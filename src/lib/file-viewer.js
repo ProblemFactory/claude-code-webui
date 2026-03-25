@@ -1,8 +1,7 @@
 import { marked } from 'marked';
 import { MarkdownViewer } from './markdown.js';
 import { HexViewer } from './hex-viewer.js';
-
-function formatSize(b) { if(b<1024) return b+' B'; if(b<1048576) return (b/1024).toFixed(1)+' KB'; return (b/1048576).toFixed(1)+' MB'; }
+import { formatSize } from './utils.js';
 
 class FileViewer {
   static async open(app, filePath, fileName, opts = {}) {

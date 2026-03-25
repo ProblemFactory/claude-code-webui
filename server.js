@@ -33,7 +33,7 @@ const SOCKETS_DIR = path.join(__dirname, 'data', 'sockets');
 const META_DIR = path.join(__dirname, 'data', 'session-meta');
 const BUFFERS_DIR = path.join(__dirname, 'data', 'session-buffers');
 const PTY_WRAPPER = path.join(__dirname, 'data', 'bin', 'pty-wrapper.js');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 
 function ensureDir(dir) { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); }
 
@@ -395,7 +395,6 @@ app.post('/api/paste-image', (req, res) => {
     // xclip stays alive as clipboard owner (X11 is owner-based).
     const clipEnv = { ...process.env, DISPLAY: process.env.DISPLAY || ':99' };
     try {
-      const { spawn } = require('child_process');
       const cp = spawn('bash', ['-c', `cat "${tmpPath}" | xclip -selection clipboard -t ${mimeType}`], {
         env: clipEnv, detached: true, stdio: 'ignore',
       });
@@ -449,17 +448,13 @@ app.post('/api/editor/signal', (req, res) => {
 
 // ── Layout Persistence ──
 const LAYOUTS_FILE = path.join(__dirname, 'data', 'layouts.json');
-function ensureDataDir() {
-  const dir = path.join(__dirname, 'data');
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-}
 function readLayouts() {
-  ensureDataDir();
+  ensureDir(path.join(__dirname, 'data'));
   try { return JSON.parse(fs.readFileSync(LAYOUTS_FILE, 'utf-8')); }
   catch { return { current: null, autoSave: null, saved: {}, customGrids: [] }; }
 }
 function writeLayouts(data) {
-  ensureDataDir();
+  ensureDir(path.join(__dirname, 'data'));
   fs.writeFileSync(LAYOUTS_FILE, JSON.stringify(data, null, 2));
 }
 
@@ -610,7 +605,7 @@ function cwdToProjectDir(cwd) {
 
 function isProcessClaude(pid) {
   try {
-    const cmd = require('child_process').execFileSync('ps', ['-p', String(pid), '-o', 'comm='], { encoding: 'utf-8', timeout: 2000 }).trim();
+    const cmd = execFileSync('ps', ['-p', String(pid), '-o', 'comm='], { encoding: 'utf-8', timeout: 2000 }).trim();
     return cmd === 'claude' || cmd.includes('claude');
   } catch { return false; }
 }

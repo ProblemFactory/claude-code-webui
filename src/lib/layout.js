@@ -104,8 +104,7 @@ class LayoutManager {
           }
         }
       } else if (ws.type === 'files') {
-        this.app.openFileExplorer(ws.explorerPath);
-        const winInfo = [...this.app.wm.windows.values()].pop();
+        const winInfo = this.app.openFileExplorer(ws.explorerPath);
         applyPosition(winInfo, ws);
       }
     }

@@ -1,4 +1,5 @@
 import { Resizer } from './resizer.js';
+import { escHtml } from './utils.js';
 
 class Sidebar {
   constructor(app) {
@@ -265,7 +266,7 @@ class Sidebar {
 
     const starred = this._starredIds.has(s.sessionId);
     card.innerHTML = `
-      <div class="session-card-name">${this._escHtml(displayName)}</div>
+      <div class="session-card-name">${escHtml(displayName)}</div>
       <div class="session-card-path">${idShort}...</div>
       <div class="session-card-meta">
         <span class="session-card-time">${date.toLocaleDateString()} ${date.toLocaleTimeString()}</span>
@@ -299,7 +300,6 @@ class Sidebar {
     return card;
   }
 
-  _escHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 }
 
 export { Sidebar };

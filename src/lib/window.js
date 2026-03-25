@@ -194,29 +194,24 @@ class WindowManager {
     if (x < T) return 'left'; if (x > r.width - T) return 'right';
     if (y < T) return 'top'; if (y > r.height - T) return 'bottom'; return null;
   }
-  _showSnap(cx, cy) {
-    const zone = this._getSnapZone(cx, cy);
-    if (!zone) { this.snapIndicator.style.display = 'none'; return; }
-    const r = this.workspace.getBoundingClientRect(), g = 6;
-    const zones = {
+  _getSnapZones(g) {
+    const r = this.workspace.getBoundingClientRect();
+    return {
       left:{left:g,top:g,width:r.width/2-g*1.5,height:r.height-g*2}, right:{left:r.width/2+g/2,top:g,width:r.width/2-g*1.5,height:r.height-g*2},
       top:{left:g,top:g,width:r.width-g*2,height:r.height/2-g*1.5}, bottom:{left:g,top:r.height/2+g/2,width:r.width-g*2,height:r.height/2-g*1.5},
       'top-left':{left:g,top:g,width:r.width/2-g*1.5,height:r.height/2-g*1.5}, 'top-right':{left:r.width/2+g/2,top:g,width:r.width/2-g*1.5,height:r.height/2-g*1.5},
       'bottom-left':{left:g,top:r.height/2+g/2,width:r.width/2-g*1.5,height:r.height/2-g*1.5}, 'bottom-right':{left:r.width/2+g/2,top:r.height/2+g/2,width:r.width/2-g*1.5,height:r.height/2-g*1.5},
     };
-    const z = zones[zone]; const si = this.snapIndicator;
+  }
+  _showSnap(cx, cy) {
+    const zone = this._getSnapZone(cx, cy);
+    if (!zone) { this.snapIndicator.style.display = 'none'; return; }
+    const z = this._getSnapZones(6)[zone]; const si = this.snapIndicator;
     si.style.display = 'block'; si.style.left = z.left+'px'; si.style.top = z.top+'px'; si.style.width = z.width+'px'; si.style.height = z.height+'px';
   }
   _applySnap(winId, zone) {
     const win = this.windows.get(winId); if (!win) return;
-    const r = this.workspace.getBoundingClientRect(), g = 4;
-    const zones = {
-      left:{left:g,top:g,width:r.width/2-g*1.5,height:r.height-g*2}, right:{left:r.width/2+g/2,top:g,width:r.width/2-g*1.5,height:r.height-g*2},
-      top:{left:g,top:g,width:r.width-g*2,height:r.height/2-g*1.5}, bottom:{left:g,top:r.height/2+g/2,width:r.width-g*2,height:r.height/2-g*1.5},
-      'top-left':{left:g,top:g,width:r.width/2-g*1.5,height:r.height/2-g*1.5}, 'top-right':{left:r.width/2+g/2,top:g,width:r.width/2-g*1.5,height:r.height/2-g*1.5},
-      'bottom-left':{left:g,top:r.height/2+g/2,width:r.width/2-g*1.5,height:r.height/2-g*1.5}, 'bottom-right':{left:r.width/2+g/2,top:r.height/2+g/2,width:r.width/2-g*1.5,height:r.height/2-g*1.5},
-    };
-    const z = zones[zone], el = win.element;
+    const z = this._getSnapZones(4)[zone], el = win.element;
     el.classList.add('snap-animating');
     el.style.left=z.left+'px'; el.style.top=z.top+'px'; el.style.width=z.width+'px'; el.style.height=z.height+'px';
     win.isMaximized = false;

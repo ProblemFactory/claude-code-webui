@@ -10,10 +10,10 @@ const WEB_FONTS = [
 ];
 
 // Detect monospace via canvas: in a monospace font, 'i' and 'M' have equal width
+const _monoCtx = document.createElement('canvas').getContext('2d');
 function _isMonospace(family) {
-  const c = document.createElement('canvas').getContext('2d');
-  c.font = `72px "${family}", serif`;
-  return Math.abs(c.measureText('i').width - c.measureText('M').width) < 1;
+  _monoCtx.font = `72px "${family}", serif`;
+  return Math.abs(_monoCtx.measureText('i').width - _monoCtx.measureText('M').width) < 1;
 }
 
 // Build font list: client local fonts (queryLocalFonts) → server fallback → web fonts
@@ -56,8 +56,6 @@ async function _buildFontList() {
 }
 
 function getAvailableFonts() { return _fontList || [{ label: 'System Default', value: 'monospace' }]; }
-
-const FONT_FAMILIES = [{ label: 'System Default', value: 'monospace' }];
 
 class TerminalSession {
   constructor(winInfo, wsManager, sessionId, themeManager, onEditorRequest, overrides = {}) {
@@ -398,4 +396,4 @@ class TerminalSession {
   }
 }
 
-export { TerminalSession, FONT_FAMILIES, getAvailableFonts };
+export { TerminalSession, getAvailableFonts };

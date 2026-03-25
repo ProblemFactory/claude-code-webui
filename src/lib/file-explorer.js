@@ -1,3 +1,5 @@
+import { formatSize } from './utils.js';
+
 class FileExplorer {
   constructor(winInfo, app) {
     this.winInfo = winInfo; this.app = app; this.currentPath = ''; this.items = [];
@@ -139,7 +141,7 @@ class FileExplorer {
         row.dataset.name = item.name; row.dataset.isDir = item.isDirectory;
         const iconEl = document.createElement('span'); iconEl.className = 'file-icon'; iconEl.textContent = item.isDirectory ? '📁' : this._fileIcon(item.name);
         const nameEl = document.createElement('span'); nameEl.className = 'file-name'; nameEl.textContent = item.name;
-        const sizeEl = document.createElement('span'); sizeEl.className = 'file-meta file-size'; sizeEl.textContent = item.isDirectory ? '' : this._formatSize(item.size);
+        const sizeEl = document.createElement('span'); sizeEl.className = 'file-meta file-size'; sizeEl.textContent = item.isDirectory ? '' : formatSize(item.size);
         const modEl = document.createElement('span'); modEl.className = 'file-meta file-modified';
         modEl.textContent = item.modified ? new Date(item.modified).toLocaleDateString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }) : '';
         row.append(iconEl, nameEl, sizeEl, modEl);
@@ -257,7 +259,6 @@ class FileExplorer {
       jpg:'🖼',jpeg:'🖼',png:'🖼',gif:'🖼',svg:'🖼',webp:'🖼',sh:'⚙',bash:'⚙',zsh:'⚙' };
     return m[ext] || '📄';
   }
-  _formatSize(b) { if(b<1024) return b+' B'; if(b<1048576) return (b/1024).toFixed(1)+' KB'; return (b/1048576).toFixed(1)+' MB'; }
 }
 
 export { FileExplorer };

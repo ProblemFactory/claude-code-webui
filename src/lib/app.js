@@ -341,8 +341,6 @@ class App {
       <div class="usage-total" style="font-weight:400;color:var(--text-dim)">Updated ${ago < 1 ? 'just now' : ago + 'min ago'}</div>`;
   }
 
-  _escHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
-
   _setupLayoutManager() {
     document.getElementById('btn-layouts').addEventListener('click', () => this._showLayoutsDialog());
     document.getElementById('btn-layout-save').addEventListener('click', () => {
@@ -522,8 +520,7 @@ class App {
         winInfo._notifyChanged = () => this.updateTaskbar();
         this.wm.setTitle(winInfo.id, `${sessionName} — ${msg.cwd||cwd||'~'}`);
         term.focus();
-        const idx = this.ws.globalHandlers.indexOf(handler);
-        if (idx >= 0) this.ws.globalHandlers.splice(idx, 1);
+        this.ws.offGlobal(handler);
       }
     };
     this.ws.onGlobal(handler);
@@ -566,8 +563,7 @@ class App {
         };
         winInfo._notifyChanged = () => this.updateTaskbar();
         term.focus();
-        const idx = this.ws.globalHandlers.indexOf(handler);
-        if (idx >= 0) this.ws.globalHandlers.splice(idx, 1);
+        this.ws.offGlobal(handler);
       }
     };
     this.ws.onGlobal(handler);
@@ -601,8 +597,7 @@ class App {
         };
         winInfo._notifyChanged = () => this.updateTaskbar();
         term.focus();
-        const idx = this.ws.globalHandlers.indexOf(handler);
-        if (idx >= 0) this.ws.globalHandlers.splice(idx, 1);
+        this.ws.offGlobal(handler);
       }
     };
     this.ws.onGlobal(handler);
@@ -647,8 +642,7 @@ class App {
         };
         winInfo._notifyChanged = () => this.updateTaskbar();
         term.focus();
-        const idx = this.ws.globalHandlers.indexOf(handler);
-        if (idx >= 0) this.ws.globalHandlers.splice(idx, 1);
+        this.ws.offGlobal(handler);
       }
     };
     this.ws.onGlobal(handler);
@@ -663,6 +657,7 @@ class App {
     const origNav = explorer.navigate.bind(explorer);
     explorer.navigate = async function(p) { await origNav(p); winInfo._explorerPath = explorer.currentPath; };
     winInfo.onClose = () => this._checkWelcome();
+    return winInfo;
   }
 
   openFile(filePath, fileName, opts) {

@@ -1,3 +1,5 @@
+import { formatSize } from './utils.js';
+
 const BYTES_PER_ROW = 16;
 const CHUNK_SIZE = 65536; // 64KB chunks
 
@@ -14,7 +16,7 @@ class HexViewer {
     const toolbar = document.createElement('div'); toolbar.className = 'hex-toolbar';
     toolbar.innerHTML = `
       <span class="file-path">${filePath}</span>
-      <span class="hex-info">${this._formatSize(fileInfo.size)}</span>
+      <span class="hex-info">${formatSize(fileInfo.size)}</span>
     `;
     const jumpInput = document.createElement('input');
     jumpInput.className = 'toolbar-select'; jumpInput.placeholder = 'Jump to offset (hex)';
@@ -51,7 +53,7 @@ class HexViewer {
       this.loadedBytes += newData.length;
 
       this._render();
-      this.statusEl.textContent = `Loaded ${this._formatSize(this.loadedBytes)} / ${this._formatSize(this.fileSize)}`;
+      this.statusEl.textContent = `Loaded ${formatSize(this.loadedBytes)} / ${formatSize(this.fileSize)}`;
     } catch (err) {
       this.statusEl.textContent = 'Error: ' + err.message;
     }
@@ -120,7 +122,6 @@ class HexViewer {
     }
   }
 
-  _formatSize(b) { if(b<1024) return b+' B'; if(b<1048576) return (b/1024).toFixed(1)+' KB'; return (b/1048576).toFixed(1)+' MB'; }
 }
 
 export { HexViewer };

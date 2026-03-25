@@ -19,6 +19,7 @@ class WsManager {
   on(sid, h) { if (!this.handlers.has(sid)) this.handlers.set(sid, []); this.handlers.get(sid).push(h); }
   off(sid) { this.handlers.delete(sid); }
   onGlobal(h) { this.globalHandlers.push(h); }
+  offGlobal(h) { const i = this.globalHandlers.indexOf(h); if (i >= 0) this.globalHandlers.splice(i, 1); }
 }
 
 export { WsManager };
