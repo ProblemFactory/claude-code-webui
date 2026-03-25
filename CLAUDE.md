@@ -5,6 +5,10 @@ A web-based UI for managing multiple Claude Code sessions with a tiling window m
 
 ## How to Build and Run
 ```bash
+# One-line install (checks deps, clones, builds):
+curl -fsSL https://raw.githubusercontent.com/ProblemFactory/claude-code-webui/master/install.sh | bash
+
+# Or manually:
 npm install
 npm run build   # esbuild bundles src/client.js → public/bundle.js (~1.8MB)
 node server.js  # starts on port 3456 (or PORT env var)
