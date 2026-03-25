@@ -5,12 +5,24 @@ set -e
 # Usage: curl -fsSL <url>/install.sh | bash
 #   or:  bash install.sh
 
-INSTALL_DIR="${CLAUDE_WEBUI_DIR:-$HOME/claude-code-webui}"
 PORT="${PORT:-3456}"
+DEFAULT_DIR="$HOME/claude-code-webui"
 
 echo ""
 echo "  Claude Code WebUI Installer"
 echo "  ============================"
+echo ""
+
+# Ask user to confirm install location (read from /dev/tty for curl|bash compat)
+printf "  Install location [%s]: " "$DEFAULT_DIR"
+if read -r USER_DIR < /dev/tty 2>/dev/null; then
+  INSTALL_DIR="${USER_DIR:-$DEFAULT_DIR}"
+else
+  INSTALL_DIR="$DEFAULT_DIR"
+fi
+# Expand ~ manually
+INSTALL_DIR="${INSTALL_DIR/#\~/$HOME}"
+echo "  → $INSTALL_DIR"
 echo ""
 
 # ── Check prerequisites ──
