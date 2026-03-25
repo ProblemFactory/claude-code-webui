@@ -10,7 +10,7 @@ const multer = require('multer');
 const PORT = process.env.PORT || 3456;
 const CLAUDE_CMD = process.env.CLAUDE_CMD || 'claude';
 const SESSIONS_DIR = path.join(os.homedir(), '.claude', 'sessions');
-const HOST = process.env.HOST || '127.0.0.1';
+const HOST = process.env.HOST || '0.0.0.0';
 const EDITOR_SCRIPT = path.join(__dirname, 'editor-helper.sh');
 
 const app = express();
