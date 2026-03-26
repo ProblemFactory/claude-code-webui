@@ -12,11 +12,22 @@ const CLAUDE_CMD = process.env.CLAUDE_CMD || 'claude';
 // Resolve full paths at startup — node-pty's posix_spawnp may not find commands
 // if Homebrew/nvm paths (/opt/homebrew/bin) aren't in Node's inherited PATH
 function resolveCmd(name) {
-  try { return execFileSync('which', [name], { encoding: 'utf-8', timeout: 2000 }).trim(); }
-  catch { return name; }
+  // Try 'which' first
+  try {
+    const r = execFileSync('/usr/bin/which', [name], { encoding: 'utf-8', timeout: 2000 }).trim();
+    if (r && r.startsWith('/')) return r;
+  } catch {}
+  // Search common paths directly
+  const dirs = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin',
+    ...(process.env.PATH || '').split(path.delimiter)];
+  for (const dir of dirs) {
+    const p = path.join(dir, name);
+    try { fs.accessSync(p, fs.constants.X_OK); return p; } catch {}
+  }
+  return name;
 }
 const DTACH_CMD = resolveCmd('dtach');
-const NODE_CMD = process.execPath; // full path to current Node binary
+const NODE_CMD = process.execPath;
 const ENV_CMD = resolveCmd('env');
 const SESSIONS_DIR = path.join(os.homedir(), '.claude', 'sessions');
 const HOST = process.env.HOST || '0.0.0.0';
