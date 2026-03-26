@@ -111,8 +111,22 @@ else
   fi
 fi
 
+# macOS: ensure Xcode command line tools for native compilation (node-pty)
+if [[ "$OSTYPE" == darwin* ]]; then
+  if ! xcode-select -p &>/dev/null; then
+    echo "  Installing Xcode Command Line Tools (required for native modules)..."
+    xcode-select --install </dev/null 2>/dev/null
+    echo "  [!] Xcode CLT install dialog opened. Complete it, then re-run this script."
+    exit 1
+  fi
+fi
+
 echo "  Installing dependencies..."
-npm install --no-fund --no-audit </dev/null 2>&1 | tail -1
+npm install --no-fund --no-audit </dev/null 2>&1 | tail -3
+
+# Rebuild native modules for current platform (needed if switching OS or node version)
+echo "  Building native modules..."
+npm rebuild node-pty </dev/null 2>&1 | tail -1
 
 echo "  Building frontend..."
 npm run build 2>&1 | tail -1
