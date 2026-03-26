@@ -497,6 +497,8 @@ html, body {
 }
 .context-menu-item:hover { background: var(--bg-hover); }
 .context-submenu { position: absolute; top: 0; left: 100%; margin-left: -1px; max-height: 300px; overflow-y: auto; }
+.context-menu-item.has-submenu { display: flex; justify-content: space-between; }
+.context-menu-item.has-submenu::after { content: '▸'; margin-left: 12px; opacity: 0.5; }
 .context-menu-separator { height: 1px; background: var(--border); margin: 3px 0; }
 
 /* ── Taskbar ── */

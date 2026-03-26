@@ -179,7 +179,7 @@ class FileExplorer {
     const fullPath = this.currentPath + '/' + dataset.name;
     const items = [];
     if (dataset.isDir === 'true') {
-      items.push({ label: 'Sessions ▸', submenu: () => {
+      items.push({ label: 'Sessions', submenu: () => {
         const sub = [];
         sub.push({ label: '+ New session', action: () => this.app.createSession({ cwd: fullPath }) });
         const sessionsHere = (this.app.sidebar?._allSessions || []).filter(s => s.cwd === fullPath);
@@ -207,7 +207,7 @@ class FileExplorer {
     for (const item of items) {
       const el = document.createElement('div'); el.className = 'context-menu-item'; el.textContent = item.label;
       if (item.submenu) {
-        el.style.position = 'relative';
+        el.classList.add('has-submenu');
         el.onmouseenter = () => {
           // Remove any existing submenu
           menu.querySelectorAll('.context-submenu').forEach(s => s.remove());

@@ -1,7 +1,7 @@
 import { EditorView, basicSetup } from 'codemirror';
 import { markdown } from '@codemirror/lang-markdown';
 import { oneDark } from '@codemirror/theme-one-dark';
-import { EditorState } from '@codemirror/state';
+import { EditorState, Compartment } from '@codemirror/state';
 import { keymap } from '@codemirror/view';
 import { marked } from 'marked';
 import { Resizer } from './resizer.js';
@@ -39,7 +39,21 @@ class MarkdownViewer {
     btnSave.style.cssText = 'width:auto;padding:2px 8px;font-size:11px'; btnSave.textContent = 'Save';
     btnSave.onclick = () => this.save();
 
-    toolbar.append(pathSpan, this.saveIndicator, modeGroup, btnSave);
+    this._wordWrap = localStorage.getItem('mdWordWrap') !== 'false';
+    this._wrapCompartment = new Compartment();
+    const btnWrap = document.createElement('button'); btnWrap.className = 'file-tool-btn';
+    btnWrap.style.cssText = 'width:auto;padding:2px 8px;font-size:10px';
+    btnWrap.textContent = this._wordWrap ? 'Wrap: On' : 'Wrap: Off';
+    btnWrap.onclick = () => {
+      this._wordWrap = !this._wordWrap;
+      localStorage.setItem('mdWordWrap', this._wordWrap);
+      btnWrap.textContent = this._wordWrap ? 'Wrap: On' : 'Wrap: Off';
+      if (this.editorView) {
+        this.editorView.dispatch({ effects: this._wrapCompartment.reconfigure(this._wordWrap ? EditorView.lineWrapping : []) });
+      }
+    };
+
+    toolbar.append(pathSpan, this.saveIndicator, modeGroup, btnWrap, btnSave);
 
     // Content area
     this.contentArea = document.createElement('div'); this.contentArea.className = 'md-content';
@@ -126,6 +140,7 @@ class MarkdownViewer {
         doc: this.content,
         extensions: [
           basicSetup, oneDark, markdown(),
+          self._wrapCompartment.of(self._wordWrap ? EditorView.lineWrapping : []),
           keymap.of([{ key: 'Mod-s', run: () => { self.save(); return true; } }]),
           EditorView.updateListener.of((update) => {
             if (update.docChanged) {

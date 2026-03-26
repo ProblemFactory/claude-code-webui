@@ -157,6 +157,28 @@ class FileViewer {
       applyZoom();
     }, { passive: false });
 
+    // Drag to pan
+    let panX = 0, panY = 0, dragging = false, startX, startY;
+    imgWrap.style.overflow = 'hidden';
+    const applyPan = () => { img.style.translate = `${panX}px ${panY}px`; };
+    imgWrap.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      dragging = true; startX = e.clientX - panX; startY = e.clientY - panY;
+      imgWrap.style.cursor = 'grabbing';
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', (e) => {
+      if (!dragging) return;
+      panX = e.clientX - startX; panY = e.clientY - startY;
+      applyPan();
+    });
+    document.addEventListener('mouseup', () => { dragging = false; imgWrap.style.cursor = 'grab'; });
+    imgWrap.style.cursor = 'grab';
+
+    // Reset pan on fit
+    const origFit = btnFit.onclick;
+    btnFit.onclick = () => { panX = 0; panY = 0; applyPan(); origFit(); };
+
     toolbar.append(btnFit, btnZoomOut, zoomLabel, btnZoomIn, btnActual);
     imgWrap.appendChild(img);
     mediaViewer.append(toolbar, imgWrap);
