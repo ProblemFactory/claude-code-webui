@@ -9,12 +9,15 @@ const multer = require('multer');
 
 const PORT = process.env.PORT || 3456;
 const CLAUDE_CMD = process.env.CLAUDE_CMD || 'claude';
-const DTACH_CMD = (() => {
-  // Resolve dtach full path at startup — node-pty's posix_spawnp may not find it
-  // if Homebrew paths (/opt/homebrew/bin, /usr/local/bin) aren't in Node's PATH
-  try { return execFileSync('which', ['dtach'], { encoding: 'utf-8', timeout: 2000 }).trim(); }
-  catch { return 'dtach'; } // fallback to bare name
-})();
+// Resolve full paths at startup — node-pty's posix_spawnp may not find commands
+// if Homebrew/nvm paths (/opt/homebrew/bin) aren't in Node's inherited PATH
+function resolveCmd(name) {
+  try { return execFileSync('which', [name], { encoding: 'utf-8', timeout: 2000 }).trim(); }
+  catch { return name; }
+}
+const DTACH_CMD = resolveCmd('dtach');
+const NODE_CMD = process.execPath; // full path to current Node binary
+const ENV_CMD = resolveCmd('env');
 const SESSIONS_DIR = path.join(os.homedir(), '.claude', 'sessions');
 const HOST = process.env.HOST || '0.0.0.0';
 const EDITOR_SCRIPT = path.join(__dirname, 'editor-helper.sh');
@@ -904,16 +907,22 @@ wss.on('connection', (ws) => {
         // Wrapper survives server restarts, tees output to buffer file
         const bufFile = path.join(BUFFERS_DIR, id + '.buf');
         const metaFileW = path.join(BUFFERS_DIR, id + '.json');
-        const createPty = pty.spawn(DTACH_CMD, ['-c', socketPath, '-E', '-r', 'none',
-          'node', PTY_WRAPPER,
-          bufFile, metaFileW,
-          'env', `EDITOR=${EDITOR_CMD}`, `CLAUDE_WEBUI_PORT=${PORT}`, `CLAUDE_WEBUI_SESSION_ID=${id}`, `DISPLAY=${process.env.DISPLAY || ':99'}`,
-          `TERM=xterm-256color`, `COLORTERM=truecolor`,
-          CLAUDE_CMD, ...claudeArgs,
-        ], {
-          name: 'xterm-256color', cols: data.cols || 120, rows: data.rows || 30,
-          cwd, env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' },
-        });
+        let createPty;
+        try {
+          createPty = pty.spawn(DTACH_CMD, ['-c', socketPath, '-E', '-r', 'none',
+            NODE_CMD, PTY_WRAPPER,
+            bufFile, metaFileW,
+            ENV_CMD, `EDITOR=${EDITOR_CMD}`, `CLAUDE_WEBUI_PORT=${PORT}`, `CLAUDE_WEBUI_SESSION_ID=${id}`, `DISPLAY=${process.env.DISPLAY || ''}`,
+            `TERM=xterm-256color`, `COLORTERM=truecolor`,
+            CLAUDE_CMD, ...claudeArgs,
+          ], {
+            name: 'xterm-256color', cols: data.cols || 120, rows: data.rows || 30,
+            cwd, env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' },
+          });
+        } catch (err) {
+          ws.send(JSON.stringify({ type: 'error', message: `Failed to spawn session: ${err.message}\ndtach=${DTACH_CMD} node=${NODE_CMD} env=${ENV_CMD} cwd=${cwd}` }));
+          return;
+        }
         setupSessionPty(session, id, createPty);
 
         activeSessions.set(id, session);
@@ -1065,6 +1074,7 @@ function broadcastActiveSessions() {
 // ── Start Server ──
 server.listen(PORT, HOST, () => {
   console.log(`\n  Claude Code WebUI v2.0 running at http://localhost:${PORT}`);
+  console.log(`  dtach: ${DTACH_CMD}, node: ${NODE_CMD}, env: ${ENV_CMD}`);
 
   // Restore existing dtach sessions from before restart
   restoreSessions();
