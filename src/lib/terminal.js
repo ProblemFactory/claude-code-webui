@@ -3,6 +3,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { THEMES } from './themes.js';
+import { attachPopoverClose } from './utils.js';
 
 // Web fonts loaded via Google Fonts (always available)
 const WEB_FONTS = [
@@ -321,10 +322,7 @@ class TerminalSession {
     pop.append(themeLabel, themeSel, sizeLabel, sizeRow, fontLabel, fontSel);
     document.body.appendChild(pop);
 
-    setTimeout(() => {
-      const close = (e) => { if (!pop.contains(e.target) && e.target !== anchor) { pop.remove(); document.removeEventListener('mousedown', close); } };
-      document.addEventListener('mousedown', close);
-    }, 0);
+    attachPopoverClose(pop, anchor);
   }
 
   applyOverride(key, value) {

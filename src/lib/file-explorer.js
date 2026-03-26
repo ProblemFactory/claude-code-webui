@@ -1,4 +1,5 @@
-import { formatSize } from './utils.js';
+import { formatSize, attachPopoverClose } from './utils.js';
+import { setupDirAutocomplete } from './autocomplete.js';
 
 class FileExplorer {
   constructor(winInfo, app) {
@@ -192,64 +193,15 @@ class FileExplorer {
       el.onclick = () => { menu.remove(); item.action(); }; menu.appendChild(el);
     }
     document.body.appendChild(menu);
-    setTimeout(() => { const close = (e) => { if (!menu.contains(e.target)) { menu.remove(); document.removeEventListener('mousedown', close); } }; document.addEventListener('mousedown', close); }, 0);
+    attachPopoverClose(menu);
   }
 
   async _rename(oldName) { const n = prompt('New name:', oldName); if (n && n!==oldName) { await fetch('/api/rename', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({oldPath:this.currentPath+'/'+oldName,newPath:this.currentPath+'/'+n})}); this.refresh(); } }
   async _delete(name, isDir) { if (!confirm(`Delete "${name}"?`)) return; await fetch(`/api/file?path=${encodeURIComponent(this.currentPath+'/'+name)}`,{method:'DELETE'}); this.refresh(); }
 
   _setupPathAutocomplete() {
-    const input = this.pathInput;
-    const dropdown = this._acDropdown;
-    let timer = null, abortCtrl = null, activeIdx = -1, items = [];
-
-    const hide = () => { dropdown.classList.add('hidden'); dropdown.innerHTML = ''; items = []; activeIdx = -1; };
-    this._hideAC = hide;
-
-    const show = (suggestions) => {
-      dropdown.innerHTML = ''; items = suggestions; activeIdx = -1;
-      if (!suggestions.length) { hide(); return; }
-      dropdown.classList.remove('hidden');
-      for (let i = 0; i < suggestions.length; i++) {
-        const el = document.createElement('div'); el.className = 'autocomplete-item';
-        el.textContent = suggestions[i];
-        el.onmousedown = (e) => { e.preventDefault(); input.value = suggestions[i] + '/'; hide(); fetchAC(input.value); };
-        dropdown.appendChild(el);
-      }
-    };
-
-    const highlight = (idx) => {
-      dropdown.querySelectorAll('.autocomplete-item').forEach((el, i) => el.classList.toggle('active', i === idx));
-      activeIdx = idx;
-    };
-
-    const fetchAC = (val) => {
-      if (abortCtrl) abortCtrl.abort();
-      abortCtrl = new AbortController();
-      fetch(`/api/dir-complete?path=${encodeURIComponent(val)}`, { signal: abortCtrl.signal })
-        .then(r => r.json()).then(d => show(d.suggestions || [])).catch(() => {});
-    };
-
-    input.addEventListener('input', () => {
-      clearTimeout(timer);
-      if (!input.value) { hide(); return; }
-      timer = setTimeout(() => fetchAC(input.value), 150);
-    });
-
-    input.addEventListener('keydown', (e) => {
-      if (dropdown.classList.contains('hidden') || !items.length) {
-        if (e.key === 'Tab' && input.value) { e.preventDefault(); fetchAC(input.value); }
-        return;
-      }
-      if (e.key === 'ArrowDown') { e.preventDefault(); highlight(Math.min(activeIdx + 1, items.length - 1)); }
-      else if (e.key === 'ArrowUp') { e.preventDefault(); highlight(Math.max(activeIdx - 1, 0)); }
-      else if (e.key === 'Tab' || e.key === 'Enter') {
-        if (activeIdx >= 0) { e.preventDefault(); input.value = items[activeIdx] + '/'; hide(); fetchAC(input.value); }
-        else if (e.key === 'Tab' && items.length === 1) { e.preventDefault(); input.value = items[0] + '/'; hide(); fetchAC(input.value); }
-      } else if (e.key === 'Escape') { hide(); }
-    });
-
-    input.addEventListener('blur', () => setTimeout(hide, 200));
+    const ac = setupDirAutocomplete(this.pathInput, this._acDropdown);
+    this._hideAC = ac.hide;
   }
 
   _fileIcon(name) {

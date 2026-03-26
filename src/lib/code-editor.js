@@ -123,4 +123,4 @@ class CodeEditor {
   }
 }
 
-export { CodeEditor };
+export { CodeEditor, detectLang, getLangExtension };

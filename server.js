@@ -37,6 +37,85 @@ const { execFileSync, spawn } = require('child_process');
 
 function ensureDir(dir) { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); }
 
+// ── Cached webuiPids (PIDs managed by webui dtach sessions) ──
+const webuiPids = new Set();
+
+function collectDescendantPids(socketPath) {
+  const pids = new Set();
+  try {
+    const out = execFileSync('pgrep', ['-f', socketPath], { encoding: 'utf-8', timeout: 2000 }).trim();
+    const rootPids = out.split('\n').map(l => parseInt(l.trim())).filter(Boolean);
+    const queue = [...rootPids];
+    while (queue.length) {
+      const pid = queue.pop();
+      try {
+        const children = execFileSync('ps', ['--ppid', String(pid), '-o', 'pid='], { encoding: 'utf-8', timeout: 2000 });
+        for (const cl of children.trim().split('\n')) {
+          const cpid = parseInt(cl.trim());
+          if (cpid && !pids.has(cpid)) { pids.add(cpid); queue.push(cpid); }
+        }
+      } catch {}
+    }
+  } catch {}
+  return pids;
+}
+
+function refreshWebuiPids() {
+  webuiPids.clear();
+  for (const [, s] of activeSessions) {
+    if (s.socketPath) {
+      for (const pid of collectDescendantPids(s.socketPath)) {
+        webuiPids.add(pid);
+      }
+    }
+  }
+}
+
+// ── Broadcast helper (avoids duplicating per-session WebSocket iteration) ──
+const WS_OPEN = 1;
+function broadcastToSession(session, id, msg) {
+  const json = JSON.stringify(msg);
+  for (const client of session.clients.keys()) {
+    if (client.readyState === WS_OPEN) { try { client.send(json); } catch {} }
+  }
+}
+
+// ── Effective-size computation (min cols/rows across clients + PTY resize + broadcast) ──
+function resizeSessionToMin(session, sessionId) {
+  if (!session.clients.size || !session.pty) return;
+  let minCols = Infinity, minRows = Infinity;
+  for (const sz of session.clients.values()) {
+    if (sz.cols < minCols) minCols = sz.cols;
+    if (sz.rows < minRows) minRows = sz.rows;
+  }
+  if (minCols < Infinity && minRows < Infinity) {
+    try { session.pty.resize(minCols, minRows); } catch {}
+    broadcastToSession(session, sessionId, { type: 'effective-size', sessionId, cols: minCols, rows: minRows });
+  }
+}
+
+// ── PTY setup helper (onData + onExit wiring) ──
+function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {}) {
+  session.pty = ptyProcess;
+  ptyProcess.onData((output) => {
+    session.buffer = (session.buffer + output).slice(-50000);
+    broadcastToSession(session, id, { type: 'output', sessionId: id, data: output });
+  });
+  ptyProcess.onExit(() => {
+    if (cleanupOnExit) {
+      if (session.socketPath && fs.existsSync(session.socketPath)) { session.pty = null; return; }
+      broadcastToSession(session, id, { type: 'exited', sessionId: id });
+      activeSessions.delete(id);
+      if (session.sockName) deleteSessionMeta(session.sockName);
+      broadcastActiveSessions();
+    } else {
+      broadcastToSession(session, id, { type: 'exited', sessionId: id });
+      activeSessions.delete(id);
+      broadcastActiveSessions();
+    }
+  });
+}
+
 // Read/write session metadata
 function readSessionMeta(sockName) {
   try { return JSON.parse(fs.readFileSync(path.join(META_DIR, sockName + '.json'), 'utf-8')); } catch { return {}; }
@@ -55,35 +134,7 @@ function attachToDtach(id, socketPath, session) {
     name: 'xterm-256color', cols: 120, rows: 30,
     env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' },
   });
-  session.pty = attachPty;
-
-  attachPty.onData((output) => {
-    session.buffer = (session.buffer + output).slice(-50000);
-    for (const client of session.clients.keys()) {
-      if (client.readyState === 1) {
-        try { client.send(JSON.stringify({ type: 'output', sessionId: id, data: output })); } catch {}
-      }
-    }
-  });
-
-  attachPty.onExit(() => {
-    // Check if the dtach socket still exists (session still alive)
-    if (fs.existsSync(socketPath)) {
-      // Socket exists — attach died but session lives (server restart scenario)
-      // Don't notify exit, just clean up the PTY reference
-      session.pty = null;
-      return;
-    }
-    // Socket gone — claude process exited
-    for (const client of session.clients.keys()) {
-      if (client.readyState === 1) {
-        try { client.send(JSON.stringify({ type: 'exited', sessionId: id })); } catch {}
-      }
-    }
-    activeSessions.delete(id);
-    deleteSessionMeta(session.sockName);
-    broadcastActiveSessions();
-  });
+  setupSessionPty(session, id, attachPty);
 }
 
 // On startup, reconnect to existing dtach sockets
@@ -141,6 +192,9 @@ function restoreSessions() {
 
     console.log(`  ✓ Reconnected: ${session.name} (${session.cwd})`);
   }
+
+  // Populate webuiPids cache after all sessions are restored
+  refreshWebuiPids();
 }
 
 // ── Create editor helper script ──
@@ -424,7 +478,7 @@ app.post('/api/editor/open', (req, res) => {
   // Broadcast to all WebSocket clients — include sessionId so each client opens editor on the right window
   const msg = JSON.stringify({ type: 'editor-open', filePath: file, signalPath: signal, sessionId: sessionId || null });
   wss.clients.forEach(client => {
-    if (client.readyState === 1) {
+    if (client.readyState === WS_OPEN) {
       try { client.send(msg); } catch {}
     }
   });
@@ -440,21 +494,25 @@ app.post('/api/editor/signal', (req, res) => {
     // Broadcast editor-close to all clients so they remove the split pane
     const msg = JSON.stringify({ type: 'editor-close', filePath, signalPath });
     wss.clients.forEach(client => {
-      if (client.readyState === 1) { try { client.send(msg); } catch {} }
+      if (client.readyState === WS_OPEN) { try { client.send(msg); } catch {} }
     });
     res.json({ success: true });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
-// ── Layout Persistence ──
+// ── Layout Persistence (cached in memory) ──
 const LAYOUTS_FILE = path.join(__dirname, 'data', 'layouts.json');
+let _layoutsCache = null;
 function readLayouts() {
+  if (_layoutsCache) return _layoutsCache;
   ensureDir(path.join(__dirname, 'data'));
-  try { return JSON.parse(fs.readFileSync(LAYOUTS_FILE, 'utf-8')); }
-  catch { return { current: null, autoSave: null, saved: {}, customGrids: [] }; }
+  try { _layoutsCache = JSON.parse(fs.readFileSync(LAYOUTS_FILE, 'utf-8')); }
+  catch { _layoutsCache = { current: null, autoSave: null, saved: {}, customGrids: [] }; }
+  return _layoutsCache;
 }
 function writeLayouts(data) {
   ensureDir(path.join(__dirname, 'data'));
+  _layoutsCache = data;
   fs.writeFileSync(LAYOUTS_FILE, JSON.stringify(data, null, 2));
 }
 
@@ -610,7 +668,16 @@ function isProcessClaude(pid) {
   } catch { return false; }
 }
 
+const _sessionMetaCache = new Map(); // filePath → { mtimeMs, meta }
+
 function extractSessionMeta(filePath) {
+  // Check cache by mtime
+  try {
+    const mtimeMs = fs.statSync(filePath).mtimeMs;
+    const cached = _sessionMetaCache.get(filePath);
+    if (cached && cached.mtimeMs === mtimeMs) return cached.meta;
+  } catch {}
+
   // Read first 32KB of JSONL to extract cwd and first user message (name)
   let cwd = '', name = '';
   try {
@@ -636,38 +703,17 @@ function extractSessionMeta(filePath) {
       } catch {}
     }
   } catch {}
-  return { cwd, name };
+
+  const meta = { cwd, name };
+  try { _sessionMetaCache.set(filePath, { mtimeMs: fs.statSync(filePath).mtimeMs, meta }); } catch {}
+  return meta;
 }
 
 app.get('/api/sessions', (req, res) => {
   try {
     const projectsDir = path.join(os.homedir(), '.claude', 'projects');
 
-    // Step 0: Build set of PIDs managed by webui dtach sessions
-    // Process tree: dtach → pty-wrapper.js → claude
-    // Find all descendant PIDs of dtach processes for our sockets
-    const webuiPids = new Set();
-    for (const [, s] of activeSessions) {
-      if (s.socketPath) {
-        try {
-          // Find dtach process for this socket (could be -c or -n)
-          const out = execFileSync('pgrep', ['-f', s.socketPath], { encoding: 'utf-8', timeout: 2000 }).trim();
-          const rootPids = out.split('\n').map(l => parseInt(l.trim())).filter(Boolean);
-          // Recursively collect all descendants
-          const queue = [...rootPids];
-          while (queue.length) {
-            const pid = queue.pop();
-            try {
-              const children = execFileSync('ps', ['--ppid', String(pid), '-o', 'pid='], { encoding: 'utf-8', timeout: 2000 });
-              for (const cl of children.trim().split('\n')) {
-                const cpid = parseInt(cl.trim());
-                if (cpid && !webuiPids.has(cpid)) { webuiPids.add(cpid); queue.push(cpid); }
-              }
-            } catch {}
-          }
-        } catch {}
-      }
-    }
+    // Step 0: Use cached webuiPids (updated on session create/kill/restore)
 
     // Step 1: Scan lock files + tmux panes → build map of RUNNING sessions
     const paneMap = getTmuxPaneMap();
@@ -695,11 +741,14 @@ app.get('/api/sessions', (req, res) => {
         const projPath = path.join(projectsDir, projDir);
         try { if (!fs.statSync(projPath).isDirectory()) continue; } catch { continue; }
 
-        // Sort by mtime desc so most recent JSONL gets the running lock
+        // Pre-fetch stats for sorting + mtime lookup
         const jsonls = fs.readdirSync(projPath).filter(f => f.endsWith('.jsonl') && !f.startsWith('agent-'));
-        jsonls.sort((a, b) => {
-          try { return fs.statSync(path.join(projPath, b)).mtimeMs - fs.statSync(path.join(projPath, a)).mtimeMs; } catch { return 0; }
-        });
+        const statMap = new Map();
+        for (const f of jsonls) {
+          try { statMap.set(f, fs.statSync(path.join(projPath, f)).mtimeMs); } catch { statMap.set(f, 0); }
+        }
+        // Sort by mtime desc so most recent JSONL gets the running lock
+        jsonls.sort((a, b) => (statMap.get(b) || 0) - (statMap.get(a) || 0));
 
         // Check if there's a running lock for this project dir
         const running = runningByProjDir.get(projDir);
@@ -707,8 +756,7 @@ app.get('/api/sessions', (req, res) => {
         for (const f of jsonls) {
           const sessionId = f.replace('.jsonl', '');
           const filePath = path.join(projPath, f);
-          let mtime = 0;
-          try { mtime = fs.statSync(filePath).mtimeMs; } catch {}
+          const mtime = statMap.get(f) || 0;
 
           const meta = extractSessionMeta(filePath);
           const cwd = (running?.lock.cwd) || meta.cwd || recoverCwdFromProjDir(projDir);
@@ -760,12 +808,16 @@ app.get('/api/active', (req, res) => {
 const https = require('https');
 let _rateLimitCache = null;
 
+let _oauthToken = null, _oauthMtime = 0;
 function getOAuthToken() {
   try {
     const credsPath = path.join(os.homedir(), '.claude', '.credentials.json');
-    if (!fs.existsSync(credsPath)) return null;
+    const stat = fs.statSync(credsPath);
+    if (_oauthToken && stat.mtimeMs === _oauthMtime) return _oauthToken;
     const creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
-    return creds?.claudeAiOauth?.accessToken || null;
+    _oauthToken = creds?.claudeAiOauth?.accessToken || null;
+    _oauthMtime = stat.mtimeMs;
+    return _oauthToken;
   } catch { return null; }
 }
 
@@ -856,32 +908,7 @@ wss.on('connection', (ws) => {
           name: 'xterm-256color', cols: data.cols || 120, rows: data.rows || 30,
           cwd, env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' },
         });
-        session.pty = createPty;
-
-        createPty.onData((output) => {
-          session.buffer = (session.buffer + output).slice(-50000);
-          for (const client of session.clients.keys()) {
-            if (client.readyState === 1) {
-              try { client.send(JSON.stringify({ type: 'output', sessionId: id, data: output })); } catch {}
-            }
-          }
-        });
-
-        createPty.onExit(() => {
-          if (fs.existsSync(socketPath)) {
-            // Socket exists — attach died but session lives (server restart scenario)
-            session.pty = null;
-            return;
-          }
-          for (const client of session.clients.keys()) {
-            if (client.readyState === 1) {
-              try { client.send(JSON.stringify({ type: 'exited', sessionId: id })); } catch {}
-            }
-          }
-          activeSessions.delete(id);
-          deleteSessionMeta(sockName);
-          broadcastActiveSessions();
-        });
+        setupSessionPty(session, id, createPty);
 
         activeSessions.set(id, session);
         attachedSessions.add(id);
@@ -909,6 +936,9 @@ wss.on('connection', (ws) => {
           setTimeout(() => tryCapture(15), 2000);
         }
 
+        // Schedule delayed webuiPids refresh (child processes need time to start)
+        setTimeout(refreshWebuiPids, 3000);
+
         ws.send(JSON.stringify({ type: 'created', sessionId: id, name: session.name, cwd }));
         broadcastActiveSessions();
         break;
@@ -923,22 +953,8 @@ wss.on('connection', (ws) => {
       case 'resize': {
         const session = activeSessions.get(data.sessionId);
         if (session && data.cols > 0 && data.rows > 0) {
-          // Update this client's reported size
           session.clients.set(ws, { cols: data.cols, rows: data.rows });
-          // Compute minimum across all clients (tmux-style)
-          let minCols = Infinity, minRows = Infinity;
-          for (const sz of session.clients.values()) {
-            if (sz.cols < minCols) minCols = sz.cols;
-            if (sz.rows < minRows) minRows = sz.rows;
-          }
-          if (minCols < Infinity && minRows < Infinity) {
-            try { if (session.pty) session.pty.resize(minCols, minRows); } catch {}
-            // Broadcast effective size to all clients
-            const msg = JSON.stringify({ type: 'effective-size', sessionId: data.sessionId, cols: minCols, rows: minRows });
-            for (const client of session.clients.keys()) {
-              if (client.readyState === 1) { try { client.send(msg); } catch {} }
-            }
-          }
+          resizeSessionToMin(session, data.sessionId);
         }
         break;
       }
@@ -979,6 +995,7 @@ wss.on('connection', (ws) => {
           try { fs.unlinkSync(path.join(BUFFERS_DIR, data.sessionId + '.json')); } catch {}
           try { fs.unlinkSync(path.join(BUFFERS_DIR, data.sessionId + '.buf')); } catch {}
           activeSessions.delete(data.sessionId);
+          refreshWebuiPids();
           broadcastActiveSessions();
         }
         break;
@@ -996,7 +1013,7 @@ wss.on('connection', (ws) => {
         });
 
         const session = {
-          pty: tmuxPty, clients: new Map([[ws, { cols: data.cols || 120, rows: data.rows || 30 }]]),
+          pty: null, clients: new Map([[ws, { cols: data.cols || 120, rows: data.rows || 30 }]]),
           cwd: data.cwd || '', name: data.name || tmuxTarget,
           createdAt: Date.now(), tmuxTarget, isTmuxView: true,
           buffer: '',
@@ -1004,24 +1021,7 @@ wss.on('connection', (ws) => {
         activeSessions.set(id, session);
         attachedSessions.add(id);
 
-        tmuxPty.onData((output) => {
-          session.buffer = (session.buffer + output).slice(-50000);
-          for (const client of session.clients.keys()) {
-            if (client.readyState === 1) {
-              try { client.send(JSON.stringify({ type: 'output', sessionId: id, data: output })); } catch {}
-            }
-          }
-        });
-
-        tmuxPty.onExit(() => {
-          for (const client of session.clients.keys()) {
-            if (client.readyState === 1) {
-              try { client.send(JSON.stringify({ type: 'exited', sessionId: id })); } catch {}
-            }
-          }
-          activeSessions.delete(id);
-          broadcastActiveSessions();
-        });
+        setupSessionPty(session, id, tmuxPty, { cleanupOnExit: false });
 
         ws.send(JSON.stringify({ type: 'created', sessionId: id, name: session.name, cwd: session.cwd, isTmuxView: true }));
         broadcastActiveSessions();
@@ -1035,21 +1035,7 @@ wss.on('connection', (ws) => {
       const session = activeSessions.get(sid);
       if (session) {
         session.clients.delete(ws);
-        // Recompute effective size — remaining clients may allow larger terminal
-        if (session.clients.size > 0 && session.pty) {
-          let minCols = Infinity, minRows = Infinity;
-          for (const sz of session.clients.values()) {
-            if (sz.cols < minCols) minCols = sz.cols;
-            if (sz.rows < minRows) minRows = sz.rows;
-          }
-          if (minCols < Infinity && minRows < Infinity) {
-            try { session.pty.resize(minCols, minRows); } catch {}
-            const msg = JSON.stringify({ type: 'effective-size', sessionId: sid, cols: minCols, rows: minRows });
-            for (const client of session.clients.keys()) {
-              if (client.readyState === 1) { try { client.send(msg); } catch {} }
-            }
-          }
-        }
+        resizeSessionToMin(session, sid);
       }
     }
   });
@@ -1064,7 +1050,7 @@ function broadcastActiveSessions() {
   }
   const msg = JSON.stringify({ type: 'active-sessions', sessions: activeList });
   wss.clients.forEach(client => {
-    if (client.readyState === 1) {
+    if (client.readyState === WS_OPEN) {
       try { client.send(msg); } catch {}
     }
   });

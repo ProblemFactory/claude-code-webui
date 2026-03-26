@@ -1,12 +1,17 @@
 class WsManager {
   constructor() {
     this.ws = null; this.handlers = new Map(); this.globalHandlers = []; this.pending = [];
+    this._connected = false;
     this.connect();
   }
   connect() {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     this.ws = new WebSocket(`${proto}//${location.host}/ws`);
-    this.ws.onopen = () => { for (const m of this.pending) this.ws.send(m); this.pending = []; };
+    this.ws.onopen = () => {
+      if (this._connected) this.globalHandlers = [];
+      this._connected = true;
+      for (const m of this.pending) this.ws.send(m); this.pending = [];
+    };
     this.ws.onmessage = (e) => {
       let d; try { d = JSON.parse(e.data); } catch { return; }
       if (d.sessionId) (this.handlers.get(d.sessionId) || []).forEach(h => h(d));

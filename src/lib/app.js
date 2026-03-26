@@ -5,17 +5,13 @@ import { TerminalSession } from './terminal.js';
 import { Sidebar } from './sidebar.js';
 import { FileExplorer } from './file-explorer.js';
 import { FileViewer } from './file-viewer.js';
-import { CodeEditor } from './code-editor.js';
+import { CodeEditor, detectLang, getLangExtension } from './code-editor.js';
 import { LayoutManager } from './layout.js';
 import { Resizer } from './resizer.js';
+import { attachPopoverClose } from './utils.js';
+import { setupDirAutocomplete } from './autocomplete.js';
 import { getAvailableFonts } from './terminal.js';
 import { EditorView, basicSetup } from 'codemirror';
-import { javascript } from '@codemirror/lang-javascript';
-import { python } from '@codemirror/lang-python';
-import { json as jsonLang } from '@codemirror/lang-json';
-import { markdown as mdLang } from '@codemirror/lang-markdown';
-import { html as htmlLang } from '@codemirror/lang-html';
-import { css as cssLang } from '@codemirror/lang-css';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { EditorState } from '@codemirror/state';
 import { keymap } from '@codemirror/view';
@@ -144,10 +140,7 @@ class App {
     pop.append(themeLabel, themeSel, sizeLabel, sizeRow, fontLabel, fontSel);
     document.body.appendChild(pop);
 
-    setTimeout(() => {
-      const close = (e) => { if (!pop.contains(e.target) && e.target !== anchor) { pop.remove(); document.removeEventListener('mousedown', close); } };
-      document.addEventListener('mousedown', close);
-    }, 0);
+    attachPopoverClose(pop, anchor);
   }
 
   _setupGridConfig() {
@@ -418,76 +411,7 @@ class App {
   _setupCwdAutocomplete() {
     const input = document.getElementById('input-cwd');
     const dropdown = document.getElementById('cwd-suggestions');
-    let debounceTimer = null;
-    let abortCtrl = null;
-    let activeIdx = -1;
-    let items = [];
-
-    const hide = () => { dropdown.classList.add('hidden'); dropdown.innerHTML = ''; items = []; activeIdx = -1; };
-
-    const show = (suggestions) => {
-      dropdown.innerHTML = '';
-      items = suggestions;
-      activeIdx = -1;
-      if (!suggestions.length) { hide(); return; }
-      dropdown.classList.remove('hidden');
-      for (let i = 0; i < suggestions.length; i++) {
-        const el = document.createElement('div');
-        el.className = 'autocomplete-item';
-        el.textContent = suggestions[i];
-        el.onmousedown = (e) => { e.preventDefault(); input.value = suggestions[i] + '/'; hide(); fetchSuggestions(input.value); };
-        dropdown.appendChild(el);
-      }
-    };
-
-    const highlight = (idx) => {
-      dropdown.querySelectorAll('.autocomplete-item').forEach((el, i) => el.classList.toggle('active', i === idx));
-      activeIdx = idx;
-    };
-
-    const fetchSuggestions = (val) => {
-      if (abortCtrl) abortCtrl.abort();
-      abortCtrl = new AbortController();
-      fetch(`/api/dir-complete?path=${encodeURIComponent(val)}`, { signal: abortCtrl.signal })
-        .then(r => r.json())
-        .then(d => show(d.suggestions || []))
-        .catch(() => {});
-    };
-
-    input.addEventListener('input', () => {
-      clearTimeout(debounceTimer);
-      const val = input.value;
-      if (!val || val.length < 1) { hide(); return; }
-      debounceTimer = setTimeout(() => fetchSuggestions(val), 150);
-    });
-
-    input.addEventListener('keydown', (e) => {
-      if (dropdown.classList.contains('hidden') || !items.length) {
-        if (e.key === 'Tab' && input.value) {
-          // Tab = trigger completion
-          e.preventDefault();
-          fetchSuggestions(input.value);
-        }
-        return;
-      }
-      if (e.key === 'ArrowDown') { e.preventDefault(); highlight(Math.min(activeIdx + 1, items.length - 1)); }
-      else if (e.key === 'ArrowUp') { e.preventDefault(); highlight(Math.max(activeIdx - 1, 0)); }
-      else if (e.key === 'Tab' || e.key === 'Enter') {
-        if (activeIdx >= 0 && activeIdx < items.length) {
-          e.preventDefault();
-          input.value = items[activeIdx] + '/';
-          hide();
-          fetchSuggestions(input.value);
-        } else if (e.key === 'Tab' && items.length === 1) {
-          e.preventDefault();
-          input.value = items[0] + '/';
-          hide();
-          fetchSuggestions(input.value);
-        }
-      } else if (e.key === 'Escape') { hide(); }
-    });
-
-    input.addEventListener('blur', () => { setTimeout(hide, 200); });
+    setupDirAutocomplete(input, dropdown);
   }
 
   _showDialog(id) {
@@ -516,14 +440,21 @@ class App {
           this._openExternalEditor(filePath, signalPath);
         });
         this.sessions.set(winInfo.id, term);
-        winInfo.onClose = () => { this.ws.send({type:'kill',sessionId:msg.sessionId}); term.dispose(); this.sessions.delete(winInfo.id); this._checkWelcome(); };
-        winInfo._notifyChanged = () => this.updateTaskbar();
+        this._wireTerminalWindow(winInfo, term, msg.sessionId);
         this.wm.setTitle(winInfo.id, `${sessionName} — ${msg.cwd||cwd||'~'}`);
         term.focus();
         this.ws.offGlobal(handler);
       }
     };
     this.ws.onGlobal(handler);
+  }
+
+  _wireTerminalWindow(winInfo, term, sessionId, { killOnClose = true } = {}) {
+    winInfo.onClose = () => {
+      if (killOnClose) this.ws.send({ type: 'kill', sessionId });
+      term.dispose(); this.sessions.delete(winInfo.id); this._checkWelcome();
+    };
+    winInfo._notifyChanged = () => this.updateTaskbar();
   }
 
   // Find existing window for a server session ID and focus it
@@ -557,11 +488,7 @@ class App {
           const buf = msg.buffer;
           setTimeout(() => { term.terminal.write(buf); term.fit(); }, 300);
         }
-        winInfo.onClose = () => {
-          this.ws.send({ type: 'kill', sessionId: serverId });
-          term.dispose(); this.sessions.delete(winInfo.id); this._checkWelcome();
-        };
-        winInfo._notifyChanged = () => this.updateTaskbar();
+        this._wireTerminalWindow(winInfo, term, serverId);
         term.focus();
         this.ws.offGlobal(handler);
       }
@@ -591,11 +518,7 @@ class App {
         term._tmuxTarget = tmuxTarget;
         this.sessions.set(winInfo.id, term);
         // Closing window only detaches the tmux view — does NOT kill the session
-        winInfo.onClose = () => {
-          this.ws.send({ type: 'kill', sessionId: msg.sessionId }); // kills the attach PTY, not tmux
-          term.dispose(); this.sessions.delete(winInfo.id); this._checkWelcome();
-        };
-        winInfo._notifyChanged = () => this.updateTaskbar();
+        this._wireTerminalWindow(winInfo, term, msg.sessionId, { killOnClose: false });
         term.focus();
         this.ws.offGlobal(handler);
       }
@@ -636,11 +559,7 @@ class App {
         const serverSessId = msg.sessionId;
         const term = new TerminalSession(winInfo, this.ws, serverSessId, this.themeManager, (fp, sp) => this._openExternalEditor(fp, sp));
         this.sessions.set(winInfo.id, term);
-        winInfo.onClose = () => {
-          this.ws.send({ type: 'kill', sessionId: serverSessId });
-          term.dispose(); this.sessions.delete(winInfo.id); this._checkWelcome();
-        };
-        winInfo._notifyChanged = () => this.updateTaskbar();
+        this._wireTerminalWindow(winInfo, term, serverSessId);
         term.focus();
         this.ws.offGlobal(handler);
       }
@@ -755,14 +674,7 @@ class App {
       .then(r => r.json())
       .then(data => {
         const content = data.content || '';
-        const ext = filePath.split('.').pop().toLowerCase();
-        const langExtensions = [];
-        if (['js','jsx','ts','tsx','mjs','cjs'].includes(ext)) langExtensions.push(javascript());
-        else if (ext === 'py') langExtensions.push(python());
-        else if (ext === 'json') langExtensions.push(jsonLang());
-        else if (ext === 'md') langExtensions.push(mdLang());
-        else if (['html','htm','vue','svelte'].includes(ext)) langExtensions.push(htmlLang());
-        else if (['css','scss','less'].includes(ext)) langExtensions.push(cssLang());
+        const langExtensions = getLangExtension(detectLang(filePath));
 
         const editorView = new EditorView({
           state: EditorState.create({
@@ -917,12 +829,7 @@ class App {
       pop.style.top = (rect.top - pop.offsetHeight - 4) + 'px';
     });
 
-    setTimeout(() => {
-      const close = (e) => {
-        if (!pop.contains(e.target) && !anchor.contains(e.target)) { pop.remove(); document.removeEventListener('mousedown', close); }
-      };
-      document.addEventListener('mousedown', close);
-    }, 0);
+    attachPopoverClose(pop, anchor);
   }
 }
 

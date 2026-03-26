@@ -1,5 +1,5 @@
 import { Resizer } from './resizer.js';
-import { escHtml } from './utils.js';
+import { escHtml, attachPopoverClose } from './utils.js';
 
 class Sidebar {
   constructor(app) {
@@ -43,8 +43,9 @@ class Sidebar {
     const filterBtn = document.getElementById('live-filter');
     filterBtn.onclick = (e) => { e.stopPropagation(); this._showStatusFilterMenu(filterBtn); };
 
+    this._sessionDigest = '';
     app.ws.onGlobal((msg) => {
-      if (msg.type === 'active-sessions') { this._webuiSessions = msg.sessions; this._merge(); this._render(); }
+      if (msg.type === 'active-sessions') { this._webuiSessions = msg.sessions; this._mergeAndRender(); }
     });
     this._poll();
   }
@@ -104,10 +105,7 @@ class Sidebar {
       menu.appendChild(row);
     }
     document.body.appendChild(menu);
-    setTimeout(() => {
-      const close = (e) => { if (!menu.contains(e.target) && e.target !== anchor) { menu.remove(); document.removeEventListener('mousedown', close); } };
-      document.addEventListener('mousedown', close);
-    }, 0);
+    attachPopoverClose(menu, anchor);
   }
 
   _updateFilterBtn(btn) {
@@ -129,7 +127,7 @@ class Sidebar {
     try {
       const res = await fetch('/api/sessions'); const data = await res.json();
       this._systemSessions = data.sessions || [];
-      this._merge(); this._render();
+      this._mergeAndRender();
     } catch {}
     setTimeout(() => this._poll(), 5000);
   }
@@ -154,6 +152,14 @@ class Sidebar {
     }
 
     this._allSessions = unified;
+  }
+
+  _mergeAndRender() {
+    this._merge();
+    const digest = JSON.stringify(this._allSessions.map(s => s.sessionId + ':' + s.status));
+    if (digest === this._sessionDigest) return;
+    this._sessionDigest = digest;
+    this._render();
   }
 
   _render() {

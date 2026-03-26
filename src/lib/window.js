@@ -1,3 +1,5 @@
+import { attachPopoverClose } from './utils.js';
+
 class WindowManager {
   constructor(workspace) {
     this.workspace = workspace;
@@ -362,12 +364,7 @@ class WindowManager {
       pop.style.top = Math.min(cy, window.innerHeight - ph - 8) + 'px';
     });
 
-    setTimeout(() => {
-      const close = (e) => {
-        if (!pop.contains(e.target)) { pop.remove(); document.removeEventListener('mousedown', close); }
-      };
-      document.addEventListener('mousedown', close);
-    }, 0);
+    attachPopoverClose(pop);
   }
 
   _notify() { if (this.onWindowsChanged) this.onWindowsChanged(); }

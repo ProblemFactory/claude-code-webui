@@ -9,6 +9,7 @@ class HexViewer {
     this.fileSize = fileInfo.size;
     this.loadedBytes = 0;
     this.data = new Uint8Array(0);
+    this._renderedBytes = 0;
 
     const container = document.createElement('div'); container.className = 'hex-viewer';
 
@@ -62,11 +63,9 @@ class HexViewer {
   _render() {
     const frag = document.createDocumentFragment();
     const totalRows = Math.ceil(this.data.length / BYTES_PER_ROW);
+    const startRow = Math.floor(this._renderedBytes / BYTES_PER_ROW);
 
-    // Clear and rebuild (for large files, only render visible rows would be better, but this works for <256KB)
-    this.contentEl.innerHTML = '';
-
-    for (let row = 0; row < totalRows; row++) {
+    for (let row = startRow; row < totalRows; row++) {
       const offset = row * BYTES_PER_ROW;
       const rowEl = document.createElement('div'); rowEl.className = 'hex-row';
 
@@ -105,6 +104,7 @@ class HexViewer {
       frag.appendChild(rowEl);
     }
     this.contentEl.appendChild(frag);
+    this._renderedBytes = this.data.length;
   }
 
   _jumpTo(hexOffset) {
@@ -117,6 +117,7 @@ class HexViewer {
       // Need to load more data first
       this.loadedBytes = Math.max(0, offset - CHUNK_SIZE);
       this.data = new Uint8Array(0);
+      this._renderedBytes = 0;
       this.contentEl.innerHTML = '';
       this._loadChunk();
     }
