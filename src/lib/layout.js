@@ -89,10 +89,12 @@ class LayoutManager {
         el.style.width = winState.width; el.style.height = winState.height;
       }
       if (winState.isMinimized) this.app.wm.minimize(winInfo.id);
-      // Multiple delayed resize to ensure terminal redraws after async attach
       setTimeout(() => { if (winInfo.onResize) winInfo.onResize(); }, 200);
-      setTimeout(() => { if (winInfo.onResize) winInfo.onResize(); }, 1000);
-      setTimeout(() => { if (winInfo.onResize) winInfo.onResize(); }, 3000);
+      // Force terminal redraw after attach completes (triggers SIGWINCH via size toggle)
+      setTimeout(() => {
+        const term = this.app.sessions.get(winInfo.id);
+        if (term?.forceRedraw) term.forceRedraw();
+      }, 2000);
     };
 
     for (const ws of state.windows) {

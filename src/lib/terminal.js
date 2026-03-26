@@ -357,6 +357,20 @@ class TerminalSession {
     }
   }
 
+  // Force a terminal redraw by briefly changing size (triggers SIGWINCH)
+  forceRedraw() {
+    try {
+      const d = this.fitAddon.proposeDimensions();
+      if (d?.cols > 1 && d?.rows > 0) {
+        // Shrink by 1 col, then restore — two resizes = guaranteed SIGWINCH
+        this.ws.send({ type: 'resize', sessionId: this.sessionId, cols: d.cols - 1, rows: d.rows });
+        setTimeout(() => {
+          this.ws.send({ type: 'resize', sessionId: this.sessionId, cols: d.cols, rows: d.rows });
+        }, 100);
+      }
+    } catch {}
+  }
+
   fit() {
     if (this._fitTimer) clearTimeout(this._fitTimer);
     this._fitTimer = setTimeout(() => {
