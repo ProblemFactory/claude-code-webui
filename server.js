@@ -500,34 +500,18 @@ app.post('/api/paste-image', (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Browser proxy — fetches external URLs server-side to bypass X-Frame-Options
-// Follows redirects, strips frame-blocking headers, rewrites redirect Location to stay proxied
-const http_ = require('http');
-const https_ = require('https');
-function proxyFetch(targetUrl, res, maxRedirects = 10) {
-  if (maxRedirects <= 0) return res.status(502).send('Too many redirects');
-  const mod = targetUrl.startsWith('https') ? https_ : http_;
-  mod.get(targetUrl, { headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': '*/*', 'Accept-Encoding': 'identity' } }, (upstream) => {
-    // Follow redirects server-side
-    if ([301, 302, 303, 307, 308].includes(upstream.statusCode) && upstream.headers.location) {
-      const redir = new URL(upstream.headers.location, targetUrl).href;
-      upstream.resume(); // drain
-      return proxyFetch(redir, res, maxRedirects - 1);
+// Browser proxy — full-rewriting web proxy via node-unblocker
+// Rewrites all URLs in HTML/CSS, injects JS to rewrite XHR/WebSocket, strips security headers
+const Unblocker = require('unblocker');
+const unblocker = new Unblocker({
+  prefix: '/proxy/',
+  responseMiddleware: [
+    function stripFrameHeaders(data) {
+      delete data.headers['x-frame-options'];
     }
-    const headers = { ...upstream.headers };
-    delete headers['x-frame-options'];
-    delete headers['content-security-policy'];
-    delete headers['content-security-policy-report-only'];
-    // Don't pass transfer-encoding chunked if we're stripping it
-    delete headers['transfer-encoding'];
-    res.writeHead(upstream.statusCode, headers);
-    upstream.pipe(res);
-  }).on('error', (err) => { if (!res.headersSent) res.status(502).send(err.message); });
-}
-app.get('/api/proxy', (req, res) => {
-  const url = req.query.url;
-  if (!url) return res.status(400).send('Missing url parameter');
-  try { proxyFetch(url, res); } catch (err) { res.status(500).send(err.message); }
+  ],
+});
+app.use(unblocker);
 });
 
 // Editor: open request from editor-helper.sh (via HTTP, not terminal output)
@@ -1141,6 +1125,11 @@ function broadcastActiveSessions() {
 }
 
 // ── Start Server ──
+// Unblocker WebSocket proxy (for proxied sites' WebSockets, not our /ws)
+server.on('upgrade', (req, socket, head) => {
+  if (req.url.startsWith('/proxy/')) unblocker.onUpgrade(req, socket, head);
+});
+
 server.listen(PORT, HOST, () => {
   console.log(`\n  Claude Code WebUI v2.0 running at http://localhost:${PORT}`);
   console.log(`  dtach: ${DTACH_CMD}, node: ${NODE_CMD}, env: ${ENV_CMD}, claude: ${CLAUDE_CMD}`);

@@ -626,7 +626,7 @@ class App {
       urlInput.value = u;
       errorMsg.style.display = 'none';
       iframe.style.display = '';
-      iframe.src = proxyMode ? `/api/proxy?url=${encodeURIComponent(u)}` : u;
+      iframe.src = proxyMode ? `/proxy/${u}` : u;
       try { this.wm.setTitle(winInfo.id, new URL(u).hostname); } catch {}
       winInfo._browserUrl = u;
     };
