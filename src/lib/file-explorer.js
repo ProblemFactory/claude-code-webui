@@ -179,22 +179,22 @@ class FileExplorer {
     const fullPath = this.currentPath + '/' + dataset.name;
     const items = [];
     if (dataset.isDir === 'true') {
-      items.push({ label:'New session here', action:() => this.app.createSession({cwd:fullPath}) });
-      // Resume session here: find stopped sessions matching this cwd
-      const stoppedHere = (this.app.sidebar?._allSessions || []).filter(
-        s => s.status === 'stopped' && s.cwd === fullPath
-      );
-      if (stoppedHere.length === 1) {
-        const s = stoppedHere[0];
-        const customName = this.app.sidebar?.getCustomName(s.sessionId);
-        items.push({ label: 'Resume session here', action: () => this.app.resumeSession(s.sessionId, s.cwd, customName || s.name) });
-      } else if (stoppedHere.length > 1) {
-        for (const s of stoppedHere) {
+      items.push({ label: 'Sessions ▸', submenu: () => {
+        const sub = [];
+        sub.push({ label: '+ New session', action: () => this.app.createSession({ cwd: fullPath }) });
+        const sessionsHere = (this.app.sidebar?._allSessions || []).filter(s => s.cwd === fullPath);
+        for (const s of sessionsHere) {
           const customName = this.app.sidebar?.getCustomName(s.sessionId);
           const dispName = customName || s.name || s.sessionId.substring(0, 12) + '...';
-          items.push({ label: `Resume: ${dispName}`, action: () => this.app.resumeSession(s.sessionId, s.cwd, customName || s.name) });
+          const badge = s.status === 'live' ? '● ' : s.status === 'tmux' ? '◆ ' : '';
+          sub.push({ label: `${badge}${dispName}`, action: () => {
+            if (s.status === 'stopped') this.app.resumeSession(s.sessionId, s.cwd, customName || s.name);
+            else if (s.status === 'live' && s.webuiId) this.app.attachSession(s.webuiId, s.webuiName || dispName, s.cwd);
+            else if (s.status === 'tmux') this.app.attachTmuxSession(s.tmuxTarget, dispName, s.cwd);
+          }});
         }
-      }
+        return sub;
+      }});
     } else {
       items.push({ label:'Open', action:() => this.app.openFile(fullPath, dataset.name) });
       items.push({ label:'Edit', action:() => this.app.openEditor(fullPath, dataset.name) });
@@ -206,7 +206,25 @@ class FileExplorer {
 
     for (const item of items) {
       const el = document.createElement('div'); el.className = 'context-menu-item'; el.textContent = item.label;
-      el.onclick = () => { menu.remove(); item.action(); }; menu.appendChild(el);
+      if (item.submenu) {
+        el.style.position = 'relative';
+        el.onmouseenter = () => {
+          // Remove any existing submenu
+          menu.querySelectorAll('.context-submenu').forEach(s => s.remove());
+          const subItems = item.submenu();
+          const sub = document.createElement('div'); sub.className = 'context-menu context-submenu';
+          sub.style.left = menu.offsetWidth + 'px'; sub.style.top = (el.offsetTop - menu.scrollTop) + 'px';
+          for (const si of subItems) {
+            const se = document.createElement('div'); se.className = 'context-menu-item'; se.textContent = si.label;
+            se.onclick = () => { menu.remove(); si.action(); };
+            sub.appendChild(se);
+          }
+          menu.appendChild(sub);
+        };
+      } else {
+        el.onclick = () => { menu.remove(); item.action(); };
+      }
+      menu.appendChild(el);
     }
     document.body.appendChild(menu);
     attachPopoverClose(menu);
