@@ -512,7 +512,6 @@ const unblocker = new Unblocker({
   ],
 });
 app.use(unblocker);
-});
 
 // Editor: open request from editor-helper.sh (via HTTP, not terminal output)
 app.post('/api/editor/open', (req, res) => {

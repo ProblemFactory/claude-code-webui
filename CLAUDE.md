@@ -292,6 +292,7 @@ Split from monolithic 1647-line `src/client.js` into 13 ES modules under `src/li
 - `POST /api/layouts-autosave` — save workspace state
 - `POST /api/editor/open` — editor helper HTTP→WebSocket bridge
 - `POST /api/editor/signal` — signal editor completion
+- `GET /proxy/<url>` — full-rewriting web proxy via node-unblocker (HTML/CSS URL rewrite, JS XHR/WS rewrite, header stripping)
 
 ### WebSocket Protocol (`/ws`)
 Client → Server: `create`, `input`, `resize`, `attach`, `kill`, `tmux-attach`
@@ -357,7 +358,8 @@ Server → Client: `created`, `output`, `exited`, `attached`, `active-sessions`,
 - Global settings popover (⚙ in toolbar): theme, font size, font family
 - Resizable sidebar (drag right edge)
 - Usage bar in taskbar (5h + 7d rate limits from Anthropic API)
-- Embedded browser window (🌐 in toolbar): iframe with URL bar, layout persistence
+- Embedded browser window (🌐 in toolbar): iframe with URL bar, proxy mode toggle, layout persistence
+- Browser proxy mode: node-unblocker full URL rewriting (HTML/CSS/JS), strips X-Frame-Options/CSP. Works for noVNC, docs, internal services. Google/Cloudflare sites may trigger reCAPTCHA due to anti-bot detection.
 - "x active" click in taskbar → window list popup
 
 ### Bug Fixes Applied
