@@ -8,7 +8,7 @@ const os = require('os');
 const multer = require('multer');
 
 const PORT = process.env.PORT || 3456;
-const CLAUDE_CMD = process.env.CLAUDE_CMD || 'claude';
+const CLAUDE_CMD_RAW = process.env.CLAUDE_CMD || 'claude';
 // Resolve full paths at startup — node-pty's posix_spawnp may not find commands
 // if Homebrew/nvm paths (/opt/homebrew/bin) aren't in Node's inherited PATH
 function resolveCmd(name) {
@@ -29,6 +29,7 @@ function resolveCmd(name) {
 const DTACH_CMD = resolveCmd('dtach');
 const NODE_CMD = process.execPath;
 const ENV_CMD = resolveCmd('env');
+const CLAUDE_CMD = CLAUDE_CMD_RAW.startsWith('/') ? CLAUDE_CMD_RAW : resolveCmd(CLAUDE_CMD_RAW);
 const SESSIONS_DIR = path.join(os.homedir(), '.claude', 'sessions');
 const HOST = process.env.HOST || '0.0.0.0';
 const EDITOR_SCRIPT = path.join(__dirname, 'editor-helper.sh');
@@ -1085,7 +1086,7 @@ function broadcastActiveSessions() {
 // ── Start Server ──
 server.listen(PORT, HOST, () => {
   console.log(`\n  Claude Code WebUI v2.0 running at http://localhost:${PORT}`);
-  console.log(`  dtach: ${DTACH_CMD}, node: ${NODE_CMD}, env: ${ENV_CMD}`);
+  console.log(`  dtach: ${DTACH_CMD}, node: ${NODE_CMD}, env: ${ENV_CMD}, claude: ${CLAUDE_CMD}`);
 
   // Restore existing dtach sessions from before restart
   restoreSessions();
