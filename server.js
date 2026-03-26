@@ -501,23 +501,33 @@ app.post('/api/paste-image', (req, res) => {
 });
 
 // Browser proxy — fetches external URLs server-side to bypass X-Frame-Options
+// Follows redirects, strips frame-blocking headers, rewrites redirect Location to stay proxied
 const http_ = require('http');
 const https_ = require('https');
+function proxyFetch(targetUrl, res, maxRedirects = 10) {
+  if (maxRedirects <= 0) return res.status(502).send('Too many redirects');
+  const mod = targetUrl.startsWith('https') ? https_ : http_;
+  mod.get(targetUrl, { headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': '*/*', 'Accept-Encoding': 'identity' } }, (upstream) => {
+    // Follow redirects server-side
+    if ([301, 302, 303, 307, 308].includes(upstream.statusCode) && upstream.headers.location) {
+      const redir = new URL(upstream.headers.location, targetUrl).href;
+      upstream.resume(); // drain
+      return proxyFetch(redir, res, maxRedirects - 1);
+    }
+    const headers = { ...upstream.headers };
+    delete headers['x-frame-options'];
+    delete headers['content-security-policy'];
+    delete headers['content-security-policy-report-only'];
+    // Don't pass transfer-encoding chunked if we're stripping it
+    delete headers['transfer-encoding'];
+    res.writeHead(upstream.statusCode, headers);
+    upstream.pipe(res);
+  }).on('error', (err) => { if (!res.headersSent) res.status(502).send(err.message); });
+}
 app.get('/api/proxy', (req, res) => {
   const url = req.query.url;
   if (!url) return res.status(400).send('Missing url parameter');
-  try {
-    const mod = url.startsWith('https') ? https_ : http_;
-    mod.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' } }, (upstream) => {
-      // Strip X-Frame-Options and CSP frame-ancestors so iframe can render
-      const headers = { ...upstream.headers };
-      delete headers['x-frame-options'];
-      delete headers['content-security-policy'];
-      delete headers['content-security-policy-report-only'];
-      res.writeHead(upstream.statusCode, headers);
-      upstream.pipe(res);
-    }).on('error', (err) => res.status(502).send(err.message));
-  } catch (err) { res.status(500).send(err.message); }
+  try { proxyFetch(url, res); } catch (err) { res.status(500).send(err.message); }
 });
 
 // Editor: open request from editor-helper.sh (via HTTP, not terminal output)
