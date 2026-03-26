@@ -22,6 +22,7 @@ class FileViewer {
     // Force hex mode
     if (opts.hex) {
       const winInfo = app.wm.createWindow({ title: `Hex: ${fileName}`, type: 'hex-viewer' });
+      winInfo._filePath = filePath; winInfo._fileName = fileName;
       new HexViewer(winInfo, filePath, fileInfo);
       return;
     }
@@ -32,6 +33,7 @@ class FileViewer {
     // Binary file (non-media) → hex viewer
     if (fileInfo.isBinary && !isMedia) {
       const winInfo = app.wm.createWindow({ title: `Hex: ${fileName}`, type: 'hex-viewer' });
+      winInfo._filePath = filePath; winInfo._fileName = fileName;
       new HexViewer(winInfo, filePath, fileInfo);
       return;
     }
@@ -44,11 +46,13 @@ class FileViewer {
     // Markdown → MarkdownViewer with preview/edit/split modes
     if (ext === 'md') {
       const winInfo = app.wm.createWindow({ title: fileName, type: 'viewer' });
+      winInfo._filePath = filePath; winInfo._fileName = fileName;
       new MarkdownViewer(winInfo, filePath, app);
       return;
     }
 
     const winInfo = app.wm.createWindow({ title: fileName, type: 'viewer' });
+    winInfo._filePath = filePath; winInfo._fileName = fileName;
     const container = document.createElement('div'); container.className = 'file-viewer';
     winInfo.content.appendChild(container);
     winInfo.onClose = () => {};

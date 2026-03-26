@@ -33,6 +33,11 @@ class LayoutManager {
       if (win.type === 'files' && win._explorerPath) {
         winState.explorerPath = win._explorerPath;
       }
+      // For file viewers and editors, save file path and name
+      if ((win.type === 'viewer' || win.type === 'hex-viewer' || win.type === 'editor') && win._filePath) {
+        winState.filePath = win._filePath;
+        winState.fileName = win._fileName;
+      }
       windows.push(winState);
     }
     const grid = this.app.wm.grid;
@@ -106,6 +111,28 @@ class LayoutManager {
       } else if (ws.type === 'files') {
         const winInfo = this.app.openFileExplorer(ws.explorerPath);
         applyPosition(winInfo, ws);
+      } else if (ws.type === 'editor' && ws.filePath) {
+        this.app.openEditor(ws.filePath, ws.fileName || ws.filePath.split('/').pop());
+        // openEditor creates the window synchronously; find it by checking the last created window
+        const lastWin = [...this.app.wm.windows.values()].pop();
+        if (lastWin && lastWin.type === 'editor') applyPosition(lastWin, ws);
+      } else if ((ws.type === 'viewer' || ws.type === 'hex-viewer') && ws.filePath) {
+        // openFile is async (FileViewer.open), so we need to wait for the window to appear
+        const beforeIds = new Set(this.app.wm.windows.keys());
+        const opts = ws.type === 'hex-viewer' ? { hex: true } : {};
+        this.app.openFile(ws.filePath, ws.fileName || ws.filePath.split('/').pop(), opts);
+        // Poll briefly for the new window to appear (FileViewer.open is async)
+        const applyPos = ws;
+        const checkWin = () => {
+          for (const [id, win] of this.app.wm.windows) {
+            if (!beforeIds.has(id) && (win.type === 'viewer' || win.type === 'hex-viewer')) {
+              applyPosition(win, applyPos);
+              return;
+            }
+          }
+          setTimeout(checkWin, 100);
+        };
+        setTimeout(checkWin, 100);
       }
     }
   }

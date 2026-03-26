@@ -8,6 +8,7 @@ class FileExplorer {
     this._viewMode = 'list'; // 'list' or 'icon'
     this._sortBy = 'name';   // 'name', 'size', 'modified'
     this._sortAsc = true;
+    this._renderLimit = 100; // initial batch size for large folders
 
     const el = document.createElement('div'); el.className = 'file-explorer';
 
@@ -61,6 +62,7 @@ class FileExplorer {
 
   async navigate(dirPath) {
     try {
+      this._renderLimit = 100; // reset batch on navigation
       const res = await fetch(`/api/files?path=${encodeURIComponent(dirPath)}`);
       const data = await res.json(); if (data.error) throw new Error(data.error);
       this.currentPath = data.path; this.pathInput.value = data.path; this.items = data.items;
@@ -119,7 +121,9 @@ class FileExplorer {
     this.listEl.className = 'file-list' + (this._viewMode === 'icon' ? ' icon-view' : '');
     this.sortHeader.style.display = this._viewMode === 'list' ? '' : 'none';
 
-    for (const item of sorted) {
+    const visible = sorted.slice(0, this._renderLimit);
+
+    for (const item of visible) {
       const fullPath = this.currentPath + '/' + item.name;
 
       if (this._viewMode === 'icon') {
@@ -155,6 +159,15 @@ class FileExplorer {
         });
         this.listEl.appendChild(row);
       }
+    }
+
+    // "Load more" button when there are remaining items
+    const remaining = sorted.length - this._renderLimit;
+    if (remaining > 0) {
+      const loadMoreBtn = document.createElement('div'); loadMoreBtn.className = 'file-load-more';
+      loadMoreBtn.textContent = `Load more (${remaining} remaining)`;
+      loadMoreBtn.onclick = () => { this._renderLimit += 100; this._renderItems(); };
+      this.listEl.appendChild(loadMoreBtn);
     }
   }
 

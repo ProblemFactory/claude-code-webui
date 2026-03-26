@@ -113,14 +113,14 @@ html, body {
 .badge-stopped { background: rgba(148,163,184,0.15); color: var(--text-dim); }
 .empty-hint { padding: 12px; text-align: center; color: var(--text-dim); font-size: 11px; }
 .session-star-btn {
-  background: none; border: none; cursor: pointer; font-size: 13px; color: var(--text-dim);
+  background: none; border: none; cursor: pointer; font-size: 11px; color: var(--text-dim);
   padding: 0; line-height: 1; position: absolute; right: 6px; top: 6px; z-index: 1;
 }
 .session-star-btn:hover { color: var(--yellow); }
 .session-star-btn.starred { color: var(--yellow); }
 .session-archive-btn {
   background: none; border: none; cursor: pointer; font-size: 11px; color: var(--text-dim);
-  padding: 0; line-height: 1; position: absolute; right: 24px; top: 6px; z-index: 1;
+  padding: 0; line-height: 1; position: absolute; right: 6px; top: 22px; z-index: 1;
 }
 .session-archive-btn:hover { color: var(--accent-hover); }
 .session-archive-btn.archived { color: var(--accent); }
@@ -372,6 +372,11 @@ html, body {
 .file-icon-cell[draggable] { cursor: grab; }
 .file-icon-large { font-size: 28px; line-height: 36px; }
 .file-icon-label { font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); margin-top: 2px; }
+.file-load-more {
+  padding: 8px 12px; text-align: center; color: var(--accent-hover); cursor: pointer;
+  font-size: 12px; border-top: 1px solid var(--border); margin-top: 4px;
+}
+.file-load-more:hover { background: var(--bg-hover); }
 /* Drop target highlight on terminal */
 .terminal-container.drop-target { outline: 2px dashed var(--accent); outline-offset: -2px; }
 

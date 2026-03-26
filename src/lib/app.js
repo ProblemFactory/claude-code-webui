@@ -587,6 +587,7 @@ class App {
   openEditor(filePath, fileName, opts = {}) {
     this._hideWelcome();
     const winInfo = this.wm.createWindow({ title: `Edit: ${fileName}`, type: 'editor' });
+    winInfo._filePath = filePath; winInfo._fileName = fileName;
     new CodeEditor(winInfo, filePath, fileName, this, opts);
     winInfo.onClose = () => this._checkWelcome();
   }
