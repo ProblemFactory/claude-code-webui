@@ -665,7 +665,7 @@ function recoverCwdFromProjDir(projDir) {
 function getTmuxPaneMap() {
   const map = new Map(); // pid (number) → "session:window.pane"
   try {
-    const out = execFileSync('tmux', ['list-panes', '-a', '-F', '#{pane_pid}||#{session_name}:#{window_index}.#{pane_index}'], { encoding: 'utf-8', timeout: 3000 }).trim();
+    const out = execFileSync('tmux', ['list-panes', '-a', '-F', '#{pane_pid}||#{session_name}:#{window_index}.#{pane_index}'], { encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
     for (const line of out.split('\n')) {
       const [pid, target] = line.split('||');
       if (pid && target) map.set(parseInt(pid), target);
