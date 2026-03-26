@@ -744,8 +744,21 @@ app.get('/api/sessions', (req, res) => {
     // Step 0: Use cached webuiPids (updated on session create/kill/restore)
 
     // Step 1: Scan lock files + tmux panes → build map of RUNNING sessions
+    // Build webuiPid → claudeSessionId map for precise JSONL matching
+    const webuiPidToSessionId = new Map();
+    for (const [, s] of activeSessions) {
+      if (s.claudeSessionId) {
+        // Find which PID in webuiPids belongs to this active session
+        if (s.socketPath) {
+          for (const pid of collectDescendantPids(s.socketPath)) {
+            webuiPidToSessionId.set(pid, s.claudeSessionId);
+          }
+        }
+      }
+    }
+
     const paneMap = getTmuxPaneMap();
-    const runningByProjDir = new Map(); // projDirName → {lock, tmuxTarget, assigned: false}
+    const runningByProjDir = new Map(); // projDirName → [{lock, tmuxTarget, assigned, claudeSessionId}]
     if (fs.existsSync(SESSIONS_DIR)) {
       for (const f of fs.readdirSync(SESSIONS_DIR).filter(f => f.endsWith('.json'))) {
         try {
@@ -754,10 +767,9 @@ app.get('/api/sessions', (req, res) => {
           if (!isProcessClaude(data.pid)) continue;
           const projDirName = cwdToProjectDir(data.cwd);
           const tmuxTarget = findTmuxTarget(data.pid, paneMap);
-          const existing = runningByProjDir.get(projDirName);
-          if (!existing || data.startedAt > (existing.lock.startedAt || 0)) {
-            runningByProjDir.set(projDirName, { lock: data, tmuxTarget, assigned: false });
-          }
+          const claudeSessionId = webuiPidToSessionId.get(data.pid) || null;
+          if (!runningByProjDir.has(projDirName)) runningByProjDir.set(projDirName, []);
+          runningByProjDir.get(projDirName).push({ lock: data, tmuxTarget, assigned: false, claudeSessionId });
         } catch {}
       }
     }
@@ -778,8 +790,8 @@ app.get('/api/sessions', (req, res) => {
         // Sort by mtime desc so most recent JSONL gets the running lock
         jsonls.sort((a, b) => (statMap.get(b) || 0) - (statMap.get(a) || 0));
 
-        // Check if there's a running lock for this project dir
-        const running = runningByProjDir.get(projDir);
+        // Check if there are running locks for this project dir
+        const runningEntries = runningByProjDir.get(projDir) || [];
 
         for (const f of jsonls) {
           const sessionId = f.replace('.jsonl', '');
@@ -787,16 +799,22 @@ app.get('/api/sessions', (req, res) => {
           const mtime = statMap.get(f) || 0;
 
           const meta = extractSessionMeta(filePath);
-          const cwd = (running?.lock.cwd) || meta.cwd || recoverCwdFromProjDir(projDir);
+          const firstRunning = runningEntries.find(e => !e.assigned);
+          const cwd = (firstRunning?.lock.cwd) || meta.cwd || recoverCwdFromProjDir(projDir);
 
-          // Assign the running lock to the MOST RECENT JSONL in this project dir
+          // Match running lock to JSONL:
+          // 1. If a lock has claudeSessionId (WebUI), only match to that exact JSONL
+          // 2. Otherwise (tmux/external), match to most recent unassigned JSONL (sorted by mtime desc)
           let status = 'stopped', pid = null, tmuxTarget = null;
-          if (running && !running.assigned) {
-            status = webuiPids.has(running.lock.pid) ? 'live'
-              : running.tmuxTarget ? 'tmux' : 'external';
-            pid = running.lock.pid;
-            tmuxTarget = running.tmuxTarget || null;
-            running.assigned = true;
+          const exactMatch = runningEntries.find(e => !e.assigned && e.claudeSessionId === sessionId);
+          const fallbackMatch = runningEntries.find(e => !e.assigned && !e.claudeSessionId);
+          const match = exactMatch || fallbackMatch;
+          if (match) {
+            status = webuiPids.has(match.lock.pid) ? 'live'
+              : match.tmuxTarget ? 'tmux' : 'external';
+            pid = match.lock.pid;
+            tmuxTarget = match.tmuxTarget || null;
+            match.assigned = true;
           }
 
           sessions.push({ sessionId, cwd, pid, startedAt: mtime, status, name: meta.name || '', tmuxTarget });
@@ -805,15 +823,17 @@ app.get('/api/sessions', (req, res) => {
     }
 
     // Step 3: Running locks that didn't match any project dir (brand new, no JSONL yet)
-    for (const [, entry] of runningByProjDir) {
-      if (!entry.assigned) {
-        sessions.push({
-          sessionId: entry.lock.sessionId, cwd: entry.lock.cwd, pid: entry.lock.pid,
-          startedAt: entry.lock.startedAt || Date.now(),
-          status: webuiPids.has(entry.lock.pid) ? 'live'
-            : entry.tmuxTarget ? 'tmux' : 'external', name: '',
-          tmuxTarget: entry.tmuxTarget || null,
-        });
+    for (const [, entries] of runningByProjDir) {
+      for (const entry of entries) {
+        if (!entry.assigned) {
+          sessions.push({
+            sessionId: entry.lock.sessionId, cwd: entry.lock.cwd, pid: entry.lock.pid,
+            startedAt: entry.lock.startedAt || Date.now(),
+            status: webuiPids.has(entry.lock.pid) ? 'live'
+              : entry.tmuxTarget ? 'tmux' : 'external', name: '',
+            tmuxTarget: entry.tmuxTarget || null,
+          });
+        }
       }
     }
 
