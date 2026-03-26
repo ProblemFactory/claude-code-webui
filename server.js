@@ -9,6 +9,12 @@ const multer = require('multer');
 
 const PORT = process.env.PORT || 3456;
 const CLAUDE_CMD = process.env.CLAUDE_CMD || 'claude';
+const DTACH_CMD = (() => {
+  // Resolve dtach full path at startup — node-pty's posix_spawnp may not find it
+  // if Homebrew paths (/opt/homebrew/bin, /usr/local/bin) aren't in Node's PATH
+  try { return execFileSync('which', ['dtach'], { encoding: 'utf-8', timeout: 2000 }).trim(); }
+  catch { return 'dtach'; } // fallback to bare name
+})();
 const SESSIONS_DIR = path.join(os.homedir(), '.claude', 'sessions');
 const HOST = process.env.HOST || '0.0.0.0';
 const EDITOR_SCRIPT = path.join(__dirname, 'editor-helper.sh');
@@ -130,7 +136,7 @@ function deleteSessionMeta(sockName) {
 
 // Attach a PTY to an existing dtach socket for I/O
 function attachToDtach(id, socketPath, session) {
-  const attachPty = pty.spawn('dtach', ['-a', socketPath, '-E', '-r', 'winch'], {
+  const attachPty = pty.spawn(DTACH_CMD, ['-a', socketPath, '-E', '-r', 'winch'], {
     name: 'xterm-256color', cols: 120, rows: 30,
     env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' },
   });
@@ -898,7 +904,7 @@ wss.on('connection', (ws) => {
         // Wrapper survives server restarts, tees output to buffer file
         const bufFile = path.join(BUFFERS_DIR, id + '.buf');
         const metaFileW = path.join(BUFFERS_DIR, id + '.json');
-        const createPty = pty.spawn('dtach', ['-c', socketPath, '-E', '-r', 'none',
+        const createPty = pty.spawn(DTACH_CMD, ['-c', socketPath, '-E', '-r', 'none',
           'node', PTY_WRAPPER,
           bufFile, metaFileW,
           'env', `EDITOR=${EDITOR_CMD}`, `CLAUDE_WEBUI_PORT=${PORT}`, `CLAUDE_WEBUI_SESSION_ID=${id}`, `DISPLAY=${process.env.DISPLAY || ':99'}`,
