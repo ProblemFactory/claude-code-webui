@@ -5,7 +5,7 @@ import { TerminalSession } from './terminal.js';
 import { Sidebar } from './sidebar.js';
 import { FileExplorer } from './file-explorer.js';
 import { FileViewer } from './file-viewer.js';
-import { CodeEditor, detectLang, getLangExtension, loadEditorSettings, editorLightTheme } from './code-editor.js';
+import { CodeEditor, detectLang, getLangExtension, loadEditorSettings, saveEditorSettings, editorLightTheme } from './code-editor.js';
 import { LayoutManager } from './layout.js';
 import { Resizer } from './resizer.js';
 import { attachPopoverClose } from './utils.js';
@@ -717,15 +717,30 @@ class App {
     editorPane.style.borderTop = '2px solid var(--accent)';
     editorPane.style.minHeight = '150px';
 
-    // Editor toolbar
+    // Editor toolbar with settings
     const toolbar = document.createElement('div');
     toolbar.className = 'editor-toolbar';
     toolbar.innerHTML = `<span class="file-path">${filePath}</span>`;
+
+    const edSettings = loadEditorSettings();
+    const mkBtn = (text) => { const b = document.createElement('button'); b.className = 'editor-setting-btn'; b.textContent = text; return b; };
+
+    // Wrap toggle
+    const btnWrap = mkBtn(edSettings.wordWrap ? 'Wrap: On' : 'Wrap: Off');
+    // Font size
+    const btnFontDown = mkBtn('A-');
+    const fontDisplay = document.createElement('span'); fontDisplay.className = 'editor-font-size-display'; fontDisplay.textContent = edSettings.fontSize;
+    const btnFontUp = mkBtn('A+');
+    // Theme toggle
+    const btnTheme = mkBtn(edSettings.theme === 'dark' ? 'Dark' : 'Light');
+
     const saveBtn = document.createElement('button');
     saveBtn.className = 'btn-create';
     saveBtn.style.cssText = 'padding:3px 12px;font-size:11px;';
     saveBtn.textContent = 'Save & Close';
-    toolbar.appendChild(saveBtn);
+
+    const sep = document.createElement('span'); sep.className = 'editor-toolbar-sep';
+    toolbar.append(sep, btnWrap, btnFontDown, fontDisplay, btnFontUp, btnTheme, saveBtn);
 
     const editorBody = document.createElement('div');
     editorBody.className = 'editor-body';
@@ -770,6 +785,32 @@ class App {
           }),
           parent: editorBody,
         });
+
+        // Wire up editor settings buttons
+        btnWrap.onclick = () => {
+          edSettings.wordWrap = !edSettings.wordWrap;
+          btnWrap.textContent = edSettings.wordWrap ? 'Wrap: On' : 'Wrap: Off';
+          editorView.dispatch({ effects: wrapComp.reconfigure(edSettings.wordWrap ? EditorView.lineWrapping : []) });
+          saveEditorSettings(edSettings);
+        };
+        btnFontDown.onclick = () => {
+          edSettings.fontSize = Math.max(8, edSettings.fontSize - 1);
+          fontDisplay.textContent = edSettings.fontSize;
+          editorView.dispatch({ effects: fontSizeComp.reconfigure(EditorView.theme({ '.cm-content, .cm-gutters': { fontSize: edSettings.fontSize + 'px' } })) });
+          saveEditorSettings(edSettings);
+        };
+        btnFontUp.onclick = () => {
+          edSettings.fontSize = Math.min(32, edSettings.fontSize + 1);
+          fontDisplay.textContent = edSettings.fontSize;
+          editorView.dispatch({ effects: fontSizeComp.reconfigure(EditorView.theme({ '.cm-content, .cm-gutters': { fontSize: edSettings.fontSize + 'px' } })) });
+          saveEditorSettings(edSettings);
+        };
+        btnTheme.onclick = () => {
+          edSettings.theme = edSettings.theme === 'dark' ? 'light' : 'dark';
+          btnTheme.textContent = edSettings.theme === 'dark' ? 'Dark' : 'Light';
+          editorView.dispatch({ effects: themeComp.reconfigure(edSettings.theme === 'dark' ? oneDark : editorLightTheme) });
+          saveEditorSettings(edSettings);
+        };
 
         const doSave = async () => {
           const newContent = editorView.state.doc.toString();
