@@ -18,6 +18,7 @@ class FileExplorer {
     const btnUp = this._btn('↑','Go up'); btnUp.onclick = () => this.navigateUp();
     this.pathInput = document.createElement('input'); this.pathInput.className = 'file-path-input';
     this.pathInput.addEventListener('keydown', e => { if (e.key==='Enter') { if (this._hideAC) this._hideAC(); this.navigate(this.pathInput.value); } });
+    this._acDropdown = document.createElement('div'); this._acDropdown.className = 'path-autocomplete hidden';
     this._setupPathAutocomplete();
     const btnRefresh = this._btn('↻','Refresh'); btnRefresh.onclick = () => this.refresh();
     const btnHidden = this._btn('⚬','Toggle hidden files'); btnHidden.onclick = () => { this._showHidden = !this._showHidden; btnHidden.classList.toggle('active', this._showHidden); this._renderItems(); };
@@ -27,7 +28,6 @@ class FileExplorer {
     const btnNewFile = this._btn('+','New file'); btnNewFile.onclick = () => this.createFile();
     const btnNewDir = this._btn('📂','New folder'); btnNewDir.onclick = () => this.createDir();
     const btnUpload = this._btn('⬆','Upload'); btnUpload.onclick = () => this._triggerUpload();
-    this._acDropdown = document.createElement('div'); this._acDropdown.className = 'path-autocomplete hidden';
     toolbar.style.position = 'relative';
     toolbar.append(btnUp, this.pathInput, btnRefresh, btnHidden, btnListView, btnIconView, btnNewFile, btnNewDir, btnUpload, this._acDropdown);
 
