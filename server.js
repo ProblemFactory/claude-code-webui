@@ -964,7 +964,7 @@ wss.on('connection', (ws) => {
           createPty = pty.spawn(DTACH_CMD, ['-c', socketPath, '-E', '-r', 'none',
             NODE_CMD, PTY_WRAPPER,
             bufFile, metaFileW,
-            ENV_CMD, `EDITOR=${EDITOR_CMD}`, `CLAUDE_WEBUI_PORT=${PORT}`, `CLAUDE_WEBUI_SESSION_ID=${id}`, `DISPLAY=${process.env.DISPLAY || ''}`,
+            ENV_CMD, `EDITOR=${EDITOR_CMD}`, `CLAUDE_WEBUI_PORT=${PORT}`, `CLAUDE_WEBUI_SESSION_ID=${id}`, `DISPLAY=${process.env.DISPLAY || (process.platform === 'darwin' ? '' : ':99')}`,
             `TERM=xterm-256color`, `COLORTERM=truecolor`,
             CLAUDE_CMD, ...claudeArgs,
           ], {
