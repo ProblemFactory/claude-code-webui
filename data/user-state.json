@@ -12,7 +12,10 @@
     "5ee38299-fb93-4fa1-a783-9c03f273de57",
     "4917c291-938b-4e8b-aecf-53efbb603295",
     "2e8e81cc-57f2-43aa-9d0e-5b59488fa391",
-    "7fcc7c7e-9ecd-4a6f-846d-2b9df25cc8eb"
+    "7fcc7c7e-9ecd-4a6f-846d-2b9df25cc8eb",
+    "4061a670-71a1-4493-a70f-bbba08d7ccda",
+    "cd1cd443-6864-4911-b06a-7654a5e41ae4",
+    "8f9acc04-ba4c-4299-8d25-a1a31cf323cf"
   ],
   "customNames": {
     "9f4cd444-abc0-4c9f-8388-ad1f9a70708c": "Claude Code WebUI 主开发",
@@ -23,6 +26,9 @@
     "工作": [
       "5cfe1199-3228-457a-9f47-c47272b731ff",
       "bde2728d-1da3-4b94-9ece-1f5060ef350b"
+    ],
+    "娱乐": [
+      "aa029052-c23e-4eb1-b811-9102eb5a3aaf"
     ]
   }
 }

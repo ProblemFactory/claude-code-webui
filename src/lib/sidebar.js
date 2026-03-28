@@ -164,6 +164,16 @@ class Sidebar {
 
   // ── Star / Archive / Rename ──
 
+  // Unified sort: starred first, then by time (desc)
+  _sortSessions(arr) {
+    arr.sort((a, b) => {
+      const as = this._starredIds.has(a.sessionId) ? 1 : 0;
+      const bs = this._starredIds.has(b.sessionId) ? 1 : 0;
+      if (as !== bs) return bs - as;
+      return (b.startedAt || 0) - (a.startedAt || 0);
+    });
+  }
+
   toggleStar(sessionId) {
     if (this._starredIds.has(sessionId)) this._starredIds.delete(sessionId);
     else this._starredIds.add(sessionId);
@@ -451,12 +461,7 @@ class Sidebar {
 
       const sessionsDiv = document.createElement('div'); sessionsDiv.className = 'folder-sessions';
       // Starred first, then by time
-      items.sort((a, b) => {
-        const as = this._starredIds.has(a.sessionId) ? 1 : 0;
-        const bs = this._starredIds.has(b.sessionId) ? 1 : 0;
-        if (as !== bs) return bs - as;
-        return (b.startedAt||0) - (a.startedAt||0);
-      });
+      this._sortSessions(items);
       for (const s of items) { sessionsDiv.appendChild(this._renderSessionCard(s)); }
 
       group.append(header, sessionsDiv);
@@ -527,12 +532,7 @@ class Sidebar {
       const sessionsDiv = document.createElement('div');
       sessionsDiv.className = 'folder-sessions';
       // Sort: starred first, then by time
-      groupSessions.sort((a, b) => {
-        const as = this._starredIds.has(a.sessionId) ? 1 : 0;
-        const bs = this._starredIds.has(b.sessionId) ? 1 : 0;
-        if (as !== bs) return bs - as;
-        return (b.startedAt || 0) - (a.startedAt || 0);
-      });
+      this._sortSessions(groupSessions);
       for (const s of groupSessions) sessionsDiv.appendChild(this._renderSessionCard(s));
 
       if (groupSessions.length === 0) {
@@ -567,12 +567,7 @@ class Sidebar {
 
       const sessionsDiv = document.createElement('div');
       sessionsDiv.className = 'folder-sessions';
-      ungrouped.sort((a, b) => {
-        const as = this._starredIds.has(a.sessionId) ? 1 : 0;
-        const bs = this._starredIds.has(b.sessionId) ? 1 : 0;
-        if (as !== bs) return bs - as;
-        return (b.startedAt || 0) - (a.startedAt || 0);
-      });
+      this._sortSessions(ungrouped);
       for (const s of ungrouped) sessionsDiv.appendChild(this._renderSessionCard(s));
 
       groupEl.append(header, sessionsDiv);
