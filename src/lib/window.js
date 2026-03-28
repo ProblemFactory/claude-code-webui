@@ -107,27 +107,25 @@ class WindowManager {
       }
       dragging = true; startX = e.clientX; startY = e.clientY;
       initL = element.offsetLeft; initT = element.offsetTop;
+      shiftDragStart = -1;
       element.classList.add('dragging');
       if (this.grid) this.gridOverlay.classList.add('dragging');
-      // Shift+Drag: record starting cell for range selection
-      if (e.shiftKey && this.grid) {
-        shiftDragStart = this._getGridCell(e.clientX, e.clientY);
-      } else {
-        shiftDragStart = -1;
-      }
       e.preventDefault();
     });
     const onMove = (e) => {
       if (!dragging) return;
       element.style.left = (initL + e.clientX - startX) + 'px'; element.style.top = (initT + e.clientY - startY) + 'px';
       if (!e.altKey) {
-        if (shiftDragStart >= 0 && this.grid) {
+        // Shift pressed mid-drag: enter range selection mode
+        if (e.shiftKey && this.grid) {
+          if (shiftDragStart < 0) shiftDragStart = this._getGridCell(e.clientX, e.clientY);
           const current = this._getGridCell(e.clientX, e.clientY);
-          if (current >= 0) this._showGridRangeHighlight(shiftDragStart, current);
-        } else if (this.grid) {
-          this._showGridHighlight(e.clientX, e.clientY);
+          if (shiftDragStart >= 0 && current >= 0) this._showGridRangeHighlight(shiftDragStart, current);
         } else {
-          this._showSnap(e.clientX, e.clientY);
+          // Shift released: cancel range selection
+          if (shiftDragStart >= 0) { shiftDragStart = -1; this._clearGridHighlight(); }
+          if (this.grid) this._showGridHighlight(e.clientX, e.clientY);
+          else this._showSnap(e.clientX, e.clientY);
         }
       } else {
         this.snapIndicator.style.display = 'none';
@@ -138,7 +136,7 @@ class WindowManager {
       if (!dragging) return; dragging = false; element.classList.remove('dragging');
       this.snapIndicator.style.display = 'none';
       if (!e.altKey) {
-        if (shiftDragStart >= 0 && this.grid) {
+        if (shiftDragStart >= 0 && e.shiftKey && this.grid) {
           const endCell = this._getGridCell(e.clientX, e.clientY);
           if (endCell >= 0) this._snapToGridRange(win.id, shiftDragStart, endCell);
           shiftDragStart = -1;
