@@ -753,6 +753,18 @@ class Sidebar {
     detailRenameBtn.onclick = (e) => { e.stopPropagation(); this.renameSession(s.sessionId, originalName); };
     actionsDiv.appendChild(detailRenameBtn);
 
+    // Find button — highlight the window + taskbar item with fast blink
+    if (s.webuiId) {
+      const findBtn = document.createElement('button');
+      findBtn.className = 'session-detail-btn';
+      findBtn.textContent = '\uD83D\uDD0D Find';
+      findBtn.onclick = (e) => {
+        e.stopPropagation();
+        this.app.flashWindow(s.webuiId);
+      };
+      actionsDiv.appendChild(findBtn);
+    }
+
     // Resume/Attach action button
     if (s.status === 'live' && s.webuiId) {
       const detailAttachBtn = document.createElement('button');
