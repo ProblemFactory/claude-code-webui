@@ -1,8 +1,8 @@
 {
   "starredSessions": [
-    "9f4cd444-abc0-4c9f-8388-ad1f9a70708c",
     "bde2728d-1da3-4b94-9ece-1f5060ef350b",
-    "5cfe1199-3228-457a-9f47-c47272b731ff"
+    "5cfe1199-3228-457a-9f47-c47272b731ff",
+    "9f4cd444-abc0-4c9f-8388-ad1f9a70708c"
   ],
   "archivedSessions": [
     "b9898f23-e26d-46f0-8f86-37e31053059e",
@@ -15,7 +15,8 @@
     "7fcc7c7e-9ecd-4a6f-846d-2b9df25cc8eb",
     "4061a670-71a1-4493-a70f-bbba08d7ccda",
     "cd1cd443-6864-4911-b06a-7654a5e41ae4",
-    "8f9acc04-ba4c-4299-8d25-a1a31cf323cf"
+    "8f9acc04-ba4c-4299-8d25-a1a31cf323cf",
+    "4406f4b1-c908-4a3e-987c-20cbd83d43cd"
   ],
   "customNames": {
     "9f4cd444-abc0-4c9f-8388-ad1f9a70708c": "Claude Code WebUI 主开发",
@@ -30,6 +31,15 @@
     ],
     "娱乐": [
       "aa029052-c23e-4eb1-b811-9102eb5a3aaf"
+    ]
+  },
+  "groupFolders": {
+    "工作": [
+      "/home/xingweil/workspace/39AI/label-studio",
+      "/home/xingweil/workspace/39AI/AIWorkspace/B2BTasks"
+    ],
+    "娱乐": [
+      "/home/xingweil/workspace/AIWorkspace/claude-code-webui"
     ]
   }
 }

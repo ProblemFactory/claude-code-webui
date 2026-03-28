@@ -1,0 +1,12 @@
+{
+  "terminal.minimumContrastRatio": 4.5,
+  "window.enableBounceOnFocus": true,
+  "sidebar.enableAutoGrouping": true,
+  "sidebar.defaultStatusFilter": [
+    "live",
+    "tmux",
+    "external",
+    "stopped",
+    "archived"
+  ]
+}

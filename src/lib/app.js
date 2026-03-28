@@ -22,7 +22,6 @@ import { indentWithTab } from '@codemirror/commands';
 class App {
   constructor() {
     this.settings = new SettingsManager();
-    window._appSettings = this.settings; // expose for TerminalSession constructor
     this.themeManager = new ThemeManager();
     this.ws = new WsManager();
     this.wm = new WindowManager(document.getElementById('workspace'));
@@ -639,7 +638,7 @@ class App {
       if (msg.type === 'created') {
         const term = new TerminalSession(winInfo, this.ws, msg.sessionId, this.themeManager, (filePath, signalPath) => {
           this._openExternalEditor(filePath, signalPath);
-        });
+        }, {}, this.settings);
         this.sessions.set(winInfo.id, term);
         this._wireTerminalWindow(winInfo, term, msg.sessionId);
         this.wm.setTitle(winInfo.id, `${sessionName} — ${msg.cwd||cwd||'~'}`);
@@ -684,12 +683,12 @@ class App {
 
     const handler = (msg) => {
       if (msg.type === 'attached' && msg.sessionId === serverId) {
-        const term = new TerminalSession(winInfo, this.ws, serverId, this.themeManager, (fp, sp) => this._openExternalEditor(fp, sp));
+        const term = new TerminalSession(winInfo, this.ws, serverId, this.themeManager, (fp, sp) => this._openExternalEditor(fp, sp), {}, this.settings);
         this.sessions.set(winInfo.id, term);
         // Write saved buffer after terminal is fully initialized
         if (msg.buffer) {
           const buf = msg.buffer;
-          setTimeout(() => { term.terminal.write(buf); term.fit(); }, 300);
+          setTimeout(() => { term.terminal.write(buf, () => { term.terminal.scrollToBottom(); term.fit(); }); }, 300);
         }
         this._wireTerminalWindow(winInfo, term, serverId);
         term.focus();
@@ -717,7 +716,7 @@ class App {
 
     const handler = (msg) => {
       if (msg.type === 'created' && msg.isTmuxView) {
-        const term = new TerminalSession(winInfo, this.ws, msg.sessionId, this.themeManager);
+        const term = new TerminalSession(winInfo, this.ws, msg.sessionId, this.themeManager, null, {}, this.settings);
         term._tmuxTarget = tmuxTarget;
         this.sessions.set(winInfo.id, term);
         // Closing window only detaches the tmux view — does NOT kill the session
@@ -760,7 +759,7 @@ class App {
     const handler = (msg) => {
       if (msg.type === 'created') {
         const serverSessId = msg.sessionId;
-        const term = new TerminalSession(winInfo, this.ws, serverSessId, this.themeManager, (fp, sp) => this._openExternalEditor(fp, sp));
+        const term = new TerminalSession(winInfo, this.ws, serverSessId, this.themeManager, (fp, sp) => this._openExternalEditor(fp, sp), {}, this.settings);
         this.sessions.set(winInfo.id, term);
         this._wireTerminalWindow(winInfo, term, serverSessId);
         term.focus();
@@ -1072,6 +1071,30 @@ class App {
 
   _hideWelcome() { document.getElementById('welcome').classList.add('hidden'); }
   _checkWelcome() { if (this.wm.windows.size === 0) document.getElementById('welcome').classList.remove('hidden'); }
+
+  // Flash a window's title bar + taskbar item to help user find it
+  flashWindow(serverSessionId) {
+    for (const [winId, term] of this.sessions) {
+      if (term.sessionId === serverSessionId) {
+        const win = this.wm.windows.get(winId);
+        if (!win) break;
+        win.element.classList.add('window-find-flash');
+        // Flash matching taskbar item
+        const taskbarItems = document.querySelectorAll('.taskbar-item');
+        const idx = [...this.wm.windows.keys()].indexOf(winId);
+        const taskbarItem = taskbarItems[idx];
+        if (taskbarItem) taskbarItem.classList.add('find-flash');
+        // Restore if minimized
+        if (win.isMinimized) this.wm.restore(winId);
+        // Remove flash after 3 seconds
+        setTimeout(() => {
+          win.element.classList.remove('window-find-flash');
+          if (taskbarItem) taskbarItem.classList.remove('find-flash');
+        }, 3000);
+        break;
+      }
+    }
+  }
 
   syncSessionName(claudeSessionId, newName) {
     // Find the open window whose server session corresponds to this claude session ID

@@ -1054,6 +1054,14 @@ html, body {
   50% { background: rgba(250,180,40,0.4); }
 }
 
+/* Find flash — faster than waiting-blink, bright cyan/green to distinguish */
+.window-find-flash .window-titlebar { animation: find-flash 0.3s ease-in-out infinite; }
+.taskbar-item.find-flash { animation: find-flash 0.3s ease-in-out infinite; }
+@keyframes find-flash {
+  0%,100% { background: var(--bg-titlebar); }
+  50% { background: rgba(34,211,238,0.5); }
+}
+
 /* ── Command Mode Indicator ── */
 #cmd-indicator { display: none; padding: 1px 8px; font-size: 10px; font-weight: 700; border-radius: var(--radius-sm); margin-right: 6px; }
 #cmd-indicator.active { display: inline-block; background: var(--yellow); color: #000; }

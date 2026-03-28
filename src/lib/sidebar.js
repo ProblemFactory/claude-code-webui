@@ -24,6 +24,7 @@ class Sidebar {
     this._archivedIds = new Set(JSON.parse(localStorage.getItem('archivedSessions') || '[]'));
     this._customNames = JSON.parse(localStorage.getItem('sessionCustomNames') || '{}');
     this._sessionGroups = JSON.parse(localStorage.getItem('sessionGroups') || '{}'); // { groupName: [sessionId, ...] }
+    this._groupFolders = JSON.parse(localStorage.getItem('groupFolders') || '{}'); // { groupName: [folderPath, ...] }
 
     this._sortMode = localStorage.getItem('sessionSort') || 'recent';
     this._filterLive = false;
@@ -107,6 +108,10 @@ class Sidebar {
       this._sessionGroups = { ...state.sessionGroups };
       localStorage.setItem('sessionGroups', JSON.stringify(state.sessionGroups));
     }
+    if (state.groupFolders) {
+      this._groupFolders = { ...state.groupFolders };
+      localStorage.setItem('groupFolders', JSON.stringify(state.groupFolders));
+    }
   }
 
   async _pushUserState() {
@@ -115,12 +120,13 @@ class Sidebar {
       archivedSessions: [...this._archivedIds],
       customNames: this._customNames,
       sessionGroups: this._sessionGroups,
+      groupFolders: this._groupFolders,
     };
-    // Write localStorage cache
     localStorage.setItem('starredSessions', JSON.stringify(state.starredSessions));
     localStorage.setItem('archivedSessions', JSON.stringify(state.archivedSessions));
     localStorage.setItem('sessionCustomNames', JSON.stringify(state.customNames));
     localStorage.setItem('sessionGroups', JSON.stringify(state.sessionGroups));
+    localStorage.setItem('groupFolders', JSON.stringify(state.groupFolders));
     // Push to server (broadcasts to other clients)
     try {
       await fetch('/api/user-state', {
@@ -244,6 +250,37 @@ class Sidebar {
     this._render();
   }
 
+  _addFolderToGroup(folderPath, groupName) {
+    if (!this._groupFolders[groupName]) this._groupFolders[groupName] = [];
+    if (!this._groupFolders[groupName].includes(folderPath)) {
+      this._groupFolders[groupName].push(folderPath);
+      this._pushUserState();
+      this._render();
+    }
+  }
+
+  _removeFolderFromGroup(folderPath, groupName) {
+    if (!this._groupFolders[groupName]) return;
+    this._groupFolders[groupName] = this._groupFolders[groupName].filter(p => p !== folderPath);
+    this._pushUserState();
+    this._render();
+  }
+
+  // Get all sessions in a group: direct + folder-matched (recursive)
+  _getGroupSessions(groupName, allSessions) {
+    const directIds = new Set(this._sessionGroups[groupName] || []);
+    const folders = this._groupFolders[groupName] || [];
+    const result = new Set(directIds);
+    for (const s of allSessions) {
+      if (result.has(s.sessionId)) continue;
+      const cwd = s.cwd || '';
+      for (const fp of folders) {
+        if (cwd === fp || cwd.startsWith(fp + '/')) { result.add(s.sessionId); break; }
+      }
+    }
+    return result;
+  }
+
   _createGroup(name) {
     if (!name || this._sessionGroups[name]) return;
     this._sessionGroups[name] = [];
@@ -253,6 +290,19 @@ class Sidebar {
 
   _deleteGroup(name) {
     delete this._sessionGroups[name];
+    delete this._groupFolders[name];
+    this._pushUserState();
+    this._render();
+  }
+
+  _renameGroup(oldName, newName) {
+    if (this._sessionGroups[newName]) return; // name taken
+    this._sessionGroups[newName] = this._sessionGroups[oldName] || [];
+    delete this._sessionGroups[oldName];
+    if (this._groupFolders[oldName]) {
+      this._groupFolders[newName] = this._groupFolders[oldName];
+      delete this._groupFolders[oldName];
+    }
     this._pushUserState();
     this._render();
   }
@@ -451,6 +501,16 @@ class Sidebar {
       addBtn.onclick = (e) => { e.stopPropagation(); this.app.createSession({ cwd }); };
       header.appendChild(addBtn);
 
+      // Link folder to group button
+      const linkBtn = document.createElement('button'); linkBtn.className = 'folder-add-btn';
+      linkBtn.textContent = '\u{1F517}'; linkBtn.title = 'Add folder to group';
+      linkBtn.style.fontSize = '10px';
+      linkBtn.onclick = (e) => {
+        e.stopPropagation();
+        this._showFolderGroupPopover(linkBtn, cwd);
+      };
+      header.appendChild(linkBtn);
+
       header.onclick = (e) => {
         if (e.target.closest('.folder-add-btn')) return;
         group.classList.toggle('collapsed');
@@ -486,11 +546,11 @@ class Sidebar {
     };
     this.listEl.appendChild(addGroupCard);
 
-    // Render each group
+    // Render each group (direct sessions + folder-matched sessions)
     for (const groupName of groupNames) {
-      const groupSessionIds = this._sessionGroups[groupName] || [];
-      const groupSessions = groupSessionIds.map(id => sessionById.get(id)).filter(Boolean);
-      groupSessionIds.forEach(id => { if (sessionById.has(id)) assignedIds.add(id); });
+      const groupSessionIds = this._getGroupSessions(groupName, sessions);
+      const groupSessions = [...groupSessionIds].map(id => sessionById.get(id)).filter(Boolean);
+      groupSessionIds.forEach(id => assignedIds.add(id));
 
       const groupEl = document.createElement('div');
       groupEl.className = 'folder-group';
@@ -499,13 +559,63 @@ class Sidebar {
 
       const hasLive = groupSessions.some(s => s.status === 'live' || s.status === 'tmux');
 
+      const linkedFolders = this._groupFolders[groupName] || [];
+      const folderHint = linkedFolders.length ? ` (${linkedFolders.length} folder${linkedFolders.length > 1 ? 's' : ''})` : '';
+
       const header = document.createElement('div');
       header.className = 'folder-header';
-      header.innerHTML = `<span class="folder-chevron">\u25BC</span><span class="folder-path" style="direction:ltr">${escHtml(groupName)}</span><span class="folder-count">${groupSessions.length}</span>`;
+      header.innerHTML = `<span class="folder-chevron">\u25BC</span><span class="folder-path" style="direction:ltr">${escHtml(groupName)}<span style="color:var(--text-dim);font-weight:400;font-size:10px">${folderHint}</span></span><span class="folder-count">${groupSessions.length}</span>`;
       if (hasLive) {
         const dot = document.createElement('span');
         dot.style.cssText = 'width:6px;height:6px;border-radius:50%;background:var(--green);flex-shrink:0';
         header.insertBefore(dot, header.children[2]);
+      }
+
+      // Double-click group name to rename
+      const nameSpan = header.querySelector('.folder-path');
+      if (nameSpan) {
+        nameSpan.addEventListener('dblclick', (e) => {
+          e.stopPropagation();
+          const newName = prompt('Rename group:', groupName);
+          if (newName && newName.trim() && newName.trim() !== groupName) {
+            this._renameGroup(groupName, newName.trim());
+          }
+        });
+        nameSpan.title = 'Double-click to rename';
+      }
+
+      // Resume all stopped sessions in group
+      const resumeAllBtn = document.createElement('button');
+      resumeAllBtn.className = 'folder-add-btn';
+      resumeAllBtn.textContent = '\u25B6';
+      resumeAllBtn.title = 'Resume all sessions in "' + groupName + '"';
+      resumeAllBtn.onclick = (e) => {
+        e.stopPropagation();
+        for (const s of groupSessions) {
+          if (s.status === 'stopped') {
+            const customName = this.getCustomName(s.sessionId);
+            this.app.resumeSession(s.sessionId, s.cwd, customName || s.name);
+          } else if (s.status === 'live' && s.webuiId) {
+            this.app.attachSession(s.webuiId, s.webuiName || s.name, s.cwd);
+          } else if (s.status === 'tmux') {
+            this.app.attachTmuxSession(s.tmuxTarget, s.name, s.cwd);
+          }
+        }
+      };
+      header.appendChild(resumeAllBtn);
+
+      // Linked folders button
+      if (linkedFolders.length > 0 || true) { // always show so user can add folders
+        const foldersBtn = document.createElement('button');
+        foldersBtn.className = 'folder-add-btn';
+        foldersBtn.textContent = '\uD83D\uDCC1';
+        foldersBtn.style.fontSize = '10px';
+        foldersBtn.title = 'Linked folders' + (linkedFolders.length ? ': ' + linkedFolders.join(', ') : ' (none)');
+        foldersBtn.onclick = (e) => {
+          e.stopPropagation();
+          this._showGroupFoldersPopover(foldersBtn, groupName);
+        };
+        header.appendChild(foldersBtn);
       }
 
       // Delete group button
@@ -683,6 +793,18 @@ class Sidebar {
     detailRenameBtn.onclick = (e) => { e.stopPropagation(); this.renameSession(s.sessionId, originalName); };
     actionsDiv.appendChild(detailRenameBtn);
 
+    // Find button — highlight the window + taskbar item with fast blink
+    if (s.webuiId) {
+      const findBtn = document.createElement('button');
+      findBtn.className = 'session-detail-btn';
+      findBtn.textContent = '\uD83D\uDD0D Find';
+      findBtn.onclick = (e) => {
+        e.stopPropagation();
+        this.app.flashWindow(s.webuiId);
+      };
+      actionsDiv.appendChild(findBtn);
+    }
+
     // Resume/Attach action button
     if (s.status === 'live' && s.webuiId) {
       const detailAttachBtn = document.createElement('button');
@@ -746,6 +868,106 @@ class Sidebar {
     };
     row.appendChild(btn);
     container.appendChild(row);
+  }
+
+  _showGroupFoldersPopover(anchor, groupName) {
+    document.querySelectorAll('.groups-popover').forEach(p => p.remove());
+    const pop = document.createElement('div');
+    pop.className = 'groups-popover';
+    const rect = anchor.getBoundingClientRect();
+    pop.style.position = 'fixed';
+    pop.style.left = rect.left + 'px';
+    pop.style.top = (rect.bottom + 2) + 'px';
+    pop.style.zIndex = '99999';
+
+    const folders = this._groupFolders[groupName] || [];
+
+    if (folders.length === 0) {
+      const hint = document.createElement('div');
+      hint.className = 'empty-hint';
+      hint.textContent = 'No linked folders. Use 🔗 on folder headers in Folders tab to link.';
+      pop.appendChild(hint);
+    } else {
+      for (const fp of folders) {
+        const row = document.createElement('div');
+        row.className = 'session-detail-group-item';
+        row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:6px;padding:4px 8px;cursor:default';
+        const pathSpan = document.createElement('span');
+        pathSpan.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px';
+        pathSpan.textContent = fp.replace(/^\/home\/[^/]+/, '~');
+        pathSpan.title = fp;
+        const removeBtn = document.createElement('button');
+        removeBtn.style.cssText = 'background:none;border:none;color:var(--red,#e55);cursor:pointer;font-size:12px;padding:0 4px;flex-shrink:0';
+        removeBtn.textContent = '\u00D7';
+        removeBtn.title = 'Unlink folder';
+        removeBtn.onclick = (e) => {
+          e.stopPropagation();
+          this._removeFolderFromGroup(fp, groupName);
+          pop.remove();
+        };
+        row.append(pathSpan, removeBtn);
+        pop.appendChild(row);
+      }
+    }
+
+    document.body.appendChild(pop);
+    attachPopoverClose(pop, anchor);
+  }
+
+  _showFolderGroupPopover(anchor, folderPath) {
+    document.querySelectorAll('.groups-popover').forEach(p => p.remove());
+    const pop = document.createElement('div');
+    pop.className = 'groups-popover';
+    const rect = anchor.getBoundingClientRect();
+    pop.style.position = 'fixed';
+    pop.style.left = rect.left + 'px';
+    pop.style.top = (rect.bottom + 2) + 'px';
+    pop.style.zIndex = '99999';
+
+    const groupNames = this._getGroupNames();
+    for (const name of groupNames) {
+      const folders = this._groupFolders[name] || [];
+      const isLinked = folders.includes(folderPath);
+      const row = document.createElement('label');
+      row.className = 'session-detail-group-item';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = isLinked;
+      cb.onchange = (e) => {
+        e.stopPropagation();
+        if (cb.checked) this._addFolderToGroup(folderPath, name);
+        else this._removeFolderFromGroup(folderPath, name);
+        pop.remove();
+      };
+      const lbl = document.createElement('span');
+      lbl.textContent = name;
+      row.append(cb, lbl);
+      row.onclick = (e) => e.stopPropagation();
+      pop.appendChild(row);
+    }
+
+    if (groupNames.length === 0) {
+      const hint = document.createElement('div');
+      hint.className = 'empty-hint'; hint.textContent = 'No groups yet';
+      pop.appendChild(hint);
+    }
+
+    const createRow = document.createElement('div');
+    createRow.className = 'session-detail-group-create';
+    createRow.textContent = '+ New group';
+    createRow.onclick = (e) => {
+      e.stopPropagation();
+      const name = prompt('New group name:');
+      if (name && name.trim()) {
+        this._createGroup(name.trim());
+        this._addFolderToGroup(folderPath, name.trim());
+        pop.remove();
+      }
+    };
+    pop.appendChild(createRow);
+
+    document.body.appendChild(pop);
+    attachPopoverClose(pop, anchor);
   }
 
   _showGroupsPopover(anchor, sessionId) {

@@ -59,12 +59,11 @@ async function _buildFontList() {
 function getAvailableFonts() { return _fontList || [{ label: 'System Default', value: 'monospace' }]; }
 
 class TerminalSession {
-  constructor(winInfo, wsManager, sessionId, themeManager, onEditorRequest, overrides = {}) {
+  constructor(winInfo, wsManager, sessionId, themeManager, onEditorRequest, overrides = {}, settings = null) {
     this.winInfo = winInfo; this.ws = wsManager; this.sessionId = sessionId;
     this.themeManager = themeManager; this.onEditorRequest = onEditorRequest;
     this.overrides = { theme: null, fontSize: null, fontFamily: null, ...overrides };
-    // Settings reference (may be set after construction via app)
-    this._settings = null;
+    this._settings = settings;
 
     const container = document.createElement('div'); container.className = 'terminal-container';
     winInfo.content.appendChild(container);
@@ -73,8 +72,7 @@ class TerminalSession {
     const effectiveFontSize = this.overrides.fontSize || parseInt(localStorage.getItem('termFontSize')) || 14;
     const effectiveFont = this.overrides.fontFamily || localStorage.getItem('termFontFamily') || getAvailableFonts()[0]?.value || 'monospace';
 
-    // Read minimumContrastRatio from settings if available
-    const mcr = typeof window._appSettings?.get === 'function' ? window._appSettings.get('terminal.minimumContrastRatio') : 1;
+    const mcr = this._settings?.get('terminal.minimumContrastRatio') ?? 1;
 
     this.terminal = new Terminal({
       cursorBlink: false, cursorStyle: 'bar', cursorInactiveStyle: 'none',
@@ -184,6 +182,7 @@ class TerminalSession {
 
     // Pin-to-bottom: auto-scroll on new output unless user scrolled up
     this._pinned = true;
+    this._claudeIdle = true; // assume idle initially — prevents false "waiting" blink on buffer replay
     const scrollBtn = document.createElement('button');
     scrollBtn.className = 'term-scroll-btn hidden';
     scrollBtn.textContent = '↓';
@@ -280,10 +279,12 @@ class TerminalSession {
     this._pinned = true;
     this.winInfo.content.querySelector('.term-scroll-btn')?.classList.add('hidden');
     if (this._pendingOutput) {
-      this.terminal.write(this._pendingOutput);
+      const pending = this._pendingOutput;
       this._pendingOutput = '';
+      this.terminal.write(pending, () => this.terminal.scrollToBottom());
+    } else {
+      this.terminal.scrollToBottom();
     }
-    this.terminal.scrollToBottom();
   }
 
   _getGlobalFontSize() { return parseInt(localStorage.getItem('termFontSize')) || 14; }
@@ -385,6 +386,7 @@ class TerminalSession {
         this.ws.send({ type: 'resize', sessionId: this.sessionId, cols: d.cols - 1, rows: d.rows });
         setTimeout(() => {
           this.ws.send({ type: 'resize', sessionId: this.sessionId, cols: d.cols, rows: d.rows });
+          setTimeout(() => { if (this._pinned) this.terminal.scrollToBottom(); }, 300);
         }, 100);
       }
     } catch {}

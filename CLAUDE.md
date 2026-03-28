@@ -329,7 +329,7 @@ Server → Client: `created`, `output`, `exited`, `attached`, `active-sessions`,
 - Overlap indicator: ⧉/□ icon on title bar shows whether other windows overlap, click opens switcher
 - Command mode: `Ctrl+\` prefix key (tmux-style), [CMD] indicator in taskbar, 2s auto-exit
 - Shift+drag: select rectangular cell range in grid mode, window spans entire range
-- Layout persistence: auto-save + named layouts + grid state
+- Presets (renamed from Layouts): save/restore full workspace state (windows, positions, z-order, grid, theme, fonts). Sessions matched by claudeSessionId. Non-preset windows minimized not killed.
 
 ### Session Management
 - Unified session list grouped by working directory
@@ -337,12 +337,13 @@ Server → Client: `created`, `output`, `exited`, `attached`, `active-sessions`,
 - Quick new session from folder header (+)
 - Resume stopped sessions via `claude --resume`
 - Session names from first user message in JSONL
-- Star sessions (★/☆): starred sessions sort first in sidebar groups and taskbar, stored in localStorage
-- Session rename: double-click name in sidebar → set custom name → used as `--name` on next resume
+- Star sessions (★/☆): starred sessions sort first in sidebar groups and taskbar
 - Archive/unarchive sessions: 📦 button, hidden by default, toggle via status filter
 - Focus window highlights corresponding session in sidebar
-- Session groups: Folders | Groups dual tab, user-defined groups with assign/unassign
-- Multi-client sync: star/archive/rename/groups broadcast via WebSocket to all clients
+- Find session: 🔍 button in expand panel flashes window title bar + taskbar (cyan 0.3s, 3s duration)
+- Session groups: Folders | Groups dual tab, user-defined groups with assign/unassign, folder linking (recursive auto-include by cwd), ▶ resume-all button
+- Multi-client sync: star/archive/rename/groups/bookmarks broadcast via WebSocket to all clients
+- Session rename: double-click name in sidebar → set custom name → used as `--name` on next resume, syncs to open windows
 
 ### File Management
 - File explorer with upload/download/drag-drop, title shows current path (front-truncated)
