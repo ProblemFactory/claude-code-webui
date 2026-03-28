@@ -734,16 +734,37 @@ class Sidebar {
 
   _renderDetailGroups(container, sessionId) {
     container.innerHTML = '';
+    const sessionGroups = this._getSessionGroups(sessionId);
+    const summary = sessionGroups.length ? sessionGroups.join(', ') : 'None';
+
+    // Single row: "Groups: X, Y" + dropdown button
+    const row = document.createElement('div');
+    row.className = 'session-detail-row';
+    row.innerHTML = `<span class="session-detail-label">Groups</span><span class="session-detail-value" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(summary)}</span>`;
+    const btn = document.createElement('button');
+    btn.className = 'session-detail-btn';
+    btn.textContent = '▾';
+    btn.style.cssText = 'padding:1px 6px;font-size:10px;min-width:0';
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      this._showGroupsPopover(btn, sessionId);
+    };
+    row.appendChild(btn);
+    container.appendChild(row);
+  }
+
+  _showGroupsPopover(anchor, sessionId) {
+    document.querySelectorAll('.groups-popover').forEach(p => p.remove());
+    const pop = document.createElement('div');
+    pop.className = 'groups-popover';
+    const rect = anchor.getBoundingClientRect();
+    pop.style.position = 'fixed';
+    pop.style.left = rect.left + 'px';
+    pop.style.top = (rect.bottom + 2) + 'px';
+    pop.style.zIndex = '99999';
+
     const groupNames = this._getGroupNames();
     const sessionGroups = this._getSessionGroups(sessionId);
-
-    const label = document.createElement('div');
-    label.className = 'session-detail-row';
-    label.innerHTML = '<span class="session-detail-label">Groups</span>';
-    container.appendChild(label);
-
-    const groupList = document.createElement('div');
-    groupList.className = 'session-detail-groups-list';
 
     for (const name of groupNames) {
       const row = document.createElement('label');
@@ -760,24 +781,25 @@ class Sidebar {
       lbl.textContent = name;
       row.append(cb, lbl);
       row.onclick = (e) => e.stopPropagation();
-      groupList.appendChild(row);
+      pop.appendChild(row);
     }
 
-    // "Create new group" option
     const createRow = document.createElement('div');
     createRow.className = 'session-detail-group-create';
-    createRow.textContent = '+ Create new group';
+    createRow.textContent = '+ New group';
     createRow.onclick = (e) => {
       e.stopPropagation();
       const name = prompt('New group name:');
       if (name && name.trim()) {
         this._createGroup(name.trim());
         this._addSessionToGroup(sessionId, name.trim());
+        pop.remove();
       }
     };
-    groupList.appendChild(createRow);
+    pop.appendChild(createRow);
 
-    container.appendChild(groupList);
+    document.body.appendChild(pop);
+    attachPopoverClose(pop, anchor);
   }
 
 }
