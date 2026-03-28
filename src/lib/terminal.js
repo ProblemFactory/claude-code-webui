@@ -59,12 +59,11 @@ async function _buildFontList() {
 function getAvailableFonts() { return _fontList || [{ label: 'System Default', value: 'monospace' }]; }
 
 class TerminalSession {
-  constructor(winInfo, wsManager, sessionId, themeManager, onEditorRequest, overrides = {}) {
+  constructor(winInfo, wsManager, sessionId, themeManager, onEditorRequest, overrides = {}, settings = null) {
     this.winInfo = winInfo; this.ws = wsManager; this.sessionId = sessionId;
     this.themeManager = themeManager; this.onEditorRequest = onEditorRequest;
     this.overrides = { theme: null, fontSize: null, fontFamily: null, ...overrides };
-    // Settings reference (may be set after construction via app)
-    this._settings = null;
+    this._settings = settings;
 
     const container = document.createElement('div'); container.className = 'terminal-container';
     winInfo.content.appendChild(container);
@@ -73,8 +72,7 @@ class TerminalSession {
     const effectiveFontSize = this.overrides.fontSize || parseInt(localStorage.getItem('termFontSize')) || 14;
     const effectiveFont = this.overrides.fontFamily || localStorage.getItem('termFontFamily') || getAvailableFonts()[0]?.value || 'monospace';
 
-    // Read minimumContrastRatio from settings if available
-    const mcr = typeof window._appSettings?.get === 'function' ? window._appSettings.get('terminal.minimumContrastRatio') : 1;
+    const mcr = this._settings?.get('terminal.minimumContrastRatio') ?? 1;
 
     this.terminal = new Terminal({
       cursorBlink: false, cursorStyle: 'bar', cursorInactiveStyle: 'none',

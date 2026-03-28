@@ -22,7 +22,6 @@ import { indentWithTab } from '@codemirror/commands';
 class App {
   constructor() {
     this.settings = new SettingsManager();
-    window._appSettings = this.settings; // expose for TerminalSession constructor
     this.themeManager = new ThemeManager();
     this.ws = new WsManager();
     this.wm = new WindowManager(document.getElementById('workspace'));
@@ -639,7 +638,7 @@ class App {
       if (msg.type === 'created') {
         const term = new TerminalSession(winInfo, this.ws, msg.sessionId, this.themeManager, (filePath, signalPath) => {
           this._openExternalEditor(filePath, signalPath);
-        });
+        }, {}, this.settings);
         this.sessions.set(winInfo.id, term);
         this._wireTerminalWindow(winInfo, term, msg.sessionId);
         this.wm.setTitle(winInfo.id, `${sessionName} — ${msg.cwd||cwd||'~'}`);
@@ -656,8 +655,6 @@ class App {
       term.dispose(); this.sessions.delete(winInfo.id); this._checkWelcome();
     };
     winInfo._notifyChanged = () => this.updateTaskbar();
-    // Give terminal access to settings
-    term._settings = this.settings;
   }
 
   // Find existing window for a server session ID and focus it
@@ -684,7 +681,7 @@ class App {
 
     const handler = (msg) => {
       if (msg.type === 'attached' && msg.sessionId === serverId) {
-        const term = new TerminalSession(winInfo, this.ws, serverId, this.themeManager, (fp, sp) => this._openExternalEditor(fp, sp));
+        const term = new TerminalSession(winInfo, this.ws, serverId, this.themeManager, (fp, sp) => this._openExternalEditor(fp, sp), {}, this.settings);
         this.sessions.set(winInfo.id, term);
         // Write saved buffer after terminal is fully initialized
         if (msg.buffer) {
@@ -717,7 +714,7 @@ class App {
 
     const handler = (msg) => {
       if (msg.type === 'created' && msg.isTmuxView) {
-        const term = new TerminalSession(winInfo, this.ws, msg.sessionId, this.themeManager);
+        const term = new TerminalSession(winInfo, this.ws, msg.sessionId, this.themeManager, null, {}, this.settings);
         term._tmuxTarget = tmuxTarget;
         this.sessions.set(winInfo.id, term);
         // Closing window only detaches the tmux view — does NOT kill the session
@@ -760,7 +757,7 @@ class App {
     const handler = (msg) => {
       if (msg.type === 'created') {
         const serverSessId = msg.sessionId;
-        const term = new TerminalSession(winInfo, this.ws, serverSessId, this.themeManager, (fp, sp) => this._openExternalEditor(fp, sp));
+        const term = new TerminalSession(winInfo, this.ws, serverSessId, this.themeManager, (fp, sp) => this._openExternalEditor(fp, sp), {}, this.settings);
         this.sessions.set(winInfo.id, term);
         this._wireTerminalWindow(winInfo, term, serverSessId);
         term.focus();
