@@ -40,6 +40,7 @@ class App {
     this._setupGridConfig();
     this._setupLayoutManager();
     this._setupUsage();
+    this._setupCommandMode();
 
     // Listen for editor open/close requests (from editor-helper.sh via server HTTP→WebSocket)
     this.ws.onGlobal((msg) => {
@@ -335,6 +336,173 @@ class App {
         </div>
       </div>
       <div class="usage-total" style="font-weight:400;color:var(--text-dim)">Updated ${ago < 1 ? 'just now' : ago + 'min ago'}</div>`;
+  }
+
+  // ── Command Mode (Ctrl+\ prefix key, tmux-style) ──
+  _setupCommandMode() {
+    this._cmdMode = false;
+    this._cmdTimer = null;
+    this._cmdDigits = '';
+    this._cmdDigitTimer = null;
+    this._cmdIndicator = document.getElementById('cmd-indicator');
+
+    document.addEventListener('keydown', (e) => {
+      // Ctrl+\ toggles command mode
+      if (e.key === '\\' && e.ctrlKey && !e.altKey && !e.metaKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (this._cmdMode) {
+          this._exitCommandMode();
+        } else {
+          this._enterCommandMode();
+        }
+        return;
+      }
+
+      if (!this._cmdMode) return;
+
+      // Reset the auto-exit timer on each key press in command mode
+      this._resetCmdTimer();
+
+      const key = e.key;
+
+      // Esc exits command mode
+      if (key === 'Escape') {
+        e.preventDefault(); e.stopPropagation();
+        this._exitCommandMode();
+        return;
+      }
+
+      // Digit accumulation for cell snap
+      if (key >= '0' && key <= '9') {
+        e.preventDefault(); e.stopPropagation();
+        this._cmdDigits += key;
+        clearTimeout(this._cmdDigitTimer);
+        this._cmdDigitTimer = setTimeout(() => this._executeCellSnap(), 500);
+        return;
+      }
+
+      // If we were accumulating digits and a non-digit came, execute the snap first
+      if (this._cmdDigits) {
+        clearTimeout(this._cmdDigitTimer);
+        this._executeCellSnap();
+        // Don't return — continue processing the non-digit key below
+        // But command mode may have been exited by _executeCellSnap, so re-check
+        if (!this._cmdMode) return;
+      }
+
+      e.preventDefault(); e.stopPropagation();
+
+      // Window commands (require active window)
+      const activeWin = this.wm.windows.get(this.wm.activeWindowId);
+
+      switch (key) {
+        case 'ArrowLeft':
+          if (activeWin) { this.wm.setGrid(1, 2); this.wm.snapActiveToCell(0); }
+          this._exitCommandMode();
+          break;
+        case 'ArrowRight':
+          if (activeWin) { this.wm.setGrid(1, 2); this.wm.snapActiveToCell(1); }
+          this._exitCommandMode();
+          break;
+        case 'ArrowUp':
+          if (activeWin) { this.wm.setGrid(2, 1); this.wm.snapActiveToCell(0); }
+          this._exitCommandMode();
+          break;
+        case 'ArrowDown':
+          if (activeWin) { this.wm.setGrid(2, 1); this.wm.snapActiveToCell(1); }
+          this._exitCommandMode();
+          break;
+        case 'm':
+          if (activeWin) this.wm.toggleMaximize(this.wm.activeWindowId);
+          this._exitCommandMode();
+          break;
+        case 'w':
+          if (activeWin) this.wm.closeWindow(this.wm.activeWindowId);
+          this._exitCommandMode();
+          break;
+        case 'Tab':
+          // Cycle to next window, STAY in command mode
+          if (this.wm.windows.size > 0) {
+            const ids = [...this.wm.windows.keys()];
+            const curIdx = ids.indexOf(this.wm.activeWindowId);
+            const nextIdx = (curIdx + 1) % ids.length;
+            const nextId = ids[nextIdx];
+            const nextWin = this.wm.windows.get(nextId);
+            if (nextWin && nextWin.isMinimized) this.wm.restore(nextId);
+            else this.wm.focusWindow(nextId);
+            const session = this.sessions.get(nextId);
+            if (session) session.focus();
+          }
+          // Don't exit command mode for Tab
+          break;
+        case 'f':
+          this.wm.applyLayout('freeform');
+          this._exitCommandMode();
+          break;
+        case 'g': {
+          this._exitCommandMode();
+          const input = prompt('Grid (e.g. 3x3):');
+          if (input) {
+            const match = input.match(/(\d+)\s*[x×X]\s*(\d+)/);
+            if (match) {
+              this.wm.setGrid(parseInt(match[1]), parseInt(match[2]));
+            }
+          }
+          break;
+        }
+        case 'n':
+          this._exitCommandMode();
+          this.showNewSessionDialog();
+          break;
+        case 's':
+          document.getElementById('sidebar').classList.toggle('open');
+          this._exitCommandMode();
+          break;
+        case 'b':
+          this.openBrowser();
+          this._exitCommandMode();
+          break;
+        case 'e':
+          this.openFileExplorer();
+          this._exitCommandMode();
+          break;
+        default:
+          // Unrecognized key — exit command mode
+          this._exitCommandMode();
+          break;
+      }
+    }, true); // capture phase
+  }
+
+  _enterCommandMode() {
+    this._cmdMode = true;
+    this._cmdDigits = '';
+    clearTimeout(this._cmdDigitTimer);
+    this._cmdIndicator.classList.add('active');
+    this._resetCmdTimer();
+  }
+
+  _exitCommandMode() {
+    this._cmdMode = false;
+    this._cmdDigits = '';
+    clearTimeout(this._cmdTimer);
+    clearTimeout(this._cmdDigitTimer);
+    this._cmdIndicator.classList.remove('active');
+  }
+
+  _resetCmdTimer() {
+    clearTimeout(this._cmdTimer);
+    this._cmdTimer = setTimeout(() => this._exitCommandMode(), 2000);
+  }
+
+  _executeCellSnap() {
+    const cellIdx = parseInt(this._cmdDigits, 10) - 1; // 1-based input → 0-based index
+    this._cmdDigits = '';
+    if (cellIdx >= 0) {
+      this.wm.snapActiveToCell(cellIdx);
+    }
+    this._exitCommandMode();
   }
 
   _setupLayoutManager() {

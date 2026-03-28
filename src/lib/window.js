@@ -97,6 +97,7 @@ class WindowManager {
   _setupDrag(win) {
     const { element, titleBar } = win;
     let dragging = false, startX, startY, initL, initT;
+    let shiftDragStart = -1;
     titleBar.addEventListener('mousedown', (e) => {
       if (e.target.closest('.window-controls') || e.button !== 0) return;
       if (win.isMaximized) {
@@ -108,13 +109,26 @@ class WindowManager {
       initL = element.offsetLeft; initT = element.offsetTop;
       element.classList.add('dragging');
       if (this.grid) this.gridOverlay.classList.add('dragging');
+      // Shift+Drag: record starting cell for range selection
+      if (e.shiftKey && this.grid) {
+        shiftDragStart = this._getGridCell(e.clientX, e.clientY);
+      } else {
+        shiftDragStart = -1;
+      }
       e.preventDefault();
     });
     const onMove = (e) => {
       if (!dragging) return;
       element.style.left = (initL + e.clientX - startX) + 'px'; element.style.top = (initT + e.clientY - startY) + 'px';
       if (!e.altKey) {
-        if (this.grid) this._showGridHighlight(e.clientX, e.clientY); else this._showSnap(e.clientX, e.clientY);
+        if (shiftDragStart >= 0 && this.grid) {
+          const current = this._getGridCell(e.clientX, e.clientY);
+          if (current >= 0) this._showGridRangeHighlight(shiftDragStart, current);
+        } else if (this.grid) {
+          this._showGridHighlight(e.clientX, e.clientY);
+        } else {
+          this._showSnap(e.clientX, e.clientY);
+        }
       } else {
         this.snapIndicator.style.display = 'none';
         this._clearGridHighlight();
@@ -124,8 +138,15 @@ class WindowManager {
       if (!dragging) return; dragging = false; element.classList.remove('dragging');
       this.snapIndicator.style.display = 'none';
       if (!e.altKey) {
-        if (this.grid) { this._snapToGrid(win.id, e.clientX, e.clientY); }
-        else { const snap = this._getSnapZone(e.clientX, e.clientY); if (snap) this._applySnap(win.id, snap); }
+        if (shiftDragStart >= 0 && this.grid) {
+          const endCell = this._getGridCell(e.clientX, e.clientY);
+          if (endCell >= 0) this._snapToGridRange(win.id, shiftDragStart, endCell);
+          shiftDragStart = -1;
+        } else if (this.grid) {
+          this._snapToGrid(win.id, e.clientX, e.clientY);
+        } else {
+          const snap = this._getSnapZone(e.clientX, e.clientY); if (snap) this._applySnap(win.id, snap);
+        }
       }
       this._clearGridHighlight(); this.gridOverlay.classList.remove('dragging');
       // Re-capture proportional bounds after final position (snap or free drop)
@@ -264,6 +285,47 @@ class WindowManager {
     const win = this.windows.get(winId); if (!win) return;
     this._positionToCell(win, idx, true);
     this._captureGridBounds(win); // Track as proportional bounds
+  }
+
+  snapActiveToCell(cellIdx) {
+    const win = this.windows.get(this.activeWindowId);
+    if (!win || !this.grid) return;
+    this._positionToCell(win, cellIdx, true);
+    setTimeout(() => this._captureGridBounds(win), 250);
+  }
+
+  _showGridRangeHighlight(startIdx, endIdx) {
+    const { cols } = this.grid;
+    const r1 = Math.floor(startIdx / cols), c1 = startIdx % cols;
+    const r2 = Math.floor(endIdx / cols), c2 = endIdx % cols;
+    const minR = Math.min(r1, r2), maxR = Math.max(r1, r2);
+    const minC = Math.min(c1, c2), maxC = Math.max(c1, c2);
+    this.gridOverlay.querySelectorAll('.grid-cell').forEach((cell, i) => {
+      const cr = Math.floor(i / cols), cc = i % cols;
+      cell.classList.toggle('highlight', cr >= minR && cr <= maxR && cc >= minC && cc <= maxC);
+    });
+  }
+
+  _snapToGridRange(winId, startIdx, endIdx) {
+    const win = this.windows.get(winId); if (!win || !this.grid) return;
+    const { rows, cols } = this.grid;
+    const r1 = Math.floor(startIdx / cols), c1 = startIdx % cols;
+    const r2 = Math.floor(endIdx / cols), c2 = endIdx % cols;
+    const minR = Math.min(r1, r2), maxR = Math.max(r1, r2);
+    const minC = Math.min(c1, c2), maxC = Math.max(c1, c2);
+
+    const r = this.workspace.getBoundingClientRect(), g = 4;
+    const cw = (r.width - g * (cols + 1)) / cols;
+    const ch = (r.height - g * (rows + 1)) / rows;
+
+    const el = win.element;
+    el.classList.add('snap-animating');
+    el.style.left = (g + minC * (cw + g)) + 'px';
+    el.style.top = (g + minR * (ch + g)) + 'px';
+    el.style.width = ((maxC - minC + 1) * (cw + g) - g) + 'px';
+    el.style.height = ((maxR - minR + 1) * (ch + g) - g) + 'px';
+    win.isMaximized = false;
+    setTimeout(() => { el.classList.remove('snap-animating'); if (win.onResize) win.onResize(); this._captureGridBounds(win); }, 220);
   }
 
   _positionToCell(win, idx, animate) {

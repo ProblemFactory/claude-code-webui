@@ -772,3 +772,7 @@ html, body {
   0%,100% { background: var(--bg-titlebar); }
   50% { background: rgba(250,180,40,0.4); }
 }
+
+/* ── Command Mode Indicator ── */
+#cmd-indicator { display: none; padding: 1px 8px; font-size: 10px; font-weight: 700; border-radius: var(--radius-sm); margin-right: 6px; }
+#cmd-indicator.active { display: inline-block; background: var(--yellow); color: #000; }
