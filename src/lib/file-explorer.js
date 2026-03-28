@@ -7,9 +7,19 @@ class FileExplorer {
     this._startPath = startPath || null;
     this._showHidden = false;
     this._viewMode = 'list'; // 'list' or 'icon'
-    this._sortBy = 'name';   // 'name', 'size', 'modified'
-    this._sortAsc = true;
+    this._sortBy = 'modified';   // 'name', 'size', 'modified'
+    this._sortAsc = false;
     this._renderLimit = 100; // initial batch size for large folders
+
+    // Bookmarks
+    const defaultBookmarks = [
+      { label: 'Downloads', path: '~/Downloads' },
+      { label: 'Documents', path: '~/Documents' },
+      { label: 'claude-ops', path: '~/Documents/claude-ops' },
+    ];
+    this._bookmarks = JSON.parse(localStorage.getItem('fileExplorerBookmarks') || 'null') || defaultBookmarks;
+    this._homePath = null;
+    fetch('/api/home').then(r => r.json()).then(d => { this._homePath = d.home; }).catch(() => {});
 
     const el = document.createElement('div'); el.className = 'file-explorer';
 
@@ -27,9 +37,20 @@ class FileExplorer {
     const btnNewFile = this._btn('+','New file'); btnNewFile.onclick = () => this.createFile();
     const btnNewDir = this._btn('📂','New folder'); btnNewDir.onclick = () => this.createDir();
     const btnUpload = this._btn('⬆','Upload'); btnUpload.onclick = () => this._triggerUpload();
+    const btnBookmarks = this._btn('★','Bookmarks'); btnBookmarks.onclick = () => {
+      this._bookmarksVisible = !this._bookmarksVisible;
+      this.bookmarkPanel.classList.toggle('hidden', !this._bookmarksVisible);
+      btnBookmarks.classList.toggle('active', this._bookmarksVisible);
+    };
+    this._bookmarksVisible = true;
+    btnBookmarks.classList.add('active');
     this._acDropdown = document.createElement('div'); this._acDropdown.className = 'path-autocomplete hidden';
     toolbar.style.position = 'relative';
-    toolbar.append(btnUp, this.pathInput, btnRefresh, btnHidden, btnListView, btnIconView, btnNewFile, btnNewDir, btnUpload, this._acDropdown);
+    toolbar.append(btnUp, this.pathInput, btnRefresh, btnHidden, btnListView, btnIconView, btnNewFile, btnNewDir, btnUpload, btnBookmarks, this._acDropdown);
+
+    // Bookmark panel (left sidebar)
+    this.bookmarkPanel = document.createElement('div'); this.bookmarkPanel.className = 'file-bookmark-panel';
+    this._renderBookmarks();
 
     // Sort header (for list view)
     this.sortHeader = document.createElement('div'); this.sortHeader.className = 'file-sort-header';
@@ -42,7 +63,12 @@ class FileExplorer {
     this.uploadInput.style.display = 'none';
     this.uploadInput.onchange = (e) => this._uploadFiles(e.target.files);
 
-    el.append(toolbar, this.sortHeader, this.listEl, this.uploadInput);
+    // Layout: toolbar on top, then body = [bookmarkPanel | mainArea]
+    const mainArea = document.createElement('div'); mainArea.className = 'file-explorer-main';
+    mainArea.append(this.sortHeader, this.listEl);
+    const bodyArea = document.createElement('div'); bodyArea.className = 'file-explorer-body';
+    bodyArea.append(this.bookmarkPanel, mainArea);
+    el.append(toolbar, bodyArea, this.uploadInput);
     winInfo.content.appendChild(el);
 
     // Drag and drop (upload)
@@ -103,9 +129,6 @@ class FileExplorer {
     let items = [...this.items];
     if (!this._showHidden) items = items.filter(i => !i.name.startsWith('.'));
 
-    // Dirs first, then sort within each group
-    const dirs = items.filter(i => i.isDirectory);
-    const files = items.filter(i => !i.isDirectory);
     const sortFn = (a, b) => {
       let cmp = 0;
       if (this._sortBy === 'name') cmp = a.name.localeCompare(b.name);
@@ -113,6 +136,16 @@ class FileExplorer {
       else if (this._sortBy === 'modified') cmp = (a.modified || 0) - (b.modified || 0);
       return this._sortAsc ? cmp : -cmp;
     };
+
+    // When sorting by modified time, flat sort without grouping
+    if (this._sortBy === 'modified') {
+      items.sort(sortFn);
+      return items;
+    }
+
+    // For name/size: dirs first, then sort within each group
+    const dirs = items.filter(i => i.isDirectory);
+    const files = items.filter(i => !i.isDirectory);
     dirs.sort(sortFn);
     files.sort(sortFn);
     return [...dirs, ...files];
@@ -254,6 +287,71 @@ class FileExplorer {
       onNavigate: (path) => this.navigate(path),
     });
     this._hideAC = ac.hide;
+  }
+
+  _renderBookmarks() {
+    this.bookmarkPanel.innerHTML = '';
+    const header = document.createElement('div'); header.className = 'file-bookmark-header';
+    header.textContent = 'Bookmarks';
+    const editBtn = this._btn('✎', 'Edit bookmarks');
+    editBtn.onclick = () => this._showBookmarkEditor();
+    header.appendChild(editBtn);
+    this.bookmarkPanel.appendChild(header);
+    for (const bm of this._bookmarks) {
+      const item = document.createElement('div'); item.className = 'file-bookmark-item';
+      item.textContent = bm.label; item.title = bm.path;
+      item.onclick = () => {
+        const resolved = bm.path.replace(/^~/, this._homePath || '');
+        this.navigate(resolved);
+      };
+      this.bookmarkPanel.appendChild(item);
+    }
+  }
+
+  _saveBookmarks() {
+    localStorage.setItem('fileExplorerBookmarks', JSON.stringify(this._bookmarks));
+    this._renderBookmarks();
+  }
+
+  _showBookmarkEditor() {
+    // Overlay
+    const overlay = document.createElement('div'); overlay.className = 'bookmark-editor-overlay';
+    const panel = document.createElement('div'); panel.className = 'bookmark-editor-panel';
+    const title = document.createElement('div'); title.className = 'bookmark-editor-title'; title.textContent = 'Edit Bookmarks';
+    const list = document.createElement('div'); list.className = 'bookmark-editor-list';
+    panel.append(title, list);
+
+    const renderRows = () => {
+      list.innerHTML = '';
+      this._bookmarks.forEach((bm, i) => {
+        const row = document.createElement('div'); row.className = 'bookmark-editor-row';
+        const labelInput = document.createElement('input'); labelInput.className = 'bookmark-editor-input bookmark-label';
+        labelInput.value = bm.label; labelInput.placeholder = 'Label';
+        labelInput.onchange = () => { bm.label = labelInput.value.trim(); };
+        const pathInput = document.createElement('input'); pathInput.className = 'bookmark-editor-input bookmark-path';
+        pathInput.value = bm.path; pathInput.placeholder = 'Path (supports ~)';
+        pathInput.onchange = () => { bm.path = pathInput.value.trim(); };
+        const delBtn = this._btn('✕', 'Remove'); delBtn.className = 'bookmark-editor-del';
+        delBtn.onclick = () => { this._bookmarks.splice(i, 1); renderRows(); };
+        row.append(labelInput, pathInput, delBtn);
+        list.appendChild(row);
+      });
+    };
+    renderRows();
+
+    const footer = document.createElement('div'); footer.className = 'bookmark-editor-footer';
+    const addBtn = document.createElement('button'); addBtn.className = 'bookmark-editor-btn'; addBtn.textContent = '+ Add';
+    addBtn.onclick = () => { this._bookmarks.push({ label: '', path: '' }); renderRows(); list.lastChild?.querySelector('.bookmark-label')?.focus(); };
+    const saveBtn = document.createElement('button'); saveBtn.className = 'bookmark-editor-btn bookmark-editor-save'; saveBtn.textContent = 'Save';
+    saveBtn.onclick = () => { this._bookmarks = this._bookmarks.filter(b => b.label && b.path); this._saveBookmarks(); overlay.remove(); };
+    const cancelBtn = document.createElement('button'); cancelBtn.className = 'bookmark-editor-btn'; cancelBtn.textContent = 'Cancel';
+    cancelBtn.onclick = () => overlay.remove();
+    footer.append(addBtn, cancelBtn, saveBtn);
+    panel.appendChild(footer);
+
+    overlay.appendChild(panel);
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) overlay.remove(); });
+    document.body.appendChild(overlay);
   }
 
   _fileIcon(name) {
