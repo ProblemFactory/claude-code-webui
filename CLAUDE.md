@@ -340,6 +340,7 @@ Server → Client: `created`, `output`, `exited`, `attached`, `active-sessions`,
 - Star sessions (★/☆): starred sessions sort first in sidebar groups and taskbar
 - Archive/unarchive sessions: 📦 button, hidden by default, toggle via status filter
 - Focus window highlights corresponding session in sidebar
+- Find session: 🔍 button in expand panel flashes window title bar + taskbar (cyan 0.3s, 3s duration)
 - Session groups: Folders | Groups dual tab, user-defined groups with assign/unassign, folder linking (recursive auto-include by cwd), ▶ resume-all button
 - Multi-client sync: star/archive/rename/groups/bookmarks broadcast via WebSocket to all clients
 - Session rename: double-click name in sidebar → set custom name → used as `--name` on next resume, syncs to open windows
