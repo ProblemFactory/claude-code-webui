@@ -24,6 +24,7 @@ class Sidebar {
     this._sortMode = localStorage.getItem('sessionSort') || 'recent';
     this._filterLive = false;
     this._collapsedFolders = new Set(JSON.parse(localStorage.getItem('collapsedFolders') || '[]'));
+    this._expandedCardId = null; // only one card expanded at a time
 
     document.getElementById('sidebar-toggle').onclick = () => this.toggle();
     document.getElementById('sidebar-close').onclick = () => this.toggle(false);
@@ -304,6 +305,7 @@ class Sidebar {
     card._sessionId = s.sessionId; // Store for highlight lookup
     const isArchived = this._archivedIds.has(s.sessionId);
     if (isArchived) card.classList.add('archived');
+    if (this._expandedCardId === s.sessionId) card.classList.add('expanded');
     const date = new Date(s.startedAt);
     const customName = this._customNames[s.sessionId];
     const originalName = s.name || s.webuiName || s.sessionId.substring(0, 12) + '...';
@@ -326,14 +328,113 @@ class Sidebar {
         <span class="session-card-time">${date.toLocaleDateString()} ${date.toLocaleTimeString()}</span>
         <span class="session-card-badge ${badge.cls}">${badge.text}</span>
       </div>`;
+
+    // Expand/collapse button on the right side, after badge
+    const expandBtn = document.createElement('button');
+    expandBtn.className = 'session-expand-btn';
+    expandBtn.textContent = this._expandedCardId === s.sessionId ? '\u25BE' : '\u25B8';
+    expandBtn.title = 'Show details';
+    expandBtn.onclick = (e) => {
+      e.stopPropagation();
+      if (this._expandedCardId === s.sessionId) {
+        this._expandedCardId = null;
+      } else {
+        this._expandedCardId = s.sessionId;
+      }
+      this._render();
+    };
+    card.querySelector('.session-card-meta').appendChild(expandBtn);
+
+    // Detail panel (shown when expanded)
+    const detailPanel = document.createElement('div');
+    detailPanel.className = 'session-card-detail';
+
+    const cwdShort = (s.cwd || '').replace(/^\/home\/[^/]+/, '~');
+
+    detailPanel.innerHTML = `
+      <div class="session-detail-row">
+        <span class="session-detail-label">ID</span>
+        <span class="session-detail-value session-detail-id">${escHtml(idShort)}...<button class="session-detail-copy" title="Copy full ID">&#x1F4CB;</button></span>
+      </div>
+      <div class="session-detail-row">
+        <span class="session-detail-label">CWD</span>
+        <span class="session-detail-value" title="${escHtml(s.cwd || '')}">${escHtml(cwdShort)}</span>
+      </div>
+      <div class="session-detail-row">
+        <span class="session-detail-label">Started</span>
+        <span class="session-detail-value">${date.toLocaleString()}</span>
+      </div>
+      <div class="session-detail-row">
+        <span class="session-detail-label">Status</span>
+        <span class="session-detail-value"><span class="session-card-badge ${badge.cls}">${badge.text}</span></span>
+      </div>
+      <div class="session-detail-actions"></div>
+    `;
+
+    // Copy ID button
+    const copyBtn = detailPanel.querySelector('.session-detail-copy');
+    if (copyBtn) {
+      copyBtn.onclick = (e) => {
+        e.stopPropagation();
+        navigator.clipboard.writeText(s.sessionId).then(() => { copyBtn.textContent = '\u2713'; setTimeout(() => { copyBtn.textContent = '\u{1F4CB}'; }, 1500); });
+      };
+    }
+
+    // Action buttons in detail panel
+    const actionsDiv = detailPanel.querySelector('.session-detail-actions');
+    // Star button
+    const detailStarBtn = document.createElement('button');
+    detailStarBtn.className = 'session-detail-btn';
+    detailStarBtn.textContent = starred ? '\u2605 Unstar' : '\u2606 Star';
+    detailStarBtn.onclick = (e) => { e.stopPropagation(); this.toggleStar(s.sessionId); };
+    actionsDiv.appendChild(detailStarBtn);
+
+    // Archive button
+    const detailArchiveBtn = document.createElement('button');
+    detailArchiveBtn.className = 'session-detail-btn';
+    detailArchiveBtn.textContent = isArchived ? '\u{1F4E4} Unarchive' : '\u{1F4E6} Archive';
+    detailArchiveBtn.onclick = (e) => { e.stopPropagation(); this.toggleArchive(s.sessionId); };
+    actionsDiv.appendChild(detailArchiveBtn);
+
+    // Rename button
+    const detailRenameBtn = document.createElement('button');
+    detailRenameBtn.className = 'session-detail-btn';
+    detailRenameBtn.textContent = '\u270F Rename';
+    detailRenameBtn.onclick = (e) => { e.stopPropagation(); this.renameSession(s.sessionId, originalName); };
+    actionsDiv.appendChild(detailRenameBtn);
+
+    // Resume/Attach action button
+    if (s.status === 'live' && s.webuiId) {
+      const detailAttachBtn = document.createElement('button');
+      detailAttachBtn.className = 'session-detail-btn session-detail-btn-primary';
+      detailAttachBtn.textContent = '\u25B6 Attach';
+      detailAttachBtn.onclick = (e) => { e.stopPropagation(); this.app.attachSession(s.webuiId, s.webuiName || displayName, s.cwd); };
+      actionsDiv.appendChild(detailAttachBtn);
+    } else if (s.status === 'tmux') {
+      const detailTmuxBtn = document.createElement('button');
+      detailTmuxBtn.className = 'session-detail-btn session-detail-btn-primary';
+      detailTmuxBtn.textContent = '\u25B6 View';
+      detailTmuxBtn.onclick = (e) => { e.stopPropagation(); this.app.attachTmuxSession(s.tmuxTarget, displayName, s.cwd); };
+      actionsDiv.appendChild(detailTmuxBtn);
+    } else if (s.status === 'stopped') {
+      const detailResumeBtn = document.createElement('button');
+      detailResumeBtn.className = 'session-detail-btn session-detail-btn-primary';
+      detailResumeBtn.textContent = '\u25B6 Resume';
+      detailResumeBtn.onclick = (e) => { e.stopPropagation(); this.app.resumeSession(s.sessionId, s.cwd, customName || s.name); };
+      actionsDiv.appendChild(detailResumeBtn);
+    }
+
+    card.appendChild(detailPanel);
+
+    // Star button (top right)
     const starBtn = document.createElement('button');
     starBtn.className = 'session-star-btn' + (starred ? ' starred' : '');
-    starBtn.textContent = starred ? '★' : '☆';
+    starBtn.textContent = starred ? '\u2605' : '\u2606';
     starBtn.title = starred ? 'Unstar' : 'Star';
     starBtn.onclick = (e) => { e.stopPropagation(); this.toggleStar(s.sessionId); };
     card.prepend(starBtn);
 
-    // Archive button
+    // Archive button (top right, below star)
     const archiveBtn = document.createElement('button');
     archiveBtn.className = 'session-archive-btn' + (isArchived ? ' archived' : '');
     archiveBtn.textContent = isArchived ? '\u{1F4E4}' : '\u{1F4E6}';
@@ -352,7 +453,7 @@ class Sidebar {
       card.onclick = () => this.app.attachSession(s.webuiId, s.webuiName || displayName, s.cwd);
     } else if (s.status === 'tmux') {
       card.onclick = () => this.app.attachTmuxSession(s.tmuxTarget, displayName, s.cwd);
-      card.title = 'Running in tmux — click to view (closing won\'t kill it)';
+      card.title = 'Running in tmux \u2014 click to view (closing won\'t kill it)';
     } else if (s.status === 'external') {
       card.style.opacity = '0.7'; card.style.cursor = 'default';
       card.title = 'Running in unsupported terminal (PID ' + (s.pid || '?') + ')';

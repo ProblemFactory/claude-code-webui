@@ -319,6 +319,7 @@ app.get('/api/files', (req, res) => {
         isDirectory: e.isDirectory() || (e.isSymbolicLink() && stat?.isDirectory()),
         size: stat?.size || 0,
         modified: stat?.mtimeMs || 0,
+        created: stat?.birthtimeMs || 0,
       };
     });
     items.sort((a, b) => {
@@ -608,6 +609,37 @@ app.delete('/api/custom-grids', (req, res) => {
   data.customGrids = data.customGrids.filter(g => !(g.rows === rows && g.cols === cols));
   writeLayouts(data);
   res.json({ success: true, customGrids: data.customGrids });
+});
+
+// ── Bookmarks API ──
+const BOOKMARKS_FILE = path.join(__dirname, 'data', 'bookmarks.json');
+function readBookmarks() {
+  ensureDir(path.join(__dirname, 'data'));
+  try { return JSON.parse(fs.readFileSync(BOOKMARKS_FILE, 'utf-8')); }
+  catch {
+    const home = os.homedir();
+    return [
+      { label: 'Home', path: home },
+      { label: 'Desktop', path: path.join(home, 'Desktop') },
+      { label: 'Downloads', path: path.join(home, 'Downloads') },
+      { label: 'Documents', path: path.join(home, 'Documents') },
+    ];
+  }
+}
+function writeBookmarks(data) {
+  ensureDir(path.join(__dirname, 'data'));
+  fs.writeFileSync(BOOKMARKS_FILE, JSON.stringify(data, null, 2));
+}
+
+app.get('/api/bookmarks', (req, res) => {
+  res.json(readBookmarks());
+});
+
+app.post('/api/bookmarks', (req, res) => {
+  const bookmarks = req.body;
+  if (!Array.isArray(bookmarks)) return res.status(400).json({ error: 'Expected array' });
+  writeBookmarks(bookmarks);
+  res.json({ success: true });
 });
 
 // Auto-save (saves current workspace state for restore on refresh)
