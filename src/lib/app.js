@@ -11,6 +11,8 @@ import { Resizer } from './resizer.js';
 import { attachPopoverClose } from './utils.js';
 import { setupDirAutocomplete } from './autocomplete.js';
 import { getAvailableFonts } from './terminal.js';
+import { SettingsManager } from './settings.js';
+import { SettingsUI } from './settings-ui.js';
 import { EditorView, basicSetup } from 'codemirror';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { EditorState, Compartment } from '@codemirror/state';
@@ -19,9 +21,12 @@ import { indentWithTab } from '@codemirror/commands';
 
 class App {
   constructor() {
+    this.settings = new SettingsManager();
+    window._appSettings = this.settings; // expose for TerminalSession constructor
     this.themeManager = new ThemeManager();
     this.ws = new WsManager();
     this.wm = new WindowManager(document.getElementById('workspace'));
+    this.wm._settings = this.settings;
     this.sessions = new Map();
     this.attachedServerSessions = new Set();
     this.layoutManager = new LayoutManager(this);
@@ -32,6 +37,16 @@ class App {
       this._notifySidebarFocus();
     };
     this.sidebar = new Sidebar(this);
+
+    // Load settings asynchronously (non-blocking — modules use defaults until loaded)
+    this.settings.load();
+
+    // Sync settings from other clients via WebSocket
+    this.ws.onGlobal((msg) => {
+      if (msg.type === 'settings-updated' && msg.settings) {
+        this.settings.applyRemote(msg.settings);
+      }
+    });
 
     this._setupToolbar();
     this._setupDialogs();
@@ -62,6 +77,14 @@ class App {
     document.getElementById('btn-new-session').addEventListener('click', () => this.showNewSessionDialog());
     document.getElementById('btn-file-explorer').addEventListener('click', () => this.openFileExplorer());
     document.getElementById('btn-browser').addEventListener('click', () => this.openBrowser());
+
+    // Apply toolbar visibility settings
+    const applyToolbarSettings = () => {
+      const presets = document.getElementById('layout-presets');
+      if (presets) presets.style.display = this.settings.get('toolbar.showLayoutPresets') ? '' : 'none';
+    };
+    applyToolbarSettings();
+    this.settings.on('toolbar.showLayoutPresets', applyToolbarSettings);
   }
 
   _setupWelcome() {
@@ -72,6 +95,7 @@ class App {
   _setupGlobalSettings() {
     this._fontSize = parseInt(localStorage.getItem('termFontSize')) || 14;
     this._fontFamily = localStorage.getItem('termFontFamily') || getAvailableFonts()[0]?.value || 'monospace';
+    this._settingsUI = new SettingsUI(this);
 
     const btn = document.getElementById('btn-global-settings');
     btn.onclick = (e) => { e.stopPropagation(); this._showGlobalSettings(btn); };
@@ -141,7 +165,13 @@ class App {
       }
     };
 
-    pop.append(themeLabel, themeSel, sizeLabel, sizeRow, fontLabel, fontSel);
+    // "All Settings" link
+    const allSettingsLink = document.createElement('div');
+    allSettingsLink.className = 'settings-all-link';
+    allSettingsLink.textContent = 'All Settings...';
+    allSettingsLink.onclick = () => { pop.remove(); this._settingsUI.open(); };
+
+    pop.append(themeLabel, themeSel, sizeLabel, sizeRow, fontLabel, fontSel, allSettingsLink);
     document.body.appendChild(pop);
 
     attachPopoverClose(pop, anchor);
@@ -347,8 +377,8 @@ class App {
     this._cmdIndicator = document.getElementById('cmd-indicator');
 
     document.addEventListener('keydown', (e) => {
-      // Ctrl+\ toggles command mode
-      if (e.key === '\\' && e.ctrlKey && !e.altKey && !e.metaKey) {
+      // Ctrl+\ toggles command mode (if enabled in settings)
+      if (e.key === '\\' && e.ctrlKey && !e.altKey && !e.metaKey && (this.settings.get('toolbar.showCommandMode') ?? true)) {
         e.preventDefault();
         e.stopPropagation();
         if (this._cmdMode) {
@@ -626,6 +656,8 @@ class App {
       term.dispose(); this.sessions.delete(winInfo.id); this._checkWelcome();
     };
     winInfo._notifyChanged = () => this.updateTaskbar();
+    // Give terminal access to settings
+    term._settings = this.settings;
   }
 
   // Find existing window for a server session ID and focus it

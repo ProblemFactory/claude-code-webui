@@ -713,6 +713,50 @@ app.post('/api/user-state', (req, res) => {
   res.json({ success: true });
 });
 
+// ── Settings API (user preferences, separate from session state) ──
+const SETTINGS_FILE = path.join(__dirname, 'data', 'settings.json');
+let _settingsCache = null;
+
+function readSettings() {
+  if (_settingsCache) return _settingsCache;
+  ensureDir(path.join(__dirname, 'data'));
+  try { _settingsCache = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf-8')); }
+  catch { _settingsCache = {}; }
+  return _settingsCache;
+}
+
+function writeSettings(data) {
+  ensureDir(path.join(__dirname, 'data'));
+  _settingsCache = data;
+  fs.writeFileSync(SETTINGS_FILE, JSON.stringify(data, null, 2));
+  const msg = JSON.stringify({ type: 'settings-updated', settings: data });
+  wss.clients.forEach(client => {
+    if (client.readyState === WS_OPEN) { try { client.send(msg); } catch {} }
+  });
+}
+
+app.get('/api/settings', (req, res) => {
+  res.json(readSettings());
+});
+
+app.post('/api/settings', (req, res) => {
+  const data = req.body;
+  if (!data || typeof data !== 'object') return res.status(400).json({ error: 'Expected object' });
+  writeSettings(data);
+  res.json({ success: true });
+});
+
+app.patch('/api/settings', (req, res) => {
+  const current = readSettings();
+  const patch = req.body;
+  if (!patch || typeof patch !== 'object') return res.status(400).json({ error: 'Expected object' });
+  const merged = { ...current, ...patch };
+  // Remove keys set to null (reset to default)
+  for (const [k, v] of Object.entries(merged)) { if (v === null) delete merged[k]; }
+  writeSettings(merged);
+  res.json({ success: true });
+});
+
 // Get just session groups
 app.get('/api/session-groups', (req, res) => {
   const state = readUserState();

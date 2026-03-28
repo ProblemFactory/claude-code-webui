@@ -9,6 +9,7 @@ class WindowManager {
     this.onWindowsChanged = null; this.windowCounter = 0;
     this.grid = null; // { rows, cols }
     this._overlapDebounceTimer = null;
+    this._settings = null; // set by App after construction
 
     // Reflow grid-tracked windows when workspace resizes (sidebar toggle, browser resize)
     this._resizeObserver = new ResizeObserver(() => this._reflowWindows());
@@ -115,14 +116,14 @@ class WindowManager {
     const onMove = (e) => {
       if (!dragging) return;
       element.style.left = (initL + e.clientX - startX) + 'px'; element.style.top = (initT + e.clientY - startY) + 'px';
-      if (!e.altKey) {
-        // Shift pressed mid-drag: enter range selection mode
-        if (e.shiftKey && this.grid) {
+      const snapEnabled = this._settings?.get('layout.enableDragSnap') ?? true;
+      const shiftDragEnabled = this._settings?.get('layout.enableShiftDragSelection') ?? true;
+      if (!e.altKey && snapEnabled) {
+        if (e.shiftKey && this.grid && shiftDragEnabled) {
           if (shiftDragStart < 0) shiftDragStart = this._getGridCell(e.clientX, e.clientY);
           const current = this._getGridCell(e.clientX, e.clientY);
           if (shiftDragStart >= 0 && current >= 0) this._showGridRangeHighlight(shiftDragStart, current);
         } else {
-          // Shift released: cancel range selection
           if (shiftDragStart >= 0) { shiftDragStart = -1; this._clearGridHighlight(); }
           if (this.grid) this._showGridHighlight(e.clientX, e.clientY);
           else this._showSnap(e.clientX, e.clientY);
@@ -135,8 +136,10 @@ class WindowManager {
     const onUp = (e) => {
       if (!dragging) return; dragging = false; element.classList.remove('dragging');
       this.snapIndicator.style.display = 'none';
-      if (!e.altKey) {
-        if (shiftDragStart >= 0 && e.shiftKey && this.grid) {
+      const snapEnabled = this._settings?.get('layout.enableDragSnap') ?? true;
+      const shiftDragEnabled = this._settings?.get('layout.enableShiftDragSelection') ?? true;
+      if (!e.altKey && snapEnabled) {
+        if (shiftDragStart >= 0 && e.shiftKey && this.grid && shiftDragEnabled) {
           const endCell = this._getGridCell(e.clientX, e.clientY);
           if (endCell >= 0) this._snapToGridRange(win.id, shiftDragStart, endCell);
           shiftDragStart = -1;
@@ -363,11 +366,16 @@ class WindowManager {
   }
 
   // ── Layout Presets ──
-  focusWindow(id) {
+  focusWindow(id, { bounce = false } = {}) {
     const win = this.windows.get(id); if (!win) return;
     this.windows.forEach(w => w.element.classList.remove('window-active'));
     win.element.style.zIndex = this.zIndex++; win.element.classList.add('window-active');
     this.activeWindowId = id; this._notify();
+    if (bounce && (this._settings?.get('window.enableBounceOnFocus') ?? false)) {
+      win.element.classList.remove('window-bounce');
+      requestAnimationFrame(() => win.element.classList.add('window-bounce'));
+      setTimeout(() => win.element.classList.remove('window-bounce'), 300);
+    }
   }
   toggleMaximize(id) {
     const win = this.windows.get(id); if (!win) return; const el = win.element;

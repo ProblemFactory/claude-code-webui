@@ -63,6 +63,8 @@ class TerminalSession {
     this.winInfo = winInfo; this.ws = wsManager; this.sessionId = sessionId;
     this.themeManager = themeManager; this.onEditorRequest = onEditorRequest;
     this.overrides = { theme: null, fontSize: null, fontFamily: null, ...overrides };
+    // Settings reference (may be set after construction via app)
+    this._settings = null;
 
     const container = document.createElement('div'); container.className = 'terminal-container';
     winInfo.content.appendChild(container);
@@ -71,11 +73,15 @@ class TerminalSession {
     const effectiveFontSize = this.overrides.fontSize || parseInt(localStorage.getItem('termFontSize')) || 14;
     const effectiveFont = this.overrides.fontFamily || localStorage.getItem('termFontFamily') || getAvailableFonts()[0]?.value || 'monospace';
 
+    // Read minimumContrastRatio from settings if available
+    const mcr = typeof window._appSettings?.get === 'function' ? window._appSettings.get('terminal.minimumContrastRatio') : 1;
+
     this.terminal = new Terminal({
       cursorBlink: false, cursorStyle: 'bar', cursorInactiveStyle: 'none',
       fontSize: effectiveFontSize, fontFamily: effectiveFont,
       lineHeight: 1.15, scrollback: 10000, allowProposedApi: true,
       theme: effectiveTheme,
+      minimumContrastRatio: mcr,
     });
     this.fitAddon = new FitAddon();
     this.terminal.loadAddon(this.fitAddon);
@@ -220,13 +226,26 @@ class TerminalSession {
       const ch = data.charCodeAt(0);
       const wasIdle = this._claudeIdle;
       this._claudeIdle = (ch === 0x2733); // ✳
-      // Became idle while window not focused → start blinking
-      if (this._claudeIdle && !wasIdle && !winInfo.element.classList.contains('window-active')) {
-        this._setWaiting(true);
+
+      const s = this._settings;
+      const blinkBehavior = s?.get('terminal.waitingBlinkBehavior') ?? 'onlyUnfocused';
+      if (this._claudeIdle && !wasIdle && !this._suppressWaiting) {
+        if (blinkBehavior === 'always') {
+          this._setWaiting(true);
+        } else if (blinkBehavior === 'onlyUnfocused' && !winInfo.element.classList.contains('window-active')) {
+          this._setWaiting(true);
+        }
+        // 'never' → don't set waiting
+      } else if (!this._claudeIdle && wasIdle) {
+        this._setWaiting(false);
       }
+
       // Update window title from Claude Code's OSC 0 title (strip status prefix)
-      const title = data.replace(/^[\u2800-\u28FF\u2733\u2734\u2735\u273B\u273C\u273D\u00B7✻✶✽] ?/, '').trim();
-      if (title) { winInfo.title = title; winInfo.titleSpan.textContent = title; }
+      const preserveTitle = s?.get('terminal.preserveCustomTitle') && winInfo._hasCustomTitle;
+      if (!preserveTitle) {
+        const title = data.replace(/^[\u2800-\u28FF\u2733\u2734\u2735\u273B\u273C\u273D\u00B7✻✶✽] ?/, '').trim();
+        if (title) { winInfo.title = title; winInfo.titleSpan.textContent = title; }
+      }
       return false;
     });
 
@@ -379,12 +398,18 @@ class TerminalSession {
     if (this._fitTimer) clearTimeout(this._fitTimer);
     this._fitTimer = setTimeout(() => {
       try {
+        const preserveScroll = this._settings?.get('terminal.preserveScrollOnFit');
+        let bottomLine, wasAtBottom;
+        if (preserveScroll) {
+          const buf = this.terminal.buffer.active;
+          bottomLine = buf.viewportY + this.terminal.rows;
+          wasAtBottom = bottomLine >= buf.length;
+        }
+
         this.fitAddon.fit();
         const d = this.fitAddon.proposeDimensions();
         if (d?.cols > 0 && d?.rows > 0) {
-          // Report our local size to server (server computes min across all clients)
           this.ws.send({ type:'resize', sessionId:this.sessionId, cols:d.cols, rows:d.rows });
-          // If effective size is smaller (other device has smaller terminal), cap to it
           if (this._effectiveSize) {
             const eCols = Math.min(d.cols, this._effectiveSize.cols);
             const eRows = Math.min(d.rows, this._effectiveSize.rows);
@@ -392,6 +417,11 @@ class TerminalSession {
               this.terminal.resize(eCols, eRows);
             }
           }
+        }
+
+        if (preserveScroll) {
+          if (wasAtBottom) this.terminal.scrollToBottom();
+          else this.terminal.scrollToLine(Math.max(0, bottomLine - this.terminal.rows));
         }
       } catch {}
     }, 100);
