@@ -11,6 +11,7 @@ import { Resizer } from './resizer.js';
 import { attachPopoverClose } from './utils.js';
 import { setupDirAutocomplete } from './autocomplete.js';
 import { getAvailableFonts } from './terminal.js';
+import { SettingsManager } from './settings.js';
 import { EditorView, basicSetup } from 'codemirror';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { EditorState, Compartment } from '@codemirror/state';
@@ -19,6 +20,7 @@ import { indentWithTab } from '@codemirror/commands';
 
 class App {
   constructor() {
+    this.settings = new SettingsManager();
     this.themeManager = new ThemeManager();
     this.ws = new WsManager();
     this.wm = new WindowManager(document.getElementById('workspace'));
@@ -32,6 +34,16 @@ class App {
       this._notifySidebarFocus();
     };
     this.sidebar = new Sidebar(this);
+
+    // Load settings asynchronously (non-blocking — modules use defaults until loaded)
+    this.settings.load();
+
+    // Sync settings from other clients via WebSocket
+    this.ws.onGlobal((msg) => {
+      if (msg.type === 'settings-updated' && msg.settings) {
+        this.settings.applyRemote(msg.settings);
+      }
+    });
 
     this._setupToolbar();
     this._setupDialogs();
