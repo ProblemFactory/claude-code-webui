@@ -66,7 +66,7 @@
       </div>
       <div class="toolbar-right">
         <button id="btn-global-settings" class="icon-btn" title="Global settings" style="font-size:14px;width:28px;height:28px">⚙</button>
-        <button id="btn-layouts" class="toolbar-action" title="Saved layouts">💾 Layouts</button>
+        <button id="btn-presets" class="toolbar-action" title="Saved presets">💾 Presets</button>
         <button id="btn-new-session" class="toolbar-action">+ New Session</button>
         <button id="btn-file-explorer" class="toolbar-action">📁 Files</button>
         <button id="btn-browser" class="toolbar-action">🌐 Browser</button>
@@ -136,15 +136,15 @@
       <div class="dialog-footer"><button class="btn-cancel">Cancel</button><button class="btn-create" id="btn-apply-grid">Add</button></div>
     </div>
 
-    <!-- Layout Manager Dialog -->
-    <div id="dialog-layouts" class="dialog hidden">
-      <div class="dialog-header"><h3>Saved Layouts</h3><button class="dialog-close">✕</button></div>
+    <!-- Preset Manager Dialog -->
+    <div id="dialog-presets" class="dialog hidden">
+      <div class="dialog-header"><h3>Saved Presets</h3><button class="dialog-close">✕</button></div>
       <div class="dialog-body">
         <div class="layout-save-row">
-          <input type="text" id="layout-save-name" placeholder="Layout name...">
-          <button class="btn-create" id="btn-layout-save" style="white-space:nowrap">Save Current</button>
+          <input type="text" id="preset-save-name" placeholder="Preset name...">
+          <button class="btn-create" id="btn-preset-save" style="white-space:nowrap">Save Current</button>
         </div>
-        <div id="saved-layouts-list" class="session-items" style="margin-top:8px"></div>
+        <div id="saved-presets-list" class="session-items" style="margin-top:8px"></div>
       </div>
       <div class="dialog-footer"><button class="btn-cancel">Cancel</button></div>
     </div>

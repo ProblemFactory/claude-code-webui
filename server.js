@@ -543,7 +543,7 @@ app.post('/api/editor/signal', (req, res) => {
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
-// ── Layout Persistence (cached in memory) ──
+// ── Layout/Preset Persistence (cached in memory) ──
 const LAYOUTS_FILE = path.join(__dirname, 'data', 'layouts.json');
 let _layoutsCache = null;
 function readLayouts() {
@@ -585,6 +585,34 @@ app.delete('/api/layouts/:name', (req, res) => {
 app.post('/api/layouts-active', (req, res) => {
   const data = readLayouts();
   data.current = req.body.name || null;
+  writeLayouts(data);
+  res.json({ success: true });
+});
+
+// Preset aliases (same backend as layouts, for renamed frontend)
+app.get('/api/presets', (req, res) => res.json(readLayouts()));
+app.post('/api/presets/:name', (req, res) => {
+  const data = readLayouts();
+  data.saved[req.params.name] = { ...req.body, updatedAt: Date.now() };
+  writeLayouts(data);
+  res.json({ success: true });
+});
+app.delete('/api/presets/:name', (req, res) => {
+  const data = readLayouts();
+  delete data.saved[req.params.name];
+  if (data.current === req.params.name) data.current = null;
+  writeLayouts(data);
+  res.json({ success: true });
+});
+app.post('/api/presets-active', (req, res) => {
+  const data = readLayouts();
+  data.current = req.body.name || null;
+  writeLayouts(data);
+  res.json({ success: true });
+});
+app.post('/api/presets-autosave', (req, res) => {
+  const data = readLayouts();
+  data.autoSave = { ...req.body, updatedAt: Date.now() };
   writeLayouts(data);
   res.json({ success: true });
 });

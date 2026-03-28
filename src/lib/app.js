@@ -506,52 +506,52 @@ class App {
   }
 
   _setupLayoutManager() {
-    document.getElementById('btn-layouts').addEventListener('click', () => this._showLayoutsDialog());
-    document.getElementById('btn-layout-save').addEventListener('click', () => {
-      const input = document.getElementById('layout-save-name');
+    document.getElementById('btn-presets').addEventListener('click', () => this._showPresetsDialog());
+    document.getElementById('btn-preset-save').addEventListener('click', () => {
+      const input = document.getElementById('preset-save-name');
       const name = input.value.trim();
       if (!name) return;
-      this.layoutManager.saveNamed(name).then(() => {
+      this.layoutManager.savePreset(name).then(() => {
         input.value = '';
-        this._renderLayoutsList();
+        this._renderPresetsList();
       });
     });
   }
 
-  async _showLayoutsDialog() {
+  async _showPresetsDialog() {
     await this.layoutManager.refresh();
-    this._renderLayoutsList();
-    this._showDialog('dialog-layouts');
+    this._renderPresetsList();
+    this._showDialog('dialog-presets');
   }
 
-  _renderLayoutsList() {
-    const list = document.getElementById('saved-layouts-list');
+  _renderPresetsList() {
+    const list = document.getElementById('saved-presets-list');
     list.innerHTML = '';
-    const layouts = this.layoutManager._savedLayouts;
-    const names = Object.keys(layouts).sort();
+    const presets = this.layoutManager._savedPresets;
+    const names = Object.keys(presets).sort();
     if (!names.length) {
-      list.innerHTML = '<div class="empty-hint">No saved layouts. Save current workspace as a layout.</div>';
+      list.innerHTML = '<div class="empty-hint">No saved presets. Save current workspace as a preset.</div>';
       return;
     }
     for (const name of names) {
-      const layout = layouts[name];
+      const preset = presets[name];
       const card = document.createElement('div'); card.className = 'layout-card';
       const isCurrent = name === this.layoutManager._currentName;
 
       const info = document.createElement('div'); info.className = 'layout-card-info';
       info.innerHTML = `<div class="layout-card-name">${isCurrent ? '● ' : ''}${name}</div>
-        <div class="layout-card-meta">${layout.windows?.length || 0} windows · ${layout.theme || 'dark'} · ${layout.updatedAt ? new Date(layout.updatedAt).toLocaleString() : ''}</div>`;
+        <div class="layout-card-meta">${preset.windows?.length || 0} windows · ${preset.theme || 'dark'} · ${preset.updatedAt ? new Date(preset.updatedAt).toLocaleString() : ''}</div>`;
       info.onclick = () => {
-        this.layoutManager.loadNamed(name).then(() => this.hideDialogs());
+        this.layoutManager.loadPreset(name).then(() => this.hideDialogs());
       };
 
       const actions = document.createElement('div'); actions.className = 'layout-card-actions';
       const btnOverwrite = document.createElement('button'); btnOverwrite.className = 'layout-card-btn'; btnOverwrite.textContent = '⟳';
       btnOverwrite.title = 'Overwrite with current';
-      btnOverwrite.onclick = (e) => { e.stopPropagation(); this.layoutManager.saveNamed(name).then(() => this._renderLayoutsList()); };
+      btnOverwrite.onclick = (e) => { e.stopPropagation(); this.layoutManager.savePreset(name).then(() => this._renderPresetsList()); };
       const btnDel = document.createElement('button'); btnDel.className = 'layout-card-btn delete'; btnDel.textContent = '✕';
       btnDel.title = 'Delete';
-      btnDel.onclick = (e) => { e.stopPropagation(); this.layoutManager.deleteNamed(name).then(() => this._renderLayoutsList()); };
+      btnDel.onclick = (e) => { e.stopPropagation(); this.layoutManager.deletePreset(name).then(() => this._renderPresetsList()); };
       actions.append(btnOverwrite, btnDel);
 
       card.append(info, actions);
