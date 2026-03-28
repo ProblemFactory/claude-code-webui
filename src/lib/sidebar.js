@@ -321,11 +321,11 @@ class Sidebar {
     const badge = badgeMap[s.status] || badgeMap.stopped;
 
     const starred = this._starredIds.has(s.sessionId);
+    // Compact layout: [★] name + badge + ▸ on one row. Details only when expanded.
+    const starIcon = starred ? '<span class="session-star-inline" title="Starred">★</span>' : '';
     card.innerHTML = `
-      <div class="session-card-name">${escHtml(displayName)}</div>
-      <div class="session-card-path">${idShort}...</div>
-      <div class="session-card-meta">
-        <span class="session-card-time">${date.toLocaleDateString()} ${date.toLocaleTimeString()}</span>
+      <div class="session-card-row">
+        ${starIcon}<span class="session-card-name">${escHtml(displayName)}</span>
         <span class="session-card-badge ${badge.cls}">${badge.text}</span>
       </div>`;
 
@@ -343,7 +343,7 @@ class Sidebar {
       }
       this._render();
     };
-    card.querySelector('.session-card-meta').appendChild(expandBtn);
+    card.querySelector('.session-card-row').appendChild(expandBtn);
 
     // Detail panel (shown when expanded)
     const detailPanel = document.createElement('div');
@@ -425,22 +425,6 @@ class Sidebar {
     }
 
     card.appendChild(detailPanel);
-
-    // Star button (top right)
-    const starBtn = document.createElement('button');
-    starBtn.className = 'session-star-btn' + (starred ? ' starred' : '');
-    starBtn.textContent = starred ? '\u2605' : '\u2606';
-    starBtn.title = starred ? 'Unstar' : 'Star';
-    starBtn.onclick = (e) => { e.stopPropagation(); this.toggleStar(s.sessionId); };
-    card.prepend(starBtn);
-
-    // Archive button (top right, below star)
-    const archiveBtn = document.createElement('button');
-    archiveBtn.className = 'session-archive-btn' + (isArchived ? ' archived' : '');
-    archiveBtn.textContent = isArchived ? '\u{1F4E4}' : '\u{1F4E6}';
-    archiveBtn.title = isArchived ? 'Unarchive' : 'Archive';
-    archiveBtn.onclick = (e) => { e.stopPropagation(); this.toggleArchive(s.sessionId); };
-    card.prepend(archiveBtn);
 
     // Double-click name to rename (sets --name for next resume)
     const nameEl = card.querySelector('.session-card-name');

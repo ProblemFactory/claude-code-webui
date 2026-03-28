@@ -96,14 +96,14 @@ html, body {
 }
 .session-items { padding: 0 6px; }
 .session-item-card {
-  padding: 8px 10px; margin: 3px 0; border-radius: var(--radius-sm);
+  padding: 5px 8px; margin: 2px 0; border-radius: var(--radius-sm);
   border: 1px solid var(--border); cursor: pointer; transition: all var(--transition);
+  position: relative;
 }
 .session-item-card:hover { background: var(--bg-hover); border-color: var(--border-active); }
-.session-card-name { font-size: 12px; font-weight: 500; color: var(--text); margin-bottom: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.session-card-path { font-size: 10px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.session-card-meta { display: flex; justify-content: space-between; align-items: center; margin-top: 4px; }
-.session-card-time { font-size: 10px; color: var(--text-dim); }
+.session-card-row { display: flex; align-items: center; gap: 6px; }
+.session-card-name { font-size: 11px; font-weight: 500; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.session-star-inline { color: var(--yellow); font-size: 10px; flex-shrink: 0; }
 .session-card-badge {
   font-size: 9px; padding: 1px 6px; border-radius: 8px; font-weight: 600;
 }
