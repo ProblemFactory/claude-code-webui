@@ -81,17 +81,10 @@ class App {
     // Apply toolbar visibility settings
     const applyToolbarSettings = () => {
       const presets = document.getElementById('layout-presets');
-      const addGrid = document.getElementById('btn-add-grid');
-      if (presets) {
-        presets.querySelectorAll('.layout-btn[data-layout]').forEach(b => {
-          b.style.display = this.settings.get('toolbar.showLayoutPresets') ? '' : 'none';
-        });
-      }
-      if (addGrid) addGrid.style.display = this.settings.get('toolbar.showCustomGridButton') ? '' : 'none';
+      if (presets) presets.style.display = this.settings.get('toolbar.showLayoutPresets') ? '' : 'none';
     };
     applyToolbarSettings();
     this.settings.on('toolbar.showLayoutPresets', applyToolbarSettings);
-    this.settings.on('toolbar.showCustomGridButton', applyToolbarSettings);
   }
 
   _setupWelcome() {

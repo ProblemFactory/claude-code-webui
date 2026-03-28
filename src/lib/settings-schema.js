@@ -9,12 +9,7 @@ const SETTINGS_SCHEMA = {
   // ── Toolbar & Layout ──
   'toolbar.showLayoutPresets': {
     type: 'boolean', default: true, label: 'Show layout presets',
-    description: 'Show layout preset buttons (freeform, maximize, 2-col, etc.) in the toolbar',
-    category: 'Toolbar & Layout', liveApply: true,
-  },
-  'toolbar.showCustomGridButton': {
-    type: 'boolean', default: true, label: 'Show custom grid button',
-    description: 'Show the + button for adding custom grid layouts',
+    description: 'Show the entire layout presets bar (built-in presets, custom grids, and + add button)',
     category: 'Toolbar & Layout', liveApply: true,
   },
   'toolbar.showCommandMode': {
