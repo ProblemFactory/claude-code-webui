@@ -18,17 +18,39 @@ class Sidebar {
     });
     this._allSessions = [];
     this._webuiSessions = [];
+
+    // Load from localStorage as initial cache/fallback
     this._starredIds = new Set(JSON.parse(localStorage.getItem('starredSessions') || '[]'));
     this._archivedIds = new Set(JSON.parse(localStorage.getItem('archivedSessions') || '[]'));
     this._customNames = JSON.parse(localStorage.getItem('sessionCustomNames') || '{}');
+    this._sessionGroups = JSON.parse(localStorage.getItem('sessionGroups') || '{}'); // { groupName: [sessionId, ...] }
+
     this._sortMode = localStorage.getItem('sessionSort') || 'recent';
     this._filterLive = false;
     this._collapsedFolders = new Set(JSON.parse(localStorage.getItem('collapsedFolders') || '[]'));
     this._expandedCardId = null; // only one card expanded at a time
 
+    // Tab state: 'folders' or 'groups'
+    this._activeTab = 'folders';
+
+    // Fetch server state (source of truth)
+    this._fetchUserState();
+
+    // Listen for user-state-updated WebSocket messages from other clients
+    app.ws.onGlobal((msg) => {
+      if (msg.type === 'user-state-updated' && msg.state) {
+        this._applyServerState(msg.state);
+        this._render();
+        this.app.updateTaskbar();
+      }
+    });
+
     document.getElementById('sidebar-toggle').onclick = () => this.toggle();
     document.getElementById('sidebar-close').onclick = () => this.toggle(false);
     document.getElementById('session-filter').oninput = () => this._render();
+
+    // Build tab bar
+    this._buildTabBar();
 
     // Sort toggle
     const sortBtn = document.getElementById('sort-toggle');
@@ -52,10 +74,100 @@ class Sidebar {
     this._poll();
   }
 
+  // ── Server State Sync ──
+
+  async _fetchUserState() {
+    try {
+      const res = await fetch('/api/user-state');
+      if (res.ok) {
+        const state = await res.json();
+        this._applyServerState(state);
+        this._render();
+        this.app.updateTaskbar();
+      }
+    } catch {
+      // Server unavailable — use localStorage cache
+    }
+  }
+
+  _applyServerState(state) {
+    if (state.starredSessions) {
+      this._starredIds = new Set(state.starredSessions);
+      localStorage.setItem('starredSessions', JSON.stringify(state.starredSessions));
+    }
+    if (state.archivedSessions) {
+      this._archivedIds = new Set(state.archivedSessions);
+      localStorage.setItem('archivedSessions', JSON.stringify(state.archivedSessions));
+    }
+    if (state.customNames) {
+      this._customNames = { ...state.customNames };
+      localStorage.setItem('sessionCustomNames', JSON.stringify(state.customNames));
+    }
+    if (state.sessionGroups) {
+      this._sessionGroups = { ...state.sessionGroups };
+      localStorage.setItem('sessionGroups', JSON.stringify(state.sessionGroups));
+    }
+  }
+
+  async _pushUserState() {
+    const state = {
+      starredSessions: [...this._starredIds],
+      archivedSessions: [...this._archivedIds],
+      customNames: this._customNames,
+      sessionGroups: this._sessionGroups,
+    };
+    // Write localStorage cache
+    localStorage.setItem('starredSessions', JSON.stringify(state.starredSessions));
+    localStorage.setItem('archivedSessions', JSON.stringify(state.archivedSessions));
+    localStorage.setItem('sessionCustomNames', JSON.stringify(state.customNames));
+    localStorage.setItem('sessionGroups', JSON.stringify(state.sessionGroups));
+    // Push to server (broadcasts to other clients)
+    try {
+      await fetch('/api/user-state', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(state),
+      });
+    } catch {
+      // Server unavailable — localStorage cache is still updated
+    }
+  }
+
+  // ── Tab Bar ──
+
+  _buildTabBar() {
+    const section = this.listEl.parentElement; // the sidebar-section div containing the list
+    const tabBar = document.createElement('div');
+    tabBar.className = 'sidebar-tabs';
+
+    const foldersTab = document.createElement('button');
+    foldersTab.className = 'sidebar-tab active';
+    foldersTab.textContent = 'Folders';
+    foldersTab.dataset.tab = 'folders';
+    foldersTab.onclick = () => { this._activeTab = 'folders'; this._updateTabs(); this._render(); };
+
+    const groupsTab = document.createElement('button');
+    groupsTab.className = 'sidebar-tab';
+    groupsTab.textContent = 'Groups';
+    groupsTab.dataset.tab = 'groups';
+    groupsTab.onclick = () => { this._activeTab = 'groups'; this._updateTabs(); this._render(); };
+
+    tabBar.append(foldersTab, groupsTab);
+    // Insert tab bar before the filter row (first child of section)
+    section.insertBefore(tabBar, section.firstChild);
+  }
+
+  _updateTabs() {
+    const tabs = this.el.querySelectorAll('.sidebar-tab');
+    tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === this._activeTab));
+  }
+
+  // ── Star / Archive / Rename ──
+
   toggleStar(sessionId) {
     if (this._starredIds.has(sessionId)) this._starredIds.delete(sessionId);
     else this._starredIds.add(sessionId);
-    localStorage.setItem('starredSessions', JSON.stringify([...this._starredIds]));
+    this._pushUserState();
     this._render();
     this.app.updateTaskbar();
   }
@@ -65,7 +177,7 @@ class Sidebar {
   toggleArchive(sessionId) {
     if (this._archivedIds.has(sessionId)) this._archivedIds.delete(sessionId);
     else this._archivedIds.add(sessionId);
-    localStorage.setItem('archivedSessions', JSON.stringify([...this._archivedIds]));
+    this._pushUserState();
     this._render();
     this.app.updateTaskbar();
   }
@@ -82,12 +194,60 @@ class Sidebar {
     } else {
       delete this._customNames[sessionId];
     }
-    localStorage.setItem('sessionCustomNames', JSON.stringify(this._customNames));
+    this._pushUserState();
     this._render();
     // Sync renamed session to any open window
     const newName = name.trim() || currentName || sessionId.substring(0, 12) + '...';
     this.app.syncSessionName(sessionId, newName);
   }
+
+  // ── Session Groups ──
+
+  _getGroupNames() {
+    return Object.keys(this._sessionGroups).sort((a, b) => a.localeCompare(b));
+  }
+
+  _getSessionGroups(sessionId) {
+    const groups = [];
+    for (const [name, ids] of Object.entries(this._sessionGroups)) {
+      if (ids.includes(sessionId)) groups.push(name);
+    }
+    return groups;
+  }
+
+  _addSessionToGroup(sessionId, groupName) {
+    if (!this._sessionGroups[groupName]) this._sessionGroups[groupName] = [];
+    if (!this._sessionGroups[groupName].includes(sessionId)) {
+      this._sessionGroups[groupName].push(sessionId);
+    }
+    this._pushUserState();
+    this._render();
+  }
+
+  _removeSessionFromGroup(sessionId, groupName) {
+    if (!this._sessionGroups[groupName]) return;
+    this._sessionGroups[groupName] = this._sessionGroups[groupName].filter(id => id !== sessionId);
+    if (this._sessionGroups[groupName].length === 0) {
+      delete this._sessionGroups[groupName];
+    }
+    this._pushUserState();
+    this._render();
+  }
+
+  _createGroup(name) {
+    if (!name || this._sessionGroups[name]) return;
+    this._sessionGroups[name] = [];
+    this._pushUserState();
+    this._render();
+  }
+
+  _deleteGroup(name) {
+    delete this._sessionGroups[name];
+    this._pushUserState();
+    this._render();
+  }
+
+  // ── Highlight / Sort / Filter ──
 
   highlightSession(sessionId) {
     this.listEl.querySelectorAll('.session-item-card').forEach(c => c.classList.remove('highlighted'));
@@ -105,7 +265,7 @@ class Sidebar {
   }
 
   _updateSortBtn(btn) {
-    btn.textContent = this._sortMode === 'recent' ? '⏱' : '📁';
+    btn.textContent = this._sortMode === 'recent' ? '\u23F1' : '\uD83D\uDCC1';
     btn.title = `Sort by: ${this._sortMode === 'recent' ? 'Recent' : 'Folder'}`;
   }
 
@@ -230,7 +390,11 @@ class Sidebar {
 
     if (!sessions.length) { this.listEl.insertAdjacentHTML('beforeend', '<div class="empty-hint">No sessions</div>'); return; }
 
-    this._renderGrouped(sessions);
+    if (this._activeTab === 'groups') {
+      this._renderByGroups(sessions);
+    } else {
+      this._renderGrouped(sessions);
+    }
   }
 
   _renderGrouped(sessions) {
@@ -264,7 +428,7 @@ class Sidebar {
       const hasLive = items.some(s => s.status === 'live' || s.status === 'tmux');
 
       const header = document.createElement('div'); header.className = 'folder-header';
-      header.innerHTML = `<span class="folder-chevron">▼</span><span class="folder-path">${cwdShort}</span><span class="folder-count">${items.length}</span>`;
+      header.innerHTML = `<span class="folder-chevron">\u25BC</span><span class="folder-path">${cwdShort}</span><span class="folder-count">${items.length}</span>`;
       if (hasLive) {
         const dot = document.createElement('span');
         dot.style.cssText = 'width:6px;height:6px;border-radius:50%;background:var(--green);flex-shrink:0';
@@ -300,6 +464,122 @@ class Sidebar {
     }
   }
 
+  _renderByGroups(sessions) {
+    const sessionById = new Map();
+    for (const s of sessions) sessionById.set(s.sessionId, s);
+
+    const groupNames = this._getGroupNames();
+    const assignedIds = new Set();
+
+    // "+" button to add new group
+    const addGroupCard = document.createElement('div');
+    addGroupCard.className = 'session-item-card new-session-card';
+    addGroupCard.innerHTML = '<div class="session-card-name" style="color:var(--accent-hover)">+ New Group</div>';
+    addGroupCard.onclick = () => {
+      const name = prompt('Group name:');
+      if (name && name.trim()) this._createGroup(name.trim());
+    };
+    this.listEl.appendChild(addGroupCard);
+
+    // Render each group
+    for (const groupName of groupNames) {
+      const groupSessionIds = this._sessionGroups[groupName] || [];
+      const groupSessions = groupSessionIds.map(id => sessionById.get(id)).filter(Boolean);
+      groupSessionIds.forEach(id => { if (sessionById.has(id)) assignedIds.add(id); });
+
+      const groupEl = document.createElement('div');
+      groupEl.className = 'folder-group';
+      const collapseKey = 'group:' + groupName;
+      if (this._collapsedFolders.has(collapseKey)) groupEl.classList.add('collapsed');
+
+      const hasLive = groupSessions.some(s => s.status === 'live' || s.status === 'tmux');
+
+      const header = document.createElement('div');
+      header.className = 'folder-header';
+      header.innerHTML = `<span class="folder-chevron">\u25BC</span><span class="folder-path" style="direction:ltr">${escHtml(groupName)}</span><span class="folder-count">${groupSessions.length}</span>`;
+      if (hasLive) {
+        const dot = document.createElement('span');
+        dot.style.cssText = 'width:6px;height:6px;border-radius:50%;background:var(--green);flex-shrink:0';
+        header.insertBefore(dot, header.children[2]);
+      }
+
+      // Delete group button
+      const delBtn = document.createElement('button');
+      delBtn.className = 'folder-add-btn';
+      delBtn.textContent = '\u00D7';
+      delBtn.title = 'Delete group "' + groupName + '"';
+      delBtn.onclick = (e) => {
+        e.stopPropagation();
+        if (confirm('Delete group "' + groupName + '"? (Sessions will not be deleted)')) {
+          this._deleteGroup(groupName);
+        }
+      };
+      header.appendChild(delBtn);
+
+      header.onclick = (e) => {
+        if (e.target.closest('.folder-add-btn')) return;
+        groupEl.classList.toggle('collapsed');
+        if (groupEl.classList.contains('collapsed')) this._collapsedFolders.add(collapseKey);
+        else this._collapsedFolders.delete(collapseKey);
+        localStorage.setItem('collapsedFolders', JSON.stringify([...this._collapsedFolders]));
+      };
+
+      const sessionsDiv = document.createElement('div');
+      sessionsDiv.className = 'folder-sessions';
+      // Sort: starred first, then by time
+      groupSessions.sort((a, b) => {
+        const as = this._starredIds.has(a.sessionId) ? 1 : 0;
+        const bs = this._starredIds.has(b.sessionId) ? 1 : 0;
+        if (as !== bs) return bs - as;
+        return (b.startedAt || 0) - (a.startedAt || 0);
+      });
+      for (const s of groupSessions) sessionsDiv.appendChild(this._renderSessionCard(s));
+
+      if (groupSessions.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'empty-hint';
+        empty.textContent = 'No sessions in this group';
+        sessionsDiv.appendChild(empty);
+      }
+
+      groupEl.append(header, sessionsDiv);
+      this.listEl.appendChild(groupEl);
+    }
+
+    // Ungrouped section
+    const ungrouped = sessions.filter(s => !assignedIds.has(s.sessionId));
+    if (ungrouped.length > 0) {
+      const groupEl = document.createElement('div');
+      groupEl.className = 'folder-group';
+      const collapseKey = 'group:__ungrouped__';
+      if (this._collapsedFolders.has(collapseKey)) groupEl.classList.add('collapsed');
+
+      const header = document.createElement('div');
+      header.className = 'folder-header';
+      header.innerHTML = `<span class="folder-chevron">\u25BC</span><span class="folder-path" style="direction:ltr;font-style:italic">Ungrouped</span><span class="folder-count">${ungrouped.length}</span>`;
+
+      header.onclick = () => {
+        groupEl.classList.toggle('collapsed');
+        if (groupEl.classList.contains('collapsed')) this._collapsedFolders.add(collapseKey);
+        else this._collapsedFolders.delete(collapseKey);
+        localStorage.setItem('collapsedFolders', JSON.stringify([...this._collapsedFolders]));
+      };
+
+      const sessionsDiv = document.createElement('div');
+      sessionsDiv.className = 'folder-sessions';
+      ungrouped.sort((a, b) => {
+        const as = this._starredIds.has(a.sessionId) ? 1 : 0;
+        const bs = this._starredIds.has(b.sessionId) ? 1 : 0;
+        if (as !== bs) return bs - as;
+        return (b.startedAt || 0) - (a.startedAt || 0);
+      });
+      for (const s of ungrouped) sessionsDiv.appendChild(this._renderSessionCard(s));
+
+      groupEl.append(header, sessionsDiv);
+      this.listEl.appendChild(groupEl);
+    }
+  }
+
   _renderSessionCard(s) {
     const card = document.createElement('div'); card.className = 'session-item-card';
     card._sessionId = s.sessionId; // Store for highlight lookup
@@ -322,7 +602,7 @@ class Sidebar {
 
     const starred = this._starredIds.has(s.sessionId);
     const isExpanded = this._expandedCardId === s.sessionId;
-    // Compact row: ★ ☆ 📦 name badge ▸
+    // Compact row: star archive name badge expand
     card.innerHTML = `<div class="session-card-row">
       <span class="session-card-name">${escHtml(displayName)}</span>
       <span class="session-card-badge ${badge.cls}">${badge.text}</span>
@@ -382,6 +662,7 @@ class Sidebar {
         <span class="session-detail-label">Status</span>
         <span class="session-detail-value"><span class="session-card-badge ${badge.cls}">${badge.text}</span></span>
       </div>
+      <div class="session-detail-groups"></div>
       <div class="session-detail-actions"></div>
     `;
 
@@ -393,6 +674,9 @@ class Sidebar {
         navigator.clipboard.writeText(s.sessionId).then(() => { copyBtn.textContent = '\u2713'; setTimeout(() => { copyBtn.textContent = '\u{1F4CB}'; }, 1500); });
       };
     }
+
+    // Groups section in detail panel
+    this._renderDetailGroups(detailPanel.querySelector('.session-detail-groups'), s.sessionId);
 
     // Action buttons in detail panel (star/archive already in compact row)
     const actionsDiv = detailPanel.querySelector('.session-detail-actions');
@@ -446,6 +730,54 @@ class Sidebar {
       card.onclick = () => this.app.resumeSession(s.sessionId, s.cwd, customName || s.name);
     }
     return card;
+  }
+
+  _renderDetailGroups(container, sessionId) {
+    container.innerHTML = '';
+    const groupNames = this._getGroupNames();
+    const sessionGroups = this._getSessionGroups(sessionId);
+
+    const label = document.createElement('div');
+    label.className = 'session-detail-row';
+    label.innerHTML = '<span class="session-detail-label">Groups</span>';
+    container.appendChild(label);
+
+    const groupList = document.createElement('div');
+    groupList.className = 'session-detail-groups-list';
+
+    for (const name of groupNames) {
+      const row = document.createElement('label');
+      row.className = 'session-detail-group-item';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = sessionGroups.includes(name);
+      cb.onchange = (e) => {
+        e.stopPropagation();
+        if (cb.checked) this._addSessionToGroup(sessionId, name);
+        else this._removeSessionFromGroup(sessionId, name);
+      };
+      const lbl = document.createElement('span');
+      lbl.textContent = name;
+      row.append(cb, lbl);
+      row.onclick = (e) => e.stopPropagation();
+      groupList.appendChild(row);
+    }
+
+    // "Create new group" option
+    const createRow = document.createElement('div');
+    createRow.className = 'session-detail-group-create';
+    createRow.textContent = '+ Create new group';
+    createRow.onclick = (e) => {
+      e.stopPropagation();
+      const name = prompt('New group name:');
+      if (name && name.trim()) {
+        this._createGroup(name.trim());
+        this._addSessionToGroup(sessionId, name.trim());
+      }
+    };
+    groupList.appendChild(createRow);
+
+    container.appendChild(groupList);
   }
 
 }

@@ -5,6 +5,7 @@ const pty = require('node-pty');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const crypto = require('crypto');
 const multer = require('multer');
 
 const PORT = process.env.PORT || 3456;
@@ -639,6 +640,132 @@ app.post('/api/bookmarks', (req, res) => {
   const bookmarks = req.body;
   if (!Array.isArray(bookmarks)) return res.status(400).json({ error: 'Expected array' });
   writeBookmarks(bookmarks);
+  // Broadcast to all WebSocket clients so multi-device stays in sync
+  const msg = JSON.stringify({ type: 'bookmarks-updated', bookmarks });
+  wss.clients.forEach(client => {
+    if (client.readyState === WS_OPEN) { try { client.send(msg); } catch {} }
+  });
+  res.json({ success: true });
+});
+
+// ── User State Persistence (server-side, replaces localStorage for starred/archived/names/groups) ──
+const USER_STATE_FILE = path.join(__dirname, 'data', 'user-state.json');
+let _userStateCache = null;
+const USER_STATE_DEFAULT = { starredSessions: [], archivedSessions: [], customNames: {}, sessionGroups: {} };
+
+function readUserState() {
+  if (_userStateCache) return _userStateCache;
+  ensureDir(path.join(__dirname, 'data'));
+  try { _userStateCache = JSON.parse(fs.readFileSync(USER_STATE_FILE, 'utf-8')); }
+  catch { _userStateCache = { ...USER_STATE_DEFAULT }; }
+  return _userStateCache;
+}
+
+function writeUserState(data) {
+  ensureDir(path.join(__dirname, 'data'));
+  _userStateCache = data;
+  fs.writeFileSync(USER_STATE_FILE, JSON.stringify(data, null, 2));
+  // Broadcast to ALL WebSocket clients
+  const msg = JSON.stringify({ type: 'user-state-updated', state: data });
+  wss.clients.forEach(client => {
+    if (client.readyState === WS_OPEN) { try { client.send(msg); } catch {} }
+  });
+}
+
+// Get full user state
+app.get('/api/user-state', (req, res) => {
+  res.json(readUserState());
+});
+
+// Save full user state (replaces entire state)
+app.post('/api/user-state', (req, res) => {
+  const data = req.body;
+  if (!data || typeof data !== 'object') return res.status(400).json({ error: 'Expected object' });
+  writeUserState(data);
+  res.json({ success: true });
+});
+
+// Get just session groups
+app.get('/api/session-groups', (req, res) => {
+  const state = readUserState();
+  res.json(state.sessionGroups || {});
+});
+
+// Save session groups (replaces all groups)
+app.post('/api/session-groups', (req, res) => {
+  const groups = req.body;
+  if (!groups || typeof groups !== 'object') return res.status(400).json({ error: 'Expected object' });
+  const state = readUserState();
+  state.sessionGroups = groups;
+  writeUserState(state);
+  res.json({ success: true });
+});
+
+// Create a new session group
+app.post('/api/session-groups/create', (req, res) => {
+  const { name } = req.body;
+  if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name is required' });
+  const state = readUserState();
+  if (!state.sessionGroups) state.sessionGroups = {};
+  const groupId = 'group-' + crypto.randomUUID();
+  state.sessionGroups[groupId] = { name, sessionIds: [] };
+  writeUserState(state);
+  res.json({ success: true, groupId, group: state.sessionGroups[groupId] });
+});
+
+// Delete a session group
+app.post('/api/session-groups/delete', (req, res) => {
+  const { groupId } = req.body;
+  if (!groupId) return res.status(400).json({ error: 'groupId is required' });
+  const state = readUserState();
+  if (!state.sessionGroups || !state.sessionGroups[groupId]) {
+    return res.status(404).json({ error: 'Group not found' });
+  }
+  delete state.sessionGroups[groupId];
+  writeUserState(state);
+  res.json({ success: true });
+});
+
+// Rename a session group
+app.post('/api/session-groups/rename', (req, res) => {
+  const { groupId, name } = req.body;
+  if (!groupId || !name) return res.status(400).json({ error: 'groupId and name are required' });
+  const state = readUserState();
+  if (!state.sessionGroups || !state.sessionGroups[groupId]) {
+    return res.status(404).json({ error: 'Group not found' });
+  }
+  state.sessionGroups[groupId].name = name;
+  writeUserState(state);
+  res.json({ success: true });
+});
+
+// Assign a session to a group
+app.post('/api/session-groups/assign', (req, res) => {
+  const { groupId, sessionId } = req.body;
+  if (!groupId || !sessionId) return res.status(400).json({ error: 'groupId and sessionId are required' });
+  const state = readUserState();
+  if (!state.sessionGroups || !state.sessionGroups[groupId]) {
+    return res.status(404).json({ error: 'Group not found' });
+  }
+  const group = state.sessionGroups[groupId];
+  if (!group.sessionIds.includes(sessionId)) {
+    group.sessionIds.push(sessionId);
+    writeUserState(state);
+  }
+  res.json({ success: true });
+});
+
+// Unassign a session from a group
+app.post('/api/session-groups/unassign', (req, res) => {
+  const { groupId, sessionId } = req.body;
+  if (!groupId || !sessionId) return res.status(400).json({ error: 'groupId and sessionId are required' });
+  const state = readUserState();
+  if (!state.sessionGroups || !state.sessionGroups[groupId]) {
+    return res.status(404).json({ error: 'Group not found' });
+  }
+  const group = state.sessionGroups[groupId];
+  group.sessionIds = group.sessionIds.filter(id => id !== sessionId);
+  writeUserState(state);
   res.json({ success: true });
 });
 

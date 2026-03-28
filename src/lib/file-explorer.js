@@ -122,6 +122,14 @@ class FileExplorer {
     // Load bookmarks from server
     this._loadBookmarks();
 
+    // Listen for bookmark sync from other clients/windows
+    this.app.ws.onGlobal((msg) => {
+      if (msg.type === 'bookmarks-updated') {
+        this._bookmarks = msg.bookmarks;
+        this._renderBookmarks();
+      }
+    });
+
     if (this._startPath) this.navigate(this._startPath);
     else this._loadHome();
   }
