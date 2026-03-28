@@ -604,6 +604,20 @@ class Sidebar {
       };
       header.appendChild(resumeAllBtn);
 
+      // Linked folders button
+      if (linkedFolders.length > 0 || true) { // always show so user can add folders
+        const foldersBtn = document.createElement('button');
+        foldersBtn.className = 'folder-add-btn';
+        foldersBtn.textContent = '\uD83D\uDCC1';
+        foldersBtn.style.fontSize = '10px';
+        foldersBtn.title = 'Linked folders' + (linkedFolders.length ? ': ' + linkedFolders.join(', ') : ' (none)');
+        foldersBtn.onclick = (e) => {
+          e.stopPropagation();
+          this._showGroupFoldersPopover(foldersBtn, groupName);
+        };
+        header.appendChild(foldersBtn);
+      }
+
       // Delete group button
       const delBtn = document.createElement('button');
       delBtn.className = 'folder-add-btn';
@@ -854,6 +868,50 @@ class Sidebar {
     };
     row.appendChild(btn);
     container.appendChild(row);
+  }
+
+  _showGroupFoldersPopover(anchor, groupName) {
+    document.querySelectorAll('.groups-popover').forEach(p => p.remove());
+    const pop = document.createElement('div');
+    pop.className = 'groups-popover';
+    const rect = anchor.getBoundingClientRect();
+    pop.style.position = 'fixed';
+    pop.style.left = rect.left + 'px';
+    pop.style.top = (rect.bottom + 2) + 'px';
+    pop.style.zIndex = '99999';
+
+    const folders = this._groupFolders[groupName] || [];
+
+    if (folders.length === 0) {
+      const hint = document.createElement('div');
+      hint.className = 'empty-hint';
+      hint.textContent = 'No linked folders. Use 🔗 on folder headers in Folders tab to link.';
+      pop.appendChild(hint);
+    } else {
+      for (const fp of folders) {
+        const row = document.createElement('div');
+        row.className = 'session-detail-group-item';
+        row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:6px;padding:4px 8px;cursor:default';
+        const pathSpan = document.createElement('span');
+        pathSpan.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left;font-size:11px';
+        pathSpan.textContent = fp.replace(/^\/home\/[^/]+/, '~');
+        pathSpan.title = fp;
+        const removeBtn = document.createElement('button');
+        removeBtn.style.cssText = 'background:none;border:none;color:var(--red,#e55);cursor:pointer;font-size:12px;padding:0 4px;flex-shrink:0';
+        removeBtn.textContent = '\u00D7';
+        removeBtn.title = 'Unlink folder';
+        removeBtn.onclick = (e) => {
+          e.stopPropagation();
+          this._removeFolderFromGroup(fp, groupName);
+          pop.remove();
+        };
+        row.append(pathSpan, removeBtn);
+        pop.appendChild(row);
+      }
+    }
+
+    document.body.appendChild(pop);
+    attachPopoverClose(pop, anchor);
   }
 
   _showFolderGroupPopover(anchor, folderPath) {
