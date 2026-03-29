@@ -97,7 +97,7 @@ Browser (xterm.js) <-> WebSocket <-> node-pty (dtach) <-> pty-wrapper.js <-> cla
 | CMD → 1-9+ | Snap to grid cell N (digits accumulate for 500ms) |
 | CMD → m / w / Tab | Maximize / Close / Cycle next window |
 | CMD → f/g/n/s/b/e | Freeform / Grid / New session / Sidebar / Browser / Files |
-| Shift+drag | Select rectangular cell range in grid mode |
+| Drag + Shift | Hold Shift while dragging title bar to select rectangular cell range |
 | Alt+drag | Bypass grid snap |
 | Right-click title bar | Switch between overlapping windows |
 
