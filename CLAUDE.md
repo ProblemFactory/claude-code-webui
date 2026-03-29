@@ -65,6 +65,19 @@ public/
   style.css            — CSS with 6 theme variants
   bundle.js            — Built output (do not edit)
 CLAUDE.md              — This file
+docs/
+  README.md            — Documentation index
+  getting-started.md   — Installation, first run, quick tour
+  terminal.md          — Terminal: dtach, multi-device, clipboard, idle detection, fonts
+  window-manager.md    — Windows: grid, snap, command mode, presets, highlight
+  sessions.md          — Sessions: discovery, groups, star/archive, drag-drop, filters
+  file-explorer.md     — Files: browsing, bookmarks, viewers, right-click, drag-drop
+  settings.md          — Settings: global/per-terminal, complete reference table
+  editor.md            — Ctrl+G split-pane CodeMirror editor
+  browser.md           — Embedded browser with proxy mode
+  keyboard-shortcuts.md — Complete shortcut reference
+  screenshot-helper.js — JS sanitizer for privacy-safe screenshots
+  screenshots/         — Documentation screenshots (overview, sidebar, settings, grid)
 ```
 
 ## Developer Guide: Where to Find & Modify Code
