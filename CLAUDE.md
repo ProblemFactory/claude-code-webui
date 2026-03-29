@@ -339,6 +339,7 @@ Server → Client: `created`, `output`, `exited`, `attached`, `active-sessions`,
 - Command mode: `Ctrl+\` prefix key (tmux-style), [CMD] indicator in taskbar, 2s auto-exit
 - Shift+drag: select rectangular cell range in grid mode, window spans entire range
 - Presets (renamed from Layouts): save/restore full workspace state (windows, positions, z-order, grid, theme, fonts). Sessions matched by claudeSessionId. Non-preset windows minimized not killed.
+- Active window highlight intensity: `window.activeHighlightIntensity` setting (subtle = shadow only, normal = accent border, strong = border + glow)
 
 ### Session Management
 - Unified session list grouped by working directory
@@ -348,11 +349,13 @@ Server → Client: `created`, `output`, `exited`, `attached`, `active-sessions`,
 - Session names from first user message in JSONL
 - Star sessions (★/☆): starred sessions sort first in sidebar groups and taskbar
 - Archive/unarchive sessions: 📦 button, hidden by default, toggle via status filter
-- Focus window highlights corresponding session in sidebar
+- Focus window highlights corresponding session in sidebar (with flash animation)
 - Find session: 🔍 button in expand panel flashes window title bar + taskbar (cyan 0.3s, 3s duration)
 - Session card settings: clickBehavior (focus/expand/flash), clickToCopy (click detail values), visibleFields, detailTruncation
+- Session cards draggable: drag to group header to assign session to group
 - Status quick tabs: ALL/LIVE/TMUX/EXT/STOP/ARCH filter tabs (enabled via settings)
 - Session groups: Folders | Groups dual tab, user-defined groups with assign/unassign, folder linking (recursive auto-include by cwd), ▶ resume-all button
+- Group header: right-click context menu (Rename / Linked folders / Delete), drop target for folders and sessions
 - Multi-client sync: star/archive/rename/groups/bookmarks broadcast via WebSocket to all clients
 - Session rename: double-click name in sidebar → set custom name → used as `--name` on next resume, syncs to open windows
 
@@ -369,7 +372,8 @@ Server → Client: `created`, `output`, `exited`, `attached`, `active-sessions`,
 - Large file warnings (>1MB), binary auto-detection
 - CWD autocomplete with `~` support
 - Clipboard image paste (Ctrl+V → upload to server → xclip/osascript sets clipboard → Ctrl+V to PTY)
-- Folder right-click: "Sessions ▸" submenu with "+ New session" and all sessions at that path
+- Folder right-click: "Sessions ▸" submenu with "+ New session" and all sessions at that path; "Add to group ▸" submenu to link folder to a session group
+- Drag folder from file explorer to sidebar group header → links folder to group
 - All windows (file explorer, viewers, editors, browser) persist and restore on page refresh
 
 ### UI
