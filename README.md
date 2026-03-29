@@ -110,6 +110,18 @@ Browser (xterm.js) <-> WebSocket <-> node-pty (dtach) <-> pty-wrapper.js <-> cla
 | WSL2 | Should work | Install dtach via apt |
 | Windows (native) | Not supported | Requires WSL2 or remote Linux server |
 
+## Documentation
+
+See the **[docs/](docs/)** directory for detailed guides:
+
+- [Getting Started](docs/getting-started.md) — Installation, first run, quick tour
+- [Terminal Management](docs/terminal.md) — Persistence, multi-device, clipboard, fonts
+- [Window Manager](docs/window-manager.md) — Grid, snap, command mode, presets
+- [Session Management](docs/sessions.md) — Groups, star/archive, drag-drop, filters
+- [File Explorer](docs/file-explorer.md) — Browsing, bookmarks, viewers
+- [Settings](docs/settings.md) — All configuration options
+- [Keyboard Shortcuts](docs/keyboard-shortcuts.md) — Complete reference
+
 ## License
 
 MIT
