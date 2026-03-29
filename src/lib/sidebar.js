@@ -1080,19 +1080,107 @@ class Sidebar {
     attachPopoverClose(menu);
   }
 
-  _addFolderToGroupDialog(groupName) {
-    const folderPath = prompt('Enter folder path (sessions in this folder and subfolders will be added to the group):');
-    if (!folderPath || !folderPath.trim()) return;
-    const fp = folderPath.trim();
+  async _addFolderToGroupDialog(groupName) {
+    document.querySelectorAll('.folder-browser-overlay').forEach(el => el.remove());
 
-    // Check for sessions in other groups that would be affected
+    const overlay = document.createElement('div');
+    overlay.className = 'folder-browser-overlay';
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) overlay.remove(); });
+
+    const dialog = document.createElement('div');
+    dialog.className = 'folder-browser-dialog';
+
+    // Header
+    const header = document.createElement('div');
+    header.className = 'folder-browser-header';
+    header.innerHTML = `<h3>Add folder to "${escHtml(groupName)}"</h3>`;
+    const closeBtn = document.createElement('button'); closeBtn.className = 'dialog-close'; closeBtn.textContent = '✕';
+    closeBtn.onclick = () => overlay.remove();
+    header.appendChild(closeBtn);
+
+    // Path bar
+    const pathBar = document.createElement('div'); pathBar.className = 'folder-browser-pathbar';
+    const pathInput = document.createElement('input'); pathInput.className = 'folder-browser-path-input';
+    pathInput.placeholder = '/path/to/folder';
+    const goBtn = document.createElement('button'); goBtn.className = 'folder-browser-go-btn'; goBtn.textContent = 'Go';
+    pathBar.append(pathInput, goBtn);
+
+    // File list
+    const list = document.createElement('div'); list.className = 'folder-browser-list';
+
+    // Footer with select button
+    const footer = document.createElement('div'); footer.className = 'folder-browser-footer';
+    const selectBtn = document.createElement('button'); selectBtn.className = 'btn-create';
+    selectBtn.textContent = '+ Add this folder';
+    footer.appendChild(selectBtn);
+
+    dialog.append(header, pathBar, list, footer);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+
+    let currentPath = '';
+
+    const navigate = async (dirPath) => {
+      list.innerHTML = '<div class="empty-hint">Loading...</div>';
+      try {
+        const res = await fetch(`/api/files?path=${encodeURIComponent(dirPath)}`);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        currentPath = data.path;
+        pathInput.value = currentPath;
+        list.innerHTML = '';
+
+        // Parent directory
+        if (currentPath !== '/') {
+          const parent = document.createElement('div'); parent.className = 'folder-browser-item';
+          parent.innerHTML = '<span>📁</span><span class="folder-browser-item-name">..</span>';
+          parent.onclick = () => navigate(currentPath.replace(/\/[^/]+\/?$/, '') || '/');
+          list.appendChild(parent);
+        }
+
+        // Directories only, sorted by modified desc
+        const dirs = (data.items || []).filter(i => i.isDirectory).sort((a, b) => (b.modified || 0) - (a.modified || 0));
+        for (const d of dirs) {
+          const item = document.createElement('div'); item.className = 'folder-browser-item';
+          const icon = document.createElement('span'); icon.textContent = '📁';
+          const name = document.createElement('span'); name.className = 'folder-browser-item-name'; name.textContent = d.name;
+          const mod = document.createElement('span'); mod.className = 'folder-browser-item-time';
+          mod.textContent = d.modified ? new Date(d.modified).toLocaleDateString([], { month: 'short', day: 'numeric' }) : '';
+          item.append(icon, name, mod);
+          item.onclick = () => navigate(currentPath + '/' + d.name);
+          list.appendChild(item);
+        }
+        if (!dirs.length && currentPath !== '/') {
+          list.innerHTML += '<div class="empty-hint">No subfolders</div>';
+        }
+      } catch (err) {
+        list.innerHTML = `<div class="empty-hint" style="color:var(--red)">${err.message}</div>`;
+      }
+    };
+
+    goBtn.onclick = () => { if (pathInput.value.trim()) navigate(pathInput.value.trim()); };
+    pathInput.onkeydown = (e) => { if (e.key === 'Enter') goBtn.click(); };
+
+    selectBtn.onclick = () => {
+      if (!currentPath) return;
+      overlay.remove();
+      this._confirmAndAddFolder(currentPath, groupName);
+    };
+
+    // Start at home
+    try {
+      const r = await fetch('/api/home'); const d = await r.json();
+      navigate(d.home);
+    } catch { navigate('/'); }
+  }
+
+  _confirmAndAddFolder(fp, groupName) {
     const allSessions = this._allSessions;
     const conflicting = [];
     for (const s of allSessions) {
       const cwd = s.cwd || '';
       if (cwd === fp || cwd.startsWith(fp + '/')) {
         const existingGroups = this._getSessionGroups(s.sessionId);
-        // Check if session is directly assigned to another group (not just folder-matched)
         for (const g of existingGroups) {
           if (g !== groupName && (this._sessionGroups[g] || []).includes(s.sessionId)) {
             conflicting.push({ session: s, fromGroup: g });
@@ -1104,7 +1192,7 @@ class Sidebar {
     if (conflicting.length > 0) {
       const names = conflicting.map(c => `"${c.session.name || c.session.sessionId.substring(0, 12)}" (in ${c.fromGroup})`).join('\n');
       const move = confirm(
-        `${conflicting.length} session(s) in this folder are already assigned to other groups:\n\n${names}\n\nMove them to "${groupName}"?\n\nOK = Move all to "${groupName}"\nCancel = Skip them (keep their current group)`
+        `${conflicting.length} session(s) in this folder are already in other groups:\n\n${names}\n\nMove them to "${groupName}"?\n\nOK = Move\nCancel = Skip`
       );
       if (move) {
         for (const c of conflicting) {
