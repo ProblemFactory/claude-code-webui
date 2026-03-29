@@ -40,13 +40,28 @@ class SettingsUI {
     exportBtn.title = 'Export all presets (settings, groups, bookmarks) to a file';
     exportBtn.onclick = async () => {
       try {
+        // Get server-side data
         const res = await fetch('/api/preset-export');
         const preset = await res.json();
-        const blob = new Blob([JSON.stringify(preset, null, 2)], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url; a.download = 'webui-preset.json'; a.click();
-        URL.revokeObjectURL(url);
+        // Add client-side localStorage data
+        const clientKeys = ['fileExplorerSettings', 'fileExplorerColumns', 'termFontSize', 'termFontFamily', 'theme', 'sidebarWidth'];
+        const clientState = {};
+        for (const k of clientKeys) {
+          const v = localStorage.getItem(k);
+          if (v !== null) clientState[k] = v;
+        }
+        preset.clientState = clientState;
+        // Save to server (webui project directory)
+        const saveRes = await fetch('/api/preset-export', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(preset),
+        });
+        const saveData = await saveRes.json();
+        if (saveRes.ok) {
+          alert('Preset exported to: ' + (saveData.path || 'webui-preset.json'));
+        } else {
+          alert('Export failed: ' + (saveData.error || 'unknown error'));
+        }
       } catch (err) { alert('Export failed: ' + err.message); }
     };
 
@@ -71,6 +86,12 @@ class SettingsUI {
             body: JSON.stringify(preset),
           });
           if (res.ok) {
+            // Restore client-side localStorage data
+            if (preset.clientState && typeof preset.clientState === 'object') {
+              for (const [k, v] of Object.entries(preset.clientState)) {
+                localStorage.setItem(k, v);
+              }
+            }
             alert('Presets imported. Reloading page...');
             location.reload();
           } else { alert('Import failed'); }

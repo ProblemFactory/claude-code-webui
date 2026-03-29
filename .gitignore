@@ -8,4 +8,5 @@ data/user-state.json
 data/bookmarks.json
 data/settings.json
 data/bin/code
+webui-preset.json
 *.nfs*

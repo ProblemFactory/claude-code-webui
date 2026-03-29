@@ -751,19 +751,33 @@ app.post('/api/settings', (req, res) => {
 // Forward-compatible: unknown sections are preserved on export and ignored on import.
 // Settings are sparse (only non-defaults), so importing an older preset into a newer
 // version just means new settings keep their defaults.
+// GET returns the preset JSON; POST accepts client-side data (localStorage values) to include
+const PRESET_FILE = path.join(__dirname, 'webui-preset.json');
+
 app.get('/api/preset-export', (req, res) => {
   const bookmarksFile = path.join(__dirname, 'data', 'bookmarks.json');
   const layoutsFile = path.join(__dirname, 'data', 'layouts.json');
   const preset = {
     _format: 'claude-code-webui-preset',
-    _version: 2,
+    _version: 3,
     _exportedAt: new Date().toISOString(),
     settings: readSettings(),
     userState: readUserState(),
     bookmarks: (() => { try { return JSON.parse(fs.readFileSync(bookmarksFile, 'utf-8')); } catch { return []; } })(),
     layouts: (() => { try { return JSON.parse(fs.readFileSync(layoutsFile, 'utf-8')); } catch { return {}; } })(),
+    // clientState is added by the client before saving
   };
   res.json(preset);
+});
+
+// Client sends the full preset (including client-side localStorage data) to save to disk
+app.post('/api/preset-export', (req, res) => {
+  const preset = req.body;
+  if (!preset || typeof preset !== 'object') return res.status(400).json({ error: 'Expected preset object' });
+  try {
+    fs.writeFileSync(PRESET_FILE, JSON.stringify(preset, null, 2));
+    res.json({ success: true, path: PRESET_FILE });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/preset-import', (req, res) => {
@@ -790,6 +804,10 @@ app.post('/api/preset-import', (req, res) => {
     if (preset.layouts && typeof preset.layouts === 'object') {
       ensureDir(path.join(__dirname, 'data'));
       fs.writeFileSync(path.join(__dirname, 'data', 'layouts.json'), JSON.stringify(preset.layouts, null, 2));
+    }
+    // clientState is returned to the client for localStorage restoration
+    if (preset.clientState) {
+      // Client will handle restoring these to localStorage
     }
     res.json({ success: true, imported: Object.keys(preset).filter(k => !k.startsWith('_')) });
   } catch (err) { res.status(500).json({ error: err.message }); }
