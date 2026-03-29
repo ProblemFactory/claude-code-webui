@@ -368,8 +368,11 @@ class WindowManager {
   // ── Layout Presets ──
   focusWindow(id, { bounce = false } = {}) {
     const win = this.windows.get(id); if (!win) return;
-    this.windows.forEach(w => w.element.classList.remove('window-active'));
+    this.windows.forEach(w => w.element.classList.remove('window-active', 'highlight-subtle', 'highlight-strong'));
     win.element.style.zIndex = this.zIndex++; win.element.classList.add('window-active');
+    const intensity = this._settings?.get('window.activeHighlightIntensity') ?? 'normal';
+    if (intensity === 'subtle') win.element.classList.add('highlight-subtle');
+    else if (intensity === 'strong') win.element.classList.add('highlight-strong');
     this.activeWindowId = id; this._notify();
     if (bounce && (this._settings?.get('window.enableBounceOnFocus') ?? false)) {
       win.element.classList.remove('window-bounce');

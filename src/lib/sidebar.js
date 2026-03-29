@@ -69,6 +69,15 @@ class Sidebar {
     this._activeView = null; // null = ALL (show all selected filters), or a specific status string
     const filterBtn = document.getElementById('live-filter');
     filterBtn.onclick = (e) => { e.stopPropagation(); this._showStatusFilterMenu(filterBtn); };
+    // Apply defaultStatusFilter once after async settings load (setting may differ from schema default)
+    const _applyDefaultFilter = (val) => {
+      this._statusFilter = new Set(val);
+      this._activeView = null;
+      this._updateFilterBtn(filterBtn);
+      this._render();
+      this.app.settings?.off('sidebar.defaultStatusFilter', _applyDefaultFilter);
+    };
+    this.app.settings?.on('sidebar.defaultStatusFilter', _applyDefaultFilter);
     this._renderQuickTabs();
     // Re-render quick tabs after settings finish loading (async)
     this.app.settings?.on('sidebar.enableStatusQuickTabs', () => this._renderQuickTabs());
@@ -315,13 +324,13 @@ class Sidebar {
   // ── Highlight / Sort / Filter ──
 
   highlightSession(sessionId) {
-    this.listEl.querySelectorAll('.session-item-card').forEach(c => c.classList.remove('highlighted'));
+    this.listEl.querySelectorAll('.session-item-card').forEach(c => c.classList.remove('highlighted', 'highlight-flash'));
     if (!sessionId) return;
     const cards = this.listEl.querySelectorAll('.session-item-card');
     for (const card of cards) {
       if (card._sessionId === sessionId) {
         card.classList.add('highlighted');
-        // Scroll into view if needed
+        requestAnimationFrame(() => card.classList.add('highlight-flash'));
         if (card.scrollIntoViewIfNeeded) card.scrollIntoViewIfNeeded(false);
         else card.scrollIntoView({ block: 'nearest' });
         break;
@@ -645,32 +654,26 @@ class Sidebar {
       };
       header.appendChild(resumeAllBtn);
 
-      // Linked folders button
-      if (linkedFolders.length > 0 || true) { // always show so user can add folders
-        const foldersBtn = document.createElement('button');
-        foldersBtn.className = 'folder-add-btn';
-        foldersBtn.textContent = '\uD83D\uDCC1';
-        foldersBtn.style.fontSize = '10px';
-        foldersBtn.title = 'Linked folders' + (linkedFolders.length ? ': ' + linkedFolders.join(', ') : ' (none)');
-        foldersBtn.onclick = (e) => {
-          e.stopPropagation();
-          this._showGroupFoldersPopover(foldersBtn, groupName);
-        };
-        header.appendChild(foldersBtn);
-      }
+      // Right-click context menu (Rename / Linked Folders / Delete)
+      header.addEventListener('contextmenu', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        this._showGroupContextMenu(e.clientX, e.clientY, groupName);
+      });
 
-      // Delete group button
-      const delBtn = document.createElement('button');
-      delBtn.className = 'folder-add-btn';
-      delBtn.textContent = '\u00D7';
-      delBtn.title = 'Delete group "' + groupName + '"';
-      delBtn.onclick = (e) => {
-        e.stopPropagation();
-        if (confirm('Delete group "' + groupName + '"? (Sessions will not be deleted)')) {
-          this._deleteGroup(groupName);
+      // Drop target: accept folders from file explorer and sessions from sidebar
+      header.addEventListener('dragover', (e) => {
+        if (e.dataTransfer.types.includes('application/x-folder-path') || e.dataTransfer.types.includes('application/x-session-id')) {
+          e.preventDefault(); header.classList.add('drop-target');
         }
-      };
-      header.appendChild(delBtn);
+      });
+      header.addEventListener('dragleave', () => header.classList.remove('drop-target'));
+      header.addEventListener('drop', (e) => {
+        e.preventDefault(); header.classList.remove('drop-target');
+        const folderPath = e.dataTransfer.getData('application/x-folder-path');
+        const sessionId = e.dataTransfer.getData('application/x-session-id');
+        if (folderPath) this._addFolderToGroup(folderPath, groupName);
+        else if (sessionId) this._assignSessionToGroup(sessionId, groupName);
+      });
 
       header.onclick = (e) => {
         if (e.target.closest('.folder-add-btn')) return;
@@ -729,6 +732,11 @@ class Sidebar {
   _renderSessionCard(s) {
     const card = document.createElement('div'); card.className = 'session-item-card';
     card._sessionId = s.sessionId; // Store for highlight lookup
+    card.draggable = true;
+    card.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData('application/x-session-id', s.sessionId);
+      e.dataTransfer.effectAllowed = 'link';
+    });
     const isArchived = this._archivedIds.has(s.sessionId);
     if (isArchived) card.classList.add('archived');
     if (this._expandedCardId === s.sessionId) card.classList.add('expanded');
@@ -888,13 +896,14 @@ class Sidebar {
       nameEl.addEventListener('dblclick', (e) => { e.stopPropagation(); this.renameSession(s.sessionId, originalName); });
     }
 
-    const clickToExpand = settings?.get('sessionCard.clickToExpand') ?? false;
-    if (clickToExpand) {
+    const clickBehavior = settings?.get('sessionCard.clickBehavior') ?? 'focus';
+    if (s.status === 'external') {
+      card.style.opacity = '0.7';
+      if (clickBehavior === 'focus') card.style.cursor = 'default';
+      card.title = 'Running in unsupported terminal (PID ' + (s.pid || '?') + ')';
+    }
+    if (clickBehavior === 'expand') {
       // Click expands/collapses; use buttons inside detail to open/resume
-      if (s.status === 'external') {
-        card.style.opacity = '0.7';
-        card.title = 'Running in unsupported terminal (PID ' + (s.pid || '?') + ')';
-      }
       card.onclick = (e) => {
         if (e.target.closest('.session-detail-btn') || e.target.closest('.session-inline-btn') || e.target.closest('.session-expand-btn') || e.target.closest('.session-detail-copyable')) return;
         if (this._expandedCardId === s.sessionId) {
@@ -904,16 +913,21 @@ class Sidebar {
         }
         this._render();
       };
+    } else if (clickBehavior === 'flash') {
+      // Click flashes/bounces the corresponding window
+      card.onclick = (e) => {
+        if (e.target.closest('.session-detail-btn') || e.target.closest('.session-inline-btn') || e.target.closest('.session-expand-btn') || e.target.closest('.session-detail-copyable')) return;
+        if (s.webuiId) this.app.flashWindow(s.webuiId);
+        else if (s.status === 'tmux') this.app.attachTmuxSession(s.tmuxTarget, displayName, s.cwd);
+        else if (s.status === 'stopped') this.app.resumeSession(s.sessionId, s.cwd, customName || s.name);
+      };
     } else {
-      // Default: click opens/resumes directly
+      // Default 'focus': click opens/resumes directly
       if (s.status === 'live' && s.webuiId) {
         card.onclick = () => this.app.attachSession(s.webuiId, s.webuiName || displayName, s.cwd);
       } else if (s.status === 'tmux') {
         card.onclick = () => this.app.attachTmuxSession(s.tmuxTarget, displayName, s.cwd);
         card.title = 'Running in tmux \u2014 click to view (closing won\'t kill it)';
-      } else if (s.status === 'external') {
-        card.style.opacity = '0.7'; card.style.cursor = 'default';
-        card.title = 'Running in unsupported terminal (PID ' + (s.pid || '?') + ')';
       } else if (s.status === 'stopped') {
         card.onclick = () => this.app.resumeSession(s.sessionId, s.cwd, customName || s.name);
       }
@@ -971,7 +985,7 @@ class Sidebar {
     if (folders.length === 0) {
       const hint = document.createElement('div');
       hint.className = 'empty-hint';
-      hint.textContent = 'No linked folders. Use 🔗 on folder headers in Folders tab to link.';
+      hint.textContent = 'No linked folders. Use \uD83D\uDD17 on folder headers in Folders tab, or drag folders here.';
       pop.appendChild(hint);
     } else {
       for (const fp of folders) {
@@ -998,6 +1012,53 @@ class Sidebar {
 
     document.body.appendChild(pop);
     attachPopoverClose(pop, anchor);
+  }
+
+  _showGroupContextMenu(x, y, groupName) {
+    document.querySelectorAll('.context-menu').forEach(m => m.remove());
+    const menu = document.createElement('div'); menu.className = 'context-menu';
+    menu.style.left = x + 'px'; menu.style.top = y + 'px';
+
+    const items = [
+      { label: 'Rename', action: () => {
+        const n = prompt('Rename group:', groupName);
+        if (n && n.trim() && n.trim() !== groupName) this._renameGroup(groupName, n.trim());
+      }},
+      { label: 'Linked folders', action: () => {
+        // Show the folders popover anchored near the menu position
+        const anchor = document.createElement('span');
+        anchor.style.cssText = 'position:fixed;left:' + x + 'px;top:' + y + 'px;width:0;height:0';
+        document.body.appendChild(anchor);
+        this._showGroupFoldersPopover(anchor, groupName);
+        anchor.remove();
+      }},
+      { separator: true },
+      { label: 'Delete group', style: 'color:var(--red,#e55)', action: () => {
+        if (confirm('Delete group "' + groupName + '"?\nSessions will not be deleted.')) this._deleteGroup(groupName);
+      }},
+    ];
+    for (const item of items) {
+      if (item.separator) { const sep = document.createElement('div'); sep.className = 'context-menu-separator'; menu.appendChild(sep); continue; }
+      const el = document.createElement('div'); el.className = 'context-menu-item'; el.textContent = item.label;
+      if (item.style) el.style.cssText = item.style;
+      el.onclick = () => { menu.remove(); item.action(); };
+      menu.appendChild(el);
+    }
+    // Keep menu on screen
+    document.body.appendChild(menu);
+    const mr = menu.getBoundingClientRect();
+    if (mr.right > window.innerWidth) menu.style.left = (window.innerWidth - mr.width - 4) + 'px';
+    if (mr.bottom > window.innerHeight) menu.style.top = (window.innerHeight - mr.height - 4) + 'px';
+    attachPopoverClose(menu);
+  }
+
+  _assignSessionToGroup(sessionId, groupName) {
+    if (!this._sessionGroups[groupName]) this._sessionGroups[groupName] = [];
+    if (!this._sessionGroups[groupName].includes(sessionId)) {
+      this._sessionGroups[groupName].push(sessionId);
+      this._pushUserState();
+      this._render();
+    }
   }
 
   _showFolderGroupPopover(anchor, folderPath) {

@@ -39,14 +39,15 @@ const SETTINGS_SCHEMA = {
     description: 'Briefly scale-bounce windows when focused from sidebar or taskbar',
     category: 'Window', liveApply: true,
   },
-  'window.showRefitButton': {
-    type: 'boolean', default: false, label: 'Show refit button',
-    description: 'Show ↻ button in window title bar to force terminal re-fit',
-    category: 'Window', liveApply: true,
-  },
-  'window.showOverlapIndicator': {
-    type: 'boolean', default: true, label: 'Overlap indicator',
-    description: 'Show overlap icon on title bar when windows stack',
+  'window.activeHighlightIntensity': {
+    type: 'enum', default: 'normal',
+    options: [
+      { value: 'subtle', label: 'Subtle' },
+      { value: 'normal', label: 'Normal' },
+      { value: 'strong', label: 'Strong' },
+    ],
+    label: 'Active window highlight',
+    description: 'How prominently the focused window is highlighted (subtle = shadow only, normal = accent border, strong = border + glow)',
     category: 'Window', liveApply: true,
   },
 
@@ -60,11 +61,6 @@ const SETTINGS_SCHEMA = {
   'terminal.preserveCustomTitle': {
     type: 'boolean', default: false, label: 'Preserve custom session title',
     description: 'Prevent Claude\'s OSC title updates from overwriting user-set session names',
-    category: 'Terminal', liveApply: true,
-  },
-  'terminal.suppressWaitingOnRestore': {
-    type: 'boolean', default: false, label: 'Suppress blink on restore',
-    description: 'Don\'t trigger waiting-blink when replaying terminal buffer on page refresh',
     category: 'Terminal', liveApply: true,
   },
   'terminal.preserveScrollOnFit': {
@@ -98,31 +94,22 @@ const SETTINGS_SCHEMA = {
     description: 'Which session statuses to show by default',
     category: 'Sidebar', liveApply: false,
   },
-  'sidebar.enableAutoGrouping': {
-    type: 'boolean', default: false, label: 'Auto domain grouping',
-    description: 'Automatically group sessions by workspace path or name prefix',
-    category: 'Sidebar', liveApply: false,
-  },
-  'sidebar.enableStarredDrawer': {
-    type: 'boolean', default: false, label: 'Starred drawer',
-    description: 'Show starred sessions in a separate collapsible group at the top',
-    category: 'Sidebar', liveApply: false,
-  },
   'sidebar.enableStatusQuickTabs': {
     type: 'boolean', default: false, label: 'Status quick tabs',
     description: 'Show quick-filter tabs (ALL/LIVE/STOP/...) below the search bar',
     category: 'Sidebar', liveApply: false,
   },
-  'sidebar.showNewSessionCard': {
-    type: 'boolean', default: true, label: 'Show "+ New Session" card',
-    description: 'Show a card at the top of the session list to create new sessions',
-    category: 'Sidebar', liveApply: false,
-  },
 
   // ── Session Card ──
-  'sessionCard.clickToExpand': {
-    type: 'boolean', default: false, label: 'Click to expand (not open)',
-    description: 'Single-click expands session card details instead of opening/resuming the session',
+  'sessionCard.clickBehavior': {
+    type: 'enum', default: 'focus',
+    options: [
+      { value: 'focus', label: 'Focus window' },
+      { value: 'expand', label: 'Expand card' },
+      { value: 'flash', label: 'Flash window' },
+    ],
+    label: 'Card click behavior',
+    description: 'What happens when clicking a session card: focus/open the window, expand card details, or flash/bounce the window',
     category: 'Session Card', liveApply: false,
   },
   'sessionCard.clickToCopy': {
@@ -153,45 +140,6 @@ const SETTINGS_SCHEMA = {
     description: 'When text overflows, truncate from the left (shows filename) or right (shows path start)',
     category: 'Session Card', liveApply: false,
   },
-
-  // ── File Explorer ──
-  'fileExplorer.defaultSort': {
-    type: 'enum', default: 'name',
-    options: [
-      { value: 'name', label: 'Name' },
-      { value: 'size', label: 'Size' },
-      { value: 'modified', label: 'Modified' },
-    ],
-    label: 'Default sort',
-    description: 'Default column to sort files by',
-    category: 'File Explorer', liveApply: false,
-  },
-  'fileExplorer.defaultSortAsc': {
-    type: 'boolean', default: true, label: 'Sort ascending',
-    description: 'Default sort direction (on = ascending, off = descending)',
-    category: 'File Explorer', liveApply: false,
-  },
-  'fileExplorer.flatTimeSort': {
-    type: 'boolean', default: false, label: 'Flat time sort',
-    description: 'When sorting by modified time, mix files and folders instead of grouping dirs first',
-    category: 'File Explorer', liveApply: false,
-  },
-
-  // ── Hotkeys ──
-  'hotkeys.layoutBindings': {
-    type: 'json', default: [],
-    label: 'Layout hotkey bindings',
-    description: 'Custom hotkey bindings for window positioning. Array of {key, modifier, layout, cell}',
-    category: 'Hotkeys', liveApply: false,
-  },
-
-  // ── Themes ──
-  'themes.colorOverrides': {
-    type: 'json', default: {},
-    label: 'Theme color overrides',
-    description: 'Override terminal colors per theme. Object keyed by theme name with partial terminal theme values.',
-    category: 'Themes', liveApply: false,
-  },
 };
 
 // Ordered category list for UI rendering
@@ -201,9 +149,6 @@ const SETTINGS_CATEGORIES = [
   'Terminal',
   'Sidebar',
   'Session Card',
-  'File Explorer',
-  'Hotkeys',
-  'Themes',
 ];
 
 export { SETTINGS_SCHEMA, SETTINGS_CATEGORIES };

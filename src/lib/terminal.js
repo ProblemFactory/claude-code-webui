@@ -396,6 +396,11 @@ class TerminalSession {
     if (this._fitTimer) clearTimeout(this._fitTimer);
     this._fitTimer = setTimeout(() => {
       try {
+        // Skip fit when container is hidden (e.g. minimized window) — fitting a 0-sized
+        // container resizes the terminal to minimum (2×1) and corrupts _effectiveSize
+        const container = this.terminal.element?.parentElement;
+        if (!container || container.offsetWidth === 0 || container.offsetHeight === 0) return;
+
         const preserveScroll = this._settings?.get('terminal.preserveScrollOnFit');
         let bottomLine, wasAtBottom;
         if (preserveScroll) {

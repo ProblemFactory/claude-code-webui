@@ -95,7 +95,7 @@ CLAUDE.md              — This file
 | **CWD autocomplete** | `server.js` → `GET /api/dir-complete` + `src/lib/app.js` → `_setupCwdAutocomplete()` | 500ms timeout, `~` expansion, debounce |
 | **Resizable panels** | `src/lib/resizer.js` | Used by sidebar (`inside: true`) and split-pane editor |
 | **Global settings** | `src/lib/app.js` → `_showGlobalSettings()` | ⚙ popover in toolbar: theme, font size, font family + "All Settings" link |
-| **Settings system** | `src/lib/settings.js` + `src/lib/settings-schema.js` + `src/lib/settings-ui.js` | Schema-driven, sparse storage, server-persisted, WS broadcast, VS Code-style UI |
+| **Settings system** | `src/lib/settings.js` + `src/lib/settings-schema.js` + `src/lib/settings-ui.js` | Schema-driven, sparse storage, server-persisted, WS broadcast, VS Code-style UI. Categories: Toolbar & Layout, Window, Terminal, Sidebar, Session Card |
 | **Per-terminal settings** | `src/lib/terminal.js` → `_showSettings()`, `applyOverride()` | ⚙ popover per window: theme/font size/font with Default option |
 | **Font discovery** | `src/lib/terminal.js` → `_buildFontList()` + `server.js` → `GET /api/fonts` | Client `queryLocalFonts()` → server `fc-list` fallback + Google Web Fonts |
 | **WebSocket protocol** | `server.js` → `wss.on('connection')` + `src/lib/ws.js` | All message types defined in server switch/case |
@@ -254,6 +254,10 @@ Split from monolithic 1647-line `src/client.js` into 13 ES modules under `src/li
 
 **Per-terminal settings** (window titlebar ⚙): Same three options, each with a "Default" that follows global. Theme and font have Default as a dropdown option. Font size has a Default checkbox that disables the number input. Overrides stored in `TerminalSession.overrides` and persisted in layout.
 
+**Schema-driven settings** (`settings-schema.js`): VS Code-style settings UI. Categories: Toolbar & Layout, Window, Terminal, Sidebar, Session Card. **Rule: only add settings that have working code behind them** — no placeholder/aspirational entries. Settings with `liveApply: false` need explicit one-shot listeners if they must be applied after async load (see `defaultStatusFilter` pattern). File explorer sort/filter config uses its own localStorage persistence — these are operational state, not user settings.
+
+**Session card click behavior**: `sessionCard.clickBehavior` enum replaces the old `clickToExpand` boolean. Three modes: `focus` (default — click opens/focuses window), `expand` (click toggles card details), `flash` (click flashes/bounces the window). Expand/collapse is always available via the ▸ arrow button regardless of this setting.
+
 ### 11. Font Discovery
 **Priority**: Client-side `queryLocalFonts()` API (Chrome 103+) → server-side `fc-list :spacing=mono` fallback → always includes Google Web Fonts.
 
@@ -346,7 +350,7 @@ Server → Client: `created`, `output`, `exited`, `attached`, `active-sessions`,
 - Archive/unarchive sessions: 📦 button, hidden by default, toggle via status filter
 - Focus window highlights corresponding session in sidebar
 - Find session: 🔍 button in expand panel flashes window title bar + taskbar (cyan 0.3s, 3s duration)
-- Session card settings: clickToExpand (click = expand not open), clickToCopy (click detail values), visibleFields, detailTruncation
+- Session card settings: clickBehavior (focus/expand/flash), clickToCopy (click detail values), visibleFields, detailTruncation
 - Status quick tabs: ALL/LIVE/TMUX/EXT/STOP/ARCH filter tabs (enabled via settings)
 - Session groups: Folders | Groups dual tab, user-defined groups with assign/unassign, folder linking (recursive auto-include by cwd), ▶ resume-all button
 - Multi-client sync: star/archive/rename/groups/bookmarks broadcast via WebSocket to all clients
@@ -408,3 +412,7 @@ Server → Client: `created`, `output`, `exited`, `attached`, `active-sessions`,
 - Dead dtach sockets cause "connection refused": `restoreSessions()` tried to attach to dead sockets. Fix: verify via `fuser`/`pgrep` before attach, auto-clean dead sockets.
 - node-pty `posix_spawnp failed` on macOS: prebuilt binary incompatible, `build/Release/spawn-helper` missing. Fix: `npm rebuild node-pty --build-from-source`. Also: commands (dtach, node, env, claude) resolved to full paths at startup via `resolveCmd()` since node-pty's `posix_spawnp` may not find Homebrew paths.
 - File explorer path not restored: `_explorerPath` was set via monkey-patch of `navigate()` AFTER constructor, so `_loadHome()`'s navigate used the original unpatched version. Fix: set `winInfo._explorerPath` directly inside `FileExplorer.navigate()`. Also pass `startPath` to constructor to skip `_loadHome()` when restoring.
+- Minimize/restore makes terminal narrow: minimizing a window (`display: none`) triggers ResizeObserver → `fit()` → fitAddon computes minimum 2×1 dimensions → sends tiny resize to server → `_effectiveSize` corrupted to {2,1}. On restore, stale `_effectiveSize` constrains terminal to 2 cols. Fix: `fit()` guards against zero-dimension containers (`offsetWidth === 0 || offsetHeight === 0`).
+- Waiting blink on buffer restore: `_suppressWaiting` was checked but never assigned, so `suppressWaitingOnRestore` setting never worked. Fix: `app.js` sets `term._suppressWaiting = true` before buffer write, clears it in the write callback. Removed the dead setting.
+- defaultStatusFilter always uses schema default: sidebar constructor reads setting synchronously before async settings load completes. Fix: one-shot listener via `settings.on()` that applies the server value once then removes itself.
+- Dead settings in schema: removed 9 settings defined in `settings-schema.js` but never read by any code (enableAutoGrouping, enableStarredDrawer, showNewSessionCard, showRefitButton, showOverlapIndicator, flatTimeSort, suppressWaitingOnRestore, layoutBindings, colorOverrides). Removed empty Hotkeys, Themes, File Explorer categories.

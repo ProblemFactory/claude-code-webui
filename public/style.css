@@ -138,6 +138,8 @@ html, body {
   border-left: 3px solid var(--accent);
   background: var(--bg-hover);
 }
+.session-item-card.highlighted.highlight-flash { animation: highlight-flash 0.4s ease-out; }
+@keyframes highlight-flash { 0% { background: var(--accent-dim, rgba(99,102,241,0.25)); } 100% { background: var(--bg-hover); } }
 
 /* Session card expand button */
 .session-expand-btn {
@@ -207,6 +209,7 @@ html, body {
   border-radius: var(--radius-sm); transition: background var(--transition);
 }
 .folder-header:hover { background: var(--bg-hover); }
+.folder-header.drop-target { background: var(--accent-dim, rgba(99,102,241,0.15)); outline: 1px dashed var(--accent); outline-offset: -1px; }
 .folder-chevron {
   font-size: 9px; transition: transform 0.15s; display: inline-block; width: 10px;
 }
@@ -343,6 +346,8 @@ html, body {
   display: flex; flex-direction: column; overflow: hidden; min-width: 320px; min-height: 180px;
 }
 .window.window-active { border-color: var(--border-active); box-shadow: var(--shadow-active); }
+.window.window-active.highlight-subtle { border-color: var(--border); box-shadow: var(--shadow-window); }
+.window.window-active.highlight-strong { border-color: var(--accent); box-shadow: var(--shadow-active), 0 0 0 1px var(--accent); }
 .window.window-bounce { animation: win-bounce 0.3s ease-out; }
 @keyframes win-bounce { 0% { transform: scale(1); } 40% { transform: scale(1.015); } 100% { transform: scale(1); } }
 .window.dragging { opacity: 0.85; cursor: grabbing; }

@@ -565,7 +565,7 @@ class FileExplorer {
       const label = document.createElement('div'); label.className = 'file-icon-label'; label.textContent = item.name;
       cell.append(icon, label);
       cell.draggable = true;
-      cell.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/plain', fullPath); e.dataTransfer.setData('application/x-file-path', fullPath); });
+      cell.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/plain', fullPath); e.dataTransfer.setData('application/x-file-path', fullPath); if (item.isDirectory) e.dataTransfer.setData('application/x-folder-path', fullPath); });
       cell.addEventListener('click', () => { this.listEl.querySelectorAll('.file-icon-cell').forEach(c => c.classList.remove('selected')); cell.classList.add('selected'); });
       cell.addEventListener('dblclick', () => {
         if (item.isDirectory) this.navigate(fullPath);
@@ -602,7 +602,7 @@ class FileExplorer {
       }
 
       row.draggable = true;
-      row.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/plain', fullPath); e.dataTransfer.setData('application/x-file-path', fullPath); });
+      row.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/plain', fullPath); e.dataTransfer.setData('application/x-file-path', fullPath); if (item.isDirectory) e.dataTransfer.setData('application/x-folder-path', fullPath); });
       row.addEventListener('click', () => { this.listEl.querySelectorAll('.file-item').forEach(r => r.classList.remove('selected')); row.classList.add('selected'); });
       row.addEventListener('dblclick', () => {
         if (item.isDirectory) this.navigate(fullPath);
@@ -657,6 +657,13 @@ class FileExplorer {
         }
         return sub;
       }});
+      // Link folder to a session group
+      const groupNames = this.app.sidebar?._getGroupNames() || [];
+      if (groupNames.length > 0) {
+        items.push({ label: 'Add to group', submenu: () => {
+          return groupNames.map(g => ({ label: g, action: () => this.app.sidebar?._addFolderToGroup(fullPath, g) }));
+        }});
+      }
     } else {
       items.push({ label:'Open', action:() => this.app.openFile(fullPath, dataset.name) });
       items.push({ label:'Edit', action:() => this.app.openEditor(fullPath, dataset.name) });
