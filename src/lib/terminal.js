@@ -119,8 +119,10 @@ class TerminalSession {
         pasteTarget.focus();
         return false;
       }
-      // Ctrl+G: if split-pane editor is open, trigger Save & Close
+      // Ctrl+G: always preventDefault to block browser "Find in page".
+      // If split-pane editor is open, trigger Save & Close. Otherwise let xterm send to PTY.
       if ((e.ctrlKey || e.metaKey) && e.key === 'g') {
+        e.preventDefault();
         if (this.winInfo?._editorDoSave) { this.winInfo._editorDoSave(); return false; }
       }
       // Ctrl+C / Cmd+C with selection: copy to clipboard (fallback for HTTP)
