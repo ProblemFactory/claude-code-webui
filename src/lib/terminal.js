@@ -107,7 +107,10 @@ class TerminalSession {
     // spam when clicking between terminal and other UI elements (e.g. split-pane editor).
     this.terminal.onData((data) => {
       const filtered = data.replace(/\x1b\[I|\x1b\[O/g, '');
-      if (filtered) this.ws.send({ type: 'input', sessionId, data: filtered });
+      if (!filtered) return;
+      // Auto-repin when user types while scrolled up (skip if split-pane editor is active)
+      if (!this._pinned && !this.winInfo?._editorDoSave) this._repin();
+      this.ws.send({ type: 'input', sessionId, data: filtered });
     });
 
     // Paste image from clipboard via hidden contenteditable div
