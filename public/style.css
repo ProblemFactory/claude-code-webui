@@ -6,7 +6,7 @@
   --bg-taskbar: #0e0e1e; --bg-input: #12122a; --bg-hover: rgba(99,102,241,0.12);
   --bg-dialog: #1a1a30; --bg-sidebar: #0e0e1e;
   --accent: #6366f1; --accent-hover: #818cf8; --accent-dim: rgba(99,102,241,0.25);
-  --text: #e2e8f0; --text-secondary: #94a3b8; --text-dim: #64748b;
+  --text: #e2e8f0; --text-secondary: #94a3b8; --text-dim: #8890a8;
   --border: rgba(255,255,255,0.07); --border-active: rgba(99,102,241,0.4);
   --green: #22c55e; --red: #ef4444; --yellow: #f59e0b; --blue: #3b82f6;
   --radius: 8px; --radius-sm: 4px;
@@ -20,7 +20,7 @@
   --bg-titlebar: #f0f0f5; --bg-titlebar-active: #e8e8f0; --bg-toolbar: #ffffff;
   --bg-taskbar: #ffffff; --bg-input: #f5f5fa; --bg-hover: rgba(99,102,241,0.08);
   --bg-dialog: #ffffff; --bg-sidebar: #f5f5fa;
-  --text: #1e293b; --text-secondary: #475569; --text-dim: #94a3b8;
+  --text: #1e293b; --text-secondary: #475569; --text-dim: #6b7280;
   --border: rgba(0,0,0,0.1); --border-active: rgba(99,102,241,0.5);
   --shadow-window: 0 4px 16px rgba(0,0,0,0.1); --shadow-active: 0 8px 24px rgba(0,0,0,0.15);
   --terminal-bg: #ffffff; --terminal-fg: #1e293b; --terminal-cursor: #6366f1;
@@ -31,7 +31,7 @@
   --bg-taskbar: #1e1f29; --bg-input: #282a36; --bg-hover: rgba(189,147,249,0.12);
   --bg-dialog: #282a36; --bg-sidebar: #1e1f29;
   --accent: #bd93f9; --accent-hover: #caa6ff; --accent-dim: rgba(189,147,249,0.25);
-  --text: #f8f8f2; --text-secondary: #bfbfbf; --text-dim: #6272a4;
+  --text: #f8f8f2; --text-secondary: #bfbfbf; --text-dim: #8892b5;
   --border: rgba(255,255,255,0.08); --border-active: rgba(189,147,249,0.4);
   --green: #50fa7b; --red: #ff5555; --yellow: #f1fa8c; --blue: #8be9fd;
   --terminal-bg: #282a36; --terminal-fg: #f8f8f2; --terminal-cursor: #bd93f9;
@@ -42,7 +42,7 @@
   --bg-taskbar: #242933; --bg-input: #3b4252; --bg-hover: rgba(136,192,208,0.12);
   --bg-dialog: #3b4252; --bg-sidebar: #242933;
   --accent: #88c0d0; --accent-hover: #8fbcbb; --accent-dim: rgba(136,192,208,0.25);
-  --text: #eceff4; --text-secondary: #d8dee9; --text-dim: #4c566a;
+  --text: #eceff4; --text-secondary: #d8dee9; --text-dim: #a8b0bf;
   --border: rgba(255,255,255,0.06); --border-active: rgba(136,192,208,0.4);
   --green: #a3be8c; --red: #bf616a; --yellow: #ebcb8b; --blue: #81a1c1;
   --terminal-bg: #2e3440; --terminal-fg: #eceff4; --terminal-cursor: #88c0d0;
@@ -53,7 +53,7 @@
   --bg-taskbar: #00212b; --bg-input: #073642; --bg-hover: rgba(38,139,210,0.12);
   --bg-dialog: #073642; --bg-sidebar: #00212b;
   --accent: #268bd2; --accent-hover: #2aa198; --accent-dim: rgba(38,139,210,0.25);
-  --text: #fdf6e3; --text-secondary: #93a1a1; --text-dim: #586e75;
+  --text: #fdf6e3; --text-secondary: #93a1a1; --text-dim: #839496;
   --border: rgba(255,255,255,0.06); --border-active: rgba(38,139,210,0.4);
   --green: #859900; --red: #dc322f; --yellow: #b58900; --blue: #268bd2;
   --terminal-bg: #002b36; --terminal-fg: #fdf6e3; --terminal-cursor: #268bd2;
@@ -64,7 +64,7 @@
   --bg-taskbar: #1a1a1a; --bg-input: #272822; --bg-hover: rgba(166,226,46,0.1);
   --bg-dialog: #272822; --bg-sidebar: #1a1a1a;
   --accent: #a6e22e; --accent-hover: #c8ff40; --accent-dim: rgba(166,226,46,0.2);
-  --text: #f8f8f2; --text-secondary: #bfbfbf; --text-dim: #75715e;
+  --text: #f8f8f2; --text-secondary: #bfbfbf; --text-dim: #908d7a;
   --border: rgba(255,255,255,0.07); --border-active: rgba(166,226,46,0.4);
   --green: #a6e22e; --red: #f92672; --yellow: #e6db74; --blue: #66d9ef;
   --terminal-bg: #272822; --terminal-fg: #f8f8f2; --terminal-cursor: #f8f8f0;
