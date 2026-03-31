@@ -200,6 +200,36 @@ function restoreSessions() {
 
   // Populate webuiPids cache after all sessions are restored
   refreshWebuiPids();
+
+  // For sessions missing childPid in metadata, use pgrep fallback and persist
+  for (const [id, s] of activeSessions) {
+    if (s._childPid) continue;
+    if (!s.socketPath) continue;
+    try {
+      const out = execFileSync('pgrep', ['-f', s.socketPath], { encoding: 'utf-8', timeout: 2000 }).trim();
+      const pids = out.split('\n').map(l => parseInt(l.trim())).filter(Boolean);
+      // Walk children to find claude
+      const all = [...pids];
+      for (const p of pids) {
+        try {
+          const ch = execFileSync('pgrep', ['-P', String(p)], { encoding: 'utf-8', timeout: 2000 }).trim();
+          for (const c of ch.split('\n')) { const cp = parseInt(c.trim()); if (cp) all.push(cp); }
+        } catch {}
+      }
+      for (const p of all) webuiPids.add(p);
+      const childPid = all.find(p => isProcessClaude(p)) || all[all.length - 1];
+      if (childPid) {
+        s._childPid = childPid;
+        const metaPath = path.join(BUFFERS_DIR, id + '.json');
+        try {
+          const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+          meta.childPid = childPid;
+          fs.writeFileSync(metaPath, JSON.stringify(meta));
+        } catch {}
+        console.log(`  ↳ Backfilled childPid=${childPid} for ${id}`);
+      }
+    } catch {}
+  }
 }
 
 // ── Create editor helper script ──
