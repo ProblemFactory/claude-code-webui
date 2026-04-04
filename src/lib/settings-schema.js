@@ -90,6 +90,18 @@ const SETTINGS_SCHEMA = {
     category: 'Terminal', liveApply: true,
   },
 
+  // ── Session ──
+  'session.defaultMode': {
+    type: 'enum', default: 'terminal',
+    options: [
+      { value: 'terminal', label: 'Terminal' },
+      { value: 'chat', label: 'Chat' },
+    ],
+    label: 'Default session mode',
+    description: 'Default mode for new sessions and single-click resume from sidebar',
+    category: 'Session Card', liveApply: true,
+  },
+
   // ── Sidebar ──
   'sidebar.defaultStatusFilter': {
     type: 'multiSelect', default: ['live', 'tmux', 'external', 'stopped'],

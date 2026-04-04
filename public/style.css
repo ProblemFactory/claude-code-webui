@@ -186,6 +186,10 @@ html, body {
   background: var(--accent-dim); color: var(--accent-hover); border-color: var(--accent);
 }
 .session-detail-btn-primary:hover { background: var(--accent); color: #fff; }
+.session-detail-btn-chat {
+  background: rgba(34,197,94,0.15); color: var(--green); border-color: var(--green);
+}
+.session-detail-btn-chat:hover { background: var(--green); color: #fff; }
 
 /* Path autocomplete in file explorer */
 .path-autocomplete {

@@ -771,13 +771,10 @@ class App {
     this.ws.onGlobal(handler);
   }
 
-  resumeSession(sessionId, cwd, sessionName) {
+  resumeSession(sessionId, cwd, sessionName, { mode } = {}) {
     // If this session is already open in a window (e.g. already resumed), just focus it
     for (const [winId, term] of this.sessions) {
-      // Match by the claude session ID stored on the server
       if (term.sessionId) {
-        // We need to check the server's active sessions to see if this term's webui session
-        // corresponds to the claude sessionId we want
         const sidebar = this.sidebar;
         const match = (sidebar._allSessions || []).find(s => s.sessionId === sessionId && s.webuiId);
         if (match && term.sessionId === match.webuiId) {
@@ -787,29 +784,8 @@ class App {
       }
     }
 
-    this._hideWelcome();
-    const cwdShort = (cwd || '').replace(/^\/home\/[^/]+/, '~');
-    const title = sessionName || cwdShort;
-    const winInfo = this.wm.createWindow({ title, type: 'terminal' });
-
-    this.ws.send({
-      type: 'create', cwd: cwd || undefined,
-      sessionName: title,
-      resume: true, resumeId: sessionId,
-      cols: 120, rows: 30,
-    });
-
-    const handler = (msg) => {
-      if (msg.type === 'created') {
-        const serverSessId = msg.sessionId;
-        const term = new TerminalSession(winInfo, this.ws, serverSessId, this.themeManager, (fp, sp) => this._openExternalEditor(fp, sp), {}, this.settings);
-        this.sessions.set(winInfo.id, term);
-        this._wireTerminalWindow(winInfo, term, serverSessId);
-        term.focus();
-        this.ws.offGlobal(handler);
-      }
-    };
-    this.ws.onGlobal(handler);
+    const sessionMode = mode || (this.settings.get('session.defaultMode') ?? 'terminal');
+    this.createSession({ cwd, name: sessionName, resumeId: sessionId, mode: sessionMode });
   }
 
   openFileExplorer(startPath) {

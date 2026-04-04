@@ -885,11 +885,17 @@ class Sidebar {
       detailTmuxBtn.onclick = (e) => { e.stopPropagation(); this.app.attachTmuxSession(s.tmuxTarget, displayName, s.cwd); };
       actionsDiv.appendChild(detailTmuxBtn);
     } else if (s.status === 'stopped') {
-      const detailResumeBtn = document.createElement('button');
-      detailResumeBtn.className = 'session-detail-btn session-detail-btn-primary';
-      detailResumeBtn.textContent = '\u25B6 Resume';
-      detailResumeBtn.onclick = (e) => { e.stopPropagation(); this.app.resumeSession(s.sessionId, s.cwd, customName || s.name); };
-      actionsDiv.appendChild(detailResumeBtn);
+      const resumeTermBtn = document.createElement('button');
+      resumeTermBtn.className = 'session-detail-btn session-detail-btn-primary';
+      resumeTermBtn.textContent = '\u25B6 Resume in Terminal';
+      resumeTermBtn.onclick = (e) => { e.stopPropagation(); this.app.resumeSession(s.sessionId, s.cwd, customName || s.name, { mode: 'terminal' }); };
+      actionsDiv.appendChild(resumeTermBtn);
+
+      const resumeChatBtn = document.createElement('button');
+      resumeChatBtn.className = 'session-detail-btn session-detail-btn-chat';
+      resumeChatBtn.textContent = '\uD83D\uDCAC Resume in Chat';
+      resumeChatBtn.onclick = (e) => { e.stopPropagation(); this.app.resumeSession(s.sessionId, s.cwd, customName || s.name, { mode: 'chat' }); };
+      actionsDiv.appendChild(resumeChatBtn);
     }
 
     // Terminate button (for any running session)
