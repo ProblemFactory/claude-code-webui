@@ -1290,10 +1290,15 @@ wss.on('connection', (ws) => {
       }
 
       case 'chat-input': {
-        // Chat mode: send user message as text + newline to stdin
+        // Chat mode: send user message to stdin + broadcast to all clients
         const session = activeSessions.get(data.sessionId);
         if (session?.pty && session.mode === 'chat') {
           session.pty.write(data.text + '\n');
+          // Broadcast user message to all attached clients (stream-json doesn't echo it)
+          const userMsg = { type: 'user', message: { role: 'user', content: data.text }, timestamp: new Date().toISOString() };
+          const userLine = JSON.stringify(userMsg);
+          session.buffer = (session.buffer + userLine + '\n').slice(-500000);
+          broadcastToSession(session, data.sessionId, { type: 'chat-message', sessionId: data.sessionId, message: userMsg });
         }
         break;
       }
