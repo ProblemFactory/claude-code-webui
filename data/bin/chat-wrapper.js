@@ -28,9 +28,12 @@ if (!bufferFile || !cmd) {
   process.exit(1);
 }
 
-// Ensure --output-format stream-json --verbose are in args
+// Ensure stream-json flags are in args
 if (!args.includes('--output-format')) {
   args.push('--output-format', 'stream-json');
+}
+if (!args.includes('--input-format')) {
+  args.push('--input-format', 'stream-json');
 }
 if (!args.includes('--verbose')) {
   args.push('--verbose');
@@ -114,16 +117,30 @@ child.stderr.on('data', (chunk) => {
 });
 
 // stdin (from dtach PTY) → child stdin
-// In chat mode, the server writes user messages as plain text lines
+// Server writes lines via dtach PTY. Each line is either:
+// - A raw JSON object (already formatted as stream-json input) → pass through
+// - Plain text → wrap as {"type":"user","content":"..."}
+let stdinLineBuf = '';
 try {
   if (process.stdin.isTTY) process.stdin.setRawMode(true);
   process.stdin.resume();
   process.stdin.setEncoding('utf8');
   process.stdin.on('data', (data) => {
-    try {
-      if (child.stdin.writable) child.stdin.write(data);
-    } catch (err) {
-      log(`stdin write failed: ${err.message}`);
+    stdinLineBuf += data;
+    let nlIdx;
+    while ((nlIdx = stdinLineBuf.indexOf('\n')) !== -1) {
+      const line = stdinLineBuf.substring(0, nlIdx).replace(/\r/g, '').trim();
+      stdinLineBuf = stdinLineBuf.substring(nlIdx + 1);
+      if (!line) continue;
+      try {
+        // Try parsing as JSON — if valid, pass through as-is
+        JSON.parse(line);
+        if (child.stdin.writable) child.stdin.write(line + '\n');
+      } catch {
+        // Plain text — wrap as stream-json user message
+        const msg = JSON.stringify({ type: 'user', content: line });
+        if (child.stdin.writable) child.stdin.write(msg + '\n');
+      }
     }
   });
 } catch (err) {
