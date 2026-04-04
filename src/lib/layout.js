@@ -30,6 +30,13 @@ class LayoutManager {
         // Save editor split-pane state (Ctrl+G)
         if (win._editorState) winState.editorState = win._editorState;
       }
+      // For chat windows, save session id and claude session id
+      if (win.type === 'chat' && termSession) {
+        winState.serverSessionId = termSession.sessionId;
+        const allSess = this.app.sidebar?._allSessions || [];
+        const match = allSess.find(s => s.webuiId === termSession.sessionId);
+        if (match) winState.claudeSessionId = match.sessionId;
+      }
       // For file explorers, save current path
       if (win.type === 'files' && win._explorerPath) {
         winState.explorerPath = win._explorerPath;
@@ -121,6 +128,19 @@ class LayoutManager {
               this.app._openExternalEditor(ws.editorState.filePath, ws.editorState.signalPath);
             }, 500);
           }
+        }
+      } else if (ws.type === 'chat') {
+        let alive = null;
+        if (ws.claudeSessionId) {
+          alive = activeSessions.find(s => s.claudeSessionId === ws.claudeSessionId);
+        }
+        if (!alive && ws.serverSessionId) {
+          alive = activeSessions.find(s => s.id === ws.serverSessionId);
+        }
+        if (alive) {
+          const customName = this.app.sidebar?.getCustomName(ws.claudeSessionId || alive.claudeSessionId);
+          const winInfo = this.app.attachSession(alive.id, customName || alive.name, alive.cwd, { mode: 'chat' });
+          applyPosition(winInfo, ws);
         }
       } else if (ws.type === 'files') {
         const winInfo = this.app.openFileExplorer(ws.explorerPath);
