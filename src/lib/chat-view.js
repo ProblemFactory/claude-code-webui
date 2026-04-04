@@ -41,19 +41,48 @@ class ChatView {
     this._textarea.placeholder = 'Type a message...';
     this._textarea.rows = 1;
 
-    // Auto-grow textarea
+    // Auto-grow textarea (skip in expanded mode — user controls height)
     this._textarea.addEventListener('input', () => {
+      if (this._expanded) return;
       this._textarea.style.height = 'auto';
       this._textarea.style.height = Math.min(this._textarea.scrollHeight, 200) + 'px';
     });
 
-    // Send on Enter (Shift+Enter for newline)
+    // Send: Enter in normal mode, Ctrl+Enter in expanded mode
     this._textarea.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        this._send();
+      if (this._expanded) {
+        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); this._send(); }
+      } else {
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); this._send(); }
       }
     });
+
+    // Button row: expand toggle + send
+    const btnRow = document.createElement('div');
+    btnRow.className = 'chat-btn-row';
+
+    const expandBtn = document.createElement('button');
+    expandBtn.className = 'chat-expand-btn';
+    expandBtn.textContent = '\u2922'; // ⤢ expand icon
+    expandBtn.title = 'Expand editor';
+    this._expanded = false;
+    expandBtn.onclick = () => {
+      this._expanded = !this._expanded;
+      if (this._expanded) {
+        this._textarea.style.height = '200px';
+        this._textarea.style.minHeight = '200px';
+        this._textarea.classList.add('chat-input-expanded');
+        expandBtn.textContent = '\u2923'; // ⤣ collapse icon
+        expandBtn.title = 'Collapse editor';
+      } else {
+        this._textarea.style.height = 'auto';
+        this._textarea.style.minHeight = '36px';
+        this._textarea.classList.remove('chat-input-expanded');
+        expandBtn.textContent = '\u2922';
+        expandBtn.title = 'Expand editor';
+      }
+      this._textarea.focus();
+    };
 
     const sendBtn = document.createElement('button');
     sendBtn.className = 'chat-send-btn';
@@ -61,7 +90,8 @@ class ChatView {
     sendBtn.title = 'Send';
     sendBtn.onclick = () => this._send();
 
-    inputArea.append(this._textarea, sendBtn);
+    btnRow.append(expandBtn, sendBtn);
+    inputArea.append(this._textarea, btnRow);
     container.appendChild(inputArea);
 
     // Listen for chat messages from server
@@ -88,6 +118,13 @@ class ChatView {
     if (!text) return;
     this._textarea.value = '';
     this._textarea.style.height = 'auto';
+    this._textarea.style.minHeight = '36px';
+    if (this._expanded) {
+      this._expanded = false;
+      this._textarea.classList.remove('chat-input-expanded');
+      const eb = this._textarea.closest('.chat-input-area')?.querySelector('.chat-expand-btn');
+      if (eb) { eb.textContent = '\u2922'; eb.title = 'Expand editor'; }
+    }
     this.ws.send({ type: 'chat-input', sessionId: this.sessionId, text });
   }
 

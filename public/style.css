@@ -1201,6 +1201,7 @@ html, body {
   display: flex; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--border);
   background: var(--bg-titlebar); align-items: flex-end;
 }
+.chat-btn-row { display: flex; flex-direction: column; gap: 4px; flex-shrink: 0; }
 .chat-input {
   flex: 1; resize: none; border: 1px solid var(--border); border-radius: 8px;
   background: var(--bg-input); color: var(--text); padding: 8px 12px; font-size: 13px;
@@ -1215,6 +1216,17 @@ html, body {
   transition: background var(--transition);
 }
 .chat-send-btn:hover { background: var(--accent-hover); }
+.chat-expand-btn {
+  width: 36px; height: 20px; border-radius: var(--radius-sm); border: 1px solid var(--border);
+  background: var(--bg-input); color: var(--text-dim); font-size: 12px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  transition: all var(--transition);
+}
+.chat-expand-btn:hover { background: var(--bg-hover); color: var(--text); }
+.chat-input-expanded {
+  font-family: 'SF Mono','Fira Code','JetBrains Mono',monospace; font-size: 12px;
+  white-space: pre; overflow-wrap: normal;
+}
 
 /* ── Mobile Responsive ── */
 @media (max-width: 768px) {
