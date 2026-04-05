@@ -41,17 +41,22 @@ class ChatView {
     this._messageList.className = 'chat-message-list';
     container.appendChild(this._messageList);
 
-    // Scroll detection: pin-to-bottom + auto-load earlier messages
+    // Scroll detection: pin-to-bottom + auto-load earlier messages (throttled)
+    let scrollTick = false;
     this._messageList.addEventListener('scroll', () => {
-      const { scrollTop, scrollHeight, clientHeight } = this._messageList;
-      const atBottom = scrollHeight - scrollTop - clientHeight < 30;
-      if (atBottom && !this._pinned) this._pinned = true;
-      else if (!atBottom) this._pinned = false;
-      // Auto-load earlier messages when scrolled near top
-      if (scrollTop < 100 && this._loadedOffset > 0 && !this._loadingEarlier) {
-        this._loadEarlierMessages();
-      }
-    });
+      if (scrollTick) return;
+      scrollTick = true;
+      requestAnimationFrame(() => {
+        scrollTick = false;
+        const { scrollTop, scrollHeight, clientHeight } = this._messageList;
+        const atBottom = scrollHeight - scrollTop - clientHeight < 30;
+        if (atBottom && !this._pinned) this._pinned = true;
+        else if (!atBottom) this._pinned = false;
+        if (scrollTop < 100 && this._loadedOffset > 0 && !this._loadingEarlier) {
+          this._loadEarlierMessages();
+        }
+      });
+    }, { passive: true });
 
     // Input area
     const inputArea = document.createElement('div');

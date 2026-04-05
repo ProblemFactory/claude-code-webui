@@ -1142,7 +1142,7 @@ html, body {
 }
 
 /* Messages */
-.chat-msg { max-width: 100%; min-width: 0; }
+.chat-msg { max-width: 100%; min-width: 0; contain: layout style paint; content-visibility: auto; }
 .chat-msg-user { display: flex; justify-content: flex-end; }
 .chat-msg-assistant { display: flex; justify-content: flex-start; }
 .chat-msg-system { display: flex; justify-content: center; }
