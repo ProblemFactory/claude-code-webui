@@ -1229,10 +1229,14 @@ html, body {
 .chat-tool-result-details summary {
   cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   padding: 3px 8px; font-size: 11px; color: var(--text-secondary); list-style: none;
+  max-width: 100%;
+}
+.chat-tool-result-details pre {
+  overflow-x: auto; word-break: break-all;
 }
 .chat-tool-result-details summary::-webkit-details-marker { display: none; }
-.chat-tool-result-details summary::before { content: '\u25B8 '; color: var(--text-dim); }
-.chat-tool-result-details[open] summary::before { content: '\u25BE '; }
+.chat-tool-result-details summary::before { content: '\25B8  '; color: var(--text-dim); }
+.chat-tool-result-details[open] summary::before { content: '\25BE  '; }
 .chat-tool-result-details pre { margin: 4px 8px 6px; }
 .chat-tool-result-details.chat-tool-ok { border-left: 3px solid var(--green); background: rgba(34,197,94,0.05); }
 .chat-tool-result-details.chat-tool-error { border-left: 3px solid var(--red); background: rgba(239,68,68,0.05); }
