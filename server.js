@@ -1174,7 +1174,7 @@ app.get('/api/sessions', (req, res) => {
 app.get('/api/active', (req, res) => {
   const sessions = [];
   for (const [id, s] of activeSessions) {
-    sessions.push({ id, name: s.name, cwd: s.cwd, createdAt: s.createdAt, claudeSessionId: s.claudeSessionId || null });
+    sessions.push({ id, name: s.name, cwd: s.cwd, createdAt: s.createdAt, claudeSessionId: s.claudeSessionId || null, mode: s.mode || 'terminal' });
   }
   res.json({ sessions });
 });
