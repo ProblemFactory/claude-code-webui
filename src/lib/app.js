@@ -35,6 +35,7 @@ class App {
       this.updateTaskbar();
       this.layoutManager.scheduleAutoSave();
       this._notifySidebarFocus();
+      this._updateMobileNavTitle();
     };
     this.sidebar = new Sidebar(this);
 
@@ -71,8 +72,25 @@ class App {
     // Restore layout after WebSocket is connected (needs active sessions)
     setTimeout(() => this.layoutManager.loadAutoSave(), 1500);
 
+    // Mobile nav bar
+    this._setupMobileNav();
     // Mobile: swipe from left edge to open sidebar
     this._setupMobileGestures();
+  }
+
+  _setupMobileNav() {
+    const nav = document.getElementById('mobile-nav');
+    if (!nav) return;
+    document.getElementById('mobile-nav-menu').onclick = () => this.sidebar.toggle(true);
+    document.getElementById('mobile-nav-new').onclick = () => this.showNewSessionDialog();
+    // Update title when active window changes
+    this._mobileNavTitle = document.getElementById('mobile-nav-title');
+  }
+
+  _updateMobileNavTitle() {
+    if (!this._mobileNavTitle) return;
+    const win = this.wm.windows.get(this.wm.activeWindowId);
+    this._mobileNavTitle.textContent = win?.title || 'Claude Code';
   }
 
   _setupMobileGestures() {

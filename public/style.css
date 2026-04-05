@@ -1455,11 +1455,17 @@ pre.chat-pre-wrapped { white-space: pre-wrap; word-break: break-all; }
   .window .resize-handle { display: none; }
   .window-titlebar { display: none; }
 
-  /* Taskbar: hide, replaced by mobile nav */
+  /* Taskbar: hide */
   #taskbar { display: none; }
 
   /* Snap/grid: disable */
   #snap-indicator, #grid-overlay { display: none !important; }
+
+  /* Mobile nav bar: visible */
+  #mobile-nav { display: flex !important; }
+
+  /* Workspace: below mobile nav */
+  #workspace { top: 44px !important; }
 
   /* Chat: optimize for touch */
   .chat-message-list { padding: 8px 10px; }
@@ -1468,26 +1474,6 @@ pre.chat-pre-wrapped { white-space: pre-wrap; word-break: break-all; }
   .chat-send-btn { width: 36px; height: 36px; }
   .chat-compact-content { font-size: 14px; }
   .chat-role { font-size: 10px; min-width: 40px; }
-
-  /* Mobile session bar at top */
-  .mobile-session-bar {
-    display: flex; align-items: center; gap: 8px;
-    padding: 8px 12px; background: var(--bg-titlebar);
-    border-bottom: 1px solid var(--border); flex-shrink: 0;
-    padding-top: calc(8px + env(safe-area-inset-top, 0px));
-  }
-  .mobile-session-bar .mobile-menu-btn {
-    background: none; border: none; color: var(--text); font-size: 18px;
-    cursor: pointer; padding: 4px; flex-shrink: 0;
-  }
-  .mobile-session-bar .mobile-session-name {
-    flex: 1; font-size: 13px; font-weight: 600; color: var(--text);
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
-  .mobile-session-bar .mobile-new-btn {
-    background: none; border: none; color: var(--accent); font-size: 18px;
-    cursor: pointer; padding: 4px; flex-shrink: 0;
-  }
 
   /* Dialogs: full-width */
   .dialog { width: 95vw !important; max-width: none; }
@@ -1498,5 +1484,19 @@ pre.chat-pre-wrapped { white-space: pre-wrap; word-break: break-all; }
   .settings-nav-item { white-space: nowrap; }
 }
 
-/* Hide mobile bar on desktop */
-.mobile-session-bar { display: none; }
+/* Global mobile nav bar (hidden on desktop) */
+#mobile-nav {
+  display: none; position: fixed; top: 0; left: 0; right: 0; z-index: 500;
+  height: 44px; align-items: center; gap: 8px;
+  padding: 0 12px; background: var(--bg-toolbar); border-bottom: 1px solid var(--border);
+  padding-top: env(safe-area-inset-top, 0px);
+}
+#mobile-nav-menu, #mobile-nav-new {
+  background: none; border: none; color: var(--text); font-size: 22px;
+  cursor: pointer; padding: 4px 8px; flex-shrink: 0;
+}
+#mobile-nav-new { color: var(--accent); font-weight: 700; }
+#mobile-nav-title {
+  flex: 1; font-size: 14px; font-weight: 600; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: center;
+}

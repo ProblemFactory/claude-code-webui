@@ -36,23 +36,6 @@ class ChatView {
       container.classList.toggle('chat-compact', v);
     });
 
-    // Mobile session bar (hidden on desktop via CSS)
-    const mobileBar = document.createElement('div');
-    mobileBar.className = 'mobile-session-bar';
-    const menuBtn = document.createElement('button');
-    menuBtn.className = 'mobile-menu-btn';
-    menuBtn.textContent = '\u2630'; // ☰ hamburger
-    menuBtn.onclick = () => app.sidebar.toggle(true);
-    const sessionName = document.createElement('span');
-    sessionName.className = 'mobile-session-name';
-    sessionName.textContent = winInfo.title || 'Chat';
-    const newBtn = document.createElement('button');
-    newBtn.className = 'mobile-new-btn';
-    newBtn.textContent = '+';
-    newBtn.onclick = () => app.showNewSessionDialog();
-    mobileBar.append(menuBtn, sessionName, newBtn);
-    container.appendChild(mobileBar);
-
     // Message list
     this._messageList = document.createElement('div');
     this._messageList.className = 'chat-message-list';
