@@ -316,14 +316,11 @@ class TerminalSession {
 
     // Mobile: keep key toolbar visible when virtual keyboard opens
     if ('visualViewport' in window) {
-      const adjustForKeyboard = () => {
+      window.visualViewport.addEventListener('resize', () => {
         if (window.innerWidth > 768) return;
-        const vv = window.visualViewport;
-        const offset = window.innerHeight - vv.height - vv.offsetTop;
-        winInfo.element.style.setProperty('--kb-offset', offset + 'px');
-      };
-      window.visualViewport.addEventListener('resize', adjustForKeyboard);
-      window.visualViewport.addEventListener('scroll', adjustForKeyboard);
+        const offset = window.innerHeight - window.visualViewport.height;
+        winInfo.element.style.setProperty('--kb-offset', Math.max(0, offset) + 'px');
+      });
     }
 
     // Add settings gear icon to titlebar
