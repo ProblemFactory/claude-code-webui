@@ -73,8 +73,9 @@ class ChatView {
       scrollTick = true;
       requestAnimationFrame(() => {
         scrollTick = false;
+        if (this._programmaticScroll) return; // don't interfere with programmatic scrolls
         const { scrollTop, scrollHeight, clientHeight } = this._messageList;
-        const atBottom = scrollHeight - scrollTop - clientHeight < 30;
+        const atBottom = scrollHeight - scrollTop - clientHeight < 50;
         if (atBottom && !this._pinned) {
           this._pinned = true;
           this._newMsgCount = 0;
@@ -1008,8 +1009,13 @@ class ChatView {
   }
 
   _scrollToBottom() {
+    // Suppress scroll handler from unpinning during programmatic scroll
+    this._programmaticScroll = true;
+    this._messageList.scrollTop = this._messageList.scrollHeight;
+    // Repeat after layout settles (content-visibility: auto delays rendering)
     requestAnimationFrame(() => {
       this._messageList.scrollTop = this._messageList.scrollHeight;
+      setTimeout(() => { this._programmaticScroll = false; }, 100);
     });
   }
 
