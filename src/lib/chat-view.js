@@ -129,12 +129,53 @@ class ChatView {
       this._textarea.style.height = Math.min(this._textarea.scrollHeight, 200) + 'px';
     });
 
+    // Slash command list (populated from system.init)
+    this._slashCommands = [];
+    this._slashDropdown = document.createElement('div');
+    this._slashDropdown.className = 'chat-slash-dropdown hidden';
+
     // Send: Enter in normal mode, Ctrl+Enter in expanded mode
+    // Tab to accept slash autocomplete
     this._textarea.addEventListener('keydown', (e) => {
+      if (!this._slashDropdown.classList.contains('hidden')) {
+        if (e.key === 'Tab' || e.key === 'Enter') {
+          const active = this._slashDropdown.querySelector('.active');
+          if (active) { e.preventDefault(); this._textarea.value = active.dataset.cmd + ' '; this._slashDropdown.classList.add('hidden'); return; }
+        }
+        if (e.key === 'Escape') { this._slashDropdown.classList.add('hidden'); return; }
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          e.preventDefault();
+          const items = [...this._slashDropdown.querySelectorAll('.chat-slash-item')];
+          const cur = items.findIndex(i => i.classList.contains('active'));
+          items[cur]?.classList.remove('active');
+          const next = e.key === 'ArrowDown' ? (cur + 1) % items.length : (cur - 1 + items.length) % items.length;
+          items[next]?.classList.add('active');
+          return;
+        }
+      }
       if (this._expanded) {
         if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); this._send(); }
       } else {
         if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); this._send(); }
+      }
+    });
+
+    // Slash command autocomplete on input
+    this._textarea.addEventListener('input', () => {
+      const val = this._textarea.value;
+      if (val.startsWith('/') && !val.includes(' ') && this._slashCommands.length) {
+        const q = val.toLowerCase();
+        const matches = this._slashCommands.filter(c => c.toLowerCase().startsWith(q));
+        if (matches.length > 0 && val !== '/') {
+          this._slashDropdown.innerHTML = matches.slice(0, 8).map((c, i) =>
+            `<div class="chat-slash-item${i === 0 ? ' active' : ''}" data-cmd="${escHtml(c)}">${escHtml(c)}</div>`
+          ).join('');
+          this._slashDropdown.classList.remove('hidden');
+        } else {
+          this._slashDropdown.classList.add('hidden');
+        }
+      } else {
+        this._slashDropdown.classList.add('hidden');
       }
     });
 
@@ -167,7 +208,11 @@ class ChatView {
       this._textarea.focus();
     };
 
-    inputWrap.append(this._textarea, expandBtn);
+    this._slashDropdown.addEventListener('click', (e) => {
+      const item = e.target.closest('.chat-slash-item');
+      if (item) { this._textarea.value = item.dataset.cmd + ' '; this._slashDropdown.classList.add('hidden'); this._textarea.focus(); }
+    });
+    inputWrap.append(this._textarea, expandBtn, this._slashDropdown);
 
     const sendCol = document.createElement('div');
     sendCol.className = 'chat-send-col';
@@ -460,6 +505,7 @@ class ChatView {
       case 'system':
         if (msg.subtype === 'init') {
           if (msg.model) this._statusModel = msg.model.replace(/\[.*$/, '');
+          if (msg.slash_commands) this._slashCommands = msg.slash_commands.map(c => '/' + c);
           this._updateStatusBar();
         }
         break;
@@ -531,16 +577,16 @@ class ChatView {
             const byteCount = new Blob([content]).size;
             const sizeStr = byteCount > 1024 ? (byteCount / 1024).toFixed(1) + ' KB' : byteCount + ' B';
             const preview = content.substring(0, 500);
-            html = `<div class="chat-tool-use"><span class="chat-tool-label">\u{1F4DD} Write ${escHtml(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${lineCount} lines, ${sizeStr}</summary><pre>${escHtml(preview)}${content.length > 500 ? '\n...' : ''}</pre></details></div>`;
+            html = `<div class="chat-tool-use"><span class="chat-tool-label">\u{1F4DD} Write ${this._clickablePath(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${lineCount} lines, ${sizeStr}</summary><pre>${escHtml(preview)}${content.length > 500 ? '\n...' : ''}</pre></details></div>`;
           } else if (status === 'ok' && pendingUse.name === 'Read') {
             const lineCount = resultText.split('\n').length;
             const preview = resultText.substring(0, 500);
-            html = `<div class="chat-tool-use"><span class="chat-tool-label">\u{1F4D6} Read ${escHtml(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${lineCount} lines</summary><pre>${escHtml(preview)}${resultText.length > 500 ? '\n...' : ''}</pre></details></div>`;
+            html = `<div class="chat-tool-use"><span class="chat-tool-label">\u{1F4D6} Read ${this._clickablePath(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${lineCount} lines</summary><pre>${escHtml(preview)}${resultText.length > 500 ? '\n...' : ''}</pre></details></div>`;
           } else {
             // Failed or unhandled tool — show error with expandable original input
             const firstLine = resultText.split('\n')[0].substring(0, 150) || '(empty)';
             const inputStr = stripAnsi(typeof pendingUse.input === 'string' ? pendingUse.input : JSON.stringify(pendingUse.input, null, 2));
-            html = `<div class="chat-tool-use chat-tool-use-error"><span class="chat-tool-label">\u2717 ${escHtml(pendingUse.name)} ${escHtml(fp)}</span><div class="chat-tool-error-reason">${escHtml(firstLine)}</div><details class="chat-diff"><summary class="chat-diff-summary">Show input</summary><pre>${escHtml(inputStr).substring(0, 3000)}</pre></details></div>`;
+            html = `<div class="chat-tool-use chat-tool-use-error"><span class="chat-tool-label">\u2717 ${escHtml(pendingUse.name)} ${this._clickablePath(fp)}</span><div class="chat-tool-error-reason">${escHtml(firstLine)}</div><details class="chat-diff"><summary class="chat-diff-summary">Show input</summary><pre>${escHtml(inputStr).substring(0, 3000)}</pre></details></div>`;
           }
 
           if (placeholder) {
@@ -630,7 +676,7 @@ class ChatView {
           if ((block.name === 'Edit' || block.name === 'Write' || block.name === 'Read') && block.id) {
             // Defer rendering until tool_result arrives (to show success/failure)
             this._pendingToolUses.set(block.id, block);
-            parts.push(`<div class="chat-tool-pending" data-tool-id="${escHtml(block.id)}"><span class="chat-tool-label">\u23F3 ${escHtml(block.name)} ${escHtml(block.input?.file_path || '')}</span><span class="chat-spinner"></span></div>`);
+            parts.push(`<div class="chat-tool-pending" data-tool-id="${escHtml(block.id)}"><span class="chat-tool-label">\u23F3 ${escHtml(block.name)} ${this._clickablePath(block.input?.file_path || '')}</span><span class="chat-spinner"></span></div>`);
           } else {
             const inputStr = stripAnsi(typeof block.input === 'string' ? block.input : JSON.stringify(block.input, null, 2));
             parts.push(`<div class="chat-tool-use"><span class="chat-tool-label">\uD83D\uDD27 ${escHtml(block.name || 'tool')}</span><details><summary>Input</summary><pre>${escHtml(inputStr).substring(0, 3000)}</pre></details></div>`);
@@ -728,7 +774,12 @@ class ChatView {
       body += `<div class="${cls}"><span class="chat-diff-prefix">${prefix}</span>${escHtml(line.text)}</div>`;
     }
 
-    return `<div class="chat-tool-use"><span class="chat-tool-label">\u{1F4DD} Update ${escHtml(filePath)}</span><details class="chat-diff"><summary class="chat-diff-summary">${summary}</summary><div class="chat-diff-body">${body}</div></details></div>`;
+    return `<div class="chat-tool-use"><span class="chat-tool-label">\u{1F4DD} Update ${this._clickablePath(filePath)}</span><details class="chat-diff"><summary class="chat-diff-summary">${summary}</summary><div class="chat-diff-body">${body}</div></details></div>`;
+  }
+
+  // Make a file path clickable (click=copy, ctrl+click=open)
+  _clickablePath(fp) {
+    return `<span class="chat-link chat-link-path" data-path="${escHtml(fp)}" title="Click to copy, Ctrl+Click to open">${escHtml(fp)}</span>`;
   }
 
   // Strip trailing punctuation from matched paths/URLs

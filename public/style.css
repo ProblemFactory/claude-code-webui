@@ -1154,6 +1154,20 @@ html, body {
 }
 .chat-status-ctx-fill { display: block; height: 100%; border-radius: 3px; min-width: 1px; }
 .chat-status-dim { color: var(--text-dim); margin-left: 1px; }
+
+/* Slash command autocomplete */
+.chat-slash-dropdown {
+  position: absolute; bottom: 100%; left: 0; right: 0;
+  background: var(--bg-dialog); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: 0 -4px 12px rgba(0,0,0,0.3);
+  max-height: 200px; overflow-y: auto; z-index: 20;
+}
+.chat-slash-dropdown.hidden { display: none; }
+.chat-slash-item {
+  padding: 6px 12px; font-size: 12px; cursor: pointer;
+  font-family: 'SF Mono','Fira Code',monospace; color: var(--text);
+}
+.chat-slash-item:hover, .chat-slash-item.active { background: var(--bg-hover); color: var(--accent); }
 .chat-message-list {
   flex: 1; overflow-y: auto; padding: 16px 20px; display: flex; flex-direction: column; gap: 12px;
   user-select: text; cursor: text;
