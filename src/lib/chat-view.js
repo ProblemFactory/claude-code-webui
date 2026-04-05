@@ -251,15 +251,16 @@ class ChatView {
     if (hasAttachments) {
       // Build stream-json message with image content blocks
       const content = [];
-      const localContent = []; // for local preview
+      const localContent = [];
       for (const a of this._attachments) {
         content.push({ type: 'image', source: { type: 'base64', media_type: a.mediaType, data: a.base64 } });
         localContent.push({ type: 'image', source: { type: 'base64', media_type: a.mediaType, data: a.base64 } });
       }
       if (text) { content.push({ type: 'text', text }); localContent.push({ type: 'text', text }); }
       const msg = JSON.stringify({ type: 'user', message: { role: 'user', content } });
+      // Skip next server echo (we show local preview instead)
+      this._skipNextUserEcho = true;
       this.ws.send({ type: 'chat-input', sessionId: this.sessionId, text: msg });
-      // Show local preview (server echo strips base64)
       this._onMessage({ type: 'user', message: { role: 'user', content: localContent } });
       this._attachments = [];
       this._renderAttachments();
@@ -274,8 +275,13 @@ class ChatView {
 
     switch (msg.type) {
       case 'user':
+        // Skip server echo for image messages (local preview already shown)
+        if (!isHistory && this._skipNextUserEcho) {
+          this._skipNextUserEcho = false;
+          if (this._pendingTyping) { this._pendingTyping = false; this._showTyping(); }
+          break;
+        }
         this._appendUser(msg);
-        // Show typing indicator after user message is rendered
         if (!isHistory && this._pendingTyping) {
           this._pendingTyping = false;
           this._showTyping();
