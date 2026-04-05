@@ -20,6 +20,7 @@ class ChatView {
     this._messages = []; // parsed message objects
     this._pinned = true; // auto-scroll to bottom
     this._renderedMsgIds = new Set(); // dedup by msgId
+    this._pendingToolUses = new Map(); // tool_use id → block (for deferred diff rendering)
 
     // Build DOM
     const container = document.createElement('div');
@@ -318,11 +319,46 @@ class ChatView {
 
     if (isToolResult) {
       for (const block of content) {
-        const el = document.createElement('div');
-        el.className = 'chat-msg chat-msg-tool-result';
+        const toolId = block.tool_use_id;
+        const pendingUse = toolId ? this._pendingToolUses.get(toolId) : null;
         const status = block.is_error ? 'error' : 'ok';
         const rawText = typeof block.content === 'string' ? block.content : JSON.stringify(block.content, null, 2);
         const resultText = stripAnsi(rawText);
+
+        if (pendingUse) {
+          // Replace the pending placeholder with the final result
+          this._pendingToolUses.delete(toolId);
+          const placeholder = this._messageList.querySelector(`[data-tool-id="${toolId}"]`);
+
+          let html = '';
+          if (status === 'ok' && pendingUse.name === 'Edit' && pendingUse.input?.old_string != null) {
+            html = this._renderEditDiff(pendingUse);
+          } else if (status === 'ok' && pendingUse.name === 'Write') {
+            const preview = (pendingUse.input?.content || '').substring(0, 500);
+            html = `<div class="chat-tool-use"><span class="chat-tool-label">\u{1F4DD} Write ${escHtml((pendingUse.input?.file_path || '').split('/').pop())}</span><details><summary>${escHtml(pendingUse.input?.file_path || '')}</summary><pre>${escHtml(preview)}${(pendingUse.input?.content || '').length > 500 ? '...' : ''}</pre></details></div>`;
+          } else {
+            // Failed edit/write — show error
+            const icon = status === 'ok' ? '\u2713' : '\u2717';
+            const firstLine = resultText.split('\n')[0].substring(0, 120) || '(empty)';
+            html = `<div class="chat-tool-result-inline chat-tool-${status}"><span class="chat-tool-label">${icon} ${escHtml(pendingUse.name)} ${escHtml((pendingUse.input?.file_path || '').split('/').pop())}</span> ${escHtml(firstLine)}</div>`;
+          }
+
+          if (placeholder) {
+            placeholder.outerHTML = html;
+          } else {
+            const el = document.createElement('div');
+            el.className = 'chat-msg chat-msg-tool-result';
+            el.innerHTML = this._compact
+              ? `<div class="chat-compact-msg"><span class="chat-role chat-role-tool">${status === 'ok' ? '\u2713' : '\u2717'}</span><div class="chat-compact-content">${html}</div></div>`
+              : html;
+            this._messageList.appendChild(el); this._addWrapToggles(el);
+          }
+          continue;
+        }
+
+        // Generic tool result (no pending use match)
+        const el = document.createElement('div');
+        el.className = 'chat-msg chat-msg-tool-result';
         const truncated = resultText.length > 2000 ? resultText.substring(0, 2000) + '...' : resultText;
         const firstLine = resultText.split('\n')[0].substring(0, 120) || '(empty)';
         const icon = status === 'ok' ? '\u2713' : '\u2717';
@@ -375,11 +411,10 @@ class ChatView {
         } else if (block.type === 'thinking') {
           parts.push(`<details class="chat-thinking"><summary>Thinking...</summary><pre>${escHtml(stripAnsi(block.text || ''))}</pre></details>`);
         } else if (block.type === 'tool_use') {
-          if (block.name === 'Edit' && block.input?.old_string != null) {
-            parts.push(this._renderEditDiff(block));
-          } else if (block.name === 'Write' && block.input?.file_path) {
-            const preview = (block.input.content || '').substring(0, 500);
-            parts.push(`<div class="chat-tool-use"><span class="chat-tool-label">\u{1F4DD} Write ${escHtml(block.input.file_path.split('/').pop())}</span><details><summary>${escHtml(block.input.file_path)}</summary><pre>${escHtml(preview)}${block.input.content?.length > 500 ? '...' : ''}</pre></details></div>`);
+          if ((block.name === 'Edit' || block.name === 'Write') && block.id) {
+            // Defer rendering until tool_result arrives (to show success/failure)
+            this._pendingToolUses.set(block.id, block);
+            parts.push(`<div class="chat-tool-pending" data-tool-id="${escHtml(block.id)}"><span class="chat-tool-label">\u23F3 ${escHtml(block.name)} ${escHtml((block.input?.file_path || '').split('/').pop())}</span><span class="chat-spinner"></span></div>`);
           } else {
             const inputStr = stripAnsi(typeof block.input === 'string' ? block.input : JSON.stringify(block.input, null, 2));
             parts.push(`<div class="chat-tool-use"><span class="chat-tool-label">\uD83D\uDD27 ${escHtml(block.name || 'tool')}</span><details><summary>Input</summary><pre>${escHtml(inputStr).substring(0, 3000)}</pre></details></div>`);
