@@ -55,7 +55,12 @@ class ChatView {
     this._textarea.placeholder = 'Type a message...';
     this._textarea.rows = 1;
 
-    // Image paste support — intercept paste with image data
+    // Attachment area (above input row)
+    this._attachments = [];
+    this._attachArea = document.createElement('div');
+    this._attachArea.className = 'chat-attach-area hidden';
+
+    // Image paste — add as attachment, don't send immediately
     this._textarea.addEventListener('paste', (e) => {
       const items = e.clipboardData?.items;
       if (!items) return;
@@ -63,7 +68,7 @@ class ChatView {
         if (item.type.startsWith('image/')) {
           e.preventDefault();
           const file = item.getAsFile();
-          if (file) this._handleImagePaste(file);
+          if (file) this._addImageAttachment(file);
           return;
         }
       }
@@ -128,7 +133,7 @@ class ChatView {
     this._shortcutHint.textContent = '\u23CE';
     sendCol.append(sendBtn, this._shortcutHint);
 
-    inputArea.append(inputWrap, sendCol);
+    inputArea.append(this._attachArea, inputWrap, sendCol);
 
     // Search bar
     const searchBar = document.createElement('div');
@@ -229,7 +234,9 @@ class ChatView {
   _send() {
     if (this._disconnected) return;
     const text = this._textarea.value.trim();
-    if (!text) return;
+    const hasAttachments = this._attachments.length > 0;
+    if (!text && !hasAttachments) return;
+
     this._textarea.value = '';
     this._textarea.style.height = 'auto';
     this._textarea.style.minHeight = '36px';
@@ -240,8 +247,25 @@ class ChatView {
       if (eb) { eb.textContent = '\u2922'; eb.title = 'Expand editor'; }
       this._shortcutHint.textContent = '\u23CE';
     }
-    this.ws.send({ type: 'chat-input', sessionId: this.sessionId, text });
-    // Typing indicator shown after user message echo arrives (see _onMessage)
+
+    if (hasAttachments) {
+      // Build stream-json message with image content blocks
+      const content = [];
+      const localContent = []; // for local preview
+      for (const a of this._attachments) {
+        content.push({ type: 'image', source: { type: 'base64', media_type: a.mediaType, data: a.base64 } });
+        localContent.push({ type: 'image', source: { type: 'base64', media_type: a.mediaType, data: a.base64 } });
+      }
+      if (text) { content.push({ type: 'text', text }); localContent.push({ type: 'text', text }); }
+      const msg = JSON.stringify({ type: 'user', message: { role: 'user', content } });
+      this.ws.send({ type: 'chat-input', sessionId: this.sessionId, text: msg });
+      // Show local preview (server echo strips base64)
+      this._onMessage({ type: 'user', message: { role: 'user', content: localContent } });
+      this._attachments = [];
+      this._renderAttachments();
+    } else {
+      this.ws.send({ type: 'chat-input', sessionId: this.sessionId, text });
+    }
     this._pendingTyping = true;
   }
 
@@ -595,33 +619,37 @@ class ChatView {
     if (this._searchStatus) this._searchStatus.textContent = '';
   }
 
-  async _handleImagePaste(file) {
+  _addImageAttachment(file) {
     const reader = new FileReader();
     reader.onload = () => {
       const dataUrl = reader.result;
       const base64 = dataUrl.split(',')[1];
       const mediaType = file.type || 'image/png';
-      const text = this._textarea.value.trim();
-
-      // Build stream-json user message with image + optional text
-      const content = [
-        { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } },
-      ];
-      if (text) content.push({ type: 'text', text });
-      const msg = JSON.stringify({ type: 'user', message: { role: 'user', content } });
-      this.ws.send({ type: 'chat-input', sessionId: this.sessionId, text: msg });
-      this._textarea.value = '';
-      this._textarea.style.height = 'auto';
-      this._pendingTyping = true;
-
-      // Show local preview immediately (server echo strips base64)
-      const previewMsg = { type: 'user', message: { role: 'user', content: [
-        { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } },
-        ...(text ? [{ type: 'text', text }] : []),
-      ]}};
-      this._onMessage(previewMsg);
+      const attachment = { base64, mediaType, dataUrl, name: file.name || 'image' };
+      this._attachments.push(attachment);
+      this._renderAttachments();
+      this._textarea.focus();
     };
     reader.readAsDataURL(file);
+  }
+
+  _renderAttachments() {
+    this._attachArea.innerHTML = '';
+    if (!this._attachments.length) { this._attachArea.classList.add('hidden'); return; }
+    this._attachArea.classList.remove('hidden');
+    for (let i = 0; i < this._attachments.length; i++) {
+      const a = this._attachments[i];
+      const item = document.createElement('div');
+      item.className = 'chat-attach-item';
+      item.innerHTML = `<img src="${a.dataUrl}" alt="${escHtml(a.name)}"><span class="chat-attach-name">${escHtml(a.name)}</span>`;
+      const removeBtn = document.createElement('button');
+      removeBtn.className = 'chat-attach-remove';
+      removeBtn.textContent = '\u2715';
+      removeBtn.title = 'Remove';
+      removeBtn.onclick = (e) => { e.stopPropagation(); this._attachments.splice(i, 1); this._renderAttachments(); };
+      item.appendChild(removeBtn);
+      this._attachArea.appendChild(item);
+    }
   }
 
   _showTyping() {

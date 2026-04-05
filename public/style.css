@@ -1180,11 +1180,11 @@ html, body {
   border-left: 3px solid var(--accent); padding-left: 12px; margin: 8px 0;
   color: var(--text-secondary);
 }
-.chat-text table { border-collapse: collapse; margin: 8px 0; font-size: 12px; width: auto; }
+.chat-text table { border-collapse: collapse; margin: 8px 0; font-size: 12px; width: auto; border: 1px solid var(--text-dim); }
 .chat-text th, .chat-text td {
-  border: 1px solid var(--border); padding: 4px 8px;
+  border: 1px solid rgba(128,128,128,0.4); padding: 4px 8px;
 }
-.chat-text th { background: var(--bg-root); font-weight: 600; }
+.chat-text th { background: rgba(128,128,128,0.1); font-weight: 600; }
 
 /* System messages */
 .chat-system {
@@ -1245,7 +1245,7 @@ html, body {
 /* Chat input area */
 .chat-input-area {
   display: flex; gap: 8px; padding: 10px 16px; border-top: 1px solid var(--border);
-  background: var(--bg-titlebar); align-items: flex-end;
+  background: var(--bg-titlebar); align-items: flex-end; flex-wrap: wrap;
 }
 .chat-input-wrap { flex: 1; position: relative; min-width: 0; }
 .chat-send-col { display: flex; flex-direction: column; align-items: center; gap: 2px; flex-shrink: 0; }
@@ -1300,6 +1300,24 @@ mark.chat-search-current { background: rgba(255,193,7,0.7); outline: 1px solid v
 }
 .chat-img:hover { opacity: 0.9; }
 .chat-img-placeholder { color: var(--text-dim); font-style: italic; }
+
+/* Attachment preview area */
+.chat-attach-area { display: flex; gap: 6px; padding: 6px 0; flex-wrap: wrap; width: 100%; }
+.chat-attach-area.hidden { display: none; }
+.chat-attach-item {
+  position: relative; display: flex; align-items: center; gap: 4px;
+  padding: 3px 6px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--bg-input); font-size: 11px;
+}
+.chat-attach-item img { width: 32px; height: 32px; object-fit: cover; border-radius: 3px; }
+.chat-attach-name { max-width: 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); }
+.chat-attach-remove {
+  position: absolute; top: -4px; right: -4px; width: 16px; height: 16px;
+  border-radius: 50%; border: none; background: var(--red); color: #fff;
+  font-size: 9px; cursor: pointer; display: flex; align-items: center; justify-content: center;
+  opacity: 0; transition: opacity var(--transition);
+}
+.chat-attach-item:hover .chat-attach-remove { opacity: 1; }
 .chat-img-overlay {
   position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 99999;
   display: flex; align-items: center; justify-content: center; cursor: zoom-out;
