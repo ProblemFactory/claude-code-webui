@@ -1326,8 +1326,8 @@ html, body {
   font-size: 10px; padding: 2px 6px; border-radius: var(--radius-sm);
 }
 .chat-search-nav:hover { background: var(--bg-hover); color: var(--text); }
-mark.chat-search-highlight { background: rgba(255,193,7,0.3); color: inherit; border-radius: 2px; }
-mark.chat-search-current { background: rgba(255,193,7,0.7); outline: 1px solid var(--yellow); }
+::highlight(chat-search) { background: rgba(255,193,7,0.3); color: inherit; }
+::highlight(chat-search-current) { background: rgba(255,193,7,0.7); }
 .chat-msg-flash { animation: chat-msg-flash 2s ease-out; }
 @keyframes chat-msg-flash { 0% { background: rgba(255,193,7,0.3); } 100% { background: transparent; } }
 .chat-link {

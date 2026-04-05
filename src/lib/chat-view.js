@@ -20,6 +20,7 @@ class ChatView {
     this._messages = []; // parsed message objects
     this._pinned = true; // auto-scroll to bottom
     this._renderedMsgIds = new Set(); // dedup by msgId
+    this._highlightQuery = ''; // active search query for highlight layer
     this._pendingToolUses = new Map(); // tool_use id → block (for deferred diff rendering)
 
     // Build DOM
@@ -319,6 +320,7 @@ class ChatView {
 
     // Preserve scroll position
     this._messageList.scrollTop += (this._messageList.scrollHeight - scrollHeightBefore);
+    if (this._highlightQuery) this._applyHighlightLayer();
     setTimeout(() => { this._loading = false; }, 300);
   }
 
@@ -842,6 +844,8 @@ class ChatView {
 
     this._searchStatus.textContent = 'Searching...';
     this._searchQuery = q;
+    this._highlightQuery = q;
+    this._applyHighlightLayer(); // highlight current view immediately
 
     // Server-side search
     const allSess = this.app.sidebar?._allSessions || [];
@@ -876,29 +880,33 @@ class ChatView {
     if (!results || idx < 0 || idx >= results.length) return;
 
     const msgIndex = results[idx].index;
-    this._clearDomHighlights();
 
-    // Jump window to the target if it's outside current range
+    // Jump window if target is outside
     if (msgIndex < this._windowStart || msgIndex >= this._windowEnd) {
       await this.jumpToIndex(msgIndex);
     }
 
-    // Highlight in the target element
+    // Expand collapsed content in target, then refresh highlight layer
     const relIdx = msgIndex - this._windowStart;
     const allMsgs = this._messageList.querySelectorAll('.chat-msg');
     if (relIdx >= 0 && relIdx < allMsgs.length) {
       const targetEl = allMsgs[relIdx];
-      // Force render + expand all collapsed content
       targetEl.style.contentVisibility = 'visible';
       for (const d of targetEl.querySelectorAll('details:not([open])')) d.open = true;
-      // Force layout before highlighting
-      targetEl.offsetHeight; // eslint-disable-line no-unused-expressions
-      this._highlightInElement(targetEl, this._searchQuery);
-      const mark = targetEl.querySelector('mark.chat-search-highlight');
-      if (mark) {
-        this._scrollToMatch(mark);
+    }
+
+    // Refresh highlight layer and scroll to first match in target
+    this._applyHighlightLayer();
+    if (this._highlightRanges?.length > 0 && relIdx >= 0) {
+      // Find the first highlight range inside the target element
+      const targetEl = allMsgs[relIdx];
+      const matchIdx = this._highlightRanges.findIndex(r => targetEl.contains(r.startContainer));
+      if (matchIdx >= 0) {
+        this._setCurrentHighlight(matchIdx);
+        const rect = this._highlightRanges[matchIdx].getBoundingClientRect();
+        const listRect = this._messageList.getBoundingClientRect();
+        this._messageList.scrollTop += rect.top - listRect.top - listRect.height / 2;
       } else {
-        // Fallback: flash the entire message as highlight
         targetEl.scrollIntoView({ block: 'center' });
         targetEl.classList.add('chat-msg-flash');
         setTimeout(() => targetEl.classList.remove('chat-msg-flash'), 2000);
@@ -906,36 +914,51 @@ class ChatView {
     }
   }
 
-  _highlightInElement(el, query) {
-    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  // ── Highlight Layer: non-destructive search highlighting ──
+
+  // Apply highlight layer to current DOM content based on _highlightQuery
+  _applyHighlightLayer() {
+    if (!CSS.highlights) return; // fallback: no highlight API
+    CSS.highlights.delete('chat-search');
+    CSS.highlights.delete('chat-search-current');
+    if (!this._highlightQuery) return;
+
+    const q = this._highlightQuery;
     const ranges = [];
+    const walker = document.createTreeWalker(this._messageList, NodeFilter.SHOW_TEXT);
     while (walker.nextNode()) {
       const node = walker.currentNode;
       const text = node.textContent.toLowerCase();
-      let i = 0;
-      while ((i = text.indexOf(query, i)) !== -1) {
-        ranges.push({ node, start: i, length: query.length });
-        i += query.length;
+      let idx = 0;
+      while ((idx = text.indexOf(q, idx)) !== -1) {
+        const range = new Range();
+        range.setStart(node, idx);
+        range.setEnd(node, idx + q.length);
+        ranges.push(range);
+        idx += q.length;
       }
     }
-    for (let i = ranges.length - 1; i >= 0; i--) {
-      try {
-        const { node, start, length } = ranges[i];
-        const range = document.createRange();
-        range.setStart(node, start);
-        range.setEnd(node, start + length);
-        const mark = document.createElement('mark');
-        mark.className = 'chat-search-highlight';
-        range.surroundContents(mark);
-      } catch {}
+    if (ranges.length > 0) {
+      CSS.highlights.set('chat-search', new Highlight(...ranges));
+    }
+    this._highlightRanges = ranges;
+  }
+
+  // Highlight a specific range as "current" (for search navigation)
+  _setCurrentHighlight(rangeIdx) {
+    if (!CSS.highlights || !this._highlightRanges) return;
+    CSS.highlights.delete('chat-search-current');
+    if (rangeIdx >= 0 && rangeIdx < this._highlightRanges.length) {
+      CSS.highlights.set('chat-search-current', new Highlight(this._highlightRanges[rangeIdx]));
     }
   }
 
-  _clearDomHighlights() {
-    for (const mark of this._messageList.querySelectorAll('mark.chat-search-highlight')) {
-      const parent = mark.parentNode;
-      parent.replaceChild(document.createTextNode(mark.textContent), mark);
-      parent.normalize();
+  _clearHighlightLayer() {
+    this._highlightQuery = '';
+    this._highlightRanges = [];
+    if (CSS.highlights) {
+      CSS.highlights.delete('chat-search');
+      CSS.highlights.delete('chat-search-current');
     }
   }
 
@@ -947,20 +970,8 @@ class ChatView {
     this._jumpToSearchResult(this._searchResultIdx);
   }
 
-  // Expand parent <details> if collapsed, then scroll to match
-  _scrollToMatch(mark) {
-    mark.classList.add('chat-search-current');
-    // Open any collapsed <details> ancestors
-    let el = mark.parentElement;
-    while (el && el !== this._messageList) {
-      if (el.tagName === 'DETAILS' && !el.open) el.open = true;
-      el = el.parentElement;
-    }
-    requestAnimationFrame(() => mark.scrollIntoView({ block: 'center', behavior: 'smooth' }));
-  }
-
   _clearSearch() {
-    this._clearDomHighlights();
+    this._clearHighlightLayer();
     this._serverSearchResults = [];
     this._searchResultIdx = -1;
     this._searchQuery = '';
