@@ -40,11 +40,9 @@ class ChatView {
     this._statusBar = document.createElement('div');
     this._statusBar.className = 'chat-status-bar';
     this._statusModel = '';
-    this._statusTokensIn = 0;
     this._statusTokensOut = 0;
-    this._statusCacheRead = 0;
+    this._statusLastInputTokens = 0; // last turn's total input (= current context size)
     this._statusCost = 0;
-    this._statusTurns = 0;
     this._statusContextWindow = 0;
 
     // Message list
@@ -426,9 +424,9 @@ class ChatView {
         if (msg.modelUsage) {
           for (const [model, info] of Object.entries(msg.modelUsage)) {
             this._statusModel = model.replace(/\[.*$/, '');
-            this._statusTokensIn = (info.inputTokens || 0) + (info.cacheReadInputTokens || 0) + (info.cacheCreationInputTokens || 0);
+            // Last turn's total input tokens = current context size
+            this._statusLastInputTokens = (info.inputTokens || 0) + (info.cacheReadInputTokens || 0) + (info.cacheCreationInputTokens || 0);
             this._statusTokensOut = info.outputTokens || 0;
-            this._statusCacheRead = info.cacheReadInputTokens || 0;
             if (info.contextWindow) this._statusContextWindow = info.contextWindow;
           }
         }
@@ -870,11 +868,16 @@ class ChatView {
     const allMsgs = this._messageList.querySelectorAll('.chat-msg');
     if (targetPos >= 0 && targetPos < allMsgs.length) {
       const targetEl = allMsgs[targetPos];
+      // Expand all collapsed <details> inside the target so text nodes are accessible
+      for (const d of targetEl.querySelectorAll('details:not([open])')) d.open = true;
+      // Force render (content-visibility: auto may skip off-screen elements)
+      targetEl.style.contentVisibility = 'visible';
       this._highlightInElement(targetEl, this._searchQuery);
       const mark = targetEl.querySelector('mark.chat-search-highlight');
       if (mark) {
         this._scrollToMatch(mark);
       } else {
+        // Fallback: scroll to element even if highlight failed
         targetEl.scrollIntoView({ block: 'center', behavior: 'smooth' });
       }
     }
@@ -997,9 +1000,8 @@ class ChatView {
     if (status.model) this._statusModel = status.model.replace(/\[.*$/, '');
     if (status.modelUsage) {
       for (const [, info] of Object.entries(status.modelUsage)) {
-        this._statusTokensIn = (info.inputTokens || 0) + (info.cacheReadInputTokens || 0) + (info.cacheCreationInputTokens || 0);
+        this._statusLastInputTokens = (info.inputTokens || 0) + (info.cacheReadInputTokens || 0) + (info.cacheCreationInputTokens || 0);
         this._statusTokensOut = info.outputTokens || 0;
-        this._statusCacheRead = info.cacheReadInputTokens || 0;
         if (info.contextWindow) this._statusContextWindow = info.contextWindow;
       }
     }
@@ -1011,26 +1013,24 @@ class ChatView {
     const fmtK = (n) => n >= 1000000 ? (n / 1000000).toFixed(1) + 'M' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
     const parts = [];
     if (this._statusModel) parts.push(this._statusModel);
-    if (this._statusTokensIn || this._statusTokensOut) {
-      parts.push(`${fmtK(this._statusTokensIn)} in \u00B7 ${fmtK(this._statusTokensOut)} out`);
+    if (this._statusContextWindow && this._statusLastInputTokens) {
+      const pct = Math.round((this._statusLastInputTokens / this._statusContextWindow) * 100);
+      parts.push(`${pct}% context (${fmtK(this._statusLastInputTokens)}/${fmtK(this._statusContextWindow)})`);
     }
-    if (this._statusContextWindow && this._statusTokensIn) {
-      const pct = Math.round((this._statusTokensIn / this._statusContextWindow) * 100);
-      parts.push(`${pct}% context`);
-    }
+    if (this._statusTokensOut) parts.push(`${fmtK(this._statusTokensOut)} out`);
     if (this._statusCost > 0) parts.push(`$${this._statusCost.toFixed(2)}`);
     this._statusBar.textContent = parts.join('  \u00B7  ');
   }
 
   _scrollToBottom() {
-    // Suppress scroll handler from unpinning during programmatic scroll
     this._programmaticScroll = true;
-    this._messageList.scrollTop = this._messageList.scrollHeight;
-    // Repeat after layout settles (content-visibility: auto delays rendering)
-    requestAnimationFrame(() => {
-      this._messageList.scrollTop = this._messageList.scrollHeight;
-      setTimeout(() => { this._programmaticScroll = false; }, 100);
-    });
+    // Multiple attempts to handle content-visibility layout delay
+    const doScroll = () => { this._messageList.scrollTop = this._messageList.scrollHeight; };
+    doScroll();
+    requestAnimationFrame(doScroll);
+    setTimeout(doScroll, 50);
+    setTimeout(doScroll, 150);
+    setTimeout(() => { doScroll(); this._programmaticScroll = false; }, 300);
   }
 
   focus() {
