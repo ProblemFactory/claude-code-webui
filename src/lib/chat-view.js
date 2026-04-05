@@ -165,9 +165,9 @@ class ChatView {
       const val = this._textarea.value;
       if (val.startsWith('/') && !val.includes(' ') && this._slashCommands.length) {
         const q = val.toLowerCase();
-        const matches = this._slashCommands.filter(c => c.toLowerCase().startsWith(q));
-        if (matches.length > 0 && val !== '/') {
-          this._slashDropdown.innerHTML = matches.slice(0, 8).map((c, i) =>
+        const matches = val === '/' ? this._slashCommands : this._slashCommands.filter(c => c.toLowerCase().startsWith(q));
+        if (matches.length > 0) {
+          this._slashDropdown.innerHTML = matches.slice(0, 10).map((c, i) =>
             `<div class="chat-slash-item${i === 0 ? ' active' : ''}" data-cmd="${escHtml(c)}">${escHtml(c)}</div>`
           ).join('');
           this._slashDropdown.classList.remove('hidden');
