@@ -182,8 +182,14 @@ class LayoutManager {
     this._autoSaveTimer = setTimeout(() => this._doAutoSave(), 2000);
   }
 
+  _isMobile() {
+    return window.innerWidth <= 768 || ('ontouchstart' in window && window.innerWidth < 1024);
+  }
+
   async _doAutoSave() {
     const state = this.captureState();
+    // Tag with device type so mobile and desktop don't overwrite each other
+    state.deviceType = this._isMobile() ? 'mobile' : 'desktop';
     try {
       await fetch('/api/layouts-autosave', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -201,7 +207,8 @@ class LayoutManager {
       this._savedPresets = data.saved || {};
       this._currentName = data.current || null;
 
-      const toRestore = data.autoSave;
+      // Pick the right autosave for this device type
+      const toRestore = this._isMobile() ? (data.autoSaveMobile || data.autoSave) : data.autoSave;
 
       if (toRestore && toRestore.windows && toRestore.windows.length > 0) {
         await this.restoreState(toRestore);

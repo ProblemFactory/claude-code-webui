@@ -168,9 +168,25 @@ class ChatView {
         this._onMessage(msg.message);
       } else if (msg.type === 'exited' && msg.sessionId === sessionId) {
         this._appendSystem('Session ended.');
+        this._hideTyping();
       }
     };
     this.ws.onGlobal(this._handler);
+
+    // Connection state: freeze on disconnect, unfreeze on reconnect
+    this._disconnected = false;
+    this._stateHandler = (connected) => {
+      this._disconnected = !connected;
+      container.classList.toggle('chat-disconnected', !connected);
+      this._textarea.disabled = !connected;
+      if (!connected) {
+        this._hideTyping();
+        this._appendSystem('Disconnected from server');
+      } else {
+        this._appendSystem('Reconnected');
+      }
+    };
+    this.ws.onStateChange(this._stateHandler);
   }
 
   // Load history from attach response
@@ -182,6 +198,7 @@ class ChatView {
   }
 
   _send() {
+    if (this._disconnected) return;
     const text = this._textarea.value.trim();
     if (!text) return;
     this._textarea.value = '';
@@ -539,9 +556,9 @@ class ChatView {
     const el = document.createElement('div');
     el.className = 'chat-msg chat-msg-typing';
     if (this._compact) {
-      el.innerHTML = '<div class="chat-compact-msg"><span class="chat-role chat-role-assistant">Claude</span><div class="chat-compact-content"><span class="chat-typing-dots"><span>.</span><span>.</span><span>.</span></span></div></div>';
+      el.innerHTML = '<div class="chat-compact-msg"><span class="chat-role chat-role-assistant">Claude</span><div class="chat-compact-content"><span class="chat-thinking-indicator"><span class="chat-spinner"></span> thinking...</span></div></div>';
     } else {
-      el.innerHTML = '<div class="chat-bubble chat-bubble-assistant"><span class="chat-typing-dots"><span>.</span><span>.</span><span>.</span></span></div>';
+      el.innerHTML = '<div class="chat-bubble chat-bubble-assistant"><span class="chat-thinking-indicator"><span class="chat-spinner"></span> thinking...</span></div>';
     }
     this._typingEl = el;
     this._messageList.appendChild(el);
@@ -564,6 +581,7 @@ class ChatView {
 
   dispose() {
     this.ws.offGlobal(this._handler);
+    this.ws.offStateChange(this._stateHandler);
   }
 }
 

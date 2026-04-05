@@ -869,9 +869,15 @@ app.post('/api/session-groups/unassign', (req, res) => {
 });
 
 // Auto-save (saves current workspace state for restore on refresh)
+// Mobile and desktop save separately to avoid overwriting each other's layout
 app.post('/api/layouts-autosave', (req, res) => {
   const data = readLayouts();
-  data.autoSave = { ...req.body, updatedAt: Date.now() };
+  const deviceType = req.body.deviceType || 'desktop';
+  if (deviceType === 'mobile') {
+    data.autoSaveMobile = { ...req.body, updatedAt: Date.now() };
+  } else {
+    data.autoSave = { ...req.body, updatedAt: Date.now() };
+  }
   writeLayouts(data);
   res.json({ success: true });
 });
