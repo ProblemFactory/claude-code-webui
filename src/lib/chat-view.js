@@ -212,7 +212,8 @@ class ChatView {
       this._shortcutHint.textContent = '\u23CE';
     }
     this.ws.send({ type: 'chat-input', sessionId: this.sessionId, text });
-    this._showTyping();
+    // Typing indicator shown after user message echo arrives (see _onMessage)
+    this._pendingTyping = true;
   }
 
   _onMessage(msg, isHistory = false) {
@@ -221,6 +222,11 @@ class ChatView {
     switch (msg.type) {
       case 'user':
         this._appendUser(msg);
+        // Show typing indicator after user message is rendered
+        if (!isHistory && this._pendingTyping) {
+          this._pendingTyping = false;
+          this._showTyping();
+        }
         break;
       case 'assistant':
         if (!isHistory) this._hideTyping();
