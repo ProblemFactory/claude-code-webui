@@ -72,14 +72,16 @@ class ChatView {
         this._textarea.style.height = '200px';
         this._textarea.style.minHeight = '200px';
         this._textarea.classList.add('chat-input-expanded');
-        expandBtn.textContent = '\u2923'; // ⤣ collapse icon
+        expandBtn.textContent = '\u2923';
         expandBtn.title = 'Collapse editor';
+        this._shortcutHint.textContent = 'Ctrl+Enter to send';
       } else {
         this._textarea.style.height = 'auto';
         this._textarea.style.minHeight = '36px';
         this._textarea.classList.remove('chat-input-expanded');
         expandBtn.textContent = '\u2922';
         expandBtn.title = 'Expand editor';
+        this._shortcutHint.textContent = 'Enter to send';
       }
       this._textarea.focus();
     };
@@ -90,9 +92,45 @@ class ChatView {
     sendBtn.title = 'Send';
     sendBtn.onclick = () => this._send();
 
-    btnRow.append(expandBtn, sendBtn);
+    // Shortcut hint
+    this._shortcutHint = document.createElement('div');
+    this._shortcutHint.className = 'chat-shortcut-hint';
+    this._shortcutHint.textContent = 'Enter to send';
+
+    btnRow.append(expandBtn, sendBtn, this._shortcutHint);
     inputArea.append(this._textarea, btnRow);
+
+    // Search bar
+    const searchBar = document.createElement('div');
+    searchBar.className = 'chat-search-bar hidden';
+    const searchInput = document.createElement('input');
+    searchInput.className = 'chat-search-input';
+    searchInput.placeholder = 'Search messages...';
+    searchInput.type = 'text';
+    const searchClose = document.createElement('button');
+    searchClose.className = 'chat-search-close';
+    searchClose.textContent = '\u2715';
+    searchClose.onclick = () => { searchBar.classList.add('hidden'); searchInput.value = ''; this._clearSearch(); };
+    searchBar.append(searchInput, searchClose);
+    container.insertBefore(searchBar, this._messageList);
+
+    searchInput.addEventListener('input', () => this._doSearch(searchInput.value));
+
+    // Ctrl+F to search
+    container.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+        e.preventDefault();
+        searchBar.classList.remove('hidden');
+        searchInput.focus();
+      }
+    });
+    // Make container focusable for Ctrl+F
+    container.tabIndex = -1;
+
     container.appendChild(inputArea);
+
+    // Set up click handler for links/paths
+    this._setupLinkHandler();
 
     // Listen for chat messages from server
     this._handler = (msg) => {
@@ -168,12 +206,12 @@ class ChatView {
     el.className = 'chat-msg chat-msg-user';
 
     if (typeof content === 'string') {
-      el.innerHTML = `<div class="chat-bubble chat-bubble-user">${escHtml(content)}</div>`;
+      el.innerHTML = `<div class="chat-bubble chat-bubble-user">${this._linkifyText(content)}</div>`;
     } else if (Array.isArray(content)) {
       const parts = [];
       for (const block of content) {
         if (block.type === 'text') {
-          parts.push(escHtml(block.text));
+          parts.push(this._linkifyText(block.text));
         } else if (block.type === 'tool_result') {
           const status = block.is_error ? 'error' : 'ok';
           const resultText = typeof block.content === 'string' ? block.content : JSON.stringify(block.content, null, 2);
@@ -230,10 +268,75 @@ class ChatView {
 
   _renderMarkdown(text) {
     try {
-      return marked.parse(text || '', { breaks: true });
+      let html = marked.parse(text || '', { breaks: true });
+      return this._linkify(html);
     } catch {
       return escHtml(text || '');
     }
+  }
+
+  // Auto-detect URLs and file paths in rendered HTML, make them interactive
+  // Click = copy, Ctrl+Click = open
+  _linkify(html) {
+    // Match URLs not already inside <a> tags
+    html = html.replace(/(?<!href=["'])(https?:\/\/[^\s<>"')\]]+)/g, (url) => {
+      return `<span class="chat-link" data-href="${escHtml(url)}" title="Click to copy, Ctrl+Click to open">${escHtml(url)}</span>`;
+    });
+    // Match absolute file paths (not already inside tags)
+    html = html.replace(/(?<![="'\w])(\/(?:home|tmp|usr|var|etc|opt|mnt|root|workspace)[^\s<>"')\]]*)/g, (fp) => {
+      return `<span class="chat-link chat-link-path" data-path="${escHtml(fp)}" title="Click to copy, Ctrl+Click to open">${escHtml(fp)}</span>`;
+    });
+    return html;
+  }
+
+  // Linkify plain text (for user messages that don't go through markdown)
+  _linkifyText(text) {
+    let html = escHtml(text);
+    html = html.replace(/(https?:\/\/[^\s<>&]+)/g, (url) => {
+      return `<span class="chat-link" data-href="${url}" title="Click to copy, Ctrl+Click to open">${url}</span>`;
+    });
+    html = html.replace(/(?<![="'\w])(\/(?:home|tmp|usr|var|etc|opt|mnt|root|workspace)[^\s<>&]*)/g, (fp) => {
+      return `<span class="chat-link chat-link-path" data-path="${fp}" title="Click to copy, Ctrl+Click to open">${fp}</span>`;
+    });
+    return html;
+  }
+
+  _setupLinkHandler() {
+    this._messageList.addEventListener('click', (e) => {
+      const link = e.target.closest('.chat-link');
+      if (!link) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const url = link.dataset.href;
+      const fp = link.dataset.path;
+      if (e.ctrlKey || e.metaKey) {
+        // Ctrl+Click: open
+        if (url) window.open(url, '_blank');
+        else if (fp) this.app.openFile(fp, fp.split('/').pop());
+      } else {
+        // Click: copy
+        const text = url || fp;
+        navigator.clipboard.writeText(text).then(() => {
+          const orig = link.textContent;
+          link.textContent = 'Copied!';
+          setTimeout(() => { link.textContent = orig; }, 800);
+        }).catch(() => {});
+      }
+    });
+  }
+
+  _doSearch(query) {
+    const q = query.trim().toLowerCase();
+    const msgs = this._messageList.querySelectorAll('.chat-msg');
+    if (!q) { msgs.forEach(m => m.classList.remove('chat-search-hidden')); return; }
+    msgs.forEach(m => {
+      const text = m.textContent.toLowerCase();
+      m.classList.toggle('chat-search-hidden', !text.includes(q));
+    });
+  }
+
+  _clearSearch() {
+    this._messageList.querySelectorAll('.chat-msg').forEach(m => m.classList.remove('chat-search-hidden'));
   }
 
   _scrollToBottom() {

@@ -1245,6 +1245,30 @@ html, body {
   transition: all var(--transition);
 }
 .chat-send-btn:hover { background: var(--accent-hover); transform: scale(1.05); }
+.chat-shortcut-hint {
+  font-size: 9px; color: var(--text-dim); text-align: center; white-space: nowrap;
+}
+.chat-search-bar {
+  display: flex; gap: 6px; padding: 6px 16px; border-bottom: 1px solid var(--border);
+  background: var(--bg-titlebar); align-items: center;
+}
+.chat-search-bar.hidden { display: none; }
+.chat-search-input {
+  flex: 1; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--bg-input); color: var(--text); padding: 4px 8px; font-size: 12px;
+}
+.chat-search-input:focus { outline: none; border-color: var(--accent); }
+.chat-search-close {
+  background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 14px; padding: 2px 4px;
+}
+.chat-search-close:hover { color: var(--text); }
+.chat-search-hidden { display: none !important; }
+.chat-link {
+  color: var(--accent); cursor: pointer; text-decoration: underline;
+  text-decoration-style: dotted; text-underline-offset: 2px;
+}
+.chat-link:hover { text-decoration-style: solid; opacity: 0.9; }
+.chat-link-path { color: var(--blue); }
 .chat-expand-btn {
   width: 36px; height: 20px; border-radius: var(--radius-sm); border: 1px solid var(--border);
   background: var(--bg-input); color: var(--text-dim); font-size: 12px; cursor: pointer;
