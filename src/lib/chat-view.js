@@ -1093,6 +1093,7 @@ class ChatView {
       this._statusTokensOut = u.output_tokens || 0;
     }
     if (status.total_cost_usd) this._statusCost = status.total_cost_usd;
+    if (status.slashCommands) this._slashCommands = status.slashCommands.map(c => c.startsWith('/') ? c : '/' + c);
     this._updateStatusBar();
   }
 

@@ -1433,7 +1433,7 @@ wss.on('connection', (ws) => {
 
             // Extract latest status: last assistant's per-turn usage + cumulative cost
             let chatStatus = null;
-            let lastUsage = null, model = null, contextWindow = 0, totalCost = 0;
+            let lastUsage = null, model = null, contextWindow = 0, totalCost = 0, slashCommands = null;
             for (let i = allMessages.length - 1; i >= 0; i--) {
               const m = allMessages[i];
               if (!lastUsage && m.type === 'assistant' && m.message?.usage) {
@@ -1445,11 +1445,19 @@ wss.on('connection', (ws) => {
               }
               if (lastUsage && model) break;
             }
+            // Find slash_commands from system.init (scan forward since it's near the start)
+            for (const m of allMessages) {
+              if (m.type === 'system' && m.subtype === 'init' && m.slash_commands) {
+                slashCommands = m.slash_commands;
+                if (!model && m.model) model = m.model;
+                break;
+              }
+            }
             for (const m of allMessages) {
               if (m.type === 'result' && m.total_cost_usd) totalCost += m.total_cost_usd;
             }
             if (lastUsage || model) {
-              chatStatus = { model, lastUsage, contextWindow, total_cost_usd: totalCost };
+              chatStatus = { model, lastUsage, contextWindow, total_cost_usd: totalCost, slashCommands };
             }
 
             ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, mode: 'chat', chatHistory, totalCount, chatStatus }));
