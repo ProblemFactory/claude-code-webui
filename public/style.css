@@ -1283,9 +1283,10 @@ html, body {
 .chat-role-user { color: var(--accent); }
 .chat-role-assistant { color: var(--green); }
 .chat-role-tool { color: var(--text-dim); font-family: monospace; }
+.chat-msg-user .chat-compact-content { white-space: pre-wrap; }
 .chat-compact-content {
   flex: 1; min-width: 0; font-size: 13px; line-height: 1.5; overflow-wrap: break-word;
-  padding: 2px 0; white-space: pre-wrap;
+  padding: 2px 0;
 }
 .chat-compact-content .chat-text { }
 .chat-compact-content .chat-text { line-height: 1.35; }

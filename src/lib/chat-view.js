@@ -301,7 +301,7 @@ class ChatView {
 
   _renderMarkdown(text) {
     try {
-      let html = marked.parse(text || '', { breaks: true });
+      let html = marked.parse(text || '');
       return this._linkify(html);
     } catch {
       return escHtml(text || '');
