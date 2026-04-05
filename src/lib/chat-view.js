@@ -42,7 +42,8 @@ class ChatView {
     this._statusBar.className = 'chat-status-bar';
     this._statusModel = '';
     this._statusTokensOut = 0;
-    this._statusLastInputTokens = 0; // last turn's total input (= current context size)
+    this._statusLastInputTokens = 0;
+    this._statusLastCacheRead = 0;
     this._statusCost = 0;
     this._statusContextWindow = 0;
 
@@ -451,6 +452,7 @@ class ChatView {
         if (msg.message?.usage && !isHistory) {
           const u = msg.message.usage;
           this._statusLastInputTokens = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+          this._statusLastCacheRead = u.cache_read_input_tokens || 0;
           this._statusTokensOut = u.output_tokens || 0;
           this._updateStatusBar();
         }
@@ -1036,6 +1038,7 @@ class ChatView {
     if (status.lastUsage) {
       const u = status.lastUsage;
       this._statusLastInputTokens = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+      this._statusLastCacheRead = u.cache_read_input_tokens || 0;
       this._statusTokensOut = u.output_tokens || 0;
     }
     if (status.total_cost_usd) this._statusCost = status.total_cost_usd;
@@ -1043,23 +1046,42 @@ class ChatView {
   }
 
   _updateStatusBar() {
-    const fmtK = (n) => n >= 1000000 ? (n / 1000000).toFixed(1) + 'M' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
+    const fmtK = (n) => n >= 1000000 ? (n / 1000000).toFixed(1) + 'm' : n >= 1000 ? Math.round(n / 1000) + 'k' : String(n);
     const parts = [];
+
+    // Model badge
     if (this._statusModel) {
       parts.push(`<span class="chat-status-model">${escHtml(this._statusModel)}</span>`);
     }
+
+    // Context % with emoji + progress bar
     if (this._statusContextWindow && this._statusLastInputTokens) {
       const pct = Math.min(100, Math.round((this._statusLastInputTokens / this._statusContextWindow) * 100));
-      const color = pct > 80 ? 'var(--red)' : pct > 50 ? 'var(--yellow)' : 'var(--green)';
-      parts.push(`<span class="chat-status-ctx"><span class="chat-status-ctx-bar"><span class="chat-status-ctx-fill" style="width:${pct}%;background:${color}"></span></span>${pct}%</span>`);
+      let icon, barColor;
+      if (pct > 95) { icon = '\uD83D\uDD34'; barColor = '#ef4444'; } // 🔴
+      else if (pct > 85) { icon = '\uD83D\uDFE0'; barColor = '#f97316'; } // 🟠
+      else if (pct > 70) { icon = '\uD83D\uDFE1'; barColor = '#eab308'; } // 🟡
+      else { icon = '\uD83D\uDFE2'; barColor = '#22c55e'; } // 🟢
+      const usedK = fmtK(this._statusLastInputTokens);
+      const totalK = fmtK(this._statusContextWindow);
+      parts.push(`<span class="chat-status-ctx">${icon} <span class="chat-status-ctx-bar"><span class="chat-status-ctx-fill" style="width:${pct}%;background:${barColor}"></span></span> <span style="color:${barColor}">${pct}%</span><span class="chat-status-dim">[${usedK}/${totalK}]</span></span>`);
     }
-    if (this._statusLastInputTokens) {
-      parts.push(`<span class="chat-status-tokens">${fmtK(this._statusLastInputTokens)} ctx</span>`);
+
+    // Cache ratio
+    if (this._statusLastCacheRead != null && this._statusLastInputTokens) {
+      const cacheTotal = this._statusLastInputTokens;
+      const cachePct = cacheTotal > 0 ? Math.round((this._statusLastCacheRead / cacheTotal) * 100) : 0;
+      const cacheColor = cachePct >= 80 ? '#22c55e' : cachePct >= 50 ? '#eab308' : '#f97316';
+      parts.push(`<span style="color:${cacheColor}">\u26A1${cachePct}%</span><span class="chat-status-dim">[${fmtK(this._statusLastCacheRead)}]</span>`);
     }
+
+    // Cost with color tiers
     if (this._statusCost > 0) {
-      parts.push(`<span class="chat-status-cost">$${this._statusCost.toFixed(2)}</span>`);
+      const costColor = this._statusCost > 5 ? '#ef4444' : this._statusCost > 1 ? '#f97316' : '#22c55e';
+      parts.push(`<span style="color:${costColor}">$${this._statusCost.toFixed(2)}</span>`);
     }
-    this._statusBar.innerHTML = parts.join('<span style="color:var(--border)"> | </span>');
+
+    this._statusBar.innerHTML = parts.join(' ');
   }
 
   _scrollToBottom() {

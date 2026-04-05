@@ -1143,15 +1143,17 @@ html, body {
   min-height: 20px; background: var(--bg-taskbar);
   white-space: nowrap; overflow: hidden;
 }
-.chat-status-model { font-weight: 700; color: var(--accent); }
-.chat-status-ctx { display: inline-flex; align-items: center; gap: 4px; }
-.chat-status-ctx-bar {
-  width: 50px; height: 6px; background: var(--bg-input); border-radius: 3px; overflow: hidden;
-  display: inline-block; vertical-align: middle;
+.chat-status-model {
+  font-weight: 700; color: var(--bg-root); background: var(--accent);
+  padding: 0 6px; border-radius: 3px; font-size: 9px; letter-spacing: 0.3px;
 }
-.chat-status-ctx-fill { height: 100%; border-radius: 3px; transition: width 0.3s; }
-.chat-status-cost { color: var(--yellow); }
-.chat-status-tokens { color: var(--text-secondary); }
+.chat-status-ctx { display: inline-flex; align-items: center; gap: 3px; }
+.chat-status-ctx-bar {
+  width: 40px; height: 5px; background: rgba(128,128,128,0.3); border-radius: 3px;
+  overflow: hidden; display: inline-block; vertical-align: middle;
+}
+.chat-status-ctx-fill { display: block; height: 100%; border-radius: 3px; min-width: 1px; }
+.chat-status-dim { color: var(--text-dim); margin-left: 1px; }
 .chat-message-list {
   flex: 1; overflow-y: auto; padding: 16px 20px; display: flex; flex-direction: column; gap: 12px;
   user-select: text; cursor: text;
