@@ -331,16 +331,24 @@ class ChatView {
           const placeholder = this._messageList.querySelector(`[data-tool-id="${toolId}"]`);
 
           let html = '';
+          const fp = pendingUse.input?.file_path || '';
           if (status === 'ok' && pendingUse.name === 'Edit' && pendingUse.input?.old_string != null) {
             html = this._renderEditDiff(pendingUse);
           } else if (status === 'ok' && pendingUse.name === 'Write') {
-            const preview = (pendingUse.input?.content || '').substring(0, 500);
-            html = `<div class="chat-tool-use"><span class="chat-tool-label">\u{1F4DD} Write ${escHtml((pendingUse.input?.file_path || '').split('/').pop())}</span><details><summary>${escHtml(pendingUse.input?.file_path || '')}</summary><pre>${escHtml(preview)}${(pendingUse.input?.content || '').length > 500 ? '...' : ''}</pre></details></div>`;
+            const content = pendingUse.input?.content || '';
+            const lineCount = content.split('\n').length;
+            const byteCount = new Blob([content]).size;
+            const sizeStr = byteCount > 1024 ? (byteCount / 1024).toFixed(1) + ' KB' : byteCount + ' B';
+            const preview = content.substring(0, 500);
+            html = `<div class="chat-tool-use"><span class="chat-tool-label">\u{1F4DD} Write ${escHtml(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${lineCount} lines, ${sizeStr}</summary><pre>${escHtml(preview)}${content.length > 500 ? '\n...' : ''}</pre></details></div>`;
+          } else if (status === 'ok' && pendingUse.name === 'Read') {
+            const lineCount = resultText.split('\n').length;
+            const preview = resultText.substring(0, 500);
+            html = `<div class="chat-tool-use"><span class="chat-tool-label">\u{1F4D6} Read ${escHtml(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${lineCount} lines</summary><pre>${escHtml(preview)}${resultText.length > 500 ? '\n...' : ''}</pre></details></div>`;
           } else {
-            // Failed edit/write — show error
             const icon = status === 'ok' ? '\u2713' : '\u2717';
             const firstLine = resultText.split('\n')[0].substring(0, 120) || '(empty)';
-            html = `<div class="chat-tool-result-inline chat-tool-${status}"><span class="chat-tool-label">${icon} ${escHtml(pendingUse.name)} ${escHtml((pendingUse.input?.file_path || '').split('/').pop())}</span> ${escHtml(firstLine)}</div>`;
+            html = `<div class="chat-tool-result-inline chat-tool-${status}"><span class="chat-tool-label">${icon} ${escHtml(pendingUse.name)} ${escHtml(fp)}</span> ${escHtml(firstLine)}</div>`;
           }
 
           if (placeholder) {
@@ -411,10 +419,10 @@ class ChatView {
         } else if (block.type === 'thinking') {
           parts.push(`<details class="chat-thinking"><summary>Thinking...</summary><pre>${escHtml(stripAnsi(block.text || ''))}</pre></details>`);
         } else if (block.type === 'tool_use') {
-          if ((block.name === 'Edit' || block.name === 'Write') && block.id) {
+          if ((block.name === 'Edit' || block.name === 'Write' || block.name === 'Read') && block.id) {
             // Defer rendering until tool_result arrives (to show success/failure)
             this._pendingToolUses.set(block.id, block);
-            parts.push(`<div class="chat-tool-pending" data-tool-id="${escHtml(block.id)}"><span class="chat-tool-label">\u23F3 ${escHtml(block.name)} ${escHtml((block.input?.file_path || '').split('/').pop())}</span><span class="chat-spinner"></span></div>`);
+            parts.push(`<div class="chat-tool-pending" data-tool-id="${escHtml(block.id)}"><span class="chat-tool-label">\u23F3 ${escHtml(block.name)} ${escHtml(block.input?.file_path || '')}</span><span class="chat-spinner"></span></div>`);
           } else {
             const inputStr = stripAnsi(typeof block.input === 'string' ? block.input : JSON.stringify(block.input, null, 2));
             parts.push(`<div class="chat-tool-use"><span class="chat-tool-label">\uD83D\uDD27 ${escHtml(block.name || 'tool')}</span><details><summary>Input</summary><pre>${escHtml(inputStr).substring(0, 3000)}</pre></details></div>`);
