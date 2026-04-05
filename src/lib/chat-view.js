@@ -36,6 +36,17 @@ class ChatView {
       container.classList.toggle('chat-compact', v);
     });
 
+    // Status bar
+    this._statusBar = document.createElement('div');
+    this._statusBar.className = 'chat-status-bar';
+    this._statusModel = '';
+    this._statusTokensIn = 0;
+    this._statusTokensOut = 0;
+    this._statusCacheRead = 0;
+    this._statusCost = 0;
+    this._statusTurns = 0;
+    container.appendChild(this._statusBar);
+
     // Message list
     this._messageList = document.createElement('div');
     this._messageList.className = 'chat-message-list';
@@ -389,13 +400,33 @@ class ChatView {
       case 'assistant':
         if (!isHistory) this._hideTyping();
         this._appendAssistant(msg);
+        // Track tokens from individual message usage
+        if (msg.message?.usage && !isHistory) {
+          const u = msg.message.usage;
+          this._statusTokensOut += u.output_tokens || 0;
+        }
         break;
       case 'system':
-        // Skip all system messages in chat mode (hooks, init, etc.)
+        if (msg.subtype === 'init' && msg.model) {
+          this._statusModel = msg.model.replace(/\[.*$/, ''); // strip [1m] etc
+          this._updateStatusBar();
+        }
         break;
       case 'result':
         if (!isHistory) this._hideTyping();
         this._appendResult(msg);
+        // Update status from result
+        if (msg.modelUsage) {
+          for (const [model, info] of Object.entries(msg.modelUsage)) {
+            this._statusModel = model.replace(/\[.*$/, '');
+            this._statusTokensIn += (info.inputTokens || 0) + (info.cacheReadInputTokens || 0) + (info.cacheCreationInputTokens || 0);
+            this._statusTokensOut += info.outputTokens || 0;
+            this._statusCacheRead += info.cacheReadInputTokens || 0;
+          }
+        }
+        if (msg.total_cost_usd) this._statusCost += msg.total_cost_usd;
+        if (msg.num_turns) this._statusTurns += msg.num_turns;
+        this._updateStatusBar();
         break;
       case 'rate_limit_event':
         // Skip silently
@@ -956,6 +987,19 @@ class ChatView {
 
   _hideTyping() {
     if (this._typingEl) { this._typingEl.remove(); this._typingEl = null; }
+  }
+
+  _updateStatusBar() {
+    const parts = [];
+    if (this._statusModel) parts.push(this._statusModel);
+    if (this._statusTokensIn || this._statusTokensOut) {
+      const fmtK = (n) => n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
+      parts.push(`\u25B8 ${fmtK(this._statusTokensIn)} in / ${fmtK(this._statusTokensOut)} out`);
+      if (this._statusCacheRead) parts.push(`(${fmtK(this._statusCacheRead)} cached)`);
+    }
+    if (this._statusCost > 0) parts.push(`$${this._statusCost.toFixed(4)}`);
+    if (this._statusTurns > 0) parts.push(`${this._statusTurns} turns`);
+    this._statusBar.textContent = parts.join('  \u00B7  ');
   }
 
   _scrollToBottom() {

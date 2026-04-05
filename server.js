@@ -992,7 +992,7 @@ function parseSessionJsonl(claudeSessionId, cwd) {
         try {
           const msg = JSON.parse(trimmed);
           // Only include user/assistant/result messages (skip system/hooks/internal)
-          if (msg.type === 'user' || msg.type === 'assistant' || msg.type === 'result') {
+          if (msg.type === 'user' || msg.type === 'assistant' || msg.type === 'result' || (msg.type === 'system' && msg.subtype === 'init')) {
             messages.push(msg);
           }
         } catch {}
