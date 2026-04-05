@@ -1257,16 +1257,14 @@ html, body {
 .chat-tool-result-inline.chat-tool-ok { background: rgba(34,197,94,0.08); color: var(--green); }
 .chat-tool-result-inline.chat-tool-error { background: rgba(239,68,68,0.08); color: var(--red); }
 
-.chat-diff { margin: 6px 0; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; font-size: 12px; }
+.chat-diff { margin: 4px 0 0; font-size: 12px; }
 .chat-diff > summary { list-style: none; cursor: pointer; }
 .chat-diff > summary::-webkit-details-marker { display: none; }
-.chat-diff-header {
-  display: flex; justify-content: space-between; align-items: center; gap: 8px;
-  padding: 4px 10px; background: rgba(128,128,128,0.1);
-}
-.chat-diff[open] .chat-diff-header { border-bottom: 1px solid var(--border); }
-.chat-diff-path { font-size: 10px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: right; }
-.chat-diff-body { font-family: 'SF Mono','Fira Code','JetBrains Mono',monospace; font-size: 11px; line-height: 1.5; overflow-x: auto; }
+.chat-diff-summary { font-size: 11px; color: var(--text-dim); padding: 2px 0; }
+.chat-diff-summary:hover { color: var(--text-secondary); }
+.chat-diff-summary::before { content: '\25B8  '; }
+.chat-diff[open] > .chat-diff-summary::before { content: '\25BE  '; }
+.chat-diff-body { font-family: 'SF Mono','Fira Code','JetBrains Mono',monospace; font-size: 11px; line-height: 1.5; overflow-x: auto; margin-top: 4px; border: 1px solid var(--border); border-radius: var(--radius-sm); }
 .chat-diff-body > div { padding: 0 10px; white-space: pre; min-height: 18px; }
 .chat-diff-prefix { display: inline-block; width: 14px; color: var(--text-dim); user-select: none; }
 .chat-diff-add { background: rgba(34,197,94,0.15); color: var(--text); }

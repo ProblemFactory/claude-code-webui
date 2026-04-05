@@ -512,7 +512,7 @@ class ChatView {
       body += `<div class="${cls}"><span class="chat-diff-prefix">${prefix}</span>${escHtml(line.text)}</div>`;
     }
 
-    return `<details class="chat-diff"><summary class="chat-diff-header"><span class="chat-tool-label">${summary}</span><span class="chat-diff-path" title="${escHtml(filePath)}">${escHtml(filePath)}</span></summary><div class="chat-diff-body">${body}</div></details>`;
+    return `<div class="chat-tool-use"><span class="chat-tool-label">\u{1F4DD} Update ${escHtml(filePath)}</span><details class="chat-diff"><summary class="chat-diff-summary">${summary}</summary><div class="chat-diff-body">${body}</div></details></div>`;
   }
 
   // Strip trailing punctuation from matched paths/URLs
