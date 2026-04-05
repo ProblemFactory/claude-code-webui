@@ -1355,7 +1355,8 @@ wss.on('connection', (ws) => {
             stdinPayload = data.text;
             userMsg = { ...parsed, msgId, timestamp: new Date().toISOString() };
           } else {
-            stdinPayload = data.text;
+            // Always send as JSON to avoid multi-line text being split by chat-wrapper
+            stdinPayload = JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: data.text }] } });
             userMsg = { type: 'user', message: { role: 'user', content: data.text }, msgId, timestamp: new Date().toISOString() };
           }
 
