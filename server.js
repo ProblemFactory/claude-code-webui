@@ -1054,10 +1054,25 @@ function extractSessionMeta(filePath) {
 // Kill an external/tmux session by PID (not managed by WebUI WebSocket)
 // Get chat message history for a Claude session (from JSONL file)
 app.get('/api/session-messages', (req, res) => {
-  const { claudeSessionId, cwd, offset, limit, search } = req.query;
+  const { claudeSessionId, cwd, offset, limit, search, withStatus } = req.query;
   if (!claudeSessionId) return res.status(400).json({ error: 'claudeSessionId required' });
   const allMessages = parseSessionJsonl(claudeSessionId, cwd || '');
   const total = allMessages.length;
+
+  // Build chatStatus if requested
+  let chatStatus = null;
+  if (withStatus) {
+    let lastUsage = null, model = null, contextWindow = 0, totalCost = 0, slashCommands = null;
+    for (let i = allMessages.length - 1; i >= 0; i--) {
+      const m = allMessages[i];
+      if (!lastUsage && m.type === 'assistant' && m.message?.usage) lastUsage = m.message.usage;
+      if (!model && m.type === 'result' && m.modelUsage) { model = Object.keys(m.modelUsage)[0]; contextWindow = Object.values(m.modelUsage)[0]?.contextWindow || 0; }
+      if (lastUsage && model) break;
+    }
+    for (const m of allMessages) { if (m.type === 'system' && m.subtype === 'init' && m.slash_commands) { slashCommands = m.slash_commands; if (!model && m.model) model = m.model; break; } }
+    for (const m of allMessages) { if (m.type === 'result' && m.total_cost_usd) totalCost += m.total_cost_usd; }
+    if (lastUsage || model) chatStatus = { model, lastUsage, contextWindow, total_cost_usd: totalCost, slashCommands };
+  }
 
   if (search) {
     // Server-side search: find messages containing the query
@@ -1077,9 +1092,9 @@ app.get('/api/session-messages', (req, res) => {
   } else if (offset !== undefined || limit !== undefined) {
     const o = parseInt(offset) || 0;
     const l = parseInt(limit) || 50;
-    res.json({ messages: allMessages.slice(o, o + l), total });
+    res.json({ messages: allMessages.slice(o, o + l), total, chatStatus });
   } else {
-    res.json({ messages: allMessages, total });
+    res.json({ messages: allMessages, total, chatStatus });
   }
 });
 

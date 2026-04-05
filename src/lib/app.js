@@ -689,9 +689,12 @@ class App {
           winInfo._notifyChanged = () => this.updateTaskbar();
           // Load JSONL history for resumed sessions
           if (resumeId) {
-            fetch(`/api/session-messages?claudeSessionId=${encodeURIComponent(resumeId)}&cwd=${encodeURIComponent(cwd||'')}`)
+            fetch(`/api/session-messages?claudeSessionId=${encodeURIComponent(resumeId)}&cwd=${encodeURIComponent(cwd||'')}&withStatus=1`)
               .then(r => r.json())
-              .then(data => { if (data.messages?.length) chatView.loadHistory(data.messages, data.total); })
+              .then(data => {
+                if (data.messages?.length) chatView.loadHistory(data.messages, data.total);
+                if (data.chatStatus) chatView.applyStatus(data.chatStatus);
+              })
               .catch(() => {});
           }
           chatView.focus();
