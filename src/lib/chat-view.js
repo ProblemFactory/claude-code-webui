@@ -210,10 +210,7 @@ class ChatView {
         this._appendAssistant(msg);
         break;
       case 'system':
-        if (msg.subtype === 'init') {
-          this._appendSystem(`Session started (${msg.model || 'unknown model'})`);
-        }
-        // Skip hook events and other system noise
+        // Skip all system messages in chat mode (hooks, init, etc.)
         break;
       case 'result':
         if (!isHistory) this._hideTyping();
