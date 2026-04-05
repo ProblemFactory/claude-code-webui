@@ -1388,6 +1388,15 @@ pre.chat-pre-wrapped { white-space: pre-wrap; word-break: break-all; }
 .chat-long-msg > summary::-webkit-details-marker { display: none; }
 .chat-long-msg > summary::after { content: ' \25B8'; color: var(--text-dim); font-size: 10px; }
 .chat-load-spinner { display: flex; justify-content: center; padding: 8px; }
+.chat-scroll-btn {
+  position: absolute; right: 16px; bottom: 80px; width: 32px; height: 32px;
+  border-radius: 50%; border: 1px solid var(--border); background: var(--bg-dialog);
+  color: var(--text); font-size: 16px; cursor: pointer; z-index: 10;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3); transition: opacity var(--transition);
+}
+.chat-scroll-btn:hover { background: var(--bg-hover); }
+.chat-scroll-btn.hidden { display: none; }
 .chat-long-msg[open] > summary { white-space: normal; display: none; }
 .chat-long-msg[open] > summary::after { content: ''; }
 .chat-compact-content {
