@@ -650,6 +650,13 @@ class App {
             chatView.dispose(); this.sessions.delete(winInfo.id); this._checkWelcome();
           };
           winInfo._notifyChanged = () => this.updateTaskbar();
+          // Load JSONL history for resumed sessions
+          if (resumeId) {
+            fetch(`/api/session-messages?claudeSessionId=${encodeURIComponent(resumeId)}&cwd=${encodeURIComponent(cwd||'')}`)
+              .then(r => r.json())
+              .then(data => { if (data.messages?.length) chatView.loadHistory(data.messages); })
+              .catch(() => {});
+          }
           chatView.focus();
         } else {
           const term = new TerminalSession(winInfo, this.ws, msg.sessionId, this.themeManager, (filePath, signalPath) => {
