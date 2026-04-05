@@ -1180,11 +1180,11 @@ html, body {
   border-left: 3px solid var(--accent); padding-left: 12px; margin: 8px 0;
   color: var(--text-secondary);
 }
-.chat-bubble-assistant .chat-text table { border-collapse: collapse; margin: 8px 0; font-size: 12px; }
-.chat-bubble-assistant .chat-text th, .chat-bubble-assistant .chat-text td {
+.chat-text table { border-collapse: collapse; margin: 8px 0; font-size: 12px; width: auto; }
+.chat-text th, .chat-text td {
   border: 1px solid var(--border); padding: 4px 8px;
 }
-.chat-bubble-assistant .chat-text th { background: var(--bg-root); font-weight: 600; }
+.chat-text th { background: var(--bg-root); font-weight: 600; }
 
 /* System messages */
 .chat-system {
@@ -1294,6 +1294,17 @@ mark.chat-search-current { background: rgba(255,193,7,0.7); outline: 1px solid v
 }
 .chat-link:hover { text-decoration-style: solid; opacity: 0.9; }
 .chat-link-path { color: var(--blue); }
+.chat-img {
+  max-width: 100%; max-height: 300px; border-radius: var(--radius); margin: 4px 0;
+  border: 1px solid var(--border); object-fit: contain; cursor: pointer;
+}
+.chat-img:hover { opacity: 0.9; }
+.chat-img-placeholder { color: var(--text-dim); font-style: italic; }
+.chat-img-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 99999;
+  display: flex; align-items: center; justify-content: center; cursor: zoom-out;
+}
+.chat-img-overlay img { max-width: 90vw; max-height: 90vh; object-fit: contain; border-radius: var(--radius); }
 .chat-pre-wrap { position: relative; }
 .chat-wrap-toggle {
   position: absolute; top: 4px; right: 4px;

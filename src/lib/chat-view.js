@@ -178,8 +178,18 @@ class ChatView {
 
     container.appendChild(inputArea);
 
-    // Set up click handler for links/paths
+    // Set up click handler for links/paths + image zoom
     this._setupLinkHandler();
+    this._messageList.addEventListener('click', (e) => {
+      if (e.target.tagName === 'IMG' && e.target.classList.contains('chat-img')) {
+        // Open image in a simple overlay
+        const overlay = document.createElement('div');
+        overlay.className = 'chat-img-overlay';
+        overlay.innerHTML = `<img src="${e.target.src}" alt="image">`;
+        overlay.onclick = () => overlay.remove();
+        document.body.appendChild(overlay);
+      }
+    });
 
     // Listen for chat messages from server
     this._handler = (msg) => {
@@ -305,7 +315,13 @@ class ChatView {
     if (typeof content === 'string') {
       textHtml = this._linkifyText(content);
     } else if (Array.isArray(content)) {
-      textHtml = content.filter(b => b.type === 'text').map(b => this._linkifyText(b.text)).join('');
+      const parts = [];
+      for (const b of content) {
+        if (b.type === 'text') parts.push(this._linkifyText(b.text));
+        else if (b.type === 'image' && b.source?.data) parts.push(`<img class="chat-img" src="data:${b.source.media_type || 'image/png'};base64,${b.source.data}" alt="image">`);
+        else if (b.type === 'image') parts.push('<span class="chat-img-placeholder">[Image]</span>');
+      }
+      textHtml = parts.join('');
     }
 
     if (this._compact) {
@@ -333,6 +349,8 @@ class ChatView {
         } else if (block.type === 'tool_use') {
           const inputStr = stripAnsi(typeof block.input === 'string' ? block.input : JSON.stringify(block.input, null, 2));
           parts.push(`<div class="chat-tool-use"><span class="chat-tool-label">\uD83D\uDD27 ${escHtml(block.name || 'tool')}</span><details><summary>Input</summary><pre>${escHtml(inputStr).substring(0, 3000)}</pre></details></div>`);
+        } else if (block.type === 'image' && block.source?.data) {
+          parts.push(`<img class="chat-img" src="data:${block.source.media_type || 'image/png'};base64,${block.source.data}" alt="image">`);
         }
       }
     } else if (typeof content === 'string') {
@@ -578,29 +596,30 @@ class ChatView {
   }
 
   async _handleImagePaste(file) {
-    // Read image as base64 and send as stream-json image content block
     const reader = new FileReader();
     reader.onload = () => {
-      const base64 = reader.result.split(',')[1]; // strip data:image/...;base64, prefix
+      const dataUrl = reader.result;
+      const base64 = dataUrl.split(',')[1];
       const mediaType = file.type || 'image/png';
-      // Build stream-json user message with image + optional text
       const text = this._textarea.value.trim();
+
+      // Build stream-json user message with image + optional text
       const content = [
         { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } },
       ];
       if (text) content.push({ type: 'text', text });
       const msg = JSON.stringify({ type: 'user', message: { role: 'user', content } });
-      // Send the raw JSON through chat-input — chat-wrapper passes valid JSON through as-is
       this.ws.send({ type: 'chat-input', sessionId: this.sessionId, text: msg });
       this._textarea.value = '';
       this._textarea.style.height = 'auto';
       this._pendingTyping = true;
 
-      // Show image preview in user message
-      const userMsg = { type: 'user', message: { role: 'user', content: [
-        { type: 'text', text: `[Image: ${file.name || 'clipboard'}]${text ? '\n' + text : ''}` }
+      // Show local preview immediately (server echo strips base64)
+      const previewMsg = { type: 'user', message: { role: 'user', content: [
+        { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } },
+        ...(text ? [{ type: 'text', text }] : []),
       ]}};
-      this._onMessage(userMsg);
+      this._onMessage(previewMsg);
     };
     reader.readAsDataURL(file);
   }
