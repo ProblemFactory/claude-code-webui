@@ -41,12 +41,18 @@ class ChatView {
     this._messageList.className = 'chat-message-list';
     container.appendChild(this._messageList);
 
-    // Scroll-to-bottom button (shown when unpinned)
+    // Scroll-to-bottom / pin button (shown when unpinned, with new message count)
+    this._newMsgCount = 0;
     this._scrollBtn = document.createElement('button');
     this._scrollBtn.className = 'chat-scroll-btn hidden';
-    this._scrollBtn.textContent = '\u2193';
+    this._scrollBtn.innerHTML = '\u2193';
     this._scrollBtn.title = 'Scroll to bottom';
-    this._scrollBtn.onclick = () => { this._pinned = true; this._scrollToBottom(); this._scrollBtn.classList.add('hidden'); };
+    this._scrollBtn.onclick = () => {
+      this._pinned = true;
+      this._newMsgCount = 0;
+      this._scrollToBottom();
+      this._scrollBtn.classList.add('hidden');
+    };
     container.appendChild(this._scrollBtn);
 
     // Scroll detection: pin-to-bottom + auto-load earlier messages (throttled)
@@ -60,6 +66,7 @@ class ChatView {
         const atBottom = scrollHeight - scrollTop - clientHeight < 30;
         if (atBottom && !this._pinned) {
           this._pinned = true;
+          this._newMsgCount = 0;
           this._scrollBtn.classList.add('hidden');
         } else if (!atBottom) {
           this._pinned = false;
@@ -398,8 +405,14 @@ class ChatView {
         break;
     }
 
-    if (!isHistory && this._pinned) {
-      this._scrollToBottom();
+    if (!isHistory) {
+      if (this._pinned) {
+        this._scrollToBottom();
+      } else {
+        // Count new messages while unpinned
+        this._newMsgCount++;
+        this._scrollBtn.innerHTML = `\u2193 <span class="chat-scroll-badge">${this._newMsgCount}</span>`;
+      }
     }
   }
 
