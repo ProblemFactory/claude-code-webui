@@ -288,9 +288,15 @@ Split from monolithic 1647-line `src/client.js` into 13 ES modules under `src/li
 
 **ChatView** (`src/lib/chat-view.js`): Renders structured messages — user/assistant/tool_use/tool_result/thinking blocks. Features: compact mode (document-style), markdown rendering, collapsible tool results, Ctrl+F search with highlight/navigation, auto-detect URLs/paths (click=copy, Ctrl+click=open), pre block wrap toggle, typing indicator, expandable input.
 
+**View Manager**: Sliding window `[_windowStart, _windowEnd)` over server message list. `jumpToIndex(idx)` replaces window. `jumpToBottom()` loads last 50. `_extendTop()` on scroll-up. Server-side search returns indices, client jumps via `jumpToIndex`.
+
+**Highlight Layer**: CSS Custom Highlight API (`CSS.highlights`) — non-destructive rendering layer for search highlighting. `_applyHighlightLayer()` creates Range objects, re-applied on view changes.
+
+**Status Bar**: Model badge, context % with colored progress bar (from `assistant.message.usage` per-turn data, NOT cumulative `result.modelUsage`), cache hit ratio ⚡, cost with color tiers ($<1 green, $1-5 orange, $>5 red). Persisted via `chatStatus` on attach.
+
 **Session management**: `mode` field on session object. Stored in session metadata + wrapper metadata. `/api/active` and WebSocket `active-sessions` include mode. Sidebar shows 💬 badge for chat sessions. Resume: split button toggles Terminal/Chat mode per session, persisted in user state.
 
-**JSONL history**: On chat attach, server reads `~/.claude/projects/<projDir>/<sessionId>.jsonl` for past conversation + buffer for current session output. API: `GET /api/session-messages?claudeSessionId=...&cwd=...`.
+**JSONL history**: On chat attach, server sends last 50 messages + `totalCount` + `chatStatus`. Paginated API: `GET /api/session-messages?claudeSessionId=...&cwd=...&offset=&limit=&search=`.
 
 **Server restart**: dtach keeps both wrappers alive. On restart, `restoreSessions` detects mode from wrapper metadata, re-attaches appropriately.
 
