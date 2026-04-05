@@ -460,19 +460,17 @@ class ChatView {
       case 'result':
         if (!isHistory) this._hideTyping();
         this._appendResult(msg);
-        // Update status from result
-        if (msg.modelUsage) {
+        // Only update status from LIVE result messages (not history — applyStatus handles that)
+        if (!isHistory && msg.modelUsage) {
           for (const [model, info] of Object.entries(msg.modelUsage)) {
             this._statusModel = model.replace(/\[.*$/, '');
-            // Last turn's total input tokens = current context size
             this._statusLastInputTokens = (info.inputTokens || 0) + (info.cacheReadInputTokens || 0) + (info.cacheCreationInputTokens || 0);
             this._statusTokensOut = info.outputTokens || 0;
             if (info.contextWindow) this._statusContextWindow = info.contextWindow;
           }
+          if (msg.total_cost_usd) this._statusCost += msg.total_cost_usd;
+          this._updateStatusBar();
         }
-        if (msg.total_cost_usd) this._statusCost += msg.total_cost_usd;
-        if (msg.num_turns) this._statusTurns += msg.num_turns;
-        this._updateStatusBar();
         break;
       case 'rate_limit_event':
         // Skip silently
@@ -890,12 +888,21 @@ class ChatView {
     const allMsgs = this._messageList.querySelectorAll('.chat-msg');
     if (relIdx >= 0 && relIdx < allMsgs.length) {
       const targetEl = allMsgs[relIdx];
-      for (const d of targetEl.querySelectorAll('details:not([open])')) d.open = true;
+      // Force render + expand all collapsed content
       targetEl.style.contentVisibility = 'visible';
+      for (const d of targetEl.querySelectorAll('details:not([open])')) d.open = true;
+      // Force layout before highlighting
+      targetEl.offsetHeight; // eslint-disable-line no-unused-expressions
       this._highlightInElement(targetEl, this._searchQuery);
       const mark = targetEl.querySelector('mark.chat-search-highlight');
-      if (mark) this._scrollToMatch(mark);
-      else targetEl.scrollIntoView({ block: 'center' });
+      if (mark) {
+        this._scrollToMatch(mark);
+      } else {
+        // Fallback: flash the entire message as highlight
+        targetEl.scrollIntoView({ block: 'center' });
+        targetEl.classList.add('chat-msg-flash');
+        setTimeout(() => targetEl.classList.remove('chat-msg-flash'), 2000);
+      }
     }
   }
 
@@ -1040,10 +1047,14 @@ class ChatView {
 
   _scrollToBottom() {
     this._programmaticScroll = true;
-    this._messageList.scrollTop = this._messageList.scrollHeight;
-    // Single rAF to let layout settle (contain-intrinsic-size keeps scrollHeight accurate)
-    requestAnimationFrame(() => {
+    const last = this._messageList.lastElementChild;
+    if (last) {
+      last.scrollIntoView({ block: 'end' });
+    } else {
       this._messageList.scrollTop = this._messageList.scrollHeight;
+    }
+    requestAnimationFrame(() => {
+      if (last) last.scrollIntoView({ block: 'end' });
       this._programmaticScroll = false;
     });
   }
