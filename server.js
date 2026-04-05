@@ -1421,7 +1421,7 @@ wss.on('connection', (ws) => {
               if (!trimmed) continue;
               try {
                 const msg = JSON.parse(trimmed);
-                if (msg.type !== 'user' && msg.type !== 'assistant') continue; // skip system/result/rate_limit
+                if (msg.type !== 'user' && msg.type !== 'assistant' && msg.type !== 'result' && !(msg.type === 'system' && msg.subtype === 'init')) continue;
                 if (msg.uuid && jsonlUuids.has(msg.uuid)) continue; // already in JSONL
                 bufferMessages.push(msg);
               } catch {}

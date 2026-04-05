@@ -839,14 +839,10 @@ class ChatView {
     if (!results || idx < 0 || idx >= results.length) return;
 
     const result = results[idx];
-    const msgIndex = result.index; // index in the full message list
+    const msgIndex = result.index;
 
-    // Check if this message is already loaded
+    // Load messages if needed
     if (msgIndex < this._loadedOffset) {
-      // Need to load messages around this result
-      const pageStart = Math.max(0, msgIndex - 10);
-      const pageSize = Math.max(50, msgIndex - this._loadedOffset + 20);
-
       const allSess = this.app.sidebar?._allSessions || [];
       const match = allSess.find(s => s.webuiId === this.sessionId);
       const claudeId = match?.sessionId;
@@ -854,10 +850,9 @@ class ChatView {
       if (!claudeId) return;
 
       try {
+        const pageStart = Math.max(0, msgIndex - 10);
         const res = await fetch(`/api/session-messages?claudeSessionId=${encodeURIComponent(claudeId)}&cwd=${encodeURIComponent(cwd)}&offset=${pageStart}&limit=${this._loadedOffset - pageStart}`);
         const data = await res.json();
-
-        // Prepend messages
         const firstMsg = this._messageList.querySelector('.chat-msg');
         for (const msg of data.messages) {
           const el = this._renderMessageElement(msg);
@@ -867,45 +862,46 @@ class ChatView {
       } catch { return; }
     }
 
-    // Now highlight in DOM
+    // Clear previous highlight
     this._clearDomHighlights();
-    const q = this._searchQuery;
-    const walker = document.createTreeWalker(this._messageList, NodeFilter.SHOW_TEXT);
-    const marks = [];
-    while (walker.nextNode()) {
-      const node = walker.currentNode;
-      const text = node.textContent.toLowerCase();
-      let i = 0;
-      while ((i = text.indexOf(q, i)) !== -1) {
-        try {
-          const range = document.createRange();
-          range.setStart(node, i);
-          range.setEnd(node, i + q.length);
-          const mark = document.createElement('mark');
-          mark.className = 'chat-search-highlight';
-          range.surroundContents(mark);
-          marks.push(mark);
-        } catch {}
-        i += q.length;
-      }
-    }
-    this._searchDomMarks = marks;
 
-    // Find the mark closest to the target message and scroll to it
-    // Target message position: msgIndex - this._loadedOffset in rendered order
+    // Only highlight inside the target message element (not entire DOM)
     const targetPos = msgIndex - this._loadedOffset;
     const allMsgs = this._messageList.querySelectorAll('.chat-msg');
     if (targetPos >= 0 && targetPos < allMsgs.length) {
       const targetEl = allMsgs[targetPos];
-      // Find first mark inside this element
-      const markInTarget = targetEl.querySelector('mark.chat-search-highlight');
-      if (markInTarget) {
-        this._scrollToMatch(markInTarget);
+      this._highlightInElement(targetEl, this._searchQuery);
+      const mark = targetEl.querySelector('mark.chat-search-highlight');
+      if (mark) {
+        this._scrollToMatch(mark);
       } else {
         targetEl.scrollIntoView({ block: 'center', behavior: 'smooth' });
       }
-    } else if (marks.length > 0) {
-      this._scrollToMatch(marks[0]);
+    }
+  }
+
+  _highlightInElement(el, query) {
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    const ranges = [];
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const text = node.textContent.toLowerCase();
+      let i = 0;
+      while ((i = text.indexOf(query, i)) !== -1) {
+        ranges.push({ node, start: i, length: query.length });
+        i += query.length;
+      }
+    }
+    for (let i = ranges.length - 1; i >= 0; i--) {
+      try {
+        const { node, start, length } = ranges[i];
+        const range = document.createRange();
+        range.setStart(node, start);
+        range.setEnd(node, start + length);
+        const mark = document.createElement('mark');
+        mark.className = 'chat-search-highlight';
+        range.surroundContents(mark);
+      } catch {}
     }
   }
 
@@ -915,7 +911,6 @@ class ChatView {
       parent.replaceChild(document.createTextNode(mark.textContent), mark);
       parent.normalize();
     }
-    this._searchDomMarks = [];
   }
 
   _searchNav(dir) {
