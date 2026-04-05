@@ -18,7 +18,16 @@ class ChatView {
     // Build DOM
     const container = document.createElement('div');
     container.className = 'chat-view';
+    this._container = container;
     winInfo.content.appendChild(container);
+
+    // Apply compact mode
+    this._compact = app.settings?.get('chat.compactMode') ?? true;
+    if (this._compact) container.classList.add('chat-compact');
+    app.settings?.on('chat.compactMode', (v) => {
+      this._compact = v;
+      container.classList.toggle('chat-compact', v);
+    });
 
     // Message list
     this._messageList = document.createElement('div');
@@ -205,8 +214,9 @@ class ChatView {
     const el = document.createElement('div');
     el.className = 'chat-msg chat-msg-user';
 
+    let textHtml = '';
     if (typeof content === 'string') {
-      el.innerHTML = `<div class="chat-bubble chat-bubble-user">${this._linkifyText(content)}</div>`;
+      textHtml = this._linkifyText(content);
     } else if (Array.isArray(content)) {
       const parts = [];
       for (const block of content) {
@@ -218,7 +228,13 @@ class ChatView {
           parts.push(`<div class="chat-tool-result chat-tool-${status}"><span class="chat-tool-label">Tool Result (${status})</span><pre>${escHtml(resultText).substring(0, 2000)}</pre></div>`);
         }
       }
-      el.innerHTML = `<div class="chat-bubble chat-bubble-user">${parts.join('')}</div>`;
+      textHtml = parts.join('');
+    }
+
+    if (this._compact) {
+      el.innerHTML = `<div class="chat-compact-msg"><span class="chat-role chat-role-user">You</span><div class="chat-compact-content">${textHtml}</div></div>`;
+    } else {
+      el.innerHTML = `<div class="chat-bubble chat-bubble-user">${textHtml}</div>`;
     }
     this._messageList.appendChild(el);
   }
@@ -230,8 +246,8 @@ class ChatView {
     const el = document.createElement('div');
     el.className = 'chat-msg chat-msg-assistant';
 
+    const parts = [];
     if (Array.isArray(content)) {
-      const parts = [];
       for (const block of content) {
         if (block.type === 'text') {
           parts.push(`<div class="chat-text">${this._renderMarkdown(block.text)}</div>`);
@@ -242,9 +258,16 @@ class ChatView {
           parts.push(`<div class="chat-tool-use"><span class="chat-tool-label">\uD83D\uDD27 ${escHtml(block.name || 'tool')}</span><details><summary>Input</summary><pre>${escHtml(inputStr).substring(0, 3000)}</pre></details></div>`);
         }
       }
-      el.innerHTML = `<div class="chat-bubble chat-bubble-assistant">${parts.join('')}</div>`;
     } else if (typeof content === 'string') {
-      el.innerHTML = `<div class="chat-bubble chat-bubble-assistant"><div class="chat-text">${this._renderMarkdown(content)}</div></div>`;
+      parts.push(`<div class="chat-text">${this._renderMarkdown(content)}</div>`);
+    }
+
+    if (!parts.length) return; // skip empty assistant messages (tool-only with no text)
+
+    if (this._compact) {
+      el.innerHTML = `<div class="chat-compact-msg"><span class="chat-role chat-role-assistant">Claude</span><div class="chat-compact-content">${parts.join('')}</div></div>`;
+    } else {
+      el.innerHTML = `<div class="chat-bubble chat-bubble-assistant">${parts.join('')}</div>`;
     }
     this._messageList.appendChild(el);
   }

@@ -90,6 +90,13 @@ const SETTINGS_SCHEMA = {
     category: 'Terminal', liveApply: true,
   },
 
+  // ── Chat ──
+  'chat.compactMode': {
+    type: 'boolean', default: true, label: 'Compact mode',
+    description: 'Dense document-style layout instead of chat bubbles. Closer to TUI information density.',
+    category: 'Session Card', liveApply: true,
+  },
+
   // ── Session ──
   'session.defaultMode': {
     type: 'enum', default: 'terminal',
