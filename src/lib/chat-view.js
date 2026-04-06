@@ -645,7 +645,7 @@ class ChatView {
             el.innerHTML = this._compact
               ? `<div class="chat-compact-msg"><span class="chat-role chat-role-tool">${status === 'ok' ? '\u2713' : '\u2717'}</span><div class="chat-compact-content">${html}</div></div>`
               : html;
-            this._messageList.appendChild(el); this._addWrapToggles(el);
+            this._messageList.appendChild(el); this._addWrapToggles(el); this._addOpenInEditorBtn(el);
           }
           continue;
         }
@@ -660,7 +660,7 @@ class ChatView {
         } else {
           el.innerHTML = `<details class="chat-tool-result-details chat-tool-${status}"><summary><span class="chat-tool-label">Tool Result (${status})</span> ${escHtml(firstLine)}</summary><pre>${this._linkifyText(resultText)}</pre></details>`;
         }
-        this._messageList.appendChild(el); this._addWrapToggles(el);
+        this._messageList.appendChild(el); this._addWrapToggles(el); this._addOpenInEditorBtn(el);
       }
       return;
     }
@@ -682,7 +682,7 @@ class ChatView {
       } else {
         el.innerHTML = `<details class="chat-system-notification"><summary>${label}: ${escHtml(preview.substring(0, 100))}${preview.length > 100 ? '...' : ''}</summary><pre>${escHtml(msgText)}</pre></details>`;
       }
-      this._messageList.appendChild(el);
+      this._messageList.appendChild(el); this._addOpenInEditorBtn(el);
       return;
     }
 
@@ -723,7 +723,7 @@ class ChatView {
       }
     }
     el.innerHTML = innerHtml;
-    this._messageList.appendChild(el); this._addWrapToggles(el);
+    this._messageList.appendChild(el); this._addWrapToggles(el); this._addOpenInEditorBtn(el);
   }
 
   _appendAssistant(msg) {
@@ -769,7 +769,7 @@ class ChatView {
     } else {
       el.innerHTML = `<div class="chat-bubble chat-bubble-assistant">${parts.join('')}</div>`;
     }
-    this._messageList.appendChild(el); this._addWrapToggles(el);
+    this._messageList.appendChild(el); this._addWrapToggles(el); this._addOpenInEditorBtn(el);
   }
 
   _appendResult(msg) {
@@ -786,10 +786,38 @@ class ChatView {
     const el = document.createElement('div');
     el.className = 'chat-msg chat-msg-system';
     el.innerHTML = `<div class="chat-system">${escHtml(text)}</div>`;
-    this._messageList.appendChild(el); this._addWrapToggles(el);
+    this._messageList.appendChild(el); this._addWrapToggles(el); this._addOpenInEditorBtn(el);
   }
 
   // Add wrap toggle button to all <pre> blocks inside an element
+  _addOpenInEditorBtn(el) {
+    const btn = document.createElement('button');
+    btn.className = 'chat-open-editor-btn';
+    btn.textContent = '\uD83D\uDCCB';
+    btn.title = 'Open in editor';
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      // Extract text content from this message block
+      const text = el.innerText || el.textContent || '';
+      if (!text.trim()) return;
+      const tmpName = `chat-block-${Date.now()}.txt`;
+      const tmpPath = `/tmp/claude-webui/${tmpName}`;
+      fetch('/api/mkdir', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: '/tmp/claude-webui' }) }).catch(() => {});
+      fetch('/api/file/write', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: tmpPath, content: text }) })
+        .then(r => { if (!r.ok) throw new Error('write failed'); return r.json(); })
+        .then(() => {
+          this.app.openEditor(tmpPath, tmpName, {
+            _tempFile: true,
+            _onCloseDelete: () => fetch(`/api/file?path=${encodeURIComponent(tmpPath)}`, { method: 'DELETE' }).catch(() => {}),
+          });
+        })
+        .catch(() => {});
+    };
+    // Insert at the start of the element (CSS positions it top-right)
+    el.style.position = 'relative';
+    el.appendChild(btn);
+  }
+
   _addWrapToggles(el) {
     for (const pre of el.querySelectorAll('pre')) {
       if (pre.querySelector('.chat-wrap-toggle')) continue;

@@ -946,10 +946,14 @@ class App {
 
   openEditor(filePath, fileName, opts = {}) {
     this._hideWelcome();
-    const winInfo = this.wm.createWindow({ title: `Edit: ${fileName}`, type: 'editor' });
+    const title = opts._tempFile ? `View: ${fileName}` : `Edit: ${fileName}`;
+    const winInfo = this.wm.createWindow({ title, type: 'editor' });
     winInfo._filePath = filePath; winInfo._fileName = fileName;
     new CodeEditor(winInfo, filePath, fileName, this, opts);
-    winInfo.onClose = () => this._checkWelcome();
+    winInfo.onClose = () => {
+      if (opts._onCloseDelete) opts._onCloseDelete();
+      this._checkWelcome();
+    };
   }
 
   _openExternalEditor(filePath, signalPath, sessionId) {
