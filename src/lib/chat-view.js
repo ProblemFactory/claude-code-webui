@@ -669,12 +669,12 @@ class ChatView {
     let msgText = '';
     if (typeof content === 'string') msgText = content;
     else if (Array.isArray(content)) msgText = content.map(b => b.text || '').join('');
-    const isSystemNotification = /<(task[-_]notification|system-reminder|local-command|command-name)[\s>]/i.test(msgText);
+    const isSystemNotification = /<(task-notification|system-reminder|local-command|command-name)[\s>]/i.test(msgText);
     if (isSystemNotification) {
       const el = document.createElement('div');
       el.className = 'chat-msg chat-msg-system-notification';
       const preview = msgText.replace(/<[^>]+>/g, ' ').trim().substring(0, 200);
-      const label = /task[-_]notification/i.test(msgText) ? '\uD83D\uDD14 Task Notification'
+      const label = msgText.includes('task-notification') ? '\uD83D\uDD14 Task Notification'
         : msgText.includes('system-reminder') ? '\u2699 System'
         : '\u2699 Notification';
       if (this._compact) {
