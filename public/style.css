@@ -1288,9 +1288,14 @@ html, body {
 /* Diff view for Edit tool */
 /* Pending tool use (waiting for result) */
 .chat-tool-pending {
-  display: inline-flex; align-items: center; gap: 6px; margin: 4px 0;
-  padding: 4px 10px; background: var(--bg-root); border: 1px solid var(--border);
-  border-radius: var(--radius-sm); font-size: 12px; color: var(--text-dim);
+  margin: 4px 0; font-size: 12px; color: var(--text-dim);
+}
+/* Simple pending (file ops): inline badge */
+.chat-tool-pending > .chat-tool-label { display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px; background: var(--bg-root); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+/* Detailed pending (other tools): has .chat-tool-use inside, no extra wrapper style */
+.chat-tool-output-pending {
+  display: flex; align-items: center; gap: 6px; padding: 4px 0; color: var(--text-dim); font-size: 11px;
 }
 .chat-tool-result-inline {
   display: inline-flex; align-items: center; gap: 4px; margin: 4px 0;
