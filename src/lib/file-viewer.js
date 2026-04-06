@@ -1,5 +1,4 @@
 import { marked } from 'marked';
-import { MarkdownViewer } from './markdown.js';
 import { HexViewer } from './hex-viewer.js';
 import { CodeEditor } from './code-editor.js';
 import { formatSize } from './utils.js';
@@ -41,14 +40,6 @@ class FileViewer {
     // Large file warning (only for text files opened in editor)
     if (!isMedia && fileInfo.size > 1024 * 1024) {
       if (!confirm(`This file is ${formatSize(fileInfo.size)}. Opening may slow down the UI. Continue?`)) return;
-    }
-
-    // Markdown → MarkdownViewer with preview/edit/split modes
-    if (ext === 'md') {
-      const winInfo = app.wm.createWindow({ title: fileName, type: 'viewer' });
-      winInfo._filePath = filePath; winInfo._fileName = fileName;
-      new MarkdownViewer(winInfo, filePath, app);
-      return;
     }
 
     const winInfo = app.wm.createWindow({ title: fileName, type: 'viewer' });
