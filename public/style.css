@@ -1303,9 +1303,17 @@ html, body {
 }
 .chat-tool-result-inline.chat-tool-ok { background: rgba(34,197,94,0.08); color: var(--green); }
 .chat-tool-result-inline.chat-tool-error { background: rgba(239,68,68,0.08); color: var(--red); }
-.chat-tool-use-error { border-left-color: var(--red) !important; background: rgba(239,68,68,0.05); }
-.chat-tool-use-error .chat-tool-label { color: var(--red); }
-.chat-tool-error-reason { font-size: 11px; color: var(--red); padding: 2px 0; }
+.chat-tool-error-text { color: var(--red); }
+
+/* System/background notifications */
+.chat-msg-system-notification { opacity: 0.7; }
+.chat-system-notification { font-size: 11px; color: var(--text-dim); padding: 2px 0; }
+.chat-system-notification > summary { cursor: pointer; list-style: none; }
+.chat-system-notification > summary::-webkit-details-marker { display: none; }
+.chat-system-notification > summary::before { content: '\25B8  '; }
+.chat-system-notification[open] > summary::before { content: '\25BE  '; }
+.chat-system-notification > pre { font-size: 10px; color: var(--text-dim); white-space: pre-wrap; word-break: break-word; margin: 4px 0; padding: 4px 8px; background: var(--bg-root); border-radius: var(--radius-sm); }
+[data-role-indicator="border"] .chat-msg-system-notification { border-left-color: var(--text-dim); }
 
 /* Permission request card */
 .chat-permission-card {

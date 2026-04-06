@@ -627,10 +627,9 @@ class ChatView {
             const preview = resultText.substring(0, 500);
             html = `<div class="chat-tool-use"><span class="chat-tool-label">\u{1F4D6} Read ${this._clickablePath(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${lineCount} lines</summary><pre>${escHtml(preview)}${resultText.length > 500 ? '\n...' : ''}</pre></details></div>`;
           } else if (status !== 'ok') {
-            // Failed tool — show error with expandable original input
-            const firstLine = resultText.split('\n')[0].substring(0, 150) || '(empty)';
+            // Failed tool — same card style, error shown inside
             const inputStr = stripAnsi(typeof pendingUse.input === 'string' ? pendingUse.input : JSON.stringify(pendingUse.input, null, 2));
-            html = `<div class="chat-tool-use chat-tool-use-error"><span class="chat-tool-label">\u2717 ${escHtml(pendingUse.name)} ${this._clickablePath(fp)}</span><div class="chat-tool-error-reason">${escHtml(firstLine)}</div><details class="chat-diff"><summary class="chat-diff-summary">Show input</summary><pre>${escHtml(inputStr)}</pre></details></div>`;
+            html = `<div class="chat-tool-use"><span class="chat-tool-label">\uD83D\uDD27 ${escHtml(pendingUse.name)} ${this._clickablePath(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${escHtml(inputStr)}</pre></details><details class="chat-diff" open><summary class="chat-diff-summary">\u2717 Error</summary><pre class="chat-tool-error-text">${escHtml(resultText)}</pre></details></div>`;
           } else {
             // Other tool success — show with collapsible input + output (no truncation)
             const inputStr = stripAnsi(typeof pendingUse.input === 'string' ? pendingUse.input : JSON.stringify(pendingUse.input, null, 2));
@@ -663,6 +662,27 @@ class ChatView {
         }
         this._messageList.appendChild(el); this._addWrapToggles(el);
       }
+      return;
+    }
+
+    // Detect system/background notifications (task_notification, system-reminder, etc.)
+    let msgText = '';
+    if (typeof content === 'string') msgText = content;
+    else if (Array.isArray(content)) msgText = content.map(b => b.text || '').join('');
+    const isSystemNotification = /<(task_notification|system-reminder|local-command|command-name)[\s>]/i.test(msgText);
+    if (isSystemNotification) {
+      const el = document.createElement('div');
+      el.className = 'chat-msg chat-msg-system-notification';
+      const preview = msgText.replace(/<[^>]+>/g, ' ').trim().substring(0, 200);
+      const label = msgText.includes('task_notification') ? '\uD83D\uDD14 Task Notification'
+        : msgText.includes('system-reminder') ? '\u2699 System'
+        : '\u2699 Notification';
+      if (this._compact) {
+        el.innerHTML = `<div class="chat-compact-msg"><div class="chat-compact-content"><details class="chat-system-notification"><summary>${label}: ${escHtml(preview.substring(0, 100))}${preview.length > 100 ? '...' : ''}</summary><pre>${escHtml(msgText)}</pre></details></div></div>`;
+      } else {
+        el.innerHTML = `<details class="chat-system-notification"><summary>${label}: ${escHtml(preview.substring(0, 100))}${preview.length > 100 ? '...' : ''}</summary><pre>${escHtml(msgText)}</pre></details>`;
+      }
+      this._messageList.appendChild(el);
       return;
     }
 
