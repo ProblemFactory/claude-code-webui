@@ -7,5 +7,6 @@ data/layouts.json
 data/user-state.json
 data/bookmarks.json
 data/settings.json
+data/custom-themes.json
 data/bin/code
 *.nfs*

@@ -1,6 +1,32 @@
 import { marked } from 'marked';
 import { escHtml } from './utils.js';
 
+// Known slash command descriptions (Claude Code built-in commands)
+const SLASH_DESCRIPTIONS = {
+  '/bug': 'Report bugs or feedback',
+  '/clear': 'Clear conversation history',
+  '/compact': 'Toggle compact mode (summarize conversation)',
+  '/config': 'Open or view configuration',
+  '/cost': 'Show token usage and cost',
+  '/doctor': 'Check Claude Code setup for issues',
+  '/help': 'Show available commands',
+  '/init': 'Initialize project with CLAUDE.md',
+  '/login': 'Switch Anthropic account',
+  '/logout': 'Sign out of Anthropic account',
+  '/memory': 'Edit CLAUDE.md project memory',
+  '/model': 'Switch or view current model',
+  '/permissions': 'View or update tool permissions',
+  '/pr-comments': 'View PR comments from GitHub',
+  '/review': 'Request a code review',
+  '/status': 'Show session status',
+  '/terminal-setup': 'Set up terminal integration',
+  '/vim': 'Toggle vim keybinding mode',
+  '/think': 'Start extended thinking mode',
+  '/mcp': 'Manage MCP servers',
+  '/approved-tools': 'Manage approved tools',
+  '/add-dir': 'Add a working directory',
+};
+
 // Strip ANSI escape sequences (colors, cursor, etc.)
 function stripAnsi(str) {
   return str.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
@@ -162,6 +188,12 @@ class ChatView {
           return;
         }
       }
+      if (e.isComposing || e.keyCode === 229) return; // IME composing — don't intercept Enter
+      // Escape: send to PTY to interrupt running Claude
+      if (e.key === 'Escape') {
+        this.ws.send({ type: 'input', sessionId: this.sessionId, data: '\x1b' });
+        return;
+      }
       if (this._expanded) {
         if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); this._send(); }
       } else {
@@ -176,9 +208,10 @@ class ChatView {
         const q = val.toLowerCase();
         const matches = val === '/' ? this._slashCommands : this._slashCommands.filter(c => c.toLowerCase().startsWith(q));
         if (matches.length > 0) {
-          this._slashDropdown.innerHTML = matches.slice(0, 10).map((c, i) =>
-            `<div class="chat-slash-item${i === 0 ? ' active' : ''}" data-cmd="${escHtml(c)}">${escHtml(c)}</div>`
-          ).join('');
+          this._slashDropdown.innerHTML = matches.slice(0, 15).map((c, i) => {
+            const desc = SLASH_DESCRIPTIONS[c] || '';
+            return `<div class="chat-slash-item${i === 0 ? ' active' : ''}" data-cmd="${escHtml(c)}"><span class="chat-slash-cmd">${escHtml(c)}</span>${desc ? `<span class="chat-slash-desc">${escHtml(desc)}</span>` : ''}</div>`;
+          }).join('');
           this._slashDropdown.classList.remove('hidden');
         } else {
           this._slashDropdown.classList.add('hidden');
@@ -834,7 +867,7 @@ class ChatView {
       return `<span class="chat-link" data-href="${escHtml(url)}" title="Click to copy, Ctrl+Click to open">${escHtml(url)}</span>${escHtml(after)}`;
     });
     // Match absolute file paths (not already inside tags)
-    html = html.replace(/(?<![="'\w])(\/(?:home|tmp|usr|var|etc|opt|mnt|root|workspace)[^\s<>"')\]]*)/g, (raw) => {
+    html = html.replace(/(?<![="'\w])(\/(?:home|tmp|usr|var|etc|opt|mnt|root|workspace|Users)[^\s<>"')\]]*)/g, (raw) => {
       const fp = this._cleanPath(raw);
       const after = raw.slice(fp.length);
       if (fp.length < 3) return raw; // too short
@@ -851,7 +884,7 @@ class ChatView {
       const after = raw.slice(url.length);
       return `<span class="chat-link" data-href="${url}" title="Click to copy, Ctrl+Click to open">${url}</span>${after}`;
     });
-    html = html.replace(/(?<![="'\w])(\/(?:home|tmp|usr|var|etc|opt|mnt|root|workspace)[^\s<>&]*)/g, (raw) => {
+    html = html.replace(/(?<![="'\w])(\/(?:home|tmp|usr|var|etc|opt|mnt|root|workspace|Users)[^\s<>&]*)/g, (raw) => {
       const fp = this._cleanPath(raw);
       const after = raw.slice(fp.length);
       if (fp.length < 3) return raw;

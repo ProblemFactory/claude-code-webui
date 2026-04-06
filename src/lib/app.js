@@ -1,4 +1,5 @@
-import { ThemeManager, THEMES } from './themes.js';
+import { ThemeManager, THEMES, BUILTIN_THEMES } from './themes.js';
+import { ThemeEditor } from './theme-editor.js';
 import { WsManager } from './ws.js';
 import { WindowManager } from './window.js';
 import { TerminalSession } from './terminal.js';
@@ -47,7 +48,13 @@ class App {
       if (msg.type === 'settings-updated' && msg.settings) {
         this.settings.applyRemote(msg.settings);
       }
+      if (msg.type === 'custom-themes-updated' && msg.themes) {
+        this._applyCustomThemesFromServer(msg.themes);
+      }
     });
+
+    // Load custom themes from server and register them
+    this._loadCustomThemes();
 
     this._setupToolbar();
     this._setupDialogs();
@@ -143,6 +150,7 @@ class App {
     this._fontSize = parseInt(localStorage.getItem('termFontSize')) || 14;
     this._fontFamily = localStorage.getItem('termFontFamily') || getAvailableFonts()[0]?.value || 'monospace';
     this._settingsUI = new SettingsUI(this);
+    this._themeEditor = new ThemeEditor(this);
 
     const btn = document.getElementById('btn-global-settings');
     btn.onclick = (e) => { e.stopPropagation(); this._showGlobalSettings(btn); };
@@ -161,13 +169,22 @@ class App {
 
     // Theme
     const themeLabel = document.createElement('label'); themeLabel.textContent = 'Theme';
+    const themeRow = document.createElement('div');
+    themeRow.style.cssText = 'display:flex;gap:4px;align-items:center';
     const themeSel = document.createElement('select');
-    for (const name of Object.keys(THEMES)) { themeSel.appendChild(opt(name, name.charAt(0).toUpperCase() + name.slice(1))); }
+    themeSel.style.flex = '1';
+    this._populateThemeSelect(themeSel);
     themeSel.value = this.themeManager.current;
     themeSel.onchange = () => {
       this.themeManager.apply(themeSel.value);
-      for (const [, term] of this.sessions) term.updateTheme(this.themeManager.getTerminalTheme());
+      for (const [, term] of this.sessions) if (term.updateTheme) term.updateTheme(this.themeManager.getTerminalTheme());
     };
+    const editThemeBtn = document.createElement('button');
+    editThemeBtn.textContent = '\u270e';
+    editThemeBtn.title = 'Theme Editor';
+    editThemeBtn.style.cssText = 'background:transparent;border:1px solid var(--border);color:var(--text-dim);padding:2px 6px;border-radius:var(--radius-sm);cursor:pointer;font-size:13px';
+    editThemeBtn.onclick = () => { pop.remove(); this._themeEditor.open(); };
+    themeRow.append(themeSel, editThemeBtn);
 
     // Font size
     const sizeLabel = document.createElement('label'); sizeLabel.textContent = 'Font Size';
@@ -222,10 +239,60 @@ class App {
     allSettingsLink.textContent = 'All Settings...';
     allSettingsLink.onclick = () => { pop.remove(); this._settingsUI.open(); };
 
-    pop.append(themeLabel, themeSel, sizeLabel, sizeRow, fontLabel, fontSel, allSettingsLink);
+    pop.append(themeLabel, themeRow, sizeLabel, sizeRow, fontLabel, fontSel, allSettingsLink);
     document.body.appendChild(pop);
 
     attachPopoverClose(pop, anchor);
+  }
+
+  _populateThemeSelect(sel) {
+    sel.innerHTML = '';
+    const opt = (v, l) => { const o = document.createElement('option'); o.value = v; o.textContent = l; return o; };
+    // Built-in
+    for (const name of BUILTIN_THEMES) {
+      sel.appendChild(opt(name, name.charAt(0).toUpperCase() + name.slice(1)));
+    }
+    // Custom
+    const customNames = this.themeManager.getThemeNames().filter(n => n.startsWith('custom-'));
+    if (customNames.length) {
+      const sep = document.createElement('option');
+      sep.disabled = true; sep.textContent = '── Custom ──';
+      sel.appendChild(sep);
+      for (const key of customNames) {
+        sel.appendChild(opt(key, key.slice(7)));
+      }
+    }
+  }
+
+  _refreshThemeDropdown() {
+    // Refresh any open global settings popover's theme select
+    const sel = document.querySelector('.global-settings-popover select');
+    if (sel) {
+      this._populateThemeSelect(sel);
+      sel.value = this.themeManager.current;
+    }
+  }
+
+  async _loadCustomThemes() {
+    try {
+      const res = await fetch('/api/custom-themes');
+      const themes = await res.json();
+      this._applyCustomThemesFromServer(themes);
+    } catch {}
+  }
+
+  _applyCustomThemesFromServer(themes) {
+    for (const [name, data] of Object.entries(themes)) {
+      this.themeManager.registerCustomTheme(name, data.css, data.terminal);
+    }
+    // If current theme is custom, re-apply to ensure CSS is injected
+    if (this.themeManager.current.startsWith('custom-')) {
+      this.themeManager.apply(this.themeManager.current);
+      const termTheme = this.themeManager.getTerminalTheme();
+      for (const [, session] of this.sessions) {
+        if (session.updateTheme) session.updateTheme(termTheme);
+      }
+    }
   }
 
   _setupGridConfig() {

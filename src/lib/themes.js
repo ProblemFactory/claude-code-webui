@@ -46,19 +46,100 @@ const THEMES = {
   },
 };
 
+const BUILTIN_THEMES = new Set(Object.keys(THEMES));
+
 class ThemeManager {
   constructor() {
     this.current = localStorage.getItem('theme') || 'dark';
+    this._customStyleEls = {}; // name -> <style> element
     this.apply(this.current);
   }
+
   apply(name) {
+    // If custom theme doesn't exist (deleted), fall back to dark
+    if (!THEMES[name] && !name.startsWith('custom-')) name = 'dark';
+    if (name.startsWith('custom-') && !THEMES[name]) name = 'dark';
     this.current = name;
     document.documentElement.setAttribute('data-theme', name);
     localStorage.setItem('theme', name);
     const sel = document.getElementById('theme-select');
     if (sel) sel.value = name;
+    // Clear any inline overrides from live preview
+    this._clearInlineOverrides();
   }
+
   getTerminalTheme() { return THEMES[this.current]?.terminal || THEMES.dark.terminal; }
+
+  getThemeNames() { return Object.keys(THEMES); }
+
+  isBuiltIn(name) { return BUILTIN_THEMES.has(name); }
+
+  registerCustomTheme(name, cssVars, terminalColors) {
+    const key = 'custom-' + name;
+    THEMES[key] = { terminal: terminalColors || THEMES.dark.terminal };
+    this._injectCustomCSS(name, cssVars);
+  }
+
+  unregisterCustomTheme(name) {
+    const key = 'custom-' + name;
+    delete THEMES[key];
+    this._removeCustomCSS(name);
+    if (this.current === key) this.apply('dark');
+  }
+
+  _injectCustomCSS(name, cssVars) {
+    const key = 'custom-' + name;
+    let el = this._customStyleEls[key];
+    if (!el) {
+      el = document.createElement('style');
+      el.id = 'custom-theme-' + name.replace(/\s+/g, '-');
+      document.head.appendChild(el);
+      this._customStyleEls[key] = el;
+    }
+    const rules = Object.entries(cssVars).map(([k, v]) => `  ${k}: ${v};`).join('\n');
+    el.textContent = `[data-theme="${key}"] {\n${rules}\n}`;
+  }
+
+  _removeCustomCSS(name) {
+    const key = 'custom-' + name;
+    const el = this._customStyleEls[key];
+    if (el) { el.remove(); delete this._customStyleEls[key]; }
+  }
+
+  // Live preview: set inline CSS vars on documentElement
+  setLivePreview(cssVars) {
+    const root = document.documentElement;
+    for (const [k, v] of Object.entries(cssVars)) {
+      root.style.setProperty(k, v);
+    }
+  }
+
+  _clearInlineOverrides() {
+    const root = document.documentElement;
+    // Remove all custom properties set as inline styles
+    const style = root.style;
+    const toRemove = [];
+    for (let i = 0; i < style.length; i++) {
+      if (style[i].startsWith('--')) toRemove.push(style[i]);
+    }
+    toRemove.forEach(p => root.style.removeProperty(p));
+  }
+
+  // Extract computed CSS variable values for a given theme (flicker-free)
+  extractThemeValues(themeName, varNames) {
+    const result = {};
+    // Use a hidden off-screen element to avoid flashing the real UI
+    const probe = document.createElement('div');
+    probe.setAttribute('data-theme', themeName);
+    probe.style.cssText = 'position:absolute;left:-9999px;top:-9999px;width:0;height:0;overflow:hidden;pointer-events:none';
+    document.body.appendChild(probe);
+    const cs = getComputedStyle(probe);
+    for (const name of varNames) {
+      result[name] = cs.getPropertyValue(name).trim();
+    }
+    probe.remove();
+    return result;
+  }
 }
 
-export { THEMES, ThemeManager };
+export { THEMES, ThemeManager, BUILTIN_THEMES };
