@@ -639,8 +639,14 @@ class ChatView {
 
           if (placeholder) {
             const parentMsg = placeholder.closest('.chat-msg');
-            placeholder.outerHTML = html;
-            // Re-apply wrap toggles to parent since new <pre> elements were injected
+            // Use a unique marker to find the new element after outerHTML replacement
+            const markerId = 'tool-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+            placeholder.outerHTML = html.replace('class="chat-tool-use"', `class="chat-tool-use" data-marker="${markerId}"`);
+            const newEl = parentMsg?.querySelector(`[data-marker="${markerId}"]`);
+            if (newEl) {
+              newEl.removeAttribute('data-marker');
+              this._addToolOpenBtn(newEl, resultText, pendingUse);
+            }
             if (parentMsg) this._addWrapToggles(parentMsg);
           } else {
             const el = document.createElement('div');
@@ -798,8 +804,45 @@ class ChatView {
   }
 
   // Add wrap toggle button to all <pre> blocks inside an element
+  // Add open-in-editor button to a tool card, using raw data from closure
+  _addToolOpenBtn(toolEl, resultText, pendingUse) {
+    const btn = document.createElement('button');
+    btn.className = 'chat-open-editor-btn chat-tool-open-btn';
+    btn.textContent = '\uD83D\uDCCB';
+    btn.title = 'Open output in editor';
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      let text = '';
+      if (pendingUse) {
+        const inputStr = typeof pendingUse.input === 'string' ? pendingUse.input : JSON.stringify(pendingUse.input, null, 2);
+        text = `[Tool: ${pendingUse.name}]\n\n--- Input ---\n${inputStr}\n\n--- Output ---\n${resultText}`;
+      } else {
+        text = resultText;
+      }
+      if (!text.trim()) return;
+      this._openInTempEditor(text);
+    };
+    toolEl.style.position = 'relative';
+    toolEl.appendChild(btn);
+  }
+
+  _openInTempEditor(text) {
+    const tmpName = `chat-block-${Date.now()}.txt`;
+    const tmpPath = `/tmp/claude-webui/${tmpName}`;
+    fetch('/api/mkdir', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: '/tmp/claude-webui' }) }).catch(() => {});
+    fetch('/api/file/write', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: tmpPath, content: text }) })
+      .then(r => { if (!r.ok) throw new Error(); return r.json(); })
+      .then(() => {
+        this.app.openEditor(tmpPath, tmpName, {
+          _tempFile: true,
+          _onCloseDelete: () => fetch(`/api/file?path=${encodeURIComponent(tmpPath)}`, { method: 'DELETE' }).catch(() => {}),
+        });
+      })
+      .catch(() => {});
+  }
+
   _addOpenInEditorBtn(el) {
-    if (!el._rawMsg) return; // no raw message bound
+    if (!el._rawMsg) return;
     const btn = document.createElement('button');
     btn.className = 'chat-open-editor-btn';
     btn.textContent = '\uD83D\uDCCB';
@@ -808,18 +851,7 @@ class ChatView {
       e.stopPropagation();
       const text = this._extractMsgText(el._rawMsg);
       if (!text.trim()) return;
-      const tmpName = `chat-block-${Date.now()}.txt`;
-      const tmpPath = `/tmp/claude-webui/${tmpName}`;
-      fetch('/api/mkdir', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: '/tmp/claude-webui' }) }).catch(() => {});
-      fetch('/api/file/write', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: tmpPath, content: text }) })
-        .then(r => { if (!r.ok) throw new Error(); return r.json(); })
-        .then(() => {
-          this.app.openEditor(tmpPath, tmpName, {
-            _tempFile: true,
-            _onCloseDelete: () => fetch(`/api/file?path=${encodeURIComponent(tmpPath)}`, { method: 'DELETE' }).catch(() => {}),
-          });
-        })
-        .catch(() => {});
+      this._openInTempEditor(text);
     };
     el.style.position = 'relative';
     el.appendChild(btn);

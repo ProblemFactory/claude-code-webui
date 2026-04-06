@@ -1468,6 +1468,8 @@ pre.chat-pre-wrapped { white-space: pre-wrap; word-break: break-all; }
 }
 .chat-msg:hover > .chat-open-editor-btn { opacity: 0.7; }
 .chat-open-editor-btn:hover { opacity: 1 !important; color: var(--text); background: var(--bg-input); }
+.chat-tool-open-btn { top: 4px; right: 4px; }
+.chat-tool-use:hover > .chat-tool-open-btn { opacity: 0.7; }
 
 /* ── Chat Compact Mode ── */
 .chat-compact .chat-message-list { padding: 8px 12px; gap: 2px; }
