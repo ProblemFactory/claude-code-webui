@@ -291,6 +291,30 @@ class TerminalSession {
     winInfo.onResize = () => this.fit();
     this._ro = new ResizeObserver(() => this.fit()); this._ro.observe(container);
 
+    // Mobile: special key toolbar (hidden on desktop via CSS)
+    const mobileKeys = document.createElement('div');
+    mobileKeys.className = 'mobile-term-keys';
+    const keys = [
+      { label: 'Ctrl+C', data: '\x03' },
+      { label: 'Ctrl+G', data: '\x07' },
+      { label: 'Ctrl+Z', data: '\x1a' },
+      { label: 'Ctrl+D', data: '\x04' },
+      { label: 'Ctrl+\\', data: '\x1c' },
+      { label: 'Tab', data: '\t' },
+      { label: 'Esc', data: '\x1b' },
+      { label: '↑', data: '\x1b[A' },
+      { label: '↓', data: '\x1b[B' },
+    ];
+    for (const k of keys) {
+      const btn = document.createElement('button');
+      btn.className = 'mobile-term-key';
+      btn.textContent = k.label;
+      btn.onclick = (e) => { e.preventDefault(); this.ws.send({ type: 'input', sessionId, data: k.data }); this.terminal.focus(); };
+      mobileKeys.appendChild(btn);
+    }
+    winInfo.content.appendChild(mobileKeys);
+
+
     // Add settings gear icon to titlebar
     this._addSettingsButton(winInfo);
   }

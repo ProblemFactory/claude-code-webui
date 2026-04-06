@@ -88,6 +88,8 @@ class WindowManager {
   }
 
   _reflowWindows() {
+    // Skip on mobile — windows are position:fixed via CSS
+    if (window.innerWidth <= 768) return;
     for (const win of this.windows.values()) {
       if (win.gridBounds && !win.isMinimized && !win.isMaximized) {
         this._applyGridBounds(win);

@@ -90,6 +90,37 @@ const SETTINGS_SCHEMA = {
     category: 'Terminal', liveApply: true,
   },
 
+  // ── Chat ──
+  'chat.compactMode': {
+    type: 'boolean', default: true, label: 'Compact mode',
+    description: 'Dense document-style layout instead of chat bubbles. Closer to TUI information density.',
+    category: 'Chat', liveApply: true,
+  },
+  'chat.roleIndicator': {
+    type: 'enum', default: 'border',
+    options: [
+      { value: 'border', label: 'Color border' },
+      { value: 'background', label: 'Background tint' },
+      { value: 'icon', label: 'Icon' },
+      { value: 'label', label: 'Text label (You/Claude)' },
+    ],
+    label: 'Role indicator style',
+    description: 'How to visually distinguish user vs assistant messages in compact mode.',
+    category: 'Chat', liveApply: true,
+  },
+
+  // ── Session ──
+  'session.defaultMode': {
+    type: 'enum', default: 'terminal',
+    options: [
+      { value: 'terminal', label: 'Terminal' },
+      { value: 'chat', label: 'Chat' },
+    ],
+    label: 'Default session mode',
+    description: 'Default mode for new sessions and single-click resume from sidebar',
+    category: 'Session Card', liveApply: true,
+  },
+
   // ── Sidebar ──
   'sidebar.defaultStatusFilter': {
     type: 'multiSelect', default: ['live', 'tmux', 'external', 'stopped'],
@@ -157,6 +188,7 @@ const SETTINGS_CATEGORIES = [
   'Toolbar & Layout',
   'Window',
   'Terminal',
+  'Chat',
   'Sidebar',
   'Session Card',
 ];

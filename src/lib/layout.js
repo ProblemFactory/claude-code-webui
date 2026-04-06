@@ -30,6 +30,13 @@ class LayoutManager {
         // Save editor split-pane state (Ctrl+G)
         if (win._editorState) winState.editorState = win._editorState;
       }
+      // For chat windows, save session id and claude session id
+      if (win.type === 'chat' && termSession) {
+        winState.serverSessionId = termSession.sessionId;
+        const allSess = this.app.sidebar?._allSessions || [];
+        const match = allSess.find(s => s.webuiId === termSession.sessionId);
+        if (match) winState.claudeSessionId = match.sessionId;
+      }
       // For file explorers, save current path
       if (win.type === 'files' && win._explorerPath) {
         winState.explorerPath = win._explorerPath;
@@ -122,6 +129,19 @@ class LayoutManager {
             }, 500);
           }
         }
+      } else if (ws.type === 'chat') {
+        let alive = null;
+        if (ws.claudeSessionId) {
+          alive = activeSessions.find(s => s.claudeSessionId === ws.claudeSessionId);
+        }
+        if (!alive && ws.serverSessionId) {
+          alive = activeSessions.find(s => s.id === ws.serverSessionId);
+        }
+        if (alive) {
+          const customName = this.app.sidebar?.getCustomName(ws.claudeSessionId || alive.claudeSessionId);
+          const winInfo = this.app.attachSession(alive.id, customName || alive.name, alive.cwd, { mode: 'chat' });
+          applyPosition(winInfo, ws);
+        }
       } else if (ws.type === 'files') {
         const winInfo = this.app.openFileExplorer(ws.explorerPath);
         applyPosition(winInfo, ws);
@@ -162,8 +182,14 @@ class LayoutManager {
     this._autoSaveTimer = setTimeout(() => this._doAutoSave(), 2000);
   }
 
+  _isMobile() {
+    return window.innerWidth <= 768 || ('ontouchstart' in window && window.innerWidth < 1024);
+  }
+
   async _doAutoSave() {
     const state = this.captureState();
+    // Tag with device type so mobile and desktop don't overwrite each other
+    state.deviceType = this._isMobile() ? 'mobile' : 'desktop';
     try {
       await fetch('/api/layouts-autosave', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -181,7 +207,8 @@ class LayoutManager {
       this._savedPresets = data.saved || {};
       this._currentName = data.current || null;
 
-      const toRestore = data.autoSave;
+      // Pick the right autosave for this device type
+      const toRestore = this._isMobile() ? (data.autoSaveMobile || data.autoSave) : data.autoSave;
 
       if (toRestore && toRestore.windows && toRestore.windows.length > 0) {
         await this.restoreState(toRestore);

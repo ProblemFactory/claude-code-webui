@@ -107,7 +107,7 @@ class FileViewer {
         container.appendChild(div);
       } else {
         // Default: open in code editor
-        app.openEditor(filePath, fileName);
+        app.openEditor(filePath, fileName, opts);
         app.wm.closeWindow(winInfo.id);
       }
     } catch (err) {

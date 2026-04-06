@@ -55,6 +55,7 @@ const SOCKETS_DIR = path.join(__dirname, 'data', 'sockets');
 const META_DIR = path.join(__dirname, 'data', 'session-meta');
 const BUFFERS_DIR = path.join(__dirname, 'data', 'session-buffers');
 const PTY_WRAPPER = path.join(__dirname, 'data', 'bin', 'pty-wrapper.js');
+const CHAT_WRAPPER = path.join(__dirname, 'data', 'bin', 'chat-wrapper.js');
 const { execFileSync, spawn } = require('child_process');
 
 function ensureDir(dir) { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); }
@@ -110,10 +111,35 @@ function resizeSessionToMin(session, sessionId) {
 // ── PTY setup helper (onData + onExit wiring) ──
 function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {}) {
   session.pty = ptyProcess;
-  ptyProcess.onData((output) => {
-    session.buffer = (session.buffer + output).slice(-50000);
-    broadcastToSession(session, id, { type: 'output', sessionId: id, data: output });
-  });
+
+  if (session.mode === 'chat') {
+    // Chat mode: parse JSON lines from PTY output, broadcast as structured messages
+    let lineBuf = '';
+    ptyProcess.onData((output) => {
+      session.buffer = (session.buffer + output).slice(-500000);
+      lineBuf += output;
+      let nlIdx;
+      while ((nlIdx = lineBuf.indexOf('\n')) !== -1) {
+        const line = lineBuf.substring(0, nlIdx).replace(/\r/g, '').trim();
+        lineBuf = lineBuf.substring(nlIdx + 1);
+        if (!line) continue;
+        try {
+          const msg = JSON.parse(line);
+          broadcastToSession(session, id, { type: 'chat-message', sessionId: id, message: msg });
+        } catch {
+          // Non-JSON line (e.g. dtach noise) — send as raw output
+          broadcastToSession(session, id, { type: 'output', sessionId: id, data: line + '\n' });
+        }
+      }
+    });
+  } else {
+    // Terminal mode: raw PTY output
+    ptyProcess.onData((output) => {
+      session.buffer = (session.buffer + output).slice(-50000);
+      broadcastToSession(session, id, { type: 'output', sessionId: id, data: output });
+    });
+  }
+
   ptyProcess.onExit(() => {
     if (cleanupOnExit) {
       if (session.socketPath && fs.existsSync(session.socketPath)) { session.pty = null; return; }
@@ -185,12 +211,23 @@ function restoreSessions() {
     const meta = readSessionMeta(sockFile);
     const id = meta.webuiSessionId || ('sess-' + (++sessionCounter) + '-' + Date.now());
 
+    // Detect mode from wrapper metadata (chat-wrapper writes mode: 'chat')
+    let sessionMode = meta.mode || 'terminal';
+    if (sessionMode === 'terminal') {
+      // Also check wrapper metadata for mode
+      try {
+        const wrapperMeta = JSON.parse(fs.readFileSync(path.join(BUFFERS_DIR, id + '.json'), 'utf-8'));
+        if (wrapperMeta.mode === 'chat') sessionMode = 'chat';
+      } catch {}
+    }
+
     let savedBuffer = '';
     if (id) {
       try { savedBuffer = fs.readFileSync(path.join(BUFFERS_DIR, id + '.buf'), 'utf-8'); } catch {}
     }
 
     const session = {
+      mode: sessionMode,
       pty: null, clients: new Map(),
       cwd: meta.cwd || os.homedir(),
       name: meta.name || sockFile,
@@ -832,9 +869,15 @@ app.post('/api/session-groups/unassign', (req, res) => {
 });
 
 // Auto-save (saves current workspace state for restore on refresh)
+// Mobile and desktop save separately to avoid overwriting each other's layout
 app.post('/api/layouts-autosave', (req, res) => {
   const data = readLayouts();
-  data.autoSave = { ...req.body, updatedAt: Date.now() };
+  const deviceType = req.body.deviceType || 'desktop';
+  if (deviceType === 'mobile') {
+    data.autoSaveMobile = { ...req.body, updatedAt: Date.now() };
+  } else {
+    data.autoSave = { ...req.body, updatedAt: Date.now() };
+  }
   writeLayouts(data);
   res.json({ success: true });
 });
@@ -923,6 +966,43 @@ function cwdToProjectDir(cwd) {
   return cwd.replace(/[/._]/g, '-');
 }
 
+// Parse a Claude session JSONL file into chat messages
+function parseSessionJsonl(claudeSessionId, cwd) {
+  const projectsDir = path.join(os.homedir(), '.claude', 'projects');
+  // Try exact project dir from cwd
+  const projDir = cwdToProjectDir(cwd || '');
+  const candidates = [];
+  if (cwd) candidates.push(path.join(projectsDir, projDir, claudeSessionId + '.jsonl'));
+  // Also scan all project dirs as fallback
+  try {
+    for (const dir of fs.readdirSync(projectsDir)) {
+      const fp = path.join(projectsDir, dir, claudeSessionId + '.jsonl');
+      if (!candidates.includes(fp)) candidates.push(fp);
+    }
+  } catch {}
+
+  for (const filePath of candidates) {
+    try {
+      if (!fs.existsSync(filePath)) continue;
+      const content = fs.readFileSync(filePath, 'utf-8');
+      const messages = [];
+      for (const line of content.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const msg = JSON.parse(trimmed);
+          // Only include user/assistant/result messages (skip system/hooks/internal)
+          if (msg.type === 'user' || msg.type === 'assistant' || msg.type === 'result' || (msg.type === 'system' && msg.subtype === 'init')) {
+            messages.push(msg);
+          }
+        } catch {}
+      }
+      return messages;
+    } catch {}
+  }
+  return [];
+}
+
 function isProcessClaude(pid) {
   try {
     const cmd = execFileSync('ps', ['-p', String(pid), '-o', 'comm='], { encoding: 'utf-8', timeout: 2000 }).trim();
@@ -972,6 +1052,52 @@ function extractSessionMeta(filePath) {
 }
 
 // Kill an external/tmux session by PID (not managed by WebUI WebSocket)
+// Get chat message history for a Claude session (from JSONL file)
+app.get('/api/session-messages', (req, res) => {
+  const { claudeSessionId, cwd, offset, limit, search, withStatus } = req.query;
+  if (!claudeSessionId) return res.status(400).json({ error: 'claudeSessionId required' });
+  const allMessages = parseSessionJsonl(claudeSessionId, cwd || '');
+  const total = allMessages.length;
+
+  // Build chatStatus if requested
+  let chatStatus = null;
+  if (withStatus) {
+    let lastUsage = null, model = null, contextWindow = 0, totalCost = 0, slashCommands = null;
+    for (let i = allMessages.length - 1; i >= 0; i--) {
+      const m = allMessages[i];
+      if (!lastUsage && m.type === 'assistant' && m.message?.usage) lastUsage = m.message.usage;
+      if (!model && m.type === 'result' && m.modelUsage) { model = Object.keys(m.modelUsage)[0]; contextWindow = Object.values(m.modelUsage)[0]?.contextWindow || 0; }
+      if (lastUsage && model) break;
+    }
+    for (const m of allMessages) { if (m.type === 'system' && m.subtype === 'init' && m.slash_commands) { slashCommands = m.slash_commands; if (!model && m.model) model = m.model; break; } }
+    for (const m of allMessages) { if (m.type === 'result' && m.total_cost_usd) totalCost += m.total_cost_usd; }
+    if (lastUsage || model) chatStatus = { model, lastUsage, contextWindow, total_cost_usd: totalCost, slashCommands };
+  }
+
+  if (search) {
+    // Server-side search: find messages containing the query
+    const q = search.toLowerCase();
+    const matches = [];
+    for (let i = 0; i < allMessages.length; i++) {
+      const m = allMessages[i];
+      const c = m.message?.content;
+      let text = '';
+      if (typeof c === 'string') text = c;
+      else if (Array.isArray(c)) text = c.map(b => b.text || '').join(' ');
+      if (text.toLowerCase().includes(q)) {
+        matches.push({ index: i, type: m.type, preview: text.substring(0, 120) });
+      }
+    }
+    res.json({ matches, total });
+  } else if (offset !== undefined || limit !== undefined) {
+    const o = parseInt(offset) || 0;
+    const l = parseInt(limit) || 50;
+    res.json({ messages: allMessages.slice(o, o + l), total, chatStatus });
+  } else {
+    res.json({ messages: allMessages, total, chatStatus });
+  }
+});
+
 app.post('/api/kill-pid', (req, res) => {
   const { pid } = req.body;
   if (!pid || typeof pid !== 'number') return res.status(400).json({ error: 'pid required' });
@@ -1092,7 +1218,7 @@ app.get('/api/sessions', (req, res) => {
 app.get('/api/active', (req, res) => {
   const sessions = [];
   for (const [id, s] of activeSessions) {
-    sessions.push({ id, name: s.name, cwd: s.cwd, createdAt: s.createdAt, claudeSessionId: s.claudeSessionId || null });
+    sessions.push({ id, name: s.name, cwd: s.cwd, createdAt: s.createdAt, claudeSessionId: s.claudeSessionId || null, mode: s.mode || 'terminal' });
   }
   res.json({ sessions });
 });
@@ -1153,7 +1279,7 @@ wss.on('connection', (ws) => {
   // Send current active sessions on connect
   const activeList = [];
   for (const [id, s] of activeSessions) {
-    activeList.push({ id, name: s.name, cwd: s.cwd, createdAt: s.createdAt, claudeSessionId: s.claudeSessionId || null });
+    activeList.push({ id, name: s.name, cwd: s.cwd, createdAt: s.createdAt, claudeSessionId: s.claudeSessionId || null, mode: s.mode || 'terminal' });
   }
   ws.send(JSON.stringify({ type: 'active-sessions', sessions: activeList }));
 
@@ -1167,6 +1293,7 @@ wss.on('connection', (ws) => {
         const cwd = data.cwd || os.homedir();
         const sockName = 'cw-' + sessionCounter + '-' + Date.now();
         const socketPath = path.join(SOCKETS_DIR, sockName);
+        const sessionMode = data.mode === 'chat' ? 'chat' : 'terminal';
 
         // Build claude command
         const claudeArgs = [];
@@ -1176,27 +1303,27 @@ wss.on('connection', (ws) => {
         if (data.permissionMode) claudeArgs.push('--permission-mode', data.permissionMode);
         if (data.extraArgs) claudeArgs.push(...data.extraArgs.trim().split(/\s+/).filter(Boolean));
 
-        // Create dtach session using wrapper for output buffering + metadata
-        // dtach -c creates and immediately attaches (no output loss)
-        // wrapper.sh captures all output via script(1) for server restart recovery
         ensureDir(SOCKETS_DIR);
         ensureDir(BUFFERS_DIR);
 
         const session = {
+          mode: sessionMode,
           pty: null, clients: new Map([[ws, { cols: data.cols || 120, rows: data.rows || 30 }]]),
           cwd, name: data.sessionName || `Session ${sessionCounter}`,
           createdAt: Date.now(), claudeSessionId: data.resumeId || null,
           sockName, socketPath, buffer: '',
         };
 
-        // Use pty-wrapper.js inside dtach for persistent output buffering
-        // Wrapper survives server restarts, tees output to buffer file
+        // Use appropriate wrapper inside dtach:
+        // - Terminal: pty-wrapper.js (spawns claude with PTY for TUI mode)
+        // - Chat: chat-wrapper.js (spawns claude with --output-format stream-json)
         const bufFile = path.join(BUFFERS_DIR, id + '.buf');
         const metaFileW = path.join(BUFFERS_DIR, id + '.json');
+        const wrapper = sessionMode === 'chat' ? CHAT_WRAPPER : PTY_WRAPPER;
         let createPty;
         try {
           createPty = pty.spawn(DTACH_CMD, ['-c', socketPath, '-E', '-r', 'none',
-            NODE_CMD, PTY_WRAPPER,
+            NODE_CMD, wrapper,
             bufFile, metaFileW,
             ENV_CMD, `EDITOR=${EDITOR_CMD}`, `CLAUDE_WEBUI_PORT=${PORT}`, `CLAUDE_WEBUI_SESSION_ID=${id}`, `DISPLAY=${process.env.DISPLAY || (process.platform === 'darwin' ? '' : ':99')}`,
             `TERM=xterm-256color`, `COLORTERM=truecolor`,
@@ -1214,7 +1341,7 @@ wss.on('connection', (ws) => {
         activeSessions.set(id, session);
         attachedSessions.add(id);
 
-        writeSessionMeta(sockName, { name: session.name, cwd, claudeSessionId: session.claudeSessionId, createdAt: session.createdAt, webuiSessionId: id });
+        writeSessionMeta(sockName, { name: session.name, cwd, claudeSessionId: session.claudeSessionId, createdAt: session.createdAt, webuiSessionId: id, mode: sessionMode });
 
         // Capture claudeSessionId from lock file for new (non-resume) sessions
         if (!session.claudeSessionId) {
@@ -1226,7 +1353,7 @@ wss.on('connection', (ws) => {
                 const lockData = JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, f), 'utf-8'));
                 if (lockData.cwd === cwd && lockData.startedAt > session.createdAt - 5000) {
                   session.claudeSessionId = lockData.sessionId;
-                  writeSessionMeta(sockName, { name: session.name, cwd, claudeSessionId: session.claudeSessionId, createdAt: session.createdAt, webuiSessionId: id });
+                  writeSessionMeta(sockName, { name: session.name, cwd, claudeSessionId: session.claudeSessionId, createdAt: session.createdAt, webuiSessionId: id, mode: sessionMode });
                   broadcastActiveSessions();
                   return;
                 }
@@ -1237,10 +1364,10 @@ wss.on('connection', (ws) => {
           setTimeout(() => tryCapture(15), 2000);
         }
 
-        // Read childPid from pty-wrapper metadata after it has time to spawn
+        // Read childPid from wrapper metadata after it has time to spawn
         setTimeout(() => refreshWebuiPids(), 3000);
 
-        ws.send(JSON.stringify({ type: 'created', sessionId: id, name: session.name, cwd }));
+        ws.send(JSON.stringify({ type: 'created', sessionId: id, name: session.name, cwd, mode: sessionMode }));
         broadcastActiveSessions();
         break;
       }
@@ -1248,6 +1375,34 @@ wss.on('connection', (ws) => {
       case 'input': {
         const session = activeSessions.get(data.sessionId);
         if (session?.pty) session.pty.write(data.data);
+        break;
+      }
+
+      case 'chat-input': {
+        // Chat mode: send user message to stdin + broadcast to all clients
+        const session = activeSessions.get(data.sessionId);
+        if (session?.pty && session.mode === 'chat') {
+          const msgId = data.msgId || (Date.now() + '-' + Math.random().toString(36).slice(2, 8));
+          let stdinPayload, userMsg;
+
+          // Check if text is already a raw JSON message (e.g. image paste)
+          let parsed = null;
+          try { parsed = JSON.parse(data.text); if (!(parsed.type === 'user' && parsed.message)) parsed = null; } catch {}
+
+          if (parsed) {
+            stdinPayload = data.text;
+            userMsg = { ...parsed, msgId, timestamp: new Date().toISOString() };
+          } else {
+            // Always send as JSON to avoid multi-line text being split by chat-wrapper
+            stdinPayload = JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: data.text }] } });
+            userMsg = { type: 'user', message: { role: 'user', content: data.text }, msgId, timestamp: new Date().toISOString() };
+          }
+
+          session.pty.write(stdinPayload + '\n');
+          const userLine = JSON.stringify(userMsg);
+          session.buffer = (session.buffer + userLine + '\n').slice(-500000);
+          broadcastToSession(session, data.sessionId, { type: 'chat-message', sessionId: data.sessionId, message: userMsg });
+        }
         break;
       }
 
@@ -1265,7 +1420,70 @@ wss.on('connection', (ws) => {
         if (session) {
           session.clients.set(ws, { cols: 120, rows: 30 });
           attachedSessions.add(data.sessionId);
-          ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, buffer: session.buffer || '' }));
+          if (session.mode === 'chat') {
+            // Load JSONL history (past conversation from Claude's session file)
+            let jsonlHistory = [];
+            const jsonlUuids = new Set();
+            if (session.claudeSessionId) {
+              jsonlHistory = parseSessionJsonl(session.claudeSessionId, session.cwd);
+              for (const m of jsonlHistory) { if (m.uuid) jsonlUuids.add(m.uuid); }
+            }
+            // Parse buffer for current session output — only include messages
+            // not already in JSONL (dedup by uuid) and filter out noise
+            const bufferMessages = [];
+            for (const line of (session.buffer || '').split('\n')) {
+              const trimmed = line.replace(/\r/g, '').trim();
+              if (!trimmed) continue;
+              try {
+                const msg = JSON.parse(trimmed);
+                if (msg.type !== 'user' && msg.type !== 'assistant' && msg.type !== 'result' && !(msg.type === 'system' && msg.subtype === 'init')) continue;
+                if (msg.uuid && jsonlUuids.has(msg.uuid)) continue; // already in JSONL
+                bufferMessages.push(msg);
+              } catch {}
+            }
+            const allMessages = [...jsonlHistory, ...bufferMessages];
+            const PAGE_SIZE = 50;
+            const chatHistory = allMessages.slice(-PAGE_SIZE);
+            const totalCount = allMessages.length;
+
+            // Extract latest status: last assistant's per-turn usage + cumulative cost
+            let chatStatus = null;
+            let lastUsage = null, model = null, contextWindow = 0, totalCost = 0, slashCommands = null;
+            for (let i = allMessages.length - 1; i >= 0; i--) {
+              const m = allMessages[i];
+              if (!lastUsage && m.type === 'assistant' && m.message?.usage) {
+                lastUsage = m.message.usage;
+              }
+              if (!model && m.type === 'result' && m.modelUsage) {
+                model = Object.keys(m.modelUsage)[0];
+                contextWindow = Object.values(m.modelUsage)[0]?.contextWindow || 0;
+              }
+              if (lastUsage && model) break;
+            }
+            // Find slash_commands from system.init (scan forward since it's near the start)
+            for (const m of allMessages) {
+              if (m.type === 'system' && m.subtype === 'init' && m.slash_commands) {
+                slashCommands = m.slash_commands;
+                if (!model && m.model) model = m.model;
+                break;
+              }
+            }
+            for (const m of allMessages) {
+              if (m.type === 'result' && m.total_cost_usd) totalCost += m.total_cost_usd;
+            }
+            if (lastUsage || model) {
+              chatStatus = { model, lastUsage, contextWindow, total_cost_usd: totalCost, slashCommands };
+            }
+
+            // Detect if Claude is mid-stream: check buffer (current run) not JSONL (history)
+            // Only buffer messages reflect current process state
+            const lastBufMsg = bufferMessages.length > 0 ? bufferMessages[bufferMessages.length - 1] : null;
+            const isStreaming = lastBufMsg && lastBufMsg.type !== 'result' && lastBufMsg.type !== 'system';
+
+            ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, mode: 'chat', chatHistory, totalCount, chatStatus, isStreaming }));
+          } else {
+            ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, buffer: session.buffer || '' }));
+          }
         } else {
           ws.send(JSON.stringify({ type: 'error', message: `Session ${data.sessionId} not found` }));
         }
@@ -1347,7 +1565,7 @@ function broadcastActiveSessions() {
   for (const [id, s] of activeSessions) {
     // Exclude tmux view sessions — they shouldn't appear as separate "live" entries
     if (s.isTmuxView) continue;
-    activeList.push({ id, name: s.name, cwd: s.cwd, createdAt: s.createdAt, claudeSessionId: s.claudeSessionId || null });
+    activeList.push({ id, name: s.name, cwd: s.cwd, createdAt: s.createdAt, claudeSessionId: s.claudeSessionId || null, mode: s.mode || 'terminal' });
   }
   const msg = JSON.stringify({ type: 'active-sessions', sessions: activeList });
   wss.clients.forEach(client => {

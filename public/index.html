@@ -2,7 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
   <title>Claude Code WebUI</title>
   <link rel="stylesheet" href="/xterm.css">
   <link rel="stylesheet" href="/style.css">
@@ -75,6 +77,13 @@
     </header>
 
     <!-- Main Workspace -->
+    <!-- Mobile nav bar (hidden on desktop) -->
+    <div id="mobile-nav">
+      <button id="mobile-nav-menu" title="Sessions">&#9776;</button>
+      <span id="mobile-nav-title">Claude Code</span>
+      <button id="mobile-nav-new" title="New session">+</button>
+    </div>
+
     <main id="workspace">
       <div id="snap-indicator"></div>
       <div id="grid-overlay"></div>
@@ -110,6 +119,7 @@
     <div id="dialog-new-session" class="dialog hidden">
       <div class="dialog-header"><h3>New Claude Code Session</h3><button class="dialog-close">✕</button></div>
       <div class="dialog-body">
+        <label>Mode<select id="input-mode"><option value="terminal">Terminal</option><option value="chat">Chat</option></select></label>
         <label>Working Directory
           <div class="autocomplete-wrapper">
             <input type="text" id="input-cwd" placeholder="/home/user/project" autocomplete="off">

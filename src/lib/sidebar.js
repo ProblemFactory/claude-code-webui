@@ -23,6 +23,7 @@ class Sidebar {
     this._starredIds = new Set(JSON.parse(localStorage.getItem('starredSessions') || '[]'));
     this._archivedIds = new Set(JSON.parse(localStorage.getItem('archivedSessions') || '[]'));
     this._customNames = JSON.parse(localStorage.getItem('sessionCustomNames') || '{}');
+    this._sessionModes = JSON.parse(localStorage.getItem('sessionModes') || '{}'); // { sessionId: 'terminal'|'chat' }
     this._sessionGroups = JSON.parse(localStorage.getItem('sessionGroups') || '{}'); // { groupName: [sessionId, ...] }
     this._groupFolders = JSON.parse(localStorage.getItem('groupFolders') || '{}'); // { groupName: [folderPath, ...] }
 
@@ -118,6 +119,10 @@ class Sidebar {
       this._customNames = { ...state.customNames };
       localStorage.setItem('sessionCustomNames', JSON.stringify(state.customNames));
     }
+    if (state.sessionModes) {
+      this._sessionModes = { ...state.sessionModes };
+      localStorage.setItem('sessionModes', JSON.stringify(state.sessionModes));
+    }
     if (state.sessionGroups) {
       this._sessionGroups = { ...state.sessionGroups };
       localStorage.setItem('sessionGroups', JSON.stringify(state.sessionGroups));
@@ -133,12 +138,14 @@ class Sidebar {
       starredSessions: [...this._starredIds],
       archivedSessions: [...this._archivedIds],
       customNames: this._customNames,
+      sessionModes: this._sessionModes,
       sessionGroups: this._sessionGroups,
       groupFolders: this._groupFolders,
     };
     localStorage.setItem('starredSessions', JSON.stringify(state.starredSessions));
     localStorage.setItem('archivedSessions', JSON.stringify(state.archivedSessions));
     localStorage.setItem('sessionCustomNames', JSON.stringify(state.customNames));
+    localStorage.setItem('sessionModes', JSON.stringify(state.sessionModes));
     localStorage.setItem('sessionGroups', JSON.stringify(state.sessionGroups));
     localStorage.setItem('groupFolders', JSON.stringify(state.groupFolders));
     // Push to server (broadcasts to other clients)
@@ -215,6 +222,8 @@ class Sidebar {
   isArchived(sessionId) { return this._archivedIds.has(sessionId); }
 
   getCustomName(sessionId) { return this._customNames[sessionId] || null; }
+  getSessionMode(sessionId) { return this._sessionModes[sessionId] || null; }
+  setSessionMode(sessionId, mode) { this._sessionModes[sessionId] = mode; this._pushUserState(); }
 
   renameSession(sessionId, currentName) {
     const name = prompt('Session name (used as --name on next resume):', this._customNames[sessionId] || currentName || '');
@@ -439,12 +448,12 @@ class Sidebar {
       if (wm) matchedWebuiIds.add(wm.id);
       // Only upgrade to 'live' for dtach-managed sessions (not tmux/external — those keep their status)
       const status = (wm && s.status === 'stopped') ? 'live' : (wm && s.status !== 'tmux' && s.status !== 'external') ? 'live' : s.status;
-      return { ...s, status, webuiId: wm?.id || null, webuiName: wm?.name || null };
+      return { ...s, status, webuiId: wm?.id || null, webuiName: wm?.name || null, webuiMode: wm?.mode || 'terminal' };
     });
 
     for (const ws of webui) {
       if (!matchedWebuiIds.has(ws.id)) {
-        unified.unshift({ sessionId: ws.claudeSessionId || ws.id, cwd: ws.cwd, startedAt: ws.createdAt, status: 'live', webuiId: ws.id, webuiName: ws.name, name: ws.name || '' });
+        unified.unshift({ sessionId: ws.claudeSessionId || ws.id, cwd: ws.cwd, startedAt: ws.createdAt, status: 'live', webuiId: ws.id, webuiName: ws.name, name: ws.name || '', webuiMode: ws.mode || 'terminal' });
       }
     }
 
@@ -646,7 +655,7 @@ class Sidebar {
             const customName = this.getCustomName(s.sessionId);
             this.app.resumeSession(s.sessionId, s.cwd, customName || s.name);
           } else if (s.status === 'live' && s.webuiId) {
-            this.app.attachSession(s.webuiId, s.webuiName || s.name, s.cwd);
+            this.app.attachSession(s.webuiId, s.webuiName || s.name, s.cwd, { mode: s.webuiMode });
           } else if (s.status === 'tmux') {
             this.app.attachTmuxSession(s.tmuxTarget, s.name, s.cwd);
           }
@@ -749,7 +758,6 @@ class Sidebar {
     const customName = this._customNames[s.sessionId];
     const originalName = s.name || s.webuiName || s.sessionId.substring(0, 12) + '...';
     const displayName = customName || originalName;
-    const idShort = s.sessionId.substring(0, 12);
 
     const badgeMap = {
       live:     { cls: 'badge-live', text: 'LIVE' },
@@ -761,10 +769,11 @@ class Sidebar {
 
     const starred = this._starredIds.has(s.sessionId);
     const isExpanded = this._expandedCardId === s.sessionId;
-    // Compact row: star archive name badge expand
+    // Compact row: star archive name [mode] badge expand
+    const modeIcon = s.webuiMode === 'chat' ? '<span class="session-mode-icon" title="Chat mode">\uD83D\uDCAC</span>' : '';
     card.innerHTML = `<div class="session-card-row">
       <span class="session-card-name">${escHtml(displayName)}</span>
-      <span class="session-card-badge ${badge.cls}">${badge.text}</span>
+      ${modeIcon}<span class="session-card-badge ${badge.cls}">${badge.text}</span>
     </div>`;
     const row = card.querySelector('.session-card-row');
     // Star button (inline, always visible)
@@ -809,8 +818,8 @@ class Sidebar {
     const cwdShort = (s.cwd || '').replace(/^\/home\/[^/]+/, '~').replace(/^\/Users\/[^/]+/, '~');
 
     const fields = [
-      { key: 'id', label: 'ID', display: `${idShort}...`, copy: s.sessionId },
-      { key: 'cwd', label: 'CWD', display: cwdShort, copy: s.cwd || '' },
+      { key: 'id', label: 'ID', display: s.sessionId, copy: s.sessionId, copiable: true, midTruncate: true },
+      { key: 'cwd', label: 'CWD', display: cwdShort, copy: s.cwd || '', copiable: true, leftTruncate: true },
       { key: 'started', label: 'Started', display: date.toLocaleString(), copy: date.toISOString() },
       { key: 'status', label: 'Status', display: null, badge: true, copy: `${s.status}${s.pid ? ' PID ' + s.pid : ''}` },
     ];
@@ -818,23 +827,33 @@ class Sidebar {
     for (const f of fields) {
       if (!visibleFields.includes(f.key)) continue;
       const row = document.createElement('div'); row.className = 'session-detail-row';
+      row.style.position = 'relative';
       const lbl = document.createElement('span'); lbl.className = 'session-detail-label'; lbl.textContent = f.label;
       const val = document.createElement('span'); val.className = 'session-detail-value';
       if (f.badge) {
         val.innerHTML = `<span class="session-card-badge ${badge.cls}">${badge.text}</span>`;
+      } else if (f.midTruncate && f.display.length > 12) {
+        // Middle truncation: flexible head (ellipsis) + fixed tail
+        val.classList.add('session-detail-mid-truncate');
+        const head = document.createElement('span'); head.className = 'mid-truncate-head'; head.textContent = f.display.slice(0, -4);
+        const tail = document.createElement('span'); tail.className = 'mid-truncate-tail'; tail.textContent = f.display.slice(-4);
+        val.append(head, tail);
       } else {
         val.textContent = f.display;
-        val.style.display = 'block'; // block needed for text-overflow + direction to work
-        if (truncation === 'left') val.style.direction = 'rtl';
+        val.style.display = 'block';
+        if (f.leftTruncate) { val.style.direction = 'rtl'; val.style.unicodeBidi = 'plaintext'; }
       }
-      if (clickToCopy) {
+      if (f.copiable || clickToCopy) {
         val.classList.add('session-detail-copyable');
-        val.title = 'Click to copy';
+        val.title = f.copy;
         val.onclick = (e) => {
           e.stopPropagation();
           navigator.clipboard.writeText(f.copy).then(() => {
-            const orig = val.textContent; val.textContent = 'Copied!';
-            setTimeout(() => { val.textContent = orig; }, 800);
+            const tip = document.createElement('span');
+            tip.className = 'session-detail-tooltip';
+            tip.textContent = 'Copied!';
+            row.appendChild(tip);
+            setTimeout(() => tip.remove(), 1000);
           }).catch(() => {});
         };
       }
@@ -876,7 +895,7 @@ class Sidebar {
       const detailAttachBtn = document.createElement('button');
       detailAttachBtn.className = 'session-detail-btn session-detail-btn-primary';
       detailAttachBtn.textContent = '\u25B6 Attach';
-      detailAttachBtn.onclick = (e) => { e.stopPropagation(); this.app.attachSession(s.webuiId, s.webuiName || displayName, s.cwd); };
+      detailAttachBtn.onclick = (e) => { e.stopPropagation(); this.app.attachSession(s.webuiId, s.webuiName || displayName, s.cwd, { mode: s.webuiMode }); };
       actionsDiv.appendChild(detailAttachBtn);
     } else if (s.status === 'tmux') {
       const detailTmuxBtn = document.createElement('button');
@@ -885,11 +904,34 @@ class Sidebar {
       detailTmuxBtn.onclick = (e) => { e.stopPropagation(); this.app.attachTmuxSession(s.tmuxTarget, displayName, s.cwd); };
       actionsDiv.appendChild(detailTmuxBtn);
     } else if (s.status === 'stopped') {
-      const detailResumeBtn = document.createElement('button');
-      detailResumeBtn.className = 'session-detail-btn session-detail-btn-primary';
-      detailResumeBtn.textContent = '\u25B6 Resume';
-      detailResumeBtn.onclick = (e) => { e.stopPropagation(); this.app.resumeSession(s.sessionId, s.cwd, customName || s.name); };
-      actionsDiv.appendChild(detailResumeBtn);
+      const savedMode = this.getSessionMode(s.sessionId);
+      const defaultMode = this.app.settings.get('session.defaultMode') ?? 'terminal';
+      let resumeMode = savedMode || defaultMode;
+
+      const resumeWrap = document.createElement('div');
+      resumeWrap.className = 'session-resume-split';
+
+      const resumeBtn = document.createElement('button');
+      const dropBtn = document.createElement('button');
+      const updateLabel = () => {
+        const isChat = resumeMode === 'chat';
+        resumeBtn.textContent = isChat ? '\uD83D\uDCAC Resume in Chat' : '\u25B6 Resume in Terminal';
+        resumeBtn.className = 'session-detail-btn ' + (isChat ? 'session-detail-btn-chat' : 'session-detail-btn-primary');
+        dropBtn.className = 'session-resume-drop ' + (isChat ? 'session-detail-btn-chat' : 'session-detail-btn-primary');
+      };
+      updateLabel();
+      resumeBtn.onclick = (e) => { e.stopPropagation(); this.app.resumeSession(s.sessionId, s.cwd, customName || s.name, { mode: resumeMode }); };
+
+      dropBtn.textContent = '\u25BE';
+      dropBtn.onclick = (e) => {
+        e.stopPropagation();
+        resumeMode = resumeMode === 'chat' ? 'terminal' : 'chat';
+        this.setSessionMode(s.sessionId, resumeMode);
+        updateLabel();
+      };
+
+      resumeWrap.append(resumeBtn, dropBtn);
+      actionsDiv.appendChild(resumeWrap);
     }
 
     // Terminate button (for any running session)
@@ -938,20 +980,20 @@ class Sidebar {
       card.onclick = (e) => {
         if (e.target.closest('.session-detail-btn') || e.target.closest('.session-inline-btn') || e.target.closest('.session-expand-btn') || e.target.closest('.session-detail-copyable')) return;
         if (s.webuiId) this.app.flashWindow(s.webuiId);
-        else if (s.status === 'live' && s.webuiId) this.app.attachSession(s.webuiId, s.webuiName || displayName, s.cwd);
+        else if (s.status === 'live' && s.webuiId) this.app.attachSession(s.webuiId, s.webuiName || displayName, s.cwd, { mode: s.webuiMode });
         else if (s.status === 'tmux') this.app.attachTmuxSession(s.tmuxTarget, displayName, s.cwd);
         else if (s.status === 'stopped') this.app.resumeSession(s.sessionId, s.cwd, customName || s.name);
       };
     } else {
       // Default 'focus': click opens/resumes directly
       if (s.status === 'live' && s.webuiId) {
-        card.onclick = () => this.app.attachSession(s.webuiId, s.webuiName || displayName, s.cwd);
+        card.onclick = () => this.app.attachSession(s.webuiId, s.webuiName || displayName, s.cwd, { mode: s.webuiMode });
       } else if (s.status === 'tmux') {
         card.onclick = () => this.app.attachTmuxSession(s.tmuxTarget, displayName, s.cwd);
         card.title = 'Running in tmux \u2014 click to view (closing won\'t kill it)';
       } else if (s.status === 'live') {
         // LIVE but no window open (e.g. layout didn't restore it) — click to attach
-        card.onclick = () => this.app.attachSession(s.webuiId, s.webuiName || displayName, s.cwd);
+        card.onclick = () => this.app.attachSession(s.webuiId, s.webuiName || displayName, s.cwd, { mode: s.webuiMode });
       } else if (s.status === 'stopped') {
         card.onclick = () => this.app.resumeSession(s.sessionId, s.cwd, customName || s.name);
       }
