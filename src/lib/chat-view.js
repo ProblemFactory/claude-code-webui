@@ -645,6 +645,7 @@ class ChatView {
           } else {
             const el = document.createElement('div');
             el.className = 'chat-msg chat-msg-tool-result';
+            el._rawMsg = msg;
             el.innerHTML = this._compact
               ? `<div class="chat-compact-msg"><span class="chat-role chat-role-tool">${status === 'ok' ? '\u2713' : '\u2717'}</span><div class="chat-compact-content">${html}</div></div>`
               : html;
@@ -656,6 +657,7 @@ class ChatView {
         // Generic tool result (no pending use match)
         const el = document.createElement('div');
         el.className = 'chat-msg chat-msg-tool-result';
+        el._rawMsg = msg;
         const firstLine = resultText.split('\n')[0].substring(0, 120) || '(empty)';
         const icon = status === 'ok' ? '\u2713' : '\u2717';
         if (this._compact) {
