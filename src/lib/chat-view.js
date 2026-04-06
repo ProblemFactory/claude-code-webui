@@ -560,7 +560,7 @@ class ChatView {
         }
         break;
       case 'control_request':
-        if (!isHistory && msg.request?.subtype === 'can_use_tool') {
+        if (msg.request?.subtype === 'can_use_tool') {
           this._appendPermissionRequest(msg);
         }
         break;
