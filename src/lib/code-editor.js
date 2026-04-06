@@ -6,7 +6,7 @@ import { markdown as mdLang } from '@codemirror/lang-markdown';
 import { html as htmlLang } from '@codemirror/lang-html';
 import { css as cssLang } from '@codemirror/lang-css';
 import { oneDark } from '@codemirror/theme-one-dark';
-import { EditorState, Compartment } from '@codemirror/state';
+import { EditorState, Compartment, EditorSelection } from '@codemirror/state';
 import { keymap } from '@codemirror/view';
 import { indentWithTab } from '@codemirror/commands';
 
@@ -78,6 +78,7 @@ class CodeEditor {
   constructor(winInfo, filePath, fileName, app, opts = {}) {
     this.winInfo = winInfo; this.filePath = filePath; this.app = app;
     this.onSaveAndClose = opts.onSaveAndClose || null;
+    this._gotoLine = opts.line || null;
     this.modified = false;
     this._settings = loadEditorSettings();
 
@@ -219,6 +220,16 @@ class CodeEditor {
       }),
       parent: this.editorBody,
     });
+
+    // Jump to line if requested
+    if (this._gotoLine && this.editorView) {
+      const line = Math.min(this._gotoLine, this.editorView.state.doc.lines);
+      const lineInfo = this.editorView.state.doc.line(line);
+      this.editorView.dispatch({
+        selection: EditorSelection.cursor(lineInfo.from),
+        effects: EditorView.scrollIntoView(lineInfo.from, { y: 'center' }),
+      });
+    }
 
     this.winInfo.onClose = () => {
       if (this.onSaveAndClose) { this.save().then(() => this.onSaveAndClose()); }

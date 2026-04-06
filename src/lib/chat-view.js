@@ -37,6 +37,22 @@ class ChatView {
       container.classList.toggle('chat-compact', v);
     });
 
+    // Apply font size from global settings (scale message list relative to base 14px)
+    const BASE_FONT = 14;
+    const fontSize = parseInt(localStorage.getItem('termFontSize')) || BASE_FONT;
+    this._chatScale = fontSize / BASE_FONT;
+    this._applyFontSize = (size) => {
+      this._chatScale = size / BASE_FONT;
+      this._messageList.style.zoom = this._chatScale;
+    };
+
+    // Role indicator style
+    const roleStyle = app.settings?.get('chat.roleIndicator') ?? 'border';
+    container.dataset.roleIndicator = roleStyle;
+    app.settings?.on('chat.roleIndicator', (v) => {
+      container.dataset.roleIndicator = v;
+    });
+
     // Status bar (will be added after input area)
     this._statusBar = document.createElement('div');
     this._statusBar.className = 'chat-status-bar';
@@ -50,6 +66,7 @@ class ChatView {
     // Message list
     this._messageList = document.createElement('div');
     this._messageList.className = 'chat-message-list';
+    if (this._chatScale !== 1) this._messageList.style.zoom = this._chatScale;
     container.appendChild(this._messageList);
 
     // Scroll-to-bottom / pin button (shown when unpinned, with new message count)
@@ -59,15 +76,7 @@ class ChatView {
     this._scrollBtn.innerHTML = '\u2193';
     this._scrollBtn.title = 'Scroll to bottom';
     this._scrollBtn.onclick = () => {
-      if (this._windowEnd < this._total) {
-        // Window doesn't include latest messages — reload at bottom
-        this.jumpToBottom();
-      } else {
-        this._pinned = true;
-        this._newMsgCount = 0;
-        this._scrollToBottom();
-        this._scrollBtn.classList.add('hidden');
-      }
+      this.jumpToBottom();
     };
     container.appendChild(this._scrollBtn);
 
@@ -226,7 +235,11 @@ class ChatView {
     this._shortcutHint.textContent = '\u23CE';
     sendCol.append(sendBtn, this._shortcutHint);
 
-    inputArea.append(this._attachArea, inputWrap, sendCol);
+    // Streaming status indicator (above input)
+    this._streamStatus = document.createElement('div');
+    this._streamStatus.className = 'chat-stream-status hidden';
+
+    inputArea.append(this._attachArea, this._streamStatus, inputWrap, sendCol);
 
     // Search bar
     const searchBar = document.createElement('div');
@@ -277,6 +290,9 @@ class ChatView {
     container.appendChild(inputArea);
     container.appendChild(this._statusBar);
 
+    // Clear waiting blink on focus/click
+    winInfo.element.addEventListener('mousedown', () => this._clearWaiting());
+
     // Set up click handler for links/paths + image zoom
     this._setupLinkHandler();
     this._messageList.addEventListener('click', (e) => {
@@ -301,8 +317,9 @@ class ChatView {
     };
     this.ws.onGlobal(this._handler);
 
-    // Connection state: freeze on disconnect, unfreeze on reconnect
+    // Connection state: freeze on disconnect, re-attach + sync on reconnect
     this._disconnected = false;
+    this._hasConnected = false; // track first connect vs reconnect
     this._stateHandler = (connected) => {
       this._disconnected = !connected;
       container.classList.toggle('chat-disconnected', !connected);
@@ -310,9 +327,11 @@ class ChatView {
       if (!connected) {
         this._hideTyping();
         this._appendSystem('Disconnected from server');
-      } else {
+      } else if (this._hasConnected) {
         this._appendSystem('Reconnected');
+        this._reattach();
       }
+      this._hasConnected = true;
     };
     this.ws.onStateChange(this._stateHandler);
   }
@@ -320,13 +339,14 @@ class ChatView {
   // ── View Manager: sliding window over server message list ──
 
   // Load initial messages from attach response
-  loadHistory(messages, totalCount) {
+  loadHistory(messages, totalCount, isStreaming) {
     this._total = totalCount || messages.length;
     this._windowStart = this._total - messages.length; // index of first loaded msg
     this._windowEnd = this._total; // index after last loaded msg
     this._loading = false;
 
     for (const msg of messages) this._onMessage(msg, true);
+    if (isStreaming) this._showTyping();
     this._scrollToBottom();
   }
 
@@ -410,7 +430,25 @@ class ChatView {
     this._pinned = true;
     this._newMsgCount = 0;
     this._scrollBtn.classList.add('hidden');
-    this._scrollToBottom();
+
+    // Temporarily disable content-visibility so the browser computes real heights
+    // for all elements, then scroll to bottom, then re-enable
+    this._forceScrollToBottom();
+  }
+
+  _forceScrollToBottom() {
+    this._programmaticScroll = true;
+    const list = this._messageList;
+    let n = 0;
+    const step = () => {
+      list.scrollTop = list.scrollHeight;
+      // Each frame scrolling reveals off-screen elements, browser computes
+      // their real heights (replacing content-visibility estimates), scrollHeight
+      // grows — repeat until converged or max 10 frames (~166ms)
+      if (++n < 10) requestAnimationFrame(step);
+      else this._programmaticScroll = false;
+    };
+    requestAnimationFrame(step);
   }
 
   // Render a single message element (append to list, then detach for insertion elsewhere)
@@ -467,7 +505,7 @@ class ChatView {
       this._scrollBtn.classList.add('hidden');
       this._scrollToBottom();
     }
-    this._pendingTyping = true;
+    this._showTyping('thinking...');
   }
 
   _onMessage(msg, isHistory = false) {
@@ -479,19 +517,11 @@ class ChatView {
     this._messages.push(msg);
 
     switch (msg.type) {
-      case 'user': {
-        const c = msg.message?.content;
-        const hasToolResult = Array.isArray(c) && c.some(b => b.type === 'tool_result');
+      case 'user':
         this._appendUser(msg);
-        this._lastUserWasToolResult = hasToolResult;
-        if (!isHistory && this._pendingTyping) {
-          this._pendingTyping = false;
-          this._showTyping();
-        }
         break;
-      }
       case 'assistant':
-        if (!isHistory) this._hideTyping();
+        if (!isHistory) this._updateTyping(msg);
         this._appendAssistant(msg);
         // Track per-turn usage from assistant message (NOT result.modelUsage which is cumulative)
         if (msg.message?.usage && !isHistory) {
@@ -510,11 +540,17 @@ class ChatView {
         }
         break;
       case 'result':
-        if (!isHistory) this._hideTyping();
+        if (!isHistory) {
+          this._hideTyping();
+          // Blink window when result arrives and window is not focused
+          if (!this.winInfo.element.classList.contains('window-active')) {
+            this.winInfo.element.classList.add('window-waiting');
+            if (this.winInfo._notifyChanged) this.winInfo._notifyChanged();
+          }
+        }
         this._appendResult(msg);
         if (!isHistory) {
           if (msg.total_cost_usd) { this._statusCost += msg.total_cost_usd; this._updateStatusBar(); }
-          // Extract contextWindow from modelUsage if not set
           if (msg.modelUsage && !this._statusContextWindow) {
             const info = Object.values(msg.modelUsage)[0];
             if (info?.contextWindow) this._statusContextWindow = info.contextWindow;
@@ -547,12 +583,8 @@ class ChatView {
     const content = msg.message?.content;
     if (!content) return;
 
-    // Distinguish actual user messages from tool results and system context
+    // Distinguish actual user messages from tool results
     const isToolResult = Array.isArray(content) && content.some(b => b.type === 'tool_result');
-    // System-injected context: array with text that follows a tool_result (has parentUuid)
-    const isSystemContext = Array.isArray(content) && !isToolResult && msg.parentUuid && content.every(b => b.type === 'text') && this._lastUserWasToolResult;
-
-    if (isSystemContext) return; // Skip system-injected context (skill paths, interrupt markers)
 
     if (isToolResult) {
       for (const block of content) {
@@ -582,11 +614,17 @@ class ChatView {
             const lineCount = resultText.split('\n').length;
             const preview = resultText.substring(0, 500);
             html = `<div class="chat-tool-use"><span class="chat-tool-label">\u{1F4D6} Read ${this._clickablePath(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${lineCount} lines</summary><pre>${escHtml(preview)}${resultText.length > 500 ? '\n...' : ''}</pre></details></div>`;
-          } else {
-            // Failed or unhandled tool — show error with expandable original input
+          } else if (status !== 'ok') {
+            // Failed tool — show error with expandable original input
             const firstLine = resultText.split('\n')[0].substring(0, 150) || '(empty)';
             const inputStr = stripAnsi(typeof pendingUse.input === 'string' ? pendingUse.input : JSON.stringify(pendingUse.input, null, 2));
             html = `<div class="chat-tool-use chat-tool-use-error"><span class="chat-tool-label">\u2717 ${escHtml(pendingUse.name)} ${this._clickablePath(fp)}</span><div class="chat-tool-error-reason">${escHtml(firstLine)}</div><details class="chat-diff"><summary class="chat-diff-summary">Show input</summary><pre>${escHtml(inputStr).substring(0, 3000)}</pre></details></div>`;
+          } else {
+            // Other tool success — show with collapsible input + output
+            const inputStr = stripAnsi(typeof pendingUse.input === 'string' ? pendingUse.input : JSON.stringify(pendingUse.input, null, 2));
+            const firstLine = resultText.split('\n')[0].substring(0, 120) || '(empty)';
+            const truncated = resultText.length > 3000 ? resultText.substring(0, 3000) + '\n...' : resultText;
+            html = `<div class="chat-tool-use"><span class="chat-tool-label">\uD83D\uDD27 ${escHtml(pendingUse.name)}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${escHtml(inputStr).substring(0, 3000)}</pre></details><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${escHtml(firstLine)}</summary><pre>${escHtml(truncated)}</pre></details></div>`;
           }
 
           if (placeholder) {
@@ -642,14 +680,14 @@ class ChatView {
     if (this._compact) {
       if (isLong) {
         const preview = rawText.substring(0, 120).split('\n')[0];
-        innerHtml = `<div class="chat-compact-msg"><span class="chat-role chat-role-user">You</span><div class="chat-compact-content"><details class="chat-long-msg"><summary>${escHtml(preview)}...</summary>${textHtml}</details></div></div>`;
+        innerHtml = `<div class="chat-compact-msg"><span class="chat-role chat-role-user">You</span><div class="chat-compact-content"><details class="chat-long-msg"><summary><span>${escHtml(preview)}...</span></summary>${textHtml}</details></div></div>`;
       } else {
         innerHtml = `<div class="chat-compact-msg"><span class="chat-role chat-role-user">You</span><div class="chat-compact-content">${textHtml}</div></div>`;
       }
     } else {
       if (isLong) {
         const preview = rawText.substring(0, 120).split('\n')[0];
-        innerHtml = `<div class="chat-bubble chat-bubble-user"><details class="chat-long-msg"><summary>${escHtml(preview)}...</summary>${textHtml}</details></div>`;
+        innerHtml = `<div class="chat-bubble chat-bubble-user"><details class="chat-long-msg"><summary><span>${escHtml(preview)}...</span></summary>${textHtml}</details></div>`;
       } else {
         innerHtml = `<div class="chat-bubble chat-bubble-user">${textHtml}</div>`;
       }
@@ -673,13 +711,14 @@ class ChatView {
         } else if (block.type === 'thinking') {
           parts.push(`<details class="chat-thinking"><summary>Thinking...</summary><pre>${escHtml(stripAnsi(block.text || ''))}</pre></details>`);
         } else if (block.type === 'tool_use') {
-          if ((block.name === 'Edit' || block.name === 'Write' || block.name === 'Read') && block.id) {
-            // Defer rendering until tool_result arrives (to show success/failure)
+          // Defer all tool_use rendering until tool_result arrives
+          if (block.id) {
             this._pendingToolUses.set(block.id, block);
-            parts.push(`<div class="chat-tool-pending" data-tool-id="${escHtml(block.id)}"><span class="chat-tool-label">\u23F3 ${escHtml(block.name)} ${this._clickablePath(block.input?.file_path || '')}</span><span class="chat-spinner"></span></div>`);
-          } else {
-            const inputStr = stripAnsi(typeof block.input === 'string' ? block.input : JSON.stringify(block.input, null, 2));
-            parts.push(`<div class="chat-tool-use"><span class="chat-tool-label">\uD83D\uDD27 ${escHtml(block.name || 'tool')}</span><details><summary>Input</summary><pre>${escHtml(inputStr).substring(0, 3000)}</pre></details></div>`);
+            const fp = block.input?.file_path || '';
+            const label = (block.name === 'Edit' || block.name === 'Write' || block.name === 'Read')
+              ? `\u23F3 ${escHtml(block.name)} ${this._clickablePath(fp)}`
+              : `\uD83D\uDD27 ${escHtml(block.name || 'tool')}`;
+            parts.push(`<div class="chat-tool-pending" data-tool-id="${escHtml(block.id)}"><span class="chat-tool-label">${label}</span><span class="chat-spinner"></span></div>`);
           }
         } else if (block.type === 'image' && block.source?.data) {
           parts.push(`<img class="chat-img" src="data:${block.source.media_type || 'image/png'};base64,${block.source.data}" alt="image">`);
@@ -834,16 +873,20 @@ class ChatView {
         if (url) {
           window.open(url, '_blank');
         } else if (fp) {
+          // Parse optional :line, :line:col, or :line-line suffix
+          const lineMatch = fp.match(/^(.+?):(\d+)(?:[:\-]\d+)?$/);
+          const cleanPath = lineMatch ? lineMatch[1] : fp;
+          const lineNum = lineMatch ? parseInt(lineMatch[2], 10) : undefined;
           // Check if path is file, directory, or doesn't exist
-          fetch(`/api/file/info?path=${encodeURIComponent(fp)}`)
+          fetch(`/api/file/info?path=${encodeURIComponent(cleanPath)}`)
             .then(r => r.json())
             .then(info => {
               if (info.error) {
                 this._flashLink(link, 'Not found');
               } else if (info.isDirectory) {
-                this.app.openFileExplorer(fp);
+                this.app.openFileExplorer(cleanPath);
               } else {
-                this.app.openFile(fp, fp.split('/').pop());
+                this.app.openFile(cleanPath, cleanPath.split('/').pop(), { line: lineNum });
               }
             })
             .catch(() => this._flashLink(link, 'Error'));
@@ -881,9 +924,13 @@ class ChatView {
   }
 
   _flashLink(link, msg) {
-    const orig = link.textContent;
-    link.textContent = msg;
-    setTimeout(() => { link.textContent = orig; }, 800);
+    // Show tooltip near the link instead of replacing text
+    const tip = document.createElement('span');
+    tip.className = 'chat-link-tooltip';
+    tip.textContent = msg;
+    link.style.position = 'relative';
+    link.appendChild(tip);
+    setTimeout(() => tip.remove(), 1200);
   }
 
   _doSearch(query) {
@@ -1064,22 +1111,29 @@ class ChatView {
     }
   }
 
-  _showTyping() {
-    this._hideTyping();
-    const el = document.createElement('div');
-    el.className = 'chat-msg chat-msg-typing';
-    if (this._compact) {
-      el.innerHTML = '<div class="chat-compact-msg"><span class="chat-role chat-role-assistant">Claude</span><div class="chat-compact-content"><span class="chat-thinking-indicator"><span class="chat-spinner"></span> thinking...</span></div></div>';
-    } else {
-      el.innerHTML = '<div class="chat-bubble chat-bubble-assistant"><span class="chat-thinking-indicator"><span class="chat-spinner"></span> thinking...</span></div>';
-    }
-    this._typingEl = el;
-    this._messageList.appendChild(el);
-    this._scrollToBottom();
+  _showTyping(label = 'thinking...') {
+    this._streamStatus.innerHTML = `<span class="chat-spinner"></span> ${escHtml(label)}`;
+    this._streamStatus.classList.remove('hidden');
   }
 
   _hideTyping() {
-    if (this._typingEl) { this._typingEl.remove(); this._typingEl = null; }
+    this._streamStatus.classList.add('hidden');
+    this._streamStatus.innerHTML = '';
+  }
+
+  // Update typing indicator based on assistant message content
+  _updateTyping(msg) {
+    const content = msg.message?.content;
+    if (!Array.isArray(content)) return;
+    const last = content[content.length - 1];
+    if (!last) return;
+    if (last.type === 'tool_use') {
+      this._showTyping(`running ${last.name}...`);
+    } else if (last.type === 'thinking') {
+      this._showTyping('thinking...');
+    } else {
+      this._showTyping('responding...');
+    }
   }
 
   applyStatus(status) {
@@ -1137,17 +1191,33 @@ class ChatView {
   }
 
   _scrollToBottom() {
-    this._programmaticScroll = true;
-    // Set scrollTop to max — browser clamps to actual scrollHeight
-    this._messageList.scrollTop = 999999999;
-    requestAnimationFrame(() => {
-      this._messageList.scrollTop = 999999999;
-      this._programmaticScroll = false;
-    });
+    this._forceScrollToBottom();
+  }
+
+  // Re-attach to session after reconnect: re-register with server + sync missed messages
+  _reattach() {
+    // Re-attach so server adds this WS to session.clients again
+    this.ws.send({ type: 'attach', sessionId: this.sessionId });
+
+    // Fetch messages from where we left off to catch up
+    const missedStart = this._windowEnd;
+    this._fetchMessages(missedStart, 200).then(msgs => {
+      if (!msgs.length) return;
+      for (const msg of msgs) this._onMessage(msg);
+      if (this._pinned) this._scrollToBottom();
+    }).catch(() => {});
+  }
+
+  _clearWaiting() {
+    if (this.winInfo.element.classList.contains('window-waiting')) {
+      this.winInfo.element.classList.remove('window-waiting');
+      if (this.winInfo._notifyChanged) this.winInfo._notifyChanged();
+    }
   }
 
   focus() {
     this._textarea.focus();
+    this._clearWaiting();
   }
 
   dispose() {

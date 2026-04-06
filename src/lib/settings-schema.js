@@ -94,7 +94,19 @@ const SETTINGS_SCHEMA = {
   'chat.compactMode': {
     type: 'boolean', default: true, label: 'Compact mode',
     description: 'Dense document-style layout instead of chat bubbles. Closer to TUI information density.',
-    category: 'Session Card', liveApply: true,
+    category: 'Chat', liveApply: true,
+  },
+  'chat.roleIndicator': {
+    type: 'enum', default: 'border',
+    options: [
+      { value: 'border', label: 'Color border' },
+      { value: 'background', label: 'Background tint' },
+      { value: 'icon', label: 'Icon' },
+      { value: 'label', label: 'Text label (You/Claude)' },
+    ],
+    label: 'Role indicator style',
+    description: 'How to visually distinguish user vs assistant messages in compact mode.',
+    category: 'Chat', liveApply: true,
   },
 
   // ── Session ──
@@ -176,6 +188,7 @@ const SETTINGS_CATEGORIES = [
   'Toolbar & Layout',
   'Window',
   'Terminal',
+  'Chat',
   'Sidebar',
   'Session Card',
 ];

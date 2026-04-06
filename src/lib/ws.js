@@ -9,7 +9,6 @@ class WsManager {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     this.ws = new WebSocket(`${proto}//${location.host}/ws`);
     this.ws.onopen = () => {
-      if (this._connected) this.globalHandlers = [];
       this._connected = true;
       this._notifyState(true);
       for (const m of this.pending) this.ws.send(m); this.pending = [];

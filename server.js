@@ -1475,7 +1475,12 @@ wss.on('connection', (ws) => {
               chatStatus = { model, lastUsage, contextWindow, total_cost_usd: totalCost, slashCommands };
             }
 
-            ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, mode: 'chat', chatHistory, totalCount, chatStatus }));
+            // Detect if Claude is mid-stream: check buffer (current run) not JSONL (history)
+            // Only buffer messages reflect current process state
+            const lastBufMsg = bufferMessages.length > 0 ? bufferMessages[bufferMessages.length - 1] : null;
+            const isStreaming = lastBufMsg && lastBufMsg.type !== 'result' && lastBufMsg.type !== 'system';
+
+            ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, mode: 'chat', chatHistory, totalCount, chatStatus, isStreaming }));
           } else {
             ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, buffer: session.buffer || '' }));
           }

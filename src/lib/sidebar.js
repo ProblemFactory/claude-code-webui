@@ -758,7 +758,6 @@ class Sidebar {
     const customName = this._customNames[s.sessionId];
     const originalName = s.name || s.webuiName || s.sessionId.substring(0, 12) + '...';
     const displayName = customName || originalName;
-    const idShort = s.sessionId.substring(0, 12);
 
     const badgeMap = {
       live:     { cls: 'badge-live', text: 'LIVE' },
@@ -819,8 +818,8 @@ class Sidebar {
     const cwdShort = (s.cwd || '').replace(/^\/home\/[^/]+/, '~').replace(/^\/Users\/[^/]+/, '~');
 
     const fields = [
-      { key: 'id', label: 'ID', display: `${idShort}...`, copy: s.sessionId },
-      { key: 'cwd', label: 'CWD', display: cwdShort, copy: s.cwd || '' },
+      { key: 'id', label: 'ID', display: s.sessionId, copy: s.sessionId, copiable: true, midTruncate: true },
+      { key: 'cwd', label: 'CWD', display: cwdShort, copy: s.cwd || '', copiable: true, leftTruncate: true },
       { key: 'started', label: 'Started', display: date.toLocaleString(), copy: date.toISOString() },
       { key: 'status', label: 'Status', display: null, badge: true, copy: `${s.status}${s.pid ? ' PID ' + s.pid : ''}` },
     ];
@@ -828,23 +827,33 @@ class Sidebar {
     for (const f of fields) {
       if (!visibleFields.includes(f.key)) continue;
       const row = document.createElement('div'); row.className = 'session-detail-row';
+      row.style.position = 'relative';
       const lbl = document.createElement('span'); lbl.className = 'session-detail-label'; lbl.textContent = f.label;
       const val = document.createElement('span'); val.className = 'session-detail-value';
       if (f.badge) {
         val.innerHTML = `<span class="session-card-badge ${badge.cls}">${badge.text}</span>`;
+      } else if (f.midTruncate && f.display.length > 12) {
+        // Middle truncation: flexible head (ellipsis) + fixed tail
+        val.classList.add('session-detail-mid-truncate');
+        const head = document.createElement('span'); head.className = 'mid-truncate-head'; head.textContent = f.display.slice(0, -4);
+        const tail = document.createElement('span'); tail.className = 'mid-truncate-tail'; tail.textContent = f.display.slice(-4);
+        val.append(head, tail);
       } else {
         val.textContent = f.display;
-        val.style.display = 'block'; // block needed for text-overflow + direction to work
-        if (truncation === 'left') val.style.direction = 'rtl';
+        val.style.display = 'block';
+        if (f.leftTruncate) { val.style.direction = 'rtl'; val.style.unicodeBidi = 'plaintext'; }
       }
-      if (clickToCopy) {
+      if (f.copiable || clickToCopy) {
         val.classList.add('session-detail-copyable');
-        val.title = 'Click to copy';
+        val.title = f.copy;
         val.onclick = (e) => {
           e.stopPropagation();
           navigator.clipboard.writeText(f.copy).then(() => {
-            const orig = val.textContent; val.textContent = 'Copied!';
-            setTimeout(() => { val.textContent = orig; }, 800);
+            const tip = document.createElement('span');
+            tip.className = 'session-detail-tooltip';
+            tip.textContent = 'Copied!';
+            row.appendChild(tip);
+            setTimeout(() => tip.remove(), 1000);
           }).catch(() => {});
         };
       }

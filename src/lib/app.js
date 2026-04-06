@@ -72,6 +72,16 @@ class App {
     // Restore layout after WebSocket is connected (needs active sessions)
     setTimeout(() => this.layoutManager.loadAutoSave(), 1500);
 
+    // Re-attach all terminal sessions on reconnect (chat sessions handle their own)
+    this.ws.onStateChange((connected) => {
+      if (!connected) return;
+      for (const [winId, session] of this.sessions) {
+        if (session instanceof TerminalSession && session.sessionId) {
+          this.ws.send({ type: 'attach', sessionId: session.sessionId });
+        }
+      }
+    });
+
     // Mobile nav bar
     this._setupMobileNav();
     // Mobile: swipe from left edge to open sidebar
@@ -170,11 +180,15 @@ class App {
     const applyFontSize = () => {
       localStorage.setItem('termFontSize', this._fontSize);
       sizeVal.textContent = this._fontSize;
-      for (const [, term] of this.sessions) {
-        if (!term.overrides.fontSize) {
-          term.terminal.options.fontSize = this._fontSize;
-          try { term.terminal.clearTextureAtlas(); } catch {}
-          term.fit();
+      for (const [, session] of this.sessions) {
+        if (session._applyFontSize) {
+          // ChatView
+          session._applyFontSize(this._fontSize);
+        } else if (session.overrides && !session.overrides.fontSize) {
+          // TerminalSession
+          session.terminal.options.fontSize = this._fontSize;
+          try { session.terminal.clearTextureAtlas(); } catch {}
+          session.fit();
         }
       }
     };
@@ -766,7 +780,7 @@ class App {
           const chatView = new ChatView(winInfo, this.ws, serverId, this);
           this.sessions.set(winInfo.id, chatView);
           if (msg.chatHistory && msg.chatHistory.length) {
-            chatView.loadHistory(msg.chatHistory, msg.totalCount);
+            chatView.loadHistory(msg.chatHistory, msg.totalCount, msg.isStreaming);
             if (msg.chatStatus) chatView.applyStatus(msg.chatStatus);
           }
           winInfo.onClose = () => {
