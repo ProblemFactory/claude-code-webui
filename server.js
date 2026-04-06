@@ -1406,6 +1406,21 @@ wss.on('connection', (ws) => {
         break;
       }
 
+      case 'permission-response': {
+        // Permission approval/denial from chat UI → write control_response to claude stdin
+        const session = activeSessions.get(data.sessionId);
+        if (session?.pty && session.mode === 'chat') {
+          const response = {
+            type: 'control_response',
+            response: data.approved
+              ? { subtype: 'success', request_id: data.requestId, response: { behavior: 'allow' } }
+              : { subtype: 'success', request_id: data.requestId, response: { behavior: 'deny', message: 'User denied this action' } },
+          };
+          session.pty.write(JSON.stringify(response) + '\n');
+        }
+        break;
+      }
+
       case 'resize': {
         const session = activeSessions.get(data.sessionId);
         if (session && data.cols > 0 && data.rows > 0) {
@@ -1436,7 +1451,7 @@ wss.on('connection', (ws) => {
               if (!trimmed) continue;
               try {
                 const msg = JSON.parse(trimmed);
-                if (msg.type !== 'user' && msg.type !== 'assistant' && msg.type !== 'result' && !(msg.type === 'system' && msg.subtype === 'init')) continue;
+                if (msg.type !== 'user' && msg.type !== 'assistant' && msg.type !== 'result' && msg.type !== 'control_request' && !(msg.type === 'system' && msg.subtype === 'init')) continue;
                 if (msg.uuid && jsonlUuids.has(msg.uuid)) continue; // already in JSONL
                 bufferMessages.push(msg);
               } catch {}

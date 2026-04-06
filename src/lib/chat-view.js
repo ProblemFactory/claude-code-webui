@@ -559,6 +559,18 @@ class ChatView {
           }
         }
         break;
+      case 'control_request':
+        if (!isHistory && msg.request?.subtype === 'can_use_tool') {
+          this._appendPermissionRequest(msg);
+        }
+        break;
+      case 'control_cancel_request':
+        // Remove pending permission request
+        if (msg.request_id) {
+          const el = this._messageList.querySelector(`[data-request-id="${msg.request_id}"]`);
+          if (el) el.remove();
+        }
+        break;
       case 'rate_limit_event':
         // Skip silently
         break;
@@ -1109,6 +1121,61 @@ class ChatView {
       item.appendChild(removeBtn);
       this._attachArea.appendChild(item);
     }
+  }
+
+  _appendPermissionRequest(msg) {
+    const req = msg.request;
+    const requestId = msg.request_id;
+    const toolName = req.tool_name || 'Unknown';
+    const input = req.input || {};
+    const inputStr = typeof input === 'string' ? input : JSON.stringify(input, null, 2);
+    const truncated = inputStr.length > 1000 ? inputStr.substring(0, 1000) + '\n...' : inputStr;
+
+    const el = document.createElement('div');
+    el.className = 'chat-msg chat-msg-permission';
+    el.dataset.requestId = requestId;
+
+    const card = document.createElement('div');
+    card.className = 'chat-permission-card';
+    card.innerHTML = `<div class="chat-permission-header"><span class="chat-permission-icon">\u{1F512}</span> Permission Request</div>`
+      + `<div class="chat-permission-tool"><strong>${escHtml(toolName)}</strong></div>`
+      + `<details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${escHtml(truncated)}</pre></details>`
+      + `<div class="chat-permission-actions"></div>`;
+
+    const actions = card.querySelector('.chat-permission-actions');
+    const btnAllow = document.createElement('button');
+    btnAllow.className = 'chat-permission-btn chat-permission-allow';
+    btnAllow.textContent = 'Allow';
+    const btnDeny = document.createElement('button');
+    btnDeny.className = 'chat-permission-btn chat-permission-deny';
+    btnDeny.textContent = 'Deny';
+
+    const respond = (approved) => {
+      this.ws.send({ type: 'permission-response', sessionId: this.sessionId, requestId, approved });
+      actions.innerHTML = approved
+        ? '<span class="chat-permission-resolved chat-permission-allowed">✓ Allowed</span>'
+        : '<span class="chat-permission-resolved chat-permission-denied">✗ Denied</span>';
+    };
+    btnAllow.onclick = () => respond(true);
+    btnDeny.onclick = () => respond(false);
+    actions.append(btnAllow, btnDeny);
+
+    if (this._compact) {
+      el.innerHTML = '';
+      const wrap = document.createElement('div');
+      wrap.className = 'chat-compact-msg';
+      const content = document.createElement('div');
+      content.className = 'chat-compact-content';
+      content.appendChild(card);
+      wrap.appendChild(content);
+      el.appendChild(wrap);
+    } else {
+      el.appendChild(card);
+    }
+    this._messageList.appendChild(el);
+    if (this._pinned) this._scrollToBottom();
+    // Hide typing — we're waiting for user, not Claude
+    this._hideTyping();
   }
 
   _showTyping(label = 'thinking...') {

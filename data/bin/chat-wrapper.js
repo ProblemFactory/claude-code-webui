@@ -38,6 +38,9 @@ if (!args.includes('--input-format')) {
 if (!args.includes('--verbose')) {
   args.push('--verbose');
 }
+if (!args.includes('--permission-prompt-tool')) {
+  args.push('--permission-prompt-tool', 'stdio');
+}
 
 // Write initial metadata
 try { fs.mkdirSync(path.dirname(metaFile), { recursive: true }); } catch {}

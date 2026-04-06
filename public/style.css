@@ -1302,6 +1302,28 @@ html, body {
 .chat-tool-use-error .chat-tool-label { color: var(--red); }
 .chat-tool-error-reason { font-size: 11px; color: var(--red); padding: 2px 0; }
 
+/* Permission request card */
+.chat-permission-card {
+  margin: 4px 0; padding: 8px 12px; background: var(--bg-root); border-radius: var(--radius);
+  border: 1px solid var(--yellow); border-left: 3px solid var(--yellow); font-size: 12px;
+}
+.chat-permission-header { font-weight: 600; font-size: 12px; color: var(--yellow); margin-bottom: 4px; }
+.chat-permission-icon { margin-right: 4px; }
+.chat-permission-tool { font-size: 12px; margin-bottom: 4px; }
+.chat-permission-actions { display: flex; gap: 8px; margin-top: 8px; }
+.chat-permission-btn {
+  padding: 4px 16px; border-radius: var(--radius-sm); font-size: 11px; font-weight: 600;
+  cursor: pointer; border: 1px solid var(--border); transition: all 0.15s;
+}
+.chat-permission-allow { background: var(--green); color: #fff; border-color: var(--green); }
+.chat-permission-allow:hover { opacity: 0.85; }
+.chat-permission-deny { background: var(--bg-tertiary); color: var(--text); }
+.chat-permission-deny:hover { background: var(--bg-hover); }
+.chat-permission-resolved { font-size: 11px; font-weight: 600; padding: 4px 0; }
+.chat-permission-allowed { color: var(--green); }
+.chat-permission-denied { color: var(--red); }
+[data-role-indicator="border"] .chat-msg-permission { border-left-color: var(--yellow); }
+
 .chat-diff { margin: 4px 0 0; font-size: 12px; }
 .chat-diff > summary { list-style: none; cursor: pointer; }
 .chat-diff > summary::-webkit-details-marker { display: none; }
