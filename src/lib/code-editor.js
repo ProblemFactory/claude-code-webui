@@ -9,6 +9,7 @@ import { oneDark } from '@codemirror/theme-one-dark';
 import { EditorState, Compartment, EditorSelection } from '@codemirror/state';
 import { keymap } from '@codemirror/view';
 import { indentWithTab } from '@codemirror/commands';
+import { marked } from 'marked';
 
 const LANGUAGES = [
   { id: 'auto', label: 'Auto' },
@@ -135,10 +136,30 @@ class CodeEditor {
       saveEditorSettings(this._settings);
     };
 
-    toolbar.append(pathSpan, this.saveIndicator, this.langSelect, btnSave, btnDownload, sep, btnWrap, sizeDown, this.fontSizeDisplay, sizeUp, btnTheme);
+    // Markdown preview toggle
+    this._btnPreview = this._btn('Preview');
+    this._btnPreview.className = 'file-tool-btn editor-setting-btn';
+    this._btnPreview.style.display = 'none'; // shown when language is markdown
+    this._previewing = false;
+    this._btnPreview.onclick = () => {
+      this._previewing = !this._previewing;
+      this._btnPreview.textContent = this._previewing ? 'Edit' : 'Preview';
+      this._btnPreview.classList.toggle('active', this._previewing);
+      if (this._previewing) {
+        this.editorBody.style.display = 'none';
+        this._previewBody.innerHTML = marked.parse(this.editorView?.state.doc.toString() || '');
+        this._previewBody.style.display = 'block';
+      } else {
+        this._previewBody.style.display = 'none';
+        this.editorBody.style.display = '';
+      }
+    };
+
+    toolbar.append(pathSpan, this.saveIndicator, this.langSelect, btnSave, btnDownload, sep, btnWrap, sizeDown, this.fontSizeDisplay, sizeUp, btnTheme, this._btnPreview);
 
     this.editorBody = document.createElement('div'); this.editorBody.className = 'editor-body';
-    container.append(toolbar, this.editorBody);
+    this._previewBody = document.createElement('div'); this._previewBody.className = 'markdown-preview editor-body'; this._previewBody.style.display = 'none'; this._previewBody.style.overflow = 'auto'; this._previewBody.style.padding = '12px 16px';
+    container.append(toolbar, this.editorBody, this._previewBody);
     winInfo.content.appendChild(container);
 
     this._langCompartment = new Compartment();
@@ -221,6 +242,9 @@ class CodeEditor {
       parent: this.editorBody,
     });
 
+    // Show preview button if markdown
+    if (detectedLang === 'markdown') this._btnPreview.style.display = '';
+
     // Jump to line if requested
     if (this._gotoLine && this.editorView) {
       const line = Math.min(this._gotoLine, this.editorView.state.doc.lines);
@@ -240,6 +264,13 @@ class CodeEditor {
     if (!this.editorView) return;
     const actualId = langId === 'auto' ? detectLang(this.filePath) : langId;
     this.editorView.dispatch({ effects: this._langCompartment.reconfigure(getLangExtension(actualId)) });
+    // Show/hide preview button
+    this._btnPreview.style.display = (actualId === 'markdown') ? '' : 'none';
+    if (actualId !== 'markdown' && this._previewing) {
+      this._previewing = false; this._btnPreview.textContent = 'Preview';
+      this._btnPreview.classList.remove('active');
+      this._previewBody.style.display = 'none'; this.editorBody.style.display = '';
+    }
   }
 
   async save() {

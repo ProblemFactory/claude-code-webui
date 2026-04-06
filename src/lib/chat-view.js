@@ -845,16 +845,40 @@ class ChatView {
       wrapper.className = 'chat-pre-wrap';
       pre.parentNode.insertBefore(wrapper, pre);
       wrapper.appendChild(pre);
-      const btn = document.createElement('button');
-      btn.className = 'chat-wrap-toggle';
-      btn.textContent = 'Wrap';
-      btn.title = 'Toggle word wrap';
-      btn.onclick = (e) => {
+
+      const btnWrap = document.createElement('button');
+      btnWrap.className = 'chat-wrap-toggle';
+      btnWrap.textContent = 'Wrap';
+      btnWrap.title = 'Toggle word wrap';
+      btnWrap.onclick = (e) => {
         e.stopPropagation();
         const on = pre.classList.toggle('chat-pre-wrapped');
-        btn.textContent = on ? 'No Wrap' : 'Wrap';
+        btnWrap.textContent = on ? 'No Wrap' : 'Wrap';
       };
-      wrapper.appendChild(btn);
+
+      const btnOpen = document.createElement('button');
+      btnOpen.className = 'chat-wrap-toggle chat-pre-open-btn';
+      btnOpen.textContent = 'Open';
+      btnOpen.title = 'Open in editor';
+      btnOpen.onclick = (e) => {
+        e.stopPropagation();
+        const text = pre.textContent || '';
+        if (!text.trim()) return;
+        const tmpName = `chat-block-${Date.now()}.txt`;
+        const tmpPath = `/tmp/claude-webui/${tmpName}`;
+        fetch('/api/mkdir', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: '/tmp/claude-webui' }) }).catch(() => {});
+        fetch('/api/file/write', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: tmpPath, content: text }) })
+          .then(r => { if (!r.ok) throw new Error(); return r.json(); })
+          .then(() => {
+            this.app.openEditor(tmpPath, tmpName, {
+              _tempFile: true,
+              _onCloseDelete: () => fetch(`/api/file?path=${encodeURIComponent(tmpPath)}`, { method: 'DELETE' }).catch(() => {}),
+            });
+          })
+          .catch(() => {});
+      };
+
+      wrapper.append(btnOpen, btnWrap);
     }
   }
 
