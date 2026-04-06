@@ -629,7 +629,7 @@ class ChatView {
           } else if (status !== 'ok') {
             // Failed tool — same card style, error shown inside
             const inputStr = stripAnsi(typeof pendingUse.input === 'string' ? pendingUse.input : JSON.stringify(pendingUse.input, null, 2));
-            html = `<div class="chat-tool-use"><span class="chat-tool-label">\uD83D\uDD27 ${escHtml(pendingUse.name)} ${this._clickablePath(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${escHtml(inputStr)}</pre></details><details class="chat-diff" open><summary class="chat-diff-summary">\u2717 Error</summary><pre class="chat-tool-error-text">${escHtml(resultText)}</pre></details></div>`;
+            html = `<div class="chat-tool-use"><span class="chat-tool-label">\uD83D\uDD27 ${escHtml(pendingUse.name)} ${this._clickablePath(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${escHtml(inputStr)}</pre></details><details class="chat-diff" open><summary class="chat-diff-summary chat-diff-summary-error">\u2717 Error</summary><pre class="chat-tool-error-text">${escHtml(resultText)}</pre></details></div>`;
           } else {
             // Other tool success — show with collapsible input + output (no truncation)
             const inputStr = stripAnsi(typeof pendingUse.input === 'string' ? pendingUse.input : JSON.stringify(pendingUse.input, null, 2));
