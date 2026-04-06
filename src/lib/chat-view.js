@@ -638,7 +638,10 @@ class ChatView {
           }
 
           if (placeholder) {
+            const parentMsg = placeholder.closest('.chat-msg');
             placeholder.outerHTML = html;
+            // Re-apply wrap toggles to parent since new <pre> elements were injected
+            if (parentMsg) this._addWrapToggles(parentMsg);
           } else {
             const el = document.createElement('div');
             el.className = 'chat-msg chat-msg-tool-result';
@@ -797,25 +800,40 @@ class ChatView {
     btn.title = 'Open in editor';
     btn.onclick = (e) => {
       e.stopPropagation();
-      // Extract text content from this message block
-      const text = el.innerText || el.textContent || '';
-      if (!text.trim()) return;
-      const tmpName = `chat-block-${Date.now()}.txt`;
-      const tmpPath = `/tmp/claude-webui/${tmpName}`;
-      fetch('/api/mkdir', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: '/tmp/claude-webui' }) }).catch(() => {});
-      fetch('/api/file/write', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: tmpPath, content: text }) })
-        .then(r => { if (!r.ok) throw new Error('write failed'); return r.json(); })
-        .then(() => {
-          this.app.openEditor(tmpPath, tmpName, {
-            _tempFile: true,
-            _onCloseDelete: () => fetch(`/api/file?path=${encodeURIComponent(tmpPath)}`, { method: 'DELETE' }).catch(() => {}),
-          });
-        })
-        .catch(() => {});
+      this._openBlockInEditor(el);
     };
-    // Insert at the start of the element (CSS positions it top-right)
     el.style.position = 'relative';
     el.appendChild(btn);
+  }
+
+  // Extract ALL text from element including collapsed <details> content, excluding buttons
+  _extractAllText(el) {
+    const parts = [];
+    for (const node of el.childNodes) {
+      if (node.nodeType === 3) { parts.push(node.textContent); continue; }
+      if (node.nodeType !== 1) continue;
+      if (node.classList?.contains('chat-open-editor-btn')) continue;
+      if (node.classList?.contains('chat-wrap-toggle')) continue;
+      parts.push(this._extractAllText(node));
+    }
+    return parts.join('');
+  }
+
+  _openBlockInEditor(el) {
+    const text = this._extractAllText(el);
+    if (!text.trim()) return;
+    const tmpName = `chat-block-${Date.now()}.txt`;
+    const tmpPath = `/tmp/claude-webui/${tmpName}`;
+    fetch('/api/mkdir', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: '/tmp/claude-webui' }) }).catch(() => {});
+    fetch('/api/file/write', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: tmpPath, content: text }) })
+      .then(r => { if (!r.ok) throw new Error('write failed'); return r.json(); })
+      .then(() => {
+        this.app.openEditor(tmpPath, tmpName, {
+          _tempFile: true,
+          _onCloseDelete: () => fetch(`/api/file?path=${encodeURIComponent(tmpPath)}`, { method: 'DELETE' }).catch(() => {}),
+        });
+      })
+      .catch(() => {});
   }
 
   _addWrapToggles(el) {
