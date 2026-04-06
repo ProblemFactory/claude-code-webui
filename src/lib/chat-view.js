@@ -162,6 +162,12 @@ class ChatView {
           return;
         }
       }
+      if (e.isComposing || e.keyCode === 229) return; // IME composing — don't intercept Enter
+      // Escape: send to PTY to interrupt running Claude
+      if (e.key === 'Escape') {
+        this.ws.send({ type: 'input', sessionId: this.sessionId, data: '\x1b' });
+        return;
+      }
       if (this._expanded) {
         if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); this._send(); }
       } else {
@@ -834,7 +840,7 @@ class ChatView {
       return `<span class="chat-link" data-href="${escHtml(url)}" title="Click to copy, Ctrl+Click to open">${escHtml(url)}</span>${escHtml(after)}`;
     });
     // Match absolute file paths (not already inside tags)
-    html = html.replace(/(?<![="'\w])(\/(?:home|tmp|usr|var|etc|opt|mnt|root|workspace)[^\s<>"')\]]*)/g, (raw) => {
+    html = html.replace(/(?<![="'\w])(\/(?:home|tmp|usr|var|etc|opt|mnt|root|workspace|Users)[^\s<>"')\]]*)/g, (raw) => {
       const fp = this._cleanPath(raw);
       const after = raw.slice(fp.length);
       if (fp.length < 3) return raw; // too short
@@ -851,7 +857,7 @@ class ChatView {
       const after = raw.slice(url.length);
       return `<span class="chat-link" data-href="${url}" title="Click to copy, Ctrl+Click to open">${url}</span>${after}`;
     });
-    html = html.replace(/(?<![="'\w])(\/(?:home|tmp|usr|var|etc|opt|mnt|root|workspace)[^\s<>&]*)/g, (raw) => {
+    html = html.replace(/(?<![="'\w])(\/(?:home|tmp|usr|var|etc|opt|mnt|root|workspace|Users)[^\s<>&]*)/g, (raw) => {
       const fp = this._cleanPath(raw);
       const after = raw.slice(fp.length);
       if (fp.length < 3) return raw;

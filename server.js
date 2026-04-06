@@ -125,6 +125,8 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
         if (!line) continue;
         try {
           const msg = JSON.parse(line);
+          // Skip user messages from PTY — already broadcast by chat-input handler
+          if (msg.type === 'user') continue;
           broadcastToSession(session, id, { type: 'chat-message', sessionId: id, message: msg });
         } catch {
           // Non-JSON line (e.g. dtach noise) — send as raw output
