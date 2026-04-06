@@ -629,12 +629,12 @@ class ChatView {
           } else if (status !== 'ok') {
             // Failed tool — same card style, error shown inside
             const inputStr = stripAnsi(typeof pendingUse.input === 'string' ? pendingUse.input : JSON.stringify(pendingUse.input, null, 2));
-            html = `<div class="chat-tool-use"><span class="chat-tool-label">\uD83D\uDD27 ${escHtml(pendingUse.name)} ${this._clickablePath(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${escHtml(inputStr)}</pre></details><details class="chat-diff" open><summary class="chat-diff-summary chat-diff-summary-error">\u2717 Error</summary><pre class="chat-tool-error-text">${escHtml(resultText)}</pre></details></div>`;
+            html = `<div class="chat-tool-use"><span class="chat-tool-label">\uD83D\uDD27 ${escHtml(pendingUse.name)} ${this._clickablePath(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this._linkifyText(inputStr)}</pre></details><details class="chat-diff" open><summary class="chat-diff-summary chat-diff-summary-error">\u2717 Error</summary><pre class="chat-tool-error-text">${this._linkifyText(resultText)}</pre></details></div>`;
           } else {
             // Other tool success — show with collapsible input + output (no truncation)
             const inputStr = stripAnsi(typeof pendingUse.input === 'string' ? pendingUse.input : JSON.stringify(pendingUse.input, null, 2));
             const firstLine = resultText.split('\n')[0].substring(0, 120) || '(empty)';
-            html = `<div class="chat-tool-use"><span class="chat-tool-label">\uD83D\uDD27 ${escHtml(pendingUse.name)}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${escHtml(inputStr)}</pre></details><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${escHtml(firstLine)}</summary><pre>${escHtml(resultText)}</pre></details></div>`;
+            html = `<div class="chat-tool-use"><span class="chat-tool-label">\uD83D\uDD27 ${escHtml(pendingUse.name)}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this._linkifyText(inputStr)}</pre></details><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${escHtml(firstLine)}</summary><pre>${this._linkifyText(resultText)}</pre></details></div>`;
           }
 
           if (placeholder) {
@@ -656,9 +656,9 @@ class ChatView {
         const firstLine = resultText.split('\n')[0].substring(0, 120) || '(empty)';
         const icon = status === 'ok' ? '\u2713' : '\u2717';
         if (this._compact) {
-          el.innerHTML = `<div class="chat-compact-msg"><span class="chat-role chat-role-tool">${icon}</span><div class="chat-compact-content"><details class="chat-tool-result-details chat-tool-${status}"><summary>${escHtml(firstLine)}</summary><pre>${escHtml(resultText)}</pre></details></div></div>`;
+          el.innerHTML = `<div class="chat-compact-msg"><span class="chat-role chat-role-tool">${icon}</span><div class="chat-compact-content"><details class="chat-tool-result-details chat-tool-${status}"><summary>${escHtml(firstLine)}</summary><pre>${this._linkifyText(resultText)}</pre></details></div></div>`;
         } else {
-          el.innerHTML = `<details class="chat-tool-result-details chat-tool-${status}"><summary><span class="chat-tool-label">Tool Result (${status})</span> ${escHtml(firstLine)}</summary><pre>${escHtml(resultText)}</pre></details>`;
+          el.innerHTML = `<details class="chat-tool-result-details chat-tool-${status}"><summary><span class="chat-tool-label">Tool Result (${status})</span> ${escHtml(firstLine)}</summary><pre>${this._linkifyText(resultText)}</pre></details>`;
         }
         this._messageList.appendChild(el); this._addWrapToggles(el);
       }
@@ -751,7 +751,7 @@ class ChatView {
               parts.push(`<div class="chat-tool-pending" data-tool-id="${escHtml(block.id)}"><span class="chat-tool-label">${label}</span><span class="chat-spinner"></span></div>`);
             } else {
               const inputStr = stripAnsi(typeof block.input === 'string' ? block.input : JSON.stringify(block.input, null, 2));
-              parts.push(`<div class="chat-tool-pending" data-tool-id="${escHtml(block.id)}"><div class="chat-tool-use"><span class="chat-tool-label">\uD83D\uDD27 ${escHtml(block.name || 'tool')}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${escHtml(inputStr)}</pre></details><div class="chat-tool-output-pending"><span class="chat-spinner"></span> running...</div></div></div>`);
+              parts.push(`<div class="chat-tool-pending" data-tool-id="${escHtml(block.id)}"><div class="chat-tool-use"><span class="chat-tool-label">\uD83D\uDD27 ${escHtml(block.name || 'tool')}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this._linkifyText(inputStr)}</pre></details><div class="chat-tool-output-pending"><span class="chat-spinner"></span> running...</div></div></div>`);
             }
           }
         } else if (block.type === 'image' && block.source?.data) {
