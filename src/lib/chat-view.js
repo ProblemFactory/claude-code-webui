@@ -843,13 +843,19 @@ class ChatView {
 
   _addOpenInEditorBtn(el) {
     if (!el._rawMsg) return;
+    // Skip for assistant messages that have tool_use — tool cards have their own buttons
+    const msg = el._rawMsg;
+    if (msg.type === 'assistant') {
+      const c = msg.message?.content;
+      if (Array.isArray(c) && c.some(b => b.type === 'tool_use') && !c.some(b => b.type === 'text' && b.text?.trim())) return;
+    }
     const btn = document.createElement('button');
     btn.className = 'chat-open-editor-btn';
     btn.textContent = '\uD83D\uDCCB';
     btn.title = 'Open in editor';
     btn.onclick = (e) => {
       e.stopPropagation();
-      const text = this._extractMsgText(el._rawMsg);
+      const text = this._extractMsgText(msg);
       if (!text.trim()) return;
       this._openInTempEditor(text);
     };
