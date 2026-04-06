@@ -676,6 +676,7 @@ class ChatView {
     if (isSystemNotification) {
       const el = document.createElement('div');
       el.className = 'chat-msg chat-msg-system-notification';
+      el._rawMsg = msg;
       const preview = msgText.replace(/<[^>]+>/g, ' ').trim().substring(0, 200);
       const label = msgText.includes('task-notification') ? '\uD83D\uDD14 Task Notification'
         : msgText.includes('system-reminder') ? '\u2699 System'
@@ -692,6 +693,7 @@ class ChatView {
     // Actual user message — render with markdown
     const el = document.createElement('div');
     el.className = 'chat-msg chat-msg-user';
+    el._rawMsg = msg;
     let rawText = '';
     let textHtml = '';
     if (typeof content === 'string') {
@@ -735,6 +737,7 @@ class ChatView {
 
     const el = document.createElement('div');
     el.className = 'chat-msg chat-msg-assistant';
+    el._rawMsg = msg;
 
     const parts = [];
     if (Array.isArray(content)) {
@@ -794,46 +797,43 @@ class ChatView {
 
   // Add wrap toggle button to all <pre> blocks inside an element
   _addOpenInEditorBtn(el) {
+    if (!el._rawMsg) return; // no raw message bound
     const btn = document.createElement('button');
     btn.className = 'chat-open-editor-btn';
     btn.textContent = '\uD83D\uDCCB';
     btn.title = 'Open in editor';
     btn.onclick = (e) => {
       e.stopPropagation();
-      this._openBlockInEditor(el);
+      const text = this._extractMsgText(el._rawMsg);
+      if (!text.trim()) return;
+      const tmpName = `chat-block-${Date.now()}.txt`;
+      const tmpPath = `/tmp/claude-webui/${tmpName}`;
+      fetch('/api/mkdir', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: '/tmp/claude-webui' }) }).catch(() => {});
+      fetch('/api/file/write', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: tmpPath, content: text }) })
+        .then(r => { if (!r.ok) throw new Error(); return r.json(); })
+        .then(() => {
+          this.app.openEditor(tmpPath, tmpName, {
+            _tempFile: true,
+            _onCloseDelete: () => fetch(`/api/file?path=${encodeURIComponent(tmpPath)}`, { method: 'DELETE' }).catch(() => {}),
+          });
+        })
+        .catch(() => {});
     };
     el.style.position = 'relative';
     el.appendChild(btn);
   }
 
-  // Extract ALL text from element including collapsed <details> content, excluding buttons
-  _extractAllText(el) {
-    const parts = [];
-    for (const node of el.childNodes) {
-      if (node.nodeType === 3) { parts.push(node.textContent); continue; }
-      if (node.nodeType !== 1) continue;
-      if (node.classList?.contains('chat-open-editor-btn')) continue;
-      if (node.classList?.contains('chat-wrap-toggle')) continue;
-      parts.push(this._extractAllText(node));
-    }
-    return parts.join('');
-  }
-
-  _openBlockInEditor(el) {
-    const text = this._extractAllText(el);
-    if (!text.trim()) return;
-    const tmpName = `chat-block-${Date.now()}.txt`;
-    const tmpPath = `/tmp/claude-webui/${tmpName}`;
-    fetch('/api/mkdir', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: '/tmp/claude-webui' }) }).catch(() => {});
-    fetch('/api/file/write', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: tmpPath, content: text }) })
-      .then(r => { if (!r.ok) throw new Error('write failed'); return r.json(); })
-      .then(() => {
-        this.app.openEditor(tmpPath, tmpName, {
-          _tempFile: true,
-          _onCloseDelete: () => fetch(`/api/file?path=${encodeURIComponent(tmpPath)}`, { method: 'DELETE' }).catch(() => {}),
-        });
-      })
-      .catch(() => {});
+  _extractMsgText(msg) {
+    const c = msg.message?.content;
+    if (typeof c === 'string') return c;
+    if (!Array.isArray(c)) return JSON.stringify(msg, null, 2);
+    return c.map(b => {
+      if (b.type === 'text') return b.text || '';
+      if (b.type === 'thinking') return b.text || '';
+      if (b.type === 'tool_use') return `[Tool: ${b.name}]\n${JSON.stringify(b.input, null, 2)}`;
+      if (b.type === 'tool_result') return typeof b.content === 'string' ? b.content : JSON.stringify(b.content, null, 2);
+      return '';
+    }).filter(Boolean).join('\n\n');
   }
 
   _addWrapToggles(el) {
