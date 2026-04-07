@@ -354,13 +354,20 @@ class ChatView {
           item.className = 'chat-status-dropdown-item chat-task-detail';
           const icon = task.type === 'agent' ? '\uD83E\uDD16' : '\u26A1';
           let detail = `<div class="chat-task-title">${icon} ${escHtml(task.description)}</div>`;
-          if (task.command) detail += `<div class="chat-task-cmd"><code>${escHtml(task.command.length > 120 ? task.command.slice(0, 120) + '...' : task.command)}</code></div>`;
-          if (task.resultText) detail += `<div class="chat-task-result">${this._linkifyText(task.resultText)}</div>`;
           if (task.lastTool) detail += `<div class="chat-status-dim">Running: ${escHtml(task.lastTool)}</div>`;
           item.innerHTML = detail;
-          if (task.type === 'agent') {
-            item.onclick = (ev) => { ev.stopPropagation(); dropdown.remove(); this._openSubagentViewer({ parentToolUseId: toolUseId, description: task.description }); };
-          }
+          item.onclick = (ev) => {
+            ev.stopPropagation(); dropdown.remove();
+            if (task.type === 'agent') {
+              this._openSubagentViewer({ parentToolUseId: toolUseId, description: task.description });
+            } else {
+              // Open command input + output in editor
+              let text = `[${task.toolName || 'Bash'}] ${task.description}\n\n`;
+              if (task.command) text += `--- Command ---\n${task.command}\n\n`;
+              if (task.resultText) text += `--- Output ---\n${task.resultText}\n`;
+              this._openInTempEditor(text);
+            }
+          };
           dropdown.appendChild(item);
         }
         container.appendChild(dropdown);
