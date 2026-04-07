@@ -307,14 +307,24 @@ class ChatView {
       // Agent View Log button
       if (e.target.classList.contains('chat-agent-view-btn')) {
         e.stopPropagation();
-        this._openAgentLog(e.target.dataset.agentId);
+        if (e.target.dataset.agentId) {
+          this._openAgentLog(e.target.dataset.agentId);
+        } else if (e.target.dataset.parentToolId) {
+          this._openLiveAgentLog(e.target.dataset.parentToolId);
+        }
       }
     });
+
+    // Buffer for live subagent messages (parentToolUseId → messages[])
+    this._subagentBuffers = new Map();
+    this._subagentViews = new Map(); // parentToolUseId → ChatView (live viewer)
 
     // Listen for chat messages from server
     this._handler = (msg) => {
       if (msg.type === 'chat-message' && msg.sessionId === sessionId) {
         this._onMessage(msg.message);
+      } else if (msg.type === 'subagent-message' && msg.sessionId === sessionId) {
+        this._onSubagentMessage(msg.parentToolUseId, msg.message);
       } else if (msg.type === 'exited' && msg.sessionId === sessionId) {
         this._appendSystem('Session ended.');
         this._hideTyping();
@@ -1358,6 +1368,66 @@ class ChatView {
 
   _interrupt() {
     this.ws.send({ type: 'interrupt', sessionId: this.sessionId });
+  }
+
+  _onSubagentMessage(parentToolUseId, msg) {
+    if (!parentToolUseId) return;
+    // Buffer the message
+    if (!this._subagentBuffers.has(parentToolUseId)) {
+      this._subagentBuffers.set(parentToolUseId, []);
+    }
+    this._subagentBuffers.get(parentToolUseId).push(msg);
+
+    // Update pending Agent card with message count + View Log button
+    const pending = this._messageList.querySelector(`[data-tool-id="${parentToolUseId}"]`);
+    if (pending) {
+      let statusEl = pending.querySelector('.chat-agent-live-status');
+      if (!statusEl) {
+        statusEl = document.createElement('div');
+        statusEl.className = 'chat-agent-live-status';
+        const outputPending = pending.querySelector('.chat-tool-output-pending');
+        if (outputPending) outputPending.before(statusEl);
+        else pending.appendChild(statusEl);
+      }
+      const count = this._subagentBuffers.get(parentToolUseId).length;
+      const lastMsg = msg;
+      let activity = '';
+      if (lastMsg.type === 'assistant') {
+        const c = lastMsg.message?.content;
+        if (Array.isArray(c)) {
+          const last = c[c.length - 1];
+          if (last?.type === 'tool_use') activity = `running ${last.name}`;
+          else if (last?.type === 'thinking') activity = 'thinking';
+          else activity = 'responding';
+        }
+      }
+      statusEl.innerHTML = `<span class="chat-agent-live-count">${count} messages${activity ? ' \u2022 ' + escHtml(activity) : ''}</span> <button class="chat-agent-view-btn" data-parent-tool-id="${escHtml(parentToolUseId)}">View Log</button>`;
+    }
+
+    // Forward to live viewer if open
+    const liveView = this._subagentViews.get(parentToolUseId);
+    if (liveView) {
+      liveView._onMessage(msg);
+    }
+  }
+
+  _openLiveAgentLog(parentToolUseId) {
+    // If already open, focus it
+    const existing = this._subagentViews.get(parentToolUseId);
+    if (existing) return;
+
+    const msgs = this._subagentBuffers.get(parentToolUseId) || [];
+    const winInfo = this.app.wm.createWindow({ title: '\uD83E\uDD16 Agent (live)', type: 'viewer' });
+    const view = new ChatView(winInfo, this.ws, null, this.app);
+    view._textarea.disabled = true;
+    view._textarea.placeholder = 'Live agent log (read-only)';
+    if (msgs.length) view.loadHistory(msgs, msgs.length);
+    this._subagentViews.set(parentToolUseId, view);
+    winInfo.onClose = () => {
+      view.dispose();
+      this._subagentViews.delete(parentToolUseId);
+      this.app._checkWelcome();
+    };
   }
 
   _openAgentLog(agentId) {

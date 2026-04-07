@@ -125,8 +125,11 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
         if (!line) continue;
         try {
           const msg = JSON.parse(line);
-          // Skip subagent messages from main chat broadcast
-          if (msg.parent_tool_use_id || msg.isSidechain) continue;
+          if (msg.parent_tool_use_id || msg.isSidechain) {
+            // Subagent message — broadcast separately so client can route to Agent card
+            broadcastToSession(session, id, { type: 'subagent-message', sessionId: id, parentToolUseId: msg.parent_tool_use_id, message: msg });
+            continue;
+          }
           broadcastToSession(session, id, { type: 'chat-message', sessionId: id, message: msg });
         } catch {
           // Non-JSON line (e.g. dtach noise) — send as raw output
