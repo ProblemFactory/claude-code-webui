@@ -1407,6 +1407,20 @@ wss.on('connection', (ws) => {
         break;
       }
 
+      case 'interrupt': {
+        // Send interrupt control_request to claude stdin
+        const session = activeSessions.get(data.sessionId);
+        if (session?.pty && session.mode === 'chat') {
+          const msg = {
+            type: 'control_request',
+            request_id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+            request: { subtype: 'interrupt' },
+          };
+          session.pty.write(JSON.stringify(msg) + '\n');
+        }
+        break;
+      }
+
       case 'permission-response': {
         // Permission approval/denial from chat UI → write control_response to claude stdin
         const session = activeSessions.get(data.sessionId);
