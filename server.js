@@ -227,6 +227,7 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
             if (ptuid) broadcastToSession(session, id, { type: 'chat-message', sessionId: `sub-${ptuid}`, message: msg });
             continue;
           }
+          if (msg.type === 'assistant' || msg.type === 'result') session._waitingForResponse = false;
           broadcastToSession(session, id, { type: 'chat-message', sessionId: id, message: msg });
         } catch {
           // Non-JSON line (e.g. dtach noise) — send as raw output
@@ -1565,8 +1566,7 @@ wss.on('connection', (ws) => {
           }
 
           session.pty.write(stdinPayload + '\n');
-          const userLine = JSON.stringify(userMsg);
-          session.buffer = (session.buffer + userLine + '\n').slice(-500000);
+          session._waitingForResponse = true; // for isStreaming detection
           broadcastToSession(session, data.sessionId, { type: 'chat-message', sessionId: data.sessionId, message: userMsg });
         }
         break;
@@ -1727,9 +1727,9 @@ wss.on('connection', (ws) => {
               chatStatus = { model, lastUsage, contextWindow, total_cost_usd: totalCost, slashCommands, permissionMode, permissionModes: PERMISSION_MODES, subagentMetas: getSubagentMetas(session.claudeSessionId, session.cwd) };
             }
 
-            // Detect if Claude is mid-stream: last message in combined history is not result/system
+            // Detect if Claude is mid-stream
             const lastMsg = allMessages.length > 0 ? allMessages[allMessages.length - 1] : null;
-            const isStreaming = lastMsg && lastMsg.type !== 'result' && lastMsg.type !== 'system';
+            const isStreaming = session._waitingForResponse || (lastMsg && lastMsg.type !== 'result' && lastMsg.type !== 'system');
 
             // Filter out resolved permissions (tool_use_id has a matching tool_result)
             const resolvedToolIds = new Set();
