@@ -1750,7 +1750,7 @@ class ChatView {
   }
 
   focus() {
-    this._textarea.focus();
+    if (this._textarea) this._textarea.focus();
     this._clearWaiting();
   }
 

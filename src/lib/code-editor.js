@@ -58,10 +58,6 @@ function saveEditorSettings(settings) {
   localStorage.setItem('editorSettings', JSON.stringify(settings));
 }
 
-function getEditorSettings() {
-  return loadEditorSettings();
-}
-
 function getLangExtension(langId) {
   const map = { javascript: javascript(), python: python(), json: jsonLang(), markdown: mdLang(), html: htmlLang(), css: cssLang() };
   return map[langId] ? [map[langId]] : [];
@@ -283,4 +279,4 @@ class CodeEditor {
   }
 }
 
-export { CodeEditor, detectLang, getLangExtension, loadEditorSettings, saveEditorSettings, getEditorSettings, editorLightTheme };
+export { CodeEditor, detectLang, getLangExtension, loadEditorSettings, saveEditorSettings, editorLightTheme };

@@ -207,11 +207,12 @@ class App {
     fontSel.onchange = () => {
       this._fontFamily = fontSel.value;
       localStorage.setItem('termFontFamily', this._fontFamily);
-      for (const [, term] of this.sessions) {
-        if (!term.overrides.fontFamily) {
-          term.terminal.options.fontFamily = this._fontFamily;
-          try { term.terminal.clearTextureAtlas(); } catch {}
-          term.fit();
+      for (const [, session] of this.sessions) {
+        if (!session.overrides) continue; // ChatView, not TerminalSession
+        if (!session.overrides.fontFamily) {
+          session.terminal.options.fontFamily = this._fontFamily;
+          try { session.terminal.clearTextureAtlas(); } catch {}
+          session.fit();
         }
       }
     };
@@ -537,7 +538,7 @@ class App {
           this.showNewSessionDialog();
           break;
         case 's':
-          document.getElementById('sidebar').classList.toggle('open');
+          this.sidebar.toggle();
           this._exitCommandMode();
           break;
         case 'b':
@@ -1043,10 +1044,12 @@ class App {
     contentEl.appendChild(editorPane);
 
     // Draggable divider between terminal and editor (vertical resize)
+    targetWinInfo._splitResizer?.destroy();
     const splitResizer = new Resizer(termContainer, 'vertical', {
       min: 80, max: 1000,
       onResize: () => { if (termSession) termSession.fit(); },
     });
+    targetWinInfo._splitResizer = splitResizer;
 
     // Resize terminal to fit the new split
     const termSession = [...this.sessions.values()].find(s => {
@@ -1154,6 +1157,7 @@ class App {
         if (editorPane) {
           editorPane.remove();
           win._editorState = null;
+          if (win._splitResizer) { win._splitResizer.destroy(); win._splitResizer = null; }
           if (termContainer) {
             win.content.style.display = '';
             win.content.style.flexDirection = '';

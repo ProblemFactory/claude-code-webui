@@ -260,63 +260,7 @@ class FileExplorer {
     this._renderBookmarks();
   }
 
-  _showBookmarkEditor() {
-    // Remove existing overlays
-    document.querySelectorAll('.file-bookmark-overlay').forEach(o => o.remove());
 
-    const overlay = document.createElement('div'); overlay.className = 'file-bookmark-overlay';
-    const panel = document.createElement('div'); panel.className = 'file-bookmark-editor';
-
-    const header = document.createElement('div'); header.className = 'file-bookmark-editor-header';
-    const title = document.createElement('span'); title.textContent = 'Edit Bookmarks';
-    const closeBtn = document.createElement('button'); closeBtn.className = 'file-tool-btn'; closeBtn.textContent = '\u2715';
-    closeBtn.onclick = () => overlay.remove();
-    header.append(title, closeBtn);
-
-    const list = document.createElement('div'); list.className = 'file-bookmark-editor-list';
-
-    const renderEditorList = () => {
-      list.innerHTML = '';
-      this._bookmarks.forEach((bk, idx) => {
-        const row = document.createElement('div'); row.className = 'file-bookmark-editor-row';
-
-        const upBtn = document.createElement('button'); upBtn.className = 'file-tool-btn'; upBtn.textContent = '\u25B2'; upBtn.title = 'Move up';
-        upBtn.disabled = idx === 0;
-        upBtn.onclick = () => { if (idx > 0) { [this._bookmarks[idx-1], this._bookmarks[idx]] = [this._bookmarks[idx], this._bookmarks[idx-1]]; renderEditorList(); } };
-
-        const downBtn = document.createElement('button'); downBtn.className = 'file-tool-btn'; downBtn.textContent = '\u25BC'; downBtn.title = 'Move down';
-        downBtn.disabled = idx === this._bookmarks.length - 1;
-        downBtn.onclick = () => { if (idx < this._bookmarks.length - 1) { [this._bookmarks[idx], this._bookmarks[idx+1]] = [this._bookmarks[idx+1], this._bookmarks[idx]]; renderEditorList(); } };
-
-        const labelInput = document.createElement('input'); labelInput.className = 'file-bookmark-editor-input'; labelInput.value = bk.label;
-        labelInput.placeholder = 'Label';
-        labelInput.onchange = () => { bk.label = labelInput.value; };
-
-        const pathInput = document.createElement('input'); pathInput.className = 'file-bookmark-editor-input file-bookmark-editor-path'; pathInput.value = bk.path;
-        pathInput.placeholder = 'Path';
-        pathInput.onchange = () => { bk.path = pathInput.value; };
-
-        const delBtn = document.createElement('button'); delBtn.className = 'file-tool-btn'; delBtn.textContent = '\u2715'; delBtn.title = 'Remove';
-        delBtn.style.color = 'var(--red)';
-        delBtn.onclick = () => { this._bookmarks.splice(idx, 1); renderEditorList(); };
-
-        row.append(upBtn, downBtn, labelInput, pathInput, delBtn);
-        list.appendChild(row);
-      });
-    };
-    renderEditorList();
-
-    const footer = document.createElement('div'); footer.className = 'file-bookmark-editor-footer';
-    const addBtn = document.createElement('button'); addBtn.className = 'btn-create'; addBtn.textContent = '+ Add';
-    addBtn.onclick = () => { this._bookmarks.push({ label: 'New', path: '/' }); renderEditorList(); };
-    const saveBtn = document.createElement('button'); saveBtn.className = 'btn-create'; saveBtn.textContent = 'Save';
-    saveBtn.onclick = () => { this._saveBookmarks(); this._renderBookmarks(); overlay.remove(); };
-    footer.append(addBtn, saveBtn);
-
-    panel.append(header, list, footer);
-    overlay.appendChild(panel);
-    this.winInfo.content.appendChild(overlay);
-  }
 
   // ── Settings ──
   _showSettings(e, btnEl) {

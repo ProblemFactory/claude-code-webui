@@ -513,7 +513,6 @@ class TerminalSession {
   focus() { this.terminal.focus(); this._setBell(false); this._setWaiting(false); }
   dispose() {
     this._ro.disconnect(); this.terminal.dispose(); this.ws.off(this.sessionId);
-    if (this._pasteKeyHandler) document.removeEventListener('keydown', this._pasteKeyHandler, true);
     if (this._pasteTarget) this._pasteTarget.remove();
   }
 }

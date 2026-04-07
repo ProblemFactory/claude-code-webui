@@ -7,6 +7,7 @@ const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
 const multer = require('multer');
+const { execFileSync, spawn } = require('child_process');
 
 const PORT = process.env.PORT || 3456;
 const CLAUDE_CMD_RAW = process.env.CLAUDE_CMD || 'claude';
@@ -66,7 +67,6 @@ const META_DIR = path.join(__dirname, 'data', 'session-meta');
 const BUFFERS_DIR = path.join(__dirname, 'data', 'session-buffers');
 const PTY_WRAPPER = path.join(__dirname, 'data', 'bin', 'pty-wrapper.js');
 const CHAT_WRAPPER = path.join(__dirname, 'data', 'bin', 'chat-wrapper.js');
-const { execFileSync, spawn } = require('child_process');
 
 function ensureDir(dir) { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); }
 
@@ -243,6 +243,14 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
   }
 
   ptyProcess.onExit(() => {
+    // Clean up subagent file watchers
+    if (session.subagentWatchers) {
+      for (const [, entry] of session.subagentWatchers) {
+        if (entry.watcher) entry.watcher.close();
+        if (entry.retry) clearTimeout(entry.retry);
+      }
+      session.subagentWatchers.clear();
+    }
     if (cleanupOnExit) {
       if (session.socketPath && fs.existsSync(session.socketPath)) { session.pty = null; return; }
       broadcastToSession(session, id, { type: 'exited', sessionId: id });
@@ -714,34 +722,6 @@ app.delete('/api/layouts/:name', (req, res) => {
 app.post('/api/layouts-active', (req, res) => {
   const data = readLayouts();
   data.current = req.body.name || null;
-  writeLayouts(data);
-  res.json({ success: true });
-});
-
-// Preset aliases (same backend as layouts, for renamed frontend)
-app.get('/api/presets', (req, res) => res.json(readLayouts()));
-app.post('/api/presets/:name', (req, res) => {
-  const data = readLayouts();
-  data.saved[req.params.name] = { ...req.body, updatedAt: Date.now() };
-  writeLayouts(data);
-  res.json({ success: true });
-});
-app.delete('/api/presets/:name', (req, res) => {
-  const data = readLayouts();
-  delete data.saved[req.params.name];
-  if (data.current === req.params.name) data.current = null;
-  writeLayouts(data);
-  res.json({ success: true });
-});
-app.post('/api/presets-active', (req, res) => {
-  const data = readLayouts();
-  data.current = req.body.name || null;
-  writeLayouts(data);
-  res.json({ success: true });
-});
-app.post('/api/presets-autosave', (req, res) => {
-  const data = readLayouts();
-  data.autoSave = { ...req.body, updatedAt: Date.now() };
   writeLayouts(data);
   res.json({ success: true });
 });
