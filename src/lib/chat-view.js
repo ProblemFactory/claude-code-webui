@@ -1538,10 +1538,9 @@ class ChatView {
       parts.push(`<span class="chat-status-model" title="Model (set at session creation)">${escHtml(this._statusModel)}</span>`);
     }
 
-    // Permission mode (click to change)
-    if (this._statusPermMode) {
-      parts.push(`<span class="chat-status-perm chat-status-clickable" title="Click to change permission mode">\uD83D\uDD12 ${escHtml(this._statusPermMode)}</span>`);
-    }
+    // Permission mode (always show, click to change)
+    const permLabel = this._statusPermMode || 'default';
+    parts.push(`<span class="chat-status-perm chat-status-clickable" title="Click to change permission mode">\uD83D\uDD12 ${escHtml(permLabel)}</span>`);
 
     // Context % with emoji + progress bar
     if (this._statusContextWindow && this._statusLastInputTokens) {
