@@ -58,7 +58,7 @@ src/
     file-viewer.js     — FileViewer (dispatch by type, size check, binary detection)
     code-editor.js     — CodeEditor (CodeMirror 6, dynamic language switching)
     markdown.js        — MarkdownViewer (preview/edit/split modes)
-    chat-view.js       — ChatView (chat interface for stream-json mode)
+    chat-view.js       — ChatView (chat interface for stream-json mode, permission approval)
     hex-viewer.js      — HexViewer (binary file viewer with chunked loading)
     resizer.js         — Resizer (reusable drag-to-resize handle)
     layout.js          — LayoutManager (auto-save/restore)
@@ -103,8 +103,9 @@ docs/
 | **Session rename** | `src/lib/sidebar.js` → `renameSession()` | Double-click name in sidebar, syncs to open windows via `app.syncSessionName()` |
 | **Ctrl+G external editor** | `server.js` → `createEditorHelper()` + `src/lib/app.js` → `_openExternalEditor()` | Fake "code" script + split-pane CodeMirror |
 | **File viewer (open file)** | `src/lib/file-viewer.js` | Dispatch by type, size check, binary detection |
-| **Code editor** | `src/lib/code-editor.js` | CodeMirror 6, language switching via Compartment |
-| **Markdown editor** | `src/lib/markdown.js` | Preview/Edit/Split modes |
+| **Code editor** | `src/lib/code-editor.js` | CodeMirror 6, language switching via Compartment, markdown preview toggle |
+| **Markdown editor** | `src/lib/markdown.js` | Legacy — .md files now use CodeEditor with preview toggle |
+| **Chat mode / permissions** | `src/lib/chat-view.js` + `data/bin/chat-wrapper.js` | ChatView, permission approval UI, role indicators, tool cards |
 | **Hex viewer** | `src/lib/hex-viewer.js` | Binary display with chunked loading |
 | **Themes / colors** | `src/lib/themes.js` + `public/style.css` | 6 themes, CSS variables `[data-theme="..."]` |
 | **Layout save/restore** | `src/lib/layout.js` | Auto-save debounce, `_restoring` flag, `claudeSessionId` matching, grid state |
@@ -275,30 +276,48 @@ Split from monolithic 1647-line `src/client.js` into 13 ES modules under `src/li
 
 **Per-terminal settings** (window titlebar ⚙): Same three options, each with a "Default" that follows global. Theme and font have Default as a dropdown option. Font size has a Default checkbox that disables the number input. Overrides stored in `TerminalSession.overrides` and persisted in layout.
 
-**Schema-driven settings** (`settings-schema.js`): VS Code-style settings UI. Categories: Toolbar & Layout, Window, Terminal, Sidebar, Session Card. **Rule: only add settings that have working code behind them** — no placeholder/aspirational entries. Settings with `liveApply: false` need explicit one-shot listeners if they must be applied after async load (see `defaultStatusFilter` pattern). File explorer sort/filter config uses its own localStorage persistence — these are operational state, not user settings.
+**Schema-driven settings** (`settings-schema.js`): VS Code-style settings UI. Categories: Toolbar & Layout, Window, Terminal, Sidebar, Session Card, Chat, Session. **Rule: only add settings that have working code behind them** — no placeholder/aspirational entries. Settings with `liveApply: false` need explicit one-shot listeners if they must be applied after async load (see `defaultStatusFilter` pattern). File explorer sort/filter config uses its own localStorage persistence — these are operational state, not user settings. Notable settings: `chat.roleIndicator` (border/background/icon/label), `session.defaultMode` (terminal/chat, default: chat).
 
 **Session card click behavior**: `sessionCard.clickBehavior` enum replaces the old `clickToExpand` boolean. Three modes: `focus` (default — click opens/focuses window), `expand` (click toggles card details), `flash` (click flashes/bounces the window). Expand/collapse is always available via the ▸ arrow button regardless of this setting.
 
 ### 11. Chat Mode (Dual-Mode Architecture)
 **Two session modes** share the same dtach persistence layer but use different wrappers:
 - **Terminal**: `dtach → pty-wrapper.js → claude` (TUI, raw PTY output, xterm.js)
-- **Chat**: `dtach → chat-wrapper.js → claude --output-format stream-json --input-format stream-json --verbose` (structured JSON, ChatView)
+- **Chat**: `dtach → chat-wrapper.js → claude --output-format stream-json --input-format stream-json --verbose --permission-prompt-tool stdio` (structured JSON, ChatView)
 
-**chat-wrapper.js**: Runs inside dtach, spawns claude with stream-json flags. Parses stdout JSON lines, writes to buffer file. Stdin: accepts JSON messages (JSONL schema: `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"..."}]}}`). Plain text on stdin auto-wrapped.
+**chat-wrapper.js**: Runs inside dtach, spawns claude with stream-json flags + `--permission-prompt-tool stdio`. Parses stdout JSON lines, writes to buffer file. Stdin: accepts JSON messages (JSONL schema: `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"..."}]}}`). Plain text on stdin auto-wrapped. Also handles `control_request`/`control_response` protocol for permission approval over stdin/stdout.
 
-**ChatView** (`src/lib/chat-view.js`): Renders structured messages — user/assistant/tool_use/tool_result/thinking blocks. Features: compact mode (document-style), markdown rendering, collapsible tool results, Ctrl+F search with highlight/navigation, auto-detect URLs/paths (click=copy, Ctrl+click=open), pre block wrap toggle, typing indicator, expandable input.
+**Permission Approval**: Claude sends `control_request` messages when a tool needs permission. ChatView renders permission cards with tool name, input summary, and Allow/Deny buttons. User response sent as `control_response` via `chat-input` WebSocket message. On history reload, permission state is resolved from subsequent messages (tool_result follows approved, absence means denied).
+
+**ChatView** (`src/lib/chat-view.js`): Renders structured messages — user/assistant/tool_use/tool_result/thinking blocks. Features: compact mode (document-style), markdown rendering, collapsible tool results (all tool_use deferred, not just file tools), Ctrl+F search with highlight/navigation, auto-detect URLs/paths with `:line`, `:line:col`, `:line-line` suffix support (click=copy with tooltip feedback, Ctrl+click=open), pre block wrap toggle, streaming/activity indicator above input bar, expandable input, per-tool-card open-in-editor button, collapsible long user messages.
+
+**Tool call rendering**: All tool_use types are rendered as collapsible cards (not just Edit/Write/Read). Non-file tools (e.g. Bash, WebSearch) show Input immediately while running, before result arrives. Tool error cards use unified styling (dim error indicator, not entirely red background). Each tool card has an open-in-editor button for file-based tools. No output truncation — full tool results displayed.
+
+**System notifications**: Messages containing `<task-notification>`, `<system-reminder>`, and similar tags are detected and rendered as collapsible dim notification cards instead of regular user messages.
+
+**Streaming/Activity Indicator**: Moved from inline in message list to a fixed position above the input bar (always visible regardless of scroll). Shows current activity: "thinking..."/"running ToolName"/"responding". On attach, server detects mid-stream state from the raw buffer (not JSONL) and sends `isStreaming` flag in the attach payload, so reconnecting clients see the indicator immediately.
+
+**Role Indicators**: `chat.roleIndicator` setting with 4 modes: `border` (default), `background`, `icon`, `label`. Border mode uses `gap:0` between messages with left margin on role switches for continuous colored bars. Background mode tints the message background by role. Icon mode shows role avatars. Label mode shows "You"/"Claude" text labels.
+
+**Chat Font Size**: Follows global A-/A+ font size setting via CSS `zoom` on the message list container.
 
 **View Manager**: Sliding window `[_windowStart, _windowEnd)` over server message list. `jumpToIndex(idx)` replaces window. `jumpToBottom()` loads last 50. `_extendTop()` on scroll-up. Server-side search returns indices, client jumps via `jumpToIndex`.
 
+**Pin-to-bottom**: Uses iterative scroll convergence (10 rAF frames) instead of single `scrollTop` assignment, for compatibility with `content-visibility: auto` CSS optimization which can cause layout shifts during scroll.
+
 **Highlight Layer**: CSS Custom Highlight API (`CSS.highlights`) — non-destructive rendering layer for search highlighting. `_applyHighlightLayer()` creates Range objects, re-applied on view changes.
 
-**Status Bar**: Model badge, context % with colored progress bar (from `assistant.message.usage` per-turn data, NOT cumulative `result.modelUsage`), cache hit ratio ⚡, cost with color tiers ($<1 green, $1-5 orange, $>5 red). Persisted via `chatStatus` on attach.
+**Status Bar**: Model badge, context % with colored progress bar (from `assistant.message.usage` per-turn data, NOT cumulative `result.modelUsage`), cache hit ratio, cost with color tiers ($<1 green, $1-5 orange, $>5 red). Persisted via `chatStatus` on attach.
 
-**Session management**: `mode` field on session object. Stored in session metadata + wrapper metadata. `/api/active` and WebSocket `active-sessions` include mode. Sidebar shows 💬 badge for chat sessions. Resume: split button toggles Terminal/Chat mode per session, persisted in user state.
+**Session management**: `mode` field on session object. Stored in session metadata + wrapper metadata. `/api/active` and WebSocket `active-sessions` include mode. Sidebar shows badge for chat sessions. Default mode controlled by `session.defaultMode` setting (default: `chat`). All `createSession` paths respect this setting. Resume: split button toggles Terminal/Chat mode per session, persisted in user state.
 
-**JSONL history**: On chat attach, server sends last 50 messages + `totalCount` + `chatStatus`. Paginated API: `GET /api/session-messages?claudeSessionId=...&cwd=...&offset=&limit=&search=`.
+**JSONL history**: On chat attach, server sends last 50 messages + `totalCount` + `chatStatus` + `isStreaming`. Paginated API: `GET /api/session-messages?claudeSessionId=...&cwd=...&offset=&limit=&search=`.
+
+**WebSocket reconnect**: On reconnect, all active sessions re-attach automatically. Chat sessions sync missed messages via `_reattach()` which fetches messages added since last known index. Fixed bug where `globalHandlers` map was wiped on reconnect in ws.js, losing persistent handlers.
 
 **Server restart**: dtach keeps both wrappers alive. On restart, `restoreSessions` detects mode from wrapper metadata, re-attaches appropriately.
+
+**Window blink**: Chat windows trigger waiting blink animation (same as terminal idle detection) when a `result` message arrives and the window is not focused.
 
 ### 12. Font Discovery
 **Priority**: Client-side `queryLocalFonts()` API (Chrome 103+) → server-side `fc-list :spacing=mono` fallback → always includes Google Web Fonts.
@@ -351,8 +370,8 @@ Split from monolithic 1647-line `src/client.js` into 13 ES modules under `src/li
 - `GET /proxy/<url>` — full-rewriting web proxy via node-unblocker (HTML/CSS URL rewrite, JS XHR/WS rewrite, header stripping)
 
 ### WebSocket Protocol (`/ws`)
-Client → Server: `create`, `input`, `chat-input`, `resize`, `attach`, `kill`, `tmux-attach`
-Server → Client: `created`, `output`, `chat-message`, `exited`, `attached`, `active-sessions`, `editor-open`, `editor-close`, `effective-size`, `user-state-updated`, `bookmarks-updated`, `settings-updated`, `error`
+Client → Server: `create`, `input`, `chat-input` (user messages + `control_response` for permissions), `resize`, `attach`, `kill`, `tmux-attach`
+Server → Client: `created`, `output`, `chat-message` (includes `control_request` for permission prompts), `exited`, `attached` (includes `isStreaming` for chat), `active-sessions`, `editor-open`, `editor-close`, `effective-size`, `user-state-updated`, `bookmarks-updated`, `settings-updated`, `error`
 
 ## Features Summary
 
@@ -374,15 +393,23 @@ Server → Client: `created`, `output`, `chat-message`, `exited`, `attached`, `a
 
 ### Chat Mode
 - Chat view: structured message display with markdown rendering
+- Permission approval: interactive Allow/Deny cards for tool permission requests (`--permission-prompt-tool stdio`)
 - Compact mode (default): document-style layout with role labels (You/Claude)
-- Collapsible tool results with first-line preview
+- Role indicator styles: `chat.roleIndicator` setting — border (default, continuous colored bars), background, icon, label
+- All tool_use rendered as collapsible cards with first-line preview. Non-file tools show Input while running. Per-tool open-in-editor button. No output truncation. Unified error styling.
+- System notifications: `<task-notification>`, `<system-reminder>` etc rendered as collapsible dim cards
 - Ctrl+F search with highlight, match counter, prev/next navigation
-- Auto-detect URLs and file paths (click=copy, Ctrl+click=open)
+- Auto-detect URLs and file paths with `:line`, `:line:col`, `:line-line` suffixes (click=copy with tooltip, Ctrl+click=open)
 - Pre block wrap toggle (hover to show)
-- Typing indicator (animated dots while waiting for response)
-- Expandable input (floating ⤢ button inside textarea)
+- Streaming/activity indicator above input bar (always visible): thinking/running ToolName/responding. Mid-stream detection on attach via `isStreaming`.
+- Collapsible long user messages (Collapse toggle)
+- Expandable input (floating button inside textarea)
 - Send: Enter (normal), Ctrl+Enter (expanded mode)
+- Chat font size follows global A-/A+ via CSS zoom
 - JSONL history loaded on resume (full past conversation)
+- Window blink on `result` message when not focused
+- WebSocket reconnect: auto re-attach all sessions, chat syncs missed messages via `_reattach()`
+- Pin-to-bottom: iterative scroll convergence (10 rAF frames) for content-visibility compatibility
 
 ### Window Manager
 - Floating windows with drag/resize
@@ -409,7 +436,8 @@ Server → Client: `created`, `output`, `chat-message`, `exited`, `attached`, `a
 - Archive/unarchive sessions: 📦 button, hidden by default, toggle via status filter
 - Focus window highlights corresponding session in sidebar (with flash animation)
 - Find session: 🔍 button in expand panel flashes window title bar + taskbar (cyan 0.3s, 3s duration)
-- Session card settings: clickBehavior (focus/expand/flash), clickToCopy (click detail values), visibleFields, detailTruncation
+- Session card settings: clickBehavior (focus/expand/flash), clickToCopy (always on for ID/CWD), visibleFields, detailTruncation
+- Session card display: full ID with CSS mid-truncation (text-overflow ellipsis in center), CWD left-truncated via unicode-bidi
 - Session cards draggable: drag to group header to assign session to group
 - Status quick tabs: ALL/LIVE/TMUX/EXT/STOP/ARCH filter tabs (enabled via settings)
 - Session groups: Folders | Groups dual tab, user-defined groups with assign/unassign, folder linking (recursive auto-include by cwd), ▶ resume-all button
@@ -426,9 +454,9 @@ Server → Client: `created`, `output`, `chat-message`, `exited`, `attached`, `a
 - View modes: list (with size/modified columns, sortable) and icon grid
 - Toggle hidden files (dotfiles)
 - Large folder pagination: first 100 items + "Load more" button
-- File viewers: PDF, images (zoom + drag-to-pan), video, audio, CSV, Excel, Word, Markdown (3 modes), hex
+- File viewers: PDF, images (zoom + drag-to-pan), video, audio, CSV, Excel, Word, hex. Markdown files use CodeEditor with preview toggle (no separate MarkdownViewer).
 - HTML viewer: dual mode — Preview (iframe) and Code (CodeEditor) toggle
-- Code editor with syntax highlighting, word wrap toggle, font size, theme (dark/light)
+- Code editor with syntax highlighting, word wrap toggle, font size, theme (dark/light), markdown preview toggle button
 - Large file warnings (>1MB), binary auto-detection
 - CWD autocomplete with `~` support
 - Clipboard image paste (Ctrl+V → upload to server → xclip/osascript sets clipboard → Ctrl+V to PTY)
