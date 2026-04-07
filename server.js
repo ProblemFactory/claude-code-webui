@@ -1567,9 +1567,10 @@ wss.on('connection', (ws) => {
 
           session.pty.write(stdinPayload + '\n');
           session._waitingForResponse = true;
-          // Don't write user message to buffer — JSONL will have it with Claude's uuid.
-          // Buffer only stores Claude's stream-json output for clean uuid-based dedup.
-          // Tiny gap between send and JSONL write: _waitingForResponse shows thinking state.
+          // Write to buffer for display on refresh (before JSONL is written).
+          // Mark with _fromWebui so dedup can remove it when JSONL version arrives.
+          userMsg._fromWebui = true;
+          session.buffer = (session.buffer + JSON.stringify(userMsg) + '\n').slice(-500000);
           broadcastToSession(session, data.sessionId, { type: 'chat-message', sessionId: data.sessionId, message: userMsg });
         }
         break;
@@ -1690,6 +1691,12 @@ wss.on('connection', (ws) => {
                 if (msg.parent_tool_use_id || msg.isSidechain) continue; // skip subagent messages
                 if (msg.type !== 'user' && msg.type !== 'assistant' && msg.type !== 'result' && !(msg.type === 'system' && msg.subtype === 'init')) continue;
                 if (msg.uuid && jsonlUuids.has(msg.uuid)) continue;
+                // Webui user messages: skip if JSONL has a user message after this timestamp
+                // (Claude processed it — JSONL has the authoritative version with uuid)
+                if (msg._fromWebui && msg.timestamp) {
+                  const hasNewer = jsonlHistory.some(m => m.type === 'user' && m.timestamp >= msg.timestamp);
+                  if (hasNewer) continue;
+                }
                 bufferMessages.push(msg);
               } catch {}
             }
