@@ -351,9 +351,18 @@ class ChatView {
         dropdown.style.left = (rect.left - containerRect.left) + 'px';
         for (const [toolUseId, task] of this._activeTasks) {
           const item = document.createElement('div');
-          item.className = 'chat-status-dropdown-item';
-          item.innerHTML = `<span>\uD83D\uDD04 ${escHtml(task.description)}${task.lastTool ? ' <span class="chat-status-dim">(' + escHtml(task.lastTool) + ')</span>' : ''}</span>`;
-          item.onclick = (ev) => { ev.stopPropagation(); dropdown.remove(); this._openSubagentViewer({ parentToolUseId: toolUseId, description: task.description }); };
+          item.className = 'chat-status-dropdown-item chat-task-detail';
+          const icon = task.type === 'agent' ? '\uD83E\uDD16' : '\u26A1';
+          let detail = `<div class="chat-task-title">${icon} ${escHtml(task.description)}</div>`;
+          if (task.command) detail += `<div class="chat-task-cmd"><code>${escHtml(task.command.length > 80 ? task.command.slice(0, 80) + '...' : task.command)}</code></div>`;
+          if (task.lastTool) detail += `<div class="chat-status-dim">Running: ${escHtml(task.lastTool)}</div>`;
+          if (task.outputFile) detail += `<div class="chat-task-file" data-path="${escHtml(task.outputFile)}">\uD83D\uDCC4 ${escHtml(task.outputFile.split('/').pop())}</div>`;
+          item.innerHTML = detail;
+          if (task.type === 'agent') {
+            item.onclick = (ev) => { ev.stopPropagation(); dropdown.remove(); this._openSubagentViewer({ parentToolUseId: toolUseId, description: task.description }); };
+          } else if (task.outputFile) {
+            item.onclick = (ev) => { ev.stopPropagation(); dropdown.remove(); this.app.openFile(task.outputFile, task.outputFile.split('/').pop()); };
+          }
           dropdown.appendChild(item);
         }
         container.appendChild(dropdown);
@@ -668,7 +677,7 @@ class ChatView {
         }
         if (msg.subtype === 'task_started') {
           if (!this._activeTasks) this._activeTasks = new Map();
-          this._activeTasks.set(msg.tool_use_id, { id: msg.task_id, description: msg.description, status: 'running' });
+          this._activeTasks.set(msg.tool_use_id, { id: msg.task_id, type: 'agent', description: msg.description, status: 'running' });
           this._updateStatusBar();
         }
         if (msg.subtype === 'task_progress' && this._activeTasks?.has(msg.tool_use_id)) {
@@ -749,6 +758,12 @@ class ChatView {
         const status = block.is_error ? 'error' : 'ok';
         const rawText = typeof block.content === 'string' ? block.content : JSON.stringify(block.content, null, 2);
         const resultText = stripAnsi(rawText);
+
+        // Capture output file path for background commands
+        if (toolId && this._activeTasks?.has(toolId) && resultText.includes('Output is being written to:')) {
+          const match = resultText.match(/Output is being written to:\s*(\S+)/);
+          if (match) this._activeTasks.get(toolId).outputFile = match[1];
+        }
 
         if (pendingUse) {
           // Replace the pending placeholder with the final result
@@ -926,7 +941,12 @@ class ChatView {
           // Track background commands
           if (block.input?.run_in_background && block.id) {
             if (!this._activeTasks) this._activeTasks = new Map();
-            this._activeTasks.set(block.id, { id: block.id, description: block.input.description || block.name, status: 'running' });
+            this._activeTasks.set(block.id, {
+              id: block.id, type: 'command', toolName: block.name,
+              description: block.input.description || block.name,
+              command: block.input.command || '',
+              status: 'running',
+            });
             this._updateStatusBar();
           }
           // Track TODO list updates

@@ -1180,6 +1180,12 @@ html, body {
 .chat-status-ctx-fill { display: block; height: 100%; border-radius: 3px; min-width: 1px; }
 .chat-status-dim { color: var(--text-dim); margin-left: 1px; }
 .chat-status-tasks { font-size: 10px; color: var(--yellow); padding: 0 4px; }
+.chat-task-detail { padding: 6px 12px; }
+.chat-task-title { font-weight: 500; margin-bottom: 2px; }
+.chat-task-cmd { font-size: 10px; color: var(--text-dim); margin: 2px 0; }
+.chat-task-cmd code { background: var(--bg-root); padding: 1px 4px; border-radius: 2px; }
+.chat-task-file { font-size: 10px; color: var(--accent); cursor: pointer; margin-top: 2px; }
+.chat-task-file:hover { text-decoration: underline; }
 .chat-status-bar { flex-wrap: wrap; }
 
 /* TODO display */
