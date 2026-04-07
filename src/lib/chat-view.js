@@ -315,15 +315,23 @@ class ChatView {
     container.appendChild(inputArea);
     container.appendChild(this._statusBar);
 
-    // Permission mode click → dropdown to change via permission_updates protocol
+    // Permission mode click → dropdown
     this._statusBar.addEventListener('click', (e) => {
       const el = e.target.closest('.chat-status-perm');
       if (!el) return;
-      let dropdown = this._statusBar.querySelector('.chat-status-dropdown');
-      if (dropdown) { dropdown.remove(); return; }
+      e.stopPropagation();
+      // Remove existing dropdown
+      const existing = container.querySelector('.chat-status-dropdown');
+      if (existing) { existing.remove(); return; }
       const modes = this._permissionModes || ['default', 'acceptEdits', 'bypassPermissions', 'plan', 'auto'];
-      dropdown = document.createElement('div');
+      const dropdown = document.createElement('div');
       dropdown.className = 'chat-status-dropdown';
+      // Position above the clicked element
+      const rect = el.getBoundingClientRect();
+      const containerRect = container.getBoundingClientRect();
+      dropdown.style.position = 'absolute';
+      dropdown.style.bottom = (containerRect.bottom - rect.top + 4) + 'px';
+      dropdown.style.left = (rect.left - containerRect.left) + 'px';
       for (const mode of modes) {
         const item = document.createElement('div');
         item.className = 'chat-status-dropdown-item' + (mode === this._statusPermMode ? ' active' : '');
@@ -331,17 +339,19 @@ class ChatView {
         item.onclick = (ev) => {
           ev.stopPropagation();
           dropdown.remove();
-          // Send permission_updates via a synthetic permission-response
           this.ws.send({ type: 'set-permission-mode', sessionId: this.sessionId, mode });
           this._statusPermMode = mode;
           this._updateStatusBar();
         };
         dropdown.appendChild(item);
       }
-      el.style.position = 'relative';
-      el.appendChild(dropdown);
-      const close = (ev) => { if (!dropdown.contains(ev.target)) { dropdown.remove(); document.removeEventListener('click', close); } };
-      setTimeout(() => document.addEventListener('click', close), 0);
+      container.appendChild(dropdown);
+      const close = (ev) => {
+        if (!dropdown.contains(ev.target) && ev.target !== el) {
+          dropdown.remove(); document.removeEventListener('mousedown', close);
+        }
+      };
+      setTimeout(() => document.addEventListener('mousedown', close), 0);
     });
 
     // Clear waiting blink on focus/click
