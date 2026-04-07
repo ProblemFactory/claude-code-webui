@@ -1191,8 +1191,9 @@ class App {
         const idx = [...this.wm.windows.keys()].indexOf(winId);
         const taskbarItem = taskbarItems[idx];
         if (taskbarItem) taskbarItem.classList.add('find-flash');
-        // Restore if minimized
+        // Restore if minimized + bring to front
         if (win.isMinimized) this.wm.restore(winId);
+        this.wm.focusWindow(winId);
         // Remove flash after 3 seconds
         setTimeout(() => {
           win.element.classList.remove('window-find-flash');
