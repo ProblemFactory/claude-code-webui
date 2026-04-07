@@ -57,7 +57,7 @@ src/
     file-explorer.js   — FileExplorer (browse/upload/download)
     file-viewer.js     — FileViewer (dispatch by type, size check, binary detection)
     code-editor.js     — CodeEditor (CodeMirror 6, dynamic language switching)
-    markdown.js        — MarkdownViewer (preview/edit/split modes)
+    markdown.js        — (removed, .md files now use CodeEditor with preview toggle)
     chat-view.js       — ChatView (chat interface for stream-json mode, permission approval)
     hex-viewer.js      — HexViewer (binary file viewer with chunked loading)
     resizer.js         — Resizer (reusable drag-to-resize handle)
@@ -104,7 +104,7 @@ docs/
 | **Ctrl+G external editor** | `server.js` → `createEditorHelper()` + `src/lib/app.js` → `_openExternalEditor()` | Fake "code" script + split-pane CodeMirror |
 | **File viewer (open file)** | `src/lib/file-viewer.js` | Dispatch by type, size check, binary detection |
 | **Code editor** | `src/lib/code-editor.js` | CodeMirror 6, language switching via Compartment, markdown preview toggle |
-| **Markdown editor** | `src/lib/markdown.js` | Legacy — .md files now use CodeEditor with preview toggle |
+| **Markdown editor** | ~~`src/lib/markdown.js`~~ | Removed — .md files use CodeEditor with preview toggle |
 | **Chat mode / permissions** | `src/lib/chat-view.js` + `data/bin/chat-wrapper.js` | ChatView, permission approval UI, role indicators, tool cards |
 | **Hex viewer** | `src/lib/hex-viewer.js` | Binary display with chunked loading |
 | **Themes / colors** | `src/lib/themes.js` + `public/style.css` | 6 themes, CSS variables `[data-theme="..."]` |
@@ -542,3 +542,10 @@ Server → Client: `created`, `output`, `chat-message`, `subagent-message` (with
 - outerHTML marker hack replaced: tool result rendering used `placeholder.outerHTML = html` which detaches the element from DOM, breaking subsequent references. Replaced with proper DOM node replacement.
 - Permission resolve loop break: permission resolution could re-process already-resolved permissions in a loop. Added break after first match.
 - Server `claudeSessionId` undefined in attach: attach handler accessed `session.claudeSessionId` before it was set for newly created sessions. Fix: fall back to `data.claudeSessionId` from client.
+- `execFileSync` TDZ bug: `require('child_process')` declared after usage — `resolveCmd()` and `PERMISSION_MODES` parsing silently failed. Moved to top of server.js.
+- Global font family crash: `fontSel.onchange` iterated sessions accessing `term.overrides.fontFamily` which crashes on ChatView instances. Fix: skip sessions without `.overrides`.
+- `_closeExternalEditor` ResizeObserver leak: Resizer created in `_openExternalEditor` never destroyed by `_closeExternalEditor`. Fix: store on winInfo, destroy on close.
+- Command mode 's' sidebar bypass: direct `classList.toggle('open')` left `sidebar.isOpen` stale. Fix: use `sidebar.toggle()`.
+- Subagent watcher leak: `fs.watch` handles on `session.subagentWatchers` not closed on session exit. Fix: iterate and close in `onExit` handler.
+- `task_type` not checked in `task_started`: Bash background commands (`local_bash`) were tracked as agent tasks, causing wrong icon and empty View Log. Fix: only track `local_agent`.
+- `isStreaming` on refresh: only checked `bufferMessages` which could miss user messages. Fix: check `allMessages` (JSONL + buffer combined).
