@@ -1611,7 +1611,7 @@ wss.on('connection', (ws) => {
               if (m.type === 'result' && m.total_cost_usd) totalCost += m.total_cost_usd;
             }
             if (lastUsage || model) {
-              chatStatus = { model, lastUsage, contextWindow, total_cost_usd: totalCost, slashCommands, permissionMode, permissionModes: PERMISSION_MODES, subagentMetas: getSubagentMetas(claudeSessionId, cwd || '') };
+              chatStatus = { model, lastUsage, contextWindow, total_cost_usd: totalCost, slashCommands, permissionMode, permissionModes: PERMISSION_MODES, subagentMetas: getSubagentMetas(session.claudeSessionId, session.cwd) };
             }
 
             // Detect if Claude is mid-stream: check buffer (current run) not JSONL (history)

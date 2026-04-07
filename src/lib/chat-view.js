@@ -28,7 +28,6 @@ class ChatView {
     const container = document.createElement('div');
     container.className = 'chat-view';
     this._container = container;
-    winInfo.content.appendChild(container);
 
     // Apply compact mode
     this._compact = app.settings?.get('chat.compactMode') ?? true;
@@ -312,6 +311,7 @@ class ChatView {
       }
     });
     container.tabIndex = -1;
+    winInfo.content.appendChild(container);
 
     container.appendChild(inputArea);
     container.appendChild(this._statusBar);
@@ -464,8 +464,10 @@ class ChatView {
     const scrollHeightBefore = this._messageList.scrollHeight;
     const firstEl = this._messageList.querySelector('.chat-msg');
     for (const msg of msgs) {
-      const el = this._renderElement(msg);
-      if (el && firstEl) this._messageList.insertBefore(el, firstEl);
+      const els = this._renderElements(msg);
+      for (const el of els) {
+        if (firstEl) this._messageList.insertBefore(el, firstEl);
+      }
     }
     this._windowStart = newStart;
 
@@ -484,6 +486,7 @@ class ChatView {
 
     // Clear and rebuild DOM
     this._messageList.querySelectorAll('.chat-msg, .chat-msg-system').forEach(el => el.remove());
+    this._pendingToolUses.clear();
     this._windowStart = start;
     this._windowEnd = end;
     this._pinned = false;
@@ -508,6 +511,7 @@ class ChatView {
     const msgs = await this._fetchMessages(start, this._total - start);
 
     this._messageList.querySelectorAll('.chat-msg, .chat-msg-system').forEach(el => el.remove());
+    this._pendingToolUses.clear();
     this._windowStart = start;
     this._windowEnd = this._total;
 
@@ -536,15 +540,17 @@ class ChatView {
     requestAnimationFrame(step);
   }
 
-  // Render a single message element (append to list, then detach for insertion elsewhere)
-  _renderElement(msg) {
+  // Render a message into elements (append to list, then detach for insertion elsewhere)
+  _renderElements(msg) {
     const countBefore = this._messageList.children.length;
     this._onMessage(msg, true);
     const countAfter = this._messageList.children.length;
-    if (countAfter > countBefore) {
-      return this._messageList.removeChild(this._messageList.lastElementChild);
+    const newEls = [];
+    for (let i = 0; i < countAfter - countBefore; i++) {
+      newEls.push(this._messageList.removeChild(this._messageList.lastElementChild));
     }
-    return null;
+    newEls.reverse(); // restore original order
+    return newEls;
   }
 
   _send() {
@@ -743,15 +749,17 @@ class ChatView {
 
           if (placeholder) {
             const parentMsg = placeholder.closest('.chat-msg');
-            // Use a unique marker to find the new element after outerHTML replacement
-            const markerId = 'tool-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
-            placeholder.outerHTML = html.replace('class="chat-tool-use"', `class="chat-tool-use" data-marker="${markerId}"`);
-            const newEl = parentMsg?.querySelector(`[data-marker="${markerId}"]`);
+            const tmp = document.createElement('div');
+            tmp.innerHTML = html;
+            const newEl = tmp.firstElementChild;
             if (newEl) {
-              newEl.removeAttribute('data-marker');
+              placeholder.replaceWith(newEl);
               this._addToolOpenBtn(newEl, resultText, pendingUse);
+              this._addWrapToggles(newEl);
+            } else {
+              placeholder.outerHTML = html;
+              if (parentMsg) this._addWrapToggles(parentMsg);
             }
-            if (parentMsg) this._addWrapToggles(parentMsg);
           } else {
             const el = document.createElement('div');
             el.className = 'chat-msg chat-msg-tool-result';
@@ -1345,13 +1353,14 @@ class ChatView {
     // Check if already resolved by looking at subsequent messages
     let resolved = null;
     if (toolUseId) {
-      for (const m of this._messages) {
+      outer: for (const m of this._messages) {
         if (m.type !== 'user') continue;
         const c = m.message?.content;
         if (!Array.isArray(c)) continue;
         for (const b of c) {
           if (b.type === 'tool_result' && b.tool_use_id === toolUseId) {
             resolved = b.is_error ? 'denied' : 'allowed';
+            break outer;
           }
         }
       }
@@ -1484,13 +1493,16 @@ class ChatView {
   }
 
   _openLiveAgentLog(parentToolUseId) {
-    // If already open, focus it
     const existing = this._subagentViews.get(parentToolUseId);
-    if (existing) return;
+    if (existing) {
+      if (existing._winId) this.app.wm.focusWindow(existing._winId);
+      return;
+    }
 
     const msgs = this._subagentBuffers.get(parentToolUseId) || [];
     const winInfo = this.app.wm.createWindow({ title: '\uD83E\uDD16 Agent (live)', type: 'viewer' });
     const view = new ChatView(winInfo, this.ws, null, this.app, { readOnly: true });
+    view._winId = winInfo.id;
     if (msgs.length) view.loadHistory(msgs, msgs.length);
     this._subagentViews.set(parentToolUseId, view);
     winInfo.onClose = () => {
