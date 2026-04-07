@@ -355,6 +355,7 @@ class ChatView {
           const icon = task.type === 'agent' ? '\uD83E\uDD16' : '\u26A1';
           let detail = `<div class="chat-task-title">${icon} ${escHtml(task.description)}</div>`;
           if (task.command) detail += `<div class="chat-task-cmd"><code>${escHtml(task.command.length > 120 ? task.command.slice(0, 120) + '...' : task.command)}</code></div>`;
+          if (task.resultText) detail += `<div class="chat-task-result">${this._linkifyText(task.resultText)}</div>`;
           if (task.lastTool) detail += `<div class="chat-status-dim">Running: ${escHtml(task.lastTool)}</div>`;
           item.innerHTML = detail;
           if (task.type === 'agent') {
@@ -755,6 +756,11 @@ class ChatView {
         const status = block.is_error ? 'error' : 'ok';
         const rawText = typeof block.content === 'string' ? block.content : JSON.stringify(block.content, null, 2);
         const resultText = stripAnsi(rawText);
+
+        // Capture result text for background commands (shows output file path etc.)
+        if (toolId && this._activeTasks?.has(toolId)) {
+          this._activeTasks.get(toolId).resultText = resultText;
+        }
 
         if (pendingUse) {
           // Replace the pending placeholder with the final result

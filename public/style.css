@@ -1184,6 +1184,7 @@ html, body {
 .chat-task-title { font-weight: 500; margin-bottom: 2px; }
 .chat-task-cmd { font-size: 10px; color: var(--text-dim); margin: 2px 0; }
 .chat-task-cmd code { background: var(--bg-root); padding: 1px 4px; border-radius: 2px; }
+.chat-task-result { font-size: 10px; color: var(--text-secondary); margin: 2px 0; word-break: break-all; }
 .chat-status-bar { flex-wrap: wrap; }
 
 /* TODO display */
