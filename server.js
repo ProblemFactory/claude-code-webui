@@ -1068,6 +1068,36 @@ function extractSessionMeta(filePath) {
   return meta;
 }
 
+// Get subagent metadata for a session (description → agentId mapping)
+function getSubagentMetas(claudeSessionId, cwd) {
+  const projectsDir = path.join(os.homedir(), '.claude', 'projects');
+  const projDir = cwdToProjectDir(cwd || '');
+  const candidates = [];
+  if (cwd) candidates.push(path.join(projectsDir, projDir, claudeSessionId, 'subagents'));
+  try {
+    for (const dir of fs.readdirSync(projectsDir)) {
+      const fp = path.join(projectsDir, dir, claudeSessionId, 'subagents');
+      if (!candidates.includes(fp)) candidates.push(fp);
+    }
+  } catch {}
+  for (const subDir of candidates) {
+    try {
+      if (!fs.existsSync(subDir)) continue;
+      const metas = [];
+      for (const f of fs.readdirSync(subDir)) {
+        if (!f.endsWith('.meta.json')) continue;
+        try {
+          const meta = JSON.parse(fs.readFileSync(path.join(subDir, f), 'utf-8'));
+          const agentId = f.replace('agent-', '').replace('.meta.json', '');
+          metas.push({ agentId, description: meta.description || '', agentType: meta.agentType || '' });
+        } catch {}
+      }
+      return metas;
+    } catch {}
+  }
+  return [];
+}
+
 // Kill an external/tmux session by PID (not managed by WebUI WebSocket)
 // Get chat message history for a Claude session (from JSONL file)
 app.get('/api/session-messages', (req, res) => {
@@ -1089,7 +1119,7 @@ app.get('/api/session-messages', (req, res) => {
     let permissionMode = null;
     for (const m of allMessages) { if (m.type === 'system' && m.subtype === 'init') { if (m.slash_commands) slashCommands = m.slash_commands; if (!model && m.model) model = m.model; if (m.permissionMode) permissionMode = m.permissionMode; break; } }
     for (const m of allMessages) { if (m.type === 'result' && m.total_cost_usd) totalCost += m.total_cost_usd; }
-    if (lastUsage || model) chatStatus = { model, lastUsage, contextWindow, total_cost_usd: totalCost, slashCommands, permissionMode, permissionModes: PERMISSION_MODES };
+    if (lastUsage || model) chatStatus = { model, lastUsage, contextWindow, total_cost_usd: totalCost, slashCommands, permissionMode, permissionModes: PERMISSION_MODES, subagentMetas: getSubagentMetas(claudeSessionId, cwd || '') };
   }
 
   if (search) {
@@ -1581,7 +1611,7 @@ wss.on('connection', (ws) => {
               if (m.type === 'result' && m.total_cost_usd) totalCost += m.total_cost_usd;
             }
             if (lastUsage || model) {
-              chatStatus = { model, lastUsage, contextWindow, total_cost_usd: totalCost, slashCommands, permissionMode, permissionModes: PERMISSION_MODES };
+              chatStatus = { model, lastUsage, contextWindow, total_cost_usd: totalCost, slashCommands, permissionMode, permissionModes: PERMISSION_MODES, subagentMetas: getSubagentMetas(claudeSessionId, cwd || '') };
             }
 
             // Detect if Claude is mid-stream: check buffer (current run) not JSONL (history)

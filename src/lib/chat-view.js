@@ -722,9 +722,13 @@ class ChatView {
             const inputStr = stripAnsi(typeof pendingUse.input === 'string' ? pendingUse.input : JSON.stringify(pendingUse.input, null, 2));
             const desc = pendingUse.input?.description || '';
             const firstLine = resultText.split('\n')[0].substring(0, 120) || '(empty)';
+            // Find agentId: from result text, buffer, or description match
             const agentMatch = resultText.match(/agentId:\s*([a-z0-9]+)/);
-            const agentId = agentMatch ? agentMatch[1] : '';
-            // Use agentId for JSONL viewer if available, otherwise parentToolId for buffer viewer
+            let agentId = agentMatch ? agentMatch[1] : '';
+            if (!agentId && desc && this._subagentMetas) {
+              const meta = this._subagentMetas.find(m => m.description === desc);
+              if (meta) agentId = meta.agentId;
+            }
             const hasBuffer = this._subagentBuffers.has(toolId);
             let viewBtn = '';
             if (agentId) viewBtn = ` <button class="chat-agent-view-btn" data-agent-id="${escHtml(agentId)}">View Log</button>`;
@@ -1540,6 +1544,7 @@ class ChatView {
     if (status.total_cost_usd) this._statusCost = status.total_cost_usd;
     if (status.permissionMode) this._statusPermMode = status.permissionMode;
     if (status.permissionModes) this._permissionModes = status.permissionModes;
+    if (status.subagentMetas) this._subagentMetas = status.subagentMetas;
     if (status.slashCommands) this._slashCommands = status.slashCommands.map(c => c.startsWith('/') ? c : '/' + c);
     this._updateStatusBar();
   }
