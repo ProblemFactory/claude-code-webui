@@ -94,7 +94,7 @@ class ChatView {
           this._pinned = true;
           this._newMsgCount = 0;
           this._scrollBtn.classList.add('hidden');
-        } else if (!atBottom) {
+        } else if (!atBottom && !this._alwaysPinned) {
           this._pinned = false;
           this._scrollBtn.classList.remove('hidden');
         }
@@ -1421,6 +1421,7 @@ class ChatView {
     const view = new ChatView(winInfo, this.ws, null, this.app);
     view._textarea.disabled = true;
     view._textarea.placeholder = 'Live agent log (read-only)';
+    view._alwaysPinned = true; // read-only live viewer always auto-scrolls
     if (msgs.length) view.loadHistory(msgs, msgs.length);
     this._subagentViews.set(parentToolUseId, view);
     winInfo.onClose = () => {
