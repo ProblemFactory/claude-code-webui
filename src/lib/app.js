@@ -673,7 +673,11 @@ class App {
     document.getElementById(id).classList.remove('hidden');
   }
 
-  showNewSessionDialog() { this._showDialog('dialog-new-session'); document.getElementById('input-cwd').focus(); }
+  showNewSessionDialog() {
+    this._showDialog('dialog-new-session');
+    document.getElementById('input-mode').value = this.settings.get('session.defaultMode') ?? 'chat';
+    document.getElementById('input-cwd').focus();
+  }
   hideDialogs() { document.getElementById('dialog-overlay').classList.add('hidden'); document.getElementById('dialog-overlay').querySelectorAll('.dialog').forEach(d => d.classList.add('hidden')); }
 
   createSession({ cwd, name, model, permission, extraArgs, resumeId, mode }) {

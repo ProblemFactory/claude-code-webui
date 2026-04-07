@@ -111,7 +111,7 @@ const SETTINGS_SCHEMA = {
 
   // ── Session ──
   'session.defaultMode': {
-    type: 'enum', default: 'terminal',
+    type: 'enum', default: 'chat',
     options: [
       { value: 'terminal', label: 'Terminal' },
       { value: 'chat', label: 'Chat' },
