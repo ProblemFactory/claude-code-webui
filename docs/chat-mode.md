@@ -85,9 +85,23 @@ After responding, the button area shows the resolution status (Allowed / Always 
 
 If a permission request is cancelled by Claude (e.g., due to interrupt), the prompt updates to show "Cancelled".
 
+To change the permission mode mid-session, click the lock icon in the status bar (see [Permission Mode Dropdown](#permission-mode-dropdown) under Status Bar).
+
 ## Subagent Support
 
-When Claude uses the Agent tool (subagent), the chat view provides visibility into the subagent's execution:
+When Claude uses the Agent tool (subagent), the chat view provides visibility into the subagent's execution.
+
+### Architecture
+
+Subagent viewers use a **virtual session** model. Each subagent gets a virtual session ID:
+- **Live agents**: `sub-{parentToolUseId}` -- the server buffers messages and forwards new ones in real time
+- **Completed agents**: `sub-agent-{agentId}` -- the server loads messages from the agent's saved JSONL file
+
+The client opens a standard read-only ChatView attached to the virtual session. All buffering and message forwarding is handled server-side -- the client code is the same `ChatView` class used for regular sessions, just with `readOnly: true`.
+
+### JSONL File Watcher
+
+Claude's stream-json mode does not emit subagent assistant text messages (known bug: [anthropics/claude-code#8262](https://github.com/anthropics/claude-code/issues/8262)). To work around this, the server watches subagent JSONL files via `fs.watch()` for live text messages. Messages from the JSONL watcher are deduplicated by UUID against those already received via stream-json.
 
 ### Live Status
 
@@ -151,19 +165,52 @@ Paste an image from your clipboard (Ctrl+V) to add it as an attachment:
 
 While Claude is responding, a streaming status bar appears above the input area showing the current activity (thinking, running ToolName, responding) with a spinner. Click the **Stop** button to interrupt Claude mid-response.
 
+## TODO Display
+
+When Claude uses the `TodoWrite` tool to track task progress, the current TODO state is displayed above the input area:
+
+- Shows the current **in-progress** item with a hourglass icon and a progress count (e.g., "3/7")
+- When all items are completed, the display is hidden
+- **Click** the TODO display to expand a popup showing the full list with status icons:
+  - Completed items
+  - In-progress item (highlighted)
+  - Pending items
+
+The TODO list updates live as Claude calls `TodoWrite` with updated items.
+
 ## Status Bar
 
 The status bar at the bottom of the chat view shows session metrics:
 
 | Metric | Display | Description |
 |--------|---------|-------------|
-| **Model** | Badge | Active model name (e.g., claude-sonnet-4-20250514) |
-| **Permission mode** | Lock icon + mode | Current permission mode (e.g., default, plan) |
+| **Model** | Badge | Active model name (e.g., claude-sonnet-4-20250514), read-only |
+| **Permission mode** | Lock icon + mode | Current permission mode. **Click to open dropdown** and change mode mid-session (see below) |
+| **Background tasks** | Spinner + count | Active background tasks (agents + commands). **Click for detail popup** (see below) |
 | **Context usage** | Colored progress bar + percentage | How much of the context window is used. Colors: green (<70%), yellow (70-85%), orange (85-95%), red (>95%) |
 | **Cache ratio** | Lightning bolt + percentage | Ratio of cache-read tokens to total input tokens |
 | **Cost** | Dollar amount | Cumulative session cost. Colors: green (<$1), orange ($1-5), red (>$5) |
 
 Status data comes from per-turn `usage` in assistant messages and `modelUsage` in result messages. It is persisted in the session's `chatStatus` and restored when re-attaching to an existing session.
+
+### Permission Mode Dropdown
+
+Click the lock icon in the status bar to open a dropdown listing available permission modes (sourced from `claude --help` output). Selecting a mode sends a `set-permission-mode` WebSocket message to the server, which writes a `control_request` with `subtype: 'set_permission_mode'` to Claude's stdin. The active mode is always displayed even if unknown (defaults to "default").
+
+### Background Tasks
+
+Two types of background tasks are tracked:
+
+| Source | Detection | Icon |
+|--------|-----------|------|
+| **Agent tool** | `system.task_started` message | Robot |
+| **Background commands** | `tool_use` with `run_in_background: true` | Lightning bolt |
+
+The task count badge appears in the status bar when tasks are active. Click to open a popup showing each task's description and current activity. Clicking a task in the popup:
+- **Agent tasks**: opens the subagent View Log viewer
+- **Command tasks**: opens a temporary editor showing the command input and output
+
+Tasks are removed when `task_notification` arrives (agent completion) or when the tool_result is received (command completion).
 
 ## Font Size
 

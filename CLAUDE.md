@@ -294,9 +294,17 @@ Split from monolithic 1647-line `src/client.js` into 13 ES modules under `src/li
 
 **Tool call rendering**: All tool_use types are deferred and rendered as collapsible cards. Non-file tools show Input immediately while running with spinner on Output only. Tool error cards use unified style (same card, red error text inside, not red card). Per-tool-card 📋 open-in-editor button (raw data in closure, not DOM extraction). Message-level 📋 button skipped for tool-only assistant messages. Clickable paths/URLs in all tool I/O via `_linkifyText`. No output truncation.
 
-**Subagent/Agent rendering**: Subagent messages (`parent_tool_use_id` or `isSidechain`) filtered from main chat. Server broadcasts as `subagent-message` type. Client buffers by `parentToolUseId`, shows live status on Agent tool card (message count + activity). "View Log" button opens read-only ChatView (`readOnly: true` — no input area, no status bar, normal scroll with pin-to-bottom): live viewer during execution (real-time message forwarding via `_subagentViews`), or loads from `subagents/agent-{agentId}.jsonl` after completion. `agentId` extracted from tool_result text via regex.
+**Subagent/Agent rendering**: Subagent messages (`parent_tool_use_id` or `isSidechain`) filtered from main chat. Server buffers by `parentToolUseId` in `session.subagentBuffers`, broadcasts as both `subagent-message` (for parent tool card status) and `chat-message` with virtual session ID `sub-{toolUseId}` (for subagent viewer). "View Log" button opens read-only ChatView (`readOnly: true` — no input area, no status bar, normal scroll with pin-to-bottom) attached to a virtual session. Live agents use `sub-{parentToolUseId}` virtual sessions — server returns buffered messages on attach and forwards new ones. Completed agents use `sub-agent-{agentId}` — server loads from `subagents/agent-{agentId}.jsonl`. No client-side `_subagentBuffers`/`_subagentViews` — all buffering/forwarding handled server-side via virtual session attach.
+
+**JSONL file watcher workaround**: stream-json does not emit subagent assistant text messages (known bug: anthropics/claude-code#8262). Server works around this by watching subagent JSONL files via `fs.watch()`. On `system.task_started`, `startSubagentWatcher()` opens the JSONL file and reads new lines on each change event. Messages are deduplicated by uuid against those already emitted via stream-json (tracked in `session.subagentEmittedUuids`). On `system.task_notification`, the watcher is stopped. This provides complete subagent message coverage despite the stream-json gap.
 
 **Interrupt**: Inline "■ Stop" button in streaming status bar (only visible while Claude outputs). Sends `control_request` with `subtype: 'interrupt'` to claude stdin.
+
+**Background task tracking**: Two sources of background tasks: `system.task_started` (Agent tool) and `tool_use.run_in_background` (Bash/commands). Tracked in `_activeTasks` Map keyed by tool_use_id. Status bar shows count. Click opens popup with task details — agent tasks open View Log (subagent viewer), command tasks open editor with input+output. `task_progress` updates description/lastTool. `task_notification` removes completed tasks.
+
+**TODO display**: Positioned above streaming status, above input area. Populated from `TodoWrite` tool_use input. Shows current `in_progress` item with hourglass icon and progress count (completed/total). Click expands full todo list popup with all items and their status icons (completed/in_progress/pending). Hidden when all items completed.
+
+**Permission mode dropdown**: Click the lock icon in status bar to open dropdown with available permission modes (fetched from `claude --help` output). Selecting a mode sends `set-permission-mode` WebSocket message → server writes `control_request` with `subtype: 'set_permission_mode'` to claude stdin. Mode badge always shown in status bar (defaults to 'default' if unknown).
 
 **System notifications**: Messages containing `<task-notification>`, `<system-reminder>`, and similar tags are detected and rendered as collapsible dim notification cards instead of regular user messages.
 
@@ -312,7 +320,7 @@ Split from monolithic 1647-line `src/client.js` into 13 ES modules under `src/li
 
 **Highlight Layer**: CSS Custom Highlight API (`CSS.highlights`) — non-destructive rendering layer for search highlighting. `_applyHighlightLayer()` creates Range objects, re-applied on view changes.
 
-**Status Bar**: Model badge, context % with colored progress bar (from `assistant.message.usage` per-turn data, NOT cumulative `result.modelUsage`), cache hit ratio, cost with color tiers ($<1 green, $1-5 orange, $>5 red). Persisted via `chatStatus` on attach.
+**Status Bar**: Model badge (read-only), permission mode (clickable dropdown to change mid-session), background task count (clickable for task detail popup), context % with colored progress bar (from `assistant.message.usage` per-turn data, NOT cumulative `result.modelUsage`), cache hit ratio, cost with color tiers ($<1 green, $1-5 orange, $>5 red). Persisted via `chatStatus` on attach.
 
 **Session management**: `mode` field on session object. Stored in session metadata + wrapper metadata. `/api/active` and WebSocket `active-sessions` include mode. Sidebar shows badge for chat sessions. Default mode controlled by `session.defaultMode` setting (default: `chat`). All `createSession` paths respect this setting. Resume: split button toggles Terminal/Chat mode per session, persisted in user state.
 
@@ -376,8 +384,10 @@ Split from monolithic 1647-line `src/client.js` into 13 ES modules under `src/li
 - `GET /proxy/<url>` — full-rewriting web proxy via node-unblocker (HTML/CSS URL rewrite, JS XHR/WS rewrite, header stripping)
 
 ### WebSocket Protocol (`/ws`)
-Client → Server: `create`, `input`, `chat-input`, `permission-response`, `interrupt`, `resize`, `attach`, `kill`, `tmux-attach`
+Client → Server: `create`, `input`, `chat-input`, `permission-response`, `set-permission-mode`, `interrupt`, `resize`, `attach`, `kill`, `tmux-attach`
 Server → Client: `created`, `output`, `chat-message`, `subagent-message` (with parentToolUseId), `exited`, `attached` (includes `isStreaming`, `pendingPermissions`), `active-sessions`, `editor-open`, `editor-close`, `effective-size`, `user-state-updated`, `bookmarks-updated`, `settings-updated`, `error`
+
+**Virtual session attach**: `attach` with `sessionId` starting with `sub-` routes to subagent handler. `sub-{parentToolUseId}` returns live-buffered messages from parent session's `subagentBuffers`. `sub-agent-{agentId}` loads completed agent's JSONL from disk. Both respond with standard `attached` payload. Live virtual sessions also receive `chat-message` broadcasts for real-time updates.
 
 ## Features Summary
 
@@ -400,10 +410,14 @@ Server → Client: `created`, `output`, `chat-message`, `subagent-message` (with
 ### Chat Mode
 - Chat view: structured message display with markdown rendering
 - Permission approval: interactive Allow/Deny cards for tool permission requests (`--permission-prompt-tool stdio`)
+- Permission mode dropdown: click lock icon in status bar to change mode mid-session (modes from `claude --help`)
 - Compact mode (default): document-style layout with role labels (You/Claude)
 - Role indicator styles: `chat.roleIndicator` setting — border (default, continuous colored bars), background, icon, label
 - All tool_use rendered as collapsible cards with first-line preview. Non-file tools show Input while running. Per-tool open-in-editor button. No output truncation. Unified error styling.
 - System notifications: `<task-notification>`, `<system-reminder>` etc rendered as collapsible dim cards
+- Background task tracking: Agent (`task_started`) and background commands (`run_in_background`) shown in status bar with click-to-view popup
+- TODO display: above input area, shows current in-progress item from TodoWrite, click for full list popup
+- Subagent viewer: unified virtual session architecture (server-buffered), standard read-only ChatView for both live and completed agents
 - Ctrl+F search with highlight, match counter, prev/next navigation
 - Auto-detect URLs and file paths with `:line`, `:line:col`, `:line-line` suffixes (click=copy with tooltip, Ctrl+click=open)
 - Pre block wrap toggle (hover to show)
@@ -522,3 +536,9 @@ Server → Client: `created`, `output`, `chat-message`, `subagent-message` (with
 - Chat pin-to-bottom fails with content-visibility: single `scrollTop` assignment didn't work because `content-visibility: auto` causes incremental layout. Fix: iterative scroll convergence over 10 rAF frames until stable.
 - Clickable path tooltip: replaced text replacement feedback (which corrupted the path) with tooltip-style feedback on click/copy.
 - Theme contrast — UI chrome: `--text-dim` was 1.4:1 in Nord, 2.4:1 in Solarized, 2.6:1 in Light. Used for setting descriptions, path labels. Fixed all themes to ≥4.1:1.
+- readOnly ChatView `_streamStatus` crash: readOnly mode skips input area construction, so `_streamStatus` is null. `_showTyping`/`_hideTyping` now guard against null `_streamStatus`.
+- `_renderElements` multi-block fix: `_onMessage` can append multiple elements (e.g. assistant with both text and tool_use blocks). Old code only detached one element. Fix: count elements before/after, detach all new ones.
+- `_pendingToolUses` leak on jumps: `jumpToIndex` and `jumpToBottom` clear the message list but old pending tool uses remained, causing stale tool card matches. Fix: `_pendingToolUses.clear()` on every jump.
+- outerHTML marker hack replaced: tool result rendering used `placeholder.outerHTML = html` which detaches the element from DOM, breaking subsequent references. Replaced with proper DOM node replacement.
+- Permission resolve loop break: permission resolution could re-process already-resolved permissions in a loop. Added break after first match.
+- Server `claudeSessionId` undefined in attach: attach handler accessed `session.claudeSessionId` before it was set for newly created sessions. Fix: fall back to `data.claudeSessionId` from client.
