@@ -315,14 +315,35 @@ class ChatView {
     container.appendChild(inputArea);
     container.appendChild(this._statusBar);
 
-    // Status bar click → insert slash command into textarea
+    // Status bar click → show option picker
     this._statusBar.addEventListener('click', (e) => {
       const el = e.target.closest('.chat-status-clickable');
-      if (el?.dataset.cmd) {
-        this._textarea.value = el.dataset.cmd;
-        this._textarea.focus();
-        this._textarea.dispatchEvent(new Event('input'));
+      if (!el) return;
+      const cmd = el.dataset.cmd;
+      if (!cmd) return;
+      const options = cmd === '/model' ? ['opus', 'sonnet', 'haiku'] : ['default', 'acceptEdits', 'bypassPermissions', 'plan', 'auto'];
+      // Show dropdown below the clicked element
+      let dropdown = this._statusBar.querySelector('.chat-status-dropdown');
+      if (dropdown) { dropdown.remove(); return; } // toggle off
+      dropdown = document.createElement('div');
+      dropdown.className = 'chat-status-dropdown';
+      for (const opt of options) {
+        const item = document.createElement('div');
+        item.className = 'chat-status-dropdown-item';
+        item.textContent = opt;
+        item.onclick = (ev) => {
+          ev.stopPropagation();
+          dropdown.remove();
+          this._textarea.value = `${cmd} ${opt}`;
+          this._textarea.focus();
+          this._send();
+        };
+        dropdown.appendChild(item);
       }
+      el.style.position = 'relative';
+      el.appendChild(dropdown);
+      const close = (ev) => { if (!dropdown.contains(ev.target)) { dropdown.remove(); document.removeEventListener('click', close); } };
+      setTimeout(() => document.addEventListener('click', close), 0);
     });
 
     // Clear waiting blink on focus/click
@@ -1515,12 +1536,12 @@ class ChatView {
 
     // Model badge (click to change)
     if (this._statusModel) {
-      parts.push(`<span class="chat-status-model chat-status-clickable" data-cmd="/model " title="Click to switch model">${escHtml(this._statusModel)}</span>`);
+      parts.push(`<span class="chat-status-model chat-status-clickable" data-cmd="/model" title="Click to switch model">${escHtml(this._statusModel)}</span>`);
     }
 
     // Permission mode (click to change)
     if (this._statusPermMode) {
-      parts.push(`<span class="chat-status-perm chat-status-clickable" data-cmd="/permissions " title="Click to change permission mode">\uD83D\uDD12 ${escHtml(this._statusPermMode)}</span>`);
+      parts.push(`<span class="chat-status-perm chat-status-clickable" data-cmd="/permissions" title="Click to change permission mode">\uD83D\uDD12 ${escHtml(this._statusPermMode)}</span>`);
     }
 
     // Context % with emoji + progress bar
