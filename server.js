@@ -1737,9 +1737,10 @@ wss.on('connection', (ws) => {
               chatStatus = { model, lastUsage, contextWindow, total_cost_usd: totalCost, slashCommands, permissionMode, permissionModes: PERMISSION_MODES, subagentMetas: getSubagentMetas(session.claudeSessionId, session.cwd) };
             }
 
-            // Detect if Claude is mid-stream
-            const lastMsg = allMessages.length > 0 ? allMessages[allMessages.length - 1] : null;
-            const isStreaming = session._waitingForResponse || (lastMsg && lastMsg.type !== 'result' && lastMsg.type !== 'system');
+            // Detect if Claude is mid-stream: only check buffer messages (current run)
+            // JSONL-only sessions (e.g. terminal mode viewed as chat) may never have 'result'
+            const lastBufMsg = bufferMessages.length > 0 ? bufferMessages[bufferMessages.length - 1] : null;
+            const isStreaming = session._waitingForResponse || (lastBufMsg && lastBufMsg.type !== 'result' && lastBufMsg.type !== 'system');
 
             // Filter out resolved permissions (tool_use_id has a matching tool_result)
             const resolvedToolIds = new Set();
