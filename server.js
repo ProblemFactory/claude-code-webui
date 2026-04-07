@@ -1566,7 +1566,10 @@ wss.on('connection', (ws) => {
           }
 
           session.pty.write(stdinPayload + '\n');
-          session._waitingForResponse = true; // for isStreaming detection
+          session._waitingForResponse = true;
+          // Don't write user message to buffer — JSONL will have it with Claude's uuid.
+          // Buffer only stores Claude's stream-json output for clean uuid-based dedup.
+          // Tiny gap between send and JSONL write: _waitingForResponse shows thinking state.
           broadcastToSession(session, data.sessionId, { type: 'chat-message', sessionId: data.sessionId, message: userMsg });
         }
         break;
