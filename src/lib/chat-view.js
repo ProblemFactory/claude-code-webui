@@ -354,14 +354,11 @@ class ChatView {
           item.className = 'chat-status-dropdown-item chat-task-detail';
           const icon = task.type === 'agent' ? '\uD83E\uDD16' : '\u26A1';
           let detail = `<div class="chat-task-title">${icon} ${escHtml(task.description)}</div>`;
-          if (task.command) detail += `<div class="chat-task-cmd"><code>${escHtml(task.command.length > 80 ? task.command.slice(0, 80) + '...' : task.command)}</code></div>`;
+          if (task.command) detail += `<div class="chat-task-cmd"><code>${escHtml(task.command.length > 120 ? task.command.slice(0, 120) + '...' : task.command)}</code></div>`;
           if (task.lastTool) detail += `<div class="chat-status-dim">Running: ${escHtml(task.lastTool)}</div>`;
-          if (task.outputFile) detail += `<div class="chat-task-file" data-path="${escHtml(task.outputFile)}">\uD83D\uDCC4 ${escHtml(task.outputFile.split('/').pop())}</div>`;
           item.innerHTML = detail;
           if (task.type === 'agent') {
             item.onclick = (ev) => { ev.stopPropagation(); dropdown.remove(); this._openSubagentViewer({ parentToolUseId: toolUseId, description: task.description }); };
-          } else if (task.outputFile) {
-            item.onclick = (ev) => { ev.stopPropagation(); dropdown.remove(); this.app.openFile(task.outputFile, task.outputFile.split('/').pop()); };
           }
           dropdown.appendChild(item);
         }
@@ -758,12 +755,6 @@ class ChatView {
         const status = block.is_error ? 'error' : 'ok';
         const rawText = typeof block.content === 'string' ? block.content : JSON.stringify(block.content, null, 2);
         const resultText = stripAnsi(rawText);
-
-        // Capture output file path for background commands
-        if (toolId && this._activeTasks?.has(toolId) && resultText.includes('Output is being written to:')) {
-          const match = resultText.match(/Output is being written to:\s*(\S+)/);
-          if (match) this._activeTasks.get(toolId).outputFile = match[1];
-        }
 
         if (pendingUse) {
           // Replace the pending placeholder with the final result
