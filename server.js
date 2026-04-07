@@ -125,6 +125,72 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
   if (session.mode === 'chat') {
     // Chat mode: parse JSON lines from PTY output, broadcast as structured messages
     let lineBuf = '';
+    if (!session.subagentBuffers) session.subagentBuffers = new Map();
+    if (!session.subagentEmittedUuids) session.subagentEmittedUuids = new Map(); // toolUseId → Set<uuid>
+    if (!session.subagentWatchers) session.subagentWatchers = new Map(); // toolUseId → {watcher, offset}
+
+    // Watch a subagent JSONL file for new messages (fills gap: text/thinking not in stream-json)
+    const startSubagentWatcher = (toolUseId, agentId) => {
+      if (session.subagentWatchers.has(toolUseId)) return;
+      // Find JSONL path
+      const projectsDir = path.join(os.homedir(), '.claude', 'projects');
+      const projDir = cwdToProjectDir(session.cwd || '');
+      const candidates = [];
+      if (session.claudeSessionId) {
+        candidates.push(path.join(projectsDir, projDir, session.claudeSessionId, 'subagents', `agent-${agentId}.jsonl`));
+        try { for (const dir of fs.readdirSync(projectsDir)) { const fp = path.join(projectsDir, dir, session.claudeSessionId, 'subagents', `agent-${agentId}.jsonl`); if (!candidates.includes(fp)) candidates.push(fp); } } catch {}
+      }
+      const watchFile = candidates.find(f => { try { return fs.existsSync(f); } catch { return false; } });
+      if (!watchFile) {
+        // File doesn't exist yet, retry after delay
+        const retry = setTimeout(() => { session.subagentWatchers.delete(toolUseId); startSubagentWatcher(toolUseId, agentId); }, 1000);
+        session.subagentWatchers.set(toolUseId, { watcher: null, retry });
+        return;
+      }
+      if (!session.subagentEmittedUuids.has(toolUseId)) session.subagentEmittedUuids.set(toolUseId, new Set());
+      const emitted = session.subagentEmittedUuids.get(toolUseId);
+      let offset = 0;
+      // Read existing content first
+      const readNewLines = () => {
+        try {
+          const stat = fs.statSync(watchFile);
+          if (stat.size <= offset) return;
+          const buf = Buffer.alloc(stat.size - offset);
+          const fd = fs.openSync(watchFile, 'r');
+          fs.readSync(fd, buf, 0, buf.length, offset);
+          fs.closeSync(fd);
+          offset = stat.size;
+          for (const line of buf.toString('utf-8').split('\n')) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            try {
+              const msg = JSON.parse(trimmed);
+              if (msg.uuid && emitted.has(msg.uuid)) continue; // already sent via stream-json
+              if (msg.uuid) emitted.add(msg.uuid);
+              if (msg.type !== 'user' && msg.type !== 'assistant' && msg.type !== 'result') continue;
+              // Buffer + broadcast
+              if (!session.subagentBuffers.has(toolUseId)) session.subagentBuffers.set(toolUseId, []);
+              session.subagentBuffers.get(toolUseId).push(msg);
+              broadcastToSession(session, id, { type: 'subagent-message', sessionId: id, parentToolUseId: toolUseId, message: msg });
+              broadcastToSession(session, id, { type: 'chat-message', sessionId: `sub-${toolUseId}`, message: msg });
+            } catch {}
+          }
+        } catch {}
+      };
+      readNewLines(); // read any existing content
+      const watcher = fs.watch(watchFile, () => readNewLines());
+      session.subagentWatchers.set(toolUseId, { watcher });
+    };
+
+    const stopSubagentWatcher = (toolUseId) => {
+      const entry = session.subagentWatchers.get(toolUseId);
+      if (entry) {
+        if (entry.watcher) entry.watcher.close();
+        if (entry.retry) clearTimeout(entry.retry);
+        session.subagentWatchers.delete(toolUseId);
+      }
+    };
+
     ptyProcess.onData((output) => {
       session.buffer = (session.buffer + output).slice(-500000);
       lineBuf += output;
@@ -135,11 +201,24 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
         if (!line) continue;
         try {
           const msg = JSON.parse(line);
+
+          // Track subagent lifecycle: start/stop JSONL watchers
+          if (msg.type === 'system' && msg.subtype === 'task_started' && msg.task_id && msg.tool_use_id) {
+            startSubagentWatcher(msg.tool_use_id, msg.task_id);
+          }
+          if (msg.type === 'system' && msg.subtype === 'task_notification' && msg.tool_use_id) {
+            stopSubagentWatcher(msg.tool_use_id);
+          }
+
           if (msg.parent_tool_use_id || msg.isSidechain) {
             const ptuid = msg.parent_tool_use_id;
-            // Buffer subagent messages for attach
             if (ptuid) {
-              if (!session.subagentBuffers) session.subagentBuffers = new Map();
+              // Mark uuid as emitted (for dedup with JSONL watcher)
+              if (msg.uuid) {
+                if (!session.subagentEmittedUuids.has(ptuid)) session.subagentEmittedUuids.set(ptuid, new Set());
+                session.subagentEmittedUuids.get(ptuid).add(msg.uuid);
+              }
+              // Buffer
               if (!session.subagentBuffers.has(ptuid)) session.subagentBuffers.set(ptuid, []);
               session.subagentBuffers.get(ptuid).push(msg);
             }
