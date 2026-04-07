@@ -1417,6 +1417,20 @@ wss.on('connection', (ws) => {
         break;
       }
 
+      case 'set-permission-mode': {
+        // Change permission mode mid-session via control_request
+        const session = activeSessions.get(data.sessionId);
+        if (session?.pty && session.mode === 'chat' && data.mode) {
+          const msg = {
+            type: 'control_request',
+            request_id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+            request: { subtype: 'set_permission_mode', mode: data.mode },
+          };
+          session.pty.write(JSON.stringify(msg) + '\n');
+        }
+        break;
+      }
+
       case 'input': {
         const session = activeSessions.get(data.sessionId);
         if (session?.pty) session.pty.write(data.data);

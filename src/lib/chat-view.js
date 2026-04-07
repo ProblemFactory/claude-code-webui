@@ -315,14 +315,33 @@ class ChatView {
     container.appendChild(inputArea);
     container.appendChild(this._statusBar);
 
-    // Status bar click → send slash command to let Claude Code handle options
+    // Permission mode click → dropdown to change via permission_updates protocol
     this._statusBar.addEventListener('click', (e) => {
-      const el = e.target.closest('.chat-status-clickable');
-      if (el?.dataset.cmd) {
-        this._textarea.value = el.dataset.cmd;
-        this._textarea.focus();
-        this._send();
+      const el = e.target.closest('.chat-status-perm');
+      if (!el) return;
+      let dropdown = this._statusBar.querySelector('.chat-status-dropdown');
+      if (dropdown) { dropdown.remove(); return; }
+      const modes = ['default', 'acceptEdits', 'bypassPermissions', 'plan', 'auto'];
+      dropdown = document.createElement('div');
+      dropdown.className = 'chat-status-dropdown';
+      for (const mode of modes) {
+        const item = document.createElement('div');
+        item.className = 'chat-status-dropdown-item' + (mode === this._statusPermMode ? ' active' : '');
+        item.textContent = mode;
+        item.onclick = (ev) => {
+          ev.stopPropagation();
+          dropdown.remove();
+          // Send permission_updates via a synthetic permission-response
+          this.ws.send({ type: 'set-permission-mode', sessionId: this.sessionId, mode });
+          this._statusPermMode = mode;
+          this._updateStatusBar();
+        };
+        dropdown.appendChild(item);
       }
+      el.style.position = 'relative';
+      el.appendChild(dropdown);
+      const close = (ev) => { if (!dropdown.contains(ev.target)) { dropdown.remove(); document.removeEventListener('click', close); } };
+      setTimeout(() => document.addEventListener('click', close), 0);
     });
 
     // Clear waiting blink on focus/click
@@ -1513,14 +1532,14 @@ class ChatView {
     const fmtK = (n) => n >= 1000000 ? (n / 1000000).toFixed(1) + 'm' : n >= 1000 ? Math.round(n / 1000) + 'k' : String(n);
     const parts = [];
 
-    // Model badge (click to change)
+    // Model badge
     if (this._statusModel) {
-      parts.push(`<span class="chat-status-model chat-status-clickable" data-cmd="/model" title="Click to switch model">${escHtml(this._statusModel)}</span>`);
+      parts.push(`<span class="chat-status-model" title="Model (set at session creation)">${escHtml(this._statusModel)}</span>`);
     }
 
     // Permission mode (click to change)
     if (this._statusPermMode) {
-      parts.push(`<span class="chat-status-perm chat-status-clickable" data-cmd="/permissions" title="Click to change permission mode">\uD83D\uDD12 ${escHtml(this._statusPermMode)}</span>`);
+      parts.push(`<span class="chat-status-perm chat-status-clickable" title="Click to change permission mode">\uD83D\uDD12 ${escHtml(this._statusPermMode)}</span>`);
     }
 
     // Context % with emoji + progress bar
