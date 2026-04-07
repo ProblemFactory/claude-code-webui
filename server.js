@@ -1410,10 +1410,12 @@ wss.on('connection', (ws) => {
         // Permission approval/denial from chat UI → write control_response to claude stdin
         const session = activeSessions.get(data.sessionId);
         if (session?.pty && session.mode === 'chat') {
+          const allowResponse = { behavior: 'allow', updatedInput: data.toolInput || {} };
+          if (data.permissionUpdates?.length) allowResponse.permission_updates = data.permissionUpdates;
           const response = {
             type: 'control_response',
             response: data.approved
-              ? { subtype: 'success', request_id: data.requestId, response: { behavior: 'allow', updatedInput: data.toolInput || {} } }
+              ? { subtype: 'success', request_id: data.requestId, response: allowResponse }
               : { subtype: 'success', request_id: data.requestId, response: { behavior: 'deny', message: 'User denied this action' } },
           };
           session.pty.write(JSON.stringify(response) + '\n');

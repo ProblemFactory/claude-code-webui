@@ -1277,13 +1277,25 @@ class ChatView {
       btnDeny.className = 'chat-permission-btn chat-permission-deny';
       btnDeny.textContent = 'Deny';
       const toolInput = input;
-      const respond = (approved) => {
-        this.ws.send({ type: 'permission-response', sessionId: this.sessionId, requestId, approved, toolInput });
-        section.innerHTML = `<details class="chat-diff"><summary class="chat-diff-summary">\u{1F512} ${approved ? '<span class="chat-permission-allowed">\u2713 Allowed</span>' : '<span class="chat-permission-denied">\u2717 Denied</span>'}</summary></details>`;
+      const suggestions = req.permission_suggestions || [];
+      const respond = (approved, permUpdates) => {
+        this.ws.send({ type: 'permission-response', sessionId: this.sessionId, requestId, approved, toolInput, permissionUpdates: permUpdates });
+        const label = !approved ? '\u2717 Denied' : permUpdates ? '\u2713 Always Allowed' : '\u2713 Allowed';
+        const cls = approved ? 'chat-permission-allowed' : 'chat-permission-denied';
+        section.innerHTML = `<details class="chat-diff"><summary class="chat-diff-summary">\u{1F512} <span class="${cls}">${label}</span></summary></details>`;
       };
       btnAllow.onclick = () => respond(true);
       btnDeny.onclick = () => respond(false);
-      actions.append(btnAllow, btnDeny);
+      if (suggestions.length > 0) {
+        const btnAlways = document.createElement('button');
+        btnAlways.className = 'chat-permission-btn chat-permission-always';
+        btnAlways.textContent = 'Always Allow';
+        btnAlways.title = suggestions.map(s => s.type === 'setMode' ? `Set mode: ${s.mode}` : s.type === 'addDirectories' ? `Add dirs: ${s.directories?.join(', ')}` : s.type).join('; ');
+        btnAlways.onclick = () => respond(true, suggestions);
+        actions.append(btnAllow, btnAlways, btnDeny);
+      } else {
+        actions.append(btnAllow, btnDeny);
+      }
       this._hideTyping();
     }
 

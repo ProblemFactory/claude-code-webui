@@ -1330,6 +1330,8 @@ html, body {
 }
 .chat-permission-allow { background: var(--green); color: #fff; border-color: var(--green); }
 .chat-permission-allow:hover { opacity: 0.85; }
+.chat-permission-always { background: var(--accent); color: #fff; border-color: var(--accent); }
+.chat-permission-always:hover { opacity: 0.85; }
 .chat-permission-deny { background: var(--bg-tertiary); color: var(--text); }
 .chat-permission-deny:hover { background: var(--bg-hover); }
 .chat-permission-allowed { color: var(--green); font-weight: 600; }
