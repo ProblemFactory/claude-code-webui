@@ -133,6 +133,7 @@ docs/
 - **Layout restore**: `attachSession()` returns `winInfo` synchronously (the DOM element). Position is applied directly to this `winInfo`, NOT by guessing via `windows.values().pop()`. The WebSocket attach is async but the window element already exists.
 - **Proportional bounds tracking**: `win.gridBounds` stores position `{left, top, width, height}` as fractions (0-1) of workspace. `_reflowWindows()` (via ResizeObserver) recalculates pixel positions on workspace resize. Applies universally — grid snap, edge snap, drag-drop, and `applyLayout()` all capture bounds. User resize updates proportions on mouseup. Works in both grid and freeform modes.
 - **Overlap switcher**: Right-click on title bar detects overlapping windows via rect intersection (`_rectsOverlap`), shows popup at cursor position. Works in any mode — not tied to grid cells.
+- **WebSocket reconnect re-attach**: On WS reconnect, all active sessions are re-attached. Chat sessions call `_reattach()` to sync missed messages since last known index. `globalHandlers` in ws.js are preserved across reconnects (not wiped).
 
 ### Server-Side Key Functions
 
@@ -287,11 +288,15 @@ Split from monolithic 1647-line `src/client.js` into 13 ES modules under `src/li
 
 **chat-wrapper.js**: Runs inside dtach, spawns claude with stream-json flags + `--permission-prompt-tool stdio`. Parses stdout JSON lines, writes to buffer file. Stdin: accepts JSON messages (JSONL schema: `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"..."}]}}`). Plain text on stdin auto-wrapped. Also handles `control_request`/`control_response` protocol for permission approval over stdin/stdout.
 
-**Permission Approval**: Claude sends `control_request` messages when a tool needs permission. ChatView renders permission cards with tool name, input summary, and Allow/Deny buttons. User response sent as `control_response` via `chat-input` WebSocket message. On history reload, permission state is resolved from subsequent messages (tool_result follows approved, absence means denied).
+**Permission Approval**: Uses `--permission-prompt-tool stdio` flag (undocumented, discovered from HAQI). Claude sends `control_request` on stdout, server handles `permission-response` WS message → writes `control_response` to stdin with `updatedInput`. Permission UI embedded inline in tool cards (not separate messages): pending shows Allow/Always Allow/Deny buttons between Input and Output; resolved shows collapsed ✓ Allowed/✗ Denied. "Always Allow" passes `permission_suggestions` back as `permission_updates` for session-wide rules. On attach, server separates `control_request` from buffer into `pendingPermissions` map, filters resolved ones, sends in attach payload. Client injects after tool cards render. Permission mode shown in status bar (🔒 default/bypassPermissions/etc.).
 
 **ChatView** (`src/lib/chat-view.js`): Renders structured messages — user/assistant/tool_use/tool_result/thinking blocks. Features: compact mode (document-style), markdown rendering, collapsible tool results (all tool_use deferred, not just file tools), Ctrl+F search with highlight/navigation, auto-detect URLs/paths with `:line`, `:line:col`, `:line-line` suffix support (click=copy with tooltip feedback, Ctrl+click=open), pre block wrap toggle, streaming/activity indicator above input bar, expandable input, per-tool-card open-in-editor button, collapsible long user messages.
 
-**Tool call rendering**: All tool_use types are rendered as collapsible cards (not just Edit/Write/Read). Non-file tools (e.g. Bash, WebSearch) show Input immediately while running, before result arrives. Tool error cards use unified styling (dim error indicator, not entirely red background). Each tool card has an open-in-editor button for file-based tools. No output truncation — full tool results displayed.
+**Tool call rendering**: All tool_use types are deferred and rendered as collapsible cards. Non-file tools show Input immediately while running with spinner on Output only. Tool error cards use unified style (same card, red error text inside, not red card). Per-tool-card 📋 open-in-editor button (raw data in closure, not DOM extraction). Message-level 📋 button skipped for tool-only assistant messages. Clickable paths/URLs in all tool I/O via `_linkifyText`. No output truncation.
+
+**Subagent/Agent rendering**: Subagent messages (`parent_tool_use_id` or `isSidechain`) filtered from main chat. Server broadcasts as `subagent-message` type. Client buffers by `parentToolUseId`, shows live status on Agent tool card (message count + activity). "View Log" button opens read-only ChatView: live viewer during execution (real-time message forwarding via `_subagentViews`), or loads from `subagents/agent-{agentId}.jsonl` after completion. `agentId` extracted from tool_result text via regex.
+
+**Interrupt**: Inline "■ Stop" button in streaming status bar (only visible while Claude outputs). Sends `control_request` with `subtype: 'interrupt'` to claude stdin.
 
 **System notifications**: Messages containing `<task-notification>`, `<system-reminder>`, and similar tags are detected and rendered as collapsible dim notification cards instead of regular user messages.
 
@@ -367,11 +372,12 @@ Split from monolithic 1647-line `src/client.js` into 13 ES modules under `src/li
 - `GET /api/bookmarks` / `POST /api/bookmarks` — file explorer bookmarks (broadcasts to all WS clients)
 - `POST /api/kill-pid` — kill an external/tmux claude process by PID (validates `isProcessClaude` before SIGTERM)
 - `GET /api/session-messages?claudeSessionId=&cwd=` — parse JSONL file into chat message history
+- `GET /api/subagent-messages?claudeSessionId=&cwd=&agentId=` — read subagent JSONL + meta from subagents/ directory
 - `GET /proxy/<url>` — full-rewriting web proxy via node-unblocker (HTML/CSS URL rewrite, JS XHR/WS rewrite, header stripping)
 
 ### WebSocket Protocol (`/ws`)
-Client → Server: `create`, `input`, `chat-input` (user messages + `control_response` for permissions), `resize`, `attach`, `kill`, `tmux-attach`
-Server → Client: `created`, `output`, `chat-message` (includes `control_request` for permission prompts), `exited`, `attached` (includes `isStreaming` for chat), `active-sessions`, `editor-open`, `editor-close`, `effective-size`, `user-state-updated`, `bookmarks-updated`, `settings-updated`, `error`
+Client → Server: `create`, `input`, `chat-input`, `permission-response`, `interrupt`, `resize`, `attach`, `kill`, `tmux-attach`
+Server → Client: `created`, `output`, `chat-message`, `subagent-message` (with parentToolUseId), `exited`, `attached` (includes `isStreaming`, `pendingPermissions`), `active-sessions`, `editor-open`, `editor-close`, `effective-size`, `user-state-updated`, `bookmarks-updated`, `settings-updated`, `error`
 
 ## Features Summary
 
@@ -511,4 +517,8 @@ Server → Client: `created`, `output`, `chat-message` (includes `control_reques
 - Ctrl+G triggers browser "Find in page": `preventDefault()` on Ctrl+G in terminal. Split-pane editor uses `Prec.highest` keymap to override CodeMirror's gotoLine.
 - LIVE session not clickable / shows as EXTERNAL: `collectDescendantPids` didn't include root PIDs → replaced with PID-file approach (pty-wrapper writes childPid to metadata).
 - Theme contrast — terminal: light theme had 7 invisible ANSI colors (white, brightWhite, brightYellow etc. on #ffffff). All 6 themes' ANSI black was near-invisible on bg. Fixed all.
+- WebSocket reconnect wipes globalHandlers: ws.js reconnect logic cleared the `globalHandlers` map, losing persistent handlers registered by other modules. Fix: preserve `globalHandlers` across reconnects, only re-attach sessions.
+- isSystemContext filter removed: was incorrectly filtering real user messages in tool-heavy sessions, causing missing messages in chat history. Removed the filter entirely.
+- Chat pin-to-bottom fails with content-visibility: single `scrollTop` assignment didn't work because `content-visibility: auto` causes incremental layout. Fix: iterative scroll convergence over 10 rAF frames until stable.
+- Clickable path tooltip: replaced text replacement feedback (which corrupted the path) with tooltip-style feedback on click/copy.
 - Theme contrast — UI chrome: `--text-dim` was 1.4:1 in Nord, 2.4:1 in Solarized, 2.6:1 in Light. Used for setting descriptions, path labels. Fixed all themes to ≥4.1:1.
