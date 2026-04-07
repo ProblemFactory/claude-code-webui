@@ -561,19 +561,17 @@ class ChatView {
         break;
       case 'control_request':
         if (msg.request?.subtype === 'can_use_tool') {
-          this._appendPermissionRequest(msg);
+          this._injectPermission(msg);
         }
         break;
-      case 'control_cancel_request':
-        // Cancel pending permission — remove the card or mark as cancelled
-        if (msg.request_id) {
-          const el = this._messageList.querySelector(`[data-request-id="${msg.request_id}"]`);
-          if (el) {
-            const actions = el.querySelector('.chat-permission-actions');
-            if (actions) actions.innerHTML = '<span class="chat-permission-resolved chat-permission-denied">Cancelled</span>';
-          }
+      case 'control_cancel_request': {
+        const permEl = this._messageList.querySelector(`[data-request-id="${msg.request_id}"]`);
+        if (permEl) {
+          const actions = permEl.querySelector('.chat-permission-actions');
+          if (actions) actions.innerHTML = '<span class="chat-permission-resolved chat-permission-denied">Cancelled</span>';
         }
         break;
+      }
       case 'rate_limit_event':
         // Skip silently
         break;
@@ -1234,16 +1232,15 @@ class ChatView {
     }
   }
 
-  _appendPermissionRequest(msg) {
+  // Inject permission UI into the matching pending tool card
+  _injectPermission(msg) {
     const req = msg.request;
     const requestId = msg.request_id;
     const toolUseId = req.tool_use_id;
-    const toolName = req.tool_name || 'Unknown';
     const input = req.input || {};
-    const inputStr = typeof input === 'string' ? input : JSON.stringify(input, null, 2);
 
     // Check if already resolved by looking at subsequent messages
-    let resolved = null; // null = pending, 'allowed', 'denied'
+    let resolved = null;
     if (toolUseId) {
       for (const m of this._messages) {
         if (m.type !== 'user') continue;
@@ -1257,23 +1254,16 @@ class ChatView {
       }
     }
 
-    const el = document.createElement('div');
-    el.className = 'chat-msg chat-msg-permission';
-    el.dataset.requestId = requestId;
+    // Build permission section
+    const section = document.createElement('div');
+    section.className = 'chat-permission-inline';
+    section.dataset.requestId = requestId;
 
-    const card = document.createElement('div');
-    card.className = 'chat-permission-card';
-    card.innerHTML = `<div class="chat-permission-header"><span class="chat-permission-icon">\u{1F512}</span> Permission Request</div>`
-      + `<div class="chat-permission-tool"><strong>${escHtml(toolName)}</strong></div>`
-      + `<details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${escHtml(inputStr)}</pre></details>`
-      + `<div class="chat-permission-actions"></div>`;
-
-    const actions = card.querySelector('.chat-permission-actions');
     if (resolved) {
-      actions.innerHTML = resolved === 'allowed'
-        ? '<span class="chat-permission-resolved chat-permission-allowed">\u2713 Allowed</span>'
-        : '<span class="chat-permission-resolved chat-permission-denied">\u2717 Denied</span>';
+      section.innerHTML = `<details class="chat-diff"><summary class="chat-diff-summary">\u{1F512} ${resolved === 'allowed' ? '<span class="chat-permission-allowed">\u2713 Allowed</span>' : '<span class="chat-permission-denied">\u2717 Denied</span>'}</summary></details>`;
     } else {
+      section.innerHTML = `<div class="chat-permission-prompt"><span class="chat-permission-icon">\u{1F512}</span> Permission required <div class="chat-permission-actions"></div></div>`;
+      const actions = section.querySelector('.chat-permission-actions');
       const btnAllow = document.createElement('button');
       btnAllow.className = 'chat-permission-btn chat-permission-allow';
       btnAllow.textContent = 'Allow';
@@ -1283,9 +1273,7 @@ class ChatView {
       const toolInput = input;
       const respond = (approved) => {
         this.ws.send({ type: 'permission-response', sessionId: this.sessionId, requestId, approved, toolInput });
-        actions.innerHTML = approved
-          ? '<span class="chat-permission-resolved chat-permission-allowed">\u2713 Allowed</span>'
-          : '<span class="chat-permission-resolved chat-permission-denied">\u2717 Denied</span>';
+        section.innerHTML = `<details class="chat-diff"><summary class="chat-diff-summary">\u{1F512} ${approved ? '<span class="chat-permission-allowed">\u2713 Allowed</span>' : '<span class="chat-permission-denied">\u2717 Denied</span>'}</summary></details>`;
       };
       btnAllow.onclick = () => respond(true);
       btnDeny.onclick = () => respond(false);
@@ -1293,18 +1281,32 @@ class ChatView {
       this._hideTyping();
     }
 
-    if (this._compact) {
-      const wrap = document.createElement('div');
-      wrap.className = 'chat-compact-msg';
-      const content = document.createElement('div');
-      content.className = 'chat-compact-content';
-      content.appendChild(card);
-      wrap.appendChild(content);
-      el.appendChild(wrap);
+    // Find matching pending tool card and inject before the output-pending spinner
+    const pending = toolUseId && this._messageList.querySelector(`[data-tool-id="${toolUseId}"]`);
+    if (pending) {
+      const outputPending = pending.querySelector('.chat-tool-output-pending');
+      if (outputPending) {
+        outputPending.before(section);
+      } else {
+        // File ops or simple pending — replace spinner with permission UI
+        const spinner = pending.querySelector('.chat-spinner');
+        if (spinner) spinner.replaceWith(section);
+        else pending.appendChild(section);
+      }
     } else {
-      el.appendChild(card);
+      // No matching tool card found — render as standalone message
+      const el = document.createElement('div');
+      el.className = 'chat-msg chat-msg-permission';
+      const toolName = req.tool_name || 'Unknown';
+      if (this._compact) {
+        el.innerHTML = `<div class="chat-compact-msg"><div class="chat-compact-content"><div class="chat-tool-use" style="position:relative"><span class="chat-tool-label">\uD83D\uDD27 ${escHtml(toolName)}</span></div></div></div>`;
+      } else {
+        el.innerHTML = `<div class="chat-tool-use" style="position:relative"><span class="chat-tool-label">\uD83D\uDD27 ${escHtml(toolName)}</span></div>`;
+      }
+      const toolUse = el.querySelector('.chat-tool-use');
+      toolUse.appendChild(section);
+      this._messageList.appendChild(el);
     }
-    this._messageList.appendChild(el);
     if (this._pinned) this._scrollToBottom();
   }
 
