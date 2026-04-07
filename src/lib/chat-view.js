@@ -680,7 +680,8 @@ class ChatView {
           if (msg.slash_commands) this._slashCommands = msg.slash_commands.map(c => '/' + c);
           this._updateStatusBar();
         }
-        if (msg.subtype === 'task_started') {
+        if (msg.subtype === 'task_started' && msg.task_type === 'local_agent') {
+          // Only track agent tasks here; bash background commands tracked via tool_use.run_in_background
           if (!this._activeTasks) this._activeTasks = new Map();
           this._activeTasks.set(msg.tool_use_id, { id: msg.task_id, type: 'agent', description: msg.description, status: 'running' });
           this._updateStatusBar();
@@ -691,9 +692,11 @@ class ChatView {
           task.lastTool = msg.last_tool_name;
           this._updateStatusBar();
         }
-        if (msg.subtype === 'task_notification' && this._activeTasks?.has(msg.tool_use_id)) {
-          this._activeTasks.delete(msg.tool_use_id);
-          this._updateStatusBar();
+        if (msg.subtype === 'task_notification') {
+          if (this._activeTasks?.has(msg.tool_use_id)) {
+            this._activeTasks.delete(msg.tool_use_id);
+            this._updateStatusBar();
+          }
         }
         break;
       case 'result':

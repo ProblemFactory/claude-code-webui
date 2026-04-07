@@ -203,7 +203,7 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
           const msg = JSON.parse(line);
 
           // Track subagent lifecycle: start/stop JSONL watchers
-          if (msg.type === 'system' && msg.subtype === 'task_started' && msg.task_id && msg.tool_use_id) {
+          if (msg.type === 'system' && msg.subtype === 'task_started' && msg.task_type === 'local_agent' && msg.task_id && msg.tool_use_id) {
             startSubagentWatcher(msg.tool_use_id, msg.task_id);
           }
           if (msg.type === 'system' && msg.subtype === 'task_notification' && msg.tool_use_id) {
