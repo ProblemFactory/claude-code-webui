@@ -1069,9 +1069,10 @@ app.get('/api/session-messages', (req, res) => {
       if (!model && m.type === 'result' && m.modelUsage) { model = Object.keys(m.modelUsage)[0]; contextWindow = Object.values(m.modelUsage)[0]?.contextWindow || 0; }
       if (lastUsage && model) break;
     }
-    for (const m of allMessages) { if (m.type === 'system' && m.subtype === 'init' && m.slash_commands) { slashCommands = m.slash_commands; if (!model && m.model) model = m.model; break; } }
+    let permissionMode = null;
+    for (const m of allMessages) { if (m.type === 'system' && m.subtype === 'init') { if (m.slash_commands) slashCommands = m.slash_commands; if (!model && m.model) model = m.model; if (m.permissionMode) permissionMode = m.permissionMode; break; } }
     for (const m of allMessages) { if (m.type === 'result' && m.total_cost_usd) totalCost += m.total_cost_usd; }
-    if (lastUsage || model) chatStatus = { model, lastUsage, contextWindow, total_cost_usd: totalCost, slashCommands };
+    if (lastUsage || model) chatStatus = { model, lastUsage, contextWindow, total_cost_usd: totalCost, slashCommands, permissionMode };
   }
 
   if (search) {
@@ -1483,11 +1484,13 @@ wss.on('connection', (ws) => {
               }
               if (lastUsage && model) break;
             }
-            // Find slash_commands from system.init (scan forward since it's near the start)
+            // Find slash_commands + permissionMode from system.init
+            let permissionMode = null;
             for (const m of allMessages) {
-              if (m.type === 'system' && m.subtype === 'init' && m.slash_commands) {
-                slashCommands = m.slash_commands;
+              if (m.type === 'system' && m.subtype === 'init') {
+                if (m.slash_commands) slashCommands = m.slash_commands;
                 if (!model && m.model) model = m.model;
+                if (m.permissionMode) permissionMode = m.permissionMode;
                 break;
               }
             }
@@ -1495,7 +1498,7 @@ wss.on('connection', (ws) => {
               if (m.type === 'result' && m.total_cost_usd) totalCost += m.total_cost_usd;
             }
             if (lastUsage || model) {
-              chatStatus = { model, lastUsage, contextWindow, total_cost_usd: totalCost, slashCommands };
+              chatStatus = { model, lastUsage, contextWindow, total_cost_usd: totalCost, slashCommands, permissionMode };
             }
 
             // Detect if Claude is mid-stream: check buffer (current run) not JSONL (history)

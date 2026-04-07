@@ -1157,6 +1157,9 @@ html, body {
   font-weight: 700; color: var(--bg-root); background: var(--accent);
   padding: 0 6px; border-radius: 3px; font-size: 9px; letter-spacing: 0.3px;
 }
+.chat-status-perm {
+  font-size: 10px; color: var(--text-dim); padding: 0 4px;
+}
 .chat-status-ctx { display: inline-flex; align-items: center; gap: 3px; }
 .chat-status-ctx-bar {
   width: 40px; height: 5px; background: rgba(128,128,128,0.3); border-radius: 3px;

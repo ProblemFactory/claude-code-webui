@@ -541,6 +541,7 @@ class ChatView {
       case 'system':
         if (msg.subtype === 'init') {
           if (msg.model) this._statusModel = msg.model.replace(/\[.*$/, '');
+          if (msg.permissionMode) this._statusPermMode = msg.permissionMode;
           if (msg.slash_commands) this._slashCommands = msg.slash_commands.map(c => '/' + c);
           this._updateStatusBar();
         }
@@ -1364,6 +1365,7 @@ class ChatView {
       this._statusTokensOut = u.output_tokens || 0;
     }
     if (status.total_cost_usd) this._statusCost = status.total_cost_usd;
+    if (status.permissionMode) this._statusPermMode = status.permissionMode;
     if (status.slashCommands) this._slashCommands = status.slashCommands.map(c => c.startsWith('/') ? c : '/' + c);
     this._updateStatusBar();
   }
@@ -1375,6 +1377,11 @@ class ChatView {
     // Model badge
     if (this._statusModel) {
       parts.push(`<span class="chat-status-model">${escHtml(this._statusModel)}</span>`);
+    }
+
+    // Permission mode
+    if (this._statusPermMode) {
+      parts.push(`<span class="chat-status-perm">\uD83D\uDD12 ${escHtml(this._statusPermMode)}</span>`);
     }
 
     // Context % with emoji + progress bar
