@@ -33,9 +33,26 @@ Sessions grouped by working directory. Each folder header shows:
 ### Groups tab
 User-created groups for organizing sessions across directories. See [Session Groups](#session-groups) below.
 
+## Session Modes
+
+Each session runs in one of two modes:
+
+- **Terminal** -- full TUI rendered via xterm.js (the classic Claude Code experience)
+- **Chat** -- structured message view with markdown, tool visualization, and permissions (see [Chat Mode](chat-mode.md))
+
+Chat sessions display a speech bubble icon next to their status badge in the sidebar.
+
+### Default mode
+
+Configure the default mode for new sessions and single-click resume via Settings > Session Card > **Default session mode**. The default is Chat.
+
+### Choosing mode on resume
+
+When resuming a stopped session, the resume button uses your default mode. A split button next to it lets you explicitly choose Terminal or Chat. The mode you last used for a session is persisted.
+
 ## Session Cards
 
-Each session appears as a compact card showing: name, status badge, and expand arrow.
+Each session appears as a compact card showing: name, status badge, mode icon (for chat), and expand arrow.
 
 ### Card click behavior
 
@@ -47,6 +64,13 @@ Configurable via Settings > Session Card > **Card click behavior**:
 | **Expand** | Expands/collapses card details | Click itself | Buttons in detail panel |
 | **Flash** | Flashes/bounces the session window | ▸ arrow button | Buttons in detail panel |
 
+### Session card display
+
+Session card details use smart truncation for readability:
+- **Session ID** -- mid-truncated (first and last characters visible, middle replaced with ellipsis)
+- **Working directory** -- left-truncated (shows the end of the path, which is most informative)
+- **Click-to-copy** -- when enabled (Settings > Session Card > **Click to copy**), clicking the session ID or CWD copies it to the clipboard
+
 ### Expanded card details
 
 Click the ▸ arrow to expand any card. The detail panel shows:
@@ -55,6 +79,7 @@ Click the ▸ arrow to expand any card. The detail panel shows:
 - Action buttons: Rename, Find, Attach/Resume, Terminate (red, with confirmation)
 
 Configure visible fields via Settings > Session Card > **Visible detail fields**.
+Configure truncation direction via Settings > Session Card > **Detail truncation**.
 
 ### Star and archive
 

@@ -71,6 +71,13 @@ Overrides persist in the layout auto-save.
 | `terminal.preserveScrollOnFit` | boolean | `false` | Keep scroll position anchored on terminal resize |
 | `terminal.waitingBlinkBehavior` | enum | `onlyUnfocused` | When to blink on idle: always, only when unfocused, never |
 
+### Chat
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `chat.compactMode` | boolean | `true` | Dense document-style layout instead of chat bubbles |
+| `chat.roleIndicator` | enum | `border` | How to distinguish user vs assistant messages: color border, background tint, icon, or text label |
+
 ### Sidebar
 
 | Setting | Type | Default | Description |
@@ -82,6 +89,7 @@ Overrides persist in the layout auto-save.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
+| `session.defaultMode` | enum | `chat` | Default mode for new sessions and single-click resume: Terminal or Chat |
 | `sessionCard.clickBehavior` | enum | `focus` | Card click: focus window, expand details, or flash window |
 | `sessionCard.clickToCopy` | boolean | `false` | Click detail values (ID, path, time) to copy to clipboard |
 | `sessionCard.visibleFields` | multiSelect | all fields | Which fields to show in expanded card details |

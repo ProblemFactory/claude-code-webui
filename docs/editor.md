@@ -26,6 +26,8 @@ The split-pane editor uses CodeMirror 6 with:
 - **Word wrap** — Toggle button in toolbar
 - **Font size** — A-/A+ buttons
 - **Theme** — Follows terminal theme (dark/light auto-detection)
+- **Markdown preview** — Toggle between code editing and rendered preview for `.md` files
+- **Jump to line** — When opened from a path with a `:line` suffix, the editor jumps to and highlights that line
 - **Indent with Tab** — Standard tab indentation
 - **Line numbers** — Always visible
 
@@ -37,6 +39,7 @@ The split-pane editor uses CodeMirror 6 with:
 | Wrap toggle | Toggle word wrap on/off |
 | A- / A+ | Decrease / increase font size |
 | Theme toggle | Switch dark/light |
+| Preview | Toggle markdown preview (`.md` files only) |
 | **Save & Close** | Write file and close editor pane |
 
 ## Resizable Split

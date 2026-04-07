@@ -22,6 +22,15 @@ Open the same WebUI from multiple browsers or devices:
 - When a client disconnects, the size may increase for remaining clients
 - Editor open/close events broadcast to all clients for correct window targeting
 
+## WebSocket Auto-Reconnect
+
+If the connection to the server is lost (network interruption, server restart):
+
+- The WebSocket client automatically reconnects with a 2-second retry interval
+- All active terminal sessions are re-attached on reconnect
+- Chat sessions re-attach and sync any missed messages (see [Chat Mode](chat-mode.md))
+- Pending messages are queued and sent once the connection is restored
+
 ## Per-Terminal Settings
 
 Each terminal window has a gear icon (⚙) in the title bar. Click it to customize:

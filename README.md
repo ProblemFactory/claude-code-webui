@@ -6,21 +6,59 @@ A web-based UI for managing multiple [Claude Code](https://docs.anthropic.com/en
 
 ## Features
 
+### Dual-Mode Sessions
+- **Terminal mode** -- full TUI via xterm.js with dtach persistence (survive server restarts)
+- **Chat mode** -- structured message view with markdown rendering, tool visualization, and interactive permissions
+- Default mode configurable per-user; split button on resume to choose Terminal or Chat
+
+### Chat Mode
+- **Structured messages** -- user/assistant/tool/thinking blocks rendered with markdown and syntax highlighting
+- **Tool visualization** -- Edit diffs, file read/write summaries, collapsible tool results with first-line preview
+- **Interactive permissions** -- Allow / Always Allow / Deny buttons inline on tool cards (`--permission-prompt-tool` support)
+- **Subagent support** -- Agent tool cards show live status during execution; View Log opens a read-only ChatView
+- **Search** -- Ctrl+F with CSS Custom Highlight API, match counter, prev/next navigation across full history
+- **Status bar** -- model badge, context % with color-coded progress bar, cache hit ratio, cost with color tiers, permission mode
+- **Slash command autocomplete** -- type `/` to see all commands, arrow keys to navigate, Tab/Enter to accept
+- **Image paste** -- paste images from clipboard as message attachments (inline preview, removable)
+- **Interrupt** -- Stop button in streaming status bar to interrupt Claude mid-response
+- **Open in Editor** -- clipboard button on messages and tool cards opens content in a temporary CodeEditor window
+- **System notifications** -- task-notification and system-reminder messages detected and rendered separately
+- **Collapsible long messages** -- messages over 500 characters auto-collapse with preview
+- **View Manager** -- sliding window pagination over full conversation history; scroll up to load earlier messages
+- **Reconnect sync** -- on WebSocket reconnect, automatically re-attaches and fetches missed messages
+
+### Terminal Mode
 - **Multi-session terminals** with dtach persistence (survive server restarts)
+- **Pin-to-bottom** -- scroll up freezes output; scroll back or click arrow to resume
+- **Idle detection** -- window blinks orange when Claude finishes and waits for input
+- **Clipboard image paste** -- Ctrl+V images from clipboard directly into Claude Code's TUI
+- **Ctrl+G external editor** -- split-pane CodeMirror integration without screen clearing
+
+### Window Manager
 - **Tiling window manager** with drag/resize, grid snap, edge snap, custom grid presets, command mode (Ctrl+\\)
-- **Session groups**: Folders | Groups dual tab, folder linking, drag sessions/folders to groups, right-click context menu
-- **Session management**: star/archive, rename, status filters, quick tabs, clickBehavior (focus/expand/flash)
-- **File explorer** with list/icon views, drag-to-terminal, upload/download, bookmarks (drag-reorder, right-click), "Add to group" on folders
-- **File viewers**: PDF, images (zoom + pan), video, audio, CSV, Excel, Word, Markdown (preview/edit/split), hex
-- **Code editor** (CodeMirror 6) with syntax highlighting, Ctrl+G split-pane integration
+- **Overlap switcher** -- right-click title bar to switch between overlapping windows
+- **Proportional tracking** -- windows maintain relative positions on workspace resize
+
+### Sessions
+- **Session discovery** -- auto-detects running Claude Code sessions (Live/Tmux/External/Stopped)
+- **Session groups** -- Folders | Groups dual tab, folder linking, drag sessions/folders to groups
+- **Session management** -- star/archive, rename, status filters, quick tabs, clickBehavior (focus/expand/flash)
+- **Session cards** -- ID mid-truncation, CWD left-truncation, click-to-copy on ID/CWD
+- **Multi-device sync** -- share sessions across browsers, auto-resize to smallest client
+
+### File Management
+- **File explorer** with list/icon views, drag-to-terminal, upload/download, bookmarks
+- **File viewers** -- PDF, images (zoom + pan), video, audio, CSV, Excel, Word, hex
+- **Code editor** (CodeMirror 6) -- syntax highlighting, markdown preview toggle, jump to line from `:line` paths
+- **Clickable file paths** -- in chat messages and tool cards; click to copy, Ctrl+click to open; supports `:line`, `:line:col`, `:line-line` suffixes
+
+### General
 - **Embedded browser** with URL bar and node-unblocker proxy mode for iframe-restricted sites
-- **6 color themes**: Dark, Light, Dracula, Nord, Solarized, Monokai
-- **Settings system**: VS Code-style UI, per-terminal overrides (theme/font/size), active window highlight intensity
-- **Session discovery**: auto-detects running Claude Code sessions (tmux, dtach, external)
-- **Multi-device sync**: share terminal sessions across browsers, auto-resize to smallest client
-- **Clipboard image paste**: Ctrl+V images from your local clipboard into Claude Code
-- **Presets**: save/restore full workspace state (windows, positions, grid, theme, fonts)
-- **Rate limit monitoring**: 5-hour and 7-day usage display from Anthropic API
+- **6 color themes** -- Dark, Light, Dracula, Nord, Solarized, Monokai
+- **Settings system** -- VS Code-style UI, per-terminal overrides (theme/font/size), active window highlight intensity
+- **Presets** -- save/restore full workspace state (windows, positions, grid, theme, fonts)
+- **Rate limit monitoring** -- 5-hour and 7-day usage display from Anthropic API
+- **WebSocket auto-reconnect** -- re-attaches all active sessions on connection recovery
 
 ## Quick Install
 
@@ -75,15 +113,22 @@ npm run build
 ## How It Works
 
 ```
-Browser (xterm.js) <-> WebSocket <-> node-pty (dtach) <-> pty-wrapper.js <-> claude CLI
-                                                               |
-                                                         buffer file (persistent)
+Terminal mode:
+  Browser (xterm.js) <-> WebSocket <-> node-pty (dtach) <-> pty-wrapper.js <-> claude CLI
+                                                                  |
+                                                            buffer file (persistent)
+
+Chat mode:
+  Browser (ChatView) <-> WebSocket <-> node-pty (dtach) <-> chat-wrapper.js <-> claude --stream-json
+                                                                  |
+                                                            buffer file (JSON lines)
 ```
 
 - **dtach** provides PTY detach/attach with zero rendering overhead (unlike tmux/screen)
-- **pty-wrapper.js** runs inside dtach, captures all output to a buffer file for server restart recovery
-- **Server** manages sessions, broadcasts terminal I/O to all connected clients
-- **Client** is vanilla JS with xterm.js (terminal), CodeMirror 6 (editor), and a custom window manager
+- **pty-wrapper.js** (terminal) and **chat-wrapper.js** (chat) run inside dtach, capture output to buffer files
+- Both wrappers survive server restarts -- dtach keeps them alive independently
+- **Server** manages sessions, broadcasts I/O to all connected clients, handles permission prompts
+- **Client** is vanilla JS with xterm.js (terminal), ChatView (chat), CodeMirror 6 (editor), and a custom window manager
 
 ## Keyboard Shortcuts
 
@@ -115,10 +160,13 @@ Browser (xterm.js) <-> WebSocket <-> node-pty (dtach) <-> pty-wrapper.js <-> cla
 See the **[docs/](docs/)** directory for detailed guides:
 
 - [Getting Started](docs/getting-started.md) — Installation, first run, quick tour
+- [Chat Mode](docs/chat-mode.md) — Structured messages, tool visualization, permissions, search, subagents
 - [Terminal Management](docs/terminal.md) — Persistence, multi-device, clipboard, fonts
 - [Window Manager](docs/window-manager.md) — Grid, snap, command mode, presets
 - [Session Management](docs/sessions.md) — Groups, star/archive, drag-drop, filters
-- [File Explorer](docs/file-explorer.md) — Browsing, bookmarks, viewers
+- [File Explorer](docs/file-explorer.md) — Browsing, bookmarks, viewers, code editor
+- [External Editor](docs/editor.md) — Ctrl+G split-pane CodeMirror integration
+- [Embedded Browser](docs/browser.md) — Iframe browser with proxy mode
 - [Settings](docs/settings.md) — All configuration options
 - [Keyboard Shortcuts](docs/keyboard-shortcuts.md) — Complete reference
 

@@ -84,7 +84,7 @@ Double-click a file to open it in the appropriate viewer:
 | Type | Viewer | Features |
 |------|--------|----------|
 | Code/text | CodeMirror 6 | Syntax highlighting, word wrap, font size, dark/light theme |
-| Markdown | MarkdownViewer | Preview, Edit, and Split modes |
+| Markdown (.md) | CodeMirror 6 | Edit mode with Preview toggle (rendered markdown view) |
 | PDF | iframe | Native browser PDF viewer |
 | Images | ImageViewer | Zoom (scroll wheel), drag-to-pan |
 | Video | Native `<video>` | Browser's built-in controls |
@@ -94,6 +94,18 @@ Double-click a file to open it in the appropriate viewer:
 | Word (.docx) | HTML | Converted to HTML via server-side library |
 | HTML | Dual mode | Preview (iframe) and Code (CodeEditor) toggle |
 | Binary | HexViewer | Hex + ASCII display with 64KB chunk loading |
+
+### Code editor features
+
+The CodeMirror-based code editor supports:
+- **Syntax highlighting** for JavaScript, Python, JSON, Markdown, HTML, CSS
+- **Language override** dropdown to force a specific language
+- **Word wrap** toggle
+- **Font size** controls (A-/A+)
+- **Theme toggle** (dark/light)
+- **Markdown preview** toggle -- for `.md` files, switch between code editing and rendered preview
+- **Jump to line** -- when opened from a path with a `:line` suffix (e.g., from a chat message clickable path), the editor jumps to that line
+- **Save** (Ctrl+S) and **Download** buttons
 
 ### Large file handling
 - Files **>1MB** show a size warning before opening

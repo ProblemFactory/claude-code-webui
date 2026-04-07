@@ -8,6 +8,22 @@
 | **Ctrl+V** | Paste text or image from clipboard |
 | **Ctrl+C** | Copy selection to clipboard (sends SIGINT if no selection) |
 
+## Chat Mode Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| **Enter** | Send message (normal mode) |
+| **Ctrl+Enter** | Send message (expanded input mode) |
+| **Shift+Enter** | Insert newline |
+| **Ctrl+F** | Open search bar |
+| **Enter** (in search) | Next search result |
+| **Shift+Enter** (in search) | Previous search result |
+| **Escape** (in search) | Close search bar |
+| **/** | Show slash command autocomplete |
+| **Tab** / **Enter** (in autocomplete) | Accept selected slash command |
+| **Arrow Up/Down** (in autocomplete) | Navigate slash command list |
+| **Ctrl+V** | Paste image as attachment |
+
 ## Command Mode
 
 Press **Ctrl+\\** to enter command mode. A yellow **[CMD]** indicator appears in the taskbar.

@@ -57,7 +57,7 @@ Example: `PORT=8080 HOST=127.0.0.1 npm start`
 The UI has four main areas:
 
 1. **Sidebar** (left) — Session list grouped by working directory. Star, archive, rename, and organize sessions into groups.
-2. **Workspace** (center) — Tiling window manager with draggable, resizable windows for terminals, file explorers, editors, and browsers.
+2. **Workspace** (center) — Tiling window manager with draggable, resizable windows for terminals, chat views, file explorers, editors, and browsers.
 3. **Toolbar** (top of workspace) — Theme selector, layout presets, grid controls, new session, settings.
 4. **Taskbar** (bottom) — Active window tabs, usage monitor, "x active" count.
 
@@ -65,7 +65,10 @@ The UI has four main areas:
 
 1. Click **"+ New Session"** in the toolbar or sidebar
 2. Enter a working directory (with autocomplete) and optional CLI arguments
-3. A terminal window opens with a Claude Code session
+3. Choose **Terminal** or **Chat** mode (default is configurable in Settings > Session Card > Default session mode)
+4. A window opens with your Claude Code session
+
+**Terminal mode** gives you the full Claude Code TUI via xterm.js. **Chat mode** gives you a structured message view with markdown rendering, tool visualization, and interactive permission prompts. See [Chat Mode](chat-mode.md) for details.
 
 ### Opening a file explorer
 
@@ -80,6 +83,8 @@ The sidebar auto-discovers all Claude Code sessions on your machine:
 - **EXTERNAL** — Running in another terminal (view-only)
 - **STOPPED** — Click to resume via `claude --resume`
 
+When resuming a stopped session, a split button lets you choose Terminal or Chat mode. The mode you last used for a session is remembered.
+
 ## Updating
 
 ```bash
@@ -93,6 +98,7 @@ Or re-run the one-line install command.
 
 ## Next steps
 
+- [Chat Mode](chat-mode.md) — Structured messages, tool visualization, permissions, subagents
 - [Terminal Management](terminal.md) — Session persistence, multi-device sync, clipboard paste
 - [Window Manager](window-manager.md) — Grid layouts, command mode, presets
 - [Session Management](sessions.md) — Groups, star/archive, filters
