@@ -1413,7 +1413,7 @@ wss.on('connection', (ws) => {
           const response = {
             type: 'control_response',
             response: data.approved
-              ? { subtype: 'success', request_id: data.requestId, response: { behavior: 'allow' } }
+              ? { subtype: 'success', request_id: data.requestId, response: { behavior: 'allow', updatedInput: data.toolInput || {} } }
               : { subtype: 'success', request_id: data.requestId, response: { behavior: 'deny', message: 'User denied this action' } },
           };
           session.pty.write(JSON.stringify(response) + '\n');
@@ -1457,6 +1457,12 @@ wss.on('connection', (ws) => {
               } catch {}
             }
             const allMessages = [...jsonlHistory, ...bufferMessages];
+            // Sort by timestamp to handle buffer/JSONL interleaving
+            allMessages.sort((a, b) => {
+              const ta = a.timestamp || '';
+              const tb = b.timestamp || '';
+              return ta < tb ? -1 : ta > tb ? 1 : 0;
+            });
             const PAGE_SIZE = 50;
             const chatHistory = allMessages.slice(-PAGE_SIZE);
             const totalCount = allMessages.length;

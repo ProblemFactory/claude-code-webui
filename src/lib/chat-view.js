@@ -1280,8 +1280,9 @@ class ChatView {
       const btnDeny = document.createElement('button');
       btnDeny.className = 'chat-permission-btn chat-permission-deny';
       btnDeny.textContent = 'Deny';
+      const toolInput = input;
       const respond = (approved) => {
-        this.ws.send({ type: 'permission-response', sessionId: this.sessionId, requestId, approved });
+        this.ws.send({ type: 'permission-response', sessionId: this.sessionId, requestId, approved, toolInput });
         actions.innerHTML = approved
           ? '<span class="chat-permission-resolved chat-permission-allowed">\u2713 Allowed</span>'
           : '<span class="chat-permission-resolved chat-permission-denied">\u2717 Denied</span>';
