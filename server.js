@@ -136,8 +136,16 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
         try {
           const msg = JSON.parse(line);
           if (msg.parent_tool_use_id || msg.isSidechain) {
-            // Subagent message — broadcast separately so client can route to Agent card
-            broadcastToSession(session, id, { type: 'subagent-message', sessionId: id, parentToolUseId: msg.parent_tool_use_id, message: msg });
+            const ptuid = msg.parent_tool_use_id;
+            // Buffer subagent messages for attach
+            if (ptuid) {
+              if (!session.subagentBuffers) session.subagentBuffers = new Map();
+              if (!session.subagentBuffers.has(ptuid)) session.subagentBuffers.set(ptuid, []);
+              session.subagentBuffers.get(ptuid).push(msg);
+            }
+            // Broadcast to parent (for tool card status) + virtual session (for subagent viewer)
+            broadcastToSession(session, id, { type: 'subagent-message', sessionId: id, parentToolUseId: ptuid, message: msg });
+            if (ptuid) broadcastToSession(session, id, { type: 'chat-message', sessionId: `sub-${ptuid}`, message: msg });
             continue;
           }
           broadcastToSession(session, id, { type: 'chat-message', sessionId: id, message: msg });
@@ -1546,6 +1554,52 @@ wss.on('connection', (ws) => {
       }
 
       case 'attach': {
+        // Virtual subagent session: sub-{parentToolUseId} or sub-agent-{agentId}
+        if (data.sessionId?.startsWith('sub-')) {
+          const subId = data.sessionId;
+          if (subId.startsWith('sub-agent-')) {
+            // Completed agent: load from JSONL
+            const agentId = subId.slice('sub-agent-'.length);
+            // Find parent session to get claudeSessionId/cwd
+            const parentId = data.parentSessionId;
+            const parentSession = parentId ? activeSessions.get(parentId) : null;
+            const claudeId = parentSession?.claudeSessionId || data.claudeSessionId || '';
+            const cwd = parentSession?.cwd || data.cwd || '';
+            const projectsDir = path.join(os.homedir(), '.claude', 'projects');
+            const projDir = cwdToProjectDir(cwd);
+            let messages = [], meta = {};
+            const candidates = [path.join(projectsDir, projDir, claudeId, 'subagents')];
+            try { for (const dir of fs.readdirSync(projectsDir)) { const fp = path.join(projectsDir, dir, claudeId, 'subagents'); if (!candidates.includes(fp)) candidates.push(fp); } } catch {}
+            for (const subDir of candidates) {
+              const fp = path.join(subDir, `agent-${agentId}.jsonl`);
+              try {
+                if (!fs.existsSync(fp)) continue;
+                for (const line of fs.readFileSync(fp, 'utf-8').split('\n')) {
+                  try { const m = JSON.parse(line.trim()); if (m.type === 'user' || m.type === 'assistant' || m.type === 'result') messages.push(m); } catch {}
+                }
+                try { meta = JSON.parse(fs.readFileSync(fp.replace('.jsonl', '.meta.json'), 'utf-8')); } catch {}
+                break;
+              } catch {}
+            }
+            ws.send(JSON.stringify({ type: 'attached', sessionId: subId, mode: 'chat', chatHistory: messages, totalCount: messages.length, meta }));
+          } else {
+            // Live agent: sub-{parentToolUseId} — find parent session and return buffered messages
+            const toolUseId = subId.slice('sub-'.length);
+            let found = false;
+            for (const [sid, sess] of activeSessions) {
+              if (sess.subagentBuffers?.has(toolUseId)) {
+                sess.clients.set(ws, { cols: 120, rows: 30 }); // register for broadcasts
+                const msgs = sess.subagentBuffers.get(toolUseId);
+                ws.send(JSON.stringify({ type: 'attached', sessionId: subId, mode: 'chat', chatHistory: msgs, totalCount: msgs.length }));
+                found = true;
+                break;
+              }
+            }
+            if (!found) ws.send(JSON.stringify({ type: 'attached', sessionId: subId, mode: 'chat', chatHistory: [], totalCount: 0 }));
+          }
+          break;
+        }
+
         const session = activeSessions.get(data.sessionId);
         if (session) {
           session.clients.set(ws, { cols: 120, rows: 30 });

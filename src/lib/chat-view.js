@@ -114,7 +114,6 @@ class ChatView {
 
     // Input area (skip for read-only viewers)
     if (this._readOnly) {
-      // Disable content-visibility for read-only (small message count, avoids scroll issues)
       container.classList.add('chat-no-content-visibility');
       container.tabIndex = -1;
       winInfo.content.appendChild(container);
@@ -129,10 +128,16 @@ class ChatView {
         }
         if (e.target.classList.contains('chat-agent-view-btn')) {
           e.stopPropagation();
-          if (e.target.dataset.agentId) this._openAgentLog(e.target.dataset.agentId);
+          this._openSubagentViewer({ agentId: e.target.dataset.agentId, parentToolUseId: e.target.dataset.parentToolId });
         }
       });
-      this._handler = () => {};
+      // Subscribe to messages for this session (virtual or real)
+      this._handler = (msg) => {
+        if (msg.type === 'chat-message' && msg.sessionId === sessionId) {
+          this._onMessage(msg.message);
+        }
+      };
+      this.ws.onGlobal(this._handler);
       this._stateHandler = () => {};
       return;
     }
@@ -379,17 +384,9 @@ class ChatView {
       // Agent View Log button
       if (e.target.classList.contains('chat-agent-view-btn')) {
         e.stopPropagation();
-        if (e.target.dataset.agentId) {
-          this._openAgentLog(e.target.dataset.agentId);
-        } else if (e.target.dataset.parentToolId) {
-          this._openLiveAgentLog(e.target.dataset.parentToolId);
-        }
+        this._openSubagentViewer({ agentId: e.target.dataset.agentId, parentToolUseId: e.target.dataset.parentToolId });
       }
     });
-
-    // Buffer for live subagent messages (parentToolUseId → messages[])
-    this._subagentBuffers = new Map();
-    this._subagentViews = new Map(); // parentToolUseId → ChatView (live viewer)
 
     // Listen for chat messages from server
     this._handler = (msg) => {
@@ -736,17 +733,17 @@ class ChatView {
             const inputStr = stripAnsi(typeof pendingUse.input === 'string' ? pendingUse.input : JSON.stringify(pendingUse.input, null, 2));
             const desc = pendingUse.input?.description || '';
             const firstLine = resultText.split('\n')[0].substring(0, 120) || '(empty)';
-            // Find agentId: from result text, buffer, or description match
+            // Find agentId from result text or description match
             const agentMatch = resultText.match(/agentId:\s*([a-z0-9]+)/);
             let agentId = agentMatch ? agentMatch[1] : '';
             if (!agentId && desc && this._subagentMetas) {
               const meta = this._subagentMetas.find(m => m.description === desc);
               if (meta) agentId = meta.agentId;
             }
-            const hasBuffer = this._subagentBuffers.has(toolId);
-            let viewBtn = '';
-            if (agentId) viewBtn = ` <button class="chat-agent-view-btn" data-agent-id="${escHtml(agentId)}">View Log</button>`;
-            else if (hasBuffer) viewBtn = ` <button class="chat-agent-view-btn" data-parent-tool-id="${escHtml(toolId)}">View Log</button>`;
+            // View Log: agentId for JSONL, parentToolUseId for server buffer
+            const viewBtn = agentId
+              ? ` <button class="chat-agent-view-btn" data-agent-id="${escHtml(agentId)}">View Log</button>`
+              : ` <button class="chat-agent-view-btn" data-parent-tool-id="${escHtml(toolId)}">View Log</button>`;
             html = `<div class="chat-tool-use"><span class="chat-tool-label">\uD83E\uDD16 Agent: ${escHtml(desc)}${viewBtn}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this._linkifyText(inputStr)}</pre></details><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${escHtml(firstLine)}</summary><pre>${this._linkifyText(resultText)}</pre></details></div>`;
           } else {
             // Other tool success — show with collapsible input + output (no truncation)
@@ -1463,13 +1460,11 @@ class ChatView {
 
   _onSubagentMessage(parentToolUseId, msg) {
     if (!parentToolUseId) return;
-    // Buffer the message
-    if (!this._subagentBuffers.has(parentToolUseId)) {
-      this._subagentBuffers.set(parentToolUseId, []);
-    }
-    this._subagentBuffers.get(parentToolUseId).push(msg);
+    // Track message count for tool card status
+    if (!this._subagentCounts) this._subagentCounts = new Map();
+    this._subagentCounts.set(parentToolUseId, (this._subagentCounts.get(parentToolUseId) || 0) + 1);
 
-    // Update pending Agent card with message count + View Log button
+    // Update pending Agent card status
     const pending = this._messageList.querySelector(`[data-tool-id="${parentToolUseId}"]`);
     if (pending) {
       let statusEl = pending.querySelector('.chat-agent-live-status');
@@ -1480,11 +1475,10 @@ class ChatView {
         if (outputPending) outputPending.before(statusEl);
         else pending.appendChild(statusEl);
       }
-      const count = this._subagentBuffers.get(parentToolUseId).length;
-      const lastMsg = msg;
+      const count = this._subagentCounts.get(parentToolUseId);
       let activity = '';
-      if (lastMsg.type === 'assistant') {
-        const c = lastMsg.message?.content;
+      if (msg.type === 'assistant') {
+        const c = msg.message?.content;
         if (Array.isArray(c)) {
           const last = c[c.length - 1];
           if (last?.type === 'tool_use') activity = `running ${last.name}`;
@@ -1494,48 +1488,32 @@ class ChatView {
       }
       statusEl.innerHTML = `<span class="chat-agent-live-count">${count} messages${activity ? ' \u2022 ' + escHtml(activity) : ''}</span> <button class="chat-agent-view-btn" data-parent-tool-id="${escHtml(parentToolUseId)}">View Log</button>`;
     }
-
-    // Forward to live viewer if open
-    const liveView = this._subagentViews.get(parentToolUseId);
-    if (liveView) {
-      liveView._onMessage(msg);
-    }
   }
 
-  _openLiveAgentLog(parentToolUseId) {
-    const existing = this._subagentViews.get(parentToolUseId);
-    if (existing) {
-      if (existing._winId) this.app.wm.focusWindow(existing._winId);
-      return;
-    }
+  // Unified subagent viewer: works for both live (parentToolUseId) and completed (agentId)
+  _openSubagentViewer({ parentToolUseId, agentId, description }) {
+    // Virtual session ID for subscribing to messages
+    const virtualId = agentId ? `sub-agent-${agentId}` : `sub-${parentToolUseId}`;
+    const title = `\uD83E\uDD16 ${description || 'Agent'}`;
+    const winInfo = this.app.wm.createWindow({ title, type: 'chat' });
+    const view = new ChatView(winInfo, this.ws, virtualId, this.app, { readOnly: true });
 
-    const msgs = this._subagentBuffers.get(parentToolUseId) || [];
-    const winInfo = this.app.wm.createWindow({ title: '\uD83E\uDD16 Agent (live)', type: 'viewer' });
-    const view = new ChatView(winInfo, this.ws, null, this.app, { readOnly: true });
-    view._winId = winInfo.id;
-    if (msgs.length) view.loadHistory(msgs, msgs.length);
-    this._subagentViews.set(parentToolUseId, view);
-    winInfo.onClose = () => {
-      view.dispose();
-      this._subagentViews.delete(parentToolUseId);
-      this.app._checkWelcome();
-    };
-  }
-
-  _openAgentLog(agentId) {
+    // Attach to virtual session — server returns history + sets up live forwarding
     const { claudeId, cwd } = this._getSessionIds();
-    if (!claudeId) return;
-    fetch(`/api/subagent-messages?claudeSessionId=${encodeURIComponent(claudeId)}&cwd=${encodeURIComponent(cwd)}&agentId=${encodeURIComponent(agentId)}`)
-      .then(r => r.json())
-      .then(data => {
-        if (!data.messages?.length) return;
-        const desc = data.meta?.description || `Agent ${agentId.substring(0, 8)}`;
-        const winInfo = this.app.wm.createWindow({ title: `\uD83E\uDD16 ${desc}`, type: 'viewer' });
-        const view = new ChatView(winInfo, this.ws, null, this.app, { readOnly: true });
-        view.loadHistory(data.messages, data.total);
-        winInfo.onClose = () => { view.dispose(); this.app._checkWelcome(); };
-      })
-      .catch(() => {});
+    this.ws.send({ type: 'attach', sessionId: virtualId, parentSessionId: this.sessionId, claudeSessionId: claudeId, cwd });
+
+    // One-time handler for attach response
+    const handler = (msg) => {
+      if (msg.type === 'attached' && msg.sessionId === virtualId) {
+        this.ws.offGlobal(handler);
+        if (msg.chatHistory?.length) {
+          view.loadHistory(msg.chatHistory, msg.totalCount);
+        }
+      }
+    };
+    this.ws.onGlobal(handler);
+
+    winInfo.onClose = () => { view.dispose(); this.app._checkWelcome(); };
   }
 
   // Update typing indicator based on assistant message content
