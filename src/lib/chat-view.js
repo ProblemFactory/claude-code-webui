@@ -321,7 +321,7 @@ class ChatView {
       if (!el) return;
       let dropdown = this._statusBar.querySelector('.chat-status-dropdown');
       if (dropdown) { dropdown.remove(); return; }
-      const modes = ['default', 'acceptEdits', 'bypassPermissions', 'plan', 'auto'];
+      const modes = this._permissionModes || ['default', 'acceptEdits', 'bypassPermissions', 'plan', 'auto'];
       dropdown = document.createElement('div');
       dropdown.className = 'chat-status-dropdown';
       for (const mode of modes) {
@@ -1524,6 +1524,7 @@ class ChatView {
     }
     if (status.total_cost_usd) this._statusCost = status.total_cost_usd;
     if (status.permissionMode) this._statusPermMode = status.permissionMode;
+    if (status.permissionModes) this._permissionModes = status.permissionModes;
     if (status.slashCommands) this._slashCommands = status.slashCommands.map(c => c.startsWith('/') ? c : '/' + c);
     this._updateStatusBar();
   }

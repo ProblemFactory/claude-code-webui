@@ -32,6 +32,16 @@ const NODE_CMD = process.execPath;
 const ENV_CMD = resolveCmd('env');
 const CLAUDE_CMD = CLAUDE_CMD_RAW.startsWith('/') ? CLAUDE_CMD_RAW : resolveCmd(CLAUDE_CMD_RAW);
 const SESSIONS_DIR = path.join(os.homedir(), '.claude', 'sessions');
+
+// Parse available permission modes from claude --help (cached on startup)
+let PERMISSION_MODES = ['default', 'acceptEdits', 'auto', 'bypassPermissions', 'dontAsk', 'plan'];
+try {
+  const help = execFileSync(CLAUDE_CMD, ['--help'], { encoding: 'utf-8', timeout: 5000 });
+  const match = help.match(/--permission-mode.*choices:\s*(.+)\)/);
+  if (match) {
+    PERMISSION_MODES = match[1].match(/"([^"]+)"/g)?.map(s => s.replace(/"/g, '')) || PERMISSION_MODES;
+  }
+} catch {}
 const HOST = process.env.HOST || '0.0.0.0';
 const EDITOR_SCRIPT = path.join(__dirname, 'editor-helper.sh');
 
@@ -1079,7 +1089,7 @@ app.get('/api/session-messages', (req, res) => {
     let permissionMode = null;
     for (const m of allMessages) { if (m.type === 'system' && m.subtype === 'init') { if (m.slash_commands) slashCommands = m.slash_commands; if (!model && m.model) model = m.model; if (m.permissionMode) permissionMode = m.permissionMode; break; } }
     for (const m of allMessages) { if (m.type === 'result' && m.total_cost_usd) totalCost += m.total_cost_usd; }
-    if (lastUsage || model) chatStatus = { model, lastUsage, contextWindow, total_cost_usd: totalCost, slashCommands, permissionMode };
+    if (lastUsage || model) chatStatus = { model, lastUsage, contextWindow, total_cost_usd: totalCost, slashCommands, permissionMode, permissionModes: PERMISSION_MODES };
   }
 
   if (search) {
@@ -1571,7 +1581,7 @@ wss.on('connection', (ws) => {
               if (m.type === 'result' && m.total_cost_usd) totalCost += m.total_cost_usd;
             }
             if (lastUsage || model) {
-              chatStatus = { model, lastUsage, contextWindow, total_cost_usd: totalCost, slashCommands, permissionMode };
+              chatStatus = { model, lastUsage, contextWindow, total_cost_usd: totalCost, slashCommands, permissionMode, permissionModes: PERMISSION_MODES };
             }
 
             // Detect if Claude is mid-stream: check buffer (current run) not JSONL (history)
