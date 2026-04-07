@@ -682,7 +682,7 @@ class App {
 
   createSession({ cwd, name, model, permission, extraArgs, resumeId, mode }) {
     this._hideWelcome();
-    const sessionMode = mode || 'terminal';
+    const sessionMode = mode || this.settings.get('session.defaultMode') || 'chat';
     const sessionName = name || (resumeId ? `Resume ${resumeId.substring(0,8)}` : `Session ${this.wm.windowCounter+1}`);
     const winType = sessionMode === 'chat' ? 'chat' : 'terminal';
     const titlePrefix = sessionMode === 'chat' ? '\uD83D\uDCAC ' : '';
@@ -857,7 +857,7 @@ class App {
       }
     }
 
-    const sessionMode = mode || (this.settings.get('session.defaultMode') ?? 'terminal');
+    const sessionMode = mode || (this.settings.get('session.defaultMode') ?? 'chat');
     this.createSession({ cwd, name: sessionName, resumeId: sessionId, mode: sessionMode });
   }
 
