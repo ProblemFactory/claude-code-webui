@@ -1179,6 +1179,25 @@ html, body {
 }
 .chat-status-ctx-fill { display: block; height: 100%; border-radius: 3px; min-width: 1px; }
 .chat-status-dim { color: var(--text-dim); margin-left: 1px; }
+.chat-status-tasks { font-size: 10px; color: var(--yellow); padding: 0 4px; }
+.chat-status-bar { flex-wrap: wrap; }
+
+/* TODO display */
+.chat-todo-display {
+  width: 100%; font-size: 11px; color: var(--text-dim); padding: 0 2px 2px;
+  cursor: pointer; display: flex; align-items: center;
+}
+.chat-todo-display.hidden { display: none; }
+.chat-todo-display:hover { color: var(--text-secondary); }
+.chat-todo-current { display: flex; align-items: center; gap: 4px; }
+.chat-todo-popup {
+  background: var(--bg-dialog); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3); z-index: 200; padding: 8px 0; max-height: 300px; overflow-y: auto;
+}
+.chat-todo-item { padding: 4px 12px; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chat-todo-completed { color: var(--text-dim); text-decoration: line-through; }
+.chat-todo-in_progress { color: var(--text); font-weight: 500; }
+.chat-todo-pending { color: var(--text-secondary); }
 
 /* Slash command autocomplete */
 .chat-slash-dropdown {

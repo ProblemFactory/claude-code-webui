@@ -273,11 +273,16 @@ class ChatView {
     this._isStreaming = false;
     sendCol.append(sendBtn, this._shortcutHint);
 
+    // TODO display (above streaming status)
+    this._todoDisplay = document.createElement('div');
+    this._todoDisplay.className = 'chat-todo-display hidden';
+    this._todos = [];
+
     // Streaming status indicator (above input)
     this._streamStatus = document.createElement('div');
     this._streamStatus.className = 'chat-stream-status hidden';
 
-    inputArea.append(this._attachArea, this._streamStatus, inputWrap, sendCol);
+    inputArea.append(this._attachArea, this._todoDisplay, this._streamStatus, inputWrap, sendCol);
 
     // Search bar
     const searchBar = document.createElement('div');
@@ -329,8 +334,34 @@ class ChatView {
     container.appendChild(inputArea);
     container.appendChild(this._statusBar);
 
-    // Permission mode click → dropdown
+    // Status bar clicks
     this._statusBar.addEventListener('click', (e) => {
+      // Background tasks click → popup
+      const taskEl = e.target.closest('.chat-status-tasks');
+      if (taskEl && this._activeTasks?.size) {
+        e.stopPropagation();
+        const existing = container.querySelector('.chat-status-dropdown');
+        if (existing) { existing.remove(); return; }
+        const dropdown = document.createElement('div');
+        dropdown.className = 'chat-status-dropdown';
+        const rect = taskEl.getBoundingClientRect();
+        const containerRect = container.getBoundingClientRect();
+        dropdown.style.position = 'absolute';
+        dropdown.style.bottom = (containerRect.bottom - rect.top + 4) + 'px';
+        dropdown.style.left = (rect.left - containerRect.left) + 'px';
+        for (const [toolUseId, task] of this._activeTasks) {
+          const item = document.createElement('div');
+          item.className = 'chat-status-dropdown-item';
+          item.innerHTML = `<span>\uD83D\uDD04 ${escHtml(task.description)}${task.lastTool ? ' <span class="chat-status-dim">(' + escHtml(task.lastTool) + ')</span>' : ''}</span>`;
+          item.onclick = (ev) => { ev.stopPropagation(); dropdown.remove(); this._openSubagentViewer({ parentToolUseId: toolUseId, description: task.description }); };
+          dropdown.appendChild(item);
+        }
+        container.appendChild(dropdown);
+        const close = (ev) => { if (!dropdown.contains(ev.target)) { dropdown.remove(); document.removeEventListener('mousedown', close); } };
+        setTimeout(() => document.addEventListener('mousedown', close), 0);
+        return;
+      }
+
       const el = e.target.closest('.chat-status-perm');
       if (!el) return;
       e.stopPropagation();
@@ -635,6 +666,21 @@ class ChatView {
           if (msg.slash_commands) this._slashCommands = msg.slash_commands.map(c => '/' + c);
           this._updateStatusBar();
         }
+        if (msg.subtype === 'task_started') {
+          if (!this._activeTasks) this._activeTasks = new Map();
+          this._activeTasks.set(msg.tool_use_id, { id: msg.task_id, description: msg.description, status: 'running' });
+          this._updateStatusBar();
+        }
+        if (msg.subtype === 'task_progress' && this._activeTasks?.has(msg.tool_use_id)) {
+          const task = this._activeTasks.get(msg.tool_use_id);
+          task.description = msg.description || task.description;
+          task.lastTool = msg.last_tool_name;
+          this._updateStatusBar();
+        }
+        if (msg.subtype === 'task_notification' && this._activeTasks?.has(msg.tool_use_id)) {
+          this._activeTasks.delete(msg.tool_use_id);
+          this._updateStatusBar();
+        }
         break;
       case 'result':
         if (!isHistory) {
@@ -872,6 +918,11 @@ class ChatView {
         } else if (block.type === 'thinking') {
           parts.push(`<details class="chat-thinking"><summary>Thinking...</summary><pre>${escHtml(stripAnsi(block.text || ''))}</pre></details>`);
         } else if (block.type === 'tool_use') {
+          // Track TODO list updates
+          if (block.name === 'TodoWrite' && block.input?.todos) {
+            this._todos = block.input.todos;
+            this._updateTodoDisplay();
+          }
           // Defer rendering until tool_result arrives, but show input immediately for non-file tools
           if (block.id) {
             this._pendingToolUses.set(block.id, block);
@@ -1518,6 +1569,42 @@ class ChatView {
     winInfo.onClose = () => { view.dispose(); this.app._checkWelcome(); };
   }
 
+  _updateTodoDisplay() {
+    if (!this._todoDisplay) return;
+    if (!this._todos?.length) { this._todoDisplay.classList.add('hidden'); return; }
+    const inProgress = this._todos.find(t => t.status === 'in_progress');
+    const completed = this._todos.filter(t => t.status === 'completed').length;
+    const total = this._todos.length;
+    if (!inProgress && completed === total) { this._todoDisplay.classList.add('hidden'); return; }
+    const label = inProgress ? inProgress.activeForm || inProgress.content : `${completed}/${total} done`;
+    const icon = inProgress ? '\u23F3' : '\u2705';
+    this._todoDisplay.innerHTML = `<span class="chat-todo-current">${icon} ${escHtml(label)} <span class="chat-status-dim">(${completed}/${total})</span></span>`;
+    this._todoDisplay.classList.remove('hidden');
+    this._todoDisplay.onclick = (e) => {
+      e.stopPropagation();
+      const existing = this._container.querySelector('.chat-todo-popup');
+      if (existing) { existing.remove(); return; }
+      const popup = document.createElement('div');
+      popup.className = 'chat-todo-popup';
+      for (const t of this._todos) {
+        const icon = t.status === 'completed' ? '\u2705' : t.status === 'in_progress' ? '\u23F3' : '\u2B55';
+        const item = document.createElement('div');
+        item.className = `chat-todo-item chat-todo-${t.status}`;
+        item.textContent = `${icon} ${t.content}`;
+        popup.appendChild(item);
+      }
+      const rect = this._todoDisplay.getBoundingClientRect();
+      const containerRect = this._container.getBoundingClientRect();
+      popup.style.position = 'absolute';
+      popup.style.bottom = (containerRect.bottom - rect.top + 4) + 'px';
+      popup.style.left = '12px';
+      popup.style.right = '12px';
+      this._container.appendChild(popup);
+      const close = (ev) => { if (!popup.contains(ev.target) && !this._todoDisplay.contains(ev.target)) { popup.remove(); document.removeEventListener('mousedown', close); } };
+      setTimeout(() => document.addEventListener('mousedown', close), 0);
+    };
+  }
+
   // Update typing indicator based on assistant message content
   _updateTyping(msg) {
     const content = msg.message?.content;
@@ -1563,6 +1650,14 @@ class ChatView {
     // Permission mode (always show, click to change)
     const permLabel = this._statusPermMode || 'default';
     parts.push(`<span class="chat-status-perm chat-status-clickable" title="Click to change permission mode">\uD83D\uDD12 ${escHtml(permLabel)}</span>`);
+
+    // Background tasks
+    if (this._activeTasks?.size > 0) {
+      const count = this._activeTasks.size;
+      const tasks = [...this._activeTasks.values()];
+      const label = count === 1 ? tasks[0].description : `${count} tasks`;
+      parts.push(`<span class="chat-status-tasks chat-status-clickable" title="${escHtml(tasks.map(t => t.description).join(', '))}">\uD83D\uDD04 ${escHtml(label)}</span>`);
+    }
 
     // Context % with emoji + progress bar
     if (this._statusContextWindow && this._statusLastInputTokens) {
