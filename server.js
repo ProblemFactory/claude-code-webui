@@ -1444,25 +1444,25 @@ wss.on('connection', (ws) => {
               for (const m of jsonlHistory) { if (m.uuid) jsonlUuids.add(m.uuid); }
             }
             // Parse buffer for current session output — only include messages
-            // not already in JSONL (dedup by uuid) and filter out noise
+            // Parse buffer: separate regular messages from control_requests
             const bufferMessages = [];
+            const pendingPermissions = {}; // tool_use_id → control_request
             for (const line of (session.buffer || '').split('\n')) {
               const trimmed = line.replace(/\r/g, '').trim();
               if (!trimmed) continue;
               try {
                 const msg = JSON.parse(trimmed);
-                if (msg.type !== 'user' && msg.type !== 'assistant' && msg.type !== 'result' && msg.type !== 'control_request' && !(msg.type === 'system' && msg.subtype === 'init')) continue;
-                if (msg.uuid && jsonlUuids.has(msg.uuid)) continue; // already in JSONL
+                if (msg.type === 'control_request' && msg.request?.tool_use_id) {
+                  pendingPermissions[msg.request.tool_use_id] = msg;
+                  continue;
+                }
+                if (msg.type !== 'user' && msg.type !== 'assistant' && msg.type !== 'result' && !(msg.type === 'system' && msg.subtype === 'init')) continue;
+                if (msg.uuid && jsonlUuids.has(msg.uuid)) continue;
                 bufferMessages.push(msg);
               } catch {}
             }
+            // Buffer messages are always from current run (after JSONL)
             const allMessages = [...jsonlHistory, ...bufferMessages];
-            // Sort by timestamp to handle buffer/JSONL interleaving
-            allMessages.sort((a, b) => {
-              const ta = a.timestamp || '';
-              const tb = b.timestamp || '';
-              return ta < tb ? -1 : ta > tb ? 1 : 0;
-            });
             const PAGE_SIZE = 50;
             const chatHistory = allMessages.slice(-PAGE_SIZE);
             const totalCount = allMessages.length;
@@ -1497,11 +1497,25 @@ wss.on('connection', (ws) => {
             }
 
             // Detect if Claude is mid-stream: check buffer (current run) not JSONL (history)
-            // Only buffer messages reflect current process state
             const lastBufMsg = bufferMessages.length > 0 ? bufferMessages[bufferMessages.length - 1] : null;
             const isStreaming = lastBufMsg && lastBufMsg.type !== 'result' && lastBufMsg.type !== 'system';
 
-            ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, mode: 'chat', chatHistory, totalCount, chatStatus, isStreaming }));
+            // Filter out resolved permissions (tool_use_id has a matching tool_result)
+            const resolvedToolIds = new Set();
+            for (const m of allMessages) {
+              if (m.type !== 'user') continue;
+              const c = m.message?.content;
+              if (!Array.isArray(c)) continue;
+              for (const b of c) {
+                if (b.type === 'tool_result' && b.tool_use_id) resolvedToolIds.add(b.tool_use_id);
+              }
+            }
+            const activePendingPermissions = {};
+            for (const [toolUseId, cr] of Object.entries(pendingPermissions)) {
+              if (!resolvedToolIds.has(toolUseId)) activePendingPermissions[toolUseId] = cr;
+            }
+
+            ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, mode: 'chat', chatHistory, totalCount, chatStatus, isStreaming, pendingPermissions: activePendingPermissions }));
           } else {
             ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, buffer: session.buffer || '' }));
           }

@@ -339,13 +339,19 @@ class ChatView {
   // ── View Manager: sliding window over server message list ──
 
   // Load initial messages from attach response
-  loadHistory(messages, totalCount, isStreaming) {
+  loadHistory(messages, totalCount, isStreaming, pendingPermissions) {
     this._total = totalCount || messages.length;
-    this._windowStart = this._total - messages.length; // index of first loaded msg
-    this._windowEnd = this._total; // index after last loaded msg
+    this._windowStart = this._total - messages.length;
+    this._windowEnd = this._total;
     this._loading = false;
+    // Store pending permissions to inject after tool_use cards are rendered
+    this._pendingPermissions = pendingPermissions || {};
 
     for (const msg of messages) this._onMessage(msg, true);
+    // Inject pending permissions into rendered tool cards
+    for (const [toolUseId, cr] of Object.entries(this._pendingPermissions)) {
+      this._injectPermission(cr);
+    }
     if (isStreaming) this._showTyping();
     this._scrollToBottom();
   }
