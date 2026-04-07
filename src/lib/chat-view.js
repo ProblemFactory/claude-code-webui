@@ -76,7 +76,15 @@ class ChatView {
     this._scrollBtn.innerHTML = '\u2193';
     this._scrollBtn.title = 'Scroll to bottom';
     this._scrollBtn.onclick = () => {
-      this.jumpToBottom();
+      if (this._readOnly || !this.sessionId) {
+        // Read-only or no session: just scroll, don't fetch
+        this._pinned = true;
+        this._newMsgCount = 0;
+        this._scrollBtn.classList.add('hidden');
+        this._forceScrollToBottom();
+      } else {
+        this.jumpToBottom();
+      }
     };
     container.appendChild(this._scrollBtn);
 
@@ -98,7 +106,7 @@ class ChatView {
           this._pinned = false;
           this._scrollBtn.classList.remove('hidden');
         }
-        if (scrollTop < 100 && this._windowStart > 0 && !this._loading) {
+        if (scrollTop < 100 && this._windowStart > 0 && !this._loading && !this._readOnly) {
           this._extendTop();
         }
       });
