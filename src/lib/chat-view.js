@@ -107,7 +107,8 @@ class ChatView {
 
     // Input area (skip for read-only viewers)
     if (this._readOnly) {
-      // No input, no status bar — just message list + search
+      // Disable content-visibility for read-only (small message count, avoids scroll issues)
+      container.classList.add('chat-no-content-visibility');
       container.tabIndex = -1;
       winInfo.content.appendChild(container);
       this._setupLinkHandler();
@@ -717,13 +718,17 @@ class ChatView {
             const inputStr = stripAnsi(typeof pendingUse.input === 'string' ? pendingUse.input : JSON.stringify(pendingUse.input, null, 2));
             html = `<div class="chat-tool-use"><span class="chat-tool-label">\uD83D\uDD27 ${escHtml(pendingUse.name)} ${this._clickablePath(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this._linkifyText(inputStr)}</pre></details><details class="chat-diff" open><summary class="chat-diff-summary chat-tool-error-label">\u2717 Error</summary><pre class="chat-tool-error-text">${this._linkifyText(resultText)}</pre></details></div>`;
           } else if (pendingUse.name === 'Agent') {
-            // Agent tool — show with View Log button to open subagent chat
+            // Agent tool — show with View Log button
             const inputStr = stripAnsi(typeof pendingUse.input === 'string' ? pendingUse.input : JSON.stringify(pendingUse.input, null, 2));
             const desc = pendingUse.input?.description || '';
             const firstLine = resultText.split('\n')[0].substring(0, 120) || '(empty)';
             const agentMatch = resultText.match(/agentId:\s*([a-z0-9]+)/);
             const agentId = agentMatch ? agentMatch[1] : '';
-            const viewBtn = agentId ? ` <button class="chat-agent-view-btn" data-agent-id="${escHtml(agentId)}">View Log</button>` : '';
+            // Use agentId for JSONL viewer if available, otherwise parentToolId for buffer viewer
+            const hasBuffer = this._subagentBuffers.has(toolId);
+            let viewBtn = '';
+            if (agentId) viewBtn = ` <button class="chat-agent-view-btn" data-agent-id="${escHtml(agentId)}">View Log</button>`;
+            else if (hasBuffer) viewBtn = ` <button class="chat-agent-view-btn" data-parent-tool-id="${escHtml(toolId)}">View Log</button>`;
             html = `<div class="chat-tool-use"><span class="chat-tool-label">\uD83E\uDD16 Agent: ${escHtml(desc)}${viewBtn}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this._linkifyText(inputStr)}</pre></details><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${escHtml(firstLine)}</summary><pre>${this._linkifyText(resultText)}</pre></details></div>`;
           } else {
             // Other tool success — show with collapsible input + output (no truncation)

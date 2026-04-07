@@ -1405,6 +1405,7 @@ html, body {
   display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-dim); padding: 4px 0;
 }
 .chat-agent-live-count { font-style: italic; }
+.chat-no-content-visibility .chat-msg { content-visibility: visible; contain: none; }
 .chat-interrupt-btn {
   margin-left: auto; padding: 1px 8px; font-size: 10px; font-weight: 600;
   border: 1px solid var(--red); border-radius: 3px; cursor: pointer;
