@@ -1383,8 +1383,12 @@ html, body {
   transition: all var(--transition);
 }
 .chat-send-btn:hover { background: var(--accent-hover); transform: scale(1.05); }
-.chat-interrupt-btn { background: var(--red); }
-.chat-interrupt-btn:hover { background: #dc2626; }
+.chat-interrupt-btn {
+  margin-left: auto; padding: 1px 8px; font-size: 10px; font-weight: 600;
+  border: 1px solid var(--red); border-radius: 3px; cursor: pointer;
+  background: transparent; color: var(--red); transition: all 0.15s;
+}
+.chat-interrupt-btn:hover { background: var(--red); color: #fff; }
 .chat-shortcut-hint {
   font-size: 9px; color: var(--text-dim); text-align: center; white-space: nowrap;
 }

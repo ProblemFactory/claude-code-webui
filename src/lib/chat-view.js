@@ -225,21 +225,16 @@ class ChatView {
 
     const sendCol = document.createElement('div');
     sendCol.className = 'chat-send-col';
-    this._sendBtn = document.createElement('button');
-    this._sendBtn.className = 'chat-send-btn';
-    this._sendBtn.textContent = '\u25B6';
-    this._sendBtn.title = 'Send';
-    this._sendBtn.onclick = () => this._send();
-    this._interruptBtn = document.createElement('button');
-    this._interruptBtn.className = 'chat-send-btn chat-interrupt-btn hidden';
-    this._interruptBtn.textContent = '\u25A0';
-    this._interruptBtn.title = 'Interrupt (stop generation)';
-    this._interruptBtn.onclick = () => this._interrupt();
+    const sendBtn = document.createElement('button');
+    sendBtn.className = 'chat-send-btn';
+    sendBtn.textContent = '\u25B6';
+    sendBtn.title = 'Send';
+    sendBtn.onclick = () => this._send();
     this._shortcutHint = document.createElement('div');
     this._shortcutHint.className = 'chat-shortcut-hint';
     this._shortcutHint.textContent = '\u23CE';
     this._isStreaming = false;
-    sendCol.append(this._sendBtn, this._interruptBtn, this._shortcutHint);
+    sendCol.append(sendBtn, this._shortcutHint);
 
     // Streaming status indicator (above input)
     this._streamStatus = document.createElement('div');
@@ -1336,19 +1331,16 @@ class ChatView {
   }
 
   _showTyping(label = 'thinking...') {
-    this._streamStatus.innerHTML = `<span class="chat-spinner"></span> ${escHtml(label)}`;
+    this._streamStatus.innerHTML = `<span class="chat-spinner"></span> ${escHtml(label)}<button class="chat-interrupt-btn" title="Interrupt">\u25A0 Stop</button>`;
+    this._streamStatus.querySelector('.chat-interrupt-btn').onclick = () => this._interrupt();
     this._streamStatus.classList.remove('hidden');
     this._isStreaming = true;
-    this._sendBtn.classList.add('hidden');
-    this._interruptBtn.classList.remove('hidden');
   }
 
   _hideTyping() {
     this._streamStatus.classList.add('hidden');
     this._streamStatus.innerHTML = '';
     this._isStreaming = false;
-    this._sendBtn.classList.remove('hidden');
-    this._interruptBtn.classList.add('hidden');
   }
 
   _interrupt() {
