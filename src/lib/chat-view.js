@@ -128,7 +128,7 @@ class ChatView {
         }
         if (e.target.classList.contains('chat-agent-view-btn')) {
           e.stopPropagation();
-          this._openSubagentViewer({ agentId: e.target.dataset.agentId, parentToolUseId: e.target.dataset.parentToolId });
+          this._openSubagentViewer({ agentId: e.target.dataset.agentId, parentToolUseId: e.target.dataset.parentToolId, description: e.target.dataset.desc });
         }
       });
       // Subscribe to messages for this session (virtual or real)
@@ -384,7 +384,7 @@ class ChatView {
       // Agent View Log button
       if (e.target.classList.contains('chat-agent-view-btn')) {
         e.stopPropagation();
-        this._openSubagentViewer({ agentId: e.target.dataset.agentId, parentToolUseId: e.target.dataset.parentToolId });
+        this._openSubagentViewer({ agentId: e.target.dataset.agentId, parentToolUseId: e.target.dataset.parentToolId, description: e.target.dataset.desc });
       }
     });
 
@@ -1486,7 +1486,9 @@ class ChatView {
           else activity = 'responding';
         }
       }
-      statusEl.innerHTML = `<span class="chat-agent-live-count">${count} messages${activity ? ' \u2022 ' + escHtml(activity) : ''}</span> <button class="chat-agent-view-btn" data-parent-tool-id="${escHtml(parentToolUseId)}">View Log</button>`;
+      const toolBlock = this._pendingToolUses.get(parentToolUseId);
+      const desc = toolBlock?.input?.description || '';
+      statusEl.innerHTML = `<span class="chat-agent-live-count">${count} messages${activity ? ' \u2022 ' + escHtml(activity) : ''}</span> <button class="chat-agent-view-btn" data-parent-tool-id="${escHtml(parentToolUseId)}" data-desc="${escHtml(desc)}">View Log</button>`;
     }
   }
 
