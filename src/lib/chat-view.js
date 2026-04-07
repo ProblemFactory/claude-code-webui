@@ -845,6 +845,11 @@ class ChatView {
     else if (Array.isArray(content)) msgText = content.map(b => b.text || '').join('');
     const isSystemNotification = /<(task-notification|system-reminder|local-command|command-name)[\s>]/i.test(msgText);
     if (isSystemNotification) {
+      // Clear active task if this is a task completion notification
+      if (msgText.includes('task-notification') && this._activeTasks) {
+        const toolUseMatch = msgText.match(/<tool-use-id>([^<]+)<\/tool-use-id>/);
+        if (toolUseMatch) { this._activeTasks.delete(toolUseMatch[1]); this._updateStatusBar(); }
+      }
       const el = document.createElement('div');
       el.className = 'chat-msg chat-msg-system-notification';
       el._rawMsg = msg;
@@ -918,6 +923,12 @@ class ChatView {
         } else if (block.type === 'thinking') {
           parts.push(`<details class="chat-thinking"><summary>Thinking...</summary><pre>${escHtml(stripAnsi(block.text || ''))}</pre></details>`);
         } else if (block.type === 'tool_use') {
+          // Track background commands
+          if (block.input?.run_in_background && block.id) {
+            if (!this._activeTasks) this._activeTasks = new Map();
+            this._activeTasks.set(block.id, { id: block.id, description: block.input.description || block.name, status: 'running' });
+            this._updateStatusBar();
+          }
           // Track TODO list updates
           if (block.name === 'TodoWrite' && block.input?.todos) {
             this._todos = block.input.todos;
