@@ -298,12 +298,16 @@ class ChatView {
     this._setupLinkHandler();
     this._messageList.addEventListener('click', (e) => {
       if (e.target.tagName === 'IMG' && e.target.classList.contains('chat-img')) {
-        // Open image in a simple overlay
         const overlay = document.createElement('div');
         overlay.className = 'chat-img-overlay';
         overlay.innerHTML = `<img src="${e.target.src}" alt="image">`;
         overlay.onclick = () => overlay.remove();
         document.body.appendChild(overlay);
+      }
+      // Agent View Log button
+      if (e.target.classList.contains('chat-agent-view-btn')) {
+        e.stopPropagation();
+        this._openAgentLog(e.target.dataset.agentId);
       }
     });
 
@@ -639,6 +643,15 @@ class ChatView {
             // Failed tool — same card style, error shown inside
             const inputStr = stripAnsi(typeof pendingUse.input === 'string' ? pendingUse.input : JSON.stringify(pendingUse.input, null, 2));
             html = `<div class="chat-tool-use"><span class="chat-tool-label">\uD83D\uDD27 ${escHtml(pendingUse.name)} ${this._clickablePath(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this._linkifyText(inputStr)}</pre></details><details class="chat-diff" open><summary class="chat-diff-summary chat-tool-error-label">\u2717 Error</summary><pre class="chat-tool-error-text">${this._linkifyText(resultText)}</pre></details></div>`;
+          } else if (pendingUse.name === 'Agent') {
+            // Agent tool — show with View Log button to open subagent chat
+            const inputStr = stripAnsi(typeof pendingUse.input === 'string' ? pendingUse.input : JSON.stringify(pendingUse.input, null, 2));
+            const desc = pendingUse.input?.description || '';
+            const firstLine = resultText.split('\n')[0].substring(0, 120) || '(empty)';
+            const agentMatch = resultText.match(/agentId:\s*([a-z0-9]+)/);
+            const agentId = agentMatch ? agentMatch[1] : '';
+            const viewBtn = agentId ? ` <button class="chat-agent-view-btn" data-agent-id="${escHtml(agentId)}">View Log</button>` : '';
+            html = `<div class="chat-tool-use"><span class="chat-tool-label">\uD83E\uDD16 Agent: ${escHtml(desc)}${viewBtn}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this._linkifyText(inputStr)}</pre></details><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${escHtml(firstLine)}</summary><pre>${this._linkifyText(resultText)}</pre></details></div>`;
           } else {
             // Other tool success — show with collapsible input + output (no truncation)
             const inputStr = stripAnsi(typeof pendingUse.input === 'string' ? pendingUse.input : JSON.stringify(pendingUse.input, null, 2));
@@ -1345,6 +1358,25 @@ class ChatView {
 
   _interrupt() {
     this.ws.send({ type: 'interrupt', sessionId: this.sessionId });
+  }
+
+  _openAgentLog(agentId) {
+    const { claudeId, cwd } = this._getSessionIds();
+    if (!claudeId) return;
+    fetch(`/api/subagent-messages?claudeSessionId=${encodeURIComponent(claudeId)}&cwd=${encodeURIComponent(cwd)}&agentId=${encodeURIComponent(agentId)}`)
+      .then(r => r.json())
+      .then(data => {
+        if (!data.messages?.length) return;
+        const desc = data.meta?.description || `Agent ${agentId.substring(0, 8)}`;
+        const winInfo = this.app.wm.createWindow({ title: `\uD83E\uDD16 ${desc}`, type: 'viewer' });
+        const view = new ChatView(winInfo, this.ws, null, this.app);
+        // Load as read-only history (no sessionId = no input/send)
+        view._textarea.disabled = true;
+        view._textarea.placeholder = 'Read-only agent log';
+        view.loadHistory(data.messages, data.total);
+        winInfo.onClose = () => { view.dispose(); this.app._checkWelcome(); };
+      })
+      .catch(() => {});
   }
 
   // Update typing indicator based on assistant message content

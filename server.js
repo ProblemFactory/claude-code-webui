@@ -1103,6 +1103,43 @@ app.get('/api/session-messages', (req, res) => {
   }
 });
 
+// Subagent messages for a given session + agentId
+app.get('/api/subagent-messages', (req, res) => {
+  const { claudeSessionId, cwd, agentId } = req.query;
+  if (!claudeSessionId || !agentId) return res.status(400).json({ error: 'claudeSessionId and agentId required' });
+  const projectsDir = path.join(os.homedir(), '.claude', 'projects');
+  const projDir = cwdToProjectDir(cwd || '');
+  // Try exact project dir, then scan all
+  const candidates = [];
+  if (cwd) candidates.push(path.join(projectsDir, projDir, claudeSessionId, 'subagents', `agent-${agentId}.jsonl`));
+  try {
+    for (const dir of fs.readdirSync(projectsDir)) {
+      const fp = path.join(projectsDir, dir, claudeSessionId, 'subagents', `agent-${agentId}.jsonl`);
+      if (!candidates.includes(fp)) candidates.push(fp);
+    }
+  } catch {}
+  for (const filePath of candidates) {
+    try {
+      if (!fs.existsSync(filePath)) continue;
+      const content = fs.readFileSync(filePath, 'utf-8');
+      const messages = [];
+      for (const line of content.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const msg = JSON.parse(trimmed);
+          if (msg.type === 'user' || msg.type === 'assistant' || msg.type === 'result') messages.push(msg);
+        } catch {}
+      }
+      // Read meta
+      let meta = {};
+      try { meta = JSON.parse(fs.readFileSync(filePath.replace('.jsonl', '.meta.json'), 'utf-8')); } catch {}
+      return res.json({ messages, total: messages.length, meta });
+    } catch {}
+  }
+  res.json({ messages: [], total: 0, meta: {} });
+});
+
 app.post('/api/kill-pid', (req, res) => {
   const { pid } = req.body;
   if (!pid || typeof pid !== 'number') return res.status(400).json({ error: 'pid required' });
