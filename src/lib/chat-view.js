@@ -620,7 +620,7 @@ class ChatView {
         this._appendUser(msg);
         break;
       case 'assistant':
-        if (!isHistory) this._updateTyping(msg);
+        if (!isHistory && this._streamStatus) this._updateTyping(msg);
         this._appendAssistant(msg);
         // Track per-turn usage from assistant message (NOT result.modelUsage which is cumulative)
         if (msg.message?.usage && !isHistory) {
@@ -1443,6 +1443,7 @@ class ChatView {
   }
 
   _showTyping(label = 'thinking...') {
+    if (!this._streamStatus) return;
     this._streamStatus.innerHTML = `<span class="chat-spinner"></span> ${escHtml(label)}<button class="chat-interrupt-btn" title="Interrupt">\u25A0 Stop</button>`;
     this._streamStatus.querySelector('.chat-interrupt-btn').onclick = () => this._interrupt();
     this._streamStatus.classList.remove('hidden');
@@ -1450,6 +1451,7 @@ class ChatView {
   }
 
   _hideTyping() {
+    if (!this._streamStatus) return;
     this._streamStatus.classList.add('hidden');
     this._streamStatus.innerHTML = '';
     this._isStreaming = false;
