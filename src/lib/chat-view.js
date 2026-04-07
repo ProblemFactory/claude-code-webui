@@ -315,6 +315,16 @@ class ChatView {
     container.appendChild(inputArea);
     container.appendChild(this._statusBar);
 
+    // Status bar click → insert slash command into textarea
+    this._statusBar.addEventListener('click', (e) => {
+      const el = e.target.closest('.chat-status-clickable');
+      if (el?.dataset.cmd) {
+        this._textarea.value = el.dataset.cmd;
+        this._textarea.focus();
+        this._textarea.dispatchEvent(new Event('input'));
+      }
+    });
+
     // Clear waiting blink on focus/click
     winInfo.element.addEventListener('mousedown', () => this._clearWaiting());
 
@@ -1503,14 +1513,14 @@ class ChatView {
     const fmtK = (n) => n >= 1000000 ? (n / 1000000).toFixed(1) + 'm' : n >= 1000 ? Math.round(n / 1000) + 'k' : String(n);
     const parts = [];
 
-    // Model badge
+    // Model badge (click to change)
     if (this._statusModel) {
-      parts.push(`<span class="chat-status-model">${escHtml(this._statusModel)}</span>`);
+      parts.push(`<span class="chat-status-model chat-status-clickable" data-cmd="/model " title="Click to switch model">${escHtml(this._statusModel)}</span>`);
     }
 
-    // Permission mode
+    // Permission mode (click to change)
     if (this._statusPermMode) {
-      parts.push(`<span class="chat-status-perm">\uD83D\uDD12 ${escHtml(this._statusPermMode)}</span>`);
+      parts.push(`<span class="chat-status-perm chat-status-clickable" data-cmd="/permissions " title="Click to change permission mode">\uD83D\uDD12 ${escHtml(this._statusPermMode)}</span>`);
     }
 
     // Context % with emoji + progress bar

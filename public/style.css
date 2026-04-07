@@ -1157,6 +1157,8 @@ html, body {
   font-weight: 700; color: var(--bg-root); background: var(--accent);
   padding: 0 6px; border-radius: 3px; font-size: 9px; letter-spacing: 0.3px;
 }
+.chat-status-clickable { cursor: pointer; }
+.chat-status-clickable:hover { opacity: 0.8; }
 .chat-status-perm {
   font-size: 10px; color: var(--text-dim); padding: 0 4px;
 }
