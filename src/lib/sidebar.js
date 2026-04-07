@@ -848,13 +848,20 @@ class Sidebar {
         val.title = f.copy;
         val.onclick = (e) => {
           e.stopPropagation();
-          navigator.clipboard.writeText(f.copy).then(() => {
+          const showTip = () => {
             const tip = document.createElement('span');
             tip.className = 'session-detail-tooltip';
             tip.textContent = 'Copied!';
             row.appendChild(tip);
             setTimeout(() => tip.remove(), 1000);
-          }).catch(() => {});
+          };
+          if (navigator.clipboard?.writeText) {
+            navigator.clipboard.writeText(f.copy).then(showTip).catch(() => {
+              this._fallbackCopy(f.copy); showTip();
+            });
+          } else {
+            this._fallbackCopy(f.copy); showTip();
+          }
         };
       }
       row.append(lbl, val);
@@ -1230,6 +1237,16 @@ class Sidebar {
 
     document.body.appendChild(pop);
     attachPopoverClose(pop, anchor);
+  }
+
+  _fallbackCopy(text) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;left:-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    ta.remove();
   }
 
 }
