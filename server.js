@@ -125,6 +125,8 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
         if (!line) continue;
         try {
           const msg = JSON.parse(line);
+          // Skip subagent messages from main chat broadcast
+          if (msg.parent_tool_use_id || msg.isSidechain) continue;
           broadcastToSession(session, id, { type: 'chat-message', sessionId: id, message: msg });
         } catch {
           // Non-JSON line (e.g. dtach noise) — send as raw output
@@ -992,6 +994,8 @@ function parseSessionJsonl(claudeSessionId, cwd) {
         try {
           const msg = JSON.parse(trimmed);
           // Only include user/assistant/result messages (skip system/hooks/internal)
+          // Skip subagent messages (have parent_tool_use_id or isSidechain)
+          if (msg.parent_tool_use_id || msg.isSidechain) continue;
           if (msg.type === 'user' || msg.type === 'assistant' || msg.type === 'result' || (msg.type === 'system' && msg.subtype === 'init')) {
             messages.push(msg);
           }
@@ -1473,6 +1477,7 @@ wss.on('connection', (ws) => {
                   pendingPermissions[msg.request.tool_use_id] = msg;
                   continue;
                 }
+                if (msg.parent_tool_use_id || msg.isSidechain) continue; // skip subagent messages
                 if (msg.type !== 'user' && msg.type !== 'assistant' && msg.type !== 'result' && !(msg.type === 'system' && msg.subtype === 'init')) continue;
                 if (msg.uuid && jsonlUuids.has(msg.uuid)) continue;
                 bufferMessages.push(msg);
