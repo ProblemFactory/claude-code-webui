@@ -12,11 +12,12 @@ function stripAnsi(str) {
  * Input goes to the same PTY session via WebSocket.
  */
 class ChatView {
-  constructor(winInfo, wsManager, sessionId, app) {
+  constructor(winInfo, wsManager, sessionId, app, { readOnly = false } = {}) {
     this.winInfo = winInfo;
     this.ws = wsManager;
     this.sessionId = sessionId;
     this.app = app;
+    this._readOnly = readOnly;
     this._messages = []; // parsed message objects
     this._pinned = true; // auto-scroll to bottom
     this._renderedMsgIds = new Set(); // dedup by msgId
@@ -94,7 +95,7 @@ class ChatView {
           this._pinned = true;
           this._newMsgCount = 0;
           this._scrollBtn.classList.add('hidden');
-        } else if (!atBottom && !this._alwaysPinned) {
+        } else if (!atBottom) {
           this._pinned = false;
           this._scrollBtn.classList.remove('hidden');
         }
@@ -104,7 +105,30 @@ class ChatView {
       });
     }, { passive: true });
 
-    // Input area
+    // Input area (skip for read-only viewers)
+    if (this._readOnly) {
+      // No input, no status bar — just message list + search
+      container.tabIndex = -1;
+      winInfo.content.appendChild(container);
+      this._setupLinkHandler();
+      this._messageList.addEventListener('click', (e) => {
+        if (e.target.tagName === 'IMG' && e.target.classList.contains('chat-img')) {
+          const overlay = document.createElement('div');
+          overlay.className = 'chat-img-overlay';
+          overlay.innerHTML = `<img src="${e.target.src}" alt="image">`;
+          overlay.onclick = () => overlay.remove();
+          document.body.appendChild(overlay);
+        }
+        if (e.target.classList.contains('chat-agent-view-btn')) {
+          e.stopPropagation();
+          if (e.target.dataset.agentId) this._openAgentLog(e.target.dataset.agentId);
+        }
+      });
+      this._handler = () => {};
+      this._stateHandler = () => {};
+      return;
+    }
+
     const inputArea = document.createElement('div');
     inputArea.className = 'chat-input-area';
     this._textarea = document.createElement('textarea');
@@ -1418,10 +1442,7 @@ class ChatView {
 
     const msgs = this._subagentBuffers.get(parentToolUseId) || [];
     const winInfo = this.app.wm.createWindow({ title: '\uD83E\uDD16 Agent (live)', type: 'viewer' });
-    const view = new ChatView(winInfo, this.ws, null, this.app);
-    view._textarea.disabled = true;
-    view._textarea.placeholder = 'Live agent log (read-only)';
-    view._alwaysPinned = true; // read-only live viewer always auto-scrolls
+    const view = new ChatView(winInfo, this.ws, null, this.app, { readOnly: true });
     if (msgs.length) view.loadHistory(msgs, msgs.length);
     this._subagentViews.set(parentToolUseId, view);
     winInfo.onClose = () => {
@@ -1440,10 +1461,7 @@ class ChatView {
         if (!data.messages?.length) return;
         const desc = data.meta?.description || `Agent ${agentId.substring(0, 8)}`;
         const winInfo = this.app.wm.createWindow({ title: `\uD83E\uDD16 ${desc}`, type: 'viewer' });
-        const view = new ChatView(winInfo, this.ws, null, this.app);
-        // Load as read-only history (no sessionId = no input/send)
-        view._textarea.disabled = true;
-        view._textarea.placeholder = 'Read-only agent log';
+        const view = new ChatView(winInfo, this.ws, null, this.app, { readOnly: true });
         view.loadHistory(data.messages, data.total);
         winInfo.onClose = () => { view.dispose(); this.app._checkWelcome(); };
       })
