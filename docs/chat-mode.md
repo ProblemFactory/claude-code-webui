@@ -98,7 +98,7 @@ While the agent is running, the Agent tool card shows:
 
 ### View Log
 
-Clicking **View Log** on a running agent opens a read-only ChatView window that displays the subagent's messages in real time. New messages appear as the agent works.
+Clicking **View Log** on a running agent opens a read-only ChatView window (no input area, no status bar) that displays the subagent's messages in real time. New messages appear as the agent works. You can scroll up to review history while new messages continue arriving -- scrolling back to the bottom re-enables auto-scroll.
 
 For completed agents, the View Log button opens a read-only ChatView populated from the agent's saved JSONL history.
 
