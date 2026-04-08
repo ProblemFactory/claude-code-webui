@@ -76,6 +76,7 @@ class CodeEditor {
     this.winInfo = winInfo; this.filePath = filePath; this.app = app;
     this.onSaveAndClose = opts.onSaveAndClose || null;
     this._gotoLine = opts.line || null;
+    this._isReadOnly = opts._tempFile || false;
     this.modified = false;
     this._settings = loadEditorSettings();
 
@@ -96,6 +97,7 @@ class CodeEditor {
     this.langSelect.onchange = () => this._changeLang(this.langSelect.value);
 
     const btnSave = this._btn('Save'); btnSave.onclick = () => this.save();
+    if (this._isReadOnly) btnSave.style.display = 'none';
     const btnDownload = this._btn('Download'); btnDownload.onclick = () => window.open(`/api/download?path=${encodeURIComponent(filePath)}`);
 
     // Settings buttons (word wrap, font size, theme)
@@ -233,6 +235,7 @@ class CodeEditor {
           EditorView.updateListener.of((update) => {
             if (update.docChanged) { self.modified = true; self.saveIndicator.textContent = '● Modified'; self.saveIndicator.style.color = 'var(--yellow)'; }
           }),
+          ...(this._isReadOnly ? [EditorState.readOnly.of(true)] : []),
         ],
       }),
       parent: this.editorBody,

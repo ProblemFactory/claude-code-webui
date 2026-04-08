@@ -684,7 +684,7 @@ html, body {
 
 .markdown-preview {
   padding: 16px 24px; font-size: 14px; line-height: 1.6; color: var(--text);
-  overflow-y: auto; height: 100%;
+  overflow-y: auto; height: 100%; user-select: text; cursor: text;
 }
 .markdown-preview h1, .markdown-preview h2, .markdown-preview h3 { margin: 16px 0 8px; color: var(--accent-hover); }
 .markdown-preview code { background: var(--bg-input); padding: 2px 5px; border-radius: 3px; font-size: 12px; }
