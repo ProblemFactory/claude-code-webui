@@ -999,7 +999,15 @@ class ChatView {
       return;
     }
     if (msg.is_error) {
-      this._appendSystem(`Error: ${msg.result || 'Unknown error'}`);
+      const label = msg.subtype === 'error_during_execution' ? 'Interrupted'
+        : msg.subtype === 'error_max_turns' ? 'Max turns reached'
+        : msg.subtype === 'error_max_budget_usd' ? 'Budget exceeded'
+        : 'Error';
+      if (msg.result) {
+        this._appendSystem(`${label}: ${msg.result}`);
+      } else if (label !== 'Error') {
+        this._appendSystem(label);
+      }
     }
   }
 
