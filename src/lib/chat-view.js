@@ -199,6 +199,7 @@ class ChatView {
           return;
         }
       }
+      if (e.isComposing || e.keyCode === 229) return; // IME composing — don't intercept Enter
       if (this._expanded) {
         if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); this._send(); }
       } else {
