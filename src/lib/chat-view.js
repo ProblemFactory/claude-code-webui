@@ -1299,11 +1299,18 @@ class ChatView {
     this._highlightQuery = q;
     this._applyHighlightLayer(); // highlight current view immediately
 
-    // Server-side search
-    const allSess = this.app.sidebar?._allSessions || [];
-    const match = allSess.find(s => s.webuiId === this.sessionId);
-    const claudeId = match?.sessionId;
-    const cwd = match?.cwd || '';
+    // Server-side search — find claudeSessionId for this webui session
+    let { claudeId, cwd } = this._getSessionIds();
+    // Fallback: check active sessions API directly
+    if (!claudeId) {
+      try {
+        const r = await fetch('/api/active');
+        const d = await r.json();
+        const sessions = d.sessions || d;
+        const s = Array.isArray(sessions) ? sessions.find(s => s.id === this.sessionId) : null;
+        if (s) { claudeId = s.claudeSessionId; cwd = s.cwd || ''; }
+      } catch {}
+    }
 
     if (claudeId) {
       try {
