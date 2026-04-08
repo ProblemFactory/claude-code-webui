@@ -756,7 +756,8 @@ class Sidebar {
     if (this._expandedCardId === s.sessionId) card.classList.add('expanded');
     const date = new Date(s.startedAt);
     const customName = this._customNames[s.sessionId];
-    const originalName = s.name || s.webuiName || s.sessionId.substring(0, 12) + '...';
+    const cwdFolder = s.cwd ? s.cwd.replace(/\/+$/, '').split('/').pop() : '';
+    const originalName = s.name || s.webuiName || cwdFolder || s.sessionId.substring(0, 12) + '...';
     const displayName = customName || originalName;
 
     const badgeMap = {
