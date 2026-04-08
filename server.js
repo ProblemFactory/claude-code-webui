@@ -1622,15 +1622,22 @@ wss.on('connection', (ws) => {
       }
 
       case 'interrupt': {
-        // Send interrupt control_request to claude stdin
+        // Dual interrupt: control_request protocol + SIGINT fallback
+        // control_request alone is unreliable during active tool execution
+        // (known issue: anthropics/claude-code#17466, #3455)
         const session = activeSessions.get(data.sessionId);
         if (session?.pty && session.mode === 'chat') {
+          // 1. Protocol: send control_request interrupt to stdin
           const msg = {
             type: 'control_request',
             request_id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
             request: { subtype: 'interrupt' },
           };
           session.pty.write(JSON.stringify(msg) + '\n');
+          // 2. Fallback: SIGINT to claude child process (bypasses PTY/dtach chain)
+          if (session._childPid) {
+            try { process.kill(session._childPid, 'SIGINT'); } catch {}
+          }
         }
         break;
       }
