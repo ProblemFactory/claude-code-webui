@@ -1,4 +1,5 @@
-import { ThemeManager, THEMES } from './themes.js';
+import { ThemeManager, THEMES, BUILTIN_THEMES } from './themes.js';
+import { ThemeEditor } from './theme-editor.js';
 import { WsManager } from './ws.js';
 import { WindowManager } from './window.js';
 import { TerminalSession } from './terminal.js';
@@ -47,7 +48,13 @@ class App {
       if (msg.type === 'settings-updated' && msg.settings) {
         this.settings.applyRemote(msg.settings);
       }
+      if (msg.type === 'custom-themes-updated' && msg.themes) {
+        this._applyCustomThemesFromServer(msg.themes);
+      }
     });
+
+    // Load custom themes from server
+    this._loadCustomThemes();
 
     this._setupToolbar();
     this._setupDialogs();
@@ -162,12 +169,22 @@ class App {
     // Theme
     const themeLabel = document.createElement('label'); themeLabel.textContent = 'Theme';
     const themeSel = document.createElement('select');
-    for (const name of Object.keys(THEMES)) { themeSel.appendChild(opt(name, name.charAt(0).toUpperCase() + name.slice(1))); }
+    themeSel.id = 'global-theme-select';
+    this._populateThemeSelect(themeSel);
     themeSel.value = this.themeManager.current;
     themeSel.onchange = () => {
       this.themeManager.apply(themeSel.value);
-      for (const [, term] of this.sessions) term.updateTheme(this.themeManager.getTerminalTheme());
+      for (const [, session] of this.sessions) {
+        if (session.updateTheme) session.updateTheme(this.themeManager.getTerminalTheme());
+      }
     };
+
+    // Theme editor button
+    const editBtn = document.createElement('button');
+    editBtn.className = 'file-tool-btn';
+    editBtn.textContent = '\u270E';
+    editBtn.title = 'Theme Editor';
+    editBtn.onclick = (e) => { e.stopPropagation(); if (!this._themeEditor) this._themeEditor = new ThemeEditor(this); this._themeEditor.open(); };
 
     // Font size
     const sizeLabel = document.createElement('label'); sizeLabel.textContent = 'Font Size';
@@ -223,7 +240,7 @@ class App {
     allSettingsLink.textContent = 'All Settings...';
     allSettingsLink.onclick = () => { pop.remove(); this._settingsUI.open(); };
 
-    pop.append(themeLabel, themeSel, sizeLabel, sizeRow, fontLabel, fontSel, allSettingsLink);
+    pop.append(themeLabel, themeSel, editBtn, sizeLabel, sizeRow, fontLabel, fontSel, allSettingsLink);
     document.body.appendChild(pop);
 
     attachPopoverClose(pop, anchor);
@@ -1316,6 +1333,49 @@ class App {
     });
 
     attachPopoverClose(pop, anchor);
+  }
+
+  _populateThemeSelect(sel) {
+    sel.innerHTML = '';
+    const opt = (v, l) => { const o = document.createElement('option'); o.value = v; o.textContent = l; return o; };
+    for (const name of BUILTIN_THEMES) sel.appendChild(opt(name, name.charAt(0).toUpperCase() + name.slice(1)));
+    const customKeys = this.themeManager.getThemeNames().filter(n => n.startsWith('custom-'));
+    if (customKeys.length) {
+      const sep = document.createElement('option'); sep.disabled = true; sep.textContent = '── Custom ──'; sel.appendChild(sep);
+      for (const key of customKeys) sel.appendChild(opt(key, key.slice(7)));
+    }
+  }
+
+  _refreshThemeDropdown() {
+    const sel = document.getElementById('global-theme-select');
+    if (sel) { this._populateThemeSelect(sel); sel.value = this.themeManager.current; }
+  }
+
+  async _loadCustomThemes() {
+    try {
+      const res = await fetch('/api/custom-themes');
+      if (!res.ok) return;
+      const themes = await res.json();
+      this._applyCustomThemesFromServer(themes);
+      this.themeManager.applyPendingTheme();
+    } catch {}
+  }
+
+  _applyCustomThemesFromServer(themes) {
+    // Unregister deleted themes
+    for (const key of this.themeManager.getThemeNames().filter(n => n.startsWith('custom-'))) {
+      const name = key.slice(7);
+      if (!themes[name]) this.themeManager.unregisterCustomTheme(name);
+    }
+    // Register/update
+    for (const [name, data] of Object.entries(themes)) {
+      this.themeManager.registerCustomTheme(name, data.css, data.terminal);
+    }
+    this._refreshThemeDropdown();
+    // Update terminal themes
+    for (const [, session] of this.sessions) {
+      if (session.updateTheme) session.updateTheme(this.themeManager.getTerminalTheme());
+    }
   }
 }
 

@@ -786,6 +786,51 @@ app.post('/api/bookmarks', (req, res) => {
   res.json({ success: true });
 });
 
+// ── Custom Themes ──
+const CUSTOM_THEMES_FILE = path.join(__dirname, 'data', 'custom-themes.json');
+let _customThemesCache = null;
+
+function readCustomThemes() {
+  if (_customThemesCache) return _customThemesCache;
+  try { _customThemesCache = JSON.parse(fs.readFileSync(CUSTOM_THEMES_FILE, 'utf-8')); }
+  catch { _customThemesCache = {}; }
+  return _customThemesCache;
+}
+
+function writeCustomThemes(data) {
+  _customThemesCache = data;
+  fs.writeFileSync(CUSTOM_THEMES_FILE, JSON.stringify(data, null, 2));
+  const msg = JSON.stringify({ type: 'custom-themes-updated', themes: data });
+  wss.clients.forEach(client => {
+    if (client.readyState === 1) { try { client.send(msg); } catch {} }
+  });
+}
+
+app.get('/api/custom-themes', (req, res) => res.json(readCustomThemes()));
+
+app.post('/api/custom-themes', (req, res) => {
+  const { name, css, terminal } = req.body;
+  if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name required' });
+  if (!css || typeof css !== 'object') return res.status(400).json({ error: 'css object required' });
+  if (name.length > 50) return res.status(400).json({ error: 'Name too long (max 50)' });
+  if (!/^[a-zA-Z0-9 _-]+$/.test(name)) return res.status(400).json({ error: 'Name must be alphanumeric' });
+  const builtIn = ['dark', 'light', 'dracula', 'nord', 'solarized', 'monokai'];
+  if (builtIn.includes(name.toLowerCase())) return res.status(400).json({ error: 'Cannot overwrite built-in theme' });
+  if (JSON.stringify(req.body).length > 100000) return res.status(413).json({ error: 'Theme data too large' });
+  const data = readCustomThemes();
+  data[name] = { css, terminal: terminal || {} };
+  writeCustomThemes(data);
+  res.json({ success: true });
+});
+
+app.delete('/api/custom-themes/:name', (req, res) => {
+  const data = readCustomThemes();
+  if (!data[req.params.name]) return res.status(404).json({ error: 'Theme not found' });
+  delete data[req.params.name];
+  writeCustomThemes(data);
+  res.json({ success: true });
+});
+
 // ── User State Persistence (server-side, replaces localStorage for starred/archived/names/groups) ──
 const USER_STATE_FILE = path.join(__dirname, 'data', 'user-state.json');
 let _userStateCache = null;
