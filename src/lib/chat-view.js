@@ -112,11 +112,27 @@ class ChatView {
       });
     }, { passive: true });
 
-    // Input area (skip for read-only viewers)
+    // Read-only viewers: status displays but no input
     if (this._readOnly) {
       container.classList.add('chat-no-content-visibility');
+
+      // TODO + streaming status + status bar (same as normal mode)
+      this._todoDisplay = document.createElement('div');
+      this._todoDisplay.className = 'chat-todo-display hidden';
+      this._todos = [];
+      this._streamStatus = document.createElement('div');
+      this._streamStatus.className = 'chat-stream-status hidden';
+      this._statusBar = document.createElement('div');
+      this._statusBar.className = 'chat-status-bar';
+
+      const statusArea = document.createElement('div');
+      statusArea.className = 'chat-input-area';
+      statusArea.style.padding = '4px 16px';
+      statusArea.append(this._todoDisplay, this._streamStatus);
+      container.append(statusArea, this._statusBar);
       container.tabIndex = -1;
       winInfo.content.appendChild(container);
+
       this._setupLinkHandler();
       this._messageList.addEventListener('click', (e) => {
         if (e.target.tagName === 'IMG' && e.target.classList.contains('chat-img')) {
@@ -131,7 +147,6 @@ class ChatView {
           this._openSubagentViewer({ agentId: e.target.dataset.agentId, parentToolUseId: e.target.dataset.parentToolId, description: e.target.dataset.desc });
         }
       });
-      // Subscribe to messages for this session (virtual or real)
       this._handler = (msg) => {
         if (msg.type === 'chat-message' && msg.sessionId === sessionId) {
           this._onMessage(msg.message);
