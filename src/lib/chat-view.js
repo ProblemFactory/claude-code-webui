@@ -1169,7 +1169,7 @@ class ChatView {
       return `<span class="chat-link" data-href="${escHtml(url)}" title="Click to copy, Ctrl+Click to open">${escHtml(url)}</span>${escHtml(after)}`;
     });
     // Match absolute file paths (not already inside tags)
-    html = html.replace(/(?<![="'\w])(\/(?:home|tmp|usr|var|etc|opt|mnt|root|workspace|Users)[^\s<>"')\]]*)/g, (raw) => {
+    html = html.replace(/(?<![="'\w])(\/[a-zA-Z_][a-zA-Z0-9._-]*\/[^\s<>"')\]]*)/g, (raw) => {
       const fp = this._cleanPath(raw);
       const after = raw.slice(fp.length);
       if (fp.length < 3) return raw; // too short
@@ -1186,7 +1186,7 @@ class ChatView {
       const after = raw.slice(url.length);
       return `<span class="chat-link" data-href="${url}" title="Click to copy, Ctrl+Click to open">${url}</span>${after}`;
     });
-    html = html.replace(/(?<![="'\w])(\/(?:home|tmp|usr|var|etc|opt|mnt|root|workspace|Users)[^\s<>&]*)/g, (raw) => {
+    html = html.replace(/(?<![="'\w])(\/[a-zA-Z_][a-zA-Z0-9._-]*\/[^\s<>&]*)/g, (raw) => {
       const fp = this._cleanPath(raw);
       const after = raw.slice(fp.length);
       if (fp.length < 3) return raw;
