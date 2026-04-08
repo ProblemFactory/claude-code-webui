@@ -1168,11 +1168,12 @@ class ChatView {
       const after = raw.slice(url.length);
       return `<span class="chat-link" data-href="${escHtml(url)}" title="Click to copy, Ctrl+Click to open">${escHtml(url)}</span>${escHtml(after)}`;
     });
-    // Match absolute file paths (not already inside tags)
-    html = html.replace(/(?<![="'\w])(\/[a-zA-Z_][a-zA-Z0-9._-]*\/[^\s<>"')\]]*)/g, (raw) => {
+    // Match file paths (VS Code-style: exclude bad chars, require /segment/)
+    // Supports absolute (/a/b), home (~/a), relative (./a, ../a)
+    html = html.replace(/(?<![="'\w])((?:~|\.\.?)?\/[^\0<>?\s!`&*()'":;\\][^\0<>?\s!`&*()'"\\:;]*(?:\/[^\0<>?\s!`&*()'"\\:;]+)+(?::\d+(?::\d+)?)?)/g, (raw) => {
       const fp = this._cleanPath(raw);
       const after = raw.slice(fp.length);
-      if (fp.length < 3) return raw; // too short
+      if (fp.length < 4) return raw;
       return `<span class="chat-link chat-link-path" data-path="${escHtml(fp)}" title="Click to copy, Ctrl+Click to open">${escHtml(fp)}</span>${escHtml(after)}`;
     });
     return html;
@@ -1186,10 +1187,10 @@ class ChatView {
       const after = raw.slice(url.length);
       return `<span class="chat-link" data-href="${url}" title="Click to copy, Ctrl+Click to open">${url}</span>${after}`;
     });
-    html = html.replace(/(?<![="'\w])(\/[a-zA-Z_][a-zA-Z0-9._-]*\/[^\s<>&]*)/g, (raw) => {
+    html = html.replace(/(?<![="'\w])((?:~|\.\.?)?\/[^\0<>?\s!`&*()'":;\\][^\0<>?\s!`&*()'"\\:;]*(?:\/[^\0<>?\s!`&*()'"\\:;]+)+(?::\d+(?::\d+)?)?)/g, (raw) => {
       const fp = this._cleanPath(raw);
       const after = raw.slice(fp.length);
-      if (fp.length < 3) return raw;
+      if (fp.length < 4) return raw;
       return `<span class="chat-link chat-link-path" data-path="${fp}" title="Click to copy, Ctrl+Click to open">${fp}</span>${after}`;
     });
     return html;
