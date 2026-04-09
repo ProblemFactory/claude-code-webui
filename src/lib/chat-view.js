@@ -907,6 +907,18 @@ class ChatView {
       return;
     }
 
+    // Detect compact summary ("This session is being continued from a previous conversation")
+    const isCompactSummary = msgText.includes('continued from a previous conversation') && msgText.includes('ran out of context');
+    if (isCompactSummary) {
+      const el = document.createElement('div');
+      el.className = 'chat-msg chat-msg-compact-boundary';
+      const msgIdx = this._messages.length - 1;
+      el.innerHTML = `<div class="chat-compact-boundary"><span class="chat-compact-boundary-icon">\uD83D\uDCCB</span> <strong>Previous conversation compacted</strong> <button class="chat-compact-boundary-btn">View Previous Conversation</button></div>`;
+      el.querySelector('.chat-compact-boundary-btn').onclick = () => this._openPreviousConversation(msgIdx);
+      this._messageList.appendChild(el);
+      return;
+    }
+
     // Actual user message — render with markdown
     const el = document.createElement('div');
     el.className = 'chat-msg chat-msg-user';
@@ -1640,6 +1652,22 @@ class ChatView {
     this.ws.onGlobal(handler);
 
     winInfo.onClose = () => { view.dispose(); this.app._checkWelcome(); };
+  }
+
+  _openPreviousConversation(compactMsgIdx) {
+    const { claudeId, cwd } = this._getSessionIds();
+    if (!claudeId) return;
+    // Fetch all messages before the compact boundary
+    fetch(`/api/session-messages?claudeSessionId=${encodeURIComponent(claudeId)}&cwd=${encodeURIComponent(cwd)}&offset=0&limit=${compactMsgIdx}`)
+      .then(r => r.json())
+      .then(data => {
+        if (!data.messages?.length) return;
+        const winInfo = this.app.wm.createWindow({ title: '\uD83D\uDCCB Previous Conversation', type: 'chat' });
+        const view = new ChatView(winInfo, this.ws, null, this.app, { readOnly: true });
+        view.loadHistory(data.messages, data.messages.length);
+        winInfo.onClose = () => { view.dispose(); this.app._checkWelcome(); };
+      })
+      .catch(() => {});
   }
 
   _updateTodoDisplay() {
