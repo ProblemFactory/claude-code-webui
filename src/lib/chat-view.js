@@ -496,14 +496,6 @@ class ChatView {
     this._pendingPermissions = pendingPermissions || {};
     this._compactBoundaryIdx = opts.compactBoundaryIdx;
 
-    // Show compact boundary banner at top if this session was compacted
-    if (this._compactBoundaryIdx != null) {
-      const banner = document.createElement('div');
-      banner.className = 'chat-msg chat-msg-compact-boundary';
-      banner.innerHTML = `<div class="chat-compact-boundary"><span class="chat-compact-boundary-icon">\uD83D\uDCCB</span> <strong>Previous conversation compacted</strong> <button class="chat-compact-boundary-btn">View Previous Conversation</button></div>`;
-      banner.querySelector('.chat-compact-boundary-btn').onclick = () => this._openPreviousConversation(this._compactBoundaryIdx);
-      this._messageList.appendChild(banner);
-    }
 
     for (const msg of messages) this._onMessage(msg, true);
     // Inject pending permissions into rendered tool cards

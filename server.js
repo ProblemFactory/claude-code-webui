@@ -1755,19 +1755,24 @@ wss.on('connection', (ws) => {
             // Buffer messages are always from current run (after JSONL)
             const allMessages = [...jsonlHistory, ...bufferMessages];
 
-            // Detect compact boundary index
+            // Detect compact boundary index (in JSONL, consistent with API pagination)
             let compactBoundaryIdx = -1;
-            for (let i = allMessages.length - 1; i >= 0; i--) {
-              const c = allMessages[i].message?.content;
+            for (let i = jsonlHistory.length - 1; i >= 0; i--) {
+              const c = jsonlHistory[i].message?.content;
               if (typeof c === 'string' && c.includes('continued from a previous conversation') && c.includes('ran out of context')) {
                 compactBoundaryIdx = i;
                 break;
               }
             }
 
+            // Use JSONL total for pagination (consistent with /api/session-messages)
+            // Buffer messages are appended as extra (not counted in pagination total)
+            const jsonlTotal = jsonlHistory.length;
             const PAGE_SIZE = 50;
-            const chatHistory = allMessages.slice(-PAGE_SIZE);
-            const totalCount = allMessages.length;
+            const chatHistory = jsonlHistory.slice(-PAGE_SIZE);
+            const totalCount = jsonlTotal;
+            // Append buffer-only messages after JSONL history (these are "live" from current run)
+            if (bufferMessages.length) chatHistory.push(...bufferMessages);
 
             // Extract latest status: last assistant's per-turn usage + cumulative cost
             let chatStatus = null;
