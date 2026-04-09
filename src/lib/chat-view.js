@@ -1184,21 +1184,25 @@ class ChatView {
   // Auto-detect URLs and file paths in rendered HTML, make them interactive
   // Click = copy, Ctrl+Click = open
   _linkify(html) {
-    // Match URLs not already inside <a> tags
-    html = html.replace(/(?<!href=["'])(https?:\/\/[^\s<>"')\]]+)/g, (raw) => {
-      const url = this._cleanPath(raw);
-      const after = raw.slice(url.length);
-      return `<span class="chat-link" data-href="${escHtml(url)}" title="Click to copy, Ctrl+Click to open">${escHtml(url)}</span>${escHtml(after)}`;
+    // Only linkify text OUTSIDE of HTML tags (don't touch href attributes or <a> content)
+    // Split on HTML tags, process only the text parts
+    return html.replace(/([^<]*)(<[^>]*>)?/g, (match, text, tag) => {
+      if (!text) return tag || '';
+      // Linkify URLs in text segments
+      let result = text.replace(/(https?:\/\/[^\s<>"')\]]+)/g, (raw) => {
+        const url = this._cleanPath(raw);
+        const after = raw.slice(url.length);
+        return `<span class="chat-link" data-href="${escHtml(url)}" title="Click to copy, Ctrl+Click to open">${escHtml(url)}</span>${escHtml(after)}`;
+      });
+      // Linkify file paths in text segments
+      result = result.replace(/(?<![="'\w/])((?:~|\.\.?)?\/[^\0<>?\s!`&*()'":;\\][^\0<>?\s!`&*()'"\\:;]*(?:\/[^\0<>?\s!`&*()'"\\:;]+)+(?::\d+(?::\d+)?)?)/g, (raw) => {
+        const fp = this._cleanPath(raw);
+        const after = raw.slice(fp.length);
+        if (fp.length < 4) return raw;
+        return `<span class="chat-link chat-link-path" data-path="${escHtml(fp)}" title="Click to copy, Ctrl+Click to open">${escHtml(fp)}</span>${escHtml(after)}`;
+      });
+      return result + (tag || '');
     });
-    // Match file paths (VS Code-style: exclude bad chars, require /segment/)
-    // Supports absolute (/a/b), home (~/a), relative (./a, ../a)
-    html = html.replace(/(?<![="'\w])((?:~|\.\.?)?\/[^\0<>?\s!`&*()'":;\\][^\0<>?\s!`&*()'"\\:;]*(?:\/[^\0<>?\s!`&*()'"\\:;]+)+(?::\d+(?::\d+)?)?)/g, (raw) => {
-      const fp = this._cleanPath(raw);
-      const after = raw.slice(fp.length);
-      if (fp.length < 4) return raw;
-      return `<span class="chat-link chat-link-path" data-path="${escHtml(fp)}" title="Click to copy, Ctrl+Click to open">${escHtml(fp)}</span>${escHtml(after)}`;
-    });
-    return html;
   }
 
   // Linkify plain text (for user messages that don't go through markdown)
@@ -1209,7 +1213,7 @@ class ChatView {
       const after = raw.slice(url.length);
       return `<span class="chat-link" data-href="${url}" title="Click to copy, Ctrl+Click to open">${url}</span>${after}`;
     });
-    html = html.replace(/(?<![="'\w])((?:~|\.\.?)?\/[^\0<>?\s!`&*()'":;\\][^\0<>?\s!`&*()'"\\:;]*(?:\/[^\0<>?\s!`&*()'"\\:;]+)+(?::\d+(?::\d+)?)?)/g, (raw) => {
+    html = html.replace(/(?<![="'\w/])((?:~|\.\.?)?\/[^\0<>?\s!`&*()'":;\\][^\0<>?\s!`&*()'"\\:;]*(?:\/[^\0<>?\s!`&*()'"\\:;]+)+(?::\d+(?::\d+)?)?)/g, (raw) => {
       const fp = this._cleanPath(raw);
       const after = raw.slice(fp.length);
       if (fp.length < 4) return raw;
