@@ -50,7 +50,7 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, 'public'), { etag: true, lastModified: true, maxAge: 0 }));
 app.use(express.json({ limit: '50mb' }));
 
 app.get('/xterm.css', (req, res) => {
