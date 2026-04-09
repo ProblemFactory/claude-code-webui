@@ -122,7 +122,7 @@ Subagent messages are filtered from the main chat -- they only appear in the ded
 
 Press **Ctrl+F** to open the search bar. Features:
 
-- Full-text search across the entire conversation history (not just the current view)
+- Full-text search across the entire conversation history (not just the current view). Falls back to `/api/active` when JSONL path is unavailable.
 - **CSS Custom Highlight API** for non-destructive highlighting (does not modify DOM)
 - Match counter showing current position and total matches
 - **Previous/Next** navigation (arrow buttons or Enter/Shift+Enter)
@@ -134,7 +134,7 @@ The highlight layer is re-applied when the view changes (scroll, pagination, exp
 
 ### Text Input
 
-- **Enter** sends the message (in normal mode)
+- **Enter** sends the message (in normal mode). IME composition (CJK input) is detected and Enter is not intercepted during composing.
 - **Ctrl+Enter** sends the message (in expanded mode)
 - **Shift+Enter** inserts a newline
 
@@ -164,6 +164,18 @@ Paste an image from your clipboard (Ctrl+V) to add it as an attachment:
 ## Interrupt
 
 While Claude is responding, a streaming status bar appears above the input area showing the current activity (thinking, running ToolName, responding) with a spinner. Click the **Stop** button to interrupt Claude mid-response.
+
+The interrupt uses a dual mechanism for reliability: a `control_request` with `subtype: 'interrupt'` is sent via stdin, and a SIGINT signal is sent to the claude child process as a fallback (working around known Claude Code bugs [#17466](https://github.com/anthropics/claude-code/issues/17466), [#3455](https://github.com/anthropics/claude-code/issues/3455)).
+
+### Interrupt Result
+
+When Claude is interrupted or hits a turn limit, the result message shows a human-readable label:
+
+| Subtype | Label |
+|---------|-------|
+| `error_during_execution` | Interrupted |
+| `error_max_turns` | Max turns reached |
+| Other | Raw subtype value |
 
 ## TODO Display
 
@@ -220,7 +232,7 @@ The chat message area respects the global terminal font size setting. The messag
 
 The chat view uses a sliding window over the server's full message list for efficient rendering:
 
-- On attach, the last 50 messages are loaded
+- On attach, the last 50 JSONL messages are loaded (plus any buffer messages appended as extra). The `totalCount` is based on JSONL count only, matching the `/api/session-messages` pagination index.
 - **Scroll up** near the top of the message list to automatically load earlier messages (50 at a time)
 - **Jump to bottom** (scroll-to-bottom button or sending a message) loads the last 50 messages
 - **Search results** jump to the target message index, loading that region of the conversation
@@ -239,7 +251,7 @@ The scroll-to-bottom uses iterative convergence: it scrolls to the bottom across
 
 ## Clickable Paths and URLs
 
-URLs and absolute file paths in messages are automatically detected and made interactive:
+URLs and absolute file paths in messages are automatically detected and made interactive. Path detection uses a VS Code-style character exclusion regex. The `_linkify` function is HTML-aware: it splits content into tags and text segments, skipping `<a>` and `<code>` blocks to avoid double-linking.
 
 - **Click** copies the path/URL to clipboard (with tooltip feedback)
 - **Ctrl+Click** opens the target:

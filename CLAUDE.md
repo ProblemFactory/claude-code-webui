@@ -59,6 +59,7 @@ src/
     code-editor.js     — CodeEditor (CodeMirror 6, dynamic language switching)
     markdown.js        — (removed, .md files now use CodeEditor with preview toggle)
     chat-view.js       — ChatView (chat interface for stream-json mode, permission approval)
+    theme-editor.js    — ThemeEditor (floating panel for custom themes, ~50 CSS vars + 16 ANSI colors)
     hex-viewer.js      — HexViewer (binary file viewer with chunked loading)
     resizer.js         — Resizer (reusable drag-to-resize handle)
     layout.js          — LayoutManager (auto-save/restore)
@@ -70,7 +71,7 @@ src/
     settings-ui.js     — SettingsUI (VS Code-style full settings dialog with search)
 public/
   index.html           — HTML structure
-  style.css            — CSS with 6 theme variants
+  style.css            — CSS with 6 built-in theme variants + custom themes
   bundle.js            — Built output (do not edit)
 CLAUDE.md              — This file
 docs/
@@ -107,7 +108,8 @@ docs/
 | **Markdown editor** | ~~`src/lib/markdown.js`~~ | Removed — .md files use CodeEditor with preview toggle |
 | **Chat mode / permissions** | `src/lib/chat-view.js` + `data/bin/chat-wrapper.js` | ChatView, permission approval UI, role indicators, tool cards |
 | **Hex viewer** | `src/lib/hex-viewer.js` | Binary display with chunked loading |
-| **Themes / colors** | `src/lib/themes.js` + `public/style.css` | 6 themes, CSS variables `[data-theme="..."]` |
+| **Themes / colors** | `src/lib/themes.js` + `public/style.css` | 6 built-in themes, CSS variables `[data-theme="..."]` |
+| **Theme editor** | `src/lib/theme-editor.js` + `src/lib/themes.js` | Floating panel: ~50 CSS vars + 16 ANSI, live preview, hover-to-highlight, save/load/delete, multi-client sync |
 | **Layout save/restore** | `src/lib/layout.js` | Auto-save debounce, `_restoring` flag, `claudeSessionId` matching, grid state |
 | **Usage / rate limits** | `server.js` → `refreshRateLimit()` + `GET /api/usage` + `src/lib/app.js` → `_pollUsage()` | Haiku API call for rate limit headers, every 5 min |
 | **dtach session create** | `server.js` → WebSocket `case 'create'` | `execFileSync('dtach', ...)` |
@@ -290,15 +292,15 @@ Split from monolithic 1647-line `src/client.js` into 13 ES modules under `src/li
 
 **Permission Approval**: Uses `--permission-prompt-tool stdio` flag (undocumented, discovered from HAQI). Claude sends `control_request` on stdout, server handles `permission-response` WS message → writes `control_response` to stdin with `updatedInput`. Permission UI embedded inline in tool cards (not separate messages): pending shows Allow/Always Allow/Deny buttons between Input and Output; resolved shows collapsed ✓ Allowed/✗ Denied. "Always Allow" passes `permission_suggestions` back as `permission_updates` for session-wide rules. On attach, server separates `control_request` from buffer into `pendingPermissions` map, filters resolved ones, sends in attach payload. Client injects after tool cards render. Permission mode shown in status bar (🔒 default/bypassPermissions/etc.).
 
-**ChatView** (`src/lib/chat-view.js`): Renders structured messages — user/assistant/tool_use/tool_result/thinking blocks. Features: compact mode (document-style), markdown rendering, collapsible tool results (all tool_use deferred, not just file tools), Ctrl+F search with highlight/navigation, auto-detect URLs/paths with `:line`, `:line:col`, `:line-line` suffix support (click=copy with tooltip feedback, Ctrl+click=open), pre block wrap toggle, streaming/activity indicator above input bar, expandable input, per-tool-card open-in-editor button, collapsible long user messages.
+**ChatView** (`src/lib/chat-view.js`): Renders structured messages — user/assistant/tool_use/tool_result/thinking blocks. Features: compact mode (document-style), markdown rendering, collapsible tool results (all tool_use deferred, not just file tools), Ctrl+F search with highlight/navigation, auto-detect URLs/paths with VS Code-style character exclusion regex (`:line`, `:line:col`, `:line-line` suffix support, click=copy with tooltip feedback, Ctrl+click=open), pre block wrap toggle, streaming/activity indicator above input bar, expandable input, per-tool-card open-in-editor button, collapsible long user messages, interrupt result labels (error_during_execution -> "Interrupted", error_max_turns -> "Max turns reached", etc.).
 
-**Tool call rendering**: All tool_use types are deferred and rendered as collapsible cards. Non-file tools show Input immediately while running with spinner on Output only. Tool error cards use unified style (same card, red error text inside, not red card). Per-tool-card 📋 open-in-editor button (raw data in closure, not DOM extraction). Message-level 📋 button skipped for tool-only assistant messages. Clickable paths/URLs in all tool I/O via `_linkifyText`. No output truncation.
+**Tool call rendering**: All tool_use types are deferred and rendered as collapsible cards. Non-file tools show Input immediately while running with spinner on Output only. Tool error cards use unified style (same card, red error text inside, not red card). Per-tool-card 📋 open-in-editor button (raw data in closure, not DOM extraction). Message-level 📋 button skipped for tool-only assistant messages. Clickable paths/URLs via `_linkify` (HTML-aware: splits into tags/text segments, skips `<a>` and `<code>` blocks) and `_linkifyText` (plain text). No output truncation.
 
 **Subagent/Agent rendering**: Subagent messages (`parent_tool_use_id` or `isSidechain`) filtered from main chat. Server buffers by `parentToolUseId` in `session.subagentBuffers`, broadcasts as both `subagent-message` (for parent tool card status) and `chat-message` with virtual session ID `sub-{toolUseId}` (for subagent viewer). "View Log" button opens read-only ChatView (`readOnly: true` — no input area, no status bar, normal scroll with pin-to-bottom) attached to a virtual session. Live agents use `sub-{parentToolUseId}` virtual sessions — server returns buffered messages on attach and forwards new ones. Completed agents use `sub-agent-{agentId}` — server loads from `subagents/agent-{agentId}.jsonl`. No client-side `_subagentBuffers`/`_subagentViews` — all buffering/forwarding handled server-side via virtual session attach.
 
 **JSONL file watcher workaround**: stream-json does not emit subagent assistant text messages (known bug: anthropics/claude-code#8262). Server works around this by watching subagent JSONL files via `fs.watch()`. On `system.task_started`, `startSubagentWatcher()` opens the JSONL file and reads new lines on each change event. Messages are deduplicated by uuid against those already emitted via stream-json (tracked in `session.subagentEmittedUuids`). On `system.task_notification`, the watcher is stopped. This provides complete subagent message coverage despite the stream-json gap.
 
-**Interrupt**: Inline "■ Stop" button in streaming status bar (only visible while Claude outputs). Sends `control_request` with `subtype: 'interrupt'` to claude stdin.
+**Interrupt**: Inline "■ Stop" button in streaming status bar (only visible while Claude outputs). Dual interrupt: sends `control_request` with `subtype: 'interrupt'` to claude stdin AND falls back to SIGINT on the claude child process for reliability (known Claude Code bug: anthropics/claude-code#17466, #3455).
 
 **Background task tracking**: Two sources of background tasks: `system.task_started` (Agent tool) and `tool_use.run_in_background` (Bash/commands). Tracked in `_activeTasks` Map keyed by tool_use_id. Status bar shows count. Click opens popup with task details — agent tasks open View Log (subagent viewer), command tasks open editor with input+output. `task_progress` updates description/lastTool. `task_notification` removes completed tasks.
 
@@ -324,7 +326,7 @@ Split from monolithic 1647-line `src/client.js` into 13 ES modules under `src/li
 
 **Session management**: `mode` field on session object. Stored in session metadata + wrapper metadata. `/api/active` and WebSocket `active-sessions` include mode. Sidebar shows badge for chat sessions. Default mode controlled by `session.defaultMode` setting (default: `chat`). All `createSession` paths respect this setting. Resume: split button toggles Terminal/Chat mode per session, persisted in user state.
 
-**JSONL history**: On chat attach, server sends last 50 messages + `totalCount` + `chatStatus` + `isStreaming`. Paginated API: `GET /api/session-messages?claudeSessionId=...&cwd=...&offset=&limit=&search=`.
+**JSONL history**: On chat attach, server sends last 50 messages from JSONL + any buffer messages appended as extra (totalCount based on JSONL count only, for consistency with `/api/session-messages` pagination). Paginated API: `GET /api/session-messages?claudeSessionId=...&cwd=...&offset=&limit=&search=`.
 
 **WebSocket reconnect**: On reconnect, all active sessions re-attach automatically. Chat sessions sync missed messages via `_reattach()` which fetches messages added since last known index. Fixed bug where `globalHandlers` map was wiped on reconnect in ws.js, losing persistent handlers.
 
@@ -381,11 +383,12 @@ Split from monolithic 1647-line `src/client.js` into 13 ES modules under `src/li
 - `POST /api/kill-pid` — kill an external/tmux claude process by PID (validates `isProcessClaude` before SIGTERM)
 - `GET /api/session-messages?claudeSessionId=&cwd=` — parse JSONL file into chat message history
 - `GET /api/subagent-messages?claudeSessionId=&cwd=&agentId=` — read subagent JSONL + meta from subagents/ directory
+- `GET /api/custom-themes` / `POST /api/custom-themes` / `DELETE /api/custom-themes/:name` — custom theme CRUD (broadcasts `custom-themes-updated` to all WS clients)
 - `GET /proxy/<url>` — full-rewriting web proxy via node-unblocker (HTML/CSS URL rewrite, JS XHR/WS rewrite, header stripping)
 
 ### WebSocket Protocol (`/ws`)
 Client → Server: `create`, `input`, `chat-input`, `permission-response`, `set-permission-mode`, `interrupt`, `resize`, `attach`, `kill`, `tmux-attach`
-Server → Client: `created`, `output`, `chat-message`, `subagent-message` (with parentToolUseId), `exited`, `attached` (includes `isStreaming`, `pendingPermissions`), `active-sessions`, `editor-open`, `editor-close`, `effective-size`, `user-state-updated`, `bookmarks-updated`, `settings-updated`, `error`
+Server → Client: `created`, `output`, `chat-message`, `subagent-message` (with parentToolUseId), `exited`, `attached` (includes `isStreaming`, `pendingPermissions`), `active-sessions`, `editor-open`, `editor-close`, `effective-size`, `user-state-updated`, `bookmarks-updated`, `settings-updated`, `custom-themes-updated`, `error`
 
 **Virtual session attach**: `attach` with `sessionId` starting with `sub-` routes to subagent handler. `sub-{parentToolUseId}` returns live-buffered messages from parent session's `subagentBuffers`. `sub-agent-{agentId}` loads completed agent's JSONL from disk. Both respond with standard `attached` payload. Live virtual sessions also receive `chat-message` broadcasts for real-time updates.
 
@@ -419,9 +422,12 @@ Server → Client: `created`, `output`, `chat-message`, `subagent-message` (with
 - TODO display: above input area, shows current in-progress item from TodoWrite, click for full list popup
 - Subagent viewer: unified virtual session architecture (server-buffered), standard read-only ChatView for both live and completed agents
 - Ctrl+F search with highlight, match counter, prev/next navigation
-- Auto-detect URLs and file paths with `:line`, `:line:col`, `:line-line` suffixes (click=copy with tooltip, Ctrl+click=open)
+- Auto-detect URLs and file paths with VS Code-style character exclusion regex, `:line`, `:line:col`, `:line-line` suffixes (click=copy with tooltip, Ctrl+click=open). `_linkify` is HTML-aware (splits tags/text, skips `<a>` and `<code>` blocks).
 - Pre block wrap toggle (hover to show)
 - Streaming/activity indicator above input bar (always visible): thinking/running ToolName/responding. Mid-stream detection on attach via `isStreaming`.
+- Interrupt result labels: maps `subtype` to human-readable label (error_during_execution -> "Interrupted", error_max_turns -> "Max turns reached", etc.)
+- Dual interrupt: control_request protocol + SIGINT fallback for reliability (Claude Code bugs #17466, #3455)
+- IME composing guard: `e.isComposing || e.keyCode === 229` check prevents Enter from sending during IME composition
 - Collapsible long user messages (Collapse toggle)
 - Expandable input (floating button inside textarea)
 - Send: Enter (normal), Ctrl+Enter (expanded mode)
@@ -451,7 +457,7 @@ Server → Client: `created`, `output`, `chat-message`, `subagent-message` (with
 - Status filter dropdown (Live / Tmux / External / Stopped / Archived — multi-select)
 - Quick new session from folder header (+)
 - Resume stopped sessions via `claude --resume`
-- Session names from first user message in JSONL
+- Session names from first user message in JSONL; default session card name from CWD folder name when no custom name set
 - Star sessions (★/☆): starred sessions sort first in sidebar groups and taskbar
 - Archive/unarchive sessions: 📦 button, hidden by default, toggle via status filter
 - Focus window highlights corresponding session in sidebar (with flash animation)
@@ -476,7 +482,7 @@ Server → Client: `created`, `output`, `chat-message`, `subagent-message` (with
 - Large folder pagination: first 100 items + "Load more" button
 - File viewers: PDF, images (zoom + drag-to-pan), video, audio, CSV, Excel, Word, hex. Markdown files use CodeEditor with preview toggle (no separate MarkdownViewer).
 - HTML viewer: dual mode — Preview (iframe) and Code (CodeEditor) toggle
-- Code editor with syntax highlighting, word wrap toggle, font size, theme (dark/light), markdown preview toggle button
+- Code editor with syntax highlighting, word wrap toggle, font size, theme (dark/light), markdown preview toggle button. Markdown preview supports `user-select: text` for copy. Temp file editors (Ctrl+G) set CodeMirror readOnly.
 - Large file warnings (>1MB), binary auto-detection
 - CWD autocomplete with `~` support
 - Clipboard image paste (Ctrl+V → upload to server → xclip/osascript sets clipboard → Ctrl+V to PTY)
@@ -485,12 +491,14 @@ Server → Client: `created`, `output`, `chat-message`, `subagent-message` (with
 - All windows (file explorer, viewers, editors, browser) persist and restore on page refresh
 
 ### UI
-- 6 color themes: Dark, Light, Dracula, Nord, Solarized, Monokai — all contrast-audited (terminal ANSI colors + UI chrome `--text-dim`/`--text-secondary`)
+- 6 built-in color themes: Dark, Light, Dracula, Nord, Solarized, Monokai — all contrast-audited (terminal ANSI colors + UI chrome `--text-dim`/`--text-secondary`)
+- Theme editor: floating panel to create custom themes — ~50 CSS variables + 16 ANSI colors, live preview, hover-to-highlight CSS var usage, save/load/delete, multi-client sync via WebSocket. ThemeManager: `registerCustomTheme`, `unregisterCustomTheme`, `setLivePreview`, `extractThemeValues`, `applyPendingTheme`. CSS value sanitization (strips `{}`). Constructor defers custom theme fallback until async load.
 - Global settings popover (⚙ in toolbar): theme, font size, font family
 - Resizable sidebar (drag right edge)
 - Usage bar in taskbar (5h + 7d rate limits from Anthropic API)
 - Embedded browser window (🌐 in toolbar): iframe with URL bar, proxy mode toggle, layout persistence
 - Browser proxy mode: node-unblocker full URL rewriting (HTML/CSS/JS), strips X-Frame-Options/CSP. Works for noVNC, docs, internal services. Google/Cloudflare sites may trigger reCAPTCHA due to anti-bot detection.
+- Static file caching: `maxAge=0` with etag validation for cache revalidation
 - "x active" click in taskbar → window list popup
 
 ### Bug Fixes Applied
@@ -549,3 +557,6 @@ Server → Client: `created`, `output`, `chat-message`, `subagent-message` (with
 - Subagent watcher leak: `fs.watch` handles on `session.subagentWatchers` not closed on session exit. Fix: iterate and close in `onExit` handler.
 - `task_type` not checked in `task_started`: Bash background commands (`local_bash`) were tracked as agent tasks, causing wrong icon and empty View Log. Fix: only track `local_agent`.
 - `isStreaming` on refresh: only checked `bufferMessages` which could miss user messages. Fix: check `allMessages` (JSONL + buffer combined).
+- Chat attach pagination off-by-one: `totalCount` included buffer messages, causing scroll-up through compacted sessions to skip or duplicate. Fix: `totalCount` uses JSONL count only (consistent with `/api/session-messages`), buffer messages appended as extra after JSONL slice.
+- Search fallback: Ctrl+F search in chat now falls back to `/api/active` when session JSONL path unavailable, ensuring search works for live-only sessions.
+- IME composing sends message: pressing Enter during IME composition (CJK input) sent incomplete text. Fix: guard with `e.isComposing || e.keyCode === 229` before handling Enter key.
