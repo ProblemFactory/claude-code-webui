@@ -1561,8 +1561,12 @@ pre.chat-pre-wrapped { white-space: pre-wrap; word-break: break-all; }
 .chat-long-msg > summary::-webkit-details-marker { display: none; }
 .chat-long-msg > summary::after { content: ' \25B8'; color: var(--text-dim); font-size: 10px; }
 .chat-load-spinner { display: flex; justify-content: center; padding: 8px; }
+.chat-scroll-btn-wrap {
+  position: relative; width: 0; height: 0; flex-shrink: 0;
+}
 .chat-scroll-btn {
-  position: absolute; right: 16px; bottom: 80px; width: 32px; height: 32px;
+  position: absolute; right: 16px; bottom: 8px;
+  width: 32px; height: 32px;
   border-radius: 50%; border: 1px solid var(--border); background: var(--bg-dialog);
   color: var(--text); font-size: 16px; cursor: pointer; z-index: 10;
   display: flex; align-items: center; justify-content: center;

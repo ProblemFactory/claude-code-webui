@@ -86,7 +86,11 @@ class ChatView {
         this.jumpToBottom();
       }
     };
-    container.appendChild(this._scrollBtn);
+    // Wrap scroll button in a zero-height container between message list and input
+    this._scrollBtnWrap = document.createElement('div');
+    this._scrollBtnWrap.className = 'chat-scroll-btn-wrap';
+    this._scrollBtnWrap.appendChild(this._scrollBtn);
+    container.appendChild(this._scrollBtnWrap);
 
     // Scroll detection: pin-to-bottom + auto-load earlier messages (throttled)
     let scrollTick = false;
