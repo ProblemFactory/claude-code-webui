@@ -496,8 +496,8 @@ class ChatView {
     this._pendingPermissions = pendingPermissions || {};
     this._compactBoundaryIdx = opts.compactBoundaryIdx;
 
-    // Show compact boundary banner if boundary exists but is outside loaded window
-    if (this._compactBoundaryIdx != null && this._compactBoundaryIdx < this._windowStart) {
+    // Show compact boundary banner at top if this session was compacted
+    if (this._compactBoundaryIdx != null) {
       const banner = document.createElement('div');
       banner.className = 'chat-msg chat-msg-compact-boundary';
       banner.innerHTML = `<div class="chat-compact-boundary"><span class="chat-compact-boundary-icon">\uD83D\uDCCB</span> <strong>Previous conversation compacted</strong> <button class="chat-compact-boundary-btn">View Previous Conversation</button></div>`;
