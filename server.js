@@ -1754,6 +1754,17 @@ wss.on('connection', (ws) => {
             }
             // Buffer messages are always from current run (after JSONL)
             const allMessages = [...jsonlHistory, ...bufferMessages];
+
+            // Detect compact boundary index
+            let compactBoundaryIdx = -1;
+            for (let i = allMessages.length - 1; i >= 0; i--) {
+              const c = allMessages[i].message?.content;
+              if (typeof c === 'string' && c.includes('continued from a previous conversation') && c.includes('ran out of context')) {
+                compactBoundaryIdx = i;
+                break;
+              }
+            }
+
             const PAGE_SIZE = 50;
             const chatHistory = allMessages.slice(-PAGE_SIZE);
             const totalCount = allMessages.length;
@@ -1809,7 +1820,7 @@ wss.on('connection', (ws) => {
               if (!resolvedToolIds.has(toolUseId)) activePendingPermissions[toolUseId] = cr;
             }
 
-            ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, mode: 'chat', chatHistory, totalCount, chatStatus, isStreaming, pendingPermissions: activePendingPermissions }));
+            ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, mode: 'chat', chatHistory, totalCount, chatStatus, isStreaming, pendingPermissions: activePendingPermissions, compactBoundaryIdx: compactBoundaryIdx >= 0 ? compactBoundaryIdx : undefined }));
           } else {
             ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, buffer: session.buffer || '' }));
           }

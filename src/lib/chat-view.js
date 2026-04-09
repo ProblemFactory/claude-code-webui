@@ -488,13 +488,22 @@ class ChatView {
   // ── View Manager: sliding window over server message list ──
 
   // Load initial messages from attach response
-  loadHistory(messages, totalCount, isStreaming, pendingPermissions) {
+  loadHistory(messages, totalCount, isStreaming, pendingPermissions, opts = {}) {
     this._total = totalCount || messages.length;
     this._windowStart = this._total - messages.length;
     this._windowEnd = this._total;
     this._loading = false;
-    // Store pending permissions to inject after tool_use cards are rendered
     this._pendingPermissions = pendingPermissions || {};
+    this._compactBoundaryIdx = opts.compactBoundaryIdx;
+
+    // Show compact boundary banner if boundary exists but is outside loaded window
+    if (this._compactBoundaryIdx != null && this._compactBoundaryIdx < this._windowStart) {
+      const banner = document.createElement('div');
+      banner.className = 'chat-msg chat-msg-compact-boundary';
+      banner.innerHTML = `<div class="chat-compact-boundary"><span class="chat-compact-boundary-icon">\uD83D\uDCCB</span> <strong>Previous conversation compacted</strong> <button class="chat-compact-boundary-btn">View Previous Conversation</button></div>`;
+      banner.querySelector('.chat-compact-boundary-btn').onclick = () => this._openPreviousConversation(this._compactBoundaryIdx);
+      this._messageList.appendChild(banner);
+    }
 
     for (const msg of messages) this._onMessage(msg, true);
     // Inject pending permissions into rendered tool cards
