@@ -1186,8 +1186,8 @@ class ChatView {
   _linkify(html) {
     // Split HTML into tags and text segments, only linkify text outside <a> tags
     let inAnchor = 0;
-    return html.replace(/(<a[\s>][\s\S]*?<\/a>)|(<[^>]*>)|([^<]+)/gi, (match, anchor, tag, text) => {
-      if (anchor) return anchor; // preserve <a>...</a> blocks untouched
+    return html.replace(/(<a[\s>][\s\S]*?<\/a>)|(<code[\s>][\s\S]*?<\/code>)|(<[^>]*>)|([^<]+)/gi, (match, anchor, code, tag, text) => {
+      if (anchor || code) return match; // preserve <a>...</a> and <code>...</code> untouched
       if (tag) return tag;
       if (!text) return match;
       // Linkify URLs
