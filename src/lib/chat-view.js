@@ -488,13 +488,12 @@ class ChatView {
   // ── View Manager: sliding window over server message list ──
 
   // Load initial messages from attach response
-  loadHistory(messages, totalCount, isStreaming, pendingPermissions, opts = {}) {
+  loadHistory(messages, totalCount, isStreaming, pendingPermissions) {
     this._total = totalCount || messages.length;
     this._windowStart = this._total - messages.length;
     this._windowEnd = this._total;
     this._loading = false;
     this._pendingPermissions = pendingPermissions || {};
-    this._compactBoundaryIdx = opts.compactBoundaryIdx;
 
 
     for (const msg of messages) this._onMessage(msg, true);
@@ -909,18 +908,6 @@ class ChatView {
         el.innerHTML = `<details class="chat-system-notification"><summary>${label}: ${escHtml(preview.substring(0, 100))}${preview.length > 100 ? '...' : ''}</summary><pre>${escHtml(msgText)}</pre></details>`;
       }
       this._messageList.appendChild(el); this._addOpenInEditorBtn(el);
-      return;
-    }
-
-    // Detect compact summary ("This session is being continued from a previous conversation")
-    const isCompactSummary = msgText.includes('continued from a previous conversation') && msgText.includes('ran out of context');
-    if (isCompactSummary) {
-      const el = document.createElement('div');
-      el.className = 'chat-msg chat-msg-compact-boundary';
-      const msgIdx = this._messages.length - 1;
-      el.innerHTML = `<div class="chat-compact-boundary"><span class="chat-compact-boundary-icon">\uD83D\uDCCB</span> <strong>Previous conversation compacted</strong> <button class="chat-compact-boundary-btn">View Previous Conversation</button></div>`;
-      el.querySelector('.chat-compact-boundary-btn').onclick = () => this._openPreviousConversation(msgIdx);
-      this._messageList.appendChild(el);
       return;
     }
 
@@ -1659,21 +1646,6 @@ class ChatView {
     winInfo.onClose = () => { view.dispose(); this.app._checkWelcome(); };
   }
 
-  _openPreviousConversation(compactMsgIdx) {
-    const { claudeId, cwd } = this._getSessionIds();
-    if (!claudeId) return;
-    // Fetch all messages before the compact boundary
-    fetch(`/api/session-messages?claudeSessionId=${encodeURIComponent(claudeId)}&cwd=${encodeURIComponent(cwd)}&offset=0&limit=${compactMsgIdx}`)
-      .then(r => r.json())
-      .then(data => {
-        if (!data.messages?.length) return;
-        const winInfo = this.app.wm.createWindow({ title: '\uD83D\uDCCB Previous Conversation', type: 'chat' });
-        const view = new ChatView(winInfo, this.ws, null, this.app, { readOnly: true });
-        view.loadHistory(data.messages, data.messages.length);
-        winInfo.onClose = () => { view.dispose(); this.app._checkWelcome(); };
-      })
-      .catch(() => {});
-  }
 
   _updateTodoDisplay() {
     if (!this._todoDisplay) return;

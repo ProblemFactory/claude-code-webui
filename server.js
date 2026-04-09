@@ -1755,16 +1755,6 @@ wss.on('connection', (ws) => {
             // Buffer messages are always from current run (after JSONL)
             const allMessages = [...jsonlHistory, ...bufferMessages];
 
-            // Detect compact boundary index (in JSONL, consistent with API pagination)
-            let compactBoundaryIdx = -1;
-            for (let i = jsonlHistory.length - 1; i >= 0; i--) {
-              const c = jsonlHistory[i].message?.content;
-              if (typeof c === 'string' && c.includes('continued from a previous conversation') && c.includes('ran out of context')) {
-                compactBoundaryIdx = i;
-                break;
-              }
-            }
-
             // Use JSONL total for pagination (consistent with /api/session-messages)
             // Buffer messages are appended as extra (not counted in pagination total)
             const jsonlTotal = jsonlHistory.length;
@@ -1825,7 +1815,7 @@ wss.on('connection', (ws) => {
               if (!resolvedToolIds.has(toolUseId)) activePendingPermissions[toolUseId] = cr;
             }
 
-            ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, mode: 'chat', chatHistory, totalCount, chatStatus, isStreaming, pendingPermissions: activePendingPermissions, compactBoundaryIdx: compactBoundaryIdx >= 0 ? compactBoundaryIdx : undefined }));
+            ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, mode: 'chat', chatHistory, totalCount, chatStatus, isStreaming, pendingPermissions: activePendingPermissions }));
           } else {
             ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, buffer: session.buffer || '' }));
           }
