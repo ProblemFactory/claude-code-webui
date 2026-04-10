@@ -1209,7 +1209,28 @@ class ChatView {
     // Split HTML into tags and text segments, only linkify text outside <a> tags
     let inAnchor = 0;
     return html.replace(/(<a[\s>][\s\S]*?<\/a>)|(<code[\s>][\s\S]*?<\/code>)|(<[^>]*>)|([^<]+)/gi, (match, anchor, code, tag, text) => {
-      if (anchor || code) return match; // preserve <a>...</a> and <code>...</code> untouched
+      if (anchor) return match; // preserve <a>...</a> untouched
+      if (code) {
+        // Linkify paths/URLs inside <code> blocks while preserving the <code> wrapper
+        // Inner content is already HTML-escaped by marked, so use same logic as bare text segments below
+        return code.replace(/^(<code[^>]*>)([\s\S]*?)(<\/code>)$/i, (_, open, inner, close) => {
+          let r = inner.replace(/(https?:\/\/[^\s<>"')\]]+)/g, (raw) => {
+            const url = this._cleanPath(raw);
+            const after = raw.slice(url.length);
+            return `<span class="chat-link" data-href="${escHtml(url)}" title="Click to copy, Ctrl+Click to open">${escHtml(url)}</span>${escHtml(after)}`;
+          });
+          r = r.replace(/(<[^>]*>)|([^<]+)/g, (m2, t2, txt) => {
+            if (t2 || !txt) return m2;
+            return txt.replace(/(?<![="'\w/])((?:~|\.\.?)?\/[^\0<>?\s!`&*()'":;\\][^\0<>?\s!`&*()'"\\:;]*(?:\/[^\0<>?\s!`&*()'"\\:;]+)+(?::\d+(?::\d+)?)?)/g, (raw) => {
+              const fp = this._cleanPath(raw);
+              const after = raw.slice(fp.length);
+              if (fp.length < 4) return raw;
+              return `<span class="chat-link chat-link-path" data-path="${escHtml(fp)}" title="Click to copy, Ctrl+Click to open">${escHtml(fp)}</span>${escHtml(after)}`;
+            });
+          });
+          return open + r + close;
+        });
+      }
       if (tag) return tag;
       if (!text) return match;
       // Linkify URLs
