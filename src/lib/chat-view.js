@@ -63,7 +63,7 @@ hljs.registerLanguage('scss', hljsScss);
 hljs.registerLanguage('graphql', hljsGraphql);
 hljs.registerLanguage('nginx', hljsNginx);
 hljs.registerLanguage('protobuf', hljsProtobuf);
-import { escHtml } from './utils.js';
+import { escHtml, saveDraft, loadDraft, clearDraft } from './utils.js';
 
 // Map file extensions to highlight.js language identifiers
 const EXT_TO_LANG = {
@@ -281,11 +281,24 @@ class ChatView {
       }
     });
 
+    // Restore draft from sessionStorage
+    const draft = loadDraft('chat', sessionId);
+    if (draft) {
+      this._textarea.value = draft;
+      // Trigger auto-grow for restored content
+      setTimeout(() => { this._textarea.style.height = 'auto'; this._textarea.style.height = Math.min(this._textarea.scrollHeight, 200) + 'px'; }, 0);
+    }
+
     // Auto-grow textarea (skip in expanded mode — user controls height)
+    this._draftTimer = null;
     this._textarea.addEventListener('input', () => {
-      if (this._expanded) return;
-      this._textarea.style.height = 'auto';
-      this._textarea.style.height = Math.min(this._textarea.scrollHeight, 200) + 'px';
+      if (!this._expanded) {
+        this._textarea.style.height = 'auto';
+        this._textarea.style.height = Math.min(this._textarea.scrollHeight, 200) + 'px';
+      }
+      // Debounced draft save
+      clearTimeout(this._draftTimer);
+      this._draftTimer = setTimeout(() => saveDraft('chat', this.sessionId, this._textarea.value), 300);
     });
 
     // Slash command list (populated from system.init)
@@ -743,6 +756,7 @@ class ChatView {
     this._textarea.value = '';
     this._textarea.style.height = '';
     this._textarea.style.minHeight = '';
+    clearDraft('chat', this.sessionId);
     if (this._expanded) {
       this._expanded = false;
       this._textarea.classList.remove('chat-input-expanded');
