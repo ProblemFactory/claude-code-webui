@@ -502,7 +502,9 @@ class ChatView {
     }
     // Restore View Log buttons for active subagents
     if (activeSubagents) {
-      for (const [toolUseId, count] of Object.entries(activeSubagents)) {
+      if (!this._subagentCounts) this._subagentCounts = new Map();
+      for (const [toolUseId, info] of Object.entries(activeSubagents)) {
+        const count = info.count || 0;
         const pending = this._messageList.querySelector(`[data-tool-id="${toolUseId}"]`);
         if (!pending) continue;
         const toolBlock = this._pendingToolUses.get(toolUseId);
@@ -513,7 +515,6 @@ class ChatView {
         const outputPending = pending.querySelector('.chat-tool-output-pending');
         if (outputPending) outputPending.before(statusEl);
         else pending.appendChild(statusEl);
-        if (!this._subagentCounts) this._subagentCounts = new Map();
         this._subagentCounts.set(toolUseId, count);
       }
     }
@@ -1010,7 +1011,12 @@ class ChatView {
               parts.push(`<div class="chat-tool-pending" data-tool-id="${escHtml(block.id)}"><span class="chat-tool-label">${label}</span><span class="chat-spinner"></span></div>`);
             } else {
               const inputStr = stripAnsi(typeof block.input === 'string' ? block.input : JSON.stringify(block.input, null, 2));
-              parts.push(`<div class="chat-tool-pending" data-tool-id="${escHtml(block.id)}"><div class="chat-tool-use"><span class="chat-tool-label">\uD83D\uDD27 ${escHtml(block.name || 'tool')}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this._linkifyText(inputStr)}</pre></details><div class="chat-tool-output-pending"><span class="chat-spinner"></span> running...</div></div></div>`);
+              const isAgent = block.name === 'Agent';
+              const toolIcon = isAgent ? '\uD83E\uDD16' : '\uD83D\uDD27';
+              const toolLabel = isAgent && block.input?.description
+                ? `${toolIcon} Agent: ${escHtml(block.input.description)}`
+                : `${toolIcon} ${escHtml(block.name || 'tool')}`;
+              parts.push(`<div class="chat-tool-pending" data-tool-id="${escHtml(block.id)}"><div class="chat-tool-use"><span class="chat-tool-label">${toolLabel}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this._linkifyText(inputStr)}</pre></details><div class="chat-tool-output-pending"><span class="chat-spinner"></span> running...</div></div></div>`);
             }
           }
         } else if (block.type === 'image' && block.source?.data) {

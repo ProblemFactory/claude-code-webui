@@ -1816,10 +1816,14 @@ wss.on('connection', (ws) => {
             }
 
             // Active subagent buffer counts for restoring View Log buttons
+            // Only include still-running agents (watcher active or no result message yet)
             const activeSubagents = {};
             if (session.subagentBuffers) {
               for (const [toolUseId, msgs] of session.subagentBuffers) {
-                if (msgs.length > 0) activeSubagents[toolUseId] = msgs.length;
+                if (msgs.length === 0) continue;
+                const hasResult = msgs.some(m => m.type === 'result');
+                if (hasResult) continue; // completed agent, not active
+                activeSubagents[toolUseId] = { count: msgs.length };
               }
             }
 
