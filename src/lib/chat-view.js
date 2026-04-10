@@ -1164,20 +1164,29 @@ class ChatView {
 
   _renderEditDiff(block) {
     const filePath = block.input.file_path || '';
-    const fileName = filePath.split('/').pop();
     const oldStr = block.input.old_string || '';
     const newStr = block.input.new_string || '';
     const oldLines = oldStr.split('\n');
     const newLines = newStr.split('\n');
 
-    // Simple line-by-line diff
+    // Simple line-by-line diff with prefix and suffix context matching
     const diffLines = [];
     let oi = 0, ni = 0;
+    // Match prefix context
     while (oi < oldLines.length && ni < newLines.length && oldLines[oi] === newLines[ni]) {
-      diffLines.push({ type: 'ctx', text: oldLines[oi] }); oi++; ni++;
+      diffLines.push({ type: 'ctx', text: oldLines[oi], ol: oi + 1, nl: ni + 1 }); oi++; ni++;
     }
-    while (oi < oldLines.length) { diffLines.push({ type: 'del', text: oldLines[oi] }); oi++; }
-    while (ni < newLines.length) { diffLines.push({ type: 'add', text: newLines[ni] }); ni++; }
+    // Match suffix context from the end
+    let suffixCtx = [];
+    let oe = oldLines.length - 1, ne = newLines.length - 1;
+    while (oe >= oi && ne >= ni && oldLines[oe] === newLines[ne]) {
+      suffixCtx.unshift({ type: 'ctx', text: oldLines[oe] }); oe--; ne--;
+    }
+    // Remaining old = del, remaining new = add
+    while (oi <= oe) { diffLines.push({ type: 'del', text: oldLines[oi], ol: oi + 1 }); oi++; }
+    while (ni <= ne) { diffLines.push({ type: 'add', text: newLines[ni], nl: ni + 1 }); ni++; }
+    // Append suffix context with correct line numbers
+    for (const s of suffixCtx) { s.ol = oi + 1; s.nl = ni + 1; diffLines.push(s); oi++; ni++; }
 
     const addCount = diffLines.filter(l => l.type === 'add').length;
     const delCount = diffLines.filter(l => l.type === 'del').length;
@@ -1187,7 +1196,9 @@ class ChatView {
     for (const line of diffLines) {
       const cls = line.type === 'add' ? 'chat-diff-add' : line.type === 'del' ? 'chat-diff-del' : 'chat-diff-ctx';
       const prefix = line.type === 'add' ? '+' : line.type === 'del' ? '-' : ' ';
-      body += `<div class="${cls}"><span class="chat-diff-prefix">${prefix}</span>${escHtml(line.text)}</div>`;
+      const olNum = line.ol != null ? String(line.ol) : '';
+      const nlNum = line.nl != null ? String(line.nl) : '';
+      body += `<div class="${cls}"><span class="chat-diff-ln">${olNum}</span><span class="chat-diff-ln">${nlNum}</span><span class="chat-diff-prefix">${prefix}</span>${escHtml(line.text)}</div>`;
     }
 
     return `<div class="chat-tool-use"><span class="chat-tool-label">\u{1F4DD} Update ${this._clickablePath(filePath)}</span><details class="chat-diff"><summary class="chat-diff-summary">${summary}</summary><div class="chat-diff-body">${body}</div></details></div>`;
