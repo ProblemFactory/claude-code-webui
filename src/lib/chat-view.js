@@ -488,18 +488,34 @@ class ChatView {
   // ── View Manager: sliding window over server message list ──
 
   // Load initial messages from attach response
-  loadHistory(messages, totalCount, isStreaming, pendingPermissions) {
+  loadHistory(messages, totalCount, isStreaming, pendingPermissions, activeSubagents) {
     this._total = totalCount || messages.length;
     this._windowStart = this._total - messages.length;
     this._windowEnd = this._total;
     this._loading = false;
     this._pendingPermissions = pendingPermissions || {};
 
-
     for (const msg of messages) this._onMessage(msg, true);
     // Inject pending permissions into rendered tool cards
     for (const [toolUseId, cr] of Object.entries(this._pendingPermissions)) {
       this._injectPermission(cr);
+    }
+    // Restore View Log buttons for active subagents
+    if (activeSubagents) {
+      for (const [toolUseId, count] of Object.entries(activeSubagents)) {
+        const pending = this._messageList.querySelector(`[data-tool-id="${toolUseId}"]`);
+        if (!pending) continue;
+        const toolBlock = this._pendingToolUses.get(toolUseId);
+        const desc = toolBlock?.input?.description || '';
+        const statusEl = document.createElement('div');
+        statusEl.className = 'chat-agent-live-status';
+        statusEl.innerHTML = `<span class="chat-agent-live-count">${count} messages</span> <button class="chat-agent-view-btn" data-parent-tool-id="${escHtml(toolUseId)}" data-desc="${escHtml(desc)}">View Log</button>`;
+        const outputPending = pending.querySelector('.chat-tool-output-pending');
+        if (outputPending) outputPending.before(statusEl);
+        else pending.appendChild(statusEl);
+        if (!this._subagentCounts) this._subagentCounts = new Map();
+        this._subagentCounts.set(toolUseId, count);
+      }
     }
     if (isStreaming) this._showTyping();
     this._scrollToBottom();

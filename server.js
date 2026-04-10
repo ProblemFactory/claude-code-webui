@@ -1815,7 +1815,15 @@ wss.on('connection', (ws) => {
               if (!resolvedToolIds.has(toolUseId)) activePendingPermissions[toolUseId] = cr;
             }
 
-            ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, mode: 'chat', chatHistory, totalCount, chatStatus, isStreaming, pendingPermissions: activePendingPermissions }));
+            // Active subagent buffer counts for restoring View Log buttons
+            const activeSubagents = {};
+            if (session.subagentBuffers) {
+              for (const [toolUseId, msgs] of session.subagentBuffers) {
+                if (msgs.length > 0) activeSubagents[toolUseId] = msgs.length;
+              }
+            }
+
+            ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, mode: 'chat', chatHistory, totalCount, chatStatus, isStreaming, pendingPermissions: activePendingPermissions, activeSubagents }));
           } else {
             ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, buffer: session.buffer || '' }));
           }

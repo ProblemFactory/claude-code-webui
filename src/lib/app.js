@@ -802,7 +802,7 @@ class App {
           const chatView = new ChatView(winInfo, this.ws, serverId, this);
           this.sessions.set(winInfo.id, chatView);
           if (msg.chatHistory && msg.chatHistory.length) {
-            chatView.loadHistory(msg.chatHistory, msg.totalCount, msg.isStreaming, msg.pendingPermissions);
+            chatView.loadHistory(msg.chatHistory, msg.totalCount, msg.isStreaming, msg.pendingPermissions, msg.activeSubagents);
             if (msg.chatStatus) chatView.applyStatus(msg.chatStatus);
           }
           winInfo.onClose = () => {
