@@ -833,6 +833,38 @@ app.delete('/api/custom-themes/:name', (req, res) => {
   res.json({ success: true });
 });
 
+// ── Drafts Persistence (server-side, multi-client sync via WS) ──
+const DRAFTS_FILE = path.join(__dirname, 'data', 'drafts.json');
+let _draftsCache = null;
+let _draftsSaveTimer = null;
+
+function readDrafts() {
+  if (_draftsCache) return _draftsCache;
+  ensureDir(path.join(__dirname, 'data'));
+  try { _draftsCache = JSON.parse(fs.readFileSync(DRAFTS_FILE, 'utf-8')); }
+  catch { _draftsCache = {}; }
+  return _draftsCache;
+}
+
+function saveDraftsToDisk() {
+  clearTimeout(_draftsSaveTimer);
+  _draftsSaveTimer = setTimeout(() => {
+    try { fs.writeFileSync(DRAFTS_FILE, JSON.stringify(_draftsCache || {}, null, 2)); } catch {}
+  }, 2000);
+}
+
+function updateDraft(key, value, senderWs) {
+  const drafts = readDrafts();
+  if (value == null || value === '') { delete drafts[key]; }
+  else { drafts[key] = value; }
+  saveDraftsToDisk();
+  // Broadcast to all OTHER clients
+  const msg = JSON.stringify({ type: 'draft-updated', key, value: value || '' });
+  wss.clients.forEach(client => {
+    if (client !== senderWs && client.readyState === WS_OPEN) { try { client.send(msg); } catch {} }
+  });
+}
+
 // ── User State Persistence (server-side, replaces localStorage for starred/archived/names/groups) ──
 const USER_STATE_FILE = path.join(__dirname, 'data', 'user-state.json');
 let _userStateCache = null;
@@ -861,6 +893,9 @@ function writeUserState(data) {
 app.get('/api/user-state', (req, res) => {
   res.json(readUserState());
 });
+
+// Get all drafts (for initial page load)
+app.get('/api/drafts', (req, res) => { res.json(readDrafts()); });
 
 // Save full user state (replaces entire state)
 app.post('/api/user-state', (req, res) => {
@@ -1865,6 +1900,13 @@ wss.on('connection', (ws) => {
           activeSessions.delete(data.sessionId);
           refreshWebuiPids();
           broadcastActiveSessions();
+        }
+        break;
+      }
+
+      case 'draft-update': {
+        if (data.key && typeof data.key === 'string') {
+          updateDraft(data.key, data.value || '', ws);
         }
         break;
       }

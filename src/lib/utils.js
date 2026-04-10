@@ -13,23 +13,38 @@ export function attachPopoverClose(popover, ...excludeEls) {
   }, 0);
 }
 
-// Unified draft persistence — saves transient input state to sessionStorage
-// Key format: draft:{type}:{id}  (type = chat|explorer|dialog, id = sessionId or path)
-const DRAFT_PREFIX = 'cwui-draft:';
+// Unified draft persistence — server-persisted, multi-client sync via WebSocket
+// Key format: {type}:{id}  (type = chat|explorer|dialog, id = sessionId or path)
+// Uses DraftManager for WS communication; standalone functions for quick access with local cache fallback
+
+let _draftWs = null;
+let _draftCache = {};
+
+export function initDrafts(wsManager, initialDrafts) {
+  _draftWs = wsManager;
+  _draftCache = initialDrafts || {};
+  // Listen for drafts from other clients
+  wsManager.onGlobal((msg) => {
+    if (msg.type === 'draft-updated') {
+      if (msg.value) _draftCache[msg.key] = msg.value;
+      else delete _draftCache[msg.key];
+      // Dispatch custom event so components can react
+      window.dispatchEvent(new CustomEvent('draft-sync', { detail: { key: msg.key, value: msg.value || '' } }));
+    }
+  });
+}
 
 export function saveDraft(type, id, value) {
-  const key = DRAFT_PREFIX + type + ':' + id;
-  if (value == null || value === '') {
-    sessionStorage.removeItem(key);
-  } else {
-    sessionStorage.setItem(key, typeof value === 'string' ? value : JSON.stringify(value));
-  }
+  const key = type + ':' + id;
+  if (value == null || value === '') { delete _draftCache[key]; }
+  else { _draftCache[key] = value; }
+  if (_draftWs) _draftWs.send({ type: 'draft-update', key, value: value || '' });
 }
 
 export function loadDraft(type, id) {
-  return sessionStorage.getItem(DRAFT_PREFIX + type + ':' + id) || '';
+  return _draftCache[type + ':' + id] || '';
 }
 
 export function clearDraft(type, id) {
-  sessionStorage.removeItem(DRAFT_PREFIX + type + ':' + id);
+  saveDraft(type, id, '');
 }

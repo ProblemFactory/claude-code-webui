@@ -301,6 +301,16 @@ class ChatView {
       this._draftTimer = setTimeout(() => saveDraft('chat', this.sessionId, this._textarea.value), 300);
     });
 
+    // Sync draft from other clients
+    this._draftSyncHandler = (e) => {
+      if (e.detail.key === 'chat:' + this.sessionId && document.activeElement !== this._textarea) {
+        this._textarea.value = e.detail.value;
+        this._textarea.style.height = 'auto';
+        this._textarea.style.height = Math.min(this._textarea.scrollHeight, 200) + 'px';
+      }
+    };
+    window.addEventListener('draft-sync', this._draftSyncHandler);
+
     // Slash command list (populated from system.init)
     this._slashCommands = [];
     this._slashDropdown = document.createElement('div');
@@ -2081,6 +2091,7 @@ class ChatView {
   dispose() {
     this.ws.offGlobal(this._handler);
     this.ws.offStateChange(this._stateHandler);
+    if (this._draftSyncHandler) window.removeEventListener('draft-sync', this._draftSyncHandler);
   }
 }
 
