@@ -32,6 +32,28 @@ class App {
     this.attachedServerSessions = new Set();
     this.layoutManager = new LayoutManager(this);
 
+    // ── Desktop tabs (multi-workspace) ──
+    this._desktops = [{ id: 'desktop-1', name: 'Main' }];
+    this._activeDesktopId = 'desktop-1';
+    this._desktopCounter = 1;
+    this._windowDesktop = new Map(); // winId → desktopId
+
+    // Hook window creation to assign desktop
+    const origCreateWindow = this.wm.createWindow.bind(this.wm);
+    this.wm.createWindow = (opts) => {
+      const winInfo = origCreateWindow(opts);
+      this._assignWindowToDesktop(winInfo.id, this._activeDesktopId);
+      this._renderDesktopTabs();
+      return winInfo;
+    };
+    // Hook window close to clean up desktop map
+    const origCloseWindow = this.wm.closeWindow.bind(this.wm);
+    this.wm.closeWindow = (id) => {
+      this._windowDesktop.delete(id);
+      origCloseWindow(id);
+      this._renderDesktopTabs();
+    };
+
     this.wm.onWindowsChanged = () => {
       this.updateTaskbar();
       this.layoutManager.scheduleAutoSave();
@@ -59,6 +81,7 @@ class App {
     this._setupToolbar();
     this._setupDialogs();
     this._setupWelcome();
+    this._setupDesktopTabs();
     this._setupGlobalSettings();
     this._setupGridConfig();
     this._setupLayoutManager();
@@ -244,6 +267,104 @@ class App {
     document.body.appendChild(pop);
 
     attachPopoverClose(pop, anchor);
+  }
+
+  // ── Desktop Tabs (multi-workspace) ──
+
+  _setupDesktopTabs() {
+    this._tabList = document.getElementById('desktop-tab-list');
+    document.getElementById('desktop-tab-add').onclick = () => this._addDesktop();
+    this._renderDesktopTabs();
+  }
+
+  _addDesktop(name) {
+    const id = 'desktop-' + (++this._desktopCounter);
+    this._desktops.push({ id, name: name || `Desktop ${this._desktops.length + 1}` });
+    this._switchDesktop(id);
+    this._renderDesktopTabs();
+    this.layoutManager.scheduleAutoSave();
+  }
+
+  _removeDesktop(id) {
+    if (this._desktops.length <= 1) return;
+    const idx = this._desktops.findIndex(d => d.id === id);
+    if (idx < 0) return;
+    // Move windows from this desktop to first remaining desktop
+    const targetId = this._desktops[idx === 0 ? 1 : 0].id;
+    for (const [winId, dId] of this._windowDesktop) {
+      if (dId === id) this._windowDesktop.set(winId, targetId);
+    }
+    this._desktops.splice(idx, 1);
+    if (this._activeDesktopId === id) this._switchDesktop(this._desktops[0].id);
+    this._renderDesktopTabs();
+    this.layoutManager.scheduleAutoSave();
+  }
+
+  _renameDesktop(id) {
+    const d = this._desktops.find(d => d.id === id);
+    if (!d) return;
+    const name = prompt('Desktop name:', d.name);
+    if (name && name.trim()) {
+      d.name = name.trim();
+      this._renderDesktopTabs();
+      this.layoutManager.scheduleAutoSave();
+    }
+  }
+
+  _switchDesktop(id) {
+    if (this._activeDesktopId === id) return;
+    this._activeDesktopId = id;
+    // Show/hide windows based on desktop assignment
+    for (const [winId, win] of this.wm.windows) {
+      const desktop = this._windowDesktop.get(winId) || this._desktops[0]?.id;
+      if (desktop === id) {
+        win.element.style.display = '';
+      } else {
+        win.element.style.display = 'none';
+      }
+    }
+    this._renderDesktopTabs();
+    this.updateTaskbar();
+  }
+
+  _assignWindowToDesktop(winId, desktopId) {
+    this._windowDesktop.set(winId, desktopId || this._activeDesktopId);
+  }
+
+  // Get desktop ID for a window (for sidebar click → switch)
+  _getWindowDesktop(winId) {
+    return this._windowDesktop.get(winId) || this._desktops[0]?.id;
+  }
+
+  _renderDesktopTabs() {
+    if (!this._tabList) return;
+    this._tabList.innerHTML = '';
+    for (const d of this._desktops) {
+      const tab = document.createElement('div');
+      tab.className = 'desktop-tab' + (d.id === this._activeDesktopId ? ' active' : '');
+      // Count visible windows on this desktop
+      let count = 0;
+      for (const [, dId] of this._windowDesktop) { if (dId === d.id) count++; }
+      tab.innerHTML = `<span class="desktop-tab-name">${d.name}</span>${count ? `<span class="desktop-tab-count">${count}</span>` : ''}`;
+      tab.onclick = () => this._switchDesktop(d.id);
+      tab.ondblclick = (e) => { e.stopPropagation(); this._renameDesktop(d.id); };
+      // Right-click to close (if more than 1)
+      tab.oncontextmenu = (e) => {
+        e.preventDefault();
+        if (this._desktops.length > 1 && confirm(`Close desktop "${d.name}"? Windows will move to another desktop.`)) {
+          this._removeDesktop(d.id);
+        }
+      };
+      this._tabList.appendChild(tab);
+    }
+  }
+
+  // Called when sidebar focuses a session — switch to its desktop
+  switchToWindowDesktop(winId) {
+    const desktopId = this._getWindowDesktop(winId);
+    if (desktopId && desktopId !== this._activeDesktopId) {
+      this._switchDesktop(desktopId);
+    }
   }
 
   _setupGridConfig() {
@@ -770,6 +891,7 @@ class App {
   _focusExistingSession(serverId) {
     for (const [winId, term] of this.sessions) {
       if (term.sessionId === serverId) {
+        this.switchToWindowDesktop(winId);
         this.wm.focusWindow(winId);
         if (this.wm.windows.get(winId)?.isMinimized) this.wm.restore(winId);
         term.focus();

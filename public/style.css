@@ -323,6 +323,38 @@ html, body {
   padding: 3px 6px; border-radius: var(--radius-sm); font-size: 11px; cursor: pointer;
 }
 
+/* ── Desktop Tabs ── */
+#desktop-tabs {
+  display: flex; align-items: center; background: var(--bg-toolbar);
+  border-bottom: 1px solid var(--border); flex-shrink: 0;
+  padding: 0 4px; height: 28px; gap: 2px; overflow-x: auto;
+}
+#desktop-tab-list { display: flex; gap: 2px; align-items: center; }
+.desktop-tab {
+  display: flex; align-items: center; gap: 4px; padding: 3px 12px;
+  font-size: 11px; color: var(--text-secondary); cursor: pointer;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  border: 1px solid transparent; border-bottom: none;
+  transition: all var(--transition); white-space: nowrap; user-select: none;
+}
+.desktop-tab:hover { color: var(--text); background: var(--bg-hover); }
+.desktop-tab.active {
+  color: var(--text); background: var(--bg-workspace);
+  border-color: var(--border);
+}
+.desktop-tab-name { font-weight: 500; }
+.desktop-tab-count {
+  font-size: 9px; background: var(--accent-dim); color: var(--accent);
+  padding: 0 5px; border-radius: 8px; font-weight: 600;
+}
+.desktop-tab-add {
+  background: none; border: 1px solid var(--border); color: var(--text-dim);
+  width: 22px; height: 22px; border-radius: var(--radius-sm); cursor: pointer;
+  font-size: 14px; display: flex; align-items: center; justify-content: center;
+  transition: all var(--transition); margin-left: 2px;
+}
+.desktop-tab-add:hover { background: var(--bg-hover); color: var(--text); }
+
 /* ── Workspace ── */
 #workspace {
   position: relative; flex: 1; background: var(--bg-workspace); overflow: hidden;
@@ -1549,10 +1581,10 @@ pre.chat-pre-wrapped { white-space: pre-wrap; word-break: break-all; }
 .chat-long-msg > summary::after { content: ' \25B8'; color: var(--text-dim); font-size: 10px; }
 .chat-load-spinner { display: flex; justify-content: center; padding: 8px; }
 .chat-scroll-btn-wrap {
-  position: relative; width: 0; height: 0; flex-shrink: 0;
+  position: relative; width: 100%; height: 0; flex-shrink: 0;
 }
 .chat-scroll-btn {
-  position: absolute; right: 16px; bottom: 8px;
+  position: absolute; right: 80px; bottom: 8px;
   width: 32px; height: 32px;
   border-radius: 50%; border: 1px solid var(--border); background: var(--bg-dialog);
   color: var(--text); font-size: 16px; cursor: pointer; z-index: 10;
@@ -1667,6 +1699,7 @@ pre.chat-pre-wrapped { white-space: pre-wrap; word-break: break-all; }
 
   /* Replace toolbar with mobile nav */
   #toolbar { display: none; }
+  #desktop-tabs { display: none; }
   #taskbar { display: none; }
   #snap-indicator, #grid-overlay { display: none !important; }
   #mobile-nav { display: flex !important; }

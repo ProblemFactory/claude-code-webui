@@ -757,8 +757,8 @@ class Sidebar {
     const date = new Date(s.startedAt);
     const customName = this._customNames[s.sessionId];
     const cwdFolder = s.cwd ? s.cwd.replace(/\/+$/, '').split('/').pop() : '';
-    const originalName = s.name || s.webuiName || cwdFolder || s.sessionId.substring(0, 12) + '...';
-    const displayName = customName || originalName;
+    const originalName = s.name || s.webuiName || s.sessionId.substring(0, 12) + '...';
+    const displayName = customName || cwdFolder || originalName;
 
     const badgeMap = {
       live:     { cls: 'badge-live', text: 'LIVE' },

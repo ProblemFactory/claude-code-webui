@@ -50,6 +50,8 @@ class LayoutManager {
       if (win.type === 'browser' && win._browserUrl) {
         winState.browserUrl = win._browserUrl;
       }
+      // Desktop assignment
+      winState.desktopId = this.app._windowDesktop?.get(id) || this.app._activeDesktopId;
       windows.push(winState);
     }
     const grid = this.app.wm.grid;
@@ -57,7 +59,9 @@ class LayoutManager {
     const globalFontSize = this.app._fontSize;
     const globalFontFamily = this.app._fontFamily;
     const sidebarOpen = this.app.sidebar.isOpen;
-    return { windows, grid, theme, globalFontSize, globalFontFamily, sidebarOpen };
+    const desktops = this.app._desktops;
+    const activeDesktopId = this.app._activeDesktopId;
+    return { windows, grid, theme, globalFontSize, globalFontFamily, sidebarOpen, desktops, activeDesktopId };
   }
 
   // Restore workspace from state (used for autosave restore on startup)
@@ -72,6 +76,14 @@ class LayoutManager {
     // Restore grid
     if (state.grid) {
       this.app.wm.setGrid(state.grid.rows, state.grid.cols);
+    }
+
+    // Restore desktops
+    if (state.desktops && state.desktops.length) {
+      this.app._desktops = state.desktops;
+      this.app._desktopCounter = state.desktops.length;
+      this.app._activeDesktopId = state.activeDesktopId || state.desktops[0].id;
+      this.app._renderDesktopTabs();
     }
 
     // Restore sidebar
@@ -100,6 +112,14 @@ class LayoutManager {
       }
       if (winState.zIndex) { winInfo.element.style.zIndex = winState.zIndex; if (winState.zIndex >= this.app.wm.zIndex) this.app.wm.zIndex = winState.zIndex + 1; }
       if (winState.isMinimized) this.app.wm.minimize(winInfo.id);
+      // Restore desktop assignment
+      if (winState.desktopId && this.app._windowDesktop) {
+        this.app._windowDesktop.set(winInfo.id, winState.desktopId);
+        // Hide if not on active desktop
+        if (winState.desktopId !== this.app._activeDesktopId) {
+          winInfo.element.style.display = 'none';
+        }
+      }
       setTimeout(() => { if (winInfo.onResize) winInfo.onResize(); }, 200);
       // Force terminal redraw after attach completes (triggers SIGWINCH via size toggle)
       setTimeout(() => {
