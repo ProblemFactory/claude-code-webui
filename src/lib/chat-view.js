@@ -833,8 +833,8 @@ class ChatView {
             }
             // View Log: agentId for JSONL, parentToolUseId for server buffer
             const viewBtn = agentId
-              ? ` <button class="chat-agent-view-btn" data-agent-id="${escHtml(agentId)}">View Log</button>`
-              : ` <button class="chat-agent-view-btn" data-parent-tool-id="${escHtml(toolId)}">View Log</button>`;
+              ? ` <button class="chat-agent-view-btn" data-agent-id="${escHtml(agentId)}" data-desc="${escHtml(desc)}">View Log</button>`
+              : ` <button class="chat-agent-view-btn" data-parent-tool-id="${escHtml(toolId)}" data-desc="${escHtml(desc)}">View Log</button>`;
             html = `<div class="chat-tool-use"><span class="chat-tool-label">\uD83E\uDD16 Agent: ${escHtml(desc)}${viewBtn}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this._linkifyText(inputStr)}</pre></details><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${escHtml(firstLine)}</summary><pre>${this._linkifyText(resultText)}</pre></details></div>`;
           } else {
             // Other tool success — show with collapsible input + output (no truncation)
@@ -1630,8 +1630,18 @@ class ChatView {
   _openSubagentViewer({ parentToolUseId, agentId, description }) {
     // Virtual session ID for subscribing to messages
     const virtualId = agentId ? `sub-agent-${agentId}` : `sub-${parentToolUseId}`;
+
+    // Reuse existing viewer window if still open
+    if (!this._subagentViewers) this._subagentViewers = new Map();
+    const existingWinId = this._subagentViewers.get(virtualId);
+    if (existingWinId && this.app.wm.windows.has(existingWinId)) {
+      this.app.wm.focusWindow(existingWinId);
+      return;
+    }
+
     const title = `\uD83E\uDD16 ${description || 'Agent'}`;
     const winInfo = this.app.wm.createWindow({ title, type: 'chat' });
+    this._subagentViewers.set(virtualId, winInfo.id);
     const view = new ChatView(winInfo, this.ws, virtualId, this.app, { readOnly: true });
 
     // Attach to virtual session — server returns history + sets up live forwarding
@@ -1649,7 +1659,7 @@ class ChatView {
     };
     this.ws.onGlobal(handler);
 
-    winInfo.onClose = () => { view.dispose(); this.app._checkWelcome(); };
+    winInfo.onClose = () => { this._subagentViewers.delete(virtualId); view.dispose(); this.app._checkWelcome(); };
   }
 
 
