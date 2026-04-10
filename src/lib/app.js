@@ -10,7 +10,7 @@ import { CodeEditor, detectLang, getLangExtension, loadEditorSettings, saveEdito
 import { LayoutManager } from './layout.js';
 import { ChatView } from './chat-view.js';
 import { Resizer } from './resizer.js';
-import { attachPopoverClose, initDrafts } from './utils.js';
+import { attachPopoverClose, initStateSync } from './utils.js';
 import { setupDirAutocomplete } from './autocomplete.js';
 import { getAvailableFonts } from './terminal.js';
 import { SettingsManager } from './settings.js';
@@ -76,8 +76,8 @@ class App {
 
     fetch('/api/home').then(r=>r.json()).then(d=> { document.getElementById('input-cwd').placeholder = d.home; }).catch(()=>{});
 
-    // Initialize draft sync (server-persisted, multi-client broadcast)
-    fetch('/api/drafts').then(r => r.json()).then(d => initDrafts(this.ws, d)).catch(() => initDrafts(this.ws, {}));
+    // Initialize unified state sync (server-persisted, versioned diff broadcast, reconnect recovery)
+    initStateSync(this.ws);
 
     // Restore layout after WebSocket is connected (needs active sessions)
     setTimeout(() => this.layoutManager.loadAutoSave(), 1500);

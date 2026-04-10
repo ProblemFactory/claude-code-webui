@@ -106,6 +106,79 @@ function broadcastToSession(session, id, msg) {
   }
 }
 
+// ── SyncStore: unified versioned state sync with diff broadcast ──
+// Each store tracks ops with monotonic versions. On reconnect, clients request
+// ops since their last version to avoid full-state reload. Future multi-user
+// ready via optional namespace prefix on keys.
+class SyncStore {
+  constructor(name, filePath, { saveDelay = 2000, maxOps = 500 } = {}) {
+    this.name = name;
+    this.filePath = filePath;
+    this.saveDelay = saveDelay;
+    this.maxOps = maxOps;
+    this.version = 0;
+    this.ops = []; // ring buffer: [{version, op:'set'|'delete', key, value?}]
+    this.data = {};
+    this._saveTimer = null;
+    this._load();
+  }
+  _load() {
+    ensureDir(path.join(__dirname, 'data'));
+    try {
+      const raw = JSON.parse(fs.readFileSync(this.filePath, 'utf-8'));
+      this.data = raw.data || {};
+      this.version = raw.version || 0;
+    } catch { this.data = {}; this.version = 0; }
+  }
+  _scheduleSave() {
+    clearTimeout(this._saveTimer);
+    this._saveTimer = setTimeout(() => {
+      try { fs.writeFileSync(this.filePath, JSON.stringify({ version: this.version, data: this.data }, null, 2)); } catch {}
+    }, this.saveDelay);
+  }
+  _pushOp(op) {
+    this.ops.push(op);
+    if (this.ops.length > this.maxOps) this.ops = this.ops.slice(-this.maxOps);
+  }
+  set(key, value, senderWs) {
+    this.version++;
+    this.data[key] = value;
+    const op = { version: this.version, op: 'set', key, value };
+    this._pushOp(op);
+    this._scheduleSave();
+    this._broadcast(op, senderWs);
+  }
+  delete(key, senderWs) {
+    if (!(key in this.data)) return;
+    this.version++;
+    delete this.data[key];
+    const op = { version: this.version, op: 'delete', key };
+    this._pushOp(op);
+    this._scheduleSave();
+    this._broadcast(op, senderWs);
+  }
+  get(key) { return this.data[key]; }
+  getAll() { return this.data; }
+  getSnapshot() { return { version: this.version, data: { ...this.data } }; }
+  getOpsSince(sinceVersion) {
+    if (sinceVersion >= this.version) return { ops: [], version: this.version };
+    // Find ops in buffer
+    const idx = this.ops.findIndex(o => o.version > sinceVersion);
+    if (idx >= 0 && this.ops[idx].version === sinceVersion + 1) {
+      // Contiguous ops available — send delta
+      return { ops: this.ops.slice(idx), version: this.version };
+    }
+    // Gap in ops (too old or buffer wrapped) — send full snapshot
+    return { full: this.data, version: this.version };
+  }
+  _broadcast(op, senderWs) {
+    const msg = JSON.stringify({ type: 'state-sync', store: this.name, ...op });
+    wss.clients.forEach(client => {
+      if (client !== senderWs && client.readyState === WS_OPEN) { try { client.send(msg); } catch {} }
+    });
+  }
+}
+
 // ── Effective-size computation (min cols/rows across clients + PTY resize + broadcast) ──
 function resizeSessionToMin(session, sessionId) {
   if (!session.clients.size || !session.pty) return;
@@ -833,37 +906,14 @@ app.delete('/api/custom-themes/:name', (req, res) => {
   res.json({ success: true });
 });
 
-// ── Drafts Persistence (server-side, multi-client sync via WS) ──
-const DRAFTS_FILE = path.join(__dirname, 'data', 'drafts.json');
-let _draftsCache = null;
-let _draftsSaveTimer = null;
+// ── Sync Stores (unified versioned state with diff broadcast) ──
+const syncStores = {};
+function getSyncStore(name) { return syncStores[name]; }
 
-function readDrafts() {
-  if (_draftsCache) return _draftsCache;
-  ensureDir(path.join(__dirname, 'data'));
-  try { _draftsCache = JSON.parse(fs.readFileSync(DRAFTS_FILE, 'utf-8')); }
-  catch { _draftsCache = {}; }
-  return _draftsCache;
-}
-
-function saveDraftsToDisk() {
-  clearTimeout(_draftsSaveTimer);
-  _draftsSaveTimer = setTimeout(() => {
-    try { fs.writeFileSync(DRAFTS_FILE, JSON.stringify(_draftsCache || {}, null, 2)); } catch {}
-  }, 2000);
-}
-
-function updateDraft(key, value, senderWs) {
-  const drafts = readDrafts();
-  if (value == null || value === '') { delete drafts[key]; }
-  else { drafts[key] = value; }
-  saveDraftsToDisk();
-  // Broadcast to all OTHER clients
-  const msg = JSON.stringify({ type: 'draft-updated', key, value: value || '' });
-  wss.clients.forEach(client => {
-    if (client !== senderWs && client.readyState === WS_OPEN) { try { client.send(msg); } catch {} }
-  });
-}
+// Register stores — each backed by a JSON file in data/
+syncStores.drafts = new SyncStore('drafts', path.join(__dirname, 'data', 'drafts.json'));
+syncStores.settings = new SyncStore('settings', path.join(__dirname, 'data', 'settings-sync.json'));
+// Future: syncStores.bookmarks, syncStores.themes, etc.
 
 // ── User State Persistence (server-side, replaces localStorage for starred/archived/names/groups) ──
 const USER_STATE_FILE = path.join(__dirname, 'data', 'user-state.json');
@@ -894,8 +944,12 @@ app.get('/api/user-state', (req, res) => {
   res.json(readUserState());
 });
 
-// Get all drafts (for initial page load)
-app.get('/api/drafts', (req, res) => { res.json(readDrafts()); });
+// Get sync store snapshot (for initial page load)
+app.get('/api/sync/:store', (req, res) => {
+  const store = getSyncStore(req.params.store);
+  if (!store) return res.status(404).json({ error: 'Unknown store' });
+  res.json(store.getSnapshot());
+});
 
 // Save full user state (replaces entire state)
 app.post('/api/user-state', (req, res) => {
@@ -1904,9 +1958,30 @@ wss.on('connection', (ws) => {
         break;
       }
 
-      case 'draft-update': {
-        if (data.key && typeof data.key === 'string') {
-          updateDraft(data.key, data.value || '', ws);
+      case 'state-set': {
+        const store = getSyncStore(data.store);
+        if (store && data.key && typeof data.key === 'string') {
+          if (data.value == null || data.value === '') store.delete(data.key, ws);
+          else store.set(data.key, data.value, ws);
+        }
+        break;
+      }
+
+      case 'state-resync': {
+        // Client reconnected — send missed ops or full snapshot per store
+        if (data.versions && typeof data.versions === 'object') {
+          for (const [name, sinceVersion] of Object.entries(data.versions)) {
+            const store = getSyncStore(name);
+            if (!store) continue;
+            const result = store.getOpsSince(sinceVersion);
+            if (result.full) {
+              ws.send(JSON.stringify({ type: 'state-snapshot', store: name, data: result.full, version: result.version }));
+            } else if (result.ops.length > 0) {
+              for (const op of result.ops) {
+                ws.send(JSON.stringify({ type: 'state-sync', store: name, ...op }));
+              }
+            }
+          }
         }
         break;
       }

@@ -8,5 +8,7 @@ data/user-state.json
 data/bookmarks.json
 data/settings.json
 data/custom-themes.json
+data/drafts.json
+data/settings-sync.json
 data/bin/code
 *.nfs*

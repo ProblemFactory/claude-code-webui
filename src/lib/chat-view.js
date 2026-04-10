@@ -63,7 +63,7 @@ hljs.registerLanguage('scss', hljsScss);
 hljs.registerLanguage('graphql', hljsGraphql);
 hljs.registerLanguage('nginx', hljsNginx);
 hljs.registerLanguage('protobuf', hljsProtobuf);
-import { escHtml, saveDraft, loadDraft, clearDraft } from './utils.js';
+import { escHtml, saveDraft, loadDraft, clearDraft, getStateSync } from './utils.js';
 
 // Map file extensions to highlight.js language identifiers
 const EXT_TO_LANG = {
@@ -301,15 +301,16 @@ class ChatView {
       this._draftTimer = setTimeout(() => saveDraft('chat', this.sessionId, this._textarea.value), 300);
     });
 
-    // Sync draft from other clients
-    this._draftSyncHandler = (e) => {
-      if (e.detail.key === 'chat:' + this.sessionId && document.activeElement !== this._textarea) {
-        this._textarea.value = e.detail.value;
+    // Sync draft from other clients via StateSync
+    this._draftSyncHandler = (value) => {
+      if (document.activeElement !== this._textarea) {
+        this._textarea.value = value || '';
         this._textarea.style.height = 'auto';
         this._textarea.style.height = Math.min(this._textarea.scrollHeight, 200) + 'px';
       }
     };
-    window.addEventListener('draft-sync', this._draftSyncHandler);
+    const sync = getStateSync();
+    if (sync) sync.on('drafts', 'chat:' + this.sessionId, this._draftSyncHandler);
 
     // Slash command list (populated from system.init)
     this._slashCommands = [];
@@ -2091,7 +2092,10 @@ class ChatView {
   dispose() {
     this.ws.offGlobal(this._handler);
     this.ws.offStateChange(this._stateHandler);
-    if (this._draftSyncHandler) window.removeEventListener('draft-sync', this._draftSyncHandler);
+    if (this._draftSyncHandler) {
+      const sync = getStateSync();
+      if (sync) sync.off('drafts', 'chat:' + this.sessionId, this._draftSyncHandler);
+    }
   }
 }
 
