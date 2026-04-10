@@ -46,6 +46,8 @@ data/sockets/cw-*      — dtach socket files (session anchors)
 data/session-buffers/  — Per-session output buffer files (written by pty-wrapper)
 data/session-meta/     — Per-session metadata JSON
 data/layouts.json      — Persisted layouts and autosave state
+data/drafts.json       — Chat input drafts (SyncStore, versioned, multi-client synced)
+data/settings-sync.json — Settings SyncStore (future migration target)
 src/
   client.js            — Entry point (2 lines): imports App and initializes
   lib/
@@ -64,7 +66,7 @@ src/
     resizer.js         — Resizer (reusable drag-to-resize handle)
     layout.js          — LayoutManager (auto-save/restore)
     app.js             — App controller (wires everything)
-    utils.js           — Shared utilities (formatSize, escHtml, attachPopoverClose)
+    utils.js           — Shared utilities (formatSize, escHtml, attachPopoverClose, StateSync, draft helpers)
     autocomplete.js    — Shared directory autocomplete (setupDirAutocomplete)
     settings.js        — SettingsManager (sparse storage, server persist, WS sync, event listeners)
     settings-schema.js — Settings schema (all options with types, defaults, categories)
@@ -123,6 +125,8 @@ docs/
 | **Per-terminal settings** | `src/lib/terminal.js` → `_showSettings()`, `applyOverride()` | ⚙ popover per window: theme/font size/font with Default option |
 | **Font discovery** | `src/lib/terminal.js` → `_buildFontList()` + `server.js` → `GET /api/fonts` | Client `queryLocalFonts()` → server `fc-list` fallback + Google Web Fonts |
 | **WebSocket protocol** | `server.js` → `wss.on('connection')` + `src/lib/ws.js` | All message types defined in server switch/case |
+| **State sync / drafts** | `server.js` → `SyncStore` class + `src/lib/utils.js` → `StateSync` class | Versioned diff broadcast, reconnect recovery, draft persistence |
+| **Syntax highlighting** | `src/lib/chat-view.js` → `_renderCodeBlock()` + highlight.js | 30 languages, line numbers, language picker dropdown |
 | **CSS / visual styling** | `public/style.css` | All themes via CSS custom properties |
 | **HTML structure** | `public/index.html` | Sidebar, toolbar, workspace, dialogs |
 
@@ -347,6 +351,46 @@ Split from monolithic 1647-line `src/client.js` into 13 ES modules under `src/li
 
 **Why client fonts matter**: Terminal renders in the browser — the fonts on the client machine are what determine rendering, not the server.
 
+### 13. StateSync (Unified Versioned Diff Broadcast)
+**Problem**: Multiple state types (drafts, settings, bookmarks, themes) each had ad-hoc persistence + broadcast patterns. No reconnect recovery — missed updates during disconnect were lost.
+
+**SyncStore** (server.js): Generic versioned key-value store.
+- Monotonic version counter per store. Each `set()`/`delete()` increments version.
+- Op log ring buffer (500 ops). On reconnect, `getOpsSince(version)` returns delta if contiguous, full snapshot if gap.
+- Debounced disk persistence (2s) to `data/{store}.json` with `{version, data}` format.
+- Diff broadcast: only the changed key+value sent to other clients (not entire state).
+- Registered stores: `syncStores.drafts`, `syncStores.settings`. Adding a new store is one line.
+
+**StateSync** (client, `src/lib/utils.js`): Client-side counterpart.
+- `init(storeName)` fetches snapshot from `GET /api/sync/:store`.
+- On WS reconnect: sends `{type: 'state-resync', versions: {drafts: 42}}` → server replies with missed ops or full snapshot.
+- Event-based: `sync.on('drafts', 'chat:sess-1', handler)` for specific key, `sync.on('drafts', '*', handler)` for all.
+- Convenience wrappers: `saveDraft(type, id, value)` / `loadDraft(type, id)` / `clearDraft(type, id)`.
+
+**WS Protocol**: `state-set` (client→server write), `state-sync` (server→clients diff op), `state-snapshot` (server→client full state on resync), `state-resync` (client→server reconnect request).
+
+**Multi-user ready**: Key namespace supports user prefixes (e.g. `user123:chat:sess-1`). Currently single-user.
+
+**Draft persistence**: Chat input auto-saved every 300ms to `drafts` store. Restored on attach. Synced across clients (Telegram-style). Cleared on send.
+
+### 14. Syntax Highlighting (highlight.js)
+Read/Write tool output uses highlight.js for syntax highlighting with line numbers.
+
+**Setup**: highlight.js core + 30 language grammars imported individually (not `common` bundle) to minimize size (~300KB added to bundle). Languages: javascript, typescript, python, json, yaml, xml, css, bash, c, cpp, go, rust, java, sql, markdown, diff, dockerfile, ini, ruby, php, swift, kotlin, scala, csharp, lua, r, perl, scss, graphql, nginx, protobuf.
+
+**Auto-detection**: `detectHljsLang(filePath)` maps file extension to hljs language via `EXT_TO_LANG` table. Falls back to `plain` (no highlighting).
+
+**Rendering**: `_renderCodeBlock(code, filePath)` returns HTML with flex-layout lines: fixed-width line number gutter (`chat-code-ln`) + text span (`chat-code-text`). hljs tokens styled via CSS variables (`--magenta`, `--green`, `--blue` etc.) for theme awareness.
+
+**Language picker**: Searchable dropdown next to Wrap button. Type to filter, click to select. `_rehighlightCodeBlock()` re-highlights in-place without re-rendering the entire block.
+
+**Wrap**: Flex layout ensures line numbers stay fixed when text wraps. Wrap toggle affects only `.chat-code-text` spans.
+
+### 15. Frontend Optimization
+- **Minification**: esbuild `--minify` flag (2.5MB → 1.4MB)
+- **Gzip compression**: `compression` middleware on all Express responses (1.4MB → ~420KB over the wire, 83% total reduction)
+- **Static file caching**: `maxAge=0` with etag for cache revalidation on every request
+
 ## API Reference
 
 ### REST Endpoints
@@ -384,11 +428,12 @@ Split from monolithic 1647-line `src/client.js` into 13 ES modules under `src/li
 - `GET /api/session-messages?claudeSessionId=&cwd=` — parse JSONL file into chat message history
 - `GET /api/subagent-messages?claudeSessionId=&cwd=&agentId=` — read subagent JSONL + meta from subagents/ directory
 - `GET /api/custom-themes` / `POST /api/custom-themes` / `DELETE /api/custom-themes/:name` — custom theme CRUD (broadcasts `custom-themes-updated` to all WS clients)
+- `GET /api/sync/:store` — SyncStore snapshot `{version, data}` for initial page load (stores: `drafts`, `settings`)
 - `GET /proxy/<url>` — full-rewriting web proxy via node-unblocker (HTML/CSS URL rewrite, JS XHR/WS rewrite, header stripping)
 
 ### WebSocket Protocol (`/ws`)
-Client → Server: `create`, `input`, `chat-input`, `permission-response`, `set-permission-mode`, `interrupt`, `resize`, `attach`, `kill`, `tmux-attach`
-Server → Client: `created`, `output`, `chat-message`, `subagent-message` (with parentToolUseId), `exited`, `attached` (includes `isStreaming`, `pendingPermissions`), `active-sessions`, `editor-open`, `editor-close`, `effective-size`, `user-state-updated`, `bookmarks-updated`, `settings-updated`, `custom-themes-updated`, `error`
+Client → Server: `create`, `input`, `chat-input`, `permission-response`, `set-permission-mode`, `interrupt`, `resize`, `attach`, `kill`, `tmux-attach`, `state-set`, `state-resync`
+Server → Client: `created`, `output`, `chat-message`, `subagent-message` (with parentToolUseId), `exited`, `attached` (includes `isStreaming`, `pendingPermissions`, `activeSubagents`), `active-sessions`, `editor-open`, `editor-close`, `effective-size`, `user-state-updated`, `bookmarks-updated`, `settings-updated`, `custom-themes-updated`, `state-sync`, `state-snapshot`, `error`
 
 **Virtual session attach**: `attach` with `sessionId` starting with `sub-` routes to subagent handler. `sub-{parentToolUseId}` returns live-buffered messages from parent session's `subagentBuffers`. `sub-agent-{agentId}` loads completed agent's JSONL from disk. Both respond with standard `attached` payload. Live virtual sessions also receive `chat-message` broadcasts for real-time updates.
 
@@ -432,9 +477,12 @@ Server → Client: `created`, `output`, `chat-message`, `subagent-message` (with
 - Expandable input (floating button inside textarea)
 - Send: Enter (normal), Ctrl+Enter (expanded mode)
 - Chat font size follows global A-/A+ via CSS zoom
+- Draft persistence: chat input auto-saved every 300ms to server, synced across clients (Telegram-style), restored on refresh/resume
+- Syntax highlighting in Read/Write output: 30 languages via highlight.js, auto-detected from file extension, line numbers, searchable language picker dropdown, wrap toggle
+- Edit diff view: flex layout with fixed +/- prefix column, suffix context matching, wrap toggle
 - JSONL history loaded on resume (full past conversation)
 - Window blink on `result` message when not focused
-- WebSocket reconnect: auto re-attach all sessions, chat syncs missed messages via `_reattach()`
+- WebSocket reconnect: auto re-attach all sessions, chat syncs missed messages via `_reattach()`, StateSync resync for drafts/settings
 - Pin-to-bottom: iterative scroll convergence (10 rAF frames) for content-visibility compatibility
 
 ### Window Manager
@@ -498,6 +546,7 @@ Server → Client: `created`, `output`, `chat-message`, `subagent-message` (with
 - Usage bar in taskbar (5h + 7d rate limits from Anthropic API)
 - Embedded browser window (🌐 in toolbar): iframe with URL bar, proxy mode toggle, layout persistence
 - Browser proxy mode: node-unblocker full URL rewriting (HTML/CSS/JS), strips X-Frame-Options/CSP. Works for noVNC, docs, internal services. Google/Cloudflare sites may trigger reCAPTCHA due to anti-bot detection.
+- Frontend optimization: esbuild minification (2.5MB → 1.4MB) + gzip compression middleware (~420KB over wire, 83% reduction)
 - Static file caching: `maxAge=0` with etag validation for cache revalidation
 - "x active" click in taskbar → window list popup
 
@@ -568,3 +617,9 @@ Server → Client: `created`, `output`, `chat-message`, `subagent-message` (with
 - Subagent View Log duplicate windows: clicking View Log multiple times opened duplicate read-only ChatViews. Fix: `_subagentViewers` Map tracks open windows by virtualId, focuses existing.
 - Completed agent View Log generic title: completed agent button lacked `data-desc` attribute, title showed "Agent" instead of description. Fix: both completed and live agent buttons carry `data-desc`.
 - Write/Read tool output truncated: output preview was cut at 500 chars with `...`. Fix: show full content (collapsed by default), consistent with other tools.
+- Tool output always wrapped: `.chat-tool-use pre` had `white-space: pre-wrap` hardcoded, making Wrap toggle ineffective. Fix: changed to `pre` (no-wrap by default), toggle works.
+- Diff view wrap overlaps prefix: `+`/`-` prefix and text on same line caused overlap when wrapped. Fix: flex layout with fixed prefix column, text wraps independently.
+- `_linkifyText` path regex matched inside generated HTML attributes: URL pass created `<span data-href="...">`, path regex matched inside attribute. Fix: tag-split before path pass.
+- Pending Agent tool card showed generic label: rendered as `🔧 Agent` instead of `🤖 Agent: {description}`. Fix: detect `block.name === 'Agent'` and use description from input.
+- Active subagent count wrong after refresh: `activeSubagents` included completed agents. Fix: filter out agents with `result` message in buffer.
+- Subagent View Log opens duplicates: no dedup check. Fix: `_subagentViewers` Map tracks open windows by virtualId, focuses existing.
