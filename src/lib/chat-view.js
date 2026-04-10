@@ -1226,17 +1226,16 @@ class ChatView {
 
   _setupLinkHandler() {
     this._messageList.addEventListener('click', (e) => {
-      const link = e.target.closest('.chat-link');
+      // Handle both our .chat-link spans and markdown-generated <a> tags
+      const link = e.target.closest('.chat-link') || e.target.closest('a[href]');
       if (!link) return;
       e.preventDefault();
       e.stopPropagation();
-      const url = link.dataset.href;
+      const url = link.dataset.href || link.getAttribute('href');
       const fp = link.dataset.path;
       if (e.ctrlKey || e.metaKey) {
         // Ctrl+Click: open
-        if (url) {
-          window.open(url, '_blank');
-        } else if (fp) {
+        if (fp) {
           // Parse optional :line, :line:col, or :line-line suffix
           const lineMatch = fp.match(/^(.+?):(\d+)(?:[:\-]\d+)?$/);
           const cleanPath = lineMatch ? lineMatch[1] : fp;
@@ -1254,10 +1253,12 @@ class ChatView {
               }
             })
             .catch(() => this._flashLink(link, 'Error'));
+        } else if (url) {
+          window.open(url, '_blank');
         }
       } else {
         // Click: copy to clipboard
-        const text = url || fp;
+        const text = fp || url;
         this._copyText(text, link);
       }
     });
