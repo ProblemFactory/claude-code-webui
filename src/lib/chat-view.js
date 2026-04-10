@@ -1223,19 +1223,25 @@ class ChatView {
     });
   }
 
-  // Linkify plain text (for user messages that don't go through markdown)
+  // Linkify plain text (for tool output, user messages that don't go through markdown)
   _linkifyText(text) {
     let html = escHtml(text);
+    // First pass: linkify URLs
     html = html.replace(/(https?:\/\/[^\s<>&]+)/g, (raw) => {
       const url = this._cleanPath(raw);
       const after = raw.slice(url.length);
       return `<span class="chat-link" data-href="${url}" title="Click to copy, Ctrl+Click to open">${url}</span>${after}`;
     });
-    html = html.replace(/(?<![="'\w/])((?:~|\.\.?)?\/[^\0<>?\s!`&*()'":;\\][^\0<>?\s!`&*()'"\\:;]*(?:\/[^\0<>?\s!`&*()'"\\:;]+)+(?::\d+(?::\d+)?)?)/g, (raw) => {
-      const fp = this._cleanPath(raw);
-      const after = raw.slice(fp.length);
-      if (fp.length < 4) return raw;
-      return `<span class="chat-link chat-link-path" data-path="${fp}" title="Click to copy, Ctrl+Click to open">${fp}</span>${after}`;
+    // Second pass: linkify file paths — split by tags to avoid matching inside generated <span> attributes
+    html = html.replace(/(<[^>]*>)|([^<]+)/g, (match, tag, text2) => {
+      if (tag) return tag;
+      if (!text2) return match;
+      return text2.replace(/(?<![="'\w/])((?:~|\.\.?)?\/[^\0<>?\s!`&*()'":;\\][^\0<>?\s!`&*()'"\\:;]*(?:\/[^\0<>?\s!`&*()'"\\:;]+)+(?::\d+(?::\d+)?)?)/g, (raw) => {
+        const fp = this._cleanPath(raw);
+        const after = raw.slice(fp.length);
+        if (fp.length < 4) return raw;
+        return `<span class="chat-link chat-link-path" data-path="${fp}" title="Click to copy, Ctrl+Click to open">${fp}</span>${after}`;
+      });
     });
     return html;
   }
