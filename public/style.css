@@ -1517,6 +1517,7 @@ html, body {
 .chat-pre-wrap:hover .chat-wrap-toggle { opacity: 1; }
 .chat-wrap-toggle:hover { color: var(--text); background: var(--bg-input); }
 pre.chat-pre-wrapped { white-space: pre-wrap; word-break: break-all; }
+.chat-diff-body.chat-pre-wrapped > div { white-space: pre-wrap; word-break: break-all; }
 .chat-open-editor-btn {
   position: absolute; top: 2px; right: 2px;
   font-size: 11px; padding: 1px 4px; border-radius: 3px; cursor: pointer;

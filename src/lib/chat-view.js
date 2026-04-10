@@ -1134,19 +1134,19 @@ class ChatView {
   }
 
   _addWrapToggles(el) {
-    for (const pre of el.querySelectorAll('pre')) {
-      if (pre.querySelector('.chat-wrap-toggle')) continue;
+    for (const block of el.querySelectorAll('pre, .chat-diff-body')) {
+      if (block.querySelector('.chat-wrap-toggle')) continue;
       const wrapper = document.createElement('div');
       wrapper.className = 'chat-pre-wrap';
-      pre.parentNode.insertBefore(wrapper, pre);
-      wrapper.appendChild(pre);
+      block.parentNode.insertBefore(wrapper, block);
+      wrapper.appendChild(block);
       const btn = document.createElement('button');
       btn.className = 'chat-wrap-toggle';
       btn.textContent = 'Wrap';
       btn.title = 'Toggle word wrap';
       btn.onclick = (e) => {
         e.stopPropagation();
-        const on = pre.classList.toggle('chat-pre-wrapped');
+        const on = block.classList.toggle('chat-pre-wrapped');
         btn.textContent = on ? 'No Wrap' : 'Wrap';
       };
       wrapper.appendChild(btn);
