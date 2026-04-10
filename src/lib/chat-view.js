@@ -826,12 +826,10 @@ class ChatView {
             const lineCount = content.split('\n').length;
             const byteCount = new Blob([content]).size;
             const sizeStr = byteCount > 1024 ? (byteCount / 1024).toFixed(1) + ' KB' : byteCount + ' B';
-            const preview = content.substring(0, 500);
-            html = `<div class="chat-tool-use"><span class="chat-tool-label">\u{1F4DD} Write ${this._clickablePath(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${lineCount} lines, ${sizeStr}</summary><pre>${escHtml(preview)}${content.length > 500 ? '\n...' : ''}</pre></details></div>`;
+            html = `<div class="chat-tool-use"><span class="chat-tool-label">\u{1F4DD} Write ${this._clickablePath(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${lineCount} lines, ${sizeStr}</summary><pre>${this._linkifyText(content)}</pre></details></div>`;
           } else if (status === 'ok' && pendingUse.name === 'Read') {
             const lineCount = resultText.split('\n').length;
-            const preview = resultText.substring(0, 500);
-            html = `<div class="chat-tool-use"><span class="chat-tool-label">\u{1F4D6} Read ${this._clickablePath(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${lineCount} lines</summary><pre>${escHtml(preview)}${resultText.length > 500 ? '\n...' : ''}</pre></details></div>`;
+            html = `<div class="chat-tool-use"><span class="chat-tool-label">\u{1F4D6} Read ${this._clickablePath(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${lineCount} lines</summary><pre>${this._linkifyText(resultText)}</pre></details></div>`;
           } else if (status !== 'ok') {
             // Failed tool — same card style, error shown inside
             const inputStr = stripAnsi(typeof pendingUse.input === 'string' ? pendingUse.input : JSON.stringify(pendingUse.input, null, 2));
