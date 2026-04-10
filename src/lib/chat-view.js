@@ -1230,6 +1230,11 @@ class ChatView {
   }
 
   _addWrapToggles(el) {
+    const LANGS = ['plain', 'bash', 'c', 'cpp', 'csharp', 'css', 'diff', 'dockerfile',
+      'go', 'graphql', 'ini', 'java', 'javascript', 'json', 'kotlin', 'lua', 'markdown',
+      'nginx', 'perl', 'php', 'protobuf', 'python', 'r', 'ruby', 'rust', 'scala', 'scss',
+      'sql', 'swift', 'typescript', 'xml', 'yaml'];
+
     for (const block of el.querySelectorAll('pre, .chat-diff-body, .chat-code-block')) {
       if (block.parentNode?.classList?.contains('chat-pre-wrap')) continue;
       const wrapper = document.createElement('div');
@@ -1240,22 +1245,55 @@ class ChatView {
       const toolbar = document.createElement('div');
       toolbar.className = 'chat-code-toolbar';
 
-      // Language dropdown for code blocks
+      // Language picker for code blocks — searchable dropdown
       if (block.classList.contains('chat-code-block')) {
-        const sel = document.createElement('select');
-        sel.className = 'chat-lang-select';
-        sel.title = 'Syntax highlighting';
-        const langs = ['plain', 'javascript', 'typescript', 'python', 'json', 'yaml', 'html', 'css',
-          'bash', 'c', 'cpp', 'csharp', 'go', 'rust', 'java', 'kotlin', 'ruby', 'swift', 'php',
-          'sql', 'markdown', 'xml', 'diff', 'dockerfile', 'ini', 'lua', 'perl', 'r', 'scala'];
-        for (const l of langs) {
-          const opt = document.createElement('option');
-          opt.value = l; opt.textContent = l;
-          sel.appendChild(opt);
-        }
-        sel.value = block.dataset.lang || 'plain';
-        sel.onchange = (e) => { e.stopPropagation(); this._rehighlightCodeBlock(block, sel.value); };
-        toolbar.appendChild(sel);
+        const langPicker = document.createElement('div');
+        langPicker.className = 'chat-lang-picker';
+        const langBtn = document.createElement('button');
+        langBtn.className = 'chat-lang-btn';
+        langBtn.textContent = block.dataset.lang || 'plain';
+        langBtn.title = 'Change syntax highlighting';
+        langBtn.onclick = (e) => {
+          e.stopPropagation();
+          if (langPicker.querySelector('.chat-lang-dropdown')) { langPicker.querySelector('.chat-lang-dropdown').remove(); return; }
+          const dd = document.createElement('div');
+          dd.className = 'chat-lang-dropdown';
+          const input = document.createElement('input');
+          input.className = 'chat-lang-search';
+          input.placeholder = 'Filter...';
+          dd.appendChild(input);
+          const list = document.createElement('div');
+          list.className = 'chat-lang-list';
+          dd.appendChild(list);
+          const render = (filter) => {
+            list.innerHTML = '';
+            const f = (filter || '').toLowerCase();
+            for (const l of LANGS) {
+              if (f && !l.includes(f)) continue;
+              const item = document.createElement('div');
+              item.className = 'chat-lang-item' + (l === (block.dataset.lang || 'plain') ? ' active' : '');
+              item.textContent = l;
+              item.onclick = (ev) => {
+                ev.stopPropagation();
+                this._rehighlightCodeBlock(block, l);
+                langBtn.textContent = l;
+                dd.remove();
+                closeFn();
+              };
+              list.appendChild(item);
+            }
+          };
+          render('');
+          input.oninput = () => render(input.value);
+          input.onkeydown = (ev) => { if (ev.key === 'Escape') { dd.remove(); closeFn(); } };
+          langPicker.appendChild(dd);
+          setTimeout(() => input.focus(), 0);
+          const closeFn = () => document.removeEventListener('mousedown', closeHandler);
+          const closeHandler = (ev) => { if (!dd.contains(ev.target) && ev.target !== langBtn) { dd.remove(); closeFn(); } };
+          setTimeout(() => document.addEventListener('mousedown', closeHandler), 0);
+        };
+        langPicker.appendChild(langBtn);
+        toolbar.appendChild(langPicker);
       }
 
       const btn = document.createElement('button');

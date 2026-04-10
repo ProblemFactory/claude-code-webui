@@ -1509,23 +1509,38 @@ html, body {
 }
 .chat-img-overlay img { max-width: 90vw; max-height: 90vh; object-fit: contain; border-radius: var(--radius); }
 .chat-pre-wrap { position: relative; }
-.chat-wrap-toggle {
-  position: absolute; top: 4px; right: 4px;
-  font-size: 9px; padding: 1px 5px; border-radius: 3px; cursor: pointer;
-  background: var(--bg-hover); border: 1px solid var(--border); color: var(--text-dim);
-  opacity: 0; transition: opacity var(--transition);
-}
 .chat-code-toolbar {
   position: absolute; top: 4px; right: 4px; display: flex; gap: 4px; align-items: center;
   opacity: 0; transition: opacity var(--transition); z-index: 2;
 }
 .chat-pre-wrap:hover .chat-code-toolbar { opacity: 1; }
-.chat-wrap-toggle:hover { color: var(--text); background: var(--bg-input); }
-.chat-lang-select {
-  font-size: 9px; padding: 1px 2px; border-radius: 3px; cursor: pointer;
+.chat-wrap-toggle {
+  font-size: 9px; padding: 1px 5px; border-radius: 3px; cursor: pointer;
   background: var(--bg-hover); border: 1px solid var(--border); color: var(--text-dim);
 }
-.chat-lang-select:hover { color: var(--text); }
+.chat-wrap-toggle:hover { color: var(--text); background: var(--bg-input); }
+.chat-lang-picker { position: relative; }
+.chat-lang-btn {
+  font-size: 9px; padding: 1px 5px; border-radius: 3px; cursor: pointer;
+  background: var(--bg-hover); border: 1px solid var(--border); color: var(--text-dim);
+}
+.chat-lang-btn:hover { color: var(--text); background: var(--bg-input); }
+.chat-lang-dropdown {
+  position: absolute; top: 100%; right: 0; margin-top: 2px;
+  background: var(--bg-dialog); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3); z-index: 100; min-width: 120px; max-height: 200px;
+  display: flex; flex-direction: column;
+}
+.chat-lang-search {
+  font-size: 11px; padding: 4px 6px; margin: 4px; border: 1px solid var(--border);
+  border-radius: 3px; background: var(--bg-input); color: var(--text); outline: none;
+}
+.chat-lang-list { overflow-y: auto; flex: 1; }
+.chat-lang-item {
+  padding: 3px 8px; font-size: 11px; cursor: pointer; color: var(--text-secondary);
+}
+.chat-lang-item:hover { background: var(--bg-hover); color: var(--text); }
+.chat-lang-item.active { color: var(--accent); font-weight: 600; }
 pre.chat-pre-wrapped { white-space: pre-wrap; word-break: break-all; }
 .chat-diff-body.chat-pre-wrapped { overflow-x: hidden; }
 .chat-diff-body.chat-pre-wrapped > div .chat-diff-text { white-space: pre-wrap; word-break: break-all; }
