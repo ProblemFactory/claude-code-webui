@@ -8,6 +8,7 @@ const os = require('os');
 const crypto = require('crypto');
 const multer = require('multer');
 const { execFileSync, spawn } = require('child_process');
+const compression = require('compression');
 
 const PORT = process.env.PORT || 3456;
 const CLAUDE_CMD_RAW = process.env.CLAUDE_CMD || 'claude';
@@ -50,6 +51,7 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 
+app.use(compression());
 app.use(express.static(path.join(__dirname, 'public'), { etag: true, lastModified: true, maxAge: 0 }));
 app.use(express.json({ limit: '50mb' }));
 
