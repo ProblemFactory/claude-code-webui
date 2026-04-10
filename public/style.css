@@ -1126,6 +1126,8 @@ html, body {
 /* Waiting for input — blink title bar and taskbar item */
 .window-waiting .window-titlebar { animation: waiting-blink 0.7s ease-in-out infinite; will-change: opacity; }
 .taskbar-item.waiting { animation: waiting-blink 0.7s ease-in-out infinite; will-change: opacity; }
+.desktop-tab.waiting { animation: waiting-blink 0.7s ease-in-out infinite; will-change: opacity; }
+.session-card.waiting { animation: waiting-blink 0.7s ease-in-out infinite; will-change: opacity; }
 @keyframes waiting-blink {
   0%,100% { opacity: 1; }
   50% { opacity: 0.5; box-shadow: inset 0 0 0 100px rgba(250,180,40,0.4); }

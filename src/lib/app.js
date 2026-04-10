@@ -822,7 +822,8 @@ class App {
   createSession({ cwd, name, model, permission, extraArgs, resumeId, mode }) {
     this._hideWelcome();
     const sessionMode = mode || this.settings.get('session.defaultMode') || 'chat';
-    const sessionName = name || (resumeId ? `Resume ${resumeId.substring(0,8)}` : `Session ${this.wm.windowCounter+1}`);
+    const cwdFolder = cwd ? cwd.replace(/\/+$/, '').split('/').pop() : '';
+    const sessionName = name || cwdFolder || (resumeId ? `Resume ${resumeId.substring(0,8)}` : `Session ${this.wm.windowCounter+1}`);
     const winType = sessionMode === 'chat' ? 'chat' : 'terminal';
     const titlePrefix = sessionMode === 'chat' ? '\uD83D\uDCAC ' : '';
     const winInfo = this.wm.createWindow({ title: `${titlePrefix}${sessionName}`, type: winType });
@@ -913,7 +914,8 @@ class App {
     this._hideWelcome();
     const isChat = mode === 'chat';
     const titlePrefix = isChat ? '\uD83D\uDCAC ' : '';
-    const winInfo = this.wm.createWindow({ title: `${titlePrefix}${name} — ${cwd}`, type: isChat ? 'chat' : 'terminal' });
+    const titleName = name || (cwd ? cwd.replace(/\/+$/, '').split('/').pop() : 'Session');
+    const winInfo = this.wm.createWindow({ title: `${titlePrefix}${titleName} — ${cwd}`, type: isChat ? 'chat' : 'terminal' });
 
     this.ws.send({ type: 'attach', sessionId: serverId });
 
@@ -1406,6 +1408,48 @@ class App {
     countEl.textContent = `${activeCount} active`;
     countEl.style.cursor = 'pointer';
     countEl.onclick = (e) => { e.stopPropagation(); this._showWindowList(countEl); };
+
+    // Propagate waiting state to desktop tabs and sidebar
+    this._updateWaitingIndicators();
+  }
+
+  _updateWaitingIndicators() {
+    // Desktop tabs: blink if any window on that desktop is waiting
+    const waitingDesktops = new Set();
+    const waitingSessions = new Set();
+    for (const [winId, win] of this.wm.windows) {
+      if (win.element.classList.contains('window-waiting')) {
+        const desktopId = this._windowDesktop.get(winId) || this._desktops[0]?.id;
+        waitingDesktops.add(desktopId);
+        // Find session for sidebar blink
+        const term = this.sessions.get(winId);
+        if (term?.sessionId) {
+          const allSess = this.sidebar?._allSessions || [];
+          const match = allSess.find(s => s.webuiId === term.sessionId);
+          if (match) waitingSessions.add(match.sessionId);
+        }
+      }
+    }
+    // Apply to desktop tabs
+    const tabs = document.querySelectorAll('.desktop-tab');
+    tabs.forEach(tab => {
+      const desktop = this._desktops[Array.from(tabs).indexOf(tab)];
+      if (desktop && waitingDesktops.has(desktop.id) && desktop.id !== this._activeDesktopId) {
+        tab.classList.add('waiting');
+      } else {
+        tab.classList.remove('waiting');
+      }
+    });
+    // Apply to sidebar session cards
+    const cards = document.querySelectorAll('.session-card');
+    cards.forEach(card => {
+      const sid = card.dataset?.sessionId;
+      if (sid && waitingSessions.has(sid)) {
+        card.classList.add('waiting');
+      } else {
+        card.classList.remove('waiting');
+      }
+    });
   }
 
   _showWindowList(anchor) {

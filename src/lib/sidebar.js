@@ -751,6 +751,7 @@ class Sidebar {
       e.dataTransfer.setData('application/x-session-id', s.sessionId);
       e.dataTransfer.effectAllowed = 'link';
     });
+    card.dataset.sessionId = s.sessionId;
     const isArchived = this._archivedIds.has(s.sessionId);
     if (isArchived) card.classList.add('archived');
     if (this._expandedCardId === s.sessionId) card.classList.add('expanded');
