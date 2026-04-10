@@ -1294,7 +1294,7 @@ html, body {
   cursor: pointer; font-size: 11px; color: var(--text-dim); padding: 2px 0;
 }
 .chat-tool-use pre {
-  white-space: pre-wrap; font-size: 11px; max-height: 250px; overflow-y: auto;
+  white-space: pre; font-size: 11px; max-height: 250px; overflow-y: auto; overflow-x: auto;
   margin-top: 6px; background: var(--bg-window); padding: 6px; border-radius: var(--radius-sm);
 }
 
@@ -1386,8 +1386,9 @@ html, body {
 .chat-diff-summary::before { content: '\25B8  '; }
 .chat-diff[open] > .chat-diff-summary::before { content: '\25BE  '; }
 .chat-diff-body { font-family: 'SF Mono','Fira Code','JetBrains Mono',monospace; font-size: 11px; line-height: 1.5; overflow-x: auto; margin-top: 4px; border: 1px solid var(--border); border-radius: var(--radius-sm); }
-.chat-diff-body > div { padding: 0 10px; white-space: pre; min-height: 18px; }
-.chat-diff-prefix { display: inline-block; width: 14px; color: var(--text-dim); user-select: none; }
+.chat-diff-body > div { display: flex; padding: 0 10px; white-space: pre; min-height: 18px; }
+.chat-diff-prefix { flex: 0 0 14px; color: var(--text-dim); user-select: none; }
+.chat-diff-text { flex: 1; min-width: 0; }
 .chat-diff-add { background: rgba(34,197,94,0.15); color: var(--text); }
 .chat-diff-del { background: rgba(239,68,68,0.15); color: var(--text); }
 .chat-diff-ctx { color: var(--text-secondary); }
@@ -1518,7 +1519,7 @@ html, body {
 .chat-wrap-toggle:hover { color: var(--text); background: var(--bg-input); }
 pre.chat-pre-wrapped { white-space: pre-wrap; word-break: break-all; }
 .chat-diff-body.chat-pre-wrapped { overflow-x: hidden; }
-.chat-diff-body.chat-pre-wrapped > div { white-space: pre-wrap; word-break: break-all; }
+.chat-diff-body.chat-pre-wrapped > div .chat-diff-text { white-space: pre-wrap; word-break: break-all; }
 .chat-open-editor-btn {
   position: absolute; top: 2px; right: 2px;
   font-size: 11px; padding: 1px 4px; border-radius: 3px; cursor: pointer;

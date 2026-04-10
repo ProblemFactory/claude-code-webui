@@ -1196,7 +1196,7 @@ class ChatView {
     for (const line of diffLines) {
       const cls = line.type === 'add' ? 'chat-diff-add' : line.type === 'del' ? 'chat-diff-del' : 'chat-diff-ctx';
       const prefix = line.type === 'add' ? '+' : line.type === 'del' ? '-' : ' ';
-      body += `<div class="${cls}"><span class="chat-diff-prefix">${prefix}</span>${escHtml(line.text)}</div>`;
+      body += `<div class="${cls}"><span class="chat-diff-prefix">${prefix}</span><span class="chat-diff-text">${escHtml(line.text)}</span></div>`;
     }
 
     return `<div class="chat-tool-use"><span class="chat-tool-label">\u{1F4DD} Update ${this._clickablePath(filePath)}</span><details class="chat-diff"><summary class="chat-diff-summary">${summary}</summary><div class="chat-diff-body">${body}</div></details></div>`;
