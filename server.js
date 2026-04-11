@@ -10,6 +10,7 @@ const multer = require('multer');
 const { execFileSync, spawn } = require('child_process');
 const compression = require('compression');
 const { MessageNormalizer } = require('./src/message-normalizer');
+const { ClaudeCodeAdapter } = require('./src/adapters/claude-code');
 
 const PORT = process.env.PORT || 3456;
 const CLAUDE_CMD_RAW = process.env.CLAUDE_CMD || 'claude';
@@ -1876,15 +1877,9 @@ wss.on('connection', (ws) => {
       }
 
       case 'set-permission-mode': {
-        // Change permission mode mid-session via control_request
         const session = activeSessions.get(data.sessionId);
         if (session?.pty && session.mode === 'chat' && data.mode) {
-          const msg = {
-            type: 'control_request',
-            request_id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-            request: { subtype: 'set_permission_mode', mode: data.mode },
-          };
-          session.pty.write(JSON.stringify(msg) + '\n');
+          session.pty.write(JSON.stringify(ClaudeCodeAdapter.buildSetPermissionMode(data.mode)) + '\n');
         }
         break;
       }
@@ -1933,12 +1928,7 @@ wss.on('connection', (ws) => {
         const session = activeSessions.get(data.sessionId);
         if (session?.pty && session.mode === 'chat') {
           // 1. Protocol: send control_request interrupt to stdin
-          const msg = {
-            type: 'control_request',
-            request_id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-            request: { subtype: 'interrupt' },
-          };
-          session.pty.write(JSON.stringify(msg) + '\n');
+          session.pty.write(JSON.stringify(ClaudeCodeAdapter.buildInterruptRequest()) + '\n');
           // 2. Fallback: SIGINT to claude child process (bypasses PTY/dtach chain)
           if (session._childPid) {
             try { process.kill(session._childPid, 'SIGINT'); } catch {}
@@ -1948,17 +1938,9 @@ wss.on('connection', (ws) => {
       }
 
       case 'permission-response': {
-        // Permission approval/denial from chat UI → write control_response to claude stdin
         const session = activeSessions.get(data.sessionId);
         if (session?.pty && session.mode === 'chat') {
-          const allowResponse = { behavior: 'allow', updatedInput: data.toolInput || {} };
-          if (data.permissionUpdates?.length) allowResponse.permission_updates = data.permissionUpdates;
-          const response = {
-            type: 'control_response',
-            response: data.approved
-              ? { subtype: 'success', request_id: data.requestId, response: allowResponse }
-              : { subtype: 'success', request_id: data.requestId, response: { behavior: 'deny', message: 'User denied this action' } },
-          };
+          const response = ClaudeCodeAdapter.buildPermissionResponse(data.requestId, data.approved, data.toolInput, data.permissionUpdates);
           session.pty.write(JSON.stringify(response) + '\n');
         }
         break;
