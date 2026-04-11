@@ -890,13 +890,19 @@ class ChatView {
       if (el) this._renderPermissionOverlay(el, msg);
     }
 
-    // Task info update
+    // Task info update — enrich with tool context from the normalized message
     if (fields.taskInfo) {
       if (!this._activeTasks) this._activeTasks = new Map();
       if (fields.taskInfo.status === 'completed') {
         this._activeTasks.delete(msg.toolCallId);
       } else if (fields.taskInfo.status === 'running') {
-        this._activeTasks.set(msg.toolCallId, fields.taskInfo);
+        const block = msg.content?.[0];
+        const task = { ...fields.taskInfo };
+        if (block?.type === 'tool_call') {
+          task.toolName = block.toolName;
+          task.command = block.input?.command || '';
+        }
+        this._activeTasks.set(msg.toolCallId, task);
       }
       this._updateStatusBar();
     }
@@ -1004,7 +1010,7 @@ class ChatView {
       }
     } else if (block.type === 'tool_result') {
       // Completed tool call — show full result
-      html = this._renderToolResult(block);
+      html = this._renderToolResult(block, msg);
     } else {
       html = `<pre>${escHtml(JSON.stringify(block, null, 2))}</pre>`;
     }
@@ -1023,7 +1029,7 @@ class ChatView {
   }
 
   // Render a completed tool result (Edit diff, Write/Read code block, Agent, generic)
-  _renderToolResult(block) {
+  _renderToolResult(block, msg) {
     const fp = block.input?.file_path || '';
     const resultText = stripAnsi(block.output || '');
     const inputStr = stripAnsi(typeof block.input === 'string' ? block.input : JSON.stringify(block.input, null, 2));
@@ -1050,7 +1056,12 @@ class ChatView {
     if (block.toolName === 'Agent') {
       const desc = block.input?.description || '';
       const firstLine = resultText.split('\n')[0].substring(0, 120) || '(empty)';
-      return `<div class="chat-tool-use"><span class="chat-tool-label">\uD83E\uDD16 Agent: ${escHtml(desc)}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this._linkifyText(inputStr)}</pre></details><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${escHtml(firstLine)}</summary><pre>${this._linkifyText(resultText)}</pre></details></div>`;
+      // View Log button: use agentId from taskInfo or parse from result text
+      const agentId = msg?.taskInfo?.id || (resultText.match(/agentId:\s*([a-z0-9]+)/)?.[1]) || '';
+      const viewBtn = agentId
+        ? ` <button class="chat-agent-view-btn" data-agent-id="${escHtml(agentId)}" data-desc="${escHtml(desc)}">View Log</button>`
+        : (block.toolCallId ? ` <button class="chat-agent-view-btn" data-parent-tool-id="${escHtml(block.toolCallId)}" data-desc="${escHtml(desc)}">View Log</button>` : '');
+      return `<div class="chat-tool-use"><span class="chat-tool-label">\uD83E\uDD16 Agent: ${escHtml(desc)}${viewBtn}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this._linkifyText(inputStr)}</pre></details><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${escHtml(firstLine)}</summary><pre>${this._linkifyText(resultText)}</pre></details></div>`;
     }
     // Generic tool
     const firstLine = resultText.split('\n')[0].substring(0, 120) || '(empty)';
