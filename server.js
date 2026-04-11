@@ -1272,15 +1272,25 @@ function backfillTaskState(messages) {
   return { tasks, todos };
 }
 
-// Get task/todo state for a session — wrapper metadata first, backfill from messages as fallback
+// Get task/todo state for a session — wrapper metadata first, backfill from raw JSONL as fallback
 function getSessionTaskState(sessionId, session) {
   const wMeta = readWrapperMeta(sessionId);
   if (wMeta.tasks || wMeta.todos) {
     return { tasks: wMeta.tasks || {}, todos: wMeta.todos || [] };
   }
-  // No wrapper metadata — backfill from message history
-  const sm = new SessionMessages(session || { claudeSessionId: '', cwd: '', buffer: '' });
-  return backfillTaskState(sm.all());
+  // No wrapper metadata — backfill from raw JSONL (unfiltered, includes system messages)
+  if (!session?.claudeSessionId) return { tasks: {}, todos: [] };
+  const fp = findSessionJsonlPath(session.claudeSessionId, session.cwd);
+  if (!fp) return { tasks: {}, todos: [] };
+  try {
+    const rawMessages = [];
+    for (const line of fs.readFileSync(fp, 'utf-8').split('\n')) {
+      const t = line.trim();
+      if (!t) continue;
+      try { rawMessages.push(JSON.parse(t)); } catch {}
+    }
+    return backfillTaskState(rawMessages);
+  } catch { return { tasks: {}, todos: [] }; }
 }
 
 function isProcessClaude(pid) {

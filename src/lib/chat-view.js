@@ -829,11 +829,11 @@ class ChatView {
 
     switch (msg.type) {
       case 'user':
-        this._appendUser(msg);
+        this._appendUser(msg, isHistory);
         break;
       case 'assistant':
         if (!isHistory && this._streamStatus) this._updateTyping(msg);
-        this._appendAssistant(msg);
+        this._appendAssistant(msg, isHistory);
         // Track per-turn usage from assistant message (NOT result.modelUsage which is cumulative)
         if (msg.message?.usage && !isHistory) {
           const u = msg.message.usage;
@@ -850,23 +850,21 @@ class ChatView {
           if (msg.slash_commands) this._slashCommands = msg.slash_commands.map(c => '/' + c);
           this._updateStatusBar();
         }
-        if (msg.subtype === 'task_started' && msg.tool_use_id) {
-          if (!this._activeTasks) this._activeTasks = new Map();
-          const type = msg.task_type === 'local_agent' ? 'agent' : 'command';
-          // Don't duplicate if already tracked via tool_use.run_in_background
-          if (!this._activeTasks.has(msg.tool_use_id)) {
-            this._activeTasks.set(msg.tool_use_id, { id: msg.task_id, type, description: msg.description, status: 'running' });
+        // Task tracking: only process live messages (history state comes from server taskState)
+        if (!isHistory && msg.tool_use_id) {
+          if (msg.subtype === 'task_started') {
+            if (!this._activeTasks) this._activeTasks = new Map();
+            const type = msg.task_type === 'local_agent' ? 'agent' : 'command';
+            if (!this._activeTasks.has(msg.tool_use_id)) {
+              this._activeTasks.set(msg.tool_use_id, { id: msg.task_id, type, description: msg.description, status: 'running' });
+              this._updateStatusBar();
+            }
+          } else if (msg.subtype === 'task_progress' && this._activeTasks?.has(msg.tool_use_id)) {
+            const task = this._activeTasks.get(msg.tool_use_id);
+            task.description = msg.description || task.description;
+            task.lastTool = msg.last_tool_name;
             this._updateStatusBar();
-          }
-        }
-        if (msg.subtype === 'task_progress' && this._activeTasks?.has(msg.tool_use_id)) {
-          const task = this._activeTasks.get(msg.tool_use_id);
-          task.description = msg.description || task.description;
-          task.lastTool = msg.last_tool_name;
-          this._updateStatusBar();
-        }
-        if (msg.subtype === 'task_notification') {
-          if (this._activeTasks?.has(msg.tool_use_id)) {
+          } else if (msg.subtype === 'task_notification' && this._activeTasks?.has(msg.tool_use_id)) {
             this._activeTasks.delete(msg.tool_use_id);
             this._updateStatusBar();
           }
@@ -925,7 +923,7 @@ class ChatView {
     }
   }
 
-  _appendUser(msg) {
+  _appendUser(msg, isHistory = false) {
     const content = msg.message?.content;
     if (!content) return;
 
@@ -1040,8 +1038,8 @@ class ChatView {
     else if (Array.isArray(content)) msgText = content.map(b => b.text || '').join('');
     const isSystemNotification = /<(task-notification|system-reminder|local-command|command-name)[\s>]/i.test(msgText);
     if (isSystemNotification) {
-      // Clear active task if this is a task completion notification
-      if (msgText.includes('task-notification') && this._activeTasks) {
+      // Clear active task if this is a task completion notification (live only)
+      if (!isHistory && msgText.includes('task-notification') && this._activeTasks) {
         const toolUseMatch = msgText.match(/<tool-use-id>([^<]+)<\/tool-use-id>/);
         if (toolUseMatch) { this._activeTasks.delete(toolUseMatch[1]); this._updateStatusBar(); }
       }
@@ -1102,7 +1100,7 @@ class ChatView {
     this._messageList.appendChild(el); this._addWrapToggles(el); this._addOpenInEditorBtn(el);
   }
 
-  _appendAssistant(msg) {
+  _appendAssistant(msg, isHistory = false) {
     const content = msg.message?.content;
     if (!content) return;
 
@@ -1118,8 +1116,8 @@ class ChatView {
         } else if (block.type === 'thinking') {
           parts.push(`<details class="chat-thinking"><summary>Thinking...</summary><pre>${escHtml(stripAnsi(block.text || ''))}</pre></details>`);
         } else if (block.type === 'tool_use') {
-          // Track background commands
-          if (block.input?.run_in_background && block.id) {
+          // Track background commands and TODO — only from live messages (history state from server)
+          if (!isHistory && block.input?.run_in_background && block.id) {
             if (!this._activeTasks) this._activeTasks = new Map();
             this._activeTasks.set(block.id, {
               id: block.id, type: 'command', toolName: block.name,
@@ -1129,8 +1127,7 @@ class ChatView {
             });
             this._updateStatusBar();
           }
-          // Track TODO list updates
-          if (block.name === 'TodoWrite' && block.input?.todos) {
+          if (!isHistory && block.name === 'TodoWrite' && block.input?.todos) {
             this._todos = block.input.todos;
             this._updateTodoDisplay();
           }
