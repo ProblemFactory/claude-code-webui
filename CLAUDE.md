@@ -337,9 +337,13 @@ Split from monolithic 1647-line `src/client.js` into 13 ES modules under `src/li
 
 **Session management**: `mode` field on session object. Stored in session metadata + wrapper metadata. `/api/active` and WebSocket `active-sessions` include mode. Sidebar shows badge for chat sessions. Default mode controlled by `session.defaultMode` setting (default: `chat`). All `createSession` paths respect this setting. Resume: split button toggles Terminal/Chat mode per session, persisted in user state.
 
-**JSONL history**: On chat attach, server sends last 50 messages from JSONL + any buffer messages appended as extra (totalCount based on JSONL count only, for consistency with `/api/session-messages` pagination). Paginated API: `GET /api/session-messages?claudeSessionId=...&cwd=...&offset=&limit=&search=`.
+**JSONL history**: On chat attach, server normalizes all messages via MessageManager (`convertHistory`) and sends last 50 normalized messages + totalCount. Paginated API: `GET /api/session-messages?claudeSessionId=...&cwd=...&offset=&limit=&search=&turnmap=1`. All responses return normalized messages (tool calls merged, stable IDs).
 
-**WebSocket reconnect**: On reconnect, all active sessions re-attach automatically. Chat sessions sync missed messages via `_reattach()` which fetches messages added since last known index. Fixed bug where `globalHandlers` map was wiped on reconnect in ws.js, losing persistent handlers.
+**Virtual scroll**: Sliding DOM window keeps max ~150 rendered messages. `_extendTop()` loads older messages and trims bottom (`_trimBottom`). `_extendBottom()` loads newer messages when scrolling back down and trims top (`_trimTop`) with scroll position preservation. Live messages while viewing history are deferred (only `_total` incremented, scroll button shows badge count). Position indicator shows `120–170 / 3000` when not pinned to bottom.
+
+**Scroll minimap**: Semantic scrollbar on right side of message list showing conversation structure. User message markers (thin blue lines) and compact/compaction markers (wide red lines). Drag to jump via `jumpToIndex`. Floating label follows cursor showing time + user message preview (first ~10 chars, word-boundary truncated). Turn data from `MessageManager.turnMap()` sent in attach payload or fetched via `?turnmap=1` API. Minimap positioned absolute in container, bounds synced to message list via ResizeObserver. Native scrollbar hidden when minimap active.
+
+**WebSocket reconnect**: On reconnect, all active sessions re-attach automatically. Chat sessions sync missed messages via `_reattach()` which re-sends attach → server responds with latest normalized messages + `isStreaming` from wrapper metadata. `globalHandlers` in ws.js are preserved across reconnects.
 
 **Server restart**: dtach keeps both wrappers alive. On restart, `restoreSessions` detects mode from wrapper metadata, re-attaches appropriately.
 
@@ -490,6 +494,8 @@ Server → Client: `created`, `output`, `msg` (normalized: op=create/edit/meta),
 - JSONL history loaded on resume (full past conversation)
 - Window blink on `result` message when not focused
 - WebSocket reconnect: auto re-attach all sessions, chat syncs missed messages via `_reattach()`, StateSync resync for drafts/settings
+- Virtual scroll: sliding DOM window (~150 max), trim top/bottom on extend, deferred live messages when viewing history
+- Scroll minimap: semantic turn-based navigation, user message markers, compact markers, drag-to-jump, floating preview label
 - Pin-to-bottom: iterative scroll convergence (10 rAF frames) for content-visibility compatibility
 
 ### Window Manager
@@ -640,5 +646,14 @@ Server → Client: `created`, `output`, `msg` (normalized: op=create/edit/meta),
 - Running agent View Log missing after refactor: `_renderToolMsg` didn't set `data-tool-id`, so `_onSubagentMessage` couldn't find DOM element. Fix: set `data-tool-id` from `msg.toolCallId`.
 - Scroll-up pagination at top edge: `scroll` event stops firing when `scrollTop=0`. Fix: `wheel` listener detects upward intent at top.
 - Collapsible long user messages showed "Message (N chars)" with no preview. Fix: show first 120 chars + total length; hide preview on expand via CSS `summary > span { display: none }`.
+- Resume briefly showed as external: session discovery only checked `webuiPids` (not yet updated). Fix: also check `activeSessions` by `claudeSessionId` as fallback.
+- View-only pagination disabled: `_readOnly` flag blocked scroll-up loading. Fix: `_canPaginate` flag (false for `sub-*` subagent viewers only, true for `view-*` and normal sessions).
+- `_addOpenInEditorBtn`/`_extractMsgText` used raw Claude message shape (`msg.type`, `msg.message`) after refactor to normalized format (`msg.role`, `msg.content`). Fix: updated to use normalized shape.
+- `pendingToolCalls` not flushed on result: interrupted tool calls stayed in pending map forever, risking wrong element mutation on resume. Fix: `_processResult` flushes all pending as error.
+- `_onEditMessage` didn't handle `'interrupted'` status: element not re-rendered. Fix: added to status transition condition.
+- `_subNormalizers`/`_normalizer` not cleaned up on session exit: listener closures held session alive. Fix: clear on exit/kill.
+- Message timestamps all identical in history: `_create` used `Date.now()` during `convertHistory`. Fix: extract `raw.timestamp` (ISO string) from Claude messages.
+- Minimap label not hiding on mouse leave: no `.chat-minimap-label.hidden` CSS rule existed (project has no global `.hidden`). Fix: added component-specific rule.
+- Live messages lost when viewing history: `_onCreateMessage` rendered at bottom then `_trimBottom` removed them. Fix: defer live messages when not pinned, show badge count on scroll button.
 - Resume briefly showed as external: session discovery only checked `webuiPids` (not yet updated). Fix: also check `activeSessions` by `claudeSessionId` as fallback.
 - View-only pagination disabled: `_readOnly` flag blocked scroll-up loading. Fix: `_canPaginate` flag (false for `sub-*` subagent viewers only, true for `view-*` and normal sessions).
