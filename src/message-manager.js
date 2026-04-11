@@ -1,5 +1,5 @@
 /**
- * MessageNormalizer — converts raw Claude stream-json messages into normalized messages.
+ * MessageManager — converts raw Claude stream-json messages into normalized messages.
  *
  * Each NormalizedMessage has a stable ID ({sessionId}:{seq}), a role, status, and content blocks.
  * Tool calls and their results are merged into single messages server-side.
@@ -13,7 +13,7 @@
  * NormalizedMessage format via their own normalizer.
  */
 
-class MessageNormalizer {
+class MessageManager {
   constructor(sessionId) {
     this.sessionId = sessionId;
     this.seq = 0;
@@ -306,4 +306,4 @@ class MessageNormalizer {
   }
 }
 
-module.exports = { MessageNormalizer };
+module.exports = { MessageManager };

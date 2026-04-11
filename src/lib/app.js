@@ -9,7 +9,6 @@ import { FileViewer } from './file-viewer.js';
 import { CodeEditor, detectLang, getLangExtension, loadEditorSettings, saveEditorSettings, editorLightTheme } from './code-editor.js';
 import { LayoutManager } from './layout.js';
 import { ChatView } from './chat-view.js';
-import { ChatViewV2 } from './chat-view-v2.js';
 import { Resizer } from './resizer.js';
 import { attachPopoverClose, initStateSync } from './utils.js';
 import { setupDirAutocomplete } from './autocomplete.js';
@@ -802,20 +801,12 @@ class App {
     const handler = (msg) => {
       if (msg.type === 'attached' && msg.sessionId === serverId) {
         if (msg.mode === 'chat' || isChat) {
-          // Chat mode: use v2 (normalized messages) if available, v1 fallback
-          const useV2 = !!msg.v2?.messages?.length;
-          let chatView;
-          if (useV2) {
-            chatView = new ChatViewV2(winInfo, this.ws, serverId, this);
-            chatView.loadHistory(msg.v2, msg.chatStatus ? { model: msg.chatStatus.model, permissionMode: msg.chatStatus.permissionMode, totalCost: msg.chatStatus.total_cost_usd } : null);
-          } else {
-            chatView = new ChatView(winInfo, this.ws, serverId, this);
-            if (msg.chatHistory && msg.chatHistory.length) {
-              chatView.loadHistory(msg.chatHistory, msg.totalCount, msg.isStreaming, msg.pendingPermissions, msg.activeSubagents, msg.taskState);
-              if (msg.chatStatus) chatView.applyStatus(msg.chatStatus);
-            }
-          }
+          const chatView = new ChatView(winInfo, this.ws, serverId, this);
           this.sessions.set(winInfo.id, chatView);
+          if (msg.chatHistory && msg.chatHistory.length) {
+            chatView.loadHistory(msg.chatHistory, msg.totalCount, msg.isStreaming, msg.pendingPermissions, msg.activeSubagents, msg.taskState);
+            if (msg.chatStatus) chatView.applyStatus(msg.chatStatus);
+          }
           winInfo.onClose = () => {
             const shouldKill = (this.settings.get('window.closeBehavior') ?? 'terminate') === 'terminate';
             if (shouldKill) this.ws.send({ type: 'kill', sessionId: serverId });

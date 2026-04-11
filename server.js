@@ -9,7 +9,7 @@ const crypto = require('crypto');
 const multer = require('multer');
 const { execFileSync, spawn } = require('child_process');
 const compression = require('compression');
-const { MessageNormalizer } = require('./src/message-normalizer');
+const { MessageManager } = require('./src/message-manager');
 const { ClaudeCodeAdapter } = require('./src/adapters/claude-code');
 
 const PORT = process.env.PORT || 3456;
@@ -429,7 +429,7 @@ function restoreSessions() {
     };
     // Create normalizer for chat sessions (populated on first attach from JSONL + buffer)
     if (sessionMode === 'chat') {
-      session._normalizer = new MessageNormalizer(id);
+      session._normalizer = new MessageManager(id);
       session._normalizer.onOp((op) => {
         broadcastToSession(session, id, { type: 'msg', sessionId: id, ...op });
       });
@@ -1544,7 +1544,7 @@ app.get('/api/session-messages-v2', (req, res) => {
 
   // Build normalizer from SessionMessages (includes buffer)
   const sm = new SessionMessages(session || { claudeSessionId, cwd: cwd || '', buffer: '' });
-  const normalizer = new MessageNormalizer('api');
+  const normalizer = new MessageManager('api');
   normalizer.convertHistory(sm.raw());
 
   if (search) {
@@ -1812,7 +1812,7 @@ wss.on('connection', (ws) => {
         };
         // Create normalizer for chat sessions (converts raw Claude messages to normalized format)
         if (sessionMode === 'chat') {
-          session._normalizer = new MessageNormalizer(id);
+          session._normalizer = new MessageManager(id);
           session._normalizer.onOp((op) => {
             broadcastToSession(session, id, { type: 'msg', sessionId: id, ...op });
           });

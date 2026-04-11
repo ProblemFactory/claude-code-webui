@@ -33,7 +33,7 @@ Chat mode (v1 — legacy):
   Browser (ChatView) ←→ WebSocket (chat-message) ←→ server ←→ node-pty (dtach -a) ←→ chat-wrapper.js ←→ claude --stream-json
 
 Chat mode (v2 — normalized messages):
-  Browser (ChatViewV2) ←→ WebSocket (msg create/edit) ←→ MessageNormalizer ←→ server ←→ chat-wrapper.js ←→ claude --stream-json
+  Browser (ChatViewV2) ←→ WebSocket (msg create/edit) ←→ MessageManager ←→ server ←→ chat-wrapper.js ←→ claude --stream-json
                                                               ↓
                                                      BackendAdapter (swappable)
 ```
@@ -78,7 +78,7 @@ src/
     settings-schema.js — Settings schema (all options with types, defaults, categories)
     settings-ui.js     — SettingsUI (VS Code-style full settings dialog with search)
 src/
-  message-normalizer.js — MessageNormalizer (converts Claude stream-json → normalized messages)
+  message-manager.js — MessageManager (converts Claude stream-json → normalized messages)
   adapters/
     base.js            — BackendAdapter + SessionHandle (abstract interface for AI backends)
     claude-code.js     — ClaudeCodeAdapter (Claude Code CLI specifics: flags, JSONL, control protocol)
