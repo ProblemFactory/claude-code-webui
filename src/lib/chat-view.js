@@ -1218,6 +1218,20 @@ class ChatView {
       const toolbar = document.createElement('div');
       toolbar.className = 'chat-code-toolbar';
 
+      // Deferred highlight: large code blocks skip hljs on render, highlight on first expand
+      if (block.classList.contains('chat-code-block') && block.dataset.highlightDeferred) {
+        const details = block.closest('details');
+        if (details) {
+          const highlightOnce = () => {
+            if (!block.dataset.highlightDeferred) return;
+            delete block.dataset.highlightDeferred;
+            this._rehighlightCodeBlock(block, block.dataset.lang);
+            details.removeEventListener('toggle', highlightOnce);
+          };
+          details.addEventListener('toggle', highlightOnce);
+        }
+      }
+
       // Language picker for code blocks — searchable dropdown
       if (block.classList.contains('chat-code-block')) {
         const langPicker = document.createElement('div');
@@ -1336,9 +1350,11 @@ class ChatView {
   // Returns HTML string for a .chat-code-block element
   _renderCodeBlock(code, filePath) {
     const lang = detectHljsLang(filePath);
+    // Skip highlight for large files (>10KB) — defer to expand time
+    const skipHighlight = code.length > 10000;
     let highlighted;
     try {
-      highlighted = lang ? hljs.highlight(code, { language: lang }).value : escHtml(code);
+      highlighted = (!skipHighlight && lang) ? hljs.highlight(code, { language: lang }).value : escHtml(code);
     } catch {
       highlighted = escHtml(code);
     }
@@ -1349,7 +1365,8 @@ class ChatView {
       body += `<div class="chat-code-line"><span class="chat-code-ln" style="width:${gutterW + 1}ch">${i + 1}</span><span class="chat-code-text">${lines[i] || ' '}</span></div>`;
     }
     const langLabel = lang || 'plain';
-    return `<div class="chat-code-block" data-lang="${escHtml(langLabel)}" data-filepath="${escHtml(filePath)}">${body}</div>`;
+    const deferred = skipHighlight ? ' data-highlight-deferred="1"' : '';
+    return `<div class="chat-code-block" data-lang="${escHtml(langLabel)}" data-filepath="${escHtml(filePath)}"${deferred}>${body}</div>`;
   }
 
   // Apply syntax highlighting to an already-rendered .chat-code-block
