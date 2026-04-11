@@ -112,11 +112,11 @@ class ChatView {
     this.sessionId = sessionId;
     this.app = app;
     this._readOnly = readOnly;
-    this._messages = []; // parsed message objects
+    this._messages = []; // normalized message objects
+    this._elements = new Map(); // msg.id → DOM element
     this._pinned = true; // auto-scroll to bottom
     this._renderedMsgIds = new Set(); // dedup by msgId
     this._highlightQuery = ''; // active search query for highlight layer
-    this._pendingToolUses = new Map(); // tool_use id → block (for deferred diff rendering)
 
     // Build DOM
     const container = document.createElement('div');
@@ -246,8 +246,8 @@ class ChatView {
         }
       });
       this._handler = (msg) => {
-        if (msg.type === 'chat-message' && msg.sessionId === sessionId) {
-          this._onMessage(msg.message);
+        if (msg.type === 'msg' && msg.sessionId === sessionId) {
+          this._onOp(msg);
         }
       };
       this.ws.onGlobal(this._handler);
@@ -571,10 +571,10 @@ class ChatView {
       }
     });
 
-    // Listen for chat messages from server
+    // Listen for normalized message ops from server
     this._handler = (msg) => {
-      if (msg.type === 'chat-message' && msg.sessionId === sessionId) {
-        this._onMessage(msg.message);
+      if (msg.type === 'msg' && msg.sessionId === sessionId) {
+        this._onOp(msg);
       } else if (msg.type === 'subagent-message' && msg.sessionId === sessionId) {
         this._onSubagentMessage(msg.parentToolUseId, msg.message);
       } else if (msg.type === 'exited' && msg.sessionId === sessionId) {
@@ -606,49 +606,33 @@ class ChatView {
   // ── View Manager: sliding window over server message list ──
 
   // Load initial messages from attach response
-  loadHistory(messages, totalCount, isStreaming, pendingPermissions, activeSubagents, taskState) {
+  // Load normalized messages from attach response
+  loadHistory(messages, totalCount, isStreaming, meta) {
     this._total = totalCount || messages.length;
     this._windowStart = this._total - messages.length;
     this._windowEnd = this._total;
     this._loading = false;
-    this._pendingPermissions = pendingPermissions || {};
 
-    for (const msg of messages) this._onMessage(msg, true);
-    // Inject pending permissions into rendered tool cards
-    for (const [toolUseId, cr] of Object.entries(this._pendingPermissions)) {
-      this._injectPermission(cr);
-    }
-    // Restore View Log buttons for active subagents
-    if (activeSubagents) {
-      if (!this._subagentCounts) this._subagentCounts = new Map();
-      for (const [toolUseId, info] of Object.entries(activeSubagents)) {
-        const count = info.count || 0;
-        const pending = this._messageList.querySelector(`[data-tool-id="${toolUseId}"]`);
-        if (!pending) continue;
-        const toolBlock = this._pendingToolUses.get(toolUseId);
-        const desc = toolBlock?.input?.description || '';
-        const statusEl = document.createElement('div');
-        statusEl.className = 'chat-agent-live-status';
-        statusEl.innerHTML = `<span class="chat-agent-live-count">${count} messages</span> <button class="chat-agent-view-btn" data-parent-tool-id="${escHtml(toolUseId)}" data-desc="${escHtml(desc)}">View Log</button>`;
-        const outputPending = pending.querySelector('.chat-tool-output-pending');
-        if (outputPending) outputPending.before(statusEl);
-        else pending.appendChild(statusEl);
-        this._subagentCounts.set(toolUseId, count);
-      }
-    }
-    // Restore task/todo state from server metadata
-    if (taskState) {
-      if (taskState.tasks) {
-        if (!this._activeTasks) this._activeTasks = new Map();
-        for (const [id, t] of Object.entries(taskState.tasks)) {
-          if (t.status === 'running') this._activeTasks.set(id, t);
+    this._loadingHistory = true;
+    for (const msg of messages) this._onCreateMessage(msg);
+    this._loadingHistory = false;
+
+    // Apply metadata (chatStatus, taskState)
+    if (meta) {
+      if (meta.chatStatus) this.applyStatus(meta.chatStatus);
+      if (meta.taskState) {
+        if (meta.taskState.tasks) {
+          if (!this._activeTasks) this._activeTasks = new Map();
+          for (const [id, t] of Object.entries(meta.taskState.tasks)) {
+            if (t.status === 'running') this._activeTasks.set(id, t);
+          }
         }
+        if (meta.taskState.todos?.length) {
+          this._todos = meta.taskState.todos;
+          this._updateTodoDisplay();
+        }
+        this._updateStatusBar();
       }
-      if (taskState.todos?.length) {
-        this._todos = taskState.todos;
-        this._updateTodoDisplay();
-      }
-      this._updateStatusBar();
     }
     if (isStreaming) this._showTyping();
     this._scrollToBottom();
@@ -683,10 +667,8 @@ class ChatView {
     const scrollHeightBefore = this._messageList.scrollHeight;
     const firstEl = this._messageList.querySelector('.chat-msg');
     for (const msg of msgs) {
-      const els = this._renderElements(msg);
-      for (const el of els) {
-        if (firstEl) this._messageList.insertBefore(el, firstEl);
-      }
+      const el = this._renderDetached(msg);
+      if (el && firstEl) this._messageList.insertBefore(el, firstEl);
     }
     this._windowStart = newStart;
 
@@ -705,12 +687,12 @@ class ChatView {
 
     // Clear and rebuild DOM
     this._messageList.querySelectorAll('.chat-msg, .chat-msg-system').forEach(el => el.remove());
-    this._pendingToolUses.clear();
+    this._elements.clear();
     this._windowStart = start;
     this._windowEnd = end;
     this._pinned = false;
 
-    for (const msg of msgs) this._onMessage(msg, true);
+    for (const msg of msgs) this._onCreateMessage(msg);
 
     // Scroll to the target message
     const relIdx = targetIdx - start;
@@ -730,11 +712,11 @@ class ChatView {
     const msgs = await this._fetchMessages(start, this._total - start);
 
     this._messageList.querySelectorAll('.chat-msg, .chat-msg-system').forEach(el => el.remove());
-    this._pendingToolUses.clear();
+    this._elements.clear();
     this._windowStart = start;
     this._windowEnd = this._total;
 
-    for (const msg of msgs) this._onMessage(msg, true);
+    for (const msg of msgs) this._onCreateMessage(msg);
     this._pinned = true;
     this._newMsgCount = 0;
     this._scrollBtn.classList.add('hidden');
@@ -760,16 +742,12 @@ class ChatView {
   }
 
   // Render a message into elements (append to list, then detach for insertion elsewhere)
-  _renderElements(msg) {
-    const countBefore = this._messageList.children.length;
-    this._onMessage(msg, true);
-    const countAfter = this._messageList.children.length;
-    const newEls = [];
-    for (let i = 0; i < countAfter - countBefore; i++) {
-      newEls.push(this._messageList.removeChild(this._messageList.lastElementChild));
-    }
-    newEls.reverse(); // restore original order
-    return newEls;
+  // Render a normalized message and detach from DOM (for insertBefore operations)
+  _renderDetached(msg) {
+    this._onCreateMessage(msg);
+    const el = this._elements.get(msg.id);
+    if (el) { el.remove(); return el; }
+    return null;
   }
 
   _send() {
@@ -800,12 +778,14 @@ class ChatView {
       if (text) content.push({ type: 'text', text });
       const msg = JSON.stringify({ type: 'user', message: { role: 'user', content } });
       this.ws.send({ type: 'chat-input', sessionId: this.sessionId, text: msg, msgId });
-      // Show local preview immediately (server echo deduped by msgId)
-      this._onMessage({ type: 'user', message: { role: 'user', content }, msgId });
+      // Show local preview immediately
+      const previewContent = content.map(b => b.type === 'text' ? { type: 'text', text: b.text } : b.type === 'image' ? { type: 'image', mediaType: b.source?.media_type, data: b.source?.data } : null).filter(Boolean);
+      this._onCreateMessage({ id: msgId, role: 'user', status: 'complete', content: previewContent, ts: Date.now() });
       this._attachments = [];
       this._renderAttachments();
     } else {
       this.ws.send({ type: 'chat-input', sessionId: this.sessionId, text, msgId });
+      this._onCreateMessage({ id: msgId, role: 'user', status: 'complete', content: [{ type: 'text', text }], ts: Date.now() });
     }
     // Re-pin — if we're not at the end of conversation, jump there first
     if (this._windowEnd < this._total) {
@@ -819,371 +799,339 @@ class ChatView {
     this._showTyping('thinking...');
   }
 
-  _onMessage(msg, isHistory = false) {
-    // Dedup by msgId — skip if already rendered
-    if (msg.msgId) {
-      if (this._renderedMsgIds.has(msg.msgId)) return;
-      this._renderedMsgIds.add(msg.msgId);
+  // Handle normalized message ops from server (create/edit/meta)
+  _onOp(op) {
+    if (op.op === 'create') {
+      this._onCreateMessage(op.message);
+    } else if (op.op === 'edit') {
+      this._onEditMessage(op.id, op.fields);
+    } else if (op.op === 'meta') {
+      this._onMeta(op);
     }
+  }
+
+  // Create a new normalized message → render and append to DOM
+  _onCreateMessage(msg) {
+    if (this._renderedMsgIds.has(msg.id)) return;
+    this._renderedMsgIds.add(msg.id);
     this._messages.push(msg);
 
-    switch (msg.type) {
-      case 'user':
-        this._appendUser(msg, isHistory);
-        break;
-      case 'assistant':
-        if (!isHistory && this._streamStatus) this._updateTyping(msg);
-        this._appendAssistant(msg, isHistory);
-        // Track per-turn usage from assistant message (NOT result.modelUsage which is cumulative)
-        if (msg.message?.usage && !isHistory) {
-          const u = msg.message.usage;
-          this._statusLastInputTokens = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
-          this._statusLastCacheRead = u.cache_read_input_tokens || 0;
-          this._statusTokensOut = u.output_tokens || 0;
-          this._updateStatusBar();
-        }
-        break;
-      case 'system':
-        if (msg.subtype === 'init') {
-          if (msg.model) this._statusModel = msg.model.replace(/\[.*$/, '');
-          if (msg.permissionMode) this._statusPermMode = msg.permissionMode;
-          if (msg.slash_commands) this._slashCommands = msg.slash_commands.map(c => '/' + c);
-          this._updateStatusBar();
-        }
-        // Task tracking: only process live messages (history state comes from server taskState)
-        if (!isHistory && msg.tool_use_id) {
-          if (msg.subtype === 'task_started') {
-            if (!this._activeTasks) this._activeTasks = new Map();
-            const type = msg.task_type === 'local_agent' ? 'agent' : 'command';
-            if (!this._activeTasks.has(msg.tool_use_id)) {
-              this._activeTasks.set(msg.tool_use_id, { id: msg.task_id, type, description: msg.description, status: 'running' });
-              this._updateStatusBar();
-            }
-          } else if (msg.subtype === 'task_progress' && this._activeTasks?.has(msg.tool_use_id)) {
-            const task = this._activeTasks.get(msg.tool_use_id);
-            task.description = msg.description || task.description;
-            task.lastTool = msg.last_tool_name;
-            this._updateStatusBar();
-          } else if (msg.subtype === 'task_notification' && this._activeTasks?.has(msg.tool_use_id)) {
-            this._activeTasks.delete(msg.tool_use_id);
-            this._updateStatusBar();
-          }
-        }
-        break;
-      case 'result':
-        if (!isHistory) {
-          this._hideTyping();
-          // Blink window when result arrives and window is not focused
-          if (!this.winInfo.element.classList.contains('window-active')) {
-            this.winInfo.element.classList.add('window-waiting');
-            if (this.winInfo._notifyChanged) this.winInfo._notifyChanged();
-          }
-        }
-        this._appendResult(msg);
-        if (!isHistory) {
-          if (msg.total_cost_usd) { this._statusCost += msg.total_cost_usd; this._updateStatusBar(); }
-          if (msg.modelUsage && !this._statusContextWindow) {
-            const info = Object.values(msg.modelUsage)[0];
-            if (info?.contextWindow) this._statusContextWindow = info.contextWindow;
-            if (!this._statusModel) this._statusModel = Object.keys(msg.modelUsage)[0]?.replace(/\[.*$/, '');
-            this._updateStatusBar();
-          }
-        }
-        break;
-      case 'control_request':
-        if (msg.request?.subtype === 'can_use_tool') {
-          this._injectPermission(msg);
-        }
-        break;
-      case 'control_cancel_request': {
-        const permEl = this._messageList.querySelector(`[data-request-id="${msg.request_id}"]`);
-        if (permEl) {
-          const actions = permEl.querySelector('.chat-permission-actions');
-          if (actions) actions.innerHTML = '<span class="chat-permission-resolved chat-permission-denied">Cancelled</span>';
-        }
-        break;
-      }
-      case 'rate_limit_event':
-        // Skip silently
-        break;
-      default:
-        // Unknown type — skip
-        break;
+    // Streaming indicator for live messages (server isStreaming is authority for initial state)
+    if (!this._loadingHistory && (msg.status === 'streaming' || msg.status === 'pending')) {
+      const label = msg.role === 'tool' ? `running ${msg.toolName || 'tool'}...` : msg.content?.[0]?.type === 'thinking' ? 'thinking...' : 'responding...';
+      this._showTyping(label);
     }
 
-    if (!isHistory) {
-      this._total = (this._total || 0) + 1;
-      this._windowEnd = this._total;
-      if (this._pinned) {
-        this._scrollToBottom();
-      } else {
-        this._newMsgCount++;
-        this._scrollBtn.innerHTML = `\u2193 <span class="chat-scroll-badge">${this._newMsgCount}</span>`;
+    let el;
+    switch (msg.role) {
+      case 'user': el = this._renderUserMsg(msg); break;
+      case 'assistant': el = this._renderAssistantMsg(msg); break;
+      case 'tool': el = this._renderToolMsg(msg); break;
+      case 'system': el = this._renderSystemMsg(msg); break;
+      default: return;
+    }
+
+    if (!el) return;
+    el.dataset.msgId = msg.id;
+    this._elements.set(msg.id, el);
+    this._messageList.appendChild(el);
+    this._addWrapToggles(el);
+    this._addOpenInEditorBtn(el);
+    if (this._pinned) this._scrollToBottom();
+  }
+
+  // Edit an existing message → re-render in place
+  _onEditMessage(id, fields) {
+    // Update stored message
+    const msgIdx = this._messages.findIndex(m => m.id === id);
+    if (msgIdx < 0) return;
+    const msg = this._messages[msgIdx];
+    Object.assign(msg, fields);
+
+    // Status transitions
+    if (fields.status === 'complete' || fields.status === 'error') {
+      // Tool call completed → re-render the element
+      const oldEl = this._elements.get(id);
+      if (oldEl) {
+        let newEl;
+        switch (msg.role) {
+          case 'tool': newEl = this._renderToolMsg(msg); break;
+          case 'assistant': newEl = this._renderAssistantMsg(msg); break;
+          default: newEl = this._renderSystemMsg(msg); break;
+        }
+        if (newEl) {
+          newEl.dataset.msgId = id;
+          oldEl.replaceWith(newEl);
+          this._elements.set(id, newEl);
+          this._addWrapToggles(newEl);
+          this._addOpenInEditorBtn(newEl);
+        }
+      }
+      // Hide streaming indicator if this is the last message
+      if (this._messages[this._messages.length - 1]?.id === id) this._hideTyping();
+    }
+
+    // Streaming text update → just update the text content
+    if (fields.content && msg.status === 'streaming') {
+      const oldEl = this._elements.get(id);
+      if (oldEl) {
+        const textDiv = oldEl.querySelector('.chat-text');
+        if (textDiv && msg.content[0]?.type === 'text') {
+          textDiv.innerHTML = this._renderMarkdown(stripAnsi(msg.content[0].text));
+        }
+      }
+    }
+
+    if (this._pinned) this._scrollToBottom();
+
+    // Permission update
+    if (fields.permission) {
+      const el = this._elements.get(id);
+      if (el) this._renderPermissionOverlay(el, msg);
+    }
+
+    // Task info update — enrich with tool context from the normalized message
+    if (fields.taskInfo) {
+      if (!this._activeTasks) this._activeTasks = new Map();
+      if (fields.taskInfo.status === 'completed') {
+        this._activeTasks.delete(msg.toolCallId);
+      } else if (fields.taskInfo.status === 'running') {
+        const block = msg.content?.[0];
+        const task = { ...fields.taskInfo };
+        if (block?.type === 'tool_call') {
+          task.toolName = block.toolName;
+          task.command = block.input?.command || '';
+        }
+        this._activeTasks.set(msg.toolCallId, task);
+      }
+      this._updateStatusBar();
+    }
+  }
+
+  // Handle meta ops (usage, cost, turn_complete)
+  _onMeta(op) {
+    if (op.subtype === 'usage') {
+      const u = op.data;
+      this._statusLastInputTokens = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+      this._statusLastCacheRead = u.cache_read_input_tokens || 0;
+      this._statusTokensOut = u.output_tokens || 0;
+      this._updateStatusBar();
+    } else if (op.subtype === 'todos') {
+      this._todos = op.data;
+      this._updateTodoDisplay();
+    } else if (op.subtype === 'turn_complete') {
+      this._hideTyping();
+      if (op.data?.cost) { this._statusCost += op.data.cost; this._updateStatusBar(); }
+      if (op.data?.modelUsage) {
+        const info = Object.values(op.data.modelUsage)[0];
+        if (info?.contextWindow) this._statusContextWindow = info.contextWindow;
+        if (!this._statusModel) this._statusModel = Object.keys(op.data.modelUsage)[0]?.replace(/\[.*$/, '');
+        this._updateStatusBar();
+      }
+      // Blink window
+      if (!this.winInfo.element.classList.contains('window-active')) {
+        this.winInfo.element.classList.add('window-waiting');
+        if (this.winInfo._notifyChanged) this.winInfo._notifyChanged();
       }
     }
   }
 
-  _appendUser(msg, isHistory = false) {
-    const content = msg.message?.content;
-    if (!content) return;
+  // ── Normalized message renderers ──
+  // These produce DOM elements from normalized messages (role-based dispatch)
 
-    // Distinguish actual user messages from tool results
-    const isToolResult = Array.isArray(content) && content.some(b => b.type === 'tool_result');
-
-    if (isToolResult) {
-      for (const block of content) {
-        const toolId = block.tool_use_id;
-        const pendingUse = toolId ? this._pendingToolUses.get(toolId) : null;
-        const status = block.is_error ? 'error' : 'ok';
-        const rawText = typeof block.content === 'string' ? block.content : JSON.stringify(block.content, null, 2);
-        const resultText = stripAnsi(rawText);
-
-        // Capture result text for background commands (shows output file path etc.)
-        if (toolId && this._activeTasks?.has(toolId)) {
-          this._activeTasks.get(toolId).resultText = resultText;
-        }
-
-        if (pendingUse) {
-          // Replace the pending placeholder with the final result
-          this._pendingToolUses.delete(toolId);
-          const placeholder = this._messageList.querySelector(`[data-tool-id="${toolId}"]`);
-
-          let html = '';
-          const fp = pendingUse.input?.file_path || '';
-          if (status === 'ok' && pendingUse.name === 'Edit' && pendingUse.input?.old_string != null) {
-            html = this._renderEditDiff(pendingUse);
-          } else if (status === 'ok' && pendingUse.name === 'Write') {
-            const content = pendingUse.input?.content || '';
-            const lineCount = content.split('\n').length;
-            const byteCount = new Blob([content]).size;
-            const sizeStr = byteCount > 1024 ? (byteCount / 1024).toFixed(1) + ' KB' : byteCount + ' B';
-            const codeBlock = this._renderCodeBlock(content, fp);
-            html = `<div class="chat-tool-use"><span class="chat-tool-label">\u{1F4DD} Write ${this._clickablePath(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${lineCount} lines, ${sizeStr}</summary>${codeBlock}</details></div>`;
-          } else if (status === 'ok' && pendingUse.name === 'Read') {
-            const lineCount = resultText.split('\n').length;
-            const codeBlock = this._renderCodeBlock(resultText, fp);
-            html = `<div class="chat-tool-use"><span class="chat-tool-label">\u{1F4D6} Read ${this._clickablePath(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${lineCount} lines</summary>${codeBlock}</details></div>`;
-          } else if (status !== 'ok') {
-            // Failed tool — same card style, error shown inside
-            const inputStr = stripAnsi(typeof pendingUse.input === 'string' ? pendingUse.input : JSON.stringify(pendingUse.input, null, 2));
-            html = `<div class="chat-tool-use"><span class="chat-tool-label">\uD83D\uDD27 ${escHtml(pendingUse.name)} ${this._clickablePath(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this._linkifyText(inputStr)}</pre></details><details class="chat-diff" open><summary class="chat-diff-summary chat-tool-error-label">\u2717 Error</summary><pre class="chat-tool-error-text">${this._linkifyText(resultText)}</pre></details></div>`;
-          } else if (pendingUse.name === 'Agent') {
-            // Agent tool — show with View Log button
-            const inputStr = stripAnsi(typeof pendingUse.input === 'string' ? pendingUse.input : JSON.stringify(pendingUse.input, null, 2));
-            const desc = pendingUse.input?.description || '';
-            const firstLine = resultText.split('\n')[0].substring(0, 120) || '(empty)';
-            // Find agentId from result text or description match
-            const agentMatch = resultText.match(/agentId:\s*([a-z0-9]+)/);
-            let agentId = agentMatch ? agentMatch[1] : '';
-            if (!agentId && desc && this._subagentMetas) {
-              const meta = this._subagentMetas.find(m => m.description === desc);
-              if (meta) agentId = meta.agentId;
-            }
-            // View Log: agentId for JSONL, parentToolUseId for server buffer
-            const viewBtn = agentId
-              ? ` <button class="chat-agent-view-btn" data-agent-id="${escHtml(agentId)}" data-desc="${escHtml(desc)}">View Log</button>`
-              : ` <button class="chat-agent-view-btn" data-parent-tool-id="${escHtml(toolId)}" data-desc="${escHtml(desc)}">View Log</button>`;
-            html = `<div class="chat-tool-use"><span class="chat-tool-label">\uD83E\uDD16 Agent: ${escHtml(desc)}${viewBtn}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this._linkifyText(inputStr)}</pre></details><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${escHtml(firstLine)}</summary><pre>${this._linkifyText(resultText)}</pre></details></div>`;
-          } else {
-            // Other tool success — show with collapsible input + output (no truncation)
-            const inputStr = stripAnsi(typeof pendingUse.input === 'string' ? pendingUse.input : JSON.stringify(pendingUse.input, null, 2));
-            const firstLine = resultText.split('\n')[0].substring(0, 120) || '(empty)';
-            html = `<div class="chat-tool-use"><span class="chat-tool-label">\uD83D\uDD27 ${escHtml(pendingUse.name)}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this._linkifyText(inputStr)}</pre></details><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${escHtml(firstLine)}</summary><pre>${this._linkifyText(resultText)}</pre></details></div>`;
-          }
-
-          if (placeholder) {
-            const parentMsg = placeholder.closest('.chat-msg');
-            const tmp = document.createElement('div');
-            tmp.innerHTML = html;
-            const newEl = tmp.firstElementChild;
-            if (newEl) {
-              placeholder.replaceWith(newEl);
-              this._addToolOpenBtn(newEl, resultText, pendingUse);
-              this._addWrapToggles(newEl);
-            } else {
-              placeholder.outerHTML = html;
-              if (parentMsg) this._addWrapToggles(parentMsg);
-            }
-          } else {
-            const el = document.createElement('div');
-            el.className = 'chat-msg chat-msg-tool-result';
-            el._rawMsg = msg;
-            el.innerHTML = this._compact
-              ? `<div class="chat-compact-msg"><span class="chat-role chat-role-tool">${status === 'ok' ? '\u2713' : '\u2717'}</span><div class="chat-compact-content">${html}</div></div>`
-              : html;
-            this._messageList.appendChild(el); this._addWrapToggles(el); this._addOpenInEditorBtn(el);
-          }
-          continue;
-        }
-
-        // Generic tool result (no pending use match)
-        const el = document.createElement('div');
-        el.className = 'chat-msg chat-msg-tool-result';
-        el._rawMsg = msg;
-        const firstLine = resultText.split('\n')[0].substring(0, 120) || '(empty)';
-        const icon = status === 'ok' ? '\u2713' : '\u2717';
-        if (this._compact) {
-          el.innerHTML = `<div class="chat-compact-msg"><span class="chat-role chat-role-tool">${icon}</span><div class="chat-compact-content"><details class="chat-tool-result-details chat-tool-${status}"><summary>${escHtml(firstLine)}</summary><pre>${this._linkifyText(resultText)}</pre></details></div></div>`;
-        } else {
-          el.innerHTML = `<details class="chat-tool-result-details chat-tool-${status}"><summary><span class="chat-tool-label">Tool Result (${status})</span> ${escHtml(firstLine)}</summary><pre>${this._linkifyText(resultText)}</pre></details>`;
-        }
-        this._messageList.appendChild(el); this._addWrapToggles(el); this._addOpenInEditorBtn(el);
-      }
-      return;
-    }
-
-    // Detect system/background notifications (task_notification, system-reminder, etc.)
-    let msgText = '';
-    if (typeof content === 'string') msgText = content;
-    else if (Array.isArray(content)) msgText = content.map(b => b.text || '').join('');
-    const isSystemNotification = /<(task-notification|system-reminder|local-command|command-name)[\s>]/i.test(msgText);
-    if (isSystemNotification) {
-      // Clear active task if this is a task completion notification (live only)
-      if (!isHistory && msgText.includes('task-notification') && this._activeTasks) {
-        const toolUseMatch = msgText.match(/<tool-use-id>([^<]+)<\/tool-use-id>/);
-        if (toolUseMatch) { this._activeTasks.delete(toolUseMatch[1]); this._updateStatusBar(); }
-      }
-      const el = document.createElement('div');
-      el.className = 'chat-msg chat-msg-system-notification';
-      el._rawMsg = msg;
-      const preview = msgText.replace(/<[^>]+>/g, ' ').trim().substring(0, 200);
-      const label = msgText.includes('task-notification') ? '\uD83D\uDD14 Task Notification'
-        : msgText.includes('system-reminder') ? '\u2699 System'
-        : '\u2699 Notification';
-      if (this._compact) {
-        el.innerHTML = `<div class="chat-compact-msg"><div class="chat-compact-content"><details class="chat-system-notification"><summary>${label}: ${escHtml(preview.substring(0, 100))}${preview.length > 100 ? '...' : ''}</summary><pre>${escHtml(msgText)}</pre></details></div></div>`;
-      } else {
-        el.innerHTML = `<details class="chat-system-notification"><summary>${label}: ${escHtml(preview.substring(0, 100))}${preview.length > 100 ? '...' : ''}</summary><pre>${escHtml(msgText)}</pre></details>`;
-      }
-      this._messageList.appendChild(el); this._addOpenInEditorBtn(el);
-      return;
-    }
-
-    // Actual user message — render with markdown
+  _renderUserMsg(msg) {
+    const content = msg.content;
+    if (!content?.length) return null;
     const el = document.createElement('div');
     el.className = 'chat-msg chat-msg-user';
     el._rawMsg = msg;
-    let rawText = '';
-    let textHtml = '';
-    if (typeof content === 'string') {
-      rawText = content;
-      textHtml = `<div class="chat-text">${this._renderMarkdown(content)}</div>`;
-    } else if (Array.isArray(content)) {
-      const parts = [];
-      for (const b of content) {
-        if (b.type === 'text') { rawText += b.text; parts.push(`<div class="chat-text">${this._renderMarkdown(b.text)}</div>`); }
-        else if (b.type === 'image' && b.source?.data) parts.push(`<img class="chat-img" src="data:${b.source.media_type || 'image/png'};base64,${b.source.data}" alt="image">`);
-        else if (b.type === 'image') parts.push('<span class="chat-img-placeholder">[Image]</span>');
-      }
-      textHtml = parts.join('');
-    }
+    const parts = content.map(b => {
+      if (b.type === 'text') return `<div class="chat-text">${this._renderMarkdown(b.text)}</div>`;
+      if (b.type === 'image') return `<img class="chat-img" src="data:${b.mediaType || 'image/png'};base64,${b.data}" alt="image">`;
+      return '';
+    }).join('');
 
-    // Auto-collapse long messages (>500 chars)
-    const isLong = rawText.length > 500;
-    let innerHtml;
+    const rawText = content.map(b => b.text || '').join('');
+    const textHtml = rawText.length > 500
+      ? `<details class="chat-long-msg"><summary>Message (${rawText.length} chars)</summary>${parts}</details>`
+      : parts;
+
     if (this._compact) {
-      if (isLong) {
-        const preview = rawText.substring(0, 120).split('\n')[0];
-        innerHtml = `<div class="chat-compact-msg"><span class="chat-role chat-role-user">You</span><div class="chat-compact-content"><details class="chat-long-msg"><summary><span>${escHtml(preview)}...</span></summary>${textHtml}</details></div></div>`;
-      } else {
-        innerHtml = `<div class="chat-compact-msg"><span class="chat-role chat-role-user">You</span><div class="chat-compact-content">${textHtml}</div></div>`;
-      }
+      el.innerHTML = `<div class="chat-compact-msg"><span class="chat-role chat-role-user">You</span><div class="chat-compact-content">${textHtml}</div></div>`;
     } else {
-      if (isLong) {
-        const preview = rawText.substring(0, 120).split('\n')[0];
-        innerHtml = `<div class="chat-bubble chat-bubble-user"><details class="chat-long-msg"><summary><span>${escHtml(preview)}...</span></summary>${textHtml}</details></div>`;
-      } else {
-        innerHtml = `<div class="chat-bubble chat-bubble-user">${textHtml}</div>`;
-      }
+      el.innerHTML = `<div class="chat-bubble chat-bubble-user">${textHtml}</div>`;
     }
-    el.innerHTML = innerHtml;
-    this._messageList.appendChild(el); this._addWrapToggles(el); this._addOpenInEditorBtn(el);
+    return el;
   }
 
-  _appendAssistant(msg, isHistory = false) {
-    const content = msg.message?.content;
-    if (!content) return;
-
+  _renderAssistantMsg(msg) {
+    const block = msg.content?.[0];
+    if (!block) return null;
     const el = document.createElement('div');
     el.className = 'chat-msg chat-msg-assistant';
     el._rawMsg = msg;
-
-    const parts = [];
-    if (Array.isArray(content)) {
-      for (const block of content) {
-        if (block.type === 'text') {
-          parts.push(`<div class="chat-text">${this._renderMarkdown(stripAnsi(block.text || ''))}</div>`);
-        } else if (block.type === 'thinking') {
-          parts.push(`<details class="chat-thinking"><summary>Thinking...</summary><pre>${escHtml(stripAnsi(block.text || ''))}</pre></details>`);
-        } else if (block.type === 'tool_use') {
-          // Track background commands and TODO — only from live messages (history state from server)
-          if (!isHistory && block.input?.run_in_background && block.id) {
-            if (!this._activeTasks) this._activeTasks = new Map();
-            this._activeTasks.set(block.id, {
-              id: block.id, type: 'command', toolName: block.name,
-              description: block.input.description || block.name,
-              command: block.input.command || '',
-              status: 'running',
-            });
-            this._updateStatusBar();
-          }
-          if (!isHistory && block.name === 'TodoWrite' && block.input?.todos) {
-            this._todos = block.input.todos;
-            this._updateTodoDisplay();
-          }
-          // Defer rendering until tool_result arrives, but show input immediately for non-file tools
-          if (block.id) {
-            this._pendingToolUses.set(block.id, block);
-            const fp = block.input?.file_path || '';
-            const isFileOp = block.name === 'Edit' || block.name === 'Write' || block.name === 'Read';
-            if (isFileOp) {
-              const label = `\u23F3 ${escHtml(block.name)} ${this._clickablePath(fp)}`;
-              parts.push(`<div class="chat-tool-pending" data-tool-id="${escHtml(block.id)}"><span class="chat-tool-label">${label}</span><span class="chat-spinner"></span></div>`);
-            } else {
-              const inputStr = stripAnsi(typeof block.input === 'string' ? block.input : JSON.stringify(block.input, null, 2));
-              const isAgent = block.name === 'Agent';
-              const toolIcon = isAgent ? '\uD83E\uDD16' : '\uD83D\uDD27';
-              const toolLabel = isAgent && block.input?.description
-                ? `${toolIcon} Agent: ${escHtml(block.input.description)}`
-                : `${toolIcon} ${escHtml(block.name || 'tool')}`;
-              parts.push(`<div class="chat-tool-pending" data-tool-id="${escHtml(block.id)}"><div class="chat-tool-use"><span class="chat-tool-label">${toolLabel}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this._linkifyText(inputStr)}</pre></details><div class="chat-tool-output-pending"><span class="chat-spinner"></span> running...</div></div></div>`);
-            }
-          }
-        } else if (block.type === 'image' && block.source?.data) {
-          parts.push(`<img class="chat-img" src="data:${block.source.media_type || 'image/png'};base64,${block.source.data}" alt="image">`);
-        }
-      }
-    } else if (typeof content === 'string') {
-      parts.push(`<div class="chat-text">${this._renderMarkdown(content)}</div>`);
+    let html;
+    if (block.type === 'thinking') {
+      html = `<details class="chat-thinking"><summary>Thinking...</summary><pre>${escHtml(stripAnsi(block.text || ''))}</pre></details>`;
+    } else if (block.type === 'text') {
+      html = `<div class="chat-text">${this._renderMarkdown(stripAnsi(block.text || ''))}</div>`;
+    } else {
+      return null;
     }
+    if (this._compact) {
+      el.innerHTML = `<div class="chat-compact-msg"><span class="chat-role chat-role-assistant">Claude</span><div class="chat-compact-content">${html}</div></div>`;
+    } else {
+      el.innerHTML = `<div class="chat-bubble chat-bubble-assistant">${html}</div>`;
+    }
+    return el;
+  }
 
-    if (!parts.length) return; // skip empty assistant messages (tool-only with no text)
+  _renderToolMsg(msg) {
+    const block = msg.content?.[0];
+    if (!block) return null;
+    const el = document.createElement('div');
+    el.className = 'chat-msg chat-msg-assistant chat-msg-tool-result';
+    el._rawMsg = msg;
+    let html;
+
+    if (block.type === 'tool_call' && msg.status === 'pending') {
+      // Pending tool call — show input with spinner
+      const isAgent = block.toolName === 'Agent';
+      const icon = isAgent ? '\uD83E\uDD16' : '\uD83D\uDD27';
+      const fp = block.input?.file_path || '';
+      const isFileOp = ['Edit', 'Write', 'Read'].includes(block.toolName);
+      if (isFileOp) {
+        const label = `\u23F3 ${escHtml(block.toolName)} ${this._clickablePath(fp)}`;
+        html = `<div class="chat-tool-pending"><span class="chat-tool-label">${label}</span><span class="chat-spinner"></span></div>`;
+      } else {
+        const desc = isAgent && block.input?.description ? `${icon} Agent: ${escHtml(block.input.description)}` : `${icon} ${escHtml(block.toolName)}`;
+        const inputStr = stripAnsi(typeof block.input === 'string' ? block.input : JSON.stringify(block.input, null, 2));
+        html = `<div class="chat-tool-use"><span class="chat-tool-label">${desc}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this._linkifyText(inputStr)}</pre></details><div class="chat-tool-output-pending"><span class="chat-spinner"></span> running...</div></div>`;
+      }
+    } else if (block.type === 'tool_result') {
+      // Completed tool call — show full result
+      html = this._renderToolResult(block, msg);
+    } else {
+      html = `<pre>${escHtml(JSON.stringify(block, null, 2))}</pre>`;
+    }
 
     if (this._compact) {
-      el.innerHTML = `<div class="chat-compact-msg"><span class="chat-role chat-role-assistant">Claude</span><div class="chat-compact-content">${parts.join('')}</div></div>`;
+      const roleLabel = msg.toolStatus === 'error' ? '\u2717' : msg.status === 'pending' ? '\u23F3' : '\u2713';
+      el.innerHTML = `<div class="chat-compact-msg"><span class="chat-role chat-role-tool">${roleLabel}</span><div class="chat-compact-content">${html}</div></div>`;
     } else {
-      el.innerHTML = `<div class="chat-bubble chat-bubble-assistant">${parts.join('')}</div>`;
+      el.innerHTML = html;
     }
-    this._messageList.appendChild(el); this._addWrapToggles(el); this._addOpenInEditorBtn(el);
+
+    // Permission overlay
+    if (msg.permission) this._renderPermissionOverlay(el, msg);
+
+    return el;
   }
 
-  _appendResult(msg) {
-    if (msg.subtype === 'success' && msg.result) {
-      // Don't duplicate — the result text is usually already shown in the last assistant message
-      return;
+  // Render a completed tool result (Edit diff, Write/Read code block, Agent, generic)
+  _renderToolResult(block, msg) {
+    const fp = block.input?.file_path || '';
+    const resultText = stripAnsi(block.output || '');
+    const inputStr = stripAnsi(typeof block.input === 'string' ? block.input : JSON.stringify(block.input, null, 2));
+
+    if (block.status === 'error') {
+      return `<div class="chat-tool-use"><span class="chat-tool-label">\uD83D\uDD27 ${escHtml(block.toolName)} ${this._clickablePath(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this._linkifyText(inputStr)}</pre></details><details class="chat-diff" open><summary class="chat-diff-summary chat-tool-error-label">\u2717 Error</summary><pre class="chat-tool-error-text">${this._linkifyText(resultText)}</pre></details></div>`;
     }
-    if (msg.is_error) {
-      const label = msg.subtype === 'error_during_execution' ? 'Interrupted'
-        : msg.subtype === 'error_max_turns' ? 'Max turns reached'
-        : msg.subtype === 'error_max_budget_usd' ? 'Budget exceeded'
-        : 'Error';
-      if (msg.result) {
-        this._appendSystem(`${label}: ${msg.result}`);
-      } else if (label !== 'Error') {
-        this._appendSystem(label);
-      }
+    if (block.toolName === 'Edit' && block.input?.old_string != null) {
+      return this._renderEditDiff({ input: block.input });
+    }
+    if (block.toolName === 'Write') {
+      const content = block.input?.content || '';
+      const lineCount = content.split('\n').length;
+      const byteCount = new Blob([content]).size;
+      const sizeStr = byteCount > 1024 ? (byteCount / 1024).toFixed(1) + ' KB' : byteCount + ' B';
+      const codeBlock = this._renderCodeBlock(content, fp);
+      return `<div class="chat-tool-use"><span class="chat-tool-label">\u{1F4DD} Write ${this._clickablePath(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${lineCount} lines, ${sizeStr}</summary>${codeBlock}</details></div>`;
+    }
+    if (block.toolName === 'Read') {
+      const lineCount = resultText.split('\n').length;
+      const codeBlock = this._renderCodeBlock(resultText, fp);
+      return `<div class="chat-tool-use"><span class="chat-tool-label">\u{1F4D6} Read ${this._clickablePath(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${lineCount} lines</summary>${codeBlock}</details></div>`;
+    }
+    if (block.toolName === 'Agent') {
+      const desc = block.input?.description || '';
+      const firstLine = resultText.split('\n')[0].substring(0, 120) || '(empty)';
+      // View Log button: use agentId from taskInfo or parse from result text
+      const agentId = msg?.taskInfo?.id || (resultText.match(/agentId:\s*([a-z0-9]+)/)?.[1]) || '';
+      const viewBtn = agentId
+        ? ` <button class="chat-agent-view-btn" data-agent-id="${escHtml(agentId)}" data-desc="${escHtml(desc)}">View Log</button>`
+        : (block.toolCallId ? ` <button class="chat-agent-view-btn" data-parent-tool-id="${escHtml(block.toolCallId)}" data-desc="${escHtml(desc)}">View Log</button>` : '');
+      return `<div class="chat-tool-use"><span class="chat-tool-label">\uD83E\uDD16 Agent: ${escHtml(desc)}${viewBtn}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this._linkifyText(inputStr)}</pre></details><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${escHtml(firstLine)}</summary><pre>${this._linkifyText(resultText)}</pre></details></div>`;
+    }
+    // Generic tool
+    const firstLine = resultText.split('\n')[0].substring(0, 120) || '(empty)';
+    return `<div class="chat-tool-use"><span class="chat-tool-label">\uD83D\uDD27 ${escHtml(block.toolName)}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this._linkifyText(inputStr)}</pre></details><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${escHtml(firstLine)}</summary><pre>${this._linkifyText(resultText)}</pre></details></div>`;
+  }
+
+  _renderSystemMsg(msg) {
+    const text = msg.content?.[0]?.text || '';
+    // system.init — extract metadata, don't render
+    if (msg.content?.[0]?.initData) {
+      const d = msg.content[0].initData;
+      if (d.model) this._statusModel = d.model.replace(/\[.*$/, '');
+      if (d.permissionMode) this._statusPermMode = d.permissionMode;
+      if (d.slashCommands) this._slashCommands = d.slashCommands.map(c => c.startsWith('/') ? c : '/' + c);
+      this._updateStatusBar();
+      return null;
+    }
+    // Error / interrupted
+    if (msg.status === 'error' || msg.status === 'interrupted') {
+      return this._appendSystem(text);
+    }
+    return null;
+  }
+
+  _renderPermissionOverlay(el, msg) {
+    if (!msg.permission) return;
+    // Remove existing permission overlay
+    const existing = el.querySelector('.chat-permission-inline');
+    if (existing) existing.remove();
+
+    const section = document.createElement('div');
+    section.className = 'chat-permission-inline';
+    section.dataset.requestId = msg.permission.requestId;
+
+    if (msg.permission.resolved) {
+      const icon = msg.permission.resolved === 'denied' ? '\u2717' : '\u2713';
+      const label = msg.permission.resolved === 'denied' ? 'Denied' : 'Allowed';
+      const cls = msg.permission.resolved === 'denied' ? 'chat-permission-denied' : 'chat-permission-allowed';
+      section.innerHTML = `<details class="chat-diff"><summary class="chat-diff-summary"><span class="chat-permission-resolved ${cls}">${icon} ${label}</span></summary></details>`;
+    } else {
+      section.innerHTML = `<div class="chat-permission-prompt"><span class="chat-permission-label">\uD83D\uDD12 Permission: ${escHtml(msg.permission.toolName)}</span><div class="chat-permission-actions"><button class="chat-perm-btn chat-perm-allow">Allow</button>${msg.permission.suggestions?.length ? '<button class="chat-perm-btn chat-perm-always">Always Allow</button>' : ''}<button class="chat-perm-btn chat-perm-deny">Deny</button></div></div>`;
+      section.querySelector('.chat-perm-allow')?.addEventListener('click', () => {
+        this.ws.send({ type: 'permission-response', sessionId: this.sessionId, requestId: msg.permission.requestId, approved: true, toolInput: msg.permission.input });
+        msg.permission.resolved = 'allowed';
+        this._renderPermissionOverlay(el, msg);
+        this._hideTyping();
+      });
+      section.querySelector('.chat-perm-always')?.addEventListener('click', () => {
+        this.ws.send({ type: 'permission-response', sessionId: this.sessionId, requestId: msg.permission.requestId, approved: true, toolInput: msg.permission.input, permissionUpdates: msg.permission.suggestions });
+        msg.permission.resolved = 'allowed';
+        this._renderPermissionOverlay(el, msg);
+        this._hideTyping();
+      });
+      section.querySelector('.chat-perm-deny')?.addEventListener('click', () => {
+        this.ws.send({ type: 'permission-response', sessionId: this.sessionId, requestId: msg.permission.requestId, approved: false });
+        msg.permission.resolved = 'denied';
+        this._renderPermissionOverlay(el, msg);
+      });
+    }
+
+    const toolUse = el.querySelector('.chat-tool-use') || el.querySelector('.chat-tool-pending');
+    if (toolUse) {
+      const outputPending = toolUse.querySelector('.chat-tool-output-pending');
+      if (outputPending) outputPending.before(section);
+      else toolUse.appendChild(section);
     }
   }
+
+
+
 
   _appendSystem(text) {
     const el = document.createElement('div');
@@ -1280,6 +1228,20 @@ class ChatView {
 
       const toolbar = document.createElement('div');
       toolbar.className = 'chat-code-toolbar';
+
+      // Deferred highlight: large code blocks skip hljs on render, highlight on first expand
+      if (block.classList.contains('chat-code-block') && block.dataset.highlightDeferred) {
+        const details = block.closest('details');
+        if (details) {
+          const highlightOnce = () => {
+            if (!block.dataset.highlightDeferred) return;
+            delete block.dataset.highlightDeferred;
+            this._rehighlightCodeBlock(block, block.dataset.lang);
+            details.removeEventListener('toggle', highlightOnce);
+          };
+          details.addEventListener('toggle', highlightOnce);
+        }
+      }
 
       // Language picker for code blocks — searchable dropdown
       if (block.classList.contains('chat-code-block')) {
@@ -1399,9 +1361,11 @@ class ChatView {
   // Returns HTML string for a .chat-code-block element
   _renderCodeBlock(code, filePath) {
     const lang = detectHljsLang(filePath);
+    // Skip highlight for large files (>10KB) — defer to expand time
+    const skipHighlight = code.length > 10000;
     let highlighted;
     try {
-      highlighted = lang ? hljs.highlight(code, { language: lang }).value : escHtml(code);
+      highlighted = (!skipHighlight && lang) ? hljs.highlight(code, { language: lang }).value : escHtml(code);
     } catch {
       highlighted = escHtml(code);
     }
@@ -1412,7 +1376,8 @@ class ChatView {
       body += `<div class="chat-code-line"><span class="chat-code-ln" style="width:${gutterW + 1}ch">${i + 1}</span><span class="chat-code-text">${lines[i] || ' '}</span></div>`;
     }
     const langLabel = lang || 'plain';
-    return `<div class="chat-code-block" data-lang="${escHtml(langLabel)}" data-filepath="${escHtml(filePath)}">${body}</div>`;
+    const deferred = skipHighlight ? ' data-highlight-deferred="1"' : '';
+    return `<div class="chat-code-block" data-lang="${escHtml(langLabel)}" data-filepath="${escHtml(filePath)}"${deferred}>${body}</div>`;
   }
 
   // Apply syntax highlighting to an already-rendered .chat-code-block
@@ -1770,95 +1735,6 @@ class ChatView {
   }
 
   // Inject permission UI into the matching pending tool card
-  _injectPermission(msg) {
-    const req = msg.request;
-    const requestId = msg.request_id;
-    const toolUseId = req.tool_use_id;
-    const input = req.input || {};
-
-    // Check if already resolved by looking at subsequent messages
-    let resolved = null;
-    if (toolUseId) {
-      outer: for (const m of this._messages) {
-        if (m.type !== 'user') continue;
-        const c = m.message?.content;
-        if (!Array.isArray(c)) continue;
-        for (const b of c) {
-          if (b.type === 'tool_result' && b.tool_use_id === toolUseId) {
-            resolved = b.is_error ? 'denied' : 'allowed';
-            break outer;
-          }
-        }
-      }
-    }
-
-    // Build permission section
-    const section = document.createElement('div');
-    section.className = 'chat-permission-inline';
-    section.dataset.requestId = requestId;
-
-    if (resolved) {
-      section.innerHTML = `<details class="chat-diff"><summary class="chat-diff-summary">\u{1F512} ${resolved === 'allowed' ? '<span class="chat-permission-allowed">\u2713 Allowed</span>' : '<span class="chat-permission-denied">\u2717 Denied</span>'}</summary></details>`;
-    } else {
-      section.innerHTML = `<div class="chat-permission-prompt"><span class="chat-permission-icon">\u{1F512}</span> Permission required <div class="chat-permission-actions"></div></div>`;
-      const actions = section.querySelector('.chat-permission-actions');
-      const btnAllow = document.createElement('button');
-      btnAllow.className = 'chat-permission-btn chat-permission-allow';
-      btnAllow.textContent = 'Allow';
-      const btnDeny = document.createElement('button');
-      btnDeny.className = 'chat-permission-btn chat-permission-deny';
-      btnDeny.textContent = 'Deny';
-      const toolInput = input;
-      const suggestions = req.permission_suggestions || [];
-      const respond = (approved, permUpdates) => {
-        this.ws.send({ type: 'permission-response', sessionId: this.sessionId, requestId, approved, toolInput, permissionUpdates: permUpdates });
-        const label = !approved ? '\u2717 Denied' : permUpdates ? '\u2713 Always Allowed' : '\u2713 Allowed';
-        const cls = approved ? 'chat-permission-allowed' : 'chat-permission-denied';
-        section.innerHTML = `<details class="chat-diff"><summary class="chat-diff-summary">\u{1F512} <span class="${cls}">${label}</span></summary></details>`;
-      };
-      btnAllow.onclick = () => respond(true);
-      btnDeny.onclick = () => respond(false);
-      if (suggestions.length > 0) {
-        const btnAlways = document.createElement('button');
-        btnAlways.className = 'chat-permission-btn chat-permission-always';
-        btnAlways.textContent = 'Always Allow';
-        btnAlways.title = suggestions.map(s => s.type === 'setMode' ? `Set mode: ${s.mode}` : s.type === 'addDirectories' ? `Add dirs: ${s.directories?.join(', ')}` : s.type).join('; ');
-        btnAlways.onclick = () => respond(true, suggestions);
-        actions.append(btnAllow, btnAlways, btnDeny);
-      } else {
-        actions.append(btnAllow, btnDeny);
-      }
-      this._hideTyping();
-    }
-
-    // Find matching pending tool card and inject before the output-pending spinner
-    const pending = toolUseId && this._messageList.querySelector(`[data-tool-id="${toolUseId}"]`);
-    if (pending) {
-      const outputPending = pending.querySelector('.chat-tool-output-pending');
-      if (outputPending) {
-        outputPending.before(section);
-      } else {
-        // File ops or simple pending — replace spinner with permission UI
-        const spinner = pending.querySelector('.chat-spinner');
-        if (spinner) spinner.replaceWith(section);
-        else pending.appendChild(section);
-      }
-    } else {
-      // No matching tool card found — render as standalone message
-      const el = document.createElement('div');
-      el.className = 'chat-msg chat-msg-permission';
-      const toolName = req.tool_name || 'Unknown';
-      if (this._compact) {
-        el.innerHTML = `<div class="chat-compact-msg"><div class="chat-compact-content"><div class="chat-tool-use" style="position:relative"><span class="chat-tool-label">\uD83D\uDD27 ${escHtml(toolName)}</span></div></div></div>`;
-      } else {
-        el.innerHTML = `<div class="chat-tool-use" style="position:relative"><span class="chat-tool-label">\uD83D\uDD27 ${escHtml(toolName)}</span></div>`;
-      }
-      const toolUse = el.querySelector('.chat-tool-use');
-      toolUse.appendChild(section);
-      this._messageList.appendChild(el);
-    }
-    if (this._pinned) this._scrollToBottom();
-  }
 
   _showTyping(label = 'thinking...') {
     if (!this._streamStatus) return;
@@ -1897,18 +1773,18 @@ class ChatView {
         else pending.appendChild(statusEl);
       }
       const count = this._subagentCounts.get(parentToolUseId);
+      // Detect activity from raw subagent message
       let activity = '';
-      if (msg.type === 'assistant') {
-        const c = msg.message?.content;
-        if (Array.isArray(c)) {
-          const last = c[c.length - 1];
-          if (last?.type === 'tool_use') activity = `running ${last.name}`;
-          else if (last?.type === 'thinking') activity = 'thinking';
-          else activity = 'responding';
-        }
+      const c = msg.message?.content || msg.content;
+      if (Array.isArray(c)) {
+        const last = c[c.length - 1];
+        if (last?.type === 'tool_use' || last?.type === 'tool_call') activity = `running ${last.name || last.toolName || 'tool'}`;
+        else if (last?.type === 'thinking') activity = 'thinking';
+        else if (last?.type === 'text') activity = 'responding';
       }
-      const toolBlock = this._pendingToolUses.get(parentToolUseId);
-      const desc = toolBlock?.input?.description || '';
+      // Find description from stored messages
+      const toolMsg = this._messages.find(m => m.toolCallId === parentToolUseId);
+      const desc = toolMsg?.content?.[0]?.input?.description || '';
       statusEl.innerHTML = `<span class="chat-agent-live-count">${count} messages${activity ? ' \u2022 ' + escHtml(activity) : ''}</span> <button class="chat-agent-view-btn" data-parent-tool-id="${escHtml(parentToolUseId)}" data-desc="${escHtml(desc)}">View Log</button>`;
     }
   }
@@ -1939,8 +1815,8 @@ class ChatView {
     const handler = (msg) => {
       if (msg.type === 'attached' && msg.sessionId === virtualId) {
         this.ws.offGlobal(handler);
-        if (msg.chatHistory?.length) {
-          view.loadHistory(msg.chatHistory, msg.totalCount);
+        if (msg.messages?.length) {
+          view.loadHistory(msg.messages, msg.totalCount, msg.isStreaming);
         }
       }
     };
@@ -2083,7 +1959,7 @@ class ChatView {
     const missedStart = this._windowEnd;
     this._fetchMessages(missedStart, 200).then(msgs => {
       if (!msgs.length) return;
-      for (const msg of msgs) this._onMessage(msg);
+      for (const msg of msgs) this._onCreateMessage(msg);
       if (this._pinned) this._scrollToBottom();
     }).catch(() => {});
   }

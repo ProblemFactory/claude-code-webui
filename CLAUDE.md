@@ -30,9 +30,9 @@ Terminal mode:
                                                                             buffer file (raw PTY)
 
 Chat mode:
-  Browser (ChatView) ←→ WebSocket ←→ node-pty (dtach -a) ←→ dtach socket ←→ chat-wrapper.js ←→ claude --stream-json
-                                                                                  ↓
-                                                                            buffer file (JSON lines)
+  Browser (ChatView) ←→ WebSocket (msg create/edit/meta) ←→ MessageManager ←→ server ←→ chat-wrapper.js ←→ claude --stream-json
+                                                                   ↓
+                                                          BackendAdapter (swappable)
 ```
 
 ## File Structure
@@ -60,7 +60,7 @@ src/
     file-viewer.js     — FileViewer (dispatch by type, size check, binary detection)
     code-editor.js     — CodeEditor (CodeMirror 6, dynamic language switching)
     markdown.js        — (removed, .md files now use CodeEditor with preview toggle)
-    chat-view.js       — ChatView (chat interface for stream-json mode, permission approval)
+    chat-view.js       — ChatView (consumes normalized msg ops from MessageManager, ID-based rendering)
     theme-editor.js    — ThemeEditor (floating panel for custom themes, ~50 CSS vars + 16 ANSI colors)
     hex-viewer.js      — HexViewer (binary file viewer with chunked loading)
     resizer.js         — Resizer (reusable drag-to-resize handle)
@@ -71,6 +71,11 @@ src/
     settings.js        — SettingsManager (sparse storage, server persist, WS sync, event listeners)
     settings-schema.js — Settings schema (all options with types, defaults, categories)
     settings-ui.js     — SettingsUI (VS Code-style full settings dialog with search)
+src/
+  message-manager.js — MessageManager (converts Claude stream-json → normalized messages with stable IDs, merges tool calls)
+  adapters/
+    base.js            — BackendAdapter + SessionHandle (abstract interface for AI backends)
+    claude-code.js     — ClaudeCodeAdapter (Claude Code CLI specifics: flags, JSONL, control protocol)
 public/
   index.html           — HTML structure
   style.css            — CSS with 6 built-in theme variants + custom themes
@@ -139,7 +144,7 @@ docs/
 - **Layout restore**: `attachSession()` returns `winInfo` synchronously (the DOM element). Position is applied directly to this `winInfo`, NOT by guessing via `windows.values().pop()`. The WebSocket attach is async but the window element already exists.
 - **Proportional bounds tracking**: `win.gridBounds` stores position `{left, top, width, height}` as fractions (0-1) of workspace. `_reflowWindows()` (via ResizeObserver) recalculates pixel positions on workspace resize. Applies universally — grid snap, edge snap, drag-drop, and `applyLayout()` all capture bounds. User resize updates proportions on mouseup. Works in both grid and freeform modes.
 - **Overlap switcher**: Right-click on title bar detects overlapping windows via rect intersection (`_rectsOverlap`), shows popup at cursor position. Works in any mode — not tied to grid cells.
-- **WebSocket reconnect re-attach**: On WS reconnect, all active sessions are re-attached. Chat sessions call `_reattach()` to sync missed messages since last known index. `globalHandlers` in ws.js are preserved across reconnects (not wiped).
+- **WebSocket reconnect re-attach**: On WS reconnect, all active sessions are re-attached. Chat sessions call `_reattach()` which re-sends attach → server responds with latest normalized messages + `isStreaming` from wrapper metadata. `globalHandlers` in ws.js are preserved across reconnects.
 
 ### Server-Side Key Functions
 
@@ -296,9 +301,9 @@ Split from monolithic 1647-line `src/client.js` into 13 ES modules under `src/li
 
 **Permission Approval**: Uses `--permission-prompt-tool stdio` flag (undocumented, discovered from HAQI). Claude sends `control_request` on stdout, server handles `permission-response` WS message → writes `control_response` to stdin with `updatedInput`. Permission UI embedded inline in tool cards (not separate messages): pending shows Allow/Always Allow/Deny buttons between Input and Output; resolved shows collapsed ✓ Allowed/✗ Denied. "Always Allow" passes `permission_suggestions` back as `permission_updates` for session-wide rules. On attach, server separates `control_request` from buffer into `pendingPermissions` map, filters resolved ones, sends in attach payload. Client injects after tool cards render. Permission mode shown in status bar (🔒 default/bypassPermissions/etc.).
 
-**ChatView** (`src/lib/chat-view.js`): Renders structured messages — user/assistant/tool_use/tool_result/thinking blocks. Features: compact mode (document-style), markdown rendering, collapsible tool results (all tool_use deferred, not just file tools), Ctrl+F search with highlight/navigation, auto-detect URLs/paths with VS Code-style character exclusion regex (`:line`, `:line:col`, `:line-line` suffix support, click=copy with tooltip feedback, Ctrl+click=open), pre block wrap toggle, streaming/activity indicator above input bar, expandable input, per-tool-card open-in-editor button, collapsible long user messages, interrupt result labels (error_during_execution -> "Interrupted", error_max_turns -> "Max turns reached", etc.).
+**ChatView** (`src/lib/chat-view.js`): ID-based renderer consuming normalized `msg` ops (create/edit/meta) from MessageManager. Each message has a stable ID → one DOM element tracked via `_elements` Map. Edit ops re-render in place (no append-and-match). Features: compact mode, markdown rendering, syntax highlighting (hljs, deferred for files >10KB), Ctrl+F search with highlight layer, auto-detect URLs/paths (click=copy, Ctrl+click=open), wrap toggles with searchable language picker, streaming indicator (from server `isStreaming`), expandable input, permission overlay on tool cards, collapsible long user messages, interrupt. Key methods: `_onOp` dispatches to `_onCreateMessage`/`_onEditMessage`/`_onMeta`. Render by role: `_renderUserMsg`, `_renderAssistantMsg`, `_renderToolMsg`/`_renderToolResult`, `_renderSystemMsg`, `_renderPermissionOverlay`. No `_pendingToolUses` — tool state managed by MessageManager.
 
-**Tool call rendering**: All tool_use types are deferred and rendered as collapsible cards. Non-file tools show Input immediately while running with spinner on Output only. Pending Agent tool_use shows `🤖 Agent: {description}` label (not generic `🔧 Agent`). Tool error cards use unified style (same card, red error text inside, not red card). Per-tool-card 📋 open-in-editor button (raw data in closure, not DOM extraction). Message-level 📋 button skipped for tool-only assistant messages. Clickable paths/URLs via `_linkify` (HTML-aware: splits into tags/text segments, skips `<a>` tags, linkifies inside `<code>` blocks) and `_linkifyText` (HTML-tag-aware: URL pass then tag-split path pass to avoid matching inside generated attributes). Markdown `<a href>` tags also intercepted by `_setupLinkHandler` (same click=copy, Ctrl+click=open behavior). No output truncation.
+**Tool call rendering**: Tool calls are normalized as `role:'tool'` messages. Pending: `status:'pending'` with `tool_call` content block (spinner). Complete: server sends edit op → `status:'complete'` with `tool_result` content block → ChatView re-renders element in place via `_onEditMessage`. Agent tools include View Log button (uses `taskInfo.id` as agentId). Clickable paths/URLs via `_linkify` (HTML-aware, linkifies inside `<code>` blocks) and `_linkifyText` (tag-split for path regex). No output truncation.
 
 **Subagent/Agent rendering**: Subagent messages (`parent_tool_use_id` or `isSidechain`) filtered from main chat. Server buffers by `parentToolUseId` in `session.subagentBuffers`, broadcasts as both `subagent-message` (for parent tool card status) and `chat-message` with virtual session ID `sub-{toolUseId}` (for subagent viewer). "View Log" button opens read-only ChatView (`readOnly: true` — no input area, no status bar, normal scroll with pin-to-bottom) attached to a virtual session. Duplicate viewers prevented: `_subagentViewers` Map tracks open windows by virtualId, clicking View Log again focuses existing window. Live agents use `sub-{parentToolUseId}` virtual sessions — server returns buffered messages on attach and forwards new ones. Completed agents use `sub-agent-{agentId}` — server loads from `subagents/agent-{agentId}.jsonl`. On page refresh, server sends `activeSubagents` in attach payload (toolUseId → {count}, only still-running agents without result message) to restore View Log buttons and message counts. No client-side `_subagentBuffers`/`_subagentViews` — all buffering/forwarding handled server-side via virtual session attach.
 
@@ -314,7 +319,7 @@ Split from monolithic 1647-line `src/client.js` into 13 ES modules under `src/li
 
 **System notifications**: Messages containing `<task-notification>`, `<system-reminder>`, and similar tags are detected and rendered as collapsible dim notification cards instead of regular user messages.
 
-**Streaming/Activity Indicator**: Moved from inline in message list to a fixed position above the input bar (always visible regardless of scroll). Shows current activity: "thinking..."/"running ToolName"/"responding". On attach, server detects mid-stream state from the raw buffer (not JSONL) and sends `isStreaming` flag in the attach payload, so reconnecting clients see the indicator immediately.
+**Streaming/Activity Indicator**: Fixed position above the input bar. Shows current activity from live `msg` ops: "thinking..."/"running ToolName"/"responding". Streaming state is tracked by `chat-wrapper.js` in wrapper metadata (`meta.streaming`) — server reads it on attach and sends `isStreaming` in the response. No client-side inference.
 
 **Role Indicators**: `chat.roleIndicator` setting with 4 modes: `border` (default), `background`, `icon`, `label`. Border mode uses `gap:0` between messages with left margin on role switches for continuous colored bars. Background mode tints the message background by role. Icon mode shows role avatars. Label mode shows "You"/"Claude" text labels.
 
@@ -433,7 +438,7 @@ Read/Write tool output uses highlight.js for syntax highlighting with line numbe
 
 ### WebSocket Protocol (`/ws`)
 Client → Server: `create`, `input`, `chat-input`, `permission-response`, `set-permission-mode`, `interrupt`, `resize`, `attach`, `kill`, `tmux-attach`, `state-set`, `state-resync`
-Server → Client: `created`, `output`, `chat-message`, `subagent-message` (with parentToolUseId), `exited`, `attached` (includes `isStreaming`, `pendingPermissions`, `activeSubagents`), `active-sessions`, `editor-open`, `editor-close`, `effective-size`, `user-state-updated`, `bookmarks-updated`, `settings-updated`, `custom-themes-updated`, `state-sync`, `state-snapshot`, `error`
+Server → Client: `created`, `output`, `msg` (normalized: op=create/edit/meta), `subagent-message` (parentToolUseId for tool card status), `exited`, `attached` (includes `messages`, `totalCount`, `isStreaming`, `chatStatus`, `taskState`), `active-sessions`, `editor-open`, `editor-close`, `effective-size`, `user-state-updated`, `bookmarks-updated`, `settings-updated`, `custom-themes-updated`, `state-sync`, `state-snapshot`, `error`
 
 **Virtual session attach**: `attach` with `sessionId` starting with `sub-` routes to subagent handler. `sub-{parentToolUseId}` returns live-buffered messages from parent session's `subagentBuffers`. `sub-agent-{agentId}` loads completed agent's JSONL from disk. Both respond with standard `attached` payload. Live virtual sessions also receive `chat-message` broadcasts for real-time updates.
 

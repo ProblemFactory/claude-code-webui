@@ -136,6 +136,10 @@ child.stdout.on('data', (chunk) => {
       }
     }
 
+    // Track streaming state
+    if (msg.type === 'user') { meta.streaming = true; scheduleMeta(); }
+    if (msg.type === 'result') { meta.streaming = false; scheduleMeta(); }
+
     // Track todos: TodoWrite tool_use in assistant messages
     if (msg.type === 'assistant' && msg.message?.content) {
       const blocks = Array.isArray(msg.message.content) ? msg.message.content : [];
@@ -214,6 +218,7 @@ child.on('exit', (exitCode) => {
   }
   if (writeTimer) { clearTimeout(writeTimer); }
   persistBuffer();
+  meta.streaming = false;
   // Mark all running tasks as unknown (process died — can't know real state)
   for (const t of Object.values(meta.tasks)) {
     if (t.status === 'running') t.status = 'unknown';

@@ -1667,7 +1667,7 @@ pre.chat-pre-wrapped { white-space: pre-wrap; word-break: break-all; }
 [data-role-indicator="border"] .chat-msg { border-left: 3px solid transparent; }
 [data-role-indicator="border"] .chat-msg-user { border-left-color: var(--accent); }
 [data-role-indicator="border"] .chat-msg-assistant { border-left-color: var(--chat-green, var(--green)); }
-[data-role-indicator="border"] .chat-msg-tool-result { border-left-color: var(--border); }
+[data-role-indicator="border"] .chat-msg-tool-result { border-left-color: var(--chat-green, var(--green)); }
 /* Space between different role groups */
 [data-role-indicator="border"] .chat-msg-user + .chat-msg-assistant,
 [data-role-indicator="border"] .chat-msg-user + .chat-msg-tool-result,

@@ -9,6 +9,8 @@ const crypto = require('crypto');
 const multer = require('multer');
 const { execFileSync, spawn } = require('child_process');
 const compression = require('compression');
+const { MessageManager } = require('./src/message-manager');
+const { ClaudeCodeAdapter } = require('./src/adapters/claude-code');
 
 const PORT = process.env.PORT || 3456;
 const CLAUDE_CMD_RAW = process.env.CLAUDE_CMD || 'claude';
@@ -247,7 +249,14 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
               if (!session.subagentBuffers.has(toolUseId)) session.subagentBuffers.set(toolUseId, []);
               session.subagentBuffers.get(toolUseId).push(msg);
               broadcastToSession(session, id, { type: 'subagent-message', sessionId: id, parentToolUseId: toolUseId, message: msg });
-              broadcastToSession(session, id, { type: 'chat-message', sessionId: `sub-${toolUseId}`, message: msg });
+              // Normalize for subagent viewers
+              if (!session._subNormalizers) session._subNormalizers = new Map();
+              if (!session._subNormalizers.has(toolUseId)) {
+                const subMM = new MessageManager(`sub-${toolUseId}`);
+                subMM.onOp((op) => broadcastToSession(session, id, { type: 'msg', sessionId: `sub-${toolUseId}`, ...op }));
+                session._subNormalizers.set(toolUseId, subMM);
+              }
+              session._subNormalizers.get(toolUseId).processLive(msg);
             } catch {}
           }
         } catch {}
@@ -297,13 +306,21 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
               if (!session.subagentBuffers.has(ptuid)) session.subagentBuffers.set(ptuid, []);
               session.subagentBuffers.get(ptuid).push(msg);
             }
-            // Broadcast to parent (for tool card status) + virtual session (for subagent viewer)
+            // Broadcast to parent (for tool card status) + normalize for subagent viewers
             broadcastToSession(session, id, { type: 'subagent-message', sessionId: id, parentToolUseId: ptuid, message: msg });
-            if (ptuid) broadcastToSession(session, id, { type: 'chat-message', sessionId: `sub-${ptuid}`, message: msg });
+            if (ptuid) {
+              if (!session._subNormalizers) session._subNormalizers = new Map();
+              if (!session._subNormalizers.has(ptuid)) {
+                const subMM = new MessageManager(`sub-${ptuid}`);
+                subMM.onOp((op) => broadcastToSession(session, id, { type: 'msg', sessionId: `sub-${ptuid}`, ...op }));
+                session._subNormalizers.set(ptuid, subMM);
+              }
+              session._subNormalizers.get(ptuid).processLive(msg);
+            }
             continue;
           }
-          if (msg.type === 'assistant' || msg.type === 'result') session._waitingForResponse = false;
-          broadcastToSession(session, id, { type: 'chat-message', sessionId: id, message: msg });
+          // Feed into MessageManager (emits normalized msg ops to all clients)
+          if (session._normalizer) session._normalizer.processLive(msg);
         } catch {
           // Non-JSON line (e.g. dtach noise) — send as raw output
           broadcastToSession(session, id, { type: 'output', sessionId: id, data: line + '\n' });
@@ -423,6 +440,13 @@ function restoreSessions() {
       socketPath,
       buffer: savedBuffer,
     };
+    // Create normalizer for chat sessions (populated on first attach from JSONL + buffer)
+    if (sessionMode === 'chat') {
+      session._normalizer = new MessageManager(id);
+      session._normalizer.onOp((op) => {
+        broadcastToSession(session, id, { type: 'msg', sessionId: id, ...op });
+      });
+    }
     activeSessions.set(id, session);
     attachToDtach(id, socketPath, session);
 
@@ -1320,7 +1344,7 @@ function getSubagentMetas(claudeSessionId, cwd) {
 // Merges JSONL (persisted history) + live output into one logical array.
 // All external code sees a single ordered message list — no concept of "buffer" vs "JSONL".
 class SessionMessages {
-  // session: { claudeSessionId, cwd, buffer, _waitingForResponse }
+  // session: { claudeSessionId, cwd, buffer }
   // sessionId: webui session ID (for reading wrapper metadata from BUFFERS_DIR)
   constructor(session, sessionId) {
     this._session = session;
@@ -1367,12 +1391,12 @@ class SessionMessages {
   /** Pending permission control_requests */
   get pendingPermissions() { this._ensureParsed(); return this._pendingPerms; }
 
-  /** Whether Claude is currently outputting */
+  /** Whether Claude is currently outputting — wrapper metadata is the authority */
   get isStreaming() {
-    this._ensureParsed();
-    if (this._session._waitingForResponse) return true;
-    const last = this._all.length > 0 ? this._all[this._all.length - 1] : null;
-    return last && last.type !== 'result' && last.type !== 'system';
+    const wMeta = this.wrapperMeta();
+    if (wMeta?.streaming != null) return wMeta.streaming;
+    // No wrapper metadata → session predates streaming tracking → not streaming
+    return false;
   }
 
   /** Last N displayable messages (for initial attach / chat rendering) */
@@ -1498,25 +1522,58 @@ class SessionMessages {
 
 // Get chat message history for a Claude session (JSONL + optional buffer)
 app.get('/api/session-messages', (req, res) => {
-  const { claudeSessionId, cwd, offset, limit, search, withStatus } = req.query;
+  const { claudeSessionId, cwd, offset, limit, search } = req.query;
   if (!claudeSessionId) return res.status(400).json({ error: 'claudeSessionId required' });
 
-  // Try to find active session to include live output; fall back to JSONL-only
+  // Use session's existing normalizer if available (cached); else build on-demand
   let session = null;
-  let sessionId = null;
-  for (const [sid, s] of activeSessions) {
-    if (s.claudeSessionId === claudeSessionId) { session = s; sessionId = sid; break; }
+  for (const [, s] of activeSessions) {
+    if (s.claudeSessionId === claudeSessionId) { session = s; break; }
   }
-  const sm = new SessionMessages(session || { claudeSessionId, cwd: cwd || '', buffer: '' }, sessionId);
+  let mm;
+  if (session?._normalizer && session._normalizer.total > 0) {
+    mm = session._normalizer;
+  } else {
+    const sm = new SessionMessages(session || { claudeSessionId, cwd: cwd || '', buffer: '' });
+    mm = new MessageManager('api');
+    mm.convertHistory(sm.raw());
+  }
 
   if (search) {
-    res.json({ matches: sm.search(search), total: sm.total });
+    res.json({ matches: mm.search(search), total: mm.total });
   } else if (offset !== undefined || limit !== undefined) {
     const o = parseInt(offset) || 0;
     const l = parseInt(limit) || 50;
-    res.json({ messages: sm.slice(o, l), total: sm.total, chatStatus: withStatus ? sm.chatStatus() : null });
+    res.json({ messages: mm.slice(o, l), total: mm.total });
   } else {
-    res.json({ messages: sm.all(), total: sm.total, chatStatus: withStatus ? sm.chatStatus() : null });
+    res.json({ messages: mm.tail(50), total: mm.total });
+  }
+});
+
+// V2: Normalized messages (tool calls merged, IDs assigned)
+app.get('/api/session-messages-v2', (req, res) => {
+  const { claudeSessionId, cwd, offset, limit, search } = req.query;
+  if (!claudeSessionId) return res.status(400).json({ error: 'claudeSessionId required' });
+
+  // Find or create normalizer
+  let session = null;
+  for (const [, s] of activeSessions) {
+    if (s.claudeSessionId === claudeSessionId) { session = s; break; }
+  }
+
+  // Build normalizer from SessionMessages (includes buffer)
+  const sm = new SessionMessages(session || { claudeSessionId, cwd: cwd || '', buffer: '' });
+  const normalizer = new MessageManager('api');
+  normalizer.convertHistory(sm.raw());
+
+  if (search) {
+    res.json({ matches: normalizer.search(search), total: normalizer.total });
+  } else if (offset !== undefined || limit !== undefined) {
+    const o = parseInt(offset) || 0;
+    const l = parseInt(limit) || 50;
+    res.json({ messages: normalizer.slice(o, l), total: normalizer.total });
+  } else {
+    res.json({ messages: normalizer.tail(50), total: normalizer.total });
   }
 });
 
@@ -1539,19 +1596,17 @@ app.get('/api/subagent-messages', (req, res) => {
     try {
       if (!fs.existsSync(filePath)) continue;
       const content = fs.readFileSync(filePath, 'utf-8');
-      const messages = [];
+      const rawMsgs = [];
       for (const line of content.split('\n')) {
         const trimmed = line.trim();
         if (!trimmed) continue;
-        try {
-          const msg = JSON.parse(trimmed);
-          if (msg.type === 'user' || msg.type === 'assistant' || msg.type === 'result') messages.push(msg);
-        } catch {}
+        try { const msg = JSON.parse(trimmed); rawMsgs.push(msg); } catch {}
       }
-      // Read meta
       let meta = {};
       try { meta = JSON.parse(fs.readFileSync(filePath.replace('.jsonl', '.meta.json'), 'utf-8')); } catch {}
-      return res.json({ messages, total: messages.length, meta });
+      const mm = new MessageManager(`sub-agent-${agentId}`);
+      mm.convertHistory(rawMsgs);
+      return res.json({ messages: mm.messages, total: mm.total, meta });
     } catch {}
   }
   res.json({ messages: [], total: 0, meta: {} });
@@ -1772,6 +1827,13 @@ wss.on('connection', (ws) => {
           createdAt: Date.now(), claudeSessionId: data.resumeId || null,
           sockName, socketPath, buffer: '',
         };
+        // Create normalizer for chat sessions (converts raw Claude messages to normalized format)
+        if (sessionMode === 'chat') {
+          session._normalizer = new MessageManager(id);
+          session._normalizer.onOp((op) => {
+            broadcastToSession(session, id, { type: 'msg', sessionId: id, ...op });
+          });
+        }
 
         // Use appropriate wrapper inside dtach:
         // - Terminal: pty-wrapper.js (spawns claude with PTY for TUI mode)
@@ -1832,15 +1894,9 @@ wss.on('connection', (ws) => {
       }
 
       case 'set-permission-mode': {
-        // Change permission mode mid-session via control_request
         const session = activeSessions.get(data.sessionId);
         if (session?.pty && session.mode === 'chat' && data.mode) {
-          const msg = {
-            type: 'control_request',
-            request_id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-            request: { subtype: 'set_permission_mode', mode: data.mode },
-          };
-          session.pty.write(JSON.stringify(msg) + '\n');
+          session.pty.write(JSON.stringify(ClaudeCodeAdapter.buildSetPermissionMode(data.mode)) + '\n');
         }
         break;
       }
@@ -1872,12 +1928,12 @@ wss.on('connection', (ws) => {
           }
 
           session.pty.write(stdinPayload + '\n');
-          session._waitingForResponse = true;
           // Write to buffer for display on refresh (before JSONL is written).
           // Mark with _fromWebui so dedup can remove it when JSONL version arrives.
           userMsg._fromWebui = true;
           session.buffer = (session.buffer + JSON.stringify(userMsg) + '\n').slice(-500000);
-          broadcastToSession(session, data.sessionId, { type: 'chat-message', sessionId: data.sessionId, message: userMsg });
+          // Normalize and broadcast to other clients (sender already shows local preview)
+          if (session._normalizer) session._normalizer.processLive(userMsg);
         }
         break;
       }
@@ -1889,12 +1945,7 @@ wss.on('connection', (ws) => {
         const session = activeSessions.get(data.sessionId);
         if (session?.pty && session.mode === 'chat') {
           // 1. Protocol: send control_request interrupt to stdin
-          const msg = {
-            type: 'control_request',
-            request_id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-            request: { subtype: 'interrupt' },
-          };
-          session.pty.write(JSON.stringify(msg) + '\n');
+          session.pty.write(JSON.stringify(ClaudeCodeAdapter.buildInterruptRequest()) + '\n');
           // 2. Fallback: SIGINT to claude child process (bypasses PTY/dtach chain)
           if (session._childPid) {
             try { process.kill(session._childPid, 'SIGINT'); } catch {}
@@ -1904,17 +1955,9 @@ wss.on('connection', (ws) => {
       }
 
       case 'permission-response': {
-        // Permission approval/denial from chat UI → write control_response to claude stdin
         const session = activeSessions.get(data.sessionId);
         if (session?.pty && session.mode === 'chat') {
-          const allowResponse = { behavior: 'allow', updatedInput: data.toolInput || {} };
-          if (data.permissionUpdates?.length) allowResponse.permission_updates = data.permissionUpdates;
-          const response = {
-            type: 'control_response',
-            response: data.approved
-              ? { subtype: 'success', request_id: data.requestId, response: allowResponse }
-              : { subtype: 'success', request_id: data.requestId, response: { behavior: 'deny', message: 'User denied this action' } },
-          };
+          const response = ClaudeCodeAdapter.buildPermissionResponse(data.requestId, data.approved, data.toolInput, data.permissionUpdates);
           session.pty.write(JSON.stringify(response) + '\n');
         }
         break;
@@ -1943,7 +1986,7 @@ wss.on('connection', (ws) => {
             const cwd = parentSession?.cwd || data.cwd || '';
             const projectsDir = path.join(os.homedir(), '.claude', 'projects');
             const projDir = cwdToProjectDir(cwd);
-            let messages = [], meta = {};
+            let rawMsgs = [], meta = {};
             const candidates = [path.join(projectsDir, projDir, claudeId, 'subagents')];
             try { for (const dir of fs.readdirSync(projectsDir)) { const fp = path.join(projectsDir, dir, claudeId, 'subagents'); if (!candidates.includes(fp)) candidates.push(fp); } } catch {}
             for (const subDir of candidates) {
@@ -1951,13 +1994,15 @@ wss.on('connection', (ws) => {
               try {
                 if (!fs.existsSync(fp)) continue;
                 for (const line of fs.readFileSync(fp, 'utf-8').split('\n')) {
-                  try { const m = JSON.parse(line.trim()); if (m.type === 'user' || m.type === 'assistant' || m.type === 'result') messages.push(m); } catch {}
+                  try { const m = JSON.parse(line.trim()); if (m.type === 'user' || m.type === 'assistant' || m.type === 'result') rawMsgs.push(m); } catch {}
                 }
                 try { meta = JSON.parse(fs.readFileSync(fp.replace('.jsonl', '.meta.json'), 'utf-8')); } catch {}
                 break;
               } catch {}
             }
-            ws.send(JSON.stringify({ type: 'attached', sessionId: subId, mode: 'chat', chatHistory: messages, totalCount: messages.length, meta }));
+            const subMM = new MessageManager(subId);
+            subMM.convertHistory(rawMsgs);
+            ws.send(JSON.stringify({ type: 'attached', sessionId: subId, mode: 'chat', messages: subMM.messages, totalCount: subMM.total, meta }));
           } else {
             // Live agent: sub-{parentToolUseId} — find parent session and return buffered messages
             const toolUseId = subId.slice('sub-'.length);
@@ -1965,13 +2010,22 @@ wss.on('connection', (ws) => {
             for (const [sid, sess] of activeSessions) {
               if (sess.subagentBuffers?.has(toolUseId)) {
                 sess.clients.set(ws, { cols: 120, rows: 30 }); // register for broadcasts
-                const msgs = sess.subagentBuffers.get(toolUseId);
-                ws.send(JSON.stringify({ type: 'attached', sessionId: subId, mode: 'chat', chatHistory: msgs, totalCount: msgs.length }));
+                const rawMsgs = sess.subagentBuffers.get(toolUseId);
+                // Use existing sub-normalizer if available, or create one
+                if (!sess._subNormalizers) sess._subNormalizers = new Map();
+                let subMM = sess._subNormalizers.get(toolUseId);
+                if (!subMM) {
+                  subMM = new MessageManager(subId);
+                  subMM.onOp((op) => broadcastToSession(sess, sid, { type: 'msg', sessionId: subId, ...op }));
+                  subMM.convertHistory(rawMsgs);
+                  sess._subNormalizers.set(toolUseId, subMM);
+                }
+                ws.send(JSON.stringify({ type: 'attached', sessionId: subId, mode: 'chat', messages: subMM.messages, totalCount: subMM.total }));
                 found = true;
                 break;
               }
             }
-            if (!found) ws.send(JSON.stringify({ type: 'attached', sessionId: subId, mode: 'chat', chatHistory: [], totalCount: 0 }));
+            if (!found) ws.send(JSON.stringify({ type: 'attached', sessionId: subId, mode: 'chat', messages: [], totalCount: 0 }));
           }
           break;
         }
@@ -1982,16 +2036,15 @@ wss.on('connection', (ws) => {
           attachedSessions.add(data.sessionId);
           if (session.mode === 'chat') {
             const sm = new SessionMessages(session, data.sessionId);
-            const chatHistory = sm.tail(50);
-            const activeSubagents = {};
-            if (session.subagentBuffers) {
-              for (const [toolUseId, msgs] of session.subagentBuffers) {
-                if (msgs.length > 0 && !msgs.some(m => m.type === 'result')) activeSubagents[toolUseId] = { count: msgs.length };
-              }
+            // Initialize normalizer from history if not yet done
+            if (session._normalizer && session._normalizer.total === 0) {
+              session._normalizer.convertHistory(sm.raw());
             }
+            const messages = session._normalizer ? session._normalizer.tail(50) : [];
+            const totalCount = session._normalizer ? session._normalizer.total : 0;
+
             ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, mode: 'chat',
-              chatHistory, totalCount: sm.total, chatStatus: sm.chatStatus(), isStreaming: sm.isStreaming,
-              pendingPermissions: sm.activePendingPermissions(), activeSubagents, taskState: sm.taskState() }));
+              messages, totalCount, chatStatus: sm.chatStatus(), isStreaming: sm.isStreaming, taskState: sm.taskState() }));
           } else {
             ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, buffer: session.buffer || '' }));
           }

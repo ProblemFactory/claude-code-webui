@@ -801,12 +801,10 @@ class App {
     const handler = (msg) => {
       if (msg.type === 'attached' && msg.sessionId === serverId) {
         if (msg.mode === 'chat' || isChat) {
-          // Chat mode: create ChatView and load history
           const chatView = new ChatView(winInfo, this.ws, serverId, this);
           this.sessions.set(winInfo.id, chatView);
-          if (msg.chatHistory && msg.chatHistory.length) {
-            chatView.loadHistory(msg.chatHistory, msg.totalCount, msg.isStreaming, msg.pendingPermissions, msg.activeSubagents, msg.taskState);
-            if (msg.chatStatus) chatView.applyStatus(msg.chatStatus);
+          if (msg.messages?.length) {
+            chatView.loadHistory(msg.messages, msg.totalCount, msg.isStreaming, { chatStatus: msg.chatStatus, taskState: msg.taskState });
           }
           winInfo.onClose = () => {
             const shouldKill = (this.settings.get('window.closeBehavior') ?? 'terminate') === 'terminate';
