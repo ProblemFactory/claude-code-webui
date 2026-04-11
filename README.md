@@ -12,20 +12,20 @@ A web-based UI for managing multiple [Claude Code](https://docs.anthropic.com/en
 - Default mode configurable per-user; split button on resume to choose Terminal or Chat
 
 ### Chat Mode
-- **Structured messages** -- user/assistant/tool/thinking blocks rendered with markdown and syntax highlighting
-- **Tool visualization** -- Edit diffs, file read/write summaries, collapsible tool results with first-line preview
+- **Normalized message system** -- MessageManager converts raw Claude stream-json to normalized messages with stable IDs, merged tool calls, streaming text edits. Backend-agnostic adapter interface for future AI backends.
+- **Tool visualization** -- Edit diffs (flex layout, wrap toggle), Read/Write with syntax highlighting (30 languages via highlight.js) + line numbers + searchable language picker
 - **Interactive permissions** -- Allow / Always Allow / Deny buttons inline on tool cards (`--permission-prompt-tool` support)
-- **Subagent support** -- Agent tool cards show live status during execution; View Log opens a read-only ChatView
+- **Subagent support** -- Agent tool cards show live status; View Log opens read-only ChatView via per-subagent normalizers
 - **Search** -- Ctrl+F with CSS Custom Highlight API, match counter, prev/next navigation across full history
-- **Status bar** -- model badge, context % with color-coded progress bar, cache hit ratio, cost with color tiers, permission mode
-- **Slash command autocomplete** -- type `/` to see all commands, arrow keys to navigate, Tab/Enter to accept
-- **Image paste** -- paste images from clipboard as message attachments (inline preview, removable)
-- **Interrupt** -- Stop button in streaming status bar to interrupt Claude mid-response
-- **Open in Editor** -- clipboard button on messages and tool cards opens content in a temporary CodeEditor window
-- **System notifications** -- task-notification and system-reminder messages detected and rendered separately
-- **Collapsible long messages** -- messages over 500 characters auto-collapse with preview
-- **View Manager** -- sliding window pagination over full conversation history; scroll up to load earlier messages
-- **Reconnect sync** -- on WebSocket reconnect, automatically re-attaches and fetches missed messages
+- **Status bar** -- model, context %, cache ratio, cost, permission mode (clickable), background tasks (clickable popup)
+- **Virtual scroll** -- sliding DOM window (~150 max), auto-trim top/bottom, deferred live messages when viewing history
+- **Scroll minimap** -- semantic turn-based navigation with user message markers, compact markers, drag-to-jump, floating preview label
+- **View-only mode** -- open stopped sessions as read-only (📋 View History); auto-converts on session terminate
+- **Draft persistence** -- chat input auto-saved to server, synced across clients (Telegram-style)
+- **Interrupt** -- dual mechanism (control_request + SIGINT) for reliability
+- **TODO display** -- live TodoWrite tracking above input area, tracked in wrapper metadata
+- **Collapsible long messages** -- 120-char preview + total length, collapse toggle
+- **Reconnect sync** -- auto re-attach, StateSync resync for drafts/settings
 
 ### Terminal Mode
 - **Multi-session terminals** with dtach persistence (survive server restarts)

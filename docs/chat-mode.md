@@ -47,7 +47,7 @@ In compact mode, you can choose how user and assistant messages are visually dis
 
 ### Collapsible Long Messages
 
-User messages over 500 characters are automatically collapsed with a preview of the first line. Click to expand and see the full message.
+User messages over 500 characters are automatically collapsed showing the first 120 characters as a preview with the total character count (e.g., "这是消息内容前120个字符... (1224 chars)"). Click to expand — the preview text hides and a "Collapse" button appears.
 
 ## Tool Visualization
 
@@ -57,9 +57,11 @@ Each tool call is rendered as a structured card showing the tool name, inputs, a
 
 | Tool | Card Display |
 |------|-------------|
-| **Edit** | Diff view with added/removed lines, color-coded (green for additions, red for deletions) |
-| **Write** | Line count, file size, and collapsible content preview |
-| **Read** | Line count with collapsible file content |
+| **Edit** | Diff view with +/- prefix columns (flex layout, prefix stays fixed on wrap), suffix context matching |
+| **Write** | Line count, file size, full content with syntax highlighting + line numbers |
+| **Read** | Line count, full content with syntax highlighting + line numbers |
+
+Syntax highlighting uses highlight.js (30 languages), auto-detected from file extension. A searchable language dropdown next to the Wrap button allows manual override. Files >10KB defer highlighting until the `<details>` section is expanded.
 
 ### Other Tools
 
@@ -230,24 +232,54 @@ The chat message area respects the global terminal font size setting. The messag
 
 ## View Manager (Pagination)
 
-The chat view uses a sliding window over the server's full message list for efficient rendering:
+The chat view uses a virtual scroll system with a sliding DOM window for efficient rendering of long conversations:
 
-- On attach, the last 50 JSONL messages are loaded (plus any buffer messages appended as extra). The `totalCount` is based on JSONL count only, matching the `/api/session-messages` pagination index.
-- **Scroll up** near the top of the message list to automatically load earlier messages (50 at a time)
-- **Jump to bottom** (scroll-to-bottom button or sending a message) loads the last 50 messages
-- **Search results** jump to the target message index, loading that region of the conversation
+- On attach, the server normalizes all messages via `MessageManager` and sends the last 50 as normalized messages (with stable IDs, merged tool calls). All messages go through the same `MessageManager` — no separate "buffer" vs "JSONL" concept exposed to the client.
+- **Scroll up** near the top to load earlier messages (50 at a time via `_extendTop`). When DOM exceeds ~150 elements, older messages at the bottom are trimmed (`_trimBottom`).
+- **Scroll down** past the rendered window loads newer messages (`_extendBottom`) and trims the top (`_trimTop`) with scroll position preservation.
+- **Wheel at top edge**: When `scrollTop=0`, scroll events stop firing. A wheel listener detects upward scroll intent and triggers pagination.
+- **Auto-fill**: If initial content is shorter than viewport (no scrollbar), more messages are loaded automatically.
+- **Position indicator**: A floating pill at top center shows "120–170 / 3000" when not pinned to bottom.
 
-The current window position (`[start, end)`) determines which messages are rendered. This allows browsing conversations with thousands of messages without loading everything at once.
+### Scroll Minimap
+
+A semantic scrollbar on the right side of the message list provides an overview of the entire conversation:
+
+- **User message markers**: Thin blue lines at each user input position
+- **Compact markers**: Wider red lines at context compaction boundaries
+- **Drag to navigate**: Click or drag the minimap to jump to any point in the conversation via `jumpToIndex`
+- **Floating label**: Follows cursor vertically, showing time and a preview of the nearest user message (first ~10 chars, word-boundary truncated). Non-today messages include the date (e.g., "Apr 5 14:32 · Fix the...").
+- **Viewport thumb**: Semi-transparent bar showing current rendered window position
+- Hidden for short conversations (<3 turns). Native scrollbar hidden when minimap is active.
+
+Turn data comes from `MessageManager.turnMap()`, included in the attach response or fetched via `?turnmap=1` API.
 
 ### Pin-to-Bottom
 
 By default, the view auto-scrolls to show new messages. When you scroll up:
 1. Auto-scroll is disabled
 2. A scroll-to-bottom button appears (with a badge showing new message count)
-3. New messages increment the badge counter
+3. Live messages arriving while viewing history are **deferred** — only the total count is updated and the badge increments. Messages load when you return to the bottom.
 4. Click the button or scroll to the bottom to re-enable auto-scroll
 
-The scroll-to-bottom uses iterative convergence: it scrolls to the bottom across multiple animation frames (up to 10) to account for content-visibility recalculation that may change scroll heights.
+The scroll-to-bottom uses iterative convergence across multiple animation frames (up to 10 rAF) to account for `content-visibility: auto` CSS optimization that may change scroll heights.
+
+## View-Only Mode
+
+Stopped sessions can be viewed without resuming:
+
+- **View History button**: In the sidebar expand panel for stopped sessions, click "📋 View History" to open a read-only ChatView that loads JSONL history without running `claude --resume`
+- **After terminate**: When a running session exits or is terminated while a window is open, the window automatically converts to read-only — the input area is hidden, and closing the window doesn't send a kill signal
+- View-only sessions support full scroll-up pagination and minimap navigation
+- Virtual session ID uses `view-{claudeSessionId}` prefix
+
+## Draft Persistence
+
+Chat input text is automatically saved every 300ms to the server and synced across all connected clients (Telegram-style):
+
+- Drafts persist across page refresh (stored server-side via StateSync)
+- Typing in one browser tab updates the textarea in another tab (unless actively focused)
+- Drafts are cleared when the message is sent
 
 ## Clickable Paths and URLs
 
