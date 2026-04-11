@@ -613,7 +613,9 @@ class ChatView {
     this._windowEnd = this._total;
     this._loading = false;
 
+    this._loadingHistory = true;
     for (const msg of messages) this._onCreateMessage(msg);
+    this._loadingHistory = false;
 
     // Apply metadata (chatStatus, taskState)
     if (meta) {
@@ -814,8 +816,8 @@ class ChatView {
     this._renderedMsgIds.add(msg.id);
     this._messages.push(msg);
 
-    // Streaming indicator
-    if (msg.status === 'streaming' || msg.status === 'pending') {
+    // Streaming indicator — only for live messages (not history batch)
+    if (!this._loadingHistory && (msg.status === 'streaming' || msg.status === 'pending')) {
       if (this._streamStatus) {
         const label = msg.role === 'tool' ? `running ${msg.toolName || 'tool'}...` : msg.content?.[0]?.type === 'thinking' ? 'thinking...' : 'responding...';
         this._showTyping(label);
