@@ -112,6 +112,8 @@ class ChatView {
     this.sessionId = sessionId;
     this.app = app;
     this._readOnly = readOnly;
+    // Subagent viewers (sub-*) can't paginate; view-only history (view-*) and normal sessions can
+    this._canPaginate = !sessionId.startsWith('sub-');
     this._messages = []; // normalized message objects
     this._elements = new Map(); // msg.id → DOM element
     this._pinned = true; // auto-scroll to bottom
@@ -189,7 +191,7 @@ class ChatView {
     // Wheel at top edge: scroll event won't fire when already at scrollTop=0,
     // so use wheel to detect upward scroll intent and trigger pagination
     this._messageList.addEventListener('wheel', (e) => {
-      if (e.deltaY < 0 && this._messageList.scrollTop < 10 && this._windowStart > 0 && !this._loading && !this._readOnly) {
+      if (e.deltaY < 0 && this._messageList.scrollTop < 10 && this._windowStart > 0 && !this._loading && this._canPaginate) {
         this._extendTop();
       }
     }, { passive: true });
@@ -212,7 +214,7 @@ class ChatView {
           this._pinned = false;
           this._scrollBtn.classList.remove('hidden');
         }
-        if (scrollTop < 100 && this._windowStart > 0 && !this._loading && !this._readOnly) {
+        if (scrollTop < 100 && this._windowStart > 0 && !this._loading && this._canPaginate) {
           this._extendTop();
         }
       });
@@ -655,6 +657,13 @@ class ChatView {
 
   // Get session identifiers for API calls
   _getSessionIds() {
+    // View-only sessions: extract claudeSessionId from the virtual ID
+    if (this.sessionId.startsWith('view-')) {
+      const claudeId = this.sessionId.slice('view-'.length);
+      const allSess = this.app.sidebar?._allSessions || [];
+      const match = allSess.find(s => s.sessionId === claudeId);
+      return { claudeId, cwd: match?.cwd || '' };
+    }
     const allSess = this.app.sidebar?._allSessions || [];
     const match = allSess.find(s => s.webuiId === this.sessionId);
     return { claudeId: match?.sessionId, cwd: match?.cwd || '' };
