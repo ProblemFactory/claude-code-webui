@@ -175,8 +175,11 @@ class ChatView {
     this._minimap.className = 'chat-minimap hidden';
     this._minimapThumb = document.createElement('div');
     this._minimapThumb.className = 'chat-minimap-thumb';
+    this._minimapLabel = document.createElement('div');
+    this._minimapLabel.className = 'chat-minimap-label hidden';
     this._minimap.appendChild(this._minimapThumb);
-    container.appendChild(this._minimap);
+    this._minimap.appendChild(this._minimapLabel);
+    this._messageList.appendChild(this._minimap);
     this._turnMap = [];
     this._setupMinimapDrag();
 
@@ -2085,20 +2088,47 @@ class ChatView {
 
   _setupMinimapDrag() {
     let dragging = false;
-    const onMove = (e) => {
-      if (!dragging || !this._turnMap.length) return;
+    const getTurnAtY = (e) => {
       const rect = this._minimap.getBoundingClientRect();
       const y = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
       const turnIdx = Math.floor(y * this._turnMap.length);
-      const turn = this._turnMap[Math.min(turnIdx, this._turnMap.length - 1)];
-      if (turn) this.jumpToIndex(turn.startIdx);
+      return this._turnMap[Math.min(turnIdx, this._turnMap.length - 1)];
+    };
+    const updateLabel = (e, turn) => {
+      if (!turn || !this._minimapLabel) return;
+      const rect = this._minimap.getBoundingClientRect();
+      const d = new Date(turn.ts);
+      const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      this._minimapLabel.textContent = `Turn ${turn.turnIndex} · ${time}`;
+      this._minimapLabel.classList.remove('hidden');
+      // Position label at cursor Y, to the left of minimap
+      this._minimapLabel.style.top = (e.clientY - rect.top) + 'px';
+    };
+    const onMove = (e) => {
+      if (!this._turnMap.length) return;
+      const turn = getTurnAtY(e);
+      updateLabel(e, turn);
+      if (dragging && turn) this.jumpToIndex(turn.startIdx);
     };
     this._minimap.addEventListener('mousedown', (e) => {
       e.preventDefault();
       dragging = true;
-      onMove(e);
+      const turn = getTurnAtY(e);
+      if (turn) this.jumpToIndex(turn.startIdx);
       document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', () => { dragging = false; document.removeEventListener('mousemove', onMove); }, { once: true });
+      document.addEventListener('mouseup', () => {
+        dragging = false;
+        document.removeEventListener('mousemove', onMove);
+        this._minimapLabel.classList.add('hidden');
+      }, { once: true });
+    });
+    this._minimap.addEventListener('mousemove', (e) => {
+      if (dragging) return; // handled by document mousemove
+      const turn = getTurnAtY(e);
+      updateLabel(e, turn);
+    });
+    this._minimap.addEventListener('mouseleave', () => {
+      if (!dragging) this._minimapLabel.classList.add('hidden');
     });
   }
 
@@ -2132,9 +2162,6 @@ class ChatView {
       else if (turn.role === 'tool') seg.classList.add('chat-minimap-tool');
       else seg.classList.add('chat-minimap-assistant');
 
-      // Tooltip with time
-      const d = new Date(turn.ts);
-      seg.title = `Turn ${turn.turnIndex} · ${d.toLocaleTimeString()}`;
       this._minimap.appendChild(seg);
     }
   }
