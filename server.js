@@ -1314,51 +1314,168 @@ function getSubagentMetas(claudeSessionId, cwd) {
   return [];
 }
 
-// Kill an external/tmux session by PID (not managed by WebUI WebSocket)
-// Get chat message history for a Claude session (from JSONL file)
-app.get('/api/session-messages', (req, res) => {
-  const { claudeSessionId, cwd, offset, limit, search, withStatus } = req.query;
-  if (!claudeSessionId) return res.status(400).json({ error: 'claudeSessionId required' });
-  const allMessages = parseSessionJsonl(claudeSessionId, cwd || '');
-  const total = allMessages.length;
-
-  // Build chatStatus if requested
-  let chatStatus = null;
-  if (withStatus) {
-    let lastUsage = null, model = null, contextWindow = 0, totalCost = 0, slashCommands = null;
-    for (let i = allMessages.length - 1; i >= 0; i--) {
-      const m = allMessages[i];
-      if (!lastUsage && m.type === 'assistant' && m.message?.usage) lastUsage = m.message.usage;
-      if (!model && m.type === 'result' && m.modelUsage) { model = Object.keys(m.modelUsage)[0]; contextWindow = Object.values(m.modelUsage)[0]?.contextWindow || 0; }
-      if (lastUsage && model) break;
-    }
-    let permissionMode = null;
-    for (const m of allMessages) { if (m.type === 'system' && m.subtype === 'init') { if (m.slash_commands) slashCommands = m.slash_commands; if (!model && m.model) model = m.model; if (m.permissionMode) permissionMode = m.permissionMode; break; } }
-    for (const m of allMessages) { if (m.type === 'result' && m.total_cost_usd) totalCost += m.total_cost_usd; }
-    if (lastUsage || model) chatStatus = { model, lastUsage, contextWindow, total_cost_usd: totalCost, slashCommands, permissionMode, permissionModes: PERMISSION_MODES, subagentMetas: getSubagentMetas(claudeSessionId, cwd || '') };
+// ── SessionMessages: unified message access (merges JSONL + buffer, deduplicates) ──
+// All external access to session chat messages MUST go through this interface.
+// Internally handles JSONL parsing (cached), buffer dedup, control_request extraction.
+class SessionMessages {
+  constructor(session) {
+    this._session = session;
+    this._jsonl = null;
+    this._buffer = null;
+    this._pendingPermissions = null;
+    this._parsed = false;
   }
 
-  if (search) {
-    // Server-side search: find messages containing the query
-    const q = search.toLowerCase();
+  _ensureParsed() {
+    if (this._parsed) return;
+    this._parsed = true;
+    const session = this._session;
+    this._jsonl = session.claudeSessionId ? parseSessionJsonl(session.claudeSessionId, session.cwd) : [];
+    const jsonlUuids = new Set();
+    for (const m of this._jsonl) { if (m.uuid) jsonlUuids.add(m.uuid); }
+
+    this._buffer = [];
+    this._pendingPermissions = {};
+    for (const line of (session.buffer || '').split('\n')) {
+      const trimmed = line.replace(/\r/g, '').trim();
+      if (!trimmed) continue;
+      try {
+        const msg = JSON.parse(trimmed);
+        if (msg.type === 'control_request' && msg.request?.tool_use_id) { this._pendingPermissions[msg.request.tool_use_id] = msg; continue; }
+        if (msg.parent_tool_use_id || msg.isSidechain) continue;
+        if (!isChatMessage(msg)) continue;
+        if (msg.uuid && jsonlUuids.has(msg.uuid)) continue;
+        if (msg._fromWebui && msg.timestamp) {
+          const hasNewer = this._jsonl.some(m => m.type === 'user' && m.timestamp >= msg.timestamp);
+          if (hasNewer) continue;
+        }
+        this._buffer.push(msg);
+      } catch {}
+    }
+  }
+
+  // Total JSONL message count (for pagination consistency)
+  get total() { this._ensureParsed(); return this._jsonl.length; }
+
+  // Pending permission control_requests from buffer
+  get pendingPermissions() { this._ensureParsed(); return this._pendingPermissions; }
+
+  // Is Claude currently streaming?
+  get isStreaming() {
+    this._ensureParsed();
+    if (this._session._waitingForResponse) return true;
+    const last = this._buffer.length > 0 ? this._buffer[this._buffer.length - 1] : null;
+    return last && last.type !== 'result' && last.type !== 'system';
+  }
+
+  // Get last N messages (JSONL tail + buffer tail) — for attach/initial load
+  tail(n = 50, bufferCap = 200) {
+    this._ensureParsed();
+    const msgs = this._jsonl.slice(-n);
+    if (this._buffer.length) msgs.push(...this._buffer.slice(-bufferCap));
+    return msgs;
+  }
+
+  // Get messages by offset+limit (JSONL only — for pagination API)
+  slice(offset, limit) {
+    this._ensureParsed();
+    return this._jsonl.slice(offset, offset + limit);
+  }
+
+  // Get all JSONL messages (for search)
+  all() { this._ensureParsed(); return this._jsonl; }
+
+  // Search messages by text query, returns [{index, type, preview}]
+  search(query) {
+    this._ensureParsed();
+    const q = query.toLowerCase();
     const matches = [];
-    for (let i = 0; i < allMessages.length; i++) {
-      const m = allMessages[i];
+    for (let i = 0; i < this._jsonl.length; i++) {
+      const m = this._jsonl[i];
       const c = m.message?.content;
       let text = '';
       if (typeof c === 'string') text = c;
       else if (Array.isArray(c)) text = c.map(b => b.text || '').join(' ');
-      if (text.toLowerCase().includes(q)) {
-        matches.push({ index: i, type: m.type, preview: text.substring(0, 120) });
+      if (text.toLowerCase().includes(q)) matches.push({ index: i, type: m.type, preview: text.substring(0, 120) });
+    }
+    return matches;
+  }
+
+  // Extract chatStatus (model, usage, cost, permissions, etc.)
+  chatStatus() {
+    this._ensureParsed();
+    let lastUsage = null, model = null, contextWindow = 0, totalCost = 0, slashCommands = null, permissionMode = null;
+    // Buffer first (most recent), then JSONL tail
+    for (let i = this._buffer.length - 1; i >= 0; i--) {
+      const m = this._buffer[i];
+      if (!lastUsage && m.type === 'assistant' && m.message?.usage) lastUsage = m.message.usage;
+      if (!model && m.type === 'result' && m.modelUsage) { model = Object.keys(m.modelUsage)[0]; contextWindow = Object.values(m.modelUsage)[0]?.contextWindow || 0; }
+      if (lastUsage && model) break;
+    }
+    if (!lastUsage || !model) {
+      for (let i = this._jsonl.length - 1; i >= Math.max(0, this._jsonl.length - 100); i--) {
+        const m = this._jsonl[i];
+        if (!lastUsage && m.type === 'assistant' && m.message?.usage) lastUsage = m.message.usage;
+        if (!model && m.type === 'result' && m.modelUsage) { model = Object.keys(m.modelUsage)[0]; contextWindow = Object.values(m.modelUsage)[0]?.contextWindow || 0; }
+        if (lastUsage && model) break;
       }
     }
-    res.json({ matches, total });
+    for (let i = 0; i < Math.min(this._jsonl.length, 5); i++) {
+      const m = this._jsonl[i];
+      if (m.type === 'system' && m.subtype === 'init') {
+        if (m.slash_commands) slashCommands = m.slash_commands;
+        if (!model && m.model) model = m.model;
+        if (m.permissionMode) permissionMode = m.permissionMode;
+        break;
+      }
+    }
+    for (const m of this._jsonl) { if (m.type === 'result' && m.total_cost_usd) totalCost += m.total_cost_usd; }
+    for (const m of this._buffer) { if (m.type === 'result' && m.total_cost_usd) totalCost += m.total_cost_usd; }
+    if (!lastUsage && !model) return null;
+    const session = this._session;
+    return { model, lastUsage, contextWindow, total_cost_usd: totalCost, slashCommands, permissionMode, permissionModes: PERMISSION_MODES, subagentMetas: getSubagentMetas(session.claudeSessionId, session.cwd) };
+  }
+
+  // Filter out resolved permissions (tool_use_id that already has a tool_result)
+  activePendingPermissions() {
+    this._ensureParsed();
+    const resolved = new Set();
+    const recent = [...this._jsonl.slice(-50), ...this._buffer];
+    for (const m of recent) {
+      if (m.type !== 'user') continue;
+      const c = m.message?.content;
+      if (!Array.isArray(c)) continue;
+      for (const b of c) { if (b.type === 'tool_result' && b.tool_use_id) resolved.add(b.tool_use_id); }
+    }
+    const result = {};
+    for (const [id, cr] of Object.entries(this._pendingPermissions)) {
+      if (!resolved.has(id)) result[id] = cr;
+    }
+    return result;
+  }
+}
+
+// Get chat message history for a Claude session (JSONL + optional buffer)
+app.get('/api/session-messages', (req, res) => {
+  const { claudeSessionId, cwd, offset, limit, search, withStatus } = req.query;
+  if (!claudeSessionId) return res.status(400).json({ error: 'claudeSessionId required' });
+
+  // Try to find an active session to include buffer; fall back to JSONL-only
+  let session = null;
+  for (const [, s] of activeSessions) {
+    if (s.claudeSessionId === claudeSessionId) { session = s; break; }
+  }
+  // Create a lightweight session-like object for SessionMessages if no active session
+  const sm = new SessionMessages(session || { claudeSessionId, cwd: cwd || '', buffer: '' });
+
+  if (search) {
+    res.json({ matches: sm.search(search), total: sm.total });
   } else if (offset !== undefined || limit !== undefined) {
     const o = parseInt(offset) || 0;
     const l = parseInt(limit) || 50;
-    res.json({ messages: allMessages.slice(o, o + l), total, chatStatus });
+    res.json({ messages: sm.slice(o, l), total: sm.total, chatStatus: withStatus ? sm.chatStatus() : null });
   } else {
-    res.json({ messages: allMessages, total, chatStatus });
+    res.json({ messages: sm.all(), total: sm.total, chatStatus: withStatus ? sm.chatStatus() : null });
   }
 });
 
@@ -1823,118 +1940,17 @@ wss.on('connection', (ws) => {
           session.clients.set(ws, { cols: 120, rows: 30 });
           attachedSessions.add(data.sessionId);
           if (session.mode === 'chat') {
-            // Load JSONL history (past conversation from Claude's session file)
-            let jsonlHistory = [];
-            const jsonlUuids = new Set();
-            if (session.claudeSessionId) {
-              jsonlHistory = parseSessionJsonl(session.claudeSessionId, session.cwd);
-              for (const m of jsonlHistory) { if (m.uuid) jsonlUuids.add(m.uuid); }
-            }
-            // Parse buffer for current session output — only include messages
-            // Parse buffer: separate regular messages from control_requests
-            const bufferMessages = [];
-            const pendingPermissions = {}; // tool_use_id → control_request
-            for (const line of (session.buffer || '').split('\n')) {
-              const trimmed = line.replace(/\r/g, '').trim();
-              if (!trimmed) continue;
-              try {
-                const msg = JSON.parse(trimmed);
-                if (msg.type === 'control_request' && msg.request?.tool_use_id) {
-                  pendingPermissions[msg.request.tool_use_id] = msg;
-                  continue;
-                }
-                if (msg.parent_tool_use_id || msg.isSidechain) continue; // skip subagent messages
-                if (msg.type !== 'user' && msg.type !== 'assistant' && msg.type !== 'result' && !(msg.type === 'system' && msg.subtype === 'init')) continue;
-                if (msg.uuid && jsonlUuids.has(msg.uuid)) continue;
-                // Webui user messages: skip if JSONL has a user message after this timestamp
-                // (Claude processed it — JSONL has the authoritative version with uuid)
-                if (msg._fromWebui && msg.timestamp) {
-                  const hasNewer = jsonlHistory.some(m => m.type === 'user' && m.timestamp >= msg.timestamp);
-                  if (hasNewer) continue;
-                }
-                bufferMessages.push(msg);
-              } catch {}
-            }
-            // Use JSONL total for pagination (consistent with /api/session-messages)
-            // Buffer messages are appended as extra (not counted in pagination total)
-            const jsonlTotal = jsonlHistory.length;
-            const PAGE_SIZE = 50;
-            const chatHistory = jsonlHistory.slice(-PAGE_SIZE);
-            const totalCount = jsonlTotal;
-            // Append buffer-only messages (current run) — cap to prevent huge payloads
-            if (bufferMessages.length) chatHistory.push(...bufferMessages.slice(-200));
-
-            // Extract chatStatus: scan buffer first (most recent), then JSONL tail
-            // No need to create allMessages array — scan in reverse priority order
-            let chatStatus = null;
-            let lastUsage = null, model = null, contextWindow = 0, totalCost = 0, slashCommands = null;
-            // Scan buffer messages (recent) for usage/model
-            for (let i = bufferMessages.length - 1; i >= 0; i--) {
-              const m = bufferMessages[i];
-              if (!lastUsage && m.type === 'assistant' && m.message?.usage) lastUsage = m.message.usage;
-              if (!model && m.type === 'result' && m.modelUsage) { model = Object.keys(m.modelUsage)[0]; contextWindow = Object.values(m.modelUsage)[0]?.contextWindow || 0; }
-              if (lastUsage && model) break;
-            }
-            // If not found in buffer, scan JSONL tail (last 100 messages max)
-            if (!lastUsage || !model) {
-              for (let i = jsonlHistory.length - 1; i >= Math.max(0, jsonlHistory.length - 100); i--) {
-                const m = jsonlHistory[i];
-                if (!lastUsage && m.type === 'assistant' && m.message?.usage) lastUsage = m.message.usage;
-                if (!model && m.type === 'result' && m.modelUsage) { model = Object.keys(m.modelUsage)[0]; contextWindow = Object.values(m.modelUsage)[0]?.contextWindow || 0; }
-                if (lastUsage && model) break;
-              }
-            }
-            // system.init is always near the start
-            let permissionMode = null;
-            for (let i = 0; i < Math.min(jsonlHistory.length, 5); i++) {
-              const m = jsonlHistory[i];
-              if (m.type === 'system' && m.subtype === 'init') {
-                if (m.slash_commands) slashCommands = m.slash_commands;
-                if (!model && m.model) model = m.model;
-                if (m.permissionMode) permissionMode = m.permissionMode;
-                break;
-              }
-            }
-            // Total cost: sum all result messages (uses cached jsonlHistory)
-            for (const m of jsonlHistory) { if (m.type === 'result' && m.total_cost_usd) totalCost += m.total_cost_usd; }
-            for (const m of bufferMessages) { if (m.type === 'result' && m.total_cost_usd) totalCost += m.total_cost_usd; }
-            if (lastUsage || model) {
-              chatStatus = { model, lastUsage, contextWindow, total_cost_usd: totalCost, slashCommands, permissionMode, permissionModes: PERMISSION_MODES, subagentMetas: getSubagentMetas(session.claudeSessionId, session.cwd) };
-            }
-
-            // Detect if Claude is mid-stream: only check buffer messages (current run)
-            // JSONL-only sessions (e.g. terminal mode viewed as chat) may never have 'result'
-            const lastBufMsg = bufferMessages.length > 0 ? bufferMessages[bufferMessages.length - 1] : null;
-            const isStreaming = session._waitingForResponse || (lastBufMsg && lastBufMsg.type !== 'result' && lastBufMsg.type !== 'system');
-
-            // Filter out resolved permissions (tool_use_id has a matching tool_result)
-            const resolvedToolIds = new Set();
-            for (const m of allMessages) {
-              if (m.type !== 'user') continue;
-              const c = m.message?.content;
-              if (!Array.isArray(c)) continue;
-              for (const b of c) {
-                if (b.type === 'tool_result' && b.tool_use_id) resolvedToolIds.add(b.tool_use_id);
-              }
-            }
-            const activePendingPermissions = {};
-            for (const [toolUseId, cr] of Object.entries(pendingPermissions)) {
-              if (!resolvedToolIds.has(toolUseId)) activePendingPermissions[toolUseId] = cr;
-            }
-
-            // Active subagent buffer counts for restoring View Log buttons
-            // Only include still-running agents (watcher active or no result message yet)
+            const sm = new SessionMessages(session);
+            const chatHistory = sm.tail(50, 200);
             const activeSubagents = {};
             if (session.subagentBuffers) {
               for (const [toolUseId, msgs] of session.subagentBuffers) {
-                if (msgs.length === 0) continue;
-                const hasResult = msgs.some(m => m.type === 'result');
-                if (hasResult) continue; // completed agent, not active
-                activeSubagents[toolUseId] = { count: msgs.length };
+                if (msgs.length > 0 && !msgs.some(m => m.type === 'result')) activeSubagents[toolUseId] = { count: msgs.length };
               }
             }
-
-            ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, mode: 'chat', chatHistory, totalCount, chatStatus, isStreaming, pendingPermissions: activePendingPermissions, activeSubagents }));
+            ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, mode: 'chat',
+              chatHistory, totalCount: sm.total, chatStatus: sm.chatStatus(), isStreaming: sm.isStreaming,
+              pendingPermissions: sm.activePendingPermissions(), activeSubagents }));
           } else {
             ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, buffer: session.buffer || '' }));
           }
