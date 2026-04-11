@@ -979,7 +979,7 @@ class ChatView {
     const block = msg.content?.[0];
     if (!block) return null;
     const el = document.createElement('div');
-    el.className = 'chat-msg chat-msg-tool';
+    el.className = 'chat-msg chat-msg-assistant chat-msg-tool-result';
     el._rawMsg = msg;
     let html;
 
