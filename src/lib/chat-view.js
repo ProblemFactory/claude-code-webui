@@ -690,6 +690,8 @@ class ChatView {
     // Clear and rebuild DOM
     this._messageList.querySelectorAll('.chat-msg, .chat-msg-system').forEach(el => el.remove());
     this._elements.clear();
+    this._renderedMsgIds.clear();
+    this._messages = [];
     this._windowStart = start;
     this._windowEnd = end;
     this._pinned = false;
@@ -717,6 +719,8 @@ class ChatView {
 
     this._messageList.querySelectorAll('.chat-msg, .chat-msg-system').forEach(el => el.remove());
     this._elements.clear();
+    this._renderedMsgIds.clear();
+    this._messages = [];
     this._windowStart = start;
     this._windowEnd = this._total;
 
@@ -849,7 +853,7 @@ class ChatView {
     Object.assign(msg, fields);
 
     // Status transitions
-    if (fields.status === 'complete' || fields.status === 'error') {
+    if (fields.status === 'complete' || fields.status === 'error' || fields.status === 'interrupted') {
       // Tool call completed → re-render the element
       const oldEl = this._elements.get(id);
       if (oldEl) {
@@ -1180,12 +1184,11 @@ class ChatView {
 
   _addOpenInEditorBtn(el) {
     if (!el._rawMsg) return;
-    // Skip for assistant messages that have tool_use — tool cards have their own buttons
     const msg = el._rawMsg;
-    if (msg.type === 'assistant') {
-      const c = msg.message?.content;
-      if (Array.isArray(c) && c.some(b => b.type === 'tool_use') && !c.some(b => b.type === 'text' && b.text?.trim())) return;
-    }
+    // Skip tool messages (they have their own open-in-editor buttons)
+    if (msg.role === 'tool') return;
+    // Skip assistant messages with no text content
+    if (msg.role === 'assistant' && !msg.content?.some(b => b.type === 'text' && b.text?.trim())) return;
     const btn = document.createElement('button');
     btn.className = 'chat-open-editor-btn';
     btn.textContent = '\uD83D\uDCCB';
@@ -1201,14 +1204,12 @@ class ChatView {
   }
 
   _extractMsgText(msg) {
-    const c = msg.message?.content;
-    if (typeof c === 'string') return c;
+    const c = msg.content;
     if (!Array.isArray(c)) return JSON.stringify(msg, null, 2);
     return c.map(b => {
-      if (b.type === 'text') return b.text || '';
-      if (b.type === 'thinking') return b.text || '';
-      if (b.type === 'tool_use') return `[Tool: ${b.name}]\n${JSON.stringify(b.input, null, 2)}`;
-      if (b.type === 'tool_result') return typeof b.content === 'string' ? b.content : JSON.stringify(b.content, null, 2);
+      if (b.type === 'text' || b.type === 'thinking' || b.type === 'system_info') return b.text || '';
+      if (b.type === 'tool_call') return `[Tool: ${b.toolName}]\n${JSON.stringify(b.input, null, 2)}`;
+      if (b.type === 'tool_result') return `[${b.toolName}] ${b.status}\n${b.output || ''}`;
       return '';
     }).filter(Boolean).join('\n\n');
   }

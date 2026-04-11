@@ -261,6 +261,16 @@ class MessageManager {
 
   _processResult(raw, emit) {
     this._finalizeStreaming(emit);
+    // Flush any pending tool calls that never got results (interrupted)
+    for (const [toolUseId, pending] of this.pendingToolCalls) {
+      const existing = this.messageIndex.get(pending.msgId);
+      if (existing && existing.status === 'pending') {
+        existing.status = 'error';
+        existing.toolStatus = 'error';
+        if (emit) this._emit({ op: 'edit', id: existing.id, fields: { status: 'error', toolStatus: 'error' } });
+      }
+    }
+    this.pendingToolCalls.clear();
     this.turnIndex++;
 
     if (raw.is_error || (raw.subtype && raw.subtype !== 'success')) {

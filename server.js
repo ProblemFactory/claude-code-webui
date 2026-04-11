@@ -336,7 +336,7 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
   }
 
   ptyProcess.onExit(() => {
-    // Clean up subagent file watchers
+    // Clean up subagent file watchers and normalizers
     if (session.subagentWatchers) {
       for (const [, entry] of session.subagentWatchers) {
         if (entry.watcher) entry.watcher.close();
@@ -344,6 +344,8 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
       }
       session.subagentWatchers.clear();
     }
+    if (session._subNormalizers) { session._subNormalizers.clear(); }
+    if (session._normalizer) { session._normalizer.listeners.length = 0; }
     if (cleanupOnExit) {
       if (session.socketPath && fs.existsSync(session.socketPath)) { session.pty = null; return; }
       broadcastToSession(session, id, { type: 'exited', sessionId: id });
