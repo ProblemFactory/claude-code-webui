@@ -1314,84 +1314,74 @@ function getSubagentMetas(claudeSessionId, cwd) {
   return [];
 }
 
-// ── SessionMessages: unified message access (merges JSONL + buffer, deduplicates) ──
-// All external access to session chat messages MUST go through this interface.
-// Internally handles JSONL parsing (cached), buffer dedup, control_request extraction.
+// ── SessionMessages: unified message access ──
+// Merges JSONL (persisted history) + live output into one logical array.
+// All external code sees a single ordered message list — no concept of "buffer" vs "JSONL".
 class SessionMessages {
   constructor(session) {
     this._session = session;
-    this._jsonl = null;
-    this._buffer = null;
-    this._pendingPermissions = null;
-    this._parsed = false;
+    this._messages = null; // merged, deduplicated array
+    this._pendingPerms = null;
   }
 
   _ensureParsed() {
-    if (this._parsed) return;
-    this._parsed = true;
+    if (this._messages) return;
     const session = this._session;
-    this._jsonl = session.claudeSessionId ? parseSessionJsonl(session.claudeSessionId, session.cwd) : [];
-    const jsonlUuids = new Set();
-    for (const m of this._jsonl) { if (m.uuid) jsonlUuids.add(m.uuid); }
+    const jsonl = session.claudeSessionId ? parseSessionJsonl(session.claudeSessionId, session.cwd) : [];
+    const uuids = new Set();
+    for (const m of jsonl) { if (m.uuid) uuids.add(m.uuid); }
 
-    this._buffer = [];
-    this._pendingPermissions = {};
+    this._pendingPerms = {};
+    const live = [];
     for (const line of (session.buffer || '').split('\n')) {
       const trimmed = line.replace(/\r/g, '').trim();
       if (!trimmed) continue;
       try {
         const msg = JSON.parse(trimmed);
-        if (msg.type === 'control_request' && msg.request?.tool_use_id) { this._pendingPermissions[msg.request.tool_use_id] = msg; continue; }
+        if (msg.type === 'control_request' && msg.request?.tool_use_id) { this._pendingPerms[msg.request.tool_use_id] = msg; continue; }
         if (msg.parent_tool_use_id || msg.isSidechain) continue;
         if (!isChatMessage(msg)) continue;
-        if (msg.uuid && jsonlUuids.has(msg.uuid)) continue;
+        if (msg.uuid && uuids.has(msg.uuid)) continue;
         if (msg._fromWebui && msg.timestamp) {
-          const hasNewer = this._jsonl.some(m => m.type === 'user' && m.timestamp >= msg.timestamp);
-          if (hasNewer) continue;
+          if (jsonl.some(m => m.type === 'user' && m.timestamp >= msg.timestamp)) continue;
         }
-        this._buffer.push(msg);
+        live.push(msg);
       } catch {}
     }
+    // Single merged array: JSONL first, then live (deduped) messages
+    this._messages = live.length ? [...jsonl, ...live] : jsonl;
   }
 
-  // Total JSONL message count (for pagination consistency)
-  get total() { this._ensureParsed(); return this._jsonl.length; }
+  /** Total message count */
+  get total() { this._ensureParsed(); return this._messages.length; }
 
-  // Pending permission control_requests from buffer
-  get pendingPermissions() { this._ensureParsed(); return this._pendingPermissions; }
+  /** Pending permission control_requests */
+  get pendingPermissions() { this._ensureParsed(); return this._pendingPerms; }
 
-  // Is Claude currently streaming?
+  /** Whether Claude is currently outputting */
   get isStreaming() {
     this._ensureParsed();
     if (this._session._waitingForResponse) return true;
-    const last = this._buffer.length > 0 ? this._buffer[this._buffer.length - 1] : null;
+    const last = this._messages.length > 0 ? this._messages[this._messages.length - 1] : null;
     return last && last.type !== 'result' && last.type !== 'system';
   }
 
-  // Get last N messages (JSONL tail + buffer tail) — for attach/initial load
-  tail(n = 50, bufferCap = 200) {
-    this._ensureParsed();
-    const msgs = this._jsonl.slice(-n);
-    if (this._buffer.length) msgs.push(...this._buffer.slice(-bufferCap));
-    return msgs;
-  }
+  /** Last N messages (for initial attach) */
+  tail(n = 50) { this._ensureParsed(); return this._messages.slice(-n); }
 
-  // Get messages by offset+limit (JSONL only — for pagination API)
-  slice(offset, limit) {
-    this._ensureParsed();
-    return this._jsonl.slice(offset, offset + limit);
-  }
+  /** Messages by offset+limit (for pagination) */
+  slice(offset, limit) { this._ensureParsed(); return this._messages.slice(offset, offset + limit); }
 
-  // Get all JSONL messages (for search)
-  all() { this._ensureParsed(); return this._jsonl; }
+  /** All messages */
+  all() { this._ensureParsed(); return this._messages; }
 
-  // Search messages by text query, returns [{index, type, preview}]
+  /** Server-side text search → [{index, type, preview}] */
   search(query) {
     this._ensureParsed();
     const q = query.toLowerCase();
     const matches = [];
-    for (let i = 0; i < this._jsonl.length; i++) {
-      const m = this._jsonl[i];
+    for (let i = 0; i < this._messages.length; i++) {
+      const m = this._messages[i];
       const c = m.message?.content;
       let text = '';
       if (typeof c === 'string') text = c;
@@ -1401,27 +1391,19 @@ class SessionMessages {
     return matches;
   }
 
-  // Extract chatStatus (model, usage, cost, permissions, etc.)
+  /** Extract chatStatus (model, usage, cost, slash commands, permission mode) */
   chatStatus() {
     this._ensureParsed();
+    const msgs = this._messages;
     let lastUsage = null, model = null, contextWindow = 0, totalCost = 0, slashCommands = null, permissionMode = null;
-    // Buffer first (most recent), then JSONL tail
-    for (let i = this._buffer.length - 1; i >= 0; i--) {
-      const m = this._buffer[i];
+    for (let i = msgs.length - 1; i >= Math.max(0, msgs.length - 200); i--) {
+      const m = msgs[i];
       if (!lastUsage && m.type === 'assistant' && m.message?.usage) lastUsage = m.message.usage;
       if (!model && m.type === 'result' && m.modelUsage) { model = Object.keys(m.modelUsage)[0]; contextWindow = Object.values(m.modelUsage)[0]?.contextWindow || 0; }
       if (lastUsage && model) break;
     }
-    if (!lastUsage || !model) {
-      for (let i = this._jsonl.length - 1; i >= Math.max(0, this._jsonl.length - 100); i--) {
-        const m = this._jsonl[i];
-        if (!lastUsage && m.type === 'assistant' && m.message?.usage) lastUsage = m.message.usage;
-        if (!model && m.type === 'result' && m.modelUsage) { model = Object.keys(m.modelUsage)[0]; contextWindow = Object.values(m.modelUsage)[0]?.contextWindow || 0; }
-        if (lastUsage && model) break;
-      }
-    }
-    for (let i = 0; i < Math.min(this._jsonl.length, 5); i++) {
-      const m = this._jsonl[i];
+    for (let i = 0; i < Math.min(msgs.length, 5); i++) {
+      const m = msgs[i];
       if (m.type === 'system' && m.subtype === 'init') {
         if (m.slash_commands) slashCommands = m.slash_commands;
         if (!model && m.model) model = m.model;
@@ -1429,26 +1411,23 @@ class SessionMessages {
         break;
       }
     }
-    for (const m of this._jsonl) { if (m.type === 'result' && m.total_cost_usd) totalCost += m.total_cost_usd; }
-    for (const m of this._buffer) { if (m.type === 'result' && m.total_cost_usd) totalCost += m.total_cost_usd; }
+    for (const m of msgs) { if (m.type === 'result' && m.total_cost_usd) totalCost += m.total_cost_usd; }
     if (!lastUsage && !model) return null;
-    const session = this._session;
-    return { model, lastUsage, contextWindow, total_cost_usd: totalCost, slashCommands, permissionMode, permissionModes: PERMISSION_MODES, subagentMetas: getSubagentMetas(session.claudeSessionId, session.cwd) };
+    return { model, lastUsage, contextWindow, total_cost_usd: totalCost, slashCommands, permissionMode, permissionModes: PERMISSION_MODES, subagentMetas: getSubagentMetas(this._session.claudeSessionId, this._session.cwd) };
   }
 
-  // Filter out resolved permissions (tool_use_id that already has a tool_result)
+  /** Pending permissions that haven't been resolved yet */
   activePendingPermissions() {
     this._ensureParsed();
     const resolved = new Set();
-    const recent = [...this._jsonl.slice(-50), ...this._buffer];
-    for (const m of recent) {
+    for (const m of this._messages.slice(-100)) {
       if (m.type !== 'user') continue;
       const c = m.message?.content;
       if (!Array.isArray(c)) continue;
       for (const b of c) { if (b.type === 'tool_result' && b.tool_use_id) resolved.add(b.tool_use_id); }
     }
     const result = {};
-    for (const [id, cr] of Object.entries(this._pendingPermissions)) {
+    for (const [id, cr] of Object.entries(this._pendingPerms)) {
       if (!resolved.has(id)) result[id] = cr;
     }
     return result;
@@ -1941,7 +1920,7 @@ wss.on('connection', (ws) => {
           attachedSessions.add(data.sessionId);
           if (session.mode === 'chat') {
             const sm = new SessionMessages(session);
-            const chatHistory = sm.tail(50, 200);
+            const chatHistory = sm.tail(50);
             const activeSubagents = {};
             if (session.subagentBuffers) {
               for (const [toolUseId, msgs] of session.subagentBuffers) {
