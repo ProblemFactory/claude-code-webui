@@ -304,7 +304,6 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
             if (ptuid) broadcastToSession(session, id, { type: 'chat-message', sessionId: `sub-${ptuid}`, message: msg });
             continue;
           }
-          if (msg.type === 'assistant' || msg.type === 'result') session._waitingForResponse = false;
           // Feed into MessageManager (emits normalized msg ops to all clients)
           if (session._normalizer) session._normalizer.processLive(msg);
         } catch {
@@ -1330,7 +1329,7 @@ function getSubagentMetas(claudeSessionId, cwd) {
 // Merges JSONL (persisted history) + live output into one logical array.
 // All external code sees a single ordered message list — no concept of "buffer" vs "JSONL".
 class SessionMessages {
-  // session: { claudeSessionId, cwd, buffer, _waitingForResponse }
+  // session: { claudeSessionId, cwd, buffer }
   // sessionId: webui session ID (for reading wrapper metadata from BUFFERS_DIR)
   constructor(session, sessionId) {
     this._session = session;
@@ -1377,16 +1376,12 @@ class SessionMessages {
   /** Pending permission control_requests */
   get pendingPermissions() { this._ensureParsed(); return this._pendingPerms; }
 
-  /** Whether Claude is currently outputting — reads from wrapper metadata (source of truth) */
+  /** Whether Claude is currently outputting — wrapper metadata is the authority */
   get isStreaming() {
-    // Wrapper metadata is authoritative (set by chat-wrapper.js inside dtach)
     const wMeta = this.wrapperMeta();
     if (wMeta?.streaming != null) return wMeta.streaming;
-    // Fallback: infer from session state (for sessions without updated wrapper)
-    if (this._session._waitingForResponse) return true;
-    this._ensureParsed();
-    const last = this._all.length > 0 ? this._all[this._all.length - 1] : null;
-    return !!(last && last.type !== 'result' && last.type !== 'system');
+    // No wrapper metadata → session predates streaming tracking → not streaming
+    return false;
   }
 
   /** Last N displayable messages (for initial attach / chat rendering) */
@@ -1914,7 +1909,6 @@ wss.on('connection', (ws) => {
           }
 
           session.pty.write(stdinPayload + '\n');
-          session._waitingForResponse = true;
           // Write to buffer for display on refresh (before JSONL is written).
           // Mark with _fromWebui so dedup can remove it when JSONL version arrives.
           userMsg._fromWebui = true;
