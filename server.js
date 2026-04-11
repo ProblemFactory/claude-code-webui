@@ -1507,25 +1507,31 @@ class SessionMessages {
 
 // Get chat message history for a Claude session (JSONL + optional buffer)
 app.get('/api/session-messages', (req, res) => {
-  const { claudeSessionId, cwd, offset, limit, search, withStatus } = req.query;
+  const { claudeSessionId, cwd, offset, limit, search } = req.query;
   if (!claudeSessionId) return res.status(400).json({ error: 'claudeSessionId required' });
 
-  // Try to find active session to include live output; fall back to JSONL-only
+  // Use session's existing normalizer if available (cached); else build on-demand
   let session = null;
-  let sessionId = null;
-  for (const [sid, s] of activeSessions) {
-    if (s.claudeSessionId === claudeSessionId) { session = s; sessionId = sid; break; }
+  for (const [, s] of activeSessions) {
+    if (s.claudeSessionId === claudeSessionId) { session = s; break; }
   }
-  const sm = new SessionMessages(session || { claudeSessionId, cwd: cwd || '', buffer: '' }, sessionId);
+  let mm;
+  if (session?._normalizer && session._normalizer.total > 0) {
+    mm = session._normalizer;
+  } else {
+    const sm = new SessionMessages(session || { claudeSessionId, cwd: cwd || '', buffer: '' });
+    mm = new MessageManager('api');
+    mm.convertHistory(sm.raw());
+  }
 
   if (search) {
-    res.json({ matches: sm.search(search), total: sm.total });
+    res.json({ matches: mm.search(search), total: mm.total });
   } else if (offset !== undefined || limit !== undefined) {
     const o = parseInt(offset) || 0;
     const l = parseInt(limit) || 50;
-    res.json({ messages: sm.slice(o, l), total: sm.total, chatStatus: withStatus ? sm.chatStatus() : null });
+    res.json({ messages: mm.slice(o, l), total: mm.total });
   } else {
-    res.json({ messages: sm.all(), total: sm.total, chatStatus: withStatus ? sm.chatStatus() : null });
+    res.json({ messages: mm.tail(50), total: mm.total });
   }
 });
 
