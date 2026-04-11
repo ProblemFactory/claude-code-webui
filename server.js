@@ -1204,13 +1204,15 @@ function findSessionJsonlPath(claudeSessionId, cwd) {
   return null;
 }
 
-// Filter: is this a displayable chat message?
-function isChatMessage(msg) {
-  if (msg.parent_tool_use_id || msg.isSidechain) return false;
+// Is this a subagent message? (filtered from all views)
+function isSubagentMessage(msg) { return !!(msg.parent_tool_use_id || msg.isSidechain); }
+
+// Is this a displayable chat message? (for rendering in chat view)
+function isDisplayMessage(msg) {
   return msg.type === 'user' || msg.type === 'assistant' || msg.type === 'result' || (msg.type === 'system' && msg.subtype === 'init');
 }
 
-// JSONL parse cache — avoids re-parsing the same file on repeated attach/pagination
+// JSONL parse cache — stores ALL non-subagent messages (unfiltered)
 const _jsonlCache = new Map(); // claudeSessionId → { mtimeMs, size, messages }
 
 function parseSessionJsonl(claudeSessionId, cwd) {
@@ -1228,7 +1230,7 @@ function parseSessionJsonl(claudeSessionId, cwd) {
       if (!trimmed) continue;
       try {
         const msg = JSON.parse(trimmed);
-        if (isChatMessage(msg)) messages.push(msg);
+        if (!isSubagentMessage(msg)) messages.push(msg);
       } catch {}
     }
     _jsonlCache.set(claudeSessionId, { mtimeMs: stat.mtimeMs, size: stat.size, messages });
@@ -1272,25 +1274,15 @@ function backfillTaskState(messages) {
   return { tasks, todos };
 }
 
-// Get task/todo state for a session — wrapper metadata first, backfill from raw JSONL as fallback
+// Get task/todo state for a session — wrapper metadata first, backfill via SessionMessages as fallback
 function getSessionTaskState(sessionId, session) {
   const wMeta = readWrapperMeta(sessionId);
   if (wMeta.tasks || wMeta.todos) {
     return { tasks: wMeta.tasks || {}, todos: wMeta.todos || [] };
   }
-  // No wrapper metadata — backfill from raw JSONL (unfiltered, includes system messages)
-  if (!session?.claudeSessionId) return { tasks: {}, todos: [] };
-  const fp = findSessionJsonlPath(session.claudeSessionId, session.cwd);
-  if (!fp) return { tasks: {}, todos: [] };
-  try {
-    const rawMessages = [];
-    for (const line of fs.readFileSync(fp, 'utf-8').split('\n')) {
-      const t = line.trim();
-      if (!t) continue;
-      try { rawMessages.push(JSON.parse(t)); } catch {}
-    }
-    return backfillTaskState(rawMessages);
-  } catch { return { tasks: {}, todos: [] }; }
+  // No wrapper metadata — backfill from SessionMessages.raw() (includes system.task_* messages)
+  const sm = new SessionMessages(session || { claudeSessionId: '', cwd: '', buffer: '' });
+  return sm.taskState();
 }
 
 function isProcessClaude(pid) {
@@ -1377,12 +1369,13 @@ function getSubagentMetas(claudeSessionId, cwd) {
 class SessionMessages {
   constructor(session) {
     this._session = session;
-    this._messages = null; // merged, deduplicated array
+    this._all = null;     // all non-subagent messages (for internal queries like task backfill)
+    this._display = null; // displayable messages only (for chat rendering)
     this._pendingPerms = null;
   }
 
   _ensureParsed() {
-    if (this._messages) return;
+    if (this._all) return;
     const session = this._session;
     const jsonl = session.claudeSessionId ? parseSessionJsonl(session.claudeSessionId, session.cwd) : [];
     const uuids = new Set();
@@ -1396,8 +1389,7 @@ class SessionMessages {
       try {
         const msg = JSON.parse(trimmed);
         if (msg.type === 'control_request' && msg.request?.tool_use_id) { this._pendingPerms[msg.request.tool_use_id] = msg; continue; }
-        if (msg.parent_tool_use_id || msg.isSidechain) continue;
-        if (!isChatMessage(msg)) continue;
+        if (isSubagentMessage(msg)) continue;
         if (msg.uuid && uuids.has(msg.uuid)) continue;
         if (msg._fromWebui && msg.timestamp) {
           if (jsonl.some(m => m.type === 'user' && m.timestamp >= msg.timestamp)) continue;
@@ -1405,12 +1397,14 @@ class SessionMessages {
         live.push(msg);
       } catch {}
     }
-    // Single merged array: JSONL first, then live (deduped) messages
-    this._messages = live.length ? [...jsonl, ...live] : jsonl;
+    // Full merged array (all non-subagent messages including system.task_* etc.)
+    this._all = live.length ? [...jsonl, ...live] : jsonl;
+    // Display-filtered subset (for chat rendering — only user/assistant/result/system.init)
+    this._display = this._all.filter(isDisplayMessage);
   }
 
-  /** Total message count */
-  get total() { this._ensureParsed(); return this._messages.length; }
+  /** Total displayable message count */
+  get total() { this._ensureParsed(); return this._display.length; }
 
   /** Pending permission control_requests */
   get pendingPermissions() { this._ensureParsed(); return this._pendingPerms; }
@@ -1419,26 +1413,29 @@ class SessionMessages {
   get isStreaming() {
     this._ensureParsed();
     if (this._session._waitingForResponse) return true;
-    const last = this._messages.length > 0 ? this._messages[this._messages.length - 1] : null;
+    const last = this._all.length > 0 ? this._all[this._all.length - 1] : null;
     return last && last.type !== 'result' && last.type !== 'system';
   }
 
-  /** Last N messages (for initial attach) */
-  tail(n = 50) { this._ensureParsed(); return this._messages.slice(-n); }
+  /** Last N displayable messages (for initial attach / chat rendering) */
+  tail(n = 50) { this._ensureParsed(); return this._display.slice(-n); }
 
-  /** Messages by offset+limit (for pagination) */
-  slice(offset, limit) { this._ensureParsed(); return this._messages.slice(offset, offset + limit); }
+  /** Displayable messages by offset+limit (for pagination) */
+  slice(offset, limit) { this._ensureParsed(); return this._display.slice(offset, offset + limit); }
 
-  /** All messages */
-  all() { this._ensureParsed(); return this._messages; }
+  /** All displayable messages */
+  all() { this._ensureParsed(); return this._display; }
 
-  /** Server-side text search → [{index, type, preview}] */
+  /** All messages including system.task_* etc. (for internal queries like task backfill) */
+  raw() { this._ensureParsed(); return this._all; }
+
+  /** Server-side text search on displayable messages → [{index, type, preview}] */
   search(query) {
     this._ensureParsed();
     const q = query.toLowerCase();
     const matches = [];
-    for (let i = 0; i < this._messages.length; i++) {
-      const m = this._messages[i];
+    for (let i = 0; i < this._display.length; i++) {
+      const m = this._display[i];
       const c = m.message?.content;
       let text = '';
       if (typeof c === 'string') text = c;
@@ -1448,10 +1445,10 @@ class SessionMessages {
     return matches;
   }
 
-  /** Extract chatStatus (model, usage, cost, slash commands, permission mode) */
+  /** Extract chatStatus from all messages (model, usage, cost, etc.) */
   chatStatus() {
     this._ensureParsed();
-    const msgs = this._messages;
+    const msgs = this._all;
     let lastUsage = null, model = null, contextWindow = 0, totalCost = 0, slashCommands = null, permissionMode = null;
     for (let i = msgs.length - 1; i >= Math.max(0, msgs.length - 200); i--) {
       const m = msgs[i];
@@ -1477,7 +1474,7 @@ class SessionMessages {
   activePendingPermissions() {
     this._ensureParsed();
     const resolved = new Set();
-    for (const m of this._messages.slice(-100)) {
+    for (const m of this._all.slice(-100)) {
       if (m.type !== 'user') continue;
       const c = m.message?.content;
       if (!Array.isArray(c)) continue;
@@ -1488,6 +1485,12 @@ class SessionMessages {
       if (!resolved.has(id)) result[id] = cr;
     }
     return result;
+  }
+
+  /** Extract task/todo state from all messages */
+  taskState() {
+    this._ensureParsed();
+    return backfillTaskState(this._all);
   }
 }
 
