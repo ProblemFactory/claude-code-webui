@@ -87,7 +87,7 @@ class MessageManager {
 
   _create(fields) {
     const msg = {
-      id: fields.forceId || this._nextId(),
+      id: this._nextId(),
       role: fields.role,
       status: fields.status || 'complete',
       content: fields.content || [],
@@ -206,7 +206,7 @@ class MessageManager {
 
       if (normalizedContent.length === 0) return;
       // Use original msgId if present (for dedup with client-side local preview)
-      const msg = this._create({ role: 'user', status: 'complete', content: normalizedContent, turnIndex: this.turnIndex, forceId: raw.msgId });
+      const msg = this._create({ role: 'user', status: 'complete', content: normalizedContent, turnIndex: this.turnIndex });
       if (emit) this._emit({ op: 'create', message: msg });
     }
   }

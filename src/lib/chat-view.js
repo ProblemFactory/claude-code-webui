@@ -774,8 +774,6 @@ class ChatView {
       this._shortcutHint.textContent = '\u23CE';
     }
 
-    const msgId = Date.now() + '-' + Math.random().toString(36).slice(2, 8);
-
     if (hasAttachments) {
       const content = [];
       for (const a of this._attachments) {
@@ -783,15 +781,11 @@ class ChatView {
       }
       if (text) content.push({ type: 'text', text });
       const msg = JSON.stringify({ type: 'user', message: { role: 'user', content } });
-      this.ws.send({ type: 'chat-input', sessionId: this.sessionId, text: msg, msgId });
-      // Show local preview immediately
-      const previewContent = content.map(b => b.type === 'text' ? { type: 'text', text: b.text } : b.type === 'image' ? { type: 'image', mediaType: b.source?.media_type, data: b.source?.data } : null).filter(Boolean);
-      this._onCreateMessage({ id: msgId, role: 'user', status: 'complete', content: previewContent, ts: Date.now() });
+      this.ws.send({ type: 'chat-input', sessionId: this.sessionId, text: msg });
       this._attachments = [];
       this._renderAttachments();
     } else {
-      this.ws.send({ type: 'chat-input', sessionId: this.sessionId, text, msgId });
-      this._onCreateMessage({ id: msgId, role: 'user', status: 'complete', content: [{ type: 'text', text }], ts: Date.now() });
+      this.ws.send({ type: 'chat-input', sessionId: this.sessionId, text });
     }
     // Re-pin — if we're not at the end of conversation, jump there first
     if (this._windowEnd < this._total) {
