@@ -1698,8 +1698,16 @@ app.get('/api/sessions', (req, res) => {
           const exactMatch = runningEntries.find(e => !e.assigned && e.claudeSessionId === sessionId);
           const fallbackMatch = runningEntries.find(e => !e.assigned && !e.claudeSessionId);
           const match = exactMatch || fallbackMatch;
+          // Also check if any active webui session claims this claudeSessionId (covers race during resume)
+          let isWebuiSession = false;
+          if (match) isWebuiSession = webuiPids.has(match.lock.pid);
+          if (!isWebuiSession) {
+            for (const [, s] of activeSessions) {
+              if (s.claudeSessionId === sessionId) { isWebuiSession = true; break; }
+            }
+          }
           if (match) {
-            status = webuiPids.has(match.lock.pid) ? 'live'
+            status = isWebuiSession ? 'live'
               : match.tmuxTarget ? 'tmux' : 'external';
             pid = match.lock.pid;
             tmuxTarget = match.tmuxTarget || null;
@@ -1718,7 +1726,7 @@ app.get('/api/sessions', (req, res) => {
           sessions.push({
             sessionId: entry.lock.sessionId, cwd: entry.lock.cwd, pid: entry.lock.pid,
             startedAt: entry.lock.startedAt || Date.now(),
-            status: webuiPids.has(entry.lock.pid) ? 'live'
+            status: (webuiPids.has(entry.lock.pid) || [...activeSessions.values()].some(s => s.claudeSessionId === entry.lock.sessionId)) ? 'live'
               : entry.tmuxTarget ? 'tmux' : 'external', name: '',
             tmuxTarget: entry.tmuxTarget || null,
           });
