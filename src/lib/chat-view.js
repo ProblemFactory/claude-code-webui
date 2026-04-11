@@ -186,6 +186,14 @@ class ChatView {
     this._scrollBtnWrap.appendChild(this._scrollBtn);
     container.appendChild(this._scrollBtnWrap);
 
+    // Wheel at top edge: scroll event won't fire when already at scrollTop=0,
+    // so use wheel to detect upward scroll intent and trigger pagination
+    this._messageList.addEventListener('wheel', (e) => {
+      if (e.deltaY < 0 && this._messageList.scrollTop < 10 && this._windowStart > 0 && !this._loading && !this._readOnly) {
+        this._extendTop();
+      }
+    }, { passive: true });
+
     // Scroll detection: pin-to-bottom + auto-load earlier messages (throttled)
     let scrollTick = false;
     this._messageList.addEventListener('scroll', () => {
@@ -636,6 +644,12 @@ class ChatView {
     }
     if (isStreaming) this._showTyping();
     this._scrollToBottom();
+    // Auto-load more if content doesn't fill viewport (no scrollbar to trigger scroll event)
+    setTimeout(() => {
+      if (this._windowStart > 0 && this._messageList.scrollHeight <= this._messageList.clientHeight) {
+        this._extendTop();
+      }
+    }, 100);
   }
 
   // Get session identifiers for API calls
@@ -996,6 +1010,7 @@ class ChatView {
     const el = document.createElement('div');
     el.className = 'chat-msg chat-msg-assistant chat-msg-tool-result';
     el._rawMsg = msg;
+    if (msg.toolCallId) el.dataset.toolId = msg.toolCallId;
     let html;
 
     if (block.type === 'tool_call' && msg.status === 'pending') {
