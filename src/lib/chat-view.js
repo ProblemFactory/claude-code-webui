@@ -909,6 +909,9 @@ class ChatView {
       this._statusLastCacheRead = u.cache_read_input_tokens || 0;
       this._statusTokensOut = u.output_tokens || 0;
       this._updateStatusBar();
+    } else if (op.subtype === 'todos') {
+      this._todos = op.data;
+      this._updateTodoDisplay();
     } else if (op.subtype === 'turn_complete') {
       this._hideTyping();
       if (op.data?.cost) { this._statusCost += op.data.cost; this._updateStatusBar(); }

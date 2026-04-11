@@ -233,6 +233,10 @@ class MessageManager {
 
       } else if (block.type === 'tool_use') {
         this._finalizeStreaming(emit);
+        // TodoWrite → emit meta op so frontend can update display
+        if (block.name === 'TodoWrite' && block.input?.todos && emit) {
+          this._emit({ op: 'meta', subtype: 'todos', data: block.input.todos });
+        }
         const msgId = this._nextId();
         const msg = {
           id: msgId, role: 'tool', status: 'pending',
