@@ -2125,7 +2125,10 @@ class ChatView {
       if (!turn || !this._minimapLabel) return;
       const rect = this._minimap.getBoundingClientRect();
       const d = new Date(turn.ts);
-      const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const now = new Date();
+      const isToday = d.toDateString() === now.toDateString();
+      const date = isToday ? '' : d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ';
+      const time = date + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       const preview = turn.preview || '';
       this._minimapLabel.textContent = preview ? `${time} · ${preview}` : time;
       this._minimapLabel.classList.remove('hidden');

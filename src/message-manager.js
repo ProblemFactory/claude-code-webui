@@ -129,7 +129,7 @@ class MessageManager {
       role: fields.role,
       status: fields.status || 'complete',
       content: fields.content || [],
-      ts: fields.ts || Date.now(),
+      ts: fields.ts || this._currentTs || Date.now(),
       turnIndex: fields.turnIndex ?? this.turnIndex,
       toolCallId: fields.toolCallId || null,
       toolName: fields.toolName || null,
@@ -156,6 +156,8 @@ class MessageManager {
   }
 
   _processMessage(raw, emit) {
+    // Extract timestamp from raw message for _create
+    this._currentTs = raw.timestamp ? new Date(raw.timestamp).getTime() : Date.now();
     switch (raw.type) {
       case 'system': return this._processSystem(raw, emit);
       case 'user': return this._processUser(raw, emit);
