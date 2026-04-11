@@ -1238,53 +1238,6 @@ function parseSessionJsonl(claudeSessionId, cwd) {
   } catch { return []; }
 }
 
-// Read wrapper metadata (tasks, todos, childPid) for a session
-function readWrapperMeta(sessionId) {
-  try { return JSON.parse(fs.readFileSync(path.join(BUFFERS_DIR, sessionId + '.json'), 'utf-8')); } catch { return {}; }
-}
-
-// Extract task/todo state from messages (for sessions without wrapper tracking)
-function backfillTaskState(messages) {
-  const tasks = {};
-  const todos = [];
-  for (const msg of messages) {
-    // Track system.task_started / task_progress / task_notification
-    if (msg.type === 'system' && msg.tool_use_id) {
-      if (msg.subtype === 'task_started') {
-        tasks[msg.tool_use_id] = { id: msg.task_id, type: msg.task_type === 'local_agent' ? 'agent' : 'command', description: msg.description || '', status: 'running' };
-      } else if (msg.subtype === 'task_progress' && tasks[msg.tool_use_id]) {
-        if (msg.description) tasks[msg.tool_use_id].description = msg.description;
-        if (msg.last_tool_name) tasks[msg.tool_use_id].lastTool = msg.last_tool_name;
-      } else if (msg.subtype === 'task_notification' && tasks[msg.tool_use_id]) {
-        tasks[msg.tool_use_id].status = 'completed';
-      }
-    }
-    // Track TodoWrite
-    if (msg.type === 'assistant' && msg.message?.content) {
-      const blocks = Array.isArray(msg.message.content) ? msg.message.content : [];
-      for (const b of blocks) {
-        if (b.type === 'tool_use' && b.name === 'TodoWrite' && b.input?.todos) {
-          todos.length = 0;
-          todos.push(...b.input.todos);
-        }
-      }
-    }
-  }
-  // Tasks still "running" with no notification are unknown (process may have died)
-  return { tasks, todos };
-}
-
-// Get task/todo state for a session — wrapper metadata first, backfill via SessionMessages as fallback
-function getSessionTaskState(sessionId, session) {
-  const wMeta = readWrapperMeta(sessionId);
-  if (wMeta.tasks || wMeta.todos) {
-    return { tasks: wMeta.tasks || {}, todos: wMeta.todos || [] };
-  }
-  // No wrapper metadata — backfill from SessionMessages.raw() (includes system.task_* messages)
-  const sm = new SessionMessages(session || { claudeSessionId: '', cwd: '', buffer: '' });
-  return sm.taskState();
-}
-
 function isProcessClaude(pid) {
   try {
     const cmd = execFileSync('ps', ['-p', String(pid), '-o', 'comm='], { encoding: 'utf-8', timeout: 2000 }).trim();
@@ -1367,11 +1320,16 @@ function getSubagentMetas(claudeSessionId, cwd) {
 // Merges JSONL (persisted history) + live output into one logical array.
 // All external code sees a single ordered message list — no concept of "buffer" vs "JSONL".
 class SessionMessages {
-  constructor(session) {
+  // session: { claudeSessionId, cwd, buffer, _waitingForResponse }
+  // sessionId: webui session ID (for reading wrapper metadata from BUFFERS_DIR)
+  constructor(session, sessionId) {
     this._session = session;
+    this._sessionId = sessionId;
     this._all = null;     // all non-subagent messages (for internal queries like task backfill)
     this._display = null; // displayable messages only (for chat rendering)
     this._pendingPerms = null;
+    this._wrapperMeta = undefined; // lazy-loaded
+    this._taskState = undefined;   // lazy-computed
   }
 
   _ensureParsed() {
@@ -1487,10 +1445,54 @@ class SessionMessages {
     return result;
   }
 
-  /** Extract task/todo state from all messages */
+  /** Wrapper metadata (childPid, tasks, todos from chat-wrapper.js) */
+  wrapperMeta() {
+    if (this._wrapperMeta === undefined) {
+      if (this._sessionId) {
+        try { this._wrapperMeta = JSON.parse(fs.readFileSync(path.join(BUFFERS_DIR, this._sessionId + '.json'), 'utf-8')); }
+        catch { this._wrapperMeta = null; }
+      } else {
+        this._wrapperMeta = null;
+      }
+    }
+    return this._wrapperMeta;
+  }
+
+  /** Task/todo state — wrapper metadata (real-time) with message backfill as fallback */
   taskState() {
+    if (this._taskState !== undefined) return this._taskState;
+    const wMeta = this.wrapperMeta();
+    if (wMeta?.tasks || wMeta?.todos) {
+      this._taskState = { tasks: wMeta.tasks || {}, todos: wMeta.todos || [] };
+      return this._taskState;
+    }
+    // Backfill from message history (scans _all including system.task_* messages)
     this._ensureParsed();
-    return backfillTaskState(this._all);
+    const tasks = {};
+    const todos = [];
+    for (const msg of this._all) {
+      if (msg.type === 'system' && msg.tool_use_id) {
+        if (msg.subtype === 'task_started') {
+          tasks[msg.tool_use_id] = { id: msg.task_id, type: msg.task_type === 'local_agent' ? 'agent' : 'command', description: msg.description || '', status: 'running' };
+        } else if (msg.subtype === 'task_progress' && tasks[msg.tool_use_id]) {
+          if (msg.description) tasks[msg.tool_use_id].description = msg.description;
+          if (msg.last_tool_name) tasks[msg.tool_use_id].lastTool = msg.last_tool_name;
+        } else if (msg.subtype === 'task_notification' && tasks[msg.tool_use_id]) {
+          tasks[msg.tool_use_id].status = 'completed';
+        }
+      }
+      if (msg.type === 'assistant' && msg.message?.content) {
+        const blocks = Array.isArray(msg.message.content) ? msg.message.content : [];
+        for (const b of blocks) {
+          if (b.type === 'tool_use' && b.name === 'TodoWrite' && b.input?.todos) {
+            todos.length = 0;
+            todos.push(...b.input.todos);
+          }
+        }
+      }
+    }
+    this._taskState = { tasks, todos };
+    return this._taskState;
   }
 }
 
@@ -1499,13 +1501,13 @@ app.get('/api/session-messages', (req, res) => {
   const { claudeSessionId, cwd, offset, limit, search, withStatus } = req.query;
   if (!claudeSessionId) return res.status(400).json({ error: 'claudeSessionId required' });
 
-  // Try to find an active session to include buffer; fall back to JSONL-only
+  // Try to find active session to include live output; fall back to JSONL-only
   let session = null;
-  for (const [, s] of activeSessions) {
-    if (s.claudeSessionId === claudeSessionId) { session = s; break; }
+  let sessionId = null;
+  for (const [sid, s] of activeSessions) {
+    if (s.claudeSessionId === claudeSessionId) { session = s; sessionId = sid; break; }
   }
-  // Create a lightweight session-like object for SessionMessages if no active session
-  const sm = new SessionMessages(session || { claudeSessionId, cwd: cwd || '', buffer: '' });
+  const sm = new SessionMessages(session || { claudeSessionId, cwd: cwd || '', buffer: '' }, sessionId);
 
   if (search) {
     res.json({ matches: sm.search(search), total: sm.total });
@@ -1979,7 +1981,7 @@ wss.on('connection', (ws) => {
           session.clients.set(ws, { cols: 120, rows: 30 });
           attachedSessions.add(data.sessionId);
           if (session.mode === 'chat') {
-            const sm = new SessionMessages(session);
+            const sm = new SessionMessages(session, data.sessionId);
             const chatHistory = sm.tail(50);
             const activeSubagents = {};
             if (session.subagentBuffers) {
@@ -1987,10 +1989,9 @@ wss.on('connection', (ws) => {
                 if (msgs.length > 0 && !msgs.some(m => m.type === 'result')) activeSubagents[toolUseId] = { count: msgs.length };
               }
             }
-            const taskState = getSessionTaskState(data.sessionId, session);
             ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, mode: 'chat',
               chatHistory, totalCount: sm.total, chatStatus: sm.chatStatus(), isStreaming: sm.isStreaming,
-              pendingPermissions: sm.activePendingPermissions(), activeSubagents, taskState }));
+              pendingPermissions: sm.activePendingPermissions(), activeSubagents, taskState: sm.taskState() }));
           } else {
             ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, buffer: session.buffer || '' }));
           }
