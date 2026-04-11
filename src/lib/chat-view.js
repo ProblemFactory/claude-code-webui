@@ -878,10 +878,11 @@ class ChatView {
         const textDiv = oldEl.querySelector('.chat-text');
         if (textDiv && msg.content[0]?.type === 'text') {
           textDiv.innerHTML = this._renderMarkdown(stripAnsi(msg.content[0].text));
-          if (this._pinned) this._scrollToBottom();
         }
       }
     }
+
+    if (this._pinned) this._scrollToBottom();
 
     // Permission update
     if (fields.permission) {
