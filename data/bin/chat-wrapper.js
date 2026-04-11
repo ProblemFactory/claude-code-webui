@@ -44,7 +44,21 @@ if (!args.includes('--permission-prompt-tool')) {
 
 // Write initial metadata
 try { fs.mkdirSync(path.dirname(metaFile), { recursive: true }); } catch {}
-const meta = { pid: process.pid, startedAt: Date.now(), mode: 'chat' };
+const meta = { pid: process.pid, startedAt: Date.now(), mode: 'chat', tasks: {}, todos: [] };
+let metaDirty = false;
+let metaTimer = null;
+
+function persistMeta() {
+  metaTimer = null;
+  metaDirty = false;
+  try { fs.writeFileSync(metaFile, JSON.stringify(meta)); } catch {}
+}
+
+function scheduleMeta() {
+  if (!metaTimer) metaTimer = setTimeout(persistMeta, 500);
+  metaDirty = true;
+}
+
 try { fs.writeFileSync(metaFile, JSON.stringify(meta)); } catch (e) { log(`meta write failed: ${e.message}`); }
 
 // Ensure buffer directory exists and start with empty buffer
@@ -92,12 +106,45 @@ child.stdout.on('data', (chunk) => {
     lineBuffer = lineBuffer.substring(nlIdx + 1);
     if (!line) continue;
 
-    // Validate it's JSON
+    // Validate it's JSON and inspect for task/todo tracking
+    let msg;
     try {
-      JSON.parse(line);
+      msg = JSON.parse(line);
     } catch {
       log(`Non-JSON line: ${line.substring(0, 100)}`);
       continue;
+    }
+
+    // Track tasks: system.task_started / task_progress / task_notification
+    if (msg.type === 'system' && msg.tool_use_id) {
+      if (msg.subtype === 'task_started') {
+        meta.tasks[msg.tool_use_id] = {
+          id: msg.task_id, type: msg.task_type === 'local_agent' ? 'agent' : 'command',
+          description: msg.description || '', status: 'running', startedAt: Date.now(),
+        };
+        scheduleMeta();
+      } else if (msg.subtype === 'task_progress') {
+        const t = meta.tasks[msg.tool_use_id];
+        if (t) {
+          if (msg.description) t.description = msg.description;
+          if (msg.last_tool_name) t.lastTool = msg.last_tool_name;
+          scheduleMeta();
+        }
+      } else if (msg.subtype === 'task_notification') {
+        const t = meta.tasks[msg.tool_use_id];
+        if (t) { t.status = 'completed'; t.completedAt = Date.now(); scheduleMeta(); }
+      }
+    }
+
+    // Track todos: TodoWrite tool_use in assistant messages
+    if (msg.type === 'assistant' && msg.message?.content) {
+      const blocks = Array.isArray(msg.message.content) ? msg.message.content : [];
+      for (const b of blocks) {
+        if (b.type === 'tool_use' && b.name === 'TodoWrite' && b.input?.todos) {
+          meta.todos = b.input.todos;
+          scheduleMeta();
+        }
+      }
     }
 
     // Append to buffer and tee to stdout
@@ -167,6 +214,12 @@ child.on('exit', (exitCode) => {
   }
   if (writeTimer) { clearTimeout(writeTimer); }
   persistBuffer();
+  // Mark all running tasks as unknown (process died — can't know real state)
+  for (const t of Object.values(meta.tasks)) {
+    if (t.status === 'running') t.status = 'unknown';
+  }
+  if (metaTimer) clearTimeout(metaTimer);
+  persistMeta();
   try { fs.unlinkSync(metaFile); } catch {}
   process.exit(exitCode ?? 0);
 });

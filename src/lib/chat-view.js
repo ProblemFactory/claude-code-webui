@@ -606,7 +606,7 @@ class ChatView {
   // ── View Manager: sliding window over server message list ──
 
   // Load initial messages from attach response
-  loadHistory(messages, totalCount, isStreaming, pendingPermissions, activeSubagents) {
+  loadHistory(messages, totalCount, isStreaming, pendingPermissions, activeSubagents, taskState) {
     this._total = totalCount || messages.length;
     this._windowStart = this._total - messages.length;
     this._windowEnd = this._total;
@@ -635,6 +635,20 @@ class ChatView {
         else pending.appendChild(statusEl);
         this._subagentCounts.set(toolUseId, count);
       }
+    }
+    // Restore task/todo state from server metadata
+    if (taskState) {
+      if (taskState.tasks) {
+        if (!this._activeTasks) this._activeTasks = new Map();
+        for (const [id, t] of Object.entries(taskState.tasks)) {
+          if (t.status === 'running') this._activeTasks.set(id, t);
+        }
+      }
+      if (taskState.todos?.length) {
+        this._todos = taskState.todos;
+        this._updateTodoDisplay();
+      }
+      this._updateStatusBar();
     }
     if (isStreaming) this._showTyping();
     this._scrollToBottom();

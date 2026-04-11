@@ -1236,6 +1236,53 @@ function parseSessionJsonl(claudeSessionId, cwd) {
   } catch { return []; }
 }
 
+// Read wrapper metadata (tasks, todos, childPid) for a session
+function readWrapperMeta(sessionId) {
+  try { return JSON.parse(fs.readFileSync(path.join(BUFFERS_DIR, sessionId + '.json'), 'utf-8')); } catch { return {}; }
+}
+
+// Extract task/todo state from messages (for sessions without wrapper tracking)
+function backfillTaskState(messages) {
+  const tasks = {};
+  const todos = [];
+  for (const msg of messages) {
+    // Track system.task_started / task_progress / task_notification
+    if (msg.type === 'system' && msg.tool_use_id) {
+      if (msg.subtype === 'task_started') {
+        tasks[msg.tool_use_id] = { id: msg.task_id, type: msg.task_type === 'local_agent' ? 'agent' : 'command', description: msg.description || '', status: 'running' };
+      } else if (msg.subtype === 'task_progress' && tasks[msg.tool_use_id]) {
+        if (msg.description) tasks[msg.tool_use_id].description = msg.description;
+        if (msg.last_tool_name) tasks[msg.tool_use_id].lastTool = msg.last_tool_name;
+      } else if (msg.subtype === 'task_notification' && tasks[msg.tool_use_id]) {
+        tasks[msg.tool_use_id].status = 'completed';
+      }
+    }
+    // Track TodoWrite
+    if (msg.type === 'assistant' && msg.message?.content) {
+      const blocks = Array.isArray(msg.message.content) ? msg.message.content : [];
+      for (const b of blocks) {
+        if (b.type === 'tool_use' && b.name === 'TodoWrite' && b.input?.todos) {
+          todos.length = 0;
+          todos.push(...b.input.todos);
+        }
+      }
+    }
+  }
+  // Tasks still "running" with no notification are unknown (process may have died)
+  return { tasks, todos };
+}
+
+// Get task/todo state for a session — wrapper metadata first, backfill from messages as fallback
+function getSessionTaskState(sessionId, session) {
+  const wMeta = readWrapperMeta(sessionId);
+  if (wMeta.tasks || wMeta.todos) {
+    return { tasks: wMeta.tasks || {}, todos: wMeta.todos || [] };
+  }
+  // No wrapper metadata — backfill from message history
+  const sm = new SessionMessages(session || { claudeSessionId: '', cwd: '', buffer: '' });
+  return backfillTaskState(sm.all());
+}
+
 function isProcessClaude(pid) {
   try {
     const cmd = execFileSync('ps', ['-p', String(pid), '-o', 'comm='], { encoding: 'utf-8', timeout: 2000 }).trim();
@@ -1927,9 +1974,10 @@ wss.on('connection', (ws) => {
                 if (msgs.length > 0 && !msgs.some(m => m.type === 'result')) activeSubagents[toolUseId] = { count: msgs.length };
               }
             }
+            const taskState = getSessionTaskState(data.sessionId, session);
             ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, mode: 'chat',
               chatHistory, totalCount: sm.total, chatStatus: sm.chatStatus(), isStreaming: sm.isStreaming,
-              pendingPermissions: sm.activePendingPermissions(), activeSubagents }));
+              pendingPermissions: sm.activePendingPermissions(), activeSubagents, taskState }));
           } else {
             ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, buffer: session.buffer || '' }));
           }
