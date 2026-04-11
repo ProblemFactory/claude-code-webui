@@ -170,6 +170,16 @@ class ChatView {
     container.appendChild(this._messageList);
     container.appendChild(this._posIndicator);
 
+    // Scroll minimap — semantic scrollbar showing turns
+    this._minimap = document.createElement('div');
+    this._minimap.className = 'chat-minimap hidden';
+    this._minimapThumb = document.createElement('div');
+    this._minimapThumb.className = 'chat-minimap-thumb';
+    this._minimap.appendChild(this._minimapThumb);
+    container.appendChild(this._minimap);
+    this._turnMap = [];
+    this._setupMinimapDrag();
+
     // Scroll-to-bottom / pin button (shown when unpinned, with new message count)
     this._newMsgCount = 0;
     this._scrollBtn = document.createElement('button');
@@ -227,6 +237,7 @@ class ChatView {
           this._extendBottom();
         }
         this._updatePosIndicator();
+        this._updateMinimapThumb();
       });
     }, { passive: true });
 
@@ -655,6 +666,10 @@ class ChatView {
         this._updateStatusBar();
       }
     }
+    // Render minimap from turn data
+    if (meta?.turnMap) this._renderMinimap(meta.turnMap);
+    this._updateMinimapThumb();
+
     if (isStreaming) this._showTyping();
     this._scrollToBottom();
     // Auto-load more if content doesn't fill viewport (no scrollbar to trigger scroll event)
@@ -2064,6 +2079,72 @@ class ChatView {
   focus() {
     if (this._textarea) this._textarea.focus();
     this._clearWaiting();
+  }
+
+  // ── Minimap (semantic scrollbar by turn) ──
+
+  _setupMinimapDrag() {
+    let dragging = false;
+    const onMove = (e) => {
+      if (!dragging || !this._turnMap.length) return;
+      const rect = this._minimap.getBoundingClientRect();
+      const y = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
+      const turnIdx = Math.floor(y * this._turnMap.length);
+      const turn = this._turnMap[Math.min(turnIdx, this._turnMap.length - 1)];
+      if (turn) this.jumpToIndex(turn.startIdx);
+    };
+    this._minimap.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      dragging = true;
+      onMove(e);
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', () => { dragging = false; document.removeEventListener('mousemove', onMove); }, { once: true });
+    });
+  }
+
+  _renderMinimap(turnMap) {
+    if (!turnMap?.length || turnMap.length < 3) {
+      this._minimap.classList.add('hidden');
+      return;
+    }
+    this._turnMap = turnMap;
+    this._minimap.classList.remove('hidden');
+
+    // Remove old turn segments (keep thumb)
+    for (const el of [...this._minimap.children]) {
+      if (el !== this._minimapThumb) el.remove();
+    }
+
+    // Render turn segments
+    const total = this._total || turnMap[turnMap.length - 1].startIdx + 1;
+    for (let i = 0; i < turnMap.length; i++) {
+      const turn = turnMap[i];
+      const nextStart = i + 1 < turnMap.length ? turnMap[i + 1].startIdx : total;
+      const height = Math.max(2, ((nextStart - turn.startIdx) / total) * 100);
+      const top = (turn.startIdx / total) * 100;
+
+      const seg = document.createElement('div');
+      seg.className = 'chat-minimap-seg';
+      seg.style.top = top + '%';
+      seg.style.height = height + '%';
+      // Color by role
+      if (turn.role === 'user') seg.classList.add('chat-minimap-user');
+      else if (turn.role === 'tool') seg.classList.add('chat-minimap-tool');
+      else seg.classList.add('chat-minimap-assistant');
+
+      // Tooltip with time
+      const d = new Date(turn.ts);
+      seg.title = `Turn ${turn.turnIndex} · ${d.toLocaleTimeString()}`;
+      this._minimap.appendChild(seg);
+    }
+  }
+
+  _updateMinimapThumb() {
+    if (!this._minimapThumb || !this._total || this._minimap.classList.contains('hidden')) return;
+    const top = (this._windowStart / this._total) * 100;
+    const height = Math.max(5, ((this._windowEnd - this._windowStart) / this._total) * 100);
+    this._minimapThumb.style.top = top + '%';
+    this._minimapThumb.style.height = height + '%';
   }
 
   _updatePosIndicator() {

@@ -1541,7 +1541,9 @@ app.get('/api/session-messages', (req, res) => {
     mm.convertHistory(sm.raw());
   }
 
-  if (search) {
+  if (req.query.turnmap) {
+    res.json({ turns: mm.turnMap(), total: mm.total });
+  } else if (search) {
     res.json({ matches: mm.search(search), total: mm.total });
   } else if (offset !== undefined || limit !== undefined) {
     const o = parseInt(offset) || 0;
@@ -2053,8 +2055,9 @@ wss.on('connection', (ws) => {
             const messages = session._normalizer ? session._normalizer.tail(50) : [];
             const totalCount = session._normalizer ? session._normalizer.total : 0;
 
+            const turnMap = session._normalizer ? session._normalizer.turnMap() : [];
             ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, mode: 'chat',
-              messages, totalCount, chatStatus: sm.chatStatus(), isStreaming: sm.isStreaming, taskState: sm.taskState() }));
+              messages, totalCount, chatStatus: sm.chatStatus(), isStreaming: sm.isStreaming, taskState: sm.taskState(), turnMap }));
           } else {
             ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, buffer: session.buffer || '' }));
           }

@@ -62,6 +62,21 @@ class MessageManager {
   /** Get messages by offset+limit */
   slice(offset, limit) { return this.messages.slice(offset, offset + limit); }
 
+  /** Get turn boundaries for minimap: [{turnIndex, startIdx, ts, role}] */
+  turnMap() {
+    const turns = [];
+    let lastTurn = -1;
+    for (let i = 0; i < this.messages.length; i++) {
+      const m = this.messages[i];
+      const t = m.turnIndex ?? 0;
+      if (t !== lastTurn) {
+        turns.push({ turnIndex: t, startIdx: i, ts: m.ts, role: m.role });
+        lastTurn = t;
+      }
+    }
+    return turns;
+  }
+
   /** Search messages by text query → [{index, id, type, preview}] */
   search(query) {
     const q = query.toLowerCase();
