@@ -2100,46 +2100,80 @@ class ChatView {
 
   _setupMinimapDrag() {
     let dragging = false;
-    const getTurnAtY = (e) => {
+    let jumpTimer = null;
+    let pendingJumpIdx = null;
+
+    // Map Y position to message index (same coordinate system as markers)
+    const getIdxAtY = (e) => {
       const rect = this._minimap.getBoundingClientRect();
       const y = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
-      const turnIdx = Math.floor(y * this._turnMap.length);
-      return this._turnMap[Math.min(turnIdx, this._turnMap.length - 1)];
+      return Math.floor(y * (this._total || 1));
     };
+
+    // Find the nearest user turn at a given message index
+    const getTurnAtIdx = (idx) => {
+      if (!this._turnMap.length) return null;
+      let best = this._turnMap[0];
+      for (const t of this._turnMap) {
+        if (t.startIdx <= idx) best = t;
+        else break;
+      }
+      return best;
+    };
+
     const updateLabel = (e, turn) => {
       if (!turn || !this._minimapLabel) return;
       const rect = this._minimap.getBoundingClientRect();
       const d = new Date(turn.ts);
       const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      // Show user message preview or time
-      const preview = turn.preview || (turn.role === 'user' ? 'User' : turn.role);
-      this._minimapLabel.textContent = `${time} · ${preview}`;
+      const preview = turn.preview || '';
+      this._minimapLabel.textContent = preview ? `${time} · ${preview}` : time;
       this._minimapLabel.classList.remove('hidden');
       this._minimapLabel.style.top = (e.clientY - rect.top) + 'px';
     };
-    const onMove = (e) => {
-      if (!this._turnMap.length) return;
-      const turn = getTurnAtY(e);
-      updateLabel(e, turn);
-      if (dragging && turn) this.jumpToIndex(turn.startIdx);
+
+    // Debounced jump — only executes the last requested position
+    const scheduleJump = (idx) => {
+      pendingJumpIdx = idx;
+      if (!jumpTimer) {
+        jumpTimer = setTimeout(() => {
+          jumpTimer = null;
+          if (pendingJumpIdx != null) this.jumpToIndex(pendingJumpIdx);
+          pendingJumpIdx = null;
+        }, 100);
+      }
     };
+
+    const onMove = (e) => {
+      const idx = getIdxAtY(e);
+      const turn = getTurnAtIdx(idx);
+      updateLabel(e, turn);
+      if (dragging) scheduleJump(idx);
+    };
+
     this._minimap.addEventListener('mousedown', (e) => {
       e.preventDefault();
       dragging = true;
-      const turn = getTurnAtY(e);
-      if (turn) this.jumpToIndex(turn.startIdx);
+      const idx = getIdxAtY(e);
+      this.jumpToIndex(idx);
+      const turn = getTurnAtIdx(idx);
+      updateLabel(e, turn);
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', () => {
         dragging = false;
         document.removeEventListener('mousemove', onMove);
         this._minimapLabel.classList.add('hidden');
+        if (jumpTimer) { clearTimeout(jumpTimer); jumpTimer = null; }
       }, { once: true });
     });
+
     this._minimap.addEventListener('mousemove', (e) => {
-      if (dragging) return; // handled by document mousemove
-      const turn = getTurnAtY(e);
+      if (dragging) return;
+      const idx = getIdxAtY(e);
+      const turn = getTurnAtIdx(idx);
       updateLabel(e, turn);
     });
+
     this._minimap.addEventListener('mouseleave', () => {
       if (!dragging) this._minimapLabel.classList.add('hidden');
     });
