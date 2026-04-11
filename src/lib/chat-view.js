@@ -971,7 +971,7 @@ class ChatView {
 
     const rawText = content.map(b => b.text || '').join('');
     const textHtml = rawText.length > 500
-      ? `<details class="chat-long-msg"><summary>${escHtml(rawText.substring(0, 120))}... (${rawText.length} chars)</summary>${parts}</details>`
+      ? `<details class="chat-long-msg"><summary><span>${escHtml(rawText.substring(0, 120))}... (${rawText.length} chars)</span></summary>${parts}</details>`
       : parts;
 
     if (this._compact) {
