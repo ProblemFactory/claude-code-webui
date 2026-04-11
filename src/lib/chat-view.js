@@ -167,8 +167,6 @@ class ChatView {
     this._posIndicator = document.createElement('div');
     this._posIndicator.className = 'chat-pos-indicator hidden';
     if (this._chatScale !== 1) this._messageList.style.zoom = this._chatScale;
-    container.appendChild(this._messageList);
-    container.appendChild(this._posIndicator);
 
     // Scroll minimap — semantic scrollbar showing turns
     this._minimap = document.createElement('div');
@@ -179,7 +177,14 @@ class ChatView {
     this._minimapLabel.className = 'chat-minimap-label hidden';
     this._minimap.appendChild(this._minimapThumb);
     this._minimap.appendChild(this._minimapLabel);
-    this._messageList.appendChild(this._minimap);
+
+    // Wrap message list + minimap in a positioned container
+    this._msgListWrap = document.createElement('div');
+    this._msgListWrap.className = 'chat-msglist-wrap';
+    this._msgListWrap.appendChild(this._messageList);
+    this._msgListWrap.appendChild(this._minimap);
+    this._msgListWrap.appendChild(this._posIndicator);
+    container.appendChild(this._msgListWrap);
     this._turnMap = [];
     this._setupMinimapDrag();
 
