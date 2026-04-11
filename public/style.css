@@ -1621,12 +1621,11 @@ pre.chat-pre-wrapped { white-space: pre-wrap; word-break: break-all; }
   margin-right: -16px; /* offset into padding */
 }
 .chat-minimap:hover { opacity: 0.8; width: 12px; }
-.chat-minimap-seg {
-  position: absolute; width: 100%; border-radius: 1px; min-height: 2px;
+.chat-minimap-marker {
+  position: absolute; width: 100%; border-radius: 1px;
 }
-.chat-minimap-user { background: var(--accent); opacity: 0.7; }
-.chat-minimap-assistant { background: var(--chat-green, var(--green)); opacity: 0.5; }
-.chat-minimap-tool { background: var(--text-dim); opacity: 0.3; }
+.chat-minimap-user-mark { background: var(--accent); opacity: 0.4; height: 2px; }
+.chat-minimap-compact { background: var(--red, #e55); opacity: 0.8; height: 4px; }
 .chat-minimap-thumb {
   position: absolute; width: 100%; background: var(--text); opacity: 0.2;
   border-radius: 2px; min-height: 4px; pointer-events: none;

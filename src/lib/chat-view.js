@@ -2099,9 +2099,10 @@ class ChatView {
       const rect = this._minimap.getBoundingClientRect();
       const d = new Date(turn.ts);
       const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      this._minimapLabel.textContent = `Turn ${turn.turnIndex} · ${time}`;
+      // Show user message preview or time
+      const preview = turn.preview || (turn.role === 'user' ? 'User' : turn.role);
+      this._minimapLabel.textContent = `${time} · ${preview}`;
       this._minimapLabel.classList.remove('hidden');
-      // Position label at cursor Y, to the left of minimap
       this._minimapLabel.style.top = (e.clientY - rect.top) + 'px';
     };
     const onMove = (e) => {
@@ -2145,24 +2146,20 @@ class ChatView {
       if (el !== this._minimapThumb) el.remove();
     }
 
-    // Render turn segments
+    // Render markers for user messages and compact points
     const total = this._total || turnMap[turnMap.length - 1].startIdx + 1;
-    for (let i = 0; i < turnMap.length; i++) {
-      const turn = turnMap[i];
-      const nextStart = i + 1 < turnMap.length ? turnMap[i + 1].startIdx : total;
-      const height = Math.max(2, ((nextStart - turn.startIdx) / total) * 100);
+    for (const turn of turnMap) {
+      if (turn.role !== 'user') continue;
       const top = (turn.startIdx / total) * 100;
-
-      const seg = document.createElement('div');
-      seg.className = 'chat-minimap-seg';
-      seg.style.top = top + '%';
-      seg.style.height = height + '%';
-      // Color by role
-      if (turn.role === 'user') seg.classList.add('chat-minimap-user');
-      else if (turn.role === 'tool') seg.classList.add('chat-minimap-tool');
-      else seg.classList.add('chat-minimap-assistant');
-
-      this._minimap.appendChild(seg);
+      const marker = document.createElement('div');
+      marker.className = 'chat-minimap-marker';
+      marker.style.top = top + '%';
+      if (turn.isCompact) {
+        marker.classList.add('chat-minimap-compact');
+      } else {
+        marker.classList.add('chat-minimap-user-mark');
+      }
+      this._minimap.appendChild(marker);
     }
   }
 

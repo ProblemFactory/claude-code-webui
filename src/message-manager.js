@@ -62,7 +62,7 @@ class MessageManager {
   /** Get messages by offset+limit */
   slice(offset, limit) { return this.messages.slice(offset, offset + limit); }
 
-  /** Get turn boundaries for minimap: [{turnIndex, startIdx, ts, role}] */
+  /** Get turn boundaries for minimap: [{turnIndex, startIdx, ts, role, preview?, isCompact?}] */
   turnMap() {
     const turns = [];
     let lastTurn = -1;
@@ -70,11 +70,34 @@ class MessageManager {
       const m = this.messages[i];
       const t = m.turnIndex ?? 0;
       if (t !== lastTurn) {
-        turns.push({ turnIndex: t, startIdx: i, ts: m.ts, role: m.role });
+        const entry = { turnIndex: t, startIdx: i, ts: m.ts, role: m.role };
+        // For user messages: extract preview text (truncate at word boundary ~10 chars)
+        if (m.role === 'user') {
+          const raw = (m.content || []).map(b => b.text || '').join('').trim();
+          if (raw) {
+            // Check for compaction marker
+            if (raw.startsWith('This session is being continued from a previous conversation')) {
+              entry.isCompact = true;
+              entry.preview = 'Context compacted';
+            } else {
+              entry.preview = this._truncateWord(raw, 10);
+            }
+          }
+        }
+        turns.push(entry);
         lastTurn = t;
       }
     }
     return turns;
+  }
+
+  /** Truncate text at word boundary, max ~maxLen chars */
+  _truncateWord(text, maxLen) {
+    if (text.length <= maxLen) return text;
+    // Find last space before or at maxLen
+    const cut = text.lastIndexOf(' ', maxLen);
+    if (cut > maxLen * 0.5) return text.substring(0, cut) + '…';
+    return text.substring(0, maxLen) + '…';
   }
 
   /** Search messages by text query → [{index, id, type, preview}] */
