@@ -162,8 +162,13 @@ class ChatView {
     // Message list
     this._messageList = document.createElement('div');
     this._messageList.className = 'chat-message-list';
+
+    // Position indicator (shows when not at bottom, e.g. "120-170 / 3000")
+    this._posIndicator = document.createElement('div');
+    this._posIndicator.className = 'chat-pos-indicator hidden';
     if (this._chatScale !== 1) this._messageList.style.zoom = this._chatScale;
     container.appendChild(this._messageList);
+    container.appendChild(this._posIndicator);
 
     // Scroll-to-bottom / pin button (shown when unpinned, with new message count)
     this._newMsgCount = 0;
@@ -217,6 +222,11 @@ class ChatView {
         if (scrollTop < 100 && this._windowStart > 0 && !this._loading && this._canPaginate) {
           this._extendTop();
         }
+        // Extend bottom when scrolling near end of rendered window (but more messages exist)
+        if (scrollHeight - scrollTop - clientHeight < 200 && this._windowEnd < this._total && !this._loading && this._canPaginate) {
+          this._extendBottom();
+        }
+        this._updatePosIndicator();
       });
     }, { passive: true });
 
@@ -698,10 +708,62 @@ class ChatView {
     this._loadingHistory = false;
     this._windowStart = newStart;
 
+    // Trim bottom if DOM window too large (keep max ~150 rendered messages)
+    this._trimBottom();
+
     // Preserve scroll position
     this._messageList.scrollTop += (this._messageList.scrollHeight - scrollHeightBefore);
     if (this._highlightQuery) this._applyHighlightLayer();
     setTimeout(() => { this._loading = false; }, 300);
+  }
+
+  // Load messages at the bottom (when scrolling back down after trimming)
+  async _extendBottom(count = 50) {
+    if (this._loading || this._windowEnd >= this._total) return;
+    this._loading = true;
+
+    const end = Math.min(this._total, this._windowEnd + count);
+    const msgs = await this._fetchMessages(this._windowEnd, end - this._windowEnd);
+
+    this._loadingHistory = true;
+    for (const msg of msgs) this._onCreateMessage(msg);
+    this._loadingHistory = false;
+    this._windowEnd = end;
+
+    // Trim top if DOM window too large
+    this._trimTop();
+
+    setTimeout(() => { this._loading = false; }, 300);
+  }
+
+  // Keep DOM under ~150 messages by removing from bottom
+  _trimBottom(maxRendered = 150) {
+    const els = this._messageList.querySelectorAll('.chat-msg');
+    if (els.length <= maxRendered) return;
+    const toRemove = els.length - maxRendered;
+    for (let i = els.length - 1; i >= els.length - toRemove; i--) {
+      const id = els[i].dataset.msgId;
+      if (id) { this._elements.delete(id); this._renderedMsgIds.delete(id); }
+      els[i].remove();
+    }
+    this._windowEnd -= toRemove;
+    this._pinned = false; // we trimmed the bottom, can't be pinned
+  }
+
+  // Keep DOM under ~150 messages by removing from top
+  _trimTop(maxRendered = 150) {
+    const els = this._messageList.querySelectorAll('.chat-msg');
+    if (els.length <= maxRendered) return;
+    const scrollHeightBefore = this._messageList.scrollHeight;
+    const toRemove = els.length - maxRendered;
+    for (let i = 0; i < toRemove; i++) {
+      const id = els[i].dataset.msgId;
+      if (id) { this._elements.delete(id); this._renderedMsgIds.delete(id); }
+      els[i].remove();
+    }
+    this._windowStart += toRemove;
+    // Preserve scroll position after removing from top
+    this._messageList.scrollTop -= (scrollHeightBefore - this._messageList.scrollHeight);
   }
 
   // Jump to a specific message index: replace window entirely
@@ -2002,6 +2064,16 @@ class ChatView {
   focus() {
     if (this._textarea) this._textarea.focus();
     this._clearWaiting();
+  }
+
+  _updatePosIndicator() {
+    if (!this._posIndicator || !this._total) return;
+    if (this._pinned && this._windowEnd >= this._total) {
+      this._posIndicator.classList.add('hidden');
+      return;
+    }
+    this._posIndicator.textContent = `${this._windowStart + 1}\u2013${this._windowEnd} / ${this._total}`;
+    this._posIndicator.classList.remove('hidden');
   }
 
   // Convert to read-only mode (after session terminate/exit)
