@@ -325,9 +325,11 @@ Split from monolithic 1647-line `src/client.js` into 13 ES modules under `src/li
 
 **Chat Font Size**: Follows global A-/A+ font size setting via CSS `zoom` on the message list container.
 
-**View Manager**: Sliding window `[_windowStart, _windowEnd)` over server message list. `jumpToIndex(idx)` replaces window. `jumpToBottom()` loads last 50. `_extendTop()` on scroll-up. Server-side search returns indices, client jumps via `jumpToIndex`.
+**View Manager**: Sliding window `[_windowStart, _windowEnd)` over server message list. `jumpToIndex(idx)` replaces window. `jumpToBottom()` loads last 50. `_extendTop()` on scroll-up. Server-side search returns indices, client jumps via `jumpToIndex`. Pagination gated by `_canPaginate` (true for normal and view-only sessions, false for subagent viewers).
 
-**Pin-to-bottom**: Uses iterative scroll convergence (10 rAF frames) instead of single `scrollTop` assignment, for compatibility with `content-visibility: auto` CSS optimization which can cause layout shifts during scroll.
+**Pin-to-bottom**: Uses iterative scroll convergence (10 rAF frames) instead of single `scrollTop` assignment, for compatibility with `content-visibility: auto` CSS optimization which can cause layout shifts during scroll. Wheel listener at `scrollTop=0` detects upward scroll intent when scroll events stop firing. Auto-fills viewport if content shorter than container.
+
+**View-only mode**: Stopped sessions can be opened as read-only via "📋 View History" button (no `claude --resume`). Server loads JSONL via `viewOnly:true` attach. Also triggered on session exit/terminate — `_setReadOnly()` hides input area, window stays open for reading. View-only sessions use `view-{claudeSessionId}` as virtual session ID, support full scroll-up pagination.
 
 **Highlight Layer**: CSS Custom Highlight API (`CSS.highlights`) — non-destructive rendering layer for search highlighting. `_applyHighlightLayer()` creates Range objects, re-applied on view changes.
 
@@ -440,7 +442,7 @@ Read/Write tool output uses highlight.js for syntax highlighting with line numbe
 Client → Server: `create`, `input`, `chat-input`, `permission-response`, `set-permission-mode`, `interrupt`, `resize`, `attach`, `kill`, `tmux-attach`, `state-set`, `state-resync`
 Server → Client: `created`, `output`, `msg` (normalized: op=create/edit/meta), `subagent-message` (parentToolUseId for tool card status), `exited`, `attached` (includes `messages`, `totalCount`, `isStreaming`, `chatStatus`, `taskState`), `active-sessions`, `editor-open`, `editor-close`, `effective-size`, `user-state-updated`, `bookmarks-updated`, `settings-updated`, `custom-themes-updated`, `state-sync`, `state-snapshot`, `error`
 
-**Virtual session attach**: `attach` with `sessionId` starting with `sub-` routes to subagent handler. `sub-{parentToolUseId}` returns live-buffered messages from parent session's `subagentBuffers`. `sub-agent-{agentId}` loads completed agent's JSONL from disk. Both respond with standard `attached` payload. Live virtual sessions also receive `chat-message` broadcasts for real-time updates.
+**Virtual session attach**: `attach` with `sessionId` starting with `sub-` routes to subagent handler. `sub-{parentToolUseId}` returns live-buffered messages from parent session's `subagentBuffers`. `sub-agent-{agentId}` loads completed agent's JSONL from disk. Both respond with standard `attached` payload with normalized messages. Live virtual sessions receive normalized `msg` ops via per-subagent normalizers. `attach` with `viewOnly:true` loads JSONL history without an active session (for stopped session history viewing).
 
 ## Features Summary
 
@@ -510,6 +512,7 @@ Server → Client: `created`, `output`, `msg` (normalized: op=create/edit/meta),
 - Status filter dropdown (Live / Tmux / External / Stopped / Archived — multi-select)
 - Quick new session from folder header (+)
 - Resume stopped sessions via `claude --resume`
+- View History: open stopped sessions as read-only (load JSONL, no resume). "📋 View History" button in sidebar expand panel
 - Session names from first user message in JSONL; default session card name from CWD folder name when no custom name set
 - Star sessions (★/☆): starred sessions sort first in sidebar groups and taskbar
 - Archive/unarchive sessions: 📦 button, hidden by default, toggle via status filter
@@ -637,3 +640,5 @@ Server → Client: `created`, `output`, `msg` (normalized: op=create/edit/meta),
 - Running agent View Log missing after refactor: `_renderToolMsg` didn't set `data-tool-id`, so `_onSubagentMessage` couldn't find DOM element. Fix: set `data-tool-id` from `msg.toolCallId`.
 - Scroll-up pagination at top edge: `scroll` event stops firing when `scrollTop=0`. Fix: `wheel` listener detects upward intent at top.
 - Collapsible long user messages showed "Message (N chars)" with no preview. Fix: show first 120 chars + total length; hide preview on expand via CSS `summary > span { display: none }`.
+- Resume briefly showed as external: session discovery only checked `webuiPids` (not yet updated). Fix: also check `activeSessions` by `claudeSessionId` as fallback.
+- View-only pagination disabled: `_readOnly` flag blocked scroll-up loading. Fix: `_canPaginate` flag (false for `sub-*` subagent viewers only, true for `view-*` and normal sessions).
