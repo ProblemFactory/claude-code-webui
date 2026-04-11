@@ -9,6 +9,7 @@ const crypto = require('crypto');
 const multer = require('multer');
 const { execFileSync, spawn } = require('child_process');
 const compression = require('compression');
+const { MessageNormalizer } = require('./src/message-normalizer');
 
 const PORT = process.env.PORT || 3456;
 const CLAUDE_CMD_RAW = process.env.CLAUDE_CMD || 'claude';
@@ -304,6 +305,8 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
           }
           if (msg.type === 'assistant' || msg.type === 'result') session._waitingForResponse = false;
           broadcastToSession(session, id, { type: 'chat-message', sessionId: id, message: msg });
+          // Feed into normalizer for v2 clients (emits msg ops via listener)
+          if (session._normalizer) session._normalizer.processLive(msg);
         } catch {
           // Non-JSON line (e.g. dtach noise) — send as raw output
           broadcastToSession(session, id, { type: 'output', sessionId: id, data: line + '\n' });
@@ -423,6 +426,13 @@ function restoreSessions() {
       socketPath,
       buffer: savedBuffer,
     };
+    // Create normalizer for chat sessions (populated on first attach from JSONL + buffer)
+    if (sessionMode === 'chat') {
+      session._normalizer = new MessageNormalizer(id);
+      session._normalizer.onOp((op) => {
+        broadcastToSession(session, id, { type: 'msg', sessionId: id, ...op });
+      });
+    }
     activeSessions.set(id, session);
     attachToDtach(id, socketPath, session);
 
@@ -1520,6 +1530,33 @@ app.get('/api/session-messages', (req, res) => {
   }
 });
 
+// V2: Normalized messages (tool calls merged, IDs assigned)
+app.get('/api/session-messages-v2', (req, res) => {
+  const { claudeSessionId, cwd, offset, limit, search } = req.query;
+  if (!claudeSessionId) return res.status(400).json({ error: 'claudeSessionId required' });
+
+  // Find or create normalizer
+  let session = null;
+  for (const [, s] of activeSessions) {
+    if (s.claudeSessionId === claudeSessionId) { session = s; break; }
+  }
+
+  // Build normalizer from SessionMessages (includes buffer)
+  const sm = new SessionMessages(session || { claudeSessionId, cwd: cwd || '', buffer: '' });
+  const normalizer = new MessageNormalizer('api');
+  normalizer.convertHistory(sm.raw());
+
+  if (search) {
+    res.json({ matches: normalizer.search(search), total: normalizer.total });
+  } else if (offset !== undefined || limit !== undefined) {
+    const o = parseInt(offset) || 0;
+    const l = parseInt(limit) || 50;
+    res.json({ messages: normalizer.slice(o, l), total: normalizer.total });
+  } else {
+    res.json({ messages: normalizer.tail(50), total: normalizer.total });
+  }
+});
+
 // Subagent messages for a given session + agentId
 app.get('/api/subagent-messages', (req, res) => {
   const { claudeSessionId, cwd, agentId } = req.query;
@@ -1772,6 +1809,13 @@ wss.on('connection', (ws) => {
           createdAt: Date.now(), claudeSessionId: data.resumeId || null,
           sockName, socketPath, buffer: '',
         };
+        // Create normalizer for chat sessions (converts raw Claude messages to normalized format)
+        if (sessionMode === 'chat') {
+          session._normalizer = new MessageNormalizer(id);
+          session._normalizer.onOp((op) => {
+            broadcastToSession(session, id, { type: 'msg', sessionId: id, ...op });
+          });
+        }
 
         // Use appropriate wrapper inside dtach:
         // - Terminal: pty-wrapper.js (spawns claude with PTY for TUI mode)
@@ -1989,9 +2033,18 @@ wss.on('connection', (ws) => {
                 if (msgs.length > 0 && !msgs.some(m => m.type === 'result')) activeSubagents[toolUseId] = { count: msgs.length };
               }
             }
+            // Initialize normalizer from history if not yet done (first attach after server restart)
+            if (session._normalizer && session._normalizer.total === 0) {
+              session._normalizer.convertHistory(sm.raw());
+            }
+            // V2 normalized messages for new clients
+            const v2Messages = session._normalizer ? session._normalizer.tail(50) : [];
+            const v2Total = session._normalizer ? session._normalizer.total : 0;
+
             ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, mode: 'chat',
               chatHistory, totalCount: sm.total, chatStatus: sm.chatStatus(), isStreaming: sm.isStreaming,
-              pendingPermissions: sm.activePendingPermissions(), activeSubagents, taskState: sm.taskState() }));
+              pendingPermissions: sm.activePendingPermissions(), activeSubagents, taskState: sm.taskState(),
+              v2: { messages: v2Messages, total: v2Total } }));
           } else {
             ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, buffer: session.buffer || '' }));
           }
