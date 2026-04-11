@@ -933,6 +933,16 @@ class ChatView {
   // Create a new normalized message → render and append to DOM
   _onCreateMessage(msg) {
     if (this._renderedMsgIds.has(msg.id)) return;
+
+    // Live message while viewing history: don't render, just track count
+    if (!this._loadingHistory && !this._pinned && this._windowEnd < this._total) {
+      this._total++;
+      this._newMsgCount++;
+      this._scrollBtn.innerHTML = `\u2193 <span class="chat-scroll-badge">${this._newMsgCount}</span>`;
+      this._scrollBtn.classList.remove('hidden');
+      return;
+    }
+
     this._renderedMsgIds.add(msg.id);
     this._messages.push(msg);
 
@@ -957,6 +967,11 @@ class ChatView {
     this._messageList.appendChild(el);
     this._addWrapToggles(el);
     this._addOpenInEditorBtn(el);
+    // Update window bounds for live messages (not history batch)
+    if (!this._loadingHistory) {
+      this._total++;
+      this._windowEnd = this._total;
+    }
     if (this._pinned) this._scrollToBottom();
   }
 
