@@ -669,8 +669,17 @@ class ChatView {
         this._updateStatusBar();
       }
     }
-    // Render minimap from turn data
-    if (meta?.turnMap) this._renderMinimap(meta.turnMap);
+    // Render minimap from turn data (attach payload or async fetch fallback)
+    if (meta?.turnMap?.length) {
+      this._renderMinimap(meta.turnMap);
+    } else if (this._total > 50) {
+      // Fallback: fetch turn map via API
+      const { claudeId, cwd } = this._getSessionIds();
+      if (claudeId) {
+        fetch(`/api/session-messages?claudeSessionId=${encodeURIComponent(claudeId)}&cwd=${encodeURIComponent(cwd)}&turnmap=1`)
+          .then(r => r.json()).then(d => { if (d.turns?.length) this._renderMinimap(d.turns); }).catch(() => {});
+      }
+    }
     this._updateMinimapThumb();
 
     if (isStreaming) this._showTyping();
