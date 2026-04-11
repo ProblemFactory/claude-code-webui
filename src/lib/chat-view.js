@@ -179,7 +179,7 @@ class ChatView {
     this._minimapLabel.className = 'chat-minimap-label hidden';
     this._minimap.appendChild(this._minimapThumb);
     this._minimap.appendChild(this._minimapLabel);
-    this._messageList.appendChild(this._minimap);
+    container.appendChild(this._minimap);
     this._turnMap = [];
     this._setupMinimapDrag();
 
@@ -2149,10 +2149,12 @@ class ChatView {
     }
     this._turnMap = turnMap;
     this._minimap.classList.remove('hidden');
+    this._messageList.classList.add('chat-minimap-active');
+    this._syncMinimapBounds();
 
-    // Remove old turn segments (keep thumb)
+    // Remove old turn segments (keep thumb and label)
     for (const el of [...this._minimap.children]) {
-      if (el !== this._minimapThumb) el.remove();
+      if (el !== this._minimapThumb && el !== this._minimapLabel) el.remove();
     }
 
     // Render markers for user messages and compact points
@@ -2170,6 +2172,15 @@ class ChatView {
       }
       this._minimap.appendChild(marker);
     }
+  }
+
+  // Sync minimap position/height to match message list within the container
+  _syncMinimapBounds() {
+    if (!this._minimap || !this._messageList) return;
+    const listRect = this._messageList.getBoundingClientRect();
+    const containerRect = this._container.getBoundingClientRect();
+    this._minimap.style.top = (listRect.top - containerRect.top) + 'px';
+    this._minimap.style.height = listRect.height + 'px';
   }
 
   _updateMinimapThumb() {
