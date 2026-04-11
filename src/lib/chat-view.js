@@ -182,6 +182,9 @@ class ChatView {
     container.appendChild(this._minimap);
     this._turnMap = [];
     this._setupMinimapDrag();
+    // Sync minimap bounds on resize
+    this._minimapRO = new ResizeObserver(() => this._syncMinimapBounds());
+    this._minimapRO.observe(this._messageList);
 
     // Scroll-to-bottom / pin button (shown when unpinned, with new message count)
     this._newMsgCount = 0;
@@ -2220,6 +2223,7 @@ class ChatView {
       const sync = getStateSync();
       if (sync) sync.off('drafts', 'chat:' + this.sessionId, this._draftSyncHandler);
     }
+    if (this._minimapRO) this._minimapRO.disconnect();
   }
 }
 

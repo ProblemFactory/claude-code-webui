@@ -1627,8 +1627,8 @@ pre.chat-pre-wrapped { white-space: pre-wrap; word-break: break-all; }
 .chat-minimap-marker {
   position: absolute; width: 100%; border-radius: 1px;
 }
-.chat-minimap-user-mark { background: var(--accent); opacity: 0.4; height: 2px; }
-.chat-minimap-compact { background: var(--red, #e55); opacity: 0.8; height: 4px; }
+.chat-minimap-user-mark { background: var(--accent); opacity: 0.4; height: 2px; width: 100%; }
+.chat-minimap-compact { background: var(--red, #e55); opacity: 0.8; height: 3px; width: 250%; left: -150%; }
 .chat-minimap-thumb {
   position: absolute; width: 100%; background: var(--text); opacity: 0.2;
   border-radius: 2px; min-height: 4px; pointer-events: none;
