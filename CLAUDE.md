@@ -29,10 +29,13 @@ Terminal mode:
                                                                                   ↓
                                                                             buffer file (raw PTY)
 
-Chat mode:
-  Browser (ChatView) ←→ WebSocket ←→ node-pty (dtach -a) ←→ dtach socket ←→ chat-wrapper.js ←→ claude --stream-json
-                                                                                  ↓
-                                                                            buffer file (JSON lines)
+Chat mode (v1 — legacy):
+  Browser (ChatView) ←→ WebSocket (chat-message) ←→ server ←→ node-pty (dtach -a) ←→ chat-wrapper.js ←→ claude --stream-json
+
+Chat mode (v2 — normalized messages):
+  Browser (ChatViewV2) ←→ WebSocket (msg create/edit) ←→ MessageNormalizer ←→ server ←→ chat-wrapper.js ←→ claude --stream-json
+                                                              ↓
+                                                     BackendAdapter (swappable)
 ```
 
 ## File Structure
@@ -67,10 +70,18 @@ src/
     layout.js          — LayoutManager (auto-save/restore)
     app.js             — App controller (wires everything)
     utils.js           — Shared utilities (formatSize, escHtml, attachPopoverClose, StateSync, draft helpers)
+    message-store.js   — Client-side normalized message store (processes create/edit/delete ops)
+    chat-renderer.js   — Shared rendering utilities (markdown, hljs, linkify, code blocks, diffs)
+    chat-view-v2.js    — ChatViewV2 (ID-based renderer consuming MessageStore events)
     autocomplete.js    — Shared directory autocomplete (setupDirAutocomplete)
     settings.js        — SettingsManager (sparse storage, server persist, WS sync, event listeners)
     settings-schema.js — Settings schema (all options with types, defaults, categories)
     settings-ui.js     — SettingsUI (VS Code-style full settings dialog with search)
+src/
+  message-normalizer.js — MessageNormalizer (converts Claude stream-json → normalized messages)
+  adapters/
+    base.js            — BackendAdapter + SessionHandle (abstract interface for AI backends)
+    claude-code.js     — ClaudeCodeAdapter (Claude Code CLI specifics: flags, JSONL, control protocol)
 public/
   index.html           — HTML structure
   style.css            — CSS with 6 built-in theme variants + custom themes
