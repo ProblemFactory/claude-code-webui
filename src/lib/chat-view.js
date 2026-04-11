@@ -783,6 +783,7 @@ class ChatView {
       this._renderAttachments();
     } else {
       this.ws.send({ type: 'chat-input', sessionId: this.sessionId, text, msgId });
+      this._onCreateMessage({ id: msgId, role: 'user', status: 'complete', content: [{ type: 'text', text }], ts: Date.now() });
     }
     // Re-pin — if we're not at the end of conversation, jump there first
     if (this._windowEnd < this._total) {
