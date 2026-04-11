@@ -249,7 +249,14 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
               if (!session.subagentBuffers.has(toolUseId)) session.subagentBuffers.set(toolUseId, []);
               session.subagentBuffers.get(toolUseId).push(msg);
               broadcastToSession(session, id, { type: 'subagent-message', sessionId: id, parentToolUseId: toolUseId, message: msg });
-              broadcastToSession(session, id, { type: 'chat-message', sessionId: `sub-${toolUseId}`, message: msg });
+              // Normalize for subagent viewers
+              if (!session._subNormalizers) session._subNormalizers = new Map();
+              if (!session._subNormalizers.has(toolUseId)) {
+                const subMM = new MessageManager(`sub-${toolUseId}`);
+                subMM.onOp((op) => broadcastToSession(session, id, { type: 'msg', sessionId: `sub-${toolUseId}`, ...op }));
+                session._subNormalizers.set(toolUseId, subMM);
+              }
+              session._subNormalizers.get(toolUseId).processLive(msg);
             } catch {}
           }
         } catch {}
@@ -299,9 +306,17 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
               if (!session.subagentBuffers.has(ptuid)) session.subagentBuffers.set(ptuid, []);
               session.subagentBuffers.get(ptuid).push(msg);
             }
-            // Broadcast to parent (for tool card status) + virtual session (for subagent viewer)
+            // Broadcast to parent (for tool card status) + normalize for subagent viewers
             broadcastToSession(session, id, { type: 'subagent-message', sessionId: id, parentToolUseId: ptuid, message: msg });
-            if (ptuid) broadcastToSession(session, id, { type: 'chat-message', sessionId: `sub-${ptuid}`, message: msg });
+            if (ptuid) {
+              if (!session._subNormalizers) session._subNormalizers = new Map();
+              if (!session._subNormalizers.has(ptuid)) {
+                const subMM = new MessageManager(`sub-${ptuid}`);
+                subMM.onOp((op) => broadcastToSession(session, id, { type: 'msg', sessionId: `sub-${ptuid}`, ...op }));
+                session._subNormalizers.set(ptuid, subMM);
+              }
+              session._subNormalizers.get(ptuid).processLive(msg);
+            }
             continue;
           }
           // Feed into MessageManager (emits normalized msg ops to all clients)
@@ -1581,19 +1596,17 @@ app.get('/api/subagent-messages', (req, res) => {
     try {
       if (!fs.existsSync(filePath)) continue;
       const content = fs.readFileSync(filePath, 'utf-8');
-      const messages = [];
+      const rawMsgs = [];
       for (const line of content.split('\n')) {
         const trimmed = line.trim();
         if (!trimmed) continue;
-        try {
-          const msg = JSON.parse(trimmed);
-          if (msg.type === 'user' || msg.type === 'assistant' || msg.type === 'result') messages.push(msg);
-        } catch {}
+        try { const msg = JSON.parse(trimmed); rawMsgs.push(msg); } catch {}
       }
-      // Read meta
       let meta = {};
       try { meta = JSON.parse(fs.readFileSync(filePath.replace('.jsonl', '.meta.json'), 'utf-8')); } catch {}
-      return res.json({ messages, total: messages.length, meta });
+      const mm = new MessageManager(`sub-agent-${agentId}`);
+      mm.convertHistory(rawMsgs);
+      return res.json({ messages: mm.messages, total: mm.total, meta });
     } catch {}
   }
   res.json({ messages: [], total: 0, meta: {} });
@@ -1919,7 +1932,8 @@ wss.on('connection', (ws) => {
           // Mark with _fromWebui so dedup can remove it when JSONL version arrives.
           userMsg._fromWebui = true;
           session.buffer = (session.buffer + JSON.stringify(userMsg) + '\n').slice(-500000);
-          broadcastToSession(session, data.sessionId, { type: 'chat-message', sessionId: data.sessionId, message: userMsg });
+          // Normalize and broadcast to other clients (sender already shows local preview)
+          if (session._normalizer) session._normalizer.processLive(userMsg);
         }
         break;
       }
@@ -1972,7 +1986,7 @@ wss.on('connection', (ws) => {
             const cwd = parentSession?.cwd || data.cwd || '';
             const projectsDir = path.join(os.homedir(), '.claude', 'projects');
             const projDir = cwdToProjectDir(cwd);
-            let messages = [], meta = {};
+            let rawMsgs = [], meta = {};
             const candidates = [path.join(projectsDir, projDir, claudeId, 'subagents')];
             try { for (const dir of fs.readdirSync(projectsDir)) { const fp = path.join(projectsDir, dir, claudeId, 'subagents'); if (!candidates.includes(fp)) candidates.push(fp); } } catch {}
             for (const subDir of candidates) {
@@ -1980,13 +1994,15 @@ wss.on('connection', (ws) => {
               try {
                 if (!fs.existsSync(fp)) continue;
                 for (const line of fs.readFileSync(fp, 'utf-8').split('\n')) {
-                  try { const m = JSON.parse(line.trim()); if (m.type === 'user' || m.type === 'assistant' || m.type === 'result') messages.push(m); } catch {}
+                  try { const m = JSON.parse(line.trim()); if (m.type === 'user' || m.type === 'assistant' || m.type === 'result') rawMsgs.push(m); } catch {}
                 }
                 try { meta = JSON.parse(fs.readFileSync(fp.replace('.jsonl', '.meta.json'), 'utf-8')); } catch {}
                 break;
               } catch {}
             }
-            ws.send(JSON.stringify({ type: 'attached', sessionId: subId, mode: 'chat', chatHistory: messages, totalCount: messages.length, meta }));
+            const subMM = new MessageManager(subId);
+            subMM.convertHistory(rawMsgs);
+            ws.send(JSON.stringify({ type: 'attached', sessionId: subId, mode: 'chat', messages: subMM.messages, totalCount: subMM.total, meta }));
           } else {
             // Live agent: sub-{parentToolUseId} — find parent session and return buffered messages
             const toolUseId = subId.slice('sub-'.length);
@@ -1994,13 +2010,22 @@ wss.on('connection', (ws) => {
             for (const [sid, sess] of activeSessions) {
               if (sess.subagentBuffers?.has(toolUseId)) {
                 sess.clients.set(ws, { cols: 120, rows: 30 }); // register for broadcasts
-                const msgs = sess.subagentBuffers.get(toolUseId);
-                ws.send(JSON.stringify({ type: 'attached', sessionId: subId, mode: 'chat', chatHistory: msgs, totalCount: msgs.length }));
+                const rawMsgs = sess.subagentBuffers.get(toolUseId);
+                // Use existing sub-normalizer if available, or create one
+                if (!sess._subNormalizers) sess._subNormalizers = new Map();
+                let subMM = sess._subNormalizers.get(toolUseId);
+                if (!subMM) {
+                  subMM = new MessageManager(subId);
+                  subMM.onOp((op) => broadcastToSession(sess, sid, { type: 'msg', sessionId: subId, ...op }));
+                  subMM.convertHistory(rawMsgs);
+                  sess._subNormalizers.set(toolUseId, subMM);
+                }
+                ws.send(JSON.stringify({ type: 'attached', sessionId: subId, mode: 'chat', messages: subMM.messages, totalCount: subMM.total }));
                 found = true;
                 break;
               }
             }
-            if (!found) ws.send(JSON.stringify({ type: 'attached', sessionId: subId, mode: 'chat', chatHistory: [], totalCount: 0 }));
+            if (!found) ws.send(JSON.stringify({ type: 'attached', sessionId: subId, mode: 'chat', messages: [], totalCount: 0 }));
           }
           break;
         }

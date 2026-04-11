@@ -1762,15 +1762,14 @@ class ChatView {
         else pending.appendChild(statusEl);
       }
       const count = this._subagentCounts.get(parentToolUseId);
+      // Detect activity from raw subagent message
       let activity = '';
-      if (msg.type === 'assistant') {
-        const c = msg.message?.content;
-        if (Array.isArray(c)) {
-          const last = c[c.length - 1];
-          if (last?.type === 'tool_use') activity = `running ${last.name}`;
-          else if (last?.type === 'thinking') activity = 'thinking';
-          else activity = 'responding';
-        }
+      const c = msg.message?.content || msg.content;
+      if (Array.isArray(c)) {
+        const last = c[c.length - 1];
+        if (last?.type === 'tool_use' || last?.type === 'tool_call') activity = `running ${last.name || last.toolName || 'tool'}`;
+        else if (last?.type === 'thinking') activity = 'thinking';
+        else if (last?.type === 'text') activity = 'responding';
       }
       // Find description from stored messages
       const toolMsg = this._messages.find(m => m.toolCallId === parentToolUseId);
