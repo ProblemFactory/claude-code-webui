@@ -666,10 +666,12 @@ class ChatView {
 
     const scrollHeightBefore = this._messageList.scrollHeight;
     const firstEl = this._messageList.querySelector('.chat-msg');
+    this._loadingHistory = true;
     for (const msg of msgs) {
       const el = this._renderDetached(msg);
       if (el && firstEl) this._messageList.insertBefore(el, firstEl);
     }
+    this._loadingHistory = false;
     this._windowStart = newStart;
 
     // Preserve scroll position
@@ -692,7 +694,9 @@ class ChatView {
     this._windowEnd = end;
     this._pinned = false;
 
+    this._loadingHistory = true;
     for (const msg of msgs) this._onCreateMessage(msg);
+    this._loadingHistory = false;
 
     // Scroll to the target message
     const relIdx = targetIdx - start;
@@ -716,7 +720,9 @@ class ChatView {
     this._windowStart = start;
     this._windowEnd = this._total;
 
+    this._loadingHistory = true;
     for (const msg of msgs) this._onCreateMessage(msg);
+    this._loadingHistory = false;
     this._pinned = true;
     this._newMsgCount = 0;
     this._scrollBtn.classList.add('hidden');
@@ -1959,7 +1965,9 @@ class ChatView {
     const missedStart = this._windowEnd;
     this._fetchMessages(missedStart, 200).then(msgs => {
       if (!msgs.length) return;
+      this._loadingHistory = true;
       for (const msg of msgs) this._onCreateMessage(msg);
+      this._loadingHistory = false;
       if (this._pinned) this._scrollToBottom();
     }).catch(() => {});
   }
