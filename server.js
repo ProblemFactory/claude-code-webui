@@ -1186,42 +1186,54 @@ function cwdToProjectDir(cwd) {
 }
 
 // Parse a Claude session JSONL file into chat messages
-function parseSessionJsonl(claudeSessionId, cwd) {
+// Find JSONL file path for a session
+function findSessionJsonlPath(claudeSessionId, cwd) {
   const projectsDir = path.join(os.homedir(), '.claude', 'projects');
-  // Try exact project dir from cwd
   const projDir = cwdToProjectDir(cwd || '');
   const candidates = [];
   if (cwd) candidates.push(path.join(projectsDir, projDir, claudeSessionId + '.jsonl'));
-  // Also scan all project dirs as fallback
   try {
     for (const dir of fs.readdirSync(projectsDir)) {
       const fp = path.join(projectsDir, dir, claudeSessionId + '.jsonl');
       if (!candidates.includes(fp)) candidates.push(fp);
     }
   } catch {}
-
-  for (const filePath of candidates) {
-    try {
-      if (!fs.existsSync(filePath)) continue;
-      const content = fs.readFileSync(filePath, 'utf-8');
-      const messages = [];
-      for (const line of content.split('\n')) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        try {
-          const msg = JSON.parse(trimmed);
-          // Only include user/assistant/result messages (skip system/hooks/internal)
-          // Skip subagent messages (have parent_tool_use_id or isSidechain)
-          if (msg.parent_tool_use_id || msg.isSidechain) continue;
-          if (msg.type === 'user' || msg.type === 'assistant' || msg.type === 'result' || (msg.type === 'system' && msg.subtype === 'init')) {
-            messages.push(msg);
-          }
-        } catch {}
-      }
-      return messages;
-    } catch {}
+  for (const fp of candidates) {
+    try { if (fs.existsSync(fp)) return fp; } catch {}
   }
-  return [];
+  return null;
+}
+
+// Filter: is this a displayable chat message?
+function isChatMessage(msg) {
+  if (msg.parent_tool_use_id || msg.isSidechain) return false;
+  return msg.type === 'user' || msg.type === 'assistant' || msg.type === 'result' || (msg.type === 'system' && msg.subtype === 'init');
+}
+
+// JSONL parse cache — avoids re-parsing the same file on repeated attach/pagination
+const _jsonlCache = new Map(); // claudeSessionId → { mtimeMs, size, messages }
+
+function parseSessionJsonl(claudeSessionId, cwd) {
+  const fp = findSessionJsonlPath(claudeSessionId, cwd);
+  if (!fp) return [];
+  try {
+    const stat = fs.statSync(fp);
+    const cached = _jsonlCache.get(claudeSessionId);
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.messages;
+
+    const content = fs.readFileSync(fp, 'utf-8');
+    const messages = [];
+    for (const line of content.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const msg = JSON.parse(trimmed);
+        if (isChatMessage(msg)) messages.push(msg);
+      } catch {}
+    }
+    _jsonlCache.set(claudeSessionId, { mtimeMs: stat.mtimeMs, size: stat.size, messages });
+    return messages;
+  } catch { return []; }
 }
 
 function isProcessClaude(pid) {
@@ -1843,35 +1855,39 @@ wss.on('connection', (ws) => {
                 bufferMessages.push(msg);
               } catch {}
             }
-            // Buffer messages are always from current run (after JSONL)
-            const allMessages = [...jsonlHistory, ...bufferMessages];
-
             // Use JSONL total for pagination (consistent with /api/session-messages)
             // Buffer messages are appended as extra (not counted in pagination total)
             const jsonlTotal = jsonlHistory.length;
             const PAGE_SIZE = 50;
             const chatHistory = jsonlHistory.slice(-PAGE_SIZE);
             const totalCount = jsonlTotal;
-            // Append buffer-only messages after JSONL history (these are "live" from current run)
-            if (bufferMessages.length) chatHistory.push(...bufferMessages);
+            // Append buffer-only messages (current run) — cap to prevent huge payloads
+            if (bufferMessages.length) chatHistory.push(...bufferMessages.slice(-200));
 
-            // Extract latest status: last assistant's per-turn usage + cumulative cost
+            // Extract chatStatus: scan buffer first (most recent), then JSONL tail
+            // No need to create allMessages array — scan in reverse priority order
             let chatStatus = null;
             let lastUsage = null, model = null, contextWindow = 0, totalCost = 0, slashCommands = null;
-            for (let i = allMessages.length - 1; i >= 0; i--) {
-              const m = allMessages[i];
-              if (!lastUsage && m.type === 'assistant' && m.message?.usage) {
-                lastUsage = m.message.usage;
-              }
-              if (!model && m.type === 'result' && m.modelUsage) {
-                model = Object.keys(m.modelUsage)[0];
-                contextWindow = Object.values(m.modelUsage)[0]?.contextWindow || 0;
-              }
+            // Scan buffer messages (recent) for usage/model
+            for (let i = bufferMessages.length - 1; i >= 0; i--) {
+              const m = bufferMessages[i];
+              if (!lastUsage && m.type === 'assistant' && m.message?.usage) lastUsage = m.message.usage;
+              if (!model && m.type === 'result' && m.modelUsage) { model = Object.keys(m.modelUsage)[0]; contextWindow = Object.values(m.modelUsage)[0]?.contextWindow || 0; }
               if (lastUsage && model) break;
             }
-            // Find slash_commands + permissionMode from system.init
+            // If not found in buffer, scan JSONL tail (last 100 messages max)
+            if (!lastUsage || !model) {
+              for (let i = jsonlHistory.length - 1; i >= Math.max(0, jsonlHistory.length - 100); i--) {
+                const m = jsonlHistory[i];
+                if (!lastUsage && m.type === 'assistant' && m.message?.usage) lastUsage = m.message.usage;
+                if (!model && m.type === 'result' && m.modelUsage) { model = Object.keys(m.modelUsage)[0]; contextWindow = Object.values(m.modelUsage)[0]?.contextWindow || 0; }
+                if (lastUsage && model) break;
+              }
+            }
+            // system.init is always near the start
             let permissionMode = null;
-            for (const m of allMessages) {
+            for (let i = 0; i < Math.min(jsonlHistory.length, 5); i++) {
+              const m = jsonlHistory[i];
               if (m.type === 'system' && m.subtype === 'init') {
                 if (m.slash_commands) slashCommands = m.slash_commands;
                 if (!model && m.model) model = m.model;
@@ -1879,9 +1895,9 @@ wss.on('connection', (ws) => {
                 break;
               }
             }
-            for (const m of allMessages) {
-              if (m.type === 'result' && m.total_cost_usd) totalCost += m.total_cost_usd;
-            }
+            // Total cost: sum all result messages (uses cached jsonlHistory)
+            for (const m of jsonlHistory) { if (m.type === 'result' && m.total_cost_usd) totalCost += m.total_cost_usd; }
+            for (const m of bufferMessages) { if (m.type === 'result' && m.total_cost_usd) totalCost += m.total_cost_usd; }
             if (lastUsage || model) {
               chatStatus = { model, lastUsage, contextWindow, total_cost_usd: totalCost, slashCommands, permissionMode, permissionModes: PERMISSION_MODES, subagentMetas: getSubagentMetas(session.claudeSessionId, session.cwd) };
             }
