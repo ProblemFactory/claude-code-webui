@@ -305,8 +305,7 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
             continue;
           }
           if (msg.type === 'assistant' || msg.type === 'result') session._waitingForResponse = false;
-          broadcastToSession(session, id, { type: 'chat-message', sessionId: id, message: msg });
-          // Feed into normalizer for v2 clients (emits msg ops via listener)
+          // Feed into MessageManager (emits normalized msg ops to all clients)
           if (session._normalizer) session._normalizer.processLive(msg);
         } catch {
           // Non-JSON line (e.g. dtach noise) — send as raw output
@@ -2008,25 +2007,15 @@ wss.on('connection', (ws) => {
           attachedSessions.add(data.sessionId);
           if (session.mode === 'chat') {
             const sm = new SessionMessages(session, data.sessionId);
-            const chatHistory = sm.tail(50);
-            const activeSubagents = {};
-            if (session.subagentBuffers) {
-              for (const [toolUseId, msgs] of session.subagentBuffers) {
-                if (msgs.length > 0 && !msgs.some(m => m.type === 'result')) activeSubagents[toolUseId] = { count: msgs.length };
-              }
-            }
-            // Initialize normalizer from history if not yet done (first attach after server restart)
+            // Initialize normalizer from history if not yet done
             if (session._normalizer && session._normalizer.total === 0) {
               session._normalizer.convertHistory(sm.raw());
             }
-            // V2 normalized messages for new clients
-            const v2Messages = session._normalizer ? session._normalizer.tail(50) : [];
-            const v2Total = session._normalizer ? session._normalizer.total : 0;
+            const messages = session._normalizer ? session._normalizer.tail(50) : [];
+            const totalCount = session._normalizer ? session._normalizer.total : 0;
 
             ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, mode: 'chat',
-              chatHistory, totalCount: sm.total, chatStatus: sm.chatStatus(), isStreaming: sm.isStreaming,
-              pendingPermissions: sm.activePendingPermissions(), activeSubagents, taskState: sm.taskState(),
-              v2: { messages: v2Messages, total: v2Total } }));
+              messages, totalCount, chatStatus: sm.chatStatus(), isStreaming: sm.isStreaming, taskState: sm.taskState() }));
           } else {
             ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, buffer: session.buffer || '' }));
           }
