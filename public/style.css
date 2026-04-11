@@ -1633,6 +1633,7 @@ pre.chat-pre-wrapped { white-space: pre-wrap; word-break: break-all; }
   position: absolute; width: 100%; background: var(--text); opacity: 0.2;
   border-radius: 2px; min-height: 4px; pointer-events: none;
 }
+.chat-minimap-label.hidden { display: none; }
 .chat-minimap-label {
   position: absolute; right: 20px; transform: translateY(-50%);
   background: var(--bg-dialog); color: var(--text); border: 1px solid var(--border);
