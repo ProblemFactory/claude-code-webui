@@ -536,10 +536,15 @@ class ChatView {
             if (task.type === 'agent') {
               this._openSubagentViewer({ parentToolUseId: toolUseId, description: task.description });
             } else {
-              // Open command input + output in editor
-              let text = `[${task.toolName || 'Bash'}] ${task.description}\n\n`;
-              if (task.command) text += `--- Command ---\n${task.command}\n\n`;
-              if (task.resultText) text += `--- Output ---\n${task.resultText}\n`;
+              // Open command input + output in editor — look up tool message for full details
+              const toolMsg = this._messages.find(m => m.toolCallId === toolUseId);
+              const block = toolMsg?.content?.[0];
+              const input = block?.input || {};
+              const toolName = task.toolName || block?.toolName || 'Bash';
+              const command = task.command || input.command || JSON.stringify(input, null, 2);
+              const output = task.resultText || block?.output || '';
+              let text = `[${toolName}] ${task.description}\n\n--- Command ---\n${command}\n`;
+              if (output) text += `\n--- Output ---\n${output}\n`;
               this._openInTempEditor(text);
             }
           };
