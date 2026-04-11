@@ -816,12 +816,10 @@ class ChatView {
     this._renderedMsgIds.add(msg.id);
     this._messages.push(msg);
 
-    // Streaming indicator — only for live messages (not history batch)
+    // Streaming indicator for live messages (server isStreaming is authority for initial state)
     if (!this._loadingHistory && (msg.status === 'streaming' || msg.status === 'pending')) {
-      if (this._streamStatus) {
-        const label = msg.role === 'tool' ? `running ${msg.toolName || 'tool'}...` : msg.content?.[0]?.type === 'thinking' ? 'thinking...' : 'responding...';
-        this._showTyping(label);
-      }
+      const label = msg.role === 'tool' ? `running ${msg.toolName || 'tool'}...` : msg.content?.[0]?.type === 'thinking' ? 'thinking...' : 'responding...';
+      this._showTyping(label);
     }
 
     let el;

@@ -1377,12 +1377,16 @@ class SessionMessages {
   /** Pending permission control_requests */
   get pendingPermissions() { this._ensureParsed(); return this._pendingPerms; }
 
-  /** Whether Claude is currently outputting */
+  /** Whether Claude is currently outputting — reads from wrapper metadata (source of truth) */
   get isStreaming() {
-    this._ensureParsed();
+    // Wrapper metadata is authoritative (set by chat-wrapper.js inside dtach)
+    const wMeta = this.wrapperMeta();
+    if (wMeta?.streaming != null) return wMeta.streaming;
+    // Fallback: infer from session state (for sessions without updated wrapper)
     if (this._session._waitingForResponse) return true;
+    this._ensureParsed();
     const last = this._all.length > 0 ? this._all[this._all.length - 1] : null;
-    return last && last.type !== 'result' && last.type !== 'system';
+    return !!(last && last.type !== 'result' && last.type !== 'system');
   }
 
   /** Last N displayable messages (for initial attach / chat rendering) */
