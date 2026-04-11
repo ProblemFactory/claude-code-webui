@@ -2058,6 +2058,13 @@ wss.on('connection', (ws) => {
           } else {
             ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, buffer: session.buffer || '' }));
           }
+        } else if (data.viewOnly && data.claudeSessionId) {
+          // View-only: load JSONL history without an active session
+          const sm = new SessionMessages({ claudeSessionId: data.claudeSessionId, cwd: data.cwd || '', buffer: '' });
+          const mm = new MessageManager(data.sessionId || 'view');
+          mm.convertHistory(sm.raw());
+          ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: data.name || '', cwd: data.cwd || '', mode: 'chat',
+            messages: mm.tail(50), totalCount: mm.total, chatStatus: sm.chatStatus(), isStreaming: false, viewOnly: true }));
         } else {
           ws.send(JSON.stringify({ type: 'error', message: `Session ${data.sessionId} not found` }));
         }

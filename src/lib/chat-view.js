@@ -588,6 +588,7 @@ class ChatView {
       } else if (msg.type === 'exited' && msg.sessionId === sessionId) {
         this._appendSystem('Session ended.');
         this._hideTyping();
+        this._setReadOnly();
       }
     };
     this.ws.onGlobal(this._handler);
@@ -1992,6 +1993,18 @@ class ChatView {
   focus() {
     if (this._textarea) this._textarea.focus();
     this._clearWaiting();
+  }
+
+  // Convert to read-only mode (after session terminate/exit)
+  _setReadOnly() {
+    this._readOnly = true;
+    if (this._textarea) {
+      this._textarea.disabled = true;
+      this._textarea.placeholder = 'Session ended';
+    }
+    // Hide send/interrupt buttons
+    const inputArea = this._container?.querySelector('.chat-input-area');
+    if (inputArea) inputArea.style.display = 'none';
   }
 
   dispose() {

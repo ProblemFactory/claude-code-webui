@@ -940,6 +940,13 @@ class Sidebar {
 
       resumeWrap.append(resumeBtn, dropBtn);
       actionsDiv.appendChild(resumeWrap);
+
+      // View History button (read-only, no resume)
+      const viewBtn = document.createElement('button');
+      viewBtn.className = 'session-detail-btn';
+      viewBtn.textContent = '\uD83D\uDCCB View History';
+      viewBtn.onclick = (e) => { e.stopPropagation(); this.app.viewSession(s.sessionId, s.cwd, customName || s.name); };
+      actionsDiv.appendChild(viewBtn);
     }
 
     // Terminate button (for any running session)

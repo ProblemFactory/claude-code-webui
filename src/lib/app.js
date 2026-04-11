@@ -806,8 +806,9 @@ class App {
           if (msg.messages?.length) {
             chatView.loadHistory(msg.messages, msg.totalCount, msg.isStreaming, { chatStatus: msg.chatStatus, taskState: msg.taskState });
           }
+          if (msg.viewOnly) chatView._setReadOnly();
           winInfo.onClose = () => {
-            const shouldKill = (this.settings.get('window.closeBehavior') ?? 'terminate') === 'terminate';
+            const shouldKill = !msg.viewOnly && (this.settings.get('window.closeBehavior') ?? 'terminate') === 'terminate';
             if (shouldKill) this.ws.send({ type: 'kill', sessionId: serverId });
             chatView.dispose(); this.sessions.delete(winInfo.id); this._checkWelcome();
           };
@@ -878,6 +879,31 @@ class App {
 
     const sessionMode = mode || (this.settings.get('session.defaultMode') ?? 'chat');
     this.createSession({ cwd, name: sessionName, resumeId: sessionId, mode: sessionMode });
+  }
+
+  // Open a stopped session as view-only (load JSONL, no claude --resume)
+  viewSession(sessionId, cwd, sessionName) {
+    this._closeSidebarOnMobile();
+    this._hideWelcome();
+    const titlePrefix = '\uD83D\uDCCB ';
+    const winInfo = this.wm.createWindow({ title: `${titlePrefix}${sessionName || 'History'} — ${cwd}`, type: 'chat' });
+    const chatView = new ChatView(winInfo, this.ws, `view-${sessionId}`, this, { readOnly: true });
+    this.sessions.set(winInfo.id, chatView);
+
+    // Request view-only attach — server loads JSONL without spawning claude
+    this.ws.send({ type: 'attach', sessionId: `view-${sessionId}`, viewOnly: true, claudeSessionId: sessionId, cwd, name: sessionName });
+
+    const handler = (msg) => {
+      if (msg.type === 'attached' && msg.sessionId === `view-${sessionId}`) {
+        this.ws.offGlobal(handler);
+        if (msg.messages?.length) {
+          chatView.loadHistory(msg.messages, msg.totalCount, false, { chatStatus: msg.chatStatus });
+        }
+      }
+    };
+    this.ws.onGlobal(handler);
+    winInfo.onClose = () => { chatView.dispose(); this.sessions.delete(winInfo.id); this._checkWelcome(); };
+    winInfo._notifyChanged = () => this.updateTaskbar();
   }
 
   openFileExplorer(startPath) {
