@@ -178,8 +178,8 @@ class ChatView {
     this._minimapLabel = document.createElement('div');
     this._minimapLabel.className = 'chat-minimap-label hidden';
     this._minimap.appendChild(this._minimapThumb);
-    this._minimap.appendChild(this._minimapLabel);
     container.appendChild(this._minimap);
+    container.appendChild(this._minimapLabel);
     this._turnMap = [];
     this._setupMinimapDrag();
     // Sync minimap bounds on resize
@@ -2143,7 +2143,7 @@ class ChatView {
 
     const updateLabel = (e, turn) => {
       if (!turn || !this._minimapLabel) return;
-      const rect = this._minimap.getBoundingClientRect();
+      const containerRect = this._container.getBoundingClientRect();
       const d = new Date(turn.ts);
       const now = new Date();
       const isToday = d.toDateString() === now.toDateString();
@@ -2152,7 +2152,7 @@ class ChatView {
       const preview = turn.preview || '';
       this._minimapLabel.textContent = preview ? `${time} · ${preview}` : time;
       this._minimapLabel.classList.remove('hidden');
-      this._minimapLabel.style.top = (e.clientY - rect.top) + 'px';
+      this._minimapLabel.style.top = (e.clientY - containerRect.top) + 'px';
     };
 
     // Debounced jump — only executes the last requested position
@@ -2214,7 +2214,7 @@ class ChatView {
 
     // Remove old turn segments (keep thumb and label)
     for (const el of [...this._minimap.children]) {
-      if (el !== this._minimapThumb && el !== this._minimapLabel) el.remove();
+      if (el !== this._minimapThumb) el.remove();
     }
 
     // Render markers for user messages and compact points

@@ -1634,7 +1634,7 @@ pre.chat-pre-wrapped { white-space: pre-wrap; word-break: break-all; }
   border-radius: 2px; min-height: 4px; pointer-events: none;
 }
 .chat-minimap-label {
-  position: absolute; right: 16px; transform: translateY(-50%);
+  position: absolute; right: 20px; transform: translateY(-50%);
   background: var(--bg-dialog); color: var(--text); border: 1px solid var(--border);
   border-radius: 4px; padding: 2px 8px; font-size: 11px; white-space: nowrap;
   pointer-events: none; z-index: 20; box-shadow: 0 2px 8px rgba(0,0,0,0.2);
