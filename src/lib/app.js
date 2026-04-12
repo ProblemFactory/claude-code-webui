@@ -786,7 +786,7 @@ class App {
 
   openEditor(filePath, fileName, opts = {}) {
     this._hideWelcome();
-    const title = opts._tempFile ? `View: ${fileName}` : `Edit: ${fileName}`;
+    const title = opts._tempFile ? `View: ${fileName}` : filePath;
     const openSpec = opts._tempFile ? undefined : { action: 'openEditor', path: filePath, name: fileName };
     const winInfo = this.wm.createWindow({ title, type: 'editor', syncId: opts.syncId, openSpec });
     winInfo._filePath = filePath; winInfo._fileName = fileName;

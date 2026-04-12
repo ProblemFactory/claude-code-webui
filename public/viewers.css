@@ -285,7 +285,6 @@
 .editor-toolbar-left {
   display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1; overflow: hidden;
 }
-.editor-toolbar-left .file-path { flex: 0 1 auto; }
 .editor-toolbar-right { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
 .editor-toolbar-sep {
   width: 1px; height: 16px; background: var(--border); margin: 0 2px; flex-shrink: 0;

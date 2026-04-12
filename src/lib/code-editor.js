@@ -51,7 +51,7 @@ function loadEditorSettings() {
     const raw = localStorage.getItem('editorSettings');
     if (raw) return JSON.parse(raw);
   } catch {}
-  return { wordWrap: false, fontSize: 14, theme: 'dark' };
+  return { wordWrap: false, fontSize: 14 };
 }
 
 function saveEditorSettings(settings) {
@@ -82,17 +82,13 @@ class CodeEditor {
 
     const container = document.createElement('div'); container.className = 'editor-container';
 
-    // Editor toolbar
+    // Editor toolbar — left: save indicator, right: controls
     const toolbar = document.createElement('div'); toolbar.className = 'editor-toolbar';
 
-    // Left: file path + save indicator
     const toolbarLeft = document.createElement('div'); toolbarLeft.className = 'editor-toolbar-left';
-    const pathSpan = document.createElement('span'); pathSpan.className = 'file-path'; pathSpan.textContent = fileName || filePath.split('/').pop();
-    pathSpan.title = filePath;
     this.saveIndicator = document.createElement('span'); this.saveIndicator.className = 'save-indicator';
-    toolbarLeft.append(pathSpan, this.saveIndicator);
+    toolbarLeft.append(this.saveIndicator);
 
-    // Right: controls
     const toolbarRight = document.createElement('div'); toolbarRight.className = 'editor-toolbar-right';
 
     // Language selector
@@ -136,7 +132,7 @@ class CodeEditor {
 
     const sep = () => { const s = document.createElement('span'); s.className = 'editor-toolbar-sep'; return s; };
 
-    // Word wrap toggle — icon-style, no text label
+    // Word wrap toggle
     const btnWrap = this._btn('\u21A9'); btnWrap.title = 'Toggle word wrap';
     if (this._settings.wordWrap) btnWrap.classList.add('active');
     btnWrap.onclick = () => {
@@ -155,24 +151,14 @@ class CodeEditor {
     sizeDown.onclick = () => this._changeFontSize(-1);
     sizeUp.onclick = () => this._changeFontSize(1);
 
-    // Theme toggle — icon-style
-    const btnTheme = this._btn(this._settings.theme === 'dark' ? '\u263E' : '\u2600');
-    btnTheme.title = 'Toggle editor theme';
-    btnTheme.onclick = () => {
-      this._settings.theme = this._settings.theme === 'dark' ? 'light' : 'dark';
-      btnTheme.textContent = this._settings.theme === 'dark' ? '\u263E' : '\u2600';
-      this._applyTheme();
-      saveEditorSettings(this._settings);
-    };
-
     // Save + download
-    const btnSave = this._btn('\u2913'); btnSave.title = 'Save (Ctrl+S)';
+    const btnSave = this._btn('\u{1F4BE}'); btnSave.title = 'Save (Ctrl+S)';
     btnSave.onclick = () => this.save();
     if (this._isReadOnly) btnSave.style.display = 'none';
     const btnDownload = this._btn('\u21E9'); btnDownload.title = 'Download';
     btnDownload.onclick = () => window.open(`/api/download?path=${encodeURIComponent(filePath)}`);
 
-    toolbarRight.append(this.langSelect, this._btnPreview, sep(), btnWrap, sizeDown, this.fontSizeDisplay, sizeUp, btnTheme, sep(), btnSave, btnDownload);
+    toolbarRight.append(this.langSelect, this._btnPreview, sep(), btnWrap, sizeDown, this.fontSizeDisplay, sizeUp, sep(), btnSave, btnDownload);
     toolbar.append(toolbarLeft, toolbarRight);
 
     this.editorBody = document.createElement('div'); this.editorBody.className = 'editor-body';
@@ -186,6 +172,10 @@ class CodeEditor {
     this._fontSizeCompartment = new Compartment();
     this.editorView = null;
     this._loadFile(opts.content);
+
+    // Follow global theme changes
+    this._themeObserver = new MutationObserver(() => this._applyTheme());
+    this._themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
   }
 
   _btn(text) {
@@ -194,7 +184,9 @@ class CodeEditor {
   }
 
   _getThemeExtension() {
-    return this._settings.theme === 'dark' ? oneDark : editorLightTheme;
+    // Follow global app theme — light theme uses light editor, all others use dark
+    const globalTheme = document.documentElement.getAttribute('data-theme') || 'dark';
+    return globalTheme === 'light' ? editorLightTheme : oneDark;
   }
 
   _getWrapExtension() {
@@ -282,6 +274,7 @@ class CodeEditor {
     }
 
     this.winInfo.onClose = () => {
+      if (this._themeObserver) this._themeObserver.disconnect();
       if (this.onSaveAndClose) { this.save().then(() => this.onSaveAndClose()); }
     };
   }
