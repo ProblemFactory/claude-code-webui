@@ -488,6 +488,8 @@ html, body {
 .taskbar-item:hover { background: var(--bg-hover); color: var(--text); }
 .taskbar-item.active { background: var(--accent-dim); border-color: var(--border-active); color: var(--text); }
 .taskbar-item.minimized { opacity: 0.5; }
+.taskbar-icon { font-size: 10px; flex-shrink: 0; line-height: 1; }
+.taskbar-star { font-size: 9px; color: var(--yellow); flex-shrink: 0; }
 .taskbar-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
 .taskbar-dot.exited { background: var(--text-dim); }
 #taskbar-status { font-size: 10px; color: var(--text-dim); padding: 0 6px; flex-shrink: 0; }

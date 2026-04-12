@@ -528,8 +528,7 @@ class App {
     const sessionEffort = effort || this.settings.get('session.defaultEffort') || undefined;
     const sessionName = name || (resumeId ? `Resume ${resumeId.substring(0,8)}` : `Session ${this.wm.windowCounter+1}`);
     const winType = sessionMode === 'chat' ? 'chat' : 'terminal';
-    const titlePrefix = sessionMode === 'chat' ? '\uD83D\uDCAC ' : '';
-    const winInfo = this.wm.createWindow({ title: `${titlePrefix}${sessionName}`, type: winType, syncId });
+    const winInfo = this.wm.createWindow({ title: sessionName, type: winType, syncId });
 
     this.ws.send({
       type:'create', mode: sessionMode, cwd: cwd||undefined, sessionName: name||undefined, model: model||undefined,
@@ -570,7 +569,7 @@ class App {
           this._wireTerminalWindow(winInfo, term, msg.sessionId);
           term.focus();
         }
-        this.wm.setTitle(winInfo.id, `${titlePrefix}${sessionName} — ${msg.cwd||cwd||'~'}`);
+        this.wm.setTitle(winInfo.id, `${sessionName} — ${msg.cwd||cwd||'~'}`);
         this.ws.offGlobal(handler);
       }
     };
@@ -618,9 +617,8 @@ class App {
 
     this._hideWelcome();
     const isChat = mode === 'chat';
-    const titlePrefix = isChat ? '\uD83D\uDCAC ' : '';
     const openSpec = { action: 'attachSession', serverId, name, cwd, mode };
-    const winInfo = this.wm.createWindow({ title: `${titlePrefix}${name} — ${cwd}`, type: isChat ? 'chat' : 'terminal', syncId, openSpec });
+    const winInfo = this.wm.createWindow({ title: `${name} — ${cwd}`, type: isChat ? 'chat' : 'terminal', syncId, openSpec });
 
     this.ws.send({ type: 'attach', sessionId: serverId });
 
@@ -711,9 +709,8 @@ class App {
   viewSession(sessionId, cwd, sessionName, { syncId } = {}) {
     this._closeSidebarOnMobile();
     this._hideWelcome();
-    const titlePrefix = '\uD83D\uDCCB ';
     const openSpec = { action: 'viewSession', sessionId, cwd, name: sessionName };
-    const winInfo = this.wm.createWindow({ title: `${titlePrefix}${sessionName || 'History'} — ${cwd}`, type: 'chat', syncId, openSpec });
+    const winInfo = this.wm.createWindow({ title: `${sessionName || 'History'} — ${cwd}`, type: 'chat', syncId, openSpec });
     const chatView = new ChatView(winInfo, this.ws, `view-${sessionId}`, this, { readOnly: true });
     this.sessions.set(winInfo.id, chatView);
 

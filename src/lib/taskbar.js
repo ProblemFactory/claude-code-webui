@@ -13,16 +13,19 @@ export function updateTaskbar(app) {
     if (id === app.wm.activeWindowId && !win.isMinimized) item.classList.add('active');
     if (win.isMinimized) item.classList.add('minimized');
     if (win.element.classList.contains('window-waiting')) item.classList.add('waiting');
-    if (win.type === 'terminal') {
-      const term = app.sessions.get(id);
-      // Check if this session is starred
+    // Window type icon
+    if (win._typeIcon) {
+      const icon = document.createElement('span'); icon.className = 'taskbar-icon'; icon.textContent = win._typeIcon;
+      item.appendChild(icon);
+    }
+    // Star indicator for starred sessions
+    const term = app.sessions.get(id);
+    if (term?.sessionId) {
       const allSess = app.sidebar?._allSessions || [];
-      const match = allSess.find(s => s.webuiId && s.webuiId === term?.sessionId);
-      const isStarred = match && app.sidebar.isStarred(match.sessionId);
-      if (isStarred) {
-        const star = document.createElement('span'); star.textContent = '\u2605'; star.style.cssText = 'color:var(--yellow);font-size:10px;margin-right:2px'; item.appendChild(star);
-      } else {
-        const dot = document.createElement('span'); dot.className = 'taskbar-dot'; if (win.exited) dot.classList.add('exited'); item.appendChild(dot);
+      const match = allSess.find(s => s.webuiId && s.webuiId === term.sessionId);
+      if (match && app.sidebar.isStarred(match.sessionId)) {
+        const star = document.createElement('span'); star.className = 'taskbar-star'; star.textContent = '\u2605';
+        item.appendChild(star);
       }
     }
     const label = document.createElement('span'); label.textContent = win.title; item.appendChild(label);
@@ -66,23 +69,13 @@ export function showWindowList(app, anchor) {
     item.className = 'overlap-switcher-item';
     if (id === app.wm.activeWindowId && !win.isMinimized) item.classList.add('active');
 
-    // Check if starred
-    const term = app.sessions.get(id);
-    const allSess = app.sidebar?._allSessions || [];
-    const match = allSess.find(s => s.webuiId && s.webuiId === term?.sessionId);
-    const isStarred = match && app.sidebar.isStarred(match.sessionId);
-
-    const indicator = document.createElement('span');
-    if (isStarred) {
-      indicator.textContent = '\u2605'; indicator.style.cssText = 'color:var(--yellow);font-size:11px;flex-shrink:0';
-    } else {
-      indicator.className = 'taskbar-dot';
-      if (win.exited) indicator.classList.add('exited');
-    }
-    if (win.isMinimized) indicator.style.opacity = '0.4';
+    const icon = document.createElement('span');
+    icon.textContent = win._typeIcon || '';
+    icon.style.cssText = 'font-size:11px;flex-shrink:0';
+    if (win.isMinimized) icon.style.opacity = '0.4';
     const label = document.createElement('span');
     label.textContent = (win.isMinimized ? '\u229E ' : '') + win.title;
-    item.append(indicator, label);
+    item.append(icon, label);
     item.onclick = () => {
       if (win.isMinimized) app.wm.restore(id);
       else app.wm.focusWindow(id);
