@@ -444,15 +444,16 @@ class WindowManager {
     };
     const onClick = (e) => {
       e.preventDefault();
+      e.stopImmediatePropagation();
       el.style.cursor = '';
       document.body.style.cursor = '';
       document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mousedown', onClick);
+      document.removeEventListener('mousedown', onClick, true);
       this._captureGridBounds(win);
       this._notify();
     };
     document.addEventListener('mousemove', onMove);
-    document.addEventListener('mousedown', onClick);
+    document.addEventListener('mousedown', onClick, true); // capture phase to intercept before other handlers
   }
 
   toggleMaximize(id) {
