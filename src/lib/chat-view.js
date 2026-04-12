@@ -1,5 +1,5 @@
 import { marked } from 'marked';
-import { escHtml, saveDraft, loadDraft, clearDraft, getStateSync } from './utils.js';
+import { escHtml, copyText, saveDraft, loadDraft, clearDraft, getStateSync } from './utils.js';
 import { detectHljsLang, getHljsLanguages, renderCodeBlock, rehighlightCodeBlock, stripAnsi } from './highlight.js';
 import { ChatMinimap } from './chat-minimap.js';
 
@@ -965,6 +965,18 @@ class ChatView {
   // ── Normalized message renderers ──
   // These produce DOM elements from normalized messages (role-based dispatch)
 
+  // Shared compact/bubble wrapper for user, assistant, and tool messages.
+  // role: 'user' | 'assistant' | 'tool'. Tool messages have no bubble in non-compact mode.
+  _wrapMsg(el, role, label, html) {
+    if (this._compact) {
+      el.innerHTML = `<div class="chat-compact-msg"><span class="chat-role chat-role-${role}">${label}</span><div class="chat-compact-content">${html}</div></div>`;
+    } else if (role === 'tool') {
+      el.innerHTML = html;
+    } else {
+      el.innerHTML = `<div class="chat-bubble chat-bubble-${role}">${html}</div>`;
+    }
+  }
+
   _renderUserMsg(msg) {
     const content = msg.content;
     if (!content?.length) return null;
@@ -982,11 +994,7 @@ class ChatView {
       ? `<details class="chat-long-msg"><summary><span>${escHtml(rawText.substring(0, 120))}... (${rawText.length} chars)</span></summary>${parts}</details>`
       : parts;
 
-    if (this._compact) {
-      el.innerHTML = `<div class="chat-compact-msg"><span class="chat-role chat-role-user">You</span><div class="chat-compact-content">${textHtml}</div></div>`;
-    } else {
-      el.innerHTML = `<div class="chat-bubble chat-bubble-user">${textHtml}</div>`;
-    }
+    this._wrapMsg(el, 'user', 'You', textHtml);
     return el;
   }
 
@@ -1004,11 +1012,7 @@ class ChatView {
     } else {
       return null;
     }
-    if (this._compact) {
-      el.innerHTML = `<div class="chat-compact-msg"><span class="chat-role chat-role-assistant">Claude</span><div class="chat-compact-content">${html}</div></div>`;
-    } else {
-      el.innerHTML = `<div class="chat-bubble chat-bubble-assistant">${html}</div>`;
-    }
+    this._wrapMsg(el, 'assistant', 'Claude', html);
     return el;
   }
 
@@ -1046,12 +1050,8 @@ class ChatView {
       html = `<pre>${escHtml(JSON.stringify(block, null, 2))}</pre>`;
     }
 
-    if (this._compact) {
-      const roleLabel = msg.toolStatus === 'error' ? '\u2717' : msg.status === 'pending' ? '\u23F3' : '\u2713';
-      el.innerHTML = `<div class="chat-compact-msg"><span class="chat-role chat-role-tool">${roleLabel}</span><div class="chat-compact-content">${html}</div></div>`;
-    } else {
-      el.innerHTML = html;
-    }
+    const toolLabel = msg.toolStatus === 'error' ? '\u2717' : msg.status === 'pending' ? '\u23F3' : '\u2713';
+    this._wrapMsg(el, 'tool', toolLabel, html);
 
     // Permission overlay
     if (msg.permission) this._renderPermissionOverlay(el, msg);
@@ -1376,74 +1376,63 @@ class ChatView {
   // Strip trailing punctuation from matched paths/URLs
   _cleanPath(p) { return p.replace(/[`'".,;:!?)}\]]+$/, ''); }
 
+  // ── Linkification helpers (shared core) ──
+
+  // Linkify URLs in a text segment. esc=true wraps output in escHtml (for markdown HTML text nodes).
+  // esc=false assumes input is already HTML-escaped (from escHtml on plain text).
+  _linkifyUrls(text, esc) {
+    // Markdown HTML text nodes may contain unescaped chars like "')]; pre-escaped text stops at &amp;
+    const re = esc ? /(https?:\/\/[^\s<>"')\]]+)/g : /(https?:\/\/[^\s<>&]+)/g;
+    const e = esc ? escHtml : s => s;
+    return text.replace(re, (raw) => {
+      const url = this._cleanPath(raw);
+      const after = raw.slice(url.length);
+      return `<span class="chat-link" data-href="${e(url)}" title="Click to copy, Ctrl+Click to open">${e(url)}</span>${e(after)}`;
+    });
+  }
+
+  // Linkify file paths in HTML that may contain tags (from prior URL linkification).
+  // Splits by tags to avoid matching inside <span> attributes. esc controls escHtml on output.
+  _linkifyPathsTagSafe(html, esc) {
+    const e = esc ? escHtml : s => s;
+    const pathRe = /(?<![="'\w/])((?:~|\.\.?)?\/[^\0<>?\s!`&*()'":;\\][^\0<>?\s!`&*()'"\\:;]*(?:\/[^\0<>?\s!`&*()'"\\:;]+)+(?::\d+(?::\d+)?)?)/g;
+    return html.replace(/(<[^>]*>)|([^<]+)/g, (m, tag, txt) => {
+      if (tag || !txt) return m;
+      return txt.replace(pathRe, (raw) => {
+        const fp = this._cleanPath(raw);
+        const after = raw.slice(fp.length);
+        if (fp.length < 4) return raw;
+        return `<span class="chat-link chat-link-path" data-path="${e(fp)}" title="Click to copy, Ctrl+Click to open">${e(fp)}</span>${e(after)}`;
+      });
+    });
+  }
+
+  // Combined URL + path linkification on a text segment.
+  _linkifySegment(text, esc) {
+    return this._linkifyPathsTagSafe(this._linkifyUrls(text, esc), esc);
+  }
+
   // Auto-detect URLs and file paths in rendered HTML, make them interactive
   // Click = copy, Ctrl+Click = open
   _linkify(html) {
     // Split HTML into tags and text segments, only linkify text outside <a> tags
-    let inAnchor = 0;
     return html.replace(/(<a[\s>][\s\S]*?<\/a>)|(<code[\s>][\s\S]*?<\/code>)|(<[^>]*>)|([^<]+)/gi, (match, anchor, code, tag, text) => {
       if (anchor) return match; // preserve <a>...</a> untouched
       if (code) {
         // Linkify paths/URLs inside <code> blocks while preserving the <code> wrapper
-        // Inner content is already HTML-escaped by marked, so use same logic as bare text segments below
         return code.replace(/^(<code[^>]*>)([\s\S]*?)(<\/code>)$/i, (_, open, inner, close) => {
-          let r = inner.replace(/(https?:\/\/[^\s<>"')\]]+)/g, (raw) => {
-            const url = this._cleanPath(raw);
-            const after = raw.slice(url.length);
-            return `<span class="chat-link" data-href="${escHtml(url)}" title="Click to copy, Ctrl+Click to open">${escHtml(url)}</span>${escHtml(after)}`;
-          });
-          r = r.replace(/(<[^>]*>)|([^<]+)/g, (m2, t2, txt) => {
-            if (t2 || !txt) return m2;
-            return txt.replace(/(?<![="'\w/])((?:~|\.\.?)?\/[^\0<>?\s!`&*()'":;\\][^\0<>?\s!`&*()'"\\:;]*(?:\/[^\0<>?\s!`&*()'"\\:;]+)+(?::\d+(?::\d+)?)?)/g, (raw) => {
-              const fp = this._cleanPath(raw);
-              const after = raw.slice(fp.length);
-              if (fp.length < 4) return raw;
-              return `<span class="chat-link chat-link-path" data-path="${escHtml(fp)}" title="Click to copy, Ctrl+Click to open">${escHtml(fp)}</span>${escHtml(after)}`;
-            });
-          });
-          return open + r + close;
+          return open + this._linkifySegment(inner, true) + close;
         });
       }
       if (tag) return tag;
       if (!text) return match;
-      // Linkify URLs
-      let result = text.replace(/(https?:\/\/[^\s<>"')\]]+)/g, (raw) => {
-        const url = this._cleanPath(raw);
-        const after = raw.slice(url.length);
-        return `<span class="chat-link" data-href="${escHtml(url)}" title="Click to copy, Ctrl+Click to open">${escHtml(url)}</span>${escHtml(after)}`;
-      });
-      // Linkify file paths
-      result = result.replace(/(?<![="'\w/])((?:~|\.\.?)?\/[^\0<>?\s!`&*()'":;\\][^\0<>?\s!`&*()'"\\:;]*(?:\/[^\0<>?\s!`&*()'"\\:;]+)+(?::\d+(?::\d+)?)?)/g, (raw) => {
-        const fp = this._cleanPath(raw);
-        const after = raw.slice(fp.length);
-        if (fp.length < 4) return raw;
-        return `<span class="chat-link chat-link-path" data-path="${escHtml(fp)}" title="Click to copy, Ctrl+Click to open">${escHtml(fp)}</span>${escHtml(after)}`;
-      });
-      return result;
+      return this._linkifySegment(text, true);
     });
   }
 
   // Linkify plain text (for tool output, user messages that don't go through markdown)
   _linkifyText(text) {
-    let html = escHtml(text);
-    // First pass: linkify URLs
-    html = html.replace(/(https?:\/\/[^\s<>&]+)/g, (raw) => {
-      const url = this._cleanPath(raw);
-      const after = raw.slice(url.length);
-      return `<span class="chat-link" data-href="${url}" title="Click to copy, Ctrl+Click to open">${url}</span>${after}`;
-    });
-    // Second pass: linkify file paths — split by tags to avoid matching inside generated <span> attributes
-    html = html.replace(/(<[^>]*>)|([^<]+)/g, (match, tag, text2) => {
-      if (tag) return tag;
-      if (!text2) return match;
-      return text2.replace(/(?<![="'\w/])((?:~|\.\.?)?\/[^\0<>?\s!`&*()'":;\\][^\0<>?\s!`&*()'"\\:;]*(?:\/[^\0<>?\s!`&*()'"\\:;]+)+(?::\d+(?::\d+)?)?)/g, (raw) => {
-        const fp = this._cleanPath(raw);
-        const after = raw.slice(fp.length);
-        if (fp.length < 4) return raw;
-        return `<span class="chat-link chat-link-path" data-path="${fp}" title="Click to copy, Ctrl+Click to open">${fp}</span>${after}`;
-      });
-    });
-    return html;
+    return this._linkifySegment(escHtml(text), false);
   }
 
   _setupLinkHandler() {
@@ -1481,33 +1470,9 @@ class ChatView {
       } else {
         // Click: copy to clipboard
         const text = fp || url;
-        this._copyText(text, link);
+        copyText(text).then(() => this._flashLink(link, 'Copied!'));
       }
     });
-  }
-
-  _copyText(text, link) {
-    // Try clipboard API, fall back to execCommand
-    const flash = () => this._flashLink(link, 'Copied!');
-    if (navigator.clipboard?.writeText) {
-      navigator.clipboard.writeText(text).then(flash).catch(() => {
-        this._fallbackCopy(text);
-        flash();
-      });
-    } else {
-      this._fallbackCopy(text);
-      flash();
-    }
-  }
-
-  _fallbackCopy(text) {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.cssText = 'position:fixed;left:-9999px';
-    document.body.appendChild(ta);
-    ta.select();
-    document.execCommand('copy');
-    ta.remove();
   }
 
   _flashLink(link, msg) {
