@@ -78,6 +78,47 @@ export class ChatMinimap {
     }
   }
 
+  /** Add a single turn incrementally (for live messages) */
+  addTurn(turn, total) {
+    if (!turn || turn.role !== 'user') return;
+    this._turnMap.push(turn);
+    this._total = total || this._total;
+    // Show minimap if we now have enough turns
+    if (this._turnMap.length >= 3 && this._minimap.classList.contains('hidden')) {
+      this._minimap.classList.remove('hidden');
+      this._messageList.classList.add('chat-minimap-active');
+      this.syncBounds();
+      // Full re-render for first display
+      this.render(this._turnMap);
+      return;
+    }
+    if (this._minimap.classList.contains('hidden')) return;
+    const t = this._total || this._turnMap[this._turnMap.length - 1].startIdx + 1;
+    const top = (turn.startIdx / t) * 100;
+    const marker = document.createElement('div');
+    marker.className = 'chat-minimap-marker';
+    marker.style.top = top + '%';
+    if (turn.isCompact) marker.classList.add('chat-minimap-compact');
+    else marker.classList.add('chat-minimap-user-mark');
+    this._minimap.appendChild(marker);
+    // Reposition existing markers since total changed
+    this._repositionMarkers();
+  }
+
+  /** Reposition all markers after total count changes */
+  _repositionMarkers() {
+    const t = this._total || 1;
+    for (const el of this._minimap.children) {
+      if (el === this._thumb) continue;
+      // Find the turn for this marker
+      const idx = [...this._minimap.children].filter(c => c !== this._thumb).indexOf(el);
+      const userTurns = this._turnMap.filter(tt => tt.role === 'user');
+      if (idx >= 0 && idx < userTurns.length) {
+        el.style.top = (userTurns[idx].startIdx / t) * 100 + '%';
+      }
+    }
+  }
+
   /** Sync minimap position/height to match message list within the container */
   syncBounds() {
     if (!this._minimap || !this._messageList) return;

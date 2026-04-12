@@ -582,6 +582,20 @@ class ChatView {
     if (!this._loadingHistory) {
       this._total++;
       this._windowEnd = this._total;
+      // Update minimap with new user turns
+      if (msg.role === 'user') {
+        const preview = (msg.content || []).map(b => b.text || '').join('').trim();
+        const turn = { turnIndex: msg.turnIndex, startIdx: this._total - 1, ts: msg.ts, role: 'user' };
+        if (preview) {
+          if (preview.startsWith('This session is being continued from a previous conversation')) {
+            turn.isCompact = true; turn.preview = 'Context compacted';
+          } else {
+            turn.preview = preview.length > 10 ? preview.substring(0, preview.lastIndexOf(' ', 10) > 5 ? preview.lastIndexOf(' ', 10) : 10) + '…' : preview;
+          }
+        }
+        this._chatMinimap.addTurn(turn, this._total);
+      }
+      this._chatMinimap.setViewport(this._windowStart, this._windowEnd, this._total);
     }
     if (this._pinned) this._scrollToBottom();
   }
