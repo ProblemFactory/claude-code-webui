@@ -10,7 +10,7 @@ import { CodeEditor } from './code-editor.js';
 import { LayoutManager } from './layout.js';
 import { ChatView } from './chat-view.js';
 import { Resizer } from './resizer.js';
-import { attachPopoverClose, initStateSync } from './utils.js';
+import { createPopover, showContextMenu, fetchJson, initStateSync } from './utils.js';
 import { setupDirAutocomplete } from './autocomplete.js';
 import { getAvailableFonts } from './terminal.js';
 import { SettingsManager } from './settings.js';
@@ -156,11 +156,9 @@ class App {
   }
 
   _showGlobalSettings(anchor) {
-    document.querySelectorAll('.global-settings-popover').forEach(p => p.remove());
-
-    const pop = document.createElement('div');
-    pop.className = 'global-settings-popover';
+    const pop = createPopover(anchor, 'global-settings-popover');
     const rect = anchor.getBoundingClientRect();
+    pop.style.left = '';
     pop.style.top = (rect.bottom + 4) + 'px';
     pop.style.right = (window.innerWidth - rect.right) + 'px';
 
@@ -241,9 +239,6 @@ class App {
     allSettingsLink.onclick = () => { pop.remove(); this._settingsUI.open(); };
 
     pop.append(themeLabel, themeSel, editBtn, sizeLabel, sizeRow, fontLabel, fontSel, allSettingsLink);
-    document.body.appendChild(pop);
-
-    attachPopoverClose(pop, anchor);
   }
 
   _setupGridConfig() {
@@ -315,13 +310,9 @@ class App {
   }
 
   async _loadCustomGrids() {
-    try {
-      const res = await fetch('/api/layouts');
-      const data = await res.json();
-      const grids = data.customGrids || [];
-      this._customGrids = grids;
-      this._renderCustomGridButtons();
-    } catch {}
+    const data = await fetchJson('/api/layouts');
+    this._customGrids = data?.customGrids || [];
+    this._renderCustomGridButtons();
   }
 
   _renderCustomGridButtons() {
@@ -339,27 +330,19 @@ class App {
     const builtins = [[1,1],[1,2],[2,1],[2,2],[1,3]];
     if (builtins.some(([r,c]) => r === rows && c === cols)) return;
     // Save to server
-    try {
-      const res = await fetch('/api/custom-grids', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rows, cols }),
-      });
-      const data = await res.json();
-      this._customGrids = data.customGrids || [];
-      this._renderCustomGridButtons();
-    } catch {}
+    const data = await fetchJson('/api/custom-grids', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rows, cols }),
+    });
+    if (data) { this._customGrids = data.customGrids || []; this._renderCustomGridButtons(); }
   }
 
   async _removeCustomGrid(rows, cols) {
-    try {
-      const res = await fetch('/api/custom-grids', {
-        method: 'DELETE', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rows, cols }),
-      });
-      const data = await res.json();
-      this._customGrids = data.customGrids || [];
-      this._renderCustomGridButtons();
-    } catch {}
+    const data = await fetchJson('/api/custom-grids', {
+      method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rows, cols }),
+    });
+    if (data) { this._customGrids = data.customGrids || []; this._renderCustomGridButtons(); }
   }
 
   _setupUsage() {
@@ -377,11 +360,8 @@ class App {
   }
 
   async _pollUsage() {
-    try {
-      const res = await fetch('/api/usage');
-      const data = await res.json();
-      this._rateLimit = data.rateLimit;
-    } catch { this._rateLimit = null; }
+    const data = await fetchJson('/api/usage');
+    this._rateLimit = data?.rateLimit || null;
     this._renderUsage();
     setTimeout(() => this._pollUsage(), 30000);
   }
@@ -974,26 +954,13 @@ class App {
       // Right-click context menu for window recovery
       item.addEventListener('contextmenu', (e) => {
         e.preventDefault();
-        document.querySelectorAll('.taskbar-context-menu').forEach(m => m.remove());
-        const menu = document.createElement('div');
-        menu.className = 'taskbar-context-menu';
-        menu.style.cssText = `position:fixed;left:${e.clientX}px;bottom:${window.innerHeight - e.clientY + 4}px;`;
-        const moveItem = document.createElement('div');
-        moveItem.className = 'taskbar-context-item';
-        moveItem.textContent = '\u2725 Move';
-        moveItem.onclick = () => { menu.remove(); this.wm.startMoveMode(id); };
-        const minimizeItem = document.createElement('div');
-        minimizeItem.className = 'taskbar-context-item';
-        minimizeItem.textContent = win.isMinimized ? '\u25A1 Restore' : '\u2013 Minimize';
-        minimizeItem.onclick = () => { menu.remove(); win.isMinimized ? this.wm.restore(id) : this.wm.minimize(id); };
-        const closeItem = document.createElement('div');
-        closeItem.className = 'taskbar-context-item';
-        closeItem.style.color = 'var(--red, #e55)';
-        closeItem.textContent = '\u2715 Close';
-        closeItem.onclick = () => { menu.remove(); this.wm.closeWindow(id); };
-        menu.append(moveItem, minimizeItem, closeItem);
-        document.body.appendChild(menu);
-        setTimeout(() => document.addEventListener('mousedown', function close(ev) { if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('mousedown', close); } }), 0);
+        const menu = showContextMenu(e.clientX, e.clientY, [
+          { label: '\u2725 Move', action: () => this.wm.startMoveMode(id) },
+          { label: win.isMinimized ? '\u25A1 Restore' : '\u2013 Minimize', action: () => win.isMinimized ? this.wm.restore(id) : this.wm.minimize(id) },
+          { label: '\u2715 Close', action: () => this.wm.closeWindow(id), style: 'color:var(--red, #e55)' },
+        ], 'taskbar-context-menu');
+        menu.style.top = '';
+        menu.style.bottom = (window.innerHeight - e.clientY + 4) + 'px';
       });
       container.appendChild(item);
     }
@@ -1005,11 +972,8 @@ class App {
   }
 
   _showWindowList(anchor) {
-    document.querySelectorAll('.overlap-switcher').forEach(p => p.remove());
     if (!this.wm.windows.size) return;
-
-    const pop = document.createElement('div');
-    pop.className = 'overlap-switcher';
+    const pop = createPopover(anchor, 'overlap-switcher');
 
     for (const [id, win] of this.wm.windows) {
       const item = document.createElement('div');
@@ -1043,14 +1007,11 @@ class App {
       pop.appendChild(item);
     }
 
-    document.body.appendChild(pop);
-    const rect = anchor.getBoundingClientRect();
     requestAnimationFrame(() => {
+      const rect = anchor.getBoundingClientRect();
       pop.style.left = Math.max(0, rect.right - pop.offsetWidth) + 'px';
       pop.style.top = (rect.top - pop.offsetHeight - 4) + 'px';
     });
-
-    attachPopoverClose(pop, anchor);
   }
 
   _populateThemeSelect(sel) {
@@ -1070,13 +1031,10 @@ class App {
   }
 
   async _loadCustomThemes() {
-    try {
-      const res = await fetch('/api/custom-themes');
-      if (!res.ok) return;
-      const themes = await res.json();
-      this._applyCustomThemesFromServer(themes);
-      this.themeManager.applyPendingTheme();
-    } catch {}
+    const themes = await fetchJson('/api/custom-themes');
+    if (!themes) return;
+    this._applyCustomThemesFromServer(themes);
+    this.themeManager.applyPendingTheme();
   }
 
   _applyCustomThemesFromServer(themes) {

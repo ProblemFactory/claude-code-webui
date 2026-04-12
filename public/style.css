@@ -771,10 +771,10 @@ html, body {
   background: var(--bg-dialog); border: 1px solid var(--border); border-radius: var(--radius-sm);
   box-shadow: 0 4px 12px rgba(0,0,0,0.3); z-index: 10000; min-width: 100px;
 }
-.taskbar-context-item {
+.taskbar-context-menu-item {
   padding: 4px 12px; font-size: 11px; cursor: pointer; color: var(--text-secondary);
 }
-.taskbar-context-item:hover { background: var(--bg-hover); color: var(--text); }
+.taskbar-context-menu-item:hover { background: var(--bg-hover); color: var(--text); }
 
 /* ── Dialogs ── */
 .dialog-overlay {
