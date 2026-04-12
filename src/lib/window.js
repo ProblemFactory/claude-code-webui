@@ -67,14 +67,18 @@ class WindowManager {
   _captureGridBounds(win) {
     const r = this.workspace.getBoundingClientRect();
     const el = win.element;
-    win.gridBounds = {
+    const newBounds = {
       left: el.offsetLeft / r.width,
       top: el.offsetTop / r.height,
       width: el.offsetWidth / r.width,
       height: el.offsetHeight / r.height,
     };
-    // Broadcast position change to other clients
-    if (this._layoutManager) this._layoutManager.broadcastWindowMove(win);
+    // Only broadcast if bounds actually changed (avoids spam on reflow/reattach)
+    const old = win.gridBounds;
+    const changed = !old || Math.abs(old.left - newBounds.left) > 0.0001 || Math.abs(old.top - newBounds.top) > 0.0001
+      || Math.abs(old.width - newBounds.width) > 0.0001 || Math.abs(old.height - newBounds.height) > 0.0001;
+    win.gridBounds = newBounds;
+    if (changed && this._layoutManager) this._layoutManager.broadcastWindowMove(win);
   }
 
   _applyGridBounds(win) {
