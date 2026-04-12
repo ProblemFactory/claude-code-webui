@@ -47,7 +47,16 @@ export function createPopover(anchor, className, opts = {}) {
  * @param {string} [className='context-menu']
  */
 export function showContextMenu(x, y, items, className = 'context-menu') {
-  const pop = createPopover(document.body, className, { position: 'cursor', x, y });
+  // Remove existing menus of same class
+  document.querySelectorAll('.' + className.split(' ')[0]).forEach(p => p.remove());
+  const pop = document.createElement('div');
+  pop.className = className;
+  pop.style.position = 'fixed';
+  pop.style.zIndex = '99999';
+  pop.style.left = x + 'px';
+  pop.style.top = y + 'px';
+  document.body.appendChild(pop);
+  attachPopoverClose(pop); // no anchor exclusion — any outside click closes
   for (const item of items) {
     if (item.separator) { const sep = document.createElement('div'); sep.className = className + '-separator'; pop.appendChild(sep); continue; }
     const el = document.createElement('div');
