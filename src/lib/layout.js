@@ -52,9 +52,10 @@ class LayoutManager {
               setTimeout(() => { if (win.onResize) win.onResize(); this.app.wm._applyGridBounds(win); }, 150);
             }
           }
-          // z-index (compact: rw.z, full: rw.zIndex)
+          // z-index: only apply if remote z is higher (local focus wins)
           const z = rw.z || rw.zIndex || 0;
-          if (z && z !== parseInt(win.element.style.zIndex)) {
+          const localZ = parseInt(win.element.style.zIndex) || 0;
+          if (z > localZ) {
             win.element.style.zIndex = z;
             if (z >= this.app.wm.zIndex) this.app.wm.zIndex = z + 1;
           }
@@ -69,7 +70,7 @@ class LayoutManager {
         }
       }
     } catch {}
-    setTimeout(() => { this._restoring = false; }, 2000);
+    setTimeout(() => { this._restoring = false; }, 1000);
   }
 
   // Capture current workspace state (complete)
@@ -257,7 +258,7 @@ class LayoutManager {
   scheduleAutoSave() {
     if (this._restoring) return; // Don't autosave while restoring
     if (this._autoSaveTimer) clearTimeout(this._autoSaveTimer);
-    this._autoSaveTimer = setTimeout(() => this._doAutoSave(), 2000);
+    this._autoSaveTimer = setTimeout(() => this._doAutoSave(), 500);
   }
 
   _isMobile() {
