@@ -8,12 +8,72 @@ class LayoutManager {
     // Listen for layout broadcasts from other clients (debounced)
     this._remoteLayoutTimer = null;
     app.ws.onGlobal((msg) => {
-      if (msg.type === 'layout-updated') {
+      if (msg.type === 'layout-updated' && msg.autoSave) {
         if (this._restoring) return;
         clearTimeout(this._remoteLayoutTimer);
-        this._remoteLayoutTimer = setTimeout(() => this.loadAutoSave(), 1000);
+        this._remoteLayoutTimer = setTimeout(() => this._applyRemotePositions(msg.autoSave), 500);
       }
     });
+  }
+
+  // Lightweight position sync from another client — only updates gridBounds, no window creation
+  _applyRemotePositions(remoteState) {
+    if (!remoteState?.windows) return;
+    this._restoring = true;
+
+    // Apply grid if changed
+    if (remoteState.grid) {
+      const currentGrid = this.app.wm.grid;
+      if (!currentGrid || currentGrid.rows !== remoteState.grid.rows || currentGrid.cols !== remoteState.grid.cols) {
+        this.app.wm.setGrid(remoteState.grid.rows, remoteState.grid.cols);
+      }
+    }
+
+    // Apply theme if changed
+    if (remoteState.theme && remoteState.theme !== this.app.themeManager?.currentTheme) {
+      this.app.themeManager.apply(remoteState.theme);
+    }
+
+    // Apply sidebar state
+    if (remoteState.sidebarOpen !== undefined && remoteState.sidebarOpen !== this.app.sidebar.isOpen) {
+      this.app.sidebar.toggle(remoteState.sidebarOpen);
+    }
+
+    // Match existing windows to remote state by session ID and update positions
+    for (const remoteWin of remoteState.windows) {
+      if (!remoteWin.gridBounds) continue;
+      let localWin = null;
+
+      // Match by claudeSessionId (most reliable across clients)
+      if (remoteWin.claudeSessionId) {
+        for (const [id, win] of this.app.wm.windows) {
+          const session = this.app.sessions.get(id);
+          if (!session) continue;
+          const allSess = this.app.sidebar?._allSessions || [];
+          const match = allSess.find(s => s.webuiId === session.sessionId);
+          if (match?.sessionId === remoteWin.claudeSessionId) { localWin = win; break; }
+        }
+      }
+      // Match by explorerPath for file explorers
+      if (!localWin && remoteWin.explorerPath) {
+        for (const [, win] of this.app.wm.windows) {
+          if (win._explorerPath === remoteWin.explorerPath) { localWin = win; break; }
+        }
+      }
+
+      if (!localWin) continue;
+
+      // Update gridBounds and reflow
+      localWin.gridBounds = remoteWin.gridBounds;
+      this.app.wm._applyGridBounds(localWin);
+      if (remoteWin.isMinimized && !localWin.isMinimized) this.app.wm.minimize(localWin.id);
+      if (!remoteWin.isMinimized && localWin.isMinimized) this.app.wm.restore(localWin.id);
+      if (remoteWin.isSnapped) { localWin._isSnapped = true; localWin._preSnapBounds = remoteWin.preSnapBounds; }
+      if (remoteWin.zIndex) { localWin.element.style.zIndex = remoteWin.zIndex; if (remoteWin.zIndex >= this.app.wm.zIndex) this.app.wm.zIndex = remoteWin.zIndex + 1; }
+      setTimeout(() => { if (localWin.onResize) localWin.onResize(); }, 100);
+    }
+
+    setTimeout(() => { this._restoring = false; }, 3000);
   }
 
   // Capture current workspace state (complete)
