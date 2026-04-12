@@ -438,7 +438,8 @@ class WindowManager {
     document.body.style.cursor = 'move';
 
     const onMove = (e) => {
-      el.style.left = (e.clientX - Math.min(parseInt(el.style.width) || 350, 200)) + 'px';
+      const w = el.offsetWidth || parseInt(el.style.width) || 350;
+      el.style.left = (e.clientX - w / 2) + 'px';
       el.style.top = (e.clientY - 15) + 'px';
     };
     const onClick = (e) => {
