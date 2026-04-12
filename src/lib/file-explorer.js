@@ -443,8 +443,8 @@ class FileExplorer {
       const checked = col.alwaysOn || this._columns[col.key];
       return {
         label: (checked ? '\u2611 ' : '\u2610 ') + col.label,
+        disabled: !!col.alwaysOn,
         action: () => {
-          if (col.alwaysOn) return;
           this._columns[col.key] = !this._columns[col.key];
           _saveColumns(this._columns);
           this._renderSortHeader();

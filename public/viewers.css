@@ -27,9 +27,10 @@
 .file-sort-col:hover { color: var(--text); }
 .file-col-resize-handle {
   position: absolute; top: 2px; right: 0; width: 5px; height: calc(100% - 4px);
-  cursor: col-resize; z-index: 1; border-right: 1px solid var(--border);
+  cursor: col-resize; z-index: 1; border-right: 1px solid var(--text-dim);
+  opacity: 0.4;
 }
-.file-col-resize-handle:hover { border-right-color: var(--accent); }
+.file-col-resize-handle:hover { border-right-color: var(--accent); opacity: 1; }
 .file-list { flex: 1; overflow: auto; padding: 2px 0; }
 .file-item {
   display: flex; align-items: center; padding: 3px 4px; cursor: pointer;

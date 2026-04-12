@@ -60,10 +60,11 @@ export function showContextMenu(x, y, items, className = 'context-menu') {
   for (const item of items) {
     if (item.separator) { const sep = document.createElement('div'); sep.className = className + '-separator'; pop.appendChild(sep); continue; }
     const el = document.createElement('div');
-    el.className = className + '-item';
+    el.className = className + '-item' + (item.disabled ? ' disabled' : '');
     el.textContent = item.label;
     if (item.style) el.style.cssText = item.style;
-    el.onclick = () => { pop.remove(); item.action(); };
+    if (item.disabled) { el.style.opacity = '0.4'; el.style.cursor = 'default'; }
+    else el.onclick = () => { pop.remove(); item.action(); };
     pop.appendChild(el);
   }
   // Keep menu on screen
