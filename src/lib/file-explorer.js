@@ -117,6 +117,10 @@ class FileExplorer {
     contentArea.append(browseArea, this._previewPanel);
     this._contentArea = contentArea;
     this._el = el;
+    // Apply saved column widths as CSS vars
+    for (const [key, w] of Object.entries(this._columnWidths)) {
+      el.style.setProperty(`--col-${key}-w`, w + 'px');
+    }
     // Auto-detect preview layout direction based on window aspect ratio
     this._previewRO = new ResizeObserver(() => this._updatePreviewLayout());
     this._previewRO.observe(contentArea);
@@ -351,6 +355,12 @@ class FileExplorer {
           this._renderItems();
         });
       }
+      // Auto-fit button
+      const fitBtn = document.createElement('div');
+      fitBtn.className = 'file-view-menu-item';
+      fitBtn.textContent = 'Auto-fit column widths';
+      fitBtn.onclick = (e) => { e.stopPropagation(); this._autoFitColumns(); pop.remove(); };
+      pop.appendChild(fitBtn);
     }
 
     // Position: align right edge to anchor right edge
@@ -479,9 +489,9 @@ class FileExplorer {
       const el = document.createElement('span');
       el.className = 'file-sort-col';
       if (col.alwaysOn) {
-        // Name column: flex, with optional minWidth
+        // Name column: flex, with CSS var min-width for resize
         el.style.flex = '1';
-        el.style.minWidth = '0';
+        el.style.minWidth = 'var(--col-name-w, 0)';
       } else {
         el.style.width = `var(--col-${col.key}-w, ${col.defaultWidth}px)`;
         el.style.flexShrink = '0';
@@ -497,17 +507,15 @@ class FileExplorer {
         this._renderItems();
       };
 
-      // Resize handle (not on name column since it uses flex)
-      if (!col.alwaysOn) {
-        const handle = document.createElement('div');
-        handle.className = 'file-col-resize-handle';
-        handle.addEventListener('mousedown', (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          this._startColumnResize(col, el, e);
-        });
-        el.appendChild(handle);
-      }
+      // Resize handle on every column (name column adjusts flex min-width)
+      const handle = document.createElement('div');
+      handle.className = 'file-col-resize-handle';
+      handle.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this._startColumnResize(col, el, e);
+      });
+      el.appendChild(handle);
 
       this.sortHeader.appendChild(el);
     }
@@ -518,6 +526,7 @@ class FileExplorer {
     const startWidth = headerEl.getBoundingClientRect().width;
     let currentWidth = startWidth;
     let rafId = null;
+    const isName = !!col.alwaysOn;
 
     const onMove = (e) => {
       const dx = e.clientX - startX;
@@ -525,7 +534,11 @@ class FileExplorer {
       if (rafId) return;
       rafId = requestAnimationFrame(() => {
         rafId = null;
-        this._el.style.setProperty(`--col-${col.key}-w`, currentWidth + 'px');
+        if (isName) {
+          this._el.style.setProperty('--col-name-w', currentWidth + 'px');
+        } else {
+          this._el.style.setProperty(`--col-${col.key}-w`, currentWidth + 'px');
+        }
       });
     };
 
@@ -535,7 +548,11 @@ class FileExplorer {
       if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
       this._columnWidths[col.key] = Math.round(currentWidth);
       this._saveColumnWidths();
-      this._el.style.setProperty(`--col-${col.key}-w`, Math.round(currentWidth) + 'px');
+      if (isName) {
+        this._el.style.setProperty('--col-name-w', Math.round(currentWidth) + 'px');
+      } else {
+        this._el.style.setProperty(`--col-${col.key}-w`, Math.round(currentWidth) + 'px');
+      }
     };
 
     document.addEventListener('mousemove', onMove);
@@ -870,6 +887,24 @@ class FileExplorer {
       onNavigate: (path) => this.navigate(path),
     });
     this._hideAC = ac.hide;
+  }
+
+  _autoFitColumns() {
+    const classMap = { size: '.file-size', modified: '.file-modified', created: '.file-created', type: '.file-type' };
+    for (const col of this._getVisibleColumns().filter(c => !c.alwaysOn)) {
+      const sel = classMap[col.key];
+      if (!sel) continue;
+      let maxW = 40;
+      for (const cell of this.listEl.querySelectorAll(sel)) {
+        const sw = cell.style.width; cell.style.width = 'auto'; cell.style.whiteSpace = 'nowrap';
+        const w = cell.scrollWidth + 8;
+        cell.style.width = sw; cell.style.whiteSpace = '';
+        if (w > maxW) maxW = w;
+      }
+      this._columnWidths[col.key] = Math.round(maxW);
+      this._el.style.setProperty(`--col-${col.key}-w`, Math.round(maxW) + 'px');
+    }
+    this._saveColumnWidths();
   }
 
   // ── Preview Panel ──
