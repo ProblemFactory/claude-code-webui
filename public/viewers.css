@@ -26,10 +26,10 @@
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0; }
 .file-sort-col:hover { color: var(--text); }
 .file-col-resize-handle {
-  position: absolute; top: 0; right: -2px; width: 4px; height: 100%;
-  cursor: col-resize; z-index: 1;
+  position: absolute; top: 2px; right: 0; width: 5px; height: calc(100% - 4px);
+  cursor: col-resize; z-index: 1; border-right: 1px solid var(--border);
 }
-.file-col-resize-handle:hover { background: var(--accent); opacity: 0.4; }
+.file-col-resize-handle:hover { border-right-color: var(--accent); }
 .file-list { flex: 1; overflow: auto; padding: 2px 0; }
 .file-item {
   display: flex; align-items: center; padding: 3px 10px; gap: 6px; cursor: pointer;
