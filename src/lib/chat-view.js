@@ -1,104 +1,7 @@
 import { marked } from 'marked';
-import hljs from 'highlight.js/lib/core';
-import hljsJavascript from 'highlight.js/lib/languages/javascript';
-import hljsTypescript from 'highlight.js/lib/languages/typescript';
-import hljsPython from 'highlight.js/lib/languages/python';
-import hljsJson from 'highlight.js/lib/languages/json';
-import hljsYaml from 'highlight.js/lib/languages/yaml';
-import hljsXml from 'highlight.js/lib/languages/xml';
-import hljsCss from 'highlight.js/lib/languages/css';
-import hljsBash from 'highlight.js/lib/languages/bash';
-import hljsC from 'highlight.js/lib/languages/c';
-import hljsCpp from 'highlight.js/lib/languages/cpp';
-import hljsGo from 'highlight.js/lib/languages/go';
-import hljsRust from 'highlight.js/lib/languages/rust';
-import hljsJava from 'highlight.js/lib/languages/java';
-import hljsSql from 'highlight.js/lib/languages/sql';
-import hljsMarkdown from 'highlight.js/lib/languages/markdown';
-import hljsDiff from 'highlight.js/lib/languages/diff';
-import hljsDockerfile from 'highlight.js/lib/languages/dockerfile';
-import hljsIni from 'highlight.js/lib/languages/ini';
-import hljsRuby from 'highlight.js/lib/languages/ruby';
-import hljsPhp from 'highlight.js/lib/languages/php';
-import hljsSwift from 'highlight.js/lib/languages/swift';
-import hljsKotlin from 'highlight.js/lib/languages/kotlin';
-import hljsScala from 'highlight.js/lib/languages/scala';
-import hljsCsharp from 'highlight.js/lib/languages/csharp';
-import hljsLua from 'highlight.js/lib/languages/lua';
-import hljsR from 'highlight.js/lib/languages/r';
-import hljsPerl from 'highlight.js/lib/languages/perl';
-import hljsScss from 'highlight.js/lib/languages/scss';
-import hljsGraphql from 'highlight.js/lib/languages/graphql';
-import hljsNginx from 'highlight.js/lib/languages/nginx';
-import hljsProtobuf from 'highlight.js/lib/languages/protobuf';
-
-hljs.registerLanguage('javascript', hljsJavascript);
-hljs.registerLanguage('typescript', hljsTypescript);
-hljs.registerLanguage('python', hljsPython);
-hljs.registerLanguage('json', hljsJson);
-hljs.registerLanguage('yaml', hljsYaml);
-hljs.registerLanguage('xml', hljsXml);
-hljs.registerLanguage('css', hljsCss);
-hljs.registerLanguage('bash', hljsBash);
-hljs.registerLanguage('c', hljsC);
-hljs.registerLanguage('cpp', hljsCpp);
-hljs.registerLanguage('go', hljsGo);
-hljs.registerLanguage('rust', hljsRust);
-hljs.registerLanguage('java', hljsJava);
-hljs.registerLanguage('sql', hljsSql);
-hljs.registerLanguage('markdown', hljsMarkdown);
-hljs.registerLanguage('diff', hljsDiff);
-hljs.registerLanguage('dockerfile', hljsDockerfile);
-hljs.registerLanguage('ini', hljsIni);
-hljs.registerLanguage('ruby', hljsRuby);
-hljs.registerLanguage('php', hljsPhp);
-hljs.registerLanguage('swift', hljsSwift);
-hljs.registerLanguage('kotlin', hljsKotlin);
-hljs.registerLanguage('scala', hljsScala);
-hljs.registerLanguage('csharp', hljsCsharp);
-hljs.registerLanguage('lua', hljsLua);
-hljs.registerLanguage('r', hljsR);
-hljs.registerLanguage('perl', hljsPerl);
-hljs.registerLanguage('scss', hljsScss);
-hljs.registerLanguage('graphql', hljsGraphql);
-hljs.registerLanguage('nginx', hljsNginx);
-hljs.registerLanguage('protobuf', hljsProtobuf);
 import { escHtml, saveDraft, loadDraft, clearDraft, getStateSync } from './utils.js';
-
-// Map file extensions to highlight.js language identifiers
-const EXT_TO_LANG = {
-  js: 'javascript', jsx: 'javascript', mjs: 'javascript', cjs: 'javascript',
-  ts: 'typescript', tsx: 'typescript',
-  py: 'python', pyw: 'python',
-  rb: 'ruby', rs: 'rust', go: 'go', java: 'java', kt: 'kotlin',
-  c: 'c', h: 'c', cpp: 'cpp', cc: 'cpp', cxx: 'cpp', hpp: 'cpp',
-  cs: 'csharp', swift: 'swift', m: 'objectivec',
-  php: 'php', pl: 'perl', pm: 'perl',
-  sh: 'bash', bash: 'bash', zsh: 'bash', fish: 'bash',
-  sql: 'sql', r: 'r', lua: 'lua', scala: 'scala', groovy: 'groovy',
-  json: 'json', yaml: 'yaml', yml: 'yaml', toml: 'ini', ini: 'ini',
-  xml: 'xml', html: 'xml', htm: 'xml', svg: 'xml',
-  css: 'css', scss: 'scss', less: 'less',
-  md: 'markdown', tex: 'latex',
-  dockerfile: 'dockerfile', makefile: 'makefile',
-  graphql: 'graphql', proto: 'protobuf', thrift: 'thrift',
-  diff: 'diff', patch: 'diff',
-  nginx: 'nginx', conf: 'nginx',
-};
-
-function detectHljsLang(filePath) {
-  if (!filePath) return '';
-  const name = filePath.split('/').pop().toLowerCase();
-  if (name === 'dockerfile') return 'dockerfile';
-  if (name === 'makefile' || name === 'gnumakefile') return 'makefile';
-  const ext = name.includes('.') ? name.split('.').pop() : '';
-  return EXT_TO_LANG[ext] || '';
-}
-
-// Strip ANSI escape sequences (colors, cursor, etc.)
-function stripAnsi(str) {
-  return str.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
-}
+import { detectHljsLang, getHljsLanguages, renderCodeBlock, rehighlightCodeBlock, stripAnsi } from './highlight.js';
+import { ChatMinimap } from './chat-minimap.js';
 
 /**
  * ChatView — renders a chat interface for stream-json mode sessions.
@@ -171,20 +74,9 @@ class ChatView {
     container.appendChild(this._posIndicator);
 
     // Scroll minimap — semantic scrollbar showing turns
-    this._minimap = document.createElement('div');
-    this._minimap.className = 'chat-minimap hidden';
-    this._minimapThumb = document.createElement('div');
-    this._minimapThumb.className = 'chat-minimap-thumb';
-    this._minimapLabel = document.createElement('div');
-    this._minimapLabel.className = 'chat-minimap-label hidden';
-    this._minimap.appendChild(this._minimapThumb);
-    container.appendChild(this._minimap);
-    container.appendChild(this._minimapLabel);
-    this._turnMap = [];
-    this._setupMinimapDrag();
+    this._chatMinimap = new ChatMinimap(container, this._messageList, (idx) => this.jumpToIndex(idx));
     // Sync minimap bounds on resize
-    this._minimapRO = new ResizeObserver(() => this._syncMinimapBounds());
-    this._minimapRO.observe(this._messageList);
+    // Minimap ResizeObserver is handled by ChatMinimap internally
 
     // Scroll-to-bottom / pin button (shown when unpinned, with new message count)
     this._newMsgCount = 0;
@@ -243,7 +135,7 @@ class ChatView {
           this._extendBottom();
         }
         this._updatePosIndicator();
-        this._updateMinimapThumb();
+        this._chatMinimap.setViewport(this._windowStart, this._windowEnd, this._total);
       });
     }, { passive: true });
 
@@ -677,16 +569,16 @@ class ChatView {
     }
     // Render minimap from turn data (attach payload or async fetch fallback)
     if (meta?.turnMap?.length) {
-      this._renderMinimap(meta.turnMap);
+      this._chatMinimap.render(meta.turnMap);
     } else if (this._total > 50) {
       // Fallback: fetch turn map via API
       const { claudeId, cwd } = this._getSessionIds();
       if (claudeId) {
         fetch(`/api/session-messages?claudeSessionId=${encodeURIComponent(claudeId)}&cwd=${encodeURIComponent(cwd)}&turnmap=1`)
-          .then(r => r.json()).then(d => { if (d.turns?.length) this._renderMinimap(d.turns); }).catch(() => {});
+          .then(r => r.json()).then(d => { if (d.turns?.length) this._chatMinimap.render(d.turns); }).catch(() => {});
       }
     }
-    this._updateMinimapThumb();
+    this._chatMinimap.setViewport(this._windowStart, this._windowEnd, this._total);
 
     if (isStreaming) this._showTyping();
     this._scrollToBottom();
@@ -1497,45 +1389,9 @@ class ChatView {
     return `<div class="chat-tool-use"><span class="chat-tool-label">\u{1F4DD} Update ${this._clickablePath(filePath)}</span><details class="chat-diff"><summary class="chat-diff-summary">${summary}</summary><div class="chat-diff-body">${body}</div></details></div>`;
   }
 
-  // Render code with line numbers + syntax highlighting (for Read/Write tool output)
-  // Returns HTML string for a .chat-code-block element
-  _renderCodeBlock(code, filePath) {
-    const lang = detectHljsLang(filePath);
-    // Skip highlight for large files (>10KB) — defer to expand time
-    const skipHighlight = code.length > 10000;
-    let highlighted;
-    try {
-      highlighted = (!skipHighlight && lang) ? hljs.highlight(code, { language: lang }).value : escHtml(code);
-    } catch {
-      highlighted = escHtml(code);
-    }
-    const lines = highlighted.split('\n');
-    const gutterW = String(lines.length).length;
-    let body = '';
-    for (let i = 0; i < lines.length; i++) {
-      body += `<div class="chat-code-line"><span class="chat-code-ln" style="width:${gutterW + 1}ch">${i + 1}</span><span class="chat-code-text">${lines[i] || ' '}</span></div>`;
-    }
-    const langLabel = lang || 'plain';
-    const deferred = skipHighlight ? ' data-highlight-deferred="1"' : '';
-    return `<div class="chat-code-block" data-lang="${escHtml(langLabel)}" data-filepath="${escHtml(filePath)}"${deferred}>${body}</div>`;
-  }
-
-  // Apply syntax highlighting to an already-rendered .chat-code-block
-  _rehighlightCodeBlock(blockEl, langId) {
-    const code = Array.from(blockEl.querySelectorAll('.chat-code-text')).map(s => s.textContent).join('\n');
-    let highlighted;
-    try {
-      highlighted = langId && langId !== 'plain' ? hljs.highlight(code, { language: langId }).value : escHtml(code);
-    } catch {
-      highlighted = escHtml(code);
-    }
-    const lines = highlighted.split('\n');
-    const lineEls = blockEl.querySelectorAll('.chat-code-text');
-    for (let i = 0; i < lineEls.length && i < lines.length; i++) {
-      lineEls[i].innerHTML = lines[i] || ' ';
-    }
-    blockEl.dataset.lang = langId || 'plain';
-  }
+  // Delegate to imported highlight.js module
+  _renderCodeBlock(code, filePath) { return renderCodeBlock(code, filePath); }
+  _rehighlightCodeBlock(blockEl, langId) { rehighlightCodeBlock(blockEl, langId); }
 
   // Make a file path clickable (click=copy, ctrl+click=open)
   _clickablePath(fp) {
@@ -2119,140 +1975,7 @@ class ChatView {
     this._clearWaiting();
   }
 
-  // ── Minimap (semantic scrollbar by turn) ──
-
-  _setupMinimapDrag() {
-    let dragging = false;
-    let jumpTimer = null;
-    let pendingJumpIdx = null;
-
-    // Map Y position to message index (same coordinate system as markers)
-    const getIdxAtY = (e) => {
-      const rect = this._minimap.getBoundingClientRect();
-      const y = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
-      return Math.floor(y * (this._total || 1));
-    };
-
-    // Find the nearest user turn at a given message index
-    const getTurnAtIdx = (idx) => {
-      if (!this._turnMap.length) return null;
-      let best = this._turnMap[0];
-      for (const t of this._turnMap) {
-        if (t.startIdx <= idx) best = t;
-        else break;
-      }
-      return best;
-    };
-
-    const updateLabel = (e, turn) => {
-      if (!turn || !this._minimapLabel) return;
-      const containerRect = this._container.getBoundingClientRect();
-      const d = new Date(turn.ts);
-      const now = new Date();
-      const isToday = d.toDateString() === now.toDateString();
-      const date = isToday ? '' : d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ';
-      const time = date + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      const preview = turn.preview || '';
-      this._minimapLabel.textContent = preview ? `${time} · ${preview}` : time;
-      this._minimapLabel.classList.remove('hidden');
-      this._minimapLabel.style.top = (e.clientY - containerRect.top) + 'px';
-    };
-
-    // Debounced jump — only executes the last requested position
-    const scheduleJump = (idx) => {
-      pendingJumpIdx = idx;
-      if (!jumpTimer) {
-        jumpTimer = setTimeout(() => {
-          jumpTimer = null;
-          if (pendingJumpIdx != null) this.jumpToIndex(pendingJumpIdx);
-          pendingJumpIdx = null;
-        }, 100);
-      }
-    };
-
-    const onMove = (e) => {
-      const idx = getIdxAtY(e);
-      const turn = getTurnAtIdx(idx);
-      updateLabel(e, turn);
-      if (dragging) scheduleJump(idx);
-    };
-
-    this._minimap.addEventListener('mousedown', (e) => {
-      e.preventDefault();
-      dragging = true;
-      const idx = getIdxAtY(e);
-      this.jumpToIndex(idx);
-      const turn = getTurnAtIdx(idx);
-      updateLabel(e, turn);
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', () => {
-        dragging = false;
-        document.removeEventListener('mousemove', onMove);
-        this._minimapLabel.classList.add('hidden');
-        if (jumpTimer) { clearTimeout(jumpTimer); jumpTimer = null; }
-      }, { once: true });
-    });
-
-    this._minimap.addEventListener('mousemove', (e) => {
-      if (dragging) return;
-      const idx = getIdxAtY(e);
-      const turn = getTurnAtIdx(idx);
-      updateLabel(e, turn);
-    });
-
-    this._minimap.addEventListener('mouseleave', () => {
-      if (!dragging) this._minimapLabel.classList.add('hidden');
-    });
-  }
-
-  _renderMinimap(turnMap) {
-    if (!turnMap?.length || turnMap.length < 3) {
-      this._minimap.classList.add('hidden');
-      return;
-    }
-    this._turnMap = turnMap;
-    this._minimap.classList.remove('hidden');
-    this._messageList.classList.add('chat-minimap-active');
-    this._syncMinimapBounds();
-
-    // Remove old turn segments (keep thumb and label)
-    for (const el of [...this._minimap.children]) {
-      if (el !== this._minimapThumb) el.remove();
-    }
-
-    // Render markers for user messages and compact points
-    const total = this._total || turnMap[turnMap.length - 1].startIdx + 1;
-    for (const turn of turnMap) {
-      if (turn.role !== 'user') continue;
-      const top = (turn.startIdx / total) * 100;
-      const marker = document.createElement('div');
-      marker.className = 'chat-minimap-marker';
-      marker.style.top = top + '%';
-      if (turn.isCompact) {
-        marker.classList.add('chat-minimap-compact');
-      } else {
-        marker.classList.add('chat-minimap-user-mark');
-      }
-      this._minimap.appendChild(marker);
-    }
-  }
-
-  // Sync minimap position/height to match message list within the container
-  _syncMinimapBounds() {
-    if (!this._minimap || !this._messageList) return;
-    const listRect = this._messageList.getBoundingClientRect();
-    const containerRect = this._container.getBoundingClientRect();
-    this._minimap.style.top = (listRect.top - containerRect.top) + 'px';
-    this._minimap.style.height = listRect.height + 'px';
-  }
-
-  _updateMinimapThumb() {
-    if (!this._minimapThumb || !this._total || this._minimap.classList.contains('hidden')) return;
-    const top = (this._windowStart / this._total) * 100;
-    const height = Math.max(5, ((this._windowEnd - this._windowStart) / this._total) * 100);
-    this._minimapThumb.style.top = top + '%';
-    this._minimapThumb.style.height = height + '%';
-  }
+  // Minimap extracted to ChatMinimap class (src/lib/chat-minimap.js)
 
   _updatePosIndicator() {
     if (!this._posIndicator || !this._total) return;
@@ -2283,7 +2006,7 @@ class ChatView {
       const sync = getStateSync();
       if (sync) sync.off('drafts', 'chat:' + this.sessionId, this._draftSyncHandler);
     }
-    if (this._minimapRO) this._minimapRO.disconnect();
+    if (this._chatMinimap) this._chatMinimap.dispose();
   }
 }
 
