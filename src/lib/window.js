@@ -113,11 +113,12 @@ class WindowManager {
     const { element, titleBar } = win;
     let mouseDown = false, dragging = false, startX, startY, initL, initT;
     let shiftDragStart = -1;
-    const DRAG_THRESHOLD = 5; // px — must move this far before drag starts
+    let tabMergeTarget = null; // window to merge into if dropped on its icon
+    const DRAG_THRESHOLD = 5;
 
     titleBar.addEventListener('mousedown', (e) => {
       if (e.target.closest('.window-controls') || e.target.closest('.tab-item') || e.target.closest('.window-type-icon') || e.button !== 0) return;
-      mouseDown = true; dragging = false;
+      mouseDown = true; dragging = false; tabMergeTarget = null;
       startX = e.clientX; startY = e.clientY;
       initL = element.offsetLeft; initT = element.offsetTop;
       shiftDragStart = -1;
@@ -175,14 +176,39 @@ class WindowManager {
         this.snapIndicator.style.display = 'none';
         this._clearGridHighlight();
       }
+
+      // Tab merge: detect if cursor is over another window's icon
+      tabMergeTarget = null;
+      for (const [id, w] of this.windows) {
+        if (id === win.id || (w._tabChain && w._tabChain.tabs[0] !== w.id)) continue;
+        const icon = w.iconSpan;
+        if (!icon) continue;
+        const r = icon.getBoundingClientRect();
+        if (e.clientX >= r.left - 8 && e.clientX <= r.right + 8 && e.clientY >= r.top - 8 && e.clientY <= r.bottom + 8) {
+          tabMergeTarget = w; break;
+        }
+      }
+      for (const [, w] of this.windows) w.element.classList.toggle('tab-drop-target', w === tabMergeTarget);
     };
 
     const onUp = (e) => {
       if (!mouseDown) return;
       mouseDown = false;
-      if (!dragging) return; // Click without drag — don't snap
+      if (!dragging) return;
       dragging = false; element.classList.remove('dragging');
       this.snapIndicator.style.display = 'none';
+      for (const [, w] of this.windows) w.element.classList.remove('tab-drop-target');
+
+      // Tab merge takes priority over snap
+      if (tabMergeTarget) {
+        this._clearGridHighlight(); this.gridOverlay.classList.remove('dragging');
+        if (tabMergeTarget._tabChain) this.addToTabChain(tabMergeTarget._tabChain, win);
+        else this.createTabChain(tabMergeTarget, win);
+        tabMergeTarget = null;
+        return;
+      }
+      tabMergeTarget = null;
+
       const snapEnabled = this._settings?.get('layout.enableDragSnap') ?? true;
       const shiftDragEnabled = this._settings?.get('layout.enableShiftDragSelection') ?? true;
       let snapped = false;

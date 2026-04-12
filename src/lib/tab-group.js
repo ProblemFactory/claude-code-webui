@@ -107,13 +107,15 @@ const tabGroupMethods = {
   },
 
   createTabChain(hostWin, guestWin) {
-    const chain = { tabs: [hostWin.id, guestWin.id], active: 0 };
+    const chain = { tabs: [hostWin.id, guestWin.id], active: 1 };
     hostWin._tabChain = chain;
     guestWin._tabChain = chain;
-    guestWin.content.classList.add('tab-hidden');
+    // Host content hidden, guest content visible (guest = newly dragged in = active)
+    hostWin.content.classList.add('tab-hidden');
     hostWin.element.appendChild(guestWin.content);
     guestWin.element.style.display = 'none';
     guestWin.gridBounds = hostWin.gridBounds ? { ...hostWin.gridBounds } : null;
+    this.activeWindowId = guestWin.id;
     this._renderTabBar(chain);
     this._notify();
   },
