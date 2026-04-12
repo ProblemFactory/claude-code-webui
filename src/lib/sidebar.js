@@ -1,5 +1,6 @@
 import { Resizer } from './resizer.js';
-import { escHtml, attachPopoverClose } from './utils.js';
+import { escHtml, createPopover, showContextMenu } from './utils.js';
+import { renderSessionCard } from './session-card.js';
 
 class Sidebar {
   constructor(app) {
@@ -353,10 +354,7 @@ class Sidebar {
   }
 
   _showStatusFilterMenu(anchor) {
-    document.querySelectorAll('.status-filter-menu').forEach(m => m.remove());
-    const menu = document.createElement('div'); menu.className = 'status-filter-menu';
-    const rect = anchor.getBoundingClientRect();
-    menu.style.top = (rect.bottom + 2) + 'px'; menu.style.left = rect.left + 'px';
+    const menu = createPopover(anchor, 'status-filter-menu');
 
     const items = [
       { id: 'live', label: 'Live', color: 'var(--green)' },
@@ -380,8 +378,6 @@ class Sidebar {
       row.append(cb, dot, lbl);
       menu.appendChild(row);
     }
-    document.body.appendChild(menu);
-    attachPopoverClose(menu, anchor);
   }
 
   _updateFilterBtn(btn) {
@@ -418,6 +414,13 @@ class Sidebar {
       btn.onclick = () => { this._activeView = f; this._renderQuickTabs(); this._render(); };
       container.appendChild(btn);
     }
+  }
+
+  _toggleCollapse(el, key) {
+    el.classList.toggle('collapsed');
+    if (el.classList.contains('collapsed')) this._collapsedFolders.add(key);
+    else this._collapsedFolders.delete(key);
+    localStorage.setItem('collapsedFolders', JSON.stringify([...this._collapsedFolders]));
   }
 
   toggle(force) {
@@ -566,22 +569,21 @@ class Sidebar {
       linkBtn.style.fontSize = '10px';
       linkBtn.onclick = (e) => {
         e.stopPropagation();
-        this._showFolderGroupPopover(linkBtn, cwd);
+        this._showGroupChecklistPopover(linkBtn,
+          (name) => (this._groupFolders[name] || []).includes(cwd),
+          (name, checked, pop) => { if (checked) this._addFolderToGroup(cwd, name); else this._removeFolderFromGroup(cwd, name); pop.remove(); });
       };
       header.appendChild(linkBtn);
 
       header.onclick = (e) => {
         if (e.target.closest('.folder-add-btn')) return;
-        group.classList.toggle('collapsed');
-        if (group.classList.contains('collapsed')) this._collapsedFolders.add(cwd);
-        else this._collapsedFolders.delete(cwd);
-        localStorage.setItem('collapsedFolders', JSON.stringify([...this._collapsedFolders]));
+        this._toggleCollapse(group, cwd);
       };
 
       const sessionsDiv = document.createElement('div'); sessionsDiv.className = 'folder-sessions';
       // Starred first, then by time
       this._sortSessions(items);
-      for (const s of items) { sessionsDiv.appendChild(this._renderSessionCard(s)); }
+      for (const s of items) { sessionsDiv.appendChild(this._buildSessionCard(s)); }
 
       group.append(header, sessionsDiv);
       this.listEl.appendChild(group);
@@ -691,17 +693,14 @@ class Sidebar {
 
       header.onclick = (e) => {
         if (e.target.closest('.folder-add-btn')) return;
-        groupEl.classList.toggle('collapsed');
-        if (groupEl.classList.contains('collapsed')) this._collapsedFolders.add(collapseKey);
-        else this._collapsedFolders.delete(collapseKey);
-        localStorage.setItem('collapsedFolders', JSON.stringify([...this._collapsedFolders]));
+        this._toggleCollapse(groupEl, collapseKey);
       };
 
       const sessionsDiv = document.createElement('div');
       sessionsDiv.className = 'folder-sessions';
       // Sort: starred first, then by time
       this._sortSessions(groupSessions);
-      for (const s of groupSessions) sessionsDiv.appendChild(this._renderSessionCard(s));
+      for (const s of groupSessions) sessionsDiv.appendChild(this._buildSessionCard(s));
 
       if (groupSessions.length === 0) {
         const empty = document.createElement('div');
@@ -726,340 +725,31 @@ class Sidebar {
       header.className = 'folder-header';
       header.innerHTML = `<span class="folder-chevron">\u25BC</span><span class="folder-path" style="direction:ltr;font-style:italic">Ungrouped</span><span class="folder-count">${ungrouped.length}</span>`;
 
-      header.onclick = () => {
-        groupEl.classList.toggle('collapsed');
-        if (groupEl.classList.contains('collapsed')) this._collapsedFolders.add(collapseKey);
-        else this._collapsedFolders.delete(collapseKey);
-        localStorage.setItem('collapsedFolders', JSON.stringify([...this._collapsedFolders]));
-      };
+      header.onclick = () => this._toggleCollapse(groupEl, collapseKey);
 
       const sessionsDiv = document.createElement('div');
       sessionsDiv.className = 'folder-sessions';
       this._sortSessions(ungrouped);
-      for (const s of ungrouped) sessionsDiv.appendChild(this._renderSessionCard(s));
+      for (const s of ungrouped) sessionsDiv.appendChild(this._buildSessionCard(s));
 
       groupEl.append(header, sessionsDiv);
       this.listEl.appendChild(groupEl);
     }
   }
 
-  _renderSessionCard(s) {
-    const card = document.createElement('div'); card.className = 'session-item-card';
-    card._sessionId = s.sessionId; // Store for highlight lookup
-    card.draggable = true;
-    card.addEventListener('dragstart', (e) => {
-      e.dataTransfer.setData('application/x-session-id', s.sessionId);
-      e.dataTransfer.effectAllowed = 'link';
+  _buildSessionCard(s) {
+    return renderSessionCard(s, {
+      state: this,
+      app: this.app,
+      settings: this.app.settings,
+      expandedCardId: this._expandedCardId,
+      onExpandToggle: (id) => { this._expandedCardId = id; this._render(); },
+      onRename: (sessionId, originalName) => this.renameSession(sessionId, originalName),
     });
-    const isArchived = this._archivedIds.has(s.sessionId);
-    if (isArchived) card.classList.add('archived');
-    if (this._expandedCardId === s.sessionId) card.classList.add('expanded');
-    const date = new Date(s.startedAt);
-    const customName = this._customNames[s.sessionId];
-    const cwdFolder = s.cwd ? s.cwd.replace(/\/+$/, '').split('/').pop() : '';
-    const originalName = s.name || s.webuiName || cwdFolder || s.sessionId.substring(0, 12) + '...';
-    const displayName = customName || originalName;
-
-    const badgeMap = {
-      live:     { cls: 'badge-live', text: 'LIVE' },
-      tmux:     { cls: 'badge-tmux', text: 'TMUX' },
-      external: { cls: 'badge-external', text: 'EXTERNAL' },
-      stopped:  { cls: 'badge-stopped', text: 'STOPPED' },
-    };
-    const badge = badgeMap[s.status] || badgeMap.stopped;
-
-    const starred = this._starredIds.has(s.sessionId);
-    const isExpanded = this._expandedCardId === s.sessionId;
-    // Compact row: star archive name [mode] badge expand
-    const modeIcon = s.webuiMode === 'chat' ? '<span class="session-mode-icon" title="Chat mode">\uD83D\uDCAC</span>' : '';
-    card.innerHTML = `<div class="session-card-row">
-      <span class="session-card-name">${escHtml(displayName)}</span>
-      ${modeIcon}<span class="session-card-badge ${badge.cls}">${badge.text}</span>
-    </div>`;
-    const row = card.querySelector('.session-card-row');
-    // Star button (inline, always visible)
-    const starBtn = document.createElement('button');
-    starBtn.className = 'session-inline-btn' + (starred ? ' starred' : '');
-    starBtn.textContent = starred ? '\u2605' : '\u2606';
-    starBtn.title = starred ? 'Unstar' : 'Star';
-    starBtn.onclick = (e) => { e.stopPropagation(); this.toggleStar(s.sessionId); };
-    row.insertBefore(starBtn, row.firstChild);
-    // Archive button (inline, always visible)
-    const archBtn = document.createElement('button');
-    archBtn.className = 'session-inline-btn' + (isArchived ? ' archived' : '');
-    archBtn.textContent = isArchived ? '\u{1F4E4}' : '\u{1F4E6}';
-    archBtn.title = isArchived ? 'Unarchive' : 'Archive';
-    archBtn.onclick = (e) => { e.stopPropagation(); this.toggleArchive(s.sessionId); };
-    row.insertBefore(archBtn, row.children[1]);
-
-    // Expand/collapse button on the right side, after badge
-    const expandBtn = document.createElement('button');
-    expandBtn.className = 'session-expand-btn';
-    expandBtn.textContent = this._expandedCardId === s.sessionId ? '\u25BE' : '\u25B8';
-    expandBtn.title = 'Show details';
-    expandBtn.onclick = (e) => {
-      e.stopPropagation();
-      if (this._expandedCardId === s.sessionId) {
-        this._expandedCardId = null;
-      } else {
-        this._expandedCardId = s.sessionId;
-      }
-      this._render();
-    };
-    card.querySelector('.session-card-row').appendChild(expandBtn);
-
-    // Detail panel (shown when expanded)
-    const detailPanel = document.createElement('div');
-    detailPanel.className = 'session-card-detail';
-
-    const settings = this.app.settings;
-    const visibleFields = settings?.get('sessionCard.visibleFields') ?? ['id', 'cwd', 'started', 'status', 'groups'];
-    const clickToCopy = settings?.get('sessionCard.clickToCopy') ?? false;
-    const truncation = settings?.get('sessionCard.detailTruncation') ?? 'left';
-    const cwdShort = (s.cwd || '').replace(/^\/home\/[^/]+/, '~').replace(/^\/Users\/[^/]+/, '~');
-
-    const fields = [
-      { key: 'id', label: 'ID', display: s.sessionId, copy: s.sessionId, copiable: true, midTruncate: true },
-      { key: 'cwd', label: 'CWD', display: cwdShort, copy: s.cwd || '', copiable: true, leftTruncate: true },
-      { key: 'started', label: 'Started', display: date.toLocaleString(), copy: date.toISOString() },
-      { key: 'status', label: 'Status', display: null, badge: true, copy: `${s.status}${s.pid ? ' PID ' + s.pid : ''}` },
-    ];
-
-    for (const f of fields) {
-      if (!visibleFields.includes(f.key)) continue;
-      const row = document.createElement('div'); row.className = 'session-detail-row';
-      row.style.position = 'relative';
-      const lbl = document.createElement('span'); lbl.className = 'session-detail-label'; lbl.textContent = f.label;
-      const val = document.createElement('span'); val.className = 'session-detail-value';
-      if (f.badge) {
-        val.innerHTML = `<span class="session-card-badge ${badge.cls}">${badge.text}</span>`;
-      } else if (f.midTruncate && f.display.length > 12) {
-        // Middle truncation: flexible head (ellipsis) + fixed tail
-        val.classList.add('session-detail-mid-truncate');
-        const head = document.createElement('span'); head.className = 'mid-truncate-head'; head.textContent = f.display.slice(0, -4);
-        const tail = document.createElement('span'); tail.className = 'mid-truncate-tail'; tail.textContent = f.display.slice(-4);
-        val.append(head, tail);
-      } else {
-        val.textContent = f.display;
-        val.style.display = 'block';
-        if (f.leftTruncate) { val.style.direction = 'rtl'; val.style.unicodeBidi = 'plaintext'; }
-      }
-      if (f.copiable || clickToCopy) {
-        val.classList.add('session-detail-copyable');
-        val.title = f.copy;
-        val.onclick = (e) => {
-          e.stopPropagation();
-          const showTip = () => {
-            const tip = document.createElement('span');
-            tip.className = 'session-detail-tooltip';
-            tip.textContent = 'Copied!';
-            row.appendChild(tip);
-            setTimeout(() => tip.remove(), 1000);
-          };
-          if (navigator.clipboard?.writeText) {
-            navigator.clipboard.writeText(f.copy).then(showTip).catch(() => {
-              this._fallbackCopy(f.copy); showTip();
-            });
-          } else {
-            this._fallbackCopy(f.copy); showTip();
-          }
-        };
-      }
-      row.append(lbl, val);
-      detailPanel.appendChild(row);
-    }
-
-    // Groups section
-    if (visibleFields.includes('groups')) {
-      const groupsContainer = document.createElement('div'); groupsContainer.className = 'session-detail-groups';
-      detailPanel.appendChild(groupsContainer);
-      this._renderDetailGroups(groupsContainer, s.sessionId, clickToCopy);
-    }
-
-    const actionsDiv = document.createElement('div'); actionsDiv.className = 'session-detail-actions';
-    detailPanel.appendChild(actionsDiv);
-
-    // Rename button
-    const detailRenameBtn = document.createElement('button');
-    detailRenameBtn.className = 'session-detail-btn';
-    detailRenameBtn.textContent = '\u270F Rename';
-    detailRenameBtn.onclick = (e) => { e.stopPropagation(); this.renameSession(s.sessionId, originalName); };
-    actionsDiv.appendChild(detailRenameBtn);
-
-    // Find button — highlight the window + taskbar item with fast blink
-    if (s.webuiId) {
-      const findBtn = document.createElement('button');
-      findBtn.className = 'session-detail-btn';
-      findBtn.textContent = '\uD83D\uDD0D Find';
-      findBtn.onclick = (e) => {
-        e.stopPropagation();
-        this.app.flashWindow(s.webuiId);
-      };
-      actionsDiv.appendChild(findBtn);
-    }
-
-    // Resume/Attach action button
-    if (s.status === 'live' && s.webuiId) {
-      const detailAttachBtn = document.createElement('button');
-      detailAttachBtn.className = 'session-detail-btn session-detail-btn-primary';
-      detailAttachBtn.textContent = '\u25B6 Attach';
-      detailAttachBtn.onclick = (e) => { e.stopPropagation(); this.app.attachSession(s.webuiId, s.webuiName || displayName, s.cwd, { mode: s.webuiMode }); };
-      actionsDiv.appendChild(detailAttachBtn);
-    } else if (s.status === 'tmux') {
-      const detailTmuxBtn = document.createElement('button');
-      detailTmuxBtn.className = 'session-detail-btn session-detail-btn-primary';
-      detailTmuxBtn.textContent = '\u25B6 View';
-      detailTmuxBtn.onclick = (e) => { e.stopPropagation(); this.app.attachTmuxSession(s.tmuxTarget, displayName, s.cwd); };
-      actionsDiv.appendChild(detailTmuxBtn);
-    } else if (s.status === 'stopped') {
-      const savedMode = this.getSessionMode(s.sessionId);
-      const defaultMode = this.app.settings.get('session.defaultMode') ?? 'terminal';
-      let resumeMode = savedMode || defaultMode;
-
-      const resumeWrap = document.createElement('div');
-      resumeWrap.className = 'session-resume-split';
-
-      const resumeBtn = document.createElement('button');
-      const dropBtn = document.createElement('button');
-      const updateLabel = () => {
-        const isChat = resumeMode === 'chat';
-        resumeBtn.textContent = isChat ? '\uD83D\uDCAC Resume in Chat' : '\u25B6 Resume in Terminal';
-        resumeBtn.className = 'session-detail-btn ' + (isChat ? 'session-detail-btn-chat' : 'session-detail-btn-primary');
-        dropBtn.className = 'session-resume-drop ' + (isChat ? 'session-detail-btn-chat' : 'session-detail-btn-primary');
-      };
-      updateLabel();
-      resumeBtn.onclick = (e) => { e.stopPropagation(); this.app.resumeSession(s.sessionId, s.cwd, customName || s.name, { mode: resumeMode }); };
-
-      dropBtn.textContent = '\u25BE';
-      dropBtn.onclick = (e) => {
-        e.stopPropagation();
-        resumeMode = resumeMode === 'chat' ? 'terminal' : 'chat';
-        this.setSessionMode(s.sessionId, resumeMode);
-        updateLabel();
-      };
-
-      resumeWrap.append(resumeBtn, dropBtn);
-      actionsDiv.appendChild(resumeWrap);
-
-      // View History button (read-only, no resume)
-      const viewBtn = document.createElement('button');
-      viewBtn.className = 'session-detail-btn';
-      viewBtn.textContent = '\uD83D\uDCCB View History';
-      viewBtn.onclick = (e) => { e.stopPropagation(); this.app.viewSession(s.sessionId, s.cwd, customName || s.name); };
-      actionsDiv.appendChild(viewBtn);
-    }
-
-    // Terminate button (for any running session)
-    if (s.status !== 'stopped') {
-      const terminateBtn = document.createElement('button');
-      terminateBtn.className = 'session-detail-btn';
-      terminateBtn.style.color = 'var(--red, #e55)';
-      terminateBtn.textContent = '\u2715 Terminate';
-      terminateBtn.onclick = (e) => {
-        e.stopPropagation();
-        if (!confirm('Terminate session "' + displayName + '"?')) return;
-        if (s.webuiId) this.app.killSession(s.webuiId);
-        else if (s.pid) this.app.killPid(s.pid);
-      };
-      actionsDiv.appendChild(terminateBtn);
-    }
-
-    card.appendChild(detailPanel);
-
-    // Double-click name to rename (sets --name for next resume)
-    const nameEl = card.querySelector('.session-card-name');
-    if (nameEl) {
-      if (customName) nameEl.title = `Custom name (--name on resume). Original: ${originalName}`;
-      nameEl.addEventListener('dblclick', (e) => { e.stopPropagation(); this.renameSession(s.sessionId, originalName); });
-    }
-
-    const clickBehavior = settings?.get('sessionCard.clickBehavior') ?? 'focus';
-    if (s.status === 'external') {
-      card.style.opacity = '0.7';
-      if (clickBehavior === 'focus') card.style.cursor = 'default';
-      card.title = 'Running in unsupported terminal (PID ' + (s.pid || '?') + ')';
-    }
-    if (clickBehavior === 'expand') {
-      // Click expands/collapses; use buttons inside detail to open/resume
-      card.onclick = (e) => {
-        if (e.target.closest('.session-detail-btn') || e.target.closest('.session-inline-btn') || e.target.closest('.session-expand-btn') || e.target.closest('.session-detail-copyable')) return;
-        if (this._expandedCardId === s.sessionId) {
-          this._expandedCardId = null;
-        } else {
-          this._expandedCardId = s.sessionId;
-        }
-        this._render();
-      };
-    } else if (clickBehavior === 'flash') {
-      // Click flashes/bounces the corresponding window
-      card.onclick = (e) => {
-        if (e.target.closest('.session-detail-btn') || e.target.closest('.session-inline-btn') || e.target.closest('.session-expand-btn') || e.target.closest('.session-detail-copyable')) return;
-        if (s.webuiId) this.app.flashWindow(s.webuiId);
-        else if (s.status === 'live' && s.webuiId) this.app.attachSession(s.webuiId, s.webuiName || displayName, s.cwd, { mode: s.webuiMode });
-        else if (s.status === 'tmux') this.app.attachTmuxSession(s.tmuxTarget, displayName, s.cwd);
-        else if (s.status === 'stopped') this.app.resumeSession(s.sessionId, s.cwd, customName || s.name);
-      };
-    } else {
-      // Default 'focus': click opens/resumes directly
-      if (s.status === 'live' && s.webuiId) {
-        card.onclick = () => this.app.attachSession(s.webuiId, s.webuiName || displayName, s.cwd, { mode: s.webuiMode });
-      } else if (s.status === 'tmux') {
-        card.onclick = () => this.app.attachTmuxSession(s.tmuxTarget, displayName, s.cwd);
-        card.title = 'Running in tmux \u2014 click to view (closing won\'t kill it)';
-      } else if (s.status === 'live') {
-        // LIVE but no window open (e.g. layout didn't restore it) — click to attach
-        card.onclick = () => this.app.attachSession(s.webuiId, s.webuiName || displayName, s.cwd, { mode: s.webuiMode });
-      } else if (s.status === 'stopped') {
-        card.onclick = () => this.app.resumeSession(s.sessionId, s.cwd, customName || s.name);
-      }
-    }
-    return card;
-  }
-
-  _renderDetailGroups(container, sessionId, clickToCopy) {
-    container.innerHTML = '';
-    const sessionGroups = this._getSessionGroups(sessionId);
-    const summary = sessionGroups.length ? sessionGroups.join(', ') : 'None';
-
-    const row = document.createElement('div');
-    row.className = 'session-detail-row';
-    const lbl = document.createElement('span'); lbl.className = 'session-detail-label'; lbl.textContent = 'Groups';
-    const val = document.createElement('span'); val.className = 'session-detail-value';
-    val.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
-    val.textContent = summary;
-    if (clickToCopy) {
-      val.classList.add('session-detail-copyable');
-      val.title = 'Click to copy';
-      val.onclick = (e) => {
-        e.stopPropagation();
-        navigator.clipboard.writeText(summary).then(() => {
-          const orig = val.textContent; val.textContent = 'Copied!';
-          setTimeout(() => { val.textContent = orig; }, 800);
-        }).catch(() => {});
-      };
-    }
-    row.append(lbl, val);
-    const btn = document.createElement('button');
-    btn.className = 'session-detail-btn';
-    btn.textContent = '▾';
-    btn.style.cssText = 'padding:1px 6px;font-size:10px;min-width:0';
-    btn.onclick = (e) => {
-      e.stopPropagation();
-      this._showGroupsPopover(btn, sessionId);
-    };
-    row.appendChild(btn);
-    container.appendChild(row);
   }
 
   _showGroupFoldersPopover(anchor, groupName) {
-    document.querySelectorAll('.groups-popover').forEach(p => p.remove());
-    const pop = document.createElement('div');
-    pop.className = 'groups-popover';
-    const rect = anchor.getBoundingClientRect();
-    pop.style.position = 'fixed';
-    pop.style.left = rect.left + 'px';
-    pop.style.top = (rect.bottom + 2) + 'px';
-    pop.style.zIndex = '99999';
+    const pop = createPopover(anchor, 'groups-popover');
 
     const folders = this._groupFolders[groupName] || [];
 
@@ -1090,23 +780,15 @@ class Sidebar {
         pop.appendChild(row);
       }
     }
-
-    document.body.appendChild(pop);
-    attachPopoverClose(pop, anchor);
   }
 
   _showGroupContextMenu(x, y, groupName) {
-    document.querySelectorAll('.context-menu').forEach(m => m.remove());
-    const menu = document.createElement('div'); menu.className = 'context-menu';
-    menu.style.left = x + 'px'; menu.style.top = y + 'px';
-
-    const items = [
+    showContextMenu(x, y, [
       { label: 'Rename', action: () => {
         const n = prompt('Rename group:', groupName);
         if (n && n.trim() && n.trim() !== groupName) this._renameGroup(groupName, n.trim());
       }},
       { label: 'Linked folders', action: () => {
-        // Show the folders popover anchored near the menu position
         const anchor = document.createElement('span');
         anchor.style.cssText = 'position:fixed;left:' + x + 'px;top:' + y + 'px;width:0;height:0';
         document.body.appendChild(anchor);
@@ -1117,20 +799,7 @@ class Sidebar {
       { label: 'Delete group', style: 'color:var(--red,#e55)', action: () => {
         if (confirm('Delete group "' + groupName + '"?\nSessions will not be deleted.')) this._deleteGroup(groupName);
       }},
-    ];
-    for (const item of items) {
-      if (item.separator) { const sep = document.createElement('div'); sep.className = 'context-menu-separator'; menu.appendChild(sep); continue; }
-      const el = document.createElement('div'); el.className = 'context-menu-item'; el.textContent = item.label;
-      if (item.style) el.style.cssText = item.style;
-      el.onclick = () => { menu.remove(); item.action(); };
-      menu.appendChild(el);
-    }
-    // Keep menu on screen
-    document.body.appendChild(menu);
-    const mr = menu.getBoundingClientRect();
-    if (mr.right > window.innerWidth) menu.style.left = (window.innerWidth - mr.width - 4) + 'px';
-    if (mr.bottom > window.innerHeight) menu.style.top = (window.innerHeight - mr.height - 4) + 'px';
-    attachPopoverClose(menu);
+    ]);
   }
 
   _assignSessionToGroup(sessionId, groupName) {
@@ -1142,31 +811,17 @@ class Sidebar {
     }
   }
 
-  _showFolderGroupPopover(anchor, folderPath) {
-    document.querySelectorAll('.groups-popover').forEach(p => p.remove());
-    const pop = document.createElement('div');
-    pop.className = 'groups-popover';
-    const rect = anchor.getBoundingClientRect();
-    pop.style.position = 'fixed';
-    pop.style.left = rect.left + 'px';
-    pop.style.top = (rect.bottom + 2) + 'px';
-    pop.style.zIndex = '99999';
+  _showGroupChecklistPopover(anchor, isCheckedFn, onToggleFn) {
+    const pop = createPopover(anchor, 'groups-popover');
 
     const groupNames = this._getGroupNames();
     for (const name of groupNames) {
-      const folders = this._groupFolders[name] || [];
-      const isLinked = folders.includes(folderPath);
       const row = document.createElement('label');
       row.className = 'session-detail-group-item';
       const cb = document.createElement('input');
       cb.type = 'checkbox';
-      cb.checked = isLinked;
-      cb.onchange = (e) => {
-        e.stopPropagation();
-        if (cb.checked) this._addFolderToGroup(folderPath, name);
-        else this._removeFolderFromGroup(folderPath, name);
-        pop.remove();
-      };
+      cb.checked = isCheckedFn(name);
+      cb.onchange = (e) => { e.stopPropagation(); onToggleFn(name, cb.checked, pop); };
       const lbl = document.createElement('span');
       lbl.textContent = name;
       row.append(cb, lbl);
@@ -1188,73 +843,11 @@ class Sidebar {
       const name = prompt('New group name:');
       if (name && name.trim()) {
         this._createGroup(name.trim());
-        this._addFolderToGroup(folderPath, name.trim());
+        onToggleFn(name.trim(), true, pop);
         pop.remove();
       }
     };
     pop.appendChild(createRow);
-
-    document.body.appendChild(pop);
-    attachPopoverClose(pop, anchor);
-  }
-
-  _showGroupsPopover(anchor, sessionId) {
-    document.querySelectorAll('.groups-popover').forEach(p => p.remove());
-    const pop = document.createElement('div');
-    pop.className = 'groups-popover';
-    const rect = anchor.getBoundingClientRect();
-    pop.style.position = 'fixed';
-    pop.style.left = rect.left + 'px';
-    pop.style.top = (rect.bottom + 2) + 'px';
-    pop.style.zIndex = '99999';
-
-    const groupNames = this._getGroupNames();
-    const sessionGroups = this._getSessionGroups(sessionId);
-
-    for (const name of groupNames) {
-      const row = document.createElement('label');
-      row.className = 'session-detail-group-item';
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.checked = sessionGroups.includes(name);
-      cb.onchange = (e) => {
-        e.stopPropagation();
-        if (cb.checked) this._addSessionToGroup(sessionId, name);
-        else this._removeSessionFromGroup(sessionId, name);
-      };
-      const lbl = document.createElement('span');
-      lbl.textContent = name;
-      row.append(cb, lbl);
-      row.onclick = (e) => e.stopPropagation();
-      pop.appendChild(row);
-    }
-
-    const createRow = document.createElement('div');
-    createRow.className = 'session-detail-group-create';
-    createRow.textContent = '+ New group';
-    createRow.onclick = (e) => {
-      e.stopPropagation();
-      const name = prompt('New group name:');
-      if (name && name.trim()) {
-        this._createGroup(name.trim());
-        this._addSessionToGroup(sessionId, name.trim());
-        pop.remove();
-      }
-    };
-    pop.appendChild(createRow);
-
-    document.body.appendChild(pop);
-    attachPopoverClose(pop, anchor);
-  }
-
-  _fallbackCopy(text) {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.cssText = 'position:fixed;left:-9999px';
-    document.body.appendChild(ta);
-    ta.select();
-    document.execCommand('copy');
-    ta.remove();
   }
 
 }

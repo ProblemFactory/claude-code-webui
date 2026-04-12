@@ -363,7 +363,7 @@ class TerminalSession {
 
     // Font size with Default checkbox
     const sizeLabel = document.createElement('label'); sizeLabel.textContent = 'Font Size';
-    const sizeRow = document.createElement('div'); sizeRow.className = 'settings-row';
+    const sizeRow = document.createElement('div'); sizeRow.className = 'popover-row';
     const sizeInput = document.createElement('input'); sizeInput.type = 'number'; sizeInput.min = 8; sizeInput.max = 28;
     const sizeDefault = document.createElement('label'); sizeDefault.className = 'settings-default-check';
     const sizeCheck = document.createElement('input'); sizeCheck.type = 'checkbox';
