@@ -929,6 +929,22 @@ class App {
       case 'viewSession':
         this.viewSession(spec.sessionId, spec.cwd, spec.name);
         break;
+      case 'viewSubagent': {
+        const title = `\uD83E\uDD16 ${spec.description || 'Agent'}`;
+        const winInfo = this.wm.createWindow({ title, type: 'chat', syncId });
+        const view = new ChatView(winInfo, this.ws, spec.virtualId, this, { readOnly: true });
+        this.sessions.set(winInfo.id, view);
+        this.ws.send({ type: 'attach', sessionId: spec.virtualId, parentSessionId: spec.parentSessionId, claudeSessionId: spec.claudeSessionId, cwd: spec.cwd });
+        const handler = (msg) => {
+          if (msg.type === 'attached' && msg.sessionId === spec.virtualId) {
+            this.ws.offGlobal(handler);
+            if (msg.messages?.length) view.loadHistory(msg.messages, msg.totalCount, msg.isStreaming);
+          }
+        };
+        this.ws.onGlobal(handler);
+        winInfo.onClose = () => { view.dispose(); this.sessions.delete(winInfo.id); this._checkWelcome(); };
+        break;
+      }
     }
   }
 

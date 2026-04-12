@@ -1941,10 +1941,11 @@ class ChatView {
     const title = `\uD83E\uDD16 ${description || 'Agent'}`;
     const winInfo = this.app.wm.createWindow({ title, type: 'chat' });
     this._subagentViewers.set(virtualId, winInfo.id);
+    const { claudeId, cwd } = this._getSessionIds();
+    winInfo._openSpec = { action: 'viewSubagent', virtualId, parentSessionId: this.sessionId, claudeSessionId: claudeId, cwd, description };
     const view = new ChatView(winInfo, this.ws, virtualId, this.app, { readOnly: true });
 
     // Attach to virtual session — server returns history + sets up live forwarding
-    const { claudeId, cwd } = this._getSessionIds();
     this.ws.send({ type: 'attach', sessionId: virtualId, parentSessionId: this.sessionId, claudeSessionId: claudeId, cwd });
 
     // One-time handler for attach response
