@@ -250,7 +250,7 @@ Recovery uses greedy filesystem checking as fallback, but the forward encoding i
 - Custom grid presets stored in `layouts.json` → `customGrids` array, loaded on startup
 - Window restore uses `winInfo` returned by `attachSession()` — NOT `windows.values().pop()` (see bug below)
 - **All window types restored**: terminals (by claudeSessionId match), file explorers (by explorerPath), file viewers/editors (by filePath), browser windows (by URL)
-- **Pre-snap size**: `preSnapSize {width, height}` persisted per window, restored on layout load
+- **Pre-snap size**: `preSnapBounds {width, height}` persisted per window, restored on layout load
 - **Unique window IDs**: `win-{timestamp}-{random}` format for cross-client matching in layout sync
 - **ID remap on layout restore**: taskbar buttons and other references use `winInfo.id` (not closure-captured id) to survive ID changes
 
@@ -676,8 +676,10 @@ Server → Client: `created`, `output`, `msg` (normalized: op=create/edit/meta),
 - Message timestamps all identical in history: `_create` used `Date.now()` during `convertHistory`. Fix: extract `raw.timestamp` (ISO string) from Claude messages.
 - Minimap label not hiding on mouse leave: no `.chat-minimap-label.hidden` CSS rule existed (project has no global `.hidden`). Fix: added component-specific rule.
 - Live messages lost when viewing history: `_onCreateMessage` rendered at bottom then `_trimBottom` removed them. Fix: defer live messages when not pinned, show badge count on scroll button.
+- Resume briefly showed as external: session discovery only checked `webuiPids` (not yet updated). Fix: also check `activeSessions` by `claudeSessionId` as fallback.
+- View-only pagination disabled: `_readOnly` flag blocked scroll-up loading. Fix: `_canPaginate` flag (false for `sub-*` subagent viewers only, true for `view-*` and normal sessions).
 - Click-to-focus triggered snap: no drag threshold meant mousedown+mouseup on title bar (to focus) could trigger snap behavior. Fix: 5px drag threshold — snap only activates after moving at least 5px.
-- Snap loses original size: snapping to grid/edge permanently changed window size with no way to restore. Fix: pre-snap size memory saves `{width, height}` before snap, dragging out of snap restores original dimensions. Persisted in layout as `preSnapSize`.
+- Snap loses original size: snapping to grid/edge permanently changed window size with no way to restore. Fix: pre-snap size memory saves `{width, height}` before snap, dragging out of snap restores original dimensions. Persisted in layout as `preSnapBounds`.
 - Drag steals mouse events: during drag, iframes and terminals inside windows would capture mouse events. Fix: `pointer-events: none` on `.window-content` during drag.
 - Taskbar overflow with many windows: taskbar items overflowed when many windows open. Fix: items use `flex-shrink` + `text-overflow: ellipsis` with `min-width: 0`.
 - Draft sync blocked by focus: `StateSync` draft updates skipped textarea when it had focus (to avoid clobbering user input). Fix: always update textarea regardless of focus state for reliable multi-client sync.
