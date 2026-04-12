@@ -113,7 +113,9 @@ class WindowManager {
     const { element, titleBar } = win;
     let mouseDown = false, dragging = false, startX, startY, initL, initT;
     let shiftDragStart = -1;
-    let tabMergeTarget = null; // window to merge into if dropped on its icon
+    let tabMergeTarget = null;
+    let mergeGhost = null; // floating ghost shown when hovering over a merge target
+    let savedBounds = null; // window bounds saved before collapsing to ghost
     const DRAG_THRESHOLD = 5;
 
     titleBar.addEventListener('mousedown', (e) => {
@@ -178,6 +180,7 @@ class WindowManager {
       }
 
       // Tab merge: detect if cursor is over another window's icon
+      const prevTarget = tabMergeTarget;
       tabMergeTarget = null;
       for (const [id, w] of this.windows) {
         if (id === win.id || (w._tabChain && w._tabChain.tabs[0] !== w.id)) continue;
@@ -189,6 +192,35 @@ class WindowManager {
         }
       }
       for (const [, w] of this.windows) w.element.classList.toggle('tab-drop-target', w === tabMergeTarget);
+
+      // Collapse window to ghost when over merge target, restore when leaving
+      if (tabMergeTarget && !prevTarget) {
+        // Entering merge zone — save bounds, hide window, show ghost
+        savedBounds = { left: element.style.left, top: element.style.top, width: element.style.width, height: element.style.height };
+        element.style.display = 'none';
+        mergeGhost = document.createElement('div');
+        mergeGhost.className = 'tab-ghost';
+        mergeGhost.innerHTML = `<span>${win._typeIcon || ''}</span><span>${win.title}</span>`;
+        document.body.appendChild(mergeGhost);
+      } else if (!tabMergeTarget && prevTarget && mergeGhost) {
+        // Leaving merge zone — remove ghost, restore window
+        mergeGhost.remove(); mergeGhost = null;
+        element.style.display = '';
+        if (savedBounds) {
+          element.style.left = savedBounds.left; element.style.top = savedBounds.top;
+          element.style.width = savedBounds.width; element.style.height = savedBounds.height;
+          // Re-sync position to cursor
+          initL = e.clientX - (parseInt(savedBounds.width) || 350) / 2;
+          initT = e.clientY - 15;
+          element.style.left = initL + 'px'; element.style.top = initT + 'px';
+          startX = e.clientX; startY = e.clientY;
+          savedBounds = null;
+        }
+      }
+      if (mergeGhost) {
+        mergeGhost.style.left = (e.clientX + 12) + 'px';
+        mergeGhost.style.top = (e.clientY + 12) + 'px';
+      }
     };
 
     const onUp = (e) => {
@@ -198,16 +230,21 @@ class WindowManager {
       dragging = false; element.classList.remove('dragging');
       this.snapIndicator.style.display = 'none';
       for (const [, w] of this.windows) w.element.classList.remove('tab-drop-target');
+      if (mergeGhost) { mergeGhost.remove(); mergeGhost = null; }
 
       // Tab merge takes priority over snap
       if (tabMergeTarget) {
         this._clearGridHighlight(); this.gridOverlay.classList.remove('dragging');
+        // Restore window visibility briefly for createTabChain to work
+        element.style.display = '';
+        if (savedBounds) { element.style.left = savedBounds.left; element.style.top = savedBounds.top; element.style.width = savedBounds.width; element.style.height = savedBounds.height; savedBounds = null; }
         if (tabMergeTarget._tabChain) this.addToTabChain(tabMergeTarget._tabChain, win);
         else this.createTabChain(tabMergeTarget, win);
         tabMergeTarget = null;
         return;
       }
       tabMergeTarget = null;
+      savedBounds = null;
 
       const snapEnabled = this._settings?.get('layout.enableDragSnap') ?? true;
       const shiftDragEnabled = this._settings?.get('layout.enableShiftDragSelection') ?? true;
