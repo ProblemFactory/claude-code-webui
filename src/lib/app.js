@@ -6,7 +6,7 @@ import { TerminalSession } from './terminal.js';
 import { Sidebar } from './sidebar.js';
 import { FileExplorer } from './file-explorer.js';
 import { FileViewer } from './file-viewer.js';
-import { CodeEditor, detectLang, getLangExtension, loadEditorSettings, saveEditorSettings, editorLightTheme } from './code-editor.js';
+import { CodeEditor } from './code-editor.js';
 import { LayoutManager } from './layout.js';
 import { ChatView } from './chat-view.js';
 import { Resizer } from './resizer.js';
@@ -15,11 +15,8 @@ import { setupDirAutocomplete } from './autocomplete.js';
 import { getAvailableFonts } from './terminal.js';
 import { SettingsManager } from './settings.js';
 import { SettingsUI } from './settings-ui.js';
-import { EditorView, basicSetup } from 'codemirror';
-import { oneDark } from '@codemirror/theme-one-dark';
-import { EditorState, Compartment, Prec } from '@codemirror/state';
-import { keymap } from '@codemirror/view';
-import { indentWithTab } from '@codemirror/commands';
+import { openExternalEditor, closeExternalEditor } from './external-editor.js';
+import { CommandMode } from './command-mode.js';
 
 class App {
   constructor() {
@@ -63,7 +60,7 @@ class App {
     this._setupGridConfig();
     this._setupLayoutManager();
     this._setupUsage();
-    this._setupCommandMode();
+    this._commandMode = new CommandMode(this, this.settings);
 
     // Listen for editor open/close requests (from editor-helper.sh via server HTTP→WebSocket)
     this.ws.onGlobal((msg) => {
@@ -440,172 +437,7 @@ class App {
       <div class="usage-total" style="font-weight:400;color:var(--text-dim)">Updated ${ago < 1 ? 'just now' : ago + 'min ago'}</div>`;
   }
 
-  // ── Command Mode (Ctrl+\ prefix key, tmux-style) ──
-  _setupCommandMode() {
-    this._cmdMode = false;
-    this._cmdTimer = null;
-    this._cmdDigits = '';
-    this._cmdDigitTimer = null;
-    this._cmdIndicator = document.getElementById('cmd-indicator');
-
-    document.addEventListener('keydown', (e) => {
-      // Ctrl+\ toggles command mode (if enabled in settings)
-      if (e.key === '\\' && e.ctrlKey && !e.altKey && !e.metaKey && (this.settings.get('toolbar.showCommandMode') ?? true)) {
-        e.preventDefault();
-        e.stopPropagation();
-        if (this._cmdMode) {
-          this._exitCommandMode();
-        } else {
-          this._enterCommandMode();
-        }
-        return;
-      }
-
-      if (!this._cmdMode) return;
-
-      // Reset the auto-exit timer on each key press in command mode
-      this._resetCmdTimer();
-
-      const key = e.key;
-
-      // Esc exits command mode
-      if (key === 'Escape') {
-        e.preventDefault(); e.stopPropagation();
-        this._exitCommandMode();
-        return;
-      }
-
-      // Digit accumulation for cell snap
-      if (key >= '0' && key <= '9') {
-        e.preventDefault(); e.stopPropagation();
-        this._cmdDigits += key;
-        clearTimeout(this._cmdDigitTimer);
-        this._cmdDigitTimer = setTimeout(() => this._executeCellSnap(), 500);
-        return;
-      }
-
-      // If we were accumulating digits and a non-digit came, execute the snap first
-      if (this._cmdDigits) {
-        clearTimeout(this._cmdDigitTimer);
-        this._executeCellSnap();
-        // Don't return — continue processing the non-digit key below
-        // But command mode may have been exited by _executeCellSnap, so re-check
-        if (!this._cmdMode) return;
-      }
-
-      e.preventDefault(); e.stopPropagation();
-
-      // Window commands (require active window)
-      const activeWin = this.wm.windows.get(this.wm.activeWindowId);
-
-      switch (key) {
-        case 'ArrowLeft':
-          if (activeWin) this.wm.snapToHalf(this.wm.activeWindowId, 'left');
-          this._exitCommandMode();
-          break;
-        case 'ArrowRight':
-          if (activeWin) this.wm.snapToHalf(this.wm.activeWindowId, 'right');
-          this._exitCommandMode();
-          break;
-        case 'ArrowUp':
-          if (activeWin) this.wm.snapToHalf(this.wm.activeWindowId, 'top');
-          this._exitCommandMode();
-          break;
-        case 'ArrowDown':
-          if (activeWin) this.wm.snapToHalf(this.wm.activeWindowId, 'bottom');
-          this._exitCommandMode();
-          break;
-        case 'm':
-          if (activeWin) this.wm.toggleMaximize(this.wm.activeWindowId);
-          this._exitCommandMode();
-          break;
-        case 'w':
-          if (activeWin) this.wm.closeWindow(this.wm.activeWindowId);
-          this._exitCommandMode();
-          break;
-        case 'Tab':
-          // Cycle to next window, STAY in command mode
-          if (this.wm.windows.size > 0) {
-            const ids = [...this.wm.windows.keys()];
-            const curIdx = ids.indexOf(this.wm.activeWindowId);
-            const nextIdx = (curIdx + 1) % ids.length;
-            const nextId = ids[nextIdx];
-            const nextWin = this.wm.windows.get(nextId);
-            if (nextWin && nextWin.isMinimized) this.wm.restore(nextId);
-            else this.wm.focusWindow(nextId);
-            const session = this.sessions.get(nextId);
-            if (session) session.focus();
-          }
-          // Don't exit command mode for Tab
-          break;
-        case 'f':
-          this.wm.applyLayout('freeform');
-          this._exitCommandMode();
-          break;
-        case 'g': {
-          this._exitCommandMode();
-          const input = prompt('Grid (e.g. 3x3):');
-          if (input) {
-            const match = input.match(/(\d+)\s*[x×X]\s*(\d+)/);
-            if (match) {
-              this.wm.setGrid(parseInt(match[1]), parseInt(match[2]));
-            }
-          }
-          break;
-        }
-        case 'n':
-          this._exitCommandMode();
-          this.showNewSessionDialog();
-          break;
-        case 's':
-          this.sidebar.toggle();
-          this._exitCommandMode();
-          break;
-        case 'b':
-          this.openBrowser();
-          this._exitCommandMode();
-          break;
-        case 'e':
-          this.openFileExplorer();
-          this._exitCommandMode();
-          break;
-        default:
-          // Unrecognized key — exit command mode
-          this._exitCommandMode();
-          break;
-      }
-    }, true); // capture phase
-  }
-
-  _enterCommandMode() {
-    this._cmdMode = true;
-    this._cmdDigits = '';
-    clearTimeout(this._cmdDigitTimer);
-    this._cmdIndicator.classList.add('active');
-    this._resetCmdTimer();
-  }
-
-  _exitCommandMode() {
-    this._cmdMode = false;
-    this._cmdDigits = '';
-    clearTimeout(this._cmdTimer);
-    clearTimeout(this._cmdDigitTimer);
-    this._cmdIndicator.classList.remove('active');
-  }
-
-  _resetCmdTimer() {
-    clearTimeout(this._cmdTimer);
-    this._cmdTimer = setTimeout(() => this._exitCommandMode(), 2000);
-  }
-
-  _executeCellSnap() {
-    const cellIdx = parseInt(this._cmdDigits, 10) - 1; // 1-based input → 0-based index
-    this._cmdDigits = '';
-    if (cellIdx >= 0) {
-      this.wm.snapActiveToCell(cellIdx);
-    }
-    this._exitCommandMode();
-  }
+  // Command mode extracted to CommandMode class (src/lib/command-mode.js)
 
   _setupLayoutManager() {
     document.getElementById('btn-presets').addEventListener('click', () => this._showPresetsDialog());
@@ -1051,220 +883,9 @@ class App {
     };
   }
 
-  _openExternalEditor(filePath, signalPath, sessionId) {
-    // Find the terminal window that triggered this — match by webui session ID
-    let targetWinInfo = null;
-    if (sessionId) {
-      for (const [winId, win] of this.wm.windows) {
-        const term = this.sessions.get(winId);
-        if (term && term.sessionId === sessionId) { targetWinInfo = win; break; }
-      }
-    }
-    // Fallback: active window, then any terminal
-    if (!targetWinInfo) {
-      for (const [winId, win] of this.wm.windows) {
-        if (win.type === 'terminal' && winId === this.wm.activeWindowId) { targetWinInfo = win; break; }
-      }
-    }
-    if (!targetWinInfo) {
-      for (const [, win] of this.wm.windows) { if (win.type === 'terminal') { targetWinInfo = win; break; } }
-    }
-
-    if (!targetWinInfo) {
-      // No terminal window — open standalone editor
-      this._hideWelcome();
-      const winInfo = this.wm.createWindow({ title: `Editor: ${filePath.split('/').pop()}`, type: 'editor' });
-      new CodeEditor(winInfo, filePath, filePath.split('/').pop(), this, {
-        onSaveAndClose: async () => {
-          try { await fetch('/api/editor/signal', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ signalPath, filePath }) }); } catch {}
-        },
-      });
-      return;
-    }
-
-    // Split the terminal window: add an editor pane below the terminal
-    const contentEl = targetWinInfo.content;
-    const termContainer = contentEl.querySelector('.terminal-container');
-    if (!termContainer) return;
-
-    // Create split layout
-    contentEl.style.display = 'flex';
-    contentEl.style.flexDirection = 'column';
-    termContainer.style.flex = '1';
-    termContainer.style.minHeight = '100px';
-
-    // Store editor state on winInfo for layout save/restore
-    targetWinInfo._editorState = { filePath, signalPath };
-
-    // Create the editor pane
-    const editorPane = document.createElement('div');
-    editorPane.className = 'editor-container';
-    editorPane.style.flex = '1';
-    editorPane.style.borderTop = '2px solid var(--accent)';
-    editorPane.style.minHeight = '150px';
-
-    // Editor toolbar with settings
-    const toolbar = document.createElement('div');
-    toolbar.className = 'editor-toolbar';
-    toolbar.innerHTML = `<span class="file-path">${filePath}</span>`;
-
-    const edSettings = loadEditorSettings();
-    const mkBtn = (text) => { const b = document.createElement('button'); b.className = 'editor-setting-btn'; b.textContent = text; return b; };
-
-    // Wrap toggle
-    const btnWrap = mkBtn(edSettings.wordWrap ? 'Wrap: On' : 'Wrap: Off');
-    // Font size
-    const btnFontDown = mkBtn('A-');
-    const fontDisplay = document.createElement('span'); fontDisplay.className = 'editor-font-size-display'; fontDisplay.textContent = edSettings.fontSize;
-    const btnFontUp = mkBtn('A+');
-    // Theme toggle
-    const btnTheme = mkBtn(edSettings.theme === 'dark' ? 'Dark' : 'Light');
-
-    const saveBtn = document.createElement('button');
-    saveBtn.className = 'btn-create';
-    saveBtn.style.cssText = 'padding:3px 12px;font-size:11px;';
-    saveBtn.textContent = 'Save & Close';
-
-    const sep = document.createElement('span'); sep.className = 'editor-toolbar-sep';
-    toolbar.append(sep, btnWrap, btnFontDown, fontDisplay, btnFontUp, btnTheme, saveBtn);
-
-    const editorBody = document.createElement('div');
-    editorBody.className = 'editor-body';
-    editorPane.append(toolbar, editorBody);
-    contentEl.appendChild(editorPane);
-
-    // Draggable divider between terminal and editor (vertical resize)
-    targetWinInfo._splitResizer?.destroy();
-    const splitResizer = new Resizer(termContainer, 'vertical', {
-      min: 80, max: 1000,
-      onResize: () => { if (termSession) termSession.fit(); },
-    });
-    targetWinInfo._splitResizer = splitResizer;
-
-    // Resize terminal to fit the new split
-    const termSession = [...this.sessions.values()].find(s => {
-      return s.winInfo === targetWinInfo;
-    }) || [...this.sessions.values()][0];
-    if (termSession) setTimeout(() => termSession.fit(), 100);
-
-    // Load file and create CodeMirror editor
-    fetch(`/api/file/content?path=${encodeURIComponent(filePath)}`)
-      .then(r => r.json())
-      .then(data => {
-        const content = data.content || '';
-        const langExtensions = getLangExtension(detectLang(filePath));
-        const edSettings = loadEditorSettings();
-
-        const themeComp = new Compartment();
-        const wrapComp = new Compartment();
-        const fontSizeComp = new Compartment();
-
-        const editorView = new EditorView({
-          state: EditorState.create({
-            doc: content,
-            extensions: [
-              basicSetup,
-              themeComp.of(edSettings.theme === 'dark' ? oneDark : editorLightTheme),
-              wrapComp.of(edSettings.wordWrap ? EditorView.lineWrapping : []),
-              fontSizeComp.of(EditorView.theme({ '.cm-content, .cm-gutters': { fontSize: edSettings.fontSize + 'px' } })),
-              ...langExtensions,
-              Prec.highest(keymap.of([
-                { key: 'Mod-s', run: () => { doSave(); return true; } },
-                { key: 'Mod-g', run: () => { doSave(); return true; } },
-              ])),
-              keymap.of([indentWithTab]),
-            ],
-          }),
-          parent: editorBody,
-        });
-        setTimeout(() => editorView.focus(), 50);
-
-        // Wire up editor settings buttons
-        btnWrap.onclick = () => {
-          edSettings.wordWrap = !edSettings.wordWrap;
-          btnWrap.textContent = edSettings.wordWrap ? 'Wrap: On' : 'Wrap: Off';
-          editorView.dispatch({ effects: wrapComp.reconfigure(edSettings.wordWrap ? EditorView.lineWrapping : []) });
-          saveEditorSettings(edSettings);
-        };
-        btnFontDown.onclick = () => {
-          edSettings.fontSize = Math.max(8, edSettings.fontSize - 1);
-          fontDisplay.textContent = edSettings.fontSize;
-          editorView.dispatch({ effects: fontSizeComp.reconfigure(EditorView.theme({ '.cm-content, .cm-gutters': { fontSize: edSettings.fontSize + 'px' } })) });
-          saveEditorSettings(edSettings);
-        };
-        btnFontUp.onclick = () => {
-          edSettings.fontSize = Math.min(32, edSettings.fontSize + 1);
-          fontDisplay.textContent = edSettings.fontSize;
-          editorView.dispatch({ effects: fontSizeComp.reconfigure(EditorView.theme({ '.cm-content, .cm-gutters': { fontSize: edSettings.fontSize + 'px' } })) });
-          saveEditorSettings(edSettings);
-        };
-        btnTheme.onclick = () => {
-          edSettings.theme = edSettings.theme === 'dark' ? 'light' : 'dark';
-          btnTheme.textContent = edSettings.theme === 'dark' ? 'Dark' : 'Light';
-          editorView.dispatch({ effects: themeComp.reconfigure(edSettings.theme === 'dark' ? oneDark : editorLightTheme) });
-          saveEditorSettings(edSettings);
-        };
-
-        const doSave = async () => {
-          const newContent = editorView.state.doc.toString();
-          try {
-            await fetch('/api/file/write', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ path: filePath, content: newContent }) });
-            await fetch('/api/editor/signal', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ signalPath, filePath }) });
-          } catch {}
-          // Remove editor pane + resizer, restore terminal to full height
-          targetWinInfo._editorState = null;
-          targetWinInfo._editorDoSave = null;
-          editorView.destroy();
-          splitResizer.destroy();
-          editorPane.remove();
-          contentEl.style.display = '';
-          contentEl.style.flexDirection = '';
-          termContainer.style.flex = '';
-          termContainer.style.minHeight = '';
-          termContainer.style.height = '';
-          termContainer.style.flexBasis = '';
-          if (termSession) {
-            setTimeout(() => {
-              termSession.fit();
-              // Scroll to bottom and re-focus terminal
-              termSession.terminal.scrollToBottom();
-              termSession.terminal.focus();
-            }, 150);
-          }
-        };
-
-        saveBtn.onclick = doSave;
-        targetWinInfo._editorDoSave = doSave;
-      });
-  }
-
-  _closeExternalEditor(signalPath) {
-    // Find the window with this editor and close the split pane
-    for (const [, win] of this.wm.windows) {
-      if (win._editorState?.signalPath === signalPath) {
-        const editorPane = win.content.querySelector('.editor-container');
-        const termContainer = win.content.querySelector('.terminal-container');
-        if (editorPane) {
-          editorPane.remove();
-          win._editorState = null;
-          if (win._splitResizer) { win._splitResizer.destroy(); win._splitResizer = null; }
-          if (termContainer) {
-            win.content.style.display = '';
-            win.content.style.flexDirection = '';
-            termContainer.style.flex = '';
-            termContainer.style.minHeight = '';
-            termContainer.style.height = '';
-            termContainer.style.flexBasis = '';
-          }
-          const termSession = [...this.sessions.values()].find(s => s.winInfo === win);
-          if (termSession) {
-            setTimeout(() => { termSession.fit(); termSession.terminal.scrollToBottom(); }, 150);
-          }
-        }
-        break;
-      }
-    }
-  }
+  // Delegate to extracted external-editor.js module
+  _openExternalEditor(filePath, signalPath, sessionId) { openExternalEditor(this, filePath, signalPath, sessionId); }
+  _closeExternalEditor(signalPath) { closeExternalEditor(this, signalPath); }
 
   _hideWelcome() { document.getElementById('welcome').classList.add('hidden'); }
   _checkWelcome() { if (this.wm.windows.size === 0) document.getElementById('welcome').classList.remove('hidden'); }
