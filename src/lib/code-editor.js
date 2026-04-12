@@ -137,16 +137,31 @@ class CodeEditor {
     // Markdown preview toggle
     this._btnPreview = this._btn('Preview');
     this._btnPreview.className = 'file-tool-btn editor-setting-btn';
-    this._btnPreview.style.display = 'none'; // shown when language is markdown
+    this._btnPreview.style.display = 'none'; // shown for markdown and html
     this._previewing = false;
+    this._previewType = null; // 'markdown' or 'html'
     this._btnPreview.onclick = () => {
       this._previewing = !this._previewing;
       this._btnPreview.textContent = this._previewing ? 'Edit' : 'Preview';
       this._btnPreview.classList.toggle('active', this._previewing);
       if (this._previewing) {
         this.editorBody.style.display = 'none';
-        this._previewBody.innerHTML = marked.parse(this.editorView?.state.doc.toString() || '');
-        this._previewBody.style.display = 'block';
+        const src = this.editorView?.state.doc.toString() || '';
+        if (this._previewType === 'html') {
+          // HTML preview: render in sandboxed iframe
+          if (!this._previewIframe) {
+            this._previewIframe = document.createElement('iframe');
+            this._previewIframe.className = 'html-preview';
+            this._previewIframe.sandbox = 'allow-scripts';
+            this._previewIframe.style.cssText = 'width:100%;height:100%;border:none';
+            this._previewBody.appendChild(this._previewIframe);
+          }
+          this._previewIframe.srcdoc = src;
+          this._previewBody.style.display = 'block';
+        } else {
+          this._previewBody.innerHTML = marked.parse(src);
+          this._previewBody.style.display = 'block';
+        }
       } else {
         this._previewBody.style.display = 'none';
         this.editorBody.style.display = '';
@@ -241,8 +256,11 @@ class CodeEditor {
       parent: this.editorBody,
     });
 
-    // Show preview button if markdown
-    if (detectedLang === 'markdown') this._btnPreview.style.display = '';
+    // Show preview button for markdown and html
+    if (detectedLang === 'markdown' || detectedLang === 'html') {
+      this._btnPreview.style.display = '';
+      this._previewType = detectedLang;
+    }
 
     // Jump to line if requested
     if (this._gotoLine && this.editorView) {
@@ -264,8 +282,10 @@ class CodeEditor {
     const actualId = langId === 'auto' ? detectLang(this.filePath) : langId;
     this.editorView.dispatch({ effects: this._langCompartment.reconfigure(getLangExtension(actualId)) });
     // Show/hide preview button
-    this._btnPreview.style.display = (actualId === 'markdown') ? '' : 'none';
-    if (actualId !== 'markdown' && this._previewing) {
+    const hasPreview = actualId === 'markdown' || actualId === 'html';
+    this._btnPreview.style.display = hasPreview ? '' : 'none';
+    this._previewType = hasPreview ? actualId : null;
+    if (!hasPreview && this._previewing) {
       this._previewing = false; this._btnPreview.textContent = 'Preview';
       this._btnPreview.classList.remove('active');
       this._previewBody.style.display = 'none'; this.editorBody.style.display = '';

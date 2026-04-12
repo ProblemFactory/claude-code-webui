@@ -60,7 +60,9 @@ class FileViewer {
       } else if (ext === 'pdf') {
         FileViewer._renderPdf(container, filePath);
       } else if (ext === 'html' || ext === 'htm') {
-        FileViewer._renderHtml(container, filePath, app, fileName, winInfo);
+        // HTML: open in CodeEditor with preview toggle (same as markdown)
+        new CodeEditor(winInfo, filePath, fileName, app);
+        return; // CodeEditor manages its own DOM
       } else if (['csv','tsv'].includes(ext)) {
         const res = await fetch(`/api/file/content?path=${encodeURIComponent(filePath)}`);
         const data = await res.json();

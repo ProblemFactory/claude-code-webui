@@ -950,6 +950,10 @@ class FileExplorer {
         this._previewContent.innerHTML = `<iframe src="${rawUrl}" style="width:100%;height:100%;border:none"></iframe>`;
         return;
       }
+      if (ext === 'html' || ext === 'htm') {
+        this._previewContent.innerHTML = `<iframe src="${rawUrl}" sandbox="allow-scripts" style="width:100%;height:100%;border:none;background:#fff"></iframe>`;
+        return;
+      }
 
       // Check file info for binary/size
       const infoRes = await fetch(`/api/file/info?path=${encodeURIComponent(fp)}`);
