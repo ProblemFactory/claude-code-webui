@@ -18,12 +18,12 @@
 .file-tool-btn:hover { background: var(--bg-hover); color: var(--text); }
 .file-tool-btn.active { background: var(--accent-dim); color: var(--accent); border-color: var(--accent); }
 .file-sort-header {
-  display: flex; padding: 2px 10px; gap: 6px; border-bottom: 1px solid var(--border);
+  display: flex; padding: 2px 4px; border-bottom: 1px solid var(--border);
   background: var(--bg-titlebar); font-size: 10px; color: var(--text-secondary); flex-shrink: 0;
   overflow: hidden;
 }
-.file-sort-col { cursor: pointer; user-select: none; padding: 2px 0; position: relative;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0; }
+.file-sort-col { cursor: pointer; user-select: none; padding: 2px 6px; position: relative;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0; box-sizing: border-box; }
 .file-sort-col:hover { color: var(--text); }
 .file-col-resize-handle {
   position: absolute; top: 2px; right: 0; width: 5px; height: calc(100% - 4px);
@@ -32,16 +32,16 @@
 .file-col-resize-handle:hover { border-right-color: var(--accent); }
 .file-list { flex: 1; overflow: auto; padding: 2px 0; }
 .file-item {
-  display: flex; align-items: center; padding: 3px 10px; gap: 6px; cursor: pointer;
+  display: flex; align-items: center; padding: 3px 4px; cursor: pointer;
   font-size: 11px; transition: background var(--transition); border-left: 2px solid transparent;
   width: fit-content; min-width: 100%;
 }
 .file-item:hover { background: var(--bg-hover); }
 .file-item.selected { background: var(--accent-dim); border-left-color: var(--accent); }
 .file-item[draggable] { cursor: grab; }
-.file-icon { font-size: 13px; width: 16px; text-align: center; flex-shrink: 0; }
-.file-name { width: var(--col-name-w, 250px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0; }
-.file-meta { color: var(--text-dim); font-size: 10px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-icon { font-size: 13px; width: 16px; text-align: center; flex-shrink: 0; padding: 0 2px; }
+.file-name { width: var(--col-name-w, 250px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0; padding: 0 6px; box-sizing: border-box; }
+.file-meta { color: var(--text-dim); font-size: 10px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 6px; box-sizing: border-box; }
 .file-size { width: var(--col-size-w, 80px); }
 .file-modified { width: var(--col-modified-w, 140px); }
 /* Icon view */

@@ -484,6 +484,10 @@ class FileExplorer {
   _renderSortHeader() {
     this.sortHeader.innerHTML = '';
     this.sortHeader.style.display = this._viewMode === 'list' ? '' : 'none';
+    // Icon spacer to align with file-icon in rows
+    const iconSpacer = document.createElement('span');
+    iconSpacer.style.cssText = 'width:16px;flex-shrink:0;padding:0 2px';
+    this.sortHeader.appendChild(iconSpacer);
     const visCols = this._getVisibleColumns();
     for (const col of visCols) {
       const el = document.createElement('span');
