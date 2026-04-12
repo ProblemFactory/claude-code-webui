@@ -196,7 +196,7 @@ class WindowManager {
       }
       this._clearGridHighlight(); this.gridOverlay.classList.remove('dragging');
       // Re-capture proportional bounds after final position (snap or free drop)
-      setTimeout(() => { this._captureGridBounds(win); this._scheduleOverlapUpdate(); }, 250);
+      setTimeout(() => { this._captureGridBounds(win); this._scheduleOverlapUpdate(); this._notify(); }, 250);
     };
     document.addEventListener('mousemove', onMove); document.addEventListener('mouseup', onUp);
   }
@@ -261,6 +261,7 @@ class WindowManager {
           if (!win._isSnapped) {
             win._preSnapBounds = { width: win.element.style.width, height: win.element.style.height, left: win.element.style.left, top: win.element.style.top };
           }
+          this._notify();
         };
         document.addEventListener('mousemove', onMove); document.addEventListener('mouseup', onUp);
       });
