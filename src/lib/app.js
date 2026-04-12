@@ -31,7 +31,6 @@ class App {
     this.sessions = new Map();
     this.attachedServerSessions = new Set();
     this.layoutManager = new LayoutManager(this);
-    this.wm._layoutManager = this.layoutManager;
 
     this.wm.onWindowsChanged = () => {
       this.updateTaskbar();

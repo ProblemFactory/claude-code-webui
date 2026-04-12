@@ -2132,24 +2132,15 @@ wss.on('connection', (ws) => {
         break;
       }
 
-      case 'layout-save': {
-        // Layout autosave via WS (full state for disk persistence)
+      case 'layout-sync': {
+        // Layout state sync: save to disk + broadcast to other clients
         const layoutData = readLayouts();
-        const deviceType = data.deviceType || 'desktop';
-        if (deviceType === 'mobile') {
-          layoutData.autoSaveMobile = { ...data.state, updatedAt: Date.now() };
-        } else {
-          layoutData.autoSave = { ...data.state, updatedAt: Date.now() };
-        }
+        layoutData.autoSave = { ...data.state, updatedAt: Date.now() };
         writeLayouts(layoutData);
-        break;
-      }
-
-      case 'layout-op': {
-        // Incremental layout operation — broadcast to other clients
-        const msg = JSON.stringify(data);
+        // Broadcast to other clients (sender excluded)
+        const syncMsg = JSON.stringify({ type: 'layout-sync', ...data });
         wss.clients.forEach(client => {
-          if (client !== ws && client.readyState === WS_OPEN) { try { client.send(msg); } catch {} }
+          if (client !== ws && client.readyState === WS_OPEN) { try { client.send(syncMsg); } catch {} }
         });
         break;
       }

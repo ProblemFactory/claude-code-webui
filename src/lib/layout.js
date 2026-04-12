@@ -4,85 +4,72 @@ class LayoutManager {
     this._autoSaveTimer = null;
     this._savedPresets = {};
     this._currentName = null;
+    this._syncVersion = 0;
 
-    // Listen for incremental layout ops from other clients
+    // Listen for state sync from other clients
     app.ws.onGlobal((msg) => {
-      if (msg.type === 'layout-op' && !this._restoring) {
-        this._applyRemoteOp(msg);
+      if (msg.type === 'layout-sync' && !this._restoring) {
+        if (msg.version && msg.version <= this._syncVersion) return; // stale
+        this._syncVersion = msg.version || 0;
+        this._applyRemoteState(msg.state);
       }
     });
   }
 
-  // Apply a single incremental layout operation from another client
-  _applyRemoteOp(op) {
+  // Apply remote state: diff against local windows, update only what changed
+  _applyRemoteState(state) {
+    if (!state) return;
     this._restoring = true;
     try {
-      switch (op.op) {
-        case 'window-move': {
-          const win = this._findWindow(op.winId);
-          if (win && op.gridBounds) {
-            win.gridBounds = op.gridBounds;
-            this.app.wm._applyGridBounds(win);
-            if (op.isSnapped) { win._isSnapped = true; win._preSnapBounds = op.preSnapBounds; }
-            else { win._isSnapped = false; }
-            if (op.zIndex) { win.element.style.zIndex = op.zIndex; if (op.zIndex >= this.app.wm.zIndex) this.app.wm.zIndex = op.zIndex + 1; }
-            // Re-apply after onResize (terminal fit() may trigger reflow)
-            setTimeout(() => {
-              if (win.onResize) win.onResize();
-              // Re-enforce gridBounds in case onResize changed dimensions
+      // Grid
+      if (state.grid) {
+        const cur = this.app.wm.grid;
+        if (!cur || cur.rows !== state.grid.rows || cur.cols !== state.grid.cols) {
+          this.app.wm.setGrid(state.grid.rows, state.grid.cols);
+        }
+      }
+      // Sidebar
+      if (state.sidebarOpen !== undefined && state.sidebarOpen !== this.app.sidebar.isOpen) {
+        this.app.sidebar.toggle(state.sidebarOpen);
+      }
+      // Windows: update positions of existing, ignore unknown
+      if (state.windows) {
+        for (const rw of state.windows) {
+          const winId = rw.winId || rw.id;
+          const win = this.app.wm.windows.get(winId);
+          if (!win) continue; // window doesn't exist locally — will sync on next full restore
+
+          // Update gridBounds
+          if (rw.gridBounds) {
+            const changed = !win.gridBounds
+              || Math.abs(win.gridBounds.left - rw.gridBounds.left) > 0.0001
+              || Math.abs(win.gridBounds.top - rw.gridBounds.top) > 0.0001
+              || Math.abs(win.gridBounds.width - rw.gridBounds.width) > 0.0001
+              || Math.abs(win.gridBounds.height - rw.gridBounds.height) > 0.0001;
+            if (changed) {
+              win.gridBounds = rw.gridBounds;
               this.app.wm._applyGridBounds(win);
-            }, 100);
+              setTimeout(() => { if (win.onResize) win.onResize(); this.app.wm._applyGridBounds(win); }, 150);
+            }
           }
-          break;
-        }
-        case 'window-minimize': {
-          const win = this._findWindow(op.winId);
-          if (win && !win.isMinimized) this.app.wm.minimize(win.id);
-          break;
-        }
-        case 'window-restore': {
-          const win = this._findWindow(op.winId);
-          if (win && win.isMinimized) this.app.wm.restore(win.id);
-          break;
-        }
-        case 'grid': {
-          this.app.wm.setGrid(op.rows, op.cols);
-          break;
-        }
-        case 'theme': {
-          this.app.themeManager.apply(op.theme);
-          break;
-        }
-        case 'sidebar': {
-          if (op.open !== this.app.sidebar.isOpen) this.app.sidebar.toggle(op.open);
-          break;
+          // z-index (compact: rw.z, full: rw.zIndex)
+          const z = rw.z || rw.zIndex || 0;
+          if (z && z !== parseInt(win.element.style.zIndex)) {
+            win.element.style.zIndex = z;
+            if (z >= this.app.wm.zIndex) this.app.wm.zIndex = z + 1;
+          }
+          // minimize/restore (compact: rw.min, full: rw.isMinimized)
+          const isMin = rw.min ?? rw.isMinimized ?? false;
+          if (isMin && !win.isMinimized) this.app.wm.minimize(win.id);
+          if (!isMin && win.isMinimized) this.app.wm.restore(win.id);
+          // snap state (compact: rw.snap/rw.snapBounds, full: rw.isSnapped/rw.preSnapBounds)
+          win._isSnapped = rw.snap ?? rw.isSnapped ?? false;
+          const snapB = rw.snapBounds || rw.preSnapBounds;
+          if (snapB) win._preSnapBounds = snapB;
         }
       }
     } catch {}
     setTimeout(() => { this._restoring = false; }, 2000);
-  }
-
-  // Find a window by its unique ID
-  _findWindow(winId) {
-    return this.app.wm.windows.get(winId) || null;
-  }
-
-  // Broadcast an incremental layout operation to other clients
-  broadcastOp(op) {
-    if (this._restoring) return;
-    this.app.ws.send({ type: 'layout-op', ...op });
-  }
-
-  // Helper: broadcast a window position/size change
-  broadcastWindowMove(win) {
-    if (this._restoring) return;
-    this.broadcastOp({
-      op: 'window-move', winId: win.id,
-      gridBounds: win.gridBounds,
-      zIndex: parseInt(win.element.style.zIndex) || 0,
-      isSnapped: win._isSnapped || false,
-      preSnapBounds: win._preSnapBounds || null,
-    });
   }
 
   // Capture current workspace state (complete)
@@ -280,9 +267,8 @@ class LayoutManager {
   async _doAutoSave() {
     if (this._restoring) return;
     const state = this.captureState();
-    // Save via WS so server can broadcast to other clients (excluding sender)
-    const deviceType = this._isMobile() ? 'mobile' : 'desktop';
-    this.app.ws.send({ type: 'layout-save', state, deviceType });
+    // Full state to server for disk persistence
+    this.app.ws.send({ type: 'layout-sync', state, version: ++this._syncVersion });
   }
 
   // Load auto-saved state on startup

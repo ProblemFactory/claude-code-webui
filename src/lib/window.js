@@ -68,18 +68,12 @@ class WindowManager {
   _captureGridBounds(win) {
     const r = this.workspace.getBoundingClientRect();
     const el = win.element;
-    const newBounds = {
+    win.gridBounds = {
       left: el.offsetLeft / r.width,
       top: el.offsetTop / r.height,
       width: el.offsetWidth / r.width,
       height: el.offsetHeight / r.height,
     };
-    // Only broadcast if bounds actually changed (avoids spam on reflow/reattach)
-    const old = win.gridBounds;
-    const changed = !old || Math.abs(old.left - newBounds.left) > 0.0001 || Math.abs(old.top - newBounds.top) > 0.0001
-      || Math.abs(old.width - newBounds.width) > 0.0001 || Math.abs(old.height - newBounds.height) > 0.0001;
-    win.gridBounds = newBounds;
-    if (changed && this._layoutManager) this._layoutManager.broadcastWindowMove(win);
   }
 
   _applyGridBounds(win) {
@@ -113,7 +107,6 @@ class WindowManager {
     titleBar.addEventListener('mousedown', (e) => {
       if (e.target.closest('.window-controls') || e.button !== 0) return;
       mouseDown = true; dragging = false;
-      this._dragSnapEnabled = undefined; // clear settings cache
       startX = e.clientX; startY = e.clientY;
       initL = element.offsetLeft; initT = element.offsetTop;
       shiftDragStart = -1;
@@ -155,13 +148,8 @@ class WindowManager {
       }
 
       element.style.left = (initL + dx) + 'px'; element.style.top = (initT + dy) + 'px';
-      // Cache settings to avoid per-mousemove lookups
-      if (this._dragSnapEnabled === undefined) {
-        this._dragSnapEnabled = this._settings?.get('layout.enableDragSnap') ?? true;
-        this._dragShiftEnabled = this._settings?.get('layout.enableShiftDragSelection') ?? true;
-      }
-      const snapEnabled = this._dragSnapEnabled;
-      const shiftDragEnabled = this._dragShiftEnabled;
+      const snapEnabled = this._settings?.get('layout.enableDragSnap') ?? true;
+      const shiftDragEnabled = this._settings?.get('layout.enableShiftDragSelection') ?? true;
       if (!e.altKey && snapEnabled) {
         if (e.shiftKey && this.grid && shiftDragEnabled) {
           if (shiftDragStart < 0) shiftDragStart = this._getGridCell(e.clientX, e.clientY);
@@ -316,7 +304,6 @@ class WindowManager {
     this.grid = rows && cols ? { rows, cols } : null;
     this._renderGridOverlay();
     this._notify();
-    if (this._layoutManager) this._layoutManager.broadcastOp({ op: 'grid', rows, cols });
   }
   _renderGridOverlay() {
     const ov = this.gridOverlay; ov.innerHTML = '';
