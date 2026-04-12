@@ -519,33 +519,6 @@ app.get('/api/session-messages', (req, res) => {
   }
 });
 
-// V2: Normalized messages (tool calls merged, IDs assigned)
-app.get('/api/session-messages-v2', (req, res) => {
-  const { claudeSessionId, cwd, offset, limit, search } = req.query;
-  if (!claudeSessionId) return res.status(400).json({ error: 'claudeSessionId required' });
-
-  // Find or create normalizer
-  let session = null;
-  for (const [, s] of activeSessions) {
-    if (s.claudeSessionId === claudeSessionId) { session = s; break; }
-  }
-
-  // Build normalizer from SessionMessages (includes buffer)
-  const sm = new SessionMessages(session || { claudeSessionId, cwd: cwd || '', buffer: '' });
-  const normalizer = new MessageManager('api');
-  normalizer.convertHistory(sm.raw());
-
-  if (search) {
-    res.json({ matches: normalizer.search(search), total: normalizer.total });
-  } else if (offset !== undefined || limit !== undefined) {
-    const o = parseInt(offset) || 0;
-    const l = parseInt(limit) || 50;
-    res.json({ messages: normalizer.slice(o, l), total: normalizer.total });
-  } else {
-    res.json({ messages: normalizer.tail(50), total: normalizer.total });
-  }
-});
-
 // Subagent messages for a given session + agentId
 app.get('/api/subagent-messages', (req, res) => {
   const { claudeSessionId, cwd, agentId } = req.query;

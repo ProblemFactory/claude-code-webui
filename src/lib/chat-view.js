@@ -56,7 +56,6 @@ class ChatView {
     this._statusBar = document.createElement('div');
     this._statusBar.className = 'chat-status-bar';
     this._statusModel = '';
-    this._statusTokensOut = 0;
     this._statusLastInputTokens = 0;
     this._statusLastCacheRead = 0;
     this._statusCost = 0;
@@ -374,8 +373,6 @@ class ChatView {
     searchClose.onclick = () => { searchBar.classList.add('hidden'); searchInput.value = ''; this._clearSearch(); };
     searchBar.append(searchInput, this._searchStatus, searchPrev, searchNext, searchClose);
     this._searchInput = searchInput;
-    this._searchMatches = [];
-    this._searchIdx = -1;
     container.insertBefore(searchBar, this._messageList);
 
     searchInput.addEventListener('input', () => this._doSearch(searchInput.value));
@@ -944,7 +941,6 @@ class ChatView {
       const u = op.data;
       this._statusLastInputTokens = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
       this._statusLastCacheRead = u.cache_read_input_tokens || 0;
-      this._statusTokensOut = u.output_tokens || 0;
       this._updateStatusBar();
     } else if (op.subtype === 'todos') {
       this._todos = op.data;
@@ -1176,27 +1172,6 @@ class ChatView {
   }
 
   // Add wrap toggle button to all <pre> blocks inside an element
-  // Add open-in-editor button to a tool card, using raw data from closure
-  _addToolOpenBtn(toolEl, resultText, pendingUse) {
-    const btn = document.createElement('button');
-    btn.className = 'chat-open-editor-btn chat-tool-open-btn';
-    btn.textContent = '\uD83D\uDCCB';
-    btn.title = 'Open output in editor';
-    btn.onclick = (e) => {
-      e.stopPropagation();
-      let text = '';
-      if (pendingUse) {
-        const inputStr = typeof pendingUse.input === 'string' ? pendingUse.input : JSON.stringify(pendingUse.input, null, 2);
-        text = `[Tool: ${pendingUse.name}]\n\n--- Input ---\n${inputStr}\n\n--- Output ---\n${resultText}`;
-      } else {
-        text = resultText;
-      }
-      if (!text.trim()) return;
-      this._openInTempEditor(text);
-    };
-    toolEl.style.position = 'relative';
-    toolEl.appendChild(btn);
-  }
 
   _openInTempEditor(text) {
     const tmpName = `chat-block-${Date.now()}.txt`;
@@ -1859,21 +1834,6 @@ class ChatView {
     };
   }
 
-  // Update typing indicator based on assistant message content
-  _updateTyping(msg) {
-    const content = msg.message?.content;
-    if (!Array.isArray(content)) return;
-    const last = content[content.length - 1];
-    if (!last) return;
-    if (last.type === 'tool_use') {
-      this._showTyping(`running ${last.name}...`);
-    } else if (last.type === 'thinking') {
-      this._showTyping('thinking...');
-    } else {
-      this._showTyping('responding...');
-    }
-  }
-
   applyStatus(status) {
     if (!status) return;
     if (status.model) this._statusModel = status.model.replace(/\[.*$/, '');
@@ -1882,12 +1842,10 @@ class ChatView {
       const u = status.lastUsage;
       this._statusLastInputTokens = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
       this._statusLastCacheRead = u.cache_read_input_tokens || 0;
-      this._statusTokensOut = u.output_tokens || 0;
     }
     if (status.total_cost_usd) this._statusCost = status.total_cost_usd;
     if (status.permissionMode) this._statusPermMode = status.permissionMode;
     if (status.permissionModes) this._permissionModes = status.permissionModes;
-    if (status.subagentMetas) this._subagentMetas = status.subagentMetas;
     if (status.slashCommands) this._slashCommands = status.slashCommands.map(c => c.startsWith('/') ? c : '/' + c);
     this._updateStatusBar();
   }

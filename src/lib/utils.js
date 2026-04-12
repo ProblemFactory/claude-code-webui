@@ -13,6 +13,78 @@ export function attachPopoverClose(popover, ...excludeEls) {
   }, 0);
 }
 
+/**
+ * Create a positioned popover, removing any existing one with the same class.
+ * Returns the popover element for caller to populate.
+ * @param {HTMLElement} anchor - element to position below
+ * @param {string} className - CSS class (also used to remove duplicates)
+ * @param {object} [opts] - { parent, position: 'below'|'cursor', x, y }
+ */
+export function createPopover(anchor, className, opts = {}) {
+  document.querySelectorAll('.' + className.split(' ')[0]).forEach(p => p.remove());
+  const pop = document.createElement('div');
+  pop.className = className;
+  pop.style.position = 'fixed';
+  pop.style.zIndex = '99999';
+  if (opts.position === 'cursor') {
+    pop.style.left = (opts.x || 0) + 'px';
+    pop.style.top = (opts.y || 0) + 'px';
+  } else {
+    const rect = anchor.getBoundingClientRect();
+    pop.style.left = rect.left + 'px';
+    pop.style.top = (rect.bottom + 2) + 'px';
+  }
+  (opts.parent || document.body).appendChild(pop);
+  attachPopoverClose(pop, anchor);
+  return pop;
+}
+
+/**
+ * Show a context menu at cursor position.
+ * @param {number} x
+ * @param {number} y
+ * @param {Array<{label: string, action: function, style?: string}>} items
+ * @param {string} [className='context-menu']
+ */
+export function showContextMenu(x, y, items, className = 'context-menu') {
+  const pop = createPopover(document.body, className, { position: 'cursor', x, y });
+  for (const item of items) {
+    const el = document.createElement('div');
+    el.className = className + '-item';
+    el.textContent = item.label;
+    if (item.style) el.style.cssText = item.style;
+    el.onclick = () => { pop.remove(); item.action(); };
+    pop.appendChild(el);
+  }
+  return pop;
+}
+
+/** Fetch JSON with silent error handling. Returns null on failure. */
+export async function fetchJson(url, opts) {
+  try {
+    const res = await fetch(url, opts);
+    return await res.json();
+  } catch { return null; }
+}
+
+/** Clipboard copy with execCommand fallback for non-HTTPS */
+export function copyText(text) {
+  if (navigator.clipboard?.writeText) {
+    return navigator.clipboard.writeText(text).catch(() => _fallbackCopy(text));
+  }
+  _fallbackCopy(text);
+  return Promise.resolve();
+}
+function _fallbackCopy(text) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.cssText = 'position:fixed;left:-9999px';
+  document.body.appendChild(ta);
+  ta.select();
+  document.execCommand('copy');
+  ta.remove();
+}
+
 // ── StateSync: unified versioned state sync with diff broadcast ──
 // Each store tracks a version. On reconnect, requests missed ops from server.
 // Components listen via events: stateSync.on('drafts', 'chat:sess-1', handler)
