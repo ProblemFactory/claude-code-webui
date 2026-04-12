@@ -182,7 +182,7 @@ docs/
 | `recoverCwdFromProjDir()` | src/session-store.js | Greedy reverse: try segments as-is, `.` prefix, `_` |
 | `SessionMessages` | src/session-store.js | Unified JSONL+buffer access, chatStatus, taskState |
 | `SyncStore` | src/sync-store.js | Versioned key-value store with diff broadcast |
-| `broadcastActiveSessions()` | server.js ~line 810 | Pushes session list to all WebSocket clients |
+| `broadcastActiveSessions()` | server.js | Pushes session list to all WebSocket clients |
 
 ## Key Design Decisions & Lessons Learned
 
@@ -341,9 +341,15 @@ Split from monolithic 1647-line `src/client.js` into 13 ES modules under `src/li
 
 **Permission Approval**: Uses `--permission-prompt-tool stdio` flag (undocumented, discovered from HAQI). Claude sends `control_request` on stdout, server handles `permission-response` WS message → writes `control_response` to stdin with `updatedInput`. Permission UI embedded inline in tool cards (not separate messages): pending shows Allow/Always Allow/Deny buttons between Input and Output; resolved shows collapsed ✓ Allowed/✗ Denied. "Always Allow" passes `permission_suggestions` back as `permission_updates` for session-wide rules. On attach, server separates `control_request` from buffer into `pendingPermissions` map, filters resolved ones, sends in attach payload. Client injects after tool cards render. Permission mode shown in status bar (🔒 default/bypassPermissions/etc.).
 
-**ChatView** (`src/lib/chat-view.js`): ID-based renderer consuming normalized `msg` ops (create/edit/meta) from MessageManager. Each message has a stable ID → one DOM element tracked via `_elements` Map. Edit ops re-render in place (no append-and-match). Features: compact mode, markdown rendering, syntax highlighting (hljs, deferred for files >10KB), Ctrl+F search with highlight layer, auto-detect URLs/paths (click=copy, Ctrl+click=open), wrap toggles with searchable language picker, streaming indicator (from server `isStreaming`), expandable input, permission overlay on tool cards, collapsible long user messages, interrupt. Key methods: `_onOp` dispatches to `_onCreateMessage`/`_onEditMessage`/`_onMeta`. Render by role: `_renderUserMsg`, `_renderAssistantMsg`, `_renderToolMsg`/`_renderToolResult`, `_renderSystemMsg`, `_renderPermissionOverlay`. No `_pendingToolUses` — tool state managed by MessageManager.
+**ChatView** (`src/lib/chat-view.js`): Controller consuming normalized `msg` ops (create/edit/meta) from MessageManager. Virtual scroll, op dispatch (`_onOp` → `_onCreateMessage`/`_onEditMessage`/`_onMeta`), lifecycle. Delegates rendering to `ChatRenderers`, input to `ChatInput`, status to `ChatStatusBar`, search to `ChatSearch`, minimap to `ChatMinimap`. Each message has a stable ID → one DOM element tracked via `_elements` Map. Edit ops re-render in place (no append-and-match). No `_pendingToolUses` — tool state managed by MessageManager.
 
-**Tool call rendering**: Tool calls are normalized as `role:'tool'` messages. Pending: `status:'pending'` with `tool_call` content block (spinner). Complete: server sends edit op → `status:'complete'` with `tool_result` content block → ChatView re-renders element in place via `_onEditMessage`. Agent tools include View Log button (uses `taskInfo.id` as agentId). Clickable paths/URLs via `_linkify` (HTML-aware, linkifies inside `<code>` blocks) and `_linkifyText` (tag-split for path regex). No output truncation.
+**ChatRenderers** (`src/lib/chat-renderers.js`): All message rendering — `renderUserMsg`, `renderAssistantMsg`, `renderToolMsg`, `renderToolResult`, `renderSystemMsg`, `renderPermissionOverlay`, `renderEditDiff`, `renderMarkdown`. Linkification via unified `linkifySegment` (URL + path regex). Wrap toggles + searchable language picker. `renderSystemMsg` returns `{el, sideEffect}` so ChatView applies model/permMode/slashCommands without circular deps.
+
+**ChatInput** (`src/lib/chat-input.js`): Textarea, send, attachments, slash command dropdown, draft persistence, streaming status indicator, TODO display, interrupt button.
+
+**ChatStatusBar** (`src/lib/chat-status-bar.js`): Model badge, context %, cache ratio, cost, permission mode dropdown, background task popup.
+
+**Tool call rendering**: Tool calls are normalized as `role:'tool'` messages. Pending: `status:'pending'` with `tool_call` content block (spinner). Complete: server sends edit op → `status:'complete'` with `tool_result` content block → ChatView re-renders via `_onEditMessage`. Interrupted: `tool_call` with error status shows `✗ Interrupted` indicator. Agent tools include View Log button. Clickable paths/URLs via unified `linkifySegment` (HTML-aware, linkifies inside `<code>` blocks). No output truncation.
 
 **Subagent/Agent rendering**: Subagent messages (`parent_tool_use_id` or `isSidechain`) filtered from main chat. Server buffers by `parentToolUseId` in `session.subagentBuffers`, broadcasts as both `subagent-message` (for parent tool card status) and normalized `msg` ops with virtual session ID `sub-{toolUseId}` (for subagent viewer via per-subagent normalizers `_subNormalizers` Map). "View Log" button opens read-only ChatView (`readOnly: true` — no input area, no status bar, normal scroll with pin-to-bottom) attached to a virtual session. Duplicate viewers prevented: `_subagentViewers` Map tracks open windows by virtualId, clicking View Log again focuses existing window. Live agents use `sub-{parentToolUseId}` virtual sessions — server returns buffered messages on attach and forwards new ones. Completed agents use `sub-agent-{agentId}` — server loads from `subagents/agent-{agentId}.jsonl`. No client-side `_subagentBuffers`/`_subagentViews` — all buffering/forwarding handled server-side via virtual session attach.
 
@@ -405,7 +411,7 @@ Split from monolithic 1647-line `src/client.js` into 13 ES modules under `src/li
 ### 13. StateSync (Unified Versioned Diff Broadcast)
 **Problem**: Multiple state types (drafts, settings, bookmarks, themes) each had ad-hoc persistence + broadcast patterns. No reconnect recovery — missed updates during disconnect were lost.
 
-**SyncStore** (server.js): Generic versioned key-value store.
+**SyncStore** (`src/sync-store.js`): Generic versioned key-value store.
 - Monotonic version counter per store. Each `set()`/`delete()` increments version.
 - Op log ring buffer (500 ops). On reconnect, `getOpsSince(version)` returns delta if contiguous, full snapshot if gap.
 - Debounced disk persistence (2s) to `data/{store}.json` with `{version, data}` format.
@@ -424,16 +430,16 @@ Split from monolithic 1647-line `src/client.js` into 13 ES modules under `src/li
 
 **Draft persistence**: Chat input auto-saved every 300ms to `drafts` store. Restored on attach. Synced across clients (Telegram-style). Cleared on send.
 
-### 14. Syntax Highlighting (highlight.js)
+### 14. Syntax Highlighting (`src/lib/highlight.js`)
 Read/Write tool output uses highlight.js for syntax highlighting with line numbers.
 
-**Setup**: highlight.js core + 30 language grammars imported individually (not `common` bundle) to minimize size (~300KB added to bundle). Languages: javascript, typescript, python, json, yaml, xml, css, bash, c, cpp, go, rust, java, sql, markdown, diff, dockerfile, ini, ruby, php, swift, kotlin, scala, csharp, lua, r, perl, scss, graphql, nginx, protobuf.
+**Setup**: highlight.js core + 30 language grammars imported individually (not `common` bundle) to minimize size (~300KB added to bundle). All hljs setup is in `src/lib/highlight.js` — language registration, `EXT_TO_LANG` map, `renderCodeBlock`, `rehighlightCodeBlock`, `stripAnsi`.
 
-**Auto-detection**: `detectHljsLang(filePath)` maps file extension to hljs language via `EXT_TO_LANG` table. Falls back to `plain` (no highlighting).
+**Auto-detection**: `detectHljsLang(filePath)` maps file extension to hljs language. Falls back to `plain`.
 
-**Rendering**: `_renderCodeBlock(code, filePath)` returns HTML with flex-layout lines: fixed-width line number gutter (`chat-code-ln`) + text span (`chat-code-text`). hljs tokens styled via CSS variables (`--magenta`, `--green`, `--blue` etc.) for theme awareness.
+**Rendering**: `renderCodeBlock(code, filePath)` returns HTML with flex-layout lines: fixed-width line number gutter (`chat-code-ln`) + text span (`chat-code-text`). hljs tokens styled via CSS variables for theme awareness.
 
-**Language picker**: Searchable dropdown next to Wrap button. Type to filter, click to select. `_rehighlightCodeBlock()` re-highlights in-place without re-rendering the entire block.
+**Language picker**: Searchable dropdown next to Wrap button (in `ChatRenderers.addWrapToggles`). `rehighlightCodeBlock()` re-highlights in-place.
 
 **Wrap**: Flex layout ensures line numbers stay fixed when text wraps. Wrap toggle affects only `.chat-code-text` spans.
 
