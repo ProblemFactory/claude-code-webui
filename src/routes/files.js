@@ -259,4 +259,49 @@ router.post('/api/paste-image', (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// Format code via server-side CLI tools (for languages not supported by Prettier)
+router.post('/api/format', (req, res) => {
+  const { code, language, filePath } = req.body;
+  if (!code || !language) return res.status(400).json({ error: 'code and language required' });
+
+  // Map language → CLI formatter command
+  const formatters = {
+    python: { cmd: 'black', args: ['-', '-q', '--fast'], stdin: true },
+    shell: { cmd: 'shfmt', args: ['-'], stdin: true },
+    go: { cmd: 'gofmt', args: [], stdin: true },
+    rust: { cmd: 'rustfmt', args: ['--edition', '2021'], stdin: true },
+  };
+
+  // Try ruff first for Python (faster), fall back to black
+  const fmt = formatters[language];
+  if (!fmt) return res.status(400).json({ error: `No server-side formatter for ${language}` });
+
+  const tryFormat = (cmd, args) => {
+    try {
+      const result = execFileSync(cmd === 'ruff' ? 'ruff' : cmd,
+        cmd === 'ruff' ? ['format', '-'] : args,
+        { input: code, encoding: 'utf-8', timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'] });
+      return result;
+    } catch (err) {
+      if (err.stdout) return err.stdout; // some formatters return non-zero but still output
+      throw err;
+    }
+  };
+
+  try {
+    let formatted;
+    if (language === 'python') {
+      // Try ruff format first (fast), fall back to black
+      try { formatted = tryFormat('ruff', ['format', '-']); }
+      catch { formatted = tryFormat('black', ['-', '-q', '--fast']); }
+    } else {
+      formatted = tryFormat(fmt.cmd, fmt.args);
+    }
+    res.json({ formatted });
+  } catch (err) {
+    const stderr = err.stderr?.toString() || err.message;
+    res.status(422).json({ error: stderr.split('\n')[0]?.substring(0, 200) || 'Format failed' });
+  }
+});
+
 module.exports = router;

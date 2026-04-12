@@ -22,11 +22,16 @@ import prettierGraphql from 'prettier/plugins/graphql';
 
 const PRETTIER_PLUGINS = [prettierBabel, prettierEstree, prettierHtml, prettierCss, prettierMarkdown, prettierTypescript, prettierYaml, prettierGraphql];
 
-// Map language id → prettier parser name
+// Map language id → prettier parser name (null = not supported client-side)
 const PRETTIER_PARSERS = {
   javascript: 'babel', json: 'json', html: 'html', css: 'css',
   markdown: 'markdown', plain: null, python: null, auto: null,
 };
+
+// Languages that can be formatted server-side via CLI tools (ruff/black, shfmt, gofmt, rustfmt)
+const SERVER_FORMATTERS = { python: 'python', shell: 'shell', go: 'go', rust: 'rust' };
+// File extensions that map to server-side formatter languages
+const EXT_TO_SERVER_FMT = { py: 'python', sh: 'shell', bash: 'shell', zsh: 'shell', go: 'go', rs: 'rust' };
 
 // Map file extension → prettier parser (for extensions not covered by language id)
 const EXT_TO_PARSER = {
@@ -344,43 +349,56 @@ class CodeEditor {
 
   async format() {
     if (!this.editorView || this._isReadOnly) return;
-    // Determine parser from current language or file extension
     const currentLang = this.langSelect.value === 'auto' ? detectLang(this.filePath) : this.langSelect.value;
     const ext = this.filePath.split('.').pop().toLowerCase();
     const parser = PRETTIER_PARSERS[currentLang] ?? EXT_TO_PARSER[ext] ?? null;
-    if (!parser) {
-      this.saveIndicator.textContent = 'No formatter for this language';
-      this.saveIndicator.style.color = 'var(--text-dim)';
-      setTimeout(() => { if (this.saveIndicator.textContent.startsWith('No ')) this.saveIndicator.textContent = ''; }, 2000);
+    const serverLang = SERVER_FORMATTERS[currentLang] ?? EXT_TO_SERVER_FMT[ext] ?? null;
+
+    if (!parser && !serverLang) {
+      this._formatStatus('No formatter for this language', 'var(--text-dim)', 2000);
       return;
     }
+
     const source = this.editorView.state.doc.toString();
+    this._formatStatus('Formatting...', 'var(--text-dim)');
+
     try {
-      const formatted = await prettier.format(source, {
-        parser,
-        plugins: PRETTIER_PLUGINS,
-        singleQuote: true,
-        trailingComma: 'all',
-        printWidth: 100,
-      });
-      if (formatted !== source) {
-        // Preserve cursor position proportionally
+      let formatted;
+      if (parser) {
+        // Client-side: Prettier
+        formatted = await prettier.format(source, {
+          parser, plugins: PRETTIER_PLUGINS,
+          singleQuote: true, trailingComma: 'all', printWidth: 100,
+        });
+      } else {
+        // Server-side: CLI formatter (ruff/black, shfmt, gofmt, rustfmt)
+        const res = await fetch('/api/format', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code: source, language: serverLang, filePath: this.filePath }),
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        formatted = data.formatted;
+      }
+      if (formatted && formatted !== source) {
         const cursor = this.editorView.state.selection.main.head;
-        const ratio = cursor / source.length;
+        const ratio = source.length > 0 ? cursor / source.length : 0;
         const newCursor = Math.min(Math.round(ratio * formatted.length), formatted.length);
         this.editorView.dispatch({
           changes: { from: 0, to: source.length, insert: formatted },
           selection: EditorSelection.cursor(newCursor),
         });
       }
-      this.saveIndicator.textContent = '✓ Formatted';
-      this.saveIndicator.style.color = 'var(--green)';
-      setTimeout(() => { if (this.saveIndicator.textContent.startsWith('✓ F')) this.saveIndicator.textContent = ''; }, 2000);
+      this._formatStatus('\u2713 Formatted', 'var(--green)', 2000);
     } catch (err) {
-      this.saveIndicator.textContent = `Format error: ${err.message?.split('\n')[0]?.substring(0, 60) || 'unknown'}`;
-      this.saveIndicator.style.color = 'var(--red)';
-      setTimeout(() => { if (this.saveIndicator.textContent.startsWith('Format')) this.saveIndicator.textContent = ''; }, 4000);
+      this._formatStatus(`Format error: ${err.message?.split('\n')[0]?.substring(0, 80) || 'unknown'}`, 'var(--red)', 4000);
     }
+  }
+
+  _formatStatus(text, color, clearAfter) {
+    this.saveIndicator.textContent = text;
+    this.saveIndicator.style.color = color;
+    if (clearAfter) setTimeout(() => { if (this.saveIndicator.textContent === text) this.saveIndicator.textContent = ''; }, clearAfter);
   }
 }
 
