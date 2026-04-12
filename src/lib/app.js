@@ -533,6 +533,7 @@ class App {
       if (msg.type === 'created') {
         // Set openSpec now that we have the server session ID (for cross-client sync)
         winInfo._openSpec = { action: 'attachSession', serverId: msg.sessionId, name: sessionName, cwd: msg.cwd || cwd || '', mode: sessionMode };
+        this.layoutManager.scheduleAutoSave(); // re-broadcast with openSpec
         if (msg.mode === 'chat' || sessionMode === 'chat') {
           const chatView = new ChatView(winInfo, this.ws, msg.sessionId, this);
           this.sessions.set(winInfo.id, chatView);
@@ -705,6 +706,7 @@ class App {
     const titlePrefix = '\uD83D\uDCCB ';
     const winInfo = this.wm.createWindow({ title: `${titlePrefix}${sessionName || 'History'} — ${cwd}`, type: 'chat', syncId });
     winInfo._openSpec = { action: 'viewSession', sessionId, cwd, name: sessionName };
+    this.layoutManager.scheduleAutoSave(); // re-broadcast with openSpec (createWindow's _notify fires before _openSpec is set)
     const chatView = new ChatView(winInfo, this.ws, `view-${sessionId}`, this, { readOnly: true });
     this.sessions.set(winInfo.id, chatView);
 
