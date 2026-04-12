@@ -16,8 +16,9 @@ class WindowManager {
     this._resizeObserver.observe(workspace);
   }
 
-  createWindow({ title, type, x, y, width, height }) {
-    const id = 'win-' + (++this.windowCounter);
+  createWindow({ title, type, x, y, width, height, syncId }) {
+    const id = syncId || ('win-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6));
+    this.windowCounter++;
     if (x === undefined) { const o = (this.windowCounter % 8) * 30; x = 40 + o; y = 40 + o; }
     width = width || 700; height = height || 500;
 

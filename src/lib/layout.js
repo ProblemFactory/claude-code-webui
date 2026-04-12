@@ -19,7 +19,7 @@ class LayoutManager {
     try {
       switch (op.op) {
         case 'window-move': {
-          const win = this._findWindowByKey(op.key, op.keyType);
+          const win = this._findWindow(op.winId);
           if (win && op.gridBounds) {
             win.gridBounds = op.gridBounds;
             this.app.wm._applyGridBounds(win);
@@ -31,12 +31,12 @@ class LayoutManager {
           break;
         }
         case 'window-minimize': {
-          const win = this._findWindowByKey(op.key, op.keyType);
+          const win = this._findWindow(op.winId);
           if (win && !win.isMinimized) this.app.wm.minimize(win.id);
           break;
         }
         case 'window-restore': {
-          const win = this._findWindowByKey(op.key, op.keyType);
+          const win = this._findWindow(op.winId);
           if (win && win.isMinimized) this.app.wm.restore(win.id);
           break;
         }
@@ -57,22 +57,9 @@ class LayoutManager {
     setTimeout(() => { this._restoring = false; }, 2000);
   }
 
-  // Find a window by claudeSessionId or explorerPath
-  _findWindowByKey(key, keyType) {
-    for (const [id, win] of this.app.wm.windows) {
-      if (keyType === 'session') {
-        const session = this.app.sessions.get(id);
-        if (!session) continue;
-        const allSess = this.app.sidebar?._allSessions || [];
-        const match = allSess.find(s => s.webuiId === session.sessionId);
-        if (match?.sessionId === key) return win;
-      } else if (keyType === 'explorer' && win._explorerPath === key) {
-        return win;
-      } else if (keyType === 'winId' && id === key) {
-        return win;
-      }
-    }
-    return null;
+  // Find a window by its unique ID
+  _findWindow(winId) {
+    return this.app.wm.windows.get(winId) || null;
   }
 
   // Broadcast an incremental layout operation to other clients
@@ -81,20 +68,11 @@ class LayoutManager {
     this.app.ws.send({ type: 'layout-op', ...op });
   }
 
-  // Helper: broadcast a window position change
+  // Helper: broadcast a window position/size change
   broadcastWindowMove(win) {
     if (this._restoring) return;
-    const session = this.app.sessions.get(win.id);
-    let key, keyType;
-    if (session?.sessionId) {
-      const allSess = this.app.sidebar?._allSessions || [];
-      const match = allSess.find(s => s.webuiId === session.sessionId);
-      key = match?.sessionId; keyType = 'session';
-    }
-    if (!key && win._explorerPath) { key = win._explorerPath; keyType = 'explorer'; }
-    if (!key) { key = win.id; keyType = 'winId'; }
     this.broadcastOp({
-      op: 'window-move', key, keyType,
+      op: 'window-move', winId: win.id,
       gridBounds: win.gridBounds,
       zIndex: parseInt(win.element.style.zIndex) || 0,
       isSnapped: win._isSnapped || false,
@@ -109,6 +87,7 @@ class LayoutManager {
       const el = win.element;
       const termSession = this.app.sessions.get(id);
       const winState = {
+        winId: id, // unique window ID for cross-client sync
         title: win.title, type: win.type,
         left: el.style.left, top: el.style.top, width: el.style.width, height: el.style.height,
         isMinimized: win.isMinimized, isMaximized: win.isMaximized,
@@ -187,6 +166,15 @@ class LayoutManager {
     // Restore windows — use gridBounds if available, otherwise absolute position
     const applyPosition = (winInfo, winState) => {
       if (!winInfo) return;
+      // Remap window ID to saved ID for cross-client sync
+      if (winState.winId && winInfo.id !== winState.winId) {
+        const wm = this.app.wm;
+        wm.windows.delete(winInfo.id);
+        const session = this.app.sessions.get(winInfo.id);
+        if (session) { this.app.sessions.delete(winInfo.id); this.app.sessions.set(winState.winId, session); }
+        winInfo.id = winState.winId;
+        wm.windows.set(winState.winId, winInfo);
+      }
       if (winState.gridBounds) {
         winInfo.gridBounds = winState.gridBounds;
         this.app.wm._applyGridBounds(winInfo);
