@@ -5,8 +5,8 @@
 export function openBrowser(app, url, { syncId } = {}) {
   app._hideWelcome();
   const startUrl = url || '';
-  const winInfo = app.wm.createWindow({ title: startUrl ? new URL(startUrl).hostname : 'Browser', type: 'browser', syncId });
-  winInfo._openSpec = { action: 'openBrowser', url: startUrl };
+  const openSpec = { action: 'openBrowser', url: startUrl };
+  const winInfo = app.wm.createWindow({ title: startUrl ? new URL(startUrl).hostname : 'Browser', type: 'browser', syncId, openSpec });
   const container = document.createElement('div');
   container.style.cssText = 'display:flex;flex-direction:column;height:100%';
 

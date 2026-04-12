@@ -18,11 +18,12 @@ class FileViewer {
       fileInfo = await res.json();
     } catch {}
 
+    const openSpec = { action: 'openFile', path: filePath, name: fileName };
+
     // Force hex mode
     if (opts.hex) {
-      const winInfo = app.wm.createWindow({ title: `Hex: ${fileName}`, type: 'hex-viewer', syncId: opts.syncId });
+      const winInfo = app.wm.createWindow({ title: `Hex: ${fileName}`, type: 'hex-viewer', syncId: opts.syncId, openSpec });
       winInfo._filePath = filePath; winInfo._fileName = fileName;
-      winInfo._openSpec = { action: 'openFile', path: filePath, name: fileName };
       new HexViewer(winInfo, filePath, fileInfo);
       return;
     }
@@ -32,9 +33,8 @@ class FileViewer {
 
     // Binary file (non-media) → hex viewer
     if (fileInfo.isBinary && !isMedia) {
-      const winInfo = app.wm.createWindow({ title: `Hex: ${fileName}`, type: 'hex-viewer', syncId: opts.syncId });
+      const winInfo = app.wm.createWindow({ title: `Hex: ${fileName}`, type: 'hex-viewer', syncId: opts.syncId, openSpec });
       winInfo._filePath = filePath; winInfo._fileName = fileName;
-      winInfo._openSpec = { action: 'openFile', path: filePath, name: fileName };
       new HexViewer(winInfo, filePath, fileInfo);
       return;
     }
@@ -44,9 +44,8 @@ class FileViewer {
       if (!confirm(`This file is ${formatSize(fileInfo.size)}. Opening may slow down the UI. Continue?`)) return;
     }
 
-    const winInfo = app.wm.createWindow({ title: fileName, type: 'viewer', syncId: opts.syncId });
+    const winInfo = app.wm.createWindow({ title: fileName, type: 'viewer', syncId: opts.syncId, openSpec });
     winInfo._filePath = filePath; winInfo._fileName = fileName;
-    winInfo._openSpec = { action: 'openFile', path: filePath, name: fileName };
     const container = document.createElement('div'); container.className = 'file-viewer';
     winInfo.content.appendChild(container);
     winInfo.onClose = () => {};

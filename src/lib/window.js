@@ -16,7 +16,7 @@ class WindowManager {
     this._resizeObserver.observe(workspace);
   }
 
-  createWindow({ title, type, x, y, width, height, syncId }) {
+  createWindow({ title, type, x, y, width, height, syncId, openSpec }) {
     const id = syncId || ('win-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6));
     this.windowCounter++;
     if (x === undefined) { const o = (this.windowCounter % 8) * 30; x = 40 + o; y = 40 + o; }
@@ -59,6 +59,7 @@ class WindowManager {
       e.preventDefault();
       this._showOverlapSwitcher(winInfo, e.clientX, e.clientY);
     });
+    if (openSpec) winInfo._openSpec = openSpec;
     this.focusWindow(id); this._notify(); this._scheduleOverlapUpdate(); return winInfo;
   }
 
