@@ -10,7 +10,7 @@
   --border: rgba(255,255,255,0.07); --border-active: rgba(99,102,241,0.4);
   --green: #22c55e; --red: #ef4444; --yellow: #f59e0b; --blue: #3b82f6;
   --radius: 8px; --radius-sm: 4px;
-  --title-height: 32px; --toolbar-height: 40px; --taskbar-height: 32px;
+  --title-height: 32px; --toolbar-height: 40px; --taskbar-height: 44px;
   --shadow-window: 0 8px 32px rgba(0,0,0,0.4); --shadow-active: 0 12px 40px rgba(0,0,0,0.5);
   --transition: 0.15s ease;
   --terminal-bg: #12122a; --terminal-fg: #e4e4e8; --terminal-cursor: #6366f1;
@@ -484,7 +484,7 @@ html, body {
 .usage-bar { width: 60px; height: 6px; background: var(--bg-input); border-radius: 3px; overflow: hidden; }
 .usage-bar-fill { height: 100%; border-radius: 3px; transition: width 0.3s; }
 .usage-popup {
-  position: fixed; bottom: 38px; right: 10px; z-index: 99999;
+  position: fixed; bottom: 50px; right: 10px; z-index: 99999;
   background: var(--bg-dialog); border: 1px solid var(--border-active); border-radius: var(--radius);
   box-shadow: 0 -8px 24px rgba(0,0,0,0.4); padding: 12px; min-width: 280px; max-height: 400px; overflow-y: auto;
 }
@@ -498,17 +498,23 @@ html, body {
 .usage-stat-label { color: var(--text-dim); }
 .usage-total { padding-top: 8px; margin-top: 4px; border-top: 1px solid var(--border); font-size: 11px; font-weight: 600; color: var(--text); }
 .taskbar-item {
-  padding: 2px 8px; background: rgba(255,255,255,0.04); border: 1px solid var(--border);
-  border-radius: var(--radius-sm); color: var(--text-secondary); font-size: 10px;
-  cursor: pointer; white-space: nowrap; max-width: 160px; min-width: 40px; overflow: hidden;
-  text-overflow: ellipsis; flex-shrink: 1;
-  text-overflow: ellipsis; transition: all var(--transition); display: flex; align-items: center; gap: 3px;
+  padding: 3px 8px; background: rgba(255,255,255,0.04); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); color: var(--text-secondary);
+  cursor: pointer; max-width: 200px; min-width: 60px; overflow: hidden;
+  flex-shrink: 1; transition: all var(--transition);
+  display: flex; align-items: center; gap: 6px;
 }
 .taskbar-item:hover { background: var(--bg-hover); color: var(--text); }
 .taskbar-item.active { background: var(--accent-dim); border-color: var(--border-active); color: var(--text); }
 .taskbar-item.minimized { opacity: 0.5; }
-.taskbar-icon { font-size: 10px; flex-shrink: 0; line-height: 1; }
-.taskbar-star { font-size: 9px; color: var(--yellow); flex-shrink: 0; }
+.taskbar-icon { font-size: 18px; flex-shrink: 0; line-height: 1; }
+.taskbar-text { display: flex; flex-direction: column; min-width: 0; gap: 0; }
+.taskbar-title {
+  font-size: 10px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.taskbar-subtitle {
+  font-size: 9px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .taskbar-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
 .taskbar-dot.exited { background: var(--text-dim); }
 #taskbar-status { font-size: 10px; color: var(--text-dim); padding: 0 6px; flex-shrink: 0; }

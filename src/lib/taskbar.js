@@ -13,22 +13,31 @@ export function updateTaskbar(app) {
     if (id === app.wm.activeWindowId && !win.isMinimized) item.classList.add('active');
     if (win.isMinimized) item.classList.add('minimized');
     if (win.element.classList.contains('window-waiting')) item.classList.add('waiting');
-    // Window type icon
-    if (win._typeIcon) {
-      const icon = document.createElement('span'); icon.className = 'taskbar-icon'; icon.textContent = win._typeIcon;
-      item.appendChild(icon);
-    }
-    // Star indicator for starred sessions
+    // Icon (large, spans both rows)
+    const icon = document.createElement('span');
+    icon.className = 'taskbar-icon';
+    icon.textContent = win._typeIcon || '';
+    // Text column (title + subtitle)
+    const textCol = document.createElement('div');
+    textCol.className = 'taskbar-text';
+    const title = document.createElement('div');
+    title.className = 'taskbar-title';
+    // Star prefix for starred sessions
     const term = app.sessions.get(id);
+    let starPrefix = '';
     if (term?.sessionId) {
       const allSess = app.sidebar?._allSessions || [];
       const match = allSess.find(s => s.webuiId && s.webuiId === term.sessionId);
-      if (match && app.sidebar.isStarred(match.sessionId)) {
-        const star = document.createElement('span'); star.className = 'taskbar-star'; star.textContent = '\u2605';
-        item.appendChild(star);
-      }
+      if (match && app.sidebar.isStarred(match.sessionId)) starPrefix = '\u2605 ';
     }
-    const label = document.createElement('span'); label.textContent = win.title; item.appendChild(label);
+    // Split title: first part = name, second part = path (after " — ")
+    const parts = win.title.split(' \u2014 ');
+    title.textContent = starPrefix + (parts[0] || win.title);
+    const subtitle = document.createElement('div');
+    subtitle.className = 'taskbar-subtitle';
+    subtitle.textContent = parts[1] || win.type;
+    textCol.append(title, subtitle);
+    item.append(icon, textCol);
     item.addEventListener('click', () => {
       if (win.isMinimized) app.wm.restore(id);
       else if (id === app.wm.activeWindowId) app.wm.minimize(id);
