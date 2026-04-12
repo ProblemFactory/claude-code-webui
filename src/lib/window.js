@@ -256,6 +256,10 @@ class WindowManager {
           if (win.gridBounds) this._captureGridBounds(win);
           if (win.onResize) win.onResize();
           this._scheduleOverlapUpdate();
+          // Manual resize = new baseline for snap restore
+          if (!win._isSnapped) {
+            win._preSnapBounds = { width: win.element.style.width, height: win.element.style.height, left: win.element.style.left, top: win.element.style.top };
+          }
         };
         document.addEventListener('mousemove', onMove); document.addEventListener('mouseup', onUp);
       });
