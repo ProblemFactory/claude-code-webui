@@ -26,7 +26,12 @@ class LayoutManager {
             if (op.isSnapped) { win._isSnapped = true; win._preSnapBounds = op.preSnapBounds; }
             else { win._isSnapped = false; }
             if (op.zIndex) { win.element.style.zIndex = op.zIndex; if (op.zIndex >= this.app.wm.zIndex) this.app.wm.zIndex = op.zIndex + 1; }
-            setTimeout(() => { if (win.onResize) win.onResize(); }, 100);
+            // Re-apply after onResize (terminal fit() may trigger reflow)
+            setTimeout(() => {
+              if (win.onResize) win.onResize();
+              // Re-enforce gridBounds in case onResize changed dimensions
+              this.app.wm._applyGridBounds(win);
+            }, 100);
           }
           break;
         }
