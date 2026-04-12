@@ -93,22 +93,15 @@ class LayoutManager {
     setTimeout(() => { this._restoring = false; }, 1000);
   }
 
-  // Create a window from remote layout state
+  // Create a window from remote layout state using its saved openSpec
   _createRemoteWindow(rw) {
     const winId = rw.winId || rw.id;
+    const spec = rw.openSpec;
+    if (!spec) return; // no spec = can't recreate
+
     try {
-      if ((rw.type === 'terminal' || rw.type === 'chat') && rw.serverSessionId) {
-        this.app.attachSession(rw.serverSessionId, rw.title, rw.explorerPath || '', { mode: rw.type === 'chat' ? 'chat' : undefined, syncId: winId });
-      } else if (rw.type === 'files' && rw.explorerPath) {
-        this.app.openFileExplorer(rw.explorerPath, { syncId: winId });
-      } else if (rw.type === 'editor' && rw.filePath) {
-        this.app.openEditor(rw.filePath, rw.fileName, { syncId: winId });
-      } else if ((rw.type === 'viewer' || rw.type === 'hex-viewer') && rw.filePath) {
-        this.app.openFile(rw.filePath, rw.fileName, { syncId: winId });
-      } else {
-        return; // unknown type
-      }
-      // Apply position after creation (may be async for file viewer)
+      this.app.replayOpenSpec(spec, winId);
+      // Apply position after creation (may be async)
       setTimeout(() => {
         const winInfo = this.app.wm.windows.get(winId);
         if (!winInfo) return;
@@ -136,6 +129,8 @@ class LayoutManager {
         zIndex: parseInt(el.style.zIndex) || 0,
       };
       if (win._isSnapped) { winState.isSnapped = true; winState.preSnapBounds = win._preSnapBounds; }
+      // openSpec: serializable recipe to recreate this window on another client
+      if (win._openSpec) winState.openSpec = win._openSpec;
       // For terminals, save both webui session id and claude session id + overrides
       if (win.type === 'terminal' && termSession) {
         winState.serverSessionId = termSession.sessionId;

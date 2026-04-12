@@ -795,6 +795,7 @@ class App {
     const isChat = mode === 'chat';
     const titlePrefix = isChat ? '\uD83D\uDCAC ' : '';
     const winInfo = this.wm.createWindow({ title: `${titlePrefix}${name} — ${cwd}`, type: isChat ? 'chat' : 'terminal', syncId });
+    winInfo._openSpec = { action: 'attachSession', serverId, name, cwd, mode };
 
     this.ws.send({ type: 'attach', sessionId: serverId });
 
@@ -887,6 +888,7 @@ class App {
     this._hideWelcome();
     const titlePrefix = '\uD83D\uDCCB ';
     const winInfo = this.wm.createWindow({ title: `${titlePrefix}${sessionName || 'History'} — ${cwd}`, type: 'chat' });
+    winInfo._openSpec = { action: 'viewSession', sessionId, cwd, name: sessionName };
     const chatView = new ChatView(winInfo, this.ws, `view-${sessionId}`, this, { readOnly: true });
     this.sessions.set(winInfo.id, chatView);
 
@@ -906,11 +908,36 @@ class App {
     winInfo._notifyChanged = () => this.updateTaskbar();
   }
 
+  // Replay a serialized openSpec to recreate a window (for cross-client sync)
+  replayOpenSpec(spec, syncId) {
+    switch (spec.action) {
+      case 'attachSession':
+        this.attachSession(spec.serverId, spec.name, spec.cwd, { mode: spec.mode, syncId });
+        break;
+      case 'openFileExplorer':
+        this.openFileExplorer(spec.path, { syncId });
+        break;
+      case 'openFile':
+        this.openFile(spec.path, spec.name, { syncId });
+        break;
+      case 'openEditor':
+        this.openEditor(spec.path, spec.name, { syncId });
+        break;
+      case 'openBrowser':
+        this.openBrowser(spec.url, { syncId });
+        break;
+      case 'viewSession':
+        this.viewSession(spec.sessionId, spec.cwd, spec.name);
+        break;
+    }
+  }
+
   openFileExplorer(startPath, { syncId } = {}) {
     this._hideWelcome();
     const winInfo = this.wm.createWindow({ title: 'File Explorer', type: 'files', syncId });
     const explorer = new FileExplorer(winInfo, this, startPath);
     winInfo._explorer = explorer;
+    winInfo._openSpec = { action: 'openFileExplorer', path: startPath };
     winInfo.onClose = () => this._checkWelcome();
     return winInfo;
   }
@@ -919,6 +946,7 @@ class App {
     this._hideWelcome();
     const startUrl = url || '';
     const winInfo = this.wm.createWindow({ title: startUrl ? new URL(startUrl).hostname : 'Browser', type: 'browser' });
+    winInfo._openSpec = { action: 'openBrowser', url: startUrl };
     const container = document.createElement('div');
     container.style.cssText = 'display:flex;flex-direction:column;height:100%';
 
@@ -999,6 +1027,7 @@ class App {
     const title = opts._tempFile ? `View: ${fileName}` : `Edit: ${fileName}`;
     const winInfo = this.wm.createWindow({ title, type: 'editor', syncId: opts.syncId });
     winInfo._filePath = filePath; winInfo._fileName = fileName;
+    if (!opts._tempFile) winInfo._openSpec = { action: 'openEditor', path: filePath, name: fileName };
     new CodeEditor(winInfo, filePath, fileName, this, opts);
     winInfo.onClose = () => {
       if (opts._onCloseDelete) opts._onCloseDelete();

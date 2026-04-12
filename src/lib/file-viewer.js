@@ -44,6 +44,7 @@ class FileViewer {
 
     const winInfo = app.wm.createWindow({ title: fileName, type: 'viewer', syncId: opts.syncId });
     winInfo._filePath = filePath; winInfo._fileName = fileName;
+    winInfo._openSpec = { action: 'openFile', path: filePath, name: fileName };
     const container = document.createElement('div'); container.className = 'file-viewer';
     winInfo.content.appendChild(container);
     winInfo.onClose = () => {};

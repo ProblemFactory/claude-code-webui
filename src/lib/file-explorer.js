@@ -378,6 +378,7 @@ class FileExplorer {
       }
       this.currentPath = data.path; this.pathInput.value = data.path; this.items = data.items;
       this.winInfo._explorerPath = data.path; // for layout persistence
+      if (this.winInfo._openSpec) this.winInfo._openSpec.path = data.path; // update for sync
       const maxLen = 40;
       const display = data.path.length > maxLen ? '\u2026' + data.path.slice(-maxLen + 1) : data.path;
       this.app.wm.setTitle(this.winInfo.id, `\uD83D\uDCC1 ${display}`);
