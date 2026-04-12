@@ -589,7 +589,8 @@ class FileExplorer {
 
   _formatDate(ms) {
     if (!ms) return '';
-    return new Date(ms).toLocaleDateString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const d = new Date(ms);
+    return `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()} ${d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
   }
 
   _renderItems() {
