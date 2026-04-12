@@ -118,7 +118,20 @@ const SETTINGS_SCHEMA = {
     ],
     label: 'Default session mode',
     description: 'Default mode for new sessions and single-click resume from sidebar',
-    category: 'Session Card', liveApply: true,
+    category: 'Session', liveApply: true,
+  },
+  'session.defaultEffort': {
+    type: 'enum', default: '',
+    options: [
+      { value: '', label: 'Auto (model default)' },
+      { value: 'low', label: 'Low' },
+      { value: 'medium', label: 'Medium' },
+      { value: 'high', label: 'High' },
+      { value: 'max', label: 'Max (Opus 4.6 only)' },
+    ],
+    label: 'Default effort level',
+    description: 'Effort level for new sessions (--effort flag). Auto uses the model default.',
+    category: 'Session', liveApply: true,
   },
 
   // ── Sidebar ──
@@ -189,6 +202,7 @@ const SETTINGS_CATEGORIES = [
   'Window',
   'Terminal',
   'Chat',
+  'Session',
   'Sidebar',
   'Session Card',
 ];

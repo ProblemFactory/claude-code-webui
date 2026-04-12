@@ -487,6 +487,7 @@ class App {
         name: document.getElementById('input-session-name').value.trim(),
         model: document.getElementById('input-model').value,
         permission: document.getElementById('input-permission').value,
+        effort: document.getElementById('input-effort').value,
         extraArgs: document.getElementById('input-extra-args').value.trim(),
       });
       this.hideDialogs();
@@ -511,13 +512,15 @@ class App {
   showNewSessionDialog() {
     this._showDialog('dialog-new-session');
     document.getElementById('input-mode').value = this.settings.get('session.defaultMode') ?? 'chat';
+    document.getElementById('input-effort').value = this.settings.get('session.defaultEffort') ?? '';
     document.getElementById('input-cwd').focus();
   }
   hideDialogs() { document.getElementById('dialog-overlay').classList.add('hidden'); document.getElementById('dialog-overlay').querySelectorAll('.dialog').forEach(d => d.classList.add('hidden')); }
 
-  createSession({ cwd, name, model, permission, extraArgs, resumeId, mode, syncId }) {
+  createSession({ cwd, name, model, permission, extraArgs, resumeId, mode, syncId, effort }) {
     this._hideWelcome();
     const sessionMode = mode || this.settings.get('session.defaultMode') || 'chat';
+    const sessionEffort = effort || this.settings.get('session.defaultEffort') || undefined;
     const sessionName = name || (resumeId ? `Resume ${resumeId.substring(0,8)}` : `Session ${this.wm.windowCounter+1}`);
     const winType = sessionMode === 'chat' ? 'chat' : 'terminal';
     const titlePrefix = sessionMode === 'chat' ? '\uD83D\uDCAC ' : '';
@@ -525,7 +528,7 @@ class App {
 
     this.ws.send({
       type:'create', mode: sessionMode, cwd: cwd||undefined, sessionName: name||undefined, model: model||undefined,
-      permissionMode: permission||undefined, extraArgs: extraArgs||undefined,
+      permissionMode: permission||undefined, effort: sessionEffort||undefined, extraArgs: extraArgs||undefined,
       resume: !!resumeId, resumeId: resumeId||undefined, cols:120, rows:30,
     });
 

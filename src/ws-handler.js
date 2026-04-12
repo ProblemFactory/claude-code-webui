@@ -46,6 +46,7 @@ function registerWsHandler(wss, ctx) {
           if (data.sessionName) claudeArgs.push('--name', data.sessionName);
           if (data.model) claudeArgs.push('--model', data.model);
           if (data.permissionMode) claudeArgs.push('--permission-mode', data.permissionMode);
+          if (data.effort) claudeArgs.push('--effort', data.effort);
           if (data.extraArgs) claudeArgs.push(...data.extraArgs.trim().split(/\s+/).filter(Boolean));
 
           ensureDir(SOCKETS_DIR);
