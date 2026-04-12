@@ -631,12 +631,12 @@ class WindowManager {
     for (const w of overlapping) {
       const item = document.createElement('div');
       item.className = 'overlap-switcher-item';
-      const dot = document.createElement('span');
-      dot.className = 'taskbar-dot';
-      if (w.exited) dot.classList.add('exited');
+      const icon = document.createElement('span');
+      icon.textContent = w._typeIcon || '';
+      icon.style.cssText = 'font-size:11px;flex-shrink:0';
       const label = document.createElement('span');
       label.textContent = w.title;
-      item.append(dot, label);
+      item.append(icon, label);
       item.onclick = () => { this.focusWindow(w.id); pop.remove(); };
       pop.appendChild(item);
     }
