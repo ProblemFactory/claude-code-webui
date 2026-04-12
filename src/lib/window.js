@@ -48,11 +48,11 @@ class WindowManager {
       if (btn.classList.contains('no-overlap')) return;
       this._showOverlapSwitcher(winInfo, e.clientX, e.clientY);
     };
-    controls.querySelector('.win-minimize').onclick = (e) => { e.stopPropagation(); this.minimize(id); };
-    controls.querySelector('.win-maximize').onclick = (e) => { e.stopPropagation(); this.toggleMaximize(id); };
-    controls.querySelector('.win-close').onclick = (e) => { e.stopPropagation(); this.closeWindow(id); };
-    el.addEventListener('mousedown', () => this.focusWindow(id));
-    titleBar.addEventListener('dblclick', (e) => { if (!e.target.closest('.window-controls')) this.toggleMaximize(id); });
+    controls.querySelector('.win-minimize').onclick = (e) => { e.stopPropagation(); this.minimize(winInfo.id); };
+    controls.querySelector('.win-maximize').onclick = (e) => { e.stopPropagation(); this.toggleMaximize(winInfo.id); };
+    controls.querySelector('.win-close').onclick = (e) => { e.stopPropagation(); this.closeWindow(winInfo.id); };
+    el.addEventListener('mousedown', () => this.focusWindow(winInfo.id));
+    titleBar.addEventListener('dblclick', (e) => { if (!e.target.closest('.window-controls')) this.toggleMaximize(winInfo.id); });
     // Right-click on title bar: show overlapping windows switcher
     titleBar.addEventListener('contextmenu', (e) => {
       if (e.target.closest('.window-controls')) return;

@@ -4,13 +4,10 @@ class LayoutManager {
     this._autoSaveTimer = null;
     this._savedPresets = {};
     this._currentName = null;
-    this._syncVersion = 0;
 
     // Listen for state sync from other clients
     app.ws.onGlobal((msg) => {
       if (msg.type === 'layout-sync' && !this._restoring) {
-        if (msg.version && msg.version <= this._syncVersion) return; // stale
-        this._syncVersion = msg.version || 0;
         this._applyRemoteState(msg.state);
       }
     });
@@ -269,7 +266,7 @@ class LayoutManager {
     if (this._restoring) return;
     const state = this.captureState();
     // Full state to server for disk persistence
-    this.app.ws.send({ type: 'layout-sync', state, version: ++this._syncVersion });
+    this.app.ws.send({ type: 'layout-sync', state });
   }
 
   // Load auto-saved state on startup
