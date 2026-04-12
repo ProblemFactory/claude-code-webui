@@ -107,13 +107,13 @@
 .file-content-area {
   display: flex; flex: 1; overflow: hidden; min-height: 0;
 }
+.file-browse-area { display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
 .file-main-pane { display: flex; flex-direction: column; flex: 1; min-width: 0; overflow: hidden; }
 .file-main-pane > .file-list { flex: 1; min-width: 0; }
 
-/* Preview panel layout: auto-detect horizontal (wide) vs vertical (tall) */
+/* Preview layout: horizontal (wide window) = side-by-side, vertical (tall) = stacked */
 .file-content-area.preview-horizontal { flex-direction: row; }
 .file-content-area.preview-vertical { flex-direction: column; }
-.file-content-area.preview-vertical > .file-main-pane { min-height: 0; flex: 1; }
 .file-content-area.preview-horizontal > .file-preview-panel { border-left: 1px solid var(--border); }
 .file-content-area.preview-vertical > .file-preview-panel { border-top: 1px solid var(--border); }
 

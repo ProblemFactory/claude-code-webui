@@ -87,7 +87,7 @@ class FileExplorer {
     this.sortHeader.addEventListener('contextmenu', (e) => { e.preventDefault(); this._showColumnMenu(e.clientX, e.clientY); });
     this._renderSortHeader();
 
-    // Content area (bookmark panel + main pane)
+    // Content area: browse area (bookmarks + file list) + preview panel
     const contentArea = document.createElement('div'); contentArea.className = 'file-content-area';
     this.listEl = document.createElement('div'); this.listEl.className = 'file-list';
 
@@ -95,6 +95,11 @@ class FileExplorer {
     const mainPane = document.createElement('div');
     mainPane.className = 'file-main-pane';
     mainPane.append(this.sortHeader, this.listEl);
+
+    // Browse area keeps bookmarks + main pane always side-by-side
+    const browseArea = document.createElement('div');
+    browseArea.className = 'file-browse-area';
+    browseArea.append(this._bookmarkPanel, mainPane);
 
     // Preview panel (shows selected file content)
     this._previewPanel = document.createElement('div');
@@ -109,7 +114,7 @@ class FileExplorer {
     previewHeader.append(this._previewTitle);
     this._previewPanel.append(previewHeader, this._previewContent);
 
-    contentArea.append(this._bookmarkPanel, mainPane, this._previewPanel);
+    contentArea.append(browseArea, this._previewPanel);
     this._contentArea = contentArea;
     this._el = el;
     // Auto-detect preview layout direction based on window aspect ratio
@@ -886,21 +891,40 @@ class FileExplorer {
     }
     const fp = this._selectedPath;
     const name = fp.split('/').pop();
+    const ext = name.split('.').pop().toLowerCase();
+    const rawUrl = `/api/file/raw?path=${encodeURIComponent(fp)}`;
     this._previewTitle.textContent = name;
     this._previewContent.innerHTML = '<div class="empty-hint">Loading...</div>';
 
+    const IMAGE_EXTS = ['png','jpg','jpeg','gif','webp','svg','bmp','ico'];
+    const VIDEO_EXTS = ['mp4','webm','mov','avi'];
+    const AUDIO_EXTS = ['mp3','wav','ogg','flac','aac','m4a'];
+
     try {
+      // Media types — render directly without file info check
+      if (IMAGE_EXTS.includes(ext)) {
+        this._previewContent.innerHTML = `<img src="${rawUrl}" style="max-width:100%;max-height:100%;object-fit:contain">`;
+        return;
+      }
+      if (VIDEO_EXTS.includes(ext)) {
+        this._previewContent.innerHTML = `<video controls style="max-width:100%;max-height:100%"><source src="${rawUrl}"></video>`;
+        return;
+      }
+      if (AUDIO_EXTS.includes(ext)) {
+        this._previewContent.innerHTML = `<div style="padding:16px"><div style="font-size:11px;color:var(--text-secondary);margin-bottom:8px">${name}</div><audio controls src="${rawUrl}" style="width:100%"></audio></div>`;
+        return;
+      }
+      if (ext === 'pdf') {
+        this._previewContent.innerHTML = `<iframe src="${rawUrl}" style="width:100%;height:100%;border:none"></iframe>`;
+        return;
+      }
+
+      // Check file info for binary/size
       const infoRes = await fetch(`/api/file/info?path=${encodeURIComponent(fp)}`);
       const info = await infoRes.json();
       if (info.error) { this._previewContent.innerHTML = `<div class="empty-hint">${info.error}</div>`; return; }
       if (info.isBinary) {
-        const ext = name.split('.').pop().toLowerCase();
-        const imgExts = ['png','jpg','jpeg','gif','webp','svg','bmp','ico'];
-        if (imgExts.includes(ext)) {
-          this._previewContent.innerHTML = `<img src="/api/file/raw?path=${encodeURIComponent(fp)}" style="max-width:100%;max-height:100%;object-fit:contain">`;
-        } else {
-          this._previewContent.innerHTML = `<div class="empty-hint">${formatSize(info.size)} binary file</div>`;
-        }
+        this._previewContent.innerHTML = `<div class="empty-hint">${formatSize(info.size)} binary file</div>`;
         return;
       }
       if (info.size > 512 * 1024) {
