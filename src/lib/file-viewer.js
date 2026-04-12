@@ -22,6 +22,7 @@ class FileViewer {
     if (opts.hex) {
       const winInfo = app.wm.createWindow({ title: `Hex: ${fileName}`, type: 'hex-viewer', syncId: opts.syncId });
       winInfo._filePath = filePath; winInfo._fileName = fileName;
+      winInfo._openSpec = { action: 'openFile', path: filePath, name: fileName };
       new HexViewer(winInfo, filePath, fileInfo);
       return;
     }
@@ -33,6 +34,7 @@ class FileViewer {
     if (fileInfo.isBinary && !isMedia) {
       const winInfo = app.wm.createWindow({ title: `Hex: ${fileName}`, type: 'hex-viewer', syncId: opts.syncId });
       winInfo._filePath = filePath; winInfo._fileName = fileName;
+      winInfo._openSpec = { action: 'openFile', path: filePath, name: fileName };
       new HexViewer(winInfo, filePath, fileInfo);
       return;
     }
