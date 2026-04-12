@@ -41,7 +41,7 @@ A web-based UI for managing multiple [Claude Code](https://docs.anthropic.com/en
 - **Taskbar context menu** -- right-click taskbar items for Move, Minimize/Restore, Close
 - **Move mode** -- window attaches to cursor, click to place (via taskbar context menu or command mode)
 - **Proportional tracking** -- windows maintain relative positions on workspace resize
-- **Multi-client layout sync** -- workspace state broadcast to all clients; smart diff syncs positions, open/close, navigation
+- **Multi-client layout sync** -- workspace state broadcast to all clients; smart diff syncs positions, open/close, navigation; openSpec pattern for window creation sync
 
 ### Sessions
 - **Session discovery** -- auto-detects running Claude Code sessions (Live/Tmux/External/Stopped)

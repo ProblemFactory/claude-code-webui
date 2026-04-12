@@ -135,6 +135,8 @@ When multiple browsers are connected, layout changes are synced in real-time:
 - **Synced properties**: window positions, maximize/minimize state, snap, z-order, open/close, file explorer navigation
 - **Proportional coordinates**: all positions use gridBounds (0-1 fractions), so different screen sizes work correctly
 - **Window matching**: windows are matched across clients by unique ID (`win-{timestamp}-{random}`)
+- **Window creation via openSpec**: every window records a serializable creation recipe. When a window exists on one client but not another, the receiver replays it. Supports all window types: sessions, file explorers, viewers, editors, browsers, subagent viewers.
+- **Draft sync**: chat input text synced across clients in real-time via StateSync
 
 The sync is debounced at 500ms and uses a 1-second cooldown to prevent echo loops.
 
