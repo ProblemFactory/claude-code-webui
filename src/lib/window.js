@@ -531,8 +531,21 @@ class WindowManager {
     if (win.isMinimized) this.restore(id);
     this.focusWindow(id);
     const el = win.element;
+
+    // Restore from maximized state (same as normal drag-out-of-maximize)
+    if (win.isMaximized && win.prevBounds) {
+      win.isMaximized = false;
+      el.style.width = win.prevBounds.width; el.style.height = win.prevBounds.height;
+    }
+    // Restore from snapped state
+    if (win._isSnapped && win._preSnapBounds) {
+      el.style.width = win._preSnapBounds.width; el.style.height = win._preSnapBounds.height;
+      win._isSnapped = false;
+    }
+    if (win.onResize) win.onResize();
+
     el.style.cursor = 'move';
-    el.style.pointerEvents = 'none'; // block all interaction with window content during move
+    el.style.pointerEvents = 'none';
     document.body.style.cursor = 'move';
 
     const onMove = (e) => {
