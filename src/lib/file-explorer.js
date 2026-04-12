@@ -526,19 +526,18 @@ class FileExplorer {
     const startWidth = headerEl.getBoundingClientRect().width;
     let currentWidth = startWidth;
     let rafId = null;
+    let moved = false;
     const isName = !!col.alwaysOn;
+    const varName = isName ? '--col-name-w' : `--col-${col.key}-w`;
 
     const onMove = (e) => {
+      moved = true;
       const dx = e.clientX - startX;
-      currentWidth = Math.max(40, startWidth + dx);
+      currentWidth = Math.max(20, startWidth + dx);
       if (rafId) return;
       rafId = requestAnimationFrame(() => {
         rafId = null;
-        if (isName) {
-          this._el.style.setProperty('--col-name-w', currentWidth + 'px');
-        } else {
-          this._el.style.setProperty(`--col-${col.key}-w`, currentWidth + 'px');
-        }
+        this._el.style.setProperty(varName, currentWidth + 'px');
       });
     };
 
@@ -548,10 +547,10 @@ class FileExplorer {
       if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
       this._columnWidths[col.key] = Math.round(currentWidth);
       this._saveColumnWidths();
-      if (isName) {
-        this._el.style.setProperty('--col-name-w', Math.round(currentWidth) + 'px');
-      } else {
-        this._el.style.setProperty(`--col-${col.key}-w`, Math.round(currentWidth) + 'px');
+      this._el.style.setProperty(varName, Math.round(currentWidth) + 'px');
+      // Suppress the click event that fires after mouseup to prevent re-sort
+      if (moved) {
+        headerEl.addEventListener('click', (e) => { e.stopImmediatePropagation(); }, { once: true, capture: true });
       }
     };
 

@@ -23,6 +23,7 @@
 }
 .file-sort-col { cursor: pointer; user-select: none; padding: 2px 0; position: relative; }
 .file-sort-col:hover { color: var(--text); }
+.file-sort-col { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-col-resize-handle {
   position: absolute; top: 0; right: -2px; width: 4px; height: 100%;
   cursor: col-resize; z-index: 1;
@@ -38,7 +39,7 @@
 .file-item[draggable] { cursor: grab; }
 .file-icon { font-size: 13px; width: 16px; text-align: center; flex-shrink: 0; }
 .file-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: var(--col-name-w, 0); }
-.file-meta { color: var(--text-dim); font-size: 10px; flex-shrink: 0; }
+.file-meta { color: var(--text-dim); font-size: 10px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-size { width: var(--col-size-w, 80px); }
 .file-modified { width: var(--col-modified-w, 140px); }
 /* Icon view */
