@@ -63,6 +63,10 @@ class LayoutManager {
             win.element.style.zIndex = z;
             if (z >= this.app.wm.zIndex) this.app.wm.zIndex = z + 1;
           }
+          // maximize
+          const isMax = rw.isMaximized ?? false;
+          if (isMax && !win.isMaximized) this.app.wm.toggleMaximize(win.id);
+          if (!isMax && win.isMaximized) this.app.wm.toggleMaximize(win.id);
           // minimize/restore
           const isMin = rw.min ?? rw.isMinimized ?? false;
           if (isMin && !win.isMinimized) this.app.wm.minimize(win.id);

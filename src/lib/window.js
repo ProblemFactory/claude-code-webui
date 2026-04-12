@@ -462,10 +462,10 @@ class WindowManager {
     const win = this.windows.get(id); if (!win) return; const el = win.element;
     if (win.isMaximized) { const p = win.prevBounds; el.style.left=p.left; el.style.top=p.top; el.style.width=p.width; el.style.height=p.height; win.isMaximized = false; }
     else { win.prevBounds={left:el.style.left,top:el.style.top,width:el.style.width,height:el.style.height}; el.style.left='0';el.style.top='0';el.style.width='100%';el.style.height='100%'; win.isMaximized = true; }
-    setTimeout(() => { if (win.onResize) win.onResize(); }, 50); this._notify(); this._scheduleOverlapUpdate();
+    setTimeout(() => { if (win.onResize) win.onResize(); this._captureGridBounds(win); }, 50); this._notify(); this._scheduleOverlapUpdate();
   }
   minimize(id) { const win = this.windows.get(id); if (!win) return; win.element.style.display='none'; win.isMinimized=true; this._notify(); this._scheduleOverlapUpdate(); }
-  restore(id) { const win = this.windows.get(id); if (!win) return; win.element.style.display=''; win.isMinimized=false; this.focusWindow(id); setTimeout(() => { if (win.onResize) win.onResize(); }, 50); this._scheduleOverlapUpdate(); }
+  restore(id) { const win = this.windows.get(id); if (!win) return; win.element.style.display=''; win.isMinimized=false; this.focusWindow(id); setTimeout(() => { if (win.onResize) win.onResize(); this._captureGridBounds(win); }, 50); this._scheduleOverlapUpdate(); }
   closeWindow(id) { const win = this.windows.get(id); if (!win) return; if (win.onClose) win.onClose(); win.element.remove(); this.windows.delete(id); this._notify(); this._scheduleOverlapUpdate(); }
   setTitle(id, t) { const win = this.windows.get(id); if (win) { win.title=t; win.titleSpan.textContent=t; this._notify(); } }
 
