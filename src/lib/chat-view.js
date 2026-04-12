@@ -2,6 +2,7 @@ import { marked } from 'marked';
 import { escHtml, copyText, saveDraft, loadDraft, clearDraft, getStateSync } from './utils.js';
 import { detectHljsLang, getHljsLanguages, renderCodeBlock, rehighlightCodeBlock, stripAnsi } from './highlight.js';
 import { ChatMinimap } from './chat-minimap.js';
+import { ChatSearch } from './chat-search.js';
 
 /**
  * ChatView — renders a chat interface for stream-json mode sessions.
@@ -21,7 +22,6 @@ class ChatView {
     this._elements = new Map(); // msg.id → DOM element
     this._pinned = true; // auto-scroll to bottom
     this._renderedMsgIds = new Set(); // dedup by msgId
-    this._highlightQuery = ''; // active search query for highlight layer
 
     // Build DOM
     const container = document.createElement('div');
@@ -348,46 +348,20 @@ class ChatView {
 
     inputArea.append(this._attachArea, this._todoDisplay, this._streamStatus, inputWrap, sendCol);
 
-    // Search bar
-    const searchBar = document.createElement('div');
-    searchBar.className = 'chat-search-bar hidden';
-    const searchInput = document.createElement('input');
-    searchInput.className = 'chat-search-input';
-    searchInput.placeholder = 'Search messages...';
-    searchInput.type = 'text';
-    this._searchStatus = document.createElement('span');
-    this._searchStatus.className = 'chat-search-status';
-    const searchPrev = document.createElement('button');
-    searchPrev.className = 'chat-search-nav';
-    searchPrev.textContent = '\u25B2';
-    searchPrev.title = 'Previous';
-    searchPrev.onclick = () => this._searchNav(-1);
-    const searchNext = document.createElement('button');
-    searchNext.className = 'chat-search-nav';
-    searchNext.textContent = '\u25BC';
-    searchNext.title = 'Next';
-    searchNext.onclick = () => this._searchNav(1);
-    const searchClose = document.createElement('button');
-    searchClose.className = 'chat-search-close';
-    searchClose.textContent = '\u2715';
-    searchClose.onclick = () => { searchBar.classList.add('hidden'); searchInput.value = ''; this._clearSearch(); };
-    searchBar.append(searchInput, this._searchStatus, searchPrev, searchNext, searchClose);
-    this._searchInput = searchInput;
-    container.insertBefore(searchBar, this._messageList);
-
-    searchInput.addEventListener('input', () => this._doSearch(searchInput.value));
-    searchInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') { e.preventDefault(); this._searchNav(e.shiftKey ? -1 : 1); }
-      if (e.key === 'Escape') { searchClose.click(); }
+    // Search (extracted to ChatSearch)
+    this._search = new ChatSearch(this._messageList, {
+      getSessionIds: () => this._getSessionIds(),
+      getSessionId: () => this.sessionId,
+      jumpToIndex: (idx) => this.jumpToIndex(idx),
+      getWindowBounds: () => ({ windowStart: this._windowStart, windowEnd: this._windowEnd }),
     });
+    container.insertBefore(this._search.element, this._messageList);
 
     // Ctrl+F to search
     container.addEventListener('keydown', (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
         e.preventDefault();
-        searchBar.classList.remove('hidden');
-        searchInput.focus();
-        searchInput.select();
+        this._search.open();
       }
     });
     container.tabIndex = -1;
@@ -635,7 +609,7 @@ class ChatView {
 
     // Preserve scroll position
     this._messageList.scrollTop += (this._messageList.scrollHeight - scrollHeightBefore);
-    if (this._highlightQuery) this._applyHighlightLayer();
+    if (this._search?.hasHighlight) this._search.applyHighlightLayer();
     setTimeout(() => { this._loading = false; }, 300);
   }
 
@@ -1485,158 +1459,6 @@ class ChatView {
     setTimeout(() => tip.remove(), 1200);
   }
 
-  _doSearch(query) {
-    if (this._searchTimer) clearTimeout(this._searchTimer);
-    this._searchTimer = setTimeout(() => this._executeSearch(query), 250);
-  }
-
-  async _executeSearch(query) {
-    this._clearSearch();
-    const q = query.trim().toLowerCase();
-    if (!q) { this._searchStatus.textContent = ''; return; }
-
-    this._searchStatus.textContent = 'Searching...';
-    this._searchQuery = q;
-    this._highlightQuery = q;
-    this._applyHighlightLayer(); // highlight current view immediately
-
-    // Server-side search — find claudeSessionId for this webui session
-    let { claudeId, cwd } = this._getSessionIds();
-    // Fallback: check active sessions API directly
-    if (!claudeId) {
-      try {
-        const r = await fetch('/api/active');
-        const d = await r.json();
-        const sessions = d.sessions || d;
-        const s = Array.isArray(sessions) ? sessions.find(s => s.id === this.sessionId) : null;
-        if (s) { claudeId = s.claudeSessionId; cwd = s.cwd || ''; }
-      } catch {}
-    }
-
-    if (claudeId) {
-      try {
-        const res = await fetch(`/api/session-messages?claudeSessionId=${encodeURIComponent(claudeId)}&cwd=${encodeURIComponent(cwd)}&search=${encodeURIComponent(q)}`);
-        const data = await res.json();
-        this._serverSearchResults = data.matches || [];
-      } catch {
-        this._serverSearchResults = [];
-      }
-    } else {
-      this._serverSearchResults = [];
-    }
-
-    if (!this._serverSearchResults.length) {
-      this._searchStatus.textContent = 'No results';
-      return;
-    }
-
-    this._searchResultIdx = 0;
-    this._searchStatus.textContent = `1/${this._serverSearchResults.length}`;
-    this._jumpToSearchResult(0);
-  }
-
-  async _jumpToSearchResult(idx) {
-    const results = this._serverSearchResults;
-    if (!results || idx < 0 || idx >= results.length) return;
-
-    const msgIndex = results[idx].index;
-
-    // Jump window if target is outside
-    if (msgIndex < this._windowStart || msgIndex >= this._windowEnd) {
-      await this.jumpToIndex(msgIndex);
-    }
-
-    // Expand collapsed content in target, then refresh highlight layer
-    const relIdx = msgIndex - this._windowStart;
-    const allMsgs = this._messageList.querySelectorAll('.chat-msg');
-    if (relIdx >= 0 && relIdx < allMsgs.length) {
-      const targetEl = allMsgs[relIdx];
-      targetEl.style.contentVisibility = 'visible';
-      for (const d of targetEl.querySelectorAll('details:not([open])')) d.open = true;
-    }
-
-    // Refresh highlight layer and scroll to first match in target
-    this._applyHighlightLayer();
-    const targetEl = allMsgs[relIdx];
-    if (this._highlightRanges?.length > 0 && targetEl) {
-      const matchIdx = this._highlightRanges.findIndex(r => targetEl.contains(r.startContainer));
-      if (matchIdx >= 0) {
-        this._setCurrentHighlight(matchIdx);
-        // Scroll the range into view
-        const rect = this._highlightRanges[matchIdx].getBoundingClientRect();
-        const listRect = this._messageList.getBoundingClientRect();
-        this._messageList.scrollTop += rect.top - listRect.top - listRect.height / 2;
-        return;
-      }
-    }
-    // Fallback: just scroll to the message
-    if (targetEl) targetEl.scrollIntoView({ block: 'center' });
-  }
-
-  // ── Highlight Layer: non-destructive search highlighting ──
-
-  // Apply highlight layer to current DOM content based on _highlightQuery
-  _applyHighlightLayer() {
-    if (!CSS.highlights) return; // fallback: no highlight API
-    CSS.highlights.delete('chat-search');
-    CSS.highlights.delete('chat-search-current');
-    if (!this._highlightQuery) return;
-
-    const q = this._highlightQuery;
-    const ranges = [];
-    const walker = document.createTreeWalker(this._messageList, NodeFilter.SHOW_TEXT);
-    while (walker.nextNode()) {
-      const node = walker.currentNode;
-      const text = node.textContent.toLowerCase();
-      let idx = 0;
-      while ((idx = text.indexOf(q, idx)) !== -1) {
-        const range = new Range();
-        range.setStart(node, idx);
-        range.setEnd(node, idx + q.length);
-        ranges.push(range);
-        idx += q.length;
-      }
-    }
-    if (ranges.length > 0) {
-      CSS.highlights.set('chat-search', new Highlight(...ranges));
-    }
-    this._highlightRanges = ranges;
-  }
-
-  // Highlight a specific range as "current" (for search navigation)
-  _setCurrentHighlight(rangeIdx) {
-    if (!CSS.highlights || !this._highlightRanges) return;
-    CSS.highlights.delete('chat-search-current');
-    if (rangeIdx >= 0 && rangeIdx < this._highlightRanges.length) {
-      CSS.highlights.set('chat-search-current', new Highlight(this._highlightRanges[rangeIdx]));
-    }
-  }
-
-  _clearHighlightLayer() {
-    this._highlightQuery = '';
-    this._highlightRanges = [];
-    if (CSS.highlights) {
-      CSS.highlights.delete('chat-search');
-      CSS.highlights.delete('chat-search-current');
-    }
-  }
-
-  _searchNav(dir) {
-    const results = this._serverSearchResults;
-    if (!results || !results.length) return;
-    this._searchResultIdx = (this._searchResultIdx + dir + results.length) % results.length;
-    this._searchStatus.textContent = `${this._searchResultIdx + 1}/${results.length}`;
-    this._jumpToSearchResult(this._searchResultIdx);
-  }
-
-  _clearSearch() {
-    this._clearHighlightLayer();
-    this._serverSearchResults = [];
-    this._searchResultIdx = -1;
-    this._searchQuery = '';
-    if (this._searchStatus) this._searchStatus.textContent = '';
-  }
-
   _addImageAttachment(file) {
     const reader = new FileReader();
     reader.onload = () => {
@@ -1930,6 +1752,7 @@ class ChatView {
       if (sync) sync.off('drafts', 'chat:' + this.sessionId, this._draftSyncHandler);
     }
     if (this._chatMinimap) this._chatMinimap.dispose();
+    if (this._search) this._search.dispose();
   }
 }
 
