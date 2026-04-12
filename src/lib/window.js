@@ -73,6 +73,8 @@ class WindowManager {
       width: el.offsetWidth / r.width,
       height: el.offsetHeight / r.height,
     };
+    // Broadcast position change to other clients
+    if (this._layoutManager) this._layoutManager.broadcastWindowMove(win);
   }
 
   _applyGridBounds(win) {
@@ -303,6 +305,7 @@ class WindowManager {
     this.grid = rows && cols ? { rows, cols } : null;
     this._renderGridOverlay();
     this._notify();
+    if (this._layoutManager) this._layoutManager.broadcastOp({ op: 'grid', rows, cols });
   }
   _renderGridOverlay() {
     const ov = this.gridOverlay; ov.innerHTML = '';

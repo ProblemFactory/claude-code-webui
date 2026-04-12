@@ -5,75 +5,101 @@ class LayoutManager {
     this._savedPresets = {};
     this._currentName = null;
 
-    // Listen for layout broadcasts from other clients (debounced)
-    this._remoteLayoutTimer = null;
+    // Listen for incremental layout ops from other clients
     app.ws.onGlobal((msg) => {
-      if (msg.type === 'layout-updated' && msg.autoSave) {
-        if (this._restoring) return;
-        clearTimeout(this._remoteLayoutTimer);
-        this._remoteLayoutTimer = setTimeout(() => this._applyRemotePositions(msg.autoSave), 500);
+      if (msg.type === 'layout-op' && !this._restoring) {
+        this._applyRemoteOp(msg);
       }
     });
   }
 
-  // Lightweight position sync from another client — only updates gridBounds, no window creation
-  _applyRemotePositions(remoteState) {
-    if (!remoteState?.windows) return;
+  // Apply a single incremental layout operation from another client
+  _applyRemoteOp(op) {
     this._restoring = true;
-
-    // Apply grid if changed
-    if (remoteState.grid) {
-      const currentGrid = this.app.wm.grid;
-      if (!currentGrid || currentGrid.rows !== remoteState.grid.rows || currentGrid.cols !== remoteState.grid.cols) {
-        this.app.wm.setGrid(remoteState.grid.rows, remoteState.grid.cols);
-      }
-    }
-
-    // Apply theme if changed
-    if (remoteState.theme && remoteState.theme !== this.app.themeManager?.currentTheme) {
-      this.app.themeManager.apply(remoteState.theme);
-    }
-
-    // Apply sidebar state
-    if (remoteState.sidebarOpen !== undefined && remoteState.sidebarOpen !== this.app.sidebar.isOpen) {
-      this.app.sidebar.toggle(remoteState.sidebarOpen);
-    }
-
-    // Match existing windows to remote state by session ID and update positions
-    for (const remoteWin of remoteState.windows) {
-      if (!remoteWin.gridBounds) continue;
-      let localWin = null;
-
-      // Match by claudeSessionId (most reliable across clients)
-      if (remoteWin.claudeSessionId) {
-        for (const [id, win] of this.app.wm.windows) {
-          const session = this.app.sessions.get(id);
-          if (!session) continue;
-          const allSess = this.app.sidebar?._allSessions || [];
-          const match = allSess.find(s => s.webuiId === session.sessionId);
-          if (match?.sessionId === remoteWin.claudeSessionId) { localWin = win; break; }
+    try {
+      switch (op.op) {
+        case 'window-move': {
+          const win = this._findWindowByKey(op.key, op.keyType);
+          if (win && op.gridBounds) {
+            win.gridBounds = op.gridBounds;
+            this.app.wm._applyGridBounds(win);
+            if (op.isSnapped) { win._isSnapped = true; win._preSnapBounds = op.preSnapBounds; }
+            else { win._isSnapped = false; }
+            if (op.zIndex) { win.element.style.zIndex = op.zIndex; if (op.zIndex >= this.app.wm.zIndex) this.app.wm.zIndex = op.zIndex + 1; }
+            setTimeout(() => { if (win.onResize) win.onResize(); }, 100);
+          }
+          break;
+        }
+        case 'window-minimize': {
+          const win = this._findWindowByKey(op.key, op.keyType);
+          if (win && !win.isMinimized) this.app.wm.minimize(win.id);
+          break;
+        }
+        case 'window-restore': {
+          const win = this._findWindowByKey(op.key, op.keyType);
+          if (win && win.isMinimized) this.app.wm.restore(win.id);
+          break;
+        }
+        case 'grid': {
+          this.app.wm.setGrid(op.rows, op.cols);
+          break;
+        }
+        case 'theme': {
+          this.app.themeManager.apply(op.theme);
+          break;
+        }
+        case 'sidebar': {
+          if (op.open !== this.app.sidebar.isOpen) this.app.sidebar.toggle(op.open);
+          break;
         }
       }
-      // Match by explorerPath for file explorers
-      if (!localWin && remoteWin.explorerPath) {
-        for (const [, win] of this.app.wm.windows) {
-          if (win._explorerPath === remoteWin.explorerPath) { localWin = win; break; }
-        }
+    } catch {}
+    setTimeout(() => { this._restoring = false; }, 2000);
+  }
+
+  // Find a window by claudeSessionId or explorerPath
+  _findWindowByKey(key, keyType) {
+    for (const [id, win] of this.app.wm.windows) {
+      if (keyType === 'session') {
+        const session = this.app.sessions.get(id);
+        if (!session) continue;
+        const allSess = this.app.sidebar?._allSessions || [];
+        const match = allSess.find(s => s.webuiId === session.sessionId);
+        if (match?.sessionId === key) return win;
+      } else if (keyType === 'explorer' && win._explorerPath === key) {
+        return win;
+      } else if (keyType === 'winId' && id === key) {
+        return win;
       }
-
-      if (!localWin) continue;
-
-      // Update gridBounds and reflow
-      localWin.gridBounds = remoteWin.gridBounds;
-      this.app.wm._applyGridBounds(localWin);
-      if (remoteWin.isMinimized && !localWin.isMinimized) this.app.wm.minimize(localWin.id);
-      if (!remoteWin.isMinimized && localWin.isMinimized) this.app.wm.restore(localWin.id);
-      if (remoteWin.isSnapped) { localWin._isSnapped = true; localWin._preSnapBounds = remoteWin.preSnapBounds; }
-      if (remoteWin.zIndex) { localWin.element.style.zIndex = remoteWin.zIndex; if (remoteWin.zIndex >= this.app.wm.zIndex) this.app.wm.zIndex = remoteWin.zIndex + 1; }
-      setTimeout(() => { if (localWin.onResize) localWin.onResize(); }, 100);
     }
+    return null;
+  }
 
-    setTimeout(() => { this._restoring = false; }, 3000);
+  // Broadcast an incremental layout operation to other clients
+  broadcastOp(op) {
+    if (this._restoring) return;
+    this.app.ws.send({ type: 'layout-op', ...op });
+  }
+
+  // Helper: broadcast a window position change
+  broadcastWindowMove(win) {
+    if (this._restoring) return;
+    const session = this.app.sessions.get(win.id);
+    let key, keyType;
+    if (session?.sessionId) {
+      const allSess = this.app.sidebar?._allSessions || [];
+      const match = allSess.find(s => s.webuiId === session.sessionId);
+      key = match?.sessionId; keyType = 'session';
+    }
+    if (!key && win._explorerPath) { key = win._explorerPath; keyType = 'explorer'; }
+    if (!key) { key = win.id; keyType = 'winId'; }
+    this.broadcastOp({
+      op: 'window-move', key, keyType,
+      gridBounds: win.gridBounds,
+      zIndex: parseInt(win.element.style.zIndex) || 0,
+      isSnapped: win._isSnapped || false,
+      preSnapBounds: win._preSnapBounds || null,
+    });
   }
 
   // Capture current workspace state (complete)
