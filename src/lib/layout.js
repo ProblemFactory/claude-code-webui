@@ -29,12 +29,19 @@ class LayoutManager {
       if (state.sidebarOpen !== undefined && state.sidebarOpen !== this.app.sidebar.isOpen) {
         this.app.sidebar.toggle(state.sidebarOpen);
       }
-      // Windows: update positions of existing, ignore unknown
+      // Windows: update existing, create missing, close removed
       if (state.windows) {
+        const remoteIds = new Set();
         for (const rw of state.windows) {
           const winId = rw.winId || rw.id;
+          remoteIds.add(winId);
           const win = this.app.wm.windows.get(winId);
-          if (!win) continue; // window doesn't exist locally — will sync on next full restore
+
+          if (!win) {
+            // Window doesn't exist locally — create it
+            this._createRemoteWindow(rw);
+            continue;
+          }
 
           // Update gridBounds
           if (rw.gridBounds) {
@@ -56,18 +63,54 @@ class LayoutManager {
             win.element.style.zIndex = z;
             if (z >= this.app.wm.zIndex) this.app.wm.zIndex = z + 1;
           }
-          // minimize/restore (compact: rw.min, full: rw.isMinimized)
+          // minimize/restore
           const isMin = rw.min ?? rw.isMinimized ?? false;
           if (isMin && !win.isMinimized) this.app.wm.minimize(win.id);
           if (!isMin && win.isMinimized) this.app.wm.restore(win.id);
-          // snap state (compact: rw.snap/rw.snapBounds, full: rw.isSnapped/rw.preSnapBounds)
+          // snap state
           win._isSnapped = rw.snap ?? rw.isSnapped ?? false;
           const snapB = rw.snapBounds || rw.preSnapBounds;
           if (snapB) win._preSnapBounds = snapB;
         }
+        // Close windows that exist locally but not remotely
+        for (const [id] of this.app.wm.windows) {
+          if (!remoteIds.has(id)) {
+            this.app.wm.closeWindow(id);
+          }
+        }
       }
     } catch {}
     setTimeout(() => { this._restoring = false; }, 1000);
+  }
+
+  // Create a window from remote layout state
+  _createRemoteWindow(rw) {
+    const winId = rw.winId || rw.id;
+    try {
+      let winInfo;
+      if ((rw.type === 'terminal' || rw.type === 'chat') && rw.serverSessionId) {
+        // Session window — attach to existing server session
+        const mode = rw.type === 'chat' ? 'chat' : undefined;
+        winInfo = this.app.attachSession(rw.serverSessionId, rw.title, rw.explorerPath || '', { mode, syncId: winId });
+      } else if (rw.type === 'files' && rw.explorerPath) {
+        winInfo = this.app.openFileExplorer(rw.explorerPath, { syncId: winId });
+      } else if ((rw.type === 'viewer' || rw.type === 'editor') && rw.filePath) {
+        winInfo = this.app.openFile(rw.filePath, rw.fileName, { syncId: winId });
+      }
+      if (winInfo) {
+        // Remap ID and apply position
+        if (winInfo.id !== winId) {
+          const wm = this.app.wm;
+          wm.windows.delete(winInfo.id);
+          const session = this.app.sessions.get(winInfo.id);
+          if (session) { this.app.sessions.delete(winInfo.id); this.app.sessions.set(winId, session); }
+          winInfo.id = winId;
+          wm.windows.set(winId, winInfo);
+        }
+        if (rw.gridBounds) { winInfo.gridBounds = rw.gridBounds; this.app.wm._applyGridBounds(winInfo); }
+        if (rw.isSnapped) { winInfo._isSnapped = true; winInfo._preSnapBounds = rw.preSnapBounds; }
+      }
+    } catch {}
   }
 
   // Capture current workspace state (complete)

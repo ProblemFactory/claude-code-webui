@@ -786,7 +786,7 @@ class App {
     if (window.innerWidth <= 768 && this.sidebar.isOpen) this.sidebar.toggle(false);
   }
 
-  attachSession(serverId, name, cwd, { mode } = {}) {
+  attachSession(serverId, name, cwd, { mode, syncId } = {}) {
     this._closeSidebarOnMobile();
     // If we already have a window for this session, just focus it
     if (this._focusExistingSession(serverId)) return null;
@@ -794,7 +794,7 @@ class App {
     this._hideWelcome();
     const isChat = mode === 'chat';
     const titlePrefix = isChat ? '\uD83D\uDCAC ' : '';
-    const winInfo = this.wm.createWindow({ title: `${titlePrefix}${name} — ${cwd}`, type: isChat ? 'chat' : 'terminal' });
+    const winInfo = this.wm.createWindow({ title: `${titlePrefix}${name} — ${cwd}`, type: isChat ? 'chat' : 'terminal', syncId });
 
     this.ws.send({ type: 'attach', sessionId: serverId });
 
@@ -906,9 +906,9 @@ class App {
     winInfo._notifyChanged = () => this.updateTaskbar();
   }
 
-  openFileExplorer(startPath) {
+  openFileExplorer(startPath, { syncId } = {}) {
     this._hideWelcome();
-    const winInfo = this.wm.createWindow({ title: 'File Explorer', type: 'files' });
+    const winInfo = this.wm.createWindow({ title: 'File Explorer', type: 'files', syncId });
     const explorer = new FileExplorer(winInfo, this, startPath);
     winInfo.onClose = () => this._checkWelcome();
     return winInfo;
