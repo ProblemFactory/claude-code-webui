@@ -79,7 +79,12 @@ class App {
     initStateSync(this.ws);
 
     // Restore layout after WebSocket is connected (needs active sessions)
-    setTimeout(() => this.layoutManager.loadAutoSave(), 1500);
+    this.ready = new Promise(resolve => {
+      setTimeout(async () => {
+        await this.layoutManager.loadAutoSave();
+        resolve();
+      }, 1500);
+    });
 
     // Re-attach all terminal sessions on reconnect (chat sessions handle their own)
     this.ws.onStateChange((connected) => {
