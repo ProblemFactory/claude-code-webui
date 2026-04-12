@@ -88,6 +88,38 @@ class LayoutManager {
             this.app.wm.closeWindow(id);
           }
         }
+
+        // Sync tab chains from remote state
+        const remoteChains = new Map(); // key -> { tabs, active }
+        for (const rw of state.windows) {
+          if (!rw.tabChain || rw.isTabGuest) continue;
+          const key = rw.tabChain.tabs.join(',');
+          remoteChains.set(key, rw.tabChain);
+        }
+        // Break local chains not in remote
+        const localChainKeys = new Set();
+        for (const [, w] of this.app.wm.windows) {
+          if (w._tabChain && w._tabChain.tabs[0] === w.id) {
+            const key = w._tabChain.tabs.join(',');
+            localChainKeys.add(key);
+            if (!remoteChains.has(key)) {
+              // Break this chain
+              while (w._tabChain && w._tabChain.tabs.length > 1) {
+                const lastId = w._tabChain.tabs[w._tabChain.tabs.length - 1];
+                this.app.wm._detachFromChain(w._tabChain, lastId);
+              }
+              if (w._tabChain) this.app.wm._ungroupLast(w._tabChain);
+            }
+          }
+        }
+        // Create remote chains not present locally
+        for (const [key, tc] of remoteChains) {
+          if (localChainKeys.has(key)) continue;
+          const validTabs = tc.tabs.filter(id => this.app.wm.windows.has(id));
+          if (validTabs.length >= 2) {
+            this.app.wm.restoreTabChain(validTabs, tc.active);
+          }
+        }
       }
     } catch {}
     setTimeout(() => { this._restoring = false; }, 1000);
@@ -161,6 +193,11 @@ class LayoutManager {
       // For browser windows, save URL
       if (win.type === 'browser' && win._browserUrl) {
         winState.browserUrl = win._browserUrl;
+      }
+      // Tab chain persistence
+      if (win._tabChain) {
+        winState.tabChain = { tabs: [...win._tabChain.tabs], active: win._tabChain.active };
+        winState.isTabGuest = win._tabChain.tabs[0] !== id;
       }
       windows.push(winState);
     }
@@ -294,6 +331,23 @@ class LayoutManager {
         applyPosition(winInfo, ws);
       }
     }
+
+    // Restore tab chains after all windows are created
+    // Collect unique chains from saved state, deduplicate by tab list
+    const restoredChains = new Set();
+    setTimeout(() => {
+      for (const ws of state.windows) {
+        if (!ws.tabChain || ws.isTabGuest) continue; // only process from host's perspective
+        const key = ws.tabChain.tabs.join(',');
+        if (restoredChains.has(key)) continue;
+        restoredChains.add(key);
+        // Verify all tabs exist
+        const validTabs = ws.tabChain.tabs.filter(id => this.app.wm.windows.has(id));
+        if (validTabs.length >= 2) {
+          this.app.wm.restoreTabChain(validTabs, ws.tabChain.active);
+        }
+      }
+    }, 1000);
   }
 
   // Auto-save (debounced, triggered on every window change)

@@ -7,6 +7,8 @@ import { createPopover, showContextMenu } from './utils.js';
 export function updateTaskbar(app) {
   const container = document.getElementById('taskbar-items'); container.innerHTML = '';
   for (const [id, win] of app.wm.windows) {
+    // Skip grouped guests — only the host appears in taskbar
+    if (win._tabChain && win._tabChain.tabs[0] !== id) continue;
     const item = document.createElement('div'); item.className = 'taskbar-item';
     if (id === app.wm.activeWindowId && !win.isMinimized) item.classList.add('active');
     if (win.isMinimized) item.classList.add('minimized');
@@ -58,6 +60,8 @@ export function showWindowList(app, anchor) {
   const pop = createPopover(anchor, 'overlap-switcher');
 
   for (const [id, win] of app.wm.windows) {
+    // Skip grouped guests — only the host appears in the list
+    if (win._tabChain && win._tabChain.tabs[0] !== id) continue;
     const item = document.createElement('div');
     item.className = 'overlap-switcher-item';
     if (id === app.wm.activeWindowId && !win.isMinimized) item.classList.add('active');
