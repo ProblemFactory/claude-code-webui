@@ -75,6 +75,12 @@ class LayoutManager {
           win._isSnapped = rw.snap ?? rw.isSnapped ?? false;
           const snapB = rw.snapBounds || rw.preSnapBounds;
           if (snapB) win._preSnapBounds = snapB;
+          // file explorer navigation sync
+          if (rw.explorerPath && win._explorerPath !== rw.explorerPath) {
+            // Find the FileExplorer instance and navigate
+            const explorer = win._explorer;
+            if (explorer) explorer.navigate(rw.explorerPath);
+          }
         }
         // Close windows that exist locally but not remotely
         for (const [id] of this.app.wm.windows) {
@@ -91,29 +97,26 @@ class LayoutManager {
   _createRemoteWindow(rw) {
     const winId = rw.winId || rw.id;
     try {
-      let winInfo;
       if ((rw.type === 'terminal' || rw.type === 'chat') && rw.serverSessionId) {
-        // Session window — attach to existing server session
-        const mode = rw.type === 'chat' ? 'chat' : undefined;
-        winInfo = this.app.attachSession(rw.serverSessionId, rw.title, rw.explorerPath || '', { mode, syncId: winId });
+        this.app.attachSession(rw.serverSessionId, rw.title, rw.explorerPath || '', { mode: rw.type === 'chat' ? 'chat' : undefined, syncId: winId });
       } else if (rw.type === 'files' && rw.explorerPath) {
-        winInfo = this.app.openFileExplorer(rw.explorerPath, { syncId: winId });
-      } else if ((rw.type === 'viewer' || rw.type === 'editor') && rw.filePath) {
-        winInfo = this.app.openFile(rw.filePath, rw.fileName, { syncId: winId });
+        this.app.openFileExplorer(rw.explorerPath, { syncId: winId });
+      } else if (rw.type === 'editor' && rw.filePath) {
+        this.app.openEditor(rw.filePath, rw.fileName, { syncId: winId });
+      } else if ((rw.type === 'viewer' || rw.type === 'hex-viewer') && rw.filePath) {
+        this.app.openFile(rw.filePath, rw.fileName, { syncId: winId });
+      } else {
+        return; // unknown type
       }
-      if (winInfo) {
-        // Remap ID and apply position
-        if (winInfo.id !== winId) {
-          const wm = this.app.wm;
-          wm.windows.delete(winInfo.id);
-          const session = this.app.sessions.get(winInfo.id);
-          if (session) { this.app.sessions.delete(winInfo.id); this.app.sessions.set(winId, session); }
-          winInfo.id = winId;
-          wm.windows.set(winId, winInfo);
-        }
+      // Apply position after creation (may be async for file viewer)
+      setTimeout(() => {
+        const winInfo = this.app.wm.windows.get(winId);
+        if (!winInfo) return;
         if (rw.gridBounds) { winInfo.gridBounds = rw.gridBounds; this.app.wm._applyGridBounds(winInfo); }
         if (rw.isSnapped) { winInfo._isSnapped = true; winInfo._preSnapBounds = rw.preSnapBounds; }
-      }
+        if (rw.isMaximized) this.app.wm.toggleMaximize(winInfo.id);
+        if (rw.isMinimized) this.app.wm.minimize(winInfo.id);
+      }, 500);
     } catch {}
   }
 
@@ -123,12 +126,13 @@ class LayoutManager {
     for (const [id, win] of this.app.wm.windows) {
       const el = win.element;
       const termSession = this.app.sessions.get(id);
+      // Ensure gridBounds is up to date
+      if (!win.gridBounds) this.app.wm._captureGridBounds(win);
       const winState = {
-        winId: id, // unique window ID for cross-client sync
+        winId: id,
         title: win.title, type: win.type,
-        left: el.style.left, top: el.style.top, width: el.style.width, height: el.style.height,
         isMinimized: win.isMinimized, isMaximized: win.isMaximized,
-        gridBounds: win.gridBounds || undefined,
+        gridBounds: win.gridBounds,
         zIndex: parseInt(el.style.zIndex) || 0,
       };
       if (win._isSnapped) { winState.isSnapped = true; winState.preSnapBounds = win._preSnapBounds; }

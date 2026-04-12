@@ -910,6 +910,7 @@ class App {
     this._hideWelcome();
     const winInfo = this.wm.createWindow({ title: 'File Explorer', type: 'files', syncId });
     const explorer = new FileExplorer(winInfo, this, startPath);
+    winInfo._explorer = explorer;
     winInfo.onClose = () => this._checkWelcome();
     return winInfo;
   }
@@ -996,7 +997,7 @@ class App {
   openEditor(filePath, fileName, opts = {}) {
     this._hideWelcome();
     const title = opts._tempFile ? `View: ${fileName}` : `Edit: ${fileName}`;
-    const winInfo = this.wm.createWindow({ title, type: 'editor' });
+    const winInfo = this.wm.createWindow({ title, type: 'editor', syncId: opts.syncId });
     winInfo._filePath = filePath; winInfo._fileName = fileName;
     new CodeEditor(winInfo, filePath, fileName, this, opts);
     winInfo.onClose = () => {
