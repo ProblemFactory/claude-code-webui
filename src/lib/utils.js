@@ -77,7 +77,6 @@ class StateSync {
 
   _applyOp(storeName, op) {
     const s = this.stores[storeName];
-    console.log('[StateSync] _applyOp', storeName, op.key, 'store exists:', !!s, 'listeners:', s ? [...s.listeners.keys()] : 'N/A');
     if (!s) return;
     if (op.op === 'set') s.data[op.key] = op.value;
     else if (op.op === 'delete') delete s.data[op.key];
@@ -102,7 +101,6 @@ class StateSync {
   _notify(s, key, value) {
     const specific = s.listeners.get(key);
     const wildcard = s.listeners.get('*');
-    console.log('[StateSync] _notify key:', key, 'specific listeners:', specific?.length || 0, 'wildcard:', wildcard?.length || 0);
     if (specific) for (const h of specific) h(value, key);
     if (wildcard) for (const h of wildcard) h(value, key);
   }
