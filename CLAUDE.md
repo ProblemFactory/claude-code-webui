@@ -66,6 +66,7 @@ src/
     themes.js          — THEMES constant + ThemeManager class
     ws.js              — WsManager (WebSocket with reconnect)
     window.js          — WindowManager (drag/resize/snap/grid)
+    tab-group.js       — Tab grouping mixin (chain model, icon drag, tab bar, drag-out)
     terminal.js        — TerminalSession (xterm.js wrapper, per-terminal settings)
     sidebar.js         — Sidebar shell (filter/sort/render pipeline, ~850 lines)
     session-card.js    — Session card renderer (stateless factory, extracted from sidebar)
@@ -125,12 +126,13 @@ docs/
 | **Session list / sidebar** | `src/lib/sidebar.js` + `src/lib/session-card.js` | Sidebar shell + session card factory |
 | **Session discovery (RUNNING/STOPPED)** | `src/routes/sessions.js` + `src/session-store.js` | Lock-first algorithm, tmux detection, PID verification |
 | **Window tiling / grid / snap** | `src/lib/window.js` | Drag, resize, grid cells, layout presets, freeform, Alt bypass, overlap switcher, pre-snap size memory, move mode |
+| **Tab groups** | `src/lib/tab-group.js` | Drag icon-to-icon to merge windows into tabs, Chrome-style tab bar, drag-out to split |
 | **Custom grid presets** | `src/lib/app.js` → `_addCustomGrid()` + `src/routes/persistence.js` | + button adds, right-click removes, persisted in layouts.json |
 | **Session starring** | `src/lib/sidebar.js` → `toggleStar()`, `isStarred()` | ★/☆ per session, starred first in sidebar + taskbar |
 | **Session rename** | `src/lib/sidebar.js` → `renameSession()` | Double-click name in sidebar, syncs to open windows via `app.syncSessionName()` |
 | **Ctrl+G external editor** | `server.js` → `createEditorHelper()` + `src/lib/external-editor.js` | Fake "code" script + split-pane CodeMirror |
 | **File viewer (open file)** | `src/lib/file-viewer.js` | Dispatch by type, size check, binary detection |
-| **Code editor** | `src/lib/code-editor.js` | CodeMirror 6, language switching via Compartment, markdown preview toggle |
+| **Code editor** | `src/lib/code-editor.js` | CodeMirror 6, language switching, Prettier/server-side format, markdown/HTML preview |
 | **Chat mode** | `src/lib/chat-view.js` (controller) + `src/lib/chat-renderers.js` (rendering) | Virtual scroll, op dispatch, message rendering, tool cards |
 | **Chat input / send** | `src/lib/chat-input.js` | Textarea, attachments, slash commands, draft persistence, TODO display |
 | **Chat status bar** | `src/lib/chat-status-bar.js` | Model, context%, cost, permission mode dropdown, task popup |
@@ -167,6 +169,10 @@ docs/
 - **Atomic openSpec**: `createWindow({ openSpec })` sets the openSpec before `_notify()` fires, ensuring the first layout broadcast includes the window creation recipe. Only `createSession` (resume) sets openSpec async (in WS `created` callback) because serverId is unknown at creation time — it explicitly re-broadcasts via `scheduleAutoSave()`.
 - **ChatView module split**: ChatView is the controller (virtual scroll, op dispatch). Rendering delegated to `ChatRenderers` (returns DOM elements). `renderSystemMsg` returns `{el, sideEffect}` to avoid circular deps — ChatView applies side effects to ChatStatusBar/ChatInput. Search, input, status bar, minimap are standalone classes receiving callbacks for cross-module communication.
 - **Shared utilities**: `createPopover(anchor, className, opts)` handles popover positioning/dedup/close for all 7+ popover types. `showContextMenu(x, y, items)` is data-driven. `fetchJson(url)` wraps fetch+json+catch. `copyText(text)` with execCommand fallback.
+- **Tab groups (chain model)**: Windows can be merged into tab groups by dragging one window's icon onto another. Shared chain object `{ tabs: [hostId, ...guestIds], active: index }` — all grouped windows hold the same reference via `win._tabChain`. `tabs[0]` is the host (owns the physical `.window` element). Guest content divs are reparented into the host element. Tab bar replaces title bar content with Chrome-style rounded tabs. Drag tab downward to pull out (follows cursor with snap). Group resize/snap syncs all tabs' gridBounds via `_syncChainBounds`. Installed as a mixin on WindowManager from `tab-group.js`.
+- **Window type icons**: Each window type has an icon (`TYPE_ICONS` in tab-group.js): terminal ⬛, chat 💬, files 📁, viewer 📄, editor ✏️, hex 🔢, browser 🌐. Shown in title bar, tab bar, taskbar, and overlap switcher. Icon is also the drag handle for tab merge.
+- **Move mode**: Right-click taskbar → Move. Full-screen overlay blocks all UI interaction. Window restores from maximized/snapped to original size. Click to place.
+- **Loading screen**: Inline splash in HTML (no CSS dependency). Fades out after `app.ready` promise resolves (layout restore complete).
 
 ### Server-Side Key Functions
 
@@ -560,8 +566,12 @@ Server → Client: `created`, `output`, `msg` (normalized: op=create/edit/meta),
 - Presets (renamed from Layouts): save/restore full workspace state (windows, positions, z-order, grid, theme, fonts). Sessions matched by claudeSessionId. Non-preset windows minimized not killed.
 - Active window highlight intensity: `window.activeHighlightIntensity` setting (subtle = shadow only, normal = accent border, strong = border + glow)
 - Window close behavior: `window.closeBehavior` setting — terminate (default, kills session) or detach (keeps session alive for re-attach)
-- Taskbar right-click context menu: Move (window attaches to cursor, click to place), Minimize/Restore, Close
-- Taskbar items use flex-shrink + text-overflow for many windows (no overflow wrapping)
+- Tab groups: drag window icon onto another window's icon to merge into Chrome-style tab group. Tab bar with rounded top tabs, active tab connects to content. Drag tab downward to pull out (follows cursor with snap). Close individual tabs. Tab chain data synced across clients via layout-sync.
+- Window type icons: each type has an emoji icon (💬 chat, ⬛ terminal, 📁 files, etc.) shown in title bar, tab bar, taskbar, overlap switcher. Icon is also drag handle for tab merge.
+- Taskbar: two-row layout with large icon (18px) + title/subtitle. Items show window type icon, starred sessions prefixed with ★.
+- Taskbar right-click context menu: Move (full-screen overlay blocks all interaction, restores from maximized/snapped), Minimize/Restore, Close
+- Move mode: window restores to original size, full-screen overlay prevents interaction with other UI elements
+- Loading screen: inline splash with animated progress bar, waits for workspace restore to complete before fading out
 - pointer-events:none on window content during drag (prevents iframe/terminal stealing mouse events)
 
 ### Session Management
@@ -586,16 +596,17 @@ Server → Client: `created`, `output`, `msg` (normalized: op=create/edit/meta),
 - Terminate button: in session card expand panel for all running sessions (live/tmux/external). Live uses WebSocket kill, external/tmux uses `POST /api/kill-pid`
 
 ### File Management
-- File explorer with upload/download/drag-drop, title shows current path (front-truncated)
+- File explorer with upload/download/drag-drop, title shows current path
+- View menu (single dropdown): view mode (list/icon), options (hidden files, mixed sort, bookmarks panel, preview panel), group by (none/type/modified/size), column visibility
+- Resizable columns: drag column header borders, absolute widths (Windows Explorer behavior), persist in localStorage. Right-click header for column visibility + auto-fit.
+- Preview panel: toggle via View menu, auto-detects layout (horizontal when wide, vertical when tall), supports all file types (text, images, PDF, video, audio, HTML as iframe)
 - Path bar: autocomplete (Tab/Enter), submit file path to open it directly in viewer
-- Path autocomplete in address bar (Tab/Enter to select, reuses `/api/dir-complete`)
 - Drag file from explorer to terminal → auto-types shell-escaped absolute path
 - View modes: list (with size/modified columns, sortable) and icon grid
-- Toggle hidden files (dotfiles)
 - Large folder pagination: first 100 items + "Load more" button
-- File viewers: PDF, images (zoom + drag-to-pan), video, audio, CSV, Excel, Word, hex. Markdown files use CodeEditor with preview toggle (no separate MarkdownViewer).
-- HTML viewer: dual mode — Preview (iframe) and Code (CodeEditor) toggle
-- Code editor with syntax highlighting, word wrap toggle, font size, theme (dark/light), markdown preview toggle button. Markdown preview supports `user-select: text` for copy. Temp file editors (Ctrl+G) set CodeMirror readOnly.
+- File viewers: PDF, images (zoom + drag-to-pan), video, audio, CSV, Excel, Word, hex
+- HTML files: open in CodeEditor with Preview toggle (sandboxed iframe), same as markdown
+- Code editor: CodeMirror 6, follows global theme, auto-format via Prettier (Shift+Alt+F) for JS/TS/JSON/HTML/CSS/MD/YAML/GraphQL + server-side ruff/black/shfmt/gofmt/rustfmt for Python/Shell/Go/Rust. Language selector drives Preview button visibility.
 - Large file warnings (>1MB), binary auto-detection
 - CWD autocomplete with `~` support
 - Clipboard image paste (Ctrl+V → upload to server → xclip/osascript sets clipboard → Ctrl+V to PTY)
