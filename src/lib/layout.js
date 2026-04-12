@@ -4,6 +4,16 @@ class LayoutManager {
     this._autoSaveTimer = null;
     this._savedPresets = {};
     this._currentName = null;
+
+    // Listen for layout broadcasts from other clients (debounced)
+    this._remoteLayoutTimer = null;
+    app.ws.onGlobal((msg) => {
+      if (msg.type === 'layout-updated') {
+        if (this._restoring) return;
+        clearTimeout(this._remoteLayoutTimer);
+        this._remoteLayoutTimer = setTimeout(() => this.loadAutoSave(), 1000);
+      }
+    });
   }
 
   // Capture current workspace state (complete)
@@ -189,15 +199,11 @@ class LayoutManager {
   }
 
   async _doAutoSave() {
+    if (this._restoring) return;
     const state = this.captureState();
-    // Tag with device type so mobile and desktop don't overwrite each other
-    state.deviceType = this._isMobile() ? 'mobile' : 'desktop';
-    try {
-      await fetch('/api/layouts-autosave', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(state),
-      });
-    } catch {}
+    // Save via WS so server can broadcast to other clients (excluding sender)
+    const deviceType = this._isMobile() ? 'mobile' : 'desktop';
+    this.app.ws.send({ type: 'layout-save', state, deviceType });
   }
 
   // Load auto-saved state on startup

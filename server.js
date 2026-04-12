@@ -792,10 +792,17 @@ function readLayouts() {
   catch { _layoutsCache = { current: null, autoSave: null, saved: {}, customGrids: [] }; }
   return _layoutsCache;
 }
-function writeLayouts(data) {
+function writeLayouts(data, senderWs) {
   ensureDir(path.join(__dirname, 'data'));
   _layoutsCache = data;
   fs.writeFileSync(LAYOUTS_FILE, JSON.stringify(data, null, 2));
+  // Broadcast to other clients (exclude sender to prevent feedback loop)
+  if (senderWs) {
+    const msg = JSON.stringify({ type: 'layout-updated', autoSave: data.autoSave, customGrids: data.customGrids });
+    wss.clients.forEach(client => {
+      if (client !== senderWs && client.readyState === WS_OPEN) { try { client.send(msg); } catch {} }
+    });
+  }
 }
 
 // Get all layouts
@@ -2129,6 +2136,19 @@ wss.on('connection', (ws) => {
             }
           }
         }
+        break;
+      }
+
+      case 'layout-save': {
+        // Layout autosave via WS (so we can exclude sender from broadcast)
+        const layoutData = readLayouts();
+        const deviceType = data.deviceType || 'desktop';
+        if (deviceType === 'mobile') {
+          layoutData.autoSaveMobile = { ...data.state, updatedAt: Date.now() };
+        } else {
+          layoutData.autoSave = { ...data.state, updatedAt: Date.now() };
+        }
+        writeLayouts(layoutData, ws);
         break;
       }
 
