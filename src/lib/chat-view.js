@@ -1133,19 +1133,23 @@ class ChatView {
     if (msg.toolCallId) el.dataset.toolId = msg.toolCallId;
     let html;
 
-    if (block.type === 'tool_call' && msg.status === 'pending') {
-      // Pending tool call — show input with spinner
+    if (block.type === 'tool_call') {
+      // Tool call — pending (spinner) or interrupted (error, no result ever came)
       const isAgent = block.toolName === 'Agent';
       const icon = isAgent ? '\uD83E\uDD16' : '\uD83D\uDD27';
       const fp = block.input?.file_path || '';
       const isFileOp = ['Edit', 'Write', 'Read'].includes(block.toolName);
-      if (isFileOp) {
+      const isPending = msg.status === 'pending';
+      if (isPending && isFileOp) {
         const label = `\u23F3 ${escHtml(block.toolName)} ${this._clickablePath(fp)}`;
         html = `<div class="chat-tool-pending"><span class="chat-tool-label">${label}</span><span class="chat-spinner"></span></div>`;
       } else {
         const desc = isAgent && block.input?.description ? `${icon} Agent: ${escHtml(block.input.description)}` : `${icon} ${escHtml(block.toolName)}`;
         const inputStr = stripAnsi(typeof block.input === 'string' ? block.input : JSON.stringify(block.input, null, 2));
-        html = `<div class="chat-tool-use"><span class="chat-tool-label">${desc}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this._linkifyText(inputStr)}</pre></details><div class="chat-tool-output-pending"><span class="chat-spinner"></span> running...</div></div>`;
+        const statusHtml = isPending
+          ? `<div class="chat-tool-output-pending"><span class="chat-spinner"></span> running...</div>`
+          : `<details class="chat-diff" open><summary class="chat-diff-summary chat-tool-error-label">\u2717 Interrupted</summary></details>`;
+        html = `<div class="chat-tool-use"><span class="chat-tool-label">${desc}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this._linkifyText(inputStr)}</pre></details>${statusHtml}</div>`;
       }
     } else if (block.type === 'tool_result') {
       // Completed tool call — show full result
