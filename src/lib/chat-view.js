@@ -1,8 +1,8 @@
-import { marked } from 'marked';
-import { escHtml, copyText, saveDraft, loadDraft, clearDraft, getStateSync } from './utils.js';
-import { detectHljsLang, getHljsLanguages, renderCodeBlock, rehighlightCodeBlock, stripAnsi } from './highlight.js';
+import { escHtml, saveDraft, loadDraft, clearDraft, getStateSync } from './utils.js';
+import { stripAnsi } from './highlight.js';
 import { ChatMinimap } from './chat-minimap.js';
 import { ChatSearch } from './chat-search.js';
+import { ChatRenderers } from './chat-renderers.js';
 
 /**
  * ChatView — renders a chat interface for stream-json mode sessions.
@@ -34,6 +34,7 @@ class ChatView {
     app.settings?.on('chat.compactMode', (v) => {
       this._compact = v;
       container.classList.toggle('chat-compact', v);
+      if (this._renderers) this._renderers._compact = v;
     });
 
     // Apply font size from global settings (scale message list relative to base 14px)
@@ -64,6 +65,16 @@ class ChatView {
     // Message list
     this._messageList = document.createElement('div');
     this._messageList.className = 'chat-message-list';
+
+    // Renderers (extracted rendering methods)
+    this._renderers = new ChatRenderers({
+      ws: wsManager,
+      sessionId,
+      app,
+      compact: this._compact,
+      messageList: this._messageList,
+      onPermissionResolve: () => this._hideTyping(),
+    });
 
     // Position indicator (shows when not at bottom, e.g. "120-170 / 3000")
     this._posIndicator = document.createElement('div');
@@ -159,7 +170,6 @@ class ChatView {
       container.tabIndex = -1;
       winInfo.content.appendChild(container);
 
-      this._setupLinkHandler();
       this._messageList.addEventListener('click', (e) => {
         if (e.target.tagName === 'IMG' && e.target.classList.contains('chat-img')) {
           const overlay = document.createElement('div');
@@ -406,7 +416,7 @@ class ChatView {
               const output = task.resultText || block?.output || '';
               let text = `[${toolName}] ${task.description}\n\n--- Command ---\n${command}\n`;
               if (output) text += `\n--- Output ---\n${output}\n`;
-              this._openInTempEditor(text);
+              this._renderers.openInTempEditor(text);
             }
           };
           dropdown.appendChild(item);
@@ -457,8 +467,7 @@ class ChatView {
     // Clear waiting blink on focus/click
     winInfo.element.addEventListener('mousedown', () => this._clearWaiting());
 
-    // Set up click handler for links/paths + image zoom
-    this._setupLinkHandler();
+    // Image zoom + Agent View Log click handler
     this._messageList.addEventListener('click', (e) => {
       if (e.target.tagName === 'IMG' && e.target.classList.contains('chat-img')) {
         const overlay = document.createElement('div');
@@ -481,7 +490,7 @@ class ChatView {
       } else if (msg.type === 'subagent-message' && msg.sessionId === sessionId) {
         this._onSubagentMessage(msg.parentToolUseId, msg.message);
       } else if (msg.type === 'exited' && msg.sessionId === sessionId) {
-        this._appendSystem('Session ended.');
+        this._renderers.appendSystem('Session ended.');
         this._hideTyping();
         this._setReadOnly();
       }
@@ -497,9 +506,9 @@ class ChatView {
       this._textarea.disabled = !connected;
       if (!connected) {
         this._hideTyping();
-        this._appendSystem('Disconnected from server');
+        this._renderers.appendSystem('Disconnected from server');
       } else if (this._hasConnected) {
-        this._appendSystem('Reconnected');
+        this._renderers.appendSystem('Reconnected');
         this._reattach();
       }
       this._hasConnected = true;
@@ -820,10 +829,21 @@ class ChatView {
 
     let el;
     switch (msg.role) {
-      case 'user': el = this._renderUserMsg(msg); break;
-      case 'assistant': el = this._renderAssistantMsg(msg); break;
-      case 'tool': el = this._renderToolMsg(msg); break;
-      case 'system': el = this._renderSystemMsg(msg); break;
+      case 'user': el = this._renderers.renderUserMsg(msg); break;
+      case 'assistant': el = this._renderers.renderAssistantMsg(msg); break;
+      case 'tool': el = this._renderers.renderToolMsg(msg); break;
+      case 'system': {
+        const result = this._renderers.renderSystemMsg(msg);
+        if (result?.sideEffect) {
+          const se = result.sideEffect;
+          if (se.model) this._statusModel = se.model;
+          if (se.permMode) this._statusPermMode = se.permMode;
+          if (se.slashCommands) this._slashCommands = se.slashCommands;
+          this._updateStatusBar();
+        }
+        el = result?.el || null;
+        break;
+      }
       default: return;
     }
 
@@ -831,8 +851,8 @@ class ChatView {
     el.dataset.msgId = msg.id;
     this._elements.set(msg.id, el);
     this._messageList.appendChild(el);
-    this._addWrapToggles(el);
-    this._addOpenInEditorBtn(el);
+    this._renderers.addWrapToggles(el);
+    this._renderers.addOpenInEditorBtn(el);
     // Update window bounds for live messages (not history batch)
     if (!this._loadingHistory) {
       this._total++;
@@ -856,16 +876,20 @@ class ChatView {
       if (oldEl) {
         let newEl;
         switch (msg.role) {
-          case 'tool': newEl = this._renderToolMsg(msg); break;
-          case 'assistant': newEl = this._renderAssistantMsg(msg); break;
-          default: newEl = this._renderSystemMsg(msg); break;
+          case 'tool': newEl = this._renderers.renderToolMsg(msg); break;
+          case 'assistant': newEl = this._renderers.renderAssistantMsg(msg); break;
+          default: {
+            const result = this._renderers.renderSystemMsg(msg);
+            newEl = result?.el || null;
+            break;
+          }
         }
         if (newEl) {
           newEl.dataset.msgId = id;
           oldEl.replaceWith(newEl);
           this._elements.set(id, newEl);
-          this._addWrapToggles(newEl);
-          this._addOpenInEditorBtn(newEl);
+          this._renderers.addWrapToggles(newEl);
+          this._renderers.addOpenInEditorBtn(newEl);
         }
       }
       // Hide streaming indicator if this is the last message
@@ -878,7 +902,7 @@ class ChatView {
       if (oldEl) {
         const textDiv = oldEl.querySelector('.chat-text');
         if (textDiv && msg.content[0]?.type === 'text') {
-          textDiv.innerHTML = this._renderMarkdown(stripAnsi(msg.content[0].text));
+          textDiv.innerHTML = this._renderers.renderMarkdown(stripAnsi(msg.content[0].text));
         }
       }
     }
@@ -888,7 +912,7 @@ class ChatView {
     // Permission update
     if (fields.permission) {
       const el = this._elements.get(id);
-      if (el) this._renderPermissionOverlay(el, msg);
+      if (el) this._renderers.renderPermissionOverlay(el, msg);
     }
 
     // Task info update — enrich with tool context from the normalized message
@@ -934,529 +958,6 @@ class ChatView {
         if (this.winInfo._notifyChanged) this.winInfo._notifyChanged();
       }
     }
-  }
-
-  // ── Normalized message renderers ──
-  // These produce DOM elements from normalized messages (role-based dispatch)
-
-  // Shared compact/bubble wrapper for user, assistant, and tool messages.
-  // role: 'user' | 'assistant' | 'tool'. Tool messages have no bubble in non-compact mode.
-  _wrapMsg(el, role, label, html) {
-    if (this._compact) {
-      el.innerHTML = `<div class="chat-compact-msg"><span class="chat-role chat-role-${role}">${label}</span><div class="chat-compact-content">${html}</div></div>`;
-    } else if (role === 'tool') {
-      el.innerHTML = html;
-    } else {
-      el.innerHTML = `<div class="chat-bubble chat-bubble-${role}">${html}</div>`;
-    }
-  }
-
-  _renderUserMsg(msg) {
-    const content = msg.content;
-    if (!content?.length) return null;
-    const el = document.createElement('div');
-    el.className = 'chat-msg chat-msg-user';
-    el._rawMsg = msg;
-    const parts = content.map(b => {
-      if (b.type === 'text') return `<div class="chat-text">${this._renderMarkdown(b.text)}</div>`;
-      if (b.type === 'image') return `<img class="chat-img" src="data:${b.mediaType || 'image/png'};base64,${b.data}" alt="image">`;
-      return '';
-    }).join('');
-
-    const rawText = content.map(b => b.text || '').join('');
-    const textHtml = rawText.length > 500
-      ? `<details class="chat-long-msg"><summary><span>${escHtml(rawText.substring(0, 120))}... (${rawText.length} chars)</span></summary>${parts}</details>`
-      : parts;
-
-    this._wrapMsg(el, 'user', 'You', textHtml);
-    return el;
-  }
-
-  _renderAssistantMsg(msg) {
-    const block = msg.content?.[0];
-    if (!block) return null;
-    const el = document.createElement('div');
-    el.className = 'chat-msg chat-msg-assistant';
-    el._rawMsg = msg;
-    let html;
-    if (block.type === 'thinking') {
-      html = `<details class="chat-thinking"><summary>Thinking...</summary><pre>${escHtml(stripAnsi(block.text || ''))}</pre></details>`;
-    } else if (block.type === 'text') {
-      html = `<div class="chat-text">${this._renderMarkdown(stripAnsi(block.text || ''))}</div>`;
-    } else {
-      return null;
-    }
-    this._wrapMsg(el, 'assistant', 'Claude', html);
-    return el;
-  }
-
-  _renderToolMsg(msg) {
-    const block = msg.content?.[0];
-    if (!block) return null;
-    const el = document.createElement('div');
-    el.className = 'chat-msg chat-msg-assistant chat-msg-tool-result';
-    el._rawMsg = msg;
-    if (msg.toolCallId) el.dataset.toolId = msg.toolCallId;
-    let html;
-
-    if (block.type === 'tool_call') {
-      // Tool call — pending (spinner) or interrupted (error, no result ever came)
-      const isAgent = block.toolName === 'Agent';
-      const icon = isAgent ? '\uD83E\uDD16' : '\uD83D\uDD27';
-      const fp = block.input?.file_path || '';
-      const isFileOp = ['Edit', 'Write', 'Read'].includes(block.toolName);
-      const isPending = msg.status === 'pending';
-      if (isPending && isFileOp) {
-        const label = `\u23F3 ${escHtml(block.toolName)} ${this._clickablePath(fp)}`;
-        html = `<div class="chat-tool-pending"><span class="chat-tool-label">${label}</span><span class="chat-spinner"></span></div>`;
-      } else {
-        const desc = isAgent && block.input?.description ? `${icon} Agent: ${escHtml(block.input.description)}` : `${icon} ${escHtml(block.toolName)}`;
-        const inputStr = stripAnsi(typeof block.input === 'string' ? block.input : JSON.stringify(block.input, null, 2));
-        const statusHtml = isPending
-          ? `<div class="chat-tool-output-pending"><span class="chat-spinner"></span> running...</div>`
-          : `<details class="chat-diff" open><summary class="chat-diff-summary chat-tool-error-label">\u2717 Interrupted</summary></details>`;
-        html = `<div class="chat-tool-use"><span class="chat-tool-label">${desc}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this._linkifyText(inputStr)}</pre></details>${statusHtml}</div>`;
-      }
-    } else if (block.type === 'tool_result') {
-      // Completed tool call — show full result
-      html = this._renderToolResult(block, msg);
-    } else {
-      html = `<pre>${escHtml(JSON.stringify(block, null, 2))}</pre>`;
-    }
-
-    const toolLabel = msg.toolStatus === 'error' ? '\u2717' : msg.status === 'pending' ? '\u23F3' : '\u2713';
-    this._wrapMsg(el, 'tool', toolLabel, html);
-
-    // Permission overlay
-    if (msg.permission) this._renderPermissionOverlay(el, msg);
-
-    return el;
-  }
-
-  // Render a completed tool result (Edit diff, Write/Read code block, Agent, generic)
-  _renderToolResult(block, msg) {
-    const fp = block.input?.file_path || '';
-    const resultText = stripAnsi(block.output || '');
-    const inputStr = stripAnsi(typeof block.input === 'string' ? block.input : JSON.stringify(block.input, null, 2));
-
-    if (block.status === 'error') {
-      return `<div class="chat-tool-use"><span class="chat-tool-label">\uD83D\uDD27 ${escHtml(block.toolName)} ${this._clickablePath(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this._linkifyText(inputStr)}</pre></details><details class="chat-diff" open><summary class="chat-diff-summary chat-tool-error-label">\u2717 Error</summary><pre class="chat-tool-error-text">${this._linkifyText(resultText)}</pre></details></div>`;
-    }
-    if (block.toolName === 'Edit' && block.input?.old_string != null) {
-      return this._renderEditDiff({ input: block.input });
-    }
-    if (block.toolName === 'Write') {
-      const content = block.input?.content || '';
-      const lineCount = content.split('\n').length;
-      const byteCount = new Blob([content]).size;
-      const sizeStr = byteCount > 1024 ? (byteCount / 1024).toFixed(1) + ' KB' : byteCount + ' B';
-      const codeBlock = this._renderCodeBlock(content, fp);
-      return `<div class="chat-tool-use"><span class="chat-tool-label">\u{1F4DD} Write ${this._clickablePath(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${lineCount} lines, ${sizeStr}</summary>${codeBlock}</details></div>`;
-    }
-    if (block.toolName === 'Read') {
-      const lineCount = resultText.split('\n').length;
-      const codeBlock = this._renderCodeBlock(resultText, fp);
-      return `<div class="chat-tool-use"><span class="chat-tool-label">\u{1F4D6} Read ${this._clickablePath(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${lineCount} lines</summary>${codeBlock}</details></div>`;
-    }
-    if (block.toolName === 'Agent') {
-      const desc = block.input?.description || '';
-      const firstLine = resultText.split('\n')[0].substring(0, 120) || '(empty)';
-      // View Log button: use agentId from taskInfo or parse from result text
-      const agentId = msg?.taskInfo?.id || (resultText.match(/agentId:\s*([a-z0-9]+)/)?.[1]) || '';
-      const viewBtn = agentId
-        ? ` <button class="chat-agent-view-btn" data-agent-id="${escHtml(agentId)}" data-desc="${escHtml(desc)}">View Log</button>`
-        : (block.toolCallId ? ` <button class="chat-agent-view-btn" data-parent-tool-id="${escHtml(block.toolCallId)}" data-desc="${escHtml(desc)}">View Log</button>` : '');
-      return `<div class="chat-tool-use"><span class="chat-tool-label">\uD83E\uDD16 Agent: ${escHtml(desc)}${viewBtn}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this._linkifyText(inputStr)}</pre></details><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${escHtml(firstLine)}</summary><pre>${this._linkifyText(resultText)}</pre></details></div>`;
-    }
-    // Generic tool
-    const firstLine = resultText.split('\n')[0].substring(0, 120) || '(empty)';
-    return `<div class="chat-tool-use"><span class="chat-tool-label">\uD83D\uDD27 ${escHtml(block.toolName)}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this._linkifyText(inputStr)}</pre></details><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${escHtml(firstLine)}</summary><pre>${this._linkifyText(resultText)}</pre></details></div>`;
-  }
-
-  _renderSystemMsg(msg) {
-    const text = msg.content?.[0]?.text || '';
-    // system.init — extract metadata, don't render
-    if (msg.content?.[0]?.initData) {
-      const d = msg.content[0].initData;
-      if (d.model) this._statusModel = d.model.replace(/\[.*$/, '');
-      if (d.permissionMode) this._statusPermMode = d.permissionMode;
-      if (d.slashCommands) this._slashCommands = d.slashCommands.map(c => c.startsWith('/') ? c : '/' + c);
-      this._updateStatusBar();
-      return null;
-    }
-    // Error / interrupted
-    if (msg.status === 'error' || msg.status === 'interrupted') {
-      return this._appendSystem(text);
-    }
-    return null;
-  }
-
-  _renderPermissionOverlay(el, msg) {
-    if (!msg.permission) return;
-    // Remove existing permission overlay
-    const existing = el.querySelector('.chat-permission-inline');
-    if (existing) existing.remove();
-
-    const section = document.createElement('div');
-    section.className = 'chat-permission-inline';
-    section.dataset.requestId = msg.permission.requestId;
-
-    if (msg.permission.resolved) {
-      const icon = msg.permission.resolved === 'denied' ? '\u2717' : '\u2713';
-      const label = msg.permission.resolved === 'denied' ? 'Denied' : 'Allowed';
-      const cls = msg.permission.resolved === 'denied' ? 'chat-permission-denied' : 'chat-permission-allowed';
-      section.innerHTML = `<details class="chat-diff"><summary class="chat-diff-summary"><span class="chat-permission-resolved ${cls}">${icon} ${label}</span></summary></details>`;
-    } else {
-      section.innerHTML = `<div class="chat-permission-prompt"><span class="chat-permission-label">\uD83D\uDD12 Permission: ${escHtml(msg.permission.toolName)}</span><div class="chat-permission-actions"><button class="chat-perm-btn chat-perm-allow">Allow</button>${msg.permission.suggestions?.length ? '<button class="chat-perm-btn chat-perm-always">Always Allow</button>' : ''}<button class="chat-perm-btn chat-perm-deny">Deny</button></div></div>`;
-      section.querySelector('.chat-perm-allow')?.addEventListener('click', () => {
-        this.ws.send({ type: 'permission-response', sessionId: this.sessionId, requestId: msg.permission.requestId, approved: true, toolInput: msg.permission.input });
-        msg.permission.resolved = 'allowed';
-        this._renderPermissionOverlay(el, msg);
-        this._hideTyping();
-      });
-      section.querySelector('.chat-perm-always')?.addEventListener('click', () => {
-        this.ws.send({ type: 'permission-response', sessionId: this.sessionId, requestId: msg.permission.requestId, approved: true, toolInput: msg.permission.input, permissionUpdates: msg.permission.suggestions });
-        msg.permission.resolved = 'allowed';
-        this._renderPermissionOverlay(el, msg);
-        this._hideTyping();
-      });
-      section.querySelector('.chat-perm-deny')?.addEventListener('click', () => {
-        this.ws.send({ type: 'permission-response', sessionId: this.sessionId, requestId: msg.permission.requestId, approved: false });
-        msg.permission.resolved = 'denied';
-        this._renderPermissionOverlay(el, msg);
-      });
-    }
-
-    const toolUse = el.querySelector('.chat-tool-use') || el.querySelector('.chat-tool-pending');
-    if (toolUse) {
-      const outputPending = toolUse.querySelector('.chat-tool-output-pending');
-      if (outputPending) outputPending.before(section);
-      else toolUse.appendChild(section);
-    }
-  }
-
-
-
-
-  _appendSystem(text) {
-    const el = document.createElement('div');
-    el.className = 'chat-msg chat-msg-system';
-    el.innerHTML = `<div class="chat-system">${escHtml(text)}</div>`;
-    this._messageList.appendChild(el); this._addWrapToggles(el); this._addOpenInEditorBtn(el);
-  }
-
-  // Add wrap toggle button to all <pre> blocks inside an element
-
-  _openInTempEditor(text) {
-    const tmpName = `chat-block-${Date.now()}.txt`;
-    const tmpPath = `/tmp/claude-webui/${tmpName}`;
-    fetch('/api/mkdir', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: '/tmp/claude-webui' }) }).catch(() => {});
-    fetch('/api/file/write', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: tmpPath, content: text }) })
-      .then(r => { if (!r.ok) throw new Error(); return r.json(); })
-      .then(() => {
-        this.app.openEditor(tmpPath, tmpName, {
-          _tempFile: true,
-          _onCloseDelete: () => fetch(`/api/file?path=${encodeURIComponent(tmpPath)}`, { method: 'DELETE' }).catch(() => {}),
-        });
-      })
-      .catch(() => {});
-  }
-
-  _addOpenInEditorBtn(el) {
-    if (!el._rawMsg) return;
-    const msg = el._rawMsg;
-    // Skip tool messages (they have their own open-in-editor buttons)
-    if (msg.role === 'tool') return;
-    // Skip assistant messages with no text content
-    if (msg.role === 'assistant' && !msg.content?.some(b => b.type === 'text' && b.text?.trim())) return;
-    const btn = document.createElement('button');
-    btn.className = 'chat-open-editor-btn';
-    btn.textContent = '\uD83D\uDCCB';
-    btn.title = 'Open in editor';
-    btn.onclick = (e) => {
-      e.stopPropagation();
-      const text = this._extractMsgText(msg);
-      if (!text.trim()) return;
-      this._openInTempEditor(text);
-    };
-    el.style.position = 'relative';
-    el.appendChild(btn);
-  }
-
-  _extractMsgText(msg) {
-    const c = msg.content;
-    if (!Array.isArray(c)) return JSON.stringify(msg, null, 2);
-    return c.map(b => {
-      if (b.type === 'text' || b.type === 'thinking' || b.type === 'system_info') return b.text || '';
-      if (b.type === 'tool_call') return `[Tool: ${b.toolName}]\n${JSON.stringify(b.input, null, 2)}`;
-      if (b.type === 'tool_result') return `[${b.toolName}] ${b.status}\n${b.output || ''}`;
-      return '';
-    }).filter(Boolean).join('\n\n');
-  }
-
-  _addWrapToggles(el) {
-    const LANGS = ['plain', 'bash', 'c', 'cpp', 'csharp', 'css', 'diff', 'dockerfile',
-      'go', 'graphql', 'ini', 'java', 'javascript', 'json', 'kotlin', 'lua', 'markdown',
-      'nginx', 'perl', 'php', 'protobuf', 'python', 'r', 'ruby', 'rust', 'scala', 'scss',
-      'sql', 'swift', 'typescript', 'xml', 'yaml'];
-
-    for (const block of el.querySelectorAll('pre, .chat-diff-body, .chat-code-block')) {
-      if (block.parentNode?.classList?.contains('chat-pre-wrap')) continue;
-      const wrapper = document.createElement('div');
-      wrapper.className = 'chat-pre-wrap';
-      block.parentNode.insertBefore(wrapper, block);
-      wrapper.appendChild(block);
-
-      const toolbar = document.createElement('div');
-      toolbar.className = 'chat-code-toolbar';
-
-      // Deferred highlight: large code blocks skip hljs on render, highlight on first expand
-      if (block.classList.contains('chat-code-block') && block.dataset.highlightDeferred) {
-        const details = block.closest('details');
-        if (details) {
-          const highlightOnce = () => {
-            if (!block.dataset.highlightDeferred) return;
-            delete block.dataset.highlightDeferred;
-            this._rehighlightCodeBlock(block, block.dataset.lang);
-            details.removeEventListener('toggle', highlightOnce);
-          };
-          details.addEventListener('toggle', highlightOnce);
-        }
-      }
-
-      // Language picker for code blocks — searchable dropdown
-      if (block.classList.contains('chat-code-block')) {
-        const langPicker = document.createElement('div');
-        langPicker.className = 'chat-lang-picker';
-        const langBtn = document.createElement('button');
-        langBtn.className = 'chat-lang-btn';
-        langBtn.textContent = block.dataset.lang || 'plain';
-        langBtn.title = 'Change syntax highlighting';
-        langBtn.onclick = (e) => {
-          e.stopPropagation();
-          if (langPicker.querySelector('.chat-lang-dropdown')) { langPicker.querySelector('.chat-lang-dropdown').remove(); return; }
-          const dd = document.createElement('div');
-          dd.className = 'chat-lang-dropdown';
-          const input = document.createElement('input');
-          input.className = 'chat-lang-search';
-          input.placeholder = 'Filter...';
-          dd.appendChild(input);
-          const list = document.createElement('div');
-          list.className = 'chat-lang-list';
-          dd.appendChild(list);
-          const render = (filter) => {
-            list.innerHTML = '';
-            const f = (filter || '').toLowerCase();
-            for (const l of LANGS) {
-              if (f && !l.includes(f)) continue;
-              const item = document.createElement('div');
-              item.className = 'chat-lang-item' + (l === (block.dataset.lang || 'plain') ? ' active' : '');
-              item.textContent = l;
-              item.onclick = (ev) => {
-                ev.stopPropagation();
-                this._rehighlightCodeBlock(block, l);
-                langBtn.textContent = l;
-                dd.remove();
-                closeFn();
-              };
-              list.appendChild(item);
-            }
-          };
-          render('');
-          input.oninput = () => render(input.value);
-          input.onkeydown = (ev) => { if (ev.key === 'Escape') { dd.remove(); closeFn(); } };
-          langPicker.appendChild(dd);
-          setTimeout(() => input.focus(), 0);
-          const closeFn = () => document.removeEventListener('mousedown', closeHandler);
-          const closeHandler = (ev) => { if (!dd.contains(ev.target) && ev.target !== langBtn) { dd.remove(); closeFn(); } };
-          setTimeout(() => document.addEventListener('mousedown', closeHandler), 0);
-        };
-        langPicker.appendChild(langBtn);
-        toolbar.appendChild(langPicker);
-      }
-
-      const btn = document.createElement('button');
-      btn.className = 'chat-wrap-toggle';
-      btn.textContent = 'Wrap';
-      btn.title = 'Toggle word wrap';
-      btn.onclick = (e) => {
-        e.stopPropagation();
-        const on = block.classList.toggle('chat-pre-wrapped');
-        btn.textContent = on ? 'No Wrap' : 'Wrap';
-      };
-      toolbar.appendChild(btn);
-      wrapper.appendChild(toolbar);
-    }
-  }
-
-  _renderMarkdown(text) {
-    try {
-      let html = marked.parse(text || '');
-      return this._linkify(html);
-    } catch {
-      return escHtml(text || '');
-    }
-  }
-
-  _renderEditDiff(block) {
-    const filePath = block.input.file_path || '';
-    const oldStr = block.input.old_string || '';
-    const newStr = block.input.new_string || '';
-    const oldLines = oldStr.split('\n');
-    const newLines = newStr.split('\n');
-
-    // Simple line-by-line diff with prefix and suffix context matching
-    const diffLines = [];
-    let oi = 0, ni = 0;
-    // Match prefix context
-    while (oi < oldLines.length && ni < newLines.length && oldLines[oi] === newLines[ni]) {
-      diffLines.push({ type: 'ctx', text: oldLines[oi], ol: oi + 1, nl: ni + 1 }); oi++; ni++;
-    }
-    // Match suffix context from the end
-    let suffixCtx = [];
-    let oe = oldLines.length - 1, ne = newLines.length - 1;
-    while (oe >= oi && ne >= ni && oldLines[oe] === newLines[ne]) {
-      suffixCtx.unshift({ type: 'ctx', text: oldLines[oe] }); oe--; ne--;
-    }
-    // Remaining old = del, remaining new = add
-    while (oi <= oe) { diffLines.push({ type: 'del', text: oldLines[oi], ol: oi + 1 }); oi++; }
-    while (ni <= ne) { diffLines.push({ type: 'add', text: newLines[ni], nl: ni + 1 }); ni++; }
-    // Append suffix context with correct line numbers
-    for (const s of suffixCtx) { s.ol = oi + 1; s.nl = ni + 1; diffLines.push(s); oi++; ni++; }
-
-    const addCount = diffLines.filter(l => l.type === 'add').length;
-    const delCount = diffLines.filter(l => l.type === 'del').length;
-    const summary = `\u2713 Added ${addCount} lines, removed ${delCount} lines`;
-
-    let body = '';
-    for (const line of diffLines) {
-      const cls = line.type === 'add' ? 'chat-diff-add' : line.type === 'del' ? 'chat-diff-del' : 'chat-diff-ctx';
-      const prefix = line.type === 'add' ? '+' : line.type === 'del' ? '-' : ' ';
-      body += `<div class="${cls}"><span class="chat-diff-prefix">${prefix}</span><span class="chat-diff-text">${escHtml(line.text)}</span></div>`;
-    }
-
-    return `<div class="chat-tool-use"><span class="chat-tool-label">\u{1F4DD} Update ${this._clickablePath(filePath)}</span><details class="chat-diff"><summary class="chat-diff-summary">${summary}</summary><div class="chat-diff-body">${body}</div></details></div>`;
-  }
-
-  // Delegate to imported highlight.js module
-  _renderCodeBlock(code, filePath) { return renderCodeBlock(code, filePath); }
-  _rehighlightCodeBlock(blockEl, langId) { rehighlightCodeBlock(blockEl, langId); }
-
-  // Make a file path clickable (click=copy, ctrl+click=open)
-  _clickablePath(fp) {
-    return `<span class="chat-link chat-link-path" data-path="${escHtml(fp)}" title="Click to copy, Ctrl+Click to open">${escHtml(fp)}</span>`;
-  }
-
-  // Strip trailing punctuation from matched paths/URLs
-  _cleanPath(p) { return p.replace(/[`'".,;:!?)}\]]+$/, ''); }
-
-  // ── Linkification helpers (shared core) ──
-
-  // Linkify URLs in a text segment. esc=true wraps output in escHtml (for markdown HTML text nodes).
-  // esc=false assumes input is already HTML-escaped (from escHtml on plain text).
-  _linkifyUrls(text, esc) {
-    // Markdown HTML text nodes may contain unescaped chars like "')]; pre-escaped text stops at &amp;
-    const re = esc ? /(https?:\/\/[^\s<>"')\]]+)/g : /(https?:\/\/[^\s<>&]+)/g;
-    const e = esc ? escHtml : s => s;
-    return text.replace(re, (raw) => {
-      const url = this._cleanPath(raw);
-      const after = raw.slice(url.length);
-      return `<span class="chat-link" data-href="${e(url)}" title="Click to copy, Ctrl+Click to open">${e(url)}</span>${e(after)}`;
-    });
-  }
-
-  // Linkify file paths in HTML that may contain tags (from prior URL linkification).
-  // Splits by tags to avoid matching inside <span> attributes. esc controls escHtml on output.
-  _linkifyPathsTagSafe(html, esc) {
-    const e = esc ? escHtml : s => s;
-    const pathRe = /(?<![="'\w/])((?:~|\.\.?)?\/[^\0<>?\s!`&*()'":;\\][^\0<>?\s!`&*()'"\\:;]*(?:\/[^\0<>?\s!`&*()'"\\:;]+)+(?::\d+(?::\d+)?)?)/g;
-    return html.replace(/(<[^>]*>)|([^<]+)/g, (m, tag, txt) => {
-      if (tag || !txt) return m;
-      return txt.replace(pathRe, (raw) => {
-        const fp = this._cleanPath(raw);
-        const after = raw.slice(fp.length);
-        if (fp.length < 4) return raw;
-        return `<span class="chat-link chat-link-path" data-path="${e(fp)}" title="Click to copy, Ctrl+Click to open">${e(fp)}</span>${e(after)}`;
-      });
-    });
-  }
-
-  // Combined URL + path linkification on a text segment.
-  _linkifySegment(text, esc) {
-    return this._linkifyPathsTagSafe(this._linkifyUrls(text, esc), esc);
-  }
-
-  // Auto-detect URLs and file paths in rendered HTML, make them interactive
-  // Click = copy, Ctrl+Click = open
-  _linkify(html) {
-    // Split HTML into tags and text segments, only linkify text outside <a> tags
-    return html.replace(/(<a[\s>][\s\S]*?<\/a>)|(<code[\s>][\s\S]*?<\/code>)|(<[^>]*>)|([^<]+)/gi, (match, anchor, code, tag, text) => {
-      if (anchor) return match; // preserve <a>...</a> untouched
-      if (code) {
-        // Linkify paths/URLs inside <code> blocks while preserving the <code> wrapper
-        return code.replace(/^(<code[^>]*>)([\s\S]*?)(<\/code>)$/i, (_, open, inner, close) => {
-          return open + this._linkifySegment(inner, true) + close;
-        });
-      }
-      if (tag) return tag;
-      if (!text) return match;
-      return this._linkifySegment(text, true);
-    });
-  }
-
-  // Linkify plain text (for tool output, user messages that don't go through markdown)
-  _linkifyText(text) {
-    return this._linkifySegment(escHtml(text), false);
-  }
-
-  _setupLinkHandler() {
-    this._messageList.addEventListener('click', (e) => {
-      // Handle both our .chat-link spans and markdown-generated <a> tags
-      const link = e.target.closest('.chat-link') || e.target.closest('a[href]');
-      if (!link) return;
-      e.preventDefault();
-      e.stopPropagation();
-      const url = link.dataset.href || link.getAttribute('href');
-      const fp = link.dataset.path;
-      if (e.ctrlKey || e.metaKey) {
-        // Ctrl+Click: open
-        if (fp) {
-          // Parse optional :line, :line:col, or :line-line suffix
-          const lineMatch = fp.match(/^(.+?):(\d+)(?:[:\-]\d+)?$/);
-          const cleanPath = lineMatch ? lineMatch[1] : fp;
-          const lineNum = lineMatch ? parseInt(lineMatch[2], 10) : undefined;
-          // Check if path is file, directory, or doesn't exist
-          fetch(`/api/file/info?path=${encodeURIComponent(cleanPath)}`)
-            .then(r => r.json())
-            .then(info => {
-              if (info.error) {
-                this._flashLink(link, 'Not found');
-              } else if (info.isDirectory) {
-                this.app.openFileExplorer(cleanPath);
-              } else {
-                this.app.openFile(cleanPath, cleanPath.split('/').pop(), { line: lineNum });
-              }
-            })
-            .catch(() => this._flashLink(link, 'Error'));
-        } else if (url) {
-          window.open(url, '_blank');
-        }
-      } else {
-        // Click: copy to clipboard
-        const text = fp || url;
-        copyText(text).then(() => this._flashLink(link, 'Copied!'));
-      }
-    });
-  }
-
-  _flashLink(link, msg) {
-    // Show tooltip near the link instead of replacing text
-    const tip = document.createElement('span');
-    tip.className = 'chat-link-tooltip';
-    tip.textContent = msg;
-    link.style.position = 'relative';
-    link.appendChild(tip);
-    setTimeout(() => tip.remove(), 1200);
   }
 
   _addImageAttachment(file) {
