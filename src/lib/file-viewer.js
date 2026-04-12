@@ -44,6 +44,14 @@ class FileViewer {
       if (!confirm(`This file is ${formatSize(fileInfo.size)}. Opening may slow down the UI. Continue?`)) return;
     }
 
+    // HTML: open in CodeEditor with preview toggle (same as markdown)
+    if (ext === 'html' || ext === 'htm') {
+      const winInfo = app.wm.createWindow({ title: fileName, type: 'editor', syncId: opts.syncId, openSpec });
+      winInfo._filePath = filePath; winInfo._fileName = fileName;
+      new CodeEditor(winInfo, filePath, fileName, app);
+      return;
+    }
+
     const winInfo = app.wm.createWindow({ title: fileName, type: 'viewer', syncId: opts.syncId, openSpec });
     winInfo._filePath = filePath; winInfo._fileName = fileName;
     const container = document.createElement('div'); container.className = 'file-viewer';
@@ -59,10 +67,6 @@ class FileViewer {
         FileViewer._renderAudio(container, filePath, fileName);
       } else if (ext === 'pdf') {
         FileViewer._renderPdf(container, filePath);
-      } else if (ext === 'html' || ext === 'htm') {
-        // HTML: open in CodeEditor with preview toggle (same as markdown)
-        new CodeEditor(winInfo, filePath, fileName, app);
-        return; // CodeEditor manages its own DOM
       } else if (['csv','tsv'].includes(ext)) {
         const res = await fetch(`/api/file/content?path=${encodeURIComponent(filePath)}`);
         const data = await res.json();

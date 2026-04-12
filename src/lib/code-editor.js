@@ -229,8 +229,16 @@ class CodeEditor {
     if (content === undefined) {
       try {
         const res = await fetch(`/api/file/content?path=${encodeURIComponent(this.filePath)}`);
-        const data = await res.json(); content = data.content || '';
-      } catch { content = ''; }
+        const data = await res.json();
+        if (data.error) {
+          this.editorBody.innerHTML = `<div class="empty-hint" style="color:var(--red);padding:20px">${data.error}</div>`;
+          return;
+        }
+        content = data.content || '';
+      } catch (err) {
+        this.editorBody.innerHTML = `<div class="empty-hint" style="color:var(--red);padding:20px">Failed to load file: ${err.message}</div>`;
+        return;
+      }
     }
 
     const detectedLang = detectLang(this.filePath);
