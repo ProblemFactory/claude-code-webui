@@ -515,13 +515,13 @@ class App {
   }
   hideDialogs() { document.getElementById('dialog-overlay').classList.add('hidden'); document.getElementById('dialog-overlay').querySelectorAll('.dialog').forEach(d => d.classList.add('hidden')); }
 
-  createSession({ cwd, name, model, permission, extraArgs, resumeId, mode }) {
+  createSession({ cwd, name, model, permission, extraArgs, resumeId, mode, syncId }) {
     this._hideWelcome();
     const sessionMode = mode || this.settings.get('session.defaultMode') || 'chat';
     const sessionName = name || (resumeId ? `Resume ${resumeId.substring(0,8)}` : `Session ${this.wm.windowCounter+1}`);
     const winType = sessionMode === 'chat' ? 'chat' : 'terminal';
     const titlePrefix = sessionMode === 'chat' ? '\uD83D\uDCAC ' : '';
-    const winInfo = this.wm.createWindow({ title: `${titlePrefix}${sessionName}`, type: winType });
+    const winInfo = this.wm.createWindow({ title: `${titlePrefix}${sessionName}`, type: winType, syncId });
 
     this.ws.send({
       type:'create', mode: sessionMode, cwd: cwd||undefined, sessionName: name||undefined, model: model||undefined,
@@ -531,6 +531,8 @@ class App {
 
     const handler = (msg) => {
       if (msg.type === 'created') {
+        // Set openSpec now that we have the server session ID (for cross-client sync)
+        winInfo._openSpec = { action: 'attachSession', serverId: msg.sessionId, name: sessionName, cwd: msg.cwd || cwd || '', mode: sessionMode };
         if (msg.mode === 'chat' || sessionMode === 'chat') {
           const chatView = new ChatView(winInfo, this.ws, msg.sessionId, this);
           this.sessions.set(winInfo.id, chatView);
@@ -678,7 +680,7 @@ class App {
     this.ws.onGlobal(handler);
   }
 
-  resumeSession(sessionId, cwd, sessionName, { mode } = {}) {
+  resumeSession(sessionId, cwd, sessionName, { mode, syncId } = {}) {
     this._closeSidebarOnMobile();
     // If this session is already open in a window (e.g. already resumed), just focus it
     for (const [winId, term] of this.sessions) {
@@ -693,15 +695,15 @@ class App {
     }
 
     const sessionMode = mode || (this.settings.get('session.defaultMode') ?? 'chat');
-    this.createSession({ cwd, name: sessionName, resumeId: sessionId, mode: sessionMode });
+    this.createSession({ cwd, name: sessionName, resumeId: sessionId, mode: sessionMode, syncId });
   }
 
   // Open a stopped session as view-only (load JSONL, no claude --resume)
-  viewSession(sessionId, cwd, sessionName) {
+  viewSession(sessionId, cwd, sessionName, { syncId } = {}) {
     this._closeSidebarOnMobile();
     this._hideWelcome();
     const titlePrefix = '\uD83D\uDCCB ';
-    const winInfo = this.wm.createWindow({ title: `${titlePrefix}${sessionName || 'History'} — ${cwd}`, type: 'chat' });
+    const winInfo = this.wm.createWindow({ title: `${titlePrefix}${sessionName || 'History'} — ${cwd}`, type: 'chat', syncId });
     winInfo._openSpec = { action: 'viewSession', sessionId, cwd, name: sessionName };
     const chatView = new ChatView(winInfo, this.ws, `view-${sessionId}`, this, { readOnly: true });
     this.sessions.set(winInfo.id, chatView);
@@ -741,7 +743,7 @@ class App {
         this.openBrowser(spec.url, { syncId });
         break;
       case 'viewSession':
-        this.viewSession(spec.sessionId, spec.cwd, spec.name);
+        this.viewSession(spec.sessionId, spec.cwd, spec.name, { syncId });
         break;
       case 'viewSubagent': {
         const title = `\uD83E\uDD16 ${spec.description || 'Agent'}`;
