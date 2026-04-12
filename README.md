@@ -36,8 +36,12 @@ A web-based UI for managing multiple [Claude Code](https://docs.anthropic.com/en
 
 ### Window Manager
 - **Tiling window manager** with drag/resize, grid snap, edge snap, custom grid presets, command mode (Ctrl+\\)
+- **Snap memory** -- snapping saves original size; dragging out of snap restores it
 - **Overlap switcher** -- right-click title bar to switch between overlapping windows
+- **Taskbar context menu** -- right-click taskbar items for Move, Minimize/Restore, Close
+- **Move mode** -- window attaches to cursor, click to place (via taskbar context menu or command mode)
 - **Proportional tracking** -- windows maintain relative positions on workspace resize
+- **Multi-client layout sync** -- workspace state broadcast to all clients; smart diff syncs positions, open/close, navigation
 
 ### Sessions
 - **Session discovery** -- auto-detects running Claude Code sessions (Live/Tmux/External/Stopped)
@@ -58,6 +62,7 @@ A web-based UI for managing multiple [Claude Code](https://docs.anthropic.com/en
 - **Settings system** -- VS Code-style UI, per-terminal overrides (theme/font/size), active window highlight intensity
 - **Presets** -- save/restore full workspace state (windows, positions, grid, theme, fonts)
 - **Rate limit monitoring** -- 5-hour and 7-day usage display from Anthropic API
+- **Multi-client layout sync** -- workspace state synced across browsers in real-time (positions, open/close, navigation)
 - **WebSocket auto-reconnect** -- re-attaches all active sessions on connection recovery
 
 ## Quick Install

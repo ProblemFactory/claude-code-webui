@@ -105,7 +105,7 @@ docs/
 | **Add/change terminal behavior** | `src/lib/terminal.js` | xterm.js config, input filtering, cursor, font |
 | **Session list / sidebar** | `src/lib/sidebar.js` | Grouping, filtering, status badges, click handlers |
 | **Session discovery (RUNNING/STOPPED)** | `server.js` → `GET /api/sessions` | Lock-first algorithm, tmux detection, PID verification |
-| **Window tiling / grid / snap** | `src/lib/window.js` | Drag, resize, grid cells, layout presets, freeform, Alt bypass, overlap switcher |
+| **Window tiling / grid / snap** | `src/lib/window.js` | Drag, resize, grid cells, layout presets, freeform, Alt bypass, overlap switcher, pre-snap size memory, move mode, taskbar context menu |
 | **Custom grid presets** | `src/lib/app.js` → `_addCustomGrid()` + `server.js` → `POST/DELETE /api/custom-grids` | + button adds, right-click removes, persisted in layouts.json |
 | **Session starring** | `src/lib/sidebar.js` → `toggleStar()`, `isStarred()` | ★/☆ per session, starred first in sidebar + taskbar, localStorage |
 | **Session rename** | `src/lib/sidebar.js` → `renameSession()` | Double-click name in sidebar, syncs to open windows via `app.syncSessionName()` |
@@ -117,7 +117,7 @@ docs/
 | **Hex viewer** | `src/lib/hex-viewer.js` | Binary display with chunked loading |
 | **Themes / colors** | `src/lib/themes.js` + `public/style.css` | 6 built-in themes, CSS variables `[data-theme="..."]` |
 | **Theme editor** | `src/lib/theme-editor.js` + `src/lib/themes.js` | Floating panel: ~50 CSS vars + 16 ANSI, live preview, hover-to-highlight, save/load/delete, multi-client sync |
-| **Layout save/restore** | `src/lib/layout.js` | Auto-save debounce, `_restoring` flag, `claudeSessionId` matching, grid state |
+| **Layout save/restore + sync** | `src/lib/layout.js` + `server.js` | Auto-save debounce, `_restoring` flag, `claudeSessionId` matching, grid state, multi-client layout sync via WS `layout-sync` |
 | **Usage / rate limits** | `server.js` → `refreshRateLimit()` + `GET /api/usage` + `src/lib/app.js` → `_pollUsage()` | Haiku API call for rate limit headers, every 5 min |
 | **dtach session create** | `server.js` → WebSocket `case 'create'` | `execFileSync('dtach', ...)` |
 | **dtach session attach** | `server.js` → `attachToDtach()` | `pty.spawn('dtach', ['-a', ...])` |
@@ -145,6 +145,7 @@ docs/
 - **Proportional bounds tracking**: `win.gridBounds` stores position `{left, top, width, height}` as fractions (0-1) of workspace. `_reflowWindows()` (via ResizeObserver) recalculates pixel positions on workspace resize. Applies universally — grid snap, edge snap, drag-drop, and `applyLayout()` all capture bounds. User resize updates proportions on mouseup. Works in both grid and freeform modes.
 - **Overlap switcher**: Right-click on title bar detects overlapping windows via rect intersection (`_rectsOverlap`), shows popup at cursor position. Works in any mode — not tied to grid cells.
 - **WebSocket reconnect re-attach**: On WS reconnect, all active sessions are re-attached. Chat sessions call `_reattach()` which re-sends attach → server responds with latest normalized messages + `isStreaming` from wrapper metadata. `globalHandlers` in ws.js are preserved across reconnects.
+- **Layout sync (multi-client)**: State-based — full workspace state broadcast via `layout-sync` WS message after every change. Server saves + rebroadcasts (excluding sender). Receiver does smart diff via `_applyRemoteState()`: matches windows by unique ID, syncs positions/state/z-order, opens/closes windows as needed.
 
 ### Server-Side Key Functions
 
@@ -241,14 +242,29 @@ Reverse direction (dir name → cwd) is ambiguous because `-` could be `/`, `.`,
 Recovery uses greedy filesystem checking as fallback, but the forward encoding is preferred.
 
 ### 6. Layout Persistence
-- Auto-save: 2s debounce after window changes, saves to `data/layouts.json`
+- Auto-save: 500ms debounce after window changes, saves to `data/layouts.json`
 - Restore: always uses autoSave on page load
-- `_restoring` flag blocks auto-save for 5s during restore (prevents empty state overwriting)
+- `_restoring` flag blocks auto-save for 1s during restore (prevents empty state overwriting)
 - Captures `claudeSessionId` per terminal for cross-restart matching
 - Grid state (`{rows, cols}`) persisted and restored — `setGrid()` triggers `_notify()` to save
 - Custom grid presets stored in `layouts.json` → `customGrids` array, loaded on startup
 - Window restore uses `winInfo` returned by `attachSession()` — NOT `windows.values().pop()` (see bug below)
 - **All window types restored**: terminals (by claudeSessionId match), file explorers (by explorerPath), file viewers/editors (by filePath), browser windows (by URL)
+- **Pre-snap size**: `preSnapSize {width, height}` persisted per window, restored on layout load
+- **Unique window IDs**: `win-{timestamp}-{random}` format for cross-client matching in layout sync
+- **ID remap on layout restore**: taskbar buttons and other references use `winInfo.id` (not closure-captured id) to survive ID changes
+
+### 6b. Layout Sync (Multi-Client)
+- **State-based sync** (not op-based): full workspace state sent via WebSocket `layout-sync` after every change
+- Server saves to disk (`data/layouts.json`) + broadcasts to all other clients (sender excluded via `ws !== senderWs`)
+- **Receiver `_applyRemoteState`** does smart diff against local state:
+  - Update positions, maximize/minimize state, snap state, z-order for matching windows (matched by unique `win.id`)
+  - Open windows that exist in remote but not locally (creates sessions, file explorers, file viewers, browser windows)
+  - Close windows that exist locally but not in remote state
+  - File explorer navigation sync: calls `explorer.navigate()` on path change
+- All coordinates use `gridBounds` (0-1 proportional), no pixel values in sync payload
+- 500ms autosave debounce ensures sync doesn't fire on every micro-change
+- 1s `_restoring` cooldown prevents remote state application from triggering outbound sync
 
 ### 6a. Grid Presets
 - **Freeform button**: Clears grid, restores free-floating mode (`setGrid(null)`)
@@ -443,8 +459,8 @@ Read/Write tool output uses highlight.js for syntax highlighting with line numbe
 - `GET /proxy/<url>` — full-rewriting web proxy via node-unblocker (HTML/CSS URL rewrite, JS XHR/WS rewrite, header stripping)
 
 ### WebSocket Protocol (`/ws`)
-Client → Server: `create`, `input`, `chat-input`, `permission-response`, `set-permission-mode`, `interrupt`, `resize`, `attach`, `kill`, `tmux-attach`, `state-set`, `state-resync`
-Server → Client: `created`, `output`, `msg` (normalized: op=create/edit/meta), `subagent-message` (parentToolUseId for tool card status), `exited`, `attached` (includes `messages`, `totalCount`, `isStreaming`, `chatStatus`, `taskState`), `active-sessions`, `editor-open`, `editor-close`, `effective-size`, `user-state-updated`, `bookmarks-updated`, `settings-updated`, `custom-themes-updated`, `state-sync`, `state-snapshot`, `error`
+Client → Server: `create`, `input`, `chat-input`, `permission-response`, `set-permission-mode`, `interrupt`, `resize`, `attach`, `kill`, `tmux-attach`, `state-set`, `state-resync`, `layout-sync`
+Server → Client: `created`, `output`, `msg` (normalized: op=create/edit/meta), `subagent-message` (parentToolUseId for tool card status), `exited`, `attached` (includes `messages`, `totalCount`, `isStreaming`, `chatStatus`, `taskState`), `active-sessions`, `editor-open`, `editor-close`, `effective-size`, `user-state-updated`, `bookmarks-updated`, `settings-updated`, `custom-themes-updated`, `state-sync`, `state-snapshot`, `layout-sync`, `error`
 
 **Virtual session attach**: `attach` with `sessionId` starting with `sub-` routes to subagent handler. `sub-{parentToolUseId}` returns live-buffered messages from parent session's `subagentBuffers`. `sub-agent-{agentId}` loads completed agent's JSONL from disk. Both respond with standard `attached` payload with normalized messages. Live virtual sessions receive normalized `msg` ops via per-subagent normalizers. `attach` with `viewOnly:true` loads JSONL history without an active session (for stopped session history viewing).
 
@@ -501,6 +517,8 @@ Server → Client: `created`, `output`, `msg` (normalized: op=create/edit/meta),
 ### Window Manager
 - Floating windows with drag/resize
 - Edge snap zones (Magnet-like)
+- Drag threshold (5px): prevents accidental snap when clicking title bar to focus
+- Pre-snap size memory: snapping saves original window size, dragging out of snap restores it (persisted in layout)
 - Freeform mode (no grid) + custom MxN grid with snap-to-cell (drag + resize snap, Alt to bypass)
 - Built-in presets: maximize, 2-col, 2-row, quad, 3-col (all via grid mechanism)
 - Custom grid presets: + button to add, right-click to remove, auto SVG icons, persisted
@@ -512,6 +530,9 @@ Server → Client: `created`, `output`, `msg` (normalized: op=create/edit/meta),
 - Presets (renamed from Layouts): save/restore full workspace state (windows, positions, z-order, grid, theme, fonts). Sessions matched by claudeSessionId. Non-preset windows minimized not killed.
 - Active window highlight intensity: `window.activeHighlightIntensity` setting (subtle = shadow only, normal = accent border, strong = border + glow)
 - Window close behavior: `window.closeBehavior` setting — terminate (default, kills session) or detach (keeps session alive for re-attach)
+- Taskbar right-click context menu: Move (window attaches to cursor, click to place), Minimize/Restore, Close
+- Taskbar items use flex-shrink + text-overflow for many windows (no overflow wrapping)
+- pointer-events:none on window content during drag (prevents iframe/terminal stealing mouse events)
 
 ### Session Management
 - Unified session list grouped by working directory
@@ -655,5 +676,9 @@ Server → Client: `created`, `output`, `msg` (normalized: op=create/edit/meta),
 - Message timestamps all identical in history: `_create` used `Date.now()` during `convertHistory`. Fix: extract `raw.timestamp` (ISO string) from Claude messages.
 - Minimap label not hiding on mouse leave: no `.chat-minimap-label.hidden` CSS rule existed (project has no global `.hidden`). Fix: added component-specific rule.
 - Live messages lost when viewing history: `_onCreateMessage` rendered at bottom then `_trimBottom` removed them. Fix: defer live messages when not pinned, show badge count on scroll button.
-- Resume briefly showed as external: session discovery only checked `webuiPids` (not yet updated). Fix: also check `activeSessions` by `claudeSessionId` as fallback.
-- View-only pagination disabled: `_readOnly` flag blocked scroll-up loading. Fix: `_canPaginate` flag (false for `sub-*` subagent viewers only, true for `view-*` and normal sessions).
+- Click-to-focus triggered snap: no drag threshold meant mousedown+mouseup on title bar (to focus) could trigger snap behavior. Fix: 5px drag threshold — snap only activates after moving at least 5px.
+- Snap loses original size: snapping to grid/edge permanently changed window size with no way to restore. Fix: pre-snap size memory saves `{width, height}` before snap, dragging out of snap restores original dimensions. Persisted in layout as `preSnapSize`.
+- Drag steals mouse events: during drag, iframes and terminals inside windows would capture mouse events. Fix: `pointer-events: none` on `.window-content` during drag.
+- Taskbar overflow with many windows: taskbar items overflowed when many windows open. Fix: items use `flex-shrink` + `text-overflow: ellipsis` with `min-width: 0`.
+- Draft sync blocked by focus: `StateSync` draft updates skipped textarea when it had focus (to avoid clobbering user input). Fix: always update textarea regardless of focus state for reliable multi-client sync.
+- Layout sync ID remap: taskbar buttons captured window ID in closures, breaking after layout restore changed IDs. Fix: buttons reference `winInfo.id` dynamically instead of closure-captured ID.

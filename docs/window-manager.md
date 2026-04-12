@@ -43,6 +43,12 @@ When a grid is active, dragging a window snaps it to the nearest grid cell on re
 ### Edge snap
 In freeform mode, dragging near screen edges snaps to half-screen positions (left/right/top/bottom).
 
+### Drag threshold
+A 5-pixel drag threshold prevents accidental snaps when you click the title bar just to focus a window. Snap behavior only activates after moving at least 5 pixels.
+
+### Pre-snap size memory
+When a window snaps to a grid cell or edge zone, its original size is saved. If you drag the window out of the snap zone, it restores to its pre-snap dimensions. This size is persisted in the layout, so it survives page refreshes.
+
 ### Bypass snap
 Hold **Alt** while dragging to bypass all snap behavior.
 
@@ -99,6 +105,38 @@ Command mode auto-exits after 2 seconds or on Escape.
 | s | Toggle sidebar |
 | b | Open embedded browser |
 | e | Open file explorer |
+
+## Taskbar
+
+The taskbar at the bottom shows all open windows. Items use flex-shrink with text-overflow ellipsis to handle many windows gracefully.
+
+### Right-click context menu
+
+Right-click any taskbar item to open a context menu:
+
+| Action | Description |
+|--------|-------------|
+| **Move** | Enters move mode -- the window attaches to your cursor. Click anywhere in the workspace to place it. |
+| **Minimize** / **Restore** | Toggle minimize state |
+| **Close** | Close the window |
+
+### Move mode
+
+Move mode detaches a window from its current position and attaches it to your cursor. Click to place it at the new location. Move mode uses capture-phase event handling to prevent the click from leaking to elements underneath the window.
+
+Move mode can also be triggered via command mode (Ctrl+\\ then a move command).
+
+## Layout Sync
+
+When multiple browsers are connected, layout changes are synced in real-time:
+
+- **State-based**: the full workspace state is broadcast after every change (not individual operations)
+- **Smart diff**: the receiver compares remote state against local and only applies differences
+- **Synced properties**: window positions, maximize/minimize state, snap, z-order, open/close, file explorer navigation
+- **Proportional coordinates**: all positions use gridBounds (0-1 fractions), so different screen sizes work correctly
+- **Window matching**: windows are matched across clients by unique ID (`win-{timestamp}-{random}`)
+
+The sync is debounced at 500ms and uses a 1-second cooldown to prevent echo loops.
 
 ## Presets
 
