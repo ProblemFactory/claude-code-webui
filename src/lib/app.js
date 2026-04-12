@@ -1304,6 +1304,25 @@ class App {
         else this.wm.focusWindow(id);
         const session = this.sessions.get(id); if (session && !win.isMinimized) session.focus();
       });
+      // Right-click context menu for window recovery
+      item.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        document.querySelectorAll('.taskbar-context-menu').forEach(m => m.remove());
+        const menu = document.createElement('div');
+        menu.className = 'taskbar-context-menu';
+        menu.style.cssText = `position:fixed;left:${e.clientX}px;bottom:${window.innerHeight - e.clientY + 4}px;`;
+        const moveItem = document.createElement('div');
+        moveItem.className = 'taskbar-context-item';
+        moveItem.textContent = '\u2725 Move';
+        moveItem.onclick = () => { menu.remove(); this.wm.startMoveMode(id); };
+        const minimizeItem = document.createElement('div');
+        minimizeItem.className = 'taskbar-context-item';
+        minimizeItem.textContent = win.isMinimized ? '\u25A1 Restore' : '\u2013 Minimize';
+        minimizeItem.onclick = () => { menu.remove(); win.isMinimized ? this.wm.restore(id) : this.wm.minimize(id); };
+        menu.append(moveItem, minimizeItem);
+        document.body.appendChild(menu);
+        setTimeout(() => document.addEventListener('mousedown', function close(ev) { if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('mousedown', close); } }), 0);
+      });
       container.appendChild(item);
     }
     const activeCount = [...this.wm.windows.values()].filter(w => w.type==='terminal' && !w.exited).length;

@@ -730,7 +730,8 @@ html, body {
   border-top: 1px solid var(--border); display: flex; align-items: center;
   padding: 0 6px; gap: 3px; flex-shrink: 0;
 }
-#taskbar-items { flex: 1; display: flex; gap: 2px; overflow-x: auto; align-items: center; }
+#taskbar-items { flex: 1; display: flex; gap: 2px; overflow-x: auto; align-items: center; scrollbar-width: none; }
+#taskbar-items::-webkit-scrollbar { display: none; }
 .taskbar-usage {
   display: flex; align-items: center; gap: 4px; padding: 0 8px; cursor: pointer;
   font-size: 10px; color: var(--text-dim); flex-shrink: 0;
@@ -755,7 +756,8 @@ html, body {
 .taskbar-item {
   padding: 2px 8px; background: rgba(255,255,255,0.04); border: 1px solid var(--border);
   border-radius: var(--radius-sm); color: var(--text-secondary); font-size: 10px;
-  cursor: pointer; white-space: nowrap; max-width: 160px; overflow: hidden;
+  cursor: pointer; white-space: nowrap; max-width: 160px; min-width: 40px; overflow: hidden;
+  text-overflow: ellipsis; flex-shrink: 1;
   text-overflow: ellipsis; transition: all var(--transition); display: flex; align-items: center; gap: 3px;
 }
 .taskbar-item:hover { background: var(--bg-hover); color: var(--text); }
@@ -764,6 +766,14 @@ html, body {
 .taskbar-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
 .taskbar-dot.exited { background: var(--text-dim); }
 #taskbar-status { font-size: 10px; color: var(--text-dim); padding: 0 6px; flex-shrink: 0; }
+.taskbar-context-menu {
+  background: var(--bg-dialog); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3); z-index: 10000; min-width: 100px;
+}
+.taskbar-context-item {
+  padding: 4px 12px; font-size: 11px; cursor: pointer; color: var(--text-secondary);
+}
+.taskbar-context-item:hover { background: var(--bg-hover); color: var(--text); }
 
 /* ── Dialogs ── */
 .dialog-overlay {

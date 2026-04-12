@@ -99,25 +99,54 @@ class WindowManager {
 
   _setupDrag(win) {
     const { element, titleBar } = win;
-    let dragging = false, startX, startY, initL, initT;
+    let mouseDown = false, dragging = false, startX, startY, initL, initT;
     let shiftDragStart = -1;
+    const DRAG_THRESHOLD = 5; // px — must move this far before drag starts
+
     titleBar.addEventListener('mousedown', (e) => {
       if (e.target.closest('.window-controls') || e.button !== 0) return;
-      if (win.isMaximized) {
-        const prev = win.prevBounds, prevW = parseInt(prev.width) || 700;
-        win.isMaximized = false; element.style.width = prev.width; element.style.height = prev.height;
-        element.style.left = (e.clientX - prevW * (e.clientX / this.workspace.offsetWidth)) + 'px'; element.style.top = '0px';
-      }
-      dragging = true; startX = e.clientX; startY = e.clientY;
+      mouseDown = true; dragging = false;
+      startX = e.clientX; startY = e.clientY;
       initL = element.offsetLeft; initT = element.offsetTop;
       shiftDragStart = -1;
-      element.classList.add('dragging');
-      if (this.grid) this.gridOverlay.classList.add('dragging');
       e.preventDefault();
     });
+
     const onMove = (e) => {
-      if (!dragging) return;
-      element.style.left = (initL + e.clientX - startX) + 'px'; element.style.top = (initT + e.clientY - startY) + 'px';
+      if (!mouseDown) return;
+      const dx = e.clientX - startX, dy = e.clientY - startY;
+
+      // Start dragging only after threshold (prevents click-to-focus from snapping)
+      if (!dragging) {
+        if (Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return;
+        dragging = true;
+        // Save pre-snap size for restore on un-snap
+        if (!win._preSnapBounds) {
+          win._preSnapBounds = { width: element.style.width, height: element.style.height, left: element.style.left, top: element.style.top };
+        }
+        if (win.isMaximized) {
+          const prev = win.prevBounds, prevW = parseInt(prev.width) || 700;
+          win.isMaximized = false; element.style.width = prev.width; element.style.height = prev.height;
+          element.style.left = (e.clientX - prevW * (e.clientX / this.workspace.offsetWidth)) + 'px'; element.style.top = '0px';
+          initL = element.offsetLeft; initT = element.offsetTop;
+          startX = e.clientX; startY = e.clientY;
+        }
+        // Restore pre-snap size when dragging out of a snap
+        if (win._isSnapped && win._preSnapBounds) {
+          const ps = win._preSnapBounds;
+          element.style.width = ps.width; element.style.height = ps.height;
+          // Center on cursor
+          initL = e.clientX - (parseInt(ps.width) || 350) / 2;
+          initT = e.clientY - 15;
+          element.style.left = initL + 'px'; element.style.top = initT + 'px';
+          startX = e.clientX; startY = e.clientY;
+          win._isSnapped = false;
+        }
+        element.classList.add('dragging');
+        if (this.grid) this.gridOverlay.classList.add('dragging');
+      }
+
+      element.style.left = (initL + dx) + 'px'; element.style.top = (initT + dy) + 'px';
       const snapEnabled = this._settings?.get('layout.enableDragSnap') ?? true;
       const shiftDragEnabled = this._settings?.get('layout.enableShiftDragSelection') ?? true;
       if (!e.altKey && snapEnabled) {
@@ -135,21 +164,34 @@ class WindowManager {
         this._clearGridHighlight();
       }
     };
+
     const onUp = (e) => {
-      if (!dragging) return; dragging = false; element.classList.remove('dragging');
+      if (!mouseDown) return;
+      mouseDown = false;
+      if (!dragging) return; // Click without drag — don't snap
+      dragging = false; element.classList.remove('dragging');
       this.snapIndicator.style.display = 'none';
       const snapEnabled = this._settings?.get('layout.enableDragSnap') ?? true;
       const shiftDragEnabled = this._settings?.get('layout.enableShiftDragSelection') ?? true;
+      let snapped = false;
       if (!e.altKey && snapEnabled) {
         if (shiftDragStart >= 0 && e.shiftKey && this.grid && shiftDragEnabled) {
           const endCell = this._getGridCell(e.clientX, e.clientY);
-          if (endCell >= 0) this._snapToGridRange(win.id, shiftDragStart, endCell);
+          if (endCell >= 0) { this._snapToGridRange(win.id, shiftDragStart, endCell); snapped = true; }
           shiftDragStart = -1;
         } else if (this.grid) {
-          this._snapToGrid(win.id, e.clientX, e.clientY);
+          this._snapToGrid(win.id, e.clientX, e.clientY); snapped = true;
         } else {
-          const snap = this._getSnapZone(e.clientX, e.clientY); if (snap) this._applySnap(win.id, snap);
+          const snap = this._getSnapZone(e.clientX, e.clientY);
+          if (snap) { this._applySnap(win.id, snap); snapped = true; }
         }
+      }
+      if (snapped) {
+        win._isSnapped = true;
+      } else {
+        // Free drop — clear pre-snap memory
+        win._preSnapBounds = null;
+        win._isSnapped = false;
       }
       this._clearGridHighlight(); this.gridOverlay.classList.remove('dragging');
       // Re-capture proportional bounds after final position (snap or free drop)
@@ -382,6 +424,32 @@ class WindowManager {
       setTimeout(() => win.element.classList.remove('window-bounce'), 300);
     }
   }
+  // Move mode: window attaches to cursor, click to place (for recovering off-screen windows)
+  startMoveMode(id) {
+    const win = this.windows.get(id); if (!win) return;
+    if (win.isMinimized) this.restore(id);
+    this.focusWindow(id);
+    const el = win.element;
+    el.style.cursor = 'move';
+    document.body.style.cursor = 'move';
+
+    const onMove = (e) => {
+      el.style.left = (e.clientX - Math.min(parseInt(el.style.width) || 350, 200)) + 'px';
+      el.style.top = (e.clientY - 15) + 'px';
+    };
+    const onClick = (e) => {
+      e.preventDefault();
+      el.style.cursor = '';
+      document.body.style.cursor = '';
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mousedown', onClick);
+      this._captureGridBounds(win);
+      this._notify();
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mousedown', onClick);
+  }
+
   toggleMaximize(id) {
     const win = this.windows.get(id); if (!win) return; const el = win.element;
     if (win.isMaximized) { const p = win.prevBounds; el.style.left=p.left; el.style.top=p.top; el.style.width=p.width; el.style.height=p.height; win.isMaximized = false; }
