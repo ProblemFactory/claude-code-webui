@@ -10,13 +10,15 @@ import { CodeEditor } from './code-editor.js';
 import { LayoutManager } from './layout.js';
 import { ChatView } from './chat-view.js';
 import { Resizer } from './resizer.js';
-import { createPopover, showContextMenu, fetchJson, initStateSync } from './utils.js';
+import { createPopover, fetchJson, initStateSync } from './utils.js';
 import { setupDirAutocomplete } from './autocomplete.js';
 import { getAvailableFonts } from './terminal.js';
 import { SettingsManager } from './settings.js';
 import { SettingsUI } from './settings-ui.js';
 import { openExternalEditor, closeExternalEditor } from './external-editor.js';
 import { CommandMode } from './command-mode.js';
+import { updateTaskbar as updateTaskbarFn, showWindowList } from './taskbar.js';
+import { openBrowser as openBrowserFn } from './browser-window.js';
 
 class App {
   constructor() {
@@ -770,81 +772,7 @@ class App {
     return winInfo;
   }
 
-  openBrowser(url) {
-    this._hideWelcome();
-    const startUrl = url || '';
-    const winInfo = this.wm.createWindow({ title: startUrl ? new URL(startUrl).hostname : 'Browser', type: 'browser' });
-    winInfo._openSpec = { action: 'openBrowser', url: startUrl };
-    const container = document.createElement('div');
-    container.style.cssText = 'display:flex;flex-direction:column;height:100%';
-
-    // URL bar
-    const urlBar = document.createElement('div');
-    urlBar.style.cssText = 'display:flex;gap:4px;padding:4px 6px;border-bottom:1px solid var(--border);background:var(--bg-titlebar);flex-shrink:0';
-    const urlInput = document.createElement('input');
-    urlInput.className = 'file-path-input';
-    urlInput.value = startUrl;
-    urlInput.placeholder = 'Enter URL...';
-    const goBtn = document.createElement('button');
-    goBtn.className = 'file-tool-btn'; goBtn.textContent = '→'; goBtn.title = 'Go';
-    goBtn.style.width = '28px';
-    let proxyMode = false;
-    const proxyBtn = document.createElement('button');
-    proxyBtn.className = 'file-tool-btn'; proxyBtn.title = 'Proxy mode (bypass X-Frame-Options)';
-    proxyBtn.style.cssText = 'width:auto;padding:0 6px;font-size:10px';
-    proxyBtn.textContent = 'Proxy: Off';
-    proxyBtn.onclick = () => {
-      proxyMode = !proxyMode;
-      proxyBtn.textContent = proxyMode ? 'Proxy: On' : 'Proxy: Off';
-      proxyBtn.style.color = proxyMode ? 'var(--accent)' : '';
-      // Re-navigate with new mode
-      if (urlInput.value) navigate(urlInput.value);
-    };
-    const openExtBtn = document.createElement('button');
-    openExtBtn.className = 'file-tool-btn'; openExtBtn.textContent = '↗'; openExtBtn.title = 'Open in new tab';
-    openExtBtn.style.width = '28px';
-    openExtBtn.onclick = () => { if (urlInput.value) window.open(urlInput.value, '_blank'); };
-    urlBar.append(urlInput, goBtn, proxyBtn, openExtBtn);
-
-    const iframe = document.createElement('iframe');
-    iframe.style.cssText = 'flex:1;border:none;width:100%;background:#fff';
-    // No sandbox for maximum compatibility — same-origin pages (noVNC, local services) work fully
-    // External sites may still block via X-Frame-Options (browser security, can't bypass)
-
-    const errorMsg = document.createElement('div');
-    errorMsg.style.cssText = 'display:none;flex:1;padding:20px;text-align:center;color:var(--text-dim);font-size:12px';
-
-    const navigate = (u) => {
-      if (!u) return;
-      if (!u.match(/^https?:\/\//)) u = 'http://' + u;
-      urlInput.value = u;
-      errorMsg.style.display = 'none';
-      iframe.style.display = '';
-      iframe.src = proxyMode ? `/proxy/${u}` : u;
-      try { this.wm.setTitle(winInfo.id, new URL(u).hostname); } catch {}
-      winInfo._browserUrl = u;
-    };
-
-    // Detect load failures (X-Frame-Options, CSP, etc.)
-    iframe.addEventListener('load', () => {
-      try { iframe.contentWindow.document; } catch {
-        // Cross-origin blocked — show error
-        errorMsg.innerHTML = `<p>This site blocked iframe embedding (X-Frame-Options).</p><p style="margin-top:8px"><a href="${urlInput.value}" target="_blank" style="color:var(--accent)">Open in new tab ↗</a></p><p style="margin-top:12px;font-size:11px;opacity:0.6">Tip: Same-origin pages (noVNC, local services) work fine in this browser.</p>`;
-        errorMsg.style.display = '';
-        iframe.style.display = 'none';
-      }
-    });
-
-    urlInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') navigate(urlInput.value); });
-    goBtn.onclick = () => navigate(urlInput.value);
-
-    container.append(urlBar, iframe, errorMsg);
-    winInfo.content.appendChild(container);
-    winInfo.onClose = () => this._checkWelcome();
-
-    if (startUrl) navigate(startUrl);
-    return winInfo;
-  }
+  openBrowser(url, opts) { return openBrowserFn(this, url, opts); }
 
   openFile(filePath, fileName, opts) {
     FileViewer.open(this, filePath, fileName, opts);
@@ -925,94 +853,9 @@ class App {
     this.sidebar.highlightSession(null);
   }
 
-  updateTaskbar() {
-    const container = document.getElementById('taskbar-items'); container.innerHTML = '';
-    for (const [id, win] of this.wm.windows) {
-      const item = document.createElement('div'); item.className = 'taskbar-item';
-      if (id === this.wm.activeWindowId && !win.isMinimized) item.classList.add('active');
-      if (win.isMinimized) item.classList.add('minimized');
-      if (win.element.classList.contains('window-waiting')) item.classList.add('waiting');
-      if (win.type === 'terminal') {
-        const term = this.sessions.get(id);
-        // Check if this session is starred
-        const allSess = this.sidebar?._allSessions || [];
-        const match = allSess.find(s => s.webuiId && s.webuiId === term?.sessionId);
-        const isStarred = match && this.sidebar.isStarred(match.sessionId);
-        if (isStarred) {
-          const star = document.createElement('span'); star.textContent = '★'; star.style.cssText = 'color:var(--yellow);font-size:10px;margin-right:2px'; item.appendChild(star);
-        } else {
-          const dot = document.createElement('span'); dot.className = 'taskbar-dot'; if (win.exited) dot.classList.add('exited'); item.appendChild(dot);
-        }
-      }
-      const label = document.createElement('span'); label.textContent = win.title; item.appendChild(label);
-      item.addEventListener('click', () => {
-        if (win.isMinimized) this.wm.restore(id);
-        else if (id === this.wm.activeWindowId) this.wm.minimize(id);
-        else this.wm.focusWindow(id);
-        const session = this.sessions.get(id); if (session && !win.isMinimized) session.focus();
-      });
-      // Right-click context menu for window recovery
-      item.addEventListener('contextmenu', (e) => {
-        e.preventDefault();
-        const menu = showContextMenu(e.clientX, e.clientY, [
-          { label: '\u2725 Move', action: () => this.wm.startMoveMode(id) },
-          { label: win.isMinimized ? '\u25A1 Restore' : '\u2013 Minimize', action: () => win.isMinimized ? this.wm.restore(id) : this.wm.minimize(id) },
-          { label: '\u2715 Close', action: () => this.wm.closeWindow(id), style: 'color:var(--red, #e55)' },
-        ], 'taskbar-context-menu');
-        menu.style.top = '';
-        menu.style.bottom = (window.innerHeight - e.clientY + 4) + 'px';
-      });
-      container.appendChild(item);
-    }
-    const activeCount = [...this.wm.windows.values()].filter(w => w.type==='terminal' && !w.exited).length;
-    const countEl = document.getElementById('active-count');
-    countEl.textContent = `${activeCount} active`;
-    countEl.style.cursor = 'pointer';
-    countEl.onclick = (e) => { e.stopPropagation(); this._showWindowList(countEl); };
-  }
+  updateTaskbar() { updateTaskbarFn(this); }
 
-  _showWindowList(anchor) {
-    if (!this.wm.windows.size) return;
-    const pop = createPopover(anchor, 'overlap-switcher');
-
-    for (const [id, win] of this.wm.windows) {
-      const item = document.createElement('div');
-      item.className = 'overlap-switcher-item';
-      if (id === this.wm.activeWindowId && !win.isMinimized) item.classList.add('active');
-
-      // Check if starred
-      const term = this.sessions.get(id);
-      const allSess = this.sidebar?._allSessions || [];
-      const match = allSess.find(s => s.webuiId && s.webuiId === term?.sessionId);
-      const isStarred = match && this.sidebar.isStarred(match.sessionId);
-
-      const indicator = document.createElement('span');
-      if (isStarred) {
-        indicator.textContent = '★'; indicator.style.cssText = 'color:var(--yellow);font-size:11px;flex-shrink:0';
-      } else {
-        indicator.className = 'taskbar-dot';
-        if (win.exited) indicator.classList.add('exited');
-      }
-      if (win.isMinimized) indicator.style.opacity = '0.4';
-      const label = document.createElement('span');
-      label.textContent = (win.isMinimized ? '⊞ ' : '') + win.title;
-      item.append(indicator, label);
-      item.onclick = () => {
-        if (win.isMinimized) this.wm.restore(id);
-        else this.wm.focusWindow(id);
-        const session = this.sessions.get(id);
-        if (session) session.focus();
-        pop.remove();
-      };
-      pop.appendChild(item);
-    }
-
-    requestAnimationFrame(() => {
-      const rect = anchor.getBoundingClientRect();
-      pop.style.left = Math.max(0, rect.right - pop.offsetWidth) + 'px';
-      pop.style.top = (rect.top - pop.offsetHeight - 4) + 'px';
-    });
-  }
+  _showWindowList(anchor) { showWindowList(this, anchor); }
 
   _populateThemeSelect(sel) {
     sel.innerHTML = '';
