@@ -1,5 +1,5 @@
 import { Resizer } from './resizer.js';
-import { escHtml, attachPopoverClose } from './utils.js';
+import { escHtml, createPopover, showContextMenu, copyText } from './utils.js';
 
 class Sidebar {
   constructor(app) {
@@ -353,10 +353,7 @@ class Sidebar {
   }
 
   _showStatusFilterMenu(anchor) {
-    document.querySelectorAll('.status-filter-menu').forEach(m => m.remove());
-    const menu = document.createElement('div'); menu.className = 'status-filter-menu';
-    const rect = anchor.getBoundingClientRect();
-    menu.style.top = (rect.bottom + 2) + 'px'; menu.style.left = rect.left + 'px';
+    const menu = createPopover(anchor, 'status-filter-menu');
 
     const items = [
       { id: 'live', label: 'Live', color: 'var(--green)' },
@@ -380,8 +377,6 @@ class Sidebar {
       row.append(cb, dot, lbl);
       menu.appendChild(row);
     }
-    document.body.appendChild(menu);
-    attachPopoverClose(menu, anchor);
   }
 
   _updateFilterBtn(btn) {
@@ -418,6 +413,13 @@ class Sidebar {
       btn.onclick = () => { this._activeView = f; this._renderQuickTabs(); this._render(); };
       container.appendChild(btn);
     }
+  }
+
+  _toggleCollapse(el, key) {
+    el.classList.toggle('collapsed');
+    if (el.classList.contains('collapsed')) this._collapsedFolders.add(key);
+    else this._collapsedFolders.delete(key);
+    localStorage.setItem('collapsedFolders', JSON.stringify([...this._collapsedFolders]));
   }
 
   toggle(force) {
@@ -566,16 +568,15 @@ class Sidebar {
       linkBtn.style.fontSize = '10px';
       linkBtn.onclick = (e) => {
         e.stopPropagation();
-        this._showFolderGroupPopover(linkBtn, cwd);
+        this._showGroupChecklistPopover(linkBtn,
+          (name) => (this._groupFolders[name] || []).includes(cwd),
+          (name, checked, pop) => { if (checked) this._addFolderToGroup(cwd, name); else this._removeFolderFromGroup(cwd, name); pop.remove(); });
       };
       header.appendChild(linkBtn);
 
       header.onclick = (e) => {
         if (e.target.closest('.folder-add-btn')) return;
-        group.classList.toggle('collapsed');
-        if (group.classList.contains('collapsed')) this._collapsedFolders.add(cwd);
-        else this._collapsedFolders.delete(cwd);
-        localStorage.setItem('collapsedFolders', JSON.stringify([...this._collapsedFolders]));
+        this._toggleCollapse(group, cwd);
       };
 
       const sessionsDiv = document.createElement('div'); sessionsDiv.className = 'folder-sessions';
@@ -691,10 +692,7 @@ class Sidebar {
 
       header.onclick = (e) => {
         if (e.target.closest('.folder-add-btn')) return;
-        groupEl.classList.toggle('collapsed');
-        if (groupEl.classList.contains('collapsed')) this._collapsedFolders.add(collapseKey);
-        else this._collapsedFolders.delete(collapseKey);
-        localStorage.setItem('collapsedFolders', JSON.stringify([...this._collapsedFolders]));
+        this._toggleCollapse(groupEl, collapseKey);
       };
 
       const sessionsDiv = document.createElement('div');
@@ -726,12 +724,7 @@ class Sidebar {
       header.className = 'folder-header';
       header.innerHTML = `<span class="folder-chevron">\u25BC</span><span class="folder-path" style="direction:ltr;font-style:italic">Ungrouped</span><span class="folder-count">${ungrouped.length}</span>`;
 
-      header.onclick = () => {
-        groupEl.classList.toggle('collapsed');
-        if (groupEl.classList.contains('collapsed')) this._collapsedFolders.add(collapseKey);
-        else this._collapsedFolders.delete(collapseKey);
-        localStorage.setItem('collapsedFolders', JSON.stringify([...this._collapsedFolders]));
-      };
+      header.onclick = () => this._toggleCollapse(groupEl, collapseKey);
 
       const sessionsDiv = document.createElement('div');
       sessionsDiv.className = 'folder-sessions';
@@ -849,20 +842,13 @@ class Sidebar {
         val.title = f.copy;
         val.onclick = (e) => {
           e.stopPropagation();
-          const showTip = () => {
+          copyText(f.copy).then(() => {
             const tip = document.createElement('span');
             tip.className = 'session-detail-tooltip';
             tip.textContent = 'Copied!';
             row.appendChild(tip);
             setTimeout(() => tip.remove(), 1000);
-          };
-          if (navigator.clipboard?.writeText) {
-            navigator.clipboard.writeText(f.copy).then(showTip).catch(() => {
-              this._fallbackCopy(f.copy); showTip();
-            });
-          } else {
-            this._fallbackCopy(f.copy); showTip();
-          }
+          });
         };
       }
       row.append(lbl, val);
@@ -1045,21 +1031,17 @@ class Sidebar {
     btn.style.cssText = 'padding:1px 6px;font-size:10px;min-width:0';
     btn.onclick = (e) => {
       e.stopPropagation();
-      this._showGroupsPopover(btn, sessionId);
+      const groups = this._getSessionGroups(sessionId);
+      this._showGroupChecklistPopover(btn,
+        (name) => groups.includes(name),
+        (name, checked) => { if (checked) this._addSessionToGroup(sessionId, name); else this._removeSessionFromGroup(sessionId, name); });
     };
     row.appendChild(btn);
     container.appendChild(row);
   }
 
   _showGroupFoldersPopover(anchor, groupName) {
-    document.querySelectorAll('.groups-popover').forEach(p => p.remove());
-    const pop = document.createElement('div');
-    pop.className = 'groups-popover';
-    const rect = anchor.getBoundingClientRect();
-    pop.style.position = 'fixed';
-    pop.style.left = rect.left + 'px';
-    pop.style.top = (rect.bottom + 2) + 'px';
-    pop.style.zIndex = '99999';
+    const pop = createPopover(anchor, 'groups-popover');
 
     const folders = this._groupFolders[groupName] || [];
 
@@ -1090,23 +1072,15 @@ class Sidebar {
         pop.appendChild(row);
       }
     }
-
-    document.body.appendChild(pop);
-    attachPopoverClose(pop, anchor);
   }
 
   _showGroupContextMenu(x, y, groupName) {
-    document.querySelectorAll('.context-menu').forEach(m => m.remove());
-    const menu = document.createElement('div'); menu.className = 'context-menu';
-    menu.style.left = x + 'px'; menu.style.top = y + 'px';
-
-    const items = [
+    showContextMenu(x, y, [
       { label: 'Rename', action: () => {
         const n = prompt('Rename group:', groupName);
         if (n && n.trim() && n.trim() !== groupName) this._renameGroup(groupName, n.trim());
       }},
       { label: 'Linked folders', action: () => {
-        // Show the folders popover anchored near the menu position
         const anchor = document.createElement('span');
         anchor.style.cssText = 'position:fixed;left:' + x + 'px;top:' + y + 'px;width:0;height:0';
         document.body.appendChild(anchor);
@@ -1117,20 +1091,7 @@ class Sidebar {
       { label: 'Delete group', style: 'color:var(--red,#e55)', action: () => {
         if (confirm('Delete group "' + groupName + '"?\nSessions will not be deleted.')) this._deleteGroup(groupName);
       }},
-    ];
-    for (const item of items) {
-      if (item.separator) { const sep = document.createElement('div'); sep.className = 'context-menu-separator'; menu.appendChild(sep); continue; }
-      const el = document.createElement('div'); el.className = 'context-menu-item'; el.textContent = item.label;
-      if (item.style) el.style.cssText = item.style;
-      el.onclick = () => { menu.remove(); item.action(); };
-      menu.appendChild(el);
-    }
-    // Keep menu on screen
-    document.body.appendChild(menu);
-    const mr = menu.getBoundingClientRect();
-    if (mr.right > window.innerWidth) menu.style.left = (window.innerWidth - mr.width - 4) + 'px';
-    if (mr.bottom > window.innerHeight) menu.style.top = (window.innerHeight - mr.height - 4) + 'px';
-    attachPopoverClose(menu);
+    ]);
   }
 
   _assignSessionToGroup(sessionId, groupName) {
@@ -1142,31 +1103,17 @@ class Sidebar {
     }
   }
 
-  _showFolderGroupPopover(anchor, folderPath) {
-    document.querySelectorAll('.groups-popover').forEach(p => p.remove());
-    const pop = document.createElement('div');
-    pop.className = 'groups-popover';
-    const rect = anchor.getBoundingClientRect();
-    pop.style.position = 'fixed';
-    pop.style.left = rect.left + 'px';
-    pop.style.top = (rect.bottom + 2) + 'px';
-    pop.style.zIndex = '99999';
+  _showGroupChecklistPopover(anchor, isCheckedFn, onToggleFn) {
+    const pop = createPopover(anchor, 'groups-popover');
 
     const groupNames = this._getGroupNames();
     for (const name of groupNames) {
-      const folders = this._groupFolders[name] || [];
-      const isLinked = folders.includes(folderPath);
       const row = document.createElement('label');
       row.className = 'session-detail-group-item';
       const cb = document.createElement('input');
       cb.type = 'checkbox';
-      cb.checked = isLinked;
-      cb.onchange = (e) => {
-        e.stopPropagation();
-        if (cb.checked) this._addFolderToGroup(folderPath, name);
-        else this._removeFolderFromGroup(folderPath, name);
-        pop.remove();
-      };
+      cb.checked = isCheckedFn(name);
+      cb.onchange = (e) => { e.stopPropagation(); onToggleFn(name, cb.checked, pop); };
       const lbl = document.createElement('span');
       lbl.textContent = name;
       row.append(cb, lbl);
@@ -1188,73 +1135,11 @@ class Sidebar {
       const name = prompt('New group name:');
       if (name && name.trim()) {
         this._createGroup(name.trim());
-        this._addFolderToGroup(folderPath, name.trim());
+        onToggleFn(name.trim(), true, pop);
         pop.remove();
       }
     };
     pop.appendChild(createRow);
-
-    document.body.appendChild(pop);
-    attachPopoverClose(pop, anchor);
-  }
-
-  _showGroupsPopover(anchor, sessionId) {
-    document.querySelectorAll('.groups-popover').forEach(p => p.remove());
-    const pop = document.createElement('div');
-    pop.className = 'groups-popover';
-    const rect = anchor.getBoundingClientRect();
-    pop.style.position = 'fixed';
-    pop.style.left = rect.left + 'px';
-    pop.style.top = (rect.bottom + 2) + 'px';
-    pop.style.zIndex = '99999';
-
-    const groupNames = this._getGroupNames();
-    const sessionGroups = this._getSessionGroups(sessionId);
-
-    for (const name of groupNames) {
-      const row = document.createElement('label');
-      row.className = 'session-detail-group-item';
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.checked = sessionGroups.includes(name);
-      cb.onchange = (e) => {
-        e.stopPropagation();
-        if (cb.checked) this._addSessionToGroup(sessionId, name);
-        else this._removeSessionFromGroup(sessionId, name);
-      };
-      const lbl = document.createElement('span');
-      lbl.textContent = name;
-      row.append(cb, lbl);
-      row.onclick = (e) => e.stopPropagation();
-      pop.appendChild(row);
-    }
-
-    const createRow = document.createElement('div');
-    createRow.className = 'session-detail-group-create';
-    createRow.textContent = '+ New group';
-    createRow.onclick = (e) => {
-      e.stopPropagation();
-      const name = prompt('New group name:');
-      if (name && name.trim()) {
-        this._createGroup(name.trim());
-        this._addSessionToGroup(sessionId, name.trim());
-        pop.remove();
-      }
-    };
-    pop.appendChild(createRow);
-
-    document.body.appendChild(pop);
-    attachPopoverClose(pop, anchor);
-  }
-
-  _fallbackCopy(text) {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.cssText = 'position:fixed;left:-9999px';
-    document.body.appendChild(ta);
-    ta.select();
-    document.execCommand('copy');
-    ta.remove();
   }
 
 }

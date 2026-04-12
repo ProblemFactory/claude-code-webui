@@ -49,6 +49,7 @@ export function createPopover(anchor, className, opts = {}) {
 export function showContextMenu(x, y, items, className = 'context-menu') {
   const pop = createPopover(document.body, className, { position: 'cursor', x, y });
   for (const item of items) {
+    if (item.separator) { const sep = document.createElement('div'); sep.className = className + '-separator'; pop.appendChild(sep); continue; }
     const el = document.createElement('div');
     el.className = className + '-item';
     el.textContent = item.label;
@@ -56,6 +57,10 @@ export function showContextMenu(x, y, items, className = 'context-menu') {
     el.onclick = () => { pop.remove(); item.action(); };
     pop.appendChild(el);
   }
+  // Keep menu on screen
+  const mr = pop.getBoundingClientRect();
+  if (mr.right > window.innerWidth) pop.style.left = (window.innerWidth - mr.width - 4) + 'px';
+  if (mr.bottom > window.innerHeight) pop.style.top = (window.innerHeight - mr.height - 4) + 'px';
   return pop;
 }
 
