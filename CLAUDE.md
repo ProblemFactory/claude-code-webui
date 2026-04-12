@@ -263,6 +263,8 @@ Recovery uses greedy filesystem checking as fallback, but the forward encoding i
   - Close windows that exist locally but not in remote state
   - File explorer navigation sync: calls `explorer.navigate()` on path change
 - All coordinates use `gridBounds` (0-1 proportional), no pixel values in sync payload
+- **Window creation sync**: `_createRemoteWindow()` handles session attach, file explorer, file viewer/editor — passes `syncId` to `createWindow` for consistent IDs across clients
+- **Maximize/restore sync**: `toggleMaximize` and `restore` call `_captureGridBounds` after resize to capture correct proportional bounds
 - 500ms autosave debounce ensures sync doesn't fire on every micro-change
 - 1s `_restoring` cooldown prevents remote state application from triggering outbound sync
 
