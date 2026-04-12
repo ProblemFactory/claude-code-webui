@@ -532,6 +532,7 @@ class WindowManager {
     this.focusWindow(id);
     const el = win.element;
     el.style.cursor = 'move';
+    el.style.pointerEvents = 'none'; // block all interaction with window content during move
     document.body.style.cursor = 'move';
 
     const onMove = (e) => {
@@ -543,6 +544,7 @@ class WindowManager {
       e.preventDefault();
       e.stopImmediatePropagation();
       el.style.cursor = '';
+      el.style.pointerEvents = '';
       document.body.style.cursor = '';
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mousedown', onClick, true);
@@ -550,7 +552,7 @@ class WindowManager {
       this._notify();
     };
     document.addEventListener('mousemove', onMove);
-    document.addEventListener('mousedown', onClick, true); // capture phase to intercept before other handlers
+    document.addEventListener('mousedown', onClick, true);
   }
 
   toggleMaximize(id) {
