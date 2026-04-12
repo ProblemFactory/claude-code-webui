@@ -3,7 +3,7 @@ import { setupDirAutocomplete } from './autocomplete.js';
 
 const DEFAULT_COLUMNS = { name: true, size: true, modified: true, created: false, type: false };
 const ALL_COLUMNS = [
-  { key: 'name', label: 'Name', flex: 1, alwaysOn: true },
+  { key: 'name', label: 'Name', defaultWidth: 250, alwaysOn: true },
   { key: 'size', label: 'Size', defaultWidth: 80 },
   { key: 'modified', label: 'Modified', defaultWidth: 140 },
   { key: 'created', label: 'Created', defaultWidth: 140 },
@@ -488,14 +488,8 @@ class FileExplorer {
     for (const col of visCols) {
       const el = document.createElement('span');
       el.className = 'file-sort-col';
-      if (col.alwaysOn) {
-        // Name column: flex, with CSS var min-width for resize
-        el.style.flex = '1';
-        el.style.minWidth = 'var(--col-name-w, 0)';
-      } else {
-        el.style.width = `var(--col-${col.key}-w, ${col.defaultWidth}px)`;
-        el.style.flexShrink = '0';
-      }
+      el.style.width = `var(--col-${col.key}-w, ${col.defaultWidth}px)`;
+      el.style.flexShrink = '0';
       el.style.position = 'relative';
       const arrow = this._sortBy === col.key ? (this._sortAsc ? ' \u25B2' : ' \u25BC') : '';
       el.textContent = col.label + arrow;
@@ -527,8 +521,7 @@ class FileExplorer {
     let currentWidth = startWidth;
     let rafId = null;
     let moved = false;
-    const isName = !!col.alwaysOn;
-    const varName = isName ? '--col-name-w' : `--col-${col.key}-w`;
+    const varName = `--col-${col.key}-w`;
 
     const onMove = (e) => {
       moved = true;
