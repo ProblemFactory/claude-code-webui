@@ -340,6 +340,7 @@ class ChatView {
 
     // Sync draft from other clients via StateSync
     this._draftSyncHandler = (value) => {
+      console.log('[Draft] sync handler fired, sessionId:', this.sessionId, 'value:', value?.substring(0, 30), 'focused:', document.activeElement === this._textarea);
       if (document.activeElement !== this._textarea) {
         this._textarea.value = value || '';
         this._textarea.style.height = 'auto';
@@ -347,6 +348,7 @@ class ChatView {
       }
     };
     const sync = getStateSync();
+    console.log('[Draft] registering listener for key:', 'chat:' + this.sessionId, 'sync exists:', !!sync);
     if (sync) sync.on('drafts', 'chat:' + this.sessionId, this._draftSyncHandler);
 
     // Slash command list (populated from system.init)
