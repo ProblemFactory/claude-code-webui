@@ -19,6 +19,7 @@ class LayoutManager {
         gridBounds: win.gridBounds || undefined,
         zIndex: parseInt(el.style.zIndex) || 0,
       };
+      if (win._isSnapped) { winState.isSnapped = true; winState.preSnapBounds = win._preSnapBounds; }
       // For terminals, save both webui session id and claude session id + overrides
       if (win.type === 'terminal' && termSession) {
         winState.serverSessionId = termSession.sessionId;
@@ -99,6 +100,7 @@ class LayoutManager {
         el.style.width = winState.width; el.style.height = winState.height;
       }
       if (winState.zIndex) { winInfo.element.style.zIndex = winState.zIndex; if (winState.zIndex >= this.app.wm.zIndex) this.app.wm.zIndex = winState.zIndex + 1; }
+      if (winState.isSnapped) { winInfo._isSnapped = true; winInfo._preSnapBounds = winState.preSnapBounds; }
       if (winState.isMinimized) this.app.wm.minimize(winInfo.id);
       setTimeout(() => { if (winInfo.onResize) winInfo.onResize(); }, 200);
       // Force terminal redraw after attach completes (triggers SIGWINCH via size toggle)
