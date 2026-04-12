@@ -1320,7 +1320,12 @@ class App {
         minimizeItem.className = 'taskbar-context-item';
         minimizeItem.textContent = win.isMinimized ? '\u25A1 Restore' : '\u2013 Minimize';
         minimizeItem.onclick = () => { menu.remove(); win.isMinimized ? this.wm.restore(id) : this.wm.minimize(id); };
-        menu.append(moveItem, minimizeItem);
+        const closeItem = document.createElement('div');
+        closeItem.className = 'taskbar-context-item';
+        closeItem.style.color = 'var(--red, #e55)';
+        closeItem.textContent = '\u2715 Close';
+        closeItem.onclick = () => { menu.remove(); this.wm.closeWindow(id); };
+        menu.append(moveItem, minimizeItem, closeItem);
         document.body.appendChild(menu);
         setTimeout(() => document.addEventListener('mousedown', function close(ev) { if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('mousedown', close); } }), 0);
       });
