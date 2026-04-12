@@ -280,13 +280,19 @@
   width: 100%; height: 100%; overflow: hidden; position: absolute; top: 0; left: 0;
 }
 
-/* ── Editor Settings Toolbar ── */
+/* ── Editor Toolbar ── */
+.editor-toolbar { justify-content: space-between; }
+.editor-toolbar-left {
+  display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1; overflow: hidden;
+}
+.editor-toolbar-left .file-path { flex: 0 1 auto; }
+.editor-toolbar-right { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
 .editor-toolbar-sep {
   width: 1px; height: 16px; background: var(--border); margin: 0 2px; flex-shrink: 0;
 }
-.editor-setting-btn { width: auto; padding: 2px 8px; font-size: 11px; }
+.save-indicator { font-size: 10px; white-space: nowrap; flex-shrink: 0; }
 .editor-font-size-display {
-  font-size: 10px; color: var(--text-secondary); min-width: 30px; text-align: center;
+  font-size: 10px; color: var(--text-secondary); min-width: 18px; text-align: center;
   font-variant-numeric: tabular-nums;
 }
 

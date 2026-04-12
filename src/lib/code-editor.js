@@ -82,64 +82,33 @@ class CodeEditor {
 
     const container = document.createElement('div'); container.className = 'editor-container';
 
-    // Editor toolbar (top row: file path, lang selector, save, download)
+    // Editor toolbar
     const toolbar = document.createElement('div'); toolbar.className = 'editor-toolbar';
-    const pathSpan = document.createElement('span'); pathSpan.className = 'file-path'; pathSpan.textContent = filePath;
+
+    // Left: file path + save indicator
+    const toolbarLeft = document.createElement('div'); toolbarLeft.className = 'editor-toolbar-left';
+    const pathSpan = document.createElement('span'); pathSpan.className = 'file-path'; pathSpan.textContent = fileName || filePath.split('/').pop();
+    pathSpan.title = filePath;
     this.saveIndicator = document.createElement('span'); this.saveIndicator.className = 'save-indicator';
+    toolbarLeft.append(pathSpan, this.saveIndicator);
+
+    // Right: controls
+    const toolbarRight = document.createElement('div'); toolbarRight.className = 'editor-toolbar-right';
 
     // Language selector
     this.langSelect = document.createElement('select');
-    this.langSelect.className = 'toolbar-select'; this.langSelect.style.fontSize = '10px';
+    this.langSelect.className = 'toolbar-select';
     for (const lang of LANGUAGES) {
       const opt = document.createElement('option'); opt.value = lang.id; opt.textContent = lang.label;
       this.langSelect.appendChild(opt);
     }
     this.langSelect.onchange = () => this._changeLang(this.langSelect.value);
 
-    const btnSave = this._btn('Save'); btnSave.onclick = () => this.save();
-    if (this._isReadOnly) btnSave.style.display = 'none';
-    const btnDownload = this._btn('Download'); btnDownload.onclick = () => window.open(`/api/download?path=${encodeURIComponent(filePath)}`);
-
-    // Settings buttons (word wrap, font size, theme)
-    const sep = document.createElement('span'); sep.className = 'editor-toolbar-sep';
-
-    // Word wrap toggle
-    const btnWrap = this._btn(this._settings.wordWrap ? 'Wrap: On' : 'Wrap: Off');
-    btnWrap.className = 'file-tool-btn editor-setting-btn';
-    if (this._settings.wordWrap) btnWrap.classList.add('active');
-    btnWrap.onclick = () => {
-      this._settings.wordWrap = !this._settings.wordWrap;
-      btnWrap.textContent = this._settings.wordWrap ? 'Wrap: On' : 'Wrap: Off';
-      btnWrap.classList.toggle('active', this._settings.wordWrap);
-      this._applyWrap();
-      saveEditorSettings(this._settings);
-    };
-
-    // Font size controls
-    const sizeDown = this._btn('A-'); sizeDown.className = 'file-tool-btn editor-setting-btn';
-    this.fontSizeDisplay = document.createElement('span');
-    this.fontSizeDisplay.className = 'editor-font-size-display';
-    this.fontSizeDisplay.textContent = this._settings.fontSize + 'px';
-    const sizeUp = this._btn('A+'); sizeUp.className = 'file-tool-btn editor-setting-btn';
-    sizeDown.onclick = () => { this._changeFontSize(-1); };
-    sizeUp.onclick = () => { this._changeFontSize(1); };
-
-    // Theme toggle
-    const btnTheme = this._btn(this._settings.theme === 'dark' ? 'Dark' : 'Light');
-    btnTheme.className = 'file-tool-btn editor-setting-btn';
-    btnTheme.onclick = () => {
-      this._settings.theme = this._settings.theme === 'dark' ? 'light' : 'dark';
-      btnTheme.textContent = this._settings.theme === 'dark' ? 'Dark' : 'Light';
-      this._applyTheme();
-      saveEditorSettings(this._settings);
-    };
-
-    // Markdown preview toggle
+    // Preview toggle (markdown/html)
     this._btnPreview = this._btn('Preview');
-    this._btnPreview.className = 'file-tool-btn editor-setting-btn';
-    this._btnPreview.style.display = 'none'; // shown for markdown and html
+    this._btnPreview.style.display = 'none';
     this._previewing = false;
-    this._previewType = null; // 'markdown' or 'html'
+    this._previewType = null;
     this._btnPreview.onclick = () => {
       this._previewing = !this._previewing;
       this._btnPreview.textContent = this._previewing ? 'Edit' : 'Preview';
@@ -148,27 +117,63 @@ class CodeEditor {
         this.editorBody.style.display = 'none';
         const src = this.editorView?.state.doc.toString() || '';
         if (this._previewType === 'html') {
-          // HTML preview: render in sandboxed iframe
           if (!this._previewIframe) {
             this._previewIframe = document.createElement('iframe');
-            this._previewIframe.className = 'html-preview';
             this._previewIframe.sandbox = 'allow-scripts';
             this._previewIframe.style.cssText = 'width:100%;height:100%;border:none';
             this._previewBody.appendChild(this._previewIframe);
           }
           this._previewIframe.srcdoc = src;
-          this._previewBody.style.display = 'block';
         } else {
           this._previewBody.innerHTML = marked.parse(src);
-          this._previewBody.style.display = 'block';
         }
+        this._previewBody.style.display = 'block';
       } else {
         this._previewBody.style.display = 'none';
         this.editorBody.style.display = '';
       }
     };
 
-    toolbar.append(pathSpan, this.saveIndicator, this.langSelect, btnSave, btnDownload, sep, btnWrap, sizeDown, this.fontSizeDisplay, sizeUp, btnTheme, this._btnPreview);
+    const sep = () => { const s = document.createElement('span'); s.className = 'editor-toolbar-sep'; return s; };
+
+    // Word wrap toggle — icon-style, no text label
+    const btnWrap = this._btn('\u21A9'); btnWrap.title = 'Toggle word wrap';
+    if (this._settings.wordWrap) btnWrap.classList.add('active');
+    btnWrap.onclick = () => {
+      this._settings.wordWrap = !this._settings.wordWrap;
+      btnWrap.classList.toggle('active', this._settings.wordWrap);
+      this._applyWrap();
+      saveEditorSettings(this._settings);
+    };
+
+    // Font size
+    const sizeDown = this._btn('\u2212'); sizeDown.title = 'Decrease font size';
+    this.fontSizeDisplay = document.createElement('span');
+    this.fontSizeDisplay.className = 'editor-font-size-display';
+    this.fontSizeDisplay.textContent = this._settings.fontSize;
+    const sizeUp = this._btn('+'); sizeUp.title = 'Increase font size';
+    sizeDown.onclick = () => this._changeFontSize(-1);
+    sizeUp.onclick = () => this._changeFontSize(1);
+
+    // Theme toggle — icon-style
+    const btnTheme = this._btn(this._settings.theme === 'dark' ? '\u263E' : '\u2600');
+    btnTheme.title = 'Toggle editor theme';
+    btnTheme.onclick = () => {
+      this._settings.theme = this._settings.theme === 'dark' ? 'light' : 'dark';
+      btnTheme.textContent = this._settings.theme === 'dark' ? '\u263E' : '\u2600';
+      this._applyTheme();
+      saveEditorSettings(this._settings);
+    };
+
+    // Save + download
+    const btnSave = this._btn('\u2913'); btnSave.title = 'Save (Ctrl+S)';
+    btnSave.onclick = () => this.save();
+    if (this._isReadOnly) btnSave.style.display = 'none';
+    const btnDownload = this._btn('\u21E9'); btnDownload.title = 'Download';
+    btnDownload.onclick = () => window.open(`/api/download?path=${encodeURIComponent(filePath)}`);
+
+    toolbarRight.append(this.langSelect, this._btnPreview, sep(), btnWrap, sizeDown, this.fontSizeDisplay, sizeUp, btnTheme, sep(), btnSave, btnDownload);
+    toolbar.append(toolbarLeft, toolbarRight);
 
     this.editorBody = document.createElement('div'); this.editorBody.className = 'editor-body';
     this._previewBody = document.createElement('div'); this._previewBody.className = 'markdown-preview editor-body'; this._previewBody.style.display = 'none'; this._previewBody.style.overflow = 'auto'; this._previewBody.style.padding = '12px 16px';

@@ -355,12 +355,6 @@ class FileExplorer {
           this._renderItems();
         });
       }
-      // Auto-fit button
-      const fitBtn = document.createElement('div');
-      fitBtn.className = 'file-view-menu-item';
-      fitBtn.textContent = 'Auto-fit column widths';
-      fitBtn.onclick = (e) => { e.stopPropagation(); this._autoFitColumns(); pop.remove(); };
-      pop.appendChild(fitBtn);
     }
 
     // Position: align right edge to anchor right edge
@@ -452,6 +446,8 @@ class FileExplorer {
         },
       };
     });
+    menuItems.push({ separator: true });
+    menuItems.push({ label: 'Auto-fit column widths', action: () => this._autoFitColumns() });
     showContextMenu(x, y, menuItems);
   }
 
