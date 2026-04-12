@@ -891,26 +891,65 @@ class WindowManager {
   }
 
   _setupTabDrag(tabEl, winId, chain) {
-    let mouseDown = false, startY = 0;
+    let mouseDown = false, startX = 0, startY = 0, detached = false;
 
     tabEl.addEventListener('mousedown', (e) => {
       if (e.target.closest('.tab-close') || e.button !== 0) return;
-      // Don't start tab drag if only one tab (nothing to drag out of)
       if (chain.tabs.length <= 1) return;
-      mouseDown = true;
-      startY = e.clientY;
+      mouseDown = true; detached = false;
+      startX = e.clientX; startY = e.clientY;
+      e.preventDefault();
     });
 
     const onMove = (e) => {
       if (!mouseDown) return;
-      if (e.clientY - startY > 30) {
-        mouseDown = false;
-        // Pull this tab out of the group
+      if (!detached && Math.abs(e.clientY - startY) > 30) {
+        // Detach from chain — window gets its own element back
+        detached = true;
         this._detachFromChain(chain, winId);
+        // Position the detached window centered on cursor
+        const win = this.windows.get(winId);
+        if (!win) { mouseDown = false; return; }
+        const w = parseInt(win.element.style.width) || 700;
+        win.element.style.left = (e.clientX - w / 2) + 'px';
+        win.element.style.top = (e.clientY - 15) + 'px';
+        win.element.classList.add('dragging');
+        if (this.grid) this.gridOverlay.classList.add('dragging');
+      }
+      if (detached) {
+        // Follow cursor like a normal window drag
+        const win = this.windows.get(winId);
+        if (!win) return;
+        const w = parseInt(win.element.style.width) || 700;
+        win.element.style.left = (e.clientX - w / 2) + 'px';
+        win.element.style.top = (e.clientY - 15) + 'px';
+        // Show snap indicators
+        if (!e.altKey) {
+          if (this.grid) this._showGridHighlight(e.clientX, e.clientY);
+          else this._showSnap(e.clientX, e.clientY);
+        }
       }
     };
 
-    const onUp = () => { mouseDown = false; };
+    const onUp = (e) => {
+      if (!mouseDown) return;
+      mouseDown = false;
+      if (!detached) return;
+      const win = this.windows.get(winId);
+      if (!win) return;
+      win.element.classList.remove('dragging');
+      this.snapIndicator.style.display = 'none';
+      this.gridOverlay.classList.remove('dragging');
+      // Apply snap if applicable
+      let snapped = false;
+      if (!e.altKey) {
+        if (this.grid) { this._snapToGrid(winId, e.clientX, e.clientY); snapped = true; }
+        else { const snap = this._getSnapZone(e.clientX, e.clientY); if (snap) { this._applySnap(winId, snap); snapped = true; } }
+      }
+      if (snapped) win._isSnapped = true;
+      this._clearGridHighlight();
+      setTimeout(() => { this._captureGridBounds(win); this._scheduleOverlapUpdate(); this._notify(); }, 250);
+    };
 
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
