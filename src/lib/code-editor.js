@@ -264,11 +264,7 @@ class CodeEditor {
       parent: this.editorBody,
     });
 
-    // Show preview button for markdown and html
-    if (detectedLang === 'markdown' || detectedLang === 'html') {
-      this._btnPreview.style.display = '';
-      this._previewType = detectedLang;
-    }
+    this._updatePreviewSupport(detectedLang);
 
     // Jump to line if requested
     if (this._gotoLine && this.editorView) {
@@ -289,14 +285,20 @@ class CodeEditor {
     if (!this.editorView) return;
     const actualId = langId === 'auto' ? detectLang(this.filePath) : langId;
     this.editorView.dispatch({ effects: this._langCompartment.reconfigure(getLangExtension(actualId)) });
-    // Show/hide preview button
-    const hasPreview = actualId === 'markdown' || actualId === 'html';
+    this._updatePreviewSupport(actualId);
+  }
+
+  /** Show/hide Preview button based on current language. Single source of truth. */
+  _updatePreviewSupport(langId) {
+    const hasPreview = langId === 'markdown' || langId === 'html';
     this._btnPreview.style.display = hasPreview ? '' : 'none';
-    this._previewType = hasPreview ? actualId : null;
+    this._previewType = hasPreview ? langId : null;
     if (!hasPreview && this._previewing) {
-      this._previewing = false; this._btnPreview.textContent = 'Preview';
+      this._previewing = false;
+      this._btnPreview.textContent = 'Preview';
       this._btnPreview.classList.remove('active');
-      this._previewBody.style.display = 'none'; this.editorBody.style.display = '';
+      this._previewBody.style.display = 'none';
+      this.editorBody.style.display = '';
     }
   }
 
