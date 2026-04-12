@@ -544,9 +544,12 @@ class WindowManager {
     }
     if (win.onResize) win.onResize();
 
-    el.style.cursor = 'move';
+    // Full-screen overlay blocks all other interaction during move
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:99998;cursor:move';
+    document.body.appendChild(overlay);
+    el.style.zIndex = '99999'; // above overlay
     el.style.pointerEvents = 'none';
-    document.body.style.cursor = 'move';
 
     const onMove = (e) => {
       const w = el.offsetWidth || parseInt(el.style.width) || 350;
@@ -556,9 +559,9 @@ class WindowManager {
     const onClick = (e) => {
       e.preventDefault();
       e.stopImmediatePropagation();
-      el.style.cursor = '';
+      overlay.remove();
       el.style.pointerEvents = '';
-      document.body.style.cursor = '';
+      el.style.zIndex = this.zIndex++;
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mousedown', onClick, true);
       this._captureGridBounds(win);
