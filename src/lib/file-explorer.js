@@ -26,10 +26,12 @@ class FileExplorer {
     this._viewMode = 'list'; // 'list' or 'icon'
     this._renderLimit = 100; // initial batch size for large folders
     this._bookmarks = [];
-    this._bookmarksPanelVisible = true;
+    this._selectedPath = null;
 
     // Load settings
     const saved = _loadSettings();
+    this._bookmarksPanelVisible = saved?.bookmarksVisible !== false;
+    this._previewVisible = saved?.previewVisible || false;
     this._showHidden = saved?.showHidden || false;
     this._mixedSort = saved?.mixedSort || false;
     this._sortBy = saved?.defaultSort || 'name';
@@ -93,7 +95,26 @@ class FileExplorer {
     const mainPane = document.createElement('div');
     mainPane.className = 'file-main-pane';
     mainPane.append(this.sortHeader, this.listEl);
-    contentArea.append(this._bookmarkPanel, mainPane);
+
+    // Preview panel (shows selected file content)
+    this._previewPanel = document.createElement('div');
+    this._previewPanel.className = 'file-preview-panel' + (this._previewVisible ? '' : ' hidden');
+    this._previewContent = document.createElement('div');
+    this._previewContent.className = 'file-preview-content';
+    const previewHeader = document.createElement('div');
+    previewHeader.className = 'file-preview-header';
+    this._previewTitle = document.createElement('span');
+    this._previewTitle.className = 'file-preview-title';
+    this._previewTitle.textContent = 'No file selected';
+    previewHeader.append(this._previewTitle);
+    this._previewPanel.append(previewHeader, this._previewContent);
+
+    contentArea.append(this._bookmarkPanel, mainPane, this._previewPanel);
+    this._contentArea = contentArea;
+    this._el = el;
+    // Auto-detect preview layout direction based on window aspect ratio
+    this._previewRO = new ResizeObserver(() => this._updatePreviewLayout());
+    this._previewRO.observe(contentArea);
 
     // Upload drop zone
     this.uploadInput = document.createElement('input'); this.uploadInput.type = 'file'; this.uploadInput.multiple = true;
@@ -259,39 +280,19 @@ class FileExplorer {
   // ── View menu (replaces old settings, view mode, group by buttons) ──
   _showViewMenu(anchor) {
     const pop = createPopover(anchor, 'file-view-menu');
+    const rebuild = () => { pop.remove(); this._showViewMenu(anchor); };
 
     // Section: View Mode
     this._viewMenuSection(pop, 'View Mode');
-    this._viewMenuRadio(pop, 'view-mode', [
+    this._viewMenuRadio(pop, [
       { label: 'List', value: 'list' },
       { label: 'Icons', value: 'icon' },
     ], this._viewMode, (v) => {
       this._viewMode = v;
       this._renderSortHeader();
       this._renderItems();
+      rebuild();
     });
-
-    this._viewMenuSep(pop);
-
-    // Section: Sort
-    this._viewMenuSection(pop, 'Sort');
-    const sortOptions = [
-      { label: 'Name', value: 'name' },
-      { label: 'Size', value: 'size' },
-      { label: 'Modified', value: 'modified' },
-      { label: 'Created', value: 'created' },
-      { label: 'Type', value: 'type' },
-    ];
-    this._viewMenuRadio(pop, 'sort', sortOptions, this._sortBy, (v) => {
-      if (this._sortBy === v) this._sortAsc = !this._sortAsc;
-      else { this._sortBy = v; this._sortAsc = v === 'name'; }
-      this._persistSettings();
-      this._renderSortHeader();
-      this._renderItems();
-      // Re-render the menu to update arrow indicators
-      pop.remove();
-      this._showViewMenu(anchor);
-    }, /* showArrow */ true);
 
     this._viewMenuSep(pop);
 
@@ -306,13 +307,20 @@ class FileExplorer {
     this._viewMenuCheckbox(pop, 'Show bookmarks panel', this._bookmarksPanelVisible, (v) => {
       this._bookmarksPanelVisible = v;
       this._bookmarkPanel.classList.toggle('hidden', !v);
+      this._persistSettings();
+    });
+    this._viewMenuCheckbox(pop, 'Show preview panel', this._previewVisible, (v) => {
+      this._previewVisible = v;
+      this._previewPanel.classList.toggle('hidden', !v);
+      this._persistSettings();
+      if (v) this._updatePreview();
     });
 
     this._viewMenuSep(pop);
 
     // Section: Group By
     this._viewMenuSection(pop, 'Group By');
-    this._viewMenuRadio(pop, 'group', [
+    this._viewMenuRadio(pop, [
       { label: 'None', value: 'none' },
       { label: 'Type', value: 'type' },
       { label: 'Modified', value: 'modified' },
@@ -322,6 +330,7 @@ class FileExplorer {
       this._collapsedGroups.clear();
       localStorage.setItem('fileExplorerGroupBy', v);
       this._renderItems();
+      rebuild();
     });
 
     // Section: Columns (only in list mode)
@@ -361,7 +370,7 @@ class FileExplorer {
     pop.appendChild(el);
   }
 
-  _viewMenuRadio(pop, group, options, current, onChange, showArrow) {
+  _viewMenuRadio(pop, options, current, onChange) {
     for (const opt of options) {
       const row = document.createElement('div');
       row.className = 'file-view-menu-item';
@@ -373,12 +382,6 @@ class FileExplorer {
       label.textContent = opt.label;
       label.style.flex = '1';
       row.append(radio, label);
-      if (showArrow && opt.value === current) {
-        const arrow = document.createElement('span');
-        arrow.className = 'file-view-menu-arrow';
-        arrow.textContent = this._sortAsc ? '\u25B2' : '\u25BC';
-        row.appendChild(arrow);
-      }
       row.onclick = (e) => { e.stopPropagation(); onChange(opt.value); };
       pop.appendChild(row);
     }
@@ -410,6 +413,8 @@ class FileExplorer {
       mixedSort: this._mixedSort,
       defaultSort: this._sortBy,
       defaultSortAsc: this._sortAsc,
+      bookmarksVisible: this._bookmarksPanelVisible,
+      previewVisible: this._previewVisible,
     });
   }
 
@@ -645,7 +650,12 @@ class FileExplorer {
       cell.append(icon, label);
       cell.draggable = true;
       cell.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/plain', fullPath); e.dataTransfer.setData('application/x-file-path', fullPath); if (item.isDirectory) e.dataTransfer.setData('application/x-folder-path', fullPath); });
-      cell.addEventListener('click', () => { this.listEl.querySelectorAll('.file-icon-cell').forEach(c => c.classList.remove('selected')); cell.classList.add('selected'); });
+      cell.addEventListener('click', () => {
+        this.listEl.querySelectorAll('.file-icon-cell').forEach(c => c.classList.remove('selected'));
+        cell.classList.add('selected');
+        this._selectedPath = item.isDirectory ? null : fullPath;
+        this._updatePreview();
+      });
       cell.addEventListener('dblclick', () => {
         if (item.isDirectory) this.navigate(fullPath);
         else this.app.openFile(fullPath, item.name);
@@ -682,7 +692,12 @@ class FileExplorer {
 
       row.draggable = true;
       row.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/plain', fullPath); e.dataTransfer.setData('application/x-file-path', fullPath); if (item.isDirectory) e.dataTransfer.setData('application/x-folder-path', fullPath); });
-      row.addEventListener('click', () => { this.listEl.querySelectorAll('.file-item').forEach(r => r.classList.remove('selected')); row.classList.add('selected'); });
+      row.addEventListener('click', () => {
+        this.listEl.querySelectorAll('.file-item').forEach(r => r.classList.remove('selected'));
+        row.classList.add('selected');
+        this._selectedPath = item.isDirectory ? null : fullPath;
+        this._updatePreview();
+      });
       row.addEventListener('dblclick', () => {
         if (item.isDirectory) this.navigate(fullPath);
         else this.app.openFile(fullPath, item.name);
@@ -850,6 +865,59 @@ class FileExplorer {
       onNavigate: (path) => this.navigate(path),
     });
     this._hideAC = ac.hide;
+  }
+
+  // ── Preview Panel ──
+
+  _updatePreviewLayout() {
+    if (!this._previewVisible || this._previewPanel.classList.contains('hidden')) return;
+    const rect = this._contentArea.getBoundingClientRect();
+    const isWide = rect.width > rect.height * 1.3;
+    this._contentArea.classList.toggle('preview-horizontal', isWide);
+    this._contentArea.classList.toggle('preview-vertical', !isWide);
+  }
+
+  async _updatePreview() {
+    if (!this._previewVisible) return;
+    if (!this._selectedPath) {
+      this._previewTitle.textContent = 'No file selected';
+      this._previewContent.innerHTML = '<div class="empty-hint">Select a file to preview</div>';
+      return;
+    }
+    const fp = this._selectedPath;
+    const name = fp.split('/').pop();
+    this._previewTitle.textContent = name;
+    this._previewContent.innerHTML = '<div class="empty-hint">Loading...</div>';
+
+    try {
+      const infoRes = await fetch(`/api/file/info?path=${encodeURIComponent(fp)}`);
+      const info = await infoRes.json();
+      if (info.error) { this._previewContent.innerHTML = `<div class="empty-hint">${info.error}</div>`; return; }
+      if (info.isBinary) {
+        const ext = name.split('.').pop().toLowerCase();
+        const imgExts = ['png','jpg','jpeg','gif','webp','svg','bmp','ico'];
+        if (imgExts.includes(ext)) {
+          this._previewContent.innerHTML = `<img src="/api/file/raw?path=${encodeURIComponent(fp)}" style="max-width:100%;max-height:100%;object-fit:contain">`;
+        } else {
+          this._previewContent.innerHTML = `<div class="empty-hint">${formatSize(info.size)} binary file</div>`;
+        }
+        return;
+      }
+      if (info.size > 512 * 1024) {
+        this._previewContent.innerHTML = `<div class="empty-hint">${formatSize(info.size)} — too large to preview</div>`;
+        return;
+      }
+      const res = await fetch(`/api/file/content?path=${encodeURIComponent(fp)}`);
+      const data = await res.json();
+      if (data.error) { this._previewContent.innerHTML = `<div class="empty-hint">${data.error}</div>`; return; }
+      const pre = document.createElement('pre');
+      pre.className = 'file-preview-code';
+      pre.textContent = data.content;
+      this._previewContent.innerHTML = '';
+      this._previewContent.appendChild(pre);
+    } catch (err) {
+      this._previewContent.innerHTML = `<div class="empty-hint">Error: ${err.message}</div>`;
+    }
   }
 
   _fileIcon(name) {
