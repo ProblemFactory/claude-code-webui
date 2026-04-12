@@ -1,13 +1,13 @@
-import { formatSize, attachPopoverClose } from './utils.js';
+import { formatSize, attachPopoverClose, createPopover, showContextMenu } from './utils.js';
 import { setupDirAutocomplete } from './autocomplete.js';
 
 const DEFAULT_COLUMNS = { name: true, size: true, modified: true, created: false, type: false };
 const ALL_COLUMNS = [
   { key: 'name', label: 'Name', flex: 1, alwaysOn: true },
-  { key: 'size', label: 'Size', width: '80px' },
-  { key: 'modified', label: 'Modified', width: '140px' },
-  { key: 'created', label: 'Created', width: '140px' },
-  { key: 'type', label: 'Type', width: '70px' },
+  { key: 'size', label: 'Size', defaultWidth: 80 },
+  { key: 'modified', label: 'Modified', defaultWidth: 140 },
+  { key: 'created', label: 'Created', defaultWidth: 140 },
+  { key: 'type', label: 'Type', defaultWidth: 70 },
 ];
 
 function _loadSettings() {
@@ -35,54 +35,42 @@ class FileExplorer {
     this._sortBy = saved?.defaultSort || 'name';
     this._sortAsc = saved?.defaultSortAsc !== undefined ? saved.defaultSortAsc : true;
 
-    // Grouping (preserved from existing implementation)
+    // Grouping
     this._groupBy = localStorage.getItem('fileExplorerGroupBy') || 'none';
     this._collapsedGroups = new Set();
 
-    // Load column visibility
+    // Load column visibility + widths
     this._columns = _loadColumns();
+    this._columnWidths = JSON.parse(localStorage.getItem('fileExplorerColumnWidths') || '{}');
 
     const el = document.createElement('div'); el.className = 'file-explorer';
+    this._el = el;
+
+    // Apply initial column CSS custom properties
+    this._applyColumnCSSVars();
 
     // Toolbar
     const toolbar = document.createElement('div'); toolbar.className = 'file-toolbar';
-    const btnUp = this._btn('\u2191','Go up'); btnUp.onclick = () => this.navigateUp();
+    const btnUp = this._btn('\u2191', 'Go up'); btnUp.onclick = () => this.navigateUp();
     this.pathInput = document.createElement('input'); this.pathInput.className = 'file-path-input';
-    this.pathInput.addEventListener('keydown', e => { if (e.key==='Enter') { if (this._hideAC) this._hideAC(); this.navigate(this.pathInput.value); } });
+    this.pathInput.addEventListener('keydown', e => { if (e.key === 'Enter') { if (this._hideAC) this._hideAC(); this.navigate(this.pathInput.value); } });
     this._acDropdown = document.createElement('div'); this._acDropdown.className = 'path-autocomplete hidden';
     this._setupPathAutocomplete();
-    const btnRefresh = this._btn('\u21BB','Refresh'); btnRefresh.onclick = () => this.refresh();
+    const btnRefresh = this._btn('\u21BB', 'Refresh'); btnRefresh.onclick = () => this.refresh();
 
-    // Bookmark current folder button
-    const btnBookmark = this._btn('\u2605','Bookmark current folder'); btnBookmark.onclick = () => this._bookmarkCurrent();
+    // View menu button
+    const btnView = this._btn('View \u25BE', 'View options');
+    btnView.style.width = 'auto';
+    btnView.style.padding = '2px 6px';
+    btnView.style.fontSize = '11px';
+    btnView.onclick = () => this._showViewMenu(btnView);
 
-    // Bookmark panel toggle
-    this._btnBookmarkToggle = this._btn('\u2630','Toggle bookmarks panel');
-    this._btnBookmarkToggle.classList.add('active');
-    this._btnBookmarkToggle.onclick = () => {
-      this._bookmarksPanelVisible = !this._bookmarksPanelVisible;
-      this._btnBookmarkToggle.classList.toggle('active', this._bookmarksPanelVisible);
-      this._bookmarkPanel.classList.toggle('hidden', !this._bookmarksPanelVisible);
-    };
-
-    const btnListView = this._btn('\u2261','List view'); btnListView.onclick = () => { this._viewMode = 'list'; this._renderItems(); btnListView.classList.add('active'); btnIconView.classList.remove('active'); };
-    btnListView.classList.add('active');
-    const btnIconView = this._btn('\u229E','Icon view'); btnIconView.onclick = () => { this._viewMode = 'icon'; this._renderItems(); btnIconView.classList.add('active'); btnListView.classList.remove('active'); };
-
-    // Group by button (preserved from existing implementation)
-    this._btnGroup = this._btn('\u2261','Group by'); this._btnGroup.title = 'Group by: ' + this._groupBy;
-    if (this._groupBy !== 'none') this._btnGroup.classList.add('active');
-    this._btnGroup.onclick = (e) => { e.stopPropagation(); this._showGroupByMenu(this._btnGroup); };
-
-    const btnNewFile = this._btn('+','New file'); btnNewFile.onclick = () => this.createFile();
-    const btnNewDir = this._btn('\uD83D\uDCC2','New folder'); btnNewDir.onclick = () => this.createDir();
-    const btnUpload = this._btn('\u2B06','Upload'); btnUpload.onclick = () => this._triggerUpload();
-
-    // Settings button (replaces standalone hidden files toggle)
-    const btnSettings = this._btn('\u2699','File explorer settings'); btnSettings.onclick = (e) => this._showSettings(e, btnSettings);
+    const btnNewFile = this._btn('+', 'New file'); btnNewFile.onclick = () => this.createFile();
+    const btnNewDir = this._btn('\uD83D\uDCC2', 'New folder'); btnNewDir.onclick = () => this.createDir();
+    const btnUpload = this._btn('\u2B06', 'Upload'); btnUpload.onclick = () => this._triggerUpload();
 
     toolbar.style.position = 'relative';
-    toolbar.append(btnUp, this.pathInput, btnRefresh, btnBookmark, this._btnBookmarkToggle, btnListView, btnIconView, this._btnGroup, btnNewFile, btnNewDir, btnUpload, btnSettings, this._acDropdown);
+    toolbar.append(btnUp, this.pathInput, btnRefresh, btnView, btnNewFile, btnNewDir, btnUpload, this._acDropdown);
 
     // Bookmark panel
     this._bookmarkPanel = document.createElement('div'); this._bookmarkPanel.className = 'file-bookmark-panel';
@@ -97,17 +85,22 @@ class FileExplorer {
     this.sortHeader.addEventListener('contextmenu', (e) => { e.preventDefault(); this._showColumnMenu(e.clientX, e.clientY); });
     this._renderSortHeader();
 
-    // Content area (bookmark panel + file list)
+    // Content area (bookmark panel + main pane)
     const contentArea = document.createElement('div'); contentArea.className = 'file-content-area';
     this.listEl = document.createElement('div'); this.listEl.className = 'file-list';
-    contentArea.append(this._bookmarkPanel, this.listEl);
+
+    // Main pane wraps sort header + file list (so columns align with bookmarks panel open)
+    const mainPane = document.createElement('div');
+    mainPane.className = 'file-main-pane';
+    mainPane.append(this.sortHeader, this.listEl);
+    contentArea.append(this._bookmarkPanel, mainPane);
 
     // Upload drop zone
     this.uploadInput = document.createElement('input'); this.uploadInput.type = 'file'; this.uploadInput.multiple = true;
     this.uploadInput.style.display = 'none';
     this.uploadInput.onchange = (e) => this._uploadFiles(e.target.files);
 
-    el.append(toolbar, this.sortHeader, contentArea, this.uploadInput);
+    el.append(toolbar, contentArea, this.uploadInput);
     winInfo.content.appendChild(el);
 
     // Drag and drop (upload)
@@ -134,7 +127,20 @@ class FileExplorer {
     else this._loadHome();
   }
 
-  _btn(text, title) { const b = document.createElement('button'); b.className='file-tool-btn'; b.textContent=text; b.title=title; return b; }
+  _btn(text, title) { const b = document.createElement('button'); b.className = 'file-tool-btn'; b.textContent = text; b.title = title; return b; }
+
+  // ── Column CSS custom properties ──
+  _applyColumnCSSVars() {
+    for (const col of ALL_COLUMNS) {
+      if (col.alwaysOn) continue; // name column uses flex
+      const w = this._columnWidths[col.key] || col.defaultWidth;
+      this._el.style.setProperty(`--col-${col.key}-w`, w + 'px');
+    }
+  }
+
+  _saveColumnWidths() {
+    localStorage.setItem('fileExplorerColumnWidths', JSON.stringify(this._columnWidths));
+  }
 
   // ── Bookmarks ──
   async _loadBookmarks() {
@@ -203,30 +209,21 @@ class FileExplorer {
           }
         }
       });
-      // Right-click: show context menu (same as right-clicking the folder in file list)
+      // Right-click: context menu via showContextMenu
       item.addEventListener('contextmenu', (e) => {
         e.preventDefault();
-        const bmItems = [];
-        bmItems.push({ label: 'Open', action: () => this.navigate(bk.path) });
-        bmItems.push({ label: 'Open in new window', action: () => this.app.openFileExplorer(bk.path) });
-        bmItems.push({ label: 'Remove from bookmarks', action: () => {
-          this._bookmarks.splice(i, 1);
-          this._saveBookmarks(); this._renderBookmarks();
-        }});
-        bmItems.push({ label: 'Rename bookmark', action: () => {
-          const n = prompt('Bookmark name:', bk.label);
-          if (n && n.trim()) { bk.label = n.trim(); this._saveBookmarks(); this._renderBookmarks(); }
-        }});
-        // Show context menu
-        document.querySelectorAll('.context-menu').forEach(m => m.remove());
-        const menu = document.createElement('div'); menu.className = 'context-menu';
-        menu.style.left = e.clientX + 'px'; menu.style.top = e.clientY + 'px';
-        for (const mi of bmItems) {
-          const el = document.createElement('div'); el.className = 'context-menu-item'; el.textContent = mi.label;
-          el.onclick = () => { menu.remove(); mi.action(); }; menu.appendChild(el);
-        }
-        document.body.appendChild(menu);
-        attachPopoverClose(menu);
+        showContextMenu(e.clientX, e.clientY, [
+          { label: 'Open', action: () => this.navigate(bk.path) },
+          { label: 'Open in new window', action: () => this.app.openFileExplorer(bk.path) },
+          { label: 'Remove from bookmarks', action: () => {
+            this._bookmarks.splice(i, 1);
+            this._saveBookmarks(); this._renderBookmarks();
+          }},
+          { label: 'Rename bookmark', action: () => {
+            const n = prompt('Bookmark name:', bk.label);
+            if (n && n.trim()) { bk.label = n.trim(); this._saveBookmarks(); this._renderBookmarks(); }
+          }},
+        ]);
       });
       this._bookmarkList.appendChild(item);
     });
@@ -252,7 +249,6 @@ class FileExplorer {
 
   _bookmarkCurrent() {
     if (!this.currentPath) return;
-    // Check if already bookmarked
     if (this._bookmarks.some(b => b.path === this.currentPath)) return;
     const label = this.currentPath.split('/').pop() || this.currentPath;
     this._bookmarks.push({ label, path: this.currentPath });
@@ -260,62 +256,152 @@ class FileExplorer {
     this._renderBookmarks();
   }
 
+  // ── View menu (replaces old settings, view mode, group by buttons) ──
+  _showViewMenu(anchor) {
+    const pop = createPopover(anchor, 'file-view-menu');
 
+    // Section: View Mode
+    this._viewMenuSection(pop, 'View Mode');
+    this._viewMenuRadio(pop, 'view-mode', [
+      { label: 'List', value: 'list' },
+      { label: 'Icons', value: 'icon' },
+    ], this._viewMode, (v) => {
+      this._viewMode = v;
+      this._renderSortHeader();
+      this._renderItems();
+    });
 
-  // ── Settings ──
-  _showSettings(e, btnEl) {
-    document.querySelectorAll('.file-settings-popover').forEach(p => p.remove());
-    const pop = document.createElement('div'); pop.className = 'file-settings-popover';
+    this._viewMenuSep(pop);
 
-    // Hidden files
-    const hiddenRow = this._settingsCheckbox('Show hidden files', this._showHidden, (v) => {
+    // Section: Sort
+    this._viewMenuSection(pop, 'Sort');
+    const sortOptions = [
+      { label: 'Name', value: 'name' },
+      { label: 'Size', value: 'size' },
+      { label: 'Modified', value: 'modified' },
+      { label: 'Created', value: 'created' },
+      { label: 'Type', value: 'type' },
+    ];
+    this._viewMenuRadio(pop, 'sort', sortOptions, this._sortBy, (v) => {
+      if (this._sortBy === v) this._sortAsc = !this._sortAsc;
+      else { this._sortBy = v; this._sortAsc = v === 'name'; }
+      this._persistSettings();
+      this._renderSortHeader();
+      this._renderItems();
+      // Re-render the menu to update arrow indicators
+      pop.remove();
+      this._showViewMenu(anchor);
+    }, /* showArrow */ true);
+
+    this._viewMenuSep(pop);
+
+    // Section: Options
+    this._viewMenuSection(pop, 'Options');
+    this._viewMenuCheckbox(pop, 'Show hidden files', this._showHidden, (v) => {
       this._showHidden = v; this._persistSettings(); this._renderItems();
     });
-
-    // Mixed sort
-    const mixedRow = this._settingsCheckbox('Mixed sort (no dirs-first)', this._mixedSort, (v) => {
+    this._viewMenuCheckbox(pop, 'Mixed sort (no dirs-first)', this._mixedSort, (v) => {
       this._mixedSort = v; this._persistSettings(); this._renderItems();
     });
+    this._viewMenuCheckbox(pop, 'Show bookmarks panel', this._bookmarksPanelVisible, (v) => {
+      this._bookmarksPanelVisible = v;
+      this._bookmarkPanel.classList.toggle('hidden', !v);
+    });
 
-    // Default sort
-    const sortRow = document.createElement('div'); sortRow.className = 'file-settings-row';
-    const sortLabel = document.createElement('span'); sortLabel.textContent = 'Default sort';
-    const sortSelect = document.createElement('select'); sortSelect.className = 'file-settings-select';
-    for (const opt of ['name', 'size', 'modified', 'created', 'type']) {
-      const o = document.createElement('option'); o.value = opt; o.textContent = opt.charAt(0).toUpperCase() + opt.slice(1);
-      if (this._sortBy === opt) o.selected = true;
-      sortSelect.appendChild(o);
+    this._viewMenuSep(pop);
+
+    // Section: Group By
+    this._viewMenuSection(pop, 'Group By');
+    this._viewMenuRadio(pop, 'group', [
+      { label: 'None', value: 'none' },
+      { label: 'Type', value: 'type' },
+      { label: 'Modified', value: 'modified' },
+      { label: 'Size', value: 'size' },
+    ], this._groupBy, (v) => {
+      this._groupBy = v;
+      this._collapsedGroups.clear();
+      localStorage.setItem('fileExplorerGroupBy', v);
+      this._renderItems();
+    });
+
+    // Section: Columns (only in list mode)
+    if (this._viewMode === 'list') {
+      this._viewMenuSep(pop);
+      this._viewMenuSection(pop, 'Columns');
+      for (const col of ALL_COLUMNS) {
+        if (col.alwaysOn) continue;
+        this._viewMenuCheckbox(pop, col.label, !!this._columns[col.key], (v) => {
+          this._columns[col.key] = v;
+          _saveColumns(this._columns);
+          this._renderSortHeader();
+          this._renderItems();
+        });
+      }
     }
-    sortSelect.onchange = () => { this._sortBy = sortSelect.value; this._persistSettings(); this._renderSortHeader(); this._renderItems(); };
-    sortRow.append(sortLabel, sortSelect);
 
-    // Sort direction
-    const dirRow = document.createElement('div'); dirRow.className = 'file-settings-row';
-    const dirLabel = document.createElement('span'); dirLabel.textContent = 'Sort direction';
-    const dirBtn = document.createElement('button'); dirBtn.className = 'file-tool-btn';
-    dirBtn.textContent = this._sortAsc ? 'Asc \u25B2' : 'Desc \u25BC';
-    dirBtn.onclick = () => { this._sortAsc = !this._sortAsc; dirBtn.textContent = this._sortAsc ? 'Asc \u25B2' : 'Desc \u25BC'; this._persistSettings(); this._renderSortHeader(); this._renderItems(); };
-    dirRow.append(dirLabel, dirBtn);
-
-    pop.append(hiddenRow, mixedRow, sortRow, dirRow);
-    document.body.appendChild(pop);
-
-    // Position near button
-    const rect = btnEl.getBoundingClientRect();
-    pop.style.top = (rect.bottom + 4) + 'px';
-    pop.style.right = (window.innerWidth - rect.right) + 'px';
-    attachPopoverClose(pop, btnEl);
+    // Position: align right edge to anchor right edge
+    requestAnimationFrame(() => {
+      const anchorRect = anchor.getBoundingClientRect();
+      const popRect = pop.getBoundingClientRect();
+      const left = anchorRect.right - popRect.width;
+      pop.style.left = Math.max(4, left) + 'px';
+    });
   }
 
-  _settingsCheckbox(label, checked, onChange) {
-    const row = document.createElement('div'); row.className = 'file-settings-row';
-    const lbl = document.createElement('label'); lbl.className = 'file-settings-label';
-    const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = checked;
-    cb.onchange = () => onChange(cb.checked);
-    const txt = document.createElement('span'); txt.textContent = label;
-    lbl.append(cb, txt);
-    row.appendChild(lbl);
-    return row;
+  _viewMenuSection(pop, title) {
+    const el = document.createElement('div');
+    el.className = 'file-view-menu-section';
+    el.textContent = title;
+    pop.appendChild(el);
+  }
+
+  _viewMenuSep(pop) {
+    const el = document.createElement('div');
+    el.className = 'file-view-menu-sep';
+    pop.appendChild(el);
+  }
+
+  _viewMenuRadio(pop, group, options, current, onChange, showArrow) {
+    for (const opt of options) {
+      const row = document.createElement('div');
+      row.className = 'file-view-menu-item';
+      if (opt.value === current) row.classList.add('active');
+      const radio = document.createElement('span');
+      radio.className = 'file-view-menu-radio';
+      radio.textContent = opt.value === current ? '\u25CF' : '\u25CB';
+      const label = document.createElement('span');
+      label.textContent = opt.label;
+      label.style.flex = '1';
+      row.append(radio, label);
+      if (showArrow && opt.value === current) {
+        const arrow = document.createElement('span');
+        arrow.className = 'file-view-menu-arrow';
+        arrow.textContent = this._sortAsc ? '\u25B2' : '\u25BC';
+        row.appendChild(arrow);
+      }
+      row.onclick = (e) => { e.stopPropagation(); onChange(opt.value); };
+      pop.appendChild(row);
+    }
+  }
+
+  _viewMenuCheckbox(pop, label, checked, onChange) {
+    const row = document.createElement('div');
+    row.className = 'file-view-menu-item';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = checked;
+    cb.style.width = '13px';
+    cb.style.height = '13px';
+    cb.style.accentColor = 'var(--accent)';
+    const txt = document.createElement('span');
+    txt.textContent = label;
+    row.append(cb, txt);
+    row.onclick = (e) => {
+      e.stopPropagation();
+      if (e.target !== cb) cb.checked = !cb.checked;
+      onChange(cb.checked);
+    };
+    pop.appendChild(row);
   }
 
   _persistSettings() {
@@ -333,31 +419,20 @@ class FileExplorer {
   }
 
   _showColumnMenu(x, y) {
-    document.querySelectorAll('.context-menu').forEach(m => m.remove());
-    const menu = document.createElement('div'); menu.className = 'context-menu';
-    menu.style.left = x + 'px'; menu.style.top = y + 'px';
-
-    for (const col of ALL_COLUMNS) {
-      const el = document.createElement('div'); el.className = 'context-menu-item';
-      const cb = document.createElement('input'); cb.type = 'checkbox';
-      cb.checked = col.alwaysOn || this._columns[col.key];
-      cb.disabled = !!col.alwaysOn;
-      cb.style.marginRight = '6px';
-      const txt = document.createTextNode(col.label);
-      el.append(cb, txt);
-      el.onclick = (e) => {
-        if (col.alwaysOn) return;
-        e.stopPropagation();
-        this._columns[col.key] = !this._columns[col.key];
-        cb.checked = this._columns[col.key];
-        _saveColumns(this._columns);
-        this._renderSortHeader();
-        this._renderItems();
+    const menuItems = ALL_COLUMNS.map(col => {
+      const checked = col.alwaysOn || this._columns[col.key];
+      return {
+        label: (checked ? '\u2611 ' : '\u2610 ') + col.label,
+        action: () => {
+          if (col.alwaysOn) return;
+          this._columns[col.key] = !this._columns[col.key];
+          _saveColumns(this._columns);
+          this._renderSortHeader();
+          this._renderItems();
+        },
       };
-      menu.appendChild(el);
-    }
-    document.body.appendChild(menu);
-    attachPopoverClose(menu);
+    });
+    showContextMenu(x, y, menuItems);
   }
 
   async _loadHome() { try { const r = await fetch('/api/home'); const d = await r.json(); this.navigate(d.home); } catch { this.navigate('/'); } }
@@ -388,11 +463,20 @@ class FileExplorer {
 
   _renderSortHeader() {
     this.sortHeader.innerHTML = '';
+    this.sortHeader.style.display = this._viewMode === 'list' ? '' : 'none';
     const visCols = this._getVisibleColumns();
     for (const col of visCols) {
       const el = document.createElement('span');
       el.className = 'file-sort-col';
-      if (col.flex) el.style.flex = col.flex; else el.style.width = col.width;
+      if (col.alwaysOn) {
+        // Name column: flex, with optional minWidth
+        el.style.flex = '1';
+        el.style.minWidth = '0';
+      } else {
+        el.style.width = `var(--col-${col.key}-w, ${col.defaultWidth}px)`;
+        el.style.flexShrink = '0';
+      }
+      el.style.position = 'relative';
       const arrow = this._sortBy === col.key ? (this._sortAsc ? ' \u25B2' : ' \u25BC') : '';
       el.textContent = col.label + arrow;
       el.onclick = () => {
@@ -402,8 +486,50 @@ class FileExplorer {
         this._renderSortHeader();
         this._renderItems();
       };
+
+      // Resize handle (not on name column since it uses flex)
+      if (!col.alwaysOn) {
+        const handle = document.createElement('div');
+        handle.className = 'file-col-resize-handle';
+        handle.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          this._startColumnResize(col, el, e);
+        });
+        el.appendChild(handle);
+      }
+
       this.sortHeader.appendChild(el);
     }
+  }
+
+  _startColumnResize(col, headerEl, startEvent) {
+    const startX = startEvent.clientX;
+    const startWidth = headerEl.getBoundingClientRect().width;
+    let currentWidth = startWidth;
+    let rafId = null;
+
+    const onMove = (e) => {
+      const dx = e.clientX - startX;
+      currentWidth = Math.max(40, startWidth + dx);
+      if (rafId) return;
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        this._el.style.setProperty(`--col-${col.key}-w`, currentWidth + 'px');
+      });
+    };
+
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+      this._columnWidths[col.key] = Math.round(currentWidth);
+      this._saveColumnWidths();
+      this._el.style.setProperty(`--col-${col.key}-w`, Math.round(currentWidth) + 'px');
+    };
+
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
   }
 
   _getExtension(name) {
@@ -440,14 +566,13 @@ class FileExplorer {
 
   _formatDate(ms) {
     if (!ms) return '';
-    return new Date(ms).toLocaleDateString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
+    return new Date(ms).toLocaleDateString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   }
 
   _renderItems() {
     const sorted = this._getSortedItems();
     this.listEl.innerHTML = '';
     this.listEl.className = 'file-list' + (this._viewMode === 'icon' ? ' icon-view' : '');
-    this.sortHeader.style.display = this._viewMode === 'list' ? '' : 'none';
 
     const groups = this._groupItems(sorted);
     if (groups) {
@@ -569,8 +694,8 @@ class FileExplorer {
   navigateUp() { this.navigate(this.currentPath.replace(/\/[^/]+\/?$/, '') || '/'); }
   refresh() { this.navigate(this.currentPath); }
 
-  async createFile() { const n = prompt('File name:'); if (n) { await fetch('/api/file/write', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({path:this.currentPath+'/'+n, content:''}) }); this.refresh(); } }
-  async createDir() { const n = prompt('Folder name:'); if (n) { await fetch('/api/mkdir', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({path:this.currentPath+'/'+n}) }); this.refresh(); } }
+  async createFile() { const n = prompt('File name:'); if (n) { await fetch('/api/file/write', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: this.currentPath + '/' + n, content: '' }) }); this.refresh(); } }
+  async createDir() { const n = prompt('Folder name:'); if (n) { await fetch('/api/mkdir', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: this.currentPath + '/' + n }) }); this.refresh(); } }
 
   _triggerUpload() { this.uploadInput.click(); }
 
@@ -583,12 +708,12 @@ class FileExplorer {
   _showContextMenu(x, y, dataset) {
     document.querySelectorAll('.context-menu').forEach(m => m.remove());
     const menu = document.createElement('div'); menu.className = 'context-menu';
-    menu.style.left = x+'px'; menu.style.top = y+'px';
+    menu.style.left = x + 'px'; menu.style.top = y + 'px';
     const fullPath = this.currentPath + '/' + dataset.name;
     const items = [];
     if (dataset.isDir === 'true') {
       const isBookmarked = this._bookmarks.some(b => b.path === fullPath);
-      items.push({ label: isBookmarked ? '★ Bookmarked' : '☆ Add to bookmarks', action: () => {
+      items.push({ label: isBookmarked ? '\u2605 Bookmarked' : '\u2606 Add to bookmarks', action: () => {
         if (!isBookmarked) {
           const label = dataset.name || fullPath.split('/').pop();
           this._bookmarks.push({ label, path: fullPath });
@@ -619,13 +744,13 @@ class FileExplorer {
         }});
       }
     } else {
-      items.push({ label:'Open', action:() => this.app.openFile(fullPath, dataset.name) });
-      items.push({ label:'Edit', action:() => this.app.openEditor(fullPath, dataset.name) });
-      items.push({ label:'Open as Hex', action:() => this.app.openFile(fullPath, dataset.name, { hex: true }) });
-      items.push({ label:'Download', action:() => { window.open(`/api/download?path=${encodeURIComponent(fullPath)}`); } });
+      items.push({ label: 'Open', action: () => this.app.openFile(fullPath, dataset.name) });
+      items.push({ label: 'Edit', action: () => this.app.openEditor(fullPath, dataset.name) });
+      items.push({ label: 'Open as Hex', action: () => this.app.openFile(fullPath, dataset.name, { hex: true }) });
+      items.push({ label: 'Download', action: () => { window.open(`/api/download?path=${encodeURIComponent(fullPath)}`); } });
     }
-    items.push({ label:'Rename', action:() => this._rename(dataset.name) });
-    items.push({ label:'Delete', action:() => this._delete(dataset.name, dataset.isDir==='true') });
+    items.push({ label: 'Rename', action: () => this._rename(dataset.name) });
+    items.push({ label: 'Delete', action: () => this._delete(dataset.name, dataset.isDir === 'true') });
 
     for (const item of items) {
       const el = document.createElement('div'); el.className = 'context-menu-item'; el.textContent = item.label;
@@ -652,40 +777,8 @@ class FileExplorer {
     attachPopoverClose(menu);
   }
 
-  async _rename(oldName) { const n = prompt('New name:', oldName); if (n && n!==oldName) { await fetch('/api/rename', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({oldPath:this.currentPath+'/'+oldName,newPath:this.currentPath+'/'+n})}); this.refresh(); } }
-  async _delete(name, isDir) { if (!confirm(`Delete "${name}"?`)) return; await fetch(`/api/file?path=${encodeURIComponent(this.currentPath+'/'+name)}`,{method:'DELETE'}); this.refresh(); }
-
-  // ── Group by (preserved from existing implementation) ──
-  _showGroupByMenu(anchor) {
-    document.querySelectorAll('.file-group-menu').forEach(m => m.remove());
-    const menu = document.createElement('div'); menu.className = 'file-group-menu';
-    const rect = anchor.getBoundingClientRect();
-    menu.style.top = (rect.bottom + 2) + 'px'; menu.style.left = rect.left + 'px';
-
-    const options = [
-      { id: 'none', label: 'None (flat list)' },
-      { id: 'type', label: 'Type (extension)' },
-      { id: 'modified', label: 'Modified (date)' },
-      { id: 'size', label: 'Size (range)' },
-    ];
-    for (const opt of options) {
-      const row = document.createElement('div'); row.className = 'file-group-menu-item';
-      if (this._groupBy === opt.id) row.classList.add('active');
-      row.textContent = (this._groupBy === opt.id ? '\u2713 ' : '  ') + opt.label;
-      row.onclick = () => {
-        this._groupBy = opt.id;
-        this._collapsedGroups.clear();
-        localStorage.setItem('fileExplorerGroupBy', opt.id);
-        this._btnGroup.classList.toggle('active', opt.id !== 'none');
-        this._btnGroup.title = 'Group by: ' + opt.id;
-        menu.remove();
-        this._renderItems();
-      };
-      menu.appendChild(row);
-    }
-    document.body.appendChild(menu);
-    attachPopoverClose(menu, anchor);
-  }
+  async _rename(oldName) { const n = prompt('New name:', oldName); if (n && n !== oldName) { await fetch('/api/rename', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ oldPath: this.currentPath + '/' + oldName, newPath: this.currentPath + '/' + n }) }); this.refresh(); } }
+  async _delete(name, isDir) { if (!confirm(`Delete "${name}"?`)) return; await fetch(`/api/file?path=${encodeURIComponent(this.currentPath + '/' + name)}`, { method: 'DELETE' }); this.refresh(); }
 
   _getFileExtension(name) {
     const dot = name.lastIndexOf('.');
@@ -761,9 +854,9 @@ class FileExplorer {
 
   _fileIcon(name) {
     const ext = name.split('.').pop().toLowerCase();
-    const m = { js:'\uD83D\uDCDC',ts:'\uD83D\uDCDC',py:'\uD83D\uDC0D',go:'\uD83D\uDD37',rs:'\uD83E\uDD80',html:'\uD83C\uDF10',css:'\uD83C\uDFA8',json:'{}',md:'\uD83D\uDCDD',txt:'\uD83D\uDCC4',
-      pdf:'\uD83D\uDCD5',doc:'\uD83D\uDCD8',docx:'\uD83D\uDCD8',xls:'\uD83D\uDCCA',xlsx:'\uD83D\uDCCA',csv:'\uD83D\uDCCA',
-      jpg:'\uD83D\uDDBC',jpeg:'\uD83D\uDDBC',png:'\uD83D\uDDBC',gif:'\uD83D\uDDBC',svg:'\uD83D\uDDBC',webp:'\uD83D\uDDBC',sh:'\u2699',bash:'\u2699',zsh:'\u2699' };
+    const m = { js: '\uD83D\uDCDC', ts: '\uD83D\uDCDC', py: '\uD83D\uDC0D', go: '\uD83D\uDD37', rs: '\uD83E\uDD80', html: '\uD83C\uDF10', css: '\uD83C\uDFA8', json: '{}', md: '\uD83D\uDCDD', txt: '\uD83D\uDCC4',
+      pdf: '\uD83D\uDCD5', doc: '\uD83D\uDCD8', docx: '\uD83D\uDCD8', xls: '\uD83D\uDCCA', xlsx: '\uD83D\uDCCA', csv: '\uD83D\uDCCA',
+      jpg: '\uD83D\uDDBC', jpeg: '\uD83D\uDDBC', png: '\uD83D\uDDBC', gif: '\uD83D\uDDBC', svg: '\uD83D\uDDBC', webp: '\uD83D\uDDBC', sh: '\u2699', bash: '\u2699', zsh: '\u2699' };
     return m[ext] || '\uD83D\uDCC4';
   }
 }
