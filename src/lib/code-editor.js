@@ -10,6 +10,30 @@ import { EditorState, Compartment, EditorSelection } from '@codemirror/state';
 import { keymap } from '@codemirror/view';
 import { indentWithTab } from '@codemirror/commands';
 import { marked } from 'marked';
+import * as prettier from 'prettier/standalone';
+import prettierBabel from 'prettier/plugins/babel';
+import prettierEstree from 'prettier/plugins/estree';
+import prettierHtml from 'prettier/plugins/html';
+import prettierCss from 'prettier/plugins/postcss';
+import prettierMarkdown from 'prettier/plugins/markdown';
+import prettierTypescript from 'prettier/plugins/typescript';
+import prettierYaml from 'prettier/plugins/yaml';
+import prettierGraphql from 'prettier/plugins/graphql';
+
+const PRETTIER_PLUGINS = [prettierBabel, prettierEstree, prettierHtml, prettierCss, prettierMarkdown, prettierTypescript, prettierYaml, prettierGraphql];
+
+// Map language id → prettier parser name
+const PRETTIER_PARSERS = {
+  javascript: 'babel', json: 'json', html: 'html', css: 'css',
+  markdown: 'markdown', plain: null, python: null, auto: null,
+};
+
+// Map file extension → prettier parser (for extensions not covered by language id)
+const EXT_TO_PARSER = {
+  ts: 'typescript', tsx: 'typescript', jsx: 'babel',
+  scss: 'scss', less: 'less', yaml: 'yaml', yml: 'yaml',
+  graphql: 'graphql', gql: 'graphql', vue: 'vue', svelte: 'html',
+};
 
 const LANGUAGES = [
   { id: 'auto', label: 'Auto' },
@@ -142,6 +166,10 @@ class CodeEditor {
       saveEditorSettings(this._settings);
     };
 
+    // Format button
+    const btnFormat = this._btn('\u2261'); btnFormat.title = 'Format document (Shift+Alt+F)';
+    btnFormat.onclick = () => this.format();
+
     // Font size
     const sizeDown = this._btn('\u2212'); sizeDown.title = 'Decrease font size';
     this.fontSizeDisplay = document.createElement('span');
@@ -158,7 +186,8 @@ class CodeEditor {
     const btnDownload = this._btn('\u21E9'); btnDownload.title = 'Download';
     btnDownload.onclick = () => window.open(`/api/download?path=${encodeURIComponent(filePath)}`);
 
-    toolbarRight.append(this.langSelect, this._btnPreview, sep(), btnWrap, sizeDown, this.fontSizeDisplay, sizeUp, sep(), btnSave, btnDownload);
+    if (this._isReadOnly) btnFormat.style.display = 'none';
+    toolbarRight.append(this.langSelect, this._btnPreview, sep(), btnWrap, btnFormat, sizeDown, this.fontSizeDisplay, sizeUp, sep(), btnSave, btnDownload);
     toolbar.append(toolbarLeft, toolbarRight);
 
     this.editorBody = document.createElement('div'); this.editorBody.className = 'editor-body';
@@ -251,7 +280,11 @@ class CodeEditor {
           this._wrapCompartment.of(this._getWrapExtension()),
           this._fontSizeCompartment.of(this._getFontSizeExtension()),
           this._langCompartment.of(getLangExtension(detectedLang)),
-          keymap.of([indentWithTab, { key: 'Mod-s', run: () => { self.save(); return true; } }]),
+          keymap.of([
+            indentWithTab,
+            { key: 'Mod-s', run: () => { self.save(); return true; } },
+            { key: 'Shift-Alt-f', run: () => { self.format(); return true; } },
+          ]),
           EditorView.updateListener.of((update) => {
             if (update.docChanged) { self.modified = true; self.saveIndicator.textContent = '● Modified'; self.saveIndicator.style.color = 'var(--yellow)'; }
           }),
@@ -307,6 +340,47 @@ class CodeEditor {
       this.modified = false; this.saveIndicator.textContent = '✓ Saved'; this.saveIndicator.style.color = 'var(--green)';
       setTimeout(() => { if (!this.modified) this.saveIndicator.textContent = ''; }, 2000);
     } catch (err) { this.saveIndicator.textContent = '✕ Error'; this.saveIndicator.style.color = 'var(--red)'; }
+  }
+
+  async format() {
+    if (!this.editorView || this._isReadOnly) return;
+    // Determine parser from current language or file extension
+    const currentLang = this.langSelect.value === 'auto' ? detectLang(this.filePath) : this.langSelect.value;
+    const ext = this.filePath.split('.').pop().toLowerCase();
+    const parser = PRETTIER_PARSERS[currentLang] ?? EXT_TO_PARSER[ext] ?? null;
+    if (!parser) {
+      this.saveIndicator.textContent = 'No formatter for this language';
+      this.saveIndicator.style.color = 'var(--text-dim)';
+      setTimeout(() => { if (this.saveIndicator.textContent.startsWith('No ')) this.saveIndicator.textContent = ''; }, 2000);
+      return;
+    }
+    const source = this.editorView.state.doc.toString();
+    try {
+      const formatted = await prettier.format(source, {
+        parser,
+        plugins: PRETTIER_PLUGINS,
+        singleQuote: true,
+        trailingComma: 'all',
+        printWidth: 100,
+      });
+      if (formatted !== source) {
+        // Preserve cursor position proportionally
+        const cursor = this.editorView.state.selection.main.head;
+        const ratio = cursor / source.length;
+        const newCursor = Math.min(Math.round(ratio * formatted.length), formatted.length);
+        this.editorView.dispatch({
+          changes: { from: 0, to: source.length, insert: formatted },
+          selection: EditorSelection.cursor(newCursor),
+        });
+      }
+      this.saveIndicator.textContent = '✓ Formatted';
+      this.saveIndicator.style.color = 'var(--green)';
+      setTimeout(() => { if (this.saveIndicator.textContent.startsWith('✓ F')) this.saveIndicator.textContent = ''; }, 2000);
+    } catch (err) {
+      this.saveIndicator.textContent = `Format error: ${err.message?.split('\n')[0]?.substring(0, 60) || 'unknown'}`;
+      this.saveIndicator.style.color = 'var(--red)';
+      setTimeout(() => { if (this.saveIndicator.textContent.startsWith('Format')) this.saveIndicator.textContent = ''; }, 4000);
+    }
   }
 }
 
