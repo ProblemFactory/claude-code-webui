@@ -488,6 +488,11 @@ html, body {
   box-shadow: inset 0 0 0 0.5px var(--bg-input), 0 0 0 0.5px rgba(0,0,0,0.3);
 }
 .desktop-preview.active .desktop-preview-win { opacity: 0.8; }
+.desktop-preview-win.desktop-preview-dragging {
+  opacity: 1; background: var(--accent); z-index: 1;
+  box-shadow: inset 0 0 0 0.5px var(--bg-input), 0 0 3px var(--accent);
+  transition: left 0.05s, top 0.05s;
+}
 .desktop-preview-label {
   position: absolute; bottom: 0; left: 0; right: 0; text-align: center;
   font-size: 7px; color: var(--text-dim); line-height: 1; padding: 1px 0;
