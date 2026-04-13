@@ -424,9 +424,10 @@ export class DesktopManager {
       handle.classList.add('active');
       document.body.style.cursor = 'ns-resize';
       document.body.style.userSelect = 'none';
+      // Suppress ResizeObserver-triggered reflow during drag
+      this.app.wm._suppressReflow = true;
 
       const onMove = (e) => {
-        // Dragging up = bigger (inverted: startY - clientY)
         const h = Math.max(MIN_H, Math.min(MAX_H, startH + (startY - e.clientY)));
         taskbar.style.height = h + 'px';
         this._adaptTaskbarSize(h);
@@ -438,7 +439,8 @@ export class DesktopManager {
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup', onUp);
         localStorage.setItem('taskbarHeight', taskbar.offsetHeight);
-        // Notify window manager of workspace size change
+        // Re-enable reflow and do one final reflow
+        this.app.wm._suppressReflow = false;
         this.app.wm._reflowWindows?.();
       };
       document.addEventListener('mousemove', onMove);
@@ -448,14 +450,22 @@ export class DesktopManager {
 
   /** Adapt desktop preview and taskbar element sizes to current height */
   _adaptTaskbarSize(h) {
+    const root = document.documentElement;
     // Preview: fill available height minus label + padding
-    const previewH = Math.max(16, h - 18); // 18 = label(~8px) + padding(~10px)
-    const previewW = Math.round(previewH * 1.5); // 3:2 aspect ratio
-    document.documentElement.style.setProperty('--desktop-preview-h', previewH + 'px');
-    document.documentElement.style.setProperty('--desktop-preview-w', previewW + 'px');
-    // Taskbar items adapt via flex
-    const addBtn = document.querySelector('.desktop-preview-add');
-    if (addBtn) addBtn.style.height = previewH + 'px';
+    const previewH = Math.max(16, h - 18);
+    const previewW = Math.round(previewH * 1.5);
+    root.style.setProperty('--desktop-preview-h', previewH + 'px');
+    root.style.setProperty('--desktop-preview-w', previewW + 'px');
+    // Taskbar items: scale icon and text with height
+    const iconSize = Math.max(14, Math.min(24, Math.round(h * 0.45)));
+    const titleSize = Math.max(8, Math.min(12, Math.round(h * 0.22)));
+    const subSize = Math.max(7, Math.min(10, Math.round(h * 0.18)));
+    root.style.setProperty('--taskbar-icon-size', iconSize + 'px');
+    root.style.setProperty('--taskbar-title-size', titleSize + 'px');
+    root.style.setProperty('--taskbar-sub-size', subSize + 'px');
+    // Usage pie size
+    const pieSize = Math.max(10, Math.min(18, Math.round(h * 0.3)));
+    root.style.setProperty('--usage-pie-size', pieSize + 'px');
   }
 
   // ── Helpers ──

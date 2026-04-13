@@ -98,6 +98,7 @@ class WindowManager {
   }
 
   _reflowWindows() {
+    if (this._suppressReflow) return;
     // Skip on mobile — windows are position:fixed via CSS
     if (window.innerWidth <= 768) return;
     for (const win of this.windows.values()) {
