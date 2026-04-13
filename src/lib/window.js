@@ -290,31 +290,39 @@ class WindowManager {
 
       // Desktop preview drop: if we have a mini window inside a preview, commit the move
       if (deskPreviewTarget && deskMiniWin) {
-        this._clearGridHighlight(); this.gridOverlay.classList.remove('dragging');
         const previews = [...document.querySelectorAll('.desktop-preview')];
         const idx = previews.indexOf(deskPreviewTarget);
         const dm = this._app?.desktopManager;
-        // Update gridBounds from mini window position (maps preview position to workspace)
-        const ml = parseFloat(deskMiniWin.style.left) / 100;
-        const mt = parseFloat(deskMiniWin.style.top) / 100;
-        const gb = win.gridBounds || { width: 0.4, height: 0.4 };
-        win.gridBounds = { left: ml, top: mt, width: gb.width, height: gb.height };
-        deskMiniWin.remove(); deskMiniWin = null;
-        deskPreviewTarget = null;
-        element.style.display = '';
-        if (deskSavedBounds) { element.style.left = deskSavedBounds.left; element.style.top = deskSavedBounds.top; element.style.width = deskSavedBounds.width; element.style.height = deskSavedBounds.height; deskSavedBounds = null; }
-        if (dm && idx >= 0 && idx < dm.desktops.length) {
-          const targetDesk = dm.desktops[idx];
-          if (targetDesk.id !== dm.activeDesktopId) {
-            dm.moveWindowToDesktop(win.id, targetDesk.id);
-          }
+        const isOtherDesktop = dm && idx >= 0 && idx < dm.desktops.length && dm.desktops[idx].id !== dm.activeDesktopId;
+
+        if (isOtherDesktop) {
+          this._clearGridHighlight(); this.gridOverlay.classList.remove('dragging');
+          // Update gridBounds from mini window position for the target desktop
+          const ml = parseFloat(deskMiniWin.style.left) / 100;
+          const mt = parseFloat(deskMiniWin.style.top) / 100;
+          const gb = win.gridBounds || { width: 0.4, height: 0.4 };
+          win.gridBounds = { left: ml, top: mt, width: gb.width, height: gb.height };
+          deskMiniWin.remove(); deskMiniWin = null; deskPreviewTarget = null;
+          element.style.display = '';
+          if (deskSavedBounds) deskSavedBounds = null;
+          dm.moveWindowToDesktop(win.id, dm.desktops[idx].id);
+          tabMergeTarget = null; savedBounds = null;
+          return;
         }
-        tabMergeTarget = null; savedBounds = null;
-        return;
+        // Dropped on current desktop's preview — just restore window normally
       }
-      // Clean up desktop drag state if drop didn't happen on a preview
+      // Clean up desktop drag state — restore window to pre-drag position
       if (deskMiniWin) { deskMiniWin.remove(); deskMiniWin = null; }
-      if (deskSavedBounds) { element.style.display = ''; element.style.left = deskSavedBounds.left; element.style.top = deskSavedBounds.top; element.style.width = deskSavedBounds.width; element.style.height = deskSavedBounds.height; deskSavedBounds = null; }
+      if (deskPreviewTarget) deskPreviewTarget.classList.remove('desktop-preview-drop');
+      if (deskSavedBounds) {
+        element.style.display = '';
+        element.style.left = deskSavedBounds.left; element.style.top = deskSavedBounds.top;
+        element.style.width = deskSavedBounds.width; element.style.height = deskSavedBounds.height;
+        // Re-sync cursor for snap logic below
+        initL = parseInt(deskSavedBounds.left) || element.offsetLeft;
+        initT = parseInt(deskSavedBounds.top) || element.offsetTop;
+        deskSavedBounds = null;
+      }
       deskPreviewTarget = null;
 
       // Tab merge takes priority over snap
@@ -732,8 +740,13 @@ class WindowManager {
 
     this.setGrid(g.rows, g.cols);
 
-    // Skip grouped guests — only host windows get positioned
-    const visible = [...this.windows.values()].filter(w => !w.isMinimized && !(w._tabChain && w._tabChain.tabs[0] !== w.id));
+    // Skip grouped guests, minimized, and windows on other desktops
+    const activeDesk = this._app?.desktopManager?.activeDesktopId;
+    const visible = [...this.windows.values()].filter(w =>
+      !w.isMinimized && !w._hiddenByDesktop
+      && !(w._tabChain && w._tabChain.tabs[0] !== w.id)
+      && (!activeDesk || !w._desktopId || w._desktopId === activeDesk)
+    );
     if (!visible.length) return;
     const totalCells = g.rows * g.cols;
 

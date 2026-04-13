@@ -154,15 +154,24 @@ export class DesktopManager {
 
       // 5. Show/restore windows for target desktop
       let hasWindows = false;
-      for (const [, win] of this.app.wm.windows) {
+      const restoredWinIds = [];
+      for (const [id, win] of this.app.wm.windows) {
         if (win._desktopId === desktopId && win._hiddenByDesktop) {
           win._hiddenByDesktop = false;
           win.element.style.display = '';
           if (win.gridBounds) this.app.wm._applyGridBounds(win);
           if (win.onResize) setTimeout(() => win.onResize(), 100);
+          restoredWinIds.push(id);
           hasWindows = true;
         }
       }
+      // Re-pin chat views that were hidden (display:none collapses scroll)
+      setTimeout(() => {
+        for (const id of restoredWinIds) {
+          const session = this.app.sessions.get(id);
+          if (session?._scrollToBottom && session._pinned) session._scrollToBottom();
+        }
+      }, 150);
 
       // 6. Create windows that exist in saved state but not yet in DOM
       // (from other clients or disk restore)
@@ -216,10 +225,29 @@ export class DesktopManager {
       win.element.style.display = 'none';
     }
 
+    // Update cached state for the target desktop so preview shows the new window
+    this._updateCachedDesktop(desktopId);
+
     this._renderSwitcher();
     this.app.updateTaskbar();
     this.app.layoutManager.scheduleAutoSave();
     this.app._checkWelcome();
+  }
+
+  /** Rebuild cached state for a non-active desktop from its live windows */
+  _updateCachedDesktop(desktopId) {
+    if (desktopId === this._activeId) return;
+    const cached = this._savedStates.get(desktopId) || { windows: [] };
+    const wins = [];
+    for (const [id, win] of this.app.wm.windows) {
+      if (win._desktopId !== desktopId) continue;
+      wins.push({
+        winId: id, gridBounds: win.gridBounds,
+        isMinimized: false, openSpec: win._openSpec,
+      });
+    }
+    cached.windows = wins;
+    this._savedStates.set(desktopId, cached);
   }
 
   // ── Remote sync ──
