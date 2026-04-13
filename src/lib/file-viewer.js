@@ -130,27 +130,7 @@ class FileViewer {
         container.appendChild(wrapper);
         await renderDocx(blob, wrapper, wrapper, { inWrapper: true, ignoreWidth: false, ignoreHeight: false, renderHeaders: true, renderFooters: true, renderFootnotes: true });
       } else if (viewerType === 'pptx') {
-        const wrapper = document.createElement('div'); wrapper.className = 'pptx-preview';
-        wrapper.style.cssText = 'width:100%;height:100%;overflow:auto;background:var(--bg-workspace)';
-        container.appendChild(wrapper);
-        const rect = container.getBoundingClientRect();
-        const slideW = Math.max(400, rect.width - 40);
-        const previewer = initPptx(wrapper, { width: slideW, height: slideW * 9 / 16, mode: 'list' });
-        const res = await fetch(rawUrl);
-        const buf = await res.arrayBuffer();
-        previewer.preview(buf);
-        // Re-render on resize to fit new container width
-        let resizeTimer = null;
-        const ro = new ResizeObserver(() => {
-          clearTimeout(resizeTimer);
-          resizeTimer = setTimeout(() => {
-            const newW = Math.max(400, wrapper.offsetWidth - 40);
-            wrapper.innerHTML = '';
-            const p = initPptx(wrapper, { width: newW, height: newW * 9 / 16, mode: 'list' });
-            p.preview(buf);
-          }, 300);
-        });
-        ro.observe(container);
+        FileViewer._renderPptx(container, filePath, rawUrl);
       } else {
         return false; // no dedicated viewer
       }
@@ -345,6 +325,102 @@ class FileViewer {
   }
 
   // ── Helper: create a styled button for media toolbars ──
+  // ── PPTX viewer: thumbnail sidebar + main slide + responsive ──
+  static async _renderPptx(container, filePath, rawUrl) {
+    const res = await fetch(rawUrl);
+    const buf = await res.arrayBuffer();
+
+    // Layout: sidebar (thumbnails) + main (current slide)
+    const viewer = document.createElement('div');
+    viewer.style.cssText = 'display:flex;height:100%;overflow:hidden;background:var(--bg-workspace);user-select:text';
+
+    // Sidebar: slide thumbnails
+    const sidebar = document.createElement('div');
+    sidebar.style.cssText = 'width:160px;flex-shrink:0;overflow-y:auto;border-right:1px solid var(--border);background:var(--bg-sidebar);padding:8px';
+
+    // Main slide area
+    const main = document.createElement('div');
+    main.style.cssText = 'flex:1;display:flex;align-items:center;justify-content:center;overflow:auto;padding:16px;min-width:0';
+
+    const slideContainer = document.createElement('div');
+    slideContainer.style.cssText = 'position:relative';
+    main.appendChild(slideContainer);
+
+    viewer.append(sidebar, main);
+    container.appendChild(viewer);
+
+    // Load PPTX
+    const previewer = initPptx(slideContainer, { width: 800, height: 450, mode: 'slide' });
+    await previewer.load(buf);
+    const count = previewer.slideCount;
+
+    let activeIdx = 0;
+    const thumbEls = [];
+
+    // Render main slide at correct size for container
+    const renderMain = (idx) => {
+      activeIdx = idx;
+      slideContainer.innerHTML = '';
+      const rect = main.getBoundingClientRect();
+      const w = Math.max(300, rect.width - 40);
+      const h = Math.max(170, rect.height - 40);
+      // Fit slide to available space maintaining aspect ratio (assume 16:9)
+      const aspect = 16 / 9;
+      let slideW, slideH;
+      if (w / h > aspect) { slideH = h; slideW = h * aspect; }
+      else { slideW = w; slideH = w / aspect; }
+      const p = initPptx(slideContainer, { width: slideW, height: slideH, mode: 'slide' });
+      p.load(buf).then(() => p.renderSingleSlide(idx));
+      // Update thumbnail highlights
+      thumbEls.forEach((t, i) => {
+        t.style.borderColor = i === idx ? 'var(--accent)' : 'var(--border)';
+        t.style.opacity = i === idx ? '1' : '0.7';
+      });
+    };
+
+    // Build thumbnails
+    for (let i = 0; i < count; i++) {
+      const thumb = document.createElement('div');
+      thumb.style.cssText = 'margin-bottom:6px;cursor:pointer;border:2px solid var(--border);border-radius:4px;overflow:hidden;opacity:0.7;transition:all 0.15s;position:relative';
+
+      // Slide number label
+      const label = document.createElement('div');
+      label.style.cssText = 'position:absolute;top:2px;left:4px;font-size:9px;color:var(--text-dim);z-index:1;background:rgba(0,0,0,0.5);padding:0 3px;border-radius:2px;color:#fff';
+      label.textContent = i + 1;
+
+      const thumbContent = document.createElement('div');
+      const thumbW = 140;
+      const thumbP = initPptx(thumbContent, { width: thumbW, height: thumbW * 9 / 16, mode: 'slide' });
+      thumbP.load(buf).then(() => thumbP.renderSingleSlide(i));
+
+      thumb.append(label, thumbContent);
+      thumb.onclick = () => renderMain(i);
+      thumb.onmouseenter = () => { if (activeIdx !== i) thumb.style.opacity = '0.9'; };
+      thumb.onmouseleave = () => { if (activeIdx !== i) thumb.style.opacity = '0.7'; };
+      thumbEls.push(thumb);
+      sidebar.appendChild(thumb);
+    }
+
+    // Render first slide
+    renderMain(0);
+
+    // Keyboard navigation
+    const onKey = (e) => {
+      if (!container.closest('.window-active')) return;
+      if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); if (activeIdx < count - 1) renderMain(activeIdx + 1); thumbEls[activeIdx]?.scrollIntoView({ block: 'nearest' }); }
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); if (activeIdx > 0) renderMain(activeIdx - 1); thumbEls[activeIdx]?.scrollIntoView({ block: 'nearest' }); }
+    };
+    document.addEventListener('keydown', onKey);
+
+    // Responsive: re-render main slide on container resize
+    let resizeTimer = null;
+    const ro = new ResizeObserver(() => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => renderMain(activeIdx), 200);
+    });
+    ro.observe(main);
+  }
+
   static _mediaBtn(text) {
     const b = document.createElement('button');
     b.className = 'file-tool-btn media-btn';
