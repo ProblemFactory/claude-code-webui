@@ -24,6 +24,13 @@
 | **Arrow Up/Down** (in autocomplete) | Navigate slash command list |
 | **Ctrl+V** | Paste image as attachment |
 
+## Virtual Desktop Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| **Ctrl+Alt+Left** | Switch to previous desktop |
+| **Ctrl+Alt+Right** | Switch to next desktop |
+
 ## Command Mode
 
 Press **Ctrl+\\** to enter command mode. A yellow **[CMD]** indicator appears in the taskbar.

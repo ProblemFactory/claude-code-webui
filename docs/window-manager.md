@@ -129,6 +129,7 @@ Right-click any taskbar item to open a context menu:
 | Action | Description |
 |--------|-------------|
 | **Move** | Enters move mode -- the window attaches to your cursor. Click anywhere in the workspace to place it. |
+| **Move to Desktop** | Submenu listing other desktops -- move the window to a different desktop (only shown when multiple desktops exist) |
 | **Minimize** / **Restore** | Toggle minimize state |
 | **Close** | Close the window |
 
@@ -137,6 +138,47 @@ Right-click any taskbar item to open a context menu:
 Move mode detaches a window from its current position and attaches it to your cursor. A full-screen overlay blocks all other UI interaction during move, ensuring no accidental clicks reach elements underneath. If the window is maximized or snapped, it restores to its original (pre-snap) size before following the cursor. Click to place it at the new location.
 
 Move mode can also be triggered via command mode (Ctrl+\\ then a move command).
+
+## Virtual Desktops
+
+Multiple independent workspaces, each with its own set of windows and grid layout.
+
+### Desktop previews
+
+The taskbar right corner shows Ubuntu-style miniature previews of each desktop. Each preview renders proportional window rectangles from `gridBounds`, giving you a live overview of every desktop's layout. The active desktop has an accent-colored border.
+
+### Creating and managing desktops
+
+- Click the **+** button next to the previews to add a new desktop
+- **Right-click** a preview for Rename / Delete
+- Deleting a desktop moves its windows to the adjacent desktop
+
+### Switching desktops
+
+- **Click** a desktop preview to switch
+- **Ctrl+Alt+Left/Right** keyboard shortcut to cycle through desktops
+
+### Moving windows between desktops
+
+- **Drag a window** (by title bar) onto a desktop preview — the window collapses into a mini rectangle inside the preview, showing exactly where it will land. Drag back out to cancel.
+- **Drag a taskbar item** onto a desktop preview
+- **Right-click** a taskbar item → "Move to Desktop" submenu
+
+### Notifications across desktops
+
+When a window on another desktop finishes (Claude awaiting input), its rectangle in the desktop preview blinks yellow. The desktop preview border also turns yellow. Both clear when you switch to that desktop and focus the window.
+
+### Per-desktop grid
+
+Each desktop maintains its own grid mode. Desktop 1 can be a 2x2 grid while Desktop 2 is freeform. Layout presets (toolbar buttons) only affect the current desktop.
+
+### Resizable taskbar
+
+Drag the top edge of the taskbar to resize it (36-120px). All elements (desktop previews, window icons, text, usage pies) scale proportionally. Height is synced across clients.
+
+### Technical details
+
+Windows are hidden via `visibility:hidden` + `pointer-events:none` (not `display:none`). This preserves all internal state: scroll position, terminal content, input focus. Switching back is instant with no re-rendering. WebSocket handlers continue processing — hidden chat windows receive new messages normally.
 
 ## Tab Groups
 
