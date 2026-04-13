@@ -535,7 +535,7 @@ html, body {
 .taskbar-usage:hover { color: var(--text); }
 .usage-pie {
   width: var(--usage-pie-size, 14px); height: var(--usage-pie-size, 14px);
-  border-radius: 50%; flex-shrink: 0; border: 1px solid var(--border);
+  border-radius: 50%; flex-shrink: 0; box-shadow: 0 0 0 1px var(--border);
 }
 .usage-bar { width: 60px; height: 6px; background: var(--bg-input); border-radius: 3px; overflow: hidden; }
 .usage-bar-fill { height: 100%; border-radius: 3px; transition: width 0.3s; }
