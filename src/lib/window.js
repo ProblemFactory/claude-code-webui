@@ -664,10 +664,19 @@ class WindowManager {
     el.style.zIndex = '99999'; // above overlay
     el.style.pointerEvents = 'none';
 
+    const wr = this.workspace.getBoundingClientRect();
     const onMove = (e) => {
       const w = el.offsetWidth || parseInt(el.style.width) || 350;
       el.style.left = (e.clientX - w / 2) + 'px';
       el.style.top = (e.clientY - 15) + 'px';
+      // Live-update desktop preview rect
+      if (wr.width > 0 && wr.height > 0) {
+        const srcRect = document.querySelector(`.desktop-preview.active .desktop-preview-win[data-win-id="${win.id}"]`);
+        if (srcRect) {
+          srcRect.style.left = ((el.offsetLeft / wr.width) * 100) + '%';
+          srcRect.style.top = ((el.offsetTop / wr.height) * 100) + '%';
+        }
+      }
     };
     const onClick = (e) => {
       e.preventDefault();

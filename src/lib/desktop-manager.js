@@ -85,21 +85,21 @@ export class DesktopManager {
     const idx = this._desktops.findIndex(d => d.id === desktopId);
     if (idx < 0) return;
 
-    // Move windows from deleted desktop to adjacent one
-    const targetIdx = idx > 0 ? idx - 1 : 1;
-    const targetId = this._desktops[targetIdx].id;
-    for (const [, win] of this.app.wm.windows) {
-      if (win._desktopId === desktopId) win._desktopId = targetId;
-    }
-
-    // If we're on the deleted desktop, switch first
+    // Always move orphaned windows to the active desktop and show them
+    // If deleting the active desktop, pick adjacent as new active first
     if (this._activeId === desktopId) {
-      this._activeId = targetId;
-      // Show windows that now belong to us
-      for (const [, win] of this.app.wm.windows) {
-        if (win._desktopId === targetId && win._hiddenByDesktop) {
-          this._showWin(win);
-        }
+      const targetIdx = idx > 0 ? idx - 1 : 1;
+      this._activeId = this._desktops[targetIdx].id;
+    }
+    const targetId = this._activeId;
+
+    for (const [, win] of this.app.wm.windows) {
+      if (win._desktopId === desktopId) {
+        win._desktopId = targetId;
+        // Always show — they may have been hidden on the deleted desktop
+        if (win._hiddenByDesktop) this._showWin(win);
+        // Re-apply position so they appear properly
+        if (win.gridBounds) this.app.wm._applyGridBounds(win);
       }
     }
 
@@ -107,6 +107,7 @@ export class DesktopManager {
     this._savedStates.delete(desktopId);
     this.app.ws.send({ type: 'desktop-delete', desktopId });
     this._renderSwitcher();
+    this.app.updateTaskbar();
     this.app.layoutManager.scheduleAutoSave();
   }
 
