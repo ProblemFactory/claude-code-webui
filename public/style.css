@@ -554,8 +554,8 @@ html, body {
 .usage-stat-label { color: var(--text-dim); }
 .usage-total { padding-top: 8px; margin-top: 4px; border-top: 1px solid var(--border); font-size: 11px; font-weight: 600; color: var(--text); }
 .taskbar-item {
-  padding: 3px 8px; background: rgba(255,255,255,0.04); border: 1px solid var(--border);
-  border-radius: var(--radius-sm); color: var(--text-secondary);
+  padding: var(--taskbar-item-pad, 3px) 8px; background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-secondary);
   cursor: pointer; max-width: 200px; min-width: 60px; overflow: hidden;
   flex-shrink: 1; transition: all var(--transition);
   display: flex; align-items: center; gap: 6px;

@@ -477,21 +477,16 @@ export class DesktopManager {
   /** Adapt desktop preview and taskbar element sizes to current height */
   _adaptTaskbarSize(h) {
     const root = document.documentElement;
-    // Preview: fill available height minus label + padding
+    // Preview: fill available height minus label + padding (3:2 aspect)
     const previewH = Math.max(16, h - 18);
-    const previewW = Math.round(previewH * 1.5);
     root.style.setProperty('--desktop-preview-h', previewH + 'px');
-    root.style.setProperty('--desktop-preview-w', previewW + 'px');
-    // Taskbar items: scale icon and text with height
-    const iconSize = Math.max(14, Math.min(24, Math.round(h * 0.45)));
-    const titleSize = Math.max(8, Math.min(12, Math.round(h * 0.22)));
-    const subSize = Math.max(7, Math.min(10, Math.round(h * 0.18)));
-    root.style.setProperty('--taskbar-icon-size', iconSize + 'px');
-    root.style.setProperty('--taskbar-title-size', titleSize + 'px');
-    root.style.setProperty('--taskbar-sub-size', subSize + 'px');
-    // Usage pie size
-    const pieSize = Math.max(10, Math.min(18, Math.round(h * 0.3)));
-    root.style.setProperty('--usage-pie-size', pieSize + 'px');
+    root.style.setProperty('--desktop-preview-w', Math.round(previewH * 1.5) + 'px');
+    // All elements proportional to taskbar height — no upper caps
+    root.style.setProperty('--taskbar-icon-size', Math.max(14, Math.round(h * 0.4)) + 'px');
+    root.style.setProperty('--taskbar-title-size', Math.max(8, Math.round(h * 0.18)) + 'px');
+    root.style.setProperty('--taskbar-sub-size', Math.max(7, Math.round(h * 0.14)) + 'px');
+    root.style.setProperty('--usage-pie-size', Math.max(10, Math.round(h * 0.25)) + 'px');
+    root.style.setProperty('--taskbar-item-pad', Math.max(2, Math.round(h * 0.06)) + 'px');
   }
 
   // ── Helpers ──
