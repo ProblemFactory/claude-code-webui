@@ -754,3 +754,11 @@ Server → Client: `created`, `output`, `msg` (normalized: op=create/edit/meta),
 - Taskbar overflow with many windows: taskbar items overflowed when many windows open. Fix: items use `flex-shrink` + `text-overflow: ellipsis` with `min-width: 0`.
 - Draft sync blocked by focus: `StateSync` draft updates skipped textarea when it had focus (to avoid clobbering user input). Fix: always update textarea regardless of focus state for reliable multi-client sync.
 - Layout sync ID remap: taskbar buttons captured window ID in closures, breaking after layout restore changed IDs. Fix: buttons reference `winInfo.id` dynamically instead of closure-captured ID.
+- PPTX arrow keys stealing chat input: keyboard nav handler on `document` intercepted ArrowLeft/Right globally. Fix: guard `e.target.closest('textarea, input, [contenteditable]')`.
+- Desktop switch `display:none` broke chat scroll: `display:none` collapses layout, losing scroll position. Fix: use `visibility:hidden` + `pointer-events:none` instead — preserves all internal state.
+- Desktop delete lost hidden windows: non-active desktop windows stayed `visibility:hidden` after reassignment. Fix: show new active desktop's windows before reassigning deleted desktop's windows. Unloaded windows (never visited) restored via `layoutManager.restoreState()`.
+- Desktop drag same-desktop drop: mini rect position wasn't applied — window disappeared. Fix: apply mini rect as `gridBounds` + `_applyGridBounds()` for same-desktop drops.
+- Layout presets affected other desktops: `applyLayout` iterated all windows. Fix: filter by `_desktopId === activeDesktop` and `!_hiddenByDesktop`.
+- Desktop preview empty after refresh: non-active desktops had no live windows. Fix: fall back to `_savedStates` cached data.
+- Usage pie border artifact: `border` on `conic-gradient` circle caused bright seams. Fix: replaced with `box-shadow: 0 0 0 1px`.
+- Active count always 0: filtered `type==='terminal'` only. Fix: count all windows on active desktop, renamed to "N windows".
