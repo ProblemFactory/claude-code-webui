@@ -504,6 +504,8 @@ html, body {
 }
 .desktop-preview.active .desktop-preview-label { color: var(--accent-hover); }
 .desktop-preview-drop { border-color: var(--accent) !important; background: var(--accent-dim) !important; }
+.desktop-preview-win-waiting { animation: waiting-blink 0.7s ease-in-out infinite; background: var(--yellow, #e2b340); }
+.desktop-preview-waiting { border-color: var(--yellow, #e2b340); }
 .desktop-preview-add {
   width: 20px; height: var(--desktop-preview-h, 32px); border-radius: 3px;
   border: 1.5px dashed var(--border); background: transparent; color: var(--text-dim);

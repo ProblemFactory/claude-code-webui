@@ -288,28 +288,33 @@ export class DesktopManager {
       preview.title = desk.name;
 
       // Collect windows for this desktop and draw miniature rectangles
-      const winEntries = []; // { id, gridBounds }
+      // All windows exist in DOM (visibility:hidden for non-active), so check live state
+      const winEntries = []; // { id, gridBounds, waiting }
+      let deskHasWaiting = false;
       if (desk.id === this._activeId) {
         for (const [id, win] of this.app.wm.windows) {
           if (win._desktopId === desk.id && win.gridBounds && !win._hiddenByDesktop && !win.isMinimized) {
-            winEntries.push({ id, gridBounds: win.gridBounds });
+            const waiting = win.element.classList.contains('window-waiting');
+            winEntries.push({ id, gridBounds: win.gridBounds, waiting });
+            if (waiting) deskHasWaiting = true;
           }
         }
       } else {
-        const cached = this._savedStates.get(desk.id);
-        if (cached?.windows) {
-          for (const ws of cached.windows) {
-            if (ws.gridBounds && !ws.isMinimized) {
-              winEntries.push({ id: ws.winId, gridBounds: ws.gridBounds });
-            }
+        // Non-active: windows are real DOM (hidden), check their live state
+        for (const [id, win] of this.app.wm.windows) {
+          if (win._desktopId === desk.id && win.gridBounds && !win.isMinimized) {
+            const waiting = win.element.classList.contains('window-waiting');
+            winEntries.push({ id, gridBounds: win.gridBounds, waiting });
+            if (waiting) deskHasWaiting = true;
           }
         }
       }
+      if (deskHasWaiting) preview.classList.add('desktop-preview-waiting');
       for (const entry of winEntries) {
         const b = entry.gridBounds;
         if (!b) continue;
         const rect = document.createElement('div');
-        rect.className = 'desktop-preview-win';
+        rect.className = 'desktop-preview-win' + (entry.waiting ? ' desktop-preview-win-waiting' : '');
         if (entry.id) rect.dataset.winId = entry.id;
         rect.style.left = (b.left * 100) + '%';
         rect.style.top = (b.top * 100) + '%';
