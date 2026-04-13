@@ -83,20 +83,7 @@ class FileViewer {
       } else if (viewerType === 'pdf') {
         FileViewer._renderPdf(container, filePath);
       } else if (viewerType === 'csv') {
-        const res = await fetch(`/api/file/content?path=${encodeURIComponent(filePath)}`);
-        const data = await res.json();
-        const sep = ext === 'tsv' ? '\t' : ',';
-        const rows = data.content.split('\n').filter(r => r.trim()).map(r => r.split(sep));
-        const table = document.createElement('table'); table.className = 'file-viewer-table';
-        if (rows.length > 0) {
-          const thead = document.createElement('thead'); const hr = document.createElement('tr');
-          rows[0].forEach(c => { const th = document.createElement('th'); th.textContent = c.trim(); hr.appendChild(th); });
-          thead.appendChild(hr); table.appendChild(thead);
-          const tbody = document.createElement('tbody');
-          rows.slice(1, 1000).forEach(row => { const tr = document.createElement('tr'); row.forEach(c => { const td = document.createElement('td'); td.textContent = c.trim(); tr.appendChild(td); }); tbody.appendChild(tr); });
-          table.appendChild(tbody);
-        }
-        container.appendChild(table);
+        FileViewer._renderCsv(container, filePath, ext);
       } else if (viewerType === 'xlsx') {
         const res = await fetch(`/api/file/excel?path=${encodeURIComponent(filePath)}`);
         const data = await res.json();
@@ -363,6 +350,114 @@ class FileViewer {
     b.className = 'file-tool-btn media-btn';
     b.textContent = text;
     return b;
+  }
+
+  // ── CSV/TSV viewer with virtual scroll (streaming from server) ──
+  static async _renderCsv(container, filePath, ext) {
+    const sep = ext === 'tsv' ? '\t' : ',';
+    const ROW_HEIGHT = 24;
+    const PAGE_SIZE = 200;
+    const cache = new Map(); // offset → rows array
+    let header = null, total = 0;
+
+    // Fetch a page of rows
+    const fetchPage = async (offset) => {
+      if (cache.has(offset)) return;
+      const res = await fetch(`/api/file/csv?path=${encodeURIComponent(filePath)}&offset=${offset}&limit=${PAGE_SIZE}&sep=${encodeURIComponent(sep)}`);
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      if (!header && data.header) header = data.header;
+      if (data.total) total = Math.max(total, data.total);
+      cache.set(offset, data.rows);
+    };
+
+    // Initial fetch
+    await fetchPage(0);
+    if (!header) { container.innerHTML = '<div class="empty-hint">Empty file</div>'; return; }
+
+    // Build viewer
+    const viewer = document.createElement('div');
+    viewer.style.cssText = 'display:flex;flex-direction:column;height:100%;overflow:hidden';
+
+    // Status bar
+    const status = document.createElement('div');
+    status.style.cssText = 'padding:2px 8px;font-size:10px;color:var(--text-dim);border-bottom:1px solid var(--border);flex-shrink:0';
+    status.textContent = `${total.toLocaleString()} rows × ${header.length} columns`;
+
+    // Header
+    const thead = document.createElement('div');
+    thead.style.cssText = 'display:flex;border-bottom:1px solid var(--border);background:var(--bg-titlebar);flex-shrink:0';
+    // Row number header
+    const rnH = document.createElement('div');
+    rnH.style.cssText = 'width:50px;padding:3px 6px;font-size:10px;font-weight:600;color:var(--text-dim);flex-shrink:0;text-align:right;border-right:1px solid var(--border)';
+    rnH.textContent = '#';
+    thead.appendChild(rnH);
+    for (const col of header) {
+      const th = document.createElement('div');
+      th.style.cssText = 'flex:1;min-width:80px;padding:3px 6px;font-size:10px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border-right:1px solid var(--border)';
+      th.textContent = col;
+      th.title = col;
+      thead.appendChild(th);
+    }
+
+    // Virtual scroll area
+    const scrollArea = document.createElement('div');
+    scrollArea.style.cssText = 'flex:1;overflow:auto;position:relative';
+    const spacer = document.createElement('div');
+    spacer.style.height = ((total - 1) * ROW_HEIGHT) + 'px';
+    spacer.style.position = 'relative';
+    scrollArea.appendChild(spacer);
+
+    const renderRows = () => {
+      const scrollTop = scrollArea.scrollTop;
+      const viewH = scrollArea.clientHeight;
+      const startRow = Math.floor(scrollTop / ROW_HEIGHT);
+      const visibleCount = Math.ceil(viewH / ROW_HEIGHT) + 2;
+
+      // Determine which page(s) we need
+      const pageStart = Math.floor(startRow / PAGE_SIZE) * PAGE_SIZE;
+      if (!cache.has(pageStart)) fetchPage(pageStart).then(renderRows);
+      if (!cache.has(pageStart + PAGE_SIZE) && startRow + visibleCount > pageStart + PAGE_SIZE) {
+        fetchPage(pageStart + PAGE_SIZE).then(renderRows);
+      }
+
+      // Clear and render visible rows
+      spacer.querySelectorAll('.csv-row').forEach(r => r.remove());
+      for (let i = 0; i < visibleCount; i++) {
+        const rowIdx = startRow + i;
+        if (rowIdx >= total - 1) break;
+        const page = Math.floor(rowIdx / PAGE_SIZE) * PAGE_SIZE;
+        const rows = cache.get(page);
+        if (!rows) continue;
+        const row = rows[rowIdx - page];
+        if (!row) continue;
+
+        const rowEl = document.createElement('div');
+        rowEl.className = 'csv-row';
+        rowEl.style.cssText = `position:absolute;top:${rowIdx * ROW_HEIGHT}px;left:0;right:0;height:${ROW_HEIGHT}px;display:flex;align-items:center;font-size:11px;border-bottom:1px solid var(--border)`;
+        if (rowIdx % 2) rowEl.style.background = 'rgba(128,128,128,0.03)';
+
+        // Row number
+        const rn = document.createElement('div');
+        rn.style.cssText = 'width:50px;padding:0 6px;font-size:9px;color:var(--text-dim);flex-shrink:0;text-align:right;border-right:1px solid var(--border)';
+        rn.textContent = rowIdx + 1;
+        rowEl.appendChild(rn);
+
+        for (const cell of row) {
+          const td = document.createElement('div');
+          td.style.cssText = 'flex:1;min-width:80px;padding:0 6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border-right:1px solid var(--border);color:var(--text)';
+          td.textContent = cell;
+          td.title = cell;
+          rowEl.appendChild(td);
+        }
+        spacer.appendChild(rowEl);
+      }
+    };
+
+    scrollArea.addEventListener('scroll', renderRows);
+    viewer.append(status, thead, scrollArea);
+    container.appendChild(viewer);
+    requestAnimationFrame(renderRows);
   }
 }
 

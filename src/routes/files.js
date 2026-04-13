@@ -259,6 +259,62 @@ router.post('/api/paste-image', (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// CSV/TSV streaming: read only requested row range from a file
+// Supports large files by reading line-by-line without loading entire file
+router.get('/api/file/csv', (req, res) => {
+  const filePath = safePath(req.query.path);
+  const offset = parseInt(req.query.offset) || 0;
+  const limit = parseInt(req.query.limit) || 100;
+  const sep = req.query.sep || ',';
+
+  try {
+    const stat = fs.statSync(filePath);
+    const stream = fs.createReadStream(filePath, { encoding: 'utf-8' });
+    let lineNum = 0, headerRow = null;
+    const rows = [];
+    let partial = '';
+    let totalLines = 0;
+    let done = false;
+
+    stream.on('data', (chunk) => {
+      if (done) return;
+      const lines = (partial + chunk).split('\n');
+      partial = lines.pop(); // last partial line
+      for (const line of lines) {
+        const trimmed = line.replace(/\r$/, '');
+        if (!trimmed) continue;
+        if (lineNum === 0) {
+          headerRow = trimmed.split(sep).map(c => c.trim());
+        } else if (lineNum > offset && rows.length < limit) {
+          rows.push(trimmed.split(sep).map(c => c.trim()));
+        }
+        lineNum++;
+        totalLines = lineNum;
+        // Stop reading early if we have enough data and want a rough total estimate
+        if (rows.length >= limit && lineNum > offset + limit + 10000) {
+          done = true;
+          stream.destroy();
+          break;
+        }
+      }
+    });
+
+    stream.on('end', () => {
+      if (partial.trim()) { totalLines++; if (lineNum > offset && rows.length < limit) rows.push(partial.split(sep).map(c => c.trim())); }
+      res.json({ header: headerRow, rows, offset: offset, total: totalLines, fileSize: stat.size });
+    });
+    stream.on('close', () => {
+      if (!res.headersSent) {
+        // Estimate total from file size if we stopped early
+        const bytesPerLine = stat.size / Math.max(1, totalLines);
+        const estimatedTotal = Math.round(stat.size / bytesPerLine);
+        res.json({ header: headerRow, rows, offset, total: done ? estimatedTotal : totalLines, fileSize: stat.size, estimated: done });
+      }
+    });
+    stream.on('error', (err) => { if (!res.headersSent) res.status(400).json({ error: err.message }); });
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
 // Format code via server-side CLI tools (for languages not supported by Prettier)
 router.post('/api/format', (req, res) => {
   const { code, language, filePath } = req.body;
