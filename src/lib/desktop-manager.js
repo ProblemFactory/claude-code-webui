@@ -442,6 +442,8 @@ export class DesktopManager {
         // Re-enable reflow and do one final reflow
         this.app.wm._suppressReflow = false;
         this.app.wm._reflowWindows?.();
+        // Broadcast height to other clients via layout sync
+        this.app.layoutManager.scheduleAutoSave();
       };
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);

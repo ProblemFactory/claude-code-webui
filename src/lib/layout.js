@@ -40,6 +40,10 @@ class LayoutManager {
       if (state.sidebarOpen !== undefined && state.sidebarOpen !== this.app.sidebar.isOpen) {
         this.app.sidebar.toggle(state.sidebarOpen);
       }
+      // Taskbar height
+      if (state.taskbarHeight) {
+        this._applyTaskbarHeight(state.taskbarHeight);
+      }
       // Windows: update existing, create missing, close removed
       if (state.windows) {
         const remoteIds = new Set();
@@ -225,7 +229,8 @@ class LayoutManager {
     const globalFontSize = this.app._fontSize;
     const globalFontFamily = this.app._fontFamily;
     const sidebarOpen = this.app.sidebar.isOpen;
-    return { windows, grid, theme, globalFontSize, globalFontFamily, sidebarOpen };
+    const taskbarHeight = document.getElementById('taskbar')?.offsetHeight || null;
+    return { windows, grid, theme, globalFontSize, globalFontFamily, sidebarOpen, taskbarHeight };
   }
 
   // Restore workspace from state (used for autosave restore on startup)
@@ -240,6 +245,11 @@ class LayoutManager {
     // Restore grid
     if (state.grid) {
       this.app.wm.setGrid(state.grid.rows, state.grid.cols);
+    }
+
+    // Restore taskbar height
+    if (state.taskbarHeight) {
+      this._applyTaskbarHeight(state.taskbarHeight);
     }
 
     // Restore sidebar
@@ -724,6 +734,14 @@ class LayoutManager {
       this._savedPresets = data.saved || {};
       this._currentName = data.current || null;
     } catch {}
+  }
+
+  _applyTaskbarHeight(h) {
+    const taskbar = document.getElementById('taskbar');
+    if (!taskbar || Math.abs(taskbar.offsetHeight - h) < 2) return;
+    taskbar.style.height = h + 'px';
+    localStorage.setItem('taskbarHeight', h);
+    this.app.desktopManager?._adaptTaskbarSize(h);
   }
 
   // Legacy aliases for backwards compatibility
