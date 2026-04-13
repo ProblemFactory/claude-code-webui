@@ -49,7 +49,6 @@ class App {
       this.layoutManager.scheduleAutoSave();
       this._notifySidebarFocus();
       this._updateMobileNavTitle();
-      if (this.desktopManager) this.desktopManager._renderSwitcher();
     };
     this.sidebar = new Sidebar(this);
 
@@ -888,7 +887,7 @@ class App {
     this.sidebar.highlightSession(null);
   }
 
-  updateTaskbar() { updateTaskbarFn(this); }
+  updateTaskbar() { updateTaskbarFn(this); if (this.desktopManager) this.desktopManager._renderSwitcher(); }
 
   _showWindowList(anchor) { showWindowList(this, anchor); }
 
