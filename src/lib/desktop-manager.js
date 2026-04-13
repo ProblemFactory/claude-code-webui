@@ -17,6 +17,9 @@ export class DesktopManager {
     app.ws.onGlobal((msg) => {
       if (msg.type === 'desktop-updated') this._onRemoteDesktopUpdated(msg);
     });
+
+    // Taskbar resize handle (drag top edge to resize)
+    this._setupTaskbarResize();
   }
 
   get activeDesktopId() { return this._activeId; }
@@ -223,12 +226,27 @@ export class DesktopManager {
 
   _onRemoteDesktopUpdated(msg) {
     if (msg.desktops) {
+      const oldIds = new Set(this._desktops.map(d => d.id));
+      const newIds = new Set(msg.desktops.map(d => d.id));
       this._desktops = msg.desktops;
-      // If our active desktop was deleted, switch to first
-      if (!this._desktops.find(d => d.id === this._activeId)) {
-        if (this._desktops.length > 0) {
-          this.switchTo(this._desktops[0].id);
+
+      // Reassign windows from deleted desktops to the first remaining desktop
+      const fallbackId = this._desktops[0]?.id;
+      if (fallbackId) {
+        for (const [, win] of this.app.wm.windows) {
+          if (win._desktopId && !newIds.has(win._desktopId)) {
+            win._desktopId = fallbackId;
+            if (fallbackId === this._activeId && win._hiddenByDesktop) {
+              win._hiddenByDesktop = false;
+              win.element.style.display = '';
+            }
+          }
         }
+      }
+
+      // If our active desktop was deleted, switch to first
+      if (!newIds.has(this._activeId) && this._desktops.length > 0) {
+        this.switchTo(this._desktops[0].id);
       }
       this._renderSwitcher();
     }
@@ -286,17 +304,19 @@ export class DesktopManager {
         preview.appendChild(rect);
       }
 
-      // Label
+      // Wrapper: preview + label below
+      const wrapper = document.createElement('div');
+      wrapper.className = 'desktop-preview-wrapper';
       const label = document.createElement('div');
       label.className = 'desktop-preview-label';
       label.textContent = desk.name;
-      preview.appendChild(label);
+      wrapper.append(preview, label);
 
       // Click to switch
-      preview.addEventListener('click', () => this.switchTo(desk.id));
+      wrapper.addEventListener('click', () => this.switchTo(desk.id));
 
       // Right-click context menu
-      preview.addEventListener('contextmenu', (e) => {
+      wrapper.addEventListener('contextmenu', (e) => {
         e.preventDefault();
         const items = [
           { label: 'Rename', action: () => this._startRename(desk) },
@@ -309,7 +329,7 @@ export class DesktopManager {
         menu.style.bottom = (window.innerHeight - e.clientY + 4) + 'px';
       });
 
-      // Drop target: drag taskbar items or windows here
+      // Drop target: drag taskbar items here (HTML5 drag)
       preview.addEventListener('dragover', (e) => { e.preventDefault(); preview.classList.add('desktop-preview-drop'); });
       preview.addEventListener('dragleave', () => preview.classList.remove('desktop-preview-drop'));
       preview.addEventListener('drop', (e) => {
@@ -319,7 +339,7 @@ export class DesktopManager {
         if (winId) this.moveWindowToDesktop(winId, desk.id);
       });
 
-      container.appendChild(preview);
+      container.appendChild(wrapper);
     }
 
     // "+" add button
@@ -349,6 +369,62 @@ export class DesktopManager {
         label: d.name,
         action: () => this.moveWindowToDesktop(winId, d.id),
       }));
+  }
+
+  // ── Taskbar resize ──
+
+  _setupTaskbarResize() {
+    const handle = document.getElementById('taskbar-resize-handle');
+    const taskbar = document.getElementById('taskbar');
+    if (!handle || !taskbar) return;
+
+    const MIN_H = 36, MAX_H = 120;
+    // Restore saved height
+    const saved = parseInt(localStorage.getItem('taskbarHeight'));
+    if (saved && saved >= MIN_H && saved <= MAX_H) {
+      taskbar.style.height = saved + 'px';
+      this._adaptTaskbarSize(saved);
+    }
+
+    handle.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      const startY = e.clientY;
+      const startH = taskbar.offsetHeight;
+      handle.classList.add('active');
+      document.body.style.cursor = 'ns-resize';
+      document.body.style.userSelect = 'none';
+
+      const onMove = (e) => {
+        // Dragging up = bigger (inverted: startY - clientY)
+        const h = Math.max(MIN_H, Math.min(MAX_H, startH + (startY - e.clientY)));
+        taskbar.style.height = h + 'px';
+        this._adaptTaskbarSize(h);
+      };
+      const onUp = () => {
+        handle.classList.remove('active');
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        localStorage.setItem('taskbarHeight', taskbar.offsetHeight);
+        // Notify window manager of workspace size change
+        this.app.wm._reflowWindows?.();
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+  }
+
+  /** Adapt desktop preview and taskbar element sizes to current height */
+  _adaptTaskbarSize(h) {
+    // Preview: fill available height minus label + padding
+    const previewH = Math.max(16, h - 18); // 18 = label(~8px) + padding(~10px)
+    const previewW = Math.round(previewH * 1.5); // 3:2 aspect ratio
+    document.documentElement.style.setProperty('--desktop-preview-h', previewH + 'px');
+    document.documentElement.style.setProperty('--desktop-preview-w', previewW + 'px');
+    // Taskbar items adapt via flex
+    const addBtn = document.querySelector('.desktop-preview-add');
+    if (addBtn) addBtn.style.height = previewH + 'px';
   }
 
   // ── Helpers ──

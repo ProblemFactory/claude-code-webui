@@ -400,7 +400,7 @@ function registerWsHandler(wss, ctx) {
           if (layoutData.desktops) delete layoutData.desktops[data.desktopId];
           writeLayouts(layoutData);
           const broadcast = JSON.stringify({ type: 'desktop-updated', desktops: layoutData.desktopMeta || [] });
-          wss.clients.forEach(c => { if (c.readyState === WS_OPEN) try { c.send(broadcast); } catch {} });
+          wss.clients.forEach(c => { if (c !== ws && c.readyState === WS_OPEN) try { c.send(broadcast); } catch {} });
           break;
         }
 
@@ -410,7 +410,7 @@ function registerWsHandler(wss, ctx) {
           if (meta) meta.name = data.name;
           writeLayouts(layoutData);
           const broadcast = JSON.stringify({ type: 'desktop-updated', desktops: layoutData.desktopMeta || [] });
-          wss.clients.forEach(c => { if (c.readyState === WS_OPEN) try { c.send(broadcast); } catch {} });
+          wss.clients.forEach(c => { if (c !== ws && c.readyState === WS_OPEN) try { c.send(broadcast); } catch {} });
           break;
         }
 

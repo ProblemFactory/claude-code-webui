@@ -474,10 +474,14 @@ html, body {
   gap: 1px; flex-shrink: 0; padding: 0 4px;
 }
 #desktop-previews {
-  display: flex; align-items: center; gap: 3px; flex-shrink: 0; padding: 0 2px;
+  display: flex; align-items: flex-end; gap: 3px; flex-shrink: 0; padding: 0 2px;
+}
+.desktop-preview-wrapper {
+  display: flex; flex-direction: column; align-items: center; gap: 1px;
 }
 .desktop-preview {
-  width: 48px; height: 32px; border-radius: 3px; position: relative; cursor: pointer;
+  width: var(--desktop-preview-w, 48px); height: var(--desktop-preview-h, 32px);
+  border-radius: 3px; position: relative; cursor: pointer;
   background: var(--bg-input); border: 1.5px solid var(--border);
   transition: all var(--transition); overflow: hidden; flex-shrink: 0;
 }
@@ -494,21 +498,27 @@ html, body {
   transition: left 0.05s, top 0.05s;
 }
 .desktop-preview-label {
-  position: absolute; bottom: 0; left: 0; right: 0; text-align: center;
-  font-size: 7px; color: var(--text-dim); line-height: 1; padding: 1px 0;
-  background: linear-gradient(transparent, var(--bg-input)); pointer-events: none;
+  text-align: center; font-size: 7px; color: var(--text-dim); line-height: 1;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: var(--desktop-preview-w, 48px); pointer-events: none;
 }
 .desktop-preview.active .desktop-preview-label { color: var(--accent-hover); }
 .desktop-preview-drop { border-color: var(--accent) !important; background: var(--accent-dim) !important; }
 .desktop-preview-add {
-  width: 20px; height: 32px; border-radius: 3px; border: 1.5px dashed var(--border);
-  background: transparent; color: var(--text-dim); cursor: pointer; font-size: 14px;
+  width: 20px; height: var(--desktop-preview-h, 32px); border-radius: 3px;
+  border: 1.5px dashed var(--border); background: transparent; color: var(--text-dim);
+  cursor: pointer; font-size: 14px;
   display: flex; align-items: center; justify-content: center; flex-shrink: 0;
   transition: all var(--transition);
 }
 .desktop-preview-add:hover { border-color: var(--text-dim); color: var(--text); background: var(--bg-hover); }
 
 /* ── Taskbar ── */
+#taskbar-resize-handle {
+  height: 3px; cursor: ns-resize; flex-shrink: 0; background: transparent;
+  position: relative; z-index: 1; margin-bottom: -3px;
+}
+#taskbar-resize-handle:hover, #taskbar-resize-handle.active { background: var(--accent-dim); }
 #taskbar {
   height: var(--taskbar-height); background: var(--bg-taskbar);
   border-top: 1px solid var(--border); display: flex; align-items: center;
