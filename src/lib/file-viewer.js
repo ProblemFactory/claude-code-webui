@@ -55,6 +55,24 @@ class FileViewer {
     const container = document.createElement('div'); container.className = 'file-viewer';
     winInfo.content.appendChild(container);
     winInfo.onClose = () => {};
+    const rendered = await FileViewer.renderInto(container, filePath, fileName);
+    if (!rendered) {
+      // No dedicated viewer — open in code editor
+      app.openEditor(filePath, fileName, opts);
+      app.wm.closeWindow(winInfo.id);
+    }
+  }
+
+  /**
+   * Render a file into a container element. Used by both the file viewer window
+   * and the file explorer preview panel. Returns true if rendered, false if
+   * no dedicated viewer exists for this file type.
+   */
+  static async renderInto(container, filePath, fileName) {
+    const ext = (fileName || filePath.split('/').pop()).split('.').pop().toLowerCase();
+    const viewerType = getViewerType(ext);
+    const rawUrl = `/api/file/raw?path=${encodeURIComponent(filePath)}`;
+
     try {
       if (viewerType === 'image') {
         FileViewer._renderImage(container, filePath);
@@ -68,7 +86,7 @@ class FileViewer {
         const res = await fetch(`/api/file/content?path=${encodeURIComponent(filePath)}`);
         const data = await res.json();
         const sep = ext === 'tsv' ? '\t' : ',';
-        const rows = data.content.split('\n').filter(r=>r.trim()).map(r=>r.split(sep));
+        const rows = data.content.split('\n').filter(r => r.trim()).map(r => r.split(sep));
         const table = document.createElement('table'); table.className = 'file-viewer-table';
         if (rows.length > 0) {
           const thead = document.createElement('thead'); const hr = document.createElement('tr');
@@ -90,38 +108,33 @@ class FileViewer {
           const tbody = document.createElement('tbody');
           sheet.data.slice(0, 1000).forEach((row, ri) => {
             const tr = document.createElement('tr');
-            (row || []).forEach(c => { const td = document.createElement(ri===0?'th':'td'); td.textContent = c ?? ''; tr.appendChild(td); });
+            (row || []).forEach(c => { const td = document.createElement(ri === 0 ? 'th' : 'td'); td.textContent = c ?? ''; tr.appendChild(td); });
             tbody.appendChild(tr);
           });
           table.appendChild(tbody); container.appendChild(table);
         }
       } else if (viewerType === 'docx') {
-        // Client-side DOCX rendering via docx-preview (visual fidelity)
-        const res = await fetch(`/api/file/raw?path=${encodeURIComponent(filePath)}`);
+        const res = await fetch(rawUrl);
         const blob = await res.blob();
         const wrapper = document.createElement('div'); wrapper.className = 'docx-preview';
         container.appendChild(wrapper);
-        await renderDocx(blob, wrapper, wrapper, {
-          inWrapper: true, ignoreWidth: false, ignoreHeight: false,
-          renderHeaders: true, renderFooters: true, renderFootnotes: true,
-        });
+        await renderDocx(blob, wrapper, wrapper, { inWrapper: true, ignoreWidth: false, ignoreHeight: false, renderHeaders: true, renderFooters: true, renderFootnotes: true });
       } else if (viewerType === 'pptx') {
-        // Client-side PPTX rendering via pptx-preview
         const wrapper = document.createElement('div'); wrapper.className = 'pptx-preview';
         wrapper.style.cssText = 'width:100%;height:100%;overflow:auto;background:var(--bg-workspace)';
         container.appendChild(wrapper);
         const rect = container.getBoundingClientRect();
         const previewer = initPptx(wrapper, { width: Math.max(640, rect.width - 40), height: Math.max(360, (rect.width - 40) * 9 / 16), mode: 'list' });
-        const res = await fetch(`/api/file/raw?path=${encodeURIComponent(filePath)}`);
+        const res = await fetch(rawUrl);
         const buf = await res.arrayBuffer();
         previewer.preview(buf);
       } else {
-        // Default: open in code editor
-        app.openEditor(filePath, fileName, opts);
-        app.wm.closeWindow(winInfo.id);
+        return false; // no dedicated viewer
       }
+      return true;
     } catch (err) {
       container.innerHTML = `<div class="empty-hint" style="color:var(--red);padding:20px">Error: ${err.message}</div>`;
+      return true; // error shown, don't fall through to editor
     }
   }
 

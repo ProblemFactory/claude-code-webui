@@ -1,6 +1,7 @@
 import { formatSize, attachPopoverClose, createPopover, showContextMenu } from './utils.js';
 import { setupDirAutocomplete } from './autocomplete.js';
-import { getFileIcon, getCategory, getViewerType } from './file-types.js';
+import { getFileIcon, hasDedicatedViewer } from './file-types.js';
+import { FileViewer } from './file-viewer.js';
 
 const DEFAULT_COLUMNS = { name: true, size: true, modified: true, created: false, type: false };
 const ALL_COLUMNS = [
@@ -925,70 +926,13 @@ class FileExplorer {
     this._previewTitle.textContent = name;
     this._previewContent.innerHTML = '<div class="empty-hint">Loading...</div>';
 
-    const vt = getViewerType(ext);
-    const cat = getCategory(ext);
-
     try {
-      if (cat === 'image') {
-        this._previewContent.innerHTML = `<img src="${rawUrl}" style="max-width:100%;max-height:100%;object-fit:contain">`;
-        return;
-      }
-      if (cat === 'video') {
-        this._previewContent.innerHTML = `<video controls style="max-width:100%;max-height:100%"><source src="${rawUrl}"></video>`;
-        return;
-      }
-      if (cat === 'audio') {
-        this._previewContent.innerHTML = `<div style="padding:16px"><div style="font-size:11px;color:var(--text-secondary);margin-bottom:8px">${name}</div><audio controls src="${rawUrl}" style="width:100%"></audio></div>`;
-        return;
-      }
-      if (vt === 'pdf') {
-        this._previewContent.innerHTML = `<iframe src="${rawUrl}" style="width:100%;height:100%;border:none"></iframe>`;
-        return;
-      }
-      if (vt === 'html-editor') {
-        this._previewContent.innerHTML = `<iframe src="${rawUrl}" sandbox="allow-scripts" style="width:100%;height:100%;border:none;background:#fff"></iframe>`;
-        return;
-      }
-      if (vt === 'docx') {
-        this._previewContent.innerHTML = '';
-        const res = await fetch(rawUrl);
-        const blob = await res.blob();
-        const { renderAsync } = await import('docx-preview');
-        await renderAsync(blob, this._previewContent, this._previewContent, { inWrapper: true, ignoreWidth: false });
-        return;
-      }
-      if (vt === 'pptx') {
-        this._previewContent.innerHTML = '';
-        const { init } = await import('pptx-preview');
-        const rect = this._previewContent.getBoundingClientRect();
-        const previewer = init(this._previewContent, { width: Math.max(320, rect.width - 20), height: Math.max(180, (rect.width - 20) * 9 / 16), mode: 'list' });
-        const res = await fetch(rawUrl);
-        const buf = await res.arrayBuffer();
-        previewer.preview(buf);
-        return;
-      }
-      if (vt === 'xlsx') {
-        // Preview Excel as table (same as file-viewer, but simpler)
-        try {
-          const res = await fetch(`/api/file/excel?path=${encodeURIComponent(fp)}`);
-          const data = await res.json();
-          if (data.sheets?.length) {
-            let html = '';
-            for (const sheet of data.sheets) {
-              html += `<div style="padding:4px 8px;font-size:11px;font-weight:600;color:var(--accent-hover)">${sheet.name}</div>`;
-              html += '<table style="width:100%;border-collapse:collapse;font-size:10px">';
-              for (const row of (sheet.data || []).slice(0, 100)) {
-                html += '<tr>' + (row || []).map(c => `<td style="padding:2px 4px;border:1px solid var(--border)">${c ?? ''}</td>`).join('') + '</tr>';
-              }
-              html += '</table>';
-            }
-            this._previewContent.innerHTML = html;
-          }
-        } catch {}
-        return;
-      }
+      // Try dedicated viewer first (reuses FileViewer.renderInto for all formats)
+      this._previewContent.innerHTML = '';
+      const rendered = await FileViewer.renderInto(this._previewContent, fp, name);
+      if (rendered) return;
 
-      // Check file info for binary/size
+      // Fallback: text preview for non-binary files
       const infoRes = await fetch(`/api/file/info?path=${encodeURIComponent(fp)}`);
       const info = await infoRes.json();
       if (info.error) { this._previewContent.innerHTML = `<div class="empty-hint">${info.error}</div>`; return; }
@@ -1006,7 +950,6 @@ class FileExplorer {
       const pre = document.createElement('pre');
       pre.className = 'file-preview-code';
       pre.textContent = data.content;
-      this._previewContent.innerHTML = '';
       this._previewContent.appendChild(pre);
     } catch (err) {
       this._previewContent.innerHTML = `<div class="empty-hint">Error: ${err.message}</div>`;
