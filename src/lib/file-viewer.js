@@ -344,7 +344,7 @@ class FileViewer {
     sidebarHandle.addEventListener('mousedown', (e) => {
       e.preventDefault();
       const startX = e.clientX, startW = sidebar.offsetWidth;
-      const onMove = (ev) => { sidebar.style.width = Math.max(120, Math.min(400, startW + ev.clientX - startX)) + 'px'; };
+      const onMove = (ev) => { sidebar.style.width = Math.max(120, Math.min(400, startW + ev.clientX - startX)) + 'px'; if (viewer._resizeThumbs) viewer._resizeThumbs(); };
       const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); sidebarHandle.style.background = ''; };
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
@@ -415,6 +415,7 @@ class FileViewer {
     const thumbWrapper = thumbHidden.querySelector('div') || thumbHidden;
     const thumbSource = [...thumbWrapper.children];
 
+    const thumbContents = []; // store references for resize
     for (let i = 0; i < count; i++) {
       const thumb = document.createElement('div');
       thumb.style.cssText = 'margin-bottom:6px;cursor:pointer;border:2px solid var(--border);border-radius:4px;overflow:hidden;opacity:0.7;transition:all 0.15s;position:relative';
@@ -423,15 +424,10 @@ class FileViewer {
       label.style.cssText = 'position:absolute;top:2px;left:4px;font-size:9px;z-index:1;background:rgba(0,0,0,0.5);padding:0 3px;border-radius:2px;color:#fff';
       label.textContent = i + 1;
 
-      // Scale full-resolution render down to thumbnail size via CSS transform
       const thumbContent = document.createElement('div');
-      const displayW = sidebar.offsetWidth - 20; // sidebar width minus padding
-      const scale = displayW / THUMB_RENDER_W;
-      const displayH = THUMB_RENDER_H * scale;
-      thumbContent.style.cssText = `width:${displayW}px;height:${displayH}px;overflow:hidden;pointer-events:none;position:relative`;
+      thumbContent.style.cssText = 'overflow:hidden;pointer-events:none;position:relative';
       if (thumbSource[i]) {
         const clone = thumbSource[i].cloneNode(true);
-        clone.style.transform = `scale(${scale})`;
         clone.style.transformOrigin = 'top left';
         clone.style.width = THUMB_RENDER_W + 'px';
         clone.style.height = THUMB_RENDER_H + 'px';
@@ -439,6 +435,7 @@ class FileViewer {
         clone.style.top = '0'; clone.style.left = '0';
         thumbContent.appendChild(clone);
       }
+      thumbContents.push(thumbContent);
 
       thumb.append(label, thumbContent);
       thumb.onclick = () => { renderMain(i); thumb.scrollIntoView({ block: 'nearest' }); };
@@ -448,6 +445,21 @@ class FileViewer {
       sidebar.appendChild(thumb);
     }
     thumbHidden.remove();
+
+    // Scale thumbnails to fit sidebar width — called on init and sidebar resize
+    const resizeThumbs = () => {
+      const displayW = sidebar.clientWidth - 16;
+      const scale = displayW / THUMB_RENDER_W;
+      const displayH = Math.round(THUMB_RENDER_H * scale);
+      for (const tc of thumbContents) {
+        tc.style.width = displayW + 'px';
+        tc.style.height = displayH + 'px';
+        const clone = tc.firstChild;
+        if (clone) clone.style.transform = `scale(${scale})`;
+      }
+    };
+    resizeThumbs();
+    viewer._resizeThumbs = resizeThumbs;
 
     // Initial render at correct size
     renderMain(0, true);
