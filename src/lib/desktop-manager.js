@@ -305,26 +305,29 @@ export class DesktopManager {
       preview.title = desk.name;
 
       // Collect windows for this desktop and draw miniature rectangles
-      const wins = [];
-      for (const [, win] of this.app.wm.windows) {
-        if (win._desktopId === desk.id && win.gridBounds && !win._hiddenByDesktop && !win.isMinimized) wins.push(win);
-      }
-      // For non-active desktops, use cached state
-      if (desk.id !== this._activeId) {
+      const winEntries = []; // { id, gridBounds }
+      if (desk.id === this._activeId) {
+        for (const [id, win] of this.app.wm.windows) {
+          if (win._desktopId === desk.id && win.gridBounds && !win._hiddenByDesktop && !win.isMinimized) {
+            winEntries.push({ id, gridBounds: win.gridBounds });
+          }
+        }
+      } else {
         const cached = this._savedStates.get(desk.id);
         if (cached?.windows) {
           for (const ws of cached.windows) {
             if (ws.gridBounds && !ws.isMinimized) {
-              wins.push({ gridBounds: ws.gridBounds }); // pseudo-win for rendering
+              winEntries.push({ id: ws.winId, gridBounds: ws.gridBounds });
             }
           }
         }
       }
-      for (const win of wins) {
-        const b = win.gridBounds;
+      for (const entry of winEntries) {
+        const b = entry.gridBounds;
         if (!b) continue;
         const rect = document.createElement('div');
         rect.className = 'desktop-preview-win';
+        if (entry.id) rect.dataset.winId = entry.id;
         rect.style.left = (b.left * 100) + '%';
         rect.style.top = (b.top * 100) + '%';
         rect.style.width = (b.width * 100) + '%';

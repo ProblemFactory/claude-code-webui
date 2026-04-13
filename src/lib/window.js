@@ -165,6 +165,17 @@ class WindowManager {
       }
 
       element.style.left = (initL + dx) + 'px'; element.style.top = (initT + dy) + 'px';
+
+      // Live-update this window's rect in the active desktop preview
+      if (!deskPreviewTarget) {
+        const wr = this.workspace.getBoundingClientRect();
+        const srcRect = document.querySelector(`.desktop-preview.active .desktop-preview-win[data-win-id="${win.id}"]`);
+        if (srcRect && wr.width > 0 && wr.height > 0) {
+          srcRect.style.left = ((element.offsetLeft / wr.width) * 100) + '%';
+          srcRect.style.top = ((element.offsetTop / wr.height) * 100) + '%';
+        }
+      }
+
       const snapEnabled = this._settings?.get('layout.enableDragSnap') ?? true;
       const shiftDragEnabled = this._settings?.get('layout.enableShiftDragSelection') ?? true;
       if (!e.altKey && snapEnabled) {
@@ -239,6 +250,9 @@ class WindowManager {
         deskSavedBounds = { left: element.style.left, top: element.style.top, width: element.style.width, height: element.style.height };
         element.style.display = 'none';
         deskPreviewTarget.classList.add('desktop-preview-drop');
+        // Hide this window's rect in the source (active) desktop preview
+        const srcRect = document.querySelector(`.desktop-preview.active .desktop-preview-win[data-win-id="${win.id}"]`);
+        if (srcRect) srcRect.style.display = 'none';
         deskMiniWin = document.createElement('div');
         deskMiniWin.className = 'desktop-preview-win desktop-preview-dragging';
         // Size: proportional to window's gridBounds (or default 40%x40%)
@@ -251,6 +265,9 @@ class WindowManager {
         if (deskMiniWin) { deskMiniWin.remove(); deskMiniWin = null; }
         prevDeskTarget.classList.remove('desktop-preview-drop');
         element.style.display = '';
+        // Show this window's rect back in the source desktop preview
+        const srcRect = document.querySelector(`.desktop-preview.active .desktop-preview-win[data-win-id="${win.id}"]`);
+        if (srcRect) srcRect.style.display = '';
         if (deskSavedBounds) {
           initL = e.clientX - (parseInt(deskSavedBounds.width) || 350) / 2;
           initT = e.clientY - 15;
