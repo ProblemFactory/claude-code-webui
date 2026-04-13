@@ -93,34 +93,37 @@ export class DesktopManager {
     }
     const targetId = this._activeId;
 
-    // If deleted desktop has windows not yet in DOM (never switched to after refresh),
-    // create them from cached state first
-    const cached = this._savedStates.get(desktopId);
-    if (cached?.windows) {
-      for (const ws of cached.windows) {
-        const winId = ws.winId || ws.id;
-        if (!this.app.wm.windows.has(winId) && ws.openSpec) {
-          this.app.replayOpenSpec(ws.openSpec, winId);
-          const newWin = this.app.wm.windows.get(winId);
-          if (newWin) {
-            newWin._desktopId = desktopId;
-            if (ws.gridBounds) newWin.gridBounds = ws.gridBounds;
-          }
-        }
-      }
-    }
-
+    // Reassign live windows to the active desktop and show them
     for (const [, win] of this.app.wm.windows) {
       if (win._desktopId === desktopId) {
         win._desktopId = targetId;
         if (win._hiddenByDesktop) this._showWin(win);
-        if (win.gridBounds) this.app.wm._applyGridBounds(win);
+      }
+    }
+
+    // For windows not yet in DOM (never switched to after refresh),
+    // restore them via the standard layout restore pipeline
+    const cached = this._savedStates.get(desktopId);
+    if (cached?.windows) {
+      const unloaded = cached.windows.filter(ws => !this.app.wm.windows.has(ws.winId || ws.id));
+      if (unloaded.length) {
+        // Tag restored windows with active desktop
+        const origCreate = this.app.wm.createWindow;
+        this.app.wm.createWindow = (opts) => {
+          const win = origCreate.call(this.app.wm, opts);
+          win._desktopId = targetId;
+          return win;
+        };
+        this.app.layoutManager.restoreState({ windows: unloaded });
+        this.app.wm.createWindow = origCreate;
       }
     }
 
     this._desktops.splice(idx, 1);
     this._savedStates.delete(desktopId);
     this.app.ws.send({ type: 'desktop-delete', desktopId });
+    // Reflow positions for all now-visible windows
+    this.app.wm._reflowWindows();
     this._renderSwitcher();
     this.app.updateTaskbar();
     this.app.layoutManager.scheduleAutoSave();
@@ -170,11 +173,11 @@ export class DesktopManager {
       for (const [, win] of this.app.wm.windows) {
         if (win._desktopId === desktopId && win._hiddenByDesktop) {
           this._showWin(win);
-          // Re-apply gridBounds — pixel position may be stale if window was moved via preview drag
-          if (win.gridBounds) this.app.wm._applyGridBounds(win);
           hasWindows = true;
         }
       }
+      // Single reflow: recalculate all visible windows' pixel positions from gridBounds
+      this.app.wm._reflowWindows();
 
       // 6. Create windows that exist in saved state but not yet in DOM
       // (from other clients or disk restore)

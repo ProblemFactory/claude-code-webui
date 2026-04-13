@@ -104,6 +104,7 @@ class WindowManager {
     for (const win of this.windows.values()) {
       // Skip grouped guests — they share the host's element
       if (win._tabChain && win._tabChain.tabs[0] !== win.id) continue;
+      if (win._hiddenByDesktop) continue;
       if (win.gridBounds && !win.isMinimized && !win.isMaximized) {
         this._applyGridBounds(win);
       }
