@@ -485,6 +485,7 @@ html, body {
 .desktop-preview.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-dim); }
 .desktop-preview-win {
   position: absolute; background: var(--accent); border-radius: 1px; opacity: 0.5;
+  box-shadow: inset 0 0 0 0.5px var(--bg-input), 0 0 0 0.5px rgba(0,0,0,0.3);
 }
 .desktop-preview.active .desktop-preview-win { opacity: 0.8; }
 .desktop-preview-label {
