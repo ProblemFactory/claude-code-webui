@@ -1,5 +1,6 @@
 import { formatSize, attachPopoverClose, createPopover, showContextMenu } from './utils.js';
 import { setupDirAutocomplete } from './autocomplete.js';
+import { getFileIcon, getCategory, getViewerType } from './file-types.js';
 
 const DEFAULT_COLUMNS = { name: true, size: true, modified: true, created: false, type: false };
 const ALL_COLUMNS = [
@@ -660,7 +661,7 @@ class FileExplorer {
       const cell = document.createElement('div'); cell.className = 'file-icon-cell';
       cell.dataset.name = item.name; cell.dataset.isDir = item.isDirectory;
       const icon = document.createElement('div'); icon.className = 'file-icon-large';
-      icon.textContent = item.isDirectory ? '\u{1F4C1}' : this._fileIcon(item.name);
+      icon.textContent = item.isDirectory ? '\u{1F4C1}' : getFileIcon(item.name);
       const label = document.createElement('div'); label.className = 'file-icon-label'; label.textContent = item.name;
       cell.append(icon, label);
       cell.draggable = true;
@@ -679,7 +680,7 @@ class FileExplorer {
     } else {
       const row = document.createElement('div'); row.className = 'file-item';
       row.dataset.name = item.name; row.dataset.isDir = item.isDirectory;
-      const iconEl = document.createElement('span'); iconEl.className = 'file-icon'; iconEl.textContent = item.isDirectory ? '\u{1F4C1}' : this._fileIcon(item.name);
+      const iconEl = document.createElement('span'); iconEl.className = 'file-icon'; iconEl.textContent = item.isDirectory ? '\u{1F4C1}' : getFileIcon(item.name);
       row.appendChild(iconEl);
 
       const visCols = this._getVisibleColumns();
@@ -924,33 +925,31 @@ class FileExplorer {
     this._previewTitle.textContent = name;
     this._previewContent.innerHTML = '<div class="empty-hint">Loading...</div>';
 
-    const IMAGE_EXTS = ['png','jpg','jpeg','gif','webp','svg','bmp','ico'];
-    const VIDEO_EXTS = ['mp4','webm','mov','avi'];
-    const AUDIO_EXTS = ['mp3','wav','ogg','flac','aac','m4a'];
+    const vt = getViewerType(ext);
+    const cat = getCategory(ext);
 
     try {
-      // Media types — render directly without file info check
-      if (IMAGE_EXTS.includes(ext)) {
+      if (cat === 'image') {
         this._previewContent.innerHTML = `<img src="${rawUrl}" style="max-width:100%;max-height:100%;object-fit:contain">`;
         return;
       }
-      if (VIDEO_EXTS.includes(ext)) {
+      if (cat === 'video') {
         this._previewContent.innerHTML = `<video controls style="max-width:100%;max-height:100%"><source src="${rawUrl}"></video>`;
         return;
       }
-      if (AUDIO_EXTS.includes(ext)) {
+      if (cat === 'audio') {
         this._previewContent.innerHTML = `<div style="padding:16px"><div style="font-size:11px;color:var(--text-secondary);margin-bottom:8px">${name}</div><audio controls src="${rawUrl}" style="width:100%"></audio></div>`;
         return;
       }
-      if (ext === 'pdf') {
+      if (vt === 'pdf') {
         this._previewContent.innerHTML = `<iframe src="${rawUrl}" style="width:100%;height:100%;border:none"></iframe>`;
         return;
       }
-      if (ext === 'html' || ext === 'htm') {
+      if (vt === 'html-editor') {
         this._previewContent.innerHTML = `<iframe src="${rawUrl}" sandbox="allow-scripts" style="width:100%;height:100%;border:none;background:#fff"></iframe>`;
         return;
       }
-      if (['docx','doc'].includes(ext)) {
+      if (vt === 'docx') {
         this._previewContent.innerHTML = '';
         const res = await fetch(rawUrl);
         const blob = await res.blob();
@@ -958,7 +957,7 @@ class FileExplorer {
         await renderAsync(blob, this._previewContent, this._previewContent, { inWrapper: true, ignoreWidth: false });
         return;
       }
-      if (['pptx','ppt'].includes(ext)) {
+      if (vt === 'pptx') {
         this._previewContent.innerHTML = '';
         const { init } = await import('pptx-preview');
         const rect = this._previewContent.getBoundingClientRect();
@@ -968,7 +967,7 @@ class FileExplorer {
         previewer.preview(buf);
         return;
       }
-      if (['xlsx','xls'].includes(ext)) {
+      if (vt === 'xlsx') {
         // Preview Excel as table (same as file-viewer, but simpler)
         try {
           const res = await fetch(`/api/file/excel?path=${encodeURIComponent(fp)}`);
@@ -1014,13 +1013,6 @@ class FileExplorer {
     }
   }
 
-  _fileIcon(name) {
-    const ext = name.split('.').pop().toLowerCase();
-    const m = { js: '\uD83D\uDCDC', ts: '\uD83D\uDCDC', py: '\uD83D\uDC0D', go: '\uD83D\uDD37', rs: '\uD83E\uDD80', html: '\uD83C\uDF10', css: '\uD83C\uDFA8', json: '{}', md: '\uD83D\uDCDD', txt: '\uD83D\uDCC4',
-      pdf: '\uD83D\uDCD5', doc: '\uD83D\uDCD8', docx: '\uD83D\uDCD8', xls: '\uD83D\uDCCA', xlsx: '\uD83D\uDCCA', csv: '\uD83D\uDCCA',
-      jpg: '\uD83D\uDDBC', jpeg: '\uD83D\uDDBC', png: '\uD83D\uDDBC', gif: '\uD83D\uDDBC', svg: '\uD83D\uDDBC', webp: '\uD83D\uDDBC', sh: '\u2699', bash: '\u2699', zsh: '\u2699' };
-    return m[ext] || '\uD83D\uDCC4';
-  }
 }
 
 export { FileExplorer };

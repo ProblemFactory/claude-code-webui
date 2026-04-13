@@ -2,12 +2,9 @@ import { marked } from 'marked';
 import { HexViewer } from './hex-viewer.js';
 import { CodeEditor } from './code-editor.js';
 import { formatSize } from './utils.js';
+import { hasDedicatedViewer, getViewerType } from './file-types.js';
 import { renderAsync as renderDocx } from 'docx-preview';
 import { init as initPptx } from 'pptx-preview';
-
-const IMAGE_EXTS = ['png','jpg','jpeg','gif','webp','svg','bmp','ico'];
-const VIDEO_EXTS = ['mp4','webm','mov','avi'];
-const AUDIO_EXTS = ['mp3','wav','ogg','flac','aac','m4a'];
 
 class FileViewer {
   static async open(app, filePath, fileName, opts = {}) {
@@ -30,25 +27,23 @@ class FileViewer {
       return;
     }
 
-    // These extensions ARE binary but have dedicated viewers — bypass hex fallback
-    const OFFICE_EXTS = ['docx','doc','pptx','ppt','xlsx','xls'];
-    const isMedia = IMAGE_EXTS.includes(ext) || VIDEO_EXTS.includes(ext) || AUDIO_EXTS.includes(ext) || ext === 'pdf' || OFFICE_EXTS.includes(ext);
-
-    // Binary file (non-media) → hex viewer
-    if (fileInfo.isBinary && !isMedia) {
+    // Binary file without a dedicated viewer → hex viewer
+    if (fileInfo.isBinary && !hasDedicatedViewer(ext)) {
       const winInfo = app.wm.createWindow({ title: `Hex: ${fileName}`, type: 'hex-viewer', syncId: opts.syncId, openSpec });
       winInfo._filePath = filePath; winInfo._fileName = fileName;
       new HexViewer(winInfo, filePath, fileInfo);
       return;
     }
 
+    const viewerType = getViewerType(ext);
+
     // Large file warning (only for text files opened in editor)
-    if (!isMedia && fileInfo.size > 1024 * 1024) {
+    if (!hasDedicatedViewer(ext) && fileInfo.size > 1024 * 1024) {
       if (!confirm(`This file is ${formatSize(fileInfo.size)}. Opening may slow down the UI. Continue?`)) return;
     }
 
     // HTML: open in CodeEditor with preview toggle (same as markdown)
-    if (ext === 'html' || ext === 'htm') {
+    if (viewerType === 'html-editor') {
       const winInfo = app.wm.createWindow({ title: fileName, type: 'editor', syncId: opts.syncId, openSpec });
       winInfo._filePath = filePath; winInfo._fileName = fileName;
       new CodeEditor(winInfo, filePath, fileName, app);
@@ -60,17 +55,16 @@ class FileViewer {
     const container = document.createElement('div'); container.className = 'file-viewer';
     winInfo.content.appendChild(container);
     winInfo.onClose = () => {};
-
     try {
-      if (IMAGE_EXTS.includes(ext)) {
+      if (viewerType === 'image') {
         FileViewer._renderImage(container, filePath);
-      } else if (VIDEO_EXTS.includes(ext)) {
+      } else if (viewerType === 'video') {
         FileViewer._renderVideo(container, filePath);
-      } else if (AUDIO_EXTS.includes(ext)) {
+      } else if (viewerType === 'audio') {
         FileViewer._renderAudio(container, filePath, fileName);
-      } else if (ext === 'pdf') {
+      } else if (viewerType === 'pdf') {
         FileViewer._renderPdf(container, filePath);
-      } else if (['csv','tsv'].includes(ext)) {
+      } else if (viewerType === 'csv') {
         const res = await fetch(`/api/file/content?path=${encodeURIComponent(filePath)}`);
         const data = await res.json();
         const sep = ext === 'tsv' ? '\t' : ',';
@@ -85,7 +79,7 @@ class FileViewer {
           table.appendChild(tbody);
         }
         container.appendChild(table);
-      } else if (['xlsx','xls'].includes(ext)) {
+      } else if (viewerType === 'xlsx') {
         const res = await fetch(`/api/file/excel?path=${encodeURIComponent(filePath)}`);
         const data = await res.json();
         if (data.error) throw new Error(data.error);
@@ -101,7 +95,7 @@ class FileViewer {
           });
           table.appendChild(tbody); container.appendChild(table);
         }
-      } else if (['docx','doc'].includes(ext)) {
+      } else if (viewerType === 'docx') {
         // Client-side DOCX rendering via docx-preview (visual fidelity)
         const res = await fetch(`/api/file/raw?path=${encodeURIComponent(filePath)}`);
         const blob = await res.blob();
@@ -111,7 +105,7 @@ class FileViewer {
           inWrapper: true, ignoreWidth: false, ignoreHeight: false,
           renderHeaders: true, renderFooters: true, renderFootnotes: true,
         });
-      } else if (['pptx','ppt'].includes(ext)) {
+      } else if (viewerType === 'pptx') {
         // Client-side PPTX rendering via pptx-preview
         const wrapper = document.createElement('div'); wrapper.className = 'pptx-preview';
         wrapper.style.cssText = 'width:100%;height:100%;overflow:auto;background:var(--bg-workspace)';
