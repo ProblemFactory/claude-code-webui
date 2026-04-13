@@ -330,7 +330,21 @@ class WindowManager {
           tabMergeTarget = null; savedBounds = null;
           return;
         }
-        // Dropped on current desktop's preview — just restore window normally
+        // Dropped on current desktop's preview — apply mini rect position
+        if (!isOtherDesktop && deskMiniWin) {
+          this._clearGridHighlight(); this.gridOverlay.classList.remove('dragging');
+          const ml = parseFloat(deskMiniWin.style.left) / 100;
+          const mt = parseFloat(deskMiniWin.style.top) / 100;
+          const gb = win.gridBounds || { width: 0.4, height: 0.4 };
+          win.gridBounds = { left: ml, top: mt, width: gb.width, height: gb.height };
+          deskMiniWin.remove(); deskMiniWin = null; deskPreviewTarget = null;
+          element.style.visibility = ''; element.style.pointerEvents = '';
+          deskSavedBounds = null;
+          this._applyGridBounds(win);
+          setTimeout(() => { this._captureGridBounds(win); this._notify(); }, 250);
+          tabMergeTarget = null; savedBounds = null;
+          return;
+        }
       }
       // Clean up desktop drag state — restore window to pre-drag position
       if (deskMiniWin) { deskMiniWin.remove(); deskMiniWin = null; }
@@ -339,7 +353,6 @@ class WindowManager {
         element.style.visibility = ''; element.style.pointerEvents = '';
         element.style.left = deskSavedBounds.left; element.style.top = deskSavedBounds.top;
         element.style.width = deskSavedBounds.width; element.style.height = deskSavedBounds.height;
-        // Re-sync cursor for snap logic below
         initL = parseInt(deskSavedBounds.left) || element.offsetLeft;
         initT = parseInt(deskSavedBounds.top) || element.offsetTop;
         deskSavedBounds = null;

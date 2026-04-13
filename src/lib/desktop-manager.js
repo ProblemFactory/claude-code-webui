@@ -85,15 +85,19 @@ export class DesktopManager {
     const idx = this._desktops.findIndex(d => d.id === desktopId);
     if (idx < 0) return;
 
-    // Always move orphaned windows to the active desktop and show them
-    // If deleting the active desktop, pick adjacent as new active first
-    if (this._activeId === desktopId) {
+    // If deleting the active desktop, switch to adjacent first
+    const wasActive = this._activeId === desktopId;
+    if (wasActive) {
       const targetIdx = idx > 0 ? idx - 1 : 1;
       this._activeId = this._desktops[targetIdx].id;
+      // Show the new active desktop's windows
+      for (const [, win] of this.app.wm.windows) {
+        if (win._desktopId === this._activeId && win._hiddenByDesktop) this._showWin(win);
+      }
     }
     const targetId = this._activeId;
 
-    // Reassign live windows to the active desktop and show them
+    // Reassign deleted desktop's windows to the active desktop and show them
     for (const [, win] of this.app.wm.windows) {
       if (win._desktopId === desktopId) {
         win._desktopId = targetId;
