@@ -950,6 +950,44 @@ class FileExplorer {
         this._previewContent.innerHTML = `<iframe src="${rawUrl}" sandbox="allow-scripts" style="width:100%;height:100%;border:none;background:#fff"></iframe>`;
         return;
       }
+      if (['docx','doc'].includes(ext)) {
+        this._previewContent.innerHTML = '';
+        const res = await fetch(rawUrl);
+        const blob = await res.blob();
+        const { renderAsync } = await import('docx-preview');
+        await renderAsync(blob, this._previewContent, this._previewContent, { inWrapper: true, ignoreWidth: false });
+        return;
+      }
+      if (['pptx','ppt'].includes(ext)) {
+        this._previewContent.innerHTML = '';
+        const { init } = await import('pptx-preview');
+        const rect = this._previewContent.getBoundingClientRect();
+        const previewer = init(this._previewContent, { width: Math.max(320, rect.width - 20), height: Math.max(180, (rect.width - 20) * 9 / 16), mode: 'list' });
+        const res = await fetch(rawUrl);
+        const buf = await res.arrayBuffer();
+        previewer.preview(buf);
+        return;
+      }
+      if (['xlsx','xls'].includes(ext)) {
+        // Preview Excel as table (same as file-viewer, but simpler)
+        try {
+          const res = await fetch(`/api/file/excel?path=${encodeURIComponent(fp)}`);
+          const data = await res.json();
+          if (data.sheets?.length) {
+            let html = '';
+            for (const sheet of data.sheets) {
+              html += `<div style="padding:4px 8px;font-size:11px;font-weight:600;color:var(--accent-hover)">${sheet.name}</div>`;
+              html += '<table style="width:100%;border-collapse:collapse;font-size:10px">';
+              for (const row of (sheet.data || []).slice(0, 100)) {
+                html += '<tr>' + (row || []).map(c => `<td style="padding:2px 4px;border:1px solid var(--border)">${c ?? ''}</td>`).join('') + '</tr>';
+              }
+              html += '</table>';
+            }
+            this._previewContent.innerHTML = html;
+          }
+        } catch {}
+        return;
+      }
 
       // Check file info for binary/size
       const infoRes = await fetch(`/api/file/info?path=${encodeURIComponent(fp)}`);

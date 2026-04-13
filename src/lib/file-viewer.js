@@ -2,6 +2,8 @@ import { marked } from 'marked';
 import { HexViewer } from './hex-viewer.js';
 import { CodeEditor } from './code-editor.js';
 import { formatSize } from './utils.js';
+import { renderAsync as renderDocx } from 'docx-preview';
+import { init as initPptx } from 'pptx-preview';
 
 const IMAGE_EXTS = ['png','jpg','jpeg','gif','webp','svg','bmp','ico'];
 const VIDEO_EXTS = ['mp4','webm','mov','avi'];
@@ -99,11 +101,25 @@ class FileViewer {
           table.appendChild(tbody); container.appendChild(table);
         }
       } else if (['docx','doc'].includes(ext)) {
-        const res = await fetch(`/api/file/docx?path=${encodeURIComponent(filePath)}`);
-        const data = await res.json();
-        if (data.error) throw new Error(data.error);
-        const div = document.createElement('div'); div.className = 'docx-preview'; div.innerHTML = data.html;
-        container.appendChild(div);
+        // Client-side DOCX rendering via docx-preview (visual fidelity)
+        const res = await fetch(`/api/file/raw?path=${encodeURIComponent(filePath)}`);
+        const blob = await res.blob();
+        const wrapper = document.createElement('div'); wrapper.className = 'docx-preview';
+        container.appendChild(wrapper);
+        await renderDocx(blob, wrapper, wrapper, {
+          inWrapper: true, ignoreWidth: false, ignoreHeight: false,
+          renderHeaders: true, renderFooters: true, renderFootnotes: true,
+        });
+      } else if (['pptx','ppt'].includes(ext)) {
+        // Client-side PPTX rendering via pptx-preview
+        const wrapper = document.createElement('div'); wrapper.className = 'pptx-preview';
+        wrapper.style.cssText = 'width:100%;height:100%;overflow:auto;background:var(--bg-workspace)';
+        container.appendChild(wrapper);
+        const rect = container.getBoundingClientRect();
+        const previewer = initPptx(wrapper, { width: Math.max(640, rect.width - 40), height: Math.max(360, (rect.width - 40) * 9 / 16), mode: 'list' });
+        const res = await fetch(`/api/file/raw?path=${encodeURIComponent(filePath)}`);
+        const buf = await res.arrayBuffer();
+        previewer.preview(buf);
       } else {
         // Default: open in code editor
         app.openEditor(filePath, fileName, opts);
