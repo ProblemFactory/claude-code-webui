@@ -38,7 +38,7 @@ cd ~/claude-code-webui
 npm start
 ```
 
-Open **http://localhost:3456** in your browser.
+Open **http://localhost:3456** in your browser. On startup, a loading screen is displayed while the workspace restores your previous session layout. It fades away once all windows are created.
 
 ### Environment variables
 

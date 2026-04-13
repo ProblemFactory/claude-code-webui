@@ -90,6 +90,7 @@ Overrides persist in the layout auto-save.
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `session.defaultMode` | enum | `chat` | Default mode for new sessions and single-click resume: Terminal or Chat |
+| `session.defaultEffort` | enum | (empty = auto) | Default effort level for new sessions. Options: Auto (model default), Low, Medium, High, Max (Opus 4.6 only) |
 | `sessionCard.clickBehavior` | enum | `focus` | Card click: focus window, expand details, or flash window |
 | `sessionCard.clickToCopy` | boolean | `false` | Click detail values (ID, path, time) to copy to clipboard |
 | `sessionCard.visibleFields` | multiSelect | all fields | Which fields to show in expanded card details |

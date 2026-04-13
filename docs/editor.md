@@ -25,8 +25,10 @@ The split-pane editor uses CodeMirror 6 with:
 - **Language override** — Dropdown in the toolbar to force a specific language
 - **Word wrap** — Toggle button in toolbar
 - **Font size** — A-/A+ buttons
-- **Theme** — Follows terminal theme (dark/light auto-detection)
+- **Theme** — Follows the global app theme (no separate theme toggle)
+- **Auto-format** — Shift+Alt+F or the format button (&#8801;) in the toolbar. Prettier for JS, TS, JSON, HTML, CSS, Markdown, YAML, GraphQL. Server-side formatting for Python (ruff/black), Go (gofmt), Rust (rustfmt), Shell (shfmt).
 - **Markdown preview** — Toggle between code editing and rendered preview for `.md` files
+- **HTML preview** — HTML files open in the editor with a Preview toggle (sandboxed iframe, same behavior as markdown preview)
 - **Jump to line** — When opened from a path with a `:line` suffix, the editor jumps to and highlights that line
 - **Indent with Tab** — Standard tab indentation
 - **Line numbers** — Always visible
@@ -35,11 +37,11 @@ The split-pane editor uses CodeMirror 6 with:
 
 | Control | Description |
 |---------|-------------|
-| Language dropdown | Override auto-detected language |
+| Language dropdown | Override auto-detected language (also drives Preview button visibility) |
 | Wrap toggle | Toggle word wrap on/off |
 | A- / A+ | Decrease / increase font size |
-| Theme toggle | Switch dark/light |
-| Preview | Toggle markdown preview (`.md` files only) |
+| Format (&#8801;) | Format document via Prettier or server-side formatter |
+| Preview | Toggle rendered preview (`.md` and `.html` files) |
 | **Save & Close** | Write file and close editor pane |
 
 ## Resizable Split

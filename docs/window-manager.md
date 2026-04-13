@@ -108,7 +108,19 @@ Command mode auto-exits after 2 seconds or on Escape.
 
 ## Taskbar
 
-The taskbar at the bottom shows all open windows. Items use flex-shrink with text-overflow ellipsis to handle many windows gracefully.
+The taskbar at the bottom shows all open windows in a two-row layout: a large type icon (18px) on the left with the window title and subtitle stacked to the right. Window type icons indicate the content:
+
+| Icon | Window type |
+|------|-------------|
+| `💬` | Chat session |
+| `⬛` | Terminal session |
+| `📁` | File explorer |
+| `📄` | File viewer |
+| `✏️` | Code editor |
+| `🔢` | Hex viewer |
+| `🌐` | Browser |
+
+Items use flex-shrink with text-overflow ellipsis to handle many windows gracefully.
 
 ### Right-click context menu
 
@@ -122,9 +134,34 @@ Right-click any taskbar item to open a context menu:
 
 ### Move mode
 
-Move mode detaches a window from its current position and attaches it to your cursor. Click to place it at the new location. Move mode uses capture-phase event handling to prevent the click from leaking to elements underneath the window.
+Move mode detaches a window from its current position and attaches it to your cursor. A full-screen overlay blocks all other UI interaction during move, ensuring no accidental clicks reach elements underneath. If the window is maximized or snapped, it restores to its original (pre-snap) size before following the cursor. Click to place it at the new location.
 
 Move mode can also be triggered via command mode (Ctrl+\\ then a move command).
+
+## Tab Groups
+
+Merge multiple windows into Chrome-style tab groups for space-efficient multitasking.
+
+### Creating a tab group
+
+- **Drag a window's type icon** onto another window's type icon to merge them into a tab group
+- **Drag a full window** over another window's type icon to merge (the dragged window collapses to a ghost indicator before snapping in)
+
+### Tab bar
+
+When windows merge, the title bar is replaced by a tab bar with rounded-top tabs. The active tab visually connects to the content area below.
+
+- **Click** a tab to switch to that window's content
+- **Close button** on each tab to remove it from the group (window closes or becomes standalone)
+- **Drag a tab downward** to pull it out of the group — the detached window follows the cursor with full snap support
+
+### Data model
+
+Tab groups share a `{tabs, active}` object among all grouped windows. The `tabs` array holds references to each window in the group, and `active` tracks the currently displayed tab.
+
+### Layout persistence
+
+Tab groups are saved and restored as part of the layout auto-save, and synced across clients via the layout sync protocol.
 
 ## Layout Sync
 

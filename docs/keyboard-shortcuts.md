@@ -97,3 +97,17 @@ Command mode auto-exits after **2 seconds** or on **Escape**. All commands are s
 | **Drag** folder to group header | Link folder to group |
 | **Drag** file/folder to bookmarks | Add bookmark |
 | **Tab** in path bar | Autocomplete directory |
+
+## Editor Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| **Shift+Alt+F** | Format document (Prettier for JS/TS/JSON/HTML/CSS/MD/YAML/GraphQL; server-side for Python/Go/Rust/Shell) |
+| **Ctrl+S** | Save file |
+
+## PPTX Viewer Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| **Arrow Left** / **Arrow Up** | Previous slide |
+| **Arrow Right** / **Arrow Down** | Next slide |
