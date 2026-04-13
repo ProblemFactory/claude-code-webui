@@ -30,8 +30,9 @@ class FileViewer {
       return;
     }
 
-    // Media types bypass binary detection — they ARE binary but have dedicated viewers
-    const isMedia = IMAGE_EXTS.includes(ext) || VIDEO_EXTS.includes(ext) || AUDIO_EXTS.includes(ext) || ext === 'pdf';
+    // These extensions ARE binary but have dedicated viewers — bypass hex fallback
+    const OFFICE_EXTS = ['docx','doc','pptx','ppt','xlsx','xls'];
+    const isMedia = IMAGE_EXTS.includes(ext) || VIDEO_EXTS.includes(ext) || AUDIO_EXTS.includes(ext) || ext === 'pdf' || OFFICE_EXTS.includes(ext);
 
     // Binary file (non-media) → hex viewer
     if (fileInfo.isBinary && !isMedia) {
