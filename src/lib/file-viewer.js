@@ -334,7 +334,21 @@ class FileViewer {
     viewer.style.cssText = 'display:flex;height:100%;overflow:hidden;background:var(--bg-workspace);user-select:text';
 
     const sidebar = document.createElement('div');
-    sidebar.style.cssText = 'width:160px;flex-shrink:0;overflow-y:auto;border-right:1px solid var(--border);background:var(--bg-sidebar);padding:8px';
+    sidebar.style.cssText = 'width:180px;min-width:120px;max-width:400px;flex-shrink:0;overflow-y:auto;border-right:1px solid var(--border);background:var(--bg-sidebar);padding:8px';
+
+    // Sidebar resize handle
+    const sidebarHandle = document.createElement('div');
+    sidebarHandle.style.cssText = 'width:4px;flex-shrink:0;cursor:col-resize;background:transparent;transition:background 0.15s';
+    sidebarHandle.onmouseenter = () => { sidebarHandle.style.background = 'var(--accent-dim)'; };
+    sidebarHandle.onmouseleave = () => { sidebarHandle.style.background = ''; };
+    sidebarHandle.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      const startX = e.clientX, startW = sidebar.offsetWidth;
+      const onMove = (ev) => { sidebar.style.width = Math.max(120, Math.min(400, startW + ev.clientX - startX)) + 'px'; };
+      const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); sidebarHandle.style.background = ''; };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
 
     const main = document.createElement('div');
     main.style.cssText = 'flex:1;display:flex;align-items:center;justify-content:center;overflow:auto;padding:16px;min-width:0';
@@ -343,7 +357,7 @@ class FileViewer {
     slideContainer.style.cssText = 'position:relative';
     main.appendChild(slideContainer);
 
-    viewer.append(sidebar, main);
+    viewer.append(sidebar, sidebarHandle, main);
     container.appendChild(viewer);
 
     // Load once for main view — this previewer is reused for slide switching
@@ -388,17 +402,18 @@ class FileViewer {
       });
     };
 
-    // Build thumbnails using list mode in a hidden container (one parse)
+    // Build thumbnails: render at high resolution, CSS scale to fit sidebar
+    const THUMB_RENDER_W = 800;
+    const THUMB_RENDER_H = 450;
     const thumbHidden = document.createElement('div');
     thumbHidden.style.cssText = 'position:absolute;left:-9999px;top:0';
     document.body.appendChild(thumbHidden);
-    const thumbPreviewer = initPptx(thumbHidden, { width: 140, height: 79, mode: 'list' });
+    const thumbPreviewer = initPptx(thumbHidden, { width: THUMB_RENDER_W, height: THUMB_RENDER_H, mode: 'list' });
     await thumbPreviewer.preview(buf);
 
-    // Extract rendered slides from list as thumbnail clones
-    const renderedSlides = thumbHidden.querySelectorAll('[class*="slide"], [style*="position"]');
-    // Fallback: just grab all direct children of the wrapper
-    const thumbSource = renderedSlides.length > 0 ? renderedSlides : thumbHidden.children[0]?.children || [];
+    // Extract rendered slides from list container
+    const thumbWrapper = thumbHidden.querySelector('div') || thumbHidden;
+    const thumbSource = [...thumbWrapper.children];
 
     for (let i = 0; i < count; i++) {
       const thumb = document.createElement('div');
@@ -408,10 +423,22 @@ class FileViewer {
       label.style.cssText = 'position:absolute;top:2px;left:4px;font-size:9px;z-index:1;background:rgba(0,0,0,0.5);padding:0 3px;border-radius:2px;color:#fff';
       label.textContent = i + 1;
 
+      // Scale full-resolution render down to thumbnail size via CSS transform
       const thumbContent = document.createElement('div');
-      thumbContent.style.cssText = 'width:140px;height:79px;overflow:hidden;pointer-events:none';
-      // Clone the already-rendered slide from list mode
-      if (thumbSource[i]) thumbContent.appendChild(thumbSource[i].cloneNode(true));
+      const displayW = sidebar.offsetWidth - 20; // sidebar width minus padding
+      const scale = displayW / THUMB_RENDER_W;
+      const displayH = THUMB_RENDER_H * scale;
+      thumbContent.style.cssText = `width:${displayW}px;height:${displayH}px;overflow:hidden;pointer-events:none;position:relative`;
+      if (thumbSource[i]) {
+        const clone = thumbSource[i].cloneNode(true);
+        clone.style.transform = `scale(${scale})`;
+        clone.style.transformOrigin = 'top left';
+        clone.style.width = THUMB_RENDER_W + 'px';
+        clone.style.height = THUMB_RENDER_H + 'px';
+        clone.style.position = 'absolute';
+        clone.style.top = '0'; clone.style.left = '0';
+        thumbContent.appendChild(clone);
+      }
 
       thumb.append(label, thumbContent);
       thumb.onclick = () => { renderMain(i); thumb.scrollIntoView({ block: 'nearest' }); };
