@@ -354,8 +354,11 @@ class FileViewer {
     let activeIdx = 0;
     const thumbEls = [];
 
-    // Render main slide — reuse the same previewer (already loaded)
-    const renderMain = (idx) => {
+    // Render main slide — switching slides reuses previewer, resize recreates it
+    let currentPreviewer = mainPreviewer;
+    let lastW = 0, lastH = 0;
+
+    const renderMain = (idx, forceResize = false) => {
       activeIdx = idx;
       const rect = main.getBoundingClientRect();
       const w = Math.max(300, rect.width - 40);
@@ -364,12 +367,21 @@ class FileViewer {
       let slideW, slideH;
       if (w / h > aspect) { slideH = h; slideW = h * aspect; }
       else { slideW = w; slideH = w / aspect; }
-      // Update size and re-render current slide
-      mainPreviewer.options.width = slideW;
-      mainPreviewer.options.height = slideH;
-      mainPreviewer.removeCurrentSlide();
-      mainPreviewer.renderSingleSlide(idx);
-      // Update thumbnail highlights
+      slideW = Math.round(slideW); slideH = Math.round(slideH);
+
+      if (forceResize || Math.abs(slideW - lastW) > 5 || Math.abs(slideH - lastH) > 5) {
+        // Size changed — need to recreate previewer with new dimensions
+        lastW = slideW; lastH = slideH;
+        slideContainer.innerHTML = '';
+        currentPreviewer = initPptx(slideContainer, { width: slideW, height: slideH, mode: 'slide' });
+        // Re-load from already-fetched buffer (re-parses but no network request)
+        currentPreviewer.load(buf).then(() => currentPreviewer.renderSingleSlide(idx));
+      } else {
+        // Same size — just switch slide
+        currentPreviewer.removeCurrentSlide();
+        currentPreviewer.renderSingleSlide(idx);
+      }
+
       thumbEls.forEach((t, i) => {
         t.style.borderColor = i === idx ? 'var(--accent)' : 'var(--border)';
         t.style.opacity = i === idx ? '1' : '0.7';
@@ -411,7 +423,7 @@ class FileViewer {
     thumbHidden.remove();
 
     // Initial render at correct size
-    renderMain(0);
+    renderMain(0, true);
 
     // Keyboard navigation
     const onKey = (e) => {
@@ -425,7 +437,7 @@ class FileViewer {
     let resizeTimer = null;
     const ro = new ResizeObserver(() => {
       clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(() => renderMain(activeIdx), 200);
+      resizeTimer = setTimeout(() => renderMain(activeIdx, true), 200);
     });
     ro.observe(main);
   }
