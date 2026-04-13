@@ -204,13 +204,18 @@ router.delete('/api/file', (req, res) => {
 const upload = multer({ dest: '/tmp/claude-webui-uploads/' });
 router.post('/api/upload', upload.array('files'), (req, res) => {
   const destDir = req.body.destDir || os.homedir();
+  // Client sends correct UTF-8 filenames as JSON to avoid multer encoding issues
+  let clientNames = [];
+  try { clientNames = JSON.parse(req.body.fileNames || '[]'); } catch {}
   try {
     const results = [];
-    for (const file of req.files) {
-      const dest = path.join(destDir, file.originalname);
+    for (let i = 0; i < req.files.length; i++) {
+      const file = req.files[i];
+      const name = clientNames[i] || file.originalname;
+      const dest = path.join(destDir, name);
       fs.copyFileSync(file.path, dest);
       fs.unlinkSync(file.path);
-      results.push({ name: file.originalname, path: dest, size: file.size });
+      results.push({ name, path: dest, size: file.size });
     }
     res.json({ success: true, files: results });
   } catch (err) { res.status(400).json({ error: err.message }); }

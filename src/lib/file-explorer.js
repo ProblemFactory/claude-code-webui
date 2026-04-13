@@ -733,7 +733,10 @@ class FileExplorer {
 
   async _uploadFiles(files) {
     const fd = new FormData(); fd.append('destDir', this.currentPath);
-    for (const f of files) fd.append('files', f);
+    // Send original filenames as separate JSON field to avoid encoding issues
+    const names = [];
+    for (const f of files) { fd.append('files', f); names.push(f.name); }
+    fd.append('fileNames', JSON.stringify(names));
     try { await fetch('/api/upload', { method: 'POST', body: fd }); this.refresh(); } catch {}
   }
 
