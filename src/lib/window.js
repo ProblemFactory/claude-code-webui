@@ -98,6 +98,7 @@ class WindowManager {
   }
 
   _reflowWindows() {
+    if (this._suppressReflow) return;
     // Skip on mobile — windows are position:fixed via CSS
     if (window.innerWidth <= 768) return;
     for (const win of this.windows.values()) {
@@ -116,6 +117,9 @@ class WindowManager {
     let tabMergeTarget = null;
     let mergeGhost = null; // floating ghost shown when hovering over a merge target
     let savedBounds = null; // window bounds saved before collapsing to ghost
+    let deskPreviewTarget = null; // desktop preview element we're hovering over
+    let deskMiniWin = null; // mini window rect inside the preview
+    let deskSavedBounds = null; // window bounds saved before entering desktop preview
     const DRAG_THRESHOLD = 5;
 
     titleBar.addEventListener('mousedown', (e) => {
@@ -162,6 +166,17 @@ class WindowManager {
       }
 
       element.style.left = (initL + dx) + 'px'; element.style.top = (initT + dy) + 'px';
+
+      // Live-update this window's rect in the active desktop preview
+      if (!deskPreviewTarget) {
+        const wr = this.workspace.getBoundingClientRect();
+        const srcRect = document.querySelector(`.desktop-preview.active .desktop-preview-win[data-win-id="${win.id}"]`);
+        if (srcRect && wr.width > 0 && wr.height > 0) {
+          srcRect.style.left = ((element.offsetLeft / wr.width) * 100) + '%';
+          srcRect.style.top = ((element.offsetTop / wr.height) * 100) + '%';
+        }
+      }
+
       const snapEnabled = this._settings?.get('layout.enableDragSnap') ?? true;
       const shiftDragEnabled = this._settings?.get('layout.enableShiftDragSelection') ?? true;
       if (!e.altKey && snapEnabled) {
@@ -221,6 +236,66 @@ class WindowManager {
         mergeGhost.style.left = (e.clientX + 12) + 'px';
         mergeGhost.style.top = (e.clientY + 12) + 'px';
       }
+
+      // Desktop preview: detect hover, collapse window into mini preview inside it
+      const prevVis = element.style.visibility;
+      element.style.visibility = 'hidden';
+      const hoverPreview = document.elementFromPoint(e.clientX, e.clientY)?.closest('.desktop-preview');
+      element.style.visibility = prevVis;
+
+      const prevDeskTarget = deskPreviewTarget;
+      deskPreviewTarget = hoverPreview || null;
+
+      if (deskPreviewTarget && !prevDeskTarget) {
+        // Entering a desktop preview — hide window, create mini rect inside preview
+        deskSavedBounds = { left: element.style.left, top: element.style.top, width: element.style.width, height: element.style.height };
+        element.style.visibility = 'hidden';
+        element.style.pointerEvents = 'none';
+        deskPreviewTarget.classList.add('desktop-preview-drop');
+        // Hide this window's rect in the source (active) desktop preview
+        const srcRect = document.querySelector(`.desktop-preview.active .desktop-preview-win[data-win-id="${win.id}"]`);
+        if (srcRect) srcRect.style.visibility = 'hidden';
+        deskMiniWin = document.createElement('div');
+        deskMiniWin.className = 'desktop-preview-win desktop-preview-dragging';
+        // Size: proportional to window's gridBounds (or default 40%x40%)
+        const gb = win.gridBounds || { width: 0.4, height: 0.4 };
+        deskMiniWin.style.width = (gb.width * 100) + '%';
+        deskMiniWin.style.height = (gb.height * 100) + '%';
+        deskPreviewTarget.appendChild(deskMiniWin);
+      } else if (!deskPreviewTarget && prevDeskTarget) {
+        // Left desktop preview — restore window, remove mini rect
+        if (deskMiniWin) { deskMiniWin.remove(); deskMiniWin = null; }
+        prevDeskTarget.classList.remove('desktop-preview-drop');
+        element.style.visibility = '';
+        element.style.pointerEvents = '';
+        // Show this window's rect back in the source desktop preview
+        const srcRect = document.querySelector(`.desktop-preview.active .desktop-preview-win[data-win-id="${win.id}"]`);
+        if (srcRect) srcRect.style.visibility = '';
+        if (deskSavedBounds) {
+          initL = e.clientX - (parseInt(deskSavedBounds.width) || 350) / 2;
+          initT = e.clientY - 15;
+          element.style.left = initL + 'px'; element.style.top = initT + 'px';
+          element.style.width = deskSavedBounds.width; element.style.height = deskSavedBounds.height;
+          startX = e.clientX; startY = e.clientY;
+          deskSavedBounds = null;
+        }
+      } else if (deskPreviewTarget && prevDeskTarget && deskPreviewTarget !== prevDeskTarget) {
+        // Moved to a different preview — migrate mini rect
+        prevDeskTarget.classList.remove('desktop-preview-drop');
+        deskPreviewTarget.classList.add('desktop-preview-drop');
+        if (deskMiniWin) deskPreviewTarget.appendChild(deskMiniWin);
+      }
+
+      // Position mini window inside preview based on cursor location
+      if (deskMiniWin && deskPreviewTarget) {
+        const pr = deskPreviewTarget.getBoundingClientRect();
+        const gb = win.gridBounds || { width: 0.4, height: 0.4 };
+        // Map cursor to 0-1 within preview, center the mini window on cursor
+        const rx = Math.max(0, Math.min(1 - gb.width, (e.clientX - pr.left) / pr.width - gb.width / 2));
+        const ry = Math.max(0, Math.min(1 - gb.height, (e.clientY - pr.top) / pr.height - gb.height / 2));
+        deskMiniWin.style.left = (rx * 100) + '%';
+        deskMiniWin.style.top = (ry * 100) + '%';
+      }
     };
 
     const onUp = (e) => {
@@ -231,6 +306,44 @@ class WindowManager {
       this.snapIndicator.style.display = 'none';
       for (const [, w] of this.windows) w.element.classList.remove('tab-drop-target');
       if (mergeGhost) { mergeGhost.remove(); mergeGhost = null; }
+      document.querySelectorAll('.desktop-preview').forEach(p => p.classList.remove('desktop-preview-drop'));
+
+      // Desktop preview drop: if we have a mini window inside a preview, commit the move
+      if (deskPreviewTarget && deskMiniWin) {
+        const previews = [...document.querySelectorAll('.desktop-preview')];
+        const idx = previews.indexOf(deskPreviewTarget);
+        const dm = this._app?.desktopManager;
+        const isOtherDesktop = dm && idx >= 0 && idx < dm.desktops.length && dm.desktops[idx].id !== dm.activeDesktopId;
+
+        if (isOtherDesktop) {
+          this._clearGridHighlight(); this.gridOverlay.classList.remove('dragging');
+          // Update gridBounds from mini window position for the target desktop
+          const ml = parseFloat(deskMiniWin.style.left) / 100;
+          const mt = parseFloat(deskMiniWin.style.top) / 100;
+          const gb = win.gridBounds || { width: 0.4, height: 0.4 };
+          win.gridBounds = { left: ml, top: mt, width: gb.width, height: gb.height };
+          deskMiniWin.remove(); deskMiniWin = null; deskPreviewTarget = null;
+          element.style.visibility = ''; element.style.pointerEvents = '';
+          if (deskSavedBounds) deskSavedBounds = null;
+          dm.moveWindowToDesktop(win.id, dm.desktops[idx].id);
+          tabMergeTarget = null; savedBounds = null;
+          return;
+        }
+        // Dropped on current desktop's preview — just restore window normally
+      }
+      // Clean up desktop drag state — restore window to pre-drag position
+      if (deskMiniWin) { deskMiniWin.remove(); deskMiniWin = null; }
+      if (deskPreviewTarget) deskPreviewTarget.classList.remove('desktop-preview-drop');
+      if (deskSavedBounds) {
+        element.style.visibility = ''; element.style.pointerEvents = '';
+        element.style.left = deskSavedBounds.left; element.style.top = deskSavedBounds.top;
+        element.style.width = deskSavedBounds.width; element.style.height = deskSavedBounds.height;
+        // Re-sync cursor for snap logic below
+        initL = parseInt(deskSavedBounds.left) || element.offsetLeft;
+        initT = parseInt(deskSavedBounds.top) || element.offsetTop;
+        deskSavedBounds = null;
+      }
+      deskPreviewTarget = null;
 
       // Tab merge takes priority over snap
       if (tabMergeTarget) {
@@ -647,8 +760,13 @@ class WindowManager {
 
     this.setGrid(g.rows, g.cols);
 
-    // Skip grouped guests — only host windows get positioned
-    const visible = [...this.windows.values()].filter(w => !w.isMinimized && !(w._tabChain && w._tabChain.tabs[0] !== w.id));
+    // Skip grouped guests, minimized, and windows on other desktops
+    const activeDesk = this._app?.desktopManager?.activeDesktopId;
+    const visible = [...this.windows.values()].filter(w =>
+      !w.isMinimized && !w._hiddenByDesktop
+      && !(w._tabChain && w._tabChain.tabs[0] !== w.id)
+      && (!activeDesk || !w._desktopId || w._desktopId === activeDesk)
+    );
     if (!visible.length) return;
     const totalCells = g.rows * g.cols;
 

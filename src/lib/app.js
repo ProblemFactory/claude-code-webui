@@ -19,6 +19,7 @@ import { openExternalEditor, closeExternalEditor } from './external-editor.js';
 import { CommandMode } from './command-mode.js';
 import { updateTaskbar as updateTaskbarFn, showWindowList } from './taskbar.js';
 import { openBrowser as openBrowserFn } from './browser-window.js';
+import { DesktopManager } from './desktop-manager.js';
 
 class App {
   constructor() {
@@ -27,9 +28,21 @@ class App {
     this.ws = new WsManager();
     this.wm = new WindowManager(document.getElementById('workspace'));
     this.wm._settings = this.settings;
+    this.wm._app = this;
     this.sessions = new Map();
     this.attachedServerSessions = new Set();
     this.layoutManager = new LayoutManager(this);
+    this.desktopManager = new DesktopManager(this);
+
+    // Tag every new window with the active desktop ID
+    const origCreateWindow = this.wm.createWindow.bind(this.wm);
+    this.wm.createWindow = (opts) => {
+      const win = origCreateWindow(opts);
+      if (this.desktopManager.activeDesktopId) {
+        win._desktopId = this.desktopManager.activeDesktopId;
+      }
+      return win;
+    };
 
     this.wm.onWindowsChanged = () => {
       this.updateTaskbar();
@@ -384,14 +397,15 @@ class App {
       return;
     }
 
-    // Taskbar: 5h progress bar + percentage
+    // Taskbar: two pie charts (5h session + 7d weekly)
     const pct5h = Math.round((rl.fiveHour?.utilization || 0) * 100);
     const color = pct5h > 80 ? 'var(--red)' : pct5h > 50 ? 'var(--yellow)' : 'var(--green)';
-    usageEl.innerHTML = `<div class="usage-bar"><div class="usage-bar-fill" style="width:${pct5h}%;background:${color}"></div></div><span>${pct5h}%</span>`;
-
-    // Popup: match Claude Code /usage layout
+    const deg = Math.round(pct5h * 3.6);
     const pct7d = Math.round((rl.sevenDay?.utilization || 0) * 100);
     const color7d = pct7d > 80 ? 'var(--red)' : pct7d > 50 ? 'var(--yellow)' : 'var(--green)';
+    const deg7d = Math.round(pct7d * 3.6);
+    usageEl.innerHTML = `<div class="usage-pie" title="5h: ${pct5h}%" style="background:conic-gradient(${color} ${deg}deg, var(--bg-input) ${deg}deg)"></div><div class="usage-pie" title="7d: ${pct7d}%" style="background:conic-gradient(${color7d} ${deg7d}deg, var(--bg-input) ${deg7d}deg)"></div>`;
+
     const fmtReset = (ts) => {
       if (!ts) return '?';
       const d = new Date(ts * 1000), now = new Date();
@@ -804,7 +818,19 @@ class App {
   _closeExternalEditor(signalPath) { closeExternalEditor(this, signalPath); }
 
   _hideWelcome() { document.getElementById('welcome').classList.add('hidden'); }
-  _checkWelcome() { if (this.wm.windows.size === 0) document.getElementById('welcome').classList.remove('hidden'); }
+  _checkWelcome() {
+    const activeDesk = this.desktopManager?.activeDesktopId;
+    let hasWindows = false;
+    if (activeDesk) {
+      for (const [, win] of this.wm.windows) {
+        if (win._desktopId === activeDesk && !win._hiddenByDesktop) { hasWindows = true; break; }
+      }
+    } else {
+      hasWindows = this.wm.windows.size > 0;
+    }
+    if (!hasWindows) document.getElementById('welcome').classList.remove('hidden');
+    else document.getElementById('welcome').classList.add('hidden');
+  }
 
   // Flash a window's title bar + taskbar item to help user find it
   flashWindow(serverSessionId) {
@@ -861,7 +887,7 @@ class App {
     this.sidebar.highlightSession(null);
   }
 
-  updateTaskbar() { updateTaskbarFn(this); }
+  updateTaskbar() { updateTaskbarFn(this); if (this.desktopManager) this.desktopManager._renderSwitcher(); }
 
   _showWindowList(anchor) { showWindowList(this, anchor); }
 

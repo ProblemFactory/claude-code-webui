@@ -85,8 +85,9 @@ src/
     hex-viewer.js      — HexViewer (binary file viewer with chunked loading)
     resizer.js         — Resizer (reusable drag-to-resize handle)
     layout.js          — LayoutManager (auto-save/restore, multi-client layout sync)
+    desktop-manager.js — DesktopManager (virtual desktops, Ubuntu-style previews, window routing)
     external-editor.js — Ctrl+G split-pane CodeMirror editor (extracted from app.js)
-    command-mode.js    — CommandMode (Ctrl+\ prefix key, tmux-style shortcuts)
+    command-mode.js    — CommandMode (Ctrl+\ prefix key, tmux-style shortcuts, desktop switch)
     taskbar.js         — Taskbar rendering + window list popup (extracted from app.js)
     browser-window.js  — Embedded browser window (iframe + URL bar + proxy toggle)
     utils.js           — Shared utilities (escHtml, createPopover, showContextMenu, fetchJson, copyText, StateSync)
@@ -143,6 +144,7 @@ docs/
 | **Themes / colors** | `src/lib/themes.js` + `public/style.css` | 6 built-in themes, CSS variables `[data-theme="..."]` |
 | **Theme editor** | `src/lib/theme-editor.js` + `public/theme-editor.css` | Floating panel: ~50 CSS vars + 16 ANSI, live preview, save/load/delete |
 | **Layout save/restore + sync** | `src/lib/layout.js` + `src/ws-handler.js` | Auto-save debounce, layout-sync WS protocol, openSpec pattern |
+| **Virtual desktops** | `src/lib/desktop-manager.js` + `src/ws-handler.js` | Create/delete/rename/switch desktops, Ubuntu-style previews, per-desktop grid, drag-to-move, multi-client sync |
 | **Usage / rate limits** | `server.js` → `refreshRateLimit()` + `src/lib/app.js` → `_pollUsage()` | Haiku API call for rate limit headers, every 5 min |
 | **WebSocket protocol** | `src/ws-handler.js` + `src/lib/ws.js` | All WS message types in ws-handler switch/case |
 | **State sync / drafts** | `src/sync-store.js` + `src/lib/utils.js` → `StateSync` class | Versioned diff broadcast, reconnect recovery, draft persistence |
@@ -306,6 +308,23 @@ Recovery uses greedy filesystem checking as fallback, but the forward encoding i
 - **All positioned windows track proportional bounds** via `win.gridBounds` `{left, top, width, height}` as fractions (0-1) of workspace. Captured after every positioning event: grid snap, edge snap, drag-drop, `applyLayout()`, user resize. `_reflowWindows()` (ResizeObserver on workspace) recalculates pixel positions on any workspace size change. Works in both grid and freeform modes.
 - `gridBounds` is persisted in layout autoSave — on restore, positioned via `_applyGridBounds()` instead of absolute pixels, adapting to current workspace size
 - **Timing**: `_captureGridBounds` must run AFTER snap animation completes (220ms). Use `setTimeout(..., 250)`, not `10`.
+
+### 6c. Virtual Desktops
+Each desktop is an independent layout slot with its own windows and grid mode. Windows are hidden via `visibility:hidden` + `pointer-events:none` (not `display:none`) — preserves scroll position, DOM state, and WebSocket handlers. Each browser tab independently tracks which desktop it's viewing (`_activeId` is local, not synced).
+
+**Data model**: `layouts.json` has `desktopMeta: [{id, name}]` and `desktops: { [id]: { autoSave: {...} } }`. First load auto-migrates legacy `autoSave` to "Desktop 1". Every window gets `win._desktopId` tag at creation (intercepted `createWindow`). `captureState()` only serializes the active desktop's windows.
+
+**Switching**: `switchTo()` hides current desktop windows, shows target desktop windows, applies target grid. No re-rendering — `visibility:hidden` windows stay alive with full state (chat scroll, terminal content, etc.). Waiting blink (`window-waiting`) propagates to desktop preview rects in real-time.
+
+**UI**: Ubuntu-style miniature previews in taskbar right corner. Each preview shows proportional window rectangles from `gridBounds`. Active desktop has accent border. Waiting windows blink yellow in preview. Click to switch, right-click for rename/delete, drag window onto preview to move it. "+" button to add desktop. Ctrl+Alt+Left/Right keyboard shortcut.
+
+**Drag to desktop**: Window title bar drag detects desktop preview via `elementFromPoint` (temporarily `visibility:hidden` to see through). Entering a preview hides the window and creates a mini draggable rect inside the preview at cursor position. The source desktop preview's rect for this window disappears. Leaving restores the window. On drop, `gridBounds` is updated from mini rect position. On same-desktop drop, falls through to normal snap logic.
+
+**Resizable taskbar**: Drag handle above taskbar (3px). Height 36-120px, persisted in localStorage + broadcast via `layout-sync`. All elements (desktop preview, taskbar icons, text, usage pies) scale proportionally via CSS variables set by `_adaptTaskbarSize()`. `_reflowWindows` suppressed during resize drag to prevent lag.
+
+**WS protocol**: `layout-sync` extended with `desktopId` + `desktopMeta`. New: `desktop-create`, `desktop-delete`, `desktop-rename` → server persists + broadcasts `desktop-updated` (excluding sender). Remote clients update desktop list, reassign orphaned windows on delete.
+
+**Tab groups**: `createTabChain`/`addToTabChain` enforce same desktop — guest inherits host's `_desktopId`. `applyLayout` filters by active desktop to prevent layout presets from affecting other desktops.
 
 ### 7. Modular Frontend (refactored 2026-03-23)
 Split from monolithic 1647-line `src/client.js` into 13 ES modules under `src/lib/`. All cross-class communication goes through the `App` mediator. esbuild follows ES imports automatically, no build config changes needed.
@@ -498,8 +517,8 @@ Read/Write tool output uses highlight.js for syntax highlighting with line numbe
 - `GET /proxy/<url>` — full-rewriting web proxy via node-unblocker (HTML/CSS URL rewrite, JS XHR/WS rewrite, header stripping)
 
 ### WebSocket Protocol (`/ws`)
-Client → Server: `create`, `input`, `chat-input`, `permission-response`, `set-permission-mode`, `interrupt`, `resize`, `attach`, `kill`, `tmux-attach`, `state-set`, `state-resync`, `layout-sync`
-Server → Client: `created`, `output`, `msg` (normalized: op=create/edit/meta), `subagent-message` (parentToolUseId for tool card status), `exited`, `attached` (includes `messages`, `totalCount`, `isStreaming`, `chatStatus`, `taskState`), `active-sessions`, `editor-open`, `editor-close`, `effective-size`, `user-state-updated`, `bookmarks-updated`, `settings-updated`, `custom-themes-updated`, `state-sync`, `state-snapshot`, `layout-sync`, `error`
+Client → Server: `create`, `input`, `chat-input`, `permission-response`, `set-permission-mode`, `interrupt`, `resize`, `attach`, `kill`, `tmux-attach`, `state-set`, `state-resync`, `layout-sync`, `desktop-create`, `desktop-delete`, `desktop-rename`
+Server → Client: `created`, `output`, `msg` (normalized: op=create/edit/meta), `subagent-message` (parentToolUseId for tool card status), `exited`, `attached` (includes `messages`, `totalCount`, `isStreaming`, `chatStatus`, `taskState`), `active-sessions`, `editor-open`, `editor-close`, `effective-size`, `user-state-updated`, `bookmarks-updated`, `settings-updated`, `custom-themes-updated`, `state-sync`, `state-snapshot`, `layout-sync`, `desktop-updated`, `error`
 
 **Virtual session attach**: `attach` with `sessionId` starting with `sub-` routes to subagent handler. `sub-{parentToolUseId}` returns live-buffered messages from parent session's `subagentBuffers`. `sub-agent-{agentId}` loads completed agent's JSONL from disk. Both respond with standard `attached` payload with normalized messages. Live virtual sessions receive normalized `msg` ops via per-subagent normalizers. `attach` with `viewOnly:true` loads JSONL history without an active session (for stopped session history viewing).
 
@@ -574,6 +593,7 @@ Server → Client: `created`, `output`, `msg` (normalized: op=create/edit/meta),
 - Taskbar: two-row layout with large icon (18px) + title/subtitle. Items show window type icon, starred sessions prefixed with ★.
 - Taskbar right-click context menu: Move (full-screen overlay blocks all interaction, restores from maximized/snapped), Minimize/Restore, Close
 - Move mode: window restores to original size, full-screen overlay prevents interaction with other UI elements
+- Virtual desktops: multiple independent workspaces with per-desktop grid/layout. Ubuntu-style miniature previews in taskbar corner showing window positions. Click to switch, drag window to move between desktops, Ctrl+Alt+Left/Right shortcut. Waiting windows blink yellow in preview. Resizable taskbar (36-120px) with auto-scaling elements.
 - Loading screen: inline splash with animated progress bar, waits for workspace restore to complete before fading out
 - pointer-events:none on window content during drag (prevents iframe/terminal stealing mouse events)
 
@@ -628,12 +648,12 @@ Server → Client: `created`, `output`, `msg` (normalized: op=create/edit/meta),
 - Theme editor: floating panel to create custom themes — ~50 CSS variables + 16 ANSI colors, live preview, hover-to-highlight CSS var usage, save/load/delete, multi-client sync via WebSocket. ThemeManager: `registerCustomTheme`, `unregisterCustomTheme`, `setLivePreview`, `extractThemeValues`, `applyPendingTheme`. CSS value sanitization (strips `{}`). Constructor defers custom theme fallback until async load.
 - Global settings popover (⚙ in toolbar): theme, font size, font family
 - Resizable sidebar (drag right edge)
-- Usage bar in taskbar (5h + 7d rate limits from Anthropic API)
+- Usage pies in taskbar (two circular pie charts: 5h session + 7d weekly rate limits from Anthropic API, hover for %, click for details)
 - Embedded browser window (🌐 in toolbar): iframe with URL bar, proxy mode toggle, layout persistence
 - Browser proxy mode: node-unblocker full URL rewriting (HTML/CSS/JS), strips X-Frame-Options/CSP. Works for noVNC, docs, internal services. Google/Cloudflare sites may trigger reCAPTCHA due to anti-bot detection.
 - Frontend optimization: esbuild minification (2.5MB → 1.4MB) + gzip compression middleware (~420KB over wire, 83% reduction)
 - Static file caching: `maxAge=0` with etag validation for cache revalidation
-- "x active" click in taskbar → window list popup
+- "N windows" click in taskbar → window list popup (scoped to active desktop)
 
 ### Bug Fixes Applied
 - Focus event spam (`^[[I^[[O`): stripped from terminal input

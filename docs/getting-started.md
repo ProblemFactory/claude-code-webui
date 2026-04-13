@@ -59,7 +59,7 @@ The UI has four main areas:
 1. **Sidebar** (left) — Session list grouped by working directory. Star, archive, rename, and organize sessions into groups.
 2. **Workspace** (center) — Tiling window manager with draggable, resizable windows for terminals, chat views, file explorers, editors, and browsers.
 3. **Toolbar** (top of workspace) — Theme selector, layout presets, grid controls, new session, settings.
-4. **Taskbar** (bottom) — Active window tabs, usage monitor, "x active" count.
+4. **Taskbar** (bottom) — Window tabs, virtual desktop previews, usage pies, window count. Drag the top edge to resize.
 
 ### Creating your first session
 

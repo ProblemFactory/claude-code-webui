@@ -356,13 +356,61 @@ function registerWsHandler(wss, ctx) {
         case 'layout-sync': {
           // Layout state sync: save to disk + broadcast to other clients
           const layoutData = readLayouts();
-          layoutData.autoSave = { ...data.state, updatedAt: Date.now() };
+          const desktopId = data.desktopId;
+          if (desktopId) {
+            // Per-desktop save
+            if (!layoutData.desktops) layoutData.desktops = {};
+            if (!layoutData.desktops[desktopId]) layoutData.desktops[desktopId] = {};
+            layoutData.desktops[desktopId].autoSave = { ...data.state, updatedAt: Date.now() };
+          } else {
+            // Legacy single-desktop save
+            layoutData.autoSave = { ...data.state, updatedAt: Date.now() };
+          }
           writeLayouts(layoutData);
-          // Broadcast to other clients (sender excluded)
-          const syncMsg = JSON.stringify({ type: 'layout-sync', ...data });
+          // Broadcast to other clients (sender excluded) — include desktopMeta
+          const syncMsg = JSON.stringify({ type: 'layout-sync', desktopId, state: data.state, desktopMeta: layoutData.desktopMeta || [] });
           wss.clients.forEach(client => {
             if (client !== ws && client.readyState === WS_OPEN) { try { client.send(syncMsg); } catch {} }
           });
+          break;
+        }
+
+        case 'desktop-create': {
+          const layoutData = readLayouts();
+          if (!layoutData.desktopMeta) layoutData.desktopMeta = [];
+          if (!layoutData.desktops) layoutData.desktops = {};
+          const newId = data.id || ('desk-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 5));
+          const newName = data.name || `Desktop ${layoutData.desktopMeta.length + 1}`;
+          // Avoid duplicates (migration sends id that may already exist)
+          if (!layoutData.desktopMeta.find(d => d.id === newId)) {
+            layoutData.desktopMeta.push({ id: newId, name: newName });
+          }
+          if (!layoutData.desktops[newId]) layoutData.desktops[newId] = {};
+          writeLayouts(layoutData);
+          const broadcast = JSON.stringify({ type: 'desktop-updated', desktops: layoutData.desktopMeta });
+          wss.clients.forEach(c => { if (c !== ws && c.readyState === WS_OPEN) try { c.send(broadcast); } catch {} });
+          break;
+        }
+
+        case 'desktop-delete': {
+          const layoutData = readLayouts();
+          if (layoutData.desktopMeta) {
+            layoutData.desktopMeta = layoutData.desktopMeta.filter(d => d.id !== data.desktopId);
+          }
+          if (layoutData.desktops) delete layoutData.desktops[data.desktopId];
+          writeLayouts(layoutData);
+          const broadcast = JSON.stringify({ type: 'desktop-updated', desktops: layoutData.desktopMeta || [] });
+          wss.clients.forEach(c => { if (c !== ws && c.readyState === WS_OPEN) try { c.send(broadcast); } catch {} });
+          break;
+        }
+
+        case 'desktop-rename': {
+          const layoutData = readLayouts();
+          const meta = (layoutData.desktopMeta || []).find(d => d.id === data.desktopId);
+          if (meta) meta.name = data.name;
+          writeLayouts(layoutData);
+          const broadcast = JSON.stringify({ type: 'desktop-updated', desktops: layoutData.desktopMeta || [] });
+          wss.clients.forEach(c => { if (c !== ws && c.readyState === WS_OPEN) try { c.send(broadcast); } catch {} });
           break;
         }
 

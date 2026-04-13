@@ -61,10 +61,30 @@ export function showContextMenu(x, y, items, className = 'context-menu') {
     if (item.separator) { const sep = document.createElement('div'); sep.className = className + '-separator'; pop.appendChild(sep); continue; }
     const el = document.createElement('div');
     el.className = className + '-item' + (item.disabled ? ' disabled' : '');
-    el.textContent = item.label;
     if (item.style) el.style.cssText = item.style;
-    if (item.disabled) { el.style.opacity = '0.4'; el.style.cursor = 'default'; }
-    else el.onclick = () => { pop.remove(); item.action(); };
+    if (item.children?.length) {
+      // Submenu item: hover to expand
+      el.textContent = item.label + ' \u25B8';
+      el.style.position = 'relative';
+      const sub = document.createElement('div');
+      sub.className = className;
+      sub.style.cssText = 'position:absolute;left:100%;top:-4px;display:none;z-index:99999';
+      for (const child of item.children) {
+        const ce = document.createElement('div');
+        ce.className = className + '-item';
+        ce.textContent = child.label;
+        if (child.style) ce.style.cssText = child.style;
+        ce.onclick = (e) => { e.stopPropagation(); pop.remove(); child.action(); };
+        sub.appendChild(ce);
+      }
+      el.appendChild(sub);
+      el.addEventListener('mouseenter', () => { sub.style.display = ''; });
+      el.addEventListener('mouseleave', () => { sub.style.display = 'none'; });
+    } else {
+      el.textContent = item.label;
+      if (item.disabled) { el.style.opacity = '0.4'; el.style.cursor = 'default'; }
+      else el.onclick = () => { pop.remove(); item.action(); };
+    }
     pop.appendChild(el);
   }
   // Keep menu on screen

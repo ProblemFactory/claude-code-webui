@@ -8,7 +8,18 @@ class LayoutManager {
     // Listen for state sync from other clients
     app.ws.onGlobal((msg) => {
       if (msg.type === 'layout-sync' && !this._restoring) {
+        const dm = this.app.desktopManager;
+        if (dm && msg.desktopId) {
+          // Desktop-aware: only apply if it's for our active desktop
+          if (msg.desktopId !== dm.activeDesktopId) {
+            // Cache state for non-active desktop
+            dm._savedStates.set(msg.desktopId, msg.state);
+            dm._renderSwitcher(); // update window counts
+            return;
+          }
+        }
         this._applyRemoteState(msg.state);
+        if (msg.desktopMeta && dm) dm.updateFromMeta(msg.desktopMeta);
       }
     });
   }
@@ -28,6 +39,10 @@ class LayoutManager {
       // Sidebar
       if (state.sidebarOpen !== undefined && state.sidebarOpen !== this.app.sidebar.isOpen) {
         this.app.sidebar.toggle(state.sidebarOpen);
+      }
+      // Taskbar height
+      if (state.taskbarHeight) {
+        this._applyTaskbarHeight(state.taskbarHeight);
       }
       // Windows: update existing, create missing, close removed
       if (state.windows) {
@@ -83,8 +98,12 @@ class LayoutManager {
           }
         }
         // Close windows that exist locally but not remotely
+        // Only close windows belonging to the active desktop (other desktops' windows are hidden)
+        const activeDesk = this.app.desktopManager?.activeDesktopId;
         for (const [id] of this.app.wm.windows) {
           if (!remoteIds.has(id)) {
+            const win = this.app.wm.windows.get(id);
+            if (activeDesk && win?._desktopId && win._desktopId !== activeDesk) continue;
             this.app.wm.closeWindow(id);
           }
         }
@@ -146,9 +165,13 @@ class LayoutManager {
   }
 
   // Capture current workspace state (complete)
+  // Only captures windows belonging to the active desktop (if desktops are enabled)
   captureState() {
+    const activeDesk = this.app.desktopManager?.activeDesktopId;
     const windows = [];
     for (const [id, win] of this.app.wm.windows) {
+      // Skip windows on other desktops
+      if (activeDesk && win._desktopId && win._desktopId !== activeDesk) continue;
       const el = win.element;
       const termSession = this.app.sessions.get(id);
       // Ensure gridBounds is up to date
@@ -206,7 +229,8 @@ class LayoutManager {
     const globalFontSize = this.app._fontSize;
     const globalFontFamily = this.app._fontFamily;
     const sidebarOpen = this.app.sidebar.isOpen;
-    return { windows, grid, theme, globalFontSize, globalFontFamily, sidebarOpen };
+    const taskbarHeight = document.getElementById('taskbar')?.offsetHeight || null;
+    return { windows, grid, theme, globalFontSize, globalFontFamily, sidebarOpen, taskbarHeight };
   }
 
   // Restore workspace from state (used for autosave restore on startup)
@@ -221,6 +245,11 @@ class LayoutManager {
     // Restore grid
     if (state.grid) {
       this.app.wm.setGrid(state.grid.rows, state.grid.cols);
+    }
+
+    // Restore taskbar height
+    if (state.taskbarHeight) {
+      this._applyTaskbarHeight(state.taskbarHeight);
     }
 
     // Restore sidebar
@@ -354,6 +383,7 @@ class LayoutManager {
   // Won't fire until initial restore is complete
   scheduleAutoSave() {
     if (this._restoring) return; // Don't autosave while restoring
+    if (this.app.desktopManager?._restoring) return; // Don't autosave during desktop switch
     if (this._autoSaveTimer) clearTimeout(this._autoSaveTimer);
     this._autoSaveTimer = setTimeout(() => this._doAutoSave(), 500);
   }
@@ -364,9 +394,11 @@ class LayoutManager {
 
   async _doAutoSave() {
     if (this._restoring) return;
+    if (this.app.desktopManager?._restoring) return;
     const state = this.captureState();
+    const desktopId = this.app.desktopManager?.activeDesktopId;
     // Full state to server for disk persistence
-    this.app.ws.send({ type: 'layout-sync', state });
+    this.app.ws.send({ type: 'layout-sync', state, desktopId });
   }
 
   // Load auto-saved state on startup
@@ -378,11 +410,15 @@ class LayoutManager {
       this._savedPresets = data.saved || {};
       this._currentName = data.current || null;
 
-      // Pick the right autosave for this device type
-      const toRestore = this._isMobile() ? (data.autoSaveMobile || data.autoSave) : data.autoSave;
-
-      if (toRestore && toRestore.windows && toRestore.windows.length > 0) {
-        await this.restoreState(toRestore);
+      // Desktop-aware restore: delegate to DesktopManager
+      if (this.app.desktopManager) {
+        await this.app.desktopManager.loadFromServer(data);
+      } else {
+        // Fallback: original single-desktop restore
+        const toRestore = this._isMobile() ? (data.autoSaveMobile || data.autoSave) : data.autoSave;
+        if (toRestore && toRestore.windows && toRestore.windows.length > 0) {
+          await this.restoreState(toRestore);
+        }
       }
     } catch {}
     // Allow autosave after restore is complete (with extra delay for windows to attach)
@@ -698,6 +734,14 @@ class LayoutManager {
       this._savedPresets = data.saved || {};
       this._currentName = data.current || null;
     } catch {}
+  }
+
+  _applyTaskbarHeight(h) {
+    const taskbar = document.getElementById('taskbar');
+    if (!taskbar || Math.abs(taskbar.offsetHeight - h) < 2) return;
+    taskbar.style.height = h + 'px';
+    localStorage.setItem('taskbarHeight', h);
+    this.app.desktopManager?._adaptTaskbarSize(h);
   }
 
   // Legacy aliases for backwards compatibility

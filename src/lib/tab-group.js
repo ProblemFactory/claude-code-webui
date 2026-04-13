@@ -110,6 +110,8 @@ const tabGroupMethods = {
     const chain = { tabs: [hostWin.id, guestWin.id], active: 1 };
     hostWin._tabChain = chain;
     guestWin._tabChain = chain;
+    // Enforce same desktop: guest inherits host's desktop
+    if (hostWin._desktopId) guestWin._desktopId = hostWin._desktopId;
     // Host content hidden, guest content visible (guest = newly dragged in = active)
     hostWin.content.classList.add('tab-hidden');
     hostWin.element.appendChild(guestWin.content);
@@ -124,6 +126,8 @@ const tabGroupMethods = {
     chain.tabs.push(guestWin.id);
     guestWin._tabChain = chain;
     const hostWin = this.windows.get(chain.tabs[0]);
+    // Enforce same desktop
+    if (hostWin?._desktopId) guestWin._desktopId = hostWin._desktopId;
     if (!hostWin) return;
     guestWin.content.classList.add('tab-hidden');
     hostWin.element.appendChild(guestWin.content);
