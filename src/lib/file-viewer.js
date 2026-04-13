@@ -101,18 +101,41 @@ class FileViewer {
         const res = await fetch(`/api/file/excel?path=${encodeURIComponent(filePath)}`);
         const data = await res.json();
         if (data.error) throw new Error(data.error);
-        for (const sheet of data.sheets) {
-          const h = document.createElement('h3'); h.textContent = sheet.name; h.style.cssText = 'padding:8px 12px;color:var(--accent-hover);font-size:13px;';
-          container.appendChild(h);
+        // Sheet tabs + table viewer
+        const viewer = document.createElement('div'); viewer.style.cssText = 'display:flex;flex-direction:column;height:100%';
+        const tableWrap = document.createElement('div'); tableWrap.style.cssText = 'flex:1;overflow:auto';
+        const renderSheet = (sheet) => {
+          tableWrap.innerHTML = '';
           const table = document.createElement('table'); table.className = 'file-viewer-table';
           const tbody = document.createElement('tbody');
-          sheet.data.slice(0, 1000).forEach((row, ri) => {
+          (sheet.data || []).slice(0, 5000).forEach((row, ri) => {
             const tr = document.createElement('tr');
             (row || []).forEach(c => { const td = document.createElement(ri === 0 ? 'th' : 'td'); td.textContent = c ?? ''; tr.appendChild(td); });
             tbody.appendChild(tr);
           });
-          table.appendChild(tbody); container.appendChild(table);
+          table.appendChild(tbody); tableWrap.appendChild(table);
+        };
+        if (data.sheets.length > 1) {
+          const tabs = document.createElement('div');
+          tabs.style.cssText = 'display:flex;gap:0;border-top:1px solid var(--border);background:var(--bg-titlebar);flex-shrink:0;overflow-x:auto';
+          data.sheets.forEach((sheet, i) => {
+            const tab = document.createElement('div');
+            tab.textContent = sheet.name;
+            tab.style.cssText = 'padding:4px 12px;font-size:11px;cursor:pointer;border-right:1px solid var(--border);white-space:nowrap;color:var(--text-secondary)';
+            tab.onclick = () => {
+              tabs.querySelectorAll('div').forEach(t => { t.style.background = ''; t.style.color = 'var(--text-secondary)'; });
+              tab.style.background = 'var(--bg-window)'; tab.style.color = 'var(--text)';
+              renderSheet(sheet);
+            };
+            if (i === 0) { tab.style.background = 'var(--bg-window)'; tab.style.color = 'var(--text)'; }
+            tabs.appendChild(tab);
+          });
+          viewer.append(tableWrap, tabs);
+        } else {
+          viewer.appendChild(tableWrap);
         }
+        renderSheet(data.sheets[0]);
+        container.appendChild(viewer);
       } else if (viewerType === 'docx') {
         const res = await fetch(rawUrl);
         const blob = await res.blob();
@@ -124,10 +147,23 @@ class FileViewer {
         wrapper.style.cssText = 'width:100%;height:100%;overflow:auto;background:var(--bg-workspace)';
         container.appendChild(wrapper);
         const rect = container.getBoundingClientRect();
-        const previewer = initPptx(wrapper, { width: Math.max(640, rect.width - 40), height: Math.max(360, (rect.width - 40) * 9 / 16), mode: 'list' });
+        const slideW = Math.max(400, rect.width - 40);
+        const previewer = initPptx(wrapper, { width: slideW, height: slideW * 9 / 16, mode: 'list' });
         const res = await fetch(rawUrl);
         const buf = await res.arrayBuffer();
         previewer.preview(buf);
+        // Re-render on resize to fit new container width
+        let resizeTimer = null;
+        const ro = new ResizeObserver(() => {
+          clearTimeout(resizeTimer);
+          resizeTimer = setTimeout(() => {
+            const newW = Math.max(400, wrapper.offsetWidth - 40);
+            wrapper.innerHTML = '';
+            const p = initPptx(wrapper, { width: newW, height: newW * 9 / 16, mode: 'list' });
+            p.preview(buf);
+          }, 300);
+        });
+        ro.observe(container);
       } else {
         return false; // no dedicated viewer
       }
