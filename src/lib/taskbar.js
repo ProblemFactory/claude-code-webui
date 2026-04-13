@@ -6,9 +6,12 @@ import { createPopover, showContextMenu } from './utils.js';
  */
 export function updateTaskbar(app) {
   const container = document.getElementById('taskbar-items'); container.innerHTML = '';
+  const activeDesk = app.desktopManager?.activeDesktopId;
   for (const [id, win] of app.wm.windows) {
     // Skip grouped guests — only the host appears in taskbar
     if (win._tabChain && win._tabChain.tabs[0] !== id) continue;
+    // Skip windows on other desktops
+    if (activeDesk && win._desktopId && win._desktopId !== activeDesk) continue;
     const item = document.createElement('div'); item.className = 'taskbar-item';
     if (id === app.wm.activeWindowId && !win.isMinimized) item.classList.add('active');
     if (win.isMinimized) item.classList.add('minimized');
@@ -47,17 +50,23 @@ export function updateTaskbar(app) {
     // Right-click context menu for window recovery
     item.addEventListener('contextmenu', (e) => {
       e.preventDefault();
-      const menu = showContextMenu(e.clientX, e.clientY, [
+      const menuItems = [
         { label: '\u2725 Move', action: () => app.wm.startMoveMode(id) },
         { label: win.isMinimized ? '\u25A1 Restore' : '\u2013 Minimize', action: () => win.isMinimized ? app.wm.restore(id) : app.wm.minimize(id) },
-        { label: '\u2715 Close', action: () => app.wm.closeWindow(id), style: 'color:var(--red, #e55)' },
-      ], 'taskbar-context-menu');
+      ];
+      // "Move to Desktop" submenu
+      const deskItems = app.desktopManager?.getDesktopMenuItems(id);
+      if (deskItems?.length) {
+        menuItems.push({ label: '\u27A4 Move to Desktop', children: deskItems });
+      }
+      menuItems.push({ label: '\u2715 Close', action: () => app.wm.closeWindow(id), style: 'color:var(--red, #e55)' });
+      const menu = showContextMenu(e.clientX, e.clientY, menuItems, 'taskbar-context-menu');
       menu.style.top = '';
       menu.style.bottom = (window.innerHeight - e.clientY + 4) + 'px';
     });
     container.appendChild(item);
   }
-  const activeCount = [...app.wm.windows.values()].filter(w => w.type==='terminal' && !w.exited).length;
+  const activeCount = [...app.wm.windows.values()].filter(w => w.type==='terminal' && !w.exited && (!activeDesk || w._desktopId === activeDesk)).length;
   const countEl = document.getElementById('active-count');
   countEl.textContent = `${activeCount} active`;
   countEl.style.cursor = 'pointer';
@@ -70,10 +79,12 @@ export function updateTaskbar(app) {
 export function showWindowList(app, anchor) {
   if (!app.wm.windows.size) return;
   const pop = createPopover(anchor, 'overlap-switcher');
+  const activeDesk = app.desktopManager?.activeDesktopId;
 
   for (const [id, win] of app.wm.windows) {
     // Skip grouped guests — only the host appears in the list
     if (win._tabChain && win._tabChain.tabs[0] !== id) continue;
+    if (activeDesk && win._desktopId && win._desktopId !== activeDesk) continue;
     const item = document.createElement('div');
     item.className = 'overlap-switcher-item';
     if (id === app.wm.activeWindowId && !win.isMinimized) item.classList.add('active');

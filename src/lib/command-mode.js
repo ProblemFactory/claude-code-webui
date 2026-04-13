@@ -22,6 +22,18 @@ export class CommandMode {
 
   _setup() {
     document.addEventListener('keydown', (e) => {
+      // Ctrl+Alt+Left/Right: switch virtual desktops
+      if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && e.ctrlKey && e.altKey && !e.metaKey) {
+        const dm = this.app.desktopManager;
+        if (dm && dm.desktops.length > 1) {
+          e.preventDefault(); e.stopPropagation();
+          const idx = dm.desktops.findIndex(d => d.id === dm.activeDesktopId);
+          const next = e.key === 'ArrowRight' ? (idx + 1) % dm.desktops.length : (idx - 1 + dm.desktops.length) % dm.desktops.length;
+          dm.switchTo(dm.desktops[next].id);
+        }
+        return;
+      }
+
       // Ctrl+\ toggles command mode (if enabled in settings)
       if (e.key === '\\' && e.ctrlKey && !e.altKey && !e.metaKey && (this.settings.get('toolbar.showCommandMode') ?? true)) {
         e.preventDefault();

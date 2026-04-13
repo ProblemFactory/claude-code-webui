@@ -468,6 +468,41 @@ html, body {
 .terminal-container .xterm { height: 100%; }
 .terminal-container .xterm-viewport { overflow-y: auto !important; }
 
+/* ── Desktop Bar ── */
+#desktop-bar {
+  height: 26px; background: var(--bg-toolbar); border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; padding: 0 8px; gap: 4px; flex-shrink: 0;
+}
+#desktop-tabs { display: flex; gap: 2px; flex: 1; overflow-x: auto; scrollbar-width: none; align-items: center; }
+#desktop-tabs::-webkit-scrollbar { display: none; }
+.desktop-tab {
+  padding: 2px 10px; border-radius: var(--radius-sm); font-size: 11px; font-weight: 500;
+  border: 1px solid transparent; background: transparent; color: var(--text-dim);
+  cursor: pointer; white-space: nowrap; transition: all var(--transition); flex-shrink: 0;
+  display: flex; align-items: center; gap: 4px;
+}
+.desktop-tab:hover { background: var(--bg-hover); color: var(--text); }
+.desktop-tab.active {
+  background: var(--accent-dim); color: var(--accent-hover); border-color: var(--accent);
+}
+.desktop-tab-count {
+  font-size: 9px; background: var(--bg-window); border-radius: 8px;
+  padding: 0 4px; color: var(--text-dim); line-height: 1.4;
+}
+.desktop-tab.active .desktop-tab-count { background: var(--accent); color: var(--bg-window); }
+.desktop-tab-drop { border-color: var(--accent) !important; background: var(--accent-dim) !important; }
+.desktop-tab-rename {
+  background: var(--bg-input); border: 1px solid var(--accent); border-radius: 3px;
+  color: var(--text); font-size: 11px; padding: 0 4px; outline: none; min-width: 40px;
+}
+#btn-add-desktop {
+  width: 20px; height: 20px; border-radius: var(--radius-sm); border: 1px solid var(--border);
+  background: transparent; color: var(--text-dim); cursor: pointer; font-size: 13px;
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  transition: all var(--transition);
+}
+#btn-add-desktop:hover { background: var(--bg-hover); color: var(--text); border-color: var(--border-active); }
+
 /* ── Taskbar ── */
 #taskbar {
   height: var(--taskbar-height); background: var(--bg-taskbar);

@@ -19,6 +19,7 @@ import { openExternalEditor, closeExternalEditor } from './external-editor.js';
 import { CommandMode } from './command-mode.js';
 import { updateTaskbar as updateTaskbarFn, showWindowList } from './taskbar.js';
 import { openBrowser as openBrowserFn } from './browser-window.js';
+import { DesktopManager } from './desktop-manager.js';
 
 class App {
   constructor() {
@@ -30,6 +31,17 @@ class App {
     this.sessions = new Map();
     this.attachedServerSessions = new Set();
     this.layoutManager = new LayoutManager(this);
+    this.desktopManager = new DesktopManager(this);
+
+    // Tag every new window with the active desktop ID
+    const origCreateWindow = this.wm.createWindow.bind(this.wm);
+    this.wm.createWindow = (opts) => {
+      const win = origCreateWindow(opts);
+      if (this.desktopManager.activeDesktopId) {
+        win._desktopId = this.desktopManager.activeDesktopId;
+      }
+      return win;
+    };
 
     this.wm.onWindowsChanged = () => {
       this.updateTaskbar();
@@ -56,6 +68,7 @@ class App {
     this._loadCustomThemes();
 
     this._setupToolbar();
+    this._setupDesktopBar();
     this._setupDialogs();
     this._setupWelcome();
     this._setupGlobalSettings();
@@ -131,6 +144,16 @@ class App {
         else if (dx < 0 && this.sidebar.isOpen) this.sidebar.toggle(false); // swipe left to close
       }
     }, { passive: true });
+  }
+
+  _setupDesktopBar() {
+    const addBtn = document.getElementById('btn-add-desktop');
+    if (addBtn) {
+      addBtn.addEventListener('click', () => {
+        const id = this.desktopManager.createDesktop();
+        this.desktopManager.switchTo(id);
+      });
+    }
   }
 
   _setupToolbar() {
@@ -804,7 +827,19 @@ class App {
   _closeExternalEditor(signalPath) { closeExternalEditor(this, signalPath); }
 
   _hideWelcome() { document.getElementById('welcome').classList.add('hidden'); }
-  _checkWelcome() { if (this.wm.windows.size === 0) document.getElementById('welcome').classList.remove('hidden'); }
+  _checkWelcome() {
+    const activeDesk = this.desktopManager?.activeDesktopId;
+    let hasWindows = false;
+    if (activeDesk) {
+      for (const [, win] of this.wm.windows) {
+        if (win._desktopId === activeDesk && !win._hiddenByDesktop) { hasWindows = true; break; }
+      }
+    } else {
+      hasWindows = this.wm.windows.size > 0;
+    }
+    if (!hasWindows) document.getElementById('welcome').classList.remove('hidden');
+    else document.getElementById('welcome').classList.add('hidden');
+  }
 
   // Flash a window's title bar + taskbar item to help user find it
   flashWindow(serverSessionId) {
