@@ -301,12 +301,23 @@ export class DesktopManager {
           }
         }
       } else {
-        // Non-active: windows are real DOM (hidden), check their live state
+        // Non-active: try live DOM windows first (they exist after first switch)
         for (const [id, win] of this.app.wm.windows) {
           if (win._desktopId === desk.id && win.gridBounds && !win.isMinimized) {
             const waiting = win.element.classList.contains('window-waiting');
             winEntries.push({ id, gridBounds: win.gridBounds, waiting });
             if (waiting) deskHasWaiting = true;
+          }
+        }
+        // Fallback: if no live windows found, use cached state (e.g. after page refresh)
+        if (!winEntries.length) {
+          const cached = this._savedStates.get(desk.id);
+          if (cached?.windows) {
+            for (const ws of cached.windows) {
+              if (ws.gridBounds && !ws.isMinimized) {
+                winEntries.push({ id: ws.winId, gridBounds: ws.gridBounds, waiting: false });
+              }
+            }
           }
         }
       }
