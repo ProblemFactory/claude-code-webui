@@ -48,6 +48,7 @@ class App {
       this.layoutManager.scheduleAutoSave();
       this._notifySidebarFocus();
       this._updateMobileNavTitle();
+      if (this.desktopManager) this.desktopManager._renderSwitcher();
     };
     this.sidebar = new Sidebar(this);
 
@@ -68,7 +69,6 @@ class App {
     this._loadCustomThemes();
 
     this._setupToolbar();
-    this._setupDesktopBar();
     this._setupDialogs();
     this._setupWelcome();
     this._setupGlobalSettings();
@@ -144,16 +144,6 @@ class App {
         else if (dx < 0 && this.sidebar.isOpen) this.sidebar.toggle(false); // swipe left to close
       }
     }, { passive: true });
-  }
-
-  _setupDesktopBar() {
-    const addBtn = document.getElementById('btn-add-desktop');
-    if (addBtn) {
-      addBtn.addEventListener('click', () => {
-        const id = this.desktopManager.createDesktop();
-        this.desktopManager.switchTo(id);
-      });
-    }
   }
 
   _setupToolbar() {

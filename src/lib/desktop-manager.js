@@ -246,83 +246,97 @@ export class DesktopManager {
     this.app.ws.send({ type: 'layout-sync', state, desktopId });
   }
 
-  // ── UI ──
+  // ── UI: Ubuntu-style desktop previews in taskbar ──
 
   _renderSwitcher() {
-    const container = document.getElementById('desktop-tabs');
+    const container = document.getElementById('desktop-previews');
     if (!container) return;
     container.innerHTML = '';
 
     for (const desk of this._desktops) {
-      const tab = document.createElement('button');
-      tab.className = 'desktop-tab' + (desk.id === this._activeId ? ' active' : '');
-      tab.draggable = false;
+      const preview = document.createElement('div');
+      preview.className = 'desktop-preview' + (desk.id === this._activeId ? ' active' : '');
+      preview.title = desk.name;
 
-      // Window count for this desktop
-      let count = 0;
+      // Collect windows for this desktop and draw miniature rectangles
+      const wins = [];
       for (const [, win] of this.app.wm.windows) {
-        if (win._desktopId === desk.id) count++;
+        if (win._desktopId === desk.id && win.gridBounds && !win._hiddenByDesktop && !win.isMinimized) wins.push(win);
+      }
+      // For non-active desktops, use cached state
+      if (desk.id !== this._activeId) {
+        const cached = this._savedStates.get(desk.id);
+        if (cached?.windows) {
+          for (const ws of cached.windows) {
+            if (ws.gridBounds && !ws.isMinimized) {
+              wins.push({ gridBounds: ws.gridBounds }); // pseudo-win for rendering
+            }
+          }
+        }
+      }
+      for (const win of wins) {
+        const b = win.gridBounds;
+        if (!b) continue;
+        const rect = document.createElement('div');
+        rect.className = 'desktop-preview-win';
+        rect.style.left = (b.left * 100) + '%';
+        rect.style.top = (b.top * 100) + '%';
+        rect.style.width = (b.width * 100) + '%';
+        rect.style.height = (b.height * 100) + '%';
+        preview.appendChild(rect);
       }
 
-      const nameSpan = document.createElement('span');
-      nameSpan.className = 'desktop-tab-name';
-      nameSpan.textContent = desk.name;
-      tab.appendChild(nameSpan);
+      // Label
+      const label = document.createElement('div');
+      label.className = 'desktop-preview-label';
+      label.textContent = desk.name;
+      preview.appendChild(label);
 
-      if (count > 0) {
-        const badge = document.createElement('span');
-        badge.className = 'desktop-tab-count';
-        badge.textContent = count;
-        tab.appendChild(badge);
-      }
+      // Click to switch
+      preview.addEventListener('click', () => this.switchTo(desk.id));
 
-      tab.addEventListener('click', () => this.switchTo(desk.id));
-      tab.addEventListener('dblclick', (e) => { e.preventDefault(); this._startRename(tab, desk); });
-      tab.addEventListener('contextmenu', (e) => {
+      // Right-click context menu
+      preview.addEventListener('contextmenu', (e) => {
         e.preventDefault();
         const items = [
-          { label: 'Rename', action: () => this._startRename(tab, desk) },
+          { label: 'Rename', action: () => this._startRename(desk) },
         ];
         if (this._desktops.length > 1) {
           items.push({ label: 'Delete', action: () => this.deleteDesktop(desk.id), style: 'color:var(--red, #e55)' });
         }
-        showContextMenu(e.clientX, e.clientY, items);
+        const menu = showContextMenu(e.clientX, e.clientY, items);
+        menu.style.top = '';
+        menu.style.bottom = (window.innerHeight - e.clientY + 4) + 'px';
       });
 
-      // Drop target for windows
-      tab.addEventListener('dragover', (e) => { e.preventDefault(); tab.classList.add('desktop-tab-drop'); });
-      tab.addEventListener('dragleave', () => tab.classList.remove('desktop-tab-drop'));
-      tab.addEventListener('drop', (e) => {
+      // Drop target: drag taskbar items or windows here
+      preview.addEventListener('dragover', (e) => { e.preventDefault(); preview.classList.add('desktop-preview-drop'); });
+      preview.addEventListener('dragleave', () => preview.classList.remove('desktop-preview-drop'));
+      preview.addEventListener('drop', (e) => {
         e.preventDefault();
-        tab.classList.remove('desktop-tab-drop');
+        preview.classList.remove('desktop-preview-drop');
         const winId = e.dataTransfer.getData('text/window-id');
         if (winId) this.moveWindowToDesktop(winId, desk.id);
       });
 
-      container.appendChild(tab);
+      container.appendChild(preview);
     }
+
+    // "+" add button
+    const addBtn = document.createElement('button');
+    addBtn.className = 'desktop-preview-add';
+    addBtn.textContent = '+';
+    addBtn.title = 'Add desktop';
+    addBtn.addEventListener('click', () => {
+      const id = this.createDesktop();
+      this.switchTo(id);
+    });
+    container.appendChild(addBtn);
   }
 
-  _startRename(tabEl, desk) {
-    const nameSpan = tabEl.querySelector('.desktop-tab-name');
-    if (!nameSpan) return;
-    const input = document.createElement('input');
-    input.className = 'desktop-tab-rename';
-    input.value = desk.name;
-    input.style.width = Math.max(40, nameSpan.offsetWidth) + 'px';
-    nameSpan.replaceWith(input);
-    input.focus();
-    input.select();
-
-    const finish = () => {
-      const newName = input.value.trim() || desk.name;
-      this.renameDesktop(desk.id, newName);
-    };
-    input.addEventListener('blur', finish);
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
-      if (e.key === 'Escape') { input.value = desk.name; input.blur(); }
-    });
+  _startRename(desk) {
+    const name = prompt('Desktop name:', desk.name);
+    if (name && name.trim()) this.renameDesktop(desk.id, name.trim());
   }
 
   /** Build "Move to Desktop" submenu items for window context menu */
