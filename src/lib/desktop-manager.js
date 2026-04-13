@@ -93,12 +93,27 @@ export class DesktopManager {
     }
     const targetId = this._activeId;
 
+    // If deleted desktop has windows not yet in DOM (never switched to after refresh),
+    // create them from cached state first
+    const cached = this._savedStates.get(desktopId);
+    if (cached?.windows) {
+      for (const ws of cached.windows) {
+        const winId = ws.winId || ws.id;
+        if (!this.app.wm.windows.has(winId) && ws.openSpec) {
+          this.app.replayOpenSpec(ws.openSpec, winId);
+          const newWin = this.app.wm.windows.get(winId);
+          if (newWin) {
+            newWin._desktopId = desktopId;
+            if (ws.gridBounds) newWin.gridBounds = ws.gridBounds;
+          }
+        }
+      }
+    }
+
     for (const [, win] of this.app.wm.windows) {
       if (win._desktopId === desktopId) {
         win._desktopId = targetId;
-        // Always show — they may have been hidden on the deleted desktop
         if (win._hiddenByDesktop) this._showWin(win);
-        // Re-apply position so they appear properly
         if (win.gridBounds) this.app.wm._applyGridBounds(win);
       }
     }
@@ -155,6 +170,8 @@ export class DesktopManager {
       for (const [, win] of this.app.wm.windows) {
         if (win._desktopId === desktopId && win._hiddenByDesktop) {
           this._showWin(win);
+          // Re-apply gridBounds — pixel position may be stale if window was moved via preview drag
+          if (win.gridBounds) this.app.wm._applyGridBounds(win);
           hasWindows = true;
         }
       }
