@@ -330,7 +330,6 @@ class FileViewer {
     const res = await fetch(rawUrl);
     const buf = await res.arrayBuffer();
 
-    // Layout: sidebar (thumbnails) + main (current slide)
     const viewer = document.createElement('div');
     viewer.style.cssText = 'display:flex;height:100%;overflow:hidden;background:var(--bg-workspace);user-select:text';
 
@@ -347,18 +346,17 @@ class FileViewer {
     viewer.append(sidebar, main);
     container.appendChild(viewer);
 
-    // Load PPTX once — reuse the parsed data for all renders
+    // Load once for main view — this previewer is reused for slide switching
     const mainPreviewer = initPptx(slideContainer, { width: 800, height: 450, mode: 'slide' });
-    const pptxData = await mainPreviewer.load(buf);
+    await mainPreviewer.preview(buf);
     const count = mainPreviewer.slideCount;
 
     let activeIdx = 0;
     const thumbEls = [];
 
-    // Render main slide — reuses the already-parsed pptxData
+    // Render main slide — reuse the same previewer (already loaded)
     const renderMain = (idx) => {
       activeIdx = idx;
-      slideContainer.innerHTML = '';
       const rect = main.getBoundingClientRect();
       const w = Math.max(300, rect.width - 40);
       const h = Math.max(170, rect.height - 40);
@@ -366,10 +364,11 @@ class FileViewer {
       let slideW, slideH;
       if (w / h > aspect) { slideH = h; slideW = h * aspect; }
       else { slideW = w; slideH = w / aspect; }
-      // Create renderer with pre-loaded data (no re-parse)
-      const p = initPptx(slideContainer, { width: slideW, height: slideH, mode: 'slide' });
-      p.pptx = mainPreviewer.pptx; // share parsed PPTX data
-      p.renderSingleSlide(idx);
+      // Update size and re-render current slide
+      mainPreviewer.options.width = slideW;
+      mainPreviewer.options.height = slideH;
+      mainPreviewer.removeCurrentSlide();
+      mainPreviewer.renderSingleSlide(idx);
       // Update thumbnail highlights
       thumbEls.forEach((t, i) => {
         t.style.borderColor = i === idx ? 'var(--accent)' : 'var(--border)';
@@ -377,8 +376,18 @@ class FileViewer {
       });
     };
 
-    // Build thumbnails — render at small size using CSS scale, load data once
-    const thumbW = 140;
+    // Build thumbnails using list mode in a hidden container (one parse)
+    const thumbHidden = document.createElement('div');
+    thumbHidden.style.cssText = 'position:absolute;left:-9999px;top:0';
+    document.body.appendChild(thumbHidden);
+    const thumbPreviewer = initPptx(thumbHidden, { width: 140, height: 79, mode: 'list' });
+    await thumbPreviewer.preview(buf);
+
+    // Extract rendered slides from list as thumbnail clones
+    const renderedSlides = thumbHidden.querySelectorAll('[class*="slide"], [style*="position"]');
+    // Fallback: just grab all direct children of the wrapper
+    const thumbSource = renderedSlides.length > 0 ? renderedSlides : thumbHidden.children[0]?.children || [];
+
     for (let i = 0; i < count; i++) {
       const thumb = document.createElement('div');
       thumb.style.cssText = 'margin-bottom:6px;cursor:pointer;border:2px solid var(--border);border-radius:4px;overflow:hidden;opacity:0.7;transition:all 0.15s;position:relative';
@@ -388,21 +397,20 @@ class FileViewer {
       label.textContent = i + 1;
 
       const thumbContent = document.createElement('div');
-      thumbContent.style.cssText = `width:${thumbW}px;height:${Math.round(thumbW * 9 / 16)}px;overflow:hidden;pointer-events:none`;
-      // Render at thumbnail size, sharing parsed data
-      const tp = initPptx(thumbContent, { width: thumbW, height: Math.round(thumbW * 9 / 16), mode: 'slide' });
-      tp.pptx = mainPreviewer.pptx;
-      // Defer thumbnail rendering to avoid blocking
-      setTimeout(() => tp.renderSingleSlide(i), i * 50);
+      thumbContent.style.cssText = 'width:140px;height:79px;overflow:hidden;pointer-events:none';
+      // Clone the already-rendered slide from list mode
+      if (thumbSource[i]) thumbContent.appendChild(thumbSource[i].cloneNode(true));
 
       thumb.append(label, thumbContent);
-      thumb.onclick = () => renderMain(i);
+      thumb.onclick = () => { renderMain(i); thumb.scrollIntoView({ block: 'nearest' }); };
       thumb.onmouseenter = () => { if (activeIdx !== i) thumb.style.opacity = '0.9'; };
       thumb.onmouseleave = () => { if (activeIdx !== i) thumb.style.opacity = '0.7'; };
       thumbEls.push(thumb);
       sidebar.appendChild(thumb);
     }
+    thumbHidden.remove();
 
+    // Initial render at correct size
     renderMain(0);
 
     // Keyboard navigation
