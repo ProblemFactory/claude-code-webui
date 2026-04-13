@@ -249,11 +249,12 @@ class WindowManager {
       if (deskPreviewTarget && !prevDeskTarget) {
         // Entering a desktop preview — hide window, create mini rect inside preview
         deskSavedBounds = { left: element.style.left, top: element.style.top, width: element.style.width, height: element.style.height };
-        element.style.display = 'none';
+        element.style.visibility = 'hidden';
+        element.style.pointerEvents = 'none';
         deskPreviewTarget.classList.add('desktop-preview-drop');
         // Hide this window's rect in the source (active) desktop preview
         const srcRect = document.querySelector(`.desktop-preview.active .desktop-preview-win[data-win-id="${win.id}"]`);
-        if (srcRect) srcRect.style.display = 'none';
+        if (srcRect) srcRect.style.visibility = 'hidden';
         deskMiniWin = document.createElement('div');
         deskMiniWin.className = 'desktop-preview-win desktop-preview-dragging';
         // Size: proportional to window's gridBounds (or default 40%x40%)
@@ -265,10 +266,11 @@ class WindowManager {
         // Left desktop preview — restore window, remove mini rect
         if (deskMiniWin) { deskMiniWin.remove(); deskMiniWin = null; }
         prevDeskTarget.classList.remove('desktop-preview-drop');
-        element.style.display = '';
+        element.style.visibility = '';
+        element.style.pointerEvents = '';
         // Show this window's rect back in the source desktop preview
         const srcRect = document.querySelector(`.desktop-preview.active .desktop-preview-win[data-win-id="${win.id}"]`);
-        if (srcRect) srcRect.style.display = '';
+        if (srcRect) srcRect.style.visibility = '';
         if (deskSavedBounds) {
           initL = e.clientX - (parseInt(deskSavedBounds.width) || 350) / 2;
           initT = e.clientY - 15;
@@ -321,7 +323,7 @@ class WindowManager {
           const gb = win.gridBounds || { width: 0.4, height: 0.4 };
           win.gridBounds = { left: ml, top: mt, width: gb.width, height: gb.height };
           deskMiniWin.remove(); deskMiniWin = null; deskPreviewTarget = null;
-          element.style.display = '';
+          element.style.visibility = ''; element.style.pointerEvents = '';
           if (deskSavedBounds) deskSavedBounds = null;
           dm.moveWindowToDesktop(win.id, dm.desktops[idx].id);
           tabMergeTarget = null; savedBounds = null;
@@ -333,7 +335,7 @@ class WindowManager {
       if (deskMiniWin) { deskMiniWin.remove(); deskMiniWin = null; }
       if (deskPreviewTarget) deskPreviewTarget.classList.remove('desktop-preview-drop');
       if (deskSavedBounds) {
-        element.style.display = '';
+        element.style.visibility = ''; element.style.pointerEvents = '';
         element.style.left = deskSavedBounds.left; element.style.top = deskSavedBounds.top;
         element.style.width = deskSavedBounds.width; element.style.height = deskSavedBounds.height;
         // Re-sync cursor for snap logic below

@@ -98,9 +98,7 @@ export class DesktopManager {
       // Show windows that now belong to us
       for (const [, win] of this.app.wm.windows) {
         if (win._desktopId === targetId && win._hiddenByDesktop) {
-          win.element.style.display = '';
-          win.isMinimized = false;
-          win._hiddenByDesktop = false;
+          this._showWin(win);
         }
       }
     }
@@ -135,8 +133,7 @@ export class DesktopManager {
       // 2. Hide all windows for current desktop
       for (const [, win] of this.app.wm.windows) {
         if (win._desktopId === this._activeId && !win._hiddenByDesktop) {
-          win._hiddenByDesktop = true;
-          win.element.style.display = 'none';
+          this._hideWin(win);
         }
       }
 
@@ -152,26 +149,14 @@ export class DesktopManager {
         this.app.wm.setGrid(null);
       }
 
-      // 5. Show/restore windows for target desktop
+      // 5. Show windows for target desktop (visibility:hidden preserves all state)
       let hasWindows = false;
-      const restoredWinIds = [];
-      for (const [id, win] of this.app.wm.windows) {
+      for (const [, win] of this.app.wm.windows) {
         if (win._desktopId === desktopId && win._hiddenByDesktop) {
-          win._hiddenByDesktop = false;
-          win.element.style.display = '';
-          if (win.gridBounds) this.app.wm._applyGridBounds(win);
-          if (win.onResize) setTimeout(() => win.onResize(), 100);
-          restoredWinIds.push(id);
+          this._showWin(win);
           hasWindows = true;
         }
       }
-      // Re-pin chat views that were hidden (display:none collapses scroll)
-      setTimeout(() => {
-        for (const id of restoredWinIds) {
-          const session = this.app.sessions.get(id);
-          if (session?._scrollToBottom && session._pinned) session._scrollToBottom();
-        }
-      }, 150);
 
       // 6. Create windows that exist in saved state but not yet in DOM
       // (from other clients or disk restore)
@@ -221,8 +206,7 @@ export class DesktopManager {
 
     // If moving to a non-active desktop, hide
     if (desktopId !== this._activeId) {
-      win._hiddenByDesktop = true;
-      win.element.style.display = 'none';
+      this._hideWin(win);
     }
 
     // Update cached state for the target desktop so preview shows the new window
@@ -265,8 +249,7 @@ export class DesktopManager {
           if (win._desktopId && !newIds.has(win._desktopId)) {
             win._desktopId = fallbackId;
             if (fallbackId === this._activeId && win._hiddenByDesktop) {
-              win._hiddenByDesktop = false;
-              win.element.style.display = '';
+              this._showWin(win);
             }
           }
         }
@@ -471,6 +454,20 @@ export class DesktopManager {
   }
 
   // ── Helpers ──
+
+  /** Hide a window without collapsing layout (preserves scroll, DOM state) */
+  _hideWin(win) {
+    win._hiddenByDesktop = true;
+    win.element.style.visibility = 'hidden';
+    win.element.style.pointerEvents = 'none';
+  }
+
+  /** Show a previously hidden window */
+  _showWin(win) {
+    win._hiddenByDesktop = false;
+    win.element.style.visibility = '';
+    win.element.style.pointerEvents = '';
+  }
 
   _generateId() {
     return 'desk-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 5);
