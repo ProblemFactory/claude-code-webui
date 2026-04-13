@@ -22,14 +22,20 @@ export class CommandMode {
 
   _setup() {
     document.addEventListener('keydown', (e) => {
-      // Ctrl+Alt+Left/Right: switch virtual desktops
+      // Ctrl+Alt+Arrow: switch desktops; +Shift: move active window to that desktop
       if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && e.ctrlKey && e.altKey && !e.metaKey) {
         const dm = this.app.desktopManager;
         if (dm && dm.desktops.length > 1) {
           e.preventDefault(); e.stopPropagation();
           const idx = dm.desktops.findIndex(d => d.id === dm.activeDesktopId);
           const next = e.key === 'ArrowRight' ? (idx + 1) % dm.desktops.length : (idx - 1 + dm.desktops.length) % dm.desktops.length;
-          dm.switchTo(dm.desktops[next].id);
+          if (e.shiftKey) {
+            // Move active window to adjacent desktop
+            const winId = this.app.wm.activeWindowId;
+            if (winId) dm.moveWindowToDesktop(winId, dm.desktops[next].id);
+          } else {
+            dm.switchTo(dm.desktops[next].id);
+          }
         }
         return;
       }

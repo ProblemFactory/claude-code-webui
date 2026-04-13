@@ -30,6 +30,8 @@
 |----------|--------|
 | **Ctrl+Alt+Left** | Switch to previous desktop |
 | **Ctrl+Alt+Right** | Switch to next desktop |
+| **Ctrl+Shift+Alt+Left** | Move active window to previous desktop |
+| **Ctrl+Shift+Alt+Right** | Move active window to next desktop |
 
 ## Command Mode
 
