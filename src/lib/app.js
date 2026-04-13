@@ -28,6 +28,7 @@ class App {
     this.ws = new WsManager();
     this.wm = new WindowManager(document.getElementById('workspace'));
     this.wm._settings = this.settings;
+    this.wm._app = this;
     this.sessions = new Map();
     this.attachedServerSessions = new Set();
     this.layoutManager = new LayoutManager(this);
@@ -397,10 +398,11 @@ class App {
       return;
     }
 
-    // Taskbar: 5h progress bar + percentage
+    // Taskbar: circular pie chart + percentage
     const pct5h = Math.round((rl.fiveHour?.utilization || 0) * 100);
     const color = pct5h > 80 ? 'var(--red)' : pct5h > 50 ? 'var(--yellow)' : 'var(--green)';
-    usageEl.innerHTML = `<div class="usage-bar"><div class="usage-bar-fill" style="width:${pct5h}%;background:${color}"></div></div><span>${pct5h}%</span>`;
+    const deg = Math.round(pct5h * 3.6);
+    usageEl.innerHTML = `<div class="usage-pie" style="background:conic-gradient(${color} ${deg}deg, var(--bg-input) ${deg}deg)"></div><span>${pct5h}%</span>`;
 
     // Popup: match Claude Code /usage layout
     const pct7d = Math.round((rl.sevenDay?.utilization || 0) * 100);

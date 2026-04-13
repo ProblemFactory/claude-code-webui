@@ -221,6 +221,14 @@ class WindowManager {
         mergeGhost.style.left = (e.clientX + 12) + 'px';
         mergeGhost.style.top = (e.clientY + 12) + 'px';
       }
+
+      // Highlight desktop preview under cursor (hide window to see through)
+      document.querySelectorAll('.desktop-preview').forEach(p => p.classList.remove('desktop-preview-drop'));
+      const prevVis = element.style.visibility;
+      element.style.visibility = 'hidden';
+      const hoverEl = document.elementFromPoint(e.clientX, e.clientY)?.closest('.desktop-preview');
+      element.style.visibility = prevVis;
+      if (hoverEl) hoverEl.classList.add('desktop-preview-drop');
     };
 
     const onUp = (e) => {
@@ -231,6 +239,28 @@ class WindowManager {
       this.snapIndicator.style.display = 'none';
       for (const [, w] of this.windows) w.element.classList.remove('tab-drop-target');
       if (mergeGhost) { mergeGhost.remove(); mergeGhost = null; }
+      document.querySelectorAll('.desktop-preview').forEach(p => p.classList.remove('desktop-preview-drop'));
+
+      // Desktop preview drop: check if cursor is over a desktop preview
+      element.style.visibility = 'hidden';
+      const previewEl = document.elementFromPoint(e.clientX, e.clientY)?.closest('.desktop-preview');
+      element.style.visibility = '';
+      if (previewEl) {
+        this._clearGridHighlight(); this.gridOverlay.classList.remove('dragging');
+        // Find which desktop this preview belongs to by index
+        const previews = [...document.querySelectorAll('.desktop-preview')];
+        const idx = previews.indexOf(previewEl);
+        const dm = this._app?.desktopManager;
+        if (dm && idx >= 0 && idx < dm.desktops.length) {
+          const targetDesk = dm.desktops[idx];
+          if (targetDesk.id !== dm.activeDesktopId) {
+            if (savedBounds) { element.style.display = ''; element.style.left = savedBounds.left; element.style.top = savedBounds.top; element.style.width = savedBounds.width; element.style.height = savedBounds.height; savedBounds = null; }
+            dm.moveWindowToDesktop(win.id, targetDesk.id);
+            tabMergeTarget = null;
+            return;
+          }
+        }
+      }
 
       // Tab merge takes priority over snap
       if (tabMergeTarget) {

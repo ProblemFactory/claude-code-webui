@@ -41,6 +41,12 @@ export function updateTaskbar(app) {
     subtitle.textContent = parts[1] || win.type;
     textCol.append(title, subtitle);
     item.append(icon, textCol);
+    // Draggable: allow dropping onto desktop previews
+    item.draggable = true;
+    item.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData('text/window-id', id);
+      e.dataTransfer.effectAllowed = 'move';
+    });
     item.addEventListener('click', () => {
       if (win.isMinimized) app.wm.restore(id);
       else if (id === app.wm.activeWindowId) app.wm.minimize(id);
@@ -66,9 +72,9 @@ export function updateTaskbar(app) {
     });
     container.appendChild(item);
   }
-  const activeCount = [...app.wm.windows.values()].filter(w => w.type==='terminal' && !w.exited && (!activeDesk || w._desktopId === activeDesk)).length;
+  const winCount = [...app.wm.windows.values()].filter(w => !activeDesk || w._desktopId === activeDesk).length;
   const countEl = document.getElementById('active-count');
-  countEl.textContent = `${activeCount} active`;
+  countEl.textContent = `${winCount} windows`;
   countEl.style.cursor = 'pointer';
   countEl.onclick = (e) => { e.stopPropagation(); showWindowList(app, countEl); };
 }
