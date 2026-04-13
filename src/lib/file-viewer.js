@@ -334,11 +334,9 @@ class FileViewer {
     const viewer = document.createElement('div');
     viewer.style.cssText = 'display:flex;height:100%;overflow:hidden;background:var(--bg-workspace);user-select:text';
 
-    // Sidebar: slide thumbnails
     const sidebar = document.createElement('div');
     sidebar.style.cssText = 'width:160px;flex-shrink:0;overflow-y:auto;border-right:1px solid var(--border);background:var(--bg-sidebar);padding:8px';
 
-    // Main slide area
     const main = document.createElement('div');
     main.style.cssText = 'flex:1;display:flex;align-items:center;justify-content:center;overflow:auto;padding:16px;min-width:0';
 
@@ -349,28 +347,29 @@ class FileViewer {
     viewer.append(sidebar, main);
     container.appendChild(viewer);
 
-    // Load PPTX
-    const previewer = initPptx(slideContainer, { width: 800, height: 450, mode: 'slide' });
-    await previewer.load(buf);
-    const count = previewer.slideCount;
+    // Load PPTX once — reuse the parsed data for all renders
+    const mainPreviewer = initPptx(slideContainer, { width: 800, height: 450, mode: 'slide' });
+    const pptxData = await mainPreviewer.load(buf);
+    const count = mainPreviewer.slideCount;
 
     let activeIdx = 0;
     const thumbEls = [];
 
-    // Render main slide at correct size for container
+    // Render main slide — reuses the already-parsed pptxData
     const renderMain = (idx) => {
       activeIdx = idx;
       slideContainer.innerHTML = '';
       const rect = main.getBoundingClientRect();
       const w = Math.max(300, rect.width - 40);
       const h = Math.max(170, rect.height - 40);
-      // Fit slide to available space maintaining aspect ratio (assume 16:9)
       const aspect = 16 / 9;
       let slideW, slideH;
       if (w / h > aspect) { slideH = h; slideW = h * aspect; }
       else { slideW = w; slideH = w / aspect; }
+      // Create renderer with pre-loaded data (no re-parse)
       const p = initPptx(slideContainer, { width: slideW, height: slideH, mode: 'slide' });
-      p.load(buf).then(() => p.renderSingleSlide(idx));
+      p.pptx = mainPreviewer.pptx; // share parsed PPTX data
+      p.renderSingleSlide(idx);
       // Update thumbnail highlights
       thumbEls.forEach((t, i) => {
         t.style.borderColor = i === idx ? 'var(--accent)' : 'var(--border)';
@@ -378,20 +377,23 @@ class FileViewer {
       });
     };
 
-    // Build thumbnails
+    // Build thumbnails — render at small size using CSS scale, load data once
+    const thumbW = 140;
     for (let i = 0; i < count; i++) {
       const thumb = document.createElement('div');
       thumb.style.cssText = 'margin-bottom:6px;cursor:pointer;border:2px solid var(--border);border-radius:4px;overflow:hidden;opacity:0.7;transition:all 0.15s;position:relative';
 
-      // Slide number label
       const label = document.createElement('div');
-      label.style.cssText = 'position:absolute;top:2px;left:4px;font-size:9px;color:var(--text-dim);z-index:1;background:rgba(0,0,0,0.5);padding:0 3px;border-radius:2px;color:#fff';
+      label.style.cssText = 'position:absolute;top:2px;left:4px;font-size:9px;z-index:1;background:rgba(0,0,0,0.5);padding:0 3px;border-radius:2px;color:#fff';
       label.textContent = i + 1;
 
       const thumbContent = document.createElement('div');
-      const thumbW = 140;
-      const thumbP = initPptx(thumbContent, { width: thumbW, height: thumbW * 9 / 16, mode: 'slide' });
-      thumbP.load(buf).then(() => thumbP.renderSingleSlide(i));
+      thumbContent.style.cssText = `width:${thumbW}px;height:${Math.round(thumbW * 9 / 16)}px;overflow:hidden;pointer-events:none`;
+      // Render at thumbnail size, sharing parsed data
+      const tp = initPptx(thumbContent, { width: thumbW, height: Math.round(thumbW * 9 / 16), mode: 'slide' });
+      tp.pptx = mainPreviewer.pptx;
+      // Defer thumbnail rendering to avoid blocking
+      setTimeout(() => tp.renderSingleSlide(i), i * 50);
 
       thumb.append(label, thumbContent);
       thumb.onclick = () => renderMain(i);
@@ -401,7 +403,6 @@ class FileViewer {
       sidebar.appendChild(thumb);
     }
 
-    // Render first slide
     renderMain(0);
 
     // Keyboard navigation
@@ -412,7 +413,7 @@ class FileViewer {
     };
     document.addEventListener('keydown', onKey);
 
-    // Responsive: re-render main slide on container resize
+    // Responsive resize
     let resizeTimer = null;
     const ro = new ResizeObserver(() => {
       clearTimeout(resizeTimer);
