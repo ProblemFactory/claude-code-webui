@@ -58,7 +58,7 @@ src/
     base.js            — BackendAdapter + SessionHandle (abstract interface for AI backends)
     claude-code.js     — ClaudeCodeAdapter (Claude Code CLI specifics: flags, JSONL, control protocol)
   routes/
-    files.js           — File system API routes (browse, read, write, upload, download, clipboard paste)
+    files.js           — File system API routes (browse, read, write, upload, download, clipboard paste, CSV streaming, format)
     persistence.js     — Persistence routes (layouts, bookmarks, themes, settings, user state, groups)
     sessions.js        — Session API routes (discovery, messages, subagents, kill)
   lib/
@@ -70,9 +70,10 @@ src/
     terminal.js        — TerminalSession (xterm.js wrapper, per-terminal settings)
     sidebar.js         — Sidebar shell (filter/sort/render pipeline, ~850 lines)
     session-card.js    — Session card renderer (stateless factory, extracted from sidebar)
-    file-explorer.js   — FileExplorer (browse/upload/download)
-    file-viewer.js     — FileViewer (dispatch by type, size check, binary detection)
-    code-editor.js     — CodeEditor (CodeMirror 6, dynamic language switching)
+    file-explorer.js   — FileExplorer (browse/upload/download, View menu, resizable columns, preview panel)
+    file-viewer.js     — FileViewer (dispatch by type via file-types registry, renderInto shared method)
+    file-types.js      — File type registry (extension → category, icon, viewer, bypassBinary)
+    code-editor.js     — CodeEditor (CodeMirror 6, Prettier format, server-side format, HTML/MD preview)
     chat-view.js       — ChatView controller (virtual scroll, op dispatch, lifecycle, ~850 lines)
     chat-renderers.js  — Message rendering (user/assistant/tool/system, linkify, diffs, permissions)
     chat-input.js      — ChatInput (textarea, send, attachments, drafts, slash commands, TODO display)
@@ -465,8 +466,10 @@ Read/Write tool output uses highlight.js for syntax highlighting with line numbe
 - `GET /api/file/binary?path=&offset=&length=` — read binary chunk (max 1MB)
 - `GET /api/file/excel?path=` — parse Excel → JSON
 - `GET /api/file/docx?path=` — parse Word → HTML
+- `GET /api/file/csv?path=&offset=&limit=&sep=` — streaming CSV/TSV row range (virtual scroll)
+- `POST /api/format` — server-side code formatting (Python/Go/Rust/Shell via ruff/black/shfmt/gofmt/rustfmt)
 - `GET /api/download?path=` — download file
-- `POST /api/upload` — multipart upload
+- `POST /api/upload` — multipart upload (fileNames JSON field for Unicode filenames)
 - `POST /api/file/write` — write file
 - `POST /api/mkdir` — create directory
 - `POST /api/rename` — rename
@@ -604,9 +607,15 @@ Server → Client: `created`, `output`, `msg` (normalized: op=create/edit/meta),
 - Drag file from explorer to terminal → auto-types shell-escaped absolute path
 - View modes: list (with size/modified columns, sortable) and icon grid
 - Large folder pagination: first 100 items + "Load more" button
-- File viewers: PDF, images (zoom + drag-to-pan), video, audio, CSV, Excel, Word, hex
+- File type registry (`file-types.js`): single source of truth for extension→viewer mapping. `hasDedicatedViewer()` prevents binary files with viewers from falling to hex. Adding a file type = one line in registry.
+- File viewers: PDF, images (zoom + drag-to-pan), video, audio, hex. `FileViewer.renderInto()` shared by viewer windows and preview panel.
+- DOCX: client-side visual rendering via `docx-preview` (headers, footers, tables, images, styles). Text selectable.
+- XLSX: sheet tabs at bottom (like Excel), click to switch. 5000 row limit. Text selectable.
+- PPTX: slide thumbnail sidebar (high-res render scaled via CSS transform, resizable sidebar with drag handle) + main slide view (fit-to-container 16:9). Keyboard navigation (arrows). Responsive resize via ResizeObserver. Text selectable.
+- CSV/TSV: virtual scroll viewer — only renders visible rows (~30-50), pages of 200 rows fetched on demand from streaming `GET /api/file/csv` endpoint. Handles arbitrarily large files.
 - HTML files: open in CodeEditor with Preview toggle (sandboxed iframe), same as markdown
 - Code editor: CodeMirror 6, follows global theme, auto-format via Prettier (Shift+Alt+F) for JS/TS/JSON/HTML/CSS/MD/YAML/GraphQL + server-side ruff/black/shfmt/gofmt/rustfmt for Python/Shell/Go/Rust. Language selector drives Preview button visibility.
+- Upload: Chinese/Unicode filenames preserved via client-side `fileNames` JSON field (bypasses multer encoding issues)
 - Large file warnings (>1MB), binary auto-detection
 - CWD autocomplete with `~` support
 - Clipboard image paste (Ctrl+V → upload to server → xclip/osascript sets clipboard → Ctrl+V to PTY)
