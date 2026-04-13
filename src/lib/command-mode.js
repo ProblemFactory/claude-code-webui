@@ -22,20 +22,14 @@ export class CommandMode {
 
   _setup() {
     document.addEventListener('keydown', (e) => {
-      // Ctrl+Alt+Arrow: switch desktops; +Shift: move active window to that desktop
+      // Ctrl+Alt+Left/Right: switch virtual desktops
       if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && e.ctrlKey && e.altKey && !e.metaKey) {
         const dm = this.app.desktopManager;
         if (dm && dm.desktops.length > 1) {
           e.preventDefault(); e.stopPropagation();
           const idx = dm.desktops.findIndex(d => d.id === dm.activeDesktopId);
           const next = e.key === 'ArrowRight' ? (idx + 1) % dm.desktops.length : (idx - 1 + dm.desktops.length) % dm.desktops.length;
-          if (e.shiftKey) {
-            // Move active window to adjacent desktop
-            const winId = this.app.wm.activeWindowId;
-            if (winId) dm.moveWindowToDesktop(winId, dm.desktops[next].id);
-          } else {
-            dm.switchTo(dm.desktops[next].id);
-          }
+          dm.switchTo(dm.desktops[next].id);
         }
         return;
       }
@@ -109,6 +103,26 @@ export class CommandMode {
         case 's': app.sidebar.toggle(); this.exit(); break;
         case 'b': app.openBrowser(); this.exit(); break;
         case 'e': app.openFileExplorer(); this.exit(); break;
+        case 'd': case 'D': {
+          // d = switch to next desktop, D (shift+d) = switch to previous
+          const dm = app.desktopManager;
+          if (dm && dm.desktops.length > 1) {
+            const idx = dm.desktops.findIndex(d => d.id === dm.activeDesktopId);
+            const next = key === 'd' ? (idx + 1) % dm.desktops.length : (idx - 1 + dm.desktops.length) % dm.desktops.length;
+            dm.switchTo(dm.desktops[next].id);
+          }
+          this.exit(); break;
+        }
+        case '[': case ']': {
+          // [ = move active window to prev desktop, ] = next desktop
+          const dm = app.desktopManager;
+          if (dm && dm.desktops.length > 1 && activeWin) {
+            const idx = dm.desktops.findIndex(d => d.id === dm.activeDesktopId);
+            const next = key === ']' ? (idx + 1) % dm.desktops.length : (idx - 1 + dm.desktops.length) % dm.desktops.length;
+            dm.moveWindowToDesktop(wm.activeWindowId, dm.desktops[next].id);
+          }
+          this.exit(); break;
+        }
         default: this.exit(); break;
       }
     }, true); // capture phase

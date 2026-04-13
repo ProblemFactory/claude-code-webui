@@ -30,8 +30,6 @@
 |----------|--------|
 | **Ctrl+Alt+Left** | Switch to previous desktop |
 | **Ctrl+Alt+Right** | Switch to next desktop |
-| **Ctrl+Shift+Alt+Left** | Move active window to previous desktop |
-| **Ctrl+Shift+Alt+Right** | Move active window to next desktop |
 
 ## Command Mode
 
@@ -52,6 +50,8 @@ Command mode auto-exits after **2 seconds** or on **Escape**. All commands are s
 | **m** | Maximize / restore window |
 | **w** | Close window |
 | **Tab** | Cycle to next window (stays in command mode) |
+| **]** | Move active window to next desktop |
+| **[** | Move active window to previous desktop |
 
 ### Global Commands
 
@@ -63,6 +63,8 @@ Command mode auto-exits after **2 seconds** or on **Escape**. All commands are s
 | **s** | Toggle sidebar |
 | **b** | Open embedded browser |
 | **e** | Open file explorer |
+| **d** | Switch to next desktop |
+| **D** | Switch to previous desktop |
 
 ## Drag Modifiers
 
