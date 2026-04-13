@@ -467,6 +467,7 @@ class FileViewer {
     // Keyboard navigation
     const onKey = (e) => {
       if (!container.closest('.window-active')) return;
+      if (e.target.closest('textarea, input, [contenteditable]')) return;
       if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); if (activeIdx < count - 1) renderMain(activeIdx + 1); thumbEls[activeIdx]?.scrollIntoView({ block: 'nearest' }); }
       if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); if (activeIdx > 0) renderMain(activeIdx - 1); thumbEls[activeIdx]?.scrollIntoView({ block: 'nearest' }); }
     };
