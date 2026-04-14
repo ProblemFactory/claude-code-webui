@@ -13,6 +13,20 @@ const { cwdToProjectDir, SessionMessages } = require('./src/session-store');
 const fileRoutes = require('./src/routes/files');
 const { router: persistenceRouter, setup: setupPersistence } = require('./src/routes/persistence');
 
+// Auto-update: pull latest + rebuild on startup (skip with NO_AUTO_UPDATE=1)
+if (!process.env.NO_AUTO_UPDATE) {
+  try {
+    const repoDir = __dirname;
+    const result = execFileSync('git', ['-C', repoDir, 'pull', '--ff-only'], { encoding: 'utf-8', timeout: 15000, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    if (result && !result.includes('Already up to date')) {
+      console.log('[auto-update] git pull:', result);
+      execFileSync('npm', ['install', '--no-audit', '--no-fund'], { cwd: repoDir, encoding: 'utf-8', timeout: 60000, stdio: 'inherit' });
+      execFileSync('npm', ['run', 'build'], { cwd: repoDir, encoding: 'utf-8', timeout: 30000, stdio: 'inherit' });
+      console.log('[auto-update] rebuilt successfully');
+    }
+  } catch (e) { console.log('[auto-update] skipped:', e.message?.split('\n')[0]); }
+}
+
 const PORT = process.env.PORT || 3456;
 const CLAUDE_CMD_RAW = process.env.CLAUDE_CMD || 'claude';
 // Resolve full paths at startup — node-pty's posix_spawnp may not find commands
