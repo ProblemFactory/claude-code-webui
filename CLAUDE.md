@@ -762,3 +762,6 @@ Server → Client: `created`, `output`, `msg` (normalized: op=create/edit/meta),
 - Desktop preview empty after refresh: non-active desktops had no live windows. Fix: fall back to `_savedStates` cached data.
 - Usage pie border artifact: `border` on `conic-gradient` circle caused bright seams. Fix: replaced with `box-shadow: 0 0 0 1px`.
 - Active count always 0: filtered `type==='terminal'` only. Fix: count all windows on active desktop, renamed to "N windows".
+- Duplicate sessions on macOS: same JSONL in multiple project dirs (CJK path encoding). Fix: `sessionMap` deduplicates by sessionId, running status wins over stopped.
+- Usage not showing on macOS: credentials stored in Keychain not `.credentials.json`. Fix: `security find-generic-password -s "Claude Code-credentials" -a <user> -w` fallback.
+- Settings search filter persisted after close/reopen: `_search` not cleared on `_showDialog()`. Fix: reset to `''` on open.
