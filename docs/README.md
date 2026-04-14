@@ -5,7 +5,7 @@
 - **[Getting Started](getting-started.md)** — Installation, first run, quick tour
 - **[Chat Mode](chat-mode.md)** — Structured messages, tool visualization, permissions, search, subagents
 - **[Terminal Management](terminal.md)** — Session persistence, multi-device sync, clipboard paste, idle detection, fonts
-- **[Window Manager](window-manager.md)** — Grid layouts, snap, command mode, presets, highlight intensity
+- **[Window Manager](window-manager.md)** — Grid layouts, snap, command mode, presets, virtual desktops, tab groups
 - **[Session Management](sessions.md)** — Discovery, groups, star/archive, drag-drop, filters, dual-mode resume
 - **[File Explorer](file-explorer.md)** — Browsing, bookmarks, viewers, code editor, clickable paths
 - **[External Editor](editor.md)** — Ctrl+G split-pane CodeMirror integration

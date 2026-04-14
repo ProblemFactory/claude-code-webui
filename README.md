@@ -36,9 +36,12 @@ A web-based UI for managing multiple [Claude Code](https://docs.anthropic.com/en
 
 ### Window Manager
 - **Tiling window manager** with drag/resize, grid snap, edge snap, custom grid presets, command mode (Ctrl+\\)
+- **Virtual desktops** -- multiple independent workspaces with per-desktop grid; Ubuntu-style miniature previews in taskbar showing live window positions; drag windows between desktops; waiting windows blink yellow across desktops
+- **Tab groups** -- drag window icons together to merge into Chrome-style tab groups; drag tab out to split
 - **Snap memory** -- snapping saves original size; dragging out of snap restores it
 - **Overlap switcher** -- right-click title bar to switch between overlapping windows
-- **Taskbar context menu** -- right-click taskbar items for Move, Minimize/Restore, Close
+- **Resizable taskbar** -- drag top edge to resize (36-120px); all elements scale proportionally; synced across clients
+- **Taskbar context menu** -- right-click taskbar items for Move, Move to Desktop, Minimize/Restore, Close
 - **Move mode** -- window attaches to cursor, click to place (via taskbar context menu or command mode)
 - **Proportional tracking** -- windows maintain relative positions on workspace resize
 - **Multi-client layout sync** -- workspace state broadcast to all clients; smart diff syncs positions, open/close, navigation; openSpec pattern for window creation sync
@@ -61,7 +64,7 @@ A web-based UI for managing multiple [Claude Code](https://docs.anthropic.com/en
 - **6 color themes** -- Dark, Light, Dracula, Nord, Solarized, Monokai
 - **Settings system** -- VS Code-style UI, per-terminal overrides (theme/font/size), active window highlight intensity
 - **Presets** -- save/restore full workspace state (windows, positions, grid, theme, fonts)
-- **Rate limit monitoring** -- 5-hour and 7-day usage display from Anthropic API
+- **Rate limit monitoring** -- dual pie charts (5h session + 7d weekly) in taskbar, click for details
 - **Multi-client layout sync** -- workspace state synced across browsers in real-time (positions, open/close, navigation)
 - **WebSocket auto-reconnect** -- re-attaches all active sessions on connection recovery
 
@@ -147,6 +150,9 @@ Chat mode:
 | CMD → 1-9+ | Snap to grid cell N (digits accumulate for 500ms) |
 | CMD → m / w / Tab | Maximize / Close / Cycle next window |
 | CMD → f/g/n/s/b/e | Freeform / Grid / New session / Sidebar / Browser / Files |
+| CMD → d/D | Switch to next / previous desktop |
+| CMD → ]/[ | Move active window to next / previous desktop |
+| Ctrl+Alt+←/→ | Switch desktop (non-command-mode) |
 | Drag + Shift | Hold Shift while dragging title bar to select rectangular cell range |
 | Alt+drag | Bypass grid snap |
 | Right-click title bar | Switch between overlapping windows |
@@ -167,7 +173,7 @@ See the **[docs/](docs/)** directory for detailed guides:
 - [Getting Started](docs/getting-started.md) — Installation, first run, quick tour
 - [Chat Mode](docs/chat-mode.md) — Structured messages, tool visualization, permissions, search, subagents
 - [Terminal Management](docs/terminal.md) — Persistence, multi-device, clipboard, fonts
-- [Window Manager](docs/window-manager.md) — Grid, snap, command mode, presets
+- [Window Manager](docs/window-manager.md) — Grid, snap, command mode, presets, virtual desktops, tab groups
 - [Session Management](docs/sessions.md) — Groups, star/archive, drag-drop, filters
 - [File Explorer](docs/file-explorer.md) — Browsing, bookmarks, viewers, code editor
 - [External Editor](docs/editor.md) — Ctrl+G split-pane CodeMirror integration
