@@ -495,13 +495,27 @@ let _rateLimitCache = null;
 let _oauthToken = null, _oauthMtime = 0;
 function getOAuthToken() {
   try {
+    // Linux: read from .credentials.json file
     const credsPath = path.join(os.homedir(), '.claude', '.credentials.json');
-    const stat = fs.statSync(credsPath);
-    if (_oauthToken && stat.mtimeMs === _oauthMtime) return _oauthToken;
-    const creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
-    _oauthToken = creds?.claudeAiOauth?.accessToken || null;
-    _oauthMtime = stat.mtimeMs;
-    return _oauthToken;
+    if (fs.existsSync(credsPath)) {
+      const stat = fs.statSync(credsPath);
+      if (_oauthToken && stat.mtimeMs === _oauthMtime) return _oauthToken;
+      const creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
+      _oauthToken = creds?.claudeAiOauth?.accessToken || null;
+      _oauthMtime = stat.mtimeMs;
+      return _oauthToken;
+    }
+    // macOS: read from Keychain
+    if (process.platform === 'darwin') {
+      if (_oauthToken) return _oauthToken;
+      const out = execFileSync('security', ['find-generic-password', '-s', 'claude-ai-credentials', '-w'], { encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+      if (out) {
+        const creds = JSON.parse(out);
+        _oauthToken = creds?.claudeAiOauth?.accessToken || null;
+        return _oauthToken;
+      }
+    }
+    return null;
   } catch { return null; }
 }
 
