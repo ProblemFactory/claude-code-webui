@@ -799,7 +799,7 @@ class WindowManager {
       this._positionToCell(w, cellIdx, true);
       setTimeout(() => { this._captureGridBounds(w); if (w._tabChain) this._syncChainBounds(w._tabChain); }, 250);
     });
-    setTimeout(() => this._scheduleOverlapUpdate(), 300);
+    setTimeout(() => { this._scheduleOverlapUpdate(); this._notify(); }, 300);
   }
   // ── Overlap Switcher (middle-click on title bar) ──
   _rectsOverlap(a, b) {
