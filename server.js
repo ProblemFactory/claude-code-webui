@@ -505,15 +505,18 @@ function getOAuthToken() {
       _oauthMtime = stat.mtimeMs;
       return _oauthToken;
     }
-    // macOS: read from Keychain
+    // macOS: read from Keychain (service: "Claude Code-credentials", account: current user)
     if (process.platform === 'darwin') {
       if (_oauthToken) return _oauthToken;
-      const out = execFileSync('security', ['find-generic-password', '-s', 'claude-ai-credentials', '-w'], { encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-      if (out) {
-        const creds = JSON.parse(out);
-        _oauthToken = creds?.claudeAiOauth?.accessToken || null;
-        return _oauthToken;
-      }
+      try {
+        const user = os.userInfo().username;
+        const out = execFileSync('security', ['find-generic-password', '-s', 'Claude Code-credentials', '-a', user, '-w'], { encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+        if (out) {
+          const creds = JSON.parse(out);
+          _oauthToken = creds?.claudeAiOauth?.accessToken || null;
+          return _oauthToken;
+        }
+      } catch {}
     }
     return null;
   } catch { return null; }
