@@ -139,6 +139,7 @@ function setup(ctx) {
 
       // Step 2: Scan JSONL files, match with running locks
       const sessions = [];
+      const sessionMap = new Map(); // sessionId → index in sessions[] (dedup: running wins over stopped)
       if (fs.existsSync(projectsDir)) {
         for (const projDir of fs.readdirSync(projectsDir)) {
           const projPath = path.join(projectsDir, projDir);
@@ -188,7 +189,19 @@ function setup(ctx) {
               match.assigned = true;
             }
 
-            sessions.push({ sessionId, cwd, pid, startedAt: mtime, status, name: meta.name || '', tmuxTarget });
+            const entry = { sessionId, cwd, pid, startedAt: mtime, status, name: meta.name || '', tmuxTarget };
+
+            // Deduplicate: same JSONL can appear in multiple project dirs
+            if (sessionMap.has(sessionId)) {
+              const existing = sessions[sessionMap.get(sessionId)];
+              // Running status wins over stopped
+              if (existing.status === 'stopped' && status !== 'stopped') {
+                sessions[sessionMap.get(sessionId)] = entry;
+              }
+            } else {
+              sessionMap.set(sessionId, sessions.length);
+              sessions.push(entry);
+            }
           }
         }
       }
@@ -196,7 +209,8 @@ function setup(ctx) {
       // Step 3: Running locks that didn't match any project dir (brand new, no JSONL yet)
       for (const [, entries] of runningByProjDir) {
         for (const entry of entries) {
-          if (!entry.assigned) {
+          if (!entry.assigned && !sessionMap.has(entry.lock.sessionId)) {
+            sessionMap.set(entry.lock.sessionId, sessions.length);
             sessions.push({
               sessionId: entry.lock.sessionId, cwd: entry.lock.cwd, pid: entry.lock.pid,
               startedAt: entry.lock.startedAt || Date.now(),
