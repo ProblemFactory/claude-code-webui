@@ -8,6 +8,7 @@ import { css as cssLang } from '@codemirror/lang-css';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { EditorState, Compartment, EditorSelection } from '@codemirror/state';
 import { keymap } from '@codemirror/view';
+let _mermaid = null; // lazy-loaded from CDN
 import { indentWithTab } from '@codemirror/commands';
 import { marked } from 'marked';
 import * as prettier from 'prettier/standalone';
@@ -151,6 +152,29 @@ class CodeEditor {
           this._previewIframe.srcdoc = src;
         } else {
           this._previewBody.innerHTML = marked.parse(src);
+          // Render mermaid diagrams: convert <code class="language-mermaid"> to mermaid divs
+          this._previewBody.querySelectorAll('code.language-mermaid').forEach(code => {
+            const pre = code.parentElement;
+            const div = document.createElement('div');
+            div.className = 'mermaid';
+            div.textContent = code.textContent;
+            pre.replaceWith(div);
+          });
+          const mermaidNodes = this._previewBody.querySelectorAll('.mermaid');
+          if (mermaidNodes.length) {
+            (async () => {
+              if (!_mermaid) {
+                // Load mermaid from CDN to avoid 3MB bundle increase
+                const script = document.createElement('script');
+                script.src = 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js';
+                await new Promise((resolve, reject) => { script.onload = resolve; script.onerror = reject; document.head.appendChild(script); });
+                _mermaid = window.mermaid;
+              }
+              const isDark = !(document.documentElement.dataset.theme?.includes('light') || document.documentElement.dataset.theme === 'solarized');
+              _mermaid.initialize({ startOnLoad: false, theme: isDark ? 'dark' : 'default' });
+              _mermaid.run({ nodes: mermaidNodes }).catch(() => {});
+            })();
+          }
         }
         this._previewBody.style.display = 'block';
       } else {
