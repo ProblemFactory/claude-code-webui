@@ -51,6 +51,7 @@ class SettingsUI {
     const searchInput = document.createElement('input');
     searchInput.className = 'settings-search';
     searchInput.placeholder = 'Search settings...';
+    this._search = ''; // clear filter on open
     searchInput.oninput = () => { this._search = searchInput.value.toLowerCase(); this._renderContent(content, nav); };
     searchWrap.appendChild(searchInput);
 
