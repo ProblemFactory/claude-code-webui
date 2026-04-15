@@ -25,7 +25,7 @@ import { createBackendIconHtml, getSessionKey, pickAgentIdentity } from './agent
 
 const BACKEND_SESSION_OPTIONS = {
   claude: {
-    models: ['', 'opus', 'sonnet', 'haiku', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-opus-4-5-20251101', 'claude-sonnet-4-5-20250929', 'claude-haiku-4-5-20251001'], // updated from /api/available-models
+    models: [{ id: '', label: 'Default' }, { id: 'opus', label: 'opus (latest)' }, { id: 'sonnet', label: 'sonnet (latest)' }, { id: 'haiku', label: 'haiku (latest)' }],
     permissions: [
       { value: '', label: 'Default' },
       { value: 'auto', label: 'Auto' },
@@ -42,7 +42,7 @@ const BACKEND_SESSION_OPTIONS = {
     ],
   },
   codex: {
-    models: [''], // updated from /api/available-models
+    models: [{ id: '', label: 'Default' }],
     permissions: [
       { value: '', label: 'Default' },
       { value: 'read-only', label: 'Read Only' },
@@ -60,17 +60,17 @@ const BACKEND_SESSION_OPTIONS = {
   },
 };
 
-// Fetch available models from server (Codex reads from ~/.codex/models_cache.json)
+// Fetch available models from server (Claude from /v1/models API, Codex from cache)
 fetchJson('/api/available-models').then(data => {
   if (!data) return;
-  const toOptions = (slugs) => slugs.map(s => ({ value: s, label: s || 'Default' }));
+  const toSchemaOptions = (models) => models.map(m => ({ value: m.id, label: m.label || m.id || 'Default' }));
   if (data.claude?.length) {
     BACKEND_SESSION_OPTIONS.claude.models = data.claude;
-    SETTINGS_SCHEMA['claude.defaultModel'].options = toOptions(data.claude);
+    SETTINGS_SCHEMA['claude.defaultModel'].options = toSchemaOptions(data.claude);
   }
   if (data.codex?.length) {
     BACKEND_SESSION_OPTIONS.codex.models = data.codex;
-    SETTINGS_SCHEMA['codex.defaultModel'].options = toOptions(data.codex);
+    SETTINGS_SCHEMA['codex.defaultModel'].options = toSchemaOptions(data.codex);
   }
 });
 
@@ -661,11 +661,15 @@ class App {
     const currentEffort = effortSel?.value || '';
 
     modelSel.innerHTML = '';
-    for (const value of cfg.models) {
+    const modelIds = [];
+    for (const m of cfg.models) {
       const opt = document.createElement('option');
-      opt.value = value;
-      opt.textContent = value || 'Default';
+      const id = typeof m === 'string' ? m : m.id;
+      const label = typeof m === 'string' ? (m || 'Default') : (m.label || m.id || 'Default');
+      opt.value = id;
+      opt.textContent = label;
       modelSel.appendChild(opt);
+      modelIds.push(id);
     }
     // "Custom..." option for free-text model entry
     const customOpt = document.createElement('option');
@@ -675,8 +679,8 @@ class App {
 
     const nextModel = applyDefaults
       ? defaults.model
-      : (cfg.models.includes(currentModel) ? currentModel : defaults.model);
-    modelSel.value = cfg.models.includes(nextModel) ? nextModel : '';
+      : (modelIds.includes(currentModel) ? currentModel : defaults.model);
+    modelSel.value = modelIds.includes(nextModel) ? nextModel : '';
 
     // Wire custom model toggle
     modelSel.onchange = () => {

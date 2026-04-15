@@ -82,26 +82,45 @@ try {
     PERMISSION_MODES = match[1].match(/"([^"]+)"/g)?.map(s => s.replace(/"/g, '')) || PERMISSION_MODES;
   }
 } catch {}
-// Discover available models per backend (cached on startup)
-// Claude: aliases + full model IDs from Claude Code source configs.ts
+// Discover available models per backend (cached, refreshed periodically)
 const AVAILABLE_MODELS = {
-  claude: [
-    '', 'opus', 'sonnet', 'haiku', 'best',
-    'claude-opus-4-6', 'claude-sonnet-4-6',
-    'claude-opus-4-5-20251101', 'claude-opus-4-1-20250805', 'claude-opus-4-20250514',
-    'claude-sonnet-4-5-20250929', 'claude-sonnet-4-20250514',
-    'claude-haiku-4-5-20251001',
-    'claude-3-7-sonnet-20250219', 'claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022',
-  ],
-  codex: [''],
+  claude: [{ id: '', label: 'Default' }, { id: 'opus', label: 'opus (latest)' }, { id: 'sonnet', label: 'sonnet (latest)' }, { id: 'haiku', label: 'haiku (latest)' }],
+  codex: [{ id: '', label: 'Default' }],
 };
-// Codex: read from ~/.codex/models_cache.json
-try {
-  const codexCache = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.codex', 'models_cache.json'), 'utf-8'));
-  if (codexCache.models?.length) {
-    AVAILABLE_MODELS.codex = ['', ...codexCache.models.map(m => m.slug).filter(Boolean)];
+function refreshAvailableModels() {
+  // Claude: fetch from /v1/models API using OAuth token
+  const token = getOAuthToken();
+  if (token) {
+    const req = https.request('https://api.anthropic.com/v1/models', {
+      method: 'GET',
+      headers: { 'x-api-key': token, 'anthropic-version': '2023-06-01' },
+    }, (res) => {
+      let body = '';
+      res.on('data', (d) => { body += d; });
+      res.on('end', () => {
+        try {
+          const data = JSON.parse(body);
+          if (data.data?.length) {
+            const aliases = [{ id: '', label: 'Default' }, { id: 'opus', label: 'opus (latest)' }, { id: 'sonnet', label: 'sonnet (latest)' }, { id: 'haiku', label: 'haiku (latest)' }];
+            const models = data.data.map(m => ({ id: m.id, label: m.display_name || m.id }));
+            AVAILABLE_MODELS.claude = [...aliases, ...models];
+          }
+        } catch {}
+      });
+    });
+    req.on('error', () => {});
+    req.end();
   }
-} catch {}
+  // Codex: read from ~/.codex/models_cache.json
+  try {
+    const codexCache = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.codex', 'models_cache.json'), 'utf-8'));
+    if (codexCache.models?.length) {
+      AVAILABLE_MODELS.codex = [{ id: '', label: 'Default' }, ...codexCache.models.map(m => ({ id: m.slug, label: m.display_name || m.slug })).filter(m => m.id)];
+    }
+  } catch {}
+}
+setTimeout(refreshAvailableModels, 3000);
+setInterval(refreshAvailableModels, 3600000); // refresh hourly
 
 const HOST = process.env.HOST || '0.0.0.0';
 const EDITOR_SCRIPT = path.join(__dirname, 'editor-helper.sh');
