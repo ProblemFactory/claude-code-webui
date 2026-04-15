@@ -108,17 +108,9 @@ Command mode auto-exits after 2 seconds or on Escape.
 
 ## Taskbar
 
-The taskbar at the bottom shows all open windows in a two-row layout: a large type icon (18px) on the left with the window title and subtitle stacked to the right. Window type icons indicate the content:
+The taskbar at the bottom shows all open windows in a two-row layout: icon on the left with the window title and subtitle stacked to the right.
 
-| Icon | Window type |
-|------|-------------|
-| `💬` | Chat session |
-| `⬛` | Terminal session |
-| `📁` | File explorer |
-| `📄` | File viewer |
-| `✏️` | Code editor |
-| `🔢` | Hex viewer |
-| `🌐` | Browser |
+For chat/terminal sessions, the icon is a **composite icon**: the backend logo (Claude/Codex) with a small mode badge (chat bubble or `>_` prompt) in the bottom-right corner. For other window types, inline SVG icons are used (folder, document, pencil, grid, globe). All icons scale proportionally with taskbar height via `transform:scale()`.
 
 Items use flex-shrink with text-overflow ellipsis to handle many windows gracefully.
 

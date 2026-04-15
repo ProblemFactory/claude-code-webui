@@ -98,7 +98,7 @@ Overrides persist in the layout auto-save.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `claude.defaultModel` | text | `''` | Default Claude model for new or resumed Claude sessions |
+| `claude.defaultModel` | enum | `''` | Default Claude model (dynamically populated from Anthropic API) |
 | `claude.defaultPermissionMode` | enum | `''` | Default Claude permission mode for new or resumed Claude sessions |
 | `claude.defaultEffort` | enum | `''` | Default Claude effort for new or resumed Claude sessions |
 | `claude.defaultExtraArgs` | text | `''` | Extra Claude CLI args appended when starting a Claude session |
@@ -107,7 +107,7 @@ Overrides persist in the layout auto-save.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `codex.defaultModel` | text | `''` | Default Codex model for new or resumed Codex sessions |
+| `codex.defaultModel` | enum | `''` | Default Codex model (dynamically populated from ~/.codex/models_cache.json) |
 | `codex.defaultPermissionMode` | enum | `''` | Default Codex permission mode for new or resumed Codex sessions |
 | `codex.defaultEffort` | enum | `''` | Default Codex reasoning effort for new or resumed Codex sessions |
 | `codex.defaultExtraArgs` | text | `''` | Extra Codex CLI args appended when starting a Codex session |
