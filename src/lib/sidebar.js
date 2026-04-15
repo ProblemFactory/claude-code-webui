@@ -398,7 +398,7 @@ class Sidebar {
         parentThreadId: s.parentThreadId || wm?.parentThreadId || null,
         webuiId: wm?.id || null,
         webuiName: wm?.name || null,
-        webuiMode: wm?.mode || 'terminal',
+        webuiMode: wm ? (wm.mode || 'terminal') : null,
       };
     });
 
