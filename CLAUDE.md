@@ -367,7 +367,9 @@ Split from monolithic 1647-line `src/client.js` into 13 ES modules under `src/li
 
 **Schema-driven settings** (`settings-schema.js`): VS Code-style settings UI. Categories: Toolbar & Layout, Window, Terminal, Sidebar, Session Card, Chat, Session. **Rule: only add settings that have working code behind them** — no placeholder/aspirational entries. Settings with `liveApply: false` need explicit one-shot listeners if they must be applied after async load (see `defaultStatusFilter` pattern). File explorer sort/filter config uses its own localStorage persistence — these are operational state, not user settings. Notable settings: `chat.roleIndicator` (border/background/icon/label), `session.defaultMode` (terminal/chat, default: chat).
 
-**Session card click behavior**: `sessionCard.clickBehavior` enum replaces the old `clickToExpand` boolean. Three modes: `focus` (default — click opens/focuses window), `expand` (click toggles card details), `flash` (click flashes/bounces the window). Expand/collapse is always available via the ▸ arrow button regardless of this setting.
+**Session card click behavior**: `sessionCard.clickBehavior` enum: `focus` (default — click opens/focuses window), `expand` (click toggles card details), `flash` (click flashes/bounces the window), `goto` (switch desktop + flash). Expand/collapse is always available via the ▸ arrow button regardless of this setting.
+
+**Find/GoTo split button**: Session card detail panel has a Find/GoTo split button (like Resume). Find flashes window + taskbar + desktop preview rect. GoTo switches to the window's desktop and flashes. Mode persisted via `sessionCard.findMode` setting (broadcast to all clients). For tab group guests, both resolve to the host window and switch to the target tab first.
 
 ### 11. Chat Mode (Dual-Mode Architecture)
 **Two session modes** share the same dtach persistence layer but use different wrappers:
@@ -618,8 +620,8 @@ Server → Client: `created`, `output`, `msg` (normalized: op=create/edit/meta),
 - Star sessions (★/☆): starred sessions sort first in sidebar groups and taskbar
 - Archive/unarchive sessions: 📦 button, hidden by default, toggle via status filter
 - Focus window highlights corresponding session in sidebar (with flash animation)
-- Find session: 🔍 button in expand panel flashes window title bar + taskbar (cyan 0.3s, 3s duration)
-- Session card settings: clickBehavior (focus/expand/flash), clickToCopy (always on for ID/CWD), visibleFields, detailTruncation
+- Find/GoTo: split button in expand panel — Find flashes window + taskbar + desktop preview; GoTo switches desktop + flashes. Mode persisted via settings. Handles tab groups (resolves to host, switches tab).
+- Session card settings: clickBehavior (focus/expand/flash/goto), findMode (find/goto), clickToCopy (always on for ID/CWD), visibleFields, detailTruncation
 - Session card display: full ID with CSS mid-truncation (text-overflow ellipsis in center), CWD left-truncated via unicode-bidi
 - Session cards draggable: drag to group header to assign session to group
 - Status quick tabs: ALL/LIVE/TMUX/EXT/STOP/ARCH filter tabs (enabled via settings)
@@ -650,7 +652,8 @@ Server → Client: `created`, `output`, `msg` (normalized: op=create/edit/meta),
 - Large file warnings (>1MB), binary auto-detection
 - CWD autocomplete with `~` support
 - Clipboard image paste (Ctrl+V → upload to server → xclip/osascript sets clipboard → Ctrl+V to PTY)
-- Folder right-click: "Sessions ▸" submenu with "+ New session" and all sessions at that path; "Add to group ▸" submenu to link folder to a session group
+- Folder right-click: "Copy Path", "Sessions ▸" submenu with "+ New session" and all sessions at that path; "Add to group ▸" submenu to link folder to a session group
+- File right-click: "Copy Path", Open, Edit, Open as Hex, Download, Rename, Delete
 - Drag folder from file explorer to sidebar group header → links folder to group
 - All windows (file explorer, viewers, editors, browser) persist and restore on page refresh
 

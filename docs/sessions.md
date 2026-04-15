@@ -95,11 +95,14 @@ Double-click a session name in the sidebar to rename it. The custom name:
 - Is used as `--name` when resuming the session
 - Syncs to all connected clients via WebSocket
 
-### Find
+### Find / GoTo
 
-Click the 🔍 button in the expanded detail panel to locate the session's window:
-- Window title bar flashes cyan for 3 seconds
-- Taskbar item flashes simultaneously
+The expanded detail panel has a split button that toggles between **Find** and **GoTo** modes (click the ▾ arrow to switch):
+
+- **Find** — flashes the window title bar, taskbar item, and desktop preview rect (cyan, 3 seconds). If the window is on another desktop, only the preview rect flashes.
+- **GoTo** — switches to the window's desktop, focuses and flashes it. For tab group windows, switches to the correct tab first.
+
+The mode is persisted via settings (`sessionCard.findMode`) and synced across clients.
 
 ## Status Filters
 

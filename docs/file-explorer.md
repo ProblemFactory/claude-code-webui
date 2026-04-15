@@ -72,6 +72,7 @@ Bookmarks sync across all connected clients via WebSocket.
 ### Right-click context menu
 
 **On folders:**
+- Copy Path — copy absolute path to clipboard
 - Add to bookmarks
 - Sessions ▸ — submenu with "+ New session" and all sessions at this path
 - Add to group ▸ — link folder to a session group
@@ -79,6 +80,7 @@ Bookmarks sync across all connected clients via WebSocket.
 - Delete
 
 **On files:**
+- Copy Path — copy absolute path to clipboard
 - Open (in appropriate viewer)
 - Edit (CodeMirror editor)
 - Open as Hex

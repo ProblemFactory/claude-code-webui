@@ -62,6 +62,7 @@ Overrides persist in the layout auto-save.
 | `toolbar.showCommandMode` | boolean | `true` | Enable Ctrl+\\ command mode |
 | `layout.enableDragSnap` | boolean | `true` | Snap windows to grid cells or screen edges when dragging |
 | `layout.enableShiftDragSelection` | boolean | `true` | Hold Shift while dragging to select a range of grid cells |
+| `taskbar.desktopPreviewRatio` | number | `70` | Desktop preview size as % of taskbar height (30-100) |
 
 ### Window
 
@@ -69,6 +70,7 @@ Overrides persist in the layout auto-save.
 |---------|------|---------|-------------|
 | `window.enableSnapAnimation` | boolean | `true` | Animate window snap transitions |
 | `window.enableBounceOnFocus` | boolean | `false` | Scale-bounce when focused from sidebar/taskbar |
+| `window.tabWrap` | boolean | `false` | Allow tab bar to wrap into multiple rows |
 | `window.closeBehavior` | enum | `terminate` | Close window: terminate session, or detach (keep alive for re-attach) |
 | `window.activeHighlightIntensity` | enum | `normal` | Focused window highlight: subtle (shadow), normal (accent border), strong (border + glow) |
 
@@ -123,7 +125,8 @@ Overrides persist in the layout auto-save.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `sessionCard.clickBehavior` | enum | `focus` | Card click: focus window, expand details, or flash window |
+| `sessionCard.clickBehavior` | enum | `focus` | Card click: focus window, expand details, flash window, or goto (switch desktop + flash) |
+| `sessionCard.findMode` | enum | `find` | Find button default: find (flash in place) or goto (switch desktop + flash) |
 | `sessionCard.clickToCopy` | boolean | `false` | Click detail values (ID, path, time) to copy to clipboard |
 | `sessionCard.visibleFields` | multiSelect | all fields | Which fields to show in expanded card details |
 | `sessionCard.detailTruncation` | enum | `left` | Truncate long values from left (show filename) or right (show path start) |
