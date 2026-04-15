@@ -36,11 +36,10 @@
     <div class="sidebar-section" style="flex:1;overflow-y:auto;display:flex;flex-direction:column">
       <div style="display:flex;gap:4px;padding:4px 6px;align-items:center">
         <input type="text" id="session-filter" class="filter-input" style="margin:0;flex:1" placeholder="Filter...">
-        <button id="backend-filter" class="icon-btn" title="Filter by agent backend" style="width:auto;padding:0 6px"></button>
+        <button id="backend-filter" class="icon-btn backend-filter-btn" title="Filter by agent backend"></button>
         <button id="live-filter" class="icon-btn" title="Show live only" style="font-size:11px;width:auto;padding:0 6px">●</button>
         <button id="sort-toggle" class="icon-btn" title="Sort by: Recent" style="font-size:11px;width:auto;padding:0 6px">⏱</button>
       </div>
-      <div id="backend-quick-tabs" class="status-quick-tabs"></div>
       <div id="agent-kind-quick-tabs" class="status-quick-tabs"></div>
       <div id="status-quick-tabs" class="status-quick-tabs"></div>
       <div id="all-sessions-list" class="session-items" style="flex:1;overflow-y:auto">

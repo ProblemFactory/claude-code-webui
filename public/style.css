@@ -325,9 +325,18 @@ html, body {
 }
 .status-quick-tab:hover { background: var(--bg-hover); color: var(--text); }
 .status-quick-tab.active { background: var(--bg-hover); color: var(--tab-color, var(--text)); }
-.backend-filter-icon-stack { display: inline-flex; align-items: center; gap: 2px; }
-.backend-filter-btn-icon { width: 13px; height: 13px; font-size: 7px; }
-.backend-quick-tab-icon { width: 14px; height: 14px; font-size: 7px; }
+.backend-filter-btn { width: 24px; height: 24px; padding: 0; position: relative; }
+.backend-filter-icon-stack {
+  display: flex; align-items: center; justify-content: center;
+  position: relative; width: 18px; height: 16px;
+}
+.backend-filter-btn-icon {
+  width: 13px; height: 13px; font-size: 7px; position: absolute;
+  transition: transform var(--transition);
+}
+.backend-filter-btn-icon:first-child { transform: rotate(-12deg) translate(-2px, 1px); z-index: 1; }
+.backend-filter-btn-icon:nth-child(2) { transform: rotate(12deg) translate(2px, -1px); z-index: 2; }
+.backend-filter-btn-icon:only-child { transform: none; position: static; }
 .agent-kind-quick-tab-icon { width: 13px; height: 13px; font-size: 8px; }
 .agent-kind-quick-tab-icon.agent-kind-icon-primary { display: inline-flex; }
 .sidebar-backend-filter-icon { width: 12px; height: 12px; font-size: 7px; }

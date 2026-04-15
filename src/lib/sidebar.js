@@ -97,7 +97,6 @@ class Sidebar {
     };
     this.app.settings?.on('sidebar.defaultStatusFilter', _applyDefaultFilter);
     this._renderQuickTabs();
-    this._renderBackendQuickTabs();
     this._renderAgentKindQuickTabs();
     // Re-render quick tabs after settings finish loading (async)
     this.app.settings?.on('sidebar.enableStatusQuickTabs', () => this._renderQuickTabs());
@@ -211,7 +210,6 @@ class Sidebar {
         localStorage.setItem('backendFilter', JSON.stringify([...this._backendFilter]));
         this._activeView = null;
         this._updateBackendFilterBtn(anchor);
-        this._renderBackendQuickTabs();
         this._render();
       };
       row.append(cb, dot, lbl);
@@ -267,44 +265,6 @@ class Sidebar {
       btn.textContent = labelMap[f] || f.toUpperCase();
       btn.style.setProperty('--tab-color', colorMap[f] || 'var(--text-dim)');
       btn.onclick = () => { this._activeView = f; this._renderQuickTabs(); this._render(); };
-      container.appendChild(btn);
-    }
-  }
-
-  _renderBackendQuickTabs() {
-    const container = document.getElementById('backend-quick-tabs');
-    if (!container) return;
-    container.innerHTML = '';
-    const backends = this._getAvailableBackends();
-    if (backends.length <= 1) return;
-
-    const allBtn = document.createElement('button'); allBtn.className = 'status-quick-tab';
-    if (this._backendFilter.size === 0) allBtn.classList.add('active');
-    allBtn.textContent = 'ALL';
-    allBtn.title = 'Show all agent backends';
-    allBtn.onclick = () => {
-      this._backendFilter.clear();
-      localStorage.setItem('backendFilter', JSON.stringify([]));
-      this._updateBackendFilterBtn(document.getElementById('backend-filter'));
-      this._renderBackendQuickTabs();
-      this._render();
-    };
-    container.appendChild(allBtn);
-
-    for (const id of backends) {
-      const meta = getBackendMeta(id);
-      const btn = document.createElement('button'); btn.className = 'status-quick-tab';
-      if (this._backendFilter.size > 0 && this._backendFilter.has(id)) btn.classList.add('active');
-      btn.title = meta.label;
-      btn.appendChild(createBackendIcon(id, { className: 'backend-quick-tab-icon', title: meta.label }));
-      btn.style.setProperty('--tab-color', meta.color);
-      btn.onclick = () => {
-        this._backendFilter = new Set([id]);
-        localStorage.setItem('backendFilter', JSON.stringify([id]));
-        this._updateBackendFilterBtn(document.getElementById('backend-filter'));
-        this._renderBackendQuickTabs();
-        this._render();
-      };
       container.appendChild(btn);
     }
   }
@@ -481,7 +441,6 @@ class Sidebar {
     this._sessionDigest = digest;
     this.app.syncSessionIdentity?.(this._allSessions);
     this._updateBackendFilterBtn(document.getElementById('backend-filter'));
-    this._renderBackendQuickTabs();
     this._renderAgentKindQuickTabs();
     this._render();
   }
