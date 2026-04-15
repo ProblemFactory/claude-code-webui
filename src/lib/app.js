@@ -24,7 +24,7 @@ import { createBackendIconHtml, getSessionKey, pickAgentIdentity } from './agent
 
 const BACKEND_SESSION_OPTIONS = {
   claude: {
-    models: ['', 'opus', 'sonnet', 'haiku'],
+    models: ['', 'opus', 'sonnet', 'haiku'], // updated from /api/available-models
     permissions: [
       { value: '', label: 'Default' },
       { value: 'auto', label: 'Auto' },
@@ -41,7 +41,7 @@ const BACKEND_SESSION_OPTIONS = {
     ],
   },
   codex: {
-    models: ['', 'gpt-5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5-codex'],
+    models: [''], // updated from /api/available-models
     permissions: [
       { value: '', label: 'Default' },
       { value: 'read-only', label: 'Read Only' },
@@ -58,6 +58,12 @@ const BACKEND_SESSION_OPTIONS = {
     ],
   },
 };
+
+// Fetch available models from server (Codex reads from ~/.codex/models_cache.json)
+fetchJson('/api/available-models').then(data => {
+  if (data?.claude?.length) BACKEND_SESSION_OPTIONS.claude.models = data.claude;
+  if (data?.codex?.length) BACKEND_SESSION_OPTIONS.codex.models = data.codex;
+});
 
 class App {
   constructor() {

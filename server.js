@@ -82,6 +82,16 @@ try {
     PERMISSION_MODES = match[1].match(/"([^"]+)"/g)?.map(s => s.replace(/"/g, '')) || PERMISSION_MODES;
   }
 } catch {}
+// Discover available models per backend (cached on startup)
+const AVAILABLE_MODELS = { claude: ['', 'opus', 'sonnet', 'haiku'], codex: [''] };
+// Codex: read from ~/.codex/models_cache.json
+try {
+  const codexCache = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.codex', 'models_cache.json'), 'utf-8'));
+  if (codexCache.models?.length) {
+    AVAILABLE_MODELS.codex = ['', ...codexCache.models.map(m => m.slug).filter(Boolean)];
+  }
+} catch {}
+
 const HOST = process.env.HOST || '0.0.0.0';
 const EDITOR_SCRIPT = path.join(__dirname, 'editor-helper.sh');
 
@@ -810,6 +820,10 @@ function summarizeCodexRateLimit() {
 
 app.get('/api/usage', (req, res) => {
   res.json({ rateLimit: _rateLimitCache, codexRateLimit: summarizeCodexRateLimit() });
+});
+
+app.get('/api/available-models', (req, res) => {
+  res.json(AVAILABLE_MODELS);
 });
 
 // ── WebSocket Terminal Handler (extracted to src/ws-handler.js) ──
