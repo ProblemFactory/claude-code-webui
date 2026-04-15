@@ -177,12 +177,13 @@ html, body {
   font-size: 9px; padding: 1px 6px; border-radius: 8px; font-weight: 600;
 }
 .session-mode-icon { font-size: 10px; flex-shrink: 0; }
-.mode-backend-icon { position: relative; }
+.mode-backend-icon { position: relative; overflow: visible; }
 .mode-badge {
-  position: absolute; bottom: -2px; right: -3px; z-index: 1;
+  position: absolute; bottom: -2px; right: -2px; z-index: 1;
   width: 8px; height: 8px; display: flex; align-items: center; justify-content: center;
+  background: var(--bg-sidebar, var(--bg-root)); border-radius: 2px; padding: 1px;
 }
-.mode-badge svg { width: 100%; height: 100%; }
+.mode-badge svg { width: 100%; height: 100%; display: block; }
 .badge-live { background: rgba(34,197,94,0.2); color: var(--green); }
 .badge-tmux { background: rgba(59,130,246,0.2); color: var(--blue); }
 .badge-external { background: rgba(245,158,11,0.15); color: var(--yellow); }
