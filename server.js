@@ -83,7 +83,18 @@ try {
   }
 } catch {}
 // Discover available models per backend (cached on startup)
-const AVAILABLE_MODELS = { claude: ['', 'opus', 'sonnet', 'haiku'], codex: [''] };
+// Claude: aliases + full model IDs from Claude Code source configs.ts
+const AVAILABLE_MODELS = {
+  claude: [
+    '', 'opus', 'sonnet', 'haiku', 'best',
+    'claude-opus-4-6', 'claude-sonnet-4-6',
+    'claude-opus-4-5-20251101', 'claude-opus-4-1-20250805', 'claude-opus-4-20250514',
+    'claude-sonnet-4-5-20250929', 'claude-sonnet-4-20250514',
+    'claude-haiku-4-5-20251001',
+    'claude-3-7-sonnet-20250219', 'claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022',
+  ],
+  codex: [''],
+};
 // Codex: read from ~/.codex/models_cache.json
 try {
   const codexCache = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.codex', 'models_cache.json'), 'utf-8'));

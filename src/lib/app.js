@@ -25,7 +25,7 @@ import { createBackendIconHtml, getSessionKey, pickAgentIdentity } from './agent
 
 const BACKEND_SESSION_OPTIONS = {
   claude: {
-    models: ['', 'opus', 'sonnet', 'haiku'], // updated from /api/available-models
+    models: ['', 'opus', 'sonnet', 'haiku', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-opus-4-5-20251101', 'claude-sonnet-4-5-20250929', 'claude-haiku-4-5-20251001'], // updated from /api/available-models
     permissions: [
       { value: '', label: 'Default' },
       { value: 'auto', label: 'Auto' },
