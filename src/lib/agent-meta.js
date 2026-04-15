@@ -326,40 +326,16 @@ export function createAgentKindIcon(kind, { title, className = '' } = {}) {
 }
 
 /**
- * Create a composite icon: mode shape (chat bubble / terminal) with backend logo inside.
- * Returns a DOM element with inline SVG.
+ * Create a backend icon with a small mode badge in the corner.
+ * Backend logo at normal size, mode indicated by a tiny corner dot.
  */
 export function createModeBackendIcon(backend, mode, { title, className = '' } = {}) {
-  const meta = getBackendMeta(backend);
-  const el = document.createElement('span');
-  el.className = `mode-backend-icon ${className}`.trim();
-  el.title = title || `${meta.label} ${mode === 'chat' ? 'Chat' : 'Terminal'}`;
-
-  // Logo color: Claude orange works on both light/dark shapes. Others use --bg-root (inverse of shape fill).
-  const logoColor = meta.brandColor === '#D97757' ? meta.brandColor : 'var(--bg-root)';
-  const logoMask = meta.iconSrc ? `<span class="mode-backend-logo ${meta.iconClass}" data-backend="${meta.id}" style="--backend-icon-mask:url('${meta.iconSrc}');--backend-icon-color:${logoColor}"></span>` : `<span class="mode-backend-logo-text">${meta.icon}</span>`;
-
-  if (mode === 'chat') {
-    // Wider bubble (viewBox 28x24), filled with text color, logo contrasts against it
-    el.innerHTML = `<svg class="mode-backend-shape" viewBox="0 0 28 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <path d="M3 4a3 3 0 0 1 3-3h16a3 3 0 0 1 3 3v10a3 3 0 0 1-3 3H10L3 21V4z" fill="currentColor"/>
-    </svg>${logoMask}`;
-  } else {
-    el.innerHTML = `<svg class="mode-backend-shape" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <rect x="1" y="2" width="22" height="19" rx="3" fill="currentColor"/>
-      <line x1="1" y1="7" x2="23" y2="7" stroke="var(--bg-root)" stroke-width="0.8"/>
-      <circle cx="4.5" cy="4.5" r="0.7" fill="var(--bg-root)" opacity="0.5"/>
-      <circle cx="7" cy="4.5" r="0.7" fill="var(--bg-root)" opacity="0.5"/>
-      <circle cx="9.5" cy="4.5" r="0.7" fill="var(--bg-root)" opacity="0.5"/>
-    </svg>${logoMask}`;
-  }
-
-  // Schedule contrast refresh for the backend logo
-  if (meta.iconSrc) {
-    const mark = el.querySelector('.mode-backend-logo');
-    if (mark) scheduleBackendIconRefresh(mark);
-  }
-  return el;
+  const icon = createBackendIcon(backend, { title: title || `${getBackendMeta(backend).label} ${mode === 'chat' ? 'Chat' : 'Terminal'}`, className });
+  icon.classList.add('mode-backend-icon');
+  const badge = document.createElement('span');
+  badge.className = `mode-badge mode-badge-${mode}`;
+  icon.appendChild(badge);
+  return icon;
 }
 
 export function getAgentRoleLabel(role) {
