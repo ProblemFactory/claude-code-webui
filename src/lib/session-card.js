@@ -14,6 +14,7 @@ const ICON = {
   history:   _s('<circle cx="8" cy="8" r="6"/><path d="M8 4v4l3 1.5"/>'),
   terminal:  _s('<rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M4.5 7l2 2-2 2M8.5 11h3"/>'),
   terminate: _s('<path d="M4 4l8 8M12 4l-8 8"/>'),
+  goto:      _s('<path d="M5 1l7 7-7 7"/>'),
 };
 
 /**
@@ -256,9 +257,9 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
     const findBtn = document.createElement('button');
     findBtn.className = 'session-detail-btn';
     const findDrop = document.createElement('button');
-    findDrop.className = 'session-resume-drop';
+    findDrop.className = 'session-resume-drop session-find-drop';
     const updateFindLabel = () => {
-      findBtn.innerHTML = findMode === 'goto' ? (ICON.terminal + ' GoTo') : (ICON.find + ' Find');
+      findBtn.innerHTML = findMode === 'goto' ? (ICON.goto + ' GoTo') : (ICON.find + ' Find');
     };
     updateFindLabel();
     findBtn.onclick = (e) => {
