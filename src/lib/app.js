@@ -317,7 +317,10 @@ class App {
     allSettingsLink.textContent = 'All Settings...';
     allSettingsLink.onclick = () => { pop.remove(); this._settingsUI.open(); };
 
-    pop.append(themeLabel, themeSel, editBtn, sizeLabel, sizeRow, fontLabel, fontSel, allSettingsLink);
+    const themeRow = document.createElement('div');
+    themeRow.style.cssText = 'display:flex;align-items:center;gap:4px';
+    themeRow.append(themeSel, editBtn);
+    pop.append(themeLabel, themeRow, sizeLabel, sizeRow, fontLabel, fontSel, allSettingsLink);
   }
 
   _setupGridConfig() {
