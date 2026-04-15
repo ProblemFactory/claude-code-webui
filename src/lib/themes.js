@@ -82,6 +82,7 @@ class ThemeManager {
     const sel = document.getElementById('theme-select');
     if (sel) sel.value = name;
     this._clearInlineOverrides();
+    if (typeof window !== 'undefined') window.dispatchEvent(new Event('theme-colors-changed'));
   }
 
   getTerminalTheme() { return THEMES[this.current]?.terminal || THEMES.dark.terminal; }
@@ -129,6 +130,7 @@ class ThemeManager {
   setLivePreview(cssVars) {
     const root = document.documentElement;
     for (const [k, v] of Object.entries(cssVars)) root.style.setProperty(k, v);
+    if (typeof window !== 'undefined') window.dispatchEvent(new Event('theme-colors-changed'));
   }
 
   _clearInlineOverrides() {

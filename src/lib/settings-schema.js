@@ -120,7 +120,28 @@ const SETTINGS_SCHEMA = {
     description: 'Default mode for new sessions and single-click resume from sidebar',
     category: 'Session', liveApply: true,
   },
-  'session.defaultEffort': {
+
+  // ── Claude ──
+  'claude.defaultModel': {
+    type: 'text', default: '',
+    label: 'Default model',
+    description: 'Default Claude model for new or resumed Claude sessions. Leave blank to use the CLI default.',
+    category: 'Claude', liveApply: true,
+  },
+  'claude.defaultPermissionMode': {
+    type: 'enum', default: '',
+    options: [
+      { value: '', label: 'Default' },
+      { value: 'auto', label: 'Auto' },
+      { value: 'bypassPermissions', label: 'Bypass' },
+      { value: 'plan', label: 'Plan' },
+      { value: 'acceptEdits', label: 'Accept Edits' },
+    ],
+    label: 'Default permission mode',
+    description: 'Default Claude permission mode for new or resumed Claude sessions.',
+    category: 'Claude', liveApply: true,
+  },
+  'claude.defaultEffort': {
     type: 'enum', default: '',
     options: [
       { value: '', label: 'Auto (model default)' },
@@ -130,8 +151,54 @@ const SETTINGS_SCHEMA = {
       { value: 'max', label: 'Max (Opus 4.6 only)' },
     ],
     label: 'Default effort level',
-    description: 'Effort level for new sessions (--effort flag). Auto uses the model default.',
-    category: 'Session', liveApply: true,
+    description: 'Default Claude effort for new or resumed Claude sessions.',
+    category: 'Claude', liveApply: true,
+  },
+  'claude.defaultExtraArgs': {
+    type: 'text', default: '',
+    label: 'Default extra args',
+    description: 'Extra Claude CLI args appended when starting a Claude session.',
+    category: 'Claude', liveApply: true,
+  },
+
+  // ── Codex ──
+  'codex.defaultModel': {
+    type: 'text', default: '',
+    label: 'Default model',
+    description: 'Default Codex model for new or resumed Codex sessions. Leave blank to use the CLI default.',
+    category: 'Codex', liveApply: true,
+  },
+  'codex.defaultPermissionMode': {
+    type: 'enum', default: '',
+    options: [
+      { value: '', label: 'Default' },
+      { value: 'read-only', label: 'Read Only' },
+      { value: 'safe-yolo', label: 'Safe Yolo' },
+      { value: 'yolo', label: 'Yolo' },
+    ],
+    label: 'Default permission mode',
+    description: 'Default Codex permission mode for new or resumed Codex sessions.',
+    category: 'Codex', liveApply: true,
+  },
+  'codex.defaultEffort': {
+    type: 'enum', default: '',
+    options: [
+      { value: '', label: 'Auto (model default)' },
+      { value: 'minimal', label: 'Minimal' },
+      { value: 'low', label: 'Low' },
+      { value: 'medium', label: 'Medium' },
+      { value: 'high', label: 'High' },
+      { value: 'xhigh', label: 'XHigh' },
+    ],
+    label: 'Default effort level',
+    description: 'Default Codex reasoning effort for new or resumed Codex sessions.',
+    category: 'Codex', liveApply: true,
+  },
+  'codex.defaultExtraArgs': {
+    type: 'text', default: '',
+    label: 'Default extra args',
+    description: 'Extra Codex CLI args appended when starting a Codex session.',
+    category: 'Codex', liveApply: true,
   },
 
   // ── Sidebar ──
@@ -172,9 +239,10 @@ const SETTINGS_SCHEMA = {
     category: 'Session Card', liveApply: false,
   },
   'sessionCard.visibleFields': {
-    type: 'multiSelect', default: ['id', 'cwd', 'started', 'status', 'groups'],
+    type: 'multiSelect', default: ['id', 'backend', 'cwd', 'started', 'status', 'groups'],
     options: [
       { value: 'id', label: 'Session ID' },
+      { value: 'backend', label: 'Agent Backend / Role' },
       { value: 'cwd', label: 'Working Directory' },
       { value: 'started', label: 'Started Time' },
       { value: 'status', label: 'Status' },
@@ -203,6 +271,8 @@ const SETTINGS_CATEGORIES = [
   'Terminal',
   'Chat',
   'Session',
+  'Claude',
+  'Codex',
   'Sidebar',
   'Session Card',
 ];

@@ -7,6 +7,77 @@
 import { marked } from 'marked';
 import { escHtml, copyText } from './utils.js';
 import { renderCodeBlock, rehighlightCodeBlock, stripAnsi } from './highlight.js';
+import { createBackendIconHtml, getBackendMeta } from './agent-meta.js';
+
+function normalizeUserInputAnswers(rawAnswers) {
+  if (!rawAnswers || typeof rawAnswers !== 'object') return {};
+  const result = {};
+  for (const [key, value] of Object.entries(rawAnswers)) {
+    if (Array.isArray(value)) {
+      result[key] = value.map((entry) => String(entry));
+    } else if (value && typeof value === 'object' && Array.isArray(value.answers)) {
+      result[key] = value.answers.map((entry) => String(entry));
+    }
+  }
+  return result;
+}
+
+function normalizePatchChangeType(rawType) {
+  const normalized = String(
+    typeof rawType === 'string'
+      ? rawType
+      : rawType?.type || rawType?.kind || '',
+  ).toLowerCase();
+  if (normalized === 'create' || normalized === 'insert') return 'add';
+  if (normalized === 'remove') return 'delete';
+  if (normalized === 'rename') return 'move';
+  return normalized || 'update';
+}
+
+function normalizePatchChanges(rawChanges) {
+  const changes = [];
+  const pushChange = (fallbackPath, raw) => {
+    const entry = raw && typeof raw === 'object' ? raw : {};
+    const filePath = entry.path || entry.file_path || entry.filePath || fallbackPath || '';
+    const changeType = normalizePatchChangeType(entry.type || entry.kind);
+    const movePath = entry.move_path || entry.movePath || entry.new_path || entry.newPath || '';
+    const unifiedDiff = entry.unified_diff || entry.unifiedDiff || '';
+    const diff = entry.diff || '';
+    const content = entry.content || '';
+    if (!filePath && !movePath && !unifiedDiff && !diff && !content) return;
+    changes.push({ filePath, changeType, movePath, unifiedDiff, diff, content });
+  };
+
+  if (Array.isArray(rawChanges)) {
+    for (const entry of rawChanges) pushChange('', entry);
+    return changes;
+  }
+  if (rawChanges && typeof rawChanges === 'object') {
+    for (const [filePath, entry] of Object.entries(rawChanges)) pushChange(filePath, entry);
+  }
+  return changes;
+}
+
+function parseUnifiedDiffLines(text) {
+  const diffLines = [];
+  for (const line of String(text || '').replace(/\r\n?/g, '\n').split('\n')) {
+    if (!line.startsWith('@@') && (line.startsWith('---') || line.startsWith('+++'))) continue;
+    if (line.startsWith('@@')) {
+      diffLines.push({ type: 'ctx', prefix: '@@', text: line });
+    } else if (line.startsWith('+')) {
+      diffLines.push({ type: 'add', prefix: '+', text: line.slice(1) });
+    } else if (line.startsWith('-')) {
+      diffLines.push({ type: 'del', prefix: '-', text: line.slice(1) });
+    } else if (line.startsWith(' ')) {
+      diffLines.push({ type: 'ctx', prefix: ' ', text: line.slice(1) });
+    } else if (line.startsWith('\\')) {
+      diffLines.push({ type: 'ctx', prefix: '\\', text: line });
+    } else {
+      diffLines.push({ type: 'ctx', prefix: ' ', text: line });
+    }
+  }
+  return diffLines;
+}
 
 class ChatRenderers {
   /**
@@ -18,10 +89,11 @@ class ChatRenderers {
    * @param {HTMLElement} opts.messageList - Message list DOM element
    * @param {Function} [opts.onPermissionResolve] - Called when a permission is resolved (allow/deny)
    */
-  constructor({ ws, sessionId, app, compact, messageList, onPermissionResolve }) {
+  constructor({ ws, sessionId, app, backend = 'claude', compact, messageList, onPermissionResolve }) {
     this.ws = ws;
     this.sessionId = sessionId;
     this.app = app;
+    this.backend = backend;
     this._compact = compact;
     this._messageList = messageList;
     this._onPermissionResolve = onPermissionResolve || (() => {});
@@ -73,13 +145,16 @@ class ChatRenderers {
     el._rawMsg = msg;
     let html;
     if (block.type === 'thinking') {
-      html = `<details class="chat-thinking"><summary>Thinking...</summary><pre>${escHtml(stripAnsi(block.text || ''))}</pre></details>`;
+      html = `<details class="chat-thinking"${msg.status === 'streaming' ? ' open' : ''}><summary>Thinking</summary><pre>${escHtml(stripAnsi(block.text || ''))}</pre></details>`;
     } else if (block.type === 'text') {
       html = `<div class="chat-text">${this.renderMarkdown(stripAnsi(block.text || ''))}</div>`;
     } else {
       return null;
     }
-    this.wrapMsg(el, 'assistant', 'Claude', html);
+    this.wrapMsg(el, 'assistant', createBackendIconHtml(this.backend, {
+      title: getBackendMeta(this.backend).label,
+      className: 'chat-role-backend-icon',
+    }), html);
     return el;
   }
 
@@ -137,6 +212,10 @@ class ChatRenderers {
     if (block.status === 'error') {
       return `<div class="chat-tool-use"><span class="chat-tool-label">\uD83D\uDD27 ${escHtml(block.toolName)} ${this.clickablePath(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this.linkifyText(inputStr)}</pre></details><details class="chat-diff" open><summary class="chat-diff-summary chat-tool-error-label">\u2717 Error</summary><pre class="chat-tool-error-text">${this.linkifyText(resultText)}</pre></details></div>`;
     }
+    if (block.toolName === 'Patch') {
+      const patchHtml = this.renderPatchDiff(block);
+      if (patchHtml) return patchHtml;
+    }
     if (block.toolName === 'Edit' && block.input?.old_string != null) {
       return this.renderEditDiff({ input: block.input });
     }
@@ -156,11 +235,18 @@ class ChatRenderers {
     if (block.toolName === 'Agent') {
       const desc = block.input?.description || '';
       const firstLine = resultText.split('\n')[0].substring(0, 120) || '(empty)';
-      // View Log button: use agentId from taskInfo or parse from result text
+      const reviewThreadId = msg?.taskInfo?.receiverThreadIds?.[0] || '';
       const agentId = msg?.taskInfo?.id || (resultText.match(/agentId:\s*([a-z0-9]+)/)?.[1]) || '';
-      const viewBtn = agentId
-        ? ` <button class="chat-agent-view-btn" data-agent-id="${escHtml(agentId)}" data-desc="${escHtml(desc)}">View Log</button>`
-        : (block.toolCallId ? ` <button class="chat-agent-view-btn" data-parent-tool-id="${escHtml(block.toolCallId)}" data-desc="${escHtml(desc)}">View Log</button>` : '');
+      const dataAttrs = reviewThreadId
+        ? ` data-thread-id="${escHtml(reviewThreadId)}"`
+        : agentId
+          ? ` data-agent-id="${escHtml(agentId)}"`
+          : block.toolCallId
+            ? ` data-parent-tool-id="${escHtml(block.toolCallId)}"`
+            : '';
+      const viewBtn = dataAttrs
+        ? ` <button class="chat-agent-view-btn"${dataAttrs} data-desc="${escHtml(desc)}">View Log</button>`
+        : '';
       return `<div class="chat-tool-use"><span class="chat-tool-label">\uD83E\uDD16 Agent: ${escHtml(desc)}${viewBtn}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this.linkifyText(inputStr)}</pre></details><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${escHtml(firstLine)}</summary><pre>${this.linkifyText(resultText)}</pre></details></div>`;
     }
     // Generic tool
@@ -201,7 +287,136 @@ class ChatRenderers {
     section.className = 'chat-permission-inline';
     section.dataset.requestId = msg.permission.requestId;
 
-    if (msg.permission.resolved) {
+    if (msg.permission.kind === 'user_input' && !msg.permission.resolved) {
+      const questions = msg.permission.questions || [];
+      section.innerHTML = '';
+      const prompt = document.createElement('div');
+      prompt.className = 'chat-permission-prompt';
+      const label = document.createElement('span');
+      label.className = 'chat-permission-label';
+      label.textContent = `Input Requested: ${msg.permission.toolName}`;
+      prompt.appendChild(label);
+
+      const answersWrap = document.createElement('div');
+      answersWrap.className = 'chat-permission-actions';
+      const answerInputs = new Map();
+
+      for (const q of questions) {
+        const row = document.createElement('div');
+        row.className = 'chat-permission-question';
+        const qLabel = document.createElement('div');
+        qLabel.className = 'chat-status-dim';
+        qLabel.textContent = q.question || q.header || q.id;
+        row.appendChild(qLabel);
+
+        if (Array.isArray(q.options) && q.options.length) {
+          for (const option of q.options) {
+            const btn = document.createElement('button');
+            btn.className = 'chat-perm-btn';
+            btn.textContent = option.label;
+            btn.onclick = () => {
+              this.ws.send({
+                type: 'permission-response',
+                sessionId: this.sessionId,
+                requestId: msg.permission.requestId,
+                responseData: {
+                  decision: 'accept',
+                  answers: { [q.id]: { answers: [option.label] } },
+                },
+              });
+              msg.permission.resolved = 'allowed';
+              msg.permission.answers = { ...(msg.permission.answers || {}), [q.id]: { answers: [option.label] } };
+              this.renderPermissionOverlay(el, msg);
+              this._onPermissionResolve('allowed');
+            };
+            row.appendChild(btn);
+          }
+        } else {
+          const input = document.createElement('input');
+          input.className = 'filter-input';
+          input.placeholder = q.header || q.id || 'Answer';
+          input.style.minWidth = '180px';
+          answerInputs.set(q.id, input);
+          row.appendChild(input);
+        }
+        answersWrap.appendChild(row);
+      }
+
+      if (answerInputs.size) {
+        const submitBtn = document.createElement('button');
+        submitBtn.className = 'chat-perm-btn chat-perm-allow';
+        submitBtn.textContent = 'Submit';
+        submitBtn.onclick = () => {
+          const answers = {};
+          for (const [id, input] of answerInputs) {
+            const value = input.value.trim();
+            if (value) answers[id] = [value];
+          }
+          this.ws.send({
+            type: 'permission-response',
+            sessionId: this.sessionId,
+            requestId: msg.permission.requestId,
+            responseData: {
+              decision: 'accept',
+              answers: Object.fromEntries(Object.entries(answers).map(([key, value]) => [key, { answers: value }])),
+            },
+          });
+          msg.permission.resolved = 'allowed';
+          msg.permission.answers = Object.fromEntries(Object.entries(answers).map(([key, value]) => [key, { answers: value }]));
+          this.renderPermissionOverlay(el, msg);
+          this._onPermissionResolve('allowed');
+        };
+        answersWrap.appendChild(submitBtn);
+      }
+
+      const cancelBtn = document.createElement('button');
+      cancelBtn.className = 'chat-perm-btn chat-perm-deny';
+      cancelBtn.textContent = 'Cancel';
+      cancelBtn.onclick = () => {
+        this.ws.send({
+          type: 'permission-response',
+          sessionId: this.sessionId,
+          requestId: msg.permission.requestId,
+          responseData: { decision: 'cancel' },
+        });
+        msg.permission.resolved = 'denied';
+        this.renderPermissionOverlay(el, msg);
+      };
+      answersWrap.appendChild(cancelBtn);
+      prompt.appendChild(answersWrap);
+      section.appendChild(prompt);
+    } else if (msg.permission.kind === 'user_input' && msg.permission.resolved) {
+      section.innerHTML = '';
+      const prompt = document.createElement('div');
+      prompt.className = 'chat-permission-prompt';
+      const resolved = document.createElement('div');
+      resolved.className = `chat-permission-resolved ${msg.permission.resolved === 'denied' ? 'chat-permission-denied' : 'chat-permission-allowed'}`;
+      resolved.textContent = msg.permission.resolved === 'denied' ? '\u2717 Input Cancelled' : '\u2713 Input Submitted';
+      prompt.appendChild(resolved);
+
+      if (msg.permission.resolved !== 'denied') {
+        const normalizedAnswers = normalizeUserInputAnswers(msg.permission.answers);
+        const questions = msg.permission.questions || [];
+        for (const q of questions) {
+          const row = document.createElement('div');
+          row.className = 'chat-permission-question';
+          const qLabel = document.createElement('div');
+          qLabel.className = 'chat-status-dim';
+          qLabel.textContent = q.question || q.header || q.id;
+          row.appendChild(qLabel);
+          const values = normalizedAnswers[q.id] || [];
+          for (const answer of values) {
+            const answerEl = document.createElement('div');
+            answerEl.className = 'chat-perm-answer';
+            answerEl.textContent = answer;
+            row.appendChild(answerEl);
+          }
+          prompt.appendChild(row);
+        }
+      }
+
+      section.appendChild(prompt);
+    } else if (msg.permission.resolved) {
       const icon = msg.permission.resolved === 'denied' ? '\u2717' : '\u2713';
       const label = msg.permission.resolved === 'denied' ? 'Denied' : 'Allowed';
       const cls = msg.permission.resolved === 'denied' ? 'chat-permission-denied' : 'chat-permission-allowed';
@@ -273,6 +488,52 @@ class ChatRenderers {
     }
 
     return `<div class="chat-tool-use"><span class="chat-tool-label">\u{1F4DD} Update ${this.clickablePath(filePath)}</span><details class="chat-diff"><summary class="chat-diff-summary">${summary}</summary><div class="chat-diff-body">${body}</div></details></div>`;
+  }
+
+  renderPatchDiff(block) {
+    const changes = normalizePatchChanges(block.input?.changes);
+    if (!changes.length) return '';
+
+    return changes.map((change) => {
+      const fromPath = change.filePath || '';
+      const filePath = fromPath || change.movePath || '';
+      const rawDiff = change.unifiedDiff || change.diff || '';
+      const hasUnifiedMarkers = rawDiff.includes('@@') || rawDiff.startsWith('---') || rawDiff.startsWith('+++');
+      const diffLines = hasUnifiedMarkers
+        ? parseUnifiedDiffLines(rawDiff)
+        : (rawDiff || change.content)
+          ? String(rawDiff || change.content)
+            .replace(/\r\n?/g, '\n')
+            .split('\n')
+            .map((line) => ({
+              type: change.changeType === 'delete' ? 'del' : 'add',
+              prefix: change.changeType === 'delete' ? '-' : '+',
+              text: line,
+            }))
+          : [];
+      const addCount = diffLines.filter((line) => line.type === 'add').length;
+      const delCount = diffLines.filter((line) => line.type === 'del').length;
+      const action = change.changeType === 'add'
+        ? 'Write'
+        : change.changeType === 'delete'
+          ? 'Delete'
+          : change.changeType === 'move'
+            ? 'Move'
+            : 'Update';
+      const pathLabel = change.movePath && fromPath
+        ? `${this.clickablePath(fromPath)} \u2192 ${this.clickablePath(change.movePath)}`
+        : this.clickablePath(filePath);
+      const summary = change.changeType === 'move' && !addCount && !delCount
+        ? `\u2713 Moved to ${escHtml(change.movePath || filePath)}`
+        : change.changeType === 'delete' && !addCount && !delCount
+          ? '\u2713 Removed file'
+          : `\u2713 Added ${addCount} lines, removed ${delCount} lines`;
+      const body = diffLines.map((line) => {
+        const cls = line.type === 'add' ? 'chat-diff-add' : line.type === 'del' ? 'chat-diff-del' : 'chat-diff-ctx';
+        return `<div class="${cls}"><span class="chat-diff-prefix">${escHtml(line.prefix)}</span><span class="chat-diff-text">${escHtml(line.text)}</span></div>`;
+      }).join('');
+      return `<div class="chat-tool-use"><span class="chat-tool-label">\u{1F4DD} ${action} ${pathLabel}</span><details class="chat-diff" open><summary class="chat-diff-summary">${summary}</summary><div class="chat-diff-body">${body}</div></details></div>`;
+    }).join('');
   }
 
   renderMarkdown(text) {

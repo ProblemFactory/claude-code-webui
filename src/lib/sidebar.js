@@ -1,5 +1,6 @@
 import { Resizer } from './resizer.js';
 import { escHtml, createPopover, showContextMenu } from './utils.js';
+import { createAgentKindIcon, createBackendIcon, getAgentKindMeta, getBackendMeta, getSessionKey } from './agent-meta.js';
 import { renderSessionCard } from './session-card.js';
 
 class Sidebar {
@@ -7,14 +8,22 @@ class Sidebar {
     this.app = app; this.el = document.getElementById('sidebar');
     this.listEl = document.getElementById('all-sessions-list');
     this.isOpen = false;
+    this._resizePreviewEl = null;
 
     // Resizable sidebar width — handle inside sidebar (position:fixed can't use sibling)
     this._resizer = new Resizer(this.el, 'horizontal', {
       min: 200, max: 500, initial: parseInt(localStorage.getItem('sidebarWidth')) || 260,
-      storageKey: 'sidebarWidth', inside: true,
-      onResize: (w) => {
-        document.getElementById('main-wrapper').style.marginLeft = this.isOpen ? w + 'px' : '0';
-        setTimeout(() => { for (const [, s] of this.app.sessions) { if (s.fit) s.fit(); } }, 50);
+      storageKey: 'sidebarWidth', inside: true, liveResize: false,
+      onResizeStart: (w) => {
+        this._setSidebarResizing(true);
+        this._showSidebarResizePreview(w);
+      },
+      onResize: (w) => this._showSidebarResizePreview(w),
+      onResizeEnd: (w) => {
+        this._hideSidebarResizePreview();
+        this._applySidebarLayoutWidth(w);
+        this._fitVisibleSessions();
+        requestAnimationFrame(() => this._setSidebarResizing(false));
       },
     });
     this._allSessions = [];
@@ -30,6 +39,8 @@ class Sidebar {
 
     this._sortMode = localStorage.getItem('sessionSort') || 'recent';
     this._filterLive = false;
+    this._backendFilter = new Set(JSON.parse(localStorage.getItem('backendFilter') || '[]'));
+    this._agentKindFilter = localStorage.getItem('agentKindFilter') || '';
     this._collapsedFolders = new Set(JSON.parse(localStorage.getItem('collapsedFolders') || '[]'));
     this._expandedCardId = null; // only one card expanded at a time
 
@@ -71,16 +82,22 @@ class Sidebar {
     this._activeView = null; // null = ALL (show all selected filters), or a specific status string
     const filterBtn = document.getElementById('live-filter');
     filterBtn.onclick = (e) => { e.stopPropagation(); this._showStatusFilterMenu(filterBtn); };
+    const backendFilterBtn = document.getElementById('backend-filter');
+    backendFilterBtn.onclick = (e) => { e.stopPropagation(); this._showBackendFilterMenu(backendFilterBtn); };
+    this._updateBackendFilterBtn(backendFilterBtn);
     // Apply defaultStatusFilter once after async settings load (setting may differ from schema default)
     const _applyDefaultFilter = (val) => {
       this._statusFilter = new Set(val);
       this._activeView = null;
       this._updateFilterBtn(filterBtn);
+      this._updateBackendFilterBtn(backendFilterBtn);
       this._render();
       this.app.settings?.off('sidebar.defaultStatusFilter', _applyDefaultFilter);
     };
     this.app.settings?.on('sidebar.defaultStatusFilter', _applyDefaultFilter);
     this._renderQuickTabs();
+    this._renderBackendQuickTabs();
+    this._renderAgentKindQuickTabs();
     // Re-render quick tabs after settings finish loading (async)
     this.app.settings?.on('sidebar.enableStatusQuickTabs', () => this._renderQuickTabs());
 
@@ -107,31 +124,193 @@ class Sidebar {
     }
   }
 
+  _writeUserStateToLocalStorage(state) {
+    localStorage.setItem('starredSessions', JSON.stringify(state.starredSessions || []));
+    localStorage.setItem('archivedSessions', JSON.stringify(state.archivedSessions || []));
+    localStorage.setItem('sessionCustomNames', JSON.stringify(state.customNames || {}));
+    localStorage.setItem('sessionModes', JSON.stringify(state.sessionModes || {}));
+    localStorage.setItem('sessionGroups', JSON.stringify(state.sessionGroups || {}));
+    localStorage.setItem('groupFolders', JSON.stringify(state.groupFolders || {}));
+  }
+
+  _getLegacySessionId(sessionOrKey, fallback = null) {
+    if (sessionOrKey && typeof sessionOrKey === 'object') {
+      if (typeof sessionOrKey.sessionKey === 'string' && sessionOrKey.sessionKey.includes(':')) {
+        return sessionOrKey.sessionKey.split(':').slice(1).join(':') || '';
+      }
+      return sessionOrKey.sessionId || sessionOrKey.backendSessionId || sessionOrKey.claudeSessionId || sessionOrKey.webuiId || sessionOrKey.id || '';
+    }
+    if (typeof sessionOrKey === 'string' && !sessionOrKey.includes(':')) return sessionOrKey;
+    if (fallback && typeof fallback === 'object') {
+      return fallback.sessionId || fallback.backendSessionId || fallback.claudeSessionId || fallback.webuiId || fallback.id || '';
+    }
+    return '';
+  }
+
+  _lookupTransientSessionKey(rawKey, sessions = this._allSessions) {
+    const key = String(rawKey || '');
+    if (!key) return null;
+
+    let backend = '';
+    let transientId = '';
+    if (key.includes(':')) {
+      const idx = key.indexOf(':');
+      backend = key.slice(0, idx) || 'claude';
+      transientId = key.slice(idx + 1);
+    } else {
+      transientId = key;
+    }
+
+    if (!transientId.startsWith('sess-')) return null;
+
+    const match = (sessions || []).find((session) => {
+      const sessionBackend = session.backend || 'claude';
+      if (backend && sessionBackend !== backend) return false;
+      return session.webuiId === transientId || session.id === transientId;
+    });
+    if (!match) return null;
+
+    const nextKey = match.sessionKey || getSessionKey(match) || '';
+    return nextKey && nextKey !== key ? nextKey : null;
+  }
+
+  _lookupLegacySessionKey(legacyId, sessions = this._allSessions) {
+    if (!legacyId) return null;
+    const transient = this._lookupTransientSessionKey(legacyId, sessions);
+    if (transient) return transient;
+    const matches = (sessions || []).filter((session) => {
+      const ids = [session.sessionId, session.backendSessionId, session.claudeSessionId, session.webuiId, session.id, this._getLegacySessionId(session)].filter(Boolean);
+      return ids.includes(legacyId);
+    });
+    if (matches.length !== 1) return null;
+    return this._getSessionStateKey(matches[0]) || null;
+  }
+
+  _getSessionStateKey(sessionOrKey, fallback = null) {
+    if (sessionOrKey && typeof sessionOrKey === 'object') {
+      return sessionOrKey.sessionKey || getSessionKey(sessionOrKey) || this._getLegacySessionId(sessionOrKey);
+    }
+    const transient = this._lookupTransientSessionKey(sessionOrKey, fallback && typeof fallback === 'object' ? [fallback] : this._allSessions);
+    if (transient) return transient;
+    if (typeof sessionOrKey === 'string' && sessionOrKey.includes(':')) return sessionOrKey;
+    const fallbackKey = fallback && typeof fallback === 'object' ? getSessionKey(fallback) : '';
+    if (fallbackKey) return fallbackKey;
+    return this._lookupLegacySessionKey(sessionOrKey) || String(sessionOrKey || '');
+  }
+
+  _stateSetHas(set, sessionOrKey, fallback = null) {
+    const stateKey = this._getSessionStateKey(sessionOrKey, fallback);
+    if (stateKey && set.has(stateKey)) return true;
+    const legacyId = this._getLegacySessionId(sessionOrKey, fallback);
+    return !!(legacyId && set.has(legacyId));
+  }
+
+  _stateMapGet(map, sessionOrKey, fallback = null) {
+    const stateKey = this._getSessionStateKey(sessionOrKey, fallback);
+    if (stateKey && Object.hasOwn(map, stateKey)) return map[stateKey];
+    const legacyId = this._getLegacySessionId(sessionOrKey, fallback);
+    if (legacyId && Object.hasOwn(map, legacyId)) return map[legacyId];
+    return null;
+  }
+
+  _migrateStateArray(items, sessions = this._allSessions) {
+    const next = [];
+    const seen = new Set();
+    let changed = false;
+    for (const raw of Array.isArray(items) ? items : []) {
+      const mapped = this._lookupTransientSessionKey(raw, sessions)
+        || ((typeof raw === 'string' && raw.includes(':')) ? raw : (this._lookupLegacySessionKey(raw, sessions) || raw));
+      if (mapped !== raw) changed = true;
+      if (seen.has(mapped)) {
+        changed = true;
+        continue;
+      }
+      seen.add(mapped);
+      next.push(mapped);
+    }
+    return { next, changed };
+  }
+
+  _migrateStateMap(map, sessions = this._allSessions) {
+    const next = {};
+    let changed = false;
+    for (const [rawKey, value] of Object.entries(map || {})) {
+      const mappedKey = this._lookupTransientSessionKey(rawKey, sessions)
+        || (rawKey.includes(':') ? rawKey : (this._lookupLegacySessionKey(rawKey, sessions) || rawKey));
+      if (mappedKey !== rawKey) changed = true;
+      if (!Object.hasOwn(next, mappedKey)) {
+        next[mappedKey] = value;
+      } else if (next[mappedKey] !== value) {
+        changed = true;
+      }
+    }
+    return { next, changed };
+  }
+
+  _migrateUserStateKeys(sessions = this._allSessions) {
+    let changed = false;
+
+    const starred = this._migrateStateArray([...this._starredIds], sessions);
+    const archived = this._migrateStateArray([...this._archivedIds], sessions);
+    const customNames = this._migrateStateMap(this._customNames, sessions);
+    const sessionModes = this._migrateStateMap(this._sessionModes, sessions);
+
+    const nextGroups = {};
+    for (const [groupName, sessionKeys] of Object.entries(this._sessionGroups || {})) {
+      const migrated = this._migrateStateArray(sessionKeys, sessions);
+      nextGroups[groupName] = migrated.next;
+      if (migrated.changed) changed = true;
+    }
+
+    if (starred.changed || archived.changed || customNames.changed || sessionModes.changed) changed = true;
+    if (!changed) return false;
+
+    this._starredIds = new Set(starred.next);
+    this._archivedIds = new Set(archived.next);
+    this._customNames = customNames.next;
+    this._sessionModes = sessionModes.next;
+    this._sessionGroups = nextGroups;
+    this._writeUserStateToLocalStorage({
+      starredSessions: [...this._starredIds],
+      archivedSessions: [...this._archivedIds],
+      customNames: this._customNames,
+      sessionModes: this._sessionModes,
+      sessionGroups: this._sessionGroups,
+      groupFolders: this._groupFolders,
+    });
+    return true;
+  }
+
   _applyServerState(state) {
+    if (state.stateVersion) {
+      this._userStateVersion = state.stateVersion;
+    }
     if (state.starredSessions) {
       this._starredIds = new Set(state.starredSessions);
-      localStorage.setItem('starredSessions', JSON.stringify(state.starredSessions));
     }
     if (state.archivedSessions) {
       this._archivedIds = new Set(state.archivedSessions);
-      localStorage.setItem('archivedSessions', JSON.stringify(state.archivedSessions));
     }
     if (state.customNames) {
       this._customNames = { ...state.customNames };
-      localStorage.setItem('sessionCustomNames', JSON.stringify(state.customNames));
     }
     if (state.sessionModes) {
       this._sessionModes = { ...state.sessionModes };
-      localStorage.setItem('sessionModes', JSON.stringify(state.sessionModes));
     }
     if (state.sessionGroups) {
       this._sessionGroups = { ...state.sessionGroups };
-      localStorage.setItem('sessionGroups', JSON.stringify(state.sessionGroups));
     }
     if (state.groupFolders) {
       this._groupFolders = { ...state.groupFolders };
-      localStorage.setItem('groupFolders', JSON.stringify(state.groupFolders));
     }
+    this._writeUserStateToLocalStorage({
+      starredSessions: [...this._starredIds],
+      archivedSessions: [...this._archivedIds],
+      customNames: this._customNames,
+      sessionModes: this._sessionModes,
+      sessionGroups: this._sessionGroups,
+      groupFolders: this._groupFolders,
+    });
   }
 
   async _pushUserState() {
@@ -143,12 +322,7 @@ class Sidebar {
       sessionGroups: this._sessionGroups,
       groupFolders: this._groupFolders,
     };
-    localStorage.setItem('starredSessions', JSON.stringify(state.starredSessions));
-    localStorage.setItem('archivedSessions', JSON.stringify(state.archivedSessions));
-    localStorage.setItem('sessionCustomNames', JSON.stringify(state.customNames));
-    localStorage.setItem('sessionModes', JSON.stringify(state.sessionModes));
-    localStorage.setItem('sessionGroups', JSON.stringify(state.sessionGroups));
-    localStorage.setItem('groupFolders', JSON.stringify(state.groupFolders));
+    this._writeUserStateToLocalStorage(state);
     // Push to server (broadcasts to other clients)
     try {
       await fetch('/api/user-state', {
@@ -195,50 +369,76 @@ class Sidebar {
   // Unified sort: starred first, then by time (desc)
   _sortSessions(arr) {
     arr.sort((a, b) => {
-      const as = this._starredIds.has(a.sessionId) ? 1 : 0;
-      const bs = this._starredIds.has(b.sessionId) ? 1 : 0;
+      const as = this._stateSetHas(this._starredIds, a) ? 1 : 0;
+      const bs = this._stateSetHas(this._starredIds, b) ? 1 : 0;
       if (as !== bs) return bs - as;
       return (b.startedAt || 0) - (a.startedAt || 0);
     });
   }
 
-  toggleStar(sessionId) {
-    if (this._starredIds.has(sessionId)) this._starredIds.delete(sessionId);
-    else this._starredIds.add(sessionId);
-    this._pushUserState();
-    this._render();
-    this.app.updateTaskbar();
-  }
-
-  isStarred(sessionId) { return this._starredIds.has(sessionId); }
-
-  toggleArchive(sessionId) {
-    if (this._archivedIds.has(sessionId)) this._archivedIds.delete(sessionId);
-    else this._archivedIds.add(sessionId);
-    this._pushUserState();
-    this._render();
-    this.app.updateTaskbar();
-  }
-
-  isArchived(sessionId) { return this._archivedIds.has(sessionId); }
-
-  getCustomName(sessionId) { return this._customNames[sessionId] || null; }
-  getSessionMode(sessionId) { return this._sessionModes[sessionId] || null; }
-  setSessionMode(sessionId, mode) { this._sessionModes[sessionId] = mode; this._pushUserState(); }
-
-  renameSession(sessionId, currentName) {
-    const name = prompt('Session name (used as --name on next resume):', this._customNames[sessionId] || currentName || '');
-    if (name === null) return; // cancelled
-    if (name.trim()) {
-      this._customNames[sessionId] = name.trim();
-    } else {
-      delete this._customNames[sessionId];
+  toggleStar(sessionOrKey) {
+    const stateKey = this._getSessionStateKey(sessionOrKey);
+    if (this._stateSetHas(this._starredIds, sessionOrKey)) {
+      this._starredIds.delete(stateKey);
+      const legacyId = this._getLegacySessionId(sessionOrKey);
+      if (legacyId) this._starredIds.delete(legacyId);
+    } else if (stateKey) {
+      this._starredIds.add(stateKey);
     }
     this._pushUserState();
     this._render();
+    this.app.updateTaskbar();
+  }
+
+  isStarred(sessionOrKey) { return this._stateSetHas(this._starredIds, sessionOrKey); }
+
+  toggleArchive(sessionOrKey) {
+    const stateKey = this._getSessionStateKey(sessionOrKey);
+    if (this._stateSetHas(this._archivedIds, sessionOrKey)) {
+      this._archivedIds.delete(stateKey);
+      const legacyId = this._getLegacySessionId(sessionOrKey);
+      if (legacyId) this._archivedIds.delete(legacyId);
+    } else if (stateKey) {
+      this._archivedIds.add(stateKey);
+    }
+    this._pushUserState();
+    this._render();
+    this.app.updateTaskbar();
+  }
+
+  isArchived(sessionOrKey) { return this._stateSetHas(this._archivedIds, sessionOrKey); }
+
+  getCustomName(sessionOrKey) { return this._stateMapGet(this._customNames, sessionOrKey); }
+  getSessionMode(sessionOrKey) { return this._stateMapGet(this._sessionModes, sessionOrKey); }
+  setSessionMode(sessionOrKey, mode) {
+    const stateKey = this._getSessionStateKey(sessionOrKey);
+    if (!stateKey) return;
+    this._sessionModes[stateKey] = mode;
+    const legacyId = this._getLegacySessionId(sessionOrKey);
+    if (legacyId && legacyId !== stateKey) delete this._sessionModes[legacyId];
+    this._pushUserState();
+  }
+
+  renameSession(sessionOrKey, currentName) {
+    const stateKey = this._getSessionStateKey(sessionOrKey);
+    const name = prompt('Session name:', this.getCustomName(sessionOrKey) || currentName || '');
+    if (name === null) return; // cancelled
+    if (!stateKey) return;
+    if (name.trim()) {
+      this._customNames[stateKey] = name.trim();
+    } else {
+      delete this._customNames[stateKey];
+    }
+    const legacyId = this._getLegacySessionId(sessionOrKey);
+    if (legacyId && legacyId !== stateKey) delete this._customNames[legacyId];
+    this._pushUserState();
+    this._render();
     // Sync renamed session to any open window
-    const newName = name.trim() || currentName || sessionId.substring(0, 12) + '...';
-    this.app.syncSessionName(sessionId, newName);
+    const newName = name.trim() || currentName || (legacyId ? legacyId.substring(0, 12) + '...' : 'Session');
+    if (sessionOrKey?.backend === 'codex' && name.trim()) {
+      this.app.renameBackendSession?.(sessionOrKey, name.trim());
+    }
+    this.app.syncSessionName(sessionOrKey, newName);
   }
 
   // ── Session Groups ──
@@ -247,26 +447,36 @@ class Sidebar {
     return Object.keys(this._sessionGroups).sort((a, b) => a.localeCompare(b));
   }
 
-  _getSessionGroups(sessionId) {
+  _getSessionGroups(sessionOrKey) {
+    const stateKey = this._getSessionStateKey(sessionOrKey);
+    const legacyId = this._getLegacySessionId(sessionOrKey);
     const groups = [];
     for (const [name, ids] of Object.entries(this._sessionGroups)) {
-      if (ids.includes(sessionId)) groups.push(name);
+      if (ids.includes(stateKey) || (legacyId && ids.includes(legacyId))) groups.push(name);
     }
     return groups;
   }
 
-  _addSessionToGroup(sessionId, groupName) {
+  _addSessionToGroup(sessionOrKey, groupName) {
+    const stateKey = this._getSessionStateKey(sessionOrKey);
+    if (!stateKey) return;
     if (!this._sessionGroups[groupName]) this._sessionGroups[groupName] = [];
-    if (!this._sessionGroups[groupName].includes(sessionId)) {
-      this._sessionGroups[groupName].push(sessionId);
+    if (!this._sessionGroups[groupName].includes(stateKey)) {
+      this._sessionGroups[groupName].push(stateKey);
+    }
+    const legacyId = this._getLegacySessionId(sessionOrKey);
+    if (legacyId && legacyId !== stateKey) {
+      this._sessionGroups[groupName] = this._sessionGroups[groupName].filter(id => id !== legacyId);
     }
     this._pushUserState();
     this._render();
   }
 
-  _removeSessionFromGroup(sessionId, groupName) {
+  _removeSessionFromGroup(sessionOrKey, groupName) {
     if (!this._sessionGroups[groupName]) return;
-    this._sessionGroups[groupName] = this._sessionGroups[groupName].filter(id => id !== sessionId);
+    const stateKey = this._getSessionStateKey(sessionOrKey);
+    const legacyId = this._getLegacySessionId(sessionOrKey);
+    this._sessionGroups[groupName] = this._sessionGroups[groupName].filter(id => id !== stateKey && id !== legacyId);
     if (this._sessionGroups[groupName].length === 0) {
       delete this._sessionGroups[groupName];
     }
@@ -296,10 +506,11 @@ class Sidebar {
     const folders = this._groupFolders[groupName] || [];
     const result = new Set(directIds);
     for (const s of allSessions) {
-      if (result.has(s.sessionId)) continue;
+      const sessionKey = this._getSessionStateKey(s);
+      if (result.has(sessionKey) || result.has(s.sessionId)) continue;
       const cwd = s.cwd || '';
       for (const fp of folders) {
-        if (cwd === fp || cwd.startsWith(fp + '/')) { result.add(s.sessionId); break; }
+        if (cwd === fp || cwd.startsWith(fp + '/')) { result.add(sessionKey); break; }
       }
     }
     return result;
@@ -380,11 +591,61 @@ class Sidebar {
     }
   }
 
+  _getAvailableBackends() {
+    const ids = new Set(this._backendFilter.size ? [...this._backendFilter] : ['claude']);
+    for (const s of [...(this._systemSessions || []), ...(this._webuiSessions || [])]) {
+      if (s.backend) ids.add(s.backend);
+    }
+    return [...ids];
+  }
+
+  _showBackendFilterMenu(anchor) {
+    const menu = createPopover(anchor, 'status-filter-menu');
+    const backends = this._getAvailableBackends();
+    for (const id of backends) {
+      const meta = getBackendMeta(id);
+      const row = document.createElement('label'); row.className = 'status-filter-item';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = this._backendFilter.size === 0 || this._backendFilter.has(id);
+      const dot = createBackendIcon(id, { className: 'sidebar-backend-filter-icon', title: meta.label });
+      const lbl = document.createElement('span'); lbl.textContent = meta.label;
+      cb.onchange = () => {
+        const next = this._backendFilter.size === 0 ? new Set(backends) : new Set(this._backendFilter);
+        if (cb.checked) next.add(id); else next.delete(id);
+        this._backendFilter = next.size === backends.length ? new Set() : next;
+        localStorage.setItem('backendFilter', JSON.stringify([...this._backendFilter]));
+        this._activeView = null;
+        this._updateBackendFilterBtn(anchor);
+        this._renderBackendQuickTabs();
+        this._render();
+      };
+      row.append(cb, dot, lbl);
+      menu.appendChild(row);
+    }
+  }
+
   _updateFilterBtn(btn) {
     // Default state: 4 non-archived filters on, archived off
     const isDefault = this._statusFilter.size === 4 && !this._statusFilter.has('archived');
     btn.style.color = isDefault ? '' : 'var(--accent-hover)';
     btn.title = isDefault ? 'Filter by status' : `Showing: ${[...this._statusFilter].join(', ')}`;
+  }
+
+  _updateBackendFilterBtn(btn) {
+    const isDefault = this._backendFilter.size === 0;
+    btn.style.color = isDefault ? '' : 'var(--accent-hover)';
+    btn.title = isDefault ? 'Filter by agent backend' : `Agents: ${[...this._backendFilter].join(', ')}`;
+    const iconIds = isDefault ? this._getAvailableBackends().slice(0, 2) : [...this._backendFilter].slice(0, 2);
+    btn.replaceChildren();
+    const stack = document.createElement('span');
+    stack.className = 'backend-filter-icon-stack';
+    if (!iconIds.length) {
+      stack.textContent = '◎';
+    } else {
+      for (const id of iconIds) stack.appendChild(createBackendIcon(id, { className: 'backend-filter-btn-icon' }));
+    }
+    btn.appendChild(stack);
   }
 
   _renderQuickTabs() {
@@ -416,6 +677,88 @@ class Sidebar {
     }
   }
 
+  _renderBackendQuickTabs() {
+    const container = document.getElementById('backend-quick-tabs');
+    if (!container) return;
+    container.innerHTML = '';
+    const backends = this._getAvailableBackends();
+    if (backends.length <= 1) return;
+
+    const allBtn = document.createElement('button'); allBtn.className = 'status-quick-tab';
+    if (this._backendFilter.size === 0) allBtn.classList.add('active');
+    allBtn.textContent = 'ALL';
+    allBtn.title = 'Show all agent backends';
+    allBtn.onclick = () => {
+      this._backendFilter.clear();
+      localStorage.setItem('backendFilter', JSON.stringify([]));
+      this._updateBackendFilterBtn(document.getElementById('backend-filter'));
+      this._renderBackendQuickTabs();
+      this._render();
+    };
+    container.appendChild(allBtn);
+
+    for (const id of backends) {
+      const meta = getBackendMeta(id);
+      const btn = document.createElement('button'); btn.className = 'status-quick-tab';
+      if (this._backendFilter.size > 0 && this._backendFilter.has(id)) btn.classList.add('active');
+      btn.title = meta.label;
+      btn.appendChild(createBackendIcon(id, { className: 'backend-quick-tab-icon', title: meta.label }));
+      btn.style.setProperty('--tab-color', meta.color);
+      btn.onclick = () => {
+        this._backendFilter = new Set([id]);
+        localStorage.setItem('backendFilter', JSON.stringify([id]));
+        this._updateBackendFilterBtn(document.getElementById('backend-filter'));
+        this._renderBackendQuickTabs();
+        this._render();
+      };
+      container.appendChild(btn);
+    }
+  }
+
+  _getAvailableAgentKinds() {
+    const kinds = new Set();
+    for (const session of this._allSessions || []) {
+      kinds.add(session.agentKind || 'primary');
+    }
+    return [...kinds];
+  }
+
+  _renderAgentKindQuickTabs() {
+    const container = document.getElementById('agent-kind-quick-tabs');
+    if (!container) return;
+    container.innerHTML = '';
+    const kinds = this._getAvailableAgentKinds();
+    if (kinds.length <= 1 && !kinds.includes('subagent') && !kinds.includes('review')) return;
+
+    const allBtn = document.createElement('button'); allBtn.className = 'status-quick-tab';
+    if (!this._agentKindFilter) allBtn.classList.add('active');
+    allBtn.textContent = 'ALL';
+    allBtn.title = 'Show all agent types';
+    allBtn.onclick = () => {
+      this._agentKindFilter = '';
+      localStorage.removeItem('agentKindFilter');
+      this._renderAgentKindQuickTabs();
+      this._render();
+    };
+    container.appendChild(allBtn);
+
+    for (const kind of kinds.sort()) {
+      const meta = getAgentKindMeta(kind);
+      const btn = document.createElement('button'); btn.className = 'status-quick-tab';
+      if (this._agentKindFilter === kind) btn.classList.add('active');
+      btn.title = meta.label;
+      btn.appendChild(createAgentKindIcon(kind, { className: 'agent-kind-quick-tab-icon', title: meta.label }));
+      btn.style.setProperty('--tab-color', meta.color);
+      btn.onclick = () => {
+        this._agentKindFilter = kind;
+        localStorage.setItem('agentKindFilter', kind);
+        this._renderAgentKindQuickTabs();
+        this._render();
+      };
+      container.appendChild(btn);
+    }
+  }
+
   _toggleCollapse(el, key) {
     el.classList.toggle('collapsed');
     if (el.classList.contains('collapsed')) this._collapsedFolders.add(key);
@@ -423,13 +766,49 @@ class Sidebar {
     localStorage.setItem('collapsedFolders', JSON.stringify([...this._collapsedFolders]));
   }
 
+  _applySidebarLayoutWidth(width = this.el.offsetWidth) {
+    document.getElementById('main-wrapper').style.marginLeft = this.isOpen ? `${width}px` : '0';
+  }
+
+  _setSidebarResizing(active) {
+    document.getElementById('main-wrapper').classList.toggle('sidebar-resizing', !!active);
+  }
+
+  _ensureSidebarResizePreview() {
+    if (this._resizePreviewEl) return this._resizePreviewEl;
+    const el = document.createElement('div');
+    el.className = 'sidebar-resize-preview';
+    document.body.appendChild(el);
+    this._resizePreviewEl = el;
+    return el;
+  }
+
+  _showSidebarResizePreview(width) {
+    const el = this._ensureSidebarResizePreview();
+    el.style.transform = `translate3d(${Math.max(0, width) - 1}px, 0, 0)`;
+    el.classList.add('visible');
+  }
+
+  _hideSidebarResizePreview() {
+    if (!this._resizePreviewEl) return;
+    this._resizePreviewEl.classList.remove('visible');
+  }
+
+  _fitVisibleSessions() {
+    for (const [, session] of this.app.sessions) {
+      if (!session.fit || !session.winInfo) continue;
+      if (session.winInfo.isMinimized || session.winInfo._hiddenByDesktop) continue;
+      session.fit();
+    }
+  }
+
   toggle(force) {
     this.isOpen = force !== undefined ? force : !this.isOpen;
     this.el.classList.toggle('open', this.isOpen);
     const wrapper = document.getElementById('main-wrapper');
     wrapper.classList.toggle('sidebar-open', this.isOpen);
-    wrapper.style.marginLeft = this.isOpen ? this.el.offsetWidth + 'px' : '0';
-    setTimeout(() => { for (const [, s] of this.app.sessions) { if (s.fit) s.fit(); } }, 250);
+    this._applySidebarLayoutWidth(this.el.offsetWidth);
+    setTimeout(() => this._fitVisibleSessions(), 250);
   }
 
   async _poll() {
@@ -447,16 +826,51 @@ class Sidebar {
     const matchedWebuiIds = new Set();
 
     const unified = system.map(s => {
-      const wm = webui.find(ws => ws.claudeSessionId === s.sessionId);
+      const wm = webui.find(ws =>
+        (ws.backend || 'claude') === (s.backend || 'claude')
+        && (ws.backendSessionId || ws.claudeSessionId || ws.id) === (s.backendSessionId || s.sessionId)
+      );
       if (wm) matchedWebuiIds.add(wm.id);
       // Only upgrade to 'live' for dtach-managed sessions (not tmux/external — those keep their status)
       const status = (wm && s.status === 'stopped') ? 'live' : (wm && s.status !== 'tmux' && s.status !== 'external') ? 'live' : s.status;
-      return { ...s, status, webuiId: wm?.id || null, webuiName: wm?.name || null, webuiMode: wm?.mode || 'terminal' };
+      return {
+        ...s,
+        sessionKey: s.sessionKey || wm?.sessionKey || getSessionKey(s),
+        status,
+        sourceKind: s.sourceKind || wm?.sourceKind || null,
+        agentKind: s.agentKind || wm?.agentKind || 'primary',
+        agentRole: s.agentRole || wm?.agentRole || '',
+        agentNickname: s.agentNickname || wm?.agentNickname || '',
+        parentThreadId: s.parentThreadId || wm?.parentThreadId || null,
+        webuiId: wm?.id || null,
+        webuiName: wm?.name || null,
+        webuiMode: wm?.mode || 'terminal',
+      };
     });
 
     for (const ws of webui) {
       if (!matchedWebuiIds.has(ws.id)) {
-        unified.unshift({ sessionId: ws.claudeSessionId || ws.id, cwd: ws.cwd, startedAt: ws.createdAt, status: 'live', webuiId: ws.id, webuiName: ws.name, name: ws.name || '', webuiMode: ws.mode || 'terminal' });
+        const backend = ws.backend || 'claude';
+        const backendSessionId = ws.backendSessionId || ws.claudeSessionId || ws.id;
+        unified.unshift({
+          backend,
+          backendSessionId,
+          sessionKey: ws.sessionKey || `${backend}:${backendSessionId}`,
+          claudeSessionId: ws.claudeSessionId || null,
+          sessionId: backendSessionId,
+          cwd: ws.cwd,
+          startedAt: ws.createdAt,
+          status: 'live',
+          sourceKind: ws.sourceKind || null,
+          agentKind: ws.agentKind || 'primary',
+          agentRole: ws.agentRole || '',
+          agentNickname: ws.agentNickname || '',
+          parentThreadId: ws.parentThreadId || null,
+          webuiId: ws.id,
+          webuiName: ws.name,
+          name: ws.name || '',
+          webuiMode: ws.mode || 'terminal',
+        });
       }
     }
 
@@ -465,9 +879,16 @@ class Sidebar {
 
   _mergeAndRender() {
     this._merge();
-    const digest = JSON.stringify(this._allSessions.map(s => s.sessionId + ':' + s.status));
+    if (this._migrateUserStateKeys(this._allSessions)) {
+      this._pushUserState();
+    }
+    const digest = JSON.stringify(this._allSessions.map(s => `${this._getSessionStateKey(s)}:${s.status}:${s.agentKind || 'primary'}:${s.agentRole || ''}:${s.agentNickname || ''}`));
     if (digest === this._sessionDigest) return;
     this._sessionDigest = digest;
+    this.app.syncSessionIdentity?.(this._allSessions);
+    this._updateBackendFilterBtn(document.getElementById('backend-filter'));
+    this._renderBackendQuickTabs();
+    this._renderAgentKindQuickTabs();
     this._render();
   }
 
@@ -476,19 +897,38 @@ class Sidebar {
     let sessions = this._allSessions;
 
     // Text filter
-    if (f) sessions = sessions.filter(s => (s.cwd||'').toLowerCase().includes(f) || (s.sessionId||'').toLowerCase().includes(f) || (s.name||'').toLowerCase().includes(f) || (s.webuiName||'').toLowerCase().includes(f));
+    if (f) sessions = sessions.filter(s =>
+      (s.cwd || '').toLowerCase().includes(f)
+      || (s.sessionId || '').toLowerCase().includes(f)
+      || (s.sessionKey || '').toLowerCase().includes(f)
+      || (s.name || '').toLowerCase().includes(f)
+      || (s.webuiName || '').toLowerCase().includes(f)
+      || (s.backend || '').toLowerCase().includes(f)
+      || (s.sourceKind || '').toLowerCase().includes(f)
+      || (s.agentKind || '').toLowerCase().includes(f)
+      || (s.agentRole || '').toLowerCase().includes(f)
+      || (s.agentNickname || '').toLowerCase().includes(f)
+    );
+
+    // Backend / agent filter
+    if (this._backendFilter.size > 0) {
+      sessions = sessions.filter(s => this._backendFilter.has(s.backend || 'claude'));
+    }
+    if (this._agentKindFilter) {
+      sessions = sessions.filter(s => (s.agentKind || 'primary') === this._agentKindFilter);
+    }
 
     // Archive filter: hide archived sessions unless 'archived' filter is on
     const showArchived = this._statusFilter.has('archived');
     if (showArchived) {
       // When archived filter is on, show only archived (plus any other enabled statuses for non-archived)
       sessions = sessions.filter(s => {
-        if (this._archivedIds.has(s.sessionId)) return true;
+        if (this._stateSetHas(this._archivedIds, s)) return true;
         return this._statusFilter.has(s.status);
       });
     } else {
       // Hide archived sessions, then apply status filter
-      sessions = sessions.filter(s => !this._archivedIds.has(s.sessionId));
+      sessions = sessions.filter(s => !this._stateSetHas(this._archivedIds, s));
       // Status filter (apply only when not all 4 non-archived statuses are selected)
       const nonArchivedFilters = new Set([...this._statusFilter]);
       nonArchivedFilters.delete('archived');
@@ -533,8 +973,8 @@ class Sidebar {
     } else {
       groupEntries.sort((a, b) => {
         // Groups with starred sessions first
-        const aStarred = a[1].some(s => this._starredIds.has(s.sessionId)) ? 1 : 0;
-        const bStarred = b[1].some(s => this._starredIds.has(s.sessionId)) ? 1 : 0;
+        const aStarred = a[1].some(s => this._stateSetHas(this._starredIds, s)) ? 1 : 0;
+        const bStarred = b[1].some(s => this._stateSetHas(this._starredIds, s)) ? 1 : 0;
         if (aStarred !== bStarred) return bStarred - aStarred;
         const aMax = Math.max(...a[1].map(s => s.startedAt || 0));
         const bMax = Math.max(...b[1].map(s => s.startedAt || 0));
@@ -592,7 +1032,12 @@ class Sidebar {
 
   _renderByGroups(sessions) {
     const sessionById = new Map();
-    for (const s of sessions) sessionById.set(s.sessionId, s);
+    for (const s of sessions) {
+      sessionById.set(this._getSessionStateKey(s), s);
+      if (s.sessionId) sessionById.set(s.sessionId, s);
+      const legacyId = this._getLegacySessionId(s);
+      if (legacyId) sessionById.set(legacyId, s);
+    }
 
     const groupNames = this._getGroupNames();
     const assignedIds = new Set();
@@ -653,11 +1098,20 @@ class Sidebar {
       resumeAllBtn.onclick = (e) => {
         e.stopPropagation();
         for (const s of groupSessions) {
+          const agentOpts = {
+            backend: s.backend || 'claude',
+            backendSessionId: s.backendSessionId || s.sessionId,
+            agentKind: s.agentKind || 'primary',
+            agentRole: s.agentRole || '',
+            agentNickname: s.agentNickname || '',
+            sourceKind: s.sourceKind || '',
+            parentThreadId: s.parentThreadId || null,
+          };
           if (s.status === 'stopped') {
-            const customName = this.getCustomName(s.sessionId);
-            this.app.resumeSession(s.sessionId, s.cwd, customName || s.name);
+            const customName = this.getCustomName(s);
+            this.app.resumeSession(s.sessionId, s.cwd, customName || s.name, agentOpts);
           } else if (s.status === 'live' && s.webuiId) {
-            this.app.attachSession(s.webuiId, s.webuiName || s.name, s.cwd, { mode: s.webuiMode });
+            this.app.attachSession(s.webuiId, s.webuiName || s.name, s.cwd, { mode: s.webuiMode, ...agentOpts });
           } else if (s.status === 'tmux') {
             this.app.attachTmuxSession(s.tmuxTarget, s.name, s.cwd);
           }
@@ -674,7 +1128,7 @@ class Sidebar {
       // Drop target on entire group (header + expanded session area)
       const _setupGroupDrop = (el) => {
         el.addEventListener('dragover', (e) => {
-          if (e.dataTransfer.types.includes('application/x-folder-path') || e.dataTransfer.types.includes('application/x-session-id')) {
+          if (e.dataTransfer.types.includes('application/x-folder-path') || e.dataTransfer.types.includes('application/x-session-id') || e.dataTransfer.types.includes('application/x-session-key')) {
             e.preventDefault(); e.stopPropagation(); header.classList.add('drop-target');
           }
         });
@@ -684,9 +1138,10 @@ class Sidebar {
         el.addEventListener('drop', (e) => {
           e.preventDefault(); e.stopPropagation(); header.classList.remove('drop-target');
           const folderPath = e.dataTransfer.getData('application/x-folder-path');
+          const sessionKey = e.dataTransfer.getData('application/x-session-key');
           const sessionId = e.dataTransfer.getData('application/x-session-id');
           if (folderPath) this._addFolderToGroup(folderPath, groupName);
-          else if (sessionId) this._assignSessionToGroup(sessionId, groupName);
+          else if (sessionKey || sessionId) this._assignSessionToGroup(sessionKey || sessionId, groupName);
         });
       };
       _setupGroupDrop(groupEl);
@@ -714,7 +1169,7 @@ class Sidebar {
     }
 
     // Ungrouped section
-    const ungrouped = sessions.filter(s => !assignedIds.has(s.sessionId));
+    const ungrouped = sessions.filter(s => !assignedIds.has(this._getSessionStateKey(s)) && !assignedIds.has(s.sessionId));
     if (ungrouped.length > 0) {
       const groupEl = document.createElement('div');
       groupEl.className = 'folder-group';
@@ -744,7 +1199,7 @@ class Sidebar {
       settings: this.app.settings,
       expandedCardId: this._expandedCardId,
       onExpandToggle: (id) => { this._expandedCardId = id; this._render(); },
-      onRename: (sessionId, originalName) => this.renameSession(sessionId, originalName),
+      onRename: (session, originalName) => this.renameSession(session, originalName),
     });
   }
 
@@ -802,13 +1257,19 @@ class Sidebar {
     ]);
   }
 
-  _assignSessionToGroup(sessionId, groupName) {
+  _assignSessionToGroup(sessionOrKey, groupName) {
+    const stateKey = this._getSessionStateKey(sessionOrKey);
+    if (!stateKey) return;
     if (!this._sessionGroups[groupName]) this._sessionGroups[groupName] = [];
-    if (!this._sessionGroups[groupName].includes(sessionId)) {
-      this._sessionGroups[groupName].push(sessionId);
-      this._pushUserState();
-      this._render();
+    if (!this._sessionGroups[groupName].includes(stateKey)) {
+      this._sessionGroups[groupName].push(stateKey);
     }
+    const legacyId = this._getLegacySessionId(sessionOrKey);
+    if (legacyId && legacyId !== stateKey) {
+      this._sessionGroups[groupName] = this._sessionGroups[groupName].filter(id => id !== legacyId);
+    }
+    this._pushUserState();
+    this._render();
   }
 
   _showGroupChecklistPopover(anchor, isCheckedFn, onToggleFn) {

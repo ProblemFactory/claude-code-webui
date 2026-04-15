@@ -1,3 +1,5 @@
+import { createAgentKindIcon } from './agent-meta.js';
+
 /**
  * Tab grouping — mixin methods for WindowManager.
  * Adds tab chain support: drag window icon onto another to merge into tabs.
@@ -32,7 +34,7 @@ const tabGroupMethods = {
   },
 
   _setupIconDrag(winInfo) {
-    const icon = winInfo.iconSpan;
+    const icon = winInfo.iconWrap || winInfo.iconSpan;
     if (!icon) return;
     let mouseDown = false, dragging = false, ghost = null, startX, startY;
     let targetWin = null;
@@ -63,10 +65,10 @@ const tabGroupMethods = {
       for (const [id, w] of this.windows) {
         if (id === winInfo.id) continue;
         if (w._tabChain && w._tabChain.tabs[0] !== w.id) continue;
-        const wIcon = w.iconSpan;
+        const wIcon = w.iconWrap || w.iconSpan;
         if (!wIcon) continue;
         if (w._tabChain) {
-          const tabItems = w.titleBar.querySelectorAll('.tab-item .tab-icon');
+          const tabItems = w.titleBar.querySelectorAll('.tab-item .tab-icon-wrap');
           for (const ti of tabItems) {
             const r = ti.getBoundingClientRect();
             if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) {
@@ -144,7 +146,7 @@ const tabGroupMethods = {
     const titleBar = hostWin.titleBar;
     const existing = titleBar.querySelector('.tab-bar-tabs');
     if (existing) existing.remove();
-    const standaloneIcon = titleBar.querySelector(':scope > .window-type-icon');
+    const standaloneIcon = titleBar.querySelector(':scope > .window-icon-stack');
     if (standaloneIcon) standaloneIcon.style.display = 'none';
     hostWin.titleSpan.style.display = 'none';
 
@@ -161,9 +163,15 @@ const tabGroupMethods = {
       tab.dataset.winId = tabWinId;
       if (i === chain.active) tab.classList.add('active');
 
+      const iconWrap = document.createElement('span');
+      iconWrap.className = 'tab-icon-wrap';
       const icon = document.createElement('span');
       icon.className = 'tab-icon';
       icon.textContent = tabWin._typeIcon || '';
+      iconWrap.appendChild(icon);
+      if (tabWin.titleMeta?.agentKind && tabWin.titleMeta.agentKind !== 'primary') {
+        iconWrap.appendChild(createAgentKindIcon(tabWin.titleMeta.agentKind, { className: 'tab-agent-kind-icon' }));
+      }
       const label = document.createElement('span');
       label.className = 'tab-label';
       label.textContent = tabWin.title;
@@ -172,7 +180,7 @@ const tabGroupMethods = {
       closeBtn.textContent = '\u2715';
       closeBtn.addEventListener('click', (e) => { e.stopPropagation(); this.removeFromTabChain(chain, tabWinId); });
 
-      tab.append(icon, label, closeBtn);
+      tab.append(iconWrap, label, closeBtn);
       tab.addEventListener('mousedown', (e) => {
         if (e.target.closest('.tab-close')) return;
         e.stopPropagation();
@@ -315,7 +323,7 @@ const tabGroupMethods = {
       win.gridBounds = hostWin.gridBounds ? { ...hostWin.gridBounds } : null;
     }
     win.element.style.display = '';
-    const standaloneIcon = win.titleBar.querySelector(':scope > .window-type-icon');
+    const standaloneIcon = win.titleBar.querySelector(':scope > .window-icon-stack');
     if (standaloneIcon) standaloneIcon.style.display = '';
     win.titleSpan.style.display = '';
     const existingTabBar = win.titleBar.querySelector('.tab-bar-tabs');
@@ -352,7 +360,7 @@ const tabGroupMethods = {
     if (!lastWin) return;
     lastWin._tabChain = null;
     lastWin.content.classList.remove('tab-hidden');
-    const standaloneIcon = lastWin.titleBar.querySelector(':scope > .window-type-icon');
+    const standaloneIcon = lastWin.titleBar.querySelector(':scope > .window-icon-stack');
     if (standaloneIcon) standaloneIcon.style.display = '';
     lastWin.titleSpan.style.display = '';
     const tabBar = lastWin.titleBar.querySelector('.tab-bar-tabs');

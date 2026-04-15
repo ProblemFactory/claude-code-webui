@@ -20,6 +20,44 @@ import { CommandMode } from './command-mode.js';
 import { updateTaskbar as updateTaskbarFn, showWindowList } from './taskbar.js';
 import { openBrowser as openBrowserFn } from './browser-window.js';
 import { DesktopManager } from './desktop-manager.js';
+import { createBackendIconHtml, getSessionKey, pickAgentIdentity } from './agent-meta.js';
+
+const BACKEND_SESSION_OPTIONS = {
+  claude: {
+    models: ['', 'opus', 'sonnet', 'haiku'],
+    permissions: [
+      { value: '', label: 'Default' },
+      { value: 'auto', label: 'Auto' },
+      { value: 'bypassPermissions', label: 'Bypass' },
+      { value: 'plan', label: 'Plan' },
+      { value: 'acceptEdits', label: 'Accept Edits' },
+    ],
+    efforts: [
+      { value: '', label: 'Auto (model default)' },
+      { value: 'low', label: 'Low' },
+      { value: 'medium', label: 'Medium' },
+      { value: 'high', label: 'High' },
+      { value: 'max', label: 'Max (Opus 4.6 only)' },
+    ],
+  },
+  codex: {
+    models: ['', 'gpt-5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5-codex'],
+    permissions: [
+      { value: '', label: 'Default' },
+      { value: 'read-only', label: 'Read Only' },
+      { value: 'safe-yolo', label: 'Safe Yolo' },
+      { value: 'yolo', label: 'Yolo' },
+    ],
+    efforts: [
+      { value: '', label: 'Auto (model default)' },
+      { value: 'minimal', label: 'Minimal' },
+      { value: 'low', label: 'Low' },
+      { value: 'medium', label: 'Medium' },
+      { value: 'high', label: 'High' },
+      { value: 'xhigh', label: 'XHigh' },
+    ],
+  },
+};
 
 class App {
   constructor() {
@@ -367,6 +405,7 @@ class App {
 
   _setupUsage() {
     this._usageData = new Map(); // sessionId → usage
+    this._codexRateLimit = null;
     const usageEl = document.getElementById('taskbar-usage');
     const popup = document.getElementById('usage-popup');
 
@@ -381,7 +420,10 @@ class App {
 
   async _pollUsage() {
     const data = await fetchJson('/api/usage');
-    this._rateLimit = data?.rateLimit || null;
+    if (data?.rateLimit) this._rateLimit = data.rateLimit;
+    else if (this._rateLimit === undefined) this._rateLimit = null;
+    if (data?.codexRateLimit) this._codexRateLimit = data.codexRateLimit;
+    else if (this._codexRateLimit === undefined) this._codexRateLimit = null;
     this._renderUsage();
     setTimeout(() => this._pollUsage(), 30000);
   }
@@ -390,22 +432,37 @@ class App {
     const usageEl = document.getElementById('taskbar-usage');
     const popup = document.getElementById('usage-popup');
     const rl = this._rateLimit;
+    const codex = this._codexRateLimit;
 
-    if (!rl) {
+    if (!rl && !codex) {
       usageEl.innerHTML = '';
       popup.innerHTML = '<div class="empty-hint">No usage data</div>';
       return;
     }
 
-    // Taskbar: two pie charts (5h session + 7d weekly)
-    const pct5h = Math.round((rl.fiveHour?.utilization || 0) * 100);
-    const color = pct5h > 80 ? 'var(--red)' : pct5h > 50 ? 'var(--yellow)' : 'var(--green)';
-    const deg = Math.round(pct5h * 3.6);
-    const pct7d = Math.round((rl.sevenDay?.utilization || 0) * 100);
-    const color7d = pct7d > 80 ? 'var(--red)' : pct7d > 50 ? 'var(--yellow)' : 'var(--green)';
-    const deg7d = Math.round(pct7d * 3.6);
-    usageEl.innerHTML = `<div class="usage-pie" title="5h: ${pct5h}%" style="background:conic-gradient(${color} ${deg}deg, var(--bg-input) ${deg}deg)"></div><div class="usage-pie" title="7d: ${pct7d}%" style="background:conic-gradient(${color7d} ${deg7d}deg, var(--bg-input) ${deg7d}deg)"></div>`;
+    const usageColor = (pct) => (pct > 80 ? 'var(--red)' : pct > 50 ? 'var(--yellow)' : 'var(--green)');
+    const renderPie = (label, pct) => {
+      const clamped = Math.max(0, Math.min(100, Math.round(pct || 0)));
+      const color = usageColor(clamped);
+      const deg = Math.round(clamped * 3.6);
+      return `<div class="usage-pie" title="${label}: ${clamped}%" style="background:conic-gradient(${color} ${deg}deg, var(--bg-input) ${deg}deg)"></div>`;
+    };
+    const renderRow = (backend, primaryLabel, primaryPct, secondaryLabel, secondaryPct) => (
+      `<div class="taskbar-usage-row">
+        ${createBackendIconHtml(backend, { className: 'taskbar-usage-backend', title: backend === 'codex' ? 'Codex' : 'Claude' })}
+        <div class="taskbar-usage-pair">
+          ${renderPie(primaryLabel, primaryPct)}
+          ${renderPie(secondaryLabel, secondaryPct)}
+        </div>
+      </div>`
+    );
+    const renderSectionTitle = (backend, label) => (
+      `<div class="usage-section-title">${createBackendIconHtml(backend, { className: 'usage-section-backend', title: label })}<span>${label}</span></div>`
+    );
 
+    const rows = [];
+    const sections = [];
+    let updatedAt = 0;
     const fmtReset = (ts) => {
       if (!ts) return '?';
       const d = new Date(ts * 1000), now = new Date();
@@ -415,12 +472,17 @@ class App {
       if (d.toDateString() === tmr.toDateString()) return `Tomorrow ${time}`;
       return d.toLocaleDateString([], {month:'short',day:'numeric'}) + ' ' + time;
     };
-    const status = rl.overallStatus === 'allowed' ? '🟢' : '🔴';
-    const ago = rl.fetchedAt ? Math.round((Date.now() - rl.fetchedAt) / 60000) : 0;
 
-    popup.innerHTML = `<h4>${status} Usage</h4>
+    if (rl) {
+      const pct5h = Math.round((rl.fiveHour?.utilization || 0) * 100);
+      const color = usageColor(pct5h);
+      const pct7d = Math.round((rl.sevenDay?.utilization || 0) * 100);
+      const color7d = usageColor(pct7d);
+      rows.push(renderRow('claude', '5h', pct5h, '7d', pct7d));
+      updatedAt = Math.max(updatedAt, rl.fetchedAt || 0);
+      sections.push(`${renderSectionTitle('claude', 'Claude')}
       <div class="usage-session">
-        <div class="usage-session-name">Current session</div>
+        <div class="usage-session-name">5-hour limit</div>
         <div class="usage-bar" style="width:100%;margin:4px 0"><div class="usage-bar-fill" style="width:${pct5h}%;background:${color}"></div></div>
         <div class="usage-session-stats">
           <span class="usage-stat">${pct5h}% used</span>
@@ -428,14 +490,45 @@ class App {
         </div>
       </div>
       <div class="usage-session">
-        <div class="usage-session-name">Current week (all models)</div>
+        <div class="usage-session-name">7-day limit</div>
         <div class="usage-bar" style="width:100%;margin:4px 0"><div class="usage-bar-fill" style="width:${pct7d}%;background:${color7d}"></div></div>
         <div class="usage-session-stats">
           <span class="usage-stat">${pct7d}% used</span>
           <span class="usage-stat"><span class="usage-stat-label">Resets</span> ${fmtReset(rl.sevenDay?.resetsAt)}</span>
         </div>
+      </div>`);
+    }
+
+    if (codex?.fiveHour || codex?.sevenDay) {
+      const pct5h = Math.round(codex.fiveHour?.usedPercent || ((codex.fiveHour?.utilization || 0) * 100));
+      const pct7d = Math.round(codex.sevenDay?.usedPercent || ((codex.sevenDay?.utilization || 0) * 100));
+      const color5h = usageColor(pct5h);
+      const color7d = usageColor(pct7d);
+      rows.push(renderRow('codex', '5h', pct5h, '7d', pct7d));
+      updatedAt = Math.max(updatedAt, codex.fetchedAt || 0);
+      sections.push(`${renderSectionTitle('codex', 'Codex')}
+      <div class="usage-session">
+        <div class="usage-session-name">5-hour limit</div>
+        <div class="usage-bar" style="width:100%;margin:4px 0"><div class="usage-bar-fill" style="width:${pct5h}%;background:${color5h}"></div></div>
+        <div class="usage-session-stats">
+          <span class="usage-stat">${pct5h}% used</span>
+          <span class="usage-stat"><span class="usage-stat-label">Resets</span> ${fmtReset(codex.fiveHour?.resetsAt)}</span>
+        </div>
       </div>
-      <div class="usage-total" style="font-weight:400;color:var(--text-dim)">Updated ${ago < 1 ? 'just now' : ago + 'min ago'}</div>`;
+      <div class="usage-session">
+        <div class="usage-session-name">7-day limit</div>
+        <div class="usage-bar" style="width:100%;margin:4px 0"><div class="usage-bar-fill" style="width:${pct7d}%;background:${color7d}"></div></div>
+        <div class="usage-session-stats">
+          <span class="usage-stat">${pct7d}% used</span>
+          <span class="usage-stat"><span class="usage-stat-label">Resets</span> ${fmtReset(codex.sevenDay?.resetsAt)}</span>
+          ${codex.planType ? `<span class="usage-stat"><span class="usage-stat-label">Plan</span> ${codex.planType}</span>` : ''}
+        </div>
+      </div>`);
+    }
+
+    const ago = updatedAt ? Math.round((Date.now() - updatedAt) / 60000) : 0;
+    usageEl.innerHTML = rows.join('');
+    popup.innerHTML = `${sections.join('')}<div class="usage-total" style="font-weight:400;color:var(--text-dim)">Updated ${ago < 1 ? 'just now' : ago + 'min ago'}</div>`;
   }
 
   // Command mode extracted to CommandMode class (src/lib/command-mode.js)
@@ -499,8 +592,13 @@ class App {
     overlay.querySelectorAll('.dialog-close, .btn-cancel').forEach(btn => btn.addEventListener('click', () => this.hideDialogs()));
     overlay.addEventListener('click', (e) => { if (e.target === overlay) this.hideDialogs(); });
 
+    const backendInput = document.getElementById('input-backend');
+    backendInput.addEventListener('change', () => this._applySessionBackendOptions(backendInput.value, { applyDefaults: true }));
+    this._applySessionBackendOptions(backendInput.value || 'claude', { applyDefaults: true });
+
     document.querySelector('#dialog-new-session .btn-create').addEventListener('click', () => {
       this.createSession({
+        backend: document.getElementById('input-backend').value || 'claude',
         mode: document.getElementById('input-mode').value,
         cwd: document.getElementById('input-cwd').value.trim(),
         name: document.getElementById('input-session-name').value.trim(),
@@ -514,6 +612,75 @@ class App {
 
     // CWD autocomplete
     this._setupCwdAutocomplete();
+  }
+
+  _getBackendSessionDefaults(backend) {
+    const prefix = backend === 'codex' ? 'codex' : 'claude';
+    const cfg = BACKEND_SESSION_OPTIONS[backend] || BACKEND_SESSION_OPTIONS.claude;
+    const legacyEffort = this.settings.get('session.defaultEffort') ?? '';
+    let effort = this.settings.get(`${prefix}.defaultEffort`) ?? '';
+    if (!effort && !this.settings.isModified(`${prefix}.defaultEffort`) && cfg.efforts.some((opt) => opt.value === legacyEffort)) {
+      effort = legacyEffort;
+    }
+    return {
+      model: this.settings.get(`${prefix}.defaultModel`) ?? '',
+      permission: this.settings.get(`${prefix}.defaultPermissionMode`) ?? '',
+      effort,
+      extraArgs: this.settings.get(`${prefix}.defaultExtraArgs`) ?? '',
+    };
+  }
+
+  _applySessionBackendOptions(backend, { applyDefaults = false } = {}) {
+    const cfg = BACKEND_SESSION_OPTIONS[backend] || BACKEND_SESSION_OPTIONS.claude;
+    const modelInput = document.getElementById('input-model');
+    const modelList = document.getElementById('model-options');
+    const permissionSel = document.getElementById('input-permission');
+    const effortSel = document.getElementById('input-effort');
+    const extraArgsInput = document.getElementById('input-extra-args');
+    const defaults = this._getBackendSessionDefaults(backend);
+    const currentModel = modelInput?.value || '';
+    const currentPermission = permissionSel?.value || '';
+    const currentEffort = effortSel?.value || '';
+
+    modelList.innerHTML = '';
+    for (const value of cfg.models) {
+      const opt = document.createElement('option');
+      opt.value = value;
+      modelList.appendChild(opt);
+    }
+    if (modelInput) {
+      const nextModel = applyDefaults
+        ? defaults.model
+        : (cfg.models.includes(currentModel) ? currentModel : defaults.model);
+      modelInput.value = nextModel || '';
+    }
+
+    permissionSel.innerHTML = '';
+    for (const optData of cfg.permissions) {
+      const opt = document.createElement('option');
+      opt.value = optData.value;
+      opt.textContent = optData.label;
+      permissionSel.appendChild(opt);
+    }
+    const permissionValue = applyDefaults
+      ? defaults.permission
+      : (cfg.permissions.some((opt) => opt.value === currentPermission) ? currentPermission : defaults.permission);
+    permissionSel.value = cfg.permissions.some((opt) => opt.value === permissionValue) ? permissionValue : '';
+
+    effortSel.innerHTML = '';
+    for (const optData of cfg.efforts) {
+      const opt = document.createElement('option');
+      opt.value = optData.value;
+      opt.textContent = optData.label;
+      effortSel.appendChild(opt);
+    }
+
+    const effortValue = applyDefaults
+      ? defaults.effort
+      : (cfg.efforts.some((opt) => opt.value === currentEffort) ? currentEffort : defaults.effort);
+    effortSel.value = cfg.efforts.some((opt) => opt.value === effortValue) ? effortValue : '';
+
+    if (extraArgsInput && applyDefaults) extraArgsInput.value = defaults.extraArgs || '';
   }
 
   _setupCwdAutocomplete() {
@@ -530,30 +697,65 @@ class App {
 
   showNewSessionDialog() {
     this._showDialog('dialog-new-session');
+    document.getElementById('input-backend').value = 'claude';
+    this._applySessionBackendOptions('claude', { applyDefaults: true });
     document.getElementById('input-mode').value = this.settings.get('session.defaultMode') ?? 'chat';
-    document.getElementById('input-effort').value = this.settings.get('session.defaultEffort') ?? '';
     document.getElementById('input-cwd').focus();
   }
   hideDialogs() { document.getElementById('dialog-overlay').classList.add('hidden'); document.getElementById('dialog-overlay').querySelectorAll('.dialog').forEach(d => d.classList.add('hidden')); }
 
-  createSession({ cwd, name, model, permission, extraArgs, resumeId, mode, syncId, effort }) {
+  _buildTitleMeta(source = {}) {
+    const identity = pickAgentIdentity(source);
+    return {
+      backend: identity.backend,
+      agentKind: identity.agentKind,
+      agentRole: identity.agentRole,
+      agentNickname: identity.agentNickname,
+      sourceKind: identity.sourceKind,
+      parentThreadId: identity.parentThreadId,
+    };
+  }
+
+  createSession({ cwd, name, model, permission, extraArgs, resumeId, mode, syncId, effort, backend = 'claude', backendSessionId, agentKind, agentRole, agentNickname, sourceKind, parentThreadId }) {
     this._hideWelcome();
+    const defaults = this._getBackendSessionDefaults(backend);
     const sessionMode = mode || this.settings.get('session.defaultMode') || 'chat';
-    const sessionEffort = effort || this.settings.get('session.defaultEffort') || undefined;
+    const sessionModel = model !== undefined ? model : defaults.model;
+    const sessionPermission = permission !== undefined ? permission : defaults.permission;
+    const sessionEffort = effort !== undefined ? effort : defaults.effort;
+    const sessionExtraArgs = extraArgs !== undefined ? extraArgs : defaults.extraArgs;
     const sessionName = name || (resumeId ? `Resume ${resumeId.substring(0,8)}` : `Session ${this.wm.windowCounter+1}`);
+    const sessionKey = backendSessionId || resumeId ? `${backend}:${backendSessionId || resumeId}` : '';
     const winType = sessionMode === 'chat' ? 'chat' : 'terminal';
-    const winInfo = this.wm.createWindow({ title: sessionName, type: winType, syncId });
+    const titleMeta = this._buildTitleMeta({ backend, agentKind, agentRole, agentNickname, sourceKind, parentThreadId });
+    const winInfo = this.wm.createWindow({ title: sessionName, type: winType, syncId, titleMeta });
 
     this.ws.send({
-      type:'create', mode: sessionMode, cwd: cwd||undefined, sessionName: name||undefined, model: model||undefined,
-      permissionMode: permission||undefined, effort: sessionEffort||undefined, extraArgs: extraArgs||undefined,
+      type:'create', backend, mode: sessionMode, cwd: cwd||undefined, sessionName: name||undefined, model: sessionModel||undefined,
+      permissionMode: sessionPermission||undefined, effort: sessionEffort||undefined, extraArgs: sessionExtraArgs||undefined,
+      agentKind: agentKind || undefined, agentRole: agentRole || undefined, agentNickname: agentNickname || undefined,
+      sourceKind: sourceKind || undefined, parentThreadId: parentThreadId || undefined,
       resume: !!resumeId, resumeId: resumeId||undefined, cols:120, rows:30,
     });
 
     const handler = (msg) => {
       if (msg.type === 'created') {
         // Set openSpec now that we have the server session ID (for cross-client sync)
-        winInfo._openSpec = { action: 'attachSession', serverId: msg.sessionId, name: sessionName, cwd: msg.cwd || cwd || '', mode: sessionMode };
+        winInfo._openSpec = {
+          action: 'attachSession',
+          serverId: msg.sessionId,
+          backend,
+          backendSessionId: backendSessionId || resumeId || null,
+          sessionKey,
+          agentKind: agentKind || 'primary',
+          agentRole: agentRole || '',
+          agentNickname: agentNickname || '',
+          sourceKind: sourceKind || '',
+          parentThreadId: parentThreadId || null,
+          name: sessionName,
+          cwd: msg.cwd || cwd || '',
+          mode: sessionMode,
+        };
         this.layoutManager.scheduleAutoSave(); // re-broadcast with openSpec
         if (msg.mode === 'chat' || sessionMode === 'chat') {
           const chatView = new ChatView(winInfo, this.ws, msg.sessionId, this);
@@ -566,7 +768,7 @@ class App {
           winInfo._notifyChanged = () => this.updateTaskbar();
           // Load JSONL history for resumed sessions
           if (resumeId) {
-            fetch(`/api/session-messages?claudeSessionId=${encodeURIComponent(resumeId)}&cwd=${encodeURIComponent(cwd||'')}&withStatus=1`)
+            fetch(`/api/session-messages?backend=${encodeURIComponent(backend)}&backendSessionId=${encodeURIComponent(backendSessionId || resumeId)}&cwd=${encodeURIComponent(cwd||'')}&withStatus=1`)
               .then(r => r.json())
               .then(data => {
                 if (data.messages?.length) chatView.loadHistory(data.messages, data.total);
@@ -624,15 +826,35 @@ class App {
     if (window.innerWidth <= 768 && this.sidebar.isOpen) this.sidebar.toggle(false);
   }
 
-  attachSession(serverId, name, cwd, { mode, syncId } = {}) {
+  attachSession(serverId, name, cwd, { mode, syncId, backend = 'claude', backendSessionId, agentKind, agentRole, agentNickname, sourceKind, parentThreadId } = {}) {
     this._closeSidebarOnMobile();
     // If we already have a window for this session, just focus it
     if (this._focusExistingSession(serverId)) return null;
 
     this._hideWelcome();
     const isChat = mode === 'chat';
-    const openSpec = { action: 'attachSession', serverId, name, cwd, mode };
-    const winInfo = this.wm.createWindow({ title: `${name} — ${cwd}`, type: isChat ? 'chat' : 'terminal', syncId, openSpec });
+    const openSpec = {
+      action: 'attachSession',
+      serverId,
+      name,
+      cwd,
+      mode,
+      backend,
+      backendSessionId: backendSessionId || null,
+      sessionKey: backendSessionId ? `${backend}:${backendSessionId}` : '',
+      agentKind: agentKind || 'primary',
+      agentRole: agentRole || '',
+      agentNickname: agentNickname || '',
+      sourceKind: sourceKind || '',
+      parentThreadId: parentThreadId || null,
+    };
+    const winInfo = this.wm.createWindow({
+      title: `${name} — ${cwd}`,
+      type: isChat ? 'chat' : 'terminal',
+      syncId,
+      openSpec,
+      titleMeta: this._buildTitleMeta(openSpec),
+    });
 
     this.ws.send({ type: 'attach', sessionId: serverId });
 
@@ -701,13 +923,13 @@ class App {
     this.ws.onGlobal(handler);
   }
 
-  resumeSession(sessionId, cwd, sessionName, { mode, syncId } = {}) {
+  resumeSession(sessionId, cwd, sessionName, { mode, syncId, backend = 'claude', backendSessionId, agentKind, agentRole, agentNickname, sourceKind, parentThreadId } = {}) {
     this._closeSidebarOnMobile();
     // If this session is already open in a window (e.g. already resumed), just focus it
     for (const [winId, term] of this.sessions) {
       if (term.sessionId) {
         const sidebar = this.sidebar;
-        const match = (sidebar._allSessions || []).find(s => s.sessionId === sessionId && s.webuiId);
+        const match = (sidebar._allSessions || []).find(s => (s.backendSessionId || s.sessionId) === (backendSessionId || sessionId) && (s.backend || 'claude') === backend && s.webuiId);
         if (match && term.sessionId === match.webuiId) {
           this._focusExistingSession(match.webuiId);
           return;
@@ -716,23 +938,66 @@ class App {
     }
 
     const sessionMode = mode || (this.settings.get('session.defaultMode') ?? 'chat');
-    this.createSession({ cwd, name: sessionName, resumeId: sessionId, mode: sessionMode, syncId });
+    this.createSession({
+      cwd,
+      name: sessionName,
+      resumeId: sessionId,
+      mode: sessionMode,
+      syncId,
+      backend,
+      backendSessionId: backendSessionId || sessionId,
+      agentKind,
+      agentRole,
+      agentNickname,
+      sourceKind,
+      parentThreadId,
+    });
   }
 
   // Open a stopped session as view-only (load JSONL, no claude --resume)
-  viewSession(sessionId, cwd, sessionName, { syncId } = {}) {
+  viewSession(sessionId, cwd, sessionName, { syncId, backend = 'claude', backendSessionId, agentKind, agentRole, agentNickname, sourceKind, parentThreadId } = {}) {
     this._closeSidebarOnMobile();
     this._hideWelcome();
-    const openSpec = { action: 'viewSession', sessionId, cwd, name: sessionName };
-    const winInfo = this.wm.createWindow({ title: `${sessionName || 'History'} — ${cwd}`, type: 'chat', syncId, openSpec });
-    const chatView = new ChatView(winInfo, this.ws, `view-${sessionId}`, this, { readOnly: true });
+    const resolvedSessionId = backendSessionId || sessionId;
+    const viewId = backend === 'claude' ? `view-${resolvedSessionId}` : `view-${backend}-${resolvedSessionId}`;
+    const openSpec = {
+      action: 'viewSession',
+      sessionId,
+      backend,
+      backendSessionId: resolvedSessionId,
+      sessionKey: `${backend}:${resolvedSessionId}`,
+      agentKind: agentKind || 'primary',
+      agentRole: agentRole || '',
+      agentNickname: agentNickname || '',
+      sourceKind: sourceKind || '',
+      parentThreadId: parentThreadId || null,
+      cwd,
+      name: sessionName,
+    };
+    const winInfo = this.wm.createWindow({
+      title: `${sessionName || 'History'} — ${cwd}`,
+      type: 'chat',
+      syncId,
+      openSpec,
+      titleMeta: this._buildTitleMeta(openSpec),
+    });
+    const chatView = new ChatView(winInfo, this.ws, viewId, this, { readOnly: true });
     this.sessions.set(winInfo.id, chatView);
 
     // Request view-only attach — server loads JSONL without spawning claude
-    this.ws.send({ type: 'attach', sessionId: `view-${sessionId}`, viewOnly: true, claudeSessionId: sessionId, cwd, name: sessionName });
+    this.ws.send({
+      type: 'attach',
+      sessionId: viewId,
+      viewOnly: true,
+      backend,
+      backendSessionId: resolvedSessionId,
+      claudeSessionId: backend === 'claude' ? resolvedSessionId : undefined,
+      cwd,
+      name: sessionName,
+    });
 
     const handler = (msg) => {
-      if (msg.type === 'attached' && msg.sessionId === `view-${sessionId}`) {
+      if (msg.type === 'attached' && msg.sessionId === viewId) {
         this.ws.offGlobal(handler);
         if (msg.messages?.length) {
           chatView.loadHistory(msg.messages, msg.totalCount, false, { chatStatus: msg.chatStatus });
@@ -742,13 +1007,24 @@ class App {
     this.ws.onGlobal(handler);
     winInfo.onClose = () => { chatView.dispose(); this.sessions.delete(winInfo.id); this._checkWelcome(); };
     winInfo._notifyChanged = () => this.updateTaskbar();
+    return winInfo;
   }
 
   // Replay a serialized openSpec to recreate a window (for cross-client sync)
   replayOpenSpec(spec, syncId) {
     switch (spec.action) {
       case 'attachSession':
-        this.attachSession(spec.serverId, spec.name, spec.cwd, { mode: spec.mode, syncId });
+        this.attachSession(spec.serverId, spec.name, spec.cwd, {
+          mode: spec.mode,
+          syncId,
+          backend: spec.backend || 'claude',
+          backendSessionId: spec.backendSessionId || null,
+          agentKind: spec.agentKind,
+          agentRole: spec.agentRole,
+          agentNickname: spec.agentNickname,
+          sourceKind: spec.sourceKind,
+          parentThreadId: spec.parentThreadId,
+        });
         break;
       case 'openFileExplorer':
         this.openFileExplorer(spec.path, { syncId });
@@ -763,14 +1039,44 @@ class App {
         this.openBrowser(spec.url, { syncId });
         break;
       case 'viewSession':
-        this.viewSession(spec.sessionId, spec.cwd, spec.name, { syncId });
+        this.viewSession(spec.sessionId, spec.cwd, spec.name, {
+          syncId,
+          backend: spec.backend || 'claude',
+          backendSessionId: spec.backendSessionId || spec.sessionId,
+          agentKind: spec.agentKind,
+          agentRole: spec.agentRole,
+          agentNickname: spec.agentNickname,
+          sourceKind: spec.sourceKind,
+          parentThreadId: spec.parentThreadId,
+        });
         break;
       case 'viewSubagent': {
         const title = `\uD83E\uDD16 ${spec.description || 'Agent'}`;
-        const winInfo = this.wm.createWindow({ title, type: 'chat', syncId });
+        const winInfo = this.wm.createWindow({
+          title,
+          type: 'chat',
+          syncId,
+          openSpec: spec,
+          titleMeta: this._buildTitleMeta({
+            backend: spec.backend || 'claude',
+            agentKind: spec.agentKind || 'subagent',
+            agentRole: spec.agentRole,
+            agentNickname: spec.agentNickname,
+            sourceKind: spec.sourceKind,
+            parentThreadId: spec.parentThreadId,
+          }),
+        });
         const view = new ChatView(winInfo, this.ws, spec.virtualId, this, { readOnly: true });
         this.sessions.set(winInfo.id, view);
-        this.ws.send({ type: 'attach', sessionId: spec.virtualId, parentSessionId: spec.parentSessionId, claudeSessionId: spec.claudeSessionId, cwd: spec.cwd });
+        this.ws.send({
+          type: 'attach',
+          sessionId: spec.virtualId,
+          parentSessionId: spec.parentSessionId,
+          backend: spec.backend || 'claude',
+          backendSessionId: spec.backendSessionId || spec.claudeSessionId,
+          claudeSessionId: spec.claudeSessionId,
+          cwd: spec.cwd,
+        });
         const handler = (msg) => {
           if (msg.type === 'attached' && msg.sessionId === spec.virtualId) {
             this.ws.offGlobal(handler);
@@ -857,16 +1163,68 @@ class App {
     }
   }
 
-  syncSessionName(claudeSessionId, newName) {
-    // Find the open window whose server session corresponds to this claude session ID
+  renameBackendSession(sessionRef, newName) {
+    if (!sessionRef || typeof sessionRef !== 'object') return;
+    this.ws.send({
+      type: 'rename-session',
+      webuiId: sessionRef.webuiId || undefined,
+      sessionKey: getSessionKey(sessionRef) || undefined,
+      backendSessionId: sessionRef.backendSessionId || sessionRef.sessionId || undefined,
+      name: newName || '',
+    });
+  }
+
+  syncSessionName(sessionRef, newName) {
+    const targetKey = (sessionRef && typeof sessionRef === 'object')
+      ? getSessionKey(sessionRef)
+      : (typeof sessionRef === 'string' && sessionRef.includes(':') ? sessionRef : '');
     for (const [winId, term] of this.sessions) {
       if (!term.sessionId) continue;
       const allSess = this.sidebar?._allSessions || [];
-      const match = allSess.find(s => s.sessionId === claudeSessionId && s.webuiId === term.sessionId);
+      const match = allSess.find((s) => {
+        if (s.webuiId !== term.sessionId) return false;
+        if (targetKey) return getSessionKey(s) === targetKey;
+        if (typeof sessionRef === 'string') return s.sessionId === sessionRef || s.backendSessionId === sessionRef;
+        return false;
+      });
       if (match) {
         const cwd = match.cwd || '';
         this.wm.setTitle(winId, `${newName} — ${cwd}`);
         break;
+      }
+    }
+  }
+
+  syncSessionIdentity(allSessions = []) {
+    for (const [winId, session] of this.sessions) {
+      const win = this.wm.windows.get(winId);
+      if (!win) continue;
+      const spec = win._openSpec || {};
+      const match = allSessions.find((entry) => {
+        if (entry.webuiId && session.sessionId === entry.webuiId) return true;
+        const entryKey = entry.sessionKey || `${entry.backend || 'claude'}:${entry.backendSessionId || entry.sessionId}`;
+        const specKey = spec.sessionKey || `${spec.backend || win.titleMeta?.backend || 'claude'}:${spec.backendSessionId || spec.sessionId || ''}`;
+        return !!(spec.sessionKey || spec.backendSessionId || spec.sessionId) && entryKey === specKey;
+      });
+      if (!match) continue;
+      this.wm.setTitleMeta(winId, this._buildTitleMeta(match));
+      if (win._openSpec) {
+        Object.assign(win._openSpec, {
+          backend: match.backend || win._openSpec.backend || 'claude',
+          backendSessionId: match.backendSessionId || match.sessionId,
+          sessionKey: match.sessionKey || getSessionKey(match),
+          name: match.name || win._openSpec.name || '',
+          agentKind: match.agentKind || 'primary',
+          agentRole: match.agentRole || '',
+          agentNickname: match.agentNickname || '',
+          sourceKind: match.sourceKind || '',
+          parentThreadId: match.parentThreadId || null,
+        });
+      }
+      if (win._openSpec?.action === 'viewSession' || win._openSpec?.action === 'attachSession') {
+        const displayName = match.webuiName || match.name || win._openSpec?.name || win.title || 'Session';
+        const cwd = match.cwd || win._openSpec?.cwd || '';
+        this.wm.setTitle(winId, cwd ? `${displayName} — ${cwd}` : displayName);
       }
     }
   }

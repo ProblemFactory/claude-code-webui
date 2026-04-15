@@ -94,23 +94,28 @@ class ChatSearch {
     this._highlightQuery = q;
     this.applyHighlightLayer(); // highlight current view immediately
 
-    // Server-side search — find claudeSessionId for this webui session
-    let { claudeId, cwd } = this._getSessionIds();
+    // Server-side search — find backend session ID for this webui session
+    let { backend, backendSessionId, cwd, claudeId } = this._getSessionIds();
     // Fallback: check active sessions API directly
-    if (!claudeId) {
+    if (!backendSessionId) {
       try {
         const r = await fetch('/api/active');
         const d = await r.json();
         const sessions = d.sessions || d;
         const sessionId = this._getSessionId();
         const s = Array.isArray(sessions) ? sessions.find(s => s.id === sessionId) : null;
-        if (s) { claudeId = s.claudeSessionId; cwd = s.cwd || ''; }
+        if (s) {
+          backend = s.backend || 'claude';
+          backendSessionId = s.backendSessionId || s.claudeSessionId;
+          claudeId = s.claudeSessionId || null;
+          cwd = s.cwd || '';
+        }
       } catch {}
     }
 
-    if (claudeId) {
+    if (backendSessionId) {
       try {
-        const res = await fetch(`/api/session-messages?claudeSessionId=${encodeURIComponent(claudeId)}&cwd=${encodeURIComponent(cwd)}&search=${encodeURIComponent(q)}`);
+        const res = await fetch(`/api/session-messages?backend=${encodeURIComponent(backend || 'claude')}&backendSessionId=${encodeURIComponent(backendSessionId)}&cwd=${encodeURIComponent(cwd)}&search=${encodeURIComponent(q)}`);
         const data = await res.json();
         this._serverSearchResults = data.matches || [];
       } catch {

@@ -13,9 +13,23 @@ const router = express.Router();
 const {
   SESSIONS_DIR, isPidAlive, cwdToProjectDir, recoverCwdFromProjDir,
   getTmuxPaneMap, findTmuxTarget, isProcessClaude,
-  extractSessionMeta, SessionMessages,
+  extractSessionMeta,
 } = require('../session-store');
-const { MessageManager } = require('../message-manager');
+const { createMessageManager } = require('../normalizers');
+const { listCodexThreads } = require('../codex-session-store');
+
+function getSessionKey(session = {}) {
+  const backend = session.backend || 'claude';
+  const backendSessionId = session.backendSessionId || session.sessionId || session.claudeSessionId || null;
+  return backendSessionId ? `${backend}:${backendSessionId}` : '';
+}
+
+function withSessionKey(session = {}) {
+  return {
+    ...session,
+    sessionKey: session.sessionKey || getSessionKey(session),
+  };
+}
 
 /** Setup session routes. Requires ctx object with dependencies. */
 function setup(ctx) {
@@ -23,34 +37,62 @@ function setup(ctx) {
 
   // Get chat message history for a Claude session (JSONL + optional buffer)
   router.get('/api/session-messages', (req, res) => {
-    const { claudeSessionId, cwd, offset, limit, search } = req.query;
-    if (!claudeSessionId) return res.status(400).json({ error: 'claudeSessionId required' });
+    const { backend, backendSessionId, claudeSessionId, cwd, offset, limit, search } = req.query;
+    const resolvedBackend = backend || 'claude';
+    const resolvedSessionId = backendSessionId || claudeSessionId;
+    if (!resolvedSessionId) return res.status(400).json({ error: 'backendSessionId or claudeSessionId required' });
 
     // Use session's existing normalizer if available (cached); else build on-demand
     let session = null;
     for (const [, s] of activeSessions) {
-      if (s.claudeSessionId === claudeSessionId) { session = s; break; }
+      if ((s.backend || 'claude') !== resolvedBackend) continue;
+      if ((s.backendSessionId || s.claudeSessionId) === resolvedSessionId) { session = s; break; }
     }
     let mm;
     if (session?._normalizer && session._normalizer.total > 0) {
       mm = session._normalizer;
     } else {
-      const sm = createSessionMessages(session || { claudeSessionId, cwd: cwd || '', buffer: '' });
-      mm = new MessageManager('api');
+      const sm = createSessionMessages(session || {
+        backend: resolvedBackend,
+        backendSessionId: resolvedSessionId,
+        claudeSessionId: resolvedBackend === 'claude' ? resolvedSessionId : null,
+        cwd: cwd || '',
+        buffer: '',
+      });
+      mm = createMessageManager(resolvedBackend, 'api');
       mm.convertHistory(sm.raw());
     }
 
     if (req.query.turnmap) {
       res.json({ turns: mm.turnMap(), total: mm.total });
-    } else if (search) {
+      return;
+    }
+    if (search) {
       res.json({ matches: mm.search(search), total: mm.total });
-    } else if (offset !== undefined || limit !== undefined) {
+      return;
+    }
+
+    let payload;
+    if (offset !== undefined || limit !== undefined) {
       const o = parseInt(offset) || 0;
       const l = parseInt(limit) || 50;
-      res.json({ messages: mm.slice(o, l), total: mm.total });
+      payload = { messages: mm.slice(o, l), total: mm.total };
     } else {
-      res.json({ messages: mm.tail(50), total: mm.total });
+      payload = { messages: mm.tail(50), total: mm.total };
     }
+    if (req.query.withStatus) {
+      const sm = createSessionMessages(session || {
+        backend: resolvedBackend,
+        backendSessionId: resolvedSessionId,
+        claudeSessionId: resolvedBackend === 'claude' ? resolvedSessionId : null,
+        cwd: cwd || '',
+        buffer: '',
+      });
+      payload.chatStatus = sm.chatStatus();
+      payload.taskState = sm.taskState?.() || null;
+      payload.turnMap = mm.turnMap();
+    }
+    res.json(payload);
   });
 
   // Subagent messages for a given session + agentId
@@ -80,7 +122,7 @@ function setup(ctx) {
         }
         let meta = {};
         try { meta = JSON.parse(fs.readFileSync(filePath.replace('.jsonl', '.meta.json'), 'utf-8')); } catch {}
-        const mm = new MessageManager(`sub-agent-${agentId}`);
+        const mm = createMessageManager('claude', `sub-agent-${agentId}`);
         mm.convertHistory(rawMsgs);
         return res.json({ messages: mm.messages, total: mm.total, meta });
       } catch {}
@@ -189,7 +231,18 @@ function setup(ctx) {
               match.assigned = true;
             }
 
-            const entry = { sessionId, cwd, pid, startedAt: mtime, status, name: meta.name || '', tmuxTarget };
+            const entry = withSessionKey({
+              backend: 'claude',
+              backendSessionId: sessionId,
+              claudeSessionId: sessionId,
+              sessionId,
+              cwd,
+              pid,
+              startedAt: mtime,
+              status,
+              name: meta.name || '',
+              tmuxTarget,
+            });
 
             // Deduplicate: same JSONL can appear in multiple project dirs
             if (sessionMap.has(sessionId)) {
@@ -211,15 +264,27 @@ function setup(ctx) {
         for (const entry of entries) {
           if (!entry.assigned && !sessionMap.has(entry.lock.sessionId)) {
             sessionMap.set(entry.lock.sessionId, sessions.length);
-            sessions.push({
+            sessions.push(withSessionKey({
+              backend: 'claude',
+              backendSessionId: entry.lock.sessionId,
+              claudeSessionId: entry.lock.sessionId,
               sessionId: entry.lock.sessionId, cwd: entry.lock.cwd, pid: entry.lock.pid,
               startedAt: entry.lock.startedAt || Date.now(),
               status: (webuiPids.has(entry.lock.pid) || [...activeSessions.values()].some(s => s.claudeSessionId === entry.lock.sessionId)) ? 'live'
                 : entry.tmuxTarget ? 'tmux' : 'external', name: '',
               tmuxTarget: entry.tmuxTarget || null,
-            });
+            }));
           }
         }
+      }
+
+      const codexSessions = listCodexThreads({ activeSessions });
+      const seenSessionKeys = new Set(sessions.map((s) => `${s.backend || 'claude'}:${s.backendSessionId || s.sessionId}`));
+      for (const entry of codexSessions) {
+        const key = `${entry.backend}:${entry.backendSessionId || entry.sessionId}`;
+        if (seenSessionKeys.has(key)) continue;
+        seenSessionKeys.add(key);
+        sessions.push(withSessionKey(entry));
       }
 
       sessions.sort((a, b) => b.startedAt - a.startedAt);
@@ -230,7 +295,22 @@ function setup(ctx) {
   router.get('/api/active', (req, res) => {
     const sessions = [];
     for (const [id, s] of activeSessions) {
-      sessions.push({ id, name: s.name, cwd: s.cwd, createdAt: s.createdAt, claudeSessionId: s.claudeSessionId || null, mode: s.mode || 'terminal' });
+      sessions.push({
+        id,
+        name: s.name,
+        cwd: s.cwd,
+        createdAt: s.createdAt,
+        backend: s.backend || 'claude',
+        backendSessionId: s.backendSessionId || s.claudeSessionId || null,
+        sessionKey: getSessionKey(s),
+        claudeSessionId: s.claudeSessionId || null,
+        sourceKind: s.sourceKind || null,
+        agentKind: s.agentKind || 'primary',
+        agentRole: s.agentRole || '',
+        agentNickname: s.agentNickname || '',
+        parentThreadId: s.parentThreadId || null,
+        mode: s.mode || 'terminal',
+      });
     }
     res.json({ sessions });
   });

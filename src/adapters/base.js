@@ -28,7 +28,7 @@ class BackendAdapter {
   /**
    * Attach to an existing session.
    * @param {string} sessionId - WebUI session ID
-   * @param {object} sessionMeta - { socketPath, cwd, claudeSessionId, ... }
+   * @param {object} sessionMeta - { socketPath, cwd, backend, backendSessionId, ... }
    * @returns {SessionHandle}
    */
   async attachSession(sessionId, sessionMeta) { throw new Error('not implemented'); }
@@ -42,11 +42,11 @@ class BackendAdapter {
   /**
    * Parse historical messages from this backend's storage.
    * Returns raw messages in the backend's format (normalizer converts them).
-   * @param {string} claudeSessionId
+   * @param {string} backendSessionId
    * @param {string} cwd
    * @returns {object[]} Raw messages
    */
-  parseHistory(claudeSessionId, cwd) { return []; }
+  parseHistory(backendSessionId, cwd) { return []; }
 }
 
 /**

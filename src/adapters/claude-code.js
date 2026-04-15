@@ -38,16 +38,16 @@ class ClaudeCodeAdapter extends BackendAdapter {
    * This adapter provides the command line arguments and session config.
    */
   buildSessionArgs(options) {
-    const { cwd, model, permissionMode, resumeId, extraArgs = [], mode = 'chat' } = options;
+    const { cwd, model, permissionMode, resumeId, sessionName, effort, extraArgs = [], mode = 'chat' } = options;
     const args = [];
 
     if (resumeId) {
       args.push('--resume', resumeId);
     }
+    if (sessionName) args.push('--name', sessionName);
     if (model) args.push('--model', model);
-    if (permissionMode && permissionMode !== 'default') {
-      args.push(`--${permissionMode}`);
-    }
+    if (permissionMode) args.push('--permission-mode', permissionMode);
+    if (effort) args.push('--effort', effort);
     if (extraArgs.length) args.push(...extraArgs);
 
     return {

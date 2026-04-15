@@ -57,11 +57,15 @@ class ChatView {
 
     // Status bar
     this._statusBar = new ChatStatusBar(wsManager, sessionId, {
+      backend: winInfo.backend || winInfo.titleMeta?.backend || 'claude',
+      allowReview: !readOnly,
       getToolMsg: (toolCallId) => this._messages.find(m => m.toolCallId === toolCallId),
       openSubagentViewer: (opts) => this._openSubagentViewer(opts),
       openInTempEditor: (text) => this._renderers.openInTempEditor(text),
+      startReview: (opts) => this._startReview(opts),
     });
     this._statusBar.popupContainer = container;
+    this._syncReviewAvailability();
 
     // Message list
     this._messageList = document.createElement('div');
@@ -72,6 +76,7 @@ class ChatView {
       ws: wsManager,
       sessionId,
       app,
+      backend: winInfo.backend || winInfo.titleMeta?.backend || 'claude',
       compact: this._compact,
       messageList: this._messageList,
       onPermissionResolve: () => this._hideTyping(),
@@ -178,7 +183,12 @@ class ChatView {
         }
         if (e.target.classList.contains('chat-agent-view-btn')) {
           e.stopPropagation();
-          this._openSubagentViewer({ agentId: e.target.dataset.agentId, parentToolUseId: e.target.dataset.parentToolId, description: e.target.dataset.desc });
+          this._openSubagentViewer({
+            threadId: e.target.dataset.threadId,
+            agentId: e.target.dataset.agentId,
+            parentToolUseId: e.target.dataset.parentToolId,
+            description: e.target.dataset.desc,
+          });
         }
       });
       this._handler = (msg) => {
@@ -188,6 +198,7 @@ class ChatView {
       };
       this.ws.onGlobal(this._handler);
       this._stateHandler = () => {};
+      this._startReadOnlyPolling();
       return;
     }
 
@@ -244,7 +255,12 @@ class ChatView {
       // Agent View Log button
       if (e.target.classList.contains('chat-agent-view-btn')) {
         e.stopPropagation();
-        this._openSubagentViewer({ agentId: e.target.dataset.agentId, parentToolUseId: e.target.dataset.parentToolId, description: e.target.dataset.desc });
+        this._openSubagentViewer({
+          threadId: e.target.dataset.threadId,
+          agentId: e.target.dataset.agentId,
+          parentToolUseId: e.target.dataset.parentToolId,
+          description: e.target.dataset.desc,
+        });
       }
     });
 
@@ -298,37 +314,23 @@ class ChatView {
     // Apply metadata (chatStatus, taskState)
     if (meta) {
       if (meta.chatStatus) this.applyStatus(meta.chatStatus);
-      if (meta.taskState) {
-        if (meta.taskState.tasks) {
-          for (const [id, t] of Object.entries(meta.taskState.tasks)) {
-            if (t.status === 'running') this._statusBar.updateTask(t, id, null);
-          }
-        }
-        if (meta.taskState.todos?.length) {
-          if (this._chatInput) {
-            this._chatInput.updateTodos(meta.taskState.todos);
-          } else {
-            this._todos = meta.taskState.todos;
-            this._updateTodoDisplay();
-          }
-        }
-        this._statusBar.render();
-      }
+      if (meta.taskState) this._applyTaskState(meta.taskState);
     }
+    this._syncReviewAvailability();
     // Render minimap from turn data (attach payload or async fetch fallback)
     if (meta?.turnMap?.length) {
       this._chatMinimap.render(meta.turnMap);
     } else if (this._total > 50) {
       // Fallback: fetch turn map via API
-      const { claudeId, cwd } = this._getSessionIds();
-      if (claudeId) {
-        fetch(`/api/session-messages?claudeSessionId=${encodeURIComponent(claudeId)}&cwd=${encodeURIComponent(cwd)}&turnmap=1`)
+      const { backend, backendSessionId, cwd } = this._getSessionIds();
+      if (backendSessionId) {
+        fetch(`/api/session-messages?backend=${encodeURIComponent(backend)}&backendSessionId=${encodeURIComponent(backendSessionId)}&cwd=${encodeURIComponent(cwd)}&turnmap=1`)
           .then(r => r.json()).then(d => { if (d.turns?.length) this._chatMinimap.render(d.turns); }).catch(() => {});
       }
     }
     this._chatMinimap.setViewport(this._windowStart, this._windowEnd, this._total);
 
-    if (isStreaming) this._showTyping();
+    if (isStreaming) this._syncTypingIndicator('thinking...');
     this._scrollToBottom();
     // Auto-load more if content doesn't fill viewport (no scrollbar to trigger scroll event)
     setTimeout(() => {
@@ -340,26 +342,69 @@ class ChatView {
 
   // Get session identifiers for API calls
   _getSessionIds() {
-    // View-only sessions: extract claudeSessionId from the virtual ID
-    if (this.sessionId.startsWith('view-')) {
-      const claudeId = this.sessionId.slice('view-'.length);
-      const allSess = this.app.sidebar?._allSessions || [];
-      const match = allSess.find(s => s.sessionId === claudeId);
-      return { claudeId, cwd: match?.cwd || '' };
-    }
     const allSess = this.app.sidebar?._allSessions || [];
+    // View-only sessions: accept both legacy `view-<claudeId>` and backend-aware `view-<backend>-<backendSessionId>`
+    if (this.sessionId.startsWith('view-')) {
+      const match = allSess.find((s) => {
+        const backend = s.backend || 'claude';
+        const backendSessionId = s.backendSessionId || s.sessionId;
+        const legacyViewId = `view-${s.sessionId}`;
+        const backendViewId = backend === 'claude' ? legacyViewId : `view-${backend}-${backendSessionId}`;
+        return this.sessionId === legacyViewId || this.sessionId === backendViewId;
+      });
+      if (match) {
+        const backend = match.backend || 'claude';
+        const backendSessionId = match.backendSessionId || match.sessionId;
+        return { backend, backendSessionId, claudeId: backend === 'claude' ? backendSessionId : null, cwd: match?.cwd || '' };
+      }
+      const rawId = this.sessionId.slice('view-'.length);
+      const sep = rawId.indexOf('-');
+      if (sep > 0) {
+        const backend = rawId.slice(0, sep);
+        const backendSessionId = rawId.slice(sep + 1);
+        if (backend && backendSessionId) {
+          return {
+            backend,
+            backendSessionId,
+            claudeId: backend === 'claude' ? backendSessionId : null,
+            cwd: this.winInfo?._openSpec?.cwd || '',
+          };
+        }
+      }
+      return {
+        backend: 'claude',
+        backendSessionId: rawId,
+        claudeId: rawId,
+        cwd: this.winInfo?._openSpec?.cwd || '',
+      };
+    }
     const match = allSess.find(s => s.webuiId === this.sessionId);
-    return { claudeId: match?.sessionId, cwd: match?.cwd || '' };
+    const backend = match?.backend || 'claude';
+    const backendSessionId = match?.backendSessionId || match?.sessionId || null;
+    return { backend, backendSessionId, claudeId: backend === 'claude' ? backendSessionId : null, cwd: match?.cwd || '' };
   }
 
   // Fetch a range of messages from server
   async _fetchMessages(offset, limit) {
-    const { claudeId, cwd } = this._getSessionIds();
-    if (!claudeId) return [];
-    const res = await fetch(`/api/session-messages?claudeSessionId=${encodeURIComponent(claudeId)}&cwd=${encodeURIComponent(cwd)}&offset=${offset}&limit=${limit}`);
-    const data = await res.json();
-    if (data.total) this._total = data.total;
+    const data = await this._fetchMessagePage(offset, limit);
     return data.messages || [];
+  }
+
+  async _fetchMessagePage(offset, limit, { withStatus = false } = {}) {
+    const { backend, backendSessionId, cwd } = this._getSessionIds();
+    if (!backendSessionId) return { messages: [], total: 0 };
+    const query = new URLSearchParams({
+      backend: backend || 'claude',
+      backendSessionId,
+      cwd: cwd || '',
+      offset: String(offset),
+      limit: String(limit),
+    });
+    if (withStatus) query.set('withStatus', '1');
+    const res = await fetch(`/api/session-messages?${query.toString()}`);
+    const data = await res.json();
+    if (typeof data.total === 'number') this._total = data.total;
+    return data;
   }
 
   // Extend the window upward (scroll up)
@@ -530,9 +575,47 @@ class ChatView {
     }
   }
 
+  _deriveTypingLabel() {
+    for (let i = this._messages.length - 1; i >= 0; i--) {
+      const msg = this._messages[i];
+      if (!msg) continue;
+      if (msg.role === 'tool' && msg.status === 'pending') {
+        return `running ${msg.toolName || 'tool'}...`;
+      }
+      if (msg.status !== 'streaming') continue;
+      const block = msg.content?.[0];
+      if (msg.role === 'tool') return `running ${msg.toolName || block?.toolName || 'tool'}...`;
+      if (block?.type === 'thinking') return 'thinking...';
+      if (block?.type === 'text') return 'responding...';
+      return 'thinking...';
+    }
+    return '';
+  }
+
+  _syncTypingIndicator(fallbackLabel = '') {
+    const label = this._deriveTypingLabel() || fallbackLabel || '';
+    if (label) this._showTyping(label);
+    else this._hideTyping();
+  }
+
   // Create a new normalized message → render and append to DOM
   _onCreateMessage(msg) {
     if (this._renderedMsgIds.has(msg.id)) return;
+    if (!this._loadingHistory && msg.backendMeta?.reviewThreadId && msg.backendMeta?.delivery === 'detached') {
+      if (!this._openedDetachedReviews) this._openedDetachedReviews = new Set();
+      const reviewThreadId = msg.backendMeta.reviewThreadId;
+      if (reviewThreadId && !this._openedDetachedReviews.has(reviewThreadId)) {
+        this._openedDetachedReviews.add(reviewThreadId);
+        const { backend, backendSessionId, cwd } = this._getSessionIds();
+        this.app.viewSession(reviewThreadId, cwd, 'Review', {
+          backend: backend || 'codex',
+          backendSessionId: reviewThreadId,
+          agentKind: 'review',
+          sourceKind: 'review',
+          parentThreadId: backendSessionId || null,
+        });
+      }
+    }
 
     // Live message while viewing history: don't render, just track count
     if (!this._loadingHistory && !this._pinned && this._windowEnd < this._total) {
@@ -545,11 +628,11 @@ class ChatView {
 
     this._renderedMsgIds.add(msg.id);
     this._messages.push(msg);
+    this._syncReviewAvailability();
 
     // Streaming indicator for live messages (server isStreaming is authority for initial state)
     if (!this._loadingHistory && (msg.status === 'streaming' || msg.status === 'pending')) {
-      const label = msg.role === 'tool' ? `running ${msg.toolName || 'tool'}...` : msg.content?.[0]?.type === 'thinking' ? 'thinking...' : 'responding...';
-      this._showTyping(label);  // delegates to _chatInput or readOnly _streamStatus
+      this._syncTypingIndicator();
     }
 
     let el;
@@ -607,14 +690,16 @@ class ChatView {
     if (msgIdx < 0) return;
     const msg = this._messages[msgIdx];
     Object.assign(msg, fields);
+    this._syncReviewAvailability();
 
     // Status transitions
     if (fields.status === 'complete' || fields.status === 'error' || fields.status === 'interrupted') {
-      // Tool call completed → re-render the element
+      // Re-render completed messages in case content changed while pending/local.
       const oldEl = this._elements.get(id);
       if (oldEl) {
         let newEl;
         switch (msg.role) {
+          case 'user': newEl = this._renderers.renderUserMsg(msg); break;
           case 'tool': newEl = this._renderers.renderToolMsg(msg); break;
           case 'assistant': newEl = this._renderers.renderAssistantMsg(msg); break;
           default: {
@@ -631,8 +716,6 @@ class ChatView {
           this._renderers.addOpenInEditorBtn(newEl);
         }
       }
-      // Hide streaming indicator if this is the last message
-      if (this._messages[this._messages.length - 1]?.id === id) this._hideTyping();
     }
 
     // Streaming text update → just update the text content
@@ -642,8 +725,19 @@ class ChatView {
         const textDiv = oldEl.querySelector('.chat-text');
         if (textDiv && msg.content[0]?.type === 'text') {
           textDiv.innerHTML = this._renderers.renderMarkdown(stripAnsi(msg.content[0].text));
+        } else if (msg.content[0]?.type === 'thinking') {
+          const summaryEl = oldEl.querySelector('.chat-thinking summary');
+          const preEl = oldEl.querySelector('.chat-thinking pre');
+          const detailsEl = oldEl.querySelector('.chat-thinking');
+          if (detailsEl) detailsEl.open = true;
+          if (summaryEl) summaryEl.textContent = 'Thinking';
+          if (preEl) preEl.textContent = stripAnsi(msg.content[0].text || '');
         }
       }
+    }
+
+    if (fields.status || fields.content) {
+      this._syncTypingIndicator();
     }
 
     if (this._pinned) this._scrollToBottom();
@@ -730,12 +824,43 @@ class ChatView {
       // Find description from stored messages
       const toolMsg = this._messages.find(m => m.toolCallId === parentToolUseId);
       const desc = toolMsg?.content?.[0]?.input?.description || '';
-      statusEl.innerHTML = `<span class="chat-agent-live-count">${count} messages${activity ? ' \u2022 ' + escHtml(activity) : ''}</span> <button class="chat-agent-view-btn" data-parent-tool-id="${escHtml(parentToolUseId)}" data-desc="${escHtml(desc)}">View Log</button>`;
+      const threadId = toolMsg?.taskInfo?.receiverThreadIds?.[0] || '';
+      const threadAttr = threadId ? ` data-thread-id="${escHtml(threadId)}"` : ` data-parent-tool-id="${escHtml(parentToolUseId)}"`;
+      statusEl.innerHTML = `<span class="chat-agent-live-count">${count} messages${activity ? ' \u2022 ' + escHtml(activity) : ''}</span> <button class="chat-agent-view-btn"${threadAttr} data-desc="${escHtml(desc)}">View Log</button>`;
     }
   }
 
   // Unified subagent viewer: works for both live (parentToolUseId) and completed (agentId)
-  _openSubagentViewer({ parentToolUseId, agentId, description }) {
+  _openSubagentViewer({ parentToolUseId, threadId, agentId, description, agentRole = '', agentNickname = '' }) {
+    const { backend, backendSessionId, claudeId, cwd } = this._getSessionIds();
+    if (backend === 'codex' && threadId) {
+      const viewId = `view-${backend}-${threadId}`;
+      if (!this._subagentViewers) this._subagentViewers = new Map();
+      const existingWinId = this._subagentViewers.get(viewId);
+      if (existingWinId && this.app.wm.windows.has(existingWinId)) {
+        this.app.wm.focusWindow(existingWinId);
+        return;
+      }
+      const winInfo = this.app.viewSession(threadId, cwd, description || agentNickname || agentRole || 'Agent', {
+        backend,
+        backendSessionId: threadId,
+        agentKind: 'subagent',
+        agentRole,
+        agentNickname,
+        sourceKind: 'subagent',
+        parentThreadId: backendSessionId || null,
+      });
+      if (winInfo?.id) {
+        this._subagentViewers.set(viewId, winInfo.id);
+        const prevOnClose = winInfo.onClose;
+        winInfo.onClose = () => {
+          this._subagentViewers.delete(viewId);
+          prevOnClose?.();
+        };
+      }
+      return;
+    }
+
     // Virtual session ID for subscribing to messages
     const virtualId = agentId ? `sub-agent-${agentId}` : `sub-${parentToolUseId}`;
 
@@ -748,14 +873,40 @@ class ChatView {
     }
 
     const title = `\uD83E\uDD16 ${description || 'Agent'}`;
-    const { claudeId, cwd } = this._getSessionIds();
-    const openSpec = { action: 'viewSubagent', virtualId, parentSessionId: this.sessionId, claudeSessionId: claudeId, cwd, description };
-    const winInfo = this.app.wm.createWindow({ title, type: 'chat', openSpec });
+    const openSpec = {
+      action: 'viewSubagent',
+      virtualId,
+      parentSessionId: this.sessionId,
+      backend,
+      backendSessionId,
+      claudeSessionId: claudeId,
+      agentKind: 'subagent',
+      agentRole,
+      agentNickname,
+      sourceKind: 'subagent',
+      parentThreadId: backendSessionId || null,
+      cwd,
+      description,
+    };
+    const winInfo = this.app.wm.createWindow({
+      title,
+      type: 'chat',
+      openSpec,
+      titleMeta: { backend, agentKind: 'subagent', agentRole, agentNickname, sourceKind: 'subagent', parentThreadId: backendSessionId || null },
+    });
     this._subagentViewers.set(virtualId, winInfo.id);
     const view = new ChatView(winInfo, this.ws, virtualId, this.app, { readOnly: true });
 
     // Attach to virtual session — server returns history + sets up live forwarding
-    this.ws.send({ type: 'attach', sessionId: virtualId, parentSessionId: this.sessionId, claudeSessionId: claudeId, cwd });
+    this.ws.send({
+      type: 'attach',
+      sessionId: virtualId,
+      parentSessionId: this.sessionId,
+      backend,
+      backendSessionId,
+      claudeSessionId: claudeId,
+      cwd,
+    });
 
     // One-time handler for attach response
     const handler = (msg) => {
@@ -769,6 +920,64 @@ class ChatView {
     this.ws.onGlobal(handler);
 
     winInfo.onClose = () => { this._subagentViewers.delete(virtualId); view.dispose(); this.app._checkWelcome(); };
+  }
+
+  _startReview({ target, delivery }) {
+    if (!target || this._readOnly) return;
+    this.ws.send({
+      type: 'review-start',
+      sessionId: this.sessionId,
+      target,
+      delivery: delivery || 'inline',
+    });
+  }
+
+  _syncReviewAvailability() {
+    const { backend } = this._getSessionIds();
+    if (backend !== 'codex') return;
+    const ready = this._messages.some((msg) => msg.role === 'assistant' && msg.status === 'complete');
+    this._statusBar.setReviewEnabled(ready);
+  }
+
+  _startReadOnlyPolling() {
+    if (!this._readOnly || !this.sessionId.startsWith('view-') || this._readOnlyPollTimer) return;
+    const { backend } = this._getSessionIds();
+    if (backend !== 'codex') return;
+    const tick = async () => {
+      if (this._disposed) return;
+      try {
+        const nextOffset = this._windowEnd || 0;
+        const page = await this._fetchMessagePage(nextOffset, 200, { withStatus: true });
+        const msgs = page.messages || [];
+        if (page.chatStatus) this.applyStatus(page.chatStatus);
+        if (page.taskState) this._applyTaskState(page.taskState);
+        if (msgs.length) {
+          this._loadingHistory = true;
+          for (const msg of msgs) this._onCreateMessage(msg);
+          this._loadingHistory = false;
+          this._windowEnd = Math.min(this._total || (nextOffset + msgs.length), nextOffset + msgs.length);
+          if (this._pinned) this._scrollToBottom();
+        }
+      } catch {}
+      if (this._disposed) return;
+      this._readOnlyPollTimer = setTimeout(tick, 2000);
+    };
+    this._readOnlyPollTimer = setTimeout(tick, 2000);
+  }
+
+  _applyTaskState(taskState) {
+    const tasks = taskState?.tasks || {};
+    this._statusBar.setTasks(tasks);
+
+    const todos = Array.isArray(taskState?.todos) ? taskState.todos : [];
+    if (this._chatInput) {
+      this._chatInput.updateTodos(todos);
+    } else {
+      this._todos = todos;
+      this._updateTodoDisplay();
+    }
+
+    this._statusBar.render();
   }
 
 
@@ -845,6 +1054,8 @@ class ChatView {
   }
 
   dispose() {
+    this._disposed = true;
+    if (this._readOnlyPollTimer) clearTimeout(this._readOnlyPollTimer);
     this.ws.offGlobal(this._handler);
     this.ws.offStateChange(this._stateHandler);
     if (this._chatInput) this._chatInput.dispose();

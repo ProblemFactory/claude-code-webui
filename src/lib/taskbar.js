@@ -31,7 +31,7 @@ export function updateTaskbar(app) {
     if (term?.sessionId) {
       const allSess = app.sidebar?._allSessions || [];
       const match = allSess.find(s => s.webuiId && s.webuiId === term.sessionId);
-      if (match && app.sidebar.isStarred(match.sessionId)) starPrefix = '\u2605 ';
+      if (match && app.sidebar.isStarred(match)) starPrefix = '\u2605 ';
     }
     // Split title: first part = name, second part = path (after " — ")
     const parts = win.title.split(' \u2014 ');

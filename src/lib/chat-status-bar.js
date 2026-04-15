@@ -9,16 +9,22 @@ export class ChatStatusBar {
    * @param {object} ws - WsManager instance
    * @param {string} sessionId - session identifier
    * @param {object} opts
+   * @param {string} [opts.backend] - backend identifier
    * @param {function} opts.getToolMsg - (toolCallId) => msg, looks up tool message for popup details
    * @param {function} opts.openSubagentViewer - ({ parentToolUseId, description }) => void
    * @param {function} opts.openInTempEditor - (text) => void
+   * @param {function} [opts.startReview] - ({ target, delivery }) => void
    */
-  constructor(ws, sessionId, { getToolMsg, openSubagentViewer, openInTempEditor }) {
+  constructor(ws, sessionId, { backend = 'claude', allowReview = false, getToolMsg, openSubagentViewer, openInTempEditor, startReview }) {
     this._ws = ws;
     this._sessionId = sessionId;
+    this._backend = backend;
+    this._allowReview = allowReview;
+    this._reviewEnabled = !allowReview;
     this._getToolMsg = getToolMsg;
     this._openSubagentViewer = openSubagentViewer;
     this._openInTempEditor = openInTempEditor;
+    this._startReview = startReview || (() => {});
 
     // Status state
     this._statusModel = '';
@@ -87,7 +93,7 @@ export class ChatStatusBar {
 
   updateTask(taskInfo, toolCallId, content) {
     if (!this._activeTasks) this._activeTasks = new Map();
-    if (taskInfo.status === 'completed') {
+    if (taskInfo.status !== 'running') {
       this._activeTasks.delete(toolCallId);
     } else if (taskInfo.status === 'running') {
       const block = content?.[0];
@@ -98,6 +104,15 @@ export class ChatStatusBar {
       }
       this._activeTasks.set(toolCallId, task);
     }
+    this.render();
+  }
+
+  setTasks(tasks) {
+    const next = new Map();
+    for (const [toolCallId, taskInfo] of Object.entries(tasks || {})) {
+      if (taskInfo?.status === 'running') next.set(toolCallId, { ...taskInfo });
+    }
+    this._activeTasks = next.size ? next : null;
     this.render();
   }
 
@@ -121,6 +136,11 @@ export class ChatStatusBar {
     this.render();
   }
 
+  setReviewEnabled(enabled) {
+    this._reviewEnabled = !!enabled;
+    this.render();
+  }
+
   render() {
     const fmtK = (n) => n >= 1000000 ? (n / 1000000).toFixed(1) + 'm' : n >= 1000 ? Math.round(n / 1000) + 'k' : String(n);
     const parts = [];
@@ -140,6 +160,14 @@ export class ChatStatusBar {
       const tasks = [...this._activeTasks.values()];
       const label = count === 1 ? tasks[0].description : `${count} tasks`;
       parts.push(`<span class="chat-status-tasks chat-status-clickable" title="${escHtml(tasks.map(t => t.description).join(', '))}">\uD83D\uDD04 ${escHtml(label)}</span>`);
+    }
+
+    if (this._backend === 'codex' && this._allowReview) {
+      const reviewClass = this._reviewEnabled ? 'chat-status-clickable' : 'chat-status-dim';
+      const reviewTitle = this._reviewEnabled
+        ? 'Start Codex review'
+        : 'Review becomes available after the first completed assistant turn';
+      parts.push(`<span class="chat-status-review ${reviewClass}" title="${escHtml(reviewTitle)}">\u2713 Review</span>`);
     }
 
     // Context % with emoji + progress bar
@@ -176,20 +204,33 @@ export class ChatStatusBar {
 
   _onClick(e) {
     const container = this._popupContainer || this._element.parentElement;
+    const showDropdown = (anchor) => {
+      const existing = container.querySelector('.chat-status-dropdown');
+      if (existing) { existing.remove(); return null; }
+      const dropdown = document.createElement('div');
+      dropdown.className = 'chat-status-dropdown';
+      const rect = anchor.getBoundingClientRect();
+      const containerRect = container.getBoundingClientRect();
+      dropdown.style.position = 'absolute';
+      dropdown.style.bottom = (containerRect.bottom - rect.top + 4) + 'px';
+      dropdown.style.left = (rect.left - containerRect.left) + 'px';
+      container.appendChild(dropdown);
+      const close = (ev) => {
+        if (!dropdown.contains(ev.target) && ev.target !== anchor) {
+          dropdown.remove();
+          document.removeEventListener('mousedown', close);
+        }
+      };
+      setTimeout(() => document.addEventListener('mousedown', close), 0);
+      return dropdown;
+    };
 
     // Background tasks click -> popup
     const taskEl = e.target.closest('.chat-status-tasks');
     if (taskEl && this._activeTasks?.size) {
       e.stopPropagation();
-      const existing = container.querySelector('.chat-status-dropdown');
-      if (existing) { existing.remove(); return; }
-      const dropdown = document.createElement('div');
-      dropdown.className = 'chat-status-dropdown';
-      const rect = taskEl.getBoundingClientRect();
-      const containerRect = container.getBoundingClientRect();
-      dropdown.style.position = 'absolute';
-      dropdown.style.bottom = (containerRect.bottom - rect.top + 4) + 'px';
-      dropdown.style.left = (rect.left - containerRect.left) + 'px';
+      const dropdown = showDropdown(taskEl);
+      if (!dropdown) return;
       for (const [toolUseId, task] of this._activeTasks) {
         const item = document.createElement('div');
         item.className = 'chat-status-dropdown-item chat-task-detail';
@@ -200,7 +241,13 @@ export class ChatStatusBar {
         item.onclick = (ev) => {
           ev.stopPropagation(); dropdown.remove();
           if (task.type === 'agent') {
-            this._openSubagentViewer({ parentToolUseId: toolUseId, description: task.description });
+            this._openSubagentViewer({
+              parentToolUseId: toolUseId,
+              threadId: task.receiverThreadIds?.[0] || '',
+              description: task.description,
+              agentRole: task.agentRole || '',
+              agentNickname: task.agentNickname || '',
+            });
           } else {
             // Open command input + output in editor
             const toolMsg = this._getToolMsg(toolUseId);
@@ -216,9 +263,50 @@ export class ChatStatusBar {
         };
         dropdown.appendChild(item);
       }
-      container.appendChild(dropdown);
-      const close = (ev) => { if (!dropdown.contains(ev.target)) { dropdown.remove(); document.removeEventListener('mousedown', close); } };
-      setTimeout(() => document.addEventListener('mousedown', close), 0);
+      return;
+    }
+
+    const reviewEl = e.target.closest('.chat-status-review');
+    if (reviewEl && this._backend === 'codex' && this._allowReview && this._reviewEnabled) {
+      e.stopPropagation();
+      const dropdown = showDropdown(reviewEl);
+      if (!dropdown) return;
+      const reviewOptions = [
+        { label: 'Working Tree', target: { type: 'uncommittedChanges' }, delivery: 'inline' },
+        { label: 'Working Tree (Detached)', target: { type: 'uncommittedChanges' }, delivery: 'detached' },
+        { label: 'Base Branch...', kind: 'baseBranch', delivery: 'inline' },
+        { label: 'Base Branch... (Detached)', kind: 'baseBranch', delivery: 'detached' },
+        { label: 'Commit...', kind: 'commit', delivery: 'inline' },
+        { label: 'Commit... (Detached)', kind: 'commit', delivery: 'detached' },
+        { label: 'Custom...', kind: 'custom', delivery: 'inline' },
+        { label: 'Custom... (Detached)', kind: 'custom', delivery: 'detached' },
+      ];
+      for (const option of reviewOptions) {
+        const item = document.createElement('div');
+        item.className = 'chat-status-dropdown-item';
+        item.textContent = option.label;
+        item.onclick = (ev) => {
+          ev.stopPropagation();
+          dropdown.remove();
+          let target = option.target || null;
+          if (option.kind === 'baseBranch') {
+            const branch = prompt('Base branch to review against:', 'main');
+            if (!branch) return;
+            target = { type: 'baseBranch', branch: branch.trim() };
+          } else if (option.kind === 'commit') {
+            const sha = prompt('Commit SHA to review:', '');
+            if (!sha) return;
+            target = { type: 'commit', sha: sha.trim() };
+          } else if (option.kind === 'custom') {
+            const instructions = prompt('Review instructions:', '');
+            if (!instructions) return;
+            target = { type: 'custom', instructions: instructions.trim() };
+          }
+          if (!target) return;
+          this._startReview({ target, delivery: option.delivery || 'inline' });
+        };
+        dropdown.appendChild(item);
+      }
       return;
     }
 
@@ -226,16 +314,9 @@ export class ChatStatusBar {
     const el = e.target.closest('.chat-status-perm');
     if (!el) return;
     e.stopPropagation();
-    const existing = container.querySelector('.chat-status-dropdown');
-    if (existing) { existing.remove(); return; }
     const modes = this._permissionModes || ['default', 'acceptEdits', 'bypassPermissions', 'plan', 'auto'];
-    const dropdown = document.createElement('div');
-    dropdown.className = 'chat-status-dropdown';
-    const rect = el.getBoundingClientRect();
-    const containerRect = container.getBoundingClientRect();
-    dropdown.style.position = 'absolute';
-    dropdown.style.bottom = (containerRect.bottom - rect.top + 4) + 'px';
-    dropdown.style.left = (rect.left - containerRect.left) + 'px';
+    const dropdown = showDropdown(el);
+    if (!dropdown) return;
     for (const mode of modes) {
       const item = document.createElement('div');
       item.className = 'chat-status-dropdown-item' + (mode === this._statusPermMode ? ' active' : '');
@@ -249,12 +330,5 @@ export class ChatStatusBar {
       };
       dropdown.appendChild(item);
     }
-    container.appendChild(dropdown);
-    const close = (ev) => {
-      if (!dropdown.contains(ev.target) && ev.target !== el) {
-        dropdown.remove(); document.removeEventListener('mousedown', close);
-      }
-    };
-    setTimeout(() => document.addEventListener('mousedown', close), 0);
   }
 }

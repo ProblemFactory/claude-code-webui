@@ -1,12 +1,14 @@
 # Chat Mode
 
-Chat mode provides a structured message view for Claude Code sessions, as an alternative to the raw terminal TUI. It uses Claude's `--output-format stream-json` protocol to render messages with markdown, tool visualization, and interactive permission prompts.
+Chat mode provides a structured message view for both Claude Code and Codex sessions, as an alternative to the raw terminal TUI. Claude chat sessions use Claude's `--output-format stream-json` protocol; Codex chat sessions use Codex `app-server`. Both render markdown, tool visualization, live thinking/status updates, and interactive permission prompts.
 
 ## Creating a Chat Session
 
 When creating a new session:
-- The mode (Terminal or Chat) defaults to your **Default session mode** setting (Settings > Session Card)
+- Choose the backend first: **Claude** or **Codex**
+- The mode (Terminal or Chat) defaults to your **Default session mode** setting (Settings > Session)
 - You can switch the mode via the split button on the new session dialog
+- Backend-specific defaults (model, permission mode, effort, extra args) come from Settings > **Claude** or Settings > **Codex**
 
 When resuming a stopped session:
 - The sidebar resume button uses your default mode setting
@@ -40,7 +42,7 @@ In compact mode, you can choose how user and assistant messages are visually dis
 |------|-----------|
 | **User messages** | Markdown-rendered text, inline image attachments |
 | **Assistant messages** | Markdown with syntax highlighting in code blocks |
-| **Thinking blocks** | Collapsible "Thinking..." section with raw text |
+| **Thinking blocks** | Collapsible "Thinking..." section with raw text. Codex reasoning streams into this block live. |
 | **Tool use/result** | Specialized tool cards (see below) |
 | **System notifications** | Collapsible details for task-notification and system-reminder |
 | **System messages** | Disconnected/reconnected/session ended notices |
@@ -58,6 +60,7 @@ Each tool call is rendered as a structured card showing the tool name, inputs, a
 | Tool | Card Display |
 |------|-------------|
 | **Edit** | Diff view with +/- prefix columns (flex layout, prefix stays fixed on wrap), suffix context matching |
+| **Patch** | Claude-style diff cards for each changed file. Codex `apply_patch` results can render as Update/Write/Delete/Move cards with unified diff details. |
 | **Write** | Line count, file size, full content with syntax highlighting + line numbers |
 | **Read** | Line count, full content with syntax highlighting + line numbers |
 
@@ -69,7 +72,7 @@ Non-file tools show a collapsible Input section and a collapsible Output section
 
 ### Pending Tools
 
-While a tool is running, a spinner indicates progress. For file operations (Edit/Write/Read), the file path is shown immediately. For other tools, the full input is visible while waiting for the result.
+While a tool is running, a spinner indicates progress. For file operations (Edit/Patch/Write/Read), the file path is shown immediately. For other tools, the full input is visible while waiting for the result.
 
 ### Open in Editor
 
@@ -165,9 +168,9 @@ Paste an image from your clipboard (Ctrl+V) to add it as an attachment:
 
 ## Interrupt
 
-While Claude is responding, a streaming status bar appears above the input area showing the current activity (thinking, running ToolName, responding) with a spinner. Click the **Stop** button to interrupt Claude mid-response.
+While the backend is responding, a streaming status bar appears above the input area showing the current activity (`thinking`, `running ToolName`, `responding`) with a spinner. Click the **Stop** button to interrupt the active turn mid-response.
 
-The interrupt uses a dual mechanism for reliability: a `control_request` with `subtype: 'interrupt'` is sent via stdin, and a SIGINT signal is sent to the claude child process as a fallback (working around known Claude Code bugs [#17466](https://github.com/anthropics/claude-code/issues/17466), [#3455](https://github.com/anthropics/claude-code/issues/3455)).
+The interrupt is routed through the backend wrapper. Claude sessions still use the existing stdin + SIGINT fallback; Codex chat sessions use Codex's native turn interrupt request.
 
 ### Interrupt Result
 
@@ -217,14 +220,14 @@ Two types of background tasks are tracked:
 
 | Source | Detection | Icon |
 |--------|-----------|------|
-| **Agent tool** | `system.task_started` message | Robot |
-| **Background commands** | `tool_use` with `run_in_background: true` | Lightning bolt |
+| **Agent tool** | Claude `system.task_started`, or Codex agent/subagent task metadata | Robot |
+| **Background commands** | Claude `tool_use` with `run_in_background: true` | Lightning bolt |
 
 The task count badge appears in the status bar when tasks are active. Click to open a popup showing each task's description and current activity. Clicking a task in the popup:
 - **Agent tasks**: opens the subagent View Log viewer
 - **Command tasks**: opens a temporary editor showing the command input and output
 
-Tasks are removed when `task_notification` arrives (agent completion) or when the tool_result is received (command completion).
+Tasks are removed when the backend reports completion. For Codex, only background/subagent agent work is treated as a task; ordinary tool calls are not shown here.
 
 ## Font Size
 
@@ -271,7 +274,7 @@ Stopped sessions can be viewed without resuming:
 - **View History button**: In the sidebar expand panel for stopped sessions, click "📋 View History" to open a read-only ChatView that loads JSONL history without running `claude --resume`
 - **After terminate**: When a running session exits or is terminated while a window is open, the window automatically converts to read-only — the input area is hidden, and closing the window doesn't send a kill signal
 - View-only sessions support full scroll-up pagination and minimap navigation
-- Virtual session ID uses `view-{claudeSessionId}` prefix
+- Virtual session IDs are backend-aware (`view-{backendSessionId}` under the hood)
 
 ## Draft Persistence
 

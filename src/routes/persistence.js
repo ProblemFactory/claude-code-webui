@@ -8,13 +8,14 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
+const { listCodexThreads } = require('../codex-session-store');
 
 const router = express.Router();
 
 function ensureDir(dir) { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); }
 
-/** Setup persistence routes. Requires { dataDir, wss, WS_OPEN, getSyncStore } context. */
-function setup({ dataDir, wss, WS_OPEN, getSyncStore }) {
+/** Setup persistence routes. Requires { dataDir, wss, WS_OPEN, getSyncStore, activeSessions } context. */
+function setup({ dataDir, wss, WS_OPEN, getSyncStore, activeSessions }) {
   const broadcast = (msg) => {
     const json = JSON.stringify(msg);
     wss.clients.forEach(client => {
@@ -183,21 +184,114 @@ function setup({ dataDir, wss, WS_OPEN, getSyncStore }) {
   // ── User State ──
   const USER_STATE_FILE = path.join(dataDir, 'user-state.json');
   let _userStateCache = null;
-  const USER_STATE_DEFAULT = { starredSessions: [], archivedSessions: [], customNames: {}, sessionGroups: {} };
+  const USER_STATE_DEFAULT = {
+    stateVersion: 2,
+    starredSessions: [],
+    archivedSessions: [],
+    customNames: {},
+    sessionModes: {},
+    sessionGroups: {},
+    groupFolders: {},
+  };
+
+  const CLAUDE_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+  function buildKnownSessionKeyMap() {
+    const map = new Map();
+    const add = (legacyId, sessionKey) => {
+      if (!legacyId || !sessionKey) return;
+      if (!map.has(legacyId)) map.set(legacyId, sessionKey);
+    };
+
+    for (const [id, session] of activeSessions || []) {
+      const backend = session.backend || 'claude';
+      const backendSessionId = session.backendSessionId || session.claudeSessionId || null;
+      const sessionKey = backendSessionId ? `${backend}:${backendSessionId}` : '';
+      const webuiSessionId = id || null;
+      add(session.backendSessionId, sessionKey);
+      add(session.claudeSessionId, sessionKey);
+      add(webuiSessionId, sessionKey);
+      add(webuiSessionId ? `${backend}:${webuiSessionId}` : '', sessionKey);
+    }
+
+    for (const session of listCodexThreads({ activeSessions })) {
+      add(session.sessionId, session.sessionKey || `codex:${session.backendSessionId || session.sessionId}`);
+      add(session.backendSessionId, session.sessionKey || `codex:${session.backendSessionId || session.sessionId}`);
+    }
+
+    return map;
+  }
+
+  function migrateLegacySessionRef(rawKey, knownSessionKeys) {
+    const key = String(rawKey || '');
+    if (!key) return '';
+    if (knownSessionKeys?.has(key)) return knownSessionKeys.get(key);
+    if (key.includes(':')) return key;
+    if (CLAUDE_UUID_RE.test(key)) return `claude:${key}`;
+    return key;
+  }
+
+  function migrateStateArray(items, knownSessionKeys) {
+    const next = [];
+    const seen = new Set();
+    for (const raw of Array.isArray(items) ? items : []) {
+      const mapped = migrateLegacySessionRef(raw, knownSessionKeys);
+      if (!mapped || seen.has(mapped)) continue;
+      seen.add(mapped);
+      next.push(mapped);
+    }
+    return next;
+  }
+
+  function migrateStateMap(map, knownSessionKeys) {
+    const next = {};
+    for (const [rawKey, value] of Object.entries(map || {})) {
+      const mapped = migrateLegacySessionRef(rawKey, knownSessionKeys);
+      if (!mapped || Object.hasOwn(next, mapped)) continue;
+      next[mapped] = value;
+    }
+    return next;
+  }
+
+  function normalizeUserState(data) {
+    const source = data && typeof data === 'object' ? data : {};
+    const knownSessionKeys = buildKnownSessionKeyMap();
+    const sessionGroups = {};
+    for (const [groupName, sessionRefs] of Object.entries(source.sessionGroups && typeof source.sessionGroups === 'object' ? source.sessionGroups : {})) {
+      sessionGroups[groupName] = migrateStateArray(sessionRefs, knownSessionKeys);
+    }
+    return {
+      stateVersion: 2,
+      starredSessions: migrateStateArray(source.starredSessions, knownSessionKeys),
+      archivedSessions: migrateStateArray(source.archivedSessions, knownSessionKeys),
+      customNames: migrateStateMap(source.customNames && typeof source.customNames === 'object' ? source.customNames : {}, knownSessionKeys),
+      sessionModes: migrateStateMap(source.sessionModes && typeof source.sessionModes === 'object' ? source.sessionModes : {}, knownSessionKeys),
+      sessionGroups,
+      groupFolders: source.groupFolders && typeof source.groupFolders === 'object' ? source.groupFolders : {},
+    };
+  }
 
   function readUserState() {
     if (_userStateCache) return _userStateCache;
     ensureDir(dataDir);
-    try { _userStateCache = JSON.parse(fs.readFileSync(USER_STATE_FILE, 'utf-8')); }
+    try {
+      const rawText = fs.readFileSync(USER_STATE_FILE, 'utf-8');
+      const parsed = JSON.parse(rawText);
+      _userStateCache = normalizeUserState(parsed);
+      const normalizedText = JSON.stringify(_userStateCache, null, 2);
+      if (normalizedText !== rawText.trim()) {
+        fs.writeFileSync(USER_STATE_FILE, normalizedText);
+      }
+    }
     catch { _userStateCache = { ...USER_STATE_DEFAULT }; }
     return _userStateCache;
   }
 
   function writeUserState(data) {
     ensureDir(dataDir);
-    _userStateCache = data;
-    fs.writeFileSync(USER_STATE_FILE, JSON.stringify(data, null, 2));
-    broadcast({ type: 'user-state-updated', state: data });
+    _userStateCache = normalizeUserState(data);
+    fs.writeFileSync(USER_STATE_FILE, JSON.stringify(_userStateCache, null, 2));
+    broadcast({ type: 'user-state-updated', state: _userStateCache });
   }
 
   router.get('/api/user-state', (req, res) => res.json(readUserState()));
@@ -294,25 +388,27 @@ function setup({ dataDir, wss, WS_OPEN, getSyncStore }) {
   });
 
   router.post('/api/session-groups/assign', (req, res) => {
-    const { groupId, sessionId } = req.body;
-    if (!groupId || !sessionId) return res.status(400).json({ error: 'groupId and sessionId are required' });
+    const { groupId, sessionId, sessionKey } = req.body;
+    const targetSession = sessionKey || sessionId;
+    if (!groupId || !targetSession) return res.status(400).json({ error: 'groupId and sessionId/sessionKey are required' });
     const state = readUserState();
     if (!state.sessionGroups || !state.sessionGroups[groupId]) return res.status(404).json({ error: 'Group not found' });
     const group = state.sessionGroups[groupId];
-    if (!group.sessionIds.includes(sessionId)) {
-      group.sessionIds.push(sessionId);
+    if (!group.sessionIds.includes(targetSession)) {
+      group.sessionIds.push(targetSession);
       writeUserState(state);
     }
     res.json({ success: true });
   });
 
   router.post('/api/session-groups/unassign', (req, res) => {
-    const { groupId, sessionId } = req.body;
-    if (!groupId || !sessionId) return res.status(400).json({ error: 'groupId and sessionId are required' });
+    const { groupId, sessionId, sessionKey } = req.body;
+    const targetSession = sessionKey || sessionId;
+    if (!groupId || !targetSession) return res.status(400).json({ error: 'groupId and sessionId/sessionKey are required' });
     const state = readUserState();
     if (!state.sessionGroups || !state.sessionGroups[groupId]) return res.status(404).json({ error: 'Group not found' });
     const group = state.sessionGroups[groupId];
-    group.sessionIds = group.sessionIds.filter(id => id !== sessionId);
+    group.sessionIds = group.sessionIds.filter(id => id !== targetSession);
     writeUserState(state);
     res.json({ success: true });
   });

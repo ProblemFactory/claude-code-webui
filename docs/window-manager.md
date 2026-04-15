@@ -176,6 +176,16 @@ Each desktop maintains its own grid mode. Desktop 1 can be a 2x2 grid while Desk
 
 Drag the top edge of the taskbar to resize it (36-120px). All elements (desktop previews, window icons, text, usage pies) scale proportionally. Height is synced across clients.
 
+### Usage Widget
+
+The right side of the taskbar shows backend usage as compact rows:
+
+- One row for **Claude**
+- One row for **Codex**
+- Each row starts with the backend logo and then two pies for the global **5-hour** and **7-day** rate-limit windows
+
+Click the widget to open a popup with percentages, reset times, and the last update time. Claude usage keeps the last successful snapshot across transient fetch failures and server restarts, so the Claude row does not disappear just because one poll failed.
+
 ### Technical details
 
 Windows are hidden via `visibility:hidden` + `pointer-events:none` (not `display:none`). This preserves all internal state: scroll position, terminal content, input focus. Switching back is instant with no re-rendering. WebSocket handlers continue processing — hidden chat windows receive new messages normally.

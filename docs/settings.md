@@ -6,7 +6,7 @@ The settings system has three layers:
 
 1. **Global settings** (toolbar ⚙) — Quick access to theme, font size, font family
 2. **Per-terminal settings** (window ⚙) — Override theme/font/size per terminal window
-3. **Full settings UI** — VS Code-style dialog with all options, accessible via "All Settings" link
+3. **Full settings UI** — VS Code-style dialog with all options, including backend-specific Claude/Codex launch defaults, accessible via "All Settings" link
 
 Settings are stored server-side (sparse storage — only non-default values persisted) and sync across all connected clients via WebSocket.
 
@@ -27,6 +27,16 @@ The toolbar gear opens a popover with:
 | Font family dropdown | Select terminal font (web fonts + system fonts) |
 
 Changes apply immediately to all terminals that don't have per-terminal overrides.
+
+## Backend Defaults
+
+The full settings dialog has separate **Claude** and **Codex** sections. These defaults are applied when:
+
+- Creating a new session with that backend
+- Resuming a stopped session with that backend
+- Switching the backend selector in the new-session dialog
+
+Shared behavior such as default **Chat/Terminal** mode still lives under the generic **Session** section.
 
 ## Per-Terminal Overrides
 
@@ -78,6 +88,30 @@ Overrides persist in the layout auto-save.
 | `chat.compactMode` | boolean | `true` | Dense document-style layout instead of chat bubbles |
 | `chat.roleIndicator` | enum | `border` | How to distinguish user vs assistant messages: color border, background tint, icon, or text label |
 
+### Session
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `session.defaultMode` | enum | `chat` | Default mode for new sessions and single-click resume: Terminal or Chat |
+
+### Claude
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `claude.defaultModel` | text | `''` | Default Claude model for new or resumed Claude sessions |
+| `claude.defaultPermissionMode` | enum | `''` | Default Claude permission mode for new or resumed Claude sessions |
+| `claude.defaultEffort` | enum | `''` | Default Claude effort for new or resumed Claude sessions |
+| `claude.defaultExtraArgs` | text | `''` | Extra Claude CLI args appended when starting a Claude session |
+
+### Codex
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `codex.defaultModel` | text | `''` | Default Codex model for new or resumed Codex sessions |
+| `codex.defaultPermissionMode` | enum | `''` | Default Codex permission mode for new or resumed Codex sessions |
+| `codex.defaultEffort` | enum | `''` | Default Codex reasoning effort for new or resumed Codex sessions |
+| `codex.defaultExtraArgs` | text | `''` | Extra Codex CLI args appended when starting a Codex session |
+
 ### Sidebar
 
 | Setting | Type | Default | Description |
@@ -89,8 +123,6 @@ Overrides persist in the layout auto-save.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `session.defaultMode` | enum | `chat` | Default mode for new sessions and single-click resume: Terminal or Chat |
-| `session.defaultEffort` | enum | (empty = auto) | Default effort level for new sessions. Options: Auto (model default), Low, Medium, High, Max (Opus 4.6 only) |
 | `sessionCard.clickBehavior` | enum | `focus` | Card click: focus window, expand details, or flash window |
 | `sessionCard.clickToCopy` | boolean | `false` | Click detail values (ID, path, time) to copy to clipboard |
 | `sessionCard.visibleFields` | multiSelect | all fields | Which fields to show in expanded card details |
