@@ -195,8 +195,10 @@ class ChatRenderers {
     const toolLabel = msg.toolStatus === 'error' ? '\u2717' : msg.status === 'pending' ? '\u23F3' : '\u2713';
     this.wrapMsg(el, 'tool', toolLabel, html);
 
-    // Permission overlay
-    if (msg.permission) this.renderPermissionOverlay(el, msg);
+    // Permission overlay — only for pending or denied (resolved+complete = no overlay needed)
+    if (msg.permission && !(msg.permission.resolved === 'allowed' && msg.status === 'complete')) {
+      this.renderPermissionOverlay(el, msg);
+    }
 
     return el;
   }
