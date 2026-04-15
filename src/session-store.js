@@ -229,7 +229,8 @@ class SessionMessages {
       if (!trimmed) continue;
       try {
         const msg = JSON.parse(trimmed);
-        if (msg.type === 'control_request' && msg.request?.tool_use_id) { this._pendingPerms[msg.request.tool_use_id] = msg; continue; }
+        if (msg.type === 'control_request' && msg.request?.tool_use_id) { this._pendingPerms[msg.request.tool_use_id] = msg; }
+        if (msg.type === 'control_request' || msg.type === 'control_response' || msg.type === 'control_cancel_request') { live.push(msg); continue; }
         if (isSubagentMessage(msg)) continue;
         if (msg.uuid && uuids.has(msg.uuid)) continue;
         if (msg._fromWebui && msg.timestamp) {

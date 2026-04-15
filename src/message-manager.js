@@ -303,9 +303,14 @@ class MessageManager {
   _processResult(raw, emit) {
     this._finalizeStreaming(emit);
     // Flush any pending tool calls that never got results (interrupted)
+    // But preserve tool calls with unresolved permissions — they're still waiting for user input
     for (const [toolUseId, pending] of this.pendingToolCalls) {
       const existing = this.messageIndex.get(pending.msgId);
       if (existing && existing.status === 'pending') {
+        if (existing.permission && !existing.permission.resolved) {
+          // Still waiting for permission — keep as pending, don't mark error
+          continue;
+        }
         existing.status = 'error';
         existing.toolStatus = 'error';
         if (emit) this._emit({ op: 'edit', id: existing.id, fields: { status: 'error', toolStatus: 'error' } });
@@ -335,17 +340,36 @@ class MessageManager {
   _processControlRequest(raw, emit) {
     if (raw.request?.subtype !== 'can_use_tool') return;
     const toolUseId = raw.request.tool_use_id;
+
+    // Find the tool message — may be in pendingToolCalls (live) or already flushed (history replay)
+    let existing = null;
     const pending = this.pendingToolCalls.get(toolUseId);
-    if (!pending) return;
-    const existing = this.messageIndex.get(pending.msgId);
+    if (pending) {
+      existing = this.messageIndex.get(pending.msgId);
+    } else {
+      // Search backwards for the tool message by toolCallId (flushed by prior result during history replay)
+      for (let i = this.messages.length - 1; i >= 0; i--) {
+        if (this.messages[i].toolCallId === toolUseId) { existing = this.messages[i]; break; }
+      }
+    }
     if (!existing) return;
+
+    // Restore from error to pending if this was incorrectly flushed
+    if (existing.status === 'error') {
+      existing.status = 'pending';
+      existing.toolStatus = null;
+      if (emit) this._emit({ op: 'edit', id: existing.id, fields: { status: 'pending', toolStatus: null } });
+    }
+
+    // If the tool already completed, the permission was implicitly approved
+    const autoResolved = existing.status === 'complete' ? 'allowed' : null;
 
     existing.permission = {
       requestId: raw.request_id,
       toolName: raw.request.tool_name,
       input: raw.request.input || {},
       suggestions: raw.request.permission_suggestions || [],
-      resolved: null,
+      resolved: autoResolved,
     };
     if (emit) this._emit({ op: 'edit', id: existing.id, fields: { permission: existing.permission } });
   }
