@@ -334,9 +334,8 @@ export function createModeBackendIcon(backend, mode, { title, className = '' } =
   const el = document.createElement('span');
   el.className = `mode-backend-icon ${className}`.trim();
   el.title = title || `${meta.label} ${mode === 'chat' ? 'Chat' : 'Terminal'}`;
+  if (meta.brandColor) el.style.setProperty('--backend-icon-color', meta.brandColor);
 
-  // Chat bubble or terminal outline as the container shape
-  // Backend logo mask centered inside, smaller
   const logoMask = meta.iconSrc ? `<span class="mode-backend-logo ${meta.iconClass}" style="--backend-icon-mask:url('${meta.iconSrc}');--backend-icon-color:${meta.brandColor || 'currentColor'}"></span>` : `<span class="mode-backend-logo-text">${meta.icon}</span>`;
 
   if (mode === 'chat') {
