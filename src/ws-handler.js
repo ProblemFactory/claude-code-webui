@@ -358,7 +358,11 @@ function registerWsHandler(wss, ctx) {
           if (session?.pty && session.mode === 'chat') {
             const adapter = adapterRegistry.get(session.backend);
             if (adapter) {
-              session.pty.write(adapter.formatPermissionResponse(data) + '\n');
+              const payload = adapter.formatPermissionResponse(data);
+              session.pty.write(payload + '\n');
+              // Record in buffer so permission state survives refresh/restart
+              session.buffer = (session.buffer + payload + '\n').slice(-500000);
+              if (session._normalizer) session._normalizer.processLive(JSON.parse(payload));
             }
           }
           break;
@@ -490,8 +494,9 @@ function registerWsHandler(wss, ctx) {
               const totalCount = session._normalizer ? session._normalizer.total : 0;
 
               const turnMap = session._normalizer ? session._normalizer.turnMap() : [];
+              const pendingPerms = sm.activePendingPermissions?.() || {};
               ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, mode: 'chat',
-                messages, totalCount, chatStatus: sm.chatStatus(), isStreaming: sm.isStreaming, taskState: sm.taskState(), turnMap }));
+                messages, totalCount, chatStatus: sm.chatStatus(), isStreaming: sm.isStreaming, taskState: sm.taskState(), turnMap, pendingPermissions: pendingPerms }));
             } else {
               ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, buffer: session.buffer || '' }));
             }

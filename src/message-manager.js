@@ -164,6 +164,7 @@ class MessageManager {
       case 'assistant': return this._processAssistant(raw, emit);
       case 'result': return this._processResult(raw, emit);
       case 'control_request': return this._processControlRequest(raw, emit);
+      case 'control_response': return this._processControlResponse(raw, emit);
       case 'control_cancel_request': return this._processControlCancel(raw, emit);
     }
   }
@@ -347,6 +348,22 @@ class MessageManager {
       resolved: null,
     };
     if (emit) this._emit({ op: 'edit', id: existing.id, fields: { permission: existing.permission } });
+  }
+
+  _processControlResponse(raw, emit) {
+    // control_response is the user's approval/denial sent to claude stdin
+    // Match by request_id to resolve the pending permission
+    const requestId = raw.response?.request_id;
+    if (!requestId) return;
+    const approved = raw.response?.response?.behavior === 'allow';
+    for (let i = this.messages.length - 1; i >= 0; i--) {
+      const m = this.messages[i];
+      if (m.permission?.requestId === requestId) {
+        m.permission.resolved = approved ? 'allowed' : 'denied';
+        if (emit) this._emit({ op: 'edit', id: m.id, fields: { permission: m.permission } });
+        break;
+      }
+    }
   }
 
   _processControlCancel(raw, emit) {

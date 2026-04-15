@@ -899,7 +899,7 @@ class App {
           const chatView = new ChatView(winInfo, this.ws, serverId, this);
           this.sessions.set(winInfo.id, chatView);
           if (msg.messages?.length) {
-            chatView.loadHistory(msg.messages, msg.totalCount, msg.isStreaming, { chatStatus: msg.chatStatus, taskState: msg.taskState, turnMap: msg.turnMap });
+            chatView.loadHistory(msg.messages, msg.totalCount, msg.isStreaming, { chatStatus: msg.chatStatus, taskState: msg.taskState, turnMap: msg.turnMap, pendingPermissions: msg.pendingPermissions });
           }
           if (msg.viewOnly) chatView._setReadOnly();
           winInfo.onClose = () => {

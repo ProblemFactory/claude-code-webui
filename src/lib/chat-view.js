@@ -311,10 +311,26 @@ class ChatView {
     for (const msg of messages) this._onCreateMessage(msg);
     this._loadingHistory = false;
 
-    // Apply metadata (chatStatus, taskState)
+    // Apply metadata (chatStatus, taskState, pendingPermissions)
     if (meta) {
       if (meta.chatStatus) this.applyStatus(meta.chatStatus);
       if (meta.taskState) this._applyTaskState(meta.taskState);
+      // Restore pending permission overlays from server (survived in buffer)
+      if (meta.pendingPermissions) {
+        for (const [toolUseId, cr] of Object.entries(meta.pendingPermissions)) {
+          // Find the message with this tool call and inject the permission
+          for (const [id, el] of this._elements) {
+            if (el.dataset?.toolId === toolUseId || el.querySelector(`[data-tool-id="${toolUseId}"]`)) {
+              const msg = this._messageIndex?.get(id);
+              if (msg && !msg.permission) {
+                msg.permission = { requestId: cr.request_id, toolName: cr.request?.tool_name, input: cr.request?.input || {}, suggestions: cr.request?.permission_suggestions || [], resolved: null };
+                this._renderers.renderPermissionOverlay(el, msg);
+              }
+              break;
+            }
+          }
+        }
+      }
     }
     this._syncReviewAvailability();
     // Render minimap from turn data (attach payload or async fetch fallback)
