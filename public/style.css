@@ -177,10 +177,11 @@ html, body {
   font-size: 9px; padding: 1px 6px; border-radius: 8px; font-weight: 600;
 }
 .session-mode-icon { font-size: 10px; flex-shrink: 0; }
+.session-backend-icon, .session-composite-icon { width: 14px; height: 14px; }
 .mode-backend-icon { position: relative; overflow: visible; }
 .mode-badge {
-  position: absolute; bottom: -2px; right: -2px; z-index: 1;
-  width: 8px; height: 8px; display: flex; align-items: center; justify-content: center;
+  position: absolute; bottom: -3px; right: -4px; z-index: 1;
+  width: 10px; height: 10px; display: flex; align-items: center; justify-content: center;
   background: var(--bg-sidebar, var(--bg-root)); border-radius: 2px; padding: 1px;
 }
 .mode-badge svg { width: 100%; height: 100%; display: block; }

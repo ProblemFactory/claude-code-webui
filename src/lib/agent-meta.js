@@ -335,10 +335,8 @@ export function createModeBackendIcon(backend, mode, { title, className = '' } =
   const badge = document.createElement('span');
   badge.className = 'mode-badge';
   if (mode === 'chat') {
-    // Rounded speech bubble
-    badge.innerHTML = `<svg viewBox="0 0 10 10" fill="var(--text)" xmlns="http://www.w3.org/2000/svg"><path d="M1 2a1.5 1.5 0 0 1 1.5-1.5h5A1.5 1.5 0 0 1 9 2v4a1.5 1.5 0 0 1-1.5 1.5H4.5L1.5 9.5V2Z"/></svg>`;
+    badge.innerHTML = `<svg viewBox="0 0 10 10" fill="none" stroke="var(--text)" stroke-width="1.2" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><path d="M1 1.8a1.2 1.2 0 0 1 1.2-1.2h5.6A1.2 1.2 0 0 1 9 1.8v4.4a1.2 1.2 0 0 1-1.2 1.2H4.2L1 9.5V1.8Z" fill="var(--bg-sidebar, var(--bg-root))"/></svg>`;
   } else {
-    // >_ prompt
     badge.innerHTML = `<svg viewBox="0 0 10 10" fill="none" stroke="var(--text)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><path d="M1 2.5l3 2.5-3 2.5"/><path d="M5.5 8h3.5"/></svg>`;
   }
   icon.appendChild(badge);
