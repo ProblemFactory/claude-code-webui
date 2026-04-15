@@ -211,16 +211,19 @@ class WindowManager {
         this._clearGridHighlight();
       }
 
-      // Tab merge: detect if cursor is over another window's icon
+      // Tab merge: detect if cursor is over another window's icon (pick highest z-index)
       const prevTarget = tabMergeTarget;
       tabMergeTarget = null;
+      let tabMergeZ = -1;
       for (const [id, w] of this.windows) {
         if (id === win.id || (w._tabChain && w._tabChain.tabs[0] !== w.id)) continue;
+        if (w._hiddenByDesktop || w.isMinimized) continue;
         const icon = w.iconSpan;
         if (!icon) continue;
         const r = icon.getBoundingClientRect();
         if (e.clientX >= r.left - 8 && e.clientX <= r.right + 8 && e.clientY >= r.top - 8 && e.clientY <= r.bottom + 8) {
-          tabMergeTarget = w; break;
+          const z = parseInt(w.element.style.zIndex) || 0;
+          if (z > tabMergeZ) { tabMergeTarget = w; tabMergeZ = z; }
         }
       }
       for (const [, w] of this.windows) w.element.classList.toggle('tab-drop-target', w === tabMergeTarget);
@@ -232,7 +235,8 @@ class WindowManager {
         element.style.display = 'none';
         mergeGhost = document.createElement('div');
         mergeGhost.className = 'tab-ghost';
-        mergeGhost.innerHTML = `<span>${win._typeIcon || ''}</span><span>${win.title}</span>`;
+        const ghostIcon = win.backendIconSlot?.children.length ? win.backendIconSlot.children[0].cloneNode(true).outerHTML : (win._typeIcon || '');
+        mergeGhost.innerHTML = `<span>${ghostIcon}</span><span>${win.title}</span>`;
         document.body.appendChild(mergeGhost);
       } else if (!tabMergeTarget && prevTarget && mergeGhost) {
         // Leaving merge zone — remove ghost, restore window

@@ -60,7 +60,8 @@ const tabGroupMethods = {
         dragging = true;
         ghost = document.createElement('div');
         ghost.className = 'tab-ghost';
-        ghost.innerHTML = `<span>${winInfo._typeIcon}</span><span>${winInfo.title}</span>`;
+        const ghostIcon = winInfo.backendIconSlot?.children.length ? winInfo.backendIconSlot.children[0].cloneNode(true).outerHTML : (winInfo._typeIcon || '');
+        ghost.innerHTML = `<span>${ghostIcon}</span><span>${winInfo.title}</span>`;
         document.body.appendChild(ghost);
       }
       ghost.style.left = (e.clientX + 12) + 'px';
@@ -171,10 +172,16 @@ const tabGroupMethods = {
 
       const iconWrap = document.createElement('span');
       iconWrap.className = 'tab-icon-wrap';
-      const icon = document.createElement('span');
-      icon.className = 'tab-icon';
-      icon.innerHTML = tabWin._typeIcon || '';
-      iconWrap.appendChild(icon);
+      // Use composite backend+mode icon if available, else generic type icon
+      if (tabWin.backendIconSlot?.children.length) {
+        const clone = tabWin.backendIconSlot.children[0].cloneNode(true);
+        iconWrap.appendChild(clone);
+      } else {
+        const icon = document.createElement('span');
+        icon.className = 'tab-icon';
+        icon.innerHTML = tabWin._typeIcon || '';
+        iconWrap.appendChild(icon);
+      }
       if (tabWin.titleMeta?.agentKind && tabWin.titleMeta.agentKind !== 'primary') {
         iconWrap.appendChild(createAgentKindIcon(tabWin.titleMeta.agentKind, { className: 'tab-agent-kind-icon' }));
       }
