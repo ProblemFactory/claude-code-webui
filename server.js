@@ -125,7 +125,10 @@ function refreshAvailableModels() {
   try {
     const codexCache = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.codex', 'models_cache.json'), 'utf-8'));
     if (codexCache.models?.length) {
-      AVAILABLE_MODELS.codex = [{ id: '', label: 'Default' }, ...codexCache.models.map(m => ({ id: m.slug, label: m.display_name || m.slug })).filter(m => m.id)];
+      AVAILABLE_MODELS.codex = [{ id: '', label: 'Default' }, ...codexCache.models.map(m => {
+        const ctx = m.context_window ? (m.context_window >= 1000000 ? Math.round(m.context_window / 1000000) + 'M' : Math.round(m.context_window / 1000) + 'k') : '';
+        return { id: m.slug, label: (m.display_name || m.slug) + (ctx ? ` (${ctx})` : '') };
+      }).filter(m => m.id)];
     }
   } catch {}
 }
