@@ -122,13 +122,19 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
   archBtn.title = isArchived ? 'Unarchive' : 'Archive';
   archBtn.onclick = (e) => { e.stopPropagation(); state.toggleArchive(s); };
   row.insertBefore(archBtn, row.children[1]);
+  // Mode icon (chat/terminal) before status badge
+  const modeIcon = document.createElement('span');
+  modeIcon.className = 'session-mode-icon';
   if (s.webuiMode === 'chat') {
-    const modeIcon = document.createElement('span');
-    modeIcon.className = 'session-mode-icon';
-    modeIcon.title = 'Chat mode';
     modeIcon.textContent = '\uD83D\uDCAC';
-    row.insertBefore(modeIcon, row.querySelector('.session-card-name'));
+    modeIcon.title = 'Chat mode';
+  } else {
+    modeIcon.textContent = '\u2B1B';
+    modeIcon.title = 'Terminal mode';
   }
+  const statusBadge = row.querySelector('.session-card-badge');
+  row.insertBefore(modeIcon, statusBadge);
+
   // Backend icon (Claude/Codex) before session name
   const backendIcon = createBackendIcon(s.backend || 'claude', {
     className: 'session-backend-icon',
