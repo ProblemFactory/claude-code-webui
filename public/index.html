@@ -147,8 +147,8 @@
           </div>
         </label>
         <label>Session Name<input type="text" id="input-session-name" placeholder="My Project"></label>
-        <label>Model<input type="text" id="input-model" list="model-options" placeholder="Default"></label>
-        <datalist id="model-options"></datalist>
+        <label>Model<select id="input-model"></select></label>
+        <label class="hidden" id="custom-model-row">Custom Model<input type="text" id="input-model-custom" placeholder="model-name"></label>
         <label>Permission Mode<select id="input-permission"></select></label>
         <label>Effort<select id="input-effort"></select></label>
         <label>Additional Arguments<input type="text" id="input-extra-args" placeholder="--verbose"></label>

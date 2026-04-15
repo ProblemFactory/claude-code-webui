@@ -602,7 +602,9 @@ class App {
         mode: document.getElementById('input-mode').value,
         cwd: document.getElementById('input-cwd').value.trim(),
         name: document.getElementById('input-session-name').value.trim(),
-        model: document.getElementById('input-model').value,
+        model: document.getElementById('input-model').value === '__custom__'
+          ? (document.getElementById('input-model-custom').value.trim() || '')
+          : document.getElementById('input-model').value,
         permission: document.getElementById('input-permission').value,
         effort: document.getElementById('input-effort').value,
         extraArgs: document.getElementById('input-extra-args').value.trim(),
@@ -632,28 +634,42 @@ class App {
 
   _applySessionBackendOptions(backend, { applyDefaults = false } = {}) {
     const cfg = BACKEND_SESSION_OPTIONS[backend] || BACKEND_SESSION_OPTIONS.claude;
-    const modelInput = document.getElementById('input-model');
-    const modelList = document.getElementById('model-options');
+    const modelSel = document.getElementById('input-model');
+    const customModelRow = document.getElementById('custom-model-row');
+    const customModelInput = document.getElementById('input-model-custom');
     const permissionSel = document.getElementById('input-permission');
     const effortSel = document.getElementById('input-effort');
     const extraArgsInput = document.getElementById('input-extra-args');
     const defaults = this._getBackendSessionDefaults(backend);
-    const currentModel = modelInput?.value || '';
+    const currentModel = modelSel?.value || '';
     const currentPermission = permissionSel?.value || '';
     const currentEffort = effortSel?.value || '';
 
-    modelList.innerHTML = '';
+    modelSel.innerHTML = '';
     for (const value of cfg.models) {
       const opt = document.createElement('option');
       opt.value = value;
-      modelList.appendChild(opt);
+      opt.textContent = value || 'Default';
+      modelSel.appendChild(opt);
     }
-    if (modelInput) {
-      const nextModel = applyDefaults
-        ? defaults.model
-        : (cfg.models.includes(currentModel) ? currentModel : defaults.model);
-      modelInput.value = nextModel || '';
-    }
+    // "Custom..." option for free-text model entry
+    const customOpt = document.createElement('option');
+    customOpt.value = '__custom__';
+    customOpt.textContent = 'Custom...';
+    modelSel.appendChild(customOpt);
+
+    const nextModel = applyDefaults
+      ? defaults.model
+      : (cfg.models.includes(currentModel) ? currentModel : defaults.model);
+    modelSel.value = cfg.models.includes(nextModel) ? nextModel : '';
+
+    // Wire custom model toggle
+    modelSel.onchange = () => {
+      const isCustom = modelSel.value === '__custom__';
+      customModelRow.classList.toggle('hidden', !isCustom);
+      if (isCustom && customModelInput) customModelInput.focus();
+    };
+    customModelRow.classList.add('hidden');
 
     permissionSel.innerHTML = '';
     for (const optData of cfg.permissions) {
