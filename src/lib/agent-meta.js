@@ -174,7 +174,7 @@ let refreshTimer = null;
 
 export function refreshBackendIcons(root = document) {
   const scope = root?.querySelectorAll ? root : document;
-  scope.querySelectorAll('.backend-icon[data-backend]').forEach((el) => applyBackendIconContrast(el));
+  scope.querySelectorAll('.backend-icon[data-backend], .mode-backend-logo[data-backend]').forEach((el) => applyBackendIconContrast(el));
 }
 
 function scheduleBackendIconRefresh(target) {
@@ -335,7 +335,7 @@ export function createModeBackendIcon(backend, mode, { title, className = '' } =
   el.className = `mode-backend-icon ${className}`.trim();
   el.title = title || `${meta.label} ${mode === 'chat' ? 'Chat' : 'Terminal'}`;
 
-  const logoMask = meta.iconSrc ? `<span class="mode-backend-logo ${meta.iconClass}" style="--backend-icon-mask:url('${meta.iconSrc}');--backend-icon-color:${meta.brandColor || 'currentColor'}"></span>` : `<span class="mode-backend-logo-text">${meta.icon}</span>`;
+  const logoMask = meta.iconSrc ? `<span class="mode-backend-logo ${meta.iconClass}" data-backend="${meta.id}" style="--backend-icon-mask:url('${meta.iconSrc}');--backend-icon-color:${meta.brandColor || 'currentColor'}"></span>` : `<span class="mode-backend-logo-text">${meta.icon}</span>`;
 
   if (mode === 'chat') {
     // Rounded chat bubble with visible tail at bottom-left
