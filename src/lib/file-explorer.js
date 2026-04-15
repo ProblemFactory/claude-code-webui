@@ -748,6 +748,12 @@ class FileExplorer {
     menu.style.left = x + 'px'; menu.style.top = y + 'px';
     const fullPath = this.currentPath + '/' + dataset.name;
     const items = [];
+    items.push({ label: 'Copy Path', action: () => {
+      navigator.clipboard?.writeText(fullPath).catch(() => {
+        const ta = document.createElement('textarea'); ta.value = fullPath; ta.style.cssText = 'position:fixed;left:-9999px';
+        document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
+      });
+    }});
     if (dataset.isDir === 'true') {
       const isBookmarked = this._bookmarks.some(b => b.path === fullPath);
       items.push({ label: isBookmarked ? '\u2605 Bookmarked' : '\u2606 Add to bookmarks', action: () => {
