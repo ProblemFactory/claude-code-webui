@@ -304,19 +304,21 @@ class MessageManager {
     this._finalizeStreaming(emit);
     // Flush any pending tool calls that never got results (interrupted)
     // But preserve tool calls with unresolved permissions — they're still waiting for user input
+    const toRemove = [];
     for (const [toolUseId, pending] of this.pendingToolCalls) {
       const existing = this.messageIndex.get(pending.msgId);
       if (existing && existing.status === 'pending') {
         if (existing.permission && !existing.permission.resolved) {
-          // Still waiting for permission — keep as pending, don't mark error
+          // Still waiting for permission — keep in pendingToolCalls for tool_result matching
           continue;
         }
         existing.status = 'error';
         existing.toolStatus = 'error';
         if (emit) this._emit({ op: 'edit', id: existing.id, fields: { status: 'error', toolStatus: 'error' } });
       }
+      toRemove.push(toolUseId);
     }
-    this.pendingToolCalls.clear();
+    for (const id of toRemove) this.pendingToolCalls.delete(id);
     this.turnIndex++;
 
     if (raw.is_error || (raw.subtype && raw.subtype !== 'success')) {
