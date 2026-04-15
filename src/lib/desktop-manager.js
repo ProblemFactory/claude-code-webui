@@ -20,6 +20,12 @@ export class DesktopManager {
 
     // Taskbar resize handle (drag top edge to resize)
     this._setupTaskbarResize();
+
+    // Re-adapt sizes when preview ratio changes
+    app.settings?.on('taskbar.desktopPreviewRatio', () => {
+      const taskbar = document.getElementById('taskbar');
+      if (taskbar) this._adaptTaskbarSize(taskbar.offsetHeight);
+    });
   }
 
   get activeDesktopId() { return this._activeId; }
@@ -477,10 +483,13 @@ export class DesktopManager {
   /** Adapt desktop preview and taskbar element sizes to current height */
   _adaptTaskbarSize(h) {
     const root = document.documentElement;
-    // Preview: fill available height minus label + padding (3:2 aspect)
-    const previewH = Math.max(16, h - 18);
+    // Preview: ratio of taskbar height, rest for label. Default 70%.
+    const ratio = (this.app.settings?.get('taskbar.desktopPreviewRatio') ?? 70) / 100;
+    const previewH = Math.max(12, Math.round(h * ratio) - 6); // 6px for padding
+    const labelSize = Math.max(6, Math.round((h - previewH) * 0.6));
     root.style.setProperty('--desktop-preview-h', previewH + 'px');
     root.style.setProperty('--desktop-preview-w', Math.round(previewH * 1.5) + 'px');
+    root.style.setProperty('--desktop-label-size', labelSize + 'px');
     // All elements proportional to taskbar height — no upper caps
     const iconSize = Math.max(14, Math.round(h * 0.4));
     root.style.setProperty('--taskbar-icon-size', iconSize + 'px');

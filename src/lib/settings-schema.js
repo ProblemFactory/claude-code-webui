@@ -28,6 +28,13 @@ const SETTINGS_SCHEMA = {
     category: 'Toolbar & Layout', liveApply: true,
   },
 
+  'taskbar.desktopPreviewRatio': {
+    type: 'number', default: 70, min: 30, max: 100, step: 5,
+    label: 'Desktop preview size (%)',
+    description: 'How much of the taskbar height the desktop preview occupies (rest goes to label text)',
+    category: 'Toolbar & Layout', liveApply: true,
+  },
+
   // ── Window ──
   'window.enableSnapAnimation': {
     type: 'boolean', default: true, label: 'Snap animation',

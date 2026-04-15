@@ -611,7 +611,7 @@ html, body {
   transition: left 0.05s, top 0.05s;
 }
 .desktop-preview-label {
-  text-align: center; font-size: 7px; color: var(--text-dim); line-height: 1;
+  text-align: center; font-size: var(--desktop-label-size, 7px); color: var(--text-dim); line-height: 1;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   max-width: var(--desktop-preview-w, 48px); pointer-events: none;
 }
