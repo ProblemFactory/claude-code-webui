@@ -1,6 +1,20 @@
 import { escHtml, copyText } from './utils.js';
 import { createBackendIcon, createAgentKindIcon, createModeBackendIcon, getBackendMeta, getAgentKindMeta, getAgentRoleLabel, getAgentRoleShortLabel, getSessionKey } from './agent-meta.js';
 
+/** Inline SVG icon helper — returns an HTML string for a 12x12 stroked icon */
+const _s = (d, fill = false) => `<svg style="width:12px;height:12px;vertical-align:-2px" viewBox="0 0 16 16" fill="${fill ? 'currentColor' : 'none'}" stroke="${fill ? 'none' : 'currentColor'}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg">${d}</svg>`;
+const ICON = {
+  starOn:    _s('<path d="M8 1.5l2 4.2 4.5.6-3.3 3.1.8 4.6L8 11.5l-4 2.5.8-4.6L1.5 6.3 6 5.7z"/>', true),
+  starOff:   _s('<path d="M8 1.5l2 4.2 4.5.6-3.3 3.1.8 4.6L8 11.5l-4 2.5.8-4.6L1.5 6.3 6 5.7z"/>'),
+  archive:   _s('<path d="M2 4h12M3 4v8a1 1 0 001 1h8a1 1 0 001-1V4"/><path d="M6.5 8h3"/>'),
+  unarchive: _s('<path d="M2 4h12M3 4v8a1 1 0 001 1h8a1 1 0 001-1V4"/><path d="M8 7v4M6 9l2-2 2 2"/>'),
+  rename:    _s('<path d="M11.5 1.5l3 3L5 14H2v-3z"/>'),
+  find:      _s('<circle cx="7" cy="7" r="4"/><path d="M10 10l4 4"/>'),
+  chat:      _s('<path d="M2 3a2 2 0 012-2h8a2 2 0 012 2v6a2 2 0 01-2 2H6l-4 3V3z"/>'),
+  history:   _s('<path d="M3 1v4h4"/><path d="M3 5a6 6 0 1011 3"/><path d="M9 5v4l2.5 1.5"/>'),
+  terminate: _s('<path d="M4 4l8 8M12 4l-8 8"/>'),
+};
+
 /**
  * Render the detail groups section inside a session card.
  * @param {HTMLElement} container - DOM container for groups
@@ -111,14 +125,14 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
   // Star button (inline, always visible)
   const starBtn = document.createElement('button');
   starBtn.className = 'session-inline-btn' + (starred ? ' starred' : '');
-  starBtn.textContent = starred ? '\u2605' : '\u2606';
+  starBtn.innerHTML = starred ? ICON.starOn : ICON.starOff;
   starBtn.title = starred ? 'Unstar' : 'Star';
   starBtn.onclick = (e) => { e.stopPropagation(); state.toggleStar(s); };
   row.insertBefore(starBtn, row.firstChild);
   // Archive button (inline, always visible)
   const archBtn = document.createElement('button');
   archBtn.className = 'session-inline-btn' + (isArchived ? ' archived' : '');
-  archBtn.textContent = isArchived ? '\u{1F4E4}' : '\u{1F4E6}';
+  archBtn.innerHTML = isArchived ? ICON.unarchive : ICON.archive;
   archBtn.title = isArchived ? 'Unarchive' : 'Archive';
   archBtn.onclick = (e) => { e.stopPropagation(); state.toggleArchive(s); };
   row.insertBefore(archBtn, row.children[1]);
@@ -229,7 +243,7 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
   // Rename button
   const detailRenameBtn = document.createElement('button');
   detailRenameBtn.className = 'session-detail-btn';
-  detailRenameBtn.textContent = '\u270F Rename';
+  detailRenameBtn.innerHTML = ICON.rename + ' Rename';
   detailRenameBtn.onclick = (e) => { e.stopPropagation(); onRename(s, originalName); };
   actionsDiv.appendChild(detailRenameBtn);
 
@@ -237,7 +251,7 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
   if (s.webuiId) {
     const findBtn = document.createElement('button');
     findBtn.className = 'session-detail-btn';
-    findBtn.textContent = '\uD83D\uDD0D Find';
+    findBtn.innerHTML = ICON.find + ' Find';
     findBtn.onclick = (e) => {
       e.stopPropagation();
       app.flashWindow(s.webuiId);
@@ -270,7 +284,7 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
     const dropBtn = document.createElement('button');
     const updateLabel = () => {
       const isChat = resumeMode === 'chat';
-      resumeBtn.textContent = isChat ? '\uD83D\uDCAC Resume in Chat' : '\u25B6 Resume in Terminal';
+      resumeBtn.innerHTML = isChat ? (ICON.chat + ' Resume in Chat') : ('\u25B6 Resume in Terminal');
       resumeBtn.className = 'session-detail-btn ' + (isChat ? 'session-detail-btn-chat' : 'session-detail-btn-primary');
       dropBtn.className = 'session-resume-drop ' + (isChat ? 'session-detail-btn-chat' : 'session-detail-btn-primary');
     };
@@ -297,7 +311,7 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
     // View History button (read-only, no resume)
     const viewBtn = document.createElement('button');
     viewBtn.className = 'session-detail-btn';
-    viewBtn.textContent = '\uD83D\uDCCB View History';
+    viewBtn.innerHTML = ICON.history + ' View History';
     viewBtn.onclick = (e) => {
       e.stopPropagation();
       app.viewSession(s.sessionId, s.cwd, customName || s.name, {
@@ -312,7 +326,7 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
     const terminateBtn = document.createElement('button');
     terminateBtn.className = 'session-detail-btn';
     terminateBtn.style.color = 'var(--red, #e55)';
-    terminateBtn.textContent = '\u2715 Terminate';
+    terminateBtn.innerHTML = ICON.terminate + ' Terminate';
     terminateBtn.onclick = (e) => {
       e.stopPropagation();
       if (!confirm('Terminate session "' + displayName + '"?')) return;
