@@ -84,7 +84,7 @@ try {
 } catch {}
 // Discover available models per backend (cached, refreshed periodically)
 const AVAILABLE_MODELS = {
-  claude: [{ id: '', label: 'Default' }, { id: 'opus', label: 'opus (latest)' }, { id: 'sonnet', label: 'sonnet (latest)' }, { id: 'haiku', label: 'haiku (latest)' }],
+  claude: [{ id: '', label: 'Default' }, { id: 'opus', label: 'opus (latest, 200k)' }, { id: 'opus[1m]', label: 'opus[1m] (latest, 1M)' }, { id: 'sonnet', label: 'sonnet (latest)' }, { id: 'sonnet[1m]', label: 'sonnet[1m] (latest, 1M)' }, { id: 'haiku', label: 'haiku (latest)' }],
   codex: [{ id: '', label: 'Default' }],
 };
 function refreshAvailableModels() {
@@ -101,8 +101,18 @@ function refreshAvailableModels() {
         try {
           const data = JSON.parse(body);
           if (data.data?.length) {
-            const aliases = [{ id: '', label: 'Default' }, { id: 'opus', label: 'opus (latest)' }, { id: 'sonnet', label: 'sonnet (latest)' }, { id: 'haiku', label: 'haiku (latest)' }];
-            const models = data.data.map(m => ({ id: m.id, label: m.display_name || m.id }));
+            const aliases = [
+              { id: '', label: 'Default' },
+              { id: 'opus', label: 'opus (latest, 200k)' },
+              { id: 'opus[1m]', label: 'opus[1m] (latest, 1M context)' },
+              { id: 'sonnet', label: 'sonnet (latest)' },
+              { id: 'sonnet[1m]', label: 'sonnet[1m] (latest, 1M context)' },
+              { id: 'haiku', label: 'haiku (latest)' },
+            ];
+            const models = data.data.map(m => {
+              const ctx = m.max_input_tokens >= 1000000 ? '1M' : m.max_input_tokens >= 200000 ? '200k' : Math.round(m.max_input_tokens / 1000) + 'k';
+              return { id: m.id, label: `${m.display_name || m.id} (${ctx})` };
+            });
             AVAILABLE_MODELS.claude = [...aliases, ...models];
           }
         } catch {}

@@ -126,8 +126,10 @@ const SETTINGS_SCHEMA = {
     type: 'enum', default: '',
     options: [
       { value: '', label: 'Default' },
-      { value: 'opus', label: 'opus (latest)' },
+      { value: 'opus', label: 'opus (latest, 200k)' },
+      { value: 'opus[1m]', label: 'opus[1m] (latest, 1M context)' },
       { value: 'sonnet', label: 'sonnet (latest)' },
+      { value: 'sonnet[1m]', label: 'sonnet[1m] (latest, 1M context)' },
       { value: 'haiku', label: 'haiku (latest)' },
     ], // dynamically updated from /api/available-models
     label: 'Default model',
