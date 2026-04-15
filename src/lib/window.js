@@ -1,6 +1,6 @@
 import { attachPopoverClose } from './utils.js';
 import { TYPE_ICONS, installTabGroupMixin } from './tab-group.js';
-import { createAgentKindIcon, getAgentKindMeta } from './agent-meta.js';
+import { createAgentKindIcon, createBackendIcon, createModeBackendIcon, getAgentKindMeta } from './agent-meta.js';
 
 class WindowManager {
   constructor(workspace) {
@@ -789,8 +789,20 @@ class WindowManager {
     win.agentKind = agentKind;
     win.backendIconSlot.innerHTML = '';
     win.agentKindSlot.innerHTML = '';
-    win.backendIconSlot.style.display = 'none';
-    win.iconSpan.style.display = '';
+    if (backend && (win.type === 'chat' || win.type === 'terminal')) {
+      // Show composite backend+mode icon, hide generic type emoji
+      const mode = win.type; // 'chat' or 'terminal'
+      win.backendIconSlot.appendChild(createModeBackendIcon(backend, mode, { className: 'window-backend-icon' }));
+      win.backendIconSlot.style.display = '';
+      win.iconSpan.style.display = 'none';
+    } else if (backend) {
+      win.backendIconSlot.appendChild(createBackendIcon(backend, { className: 'window-backend-icon' }));
+      win.backendIconSlot.style.display = '';
+      win.iconSpan.style.display = 'none';
+    } else {
+      win.backendIconSlot.style.display = 'none';
+      win.iconSpan.style.display = '';
+    }
     if (agentKind && agentKind !== 'primary') {
       const kindMeta = getAgentKindMeta(agentKind);
       win.agentKindSlot.style.display = '';
