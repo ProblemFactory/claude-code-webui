@@ -252,6 +252,7 @@ const SETTINGS_SCHEMA = {
       { value: 'focus', label: 'Focus window' },
       { value: 'expand', label: 'Expand card' },
       { value: 'flash', label: 'Flash window' },
+      { value: 'goto', label: 'Go to window (switch desktop + flash)' },
     ],
     label: 'Card click behavior',
     description: 'What happens when clicking a session card: focus/open the window, expand card details, or flash/bounce the window',

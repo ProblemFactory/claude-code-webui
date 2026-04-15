@@ -1182,6 +1182,34 @@ class App {
     else document.getElementById('welcome').classList.add('hidden');
   }
 
+  // Switch to the window's desktop and flash it
+  goToWindow(serverSessionId) {
+    for (const [winId, term] of this.sessions) {
+      if (term.sessionId === serverSessionId) {
+        const win = this.wm.windows.get(winId);
+        if (!win) break;
+        const dm = this.desktopManager;
+        // Switch desktop if needed
+        if (dm && win._desktopId && win._desktopId !== dm.activeDesktopId) {
+          dm.switchTo(win._desktopId).then(() => {
+            if (win.isMinimized) this.wm.restore(winId);
+            this.wm.focusWindow(winId);
+            win.element.classList.add('window-find-flash');
+            setTimeout(() => win.element.classList.remove('window-find-flash'), 3000);
+          });
+        } else {
+          if (win.isMinimized) this.wm.restore(winId);
+          this.wm.focusWindow(winId);
+          win.element.classList.add('window-find-flash');
+          setTimeout(() => win.element.classList.remove('window-find-flash'), 3000);
+        }
+        const session = this.sessions.get(winId);
+        if (session && !win.isMinimized) session.focus?.();
+        break;
+      }
+    }
+  }
+
   // Flash a window's title bar + taskbar item to help user find it
   flashWindow(serverSessionId) {
     for (const [winId, term] of this.sessions) {

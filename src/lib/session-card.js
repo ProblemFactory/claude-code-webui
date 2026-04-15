@@ -248,16 +248,32 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
   detailRenameBtn.onclick = (e) => { e.stopPropagation(); onRename(s, originalName); };
   actionsDiv.appendChild(detailRenameBtn);
 
-  // Find button — highlight the window + taskbar item with fast blink
+  // Find / GoTo split button
   if (s.webuiId) {
+    const findWrap = document.createElement('div');
+    findWrap.className = 'session-resume-split';
+    let findMode = 'find'; // 'find' or 'goto'
     const findBtn = document.createElement('button');
     findBtn.className = 'session-detail-btn';
-    findBtn.innerHTML = ICON.find + ' Find';
+    const findDrop = document.createElement('button');
+    findDrop.className = 'session-resume-drop';
+    const updateFindLabel = () => {
+      findBtn.innerHTML = findMode === 'goto' ? (ICON.terminal + ' GoTo') : (ICON.find + ' Find');
+    };
+    updateFindLabel();
     findBtn.onclick = (e) => {
       e.stopPropagation();
-      app.flashWindow(s.webuiId);
+      if (findMode === 'goto') app.goToWindow(s.webuiId);
+      else app.flashWindow(s.webuiId);
     };
-    actionsDiv.appendChild(findBtn);
+    findDrop.textContent = '\u25BE';
+    findDrop.onclick = (e) => {
+      e.stopPropagation();
+      findMode = findMode === 'goto' ? 'find' : 'goto';
+      updateFindLabel();
+    };
+    findWrap.append(findBtn, findDrop);
+    actionsDiv.appendChild(findWrap);
   }
 
   // Resume/Attach action button
@@ -363,15 +379,18 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
       }
     };
   } else if (clickBehavior === 'flash') {
-    // Click flashes/bounces the corresponding window
     card.onclick = (e) => {
       if (e.target.closest('.session-detail-btn') || e.target.closest('.session-inline-btn') || e.target.closest('.session-expand-btn') || e.target.closest('.session-detail-copyable')) return;
       if (s.webuiId) app.flashWindow(s.webuiId);
-      else if (s.status === 'live' && s.webuiId) app.attachSession(s.webuiId, s.webuiName || displayName, s.cwd, { mode: s.webuiMode, ...agentOpts });
       else if (s.status === 'tmux') app.attachTmuxSession(s.tmuxTarget, displayName, s.cwd);
-      else if (s.status === 'stopped') app.resumeSession(s.sessionId, s.cwd, customName || s.name, {
-        ...agentOpts,
-      });
+      else if (s.status === 'stopped') app.resumeSession(s.sessionId, s.cwd, customName || s.name, { ...agentOpts });
+    };
+  } else if (clickBehavior === 'goto') {
+    card.onclick = (e) => {
+      if (e.target.closest('.session-detail-btn') || e.target.closest('.session-inline-btn') || e.target.closest('.session-expand-btn') || e.target.closest('.session-detail-copyable')) return;
+      if (s.webuiId) app.goToWindow(s.webuiId);
+      else if (s.status === 'tmux') app.attachTmuxSession(s.tmuxTarget, displayName, s.cwd);
+      else if (s.status === 'stopped') app.resumeSession(s.sessionId, s.cwd, customName || s.name, { ...agentOpts });
     };
   } else {
     // Default 'focus': click opens/resumes directly
