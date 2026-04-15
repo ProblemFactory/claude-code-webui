@@ -350,11 +350,13 @@
 ::highlight(chat-search-current) { background: rgba(255,193,7,0.7); }
 .chat-msg-flash { animation: chat-msg-flash 2s ease-out; }
 @keyframes chat-msg-flash { 0% { background: rgba(255,193,7,0.3); } 100% { background: transparent; } }
-.chat-link {
-  color: var(--accent); cursor: pointer; text-decoration: underline;
+/* All links inside chat messages (both auto-detected .chat-link and markdown <a>) */
+.chat-msg a, .chat-link {
+  color: var(--blue); cursor: pointer; text-decoration: underline;
   text-decoration-style: dotted; text-underline-offset: 2px;
 }
-.chat-link:hover { text-decoration-style: solid; opacity: 0.9; }
+.chat-msg a:visited { color: var(--blue); opacity: 0.8; }
+.chat-msg a:hover, .chat-link:hover { text-decoration-style: solid; opacity: 0.9; }
 .chat-link-path { color: var(--blue); }
 .chat-link-tooltip {
   position: absolute; bottom: calc(100% + 4px); left: 50%; transform: translateX(-50%);
