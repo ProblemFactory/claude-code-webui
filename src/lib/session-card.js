@@ -1,5 +1,5 @@
 import { escHtml, copyText } from './utils.js';
-import { createAgentKindIcon, getBackendMeta, getAgentKindMeta, getAgentRoleLabel, getAgentRoleShortLabel, getSessionKey } from './agent-meta.js';
+import { createBackendIcon, createAgentKindIcon, getBackendMeta, getAgentKindMeta, getAgentRoleLabel, getAgentRoleShortLabel, getSessionKey } from './agent-meta.js';
 
 /**
  * Render the detail groups section inside a session card.
@@ -129,6 +129,13 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
     modeIcon.textContent = '\uD83D\uDCAC';
     row.insertBefore(modeIcon, row.querySelector('.session-card-name'));
   }
+  // Backend icon (Claude/Codex) before session name
+  const backendIcon = createBackendIcon(s.backend || 'claude', {
+    className: 'session-backend-icon',
+    title: backendMeta.label,
+  });
+  row.insertBefore(backendIcon, row.querySelector('.session-card-name'));
+
   if (showAgentKind) {
     const agentKindIcon = createAgentKindIcon(s.agentKind || 'primary', {
       className: 'session-agent-kind-icon',

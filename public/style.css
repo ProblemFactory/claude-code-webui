@@ -163,6 +163,7 @@ html, body {
   color: var(--text-dim);
 }
 .session-backend-icon { width: 14px; height: 14px; font-size: 8px; }
+.session-backend-icon { width: 12px; height: 12px; font-size: 8px; flex-shrink: 0; }
 .session-agent-kind-icon { width: 12px; height: 12px; font-size: 8px; }
 .session-inline-btn {
   background: none; border: none; cursor: pointer; font-size: 11px; color: var(--text-dim);
