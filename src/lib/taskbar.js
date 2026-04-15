@@ -16,10 +16,16 @@ export function updateTaskbar(app) {
     if (id === app.wm.activeWindowId && !win.isMinimized) item.classList.add('active');
     if (win.isMinimized) item.classList.add('minimized');
     if (win.element.classList.contains('window-waiting')) item.classList.add('waiting');
-    // Icon (large, spans both rows)
+    // Icon: clone the window's backend+mode icon if available, else use type emoji
     const icon = document.createElement('span');
     icon.className = 'taskbar-icon';
-    icon.textContent = win._typeIcon || '';
+    if (win.backendIconSlot?.children.length) {
+      const clone = win.backendIconSlot.children[0].cloneNode(true);
+      clone.style.width = ''; clone.style.height = '';
+      icon.appendChild(clone);
+    } else {
+      icon.innerHTML = win._typeIcon || '';
+    }
     // Text column (title + subtitle)
     const textCol = document.createElement('div');
     textCol.className = 'taskbar-text';
@@ -96,8 +102,8 @@ export function showWindowList(app, anchor) {
     if (id === app.wm.activeWindowId && !win.isMinimized) item.classList.add('active');
 
     const icon = document.createElement('span');
-    icon.textContent = win._typeIcon || '';
-    icon.style.cssText = 'font-size:11px;flex-shrink:0';
+    icon.innerHTML = win._typeIcon || '';
+    icon.style.cssText = 'font-size:11px;flex-shrink:0;display:inline-flex;align-items:center';
     if (win.isMinimized) icon.style.opacity = '0.4';
     const label = document.createElement('span');
     label.textContent = (win.isMinimized ? '\u229E ' : '') + win.title;

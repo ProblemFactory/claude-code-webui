@@ -36,7 +36,7 @@ class WindowManager {
     const iconWrap = document.createElement('div'); iconWrap.className = 'window-icon-stack';
     const backendIconSlot = document.createElement('span'); backendIconSlot.className = 'window-backend-slot';
     const agentKindSlot = document.createElement('span'); agentKindSlot.className = 'window-agent-kind-slot';
-    const iconSpan = document.createElement('span'); iconSpan.className = 'window-type-icon'; iconSpan.textContent = TYPE_ICONS[type] || '';
+    const iconSpan = document.createElement('span'); iconSpan.className = 'window-type-icon'; iconSpan.innerHTML = TYPE_ICONS[type] || '';
     iconWrap.append(backendIconSlot, agentKindSlot, iconSpan);
     const titleSpan = document.createElement('span'); titleSpan.className = 'window-title'; titleSpan.textContent = title;
     const controls = document.createElement('div'); controls.className = 'window-controls';
@@ -896,8 +896,8 @@ class WindowManager {
       const item = document.createElement('div');
       item.className = 'overlap-switcher-item';
       const icon = document.createElement('span');
-      icon.textContent = w._typeIcon || '';
-      icon.style.cssText = 'font-size:11px;flex-shrink:0';
+      icon.innerHTML = w._typeIcon || '';
+      icon.style.cssText = 'font-size:11px;flex-shrink:0;display:inline-flex;align-items:center';
       const label = document.createElement('span');
       label.textContent = w.title;
       item.append(icon, label);

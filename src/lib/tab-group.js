@@ -9,9 +9,15 @@ import { createAgentKindIcon } from './agent-meta.js';
  * tabs[0] is always the host (owns the physical .window element).
  */
 
+const _i = (d) => `<svg style="width:1em;height:1em;vertical-align:-0.1em" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
 export const TYPE_ICONS = {
-  terminal: '\u2B1B', chat: '\uD83D\uDCAC', files: '\uD83D\uDCC1', viewer: '\uD83D\uDCC4',
-  editor: '\u270F\uFE0F', 'hex-viewer': '\uD83D\uDD22', browser: '\uD83C\uDF10',
+  terminal: _i('<rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M4.5 7l2 2-2 2M8.5 11h3"/>'),
+  chat:     _i('<path d="M2 3a2 2 0 012-2h8a2 2 0 012 2v6a2 2 0 01-2 2H6l-4 3V3z"/>'),
+  files:    _i('<path d="M2 3h4l2 2h6v8H2V3z"/>'),
+  viewer:   _i('<path d="M4 1h6l4 4v9H4V1z"/><path d="M10 1v4h4"/>'),
+  editor:   _i('<path d="M11.5 1.5l3 3L5 14H2v-3z"/>'),
+  'hex-viewer': _i('<path d="M2 2h12v12H2z"/><path d="M2 6h12M6 2v12"/>'),
+  browser:  _i('<circle cx="8" cy="8" r="6"/><path d="M2 8h12M8 2c-2 2-2 10 0 12M8 2c2 2 2 10 0 12"/>'),
 };
 
 /**
@@ -167,7 +173,7 @@ const tabGroupMethods = {
       iconWrap.className = 'tab-icon-wrap';
       const icon = document.createElement('span');
       icon.className = 'tab-icon';
-      icon.textContent = tabWin._typeIcon || '';
+      icon.innerHTML = tabWin._typeIcon || '';
       iconWrap.appendChild(icon);
       if (tabWin.titleMeta?.agentKind && tabWin.titleMeta.agentKind !== 'primary') {
         iconWrap.appendChild(createAgentKindIcon(tabWin.titleMeta.agentKind, { className: 'tab-agent-kind-icon' }));
