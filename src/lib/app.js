@@ -14,6 +14,7 @@ import { createPopover, fetchJson, initStateSync } from './utils.js';
 import { setupDirAutocomplete } from './autocomplete.js';
 import { getAvailableFonts } from './terminal.js';
 import { SettingsManager } from './settings.js';
+import { SETTINGS_SCHEMA } from './settings-schema.js';
 import { SettingsUI } from './settings-ui.js';
 import { openExternalEditor, closeExternalEditor } from './external-editor.js';
 import { CommandMode } from './command-mode.js';
@@ -61,8 +62,16 @@ const BACKEND_SESSION_OPTIONS = {
 
 // Fetch available models from server (Codex reads from ~/.codex/models_cache.json)
 fetchJson('/api/available-models').then(data => {
-  if (data?.claude?.length) BACKEND_SESSION_OPTIONS.claude.models = data.claude;
-  if (data?.codex?.length) BACKEND_SESSION_OPTIONS.codex.models = data.codex;
+  if (!data) return;
+  const toOptions = (slugs) => slugs.map(s => ({ value: s, label: s || 'Default' }));
+  if (data.claude?.length) {
+    BACKEND_SESSION_OPTIONS.claude.models = data.claude;
+    SETTINGS_SCHEMA['claude.defaultModel'].options = toOptions(data.claude);
+  }
+  if (data.codex?.length) {
+    BACKEND_SESSION_OPTIONS.codex.models = data.codex;
+    SETTINGS_SCHEMA['codex.defaultModel'].options = toOptions(data.codex);
+  }
 });
 
 class App {

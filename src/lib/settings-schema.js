@@ -123,9 +123,15 @@ const SETTINGS_SCHEMA = {
 
   // ── Claude ──
   'claude.defaultModel': {
-    type: 'text', default: '',
+    type: 'enum', default: '',
+    options: [
+      { value: '', label: 'Default' },
+      { value: 'opus', label: 'Opus' },
+      { value: 'sonnet', label: 'Sonnet' },
+      { value: 'haiku', label: 'Haiku' },
+    ],
     label: 'Default model',
-    description: 'Default Claude model for new or resumed Claude sessions. Leave blank to use the CLI default.',
+    description: 'Default Claude model for new or resumed Claude sessions.',
     category: 'Claude', liveApply: true,
   },
   'claude.defaultPermissionMode': {
@@ -163,9 +169,12 @@ const SETTINGS_SCHEMA = {
 
   // ── Codex ──
   'codex.defaultModel': {
-    type: 'text', default: '',
+    type: 'enum', default: '',
+    options: [
+      { value: '', label: 'Default' },
+    ],
     label: 'Default model',
-    description: 'Default Codex model for new or resumed Codex sessions. Leave blank to use the CLI default.',
+    description: 'Default Codex model for new or resumed Codex sessions.',
     category: 'Codex', liveApply: true,
   },
   'codex.defaultPermissionMode': {
