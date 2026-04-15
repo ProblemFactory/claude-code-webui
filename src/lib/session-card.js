@@ -11,7 +11,8 @@ const ICON = {
   rename:    _s('<path d="M11.5 1.5l3 3L5 14H2v-3z"/>'),
   find:      _s('<circle cx="7" cy="7" r="4"/><path d="M10 10l4 4"/>'),
   chat:      _s('<path d="M2 3a2 2 0 012-2h8a2 2 0 012 2v6a2 2 0 01-2 2H6l-4 3V3z"/>'),
-  history:   _s('<path d="M3 1v4h4"/><path d="M3 5a6 6 0 1011 3"/><path d="M9 5v4l2.5 1.5"/>'),
+  history:   _s('<circle cx="8" cy="8" r="6"/><path d="M8 4v4l3 1.5"/>'),
+  terminal:  _s('<rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M4.5 7l2 2-2 2M8.5 11h3"/>'),
   terminate: _s('<path d="M4 4l8 8M12 4l-8 8"/>'),
 };
 
@@ -263,13 +264,13 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
   if (s.status === 'live' && s.webuiId) {
     const detailAttachBtn = document.createElement('button');
     detailAttachBtn.className = 'session-detail-btn session-detail-btn-primary';
-    detailAttachBtn.textContent = '\u25B6 Attach';
+    detailAttachBtn.innerHTML = ICON.terminal + ' Attach';
     detailAttachBtn.onclick = (e) => { e.stopPropagation(); app.attachSession(s.webuiId, s.webuiName || displayName, s.cwd, { mode: s.webuiMode, ...agentOpts }); };
     actionsDiv.appendChild(detailAttachBtn);
   } else if (s.status === 'tmux') {
     const detailTmuxBtn = document.createElement('button');
     detailTmuxBtn.className = 'session-detail-btn session-detail-btn-primary';
-    detailTmuxBtn.textContent = '\u25B6 View';
+    detailTmuxBtn.innerHTML = ICON.terminal + ' View';
     detailTmuxBtn.onclick = (e) => { e.stopPropagation(); app.attachTmuxSession(s.tmuxTarget, displayName, s.cwd); };
     actionsDiv.appendChild(detailTmuxBtn);
   } else if (s.status === 'stopped') {
@@ -284,7 +285,7 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
     const dropBtn = document.createElement('button');
     const updateLabel = () => {
       const isChat = resumeMode === 'chat';
-      resumeBtn.innerHTML = isChat ? (ICON.chat + ' Resume in Chat') : ('\u25B6 Resume in Terminal');
+      resumeBtn.innerHTML = isChat ? (ICON.chat + ' Resume in Chat') : (ICON.terminal + ' Resume in Terminal');
       resumeBtn.className = 'session-detail-btn ' + (isChat ? 'session-detail-btn-chat' : 'session-detail-btn-primary');
       dropBtn.className = 'session-resume-drop ' + (isChat ? 'session-detail-btn-chat' : 'session-detail-btn-primary');
     };

@@ -170,17 +170,14 @@ export class ChatStatusBar {
       parts.push(`<span class="chat-status-review ${reviewClass}" title="${escHtml(reviewTitle)}">\u2713 Review</span>`);
     }
 
-    // Context % with emoji + progress bar
+    // Context % with pie chart
     if (this._statusContextWindow && this._statusLastInputTokens) {
       const pct = Math.min(100, Math.round((this._statusLastInputTokens / this._statusContextWindow) * 100));
-      let icon, barColor;
-      if (pct > 95) { icon = '\uD83D\uDD34'; barColor = '#ef4444'; }
-      else if (pct > 85) { icon = '\uD83D\uDFE0'; barColor = '#f97316'; }
-      else if (pct > 70) { icon = '\uD83D\uDFE1'; barColor = '#eab308'; }
-      else { icon = '\uD83D\uDFE2'; barColor = '#22c55e'; }
+      const color = pct > 95 ? '#ef4444' : pct > 85 ? '#f97316' : pct > 70 ? '#eab308' : '#22c55e';
+      const deg = Math.round(pct * 3.6);
       const usedK = fmtK(this._statusLastInputTokens);
       const totalK = fmtK(this._statusContextWindow);
-      parts.push(`<span class="chat-status-ctx">${icon} <span class="chat-status-ctx-bar"><span class="chat-status-ctx-fill" style="width:${pct}%;background:${barColor}"></span></span> <span style="color:${barColor}">${pct}%</span><span class="chat-status-dim">[${usedK}/${totalK}]</span></span>`);
+      parts.push(`<span class="chat-status-ctx"><span class="chat-status-ctx-pie" style="background:conic-gradient(${color} ${deg}deg, var(--bg-input) ${deg}deg)"></span> <span style="color:${color}">${pct}%</span><span class="chat-status-dim">[${usedK}/${totalK}]</span></span>`);
     }
 
     // Cache ratio
