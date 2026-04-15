@@ -82,6 +82,12 @@ class App {
     this.wm = new WindowManager(document.getElementById('workspace'));
     this.wm._settings = this.settings;
     this.wm._app = this;
+    // Re-render all tab bars when tab wrap setting changes
+    this.settings.on('window.tabWrap', () => {
+      for (const [, win] of this.wm.windows) {
+        if (win._tabChain && win._tabChain.tabs[0] === win.id) this.wm._renderTabBar(win._tabChain);
+      }
+    });
     this.sessions = new Map();
     this.attachedServerSessions = new Set();
     this.layoutManager = new LayoutManager(this);

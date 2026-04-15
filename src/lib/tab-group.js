@@ -159,7 +159,9 @@ const tabGroupMethods = {
 
     const tabBar = document.createElement('div');
     tabBar.className = 'tab-bar-tabs';
-    if (this._settings?.get('window.tabWrap')) tabBar.classList.add('tab-wrap');
+    const wrap = this._settings?.get('window.tabWrap');
+    if (wrap) tabBar.classList.add('tab-wrap');
+    hostWin.element.classList.toggle('tab-wrap-mode', !!wrap);
 
     for (let i = 0; i < chain.tabs.length; i++) {
       const tabWinId = chain.tabs[i];
