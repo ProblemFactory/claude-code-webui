@@ -195,6 +195,10 @@ function getSubagentMetas(claudeSessionId, cwd) {
   return [];
 }
 
+function getHistorySessionId(session) {
+  return session?.backendSessionId || session?.claudeSessionId || null;
+}
+
 // ── SessionMessages class ──
 
 class SessionMessages {
@@ -213,7 +217,8 @@ class SessionMessages {
   _ensureParsed() {
     if (this._all) return;
     const session = this._session;
-    const jsonl = session.claudeSessionId ? parseSessionJsonl(session.claudeSessionId, session.cwd) : [];
+    const historySessionId = getHistorySessionId(session);
+    const jsonl = historySessionId ? parseSessionJsonl(historySessionId, session.cwd) : [];
     const uuids = new Set();
     for (const m of jsonl) { if (m.uuid) uuids.add(m.uuid); }
 
@@ -224,7 +229,8 @@ class SessionMessages {
       if (!trimmed) continue;
       try {
         const msg = JSON.parse(trimmed);
-        if (msg.type === 'control_request' && msg.request?.tool_use_id) { this._pendingPerms[msg.request.tool_use_id] = msg; continue; }
+        if (msg.type === 'control_request' && msg.request?.tool_use_id) { this._pendingPerms[msg.request.tool_use_id] = msg; }
+        if (msg.type === 'control_request' || msg.type === 'control_response' || msg.type === 'control_cancel_request') { live.push(msg); continue; }
         if (isSubagentMessage(msg)) continue;
         if (msg.uuid && uuids.has(msg.uuid)) continue;
         if (msg._fromWebui && msg.timestamp) {
@@ -290,7 +296,7 @@ class SessionMessages {
     return {
       model, lastUsage, contextWindow, total_cost_usd: totalCost, slashCommands, permissionMode,
       permissionModes: this._permissionModes,
-      subagentMetas: getSubagentMetas(this._session.claudeSessionId, this._session.cwd),
+      subagentMetas: getSubagentMetas(getHistorySessionId(this._session), this._session.cwd),
     };
   }
 
@@ -372,5 +378,6 @@ module.exports = {
   parseSessionJsonl,
   extractSessionMeta,
   getSubagentMetas,
+  getHistorySessionId,
   SessionMessages,
 };

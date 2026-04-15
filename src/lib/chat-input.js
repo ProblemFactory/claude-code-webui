@@ -272,6 +272,7 @@ export class ChatInput {
     const text = this._textarea.value.trim();
     const hasAttachments = this._attachments.length > 0;
     if (!text && !hasAttachments) return;
+    const msgId = Date.now() + '-' + Math.random().toString(36).slice(2, 8);
 
     this._textarea.value = '';
     this._textarea.style.height = '';
@@ -292,11 +293,11 @@ export class ChatInput {
       }
       if (text) content.push({ type: 'text', text });
       const msg = JSON.stringify({ type: 'user', message: { role: 'user', content } });
-      this._ws.send({ type: 'chat-input', sessionId: this._sessionId, text: msg });
+      this._ws.send({ type: 'chat-input', sessionId: this._sessionId, text: msg, msgId });
       this._attachments = [];
       this._renderAttachments();
     } else {
-      this._ws.send({ type: 'chat-input', sessionId: this._sessionId, text });
+      this._ws.send({ type: 'chat-input', sessionId: this._sessionId, text, msgId });
     }
 
     // Notify parent to handle scroll/pin

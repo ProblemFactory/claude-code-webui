@@ -1,5 +1,6 @@
 import { attachPopoverClose } from './utils.js';
 import { TYPE_ICONS, installTabGroupMixin } from './tab-group.js';
+import { createAgentKindIcon, createBackendIcon, createModeBackendIcon, getAgentKindMeta } from './agent-meta.js';
 
 class WindowManager {
   constructor(workspace) {
@@ -11,16 +12,17 @@ class WindowManager {
     this.grid = null; // { rows, cols }
     this._overlapDebounceTimer = null;
     this._settings = null; // set by App after construction
+    this._reflowScheduled = false;
 
     // Reflow grid-tracked windows when workspace resizes (sidebar toggle, browser resize)
-    this._resizeObserver = new ResizeObserver(() => this._reflowWindows());
+    this._resizeObserver = new ResizeObserver(() => this._scheduleReflowWindows());
     this._resizeObserver.observe(workspace);
 
     // Install tab grouping methods (from tab-group.js mixin)
     installTabGroupMixin(this);
   }
 
-  createWindow({ title, type, x, y, width, height, syncId, openSpec }) {
+  createWindow({ title, type, x, y, width, height, syncId, openSpec, titleMeta }) {
     const id = syncId || ('win-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6));
     this.windowCounter++;
     if (x === undefined) { const o = (this.windowCounter % 8) * 30; x = 40 + o; y = 40 + o; }
@@ -31,11 +33,15 @@ class WindowManager {
     el.style.cssText = `left:${x}px;top:${y}px;width:${width}px;height:${height}px;z-index:${this.zIndex++}`;
 
     const titleBar = document.createElement('div'); titleBar.className = 'window-titlebar';
-    const iconSpan = document.createElement('span'); iconSpan.className = 'window-type-icon'; iconSpan.textContent = TYPE_ICONS[type] || '';
+    const iconWrap = document.createElement('div'); iconWrap.className = 'window-icon-stack';
+    const backendIconSlot = document.createElement('span'); backendIconSlot.className = 'window-backend-slot';
+    const agentKindSlot = document.createElement('span'); agentKindSlot.className = 'window-agent-kind-slot';
+    const iconSpan = document.createElement('span'); iconSpan.className = 'window-type-icon'; iconSpan.innerHTML = TYPE_ICONS[type] || '';
+    iconWrap.append(backendIconSlot, agentKindSlot, iconSpan);
     const titleSpan = document.createElement('span'); titleSpan.className = 'window-title'; titleSpan.textContent = title;
     const controls = document.createElement('div'); controls.className = 'window-controls';
     controls.innerHTML = '<button class="win-btn win-overlap-btn no-overlap" title="Overlapping windows">□</button><button class="win-btn win-minimize" title="Minimize">─</button><button class="win-btn win-maximize" title="Maximize">□</button><button class="win-btn win-close" title="Close">✕</button>';
-    titleBar.append(iconSpan, titleSpan, controls);
+    titleBar.append(iconWrap, titleSpan, controls);
 
     const content = document.createElement('div'); content.className = 'window-content';
     for (const dir of ['n','s','e','w','ne','nw','se','sw']) {
@@ -43,10 +49,11 @@ class WindowManager {
     }
     el.append(titleBar, content); this.workspace.appendChild(el);
 
-    const winInfo = { id, element: el, titleBar, titleSpan, iconSpan, content, title, type,
+    const winInfo = { id, element: el, titleBar, titleSpan, iconSpan, iconWrap, backendIconSlot, agentKindSlot, content, title, type,
       isMaximized: false, isMinimized: false, prevBounds: null, onResize: null, onClose: null, exited: false,
-      _typeIcon: TYPE_ICONS[type] || '', _tabChain: null };
+      _typeIcon: TYPE_ICONS[type] || '', _tabChain: null, titleMeta: { ...(titleMeta || {}) } };
     this.windows.set(id, winInfo);
+    this._applyTitleMeta(winInfo);
     this._setupDrag(winInfo); this._setupResize(winInfo); this._setupIconDrag(winInfo);
     controls.querySelector('.win-overlap-btn').onclick = (e) => {
       e.stopPropagation();
@@ -111,6 +118,15 @@ class WindowManager {
     }
   }
 
+  _scheduleReflowWindows() {
+    if (this._suppressReflow || this._reflowScheduled) return;
+    this._reflowScheduled = true;
+    requestAnimationFrame(() => {
+      this._reflowScheduled = false;
+      this._reflowWindows();
+    });
+  }
+
   _setupDrag(win) {
     const { element, titleBar } = win;
     let mouseDown = false, dragging = false, startX, startY, initL, initT;
@@ -124,7 +140,7 @@ class WindowManager {
     const DRAG_THRESHOLD = 5;
 
     titleBar.addEventListener('mousedown', (e) => {
-      if (e.target.closest('.window-controls') || e.target.closest('.tab-item') || e.target.closest('.window-type-icon') || e.button !== 0) return;
+      if (e.target.closest('.window-controls') || e.target.closest('.tab-item') || e.target.closest('.window-icon-stack') || e.button !== 0) return;
       mouseDown = true; dragging = false; tabMergeTarget = null;
       startX = e.clientX; startY = e.clientY;
       initL = element.offsetLeft; initT = element.offsetTop;
@@ -764,6 +780,58 @@ class WindowManager {
     this._notify();
   }
 
+  _applyTitleMeta(win) {
+    if (!win?.backendIconSlot || !win?.agentKindSlot) return;
+    const meta = win.titleMeta || {};
+    const backend = meta.backend || null;
+    const agentKind = meta.agentKind || 'primary';
+    win.backend = backend;
+    win.agentKind = agentKind;
+    win.backendIconSlot.innerHTML = '';
+    win.agentKindSlot.innerHTML = '';
+    if (backend && (win.type === 'chat' || win.type === 'terminal')) {
+      // Show composite backend+mode icon, hide generic type emoji
+      const mode = win.type; // 'chat' or 'terminal'
+      win.backendIconSlot.appendChild(createModeBackendIcon(backend, mode, { className: 'window-backend-icon' }));
+      win.backendIconSlot.style.display = '';
+      win.iconSpan.style.display = 'none';
+    } else if (backend) {
+      win.backendIconSlot.appendChild(createBackendIcon(backend, { className: 'window-backend-icon' }));
+      win.backendIconSlot.style.display = '';
+      win.iconSpan.style.display = 'none';
+    } else {
+      win.backendIconSlot.style.display = 'none';
+      win.iconSpan.style.display = '';
+    }
+    if (agentKind && agentKind !== 'primary') {
+      const kindMeta = getAgentKindMeta(agentKind);
+      win.agentKindSlot.style.display = '';
+      win.agentKindSlot.appendChild(createAgentKindIcon(agentKind, {
+        className: 'window-agent-kind-icon',
+        title: kindMeta.label,
+      }));
+      win.element.dataset.agentKind = agentKind;
+    } else {
+      win.agentKindSlot.style.display = 'none';
+      delete win.element.dataset.agentKind;
+    }
+    if (backend) win.element.dataset.backend = backend;
+    else delete win.element.dataset.backend;
+  }
+
+  setTitleMeta(id, meta = {}) {
+    const win = this.windows.get(id); if (!win) return;
+    const nextMeta = { ...(win.titleMeta || {}) };
+    for (const [key, value] of Object.entries(meta)) {
+      if (value == null || value === '') delete nextMeta[key];
+      else nextMeta[key] = value;
+    }
+    win.titleMeta = nextMeta;
+    this._applyTitleMeta(win);
+    if (win._tabChain) this._renderTabBar(win._tabChain);
+    this._notify();
+  }
+
   applyLayout(layout) {
     if (layout === 'freeform') { this.setGrid(null); return; }
 
@@ -828,8 +896,8 @@ class WindowManager {
       const item = document.createElement('div');
       item.className = 'overlap-switcher-item';
       const icon = document.createElement('span');
-      icon.textContent = w._typeIcon || '';
-      icon.style.cssText = 'font-size:11px;flex-shrink:0';
+      icon.innerHTML = w._typeIcon || '';
+      icon.style.cssText = 'font-size:11px;flex-shrink:0;display:inline-flex;align-items:center';
       const label = document.createElement('span');
       label.textContent = w.title;
       item.append(icon, label);

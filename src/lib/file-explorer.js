@@ -760,12 +760,21 @@ class FileExplorer {
         sub.push({ label: '+ New session', action: () => this.app.createSession({ cwd: fullPath }) });
         const sessionsHere = (this.app.sidebar?._allSessions || []).filter(s => s.cwd === fullPath);
         for (const s of sessionsHere) {
-          const customName = this.app.sidebar?.getCustomName(s.sessionId);
+          const customName = this.app.sidebar?.getCustomName(s);
           const dispName = customName || s.name || s.sessionId.substring(0, 12) + '...';
           const badge = s.status === 'live' ? '\u25CF ' : s.status === 'tmux' ? '\u25C6 ' : '';
+          const agentOpts = {
+            backend: s.backend || 'claude',
+            backendSessionId: s.backendSessionId || s.sessionId,
+            agentKind: s.agentKind || 'primary',
+            agentRole: s.agentRole || '',
+            agentNickname: s.agentNickname || '',
+            sourceKind: s.sourceKind || '',
+            parentThreadId: s.parentThreadId || null,
+          };
           sub.push({ label: `${badge}${dispName}`, action: () => {
-            if (s.status === 'stopped') this.app.resumeSession(s.sessionId, s.cwd, customName || s.name);
-            else if (s.status === 'live' && s.webuiId) this.app.attachSession(s.webuiId, s.webuiName || dispName, s.cwd);
+            if (s.status === 'stopped') this.app.resumeSession(s.sessionId, s.cwd, customName || s.name, agentOpts);
+            else if (s.status === 'live' && s.webuiId) this.app.attachSession(s.webuiId, s.webuiName || dispName, s.cwd, { mode: s.webuiMode, ...agentOpts });
             else if (s.status === 'tmux') this.app.attachTmuxSession(s.tmuxTarget, dispName, s.cwd);
           }});
         }

@@ -191,7 +191,11 @@ class LayoutManager {
         winState.serverSessionId = termSession.sessionId;
         const allSess = this.app.sidebar?._allSessions || [];
         const match = allSess.find(s => s.webuiId === termSession.sessionId);
-        if (match) winState.claudeSessionId = match.sessionId;
+        if (match) {
+          winState.backend = match.backend || 'claude';
+          winState.backendSessionId = match.backendSessionId || match.sessionId;
+          winState.claudeSessionId = winState.backend === 'claude' ? winState.backendSessionId : null;
+        }
         // Save per-terminal overrides
         if (termSession.overrides) winState.terminalOverrides = termSession.overrides;
         // Save editor split-pane state (Ctrl+G)
@@ -202,7 +206,11 @@ class LayoutManager {
         winState.serverSessionId = termSession.sessionId;
         const allSess = this.app.sidebar?._allSessions || [];
         const match = allSess.find(s => s.webuiId === termSession.sessionId);
-        if (match) winState.claudeSessionId = match.sessionId;
+        if (match) {
+          winState.backend = match.backend || 'claude';
+          winState.backendSessionId = match.backendSessionId || match.sessionId;
+          winState.claudeSessionId = winState.backend === 'claude' ? winState.backendSessionId : null;
+        }
       }
       // For file explorers, save current path
       if (win.type === 'files' && win._explorerPath) {
@@ -298,16 +306,18 @@ class LayoutManager {
 
     for (const ws of state.windows) {
       if (ws.type === 'terminal') {
+        const backend = ws.backend || 'claude';
+        const backendSessionId = ws.backendSessionId || ws.claudeSessionId;
         let alive = null;
-        if (ws.claudeSessionId) {
-          alive = activeSessions.find(s => s.claudeSessionId === ws.claudeSessionId);
+        if (backendSessionId) {
+          alive = activeSessions.find(s => (s.backend || 'claude') === backend && (s.backendSessionId || s.claudeSessionId) === backendSessionId);
         }
         if (!alive && ws.serverSessionId) {
           alive = activeSessions.find(s => s.id === ws.serverSessionId);
         }
         if (alive) {
-          const customName = this.app.sidebar?.getCustomName(ws.claudeSessionId || alive.claudeSessionId);
-          const winInfo = this.app.attachSession(alive.id, customName || alive.name, alive.cwd);
+          const customName = this.app.sidebar?.getCustomName(backendSessionId || alive.backendSessionId || alive.claudeSessionId);
+          const winInfo = this.app.attachSession(alive.id, customName || alive.name, alive.cwd, { backend: alive.backend || backend, mode: alive.mode || 'terminal' });
           applyPosition(winInfo, ws);
           // Restore split-pane editor if it was active (Ctrl+G)
           if (ws.editorState && winInfo) {
@@ -318,16 +328,18 @@ class LayoutManager {
           }
         }
       } else if (ws.type === 'chat') {
+        const backend = ws.backend || 'claude';
+        const backendSessionId = ws.backendSessionId || ws.claudeSessionId;
         let alive = null;
-        if (ws.claudeSessionId) {
-          alive = activeSessions.find(s => s.claudeSessionId === ws.claudeSessionId);
+        if (backendSessionId) {
+          alive = activeSessions.find(s => (s.backend || 'claude') === backend && (s.backendSessionId || s.claudeSessionId) === backendSessionId);
         }
         if (!alive && ws.serverSessionId) {
           alive = activeSessions.find(s => s.id === ws.serverSessionId);
         }
         if (alive) {
-          const customName = this.app.sidebar?.getCustomName(ws.claudeSessionId || alive.claudeSessionId);
-          const winInfo = this.app.attachSession(alive.id, customName || alive.name, alive.cwd, { mode: 'chat' });
+          const customName = this.app.sidebar?.getCustomName(backendSessionId || alive.backendSessionId || alive.claudeSessionId);
+          const winInfo = this.app.attachSession(alive.id, customName || alive.name, alive.cwd, { mode: 'chat', backend: alive.backend || backend });
           applyPosition(winInfo, ws);
         }
       } else if (ws.type === 'files') {
@@ -497,12 +509,13 @@ class LayoutManager {
     // Restore global settings
     if (preset.theme) {
       this.app.themeManager.apply(preset.theme);
-      for (const [, term] of this.app.sessions) term.updateTheme(this.app.themeManager.getTerminalTheme());
+      for (const [, term] of this.app.sessions) { if (term.updateTheme) term.updateTheme(this.app.themeManager.getTerminalTheme()); }
     }
     if (preset.globalFontSize && preset.globalFontSize !== this.app._fontSize) {
       this.app._fontSize = preset.globalFontSize;
       localStorage.setItem('termFontSize', this.app._fontSize);
       for (const [, term] of this.app.sessions) {
+        if (!term.overrides || !term.terminal) continue;
         if (!term.overrides.fontSize) {
           term.terminal.options.fontSize = this.app._fontSize;
           try { term.terminal.clearTextureAtlas(); } catch {}
@@ -514,6 +527,7 @@ class LayoutManager {
       this.app._fontFamily = preset.globalFontFamily;
       localStorage.setItem('termFontFamily', this.app._fontFamily);
       for (const [, term] of this.app.sessions) {
+        if (!term.overrides || !term.terminal) continue;
         if (!term.overrides.fontFamily) {
           term.terminal.options.fontFamily = this.app._fontFamily;
           try { term.terminal.clearTextureAtlas(); } catch {}
@@ -534,8 +548,8 @@ class LayoutManager {
       this.app.sidebar.toggle(preset.sidebarOpen);
     }
 
-    // Build a map of currently open terminal windows by claudeSessionId
-    const openTermByClaudeId = new Map(); // claudeSessionId -> { winId, win, term }
+    // Build maps of currently open terminal windows by backend session ID and server session ID
+    const openTermByBackendSessionId = new Map(); // backend:sessionId -> { winId, win, term }
     const openTermByServerId = new Map(); // serverSessionId -> { winId, win, term }
     for (const [winId, win] of this.app.wm.windows) {
       if (win.type === 'terminal') {
@@ -543,7 +557,9 @@ class LayoutManager {
         if (term) {
           const sidebarSess = (this.app.sidebar._allSessions || []).find(s => s.webuiId === term.sessionId);
           if (sidebarSess) {
-            openTermByClaudeId.set(sidebarSess.sessionId, { winId, win, term });
+            const backend = sidebarSess.backend || 'claude';
+            const backendSessionId = sidebarSess.backendSessionId || sidebarSess.sessionId;
+            openTermByBackendSessionId.set(`${backend}:${backendSessionId}`, { winId, win, term });
           }
           openTermByServerId.set(term.sessionId, { winId, win, term });
         }
@@ -562,20 +578,22 @@ class LayoutManager {
       }
     }
 
-    // Track which claudeSessionIds have already been processed (prevent duplicates)
-    const processedClaudeIds = new Set();
+    // Track which backend session IDs have already been processed (prevent duplicates)
+    const processedBackendSessionIds = new Set();
 
     // Process each preset window
     for (const ws of preset.windows) {
       if (ws.type === 'terminal') {
+        const backend = ws.backend || 'claude';
+        const backendSessionId = ws.backendSessionId || ws.claudeSessionId;
         // Skip if we already processed this session (prevents duplicate resume)
-        if (ws.claudeSessionId && processedClaudeIds.has(ws.claudeSessionId)) continue;
-        if (ws.claudeSessionId) processedClaudeIds.add(ws.claudeSessionId);
+        if (backendSessionId && processedBackendSessionIds.has(`${backend}:${backendSessionId}`)) continue;
+        if (backendSessionId) processedBackendSessionIds.add(`${backend}:${backendSessionId}`);
 
         // Try to find an already-open window matching this terminal
         let existing = null;
-        if (ws.claudeSessionId) {
-          existing = openTermByClaudeId.get(ws.claudeSessionId);
+        if (backendSessionId) {
+          existing = openTermByBackendSessionId.get(`${backend}:${backendSessionId}`);
         }
         if (!existing && ws.serverSessionId) {
           existing = openTermByServerId.get(ws.serverSessionId);
@@ -589,8 +607,8 @@ class LayoutManager {
         } else {
           // Not open — check if session exists as active (attach) or stopped (resume)
           let activeMatch = null;
-          if (ws.claudeSessionId) {
-            activeMatch = activeSessions.find(s => s.claudeSessionId === ws.claudeSessionId);
+          if (backendSessionId) {
+            activeMatch = activeSessions.find(s => (s.backend || 'claude') === backend && (s.backendSessionId || s.claudeSessionId) === backendSessionId);
           }
           if (!activeMatch && ws.serverSessionId) {
             activeMatch = activeSessions.find(s => s.id === ws.serverSessionId);
@@ -598,8 +616,8 @@ class LayoutManager {
 
           if (activeMatch) {
             // Active but no window — attach (use custom name if available)
-            const customName = this.app.sidebar?.getCustomName(ws.claudeSessionId);
-            const winInfo = this.app.attachSession(activeMatch.id, customName || activeMatch.name, activeMatch.cwd);
+            const customName = this.app.sidebar?.getCustomName(backendSessionId);
+            const winInfo = this.app.attachSession(activeMatch.id, customName || activeMatch.name, activeMatch.cwd, { backend: activeMatch.backend || backend, mode: activeMatch.mode || ws.type });
             if (winInfo) {
               matchedWinIds.add(winInfo.id);
               applyPosition(winInfo, ws);
@@ -611,12 +629,15 @@ class LayoutManager {
                 }, 500);
               }
             }
-          } else if (ws.claudeSessionId) {
+          } else if (backendSessionId) {
             // Check stopped sessions for resume
-            const stoppedMatch = allSessions.find(s => s.sessionId === ws.claudeSessionId && s.status === 'stopped');
+            const stoppedMatch = allSessions.find(s => (s.backend || 'claude') === backend && (s.backendSessionId || s.sessionId) === backendSessionId && s.status === 'stopped');
             if (stoppedMatch) {
-              const customName = this.app.sidebar?.getCustomName(ws.claudeSessionId);
-              this.app.resumeSession(stoppedMatch.sessionId, stoppedMatch.cwd, customName || stoppedMatch.name);
+              const customName = this.app.sidebar?.getCustomName(backendSessionId);
+              this.app.resumeSession(stoppedMatch.sessionId, stoppedMatch.cwd, customName || stoppedMatch.name, {
+                backend,
+                backendSessionId,
+              });
               // resumeSession creates window asynchronously; find it after a delay
               const capturedWs = ws;
               setTimeout(() => {
@@ -634,6 +655,30 @@ class LayoutManager {
               }, 1500);
             }
             // If session doesn't exist at all — skip
+          }
+        }
+      } else if (ws.type === 'chat') {
+        const backend = ws.backend || 'claude';
+        const backendSessionId = ws.backendSessionId || ws.claudeSessionId;
+        if (backendSessionId && processedBackendSessionIds.has(`${backend}:${backendSessionId}`)) continue;
+        if (backendSessionId) processedBackendSessionIds.add(`${backend}:${backendSessionId}`);
+
+        let existing = null;
+        if (backendSessionId) existing = openTermByBackendSessionId.get(`${backend}:${backendSessionId}`);
+        if (!existing && ws.serverSessionId) existing = openTermByServerId.get(ws.serverSessionId);
+
+        if (existing) {
+          matchedWinIds.add(existing.winId);
+          applyPosition(existing.win, ws);
+          this.app.wm.focusWindow(existing.winId);
+        } else {
+          let activeMatch = null;
+          if (backendSessionId) activeMatch = activeSessions.find(s => (s.backend || 'claude') === backend && (s.backendSessionId || s.claudeSessionId) === backendSessionId);
+          if (!activeMatch && ws.serverSessionId) activeMatch = activeSessions.find(s => s.id === ws.serverSessionId);
+          if (activeMatch) {
+            const customName = this.app.sidebar?.getCustomName(backendSessionId);
+            const winInfo = this.app.attachSession(activeMatch.id, customName || activeMatch.name, activeMatch.cwd, { mode: 'chat', backend: activeMatch.backend || backend });
+            if (winInfo) { matchedWinIds.add(winInfo.id); applyPosition(winInfo, ws); }
           }
         }
       } else if (ws.type === 'files') {

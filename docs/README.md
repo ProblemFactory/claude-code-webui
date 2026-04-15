@@ -3,14 +3,14 @@
 ## Guides
 
 - **[Getting Started](getting-started.md)** — Installation, first run, quick tour
-- **[Chat Mode](chat-mode.md)** — Structured messages, tool visualization, permissions, search, subagents
-- **[Terminal Management](terminal.md)** — Session persistence, multi-device sync, clipboard paste, idle detection, fonts
+- **[Chat Mode](chat-mode.md)** — Structured Claude/Codex messages, tool visualization, permissions, search, subagents
+- **[Terminal Management](terminal.md)** — Claude/Codex terminal sessions, persistence, multi-device sync, clipboard paste, idle detection, fonts
 - **[Window Manager](window-manager.md)** — Grid layouts, snap, command mode, presets, virtual desktops, tab groups
-- **[Session Management](sessions.md)** — Discovery, groups, star/archive, drag-drop, filters, dual-mode resume
+- **[Session Management](sessions.md)** — Claude/Codex discovery, groups, star/archive, drag-drop, filters, dual-mode resume
 - **[File Explorer](file-explorer.md)** — Browsing, bookmarks, viewers, code editor, clickable paths
 - **[External Editor](editor.md)** — Ctrl+G split-pane CodeMirror integration
 - **[Embedded Browser](browser.md)** — Iframe browser with proxy mode
-- **[Settings](settings.md)** — Global/per-terminal/chat settings, complete reference table
+- **[Settings](settings.md)** — Global/per-terminal/chat settings plus Claude and Codex launch defaults
 
 ## Reference
 
@@ -24,3 +24,5 @@ See [CLAUDE.md](../CLAUDE.md) in the project root for:
 - Design decisions and lessons learned
 - API reference (REST + WebSocket)
 - Bug fix history
+
+- **[Codex Support Plan](codex-support-plan.md)** — Research notes, parity gaps, and phased integration plan for first-class Codex support

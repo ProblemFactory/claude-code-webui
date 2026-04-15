@@ -38,16 +38,16 @@ class ClaudeCodeAdapter extends BackendAdapter {
    * This adapter provides the command line arguments and session config.
    */
   buildSessionArgs(options) {
-    const { cwd, model, permissionMode, resumeId, extraArgs = [], mode = 'chat' } = options;
+    const { cwd, model, permissionMode, resumeId, sessionName, effort, extraArgs = [], mode = 'chat' } = options;
     const args = [];
 
     if (resumeId) {
       args.push('--resume', resumeId);
     }
+    if (sessionName) args.push('--name', sessionName);
     if (model) args.push('--model', model);
-    if (permissionMode && permissionMode !== 'default') {
-      args.push(`--${permissionMode}`);
-    }
+    if (permissionMode) args.push('--permission-mode', permissionMode);
+    if (effort) args.push('--effort', effort);
     if (extraArgs.length) args.push(...extraArgs);
 
     return {
@@ -109,9 +109,46 @@ class ClaudeCodeAdapter extends BackendAdapter {
     return cwd.replace(/[/._]/g, '-');
   }
 
-  /**
-   * Build the control_response JSON for permission approval/denial.
-   */
+  // ── Protocol formatting (called by ws-handler) ──
+
+  formatChatInput(text, msgId) {
+    let stdinPayload, userMsg;
+    let parsed = null;
+    try { parsed = JSON.parse(text); if (!(parsed.type === 'user' && parsed.message)) parsed = null; } catch {}
+    if (parsed) {
+      stdinPayload = text;
+      userMsg = { ...parsed, msgId, timestamp: new Date().toISOString() };
+    } else {
+      stdinPayload = JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text }] } });
+      userMsg = { type: 'user', message: { role: 'user', content: text }, msgId, timestamp: new Date().toISOString() };
+    }
+    userMsg._fromWebui = true;
+    return { stdinPayload, userMsg };
+  }
+
+  formatInterrupt() {
+    return JSON.stringify(ClaudeCodeAdapter.buildInterruptRequest());
+  }
+
+  postInterrupt(session) {
+    // SIGINT fallback for reliability (Claude Code bugs #17466, #3455)
+    if (session._childPid) {
+      try { process.kill(session._childPid, 'SIGINT'); } catch {}
+    }
+  }
+
+  formatPermissionResponse(data) {
+    return JSON.stringify(ClaudeCodeAdapter.buildPermissionResponse(data.requestId, data.approved, data.toolInput, data.permissionUpdates));
+  }
+
+  formatSetPermissionMode(mode) {
+    return JSON.stringify(ClaudeCodeAdapter.buildSetPermissionMode(mode));
+  }
+
+  buildUserPreview(text, msgId) { return null; } // handled inline by formatChatInput
+
+  // ── Static helpers (kept for backward compat) ──
+
   static buildPermissionResponse(requestId, approved, toolInput, permissionUpdates) {
     const allowResponse = { behavior: 'allow', updatedInput: toolInput || {} };
     if (permissionUpdates?.length) allowResponse.permission_updates = permissionUpdates;
@@ -123,9 +160,6 @@ class ClaudeCodeAdapter extends BackendAdapter {
     };
   }
 
-  /**
-   * Build the control_request JSON for interrupting.
-   */
   static buildInterruptRequest() {
     return {
       type: 'control_request',
@@ -134,9 +168,6 @@ class ClaudeCodeAdapter extends BackendAdapter {
     };
   }
 
-  /**
-   * Build the control_request JSON for setting permission mode.
-   */
   static buildSetPermissionMode(mode) {
     return {
       type: 'control_request',

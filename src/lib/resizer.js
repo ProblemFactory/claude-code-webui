@@ -13,7 +13,10 @@ class Resizer {
     this.dir = dir;
     this.min = opts.min || 100;
     this.max = opts.max || 2000;
+    this.liveResize = opts.liveResize !== false;
     this.onResize = opts.onResize || null;
+    this.onResizeStart = opts.onResizeStart || null;
+    this.onResizeEnd = opts.onResizeEnd || null;
     this.storageKey = opts.storageKey || null;
     this._inside = !!opts.inside;
 
@@ -52,15 +55,18 @@ class Resizer {
       e.preventDefault(); e.stopPropagation();
       const startPos = dir === 'horizontal' ? e.clientX : e.clientY;
       const startSize = dir === 'horizontal' ? target.offsetWidth : target.offsetHeight;
+      let currentSize = startSize;
 
       this.handle.classList.add('active');
       document.body.style.cursor = dir === 'horizontal' ? 'col-resize' : 'row-resize';
       document.body.style.userSelect = 'none';
+      if (this.onResizeStart) this.onResizeStart(startSize);
 
       const onMove = (e) => {
         const delta = (dir === 'horizontal' ? e.clientX : e.clientY) - startPos;
         const newSize = Math.max(this.min, Math.min(this.max, startSize + delta));
-        this._setSize(newSize);
+        currentSize = newSize;
+        if (this.liveResize) this._setSize(newSize);
         if (this.onResize) this.onResize(newSize);
       };
 
@@ -70,9 +76,11 @@ class Resizer {
         document.body.style.userSelect = '';
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup', onUp);
-        const finalSize = dir === 'horizontal' ? target.offsetWidth : target.offsetHeight;
+        const finalSize = currentSize;
+        if (!this.liveResize) this._setSize(finalSize);
         if (this.storageKey) localStorage.setItem(this.storageKey, finalSize);
         if (this.onResize) this.onResize(finalSize);
+        if (this.onResizeEnd) this.onResizeEnd(finalSize);
       };
 
       document.addEventListener('mousemove', onMove);

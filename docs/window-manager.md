@@ -108,17 +108,9 @@ Command mode auto-exits after 2 seconds or on Escape.
 
 ## Taskbar
 
-The taskbar at the bottom shows all open windows in a two-row layout: a large type icon (18px) on the left with the window title and subtitle stacked to the right. Window type icons indicate the content:
+The taskbar at the bottom shows all open windows in a two-row layout: icon on the left with the window title and subtitle stacked to the right.
 
-| Icon | Window type |
-|------|-------------|
-| `💬` | Chat session |
-| `⬛` | Terminal session |
-| `📁` | File explorer |
-| `📄` | File viewer |
-| `✏️` | Code editor |
-| `🔢` | Hex viewer |
-| `🌐` | Browser |
+For chat/terminal sessions, the icon is a **composite icon**: the backend logo (Claude/Codex) with a small mode badge (chat bubble or `>_` prompt) in the bottom-right corner. For other window types, inline SVG icons are used (folder, document, pencil, grid, globe). All icons scale proportionally with taskbar height via `transform:scale()`.
 
 Items use flex-shrink with text-overflow ellipsis to handle many windows gracefully.
 
@@ -175,6 +167,16 @@ Each desktop maintains its own grid mode. Desktop 1 can be a 2x2 grid while Desk
 ### Resizable taskbar
 
 Drag the top edge of the taskbar to resize it (36-120px). All elements (desktop previews, window icons, text, usage pies) scale proportionally. Height is synced across clients.
+
+### Usage Widget
+
+The right side of the taskbar shows backend usage as compact rows:
+
+- One row for **Claude**
+- One row for **Codex**
+- Each row starts with the backend logo and then two pies for the global **5-hour** and **7-day** rate-limit windows
+
+Click the widget to open a popup with percentages, reset times, and the last update time. Claude usage keeps the last successful snapshot across transient fetch failures and server restarts, so the Claude row does not disappear just because one poll failed.
 
 ### Technical details
 

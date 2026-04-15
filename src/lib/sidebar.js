@@ -1,20 +1,30 @@
 import { Resizer } from './resizer.js';
 import { escHtml, createPopover, showContextMenu } from './utils.js';
-import { renderSessionCard } from './session-card.js';
+import { createAgentKindIcon, createBackendIcon, getAgentKindMeta, getBackendMeta, getSessionKey } from './agent-meta.js';
+import { installSidebarState } from './sidebar-state.js';
+import { installSidebarRender } from './sidebar-render.js';
 
 class Sidebar {
   constructor(app) {
     this.app = app; this.el = document.getElementById('sidebar');
     this.listEl = document.getElementById('all-sessions-list');
     this.isOpen = false;
+    this._resizePreviewEl = null;
 
     // Resizable sidebar width — handle inside sidebar (position:fixed can't use sibling)
     this._resizer = new Resizer(this.el, 'horizontal', {
       min: 200, max: 500, initial: parseInt(localStorage.getItem('sidebarWidth')) || 260,
-      storageKey: 'sidebarWidth', inside: true,
-      onResize: (w) => {
-        document.getElementById('main-wrapper').style.marginLeft = this.isOpen ? w + 'px' : '0';
-        setTimeout(() => { for (const [, s] of this.app.sessions) { if (s.fit) s.fit(); } }, 50);
+      storageKey: 'sidebarWidth', inside: true, liveResize: false,
+      onResizeStart: (w) => {
+        this._setSidebarResizing(true);
+        this._showSidebarResizePreview(w);
+      },
+      onResize: (w) => this._showSidebarResizePreview(w),
+      onResizeEnd: (w) => {
+        this._hideSidebarResizePreview();
+        this._applySidebarLayoutWidth(w);
+        this._fitVisibleSessions();
+        requestAnimationFrame(() => this._setSidebarResizing(false));
       },
     });
     this._allSessions = [];
@@ -30,6 +40,8 @@ class Sidebar {
 
     this._sortMode = localStorage.getItem('sessionSort') || 'recent';
     this._filterLive = false;
+    this._backendFilter = new Set(JSON.parse(localStorage.getItem('backendFilter') || '[]'));
+    this._agentKindFilter = localStorage.getItem('agentKindFilter') || '';
     this._collapsedFolders = new Set(JSON.parse(localStorage.getItem('collapsedFolders') || '[]'));
     this._expandedCardId = null; // only one card expanded at a time
 
@@ -71,16 +83,21 @@ class Sidebar {
     this._activeView = null; // null = ALL (show all selected filters), or a specific status string
     const filterBtn = document.getElementById('live-filter');
     filterBtn.onclick = (e) => { e.stopPropagation(); this._showStatusFilterMenu(filterBtn); };
+    const backendFilterBtn = document.getElementById('backend-filter');
+    backendFilterBtn.onclick = (e) => { e.stopPropagation(); this._showBackendFilterMenu(backendFilterBtn); };
+    this._updateBackendFilterBtn(backendFilterBtn);
     // Apply defaultStatusFilter once after async settings load (setting may differ from schema default)
     const _applyDefaultFilter = (val) => {
       this._statusFilter = new Set(val);
       this._activeView = null;
       this._updateFilterBtn(filterBtn);
+      this._updateBackendFilterBtn(backendFilterBtn);
       this._render();
       this.app.settings?.off('sidebar.defaultStatusFilter', _applyDefaultFilter);
     };
     this.app.settings?.on('sidebar.defaultStatusFilter', _applyDefaultFilter);
     this._renderQuickTabs();
+    this._renderAgentKindQuickTabs();
     // Re-render quick tabs after settings finish loading (async)
     this.app.settings?.on('sidebar.enableStatusQuickTabs', () => this._renderQuickTabs());
 
@@ -91,244 +108,31 @@ class Sidebar {
     this._poll();
   }
 
-  // ── Server State Sync ──
-
-  async _fetchUserState() {
-    try {
-      const res = await fetch('/api/user-state');
-      if (res.ok) {
-        const state = await res.json();
-        this._applyServerState(state);
-        this._render();
-        this.app.updateTaskbar();
-      }
-    } catch {
-      // Server unavailable — use localStorage cache
-    }
-  }
-
-  _applyServerState(state) {
-    if (state.starredSessions) {
-      this._starredIds = new Set(state.starredSessions);
-      localStorage.setItem('starredSessions', JSON.stringify(state.starredSessions));
-    }
-    if (state.archivedSessions) {
-      this._archivedIds = new Set(state.archivedSessions);
-      localStorage.setItem('archivedSessions', JSON.stringify(state.archivedSessions));
-    }
-    if (state.customNames) {
-      this._customNames = { ...state.customNames };
-      localStorage.setItem('sessionCustomNames', JSON.stringify(state.customNames));
-    }
-    if (state.sessionModes) {
-      this._sessionModes = { ...state.sessionModes };
-      localStorage.setItem('sessionModes', JSON.stringify(state.sessionModes));
-    }
-    if (state.sessionGroups) {
-      this._sessionGroups = { ...state.sessionGroups };
-      localStorage.setItem('sessionGroups', JSON.stringify(state.sessionGroups));
-    }
-    if (state.groupFolders) {
-      this._groupFolders = { ...state.groupFolders };
-      localStorage.setItem('groupFolders', JSON.stringify(state.groupFolders));
-    }
-  }
-
-  async _pushUserState() {
-    const state = {
-      starredSessions: [...this._starredIds],
-      archivedSessions: [...this._archivedIds],
-      customNames: this._customNames,
-      sessionModes: this._sessionModes,
-      sessionGroups: this._sessionGroups,
-      groupFolders: this._groupFolders,
-    };
-    localStorage.setItem('starredSessions', JSON.stringify(state.starredSessions));
-    localStorage.setItem('archivedSessions', JSON.stringify(state.archivedSessions));
-    localStorage.setItem('sessionCustomNames', JSON.stringify(state.customNames));
-    localStorage.setItem('sessionModes', JSON.stringify(state.sessionModes));
-    localStorage.setItem('sessionGroups', JSON.stringify(state.sessionGroups));
-    localStorage.setItem('groupFolders', JSON.stringify(state.groupFolders));
-    // Push to server (broadcasts to other clients)
-    try {
-      await fetch('/api/user-state', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(state),
-      });
-    } catch {
-      // Server unavailable — localStorage cache is still updated
-    }
-  }
+  // State methods (star/archive/rename/groups/migration) installed by sidebar-state.js mixin
 
   // ── Tab Bar ──
 
   _buildTabBar() {
-    const section = this.listEl.parentElement; // the sidebar-section div containing the list
+    const section = this.listEl.parentElement;
     const tabBar = document.createElement('div');
     tabBar.className = 'sidebar-tabs';
-
     const foldersTab = document.createElement('button');
     foldersTab.className = 'sidebar-tab active';
     foldersTab.textContent = 'Folders';
     foldersTab.dataset.tab = 'folders';
     foldersTab.onclick = () => { this._activeTab = 'folders'; this._updateTabs(); this._render(); };
-
     const groupsTab = document.createElement('button');
     groupsTab.className = 'sidebar-tab';
     groupsTab.textContent = 'Groups';
     groupsTab.dataset.tab = 'groups';
     groupsTab.onclick = () => { this._activeTab = 'groups'; this._updateTabs(); this._render(); };
-
     tabBar.append(foldersTab, groupsTab);
-    // Insert tab bar before the filter row (first child of section)
     section.insertBefore(tabBar, section.firstChild);
   }
 
   _updateTabs() {
     const tabs = this.el.querySelectorAll('.sidebar-tab');
     tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === this._activeTab));
-  }
-
-  // ── Star / Archive / Rename ──
-
-  // Unified sort: starred first, then by time (desc)
-  _sortSessions(arr) {
-    arr.sort((a, b) => {
-      const as = this._starredIds.has(a.sessionId) ? 1 : 0;
-      const bs = this._starredIds.has(b.sessionId) ? 1 : 0;
-      if (as !== bs) return bs - as;
-      return (b.startedAt || 0) - (a.startedAt || 0);
-    });
-  }
-
-  toggleStar(sessionId) {
-    if (this._starredIds.has(sessionId)) this._starredIds.delete(sessionId);
-    else this._starredIds.add(sessionId);
-    this._pushUserState();
-    this._render();
-    this.app.updateTaskbar();
-  }
-
-  isStarred(sessionId) { return this._starredIds.has(sessionId); }
-
-  toggleArchive(sessionId) {
-    if (this._archivedIds.has(sessionId)) this._archivedIds.delete(sessionId);
-    else this._archivedIds.add(sessionId);
-    this._pushUserState();
-    this._render();
-    this.app.updateTaskbar();
-  }
-
-  isArchived(sessionId) { return this._archivedIds.has(sessionId); }
-
-  getCustomName(sessionId) { return this._customNames[sessionId] || null; }
-  getSessionMode(sessionId) { return this._sessionModes[sessionId] || null; }
-  setSessionMode(sessionId, mode) { this._sessionModes[sessionId] = mode; this._pushUserState(); }
-
-  renameSession(sessionId, currentName) {
-    const name = prompt('Session name (used as --name on next resume):', this._customNames[sessionId] || currentName || '');
-    if (name === null) return; // cancelled
-    if (name.trim()) {
-      this._customNames[sessionId] = name.trim();
-    } else {
-      delete this._customNames[sessionId];
-    }
-    this._pushUserState();
-    this._render();
-    // Sync renamed session to any open window
-    const newName = name.trim() || currentName || sessionId.substring(0, 12) + '...';
-    this.app.syncSessionName(sessionId, newName);
-  }
-
-  // ── Session Groups ──
-
-  _getGroupNames() {
-    return Object.keys(this._sessionGroups).sort((a, b) => a.localeCompare(b));
-  }
-
-  _getSessionGroups(sessionId) {
-    const groups = [];
-    for (const [name, ids] of Object.entries(this._sessionGroups)) {
-      if (ids.includes(sessionId)) groups.push(name);
-    }
-    return groups;
-  }
-
-  _addSessionToGroup(sessionId, groupName) {
-    if (!this._sessionGroups[groupName]) this._sessionGroups[groupName] = [];
-    if (!this._sessionGroups[groupName].includes(sessionId)) {
-      this._sessionGroups[groupName].push(sessionId);
-    }
-    this._pushUserState();
-    this._render();
-  }
-
-  _removeSessionFromGroup(sessionId, groupName) {
-    if (!this._sessionGroups[groupName]) return;
-    this._sessionGroups[groupName] = this._sessionGroups[groupName].filter(id => id !== sessionId);
-    if (this._sessionGroups[groupName].length === 0) {
-      delete this._sessionGroups[groupName];
-    }
-    this._pushUserState();
-    this._render();
-  }
-
-  _addFolderToGroup(folderPath, groupName) {
-    if (!this._groupFolders[groupName]) this._groupFolders[groupName] = [];
-    if (!this._groupFolders[groupName].includes(folderPath)) {
-      this._groupFolders[groupName].push(folderPath);
-      this._pushUserState();
-      this._render();
-    }
-  }
-
-  _removeFolderFromGroup(folderPath, groupName) {
-    if (!this._groupFolders[groupName]) return;
-    this._groupFolders[groupName] = this._groupFolders[groupName].filter(p => p !== folderPath);
-    this._pushUserState();
-    this._render();
-  }
-
-  // Get all sessions in a group: direct + folder-matched (recursive)
-  _getGroupSessions(groupName, allSessions) {
-    const directIds = new Set(this._sessionGroups[groupName] || []);
-    const folders = this._groupFolders[groupName] || [];
-    const result = new Set(directIds);
-    for (const s of allSessions) {
-      if (result.has(s.sessionId)) continue;
-      const cwd = s.cwd || '';
-      for (const fp of folders) {
-        if (cwd === fp || cwd.startsWith(fp + '/')) { result.add(s.sessionId); break; }
-      }
-    }
-    return result;
-  }
-
-  _createGroup(name) {
-    if (!name || this._sessionGroups[name]) return;
-    this._sessionGroups[name] = [];
-    this._pushUserState();
-    this._render();
-  }
-
-  _deleteGroup(name) {
-    delete this._sessionGroups[name];
-    delete this._groupFolders[name];
-    this._pushUserState();
-    this._render();
-  }
-
-  _renameGroup(oldName, newName) {
-    if (this._sessionGroups[newName]) return; // name taken
-    this._sessionGroups[newName] = this._sessionGroups[oldName] || [];
-    delete this._sessionGroups[oldName];
-    if (this._groupFolders[oldName]) {
-      this._groupFolders[newName] = this._groupFolders[oldName];
-      delete this._groupFolders[oldName];
-    }
-    this._pushUserState();
-    this._render();
   }
 
   // ── Highlight / Sort / Filter ──
@@ -380,11 +184,60 @@ class Sidebar {
     }
   }
 
+  _getAvailableBackends() {
+    const ids = new Set(this._backendFilter.size ? [...this._backendFilter] : ['claude']);
+    for (const s of [...(this._systemSessions || []), ...(this._webuiSessions || [])]) {
+      if (s.backend) ids.add(s.backend);
+    }
+    return [...ids];
+  }
+
+  _showBackendFilterMenu(anchor) {
+    const menu = createPopover(anchor, 'status-filter-menu');
+    const backends = this._getAvailableBackends();
+    for (const id of backends) {
+      const meta = getBackendMeta(id);
+      const row = document.createElement('label'); row.className = 'status-filter-item';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = this._backendFilter.size === 0 || this._backendFilter.has(id);
+      const dot = createBackendIcon(id, { className: 'sidebar-backend-filter-icon', title: meta.label });
+      const lbl = document.createElement('span'); lbl.textContent = meta.label;
+      cb.onchange = () => {
+        const next = this._backendFilter.size === 0 ? new Set(backends) : new Set(this._backendFilter);
+        if (cb.checked) next.add(id); else next.delete(id);
+        this._backendFilter = next.size === backends.length ? new Set() : next;
+        localStorage.setItem('backendFilter', JSON.stringify([...this._backendFilter]));
+        this._activeView = null;
+        this._updateBackendFilterBtn(anchor);
+        this._render();
+      };
+      row.append(cb, dot, lbl);
+      menu.appendChild(row);
+    }
+  }
+
   _updateFilterBtn(btn) {
     // Default state: 4 non-archived filters on, archived off
     const isDefault = this._statusFilter.size === 4 && !this._statusFilter.has('archived');
     btn.style.color = isDefault ? '' : 'var(--accent-hover)';
     btn.title = isDefault ? 'Filter by status' : `Showing: ${[...this._statusFilter].join(', ')}`;
+  }
+
+  _updateBackendFilterBtn(btn) {
+    const isDefault = this._backendFilter.size === 0;
+    btn.style.color = isDefault ? '' : 'var(--accent-hover)';
+    btn.title = isDefault ? 'Filter by agent backend' : `Agents: ${[...this._backendFilter].join(', ')}`;
+    const iconIds = isDefault ? this._getAvailableBackends().slice(0, 2) : [...this._backendFilter].slice(0, 2);
+    btn.replaceChildren();
+    const stack = document.createElement('span');
+    stack.className = 'backend-filter-icon-stack';
+    if (!iconIds.length) {
+      stack.textContent = '◎';
+    } else {
+      for (const id of iconIds) stack.appendChild(createBackendIcon(id, { className: 'backend-filter-btn-icon' }));
+    }
+    btn.appendChild(stack);
   }
 
   _renderQuickTabs() {
@@ -416,6 +269,50 @@ class Sidebar {
     }
   }
 
+  _getAvailableAgentKinds() {
+    const kinds = new Set();
+    for (const session of this._allSessions || []) {
+      kinds.add(session.agentKind || 'primary');
+    }
+    return [...kinds];
+  }
+
+  _renderAgentKindQuickTabs() {
+    const container = document.getElementById('agent-kind-quick-tabs');
+    if (!container) return;
+    container.innerHTML = '';
+    const kinds = this._getAvailableAgentKinds();
+    if (kinds.length <= 1 && !kinds.includes('subagent') && !kinds.includes('review')) return;
+
+    const allBtn = document.createElement('button'); allBtn.className = 'status-quick-tab';
+    if (!this._agentKindFilter) allBtn.classList.add('active');
+    allBtn.textContent = 'ALL';
+    allBtn.title = 'Show all agent types';
+    allBtn.onclick = () => {
+      this._agentKindFilter = '';
+      localStorage.removeItem('agentKindFilter');
+      this._renderAgentKindQuickTabs();
+      this._render();
+    };
+    container.appendChild(allBtn);
+
+    for (const kind of kinds.sort()) {
+      const meta = getAgentKindMeta(kind);
+      const btn = document.createElement('button'); btn.className = 'status-quick-tab';
+      if (this._agentKindFilter === kind) btn.classList.add('active');
+      btn.title = meta.label;
+      btn.appendChild(createAgentKindIcon(kind, { className: 'agent-kind-quick-tab-icon', title: meta.label }));
+      btn.style.setProperty('--tab-color', meta.color);
+      btn.onclick = () => {
+        this._agentKindFilter = kind;
+        localStorage.setItem('agentKindFilter', kind);
+        this._renderAgentKindQuickTabs();
+        this._render();
+      };
+      container.appendChild(btn);
+    }
+  }
+
   _toggleCollapse(el, key) {
     el.classList.toggle('collapsed');
     if (el.classList.contains('collapsed')) this._collapsedFolders.add(key);
@@ -423,13 +320,49 @@ class Sidebar {
     localStorage.setItem('collapsedFolders', JSON.stringify([...this._collapsedFolders]));
   }
 
+  _applySidebarLayoutWidth(width = this.el.offsetWidth) {
+    document.getElementById('main-wrapper').style.marginLeft = this.isOpen ? `${width}px` : '0';
+  }
+
+  _setSidebarResizing(active) {
+    document.getElementById('main-wrapper').classList.toggle('sidebar-resizing', !!active);
+  }
+
+  _ensureSidebarResizePreview() {
+    if (this._resizePreviewEl) return this._resizePreviewEl;
+    const el = document.createElement('div');
+    el.className = 'sidebar-resize-preview';
+    document.body.appendChild(el);
+    this._resizePreviewEl = el;
+    return el;
+  }
+
+  _showSidebarResizePreview(width) {
+    const el = this._ensureSidebarResizePreview();
+    el.style.transform = `translate3d(${Math.max(0, width) - 1}px, 0, 0)`;
+    el.classList.add('visible');
+  }
+
+  _hideSidebarResizePreview() {
+    if (!this._resizePreviewEl) return;
+    this._resizePreviewEl.classList.remove('visible');
+  }
+
+  _fitVisibleSessions() {
+    for (const [, session] of this.app.sessions) {
+      if (!session.fit || !session.winInfo) continue;
+      if (session.winInfo.isMinimized || session.winInfo._hiddenByDesktop) continue;
+      session.fit();
+    }
+  }
+
   toggle(force) {
     this.isOpen = force !== undefined ? force : !this.isOpen;
     this.el.classList.toggle('open', this.isOpen);
     const wrapper = document.getElementById('main-wrapper');
     wrapper.classList.toggle('sidebar-open', this.isOpen);
-    wrapper.style.marginLeft = this.isOpen ? this.el.offsetWidth + 'px' : '0';
-    setTimeout(() => { for (const [, s] of this.app.sessions) { if (s.fit) s.fit(); } }, 250);
+    this._applySidebarLayoutWidth(this.el.offsetWidth);
+    setTimeout(() => this._fitVisibleSessions(), 250);
   }
 
   async _poll() {
@@ -447,16 +380,51 @@ class Sidebar {
     const matchedWebuiIds = new Set();
 
     const unified = system.map(s => {
-      const wm = webui.find(ws => ws.claudeSessionId === s.sessionId);
+      const wm = webui.find(ws =>
+        (ws.backend || 'claude') === (s.backend || 'claude')
+        && (ws.backendSessionId || ws.claudeSessionId || ws.id) === (s.backendSessionId || s.sessionId)
+      );
       if (wm) matchedWebuiIds.add(wm.id);
       // Only upgrade to 'live' for dtach-managed sessions (not tmux/external — those keep their status)
       const status = (wm && s.status === 'stopped') ? 'live' : (wm && s.status !== 'tmux' && s.status !== 'external') ? 'live' : s.status;
-      return { ...s, status, webuiId: wm?.id || null, webuiName: wm?.name || null, webuiMode: wm?.mode || 'terminal' };
+      return {
+        ...s,
+        sessionKey: s.sessionKey || wm?.sessionKey || getSessionKey(s),
+        status,
+        sourceKind: s.sourceKind || wm?.sourceKind || null,
+        agentKind: s.agentKind || wm?.agentKind || 'primary',
+        agentRole: s.agentRole || wm?.agentRole || '',
+        agentNickname: s.agentNickname || wm?.agentNickname || '',
+        parentThreadId: s.parentThreadId || wm?.parentThreadId || null,
+        webuiId: wm?.id || null,
+        webuiName: wm?.name || null,
+        webuiMode: wm ? (wm.mode || 'terminal') : null,
+      };
     });
 
     for (const ws of webui) {
       if (!matchedWebuiIds.has(ws.id)) {
-        unified.unshift({ sessionId: ws.claudeSessionId || ws.id, cwd: ws.cwd, startedAt: ws.createdAt, status: 'live', webuiId: ws.id, webuiName: ws.name, name: ws.name || '', webuiMode: ws.mode || 'terminal' });
+        const backend = ws.backend || 'claude';
+        const backendSessionId = ws.backendSessionId || ws.claudeSessionId || ws.id;
+        unified.unshift({
+          backend,
+          backendSessionId,
+          sessionKey: ws.sessionKey || `${backend}:${backendSessionId}`,
+          claudeSessionId: ws.claudeSessionId || null,
+          sessionId: backendSessionId,
+          cwd: ws.cwd,
+          startedAt: ws.createdAt,
+          status: 'live',
+          sourceKind: ws.sourceKind || null,
+          agentKind: ws.agentKind || 'primary',
+          agentRole: ws.agentRole || '',
+          agentNickname: ws.agentNickname || '',
+          parentThreadId: ws.parentThreadId || null,
+          webuiId: ws.id,
+          webuiName: ws.name,
+          name: ws.name || '',
+          webuiMode: ws.mode || 'terminal',
+        });
       }
     }
 
@@ -465,9 +433,15 @@ class Sidebar {
 
   _mergeAndRender() {
     this._merge();
-    const digest = JSON.stringify(this._allSessions.map(s => s.sessionId + ':' + s.status));
+    if (this._migrateUserStateKeys(this._allSessions)) {
+      this._pushUserState();
+    }
+    const digest = JSON.stringify(this._allSessions.map(s => `${this._getSessionStateKey(s)}:${s.status}:${s.agentKind || 'primary'}:${s.agentRole || ''}:${s.agentNickname || ''}`));
     if (digest === this._sessionDigest) return;
     this._sessionDigest = digest;
+    this.app.syncSessionIdentity?.(this._allSessions);
+    this._updateBackendFilterBtn(document.getElementById('backend-filter'));
+    this._renderAgentKindQuickTabs();
     this._render();
   }
 
@@ -476,19 +450,38 @@ class Sidebar {
     let sessions = this._allSessions;
 
     // Text filter
-    if (f) sessions = sessions.filter(s => (s.cwd||'').toLowerCase().includes(f) || (s.sessionId||'').toLowerCase().includes(f) || (s.name||'').toLowerCase().includes(f) || (s.webuiName||'').toLowerCase().includes(f));
+    if (f) sessions = sessions.filter(s =>
+      (s.cwd || '').toLowerCase().includes(f)
+      || (s.sessionId || '').toLowerCase().includes(f)
+      || (s.sessionKey || '').toLowerCase().includes(f)
+      || (s.name || '').toLowerCase().includes(f)
+      || (s.webuiName || '').toLowerCase().includes(f)
+      || (s.backend || '').toLowerCase().includes(f)
+      || (s.sourceKind || '').toLowerCase().includes(f)
+      || (s.agentKind || '').toLowerCase().includes(f)
+      || (s.agentRole || '').toLowerCase().includes(f)
+      || (s.agentNickname || '').toLowerCase().includes(f)
+    );
+
+    // Backend / agent filter
+    if (this._backendFilter.size > 0) {
+      sessions = sessions.filter(s => this._backendFilter.has(s.backend || 'claude'));
+    }
+    if (this._agentKindFilter) {
+      sessions = sessions.filter(s => (s.agentKind || 'primary') === this._agentKindFilter);
+    }
 
     // Archive filter: hide archived sessions unless 'archived' filter is on
     const showArchived = this._statusFilter.has('archived');
     if (showArchived) {
       // When archived filter is on, show only archived (plus any other enabled statuses for non-archived)
       sessions = sessions.filter(s => {
-        if (this._archivedIds.has(s.sessionId)) return true;
+        if (this._stateSetHas(this._archivedIds, s)) return true;
         return this._statusFilter.has(s.status);
       });
     } else {
       // Hide archived sessions, then apply status filter
-      sessions = sessions.filter(s => !this._archivedIds.has(s.sessionId));
+      sessions = sessions.filter(s => !this._stateSetHas(this._archivedIds, s));
       // Status filter (apply only when not all 4 non-archived statuses are selected)
       const nonArchivedFilters = new Set([...this._statusFilter]);
       nonArchivedFilters.delete('archived');
@@ -519,337 +512,11 @@ class Sidebar {
     }
   }
 
-  _renderGrouped(sessions) {
-    const groups = new Map();
-    for (const s of sessions) {
-      const key = s.cwd || '/unknown';
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push(s);
-    }
-
-    let groupEntries = [...groups.entries()];
-    if (this._sortMode === 'folder') {
-      groupEntries.sort((a, b) => a[0].localeCompare(b[0]));
-    } else {
-      groupEntries.sort((a, b) => {
-        // Groups with starred sessions first
-        const aStarred = a[1].some(s => this._starredIds.has(s.sessionId)) ? 1 : 0;
-        const bStarred = b[1].some(s => this._starredIds.has(s.sessionId)) ? 1 : 0;
-        if (aStarred !== bStarred) return bStarred - aStarred;
-        const aMax = Math.max(...a[1].map(s => s.startedAt || 0));
-        const bMax = Math.max(...b[1].map(s => s.startedAt || 0));
-        return bMax - aMax;
-      });
-    }
-
-    for (const [cwd, items] of groupEntries) {
-      const group = document.createElement('div'); group.className = 'folder-group';
-      if (this._collapsedFolders.has(cwd)) group.classList.add('collapsed');
-
-      const cwdShort = cwd.replace(/^\/home\/[^/]+/, '~');
-      const hasLive = items.some(s => s.status === 'live' || s.status === 'tmux');
-
-      const header = document.createElement('div'); header.className = 'folder-header';
-      header.innerHTML = `<span class="folder-chevron">\u25BC</span><span class="folder-path">${cwdShort}</span><span class="folder-count">${items.length}</span>`;
-      if (hasLive) {
-        const dot = document.createElement('span');
-        dot.style.cssText = 'width:6px;height:6px;border-radius:50%;background:var(--green);flex-shrink:0';
-        header.insertBefore(dot, header.children[2]);
-      }
-
-      // "+" button to create new session in this folder
-      const addBtn = document.createElement('button'); addBtn.className = 'folder-add-btn';
-      addBtn.textContent = '+'; addBtn.title = 'New session in ' + cwdShort;
-      addBtn.onclick = (e) => { e.stopPropagation(); this.app.createSession({ cwd }); };
-      header.appendChild(addBtn);
-
-      // Link folder to group button
-      const linkBtn = document.createElement('button'); linkBtn.className = 'folder-add-btn';
-      linkBtn.textContent = '\u{1F517}'; linkBtn.title = 'Add folder to group';
-      linkBtn.style.fontSize = '10px';
-      linkBtn.onclick = (e) => {
-        e.stopPropagation();
-        this._showGroupChecklistPopover(linkBtn,
-          (name) => (this._groupFolders[name] || []).includes(cwd),
-          (name, checked, pop) => { if (checked) this._addFolderToGroup(cwd, name); else this._removeFolderFromGroup(cwd, name); pop.remove(); });
-      };
-      header.appendChild(linkBtn);
-
-      header.onclick = (e) => {
-        if (e.target.closest('.folder-add-btn')) return;
-        this._toggleCollapse(group, cwd);
-      };
-
-      const sessionsDiv = document.createElement('div'); sessionsDiv.className = 'folder-sessions';
-      // Starred first, then by time
-      this._sortSessions(items);
-      for (const s of items) { sessionsDiv.appendChild(this._buildSessionCard(s)); }
-
-      group.append(header, sessionsDiv);
-      this.listEl.appendChild(group);
-    }
-  }
-
-  _renderByGroups(sessions) {
-    const sessionById = new Map();
-    for (const s of sessions) sessionById.set(s.sessionId, s);
-
-    const groupNames = this._getGroupNames();
-    const assignedIds = new Set();
-
-    // "+" button to add new group
-    const addGroupCard = document.createElement('div');
-    addGroupCard.className = 'session-item-card new-session-card';
-    addGroupCard.innerHTML = '<div class="session-card-name" style="color:var(--accent-hover)">+ New Group</div>';
-    addGroupCard.onclick = () => {
-      const name = prompt('Group name:');
-      if (name && name.trim()) this._createGroup(name.trim());
-    };
-    this.listEl.appendChild(addGroupCard);
-
-    // Render each group (direct sessions + folder-matched sessions)
-    for (const groupName of groupNames) {
-      const groupSessionIds = this._getGroupSessions(groupName, sessions);
-      const groupSessions = [...groupSessionIds].map(id => sessionById.get(id)).filter(Boolean);
-      groupSessionIds.forEach(id => assignedIds.add(id));
-
-      const groupEl = document.createElement('div');
-      groupEl.className = 'folder-group';
-      const collapseKey = 'group:' + groupName;
-      if (this._collapsedFolders.has(collapseKey)) groupEl.classList.add('collapsed');
-
-      const hasLive = groupSessions.some(s => s.status === 'live' || s.status === 'tmux');
-
-      const linkedFolders = this._groupFolders[groupName] || [];
-      const folderHint = linkedFolders.length ? ` (${linkedFolders.length} folder${linkedFolders.length > 1 ? 's' : ''})` : '';
-
-      const header = document.createElement('div');
-      header.className = 'folder-header';
-      header.innerHTML = `<span class="folder-chevron">\u25BC</span><span class="folder-path" style="direction:ltr">${escHtml(groupName)}<span style="color:var(--text-dim);font-weight:400;font-size:10px">${folderHint}</span></span><span class="folder-count">${groupSessions.length}</span>`;
-      if (hasLive) {
-        const dot = document.createElement('span');
-        dot.style.cssText = 'width:6px;height:6px;border-radius:50%;background:var(--green);flex-shrink:0';
-        header.insertBefore(dot, header.children[2]);
-      }
-
-      // Double-click group name to rename
-      const nameSpan = header.querySelector('.folder-path');
-      if (nameSpan) {
-        nameSpan.addEventListener('dblclick', (e) => {
-          e.stopPropagation();
-          const newName = prompt('Rename group:', groupName);
-          if (newName && newName.trim() && newName.trim() !== groupName) {
-            this._renameGroup(groupName, newName.trim());
-          }
-        });
-        nameSpan.title = 'Double-click to rename';
-      }
-
-      // Resume all stopped sessions in group
-      const resumeAllBtn = document.createElement('button');
-      resumeAllBtn.className = 'folder-add-btn';
-      resumeAllBtn.textContent = '\u25B6';
-      resumeAllBtn.title = 'Resume all sessions in "' + groupName + '"';
-      resumeAllBtn.onclick = (e) => {
-        e.stopPropagation();
-        for (const s of groupSessions) {
-          if (s.status === 'stopped') {
-            const customName = this.getCustomName(s.sessionId);
-            this.app.resumeSession(s.sessionId, s.cwd, customName || s.name);
-          } else if (s.status === 'live' && s.webuiId) {
-            this.app.attachSession(s.webuiId, s.webuiName || s.name, s.cwd, { mode: s.webuiMode });
-          } else if (s.status === 'tmux') {
-            this.app.attachTmuxSession(s.tmuxTarget, s.name, s.cwd);
-          }
-        }
-      };
-      header.appendChild(resumeAllBtn);
-
-      // Right-click context menu (Rename / Linked Folders / Delete)
-      header.addEventListener('contextmenu', (e) => {
-        e.preventDefault(); e.stopPropagation();
-        this._showGroupContextMenu(e.clientX, e.clientY, groupName);
-      });
-
-      // Drop target on entire group (header + expanded session area)
-      const _setupGroupDrop = (el) => {
-        el.addEventListener('dragover', (e) => {
-          if (e.dataTransfer.types.includes('application/x-folder-path') || e.dataTransfer.types.includes('application/x-session-id')) {
-            e.preventDefault(); e.stopPropagation(); header.classList.add('drop-target');
-          }
-        });
-        el.addEventListener('dragleave', (e) => {
-          if (!groupEl.contains(e.relatedTarget)) header.classList.remove('drop-target');
-        });
-        el.addEventListener('drop', (e) => {
-          e.preventDefault(); e.stopPropagation(); header.classList.remove('drop-target');
-          const folderPath = e.dataTransfer.getData('application/x-folder-path');
-          const sessionId = e.dataTransfer.getData('application/x-session-id');
-          if (folderPath) this._addFolderToGroup(folderPath, groupName);
-          else if (sessionId) this._assignSessionToGroup(sessionId, groupName);
-        });
-      };
-      _setupGroupDrop(groupEl);
-
-      header.onclick = (e) => {
-        if (e.target.closest('.folder-add-btn')) return;
-        this._toggleCollapse(groupEl, collapseKey);
-      };
-
-      const sessionsDiv = document.createElement('div');
-      sessionsDiv.className = 'folder-sessions';
-      // Sort: starred first, then by time
-      this._sortSessions(groupSessions);
-      for (const s of groupSessions) sessionsDiv.appendChild(this._buildSessionCard(s));
-
-      if (groupSessions.length === 0) {
-        const empty = document.createElement('div');
-        empty.className = 'empty-hint';
-        empty.textContent = 'No sessions in this group';
-        sessionsDiv.appendChild(empty);
-      }
-
-      groupEl.append(header, sessionsDiv);
-      this.listEl.appendChild(groupEl);
-    }
-
-    // Ungrouped section
-    const ungrouped = sessions.filter(s => !assignedIds.has(s.sessionId));
-    if (ungrouped.length > 0) {
-      const groupEl = document.createElement('div');
-      groupEl.className = 'folder-group';
-      const collapseKey = 'group:__ungrouped__';
-      if (this._collapsedFolders.has(collapseKey)) groupEl.classList.add('collapsed');
-
-      const header = document.createElement('div');
-      header.className = 'folder-header';
-      header.innerHTML = `<span class="folder-chevron">\u25BC</span><span class="folder-path" style="direction:ltr;font-style:italic">Ungrouped</span><span class="folder-count">${ungrouped.length}</span>`;
-
-      header.onclick = () => this._toggleCollapse(groupEl, collapseKey);
-
-      const sessionsDiv = document.createElement('div');
-      sessionsDiv.className = 'folder-sessions';
-      this._sortSessions(ungrouped);
-      for (const s of ungrouped) sessionsDiv.appendChild(this._buildSessionCard(s));
-
-      groupEl.append(header, sessionsDiv);
-      this.listEl.appendChild(groupEl);
-    }
-  }
-
-  _buildSessionCard(s) {
-    return renderSessionCard(s, {
-      state: this,
-      app: this.app,
-      settings: this.app.settings,
-      expandedCardId: this._expandedCardId,
-      onExpandToggle: (id) => { this._expandedCardId = id; this._render(); },
-      onRename: (sessionId, originalName) => this.renameSession(sessionId, originalName),
-    });
-  }
-
-  _showGroupFoldersPopover(anchor, groupName) {
-    const pop = createPopover(anchor, 'groups-popover');
-
-    const folders = this._groupFolders[groupName] || [];
-
-    if (folders.length === 0) {
-      const hint = document.createElement('div');
-      hint.className = 'empty-hint';
-      hint.textContent = 'No linked folders. Use \uD83D\uDD17 on folder headers in Folders tab, or drag folders here.';
-      pop.appendChild(hint);
-    } else {
-      for (const fp of folders) {
-        const row = document.createElement('div');
-        row.className = 'session-detail-group-item';
-        row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:6px;padding:4px 8px;cursor:default';
-        const pathSpan = document.createElement('span');
-        pathSpan.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px';
-        pathSpan.textContent = fp.replace(/^\/home\/[^/]+/, '~');
-        pathSpan.title = fp;
-        const removeBtn = document.createElement('button');
-        removeBtn.style.cssText = 'background:none;border:none;color:var(--red,#e55);cursor:pointer;font-size:12px;padding:0 4px;flex-shrink:0';
-        removeBtn.textContent = '\u00D7';
-        removeBtn.title = 'Unlink folder';
-        removeBtn.onclick = (e) => {
-          e.stopPropagation();
-          this._removeFolderFromGroup(fp, groupName);
-          pop.remove();
-        };
-        row.append(pathSpan, removeBtn);
-        pop.appendChild(row);
-      }
-    }
-  }
-
-  _showGroupContextMenu(x, y, groupName) {
-    showContextMenu(x, y, [
-      { label: 'Rename', action: () => {
-        const n = prompt('Rename group:', groupName);
-        if (n && n.trim() && n.trim() !== groupName) this._renameGroup(groupName, n.trim());
-      }},
-      { label: 'Linked folders', action: () => {
-        const anchor = document.createElement('span');
-        anchor.style.cssText = 'position:fixed;left:' + x + 'px;top:' + y + 'px;width:0;height:0';
-        document.body.appendChild(anchor);
-        this._showGroupFoldersPopover(anchor, groupName);
-        anchor.remove();
-      }},
-      { separator: true },
-      { label: 'Delete group', style: 'color:var(--red,#e55)', action: () => {
-        if (confirm('Delete group "' + groupName + '"?\nSessions will not be deleted.')) this._deleteGroup(groupName);
-      }},
-    ]);
-  }
-
-  _assignSessionToGroup(sessionId, groupName) {
-    if (!this._sessionGroups[groupName]) this._sessionGroups[groupName] = [];
-    if (!this._sessionGroups[groupName].includes(sessionId)) {
-      this._sessionGroups[groupName].push(sessionId);
-      this._pushUserState();
-      this._render();
-    }
-  }
-
-  _showGroupChecklistPopover(anchor, isCheckedFn, onToggleFn) {
-    const pop = createPopover(anchor, 'groups-popover');
-
-    const groupNames = this._getGroupNames();
-    for (const name of groupNames) {
-      const row = document.createElement('label');
-      row.className = 'session-detail-group-item';
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.checked = isCheckedFn(name);
-      cb.onchange = (e) => { e.stopPropagation(); onToggleFn(name, cb.checked, pop); };
-      const lbl = document.createElement('span');
-      lbl.textContent = name;
-      row.append(cb, lbl);
-      row.onclick = (e) => e.stopPropagation();
-      pop.appendChild(row);
-    }
-
-    if (groupNames.length === 0) {
-      const hint = document.createElement('div');
-      hint.className = 'empty-hint'; hint.textContent = 'No groups yet';
-      pop.appendChild(hint);
-    }
-
-    const createRow = document.createElement('div');
-    createRow.className = 'session-detail-group-create';
-    createRow.textContent = '+ New group';
-    createRow.onclick = (e) => {
-      e.stopPropagation();
-      const name = prompt('New group name:');
-      if (name && name.trim()) {
-        this._createGroup(name.trim());
-        onToggleFn(name.trim(), true, pop);
-        pop.remove();
-      }
-    };
-    pop.appendChild(createRow);
-  }
+  // Rendering methods (_renderGrouped, _renderByGroups, _buildSessionCard, group popovers)
+  // installed by sidebar-render.js mixin
 
 }
 
+installSidebarState(Sidebar);
+installSidebarRender(Sidebar);
 export { Sidebar };

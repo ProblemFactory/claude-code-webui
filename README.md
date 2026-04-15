@@ -12,7 +12,7 @@ A web-based UI for managing multiple [Claude Code](https://docs.anthropic.com/en
 - Default mode configurable per-user; split button on resume to choose Terminal or Chat
 
 ### Chat Mode
-- **Normalized message system** -- MessageManager converts raw Claude stream-json to normalized messages with stable IDs, merged tool calls, streaming text edits. Backend-agnostic adapter interface for future AI backends.
+- **Normalized message system** -- MessageManager (Claude) / CodexMessageManager (Codex) converts raw backend output to normalized messages with stable IDs, merged tool calls, streaming text edits. Backend-agnostic adapter interface (`BackendAdapter`) for pluggable AI backends.
 - **Tool visualization** -- Edit diffs (flex layout, wrap toggle), Read/Write with syntax highlighting (30 languages via highlight.js) + line numbers + searchable language picker
 - **Interactive permissions** -- Allow / Always Allow / Deny buttons inline on tool cards (`--permission-prompt-tool` support)
 - **Subagent support** -- Agent tool cards show live status; View Log opens read-only ChatView via per-subagent normalizers

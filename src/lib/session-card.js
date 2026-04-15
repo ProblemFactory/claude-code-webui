@@ -1,15 +1,31 @@
 import { escHtml, copyText } from './utils.js';
+import { createBackendIcon, createAgentKindIcon, createModeBackendIcon, getBackendMeta, getAgentKindMeta, getAgentRoleLabel, getAgentRoleShortLabel, getSessionKey } from './agent-meta.js';
+
+/** Inline SVG icon helper — returns an HTML string for a 12x12 stroked icon */
+const _s = (d, fill = false) => `<svg style="width:12px;height:12px;vertical-align:-2px" viewBox="0 0 16 16" fill="${fill ? 'currentColor' : 'none'}" stroke="${fill ? 'none' : 'currentColor'}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg">${d}</svg>`;
+const ICON = {
+  starOn:    _s('<path d="M8 1.5l2 4.2 4.5.6-3.3 3.1.8 4.6L8 11.5l-4 2.5.8-4.6L1.5 6.3 6 5.7z"/>', true),
+  starOff:   _s('<path d="M8 1.5l2 4.2 4.5.6-3.3 3.1.8 4.6L8 11.5l-4 2.5.8-4.6L1.5 6.3 6 5.7z"/>'),
+  archive:   _s('<path d="M2 4h12M3 4v8a1 1 0 001 1h8a1 1 0 001-1V4"/><path d="M6.5 8h3"/>'),
+  unarchive: _s('<path d="M2 4h12M3 4v8a1 1 0 001 1h8a1 1 0 001-1V4"/><path d="M8 7v4M6 9l2-2 2 2"/>'),
+  rename:    _s('<path d="M11.5 1.5l3 3L5 14H2v-3z"/>'),
+  find:      _s('<circle cx="7" cy="7" r="4"/><path d="M10 10l4 4"/>'),
+  chat:      _s('<path d="M2 3a2 2 0 012-2h8a2 2 0 012 2v6a2 2 0 01-2 2H6l-4 3V3z"/>'),
+  history:   _s('<circle cx="8" cy="8" r="6"/><path d="M8 4v4l3 1.5"/>'),
+  terminal:  _s('<rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M4.5 7l2 2-2 2M8.5 11h3"/>'),
+  terminate: _s('<path d="M4 4l8 8M12 4l-8 8"/>'),
+};
 
 /**
  * Render the detail groups section inside a session card.
  * @param {HTMLElement} container - DOM container for groups
- * @param {string} sessionId
+ * @param {object|string} sessionRef
  * @param {boolean} clickToCopy
  * @param {object} state - sidebar instance (for _getSessionGroups, _showGroupChecklistPopover, _addSessionToGroup, _removeSessionFromGroup)
  */
-function renderDetailGroups(container, sessionId, clickToCopy, state) {
+function renderDetailGroups(container, sessionRef, clickToCopy, state) {
   container.innerHTML = '';
-  const sessionGroups = state._getSessionGroups(sessionId);
+  const sessionGroups = state._getSessionGroups(sessionRef);
   const summary = sessionGroups.length ? sessionGroups.join(', ') : 'None';
 
   const row = document.createElement('div');
@@ -36,10 +52,10 @@ function renderDetailGroups(container, sessionId, clickToCopy, state) {
   btn.style.cssText = 'padding:1px 6px;font-size:10px;min-width:0';
   btn.onclick = (e) => {
     e.stopPropagation();
-    const groups = state._getSessionGroups(sessionId);
+    const groups = state._getSessionGroups(sessionRef);
     state._showGroupChecklistPopover(btn,
       (name) => groups.includes(name),
-      (name, checked) => { if (checked) state._addSessionToGroup(sessionId, name); else state._removeSessionFromGroup(sessionId, name); });
+      (name, checked) => { if (checked) state._addSessionToGroup(sessionRef, name); else state._removeSessionFromGroup(sessionRef, name); });
   };
   row.appendChild(btn);
   container.appendChild(row);
@@ -54,7 +70,7 @@ function renderDetailGroups(container, sessionId, clickToCopy, state) {
  * @param {object} opts.settings - SettingsManager
  * @param {string|null} opts.expandedCardId - currently expanded card ID
  * @param {function} opts.onExpandToggle - callback(sessionId) when expand toggled
- * @param {function} opts.onRename - callback(sessionId, originalName) for rename
+ * @param {function} opts.onRename - callback(session, originalName) for rename
  * @returns {HTMLElement}
  */
 export function renderSessionCard(s, { state, app, settings, expandedCardId, onExpandToggle, onRename }) {
@@ -63,16 +79,32 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
   card.draggable = true;
   card.addEventListener('dragstart', (e) => {
     e.dataTransfer.setData('application/x-session-id', s.sessionId);
+    const sessionKey = getSessionKey(s);
+    if (sessionKey) e.dataTransfer.setData('application/x-session-key', sessionKey);
     e.dataTransfer.effectAllowed = 'link';
   });
-  const isArchived = state.isArchived(s.sessionId);
+  const isArchived = state.isArchived(s);
   if (isArchived) card.classList.add('archived');
   if (expandedCardId === s.sessionId) card.classList.add('expanded');
   const date = new Date(s.startedAt);
-  const customName = state.getCustomName(s.sessionId);
+  const customName = state.getCustomName(s);
   const cwdFolder = s.cwd ? s.cwd.replace(/\/+$/, '').split('/').pop() : '';
   const originalName = s.name || s.webuiName || cwdFolder || s.sessionId.substring(0, 12) + '...';
   const displayName = customName || originalName;
+  const backendMeta = getBackendMeta(s.backend || 'claude');
+  const agentKindMeta = getAgentKindMeta(s.agentKind || 'primary');
+  const agentRoleLabel = getAgentRoleLabel(s.agentRole);
+  const agentRoleShort = getAgentRoleShortLabel(s.agentRole);
+  const showAgentKind = (s.agentKind || 'primary') !== 'primary';
+  const agentOpts = {
+    backend: s.backend || 'claude',
+    backendSessionId: s.backendSessionId || s.sessionId,
+    agentKind: s.agentKind || 'primary',
+    agentRole: s.agentRole || '',
+    agentNickname: s.agentNickname || '',
+    sourceKind: s.sourceKind || '',
+    parentThreadId: s.parentThreadId || null,
+  };
 
   const badgeMap = {
     live:     { cls: 'badge-live', text: 'LIVE' },
@@ -82,29 +114,53 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
   };
   const badge = badgeMap[s.status] || badgeMap.stopped;
 
-  const starred = state.isStarred(s.sessionId);
+  const starred = state.isStarred(s);
   const isExpanded = expandedCardId === s.sessionId;
-  // Compact row: star archive name [mode] badge expand
-  const modeIcon = s.webuiMode === 'chat' ? '<span class="session-mode-icon" title="Chat mode">\uD83D\uDCAC</span>' : '';
+  // Compact row: star archive mode/backend icon name status expand
   card.innerHTML = `<div class="session-card-row">
     <span class="session-card-name">${escHtml(displayName)}</span>
-    ${modeIcon}<span class="session-card-badge ${badge.cls}">${badge.text}</span>
+    ${agentRoleShort ? `<span class="session-card-badge badge-agent-role" title="${escHtml(agentRoleLabel)}">${escHtml(agentRoleShort)}</span>` : ''}
+    <span class="session-card-badge ${badge.cls}">${badge.text}</span>
   </div>`;
   const row = card.querySelector('.session-card-row');
   // Star button (inline, always visible)
   const starBtn = document.createElement('button');
   starBtn.className = 'session-inline-btn' + (starred ? ' starred' : '');
-  starBtn.textContent = starred ? '\u2605' : '\u2606';
+  starBtn.innerHTML = starred ? ICON.starOn : ICON.starOff;
   starBtn.title = starred ? 'Unstar' : 'Star';
-  starBtn.onclick = (e) => { e.stopPropagation(); state.toggleStar(s.sessionId); };
+  starBtn.onclick = (e) => { e.stopPropagation(); state.toggleStar(s); };
   row.insertBefore(starBtn, row.firstChild);
   // Archive button (inline, always visible)
   const archBtn = document.createElement('button');
   archBtn.className = 'session-inline-btn' + (isArchived ? ' archived' : '');
-  archBtn.textContent = isArchived ? '\u{1F4E4}' : '\u{1F4E6}';
+  archBtn.innerHTML = isArchived ? ICON.unarchive : ICON.archive;
   archBtn.title = isArchived ? 'Unarchive' : 'Archive';
-  archBtn.onclick = (e) => { e.stopPropagation(); state.toggleArchive(s.sessionId); };
+  archBtn.onclick = (e) => { e.stopPropagation(); state.toggleArchive(s); };
   row.insertBefore(archBtn, row.children[1]);
+  // Composite icon: mode shape (chat/terminal) + backend logo inside
+  // For live sessions with known mode: composite icon before name
+  // For stopped/external: plain backend icon before name
+  if (s.webuiMode) {
+    const compositeIcon = createModeBackendIcon(s.backend || 'claude', s.webuiMode, {
+      className: 'session-composite-icon',
+      title: `${backendMeta.label} ${s.webuiMode === 'chat' ? 'Chat' : 'Terminal'}`,
+    });
+    row.insertBefore(compositeIcon, row.querySelector('.session-card-name'));
+  } else {
+    const backendIcon = createBackendIcon(s.backend || 'claude', {
+      className: 'session-backend-icon',
+      title: backendMeta.label,
+    });
+    row.insertBefore(backendIcon, row.querySelector('.session-card-name'));
+  }
+
+  if (showAgentKind) {
+    const agentKindIcon = createAgentKindIcon(s.agentKind || 'primary', {
+      className: 'session-agent-kind-icon',
+      title: agentKindMeta.label,
+    });
+    row.insertBefore(agentKindIcon, row.querySelector('.session-card-name'));
+  }
 
   // Expand/collapse button on the right side, after badge
   const expandBtn = document.createElement('button');
@@ -125,13 +181,14 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
   const detailPanel = document.createElement('div');
   detailPanel.className = 'session-card-detail';
 
-  const visibleFields = settings?.get('sessionCard.visibleFields') ?? ['id', 'cwd', 'started', 'status', 'groups'];
+  const visibleFields = settings?.get('sessionCard.visibleFields') ?? ['id', 'backend', 'cwd', 'started', 'status', 'groups'];
   const clickToCopy = settings?.get('sessionCard.clickToCopy') ?? false;
   const truncation = settings?.get('sessionCard.detailTruncation') ?? 'left';
   const cwdShort = (s.cwd || '').replace(/^\/home\/[^/]+/, '~').replace(/^\/Users\/[^/]+/, '~');
 
   const fields = [
     { key: 'id', label: 'ID', display: s.sessionId, copy: s.sessionId, copiable: true, midTruncate: true },
+    { key: 'backend', label: 'Agent', display: [backendMeta.label, showAgentKind ? agentKindMeta.label : null, agentRoleLabel, s.agentNickname || null].filter(Boolean).join(' / '), copy: [backendMeta.label, showAgentKind ? agentKindMeta.label : null, agentRoleLabel, s.agentNickname || null].filter(Boolean).join(' / ') },
     { key: 'cwd', label: 'CWD', display: cwdShort, copy: s.cwd || '', copiable: true, leftTruncate: true },
     { key: 'started', label: 'Started', display: date.toLocaleString(), copy: date.toISOString() },
     { key: 'status', label: 'Status', display: null, badge: true, copy: `${s.status}${s.pid ? ' PID ' + s.pid : ''}` },
@@ -178,7 +235,7 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
   if (visibleFields.includes('groups')) {
     const groupsContainer = document.createElement('div'); groupsContainer.className = 'session-detail-groups';
     detailPanel.appendChild(groupsContainer);
-    renderDetailGroups(groupsContainer, s.sessionId, clickToCopy, state);
+    renderDetailGroups(groupsContainer, s, clickToCopy, state);
   }
 
   const actionsDiv = document.createElement('div'); actionsDiv.className = 'session-detail-actions';
@@ -187,15 +244,15 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
   // Rename button
   const detailRenameBtn = document.createElement('button');
   detailRenameBtn.className = 'session-detail-btn';
-  detailRenameBtn.textContent = '\u270F Rename';
-  detailRenameBtn.onclick = (e) => { e.stopPropagation(); onRename(s.sessionId, originalName); };
+  detailRenameBtn.innerHTML = ICON.rename + ' Rename';
+  detailRenameBtn.onclick = (e) => { e.stopPropagation(); onRename(s, originalName); };
   actionsDiv.appendChild(detailRenameBtn);
 
   // Find button — highlight the window + taskbar item with fast blink
   if (s.webuiId) {
     const findBtn = document.createElement('button');
     findBtn.className = 'session-detail-btn';
-    findBtn.textContent = '\uD83D\uDD0D Find';
+    findBtn.innerHTML = ICON.find + ' Find';
     findBtn.onclick = (e) => {
       e.stopPropagation();
       app.flashWindow(s.webuiId);
@@ -207,17 +264,17 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
   if (s.status === 'live' && s.webuiId) {
     const detailAttachBtn = document.createElement('button');
     detailAttachBtn.className = 'session-detail-btn session-detail-btn-primary';
-    detailAttachBtn.textContent = '\u25B6 Attach';
-    detailAttachBtn.onclick = (e) => { e.stopPropagation(); app.attachSession(s.webuiId, s.webuiName || displayName, s.cwd, { mode: s.webuiMode }); };
+    detailAttachBtn.innerHTML = ICON.terminal + ' Attach';
+    detailAttachBtn.onclick = (e) => { e.stopPropagation(); app.attachSession(s.webuiId, s.webuiName || displayName, s.cwd, { mode: s.webuiMode, ...agentOpts }); };
     actionsDiv.appendChild(detailAttachBtn);
   } else if (s.status === 'tmux') {
     const detailTmuxBtn = document.createElement('button');
     detailTmuxBtn.className = 'session-detail-btn session-detail-btn-primary';
-    detailTmuxBtn.textContent = '\u25B6 View';
+    detailTmuxBtn.innerHTML = ICON.terminal + ' View';
     detailTmuxBtn.onclick = (e) => { e.stopPropagation(); app.attachTmuxSession(s.tmuxTarget, displayName, s.cwd); };
     actionsDiv.appendChild(detailTmuxBtn);
   } else if (s.status === 'stopped') {
-    const savedMode = state.getSessionMode(s.sessionId);
+    const savedMode = state.getSessionMode(s);
     const defaultMode = settings?.get('session.defaultMode') ?? 'terminal';
     let resumeMode = savedMode || defaultMode;
 
@@ -228,18 +285,24 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
     const dropBtn = document.createElement('button');
     const updateLabel = () => {
       const isChat = resumeMode === 'chat';
-      resumeBtn.textContent = isChat ? '\uD83D\uDCAC Resume in Chat' : '\u25B6 Resume in Terminal';
+      resumeBtn.innerHTML = isChat ? (ICON.chat + ' Resume in Chat') : (ICON.terminal + ' Resume in Terminal');
       resumeBtn.className = 'session-detail-btn ' + (isChat ? 'session-detail-btn-chat' : 'session-detail-btn-primary');
       dropBtn.className = 'session-resume-drop ' + (isChat ? 'session-detail-btn-chat' : 'session-detail-btn-primary');
     };
     updateLabel();
-    resumeBtn.onclick = (e) => { e.stopPropagation(); app.resumeSession(s.sessionId, s.cwd, customName || s.name, { mode: resumeMode }); };
+    resumeBtn.onclick = (e) => {
+      e.stopPropagation();
+      app.resumeSession(s.sessionId, s.cwd, customName || s.name, {
+        mode: resumeMode,
+        ...agentOpts,
+      });
+    };
 
     dropBtn.textContent = '\u25BE';
     dropBtn.onclick = (e) => {
       e.stopPropagation();
       resumeMode = resumeMode === 'chat' ? 'terminal' : 'chat';
-      state.setSessionMode(s.sessionId, resumeMode);
+      state.setSessionMode(s, resumeMode);
       updateLabel();
     };
 
@@ -249,8 +312,13 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
     // View History button (read-only, no resume)
     const viewBtn = document.createElement('button');
     viewBtn.className = 'session-detail-btn';
-    viewBtn.textContent = '\uD83D\uDCCB View History';
-    viewBtn.onclick = (e) => { e.stopPropagation(); app.viewSession(s.sessionId, s.cwd, customName || s.name); };
+    viewBtn.innerHTML = ICON.history + ' View History';
+    viewBtn.onclick = (e) => {
+      e.stopPropagation();
+      app.viewSession(s.sessionId, s.cwd, customName || s.name, {
+        ...agentOpts,
+      });
+    };
     actionsDiv.appendChild(viewBtn);
   }
 
@@ -259,7 +327,7 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
     const terminateBtn = document.createElement('button');
     terminateBtn.className = 'session-detail-btn';
     terminateBtn.style.color = 'var(--red, #e55)';
-    terminateBtn.textContent = '\u2715 Terminate';
+    terminateBtn.innerHTML = ICON.terminate + ' Terminate';
     terminateBtn.onclick = (e) => {
       e.stopPropagation();
       if (!confirm('Terminate session "' + displayName + '"?')) return;
@@ -275,7 +343,7 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
   const nameEl = card.querySelector('.session-card-name');
   if (nameEl) {
     if (customName) nameEl.title = `Custom name (--name on resume). Original: ${originalName}`;
-    nameEl.addEventListener('dblclick', (e) => { e.stopPropagation(); onRename(s.sessionId, originalName); });
+    nameEl.addEventListener('dblclick', (e) => { e.stopPropagation(); onRename(s, originalName); });
   }
 
   const clickBehavior = settings?.get('sessionCard.clickBehavior') ?? 'focus';
@@ -299,22 +367,26 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
     card.onclick = (e) => {
       if (e.target.closest('.session-detail-btn') || e.target.closest('.session-inline-btn') || e.target.closest('.session-expand-btn') || e.target.closest('.session-detail-copyable')) return;
       if (s.webuiId) app.flashWindow(s.webuiId);
-      else if (s.status === 'live' && s.webuiId) app.attachSession(s.webuiId, s.webuiName || displayName, s.cwd, { mode: s.webuiMode });
+      else if (s.status === 'live' && s.webuiId) app.attachSession(s.webuiId, s.webuiName || displayName, s.cwd, { mode: s.webuiMode, ...agentOpts });
       else if (s.status === 'tmux') app.attachTmuxSession(s.tmuxTarget, displayName, s.cwd);
-      else if (s.status === 'stopped') app.resumeSession(s.sessionId, s.cwd, customName || s.name);
+      else if (s.status === 'stopped') app.resumeSession(s.sessionId, s.cwd, customName || s.name, {
+        ...agentOpts,
+      });
     };
   } else {
     // Default 'focus': click opens/resumes directly
     if (s.status === 'live' && s.webuiId) {
-      card.onclick = () => app.attachSession(s.webuiId, s.webuiName || displayName, s.cwd, { mode: s.webuiMode });
+      card.onclick = () => app.attachSession(s.webuiId, s.webuiName || displayName, s.cwd, { mode: s.webuiMode, ...agentOpts });
     } else if (s.status === 'tmux') {
       card.onclick = () => app.attachTmuxSession(s.tmuxTarget, displayName, s.cwd);
       card.title = 'Running in tmux \u2014 click to view (closing won\'t kill it)';
     } else if (s.status === 'live') {
       // LIVE but no window open (e.g. layout didn't restore it) — click to attach
-      card.onclick = () => app.attachSession(s.webuiId, s.webuiName || displayName, s.cwd, { mode: s.webuiMode });
+      card.onclick = () => app.attachSession(s.webuiId, s.webuiName || displayName, s.cwd, { mode: s.webuiMode, ...agentOpts });
     } else if (s.status === 'stopped') {
-      card.onclick = () => app.resumeSession(s.sessionId, s.cwd, customName || s.name);
+      card.onclick = () => app.resumeSession(s.sessionId, s.cwd, customName || s.name, {
+        ...agentOpts,
+      });
     }
   }
   return card;

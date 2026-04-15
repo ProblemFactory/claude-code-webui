@@ -28,7 +28,7 @@ class BackendAdapter {
   /**
    * Attach to an existing session.
    * @param {string} sessionId - WebUI session ID
-   * @param {object} sessionMeta - { socketPath, cwd, claudeSessionId, ... }
+   * @param {object} sessionMeta - { socketPath, cwd, backend, backendSessionId, ... }
    * @returns {SessionHandle}
    */
   async attachSession(sessionId, sessionMeta) { throw new Error('not implemented'); }
@@ -42,11 +42,11 @@ class BackendAdapter {
   /**
    * Parse historical messages from this backend's storage.
    * Returns raw messages in the backend's format (normalizer converts them).
-   * @param {string} claudeSessionId
+   * @param {string} backendSessionId
    * @param {string} cwd
    * @returns {object[]} Raw messages
    */
-  parseHistory(claudeSessionId, cwd) { return []; }
+  parseHistory(backendSessionId, cwd) { return []; }
 }
 
 /**
@@ -93,5 +93,18 @@ class SessionHandle extends EventEmitter {
   /** Get the raw PTY buffer (for terminal mode attach) */
   get buffer() { return ''; }
 }
+
+/**
+ * Protocol formatting methods — called by ws-handler to build
+ * backend-specific JSON payloads. Eliminates if/else branching.
+ */
+BackendAdapter.prototype.formatChatInput = function(text, msgId) { throw new Error('not implemented'); };
+BackendAdapter.prototype.formatInterrupt = function(session) { throw new Error('not implemented'); };
+BackendAdapter.prototype.formatPermissionResponse = function(data) { throw new Error('not implemented'); };
+BackendAdapter.prototype.formatSetPermissionMode = function(mode) { throw new Error('not implemented'); };
+/** Build a preview user message record for buffer (before JSONL arrives) */
+BackendAdapter.prototype.buildUserPreview = function(text, msgId) { return null; };
+/** Extra actions after sending interrupt (e.g. SIGINT fallback) */
+BackendAdapter.prototype.postInterrupt = function(session) {};
 
 module.exports = { BackendAdapter, SessionHandle };
