@@ -340,13 +340,18 @@ export function createModeBackendIcon(backend, mode, { title, className = '' } =
   const logoMask = meta.iconSrc ? `<span class="mode-backend-logo ${meta.iconClass}" style="--backend-icon-mask:url('${meta.iconSrc}');--backend-icon-color:${meta.brandColor || 'currentColor'}"></span>` : `<span class="mode-backend-logo-text">${meta.icon}</span>`;
 
   if (mode === 'chat') {
-    el.innerHTML = `<svg class="mode-backend-shape" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <path d="M3 3.5A1.5 1.5 0 0 1 4.5 2h11A1.5 1.5 0 0 1 17 3.5v9a1.5 1.5 0 0 1-1.5 1.5H7l-4 4V3.5z" fill="currentColor" opacity="0.15" stroke="currentColor" stroke-width="1.2"/>
+    // Rounded chat bubble with visible tail at bottom-left
+    el.innerHTML = `<svg class="mode-backend-shape" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M4 4a3 3 0 0 1 3-3h10a3 3 0 0 1 3 3v10a3 3 0 0 1-3 3H9.5L4 21V4z" fill="currentColor" opacity="0.15" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
     </svg>${logoMask}`;
   } else {
-    el.innerHTML = `<svg class="mode-backend-shape" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <rect x="2" y="3" width="16" height="13" rx="2" fill="currentColor" opacity="0.15" stroke="currentColor" stroke-width="1.2"/>
-      <path d="M5.5 9l2 2-2 2" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" opacity="0.5"/>
+    // Terminal window with title bar dots
+    el.innerHTML = `<svg class="mode-backend-shape" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect x="1.5" y="2.5" width="21" height="18" rx="3" fill="currentColor" opacity="0.15" stroke="currentColor" stroke-width="1.5"/>
+      <line x1="1.5" y1="7" x2="22.5" y2="7" stroke="currentColor" stroke-width="1" opacity="0.3"/>
+      <circle cx="5" cy="4.8" r="0.8" fill="currentColor" opacity="0.4"/>
+      <circle cx="7.5" cy="4.8" r="0.8" fill="currentColor" opacity="0.4"/>
+      <circle cx="10" cy="4.8" r="0.8" fill="currentColor" opacity="0.4"/>
     </svg>${logoMask}`;
   }
 
