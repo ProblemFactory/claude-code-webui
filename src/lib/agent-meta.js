@@ -338,18 +338,16 @@ export function createModeBackendIcon(backend, mode, { title, className = '' } =
   const logoMask = meta.iconSrc ? `<span class="mode-backend-logo ${meta.iconClass}" data-backend="${meta.id}" style="--backend-icon-mask:url('${meta.iconSrc}');--backend-icon-color:${meta.brandColor || 'currentColor'}"></span>` : `<span class="mode-backend-logo-text">${meta.icon}</span>`;
 
   if (mode === 'chat') {
-    // Rounded chat bubble with visible tail at bottom-left
     el.innerHTML = `<svg class="mode-backend-shape" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <path d="M4 4a3 3 0 0 1 3-3h10a3 3 0 0 1 3 3v10a3 3 0 0 1-3 3H9.5L4 21V4z" fill="currentColor" opacity="0.15" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+      <path d="M4 4a3 3 0 0 1 3-3h10a3 3 0 0 1 3 3v10a3 3 0 0 1-3 3H9.5L4 21V4z" fill="var(--bg-hover)" stroke="var(--border-active)" stroke-width="1.5" stroke-linejoin="round"/>
     </svg>${logoMask}`;
   } else {
-    // Terminal window with title bar dots
     el.innerHTML = `<svg class="mode-backend-shape" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <rect x="1.5" y="2.5" width="21" height="18" rx="3" fill="currentColor" opacity="0.15" stroke="currentColor" stroke-width="1.5"/>
-      <line x1="1.5" y1="7" x2="22.5" y2="7" stroke="currentColor" stroke-width="1" opacity="0.3"/>
-      <circle cx="5" cy="4.8" r="0.8" fill="currentColor" opacity="0.4"/>
-      <circle cx="7.5" cy="4.8" r="0.8" fill="currentColor" opacity="0.4"/>
-      <circle cx="10" cy="4.8" r="0.8" fill="currentColor" opacity="0.4"/>
+      <rect x="1.5" y="2.5" width="21" height="18" rx="3" fill="var(--bg-hover)" stroke="var(--border-active)" stroke-width="1.5"/>
+      <line x1="1.5" y1="7" x2="22.5" y2="7" stroke="var(--border-active)" stroke-width="1" opacity="0.5"/>
+      <circle cx="5" cy="4.8" r="0.8" fill="var(--text-dim)"/>
+      <circle cx="7.5" cy="4.8" r="0.8" fill="var(--text-dim)"/>
+      <circle cx="10" cy="4.8" r="0.8" fill="var(--text-dim)"/>
     </svg>${logoMask}`;
   }
 
