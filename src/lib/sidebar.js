@@ -153,7 +153,7 @@ class Sidebar {
   }
 
   _updateSortBtn(btn) {
-    btn.textContent = this._sortMode === 'recent' ? '\u23F1' : '\uD83D\uDCC1';
+    btn.innerHTML = this._sortMode === 'recent' ? '<svg style="width:11px;height:11px;vertical-align:-1px" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="6"/><path d="M8 4v4l3 1.5"/></svg>' : '<svg style="width:11px;height:11px;vertical-align:-1px" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4h4l2 2h6v7a1 1 0 01-1 1H3a1 1 0 01-1-1V4z"/></svg>';
     btn.title = `Sort by: ${this._sortMode === 'recent' ? 'Recent' : 'Folder'}`;
   }
 

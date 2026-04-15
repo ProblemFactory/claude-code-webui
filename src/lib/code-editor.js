@@ -209,7 +209,7 @@ class CodeEditor {
     sizeUp.onclick = () => this._changeFontSize(1);
 
     // Save + download
-    const btnSave = this._btn('\u{1F4BE}'); btnSave.title = 'Save (Ctrl+S)';
+    const btnSave = this._btn(''); btnSave.innerHTML = '<svg style="width:12px;height:12px;vertical-align:-1px" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 1h8l3 3v9a2 2 0 01-2 2H3a2 2 0 01-2-2V3a2 2 0 012-2z"/><path d="M5 1v4h5V1M4 9h8"/></svg>'; btnSave.title = 'Save (Ctrl+S)';
     btnSave.onclick = () => this.save();
     if (this._isReadOnly) btnSave.style.display = 'none';
     const btnDownload = this._btn('\u21E9'); btnDownload.title = 'Download';

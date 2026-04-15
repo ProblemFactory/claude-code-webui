@@ -1,6 +1,7 @@
 import { formatSize, attachPopoverClose, createPopover, showContextMenu } from './utils.js';
 import { setupDirAutocomplete } from './autocomplete.js';
 import { getFileIcon, hasDedicatedViewer } from './file-types.js';
+import { FILE_ICONS } from './icons.js';
 import { FileViewer } from './file-viewer.js';
 
 const DEFAULT_COLUMNS = { name: true, size: true, modified: true, created: false, type: false };
@@ -70,7 +71,7 @@ class FileExplorer {
     btnView.onclick = () => this._showViewMenu(btnView);
 
     const btnNewFile = this._btn('+', 'New file'); btnNewFile.onclick = () => this.createFile();
-    const btnNewDir = this._btn('\uD83D\uDCC2', 'New folder'); btnNewDir.onclick = () => this.createDir();
+    const btnNewDir = this._btn('', 'New folder'); btnNewDir.innerHTML = FILE_ICONS.folderOpen; btnNewDir.onclick = () => this.createDir();
     const btnUpload = this._btn('\u2B06', 'Upload'); btnUpload.onclick = () => this._triggerUpload();
 
     toolbar.style.position = 'relative';
@@ -662,7 +663,7 @@ class FileExplorer {
       const cell = document.createElement('div'); cell.className = 'file-icon-cell';
       cell.dataset.name = item.name; cell.dataset.isDir = item.isDirectory;
       const icon = document.createElement('div'); icon.className = 'file-icon-large';
-      icon.textContent = item.isDirectory ? '\u{1F4C1}' : getFileIcon(item.name);
+      icon.innerHTML = item.isDirectory ? FILE_ICONS.folder : getFileIcon(item.name);
       const label = document.createElement('div'); label.className = 'file-icon-label'; label.textContent = item.name;
       cell.append(icon, label);
       cell.draggable = true;
@@ -681,7 +682,7 @@ class FileExplorer {
     } else {
       const row = document.createElement('div'); row.className = 'file-item';
       row.dataset.name = item.name; row.dataset.isDir = item.isDirectory;
-      const iconEl = document.createElement('span'); iconEl.className = 'file-icon'; iconEl.textContent = item.isDirectory ? '\u{1F4C1}' : getFileIcon(item.name);
+      const iconEl = document.createElement('span'); iconEl.className = 'file-icon'; iconEl.innerHTML = item.isDirectory ? FILE_ICONS.folder : getFileIcon(item.name);
       row.appendChild(iconEl);
 
       const visCols = this._getVisibleColumns();

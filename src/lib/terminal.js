@@ -498,7 +498,7 @@ class TerminalSession {
     if (on && !existing) {
       const bell = document.createElement('span');
       bell.className = 'bell-icon';
-      bell.textContent = '🔔';
+      bell.innerHTML = '<svg style="width:12px;height:12px;vertical-align:-1px" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M8 1.5a4.5 4.5 0 00-4.5 4.5c0 2.5-1.5 4-1.5 4h12s-1.5-1.5-1.5-4A4.5 4.5 0 008 1.5z"/><path d="M6.5 14a1.5 1.5 0 003 0"/></svg>';
       titleSpan.appendChild(bell);
     } else if (!on && existing) {
       existing.remove();

@@ -7,6 +7,7 @@
 import { marked } from 'marked';
 import { escHtml, copyText } from './utils.js';
 import { renderCodeBlock, rehighlightCodeBlock, stripAnsi } from './highlight.js';
+import { UI_ICONS } from './icons.js';
 import { createBackendIconHtml, getBackendMeta } from './agent-meta.js';
 
 function normalizeUserInputAnswers(rawAnswers) {
@@ -170,7 +171,7 @@ class ChatRenderers {
     if (block.type === 'tool_call') {
       // Tool call — pending (spinner) or interrupted (error, no result ever came)
       const isAgent = block.toolName === 'Agent';
-      const icon = isAgent ? '\uD83E\uDD16' : '\uD83D\uDD27';
+      const icon = isAgent ? UI_ICONS.robot : UI_ICONS.wrench;
       const fp = block.input?.file_path || '';
       const isFileOp = ['Edit', 'Write', 'Read'].includes(block.toolName);
       const isPending = msg.status === 'pending';
@@ -212,7 +213,7 @@ class ChatRenderers {
     const inputStr = stripAnsi(typeof block.input === 'string' ? block.input : JSON.stringify(block.input, null, 2));
 
     if (block.status === 'error') {
-      return `<div class="chat-tool-use"><span class="chat-tool-label">\uD83D\uDD27 ${escHtml(block.toolName)} ${this.clickablePath(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this.linkifyText(inputStr)}</pre></details><details class="chat-diff" open><summary class="chat-diff-summary chat-tool-error-label">\u2717 Error</summary><pre class="chat-tool-error-text">${this.linkifyText(resultText)}</pre></details></div>`;
+      return `<div class="chat-tool-use"><span class="chat-tool-label">${UI_ICONS.wrench} ${escHtml(block.toolName)} ${this.clickablePath(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this.linkifyText(inputStr)}</pre></details><details class="chat-diff" open><summary class="chat-diff-summary chat-tool-error-label">\u2717 Error</summary><pre class="chat-tool-error-text">${this.linkifyText(resultText)}</pre></details></div>`;
     }
     if (block.toolName === 'Patch') {
       const patchHtml = this.renderPatchDiff(block);
@@ -227,12 +228,12 @@ class ChatRenderers {
       const byteCount = new Blob([content]).size;
       const sizeStr = byteCount > 1024 ? (byteCount / 1024).toFixed(1) + ' KB' : byteCount + ' B';
       const codeBlock = this.renderCodeBlock(content, fp);
-      return `<div class="chat-tool-use"><span class="chat-tool-label">\u{1F4DD} Write ${this.clickablePath(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${lineCount} lines, ${sizeStr}</summary>${codeBlock}</details></div>`;
+      return `<div class="chat-tool-use"><span class="chat-tool-label">${UI_ICONS.memo} Write ${this.clickablePath(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${lineCount} lines, ${sizeStr}</summary>${codeBlock}</details></div>`;
     }
     if (block.toolName === 'Read') {
       const lineCount = resultText.split('\n').length;
       const codeBlock = this.renderCodeBlock(resultText, fp);
-      return `<div class="chat-tool-use"><span class="chat-tool-label">\u{1F4D6} Read ${this.clickablePath(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${lineCount} lines</summary>${codeBlock}</details></div>`;
+      return `<div class="chat-tool-use"><span class="chat-tool-label">${UI_ICONS.book} Read ${this.clickablePath(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${lineCount} lines</summary>${codeBlock}</details></div>`;
     }
     if (block.toolName === 'Agent') {
       const desc = block.input?.description || '';
@@ -249,11 +250,11 @@ class ChatRenderers {
       const viewBtn = dataAttrs
         ? ` <button class="chat-agent-view-btn"${dataAttrs} data-desc="${escHtml(desc)}">View Log</button>`
         : '';
-      return `<div class="chat-tool-use"><span class="chat-tool-label">\uD83E\uDD16 Agent: ${escHtml(desc)}${viewBtn}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this.linkifyText(inputStr)}</pre></details><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${escHtml(firstLine)}</summary><pre>${this.linkifyText(resultText)}</pre></details></div>`;
+      return `<div class="chat-tool-use"><span class="chat-tool-label">${UI_ICONS.robot} Agent: ${escHtml(desc)}${viewBtn}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this.linkifyText(inputStr)}</pre></details><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${escHtml(firstLine)}</summary><pre>${this.linkifyText(resultText)}</pre></details></div>`;
     }
     // Generic tool
     const firstLine = resultText.split('\n')[0].substring(0, 120) || '(empty)';
-    return `<div class="chat-tool-use"><span class="chat-tool-label">\uD83D\uDD27 ${escHtml(block.toolName)}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this.linkifyText(inputStr)}</pre></details><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${escHtml(firstLine)}</summary><pre>${this.linkifyText(resultText)}</pre></details></div>`;
+    return `<div class="chat-tool-use"><span class="chat-tool-label">${UI_ICONS.wrench} ${escHtml(block.toolName)}</span><details class="chat-diff"><summary class="chat-diff-summary">Input</summary><pre>${this.linkifyText(inputStr)}</pre></details><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${escHtml(firstLine)}</summary><pre>${this.linkifyText(resultText)}</pre></details></div>`;
   }
 
   /**
@@ -424,7 +425,7 @@ class ChatRenderers {
       const cls = msg.permission.resolved === 'denied' ? 'chat-permission-denied' : 'chat-permission-allowed';
       section.innerHTML = `<details class="chat-diff"><summary class="chat-diff-summary"><span class="chat-permission-resolved ${cls}">${icon} ${label}</span></summary></details>`;
     } else {
-      section.innerHTML = `<div class="chat-permission-prompt"><span class="chat-permission-label">\uD83D\uDD12 Permission: ${escHtml(msg.permission.toolName)}</span><div class="chat-permission-actions"><button class="chat-perm-btn chat-perm-allow">Allow</button>${msg.permission.suggestions?.length ? '<button class="chat-perm-btn chat-perm-always">Always Allow</button>' : ''}<button class="chat-perm-btn chat-perm-deny">Deny</button></div></div>`;
+      section.innerHTML = `<div class="chat-permission-prompt"><span class="chat-permission-label">${UI_ICONS.lock} Permission: ${escHtml(msg.permission.toolName)}</span><div class="chat-permission-actions"><button class="chat-perm-btn chat-perm-allow">Allow</button>${msg.permission.suggestions?.length ? '<button class="chat-perm-btn chat-perm-always">Always Allow</button>' : ''}<button class="chat-perm-btn chat-perm-deny">Deny</button></div></div>`;
       section.querySelector('.chat-perm-allow')?.addEventListener('click', () => {
         this.ws.send({ type: 'permission-response', sessionId: this.sessionId, requestId: msg.permission.requestId, approved: true, toolInput: msg.permission.input });
         msg.permission.resolved = 'allowed';
@@ -489,7 +490,7 @@ class ChatRenderers {
       body += `<div class="${cls}"><span class="chat-diff-prefix">${prefix}</span><span class="chat-diff-text">${escHtml(line.text)}</span></div>`;
     }
 
-    return `<div class="chat-tool-use"><span class="chat-tool-label">\u{1F4DD} Update ${this.clickablePath(filePath)}</span><details class="chat-diff"><summary class="chat-diff-summary">${summary}</summary><div class="chat-diff-body">${body}</div></details></div>`;
+    return `<div class="chat-tool-use"><span class="chat-tool-label">${UI_ICONS.memo} Update ${this.clickablePath(filePath)}</span><details class="chat-diff"><summary class="chat-diff-summary">${summary}</summary><div class="chat-diff-body">${body}</div></details></div>`;
   }
 
   renderPatchDiff(block) {
@@ -534,7 +535,7 @@ class ChatRenderers {
         const cls = line.type === 'add' ? 'chat-diff-add' : line.type === 'del' ? 'chat-diff-del' : 'chat-diff-ctx';
         return `<div class="${cls}"><span class="chat-diff-prefix">${escHtml(line.prefix)}</span><span class="chat-diff-text">${escHtml(line.text)}</span></div>`;
       }).join('');
-      return `<div class="chat-tool-use"><span class="chat-tool-label">\u{1F4DD} ${action} ${pathLabel}</span><details class="chat-diff" open><summary class="chat-diff-summary">${summary}</summary><div class="chat-diff-body">${body}</div></details></div>`;
+      return `<div class="chat-tool-use"><span class="chat-tool-label">${UI_ICONS.memo} ${action} ${pathLabel}</span><details class="chat-diff" open><summary class="chat-diff-summary">${summary}</summary><div class="chat-diff-body">${body}</div></details></div>`;
     }).join('');
   }
 
@@ -708,7 +709,7 @@ class ChatRenderers {
     if (msg.role === 'assistant' && !msg.content?.some(b => b.type === 'text' && b.text?.trim())) return;
     const btn = document.createElement('button');
     btn.className = 'chat-open-editor-btn';
-    btn.textContent = '\uD83D\uDCCB';
+    btn.innerHTML = UI_ICONS.clipboard;
     btn.title = 'Open in editor';
     btn.onclick = (e) => {
       e.stopPropagation();

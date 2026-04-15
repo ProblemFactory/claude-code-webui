@@ -1092,7 +1092,7 @@ class App {
         });
         break;
       case 'viewSubagent': {
-        const title = `\uD83E\uDD16 ${spec.description || 'Agent'}`;
+        const title = `Agent: ${spec.description || 'Subagent'}`;
         const winInfo = this.wm.createWindow({
           title,
           type: 'chat',

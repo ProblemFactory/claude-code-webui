@@ -54,7 +54,7 @@ export function installSidebarRender(SidebarClass) {
       header.appendChild(addBtn);
 
       const linkBtn = document.createElement('button'); linkBtn.className = 'folder-add-btn';
-      linkBtn.textContent = '\u{1F517}'; linkBtn.title = 'Add folder to group';
+      linkBtn.innerHTML = '<svg style="width:10px;height:10px" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M7 9l2-2M6 12l-1.5 1.5a2 2 0 01-3-3L4 8M10 4l1.5-1.5a2 2 0 013 3L12 8"/></svg>'; linkBtn.title = 'Add folder to group';
       linkBtn.style.fontSize = '10px';
       linkBtn.onclick = (e) => {
         e.stopPropagation();

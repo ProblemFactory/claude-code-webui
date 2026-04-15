@@ -1,4 +1,5 @@
 import { escHtml } from './utils.js';
+import { UI_ICONS } from './icons.js';
 
 /**
  * ChatStatusBar — status bar for chat mode sessions.
@@ -152,14 +153,14 @@ export class ChatStatusBar {
 
     // Permission mode (always show, click to change)
     const permLabel = this._statusPermMode || 'default';
-    parts.push(`<span class="chat-status-perm chat-status-clickable" title="Click to change permission mode">\uD83D\uDD12 ${escHtml(permLabel)}</span>`);
+    parts.push(`<span class="chat-status-perm chat-status-clickable" title="Click to change permission mode">${UI_ICONS.lock} ${escHtml(permLabel)}</span>`);
 
     // Background tasks
     if (this._activeTasks?.size > 0) {
       const count = this._activeTasks.size;
       const tasks = [...this._activeTasks.values()];
       const label = count === 1 ? tasks[0].description : `${count} tasks`;
-      parts.push(`<span class="chat-status-tasks chat-status-clickable" title="${escHtml(tasks.map(t => t.description).join(', '))}">\uD83D\uDD04 ${escHtml(label)}</span>`);
+      parts.push(`<span class="chat-status-tasks chat-status-clickable" title="${escHtml(tasks.map(t => t.description).join(', '))}">${UI_ICONS.refresh} ${escHtml(label)}</span>`);
     }
 
     if (this._backend === 'codex' && this._allowReview) {
@@ -231,7 +232,7 @@ export class ChatStatusBar {
       for (const [toolUseId, task] of this._activeTasks) {
         const item = document.createElement('div');
         item.className = 'chat-status-dropdown-item chat-task-detail';
-        const icon = task.type === 'agent' ? '\uD83E\uDD16' : '\u26A1';
+        const icon = task.type === 'agent' ? UI_ICONS.robot : UI_ICONS.tasks;
         let detail = `<div class="chat-task-title">${icon} ${escHtml(task.description)}</div>`;
         if (task.lastTool) detail += `<div class="chat-status-dim">Running: ${escHtml(task.lastTool)}</div>`;
         item.innerHTML = detail;

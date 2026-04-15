@@ -888,7 +888,7 @@ class ChatView {
       return;
     }
 
-    const title = `\uD83E\uDD16 ${description || 'Agent'}`;
+    const title = `Agent: ${description || 'Subagent'}`;
     const openSpec = {
       action: 'viewSubagent',
       virtualId,
