@@ -781,3 +781,9 @@ Server → Client: `created`, `output`, `msg` (normalized: op=create/edit/meta),
 - Settings search filter persisted after close/reopen: `_search` not cleared on `_showDialog()`. Fix: reset to `''` on open.
 - Permission state lost across refresh/restart: `control_response` not in buffer, `control_request` stripped from raw(), `_processResult` flushed pending permission tools. Fix: record responses in buffer, pass control messages to normalizer, search backwards for flushed tools, auto-resolve completed tools.
 - Composite icon invisible on dark themes: `opacity:0.15` fill, wrong `currentColor` inheritance, missing `data-backend` for contrast system. Fix: mode badge approach with `var(--text)` SVG + backend logo mask.
+- Duplicate sessions on macOS: same JSONL in multiple project dirs (CJK path encoding). Fix: `sessionMap` deduplicates by sessionId, running status wins over stopped.
+- Usage not showing on macOS: credentials stored in Keychain not `.credentials.json`. Fix: `security find-generic-password -s "Claude Code-credentials" -a <user> -w` fallback.
+- macOS auto-update build failure: non-login shells lack Homebrew PATH. Fix: prepend `path.dirname(process.execPath)` to child process env.
+- Tab merge targeting wrong window: Map iteration order != z-index. Fix: compare all matches by z-index, pick highest.
+- Settings text inputs unstyled in dark themes: `.settings-input-text` had no CSS rule. Fix: added themed rule matching other settings controls.
+- Settings multi-select layout broken: multi-select controls squeezed label. Fix: `:has(.settings-multi-select)` wraps control to full width below label.
