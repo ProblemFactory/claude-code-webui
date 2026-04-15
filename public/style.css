@@ -626,6 +626,7 @@ html, body {
   cursor: pointer; font-size: 14px;
   display: flex; align-items: center; justify-content: center; flex-shrink: 0;
   transition: all var(--transition);
+  margin-bottom: calc(var(--desktop-label-size, 7px) + 1px); /* align with preview, not label */
 }
 .desktop-preview-add:hover { border-color: var(--text-dim); color: var(--text); background: var(--bg-hover); }
 
