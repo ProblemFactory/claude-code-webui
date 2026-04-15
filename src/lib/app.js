@@ -1189,11 +1189,9 @@ class App {
         // If window is on another desktop, flash its rect in the desktop preview
         const dm = this.desktopManager;
         if (dm && win._desktopId && win._desktopId !== dm.activeDesktopId) {
-          const previewRect = document.querySelector(`.desktop-preview-win[data-win-id="${winId}"]`);
-          if (previewRect) {
-            previewRect.classList.add('desktop-preview-find-flash');
-            setTimeout(() => previewRect.classList.remove('desktop-preview-find-flash'), 3000);
-          }
+          dm._flashingWinId = winId;
+          dm._renderSwitcher();
+          setTimeout(() => { dm._flashingWinId = null; dm._renderSwitcher(); }, 3000);
           break;
         }
 

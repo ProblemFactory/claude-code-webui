@@ -356,7 +356,8 @@ export class DesktopManager {
         const b = entry.gridBounds;
         if (!b) continue;
         const rect = document.createElement('div');
-        rect.className = 'desktop-preview-win' + (entry.waiting ? ' desktop-preview-win-waiting' : '');
+        const flash = this._flashingWinId === entry.id;
+        rect.className = 'desktop-preview-win' + (entry.waiting ? ' desktop-preview-win-waiting' : '') + (flash ? ' desktop-preview-find-flash' : '');
         if (entry.id) rect.dataset.winId = entry.id;
         rect.style.left = (b.left * 100) + '%';
         rect.style.top = (b.top * 100) + '%';
