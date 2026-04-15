@@ -45,7 +45,7 @@ function setup(ctx) {
     // Use session's existing normalizer if available (cached); else build on-demand
     let session = null;
     for (const [, s] of activeSessions) {
-      if ((s.backend || 'claude') !== resolvedBackend) continue;
+      if (s.backend !== resolvedBackend) continue;
       if ((s.backendSessionId || s.claudeSessionId) === resolvedSessionId) { session = s; break; }
     }
     let mm;
@@ -300,7 +300,7 @@ function setup(ctx) {
         name: s.name,
         cwd: s.cwd,
         createdAt: s.createdAt,
-        backend: s.backend || 'claude',
+        backend: s.backend,
         backendSessionId: s.backendSessionId || s.claudeSessionId || null,
         sessionKey: getSessionKey(s),
         claudeSessionId: s.claudeSessionId || null,

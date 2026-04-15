@@ -5,54 +5,17 @@
 
 const { MessageManager } = require('./message-manager');
 const { createMessageManager } = require('./normalizers');
-const { ClaudeCodeAdapter } = require('./adapters/claude-code');
 const { listCodexThreads } = require('./codex-session-store');
 const { cwdToProjectDir } = require('./session-store');
 
 function getSessionKey(session = {}) {
-  const backend = session.backend || 'claude';
+  const backend = session.backend || 'claude'; // fallback needed: called with API data too
   const backendSessionId = session.backendSessionId || session.sessionId || session.claudeSessionId || null;
   return backendSessionId ? `${backend}:${backendSessionId}` : '';
 }
 
 function safeJsonParse(text, fallback = null) {
   try { return JSON.parse(text); } catch { return fallback; }
-}
-
-function buildCodexUserPreviewRecord(rawText, msgId) {
-  let text = typeof rawText === 'string' ? rawText : '';
-  const attachments = [];
-  const parsed = safeJsonParse(text);
-  if (parsed?.type === 'user' && parsed.message) {
-    text = '';
-    for (const block of parsed.message.content || []) {
-      if (block.type === 'text' && block.text) text = block.text;
-      if (block.type === 'image' && block.source?.data) {
-        attachments.push({
-          type: 'input_image',
-          image_url: `data:${block.source.media_type || 'image/png'};base64,${block.source.data}`,
-        });
-      }
-    }
-  }
-
-  const content = [
-    ...attachments.map((item) => ({ type: 'input_image', image_url: item.image_url })),
-    ...(text ? [{ type: 'input_text', text }] : []),
-  ];
-  if (!content.length) return null;
-
-  return {
-    timestamp: new Date().toISOString(),
-    type: 'response_item',
-    _fromWebui: true,
-    payload: {
-      type: 'message',
-      role: 'user',
-      webui_msg_id: msgId || '',
-      content,
-    },
-  };
 }
 
 function normalizeComparablePath(pathLib, value) {
@@ -338,11 +301,8 @@ function registerWsHandler(wss, ctx) {
         case 'set-permission-mode': {
           const session = activeSessions.get(data.sessionId);
           if (session?.pty && session.mode === 'chat' && data.mode) {
-            if ((session.backend || 'claude') === 'codex') {
-              session.pty.write(JSON.stringify({ type: 'set-permission-mode', mode: data.mode }) + '\n');
-            } else {
-              session.pty.write(JSON.stringify(ClaudeCodeAdapter.buildSetPermissionMode(data.mode)) + '\n');
-            }
+            const adapter = adapterRegistry.get(session.backend);
+            if (adapter) session.pty.write(adapter.formatSetPermissionMode(data.mode) + '\n');
           }
           break;
         }
@@ -356,39 +316,15 @@ function registerWsHandler(wss, ctx) {
         case 'chat-input': {
           const session = activeSessions.get(data.sessionId);
           if (session?.pty && session.mode === 'chat') {
+            const adapter = adapterRegistry.get(session.backend);
+            if (!adapter) break;
             const msgId = data.msgId || (Date.now() + '-' + Math.random().toString(36).slice(2, 8));
-            if ((session.backend || 'claude') === 'codex') {
-              session.pty.write(JSON.stringify({ type: 'chat-input', text: data.text, msgId }) + '\n');
-              const userMsg = buildCodexUserPreviewRecord(data.text, msgId);
-              if (userMsg) {
-                session.buffer = (session.buffer + JSON.stringify(userMsg) + '\n').slice(-800000);
-                if (session._normalizer) session._normalizer.processLive(userMsg);
-              }
-              break;
-            }
-
-            let stdinPayload, userMsg;
-
-            // Check if text is already a raw JSON message (e.g. image paste)
-            let parsed = null;
-            try { parsed = JSON.parse(data.text); if (!(parsed.type === 'user' && parsed.message)) parsed = null; } catch {}
-
-            if (parsed) {
-              stdinPayload = data.text;
-              userMsg = { ...parsed, msgId, timestamp: new Date().toISOString() };
-            } else {
-              // Always send as JSON to avoid multi-line text being split by chat-wrapper
-              stdinPayload = JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: data.text }] } });
-              userMsg = { type: 'user', message: { role: 'user', content: data.text }, msgId, timestamp: new Date().toISOString() };
-            }
-
+            const { stdinPayload, userMsg } = adapter.formatChatInput(data.text, msgId);
             session.pty.write(stdinPayload + '\n');
-            // Write to buffer for display on refresh (before JSONL is written).
-            // Mark with _fromWebui so dedup can remove it when JSONL version arrives.
-            userMsg._fromWebui = true;
-            session.buffer = (session.buffer + JSON.stringify(userMsg) + '\n').slice(-500000);
-            // Normalize and broadcast to other clients (sender already shows local preview)
-            if (session._normalizer) session._normalizer.processLive(userMsg);
+            if (userMsg) {
+              session.buffer = (session.buffer + JSON.stringify(userMsg) + '\n').slice(-500000);
+              if (session._normalizer) session._normalizer.processLive(userMsg);
+            }
           }
           break;
         }
@@ -396,14 +332,10 @@ function registerWsHandler(wss, ctx) {
         case 'interrupt': {
           const session = activeSessions.get(data.sessionId);
           if (session?.pty && session.mode === 'chat') {
-            if ((session.backend || 'claude') === 'codex') {
-              session.pty.write(JSON.stringify({ type: 'interrupt' }) + '\n');
-            } else {
-              // Dual interrupt: control_request protocol + SIGINT fallback
-              session.pty.write(JSON.stringify(ClaudeCodeAdapter.buildInterruptRequest()) + '\n');
-              if (session._childPid) {
-                try { process.kill(session._childPid, 'SIGINT'); } catch {}
-              }
+            const adapter = adapterRegistry.get(session.backend);
+            if (adapter) {
+              session.pty.write(adapter.formatInterrupt() + '\n');
+              adapter.postInterrupt(session);
             }
           }
           break;
@@ -411,7 +343,7 @@ function registerWsHandler(wss, ctx) {
 
         case 'review-start': {
           const session = activeSessions.get(data.sessionId);
-          if (session?.pty && session.mode === 'chat' && (session.backend || 'claude') === 'codex' && data.target) {
+          if (session?.pty && session.mode === 'chat' && session.backend === 'codex' && data.target) {
             session.pty.write(JSON.stringify({
               type: 'review-start',
               target: data.target,
@@ -424,18 +356,9 @@ function registerWsHandler(wss, ctx) {
         case 'permission-response': {
           const session = activeSessions.get(data.sessionId);
           if (session?.pty && session.mode === 'chat') {
-            if ((session.backend || 'claude') === 'codex') {
-              session.pty.write(JSON.stringify({
-                type: 'permission-response',
-                requestId: data.requestId,
-                approved: !!data.approved,
-                alwaysAllow: Array.isArray(data.permissionUpdates) && data.permissionUpdates.length > 0,
-                abort: !!data.abort,
-                responseData: data.responseData || null,
-              }) + '\n');
-            } else {
-              const response = ClaudeCodeAdapter.buildPermissionResponse(data.requestId, data.approved, data.toolInput, data.permissionUpdates);
-              session.pty.write(JSON.stringify(response) + '\n');
+            const adapter = adapterRegistry.get(session.backend);
+            if (adapter) {
+              session.pty.write(adapter.formatPermissionResponse(data) + '\n');
             }
           }
           break;
@@ -462,7 +385,7 @@ function registerWsHandler(wss, ctx) {
           if (!session) break;
 
           if (trimmedName) session.name = trimmedName;
-          if ((session.backend || 'claude') === 'codex' && session.mode === 'chat' && session.pty && trimmedName) {
+          if (session.backend === 'codex' && session.mode === 'chat' && session.pty && trimmedName) {
             session.pty.write(JSON.stringify({ type: 'set-thread-name', name: trimmedName }) + '\n');
           }
           if (session.sockName) {
@@ -731,7 +654,7 @@ function registerWsHandler(wss, ctx) {
             pty: null, clients: new Map([[ws, { cols: data.cols || 120, rows: data.rows || 30 }]]),
             cwd: data.cwd || '', name: data.name || tmuxTarget,
             createdAt: Date.now(), tmuxTarget, isTmuxView: true,
-            buffer: '',
+            backend: 'claude', buffer: '',
           };
           activeSessions.set(id, session);
           attachedSessions.add(id);

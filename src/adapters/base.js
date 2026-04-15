@@ -94,4 +94,17 @@ class SessionHandle extends EventEmitter {
   get buffer() { return ''; }
 }
 
+/**
+ * Protocol formatting methods — called by ws-handler to build
+ * backend-specific JSON payloads. Eliminates if/else branching.
+ */
+BackendAdapter.prototype.formatChatInput = function(text, msgId) { throw new Error('not implemented'); };
+BackendAdapter.prototype.formatInterrupt = function(session) { throw new Error('not implemented'); };
+BackendAdapter.prototype.formatPermissionResponse = function(data) { throw new Error('not implemented'); };
+BackendAdapter.prototype.formatSetPermissionMode = function(mode) { throw new Error('not implemented'); };
+/** Build a preview user message record for buffer (before JSONL arrives) */
+BackendAdapter.prototype.buildUserPreview = function(text, msgId) { return null; };
+/** Extra actions after sending interrupt (e.g. SIGINT fallback) */
+BackendAdapter.prototype.postInterrupt = function(session) {};
+
 module.exports = { BackendAdapter, SessionHandle };

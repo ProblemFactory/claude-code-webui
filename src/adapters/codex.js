@@ -443,6 +443,59 @@ class CodexAdapter extends BackendAdapter {
     if (!threadId) return [];
     return parseCodexSessionJsonl(threadId);
   }
+
+  // ── Protocol formatting (called by ws-handler) ──
+
+  formatChatInput(text, msgId) {
+    const stdinPayload = JSON.stringify({ type: 'chat-input', text, msgId });
+    const userMsg = CodexAdapter._buildUserPreview(text, msgId);
+    return { stdinPayload, userMsg };
+  }
+
+  formatInterrupt() {
+    return JSON.stringify({ type: 'interrupt' });
+  }
+
+  postInterrupt() {} // no SIGINT fallback needed
+
+  formatPermissionResponse(data) {
+    return JSON.stringify({
+      type: 'permission-response',
+      requestId: data.requestId,
+      approved: !!data.approved,
+      alwaysAllow: Array.isArray(data.permissionUpdates) && data.permissionUpdates.length > 0,
+      abort: !!data.abort,
+      responseData: data.responseData || null,
+    });
+  }
+
+  formatSetPermissionMode(mode) {
+    return JSON.stringify({ type: 'set-permission-mode', mode });
+  }
+
+  /** Build a preview user message for buffer before JSONL arrives */
+  static _buildUserPreview(rawText, msgId) {
+    let text = typeof rawText === 'string' ? rawText : '';
+    const attachments = [];
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed?.type === 'user' && parsed.message) {
+        text = '';
+        for (const block of parsed.message.content || []) {
+          if (block.type === 'text' && block.text) text = block.text;
+          if (block.type === 'image' && block.source?.data) {
+            attachments.push({ type: 'input_image', image_url: `data:${block.source.media_type || 'image/png'};base64,${block.source.data}` });
+          }
+        }
+      }
+    } catch {}
+    const content = [
+      ...attachments.map(a => ({ type: 'input_image', image_url: a.image_url })),
+      ...(text ? [{ type: 'input_text', text }] : []),
+    ];
+    if (!content.length) return null;
+    return { timestamp: new Date().toISOString(), type: 'response_item', _fromWebui: true, payload: { type: 'message', role: 'user', webui_msg_id: msgId || '', content } };
+  }
 }
 
 module.exports = {

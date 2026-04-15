@@ -265,7 +265,7 @@ function listCodexThreads({ activeSessions } = {}) {
   const activeByThreadId = new Map();
   const externallyOpenThreadIds = listOpenCodexThreadIds();
   for (const [id, session] of activeSessions || []) {
-    if ((session.backend || 'claude') !== 'codex') continue;
+    if (session.backend !== 'codex') continue;
     const threadId = session.backendSessionId || session.claudeSessionId;
     if (!threadId) continue;
     activeByThreadId.set(threadId, { id, session });

@@ -168,7 +168,7 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
 
   if (session.mode === 'chat') {
     let lineBuf = '';
-    if ((session.backend || 'claude') === 'codex') {
+    if (session.backend === 'codex') {
       const stripAnsi = (value) => String(value || '').replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '');
       ptyProcess.onData((output) => {
         session.buffer = (session.buffer + output).slice(-800000);
@@ -602,7 +602,7 @@ const { readLayouts, writeLayouts } = persistenceRouter;
 // Session discovery functions imported from ./src/session-store.js
 // Helper to create SessionMessages with correct context
 function createSessionMessages(session, sessionId) {
-  return (session?.backend || 'claude') === 'codex'
+  return session?.backend === 'codex'
     ? new CodexSessionMessages(session, sessionId, { buffersDir: BUFFERS_DIR })
     : new SessionMessages(session, sessionId, { buffersDir: BUFFERS_DIR, permissionModes: PERMISSION_MODES });
 }
@@ -787,7 +787,7 @@ function summarizeCodexRateLimit() {
 
   let freshest = null;
   for (const [id, session] of activeSessions) {
-    if ((session.backend || 'claude') !== 'codex' || session.mode !== 'chat') continue;
+    if (session.backend !== 'codex' || session.mode !== 'chat') continue;
     const snapshot = readCodexWrapperRateLimit(id);
     if (!snapshot) continue;
     if (!freshest || (snapshot.fetchedAt || 0) > (freshest.fetchedAt || 0)) freshest = snapshot;
