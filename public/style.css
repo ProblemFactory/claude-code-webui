@@ -524,10 +524,11 @@ html, body {
 .window.tab-wrap-mode > .window-titlebar { height: auto; min-height: var(--title-height); }
 .tab-bar-tabs::-webkit-scrollbar { display: none; }
 .tab-item {
-  display: flex; align-items: center; gap: 4px; padding: 0 8px; min-width: 28px;
+  display: flex; align-items: center; gap: 4px; padding: 0 8px; min-width: 20px;
   height: calc(100% - 4px); margin-top: auto;
   cursor: pointer; font-size: 11px; color: var(--text-dim);
-  max-width: 200px; white-space: nowrap; overflow: hidden; flex-shrink: 1;
+  max-width: 200px; white-space: nowrap; overflow: hidden;
+  flex: 1 1 0; /* equal width distribution */
   border-radius: 6px 6px 0 0; position: relative;
   transition: background var(--transition), color var(--transition);
 }

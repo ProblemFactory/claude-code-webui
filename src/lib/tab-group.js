@@ -131,8 +131,12 @@ const tabGroupMethods = {
     this._notify();
   },
 
-  addToTabChain(chain, guestWin) {
-    chain.tabs.push(guestWin.id);
+  addToTabChain(chain, guestWin, insertIndex) {
+    if (insertIndex != null && insertIndex >= 0 && insertIndex < chain.tabs.length) {
+      chain.tabs.splice(insertIndex + 1, 0, guestWin.id); // insert after the tab at insertIndex
+    } else {
+      chain.tabs.push(guestWin.id);
+    }
     guestWin._tabChain = chain;
     const hostWin = this.windows.get(chain.tabs[0]);
     // Enforce same desktop

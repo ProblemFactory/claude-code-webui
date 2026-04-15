@@ -394,11 +394,21 @@ class WindowManager {
       // Tab merge takes priority over snap
       if (tabMergeTarget) {
         this._clearGridHighlight(); this.gridOverlay.classList.remove('dragging');
-        // Restore window visibility briefly for createTabChain to work
         element.style.display = '';
         if (savedBounds) { element.style.left = savedBounds.left; element.style.top = savedBounds.top; element.style.width = savedBounds.width; element.style.height = savedBounds.height; savedBounds = null; }
-        if (tabMergeTarget._tabChain) this.addToTabChain(tabMergeTarget._tabChain, win);
-        else this.createTabChain(tabMergeTarget, win);
+        if (tabMergeTarget._tabChain) {
+          // Calculate insert position from cursor relative to existing tabs
+          let insertIdx = null;
+          const tabItems = tabMergeTarget.element.querySelectorAll('.tab-item');
+          for (let i = 0; i < tabItems.length; i++) {
+            const r = tabItems[i].getBoundingClientRect();
+            if (e.clientX < r.left + r.width / 2) { insertIdx = i - 1; break; }
+          }
+          if (insertIdx === null) insertIdx = tabItems.length - 1; // append at end
+          this.addToTabChain(tabMergeTarget._tabChain, win, insertIdx < 0 ? 0 : insertIdx);
+        } else {
+          this.createTabChain(tabMergeTarget, win);
+        }
         tabMergeTarget = null;
         return;
       }
