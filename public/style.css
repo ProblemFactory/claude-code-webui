@@ -619,6 +619,7 @@ html, body {
 .desktop-preview-drop { border-color: var(--accent) !important; background: var(--accent-dim) !important; }
 .desktop-preview-win-waiting { animation: waiting-blink 0.7s ease-in-out infinite; background: var(--yellow, #e2b340); }
 .desktop-preview-waiting { border-color: var(--yellow, #e2b340); }
+.desktop-preview-find-flash { animation: find-flash 0.3s ease-in-out infinite; background: var(--accent); opacity: 1; }
 .desktop-preview-add {
   width: 20px; height: var(--desktop-preview-h, 32px); border-radius: 3px;
   border: 1.5px dashed var(--border); background: transparent; color: var(--text-dim);
@@ -834,7 +835,9 @@ html, body {
   background: var(--bg-input); border: 1px solid var(--border); color: var(--text);
   padding: 4px 8px; border-radius: var(--radius-sm); font-size: 11px; min-width: 120px;
 }
-.settings-multi-select { display: flex; flex-wrap: wrap; gap: 4px; }
+.settings-multi-select { display: flex; flex-wrap: wrap; gap: 4px; max-width: 350px; }
+.settings-row:has(.settings-multi-select) { flex-wrap: wrap; }
+.settings-row:has(.settings-multi-select) .settings-row-control { flex-basis: 100%; }
 .settings-checkbox-label {
   display: flex; align-items: center; gap: 3px; font-size: 11px; color: var(--text-secondary);
   cursor: pointer; padding: 2px 6px; border: 1px solid var(--border); border-radius: var(--radius-sm);

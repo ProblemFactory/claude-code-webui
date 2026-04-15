@@ -1185,16 +1185,25 @@ class App {
       if (term.sessionId === serverSessionId) {
         const win = this.wm.windows.get(winId);
         if (!win) break;
+
+        // If window is on another desktop, flash its rect in the desktop preview
+        const dm = this.desktopManager;
+        if (dm && win._desktopId && win._desktopId !== dm.activeDesktopId) {
+          const previewRect = document.querySelector(`.desktop-preview-win[data-win-id="${winId}"]`);
+          if (previewRect) {
+            previewRect.classList.add('desktop-preview-find-flash');
+            setTimeout(() => previewRect.classList.remove('desktop-preview-find-flash'), 3000);
+          }
+          break;
+        }
+
         win.element.classList.add('window-find-flash');
-        // Flash matching taskbar item
         const taskbarItems = document.querySelectorAll('.taskbar-item');
         const idx = [...this.wm.windows.keys()].indexOf(winId);
         const taskbarItem = taskbarItems[idx];
         if (taskbarItem) taskbarItem.classList.add('find-flash');
-        // Restore if minimized + bring to front
         if (win.isMinimized) this.wm.restore(winId);
         this.wm.focusWindow(winId);
-        // Remove flash after 3 seconds
         setTimeout(() => {
           win.element.classList.remove('window-find-flash');
           if (taskbarItem) taskbarItem.classList.remove('find-flash');
