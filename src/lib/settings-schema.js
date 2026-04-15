@@ -39,6 +39,12 @@ const SETTINGS_SCHEMA = {
     description: 'Briefly scale-bounce windows when focused from sidebar or taskbar',
     category: 'Window', liveApply: true,
   },
+  'window.tabWrap': {
+    type: 'boolean', default: false,
+    label: 'Multi-row tabs',
+    description: 'Allow tab bar to wrap into multiple rows when there are many tabs (like a flow layout)',
+    category: 'Window', liveApply: true,
+  },
   'window.closeBehavior': {
     type: 'enum', default: 'terminate',
     options: [

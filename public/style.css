@@ -519,12 +519,13 @@ html, body {
   display: flex; flex: 1; overflow-x: auto; scrollbar-width: none; min-width: 0;
   align-items: flex-end; height: 100%; padding: 0 2px;
 }
+.tab-bar-tabs.tab-wrap { flex-wrap: wrap; overflow-x: visible; align-content: flex-end; }
 .tab-bar-tabs::-webkit-scrollbar { display: none; }
 .tab-item {
-  display: flex; align-items: center; gap: 5px; padding: 0 12px; min-width: 60px;
+  display: flex; align-items: center; gap: 4px; padding: 0 8px; min-width: 28px;
   height: calc(100% - 4px); margin-top: auto;
   cursor: pointer; font-size: 11px; color: var(--text-dim);
-  max-width: 200px; white-space: nowrap; overflow: hidden; flex-shrink: 0;
+  max-width: 200px; white-space: nowrap; overflow: hidden; flex-shrink: 1;
   border-radius: 6px 6px 0 0; position: relative;
   transition: background var(--transition), color var(--transition);
 }

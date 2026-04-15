@@ -211,17 +211,29 @@ class WindowManager {
         this._clearGridHighlight();
       }
 
-      // Tab merge: detect if cursor is over another window's icon (pick highest z-index)
+      // Tab merge: detect if cursor is over another window's icon OR tab bar (pick highest z-index)
       const prevTarget = tabMergeTarget;
       tabMergeTarget = null;
       let tabMergeZ = -1;
       for (const [id, w] of this.windows) {
         if (id === win.id || (w._tabChain && w._tabChain.tabs[0] !== w.id)) continue;
         if (w._hiddenByDesktop || w.isMinimized) continue;
+        // Check icon span (for non-tabbed windows)
         const icon = w.iconSpan;
-        if (!icon) continue;
-        const r = icon.getBoundingClientRect();
-        if (e.clientX >= r.left - 8 && e.clientX <= r.right + 8 && e.clientY >= r.top - 8 && e.clientY <= r.bottom + 8) {
+        let hit = false;
+        if (icon) {
+          const r = icon.getBoundingClientRect();
+          if (e.clientX >= r.left - 8 && e.clientX <= r.right + 8 && e.clientY >= r.top - 8 && e.clientY <= r.bottom + 8) hit = true;
+        }
+        // Check tab bar area (for tabbed windows — drop anywhere on the tab bar)
+        if (!hit && w._tabChain) {
+          const tabBar = w.element.querySelector('.tab-bar');
+          if (tabBar) {
+            const r = tabBar.getBoundingClientRect();
+            if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) hit = true;
+          }
+        }
+        if (hit) {
           const z = parseInt(w.element.style.zIndex) || 0;
           if (z > tabMergeZ) { tabMergeTarget = w; tabMergeZ = z; }
         }
