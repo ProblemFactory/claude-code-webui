@@ -2,6 +2,7 @@ import { Resizer } from './resizer.js';
 import { escHtml, createPopover, showContextMenu } from './utils.js';
 import { createAgentKindIcon, createBackendIcon, getAgentKindMeta, getBackendMeta, getSessionKey } from './agent-meta.js';
 import { renderSessionCard } from './session-card.js';
+import { installSidebarState } from './sidebar-state.js';
 
 class Sidebar {
   constructor(app) {
@@ -108,438 +109,31 @@ class Sidebar {
     this._poll();
   }
 
-  // ── Server State Sync ──
-
-  async _fetchUserState() {
-    try {
-      const res = await fetch('/api/user-state');
-      if (res.ok) {
-        const state = await res.json();
-        this._applyServerState(state);
-        this._render();
-        this.app.updateTaskbar();
-      }
-    } catch {
-      // Server unavailable — use localStorage cache
-    }
-  }
-
-  _writeUserStateToLocalStorage(state) {
-    localStorage.setItem('starredSessions', JSON.stringify(state.starredSessions || []));
-    localStorage.setItem('archivedSessions', JSON.stringify(state.archivedSessions || []));
-    localStorage.setItem('sessionCustomNames', JSON.stringify(state.customNames || {}));
-    localStorage.setItem('sessionModes', JSON.stringify(state.sessionModes || {}));
-    localStorage.setItem('sessionGroups', JSON.stringify(state.sessionGroups || {}));
-    localStorage.setItem('groupFolders', JSON.stringify(state.groupFolders || {}));
-  }
-
-  _getLegacySessionId(sessionOrKey, fallback = null) {
-    if (sessionOrKey && typeof sessionOrKey === 'object') {
-      if (typeof sessionOrKey.sessionKey === 'string' && sessionOrKey.sessionKey.includes(':')) {
-        return sessionOrKey.sessionKey.split(':').slice(1).join(':') || '';
-      }
-      return sessionOrKey.sessionId || sessionOrKey.backendSessionId || sessionOrKey.claudeSessionId || sessionOrKey.webuiId || sessionOrKey.id || '';
-    }
-    if (typeof sessionOrKey === 'string' && !sessionOrKey.includes(':')) return sessionOrKey;
-    if (fallback && typeof fallback === 'object') {
-      return fallback.sessionId || fallback.backendSessionId || fallback.claudeSessionId || fallback.webuiId || fallback.id || '';
-    }
-    return '';
-  }
-
-  _lookupTransientSessionKey(rawKey, sessions = this._allSessions) {
-    const key = String(rawKey || '');
-    if (!key) return null;
-
-    let backend = '';
-    let transientId = '';
-    if (key.includes(':')) {
-      const idx = key.indexOf(':');
-      backend = key.slice(0, idx) || 'claude';
-      transientId = key.slice(idx + 1);
-    } else {
-      transientId = key;
-    }
-
-    if (!transientId.startsWith('sess-')) return null;
-
-    const match = (sessions || []).find((session) => {
-      const sessionBackend = session.backend || 'claude';
-      if (backend && sessionBackend !== backend) return false;
-      return session.webuiId === transientId || session.id === transientId;
-    });
-    if (!match) return null;
-
-    const nextKey = match.sessionKey || getSessionKey(match) || '';
-    return nextKey && nextKey !== key ? nextKey : null;
-  }
-
-  _lookupLegacySessionKey(legacyId, sessions = this._allSessions) {
-    if (!legacyId) return null;
-    const transient = this._lookupTransientSessionKey(legacyId, sessions);
-    if (transient) return transient;
-    const matches = (sessions || []).filter((session) => {
-      const ids = [session.sessionId, session.backendSessionId, session.claudeSessionId, session.webuiId, session.id, this._getLegacySessionId(session)].filter(Boolean);
-      return ids.includes(legacyId);
-    });
-    if (matches.length !== 1) return null;
-    return this._getSessionStateKey(matches[0]) || null;
-  }
-
-  _getSessionStateKey(sessionOrKey, fallback = null) {
-    if (sessionOrKey && typeof sessionOrKey === 'object') {
-      return sessionOrKey.sessionKey || getSessionKey(sessionOrKey) || this._getLegacySessionId(sessionOrKey);
-    }
-    const transient = this._lookupTransientSessionKey(sessionOrKey, fallback && typeof fallback === 'object' ? [fallback] : this._allSessions);
-    if (transient) return transient;
-    if (typeof sessionOrKey === 'string' && sessionOrKey.includes(':')) return sessionOrKey;
-    const fallbackKey = fallback && typeof fallback === 'object' ? getSessionKey(fallback) : '';
-    if (fallbackKey) return fallbackKey;
-    return this._lookupLegacySessionKey(sessionOrKey) || String(sessionOrKey || '');
-  }
-
-  _stateSetHas(set, sessionOrKey, fallback = null) {
-    const stateKey = this._getSessionStateKey(sessionOrKey, fallback);
-    if (stateKey && set.has(stateKey)) return true;
-    const legacyId = this._getLegacySessionId(sessionOrKey, fallback);
-    return !!(legacyId && set.has(legacyId));
-  }
-
-  _stateMapGet(map, sessionOrKey, fallback = null) {
-    const stateKey = this._getSessionStateKey(sessionOrKey, fallback);
-    if (stateKey && Object.hasOwn(map, stateKey)) return map[stateKey];
-    const legacyId = this._getLegacySessionId(sessionOrKey, fallback);
-    if (legacyId && Object.hasOwn(map, legacyId)) return map[legacyId];
-    return null;
-  }
-
-  _migrateStateArray(items, sessions = this._allSessions) {
-    const next = [];
-    const seen = new Set();
-    let changed = false;
-    for (const raw of Array.isArray(items) ? items : []) {
-      const mapped = this._lookupTransientSessionKey(raw, sessions)
-        || ((typeof raw === 'string' && raw.includes(':')) ? raw : (this._lookupLegacySessionKey(raw, sessions) || raw));
-      if (mapped !== raw) changed = true;
-      if (seen.has(mapped)) {
-        changed = true;
-        continue;
-      }
-      seen.add(mapped);
-      next.push(mapped);
-    }
-    return { next, changed };
-  }
-
-  _migrateStateMap(map, sessions = this._allSessions) {
-    const next = {};
-    let changed = false;
-    for (const [rawKey, value] of Object.entries(map || {})) {
-      const mappedKey = this._lookupTransientSessionKey(rawKey, sessions)
-        || (rawKey.includes(':') ? rawKey : (this._lookupLegacySessionKey(rawKey, sessions) || rawKey));
-      if (mappedKey !== rawKey) changed = true;
-      if (!Object.hasOwn(next, mappedKey)) {
-        next[mappedKey] = value;
-      } else if (next[mappedKey] !== value) {
-        changed = true;
-      }
-    }
-    return { next, changed };
-  }
-
-  _migrateUserStateKeys(sessions = this._allSessions) {
-    let changed = false;
-
-    const starred = this._migrateStateArray([...this._starredIds], sessions);
-    const archived = this._migrateStateArray([...this._archivedIds], sessions);
-    const customNames = this._migrateStateMap(this._customNames, sessions);
-    const sessionModes = this._migrateStateMap(this._sessionModes, sessions);
-
-    const nextGroups = {};
-    for (const [groupName, sessionKeys] of Object.entries(this._sessionGroups || {})) {
-      const migrated = this._migrateStateArray(sessionKeys, sessions);
-      nextGroups[groupName] = migrated.next;
-      if (migrated.changed) changed = true;
-    }
-
-    if (starred.changed || archived.changed || customNames.changed || sessionModes.changed) changed = true;
-    if (!changed) return false;
-
-    this._starredIds = new Set(starred.next);
-    this._archivedIds = new Set(archived.next);
-    this._customNames = customNames.next;
-    this._sessionModes = sessionModes.next;
-    this._sessionGroups = nextGroups;
-    this._writeUserStateToLocalStorage({
-      starredSessions: [...this._starredIds],
-      archivedSessions: [...this._archivedIds],
-      customNames: this._customNames,
-      sessionModes: this._sessionModes,
-      sessionGroups: this._sessionGroups,
-      groupFolders: this._groupFolders,
-    });
-    return true;
-  }
-
-  _applyServerState(state) {
-    if (state.stateVersion) {
-      this._userStateVersion = state.stateVersion;
-    }
-    if (state.starredSessions) {
-      this._starredIds = new Set(state.starredSessions);
-    }
-    if (state.archivedSessions) {
-      this._archivedIds = new Set(state.archivedSessions);
-    }
-    if (state.customNames) {
-      this._customNames = { ...state.customNames };
-    }
-    if (state.sessionModes) {
-      this._sessionModes = { ...state.sessionModes };
-    }
-    if (state.sessionGroups) {
-      this._sessionGroups = { ...state.sessionGroups };
-    }
-    if (state.groupFolders) {
-      this._groupFolders = { ...state.groupFolders };
-    }
-    this._writeUserStateToLocalStorage({
-      starredSessions: [...this._starredIds],
-      archivedSessions: [...this._archivedIds],
-      customNames: this._customNames,
-      sessionModes: this._sessionModes,
-      sessionGroups: this._sessionGroups,
-      groupFolders: this._groupFolders,
-    });
-  }
-
-  async _pushUserState() {
-    const state = {
-      starredSessions: [...this._starredIds],
-      archivedSessions: [...this._archivedIds],
-      customNames: this._customNames,
-      sessionModes: this._sessionModes,
-      sessionGroups: this._sessionGroups,
-      groupFolders: this._groupFolders,
-    };
-    this._writeUserStateToLocalStorage(state);
-    // Push to server (broadcasts to other clients)
-    try {
-      await fetch('/api/user-state', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(state),
-      });
-    } catch {
-      // Server unavailable — localStorage cache is still updated
-    }
-  }
+  // State methods (star/archive/rename/groups/migration) installed by sidebar-state.js mixin
 
   // ── Tab Bar ──
 
   _buildTabBar() {
-    const section = this.listEl.parentElement; // the sidebar-section div containing the list
+    const section = this.listEl.parentElement;
     const tabBar = document.createElement('div');
     tabBar.className = 'sidebar-tabs';
-
     const foldersTab = document.createElement('button');
     foldersTab.className = 'sidebar-tab active';
     foldersTab.textContent = 'Folders';
     foldersTab.dataset.tab = 'folders';
     foldersTab.onclick = () => { this._activeTab = 'folders'; this._updateTabs(); this._render(); };
-
     const groupsTab = document.createElement('button');
     groupsTab.className = 'sidebar-tab';
     groupsTab.textContent = 'Groups';
     groupsTab.dataset.tab = 'groups';
     groupsTab.onclick = () => { this._activeTab = 'groups'; this._updateTabs(); this._render(); };
-
     tabBar.append(foldersTab, groupsTab);
-    // Insert tab bar before the filter row (first child of section)
     section.insertBefore(tabBar, section.firstChild);
   }
 
   _updateTabs() {
     const tabs = this.el.querySelectorAll('.sidebar-tab');
     tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === this._activeTab));
-  }
-
-  // ── Star / Archive / Rename ──
-
-  // Unified sort: starred first, then by time (desc)
-  _sortSessions(arr) {
-    arr.sort((a, b) => {
-      const as = this._stateSetHas(this._starredIds, a) ? 1 : 0;
-      const bs = this._stateSetHas(this._starredIds, b) ? 1 : 0;
-      if (as !== bs) return bs - as;
-      return (b.startedAt || 0) - (a.startedAt || 0);
-    });
-  }
-
-  toggleStar(sessionOrKey) {
-    const stateKey = this._getSessionStateKey(sessionOrKey);
-    if (this._stateSetHas(this._starredIds, sessionOrKey)) {
-      this._starredIds.delete(stateKey);
-      const legacyId = this._getLegacySessionId(sessionOrKey);
-      if (legacyId) this._starredIds.delete(legacyId);
-    } else if (stateKey) {
-      this._starredIds.add(stateKey);
-    }
-    this._pushUserState();
-    this._render();
-    this.app.updateTaskbar();
-  }
-
-  isStarred(sessionOrKey) { return this._stateSetHas(this._starredIds, sessionOrKey); }
-
-  toggleArchive(sessionOrKey) {
-    const stateKey = this._getSessionStateKey(sessionOrKey);
-    if (this._stateSetHas(this._archivedIds, sessionOrKey)) {
-      this._archivedIds.delete(stateKey);
-      const legacyId = this._getLegacySessionId(sessionOrKey);
-      if (legacyId) this._archivedIds.delete(legacyId);
-    } else if (stateKey) {
-      this._archivedIds.add(stateKey);
-    }
-    this._pushUserState();
-    this._render();
-    this.app.updateTaskbar();
-  }
-
-  isArchived(sessionOrKey) { return this._stateSetHas(this._archivedIds, sessionOrKey); }
-
-  getCustomName(sessionOrKey) { return this._stateMapGet(this._customNames, sessionOrKey); }
-  getSessionMode(sessionOrKey) { return this._stateMapGet(this._sessionModes, sessionOrKey); }
-  setSessionMode(sessionOrKey, mode) {
-    const stateKey = this._getSessionStateKey(sessionOrKey);
-    if (!stateKey) return;
-    this._sessionModes[stateKey] = mode;
-    const legacyId = this._getLegacySessionId(sessionOrKey);
-    if (legacyId && legacyId !== stateKey) delete this._sessionModes[legacyId];
-    this._pushUserState();
-  }
-
-  renameSession(sessionOrKey, currentName) {
-    const stateKey = this._getSessionStateKey(sessionOrKey);
-    const name = prompt('Session name:', this.getCustomName(sessionOrKey) || currentName || '');
-    if (name === null) return; // cancelled
-    if (!stateKey) return;
-    if (name.trim()) {
-      this._customNames[stateKey] = name.trim();
-    } else {
-      delete this._customNames[stateKey];
-    }
-    const legacyId = this._getLegacySessionId(sessionOrKey);
-    if (legacyId && legacyId !== stateKey) delete this._customNames[legacyId];
-    this._pushUserState();
-    this._render();
-    // Sync renamed session to any open window
-    const newName = name.trim() || currentName || (legacyId ? legacyId.substring(0, 12) + '...' : 'Session');
-    if (sessionOrKey?.backend === 'codex' && name.trim()) {
-      this.app.renameBackendSession?.(sessionOrKey, name.trim());
-    }
-    this.app.syncSessionName(sessionOrKey, newName);
-  }
-
-  // ── Session Groups ──
-
-  _getGroupNames() {
-    return Object.keys(this._sessionGroups).sort((a, b) => a.localeCompare(b));
-  }
-
-  _getSessionGroups(sessionOrKey) {
-    const stateKey = this._getSessionStateKey(sessionOrKey);
-    const legacyId = this._getLegacySessionId(sessionOrKey);
-    const groups = [];
-    for (const [name, ids] of Object.entries(this._sessionGroups)) {
-      if (ids.includes(stateKey) || (legacyId && ids.includes(legacyId))) groups.push(name);
-    }
-    return groups;
-  }
-
-  _addSessionToGroup(sessionOrKey, groupName) {
-    const stateKey = this._getSessionStateKey(sessionOrKey);
-    if (!stateKey) return;
-    if (!this._sessionGroups[groupName]) this._sessionGroups[groupName] = [];
-    if (!this._sessionGroups[groupName].includes(stateKey)) {
-      this._sessionGroups[groupName].push(stateKey);
-    }
-    const legacyId = this._getLegacySessionId(sessionOrKey);
-    if (legacyId && legacyId !== stateKey) {
-      this._sessionGroups[groupName] = this._sessionGroups[groupName].filter(id => id !== legacyId);
-    }
-    this._pushUserState();
-    this._render();
-  }
-
-  _removeSessionFromGroup(sessionOrKey, groupName) {
-    if (!this._sessionGroups[groupName]) return;
-    const stateKey = this._getSessionStateKey(sessionOrKey);
-    const legacyId = this._getLegacySessionId(sessionOrKey);
-    this._sessionGroups[groupName] = this._sessionGroups[groupName].filter(id => id !== stateKey && id !== legacyId);
-    if (this._sessionGroups[groupName].length === 0) {
-      delete this._sessionGroups[groupName];
-    }
-    this._pushUserState();
-    this._render();
-  }
-
-  _addFolderToGroup(folderPath, groupName) {
-    if (!this._groupFolders[groupName]) this._groupFolders[groupName] = [];
-    if (!this._groupFolders[groupName].includes(folderPath)) {
-      this._groupFolders[groupName].push(folderPath);
-      this._pushUserState();
-      this._render();
-    }
-  }
-
-  _removeFolderFromGroup(folderPath, groupName) {
-    if (!this._groupFolders[groupName]) return;
-    this._groupFolders[groupName] = this._groupFolders[groupName].filter(p => p !== folderPath);
-    this._pushUserState();
-    this._render();
-  }
-
-  // Get all sessions in a group: direct + folder-matched (recursive)
-  _getGroupSessions(groupName, allSessions) {
-    const directIds = new Set(this._sessionGroups[groupName] || []);
-    const folders = this._groupFolders[groupName] || [];
-    const result = new Set(directIds);
-    for (const s of allSessions) {
-      const sessionKey = this._getSessionStateKey(s);
-      if (result.has(sessionKey) || result.has(s.sessionId)) continue;
-      const cwd = s.cwd || '';
-      for (const fp of folders) {
-        if (cwd === fp || cwd.startsWith(fp + '/')) { result.add(sessionKey); break; }
-      }
-    }
-    return result;
-  }
-
-  _createGroup(name) {
-    if (!name || this._sessionGroups[name]) return;
-    this._sessionGroups[name] = [];
-    this._pushUserState();
-    this._render();
-  }
-
-  _deleteGroup(name) {
-    delete this._sessionGroups[name];
-    delete this._groupFolders[name];
-    this._pushUserState();
-    this._render();
-  }
-
-  _renameGroup(oldName, newName) {
-    if (this._sessionGroups[newName]) return; // name taken
-    this._sessionGroups[newName] = this._sessionGroups[oldName] || [];
-    delete this._sessionGroups[oldName];
-    if (this._groupFolders[oldName]) {
-      this._groupFolders[newName] = this._groupFolders[oldName];
-      delete this._groupFolders[oldName];
-    }
-    this._pushUserState();
-    this._render();
   }
 
   // ── Highlight / Sort / Filter ──
@@ -1313,4 +907,5 @@ class Sidebar {
 
 }
 
+installSidebarState(Sidebar);
 export { Sidebar };
