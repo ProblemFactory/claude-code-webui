@@ -253,24 +253,25 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
   if (s.webuiId) {
     const findWrap = document.createElement('div');
     findWrap.className = 'session-resume-split';
-    let findMode = 'find'; // 'find' or 'goto'
     const findBtn = document.createElement('button');
     findBtn.className = 'session-detail-btn';
     const findDrop = document.createElement('button');
     findDrop.className = 'session-resume-drop session-find-drop';
+    const getFindMode = () => settings?.get('sessionCard.findMode') ?? 'find';
     const updateFindLabel = () => {
-      findBtn.innerHTML = findMode === 'goto' ? (ICON.goto + ' GoTo') : (ICON.find + ' Find');
+      const m = getFindMode();
+      findBtn.innerHTML = m === 'goto' ? (ICON.goto + ' GoTo') : (ICON.find + ' Find');
     };
     updateFindLabel();
     findBtn.onclick = (e) => {
       e.stopPropagation();
-      if (findMode === 'goto') app.goToWindow(s.webuiId);
+      if (getFindMode() === 'goto') app.goToWindow(s.webuiId);
       else app.flashWindow(s.webuiId);
     };
     findDrop.textContent = '\u25BE';
     findDrop.onclick = (e) => {
       e.stopPropagation();
-      findMode = findMode === 'goto' ? 'find' : 'goto';
+      settings?.set('sessionCard.findMode', getFindMode() === 'goto' ? 'find' : 'goto');
       updateFindLabel();
     };
     findWrap.append(findBtn, findDrop);

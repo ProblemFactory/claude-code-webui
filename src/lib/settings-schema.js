@@ -258,6 +258,16 @@ const SETTINGS_SCHEMA = {
     description: 'What happens when clicking a session card: focus/open the window, expand card details, or flash/bounce the window',
     category: 'Session Card', liveApply: false,
   },
+  'sessionCard.findMode': {
+    type: 'enum', default: 'find',
+    options: [
+      { value: 'find', label: 'Find (flash in place)' },
+      { value: 'goto', label: 'GoTo (switch desktop + flash)' },
+    ],
+    label: 'Find button mode',
+    description: 'Default behavior for the Find button in session cards',
+    category: 'Session Card', liveApply: true,
+  },
   'sessionCard.clickToCopy': {
     type: 'boolean', default: false, label: 'Click detail values to copy',
     description: 'Click on ID, Path, Time, or Groups values to copy them to clipboard',
