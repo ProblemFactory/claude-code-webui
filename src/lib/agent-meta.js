@@ -325,6 +325,39 @@ export function createAgentKindIcon(kind, { title, className = '' } = {}) {
   return el;
 }
 
+/**
+ * Create a composite icon: mode shape (chat bubble / terminal) with backend logo inside.
+ * Returns a DOM element with inline SVG.
+ */
+export function createModeBackendIcon(backend, mode, { title, className = '' } = {}) {
+  const meta = getBackendMeta(backend);
+  const el = document.createElement('span');
+  el.className = `mode-backend-icon ${className}`.trim();
+  el.title = title || `${meta.label} ${mode === 'chat' ? 'Chat' : 'Terminal'}`;
+
+  // Chat bubble or terminal outline as the container shape
+  // Backend logo mask centered inside, smaller
+  const logoMask = meta.iconSrc ? `<span class="mode-backend-logo ${meta.iconClass}" style="--backend-icon-mask:url('${meta.iconSrc}');--backend-icon-color:${meta.brandColor || 'currentColor'}"></span>` : `<span class="mode-backend-logo-text">${meta.icon}</span>`;
+
+  if (mode === 'chat') {
+    el.innerHTML = `<svg class="mode-backend-shape" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M3 3.5A1.5 1.5 0 0 1 4.5 2h11A1.5 1.5 0 0 1 17 3.5v9a1.5 1.5 0 0 1-1.5 1.5H7l-4 4V3.5z" fill="currentColor" opacity="0.15" stroke="currentColor" stroke-width="1.2"/>
+    </svg>${logoMask}`;
+  } else {
+    el.innerHTML = `<svg class="mode-backend-shape" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect x="2" y="3" width="16" height="13" rx="2" fill="currentColor" opacity="0.15" stroke="currentColor" stroke-width="1.2"/>
+      <path d="M5.5 9l2 2-2 2" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" opacity="0.5"/>
+    </svg>${logoMask}`;
+  }
+
+  // Schedule contrast refresh for the backend logo
+  if (meta.iconSrc) {
+    const mark = el.querySelector('.mode-backend-logo');
+    if (mark) scheduleBackendIconRefresh(mark);
+  }
+  return el;
+}
+
 export function getAgentRoleLabel(role) {
   if (!role) return null;
   return String(role).replace(/([a-z])([A-Z])/g, '$1 $2').replace(/_/g, ' ').trim();

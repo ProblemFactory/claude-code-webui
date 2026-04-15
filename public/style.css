@@ -177,6 +177,21 @@ html, body {
   font-size: 9px; padding: 1px 6px; border-radius: 8px; font-weight: 600;
 }
 .session-mode-icon { font-size: 10px; flex-shrink: 0; }
+.mode-backend-icon {
+  position: relative; display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; flex-shrink: 0; color: var(--text-dim);
+}
+.mode-backend-shape { width: 100%; height: 100%; position: absolute; inset: 0; }
+.mode-backend-logo {
+  position: relative; width: 9px; height: 9px; display: block; z-index: 1;
+  background-color: var(--backend-icon-color, currentColor);
+  -webkit-mask-image: var(--backend-icon-mask); mask-image: var(--backend-icon-mask);
+  -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
+  -webkit-mask-position: center; mask-position: center;
+  -webkit-mask-size: contain; mask-size: contain;
+  margin-top: -1px; /* nudge into shape center */
+}
+.mode-backend-logo-text { position: relative; z-index: 1; font-size: 7px; font-weight: 700; }
 .badge-live { background: rgba(34,197,94,0.2); color: var(--green); }
 .badge-tmux { background: rgba(59,130,246,0.2); color: var(--blue); }
 .badge-external { background: rgba(245,158,11,0.15); color: var(--yellow); }

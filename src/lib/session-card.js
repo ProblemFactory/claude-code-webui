@@ -1,5 +1,5 @@
 import { escHtml, copyText } from './utils.js';
-import { createBackendIcon, createAgentKindIcon, getBackendMeta, getAgentKindMeta, getAgentRoleLabel, getAgentRoleShortLabel, getSessionKey } from './agent-meta.js';
+import { createBackendIcon, createAgentKindIcon, createModeBackendIcon, getBackendMeta, getAgentKindMeta, getAgentRoleLabel, getAgentRoleShortLabel, getSessionKey } from './agent-meta.js';
 
 /**
  * Render the detail groups section inside a session card.
@@ -122,27 +122,22 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
   archBtn.title = isArchived ? 'Unarchive' : 'Archive';
   archBtn.onclick = (e) => { e.stopPropagation(); state.toggleArchive(s); };
   row.insertBefore(archBtn, row.children[1]);
-  // Mode icon (chat/terminal) before status badge — only for live sessions with known mode
+  // Composite icon: mode shape (chat/terminal) + backend logo inside
+  // For live sessions with known mode: composite icon before name
+  // For stopped/external: plain backend icon before name
   if (s.webuiMode) {
-    const modeIcon = document.createElement('span');
-    modeIcon.className = 'session-mode-icon';
-    if (s.webuiMode === 'chat') {
-      modeIcon.innerHTML = '<svg viewBox="0 0 16 16" width="11" height="11" fill="currentColor"><path d="M2 2.5A1.5 1.5 0 0 1 3.5 1h9A1.5 1.5 0 0 1 14 2.5v7a1.5 1.5 0 0 1-1.5 1.5H5.25L2 14V2.5z"/></svg>';
-      modeIcon.title = 'Chat mode';
-    } else {
-      modeIcon.innerHTML = '<svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="1.5" y="2" width="13" height="11" rx="1.5"/><path d="M4.5 7l2 2-2 2M8.5 11h3" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-      modeIcon.title = 'Terminal mode';
-    }
-    const statusBadge = row.querySelector('.session-card-badge');
-    row.insertBefore(modeIcon, statusBadge);
+    const compositeIcon = createModeBackendIcon(s.backend || 'claude', s.webuiMode, {
+      className: 'session-composite-icon',
+      title: `${backendMeta.label} ${s.webuiMode === 'chat' ? 'Chat' : 'Terminal'}`,
+    });
+    row.insertBefore(compositeIcon, row.querySelector('.session-card-name'));
+  } else {
+    const backendIcon = createBackendIcon(s.backend || 'claude', {
+      className: 'session-backend-icon',
+      title: backendMeta.label,
+    });
+    row.insertBefore(backendIcon, row.querySelector('.session-card-name'));
   }
-
-  // Backend icon (Claude/Codex) before session name
-  const backendIcon = createBackendIcon(s.backend || 'claude', {
-    className: 'session-backend-icon',
-    title: backendMeta.label,
-  });
-  row.insertBefore(backendIcon, row.querySelector('.session-card-name'));
 
   if (showAgentKind) {
     const agentKindIcon = createAgentKindIcon(s.agentKind || 'primary', {
