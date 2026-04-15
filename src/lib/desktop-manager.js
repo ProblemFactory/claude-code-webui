@@ -482,7 +482,9 @@ export class DesktopManager {
     root.style.setProperty('--desktop-preview-h', previewH + 'px');
     root.style.setProperty('--desktop-preview-w', Math.round(previewH * 1.5) + 'px');
     // All elements proportional to taskbar height — no upper caps
-    root.style.setProperty('--taskbar-icon-size', Math.max(14, Math.round(h * 0.4)) + 'px');
+    const iconSize = Math.max(14, Math.round(h * 0.4));
+    root.style.setProperty('--taskbar-icon-size', iconSize + 'px');
+    root.style.setProperty('--taskbar-icon-scale', (iconSize / 14).toFixed(2));
     root.style.setProperty('--taskbar-title-size', Math.max(8, Math.round(h * 0.18)) + 'px');
     root.style.setProperty('--taskbar-sub-size', Math.max(7, Math.round(h * 0.14)) + 'px');
     root.style.setProperty('--usage-pie-size', Math.max(10, Math.round(h * 0.25)) + 'px');
