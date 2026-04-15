@@ -21,11 +21,15 @@ const { router: persistenceRouter, setup: setupPersistence } = require('./src/ro
 if (!process.env.NO_AUTO_UPDATE) {
   try {
     const repoDir = __dirname;
+    // Ensure Homebrew/nvm paths are in PATH for child processes (macOS non-login shells)
+    const nodeDir = path.dirname(process.execPath);
+    const envPath = [nodeDir, process.env.PATH].filter(Boolean).join(path.delimiter);
+    const spawnEnv = { ...process.env, PATH: envPath };
     const result = execFileSync('git', ['-C', repoDir, 'pull', '--ff-only'], { encoding: 'utf-8', timeout: 15000, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
     if (result && !result.includes('Already up to date')) {
       console.log('[auto-update] git pull:', result);
-      execFileSync('npm', ['install', '--no-audit', '--no-fund'], { cwd: repoDir, encoding: 'utf-8', timeout: 60000, stdio: 'inherit' });
-      execFileSync('npm', ['run', 'build'], { cwd: repoDir, encoding: 'utf-8', timeout: 30000, stdio: 'inherit' });
+      execFileSync('npm', ['install', '--no-audit', '--no-fund'], { cwd: repoDir, encoding: 'utf-8', timeout: 60000, stdio: 'inherit', env: spawnEnv });
+      execFileSync('npm', ['run', 'build'], { cwd: repoDir, encoding: 'utf-8', timeout: 30000, stdio: 'inherit', env: spawnEnv });
       console.log('[auto-update] rebuilt successfully');
     }
   } catch (e) { console.log('[auto-update] skipped:', e.message?.split('\n')[0]); }
