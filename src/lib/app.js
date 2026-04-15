@@ -1188,23 +1188,33 @@ class App {
       if (term.sessionId === serverSessionId) {
         const win = this.wm.windows.get(winId);
         if (!win) break;
+
+        // Resolve tab group: find host and switch to target tab
+        let targetWin = win, targetId = winId;
+        if (win._tabChain && win._tabChain.tabs[0] !== winId) {
+          const hostId = win._tabChain.tabs[0];
+          const host = this.wm.windows.get(hostId);
+          if (host) {
+            targetWin = host; targetId = hostId;
+            const tabIdx = win._tabChain.tabs.indexOf(winId);
+            if (tabIdx >= 0) this.wm.switchTab(win._tabChain, tabIdx);
+          }
+        }
+
         const dm = this.desktopManager;
-        // Switch desktop if needed
-        if (dm && win._desktopId && win._desktopId !== dm.activeDesktopId) {
-          dm.switchTo(win._desktopId).then(() => {
-            if (win.isMinimized) this.wm.restore(winId);
-            this.wm.focusWindow(winId);
-            win.element.classList.add('window-find-flash');
-            setTimeout(() => win.element.classList.remove('window-find-flash'), 3000);
-          });
+        const doFlash = () => {
+          if (targetWin.isMinimized) this.wm.restore(targetId);
+          this.wm.focusWindow(targetId);
+          targetWin.element.classList.add('window-find-flash');
+          setTimeout(() => targetWin.element.classList.remove('window-find-flash'), 3000);
+        };
+        if (dm && targetWin._desktopId && targetWin._desktopId !== dm.activeDesktopId) {
+          dm.switchTo(targetWin._desktopId).then(doFlash);
         } else {
-          if (win.isMinimized) this.wm.restore(winId);
-          this.wm.focusWindow(winId);
-          win.element.classList.add('window-find-flash');
-          setTimeout(() => win.element.classList.remove('window-find-flash'), 3000);
+          doFlash();
         }
         const session = this.sessions.get(winId);
-        if (session && !win.isMinimized) session.focus?.();
+        if (session) session.focus?.();
         break;
       }
     }
@@ -1218,28 +1228,44 @@ class App {
         if (!win) break;
 
         const dm = this.desktopManager;
+
+        // Resolve the visible window: if in a tab group, find the host and switch to this tab
+        let flashWin = win;
+        let flashWinId = winId;
+        if (win._tabChain && win._tabChain.tabs[0] !== winId) {
+          const hostId = win._tabChain.tabs[0];
+          const host = this.wm.windows.get(hostId);
+          if (host) {
+            flashWin = host;
+            flashWinId = hostId;
+            // Switch to the target tab
+            const tabIdx = win._tabChain.tabs.indexOf(winId);
+            if (tabIdx >= 0) this.wm.switchTab(win._tabChain, tabIdx);
+          }
+        }
+
         // If window is on another desktop, flash its rect in the desktop preview
-        if (dm && win._desktopId && win._desktopId !== dm.activeDesktopId) {
-          dm._flashingWinId = winId;
+        if (dm && flashWin._desktopId && flashWin._desktopId !== dm.activeDesktopId) {
+          dm._flashingWinId = flashWinId;
           dm._renderSwitcher();
           setTimeout(() => { dm._flashingWinId = null; dm._renderSwitcher(); }, 3000);
           break;
         }
 
-        win.element.classList.add('window-find-flash');
+        flashWin.element.classList.add('window-find-flash');
         const taskbarItems = document.querySelectorAll('.taskbar-item');
-        const idx = [...this.wm.windows.keys()].indexOf(winId);
+        const idx = [...this.wm.windows.keys()].indexOf(flashWinId);
         const taskbarItem = taskbarItems[idx];
         if (taskbarItem) taskbarItem.classList.add('find-flash');
         // Also flash in desktop preview
         if (dm) {
-          dm._flashingWinId = winId;
+          dm._flashingWinId = flashWinId;
           dm._renderSwitcher();
         }
-        if (win.isMinimized) this.wm.restore(winId);
-        this.wm.focusWindow(winId);
+        if (flashWin.isMinimized) this.wm.restore(flashWinId);
+        this.wm.focusWindow(flashWinId);
         setTimeout(() => {
-          win.element.classList.remove('window-find-flash');
+          flashWin.element.classList.remove('window-find-flash');
           if (taskbarItem) taskbarItem.classList.remove('find-flash');
           if (dm) { dm._flashingWinId = null; dm._renderSwitcher(); }
         }, 3000);
