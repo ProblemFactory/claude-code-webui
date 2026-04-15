@@ -179,11 +179,10 @@ html, body {
 .session-mode-icon { font-size: 10px; flex-shrink: 0; }
 .mode-backend-icon { position: relative; }
 .mode-badge {
-  position: absolute; bottom: -1px; right: -1px; width: 6px; height: 6px;
-  border-radius: 50%; border: 1px solid var(--bg-window); z-index: 1;
+  position: absolute; bottom: -2px; right: -3px; z-index: 1;
+  width: 8px; height: 8px; display: flex; align-items: center; justify-content: center;
 }
-.mode-badge-chat { background: var(--accent); }
-.mode-badge-terminal { background: var(--text-dim); }
+.mode-badge svg { width: 100%; height: 100%; }
 .badge-live { background: rgba(34,197,94,0.2); color: var(--green); }
 .badge-tmux { background: rgba(59,130,246,0.2); color: var(--blue); }
 .badge-external { background: rgba(245,158,11,0.15); color: var(--yellow); }
