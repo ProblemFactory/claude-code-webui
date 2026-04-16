@@ -249,6 +249,8 @@ const tabGroupMethods = {
   _setupTabDrag(tabEl, winId, chain) {
     let mouseDown = false, startX = 0, startY = 0, detached = false;
     let mergeTarget = null;
+    let mergeGhost = null;
+    let savedBounds = null;
 
     tabEl.addEventListener('mousedown', (e) => {
       if (e.target.closest('.tab-close') || e.button !== 0) return;
@@ -275,23 +277,50 @@ const tabGroupMethods = {
       const win = this.windows.get(winId);
       if (!win) return;
 
-      // Check for tab merge target first — takes priority over snap.
-      // Unlike icon drag (which has a separate ghost), the detached window
-      // itself IS the cursor-following preview, so we keep it visible while
-      // hovering a merge target and just indicate with .tab-drop-target.
-      mergeTarget = this._detectTabMergeTarget(e.clientX, e.clientY, winId, [win.element]);
+      // Hit-test merge targets first (takes priority over snap). Matches the
+      // window.js titleBar-drag pattern: window follows cursor normally in
+      // empty space, but collapses to a small ghost preview while hovering
+      // another window's icon/tab bar.
+      const prevMerge = mergeTarget;
+      mergeTarget = this._detectTabMergeTarget(e.clientX, e.clientY, winId, [win.element, mergeGhost].filter(Boolean));
       for (const [, w] of this.windows) {
         w.element.classList.toggle('tab-drop-target', w === mergeTarget);
       }
-      const w = parseInt(win.element.style.width) || 700;
-      win.element.style.left = (e.clientX - w / 2) + 'px';
-      win.element.style.top = (e.clientY - 15) + 'px';
-      if (mergeTarget) {
+
+      if (mergeTarget && !prevMerge) {
+        // Entering merge zone: save window bounds, hide it, show ghost
+        savedBounds = { left: win.element.style.left, top: win.element.style.top, width: win.element.style.width, height: win.element.style.height };
+        win.element.style.display = 'none';
+        mergeGhost = document.createElement('div');
+        mergeGhost.className = 'tab-ghost';
+        const ghostIcon = win.backendIconSlot?.children.length ? win.backendIconSlot.children[0].cloneNode(true).outerHTML : (win._typeIcon || '');
+        mergeGhost.innerHTML = `<span>${ghostIcon}</span><span>${win.title}</span>`;
+        document.body.appendChild(mergeGhost);
         this.snapIndicator.style.display = 'none';
         this._clearGridHighlight();
-      } else if (!e.altKey) {
-        if (this.grid) this._showGridHighlight(e.clientX, e.clientY);
-        else this._showSnap(e.clientX, e.clientY);
+      } else if (!mergeTarget && prevMerge && mergeGhost) {
+        // Leaving merge zone: remove ghost, restore window, re-sync to cursor
+        mergeGhost.remove(); mergeGhost = null;
+        win.element.style.display = '';
+        if (savedBounds) {
+          win.element.style.width = savedBounds.width;
+          win.element.style.height = savedBounds.height;
+          savedBounds = null;
+        }
+      }
+
+      if (mergeGhost) {
+        mergeGhost.style.left = (e.clientX + 12) + 'px';
+        mergeGhost.style.top = (e.clientY + 12) + 'px';
+      } else {
+        // Not in merge zone: window follows cursor + snap/grid indicators
+        const w = parseInt(win.element.style.width) || 700;
+        win.element.style.left = (e.clientX - w / 2) + 'px';
+        win.element.style.top = (e.clientY - 15) + 'px';
+        if (!e.altKey) {
+          if (this.grid) this._showGridHighlight(e.clientX, e.clientY);
+          else this._showSnap(e.clientX, e.clientY);
+        }
       }
     };
 
@@ -302,20 +331,39 @@ const tabGroupMethods = {
       const win = this.windows.get(winId);
       if (!win) return;
       win.element.classList.remove('dragging');
-      win.element.style.visibility = '';
       this.snapIndicator.style.display = 'none';
       this.gridOverlay.classList.remove('dragging');
       for (const [, w] of this.windows) w.element.classList.remove('tab-drop-target');
 
       // Merge into another window's tab group takes priority over snap
       if (mergeTarget && mergeTarget.id !== winId) {
+        if (mergeGhost) { mergeGhost.remove(); mergeGhost = null; }
+        // Window still display:none from merge zone — addToTabChain/createTabChain
+        // will manage it as a tab guest, so no need to restore.
         if (mergeTarget._tabChain) this.addToTabChain(mergeTarget._tabChain, win);
         else this.createTabChain(mergeTarget, win);
         mergeTarget = null;
+        savedBounds = null;
         this._clearGridHighlight();
         return;
       }
       mergeTarget = null;
+
+      // Not a merge drop — clean up any leftover ghost state
+      if (mergeGhost) { mergeGhost.remove(); mergeGhost = null; }
+      if (win.element.style.display === 'none') {
+        win.element.style.display = '';
+        if (savedBounds) {
+          win.element.style.width = savedBounds.width;
+          win.element.style.height = savedBounds.height;
+          savedBounds = null;
+        }
+        // Reposition to cursor since window was hidden during merge hover
+        const w = parseInt(win.element.style.width) || 700;
+        win.element.style.left = (e.clientX - w / 2) + 'px';
+        win.element.style.top = (e.clientY - 15) + 'px';
+      }
+      savedBounds = null;
 
       let snapped = false;
       if (!e.altKey) {
