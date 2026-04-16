@@ -211,31 +211,24 @@ class WindowManager {
         this._clearGridHighlight();
       }
 
-      // Tab merge: detect if cursor is over another window's icon OR tab bar (pick highest z-index)
+      // Tab merge: detect if cursor is over another window's icon OR tab bar.
+      // Use elementFromPoint so only the visually-topmost element counts — rect
+      // hit-testing matches occluded icons, causing e.g. dragging A's titlebar
+      // to A's own position to match a stacked window B underneath.
+      // Temporarily disable pointer-events on the dragged window so we see past it.
       const prevTarget = tabMergeTarget;
       tabMergeTarget = null;
-      let tabMergeZ = -1;
-      for (const [id, w] of this.windows) {
-        if (id === win.id || (w._tabChain && w._tabChain.tabs[0] !== w.id)) continue;
-        if (w._hiddenByDesktop || w.isMinimized) continue;
-        // Check icon span (for non-tabbed windows)
-        const icon = w.iconSpan;
-        let hit = false;
-        if (icon) {
-          const r = icon.getBoundingClientRect();
-          if (e.clientX >= r.left - 8 && e.clientX <= r.right + 8 && e.clientY >= r.top - 8 && e.clientY <= r.bottom + 8) hit = true;
-        }
-        // Check tab bar area (for tabbed windows — drop anywhere on the tab bar)
-        if (!hit && w._tabChain) {
-          const tabBar = w.element.querySelector('.tab-bar');
-          if (tabBar) {
-            const r = tabBar.getBoundingClientRect();
-            if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) hit = true;
-          }
-        }
-        if (hit) {
-          const z = parseInt(w.element.style.zIndex) || 0;
-          if (z > tabMergeZ) { tabMergeTarget = w; tabMergeZ = z; }
+      const prevPE = element.style.pointerEvents;
+      element.style.pointerEvents = 'none';
+      const topEl = document.elementFromPoint(e.clientX, e.clientY);
+      element.style.pointerEvents = prevPE;
+      const hitZoneEl = topEl?.closest('.window-icon-stack, .tab-bar-tabs');
+      if (hitZoneEl) {
+        const hitWinEl = hitZoneEl.closest('.window');
+        for (const [id, w] of this.windows) {
+          if (id === win.id || (w._tabChain && w._tabChain.tabs[0] !== w.id)) continue;
+          if (w._hiddenByDesktop || w.isMinimized) continue;
+          if (w.element === hitWinEl) { tabMergeTarget = w; break; }
         }
       }
       for (const [, w] of this.windows) w.element.classList.toggle('tab-drop-target', w === tabMergeTarget);

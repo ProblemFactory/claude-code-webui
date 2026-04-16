@@ -67,26 +67,20 @@ const tabGroupMethods = {
       ghost.style.left = (e.clientX + 12) + 'px';
       ghost.style.top = (e.clientY + 12) + 'px';
 
-      // Hit-test other windows' icons
+      // Hit-test via elementFromPoint so only the visually-topmost element
+      // counts (avoid matching icons occluded by other windows).
       targetWin = null;
-      for (const [id, w] of this.windows) {
-        if (id === winInfo.id) continue;
-        if (w._tabChain && w._tabChain.tabs[0] !== w.id) continue;
-        const wIcon = w.iconWrap || w.iconSpan;
-        if (!wIcon) continue;
-        if (w._tabChain) {
-          const tabItems = w.titleBar.querySelectorAll('.tab-item .tab-icon-wrap');
-          for (const ti of tabItems) {
-            const r = ti.getBoundingClientRect();
-            if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) {
-              targetWin = w; break;
-            }
-          }
-          if (targetWin) break;
-        }
-        const r = wIcon.getBoundingClientRect();
-        if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) {
-          targetWin = w; break;
+      const ghostPE = ghost.style.pointerEvents;
+      ghost.style.pointerEvents = 'none';
+      const topEl = document.elementFromPoint(e.clientX, e.clientY);
+      ghost.style.pointerEvents = ghostPE;
+      const hitZoneEl = topEl?.closest('.window-icon-stack, .tab-icon-wrap');
+      if (hitZoneEl) {
+        const hitWinEl = hitZoneEl.closest('.window');
+        for (const [id, w] of this.windows) {
+          if (id === winInfo.id) continue;
+          if (w._tabChain && w._tabChain.tabs[0] !== w.id) continue;
+          if (w.element === hitWinEl) { targetWin = w; break; }
         }
       }
       for (const [, w] of this.windows) {
