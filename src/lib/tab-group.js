@@ -39,6 +39,34 @@ const tabGroupMethods = {
     }
   },
 
+  /**
+   * Hit-test for tab merge. Uses elementFromPoint so occluded icons don't
+   * match. `sourceWinId` is excluded, and elements listed in `hiddenEls`
+   * are temporarily hidden so elementFromPoint sees past them (pass the
+   * ghost + source element for icon/tab drags).
+   * Returns the target winInfo (chain host) or null.
+   */
+  _detectTabMergeTarget(clientX, clientY, sourceWinId, hiddenEls = []) {
+    const savedPE = hiddenEls.map(el => {
+      const prev = el.style.pointerEvents;
+      el.style.pointerEvents = 'none';
+      return prev;
+    });
+    const topEl = document.elementFromPoint(clientX, clientY);
+    hiddenEls.forEach((el, i) => { el.style.pointerEvents = savedPE[i]; });
+    const hitZoneEl = topEl?.closest('.window-icon-stack, .tab-bar-tabs, .tab-icon-wrap');
+    if (!hitZoneEl) return null;
+    const hitWinEl = hitZoneEl.closest('.window');
+    if (!hitWinEl) return null;
+    for (const [id, w] of this.windows) {
+      if (id === sourceWinId) continue;
+      if (w._tabChain && w._tabChain.tabs[0] !== w.id) continue; // skip guests
+      if (w._hiddenByDesktop || w.isMinimized) continue;
+      if (w.element === hitWinEl) return w;
+    }
+    return null;
+  },
+
   _setupIconDrag(winInfo) {
     const icon = winInfo.iconWrap || winInfo.iconSpan;
     if (!icon) return;
@@ -52,12 +80,16 @@ const tabGroupMethods = {
       startX = e.clientX; startY = e.clientY;
     });
 
+    let prevVisibility = '';
     const onMove = (e) => {
       if (!mouseDown) return;
       const dx = e.clientX - startX, dy = e.clientY - startY;
       if (!dragging) {
         if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
         dragging = true;
+        // Hide source window during icon drag — the ghost represents it
+        prevVisibility = winInfo.element.style.visibility;
+        winInfo.element.style.visibility = 'hidden';
         ghost = document.createElement('div');
         ghost.className = 'tab-ghost';
         const ghostIcon = winInfo.backendIconSlot?.children.length ? winInfo.backendIconSlot.children[0].cloneNode(true).outerHTML : (winInfo._typeIcon || '');
@@ -67,22 +99,7 @@ const tabGroupMethods = {
       ghost.style.left = (e.clientX + 12) + 'px';
       ghost.style.top = (e.clientY + 12) + 'px';
 
-      // Hit-test via elementFromPoint so only the visually-topmost element
-      // counts (avoid matching icons occluded by other windows).
-      targetWin = null;
-      const ghostPE = ghost.style.pointerEvents;
-      ghost.style.pointerEvents = 'none';
-      const topEl = document.elementFromPoint(e.clientX, e.clientY);
-      ghost.style.pointerEvents = ghostPE;
-      const hitZoneEl = topEl?.closest('.window-icon-stack, .tab-icon-wrap');
-      if (hitZoneEl) {
-        const hitWinEl = hitZoneEl.closest('.window');
-        for (const [id, w] of this.windows) {
-          if (id === winInfo.id) continue;
-          if (w._tabChain && w._tabChain.tabs[0] !== w.id) continue;
-          if (w.element === hitWinEl) { targetWin = w; break; }
-        }
-      }
+      targetWin = this._detectTabMergeTarget(e.clientX, e.clientY, winInfo.id, [ghost]);
       for (const [, w] of this.windows) {
         w.element.classList.toggle('tab-drop-target', w === targetWin);
       }
@@ -93,6 +110,10 @@ const tabGroupMethods = {
       mouseDown = false;
       if (ghost) { ghost.remove(); ghost = null; }
       for (const [, w] of this.windows) w.element.classList.remove('tab-drop-target');
+      if (dragging) {
+        // Restore source window visibility
+        winInfo.element.style.visibility = prevVisibility;
+      }
       if (!dragging) return;
       dragging = false;
 
@@ -227,11 +248,12 @@ const tabGroupMethods = {
 
   _setupTabDrag(tabEl, winId, chain) {
     let mouseDown = false, startX = 0, startY = 0, detached = false;
+    let mergeTarget = null;
 
     tabEl.addEventListener('mousedown', (e) => {
       if (e.target.closest('.tab-close') || e.button !== 0) return;
       if (chain.tabs.length <= 1) return;
-      mouseDown = true; detached = false;
+      mouseDown = true; detached = false; mergeTarget = null;
       startX = e.clientX; startY = e.clientY;
       e.preventDefault();
     });
@@ -249,9 +271,23 @@ const tabGroupMethods = {
         win.element.classList.add('dragging');
         if (this.grid) this.gridOverlay.classList.add('dragging');
       }
-      if (detached) {
-        const win = this.windows.get(winId);
-        if (!win) return;
+      if (!detached) return;
+      const win = this.windows.get(winId);
+      if (!win) return;
+
+      // Check for tab merge target first — takes priority over snap
+      const prevMerge = mergeTarget;
+      mergeTarget = this._detectTabMergeTarget(e.clientX, e.clientY, winId, [win.element]);
+      for (const [, w] of this.windows) {
+        w.element.classList.toggle('tab-drop-target', w === mergeTarget);
+      }
+      if (mergeTarget) {
+        // Hide the detached window while hovering over merge zone
+        win.element.style.visibility = 'hidden';
+        this.snapIndicator.style.display = 'none';
+        this._clearGridHighlight();
+      } else {
+        if (prevMerge) win.element.style.visibility = '';
         const w = parseInt(win.element.style.width) || 700;
         win.element.style.left = (e.clientX - w / 2) + 'px';
         win.element.style.top = (e.clientY - 15) + 'px';
@@ -269,8 +305,21 @@ const tabGroupMethods = {
       const win = this.windows.get(winId);
       if (!win) return;
       win.element.classList.remove('dragging');
+      win.element.style.visibility = '';
       this.snapIndicator.style.display = 'none';
       this.gridOverlay.classList.remove('dragging');
+      for (const [, w] of this.windows) w.element.classList.remove('tab-drop-target');
+
+      // Merge into another window's tab group takes priority over snap
+      if (mergeTarget && mergeTarget.id !== winId) {
+        if (mergeTarget._tabChain) this.addToTabChain(mergeTarget._tabChain, win);
+        else this.createTabChain(mergeTarget, win);
+        mergeTarget = null;
+        this._clearGridHighlight();
+        return;
+      }
+      mergeTarget = null;
+
       let snapped = false;
       if (!e.altKey) {
         if (this.grid) { this._snapToGrid(winId, e.clientX, e.clientY); snapped = true; }

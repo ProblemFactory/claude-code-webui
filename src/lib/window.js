@@ -211,26 +211,11 @@ class WindowManager {
         this._clearGridHighlight();
       }
 
-      // Tab merge: detect if cursor is over another window's icon OR tab bar.
-      // Use elementFromPoint so only the visually-topmost element counts — rect
-      // hit-testing matches occluded icons, causing e.g. dragging A's titlebar
-      // to A's own position to match a stacked window B underneath.
-      // Temporarily disable pointer-events on the dragged window so we see past it.
+      // Tab merge hit-test via shared helper (uses elementFromPoint so
+      // occluded icons don't match). Pass the dragged window so it's
+      // ignored by elementFromPoint.
       const prevTarget = tabMergeTarget;
-      tabMergeTarget = null;
-      const prevPE = element.style.pointerEvents;
-      element.style.pointerEvents = 'none';
-      const topEl = document.elementFromPoint(e.clientX, e.clientY);
-      element.style.pointerEvents = prevPE;
-      const hitZoneEl = topEl?.closest('.window-icon-stack, .tab-bar-tabs');
-      if (hitZoneEl) {
-        const hitWinEl = hitZoneEl.closest('.window');
-        for (const [id, w] of this.windows) {
-          if (id === win.id || (w._tabChain && w._tabChain.tabs[0] !== w.id)) continue;
-          if (w._hiddenByDesktop || w.isMinimized) continue;
-          if (w.element === hitWinEl) { tabMergeTarget = w; break; }
-        }
-      }
+      tabMergeTarget = this._detectTabMergeTarget(e.clientX, e.clientY, win.id, [element]);
       for (const [, w] of this.windows) w.element.classList.toggle('tab-drop-target', w === tabMergeTarget);
 
       // Collapse window to ghost when over merge target, restore when leaving
