@@ -130,11 +130,25 @@ class ClaudeCodeAdapter extends BackendAdapter {
     return JSON.stringify(ClaudeCodeAdapter.buildInterruptRequest());
   }
 
-  postInterrupt(session) {
-    // SIGINT fallback for reliability (Claude Code bugs #17466, #3455)
-    if (session._childPid) {
+  postInterrupt(session, sessionId) {
+    // Delayed SIGINT fallback: if Claude is still streaming 2s after the
+    // control_request, send SIGINT as last resort. In recent Claude Code
+    // versions SIGINT exits the whole process (killing the session), so we
+    // avoid it unless the protocol-level interrupt actually failed.
+    // Historical context: bugs #17466, #3455 — may be fixed now.
+    if (!session._childPid) return;
+    if (session._interruptTimer) clearTimeout(session._interruptTimer);
+    session._interruptTimer = setTimeout(() => {
+      session._interruptTimer = null;
+      // Check if the control_request interrupt worked by reading wrapper meta
+      try {
+        const metaPath = path.join(this.config.buffersDir, sessionId + '.json');
+        const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+        if (!meta.streaming) return; // Interrupt worked — no need for SIGINT
+      } catch {}
+      // Still streaming after 2s → force SIGINT
       try { process.kill(session._childPid, 'SIGINT'); } catch {}
-    }
+    }, 2000);
   }
 
   formatPermissionResponse(data) {

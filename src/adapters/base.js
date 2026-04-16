@@ -104,7 +104,7 @@ BackendAdapter.prototype.formatPermissionResponse = function(data) { throw new E
 BackendAdapter.prototype.formatSetPermissionMode = function(mode) { throw new Error('not implemented'); };
 /** Build a preview user message record for buffer (before JSONL arrives) */
 BackendAdapter.prototype.buildUserPreview = function(text, msgId) { return null; };
-/** Extra actions after sending interrupt (e.g. SIGINT fallback) */
-BackendAdapter.prototype.postInterrupt = function(session) {};
+/** Extra actions after sending interrupt (e.g. delayed SIGINT fallback) */
+BackendAdapter.prototype.postInterrupt = function(session, sessionId) {};
 
 module.exports = { BackendAdapter, SessionHandle };

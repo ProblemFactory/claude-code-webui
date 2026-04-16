@@ -318,6 +318,12 @@ function registerWsHandler(wss, ctx) {
           if (session?.pty && session.mode === 'chat') {
             const adapter = adapterRegistry.get(session.backend);
             if (!adapter) break;
+            // New input means prior interrupt succeeded (or user proceeded) —
+            // cancel any pending SIGINT fallback to avoid killing mid-stream.
+            if (session._interruptTimer) {
+              clearTimeout(session._interruptTimer);
+              session._interruptTimer = null;
+            }
             const msgId = data.msgId || (Date.now() + '-' + Math.random().toString(36).slice(2, 8));
             const { stdinPayload, userMsg } = adapter.formatChatInput(data.text, msgId);
             session.pty.write(stdinPayload + '\n');
@@ -335,7 +341,7 @@ function registerWsHandler(wss, ctx) {
             const adapter = adapterRegistry.get(session.backend);
             if (adapter) {
               session.pty.write(adapter.formatInterrupt() + '\n');
-              adapter.postInterrupt(session);
+              adapter.postInterrupt(session, data.sessionId);
             }
           }
           break;
