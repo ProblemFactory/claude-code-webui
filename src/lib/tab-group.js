@@ -267,6 +267,9 @@ const tabGroupMethods = {
         this._detachFromChain(chain, winId);
         const win = this.windows.get(winId);
         if (!win) { mouseDown = false; return; }
+        // Raise to front so the detached window isn't hidden behind others
+        // (especially the original tab chain host it came from).
+        this.focusWindow(winId);
         const w = parseInt(win.element.style.width) || 700;
         win.element.style.left = (e.clientX - w / 2) + 'px';
         win.element.style.top = (e.clientY - 15) + 'px';
