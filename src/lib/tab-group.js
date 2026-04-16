@@ -275,26 +275,23 @@ const tabGroupMethods = {
       const win = this.windows.get(winId);
       if (!win) return;
 
-      // Check for tab merge target first — takes priority over snap
-      const prevMerge = mergeTarget;
+      // Check for tab merge target first — takes priority over snap.
+      // Unlike icon drag (which has a separate ghost), the detached window
+      // itself IS the cursor-following preview, so we keep it visible while
+      // hovering a merge target and just indicate with .tab-drop-target.
       mergeTarget = this._detectTabMergeTarget(e.clientX, e.clientY, winId, [win.element]);
       for (const [, w] of this.windows) {
         w.element.classList.toggle('tab-drop-target', w === mergeTarget);
       }
+      const w = parseInt(win.element.style.width) || 700;
+      win.element.style.left = (e.clientX - w / 2) + 'px';
+      win.element.style.top = (e.clientY - 15) + 'px';
       if (mergeTarget) {
-        // Hide the detached window while hovering over merge zone
-        win.element.style.visibility = 'hidden';
         this.snapIndicator.style.display = 'none';
         this._clearGridHighlight();
-      } else {
-        if (prevMerge) win.element.style.visibility = '';
-        const w = parseInt(win.element.style.width) || 700;
-        win.element.style.left = (e.clientX - w / 2) + 'px';
-        win.element.style.top = (e.clientY - 15) + 'px';
-        if (!e.altKey) {
-          if (this.grid) this._showGridHighlight(e.clientX, e.clientY);
-          else this._showSnap(e.clientX, e.clientY);
-        }
+      } else if (!e.altKey) {
+        if (this.grid) this._showGridHighlight(e.clientX, e.clientY);
+        else this._showSnap(e.clientX, e.clientY);
       }
     };
 
