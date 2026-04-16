@@ -5,6 +5,7 @@ import { ChatSearch } from './chat-search.js';
 import { ChatRenderers } from './chat-renderers.js';
 import { ChatInput } from './chat-input.js';
 import { ChatStatusBar } from './chat-status-bar.js';
+import { UI_ICONS } from './icons.js';
 
 /**
  * ChatView — renders a chat interface for stream-json mode sessions.
@@ -199,6 +200,8 @@ class ChatView {
       this.ws.onGlobal(this._handler);
       this._stateHandler = () => {};
       this._startReadOnlyPolling();
+      // Show Resume button for view-only history (skip subagent viewers)
+      this._showResumeBar();
       return;
     }
 
@@ -1067,6 +1070,62 @@ class ChatView {
   _setReadOnly() {
     this._readOnly = true;
     if (this._chatInput) this._chatInput.setReadOnly();
+    this._showResumeBar();
+  }
+
+  // Insert a Resume bar in place of the input area for stopped/view-only/terminated
+  // chat windows. Subagent viewers (sub-*) can't be resumed, so they're skipped.
+  _showResumeBar() {
+    if (this._resumeBar || this.sessionId.startsWith('sub-')) return;
+    const container = this._container;
+    if (!container) return;
+
+    const bar = document.createElement('div');
+    bar.className = 'chat-resume-bar';
+    const btn = document.createElement('button');
+    btn.className = 'chat-resume-btn';
+    btn.innerHTML = `${UI_ICONS.refresh} <span>Resume this session</span>`;
+    btn.title = 'Resume the session and continue chatting';
+    btn.onclick = () => this._resumeAndClose();
+
+    const note = document.createElement('div');
+    note.className = 'chat-resume-note';
+    note.textContent = 'Session is read-only.';
+
+    bar.append(note, btn);
+    // Insert before status bar (which is the last child)
+    if (this._statusBar?.element && this._statusBar.element.parentNode === container) {
+      container.insertBefore(bar, this._statusBar.element);
+    } else {
+      container.appendChild(bar);
+    }
+    this._resumeBar = bar;
+  }
+
+  _resumeAndClose() {
+    const ids = this._getSessionIds();
+    const backend = ids.backend || 'claude';
+    const backendSessionId = ids.backendSessionId || this.winInfo?.backendSessionId || null;
+    const cwd = ids.cwd || this.winInfo?._openSpec?.cwd || this.winInfo?.cwd || '';
+    if (!backendSessionId || !cwd) {
+      // Can't resume without these — fall back to focusing sidebar
+      this.app.sidebar?.refresh?.();
+      return;
+    }
+    const customName = this.app.sidebar?.getCustomName?.(backendSessionId);
+    const name = customName || this.winInfo?.name || this.winInfo?.titleMeta?.name || 'Session';
+    const winId = this.winInfo?.id;
+    this.app.resumeSession(backendSessionId, cwd, name, {
+      mode: 'chat',
+      backend,
+      backendSessionId,
+      agentKind: this.winInfo?.titleMeta?.agentKind,
+      agentRole: this.winInfo?.titleMeta?.agentRole,
+      agentNickname: this.winInfo?.titleMeta?.agentNickname,
+      sourceKind: this.winInfo?.titleMeta?.sourceKind,
+    });
+    // Close the read-only window — the resumed session opens in a new window
+    if (winId) this.app.wm?.closeWindow?.(winId);
   }
 
   dispose() {

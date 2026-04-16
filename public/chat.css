@@ -279,6 +279,23 @@
 .chat-diff-add .chat-diff-prefix { color: #16a34a; font-weight: 700; }
 .chat-diff-del .chat-diff-prefix { color: #ef4444; font-weight: 700; }
 
+/* Resume bar (read-only / view-history / terminated chat windows) */
+.chat-resume-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 16px; border-top: 1px solid var(--border);
+  background: var(--bg-titlebar); flex-wrap: wrap;
+}
+.chat-resume-note { font-size: 12px; color: var(--text-dim); flex: 1; min-width: 0; }
+.chat-resume-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 14px; border-radius: 6px;
+  background: var(--accent); color: #fff; border: none;
+  font-size: 13px; font-weight: 500; cursor: pointer;
+  transition: filter 0.15s;
+}
+.chat-resume-btn:hover { filter: brightness(1.12); }
+.chat-resume-btn svg { width: 14px; height: 14px; }
+
 /* Chat input area */
 .chat-input-area {
   display: flex; gap: 8px; padding: 10px 16px; border-top: 1px solid var(--border);
