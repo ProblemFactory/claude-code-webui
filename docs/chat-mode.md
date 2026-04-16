@@ -170,7 +170,7 @@ Paste an image from your clipboard (Ctrl+V) to add it as an attachment:
 
 While the backend is responding, a streaming status bar appears above the input area showing the current activity (`thinking`, `running ToolName`, `responding`) with a spinner. Click the **Stop** button to interrupt the active turn mid-response.
 
-The interrupt is routed through the backend wrapper. Claude sessions still use the existing stdin + SIGINT fallback; Codex chat sessions use Codex's native turn interrupt request.
+The interrupt is routed through the backend wrapper. For Claude sessions: the `control_request: interrupt` protocol message is written to stdin immediately, and a **SIGINT fallback** is scheduled 2 seconds later. Before firing, the wrapper's meta file is re-read; if `streaming:false` the protocol interrupt worked and SIGINT is skipped. Sending a new chat message during the 2s window also cancels the pending SIGINT. This avoids the killing-the-whole-session problem where newer Claude Code versions exit on SIGINT instead of just interrupting the turn. Codex chat sessions use Codex's native turn interrupt request with no fallback needed.
 
 ### Interrupt Result
 
@@ -275,6 +275,10 @@ Stopped sessions can be viewed without resuming:
 - **After terminate**: When a running session exits or is terminated while a window is open, the window automatically converts to read-only — the input area is hidden, and closing the window doesn't send a kill signal
 - View-only sessions support full scroll-up pagination and minimap navigation
 - Virtual session IDs are backend-aware (`view-{backendSessionId}` under the hood)
+
+### Resume button
+
+All read-only ChatView windows (view-history, terminated, exited) show a **Resume this session** button in place of the input area. Click to call `app.resumeSession()` — the backend starts a live session (via `claude --resume` / `codex resume`), the current read-only window closes, and the new live window takes over. Subagent viewers (`sub-*` virtual sessions) are excluded since they can't be resumed. This unifies the three read-only scenarios so users never have to go back to the sidebar just to continue chatting.
 
 ## Draft Persistence
 

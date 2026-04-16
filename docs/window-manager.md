@@ -188,8 +188,10 @@ Merge multiple windows into Chrome-style tab groups for space-efficient multitas
 
 ### Creating a tab group
 
-- **Drag a window's type icon** onto another window's type icon to merge them into a tab group
-- **Drag a full window** over another window's type icon to merge (the dragged window collapses to a ghost indicator before snapping in)
+- **Drag a window's type icon** onto another window's type icon to merge them into a tab group. The source window is auto-hidden during the drag (the ghost represents it).
+- **Drag a full window** over another window's type icon OR tab bar to merge. Over empty space, the window follows the cursor normally with snap highlights. Entering a merge zone, it collapses to a small ghost preview. Leaving the zone restores the window.
+
+Tab merge hit-testing uses `elementFromPoint` (via the shared `_detectTabMergeTarget` helper on the tab-group mixin), so occluded icons under the dragged window never match — dragging A's titlebar onto A's own position no longer accidentally merges with a window stacked underneath.
 
 ### Tab bar
 
@@ -197,7 +199,7 @@ When windows merge, the title bar is replaced by a tab bar with rounded-top tabs
 
 - **Click** a tab to switch to that window's content
 - **Close button** on each tab to remove it from the group (window closes or becomes standalone)
-- **Drag a tab downward** to pull it out of the group — the detached window follows the cursor with full snap support
+- **Drag a tab downward** (>30px) to pull it out of the group. The detached window is raised above all others and follows the cursor. You can then drop it in empty space (becomes standalone), onto another window's icon/tab bar (merges into that group — including the original group), or on a snap zone.
 
 ### Data model
 

@@ -181,6 +181,10 @@ See the **[docs/](docs/)** directory for detailed guides:
 - [Settings](docs/settings.md) — All configuration options
 - [Keyboard Shortcuts](docs/keyboard-shortcuts.md) — Complete reference
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for release notes.
+
 ## License
 
 MIT
