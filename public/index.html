@@ -14,12 +14,20 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&family=JetBrains+Mono:wght@400;500&family=Source+Code+Pro:wght@400;500&family=IBM+Plex+Mono:wght@400;500&family=Inconsolata:wght@400;500&display=swap">
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><defs><linearGradient id='g' x1='0' y1='0' x2='0' y2='1'><stop offset='0' stop-color='%236366f1'/><stop offset='1' stop-color='%23818cf8'/></linearGradient></defs><path d='M13 2L3 14h8l-2 8L21 10h-8z' fill='url(%23g)' stroke='%234f46e5' stroke-width='0.5' stroke-linejoin='round'/></svg>">
 </head>
 <body>
   <!-- Loading screen (inline styles so it shows before CSS/JS load) -->
   <div id="loading-screen" style="position:fixed;inset:0;z-index:999999;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px;background:#0c0c18;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;transition:opacity 0.3s">
-    <div style="font-size:36px">⚡</div>
+    <svg width="48" height="48" viewBox="0 0 24 24" style="filter:drop-shadow(0 0 14px rgba(99,102,241,0.6))">
+      <defs>
+        <linearGradient id="bolt-grad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#818cf8"/>
+          <stop offset="100%" stop-color="#6366f1"/>
+        </linearGradient>
+      </defs>
+      <path d="M13 2L3 14h8l-2 8L21 10h-8z" fill="url(#bolt-grad)" stroke="#4f46e5" stroke-width="0.4" stroke-linejoin="round"/>
+    </svg>
     <div style="font-size:15px;font-weight:600;background:linear-gradient(135deg,#6366f1,#818cf8);-webkit-background-clip:text;-webkit-text-fill-color:transparent">Claude Code WebUI</div>
     <div style="width:120px;height:3px;background:rgba(255,255,255,0.07);border-radius:2px;overflow:hidden">
       <div style="width:30%;height:100%;background:#6366f1;border-radius:2px;animation:loading-bar 1.2s ease-in-out infinite"></div>
