@@ -74,6 +74,27 @@ class FileExplorer {
     const btnNewFile = this._btn('+', 'New file'); btnNewFile.onclick = () => this.createFile();
     const btnNewDir = this._btn('', 'New folder'); btnNewDir.innerHTML = FILE_ICONS.folderOpen; btnNewDir.onclick = () => this.createDir();
     const btnUpload = this._btn('\u2B06', 'Upload'); btnUpload.onclick = () => this._triggerUpload(btnUpload);
+    btnUpload.style.position = 'relative';
+    this._uploadBtn = btnUpload;
+    // Ring progress indicator (Chrome-style, shown during active uploads)
+    const ring = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    ring.setAttribute('viewBox', '0 0 20 20');
+    ring.classList.add('upload-ring', 'hidden');
+    const bgCircle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    bgCircle.setAttribute('cx', '10'); bgCircle.setAttribute('cy', '10'); bgCircle.setAttribute('r', '8');
+    bgCircle.setAttribute('fill', 'none'); bgCircle.setAttribute('stroke', 'var(--border)'); bgCircle.setAttribute('stroke-width', '2');
+    const fgCircle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    fgCircle.setAttribute('cx', '10'); fgCircle.setAttribute('cy', '10'); fgCircle.setAttribute('r', '8');
+    fgCircle.setAttribute('fill', 'none'); fgCircle.setAttribute('stroke', 'var(--accent)'); fgCircle.setAttribute('stroke-width', '2');
+    fgCircle.setAttribute('stroke-linecap', 'round');
+    fgCircle.setAttribute('stroke-dasharray', `${2 * Math.PI * 8}`);
+    fgCircle.setAttribute('stroke-dashoffset', `${2 * Math.PI * 8}`);
+    fgCircle.setAttribute('transform', 'rotate(-90 10 10)');
+    ring.append(bgCircle, fgCircle);
+    btnUpload.appendChild(ring);
+    this._uploadRing = fgCircle;
+    this._uploadRingSvg = ring;
+    this._ringCircumference = 2 * Math.PI * 8;
 
     toolbar.style.position = 'relative';
     toolbar.append(btnUp, this.pathInput, btnRefresh, btnView, btnNewFile, btnNewDir, btnUpload, this._acDropdown);
@@ -755,14 +776,29 @@ class FileExplorer {
       const activeLabel = document.createElement('div'); activeLabel.className = 'upload-menu-label'; activeLabel.textContent = 'Uploading';
       pop.appendChild(activeLabel);
       for (const [id, upload] of this._activeUploads) {
-        const item = document.createElement('div'); item.className = 'upload-menu-item upload-active-item';
+        const item = document.createElement('div'); item.className = 'upload-active-item';
+        // Row 1: spinner + name + cancel
+        const row1 = document.createElement('div'); row1.className = 'upload-active-row1';
+        const spinner = document.createElement('span'); spinner.className = 'upload-active-spinner';
         const nameList = upload.rows.map(r => r.el.querySelector('.file-name')?.textContent).filter(Boolean);
         const label = nameList.length > 1 ? `${nameList.length} files` : (nameList[0] || 'uploading...');
-        const icon = document.createElement('span'); icon.className = 'upload-active-spinner';
-        const name = document.createElement('span'); name.className = 'upload-hist-name'; name.textContent = label;
+        const name = document.createElement('span'); name.className = 'upload-active-name'; name.textContent = label;
         const cancelBtn = document.createElement('span'); cancelBtn.className = 'upload-active-cancel'; cancelBtn.textContent = '\u2715';
         cancelBtn.onclick = (e) => { e.stopPropagation(); upload.xhr.abort(); pop.remove(); };
-        item.append(icon, name, cancelBtn);
+        row1.append(spinner, name, cancelBtn);
+        // Row 2: progress bar + size
+        const row2 = document.createElement('div'); row2.className = 'upload-active-row2';
+        const track = document.createElement('span'); track.className = 'upload-active-track';
+        const fill = document.createElement('span'); fill.className = 'upload-active-fill';
+        // Read current progress from inline row
+        const curFill = upload.rows[0]?.fill;
+        if (curFill) fill.style.width = curFill.style.width;
+        track.appendChild(fill);
+        const totalSize = upload.files.reduce((s, f) => s + f.size, 0);
+        const sizeLabel = document.createElement('span'); sizeLabel.className = 'upload-active-size';
+        sizeLabel.textContent = formatSize(totalSize);
+        row2.append(track, sizeLabel);
+        item.append(row1, row2);
         pop.appendChild(item);
       }
     }
@@ -776,14 +812,18 @@ class FileExplorer {
       const histLabel = document.createElement('div'); histLabel.className = 'upload-menu-label'; histLabel.textContent = 'Recent Uploads';
       pop.appendChild(histLabel);
       for (const entry of historyData.slice(0, 10)) {
-        const item = document.createElement('div'); item.className = 'upload-menu-item upload-history-item';
+        const item = document.createElement('div'); item.className = 'upload-history-item';
+        // Row 1: icon + name + status
+        const row1 = document.createElement('div'); row1.className = 'upload-hist-row1';
         const icon = document.createElement('span'); icon.innerHTML = getFileIcon(entry.name);
         const name = document.createElement('span'); name.className = 'upload-hist-name'; name.textContent = entry.name;
-        const meta = document.createElement('span'); meta.className = 'upload-hist-meta';
-        meta.textContent = `${formatSize(entry.size)} · ${this._formatDate(entry.date)}`;
         const statusIcon = document.createElement('span'); statusIcon.className = 'upload-hist-status';
         statusIcon.textContent = entry.status === 'ok' ? '\u2713' : entry.status === 'fail' ? '\u2717' : '\u2026';
-        item.append(icon, name, meta, statusIcon);
+        row1.append(icon, name, statusIcon);
+        // Row 2: size + date
+        const row2 = document.createElement('div'); row2.className = 'upload-hist-row2';
+        row2.textContent = `${formatSize(entry.size)} · ${this._formatDate(entry.date)}`;
+        item.append(row1, row2);
         item.onclick = () => { pop.remove(); if (entry.path) this.app.openFile(entry.path, entry.name); };
         pop.appendChild(item);
       }
@@ -886,6 +926,9 @@ class FileExplorer {
       }
     }
 
+    // Show ring on upload button
+    this._uploadRingSvg.classList.remove('hidden');
+
     xhr.upload.onprogress = (e) => {
       if (!e.lengthComputable) return;
       const pct = Math.round(e.loaded / e.total * 100);
@@ -893,10 +936,14 @@ class FileExplorer {
         r.fill.style.width = pct + '%';
         r.pctLabel.textContent = pct + '%';
       }
+      // Update ring progress
+      const offset = this._ringCircumference * (1 - pct / 100);
+      this._uploadRing.setAttribute('stroke-dashoffset', offset);
     };
 
     xhr.onload = () => {
       this._activeUploads.delete(uploadId);
+      this._updateUploadRing();
       let resultFiles = files.map((f, i) => ({ name: names[i], size: f.size, destPath: this.currentPath + '/' + names[i] }));
       try {
         const resp = JSON.parse(xhr.responseText);
@@ -909,6 +956,7 @@ class FileExplorer {
 
     xhr.onerror = () => {
       this._activeUploads.delete(uploadId);
+      this._updateUploadRing();
       this._saveUploadHistory(files.map((f, i) => ({ name: names[i], size: f.size })), 'fail');
       for (const r of rows) { r.el.classList.add('file-upload-error'); r.pctLabel.textContent = 'Failed'; }
       setTimeout(() => { for (const r of rows) r.el.remove(); }, 3000);
@@ -916,11 +964,19 @@ class FileExplorer {
 
     xhr.onabort = () => {
       this._activeUploads.delete(uploadId);
+      this._updateUploadRing();
       for (const r of rows) r.el.remove();
     };
 
     xhr.open('POST', '/api/upload');
     xhr.send(fd);
+  }
+
+  _updateUploadRing() {
+    if (this._activeUploads.size === 0) {
+      this._uploadRingSvg.classList.add('hidden');
+      this._uploadRing.setAttribute('stroke-dashoffset', this._ringCircumference);
+    }
   }
 
   _showContextMenu(x, y, dataset) {
