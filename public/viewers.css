@@ -139,6 +139,8 @@
 
 /* Upload popover (Chrome download-button style) */
 .upload-popover {
+  background: var(--bg-dialog); border: 1px solid var(--border-active);
+  border-radius: var(--radius); box-shadow: 0 8px 24px rgba(0,0,0,0.4);
   min-width: 220px; max-width: 320px; max-height: 400px; overflow-y: auto;
   padding: 4px 0;
 }
