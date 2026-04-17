@@ -733,13 +733,71 @@ class FileExplorer {
 
   _triggerUpload() { this.uploadInput.click(); }
 
-  async _uploadFiles(files) {
+  _uploadFiles(files) {
     const fd = new FormData(); fd.append('destDir', this.currentPath);
-    // Send original filenames as separate JSON field to avoid encoding issues
     const names = [];
-    for (const f of files) { fd.append('files', f); names.push(f.name); }
+    let totalSize = 0;
+    for (const f of files) { fd.append('files', f); names.push(f.name); totalSize += f.size; }
     fd.append('fileNames', JSON.stringify(names));
-    try { await fetch('/api/upload', { method: 'POST', body: fd }); this.refresh(); } catch {}
+
+    // Show progress bar for uploads (always — even fast ones get a brief flash)
+    const bar = this._ensureUploadBar();
+    const label = bar.querySelector('.upload-label');
+    const fill = bar.querySelector('.upload-fill');
+    const cancelBtn = bar.querySelector('.upload-cancel');
+    const count = files.length;
+    label.textContent = `Uploading ${count} file${count > 1 ? 's' : ''}…`;
+    fill.style.width = '0%';
+    bar.classList.remove('hidden');
+
+    const xhr = new XMLHttpRequest();
+    this._activeUploadXhr = xhr;
+
+    xhr.upload.onprogress = (e) => {
+      if (!e.lengthComputable) return;
+      const pct = Math.round(e.loaded / e.total * 100);
+      fill.style.width = pct + '%';
+      const mb = (s) => (s / 1048576).toFixed(1);
+      label.textContent = `Uploading ${count} file${count > 1 ? 's' : ''} — ${mb(e.loaded)}/${mb(e.total)} MB (${pct}%)`;
+    };
+
+    xhr.onload = () => {
+      this._activeUploadXhr = null;
+      fill.style.width = '100%';
+      label.textContent = `Uploaded ${count} file${count > 1 ? 's' : ''}.`;
+      setTimeout(() => { bar.classList.add('hidden'); }, 1500);
+      this.refresh();
+    };
+
+    xhr.onerror = () => {
+      this._activeUploadXhr = null;
+      label.textContent = 'Upload failed.';
+      fill.style.width = '0%';
+      setTimeout(() => { bar.classList.add('hidden'); }, 3000);
+    };
+
+    xhr.onabort = () => {
+      this._activeUploadXhr = null;
+      label.textContent = 'Upload cancelled.';
+      fill.style.width = '0%';
+      setTimeout(() => { bar.classList.add('hidden'); }, 1500);
+    };
+
+    cancelBtn.onclick = () => xhr.abort();
+
+    xhr.open('POST', '/api/upload');
+    xhr.send(fd);
+  }
+
+  _ensureUploadBar() {
+    if (this._uploadBar) return this._uploadBar;
+    const bar = document.createElement('div');
+    bar.className = 'upload-progress-bar hidden';
+    bar.innerHTML = `<div class="upload-track"><div class="upload-fill"></div></div><span class="upload-label"></span><button class="upload-cancel" title="Cancel upload">\u2715</button>`;
+    // Insert at the bottom of the file explorer element, after the content area
+    this._el.appendChild(bar);
+    this._uploadBar = bar;
+    return bar;
   }
 
   _showContextMenu(x, y, dataset) {
