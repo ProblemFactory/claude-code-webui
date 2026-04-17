@@ -876,100 +876,129 @@ class FileExplorer {
     const files = [...fileList];
     if (!files.length) return;
     const uploadId = Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+    const destDir = this.currentPath;
 
-    // Build FormData — for folders, preserve relative paths via webkitRelativePath
-    const fd = new FormData(); fd.append('destDir', this.currentPath);
+    // Build FormData
+    const fd = new FormData(); fd.append('destDir', destDir);
     const names = [];
-    const relPaths = [];
     for (const f of files) {
       fd.append('files', f);
       const rel = isFolder && f.webkitRelativePath ? f.webkitRelativePath : f.name;
       names.push(rel);
-      relPaths.push(rel);
     }
     fd.append('fileNames', JSON.stringify(names));
     if (isFolder) fd.append('preservePaths', '1');
 
-    // Insert placeholder rows into the file list (Mac Finder style)
-    const rows = [];
-    // For folder uploads: show one row per unique top-level entry
+    // Display names for the file list (folder uploads show one entry per top-level dir)
     const displayNames = isFolder
-      ? [...new Set(relPaths.map(r => r.split('/')[0]))]
-      : names;
-    for (const displayName of displayNames) {
-      const row = document.createElement('div'); row.className = 'file-item file-uploading';
-      const iconEl = document.createElement('span'); iconEl.className = 'file-icon';
-      iconEl.innerHTML = isFolder && displayNames.length === 1 ? FILE_ICONS.folder : getFileIcon(displayName);
-      const nameEl = document.createElement('span'); nameEl.className = 'file-name'; nameEl.textContent = displayName;
-      // Mac Finder style: progress bar fills the remaining space after the name
-      const progressWrap = document.createElement('span'); progressWrap.className = 'file-upload-progress';
-      const progressTrack = document.createElement('span'); progressTrack.className = 'file-upload-track';
-      const progressFill = document.createElement('span'); progressFill.className = 'file-upload-fill';
-      progressTrack.appendChild(progressFill);
-      const pctLabel = document.createElement('span'); pctLabel.className = 'file-upload-pct'; pctLabel.textContent = '0%';
-      const cancelBtn = document.createElement('button'); cancelBtn.className = 'file-upload-cancel'; cancelBtn.textContent = '\u2715';
-      cancelBtn.title = 'Cancel upload';
-      progressWrap.append(progressTrack, pctLabel, cancelBtn);
-      row.append(iconEl, nameEl, progressWrap);
-      // Insert at top of file list
-      if (this.listEl.firstChild) this.listEl.insertBefore(row, this.listEl.firstChild);
-      else this.listEl.appendChild(row);
-      rows.push({ el: row, fill: progressFill, pctLabel });
-    }
+      ? [...new Set(names.map(r => r.split('/')[0]))]
+      : [...names];
+
+    // Store upload metadata — _renderItems reads this to show progress rows
+    const upload = {
+      xhr: null, files, names, destDir, displayNames, isFolder,
+      pct: 0, status: 'uploading', // status: uploading | done | error
+      domRefs: new Map(), // displayName → {fill, pctLabel} — populated by _renderItems
+    };
+    this._activeUploads.set(uploadId, upload);
+
+    // Render upload rows in current view (if we're viewing destDir)
+    this._renderItems();
 
     const xhr = new XMLHttpRequest();
-    this._activeUploads.set(uploadId, { xhr, files, rows });
-
-    cancelBtn: {
-      for (const r of rows) {
-        r.el.querySelector('.file-upload-cancel').onclick = () => xhr.abort();
-      }
-    }
+    upload.xhr = xhr;
 
     // Show ring on upload button
     this._uploadRingSvg.classList.remove('hidden');
 
     xhr.upload.onprogress = (e) => {
       if (!e.lengthComputable) return;
-      const pct = Math.round(e.loaded / e.total * 100);
-      for (const r of rows) {
-        r.fill.style.width = pct + '%';
-        r.pctLabel.textContent = pct + '%';
+      upload.pct = Math.round(e.loaded / e.total * 100);
+      // Update DOM refs directly (fast path, no re-render)
+      for (const ref of upload.domRefs.values()) {
+        ref.fill.style.width = upload.pct + '%';
+        ref.pctLabel.textContent = upload.pct + '%';
       }
-      // Update ring progress
-      const offset = this._ringCircumference * (1 - pct / 100);
+      // Update ring
+      const offset = this._ringCircumference * (1 - upload.pct / 100);
       this._uploadRing.setAttribute('stroke-dashoffset', offset);
     };
 
     xhr.onload = () => {
-      this._activeUploads.delete(uploadId);
-      this._updateUploadRing();
-      let resultFiles = files.map((f, i) => ({ name: names[i], size: f.size, destPath: this.currentPath + '/' + names[i] }));
+      let resultFiles = files.map((f, i) => ({ name: names[i], size: f.size, destPath: destDir + '/' + names[i] }));
       try {
         const resp = JSON.parse(xhr.responseText);
         if (resp.files) resultFiles = resp.files.map(f => ({ name: f.name, size: f.size, destPath: f.path }));
       } catch {}
       this._saveUploadHistory(resultFiles, 'ok');
-      for (const r of rows) { r.fill.style.width = '100%'; r.pctLabel.textContent = '100%'; r.el.classList.add('file-upload-done'); }
-      setTimeout(() => this.refresh(), 800);
+      upload.status = 'done'; upload.pct = 100;
+      for (const ref of upload.domRefs.values()) {
+        ref.fill.style.width = '100%'; ref.pctLabel.textContent = '100%';
+        ref.row.classList.add('file-upload-done');
+      }
+      setTimeout(() => {
+        this._activeUploads.delete(uploadId);
+        this._updateUploadRing();
+        this.refresh();
+      }, 800);
     };
 
     xhr.onerror = () => {
-      this._activeUploads.delete(uploadId);
-      this._updateUploadRing();
       this._saveUploadHistory(files.map((f, i) => ({ name: names[i], size: f.size })), 'fail');
-      for (const r of rows) { r.el.classList.add('file-upload-error'); r.pctLabel.textContent = 'Failed'; }
-      setTimeout(() => { for (const r of rows) r.el.remove(); }, 3000);
+      upload.status = 'error';
+      for (const ref of upload.domRefs.values()) {
+        ref.row.classList.add('file-upload-error'); ref.pctLabel.textContent = 'Failed';
+      }
+      setTimeout(() => {
+        this._activeUploads.delete(uploadId);
+        this._updateUploadRing();
+        if (this.currentPath === destDir) this._renderItems();
+      }, 3000);
     };
 
     xhr.onabort = () => {
       this._activeUploads.delete(uploadId);
       this._updateUploadRing();
-      for (const r of rows) r.el.remove();
+      if (this.currentPath === destDir) this._renderItems();
     };
 
     xhr.open('POST', '/api/upload');
     xhr.send(fd);
+  }
+
+  // Render upload-in-progress rows for current directory. Called from _renderItems.
+  _renderUploadRows() {
+    for (const [uploadId, upload] of this._activeUploads) {
+      if (upload.destDir !== this.currentPath) continue;
+      for (const displayName of upload.displayNames) {
+        // Skip if a real file with this name already exists in the listing
+        const existing = this.listEl.querySelector(`.file-item:not(.file-uploading) [data-name="${CSS.escape(displayName)}"]`);
+        // Build upload row
+        const row = document.createElement('div'); row.className = 'file-item file-uploading';
+        if (upload.status === 'done') row.classList.add('file-upload-done');
+        if (upload.status === 'error') row.classList.add('file-upload-error');
+        const iconEl = document.createElement('span'); iconEl.className = 'file-icon';
+        iconEl.innerHTML = upload.isFolder && upload.displayNames.length === 1 ? FILE_ICONS.folder : getFileIcon(displayName);
+        const nameEl = document.createElement('span'); nameEl.className = 'file-name'; nameEl.textContent = displayName;
+        const progressWrap = document.createElement('span'); progressWrap.className = 'file-upload-progress';
+        const progressTrack = document.createElement('span'); progressTrack.className = 'file-upload-track';
+        const progressFill = document.createElement('span'); progressFill.className = 'file-upload-fill';
+        progressFill.style.width = upload.pct + '%';
+        progressTrack.appendChild(progressFill);
+        const pctLabel = document.createElement('span'); pctLabel.className = 'file-upload-pct';
+        pctLabel.textContent = upload.status === 'error' ? 'Failed' : upload.pct + '%';
+        const cancelBtn = document.createElement('button'); cancelBtn.className = 'file-upload-cancel'; cancelBtn.textContent = '\u2715';
+        cancelBtn.title = 'Cancel upload';
+        cancelBtn.onclick = () => upload.xhr?.abort();
+        progressWrap.append(progressTrack, pctLabel, cancelBtn);
+        row.append(iconEl, nameEl, progressWrap);
+        // Insert at top
+        if (this.listEl.firstChild) this.listEl.insertBefore(row, this.listEl.firstChild);
+        else this.listEl.appendChild(row);
+        // Store DOM refs so onprogress can update directly without re-render
+        upload.domRefs.set(displayName, { row, fill: progressFill, pctLabel });
+      }
+    }
   }
 
   _updateUploadRing() {

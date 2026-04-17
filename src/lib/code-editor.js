@@ -145,11 +145,24 @@ class CodeEditor {
         if (this._previewType === 'html') {
           if (!this._previewIframe) {
             this._previewIframe = document.createElement('iframe');
-            this._previewIframe.sandbox = 'allow-scripts';
+            this._previewIframe.sandbox = 'allow-scripts allow-same-origin';
             this._previewIframe.style.cssText = 'width:100%;height:100%;border:none';
             this._previewBody.appendChild(this._previewIframe);
           }
-          this._previewIframe.srcdoc = src;
+          // Inject <base> so relative paths (CSS, images, fonts, icons, etc.)
+          // resolve relative to the file's directory via the path-based serve route.
+          const dir = this.filePath.replace(/\/[^/]*$/, '');
+          const baseHref = '/api/file/serve/' + dir.split('/').map(encodeURIComponent).join('/') + '/';
+          const baseTag = `<base href="${baseHref}">`;
+          let html = src;
+          if (/<head[^>]*>/i.test(html)) {
+            html = html.replace(/(<head[^>]*>)/i, '$1' + baseTag);
+          } else if (/<html[^>]*>/i.test(html)) {
+            html = html.replace(/(<html[^>]*>)/i, '$1<head>' + baseTag + '</head>');
+          } else {
+            html = baseTag + html;
+          }
+          this._previewIframe.srcdoc = html;
         } else {
           this._previewBody.innerHTML = marked.parse(src);
           // Render mermaid diagrams: convert <code class="language-mermaid"> to mermaid divs

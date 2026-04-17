@@ -142,6 +142,17 @@ router.get('/api/file/raw', (req, res) => {
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
+// Path-based file serving — enables <base href> for HTML preview.
+// /api/file/serve/home/user/project/style.css → serves /home/user/project/style.css
+// This allows relative paths in HTML previews (CSS, images, fonts, JS) to resolve correctly.
+router.get('/api/file/serve/*', (req, res) => {
+  const filePath = '/' + req.params[0]; // reconstruct absolute path
+  try {
+    if (!fs.existsSync(filePath)) return res.status(404).end();
+    res.sendFile(filePath);
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
 // Download file
 router.get('/api/download', (req, res) => {
   const filePath = safePath(req.query.path);
