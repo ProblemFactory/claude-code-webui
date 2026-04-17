@@ -143,26 +143,19 @@ class CodeEditor {
         this.editorBody.style.display = 'none';
         const src = this.editorView?.state.doc.toString() || '';
         if (this._previewType === 'html') {
-          if (!this._previewIframe) {
-            this._previewIframe = document.createElement('iframe');
-            this._previewIframe.sandbox = 'allow-scripts allow-same-origin';
-            this._previewIframe.style.cssText = 'width:100%;height:100%;border:none';
-            this._previewBody.appendChild(this._previewIframe);
+          this._renderHtmlPreview(src);
+          // Re-render on resize so JS-computed layouts recalculate at new size
+          if (!this._previewRO) {
+            this._previewRO = new ResizeObserver(() => {
+              if (!this._previewing || this._previewType !== 'html') return;
+              if (this._previewResizeTimer) clearTimeout(this._previewResizeTimer);
+              this._previewResizeTimer = setTimeout(() => {
+                const s = this.editorView?.state.doc.toString() || '';
+                this._renderHtmlPreview(s);
+              }, 300);
+            });
+            this._previewRO.observe(this._previewBody);
           }
-          // Inject <base> so relative paths (CSS, images, fonts, icons, etc.)
-          // resolve relative to the file's directory via the path-based serve route.
-          const dir = this.filePath.replace(/\/[^/]*$/, '');
-          const baseHref = '/api/file/serve/' + dir.split('/').map(encodeURIComponent).join('/') + '/';
-          const baseTag = `<base href="${baseHref}">`;
-          let html = src;
-          if (/<head[^>]*>/i.test(html)) {
-            html = html.replace(/(<head[^>]*>)/i, '$1' + baseTag);
-          } else if (/<html[^>]*>/i.test(html)) {
-            html = html.replace(/(<html[^>]*>)/i, '$1<head>' + baseTag + '</head>');
-          } else {
-            html = baseTag + html;
-          }
-          this._previewIframe.srcdoc = html;
         } else {
           this._previewBody.innerHTML = marked.parse(src);
           // Render mermaid diagrams: convert <code class="language-mermaid"> to mermaid divs
@@ -359,6 +352,27 @@ class CodeEditor {
     const actualId = langId === 'auto' ? detectLang(this.filePath) : langId;
     this.editorView.dispatch({ effects: this._langCompartment.reconfigure(getLangExtension(actualId)) });
     this._updatePreviewSupport(actualId);
+  }
+
+  _renderHtmlPreview(src) {
+    if (!this._previewIframe) {
+      this._previewIframe = document.createElement('iframe');
+      this._previewIframe.sandbox = 'allow-scripts allow-same-origin';
+      this._previewIframe.style.cssText = 'width:100%;height:100%;border:none';
+      this._previewBody.appendChild(this._previewIframe);
+    }
+    const dir = this.filePath.replace(/\/[^/]*$/, '');
+    const baseHref = '/api/file/serve/' + dir.split('/').map(encodeURIComponent).join('/') + '/';
+    const baseTag = `<base href="${baseHref}">`;
+    let html = src;
+    if (/<head[^>]*>/i.test(html)) {
+      html = html.replace(/(<head[^>]*>)/i, '$1' + baseTag);
+    } else if (/<html[^>]*>/i.test(html)) {
+      html = html.replace(/(<html[^>]*>)/i, '$1<head>' + baseTag + '</head>');
+    } else {
+      html = baseTag + html;
+    }
+    this._previewIframe.srcdoc = html;
   }
 
   /** Show/hide Preview button based on current language. Single source of truth. */
