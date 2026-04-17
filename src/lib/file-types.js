@@ -26,6 +26,8 @@ const REGISTRY = {
   flac: { category: 'audio', icon: I.audio, viewer: 'audio', bypassBinary: true },
   aac:  { category: 'audio', icon: I.audio, viewer: 'audio', bypassBinary: true },
   m4a:  { category: 'audio', icon: I.audio, viewer: 'audio', bypassBinary: true },
+  opus: { category: 'audio', icon: I.audio, viewer: 'audio', bypassBinary: true },
+  wma:  { category: 'audio', icon: I.audio, viewer: 'audio', bypassBinary: true },
   // PDF
   pdf:  { category: 'document', icon: I.pdf, viewer: 'pdf', bypassBinary: true },
   // Office
