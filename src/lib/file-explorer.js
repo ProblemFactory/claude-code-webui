@@ -748,6 +748,25 @@ class FileExplorer {
     folderBtn.onclick = () => { pop.remove(); this._folderInput.click(); };
     pop.append(fileBtn, folderBtn);
 
+    // Active uploads section
+    if (this._activeUploads.size > 0) {
+      const divider = document.createElement('div'); divider.className = 'upload-menu-divider';
+      pop.appendChild(divider);
+      const activeLabel = document.createElement('div'); activeLabel.className = 'upload-menu-label'; activeLabel.textContent = 'Uploading';
+      pop.appendChild(activeLabel);
+      for (const [id, upload] of this._activeUploads) {
+        const item = document.createElement('div'); item.className = 'upload-menu-item upload-active-item';
+        const nameList = upload.rows.map(r => r.el.querySelector('.file-name')?.textContent).filter(Boolean);
+        const label = nameList.length > 1 ? `${nameList.length} files` : (nameList[0] || 'uploading...');
+        const icon = document.createElement('span'); icon.className = 'upload-active-spinner';
+        const name = document.createElement('span'); name.className = 'upload-hist-name'; name.textContent = label;
+        const cancelBtn = document.createElement('span'); cancelBtn.className = 'upload-active-cancel'; cancelBtn.textContent = '\u2715';
+        cancelBtn.onclick = (e) => { e.stopPropagation(); upload.xhr.abort(); pop.remove(); };
+        item.append(icon, name, cancelBtn);
+        pop.appendChild(item);
+      }
+    }
+
     // History section
     const sync = getStateSync();
     const historyData = sync ? this._getUploadHistory(sync) : [];
@@ -842,17 +861,19 @@ class FileExplorer {
       const iconEl = document.createElement('span'); iconEl.className = 'file-icon';
       iconEl.innerHTML = isFolder && displayNames.length === 1 ? FILE_ICONS.folder : getFileIcon(displayName);
       const nameEl = document.createElement('span'); nameEl.className = 'file-name'; nameEl.textContent = displayName;
+      // Mac Finder style: progress bar fills the remaining space after the name
       const progressWrap = document.createElement('span'); progressWrap.className = 'file-upload-progress';
+      const progressTrack = document.createElement('span'); progressTrack.className = 'file-upload-track';
       const progressFill = document.createElement('span'); progressFill.className = 'file-upload-fill';
-      progressWrap.appendChild(progressFill);
-      const pctLabel = document.createElement('span'); pctLabel.className = 'file-upload-pct'; pctLabel.textContent = '0%';
+      progressTrack.appendChild(progressFill);
       const cancelBtn = document.createElement('button'); cancelBtn.className = 'file-upload-cancel'; cancelBtn.textContent = '\u2715';
       cancelBtn.title = 'Cancel upload';
-      row.append(iconEl, nameEl, progressWrap, pctLabel, cancelBtn);
+      progressWrap.append(progressTrack, cancelBtn);
+      row.append(iconEl, nameEl, progressWrap);
       // Insert at top of file list
       if (this.listEl.firstChild) this.listEl.insertBefore(row, this.listEl.firstChild);
       else this.listEl.appendChild(row);
-      rows.push({ el: row, fill: progressFill, pctLabel });
+      rows.push({ el: row, fill: progressFill });
     }
 
     const xhr = new XMLHttpRequest();
@@ -867,10 +888,7 @@ class FileExplorer {
     xhr.upload.onprogress = (e) => {
       if (!e.lengthComputable) return;
       const pct = Math.round(e.loaded / e.total * 100);
-      for (const r of rows) {
-        r.fill.style.width = pct + '%';
-        r.pctLabel.textContent = pct + '%';
-      }
+      for (const r of rows) r.fill.style.width = pct + '%';
     };
 
     xhr.onload = () => {
@@ -881,15 +899,14 @@ class FileExplorer {
         if (resp.files) resultFiles = resp.files.map(f => ({ name: f.name, size: f.size, destPath: f.path }));
       } catch {}
       this._saveUploadHistory(resultFiles, 'ok');
-      // Brief flash of 100% then refresh
-      for (const r of rows) { r.fill.style.width = '100%'; r.pctLabel.textContent = '100%'; r.el.classList.add('file-upload-done'); }
+      for (const r of rows) { r.fill.style.width = '100%'; r.el.classList.add('file-upload-done'); }
       setTimeout(() => this.refresh(), 800);
     };
 
     xhr.onerror = () => {
       this._activeUploads.delete(uploadId);
       this._saveUploadHistory(files.map((f, i) => ({ name: names[i], size: f.size })), 'fail');
-      for (const r of rows) { r.el.classList.add('file-upload-error'); r.pctLabel.textContent = 'Failed'; }
+      for (const r of rows) r.el.classList.add('file-upload-error');
       setTimeout(() => { for (const r of rows) r.el.remove(); }, 3000);
     };
 

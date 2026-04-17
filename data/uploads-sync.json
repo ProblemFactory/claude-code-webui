@@ -1,0 +1,19 @@
+{
+  "version": 2,
+  "data": {
+    "upload:1776387191318-0": {
+      "name": "Chapter of Yuusha Ⅲ 勇者之章Ⅲ v3.12.15 客户端导入包.zip",
+      "path": "/home/xingweil/workspace/39AI/AIWorkspace/B2BTasks/04162026VoiceProviderReview/Provider2/Chapter of Yuusha Ⅲ 勇者之章Ⅲ v3.12.15 客户端导入包.zip",
+      "size": 1142089604,
+      "date": 1776387191318,
+      "status": "ok"
+    },
+    "upload:1776387353708-0": {
+      "name": "test-inline.bin",
+      "path": "/home/xingweil/.claude/test-inline.bin",
+      "size": 204800,
+      "date": 1776387353708,
+      "status": "ok"
+    }
+  }
+}

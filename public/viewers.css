@@ -169,31 +169,43 @@
 }
 
 /* Inline upload progress in file list (Mac Finder style) */
-.file-uploading {
-  position: relative; opacity: 0.85;
-}
+.file-uploading { opacity: 0.85; }
 .file-upload-progress {
-  position: absolute; bottom: 0; left: 0; right: 0; height: 3px;
+  flex: 1; display: flex; align-items: center; gap: 6px;
+  min-width: 0; padding: 0 8px;
+}
+.file-upload-track {
+  flex: 1; height: 6px; border-radius: 3px;
   background: var(--border); overflow: hidden;
 }
 .file-upload-fill {
-  height: 100%; background: var(--accent); width: 0%;
+  height: 100%; border-radius: 3px;
+  background: var(--accent); width: 0%;
   transition: width 0.15s ease;
-}
-.file-upload-pct {
-  font-size: 10px; color: var(--text-dim); margin-left: auto;
-  padding: 0 4px; flex-shrink: 0; min-width: 30px; text-align: right;
 }
 .file-upload-cancel {
   background: none; border: none; color: var(--text-dim);
-  cursor: pointer; font-size: 11px; padding: 0 4px; line-height: 1;
+  cursor: pointer; font-size: 11px; padding: 0 2px; line-height: 1;
   flex-shrink: 0;
 }
 .file-upload-cancel:hover { color: var(--text); }
-.file-upload-done { opacity: 0.5; }
 .file-upload-done .file-upload-fill { background: #16a34a; }
+.file-upload-done { opacity: 0.5; }
 .file-upload-error .file-upload-fill { background: #ef4444; width: 100% !important; }
-.file-upload-error .file-upload-pct { color: #ef4444; }
+
+/* Active upload item in popover */
+.upload-active-item { gap: 6px; }
+.upload-active-spinner {
+  width: 12px; height: 12px; flex-shrink: 0;
+  border: 2px solid var(--border); border-top-color: var(--accent);
+  border-radius: 50%; animation: upload-spin 0.8s linear infinite;
+}
+@keyframes upload-spin { to { transform: rotate(360deg); } }
+.upload-active-cancel {
+  cursor: pointer; color: var(--text-dim); font-size: 12px;
+  margin-left: auto; flex-shrink: 0;
+}
+.upload-active-cancel:hover { color: var(--text); }
 .file-preview-content img { display: block; margin: auto; padding: 8px; }
 .file-preview-code {
   margin: 0; padding: 8px; font-size: 11px; line-height: 1.4;
