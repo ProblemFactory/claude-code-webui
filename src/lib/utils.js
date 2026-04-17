@@ -26,6 +26,8 @@ export function createPopover(anchor, className, opts = {}) {
   pop.className = className;
   pop.style.position = 'fixed';
   pop.style.zIndex = '99999';
+  // Initial placement (off-screen to measure)
+  pop.style.visibility = 'hidden';
   if (opts.position === 'cursor') {
     pop.style.left = (opts.x || 0) + 'px';
     pop.style.top = (opts.y || 0) + 'px';
@@ -35,6 +37,16 @@ export function createPopover(anchor, className, opts = {}) {
     pop.style.top = (rect.bottom + 2) + 'px';
   }
   (opts.parent || document.body).appendChild(pop);
+  // Clamp to viewport after render so content is measured
+  requestAnimationFrame(() => {
+    const pr = pop.getBoundingClientRect();
+    const vw = window.innerWidth, vh = window.innerHeight;
+    if (pr.right > vw) pop.style.left = Math.max(0, vw - pr.width - 4) + 'px';
+    if (pr.bottom > vh) pop.style.top = Math.max(0, vh - pr.height - 4) + 'px';
+    if (pr.left < 0) pop.style.left = '4px';
+    if (pr.top < 0) pop.style.top = '4px';
+    pop.style.visibility = '';
+  });
   attachPopoverClose(pop, anchor);
   return pop;
 }
@@ -53,6 +65,7 @@ export function showContextMenu(x, y, items, className = 'context-menu') {
   pop.className = className;
   pop.style.position = 'fixed';
   pop.style.zIndex = '99999';
+  pop.style.visibility = 'hidden';
   pop.style.left = x + 'px';
   pop.style.top = y + 'px';
   document.body.appendChild(pop);
@@ -89,8 +102,12 @@ export function showContextMenu(x, y, items, className = 'context-menu') {
   }
   // Keep menu on screen
   const mr = pop.getBoundingClientRect();
-  if (mr.right > window.innerWidth) pop.style.left = (window.innerWidth - mr.width - 4) + 'px';
-  if (mr.bottom > window.innerHeight) pop.style.top = (window.innerHeight - mr.height - 4) + 'px';
+  const vw = window.innerWidth, vh = window.innerHeight;
+  if (mr.right > vw) pop.style.left = Math.max(0, vw - mr.width - 4) + 'px';
+  if (mr.bottom > vh) pop.style.top = Math.max(0, vh - mr.height - 4) + 'px';
+  if (mr.left < 0) pop.style.left = '4px';
+  if (mr.top < 0) pop.style.top = '4px';
+  pop.style.visibility = '';
   return pop;
 }
 
