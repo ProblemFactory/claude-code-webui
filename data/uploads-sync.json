@@ -1,18 +1,32 @@
 {
-  "version": 2,
+  "version": 8,
   "data": {
-    "upload:1776387191318-0": {
-      "name": "Chapter of Yuusha Ⅲ 勇者之章Ⅲ v3.12.15 客户端导入包.zip",
-      "path": "/home/xingweil/workspace/39AI/AIWorkspace/B2BTasks/04162026VoiceProviderReview/Provider2/Chapter of Yuusha Ⅲ 勇者之章Ⅲ v3.12.15 客户端导入包.zip",
-      "size": 1142089604,
-      "date": 1776387191318,
+    "upload:1776387414050-0": {
+      "name": "test-5mb.bin",
+      "path": "/home/xingweil/.claude/test-5mb.bin",
+      "size": 5242880,
+      "date": 1776387414050,
       "status": "ok"
     },
-    "upload:1776387353708-0": {
-      "name": "test-inline.bin",
-      "path": "/home/xingweil/.claude/test-inline.bin",
-      "size": 204800,
-      "date": 1776387353708,
+    "upload:1776387426137-0": {
+      "name": "test-css.bin",
+      "path": "/home/xingweil/.claude/test-css.bin",
+      "size": 5242880,
+      "date": 1776387426137,
+      "status": "ok"
+    },
+    "upload:1776387499980-0": {
+      "name": "test-visible.bin",
+      "path": "/home/xingweil/.claude/test-visible.bin",
+      "size": 5242880,
+      "date": 1776387499980,
+      "status": "ok"
+    },
+    "upload:1776387507058-0": {
+      "name": "test-fill.bin",
+      "path": "/home/xingweil/.claude/test-fill.bin",
+      "size": 5242880,
+      "date": 1776387507058,
       "status": "ok"
     }
   }

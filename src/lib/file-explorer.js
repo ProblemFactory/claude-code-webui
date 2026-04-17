@@ -866,14 +866,15 @@ class FileExplorer {
       const progressTrack = document.createElement('span'); progressTrack.className = 'file-upload-track';
       const progressFill = document.createElement('span'); progressFill.className = 'file-upload-fill';
       progressTrack.appendChild(progressFill);
+      const pctLabel = document.createElement('span'); pctLabel.className = 'file-upload-pct'; pctLabel.textContent = '0%';
       const cancelBtn = document.createElement('button'); cancelBtn.className = 'file-upload-cancel'; cancelBtn.textContent = '\u2715';
       cancelBtn.title = 'Cancel upload';
-      progressWrap.append(progressTrack, cancelBtn);
+      progressWrap.append(progressTrack, pctLabel, cancelBtn);
       row.append(iconEl, nameEl, progressWrap);
       // Insert at top of file list
       if (this.listEl.firstChild) this.listEl.insertBefore(row, this.listEl.firstChild);
       else this.listEl.appendChild(row);
-      rows.push({ el: row, fill: progressFill });
+      rows.push({ el: row, fill: progressFill, pctLabel });
     }
 
     const xhr = new XMLHttpRequest();
@@ -888,7 +889,10 @@ class FileExplorer {
     xhr.upload.onprogress = (e) => {
       if (!e.lengthComputable) return;
       const pct = Math.round(e.loaded / e.total * 100);
-      for (const r of rows) r.fill.style.width = pct + '%';
+      for (const r of rows) {
+        r.fill.style.width = pct + '%';
+        r.pctLabel.textContent = pct + '%';
+      }
     };
 
     xhr.onload = () => {
@@ -899,14 +903,14 @@ class FileExplorer {
         if (resp.files) resultFiles = resp.files.map(f => ({ name: f.name, size: f.size, destPath: f.path }));
       } catch {}
       this._saveUploadHistory(resultFiles, 'ok');
-      for (const r of rows) { r.fill.style.width = '100%'; r.el.classList.add('file-upload-done'); }
+      for (const r of rows) { r.fill.style.width = '100%'; r.pctLabel.textContent = '100%'; r.el.classList.add('file-upload-done'); }
       setTimeout(() => this.refresh(), 800);
     };
 
     xhr.onerror = () => {
       this._activeUploads.delete(uploadId);
       this._saveUploadHistory(files.map((f, i) => ({ name: names[i], size: f.size })), 'fail');
-      for (const r of rows) r.el.classList.add('file-upload-error');
+      for (const r of rows) { r.el.classList.add('file-upload-error'); r.pctLabel.textContent = 'Failed'; }
       setTimeout(() => { for (const r of rows) r.el.remove(); }, 3000);
     };
 
