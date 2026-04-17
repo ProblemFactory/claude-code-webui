@@ -1,7 +1,7 @@
-import { formatSize, attachPopoverClose, createPopover, showContextMenu } from './utils.js';
+import { formatSize, attachPopoverClose, createPopover, showContextMenu, getStateSync } from './utils.js';
 import { setupDirAutocomplete } from './autocomplete.js';
 import { getFileIcon, hasDedicatedViewer } from './file-types.js';
-import { FILE_ICONS } from './icons.js';
+import { FILE_ICONS, UI_ICONS } from './icons.js';
 import { FileViewer } from './file-viewer.js';
 
 const DEFAULT_COLUMNS = { name: true, size: true, modified: true, created: false, type: false };
@@ -73,7 +73,7 @@ class FileExplorer {
 
     const btnNewFile = this._btn('+', 'New file'); btnNewFile.onclick = () => this.createFile();
     const btnNewDir = this._btn('', 'New folder'); btnNewDir.innerHTML = FILE_ICONS.folderOpen; btnNewDir.onclick = () => this.createDir();
-    const btnUpload = this._btn('\u2B06', 'Upload'); btnUpload.onclick = () => this._triggerUpload();
+    const btnUpload = this._btn('\u2B06', 'Upload'); btnUpload.onclick = () => this._triggerUpload(btnUpload);
 
     toolbar.style.position = 'relative';
     toolbar.append(btnUp, this.pathInput, btnRefresh, btnView, btnNewFile, btnNewDir, btnUpload, this._acDropdown);
@@ -129,12 +129,16 @@ class FileExplorer {
     this._previewRO = new ResizeObserver(() => this._updatePreviewLayout());
     this._previewRO.observe(contentArea);
 
-    // Upload drop zone
+    // Upload inputs (hidden)
     this.uploadInput = document.createElement('input'); this.uploadInput.type = 'file'; this.uploadInput.multiple = true;
     this.uploadInput.style.display = 'none';
-    this.uploadInput.onchange = (e) => this._uploadFiles(e.target.files);
+    this.uploadInput.onchange = (e) => { this._uploadFiles(e.target.files); e.target.value = ''; };
+    this._folderInput = document.createElement('input'); this._folderInput.type = 'file';
+    this._folderInput.setAttribute('webkitdirectory', ''); this._folderInput.style.display = 'none';
+    this._folderInput.onchange = (e) => { this._uploadFiles(e.target.files, true); e.target.value = ''; };
+    this._activeUploads = new Map(); // uploadId → {xhr, files, rows[]}
 
-    el.append(toolbar, contentArea, this.uploadInput);
+    el.append(toolbar, contentArea, this.uploadInput, this._folderInput);
     winInfo.content.appendChild(el);
 
     // Drag and drop (upload)
@@ -731,73 +735,171 @@ class FileExplorer {
   async createFile() { const n = prompt('File name:'); if (n) { await fetch('/api/file/write', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: this.currentPath + '/' + n, content: '' }) }); this.refresh(); } }
   async createDir() { const n = prompt('Folder name:'); if (n) { await fetch('/api/mkdir', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: this.currentPath + '/' + n }) }); this.refresh(); } }
 
-  _triggerUpload() { this.uploadInput.click(); }
+  // ── Upload popover menu (Chrome download-button style) ──
+  _triggerUpload(anchor) {
+    const pop = createPopover(anchor, 'upload-popover');
+    // Upload Files
+    const fileBtn = document.createElement('div'); fileBtn.className = 'upload-menu-item';
+    fileBtn.innerHTML = `${UI_ICONS.upload} Upload Files`;
+    fileBtn.onclick = () => { pop.remove(); this.uploadInput.click(); };
+    // Upload Folder
+    const folderBtn = document.createElement('div'); folderBtn.className = 'upload-menu-item';
+    folderBtn.innerHTML = `${FILE_ICONS.folder} Upload Folder`;
+    folderBtn.onclick = () => { pop.remove(); this._folderInput.click(); };
+    pop.append(fileBtn, folderBtn);
 
-  _uploadFiles(files) {
+    // History section
+    const sync = getStateSync();
+    const historyData = sync ? this._getUploadHistory(sync) : [];
+    if (historyData.length > 0) {
+      const divider = document.createElement('div'); divider.className = 'upload-menu-divider';
+      pop.appendChild(divider);
+      const histLabel = document.createElement('div'); histLabel.className = 'upload-menu-label'; histLabel.textContent = 'Recent Uploads';
+      pop.appendChild(histLabel);
+      for (const entry of historyData.slice(0, 10)) {
+        const item = document.createElement('div'); item.className = 'upload-menu-item upload-history-item';
+        const icon = document.createElement('span'); icon.innerHTML = getFileIcon(entry.name);
+        const name = document.createElement('span'); name.className = 'upload-hist-name'; name.textContent = entry.name;
+        const meta = document.createElement('span'); meta.className = 'upload-hist-meta';
+        meta.textContent = `${formatSize(entry.size)} · ${this._formatDate(entry.date)}`;
+        const statusIcon = document.createElement('span'); statusIcon.className = 'upload-hist-status';
+        statusIcon.textContent = entry.status === 'ok' ? '\u2713' : entry.status === 'fail' ? '\u2717' : '\u2026';
+        item.append(icon, name, meta, statusIcon);
+        item.onclick = () => { pop.remove(); if (entry.path) this.app.openFile(entry.path, entry.name); };
+        pop.appendChild(item);
+      }
+      if (historyData.length > 0) {
+        const clearBtn = document.createElement('div'); clearBtn.className = 'upload-menu-item upload-menu-clear';
+        clearBtn.textContent = 'Clear History';
+        clearBtn.onclick = () => { pop.remove(); this._clearUploadHistory(); };
+        pop.appendChild(clearBtn);
+      }
+    }
+  }
+
+  _getUploadHistory(sync) {
+    const all = [];
+    const data = sync.getAll('uploads');
+    for (const [key, val] of Object.entries(data)) {
+      if (key.startsWith('upload:') && val) {
+        try { all.push(typeof val === 'string' ? JSON.parse(val) : val); } catch {}
+      }
+    }
+    all.sort((a, b) => (b.date || 0) - (a.date || 0));
+    return all;
+  }
+
+  _clearUploadHistory() {
+    const sync = getStateSync();
+    if (!sync) return;
+    const data = sync.getAll('uploads');
+    for (const key of Object.keys(data)) {
+      if (key.startsWith('upload:')) sync.set('uploads', key, '');
+    }
+  }
+
+  _saveUploadHistory(files, status) {
+    const sync = getStateSync();
+    if (!sync) return;
+    const now = Date.now();
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i];
+      const key = `upload:${now}-${i}`;
+      sync.set('uploads', key, {
+        name: f.name, path: f.destPath || '', size: f.size || 0,
+        date: now, status,
+      });
+    }
+  }
+
+  // ── Upload with inline file-list progress ──
+  _uploadFiles(fileList, isFolder = false) {
+    const files = [...fileList];
+    if (!files.length) return;
+    const uploadId = Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+
+    // Build FormData — for folders, preserve relative paths via webkitRelativePath
     const fd = new FormData(); fd.append('destDir', this.currentPath);
     const names = [];
-    let totalSize = 0;
-    for (const f of files) { fd.append('files', f); names.push(f.name); totalSize += f.size; }
+    const relPaths = [];
+    for (const f of files) {
+      fd.append('files', f);
+      const rel = isFolder && f.webkitRelativePath ? f.webkitRelativePath : f.name;
+      names.push(rel);
+      relPaths.push(rel);
+    }
     fd.append('fileNames', JSON.stringify(names));
+    if (isFolder) fd.append('preservePaths', '1');
 
-    // Show progress bar for uploads (always — even fast ones get a brief flash)
-    const bar = this._ensureUploadBar();
-    const label = bar.querySelector('.upload-label');
-    const fill = bar.querySelector('.upload-fill');
-    const cancelBtn = bar.querySelector('.upload-cancel');
-    const count = files.length;
-    label.textContent = `Uploading ${count} file${count > 1 ? 's' : ''}…`;
-    fill.style.width = '0%';
-    bar.classList.remove('hidden');
+    // Insert placeholder rows into the file list (Mac Finder style)
+    const rows = [];
+    // For folder uploads: show one row per unique top-level entry
+    const displayNames = isFolder
+      ? [...new Set(relPaths.map(r => r.split('/')[0]))]
+      : names;
+    for (const displayName of displayNames) {
+      const row = document.createElement('div'); row.className = 'file-item file-uploading';
+      const iconEl = document.createElement('span'); iconEl.className = 'file-icon';
+      iconEl.innerHTML = isFolder && displayNames.length === 1 ? FILE_ICONS.folder : getFileIcon(displayName);
+      const nameEl = document.createElement('span'); nameEl.className = 'file-name'; nameEl.textContent = displayName;
+      const progressWrap = document.createElement('span'); progressWrap.className = 'file-upload-progress';
+      const progressFill = document.createElement('span'); progressFill.className = 'file-upload-fill';
+      progressWrap.appendChild(progressFill);
+      const pctLabel = document.createElement('span'); pctLabel.className = 'file-upload-pct'; pctLabel.textContent = '0%';
+      const cancelBtn = document.createElement('button'); cancelBtn.className = 'file-upload-cancel'; cancelBtn.textContent = '\u2715';
+      cancelBtn.title = 'Cancel upload';
+      row.append(iconEl, nameEl, progressWrap, pctLabel, cancelBtn);
+      // Insert at top of file list
+      if (this.listEl.firstChild) this.listEl.insertBefore(row, this.listEl.firstChild);
+      else this.listEl.appendChild(row);
+      rows.push({ el: row, fill: progressFill, pctLabel });
+    }
 
     const xhr = new XMLHttpRequest();
-    this._activeUploadXhr = xhr;
+    this._activeUploads.set(uploadId, { xhr, files, rows });
+
+    cancelBtn: {
+      for (const r of rows) {
+        r.el.querySelector('.file-upload-cancel').onclick = () => xhr.abort();
+      }
+    }
 
     xhr.upload.onprogress = (e) => {
       if (!e.lengthComputable) return;
       const pct = Math.round(e.loaded / e.total * 100);
-      fill.style.width = pct + '%';
-      const mb = (s) => (s / 1048576).toFixed(1);
-      label.textContent = `Uploading ${count} file${count > 1 ? 's' : ''} — ${mb(e.loaded)}/${mb(e.total)} MB (${pct}%)`;
+      for (const r of rows) {
+        r.fill.style.width = pct + '%';
+        r.pctLabel.textContent = pct + '%';
+      }
     };
 
     xhr.onload = () => {
-      this._activeUploadXhr = null;
-      fill.style.width = '100%';
-      label.textContent = `Uploaded ${count} file${count > 1 ? 's' : ''}.`;
-      setTimeout(() => { bar.classList.add('hidden'); }, 1500);
-      this.refresh();
+      this._activeUploads.delete(uploadId);
+      let resultFiles = files.map((f, i) => ({ name: names[i], size: f.size, destPath: this.currentPath + '/' + names[i] }));
+      try {
+        const resp = JSON.parse(xhr.responseText);
+        if (resp.files) resultFiles = resp.files.map(f => ({ name: f.name, size: f.size, destPath: f.path }));
+      } catch {}
+      this._saveUploadHistory(resultFiles, 'ok');
+      // Brief flash of 100% then refresh
+      for (const r of rows) { r.fill.style.width = '100%'; r.pctLabel.textContent = '100%'; r.el.classList.add('file-upload-done'); }
+      setTimeout(() => this.refresh(), 800);
     };
 
     xhr.onerror = () => {
-      this._activeUploadXhr = null;
-      label.textContent = 'Upload failed.';
-      fill.style.width = '0%';
-      setTimeout(() => { bar.classList.add('hidden'); }, 3000);
+      this._activeUploads.delete(uploadId);
+      this._saveUploadHistory(files.map((f, i) => ({ name: names[i], size: f.size })), 'fail');
+      for (const r of rows) { r.el.classList.add('file-upload-error'); r.pctLabel.textContent = 'Failed'; }
+      setTimeout(() => { for (const r of rows) r.el.remove(); }, 3000);
     };
 
     xhr.onabort = () => {
-      this._activeUploadXhr = null;
-      label.textContent = 'Upload cancelled.';
-      fill.style.width = '0%';
-      setTimeout(() => { bar.classList.add('hidden'); }, 1500);
+      this._activeUploads.delete(uploadId);
+      for (const r of rows) r.el.remove();
     };
-
-    cancelBtn.onclick = () => xhr.abort();
 
     xhr.open('POST', '/api/upload');
     xhr.send(fd);
-  }
-
-  _ensureUploadBar() {
-    if (this._uploadBar) return this._uploadBar;
-    const bar = document.createElement('div');
-    bar.className = 'upload-progress-bar hidden';
-    bar.innerHTML = `<div class="upload-track"><div class="upload-fill"></div></div><span class="upload-label"></span><button class="upload-cancel" title="Cancel upload">\u2715</button>`;
-    // Insert at the bottom of the file explorer element, after the content area
-    this._el.appendChild(bar);
-    this._uploadBar = bar;
-    return bar;
   }
 
   _showContextMenu(x, y, dataset) {

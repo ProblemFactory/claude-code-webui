@@ -204,6 +204,7 @@ router.delete('/api/file', (req, res) => {
 const upload = multer({ dest: '/tmp/claude-webui-uploads/' });
 router.post('/api/upload', upload.array('files'), (req, res) => {
   const destDir = req.body.destDir || os.homedir();
+  const preservePaths = req.body.preservePaths === '1'; // folder upload: keep relative paths
   // Client sends correct UTF-8 filenames as JSON to avoid multer encoding issues
   let clientNames = [];
   try { clientNames = JSON.parse(req.body.fileNames || '[]'); } catch {}
@@ -213,6 +214,10 @@ router.post('/api/upload', upload.array('files'), (req, res) => {
       const file = req.files[i];
       const name = clientNames[i] || file.originalname;
       const dest = path.join(destDir, name);
+      // For folder uploads, create intermediate directories
+      if (preservePaths && name.includes('/')) {
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+      }
       fs.copyFileSync(file.path, dest);
       fs.unlinkSync(file.path);
       results.push({ name, path: dest, size: file.size });
