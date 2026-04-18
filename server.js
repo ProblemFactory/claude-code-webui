@@ -714,6 +714,9 @@ function getOAuthToken() {
     if (process.platform === 'darwin') {
       if (_oauthToken) return _oauthToken;
       try {
+        // Unlock login keychain first — required when running from non-interactive
+        // contexts (screen, SSH, launchd) where errSecInteractionNotAllowed blocks reads.
+        try { execFileSync('security', ['unlock-keychain', path.join(os.homedir(), 'Library/Keychains/login.keychain-db')], { timeout: 3000, stdio: 'pipe' }); } catch {}
         const user = os.userInfo().username;
         const out = execFileSync('security', ['find-generic-password', '-s', 'Claude Code-credentials', '-a', user, '-w'], { encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
         if (out) {

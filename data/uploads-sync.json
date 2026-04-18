@@ -1,5 +1,5 @@
 {
-  "version": 10,
+  "version": 12,
   "data": {
     "upload:1776387414050-0": {
       "name": "test-5mb.bin",
@@ -41,6 +41,20 @@
       "path": "/home/xingweil/.claude/big-test.bin",
       "size": 52428800,
       "date": 1776388015131,
+      "status": "ok"
+    },
+    "upload:1776394610255-0": {
+      "name": "Recording (4).m4a",
+      "path": "/home/xingweil/workspace/39AI/AIWorkspace/B2BTasks/04162026VoiceProviderReview/MysteriesRecording/Recording (4).m4a",
+      "size": 1661713,
+      "date": 1776394610255,
+      "status": "ok"
+    },
+    "upload:1776394610255-1": {
+      "name": "Recording (5).m4a",
+      "path": "/home/xingweil/workspace/39AI/AIWorkspace/B2BTasks/04162026VoiceProviderReview/MysteriesRecording/Recording (5).m4a",
+      "size": 1622113,
+      "date": 1776394610255,
       "status": "ok"
     }
   }
