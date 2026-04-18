@@ -200,6 +200,48 @@ class SettingsUI {
     }
 
     if (schema.type === 'enum') {
+      // Combobox mode: dropdown + custom text input for types that allow free-form values
+      if (schema.combobox) {
+        const wrap = document.createElement('div');
+        wrap.className = 'settings-combobox';
+        const select = document.createElement('select');
+        select.className = 'settings-select';
+        const customOpt = document.createElement('option');
+        customOpt.value = '__custom__'; customOpt.textContent = 'Custom...';
+        for (const opt of schema.options) {
+          const o = document.createElement('option');
+          o.value = opt.value; o.textContent = opt.label;
+          select.appendChild(o);
+        }
+        select.appendChild(customOpt);
+        const input = document.createElement('input');
+        input.type = 'text'; input.className = 'settings-input-text';
+        input.placeholder = 'e.g. claude-opus-4-6-20250414';
+        // Determine initial state
+        const knownValues = schema.options.map(o => o.value);
+        const isCustom = value && !knownValues.includes(value);
+        if (isCustom) {
+          select.value = '__custom__';
+          input.value = value;
+          input.style.display = '';
+        } else {
+          select.value = value;
+          input.style.display = 'none';
+        }
+        select.onchange = () => {
+          if (select.value === '__custom__') {
+            input.style.display = ''; input.focus();
+            this.settings.set(path, input.value);
+          } else {
+            input.style.display = 'none';
+            this.settings.set(path, select.value);
+          }
+          row.classList.toggle('modified', this.settings.isModified(path));
+        };
+        input.onchange = () => { this.settings.set(path, input.value); row.classList.toggle('modified', this.settings.isModified(path)); };
+        wrap.append(select, input);
+        return wrap;
+      }
       const select = document.createElement('select');
       select.className = 'settings-select';
       for (const opt of schema.options) {

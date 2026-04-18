@@ -857,6 +857,9 @@ html, body {
   padding: 4px 8px; border-radius: var(--radius-sm); font-size: 12px; font-family: inherit;
 }
 .settings-input-number:focus, .settings-select:focus, .settings-json:focus, .settings-input-text:focus { outline: none; border-color: var(--accent); }
+.settings-combobox { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.settings-combobox .settings-select { flex-shrink: 0; }
+.settings-combobox .settings-input-text { flex: 1; min-width: 180px; }
 .btn-create {
   padding: 5px 14px; background: var(--accent); border: 1px solid var(--accent);
   color: #fff; border-radius: var(--radius-sm); cursor: pointer; font-size: 12px; font-weight: 500;

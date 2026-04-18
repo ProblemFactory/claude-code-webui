@@ -136,7 +136,7 @@ const SETTINGS_SCHEMA = {
 
   // ── Claude ──
   'claude.defaultModel': {
-    type: 'enum', default: '',
+    type: 'enum', default: '', combobox: true,
     options: [
       { value: '', label: 'Default' },
       { value: 'opus', label: 'opus (latest, 200k)' },
@@ -144,9 +144,9 @@ const SETTINGS_SCHEMA = {
       { value: 'sonnet', label: 'sonnet (latest)' },
       { value: 'sonnet[1m]', label: 'sonnet[1m] (latest, 1M context)' },
       { value: 'haiku', label: 'haiku (latest)' },
-    ], // dynamically updated from /api/available-models
+    ], // dynamically updated from /api/available-models; Custom... allows typing full model IDs
     label: 'Default model',
-    description: 'Default Claude model for new or resumed Claude sessions.',
+    description: 'Select an alias or choose "Custom..." to type a specific model ID (e.g. claude-opus-4-6-20250414).',
     category: 'Claude', liveApply: true,
   },
   'claude.defaultPermissionMode': {
@@ -184,12 +184,12 @@ const SETTINGS_SCHEMA = {
 
   // ── Codex ──
   'codex.defaultModel': {
-    type: 'enum', default: '',
+    type: 'enum', default: '', combobox: true,
     options: [
       { value: '', label: 'Default' },
     ],
     label: 'Default model',
-    description: 'Default Codex model for new or resumed Codex sessions.',
+    description: 'Select a known model or choose "Custom..." to type a specific model ID.',
     category: 'Codex', liveApply: true,
   },
   'codex.defaultPermissionMode': {
