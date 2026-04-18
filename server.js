@@ -92,8 +92,9 @@ const AVAILABLE_MODELS = {
   codex: [{ id: '', label: 'Default' }],
 };
 function refreshAvailableModels() {
-  // Claude: fetch from /v1/models API using OAuth token
-  const token = getOAuthToken();
+  // Claude: fetch from /v1/models API using API key (not OAuth — the models
+  // endpoint doesn't support OAuth tokens, returns 401).
+  const token = process.env.ANTHROPIC_API_KEY || null;
   if (token) {
     const req = https.request('https://api.anthropic.com/v1/models', {
       method: 'GET',
