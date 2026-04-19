@@ -92,28 +92,40 @@ const AVAILABLE_MODELS = {
   codex: [{ id: '', label: 'Default' }],
 };
 function refreshAvailableModels() {
-  // Claude: fetch from /v1/models API using API key (not OAuth — the models
-  // endpoint doesn't support OAuth tokens, returns 401).
-  const token = process.env.ANTHROPIC_API_KEY || null;
-  if (token) {
-    const req = https.request('https://api.anthropic.com/v1/models', {
-      method: 'GET',
-      headers: { 'x-api-key': token, 'anthropic-version': '2023-06-01' },
+  const aliases = [
+    { id: '', label: 'Default' },
+    { id: 'opus', label: 'opus (latest, 200k)' },
+    { id: 'opus[1m]', label: 'opus[1m] (latest, 1M context)' },
+    { id: 'sonnet', label: 'sonnet (latest)' },
+    { id: 'sonnet[1m]', label: 'sonnet[1m] (latest, 1M context)' },
+    { id: 'haiku', label: 'haiku (latest)' },
+  ];
+
+  function fetchModels(token, useOAuth) {
+    const headers = { 'anthropic-version': '2023-06-01' };
+    let endpoint = '/v1/models';
+    if (useOAuth) {
+      headers['Authorization'] = 'Bearer ' + token;
+      headers['anthropic-beta'] = 'oauth-2025-04-20';
+      endpoint = '/api/claude_cli/bootstrap';
+    } else {
+      headers['x-api-key'] = token;
+    }
+    const req = https.request('https://api.anthropic.com' + endpoint, {
+      method: 'GET', headers,
     }, (res) => {
       let body = '';
       res.on('data', (d) => { body += d; });
       res.on('end', () => {
         try {
           const data = JSON.parse(body);
-          if (data.data?.length) {
-            const aliases = [
-              { id: '', label: 'Default' },
-              { id: 'opus', label: 'opus (latest, 200k)' },
-              { id: 'opus[1m]', label: 'opus[1m] (latest, 1M context)' },
-              { id: 'sonnet', label: 'sonnet (latest)' },
-              { id: 'sonnet[1m]', label: 'sonnet[1m] (latest, 1M context)' },
-              { id: 'haiku', label: 'haiku (latest)' },
-            ];
+          if (useOAuth) {
+            const extra = data.additional_model_options;
+            if (extra?.length) {
+              const models = extra.map(m => ({ id: m.model, label: m.name || m.model }));
+              AVAILABLE_MODELS.claude = [...aliases, ...models];
+            }
+          } else if (data.data?.length) {
             const models = data.data.map(m => {
               const ctx = m.max_input_tokens >= 1000000 ? '1M' : m.max_input_tokens >= 200000 ? '200k' : Math.round(m.max_input_tokens / 1000) + 'k';
               return { id: m.id, label: `${m.display_name || m.id} (${ctx})` };
@@ -126,6 +138,13 @@ function refreshAvailableModels() {
     req.on('error', () => {});
     req.end();
   }
+
+  // Prefer OAuth (supports bootstrap endpoint), fall back to API key (/v1/models)
+  const apiKey = process.env.ANTHROPIC_API_KEY || null;
+  getOAuthToken((oauthToken) => {
+    if (oauthToken) fetchModels(oauthToken, true);
+    else if (apiKey) fetchModels(apiKey, false);
+  });
   // Codex: read from ~/.codex/models_cache.json
   try {
     const codexCache = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.codex', 'models_cache.json'), 'utf-8'));
@@ -698,42 +717,113 @@ let _rateLimitCache = readUsageCache();
 let _codexRateLimitCache = null;
 let _codexRateLimitCacheAt = 0;
 
-let _oauthToken = null, _oauthMtime = 0;
-function getOAuthToken() {
+let _oauthCreds = null; // { accessToken, refreshToken, expiresAt }
+let _oauthMtime = 0;
+const OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
+const OAUTH_TOKEN_URL = 'https://platform.claude.com/v1/oauth/token';
+
+function _readOAuthCreds() {
   try {
-    // Linux: read from .credentials.json file
+    // Linux: .credentials.json
     const credsPath = path.join(os.homedir(), '.claude', '.credentials.json');
     if (fs.existsSync(credsPath)) {
       const stat = fs.statSync(credsPath);
-      if (_oauthToken && stat.mtimeMs === _oauthMtime) return _oauthToken;
-      const creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
-      _oauthToken = creds?.claudeAiOauth?.accessToken || null;
-      _oauthMtime = stat.mtimeMs;
-      return _oauthToken;
+      if (_oauthCreds && stat.mtimeMs === _oauthMtime) return _oauthCreds;
+      const raw = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
+      const o = raw?.claudeAiOauth;
+      if (o?.accessToken) { _oauthCreds = o; _oauthMtime = stat.mtimeMs; return _oauthCreds; }
     }
-    // macOS: read from Keychain (service: "Claude Code-credentials", account: current user)
+    // macOS: Keychain
     if (process.platform === 'darwin') {
-      if (_oauthToken) return _oauthToken;
+      // Re-read from Keychain each time (Claude Code may have refreshed)
       try {
-        // Unlock login keychain first — required when running from non-interactive
-        // contexts (screen, SSH, launchd) where errSecInteractionNotAllowed blocks reads.
-        try { execFileSync('security', ['unlock-keychain', path.join(os.homedir(), 'Library/Keychains/login.keychain-db')], { timeout: 3000, stdio: 'pipe' }); } catch {}
         const user = os.userInfo().username;
         const out = execFileSync('security', ['find-generic-password', '-s', 'Claude Code-credentials', '-a', user, '-w'], { encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
         if (out) {
-          const creds = JSON.parse(out);
-          _oauthToken = creds?.claudeAiOauth?.accessToken || null;
-          return _oauthToken;
+          const o = JSON.parse(out)?.claudeAiOauth;
+          if (o?.accessToken) { _oauthCreds = o; return _oauthCreds; }
         }
       } catch {}
     }
-    return null;
-  } catch { return null; }
+  } catch {}
+  return _oauthCreds;
+}
+
+function _saveRefreshedToken(creds) {
+  try {
+    // Linux: write back to .credentials.json
+    const credsPath = path.join(os.homedir(), '.claude', '.credentials.json');
+    if (fs.existsSync(credsPath)) {
+      const raw = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
+      raw.claudeAiOauth = { ...raw.claudeAiOauth, ...creds };
+      fs.writeFileSync(credsPath, JSON.stringify(raw, null, 2));
+      _oauthMtime = fs.statSync(credsPath).mtimeMs;
+    }
+    // macOS: Keychain — let Claude Code handle persisting on next run.
+    // We update in-memory only; Claude Code will re-read Keychain and
+    // see the token isn't expired, skipping its own refresh.
+  } catch {}
+  _oauthCreds = { ..._oauthCreds, ...creds };
+}
+
+function _refreshOAuthToken(callback) {
+  const creds = _readOAuthCreds();
+  if (!creds?.refreshToken) return callback(null);
+  const body = JSON.stringify({
+    grant_type: 'refresh_token',
+    refresh_token: creds.refreshToken,
+    client_id: OAUTH_CLIENT_ID,
+  });
+  const req = https.request(OAUTH_TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+  }, (res) => {
+    let data = '';
+    res.on('data', d => { data += d; });
+    res.on('end', () => {
+      try {
+        const resp = JSON.parse(data);
+        if (resp.access_token) {
+          const refreshed = {
+            accessToken: resp.access_token,
+            refreshToken: resp.refresh_token || creds.refreshToken,
+            expiresAt: Date.now() + (resp.expires_in || 3600) * 1000,
+          };
+          _saveRefreshedToken(refreshed);
+          callback(refreshed.accessToken);
+        } else { callback(null); }
+      } catch { callback(null); }
+    });
+  });
+  req.on('error', () => callback(null));
+  req.end(body);
+}
+
+function getOAuthToken(callback) {
+  // Async version: callback(token) — handles refresh if expired
+  if (callback) {
+    const creds = _readOAuthCreds();
+    if (!creds?.accessToken) return callback(null);
+    if (creds.expiresAt && Date.now() > creds.expiresAt) {
+      _refreshOAuthToken(callback);
+    } else {
+      callback(creds.accessToken);
+    }
+    return;
+  }
+  // Sync version (for rate limit polling where we don't want to block) —
+  // returns cached token, may be expired (caller should handle 401).
+  const creds = _readOAuthCreds();
+  return creds?.accessToken || null;
 }
 
 function refreshRateLimit() {
-  const token = getOAuthToken();
-  if (!token) return;
+  getOAuthToken((token) => {
+    if (!token) return;
+    _refreshRateLimitWithToken(token);
+  });
+}
+function _refreshRateLimitWithToken(token) {
   const body = JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 1, messages: [{ role: 'user', content: '.' }] });
   const req = https.request('https://api.anthropic.com/v1/messages', {
     method: 'POST',
