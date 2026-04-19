@@ -13,7 +13,7 @@ The toolbar provides a streamlined set of controls:
 - **Refresh** — Reload the current directory
 - **View** — Menu that replaces the old individual toolbar buttons for view mode, display options, group by, and column visibility
 - **+file** / **📂folder** — Create new file or directory
-- **⬆upload** — Upload files (or drag from your OS file manager)
+- **⬆upload** — Opens upload menu (Upload Files, Upload Folder, upload history). Ring progress indicator on the button during active uploads.
 
 The title bar shows the current path (front-truncated for long paths).
 
@@ -90,8 +90,18 @@ Bookmarks sync across all connected clients via WebSocket.
 
 ### Upload
 
-- Click the **upload** button in the toolbar
-- Or drag files from your OS file manager onto the file explorer
+Click the **upload** button to open a Chrome-style popover menu:
+
+- **Upload Files** — multi-file upload via file picker
+- **Upload Folder** — folder upload preserving directory structure (`webkitdirectory`)
+- **Active uploads** — spinner + file name + cancel button for each in-progress upload
+- **Upload history** — last 10 uploads with icon, name, size, date, status (✓/✗). Click to reopen file. "Clear History" at bottom. Persisted server-side and synced across clients.
+
+During upload, files appear as real rows in the file list with a **Mac Finder-style progress bar** (accent-colored fill in the area after the file name) and a percentage label. Rows survive folder navigation — they re-render when you return to the upload directory.
+
+The upload button shows an **SVG ring progress indicator** (Chrome download-button style) during active uploads.
+
+You can also **drag files from your OS file manager** onto the file explorer to upload.
 
 ### Drag to terminal
 

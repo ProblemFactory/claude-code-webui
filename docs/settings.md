@@ -100,7 +100,7 @@ Overrides persist in the layout auto-save.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `claude.defaultModel` | enum | `''` | Default Claude model (dynamically populated from Anthropic API) |
+| `claude.defaultModel` | combobox | `''` | Default Claude model — dropdown aliases + "Custom..." for specific model IDs (e.g. claude-opus-4-6-20250414). Populated from bootstrap API. |
 | `claude.defaultPermissionMode` | enum | `''` | Default Claude permission mode for new or resumed Claude sessions |
 | `claude.defaultEffort` | enum | `''` | Default Claude effort for new or resumed Claude sessions |
 | `claude.defaultExtraArgs` | text | `''` | Extra Claude CLI args appended when starting a Claude session |
@@ -109,7 +109,7 @@ Overrides persist in the layout auto-save.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `codex.defaultModel` | enum | `''` | Default Codex model (dynamically populated from ~/.codex/models_cache.json) |
+| `codex.defaultModel` | combobox | `''` | Default Codex model — dropdown + "Custom..." for specific model IDs. Populated from ~/.codex/models_cache.json. |
 | `codex.defaultPermissionMode` | enum | `''` | Default Codex permission mode for new or resumed Codex sessions |
 | `codex.defaultEffort` | enum | `''` | Default Codex reasoning effort for new or resumed Codex sessions |
 | `codex.defaultExtraArgs` | text | `''` | Extra Codex CLI args appended when starting a Codex session |

@@ -349,17 +349,22 @@ Split from monolithic 1647-line `src/client.js` into 13 ES modules under `src/li
 - **Idle detection via OSC 0**: Claude Code updates terminal title via `\e]0;...\a`. First character indicates state: `✳` (U+2733) = idle/waiting for input, braille chars (U+2800-28FF) = working. Detected via `terminal.parser.registerOscHandler(0, ...)`. When transitioning to idle while window not focused, `window-waiting` class triggers orange blink animation on title bar + taskbar item. Cleared on focus.
 
 ### 9. Usage / Rate Limit Monitoring
-**Approach**: Minimal haiku API call every 5 minutes. Reads rate limit utilization from response headers (`anthropic-ratelimit-unified-*`). Uses OAuth token from `~/.claude/.credentials.json`.
+**Approach**: Minimal haiku API call every 5 minutes. Reads rate limit utilization from response headers (`anthropic-ratelimit-unified-*`). Uses OAuth token with auto-refresh.
 
 **Available data**: 5-hour utilization (%), 7-day utilization (%), reset timestamps, status (allowed/limited).
 
-**Not available via API**: "Sonnet only" weekly limit (only returned by internal `/api/oauth/usage` endpoint which has severe rate limiting). Claude Code gets this via `GET /api/oauth/usage` with `Bearer` + `anthropic-beta: oauth-2025-04-20` headers, but the endpoint is too rate-limited for periodic polling.
+**OAuth token management**: `getOAuthToken(callback)` — dual API: async callback mode (auto-refreshes expired tokens via `platform.claude.com/v1/oauth/token` using Claude Code's client_id `9d1c250a-...`) and sync mode (returns cached, may be expired). Full creds stored in `_oauthCreds` (accessToken + refreshToken + expiresAt). On Linux, refreshed tokens written back to `~/.claude/.credentials.json`. On macOS, in-memory only (Claude Code handles Keychain persistence). Both model discovery and rate limit polling use the async path.
+
+**Model discovery**: `refreshAvailableModels()` — OAuth users: `GET /api/claude_cli/bootstrap` (Bearer + `anthropic-beta: oauth-2025-04-20`), returns `additional_model_options: [{model, name, description}]`. API key users: `GET /v1/models`. Runs 3s after startup then hourly. `/v1/models` does NOT support OAuth tokens (returns 401 "OAuth authentication not supported").
 
 **Failed approaches:**
 - ❌ Parse statusline output: user-customizable, can't guarantee format
 - ❌ Statusline hook wrapper (`--settings`): intrusive, doesn't work for non-WebUI sessions
 - ❌ `/api/oauth/usage` endpoint: correct data but extremely aggressive rate limiting
+- ❌ `/v1/models` with OAuth token: returns 401, only supports API keys
+- ❌ macOS `security unlock-keychain`: works but requires empty keychain password, invasive
 - ✅ Haiku API call + response headers: reliable, cheap, gets 5h + 7d unified limits
+- ✅ `/api/claude_cli/bootstrap` with OAuth: correct endpoint for model discovery
 
 ### 10. Settings System (Global + Per-Terminal)
 **Global settings** (toolbar ⚙): Theme, font size (A-/A+), font family. Stored in `localStorage` (`termFontSize`, `termFontFamily`). Changes propagate to all terminals without per-terminal overrides.
@@ -502,7 +507,8 @@ Read/Write tool output uses highlight.js for syntax highlighting with line numbe
 - `GET /api/file/csv?path=&offset=&limit=&sep=` — streaming CSV/TSV row range (virtual scroll)
 - `POST /api/format` — server-side code formatting (Python/Go/Rust/Shell via ruff/black/shfmt/gofmt/rustfmt)
 - `GET /api/download?path=` — download file
-- `POST /api/upload` — multipart upload (fileNames JSON field for Unicode filenames)
+- `POST /api/upload` — multipart upload (fileNames JSON field for Unicode filenames, preservePaths=1 for folder uploads with recursive mkdir)
+- `GET /api/file/serve/*` — path-based raw file serving (enables `<base href>` for HTML preview relative paths)
 - `POST /api/file/write` — write file
 - `POST /api/mkdir` — create directory
 - `POST /api/rename` — rename
@@ -650,7 +656,7 @@ Server → Client: `created`, `output`, `msg` (normalized: op=create/edit/meta),
 - CSV/TSV: virtual scroll viewer — only renders visible rows (~30-50), pages of 200 rows fetched on demand from streaming `GET /api/file/csv` endpoint. Handles arbitrarily large files.
 - HTML files: open in CodeEditor with Preview toggle (sandboxed iframe), same as markdown
 - Code editor: CodeMirror 6, follows global theme, auto-format via Prettier (Shift+Alt+F) for JS/TS/JSON/HTML/CSS/MD/YAML/GraphQL + server-side ruff/black/shfmt/gofmt/rustfmt for Python/Shell/Go/Rust. Language selector drives Preview button visibility.
-- Upload: Chinese/Unicode filenames preserved via client-side `fileNames` JSON field (bypasses multer encoding issues)
+- Upload: Chrome-style popover menu (Upload Files / Upload Folder / active uploads with spinner / upload history). Mac Finder-style inline progress bars in file list. Ring progress on upload button. Upload history persisted via SyncStore and broadcast across clients. Folder upload preserves directory structure. Chinese/Unicode filenames preserved via `fileNames` JSON field.
 - Large file warnings (>1MB), binary auto-detection
 - CWD autocomplete with `~` support
 - Clipboard image paste (Ctrl+V → upload to server → xclip/osascript sets clipboard → Ctrl+V to PTY)
@@ -796,3 +802,10 @@ Server → Client: `created`, `output`, `msg` (normalized: op=create/edit/meta),
 - Tab drag-out preview confusing over merge zones: the detached window IS the cursor-following preview (no separate ghost), but while hovering a tab zone it was being hidden — users saw nothing. Fix: mirror the titleBar drag pattern exactly — window follows cursor normally in empty space; on entering merge zone, window `display:none` and a small `.tab-ghost` preview appears; on leaving, restore window and resume cursor tracking.
 - Icon drag didn't hide source: the dragging icon's source window stayed visible while the ghost followed the cursor. Fix: `visibility:hidden` source on drag threshold crossed, restored on mouseup.
 - Tab drag-out window drifted behind others: `_detachFromChain` copied the host's z-index, so the detached window might end up below a focused standalone window. Fix: call `focusWindow(winId)` right after detach.
+- HTML preview broken for pages with relative resources: `srcdoc` has no base URL, and `sandbox='allow-scripts'` blocked same-origin loading. Fix: inject `<base href="/api/file/serve/DIR/">` into srcdoc, add `allow-same-origin` to sandbox. New path-based route `GET /api/file/serve/*` maps URL path segments to filesystem paths for proper `<base href>` resolution.
+- HTML preview didn't re-render on resize: JS-computed layouts (canvas, calculated dimensions) froze at initial window size. Fix: ResizeObserver on preview body triggers debounced (300ms) srcdoc rewrite.
+- Upload progress bar fill invisible: `<span>` fill element was `display:inline`, CSS width/height had no effect. Fix: `display:block`.
+- Upload popover had no background: missing `background/border/box-shadow` CSS on `.upload-popover`.
+- Popovers/context menus clipped by viewport edge: no bounds checking after render. Fix: `createPopover` uses rAF + `getBoundingClientRect` to clamp all four edges; `showContextMenu` clamps synchronously after items appended. Both render with `visibility:hidden` first then reveal.
+- Model discovery failed for OAuth users: `/v1/models` returns 401 for OAuth tokens. Fix: use `/api/claude_cli/bootstrap` endpoint (supports OAuth, same as Claude Code) with `anthropic-beta: oauth-2025-04-20`. Falls back to `ANTHROPIC_API_KEY` + `/v1/models`.
+- OAuth token expired silently: server cached only the accessToken with no refresh. Fix: store full creds (accessToken + refreshToken + expiresAt), auto-refresh via `platform.claude.com/v1/oauth/token` when expired. `getOAuthToken(callback)` async API with refresh, sync fallback for non-critical paths.
