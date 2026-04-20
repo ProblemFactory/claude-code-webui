@@ -474,14 +474,16 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
     }
     if (session._subNormalizers) { session._subNormalizers.clear(); }
     if (session._normalizer) { session._normalizer.listeners.length = 0; }
+    // Detect auth failure from buffer content (claude exits immediately with "Not logged in")
+    const exitReason = /Not logged in|Please run \/login|OAuth token revoked/.test(session.buffer || '') ? 'not_logged_in' : undefined;
     if (cleanupOnExit) {
       if (session.socketPath && fs.existsSync(session.socketPath)) { session.pty = null; return; }
-      broadcastToSession(session, id, { type: 'exited', sessionId: id });
+      broadcastToSession(session, id, { type: 'exited', sessionId: id, reason: exitReason });
       activeSessions.delete(id);
       if (session.sockName) deleteSessionMeta(session.sockName);
       broadcastActiveSessions();
     } else {
-      broadcastToSession(session, id, { type: 'exited', sessionId: id });
+      broadcastToSession(session, id, { type: 'exited', sessionId: id, reason: exitReason });
       activeSessions.delete(id);
       broadcastActiveSessions();
     }

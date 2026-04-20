@@ -295,6 +295,8 @@
 }
 .chat-resume-btn:hover { filter: brightness(1.12); }
 .chat-resume-btn svg { width: 14px; height: 14px; }
+.chat-login-bar { flex-wrap: wrap; gap: 8px; }
+.chat-login-bar .chat-resume-note { width: 100%; }
 
 /* Chat input area */
 .chat-input-area {

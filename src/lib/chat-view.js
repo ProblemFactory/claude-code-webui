@@ -274,9 +274,15 @@ class ChatView {
       } else if (msg.type === 'subagent-message' && msg.sessionId === sessionId) {
         this._onSubagentMessage(msg.parentToolUseId, msg.message);
       } else if (msg.type === 'exited' && msg.sessionId === sessionId) {
-        this._renderers.appendSystem('Session ended.');
         this._hideTyping();
-        this._setReadOnly();
+        if (msg.reason === 'not_logged_in') {
+          this._renderers.appendSystem('Not logged in — please log in to continue.');
+          this._setReadOnly();
+          this._showLoginBar();
+        } else {
+          this._renderers.appendSystem('Session ended.');
+          this._setReadOnly();
+        }
       }
     };
     this.ws.onGlobal(this._handler);
@@ -1094,6 +1100,44 @@ class ChatView {
 
     bar.append(note, btn);
     // Insert before status bar (which is the last child)
+    if (this._statusBar?.element && this._statusBar.element.parentNode === container) {
+      container.insertBefore(bar, this._statusBar.element);
+    } else {
+      container.appendChild(bar);
+    }
+    this._resumeBar = bar;
+  }
+
+  // Show login bar when session exits due to expired/missing OAuth token
+  _showLoginBar() {
+    if (this._resumeBar) this._resumeBar.remove();
+    this._resumeBar = null;
+    const container = this._container;
+    if (!container) return;
+
+    const bar = document.createElement('div');
+    bar.className = 'chat-resume-bar chat-login-bar';
+
+    const note = document.createElement('div');
+    note.className = 'chat-resume-note';
+    note.textContent = 'Claude CLI is not logged in. Open a terminal to run /login, then retry.';
+
+    const loginBtn = document.createElement('button');
+    loginBtn.className = 'chat-resume-btn';
+    loginBtn.innerHTML = `${UI_ICONS.wrench} <span>Open Login Terminal</span>`;
+    loginBtn.onclick = () => {
+      // Open a terminal window running claude (user can /login there)
+      const ids = this._getSessionIds();
+      const cwd = ids.cwd || this.winInfo?._openSpec?.cwd || '';
+      this.app.createSession({ cwd, mode: 'terminal', backend: ids.backend || 'claude' });
+    };
+
+    const retryBtn = document.createElement('button');
+    retryBtn.className = 'chat-resume-btn';
+    retryBtn.innerHTML = `${UI_ICONS.refresh} <span>Retry</span>`;
+    retryBtn.onclick = () => this._resumeAndClose();
+
+    bar.append(note, loginBtn, retryBtn);
     if (this._statusBar?.element && this._statusBar.element.parentNode === container) {
       container.insertBefore(bar, this._statusBar.element);
     } else {
