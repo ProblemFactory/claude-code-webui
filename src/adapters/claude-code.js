@@ -44,7 +44,7 @@ class ClaudeCodeAdapter extends BackendAdapter {
     if (resumeId) {
       args.push('--resume', resumeId);
     }
-    if (sessionName) args.push('--name', sessionName);
+    if (sessionName && this.config.supportsName) args.push('--name', sessionName);
     if (model) args.push('--model', model);
     if (permissionMode) args.push('--permission-mode', permissionMode);
     if (effort) args.push('--effort', effort);

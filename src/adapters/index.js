@@ -8,6 +8,7 @@ function createAdapterRegistry(config = {}) {
     claudeCmd: config.claudeCmd,
     chatWrapper: config.chatWrapper,
     ptyWrapper: config.ptyWrapper,
+    buffersDir: config.buffersDir,
   }));
 
   adapters.set('codex', new CodexAdapter({

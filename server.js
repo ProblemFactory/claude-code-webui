@@ -71,21 +71,26 @@ const adapterRegistry = createAdapterRegistry({
   chatWrapper: path.join(__dirname, 'data', 'bin', 'chat-wrapper.js'),
   codexChatWrapper: path.join(__dirname, 'data', 'bin', 'codex-chat-wrapper.js'),
   ptyWrapper: path.join(__dirname, 'data', 'bin', 'pty-wrapper.js'),
+  buffersDir: path.join(__dirname, 'data', 'session-buffers'),
 });
 
 if (!CODEX_SANDBOX_SUPPORTED) {
   console.log('[codex] codex-linux-sandbox not found; default/safe-yolo sessions will run unsandboxed.');
 }
 
-// Parse available permission modes from claude --help (cached on startup)
+// Parse available permission modes + supported flags from claude --help (cached on startup)
 let PERMISSION_MODES = ['default', 'acceptEdits', 'auto', 'bypassPermissions', 'dontAsk', 'plan'];
+let CLAUDE_SUPPORTS_NAME = false;
 try {
   const help = execFileSync(CLAUDE_CMD, ['--help'], { encoding: 'utf-8', timeout: 5000 });
   const match = help.match(/--permission-mode.*choices:\s*(.+)\)/);
   if (match) {
     PERMISSION_MODES = match[1].match(/"([^"]+)"/g)?.map(s => s.replace(/"/g, '')) || PERMISSION_MODES;
   }
+  CLAUDE_SUPPORTS_NAME = /--name\b/.test(help);
 } catch {}
+// Propagate capability flags to the adapter
+adapterRegistry.get('claude').config.supportsName = CLAUDE_SUPPORTS_NAME;
 // Discover available models per backend (cached, refreshed periodically)
 const AVAILABLE_MODELS = {
   claude: [{ id: '', label: 'Default' }, { id: 'opus', label: 'opus (latest, 200k)' }, { id: 'opus[1m]', label: 'opus[1m] (latest, 1M)' }, { id: 'sonnet', label: 'sonnet (latest)' }, { id: 'sonnet[1m]', label: 'sonnet[1m] (latest, 1M)' }, { id: 'haiku', label: 'haiku (latest)' }],
