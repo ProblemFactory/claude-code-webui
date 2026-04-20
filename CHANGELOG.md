@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/),
 and this project uses [Semantic Versioning](https://semver.org/).
 
+## [2.2.1] — 2026-04-20
+
+### Fixed
+
+- **Resume/new session broken on older Claude CLI**: Claude Code <2.1.98 doesn't support `--name`, causing immediate exit code 1 and read-only window. Server now parses `claude --help` at startup to detect supported flags and only passes `--name` when available.
+- **Startup banner showed hardcoded "v2.0"**: Now reads version from package.json dynamically.
+
 ## [2.2.0] — 2026-04-18
 
 ### Added

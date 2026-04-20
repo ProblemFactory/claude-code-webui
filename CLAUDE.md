@@ -636,7 +636,7 @@ Server → Client: `created`, `output`, `msg` (normalized: op=create/edit/meta),
 - Session groups: Folders | Groups dual tab, user-defined groups with assign/unassign, folder linking (recursive auto-include by cwd), ▶ resume-all button
 - Group header: right-click context menu (Rename / Linked folders / Delete), drop target for folders and sessions
 - Multi-client sync: star/archive/rename/groups/bookmarks broadcast via WebSocket to all clients
-- Session rename: double-click name in sidebar → set custom name → used as `--name` on next resume, syncs to open windows
+- Session rename: double-click name in sidebar → set custom name → used as `--name` on next resume (if CLI supports it — detected via `--help` at startup), syncs to open windows
 - Terminate button: in session card expand panel for all running sessions (live/tmux/external). Live uses WebSocket kill, external/tmux uses `POST /api/kill-pid`
 
 ### File Management
@@ -809,3 +809,4 @@ Server → Client: `created`, `output`, `msg` (normalized: op=create/edit/meta),
 - Popovers/context menus clipped by viewport edge: no bounds checking after render. Fix: `createPopover` uses rAF + `getBoundingClientRect` to clamp all four edges; `showContextMenu` clamps synchronously after items appended. Both render with `visibility:hidden` first then reveal.
 - Model discovery failed for OAuth users: `/v1/models` returns 401 for OAuth tokens. Fix: use `/api/claude_cli/bootstrap` endpoint (supports OAuth, same as Claude Code) with `anthropic-beta: oauth-2025-04-20`. Falls back to `ANTHROPIC_API_KEY` + `/v1/models`.
 - OAuth token expired silently: server cached only the accessToken with no refresh. Fix: store full creds (accessToken + refreshToken + expiresAt), auto-refresh via `platform.claude.com/v1/oauth/token` when expired. `getOAuthToken(callback)` async API with refresh, sync fallback for non-critical paths.
+- Resume/new session fails on older Claude CLI (`--name` unsupported): Claude Code <2.1.98 doesn't have `--name`, causing `error: unknown option` → exit code 1 → immediate read-only. Fix: parse `claude --help` at startup for `--name` support (`CLAUDE_SUPPORTS_NAME`), propagate to adapter config. `buildSessionArgs` only includes `--name` when supported.
