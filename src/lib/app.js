@@ -640,6 +640,10 @@ class App {
     this._setupCwdAutocomplete();
   }
 
+  getSessionOptions(backend) {
+    return BACKEND_SESSION_OPTIONS[backend] || BACKEND_SESSION_OPTIONS.claude;
+  }
+
   _getBackendSessionDefaults(backend) {
     const prefix = backend === 'codex' ? 'codex' : 'claude';
     const cfg = BACKEND_SESSION_OPTIONS[backend] || BACKEND_SESSION_OPTIONS.claude;
@@ -967,7 +971,7 @@ class App {
     this.ws.onGlobal(handler);
   }
 
-  resumeSession(sessionId, cwd, sessionName, { mode, syncId, backend = 'claude', backendSessionId, agentKind, agentRole, agentNickname, sourceKind, parentThreadId } = {}) {
+  resumeSession(sessionId, cwd, sessionName, { mode, model, effort, permission, syncId, backend = 'claude', backendSessionId, agentKind, agentRole, agentNickname, sourceKind, parentThreadId } = {}) {
     this._closeSidebarOnMobile();
     // If this session is already open in a window (e.g. already resumed), just focus it
     for (const [winId, term] of this.sessions) {
@@ -987,6 +991,9 @@ class App {
       name: sessionName,
       resumeId: sessionId,
       mode: sessionMode,
+      model,
+      permission,
+      effort,
       syncId,
       backend,
       backendSessionId: backendSessionId || sessionId,

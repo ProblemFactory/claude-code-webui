@@ -286,6 +286,28 @@ html, body {
 .session-resume-drop.session-detail-btn-chat { background: rgba(34,197,94,0.15); color: var(--green); border-color: var(--green); }
 .session-resume-drop.session-detail-btn-chat:hover { background: var(--green); color: #fff; }
 
+/* Per-session config panel */
+.session-config-toggle { width: 100%; justify-content: center; margin-bottom: 4px; }
+.session-config-panel { display: flex; flex-direction: column; gap: 4px; margin-bottom: 6px; }
+.session-config-panel.hidden { display: none; }
+.session-config-row {
+  display: flex; align-items: center; gap: 6px; font-size: 11px;
+}
+.session-config-label {
+  width: 62px; flex-shrink: 0; color: var(--text-dim); text-align: right;
+}
+.session-config-select {
+  flex: 1; min-width: 0; background: var(--bg-input); border: 1px solid var(--border);
+  color: var(--text); padding: 2px 4px; border-radius: var(--radius-sm); font-size: 11px;
+}
+.session-config-select:focus { outline: none; border-color: var(--accent); }
+.session-config-input {
+  flex: 1; min-width: 0; background: var(--bg-input); border: 1px solid var(--border);
+  color: var(--text); padding: 2px 4px; border-radius: var(--radius-sm); font-size: 11px;
+  font-family: inherit;
+}
+.session-config-input:focus { outline: none; border-color: var(--accent); }
+
 /* Path autocomplete in file explorer */
 .path-autocomplete {
   position: absolute; top: 100%; left: 0; right: 0; z-index: 100;
