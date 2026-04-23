@@ -347,7 +347,7 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
     // Config button (gear) — opens popover for model/effort/permission
     const configBtn = document.createElement('button');
     configBtn.className = 'session-resume-drop ' + (resumeMode === 'chat' ? 'session-detail-btn-chat' : 'session-detail-btn-primary');
-    configBtn.innerHTML = '<svg style="width:10px;height:10px" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="2.5"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.1 3.1l1.4 1.4M11.5 11.5l1.4 1.4M3.1 12.9l1.4-1.4M11.5 4.5l1.4-1.4"/></svg>';
+    configBtn.innerHTML = '<svg style="width:10px;height:10px" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="2.5"/><path d="M8 1.5v1.3M8 13.2v1.3M1.5 8h1.3M13.2 8h1.3M3.4 3.4l.9.9M11.7 11.7l.9.9M3.4 12.6l.9-.9M11.7 4.3l.9-.9"/><path d="M6.5 1.5h3l.3 1.5.8.3 1.3-.8 2.1 2.1-.8 1.3.3.8 1.5.3v3l-1.5.3-.3.8.8 1.3-2.1 2.1-1.3-.8-.8.3-.3 1.5h-3l-.3-1.5-.8-.3-1.3.8-2.1-2.1.8-1.3-.3-.8L1.5 9.5v-3l1.5-.3.3-.8-.8-1.3 2.1-2.1 1.3.8.8-.3z"/></svg>';
     configBtn.title = 'Session parameters';
     configBtn.style.borderLeft = '1px solid var(--border)';
     configBtn.onclick = (e) => {
