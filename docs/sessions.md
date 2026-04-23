@@ -50,6 +50,10 @@ Configure the default mode for new sessions and single-click resume via Settings
 
 When resuming a stopped session, the resume button uses your default mode. A split button next to it lets you explicitly choose Terminal or Chat. The mode you last used for a session is persisted.
 
+### Per-session parameters
+
+A gear button (⚙) next to the Resume button opens a config popover where you can override **Model**, **Effort**, and **Permission Mode** for that specific resume. Each option has a checkbox — unchecked means "use global default" (greyed out), checked means the override is active. Changing a dropdown while unchecked auto-checks it. Model supports typing a specific model ID via the "Custom..." option.
+
 ## Session Cards
 
 Each session appears as a compact card showing: name, status badge, mode icon (for chat), and expand arrow.

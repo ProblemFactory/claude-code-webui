@@ -638,6 +638,7 @@ Server → Client: `created`, `output`, `msg` (normalized: op=create/edit/meta),
 - Multi-client sync: star/archive/rename/groups/bookmarks broadcast via WebSocket to all clients
 - Session rename: double-click name in sidebar → set custom name → used as `--name` on next resume (if CLI supports it — detected via `--help` at startup), syncs to open windows
 - Terminate button: in session card expand panel for all running sessions (live/tmux/external). Live uses WebSocket kill, external/tmux uses `POST /api/kill-pid`
+- Per-session config: gear button (⚙) in Resume split button group opens a popover with Model/Effort/Permission overrides. Each row has a checkbox — unchecked = greyed out, uses global default; checked = per-session override. Changing a select while unchecked auto-checks. Model supports combobox (Custom... for specific model IDs). Overrides passed to `resumeSession()` → `createSession()` → CLI flags.
 
 ### File Management
 - File explorer with upload/download/drag-drop, title shows current path
