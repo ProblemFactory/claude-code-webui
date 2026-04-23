@@ -358,42 +358,63 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
     const _showConfigPopover = (anchor) => {
       const pop = createPopover(anchor, 'session-config-popover');
 
-      const makeRow = (label, options, curVal, onChange, isModel) => {
+      const makeRow = (label, options, key, isModel) => {
+        const curVal = overrides[key];
+        const defaultVal = defaults[key];
+        const isDefault = !curVal || curVal === defaultVal;
         const row = document.createElement('div'); row.className = 'session-config-row';
+        const cb = document.createElement('input'); cb.type = 'checkbox';
+        cb.className = 'session-config-cb'; cb.checked = !isDefault;
+        cb.title = cb.checked ? 'Uncheck to use global default' : 'Check to override';
         const lbl = document.createElement('span'); lbl.className = 'session-config-label'; lbl.textContent = label;
         const sel = document.createElement('select'); sel.className = 'session-config-select';
         for (const opt of options) {
           const o = document.createElement('option');
           o.value = opt.value || opt.id || '';
           o.textContent = opt.label || opt.value || 'Default';
-          if (String(o.value) === String(curVal)) o.selected = true;
+          if (String(o.value) === String(isDefault ? defaultVal : curVal)) o.selected = true;
           sel.appendChild(o);
         }
+        let input = null;
         if (isModel) {
           const customOpt = document.createElement('option'); customOpt.value = '__custom__'; customOpt.textContent = 'Custom...';
           sel.appendChild(customOpt);
-          const input = document.createElement('input'); input.type = 'text'; input.className = 'session-config-input';
+          input = document.createElement('input'); input.type = 'text'; input.className = 'session-config-input';
           input.placeholder = 'e.g. claude-opus-4-6';
           const known = options.map(o => o.value || o.id || '');
-          if (curVal && !known.includes(curVal)) {
-            sel.value = '__custom__'; input.value = curVal; input.style.display = '';
+          const cv = isDefault ? defaultVal : curVal;
+          if (cv && !known.includes(cv)) {
+            sel.value = '__custom__'; input.value = cv; input.style.display = '';
           } else { input.style.display = 'none'; }
           sel.onchange = () => {
-            if (sel.value === '__custom__') { input.style.display = ''; input.focus(); onChange(input.value); }
-            else { input.style.display = 'none'; onChange(sel.value); }
+            if (sel.value === '__custom__') { input.style.display = ''; input.focus(); overrides[key] = input.value; }
+            else { input.style.display = 'none'; overrides[key] = sel.value; }
+            if (!cb.checked) { cb.checked = true; applyDisabled(); }
           };
-          input.onchange = () => onChange(input.value);
-          row.append(lbl, sel, input);
+          input.onchange = () => { overrides[key] = input.value; if (!cb.checked) { cb.checked = true; applyDisabled(); } };
         } else {
-          sel.onchange = () => onChange(sel.value);
-          row.append(lbl, sel);
+          sel.onchange = () => { overrides[key] = sel.value; if (!cb.checked) { cb.checked = true; applyDisabled(); } };
         }
+        const applyDisabled = () => {
+          const disabled = !cb.checked;
+          sel.disabled = disabled;
+          if (input) input.disabled = disabled;
+          row.classList.toggle('session-config-disabled', disabled);
+          if (disabled) overrides[key] = ''; // revert to global default
+        };
+        cb.onchange = () => {
+          applyDisabled();
+          if (cb.checked) { overrides[key] = sel.value === '__custom__' ? (input?.value || '') : sel.value; }
+        };
+        row.append(cb, lbl, sel);
+        if (input) row.appendChild(input);
+        applyDisabled();
         return row;
       };
 
-      pop.appendChild(makeRow('Model', opts.models, overrides.model, (v) => { overrides.model = v; }, true));
-      pop.appendChild(makeRow('Effort', opts.efforts, overrides.effort, (v) => { overrides.effort = v; }));
-      pop.appendChild(makeRow('Permission', opts.permissions, overrides.permission, (v) => { overrides.permission = v; }));
+      pop.appendChild(makeRow('Model', opts.models, 'model', true));
+      pop.appendChild(makeRow('Effort', opts.efforts, 'effort'));
+      pop.appendChild(makeRow('Permission', opts.permissions, 'permission'));
     };
 
     resumeWrap.append(resumeBtn, dropBtn, configBtn);
