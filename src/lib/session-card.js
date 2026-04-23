@@ -1,4 +1,4 @@
-import { escHtml, copyText } from './utils.js';
+import { escHtml, copyText, createPopover } from './utils.js';
 import { createBackendIcon, createAgentKindIcon, createModeBackendIcon, getBackendMeta, getAgentKindMeta, getAgentRoleLabel, getAgentRoleShortLabel, getSessionKey } from './agent-meta.js';
 
 /** Inline SVG icon helper — returns an HTML string for a 12x12 stroked icon */
@@ -296,7 +296,7 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
     const defaultMode = settings?.get('session.defaultMode') ?? 'terminal';
     let resumeMode = savedMode || defaultMode;
 
-    // Per-session config (model / effort / permission) — collapsible
+    // Per-session config (model / effort / permission) — popover
     const backend = s.backend || 'claude';
     const opts = app.getSessionOptions(backend);
     const prefix = backend === 'codex' ? 'codex' : 'claude';
@@ -306,61 +306,12 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
       permission: settings?.get(`${prefix}.defaultPermissionMode`) ?? '',
     };
     const overrides = { model: defaults.model, effort: defaults.effort, permission: defaults.permission };
-
-    const configToggle = document.createElement('button');
-    configToggle.className = 'session-detail-btn session-config-toggle';
-    configToggle.innerHTML = ICON.find.replace('</svg>', '') + '</svg>' + ' Session Config';
-    configToggle.innerHTML = '<svg style="width:12px;height:12px;vertical-align:-2px" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="5.5"/><path d="M8 5.5v5M5.5 8h5"/></svg> Session Config';
-    const configPanel = document.createElement('div');
-    configPanel.className = 'session-config-panel hidden';
-    let configOpen = false;
-    configToggle.onclick = (e) => {
-      e.stopPropagation();
-      configOpen = !configOpen;
-      configPanel.classList.toggle('hidden', !configOpen);
+    // Track current labels for the config button badge
+    const getModelLabel = () => {
+      if (!overrides.model) return '';
+      const m = opts.models.find(o => (o.value || o.id || '') === overrides.model);
+      return m ? (m.label || m.value || '') : overrides.model;
     };
-
-    const makeRow = (label, options, defaultVal, onChange) => {
-      const row = document.createElement('div'); row.className = 'session-config-row';
-      const lbl = document.createElement('span'); lbl.className = 'session-config-label'; lbl.textContent = label;
-      const sel = document.createElement('select'); sel.className = 'session-config-select';
-      for (const opt of options) {
-        const o = document.createElement('option');
-        o.value = opt.value || opt.id || '';
-        o.textContent = opt.label || opt.value || 'Default';
-        if (String(o.value) === String(defaultVal)) o.selected = true;
-        sel.appendChild(o);
-      }
-      // Custom option for model combobox
-      if (label === 'Model') {
-        const customOpt = document.createElement('option'); customOpt.value = '__custom__'; customOpt.textContent = 'Custom...';
-        sel.appendChild(customOpt);
-        const input = document.createElement('input'); input.type = 'text'; input.className = 'session-config-input';
-        input.placeholder = 'e.g. claude-opus-4-6-20250414';
-        const known = options.map(o => o.value || o.id || '');
-        if (defaultVal && !known.includes(defaultVal)) {
-          sel.value = '__custom__'; input.value = defaultVal; input.style.display = '';
-        } else { input.style.display = 'none'; }
-        sel.onchange = () => {
-          if (sel.value === '__custom__') { input.style.display = ''; input.focus(); onChange(input.value); }
-          else { input.style.display = 'none'; onChange(sel.value); }
-        };
-        input.onchange = () => onChange(input.value);
-        sel.onclick = (e) => e.stopPropagation();
-        input.onclick = (e) => e.stopPropagation();
-        row.append(lbl, sel, input);
-      } else {
-        sel.onchange = () => onChange(sel.value);
-        sel.onclick = (e) => e.stopPropagation();
-        row.append(lbl, sel);
-      }
-      return row;
-    };
-
-    configPanel.appendChild(makeRow('Model', opts.models, defaults.model, (v) => { overrides.model = v; }));
-    configPanel.appendChild(makeRow('Effort', opts.efforts, defaults.effort, (v) => { overrides.effort = v; }));
-    configPanel.appendChild(makeRow('Permission', opts.permissions, defaults.permission, (v) => { overrides.permission = v; }));
-    actionsDiv.append(configToggle, configPanel);
 
     const resumeWrap = document.createElement('div');
     resumeWrap.className = 'session-resume-split';
@@ -393,7 +344,59 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
       updateLabel();
     };
 
-    resumeWrap.append(resumeBtn, dropBtn);
+    // Config button (gear) — opens popover for model/effort/permission
+    const configBtn = document.createElement('button');
+    configBtn.className = 'session-resume-drop ' + (resumeMode === 'chat' ? 'session-detail-btn-chat' : 'session-detail-btn-primary');
+    configBtn.innerHTML = '<svg style="width:10px;height:10px" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="2.5"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.1 3.1l1.4 1.4M11.5 11.5l1.4 1.4M3.1 12.9l1.4-1.4M11.5 4.5l1.4-1.4"/></svg>';
+    configBtn.title = 'Session parameters';
+    configBtn.style.borderLeft = '1px solid var(--border)';
+    configBtn.onclick = (e) => {
+      e.stopPropagation();
+      _showConfigPopover(configBtn);
+    };
+
+    const _showConfigPopover = (anchor) => {
+      const pop = createPopover(anchor, 'session-config-popover');
+
+      const makeRow = (label, options, curVal, onChange, isModel) => {
+        const row = document.createElement('div'); row.className = 'session-config-row';
+        const lbl = document.createElement('span'); lbl.className = 'session-config-label'; lbl.textContent = label;
+        const sel = document.createElement('select'); sel.className = 'session-config-select';
+        for (const opt of options) {
+          const o = document.createElement('option');
+          o.value = opt.value || opt.id || '';
+          o.textContent = opt.label || opt.value || 'Default';
+          if (String(o.value) === String(curVal)) o.selected = true;
+          sel.appendChild(o);
+        }
+        if (isModel) {
+          const customOpt = document.createElement('option'); customOpt.value = '__custom__'; customOpt.textContent = 'Custom...';
+          sel.appendChild(customOpt);
+          const input = document.createElement('input'); input.type = 'text'; input.className = 'session-config-input';
+          input.placeholder = 'e.g. claude-opus-4-6';
+          const known = options.map(o => o.value || o.id || '');
+          if (curVal && !known.includes(curVal)) {
+            sel.value = '__custom__'; input.value = curVal; input.style.display = '';
+          } else { input.style.display = 'none'; }
+          sel.onchange = () => {
+            if (sel.value === '__custom__') { input.style.display = ''; input.focus(); onChange(input.value); }
+            else { input.style.display = 'none'; onChange(sel.value); }
+          };
+          input.onchange = () => onChange(input.value);
+          row.append(lbl, sel, input);
+        } else {
+          sel.onchange = () => onChange(sel.value);
+          row.append(lbl, sel);
+        }
+        return row;
+      };
+
+      pop.appendChild(makeRow('Model', opts.models, overrides.model, (v) => { overrides.model = v; }, true));
+      pop.appendChild(makeRow('Effort', opts.efforts, overrides.effort, (v) => { overrides.effort = v; }));
+      pop.appendChild(makeRow('Permission', opts.permissions, overrides.permission, (v) => { overrides.permission = v; }));
+    };
+
+    resumeWrap.append(resumeBtn, dropBtn, configBtn);
     actionsDiv.appendChild(resumeWrap);
 
     // View History button (read-only, no resume)
