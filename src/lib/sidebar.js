@@ -47,6 +47,8 @@ class Sidebar {
 
     // Tab state: 'folders' or 'groups'
     this._activeTab = 'folders';
+    // Mobile mode: reduce render limits for performance
+    this._mobileMode = window.matchMedia('(max-width: 768px)').matches;
 
     // Fetch server state (source of truth)
     this._fetchUserState();

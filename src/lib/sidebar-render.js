@@ -11,6 +11,48 @@ import { renderSessionCard } from './session-card.js';
 export function installSidebarRender(SidebarClass) {
   const proto = SidebarClass.prototype;
 
+  // Lazy render/unload folder contents based on viewport visibility.
+  // Each folder group starts empty; IntersectionObserver triggers render
+  // when the group enters viewport, and replaces with a height placeholder
+  // when it scrolls far away — keeping DOM node count low.
+  proto._setupLazyFolders = function() {
+    if (this._folderObserver) this._folderObserver.disconnect();
+    const scrollRoot = this.listEl.closest('.sidebar-section');
+    this._folderObserver = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        const group = entry.target;
+        const sessionsDiv = group.querySelector('.folder-sessions');
+        if (!sessionsDiv) continue;
+        if (entry.isIntersecting) {
+          // Entering viewport — render cards if placeholder
+          if (sessionsDiv.dataset.lazy === 'placeholder') {
+            const items = sessionsDiv._lazyItems;
+            if (items) {
+              sessionsDiv.innerHTML = '';
+              for (const s of items) sessionsDiv.appendChild(this._buildSessionCard(s));
+              sessionsDiv.dataset.lazy = 'rendered';
+            }
+          }
+        } else {
+          // Leaving viewport — replace cards with height placeholder
+          if (sessionsDiv.dataset.lazy === 'rendered' && sessionsDiv.children.length > 0) {
+            const h = sessionsDiv.offsetHeight;
+            sessionsDiv.innerHTML = '';
+            sessionsDiv.style.minHeight = h + 'px';
+            sessionsDiv.dataset.lazy = 'placeholder';
+          }
+        }
+      }
+    }, { root: scrollRoot, rootMargin: '200px 0px' });
+  };
+
+  proto._observeFolder = function(group, sessionsDiv, items) {
+    // Store items for lazy re-render
+    sessionsDiv._lazyItems = items;
+    sessionsDiv.dataset.lazy = 'pending';
+    if (this._folderObserver) this._folderObserver.observe(group);
+  };
+
   proto._renderGrouped = function(sessions) {
     const groups = new Map();
     for (const s of sessions) {
@@ -71,11 +113,32 @@ export function installSidebarRender(SidebarClass) {
 
       const sessionsDiv = document.createElement('div'); sessionsDiv.className = 'folder-sessions';
       this._sortSessions(items);
-      for (const s of items) sessionsDiv.appendChild(this._buildSessionCard(s));
 
       group.append(header, sessionsDiv);
       this.listEl.appendChild(group);
+      // Defer card rendering to IntersectionObserver
+      this._observeFolder(group, sessionsDiv, items);
     }
+    this._setupLazyFolders();
+    // Trigger initial check for folders already in viewport
+    requestAnimationFrame(() => {
+      if (!this._folderObserver) return;
+      for (const group of this.listEl.querySelectorAll('.folder-group')) {
+        const sessionsDiv = group.querySelector('.folder-sessions');
+        if (sessionsDiv?.dataset.lazy === 'pending') {
+          const rect = group.getBoundingClientRect();
+          const scrollRoot = this.listEl.closest('.sidebar-section');
+          const rootRect = scrollRoot?.getBoundingClientRect() || { top: 0, bottom: window.innerHeight };
+          if (rect.top < rootRect.bottom + 200 && rect.bottom > rootRect.top - 200) {
+            const items = sessionsDiv._lazyItems;
+            if (items) {
+              for (const s of items) sessionsDiv.appendChild(this._buildSessionCard(s));
+              sessionsDiv.dataset.lazy = 'rendered';
+            }
+          }
+        }
+      }
+    });
   };
 
   proto._renderByGroups = function(sessions) {
@@ -187,12 +250,13 @@ export function installSidebarRender(SidebarClass) {
       const sessionsDiv = document.createElement('div');
       sessionsDiv.className = 'folder-sessions';
       this._sortSessions(groupSessions);
-      for (const s of groupSessions) sessionsDiv.appendChild(this._buildSessionCard(s));
 
       if (groupSessions.length === 0) {
         const empty = document.createElement('div'); empty.className = 'empty-hint';
         empty.textContent = 'No sessions in this group';
         sessionsDiv.appendChild(empty);
+      } else {
+        this._observeFolder(groupEl, sessionsDiv, groupSessions);
       }
 
       groupEl.append(header, sessionsDiv);
@@ -210,10 +274,11 @@ export function installSidebarRender(SidebarClass) {
       header.onclick = () => this._toggleCollapse(groupEl, collapseKey);
       const sessionsDiv = document.createElement('div'); sessionsDiv.className = 'folder-sessions';
       this._sortSessions(ungrouped);
-      for (const s of ungrouped) sessionsDiv.appendChild(this._buildSessionCard(s));
+      this._observeFolder(groupEl, sessionsDiv, ungrouped);
       groupEl.append(header, sessionsDiv);
       this.listEl.appendChild(groupEl);
     }
+    this._setupLazyFolders();
   };
 
   proto._buildSessionCard = function(s) {

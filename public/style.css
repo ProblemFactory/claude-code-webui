@@ -345,6 +345,11 @@ html, body {
 .folder-path::before { content: '\200e'; }
 .folder-count { font-size: 10px; color: var(--text-dim); font-weight: 400; }
 .folder-sessions { padding-left: 6px; }
+.folder-load-more {
+  padding: 8px 12px; font-size: 11px; color: var(--accent);
+  cursor: pointer; text-align: center;
+}
+.folder-load-more:hover { text-decoration: underline; }
 .folder-add-btn {
   background: transparent; border: none; color: var(--text-dim); cursor: pointer;
   font-size: 14px; padding: 0 4px; border-radius: 3px; opacity: 0; transition: all var(--transition); margin-left: auto;
