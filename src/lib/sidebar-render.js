@@ -87,7 +87,7 @@ export function installSidebarRender(SidebarClass) {
         + `<span class="mobile-folder-meta">${items.length} session${items.length > 1 ? 's' : ''}${liveCount ? ' · ' + liveCount + ' live' : ''}</span>`
         + `<span class="mobile-folder-arrow">\u203A</span>`;
       if (liveCount) card.classList.add('has-live');
-      card.onclick = () => this._renderMobileFolderDetail(cwd, cwdShort, items, sessions);
+      card.onclick = () => { this._mobileDrilldown = { type: 'folder', key: cwd, label: cwdShort }; this._renderMobileFolderDetail(cwd, cwdShort, items, sessions); };
       this.listEl.appendChild(card);
     }
   };
@@ -97,7 +97,7 @@ export function installSidebarRender(SidebarClass) {
     // Back button
     const back = document.createElement('div'); back.className = 'mobile-folder-back';
     back.innerHTML = `<span class="mobile-folder-back-arrow">\u2039</span> <span>All Folders</span>`;
-    back.onclick = () => { this.listEl.innerHTML = ''; this._renderMobileFolderList(allSessions); };
+    back.onclick = () => { this._mobileDrilldown = null; this.listEl.innerHTML = ''; this._renderMobileFolderList(allSessions); };
     this.listEl.appendChild(back);
     // Folder title + new session button
     const titleRow = document.createElement('div'); titleRow.className = 'mobile-folder-title';
@@ -112,14 +112,17 @@ export function installSidebarRender(SidebarClass) {
   };
 
   proto._renderMobileGroupList = function(sessions) {
-    const groupNames = Object.keys(this._sessionGroups);
-    const assignedIds = new Set();
-    for (const [, members] of Object.entries(this._sessionGroups)) {
-      for (const id of members) assignedIds.add(id);
+    const groupNames = this._getGroupNames();
+    const sessionById = new Map();
+    for (const s of sessions) {
+      sessionById.set(this._getSessionStateKey(s), s);
+      sessionById.set(s.sessionId, s);
     }
+    const assignedIds = new Set();
     for (const groupName of groupNames) {
-      const memberIds = this._sessionGroups[groupName] || [];
-      const groupSessions = this._getGroupSessions(sessions, memberIds, groupName);
+      const groupSessionIds = this._getGroupSessions(groupName, sessions);
+      const groupSessions = [...groupSessionIds].map(id => sessionById.get(id)).filter(Boolean);
+      groupSessionIds.forEach(id => assignedIds.add(id));
       const liveCount = groupSessions.filter(s => s.status === 'live' || s.status === 'tmux').length;
       const card = document.createElement('div'); card.className = 'mobile-folder-card';
       card.innerHTML = MOBILE_ICON_GROUP
@@ -127,7 +130,7 @@ export function installSidebarRender(SidebarClass) {
         + `<span class="mobile-folder-meta">${groupSessions.length} session${groupSessions.length > 1 ? 's' : ''}${liveCount ? ' · ' + liveCount + ' live' : ''}</span>`
         + `<span class="mobile-folder-arrow">\u203A</span>`;
       if (liveCount) card.classList.add('has-live');
-      card.onclick = () => this._renderMobileGroupDetail(groupName, groupSessions, sessions);
+      card.onclick = () => { this._mobileDrilldown = { type: 'group', key: groupName }; this._renderMobileGroupDetail(groupName, groupSessions, sessions); };
       this.listEl.appendChild(card);
     }
     // Ungrouped
@@ -138,7 +141,7 @@ export function installSidebarRender(SidebarClass) {
         + `<span class="mobile-folder-path" style="font-style:italic">Ungrouped</span>`
         + `<span class="mobile-folder-meta">${ungrouped.length} sessions</span>`
         + `<span class="mobile-folder-arrow">\u203A</span>`;
-      card.onclick = () => this._renderMobileGroupDetail('Ungrouped', ungrouped, sessions);
+      card.onclick = () => { this._mobileDrilldown = { type: 'group', key: '__ungrouped__' }; this._renderMobileGroupDetail('Ungrouped', ungrouped, sessions); };
       this.listEl.appendChild(card);
     }
   };
@@ -147,7 +150,7 @@ export function installSidebarRender(SidebarClass) {
     this.listEl.innerHTML = '';
     const back = document.createElement('div'); back.className = 'mobile-folder-back';
     back.innerHTML = `<span class="mobile-folder-back-arrow">\u2039</span> <span>All Groups</span>`;
-    back.onclick = () => { this.listEl.innerHTML = ''; this._renderMobileGroupList(allSessions); };
+    back.onclick = () => { this._mobileDrilldown = null; this.listEl.innerHTML = ''; this._renderMobileGroupList(allSessions); };
     this.listEl.appendChild(back);
     const titleRow = document.createElement('div'); titleRow.className = 'mobile-folder-title';
     titleRow.innerHTML = `<span>${escHtml(groupName)}</span>`;

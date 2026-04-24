@@ -516,6 +516,28 @@ class Sidebar {
     if (!sessions.length) { this.listEl.insertAdjacentHTML('beforeend', '<div class="empty-hint">No sessions</div>'); return; }
 
     if (this._mobileMode) {
+      // Restore drill-down state if we were inside a folder/group
+      if (this._mobileDrilldown) {
+        const dd = this._mobileDrilldown;
+        if (dd.type === 'folder') {
+          const items = sessions.filter(s => (s.cwd || '/unknown') === dd.key);
+          if (items.length) { this._renderMobileFolderDetail(dd.key, dd.label, items, sessions); return; }
+        } else if (dd.type === 'group') {
+          const sessionById = new Map();
+          for (const s of sessions) { sessionById.set(this._getSessionStateKey(s), s); sessionById.set(s.sessionId, s); }
+          if (dd.key === '__ungrouped__') {
+            const assignedIds = new Set();
+            for (const gn of this._getGroupNames()) this._getGroupSessions(gn, sessions).forEach(id => assignedIds.add(id));
+            const ungrouped = sessions.filter(s => !assignedIds.has(this._getSessionStateKey(s)) && !assignedIds.has(s.sessionId));
+            if (ungrouped.length) { this._renderMobileGroupDetail('Ungrouped', ungrouped, sessions); return; }
+          } else {
+            const ids = this._getGroupSessions(dd.key, sessions);
+            const groupSessions = [...ids].map(id => sessionById.get(id)).filter(Boolean);
+            if (groupSessions.length) { this._renderMobileGroupDetail(dd.key, groupSessions, sessions); return; }
+          }
+        }
+        this._mobileDrilldown = null; // fallback to list if drill-down target gone
+      }
       if (this._activeTab === 'groups') this._renderMobileGroupList(sessions);
       else this._renderMobileFolderList(sessions);
     } else {
