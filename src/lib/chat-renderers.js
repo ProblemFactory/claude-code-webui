@@ -634,7 +634,7 @@ class ChatRenderers {
 
   /** Set up delegated click handler on message list for links/paths */
   setupLinkHandler() {
-    const isMobile = window.matchMedia('(max-width: 768px)').matches;
+    const isMobile = this.app?.isMobile;
     this._messageList.addEventListener('click', (e) => {
       // Handle both our .chat-link spans and markdown-generated <a> tags
       const link = e.target.closest('.chat-link') || e.target.closest('a[href]');

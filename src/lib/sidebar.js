@@ -3,6 +3,7 @@ import { escHtml, createPopover, showContextMenu } from './utils.js';
 import { createAgentKindIcon, createBackendIcon, getAgentKindMeta, getBackendMeta, getSessionKey } from './agent-meta.js';
 import { installSidebarState } from './sidebar-state.js';
 import { installSidebarRender } from './sidebar-render.js';
+import { installSidebarRenderMobile } from './sidebar-render-mobile.js';
 
 class Sidebar {
   constructor(app) {
@@ -47,8 +48,8 @@ class Sidebar {
 
     // Tab state: 'folders' or 'groups'
     this._activeTab = 'folders';
-    // Mobile mode: reduce render limits for performance
-    this._mobileMode = window.matchMedia('(max-width: 768px)').matches;
+    // Mobile mode from centralized app.isMobile
+    this._mobileMode = app.isMobile;
 
     // Fetch server state (source of truth)
     this._fetchUserState();
@@ -553,4 +554,5 @@ class Sidebar {
 
 installSidebarState(Sidebar);
 installSidebarRender(Sidebar);
+installSidebarRenderMobile(Sidebar);
 export { Sidebar };
