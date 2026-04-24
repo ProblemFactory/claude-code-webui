@@ -395,7 +395,7 @@ html, body {
 
 /* ── Main Wrapper ── */
 #main-wrapper {
-  display: flex; flex-direction: column; height: 100vh;
+  display: flex; flex-direction: column; height: 100vh; height: 100dvh;
   transition: margin-left 0.2s ease;
 }
 #main-wrapper.sidebar-resizing { transition: none; }
@@ -1129,14 +1129,22 @@ html, body {
 
 @media (max-width: 768px) {
   /* Sidebar: full-width overlay (z-index must beat window z-index which can be 10000+) */
-  .sidebar { width: 100vw !important; max-width: 100vw; z-index: 90000; }
+  .sidebar {
+    width: 100vw !important; max-width: 100vw; z-index: 90000;
+    height: 100vh !important; height: 100dvh !important;
+    position: fixed !important; top: 0; left: 0;
+  }
+  .sidebar .sidebar-section { -webkit-overflow-scrolling: touch; }
   #main-wrapper { margin-left: 0 !important; }
 
-  /* Replace toolbar with mobile nav */
+  /* Replace toolbar with mobile nav — sticky so it survives keyboard */
   #toolbar { display: none; }
   #taskbar { display: none; }
   #snap-indicator, #grid-overlay { display: none !important; }
-  #mobile-nav { display: flex !important; }
+  #mobile-nav {
+    display: flex !important; position: sticky; top: 0; z-index: 100;
+    background: var(--bg-toolbar);
+  }
 
   /* Windows: fill workspace, only active visible, no chrome */
   .window {
@@ -1144,39 +1152,70 @@ html, body {
     width: 100% !important; height: 100% !important;
     border-radius: 0; min-width: 0; min-height: 0; border: none;
     box-shadow: none; display: none !important;
+    position: relative !important;
   }
   .window.window-active { display: flex !important; }
   .window .resize-handle { display: none; }
   .window-titlebar { display: none; }
 
+  /* Workspace fills remaining height */
+  #workspace { flex: 1; min-height: 0; overflow: hidden; }
+
   /* Terminal: mobile key toolbar */
   .mobile-term-keys {
-    display: flex !important; gap: 4px; padding: 4px 8px; overflow-x: auto;
+    display: flex !important; gap: 4px; padding: 6px 8px; overflow-x: auto;
     background: var(--bg-taskbar); border-top: 1px solid var(--border);
     flex-shrink: 0; -webkit-overflow-scrolling: touch;
   }
   .mobile-term-key {
-    flex-shrink: 0; padding: 4px 10px; font-size: 11px; font-weight: 600;
+    flex-shrink: 0; padding: 6px 12px; font-size: 12px; font-weight: 600;
     border: 1px solid var(--border); border-radius: var(--radius-sm);
     background: var(--bg-input); color: var(--text); cursor: pointer;
-    white-space: nowrap;
+    white-space: nowrap; min-height: 32px;
   }
   .mobile-term-key:active { background: var(--accent); color: #fff; }
 
   /* Chat: optimize for touch */
-  .chat-message-list { padding: 8px 10px; }
-  .chat-input-area { padding: 6px 8px; }
-  .chat-input { font-size: 16px; min-height: 44px; padding: 8px 32px 8px 10px; }
-  .chat-send-btn { width: 36px; height: 36px; }
-  .chat-compact-content { font-size: 14px; }
+  .chat-view { height: 100%; }
+  .chat-message-list { padding: 8px 12px; -webkit-overflow-scrolling: touch; }
+  .chat-input-area { padding: 8px 10px; gap: 6px; }
+  .chat-input {
+    font-size: 16px; min-height: 44px; padding: 10px 36px 10px 12px;
+    border-radius: 22px;
+  }
+  .chat-send-btn { width: 38px; height: 38px; border-radius: 50%; }
+  .chat-compact-content { font-size: 14px; line-height: 1.5; }
   .chat-role { font-size: 10px; min-width: 40px; }
 
+  /* Tool cards: better touch spacing */
+  .chat-tool-use { margin: 6px 0; border-radius: 10px; }
+  .chat-tool-header { padding: 8px 10px; min-height: 36px; }
+  .chat-tool-body { padding: 8px 10px; }
+
+  /* Status bar: bigger touch targets */
+  .chat-status-bar { padding: 6px 10px; gap: 8px; font-size: 12px; }
+
+  /* Resume bar */
+  .chat-resume-bar { padding: 10px 12px; }
+  .chat-resume-btn { padding: 8px 16px; font-size: 14px; border-radius: 8px; }
+
+  /* Scroll button */
+  .chat-scroll-btn { width: 40px; height: 40px; font-size: 18px; right: 12px; bottom: 80px; }
+
   /* Dialogs */
-  .dialog { width: 95vw !important; max-width: none; }
-  .settings-dialog { width: 95vw !important; height: 90vh; }
+  .dialog { width: 95vw !important; max-width: none; max-height: 85vh; max-height: 85dvh; overflow-y: auto; }
+  .settings-dialog { width: 95vw !important; height: 90vh; height: 90dvh; }
   .settings-body { flex-direction: column; }
   .settings-nav { width: 100%; border-right: none; border-bottom: 1px solid var(--border); display: flex; overflow-x: auto; padding: 4px; }
   .settings-nav-item { white-space: nowrap; }
+
+  /* Session cards in sidebar: better touch targets */
+  .session-item-card { padding: 10px 12px; }
+  .session-card-name { font-size: 13px; }
+  .session-detail-btn { padding: 8px 12px; font-size: 12px; min-height: 36px; }
+
+  /* Popovers: prevent going off-screen on mobile */
+  .session-config-popover, .upload-popover, .file-view-menu { max-width: 90vw; }
 }
 
 /* Mobile terminal key toolbar (hidden on desktop) */
