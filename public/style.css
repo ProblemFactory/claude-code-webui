@@ -350,6 +350,40 @@ html, body {
   cursor: pointer; text-align: center;
 }
 .folder-load-more:hover { text-decoration: underline; }
+
+/* Mobile two-level folder/group navigation */
+.mobile-folder-card {
+  display: flex; align-items: center; gap: 8px;
+  padding: 14px 14px; cursor: pointer;
+  border-bottom: 1px solid var(--border);
+  transition: background var(--transition);
+}
+.mobile-folder-card:active { background: var(--bg-hover); }
+.mobile-folder-card.has-live { border-left: 3px solid var(--green); }
+.mobile-folder-path {
+  flex: 1; min-width: 0; font-size: 13px; font-weight: 500; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  direction: rtl; unicode-bidi: plaintext;
+}
+.mobile-folder-meta {
+  flex-shrink: 0; font-size: 11px; color: var(--text-dim);
+}
+.mobile-folder-arrow {
+  flex-shrink: 0; font-size: 18px; color: var(--text-dim); font-weight: 300;
+}
+.mobile-folder-back {
+  display: flex; align-items: center; gap: 6px;
+  padding: 12px 14px; cursor: pointer; font-size: 14px; font-weight: 500;
+  color: var(--accent); border-bottom: 1px solid var(--border);
+}
+.mobile-folder-back:active { background: var(--bg-hover); }
+.mobile-folder-back-arrow { font-size: 20px; font-weight: 300; }
+.mobile-folder-title {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px; font-size: 12px; font-weight: 600; color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+  text-transform: uppercase; letter-spacing: 0.3px;
+}
 .folder-add-btn {
   background: transparent; border: none; color: var(--text-dim); cursor: pointer;
   font-size: 14px; padding: 0 4px; border-radius: 3px; opacity: 0; transition: all var(--transition); margin-left: auto;
@@ -1218,6 +1252,9 @@ html, body {
   .session-item-card { padding: 10px 12px; }
   .session-card-name { font-size: 13px; }
   .session-detail-btn { padding: 8px 12px; font-size: 12px; min-height: 36px; }
+
+  /* Desktop folder groups hidden on mobile (replaced by two-level nav) */
+  .folder-group { display: none; }
 
   /* Popovers: prevent going off-screen on mobile */
   .session-config-popover, .upload-popover, .file-view-menu { max-width: 90vw; }

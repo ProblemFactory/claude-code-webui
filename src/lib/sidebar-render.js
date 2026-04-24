@@ -53,6 +53,102 @@ export function installSidebarRender(SidebarClass) {
     if (this._folderObserver) this._folderObserver.observe(group);
   };
 
+  // ── Mobile two-level navigation ──
+  // Level 1: folder/group list (tap to drill in)
+  // Level 2: sessions inside one folder/group (back button to return)
+
+  proto._renderMobileFolderList = function(sessions) {
+    const groups = new Map();
+    for (const s of sessions) {
+      const key = s.cwd || '/unknown';
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(s);
+    }
+    let entries = [...groups.entries()];
+    entries.sort((a, b) => {
+      const aStarred = a[1].some(s => this._stateSetHas(this._starredIds, s)) ? 1 : 0;
+      const bStarred = b[1].some(s => this._stateSetHas(this._starredIds, s)) ? 1 : 0;
+      if (aStarred !== bStarred) return bStarred - aStarred;
+      const aMax = Math.max(...a[1].map(s => s.startedAt || 0));
+      const bMax = Math.max(...b[1].map(s => s.startedAt || 0));
+      return bMax - aMax;
+    });
+    for (const [cwd, items] of entries) {
+      const cwdShort = cwd.replace(/^\/home\/[^/]+/, '~');
+      const liveCount = items.filter(s => s.status === 'live' || s.status === 'tmux').length;
+      const stoppedCount = items.length - liveCount;
+      const card = document.createElement('div'); card.className = 'mobile-folder-card';
+      card.innerHTML = `<span class="mobile-folder-path">${escHtml(cwdShort)}</span>`
+        + `<span class="mobile-folder-meta">${items.length} session${items.length > 1 ? 's' : ''}${liveCount ? ' · ' + liveCount + ' live' : ''}</span>`
+        + `<span class="mobile-folder-arrow">\u203A</span>`;
+      if (liveCount) card.classList.add('has-live');
+      card.onclick = () => this._renderMobileFolderDetail(cwd, cwdShort, items, sessions);
+      this.listEl.appendChild(card);
+    }
+  };
+
+  proto._renderMobileFolderDetail = function(cwd, cwdShort, items, allSessions) {
+    this.listEl.innerHTML = '';
+    // Back button
+    const back = document.createElement('div'); back.className = 'mobile-folder-back';
+    back.innerHTML = `<span class="mobile-folder-back-arrow">\u2039</span> <span>All Folders</span>`;
+    back.onclick = () => { this.listEl.innerHTML = ''; this._renderMobileFolderList(allSessions); };
+    this.listEl.appendChild(back);
+    // Folder title + new session button
+    const titleRow = document.createElement('div'); titleRow.className = 'mobile-folder-title';
+    titleRow.innerHTML = `<span>${escHtml(cwdShort)}</span>`;
+    const addBtn = document.createElement('button'); addBtn.className = 'folder-add-btn'; addBtn.textContent = '+';
+    addBtn.onclick = (e) => { e.stopPropagation(); this.app.createSession({ cwd }); };
+    titleRow.appendChild(addBtn);
+    this.listEl.appendChild(titleRow);
+    // Session cards
+    this._sortSessions(items);
+    for (const s of items) this.listEl.appendChild(this._buildSessionCard(s));
+  };
+
+  proto._renderMobileGroupList = function(sessions) {
+    const groupNames = Object.keys(this._sessionGroups);
+    const assignedIds = new Set();
+    for (const [, members] of Object.entries(this._sessionGroups)) {
+      for (const id of members) assignedIds.add(id);
+    }
+    for (const groupName of groupNames) {
+      const memberIds = this._sessionGroups[groupName] || [];
+      const groupSessions = this._getGroupSessions(sessions, memberIds, groupName);
+      const liveCount = groupSessions.filter(s => s.status === 'live' || s.status === 'tmux').length;
+      const card = document.createElement('div'); card.className = 'mobile-folder-card';
+      card.innerHTML = `<span class="mobile-folder-path">${escHtml(groupName)}</span>`
+        + `<span class="mobile-folder-meta">${groupSessions.length} session${groupSessions.length > 1 ? 's' : ''}${liveCount ? ' · ' + liveCount + ' live' : ''}</span>`
+        + `<span class="mobile-folder-arrow">\u203A</span>`;
+      if (liveCount) card.classList.add('has-live');
+      card.onclick = () => this._renderMobileGroupDetail(groupName, groupSessions, sessions);
+      this.listEl.appendChild(card);
+    }
+    // Ungrouped
+    const ungrouped = sessions.filter(s => !assignedIds.has(this._getSessionStateKey(s)) && !assignedIds.has(s.sessionId));
+    if (ungrouped.length > 0) {
+      const card = document.createElement('div'); card.className = 'mobile-folder-card';
+      card.innerHTML = `<span class="mobile-folder-path" style="font-style:italic">Ungrouped</span>`
+        + `<span class="mobile-folder-meta">${ungrouped.length} sessions</span>`
+        + `<span class="mobile-folder-arrow">\u203A</span>`;
+      card.onclick = () => this._renderMobileGroupDetail('Ungrouped', ungrouped, sessions);
+      this.listEl.appendChild(card);
+    }
+  };
+
+  proto._renderMobileGroupDetail = function(groupName, groupSessions, allSessions) {
+    this.listEl.innerHTML = '';
+    const back = document.createElement('div'); back.className = 'mobile-folder-back';
+    back.innerHTML = `<span class="mobile-folder-back-arrow">\u2039</span> <span>All Groups</span>`;
+    back.onclick = () => { this.listEl.innerHTML = ''; this._renderMobileGroupList(allSessions); };
+    this.listEl.appendChild(back);
+    const titleRow = document.createElement('div'); titleRow.className = 'mobile-folder-title';
+    titleRow.innerHTML = `<span>${escHtml(groupName)}</span>`;
+    this.listEl.appendChild(titleRow);
+    this._sortSessions(groupSessions);
+    for (const s of groupSessions) this.listEl.appendChild(this._buildSessionCard(s));
+  };
+
   proto._renderGrouped = function(sessions) {
     const groups = new Map();
     for (const s of sessions) {

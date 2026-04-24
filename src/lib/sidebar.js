@@ -84,9 +84,17 @@ class Sidebar {
     this._statusFilter = new Set(defaultFilter);
     this._activeView = null; // null = ALL (show all selected filters), or a specific status string
     const filterBtn = document.getElementById('live-filter');
-    filterBtn.onclick = (e) => { e.stopPropagation(); this._showStatusFilterMenu(filterBtn); };
+    filterBtn.onclick = (e) => {
+      e.stopPropagation();
+      if (document.querySelector('.status-filter-menu')) { document.querySelector('.status-filter-menu').remove(); return; }
+      this._showStatusFilterMenu(filterBtn);
+    };
     const backendFilterBtn = document.getElementById('backend-filter');
-    backendFilterBtn.onclick = (e) => { e.stopPropagation(); this._showBackendFilterMenu(backendFilterBtn); };
+    backendFilterBtn.onclick = (e) => {
+      e.stopPropagation();
+      if (document.querySelector('.backend-filter-menu')) { document.querySelector('.backend-filter-menu').remove(); return; }
+      this._showBackendFilterMenu(backendFilterBtn);
+    };
     this._updateBackendFilterBtn(backendFilterBtn);
     // Apply defaultStatusFilter once after async settings load (setting may differ from schema default)
     const _applyDefaultFilter = (val) => {
@@ -507,10 +515,12 @@ class Sidebar {
 
     if (!sessions.length) { this.listEl.insertAdjacentHTML('beforeend', '<div class="empty-hint">No sessions</div>'); return; }
 
-    if (this._activeTab === 'groups') {
-      this._renderByGroups(sessions);
+    if (this._mobileMode) {
+      if (this._activeTab === 'groups') this._renderMobileGroupList(sessions);
+      else this._renderMobileFolderList(sessions);
     } else {
-      this._renderGrouped(sessions);
+      if (this._activeTab === 'groups') this._renderByGroups(sessions);
+      else this._renderGrouped(sessions);
     }
   }
 
