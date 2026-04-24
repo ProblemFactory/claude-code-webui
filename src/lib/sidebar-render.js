@@ -7,6 +7,10 @@
 import { escHtml, createPopover, showContextMenu } from './utils.js';
 import { createBackendIcon, getBackendMeta, getSessionKey } from './agent-meta.js';
 import { renderSessionCard } from './session-card.js';
+import { FILE_ICONS } from './icons.js';
+
+const MOBILE_ICON_FOLDER = '<svg style="width:18px;height:18px;flex-shrink:0;vertical-align:-3px" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4h4l2 2h6v7a1 1 0 01-1 1H3a1 1 0 01-1-1V4z"/></svg>';
+const MOBILE_ICON_GROUP = '<svg style="width:18px;height:18px;flex-shrink:0;vertical-align:-3px" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="5" r="2.5"/><path d="M1 13c0-2.5 2-4 5-4s5 1.5 5 4"/><circle cx="11.5" cy="5.5" r="2"/><path d="M15 13c0-2 -1.5-3.2-3.5-3.5"/></svg>';
 
 export function installSidebarRender(SidebarClass) {
   const proto = SidebarClass.prototype;
@@ -78,7 +82,8 @@ export function installSidebarRender(SidebarClass) {
       const liveCount = items.filter(s => s.status === 'live' || s.status === 'tmux').length;
       const stoppedCount = items.length - liveCount;
       const card = document.createElement('div'); card.className = 'mobile-folder-card';
-      card.innerHTML = `<span class="mobile-folder-path">${escHtml(cwdShort)}</span>`
+      card.innerHTML = MOBILE_ICON_FOLDER
+        + `<span class="mobile-folder-path">${escHtml(cwdShort)}</span>`
         + `<span class="mobile-folder-meta">${items.length} session${items.length > 1 ? 's' : ''}${liveCount ? ' · ' + liveCount + ' live' : ''}</span>`
         + `<span class="mobile-folder-arrow">\u203A</span>`;
       if (liveCount) card.classList.add('has-live');
@@ -117,7 +122,8 @@ export function installSidebarRender(SidebarClass) {
       const groupSessions = this._getGroupSessions(sessions, memberIds, groupName);
       const liveCount = groupSessions.filter(s => s.status === 'live' || s.status === 'tmux').length;
       const card = document.createElement('div'); card.className = 'mobile-folder-card';
-      card.innerHTML = `<span class="mobile-folder-path">${escHtml(groupName)}</span>`
+      card.innerHTML = MOBILE_ICON_GROUP
+        + `<span class="mobile-folder-path">${escHtml(groupName)}</span>`
         + `<span class="mobile-folder-meta">${groupSessions.length} session${groupSessions.length > 1 ? 's' : ''}${liveCount ? ' · ' + liveCount + ' live' : ''}</span>`
         + `<span class="mobile-folder-arrow">\u203A</span>`;
       if (liveCount) card.classList.add('has-live');
@@ -128,7 +134,8 @@ export function installSidebarRender(SidebarClass) {
     const ungrouped = sessions.filter(s => !assignedIds.has(this._getSessionStateKey(s)) && !assignedIds.has(s.sessionId));
     if (ungrouped.length > 0) {
       const card = document.createElement('div'); card.className = 'mobile-folder-card';
-      card.innerHTML = `<span class="mobile-folder-path" style="font-style:italic">Ungrouped</span>`
+      card.innerHTML = MOBILE_ICON_GROUP
+        + `<span class="mobile-folder-path" style="font-style:italic">Ungrouped</span>`
         + `<span class="mobile-folder-meta">${ungrouped.length} sessions</span>`
         + `<span class="mobile-folder-arrow">\u203A</span>`;
       card.onclick = () => this._renderMobileGroupDetail('Ungrouped', ungrouped, sessions);
