@@ -768,7 +768,20 @@ class WindowManager {
       // onClose fires inside removeFromTabChain
       return;
     }
-    if (win.onClose) win.onClose(); win.element.remove(); this.windows.delete(id); this._notify(); this._scheduleOverlapUpdate();
+    if (win.onClose) win.onClose(); win.element.remove(); this.windows.delete(id);
+    // If closed window was active, focus the most recently used remaining window (highest z-index)
+    if (this.activeWindowId === id) {
+      this.activeWindowId = null;
+      let best = null, bestZ = -1;
+      for (const [wid, w] of this.windows) {
+        if (w._hiddenByDesktop || w.isMinimized) continue;
+        if (w._tabChain && w._tabChain.tabs[0] !== w.id) continue; // skip tab guests
+        const z = parseInt(w.element.style.zIndex) || 0;
+        if (z > bestZ) { best = wid; bestZ = z; }
+      }
+      if (best) this.focusWindow(best);
+    }
+    this._notify(); this._scheduleOverlapUpdate();
   }
   setTitle(id, t) {
     const win = this.windows.get(id); if (!win) return;
