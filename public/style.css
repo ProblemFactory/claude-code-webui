@@ -1162,15 +1162,19 @@ html, body {
   padding: 0 12px; background: var(--bg-toolbar); border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
-#mobile-nav-menu, #mobile-nav-new {
+#mobile-nav-menu, #mobile-nav-new, #mobile-nav-close {
   background: none; border: none; color: var(--text); font-size: 22px;
   cursor: pointer; padding: 4px 8px; flex-shrink: 0;
 }
 #mobile-nav-new { color: var(--accent); font-weight: 700; }
+#mobile-nav-close { font-size: 16px; color: var(--text-dim); display: none; }
+@media (max-width: 768px) { #mobile-nav-close { display: block; } }
 #mobile-nav-title {
   flex: 1; font-size: 14px; font-weight: 600; color: var(--text);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: center;
+  cursor: pointer; padding: 4px 0;
 }
+#mobile-nav-title:active { opacity: 0.6; }
 
 @media (max-width: 768px) {
   /* Sidebar: full-width overlay (z-index must beat window z-index which can be 10000+) */

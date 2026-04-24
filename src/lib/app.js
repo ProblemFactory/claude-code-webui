@@ -193,14 +193,72 @@ class App {
     if (!nav) return;
     document.getElementById('mobile-nav-menu').onclick = () => this.sidebar.toggle(true);
     document.getElementById('mobile-nav-new').onclick = () => this.showNewSessionDialog();
-    // Update title when active window changes
+
+    // Close button: close active window
+    document.getElementById('mobile-nav-close').onclick = () => {
+      const activeId = this.wm.activeWindowId;
+      if (activeId) this.wm.closeWindow(activeId);
+    };
+
+    // Title tap: show open window switcher
     this._mobileNavTitle = document.getElementById('mobile-nav-title');
+    this._mobileNavTitle.onclick = () => this._showMobileWindowSwitcher();
+  }
+
+  _showMobileWindowSwitcher() {
+    const anchor = this._mobileNavTitle;
+    if (!anchor) return;
+    // Toggle: if already open, close
+    const existing = document.querySelector('.mobile-win-switcher');
+    if (existing) { existing.remove(); return; }
+
+    const pop = document.createElement('div');
+    pop.className = 'mobile-win-switcher';
+    pop.style.cssText = 'position:fixed;left:0;right:0;z-index:90001;background:var(--bg-dialog);border-bottom:1px solid var(--border);box-shadow:0 4px 16px rgba(0,0,0,0.3);max-height:60vh;overflow-y:auto;-webkit-overflow-scrolling:touch';
+    // Position below nav
+    const navRect = anchor.closest('#mobile-nav').getBoundingClientRect();
+    pop.style.top = navRect.bottom + 'px';
+
+    const windows = [...this.wm.windows.values()].filter(w => !w._hiddenByDesktop && !w.isMinimized);
+    if (!windows.length) {
+      pop.innerHTML = '<div style="padding:16px;text-align:center;color:var(--text-dim);font-size:13px">No open windows</div>';
+    } else {
+      for (const win of windows) {
+        const item = document.createElement('div');
+        item.style.cssText = 'display:flex;align-items:center;gap:10px;padding:12px 16px;cursor:pointer;border-bottom:1px solid var(--border);transition:background 0.1s';
+        if (win.id === this.wm.activeWindowId) item.style.background = 'var(--accent-dim)';
+
+        const icon = document.createElement('span');
+        icon.style.cssText = 'flex-shrink:0;font-size:16px';
+        icon.innerHTML = win._typeIcon || '';
+
+        const label = document.createElement('span');
+        label.style.cssText = 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;color:var(--text)';
+        label.textContent = win.title || 'Window';
+
+        const closeBtn = document.createElement('button');
+        closeBtn.style.cssText = 'background:none;border:none;color:var(--text-dim);font-size:16px;padding:4px 8px;cursor:pointer;flex-shrink:0;min-width:32px;min-height:32px;display:flex;align-items:center;justify-content:center';
+        closeBtn.textContent = '\u2715';
+        closeBtn.onclick = (e) => { e.stopPropagation(); this.wm.closeWindow(win.id); item.remove(); if (!pop.querySelector('div[style]')) pop.remove(); };
+
+        item.append(icon, label, closeBtn);
+        item.addEventListener('pointerdown', () => { item.style.background = 'var(--bg-hover)'; });
+        item.onclick = () => { pop.remove(); this.wm.focusWindow(win.id); };
+        pop.appendChild(item);
+      }
+    }
+
+    document.body.appendChild(pop);
+    // Close on outside tap
+    const onTap = (e) => { if (!pop.contains(e.target) && e.target !== anchor) { pop.remove(); document.removeEventListener('pointerdown', onTap); } };
+    setTimeout(() => document.addEventListener('pointerdown', onTap), 0);
   }
 
   _updateMobileNavTitle() {
     if (!this._mobileNavTitle) return;
     const win = this.wm.windows.get(this.wm.activeWindowId);
-    this._mobileNavTitle.textContent = win?.title || 'Claude Code';
+    const count = [...this.wm.windows.values()].filter(w => !w._hiddenByDesktop && !w.isMinimized).length;
+    this._mobileNavTitle.textContent = (win?.title || 'Claude Code') + (count > 1 ? ` (${count})` : '');
   }
 
   _setupMobileGestures() {
