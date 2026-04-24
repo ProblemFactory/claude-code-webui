@@ -82,8 +82,12 @@ export function installSidebarRender(SidebarClass) {
       const liveCount = items.filter(s => s.status === 'live' || s.status === 'tmux').length;
       const stoppedCount = items.length - liveCount;
       const card = document.createElement('div'); card.className = 'mobile-folder-card';
+      // Split path: head (shrinkable, gets ellipsis) + tail (last segment, preserved)
+      const lastSlash = cwdShort.lastIndexOf('/');
+      const pathHead = lastSlash > 0 ? cwdShort.slice(0, lastSlash + 1) : '';
+      const pathTail = lastSlash > 0 ? cwdShort.slice(lastSlash + 1) : cwdShort;
       card.innerHTML = MOBILE_ICON_FOLDER
-        + `<span class="mobile-folder-path">${escHtml(cwdShort)}</span>`
+        + `<span class="mobile-folder-path"><span class="mobile-folder-path-head">${escHtml(pathHead)}</span><span class="mobile-folder-path-tail">${escHtml(pathTail)}</span></span>`
         + `<span class="mobile-folder-meta">${items.length} session${items.length > 1 ? 's' : ''}${liveCount ? ' · ' + liveCount + ' live' : ''}</span>`
         + `<span class="mobile-folder-arrow">\u203A</span>`;
       if (liveCount) card.classList.add('has-live');

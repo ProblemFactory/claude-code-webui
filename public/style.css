@@ -362,8 +362,14 @@ html, body {
 .mobile-folder-card.has-live { border-left: 3px solid var(--green); }
 .mobile-folder-path {
   flex: 1; min-width: 0; font-size: 13px; font-weight: 500; color: var(--text);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  direction: rtl; unicode-bidi: plaintext;
+  overflow: hidden; white-space: nowrap;
+  display: flex;
+}
+.mobile-folder-path-head {
+  flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+}
+.mobile-folder-path-tail {
+  flex-shrink: 0;
 }
 .mobile-folder-meta {
   flex-shrink: 0; font-size: 11px; color: var(--text-dim);
