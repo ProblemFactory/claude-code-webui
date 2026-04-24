@@ -60,7 +60,7 @@ const BACKEND_SESSION_OPTIONS = {
   },
 };
 
-// Fetch available models from server (Claude from /v1/models API, Codex from cache)
+// Fetch available models from server (Claude from bootstrap/v1/models API, Codex from cache)
 fetchJson('/api/available-models').then(data => {
   if (!data) return;
   const toSchemaOptions = (models) => models.map(m => ({ value: m.id, label: m.label || m.id || 'Default' }));
@@ -71,6 +71,20 @@ fetchJson('/api/available-models').then(data => {
   if (data.codex?.length) {
     BACKEND_SESSION_OPTIONS.codex.models = data.codex;
     SETTINGS_SCHEMA['codex.defaultModel'].options = toSchemaOptions(data.codex);
+  }
+});
+// Fetch effort levels + permission modes from server (parsed from claude --help)
+fetchJson('/api/session-options').then(data => {
+  if (!data) return;
+  if (data.effortLevels?.length) {
+    const efforts = [{ value: '', label: 'Auto (model default)' }, ...data.effortLevels.map(e => ({ value: e, label: e.charAt(0).toUpperCase() + e.slice(1) }))];
+    BACKEND_SESSION_OPTIONS.claude.efforts = efforts;
+    SETTINGS_SCHEMA['claude.defaultEffort'].options = efforts.map(e => ({ value: e.value, label: e.label }));
+  }
+  if (data.permissionModes?.length) {
+    const perms = [{ value: '', label: 'Default' }, ...data.permissionModes.map(p => ({ value: p, label: p }))];
+    BACKEND_SESSION_OPTIONS.claude.permissions = perms;
+    SETTINGS_SCHEMA['claude.defaultPermissionMode'].options = perms.map(p => ({ value: p.value, label: p.label }));
   }
 });
 

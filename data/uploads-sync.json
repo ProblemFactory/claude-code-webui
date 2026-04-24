@@ -1,5 +1,5 @@
 {
-  "version": 12,
+  "version": 16,
   "data": {
     "upload:1776387414050-0": {
       "name": "test-5mb.bin",
@@ -55,6 +55,34 @@
       "path": "/home/xingweil/workspace/39AI/AIWorkspace/B2BTasks/04162026VoiceProviderReview/MysteriesRecording/Recording (5).m4a",
       "size": 1622113,
       "date": 1776394610255,
+      "status": "ok"
+    },
+    "upload:1776935295704-0": {
+      "name": "OneLineStudiosSample-Conversational_02.wav",
+      "path": "/home/xingweil/workspace/39AI/AIWorkspace/B2BTasks/04162026VoiceProviderReview/Provider1/OneLineStudiosSample-Conversational_02.wav",
+      "size": 2066904,
+      "date": 1776935295704,
+      "status": "ok"
+    },
+    "upload:1776935295704-1": {
+      "name": "OneLineStudiosSample-Conversational_03.wav",
+      "path": "/home/xingweil/workspace/39AI/AIWorkspace/B2BTasks/04162026VoiceProviderReview/Provider1/OneLineStudiosSample-Conversational_03.wav",
+      "size": 2099184,
+      "date": 1776935295704,
+      "status": "ok"
+    },
+    "upload:1776935295704-2": {
+      "name": "OneLineStudiosSample-Conversational_04.wav",
+      "path": "/home/xingweil/workspace/39AI/AIWorkspace/B2BTasks/04162026VoiceProviderReview/Provider1/OneLineStudiosSample-Conversational_04.wav",
+      "size": 1838864,
+      "date": 1776935295704,
+      "status": "ok"
+    },
+    "upload:1776935295704-3": {
+      "name": "OneLineStudiosSample-Conversational_01.wav",
+      "path": "/home/xingweil/workspace/39AI/AIWorkspace/B2BTasks/04162026VoiceProviderReview/Provider1/OneLineStudiosSample-Conversational_01.wav",
+      "size": 2115576,
+      "date": 1776935295704,
       "status": "ok"
     }
   }
