@@ -634,6 +634,7 @@ class ChatRenderers {
 
   /** Set up delegated click handler on message list for links/paths */
   setupLinkHandler() {
+    const isMobile = window.matchMedia('(max-width: 768px)').matches;
     this._messageList.addEventListener('click', (e) => {
       // Handle both our .chat-link spans and markdown-generated <a> tags
       const link = e.target.closest('.chat-link') || e.target.closest('a[href]');
@@ -642,14 +643,14 @@ class ChatRenderers {
       e.stopPropagation();
       const url = link.dataset.href || link.getAttribute('href');
       const fp = link.dataset.path;
-      if (e.ctrlKey || e.metaKey) {
-        // Ctrl+Click: open
+      // Mobile: tap = open (no Ctrl key available); Desktop: Ctrl/Cmd+Click = open, Click = copy
+      const shouldOpen = isMobile || e.ctrlKey || e.metaKey;
+      if (shouldOpen) {
         if (fp) {
           // Parse optional :line, :line:col, or :line-line suffix
           const lineMatch = fp.match(/^(.+?):(\d+)(?:[:\-]\d+)?$/);
           const cleanPath = lineMatch ? lineMatch[1] : fp;
           const lineNum = lineMatch ? parseInt(lineMatch[2], 10) : undefined;
-          // Check if path is file, directory, or doesn't exist
           fetch(`/api/file/info?path=${encodeURIComponent(cleanPath)}`)
             .then(r => r.json())
             .then(info => {
@@ -666,7 +667,7 @@ class ChatRenderers {
           window.open(url, '_blank');
         }
       } else {
-        // Click: copy to clipboard
+        // Desktop click: copy to clipboard
         const text = fp || url;
         copyText(text).then(() => this.flashLink(link, 'Copied!'));
       }
