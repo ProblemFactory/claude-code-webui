@@ -163,16 +163,16 @@ const SETTINGS_SCHEMA = {
     category: 'Claude', liveApply: true,
   },
   'claude.defaultEffort': {
-    type: 'enum', default: '',
+    type: 'enum', default: '', combobox: true,
     options: [
       { value: '', label: 'Auto (model default)' },
       { value: 'low', label: 'Low' },
       { value: 'medium', label: 'Medium' },
       { value: 'high', label: 'High' },
-      { value: 'max', label: 'Max (Opus 4.6 only)' },
-    ],
+      { value: 'max', label: 'Max' },
+    ], // dynamically updated from claude --help; Custom... allows typing values like xhigh
     label: 'Default effort level',
-    description: 'Default Claude effort for new or resumed Claude sessions.',
+    description: 'Select a level or choose "Custom..." to type any value (e.g. xhigh).',
     category: 'Claude', liveApply: true,
   },
   'claude.defaultExtraArgs': {
