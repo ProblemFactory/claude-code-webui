@@ -131,14 +131,24 @@ child.stdout.on('data', (chunk) => {
           scheduleMeta();
         }
       } else if (msg.subtype === 'task_notification') {
-        const t = meta.tasks[msg.tool_use_id];
-        if (t) { t.status = 'completed'; t.completedAt = Date.now(); scheduleMeta(); }
+        // Remove completed tasks entirely — don't accumulate in meta
+        delete meta.tasks[msg.tool_use_id];
+        scheduleMeta();
       }
     }
 
     // Track streaming state
     if (msg.type === 'user') { meta.streaming = true; scheduleMeta(); }
-    if (msg.type === 'result') { meta.streaming = false; scheduleMeta(); }
+    if (msg.type === 'result') {
+      meta.streaming = false;
+      // Clean up background command tasks on turn end — stream-json rarely
+      // emits task_notification for them (known bug). Agent tasks are kept
+      // since they may genuinely span multiple turns.
+      for (const [id, t] of Object.entries(meta.tasks)) {
+        if (t.type === 'command') delete meta.tasks[id];
+      }
+      scheduleMeta();
+    }
 
     // Track todos: TodoWrite tool_use in assistant messages
     if (msg.type === 'assistant' && msg.message?.content) {
