@@ -375,26 +375,22 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
           if (String(o.value) === String(isDefault ? defaultVal : curVal)) o.selected = true;
           sel.appendChild(o);
         }
-        let input = null;
-        if (isModel) {
-          const customOpt = document.createElement('option'); customOpt.value = '__custom__'; customOpt.textContent = 'Custom...';
-          sel.appendChild(customOpt);
-          input = document.createElement('input'); input.type = 'text'; input.className = 'session-config-input';
-          input.placeholder = 'e.g. claude-opus-4-6';
-          const known = options.map(o => o.value || o.id || '');
-          const cv = isDefault ? defaultVal : curVal;
-          if (cv && !known.includes(cv)) {
-            sel.value = '__custom__'; input.value = cv; input.style.display = '';
-          } else { input.style.display = 'none'; }
-          sel.onchange = () => {
-            if (sel.value === '__custom__') { input.style.display = ''; input.focus(); overrides[key] = input.value; }
-            else { input.style.display = 'none'; overrides[key] = sel.value; }
-            if (!cb.checked) { cb.checked = true; applyDisabled(); }
-          };
-          input.onchange = () => { overrides[key] = input.value; if (!cb.checked) { cb.checked = true; applyDisabled(); } };
-        } else {
-          sel.onchange = () => { overrides[key] = sel.value; if (!cb.checked) { cb.checked = true; applyDisabled(); } };
-        }
+        // All rows support Custom... for free-form input (model IDs, effort levels like xhigh, etc.)
+        const customOpt = document.createElement('option'); customOpt.value = '__custom__'; customOpt.textContent = 'Custom...';
+        sel.appendChild(customOpt);
+        const input = document.createElement('input'); input.type = 'text'; input.className = 'session-config-input';
+        input.placeholder = isModel ? 'e.g. claude-opus-4-6' : 'e.g. xhigh';
+        const known = options.map(o => o.value || o.id || '');
+        const cv = isDefault ? defaultVal : curVal;
+        if (cv && !known.includes(cv)) {
+          sel.value = '__custom__'; input.value = cv; input.style.display = '';
+        } else { input.style.display = 'none'; }
+        sel.onchange = () => {
+          if (sel.value === '__custom__') { input.style.display = ''; input.focus(); overrides[key] = input.value; }
+          else { input.style.display = 'none'; overrides[key] = sel.value; }
+          if (!cb.checked) { cb.checked = true; applyDisabled(); }
+        };
+        input.onchange = () => { overrides[key] = input.value; if (!cb.checked) { cb.checked = true; applyDisabled(); } };
         const applyDisabled = () => {
           const disabled = !cb.checked;
           sel.disabled = disabled;
