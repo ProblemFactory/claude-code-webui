@@ -52,7 +52,16 @@ When resuming a stopped session, the resume button uses your default mode. A spl
 
 ### Per-session parameters
 
-A gear button (⚙) next to the Resume button opens a config popover where you can override **Model**, **Effort**, and **Permission Mode** for that specific resume. Each option has a checkbox — unchecked means "use global default" (greyed out), checked means the override is active. Changing a dropdown while unchecked auto-checks it. Model supports typing a specific model ID via the "Custom..." option.
+A gear button (⚙) next to the Resume button opens a config popover where you can override **Model**, **Effort**, and **Permission Mode** for that specific resume. Each option has a checkbox — unchecked means "use global default" (greyed out), checked means the override is active. Changing a dropdown while unchecked auto-checks it. All three fields support "Custom..." for typing arbitrary values (model IDs like `claude-opus-4-7`, effort levels like `xhigh`, etc.).
+
+### Mobile sidebar
+
+On mobile (≤768px), the sidebar uses a **two-level navigation** instead of the desktop's collapsible folder groups:
+
+- **Level 1**: folder or group list — each entry shows a folder/group icon, path (middle-truncated), session count, and live count. Tap to drill in.
+- **Level 2**: session cards inside one folder/group, with a back button at top. Only this folder's sessions are rendered (~5-20 cards instead of 1600+).
+
+The mobile nav bar provides: ☰ sidebar toggle, session title (tap for window switcher with desktop tabs), ✕ close window, + new session. Image upload button appears next to the chat input on mobile.
 
 ## Session Cards
 

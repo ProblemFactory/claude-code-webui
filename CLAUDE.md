@@ -77,6 +77,8 @@ src/
     sidebar.js         — Sidebar shell (filter/sort/merge pipeline, ~560 lines)
     sidebar-state.js   — Sidebar state mixin (star/archive/rename/groups/migration)
     sidebar-render.js  — Sidebar rendering mixin (folder groups, user groups, drag-drop)
+    sidebar-render-mobile.js — Mobile sidebar mixin (two-level folder/group navigation)
+    mobile-nav.js      — MobileNav class (window switcher, close, desktop tabs, gestures)
     session-card.js    — Session card renderer (SVG icons, composite backend+mode icons)
     agent-meta.js      — Backend/agent metadata, SVG icon creation (createBackendIcon, createModeBackendIcon)
     file-explorer.js   — FileExplorer (browse/upload/download, View menu, resizable columns, preview panel)
@@ -135,7 +137,7 @@ docs/
 | Task | Primary File(s) | Notes |
 |------|-----------------|-------|
 | **Add/change terminal behavior** | `src/lib/terminal.js` | xterm.js config, input filtering, cursor, font |
-| **Session list / sidebar** | `src/lib/sidebar.js` + `src/lib/sidebar-state.js` + `src/lib/sidebar-render.js` + `src/lib/session-card.js` | Sidebar shell + state mixin + render mixin + card factory |
+| **Session list / sidebar** | `src/lib/sidebar.js` + `src/lib/sidebar-state.js` + `src/lib/sidebar-render.js` + `src/lib/sidebar-render-mobile.js` + `src/lib/session-card.js` | Sidebar shell + state mixin + render mixin (desktop) + render mixin (mobile) + card factory |
 | **Backend metadata / icons** | `src/lib/agent-meta.js` | Backend/agent meta, createBackendIcon, createModeBackendIcon, contrast adaptation |
 | **Session discovery (RUNNING/STOPPED)** | `src/routes/sessions.js` + `src/session-store.js` | Lock-first algorithm, tmux detection, PID verification |
 | **Window tiling / grid / snap** | `src/lib/window.js` | Drag, resize, grid cells, layout presets, freeform, Alt bypass, overlap switcher, pre-snap size memory, move mode |
@@ -340,6 +342,13 @@ Each desktop is an independent layout slot with its own windows and grid mode. W
 
 ### 7. Modular Frontend (refactored 2026-03-23)
 Split from monolithic 1647-line `src/client.js` into 13 ES modules under `src/lib/`. All cross-class communication goes through the `App` mediator. esbuild follows ES imports automatically, no build config changes needed.
+
+### 7a. Mobile Architecture (refactored 2026-04-24)
+Mobile-specific UI code extracted into dedicated modules to keep desktop and mobile rendering paths independent:
+- **`src/lib/mobile-nav.js`** — `MobileNav` class: window switcher (tap title), close button (✕), desktop tabs, title updates, edge-swipe gestures. Only constructed when `app.isMobile` is true.
+- **`src/lib/sidebar-render-mobile.js`** — `installSidebarRenderMobile` mixin: two-level folder/group navigation (folder list → drill-down → session cards). Architecturally different from desktop's collapsible groups.
+- **`app.isMobile`** — centralized `matchMedia('max-width: 768px')` check in App constructor. All code references this instead of doing its own detection.
+- **`_mobileDrilldown`** state on Sidebar: `{type: 'folder'|'group', key, label}` tracks drill-down position so `_render()` can restore it after session state changes (star/archive/resume) that trigger re-render.
 
 ### 8. xterm.js Rendering Gotchas
 - **Font change requires `clearTextureAtlas()`**: xterm.js canvas/WebGL renderer caches font glyphs in a texture atlas. Setting `terminal.options.fontFamily` alone does NOT re-render — must call `terminal.clearTextureAtlas()` after changing font family or font size for the change to take visual effect, then call `fit()` to recalculate dimensions.
