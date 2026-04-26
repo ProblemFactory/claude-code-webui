@@ -45,38 +45,66 @@ export class MobileNav {
     pop.style.top = navRect.bottom + 'px';
 
     const wm = this.app.wm;
-    const windows = [...wm.windows.values()].filter(w => !w._hiddenByDesktop && !w.isMinimized);
+    const dm = this.app.desktopManager;
+    const desktops = dm?.desktops || [];
+    const allWindows = [...wm.windows.values()].filter(w => !w.isMinimized);
+
+    // Desktop tabs (only when 2+ desktops)
+    if (desktops.length >= 2) {
+      const tabBar = document.createElement('div');
+      tabBar.style.cssText = 'display:flex;gap:0;border-bottom:2px solid var(--border);overflow-x:auto;-webkit-overflow-scrolling:touch;flex-shrink:0';
+      for (const desk of desktops) {
+        const tab = document.createElement('button');
+        const isActive = desk.id === dm.activeDesktopId;
+        const winCount = allWindows.filter(w => w._desktopId === desk.id).length;
+        tab.textContent = `${desk.name} (${winCount})`;
+        tab.style.cssText = `flex:1;padding:10px 12px;border:none;background:none;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;color:${isActive ? 'var(--accent)' : 'var(--text-dim)'};border-bottom:2px solid ${isActive ? 'var(--accent)' : 'transparent'};margin-bottom:-2px`;
+        tab.onclick = () => {
+          pop.remove();
+          dm.switchTo(desk.id);
+        };
+        tabBar.appendChild(tab);
+      }
+      pop.appendChild(tabBar);
+    }
+
+    // Window list (current desktop only)
+    const windows = allWindows.filter(w => !w._hiddenByDesktop);
     if (!windows.length) {
-      pop.innerHTML = '<div style="padding:16px;text-align:center;color:var(--text-dim);font-size:13px">No open windows</div>';
+      pop.innerHTML += '<div style="padding:16px;text-align:center;color:var(--text-dim);font-size:13px">No open windows</div>';
     } else {
       for (const win of windows) {
-        const item = document.createElement('div');
-        item.style.cssText = 'display:flex;align-items:center;gap:10px;padding:12px 16px;cursor:pointer;border-bottom:1px solid var(--border);transition:background 0.1s';
-        if (win.id === wm.activeWindowId) item.style.background = 'var(--accent-dim)';
-
-        const icon = document.createElement('span');
-        icon.style.cssText = 'flex-shrink:0;font-size:16px';
-        icon.innerHTML = win._typeIcon || '';
-
-        const label = document.createElement('span');
-        label.style.cssText = 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;color:var(--text)';
-        label.textContent = win.title || 'Window';
-
-        const closeBtn = document.createElement('button');
-        closeBtn.style.cssText = 'background:none;border:none;color:var(--text-dim);font-size:16px;padding:4px 8px;cursor:pointer;flex-shrink:0;min-width:32px;min-height:32px;display:flex;align-items:center;justify-content:center';
-        closeBtn.textContent = '\u2715';
-        closeBtn.onclick = (e) => { e.stopPropagation(); wm.closeWindow(win.id); item.remove(); if (!pop.querySelector('div')) pop.remove(); };
-
-        item.append(icon, label, closeBtn);
-        item.addEventListener('pointerdown', () => { item.style.background = 'var(--bg-hover)'; });
-        item.onclick = () => { pop.remove(); wm.focusWindow(win.id); };
-        pop.appendChild(item);
+        pop.appendChild(this._buildWindowItem(win, wm, pop));
       }
     }
 
     document.body.appendChild(pop);
     const onTap = (e) => { if (!pop.contains(e.target) && e.target !== anchor) { pop.remove(); document.removeEventListener('pointerdown', onTap); } };
     setTimeout(() => document.addEventListener('pointerdown', onTap), 0);
+  }
+
+  _buildWindowItem(win, wm, pop) {
+    const item = document.createElement('div');
+    item.style.cssText = 'display:flex;align-items:center;gap:10px;padding:12px 16px;cursor:pointer;border-bottom:1px solid var(--border);transition:background 0.1s';
+    if (win.id === wm.activeWindowId) item.style.background = 'var(--accent-dim)';
+
+    const icon = document.createElement('span');
+    icon.style.cssText = 'flex-shrink:0;font-size:16px';
+    icon.innerHTML = win._typeIcon || '';
+
+    const label = document.createElement('span');
+    label.style.cssText = 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;color:var(--text)';
+    label.textContent = win.title || 'Window';
+
+    const closeBtn = document.createElement('button');
+    closeBtn.style.cssText = 'background:none;border:none;color:var(--text-dim);font-size:16px;padding:4px 8px;cursor:pointer;flex-shrink:0;min-width:32px;min-height:32px;display:flex;align-items:center;justify-content:center';
+    closeBtn.textContent = '\u2715';
+    closeBtn.onclick = (e) => { e.stopPropagation(); wm.closeWindow(win.id); item.remove(); };
+
+    item.append(icon, label, closeBtn);
+    item.addEventListener('pointerdown', () => { item.style.background = 'var(--bg-hover)'; });
+    item.onclick = () => { pop.remove(); wm.focusWindow(win.id); };
+    return item;
   }
 
   _setupGestures() {
