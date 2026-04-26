@@ -49,34 +49,44 @@ export class MobileNav {
     const desktops = dm?.desktops || [];
     const allWindows = [...wm.windows.values()].filter(w => !w.isMinimized);
 
-    // Desktop tabs (only when 2+ desktops)
-    if (desktops.length >= 2) {
-      const tabBar = document.createElement('div');
-      tabBar.style.cssText = 'display:flex;gap:0;border-bottom:2px solid var(--border);overflow-x:auto;-webkit-overflow-scrolling:touch;flex-shrink:0';
-      for (const desk of desktops) {
-        const tab = document.createElement('button');
-        const isActive = desk.id === dm.activeDesktopId;
-        const winCount = allWindows.filter(w => w._desktopId === desk.id).length;
-        tab.textContent = `${desk.name} (${winCount})`;
-        tab.style.cssText = `flex:1;padding:10px 12px;border:none;background:none;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;color:${isActive ? 'var(--accent)' : 'var(--text-dim)'};border-bottom:2px solid ${isActive ? 'var(--accent)' : 'transparent'};margin-bottom:-2px`;
-        tab.onclick = () => {
-          pop.remove();
-          dm.switchTo(desk.id);
-        };
-        tabBar.appendChild(tab);
-      }
-      pop.appendChild(tabBar);
-    }
+    // Window list container (rebuilt on desktop switch)
+    const winList = document.createElement('div');
 
-    // Window list (current desktop only)
-    const windows = allWindows.filter(w => !w._hiddenByDesktop);
-    if (!windows.length) {
-      pop.innerHTML += '<div style="padding:16px;text-align:center;color:var(--text-dim);font-size:13px">No open windows</div>';
-    } else {
-      for (const win of windows) {
-        pop.appendChild(this._buildWindowItem(win, wm, pop));
+    const renderContent = () => {
+      // Desktop tabs
+      if (desktops.length >= 2) {
+        const oldTabs = pop.querySelector('.mobile-desk-tabs');
+        if (oldTabs) oldTabs.remove();
+        const tabBar = document.createElement('div');
+        tabBar.className = 'mobile-desk-tabs';
+        tabBar.style.cssText = 'display:flex;gap:0;border-bottom:2px solid var(--border);overflow-x:auto;-webkit-overflow-scrolling:touch;flex-shrink:0';
+        for (const desk of desktops) {
+          const tab = document.createElement('button');
+          const isActive = desk.id === dm.activeDesktopId;
+          const deskWindows = allWindows.filter(w => w._desktopId === desk.id);
+          tab.textContent = `${desk.name} (${deskWindows.length})`;
+          tab.style.cssText = `flex:1;padding:10px 12px;border:none;background:none;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;color:${isActive ? 'var(--accent)' : 'var(--text-dim)'};border-bottom:2px solid ${isActive ? 'var(--accent)' : 'transparent'};margin-bottom:-2px`;
+          tab.onclick = () => {
+            dm.switchTo(desk.id).then(() => renderContent());
+          };
+          tabBar.appendChild(tab);
+        }
+        pop.insertBefore(tabBar, winList);
       }
-    }
+      // Window list for current desktop
+      winList.innerHTML = '';
+      const windows = allWindows.filter(w => !w._hiddenByDesktop && !w.isMinimized);
+      if (!windows.length) {
+        winList.innerHTML = '<div style="padding:16px;text-align:center;color:var(--text-dim);font-size:13px">No windows on this desktop</div>';
+      } else {
+        for (const win of windows) {
+          winList.appendChild(this._buildWindowItem(win, wm, pop));
+        }
+      }
+    };
+
+    pop.appendChild(winList);
+    renderContent();
 
     document.body.appendChild(pop);
     const onTap = (e) => { if (!pop.contains(e.target) && e.target !== anchor) { pop.remove(); document.removeEventListener('pointerdown', onTap); } };
