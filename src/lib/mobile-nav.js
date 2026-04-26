@@ -65,7 +65,7 @@ export class MobileNav {
           const isActive = desk.id === dm.activeDesktopId;
           const deskWindows = allWindows.filter(w => w._desktopId === desk.id);
           tab.textContent = `${desk.name} (${deskWindows.length})`;
-          tab.style.cssText = `flex:1;padding:10px 12px;border:none;background:none;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;color:${isActive ? 'var(--accent)' : 'var(--text-dim)'};border-bottom:2px solid ${isActive ? 'var(--accent)' : 'transparent'};margin-bottom:-2px`;
+          tab.style.cssText = `flex-shrink:0;padding:10px 14px;border:none;background:none;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;color:${isActive ? 'var(--accent)' : 'var(--text-dim)'};border-bottom:2px solid ${isActive ? 'var(--accent)' : 'transparent'};margin-bottom:-2px`;
           tab.onclick = () => {
             dm.switchTo(desk.id).then(() => renderContent());
           };
