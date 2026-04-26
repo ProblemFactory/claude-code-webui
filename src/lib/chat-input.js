@@ -175,7 +175,23 @@ export class ChatInput {
       const item = e.target.closest('.chat-slash-item');
       if (item) { this._textarea.value = item.dataset.cmd + ' '; this._slashDropdown.classList.add('hidden'); this._textarea.focus(); }
     });
-    inputWrap.append(this._textarea, expandBtn, this._slashDropdown);
+    // Image upload button (visible on mobile, hidden on desktop where paste works)
+    const attachBtn = document.createElement('button');
+    attachBtn.className = 'chat-attach-btn';
+    attachBtn.title = 'Attach image';
+    attachBtn.innerHTML = '<svg viewBox="0 0 16 16" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="12" height="12" rx="1.5"/><circle cx="5.5" cy="5.5" r="1.5"/><path d="M14 10.5l-3-3-4 4-2-2-3 3"/></svg>';
+    const attachInput = document.createElement('input');
+    attachInput.type = 'file';
+    attachInput.accept = 'image/*';
+    attachInput.multiple = true;
+    attachInput.style.display = 'none';
+    attachBtn.onclick = () => attachInput.click();
+    attachInput.onchange = () => {
+      for (const file of attachInput.files) this._addImageAttachment(file);
+      attachInput.value = '';
+    };
+
+    inputWrap.append(attachBtn, attachInput, this._textarea, expandBtn, this._slashDropdown);
 
     const sendCol = document.createElement('div');
     sendCol.className = 'chat-send-col';

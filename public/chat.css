@@ -308,7 +308,17 @@
   display: flex; align-items: center; gap: 6px;
 }
 .chat-stream-status.hidden { display: none; }
-.chat-input-wrap { flex: 1; position: relative; min-width: 0; }
+.chat-input-wrap { flex: 1; position: relative; min-width: 0; display: flex; align-items: flex-end; gap: 6px; }
+.chat-attach-btn {
+  display: none; background: none; border: none; color: var(--text-dim);
+  cursor: pointer; padding: 6px; flex-shrink: 0; border-radius: 50%;
+  min-width: 36px; min-height: 36px;
+  align-items: center; justify-content: center;
+}
+.chat-attach-btn:active { background: var(--bg-hover); }
+.chat-attach-btn svg { display: block; }
+@media (max-width: 768px) { .chat-attach-btn { display: flex; } }
+.chat-input-wrap .chat-input { flex: 1; min-width: 0; }
 .chat-send-col { display: flex; flex-direction: column; align-items: center; gap: 2px; flex-shrink: 0; }
 .chat-input {
   width: 100%; resize: none; border: 1px solid var(--border); border-radius: 12px;
