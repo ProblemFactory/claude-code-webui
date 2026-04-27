@@ -1031,7 +1031,7 @@ class FileExplorer {
       }});
       items.push({ label: 'Sessions', submenu: () => {
         const sub = [];
-        sub.push({ label: '+ New session', action: () => this.app.createSession({ cwd: fullPath }) });
+        sub.push({ label: '+ New session', action: () => this.app.showNewSessionDialog({ cwd: fullPath }) });
         const sessionsHere = (this.app.sidebar?._allSessions || []).filter(s => s.cwd === fullPath);
         for (const s of sessionsHere) {
           const customName = this.app.sidebar?.getCustomName(s);

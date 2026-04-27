@@ -57,7 +57,7 @@ export function installSidebarRenderMobile(SidebarClass) {
     const titleRow = document.createElement('div'); titleRow.className = 'mobile-folder-title';
     titleRow.innerHTML = `<span>${escHtml(cwdShort)}</span>`;
     const addBtn = document.createElement('button'); addBtn.className = 'folder-add-btn'; addBtn.textContent = '+';
-    addBtn.onclick = (e) => { e.stopPropagation(); this.app.createSession({ cwd }); };
+    addBtn.onclick = (e) => { e.stopPropagation(); this.app.showNewSessionDialog({ cwd }); };
     titleRow.appendChild(addBtn);
     this.listEl.appendChild(titleRow);
     this._sortSessions(items);

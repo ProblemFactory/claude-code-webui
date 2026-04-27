@@ -732,11 +732,14 @@ class App {
     document.getElementById(id).classList.remove('hidden');
   }
 
-  showNewSessionDialog() {
+  showNewSessionDialog({ cwd, backend } = {}) {
+    if (this.isMobile) this.sidebar.toggle(false); // close sidebar so dialog is visible
     this._showDialog('dialog-new-session');
-    document.getElementById('input-backend').value = 'claude';
-    this._applySessionBackendOptions('claude', { applyDefaults: true });
+    const b = backend || 'claude';
+    document.getElementById('input-backend').value = b;
+    this._applySessionBackendOptions(b, { applyDefaults: true });
     document.getElementById('input-mode').value = this.settings.get('session.defaultMode') ?? 'chat';
+    if (cwd) document.getElementById('input-cwd').value = cwd;
     document.getElementById('input-cwd').focus();
   }
   hideDialogs() { document.getElementById('dialog-overlay').classList.add('hidden'); document.getElementById('dialog-overlay').querySelectorAll('.dialog').forEach(d => d.classList.add('hidden')); }

@@ -92,7 +92,7 @@ export function installSidebarRender(SidebarClass) {
 
       const addBtn = document.createElement('button'); addBtn.className = 'folder-add-btn';
       addBtn.textContent = '+'; addBtn.title = 'New session in ' + cwdShort;
-      addBtn.onclick = (e) => { e.stopPropagation(); this.app.createSession({ cwd }); };
+      addBtn.onclick = (e) => { e.stopPropagation(); this.app.showNewSessionDialog({ cwd }); };
       header.appendChild(addBtn);
 
       const linkBtn = document.createElement('button'); linkBtn.className = 'folder-add-btn';
