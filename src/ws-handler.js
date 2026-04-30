@@ -331,6 +331,29 @@ function registerWsHandler(wss, ctx) {
               session.buffer = (session.buffer + JSON.stringify(userMsg) + '\n').slice(-500000);
               if (session._normalizer) session._normalizer.processLive(userMsg);
             }
+            // Detect broken pty stdin: if wrapper doesn't start streaming
+            // within 5s, the dtach attach pty may have a dead stdin pipe.
+            // Re-attach to fix it, then re-send the message.
+            if (session.socketPath && session.sockName) {
+              const metaPath = path.join(BUFFERS_DIR, data.sessionId + '.json');
+              const inputPayload = stdinPayload;
+              setTimeout(() => {
+                try {
+                  const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+                  if (!meta.streaming) {
+                    console.log(`[${data.sessionId}] Broken pty stdin detected — re-attaching dtach`);
+                    if (session.pty) { try { session.pty.kill(); } catch {} }
+                    const newPty = pty.spawn(DTACH_CMD, ['-a', session.socketPath, '-E', '-r', 'winch'], {
+                      name: 'xterm-256color', cols: 120, rows: 30,
+                      env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' },
+                    });
+                    setupSessionPty(session, data.sessionId, newPty);
+                    // Re-send the message on the fresh pty
+                    setTimeout(() => { newPty.write(inputPayload + '\n'); }, 500);
+                  }
+                } catch {}
+              }, 5000);
+            }
           }
           break;
         }
