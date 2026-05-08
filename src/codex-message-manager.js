@@ -162,7 +162,7 @@ class CodexMessageManager {
 
   convertHistory(records) {
     for (const record of records || []) this._processRecord(record, false);
-    this._finalizeStreaming(false);
+    this._finalizeStreaming(false, { includeReasoning: true });
     return this.messages;
   }
 
@@ -200,15 +200,17 @@ class CodexMessageManager {
     return msg;
   }
 
-  _finalizeStreaming(emit) {
+  _finalizeStreaming(emit, { includeReasoning = false } = {}) {
     for (const m of this.messages) {
       if (m.status === 'streaming') {
+        // Only finalize reasoning if explicitly asked (e.g. turn end)
+        if (!includeReasoning && m.content?.[0]?.type === 'thinking') continue;
         m.status = 'complete';
         if (emit) this._emit({ op: 'edit', id: m.id, fields: { status: 'complete' } });
       }
     }
     this.streamingAgentMessages.clear();
-    this.streamingReasoningMessages.clear();
+    if (includeReasoning) this.streamingReasoningMessages.clear();
   }
 
   _processRecord(record, emit) {
@@ -388,6 +390,22 @@ class CodexMessageManager {
   _processReasoningItem(item, emit) {
     const summaryText = flattenContentText(item.summary) || flattenContentText(item.content);
     if (!summaryText) return;
+    // If a streaming reasoning message exists for this item, finalize it
+    // instead of creating a duplicate.
+    const itemId = item.item_id || item.id;
+    if (itemId) {
+      const existingId = this.streamingReasoningMessages.get(itemId);
+      if (existingId) {
+        const existing = this.messageIndex.get(existingId);
+        if (existing) {
+          existing.content = [{ type: 'thinking', text: summaryText }];
+          existing.status = 'complete';
+          this.streamingReasoningMessages.delete(itemId);
+          if (emit) this._emit({ op: 'edit', id: existing.id, fields: { content: existing.content, status: 'complete' } });
+          return;
+        }
+      }
+    }
     const msg = this._create({ role: 'assistant', content: [{ type: 'thinking', text: summaryText }] });
     if (emit) this._emit({ op: 'create', message: msg });
   }
@@ -514,7 +532,7 @@ class CodexMessageManager {
     }
 
     if (type === 'task_complete' || type === 'turn_aborted' || type === 'task_failed') {
-      this._finalizeStreaming(emit);
+      this._finalizeStreaming(emit, { includeReasoning: true });
       if (type === 'task_failed') {
         const msg = this._create({
           role: 'system',

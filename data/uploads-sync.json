@@ -1,5 +1,5 @@
 {
-  "version": 16,
+  "version": 17,
   "data": {
     "upload:1776387414050-0": {
       "name": "test-5mb.bin",
@@ -83,6 +83,13 @@
       "path": "/home/xingweil/workspace/39AI/AIWorkspace/B2BTasks/04162026VoiceProviderReview/Provider1/OneLineStudiosSample-Conversational_01.wav",
       "size": 2115576,
       "date": 1776935295704,
+      "status": "ok"
+    },
+    "upload:1777634278007-0": {
+      "name": "audio (2).wav",
+      "path": "/tmp/audio (2).wav",
+      "size": 682710,
+      "date": 1777634278007,
       "status": "ok"
     }
   }
