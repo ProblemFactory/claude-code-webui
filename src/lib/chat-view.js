@@ -604,6 +604,10 @@ class ChatView {
     for (let i = this._messages.length - 1; i >= 0; i--) {
       const msg = this._messages[i];
       if (!msg) continue;
+      // Stop at user messages — streaming never crosses turn boundaries.
+      // This prevents stale streaming messages from earlier turns from
+      // showing a permanent 'responding...' indicator.
+      if (msg.role === 'user') return '';
       if (msg.role === 'tool' && msg.status === 'pending') {
         return `running ${msg.toolName || 'tool'}...`;
       }
