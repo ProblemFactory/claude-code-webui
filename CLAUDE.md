@@ -56,7 +56,7 @@ src/
   session-store.js     — SessionMessages + JSONL parsing + session discovery helpers
   message-manager.js   — MessageManager (Claude stream-json → normalized messages with stable IDs)
   codex-message-manager.js — CodexMessageManager (Codex JSON-RPC → normalized messages)
-  codex-session-store.js — Codex session discovery (thread listing, JSONL parsing, rate limits)
+  codex-session-store.js — Codex session discovery (thread listing, JSONL parsing, forkedFrom chain merge)
   normalizers.js       — createMessageManager(backend, id) factory for backend-agnostic normalization
   adapters/
     base.js            — BackendAdapter + SessionHandle (abstract interface for AI backends)
@@ -828,3 +828,4 @@ Server → Client: `created`, `output`, `msg` (normalized: op=create/edit/meta),
 - Stale streaming messages causing permanent 'responding' indicator: `_finalizeStreaming()` broke at first non-streaming message, leaving interleaved stale ones. Fix: scan to `role==='user'` boundary. `_deriveTypingLabel` also stops at user messages to ignore stale turns. `isStreaming` in attach response used `||` (stale meta overrode normalizer); fixed to prefer normalizer when it has messages.
 - Broken pty stdin false positives with old wrappers: new server expected `_stdin_ack` but old running wrappers didn't send it. Fix: fallback to buffer growth check when no ack received.
 - `/compact` leaving chat stuck on 'thinking': stream-json emits `user` messages (compact summary) but no `result` after `/compact`. `_processUser` never called `_finalizeStreaming`, so stale streaming assistant messages persisted indefinitely. Fix: `_processUser` now calls `_finalizeStreaming` at start of new user message. Wrapper also treats `compact_boundary` system message as end-of-stream (`meta.streaming = false`).
+- Codex resume lost old history: `thread/resume` always creates a new thread ID (fork by design). Server overwrote `backendSessionId` with new ID, losing the old one. Fix: track `forkedFrom` array (chain of old thread IDs). `CodexSessionMessages._ensureParsed` loads the full chain (oldest → newest) + current, merging with fingerprint dedup. Forked-from threads hidden from sidebar to avoid duplicates. Persisted in session metadata, survives server restarts. Supports multi-level forks (A → B → C).
