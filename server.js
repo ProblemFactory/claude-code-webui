@@ -268,6 +268,7 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
           if (!line) continue;
           try {
             const msg = JSON.parse(stripAnsi(line).trim());
+            if (msg.type === '_stdin_ack') { session._stdinAckReceived = true; continue; }
             const payload = msg.payload || {};
             const nextThreadId = msg.type === 'session_meta'
               ? payload.id
@@ -418,6 +419,7 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
           if (!line) continue;
           try {
             const msg = JSON.parse(line);
+            if (msg.type === '_stdin_ack') { session._stdinAckReceived = true; continue; }
 
             // Track subagent lifecycle: start/stop JSONL watchers
             if (msg.type === 'system' && msg.subtype === 'task_started' && msg.task_type === 'local_agent' && msg.task_id && msg.tool_use_id) {

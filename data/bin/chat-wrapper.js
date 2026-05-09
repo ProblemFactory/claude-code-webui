@@ -196,6 +196,10 @@ try {
       const line = stdinLineBuf.substring(0, nlIdx).replace(/\r/g, '').trim();
       stdinLineBuf = stdinLineBuf.substring(nlIdx + 1);
       if (!line) continue;
+      // Immediately ack on stdout so the server knows stdin is alive.
+      // This fires before claude processes the message, so it works
+      // even when the model takes 30+ seconds to respond.
+      try { process.stdout.write(JSON.stringify({ type: '_stdin_ack', timestamp: Date.now() }) + '\n'); } catch {}
       try {
         // Try parsing as JSON — if valid, pass through as-is
         JSON.parse(line);

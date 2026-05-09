@@ -331,26 +331,18 @@ function registerWsHandler(wss, ctx) {
               session.buffer = (session.buffer + JSON.stringify(userMsg) + '\n').slice(-500000);
               if (session._normalizer) session._normalizer.processLive(userMsg);
             }
-            // Detect broken pty stdin: record the buffer length before sending.
-            // After 5s, if zero new bytes arrived on the pty AND the wrapper
-            // meta still shows streaming=false, the stdin pipe is dead.
-            // We check both conditions to avoid false positives (slow API
-            // response still produces pty output from the wrapper's heartbeat).
+            // Detect broken pty stdin: the wrapper immediately writes a
+            // _stdin_ack on stdout when it receives ANY stdin input. If we
+            // don't see that ack within 5s, the stdin pipe is dead (dtach
+            // re-attach issue). This is immune to slow model responses —
+            // the ack fires before claude even sees the message.
             if (session.socketPath) {
-              const bufLenBefore = (session.buffer || '').length;
               const inputPayload = stdinPayload;
+              session._stdinAckReceived = false;
               setTimeout(() => {
-                // If buffer grew or session already gone, stdin is fine
                 if (!activeSessions.has(data.sessionId)) return;
-                const bufLenAfter = (session.buffer || '').length;
-                if (bufLenAfter > bufLenBefore) return; // got output → pty works
-                // Double-check wrapper meta
-                try {
-                  const metaPath = path.join(BUFFERS_DIR, data.sessionId + '.json');
-                  const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
-                  if (meta.streaming) return; // wrapper says it's streaming
-                } catch {}
-                console.log(`[${data.sessionId}] Broken pty stdin detected — re-attaching dtach`);
+                if (session._stdinAckReceived) return; // wrapper confirmed receipt
+                console.log(`[${data.sessionId}] Broken pty stdin detected (no _stdin_ack) — re-attaching dtach`);
                 if (session.pty) { try { session.pty.kill(); } catch {} }
                 const newPty = pty.spawn(DTACH_CMD, ['-a', session.socketPath, '-E', '-r', 'winch'], {
                   name: 'xterm-256color', cols: 120, rows: 30,
