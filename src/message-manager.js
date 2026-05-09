@@ -149,9 +149,11 @@ class MessageManager {
       if (m.status === 'streaming') {
         m.status = 'complete';
         if (emit) this._emit({ op: 'edit', id: m.id, fields: { status: 'complete' } });
-      } else {
-        break;
       }
+      // Don't break early — stale streaming messages can exist anywhere
+      // after pty re-attach incidents. Scan all recent messages.
+      // Stop at user messages (streaming never crosses turn boundaries).
+      if (m.role === 'user') break;
     }
   }
 
