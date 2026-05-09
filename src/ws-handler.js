@@ -275,6 +275,7 @@ function registerWsHandler(wss, ctx) {
                   agentRole: session.agentRole,
                   agentNickname: session.agentNickname,
                   parentThreadId: session.parentThreadId,
+                  forkedFrom: session.forkedFrom || null,
                   createdAt: session.createdAt,
                   webuiSessionId: id,
                   mode: sessionMode,

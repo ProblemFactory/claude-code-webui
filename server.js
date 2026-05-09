@@ -284,6 +284,11 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
             const sourceMeta = payload.source ? normalizeCodexSource(payload.source) : null;
             let changed = false;
             if (nextThreadId && session.backendSessionId !== nextThreadId) {
+              if (session.backendSessionId) {
+                const prev = session.forkedFrom || [];
+                if (!prev.includes(session.backendSessionId)) prev.push(session.backendSessionId);
+                session.forkedFrom = prev;
+              }
               session.backendSessionId = nextThreadId;
               session.claudeSessionId = null;
               changed = true;
@@ -323,6 +328,7 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
                 agentRole: session.agentRole || '',
                 agentNickname: session.agentNickname || '',
                 parentThreadId: session.parentThreadId || null,
+                forkedFrom: session.forkedFrom || null,
                 createdAt: session.createdAt,
                 webuiSessionId: id,
                 mode: session.mode,
@@ -583,6 +589,7 @@ function restoreSessions() {
       agentRole: meta.agentRole || '',
       agentNickname: meta.agentNickname || '',
       parentThreadId: meta.parentThreadId || null,
+      forkedFrom: meta.forkedFrom || null,
       sockName: sockFile,
       socketPath,
       buffer: savedBuffer,

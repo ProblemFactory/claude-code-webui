@@ -171,7 +171,15 @@ class CodexSessionMessages {
   _ensureParsed() {
     if (this._all) return;
     const threadId = getCodexHistorySessionId(this._session);
-    const history = threadId ? parseCodexSessionJsonl(threadId) : [];
+    // Load forked-from chain first (oldest → newest), then current thread
+    const forkedFrom = this._session?.forkedFrom || [];
+    let history = [];
+    for (const forkId of forkedFrom) {
+      const forkHistory = parseCodexSessionJsonl(forkId);
+      if (forkHistory.length) history = mergeCodexRecords(history, forkHistory);
+    }
+    const currentHistory = threadId ? parseCodexSessionJsonl(threadId) : [];
+    if (currentHistory.length) history = mergeCodexRecords(history, currentHistory);
     const live = parseBufferRecords(this._session?.buffer || '');
     this._all = mergeCodexRecords(history, live);
   }
