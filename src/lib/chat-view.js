@@ -1040,10 +1040,16 @@ class ChatView {
     // Fetch messages from where we left off to catch up
     const missedStart = this._windowEnd;
     this._fetchMessages(missedStart, 200).then(msgs => {
-      if (!msgs.length) return;
+      if (!msgs.length) {
+        // No missed messages — still sync typing indicator in case streaming
+        // started or stopped while we were disconnected
+        this._syncTypingIndicator();
+        return;
+      }
       this._loadingHistory = true;
       for (const msg of msgs) this._onCreateMessage(msg);
       this._loadingHistory = false;
+      this._syncTypingIndicator();
       if (this._pinned) this._scrollToBottom();
     }).catch(() => {});
   }

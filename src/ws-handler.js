@@ -530,8 +530,11 @@ function registerWsHandler(wss, ctx) {
 
               const turnMap = session._normalizer ? session._normalizer.turnMap() : [];
               const pendingPerms = sm.activePendingPermissions?.() || {};
+              // Derive isStreaming from both wrapper meta AND normalizer messages
+              // (meta file may lag behind due to debounced writes)
+              const isStreaming = sm.isStreaming || messages.some(m => m.status === 'streaming');
               ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, mode: 'chat',
-                messages, totalCount, chatStatus: sm.chatStatus(), isStreaming: sm.isStreaming, taskState: sm.taskState(), turnMap, pendingPermissions: pendingPerms }));
+                messages, totalCount, chatStatus: sm.chatStatus(), isStreaming, taskState: sm.taskState(), turnMap, pendingPermissions: pendingPerms }));
             } else {
               ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, buffer: session.buffer || '' }));
             }
