@@ -327,6 +327,7 @@ function registerWsHandler(wss, ctx) {
             }
             const msgId = data.msgId || (Date.now() + '-' + Math.random().toString(36).slice(2, 8));
             const { stdinPayload, userMsg } = adapter.formatChatInput(data.text, msgId);
+            session._isStreaming = true;
             session.pty.write(stdinPayload + '\n');
             if (userMsg) {
               session.buffer = (session.buffer + JSON.stringify(userMsg) + '\n').slice(-500000);
