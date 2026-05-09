@@ -175,7 +175,7 @@ function registerWsHandler(wss, ctx) {
               sessionSpec.cmd || CLAUDE_CMD, ...(sessionSpec.args || []),
             ], {
               name: 'xterm-256color', cols: data.cols || 120, rows: data.rows || 30,
-              cwd, env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' },
+              cwd, env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor', ...Object.fromEntries(Object.entries(sessionSpec.env || {}).map(([k, v]) => [k, v == null ? '' : String(v)])) },
             });
           } catch (err) {
             ws.send(JSON.stringify({ type: 'error', message: `Failed to spawn session: ${err.message}\ndtach=${DTACH_CMD} node=${NODE_CMD} env=${ENV_CMD} cwd=${cwd}` }));

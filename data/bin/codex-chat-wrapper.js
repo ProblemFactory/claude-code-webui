@@ -285,6 +285,7 @@ function updateMetaFromThread(resp) {
     model: meta.model,
     model_provider: meta.modelProvider,
     session_name: meta.threadName,
+    permissionMode: meta.permissionMode,
     agent_role: thread.agentRole || null,
     agent_nickname: thread.agentNickname || null,
   });

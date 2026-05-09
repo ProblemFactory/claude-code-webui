@@ -249,6 +249,7 @@ class CodexMessageManager {
     const payload = record.payload || {};
     if (!this._status.model && payload.model) this._status.model = payload.model;
     if (payload.model_provider) this._status.modelProvider = payload.model_provider;
+    if (payload.permissionMode) this._status.permissionMode = payload.permissionMode;
     if (emit && !this._seenInit) {
       this._seenInit = true;
       const msg = this._create({
