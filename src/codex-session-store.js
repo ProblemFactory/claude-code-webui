@@ -271,12 +271,14 @@ function listCodexThreads({ activeSessions } = {}) {
   const sessions = [];
   const seen = new Set();
   const activeByThreadId = new Map();
+  const mergedThreadIds = new Set();
   const externallyOpenThreadIds = listOpenCodexThreadIds();
   for (const [id, session] of activeSessions || []) {
     if (session.backend !== 'codex') continue;
     const threadId = session.backendSessionId || session.claudeSessionId;
     if (!threadId) continue;
     activeByThreadId.set(threadId, { id, session });
+    for (const forkId of session.forkedFrom || []) mergedThreadIds.add(forkId);
   }
 
   const stack = [CODEX_SESSIONS_DIR];
@@ -293,6 +295,7 @@ function listCodexThreads({ activeSessions } = {}) {
       if (!entry.isFile() || !fp.endsWith('.jsonl')) continue;
       const meta = extractCodexThreadMeta(fp);
       if (!meta.threadId || seen.has(meta.threadId)) continue;
+      if (mergedThreadIds.has(meta.threadId)) continue;
       seen.add(meta.threadId);
       const active = activeByThreadId.get(meta.threadId);
       const isExternal = !active && externallyOpenThreadIds.has(meta.threadId);
