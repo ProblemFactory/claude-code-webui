@@ -331,18 +331,21 @@ function registerWsHandler(wss, ctx) {
               session.buffer = (session.buffer + JSON.stringify(userMsg) + '\n').slice(-500000);
               if (session._normalizer) session._normalizer.processLive(userMsg);
             }
-            // Detect broken pty stdin: the wrapper immediately writes a
-            // _stdin_ack on stdout when it receives ANY stdin input. If we
-            // don't see that ack within 5s, the stdin pipe is dead (dtach
-            // re-attach issue). This is immune to slow model responses —
-            // the ack fires before claude even sees the message.
+            // Detect broken pty stdin: the wrapper writes _stdin_ack on
+            // stdout immediately when it receives stdin input. If no ack
+            // AND no buffer growth within 5s, the stdin pipe is dead.
+            // Both signals checked for compat with old wrappers that don't
+            // send _stdin_ack (wrapper only updates on server restart).
             if (session.socketPath) {
               const inputPayload = stdinPayload;
+              const bufLenBefore = (session.buffer || '').length;
               session._stdinAckReceived = false;
               setTimeout(() => {
                 if (!activeSessions.has(data.sessionId)) return;
-                if (session._stdinAckReceived) return; // wrapper confirmed receipt
-                console.log(`[${data.sessionId}] Broken pty stdin detected (no _stdin_ack) — re-attaching dtach`);
+                if (session._stdinAckReceived) return;
+                // Fallback: if buffer grew, pty is working (old wrapper without ack)
+                if ((session.buffer || '').length > bufLenBefore) return;
+                console.log(`[${data.sessionId}] Broken pty stdin detected — re-attaching dtach`);
                 if (session.pty) { try { session.pty.kill(); } catch {} }
                 const newPty = pty.spawn(DTACH_CMD, ['-a', session.socketPath, '-E', '-r', 'winch'], {
                   name: 'xterm-256color', cols: 120, rows: 30,
