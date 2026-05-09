@@ -1,6 +1,6 @@
 {
   "name": "claude-code-webui",
-  "version": "2.5.0",
+  "version": "2.5.1",
   "description": "WebUI for Claude Code with multi-session tiling window manager",
   "main": "server.js",
   "scripts": {
