@@ -139,7 +139,7 @@ child.stdout.on('data', (chunk) => {
 
     // Track streaming state
     if (msg.type === 'user') { meta.streaming = true; scheduleMeta(); }
-    if (msg.type === 'result') {
+    if (msg.type === 'result' || (msg.type === 'system' && msg.subtype === 'compact_boundary')) {
       meta.streaming = false;
       // Clean up background command tasks on turn end — stream-json rarely
       // emits task_notification for them (known bug). Agent tasks are kept

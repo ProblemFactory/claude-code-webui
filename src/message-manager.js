@@ -206,6 +206,7 @@ class MessageManager {
   }
 
   _processUser(raw, emit) {
+    this._finalizeStreaming(emit);
     const content = raw.message?.content;
     if (!content) return;
     const blocks = Array.isArray(content) ? content : [{ type: 'text', text: String(content) }];
