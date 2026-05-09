@@ -195,13 +195,14 @@ class LayoutManager {
           winState.backend = match.backend || 'claude';
           winState.backendSessionId = match.backendSessionId || match.sessionId;
           winState.claudeSessionId = winState.backend === 'claude' ? winState.backendSessionId : null;
+          winState.cwd = match.cwd || '';
         }
         // Save per-terminal overrides
         if (termSession.overrides) winState.terminalOverrides = termSession.overrides;
         // Save editor split-pane state (Ctrl+G)
         if (win._editorState) winState.editorState = win._editorState;
       }
-      // For chat windows, save session id and claude session id
+      // For chat windows, save session id and claude session id + cwd
       if (win.type === 'chat' && termSession) {
         winState.serverSessionId = termSession.sessionId;
         const allSess = this.app.sidebar?._allSessions || [];
@@ -210,6 +211,7 @@ class LayoutManager {
           winState.backend = match.backend || 'claude';
           winState.backendSessionId = match.backendSessionId || match.sessionId;
           winState.claudeSessionId = winState.backend === 'claude' ? winState.backendSessionId : null;
+          winState.cwd = match.cwd || '';
         }
       }
       // For file explorers, save current path
@@ -267,10 +269,17 @@ class LayoutManager {
 
     // Wait for active sessions list from server
     let activeSessions = [];
+    let allSessions = [];
     try {
       const res = await fetch('/api/active');
       const data = await res.json();
       activeSessions = data.sessions || [];
+    } catch {}
+    // Also fetch all sessions (including stopped) for view-only fallback
+    try {
+      const res = await fetch('/api/sessions');
+      const data = await res.json();
+      allSessions = data.sessions || data || [];
     } catch {}
 
     // Restore windows — use gridBounds if available, otherwise absolute position
@@ -326,6 +335,20 @@ class LayoutManager {
               this.app._openExternalEditor(ws.editorState.filePath, ws.editorState.signalPath);
             }, 500);
           }
+        } else if (backendSessionId) {
+          // Terminal session not alive — open as view-only chat history
+          const cwd = ws.cwd || '';
+          const customName = this.app.sidebar?.getCustomName(backendSessionId);
+          const stoppedMatch = allSessions.find(s =>
+            (s.backendSessionId || s.sessionId) === backendSessionId && (s.backend || 'claude') === backend
+          );
+          if (stoppedMatch) {
+            this.app.viewSession(stoppedMatch.sessionId, stoppedMatch.cwd, customName || stoppedMatch.name || ws.title || 'Session', {
+              backend, backendSessionId,
+            });
+            const lastWin = [...this.app.wm.windows.values()].pop();
+            if (lastWin) applyPosition(lastWin, ws);
+          }
         }
       } else if (ws.type === 'chat') {
         const backend = ws.backend || 'claude';
@@ -341,6 +364,21 @@ class LayoutManager {
           const customName = this.app.sidebar?.getCustomName(backendSessionId || alive.backendSessionId || alive.claudeSessionId);
           const winInfo = this.app.attachSession(alive.id, customName || alive.name, alive.cwd, { mode: 'chat', backend: alive.backend || backend });
           applyPosition(winInfo, ws);
+        } else if (backendSessionId) {
+          // Session not alive (server/machine restarted) — open as view-only
+          // so user sees history and can click Resume
+          const cwd = ws.cwd || '';
+          const customName = this.app.sidebar?.getCustomName(backendSessionId);
+          const stoppedMatch = allSessions.find(s =>
+            (s.backendSessionId || s.sessionId) === backendSessionId && (s.backend || 'claude') === backend
+          );
+          if (stoppedMatch) {
+            this.app.viewSession(stoppedMatch.sessionId, stoppedMatch.cwd, customName || stoppedMatch.name || ws.title || 'Session', {
+              backend, backendSessionId,
+            });
+            const lastWin = [...this.app.wm.windows.values()].pop();
+            if (lastWin) applyPosition(lastWin, ws);
+          }
         }
       } else if (ws.type === 'files') {
         const winInfo = this.app.openFileExplorer(ws.explorerPath);
