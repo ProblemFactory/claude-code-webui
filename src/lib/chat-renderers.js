@@ -209,7 +209,14 @@ class ChatRenderers {
    */
   renderToolResult(block, msg) {
     const fp = block.input?.file_path || '';
-    const resultText = stripAnsi(block.output || '');
+    let resultText = stripAnsi(block.output || '');
+    // Parse JSON content arrays (e.g. Agent tool returns [{"type":"text","text":"..."}])
+    if (resultText.startsWith('[{')) {
+      try {
+        const parsed = JSON.parse(resultText);
+        if (Array.isArray(parsed)) resultText = parsed.map(b => b.text || '').filter(Boolean).join('\n');
+      } catch {}
+    }
     const inputStr = stripAnsi(typeof block.input === 'string' ? block.input : JSON.stringify(block.input, null, 2));
 
     if (block.status === 'error') {
