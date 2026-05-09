@@ -24,11 +24,12 @@ export function installSidebarRender(SidebarClass) {
         const sessionsDiv = group.querySelector('.folder-sessions');
         if (!sessionsDiv) continue;
         if (entry.isIntersecting) {
-          // Entering viewport — render cards if placeholder
-          if (sessionsDiv.dataset.lazy === 'placeholder') {
+          // Entering viewport — render cards if pending or placeholder
+          if (sessionsDiv.dataset.lazy === 'pending' || sessionsDiv.dataset.lazy === 'placeholder') {
             const items = sessionsDiv._lazyItems;
             if (items) {
               sessionsDiv.innerHTML = '';
+              sessionsDiv.style.minHeight = '';
               for (const s of items) sessionsDiv.appendChild(this._buildSessionCard(s));
               sessionsDiv.dataset.lazy = 'rendered';
             }
