@@ -335,6 +335,12 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
               });
               broadcastActiveSessions();
             }
+            // Track turn lifecycle for session-level streaming state
+            if (msg.type === 'event_msg') {
+              const evType = payload.type;
+              if (evType === 'task_started' && payload.turn_id) session._isStreaming = true;
+              else if (evType === 'task_complete' || evType === 'turn_aborted' || evType === 'task_failed') session._isStreaming = false;
+            }
             if (session._normalizer) session._normalizer.processLive(msg);
           } catch {
             broadcastToSession(session, id, { type: 'output', sessionId: id, data: line + '\n' });
@@ -427,6 +433,13 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
             const msg = JSON.parse(line);
             if (msg.type === '_stdin_ack') { session._stdinAckReceived = true; continue; }
 
+            // Track turn lifecycle for session-level streaming state
+            if (msg.type === 'result' || (msg.type === 'system' && msg.subtype === 'compact_boundary')) {
+              session._isStreaming = false;
+            } else if (msg.type === 'user' && !msg.parent_tool_use_id && !msg.isSidechain) {
+              session._isStreaming = true;
+            }
+
             // Track subagent lifecycle: start/stop JSONL watchers
             if (msg.type === 'system' && msg.subtype === 'task_started' && msg.task_type === 'local_agent' && msg.task_id && msg.tool_use_id) {
               startSubagentWatcher(msg.tool_use_id, msg.task_id);
@@ -488,6 +501,7 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
     }
     if (session._subNormalizers) { session._subNormalizers.clear(); }
     if (session._normalizer) { session._normalizer.listeners.length = 0; }
+    session._isStreaming = false;
     // Detect auth failure from buffer content (claude exits immediately with "Not logged in")
     const exitReason = /Not logged in|Please run \/login|OAuth token revoked/.test(session.buffer || '') ? 'not_logged_in' : undefined;
     if (cleanupOnExit) {
@@ -560,15 +574,14 @@ function restoreSessions() {
     const meta = readSessionMeta(sockFile);
     const id = meta.webuiSessionId || ('sess-' + (++sessionCounterRef.value) + '-' + Date.now());
 
-    // Detect mode from wrapper metadata (chat-wrapper writes mode: 'chat')
+    // Detect mode and streaming state from wrapper metadata
     let sessionMode = meta.mode || 'terminal';
-    if (sessionMode === 'terminal') {
-      // Also check wrapper metadata for mode
-      try {
-        const wrapperMeta = JSON.parse(fs.readFileSync(path.join(BUFFERS_DIR, id + '.json'), 'utf-8'));
-        if (wrapperMeta.mode === 'chat') sessionMode = 'chat';
-      } catch {}
-    }
+    let wrapperStreaming = false;
+    try {
+      const wrapperMeta = JSON.parse(fs.readFileSync(path.join(BUFFERS_DIR, id + '.json'), 'utf-8'));
+      if (wrapperMeta.mode === 'chat') sessionMode = 'chat';
+      if (wrapperMeta.streaming != null) wrapperStreaming = !!wrapperMeta.streaming;
+    } catch {}
 
     let savedBuffer = '';
     if (id) {
@@ -593,6 +606,7 @@ function restoreSessions() {
       sockName: sockFile,
       socketPath,
       buffer: savedBuffer,
+      _isStreaming: wrapperStreaming,
     };
     // Create normalizer for chat sessions (populated on first attach from JSONL + buffer)
     if (sessionMode === 'chat') {
