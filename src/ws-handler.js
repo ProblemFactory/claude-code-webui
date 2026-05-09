@@ -525,9 +525,12 @@ function registerWsHandler(wss, ctx) {
 
               const turnMap = session._normalizer ? session._normalizer.turnMap() : [];
               const pendingPerms = sm.activePendingPermissions?.() || {};
-              // Derive isStreaming from both wrapper meta AND normalizer messages
-              // (meta file may lag behind due to debounced writes)
-              const isStreaming = sm.isStreaming || messages.some(m => m.status === 'streaming');
+              // Derive isStreaming: prefer normalizer messages (authoritative),
+              // fall back to wrapper meta only when normalizer has no messages yet.
+              // Don't OR them — stale meta.streaming=true after pty re-attach
+              // would override the normalizer's correct state.
+              const hasStreamingMsg = messages.some(m => m.status === 'streaming');
+              const isStreaming = totalCount > 0 ? hasStreamingMsg : sm.isStreaming;
               ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, mode: 'chat',
                 messages, totalCount, chatStatus: sm.chatStatus(), isStreaming, taskState: sm.taskState(), turnMap, pendingPermissions: pendingPerms }));
             } else {
