@@ -270,6 +270,7 @@ function extractCodexThreadMeta(filePath) {
   let source = null;
   let sourceMeta = normalizeCodexSource(null);
   let forkedFromId = null;
+  let forkedFromChain = null;
   let sessionAgentRole = '';
   let sessionAgentNickname = '';
   let reviewDetected = false;
@@ -299,6 +300,7 @@ function extractCodexThreadMeta(filePath) {
         );
         if (explicitName) name = explicitName;
         forkedFromId = msg.payload?.forked_from_id || forkedFromId;
+        if (Array.isArray(msg.payload?.forked_from)) forkedFromChain = msg.payload.forked_from;
         if (!source) {
           source = msg.payload?.source || null;
           sourceMeta = normalizeCodexSource(source);
@@ -373,6 +375,7 @@ function extractCodexThreadMeta(filePath) {
     agentRole: sourceMeta.agentRole,
     agentNickname: sourceMeta.agentNickname,
     parentThreadId: sourceMeta.parentThreadId,
+    forkedFrom: forkedFromChain || [],
   };
 }
 

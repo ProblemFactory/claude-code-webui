@@ -6,6 +6,7 @@
 const { MessageManager } = require('./message-manager');
 const { createMessageManager } = require('./normalizers');
 const { listCodexThreads } = require('./codex-session-store');
+const { findCodexSessionJsonlPath, extractCodexThreadMeta } = require('./adapters/codex');
 const { cwdToProjectDir } = require('./session-store');
 
 function getSessionKey(session = {}) {
@@ -128,6 +129,13 @@ function registerWsHandler(wss, ctx) {
             initialPrompt: data.initialPrompt || '',
             mode: sessionMode,
           });
+          // For codex resume: inherit forkedFrom chain from old session's JSONL
+          if (backend === 'codex' && data.resumeId && sessionSpec.env) {
+            const oldPath = findCodexSessionJsonlPath(data.resumeId);
+            const oldChain = oldPath ? (extractCodexThreadMeta(oldPath).forkedFrom || []) : [];
+            if (!oldChain.includes(data.resumeId)) oldChain.push(data.resumeId);
+            sessionSpec.env.CODEX_WEBUI_FORKED_FROM = oldChain.join(',');
+          }
           const codexThreadBaseline = backend === 'codex' && !data.resumeId
             ? new Set(listCodexThreads({ activeSessions }).map((entry) => entry.backendSessionId || entry.sessionId).filter(Boolean))
             : null;

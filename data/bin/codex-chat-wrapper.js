@@ -146,6 +146,8 @@ const resumeId = process.env.CODEX_WEBUI_RESUME_ID || '';
 const model = process.env.CODEX_WEBUI_MODEL || '';
 const effort = process.env.CODEX_WEBUI_EFFORT || '';
 const backendPermissionMode = process.env.CODEX_WEBUI_PERMISSION_MODE || 'default';
+const forkedFromEnv = process.env.CODEX_WEBUI_FORKED_FROM || '';
+const forkedFrom = forkedFromEnv ? forkedFromEnv.split(',').filter(Boolean) : [];
 const baseCwd = process.env.CODEX_WEBUI_CWD || process.cwd();
 let permissionMode = backendPermissionMode;
 let currentPermission = resolvePermissionMode(permissionMode);
@@ -286,6 +288,7 @@ function updateMetaFromThread(resp) {
     model_provider: meta.modelProvider,
     session_name: meta.threadName,
     permissionMode: meta.permissionMode,
+    forked_from: forkedFrom.length ? forkedFrom : undefined,
     agent_role: thread.agentRole || null,
     agent_nickname: thread.agentNickname || null,
   });

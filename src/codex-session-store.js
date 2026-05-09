@@ -281,6 +281,8 @@ function listCodexThreads({ activeSessions } = {}) {
     for (const forkId of session.forkedFrom || []) mergedThreadIds.add(forkId);
   }
 
+  // Pass 1: scan all JONLs, extract metadata + forkedFrom chains
+  const allMetas = [];
   const stack = [CODEX_SESSIONS_DIR];
   while (stack.length) {
     const current = stack.pop();
@@ -288,37 +290,41 @@ function listCodexThreads({ activeSessions } = {}) {
     try { entries = fs.readdirSync(current, { withFileTypes: true }); } catch { continue; }
     for (const entry of entries) {
       const fp = path.join(current, entry.name);
-      if (entry.isDirectory()) {
-        stack.push(fp);
-        continue;
-      }
+      if (entry.isDirectory()) { stack.push(fp); continue; }
       if (!entry.isFile() || !fp.endsWith('.jsonl')) continue;
       const meta = extractCodexThreadMeta(fp);
       if (!meta.threadId || seen.has(meta.threadId)) continue;
-      if (mergedThreadIds.has(meta.threadId)) continue;
       seen.add(meta.threadId);
-      const active = activeByThreadId.get(meta.threadId);
-      const isExternal = !active && externallyOpenThreadIds.has(meta.threadId);
-      sessions.push({
-        backend: 'codex',
-        backendSessionId: meta.threadId,
-        sessionId: meta.threadId,
-        sessionKey: getSessionKey({ backend: 'codex', backendSessionId: meta.threadId }),
-        cwd: meta.cwd || '',
-        startedAt: meta.updatedAt || Date.now(),
-        status: active ? 'live' : (isExternal ? 'external' : 'stopped'),
-        name: meta.name || meta.agentNickname || meta.agentRole || '',
-        source: meta.source || null,
-        sourceKind: meta.sourceKind || null,
-        agentKind: meta.agentKind || 'primary',
-        agentRole: meta.agentRole || '',
-        agentNickname: meta.agentNickname || '',
-        parentThreadId: meta.parentThreadId || null,
-        webuiId: active?.id || null,
-        webuiName: active?.session?.name || null,
-        webuiMode: active?.session?.mode || null,
-      });
+      // Collect forkedFrom from JSONL metadata (persisted across session lifecycle)
+      for (const forkId of meta.forkedFrom || []) mergedThreadIds.add(forkId);
+      allMetas.push(meta);
     }
+  }
+
+  // Pass 2: build session list, filtering out merged threads
+  for (const meta of allMetas) {
+    if (mergedThreadIds.has(meta.threadId)) continue;
+    const active = activeByThreadId.get(meta.threadId);
+    const isExternal = !active && externallyOpenThreadIds.has(meta.threadId);
+    sessions.push({
+      backend: 'codex',
+      backendSessionId: meta.threadId,
+      sessionId: meta.threadId,
+      sessionKey: getSessionKey({ backend: 'codex', backendSessionId: meta.threadId }),
+      cwd: meta.cwd || '',
+      startedAt: meta.updatedAt || Date.now(),
+      status: active ? 'live' : (isExternal ? 'external' : 'stopped'),
+      name: meta.name || meta.agentNickname || meta.agentRole || '',
+      source: meta.source || null,
+      sourceKind: meta.sourceKind || null,
+      agentKind: meta.agentKind || 'primary',
+      agentRole: meta.agentRole || '',
+      agentNickname: meta.agentNickname || '',
+      parentThreadId: meta.parentThreadId || null,
+      webuiId: active?.id || null,
+      webuiName: active?.session?.name || null,
+      webuiMode: active?.session?.mode || null,
+    });
   }
 
   sessions.sort((a, b) => b.startedAt - a.startedAt);
