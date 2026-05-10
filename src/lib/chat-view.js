@@ -271,6 +271,9 @@ class ChatView {
     this._handler = (msg) => {
       if (msg.type === 'msg' && msg.sessionId === sessionId) {
         this._onOp(msg);
+      } else if (msg.type === 'streaming-label' && msg.sessionId === sessionId) {
+        if (msg.label) this._showTyping(msg.label);
+        else this._hideTyping();
       } else if (msg.type === 'subagent-message' && msg.sessionId === sessionId) {
         this._onSubagentMessage(msg.parentToolUseId, msg.message);
       } else if (msg.type === 'exited' && msg.sessionId === sessionId) {
@@ -355,7 +358,7 @@ class ChatView {
     }
     this._chatMinimap.setViewport(this._windowStart, this._windowEnd, this._total);
 
-    if (isStreaming) this._syncTypingIndicator('thinking...');
+    if (isStreaming) this._showTyping(meta?.streamingLabel || 'thinking...');
     this._scrollToBottom();
     // Auto-load more if content doesn't fill viewport (no scrollbar to trigger scroll event)
     setTimeout(() => {
@@ -659,10 +662,7 @@ class ChatView {
     this._messages.push(msg);
     this._syncReviewAvailability();
 
-    // Streaming indicator for live messages (server isStreaming is authority for initial state)
-    if (!this._loadingHistory && (msg.status === 'streaming' || msg.status === 'pending')) {
-      this._syncTypingIndicator();
-    }
+    // Streaming indicator driven by server's streaming-label broadcast (no client-side derivation)
 
     let el;
     switch (msg.role) {
@@ -765,9 +765,7 @@ class ChatView {
       }
     }
 
-    if (fields.status || fields.content) {
-      this._syncTypingIndicator();
-    }
+    // Streaming label driven by server broadcast — no client-side sync needed here
 
     if (this._pinned) this._scrollToBottom();
 
@@ -1044,16 +1042,10 @@ class ChatView {
     // Fetch messages from where we left off to catch up
     const missedStart = this._windowEnd;
     this._fetchMessages(missedStart, 200).then(msgs => {
-      if (!msgs.length) {
-        // No missed messages — still sync typing indicator in case streaming
-        // started or stopped while we were disconnected
-        this._syncTypingIndicator();
-        return;
-      }
+      if (!msgs.length) return;
       this._loadingHistory = true;
       for (const msg of msgs) this._onCreateMessage(msg);
       this._loadingHistory = false;
-      this._syncTypingIndicator();
       if (this._pinned) this._scrollToBottom();
     }).catch(() => {});
   }

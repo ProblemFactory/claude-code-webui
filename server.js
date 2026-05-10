@@ -335,11 +335,23 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
               });
               broadcastActiveSessions();
             }
-            // Track turn lifecycle for session-level streaming state
-            if (msg.type === 'event_msg') {
-              const evType = payload.type;
-              if (evType === 'task_started' && payload.turn_id) session._isStreaming = true;
-              else if (evType === 'task_complete' || evType === 'turn_aborted' || evType === 'task_failed') session._isStreaming = false;
+            // Track turn lifecycle: streaming state + activity label
+            {
+              let newLabel = null;
+              if (msg.type === 'event_msg') {
+                const evType = payload.type;
+                if (evType === 'task_started' && payload.turn_id) { session._isStreaming = true; newLabel = 'thinking...'; }
+                else if (evType === 'task_complete' || evType === 'turn_aborted' || evType === 'task_failed') { session._isStreaming = false; newLabel = ''; }
+              } else if (msg.type === 'response_item') {
+                const itemType = payload.type;
+                if (itemType === 'message' && payload.role === 'assistant') newLabel = 'responding';
+                else if (itemType === 'function_call') newLabel = `running ${payload.name || 'tool'}`;
+                else if (itemType === 'reasoning') newLabel = 'thinking...';
+              }
+              if (newLabel !== null && session._streamingLabel !== newLabel) {
+                session._streamingLabel = newLabel;
+                broadcastToSession(session, id, { type: 'streaming-label', sessionId: id, label: newLabel });
+              }
             }
             if (session._normalizer) session._normalizer.processLive(msg);
           } catch {
@@ -433,11 +445,28 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
             const msg = JSON.parse(line);
             if (msg.type === '_stdin_ack') { session._stdinAckReceived = true; continue; }
 
-            // Track turn lifecycle for session-level streaming state
-            if (msg.type === 'result' || (msg.type === 'system' && msg.subtype === 'compact_boundary')) {
-              session._isStreaming = false;
-            } else if (msg.type === 'user' && !msg.parent_tool_use_id && !msg.isSidechain) {
-              session._isStreaming = true;
+            // Track turn lifecycle: streaming state + activity label (broadcast to clients)
+            {
+              let newLabel = null;
+              if (msg.type === 'result' || (msg.type === 'system' && msg.subtype === 'compact_boundary')) {
+                session._isStreaming = false;
+                newLabel = '';
+              } else if (msg.type === 'user' && !msg.parent_tool_use_id && !msg.isSidechain) {
+                session._isStreaming = true;
+                newLabel = 'thinking...';
+              } else if (msg.type === 'assistant' && !msg.parent_tool_use_id && !msg.isSidechain) {
+                const blocks = msg.message?.content;
+                if (Array.isArray(blocks)) {
+                  const last = blocks[blocks.length - 1];
+                  if (last?.type === 'thinking') newLabel = 'thinking...';
+                  else if (last?.type === 'text') newLabel = 'responding';
+                  else if (last?.type === 'tool_use') newLabel = `running ${last.name || 'tool'}`;
+                }
+              }
+              if (newLabel !== null && session._streamingLabel !== newLabel) {
+                session._streamingLabel = newLabel;
+                broadcastToSession(session, id, { type: 'streaming-label', sessionId: id, label: newLabel });
+              }
             }
 
             // Track subagent lifecycle: start/stop JSONL watchers

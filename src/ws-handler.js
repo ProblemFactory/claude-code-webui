@@ -539,8 +539,9 @@ function registerWsHandler(wss, ctx) {
               // (result/compact_boundary/user for Claude, turn events for Codex).
               // Falls back to wrapper metadata file for sessions not yet tracked.
               const isStreaming = session._isStreaming ?? sm.isStreaming;
+              const streamingLabel = isStreaming ? (session._streamingLabel || 'thinking...') : '';
               ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, mode: 'chat',
-                messages, totalCount, chatStatus: sm.chatStatus(), isStreaming, taskState: sm.taskState(), turnMap, pendingPermissions: pendingPerms }));
+                messages, totalCount, chatStatus: sm.chatStatus(), isStreaming, streamingLabel, taskState: sm.taskState(), turnMap, pendingPermissions: pendingPerms }));
             } else {
               ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, buffer: session.buffer || '' }));
             }
