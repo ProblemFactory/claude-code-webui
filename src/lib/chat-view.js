@@ -302,7 +302,7 @@ class ChatView {
         this._renderers.appendSystem('Disconnected from server');
       } else if (this._hasConnected) {
         this._renderers.appendSystem('Reconnected');
-        this._reattach();
+        this._reattach(true);
       }
       this._hasConnected = true;
     };
@@ -1035,9 +1035,29 @@ class ChatView {
   }
 
   // Re-attach to session after reconnect: re-register with server + sync missed messages
-  _reattach() {
+  _reattach(keepDisabled = false) {
+    // Keep input disabled until server confirms re-attach — prevents
+    // sending messages before the WS is registered in session.clients
+    if (keepDisabled && this._chatInput) this._chatInput.setDisconnected(true);
+
     // Re-attach so server adds this WS to session.clients again
     this.ws.send({ type: 'attach', sessionId: this.sessionId });
+
+    // Wait for attached response before re-enabling input
+    const handler = (msg) => {
+      if (msg.type !== 'attached' || msg.sessionId !== this.sessionId) return;
+      this.ws.offGlobal(handler);
+      if (this._chatInput) this._chatInput.setDisconnected(false);
+      // Sync streaming label from server
+      if (msg.isStreaming) this._showTyping(msg.streamingLabel || 'thinking...');
+      else this._hideTyping();
+    };
+    this.ws.onGlobal(handler);
+    // Safety: re-enable after 5s even if attached never arrives
+    setTimeout(() => {
+      this.ws.offGlobal(handler);
+      if (this._chatInput) this._chatInput.setDisconnected(false);
+    }, 5000);
 
     // Fetch messages from where we left off to catch up
     const missedStart = this._windowEnd;

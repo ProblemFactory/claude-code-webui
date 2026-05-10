@@ -117,6 +117,32 @@ export class ChatInput {
         }
       }
       if (e.isComposing || e.keyCode === 229) return; // IME composing
+      // Input history: ArrowUp on empty textarea recalls previous sent message
+      if (e.key === 'ArrowUp' && !this._textarea.value.trim() && this._sentHistory?.length) {
+        e.preventDefault();
+        if (this._historyIdx == null) this._historyIdx = this._sentHistory.length;
+        if (this._historyIdx > 0) {
+          this._historyIdx--;
+          this._textarea.value = this._sentHistory[this._historyIdx];
+          this._textarea.style.height = 'auto';
+          this._textarea.style.height = Math.min(this._textarea.scrollHeight, 200) + 'px';
+        }
+        return;
+      }
+      if (e.key === 'ArrowDown' && this._historyIdx != null) {
+        e.preventDefault();
+        this._historyIdx++;
+        if (this._historyIdx >= this._sentHistory.length) {
+          this._historyIdx = null;
+          this._textarea.value = '';
+        } else {
+          this._textarea.value = this._sentHistory[this._historyIdx];
+        }
+        this._textarea.style.height = 'auto';
+        this._textarea.style.height = Math.min(this._textarea.scrollHeight, 200) + 'px';
+        return;
+      }
+      if (this._historyIdx != null && e.key !== 'ArrowUp' && e.key !== 'ArrowDown') this._historyIdx = null;
       if (this._expanded) {
         if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); this._send(); }
       } else {
@@ -289,6 +315,14 @@ export class ChatInput {
     const hasAttachments = this._attachments.length > 0;
     if (!text && !hasAttachments) return;
     const msgId = Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+
+    // Save to input history (ring buffer, max 50)
+    if (text) {
+      if (!this._sentHistory) this._sentHistory = [];
+      this._sentHistory.push(text);
+      if (this._sentHistory.length > 50) this._sentHistory.shift();
+      this._historyIdx = null;
+    }
 
     this._textarea.value = '';
     this._textarea.style.height = '';
