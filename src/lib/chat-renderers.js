@@ -120,6 +120,15 @@ class ChatRenderers {
   renderUserMsg(msg) {
     const content = msg.content;
     if (!content?.length) return null;
+
+    // Detect system notifications: command tags, meta directives, reminders
+    const rawText = content.map(b => b.text || '').join('');
+    const isNotification = /^<(command-name|local-command|task-notification|system-reminder)/.test(rawText.trim())
+      || /^A session-scoped Stop hook is now active/.test(rawText.trim());
+    if (isNotification) {
+      return this._renderNotificationMsg(rawText);
+    }
+
     const el = document.createElement('div');
     el.className = 'chat-msg chat-msg-user';
     el._rawMsg = msg;
@@ -129,12 +138,43 @@ class ChatRenderers {
       return '';
     }).join('');
 
-    const rawText = content.map(b => b.text || '').join('');
     const textHtml = rawText.length > 500
       ? `<details class="chat-long-msg"><summary><span>${escHtml(rawText.substring(0, 120))}... (${rawText.length} chars)</span></summary>${parts}</details>`
       : parts;
 
     this.wrapMsg(el, 'user', 'You', textHtml);
+    return el;
+  }
+
+  _renderNotificationMsg(rawText) {
+    const el = document.createElement('div');
+    el.className = 'chat-msg chat-msg-system chat-system-notification';
+    el._rawMsg = { role: 'system' };
+
+    // Extract readable label from tagged content
+    let label = '', detail = '';
+    const cmdMatch = rawText.match(/<command-name>\/?(\w+)<\/command-name>/);
+    const argsMatch = rawText.match(/<command-args>([\s\S]*?)<\/command-args>/);
+    const stdoutMatch = rawText.match(/<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/);
+    const hookMatch = rawText.match(/^A session-scoped Stop hook is now active with condition: "([\s\S]*?)"/);
+
+    if (cmdMatch) {
+      label = `/${cmdMatch[1]}`;
+      if (argsMatch) detail = argsMatch[1].trim();
+    } else if (stdoutMatch) {
+      label = stdoutMatch[1].trim().substring(0, 80);
+      if (stdoutMatch[1].length > 80) label += '...';
+    } else if (hookMatch) {
+      label = `Goal: ${hookMatch[1].substring(0, 60)}${hookMatch[1].length > 60 ? '...' : ''}`;
+    } else {
+      label = rawText.replace(/<[^>]+>/g, '').trim().substring(0, 80) || 'notification';
+    }
+
+    if (detail) {
+      el.innerHTML = `<details class="chat-hook-details"><summary class="chat-hook-summary">${escHtml(label)}</summary><pre class="chat-hook-output">${escHtml(detail)}</pre></details>`;
+    } else {
+      el.innerHTML = `<span class="chat-system-text">${escHtml(label)}</span>`;
+    }
     return el;
   }
 
