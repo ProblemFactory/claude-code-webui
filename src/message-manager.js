@@ -180,6 +180,29 @@ class MessageManager {
       if (emit) this._emit({ op: 'create', message: msg });
     }
 
+    if (raw.subtype === 'hook_response') {
+      const name = raw.hook_name || raw.hook_event || 'hook';
+      const ok = raw.outcome === 'success' || raw.exit_code === 0;
+      const icon = ok ? '✓' : '✗';
+      const msg = this._create({
+        role: 'system', status: ok ? 'complete' : 'error',
+        content: [{ type: 'system_info', text: `${icon} Hook: ${name}`, hookData: { name, event: raw.hook_event, outcome: raw.outcome, exitCode: raw.exit_code, output: raw.output } }],
+      });
+      if (emit) this._emit({ op: 'create', message: msg });
+    }
+
+    if (raw.subtype === 'stop_hook_summary') {
+      const count = raw.hookCount || 0;
+      const infos = raw.hookInfos || [];
+      const failed = infos.filter(h => h.exitCode !== 0 && h.exitCode != null);
+      const text = failed.length ? `${count} hooks ran, ${failed.length} failed` : `${count} hooks ran`;
+      const msg = this._create({
+        role: 'system', status: failed.length ? 'error' : 'complete',
+        content: [{ type: 'system_info', text }],
+      });
+      if (emit) this._emit({ op: 'create', message: msg });
+    }
+
     // Task lifecycle → edit existing tool message
     if (raw.tool_use_id) {
       const pending = this.pendingToolCalls.get(raw.tool_use_id);

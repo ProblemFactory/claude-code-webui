@@ -280,9 +280,25 @@ class ChatRenderers {
       if (d.slashCommands) sideEffect.slashCommands = d.slashCommands.map(c => c.startsWith('/') ? c : '/' + c);
       return { el: null, sideEffect };
     }
+    // Hook events — compact collapsible
+    if (msg.content?.[0]?.hookData) {
+      const h = msg.content[0].hookData;
+      const el = document.createElement('div');
+      el.className = 'chat-msg chat-msg-system chat-system-notification';
+      const output = h.output ? escHtml(h.output).substring(0, 500) : '';
+      el.innerHTML = `<details class="chat-hook-details"><summary class="chat-hook-summary">${escHtml(text)}</summary>${output ? `<pre class="chat-hook-output">${output}</pre>` : ''}</details>`;
+      return { el, sideEffect: null };
+    }
     // Error / interrupted
     if (msg.status === 'error' || msg.status === 'interrupted') {
       return { el: this.appendSystem(text), sideEffect: null };
+    }
+    // Other system messages (hook summary, etc.)
+    if (text) {
+      const el = document.createElement('div');
+      el.className = 'chat-msg chat-msg-system chat-system-notification';
+      el.innerHTML = `<span class="chat-system-text">${escHtml(text)}</span>`;
+      return { el, sideEffect: null };
     }
     return null;
   }

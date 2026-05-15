@@ -206,7 +206,11 @@
 .chat-system-notification > summary::-webkit-details-marker { display: none; }
 .chat-system-notification > summary::before { content: '\25B8  '; }
 .chat-system-notification[open] > summary::before { content: '\25BE  '; }
-.chat-system-notification > pre { font-size: 10px; color: var(--text-dim); white-space: pre-wrap; word-break: break-word; margin: 4px 0; padding: 4px 8px; background: var(--bg-root); border-radius: var(--radius-sm); }
+.chat-system-notification pre { font-size: 10px; color: var(--text-dim); white-space: pre-wrap; word-break: break-word; margin: 4px 0; padding: 4px 8px; background: var(--bg-root); border-radius: var(--radius-sm); max-height: 150px; overflow: auto; }
+.chat-hook-summary { cursor: pointer; list-style: none; }
+.chat-hook-summary::-webkit-details-marker { display: none; }
+.chat-hook-summary::before { content: '\25B8  '; }
+.chat-hook-details[open] > .chat-hook-summary::before { content: '\25BE  '; }
 [data-role-indicator="border"] .chat-msg-system-notification { border-left-color: var(--text-dim); }
 
 
