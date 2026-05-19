@@ -635,16 +635,20 @@ class ChatRenderers {
   cleanPath(p) { return p.replace(/[`'".,;:!?)}\]]+$/, ''); }
 
   /**
-   * Linkify URLs in a text segment. esc=true wraps output in escHtml (for markdown HTML text nodes).
-   * esc=false assumes input is already HTML-escaped (from escHtml on plain text).
+   * Linkify URLs in a text segment.
+   * Both call paths feed already-HTML-escaped text in:
+   *   esc=true  → called from linkify() on marked.parse() output (escaped by marked)
+   *   esc=false → called from linkifyText() which escHtml's plain text first
+   * The URL regex must include &amp; sequences so multi-param URLs aren't truncated.
+   * Output must NOT call escHtml again — that would double-escape &amp; → &amp;amp;,
+   * causing the user to copy &amp; instead of & when they grab a URL with query params.
    */
   linkifyUrls(text, esc) {
-    const re = esc ? /(https?:\/\/[^\s<>"')\]]+)/g : /(https?:\/\/[^\s<>&]+)/g;
-    const e = esc ? escHtml : s => s;
+    const re = /(https?:\/\/(?:[^\s<>"')\]&]|&amp;)+)/g;
     return text.replace(re, (raw) => {
       const url = this.cleanPath(raw);
       const after = raw.slice(url.length);
-      return `<span class="chat-link" data-href="${e(url)}" title="Click to copy, Ctrl+Click to open">${e(url)}</span>${e(after)}`;
+      return `<span class="chat-link" data-href="${url}" title="Click to copy, Ctrl+Click to open">${url}</span>${after}`;
     });
   }
 
