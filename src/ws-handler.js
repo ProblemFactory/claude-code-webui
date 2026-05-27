@@ -526,8 +526,14 @@ function registerWsHandler(wss, ctx) {
             attachedSessions.add(data.sessionId);
             if (session.mode === 'chat') {
               const sm = createSessionMessages(session, data.sessionId);
-              // Initialize normalizer from history if not yet done
-              if (session._normalizer && session._normalizer.total === 0) {
+              // Initialize normalizer from full JSONL + buffer history on first attach.
+              // Can't use total===0: PTY output via processLive may have populated the
+              // normalizer with partial buffer data before any client connected.
+              if (session._normalizer && !session._historyLoaded) {
+                session._historyLoaded = true;
+                const opHandler = session._normalizer.listeners[0];
+                session._normalizer = createMessageManager(session.backend || 'claude', data.sessionId);
+                if (opHandler) session._normalizer.onOp(opHandler);
                 session._normalizer.convertHistory(sm.raw());
               }
               const messages = session._normalizer ? session._normalizer.tail(50) : [];
