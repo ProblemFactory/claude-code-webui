@@ -132,11 +132,14 @@ function recordFingerprint(record, turnId) {
       if (webuiMsgId) return `${turnId}:response_item:user:${webuiMsgId}`;
     }
     const key = payload.call_id || payload.callId || payload.role || payload.type || 'item';
-    return `${turnId}:response_item:${payload.type}:${key}:${JSON.stringify(payload)}`;
+    // Strip volatile fields (item_id present in JSONL but absent in buffer)
+    const { item_id, itemId, ...stablePayload } = payload;
+    return `${turnId}:response_item:${payload.type}:${key}:${JSON.stringify(stablePayload)}`;
   }
   if (record.type === 'event_msg') {
     const key = payload.turn_id || payload.turnId || payload.call_id || payload.callId || payload.item_id || payload.itemId || payload.type || 'event';
-    return `${turnId}:event_msg:${payload.type}:${key}:${JSON.stringify(payload)}`;
+    const { item_id, itemId, ...stablePayload } = payload;
+    return `${turnId}:event_msg:${payload.type}:${key}:${JSON.stringify(stablePayload)}`;
   }
   return null;
 }
