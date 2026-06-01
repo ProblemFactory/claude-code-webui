@@ -519,6 +519,7 @@ function handleNotification(method, params) {
   }
   if (method === 'turn/completed') {
     const status = params?.status || params?.turn?.status || 'completed';
+    const normalEnd = status === 'completed' || status === 'success' || !status;
     meta.activeTurnId = null;
     meta.streaming = false;
     if (status === 'interrupted' || status === 'cancelled' || status === 'canceled') emitTaskEvent('turn_aborted', { turn_id: currentTurnId });
@@ -526,6 +527,17 @@ function handleNotification(method, params) {
     else emitTaskEvent('task_complete', { turn_id: currentTurnId, last_agent_message: '' });
     currentTurnId = null;
     scheduleMeta();
+
+    // Goal auto-continue: if goal is active and turn completed normally, start a new turn
+    if (normalEnd && meta.goal && meta.threadId) {
+      setTimeout(async () => {
+        try {
+          const goalPrompt = `[Goal still active: "${meta.goal}"]\nYou stopped but your goal is not yet complete. Continue working toward it. Do not ask for confirmation — just proceed.`;
+          await startTurn(goalPrompt, []);
+          log('Goal auto-continue sent');
+        } catch (e) { log(`Goal auto-continue failed: ${e.message}`); }
+      }, 1000);
+    }
     return;
   }
   if (method === 'item/agentMessage/delta') {
@@ -715,6 +727,12 @@ async function handleInput(msg) {
       delivery: delivery || 'inline',
       target,
     });
+    return;
+  }
+  if (msg.type === 'set-goal') {
+    meta.goal = msg.goal || null;
+    scheduleMeta();
+    log(`Goal ${meta.goal ? 'set: ' + meta.goal.substring(0, 80) : 'cleared'}`);
     return;
   }
   if (msg.type === 'set-thread-name') {

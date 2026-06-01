@@ -274,6 +274,8 @@ class ChatView {
       } else if (msg.type === 'streaming-label' && msg.sessionId === sessionId) {
         if (msg.label) this._showTyping(msg.label);
         else this._hideTyping();
+      } else if (msg.type === 'goal-updated' && msg.sessionId === sessionId) {
+        this._onGoalUpdated(msg.goal);
       } else if (msg.type === 'subagent-message' && msg.sessionId === sessionId) {
         this._onSubagentMessage(msg.parentToolUseId, msg.message);
       } else if (msg.type === 'exited' && msg.sessionId === sessionId) {
@@ -327,6 +329,7 @@ class ChatView {
     if (meta) {
       if (meta.chatStatus) this.applyStatus(meta.chatStatus);
       if (meta.taskState) this._applyTaskState(meta.taskState);
+      if (meta.goal != null) this._onGoalUpdated(meta.goal);
       // Restore pending permission overlays from server (survived in buffer)
       if (meta.pendingPermissions) {
         for (const [toolUseId, cr] of Object.entries(meta.pendingPermissions)) {
@@ -819,6 +822,25 @@ class ChatView {
     if (!this._streamStatus) return;
     this._streamStatus.classList.add('hidden');
     this._streamStatus.innerHTML = '';
+  }
+
+  _onGoalUpdated(goal) {
+    if (!this._goalBanner) {
+      this._goalBanner = document.createElement('div');
+      this._goalBanner.className = 'chat-goal-banner hidden';
+      // Insert before message list
+      this._container.insertBefore(this._goalBanner, this._messageList);
+    }
+    if (goal) {
+      this._goalBanner.innerHTML = `<span class="chat-goal-icon">\u{1F3AF}</span><span class="chat-goal-text">${escHtml(goal)}</span><button class="chat-goal-clear" title="Clear goal">✕</button>`;
+      this._goalBanner.classList.remove('hidden');
+      this._goalBanner.querySelector('.chat-goal-clear').onclick = () => {
+        this.ws.send({ type: 'set-goal', sessionId: this.sessionId, goal: null });
+      };
+    } else {
+      this._goalBanner.classList.add('hidden');
+      this._goalBanner.innerHTML = '';
+    }
   }
 
   _onSubagentMessage(parentToolUseId, msg) {

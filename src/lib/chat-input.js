@@ -314,6 +314,19 @@ export class ChatInput {
     const text = this._textarea.value.trim();
     const hasAttachments = this._attachments.length > 0;
     if (!text && !hasAttachments) return;
+
+    // Intercept /goal command — handled by wrapper, not sent as chat message
+    const goalMatch = text.match(/^\/goal(?:\s+(.*))?$/s);
+    if (goalMatch) {
+      const goalText = (goalMatch[1] || '').trim();
+      this._ws.send({ type: 'set-goal', sessionId: this._sessionId, goal: goalText || null });
+      this._textarea.value = '';
+      this._textarea.style.height = '';
+      clearDraft('chat', this._sessionId);
+      this._onSend();
+      return;
+    }
+
     const msgId = Date.now() + '-' + Math.random().toString(36).slice(2, 8);
 
     // Save to input history (ring buffer, max 50)

@@ -141,13 +141,27 @@ child.stdout.on('data', (chunk) => {
     if (msg.type === 'user') { meta.streaming = true; scheduleMeta(); }
     if (msg.type === 'result' || (msg.type === 'system' && msg.subtype === 'compact_boundary')) {
       meta.streaming = false;
-      // Clean up background command tasks on turn end — stream-json rarely
-      // emits task_notification for them (known bug). Agent tasks are kept
-      // since they may genuinely span multiple turns.
       for (const [id, t] of Object.entries(meta.tasks)) {
         if (t.type === 'command') delete meta.tasks[id];
       }
       scheduleMeta();
+
+      // Goal auto-continue: if a goal is active and the turn completed normally,
+      // send a follow-up message to keep the model working toward the goal.
+      if (msg.type === 'result' && meta.goal && !msg.is_error && child.stdin.writable) {
+        const continueMsg = JSON.stringify({
+          type: 'user',
+          message: { role: 'user', content: [{ type: 'text',
+            text: `[Goal still active: "${meta.goal}"]\nYou stopped but your goal is not yet complete. Continue working toward it. Do not ask for confirmation — just proceed.`
+          }] }
+        });
+        setTimeout(() => {
+          if (child.stdin.writable) {
+            child.stdin.write(continueMsg + '\n');
+            log('Goal auto-continue sent');
+          }
+        }, 1000);
+      }
     }
 
     // Track todos: TodoWrite tool_use in assistant messages
@@ -201,12 +215,18 @@ try {
       // even when the model takes 30+ seconds to respond.
       try { process.stdout.write(JSON.stringify({ type: '_stdin_ack', timestamp: Date.now() }) + '\n'); } catch {}
       try {
-        // Try parsing as JSON — if valid, pass through as-is
-        JSON.parse(line);
+        const parsed = JSON.parse(line);
+        // Handle goal commands from WebUI
+        if (parsed.type === 'set-goal') {
+          meta.goal = parsed.goal || null;
+          scheduleMeta();
+          log(`Goal ${meta.goal ? 'set: ' + meta.goal.substring(0, 80) : 'cleared'}`);
+          continue;
+        }
+        // Pass through as-is to claude
         if (child.stdin.writable) child.stdin.write(line + '\n');
       } catch {
         // Plain text — wrap as stream-json user message
-        // Format must match JSONL schema: {type, message: {role, content: [{type, text}]}}
         const msg = JSON.stringify({
           type: 'user',
           message: { role: 'user', content: [{ type: 'text', text: line }] }

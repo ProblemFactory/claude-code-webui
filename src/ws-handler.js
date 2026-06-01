@@ -408,6 +408,18 @@ function registerWsHandler(wss, ctx) {
           break;
         }
 
+        case 'set-goal': {
+          const session = activeSessions.get(data.sessionId);
+          if (session?.pty && session.mode === 'chat') {
+            session.pty.write(JSON.stringify({ type: 'set-goal', goal: data.goal || null }) + '\n');
+            // Broadcast goal state to all clients on this session
+            const goalText = data.goal || null;
+            session._goal = goalText;
+            broadcastToSession(session, data.sessionId, { type: 'goal-updated', sessionId: data.sessionId, goal: goalText });
+          }
+          break;
+        }
+
         case 'rename-session': {
           const trimmedName = typeof data.name === 'string' ? data.name.trim() : '';
           let targetId = data.webuiId && activeSessions.has(data.webuiId) ? data.webuiId : null;
@@ -547,7 +559,7 @@ function registerWsHandler(wss, ctx) {
               const isStreaming = session._isStreaming ?? sm.isStreaming;
               const streamingLabel = isStreaming ? (session._streamingLabel || 'thinking...') : '';
               ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, mode: 'chat',
-                messages, totalCount, chatStatus: sm.chatStatus(), isStreaming, streamingLabel, taskState: sm.taskState(), turnMap, pendingPermissions: pendingPerms }));
+                messages, totalCount, chatStatus: sm.chatStatus(), isStreaming, streamingLabel, taskState: sm.taskState(), turnMap, pendingPermissions: pendingPerms, goal: session._goal || null }));
             } else {
               ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, buffer: session.buffer || '' }));
             }
