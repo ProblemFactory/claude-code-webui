@@ -997,6 +997,28 @@ class App {
     });
   }
 
+  forkSession(sessionInfo) {
+    const backend = sessionInfo.backend || 'claude';
+    const resumeId = sessionInfo.backendSessionId || sessionInfo.sessionId;
+    const baseName = sessionInfo.webuiName || sessionInfo.name || 'Session';
+    // Generate fork name: "Name (forked)", "Name (forked 2)", etc.
+    const allNames = (this.sidebar._allSessions || []).map(s => s.webuiName || s.name || '');
+    let forkName = `${baseName} (forked)`;
+    let n = 2;
+    while (allNames.includes(forkName)) { forkName = `${baseName} (forked ${n++})`; }
+
+    const mode = sessionInfo.webuiMode || this.settings.get('session.defaultMode') || 'chat';
+    this.createSession({
+      cwd: sessionInfo.cwd,
+      name: forkName,
+      resumeId,
+      mode,
+      backend,
+      backendSessionId: resumeId,
+      extraArgs: backend === 'claude' ? '--fork-session' : '',
+    });
+  }
+
   // Open a stopped session as view-only (load JSONL, no claude --resume)
   viewSession(sessionId, cwd, sessionName, { syncId, backend = 'claude', backendSessionId, agentKind, agentRole, agentNickname, sourceKind, parentThreadId } = {}) {
     this._closeSidebarOnMobile();

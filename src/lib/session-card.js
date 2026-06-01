@@ -15,6 +15,7 @@ const ICON = {
   terminal:  _s('<rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M4.5 7l2 2-2 2M8.5 11h3"/>'),
   terminate: _s('<path d="M4 4l8 8M12 4l-8 8"/>'),
   goto:      _s('<path d="M5 1l7 7-7 7"/>'),
+  fork:      _s('<path d="M8 2v6M8 8c-3 0-4 2-4 4M8 8c3 0 4 2 4 4"/><circle cx="4" cy="13" r="1.5"/><circle cx="12" cy="13" r="1.5"/><circle cx="8" cy="2" r="1.5"/>'),
 };
 
 /**
@@ -427,6 +428,13 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
       });
     };
     actionsDiv.appendChild(viewBtn);
+
+    // Fork button
+    const forkBtn = document.createElement('button');
+    forkBtn.className = 'session-detail-btn';
+    forkBtn.innerHTML = ICON.fork + ' Fork';
+    forkBtn.onclick = (e) => { e.stopPropagation(); app.forkSession(s); };
+    actionsDiv.appendChild(forkBtn);
   }
 
   // Terminate button (for any running session)
