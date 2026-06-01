@@ -410,12 +410,19 @@ function registerWsHandler(wss, ctx) {
 
         case 'set-goal': {
           const session = activeSessions.get(data.sessionId);
-          if (session?.pty && session.mode === 'chat') {
-            session.pty.write(JSON.stringify({ type: 'set-goal', goal: data.goal || null }) + '\n');
-            // Broadcast goal state to all clients on this session
-            const goalText = data.goal || null;
-            session._goal = goalText;
-            broadcastToSession(session, data.sessionId, { type: 'goal-updated', sessionId: data.sessionId, goal: goalText });
+          if (session?.mode === 'chat') {
+            if (data.action === 'status') {
+              // Show current goal status to the requesting client only
+              const goal = session._goal;
+              const msg = goal ? `Goal active: ${goal}\n\`/goal clear\` to remove, \`/goal <new text>\` to replace.` : 'No goal set. Usage: `/goal <condition>`';
+              ws.send(JSON.stringify({ type: 'goal-updated', sessionId: data.sessionId, goal: session._goal || null, statusMsg: msg }));
+            } else {
+              const goalText = data.goal || null;
+              if (session.pty) session.pty.write(JSON.stringify({ type: 'set-goal', goal: goalText }) + '\n');
+              session._goal = goalText;
+              const msg = goalText ? `Goal set: ${goalText}` : `Goal cleared`;
+              broadcastToSession(session, data.sessionId, { type: 'goal-updated', sessionId: data.sessionId, goal: goalText, statusMsg: msg });
+            }
           }
           break;
         }

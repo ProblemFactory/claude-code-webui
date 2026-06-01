@@ -318,12 +318,18 @@ export class ChatInput {
     // Intercept /goal command — handled by wrapper, not sent as chat message
     const goalMatch = text.match(/^\/goal(?:\s+(.*))?$/s);
     if (goalMatch) {
-      const goalText = (goalMatch[1] || '').trim();
-      this._ws.send({ type: 'set-goal', sessionId: this._sessionId, goal: goalText || null });
+      const goalArg = (goalMatch[1] || '').trim();
+      if (!goalArg) {
+        // /goal with no args → request status
+        this._ws.send({ type: 'set-goal', sessionId: this._sessionId, action: 'status' });
+      } else if (goalArg === 'clear') {
+        this._ws.send({ type: 'set-goal', sessionId: this._sessionId, goal: null });
+      } else {
+        this._ws.send({ type: 'set-goal', sessionId: this._sessionId, goal: goalArg });
+      }
       this._textarea.value = '';
       this._textarea.style.height = '';
       clearDraft('chat', this._sessionId);
-      this._onSend();
       return;
     }
 
