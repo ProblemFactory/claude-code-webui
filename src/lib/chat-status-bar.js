@@ -327,7 +327,14 @@ export class ChatStatusBar {
       const continueBtn = document.createElement('button');
       continueBtn.className = 'chat-perm-btn chat-perm-allow';
       continueBtn.textContent = 'Continue Goal';
-      continueBtn.onclick = () => { dropdown.remove(); this._ws.send({ type: 'set-goal', sessionId: this._sessionId, goal: this._goal }); };
+      continueBtn.onclick = () => {
+        dropdown.remove();
+        const goal = this._goal;
+        this._ws.send({ type: 'set-goal', sessionId: this._sessionId, goal });
+        this._ws.send({ type: 'chat-input', sessionId: this._sessionId,
+          text: `[Goal: "${goal}"]\nContinue working toward this goal. Do not ask for confirmation — just proceed.`,
+          msgId: Date.now() + '-goal' });
+      };
       const clearBtn = document.createElement('button');
       clearBtn.className = 'chat-perm-btn chat-perm-deny';
       clearBtn.textContent = 'Clear';
