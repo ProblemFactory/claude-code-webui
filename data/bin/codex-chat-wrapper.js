@@ -493,6 +493,24 @@ function handleNotification(method, params) {
     return;
   }
   if (method === 'thread/status/changed') return;
+  if (method === 'thread/goal/updated') {
+    const goal = params?.goal;
+    meta.goal = goal?.objective || null;
+    meta.goalStatus = goal?.status || null;
+    meta.goalElapsed = (goal?.time_used_seconds || 0) * 1000;
+    meta.goalTokensUsed = goal?.tokens_used || 0;
+    scheduleMeta();
+    record('event_msg', { type: 'goal_updated', goal });
+    return;
+  }
+  if (method === 'thread/goal/cleared') {
+    meta.goal = null;
+    meta.goalStatus = null;
+    meta.goalElapsed = 0;
+    scheduleMeta();
+    record('event_msg', { type: 'goal_cleared', threadId: params?.threadId });
+    return;
+  }
   if (method === 'thread/name/updated') {
     updateMetaFromThread({ thread: { id: params?.threadId || meta.threadId, name: resolveThreadName(params) } });
     return;
@@ -594,7 +612,7 @@ async function startTurn(text, attachments = []) {
   if (!meta.threadId) throw new Error('No threadId available for turn/start');
   const input = encodeUserInput(text, attachments);
   if (!input.length) return;
-  const turnParams = {
+  const resp = await request('turn/start', {
     threadId: meta.threadId,
     input,
     cwd: meta.cwd,
@@ -603,9 +621,7 @@ async function startTurn(text, attachments = []) {
     model: meta.model || undefined,
     effort: effort || undefined,
     personality: 'pragmatic',
-  };
-  if (meta.goal) turnParams.goal = { condition: meta.goal };
-  const resp = await request('turn/start', turnParams, 120000);
+  }, 120000);
   currentTurnId = resp?.turn?.id || currentTurnId;
   meta.activeTurnId = currentTurnId;
   meta.streaming = true;
@@ -723,9 +739,22 @@ async function handleInput(msg) {
     return;
   }
   if (msg.type === 'set-goal') {
-    meta.goal = msg.goal || null;
+    if (msg.goal && meta.threadId) {
+      try {
+        await request('thread/goal/set', { threadId: meta.threadId, objective: msg.goal }, 30000);
+        meta.goal = msg.goal;
+        log('Goal set via thread/goal/set: ' + msg.goal.substring(0, 80));
+      } catch (e) { log('thread/goal/set failed: ' + e.message); meta.goal = msg.goal; }
+    } else if (!msg.goal && meta.threadId) {
+      try {
+        await request('thread/goal/clear', { threadId: meta.threadId }, 30000);
+        log('Goal cleared via thread/goal/clear');
+      } catch (e) { log('thread/goal/clear failed: ' + e.message); }
+      meta.goal = null;
+    } else {
+      meta.goal = msg.goal || null;
+    }
     scheduleMeta();
-    log(`Goal ${meta.goal ? 'set: ' + meta.goal.substring(0, 80) : 'cleared'}`);
     return;
   }
   if (msg.type === 'set-thread-name') {

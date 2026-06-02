@@ -275,7 +275,8 @@ class ChatView {
         if (msg.label) this._showTyping(msg.label);
         else this._hideTyping();
       } else if (msg.type === 'goal-updated' && msg.sessionId === sessionId) {
-        this._onGoalUpdated(msg.goal);
+        this._onGoalUpdated(msg.goal, msg.goalElapsed);
+        if (msg.goalStatus) this._statusBar.setGoalStatus(msg.goalStatus);
         if (msg.statusMsg) this._renderers.appendSystem(msg.statusMsg);
       } else if (msg.type === 'subagent-message' && msg.sessionId === sessionId) {
         this._onSubagentMessage(msg.parentToolUseId, msg.message);

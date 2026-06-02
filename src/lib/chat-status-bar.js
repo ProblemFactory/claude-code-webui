@@ -37,8 +37,8 @@ export class ChatStatusBar {
     this._permissionModes = null;
     this._activeTasks = null;
     this._goal = null;
-    this._goalStartedAt = 0;
-    this._goalTimerInterval = null;
+    this._goalElapsed = 0;
+    this._goalStatus = null;
 
     // Container reference (set via popupContainer setter for dropdown positioning)
     this._popupContainer = null;
@@ -143,17 +143,17 @@ export class ChatStatusBar {
   setGoal(goal, elapsedMs) {
     if (goal) {
       this._goal = goal;
-      this._goalElapsed = elapsedMs || this._goalElapsed || 0;
-      this._goalPausedAt = Date.now();
-      if (!this._goalTimerInterval) {
-        this._goalTimerInterval = setInterval(() => this._updateGoalTimer(), 1000);
-      }
+      if (elapsedMs) this._goalElapsed = elapsedMs;
     } else {
       this._goal = null;
       this._goalElapsed = 0;
-      this._goalPausedAt = 0;
-      if (this._goalTimerInterval) { clearInterval(this._goalTimerInterval); this._goalTimerInterval = null; }
+      this._goalStatus = null;
     }
+    this.render();
+  }
+
+  setGoalStatus(status) {
+    this._goalStatus = status;
     this.render();
   }
 
@@ -174,8 +174,10 @@ export class ChatStatusBar {
     // Goal indicator
     if (this._goal) {
       const elapsed = this._fmtElapsed(this._goalElapsed || 0);
+      const status = this._goalStatus || '';
+      const statusIcon = status === 'Active' ? '\u{25B6}' : status === 'Paused' ? '⏸' : status === 'Complete' ? '✓' : '';
       const shortGoal = this._goal.length > 30 ? this._goal.substring(0, 30) + '…' : this._goal;
-      parts.push(`<span class="chat-status-goal chat-status-clickable" title="${escHtml(this._goal)}">\u{1F3AF} <span class="chat-goal-timer">${elapsed}</span> ${escHtml(shortGoal)}</span>`);
+      parts.push(`<span class="chat-status-goal chat-status-clickable" title="${escHtml(this._goal)}">\u{1F3AF}${statusIcon ? ' ' + statusIcon : ''} <span class="chat-goal-timer">${elapsed}</span> ${escHtml(shortGoal)}</span>`);
     }
 
     // Permission mode (always show, click to change)
@@ -234,12 +236,6 @@ export class ChatStatusBar {
     if (m < 60) return `${m}m${String(s % 60).padStart(2, '0')}s`;
     const h = Math.floor(m / 60);
     return `${h}h${String(m % 60).padStart(2, '0')}m`;
-  }
-
-  _updateGoalTimer() {
-    const el = this._element.querySelector('.chat-goal-timer');
-    if (!el) return;
-    el.textContent = this._fmtElapsed(this._goalElapsed || 0);
   }
 
   _onClick(e) {
@@ -321,7 +317,8 @@ export class ChatStatusBar {
       text.textContent = this._goal;
       const elapsed = document.createElement('div');
       elapsed.style.cssText = 'font-size:11px;color:var(--text-dim)';
-      elapsed.textContent = `Pursued for ${this._fmtElapsed(this._goalElapsed || 0)}`;
+      const statusLabel = this._goalStatus ? ` · ${this._goalStatus}` : '';
+      elapsed.textContent = `Pursued for ${this._fmtElapsed(this._goalElapsed || 0)}${statusLabel}`;
       const actions = document.createElement('div');
       actions.style.cssText = 'display:flex;gap:6px';
       const continueBtn = document.createElement('button');

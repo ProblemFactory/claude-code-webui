@@ -342,6 +342,16 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
                 const evType = payload.type;
                 if (evType === 'task_started' && payload.turn_id) { session._isStreaming = true; newLabel = 'thinking...'; }
                 else if (evType === 'task_complete' || evType === 'turn_aborted' || evType === 'task_failed') { session._isStreaming = false; newLabel = ''; }
+                else if (evType === 'goal_updated' && payload.goal) {
+                  session._goal = payload.goal.objective || null;
+                  session._goalElapsed = (payload.goal.time_used_seconds || 0) * 1000;
+                  session._goalStatus = payload.goal.status || null;
+                  broadcastToSession(session, id, { type: 'goal-updated', sessionId: id, goal: session._goal, goalElapsed: session._goalElapsed, goalStatus: session._goalStatus });
+                } else if (evType === 'goal_cleared') {
+                  if (session._goal) session._prevGoal = session._goal;
+                  session._goal = null; session._goalElapsed = 0; session._goalStatus = null;
+                  broadcastToSession(session, id, { type: 'goal-updated', sessionId: id, goal: null, statusMsg: 'Goal cleared' });
+                }
               } else if (msg.type === 'response_item') {
                 const itemType = payload.type;
                 if (itemType === 'message' && payload.role === 'assistant') newLabel = 'responding';

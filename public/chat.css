@@ -4,8 +4,7 @@
 }
 /* Goal indicator in status bar */
 .chat-status-goal { color: var(--accent); font-weight: 600; }
-.chat-goal-timer { font-variant-numeric: tabular-nums; animation: goal-pulse 2s ease-in-out infinite; }
-@keyframes goal-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+.chat-goal-timer { font-variant-numeric: tabular-nums; }
 .chat-status-bar {
   display: flex; align-items: center; gap: 10px;
   padding: 3px 16px; font-size: 10px; color: var(--text-dim);
