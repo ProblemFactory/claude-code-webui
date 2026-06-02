@@ -965,15 +965,25 @@ class App {
 
   resumeSession(sessionId, cwd, sessionName, { mode, model, effort, permission, syncId, backend = 'claude', backendSessionId, agentKind, agentRole, agentNickname, sourceKind, parentThreadId } = {}) {
     this._closeSidebarOnMobile();
-    // If this session is already open in a window (e.g. already resumed), just focus it
+    const targetBackendId = backendSessionId || sessionId;
+    // If this session is already open in a LIVE window, focus it
     for (const [winId, term] of this.sessions) {
       if (term.sessionId) {
         const sidebar = this.sidebar;
-        const match = (sidebar._allSessions || []).find(s => (s.backendSessionId || s.sessionId) === (backendSessionId || sessionId) && (s.backend || 'claude') === backend && s.webuiId);
+        const match = (sidebar._allSessions || []).find(s => (s.backendSessionId || s.sessionId) === targetBackendId && (s.backend || 'claude') === backend && s.webuiId);
         if (match && term.sessionId === match.webuiId) {
           this._focusExistingSession(match.webuiId);
           return;
         }
+      }
+    }
+    // Close any TERMINATED/read-only windows for the same backend session
+    // (otherwise we'd end up with two windows pointing at the same conversation)
+    for (const [winId, term] of [...this.sessions]) {
+      const win = this.wm.windows.get(winId);
+      const spec = win?._openSpec;
+      if (spec?.backend === backend && spec?.backendSessionId === targetBackendId) {
+        this.wm.closeWindow(winId);
       }
     }
 
