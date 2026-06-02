@@ -568,15 +568,43 @@ function registerWsHandler(wss, ctx) {
                 if (opHandler) session._normalizer.onOp(opHandler);
                 session._normalizer.convertHistory(sm.raw());
               }
-              // Recover goal state from normalizer (JSONL history) if not already set
-              if (!session._goal && session._normalizer?.goalState?.()) {
-                const gs = session._normalizer.goalState();
+              // Recover goal state
+              if (!session._goal) {
+                // 1. From normalizer (if convertHistory already ran)
+                const gs = session._normalizer?.goalState?.();
                 if (gs?.condition) {
-                  if (!gs.met) {
-                    session._goal = gs.condition;
-                  } else {
-                    // Goal was met — store as previous for /goal resume
-                    session._prevGoal = gs.condition;
+                  if (!gs.met) session._goal = gs.condition;
+                  else session._prevGoal = gs.condition;
+                }
+                // 2. From wrapper meta file
+                if (!session._goal) {
+                  const wMeta = sm.wrapperMeta?.() || {};
+                  if (wMeta.goal) session._goal = wMeta.goal;
+                }
+                // 3. Fast scan of raw records for goal (avoids waiting for full convertHistory)
+                if (!session._goal && session.backend === 'codex') {
+                  const raw = sm.raw();
+                  for (let i = raw.length - 1; i >= 0 && i >= raw.length - 2000; i--) {
+                    const r = raw[i];
+                    if (r.type === 'response_item' && r.payload?.role === 'developer') {
+                      const text = (r.payload.content || []).map(b => b.text || '').join('');
+                      if (text.includes('Continue working toward the active thread goal')) {
+                        const match = text.match(/<untrusted_objective>\s*([\s\S]*?)\s*<\/untrusted_objective>/);
+                        if (match) { session._goal = match[1].trim(); break; }
+                      }
+                    }
+                  }
+                }
+                // 4. Fast scan for Claude goal_status attachment
+                if (!session._goal && session.backend === 'claude') {
+                  const raw = sm.raw();
+                  for (let i = raw.length - 1; i >= 0 && i >= raw.length - 500; i--) {
+                    const r = raw[i];
+                    if (r.type === 'attachment' && r.attachment?.type === 'goal_status') {
+                      if (!r.attachment.met && r.attachment.condition) session._goal = r.attachment.condition;
+                      else if (r.attachment.met) session._prevGoal = r.attachment.condition;
+                      break;
+                    }
                   }
                 }
               }

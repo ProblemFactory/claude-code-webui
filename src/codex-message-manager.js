@@ -164,8 +164,8 @@ class CodexMessageManager {
     for (const record of records || []) this._processRecord(record, false);
     this._finalizeStreaming(false, { includeReasoning: true });
     // Finalize goal state: if auto-continue messages were found, goal is active
-    if (this._goalActive && this._firstUserPrompt) {
-      this._goalState = { condition: this._firstUserPrompt, met: false, sentinel: false };
+    if (this._goalActive && this._goalCondition) {
+      this._goalState = { condition: this._goalCondition, met: false, sentinel: false };
     }
     return this.messages;
   }
@@ -345,15 +345,13 @@ class CodexMessageManager {
       const text = asArray(item.content).map(b => b.text || '').join('');
       if (text.includes('Continue working toward the active thread goal')) {
         this._goalActive = true;
+        // Extract goal text from <untrusted_objective> tag
+        const match = text.match(/<untrusted_objective>\s*([\s\S]*?)\s*<\/untrusted_objective>/);
+        if (match) this._goalCondition = match[1].trim();
       }
       return;
     }
     if (role === 'user') {
-      // Capture first user prompt as potential goal text
-      if (!this._firstUserPrompt) {
-        const text = asArray(item.content).filter(b => b.type === 'input_text').map(b => b.text || '').join('').trim();
-        if (text && !text.startsWith('#') && !text.startsWith('<')) this._firstUserPrompt = text;
-      }
       const content = [];
       for (const block of asArray(item.content)) {
         if (block.type === 'input_text') content.push({ type: 'text', text: block.text || '' });
