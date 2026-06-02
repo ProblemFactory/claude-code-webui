@@ -756,7 +756,7 @@ class App {
     };
   }
 
-  createSession({ cwd, name, model, permission, extraArgs, resumeId, mode, syncId, effort, backend = 'claude', backendSessionId, agentKind, agentRole, agentNickname, sourceKind, parentThreadId }) {
+  createSession({ cwd, name, model, permission, extraArgs, resumeId, mode, syncId, effort, fork, backend = 'claude', backendSessionId, agentKind, agentRole, agentNickname, sourceKind, parentThreadId }) {
     this._hideWelcome();
     const defaults = this._getBackendSessionDefaults(backend);
     const sessionMode = mode || this.settings.get('session.defaultMode') || 'chat';
@@ -775,7 +775,7 @@ class App {
       permissionMode: sessionPermission||undefined, effort: sessionEffort||undefined, extraArgs: sessionExtraArgs||undefined,
       agentKind: agentKind || undefined, agentRole: agentRole || undefined, agentNickname: agentNickname || undefined,
       sourceKind: sourceKind || undefined, parentThreadId: parentThreadId || undefined,
-      resume: !!resumeId, resumeId: resumeId||undefined, cols:120, rows:30,
+      resume: !!resumeId, resumeId: resumeId||undefined, fork: fork||undefined, cols:120, rows:30,
     });
 
     const handler = (msg) => {
@@ -1015,6 +1015,7 @@ class App {
       mode,
       backend,
       backendSessionId: resumeId,
+      fork: true,
       extraArgs: backend === 'claude' ? '--fork-session' : '',
     });
   }

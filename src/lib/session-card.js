@@ -429,14 +429,12 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
     };
     actionsDiv.appendChild(viewBtn);
 
-    // Fork button (Claude only — Codex resume reuses same thread, no fork mechanism)
-    if (s.backend !== 'codex') {
-      const forkBtn = document.createElement('button');
-      forkBtn.className = 'session-detail-btn';
-      forkBtn.innerHTML = ICON.fork + ' Fork';
-      forkBtn.onclick = (e) => { e.stopPropagation(); app.forkSession(s); };
-      actionsDiv.appendChild(forkBtn);
-    }
+    // Fork button
+    const forkBtn = document.createElement('button');
+    forkBtn.className = 'session-detail-btn';
+    forkBtn.innerHTML = ICON.fork + ' Fork';
+    forkBtn.onclick = (e) => { e.stopPropagation(); app.forkSession(s); };
+    actionsDiv.appendChild(forkBtn);
   }
 
   // Terminate button (for any running session)

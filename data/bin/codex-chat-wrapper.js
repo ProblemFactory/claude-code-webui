@@ -146,6 +146,7 @@ const resumeId = process.env.CODEX_WEBUI_RESUME_ID || '';
 const model = process.env.CODEX_WEBUI_MODEL || '';
 const effort = process.env.CODEX_WEBUI_EFFORT || '';
 const backendPermissionMode = process.env.CODEX_WEBUI_PERMISSION_MODE || 'default';
+const isFork = process.env.CODEX_WEBUI_FORK === '1';
 const forkedFromEnv = process.env.CODEX_WEBUI_FORKED_FROM || '';
 const forkedFrom = forkedFromEnv ? forkedFromEnv.split(',').filter(Boolean) : [];
 const baseCwd = process.env.CODEX_WEBUI_CWD || process.cwd();
@@ -593,7 +594,7 @@ async function startThread() {
   };
   if (model) params.model = model;
   if (sessionName) params.config = { 'thread.name': sessionName };
-  const method = resumeId ? 'thread/resume' : 'thread/start';
+  const method = resumeId ? (isFork ? 'thread/fork' : 'thread/resume') : 'thread/start';
   if (resumeId) params.threadId = resumeId;
   const resp = await request(method, params, 120000);
   updateMetaFromThread(resp || {});

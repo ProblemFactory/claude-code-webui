@@ -391,7 +391,7 @@ class CodexAdapter extends BackendAdapter {
    * Build session args for Codex terminal/chat modes.
    */
   buildSessionArgs(options) {
-    const { cwd, model, effort, permissionMode, resumeId, extraArgs = [], mode = 'terminal', initialPrompt = '' } = options;
+    const { cwd, model, effort, permissionMode, resumeId, fork = false, extraArgs = [], mode = 'terminal', initialPrompt = '' } = options;
     const resolvedPermission = resolveCodexPermissionMode(permissionMode, {
       sandboxSupported: this.config.codexSandboxSupported !== false,
     });
@@ -407,6 +407,7 @@ class CodexAdapter extends BackendAdapter {
           CODEX_WEBUI_MODEL: model || '',
           CODEX_WEBUI_EFFORT: effort || '',
           CODEX_WEBUI_RESUME_ID: resumeId || '',
+          CODEX_WEBUI_FORK: fork ? '1' : '',
           CODEX_WEBUI_PERMISSION_MODE: resolvedPermission.permissionMode,
           CODEX_WEBUI_REQUESTED_PERMISSION_MODE: resolvedPermission.requestedPermissionMode || '',
           CODEX_WEBUI_PERMISSION_FALLBACK: resolvedPermission.degradedReason || '',

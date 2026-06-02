@@ -123,6 +123,7 @@ function registerWsHandler(wss, ctx) {
             model: data.model,
             permissionMode: data.permissionMode,
             resumeId: data.resume && data.resumeId ? data.resumeId : null,
+            fork: data.fork || false,
             sessionName: data.sessionName,
             effort: data.effort,
             extraArgs,
