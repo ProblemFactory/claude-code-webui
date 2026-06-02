@@ -571,7 +571,14 @@ function registerWsHandler(wss, ctx) {
               // Recover goal state from normalizer (JSONL history) if not already set
               if (!session._goal && session._normalizer?.goalState?.()) {
                 const gs = session._normalizer.goalState();
-                if (gs && !gs.met && gs.condition) session._goal = gs.condition;
+                if (gs?.condition) {
+                  if (!gs.met) {
+                    session._goal = gs.condition;
+                  } else {
+                    // Goal was met — store as previous for /goal resume
+                    session._prevGoal = gs.condition;
+                  }
+                }
               }
               const messages = session._normalizer ? session._normalizer.tail(50) : [];
               const totalCount = session._normalizer ? session._normalizer.total : 0;
