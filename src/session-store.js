@@ -100,8 +100,11 @@ function findSessionJsonlPath(claudeSessionId, cwd) {
   return null;
 }
 
-// JSONL parse cache — stores ALL non-subagent messages (unfiltered)
+// JSONL parse cache — stores ALL non-subagent messages (unfiltered).
+// LRU-bounded: it retains the FULL parsed history of each session, so an
+// uncapped map slowly pins every session ever viewed in memory.
 const _jsonlCache = new Map();
+const JSONL_CACHE_MAX = 30;
 
 function parseSessionJsonl(claudeSessionId, cwd) {
   const fp = findSessionJsonlPath(claudeSessionId, cwd);
@@ -109,7 +112,12 @@ function parseSessionJsonl(claudeSessionId, cwd) {
   try {
     const stat = fs.statSync(fp);
     const cached = _jsonlCache.get(claudeSessionId);
-    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.messages;
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+      // refresh LRU position
+      _jsonlCache.delete(claudeSessionId);
+      _jsonlCache.set(claudeSessionId, cached);
+      return cached.messages;
+    }
 
     const content = fs.readFileSync(fp, 'utf-8');
     const messages = [];
@@ -121,7 +129,11 @@ function parseSessionJsonl(claudeSessionId, cwd) {
         if (!isSubagentMessage(msg)) messages.push(msg);
       } catch {}
     }
+    _jsonlCache.delete(claudeSessionId);
     _jsonlCache.set(claudeSessionId, { mtimeMs: stat.mtimeMs, size: stat.size, messages });
+    while (_jsonlCache.size > JSONL_CACHE_MAX) {
+      _jsonlCache.delete(_jsonlCache.keys().next().value);
+    }
     return messages;
   } catch { return []; }
 }

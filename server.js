@@ -259,7 +259,10 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
       const stripAnsi = (value) => String(value || '').replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '');
       ptyProcess.onData((output) => {
         if (session._reattachAttempts) session._reattachAttempts = 0;
-        session.buffer = (session.buffer + output).slice(-800000);
+        // Append, trim only past 1.5x cap — slicing a fresh 800KB string per
+        // delta chunk was hundreds of MB/s of string churn while streaming
+        session.buffer += output;
+        if (session.buffer.length > 1200000) session.buffer = session.buffer.slice(-800000);
         lineBuf += output;
         let nlIdx;
         while ((nlIdx = lineBuf.indexOf('\n')) !== -1) {
@@ -375,7 +378,7 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
       if (!session.subagentWatchers) session.subagentWatchers = new Map(); // toolUseId → {watcher, offset}
 
       // Watch a subagent JSONL file for new messages (fills gap: text/thinking not in stream-json)
-      const startSubagentWatcher = (toolUseId, agentId) => {
+      const startSubagentWatcher = (toolUseId, agentId, attempt = 0) => {
         if (session.subagentWatchers.has(toolUseId)) return;
         // Find JSONL path
         const projectsDir = path.join(os.homedir(), '.claude', 'projects');
@@ -387,8 +390,13 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
         }
         const watchFile = candidates.find(f => { try { return fs.existsSync(f); } catch { return false; } });
         if (!watchFile) {
-          // File doesn't exist yet, retry after delay
-          const retry = setTimeout(() => { session.subagentWatchers.delete(toolUseId); startSubagentWatcher(toolUseId, agentId); }, 1000);
+          // File doesn't exist yet — retry with backoff, capped: an agent that
+          // failed before writing its JSONL never gets a task_notification, so
+          // an uncapped 1s retry (each with a full projects-dir scan) would
+          // spin for the session's lifetime
+          if (attempt >= 30) { session.subagentWatchers.delete(toolUseId); return; }
+          const delay = Math.min(10000, 1000 * Math.pow(1.3, attempt));
+          const retry = setTimeout(() => { session.subagentWatchers.delete(toolUseId); startSubagentWatcher(toolUseId, agentId, attempt + 1); }, delay);
           session.subagentWatchers.set(toolUseId, { watcher: null, retry });
           return;
         }
@@ -445,7 +453,8 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
 
       ptyProcess.onData((output) => {
         if (session._reattachAttempts) session._reattachAttempts = 0;
-        session.buffer = (session.buffer + output).slice(-500000);
+        session.buffer += output;
+        if (session.buffer.length > 750000) session.buffer = session.buffer.slice(-500000);
         lineBuf += output;
         let nlIdx;
         while ((nlIdx = lineBuf.indexOf('\n')) !== -1) {
@@ -542,7 +551,8 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
     // Terminal mode: raw PTY output
     ptyProcess.onData((output) => {
       if (session._reattachAttempts) session._reattachAttempts = 0;
-      session.buffer = (session.buffer + output).slice(-50000);
+      session.buffer += output;
+      if (session.buffer.length > 75000) session.buffer = session.buffer.slice(-50000);
       broadcastToSession(session, id, { type: 'output', sessionId: id, data: output });
     });
   }
@@ -796,7 +806,7 @@ syncStores.uploads = new SyncStore('uploads', path.join(__dirname, 'data', 'uplo
 
 setupPersistence({ dataDir: path.join(__dirname, 'data'), wss, WS_OPEN, getSyncStore, activeSessions });
 app.use(persistenceRouter);
-const { readLayouts, writeLayouts } = persistenceRouter;
+const { readLayouts, writeLayouts, flushLayouts } = persistenceRouter;
 
 // Session discovery functions imported from ./src/session-store.js
 // Helper to create SessionMessages with correct context
@@ -1021,7 +1031,22 @@ function readCodexWrapperRateLimit(sessionId) {
 
 function readLatestCodexRateLimitFromJsonl(filePath) {
   try {
-    const content = fs.readFileSync(filePath, 'utf-8');
+    // Tail read only — we scan from the end anyway, and codex JSONLs can be
+    // many MB; reading them whole blocked the event loop on every fallback
+    const TAIL = 65536;
+    const stat = fs.statSync(filePath);
+    let content;
+    if (stat.size > TAIL) {
+      const fd = fs.openSync(filePath, 'r');
+      try {
+        const buf = Buffer.alloc(TAIL);
+        const n = fs.readSync(fd, buf, 0, TAIL, stat.size - TAIL);
+        content = buf.toString('utf-8', 0, n);
+        content = content.slice(content.indexOf('\n') + 1); // drop the cut-off first line
+      } finally { fs.closeSync(fd); }
+    } else {
+      content = fs.readFileSync(filePath, 'utf-8');
+    }
     const lines = content.split('\n');
     for (let i = lines.length - 1; i >= 0; i -= 1) {
       const line = lines[i].trim();
@@ -1170,9 +1195,10 @@ server.listen(PORT, HOST, () => {
 // Claude processes in dtach survive the server restart
 function shutdown() {
   for (const [, s] of activeSessions) { try { if (s.pty) s.pty.kill(); } catch {} }
-  // SyncStores persist on a debounce — flush so drafts/settings/uploads
-  // changed within the last 2s aren't lost across a restart
+  // SyncStores + layouts persist on a debounce — flush so changes made within
+  // the last couple seconds aren't lost across a restart
   for (const store of Object.values(syncStores)) { try { store.flush(); } catch {} }
+  try { flushLayouts(); } catch {}
   process.exit(0);
 }
 process.on('SIGINT', () => {

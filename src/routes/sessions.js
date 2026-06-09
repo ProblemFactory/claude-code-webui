@@ -144,8 +144,15 @@ function setup(ctx) {
     } catch (err) { res.status(500).json({ error: err.message }); }
   });
 
+  // Short response cache: discovery spawns sync subprocesses (pgrep/tmux) and
+  // scans lock files + project dirs — with several clients polling, each poll
+  // paid the full cost. 2s TTL collapses concurrent polls into one scan.
+  let _sessionsCache = null;
+  let _sessionsCacheAt = 0;
+
   router.get('/api/sessions', (req, res) => {
     try {
+      if (_sessionsCache && Date.now() - _sessionsCacheAt < 2000) return res.json(_sessionsCache);
       const projectsDir = path.join(os.homedir(), '.claude', 'projects');
 
       // Step 0: Use cached webuiPids (updated on session create/kill/restore)
@@ -292,7 +299,9 @@ function setup(ctx) {
       }
 
       sessions.sort((a, b) => b.startedAt - a.startedAt);
-      res.json({ sessions });
+      _sessionsCache = { sessions };
+      _sessionsCacheAt = Date.now();
+      res.json(_sessionsCache);
     } catch (err) { res.status(500).json({ error: err.message }); }
   });
 

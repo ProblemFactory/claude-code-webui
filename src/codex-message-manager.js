@@ -205,7 +205,14 @@ class CodexMessageManager {
   }
 
   _finalizeStreaming(emit, { includeReasoning = false } = {}) {
-    for (const m of this.messages) {
+    // Backward scan, stop at the previous user message: streaming messages can
+    // only exist in the current turn. The old full forward scan made history
+    // conversion O(n²) — called per user message, this was millions of
+    // iterations for multi-thousand-message sessions (cf. the Claude manager,
+    // which always scanned backwards).
+    for (let i = this.messages.length - 1; i >= 0; i--) {
+      const m = this.messages[i];
+      if (m.role === 'user') break;
       if (m.status === 'streaming') {
         // Only finalize reasoning if explicitly asked (e.g. turn end)
         if (!includeReasoning && m.content?.[0]?.type === 'thinking') continue;

@@ -8,7 +8,13 @@ const path = require('path');
 
 // Debug log to file (since stdout goes to dtach PTY, errors are invisible)
 const logFile = path.join(path.dirname(process.argv[2] || '/tmp/pty-wrapper'), 'pty-wrapper.log');
-function log(msg) { try { fs.appendFileSync(logFile, `[${new Date().toISOString()}] ${msg}\n`); } catch {} }
+// Rotate at 5MB (shared by all sessions' wrappers, grew without bound)
+function log(msg) {
+  try {
+    try { if (fs.statSync(logFile).size > 5242880) fs.renameSync(logFile, logFile + '.old'); } catch {}
+    fs.appendFileSync(logFile, `[${new Date().toISOString()}] ${msg}\n`);
+  } catch {}
+}
 
 let pty;
 try {

@@ -14,7 +14,13 @@ const path = require('path');
 const { spawn } = require('child_process');
 
 const logFile = path.join(path.dirname(process.argv[2] || '/tmp/chat-wrapper'), 'chat-wrapper.log');
-function log(msg) { try { fs.appendFileSync(logFile, `[${new Date().toISOString()}] ${msg}\n`); } catch {} }
+// Rotate at 5MB (shared by all sessions' wrappers, grew without bound)
+function log(msg) {
+  try {
+    try { if (fs.statSync(logFile).size > 5242880) fs.renameSync(logFile, logFile + '.old'); } catch {}
+    fs.appendFileSync(logFile, `[${new Date().toISOString()}] ${msg}\n`);
+  } catch {}
+}
 
 const bufferFile = process.argv[2];
 const metaFile = process.argv[3];

@@ -769,21 +769,18 @@ class ChatView {
       }
     }
 
-    // Streaming text update → just update the text content
+    // Streaming text update → coalesce to one re-render per frame: each delta
+    // re-parses the FULL accumulated markdown + linkify passes, so per-delta
+    // rendering is O(n²) over a long response and churns the DOM subtree
     if (fields.content && msg.status === 'streaming') {
-      const oldEl = this._elements.get(id);
-      if (oldEl) {
-        const textDiv = oldEl.querySelector('.chat-text');
-        if (textDiv && msg.content[0]?.type === 'text') {
-          textDiv.innerHTML = this._renderers.renderMarkdown(stripAnsi(msg.content[0].text));
-        } else if (msg.content[0]?.type === 'thinking') {
-          const summaryEl = oldEl.querySelector('.chat-thinking summary');
-          const preEl = oldEl.querySelector('.chat-thinking pre');
-          const detailsEl = oldEl.querySelector('.chat-thinking');
-          if (detailsEl) detailsEl.open = true;
-          if (summaryEl) summaryEl.textContent = 'Thinking';
-          if (preEl) preEl.textContent = stripAnsi(msg.content[0].text || '');
-        }
+      if (!this._streamRenderPending) this._streamRenderPending = new Set();
+      this._streamRenderPending.add(id);
+      if (!this._streamRenderRaf) {
+        this._streamRenderRaf = requestAnimationFrame(() => {
+          this._streamRenderRaf = null;
+          const ids = this._streamRenderPending; this._streamRenderPending = new Set();
+          for (const mid of ids) this._renderStreamingText(mid);
+        });
       }
     }
 
@@ -801,6 +798,26 @@ class ChatView {
     if (fields.taskInfo) {
       this._statusBar.updateTask(fields.taskInfo, msg.toolCallId, msg.content);
     }
+  }
+
+  // Render the latest streaming text for a message (called once per rAF batch)
+  _renderStreamingText(id) {
+    if (this._disposed) return;
+    const msg = this._messages.find(m => m.id === id);
+    const oldEl = this._elements.get(id);
+    if (!msg || !oldEl || msg.status !== 'streaming') return;
+    const textDiv = oldEl.querySelector('.chat-text');
+    if (textDiv && msg.content[0]?.type === 'text') {
+      textDiv.innerHTML = this._renderers.renderMarkdown(stripAnsi(msg.content[0].text));
+    } else if (msg.content[0]?.type === 'thinking') {
+      const summaryEl = oldEl.querySelector('.chat-thinking summary');
+      const preEl = oldEl.querySelector('.chat-thinking pre');
+      const detailsEl = oldEl.querySelector('.chat-thinking');
+      if (detailsEl) detailsEl.open = true;
+      if (summaryEl) summaryEl.textContent = 'Thinking';
+      if (preEl) preEl.textContent = stripAnsi(msg.content[0].text || '');
+    }
+    if (this._pinned) this._scrollToBottom();
   }
 
   // Handle meta ops (usage, cost, turn_complete)

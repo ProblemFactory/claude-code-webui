@@ -262,7 +262,20 @@ function deriveCodexAgentName(agentKind, agentRole, agentNickname) {
   return '';
 }
 
+// mtime-keyed cache: listCodexThreads runs extractCodexThreadMeta on EVERY
+// thread JSONL per /api/sessions poll (and per user-state normalization) —
+// uncached this re-read+re-parsed the entire ~/.codex/sessions tree each time.
+// Mirrors the Claude side's _sessionMetaCache.
+const _threadMetaCache = new Map(); // filePath -> { mtimeMs, meta }
+const THREAD_META_HEAD_BYTES = 262144; // session_meta + first user msg live at the head
+
 function extractCodexThreadMeta(filePath) {
+  let cachedStat = null;
+  try {
+    cachedStat = fs.statSync(filePath);
+    const hit = _threadMetaCache.get(filePath);
+    if (hit && hit.mtimeMs === cachedStat.mtimeMs) return hit.meta;
+  } catch {}
   let threadId = '';
   let cwd = '';
   let name = '';
@@ -279,9 +292,23 @@ function extractCodexThreadMeta(filePath) {
   let firstUserName = '';
   let scannedRecords = 0;
   try {
-    const stat = fs.statSync(filePath);
+    const stat = cachedStat || fs.statSync(filePath);
     updatedAt = stat.mtimeMs || 0;
-    for (const line of fs.readFileSync(filePath, 'utf-8').split('\n')) {
+    // Head read only — all meta-bearing records are at the start; reading
+    // multi-MB session files whole just to break at record 200 wasted IO
+    let head;
+    if (stat.size > THREAD_META_HEAD_BYTES) {
+      const fd = fs.openSync(filePath, 'r');
+      try {
+        const buf = Buffer.alloc(THREAD_META_HEAD_BYTES);
+        const n = fs.readSync(fd, buf, 0, THREAD_META_HEAD_BYTES, 0);
+        head = buf.toString('utf-8', 0, n);
+        head = head.slice(0, head.lastIndexOf('\n') + 1); // drop the cut-off last line
+      } finally { fs.closeSync(fd); }
+    } else {
+      head = fs.readFileSync(filePath, 'utf-8');
+    }
+    for (const line of head.split('\n')) {
       const trimmed = line.trim();
       if (!trimmed) continue;
       scannedRecords++;
@@ -364,7 +391,7 @@ function extractCodexThreadMeta(filePath) {
     name = firstUserName || deriveCodexAgentName(sourceMeta.agentKind, sourceMeta.agentRole, sourceMeta.agentNickname);
   }
 
-  return {
+  const meta = {
     threadId,
     cwd,
     name,
@@ -377,6 +404,15 @@ function extractCodexThreadMeta(filePath) {
     parentThreadId: sourceMeta.parentThreadId,
     forkedFrom: forkedFromChain || [],
   };
+  if (cachedStat) {
+    _threadMetaCache.set(filePath, { mtimeMs: cachedStat.mtimeMs, meta });
+    // Bounded: evict oldest entries past 2000 files
+    if (_threadMetaCache.size > 2000) {
+      const firstKey = _threadMetaCache.keys().next().value;
+      _threadMetaCache.delete(firstKey);
+    }
+  }
+  return meta;
 }
 
 class CodexAdapter extends BackendAdapter {

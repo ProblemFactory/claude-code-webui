@@ -165,11 +165,18 @@ router.get('/api/download', (req, res) => {
 router.get('/api/file/excel', (req, res) => {
   const filePath = safePath(req.query.path);
   try {
+    // Size guard (like /api/file/content's 10MB cap): XLSX.readFile parses the
+    // whole workbook synchronously — a huge file blocks the entire server
+    const stat = fs.statSync(filePath);
+    if (stat.size > 20 * 1024 * 1024) {
+      return res.status(413).json({ error: `Excel file too large to preview (${(stat.size / 1048576).toFixed(1)} MB > 20 MB)` });
+    }
     const XLSX = require('xlsx');
     const workbook = XLSX.readFile(filePath);
+    // Client renders at most 5000 rows per sheet — don't serialize more
     const sheets = workbook.SheetNames.map(name => ({
       name,
-      data: XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1 }),
+      data: XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1 }).slice(0, 5000),
     }));
     res.json({ sheets });
   } catch (err) { res.status(400).json({ error: err.message }); }

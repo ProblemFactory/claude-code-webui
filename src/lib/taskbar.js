@@ -5,14 +5,56 @@ import { createPopover, showContextMenu } from './utils.js';
  * Called as app.updateTaskbar() — the App method delegates here.
  */
 export function updateTaskbar(app) {
-  const container = document.getElementById('taskbar-items'); container.innerHTML = '';
+  const container = document.getElementById('taskbar-items');
   const activeDesk = app.desktopManager?.activeDesktopId;
+
+  // Collect visible entries + per-entry star prefix (one sidebar map instead
+  // of an Array.find per window)
+  const webuiIdToSession = new Map();
+  for (const s of app.sidebar?._allSessions || []) { if (s.webuiId) webuiIdToSession.set(s.webuiId, s); }
+  const entries = [];
   for (const [id, win] of app.wm.windows) {
     // Skip grouped guests — only the host appears in taskbar
     if (win._tabChain && win._tabChain.tabs[0] !== id) continue;
     // Skip windows on other desktops
     if (activeDesk && win._desktopId && win._desktopId !== activeDesk) continue;
+    const term = app.sessions.get(id);
+    let starPrefix = '';
+    if (term?.sessionId) {
+      const match = webuiIdToSession.get(term.sessionId);
+      if (match && app.sidebar.isStarred(match)) starPrefix = '\u2605 ';
+    }
+    entries.push({ id, win, starPrefix });
+  }
+
+  // Structure unchanged → update state classes in place. onWindowsChanged
+  // fires on EVERY focus (each mousedown); a full innerHTML rebuild + listener
+  // re-wiring per click was constant churn.
+  const structKey = entries.map(e => `${e.id}\u0000${e.win.title}\u0000${e.starPrefix}`).join('\u0001');
+  if (container._structKey === structKey) {
+    for (const el of container.children) {
+      const win = app.wm.windows.get(el.dataset.winId);
+      if (!win) continue;
+      el.classList.toggle('active', el.dataset.winId === app.wm.activeWindowId && !win.isMinimized);
+      el.classList.toggle('minimized', win.isMinimized);
+      el.classList.toggle('waiting', win.element.classList.contains('window-waiting'));
+    }
+  } else {
+    container._structKey = structKey;
+    container.innerHTML = '';
+    _rebuildTaskbarItems(app, container, entries);
+  }
+  const winCount = [...app.wm.windows.values()].filter(w => !activeDesk || w._desktopId === activeDesk).length;
+  const countEl = document.getElementById('active-count');
+  countEl.textContent = `${winCount} windows`;
+  countEl.style.cursor = 'pointer';
+  countEl.onclick = (e) => { e.stopPropagation(); showWindowList(app, countEl); };
+}
+
+function _rebuildTaskbarItems(app, container, entries) {
+  for (const { id, win, starPrefix } of entries) {
     const item = document.createElement('div'); item.className = 'taskbar-item';
+    item.dataset.winId = id;
     if (id === app.wm.activeWindowId && !win.isMinimized) item.classList.add('active');
     if (win.isMinimized) item.classList.add('minimized');
     if (win.element.classList.contains('window-waiting')) item.classList.add('waiting');
@@ -31,14 +73,6 @@ export function updateTaskbar(app) {
     textCol.className = 'taskbar-text';
     const title = document.createElement('div');
     title.className = 'taskbar-title';
-    // Star prefix for starred sessions
-    const term = app.sessions.get(id);
-    let starPrefix = '';
-    if (term?.sessionId) {
-      const allSess = app.sidebar?._allSessions || [];
-      const match = allSess.find(s => s.webuiId && s.webuiId === term.sessionId);
-      if (match && app.sidebar.isStarred(match)) starPrefix = '\u2605 ';
-    }
     // Split title: first part = name, second part = path (after " — ")
     const parts = win.title.split(' \u2014 ');
     title.textContent = starPrefix + (parts[0] || win.title);
@@ -78,11 +112,6 @@ export function updateTaskbar(app) {
     });
     container.appendChild(item);
   }
-  const winCount = [...app.wm.windows.values()].filter(w => !activeDesk || w._desktopId === activeDesk).length;
-  const countEl = document.getElementById('active-count');
-  countEl.textContent = `${winCount} windows`;
-  countEl.style.cursor = 'pointer';
-  countEl.onclick = (e) => { e.stopPropagation(); showWindowList(app, countEl); };
 }
 
 /**

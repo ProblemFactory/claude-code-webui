@@ -697,9 +697,9 @@ html, body {
 }
 .desktop-preview.active .desktop-preview-label { color: var(--accent-hover); }
 .desktop-preview-drop { border-color: var(--accent) !important; background: var(--accent-dim) !important; }
-.desktop-preview-win-waiting { animation: waiting-blink 0.7s ease-in-out infinite; background: var(--yellow, #e2b340); }
+.desktop-preview-win-waiting { animation: blink-fade 0.7s ease-in-out infinite reverse; background: var(--yellow, #e2b340); }
 .desktop-preview-waiting { border-color: var(--yellow, #e2b340); }
-.desktop-preview-find-flash { animation: find-flash 0.3s ease-in-out infinite; background: var(--accent); opacity: 1; }
+.desktop-preview-find-flash { animation: blink-fade 0.3s ease-in-out infinite reverse; background: var(--accent); }
 .desktop-preview-add {
   width: 20px; height: var(--desktop-preview-h, 32px); border-radius: 3px;
   border: 1.5px dashed var(--border); background: transparent; color: var(--text-dim);
@@ -1114,20 +1114,25 @@ html, body {
 .bell-icon { margin-left: 6px; font-size: 11px; animation: bell-pulse 1s ease-in-out; }
 @keyframes bell-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
 
-/* Waiting for input — blink title bar and taskbar item */
-.window-waiting .window-titlebar { animation: waiting-blink 0.7s ease-in-out infinite; will-change: opacity; }
-.taskbar-item.waiting { animation: waiting-blink 0.7s ease-in-out infinite; will-change: opacity; }
-@keyframes waiting-blink {
-  0%,100% { opacity: 1; }
-  50% { opacity: 0.5; box-shadow: inset 0 0 0 100px rgba(250,180,40,0.4); }
+/* Waiting for input — blink title bar and taskbar item.
+   The color fill is an ::after overlay animating only opacity (composited);
+   the old inset box-shadow hack forced a full repaint every frame, forever,
+   on every blinking titlebar/taskbar item at once. */
+.window-waiting .window-titlebar, .taskbar-item.waiting,
+.window-find-flash .window-titlebar, .taskbar-item.find-flash { position: relative; }
+.window-waiting .window-titlebar::after, .taskbar-item.waiting::after,
+.window-find-flash .window-titlebar::after, .taskbar-item.find-flash::after {
+  content: ''; position: absolute; inset: 0; pointer-events: none; border-radius: inherit;
+  animation: blink-fade 0.7s ease-in-out infinite; will-change: opacity; opacity: 0;
 }
-
-/* Find flash — faster than waiting-blink, bright cyan/green to distinguish */
-.window-find-flash .window-titlebar { animation: find-flash 0.3s ease-in-out infinite; will-change: opacity; }
-.taskbar-item.find-flash { animation: find-flash 0.3s ease-in-out infinite; will-change: opacity; }
-@keyframes find-flash {
-  0%,100% { opacity: 1; }
-  50% { opacity: 0.5; box-shadow: inset 0 0 0 100px rgba(34,211,238,0.5); }
+.window-waiting .window-titlebar::after, .taskbar-item.waiting::after { background: rgba(250,180,40,0.4); }
+/* Find flash — faster, bright cyan to distinguish */
+.window-find-flash .window-titlebar::after, .taskbar-item.find-flash::after {
+  background: rgba(34,211,238,0.5); animation-duration: 0.3s;
+}
+@keyframes blink-fade {
+  0%,100% { opacity: 0; }
+  50% { opacity: 1; }
 }
 
 /* ── Command Mode Indicator ── */

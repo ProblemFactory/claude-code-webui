@@ -47,10 +47,18 @@ function setup({ dataDir, wss, WS_OPEN, getSyncStore, activeSessions }) {
     return _layoutsCache;
   }
 
+  // Disk write is debounced: layout-sync WS messages arrive on every window
+  // change from every client — a sync full-file write per message was a steady
+  // event-loop hot path. The in-memory cache is authoritative between flushes.
+  let _layoutsSaveTimer = null;
+  function flushLayouts() {
+    if (_layoutsSaveTimer) { clearTimeout(_layoutsSaveTimer); _layoutsSaveTimer = null; }
+    if (_layoutsCache) { try { ensureDir(dataDir); writeJsonAtomic(LAYOUTS_FILE, _layoutsCache); } catch {} }
+  }
   function writeLayouts(data) {
-    ensureDir(dataDir);
     _layoutsCache = data;
-    writeJsonAtomic(LAYOUTS_FILE, data);
+    if (_layoutsSaveTimer) clearTimeout(_layoutsSaveTimer);
+    _layoutsSaveTimer = setTimeout(flushLayouts, 500);
   }
 
   router.get('/api/layouts', (req, res) => res.json(readLayouts()));
@@ -113,6 +121,7 @@ function setup({ dataDir, wss, WS_OPEN, getSyncStore, activeSessions }) {
   // Expose for server.js to use directly
   router.readLayouts = readLayouts;
   router.writeLayouts = writeLayouts;
+  router.flushLayouts = flushLayouts;
 
   // ── Bookmarks ──
   const BOOKMARKS_FILE = path.join(dataDir, 'bookmarks.json');
@@ -267,9 +276,26 @@ function setup({ dataDir, wss, WS_OPEN, getSyncStore, activeSessions }) {
     return next;
   }
 
+  // True if any session ref still uses a legacy un-prefixed id (no "backend:" prefix)
+  function _hasLegacyRefs(source) {
+    const refs = [
+      ...(Array.isArray(source.starredSessions) ? source.starredSessions : []),
+      ...(Array.isArray(source.archivedSessions) ? source.archivedSessions : []),
+      ...Object.keys(source.customNames || {}),
+      ...Object.keys(source.sessionModes || {}),
+      ...Object.keys(source.sessionConfigs || {}),
+      ...Object.values(source.sessionGroups || {}).flat(),
+    ];
+    return refs.some((r) => typeof r === 'string' && r && !r.includes(':'));
+  }
+
   function normalizeUserState(data) {
     const source = data && typeof data === 'object' ? data : {};
-    const knownSessionKeys = buildKnownSessionKeyMap();
+    // buildKnownSessionKeyMap walks the entire ~/.codex/sessions tree — only
+    // pay that on writes that actually contain legacy refs to migrate.
+    // (migrateLegacySessionRef passes prefixed keys through untouched, so an
+    // empty map is equivalent when no legacy refs exist.)
+    const knownSessionKeys = _hasLegacyRefs(source) ? buildKnownSessionKeyMap() : new Map();
     const sessionGroups = {};
     for (const [groupName, sessionRefs] of Object.entries(source.sessionGroups && typeof source.sessionGroups === 'object' ? source.sessionGroups : {})) {
       sessionGroups[groupName] = migrateStateArray(sessionRefs, knownSessionKeys);

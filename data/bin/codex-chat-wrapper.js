@@ -14,7 +14,11 @@ const args = process.argv.slice(5);
 const logFile = path.join(path.dirname(bufferFile || '/tmp/codex-chat-wrapper'), 'codex-chat-wrapper.log');
 
 function log(msg) {
-  try { fs.appendFileSync(logFile, `[${new Date().toISOString()}] ${msg}\n`); } catch {}
+  try {
+    // Rotate at 5MB (shared by all sessions' wrappers, grew without bound)
+    try { if (fs.statSync(logFile).size > 5242880) fs.renameSync(logFile, logFile + '.old'); } catch {}
+    fs.appendFileSync(logFile, `[${new Date().toISOString()}] ${msg}\n`);
+  } catch {}
 }
 
 function writeRecord(record) {
@@ -186,8 +190,6 @@ let stdoutBuf = '';
 let stdinBuf = '';
 let currentTurnId = null;
 let lastReasoningByItem = new Map();
-let lastAgentDeltaByItem = new Map();
-let lastCommandDeltaByItem = new Map();
 let itemState = new Map();
 let markReady = null;
 let markReadyFailed = null;
@@ -323,7 +325,12 @@ function emitTaskEvent(type, payload = {}) {
 
 function trackTask(callId, patch) {
   if (!callId) return;
-  meta.tasks[callId] = { ...(meta.tasks[callId] || {}), ...patch };
+  const next = { ...(meta.tasks[callId] || {}), ...patch };
+  // Completed/failed tasks are dropped (mirrors chat-wrapper, which deletes on
+  // task_notification) — meta is re-serialized to disk on every change, so a
+  // monotonically growing tasks map made each write larger forever
+  if (next.status === 'completed' || next.status === 'failed') delete meta.tasks[callId];
+  else meta.tasks[callId] = next;
   scheduleMeta();
 }
 
@@ -401,6 +408,14 @@ function handleItemStarted(item, itemId) {
 }
 
 function handleItemCompleted(item, itemId) {
+  try { _handleItemCompletedInner(item, itemId); } finally {
+    // Per-item state would otherwise accumulate for the wrapper's lifetime
+    itemState.delete(itemId);
+    lastReasoningByItem.delete(itemId);
+  }
+}
+
+function _handleItemCompletedInner(item, itemId) {
   const state = itemState.get(itemId) || {};
   const type = state.type || item.type;
   if (type === 'agentMessage') {
@@ -545,6 +560,14 @@ function handleNotification(method, params) {
     else if (status === 'failed' || status === 'error') emitTaskEvent('task_failed', { turn_id: currentTurnId, error: params?.error || params?.message || '' });
     else emitTaskEvent('task_complete', { turn_id: currentTurnId, last_agent_message: '' });
     currentTurnId = null;
+    // Drop server requests the turn ended without resolving (interrupt/abort) —
+    // they can never be answered now, but used to persist in meta forever and
+    // resurface as stale permission prompts on attach
+    for (const [rid] of pendingServerRequests) {
+      record('server_request_resolved', { id: rid, decision: 'stale_turn_end', answers: null });
+      delete meta.pendingRequests[String(rid)];
+    }
+    pendingServerRequests.clear();
     scheduleMeta();
 
     // Refresh goal state after each turn (time_used_seconds updated in DB)
@@ -567,7 +590,6 @@ function handleNotification(method, params) {
     const itemId = params?.itemId || params?.item_id || params?.id || 'agent';
     const delta = asString(params?.delta || params?.text || params?.message);
     if (!delta) return;
-    lastAgentDeltaByItem.set(itemId, (lastAgentDeltaByItem.get(itemId) || '') + delta);
     emitTaskEvent('agent_message_delta', { item_id: itemId, delta });
     meta.streaming = true;
     scheduleMeta();
@@ -590,7 +612,6 @@ function handleNotification(method, params) {
     const itemId = params?.itemId || params?.item_id || params?.id;
     const delta = asString(params?.delta || params?.output || params?.stdout);
     if (!itemId || !delta) return;
-    lastCommandDeltaByItem.set(itemId, (lastCommandDeltaByItem.get(itemId) || '') + delta);
     emitTaskEvent('exec_command_output_delta', { call_id: itemId, delta });
     return;
   }
