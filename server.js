@@ -98,31 +98,35 @@ try {
 // Propagate capability flags to the adapter
 adapterRegistry.get('claude').config.supportsName = CLAUDE_SUPPORTS_NAME;
 // Discover available models per backend (cached, refreshed periodically)
+const CLAUDE_MODEL_ALIASES = [
+  { id: '', label: 'Default' },
+  { id: 'fable', label: 'fable (latest, 200k)' },
+  { id: 'fable[1m]', label: 'fable[1m] (latest, 1M context)' },
+  { id: 'opus', label: 'opus (latest, 200k)' },
+  { id: 'opus[1m]', label: 'opus[1m] (latest, 1M context)' },
+  { id: 'sonnet', label: 'sonnet (latest)' },
+  { id: 'sonnet[1m]', label: 'sonnet[1m] (latest, 1M context)' },
+  { id: 'haiku', label: 'haiku (latest)' },
+];
 const AVAILABLE_MODELS = {
-  claude: [{ id: '', label: 'Default' }, { id: 'opus', label: 'opus (latest, 200k)' }, { id: 'opus[1m]', label: 'opus[1m] (latest, 1M)' }, { id: 'sonnet', label: 'sonnet (latest)' }, { id: 'sonnet[1m]', label: 'sonnet[1m] (latest, 1M)' }, { id: 'haiku', label: 'haiku (latest)' }],
+  claude: [...CLAUDE_MODEL_ALIASES],
   codex: [{ id: '', label: 'Default' }],
 };
 function refreshAvailableModels() {
-  const aliases = [
-    { id: '', label: 'Default' },
-    { id: 'opus', label: 'opus (latest, 200k)' },
-    { id: 'opus[1m]', label: 'opus[1m] (latest, 1M context)' },
-    { id: 'sonnet', label: 'sonnet (latest)' },
-    { id: 'sonnet[1m]', label: 'sonnet[1m] (latest, 1M context)' },
-    { id: 'haiku', label: 'haiku (latest)' },
-  ];
-
+  // /v1/models accepts both auth schemes now (OAuth needs Bearer + the oauth
+  // beta header — it used to 401, fixed server-side ~2026-06). The old
+  // bootstrap endpoint's additional_model_options now returns null, so
+  // /v1/models is the single source for full model IDs; CLI aliases
+  // (fable/opus/sonnet/haiku) stay hardcoded since they're CLI-side names.
   function fetchModels(token, useOAuth) {
     const headers = { 'anthropic-version': '2023-06-01' };
-    let endpoint = '/v1/models';
     if (useOAuth) {
       headers['Authorization'] = 'Bearer ' + token;
       headers['anthropic-beta'] = 'oauth-2025-04-20';
-      endpoint = '/api/claude_cli/bootstrap';
     } else {
       headers['x-api-key'] = token;
     }
-    const req = https.request('https://api.anthropic.com' + endpoint, {
+    const req = https.request('https://api.anthropic.com/v1/models?limit=100', {
       method: 'GET', headers,
     }, (res) => {
       let body = '';
@@ -130,18 +134,14 @@ function refreshAvailableModels() {
       res.on('end', () => {
         try {
           const data = JSON.parse(body);
-          if (useOAuth) {
-            const extra = data.additional_model_options;
-            if (extra?.length) {
-              const models = extra.map(m => ({ id: m.model, label: m.name || m.model }));
-              AVAILABLE_MODELS.claude = [...aliases, ...models];
-            }
-          } else if (data.data?.length) {
+          if (data.data?.length) {
             const models = data.data.map(m => {
               const ctx = m.max_input_tokens >= 1000000 ? '1M' : m.max_input_tokens >= 200000 ? '200k' : Math.round(m.max_input_tokens / 1000) + 'k';
               return { id: m.id, label: `${m.display_name || m.id} (${ctx})` };
             });
-            AVAILABLE_MODELS.claude = [...aliases, ...models];
+            AVAILABLE_MODELS.claude = [...CLAUDE_MODEL_ALIASES, ...models];
+          } else if (res.statusCode !== 200) {
+            console.warn(`[models] /v1/models failed: HTTP ${res.statusCode}`);
           }
         } catch {}
       });
@@ -150,7 +150,6 @@ function refreshAvailableModels() {
     req.end();
   }
 
-  // Prefer OAuth (supports bootstrap endpoint), fall back to API key (/v1/models)
   const apiKey = process.env.ANTHROPIC_API_KEY || null;
   getOAuthToken((oauthToken) => {
     if (oauthToken) fetchModels(oauthToken, true);

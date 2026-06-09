@@ -139,6 +139,8 @@ const SETTINGS_SCHEMA = {
     type: 'enum', default: '', combobox: true,
     options: [
       { value: '', label: 'Default' },
+      { value: 'fable', label: 'fable (latest, 200k)' },
+      { value: 'fable[1m]', label: 'fable[1m] (latest, 1M context)' },
       { value: 'opus', label: 'opus (latest, 200k)' },
       { value: 'opus[1m]', label: 'opus[1m] (latest, 1M context)' },
       { value: 'sonnet', label: 'sonnet (latest)' },

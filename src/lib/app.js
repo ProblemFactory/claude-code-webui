@@ -26,7 +26,7 @@ import { createBackendIconHtml, getSessionKey, pickAgentIdentity } from './agent
 
 const BACKEND_SESSION_OPTIONS = {
   claude: {
-    models: [{ id: '', label: 'Default' }, { id: 'opus', label: 'opus (latest, 200k)' }, { id: 'opus[1m]', label: 'opus[1m] (latest, 1M)' }, { id: 'sonnet', label: 'sonnet (latest)' }, { id: 'sonnet[1m]', label: 'sonnet[1m] (latest, 1M)' }, { id: 'haiku', label: 'haiku (latest)' }],
+    models: [{ id: '', label: 'Default' }, { id: 'fable', label: 'fable (latest, 200k)' }, { id: 'fable[1m]', label: 'fable[1m] (latest, 1M)' }, { id: 'opus', label: 'opus (latest, 200k)' }, { id: 'opus[1m]', label: 'opus[1m] (latest, 1M)' }, { id: 'sonnet', label: 'sonnet (latest)' }, { id: 'sonnet[1m]', label: 'sonnet[1m] (latest, 1M)' }, { id: 'haiku', label: 'haiku (latest)' }],
     permissions: [
       { value: '', label: 'Default' },
       { value: 'auto', label: 'Auto' },
