@@ -182,6 +182,11 @@ class App {
       for (const [winId, session] of this.sessions) {
         if (session instanceof TerminalSession && session.sessionId) {
           this.ws.send({ type: 'attach', sessionId: session.sessionId });
+          // Re-attach registers this client at the 120×30 placeholder; the
+          // DOM size didn't change so ResizeObserver stays quiet and no real
+          // resize would follow. Re-fit explicitly, or once the heartbeat
+          // evicts the old ghost the session would shrink to the placeholder.
+          requestAnimationFrame(() => { try { session.fit(); } catch {} });
         }
       }
     });

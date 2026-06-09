@@ -75,7 +75,26 @@ function registerWsHandler(wss, ctx) {
     adapterRegistry, pty, path, fs, os, execFileSync, ensureDir,
   } = ctx;
 
+  // Heartbeat: without ping/pong a half-open WS (network blip, sleep/wake,
+  // the OOM-induced unresponsiveness from heavy local jobs) is NOT detected
+  // by the server — the dead ws lingers in every session.clients map for the
+  // full TCP keepalive window (~2h), and its stale size keeps shrinking the
+  // PTY via resizeSessionToMin. Ping every 30s; a client that misses two
+  // consecutive pongs is terminated, which fires 'close' and cleans it up.
+  if (!wss._heartbeatTimer) {
+    wss._heartbeatTimer = setInterval(() => {
+      for (const client of wss.clients) {
+        if (client._isAlive === false) { try { client.terminate(); } catch {} continue; }
+        client._isAlive = false;
+        try { client.ping(); } catch {}
+      }
+    }, 30000);
+    wss._heartbeatTimer.unref?.();
+  }
+
   wss.on('connection', (ws) => {
+    ws._isAlive = true;
+    ws.on('pong', () => { ws._isAlive = true; });
     const attachedSessions = new Set();
 
     // Send current active sessions on connect
@@ -513,7 +532,9 @@ function registerWsHandler(wss, ctx) {
         case 'resize': {
           const session = activeSessions.get(data.sessionId);
           if (session && data.cols > 0 && data.rows > 0) {
-            session.clients.set(ws, { cols: data.cols, rows: data.rows });
+            // real:true marks this as a genuine terminal fit (vs the 120×30
+            // placeholder set at attach) — only these drive resizeSessionToMin
+            session.clients.set(ws, { cols: data.cols, rows: data.rows, real: true });
             resizeSessionToMin(session, data.sessionId);
           }
           break;
@@ -556,7 +577,9 @@ function registerWsHandler(wss, ctx) {
               let found = false;
               for (const [sid, sess] of activeSessions) {
                 if (sess.subagentBuffers?.has(toolUseId)) {
-                  sess.clients.set(ws, { cols: 120, rows: 30 }); // register for broadcasts
+                  // viewer:true — receive broadcasts but NEVER influence the
+                  // parent session's PTY size (this read-only window has no terminal)
+                  sess.clients.set(ws, { cols: 120, rows: 30, viewer: true });
                   attachedSessions.add(sid); // so ws close removes us from the parent's clients map
                   const rawMsgs = sess.subagentBuffers.get(toolUseId);
                   // Use existing sub-normalizer if available, or create one

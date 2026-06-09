@@ -235,12 +235,31 @@ function broadcastToSession(session, id, msg) {
 // SyncStore imported from ./src/sync-store.js
 
 // ── Effective-size computation (min cols/rows across clients + PTY resize + broadcast) ──
+// Only clients that have sent a REAL `resize` (terminal fit) drive the PTY
+// size. Two classes of entries must NOT shrink it:
+//  - viewer:true  → subagent View Log windows attach to the PARENT session's
+//    clients map purely to receive broadcasts; they have no terminal.
+//  - placeholder (no `real` flag) → the 120×30 default set at attach time,
+//    before the client's first fit(). A reconnecting/ghost client sitting at
+//    this placeholder used to win the min and shrink everyone's terminal.
 function resizeSessionToMin(session, sessionId) {
   if (!session.clients.size || !session.pty) return;
-  let minCols = Infinity, minRows = Infinity;
+  let minCols = Infinity, minRows = Infinity, sawReal = false;
   for (const sz of session.clients.values()) {
+    if (sz.viewer || !sz.real) continue;
+    sawReal = true;
     if (sz.cols < minCols) minCols = sz.cols;
     if (sz.rows < minRows) minRows = sz.rows;
+  }
+  // No real terminal client yet (e.g. chat sessions never fit) — fall back to
+  // non-viewer placeholders so chat PTYs still get a sane width, but never let
+  // a viewer entry participate.
+  if (!sawReal) {
+    for (const sz of session.clients.values()) {
+      if (sz.viewer) continue;
+      if (sz.cols < minCols) minCols = sz.cols;
+      if (sz.rows < minRows) minRows = sz.rows;
+    }
   }
   if (minCols < Infinity && minRows < Infinity) {
     try { session.pty.resize(minCols, minRows); } catch {}
