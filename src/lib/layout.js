@@ -104,6 +104,10 @@ class LayoutManager {
           if (!remoteIds.has(id)) {
             const win = this.app.wm.windows.get(id);
             if (activeDesk && win?._desktopId && win._desktopId !== activeDesk) continue;
+            // Windows without an openSpec can't have been replayed remotely —
+            // e.g. a createSession window still waiting for its 'created' reply.
+            // Closing it here would KILL the just-created session.
+            if (!win?._openSpec) continue;
             this.app.wm.closeWindow(id);
           }
         }

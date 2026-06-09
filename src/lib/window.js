@@ -51,7 +51,10 @@ class WindowManager {
 
     const winInfo = { id, element: el, titleBar, titleSpan, iconSpan, iconWrap, backendIconSlot, agentKindSlot, content, title, type,
       isMaximized: false, isMinimized: false, prevBounds: null, onResize: null, onClose: null, exited: false,
-      _typeIcon: TYPE_ICONS[type] || '', _tabChain: null, titleMeta: { ...(titleMeta || {}) } };
+      _typeIcon: TYPE_ICONS[type] || '', _tabChain: null, titleMeta: { ...(titleMeta || {}) },
+      // All document-level listeners for this window register with this signal
+      // and are removed together on close (they used to leak per window).
+      _listenerCtl: new AbortController() };
     this.windows.set(id, winInfo);
     this._applyTitleMeta(winInfo);
     this._setupDrag(winInfo); this._setupResize(winInfo); this._setupIconDrag(winInfo);
@@ -423,7 +426,8 @@ class WindowManager {
         this._scheduleOverlapUpdate(); this._notify();
       }, 250);
     };
-    document.addEventListener('mousemove', onMove); document.addEventListener('mouseup', onUp);
+    const signal = win._listenerCtl?.signal;
+    document.addEventListener('mousemove', onMove, { signal }); document.addEventListener('mouseup', onUp, { signal });
   }
 
   _snapVal(val, gridLines, threshold) {
@@ -763,6 +767,7 @@ class WindowManager {
   }
   closeWindow(id) {
     const win = this.windows.get(id); if (!win) return;
+    win._listenerCtl?.abort(); // release document-level drag/icon listeners
     if (win._tabChain) {
       this.removeFromTabChain(win._tabChain, id);
       // onClose fires inside removeFromTabChain

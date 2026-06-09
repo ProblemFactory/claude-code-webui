@@ -31,10 +31,16 @@ class ChatView {
     container.className = 'chat-view';
     this._container = container;
 
+    // Settings listeners are tracked and removed in dispose() — the
+    // SettingsManager keeps them in a permanent Set, so untracked listeners
+    // leak the whole view DOM per closed chat window.
+    this._settingsListeners = [];
+    const onSetting = (key, fn) => { app.settings?.on(key, fn); this._settingsListeners.push([key, fn]); };
+
     // Apply compact mode
     this._compact = app.settings?.get('chat.compactMode') ?? true;
     if (this._compact) container.classList.add('chat-compact');
-    app.settings?.on('chat.compactMode', (v) => {
+    onSetting('chat.compactMode', (v) => {
       this._compact = v;
       container.classList.toggle('chat-compact', v);
       if (this._renderers) this._renderers._compact = v;
@@ -52,7 +58,7 @@ class ChatView {
     // Role indicator style
     const roleStyle = app.settings?.get('chat.roleIndicator') ?? 'border';
     container.dataset.roleIndicator = roleStyle;
-    app.settings?.on('chat.roleIndicator', (v) => {
+    onSetting('chat.roleIndicator', (v) => {
       container.dataset.roleIndicator = v;
     });
 
@@ -332,13 +338,16 @@ class ChatView {
       if (meta.chatStatus) this.applyStatus(meta.chatStatus);
       if (meta.taskState) this._applyTaskState(meta.taskState);
       if (meta.goal != null) { this._onGoalUpdated(meta.goal, meta.goalElapsed); if (meta.goalStatus) this._statusBar.setGoalStatus(meta.goalStatus); }
-      // Restore pending permission overlays from server (survived in buffer)
+      // Restore pending permission overlays from server (survived in buffer).
+      // Usually redundant — MessageManager attaches `permission` onto the
+      // normalized tool message — but covers control_requests the normalizer
+      // didn't see (e.g. buffered before a server restart).
       if (meta.pendingPermissions) {
         for (const [toolUseId, cr] of Object.entries(meta.pendingPermissions)) {
           // Find the message with this tool call and inject the permission
           for (const [id, el] of this._elements) {
             if (el.dataset?.toolId === toolUseId || el.querySelector(`[data-tool-id="${toolUseId}"]`)) {
-              const msg = this._messageIndex?.get(id);
+              const msg = this._messages.find(m => m.id === id);
               if (msg && !msg.permission) {
                 msg.permission = { requestId: cr.request_id, toolName: cr.request?.tool_name, input: cr.request?.input || {}, suggestions: cr.request?.permission_suggestions || [], resolved: null };
                 this._renderers.renderPermissionOverlay(el, msg);
@@ -492,11 +501,13 @@ class ChatView {
     const els = this._messageList.querySelectorAll('.chat-msg');
     if (els.length <= maxRendered) return;
     const toRemove = els.length - maxRendered;
+    const removedIds = new Set();
     for (let i = els.length - 1; i >= els.length - toRemove; i--) {
       const id = els[i].dataset.msgId;
-      if (id) { this._elements.delete(id); this._renderedMsgIds.delete(id); }
+      if (id) { this._elements.delete(id); this._renderedMsgIds.delete(id); removedIds.add(id); }
       els[i].remove();
     }
+    if (removedIds.size) this._messages = this._messages.filter(m => !removedIds.has(m.id));
     this._windowEnd -= toRemove;
     this._pinned = false; // we trimmed the bottom, can't be pinned
   }
@@ -507,11 +518,13 @@ class ChatView {
     if (els.length <= maxRendered) return;
     const scrollHeightBefore = this._messageList.scrollHeight;
     const toRemove = els.length - maxRendered;
+    const removedIds = new Set();
     for (let i = 0; i < toRemove; i++) {
       const id = els[i].dataset.msgId;
-      if (id) { this._elements.delete(id); this._renderedMsgIds.delete(id); }
+      if (id) { this._elements.delete(id); this._renderedMsgIds.delete(id); removedIds.add(id); }
       els[i].remove();
     }
+    if (removedIds.size) this._messages = this._messages.filter(m => !removedIds.has(m.id));
     this._windowStart += toRemove;
     // Preserve scroll position after removing from top
     this._messageList.scrollTop -= (scrollHeightBefore - this._messageList.scrollHeight);
@@ -664,7 +677,11 @@ class ChatView {
     }
 
     this._renderedMsgIds.add(msg.id);
-    this._messages.push(msg);
+    // Upsert: trims clear _renderedMsgIds, so re-extending the window would
+    // otherwise push duplicate copies — and _onEditMessage's findIndex would
+    // then mutate the stale first copy instead of the rendered one.
+    const existIdx = this._messages.findIndex(m => m.id === msg.id);
+    if (existIdx >= 0) this._messages[existIdx] = msg; else this._messages.push(msg);
     this._syncReviewAvailability();
 
     // Streaming indicator driven by server's streaming-label broadcast (no client-side derivation)
@@ -1217,6 +1234,8 @@ class ChatView {
     if (this._readOnlyPollTimer) clearTimeout(this._readOnlyPollTimer);
     this.ws.offGlobal(this._handler);
     this.ws.offStateChange(this._stateHandler);
+    for (const [key, fn] of this._settingsListeners || []) this.app.settings?.off(key, fn);
+    this._settingsListeners = [];
     if (this._chatInput) this._chatInput.dispose();
     if (this._chatMinimap) this._chatMinimap.dispose();
     if (this._search) this._search.dispose();

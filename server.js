@@ -586,6 +586,7 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
     }
     if (session._subNormalizers) { session._subNormalizers.clear(); }
     if (session._normalizer) { session._normalizer.listeners.length = 0; }
+    if (session._interruptTimer) { clearTimeout(session._interruptTimer); session._interruptTimer = null; }
     session._isStreaming = false;
     // Detect auth failure from buffer content (claude exits immediately with "Not logged in")
     const exitReason = /Not logged in|Please run \/login|OAuth token revoked/.test(session.buffer || '') ? 'not_logged_in' : undefined;
@@ -1167,12 +1168,15 @@ server.listen(PORT, HOST, () => {
 
 // On server shutdown: only kill the attach PTYs, NOT the dtach sessions
 // Claude processes in dtach survive the server restart
+function shutdown() {
+  for (const [, s] of activeSessions) { try { if (s.pty) s.pty.kill(); } catch {} }
+  // SyncStores persist on a debounce — flush so drafts/settings/uploads
+  // changed within the last 2s aren't lost across a restart
+  for (const store of Object.values(syncStores)) { try { store.flush(); } catch {} }
+  process.exit(0);
+}
 process.on('SIGINT', () => {
   console.log('\n  Shutting down (dtach sessions will keep running)...');
-  for (const [, s] of activeSessions) { try { if (s.pty) s.pty.kill(); } catch {} }
-  process.exit(0);
+  shutdown();
 });
-process.on('SIGTERM', () => {
-  for (const [, s] of activeSessions) { try { if (s.pty) s.pty.kill(); } catch {} }
-  process.exit(0);
-});
+process.on('SIGTERM', shutdown);

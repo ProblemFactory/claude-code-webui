@@ -22,6 +22,9 @@ export function installSidebarState(SidebarClass) {
         this.app.updateTaskbar();
       }
     } catch {}
+    // Only after the authoritative server state has been applied may
+    // migration-triggered pushes write back (see _migrateUserStateKeys).
+    this._userStateFetched = true;
   };
 
   proto._writeUserStateToLocalStorage = function(state) {

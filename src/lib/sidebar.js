@@ -446,9 +446,13 @@ class Sidebar {
   _mergeAndRender() {
     this._merge();
     if (this._migrateUserStateKeys(this._allSessions)) {
-      this._pushUserState();
+      // Never push migration results before the initial server fetch has been
+      // applied — doing so POSTs the stale localStorage cache as full state,
+      // wiping changes made from other devices (server is last-write-wins).
+      // Migration re-runs after the fetch, so deferring loses nothing.
+      if (this._userStateFetched) this._pushUserState();
     }
-    const digest = JSON.stringify(this._allSessions.map(s => `${this._getSessionStateKey(s)}:${s.status}:${s.agentKind || 'primary'}:${s.agentRole || ''}:${s.agentNickname || ''}`));
+    const digest = JSON.stringify(this._allSessions.map(s => `${this._getSessionStateKey(s)}:${s.status}:${s.name || ''}:${s.webuiName || ''}:${s.startedAt || 0}:${s.webuiId || ''}:${s.agentKind || 'primary'}:${s.agentRole || ''}:${s.agentNickname || ''}`));
     if (digest === this._sessionDigest) return;
     this._sessionDigest = digest;
     this.app.syncSessionIdentity?.(this._allSessions);

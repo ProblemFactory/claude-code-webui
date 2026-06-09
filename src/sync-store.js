@@ -44,9 +44,19 @@ class SyncStore {
 
   _scheduleSave() {
     clearTimeout(this._saveTimer);
-    this._saveTimer = setTimeout(() => {
-      try { fs.writeFileSync(this.filePath, JSON.stringify({ version: this.version, data: this.data }, null, 2)); } catch {}
-    }, this.saveDelay);
+    this._saveTimer = setTimeout(() => { this._saveTimer = null; this.flush(); }, this.saveDelay);
+  }
+
+  /** Synchronous save — called on debounce fire and on server shutdown
+   *  (SIGINT/SIGTERM exit immediately; without this, changes made within
+   *  saveDelay of a restart were lost). Atomic via tmp+rename. */
+  flush() {
+    if (this._saveTimer) { clearTimeout(this._saveTimer); this._saveTimer = null; }
+    try {
+      const tmp = `${this.filePath}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify({ version: this.version, data: this.data }, null, 2));
+      fs.renameSync(tmp, this.filePath);
+    } catch {}
   }
 
   _pushOp(op) {

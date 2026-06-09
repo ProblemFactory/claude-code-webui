@@ -49,7 +49,11 @@ function setup(ctx) {
       if ((s.backendSessionId || s.claudeSessionId) === resolvedSessionId) { session = s; break; }
     }
     let mm;
-    if (session?._normalizer && session._normalizer.total > 0) {
+    // Only trust the live normalizer once the WS attach path has loaded the
+    // full JSONL into it (_historyLoaded). After a server restart, processLive
+    // can populate it with partial buffer data first — serving that here
+    // truncated history/search/turnmap to a handful of buffer messages.
+    if (session?._normalizer && session._normalizer.total > 0 && session._historyLoaded) {
       mm = session._normalizer;
     } else {
       const sm = createSessionMessages(session || {

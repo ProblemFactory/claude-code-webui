@@ -217,9 +217,17 @@ function registerWsHandler(wss, ctx) {
             const tryCapture = (attempts) => {
               if (attempts <= 0 || !activeSessions.has(id)) return;
               try {
+                // Exclude lock sessionIds already claimed by other webui
+                // sessions — two new same-cwd sessions within the retry window
+                // would otherwise both claim the FIRST matching lock
+                const claimed = new Set();
+                for (const [oid, os] of activeSessions) {
+                  if (oid !== id && os.backend === 'claude' && os.claudeSessionId) claimed.add(os.claudeSessionId);
+                }
                 const files = fs.readdirSync(SESSIONS_DIR).filter(f => f.endsWith('.json'));
                 for (const f of files) {
                   const lockData = JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, f), 'utf-8'));
+                  if (claimed.has(lockData.sessionId)) continue;
                   if (lockData.cwd === cwd && lockData.startedAt > session.createdAt - 5000) {
                     session.claudeSessionId = lockData.sessionId;
                     session.backendSessionId = lockData.sessionId;
@@ -303,7 +311,7 @@ function registerWsHandler(wss, ctx) {
           // Read childPid from wrapper metadata after it has time to spawn
           setTimeout(() => refreshWebuiPids(), 3000);
 
-          ws.send(JSON.stringify({ type: 'created', sessionId: id, name: session.name, cwd, mode: sessionMode }));
+          ws.send(JSON.stringify({ type: 'created', sessionId: id, name: session.name, cwd, mode: sessionMode, reqId: data.reqId || undefined }));
           broadcastActiveSessions();
           break;
         }
@@ -532,6 +540,7 @@ function registerWsHandler(wss, ctx) {
               for (const [sid, sess] of activeSessions) {
                 if (sess.subagentBuffers?.has(toolUseId)) {
                   sess.clients.set(ws, { cols: 120, rows: 30 }); // register for broadcasts
+                  attachedSessions.add(sid); // so ws close removes us from the parent's clients map
                   const rawMsgs = sess.subagentBuffers.get(toolUseId);
                   // Use existing sub-normalizer if available, or create one
                   if (!sess._subNormalizers) sess._subNormalizers = new Map();
@@ -563,9 +572,9 @@ function registerWsHandler(wss, ctx) {
               // normalizer with partial buffer data before any client connected.
               if (session._normalizer && !session._historyLoaded) {
                 session._historyLoaded = true;
-                const opHandler = session._normalizer.listeners[0];
+                const opHandlers = [...session._normalizer.listeners]; // carry over ALL subscribers, not just the first
                 session._normalizer = createMessageManager(session.backend || 'claude', data.sessionId);
-                if (opHandler) session._normalizer.onOp(opHandler);
+                for (const h of opHandlers) session._normalizer.onOp(h);
                 session._normalizer.convertHistory(sm.raw());
               }
               // Recover goal state from wrapper meta (populated by thread/goal/get on startup)
@@ -630,6 +639,9 @@ function registerWsHandler(wss, ctx) {
         case 'kill': {
           const session = activeSessions.get(data.sessionId);
           if (session) {
+            // Cancel any pending delayed-SIGINT from a recent interrupt — after
+            // kill, the childPid may be reused by an unrelated process
+            if (session._interruptTimer) { clearTimeout(session._interruptTimer); session._interruptTimer = null; }
             // Kill the dtach session process (which kills claude as its child)
             // The dtach process is the parent of our attach PTY's target
             if (session.socketPath) {
@@ -768,7 +780,7 @@ function registerWsHandler(wss, ctx) {
 
           setupSessionPty(session, id, tmuxPty, { cleanupOnExit: false });
 
-          ws.send(JSON.stringify({ type: 'created', sessionId: id, name: session.name, cwd: session.cwd, isTmuxView: true }));
+          ws.send(JSON.stringify({ type: 'created', sessionId: id, name: session.name, cwd: session.cwd, isTmuxView: true, reqId: data.reqId || undefined }));
           broadcastActiveSessions();
           break;
         }

@@ -126,8 +126,9 @@ const tabGroupMethods = {
       targetWin = null;
     };
 
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
+    const signal = winInfo._listenerCtl?.signal;
+    document.addEventListener('mousemove', onMove, { signal });
+    document.addEventListener('mouseup', onUp, { signal });
   },
 
   createTabChain(hostWin, guestWin) {
@@ -169,6 +170,10 @@ const tabGroupMethods = {
   _renderTabBar(chain) {
     const hostWin = this.windows.get(chain.tabs[0]);
     if (!hostWin) return;
+    // Per-render controller: tab-drag document listeners from the previous
+    // render are released here (they used to accumulate on every re-render)
+    chain._tabCtl?.abort();
+    chain._tabCtl = new AbortController();
     const titleBar = hostWin.titleBar;
     const existing = titleBar.querySelector('.tab-bar-tabs');
     if (existing) existing.remove();
@@ -378,8 +383,9 @@ const tabGroupMethods = {
       setTimeout(() => { this._captureGridBounds(win); this._scheduleOverlapUpdate(); this._notify(); }, 250);
     };
 
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
+    const signal = chain._tabCtl?.signal;
+    document.addEventListener('mousemove', onMove, { signal });
+    document.addEventListener('mouseup', onUp, { signal });
   },
 
   _detachFromChain(chain, winId) {
@@ -458,15 +464,36 @@ const tabGroupMethods = {
   removeFromTabChain(chain, winId) {
     const win = this.windows.get(winId);
     if (!win) return;
+    win._listenerCtl?.abort(); // release document-level listeners (also reached via tab ✕, not just closeWindow)
     this._detachFromChain(chain, winId);
     if (win.onClose) win.onClose();
     win.element.remove();
     this.windows.delete(winId);
     this._notify(); this._scheduleOverlapUpdate();
+    // Closing the active tab: hand focus to the chain's new active tab (or the
+    // MRU window if the chain dissolved) so keyboard commands / taskbar active
+    // state don't point at a deleted id
+    if (this.activeWindowId === winId) {
+      this.activeWindowId = null;
+      const next = chain.tabs[chain.active] ?? chain.tabs[0];
+      if (next && this.windows.has(next)) {
+        this.focusWindow(next);
+      } else {
+        let best = null, bestZ = -1;
+        for (const [wid, w] of this.windows) {
+          if (w._hiddenByDesktop || w.isMinimized) continue;
+          if (w._tabChain && w._tabChain.tabs[0] !== w.id) continue;
+          const z = parseInt(w.element.style.zIndex) || 0;
+          if (z > bestZ) { best = wid; bestZ = z; }
+        }
+        if (best) this.focusWindow(best);
+      }
+    }
   },
 
   _ungroupLast(chain) {
     if (chain.tabs.length !== 1) return;
+    chain._tabCtl?.abort(); // chain dissolves — release its tab-drag listeners
     const lastWin = this.windows.get(chain.tabs[0]);
     if (!lastWin) return;
     lastWin._tabChain = null;

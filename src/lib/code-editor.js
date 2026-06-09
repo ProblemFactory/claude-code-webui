@@ -295,11 +295,13 @@ class CodeEditor {
         const data = await res.json();
         if (data.error) {
           this.editorBody.innerHTML = `<div class="empty-hint" style="color:var(--red);padding:20px">${escHtml(data.error)}</div>`;
+          this._themeObserver?.disconnect(); // load failed — editor never constructed, observer would leak
           return;
         }
         content = data.content || '';
       } catch (err) {
         this.editorBody.innerHTML = `<div class="empty-hint" style="color:var(--red);padding:20px">Failed to load file: ${escHtml(err.message)}</div>`;
+        this._themeObserver?.disconnect();
         return;
       }
     }
@@ -343,9 +345,14 @@ class CodeEditor {
       });
     }
 
+    // Chain, don't clobber: app.openEditor installs its own onClose (temp-file
+    // cleanup + welcome check) BEFORE this async load completes — overwriting
+    // it leaked temp files and never restored the welcome screen.
+    const prevOnClose = this.winInfo.onClose;
     this.winInfo.onClose = () => {
       if (this._themeObserver) this._themeObserver.disconnect();
       if (this.onSaveAndClose) { this.save().then(() => this.onSaveAndClose()); }
+      if (prevOnClose) prevOnClose();
     };
   }
 
@@ -394,10 +401,17 @@ class CodeEditor {
   async save() {
     const content = this.editorView.state.doc.toString();
     try {
-      await fetch('/api/file/write', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({path:this.filePath,content}) });
+      // fetch only rejects on network errors — server-side write failures
+      // (permission denied, read-only fs) return 400 with {error} and used to
+      // show "✓ Saved" while silently dropping the edits
+      const res = await fetch('/api/file/write', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({path:this.filePath,content}) });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
       this.modified = false; this.saveIndicator.textContent = '✓ Saved'; this.saveIndicator.style.color = 'var(--green)';
       setTimeout(() => { if (!this.modified) this.saveIndicator.textContent = ''; }, 2000);
-    } catch (err) { this.saveIndicator.textContent = '✕ Error'; this.saveIndicator.style.color = 'var(--red)'; }
+    } catch (err) {
+      this.saveIndicator.textContent = `✕ ${err.message || 'Error'}`; this.saveIndicator.style.color = 'var(--red)';
+    }
   }
 
   async format() {

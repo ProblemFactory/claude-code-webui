@@ -769,17 +769,24 @@ class App {
     const winType = sessionMode === 'chat' ? 'chat' : 'terminal';
     const titleMeta = this._buildTitleMeta({ backend, agentKind, agentRole, agentNickname, sourceKind, parentThreadId });
     const winInfo = this.wm.createWindow({ title: sessionName, type: winType, syncId, titleMeta });
+    // Correlation id: concurrent creates (e.g. group resume-all) must each
+    // match their OWN 'created' reply — an untagged match binds the ChatView
+    // to whichever session the server happens to answer first.
+    const reqId = `req-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
     this.ws.send({
       type:'create', backend, mode: sessionMode, cwd: cwd||undefined, sessionName: name||undefined, model: sessionModel||undefined,
       permissionMode: sessionPermission||undefined, effort: sessionEffort||undefined, extraArgs: sessionExtraArgs||undefined,
       agentKind: agentKind || undefined, agentRole: agentRole || undefined, agentNickname: agentNickname || undefined,
       sourceKind: sourceKind || undefined, parentThreadId: parentThreadId || undefined,
-      resume: !!resumeId, resumeId: resumeId||undefined, fork: fork||undefined, cols:120, rows:30,
+      resume: !!resumeId, resumeId: resumeId||undefined, fork: fork||undefined, cols:120, rows:30, reqId,
     });
 
     const handler = (msg) => {
-      if (msg.type === 'created') {
+      // Window closed before the server answered — clean up the handler so it
+      // doesn't hold winInfo forever (and can't bind a session to a dead window)
+      if (!this.wm.windows.has(winInfo.id)) { this.ws.offGlobal(handler); return; }
+      if (msg.type === 'created' && msg.reqId === reqId) {
         // Set openSpec now that we have the server session ID (for cross-client sync)
         winInfo._openSpec = {
           action: 'attachSession',
@@ -945,12 +952,17 @@ class App {
     }
 
     this._hideWelcome();
-    const winInfo = this.wm.createWindow({ title: `[tmux] ${name}`, type: 'terminal' });
+    // openSpec from creation: without it, another client's layout-sync diff
+    // sees an unknown window and closes it (tmux views were killed on the
+    // first remote broadcast)
+    const winInfo = this.wm.createWindow({ title: `[tmux] ${name}`, type: 'terminal', openSpec: { action: 'attachTmuxSession', tmuxTarget, name, cwd } });
+    const reqId = `req-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
-    this.ws.send({ type: 'tmux-attach', tmuxTarget, name, cwd, cols: 120, rows: 30 });
+    this.ws.send({ type: 'tmux-attach', tmuxTarget, name, cwd, cols: 120, rows: 30, reqId });
 
     const handler = (msg) => {
-      if (msg.type === 'created' && msg.isTmuxView) {
+      if (!this.wm.windows.has(winInfo.id)) { this.ws.offGlobal(handler); return; }
+      if (msg.type === 'created' && msg.isTmuxView && msg.reqId === reqId) {
         const term = new TerminalSession(winInfo, this.ws, msg.sessionId, this.themeManager, null, {}, this.settings);
         term._tmuxTarget = tmuxTarget;
         this.sessions.set(winInfo.id, term);
@@ -1116,6 +1128,9 @@ class App {
         break;
       case 'openBrowser':
         this.openBrowser(spec.url, { syncId });
+        break;
+      case 'attachTmuxSession':
+        this.attachTmuxSession(spec.tmuxTarget, spec.name, spec.cwd);
         break;
       case 'viewSession':
         this.viewSession(spec.sessionId, spec.cwd, spec.name, {

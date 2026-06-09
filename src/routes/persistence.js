@@ -1,18 +1,30 @@
 /**
  * Persistence API routes — layouts, bookmarks, custom themes, user state,
- * settings, session groups. All are file-backed JSON stores with WS broadcast.
+ * settings. All are file-backed JSON stores with WS broadcast.
+ * (Session groups live inside user-state; the old /api/session-groups CRUD
+ * routes were removed — they were unreachable and used a conflicting data
+ * shape that normalizeUserState would have flattened to [].)
  */
 
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const crypto = require('crypto');
 const { listCodexThreads } = require('../codex-session-store');
 
 const router = express.Router();
 
 function ensureDir(dir) { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); }
+
+// Atomic JSON write: tmp + rename. layouts.json/user-state.json are rewritten
+// constantly; a crash mid-writeFileSync truncates the file, the next read's
+// catch silently resets to defaults, and the next autosave makes the loss
+// permanent. rename() is atomic on POSIX so readers see old-or-new, never torn.
+function writeJsonAtomic(file, data) {
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+  fs.renameSync(tmp, file);
+}
 
 /** Setup persistence routes. Requires { dataDir, wss, WS_OPEN, getSyncStore, activeSessions } context. */
 function setup({ dataDir, wss, WS_OPEN, getSyncStore, activeSessions }) {
@@ -38,7 +50,7 @@ function setup({ dataDir, wss, WS_OPEN, getSyncStore, activeSessions }) {
   function writeLayouts(data) {
     ensureDir(dataDir);
     _layoutsCache = data;
-    fs.writeFileSync(LAYOUTS_FILE, JSON.stringify(data, null, 2));
+    writeJsonAtomic(LAYOUTS_FILE, data);
   }
 
   router.get('/api/layouts', (req, res) => res.json(readLayouts()));
@@ -119,7 +131,7 @@ function setup({ dataDir, wss, WS_OPEN, getSyncStore, activeSessions }) {
   }
   function writeBookmarks(data) {
     ensureDir(dataDir);
-    fs.writeFileSync(BOOKMARKS_FILE, JSON.stringify(data, null, 2));
+    writeJsonAtomic(BOOKMARKS_FILE, data);
   }
 
   router.get('/api/bookmarks', (req, res) => res.json(readBookmarks()));
@@ -144,8 +156,9 @@ function setup({ dataDir, wss, WS_OPEN, getSyncStore, activeSessions }) {
   }
 
   function writeCustomThemes(data) {
+    ensureDir(dataDir);
     _customThemesCache = data;
-    fs.writeFileSync(CUSTOM_THEMES_FILE, JSON.stringify(data, null, 2));
+    writeJsonAtomic(CUSTOM_THEMES_FILE, data);
     broadcast({ type: 'custom-themes-updated', themes: data });
   }
 
@@ -282,7 +295,7 @@ function setup({ dataDir, wss, WS_OPEN, getSyncStore, activeSessions }) {
       _userStateCache = normalizeUserState(parsed);
       const normalizedText = JSON.stringify(_userStateCache, null, 2);
       if (normalizedText !== rawText.trim()) {
-        fs.writeFileSync(USER_STATE_FILE, normalizedText);
+        writeJsonAtomic(USER_STATE_FILE, _userStateCache);
       }
     }
     catch { _userStateCache = { ...USER_STATE_DEFAULT }; }
@@ -292,7 +305,7 @@ function setup({ dataDir, wss, WS_OPEN, getSyncStore, activeSessions }) {
   function writeUserState(data) {
     ensureDir(dataDir);
     _userStateCache = normalizeUserState(data);
-    fs.writeFileSync(USER_STATE_FILE, JSON.stringify(_userStateCache, null, 2));
+    writeJsonAtomic(USER_STATE_FILE, _userStateCache);
     broadcast({ type: 'user-state-updated', state: _userStateCache });
   }
 
@@ -320,7 +333,7 @@ function setup({ dataDir, wss, WS_OPEN, getSyncStore, activeSessions }) {
   function writeSettings(data) {
     ensureDir(dataDir);
     _settingsCache = data;
-    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(data, null, 2));
+    writeJsonAtomic(SETTINGS_FILE, data);
     broadcast({ type: 'settings-updated', settings: data });
   }
 
@@ -340,78 +353,6 @@ function setup({ dataDir, wss, WS_OPEN, getSyncStore, activeSessions }) {
     const merged = { ...current, ...patch };
     for (const [k, v] of Object.entries(merged)) { if (v === null) delete merged[k]; }
     writeSettings(merged);
-    res.json({ success: true });
-  });
-
-  // ── Session Groups ──
-  router.get('/api/session-groups', (req, res) => {
-    const state = readUserState();
-    res.json(state.sessionGroups || {});
-  });
-
-  router.post('/api/session-groups', (req, res) => {
-    const groups = req.body;
-    if (!groups || typeof groups !== 'object') return res.status(400).json({ error: 'Expected object' });
-    const state = readUserState();
-    state.sessionGroups = groups;
-    writeUserState(state);
-    res.json({ success: true });
-  });
-
-  router.post('/api/session-groups/create', (req, res) => {
-    const { name } = req.body;
-    if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name is required' });
-    const state = readUserState();
-    if (!state.sessionGroups) state.sessionGroups = {};
-    const groupId = 'group-' + crypto.randomUUID();
-    state.sessionGroups[groupId] = { name, sessionIds: [] };
-    writeUserState(state);
-    res.json({ success: true, groupId, group: state.sessionGroups[groupId] });
-  });
-
-  router.post('/api/session-groups/delete', (req, res) => {
-    const { groupId } = req.body;
-    if (!groupId) return res.status(400).json({ error: 'groupId is required' });
-    const state = readUserState();
-    if (!state.sessionGroups || !state.sessionGroups[groupId]) return res.status(404).json({ error: 'Group not found' });
-    delete state.sessionGroups[groupId];
-    writeUserState(state);
-    res.json({ success: true });
-  });
-
-  router.post('/api/session-groups/rename', (req, res) => {
-    const { groupId, name } = req.body;
-    if (!groupId || !name) return res.status(400).json({ error: 'groupId and name are required' });
-    const state = readUserState();
-    if (!state.sessionGroups || !state.sessionGroups[groupId]) return res.status(404).json({ error: 'Group not found' });
-    state.sessionGroups[groupId].name = name;
-    writeUserState(state);
-    res.json({ success: true });
-  });
-
-  router.post('/api/session-groups/assign', (req, res) => {
-    const { groupId, sessionId, sessionKey } = req.body;
-    const targetSession = sessionKey || sessionId;
-    if (!groupId || !targetSession) return res.status(400).json({ error: 'groupId and sessionId/sessionKey are required' });
-    const state = readUserState();
-    if (!state.sessionGroups || !state.sessionGroups[groupId]) return res.status(404).json({ error: 'Group not found' });
-    const group = state.sessionGroups[groupId];
-    if (!group.sessionIds.includes(targetSession)) {
-      group.sessionIds.push(targetSession);
-      writeUserState(state);
-    }
-    res.json({ success: true });
-  });
-
-  router.post('/api/session-groups/unassign', (req, res) => {
-    const { groupId, sessionId, sessionKey } = req.body;
-    const targetSession = sessionKey || sessionId;
-    if (!groupId || !targetSession) return res.status(400).json({ error: 'groupId and sessionId/sessionKey are required' });
-    const state = readUserState();
-    if (!state.sessionGroups || !state.sessionGroups[groupId]) return res.status(404).json({ error: 'Group not found' });
-    const group = state.sessionGroups[groupId];
-    group.sessionIds = group.sessionIds.filter(id => id !== targetSession);
-    writeUserState(state);
     res.json({ success: true });
   });
 

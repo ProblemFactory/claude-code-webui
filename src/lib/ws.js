@@ -15,8 +15,10 @@ class WsManager {
     };
     this.ws.onmessage = (e) => {
       let d; try { d = JSON.parse(e.data); } catch { return; }
-      if (d.sessionId) (this.handlers.get(d.sessionId) || []).forEach(h => h(d));
-      this.globalHandlers.forEach(h => h(d));
+      if (d.sessionId) [...(this.handlers.get(d.sessionId) || [])].forEach(h => h(d));
+      // Snapshot: one-time handlers self-remove via offGlobal during dispatch;
+      // splicing the live array inside forEach skips the next handler.
+      [...this.globalHandlers].forEach(h => h(d));
     };
     this.ws.onclose = () => {
       this._connected = false;
