@@ -149,40 +149,21 @@ child.stdout.on('data', (chunk) => {
       }
       scheduleMeta();
 
-      // Goal auto-continue: if a goal is active and the turn completed normally,
-      // send a follow-up message to keep the model working toward the goal.
-      if (msg.type === 'result' && meta.goal && !msg.is_error && child.stdin.writable) {
-        meta.goalIterations = (meta.goalIterations || 0) + 1;
-        // Safety cap: WebUI-set goals have no CLI-side "met" detection, so an
-        // unattended goal would otherwise continue forever. Pausing (not
-        // clearing) lets the user resume via the status bar Continue button.
-        if (meta.goalIterations > 200) {
-          log(`Goal auto-continue cap reached (${meta.goalIterations - 1} turns) — pausing goal`);
-          meta.goalStatus = 'paused';
-          scheduleMeta();
-        } else {
-          setTimeout(() => {
-            // Re-check at fire time: clearing the goal during this window must
-            // not trigger one more forced continuation
-            if (!meta.goal || !child.stdin.writable) return;
-            const continueMsg = JSON.stringify({
-              type: 'user',
-              message: { role: 'user', content: [{ type: 'text',
-                text: `[Goal still active: "${meta.goal}"]\nYou stopped but your goal is not yet complete. Continue working toward it. Do not ask for confirmation — just proceed.`
-              }] }
-            });
-            child.stdin.write(continueMsg + '\n');
-            log('Goal auto-continue sent');
-          }, 1000);
-        }
-      }
+      // Goals are handled NATIVELY by the CLI since /goal gained
+      // supportsNonInteractive (2.1.1xx): the Stop hook drives continuation
+      // and met-detection. The old wrapper-side auto-continue simulation
+      // (and its iteration cap) is gone — see the set-goal stdin handler.
     }
 
-    // Track goal state from CLI /goal (goal_status attachment in stream-json)
+    // Track goal state from CLI /goal (goal_status attachment). As of 2.1.170
+    // these are JSONL-only (not emitted on stream-json stdout) — the server
+    // tails the JSONL instead — but keep this in case the CLI starts emitting.
     if (msg.type === 'attachment' && msg.attachment?.type === 'goal_status') {
       const a = msg.attachment;
-      if (a.met) { meta.goal = null; }
-      else if (a.condition) { meta.goal = a.condition; }
+      if (a.met) { meta.goal = null; meta.goalStatus = 'complete'; }
+      else if (a.condition) { meta.goal = a.condition; meta.goalStatus = 'active'; }
+      if (a.durationMs) meta.goalElapsed = a.durationMs;
+      if (a.tokens) meta.goalTokensUsed = a.tokens;
       scheduleMeta();
     }
 
@@ -240,11 +221,23 @@ try {
         const parsed = JSON.parse(line);
         // Handle goal commands from WebUI
         if (parsed.type === 'set-goal') {
+          // Forward to the CLI's NATIVE /goal (dispatched as a command in
+          // stream-json since supportsNonInteractive). Setting a goal starts a
+          // model turn immediately; the Stop hook then drives continuation and
+          // met-detection (goal_status attachments land in the JSONL — the
+          // server tails it after each result to sync state).
           meta.goal = parsed.goal || null;
-          meta.goalIterations = 0; // fresh goal → fresh auto-continue budget
-          if (meta.goal) meta.goalStatus = 'active';
+          meta.goalStatus = meta.goal ? 'active' : null;
+          meta.goalSetAt = meta.goal ? Date.now() : null;
           scheduleMeta();
-          log(`Goal ${meta.goal ? 'set: ' + meta.goal.substring(0, 80) : 'cleared'}`);
+          const cmdText = meta.goal ? `/goal ${meta.goal}` : '/goal clear';
+          if (child.stdin.writable) {
+            child.stdin.write(JSON.stringify({
+              type: 'user',
+              message: { role: 'user', content: [{ type: 'text', text: cmdText }] },
+            }) + '\n');
+          }
+          log(`Goal ${meta.goal ? 'set (native): ' + meta.goal.substring(0, 80) : 'cleared (native)'}`);
           continue;
         }
         // Pass through as-is to claude

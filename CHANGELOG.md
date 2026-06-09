@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/),
 and this project uses [Semantic Versioning](https://semver.org/).
 
+## [2.8.1] — 2026-06-09
+
+### Changed
+
+- **Claude `/goal` switched to the CLI's native goal mechanism** (parity with Codex). CLI ~2.1.1xx added `supportsNonInteractive` to `/goal`, so it now dispatches as a real command in stream-json (verified live on 2.1.170) — the wrapper forwards `/goal <text>` / `/goal clear` instead of simulating continuation. The CLI's Stop hook drives both auto-continue and **met-detection** (which the simulation never had), so the v2.8.0 200-iteration safety cap is gone — goals terminate when their condition is met, with `reason`/`iterations`/`durationMs`/`tokens` reported.
+- `goal_status` attachments are JSONL-only (not emitted on stream-json stdout — same gap class as subagent messages #8262), so the server tails the session JSONL after each turn to sync goal state, broadcasts `Goal met: …` with the hook's reasoning, and writes the cleared state back to the wrapper meta so restarts don't resurrect a finished goal.
+
 ## [2.8.0] — 2026-06-09
 
 Full-project code review release: 8 parallel review agents audited every subsystem (server, wrappers, WS/stores, routes, window manager, sidebar, chat UI, viewers, CSS), followed by five fix batches covering ~120 findings.

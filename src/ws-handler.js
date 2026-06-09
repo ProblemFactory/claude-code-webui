@@ -437,16 +437,21 @@ function registerWsHandler(wss, ctx) {
               } else {
                 session._goal = prev;
                 session._prevGoal = null;
+                session._goalStatus = 'active';
+                session._lastGoalStatusUuid = null; // fresh native goal → re-sync from JSONL
                 if (session.pty) session.pty.write(JSON.stringify({ type: 'set-goal', goal: prev }) + '\n');
-                broadcastToSession(session, data.sessionId, { type: 'goal-updated', sessionId: data.sessionId, goal: prev, statusMsg: `Goal resumed: ${prev}` });
+                broadcastToSession(session, data.sessionId, { type: 'goal-updated', sessionId: data.sessionId, goal: prev, goalStatus: 'active', statusMsg: `Goal resumed: ${prev}` });
               }
             } else {
               const goalText = data.goal || null;
               if (!goalText && session._goal) session._prevGoal = session._goal;
               if (session.pty) session.pty.write(JSON.stringify({ type: 'set-goal', goal: goalText }) + '\n');
               session._goal = goalText;
+              session._goalStatus = goalText ? 'active' : null;
+              session._goalElapsed = 0;
+              session._lastGoalStatusUuid = null;
               const msg = goalText ? `Goal set: ${goalText}` : `Goal cleared`;
-              broadcastToSession(session, data.sessionId, { type: 'goal-updated', sessionId: data.sessionId, goal: goalText, statusMsg: msg });
+              broadcastToSession(session, data.sessionId, { type: 'goal-updated', sessionId: data.sessionId, goal: goalText, goalStatus: session._goalStatus, goalElapsed: 0, statusMsg: msg });
             }
           }
           break;
