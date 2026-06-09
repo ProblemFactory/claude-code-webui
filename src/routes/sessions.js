@@ -93,6 +93,11 @@ function setup(ctx) {
         buffer: '',
       });
       payload.chatStatus = sm.chatStatus();
+      // Permission mode isn't recoverable from the JSONL — merge the mode the
+      // live session was started with (covers freshly resumed sessions)
+      if (session?._permissionMode && payload.chatStatus && !payload.chatStatus.permissionMode) {
+        payload.chatStatus.permissionMode = session._permissionMode;
+      }
       payload.taskState = sm.taskState?.() || null;
       payload.turnMap = mm.turnMap();
     }

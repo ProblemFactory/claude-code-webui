@@ -161,6 +161,10 @@ function registerWsHandler(wss, ctx) {
             agentRole: data.agentRole || '',
             agentNickname: data.agentNickname || '',
             parentThreadId: data.parentThreadId || null,
+            // Permission mode is not recoverable from the JSONL (init records
+            // are stdout-only) — remember what this session was started with
+            // so attach can restore the status bar immediately
+            _permissionMode: data.permissionMode || null,
             sockName, socketPath, buffer: '',
           };
           if (codexThreadBaseline) session._codexThreadBaseline = codexThreadBaseline;
@@ -618,8 +622,13 @@ function registerWsHandler(wss, ctx) {
               // Falls back to wrapper metadata file for sessions not yet tracked.
               const isStreaming = session._isStreaming ?? sm.isStreaming;
               const streamingLabel = isStreaming ? (session._streamingLabel || 'thinking...') : '';
+              // Merge session-known permission mode into chatStatus — the JSONL
+              // can't provide it (init records are stdout-only), so freshly
+              // resumed sessions had an empty mode until the first reply
+              const chatStatus = sm.chatStatus() || {};
+              if (!chatStatus.permissionMode && session._permissionMode) chatStatus.permissionMode = session._permissionMode;
               ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, mode: 'chat',
-                messages, totalCount, chatStatus: sm.chatStatus(), isStreaming, streamingLabel, taskState: sm.taskState(), turnMap, pendingPermissions: pendingPerms,
+                messages, totalCount, chatStatus, isStreaming, streamingLabel, taskState: sm.taskState(), turnMap, pendingPermissions: pendingPerms,
                 goal: session._goal || null, goalElapsed: session._goalElapsed || 0, goalStatus: session._goalStatus || null }));
             } else {
               ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, buffer: session.buffer || '' }));

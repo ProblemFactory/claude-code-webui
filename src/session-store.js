@@ -288,12 +288,18 @@ class SessionMessages {
     this._ensureParsed();
     const msgs = this._all;
     let lastUsage = null, model = null, contextWindow = 0, totalCost = 0, slashCommands = null, permissionMode = null;
+    let assistantModel = null;
     for (let i = msgs.length - 1; i >= Math.max(0, msgs.length - 200); i--) {
       const m = msgs[i];
       if (!lastUsage && m.type === 'assistant' && m.message?.usage) lastUsage = m.message.usage;
+      // result/init records are stream-json stdout-only — they NEVER appear in
+      // the JSONL, so for stopped/resumed sessions (no buffer) the assistant
+      // record's message.model is the only model source available
+      if (!assistantModel && m.type === 'assistant' && m.message?.model && !String(m.message.model).startsWith('<')) assistantModel = m.message.model;
       if (!model && m.type === 'result' && m.modelUsage) { model = Object.keys(m.modelUsage)[0]; contextWindow = Object.values(m.modelUsage)[0]?.contextWindow || 0; }
-      if (lastUsage && model) break;
+      if (lastUsage && model && assistantModel) break;
     }
+    if (!model) model = assistantModel;
     for (let i = 0; i < Math.min(msgs.length, 5); i++) {
       const m = msgs[i];
       if (m.type === 'system' && m.subtype === 'init') {
@@ -302,6 +308,13 @@ class SessionMessages {
         if (m.permissionMode) permissionMode = m.permissionMode;
         break;
       }
+    }
+    // contextWindow comes from result.modelUsage (stdout-only). When restoring
+    // from JSONL, infer it from observed usage: a context larger than the
+    // standard 200k window implies the 1M beta.
+    if (!contextWindow && lastUsage) {
+      const used = (lastUsage.input_tokens || 0) + (lastUsage.cache_read_input_tokens || 0) + (lastUsage.cache_creation_input_tokens || 0);
+      contextWindow = used > 190000 ? 1000000 : 200000;
     }
     for (const m of msgs) { if (m.type === 'result' && m.total_cost_usd) totalCost += m.total_cost_usd; }
     if (!lastUsage && !model) return null;
