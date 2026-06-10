@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/),
 and this project uses [Semantic Versioning](https://semver.org/).
 
+## [2.8.2] — 2026-06-09
+
+### Added
+
+- **Persistent goal entry point in the chat status bar**: a dim 🎯 is always shown when no goal is active — clicking it opens a set-a-goal popup (condition input + "Resume previous"). Active goals show status icon + elapsed + objective as before.
+- **Codex status bar parity**: reasoning effort next to the model badge, sandbox policy in the permission tooltip, cumulative session token usage (in/cached/out/reasoning) in the context-pie tooltip, and Codex's plan tool (`update_plan`) now drives the same TODO display above the input that Claude's TodoWrite does.
+
+### Fixed
+
+- **Spontaneous terminal shrink + apparent disconnect mid-use**: `resizeSessionToMin` min'd over all clients while ghost/placeholder entries sat at a hardcoded 120×30 (the attach placeholder, or a subagent View-Log window registered into the parent session). Compounded by no WS heartbeat, so half-open connections lingered. Now only genuinely-fitted terminal clients drive PTY size (`real:true`), subagent viewers never participate (`viewer:true`), a 30s ping/pong heartbeat evicts ghosts, and terminals re-fit on reconnect.
+- **Status bar empty until the first reply after resume/attach**: model and context window were derived only from `result.modelUsage` / system-init records, which are stream-json stdout-only and never in the JSONL. Now falls back to `assistant.message.model`, infers the context window from observed usage (>190k ⇒ 1M beta), and restores the permission mode from the session's launch args. Codex unaffected (rollout JSONL carries it natively).
+- **Codex resume showed no goal for the whole first turn**: resuming a thread with an active goal auto-continues by Codex design, but the wrapper only emitted a goal event at turn end. It now emits `goal_updated` right after the startup `thread/goal/get`. Replacing an active goal (`/goal B` over A) now also saves A to `_prevGoal` for resume.
+- **Codex live token% / rate limits were dead paths**: the `thread/tokenUsage/updated` notification's v2 shape (`{tokenUsage:{total,last,modelContextWindow}}`) was read with nonexistent field names, and rate limits were looked for on the wrong notification — both now parsed correctly (`account/rateLimits/updated` carries the limits).
+
+### Changed
+
+- **Claude `/goal` uses the CLI's native goal mechanism** (parity with Codex; superseded the wrapper simulation + 200-iteration cap from 2.8.0). The CLI's Stop hook drives continuation and met-detection; the server tails the JSONL for `goal_status` attachments (stdout-gap) to sync state. Requires CLI ~2.1.1xx (`/goal` `supportsNonInteractive`).
+
 ## [2.8.1] — 2026-06-09
 
 ### Changed

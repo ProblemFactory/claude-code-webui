@@ -716,6 +716,7 @@ Eight parallel review agents audited every subsystem; ~120 findings fixed in fiv
 - Ctrl+G screen clearing: editor script named `code` (GUI editor whitelist)
 - Session resume duplicates: `broadcastActiveSessions()` includes `claudeSessionId`
 - Layout restore race: `_restoring` flag blocks auto-save
+- Chat status bar empty until first reply after resume/attach: model + contextWindow came only from `result.modelUsage` / system-`init` records, which are stream-json **stdout-only and never written to the JSONL** — any pure-JSONL restore got `model:null, contextWindow:0`. Fix in `SessionMessages.chatStatus()`: fall back to `assistant.message.model` (skip `<synthetic>`), infer contextWindow from observed usage (>190k tokens ⇒ 1M beta else 200k); permission mode isn't in the JSONL at all → `session._permissionMode` (remembered from launch args) merged into chatStatus by both WS attach and `/api/session-messages?withStatus=1`. Codex needs none of this (rollout JSONL carries turn_context model + token_count + approval policy natively).
 - Resumed sessions not showing: lock-first discovery with project dir matching
 - Save & Close scroll: `scrollToBottom()` + `focus()` after editor close
 - Sidebar resizer: `inside` mode for fixed-position elements
