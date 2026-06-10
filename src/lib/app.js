@@ -10,7 +10,7 @@ import { CodeEditor } from './code-editor.js';
 import { LayoutManager } from './layout.js';
 import { ChatView } from './chat-view.js';
 import { Resizer } from './resizer.js';
-import { createPopover, fetchJson, initStateSync } from './utils.js';
+import { createPopover, fetchJson, initStateSync, installLongPressContextMenu } from './utils.js';
 import { MobileNav } from './mobile-nav.js';
 import { setupDirAutocomplete } from './autocomplete.js';
 import { getAvailableFonts } from './terminal.js';
@@ -93,6 +93,10 @@ class App {
   constructor() {
     /** Centralized mobile detection — all code should use app.isMobile instead of matchMedia */
     this.isMobile = window.matchMedia('(max-width: 768px)').matches;
+    /** Touch-primary device (phones AND tablets) — hover/right-click unavailable */
+    this.isTouch = window.matchMedia('(hover: none) and (pointer: coarse)').matches;
+    // Long-press = right-click on touch devices (iOS never fires contextmenu natively)
+    if (this.isTouch) installLongPressContextMenu();
 
     this.settings = new SettingsManager();
     this.themeManager = new ThemeManager();

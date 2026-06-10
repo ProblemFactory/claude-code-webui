@@ -669,6 +669,9 @@ pre.chat-pre-wrapped { white-space: pre-wrap; word-break: break-all; }
 @media (hover: none) {
   .chat-attach-remove, .chat-pre-wrap .chat-code-toolbar { opacity: 1; }
   .chat-msg > .chat-open-editor-btn { opacity: 0.7; }
+  /* Tap on a link shows our Open/Copy menu — suppress the competing iOS
+     long-press link callout */
+  .chat-msg a, .chat-link { -webkit-touch-callout: none; }
   /* Minimap drag-to-jump hijacks edge scrolling on phones (native scrollbar
      is hidden when minimap is active) — disable interaction, keep visual */
   .chat-minimap { pointer-events: none; }

@@ -6,7 +6,7 @@
 
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
-import { escHtml, copyText } from './utils.js';
+import { escHtml, copyText, showContextMenu } from './utils.js';
 import { renderCodeBlock, rehighlightCodeBlock, stripAnsi, getHljsLanguages } from './highlight.js';
 import { UI_ICONS } from './icons.js';
 import { createBackendIconHtml, getBackendMeta } from './agent-meta.js';
@@ -733,7 +733,7 @@ class ChatRenderers {
 
   /** Set up delegated click handler on message list for links/paths */
   setupLinkHandler() {
-    const isMobile = this.app?.isMobile;
+    const isTouch = this.app?.isTouch || this.app?.isMobile;
     this._messageList.addEventListener('click', (e) => {
       // Handle both our .chat-link spans and markdown-generated <a> tags
       const link = e.target.closest('.chat-link') || e.target.closest('a[href]');
@@ -742,35 +742,58 @@ class ChatRenderers {
       e.stopPropagation();
       const url = link.dataset.href || link.getAttribute('href');
       const fp = link.dataset.path;
-      // Mobile: tap = open (no Ctrl key available); Desktop: Ctrl/Cmd+Click = open, Click = copy
-      const shouldOpen = isMobile || e.ctrlKey || e.metaKey;
-      if (shouldOpen) {
-        if (fp) {
-          // Parse optional :line, :line:col, or :line-line suffix
-          const lineMatch = fp.match(/^(.+?):(\d+)(?:[:\-]\d+)?$/);
-          const cleanPath = lineMatch ? lineMatch[1] : fp;
-          const lineNum = lineMatch ? parseInt(lineMatch[2], 10) : undefined;
-          fetch(`/api/file/info?path=${encodeURIComponent(cleanPath)}`)
-            .then(r => r.json())
-            .then(info => {
-              if (info.error) {
-                this.flashLink(link, 'Not found');
-              } else if (info.isDirectory) {
-                this.app.openFileExplorer(cleanPath);
-              } else {
-                this.app.openFile(cleanPath, cleanPath.split('/').pop(), { line: lineNum });
-              }
-            })
-            .catch(() => this.flashLink(link, 'Error'));
-        } else if (url) {
-          window.open(url, '_blank');
-        }
+      const open = () => this._openLinkTarget(link, url, fp);
+      const copy = () => copyText(fp || url).then(() => this.flashLink(link, 'Copied!'));
+      if (isTouch) {
+        // No Ctrl/hover on touch — tap shows both actions (copy used to be impossible)
+        showContextMenu(e.clientX, e.clientY, [
+          { label: fp ? 'Open' : 'Open link', action: open },
+          { label: fp ? 'Copy path' : 'Copy URL', action: copy },
+        ]);
+      } else if (e.ctrlKey || e.metaKey) {
+        open();
       } else {
-        // Desktop click: copy to clipboard
-        const text = fp || url;
-        copyText(text).then(() => this.flashLink(link, 'Copied!'));
+        copy();
       }
     });
+    // Right-click / long-press on a link: same Open/Copy menu (desktop native
+    // menu has no useful actions for .chat-link spans)
+    this._messageList.addEventListener('contextmenu', (e) => {
+      const link = e.target.closest('.chat-link') || e.target.closest('a[href]');
+      if (!link) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const url = link.dataset.href || link.getAttribute('href');
+      const fp = link.dataset.path;
+      showContextMenu(e.clientX, e.clientY, [
+        { label: fp ? 'Open' : 'Open link', action: () => this._openLinkTarget(link, url, fp) },
+        { label: fp ? 'Copy path' : 'Copy URL', action: () => copyText(fp || url).then(() => this.flashLink(link, 'Copied!')) },
+      ]);
+    });
+  }
+
+  /** Open a chat link target: file path (with optional :line suffix) in viewer/explorer, URL in new tab */
+  _openLinkTarget(link, url, fp) {
+    if (fp) {
+      // Parse optional :line, :line:col, or :line-line suffix
+      const lineMatch = fp.match(/^(.+?):(\d+)(?:[:\-]\d+)?$/);
+      const cleanPath = lineMatch ? lineMatch[1] : fp;
+      const lineNum = lineMatch ? parseInt(lineMatch[2], 10) : undefined;
+      fetch(`/api/file/info?path=${encodeURIComponent(cleanPath)}`)
+        .then(r => r.json())
+        .then(info => {
+          if (info.error) {
+            this.flashLink(link, 'Not found');
+          } else if (info.isDirectory) {
+            this.app.openFileExplorer(cleanPath);
+          } else {
+            this.app.openFile(cleanPath, cleanPath.split('/').pop(), { line: lineNum });
+          }
+        })
+        .catch(() => this.flashLink(link, 'Error'));
+    } else if (url) {
+      window.open(url, '_blank');
+    }
   }
 
   flashLink(link, msg) {
@@ -910,6 +933,35 @@ class ChatRenderers {
         langPicker.appendChild(langBtn);
         toolbar.appendChild(langPicker);
       }
+
+      // Copy button — extracts code text without line-number gutters / diff
+      // prefixes. Especially valuable on touch devices where text selection
+      // inside scrollable code blocks is impractical.
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'chat-wrap-toggle';
+      copyBtn.textContent = 'Copy';
+      copyBtn.title = 'Copy to clipboard';
+      copyBtn.onclick = (e) => {
+        e.stopPropagation();
+        let text;
+        if (block.classList.contains('chat-diff-body')) {
+          // Keep +/- prefixes — without them added/removed lines are indistinguishable
+          text = Array.from(block.children).map(row =>
+            (row.querySelector('.chat-diff-prefix')?.textContent || '') +
+            (row.querySelector('.chat-diff-text')?.textContent || '')
+          ).join('\n');
+        } else {
+          const lineEls = block.querySelectorAll('.chat-code-text');
+          text = lineEls.length
+            ? Array.from(lineEls).map(s => s.textContent).join('\n')
+            : block.textContent.replace(/\n$/, '');
+        }
+        copyText(text).then(() => {
+          copyBtn.textContent = 'Copied';
+          setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1200);
+        });
+      };
+      toolbar.appendChild(copyBtn);
 
       const btn = document.createElement('button');
       btn.className = 'chat-wrap-toggle';

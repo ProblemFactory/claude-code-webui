@@ -1249,6 +1249,11 @@ html, body {
 @media (hover: none) {
   .folder-add-btn { opacity: 0.6; }
   .tab-item .tab-close { opacity: 0.5; }
+  /* Finger-sized context menu rows (reached via long-press on touch) */
+  .context-menu-item, .taskbar-context-menu-item { padding: 10px 14px; font-size: 13px; min-height: 40px; }
+  .context-menu-item:active, .taskbar-context-menu-item:active { background: var(--bg-hover); }
+  /* Suppress the iOS long-press callout on surfaces that have our own context menus */
+  .mobile-folder-card, .session-item-card, .file-item, .folder-header { -webkit-touch-callout: none; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }

@@ -97,6 +97,20 @@ export function showContextMenu(x, y, items, className = 'context-menu') {
       el.appendChild(sub);
       el.addEventListener('mouseenter', () => { sub.style.display = ''; });
       el.addEventListener('mouseleave', () => { sub.style.display = 'none'; });
+      // Touch: no hover exists — tap the parent row to open the submenu.
+      // Only opens (never toggles closed): emulated mouseenter on tap may have
+      // already shown it, and a toggle would immediately re-hide it.
+      el.addEventListener('click', (e) => {
+        if (e.target !== el) return; // child item clicks handle themselves
+        e.stopPropagation();
+        sub.style.display = '';
+        requestAnimationFrame(() => {
+          const r = sub.getBoundingClientRect();
+          if (r.right > window.innerWidth && !sub.style.right) { sub.style.left = 'auto'; sub.style.right = '100%'; }
+          const overflowY = r.bottom - window.innerHeight;
+          if (overflowY > 0) sub.style.top = `${-4 - overflowY - 4}px`; // top is relative to the parent row (initial -4px)
+        });
+      });
     } else {
       el.textContent = item.label;
       if (item.disabled) { el.style.opacity = '0.4'; el.style.cursor = 'default'; }
@@ -113,6 +127,49 @@ export function showContextMenu(x, y, items, className = 'context-menu') {
   if (mr.top < 0) pop.style.top = '4px';
   pop.style.visibility = '';
   return pop;
+}
+
+/**
+ * Long-press → contextmenu for touch devices.
+ *
+ * iOS Safari never fires `contextmenu` on long-press, so every right-click
+ * menu (file explorer, group headers, …) is unreachable there. Synthesize a
+ * bubbling contextmenu event after a 500ms still press. Android Chrome fires
+ * the native event itself — a trusted contextmenu cancels the pending timer
+ * so menus don't double-fire.
+ */
+export function installLongPressContextMenu() {
+  let timer = null, sx = 0, sy = 0, fired = false;
+  const cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
+  document.addEventListener('touchstart', (e) => {
+    cancel(); fired = false;
+    if (e.touches.length !== 1) return;
+    const target = e.target;
+    // Native long-press matters on these (paste menu, text selection, terminal)
+    if (target.closest?.('textarea, input, select, [contenteditable], .xterm')) return;
+    const t = e.touches[0];
+    sx = t.clientX; sy = t.clientY;
+    timer = setTimeout(() => {
+      timer = null; fired = true;
+      try { navigator.vibrate?.(10); } catch {}
+      target.dispatchEvent(new MouseEvent('contextmenu', {
+        bubbles: true, cancelable: true, view: window, clientX: sx, clientY: sy,
+      }));
+    }, 500);
+  }, { passive: true, capture: true });
+  document.addEventListener('touchmove', (e) => {
+    if (!timer) return;
+    const t = e.touches[0];
+    if (Math.abs(t.clientX - sx) > 10 || Math.abs(t.clientY - sy) > 10) cancel();
+  }, { passive: true, capture: true });
+  // Non-passive: preventDefault after a fired long-press suppresses the
+  // emulated click that would otherwise also activate the pressed element
+  document.addEventListener('touchend', (e) => {
+    cancel();
+    if (fired) { fired = false; e.preventDefault(); }
+  }, { capture: true });
+  document.addEventListener('touchcancel', () => { cancel(); fired = false; }, { capture: true });
+  document.addEventListener('contextmenu', (e) => { if (e.isTrusted) cancel(); }, { capture: true });
 }
 
 /** Fetch JSON with silent error handling. Returns null on failure. */

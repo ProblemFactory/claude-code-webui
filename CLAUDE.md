@@ -348,6 +348,12 @@ Mobile-specific UI code extracted into dedicated modules to keep desktop and mob
 - **`src/lib/mobile-nav.js`** — `MobileNav` class: window switcher (tap title), close button (✕), desktop tabs, title updates, edge-swipe gestures. Only constructed when `app.isMobile` is true.
 - **`src/lib/sidebar-render-mobile.js`** — `installSidebarRenderMobile` mixin: two-level folder/group navigation (folder list → drill-down → session cards). Architecturally different from desktop's collapsible groups.
 - **`app.isMobile`** — centralized `matchMedia('max-width: 768px')` check in App constructor. All code references this instead of doing its own detection.
+- **`app.isTouch`** — `matchMedia('(hover: none) and (pointer: coarse)')` — touch-primary device (phones AND tablets, independent of width). Gates touch affordances that aren't about layout.
+- **Long-press = right-click** (`installLongPressContextMenu` in utils.js, installed when `app.isTouch`): 500ms still press synthesizes a bubbling `contextmenu` MouseEvent at the touch point, so ALL existing right-click menus (file explorer items/background/columns, sidebar group headers, mobile folder/group cards) work on touch with zero per-site code. iOS Safari never fires contextmenu natively; Android does — a trusted contextmenu cancels the pending timer (no double-fire). The post-long-press emulated click is suppressed via non-passive `touchend` preventDefault. Excluded surfaces: `textarea/input/select/[contenteditable]/.xterm` (native long-press behavior matters there).
+- **Touch context menus**: `showContextMenu` submenus open on tap (click handler alongside mouseenter; open-only to avoid emulated-mouseenter double-toggle), clamp into viewport. `@media (hover: none)` enlarges menu rows to 40px touch targets.
+- **Chat links on touch**: tap shows an Open / Copy menu (`showContextMenu` at tap point) — there is no Ctrl key on touch, so the desktop click=copy / Ctrl+click=open split collapses into one menu. Right-click/long-press on links shows the same menu on all devices. iOS link callout suppressed via `-webkit-touch-callout: none`.
+- **Code block Copy button**: in the code toolbar next to Wrap — strips line-number gutters (`.chat-code-text` join) and keeps diff +/- prefixes. Hover-revealed toolbars are always visible under `@media (hover: none)`.
+- **Mobile sidebar cards**: long-press a group card → same context menu as desktop group-header right-click (rename/linked folders/delete); long-press a folder card → New session here / Copy path.
 - **`_mobileDrilldown`** state on Sidebar: `{type: 'folder'|'group', key, label}` tracks drill-down position so `_render()` can restore it after session state changes (star/archive/resume) that trigger re-render.
 
 ### 8. xterm.js Rendering Gotchas
@@ -589,7 +595,8 @@ Server → Client: `created`, `output`, `msg` (normalized: op=create/edit/meta),
 - TODO display: above input area, shows current in-progress item from TodoWrite, click for full list popup
 - Subagent viewer: unified virtual session architecture (server-buffered), standard read-only ChatView for both live and completed agents
 - Ctrl+F search with highlight, match counter, prev/next navigation
-- Auto-detect URLs and file paths with VS Code-style character exclusion regex, `:line`, `:line:col`, `:line-line` suffixes (click=copy with tooltip, Ctrl+click=open). `_linkify` is HTML-aware (splits tags/text, skips `<a>` tags, linkifies inside `<code>` blocks). Markdown `<a href>` tags also intercepted (same click=copy, Ctrl+click=open).
+- Auto-detect URLs and file paths with VS Code-style character exclusion regex, `:line`, `:line:col`, `:line-line` suffixes (click=copy with tooltip, Ctrl+click=open; touch devices: tap=Open/Copy menu; right-click/long-press=same menu everywhere). `_linkify` is HTML-aware (splits tags/text, skips `<a>` tags, linkifies inside `<code>` blocks). Markdown `<a href>` tags also intercepted (same behavior).
+- Code block toolbar: Copy button (strips line-number gutters, keeps diff +/- prefixes), Wrap toggle, language picker — always visible on touch devices (hover-gated on desktop)
 - Pre block wrap toggle (hover to show)
 - Streaming/activity indicator above input bar (always visible): thinking/running ToolName/responding. Mid-stream detection on attach via `isStreaming`.
 - Interrupt result labels: maps `subtype` to human-readable label (error_during_execution -> "Interrupted", error_max_turns -> "Max turns reached", etc.)
