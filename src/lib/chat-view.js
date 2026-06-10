@@ -296,6 +296,12 @@ class ChatView {
           this._renderers.appendSystem('Session ended.');
           this._setReadOnly();
         }
+      } else if (msg.type === 'error' && msg.sessionId === sessionId) {
+        // Attach failed (e.g. stale serverId replayed from a saved layout) —
+        // surface it instead of waiting forever on a blank window
+        this._hideTyping();
+        this._renderers.appendSystem(msg.message || 'Session not found.');
+        this._setReadOnly();
       }
     };
     this.ws.onGlobal(this._handler);

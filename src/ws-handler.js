@@ -680,7 +680,9 @@ function registerWsHandler(wss, ctx) {
             ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: data.name || '', cwd: data.cwd || '', mode: 'chat',
               messages: mm.tail(50), totalCount: mm.total, chatStatus: sm.chatStatus(), isStreaming: false, viewOnly: true }));
           } else {
-            ws.send(JSON.stringify({ type: 'error', message: `Session ${data.sessionId} not found` }));
+            // Include sessionId so the requesting ChatView can correlate the
+            // failure (otherwise it waits forever on a blank window)
+            ws.send(JSON.stringify({ type: 'error', sessionId: data.sessionId, message: `Session ${data.sessionId} not found` }));
           }
           break;
         }

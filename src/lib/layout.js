@@ -222,6 +222,15 @@ class LayoutManager {
           winState.cwd = match.cwd || '';
         }
       }
+      // Identity fallback from openSpec: a window whose server session died
+      // (stale serverId, not in _allSessions) would otherwise persist with NO
+      // backendSessionId — restoreState then can't rematch it after refresh
+      if ((win.type === 'chat' || win.type === 'terminal') && !winState.backendSessionId && win._openSpec?.backendSessionId) {
+        winState.backend = win._openSpec.backend || 'claude';
+        winState.backendSessionId = win._openSpec.backendSessionId;
+        winState.claudeSessionId = winState.backend === 'claude' ? winState.backendSessionId : null;
+        if (!winState.cwd) winState.cwd = win._openSpec.cwd || '';
+      }
       // For file explorers, save current path
       if (win.type === 'files' && win._explorerPath) {
         winState.explorerPath = win._explorerPath;
@@ -319,8 +328,8 @@ class LayoutManager {
 
     for (const ws of state.windows) {
       if (ws.type === 'terminal') {
-        const backend = ws.backend || 'claude';
-        const backendSessionId = ws.backendSessionId || ws.claudeSessionId;
+        const backend = ws.backend || ws.openSpec?.backend || 'claude';
+        const backendSessionId = ws.backendSessionId || ws.claudeSessionId || ws.openSpec?.backendSessionId;
         let alive = null;
         if (backendSessionId) {
           alive = activeSessions.find(s => (s.backend || 'claude') === backend && (s.backendSessionId || s.claudeSessionId) === backendSessionId);
@@ -354,8 +363,8 @@ class LayoutManager {
           }
         }
       } else if (ws.type === 'chat') {
-        const backend = ws.backend || 'claude';
-        const backendSessionId = ws.backendSessionId || ws.claudeSessionId;
+        const backend = ws.backend || ws.openSpec?.backend || 'claude';
+        const backendSessionId = ws.backendSessionId || ws.claudeSessionId || ws.openSpec?.backendSessionId;
         let alive = null;
         if (backendSessionId) {
           alive = activeSessions.find(s => (s.backend || 'claude') === backend && (s.backendSessionId || s.claudeSessionId) === backendSessionId);
@@ -621,8 +630,8 @@ class LayoutManager {
     // Process each preset window
     for (const ws of preset.windows) {
       if (ws.type === 'terminal') {
-        const backend = ws.backend || 'claude';
-        const backendSessionId = ws.backendSessionId || ws.claudeSessionId;
+        const backend = ws.backend || ws.openSpec?.backend || 'claude';
+        const backendSessionId = ws.backendSessionId || ws.claudeSessionId || ws.openSpec?.backendSessionId;
         // Skip if we already processed this session (prevents duplicate resume)
         if (backendSessionId && processedBackendSessionIds.has(`${backend}:${backendSessionId}`)) continue;
         if (backendSessionId) processedBackendSessionIds.add(`${backend}:${backendSessionId}`);
@@ -695,8 +704,8 @@ class LayoutManager {
           }
         }
       } else if (ws.type === 'chat') {
-        const backend = ws.backend || 'claude';
-        const backendSessionId = ws.backendSessionId || ws.claudeSessionId;
+        const backend = ws.backend || ws.openSpec?.backend || 'claude';
+        const backendSessionId = ws.backendSessionId || ws.claudeSessionId || ws.openSpec?.backendSessionId;
         if (backendSessionId && processedBackendSessionIds.has(`${backend}:${backendSessionId}`)) continue;
         if (backendSessionId) processedBackendSessionIds.add(`${backend}:${backendSessionId}`);
 

@@ -1109,12 +1109,44 @@ class App {
   // Replay a serialized openSpec to recreate a window (for cross-client sync)
   replayOpenSpec(spec, syncId) {
     switch (spec.action) {
-      case 'attachSession':
-        this.attachSession(spec.serverId, spec.name, spec.cwd, {
+      case 'attachSession': {
+        // The saved serverId/name may be STALE — the dtach instance dies and
+        // gets resumed under a new server id while the spec persists in the
+        // autosave (and the name was captured at window creation, before any
+        // rename). Re-resolve against the live session list like restoreState
+        // does; a spec replayed verbatim attaches to a nonexistent session and
+        // leaves a blank window that re-persists the stale spec forever.
+        const backend = spec.backend || 'claude';
+        const bsid = spec.backendSessionId || null;
+        const live = this.sidebar?._webuiSessions || [];
+        let serverId = spec.serverId;
+        let name = spec.name;
+        let cwd = spec.cwd;
+        if (bsid && !live.some(s => s.id === serverId)) {
+          const alive = live.find(s => (s.backend || 'claude') === backend
+            && (s.backendSessionId || s.claudeSessionId) === bsid);
+          if (alive) {
+            serverId = alive.id;
+            name = alive.name || name;
+            cwd = alive.cwd || cwd;
+          } else if (live.length) {
+            // Session is dead — open read-only history with a Resume bar
+            // instead of a blank window stuck on a failed attach
+            this.viewSession(bsid, cwd, this.sidebar?.getCustomName(spec.sessionKey || bsid) || name, {
+              syncId, backend, backendSessionId: bsid,
+              agentKind: spec.agentKind, agentRole: spec.agentRole,
+              agentNickname: spec.agentNickname, sourceKind: spec.sourceKind,
+              parentThreadId: spec.parentThreadId,
+            });
+            break;
+          }
+        }
+        if (bsid) name = this.sidebar?.getCustomName(spec.sessionKey || bsid) || name;
+        this.attachSession(serverId, name, cwd, {
           mode: spec.mode,
           syncId,
-          backend: spec.backend || 'claude',
-          backendSessionId: spec.backendSessionId || null,
+          backend,
+          backendSessionId: bsid,
           agentKind: spec.agentKind,
           agentRole: spec.agentRole,
           agentNickname: spec.agentNickname,
@@ -1122,6 +1154,7 @@ class App {
           parentThreadId: spec.parentThreadId,
         });
         break;
+      }
       case 'openFileExplorer':
         this.openFileExplorer(spec.path, { syncId });
         break;
