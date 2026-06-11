@@ -162,7 +162,8 @@ class ChatRenderers {
     // Button wired by ChatView's delegated handler (it owns pagination state)
     el.innerHTML = `<div class="chat-history-gap-inner">`
       + `<div class="chat-history-gap-text">${escHtml(summary)}</div>`
-      + `<button class="chat-load-earlier-btn" type="button">Load earlier messages</button>`
+      + `<div class="chat-history-gap-hint">Scroll up to load earlier messages automatically</div>`
+      + `<button class="chat-load-earlier-btn" type="button">Load earlier now</button>`
       + `</div>`;
     return el;
   }

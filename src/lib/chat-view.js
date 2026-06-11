@@ -491,10 +491,29 @@ class ChatView {
     setTimeout(() => { this._loading = false; }, 300);
   }
 
+  // Auto-load the elided middle as the seam marker scrolls into view — like a
+  // virtual list's infinite scroll. The marker sits at the top of the gap
+  // region; each loaded slab inserts just below it (with scroll compensation),
+  // pushing the marker out of the trigger zone until the user scrolls up again.
+  _observeHistoryGap(markerEl) {
+    if (markerEl._gapObserved) return;
+    markerEl._gapObserved = true;
+    if (!this._gapObserver) {
+      this._gapObserver = new IntersectionObserver((entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) this._loadEarlierGap(entry.target, entry.target.querySelector('.chat-load-earlier-btn'));
+        }
+      }, { root: this._messageList, rootMargin: '300px 0px 0px 0px' });
+    }
+    this._gapObserver.observe(markerEl);
+  }
+
   // Lazily load a slab of the elided MIDDLE of a huge session (seek-read on the
-  // server by byte offset). Each click walks one slab older, filling the gap
-  // between the loaded head and tail bottom-up. Gap messages render read-only
-  // and are excluded from virtual-scroll trimming + window accounting.
+  // server by byte offset). Fired automatically by the IntersectionObserver as
+  // the marker nears the viewport, or manually via the fallback button. Each
+  // call walks one slab older, filling the gap between head and tail bottom-up.
+  // Gap messages render read-only and are excluded from virtual-scroll trimming
+  // + window accounting.
   async _loadEarlierGap(markerEl, btn) {
     if (!markerEl || markerEl._gapLoading) return;
     markerEl._gapLoading = true;
@@ -512,7 +531,7 @@ class ChatView {
         markerEl._gapCursor = info.gap.tailStartLine;
         markerEl._gapAnchor = markerEl.nextElementSibling; // insert new (older) slabs before this
       }
-      if (markerEl._gapCursor <= markerEl._gapHeadEnd) { if (btn) btn.remove(); return; }
+      if (markerEl._gapCursor <= markerEl._gapHeadEnd) { if (btn) btn.remove(); this._gapObserver?.unobserve(markerEl); return; }
       const data = await fetch(`/api/session-history-gap?${base}&endLine=${markerEl._gapCursor}&count=2000`).then(r => r.json()).catch(() => null);
       const msgs = data?.messages || [];
       const scrollHeightBefore = this._messageList.scrollHeight;
@@ -533,6 +552,7 @@ class ChatView {
       this._messageList.scrollTop = scrollTopBefore + (this._messageList.scrollHeight - scrollHeightBefore);
       if (markerEl._gapCursor <= markerEl._gapHeadEnd) {
         if (btn) btn.remove();
+        this._gapObserver?.unobserve(markerEl);
         const done = document.createElement('div');
         done.className = 'chat-history-gap-done';
         done.textContent = '— reached the start of the loadable middle —';
@@ -800,6 +820,8 @@ class ChatView {
     this._messageList.appendChild(el);
     this._renderers.addWrapToggles(el);
     this._renderers.addOpenInEditorBtn(el);
+    // Truncated-history seam: auto-load the elided middle as it scrolls near
+    if (el._isHistoryGap) this._observeHistoryGap(el);
     // Update window bounds for live messages (not history batch)
     if (!this._loadingHistory) {
       this._total++;
@@ -1344,6 +1366,7 @@ class ChatView {
     if (this._chatInput) this._chatInput.dispose();
     if (this._chatMinimap) this._chatMinimap.dispose();
     if (this._search) this._search.dispose();
+    if (this._gapObserver) { this._gapObserver.disconnect(); this._gapObserver = null; }
   }
 }
 

@@ -203,6 +203,7 @@
   background: color-mix(in srgb, var(--accent) 5%, transparent);
 }
 .chat-history-gap-text { font-size: 11px; color: var(--text-dim); line-height: 1.5; max-width: 540px; }
+.chat-history-gap-hint { font-size: 10px; color: var(--text-dim); opacity: 0.7; }
 .chat-load-earlier-btn {
   padding: 7px 16px; font-size: 12px; font-weight: 600; cursor: pointer;
   border: 1px solid var(--accent); border-radius: 16px;
