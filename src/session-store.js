@@ -7,6 +7,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { execFileSync } = require('child_process');
+const { readJsonlBounded } = require('./adapters/codex');
 
 const SESSIONS_DIR = path.join(os.homedir(), '.claude', 'sessions');
 
@@ -119,7 +120,9 @@ function parseSessionJsonl(claudeSessionId, cwd) {
       return cached.messages;
     }
 
-    const content = fs.readFileSync(fp, 'utf-8');
+    // Bounded read: a full readFileSync('utf-8') THROWS past Node's ~512MB
+    // string limit (and blocks the event loop for hundreds of MB below it)
+    const content = readJsonlBounded(fp);
     const messages = [];
     for (const line of content.split('\n')) {
       const trimmed = line.trim();

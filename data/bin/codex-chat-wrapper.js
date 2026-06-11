@@ -291,7 +291,11 @@ function updateMetaFromThread(resp) {
     model_provider: meta.modelProvider,
     session_name: meta.threadName,
     permissionMode: meta.permissionMode,
-    forked_from: forkedFrom.length ? forkedFrom : undefined,
+    // Newer codex resumes keep the SAME thread id (no fork) — the env chain
+    // built at spawn assumed a fork and includes the resume target, so drop
+    // our own id to avoid a self-referencing fork chain (it made discovery
+    // hide the thread from the session list after termination)
+    forked_from: (() => { const c = forkedFrom.filter((id) => id !== meta.threadId); return c.length ? c : undefined; })(),
     agent_role: thread.agentRole || null,
     agent_nickname: thread.agentNickname || null,
   });

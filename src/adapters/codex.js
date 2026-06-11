@@ -90,12 +90,38 @@ function findCodexSessionJsonlPath(threadId) {
   return null;
 }
 
+// Bounded JSONL read: head (session_meta, early turn_context) + tail (recent
+// conversation), line-aligned. Two reasons full reads are wrong for huge
+// rollouts: (1) Node cannot create a string > ~512MB — readFileSync('utf-8')
+// THROWS on a 541MB file and the swallowed error left attach with an empty
+// history (blank chat window); (2) even below the limit, parsing hundreds of
+// MB of JSON synchronously blocks the event loop for the whole server.
+const JSONL_HEAD_BYTES = 2 * 1024 * 1024;
+const JSONL_TAIL_BYTES = 32 * 1024 * 1024;
+function readJsonlBounded(fp) {
+  const stat = fs.statSync(fp);
+  if (stat.size <= JSONL_HEAD_BYTES + JSONL_TAIL_BYTES) return fs.readFileSync(fp, 'utf-8');
+  console.warn(`[jsonl] large session file ${path.basename(fp)} (${Math.round(stat.size / 1048576)}MB): loading first ${JSONL_HEAD_BYTES / 1048576}MB + last ${JSONL_TAIL_BYTES / 1048576}MB, middle elided`);
+  const fd = fs.openSync(fp, 'r');
+  try {
+    const headBuf = Buffer.alloc(JSONL_HEAD_BYTES);
+    const hn = fs.readSync(fd, headBuf, 0, JSONL_HEAD_BYTES, 0);
+    let head = headBuf.toString('utf-8', 0, hn);
+    head = head.slice(0, head.lastIndexOf('\n') + 1);
+    const tailBuf = Buffer.alloc(JSONL_TAIL_BYTES);
+    const tn = fs.readSync(fd, tailBuf, 0, JSONL_TAIL_BYTES, stat.size - JSONL_TAIL_BYTES);
+    let tail = tailBuf.toString('utf-8', 0, tn);
+    tail = tail.slice(tail.indexOf('\n') + 1); // drop the cut-off first line
+    return head + tail;
+  } finally { fs.closeSync(fd); }
+}
+
 function parseCodexSessionJsonl(threadId) {
   const fp = findCodexSessionJsonlPath(threadId);
   if (!fp) return [];
   const messages = [];
   try {
-    for (const line of fs.readFileSync(fp, 'utf-8').split('\n')) {
+    for (const line of readJsonlBounded(fp).split('\n')) {
       const trimmed = line.trim();
       if (!trimmed) continue;
       try { messages.push(JSON.parse(trimmed)); } catch {}
@@ -558,5 +584,6 @@ module.exports = {
   normalizeCodexSource,
   parseCodexSessionJsonl,
   extractCodexThreadMeta,
+  readJsonlBounded,
   resolveCodexPermissionMode,
 };
