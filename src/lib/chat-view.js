@@ -271,6 +271,11 @@ class ChatView {
           description: e.target.dataset.desc,
         });
       }
+      // "Load earlier messages" on a truncated-history seam marker
+      if (e.target.classList.contains('chat-load-earlier-btn')) {
+        e.stopPropagation();
+        this._loadEarlierGap(e.target.closest('.chat-history-gap'), e.target);
+      }
     });
 
     // Listen for normalized message ops from server
@@ -486,6 +491,77 @@ class ChatView {
     setTimeout(() => { this._loading = false; }, 300);
   }
 
+  // Lazily load a slab of the elided MIDDLE of a huge session (seek-read on the
+  // server by byte offset). Each click walks one slab older, filling the gap
+  // between the loaded head and tail bottom-up. Gap messages render read-only
+  // and are excluded from virtual-scroll trimming + window accounting.
+  async _loadEarlierGap(markerEl, btn) {
+    if (!markerEl || markerEl._gapLoading) return;
+    markerEl._gapLoading = true;
+    const origLabel = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Loading…'; }
+    try {
+      const { backend, backendSessionId, cwd } = this._getSessionIds();
+      if (!backendSessionId) return;
+      const base = `backend=${encodeURIComponent(backend || 'claude')}&backendSessionId=${encodeURIComponent(backendSessionId)}&cwd=${encodeURIComponent(cwd || '')}`;
+      // First click: discover the gap boundaries; cursor starts at the tail edge
+      if (markerEl._gapCursor == null) {
+        const info = await fetch(`/api/session-history-gap?${base}&info=1`).then(r => r.json()).catch(() => null);
+        if (!info?.gap) { if (btn) btn.remove(); return; }
+        markerEl._gapHeadEnd = info.gap.headEndLine;
+        markerEl._gapCursor = info.gap.tailStartLine;
+        markerEl._gapAnchor = markerEl.nextElementSibling; // insert new (older) slabs before this
+      }
+      if (markerEl._gapCursor <= markerEl._gapHeadEnd) { if (btn) btn.remove(); return; }
+      const data = await fetch(`/api/session-history-gap?${base}&endLine=${markerEl._gapCursor}&count=2000`).then(r => r.json()).catch(() => null);
+      const msgs = data?.messages || [];
+      const scrollHeightBefore = this._messageList.scrollHeight;
+      const scrollTopBefore = this._messageList.scrollTop;
+      const anchor = markerEl._gapAnchor && markerEl._gapAnchor.parentNode === this._messageList
+        ? markerEl._gapAnchor : null;
+      let firstInserted = null;
+      for (const msg of msgs) {
+        const el = this._renderGapMsg(msg);
+        if (!el) continue;
+        this._messageList.insertBefore(el, anchor);
+        if (!firstInserted) firstInserted = el;
+      }
+      // Next (older) slab inserts above the one we just added
+      if (firstInserted) markerEl._gapAnchor = firstInserted;
+      markerEl._gapCursor = (data && Number.isFinite(data.fromLine)) ? data.fromLine : markerEl._gapHeadEnd;
+      // Keep the viewport stable: we inserted content below the marker
+      this._messageList.scrollTop = scrollTopBefore + (this._messageList.scrollHeight - scrollHeightBefore);
+      if (markerEl._gapCursor <= markerEl._gapHeadEnd) {
+        if (btn) btn.remove();
+        const done = document.createElement('div');
+        done.className = 'chat-history-gap-done';
+        done.textContent = '— reached the start of the loadable middle —';
+        markerEl.querySelector('.chat-history-gap-inner')?.appendChild(done);
+      }
+    } finally {
+      markerEl._gapLoading = false;
+      if (btn && btn.isConnected) { btn.disabled = false; btn.textContent = origLabel; }
+    }
+  }
+
+  // Render a gap message to a standalone element WITHOUT registering it in the
+  // virtual-scroll window (_messages/_elements/_windowStart). Static + read-only.
+  _renderGapMsg(msg) {
+    let el;
+    switch (msg.role) {
+      case 'user': el = this._renderers.renderUserMsg(msg); break;
+      case 'assistant': el = this._renderers.renderAssistantMsg(msg); break;
+      case 'tool': el = this._renderers.renderToolMsg(msg); break;
+      case 'system': { const r = this._renderers.renderSystemMsg(msg); el = r?.el || null; break; }
+      default: return null;
+    }
+    if (!el) return null;
+    el.classList.add('chat-gap-msg');
+    this._renderers.addWrapToggles(el);
+    this._renderers.addOpenInEditorBtn(el);
+    return el;
+  }
+
   // Load messages at the bottom (when scrolling back down after trimming)
   async _extendBottom(count = 50) {
     if (this._loading || this._windowEnd >= this._total) return;
@@ -507,7 +583,7 @@ class ChatView {
 
   // Keep DOM under ~150 messages by removing from bottom
   _trimBottom(maxRendered = 150) {
-    const els = this._messageList.querySelectorAll('.chat-msg');
+    const els = this._messageList.querySelectorAll('.chat-msg:not(.chat-gap-msg)');
     if (els.length <= maxRendered) return;
     const toRemove = els.length - maxRendered;
     const removedIds = new Set();
@@ -523,7 +599,10 @@ class ChatView {
 
   // Keep DOM under ~150 messages by removing from top
   _trimTop(maxRendered = 150) {
-    const els = this._messageList.querySelectorAll('.chat-msg');
+    // Exclude lazily-loaded gap messages: they aren't part of the server
+    // window (_windowStart/_windowEnd accounting), so trimming them would
+    // corrupt the offsets and silently delete explicitly-requested history
+    const els = this._messageList.querySelectorAll('.chat-msg:not(.chat-gap-msg)');
     if (els.length <= maxRendered) return;
     const scrollHeightBefore = this._messageList.scrollHeight;
     const toRemove = els.length - maxRendered;

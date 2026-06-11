@@ -124,6 +124,11 @@ class ChatRenderers {
 
     // Detect system notifications: command tags, meta directives, reminders
     const rawText = content.map(b => b.text || '').join('');
+    // Truncated-history seam marker → interactive "load earlier" card (the
+    // server injects this where a huge file's middle was elided)
+    if (rawText.includes('Session history truncated for display')) {
+      return this._renderHistoryGapMarker(rawText);
+    }
     const isNotification = /^<(command-name|local-command|task-notification|system-reminder)/.test(rawText.trim())
       || /^A session-scoped Stop hook is now active/.test(rawText.trim())
       || /^Stop hook feedback:/.test(rawText.trim());
@@ -145,6 +150,20 @@ class ChatRenderers {
       : parts;
 
     this.wrapMsg(el, 'user', 'You', textHtml);
+    return el;
+  }
+
+  _renderHistoryGapMarker(rawText) {
+    const el = document.createElement('div');
+    el.className = 'chat-msg chat-msg-system chat-history-gap';
+    el._rawMsg = { role: 'system' };
+    el._isHistoryGap = true;
+    const summary = rawText.replace(/<\/?system-reminder>/g, '').trim();
+    // Button wired by ChatView's delegated handler (it owns pagination state)
+    el.innerHTML = `<div class="chat-history-gap-inner">`
+      + `<div class="chat-history-gap-text">${escHtml(summary)}</div>`
+      + `<button class="chat-load-earlier-btn" type="button">Load earlier messages</button>`
+      + `</div>`;
     return el;
   }
 

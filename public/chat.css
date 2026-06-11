@@ -194,6 +194,24 @@
 .chat-diff-summary.chat-tool-error-label { color: var(--red); }
 
 /* System/background notifications */
+/* Truncated-history seam: interactive "load earlier" card for huge sessions */
+.chat-history-gap { padding: 6px 0; }
+.chat-history-gap-inner {
+  display: flex; flex-direction: column; gap: 8px; align-items: center;
+  padding: 12px; margin: 4px 0; text-align: center;
+  border: 1px dashed var(--border); border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+}
+.chat-history-gap-text { font-size: 11px; color: var(--text-dim); line-height: 1.5; max-width: 540px; }
+.chat-load-earlier-btn {
+  padding: 7px 16px; font-size: 12px; font-weight: 600; cursor: pointer;
+  border: 1px solid var(--accent); border-radius: 16px;
+  background: var(--accent); color: var(--accent-fg);
+}
+.chat-load-earlier-btn:hover { opacity: 0.85; }
+.chat-load-earlier-btn:disabled { opacity: 0.5; cursor: default; }
+.chat-history-gap-done { font-size: 10px; color: var(--text-dim); font-style: italic; }
+
 .chat-system-notification { opacity: 0.7; font-size: 11px; color: var(--text-dim); padding: 2px 0; }
 .chat-system-notification > summary { cursor: pointer; list-style: none; }
 .chat-system-notification > summary::-webkit-details-marker { display: none; }

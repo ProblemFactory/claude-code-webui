@@ -131,6 +131,85 @@ function elisionNoticeText(elidedBytes, approxOmitted) {
   return `<system-reminder>Session history truncated for display: ~${approxOmitted} records (${mb}MB) in the middle of this conversation were not loaded — the file is too large. Showing the earliest ${JSONL_HEAD_BYTES / 1048576}MB and the most recent ${JSONL_TAIL_BYTES / 1048576}MB.</system-reminder>`;
 }
 
+// ── Byte-offset line index for seek-based lazy loading of huge JSONL files ──
+// A full readFileSync is impossible (>512MB string) and a full normalize is
+// expensive, but the MIDDLE of a big rollout is still seek-readable: build a
+// line→byte-offset table ONCE (streaming, Buffer scan — never holds the whole
+// file as a string), cache it by mtime+size, then read any line range by
+// pread without touching the rest. This is how the WebUI lets you scroll into
+// the elided middle that head+tail loading skips.
+const _lineIndexCache = new Map(); // fp -> { mtimeMs, size, offsets, totalLines }
+const LINE_INDEX_CHUNK = 16 * 1024 * 1024;
+
+function getJsonlLineIndex(fp) {
+  const stat = fs.statSync(fp);
+  const hit = _lineIndexCache.get(fp);
+  if (hit && hit.mtimeMs === stat.mtimeMs && hit.size === stat.size) return hit;
+  const offsets = [0]; // byte offset where each line STARTS; offsets[i] = start of line i
+  const fd = fs.openSync(fp, 'r');
+  try {
+    const buf = Buffer.alloc(LINE_INDEX_CHUNK);
+    let pos = 0;
+    while (pos < stat.size) {
+      const n = fs.readSync(fd, buf, 0, LINE_INDEX_CHUNK, pos);
+      if (n <= 0) break;
+      for (let i = 0; i < n; i++) {
+        if (buf[i] === 0x0a) offsets.push(pos + i + 1); // start of next line
+      }
+      pos += n;
+    }
+  } finally { fs.closeSync(fd); }
+  // offsets now has one trailing entry == file end if the file ends with \n;
+  // totalLines = number of line starts that actually begin a line (< size)
+  while (offsets.length > 1 && offsets[offsets.length - 1] >= stat.size) offsets.pop();
+  const entry = { mtimeMs: stat.mtimeMs, size: stat.size, offsets, totalLines: offsets.length };
+  _lineIndexCache.set(fp, entry);
+  if (_lineIndexCache.size > 32) _lineIndexCache.delete(_lineIndexCache.keys().next().value);
+  return entry;
+}
+
+// Which line indices does the head+tail window cover? Lines [0, headEndLine)
+// are in the head, [tailStartLine, totalLines) in the tail; the gap in between
+// is what lazy loading fetches. Returns null when the file isn't elided.
+function jsonlGapInfo(fp) {
+  const stat = fs.statSync(fp);
+  if (stat.size <= JSONL_HEAD_BYTES + JSONL_TAIL_BYTES) return null;
+  const { offsets, totalLines } = getJsonlLineIndex(fp);
+  const tailStartByte = stat.size - JSONL_TAIL_BYTES;
+  // first line whose start is within the head budget is excluded once offset > head
+  let headEndLine = 0;
+  while (headEndLine < totalLines && offsets[headEndLine] < JSONL_HEAD_BYTES) headEndLine++;
+  let tailStartLine = headEndLine;
+  while (tailStartLine < totalLines && offsets[tailStartLine] < tailStartByte) tailStartLine++;
+  return { headEndLine, tailStartLine, totalLines, gapRecords: Math.max(0, tailStartLine - headEndLine) };
+}
+
+// Read raw records for line range [startLine, endLine) by seeking to the
+// indexed byte offsets — no full-file read, no string-limit risk.
+function readJsonlLineRange(fp, startLine, endLine) {
+  const { offsets, totalLines, size } = getJsonlLineIndex(fp);
+  const s = Math.max(0, Math.min(startLine, totalLines));
+  const e = Math.max(s, Math.min(endLine, totalLines));
+  if (e <= s) return [];
+  const startByte = offsets[s];
+  const endByte = e < totalLines ? offsets[e] : size;
+  const len = endByte - startByte;
+  if (len <= 0) return [];
+  const fd = fs.openSync(fp, 'r');
+  try {
+    const buf = Buffer.alloc(len);
+    const n = fs.readSync(fd, buf, 0, len, startByte);
+    const text = buf.toString('utf-8', 0, n);
+    const records = [];
+    for (const line of text.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try { records.push(JSON.parse(trimmed)); } catch {}
+    }
+    return records;
+  } finally { fs.closeSync(fd); }
+}
+
 // Tag the seam marker, then give it the timestamp of its preceding record so
 // timestamp-based sorting (mergeCodexRecords) keeps it at the seam
 function applyElisionTimestamp(messages) {
@@ -621,5 +700,8 @@ module.exports = {
   readJsonlBounded,
   elisionNoticeText,
   applyElisionTimestamp,
+  getJsonlLineIndex,
+  jsonlGapInfo,
+  readJsonlLineRange,
   resolveCodexPermissionMode,
 };

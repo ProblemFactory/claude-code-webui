@@ -17,6 +17,8 @@ const {
 } = require('../session-store');
 const { createMessageManager } = require('../normalizers');
 const { listCodexThreads } = require('../codex-session-store');
+const { findSessionJsonlPath } = require('../session-store');
+const { findCodexSessionJsonlPath, jsonlGapInfo, readJsonlLineRange } = require('../adapters/codex');
 
 function getSessionKey(session = {}) {
   const backend = session.backend || 'claude';
@@ -102,6 +104,46 @@ function setup(ctx) {
       payload.turnMap = mm.turnMap();
     }
     res.json(payload);
+  });
+
+  // ── Lazy middle-of-history loading for huge JSONL files ──
+  // Initial attach loads head+tail with an elided middle (see readJsonlBounded).
+  // This endpoint seeks into that middle by byte offset (via a cached line
+  // index) and normalizes just the requested raw-record slab — so the user can
+  // scroll into history that's too large to ever hold fully in memory.
+  //   ?…&info=1                  → { headEndLine, tailStartLine, totalLines, gapRecords } or { gap:null }
+  //   ?…&endLine=N&count=C       → { messages, fromLine, toLine, headEndLine } (records [max(headEnd,N-C), N))
+  router.get('/api/session-history-gap', (req, res) => {
+    const { backend, backendSessionId, claudeSessionId, cwd } = req.query;
+    const resolvedBackend = backend || 'claude';
+    const resolvedSessionId = backendSessionId || claudeSessionId;
+    if (!resolvedSessionId) return res.status(400).json({ error: 'backendSessionId or claudeSessionId required' });
+
+    const fp = resolvedBackend === 'codex'
+      ? findCodexSessionJsonlPath(resolvedSessionId)
+      : findSessionJsonlPath(resolvedSessionId, cwd || '');
+    if (!fp || !fs.existsSync(fp)) return res.json({ gap: null });
+
+    let gap;
+    try { gap = jsonlGapInfo(fp); } catch { gap = null; }
+    if (!gap) return res.json({ gap: null });
+
+    if (req.query.info) return res.json({ gap });
+
+    const endLine = parseInt(req.query.endLine);
+    const count = Math.min(parseInt(req.query.count) || 2000, 8000);
+    if (!Number.isFinite(endLine)) return res.status(400).json({ error: 'endLine required' });
+    const toLine = Math.min(endLine, gap.tailStartLine);
+    const fromLine = Math.max(gap.headEndLine, toLine - count);
+    if (fromLine >= toLine) return res.json({ messages: [], fromLine: gap.headEndLine, toLine: gap.headEndLine, headEndLine: gap.headEndLine });
+
+    let records = [];
+    try { records = readJsonlLineRange(fp, fromLine, toLine); } catch { records = []; }
+    // Normalize the slab in isolation. Tool calls whose result is outside this
+    // window render as orphans (acceptable for read-only history browsing).
+    const mm = createMessageManager(resolvedBackend, 'gap');
+    mm.convertHistory(records);
+    res.json({ messages: mm.tail(mm.total), fromLine, toLine, headEndLine: gap.headEndLine });
   });
 
   // Subagent messages for a given session + agentId
