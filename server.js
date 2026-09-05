@@ -1699,7 +1699,7 @@ registerWsHandler(wss, {
   NODE_CMD, DTACH_CMD, ENV_CMD, CLAUDE_CMD, EDITOR_CMD, AGENT_BIN_DIR, PORT, X_ENV,
   adapterRegistry, pty, path, fs, os, execFileSync, ensureDir, hosts,
   accounts, scheduleCtxSync, activeSessionsPayload, serverNotice,
-  USAGE_STATUSLINE_CMD, userStatuslineCmd,
+  USAGE_STATUSLINE_CMD, userStatuslineCmd, telemetry, // telemetry: the ws switch's `default:` counts unknown message types (Plugin Ph1)
 });
 
 // Billing identity for the card badge. Precedence: env-key spawn (definite) →

@@ -149,7 +149,7 @@ src/plugins.js = tailscale/frp 两个硬编码 host 守护进程的管理器（`
 ### 3.3 分期
 | 期 | 内容 | 依赖 |
 |---|---|---|
-| Ph1 | 核心贡献点注册表化（窗口类型/rail 面板/查看器/命令+菜单 when/状态芯片/键位/ws default）——与 §2 S1/S7 同批，无 loader | — |
+| Ph1 | 核心贡献点注册表化（窗口类型 ✅2.369.19 window-types.js / rail 面板 / 查看器 / **命令+菜单 when+键位+ws default ✅ src/lib/contributions.js**：`registerCommand`/`registerMenuItem({menu, command, group, order, when})`/`menuItems(menu, ctx)`/`registerKeybinding`+一个 document 级分发器（app 生命周期 AbortController）/`runCommand`；核心已把 session-card 右键菜单（session.* 命令，session-card.js）、窗口标题栏/taskbar/窗口列表菜单（window.* 命令，taskbar.js）、⚙ 菜单（gear-menu.js，含插件窗口 expand 行）迁成注册项且**字节级一致**（scripts/test-contributions.mjs 用逐字复制的旧 builder 在状态矩阵上做 diff）；command mode/Ctrl+K 只注册为命令、键位分发原地保留（旧检查对修饰键宽松+capture 顺序 load-bearing，迁移即行为变化）；分隔符是显式贡献（VS Code 自动分组规则无法复现窗口菜单无会话时 Minimize/Close 之间无线的形状）；plugin-client 受信模块 host API `api.registerCommand/registerMenuItem/registerKeybinding/runCommand`（id 命名空间 `plugin:<id>:<slug>`，全部绑到插件 signal）；ws-handler `switch(data.type)` 加 `default:`（限频日志+telemetry `ws-unknown-type`+回 `{type:'error', code:'unknown-type'}` **不带 sessionId**）。**未迁**：file-explorer 菜单（file-explorer-ops.js，超出本片）、状态芯片 / rail 面板 / 查看器注册表 / 状态芯片）——与 §2 S1/S7 同批，无 loader | — |
 | Ph2 ✅2.369.24 最小 + ✅2.369.30 全部(受信层/设置主题贡献/安装UI/能力执行) | manifest + loader：声明式 + iframe UI + 独立进程服务端插件 + agentTools shim + 安装/卸载 UI；tailscale/frp 迁入 | Ph1 |
 | Ph3 | harness 插件：ACP/Gemini 作为首个外部 harness 插件（= §2 S8 的交付形态） | S1–S6, Ph2 |
 | Ph4 ✅2.369.30 (受信模块+同意+打包安装源+能力清单UI+--permission执行+远程shim) | 受信客户端模块 + 打包/安装源 + 能力清单 UI | Ph2 |

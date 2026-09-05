@@ -1,5 +1,6 @@
 import { createPopover, showContextMenu } from './utils.js';
 import { t } from './i18n.js';
+import { registerCommand, registerMenuItem, menuItems as contribMenuItems } from './contributions.js';
 
 // Resolve the sidebar SESSION object behind a session window (chat/terminal)
 // — identity kept fresh in _openSpec by syncSessionIdentity. Non-session
@@ -172,60 +173,85 @@ function _rebuildTaskbarItems(app, container, entries) {
 // window-count chip moved into the toolbar must not push the menu off-screen.
 // opts.onAction(kind) fires after any action ('move'|'minimize'|'desktop'|
 // 'close') so a hosting popover can refresh itself instead of going stale.
+// ── WINDOW COMMANDS + the 'window' MENU (contributions registry, Plugin Ph1).
+//    The title-bar / taskbar / window-list right-click menu is the
+//    registrations below, rendered by menuItems('window', ctx) in the
+//    hand-built order (scripts/test-contributions.mjs diffs it against a
+//    verbatim copy of the pre-registry builder over a state matrix). Window
+//    verbs are `window.*` commands over ctx.id; the session block reuses the
+//    `session.*` commands session-card.js registers (same semantics: restart /
+//    resume / locate / properties over ctx.s) plus two window-flavoured ones
+//    (rename via the sidebar, terminate WITHOUT the card's confirm — as before).
+//    ctx = { app, id, win, s (the sidebar session behind a chat/terminal
+//    window, else null), switchSubmenu, closeLabel }. Items carry `kind`; the
+//    renderer fires onAction(kind) after each action (children inherit their
+//    parent's kind — Task Groups / Move to Desktop — never the Switch-window
+//    submenu, which had none).
+//    Keep this block self-contained (the gate suite extracts + replays it):
+//    it closes over registerCommand, registerMenuItem, t, switchWindowItems only. ──
+export function registerWindowMenu() {
+  const M = 'window';
+  const hasSess = (c) => !!c.s;
+  const live = (c) => hasSess(c) && c.s.status === 'live';
+  registerCommand({ id: 'window.move', title: () => t('Move'), run: (c) => c.app.wm.startMoveMode(c.id) });
+  registerCommand({ id: 'window.minimizeOrRestore', title: (c) => (c.win.isMinimized ? t('Restore') : t('Minimize')), run: (c) => (c.win.isMinimized ? c.app.wm.restore(c.id) : c.app.wm.minimize(c.id)) });
+  registerCommand({ id: 'window.renameSession', title: () => t('Rename…'), run: (c) => c.app.sidebar?.renameSession?.(c.s, c.s.name) });
+  registerCommand({ id: 'window.terminateSession', title: () => t('Terminate session'), run: (c) => c.app.killSession(c.s.webuiId) });
+  registerCommand({ id: 'window.close', title: () => t('Close'), run: (c) => c.app.wm.closeWindow(c.id) });
+  // Title-bar variant (2.212.0): the whole right-click used to BE the overlap
+  // switcher — now it's a submenu whose scope is user-configurable.
+  registerMenuItem({ menu: M, group: 'navigation', order: 10, id: 'window/switch-window', when: (c) => !!c.switchSubmenu, label: () => t('Switch window'), children: (c) => switchWindowItems(c.app, c.id) });
+  registerMenuItem({ menu: M, group: 'navigation', order: 20, when: (c) => !!c.switchSubmenu, separator: true });
+  registerMenuItem({ menu: M, group: '1_window', order: 10, command: 'window.move', kind: 'move', label: (c, title) => '✥ ' + title });
+  registerMenuItem({ menu: M, group: '1_window', order: 20, command: 'window.minimizeOrRestore', kind: 'minimize', label: (c, title) => (c.win.isMinimized ? '□ ' : '– ') + title });
+  // Session windows: rename + Task Group binding straight from the window
+  // chrome (2.212.0, user request) — same semantics as the session card menu.
+  registerMenuItem({ menu: M, group: '1_window', order: 30, command: 'window.renameSession', kind: 'rename', when: hasSess });
+  const activeGroups = (c) => (c.app.sidebar?._tasks || []).filter((tg) => !tg.archived);
+  registerMenuItem({
+    menu: M, group: '1_window', order: 40, id: 'window/task-groups', kind: 'groups', when: hasSess, label: () => t('Task Groups'),
+    children: (c) => { // an empty list drops the submenu (registry rule) — the legacy `if (groups.length)`
+      const sb = c.app.sidebar;
+      const explicitIds = new Set((sb._getSessionTasks?.(c.s) || []).map((tg) => tg.id));
+      const folderIds = new Set((sb._getSessionTaskGroups?.(c.s) || []).map((tg) => tg.id));
+      return activeGroups(c).map((tg) => ({
+        label: (explicitIds.has(tg.id) ? '✓ ' : folderIds.has(tg.id) ? '◇ ' : ' ') + tg.title + (!explicitIds.has(tg.id) && folderIds.has(tg.id) ? t(' (folder)') : ''),
+        disabled: !explicitIds.has(tg.id) && folderIds.has(tg.id),
+        action: () => { explicitIds.has(tg.id) ? sb._taskUnbind(tg.id, c.s) : sb._taskBind(tg.id, c.s); },
+      }));
+    },
+  });
+  // Common SESSION ops on the window chrome (owner UX 2.369.8: restart after a
+  // style pick meant a sidebar hunt; the title menu is right here)
+  registerMenuItem({ menu: M, group: '2_session', order: 0, when: hasSess, separator: true });
+  registerMenuItem({ menu: M, group: '2_session', order: 10, id: 'window/restart-session', command: 'session.restart', kind: 'restart', when: live, label: () => '⟳ ' + t('Restart session') });
+  registerMenuItem({ menu: M, group: '2_session', order: 20, command: 'window.terminateSession', kind: 'terminate', when: live, style: 'color:var(--red, #e55)' });
+  registerMenuItem({ menu: M, group: '2_session', order: 10, id: 'window/resume-session', command: 'session.restart', kind: 'resume', when: (c) => hasSess(c) && c.s.status !== 'live' && !!c.s.sessionId, label: () => t('Resume session') });
+  registerMenuItem({ menu: M, group: '2_session', order: 30, command: 'session.locate', kind: 'locate', when: hasSess });
+  registerMenuItem({ menu: M, group: '2_session', order: 40, command: 'session.properties', kind: 'props', when: hasSess, label: () => t('Session properties…') });
+  registerMenuItem({ menu: M, group: '2_session', order: 50, when: hasSess, separator: true });
+  registerMenuItem({ menu: M, group: '3_close', order: 10, id: 'window/move-to-desktop', kind: 'desktop', label: () => '➤ ' + t('Move to Desktop'), children: (c) => c.app.desktopManager?.getDesktopMenuItems(c.id) || [] });
+  registerMenuItem({ menu: M, group: '3_close', order: 20, command: 'window.close', kind: 'close', label: (c) => c.closeLabel, style: 'color:var(--red, #e55)' });
+}
+registerWindowMenu();
+// end registerWindowMenu (scripts/test-contributions.mjs extracts the block above)
+
 export function showWindowContextMenu(app, id, x, y, { closeLabel = null, onAction, switchSubmenu = false } = {}) {
   const win = app.wm.windows.get(id);
   if (!win) return;
-  closeLabel = closeLabel || '\u2715 ' + t('Close');
-  const act = (kind, fn) => () => { fn(); onAction?.(kind); };
-  const menuItems = [];
-  // Title-bar variant (2.212.0): the whole right-click used to BE the overlap
-  // switcher \u2014 now it's a submenu whose scope is user-configurable.
-  if (switchSubmenu) {
-    menuItems.push({ label: t('Switch window'), children: switchWindowItems(app, id) });
-    menuItems.push({ separator: true });
-  }
-  menuItems.push(
-    { label: '\u2725 ' + t('Move'), action: act('move', () => app.wm.startMoveMode(id)) },
-    { label: win.isMinimized ? '\u25A1 ' + t('Restore') : '\u2013 ' + t('Minimize'), action: act('minimize', () => win.isMinimized ? app.wm.restore(id) : app.wm.minimize(id)) },
-  );
-  // Session windows: rename + Task Group binding straight from the window
-  // chrome (2.212.0, user request) \u2014 same semantics as the session card menu.
+  closeLabel = closeLabel || '✕ ' + t('Close');
+  // Items come from the 'window' MENU REGISTRY (registerWindowMenu above; a
+  // plugin adds rows through the same call). Every kinded action — and each
+  // child of a kinded submenu — reports onAction(kind) after it runs.
   const sess = sessionForWin(app, win);
-  if (sess) {
-    const sb = app.sidebar;
-    menuItems.push({ label: t('Rename\u2026'), action: act('rename', () => sb?.renameSession?.(sess, sess.name)) });
-    const groups = (sb?._tasks || []).filter((tg) => !tg.archived);
-    if (groups.length) {
-      const explicitIds = new Set((sb._getSessionTasks?.(sess) || []).map((tg) => tg.id));
-      const folderIds = new Set((sb._getSessionTaskGroups?.(sess) || []).map((tg) => tg.id));
-      menuItems.push({
-        label: t('Task Groups'),
-        children: groups.map((tg) => ({
-          label: (explicitIds.has(tg.id) ? '\u2713 ' : folderIds.has(tg.id) ? '\u25C7 ' : ' ') + tg.title + (!explicitIds.has(tg.id) && folderIds.has(tg.id) ? t(' (folder)') : ''),
-          disabled: !explicitIds.has(tg.id) && folderIds.has(tg.id),
-          action: act('groups', () => { explicitIds.has(tg.id) ? sb._taskUnbind(tg.id, sess) : sb._taskBind(tg.id, sess); }),
-        })),
-      });
-    }
-  }
-  if (sess) {
-    // Common SESSION ops on the window chrome (owner UX 2.369.8: restart
-    // after a style pick meant a sidebar hunt; the title menu is right here)
-    menuItems.push({ separator: true });
-    if (sess.status === 'live') {
-      menuItems.push({ label: '\u27F3 ' + t('Restart session'), action: act('restart', () => app.restartConversationInPlace(sess)) });
-      menuItems.push({ label: t('Terminate session'), action: act('terminate', () => app.killSession(sess.webuiId)), style: 'color:var(--red, #e55)' });
-    } else if (sess.sessionId) {
-      menuItems.push({ label: t('Resume session'), action: act('resume', () => app.restartConversationInPlace(sess)) });
-    }
-    menuItems.push({ label: t('Locate in sidebar'), action: act('locate', () => app.locateSessionInSidebar(sess.sessionId)) });
-    menuItems.push({ label: t('Session properties\u2026'), action: act('props', () => app.openSessionProps(sess)) });
-    menuItems.push({ separator: true });
-  }
-  const deskItems = (app.desktopManager?.getDesktopMenuItems(id) || [])
-    .map(d => ({ ...d, action: act('desktop', d.action) }));
-  if (deskItems.length) menuItems.push({ label: '\u27A4 ' + t('Move to Desktop'), children: deskItems });
-  menuItems.push({ label: closeLabel, action: act('close', () => app.wm.closeWindow(id)), style: 'color:var(--red, #e55)' });
+  const ctx = { app, id, win, s: sess, switchSubmenu, closeLabel };
+  const wrapAct = (item, kind = item.kind) => {
+    const out = { ...item };
+    if (kind && typeof item.action === 'function') out.action = () => { item.action(); onAction?.(kind); };
+    if (Array.isArray(item.children)) out.children = item.children.map((ch) => wrapAct(ch, kind));
+    return out;
+  };
+  const menuItems = contribMenuItems('window', ctx).map((it) => wrapAct(it));
   const menu = showContextMenu(x, y, menuItems, 'taskbar-context-menu');
   if (y > window.innerHeight / 2) {
     menu.style.top = '';

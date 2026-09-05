@@ -134,7 +134,7 @@ data/settings-sync.json — Settings SyncStore (future migration target)
 src/
   transcript-service.js — ONE interface over the transcript parse stack (R3 of docs/design-three-tier.md; 2.283.0 step 1 = server-hosted, HTTP read family rerouted through it). ⇒ kb-file-structure.md
   client.js            — Entry point (2 lines): imports App and initializes
-  ws-handler.js        — WebSocket protocol handler (all WS message cases, extracted from server.js)
+  ws-handler.js        — WebSocket protocol handler (all WS message cases, extracted from server.js; `default:` since Plugin Ph1 = rate-limited log + telemetry 'ws-unknown-type' + `{type:'error', code:'unknown-type'}` reply WITHOUT sessionId — a session-scoped error flips live windows read-only). ⇒ kb-file-structure.md
   sync-store.js        — SyncStore class (versioned state sync with diff broadcast)
   session-store.js — SessionMessages + JSONL parsing + session discovery helpers. ⇒ kb-file-structure.md
   message-manager.js — MessageManager (Claude stream-json → normalized messages with stable IDs; 2.368.30 parseBackgroundLaunch=后台启动ack→taskInfo合成, task_*系统subtype只在活流上存在, 落盘的ack+<task-notification>才是历史可用的生命周期真源, session-store taskState扫描共用同一解析器). ⇒ kb-file-structure.md
@@ -214,8 +214,10 @@ src/
     themes.js          — THEMES constant + ThemeManager class. **extractThemeValues probes inside a data-theme="dark" WRAPPER (B-b2d6, 2.268.9): custom properties inherit and only dark defines every var — a bare probe read live-preview inline overrides (and an applied custom theme's stylesheet values) back as a partially-defined theme's "defaults", and Save froze them into new themes. Never regress to a single-layer probe.**
     ws.js              — WsManager (WebSocket with reconnect)
     window.js          — WindowManager (drag/resize/snap/grid)
-    plugin-client.js   — PLUGIN CLIENT (Ph2): fetches /api/plugins/manifests, registers every enabled iframe plugin's windows as window types (sandboxed iframe + postMessage bridge ready/init/storage/notify/close), ⚙ menu rows
+    plugin-client.js   — PLUGIN CLIENT (Ph2): fetches /api/plugins/manifests, registers every enabled iframe plugin's windows as window types (sandboxed iframe + postMessage bridge ready/init/storage/notify/close), ⚙ menu rows; trusted-module host API incl. Ph1 `api.registerCommand/registerMenuItem/registerKeybinding/runCommand` (ids `plugin:<id>:<slug>`, all bound to the plugin's signal)
     window-types.js    — WINDOW-TYPE REGISTRY (Plugin Ph1, 2.369.19): registerWindowType({type, icon, replay}) — replayOpenSpec dispatches through it, unknown action = loud warn + telemetry 'openspec-unknown'; TYPE_ICONS is a view; core registers its 14 kinds where they live (scripts/test-window-types.mjs pins the sets)
+    contributions.js   — COMMANDS + MENUS (when/group/order) + KEYBINDINGS REGISTRY (Plugin Ph1): registerCommand/registerMenuItem/menuItems(menu, ctx)/registerKeybinding + ONE document dispatcher/runCommand; DOM-free at import; explicit separators; loud unknowns (throw / warn-once + telemetry). Core menus 'session-card' (session-card.js), 'window' (taskbar.js), 'gear' (gear-menu.js) are registrations, byte-identical to the former literals; core key chords stay in their own dispatchers as commands. ⇒ kb-file-structure.md
+    gear-menu.js       — ⚙ gear menu rows as 'gear' contributions (groups 0_prefs/1_admin/2_maint/2p_plugins/3_help, decorate() for Language + Update rows) + buildGearMenu(app, pop) renderer (split from app.js; mobile shares it)
     tab-group.js       — Tab grouping mixin (chain model, icon drag, tab bar, drag-out)
     terminal.js        — TerminalSession (xterm.js wrapper, per-terminal settings)
     sidebar.js         — Sidebar shell (filter/sort/merge pipeline, tab switching, ~870 lines)

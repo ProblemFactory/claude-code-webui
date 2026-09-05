@@ -34,6 +34,30 @@ const crashLoopRef = {};
 // incident: 5 auto-recreations in 2 minutes, each dying in ~2s).
 const noConvoRef = { map: new Map() };
 
+// Unknown ws message types (the switch's `default:` case, Plugin Ph1 —
+// design-harness-plugins §3.1: the switch had no default, so a typo'd or
+// newer-client type was silently ignored and the sender waited forever with
+// no signal anywhere). Per type per boot: the first sighting logs and later
+// ones re-log at most every 10 minutes carrying the running count — a chatty
+// stale client cannot flood the journal, and one line is enough to find it.
+// Every occurrence is a telemetry event (Diagnostics).
+const UNKNOWN_WS_TYPE_LOG_MS = 10 * 60 * 1000;
+const unknownWsTypes = new Map(); // type label → { n, lastLogAt }
+const unknownTypeLabel = (t) => (typeof t === 'string' ? t : String(t)).slice(0, 80);
+function noteUnknownWsType(telemetry, type) {
+  const label = unknownTypeLabel(type);
+  const rec = unknownWsTypes.get(label) || { n: 0, lastLogAt: 0 };
+  rec.n++;
+  const now = Date.now();
+  if (now - rec.lastLogAt >= UNKNOWN_WS_TYPE_LOG_MS) {
+    rec.lastLogAt = now;
+    console.warn(`[ws] unknown message type "${label}" (${rec.n}× this boot) — replied error/unknown-type`);
+  }
+  unknownWsTypes.set(label, rec);
+  try { telemetry?.record({ kind: 'event', name: 'ws-unknown-type', detail: label }); } catch {}
+  return rec;
+}
+
 // ── Server-runtime env must NEVER reach an agent session (2.227.12) ──
 // A session inherits `process.env` so the CLI sees the user's PATH etc. — but
 // the container's env also carries (a) OPERATIONAL vars that break the agent's
@@ -163,7 +187,7 @@ const WS_CTX_CONTRACT = [
   'NODE_CMD', 'DTACH_CMD', 'ENV_CMD', 'CLAUDE_CMD', 'EDITOR_CMD', 'AGENT_BIN_DIR', 'PORT', 'X_ENV',
   'adapterRegistry', 'pty', 'path', 'fs', 'os', 'execFileSync', 'ensureDir', 'hosts',
   'accounts', 'scheduleCtxSync', 'activeSessionsPayload',
-  'USAGE_STATUSLINE_CMD', 'userStatuslineCmd', 'serverNotice', 'otelEnv',
+  'USAGE_STATUSLINE_CMD', 'userStatuslineCmd', 'serverNotice', 'otelEnv', 'telemetry',
 ];
 
 function registerWsHandler(wss, ctx) {
@@ -178,7 +202,7 @@ function registerWsHandler(wss, ctx) {
     NODE_CMD, DTACH_CMD, ENV_CMD, CLAUDE_CMD, EDITOR_CMD, AGENT_BIN_DIR, PORT, X_ENV,
     adapterRegistry, pty, path, fs, os, execFileSync, ensureDir, hosts,
     accounts, scheduleCtxSync, activeSessionsPayload,
-    USAGE_STATUSLINE_CMD, userStatuslineCmd, otelEnv,
+    USAGE_STATUSLINE_CMD, userStatuslineCmd, otelEnv, telemetry,
   } = ctx;
 
   // Monotonic sequence for layout-sync rebroadcasts (shared across all
@@ -1246,6 +1270,22 @@ function registerWsHandler(wss, ctx) {
 
           ws.send(JSON.stringify({ type: 'created', sessionId: id, name: session.name, cwd: session.cwd, isTmuxView: true, reqId: data.reqId || undefined }));
           broadcastActiveSessions();
+          break;
+        }
+        default: {
+          // LOUD unknown type (Plugin Ph1; design-harness-plugins §3.1): this
+          // switch had no default, so an unknown type vanished — no log, no
+          // telemetry, no reply, and the sender waited forever. Rate-limited
+          // log + a telemetry count + a reply to the sender. The reply carries
+          // NO sessionId ON PURPOSE: a session-scoped `error` frame is what
+          // flips a live window into the attach-failed / exited path
+          // (chat-view's error branch and terminal's per-session handler key on
+          // msg.sessionId; ws.js routes by it) — an unknown TYPE is not a dead
+          // session. reqId IS echoed so a ws.request() caller fails fast
+          // instead of hanging.
+          noteUnknownWsType(telemetry, data?.type);
+          const unknownType = unknownTypeLabel(data?.type);
+          try { ws.send(JSON.stringify({ type: 'error', code: 'unknown-type', message: `Unknown message type: ${unknownType}`, unknownType, reqId: data?.reqId || undefined })); } catch {}
           break;
         }
       }
