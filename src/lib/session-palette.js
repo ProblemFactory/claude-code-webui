@@ -3,6 +3,7 @@
 // typing an absolute/~ path offers "new session here". Works everywhere
 // except inside terminals (.xterm owns its keys).
 import { escHtml } from './utils.js';
+import { registerCommand, runCommand } from './contributions.js';
 
 function subseq(t, s) {
   let qi = 0;
@@ -159,10 +160,19 @@ export function installSessionPalette(app) {
     } catch {}
   };
 
+  // COMMAND 'session.palette' (contributions registry, Plugin Ph1) — a plugin
+  // row or binding can open the palette. The chord itself stays dispatched
+  // HERE, not via registerKeybinding: this check is modifier-LENIENT
+  // ((ctrl|meta)+k regardless of shift/alt, capture phase) while the
+  // registry matcher is strict (VS Code semantics, bubble phase), so migrating
+  // it would silently drop Ctrl+Shift+K / Ctrl+Alt+K and reorder listeners —
+  // the key dispatch is left byte-identical and only the action is
+  // registry-routed.
+  registerCommand({ id: 'session.palette', title: 'Jump to a session…', run: () => open() });
   document.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k' && !e.target.closest?.('.xterm')) {
       e.preventDefault();
-      open();
+      runCommand('session.palette', { app });
     }
   }, true);
 }

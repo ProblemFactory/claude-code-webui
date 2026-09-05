@@ -1,5 +1,7 @@
 import { ThemeManager, THEMES, BUILTIN_THEMES } from './themes.js';
-import { installPluginClient, PLUGIN_ICON } from './plugin-client.js';
+import { installPluginClient } from './plugin-client.js';
+import { installKeybindings } from './contributions.js';
+import { buildGearMenu } from './gear-menu.js';
 import { BUILD_VERSION } from './build-version.js';
 import { track } from './telemetry-client.js';
 import { ThemeEditor } from './theme-editor.js';
@@ -14,7 +16,7 @@ import { LayoutManager } from './layout.js';
 import { ChatView } from './chat-view.js';
 import { Resizer } from './resizer.js';
 import { anchorFixedPopup, api, configureToasts, createPopover, createModalShell, fetchJson, initStateSync, installLongPressContextMenu, frontTruncate, escHtml, showContextMenu, showToast, showConfirmDialog, showInputDialog, applyUiPrefs, getUiPref, UI_SCALE_MIN, UI_SCALE_MAX, UI_FONT_MIN, UI_FONT_MAX, uiScale, setInstanceUrl } from './utils.js';
-import { t, tc, getLangPref, setLang } from './i18n.js';
+import { t, tc } from './i18n.js';
 import { installManageAgents } from './manage-agents.js';
 import { installPluginsUI } from './plugins-ui.js';
 import { installUsageMeter } from './usage-meter.js';
@@ -311,6 +313,13 @@ class App {
     this._setupGlobalSettings();
     this._setupChromeContextMenus();
     if (!this.isMobile) installSessionPalette(this);
+    // THE document-level keybinding dispatcher for registry chords
+    // (contributions.js registerKeybinding, Plugin Ph1): ONE bubble-phase
+    // listener bound for the app's lifetime under an AbortController. Core
+    // shortcuts keep their own capture listeners (command-mode.js /
+    // session-palette.js say why); plugin bindings ride this one.
+    this._contribCtl = new AbortController();
+    installKeybindings(document, { signal: this._contribCtl.signal, getCtx: () => ({ app: this }) });
     this._setupGridConfig();
     this._setupLayoutManager();
     this._setupUsage();
@@ -1054,102 +1063,10 @@ class App {
     themeRow.append(themeSel, editBtn);
     pop.append(themeLabel, themeRow, sizeLabel, sizeRow, fontLabel, fontSel, scaleLab, scaleRow, fscaleLab, fscaleRow, allSettingsLink);
 
-    // Account / help section — compact menu rows (matches context-menu look)
-    const menu = document.createElement('div');
-    menu.className = 'gs-menu';
-    const item = (svg, label, onClick, danger = false) => {
-      const el = document.createElement('div');
-      el.className = 'gs-menu-item' + (danger ? ' danger' : '');
-      el.innerHTML = `<span class="gs-menu-icon">${svg}</span><span>${label}</span>`;
-      el.onclick = () => { pop.remove(); onClick(); };
-      return el;
-    };
-    const I = {
-      key: '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="11" r="3"/><path d="M7.5 8.5L13 3M11 5l2 2M9 7l1.5 1.5"/></svg>',
-      puzzle: '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2h4v2.5a1.5 1.5 0 103 0V7h2v7H3V7h2V4.5a1.5 1.5 0 103 0z"/></svg>',
-      brush: '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 2.5c-2.5.5-5.5 3-7 5l2 2c2-1.5 4.5-4.5 5-7z"/><path d="M6.5 7.5c-1.5.3-2.5 1.5-2.5 3.5-1 .5-1.5.5-2.5.5 1 1.5 2.5 2 4 2s2.8-1.3 3-3"/></svg>',
-      tour: '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6.5"/><path d="M8 7.5v3.5M8 5v.5"/></svg>',
-      out: '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2H3v12h3M10 11l3-3-3-3M13 8H6"/></svg>',
-      exp: '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M8 10V2M5 5l3-3 3 3M3 10v3h10v-3"/></svg>',
-      imp: '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v8M5 7l3 3 3-3M3 10v3h10v-3"/></svg>',
-      lock: '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="7" width="9" height="6.5" rx="1"/><path d="M5.5 7V5a2.5 2.5 0 015 0v2"/></svg>',
-      chart: '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2 13h12"/><rect x="3" y="8" width="2.4" height="4"/><rect x="6.8" y="5" width="2.4" height="7"/><rect x="10.6" y="2.5" width="2.4" height="9.5"/></svg>',
-      pulse: '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 8h3l1.5-4 3 8L10.5 8h4"/></svg>',
-    };
-    const sep = () => { const s = document.createElement('div'); s.className = 'gs-menu-sep'; return s; };
-    // Grouped by nature (user feedback "布局逻辑怪怪的"):
-    // ① UI & preferences (customize / language — the quick appearance
-    //   controls + All settings sit right above) ② admin & monitoring
-    //   ③ maintenance (backup / password / update) ④ help & session.
-    if (!this.isMobile) menu.append(item(I.brush, t('Customize UI\u2026'), () => this._customize.enter()));
-    // Language is PER-DEVICE (localStorage, not a synced setting) \u2014 names shown
-    // in their own language, never translated. Switching reloads the page.
-    {
-      const I_globe = '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6.5"/><path d="M1.5 8h13M8 1.5c-1.8 1.8-2.7 4-2.7 6.5S6.2 12.7 8 14.5c1.8-1.8 2.7-4 2.7-6.5S9.8 3.3 8 1.5z"/></svg>';
-      const pref = getLangPref();
-      const cur = { auto: t('Auto (system)'), en: 'English', zh: '\u4e2d\u6587', ja: '\u65e5\u672c\u8a9e' }[pref] || pref;
-      const langItem = item(I_globe, `${t('Language')}: ${cur}`, () => {});
-      langItem.onclick = (e) => {
-        const choices = [['auto', t('Auto (system)')], ['en', 'English'], ['zh', '\u4e2d\u6587'], ['ja', '\u65e5\u672c\u8a9e']];
-        showContextMenu(e.clientX, e.clientY, choices.map(([code, label]) => ({
-          label: (pref === code ? '\u2713 ' : '\u2007 ') + label,
-          action: () => setLang(code), // showContextMenu items use .action, not .onClick
-        })));
-      };
-      menu.append(langItem);
-    }
-    menu.append(sep(),
-      item(I.key, t('Manage agents\u2026'), () => this._showAgentsDialog()),
-      item(I.puzzle, t('Plugins\u2026'), () => this.openPluginsDialog()),
-      item(I.chart, t('Usage\u2026'), () => this.openUsage()),
-      item(I.chart, t('Background Work\u2026'), () => this.openJobs()),
-      item(I.pulse, t('Diagnostics report\u2026'), () => this._openDiagnostics()),
-      item(I.alert || I.pulse, t('Report a problem\u2026'), () => this.captureIncident?.()),
-      item(I.exp || I.pulse, t('Restore a previous layout\u2026'), () => this._showLayoutHistory()));
-    menu.append(sep(),
-      item(I.exp, t('Backup & migrate\u2026'), () => this._showTransferDialog()),
-      item(I.lock, this._authEnabled ? t('Change password\u2026') : t('Set password\u2026'), () => this._showPasswordDialog()));
-    // Self-update: runs scripts/update.sh visibly in a shell terminal (same
-    // pattern as Manage Agents' CLI updates). The dtach terminal survives the
-    // service restart at the end, so the log stays readable throughout.
-    // The item also shows the running version and \u2014 when the canonical repo
-    // has a newer one \u2014 "vX \u2192 vY" highlighted (user request).
-    if (this._repoDir) {
-      // Clicking Update opens the changelog-confirm dialog first (user
-      // directive) — the actual update runs only after the user confirms.
-      const upd = item(I.key, t('Update VibeSpace\u2026'), () => {
-        this._showUpdateConfirmDialog();
-      });
-      // Two-line button (user request): label on top, "vCURRENT \u2192 vLATEST"
-      // below. Restructure item()'s [icon][label] into [icon][column].
-      const labelSpan = upd.children[1];
-      const col = document.createElement('div');
-      col.className = 'gs-item-col';
-      upd.appendChild(col);
-      col.appendChild(labelSpan);
-      const vspan = document.createElement('span');
-      vspan.className = 'gs-ver';
-      col.appendChild(vspan);
-      fetchJson('/api/version?fresh=1').then(v => {
-        if (!v?.version || !vspan.isConnected) return;
-        const newer = v.latest && this._versionNewer(v.latest, v.version);
-        vspan.textContent = newer ? `v${v.version} \u2192 v${v.latest}` : `v${v.version}`;
-        if (newer) vspan.classList.add('gs-ver-new');
-        vspan.title = newer ? t('Update available') : (v.latest ? t('Up to date') : '');
-      }).catch(() => {});
-      menu.append(upd);
-    }
-    // Plugin-contributed windows (Ph2): one row per enabled iframe window
-    const pluginWins = this.pluginClient?.contributedWindows?.() || [];
-    if (pluginWins.length) menu.append(sep(), ...pluginWins.map((w) => item(PLUGIN_ICON, w.title, () => this.pluginClient.open(w.pluginId, w.windowId))));
-    menu.append(sep(), item(I.tour, t('Welcome tour'), () => this._showOnboarding(true)));
-    if (this._authEnabled) {
-      menu.append(item(I.out, t('Sign out'), async () => {
-        try { await fetch('/api/logout', { method: 'POST' }); } catch {}
-        location.href = '/login';
-      }, true));
-    }
-    pop.append(menu);
+    // Account / help section — the 'gear' MENU REGISTRY (gear-menu.js holds
+    // the core rows as contributions; a plugin adds rows through the same
+    // registerMenuItem({ menu: 'gear', … }) call). Mobile shares this menu.
+    pop.append(buildGearMenu(this, pop));
   }
 
   // Update-confirm dialog: every changelog entry between the RUNNING version

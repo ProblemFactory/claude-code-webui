@@ -1,5 +1,6 @@
 import { agoText, escHtml, copyText, createPopover, showConfirmDialog, showContextMenu, uiScale } from './utils.js';
 import { t as tr } from './i18n.js';
+import { registerCommand, registerMenuItem, menuItems } from './contributions.js';
 import { SESSION_STATE_META, SESSION_URGENCY_META } from './sidebar-tasks.js';
 import { createBackendIcon, createAgentKindIcon, createModeBackendIcon, getBackendMeta, getAgentKindMeta, getAgentRoleLabel, getAgentRoleShortLabel, getSessionKey, backendFeatureCaps, settingsPrefixFor } from './agent-meta.js';
 
@@ -28,6 +29,126 @@ const ICON = {
  * @param {boolean} clickToCopy
  * @param {object} state - sidebar instance (for _getSessionTasks, _showTaskBindPopover, _taskBind, _taskUnbind)
  */
+// ── SESSION COMMANDS + the 'session-card' MENU (contributions registry,
+//    Plugin Ph1). The verbs are `session.*` commands over ctx.s (the sidebar
+//    session object) so the window title-bar menu (taskbar.js) and a plugin
+//    can reuse them; the card's right-click menu is the registrations below,
+//    rendered by menuItems('session-card', ctx) in the hand-built order
+//    (scripts/test-contributions.mjs diffs it against a verbatim copy of the
+//    pre-registry builder — byte-identical labels/separators/submenus).
+//    ctx = { app, state (the sidebar), settings, s, card, event, displayName,
+//    customName, originalName, onRename, agentOpts }.
+//    Keep this block self-contained (the gate suite extracts + replays it):
+//    it closes over registerCommand, registerMenuItem, tr, backendFeatureCaps,
+//    copyText, showConfirmDialog only. ──
+export function registerSessionCardMenu() {
+  const M = 'session-card';
+  const live = (c) => c.s.status === 'live' && !!c.s.webuiId;
+  const stopped = (c) => c.s.status === 'stopped';
+  const resumeWith = (c, mode) => {
+    const cfgA = c.state.getSessionConfig?.(c.s) || {};
+    return c.app.resumeSession(c.s.sessionId, c.s.cwd, c.customName || c.s.name, { mode, accountId: cfgA.account || undefined, ...c.agentOpts });
+  };
+  // verbs (session.* — shared with the window menu where the semantics are identical)
+  registerCommand({ id: 'session.focusWindow', title: () => tr('Focus window'), run: (c) => c.app.attachSession(c.s.webuiId, c.s.webuiName || c.displayName, c.s.cwd, { mode: c.s.webuiMode, ...c.agentOpts }) });
+  // one-click Terminate+Resume (owner UX 2.369.8 — the entry used to
+  // support only terminate-then-hunt-then-resume); also 'Resume session' on a
+  // dead window's title menu (dead sessions skip straight to resume)
+  registerCommand({ id: 'session.restart', title: () => tr('Restart (Terminate + Resume)'), run: (c) => c.app.restartConversationInPlace(c.s) });
+  registerCommand({ id: 'session.viewTmux', title: () => tr('View (tmux)'), run: (c) => c.app.attachTmuxSession(c.s.tmuxTarget, c.displayName, c.s.cwd) });
+  registerCommand({ id: 'session.resumeChat', title: () => tr('Resume in Chat'), run: (c) => resumeWith(c, 'chat') });
+  registerCommand({ id: 'session.resumeTerminal', title: () => tr('Resume in Terminal'), run: (c) => resumeWith(c, 'terminal') });
+  registerCommand({ id: 'session.viewHistory', title: () => tr('View History'), run: (c) => c.app.viewSession(c.s.sessionId, c.s.cwd, c.customName || c.s.name, { ...c.agentOpts }) });
+  registerCommand({ id: 'session.fork', title: () => tr('Fork…'), run: (c) => c.app.forkSession(c.s) });
+  registerCommand({ id: 'session.toggleStar', title: (c) => (c.state.isStarred(c.s) ? tr('Unstar') : tr('Star')), run: (c) => c.state.toggleStar(c.s) });
+  registerCommand({ id: 'session.toggleArchive', title: (c) => (c.state.isArchived(c.s) ? tr('Unarchive') : tr('Archive')), run: (c) => c.state.toggleArchive(c.s) });
+  registerCommand({ id: 'session.rename', title: () => tr('Rename…'), run: (c) => c.onRename(c.s, c.originalName) });
+  registerCommand({ id: 'session.setStatus', title: () => tr('Set status…'), run: (c) => c.state._showSessionStatusPopover?.(c.card, c.s) });
+  registerCommand({ id: 'session.copyId', title: () => tr('Copy session ID'), run: (c) => copyText(c.s.sessionId || '') });
+  registerCommand({ id: 'session.copyPath', title: () => tr('Copy path'), run: (c) => copyText(c.s.cwd || '') });
+  // Host-aware: a remote session's cwd opens in the explorer ON its host
+  registerCommand({ id: 'session.openCwd', title: () => tr('Open working directory'), run: (c) => c.app.openFileExplorer(c.s.cwd, { host: c.s.host || undefined }) });
+  registerCommand({ id: 'session.findWindow', title: () => tr('Find window'), run: (c) => c.app.flashWindow(c.s.webuiId) });
+  registerCommand({ id: 'session.goToWindow', title: () => tr('Go to window'), run: (c) => c.app.goToWindow(c.s.webuiId) });
+  registerCommand({ id: 'session.moveWindow', title: () => tr('Move window…'), run: (c) => c.app.moveSessionWindow(c.s.webuiId) });
+  // Billing switch straight from the card — on phones there are no window
+  // title bars, so the title-bar identity badge (the desktop entry point)
+  // doesn't exist; this menu is the universal path.
+  registerCommand({ id: 'session.switchBilling', title: () => tr('Switch billing…'), run: (c) => c.app.showBillingSwitcher(c.s, { x: c.event.clientX, y: c.event.clientY }) });
+  // transcript rescue (2.360.0, owner request after the 79928a2b 38MB
+  // poisoning): stubs oversized records in place (full backup) so a
+  // conversation whose resume dies / history blanks comes back
+  registerCommand({
+    id: 'session.rescueTranscript', title: () => tr('Rescue transcript…'),
+    run: async (c) => {
+      const s = c.s;
+      const { showConfirmDialog, fetchJson: fj, showToast: toast } = await import('./utils.js');
+      const okGo = await showConfirmDialog({ title: tr('Rescue this conversation?'), message: tr('Scans the transcript for oversized broken records (giant image pastes etc.), replaces them with small stubs and keeps a full backup next to the file. Use when resume keeps dying or the history opens blank.'), confirmText: tr('Rescue') });
+      if (!okGo) return;
+      const r = await fj('/api/session-rescue', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: s.sessionId, cwd: s.cwd, backend: s.backend || 'claude' }) });
+      if (r?.error) { toast(r.error, { type: 'error' }); return; }
+      if (!r.replaced && !r.skipped) toast(tr('Nothing oversized found — this transcript looks healthy'));
+      else toast(tr('Rescued: {n} oversized record(s) stubbed, {mb}MB freed — backup kept next to the transcript', { n: r.replaced + r.skipped, mb: Math.round((r.sizeBefore - r.sizeAfter) / 1048576) }), { duration: 9000 });
+    },
+  });
+  registerCommand({ id: 'session.properties', title: () => tr('Properties…'), run: (c) => c.app.openSessionProps(c.s) });
+  registerCommand({ id: 'session.locate', title: () => tr('Locate in sidebar'), run: (c) => c.app.locateSessionInSidebar(c.s.sessionId) });
+  registerCommand({
+    id: 'session.terminate', title: () => tr('Terminate'),
+    run: async (c) => {
+      const s = c.s;
+      const ok = await showConfirmDialog({ title: tr('Terminate Session'), message: tr('Terminate session "{name}"? The running agent process will be killed.', { name: c.displayName }), confirmText: tr('Terminate'), danger: true });
+      if (!ok) return;
+      if (s.webuiId) c.app.killSession(s.webuiId);
+      else if (s.pid) c.app.killPid(s.pid, s.host);
+    },
+  });
+  // ── the card's right-click menu, group by group (explicit separators) ──
+  // 0_primary: open / resume / history / fork
+  registerMenuItem({ menu: M, group: '0_primary', order: 10, command: 'session.focusWindow', when: live });
+  registerMenuItem({ menu: M, group: '0_primary', order: 20, command: 'session.restart', when: live, label: (c, title) => '⟳ ' + title });
+  registerMenuItem({ menu: M, group: '0_primary', order: 10, command: 'session.viewTmux', when: (c) => c.s.status === 'tmux' });
+  registerMenuItem({ menu: M, group: '0_primary', order: 10, command: 'session.resumeChat', when: stopped });
+  registerMenuItem({ menu: M, group: '0_primary', order: 20, command: 'session.resumeTerminal', when: stopped });
+  registerMenuItem({ menu: M, group: '0_primary', order: 30, command: 'session.viewHistory' });
+  registerMenuItem({ menu: M, group: '0_primary', order: 40, command: 'session.fork', when: (c) => !!backendFeatureCaps(c.s.backend || 'claude').fork && c.s.status !== 'external' });
+  // 1_state: star / archive / rename / status / task groups
+  registerMenuItem({ menu: M, group: '1_state', order: 0, separator: true });
+  registerMenuItem({ menu: M, group: '1_state', order: 10, command: 'session.toggleStar' });
+  registerMenuItem({ menu: M, group: '1_state', order: 20, command: 'session.toggleArchive' });
+  registerMenuItem({ menu: M, group: '1_state', order: 30, command: 'session.rename' });
+  registerMenuItem({ menu: M, group: '1_state', order: 40, command: 'session.setStatus' });
+  const activeGroups = (c) => (c.state._tasks || []).filter((t) => !t.archived);
+  registerMenuItem({
+    menu: M, group: '1_state', order: 50, id: 'session-card/task-groups', label: () => tr('Task Groups'),
+    children: (c) => { // an empty list drops the submenu (registry rule) — the legacy `if (groups.length)`
+      const explicitIds = new Set((c.state._getSessionTasks?.(c.s) || []).map((t) => t.id));
+      const folderIds = new Set((c.state._getSessionTaskGroups?.(c.s) || []).map((t) => t.id));
+      return activeGroups(c).map((t) => ({
+        label: (explicitIds.has(t.id) ? '✓ ' : folderIds.has(t.id) ? '◇ ' : ' ') + t.title + (!explicitIds.has(t.id) && folderIds.has(t.id) ? tr(' (folder)') : ''),
+        disabled: !explicitIds.has(t.id) && folderIds.has(t.id),
+        action: () => { explicitIds.has(t.id) ? c.state._taskUnbind(t.id, c.s) : c.state._taskBind(t.id, c.s); },
+      }));
+    },
+  });
+  // 2_locate: ids / paths / window
+  registerMenuItem({ menu: M, group: '2_locate', order: 0, separator: true });
+  registerMenuItem({ menu: M, group: '2_locate', order: 10, command: 'session.copyId' });
+  registerMenuItem({ menu: M, group: '2_locate', order: 20, command: 'session.copyPath' });
+  registerMenuItem({ menu: M, group: '2_locate', order: 30, command: 'session.openCwd', when: (c) => !!c.s.cwd });
+  registerMenuItem({ menu: M, group: '2_locate', order: 40, command: 'session.findWindow', when: (c) => !!c.s.webuiId });
+  registerMenuItem({ menu: M, group: '2_locate', order: 50, command: 'session.goToWindow', when: (c) => !!c.s.webuiId });
+  registerMenuItem({ menu: M, group: '2_locate', order: 60, command: 'session.moveWindow', when: (c) => !!c.s.webuiId && !c.app.isMobile });
+  // 3_admin: billing / rescue / properties / terminate
+  registerMenuItem({ menu: M, group: '3_admin', order: 0, separator: true });
+  registerMenuItem({ menu: M, group: '3_admin', order: 10, command: 'session.switchBilling', when: (c) => (c.s.backend || 'claude') === 'claude' || c.s.backend === 'codex' });
+  registerMenuItem({ menu: M, group: '3_admin', order: 20, command: 'session.rescueTranscript', when: (c) => stopped(c) && !c.s.host });
+  registerMenuItem({ menu: M, group: '3_admin', order: 30, command: 'session.properties' });
+  registerMenuItem({ menu: M, group: '3_admin', order: 40, command: 'session.terminate', when: (c) => c.s.status !== 'stopped', style: 'color: var(--red, #e55)' });
+}
+registerSessionCardMenu();
+// end registerSessionCardMenu (scripts/test-contributions.mjs extracts the block above)
+
 function renderDetailGroups(container, sessionRef, clickToCopy, state) {
   container.innerHTML = '';
   const explicit = state._getSessionTasks(sessionRef);
@@ -784,90 +905,14 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
 
   // Right-click (long-press on touch): quick actions without expanding the
   // card. Everything here calls the SAME handlers as the expanded buttons.
+  // Items come from the 'session-card' MENU REGISTRY (contributions.js, Plugin
+  // Ph1) — registerSessionCardMenu() at the top of this file holds the core
+  // entries in the hand-built order; a plugin adds rows through the same call.
   card.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     e.stopPropagation();
-    const items = [];
-    if (s.status === 'live' && s.webuiId) {
-      items.push({ label: tr('Focus window'), action: () => app.attachSession(s.webuiId, s.webuiName || displayName, s.cwd, { mode: s.webuiMode, ...agentOpts }) });
-      // one-click Terminate+Resume (owner UX 2.369.8 — the entry used to
-      // support only terminate-then-hunt-then-resume)
-      items.push({ label: '\u27F3 ' + tr('Restart (Terminate + Resume)'), action: () => app.restartConversationInPlace(s) });
-    } else if (s.status === 'tmux') {
-      items.push({ label: tr('View (tmux)'), action: () => app.attachTmuxSession(s.tmuxTarget, displayName, s.cwd) });
-    } else if (s.status === 'stopped') {
-      const cfgA = state.getSessionConfig?.(s) || {};
-      const resumeWith = (mode) => app.resumeSession(s.sessionId, s.cwd, customName || s.name, { mode, accountId: cfgA.account || undefined, ...agentOpts });
-      items.push({ label: tr('Resume in Chat'), action: () => resumeWith('chat') });
-      items.push({ label: tr('Resume in Terminal'), action: () => resumeWith('terminal') });
-    }
-    items.push({ label: tr('View History'), action: () => app.viewSession(s.sessionId, s.cwd, customName || s.name, { ...agentOpts }) });
-    if (backendFeatureCaps(s.backend || 'claude').fork && s.status !== 'external') items.push({ label: tr('Fork…'), action: () => app.forkSession(s) });
-    items.push({ separator: true });
-    items.push({ label: state.isStarred(s) ? tr('Unstar') : tr('Star'), action: () => state.toggleStar(s) });
-    items.push({ label: state.isArchived(s) ? tr('Unarchive') : tr('Archive'), action: () => state.toggleArchive(s) });
-    items.push({ label: tr('Rename…'), action: () => onRename(s, originalName) });
-    items.push({ label: tr('Set status…'), action: () => state._showSessionStatusPopover?.(card, s) });
-    const groups = (state._tasks || []).filter(t => !t.archived);
-    if (groups.length) {
-      const explicitIds = new Set((state._getSessionTasks?.(s) || []).map(t => t.id));
-      const folderIds = new Set((state._getSessionTaskGroups?.(s) || []).map(t => t.id));
-      items.push({
-        label: tr('Task Groups'),
-        children: groups.map(t => ({
-          label: (explicitIds.has(t.id) ? '✓ ' : folderIds.has(t.id) ? '◇ ' : ' ') + t.title + (!explicitIds.has(t.id) && folderIds.has(t.id) ? tr(' (folder)') : ''),
-          disabled: !explicitIds.has(t.id) && folderIds.has(t.id),
-          action: () => { explicitIds.has(t.id) ? state._taskUnbind(t.id, s) : state._taskBind(t.id, s); },
-        })),
-      });
-    }
-    items.push({ separator: true });
-    items.push({ label: tr('Copy session ID'), action: () => copyText(s.sessionId || '') });
-    items.push({ label: tr('Copy path'), action: () => copyText(s.cwd || '') });
-    // Host-aware: a remote session's cwd opens in the explorer ON its host
-    if (s.cwd) items.push({ label: tr('Open working directory'), action: () => app.openFileExplorer(s.cwd, { host: s.host || undefined }) });
-    if (s.webuiId) {
-      items.push({ label: tr('Find window'), action: () => app.flashWindow(s.webuiId) });
-      items.push({ label: tr('Go to window'), action: () => app.goToWindow(s.webuiId) });
-      if (!app.isMobile) items.push({ label: tr('Move window…'), action: () => app.moveSessionWindow(s.webuiId) });
-    }
-    items.push({ separator: true });
-    // Billing switch straight from the card — on phones there are no window
-    // title bars, so the title-bar identity badge (the desktop entry point)
-    // doesn't exist; this menu is the universal path.
-    if ((s.backend || 'claude') === 'claude' || s.backend === 'codex') {
-      items.push({ label: tr('Switch billing…'), action: () => app.showBillingSwitcher(s, { x: e.clientX, y: e.clientY }) });
-    }
-    // transcript rescue (2.360.0, owner request after the 79928a2b 38MB
-    // poisoning): stubs oversized records in place (full backup) so a
-    // conversation whose resume dies / history blanks comes back
-    if (s.status === 'stopped' && !s.host) {
-      items.push({
-        label: tr('Rescue transcript…'),
-        action: async () => {
-          const { showConfirmDialog, fetchJson: fj, showToast: toast } = await import('./utils.js');
-          const okGo = await showConfirmDialog({ title: tr('Rescue this conversation?'), message: tr('Scans the transcript for oversized broken records (giant image pastes etc.), replaces them with small stubs and keeps a full backup next to the file. Use when resume keeps dying or the history opens blank.'), confirmText: tr('Rescue') });
-          if (!okGo) return;
-          const r = await fj('/api/session-rescue', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: s.sessionId, cwd: s.cwd, backend: s.backend || 'claude' }) });
-          if (r?.error) { toast(r.error, { type: 'error' }); return; }
-          if (!r.replaced && !r.skipped) toast(tr('Nothing oversized found — this transcript looks healthy'));
-          else toast(tr('Rescued: {n} oversized record(s) stubbed, {mb}MB freed — backup kept next to the transcript', { n: r.replaced + r.skipped, mb: Math.round((r.sizeBefore - r.sizeAfter) / 1048576) }), { duration: 9000 });
-        },
-      });
-    }
-    items.push({ label: tr('Properties…'), action: () => app.openSessionProps(s) });
-    if (s.status !== 'stopped') {
-      items.push({
-        label: tr('Terminate'), style: 'color: var(--red, #e55)',
-        action: async () => {
-          const ok = await showConfirmDialog({ title: tr('Terminate Session'), message: tr('Terminate session "{name}"? The running agent process will be killed.', { name: displayName }), confirmText: tr('Terminate'), danger: true });
-          if (!ok) return;
-          if (s.webuiId) app.killSession(s.webuiId);
-          else if (s.pid) app.killPid(s.pid, s.host);
-        },
-      });
-    }
-    showContextMenu(e.clientX, e.clientY, items);
+    const ctx = { app, state, settings, s, card, event: e, displayName, customName, originalName, onRename, agentOpts };
+    showContextMenu(e.clientX, e.clientY, menuItems('session-card', ctx));
   });
 
   // Double-click name to rename (sets --name for next resume)

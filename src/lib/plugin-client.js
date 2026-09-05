@@ -32,8 +32,15 @@
 //   api.settings.get(key) / .set(key, value) / .path(key) / .onChange(fn)   (plugin.<id>.<key>)
 //   api.storage.get/set/del(k)         (localStorage, vsp_<id>_ namespace — shared with its iframes)
 //   api.on('theme-changed' | 'plugins-manifests-updated' | 'ws', fn)        → unsubscribe()
+//   api.registerCommand({ id: slug, title, run(ctx), when?(ctx), icon? })   → command id `plugin:<id>:<slug>` (Ph1 registry)
+//   api.registerMenuItem({ menu: 'session-card'|'window'|'gear'|…, command | label+run, group?, order?, when?(ctx), … })
+//                                      → item id `plugin:<id>:…`; `command` = own slug or a full id ('session.properties')
+//   api.registerKeybinding({ key: 'ctrl+shift+k', command, when?(ctx) })   → last registered wins; never inside .xterm
+//   api.runCommand(id, ctx)            → run any registered command (own slug or full id)
+//   Every Ph1 contribution is bound to api.signal — it leaves with the plugin (disable / uninstall / reload).
 //   api.app                            → the App mediator (it IS trusted code; the same access as VibeSpace itself)
 import { registerWindowType, svgIcon16 } from './window-types.js';
+import { registerCommand, registerMenuItem, registerKeybinding, runCommand } from './contributions.js';
 import { fetchJson, showToast, createModalShell } from './utils.js';
 import { registerPluginSettings, unregisterPluginSettings, pluginSettingPath } from './settings-schema.js';
 import { t } from './i18n.js';
@@ -177,6 +184,13 @@ export class PluginClient {
     const app = this.app, id = m.id;
     const storagePrefix = `vsp_${id}_`;
     const settingsChanged = new Set();
+    // a bare slug names the plugin's OWN command; a full id (has '.' or ':' —
+    // 'session.properties', 'plugin:other.id:x') is used as given
+    const pluginCommandId = (c) => {
+      if (typeof c !== 'string' || !c) throw new Error('command id required');
+      return /[.:]/.test(c) ? c : `plugin:${id}:${c}`;
+    };
+    let pluginItemSeq = 0;
     const api = {
       id, version: m.version, manifest: m, signal: ctl.signal, app,
       t,
@@ -206,6 +220,21 @@ export class PluginClient {
         if (!rel.startsWith('/')) throw new Error('api.fetch: path must start with /');
         return fetch(`/api/plugins/${encodeURIComponent(id)}/x${rel}`, opts);
       },
+      // ── Ph1 contribution registries (contributions.js), scoped to this
+      //    plugin: ids are namespaced `plugin:<id>:<slug>`, every registration
+      //    rides ctl.signal so it is removed on deactivate ──
+      registerCommand: ({ id: slug, title, run, when, icon } = {}) => {
+        if (typeof slug !== 'string' || !/^[a-z0-9-]+$/.test(slug)) throw new Error('api.registerCommand expects { id: slug ([a-z0-9-]), title, run(ctx) }');
+        return registerCommand({ id: `plugin:${id}:${slug}`, title, run, when, icon, signal: ctl.signal });
+      },
+      registerMenuItem: (spec = {}) => {
+        if (!spec || typeof spec !== 'object') throw new Error('api.registerMenuItem expects a spec object');
+        const command = spec.command === undefined ? undefined : pluginCommandId(spec.command);
+        const itemId = `plugin:${id}:${spec.id || spec.command || 'item-' + (++pluginItemSeq)}`;
+        return registerMenuItem({ ...spec, command, id: itemId, signal: ctl.signal });
+      },
+      registerKeybinding: ({ key, command, when, inTerminal } = {}) => registerKeybinding({ key, command: pluginCommandId(command), when, inTerminal, signal: ctl.signal }),
+      runCommand: (cid, ctx) => runCommand(pluginCommandId(cid), ctx),
       settings: {
         path: (key) => pluginSettingPath(id, key),
         get: (key) => app.settings?.get(pluginSettingPath(id, key)),
