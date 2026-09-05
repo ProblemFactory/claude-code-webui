@@ -200,7 +200,7 @@ const T0 = Date.now();   // the module refuses waits >26h out, so the clock must
   ok('the style menu offers Restart-now when a pick is pending', sb.includes('Restart now to apply') && sb.includes('_onRestartSession'));
   const sl9 = read('src/lib/session-lifecycle.js');
   ok('restartConversationInPlace exists (kill → exited → resume, config rides the respawn)', /restartConversationInPlace\(sessLike = \{\}\)/.test(sl9) && /this\.killSession\(webuiId, cid\)/.test(sl9));
-  ok('…and the session ops ride the window-title menu + the sidebar card menu', /Restart session/.test(read('src/lib/taskbar.js')) && /restartConversationInPlace\(s\)/.test(read('src/lib/session-card.js')));
+  ok('…and the session ops ride the window-title menu + the sidebar card menu (registry since Ph1: both menus contribute the session.restart command, whose run() is restartConversationInPlace)', /id: 'window\/restart-session', command: 'session\.restart'/.test(read('src/lib/taskbar.js')) && /id: 'session\.restart'[^\n]*restartConversationInPlace/.test(read('src/lib/session-card.js')) && /command: 'session\.restart'/.test(read('src/lib/session-card.js')));
   ok('locate-in-sidebar exists (folders panel, expand, scroll, flash)', /locateSessionInSidebar\(backendSessionId\)/.test(sl9) && /locate-flash/.test(sl9));
   const cv2 = read('src/lib/chat-view.js');
   ok('partial-meta refreshes do NOT reset the live style (2.368.3: wiping os to \'\' re-lit the hourglass on a running Concise session)', /_applyLiveMeta\(meta\)\s*{\s*if \(!meta\) return;[\s\S]{0,200}'outputStyle' in meta/.test(cv2) && cv2.includes("'autoResume' in meta"));

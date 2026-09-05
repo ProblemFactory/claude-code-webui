@@ -97,7 +97,8 @@ const sandboxConst = (pc.match(/const IFRAME_SANDBOX = '([^']*)'/) || [])[1] || 
 ok(/registerWindowType\(\{/.test(pc) && /action: w\.action/.test(pc) && /sandbox', IFRAME_SANDBOX/.test(pc) && sandboxConst.includes('allow-scripts') && !sandboxConst.includes('allow-same-origin'), `plugin-client registers contributed windows as window types and frames them sandboxed (never allow-same-origin): "${sandboxConst}"`);
 ok(/plugins-manifests-updated/.test(pc), 'plugin-client re-applies on the manifests broadcast');
 const appSrc = read('src/lib/app.js');
-ok(/installPluginClient\(this\)/.test(appSrc) && /this\.pluginClient\?\.contributedWindows\?\.\(\)/.test(appSrc), 'app installs the plugin client and lists contributed windows in the ⚙ menu');
+const gearSrc = read('src/lib/gear-menu.js');
+ok(/installPluginClient\(this\)/.test(appSrc) && /pluginClient\?\.contributedWindows\?\.\(\)/.test(appSrc + gearSrc), 'app installs the plugin client and the ⚙ menu (gear-menu.js since Ph1) lists contributed windows');
 const wiring = read('src/server/mounts-plugins-wiring.js');
 ok(/require\('\.\/plugin-loader\.js'\)\.create\(/.test(wiring) && /agentAuth: \(req\) =>/.test(wiring) && /s\.agentToken === tok/.test(wiring) && /pluginLoader\.shutdown\(\)/.test(wiring), 'wiring creates the loader with a vsst_-validating agentAuth and shuts plugin processes down with the server');
 ok(/, activeSessions,$/m.test(read('server.js')) && /pluginLoader,$/m.test(read('server.js')) && /const \{ agentEnv \} = require\('\.\.\/ws-handler'\);/.test(wiring), 'server.js passes activeSessions and receives the loader; the wiring takes agentEnv from ws-handler (the ONE sanitized-env builder)');
