@@ -86,6 +86,10 @@ const X_ENV = detectXDisplay();
 function refreshXEnv() { Object.assign(X_ENV, detectXDisplay()); return X_ENV; }
 const CLAUDE_CMD = CLAUDE_CMD_RAW.startsWith('/') ? CLAUDE_CMD_RAW : resolveCmd(CLAUDE_CMD_RAW);
 const CODEX_CMD = CODEX_CMD_RAW.startsWith('/') ? CODEX_CMD_RAW : resolveCmd(CODEX_CMD_RAW);
+// codex 0.153 thread/read fallback (B-21e4 item 5): the codex store's warmTranscript may run ONE
+// bounded `codex app-server` read for a thread with no rollout file here — wired where the
+// command is resolved (disabled when codex is absent; server.js stays bootstrap-sized)
+require('../codex-thread-read').configure({ codexCmd: CODEX_CMD || null, enabled: !!CODEX_CMD });
 const CLAUDE_SUBSCRIPTION_LOGIN_HELPER = path.join(rootDir, 'data', 'bin', 'vibespace-claude-subscription-login.mjs');
 const CODEX_LINUX_SANDBOX_CMD = resolveCmd('codex-linux-sandbox');
 // FUNCTIONAL probe (2.369.17): the PATH lookup above said "not found" on every

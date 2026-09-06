@@ -320,7 +320,7 @@ console.log('— ⑤ thread/read fallback for a thread with NO rollout (0.153 pa
   const wsh = read('src/ws-handler.js'), tsv = read('src/transcript-service.js');
   ok((wsh.match(/harnessOf\((?:session|data)\.backend \|\| 'claude'\)\.store\?\.warmTranscript/g) || []).length === 2 && !/if \(\(session\.backend \|\| 'claude'\) === 'claude'\) \{\s*\n\s*try \{ await warmSessionJsonlAsync/.test(wsh), 'ws-handler attach AND view-only paths warm through the descriptor (the claude-only ternary is gone)');
   ok(/harnessOf\(r\.backend \|\| 'claude'\)\.store\?\.warmTranscript/.test(tsv) && !/if \(r\.backend === 'claude'\) \{\s*\n\s*try \{ await warmSessionJsonlAsync/.test(tsv), 'transcript-service.view warms through the descriptor');
-  ok(/require\('\.\/src\/codex-thread-read'\)\.configure\(\{ codexCmd: CODEX_CMD \|\| null, enabled: !!CODEX_CMD \}\)/.test(read('server.js')), 'server.js configures the fallback with the resolved CODEX_CMD (disabled when codex is absent)');
+  ok(/require\('\.\.\/codex-thread-read'\)\.configure\(\{ codexCmd: CODEX_CMD \|\| null, enabled: !!CODEX_CMD \}\)/.test(read('src/server/cli-env.js')) && !/codex-thread-read/.test(read('server.js')), 'cli-env configures the fallback where CODEX_CMD is resolved (disabled when codex is absent; server.js untouched — the size ratchet)');
   ok(/'src\/codex-thread-read\.js'\]\);/.test(read('scripts/test-architecture.mjs')), 'the module is registered in the SHARED tier');
   ok(HARNESSES.claude.store.warmTranscript === require(path.join(REPO, 'src/session-store.js')).warmSessionJsonlAsync, 'claude\'s hook is still the worker parse-cache warm (unchanged)');
 }
