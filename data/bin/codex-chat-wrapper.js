@@ -368,6 +368,15 @@ function updateMetaFromThread(resp) {
   meta.approvalPolicy = typeof resp?.approvalPolicy === 'string' ? resp.approvalPolicy : meta.approvalPolicy;
   meta.permissionMode = permissionMode;
   if (resp?.reasoningEffort) meta.effort = resp.reasoningEffort;
+  // EXPLICIT EFFORT ON EVERY TURN (B-21e4 item 4, the effort twin of the
+  // modelPinned rule): with no COMMANDED effort (spawn env / set-effort) adopt
+  // the thread's own current effort from the start/resume/fork response
+  // (`reasoningEffort`, 0.153.4 bindings) so every turn/start carries an
+  // explicit `effort` — the app-server's per-thread defaults can then never
+  // flip a resumed conversation (0.153.4: gpt-6-astra defaults to LOW when
+  // config.toml names no model). A later set-effort still wins (it rewrites
+  // `effort`); a set-effort back to '' deliberately hands the choice back.
+  if (!effort && typeof resp?.reasoningEffort === 'string' && resp.reasoningEffort) { effort = resp.reasoningEffort; meta.effortAdopted = effort; }
   record('session_meta', {
     id: threadId,
     timestamp: now(),

@@ -195,5 +195,47 @@ console.log('— ③ effort enum: ultra offered when the served model reports it
   ok(read('src/lib/i18n-zh.js').includes(`"${key}":`) && read('src/lib/i18n-ja.js').includes(`"${key}":`), 'zh + ja carry the hint');
 }
 
+console.log('— ④ explicit model + effort on EVERY turn/start (resume continuity for effort)');
+{
+  const CX2 = require(path.join(REPO, 'src/adapters/codex.js'));
+  ok(CX2.lastCodexTurnEffort(P) === 'high' && CX2.lastCodexTurnModel(P) === 'gpt-6-astra' && CX2.lastCodexTurnEffort('00000000-0000-4000-8000-000000000000') === null, 'lastCodexTurnEffort = the last turn_context.effort (model twin unchanged; unknown thread → null)');
+  const wc = read('src/ws-create.js');
+  ok(/if \(!sessionSpec\.env\.CODEX_WEBUI_EFFORT\) \{ try \{ const le = lastCodexTurnEffort\(data\.resumeId\); if \(le\) sessionSpec\.env\.CODEX_WEBUI_EFFORT = le; \} catch \{ \} \}/.test(wc) && /lastCodexTurnModel, lastCodexTurnEffort/.test(wc), 'ws-create: a codex resume without an explicit effort carries the last-run effort (client choice still wins)');
+  // the REAL wrapper against a stub app-server: resume reply names model + effort → every turn/start carries both
+  const run = async (env, label) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-cx0153-e-'));
+    const SID = 'sess-4-1700000000004';
+    const buf = path.join(dir, SID + '.buf'), meta = path.join(dir, SID + '.json'), rpcLog = path.join(dir, 'rpc.jsonl');
+    const STUB = `const fs=require('fs');let b='';let n=0;const send=(o)=>process.stdout.write(JSON.stringify(o)+'\\n');process.stdin.setEncoding('utf8');process.stdin.on('data',(d)=>{b+=d;let i;while((i=b.indexOf('\\n'))!==-1){const l=b.slice(0,i);b=b.slice(i+1);if(!l.trim())continue;let m;try{m=JSON.parse(l)}catch{continue}if(m.id===undefined||!m.method)continue;fs.appendFileSync(${JSON.stringify(rpcLog)},l+'\\n');if(m.method==='thread/resume'){send({id:m.id,result:{thread:{id:'th-r',model:'gpt-6-astra',reasoningEffort:'high'},model:'gpt-6-astra',reasoningEffort:'high'}});continue;}if(m.method==='turn/start'){n++;const t='turn-'+n;send({id:m.id,result:{turn:{id:t}}});send({method:'turn/completed',params:{turn:{id:t},status:'completed'}});continue;}send({id:m.id,result:{}});}});setInterval(()=>{},1e3);`;
+    const w = spawn(process.execPath, [path.join(REPO, 'data/bin/codex-chat-wrapper.js'), buf, meta, process.execPath, '-e', STUB], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, CODEX_WEBUI_CWD: dir, CODEX_WEBUI_RESUME_ID: 'th-r', CODEX_WEBUI_MODEL: '', CODEX_WEBUI_EFFORT: '', VIBESPACE_API: '', VIBESPACE_SESSION_TOKEN: '', VIBESPACE_SKIP_AGENT_HOOKS: '1', ...env },
+    });
+    w.stdout.on('data', () => {}); w.stderr.on('data', () => {});
+    const rpc = () => { try { return fs.readFileSync(rpcLog, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
+    const readMeta = () => { try { return JSON.parse(fs.readFileSync(meta, 'utf8')); } catch { return null; } };
+    const send = (o) => w.stdin.write(JSON.stringify(o) + '\n');
+    let t0 = Date.now(); while (Date.now() - t0 < 8000 && readMeta()?.threadId !== 'th-r') await sleep(100);
+    send({ type: 'chat-input', text: 'first', msgId: 'm1' });
+    t0 = Date.now(); while (Date.now() - t0 < 8000 && !rpc().some((m) => m.method === 'turn/start')) await sleep(100);
+    const t1 = rpc().find((m) => m.method === 'turn/start');
+    send({ type: 'set-effort', effort: 'xhigh' });
+    await sleep(200);
+    send({ type: 'chat-input', text: 'second', msgId: 'm2' });
+    t0 = Date.now(); while (Date.now() - t0 < 8000 && rpc().filter((m) => m.method === 'turn/start').length < 2) await sleep(100);
+    const t2 = rpc().filter((m) => m.method === 'turn/start')[1];
+    try { w.kill('SIGTERM'); } catch {}
+    fs.rmSync(dir, { recursive: true, force: true });
+    return { t1: t1?.params, t2: t2?.params, meta: readMeta() };
+  };
+  const a = await run({}, 'no commanded effort');
+  ok(a.t1?.model === 'gpt-6-astra' && a.t1?.effort === 'high', 'no commanded effort: the first turn/start after thread/resume carries the thread\'s model AND effort explicitly (adopted from the resume reply)', a.t1 && { model: a.t1.model, effort: a.t1.effort });
+  ok(a.t2?.effort === 'xhigh' && a.t2?.model === 'gpt-6-astra', 'set-effort rewrites the per-turn effort (explicit on the next turn/start too)', a.t2 && { model: a.t2.model, effort: a.t2.effort });
+  const b = await run({ CODEX_WEBUI_EFFORT: 'low' }, 'commanded effort');
+  ok(b.t1?.effort === 'low' && b.t1?.model === 'gpt-6-astra', 'a COMMANDED effort (spawn env, e.g. the last-run effort ws-create carries) wins over the resume reply', b.t1 && { effort: b.t1.effort });
+  const w = read('data/bin/codex-chat-wrapper.js');
+  ok(/model: meta\.model \|\| undefined,\s*\n\s*effort: effort \|\| undefined,/.test(w) && /if \(!effort && typeof resp\?\.reasoningEffort === 'string' && resp\.reasoningEffort\) \{ effort = resp\.reasoningEffort;/.test(w), 'wrapper pin: turn/start passes model + effort; an uncommanded effort is adopted from the thread reply');
+}
+
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);
 process.exit(fail ? 1 : 0);

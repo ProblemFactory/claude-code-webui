@@ -147,7 +147,14 @@ function _walkJsonlFiles(rootDir) {
  *  otherwise fall back to the THREAD's start model (app-server thread.model)
  *  and silently downgrade a conversation the user had switched mid-way
  *  (owner report 2.369.32: "selected GPT-6, the view says 5.6"). Tail read only. */
-function lastCodexTurnModel(threadId) {
+function lastCodexTurnModel(threadId) { return _lastTurnContextField(threadId, 'model'); }
+/** The effort a thread LAST ran on (last turn_context.effort — codex writes
+ *  it per turn since 0.149; the wrapper's own copy carries null when nothing
+ *  was commanded, so nulls are skipped). The effort twin of lastCodexTurnModel
+ *  (B-21e4 item 4): a resume without an explicit effort carries it, so the
+ *  app-server's per-thread default can never flip a conversation's effort. */
+function lastCodexTurnEffort(threadId) { return _lastTurnContextField(threadId, 'effort'); }
+function _lastTurnContextField(threadId, field) {
   const fp = findCodexSessionJsonlPath(threadId);
   if (!fp) return null;
   let text;
@@ -156,7 +163,7 @@ function lastCodexTurnModel(threadId) {
   for (let i = lines.length - 1; i >= 0; i--) {
     const l = lines[i];
     if (l.indexOf('"turn_context"') < 0) continue;
-    try { const r = JSON.parse(l); if (r.type === 'turn_context' && r.payload?.model) return String(r.payload.model); } catch { }
+    try { const r = JSON.parse(l); if (r.type === 'turn_context' && r.payload?.[field]) return String(r.payload[field]); } catch { }
   }
   return null;
 }
@@ -1029,7 +1036,7 @@ class CodexAdapter extends BackendAdapter {
 
 module.exports = {
   jsonlGapInfoAsync, readJsonlLineRangeAsync, scanJsonlUserTurnsAsync, readJsonlBoundedParsedAsync, transcriptWorkerCall,
-  plainJsonlPath, fileIsZst, ZST_MAX_PLAIN, deriveCodexSessionName, CODEX_ROLLOUT_RE, lastCodexTurnModel,
+  plainJsonlPath, fileIsZst, ZST_MAX_PLAIN, deriveCodexSessionName, CODEX_ROLLOUT_RE, lastCodexTurnModel, lastCodexTurnEffort,
   CODEX_SESSIONS_DIR,
   CodexAdapter,
   findCodexSessionJsonlPath,

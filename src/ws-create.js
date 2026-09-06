@@ -11,7 +11,7 @@ const { MessageManager } = require('./message-manager');
 const { capsOf } = require('./backend-caps');
 const { createMessageManager } = require('./normalizers');
 const { listCodexThreads } = require('./codex-session-store');
-const { findCodexSessionJsonlPath, lastCodexTurnModel, extractCodexThreadMeta } = require('./adapters/codex');
+const { findCodexSessionJsonlPath, lastCodexTurnModel, lastCodexTurnEffort, extractCodexThreadMeta } = require('./adapters/codex');
 const { cwdToProjectDir, findSessionJsonlPath, warmSessionJsonlAsync } = require('./session-store');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
@@ -352,6 +352,12 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
             // app-server's thread.model (= the START model) — a mid-conversation
             // switch to gpt-6 survived neither restart nor rename before this.
             if (!sessionSpec.env.CODEX_WEBUI_MODEL) { try { const lm = lastCodexTurnModel(data.resumeId); if (lm) sessionSpec.env.CODEX_WEBUI_MODEL = lm; } catch { } }
+            // EFFORT CONTINUITY (B-21e4 item 4, the effort twin): a resume without an
+            // explicit effort carries the effort the thread LAST ran on (last
+            // turn_context.effort) — the wrapper then passes it on EVERY turn/start, so
+            // the app-server's per-thread default (LOW for the 0.153.4 default model)
+            // can never flip a conversation that was running at high/ultra.
+            if (!sessionSpec.env.CODEX_WEBUI_EFFORT) { try { const le = lastCodexTurnEffort(data.resumeId); if (le) sessionSpec.env.CODEX_WEBUI_EFFORT = le; } catch { } }
             const oldPath = findCodexSessionJsonlPath(data.resumeId);
             const oldChain = oldPath ? (extractCodexThreadMeta(oldPath).forkedFrom || []) : [];
             if (!oldChain.includes(data.resumeId)) oldChain.push(data.resumeId);
