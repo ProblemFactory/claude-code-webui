@@ -458,11 +458,23 @@ async function handleInput(msg) {
       // ok/queued) — dropping it silently would lose a promised message, so it
       // goes back to the delivery ladder's stash (the acp-events consumer
       // re-stashes on ok:false).
+      let droppedNudges = 0;
       for (const q of dropped) {
         if (q.opts?.peer && q.opts.peerText) record('peer_result', { ok: false, reason: 'dropped by Stop before it was delivered', text: q.opts.peerText, fromName: q.opts.peerFrom || null });
+        // A dropped NUDGE takes its latch with it. `nudgeTurnActive` is cleared
+        // by endPrompt for the nudge's OWN turn — a queue entry that never runs
+        // never reaches endPrompt, so leaving the flag set silently disabled
+        // the stop-time bookkeeping nudge for the REST OF THE SESSION (every
+        // later end_turn took the `!nudgeTurnActive` branch and skipped
+        // stop-check entirely). Per-turn state dies with the turn it belongs to.
+        if (q.opts?.nudge) { droppedNudges++; nudgeTurnActive = false; }
       }
-      if (dropped.length) notice('info', `Stop also dropped ${dropped.length} queued message${dropped.length === 1 ? '' : 's'} — send ${dropped.length === 1 ? 'it' : 'them'} again to run ${dropped.length === 1 ? 'it' : 'them'}.`, 'queue-cleared');
-      log(`interrupt: active=${!!activePrompt} dropped=${dropped.length}`);
+      // Count only what the USER queued: the bookkeeping nudge is ours, and
+      // telling someone to "send it again" for a message they never sent is a
+      // lie (the log line below still carries the true total).
+      const userDropped = dropped.length - droppedNudges;
+      if (userDropped) notice('info', `Stop also dropped ${userDropped} queued message${userDropped === 1 ? '' : 's'} — send ${userDropped === 1 ? 'it' : 'them'} again to run ${userDropped === 1 ? 'it' : 'them'}.`, 'queue-cleared');
+      log(`interrupt: active=${!!activePrompt} dropped=${dropped.length} (nudges=${droppedNudges})`);
       return;
     }
     case 'permission-response': resolvePermission(msg); return;

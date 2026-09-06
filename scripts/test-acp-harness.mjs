@@ -239,6 +239,73 @@ console.log('— Stop means stop (the cancel race + the local queue)');
   } finally { await w.stop(); }
 }
 
+console.log('— the stop-time bookkeeping nudge survives a Stop that drops it from the queue');
+{
+  // The nudge is FETCHED by endPrompt (a /api/agent/stop-check round trip) and
+  // dispatched only when the answer lands — by then drainPromptQueue has usually
+  // started the next turn, so the nudge itself goes into the LOCAL QUEUE. A Stop
+  // drops that queue, and the drop used to strand `nudgeTurnActive` at true
+  // (only the nudge's OWN endPrompt clears it, which a dropped queue entry never
+  // reaches): every later end_turn then took the `!nudgeTurnActive` branch and
+  // the session never nudged again — the bookkeeping reminder was gone for good.
+  let stopChecks = 0;
+  const api = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    // "fs" in the reason puts the mock on its fs branch, so the nudge turn needs
+    // no permission and ends by itself.
+    if (String(req.url).startsWith('/api/agent/stop-check')) { stopChecks++; res.end(JSON.stringify({ block: true, reason: 'fs — report your progress with vibespace-task' })); }
+    else res.end(JSON.stringify({ context: '' }));   // prompt-context: no prefix, so the wire stays readable
+  });
+  await new Promise((r) => api.listen(0, '127.0.0.1', r));
+  const ENV = { VIBESPACE_API: `http://127.0.0.1:${api.address().port}`, VIBESPACE_SESSION_TOKEN: 'vsst_test' };
+  const reminders = (w) => w.mockCalls().filter((c) => c.method === 'session/prompt' && JSON.stringify(c.params?.prompt || []).includes('vibespace-reminder'));
+  const queued = (w) => w.findAll('notice', (r) => r.noticeKind === 'queued');
+  // bounded wait that never throws: a regression must read as a FAILED ASSERT
+  // (with its counters), not as an exception that kills the rest of the suite.
+  const settle = async (pred, ms = 6000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { if (pred()) return true; await sleep(20); } return false; };
+  // drives a wrapper into the exact state the bug needs: a nudge sitting in the
+  // local queue behind a running turn.
+  async function nudgeIntoQueue(w) {
+    await w.waitFor(() => w.find('session'), 10000, 'session record');
+    w.send({ type: 'chat-input', text: 'slow read it', msgId: 'n1' });            // turn A
+    const perm = await w.waitFor(() => w.find('permission_request'), 8000, 'permission_request A');
+    w.send({ type: 'chat-input', text: 'slow read it again', msgId: 'n2' });      // queues behind turn A
+    await w.waitFor(() => queued(w).length === 1, 3000, 'the user message queued');
+    w.send({ type: 'permission-response', requestId: perm.requestId, approved: true, optionId: 'once' });
+    await w.waitFor(() => w.find('prompt_end', (r) => r.stopReason === 'end_turn'), 8000, 'turn A end_turn');
+    await w.waitFor(() => queued(w).length === 2, 8000, 'the nudge queued behind the drained turn');
+  }
+  const w = startWrapper({ env: ENV });
+  try {
+    await nudgeIntoQueue(w);
+    ok('a stop-time nudge whose turn is already taken goes into the LOCAL QUEUE (stop-check answered, nothing on the wire yet)', stopChecks === 1 && reminders(w).length === 0, { stopChecks, prompts: w.mockCalls().filter((c) => c.method === 'session/prompt').length });
+    w.send({ type: 'interrupt' });                                               // ← Stop drops the QUEUED nudge
+    await w.waitFor(() => w.find('prompt_end', (r) => r.stopReason === 'cancelled'), 8000, 'the running turn ends cancelled');
+    await sleep(300);
+    ok('…Stop drops it without sending it, and never tells the user to re-send a message they did not queue (the nudge is ours, not theirs)', reminders(w).length === 0 && !w.find('notice', (r) => r.noticeKind === 'queue-cleared'), { reminders: reminders(w).length, cleared: w.find('notice', (r) => r.noticeKind === 'queue-cleared') });
+    w.send({ type: 'chat-input', text: 'fs check', msgId: 'n3' });                // a later turn that ends end_turn
+    const again = await settle(() => stopChecks === 2 && reminders(w).length === 1);
+    ok('THE FIX: the dropped queue entry takes its latch with it — the NEXT completed turn asks stop-check again and the reminder goes out (before: nudgeTurnActive stayed true for the rest of the session)', again && /vibespace-reminder>fs/.test(JSON.stringify(reminders(w)[0]?.params?.prompt || '')), { stopChecks, reminders: reminders(w).length, ends: w.findAll('prompt_end').map((e) => e.stopReason) });
+  } finally { await w.stop(); }
+
+  // CONTROL — the same setup with NO Stop: the queued nudge runs, and the turn
+  // it waited behind must NOT fetch a second one. Green both before and after
+  // the fix: it proves the harness sees nudges at all, and that the fix is about
+  // the dropped entry rather than about deleting the latch (a wrapper that reset
+  // nudgeTurnActive on every turn would double-nudge here).
+  stopChecks = 0;
+  const c = startWrapper({ env: ENV });
+  try {
+    await nudgeIntoQueue(c);
+    const permB = await c.waitFor(() => c.findAll('permission_request')[1], 8000, 'permission_request B');
+    c.send({ type: 'permission-response', requestId: permB.requestId, approved: true, optionId: 'once' });
+    const ran = await settle(() => reminders(c).length === 1 && c.findAll('prompt_end').length === 3, 12000);
+    ok('control: with no Stop the queued nudge RUNS after the turn it waited for, and that turn\'s own end_turn does not queue a second nudge (the latch holds)', ran && stopChecks === 1 && reminders(c).length === 1, { stopChecks, reminders: reminders(c).length, ends: c.findAll('prompt_end').map((e) => e.stopReason) });
+    await sleep(600);
+    ok('negative control: the nudge turn\'s own end_turn does NOT nudge again — one reminder, one stop-check, no reminder loop', stopChecks === 1 && reminders(c).length === 1 && c.findAll('prompt_end').length === 3, { stopChecks, reminders: reminders(c).length, ends: c.findAll('prompt_end').map((e) => e.stopReason) });
+  } finally { await c.stop(); api.close(); }
+}
+
 console.log('— a Deny never selects an ALLOW option (fail closed)');
 {
   const w = startWrapper();
