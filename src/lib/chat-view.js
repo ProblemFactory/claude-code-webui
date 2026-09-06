@@ -918,13 +918,14 @@ class ChatView {
     // ledger by requestId — with the pool switching accounts mid-conversation,
     // "which account served THIS message" is per-message truth only the
     // ledger's baked attribution can answer.
-    const addBillingRow = (val) => {
+    const addAsyncRow = (label, val) => {
       if (!pop.isConnected) return;
       const row = document.createElement('div');
       row.className = 'msg-meta-row';
-      row.innerHTML = `<span class="msg-meta-label">${escHtml(t('Billing account'))}</span><span class="msg-meta-val">${escHtml(val)}</span>`;
+      row.innerHTML = `<span class="msg-meta-label">${escHtml(label)}</span><span class="msg-meta-val">${escHtml(val)}</span>`;
       pop.querySelector('.msg-meta-copy')?.before(row);
     };
+    const addBillingRow = (val) => addAsyncRow(t('Billing account'), val);
     // Session-level billing identity — the fallback truth when per-request
     // attribution can't answer (no request id on the record, or the remote
     // harvest hasn't landed yet). Real report: rows with no requestId showed
@@ -985,6 +986,14 @@ class ChatView {
           val = (sb ? sb + ' · ' : '') + t('not in the ledger yet');
         }
         addBillingRow(val);
+        // the ledger baked the served model (+ codex effort) per request —
+        // fall back to it ONLY when the record's own meta had none (a pre-meta
+        // rollout / a record with no turn_context in its slab); rows appended,
+        // never duplicated over the sync rows above
+        if (r?.found) {
+          if (!meta.model && r.model) addAsyncRow(t('Model'), r.model);
+          if (!meta.effort && r.effort) addAsyncRow(t('Effort'), r.effort);
+        }
       }).catch(() => { });
     } else {
       // record carries NEITHER id (rare: synthetic/system records) — the only

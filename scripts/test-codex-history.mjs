@@ -246,5 +246,231 @@ const ok = (n, c, e) => { if (c) { pass++; console.log('  ✓ ' + n); } else { f
   }
 }
 
+
+// ── THREAD ID = the rollout being rendered, never the parent's (adversarial
+// verifier, real-data refutation of the first cut): a codex SUB-AGENT rollout
+// carries its OWN session_meta at line 0 and the PARENT's at line 1 (11/79
+// local rollouts, 2320/10251 messages); "last session_meta wins" keyed every
+// meta.requestId `cx:<parent>:<cum>` — and 64 of those keys COLLIDED with real
+// ledger events of the parent conversation, so the billing row named the
+// wrong conversation's account. The ledger walker keys by the FILE's uuid
+// (= the first session_meta; 79/79 local rollouts, incl. all 29 multi-meta
+// ones). Fixture = the head of a real 0.149.1 sub-agent rollout, verbatim
+// (paths/instructions anonymised; no token_usage_record exists in that file).
+{
+  const fs = require('node:fs'), os = require('node:os');
+  const CHILD = '01a0338e-79d3-7820-a298-b119d4ec5bb3', PARENT = '01a0338c-b464-7ed3-8c11-bfa028cb0e2d';
+  const TURN = '01a0338c-d448-7e50-ba61-6f1daff2402b';
+  const TS = '2026-08-24T11:36:10.481Z';
+  const R = (type, payload) => ({ timestamp: TS, type, payload });
+  const BASE = { text: '[base instructions — trimmed]', provenance: { type: 'model', model: 'gpt-5.6-sol' } };
+  const COLLAB = { mode: 'default', settings: { model: 'gpt-5.6-sol', reasoning_effort: 'ultra', developer_instructions: null } };
+  const turnCtx = (turn_id) => ({ turn_id, cwd: '/home/u', workspace_roots: ['/home/u'], current_date: '2026-08-24', timezone: 'UTC', approval_policy: 'never', approvals_reviewer: 'user', sandbox_policy: { type: 'danger-full-access' }, permission_profile: { type: 'disabled' }, model: 'gpt-5.6-sol', comp_hash: '3000', personality: 'pragmatic', collaboration_mode: COLLAB, multi_agent_version: 'v2', realtime_active: false, effort: 'ultra', summary: 'auto' });
+  const U16496 = { input_tokens: 16371, cached_input_tokens: 11008, cache_write_input_tokens: 0, output_tokens: 125, reasoning_output_tokens: 104, total_tokens: 16496 };
+  const subagentHead = [
+    R('session_meta', { session_id: PARENT, id: CHILD, forked_from_id: PARENT, parent_thread_id: PARENT, timestamp: '2026-08-24T11:36:10.451Z', cwd: '/home/u', originator: 'claude-code-webui', cli_version: '0.149.1', source: { subagent: { thread_spawn: { parent_thread_id: PARENT, depth: 1, agent_path: '/root/paper_analysis', agent_nickname: 'Poincare', agent_role: null } } }, thread_source: 'subagent', agent_nickname: 'Poincare', agent_path: '/root/paper_analysis', model_provider: 'openai', base_instructions: BASE, history_mode: 'legacy', multi_agent_version: 'v2', context_window: { window_id: '01a0338e-79d3-7820-a298-b12d89fcc9fe' } }),
+    R('session_meta', { session_id: PARENT, id: PARENT, timestamp: '2026-08-24T11:34:14.373Z', cwd: '/home/u', originator: 'claude-code-webui', cli_version: '0.149.1', source: 'vscode', model_provider: 'openai', base_instructions: BASE, history_mode: 'legacy', context_window: { window_id: '01a0338c-b464-7ed3-8c11-bfb930f54094' } }),
+    R('response_item', { type: 'message', id: 'msg_01a0338c-d441-7903-b87e-fe719da45bcb', role: 'developer', content: [{ type: 'input_text', text: '<skills_instructions>\n## Skills\n[trimmed]\n</skills_instructions>' }] }),
+    R('response_item', { type: 'message', id: 'msg_01a0338c-d441-7903-b87e-fea476070d70', role: 'user', content: [{ type: 'input_text', text: '<recommended_plugins>\n[trimmed]\n</recommended_plugins>' }] }),
+    R('world_state', { full: true, state: { agents_md: {}, apps_instructions: true, collaboration_mode: { mode: 'default', model: 'gpt-5.6-sol', instructions: 'dfd53114f5f6f9f5fd7816370d0bf2847806246d' }, environments: { environments: { local: { cwd: '/home/u', status: 'available', shell: 'zsh' } }, current_date: '2026-08-24', timezone: 'UTC' } } }),
+    R('turn_context', turnCtx('auto-compact-1')),
+    R('response_item', { type: 'message', id: 'msg_01a0338c-d446-7800-ac02-ca0e7dced051', role: 'developer', content: [{ type: 'input_text', text: '<vibespace-reminder>[trimmed]</vibespace-reminder>' }] }),
+    R('event_msg', { type: 'thread_settings_applied', thread_settings: { model: 'gpt-5.6-sol', model_provider_id: 'openai', approval_policy: 'never', approvals_reviewer: 'user', permission_profile: { type: 'disabled' }, cwd: '/home/u', reasoning_effort: 'ultra', personality: 'pragmatic', collaboration_mode: COLLAB } }),
+    R('event_msg', { type: 'task_started', turn_id: TURN, started_at: 1787571262, model_context_window: 828400, collaboration_mode_kind: 'default' }),
+    R('turn_context', turnCtx(TURN)),
+    R('response_item', { type: 'message', id: 'msg_01a0338c-d500-7661-9b98-34472caf9c1a', role: 'user', content: [{ type: 'input_text', text: '你好' }], internal_chat_message_metadata_passthrough: { turn_id: TURN, create_time: 1787571262.720582 } }),
+    R('event_msg', { type: 'user_message', message: '你好', images: [], local_images: [], audio: [], local_audio: [], text_elements: [] }),
+    R('response_item', { type: 'message', id: 'msg_01a0338c-d502-7a11-8de6-a39523a740ed', role: 'developer', content: [{ type: 'input_text', text: '<vibespace-reminder>[trimmed]</vibespace-reminder>' }] }),
+    R('event_msg', { type: 'agent_message', message: '你好！很高兴见到你，我随时可以帮忙。', phase: 'final_answer', memory_citation: null }),
+    R('response_item', { type: 'message', id: 'msg_0809e1b195756599016a8c2c419a4087d0a3dbc4dedc9d851d', role: 'assistant', content: [{ type: 'output_text', text: '你好！很高兴见到你，我随时可以帮忙。' }], phase: 'final_answer', internal_chat_message_metadata_passthrough: { turn_id: TURN, create_time: 1787571263.046728 } }),
+    R('event_msg', { type: 'token_count', info: { total_token_usage: U16496, last_token_usage: U16496, model_context_window: 828400 }, rate_limits: { limit_id: 'codex', limit_name: null, primary: { used_percent: 0.0, window_minutes: 10080, resets_at: 1788175818 }, secondary: null, credits: { has_credits: false, unlimited: false, balance: '0' }, individual_limit: null, spend_control_reached: null, plan_type: 'pro', rate_limit_reached_type: null } }),
+    R('event_msg', { type: 'task_complete', turn_id: TURN, last_agent_message: '你好！很高兴见到你，我随时可以帮忙。', started_at: 1787571262, completed_at: 1787571266, duration_ms: 3754, time_to_first_token_ms: 3083 }),
+  ];
+  const ridsOf = (msgs) => [...new Set(msgs.map((m) => m.meta?.requestId).filter(Boolean))];
+  // bare replay of the file (what the corpus smoke below and the walker see)
+  const bare = new CodexMessageManager('t10').convertHistory(subagentHead);
+  const reply = bare.find((m) => m.role === 'assistant');
+  ok('sub-agent rollout: the FIRST session_meta (the file\'s own id) keys every meta — the parent\'s line-1 session_meta never overwrites it (was cx:<parent>:…)', reply?.meta?.requestId === `cx:${CHILD}:16496` && ridsOf(bare).every((r) => r.startsWith(`cx:${CHILD}:`)), JSON.stringify(ridsOf(bare)));
+  ok('…no token_usage_record in a 0.149 file ⇒ msgId null (never invented)', reply?.meta?.msgId === null && reply.meta.msgIdKind === null);
+  // the walker keys the same file by its NAME uuid — the join must hold
+  const { runUsageWalk } = require(REPO + '/src/usage-walker.js');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-cxsub-'));
+  const cxDir = path.join(home, '.codex', 'sessions', '2026', '08', '24');
+  fs.mkdirSync(cxDir, { recursive: true });
+  fs.writeFileSync(path.join(cxDir, `rollout-2026-08-24T04-36-10-${CHILD}.jsonl`), subagentHead.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  const evs = runUsageWalk({ home, codexSessionsDir: path.join(home, '.codex', 'sessions'), cursorFile: path.join(home, 'cursor.json') }).events.map((l) => JSON.parse(l));
+  ok('walker rid for the sub-agent file === normalizer requestId (cx:<child>:16496, sid = the filename uuid)', evs.length === 1 && evs[0].rid === `cx:${CHILD}:16496` && evs[0].rid === reply?.meta?.requestId, JSON.stringify(evs.map((e) => e.rid)));
+  fs.rmSync(home, { recursive: true, force: true });
+
+  // The READER's thread id is preferred when the manager is constructed with
+  // one: CodexSessionMessages prepends the fork ANCESTRY (parent session_meta
+  // first, oldest → newest) before the thread's own records, and a gap slab
+  // may hold no session_meta at all — only the constructor knows the file.
+  const pinned = new CodexMessageManager('t10b', { threadId: CHILD }).convertHistory([
+    R('session_meta', { session_id: PARENT, id: PARENT, timestamp: '2026-08-24T11:34:14.373Z', cwd: '/home/u', originator: 'claude-code-webui', cli_version: '0.149.1', source: 'vscode', model_provider: 'openai', base_instructions: BASE }), // prepended ancestry
+    ...subagentHead,
+  ]);
+  ok('constructed with the reader\'s thread id: a PREPENDED fork-ancestry session_meta, the own one, the parent-provenance one — none re-points the key', ridsOf(pinned).length === 1 && ridsOf(pinned)[0] === `cx:${CHILD}:16496`, JSON.stringify(ridsOf(pinned)));
+  const slab = new CodexMessageManager('t10c', { threadId: CHILD }).convertHistory(subagentHead.slice(9)); // gap slab: no session_meta in range
+  ok('a gap slab (no session_meta in the line range) still keys by the constructor thread id', ridsOf(slab)[0] === `cx:${CHILD}:16496`, JSON.stringify(ridsOf(slab)));
+  // precedence without a pin: first session_meta wins; wrapper_meta (the
+  // wrapper's OWN live record — a mid-life thread/fork re-points the file it
+  // writes) replaces; token_usage_record.thread_id only fills a void
+  const prec = new CodexMessageManager('t10d');
+  prec.processLive({ type: 'token_usage_record', payload: { thread_id: 'fill-only', response_id: 'resp_x', usage: { total_tokens: 1 } } }, false);
+  ok('token_usage_record.thread_id fills an EMPTY thread id', prec._threadId === 'fill-only');
+  const prec2 = new CodexMessageManager('t10e');
+  prec2.processLive({ type: 'session_meta', payload: { id: 'first' } }, false);
+  prec2.processLive({ type: 'session_meta', payload: { id: 'second' } }, false);
+  prec2.processLive({ type: 'token_usage_record', payload: { thread_id: 'third', response_id: 'resp_x', usage: { total_tokens: 1 } } }, false);
+  ok('first session_meta wins over later session_meta / token_usage_record thread ids', prec2._threadId === 'first');
+  prec2.processLive({ type: 'wrapper_meta', payload: { threadId: 'live' } }, false);
+  ok('wrapper_meta.threadId (the live wrapper\'s own record) replaces — the file currently being written', prec2._threadId === 'live');
+  const pinnedLive = new CodexMessageManager('t10f', { threadId: 'pin' });
+  pinnedLive.processLive({ type: 'wrapper_meta', payload: { threadId: 'other' } }, false);
+  pinnedLive.processLive({ type: 'session_meta', payload: { id: 'other2' } }, false);
+  ok('a constructor thread id is never replaced by any record', pinnedLive._threadId === 'pin');
+  // WIRING: every reader that has the thread id passes it (a normalizer fix
+  // with no consumer is dead — 2.355.0)
+  const nz = fs.readFileSync(REPO + '/src/normalizers.js', 'utf8');
+  ok('createMessageManager forwards opts to the normalizer ctor; rebuildHistory pins the session\'s backend thread id', /function createMessageManager\(backend, sessionId, opts\)[\s\S]{0,300}new Ctor\(sessionId, opts\)/.test(nz) && /createMessageManager\(session\.backend \|\| 'claude', sessionId, \{ threadId: session\.backendSessionId \|\| session\.claudeSessionId \|\| null \}\)/.test(nz));
+  const wsh = fs.readFileSync(REPO + '/src/ws-handler.js', 'utf8');
+  ok('the view-only (dead session) attach pins the thread id', /createMessageManager\(data\.backend \|\| 'claude', data\.sessionId \|\| 'view', \{ threadId: backendSessionId \}\)/.test(wsh));
+  const tsv = fs.readFileSync(REPO + '/src/transcript-service.js', 'utf8');
+  ok('transcript-service view() + gapSlab() pin the thread id (gap slabs carry no session_meta)', /createMessageManager\(r\.backend, 'api', \{ threadId: r\.sessionId \}\)/.test(tsv) && /createMessageManager\(r\.backend, 'gap', \{ threadId: r\.sessionId \}\)/.test(tsv));
+}
+
+// ── DUPLICATE token_count (verifier, real data: 394/8513 = 4.6% across 79
+// rollouts; re-measured 369/8490 with the bare-cum probe): codex re-emits an
+// IDENTICAL token_count (same last_token_usage, same cumulative total). The
+// walker dedups on rid (`rid === cur.lastRid`); the first cut of
+// _threadUsageMeta did not — it stamped the PREVIOUS response's key/numbers on
+// the NEXT response's messages and advanced _usageMark so they were never
+// re-stamped (45/1143 checkable messages wrong). Fixture = the real window
+// verbatim (rollout-2026-09-05T13-26-05-01a0733f…, lines 108–127; paths and
+// the reply text trimmed): token_count → item_completed → assistant message →
+// DUPLICATE token_count → token_usage_record → next token_count.
+{
+  const fs = require('node:fs'), os = require('node:os');
+  const TID = '01a0733f-f028-7462-9769-be3e761a4f19', TURN = '01a07340-04bc-7482-97fb-28ed6ed5a438';
+  const U = (i, c, o, r, t) => ({ input_tokens: i, cached_input_tokens: c, cache_write_input_tokens: 0, output_tokens: o, reasoning_output_tokens: r, total_tokens: t });
+  const RL = { limit_id: 'codex', limit_name: null, primary: { used_percent: 6.0, window_minutes: 10080, resets_at: 1789224035 }, secondary: null, credits: { has_credits: false, unlimited: false, balance: '0' }, individual_limit: null, spend_control_reached: null, plan_type: 'pro', rate_limit_reached_type: null };
+  const O = (ordinal, ts, type, payload) => ({ timestamp: ts, ordinal, type, payload });
+  const CUM_A = U(401568, 374016, 3567, 568, 405135), LAST_A = U(46596, 45952, 233, 21, 46829);
+  const CUM_B = U(448867, 420864, 3598, 568, 452465), LAST_B = U(47299, 46848, 31, 0, 47330);
+  const RESP_A = 'resp_0f70caa71c94cdcc016a9c7b9a0b5887d091c099492fce3b09', RESP_B = 'resp_0f70caa71c94cdcc016a9c7bacb49087d0a16d9758e8f9c292';
+  const window = [
+    O(0, '2026-09-05T20:26:10.474Z', 'session_meta', { session_id: TID, id: TID, timestamp: '2026-09-05T20:26:05.224Z', cwd: '/home/u/proj', originator: 'claude-code-webui', cli_version: '0.153.4', source: 'vscode', model_provider: 'openai' }),
+    O(10, '2026-09-05T20:26:10.502Z', 'turn_context', { turn_id: TURN, root_turn_id: TURN, cwd: '/home/u/proj', workspace_roots: ['/home/u/proj'], current_date: '2026-09-05', timezone: 'UTC', approval_policy: 'never', approvals_reviewer: 'user', sandbox_policy: { type: 'danger-full-access' }, permission_profile: { type: 'disabled' }, model: 'gpt-6-astra', comp_hash: '3000', personality: 'pragmatic', collaboration_mode: { mode: 'default', settings: { model: 'gpt-6-astra', reasoning_effort: 'ultra', developer_instructions: null } }, multi_agent_version: 'v2', realtime_active: false, effort: 'ultra', summary: 'auto' }),
+    O(112, '2026-09-05T20:29:22.048Z', 'response_item', { type: 'custom_tool_call', id: 'ctc_0f70caa71c94cdcc016a9c7b9c306887d0bb99e97501949ff3', status: 'completed', call_id: 'call_825hA5p3YQWaT3uDn2R4voLd', name: 'exec', input: 'text(await tools.exec_command({cmd:"vibespace-task progress \'…\'",max_output_tokens:1500}));' }),
+    O(113, '2026-09-05T20:29:22.082Z', 'token_usage_record', { thread_id: TID, turn_id: TURN, session_id: TID, root_turn_id: TURN, response_id: RESP_A, usage: LAST_A, turn_token_usage: CUM_A, thread_token_usage: CUM_A }),
+    O(114, '2026-09-05T20:29:22.266Z', 'event_msg', { type: 'item_completed', thread_id: TID, turn_id: TURN, item: { type: 'CommandExecution', id: 'exec-816df4b3-1751-490f-aa07-bbb19833b4ad', process_id: '65391', command: ['/usr/bin/zsh', '-lc', 'vibespace-task progress …'], cwd: 'file:///home/u/proj', parsed_cmd: [{ type: 'unknown', cmd: 'vibespace-task progress …' }], source: 'unified_exec_startup', status: 'completed', stdout: 'progress recorded (with detail)\n' }, started_at_ms: 1788640162082, completed_at_ms: 1788640162266 }),
+    O(116, '2026-09-05T20:29:22.312Z', 'response_item', { type: 'custom_tool_call_output', id: 'ctco_01a07342-f208-7171-b944-d5ea501a4c8e', call_id: 'call_825hA5p3YQWaT3uDn2R4voLd', output: [{ type: 'input_text', text: 'Script completed\nWall time 0.3 seconds\nOutput:\n' }, { type: 'input_text', text: '{"chunk_id":"44c163","wall_time_seconds":0.050621277,"exit_code":0,"original_token_count":63,"output":"progress recorded (with detail)\\n"}' }], internal_chat_message_metadata_passthrough: { turn_id: TURN, create_time: 1788640162.3128173 } }),
+    O(117, '2026-09-05T20:29:22.313Z', 'event_msg', { type: 'token_count', info: { total_token_usage: CUM_A, last_token_usage: LAST_A, model_context_window: 828400 }, rate_limits: RL }),
+    O(118, '2026-09-05T20:29:32.025Z', 'event_msg', { type: 'item_completed', thread_id: TID, turn_id: TURN, item: { type: 'AgentMessage', id: 'msg_0f70caa71c94cdcc016a9c7ba6fe1487d0ab25b5060ee21f5e', content: [{ type: 'Text', text: '空间方案已收敛到 5.45 米长的高顶 Van。' }], phase: 'commentary' }, started_at_ms: 1788640167014, completed_at_ms: 1788640172025 }),
+    O(119, '2026-09-05T20:29:32.028Z', 'response_item', { type: 'message', id: 'msg_0f70caa71c94cdcc016a9c7ba6fe1487d0ab25b5060ee21f5e', role: 'assistant', content: [{ type: 'output_text', text: '空间方案已收敛到 5.45 米长的高顶 Van。' }], phase: 'commentary', internal_chat_message_metadata_passthrough: { turn_id: TURN, create_time: 1788640162.65853, content_item_kinds: ['unknown'] } }),
+    O(120, '2026-09-05T20:29:32.028Z', 'event_msg', { type: 'token_count', info: { total_token_usage: CUM_A, last_token_usage: LAST_A, model_context_window: 828400 }, rate_limits: RL }), // ← the DUPLICATE
+    O(121, '2026-09-05T20:29:32.030Z', 'inter_agent_communication_metadata', { trigger_turn: false }),
+    O(122, '2026-09-05T20:29:32.030Z', 'response_item', { type: 'agent_message', id: 'amsg_01a07343-17fe-7883-9616-88ea3029f89e', author: '/root/interior_research', recipient: '/root', content: [{ type: 'input_text', text: 'Message Type: MESSAGE\nTask name: /root\nSender: /root/interior_research\nPayload:\n' }, { type: 'encrypted_content', encrypted_content: 'gAAAAABqnHujj9fbPqJeTp7u…' }], internal_chat_message_metadata_passthrough: { turn_id: TURN, create_time: 1788640172.0300913 } }),
+    O(123, '2026-09-05T20:29:35.246Z', 'response_item', { type: 'function_call', id: 'fc_0f70caa71c94cdcc016a9c7bae93f887d0af84c316cb7878d5', name: 'wait', arguments: '{"cell_id":"3","max_tokens":3000,"yield_time_ms":1000}', call_id: 'call_6G7f6gJNAxEwx4ft6dCxz9ex', internal_chat_message_metadata_passthrough: { turn_id: TURN, create_time: 1788640173.032581 } }),
+    O(124, '2026-09-05T20:29:35.303Z', 'token_usage_record', { thread_id: TID, turn_id: TURN, session_id: TID, root_turn_id: TURN, response_id: RESP_B, usage: LAST_B, turn_token_usage: CUM_B, thread_token_usage: CUM_B }),
+    O(125, '2026-09-05T20:29:35.320Z', 'response_item', { type: 'function_call_output', id: 'fco_01a07343-24d8-7b60-8c39-fad74db93027', call_id: 'call_6G7f6gJNAxEwx4ft6dCxz9ex', output: [{ type: 'input_text', text: 'Script completed\nWall time 0.0 seconds\nOutput:\n' }, { type: 'input_text', text: 'Warning: truncated output (original token count: 753317)\nTotal output lines: 1\n\n{"image_url":"data:image/png;base64,…"}' }], internal_chat_message_metadata_passthrough: { turn_id: TURN, create_time: 1788640175.3201 } }),
+    O(126, '2026-09-05T20:29:35.321Z', 'event_msg', { type: 'token_count', info: { total_token_usage: CUM_B, last_token_usage: LAST_B, model_context_window: 828400 }, rate_limits: RL }),
+  ];
+  const msgs = new CodexMessageManager('t11').convertHistory(window);
+  const exec = msgs.find((m) => m.toolCallId === 'call_825hA5p3YQWaT3uDn2R4voLd');
+  const reply = msgs.find((m) => m.role === 'assistant' && m.content[0]?.type === 'text');
+  const wait = msgs.find((m) => m.toolCallId === 'call_6G7f6gJNAxEwx4ft6dCxz9ex');
+  ok('the exec card (output landed before the first token_count) carries response A: cx:…:405135 / resp_A', exec?.meta?.requestId === `cx:${TID}:405135` && exec.meta.msgId === RESP_A && exec.meta.usage.output_tokens === 233, JSON.stringify(exec?.meta));
+  ok('the assistant reply created AFTER token_count A is NOT stamped by the DUPLICATE token_count — it gets response B: cx:…:452465, resp_B, input 47299−46848 fresh / 46848 cached / output 31', reply?.meta?.requestId === `cx:${TID}:452465` && reply.meta.msgId === RESP_B && reply.meta.usage.input_tokens === 47299 - 46848 && reply.meta.usage.cache_read_input_tokens === 46848 && reply.meta.usage.output_tokens === 31 && reply.meta.usage.reasoning_output_tokens === 0, JSON.stringify(reply?.meta));
+  ok('…and the wait card of the same response shares it (the duplicate advanced no mark)', wait?.meta?.requestId === `cx:${TID}:452465` && wait.meta.msgId === RESP_B);
+  ok('every stamped message keys to one of the TWO real responses (never a third phantom)', msgs.filter((m) => m.meta).every((m) => [405135, 452465].some((n) => m.meta.requestId === `cx:${TID}:${n}`)), JSON.stringify(msgs.map((m) => m.meta?.requestId)));
+  // walker on the same window: two events, deduped identically
+  const { runUsageWalk } = require(REPO + '/src/usage-walker.js');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-cxdup-'));
+  const cxDir = path.join(home, '.codex', 'sessions', '2026', '09', '05');
+  fs.mkdirSync(cxDir, { recursive: true });
+  fs.writeFileSync(path.join(cxDir, `rollout-2026-09-05T13-26-05-${TID}.jsonl`), window.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  const evs = runUsageWalk({ home, codexSessionsDir: path.join(home, '.codex', 'sessions'), cursorFile: path.join(home, 'cursor.json') }).events.map((l) => JSON.parse(l));
+  ok('walker emits exactly two events for the window (the duplicate deduped on rid) with the same rids + mids the normalizer stamped', evs.length === 2 && evs[0].rid === exec?.meta?.requestId && evs[0].mid === RESP_A && evs[1].rid === reply?.meta?.requestId && evs[1].mid === RESP_B && evs[1].i === reply.meta.usage.input_tokens && evs[1].o === 31, JSON.stringify(evs.map((e) => [e.rid, e.mid, e.i, e.o])));
+  fs.rmSync(home, { recursive: true, force: true });
+  // live path: the same duplicate through processLive neither stamps nor advances
+  const live = new CodexMessageManager('t11b'); const ops = []; live.onOp((o) => ops.push(o));
+  for (const r of window.slice(0, 10)) live.processLive(r); // through the duplicate (ordinal 120)
+  const liveReply = live.messages.find((m) => m.role === 'assistant' && m.content[0]?.type === 'text');
+  ok('live: after the duplicate the reply is still unstamped (no phantom edit op)', liveReply && liveReply.meta == null && !ops.some((o) => o.op === 'edit' && o.id === liveReply.id && o.fields?.meta));
+  for (const r of window.slice(10)) live.processLive(r);
+  ok('live: the NEXT real token_count stamps it with response B and emits the edit', liveReply.meta?.requestId === `cx:${TID}:452465` && ops.some((o) => o.op === 'edit' && o.id === liveReply.id && o.fields?.meta?.msgId === RESP_B));
+}
+
+// ── rid-info model/effort CONSUMER (verifier item 3): the route returns the
+// ledger's served model + codex effort; the popup falls back to them when the
+// record's own meta has none (rows appended only when the sync rows lacked them).
+{
+  const cv = require('node:fs').readFileSync(REPO + '/src/lib/chat-view.js', 'utf8');
+  ok('popup appends Model / Effort from the ledger event when meta.model / meta.effort are empty', /if \(!meta\.model && r\.model\) addAsyncRow\(t\('Model'\), r\.model\)/.test(cv) && /if \(!meta\.effort && r\.effort\) addAsyncRow\(t\('Effort'\), r\.effort\)/.test(cv));
+}
+
+// ── CORPUS SMOKE (verifier item 4): when this machine has ~/.codex/sessions,
+// drive the normalizer over up to 30 local rollouts and demand (a) every
+// meta.requestId starts with `cx:<that file's uuid>:` and (b) the set of
+// ledger keys the normalizer MINTS equals the walker's rid set for the same
+// file (and the mids agree) — minted, not merely stamped: a CARDLESS response
+// (back-to-back token_counts with no item between them; an agent_message
+// event with no response_item twin — 215/835 responses in one real sub-agent
+// rollout) has no message to carry its key, yet the ledger counts it.
+// Skipped with a printed reason where the directory is absent (CI).
+{
+  const fs = require('node:fs'), os = require('node:os');
+  const sessionsDir = path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'sessions');
+  let rollouts = [];
+  try { rollouts = fs.readdirSync(sessionsDir, { recursive: true }).map(String).filter((f) => /rollout-.*\.jsonl$/.test(f)); } catch { }
+  if (!rollouts.length) {
+    console.log(`  – corpus smoke SKIPPED: no codex rollouts under ${sessionsDir} on this machine (CI runners have none)`);
+  } else {
+    const MAX_FILES = 30, MAX_BYTES = 24 * 1024 * 1024;
+    const picked = rollouts.map((rel) => { const fp = path.join(sessionsDir, rel); let st; try { st = fs.statSync(fp); } catch { return null; } return st && st.isFile() && st.size <= MAX_BYTES ? { rel, fp, size: st.size, mtime: st.mtimeMs } : null; })
+      .filter(Boolean).sort((a, b) => b.mtime - a.mtime).slice(0, MAX_FILES);
+    const { runUsageWalk } = require(REPO + '/src/usage-walker.js');
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-cxcorpus-'));
+    const cxDir = path.join(home, '.codex', 'sessions');
+    fs.mkdirSync(cxDir, { recursive: true });
+    for (const p of picked) fs.symlinkSync(p.fp, path.join(cxDir, path.basename(p.rel))); // the walker keys by the file NAME uuid; a symlink keeps it and the bytes
+    const bySid = new Map();
+    for (const l of runUsageWalk({ home, codexSessionsDir: cxDir, cursorFile: path.join(home, 'cursor.json') }).events) {
+      const e = JSON.parse(l);
+      if (!bySid.has(e.sid)) bySid.set(e.sid, new Map());
+      bySid.get(e.sid).set(e.rid, e.mid || null);
+    }
+    fs.rmSync(home, { recursive: true, force: true });
+    let files = 0, msgsSeen = 0, minted = 0, cardless = 0, prefixBad = [], setBad = [], midBad = [], stampedBad = [];
+    for (const p of picked) {
+      const uuid = /-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i.exec(p.rel)[1].toLowerCase();
+      const records = [];
+      for (const line of fs.readFileSync(p.fp, 'utf8').split('\n')) { if (!line) continue; try { records.push(JSON.parse(line)); } catch { } }
+      const mm = new CodexMessageManager('corpus'); // bare: no pinned id — the file's own first session_meta must carry it
+      const msgs = mm.convertHistory(records);
+      files++;
+      const stamped = msgs.filter((m) => m.meta?.requestId);
+      msgsSeen += stamped.length;
+      const wrong = stamped.filter((m) => !m.meta.requestId.startsWith(`cx:${uuid}:`));
+      if (wrong.length) prefixBad.push(`${path.basename(p.rel).slice(0, 44)}: ${wrong.length}/${stamped.length} keyed ${wrong[0].meta.requestId.slice(0, 48)}`);
+      const keys = mm._ledgerKeys; minted += keys.length; cardless += keys.filter((k) => !k.n).length;
+      const normSet = new Set(keys.map((k) => k.rid));
+      const walkMap = bySid.get(uuid) || new Map();
+      const missing = [...walkMap.keys()].filter((r) => !normSet.has(r)), extra = [...normSet].filter((r) => !walkMap.has(r));
+      if (missing.length || extra.length || normSet.size !== keys.length) setBad.push(`${path.basename(p.rel).slice(0, 44)}: walker-only ${missing.length} (${missing.slice(0, 2).join(',')}) normalizer-only ${extra.length} (${extra.slice(0, 2).join(',')}) minted ${keys.length} distinct ${normSet.size}`);
+      const notMinted = stamped.filter((m) => !normSet.has(m.meta.requestId));
+      if (notMinted.length) stampedBad.push(`${path.basename(p.rel).slice(0, 44)}: ${notMinted.length} stamped keys never minted`);
+      const midMismatch = keys.filter((k) => walkMap.has(k.rid) && (walkMap.get(k.rid) || null) !== (k.mid || null));
+      if (midMismatch.length) midBad.push(`${path.basename(p.rel).slice(0, 44)}: ${midMismatch.length} mids differ (${midMismatch[0].rid.slice(-8)}: ${walkMap.get(midMismatch[0].rid)} vs ${midMismatch[0].mid})`);
+    }
+    console.log(`  · corpus smoke: ${files} local rollouts (≤${MAX_BYTES / 1048576}MB each, newest first), ${minted} ledger keys minted (${cardless} cardless), ${msgsSeen} stamped messages, ${[...bySid.values()].reduce((n, m) => n + m.size, 0)} walker events`);
+    ok(`corpus: every meta.requestId starts with cx:<the file's own uuid>: (${files} rollouts)`, files > 0 && prefixBad.length === 0, prefixBad.slice(0, 5).join(' | '));
+    ok('corpus: the set of ledger keys the normalizer MINTS EQUALS the walker\'s rid set for every file, each minted once (dedup + heartbeat skip + thread id all agree)', files > 0 && setBad.length === 0, setBad.slice(0, 5).join(' | '));
+    ok('corpus: every stamped message key is a minted key', files > 0 && stampedBad.length === 0, stampedBad.slice(0, 5).join(' | '));
+    ok('corpus: the response id (msgId) matches the walker\'s mid on every minted key', files > 0 && midBad.length === 0, midBad.slice(0, 5).join(' | '));
+  }
+}
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);
 process.exit(fail ? 1 : 0);

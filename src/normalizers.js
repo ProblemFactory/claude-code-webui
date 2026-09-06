@@ -10,10 +10,16 @@ const { MessageManager } = require('./message-manager');
 const NORMALIZERS = Object.fromEntries(Object.values(HARNESSES).map((h) => [h.id, h.Normalizer
   || MessageManager])); // terminal-only harnesses (shell) get the inert claude shape — they have no chat mode
 
-function createMessageManager(backend, sessionId) {
+// opts (optional, harness-neutral): { threadId } — the READER's conversation
+// id for the transcript it opened. The codex normalizer keys its per-message
+// ledger meta by it (`cx:<thread>:<cumulative>`); a merged codex read carries
+// fork-ancestry / parent-provenance session_metas that must never re-point
+// that key, and a gap slab carries no session_meta at all. Normalizers that
+// have no use for it ignore the extra argument.
+function createMessageManager(backend, sessionId, opts) {
   const Ctor = NORMALIZERS[backend || 'claude'];
   if (!Ctor) throw new Error(`no message normalizer registered for backend "${backend}" — add it to src/normalizers.js NORMALIZERS`);
-  return new Ctor(sessionId);
+  return new Ctor(sessionId, opts);
 }
 
 /**
@@ -68,7 +74,7 @@ let rebuildChain = Promise.resolve();
 function rebuildHistory(session, sessionId, records, { budgetMs, onProgress } = {}) {
   if (session._rebuildPromise) return session._rebuildPromise;
   const opHandlers = [...(session._normalizer?.listeners || [])];
-  const mm = createMessageManager(session.backend || 'claude', sessionId);
+  const mm = createMessageManager(session.backend || 'claude', sessionId, { threadId: session.backendSessionId || session.claudeSessionId || null }); // pin the rendered conversation's id (codex ledger key; null before a fresh thread is adopted)
   for (const h of opHandlers) mm.onOp(h);
   session._normalizer = mm;
   session._normEpoch = Date.now();

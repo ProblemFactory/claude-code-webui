@@ -142,7 +142,7 @@ function createTranscriptService({ activeSessions, createSessionMessages, hosts 
     }
     const sm = createSessionMessages(sessionShape(r, session));
     if (typeof sm.prepare === 'function') await sm.prepare(); // S9: a serve-backed reader (opencode stopped conversation) loads here — LOUD on failure, a user opened it
-    const mm = createMessageManager(r.backend, 'api');
+    const mm = createMessageManager(r.backend, 'api', { threadId: r.sessionId }); // the rendered conversation's id (codex ledger key)
     await mm.convertHistoryAsync(sm.raw());
     return { mm, session };
   }
@@ -259,7 +259,7 @@ function createTranscriptService({ activeSessions, createSessionMessages, hosts 
     try { records = await readJsonlLineRangeAsync(fp, fromLine, toLine); } catch { }
     records = records.filter((rec) => !isSubagentMessage(rec));
     const r = norm(ref);
-    const mm = createMessageManager(r.backend, 'gap');
+    const mm = createMessageManager(r.backend, 'gap', { threadId: r.sessionId }); // a slab carries no session_meta — only the reader knows the file
     mm.convertHistory(records);
     return mm.tail(mm.total);
   }
