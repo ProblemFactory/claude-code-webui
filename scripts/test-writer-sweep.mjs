@@ -81,12 +81,37 @@ if (fs.existsSync('/proc/self')) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-sweep-'));
   const jsonl = path.join(dir, 'rid-live.jsonl');
   fs.writeFileSync(jsonl, '{}\n');
-  const fd = fs.openSync(jsonl, 'r'); // THIS process now holds it open
-  const { execFileSync } = await import('node:child_process');
-  // ps -o args= for our pid contains 'node', not 'claude' → must NOT be killed
-  const out = execFileSync('sh', ['-c', writerSweepScript('rid-live', shq)], { encoding: 'utf8', timeout: 20000, env: { ...process.env, HOME: dir } });
-  fs.closeSync(fd);
-  ok(parseSwept(out).length === 0, 'a NON-claude holder of the transcript is never killed (cmdline guard)');
+  const { execFileSync, spawn } = await import('node:child_process');
+  // The holder is a SEPARATE process with a neutral argv, never this one: the
+  // script's guard substring-matches 'claude' anywhere in `ps -o args=` (the
+  // real CLI runs as `node …/claude/cli.js`, so the looseness is load-bearing),
+  // and this suite's own argv is its absolute path — inside a git worktree
+  // under ~/.claude/worktrees/ (the worktree-only-smokes law puts EVERY agent
+  // there) the suite matched its own guard and SIGTERMed itself before the
+  // assertion ran: exit 143, gate red, on code that is completely fine.
+  const holderSrc = (readyPath) => `require('fs').openSync(${JSON.stringify(jsonl)}, 'r'); require('fs').writeFileSync(${JSON.stringify(readyPath)}, '1'); setTimeout(() => {}, 60000);`;
+  const neutralReady = path.join(dir, 'ready-neutral');
+  const neutral = spawn(process.execPath, ['-e', holderSrc(neutralReady)], { cwd: os.tmpdir(), stdio: 'ignore' });
+  // POSITIVE CONTROL for the same run: a holder whose argv DOES look like the
+  // CLI must be swept — without it, "never killed" would also pass if the
+  // fd-scan leg found no holder at all.
+  const claudeReady = path.join(dir, 'ready-claude');
+  const claudeScript = path.join(dir, 'claude-cli.js');
+  fs.writeFileSync(claudeScript, holderSrc(claudeReady));
+  const fake = spawn(process.execPath, [claudeScript], { cwd: os.tmpdir(), stdio: 'ignore' });
+  const t0 = Date.now();
+  while ((!fs.existsSync(neutralReady) || !fs.existsSync(claudeReady)) && Date.now() - t0 < 5000) await new Promise((r) => setTimeout(r, 20));
+  // 90s, not the production 20s budget: this leg walks EVERY /proc entry's fd
+  // table, which is ~24s on the shared dev box (2300 processes) and seconds on
+  // a quiet one — the assertion is about the script's BEHAVIOUR, and a
+  // load-dependent timeout would make the release gate a coin flip.
+  const out = execFileSync('sh', ['-c', writerSweepScript('rid-live', shq)], { encoding: 'utf8', timeout: 90000, env: { ...process.env, HOME: dir } });
+  await new Promise((r) => setTimeout(r, 200));
+  const alive = (p) => { try { process.kill(p, 0); return true; } catch { return false; } };
+  const swept = parseSwept(out);
+  ok(fs.existsSync(claudeReady) && swept.map(Number).includes(fake.pid) && !alive(fake.pid), 'the real script\'s fd-scan leg finds a claude-looking holder and SIGTERMs it (positive control)', { swept, pid: fake.pid });
+  ok(fs.existsSync(neutralReady) && !swept.map(Number).includes(neutral.pid) && alive(neutral.pid), 'a NON-claude holder of the transcript is never killed (cmdline guard) — and it is still alive', { swept, pid: neutral.pid });
+  for (const h of [neutral, fake]) { try { h.kill('SIGKILL'); } catch {} }
   fs.rmSync(dir, { recursive: true, force: true });
 } else { console.log('  · /proc absent — skipping the live fd-scan leg'); }
 

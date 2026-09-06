@@ -37,9 +37,13 @@
 //
 // STDIN VERBS: chat-input → session/prompt (queued while a prompt runs — ACP has
 // no queue verb); interrupt → session/cancel (+ every pending request_permission
-// answered 'cancelled', per spec); permission-response → the pending
+// answered 'cancelled', per spec) AND the local queue is always dropped (a
+// queued peer message goes back to the delivery ladder as peer_result ok:false);
+// a prompt cancelled while it was still awaiting its context prefix is never
+// dispatched (prompt_end 'cancelled'); permission-response → the pending
 // request_permission reply (explicit optionId, else the option whose kind
-// matches approved/alwaysAllow); set-model/set-effort → set_config_option on the
+// matches approved/alwaysAllow — a Deny with no reject-kind option FAILS CLOSED
+// to {outcome:'cancelled'}, never an allow option); set-model/set-effort → set_config_option on the
 // 'model'/'thought_level' category; set-mode/set-permission-mode → 'mode'
 // category, else session/set_mode; peer-message → a prompt prefixed
 // 'Message from <name>:'; _frame_file; _stdin_ack per line.
@@ -287,32 +291,46 @@ function drainPromptQueue() {
   runPrompt(next.blocks, next.opts).catch((e) => log('queued prompt failed: ' + e.message));
 }
 
+function endPrompt(mine, stopReason, error, opts) {
+  record('prompt_end', { promptId: mine.id, stopReason, error: error || null });
+  if (activePrompt === mine) activePrompt = null;
+  meta.streaming = false; meta.activePromptId = null; scheduleMeta();
+  if (nudgeTurnActive && opts.nudge) nudgeTurnActive = false;
+  else if (stopReason === 'end_turn' && !opts.nudge && !nudgeTurnActive) maybeStopNudge().catch(() => {});
+  drainPromptQueue();
+}
+
 async function runPrompt(blocks, opts = {}) {
   if (!meta.sessionId) throw new Error('no ACP session yet');
   if (activePrompt) { promptQueue.push({ blocks, opts }); if (!opts.silentQueue) notice('info', 'Queued — runs after the current turn', 'queued'); return; }
   const promptId = `p${++promptSeq}-${process.pid}`;
-  activePrompt = { id: promptId, cancelled: false };
+  const mine = { id: promptId, cancelled: false, dispatched: false };
+  activePrompt = mine;
   meta.streaming = true; meta.activePromptId = promptId; scheduleMeta();
   const prompt = [...blocks];
   if (!opts.nudge && !opts.peer) {
     const ctx = await fetchContextPrefix();
     if (ctx) prompt.unshift({ type: 'text', text: '<vibespace-context>\n' + ctx + '\n</vibespace-context>' });
   }
+  // The turn is CLAIMED synchronously (so a second message queues) but the
+  // context prefix above is a real HTTP round trip: a Stop landing inside it
+  // sees activePrompt and flips `cancelled` — dispatching afterwards put the
+  // cancel BEFORE the prompt on the wire, and an agent that has not started the
+  // turn ignores (or worse, LATCHES) that cancel, so Stop silently ran the whole
+  // turn. Re-check after EVERY await before dispatching; a cancelled prompt ends
+  // as 'cancelled' and never reaches the agent at all.
+  if (mine.cancelled) { endPrompt(mine, 'cancelled', null, opts); return; }
   record('prompt_start', { promptId, blocks: prompt.length });
   let stopReason = 'end_turn', error = null;
   try {
+    mine.dispatched = true;
     const r = await request('session/prompt', { sessionId: meta.sessionId, prompt }, 0);
     stopReason = r?.stopReason || 'end_turn';
   } catch (e) {
-    stopReason = activePrompt.cancelled ? 'cancelled' : 'error';
+    stopReason = mine.cancelled ? 'cancelled' : 'error';
     error = { message: e.message };
   }
-  record('prompt_end', { promptId, stopReason, error });
-  activePrompt = null;
-  meta.streaming = false; meta.activePromptId = null; scheduleMeta();
-  if (nudgeTurnActive && opts.nudge) nudgeTurnActive = false;
-  else if (stopReason === 'end_turn' && !opts.nudge && !nudgeTurnActive) maybeStopNudge().catch(() => {});
-  drainPromptQueue();
+  endPrompt(mine, stopReason, error, opts);
 }
 
 // ── stdin verbs ──
@@ -373,7 +391,15 @@ function resolvePermission(msg) {
       const want = msg.approved ? (msg.alwaysAllow ? ['allow_always', 'allow_once'] : ['allow_once', 'allow_always']) : ['reject_once', 'reject_always'];
       for (const k of want) { opt = options.find((o) => o && o.kind === k); if (opt) break; }
     }
-    if (!opt) opt = options.find((o) => o && (msg.approved ? /^allow/.test(o.kind || '') : /^reject/.test(o.kind || ''))) || (msg.approved ? options[0] : options[options.length - 1]) || null;
+    if (!opt) opt = options.find((o) => o && (msg.approved ? /^allow/.test(o.kind || '') : /^reject/.test(o.kind || ''))) || null;
+    // FAIL CLOSED on a rejection. The old last-resort `options[options.length-1]`
+    // picked the LAST option for a Deny — on an agent that offers only
+    // [allow_once, allow_always] that is allow_always, so pressing Deny ran the
+    // tool AND stood the permission down for the rest of the session. A Deny we
+    // cannot express as a reject option is answered {outcome:'cancelled'} (ACP's
+    // own no-answer outcome) and SAYS so; approvals keep the positional fallback.
+    if (!opt && msg.approved) opt = options[0] || null;
+    if (!opt && !msg.approved) notice('info', `This agent offered no "reject" option for that permission (${options.map((o) => o?.kind || '?').join(', ') || 'no options'}) — your Deny was answered with "cancelled": the tool did not run, but the agent may end the turn instead of continuing.`, 'deny-cancelled');
     outcome = opt ? { outcome: 'selected', optionId: opt.optionId } : { outcome: 'cancelled' };
   }
   reply(p.id, { outcome });
@@ -407,15 +433,36 @@ async function handleInput(msg) {
       return;
     }
     case 'interrupt': {
+      // Stop means stop: ALWAYS drop what the user queued behind the running
+      // turn. ACP has no queue verb so the queue is OURS — clearing it only in
+      // the "nothing is running" branch meant the cancelled turn's own
+      // drainPromptQueue() dispatched the queued prompt the instant Stop
+      // landed, i.e. the agent kept working after Stop.
+      const dropped = promptQueue.splice(0, promptQueue.length);
       if (activePrompt) {
         activePrompt.cancelled = true;
-        notify('session/cancel', { sessionId: meta.sessionId });
-        cancelPendingPermissions('cancelled');
-        log('session/cancel sent');
-      } else if (promptQueue.length) {
-        promptQueue.length = 0;
-        notice('info', 'Queued messages dropped', 'queue-cleared');
+        // Only cancel a turn the agent KNOWS about: a session/cancel for a
+        // prompt we never dispatched is at best a no-op and at worst latched by
+        // the agent, cancelling the NEXT turn instead (the mock agent does
+        // exactly that). runPrompt drops the undispatched prompt itself.
+        if (activePrompt.dispatched) {
+          notify('session/cancel', { sessionId: meta.sessionId });
+          log('session/cancel sent');
+        } else log('interrupt before dispatch — the prompt is dropped, no session/cancel sent');
       }
+      // Always: a Stop leaves no question hanging (per spec every pending
+      // request_permission is answered 'cancelled'), including one left over
+      // from a turn the agent abandoned.
+      cancelPendingPermissions('cancelled');
+      // A queued PEER message was already reported delivered (peer_result
+      // ok/queued) — dropping it silently would lose a promised message, so it
+      // goes back to the delivery ladder's stash (the acp-events consumer
+      // re-stashes on ok:false).
+      for (const q of dropped) {
+        if (q.opts?.peer && q.opts.peerText) record('peer_result', { ok: false, reason: 'dropped by Stop before it was delivered', text: q.opts.peerText, fromName: q.opts.peerFrom || null });
+      }
+      if (dropped.length) notice('info', `Stop also dropped ${dropped.length} queued message${dropped.length === 1 ? '' : 's'} — send ${dropped.length === 1 ? 'it' : 'them'} again to run ${dropped.length === 1 ? 'it' : 'them'}.`, 'queue-cleared');
+      log(`interrupt: active=${!!activePrompt} dropped=${dropped.length}`);
       return;
     }
     case 'permission-response': resolvePermission(msg); return;
@@ -432,7 +479,9 @@ async function handleInput(msg) {
       try {
         record('user', { msgId: '', content: [{ type: 'text', text }], peer: { name: fromName, body: cardText } });
         const queued = !!activePrompt;
-        await runPrompt([{ type: 'text', text: body }], { peer: true, silentQueue: true });
+        // peerText/peerFrom ride the queue entry so a Stop that drops it can
+        // hand the message back to the delivery ladder instead of losing it.
+        await runPrompt([{ type: 'text', text: body }], { peer: true, silentQueue: true, peerText: text, peerFrom: fromName });
         record('peer_result', { ok: true, mode: queued ? 'queued' : 'turn' });
       } catch (e) {
         record('peer_result', { ok: false, reason: e.message, text, fromName });
@@ -531,7 +580,13 @@ function startChild() {
     for (const [, p] of pendingRequests) p.reject(new Error(`agent exited (${signal || code})`));
     pendingRequests.clear();
     if (!shuttingDown && activePrompt) record('prompt_end', { promptId: activePrompt.id, stopReason: 'error', error: { message: `agent exited (${signal || code})` } });
-    if (!shuttingDown && code !== 0 && !markReadyDone) notice('error', `The agent exited before the session was ready (code ${signal || code}) — check that "${cmd}" runs and is logged in (see acp-wrapper.log).`, 'agent-exited');
+    // ANY exit before the session is ready is a boot failure — including exit 0.
+    // finalizeExit() calls process.exit() synchronously, so boot()'s catch (the
+    // 'boot-failed' notice) never runs from here: gating this on code !== 0 left
+    // an agent that quits 0 before answering initialize (a CLI that prints usage
+    // and exits, an unauthenticated agent that gives up quietly) with ZERO
+    // records — a blank chat window that never says why.
+    if (!shuttingDown && !markReadyDone) notice('error', `The agent exited before the session was ready (${signal ? `signal ${signal}` : `exit code ${code}`}) — no ACP session was created. Check that "${cmd}" runs in ACP mode and is logged in (see acp-wrapper.log).`, 'agent-exited');
     finalizeExit(code ?? 0);
   });
 }

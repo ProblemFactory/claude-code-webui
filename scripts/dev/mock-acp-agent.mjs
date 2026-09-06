@@ -8,7 +8,8 @@
 //   session/load          → replays a stored conversation as user/agent chunks, then result
 //   session/prompt        → agent_message_chunk ×2 → agent_thought_chunk → plan → tool_call
 //                           (kind from the prompt text: "edit"→edit, "run"→execute, else read)
-//                           → session/request_permission (allow_once/allow_always/reject_once)
+//                           → session/request_permission (allow_once/allow_always/reject_once;
+//                             a prompt containing "noreject" offers ONLY the two allow options)
 //                           → tool_call_update in_progress → completed (content) → agent text → end_turn
 //                           a prompt containing "fs" first calls fs/read_text_file (must be refused)
 //   session/cancel        → the running prompt resolves with stopReason 'cancelled'
@@ -62,10 +63,16 @@ async function runPrompt(id, params) {
   const callId = 'call-' + id;
   update(sid, { sessionUpdate: 'tool_call', toolCallId: callId, title: kind === 'execute' ? 'Running ls' : kind === 'edit' ? 'Editing README.md' : 'Reading README.md', kind, status: 'pending', rawInput: kind === 'execute' ? { command: 'ls -la' } : { path: '/repo/README.md' }, locations: [{ path: '/repo/README.md' }] });
   if (/\bslow\b/.test(text)) { await sleep(3000); if (cancelledAt()) { update(sid, { sessionUpdate: 'tool_call_update', toolCallId: callId, status: 'failed' }); return finish('cancelled'); } }
+  // "noreject" = an agent that offers ONLY allow options (real agents do: the
+  // spec's PermissionOption list is the agent's choice) — the client must never
+  // answer a Deny by selecting one of these.
+  const options = /\bnoreject\b/.test(text)
+    ? [{ optionId: 'once', name: 'Allow once', kind: 'allow_once' }, { optionId: 'always', name: 'Always allow', kind: 'allow_always' }]
+    : [{ optionId: 'once', name: 'Allow once', kind: 'allow_once' }, { optionId: 'always', name: 'Always allow', kind: 'allow_always' }, { optionId: 'no', name: 'Reject', kind: 'reject_once' }];
   const perm = await ask('session/request_permission', {
     sessionId: sid,
     toolCall: { toolCallId: callId, title: 'Permission to proceed', kind, status: 'pending' },
-    options: [{ optionId: 'once', name: 'Allow once', kind: 'allow_once' }, { optionId: 'always', name: 'Always allow', kind: 'allow_always' }, { optionId: 'no', name: 'Reject', kind: 'reject_once' }],
+    options,
   });
   const outcome = perm?.result?.outcome;
   if (cancelledAt() || outcome?.outcome === 'cancelled') { update(sid, { sessionUpdate: 'tool_call_update', toolCallId: callId, status: 'failed' }); return finish('cancelled'); }

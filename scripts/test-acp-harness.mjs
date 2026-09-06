@@ -10,6 +10,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
@@ -184,6 +185,84 @@ console.log('— resume (session/load replay)');
   } finally { await w.stop(); }
 }
 
+console.log('— Stop means stop (the cancel race + the local queue)');
+{
+  // The prompt-context round trip is a REAL http call the wrapper awaits AFTER
+  // it has already claimed the turn. This server holds the response until the
+  // test releases it, so the "Stop lands mid-await" window is deterministic.
+  let release = null, hits = 0;
+  const ctxSrv = http.createServer((req, res) => { hits++; release = () => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ context: 'task ctx' })); }; });
+  await new Promise((r) => ctxSrv.listen(0, '127.0.0.1', r));
+  const w = startWrapper({ env: { VIBESPACE_API: `http://127.0.0.1:${ctxSrv.address().port}`, VIBESPACE_SESSION_TOKEN: 'vsst_test' } });
+  try {
+    await w.waitFor(() => w.find('session'), 10000, 'session record');
+    w.send({ type: 'chat-input', text: 'please read the file', msgId: 'c1' });
+    await w.waitFor(() => hits === 1, 5000, 'prompt-context request');   // the turn is claimed, the await is open
+    w.send({ type: 'interrupt' });                                        // ← Stop, mid-await
+    await w.waitFor(() => w.find('prompt_end'), 5000, 'prompt_end');
+    release();
+    await sleep(400);
+    ok('Stop during the context round trip: NOTHING reaches the agent — no session/prompt, and no session/cancel for a turn it never saw (a latched cancel would eat the NEXT turn)', !w.mockCalls().some((c) => c.method === 'session/prompt' || c.method === 'session/cancel'), w.mockCalls().map((c) => c.method));
+    ok('…and the turn ends honestly: prompt_end cancelled, no prompt_start, streaming cleared in the sidecar', w.findAll('prompt_end').length === 1 && w.find('prompt_end').stopReason === 'cancelled' && !w.find('prompt_start') && w.metaJson()?.streaming === false && w.metaJson()?.activePromptId === null, { ends: w.findAll('prompt_end'), meta: w.metaJson() });
+    // POSITIVE CONTROL: the same path with no Stop still prefixes the context
+    hits = 0;
+    w.send({ type: 'chat-input', text: 'please read the file', msgId: 'c2' });
+    await w.waitFor(() => hits === 1, 5000, 'second prompt-context request');
+    release();
+    const ps = await w.waitFor(() => w.find('prompt_start'), 5000, 'prompt_start');
+    const call = w.mockCalls().find((c) => c.method === 'session/prompt');
+    ok('positive control: without a Stop the same prompt goes out WITH the <vibespace-context> prefix', !!call && call.params.prompt.length === 2 && /<vibespace-context>\ntask ctx/.test(call.params.prompt[0].text) && ps.blocks === 2, call?.params?.prompt?.map((b) => b.text?.slice(0, 30)));
+    const perm = await w.waitFor(() => w.find('permission_request'), 5000, 'permission_request');
+    w.send({ type: 'permission-response', requestId: perm.requestId, approved: true, optionId: 'once' });
+    await w.waitFor(() => w.findAll('prompt_end').length === 2, 5000, 'second prompt_end');
+  } finally { await w.stop(); ctxSrv.close(); }
+}
+{
+  const w = startWrapper();
+  try {
+    await w.waitFor(() => w.find('session'), 10000, 'session record');
+    w.send({ type: 'chat-input', text: 'slow run it', msgId: 'q1' });     // the mock holds this turn 3s
+    await w.waitFor(() => w.find('prompt_start'), 5000, 'prompt_start');
+    w.send({ type: 'chat-input', text: 'please read the file', msgId: 'q2' });
+    await w.waitFor(() => w.find('notice', (r) => r.noticeKind === 'queued'), 3000, 'queued notice');
+    w.send({ type: 'peer-message', text: 'ping from B', fromName: 'B' });  // queues too (silently)
+    await w.waitFor(() => w.find('peer_result', (r) => r.mode === 'queued'), 3000, 'queued peer_result');
+    w.send({ type: 'interrupt' });
+    await w.waitFor(() => w.find('prompt_end'), 8000, 'prompt_end');
+    await sleep(1500); // long enough for a drained queue prompt to reach the agent
+    ok('Stop with messages queued behind the turn: the queue is DROPPED — one prompt on the wire, one prompt_start, one cancelled prompt_end', w.mockCalls().filter((c) => c.method === 'session/prompt').length === 1 && w.findAll('prompt_start').length === 1 && w.findAll('prompt_end').length === 1 && w.find('prompt_end').stopReason === 'cancelled', { wire: w.mockCalls().map((c) => c.method), starts: w.findAll('prompt_start').length, ends: w.findAll('prompt_end').map((e) => e.stopReason) });
+    const cleared = w.find('notice', (r) => r.noticeKind === 'queue-cleared');
+    ok('…the drop is LOUD and counts what was dropped (never a silent discard)', !!cleared && /dropped 2 queued messages/.test(cleared.text), cleared);
+    const pr = w.findAll('peer_result');
+    ok('…a dropped PEER message goes back to the delivery ladder (peer_result ok:false with its text — the consumer re-stashes it)', pr.length === 2 && pr[1].ok === false && pr[1].text === 'ping from B' && pr[1].fromName === 'B' && /Stop/.test(pr[1].reason || ''), pr);
+    ok('…and the session stays usable: streaming cleared, no pending permission left', w.metaJson()?.streaming === false && Object.keys(w.metaJson()?.pendingRequests || {}).length === 0, w.metaJson());
+  } finally { await w.stop(); }
+}
+
+console.log('— a Deny never selects an ALLOW option (fail closed)');
+{
+  const w = startWrapper();
+  try {
+    await w.waitFor(() => w.find('session'), 10000, 'session record');
+    // "noreject" → the mock offers ONLY [allow_once, allow_always]
+    w.send({ type: 'chat-input', text: 'noreject please read the file', msgId: 'd1' });
+    const perm = await w.waitFor(() => w.find('permission_request'), 5000, 'permission_request');
+    ok('the agent offers no reject-kind option (the shape that used to execute the tool on Deny)', perm.options.map((o) => o.kind).join(',') === 'allow_once,allow_always', perm.options);
+    w.send({ type: 'permission-response', requestId: perm.requestId, approved: false });
+    const res = await w.waitFor(() => w.find('permission_resolved'), 5000, 'permission_resolved');
+    const end = await w.waitFor(() => w.find('prompt_end'), 8000, 'prompt_end');
+    ok('Deny with no reject option → {outcome:cancelled}, NEVER an allow option', res.outcome === 'cancelled' && res.optionId === null && res.optionKind === null, res);
+    ok('…the tool did not run (tool_call_update failed, no "completed", no "Done (always)" text)', w.updates('tool_call_update').every((u) => u.update.status !== 'completed') && w.updates('tool_call_update').some((u) => u.update.status === 'failed') && !w.updates('agent_message_chunk').some((u) => /Done \(/.test(u.update.content?.text || '')) && end.stopReason === 'cancelled', w.updates('tool_call_update').map((u) => u.update.status));
+    ok('…and the user is TOLD what their Deny became (cancelled ends the turn; the tool was refused)', /^This agent offered no "reject" option/.test(w.find('notice', (r) => r.noticeKind === 'deny-cancelled')?.text || ''), w.find('notice', (r) => r.noticeKind === 'deny-cancelled'));
+    // POSITIVE CONTROL: with a reject option offered, Deny still picks it
+    w.send({ type: 'chat-input', text: 'please read the file', msgId: 'd2' });
+    const perm2 = await w.waitFor(() => w.findAll('permission_request').length === 2 && w.findAll('permission_request')[1], 5000, 'second permission_request');
+    w.send({ type: 'permission-response', requestId: perm2.requestId, approved: false });
+    await w.waitFor(() => w.findAll('permission_resolved').length === 2, 5000, 'second permission_resolved');
+    ok('positive control: an agent that DOES offer reject_once still gets the explicit rejection (no behaviour change)', w.findAll('permission_resolved')[1].optionKind === 'reject_once' && w.findAll('notice', (r) => r.noticeKind === 'deny-cancelled').length === 1, w.findAll('permission_resolved')[1]);
+  } finally { await w.stop(); }
+}
+
 console.log('— boot failure honesty');
 {
   const w = startWrapper({ env: { ACP_WEBUI_BACKEND: 'opencode' } });
@@ -197,6 +276,19 @@ console.log('— boot failure honesty');
   let out = ''; child.stdout.setEncoding('utf8'); child.stdout.on('data', (d) => { out += d; });
   const code = await new Promise((r) => child.on('exit', (c) => r(c)));
   ok('an agent that exits before initialize → LOUD boot-failed/agent-exited notice + non-zero wrapper exit (never a silent hang)', code !== 0 && /agent-exited|boot-failed/.test(out) && /exited before the session was ready|could not start/.test(out), { code, out: out.slice(0, 300) });
+  // …AND when it exits 0 (a CLI that prints usage / an unauthenticated agent
+  // that gives up quietly). finalizeExit() exits synchronously, so boot()'s own
+  // catch never runs from the child-exit path: gating the notice on code !== 0
+  // produced ZERO records — a blank chat window that never said why.
+  const dir0 = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-acp-'));
+  const buf0 = path.join(dir0, 's.buf');
+  const c0 = spawn(process.execPath, [WRAPPER, buf0, path.join(dir0, 's.json'), process.execPath, '-e', 'process.exit(0)'], { env: { ...CLEAN_ENV, ACP_WEBUI_CWD: dir0 }, stdio: ['pipe', 'pipe', 'pipe'] });
+  let out0 = ''; c0.stdout.setEncoding('utf8'); c0.stdout.on('data', (d) => { out0 += d; });
+  await new Promise((r) => c0.on('exit', () => r()));
+  const recs0 = out0.trim().split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+  const bufRecs0 = (() => { try { return fs.readFileSync(buf0, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } })();
+  ok('an agent that exits 0 before answering initialize is STILL reported (exit code 0 is not success when no session exists)', recs0.some((r) => r.kind === 'notice' && r.noticeKind === 'agent-exited' && /exited before the session was ready \(exit code 0\)/.test(r.text)), recs0);
+  ok('…and the notice is in the BUFFER FILE too — the journal IS the history, so the window shows it after a restart (never blank)', bufRecs0.some((r) => r.kind === 'notice' && r.noticeKind === 'agent-exited'), bufRecs0);
 }
 
 console.log('— normalizer (AcpMessageManager) over the journal');
