@@ -14,6 +14,7 @@ import { agentMemoryPathRes } from './agent-meta.js';
 import { createBackendIconHtml, getBackendMeta } from './agent-meta.js';
 import { t } from './i18n.js';
 import { searchQueryOf } from '../search-card.js'; // shared with the server (CJS pulled into the bundle, like task-color-seq.js)
+import { mcpParts } from './chat-run-summary.js';
 
 // Agent-memory files get their own card treatment (user ask: a memory write
 // is a different concern than a project write — render "记忆更新 <name>"
@@ -24,12 +25,10 @@ function memoryBase(fp) {
   return fp && MEMORY_RES.some((re) => re.test(fp)) ? fp.split('/').pop() : null;
 }
 
-// MCP tool ids (mcp__<server>__<tool>) split into their parts — the raw
-// triple-underscore identifier as a card header was the reported eyesore.
-export function mcpParts(name) {
-  const m = /^mcp__(.+?)__(.+)$/.exec(String(name || ''));
-  return m ? { server: m[1], tool: m[2] } : null;
-}
+// MCP tool ids (mcp__<server>__<tool>) split into their parts — ONE
+// implementation, shared with the run-fold classifier (chat-run-summary.js,
+// pure; re-exported here for the existing importers).
+export { mcpParts };
 
 // Escaped HTML for a tool-card header: curated display name, or for MCP
 // tools the SHORT tool name (underscores → spaces) + a dim server chip.

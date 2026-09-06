@@ -250,6 +250,7 @@ src/
     code-editor.js     — CodeEditor (CodeMirror 6, Prettier format, server-side format, HTML/MD preview; 2.341.0 disk-freshness watch + ⟳ reload — kb-features §File Management)
     chat-view.js       — ChatView controller (virtual scroll, op dispatch, lifecycle; gap-seek mixin split out 2.92.0)
     chat-view-seek.js  — installChatSeek(ChatView): the huge-JSONL continuous-scroll machinery (sentinel, slab loading, teleport, stable-height landings; 17 methods)
+    chat-run-summary.js — PURE run-fold classifier + summary composer (2.369.37, imports nothing): messageKind (semantic collapseKind hint → claude tool-name map; ToolSearch = 'lookup', folds under the MCP toggle via foldToggleFor but is labelled "N tool lookups", never MCP), countKinds (zero-fills RUN_KINDS), runSummaryParts/runSummaryLabel, the ONE mcpParts. Gated by scripts/test-fold-ux.mjs (node unit + headless-chrome rail/floating-bar/footer fixture)
     chat-renderers.js  — Message rendering (user/assistant/tool/system, linkify, diffs, permissions; 2.369.43 search-kind card headers carry the query as an escaped `.chat-tool-query` chip via searchQueryChipHtml — claude WebSearch/WebFetch, codex web_search, ACP search). ⇒ kb-file-structure.md
     chat-input.js      — ChatInput (textarea, send, attachments, drafts, slash commands, TODO display)
     chat-status-bar.js — ChatStatusBar (model, context%, cost, permission mode, task popup)

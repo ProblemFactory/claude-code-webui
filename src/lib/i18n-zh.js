@@ -2915,4 +2915,8 @@ export default {
   "{n} web searches": "{n} 次网页搜索",
   "{n} image reads": "{n} 次看图",
   "delegates to sub-agents (multi-agent), extra usage": "委派给子代理（多代理），额外用量",
+  "{n} tool lookups": "{n} 次工具查找",
+  "Collapse": "折叠",
+  "Collapse run": "折叠此组",
+  "Jump to top of run": "跳到此组开头",
 };

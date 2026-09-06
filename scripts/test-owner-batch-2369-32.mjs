@@ -67,7 +67,16 @@ ok(/const fmtReset = \(ts, util(?:, est)?\) => \{/.test(um2) && (um2.match(/fmtR
   const ss = read('src/lib/settings-schema.js');
   ok(/default: \['thinking', 'bash', 'read', 'memory', 'mcp', 'skill', 'agent', 'search', 'image'\]/.test(ss) && /value: 'search', label: t\('Web searches \/ fetches/.test(ss) && /value: 'image', label: t\('Image views/.test(ss), "settings: 'search' and 'image' are fold kinds, ON by default");
   const cv = read('src/lib/chat-view.js');
-  ok(/if \(tn === 'WebSearch' \|\| tn === 'WebFetch'\) return 'search';/.test(cv) && /if \(tn === 'Grep' \|\| tn === 'Glob' \|\| tn === 'LS'\) return 'read';/.test(cv) && /if \(tn === 'ToolSearch'\) return 'mcp';/.test(cv) && /byKind\.search\) parts\.push\(t\('\{n\} web searches'/.test(cv) && /byKind\.image\) parts\.push\(t\('\{n\} image reads'/.test(cv) && /byKind\.read\) parts\.push\(t\('\{n\} file reads'/.test(cv) && /search: 0, image: 0 \}/.test(cv) && /return 'image'; \/\/ image views fold/.test(cv) && /'mcp', 'agent', 'search', 'image'\]\)/.test(cv), 'chat-view: WebSearch/WebFetch→search, Grep/Glob/LS→read, ToolSearch→mcp; summary counts searches; default set includes search');
+  // 2.369.37: the classifier + summary composer moved to the PURE module
+  // src/lib/chat-run-summary.js (owner caught "1 次 MCP" over a ToolSearch —
+  // it is a 'lookup' now: folds under the MCP toggle, labelled honestly)
+  const RS = await import(path.join(REPO, 'src/lib/chat-run-summary.js'));
+  const tk = (name, input = {}) => RS.messageKind({ role: 'assistant', content: [{ type: 'tool_use', toolName: name, input }] }, { toolCard: true });
+  const tt = (k, p) => k.replace(/\{(\w+)\}/g, (m, x) => String(p?.[x] ?? m));
+  ok(tk('WebSearch') === 'search' && tk('WebFetch') === 'search' && tk('Grep') === 'read' && tk('Glob') === 'read' && tk('LS') === 'read' && tk('ToolSearch') === 'lookup' && RS.foldToggleFor('lookup') === 'mcp'
+    && tk('Read', { file_path: '/x/y.png' }) === 'image'
+    && RS.runSummaryParts(RS.countKinds(['search', 'search', 'image', 'read']), new Set(), tt).join(' · ') === '1 file reads · 2 web searches · 1 image reads'
+    && /messageKind\(el\._rawMsg, \{ toolCard: el\.classList\.contains\('chat-msg-tool-result'\), isMemoryPath \}\)/.test(cv) && /'mcp', 'agent', 'search', 'image'\]\)/.test(cv), 'chat-view: WebSearch/WebFetch→search, Grep/Glob/LS→read, ToolSearch→lookup (folds under mcp, labelled apart); summary counts searches; default set includes search');
   const { CodexMessageManager } = require(path.join(REPO, 'src/codex-message-manager.js'));
   const cm2 = new CodexMessageManager('c2');
   cm2.processLive({ timestamp: new Date().toISOString(), type: 'response_item', payload: { type: 'function_call', call_id: 'ws1', name: 'web_search', arguments: '{"query":"rv solar"}' } });

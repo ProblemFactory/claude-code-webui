@@ -190,7 +190,7 @@ export function installChatSeek(ChatView) {
         // = APPEND, landing an older slab BELOW the live tail (review
         // finding). Members (.chat-msg) only ever get class-toggled — stable.
         let gapA = markerEl.nextElementSibling;
-        while (gapA && gapA.classList?.contains('chat-run-header')) gapA = gapA.nextElementSibling;
+        while (gapA && (gapA.classList?.contains('chat-run-header') || gapA.classList?.contains('chat-run-footer'))) gapA = gapA.nextElementSibling;
         markerEl._gapAnchor = gapA;
       }
       if (markerEl._gapCursor <= 0) { this._finishSeek(markerEl, btn); return; }

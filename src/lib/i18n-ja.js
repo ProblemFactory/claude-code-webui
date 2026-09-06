@@ -2915,4 +2915,8 @@ export default {
   "{n} web searches": "{n} 件の Web 検索",
   "{n} image reads": "{n} 件の画像表示",
   "delegates to sub-agents (multi-agent), extra usage": "サブエージェントに委任（マルチエージェント）、追加使用量",
+  "{n} tool lookups": "{n} 件のツール検索",
+  "Collapse": "折りたたむ",
+  "Collapse run": "この実行を折りたたむ",
+  "Jump to top of run": "実行の先頭へ",
 };

@@ -908,6 +908,69 @@ body.hide-empty-thinking .chat-compact .chat-msg.chat-empty-thinking { display: 
 .chat-msg.chat-run-collapsed,
 .chat-compact .chat-msg.chat-run-collapsed { display: none; }
 
+/* ── Expanded-run legibility (2.369.37) — the list stays FLAT: members are
+   direct .chat-msg children carrying .chat-run-member (+ -first/-last); the
+   header (.open) and the bottom line (.chat-run-footer) bracket them. ── */
+/* (i) grouping rail: continuous accent rail + faint tint on every member.
+   Non-border role modes paint the rail INSIDE the card (inset shadow — no
+   layout shift, contain:paint-safe); border mode recolors the role bar. */
+.chat-msg.chat-run-member {
+  background: color-mix(in srgb, var(--chat-run-rail, var(--accent)) 5%, transparent);
+  box-shadow: inset 3px 0 0 0 var(--chat-run-rail, var(--accent));
+}
+[data-role-indicator="border"] .chat-msg.chat-run-member {
+  box-shadow: none; border-left-color: var(--chat-run-rail, var(--accent));
+}
+.chat-run-header.open,
+.chat-run-footer {
+  border: 1px solid color-mix(in srgb, var(--chat-run-rail, var(--accent)) 45%, var(--border));
+  border-left: 3px solid var(--chat-run-rail, var(--accent));
+  border-top-left-radius: 0; border-bottom-left-radius: 0;
+  background: color-mix(in srgb, var(--chat-run-rail, var(--accent)) 5%, transparent);
+}
+.chat-run-header.open { border-bottom-right-radius: 0; margin-bottom: 0; }
+/* (iii) bottom collapse line — same family as the header, non-.chat-msg */
+.chat-run-footer {
+  font-size: 11px; color: var(--text-dim); cursor: pointer; user-select: none;
+  padding: 3px 12px; margin: 0 0 2px; border-top-right-radius: 0;
+  border-bottom-right-radius: var(--radius);
+  display: flex; align-items: center; gap: 6px;
+}
+.chat-run-footer:hover { color: var(--text-secondary); border-color: var(--accent); }
+.chat-run-footer .chat-run-arrow svg { width: 10px; height: 10px; vertical-align: -1px; }
+.chat-run-header .chat-run-label,
+.chat-run-footer .chat-run-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* (ii) floating run bar — ONE element per ChatView on the .chat-view
+   container (never a list child), pinned to the message list's top edge
+   while an open run's header is scrolled off. Tap/click anywhere = collapse. */
+.chat-run-bar {
+  position: absolute; left: 0; right: 16px; top: 0; z-index: 12;
+  display: flex; align-items: center; gap: 6px; padding: 3px 8px 3px 12px;
+  font-size: 11px; color: var(--text-secondary); cursor: pointer; user-select: none;
+  background: color-mix(in srgb, var(--chat-run-rail, var(--accent)) 10%, var(--bg-dialog));
+  border-bottom: 1px solid color-mix(in srgb, var(--chat-run-rail, var(--accent)) 45%, var(--border));
+  border-left: 3px solid var(--chat-run-rail, var(--accent));
+  border-bottom-right-radius: var(--radius-sm);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+  touch-action: manipulation;
+}
+.chat-run-bar.hidden { display: none; }
+.chat-run-bar-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-run-bar-btn {
+  flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center;
+  min-width: 26px; height: 22px; padding: 0 5px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); background: var(--bg-input); color: var(--text-secondary);
+  cursor: pointer; font-size: 11px; transition: var(--transition);
+}
+.chat-run-bar-btn:hover { border-color: var(--accent); color: var(--accent); }
+.chat-run-bar-btn svg { width: 12px; height: 12px; }
+/* the position pill would sit on top of the bar — drop it below while shown */
+.chat-view.chat-run-bar-on .chat-pos-indicator { top: 34px; }
+@media (max-width: 768px) {
+  .chat-run-bar-btn { min-width: 34px; height: 28px; }
+  .chat-run-footer { padding: 6px 12px; }
+}
+
 /* Long-running tool heartbeat line (2.227.7) — distinct from the agent status
    line: no count, no View Log (a Bash call has no transcript to open). */
 .chat-tool-progress { font-size: 11px; color: var(--text-dim); padding: 2px 0 0 2px; font-style: italic; }
