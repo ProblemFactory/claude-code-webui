@@ -108,5 +108,128 @@ ok('the legacy dialog overlay closes only when the interaction STARTED on it (in
 ok('loadHistory skips the rebuild for an IDENTICAL slab (same epoch/total/tail ids, tail-anchored)', /loadHistory:identical-skip/.test(cv) && /lastCur\.id === lastNew\.id/.test(cv) && /this\._windowEnd === this\._total/.test(cv));
 ok('…the skip still applies meta/status/live state and the typing indicator', /identical-skip[\s\S]{0,900}applyStatus\(meta\.chatStatus\)[\s\S]{0,600}_applyLiveMeta\?\.\(meta\)/.test(cv));
 
+// ── the RESUME transition (inc-mtq5bpjt-0o0n "切换桌面后，新桌面的窗口内容跳到
+// 历史消息了"): suspending covered the HIDDEN state; the un-hide TRANSITION was
+// unguarded, and the ONE upward-paging entry point with no gate at all — the
+// gap sentinel's IntersectionObserver → _loadEarlierGap's tail-mode branch —
+// paged three PINNED windows into history with zero user input. The end-to-end
+// reproduction (with the negative control that proves the path is exercised)
+// lives in scripts/test-desktop-resume-paging.mjs; these pin the mechanism.
+const sk = fs.readFileSync(path.join(REPO, 'src/lib/chat-view-seek.js'), 'utf8');
+ok('the gap path has ONE gate predicate, _autoPagingBlocked (never re-invented per entry point)',
+  /_autoPagingBlocked\(\) \{/.test(cv));
+ok('…and it names every law the scroll handler obeys (suspend / resume-settle / pin / settle / no-input)',
+  ["'suspended'", "'resume-settle'", "'pinned'", "'settling'", "'no-input'"].every((r) => cv.includes(r)));
+ok('_loadEarlierGap applies the gate BEFORE its tail-mode _extendTop branch (the guard sits on the path that is alive in the failure state)',
+  /if \(auto\) \{[\s\S]{0,220}_autoPagingBlocked\(\)[\s\S]{0,220}\}[\s\S]{0,400}this\._windowStart > 0\) \{ await this\._extendTop\(\); return; \}/.test(sk));
+ok('…and traces WHY it refused (gapSkip + reason, so the tracer shows the refusal)', /_trace\?\.\('gapSkip', \{ why, via \}\)/.test(sk));
+ok('the sentinel IntersectionObserver goes through _loadEarlierGap as an AUTOMATIC caller (never a bare _extendTop)',
+  /isIntersecting\) continue;[\s\S]{0,900}this\._loadEarlierGap\(entry\.target, null, \{ via: 'io' \}\)/.test(cv));
+ok('an explicit RETRY click bypasses the gate (auto: false — a click is intent)', /_loadEarlierGap\(markerEl, btn, \{ auto: false \}\)/.test(sk));
+ok('the scroll/wheel-driven _maybeSeekEarlier is an automatic caller too', /_maybeSeekEarlier\(\) \{[\s\S]{0,700}_loadEarlierGap\(s, null\);\s*\/\/ AUTOMATIC/.test(sk));
+ok('setSuspended(false) arms the resume settle window — WITH the re-tail timer\'s slack, so nothing can decide in the gap between the window expiring and the re-tail running',
+  /setSuspended\(on\) \{[\s\S]{0,900}this\._resumeSettleUntil = Date\.now\(\) \+ RESUME_SETTLE_MS \+ RESUME_RETAIL_SLACK_MS;/.test(cv)
+  && /const RESUME_RETAIL_SLACK_MS = 40;/.test(cv));
+ok('…and the pinned re-tail is re-asserted when the settle expires (one hop: jumpToBottom only when behind the tail)',
+  /_resumeSettleTimer = setTimeout\(\(\) => \{ reTail\(\); this\._pinnedAtSuspend = false; \},\s*RESUME_SETTLE_MS \+ RESUME_RETAIL_SLACK_MS\);/.test(cv)
+  && /clearTimeout\(this\._resumeSettleTimer\)/.test(cv.slice(cv.indexOf('dispose()'))));
+ok('…and it asserts off the pin SNAPSHOT taken when the window was HIDDEN (a transitional unpin during the resume must not strand the window in history)',
+  /this\._pinnedAtSuspend = this\._pinned;/.test(cv)
+  && /if \(!this\._pinned && !this\._pinnedAtSuspend\) return;/.test(cv)
+  && /if \(this\._pinned \|\| this\._pinnedAtSuspend\) \{/.test(cv));
+ok('the scroll handler no-ops during the settle, BEFORE it touches the pin (transitional geometry must not unpin)',
+  /this\._suspended\) return;[\s\S]{0,700}Date\.now\(\) < \(this\._resumeSettleUntil \|\| 0\)\) return;[\s\S]{0,2600}const atBottom =/.test(cv));
+ok('the loadHistory auto-fill DEFERS through the settle instead of deciding on transitional geometry',
+  /const tryAutoFill = \(retries\) => \{[\s\S]{0,400}this\._resumeSettleUntil \|\| 0\) - Date\.now\(\)[\s\S]{0,200}tryAutoFill\(retries - 1\)/.test(cv));
+ok('REAL user input clears the settle AND the pin snapshot (wheel + touchmove + pointerdown + keydown — the settle only suppresses input-LESS displacement, it never fights a reader)',
+  (cv.match(/this\._endResumeSettle\(\);/g) || []).length >= 4
+  && /_endResumeSettle\(\) \{ this\._resumeSettleUntil = 0; this\._pinnedAtSuspend = false; \}/.test(cv));
+ok('INVARIANT a pinned view never loses its tail: _extendTop skips trimBottom while pinned',
+  /if \(this\._pinned\) this\._trace\('trimSkipPinned'[\s\S]{0,200}else this\._trimBottom\(\);/.test(cv));
+ok('…and re-asserts the tail after the prepend (the anchor restore fails under transitional geometry: anchored:false, scrollTop 0)',
+  /if \(this\._pinned\) \{ this\._trace\('pinnedRetail'[\s\S]{0,80}this\._scrollToBottom\(\); \}/.test(cv));
+ok('the incident is named at the fix (future readers find the bundle)', /inc-mtq5bpjt-0o0n/.test(cv) && /inc-mtq5bpjt-0o0n/.test(sk));
+
+// ── DOM-free UNIT: the decision table itself. The method reads only `this`
+// fields and `window`, so the SHIPPED source is lifted out and exercised
+// directly — no jsdom, no bundle, and a rewrite that changes the ORDER of the
+// reasons (which is the diagnostic value of the trace) fails here.
+{
+  const start = cv.indexOf('  _autoPagingBlocked() {');
+  const end = cv.indexOf('\n  }\n', start);
+  ok('the _autoPagingBlocked source is extractable for the unit below', start > 0 && end > start);
+  if (start > 0 && end > start) {
+    const body = cv.slice(cv.indexOf('{', start) + 1, end);
+    const win = {};
+    const decide = new Function('window', `return function () {${body}\n}`)(win);
+    const NOW = Date.now();
+    const clear = () => ({ _pinned: false, _lastStructuralAt: NOW - 9e5, _lastUserScrollAt: NOW - 100, _resumeSettleUntil: 0 });
+    const call = (over) => { win.__vsInputResizeAt = 0; win.__vsViewportResizeAt = 0; return decide.call({ ...clear(), ...over }); };
+    ok('unit: a clean, recently-scrolled, unpinned view may page', call({}) === null);
+    ok('unit: disposed blocks', call({ _disposed: true }) === 'disposed');
+    ok('unit: a desktop-HIDDEN view blocks (geometry is meaningless)', call({ _suspended: true }) === 'suspended');
+    ok('unit: a just-RESUMED view blocks for the settle window', call({ _resumeSettleUntil: NOW + 500 }) === 'resume-settle');
+    ok('unit: a PINNED view blocks — it is at the live tail by definition (THE inc-mtq5bpjt-0o0n case)', call({ _pinned: true }) === 'pinned');
+    ok('unit: our own recent structural mutation blocks (it is still moving scrollTop)', call({ _lastStructuralAt: NOW - 200 }) === 'settling');
+    ok('unit: no recent user input blocks — displacement is not intent', call({ _lastUserScrollAt: NOW - 5000 }) === 'no-input');
+    ok('unit: …and a view that NEVER saw user input blocks too (undefined, not just stale)', call({ _lastUserScrollAt: undefined }) === 'no-input');
+    ok('unit: input-box / viewport resize blocks (the 2.338/2.339 displacement doors)',
+      (() => { win.__vsInputResizeAt = NOW - 50; win.__vsViewportResizeAt = 0; return decide.call(clear()) === 'input-resize'; })());
+    ok('unit: suspend outranks pin outranks no-input (reason ORDER is the diagnostic)',
+      call({ _suspended: true, _pinned: true, _lastUserScrollAt: 0 }) === 'suspended'
+      && call({ _pinned: true, _lastUserScrollAt: 0 }) === 'pinned');
+  }
+}
+
+// ── FUNCTIONAL: the resume RE-TAIL and its pin SNAPSHOT. The settle expires
+// and the pinned re-tail runs a beat later; an input-LESS displacement landing
+// in that gap reached the scroll handler, unpinned the window, and the re-tail
+// — which asserted off the LIVE flag — then refused, stranding the window in
+// history for good (repro: scrollTop=0 injected at resume+1210ms). setSuspended
+// is DOM-free enough to run right here, so the two behaviours are pinned by
+// EXECUTION, not by regex: a transitional unpin still returns to the tail, and
+// a real reader who scrolled away is left exactly where they are.
+if (typeof globalThis.requestAnimationFrame !== 'function') globalThis.requestAnimationFrame = (fn) => setTimeout(fn, 0);
+{
+  const nap = (ms) => new Promise((r) => setTimeout(r, ms));
+  const mkView = (over = {}) => Object.assign(Object.create(ChatView.prototype), {
+    _suspended: false, _disposed: false, _pinned: true, _teleported: false,
+    _windowEnd: 100, _total: 100, _newMsgCount: 3,
+    _scrollBtn: { classList: { add() {}, remove() {} } },
+    _updateRunBar() {}, _scheduleRunBar() {},
+    jumpToBottom() { this._jumps = (this._jumps || 0) + 1; this._pinned = true; },
+    _scrollToBottom() { this._scrolls = (this._scrolls || 0) + 1; },
+    ...over,
+  });
+  const retails = (v) => (v._scrolls || 0) + (v._jumps || 0);
+  const resumeThen = async (mutate, over) => {
+    const v = mkView(over);
+    v.setSuspended(true);                            // desktop hidden
+    v.setSuspended(false);                           // …and shown again
+    await nap(60);                                   // the immediate rAF re-tail
+    const baseline = retails(v);
+    mutate?.(v);
+    await nap(1500);                                 // past RESUME_SETTLE_MS + the slack
+    return { v, retailed: retails(v) > baseline };
+  };
+  const snap = mkView(); snap.setSuspended(true);
+  ok('setSuspended(true) SNAPSHOTS the pin — the last honest reading before the geometry starts lying', snap._pinnedAtSuspend === true);
+  const snapOff = mkView({ _pinned: false }); snapOff.setSuspended(true);
+  ok('…and an unpinned window snapshots FALSE (a reader in history is not dragged anywhere)', snapOff._pinnedAtSuspend === false);
+  const [gap, reader, never] = await Promise.all([
+    resumeThen((v) => { v._pinned = false; }),                        // input-LESS transitional unpin (THE hole)
+    resumeThen((v) => { v._pinned = false; v._endResumeSettle(); }),  // a real reader scrolled away
+    resumeThen(null, { _pinned: false }),                             // was never pinned to begin with
+  ]);
+  ok('a transitional (input-LESS) unpin during the resume still ends at the LIVE tail — the re-tail asserts off the snapshot', gap.retailed && gap.v._pinned === true);
+  ok('…and a REAL reader who scrolled away during the settle is left alone (input drops the snapshot)', !reader.retailed && reader.v._pinned === false);
+  ok('a window that was NOT pinned when it was hidden is never dragged to the tail', !never.retailed && retails(never.v) === 0);
+}
+
+// ── WIRING PIN: the desktop show/hide path must keep flowing the flag (a new
+// hide/show writer that forgets it re-opens the whole class)
+ok('desktop _showWin resumes the ChatView (the resume settle is armed from there)',
+  /_showWin\(win\) \{[\s\S]{0,500}setSuspended\?\.\(false\)/.test(dm));
+
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);
 process.exit(fail ? 1 : 0);

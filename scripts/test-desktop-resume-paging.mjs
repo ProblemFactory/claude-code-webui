@@ -1,0 +1,328 @@
+#!/usr/bin/env node
+// DESKTOP-RESUME PAGING (inc-mtq5bpjt-0o0n, owner: "切换桌面后，新桌面的窗口
+// 内容跳到历史消息了"). Three chat windows, all PINNED at the live tail before
+// their desktop was hidden, came back at scrollTop 0 with the tail TRIMMED
+// AWAY — with zero user input (the capture's wheelAgo was 1.8M-4.7M ms).
+//
+// Mechanism: the gap sentinel's IntersectionObserver (rootMargin 300px) is a
+// PURELY GEOMETRIC trigger. On resume, desktop-manager._showWin clears
+// content-visibility:hidden, the subtree re-measures, scrollTop transits
+// through 0 while still pinned, the sentinel intersects → _loadEarlierGap →
+// its tail-mode branch called _extendTop() with NO intent/pin/settle/suspend
+// gate at all — the one upward-paging entry point the 2.301→2.339 gates never
+// covered. _extendTop's completion then trimBottom'd the live tail away
+// (windowEnd < total), the anchor restore failed under transitional geometry
+// (anchored:false) and the view landed at scrollTop 0, unpinned.
+//
+// This drives the REAL path end to end: a >34MB transcript (so the server
+// reports a gap and the client installs the seek sentinel — the sentinel is
+// what makes the failure reachable at all), a chat window pinned at the tail
+// on desktop B, switch away, switch back, and watch the tracer.
+//
+// NEGATIVE CONTROL: the same run against a worktree whose gates are patched
+// out at SOURCE level must page up on the resume AND through the sentinel
+// probe — otherwise the harness proves nothing (a green test that never
+// touches the path is worse than no test).
+//
+// IN THE RELEASE GATE (scripts/ci.mjs) despite being heavy — two chrome runs
+// and two bundle builds, ~1 min here: this is the only place the whole path is
+// exercised end to end, and its negative control is what proves the harness
+// touches it at all. The cheap in-gate pins live in test-chat-trim-guard.mjs.
+// Run: node scripts/test-desktop-resume-paging.mjs   (SKIPs without chrome)
+import { execSync, spawn } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+
+const repo = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+const CHROME = ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser'].find((p) => fs.existsSync(p));
+if (!CHROME) { console.log('SKIP: no chrome/chromium'); process.exit(0); }
+
+const PORT = 3989, CDP_PORT = 9339;
+const wt = `/tmp/vs-deskresume-${process.pid}`;
+const fakeHome = `/tmp/vs-deskresume-home-${process.pid}`;
+const chromeDir = `/tmp/vs-deskresume-chrome-${process.pid}`;
+const CWD = `/tmp/vs-deskresume-cwd-${process.pid}`;
+const SID = 'e2e00000-0000-4000-8000-0000000000d1';
+const PROJ = path.join(fakeHome, '.claude', 'projects', CWD.replace(/[/._]/g, '-'));
+let failed = 0;
+const check = (n, c, e) => { if (c) console.log(`  ✓ ${n}`); else { failed++; console.error(`  ✗ ${n}${e ? '\n    ' + e : ''}`); } };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ── 1. synthetic transcript > 34MB (JSONL_HEAD 2MB + JSONL_TAIL 32MB is the
+//      threshold below which jsonlGapInfo returns null — no gap, no sentinel,
+//      no bug). Fat tool outputs so the rendered 50-message tail is much
+//      TALLER than the viewport: the sentinel must NOT already be intersecting
+//      at load, or the "before" state is contaminated by an ordinary fill.
+const MIN_BYTES = 36 * 1024 * 1024;
+{
+  fs.mkdirSync(PROJ, { recursive: true });
+  fs.mkdirSync(CWD, { recursive: true });
+  const fp = path.join(PROJ, `${SID}.jsonl`);
+  const fd = fs.openSync(fp, 'w');
+  const FAT = 'a fat line of tool output that adds real rendered height 0123456789\n';
+  let bytes = 0, n = 0, turn = 0;
+  let t = Date.now() - 7 * 86400e3;
+  const ts = () => new Date((t += 30e3)).toISOString();
+  const push = (o) => { const s = JSON.stringify(o) + '\n'; fs.writeSync(fd, s); bytes += Buffer.byteLength(s); };
+  while (bytes < MIN_BYTES) {
+    push({ type: 'user', message: { role: 'user', content: `question ${turn}: please do the thing and explain` }, uuid: `u-${n++}`, timestamp: ts() });
+    const long = 'line of explanatory prose that wraps around and adds height\n'.repeat(3 + (turn % 9) * 4);
+    push({ type: 'assistant', message: { id: `msg_${n}`, role: 'assistant', model: 'claude-fable-5', content: [{ type: 'text', text: `answer ${turn}:\n${long}` }], usage: { input_tokens: 10, output_tokens: 50 } }, uuid: `a-${n++}`, timestamp: ts() });
+    for (let b = 0; b < 4; b++) {
+      const tid = `toolu_${turn}_${b}`;
+      push({ type: 'assistant', message: { id: `msg_${n}`, role: 'assistant', model: 'claude-fable-5', content: [{ type: 'tool_use', id: tid, name: 'Bash', input: { command: `echo step ${turn}.${b}` } }], usage: {} }, uuid: `tu-${n++}`, timestamp: ts() });
+      push({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: tid, content: `output ${turn}.${b}\n` + FAT.repeat(16 + ((turn + b) % 5) * 70) }] }, uuid: `tr-${n++}`, timestamp: ts() });
+    }
+    push({ type: 'assistant', message: { id: `msg_${n}`, role: 'assistant', model: 'claude-fable-5', content: [{ type: 'text', text: `turn ${turn} done.` }], usage: { input_tokens: 10, output_tokens: 5 } }, uuid: `af-${n++}`, timestamp: ts() });
+    turn++;
+  }
+  fs.closeSync(fd);
+  console.log(`  transcript: ${n} records, ${(bytes / 1048576).toFixed(1)}MB (gap threshold 34MB)`);
+}
+
+// ── 2. throwaway worktree + WORKING-TREE overlay (a pre-commit run must test
+//      what is about to ship) ──
+try { execSync(`git worktree remove --force ${wt}`, { cwd: repo, stdio: 'ignore' }); } catch {}
+execSync(`git worktree add --detach ${wt} HEAD`, { cwd: repo, stdio: 'ignore' });
+for (const f of ['src', 'public', 'server.js', 'package.json']) {
+  execSync(`rm -rf ${wt}/${f} && cp -r ${repo}/${f} ${wt}/${f}`);
+}
+fs.symlinkSync(path.join(repo, 'node_modules'), path.join(wt, 'node_modules'));
+const buildBundle = () => {
+  fs.writeFileSync(path.join(wt, 'src/lib/build-version.js'), "export const BUILD_VERSION = 'test';\n");
+  // UNMINIFIED: this harness reads traces, not bytes, but a readable bundle
+  // makes a red run debuggable.
+  execSync('npx esbuild src/client.js --bundle --outfile=public/bundle.js --format=iife --platform=browser --target=es2020 --loader:.css=css',
+    { cwd: wt, stdio: 'ignore' });
+};
+buildBundle();
+
+const srv = spawn(process.execPath, ['server.js'], {
+  cwd: wt, stdio: 'ignore',
+  env: { ...process.env, PORT: String(PORT), HOME: fakeHome, VIBESPACE_SKIP_AGENT_HOOKS: '1', VIBESPACE_PASSWORD: '' },
+});
+const chrome = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${CDP_PORT}`, '--no-first-run', '--disable-gpu',
+  '--no-sandbox', '--disable-dev-shm-usage', '--window-size=1500,1050', '--disable-background-timer-throttling',
+  `--user-data-dir=${chromeDir}`, 'about:blank'], { stdio: 'ignore' });
+const cleanup = () => {
+  try { chrome.kill('SIGKILL'); } catch {}
+  try { srv.kill('SIGKILL'); } catch {}
+  try { execSync(`git worktree remove --force ${wt}`, { cwd: repo, stdio: 'ignore' }); } catch {}
+  for (const d of [chromeDir, fakeHome, CWD]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} }
+};
+process.on('exit', cleanup);
+
+for (let i = 0; i < 80; i++) { try { await fetch(`http://127.0.0.1:${PORT}/api/home`); break; } catch { await sleep(250); } }
+
+const WebSocket = require('ws');
+let target = null;
+for (let i = 0; i < 80 && !target; i++) {
+  try { target = (await (await fetch(`http://127.0.0.1:${CDP_PORT}/json`)).json()).find((x) => x.type === 'page'); } catch {}
+  if (!target) await sleep(250);
+}
+if (!target) { console.error('✗ chrome never exposed a CDP page target'); process.exit(1); }
+const ws = new WebSocket(target.webSocketDebuggerUrl, { maxPayload: 128 * 1024 * 1024 });
+await new Promise((r) => ws.on('open', r));
+let seq = 0; const pend = new Map();
+ws.on('message', (d) => {
+  const m = JSON.parse(d);
+  if (m.id && pend.has(m.id)) { pend.get(m.id)(m); pend.delete(m.id); }
+});
+const cdp = (method, params = {}) => new Promise((res) => { const id = ++seq; pend.set(id, res); ws.send(JSON.stringify({ id, method, params })); });
+const evaljs = async (expr) => {
+  const r = await cdp('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true });
+  if (r.result?.exceptionDetails) throw new Error(JSON.stringify(r.result.exceptionDetails).slice(0, 500));
+  return r.result?.result?.value;
+};
+await cdp('Runtime.enable');
+await cdp('Page.enable');
+
+// ── 3. THE SCENARIO, as one page-side script so every step is same-tab ──
+const SCENARIO = `(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const dm = window.app.desktopManager;
+  const deskA = dm.activeDesktopId;
+  const deskB = dm.createDesktop('B');
+  await dm.switchTo(deskB);
+  await sleep(300);
+
+  const win = window.app.viewSession('${SID}', '${CWD}', 'resume paging test');
+  window.app.wm.toggleMaximize(win.id);   // a real reading viewport, not a 380px pane
+  let view = null;
+  for (let i = 0; i < 120; i++) {
+    view = window.app.sessions.get(win.id);
+    if (view && view._messages && view._messages.length > 10) break;
+    await sleep(500);
+  }
+  if (!view || !view._messages?.length) return { ok: false, why: 'chat never loaded' };
+  // A view-only ChatView runs with content-visibility OFF permanently
+  // (.chat-no-content-visibility) — but the incident's windows were LIVE ones,
+  // and content-visibility:auto height re-resolution IS the displacement that
+  // drives scrollTop to 0 on resume. Put this harness window in the live
+  // window's rendering mode; everything else about the path is identical.
+  view._container.classList.remove('chat-no-content-visibility');
+  // wait for the gap probe (sentinel install) + folds + heights to settle
+  for (let i = 0; i < 40 && !view._seekSentinel; i++) await sleep(300);
+  await sleep(2500);
+  // SEED both A/B runs to the SAME starting state — 150 rendered messages
+  // (the trim cap) pinned at the tail, which is what the incident's windows
+  // were. Two DIRECT _extendTop calls: explicit, ungated by construction, and
+  // exactly at the cap so neither build trims while seeding. Without this the
+  // two builds start from different window sizes and the comparison is not an
+  // A/B at all (the ungated build pages once at LOAD time and ends up taller).
+  await view._extendTop(); await sleep(900);
+  await view._extendTop(); await sleep(1500);
+  view._pinned = true; view._scrollToBottom(); await sleep(1500);
+
+  const list = view._messageList;
+  const snap = () => ({
+    st: Math.round(list.scrollTop), sh: Math.round(list.scrollHeight), ch: Math.round(list.clientHeight),
+    fromBottom: Math.round(list.scrollHeight - list.scrollTop - list.clientHeight),
+    pinned: !!view._pinned, ws: view._windowStart, we: view._windowEnd, total: view._total,
+  });
+  const before = { ...snap(), rendered: list.querySelectorAll(':scope > .chat-msg').length,
+    sentinel: !!(view._seekSentinel && view._seekSentinel.isConnected), gapActive: !!view._gapMinimapActive };
+  if (!before.sentinel) return { ok: false, why: 'no seek sentinel — the transcript is under the gap threshold', before };
+  if (!(before.ws > 0)) return { ok: false, why: 'windowStart is 0 — nothing to page up into', before };
+
+  // ── the gesture: switch away, sit there, switch back ──
+  const mark = (view._traceRing || []).length;
+  await dm.switchTo(deskA);
+  await sleep(2000);
+  const tSwitch = Date.now();
+  await dm.switchTo(deskB);
+  const samples = [];
+  for (let i = 0; i < 20; i++) { await sleep(200); samples.push({ dt: Date.now() - tSwitch, ...snap() }); }
+  const traces = (view._traceRing || []).slice(mark).map((e) => ({ dt: e.t - tSwitch, ...e, t: undefined }));
+  const after = snap();
+
+  // ── SENTINEL PROBE: the incident's essential fact in isolation — scrollTop
+  //    reads 0 with NO user input (a re-measure, an anchor restore, anything
+  //    structural), the top sentinel enters the observer's 300px margin and
+  //    the IntersectionObserver fires. The scroll/wheel handlers cannot page
+  //    here (no user input, no wheel), so anything that loads came through the
+  //    gap door — which is exactly the door this fix closes.
+  view._pinned = true; view._scrollToBottom(); await sleep(1200);
+  const mark2 = (view._traceRing || []).length;
+  list.scrollTop = 0;
+  await sleep(2000);
+  const probeTraces = (view._traceRing || []).slice(mark2).map((e) => e.tag + (e.why ? '/' + e.why : ''));
+
+  // ── RE-TAIL GAP (the verifier's minor on this fix): the settle expires and
+  //    the pinned re-tail runs a beat later. An input-LESS displacement landing
+  //    in THAT gap reached the scroll handler, unpinned the window, and the
+  //    re-tail — which asserted off the LIVE pin flag — then refused: the window
+  //    stayed in history permanently (measured: scrollTop=0 injected at
+  //    resume+1210ms → unpinned, fromBottom 1536, and it stayed there). Same
+  //    gesture as the resume above, with the displacement injected in the gap.
+  view._pinned = true; view._scrollToBottom(); await sleep(1500);
+  await dm.switchTo(deskA);
+  await sleep(1500);
+  const mark4 = (view._traceRing || []).length;
+  const tSwitch3 = Date.now();
+  await dm.switchTo(deskB);
+  await sleep(Math.max(0, 1210 - (Date.now() - tSwitch3)));
+  const injectedAt = Date.now() - tSwitch3;
+  list.scrollTop = 0;                       // zero user input — a re-measure would do this
+  await sleep(2500);
+  const retail = { ...snap(), inject: injectedAt,
+    traces: (view._traceRing || []).slice(mark4).map((e) => e.tag + (e.why ? '/' + e.why : '')) };
+
+  // ── and a REAL wheel-up: paging must still work for an actual reader.
+  //    A reader produces a STREAM of wheel ticks, so send a few (a single
+  //    synthetic tick can land while a previous load still holds _loading).
+  const mark3 = (view._traceRing || []).length;
+  let wheelTraces = [];
+  for (let i = 0; i < 6; i++) {
+    list.scrollTop = 0;
+    list.dispatchEvent(new WheelEvent('wheel', { deltaY: -300, bubbles: true }));
+    await sleep(700);
+    wheelTraces = (view._traceRing || []).slice(mark3).map((e) => e.tag);
+    if (wheelTraces.includes('extendTop:done')) break;
+  }
+  const wheelState = { loading: !!view._loading, pinned: !!view._pinned, ws: view._windowStart, st: Math.round(list.scrollTop) };
+
+  return { ok: true, before, after, samples, traces, probeTraces, retail, wheelTraces, wheelState };
+})()`;
+
+const run = async (label) => {
+  // The negative-control leg re-navigates onto a JUST-REBUILT bundle, so a
+  // boot can lose the race — retry the navigation rather than throwing an
+  // opaque "window.app is undefined" out of the scenario.
+  let booted = false;
+  for (let attempt = 0; attempt < 3 && !booted; attempt++) {
+    await cdp('Page.navigate', { url: `http://127.0.0.1:${PORT}/?cb=${Date.now()}` });
+    for (let i = 0; i < 90 && !booted; i++) {
+      booted = !!await evaljs('!!(window.app && window.app.ready && window.app.wm && window.app.desktopManager)').catch(() => false);
+      if (!booted) await sleep(400);
+    }
+  }
+  if (!booted) return { ok: false, why: 'the client never booted' };
+  await evaljs('window.app.ready').catch(() => {});
+  await sleep(1500);
+  const r = await evaljs(SCENARIO).catch((e) => ({ ok: false, why: String(e.message || e).slice(0, 300) }));
+  console.log(`  [${label}] ${r?.ok ? JSON.stringify({ before: r.before, after: r.after, wheelState: r.wheelState }) : JSON.stringify(r)}`);
+  if (r?.ok) console.log(`  [${label}] traces: ${JSON.stringify(r.traces.map((e) => e.dt + ':' + e.tag + (e.why ? '/' + e.why : '')))}`);
+  return r;
+};
+
+// ── 4. FIXED build: the resume must change nothing ──
+const good = await run('fixed');
+check('scenario ran (chat opened, gap sentinel installed, windowStart > 0)', good?.ok, JSON.stringify(good).slice(0, 400));
+if (good?.ok) {
+  const tags = good.traces.map((e) => e.tag);
+  check('resume does NOT page up (no extendTop:done)', !tags.includes('extendTop:done'), JSON.stringify(good.traces).slice(0, 900));
+  check('resume does NOT trim the tail away (no trimBottom)', !tags.includes('trimBottom'), JSON.stringify(good.traces).slice(0, 900));
+  check('the rendered window did not MOVE (windowStart unchanged — the visible "跳到历史消息了")',
+    good.after.ws === good.before.ws, `${good.before.ws} → ${good.after.ws}`);
+  check('the view is still PINNED after the resume', good.after.pinned === true, JSON.stringify(good.after));
+  check('the window still ends at the live tail (windowEnd === total)', good.after.we === good.after.total, JSON.stringify(good.after));
+  check('the view sits at the bottom (within 8px)', good.after.fromBottom <= 8, JSON.stringify(good.after));
+  check('…and never left the bottom during the whole 4s settle', good.samples.every((s) => s.fromBottom <= 8),
+    JSON.stringify(good.samples.filter((s) => s.fromBottom > 8)).slice(0, 500));
+  check('SENTINEL PROBE: an input-less scrollTop→0 makes the observer fire and be REFUSED (gapSkip)',
+    good.probeTraces.some((x) => x.startsWith('gapSkip')), JSON.stringify(good.probeTraces));
+  check('SENTINEL PROBE: …and nothing pages (no extendTop:done, no trimBottom)',
+    !good.probeTraces.some((x) => x === 'extendTop:done' || x === 'trimBottom'), JSON.stringify(good.probeTraces));
+  check('RE-TAIL GAP: an input-less scrollTop→0 at resume+1210ms (between the settle expiring and the re-tail running) ends PINNED at the tail',
+    good.retail.pinned === true && good.retail.fromBottom <= 8, JSON.stringify(good.retail).slice(0, 500));
+  check('a REAL wheel-up after the settle still pages normally (the gates refuse displacement, never a reader)',
+    good.wheelTraces.includes('extendTop:done'), JSON.stringify({ wheelTraces: good.wheelTraces, wheelState: good.wheelState }));
+}
+
+// ── 5. NEGATIVE CONTROL: patch the gates out at SOURCE and rebuild ──
+// String-exact against code this commit owns; a drifted marker fails LOUDLY
+// instead of silently turning the control into a no-op.
+const patch = (rel, pairs) => {
+  const fp = path.join(wt, rel);
+  let s = fs.readFileSync(fp, 'utf8');
+  for (const [from, to] of pairs) {
+    if (!s.includes(from)) { console.error(`  ✗ NEGATIVE CONTROL marker drifted in ${rel}: ${from.slice(0, 70)}`); failed++; continue; }
+    s = s.split(from).join(to);
+  }
+  fs.writeFileSync(fp, s);
+};
+patch('src/lib/chat-view.js', [
+  ['const RESUME_SETTLE_MS = 1200;', 'const RESUME_SETTLE_MS = 0;'],                       // (2) resume settle off
+  ['  _autoPagingBlocked() {', '  _autoPagingBlocked() { return null;'],                   // (1) IO/seek gate off
+  ["if (this._pinned) this._trace('trimSkipPinned', { ws: newStart, n: msgs.length });\n        else this._trimBottom();", 'this._trimBottom();'], // (3a)
+  ["if (this._pinned) { this._trace('pinnedRetail', { ws: newStart }); this._scrollToBottom(); }", ';'],                                          // (3b)
+  ['if (!this._pinned && !this._pinnedAtSuspend) return;', 'if (!this._pinned) return;'],   // (4) re-tail back on the LIVE flag
+]);
+buildBundle();
+const bad = await run('gates-removed');
+check('NEGATIVE CONTROL: without the gates the resume DOES page up (extendTop:done)',
+  bad?.ok && bad.traces.some((e) => e.tag === 'extendTop:done'), JSON.stringify(bad).slice(0, 900));
+check('NEGATIVE CONTROL: …and the rendered window MOVES with zero user input',
+  bad?.ok && bad.after.ws !== bad.before.ws, `${bad?.before?.ws} → ${bad?.after?.ws}`);
+check('NEGATIVE CONTROL: the sentinel probe pages through the gap door',
+  bad?.ok && bad.probeTraces.includes('extendTop:done'), JSON.stringify(bad?.probeTraces));
+check('NEGATIVE CONTROL: …and the re-tail-gap injection strands the window (unpinned / away from the tail)',
+  bad?.ok && (bad.retail.pinned === false || bad.retail.fromBottom > 8), JSON.stringify(bad?.retail).slice(0, 500));
+
+ws.close();
+console.log(failed ? `\n${failed} FAILED` : '\nALL PASS (15)');
+process.exit(failed ? 1 : 0);

@@ -145,8 +145,16 @@ ok(/typeof usageHistory\?\.pricingToken === 'function'/.test(ua), 'a ledger that
 const uhs = fs.readFileSync(path.join(REPO, 'src/usage-history.js'), 'utf8');
 ok(/_sortedEvents\(\) \{/.test(uhs) && /if \(Date\.now\(\) - \(c\.checkedAt \|\| 0\) < 1000\) return c\.events;/.test(uhs) && /if \(to && ev\.ts > to\) break;/.test(uhs), 'usage-history has the sorted view, the 1s throttle and the early break');
 ok(/pricingToken\(\) \{/.test(uhs) && /this\._priceTokFor === this\._pricing/.test(uhs), 'usage-history exposes the price-table token, recomputed only when the table object is REPLACED');
-// the client half of inc-mtox23xw lives in scripts/test-chat-trim-guard.mjs
-// (the 2.369.36 `rendered < 30` gate was unsatisfiable — see that suite)
+// The client half of inc-mtox23xw is the post-attach short-view rescue. Its
+// FUNCTIONAL coverage (the corroborated two readings, the harm bound) lives in
+// scripts/test-chat-trim-guard.mjs — the 2.369.36 `rendered < 30` gate was
+// unsatisfiable. These two keep the shape pinned from the incident's own suite:
+// the rescue still waits out the settle, still bounds the harm, and since
+// inc-mtq5bpjt-0o0n it ALSO defers through the desktop-resume settle window —
+// same law, second source of transitional geometry.
+const cv = fs.readFileSync(path.join(REPO, 'src/lib/chat-view.js'), 'utf8');
+ok(/_shortViewNeedsFill\(list\) \{/.test(cv) && /rendered \+ 50 > 150/.test(cv) && /tryAutoFill\(2\), 700\);/.test(cv) && /autoFill/.test(cv), 'chat-view: the auto-fill page-up after attach waits for heights to settle, corroborates the reading and stays under the trim cap (never a pinned tall window)');
+ok(/const tryAutoFill = \(retries\) => \{[\s\S]{0,400}this\._resumeSettleUntil \|\| 0\) - Date\.now\(\)/.test(cv), 'chat-view: …and it defers through a desktop-resume settle instead of deciding on transitional geometry (inc-mtq5bpjt-0o0n)');
 fs.rmSync(dataDir, { recursive: true, force: true });
 fs.rmSync(priceDir, { recursive: true, force: true });
 fs.rmSync(otherDir, { recursive: true, force: true });

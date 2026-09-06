@@ -80,6 +80,7 @@ const SUITES = [
   'test-local-device', 'test-sysinfo-op', 'test-transcript-parity',
   'test-writer-sweep', 'test-agentd-session', 'test-session-brain-dark',
   'test-chat-e2e',      // ONE real haiku turn through the full chat pipeline (oat token slot; SKIPs without ~/.config/vibespace/ci-oat)
+  'test-desktop-resume-paging', // inc-mtq5bpjt-0o0n end-to-end: a PINNED window survives a real desktop switch on a real >34MB transcript (gap sentinel installed), incl. the input-less scrollTop→0 probes, WITH a source-level negative control that rebuilds the bundle with the gates patched out (SKIPs without chrome; ~1 min, two chrome runs + two bundle builds)
   'test-client-boot',   // headless-chrome app boot (the FRONTEND face of 打不开; SKIPs without chrome)
   'test-sidebar-rail',  // rail panels + process manager CDP battery (was manual-only and went silently stale — the 9-item assert was red for 12 releases; no rebuild: overlays the gate's own build; SKIPs without chrome)
   'test-restore-smoke', // LAST: the end-to-end boot + session-lifecycle + route battery

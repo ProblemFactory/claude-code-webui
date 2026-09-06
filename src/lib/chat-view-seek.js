@@ -131,7 +131,7 @@ export function installChatSeek(ChatView) {
     // doomed request every frame while the user sits at the top.
     if (s && s.isConnected && !s._gapLoading && Date.now() >= (s._gapRetryAt || 0)
         && (s._gapCursor == null || s._gapCursor > 0)) {
-      this._loadEarlierGap(s, null);
+      this._loadEarlierGap(s, null);   // AUTOMATIC: gated inside (_autoPagingBlocked)
     }
   },
 
@@ -147,9 +147,21 @@ export function installChatSeek(ChatView) {
     if (s) { s._gapCursor = null; s._gapAnchor = null; s._gapLoading = false; s._gapRetryAt = 0; }
   },
 
-    async _loadEarlierGap(markerEl, btn) {
+    async _loadEarlierGap(markerEl, btn, { auto = true, via = 'seek' } = {}) {
       const _t0 = performance.now();
     if (!markerEl || markerEl._gapLoading) return;
+    // AUTOMATIC callers (the sentinel's IntersectionObserver and the
+    // scroll/wheel-driven _maybeSeekEarlier) obey the same laws as the scroll
+    // handler — suspended / just-resumed / pinned / settling / no recent user
+    // input all mean "this is displacement, not intent" (inc-mtq5bpjt-0o0n:
+    // this function was the ONE upward-paging entry point with no gate at all,
+    // and a desktop resume drove it straight through the tail branch below).
+    // The guard lives HERE, on the path that is alive in the failure state —
+    // an explicit user gesture (retry click) passes auto:false and bypasses it.
+    if (auto) {
+      const why = this._autoPagingBlocked();
+      if (why) { this._trace?.('gapSkip', { why, via }); return; }
+    }
     // Tail mode: load the registered tail to completion first — the sentinel
     // loads history BELOW line tailStartLine, which must sit above a fully
     // rendered tail. Teleport mode has no registered tail, so skip this.
@@ -165,7 +177,8 @@ export function installChatSeek(ChatView) {
       if (retryable) markerEl._gapRetryAt = Date.now() + 5000;
       this._showHistoryStatus(t('Couldn\'t load earlier messages'), {
         kind: 'error',
-        retry: () => { markerEl._gapRetryAt = 0; this._loadEarlierGap(markerEl, btn); },
+        // an explicit retry CLICK is intent — never gated by _autoPagingBlocked
+        retry: () => { markerEl._gapRetryAt = 0; this._loadEarlierGap(markerEl, btn, { auto: false }); },
       });
     };
     try {
