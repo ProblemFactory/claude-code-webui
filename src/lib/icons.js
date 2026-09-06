@@ -37,6 +37,7 @@ export const FILE_ICONS = {
 
 // ── UI icons (used across chat, session cards, toolbar, etc.) ──
 export const UI_ICONS = {
+  image:     FILE_ICONS.image, // image media cards (chat-renderers) share the file-type glyph
   alert: `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6.2"/><path d="M8 4.8v3.6" stroke-linecap="round"/><circle cx="8" cy="11" r="0.9" fill="currentColor" stroke="none"/></svg>`,
   // Tool cards
   // Classic open-end wrench (Lucide 'wrench' scaled to 16) — the old path

@@ -35,15 +35,25 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // ── Part 1: pure classifier + summary composer ──────────────────────────────
 const S = await import(path.join(repo, 'src/lib/chat-run-summary.js'));
 const t = (k, p) => k.replace(/\{(\w+)\}/g, (m, x) => (p && p[x] !== undefined ? String(p[x]) : m));
-const tool = (toolName, input = {}, extra = {}) => ({ role: 'assistant', content: [{ type: 'tool_use', toolName, input }], ...extra });
+const tool = (toolName, input = {}, extra = {}, block = {}) => ({ role: 'assistant', content: [{ type: 'tool_use', toolName, input, ...block }], ...extra });
 const kindOf = (m, opts = {}) => S.messageKind(m, { toolCard: true, ...opts });
 
 check('ToolSearch classifies as lookup (NOT mcp)', kindOf(tool('ToolSearch', { query: 'select:Read' })) === 'lookup');
 check('mcp__server__tool classifies as mcp', kindOf(tool('mcp__chrome-devtools__click')) === 'mcp');
 check('lookup folds under the MCP toggle (no new checkbox; customised kind lists keep folding what they fold today)', S.foldToggleFor('lookup') === 'mcp' && S.foldToggleFor('bash') === 'bash' && S.foldToggleFor('mcp') === 'mcp');
-check('claude name map: Bash/Grep/Read/Edit/WebSearch/Skill/Agent/image-Read', kindOf(tool('Bash')) === 'bash' && kindOf(tool('Grep')) === 'read' && kindOf(tool('Read', { file_path: '/a/b.js' })) === 'read'
-  && kindOf(tool('Edit', { file_path: '/a/b.js' })) === 'write' && kindOf(tool('WebSearch')) === 'search' && kindOf(tool('Skill')) === 'skill' && kindOf(tool('Agent')) === 'agent'
-  && kindOf(tool('Read', { file_path: '/shots/x.PNG' })) === 'image');
+check('claude name map: Bash/Grep/Read/Edit/WebSearch/Skill/Agent', kindOf(tool('Bash')) === 'bash' && kindOf(tool('Grep')) === 'read' && kindOf(tool('Read', { file_path: '/a/b.js' })) === 'read'
+  && kindOf(tool('Edit', { file_path: '/a/b.js' })) === 'write' && kindOf(tool('WebSearch')) === 'search' && kindOf(tool('Skill')) === 'skill' && kindOf(tool('Agent')) === 'agent');
+// EVIDENCE, NEVER THE EXTENSION (image-card review round 2, 2026-09-06): a Read is an image view only when
+// its RESULT carried lifted image blocks — a claude `Read *.svg` comes back as
+// numbered TEXT (12/12 real fleet reads), and the extension rule both counted
+// those as "image reads" and (since image members are fold-exempt) let a plain
+// text card escape its run.
+check("a Read is 'image' only with lifted image blocks; a text result of any image extension is a plain read",
+  kindOf(tool('Read', { file_path: '/shots/x.PNG' }, {}, { images: [{ mediaType: 'image/png', bytes: 12 }] })) === 'image'
+  && kindOf(tool('Read', { file_path: '/shots/x.PNG' })) === 'read'
+  && kindOf(tool('Read', { file_path: '/w/logo.svg' })) === 'read'
+  && kindOf(tool('Read', { file_path: '/w/no-ext' }, {}, { images: [{ mediaType: 'image/png', bytes: 12 }] })) === 'image');
+check("codex/ACP still decide by the stamped collapseKind (view_image → image)", kindOf(tool('view_image', { path: '/w/a.png' }, { collapseKind: 'image' })) === 'image');
 check('semantic collapseKind hint wins (codex exec → bash) and memory paths override read/write hints', kindOf(tool('exec', {}, { collapseKind: 'bash' })) === 'bash'
   && kindOf(tool('Patch', { file_path: '/home/u/.claude/projects/x/memory/MEMORY.md' }, { collapseKind: 'write' }), { isMemoryPath: (fp) => /\/memory\//.test(fp) }) === 'memory');
 check('unknown tool → null (breaks the run — every new tool name needs a kind); pure thinking → thinking; text → null',
@@ -120,6 +130,10 @@ const wt = `/tmp/vs-foldux-${process.pid}`;
 const fakeHome = `${wt}-home`;
 const CWD = `${wt}-cwd`;
 const SID = 'f01d0000-0000-4000-8000-00000000ffee';
+const IMG_SID = 'f01d0000-0000-4000-8000-00000000f11e';
+const IMG_PATH = `${CWD}/shot.png`;
+// a real 8×8 opaque PNG — the thumbnail must actually decode (naturalWidth > 0)
+const PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGMwnnkGK2IYWhIAtNFmAVCW3mYAAAAASUVORK5CYII=';
 // 28 Bash + 1 ToolSearch = a run taller than the window; 8 tall text turns
 // AFTER it so the header can land at the viewport top once the run collapses
 // (with nothing below, scrollTop just clamps to 0), then a SHORT mcp run after
@@ -163,6 +177,32 @@ const NBASH = 28, NTAIL = 8, NMCP = 2;
   fs.mkdirSync(proj, { recursive: true });
   fs.mkdirSync(CWD, { recursive: true });
   fs.writeFileSync(path.join(proj, `${SID}.jsonl`), lines.join('\n') + '\n');
+
+  // ── the MIXED run (image-card review round 2, 2026-09-06): Bash → Read(png) → Bash, the shape a media
+  // card really lands in. A run-level exemption left this card display:none
+  // inside "2 Bash · 1 image reads" (browser ground truth) — the image MEMBER
+  // must stay visible while the run folds around it, and its lazy thumbnail
+  // must actually FETCH, so the fixture writes a REAL png the server can serve
+  // through /api/file/raw.
+  fs.writeFileSync(IMG_PATH, Buffer.from(PNG_B64, 'base64'));
+  const il = [];
+  let its0 = Date.now() - 1800e3;
+  const its = () => new Date((its0 += 5e3)).toISOString();
+  let m = 0;
+  const ipush = (o) => il.push(JSON.stringify(o));
+  ipush({ type: 'user', message: { role: 'user', content: 'look at the screenshot' }, uuid: `iu-${m++}`, timestamp: its() });
+  ipush({ type: 'assistant', message: { id: `imsg_${m}`, role: 'assistant', model: 'claude-fable-5', content: [{ type: 'text', text: 'Checking.' }], usage: { input_tokens: 1, output_tokens: 1 } }, uuid: `ia-${m++}`, timestamp: its() });
+  for (const [i, name] of [[0, 'Bash'], [1, 'Read'], [2, 'Bash']]) {
+    const tid = `toolu_i${i}`;
+    const input = name === 'Bash' ? { command: `ls -l ${i}` } : { file_path: IMG_PATH };
+    ipush({ type: 'assistant', message: { id: `imsg_${m}`, role: 'assistant', model: 'claude-fable-5', content: [{ type: 'tool_use', id: tid, name, input }], usage: {} }, uuid: `itu-${m++}`, timestamp: its() });
+    const content = name === 'Bash'
+      ? `listing ${i}\n`
+      : [{ type: 'text', text: 'Read the image.' }, { type: 'image', source: { type: 'base64', media_type: 'image/png', data: PNG_B64 } }];
+    ipush({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: tid, content }] }, uuid: `itr-${m++}`, timestamp: its() });
+  }
+  ipush({ type: 'assistant', message: { id: `imsg_${m}`, role: 'assistant', model: 'claude-fable-5', content: [{ type: 'text', text: 'Looks right.' }], usage: { input_tokens: 1, output_tokens: 1 } }, uuid: `iaf-${m++}`, timestamp: its() });
+  fs.writeFileSync(path.join(proj, `${IMG_SID}.jsonl`), il.join('\n') + '\n');
 }
 
 try { execSync(`git worktree remove --force ${wt}`, { cwd: repo, stdio: 'ignore' }); } catch {}
@@ -398,6 +438,70 @@ const p6 = await chatView(`
   cv._hideHistoryStatus();
   return r;`);
 check('the history-load pill sits BELOW the floating run bar (no inline top left to beat the stylesheet)', p6.barShown && p6.pillTop >= p6.barBottom && p6.pillInline === '', JSON.stringify(p6));
+
+// ── THE MIXED RUN (image-card review round 2, 2026-09-06): Bash → Read(png) → Bash ────────────────
+// The owner's ask was "展开直接看到图像内容". The first cut exempted only runs
+// made ONLY of image views — but a media card almost always sits BETWEEN other
+// foldable cards, and there it was still display:none inside "2 Bash · 1 image
+// reads", its loading="lazy" thumbnail never fetching. GROUND TRUTH here: with
+// the run COLLAPSED (the shipped default), the Bash cards are display:none, the
+// media card is not, and its <img> really decodes off /api/file/raw.
+const img0 = await evaljs(`(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  window.app.viewSession('${IMG_SID}', '${CWD}', 'image fold');
+  let cv = null;
+  // the view-only ChatView may be keyed by a synthesized id — identify it by
+  // its OWN message list (never the first fixture's)
+  for (let i = 0; i < 80; i++) {
+    cv = [...window.app.sessions.values()].find((s) => s && s._messageList && s._messageList !== window.__list);
+    if (cv && cv._messageList.querySelector(':scope > .chat-run-header')) break;
+    await sleep(250);
+  }
+  if (!cv || !cv._messageList) return { err: 'no image ChatView', keys: [...window.app.sessions.keys()].slice(0, 6), ids: [...window.app.sessions.values()].map((s) => s && s.sessionId).slice(0, 6) };
+  await sleep(900); // fold settle
+  window.__imgCv = cv;
+  const list = cv._messageList;
+  const header = list.querySelector(':scope > .chat-run-header');
+  const cards = [...list.querySelectorAll(':scope > .chat-msg.chat-msg-tool-result')];
+  const media = cards.find((el) => el.querySelector('img.chat-tool-img'));
+  const img = media?.querySelector('img.chat-tool-img');
+  if (img && !img.complete) await new Promise((r) => { img.addEventListener('load', r, { once: true }); img.addEventListener('error', r, { once: true }); setTimeout(r, 4000); });
+  const disp = (el) => (el ? getComputedStyle(el).display : 'missing');
+  return {
+    header: !!header, label: (header?.textContent || '').replace(/^▸\\s*/, '').trim(),
+    open: header?.classList.contains('open') || false,
+    cards: cards.length,
+    mediaFound: !!media,
+    mediaDisplay: disp(media),
+    mediaCollapsed: media?.classList.contains('chat-run-collapsed') || false,
+    bashDisplays: cards.filter((el) => el !== media).map(disp),
+    bashCollapsed: cards.filter((el) => el !== media && el.classList.contains('chat-run-collapsed')).length,
+    imgSrc: img?.getAttribute('src') || '',
+    naturalWidth: img?.naturalWidth || 0,
+    broken: !!media?.querySelector('.chat-media.chat-media-broken'),
+    inlineSize: cv._runs?.[0]?.inline?.size ?? -1,
+    members: cv._runs?.[0]?.members?.length ?? -1,
+  };
+})()`);
+check('mixed run: the header exists and still counts every member ("2 Bash · 1 image reads")', img0?.header && /2 Bash/.test(img0.label) && /1 image reads/.test(img0.label), JSON.stringify(img0));
+check('mixed run COLLAPSED: the two Bash cards are display:none…', !img0?.open && img0?.bashCollapsed === 2 && img0.bashDisplays.every((d) => d === 'none'), JSON.stringify({ open: img0?.open, bashCollapsed: img0?.bashCollapsed, d: img0?.bashDisplays }));
+check('…while the IMAGE card is NOT hidden (the owner\'s ask: 展开直接看到图像内容)', img0?.mediaFound && !img0.mediaCollapsed && img0.mediaDisplay !== 'none', JSON.stringify({ found: img0?.mediaFound, collapsed: img0?.mediaCollapsed, display: img0?.mediaDisplay }));
+check('…and its lazy thumbnail really FETCHED and decoded from /api/file/raw (naturalWidth > 0)', img0?.naturalWidth > 0 && /\/api\/file\/raw\?path=/.test(img0.imgSrc) && !img0.broken, JSON.stringify({ nw: img0?.naturalWidth, src: img0?.imgSrc, broken: img0?.broken }));
+check('…bookkeeping: the image is a MEMBER of the run, only listed as inline (not a separate run)', img0?.members === 3 && img0?.inlineSize === 1, JSON.stringify({ members: img0?.members, inline: img0?.inlineSize }));
+const img1 = img0?.err ? { err: img0.err } : await evaljs(`(async () => {
+  const cv = window.__imgCv, list = cv._messageList;
+  list.querySelector(':scope > .chat-run-header').click();
+  await new Promise((r) => setTimeout(r, 400));
+  const cards = [...list.querySelectorAll(':scope > .chat-msg.chat-msg-tool-result')];
+  const media = cards.find((el) => el.querySelector('img.chat-tool-img'));
+  return { open: list.querySelector(':scope > .chat-run-header').classList.contains('open'),
+    collapsed: list.querySelectorAll(':scope > .chat-msg.chat-run-collapsed').length,
+    members: list.querySelectorAll(':scope > .chat-msg.chat-run-member').length,
+    mediaIsMember: media?.classList.contains('chat-run-member') || false,
+    footers: list.querySelectorAll(':scope > .chat-run-footer').length,
+    displays: cards.map((el) => getComputedStyle(el).display) };
+})()`);
+check('mixed run EXPANDED: everything visible, the image carries the grouping rail like any member', img1?.open && img1.collapsed === 0 && img1.members === 3 && img1.mediaIsMember && img1.footers === 1 && img1.displays.every((d) => d !== 'none'), JSON.stringify(img1));
 
 check('zero uncaught page exceptions during the whole flow', pageErrors.length === 0, pageErrors.slice(0, 3).join(' | '));
 

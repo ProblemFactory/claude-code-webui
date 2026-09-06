@@ -36,8 +36,6 @@ export function mcpParts(name) {
   return m ? { server: m[1], tool: m[2] } : null;
 }
 
-const IMAGE_RE = /\.(png|jpe?g|gif|webp|bmp|svg|ico|tiff?|heic|avif)$/i;
-
 /**
  * Semantic kind of one card. `toolCard` = the element is a tool-result card
  * (role assistant + tool_use block); non-tool cards can only be 'thinking'.
@@ -52,7 +50,8 @@ const IMAGE_RE = /\.(png|jpe?g|gif|webp|bmp|svg|ico|tiff?|heic|avif)$/i;
  */
 export function messageKind(m, { toolCard, isMemoryPath = () => false }) {
   if (toolCard) {
-    const fp = m?.content?.[0]?.input?.file_path || '';
+    const b0 = m?.content?.[0];
+    const fp = b0?.input?.file_path || '';
     const ck = m?.collapseKind;
     if (ck) {
       if ((ck === 'read' || ck === 'write') && isMemoryPath(fp)) return 'memory';
@@ -68,7 +67,15 @@ export function messageKind(m, { toolCard, isMemoryPath = () => false }) {
     // web research is its OWN kind (2.369.33, owner report: 42 WebSearch cards
     // in one session, none folded — and each null BROKE the surrounding run)
     if (tn === 'WebSearch' || tn === 'WebFetch') return 'search';
-    if (tn === 'Read' && IMAGE_RE.test(fp)) return 'image'; // image views fold as their own kind (2.369.34)
+    // EVIDENCE, NEVER THE EXTENSION (image-card review round 2, 2026-09-06): a Read is an image view
+    // only when its RESULT carried lifted image blocks. claude hands back
+    // numbered TEXT for the text-source image formats — measured, 12/12 real
+    // `Read *.svg` tool_results in the fleet corpus are plain strings starting
+    // "1\t<svg …" — so an extension rule counted those as "image reads" in the
+    // summary AND (since the image kind is exempt from folding) let a plain
+    // text card escape its run. codex/ACP never reach this line: their
+    // normalizers stamp `collapseKind` above.
+    if (tn === 'Read' && b0?.images?.length > 0) return 'image'; // image views fold as their own kind (2.369.34)
     if (tn === 'Grep' || tn === 'Glob' || tn === 'LS') return 'read';   // file-system searches = reads
     // Tool-schema lookups are NOT MCP calls (owner, 2.369.37): they fold with
     // their neighbours under the MCP toggle (foldToggleFor) but count as

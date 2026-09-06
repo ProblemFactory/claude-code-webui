@@ -2920,4 +2920,7 @@ export default {
   "Collapse": "折りたたむ",
   "Collapse run": "この実行を折りたたむ",
   "Jump to top of run": "実行の先頭へ",
+  "View image": "画像を表示",
+  "Image": "画像",
+  "Image not available on this machine": "この端末では画像を利用できません",
 };

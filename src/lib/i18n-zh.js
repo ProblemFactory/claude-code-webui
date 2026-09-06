@@ -2920,4 +2920,7 @@ export default {
   "Collapse": "折叠",
   "Collapse run": "折叠此组",
   "Jump to top of run": "跳到此组开头",
+  "View image": "查看图片",
+  "Image": "图片",
+  "Image not available on this machine": "此机器上没有该图片",
 };

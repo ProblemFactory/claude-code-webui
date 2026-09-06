@@ -112,6 +112,14 @@ class ChatView {
     // Message list
     this._messageList = document.createElement('div');
     this._messageList.className = 'chat-message-list';
+    // Media-card thumbnails that cannot load (file deleted, or a history viewed
+    // from a machine that does not have it) swap to the honest "not available"
+    // line — `error` does not bubble, so this is a CAPTURE-phase delegate on
+    // the list (no inline handlers in rendered HTML; 2.369.43)
+    this._messageList.addEventListener('error', (e) => {
+      const img = e.target;
+      if (img?.tagName === 'IMG' && img.classList?.contains('chat-tool-img')) img.closest('.chat-media')?.classList.add('chat-media-broken');
+    }, true);
     // Consecutive thinking/Bash run collapse (chat.collapseRuns, default ON —
     // TUI-style): a MutationObserver keeps the decoration current across live
     // appends, edits, virtual-scroll trims and jumps without touching any of
@@ -3112,6 +3120,23 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
         // card still shrinks several lines → one). Pure-thinking runs need ≥2
         // so a lone thought stays inline.
         const hasTool = members.some((el) => el.classList.contains('chat-msg-tool-result'));
+        // THE IMAGE MEMBER IS EXEMPT, NOT THE RUN (image-card review round 2, 2026-09-06).
+        // An image the owner asked to SEE must not vanish into "1 image read"
+        // (2.369.43): 'image' ships ON in chat.collapseKinds and the rule above
+        // folds a LONE tool card, so every media card landed collapsed —
+        // display:none, so the card was invisible without a click AND its
+        // loading="lazy" thumbnail never even fetched. The first cut exempted
+        // whole runs made only of image views, which is the RARE shape: in real
+        // sessions a media card sits BETWEEN other foldable cards (Bash →
+        // Read(png) → Bash), and browser ground truth showed it still
+        // display:none inside "2 Bash · 1 image reads". So the exemption is
+        // per MEMBER: image cards stay in the run (rail, first/last, sticky
+        // mark, summary count, the bar's span) but never join the COLLAPSED
+        // set — the fold closes around them. A run with NOTHING left to fold
+        // (every member an image) gets no header at all: a fold control that
+        // hides nothing is a dead control.
+        const inline = new Set(members.filter((el) => memberKind(el) === 'image'));
+        if (inline.size === members.length) { run = []; runKind = null; return; }
         if (members.length >= (hasTool ? 1 : 2)) {
           const header = document.createElement('div');
           header.className = 'chat-run-header';
@@ -3151,7 +3176,7 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
           const running = members.some((el) => el._rawMsg?.status === 'pending' || el._rawMsg?.status === 'streaming');
           const label = runSummaryLabel({ byKind, mcpServers, files, nErr, running }, t);
           header.innerHTML = `<span class="chat-run-arrow">▸</span><span class="chat-run-label">${escHtml(label)}</span>`;
-          const rec = { header, members, footer: null, label, open: false };
+          const rec = { header, members, inline, footer: null, label, open: false };
           // Rebuilds happen on every list mutation — remember runs the user
           // opened so a new message doesn't re-collapse what they're reading.
           // Keyed by ANY member, not just the first: scroll-up pagination
@@ -3248,7 +3273,11 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
     const n = run.members.length;
     run.members.forEach((el, i) => {
       if (run.open) this._runExpanded.add(el); else this._runExpanded.delete(el);
-      el.classList.toggle('chat-run-collapsed', !run.open);
+      // an INLINE member (an image view — image-card review round 2) is a member of the run for
+      // every other purpose but never of the collapsed set: the owner asked to
+      // see the picture without a click, and display:none also means its
+      // loading="lazy" thumbnail never fetches
+      el.classList.toggle('chat-run-collapsed', !run.open && !run.inline?.has(el));
       el.classList.toggle('chat-run-member', run.open);
       el.classList.toggle('chat-run-first', run.open && i === 0);
       el.classList.toggle('chat-run-last', run.open && i === n - 1);

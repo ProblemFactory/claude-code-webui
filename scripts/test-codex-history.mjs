@@ -852,5 +852,23 @@ const ok = (n, c, e) => { if (c) { pass++; console.log('  ✓ ' + n); } else { f
   ok('the 0.130.0 window carries ORPHAN ENDS (the shape no other rollout has) and its twins are interleaved with them', orphanEnds === 12 && p130.ends === 106 && p130.calls === 94 && p130.expectedCards === 106, JSON.stringify({ orphanEnds, ends: p130.ends, calls: p130.calls }));
 }
 
+// ── view_image in a REAL rollout (2.369.43; shapes verbatim from ~/.codex/sessions,
+// path sanitized): function_call → event_msg view_image_tool_call (formerly
+// SKIPPED) → function_call_output whose output is [{input_image, image_url:data:…}]
+{
+  const b64 = Buffer.alloc(9000).toString('base64');
+  const mm = new CodexMessageManager('t-img');
+  const msgs = mm.convertHistory([
+    { type: 'response_item', payload: { type: 'function_call', name: 'view_image', arguments: '{"path":"/w/artifacts/bench.png","detail":"original"}', call_id: 'call_C9Wp' } },
+    { type: 'event_msg', payload: { type: 'view_image_tool_call', call_id: 'call_C9Wp', path: '/w/artifacts/bench.png' } },
+    { type: 'response_item', payload: { type: 'function_call_output', call_id: 'call_C9Wp', output: [{ type: 'input_image', image_url: 'data:image/png;base64,' + b64 }] } },
+    { type: 'event_msg', payload: { type: 'view_image_tool_call', call_id: 'call_orphan', path: '/w/orphan.png' } },
+  ]);
+  const tools = msgs.filter((m) => m.role === 'tool');
+  ok('the rollout triple (call + engine event + output) is ONE complete view_image card in the image fold kind', tools.filter((m) => m.toolCallId === 'call_C9Wp').length === 1 && tools[0].status === 'complete' && tools[0].collapseKind === 'image' && tools[0].content[0].input.path === '/w/artifacts/bench.png', JSON.stringify(tools.map((m) => [m.toolCallId, m.status])));
+  ok('the input_image output block is lifted to {mediaType, bytes} — no base64 in the card (2.369.35 law, codex twin)', tools[0].content[0].images?.[0]?.mediaType === 'image/png' && tools[0].content[0].images[0].bytes === 9000 && !JSON.stringify(tools[0]).includes(b64.slice(0, 32)) && tools[0].content[0].output === '[image image/png · 9 KB]', tools[0].content[0].output);
+  ok('an engine event with no call pair (history without the wrapper stub) still becomes a complete card', tools.some((m) => m.toolCallId === 'call_orphan' && m.status === 'complete' && m.content[0].input.path === '/w/orphan.png'));
+  ok('view_image_tool_call is routed, not skipped', !CodexMessageManager.SKIPPED_EVENT_TYPES.has('view_image_tool_call'));}
+
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);
 process.exit(fail ? 1 : 0);

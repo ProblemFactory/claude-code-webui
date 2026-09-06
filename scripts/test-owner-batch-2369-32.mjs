@@ -71,10 +71,11 @@ ok(/const fmtReset = \(ts, util(?:, est)?\) => \{/.test(um2) && (um2.match(/fmtR
   // src/lib/chat-run-summary.js (owner caught "1 次 MCP" over a ToolSearch —
   // it is a 'lookup' now: folds under the MCP toggle, labelled honestly)
   const RS = await import(path.join(REPO, 'src/lib/chat-run-summary.js'));
-  const tk = (name, input = {}) => RS.messageKind({ role: 'assistant', content: [{ type: 'tool_use', toolName: name, input }] }, { toolCard: true });
+  const tk = (name, input = {}, extra = {}) => RS.messageKind({ role: 'assistant', content: [{ type: 'tool_use', toolName: name, input, ...extra }] }, { toolCard: true });
   const tt = (k, p) => k.replace(/\{(\w+)\}/g, (m, x) => String(p?.[x] ?? m));
   ok(tk('WebSearch') === 'search' && tk('WebFetch') === 'search' && tk('Grep') === 'read' && tk('Glob') === 'read' && tk('LS') === 'read' && tk('ToolSearch') === 'lookup' && RS.foldToggleFor('lookup') === 'mcp'
-    && tk('Read', { file_path: '/x/y.png' }) === 'image'
+    && tk('Read', { file_path: '/x/y.png' }, { images: [{ mediaType: 'image/png', bytes: 9 }] }) === 'image'
+    && tk('Read', { file_path: '/x/y.png' }) === 'read' && tk('Read', { file_path: '/x/logo.svg' }) === 'read' // EVIDENCE, not the extension (image-card review round 2, 2026-09-06)
     && RS.runSummaryParts(RS.countKinds(['search', 'search', 'image', 'read']), new Set(), tt).join(' · ') === '1 file reads · 2 web searches · 1 image reads'
     && /messageKind\(el\._rawMsg, \{ toolCard: el\.classList\.contains\('chat-msg-tool-result'\), isMemoryPath \}\)/.test(cv) && /'mcp', 'agent', 'search', 'image'\]\)/.test(cv), 'chat-view: WebSearch/WebFetch→search, Grep/Glob/LS→read, ToolSearch→lookup (folds under mcp, labelled apart); summary counts searches; default set includes search');
   const { CodexMessageManager } = require(path.join(REPO, 'src/codex-message-manager.js'));
@@ -106,7 +107,15 @@ ok(/const fmtReset = \(ts, util(?:, est)?\) => \{/.test(um2) && (um2.match(/fmtR
   ok(b && b.type === 'tool_result' && b.output.length < 200 && /\[image image\/png · 586 KB\]/.test(b.output) && b.images?.[0]?.mediaType === 'image/png' && b.images[0].bytes === 600000 && JSON.stringify(card).length < 2000, `a Read-of-PNG tool result carries {mediaType, bytes} metadata, never the base64 (card ${JSON.stringify(card).length} bytes)`, b?.output?.slice(0, 80));
   ok(splitToolResultContent([{ type: 'text', text: 'hi' }]).text === '[{"type":"text","text":"hi"}]' && splitToolResultContent('plain').text === 'plain' && splitToolResultContent([{ type: 'text', text: 'a' }, { type: 'image', source: { media_type: 'image/jpeg', data: 'xx' } }]).images.length === 1, 'text/array results keep their exact previous shape; mixed results lift only the images');
   const cr2 = read('src/lib/chat-renderers.js');
-  ok(/Array\.isArray\(block\.images\) && block\.images\.length/.test(cr2) && /src="\/api\/file\/raw\?path=\$\{encodeURIComponent\(fp\)\}/.test(cr2) && /chat-tool-image-chip/.test(cr2) && /<\/span>\$\{imagesHtml\}/.test(cr2) && /\.chat-tool-images/.test(read('public/chat.css')), 'the tool card renders image results from the FILE (same URL as the file viewer) or a size chip — never a data: URL from the card');
+  // 2.369.43 seam (the pin follows the CODE, not the other way round): the
+  // lifted blocks feed ONE exported imageMediaHtml() whose thumbnail URL comes
+  // from imageRawUrl() (= the file viewer's /api/file/raw, host-qualified);
+  // the generic card splices ${mediaHtml}; no drawable path = a size chip.
+  // "never a data: URL from the card" is pinned BEHAVIOURALLY in
+  // test-image-cards ① (renders a card from image blocks, greps for base64) —
+  // a source-wide `!/data:/` assert is wrong here, renderUserMsg's inline
+  // ACP/claude attachments legitimately build one.
+  ok(/const images = Array\.isArray\(block\.images\) \? block\.images : \[\];/.test(cr2) && /export function imageRawUrl\(fp, host\) \{\s*return `\/api\/file\/raw\?path=\$\{encodeURIComponent\(fp\)\}/.test(cr2) && /imageMediaHtml\(\{ path: isImagePath\(fp\) \? fp : '', host: mediaHost, mediaType: im\.mediaType, bytes: im\.bytes \}\)/.test(cr2) && /chat-tool-image-chip/.test(cr2) && /<\/span>\$\{mediaHtml\}<details class="chat-diff"><summary class="chat-diff-summary">\$\{t\('Input'\)\}/.test(cr2) && !/imagesHtml/.test(cr2) && /\.chat-tool-images/.test(read('public/chat.css')), 'the tool card renders image results from the FILE (imageMediaHtml over imageRawUrl = the file viewer URL) or a size chip — never a base64 blob built by the card');
 }
 
 fs.rmSync(home, { recursive: true, force: true });

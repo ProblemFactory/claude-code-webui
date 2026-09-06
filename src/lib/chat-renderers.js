@@ -88,6 +88,52 @@ const toolCardIcon = (name) => (name === 'Agent' ? UI_ICONS.robot : SHELL_TOOL_N
 // _onSubagentMessage upgrades it to the model actually observed serving.
 const agentModelChip = (model) => (model ? `<span class="chat-agent-model">${escHtml(model)}</span>` : '');
 
+// ── Image media cards (2.369.43, owner: "view image 能不能也多媒体化") ──
+// Every image a tool looked at renders as ONE media block: an expandable
+// <details> (open by default — the owner wants to SEE it) whose body is the
+// image itself, click-to-zoom through the standard .chat-img overlay. The
+// bytes never ride the message (2.369.35 law): a file on disk is drawn from
+// /api/file/raw (host-qualified for remote sessions — the SAME url the file
+// viewer uses, so ?host= dispatches to the machine that owns the file); an
+// inline data: URL is only accepted for the small images a harness hands us
+// directly (ACP/claude user attachments). `loading="lazy"` + the fold's
+// display:none means a collapsed run never fetches its thumbnails.
+// IMAGE_EXT_RE answers ONE question — can the browser DECODE this file as an
+// <img>? — and so decides thumbnail-vs-chip only. Whether a Read's result IS
+// an image is decided by the lifted image blocks (`block.images`), never by
+// the extension: claude returns numbered TEXT for a text-source image format
+// — MEASURED for .svg (real fleet transcripts, cli 2.1.85: every one of the
+// 10 local `Read *.svg` tool_results is a plain string starting "1\t<svg …",
+// 4 of them in one session; .ico is the same class, unmeasured here) — while
+// a tiff/heic Read returns image blocks the browser cannot draw.
+const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|svg|ico|avif)$/i;
+export function isImagePath(fp) { return !!fp && IMAGE_EXT_RE.test(String(fp)); }
+export function imageRawUrl(fp, host) {
+  return `/api/file/raw?path=${encodeURIComponent(fp)}${host ? `&host=${encodeURIComponent(host)}` : ''}`;
+}
+const fmtBytes = (n) => (n >= 1024 * 1024 ? `${(n / (1024 * 1024)).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
+/**
+ * @param {object} o
+ * @param {string} [o.path]      absolute file path (drawn from disk via /api/file/raw)
+ * @param {string} [o.host]      hostId for remote sessions (null/'' = this machine)
+ * @param {string} [o.mediaType] e.g. image/png (summary chip)
+ * @param {number} [o.bytes]     decoded size (summary chip)
+ * @param {string} [o.dataUrl]   inline data: URL (harness-supplied small image)
+ * @param {string} [o.name]      summary label (default: basename of path)
+ * @param {boolean} [o.open]     expanded by default (true)
+ * @returns {string} HTML — a <details class="chat-media"> block, or a size chip when there is nothing drawable
+ */
+export function imageMediaHtml({ path = '', host = null, mediaType = '', bytes = 0, dataUrl = null, name = '', open = true } = {}) {
+  const label = name || (path ? String(path).split('/').pop() : '') || t('Image');
+  const meta = [mediaType, bytes > 0 ? fmtBytes(bytes) : ''].filter(Boolean).join(' · ');
+  const src = dataUrl || (path ? imageRawUrl(path, host) : '');
+  if (!src) return `<span class="chat-tool-image-chip">${escHtml(meta || t('Image'))}</span>`;
+  const metaHtml = meta ? ` <span class="chat-media-meta">${escHtml(meta)}</span>` : '';
+  // the "missing" line is display:none until the <img> fires error (ChatView's
+  // capture-phase listener flags .chat-media-broken — no inline handlers)
+  return `<details class="chat-diff chat-media"${open ? ' open' : ''}><summary class="chat-diff-summary">${UI_ICONS.image} ${escHtml(label)}${metaHtml}</summary><div class="chat-media-body"><img class="chat-img chat-tool-img" loading="lazy" src="${escHtml(src)}" alt="${escHtml(label)}"><span class="chat-media-missing">${escHtml(t('Image not available on this machine'))}</span></div></details>`;
+}
+
 function normalizeUserInputAnswers(rawAnswers) {
   if (!rawAnswers || typeof rawAnswers !== 'object') return {};
   const result = {};
@@ -277,7 +323,9 @@ class ChatRenderers {
     el._rawMsg = msg;
     const parts = content.map(b => {
       if (b.type === 'text') return `<div class="chat-text">${this.renderMarkdown(b.text)}</div>`;
-      if (b.type === 'image') return `<img class="chat-img" src="data:${escHtml(b.mediaType || 'image/png')};base64,${escHtml(b.data)}" alt="image">`;
+      // harness-supplied inline image (ACP/claude user attachment): same media
+      // wrapper + zoom as the tool cards; the data: URL stays (small, no path on disk)
+      if (b.type === 'image') return imageMediaHtml({ dataUrl: `data:${b.mediaType || 'image/png'};base64,${b.data}`, mediaType: b.mediaType || 'image/png', name: t('Image') });
       return '';
     }).join('');
 
@@ -514,13 +562,14 @@ class ChatRenderers {
   renderToolResult(block, msg) {
     const fp = block.input?.file_path || '';
     let resultText = stripAnsi(block.output || '');
-    // image tool results (Read of a PNG/JPG, 2.369.35): the normalizer keeps only
-    // {mediaType, bytes} — render the FILE from disk (same URL the file viewer
-    // uses), never a base64 blob in the DOM
-    const imagesHtml = Array.isArray(block.images) && block.images.length
-      ? `<div class="chat-tool-images">${block.images.map((im) => (fp && /\.(png|jpe?g|gif|webp|bmp|svg|ico|avif)$/i.test(fp))
-        ? `<img class="chat-img chat-tool-img" loading="lazy" src="/api/file/raw?path=${encodeURIComponent(fp)}''" alt="${escHtml(im.mediaType)}">`
-        : `<span class="chat-tool-image-chip">${escHtml(im.mediaType)} · ${Math.max(1, Math.round(im.bytes / 1024))} KB</span>`).join('')}</div>`
+    // image tool results (2.369.35): the normalizer keeps only {mediaType,
+    // bytes} — the media card draws the FILE from disk (host-qualified for
+    // remote sessions), never a base64 blob in the DOM; an image with no path
+    // on disk (an MCP screenshot tool's inline result) stays a size chip
+    const images = Array.isArray(block.images) ? block.images : [];
+    const mediaHost = this._sessionCtx().host || null;
+    const mediaHtml = images.length
+      ? `<div class="chat-tool-images">${images.map((im) => imageMediaHtml({ path: isImagePath(fp) ? fp : '', host: mediaHost, mediaType: im.mediaType, bytes: im.bytes })).join('')}</div>`
       : '';
     // Parse JSON content arrays (e.g. Agent tool returns [{"type":"text","text":"..."}])
     if (resultText.startsWith('[{')) {
@@ -550,11 +599,30 @@ class ChatRenderers {
       const mbW = memoryBase(fp);
       return `<div class="chat-tool-use"><span class="chat-tool-label">${UI_ICONS.memo} ${mbW ? t('Memory update') : t('Write')} ${this.clickablePath(fp, mbW)}</span><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${t('{n} lines, {size}', { n: lineCount, size: sizeStr })}</summary>${codeBlock}</details></div>`;
     }
+    // An image the agent LOOKED AT (claude Read of a png/jpg — the exact case
+    // 2.369.35 lifted the bytes out of, whose card then showed only the
+    // "[image …]" marker because this branch returned before the generic
+    // thumbnail splice; codex view_image {path}) → the media card. For a Read
+    // the LIFTED BLOCKS decide, never the extension: a .svg/.ico Read returns
+    // numbered TEXT (a by-extension branch dropped that source silently).
+    const viewsImage = block.toolName === 'Read' ? images.length > 0
+      : String(block.toolName || '').toLowerCase() === 'view_image';
+    if (viewsImage) {
+      const imgPath = fp || block.input?.path || '';
+      const im = images[0] || {};
+      const verb = block.toolName === 'Read' ? t('Read') : t('View image');
+      // a format the browser cannot decode (tiff/heic) gets the type/size chip,
+      // never an <img> that can only break
+      return `<div class="chat-tool-use"><span class="chat-tool-label">${UI_ICONS.image} ${escHtml(verb)} ${this.clickablePath(imgPath)}</span>${imageMediaHtml({ path: isImagePath(imgPath) ? imgPath : '', host: mediaHost, mediaType: im.mediaType || '', bytes: im.bytes || 0 })}</div>`;
+    }
     if (block.toolName === 'Read') {
       const lineCount = resultText.split('\n').length;
       const codeBlock = this.renderCodeBlock(resultText, fp);
       const mbR = memoryBase(fp);
-      return `<div class="chat-tool-use"><span class="chat-tool-label">${UI_ICONS.book} ${mbR ? t('Memory read') : t('Read')} ${this.clickablePath(fp, mbR)}</span><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${t('{n} lines', { n: lineCount })}</summary>${codeBlock}</details></div>`;
+      // a TEXT result for a browser-drawable image type (svg/ico source) keeps
+      // its code block and ALSO shows the rendered file below it
+      const thumb = isImagePath(fp) ? imageMediaHtml({ path: fp, host: mediaHost }) : '';
+      return `<div class="chat-tool-use"><span class="chat-tool-label">${UI_ICONS.book} ${mbR ? t('Memory read') : t('Read')} ${this.clickablePath(fp, mbR)}</span><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${t('{n} lines', { n: lineCount })}</summary>${codeBlock}</details>${thumb}</div>`;
     }
     if (block.toolName === 'Agent') {
       const desc = block.input?.description || '';
@@ -597,7 +665,7 @@ class ChatRenderers {
     }
     // Generic tool
     const firstLine = resultText.split('\n')[0].substring(0, 120) || t('(empty)');
-    return `<div class="chat-tool-use"><span class="chat-tool-label" title="${escHtml(block.toolName)}">${toolCardIcon(block.toolName)} ${toolHeaderHtml(block.toolName)}${searchQueryChipHtml(block, msg)}</span>${imagesHtml}<details class="chat-diff"><summary class="chat-diff-summary">${t('Input')}</summary><pre>${this.linkifyText(inputStr)}</pre></details><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${escHtml(firstLine)}</summary><pre>${this.linkifyText(resultText)}</pre></details></div>`;
+    return `<div class="chat-tool-use"><span class="chat-tool-label" title="${escHtml(block.toolName)}">${toolCardIcon(block.toolName)} ${toolHeaderHtml(block.toolName)}${searchQueryChipHtml(block, msg)}</span>${mediaHtml}<details class="chat-diff"><summary class="chat-diff-summary">${t('Input')}</summary><pre>${this.linkifyText(inputStr)}</pre></details><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${escHtml(firstLine)}</summary><pre>${this.linkifyText(resultText)}</pre></details></div>`;
   }
 
   /**

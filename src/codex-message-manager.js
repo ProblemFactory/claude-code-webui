@@ -77,6 +77,19 @@ function formatToolName(name) {
   return String(name);
 }
 
+// 0.153.4 ImageView items carry the file as a `file:///…` URL (percent-encoded);
+// cards and the renderer's /api/file/raw thumbnail want the plain path. Only
+// the local forms (empty or `localhost` authority) are understood — anything
+// else (a real remote authority) is handed back untouched rather than turned
+// into a bogus relative path.
+function fileUrlToPath(p) {
+  if (typeof p !== 'string') return '';
+  if (!/^file:\/\//i.test(p)) return p;
+  const bare = p.replace(/^file:\/\/(localhost)?/i, '');
+  if (!bare.startsWith('/')) return p;
+  try { return decodeURIComponent(bare); } catch { return bare; }
+}
+
 // ONE tool-input parser for BOTH call record types (function_call carries
 // `arguments`, custom_tool_call carries `input` — apply_patch arrives as
 // EITHER depending on channel: live buffer = function_call with structured
@@ -158,7 +171,9 @@ const SKIPPED_EVENT_TYPES = new Set([
   // tool lifecycle noise — the function_call / function_call_output pair is the card
   'exec_command_begin', 'exec_command_end', 'exec_command_output_delta', 'exec_approval_request', 'apply_patch_approval_request', 'patch_apply_begin', 'patch_apply_updated',
   // (web_search_begin / web_search_end are HANDLED — a rollout persists the search ONLY there, 2.369.43)
-  'mcp_tool_call_begin', 'mcp_tool_call_end', 'view_image_tool_call', 'image_generation_begin', 'image_generation_end', 'turn_diff', 'terminal_interaction',
+  // (view_image_tool_call is HANDLED too — the ≤0.130 engine's own record of an
+  // image view, and the ONLY trace of it when the function_call pair is absent)
+  'mcp_tool_call_begin', 'mcp_tool_call_end', 'image_generation_begin', 'image_generation_end', 'turn_diff', 'terminal_interaction',
   'collab_agent_spawn_begin', 'collab_agent_spawn_end', 'collab_agent_interaction_begin', 'collab_agent_interaction_end',
   // wrapper / engine side channels consumed elsewhere (pool engine, goal sync, usage meter, delivery ladder)
   'rate_limits_updated', 'goal_updated', 'goal_cleared', 'thread_goal_updated', 'thread_queue_changed', '_remote_state', 'peer_message_result', 'reset_credit_result',
@@ -900,9 +915,30 @@ class CodexMessageManager {
     if (emit) this._emit({ op: 'create', message: msg });
   }
 
+  // ONE card per call_id (2.369.43): the wrapper's buffer copy and codex's own
+  // rollout copy of the same call serialize differently (view_image: the stub
+  // records {path}, the rollout {path, detail}) so the merge fingerprint keeps
+  // BOTH — a second card for a known id used to leave the first pending
+  // forever. A known id learns any input the twin adds; no new card.
+  _absorbTwinCall(toolCallId, parsedInput, emit) {
+    const msgId = this.toolCallMessageIds.get(toolCallId);
+    const existing = msgId ? this.messageIndex.get(msgId) : null;
+    if (!existing) return false;
+    const block = existing.content?.[0];
+    if (block && parsedInput && typeof parsedInput === 'object' && !Array.isArray(parsedInput)) {
+      const merged = mergeToolInput(block.input, parsedInput);
+      if (JSON.stringify(merged) !== JSON.stringify(block.input)) {
+        block.input = merged;
+        if (emit) this._emit({ op: 'edit', id: existing.id, fields: { content: existing.content } });
+      }
+    }
+    return true;
+  }
+
   _processFunctionCall(item, emit) {
     const toolCallId = item.call_id || item.callId || this._nextId();
     const parsedInput = parseToolInput(item.name, item.arguments);
+    if (this._absorbTwinCall(toolCallId, parsedInput, emit)) return;
     const toolName = formatToolName(item.name || 'tool');
     const msg = this._create({
       role: 'tool',
@@ -922,6 +958,7 @@ class CodexMessageManager {
     const toolCallId = item.call_id || item.callId || this._nextId();
     const rawInput = item.input ?? item.arguments ?? '';
     const parsedInput = parseToolInput(item.name, rawInput);
+    if (this._absorbTwinCall(toolCallId, parsedInput, emit)) return;
     const toolName = formatToolName(item.name || 'tool');
     const msg = this._create({
       role: 'tool',
@@ -937,12 +974,14 @@ class CodexMessageManager {
     if (emit) this._emit({ op: 'create', message: msg });
   }
 
-  _finalizeToolCall(toolCallId, { output, isError, extraInput = null, rawName = 'tool' }, emit) {
+  _finalizeToolCall(toolCallId, { output, isError, extraInput = null, rawName = 'tool', images = null }, emit) {
     const pending = this.pendingToolCalls.get(toolCallId);
     const msgId = pending?.msgId || this.toolCallMessageIds.get(toolCallId);
     const toolName = formatToolName(pending?.rawName || rawName || 'tool');
     const nextStatus = isError ? 'error' : 'complete';
     const nextToolStatus = isError ? 'error' : 'ok';
+    // lifted image metadata ({mediaType, bytes}[], claude parity) — never bytes
+    const imagesField = Array.isArray(images) && images.length ? { images } : {};
 
     if (!msgId) {
       const msg = this._create({
@@ -955,6 +994,7 @@ class CodexMessageManager {
           input: extraInput || {},
           output: typeof output === 'string' ? output : '',
           status: isError ? 'error' : 'ok',
+          ...imagesField,
         }],
         toolCallId,
         toolName,
@@ -987,6 +1027,8 @@ class CodexMessageManager {
       input: nextInput,
       output: nextOutput,
       status: isError ? 'error' : 'ok',
+      ...(Array.isArray(currentBlock.images) && currentBlock.images.length ? { images: currentBlock.images } : {}),
+      ...imagesField,
     }];
     if (emit) {
       this._emit({
@@ -1004,12 +1046,50 @@ class CodexMessageManager {
     // custom_tool_call_output carries output as an ARRAY of {type:'input_text',
     // text} blocks (real rollout shape) — join the text instead of dumping a
     // JSON blob into the card.
+    // BINARY NEVER ENTERS A CARD (the 2.369.35 law, codex twin): a view_image
+    // output twin in the rollout is [{type:'input_image', image_url:'data:…'}]
+    // — lifted to {mediaType, bytes} + a one-line marker, exactly like the
+    // claude normalizer's splitToolResultContent; the renderer draws the file.
     const raw = item.output;
+    const images = [];
     const output = typeof raw === 'string' ? raw
-      : Array.isArray(raw) ? raw.map((b) => (b && typeof b === 'object' ? (b.text ?? '') : String(b ?? ''))).join('')
+      : Array.isArray(raw) ? raw.map((b) => {
+        if (b && typeof b === 'object' && b.type === 'input_image' && typeof b.image_url === 'string') {
+          const m = /^data:([^;,]+)[;,]/.exec(b.image_url);
+          const mediaType = m ? m[1] : 'image/png';
+          const b64 = b.image_url.slice(b.image_url.indexOf(',') + 1);
+          const bytes = Math.round(b64.length * 3 / 4);
+          images.push({ mediaType, bytes });
+          return `[image ${mediaType} · ${Math.max(1, Math.round(bytes / 1024))} KB]`;
+        }
+        return b && typeof b === 'object' ? (b.text ?? '') : String(b ?? '');
+      }).join('')
         : JSON.stringify(raw ?? '');
     const isError = !!item.is_error || !!item.error;
-    this._finalizeToolCall(toolCallId, { output, isError }, emit);
+    this._finalizeToolCall(toolCallId, { output, isError, images }, emit);
+  }
+
+  // THE image-view card path — every carrier of "the agent looked at this
+  // image" funnels through here, so `fileUrlToPath` is applied in exactly ONE
+  // place (2.369.43). The carriers:
+  //   · `function_call view_image {path}` — the wrapper's LIVE stub (plain path)
+  //   · `event_msg view_image_tool_call {call_id, path}` — the ≤0.130 engine's
+  //     own record; the ONLY trace when the function_call pair is absent (a
+  //     history whose wrapper stub never recorded the item). Used to sit in
+  //     SKIPPED_EVENT_TYPES.
+  //   · `event_msg item_completed {item:{type:'ImageView', id, path}}` — the
+  //     0.153.4 carrier (file:// URL), routed by _processItemCompleted.
+  // ONE card per call_id either way: a KNOWN id just learns the path (the live
+  // stub and the rollout copy of the same view share the `exec-…` id), an
+  // unknown one becomes a complete view_image card a later output twin edits
+  // in place.
+  _processViewImageEvent(event, emit) {
+    const toolCallId = event.call_id || event.callId;
+    if (!toolCallId) return;
+    const path = fileUrlToPath(typeof event.path === 'string' ? event.path : '');
+    const known = this.toolCallMessageIds.has(toolCallId) || this.pendingToolCalls.has(toolCallId);
+    if (known) { if (path) this._absorbTwinCall(toolCallId, { path }, emit); return; }
+    this._finalizeToolCall(toolCallId, { output: `viewed ${path || 'image'}`, isError: false, extraInput: { path }, rawName: 'view_image' }, emit);
   }
 
   // ── web search (2.369.43, owner: every codex web_search card read
@@ -1186,9 +1266,12 @@ class CodexMessageManager {
       return;
     }
     if (type === 'ImageView') {
-      // the wrapper's live view_image card path (same item id ⇒ the rollout copy edits it in place)
-      const p = String(it.path || '').replace(/^file:\/\//, '');
-      this._finalizeToolCall(it.id || this._nextId(), { output: `viewed ${p || 'image'}`, isError: false, extraInput: { path: p }, rawName: 'view_image' }, emit);
+      // the shared view_image card path (same item id ⇒ the wrapper's live stub
+      // and this rollout copy converge on ONE card, whichever arrives first);
+      // the rollout persists a `file://` URL while the live RPC hands the
+      // wrapper a plain path — _processViewImageEvent decodes both to the plain
+      // path /api/file/raw needs
+      this._processViewImageEvent({ call_id: it.id || this._nextId(), path: it.path }, emit);
       return;
     }
     if (type === 'SubAgentActivity') {
@@ -1262,6 +1345,9 @@ class CodexMessageManager {
     const type = event.type;
     if (!type) return;
     if (type === 'web_search_begin' || type === 'web_search_end') return this._processWebSearchEvent(event, emit);
+    // the ≤0.130 engine's own image-view record (the only trace when the
+    // function_call pair is absent) — routed, not skipped, since 2.369.43
+    if (type === 'view_image_tool_call') return this._processViewImageEvent(event, emit);
     // BEFORE the generic skip: 0.153.4 persists web.search / image_gen / ImageView ONLY here
     if (type === 'item_completed') return this._processItemCompleted(event, emit);
 
