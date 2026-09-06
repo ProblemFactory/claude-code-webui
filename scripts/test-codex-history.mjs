@@ -151,5 +151,100 @@ const ok = (n, c, e) => { if (c) { pass++; console.log('  ✓ ' + n); } else { f
   ok('…and the ✎ write mark keys on the semantic hint too', /el\._rawMsg\?\.collapseKind === 'write' \|\| tn === 'Write'/.test(cv));
 }
 
+// ── Per-message metadata (owner 2026-09-06: "codex会话是不是依然看不到每条消息的
+// 详细信息、计费账号、使用模型") — the popup showed Role/Time/uuid only because
+// _create threaded no meta. Fixture = the head of a REAL 0.153.4 rollout
+// (paths/ids anonymised, numbers verbatim): codex stamps usage per RESPONSE
+// (items → token_usage_record → tool outputs → token_count), never per item.
+{
+  const fs = require('node:fs'), os = require('node:os');
+  const TID = '01a07386-3386-7203-adfb-7c4ba193e24d';
+  const R = (type, payload, ts) => ({ timestamp: ts || '2026-09-05T21:42:49.991Z', type, payload });
+  const U = (input, cached, output, reasoning, total) => ({ input_tokens: input, cached_input_tokens: cached, cache_write_input_tokens: 0, output_tokens: output, reasoning_output_tokens: reasoning, total_tokens: total });
+  const rollout = [
+    R('session_meta', { id: TID, timestamp: '2026-09-05T21:42:49.990Z', cwd: '/home/u/proj', originator: 'claude-code-webui', cli_version: '0.153.4' }),
+    R('turn_context', { turn_id: 'turn-A', cwd: '/home/u/proj', approval_policy: 'never', model: 'gpt-6-astra', collaboration_mode: { mode: 'default', settings: { model: 'gpt-6-astra', reasoning_effort: 'ultra' } }, multi_agent_version: 'v2', effort: 'ultra', summary: 'auto' }),
+    R('response_item', { type: 'message', id: 'msg_u1', role: 'user', content: [{ type: 'input_text', text: 'review the site' }] }),
+    R('event_msg', { type: 'task_started', turn_id: 'turn-A', model_context_window: 828400 }),
+    // real 0.153 reasoning is encrypted (no card); a summary is given here so a thinking card EXISTS to carry meta
+    R('response_item', { type: 'reasoning', id: 'rs_1', summary: [{ type: 'summary_text', text: 'Reading the files first' }] }),
+    R('response_item', { type: 'function_call', id: 'fc_1', name: 'send_message', namespace: 'collaboration', arguments: '{"target":"/root","message":"…"}', call_id: 'call_A' }),
+    R('token_usage_record', { thread_id: TID, turn_id: 'turn-A', session_id: TID, root_turn_id: 'turn-A', response_id: 'resp_A', usage: U(29940, 28416, 119, 0, 30059), turn_token_usage: U(29940, 28416, 119, 0, 30059), thread_token_usage: U(29940, 28416, 119, 0, 30059) }, '2026-09-05T21:42:56.678Z'),
+    R('response_item', { type: 'function_call_output', id: 'fco_1', call_id: 'call_A', output: '' }, '2026-09-05T21:42:56.679Z'),
+    R('event_msg', { type: 'token_count', info: { total_token_usage: U(29940, 28416, 119, 0, 30059), last_token_usage: U(29940, 28416, 119, 0, 30059), model_context_window: 828400 }, rate_limits: { limit_id: 'codex', primary: { used_percent: 12.0, window_minutes: 10080, resets_at: 1789224035 }, plan_type: 'pro' } }, '2026-09-05T21:42:56.680Z'),
+    R('response_item', { type: 'custom_tool_call', id: 'ctc_1', status: 'completed', call_id: 'call_B', name: 'exec', input: 'const results=await Promise.allSettled([tools.exec_command({cmd:"cat package.json"})]);' }, '2026-09-05T21:43:03.826Z'),
+    R('token_usage_record', { thread_id: TID, turn_id: 'turn-A', session_id: TID, root_turn_id: 'turn-A', response_id: 'resp_B', usage: U(30071, 29824, 188, 0, 30259), turn_token_usage: U(60011, 58240, 307, 0, 60318), thread_token_usage: U(60011, 58240, 307, 0, 60318) }, '2026-09-05T21:43:04.827Z'),
+    R('response_item', { type: 'custom_tool_call_output', id: 'ctco_1', call_id: 'call_B', output: [{ type: 'input_text', text: 'Script completed\n' }] }, '2026-09-05T21:43:04.846Z'),
+    R('event_msg', { type: 'token_count', info: { total_token_usage: U(60011, 58240, 307, 0, 60318), last_token_usage: U(30071, 29824, 188, 0, 30259), model_context_window: 828400 } }, '2026-09-05T21:43:04.847Z'),
+    R('response_item', { type: 'message', id: 'msg_a1', role: 'assistant', content: [{ type: 'output_text', text: '只读审查完成。' }] }, '2026-09-05T22:15:16.482Z'),
+    R('token_usage_record', { thread_id: TID, turn_id: 'turn-A', session_id: TID, root_turn_id: 'turn-A', response_id: 'resp_C', usage: U(117791, 117248, 267, 227, 118058), turn_token_usage: U(177802, 175488, 574, 227, 178376), thread_token_usage: U(177802, 175488, 574, 227, 178376) }, '2026-09-05T22:15:16.550Z'),
+    R('event_msg', { type: 'token_count', info: { total_token_usage: U(177802, 175488, 574, 227, 178376), last_token_usage: U(117791, 117248, 267, 227, 118058), model_context_window: 828400 } }, '2026-09-05T22:15:16.551Z'),
+    R('event_msg', { type: 'task_complete', turn_id: 'turn-A', last_agent_message: '只读审查完成。' }, '2026-09-05T22:15:16.554Z'),
+  ];
+  const mm = new CodexMessageManager('t8');
+  const msgs = mm.convertHistory(rollout);
+  const user = msgs.find((m) => m.role === 'user');
+  const think = msgs.find((m) => m.role === 'assistant' && m.content[0]?.type === 'thinking');
+  const callA = msgs.find((m) => m.toolCallId === 'call_A');
+  const callB = msgs.find((m) => m.toolCallId === 'call_B');
+  const text = msgs.find((m) => m.role === 'assistant' && m.content[0]?.type === 'text');
+  ok('history rebuild threads meta onto the FIRST response (thinking + tool card) with the ledger rid `cx:<thread>:<cumulative>` and the response id', think?.meta?.requestId === `cx:${TID}:30059` && callA?.meta?.requestId === `cx:${TID}:30059` && callA.meta.msgId === 'resp_A' && callA.meta.requestIdKind === 'ledger' && callA.meta.msgIdKind === 'response', JSON.stringify({ think: think?.meta, callA: callA?.meta }));
+  ok('usage numbers mirror the ledger split (input = fresh = input − cached, cache read = cached, output, reasoning)', callA?.meta?.usage?.input_tokens === 29940 - 28416 && callA.meta.usage.cache_read_input_tokens === 28416 && callA.meta.usage.output_tokens === 119 && callA.meta.usage.reasoning_output_tokens === 0 && callA.meta.usage.cache_write_input_tokens === 0, JSON.stringify(callA?.meta?.usage));
+  ok('model + effort ride the meta from the turn_context (gpt-6-astra / ultra)', callA?.meta?.model === 'gpt-6-astra' && callA.meta.effort === 'ultra');
+  ok('the SECOND response (a tool card whose output arrived between token_usage_record and token_count) gets ITS OWN meta — the first is not overwritten', callB?.meta?.requestId === `cx:${TID}:60318` && callB.meta.msgId === 'resp_B' && callB.meta.usage.input_tokens === 30071 - 29824 && callB.meta.usage.output_tokens === 188 && callA.meta.msgId === 'resp_A', JSON.stringify(callB?.meta));
+  ok('the final assistant text carries the third response (reasoning tokens 227 of 267 output)', text?.meta?.requestId === `cx:${TID}:178376` && text.meta.msgId === 'resp_C' && text.meta.usage.reasoning_output_tokens === 227 && text.meta.usage.output_tokens === 267, JSON.stringify(text?.meta));
+  ok('user records carry no meta (a response usage never belongs to the prompt)', user && user.meta == null);
+
+  // THE JOIN: the meta's requestId must equal the rid the ledger walker mints
+  // for the SAME rollout (the key baked into every already-scanned ledger) and
+  // its msgId the walker's mid — else the billing row can never resolve.
+  const { runUsageWalk } = require(REPO + '/src/usage-walker.js');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-cxmeta-'));
+  const cxDir = path.join(home, '.codex', 'sessions', '2026', '09', '05');
+  fs.mkdirSync(cxDir, { recursive: true });
+  fs.writeFileSync(path.join(cxDir, `rollout-2026-09-05T14-42-49-${TID}.jsonl`), rollout.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  const walk = runUsageWalk({ home, codexSessionsDir: path.join(home, '.codex', 'sessions'), cursorFile: path.join(home, 'cursor.json') });
+  const evs = walk.events.map((l) => JSON.parse(l));
+  ok('the ledger walker emits exactly the three responses with UNCHANGED rids (the dedup key already in permanent ledgers)', evs.length === 3 && evs.map((e) => e.rid).join(',') === [30059, 60318, 178376].map((n) => `cx:${TID}:${n}`).join(','), evs.map((e) => e.rid).join(','));
+  ok('normalizer requestId === walker rid, normalizer msgId === walker mid, for every response', [callA, callB, text].every((m, i) => m.meta.requestId === evs[i].rid && m.meta.msgId === evs[i].mid) && evs.every((e) => e.effort === 'ultra' && e.model === 'gpt-6-astra'), JSON.stringify(evs.map((e) => [e.rid, e.mid, e.effort])));
+  ok('walker fresh-input matches the meta (i = input − cached; cr = cached)', evs[0].i === callA.meta.usage.input_tokens && evs[0].cr === callA.meta.usage.cache_read_input_tokens && evs[2].o === text.meta.usage.output_tokens);
+  fs.rmSync(home, { recursive: true, force: true });
+
+  // LIVE stream: the wrapper relays thread/tokenUsage/updated as a token_count
+  // whose inner objects keep the v2 camelCase (real live buffer shape); no
+  // token_usage_record exists live (msgId null, honest) — the rid is derived
+  // from wrapper_meta.threadId + total.totalTokens and the SAME 'edit' op
+  // claude uses carries the meta to an open window.
+  const live = new CodexMessageManager('t9'); const ops = []; live.onOp((o) => ops.push(o));
+  live.processLive({ type: 'wrapper_meta', payload: { threadId: TID, model: 'gpt-6-astra', permissionMode: 'yolo' } });
+  live.processLive({ type: 'turn_context', payload: { turn_id: 't-live', cwd: '/home/u/proj', model: 'gpt-6-astra', effort: 'xhigh', summary: 'none' } });
+  live.processLive({ type: 'event_msg', payload: { type: 'task_started', turn_id: 't-live' } });
+  live.processLive({ type: 'event_msg', payload: { type: 'agent_message_delta', item_id: 'it-1', delta: 'Hello' } });
+  live.processLive({ type: 'event_msg', payload: { type: 'agent_message_delta', item_id: 'it-1', delta: ' world' } });
+  live.processLive({ type: 'response_item', payload: { type: 'message', item_id: 'it-1', role: 'assistant', content: [{ type: 'output_text', text: 'Hello world' }] } });
+  live.processLive({ type: 'event_msg', payload: { type: 'token_count', info: { last_token_usage: { totalTokens: 147473, inputTokens: 147168, cachedInputTokens: 144768, cacheWriteInputTokens: 0, outputTokens: 305, reasoningOutputTokens: 227 }, total_token_usage: { totalTokens: 3357139, inputTokens: 3319196, cachedInputTokens: 3205120, cacheWriteInputTokens: 0, outputTokens: 37943, reasoningOutputTokens: 8151 }, model_context_window: 828400 } } });
+  const am = live.messages.find((m) => m.role === 'assistant');
+  ok('live token_count (v2 camelCase) attaches meta to the streamed assistant message: ledger rid from wrapper_meta.threadId + cumulative totalTokens, fresh input, reasoning, effort', am?.meta?.requestId === `cx:${TID}:3357139` && am.meta.usage.input_tokens === 147168 - 144768 && am.meta.usage.reasoning_output_tokens === 227 && am.meta.usage.output_tokens === 305 && am.meta.effort === 'xhigh' && am.meta.model === 'gpt-6-astra', JSON.stringify(am?.meta));
+  ok('no token_usage_record live ⇒ msgId is null (never an invented id), kind null', am?.meta?.msgId === null && am.meta.msgIdKind === null);
+  const editOp = ops.find((o) => o.op === 'edit' && o.id === am?.id && o.fields?.meta);
+  ok("the live path emits claude's 'edit' op with fields.meta so an open window's popup refreshes", !!editOp && editOp.fields.meta.requestId === `cx:${TID}:3357139`);
+  ok('the init system card never gets response meta', live.messages.filter((m) => m.role === 'system').every((m) => m.meta == null));
+  // a heartbeat token_count (info:null / empty usage) neither attaches nor advances anything
+  live.processLive({ type: 'event_msg', payload: { type: 'agent_message_delta', item_id: 'it-2', delta: 'next' } });
+  live.processLive({ type: 'event_msg', payload: { type: 'token_count', info: null, rate_limits: { primary: { used_percent: 12 } } } });
+  const am2 = live.messages.filter((m) => m.role === 'assistant')[1];
+  ok('a rate-limit heartbeat token_count attaches nothing (the next real one will)', am2 && am2.meta == null);
+
+  // WIRING PINS (the 2.355.0 lesson: a normalizer fix with no consumer is dead):
+  const cv = fs.readFileSync(REPO + '/src/lib/chat-view.js', 'utf8');
+  ok('popup labels the ledger key honestly + shows the response id, reasoning tokens, effort, codex cache write', /requestIdKind === 'ledger' \? t\('Ledger request key'\) : t\('Request ID'\)/.test(cv) && /msgIdKind === 'response' \? t\('Response ID'\) : t\('Message ID'\)/.test(cv) && /t\('Reasoning tokens'\)/.test(cv) && /if \(meta\.effort\) add\(t\('Effort'\)/.test(cv) && /\|\| \(u\.cache_write_input_tokens \|\| 0\)/.test(cv));
+  ok("popup's session-level fallback reads the REAL auth shape (source: codex-subscription / codex-cli / pooled / subscription / api-*)", /a\.source === 'codex-subscription'/.test(cv) && /a\.source === 'codex-cli'/.test(cv) && /a\.source === 'pooled'/.test(cv) && !/a\.accountName \|\| \(a\.kind ===/.test(cv));
+  ok('global-bucket billing row names the ChatGPT login for codex events (route returns be)', /r\.be === 'codex' \? t\('ChatGPT login'\) : t\('CLI login'\)/.test(cv) && /be: ev\.be \|\| 'claude', model: ev\.model \|\| null, effort: ev\.effort \|\| null/.test(fs.readFileSync(REPO + '/src/server/account-usage-routes.js', 'utf8')));
+  for (const dict of ['i18n-zh.js', 'i18n-ja.js']) {
+    const d = fs.readFileSync(REPO + '/src/lib/' + dict, 'utf8');
+    ok(`${dict} carries the new popup keys`, ['"Reasoning tokens"', '"Ledger request key"', '"Response ID"'].every((k) => d.includes(k)));
+  }
+}
+
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);
 process.exit(fail ? 1 : 0);

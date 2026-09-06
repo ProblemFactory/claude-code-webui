@@ -304,6 +304,7 @@ class UsageHistory {
             ts: ev.ts, sid: ev.sid,
             be: ev.be === 'codex' ? 'codex' : (minfo.backend || 'claude'),
             model: ev.model,
+            effort: ev.effort, // codex reasoning effort (turn_context) — claude events carry none (undefined = not serialized)
             acct: acct || null,
             pool: pool || undefined, // billed THROUGH this pool (acct = its real target)
             atype: ainfo ? ainfo.type : (acct ? 'unknown' : 'global'),
@@ -369,6 +370,7 @@ class UsageHistory {
         sid: e.sid || null,
         be: e.be === 'codex' ? 'codex' : 'claude', // v2 walkers emit codex rollout events too
         model: e.model || null,
+        effort: e.effort || undefined, // codex per-turn effort (walker v3) — absent for claude
         acct: resolved || hostId, // host ids are already 'host-…' — distinct from acct-/sub-/cxs- account ids
         pool: rpool || undefined,
         atype: resolved ? (rinfo ? rinfo.type : 'unknown') : 'host',

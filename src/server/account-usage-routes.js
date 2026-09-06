@@ -82,7 +82,10 @@ app.get('/api/usage-stats/rid-info', (req, res) => {
     try { poolName = ev.pool ? (accounts.get(ev.pool)?.name || null) : null; } catch { }
     let hostName = null;
     try { hostName = ev.host ? (hosts.get(ev.host)?.name || null) : null; } catch { }
-    res.json({ found: true, acct: ev.acct || null, aname: ev.aname || null, atype: ev.atype || 'global', pool: ev.pool || null, poolName, host: ev.host || null, hostName });
+    // be/model/effort (additive): the popup names the RIGHT machine login for a
+    // global-bucket event (codex = the ChatGPT login, not "CLI login") and can
+    // show the ledger's served model / codex effort when the record has none.
+    res.json({ found: true, acct: ev.acct || null, aname: ev.aname || null, atype: ev.atype || 'global', pool: ev.pool || null, poolName, host: ev.host || null, hostName, be: ev.be || 'claude', model: ev.model || null, effort: ev.effort || null });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.get('/api/usage-stats/pricing', (req, res) => res.json({ pricing: usageHistory.pricingTable() }));

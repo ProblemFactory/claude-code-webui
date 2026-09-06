@@ -183,8 +183,24 @@ function runUsageWalk({ home = os.homedir(), cursorFile = defaultCursorFile(),
         if (r.type === 'turn_context' && r.payload) {
           if (r.payload.model) cur.model = r.payload.model;
           if (r.payload.cwd) cur.cwd = r.payload.cwd;
+          if (r.payload.effort) cur.effort = String(r.payload.effort); // reasoning effort per turn (0.149+) — persisted like model
         }
         return;
+      }
+      if (line.indexOf('"token_usage_record"') >= 0) {
+        // 0.153 per-response ledger twin: PRECEDES its token_count by 1–5 lines
+        // (830/830 real pairs: same turn_id, usage.total_tokens equal) and names
+        // the vendor response id — codex's `mid` join field (the popup's second
+        // key; rid stays the cumulative-total key already baked into every
+        // ledger). Parked in the CURSOR so a scan boundary between the pair
+        // loses nothing; consumed by the next token_count, matched on the total.
+        let r; try { r = JSON.parse(line); } catch { return; }
+        if (r.type === 'token_usage_record' && r.payload) {
+          const u = r.payload.usage || {};
+          cur.pendMid = r.payload.response_id ? String(r.payload.response_id) : null;
+          cur.pendTotal = typeof u.total_tokens === 'number' ? u.total_tokens : null;
+          return;
+        }
       }
       if (line.indexOf('"token_count"') < 0) return;
       let r; try { r = JSON.parse(line); } catch { return; }
@@ -195,13 +211,17 @@ function runUsageWalk({ home = os.homedir(), cursorFile = defaultCursorFile(),
       const ts = Date.parse(r.timestamp) || Date.now();
       const cum = info.total_token_usage ? info.total_token_usage.total_tokens : null;
       const rid = `cx:${sid}:${cum != null ? cum : cur.offset + '-' + ts}`;
+      const pendMid = cur.pendMid || null, pendTotal = cur.pendTotal;
+      delete cur.pendMid; delete cur.pendTotal; // consumed by this token_count whether or not it emits
       if (rid === cur.lastRid) return;
       cur.lastRid = rid;
       const cached = last.cached_input_tokens || 0;
+      const mid = pendMid && (pendTotal == null || typeof last.total_tokens !== 'number' || pendTotal === last.total_tokens) ? pendMid : undefined;
       emit({
-        rid, be: 'codex', ts, sid,
+        rid, mid, be: 'codex', ts, sid,
         model: cur.model || null,
         cwd: cur.cwd || null,
+        effort: cur.effort || undefined,
         i: Math.max(0, (last.input_tokens || 0) - cached),
         cw5: 0, cw1: 0,
         cr: cached,

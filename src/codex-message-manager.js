@@ -129,7 +129,8 @@ function collapseKindOf(rawName) {
 // ResponseItem / EventMsg, snake_case) + every local rollout since 0.142.
 const SKIPPED_RECORD_TYPES = new Set([
   'world_state',                        // 0.153 environment/skills snapshot — not conversation content
-  'token_usage_record',                 // per-response ledger twin of event_msg token_count (which feeds the meter)
+  // token_usage_record is HANDLED (not skipped) since the per-message meta
+  // work: it names the vendor response id for the token_count that follows
   'inter_agent_communication_metadata', // {trigger_turn} marker preceding an agent_message item
   'compacted',                          // the compaction summary line; event_msg context_compacted renders the notice
 ]);
@@ -212,6 +213,14 @@ class CodexMessageManager {
     this.turnIndex = 0;
     this._currentTurnId = null;
     this._currentTs = Date.now();
+    // Per-message meta state (see _threadUsageMeta): the codex thread id (the
+    // ledger's `cx:<thread>:<cumulative>` request key needs it — session_meta
+    // .id on rebuild, wrapper_meta.threadId live, token_usage_record.thread_id
+    // either way), the 0.153 token_usage_record awaiting its token_count twin,
+    // and the message index the last usage-bearing token_count closed at.
+    this._threadId = null;
+    this._pendingUsageRecord = null;
+    this._usageMark = 0;
     this._status = {
       model: '',
       permissionMode: '',
@@ -382,6 +391,7 @@ class CodexMessageManager {
       taskInfo: fields.taskInfo || null,
       backendMeta: fields.backendMeta || null,
       collapseKind: fields.collapseKind || null, // semantic run-fold kind (Track B) — the chat view folds by THIS, never by backend tool names
+      meta: fields.meta || null, // per-response metadata for the message-info popup — threaded by _threadUsageMeta at token_count (claude parity: MessageManager._create)
     };
     this.messages.push(msg);
     this.messageIndex.set(msg.id, msg);
@@ -445,8 +455,93 @@ class CodexMessageManager {
       this._processServerRequestResolved(record.payload || {}, emit);
       return;
     }
+    if (record.type === 'token_usage_record') {
+      this._processTokenUsageRecord(record.payload || {});
+      return;
+    }
     if (SKIPPED_RECORD_TYPES.has(record.type)) return;
     this._noteUnknown('record', record.type);
+  }
+
+  // 0.153 per-response ledger record {thread_id, turn_id, response_id:'resp_…',
+  // usage, turn_token_usage, thread_token_usage}. It PRECEDES the event_msg
+  // token_count of the same response by 1–5 lines (830/830 real pairs: same
+  // turn_id, usage.total_tokens === last_token_usage.total_tokens, only tool
+  // outputs / item_completed noise in between — never a new response item), so
+  // it is held here and consumed by the next usage-bearing token_count, which
+  // verifies the total before adopting the response id. No card, no telemetry.
+  _processTokenUsageRecord(payload) {
+    if (payload.thread_id) this._threadId = String(payload.thread_id);
+    const u = payload.usage && typeof payload.usage === 'object' ? payload.usage : null;
+    this._pendingUsageRecord = {
+      responseId: payload.response_id ? String(payload.response_id) : null,
+      turnId: payload.turn_id || null,
+      total: u && typeof u.total_tokens === 'number' ? u.total_tokens : null,
+    };
+  }
+
+  // ── Per-message metadata (owner 2026-09-06: "codex会话是不是依然看不到每条消息
+  // 的详细信息、计费账号、使用模型"). Codex never stamps usage on a message item —
+  // the numbers arrive as ONE token_count per model response, AFTER the
+  // response's items (real 0.153.4 rollouts: reasoning/message/function_call
+  // items → token_usage_record → tool outputs → token_count). So a response's
+  // meta is attached to every assistant/tool message created since the
+  // previous usage-bearing token_count — the codex equivalent of the claude
+  // normalizer threading one recMeta onto every block of one assistant
+  // record. SAME SHAPE as claude's meta so the popup and the rid-info route
+  // stay backend-neutral, plus honest kind markers:
+  //   requestId = `cx:<threadId>:<cumulative total_tokens>` — derived EXACTLY
+  //     the way the ledger mints it (usage-walker.js codex block; that
+  //     synthetic key is baked into every already-scanned rollout and is the
+  //     only join they have; requestIdKind:'ledger' — never passed off as a
+  //     vendor id);
+  //   msgId = the vendor response id (`resp_…`) from the preceding
+  //     token_usage_record (msgIdKind:'response'; absent on pre-0.153
+  //     rollouts and on the live v2 stream, which carries no such record);
+  //   usage: input_tokens = FRESH input (input − cached = the ledger's `i`),
+  //     cache_read_input_tokens = cached, the cache-write count under BOTH the
+  //     claude-parity name and codex's own cache_write_input_tokens,
+  //     reasoning_output_tokens kept (a share of output_tokens);
+  //   effort = the turn's reasoning effort (turn_context / thread settings).
+  // Live: the same 'edit' op claude uses refreshes an open window's popup.
+  _threadUsageMeta(last, total, emit) {
+    if (!last || typeof last !== 'object') return;
+    const num = (o, a, b) => { const v = o[a] ?? o[b]; return v == null ? null : (Number(v) || 0); };
+    const input = num(last, 'input_tokens', 'inputTokens') || 0;
+    const output = num(last, 'output_tokens', 'outputTokens') || 0;
+    if (!input && !output) return; // heartbeat / empty — not a model response (the walker skips these too)
+    const cached = num(last, 'cached_input_tokens', 'cachedInputTokens') || 0;
+    const cacheWrite = num(last, 'cache_write_input_tokens', 'cacheWriteInputTokens') || 0;
+    const reasoning = num(last, 'reasoning_output_tokens', 'reasoningOutputTokens');
+    const lastTotal = num(last, 'total_tokens', 'totalTokens');
+    const cumTotal = total && typeof total === 'object' ? num(total, 'total_tokens', 'totalTokens') : null;
+    const pend = this._pendingUsageRecord;
+    this._pendingUsageRecord = null; // consumed by this token_count, matched or not
+    const responseId = pend && pend.responseId && (pend.total == null || lastTotal == null || pend.total === lastTotal) ? pend.responseId : null;
+    const meta = {
+      model: this._status.model || null,
+      usage: {
+        input_tokens: Math.max(0, input - cached),
+        cache_read_input_tokens: cached,
+        cache_creation_input_tokens: cacheWrite,
+        cache_write_input_tokens: cacheWrite,
+        output_tokens: output,
+        ...(reasoning != null ? { reasoning_output_tokens: reasoning } : {}),
+      },
+      requestId: this._threadId && cumTotal != null ? `cx:${this._threadId}:${cumTotal}` : null,
+      requestIdKind: 'ledger',
+      msgId: responseId,
+      msgIdKind: responseId ? 'response' : null,
+      stopReason: null,
+      effort: this._status.effort || null,
+    };
+    for (let i = this._usageMark; i < this.messages.length; i++) {
+      const m = this.messages[i];
+      if (m.role !== 'assistant' && m.role !== 'tool') continue; // user / peer / system records carry no response usage
+      m.meta = meta;
+      if (emit) this._emit({ op: 'edit', id: m.id, fields: { meta } });
+    }
+    this._usageMark = this.messages.length;
   }
 
   // Once-per-process breadcrumb for an upstream type this normalizer does not
@@ -460,6 +555,7 @@ class CodexMessageManager {
 
   _processSessionMeta(record, emit) {
     const payload = record.payload || {};
+    if (payload.id) this._threadId = String(payload.id); // rollout thread id (a fork prefix re-points it to the parent's until the child's own session_meta)
     if (!this._status.model && payload.model) this._status.model = payload.model;
     if (payload.model_provider) this._status.modelProvider = payload.model_provider;
     if (payload.permissionMode) this._status.permissionMode = payload.permissionMode;
@@ -518,6 +614,7 @@ class CodexMessageManager {
 
   _processWrapperMeta(record, emit) {
     const payload = record.payload || {};
+    if (payload.threadId) this._threadId = String(payload.threadId); // live thread id (the wrapper's own record — arrives before the first token_count)
     if (Array.isArray(payload.slashCommands)) {
       this._status.slashCommands = payload.slashCommands.slice(0, 32).map(String);
       // The init card may already exist (boot wrapper_meta / session_meta came
@@ -904,6 +1001,7 @@ class CodexMessageManager {
       // via the attach-time chatStatus — a created-here codex session showed
       // "123k/?" until re-attach (2.368.15).
       if (emit && this._status.lastUsage) this._emit({ op: 'meta', subtype: 'usage', data: { ...this._status.lastUsage, contextWindow: this._status.contextWindow || 0, totals: this._status.totalUsage || null } });
+      this._threadUsageMeta(last, total, emit);
       return;
     }
 

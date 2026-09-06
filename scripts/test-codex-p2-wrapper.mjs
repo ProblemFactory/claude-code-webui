@@ -53,6 +53,8 @@ process.stdin.on('data', (d) => {
         send({ method: 'item/completed', params: { item: { type: 'mcpToolCall', id: 'mcp-1', server: 'github', tool: 'list_issues', arguments: { repo: 'x/y' }, status: 'completed', result: { content: [{ type: 'text', text: '3 issues' }] } } } });
         send({ method: 'item/completed', params: { item: { type: 'webSearch', id: 'ws-1', query: 'vibespace acp', results: [{ title: 't', url: 'u' }] } } });
         send({ method: 'item/completed', params: { item: { type: 'imageView', id: 'img-1', path: '/tmp/shot.png' } } });
+        // per-response usage (v2 camelCase shape, as the real app-server sends it) — the wrapper relays it as a token_count
+        send({ method: 'thread/tokenUsage/updated', params: { threadId: 'th-p2', turnId: tid, tokenUsage: { total: { totalTokens: 5150, inputTokens: 5000, cachedInputTokens: 4000, cacheWriteInputTokens: 0, outputTokens: 150, reasoningOutputTokens: 40 }, last: { totalTokens: 5150, inputTokens: 5000, cachedInputTokens: 4000, cacheWriteInputTokens: 0, outputTokens: 150, reasoningOutputTokens: 40 }, modelContextWindow: 828400 } } });
       }
       continue;
     }
@@ -130,6 +132,16 @@ for (const r of bufRecords()) live.processLive(r);
 const init = live.messages.find((m) => m.content?.[0]?.initData);
 ok(init && init.content[0].initData.slashCommands.includes('compact'), 'the live init record carries the wrapper-served slash commands (chat-input autocomplete source)');
 ok(ops.some((o) => o.op === 'edit' && o.id === init?.id && JSON.stringify(o.fields).includes('compact')) || (bufRecords().find((r) => r.type === 'wrapper_meta')?.payload?.slashCommands?.length > 0), 'clients learn the commands: either the first wrapper_meta already carries them or a later one patches the init card (edit op)');
+// per-message META on the LIVE chain (wrapper → token_count → normalizer):
+// the stub's thread/tokenUsage/updated became a token_count record; the tool
+// cards of that response carry the ledger key `cx:<thread>:<cumulative>`
+// (wrapper_meta.threadId + total.totalTokens) and the same 'edit' op claude
+// uses delivered it to the (would-be) open window.
+const tc = bufRecords().find((r) => r.type === 'event_msg' && r.payload?.type === 'token_count');
+ok(tc && tc.payload.info?.total_token_usage?.totalTokens === 5150, 'the wrapper relays thread/tokenUsage/updated as a token_count (v2 camelCase inside the snake_case envelope)');
+const mcpCard = live.messages.find((m) => m.role === 'tool' && /list_issues/.test(m.toolName || ''));
+ok(mcpCard?.meta?.requestId === 'cx:th-p2:5150' && mcpCard.meta.requestIdKind === 'ledger' && mcpCard.meta.usage.input_tokens === 1000 && mcpCard.meta.usage.cache_read_input_tokens === 4000 && mcpCard.meta.usage.output_tokens === 150 && mcpCard.meta.usage.reasoning_output_tokens === 40 && mcpCard.meta.msgId === null, `live tool cards carry the response meta with the LEDGER rid (${JSON.stringify(mcpCard?.meta)})`);
+ok(ops.some((o) => o.op === 'edit' && o.id === mcpCard?.id && o.fields?.meta?.requestId === 'cx:th-p2:5150'), "…delivered live through the 'edit' op (open-window popup refresh)");
 
 // pins
 const wsrc = fs.readFileSync(path.join(REPO, 'data/bin/codex-chat-wrapper.js'), 'utf8');

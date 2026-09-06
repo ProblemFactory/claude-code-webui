@@ -876,14 +876,23 @@ class ChatView {
     if (u.input_tokens != null || u.output_tokens != null) {
       add(t('Input tokens'), fmt(u.input_tokens));
       add(t('Cache read'), fmt(u.cache_read_input_tokens));
-      const cw = (cc.ephemeral_5m_input_tokens || 0) + (cc.ephemeral_1h_input_tokens || 0);
+      // claude reports cache writes per TTL bucket (cache_creation.ephemeral_*);
+      // codex reports ONE cache_write_input_tokens count (its normalizer keeps
+      // that name) — claude usage never carries it, so the claude row is unchanged
+      const cw = (cc.ephemeral_5m_input_tokens || 0) + (cc.ephemeral_1h_input_tokens || 0) || (u.cache_write_input_tokens || 0);
       add(t('Cache write'), cw ? fmt(cw) : null);
       add(t('Output tokens'), fmt(u.output_tokens));
+      if (u.reasoning_output_tokens != null) add(t('Reasoning tokens'), fmt(u.reasoning_output_tokens)); // codex: the reasoning share of output_tokens
       if (u.service_tier) add(t('Service tier'), u.service_tier);
     }
+    if (meta.effort) add(t('Effort'), meta.effort); // codex: the turn's reasoning effort (turn_context)
     add(t('Stop reason'), meta.stopReason);
-    add(t('Request ID'), meta.requestId, true);
-    add(t('Message ID'), meta.msgId, true);
+    // Codex has no vendor request id: its requestId is the LEDGER's synthetic
+    // key (cx:<thread>:<cumulative total>, the join every scanned rollout has)
+    // and its msgId is the vendor RESPONSE id — the normalizer marks both kinds
+    // so the labels stay honest; claude meta carries no kinds → old labels.
+    add(meta.requestIdKind === 'ledger' ? t('Ledger request key') : t('Request ID'), meta.requestId, true);
+    add(meta.msgIdKind === 'response' ? t('Response ID') : t('Message ID'), meta.msgId, true);
     add(t('uuid'), msg.uuid, true);
     if (msg.srcLine != null) add(t('Transcript line'), msg.srcLine + 1);
     const pop = document.createElement('div');
@@ -920,13 +929,25 @@ class ChatView {
     // attribution can't answer (no request id on the record, or the remote
     // harvest hasn't landed yet). Real report: rows with no requestId showed
     // NOTHING at all, which read as a bug rather than a data gap.
+    // The auth object is server.js sessionAuth(s) = {source, name, poolTarget,
+    // tail, detail, hostName…} — the SAME shape session-props/session-card
+    // read. (This helper used to read `accountName`/`kind`, fields that shape
+    // never had, so it answered null for EVERY backend and the codex fallback
+    // could never name the ChatGPT account.)
     const sessionBilling = () => {
       const ids = this._getSessionIds?.() || {};
       const live = (this.app.sidebar?._allSessions || []).find((s) =>
         s.webuiId && (s.backendSessionId === ids.backendSessionId || s.claudeSessionId === ids.backendSessionId));
       const a = live?.auth;
       if (!a) return null;
-      return a.accountName || (a.kind === 'subscription' || a.kind === 'cli-global' ? t('CLI login') : null);
+      const onHost = a.hostName ? ` · ${t('on {host}', { host: a.hostName })}` : '';
+      if (a.source === 'pooled') return (a.name || t('Pool')) + (a.poolTarget ? ' → ' + a.poolTarget : '') + onHost;
+      if (a.source === 'codex-subscription') return (a.name || 'ChatGPT') + onHost;
+      if (a.source === 'codex-cli') return t('ChatGPT login') + onHost;
+      if (a.source === 'subscription') return (a.name || t('CLI login')) + onHost;
+      if (a.source === 'api-console') return t('Console login') + onHost;
+      if (a.source === 'api-key' || a.source === 'api-other') return (a.name ? a.name + (a.tail ? ' (…' + a.tail + ')' : '') : (a.detail || t('API key'))) + onHost;
+      return null;
     };
     const isRemote = !!(this.winInfo?._openSpec?.hostId);
     if (meta.requestId || meta.msgId) {
@@ -946,7 +967,9 @@ class ChatView {
             // spawned). Honest bucket — never invent an account.
             val = t('{host}’s machine login (remote ledger)', { host: r.hostName || r.aname || r.acct || t('remote host') });
           } else {
-            val = r.aname || (r.atype === 'global' || !r.acct ? t('CLI login') : r.acct);
+            // global bucket = the machine's own login of THAT harness (the
+            // ledger event says which: codex → ChatGPT, claude → the CLI login)
+            val = r.aname || (r.atype === 'global' || !r.acct ? (r.be === 'codex' ? t('ChatGPT login') : t('CLI login')) : r.acct);
             if (r.poolName) val += ` · ${t('via pool “{name}”', { name: r.poolName })}`;
             // a remote request bills to a real account AND ran on a machine —
             // both matter (2.294.0), so name the machine after the account
@@ -956,7 +979,10 @@ class ChatView {
           const sb = sessionBilling();
           val = (sb ? sb + ' · ' : '') + t('remote — reaches the ledger about a minute after the turn ends');
         } else {
-          val = t('not in the ledger yet');
+          // not scanned yet (≤15s) — still name the session's billing identity
+          // so the row is never blank about WHO will be billed
+          const sb = sessionBilling();
+          val = (sb ? sb + ' · ' : '') + t('not in the ledger yet');
         }
         addBillingRow(val);
       }).catch(() => { });
