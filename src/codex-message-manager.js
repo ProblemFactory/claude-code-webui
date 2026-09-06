@@ -118,6 +118,37 @@ function collapseKindOf(rawName) {
   return 'mcp';
 }
 
+// ── 0.153 RECORD TOLERANCE (B-21e4 item 2) ──
+// Every rollout line type / response_item type / event_msg type is either
+// HANDLED, deliberately SKIPPED (named below — no card, no telemetry) or
+// UNKNOWN: reported ONCE per process as telemetry `codex-unknown-record:<type>`
+// (Diagnostics shows the next upstream addition instead of waiting for a
+// report — the 2.227.5 invisible-record class) and then skipped. Neither ever
+// breaks the surrounding fold (a stray system card splits a run) nor drops the
+// turn around it. Names enumerated from codex-rs protocol.rs (RolloutItem /
+// ResponseItem / EventMsg, snake_case) + every local rollout since 0.142.
+const SKIPPED_RECORD_TYPES = new Set([
+  'world_state',                        // 0.153 environment/skills snapshot — not conversation content
+  'token_usage_record',                 // per-response ledger twin of event_msg token_count (which feeds the meter)
+  'inter_agent_communication_metadata', // {trigger_turn} marker preceding an agent_message item
+  'compacted',                          // the compaction summary line; event_msg context_compacted renders the notice
+]);
+const SKIPPED_RESPONSE_ITEM_TYPES = new Set([
+  'additional_tools', 'configuration_update', 'compaction', 'context_compaction', 'other',
+]);
+const SKIPPED_EVENT_TYPES = new Set([
+  // twins of records already rendered from the response_item stream
+  'user_message', 'agent_message', 'agent_reasoning', 'agent_reasoning_raw_content', 'raw_response_item', 'raw_response_completed', 'item_started', 'item_completed',
+  'agent_message_content_delta', 'reasoning_content_delta', 'reasoning_raw_content_delta', 'plan_delta',
+  // tool lifecycle noise — the function_call / function_call_output pair is the card
+  'exec_command_begin', 'exec_command_end', 'exec_command_output_delta', 'exec_approval_request', 'apply_patch_approval_request', 'patch_apply_begin', 'patch_apply_updated',
+  'mcp_tool_call_begin', 'mcp_tool_call_end', 'web_search_begin', 'web_search_end', 'view_image_tool_call', 'image_generation_begin', 'image_generation_end', 'turn_diff', 'terminal_interaction',
+  'collab_agent_spawn_begin', 'collab_agent_spawn_end', 'collab_agent_interaction_begin', 'collab_agent_interaction_end',
+  // wrapper / engine side channels consumed elsewhere (pool engine, goal sync, usage meter, delivery ladder)
+  'rate_limits_updated', 'goal_updated', 'goal_cleared', 'thread_goal_updated', 'thread_queue_changed', '_remote_state', 'peer_message_result', 'reset_credit_result',
+  'error', 'warning', 'stream_error', 'deprecation_notice', 'mcp_startup_update', 'mcp_startup_complete', 'session_configured', 'hook_started', 'hook_completed', 'thread_rolled_back', 'shutdown_complete',
+]);
+
 function flattenContentText(content) {
   return asArray(content).map((item) => item?.text || item?.content || item?.message || '').join('');
 }
@@ -412,7 +443,19 @@ class CodexMessageManager {
     }
     if (record.type === 'server_request_resolved') {
       this._processServerRequestResolved(record.payload || {}, emit);
+      return;
     }
+    if (SKIPPED_RECORD_TYPES.has(record.type)) return;
+    this._noteUnknown('record', record.type);
+  }
+
+  // Once-per-process breadcrumb for an upstream type this normalizer does not
+  // know (mirrors MessageManager's cli-unknown-system-subtype). Name-only.
+  _noteUnknown(kind, type) {
+    const key = `${kind}:${type || '(untyped)'}`;
+    if (CodexMessageManager._seenUnknownRecords.has(key)) return;
+    CodexMessageManager._seenUnknownRecords.add(key);
+    try { global.__vsEvent?.('codex-unknown-record:' + String(type || '(untyped)').slice(0, 48), kind); } catch {}
   }
 
   _processSessionMeta(record, emit) {
@@ -447,6 +490,7 @@ class CodexMessageManager {
       this.turnIndex++;
     }
     if (payload.model) this._status.model = payload.model;
+    if (payload.effort) this._status.effort = String(payload.effort); // codex reports effort per turn (turn_context.effort, 0.149+)
     if (payload.approval_policy || payload.approvalPolicy || payload.permissionMode) {
       this._status.permissionMode = payload.permissionMode || payload.approval_policy || payload.approvalPolicy;
     }
@@ -524,6 +568,41 @@ class CodexMessageManager {
     // the codex flavor of the forever-running card).
     if (type === 'custom_tool_call_output') return this._processFunctionCallOutput(item, emit);
     if (type === 'reasoning') return this._processReasoningItem(item, emit);
+    // 0.153 multi-agent v2 chatter (sub-agent ↔ root) — an 'agent' fold-kind card
+    if (type === 'agent_message') return this._processAgentMessageItem(item, emit);
+    // older Responses-API items that were silently dropped: each is real work
+    // the model did, rendered as a COMPLETE card in its fold kind
+    if (type === 'web_search_call') return this._finalizeToolCall(item.call_id || item.id || this._nextId(), { output: item.status ? `status: ${item.status}` : '', isError: false, extraInput: { query: item.action?.query || '', action: item.action?.type || null }, rawName: 'web_search' }, emit);
+    if (type === 'tool_search_call') return this._processCustomToolCall({ ...item, name: 'tool_search', input: item.arguments ?? item.input ?? '' }, emit);
+    if (type === 'tool_search_output') return this._processFunctionCallOutput({ ...item, output: item.output ?? (Array.isArray(item.tools) ? item.tools.map((t) => t?.name || '').filter(Boolean).join(', ') : '') }, emit);
+    if (type === 'local_shell_call') return this._processCustomToolCall({ ...item, name: 'local_shell', input: item.action ?? {} }, emit);
+    if (type === 'image_generation_call') return this._finalizeToolCall(item.call_id || item.id || this._nextId(), { output: item.status ? `status: ${item.status}` : '', isError: false, extraInput: { prompt: item.prompt || '' }, rawName: 'image_gen' }, emit);
+    if (SKIPPED_RESPONSE_ITEM_TYPES.has(type)) return;
+    this._noteUnknown('response_item', type);
+  }
+
+  // 0.153 multi-agent v2: `agent_message` response items are the sub-agent ↔
+  // root chatter (author/recipient are agent paths like /root/water_waste; the
+  // payload rides an encrypted_content block, the visible envelope is the
+  // input_text "Message Type: … / Sender: … / Payload:"). Rendered as a
+  // COMPLETE tool card in the 'agent' fold kind — a system card here would
+  // split every surrounding run, and dropping it hid the whole collaboration.
+  _processAgentMessageItem(item, emit) {
+    const parts = asArray(item.content);
+    const visible = parts.filter((b) => b && (b.type === 'input_text' || b.type === 'output_text' || b.type === 'text')).map((b) => b.text || '').join('').trim();
+    const encrypted = parts.some((b) => b && (b.type === 'encrypted_content' || typeof b.encrypted_content === 'string'));
+    const output = visible + (encrypted ? `${visible ? '\n' : ''}[encrypted payload — withheld upstream]` : '');
+    const toolCallId = item.id || item.item_id || this._nextId();
+    const msg = this._create({
+      role: 'tool',
+      status: 'complete',
+      content: [{ type: 'tool_result', toolCallId, toolName: 'Agent Message', input: { author: item.author || '', recipient: item.recipient || '' }, output, status: 'ok' }],
+      toolCallId,
+      toolName: 'Agent Message',
+      toolStatus: 'ok',
+      collapseKind: 'agent',
+    });
+    if (emit) this._emit({ op: 'create', message: msg });
   }
 
   goalState() { return this._goalState || null; }
@@ -829,18 +908,48 @@ class CodexMessageManager {
     }
 
     if (type === 'sub_agent_activity') {
-      // Codex sub-agents (2026-08 CLI): a spawned agent THREAD tied to a tool
-      // call. Minimal visibility — announce the spawn as a system line (the
-      // thread id names a real rollout a future viewer can open); 'interacted'
-      // events are churn, and there is no terminal kind to close a chip on,
-      // so no task-lifecycle state is created here (the forever-running class).
-      if ((event.kind || '') === 'started') {
+      // Codex sub-agents: a spawned agent THREAD tied to a tool call
+      // (SubAgentActivityKind started | interacted | interrupted | completed,
+      // 0.153.4 protocol.rs). One COMPLETE card per sub-agent thread in the
+      // 'agent' fold kind (a system line split every surrounding run);
+      // 'interacted' is churn; completed/interrupted edit the card in place.
+      // No task-lifecycle chip: a sub-agent has no result payload to close on.
+      const tid = String(event.agent_thread_id || event.agentThreadId || '');
+      const key = 'subagent:' + (tid || event.event_id || 'x');
+      const kind = event.kind || '';
+      const label = `${event.agent_path || '(agent)'} — thread ${tid.slice(0, 13)}…`;
+      if (kind === 'started') {
         const msg = this._create({
-          role: 'system',
-          content: [{ type: 'system_info', text: `Codex sub-agent started: ${event.agent_path || '(agent)'} — thread ${String(event.agent_thread_id || '').slice(0, 13)}…` }],
+          role: 'tool',
+          status: 'complete',
+          content: [{ type: 'tool_result', toolCallId: key, toolName: 'Sub-agent', input: { agent_path: event.agent_path || '', thread_id: tid }, output: `Codex sub-agent started: ${label}`, status: 'ok' }],
+          toolCallId: key,
+          toolName: 'Sub-agent',
+          toolStatus: 'ok',
+          collapseKind: 'agent',
         });
+        this.toolCallMessageIds.set(key, msg.id);
         if (emit) this._emit({ op: 'create', message: msg });
+      } else if (kind === 'completed' || kind === 'interrupted') {
+        const existing = this.messageIndex.get(this.toolCallMessageIds.get(key));
+        if (existing) {
+          const failed = kind === 'interrupted';
+          existing.status = failed ? 'error' : 'complete';
+          existing.toolStatus = failed ? 'error' : 'ok';
+          existing.content = [{ ...(existing.content?.[0] || {}), output: `Codex sub-agent ${kind}: ${label}`, status: failed ? 'error' : 'ok' }];
+          if (emit) this._emit({ op: 'edit', id: existing.id, fields: { status: existing.status, toolStatus: existing.toolStatus, content: existing.content } });
+        }
       }
+      return;
+    }
+
+    if (type === 'thread_settings_applied') {
+      // 0.153: the app-server's own confirmation of the thread's settings
+      // (model / reasoning_effort / approval_policy / cwd…) — the typed source
+      // for the status bar; never a card.
+      const s = event.thread_settings && typeof event.thread_settings === 'object' ? event.thread_settings : {};
+      if (s.model) this._status.model = String(s.model);
+      if (s.reasoning_effort) this._status.effort = String(s.reasoning_effort);
       return;
     }
 
@@ -991,7 +1100,11 @@ class CodexMessageManager {
         backendMeta: { reviewThreadId, delivery, target: event.target || null },
       });
       if (emit) this._emit({ op: 'create', message: msg });
+      return;
     }
+
+    if (SKIPPED_EVENT_TYPES.has(type)) return;
+    this._noteUnknown('event_msg', type);
   }
 
   _processServerRequest(payload, emit) {
@@ -1075,5 +1188,10 @@ class CodexMessageManager {
     this.pendingApprovals.delete(requestId);
   }
 }
+
+CodexMessageManager._seenUnknownRecords = new Set();
+CodexMessageManager.SKIPPED_RECORD_TYPES = SKIPPED_RECORD_TYPES;
+CodexMessageManager.SKIPPED_RESPONSE_ITEM_TYPES = SKIPPED_RESPONSE_ITEM_TYPES;
+CodexMessageManager.SKIPPED_EVENT_TYPES = SKIPPED_EVENT_TYPES;
 
 module.exports = { CodexMessageManager };

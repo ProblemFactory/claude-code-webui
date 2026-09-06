@@ -32,9 +32,11 @@ const ok = (n, c, e) => { if (c) { pass++; console.log('  ✓ ' + n); } else { f
     { type: 'event_msg', payload: { type: 'sub_agent_activity', event_id: 'call_B', occurred_at_ms: 1, agent_thread_id: '01a0338e-79d3-7820-a298-b119d4ec5bb3', agent_path: '/root/paper_analysis', kind: 'started' } },
     { type: 'event_msg', payload: { type: 'sub_agent_activity', event_id: 'call_B', occurred_at_ms: 2, agent_thread_id: '01a0338e-79d3-7820-a298-b119d4ec5bb3', agent_path: '/root/paper_analysis', kind: 'interacted' } },
   ]);
-  const lines = msgs.filter((m) => (m.content || []).some((c) => c.type === 'system_info' && /sub-agent/i.test(c.text || '')));
-  ok('a sub-agent spawn is announced (it was fully invisible)', lines.length === 1 && /paper_analysis/.test(JSON.stringify(lines[0].content)));
-  ok("'interacted' churn does not spam extra lines", lines.length === 1);
+  // B-21e4 item 2: the announcement is a COMPLETE tool card in the 'agent' fold
+  // kind (a system line split every surrounding run), never a task chip
+  const lines = msgs.filter((m) => m.role === 'tool' && m.toolName === 'Sub-agent');
+  ok('a sub-agent spawn is announced (it was fully invisible)', lines.length === 1 && /paper_analysis/.test(JSON.stringify(lines[0].content)) && lines[0].collapseKind === 'agent' && lines[0].status === 'complete');
+  ok("'interacted' churn does not spam extra lines", lines.length === 1 && !msgs.some((m) => m.role === 'system'));
 }
 
 // ── live context%: contextWindow rides the usage meta ──

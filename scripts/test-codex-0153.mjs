@@ -127,5 +127,60 @@ ok(eC && eC.forkedFromId === P && eC.forkedFromOrdinal === 5 && eC.historyMode =
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
+console.log('— ② 0.153 record tolerance: known skips, agent chatter, sub-agent cards, unknowns → telemetry once');
+{
+  const { CodexMessageManager } = require(path.join(REPO, 'src/codex-message-manager.js'));
+  const events = [];
+  const prevEv = global.__vsEvent;
+  global.__vsEvent = (name, detail) => events.push({ name, detail });
+  const mm = new CodexMessageManager('t0153');
+  const R = (type, payload, ordinal = 0) => ({ timestamp: '2026-09-05T17:49:40.476Z', ordinal, type, payload });
+  // shapes verbatim from a real 0.153.4 rollout (ids sanitized) + the schema for the unknowns
+  const seq = [
+    R('session_meta', { id: 'th-1', cwd: '/w', cli_version: '0.153.4', history_mode: 'paginated' }),
+    R('world_state', { full: true, state: { agents_md: {}, environments: { environments: { local: { cwd: '/w' } } } } }),
+    R('turn_context', { turn_id: 't1', cwd: '/w', model: 'gpt-5.6-sol', effort: 'ultra', approval_policy: 'never' }),
+    R('event_msg', { type: 'thread_settings_applied', thread_id: 'th-1', thread_settings: { model: 'gpt-5.6-sol', model_provider_id: 'openai', approval_policy: 'never', cwd: '/w', reasoning_effort: 'ultra', personality: 'pragmatic' } }),
+    R('response_item', { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'design my van' }] }),
+    R('event_msg', { type: 'item_completed', thread_id: 'th-1', turn_id: 't1', item: { type: 'UserMessage', id: 'u1', content: [{ type: 'text', text: 'design my van' }] } }),
+    R('token_usage_record', { thread_id: 'th-1', turn_id: 't1', usage: { input_tokens: 17842, output_tokens: 351, total_tokens: 18193 } }),
+    R('response_item', { type: 'function_call', call_id: 'k1', name: 'exec', arguments: '{"command":["ls"]}' }),
+    R('response_item', { type: 'function_call_output', call_id: 'k1', output: 'a b' }),
+    R('event_msg', { type: 'sub_agent_activity', event_id: 'call_B', occurred_at_ms: 1, agent_thread_id: '01a072b1-186b-7711-8176-817d3f6d0fee', agent_path: '/root/water_waste', kind: 'started' }),
+    R('event_msg', { type: 'sub_agent_activity', event_id: 'call_B', occurred_at_ms: 2, agent_thread_id: '01a072b1-186b-7711-8176-817d3f6d0fee', agent_path: '/root/water_waste', kind: 'interacted' }),
+    R('inter_agent_communication_metadata', { trigger_turn: false }),
+    R('response_item', { type: 'agent_message', id: 'amsg_1', author: '/root/water_waste', recipient: '/root', content: [{ type: 'input_text', text: 'Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/water_waste\nPayload:\n' }, { type: 'encrypted_content', encrypted_content: 'gAAAAABq…' }] }),
+    R('event_msg', { type: 'sub_agent_activity', event_id: 'call_B', occurred_at_ms: 3, agent_thread_id: '01a072b1-186b-7711-8176-817d3f6d0fee', agent_path: '/root/water_waste', kind: 'completed' }),
+    R('response_item', { type: 'brand_new_item', id: 'x1', whatever: 1 }),
+    R('response_item', { type: 'brand_new_item', id: 'x2', whatever: 2 }),
+    R('event_msg', { type: 'brand_new_event', foo: 'bar' }),
+    R('brand_new_record', { anything: true }),
+    R('response_item', { type: 'web_search_call', status: 'completed' }),
+    R('response_item', { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'here is the van' }] }),
+    R('event_msg', { type: 'task_complete', turn_id: 't1' }),
+  ];
+  for (const r of seq) mm.processLive(r);
+  global.__vsEvent = prevEv;
+  const roles = mm.messages.map((m) => m.role);
+  ok(!mm.messages.some((m) => m.role === 'system' && m.status !== 'complete'), 'no error card for any of the known/unknown 0.153 records', roles);
+  ok(mm.messages.filter((m) => m.role === 'system').length === 1, 'known skips (world_state / token_usage_record / inter_agent_communication_metadata / item_completed) render NOTHING (only the init card exists)', roles);
+  const chatter = mm.messages.find((m) => m.toolName === 'Agent Message');
+  ok(chatter && chatter.role === 'tool' && chatter.collapseKind === 'agent' && chatter.status === 'complete' && /FINAL_ANSWER/.test(chatter.content[0].output) && /encrypted payload/.test(chatter.content[0].output) && chatter.content[0].input.author === '/root/water_waste', "agent_message (sub-agent ↔ root chatter) renders as a complete 'agent'-kind tool card, encrypted payload named", chatter && chatter.content[0]);
+  const sub = mm.messages.filter((m) => m.toolName === 'Sub-agent');
+  ok(sub.length === 1 && sub[0].collapseKind === 'agent' && /completed/.test(sub[0].content[0].output) && sub[0].status === 'complete', "sub_agent_activity started/interacted/completed = ONE 'agent'-kind card, edited in place on completion", sub.map((m) => m.content[0].output));
+  const st = mm.status();
+  ok(st.model === 'gpt-5.6-sol' && st.effort === 'ultra', 'thread_settings_applied + turn_context.effort feed status().model/effort (typed source, no card)', st);
+  const asst = mm.messages.find((m) => m.role === 'assistant');
+  const userMsg = mm.messages.find((m) => m.role === 'user');
+  ok(asst && userMsg && asst.turnIndex === userMsg.turnIndex && asst.content[0].text === 'here is the van' && asst.status === 'complete', 'the assistant reply after a run of unknown records lands in the SAME turn and completes (nothing dropped the turn)', { a: asst?.turnIndex, u: userMsg?.turnIndex });
+  const ws = mm.messages.find((m) => m.collapseKind === 'search');
+  ok(ws && ws.role === 'tool' && ws.status === 'complete', "an old-style web_search_call (no action) renders as a complete 'search'-kind card instead of vanishing", ws);
+  const names = events.map((e) => e.name);
+  ok(names.filter((n) => n === 'codex-unknown-record:brand_new_item').length === 1 && names.includes('codex-unknown-record:brand_new_event') && names.includes('codex-unknown-record:brand_new_record'), 'unknown response_item / event_msg / record types fire telemetry codex-unknown-record:<type> ONCE per type', names);
+  ok(!names.some((n) => /world_state|token_usage_record|inter_agent|item_completed|thread_settings|sub_agent|agent_message/.test(n)), 'known types never fire the unknown-record telemetry', names);
+  const S = CodexMessageManager;
+  ok(S.SKIPPED_RECORD_TYPES.has('world_state') && S.SKIPPED_EVENT_TYPES.has('item_completed') && S.SKIPPED_RESPONSE_ITEM_TYPES.has('additional_tools'), 'the skip sets are explicit and exported for the audit');
+}
+
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);
 process.exit(fail ? 1 : 0);
