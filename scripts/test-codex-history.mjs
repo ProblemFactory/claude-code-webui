@@ -665,7 +665,7 @@ const ok = (n, c, e) => { if (c) { pass++; console.log('  ✓ ' + n); } else { f
     { timestamp: '2026-04-15T01:01:48.300Z', type: 'response_item', payload: { type: 'web_search_call', status: 'completed' } },
   ]);
   const tc = tm.filter((m) => m.role === 'tool');
-  ok('0.120-0.130 rollouts: web_search_end + its id-less web_search_call twin = ONE card each (2 searches + 1 orphan call = 3 cards, not 5)', tc.length === 3 && tc[0].content[0].input.query === 'GitHub request code review pull request' && tc[1].content[0].input.action?.url === 'https://ai.example.dev/docs/document-processing' && tc[2].content[0].output === 'status: completed', JSON.stringify(tc.map((m) => m.content[0].input)));
+  ok('0.120-0.130 rollouts: web_search_end + its id-less web_search_call twin = ONE card each (2 searches + 1 orphan call = 3 cards, not 5)', tc.length === 3 && tc[0].content[0].input.query === 'GitHub request code review pull request' && tc[1].content[0].input.action?.url === 'https://ai.example.dev/docs/document-processing' && tc[2].content[0].output === 'web search (no details recorded)\n\nstatus: completed', JSON.stringify(tc.map((m) => m.content[0].input)));
   // reverse order (call first, then end) also pairs
   const rev = new CodexMessageManager('ws6');
   const rm = rev.convertHistory([
@@ -729,11 +729,56 @@ const ok = (n, c, e) => { if (c) { pass++; console.log('  ✓ ' + n); } else { f
   const sleep = (id) => ({ ...F.other, payload: { ...F.other.payload, item: { type: 'Extension', kind: 'web.sleep', id, seconds: 2 } } });
   u.convertHistory([sleep('exec-s1'), sleep('exec-s2'), F.search, F.imageGen, F.imageView]);
   global.__vsEvent = prevEv;
-  ok("an unknown Extension kind fires 'codex-unknown-record:item_completed:<kind>' ONCE per kind and renders nothing; web.search / image_gen / ImageView never fire it", names.filter((n) => n === 'codex-unknown-record:item_completed:web.sleep').length === 1 && !names.some((n) => /web\.search|image_gen|ImageView/.test(n)) && !u.messages.some((m) => m.role === 'system'), JSON.stringify(names));
+  ok("an unknown Extension kind fires 'codex-unknown-record:item_completed:Extension:<kind>' ONCE per kind and renders nothing; web.search / image_gen / ImageView never fire it", names.filter((n) => n === 'codex-unknown-record:item_completed:Extension:web.sleep').length === 1 && !names.some((n) => /web\.search|image_gen|ImageView/.test(n)) && !u.messages.some((m) => m.role === 'system'), JSON.stringify(names));
   const ig = u.messages.find((m) => m.content?.[0]?.toolCallId === F.imageGen.payload.item.id);
   ok("Extension image_gen.generation (0.153.4 persists it nowhere else) → the image_gen card: prompt in, status + saved path out, the 3 MB base64 NEVER copied", ig && ig.status === 'complete' && ig.collapseKind === null && ig.content[0].input.prompt.startsWith('Use case: stylized-concept') && ig.content[0].output === 'status: completed\nsaved /home/user/.codex/generated_images/01a0aaaa-0000-7000-8000-000000000001/exec-187fe7b0-73fc-493a-95f8-0c4a10c9d6e4.png' && !JSON.stringify(ig).includes('base64'), JSON.stringify(ig?.content));
   const iv = u.messages.find((m) => m.content?.[0]?.toolCallId === F.imageView.payload.item.id);
   ok("ImageView item_completed (no view_image function_call in any 0.153.4 rollout) → the view_image card path, file:// stripped", iv && iv.status === 'complete' && iv.collapseKind === 'image' && iv.content[0].output === 'viewed /home/user/workspace/project/orbiter-preview.png' && iv.content[0].input.path === '/home/user/workspace/project/orbiter-preview.png', JSON.stringify(iv?.content));
+  // ── SubAgentActivity: 258 records in the same 25 rollouts (started 18 ·
+  // interacted 214 · completed 32, snapshot 2026-09-06). 232 of them carry the
+  // id of the CALL that caused them (started → spawn_agent, interacted →
+  // send_message / followup_task) and that call renders its own card; the 32
+  // kind:'completed' records carry `subagent-completed-<uuid>`, which twins
+  // NOTHING — the sub-agent FINISHING was recorded nowhere else. Records below
+  // are VERBATIM from rollout-2026-09-05T10-34-43 lines 26/27/242 (cli_version
+  // 0.153.4, outer thread_id swapped, the spawn_agent argument blob shortened).
+  const SA = {
+    spawn: { timestamp: '2026-09-05T17:50:03.877Z', ordinal: 25, type: 'response_item', payload: { type: 'function_call', id: 'fc_0926a9d9621e17bd016a9c5648cb3487d0a456e3f4e822551c', name: 'spawn_agent', namespace: 'collaboration', arguments: '{"task_name":"platform_geometry","fork_turns":"all","message":"gAAAAABqnFZL1WV6nYX1adJg40e1HXBTW…"}', call_id: 'call_FB3Ljqfkix3j27IabuUA6SWg' } },
+    started: { timestamp: '2026-09-05T17:50:03.895Z', ordinal: 26, type: 'event_msg', payload: { type: 'item_completed', thread_id: '01a0aaaa-0000-7000-8000-000000000001', turn_id: '01a072b0-bd02-7202-9560-c5ac2cb37b8b', item: { type: 'SubAgentActivity', id: 'call_FB3Ljqfkix3j27IabuUA6SWg', kind: 'started', agent_thread_id: '01a072b1-186b-7711-8176-817d3f6d0fee', agent_path: '/root/platform_geometry' }, started_at_ms: 1788630603895, completed_at_ms: 1788630603895 } },
+    interacted: { timestamp: '2026-09-05T17:58:39.568Z', ordinal: 336, type: 'event_msg', payload: { type: 'item_completed', thread_id: '01a0aaaa-0000-7000-8000-000000000001', turn_id: '01a072b0-bd02-7202-9560-c5ac2cb37b8b', item: { type: 'SubAgentActivity', id: 'call_CC8aEjKP1yfvOFIJkm7uYD2Y', kind: 'interacted', agent_thread_id: '01a072b1-3025-79c2-b6d3-fa4acfa9f71a', agent_path: '/root/water_waste' }, started_at_ms: 1788630719568, completed_at_ms: 1788630719568 } },
+    completed: { timestamp: '2026-09-05T17:56:56.136Z', ordinal: 241, type: 'event_msg', payload: { type: 'item_completed', thread_id: '01a0aaaa-0000-7000-8000-000000000001', turn_id: '01a072b0-bd02-7202-9560-c5ac2cb37b8b', item: { type: 'SubAgentActivity', id: 'subagent-completed-01a072b1-1877-7982-9080-00e077cd7747', kind: 'completed', agent_thread_id: '01a072b1-186b-7711-8176-817d3f6d0fee', agent_path: '/root/platform_geometry' }, started_at_ms: 1788631016136, completed_at_ms: 1788631016136 } },
+  };
+  const sa = new CodexMessageManager('ws0153sa');
+  const sam = sa.convertHistory([SA.spawn, SA.started, SA.interacted, SA.completed]);
+  const saTools = sam.filter((m) => m.role === 'tool');
+  ok('0.153.4: the TWINNED sub-agent records (started ↔ spawn_agent, interacted ↔ send_message) add NO card — their tool call is the card', saTools.filter((m) => m.content[0].toolCallId === 'call_FB3Ljqfkix3j27IabuUA6SWg').length === 1 && !saTools.some((m) => m.content[0].toolCallId === 'call_CC8aEjKP1yfvOFIJkm7uYD2Y'), JSON.stringify(saTools.map((m) => [m.toolName, m.content[0].toolCallId])));
+  const saCard = saTools.find((m) => m.toolName === 'Sub-agent');
+  ok("…and the kind:'completed' record (id `subagent-completed-<uuid>`, twinning NOTHING) renders the 'agent'-fold Sub-agent card it used to be silent about", saCard && saCard.status === 'complete' && saCard.collapseKind === 'agent' && saCard.content[0].toolCallId === 'subagent:01a072b1-186b-7711-8176-817d3f6d0fee' && /completed: \/root\/platform_geometry/.test(saCard.content[0].output), JSON.stringify(saCard?.content));
+  ok('exactly two cards for that sub-agent: its spawn_agent call and its completion (no third from the twins)', saTools.length === 2, JSON.stringify(saTools.map((m) => m.toolName)));
+  // 0.149.1 persists the SAME facts as standalone sub_agent_activity events.
+  // SYNTHETIC repetition (the 0.149.1 corpus has 79 (file, thread) pairs and NOT
+  // ONE repeated 'started' — an old-vs-new replay of all 15 rollouts is
+  // card-for-card identical): the pin is that the card is keyed by THREAD, so
+  // any repeat is idempotent instead of a second card.
+  const rep2 = new CodexMessageManager('ws0149rep');
+  const ev = (kind) => ({ type: 'event_msg', payload: { type: 'sub_agent_activity', event_id: 'call_R', agent_thread_id: '01a0338e-79d3-7820-a298-b119d4ec5bb3', agent_path: '/root/paper_analysis', kind } });
+  const repm = rep2.convertHistory([ev('started'), ev('started'), ev('started'), ev('interacted'), ev('interrupted')]).filter((m) => m.role === 'tool');
+  ok("a repeated 'started' for one sub-agent thread is idempotent: still ONE card, closed by the terminal record", repm.length === 1 && repm[0].status === 'error' && /interrupted/.test(repm[0].content[0].output), JSON.stringify(repm.map((m) => [m.status, m.content[0].output])));
+  // an unrecognised TOP-LEVEL item.type: a breadcrumb, ONCE per type — never a
+  // silent skip (the whole reason 245 searches were invisible). 'FutureThing' is
+  // SYNTHETIC: the corpus has exactly the 10 types in the census comment.
+  const prevEv2 = global.__vsEvent; const names2 = []; global.__vsEvent = (n) => names2.push(n);
+  const un = new CodexMessageManager('ws0153un');
+  const synth = (id) => ({ ...SA.completed, payload: { ...SA.completed.payload, item: { type: 'FutureThing', id, foo: 1 } } });
+  const unm = un.convertHistory([
+    synth('ft-1'), synth('ft-2'),
+    { ...SA.completed, payload: { ...SA.completed.payload, item: { type: 'ContextCompaction', id: '01a077f5-04c9-7253-afca-6d5ca6949870' } } },
+    { ...SA.completed, payload: { ...SA.completed.payload, item: { type: 'CommandExecution', id: 'exec-7dc7198a-50b7-43e0-8618-fdf6ca4f2754', command: ['/usr/bin/zsh', '-lc', 'ls'], status: 'completed' } } },
+  ]);
+  global.__vsEvent = prevEv2;
+  ok("an unknown TOP-LEVEL item.type fires 'codex-unknown-record:item_completed:<type>' ONCE per type and renders nothing (a silent default here is the invisible-record class)", names2.filter((n) => n === 'codex-unknown-record:item_completed:FutureThing').length === 1 && !unm.some((m) => m.role === 'tool' || m.role === 'system'), JSON.stringify([names2, unm.map((m) => m.role)]));
+  ok('…and an ALLOWLISTED type (rendered from its own record, or ContextCompaction) is silent WITHOUT telemetry — the breadcrumb means "never seen", not "not carded"', !names2.some((n) => /ContextCompaction|CommandExecution/.test(n)) && CodexMessageManager.ITEM_COMPLETED_SKIPPED_TYPES.has('ContextCompaction') && CodexMessageManager.ITEM_COMPLETED_SKIPPED_TYPES.has('CommandExecution'), JSON.stringify(names2));
+  ok('the skip allowlist is exactly the census list (a new twin type must be added deliberately)', JSON.stringify([...CodexMessageManager.ITEM_COMPLETED_SKIPPED_TYPES].sort()) === JSON.stringify(['AgentMessage', 'CollabAgentToolCall', 'CommandExecution', 'ContextCompaction', 'FileChange', 'Reasoning', 'UserMessage']), JSON.stringify([...CodexMessageManager.ITEM_COMPLETED_SKIPPED_TYPES]));
   const cm = require('node:fs').readFileSync(REPO + '/src/codex-message-manager.js', 'utf8');
   ok('item_completed stays in the exported generic skip set (test-codex-0153 audit) but is DISPATCHED before it', CodexMessageManager.SKIPPED_EVENT_TYPES.has('item_completed') && /if \(type === 'item_completed'\) return this\._processItemCompleted\(event, emit\);[\s\S]*if \(SKIPPED_EVENT_TYPES\.has\(type\)\) return;/.test(cm));
 }
@@ -764,7 +809,12 @@ const ok = (n, c, e) => { if (c) { pass++; console.log('  ✓ ' + n); } else { f
   const om = orphan.convertHistory([
     { timestamp: '2026-04-15T01:01:48.300Z', type: 'response_item', payload: { type: 'web_search_call', status: 'completed' } },
   ]).filter((m) => m.role === 'tool');
-  ok('an orphan action-less web_search_call (no end before it) still renders its status card', om.length === 1 && om[0].content[0].output === 'status: completed');
+  // the LAST residual of the owner's report: a card with nothing in it rendered
+  // input {"query":"","action":null} over 'status: completed' — the exact shape
+  // that was reported as broken. It renders LABELLED now, so no card reproduces
+  // that shape byte for byte, and the empty keys are gone from the input.
+  const oc = om[0]?.content?.[0];
+  ok('an orphan action-less web_search_call (no end before it) still renders — LABELLED, never the owner\'s empty {"query":"","action":null} / status card', om.length === 1 && oc.output === 'web search (no details recorded)\n\nstatus: completed' && JSON.stringify(oc.input) === '{"note":"no details recorded"}' && !/"query":"","action":null/.test(JSON.stringify(oc)));
 
   // PATTERN replays (scripts/fixtures/codex-web-search-patterns.json — the real record order + action identity of
   // three rollouts, distilled read-only; queries synthesised per identity, no text carried). expectedCards is

@@ -1,5 +1,5 @@
 {
- "_about": "Web-search record PATTERNS distilled READ-ONLY from real ~/.codex/sessions rollouts (fleet scan 2026-09-06, keyed on session_meta.cli_version): the ORDER of event_msg web_search_end (E) and response_item web_search_call (C) records and which of them carry the SAME action (identity number; E~ = end with action {type:\"other\"}, C- = call with no action key at all). Queries/urls are NOT carried - the replay in scripts/test-codex-history.mjs synthesises one per identity, and the 0.153.4 shapes are separate VERBATIM records in that file. expectedCards is ground truth computed OUTSIDE the normalizer: ends + calls - adjacentTwins, a twin being a call directly after an end with the matching action (an {type:'other'} end matches an action-less call). The 0.130.0 entry is a contiguous WINDOW of the 512 MB rollout (see its `window` field) because the whole file cannot be a fixture; it is the only corpus with ORPHAN ENDS. Regenerate: see the kb essay for src/codex-message-manager.js (WEB SEARCH).",
+ "_about": "Web-search record PATTERNS distilled READ-ONLY from real ~/.codex/sessions rollouts (fleet scan 2026-09-06, keyed on session_meta.cli_version): the ORDER of event_msg web_search_end (E) and response_item web_search_call (C) records and which of them carry the SAME action (identity number; E~ = end with action {type:\"other\"}, C- = call with no action key at all). Queries/urls are NOT carried - the replay in scripts/test-codex-history.mjs synthesises one per identity, and the 0.153.4 shapes are separate VERBATIM records in that file. expectedCards is ground truth computed OUTSIDE the normalizer: ends + calls - adjacentTwins, a twin being a call directly after an end with the matching action (an {type:'other'} end matches an action-less call). The 0.130.0 entry is a contiguous WINDOW of the 2.0 GiB rollout (see its `window` field) because the whole file cannot be a fixture; it is the only corpus with ORPHAN ENDS. Regenerate: see the kb essay for src/codex-message-manager.js (WEB SEARCH).",
  "rollouts": [
   {
    "file": "rollout-2026-04-14T03-14-36-019d8b7c-5e81-7293-8225-efdd5f2a801a.jsonl",
@@ -446,7 +446,7 @@
   {
    "file": "rollout-2026-05-15T06-17-57-019e2bc9-5be2-7e12-88b6-95e0eae1957c.jsonl",
    "cli_version": "0.130.0",
-   "window": "the 200 consecutive web-search records at file lines 896905-1056905 (the whole file is 512 MB / 1.1M lines: 1524 ends + 1324 calls -> 1524 cards; this window is the shape no other rollout has, ORPHAN ends)",
+   "window": "the 200 consecutive web-search records at file lines 896905-1056905 (the whole file is 2,119,710,127 bytes = 2.0 GiB / 1,116,410 lines: 1524 ends + 1324 calls -> 1524 cards; this window is the shape no other rollout has, ORPHAN ends)",
    "ends": 106,
    "calls": 94,
    "adjacentTwins": 94,

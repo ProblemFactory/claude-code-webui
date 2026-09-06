@@ -36,6 +36,11 @@
 
 const MAX_RESULTS = 20;
 const MAX_OUTPUT_BYTES = 4096;
+// What a card says when the record carried NO query, NO action and NO results
+// (the 0.120.0 orphan `web_search_call {status:'completed'}`): the label is the
+// point — an unlabelled empty card renders as {"query":"","action":null} over
+// 'status: completed', which is the shape the owner reported as broken.
+const NO_SEARCH_DETAILS = 'no details recorded';
 
 const str = (v) => (typeof v === 'string' ? v.trim() : '');
 const obj = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : null);
@@ -142,4 +147,4 @@ function searchActionKey(action, query) {
   return [t || 'search', what, str(a?.url), str(a?.pattern)].join('|');
 }
 
-module.exports = { renderSearchOutput, searchQueryOf, searchActionKey, actionType, MAX_RESULTS, MAX_OUTPUT_BYTES };
+module.exports = { renderSearchOutput, searchQueryOf, searchActionKey, actionType, NO_SEARCH_DETAILS, MAX_RESULTS, MAX_OUTPUT_BYTES };

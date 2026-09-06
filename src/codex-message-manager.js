@@ -13,7 +13,7 @@
 
 const { peerDisplayName } = require('./message-manager');
 // web-search cards: the ONE results renderer + the twin-dedup key (PURE, shared with the client's title chip)
-const { renderSearchOutput, searchActionKey } = require('./search-card');
+const { renderSearchOutput, searchActionKey, NO_SEARCH_DETAILS } = require('./search-card');
 
 function safeJsonParse(text, fallback = null) {
   try { return JSON.parse(text); } catch { return fallback; }
@@ -139,6 +139,14 @@ const SKIPPED_RECORD_TYPES = new Set([
 const SKIPPED_RESPONSE_ITEM_TYPES = new Set([
   'additional_tools', 'configuration_update', 'compaction', 'context_compaction', 'other',
 ]);
+// item_completed item.TYPEs this handler deliberately renders NOTHING for — each
+// one's twin (or, for ContextCompaction, the reason it stays unrouted) is named
+// in the census above _processItemCompleted. A type NOT in here and not routed
+// fires telemetry; the set is exported so the gate can pin it.
+const ITEM_COMPLETED_SKIPPED_TYPES = new Set([
+  'Reasoning', 'AgentMessage', 'CollabAgentToolCall', 'CommandExecution', 'FileChange', 'UserMessage', 'ContextCompaction',
+]);
+
 const SKIPPED_EVENT_TYPES = new Set([
   // twins of records already rendered from the response_item stream
   // (item_completed = the GENERIC skip — _processItemCompleted runs first and
@@ -1036,9 +1044,10 @@ class CodexMessageManager {
   // touch it, and both handlers overwrite it) and the next search record
   // consumes or clears it, so an orphan call later in the file with the same
   // action never pairs with a stale end. Whole-file replays: the 0.125 file =
-  // 96 orphan calls then 104 end+call twins ⇒ 200 cards; the 512 MB 0.130 file
-  // = 1524 ends + 1324 calls, every call an adjacent twin ⇒ 1524 cards, 0
-  // empty and 0 'no results'.
+  // 96 orphan calls then 104 end+call twins ⇒ 200 cards; the 0.130 file
+  // (2,119,710,127 bytes = 2.0 GiB, 1,116,410 lines — `ls -l` on the named
+  // rollout, NOT the 512 MB the first cut claimed) = 1524 ends + 1324 calls,
+  // every call an adjacent twin ⇒ 1524 cards, 0 empty and 0 'no results'.
   // web_search_begin is not persisted (0 in every local rollout) but handled
   // for the live stream: a pending card if none exists, else a query patch.
   _processWebSearchEvent(event, emit) {
@@ -1081,32 +1090,84 @@ class CodexMessageManager {
     this._lastSearchEnd = null;
     if (idLess && prevEnd && prevEnd.key === key) return; // the end's twin (incl. {type:'other'} end ↔ action-less call)
     const callId = item.call_id || item.id || this._nextId();
-    this._finalizeToolCall(callId, { output: item.status ? `status: ${item.status}` : '', isError: false, extraInput: { query: action?.query || '', action }, rawName: 'web_search' }, emit);
+    // An ORPHAN action-less call (0.120.0 `{status:'completed'}` with no end, no
+    // id, no action — one such record survives the positional pairing) carried
+    // NOTHING to render, so the card came out as the owner's exact complaint
+    // shape: input {"query":"","action":null} over 'status: completed'. It is
+    // now LABELLED — an empty input is replaced by the note and the head says
+    // what is missing — so no card can reproduce that shape byte for byte.
+    const status = item.status ? `status: ${item.status}` : '';
+    const detailed = !!action;
+    this._finalizeToolCall(callId, {
+      output: detailed ? status : [`web search (${NO_SEARCH_DETAILS})`, status].filter(Boolean).join('\n\n'),
+      isError: false,
+      extraInput: detailed ? { query: action.query || '', action } : { note: NO_SEARCH_DETAILS },
+      rawName: 'web_search',
+    }, emit);
     this._lastSearchCall = idLess ? { key, msgId: this.toolCallMessageIds.get(callId) || null } : null;
   }
 
   // ── event_msg item_completed (the 0.149+ ThreadItem lifecycle record) ──
-  // 0.153.4 CENSUS (25 local rollouts, snapshot 2026-09-06 — the corpus is LIVE
-  // and grows, so re-count rather than trusting these totals; the RATIOS are the
-  // claim. item_started is NEVER persisted — 0 records — so item_completed is the
-  // only lifecycle carrier):
-  //   Reasoning 1227 · AgentMessage 75 · CollabAgentToolCall 5 — the item id IS
-  //     a response_item id (twin 1228/1228, 75/75, 5/5) ⇒ generic skip.
-  //   CommandExecution 478 · FileChange 108 — no id twin, but each sits beside
-  //     the custom_tool_call `exec` that produced it (the apply_patch execs
-  //     match the FileChange count file by file) ⇒ generic skip.
-  //   UserMessage 29 — the prompt, already rendered from the response_item.
-  //   Extension:web.search 245 · Extension:image_gen.generation 3 · ImageView 48
-  //     — ZERO response_item twins by id: persisted NOWHERE else, so these are
-  //     routed here into the card path their live/legacy twin already uses.
-  // Those two are the only Extension KINDS in the corpus; any other kind is
-  // reported ONCE per kind as telemetry `codex-unknown-record:item_completed:
-  // <kind>` (the generic skip used to swallow it silently — the invisible-record
-  // class again) instead of being invented into a card.
+  // Dispatch is an explicit ALLOWLIST on item.TYPE, not a fall-through: a type
+  // whose fact is rendered from ANOTHER record is skipped BY NAME with that
+  // record named, a type that is the ONLY carrier of its fact is routed into the
+  // card path its live/legacy twin already uses, and anything else fires
+  // `codex-unknown-record:item_completed:<type>` ONCE per type. A silent default
+  // here is the invisible-record class — three 0.153.4 rollouts with 20/43/30
+  // searches rendered ZERO cards while item_completed sat in the generic skip.
+  //
+  // 0.153.4 CENSUS (all 25 local rollouts, snapshot 2026-09-06 — the corpus is
+  // LIVE: two scans an hour apart differed by ~4%, so RE-COUNT rather than trust
+  // the totals; the RATIOS are the claim. item_started is NEVER persisted — 0
+  // records — so item_completed is the only lifecycle carrier):
+  //   RENDERED ELSEWHERE ⇒ skipped by name (ITEM_COMPLETED_SKIPPED_TYPES):
+  //   Reasoning 1480 · AgentMessage 84 — the item id IS a response_item id
+  //     (1480/1480, 84/84).
+  //   CollabAgentToolCall 5 — the id is the function_call's call_id (5/5).
+  //   CommandExecution 588 · FileChange 135 — no id twin: the item is the RESULT
+  //     of the `exec` custom_tool_call in front of it (876 exec calls, the only
+  //     shell tool name in the corpus), whose card already shows the command and
+  //     its output. 0.153.4 has NO standalone apply_patch tool call AT ALL (0 in
+  //     the corpus — the earlier "the apply_patch execs match the FileChange
+  //     count" claim was false): a patch rides the SAME `exec` call, whose input
+  //     text carries the '*** Begin Patch' payload; 135/135 FileChange items
+  //     follow an exec call naming the changed file.
+  //   UserMessage 31 — the prompt, already rendered from its response_item.
+  //   SubAgentActivity started 18 + interacted 214 — the item id is the id of the
+  //     tool CALL that caused it (started → spawn_agent 18/18, interacted →
+  //     send_message 197 + followup_task 17), and that call renders its own card.
+  //   ContextCompaction 1 — deliberately NOT routed: the live wrapper emits its
+  //     own `context_compacted` for the same item, the two spellings do NOT
+  //     fingerprint-dedupe in the buffer⇄rollout merge, so routing it would
+  //     print the notice twice (and bump turnIndex twice) on every live session.
+  //     Known cost, named here: a rollout-ONLY rebuild shows no compaction
+  //     notice. Fixing it needs a dedupe key both spellings share.
+  //   ONLY CARRIER ⇒ routed:
+  //   Extension:web.search 245 · Extension:image_gen.generation 3 · ImageView 54
+  //     — ZERO twins by any id: persisted NOWHERE else.
+  //   SubAgentActivity completed 32 over 18 distinct threads (a thread's
+  //     completion is recorded more than once; the card is keyed by THREAD, so
+  //     the corpus replay gains exactly 18 cards) — id `subagent-completed-
+  //     <uuid>`, twinning NOTHING (0/32). A sub-agent FINISHING was recorded
+  //     nowhere else, so it routes to the sub_agent_activity card path (which
+  //     now CREATES the card when no 'started' opened one: 0.153.4 persists no
+  //     standalone sub_agent_activity at all, and its 'started' twin renders as the
+  //     spawn_agent call instead). 0.149.1 persists the same facts the OTHER way
+  //     — 349 standalone sub_agent_activity events, started 64 / interacted 277 /
+  //     interrupted 8 / completed 0 — so this carrier MOVED into item_completed
+  //     exactly like web.search did. 'interrupted' has 0 item_completed records
+  //     locally: it rides the same terminal rule, and the twin guard below means
+  //     a twinned one could still never double-render.
+  // Only web.search / image_gen.generation are Extension KINDS in the corpus; an
+  // unknown KIND reports as `item_completed:Extension:<kind>` (namespaced so a
+  // kind can never be read as a top-level type), an unknown SubAgentActivity kind
+  // as `item_completed:SubAgentActivity:<kind>`.
   _processItemCompleted(event, emit) {
     const it = event.item && typeof event.item === 'object' && !Array.isArray(event.item) ? event.item : null;
     if (!it) return;
-    if (it.type === 'Extension') {
+    const type = String(it.type || '');
+    if (ITEM_COMPLETED_SKIPPED_TYPES.has(type)) return; // rendered from the record named in the census above
+    if (type === 'Extension') {
       if (it.kind === 'web.search') {
         this._processWebSearchEvent({ type: 'web_search_end', call_id: it.id, query: it.query, action: it.action, results: it.results, error: it.error }, emit);
         return;
@@ -1121,15 +1182,80 @@ class CodexMessageManager {
         this._finalizeToolCall(it.id || this._nextId(), { output, isError: !!failure, extraInput: { prompt: typeof it.revisedPrompt === 'string' ? it.revisedPrompt : '' }, rawName: 'image_gen' }, emit);
         return;
       }
-      this._noteUnknown('event_msg', 'item_completed:' + (it.kind || '(unkinded)'));
+      this._noteUnknown('event_msg', 'item_completed:Extension:' + (it.kind || '(unkinded)'));
       return;
     }
-    if (it.type === 'ImageView') {
+    if (type === 'ImageView') {
       // the wrapper's live view_image card path (same item id ⇒ the rollout copy edits it in place)
       const p = String(it.path || '').replace(/^file:\/\//, '');
       this._finalizeToolCall(it.id || this._nextId(), { output: `viewed ${p || 'image'}`, isError: false, extraInput: { path: p }, rawName: 'view_image' }, emit);
+      return;
     }
-    // every other item type: twin of a rendered response_item — generic skip (SKIPPED_EVENT_TYPES)
+    if (type === 'SubAgentActivity') {
+      const kind = String(it.kind || '');
+      if (kind === 'started' || kind === 'interacted') return; // the spawn_agent / send_message card IS this record
+      if (kind === 'completed' || kind === 'interrupted') {
+        // a terminal record whose id already owns a card would be that call's
+        // twin (never seen — the CLI synthesises `subagent-completed-<uuid>` —
+        // but a double card is a failure nobody would report, so guard it)
+        if (it.id && this.toolCallMessageIds.has(String(it.id))) return;
+        this._processSubAgentActivity({ event_id: it.id, agent_thread_id: it.agent_thread_id || it.agentThreadId, agent_path: it.agent_path || it.agentPath, kind }, emit);
+        return;
+      }
+      this._noteUnknown('event_msg', 'item_completed:SubAgentActivity:' + (kind || '(unkinded)'));
+      return;
+    }
+    this._noteUnknown('event_msg', 'item_completed:' + (type || '(untyped)'));
+  }
+
+  // Codex sub-agents: a spawned agent THREAD tied to a tool call
+  // (SubAgentActivityKind started | interacted | interrupted | completed,
+  // 0.153.4 protocol.rs). ONE card per sub-agent THREAD in the 'agent' fold kind
+  // (a system line split every surrounding run); 'interacted' is churn;
+  // completed/interrupted edit the card in place. No task-lifecycle chip: a
+  // sub-agent has no result payload to close on.
+  // Reached from THREE carriers, all keyed on the thread id: standalone event_msg
+  // sub_agent_activity (0.149.1 rollouts — 349 records), the thread/read mapper
+  // (src/codex-thread-read.js), and 0.153.4's item_completed SubAgentActivity
+  // (terminal kinds only — the others are their spawn/send call's own card).
+  // ONE card per thread, always — a repeated 'started' patches nothing (79
+  // (file, thread) pairs in the 0.149.1 corpus, ZERO with a second 'started', so
+  // this is idempotence, NOT a fix for an observed duplicate: an earlier count
+  // that said 19 of 43 pairs repeat was an artifact of comparing 8-char id
+  // PREFIXES, caught by an old-vs-new whole-corpus replay that showed no
+  // difference), and a TERMINAL record with no open card CREATES one, because on
+  // 0.153.4 the terminal record is the only one that reaches here.
+  _processSubAgentActivity(event, emit) {
+    const tid = String(event.agent_thread_id || event.agentThreadId || '');
+    const key = 'subagent:' + (tid || event.event_id || 'x');
+    const kind = event.kind || '';
+    const terminal = kind === 'completed' || kind === 'interrupted';
+    if (kind !== 'started' && !terminal) return;
+    const label = `${event.agent_path || '(agent)'} — thread ${tid.slice(0, 13)}…`;
+    const failed = kind === 'interrupted';
+    const output = `Codex sub-agent ${kind === 'started' ? 'started' : kind}: ${label}`;
+    const status = failed ? 'error' : 'complete';
+    const toolStatus = failed ? 'error' : 'ok';
+    const existing = this.messageIndex.get(this.toolCallMessageIds.get(key));
+    if (existing) {
+      if (!terminal) return; // a repeated 'started' is not a second sub-agent
+      existing.status = status;
+      existing.toolStatus = toolStatus;
+      existing.content = [{ ...(existing.content?.[0] || {}), output, status: toolStatus }];
+      if (emit) this._emit({ op: 'edit', id: existing.id, fields: { status: existing.status, toolStatus: existing.toolStatus, content: existing.content } });
+      return;
+    }
+    const msg = this._create({
+      role: 'tool',
+      status,
+      content: [{ type: 'tool_result', toolCallId: key, toolName: 'Sub-agent', input: { agent_path: event.agent_path || '', thread_id: tid }, output, status: toolStatus }],
+      toolCallId: key,
+      toolName: 'Sub-agent',
+      toolStatus,
+      collapseKind: 'agent',
+    });
+    this.toolCallMessageIds.set(key, msg.id);
+    if (emit) this._emit({ op: 'create', message: msg });
   }
 
   _processEvent(event, emit) {
@@ -1214,41 +1340,7 @@ class CodexMessageManager {
       return;
     }
 
-    if (type === 'sub_agent_activity') {
-      // Codex sub-agents: a spawned agent THREAD tied to a tool call
-      // (SubAgentActivityKind started | interacted | interrupted | completed,
-      // 0.153.4 protocol.rs). One COMPLETE card per sub-agent thread in the
-      // 'agent' fold kind (a system line split every surrounding run);
-      // 'interacted' is churn; completed/interrupted edit the card in place.
-      // No task-lifecycle chip: a sub-agent has no result payload to close on.
-      const tid = String(event.agent_thread_id || event.agentThreadId || '');
-      const key = 'subagent:' + (tid || event.event_id || 'x');
-      const kind = event.kind || '';
-      const label = `${event.agent_path || '(agent)'} — thread ${tid.slice(0, 13)}…`;
-      if (kind === 'started') {
-        const msg = this._create({
-          role: 'tool',
-          status: 'complete',
-          content: [{ type: 'tool_result', toolCallId: key, toolName: 'Sub-agent', input: { agent_path: event.agent_path || '', thread_id: tid }, output: `Codex sub-agent started: ${label}`, status: 'ok' }],
-          toolCallId: key,
-          toolName: 'Sub-agent',
-          toolStatus: 'ok',
-          collapseKind: 'agent',
-        });
-        this.toolCallMessageIds.set(key, msg.id);
-        if (emit) this._emit({ op: 'create', message: msg });
-      } else if (kind === 'completed' || kind === 'interrupted') {
-        const existing = this.messageIndex.get(this.toolCallMessageIds.get(key));
-        if (existing) {
-          const failed = kind === 'interrupted';
-          existing.status = failed ? 'error' : 'complete';
-          existing.toolStatus = failed ? 'error' : 'ok';
-          existing.content = [{ ...(existing.content?.[0] || {}), output: `Codex sub-agent ${kind}: ${label}`, status: failed ? 'error' : 'ok' }];
-          if (emit) this._emit({ op: 'edit', id: existing.id, fields: { status: existing.status, toolStatus: existing.toolStatus, content: existing.content } });
-        }
-      }
-      return;
-    }
+    if (type === 'sub_agent_activity') return this._processSubAgentActivity(event, emit);
 
     if (type === 'thread_settings_applied') {
       // 0.153: the app-server's own confirmation of the thread's settings
@@ -1500,5 +1592,6 @@ CodexMessageManager._seenUnknownRecords = new Set();
 CodexMessageManager.SKIPPED_RECORD_TYPES = SKIPPED_RECORD_TYPES;
 CodexMessageManager.SKIPPED_RESPONSE_ITEM_TYPES = SKIPPED_RESPONSE_ITEM_TYPES;
 CodexMessageManager.SKIPPED_EVENT_TYPES = SKIPPED_EVENT_TYPES;
+CodexMessageManager.ITEM_COMPLETED_SKIPPED_TYPES = ITEM_COMPLETED_SKIPPED_TYPES;
 
 module.exports = { CodexMessageManager };
