@@ -140,6 +140,7 @@ Everything VibeSpace adds *into* your agent sessions lives here — and all of i
 | `agents.stopNudgeExtra` | text | `''` | Custom text prepended to the stop nudge (≤500 chars) |
 | `agents.allowGroupManagement` | boolean | `false` | Let designated "Group manager" sessions create/configure Task Groups via CLI |
 | `agents.groupManagementRoots` | string | `~` | Comma-separated path prefixes manager agents may use for group folders |
+| `agents.opencodeServeAutostart` | boolean | `true` | Start one background `opencode serve` on 127.0.0.1 so STOPPED OpenCode conversations list/open/resume/fork from the sidebar (OpenCode keeps its sessions in its own database, not in files). Off = OpenCode conversations only appear while running; an already-running serve is still reused. `VIBESPACE_OPENCODE_SERVE=0/1` overrides this setting. The keeper samples the serve's CPU/RSS and stops it (visibly) if it runs away. |
 
 ### Claude
 

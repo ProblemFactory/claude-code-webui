@@ -339,6 +339,16 @@ class App {
       Object.assign(BACKEND_META[msg.backend].caps, msg.caps);
       try { this.sidebar?._render?.(); } catch {}
     });
+    // S9 (2.369.45): a harness STORE that broke — the opencode serve parked
+    // after crashes or stopped as a runaway — must reach the user, not just
+    // the journal. The reason rides BACKEND_META (user actions quote it) and
+    // a NEW park toasts once.
+    this.ws.onGlobal((msg) => {
+      if (msg.type !== 'harness-store-updated' || !msg.backend || !BACKEND_META[msg.backend]) return;
+      const prev = BACKEND_META[msg.backend].storeReason || null;
+      BACKEND_META[msg.backend].storeReason = msg.reason || null;
+      if (msg.reason && msg.reason !== prev) showToast(`${BACKEND_META[msg.backend].label || msg.backend}: ${msg.reason}`, { type: 'error' });
+    });
     this.ws.onGlobal((msg) => {
       if (msg.type === 'editor-open' && msg.filePath && msg.signalPath) {
         this._openExternalEditor(msg.filePath, msg.signalPath, msg.sessionId, msg.host);
@@ -363,6 +373,7 @@ class App {
         if (opt) opt.hidden = !h.installed;
         // S9: runtime-verified caps (opencode fork = the serve OpenAPI evidence) replace the shipped guess
         if (h.caps && BACKEND_META[h.id]?.caps) Object.assign(BACKEND_META[h.id].caps, h.caps);
+        if (BACKEND_META[h.id]) BACKEND_META[h.id].storeReason = h.storeReason || null; // a parked/runaway store carries WHY (2.369.45)
       }
     }).catch(()=>{});
 

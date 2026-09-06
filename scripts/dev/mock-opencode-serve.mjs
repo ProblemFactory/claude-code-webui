@@ -16,7 +16,10 @@ export const SESSIONS = () => ([
   { id: 'ses_child', slug: 'tiny-otter', projectID: 'proj_a', directory: '/work/alpha', path: '', parentID: 'ses_a2', title: 'subtask child', agent: 'build', model: { id: 'big-pickle', providerID: 'opencode' }, version: '1.18.29', time: { created: 1788601500000, updated: 1788601600000 }, cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } },
   { id: 'ses_g1', slug: 'quick-tiger', projectID: 'global', directory: '/tmp/x', path: 'tmp/x', title: 'New session - 2026-09-05T11:00:00.000Z', agent: 'build', model: { id: 'big-pickle', providerID: 'opencode' }, version: '1.18.29', time: { created: 1788603000000, updated: 1788603000000 }, cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } },
 ]);
-export const PROJECTS = [{ id: 'proj_a', worktree: '/work/alpha', time: { created: 1, updated: 2 }, sandboxes: [] }, { id: 'global', worktree: '/', time: { created: 1, updated: 2 }, sandboxes: [] }];
+// Shaped after a real 1.18.29 store: a git-backed project row carries `vcs`,
+// the 'global' catch-all does NOT and its worktree is whatever the last serve's
+// cwd resolved to — on the owner's 2.369.42 box, "/" (the whole filesystem).
+export const PROJECTS = [{ id: 'proj_a', worktree: '/work/alpha', vcs: 'git', time: { created: 1, updated: 2 }, sandboxes: [] }, { id: 'global', worktree: '/', time: { created: 1, updated: 2 }, sandboxes: [] }];
 
 /** v1 messages for ses_a1: user → assistant (reasoning, text, read tool ok, edit tool error, subtask, step parts) → user → aborted assistant → user (no reply yet) */
 export const MESSAGES = {
@@ -63,7 +66,18 @@ export function openapiDoc({ withFork = true } = {}) {
 }
 
 export function createMockState(opts = {}) {
-  return { hang: false, fail: false, withFork: opts.withFork !== false, sessions: SESSIONS(), messages: JSON.parse(JSON.stringify(MESSAGES)), requests: [], forks: 0, delayMs: 0 };
+  return {
+    hang: false, fail: false, withFork: opts.withFork !== false, sessions: SESSIONS(),
+    messages: JSON.parse(JSON.stringify(MESSAGES)), requests: [], forks: 0, delayMs: 0,
+    // the serve's OWN project (GET /project/current) — what the 2.369.42
+    // self-heal probes on a recorded instance; '/' = the leftover shape
+    currentWorktree: opts.currentWorktree || '/work/alpha',
+    // MEASURED on the real 1.18.29 serve: any v2 /api/session/{id}/… route
+    // bootstraps an instance for that session's DIRECTORY (fff indexer +
+    // recursive inotify watch); the v1 routes boot nothing. The mock records
+    // it so the suite can assert the discovery path bootstraps NOTHING.
+    instances: new Set(), disposed: [],
+  };
 }
 
 export function makeHandler(state) {
@@ -78,6 +92,12 @@ export function makeHandler(state) {
       if (req.method === 'GET' && p === '/global/health') return json(res, 200, { healthy: true, version: '1.18.29' });
       if (req.method === 'GET' && p === '/doc') return json(res, 200, openapiDoc({ withFork: state.withFork }));
       if (req.method === 'GET' && p === '/project') return json(res, 200, PROJECTS);
+      if (req.method === 'GET' && p === '/project/current') return json(res, 200, { id: 'global', worktree: state.currentWorktree, time: { created: 1, updated: 2 }, sandboxes: [] });
+      if (req.method === 'POST' && p === '/instance/dispose') {
+        const dir = url.searchParams.get('directory') || '';
+        state.disposed.push(dir); state.instances.delete(dir);
+        return json(res, 200, true);
+      }
       if (req.method === 'GET' && p === '/session') {
         // verified 1.18.29 semantics: bare directory = EXACT directory match ("/" matches nothing);
         // scope=project + directory=<worktree> = every session of that project
@@ -103,6 +123,12 @@ export function makeHandler(state) {
         const all = state.messages[id] || [];
         const limit = Number(url.searchParams.get('limit') || 0);
         return json(res, 200, limit ? all.slice(-limit) : all); // v1: limit = the NEWEST N
+      }
+      if ((m = p.match(/^\/api\/session\/([^/]+)/)) && req.method === 'GET') {
+        // EVERY v2 per-session route boots the instance (measured) — model it
+        const id = decodeURIComponent(m[1]);
+        const s0 = state.sessions.find((x) => x.id === id);
+        if (s0 && s0.directory) state.instances.add(s0.directory);
       }
       if ((m = p.match(/^\/api\/session\/([^/]+)\/message$/)) && req.method === 'GET') {
         const id = decodeURIComponent(m[1]);
@@ -145,12 +171,14 @@ export function startMockServe({ port = 0, state = null } = {}) {
 
 // child mode: `node mock-opencode-serve.mjs serve --port N [--hostname H] [--log-level L]`
 //   MOCK_OPENCODE_CRASH=1 exits 3 at once (keeper crash loop), MOCK_OPENCODE_NO_FORK=1 hides the fork endpoint,
-//   MOCK_OPENCODE_BOOT_DELAY_MS delays the listen (boot-wait path)
+//   MOCK_OPENCODE_BOOT_DELAY_MS delays the listen (boot-wait path),
+//   MOCK_OPENCODE_WORKTREE overrides GET /project/current's worktree (default: the child's own cwd —
+//   so the keeper's isolated-cwd spawn reports a SAFE project and a hand-started '/' serve reports '/')
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1] && process.argv[2] === 'serve') {
   const argv = process.argv.slice(3);
   if (argv.includes('--crash') || process.env.MOCK_OPENCODE_CRASH === '1') process.exit(3);
   const port = Number(argv[argv.indexOf('--port') + 1] || 0);
-  const st = createMockState({ withFork: !argv.includes('--no-fork') && process.env.MOCK_OPENCODE_NO_FORK !== '1' });
+  const st = createMockState({ withFork: !argv.includes('--no-fork') && process.env.MOCK_OPENCODE_NO_FORK !== '1', currentWorktree: process.env.MOCK_OPENCODE_WORKTREE || process.cwd() });
   const delay = Number(process.env.MOCK_OPENCODE_BOOT_DELAY_MS || 0);
   setTimeout(() => { startMockServe({ port, state: st }).then((m) => { process.stdout.write(`mock opencode serve listening on ${m.url}\n`); }); }, delay);
 }

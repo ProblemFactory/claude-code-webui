@@ -18,14 +18,18 @@
  *                          is set in the spawn env; no vendor secret ever).
  *   createServeLocator   — finds ONE serve instance per VibeSpace: reuse the
  *                          one recorded in data/opencode-serve.json {port,pid,
- *                          startedAt} when it still answers /global/health,
+ *                          startedAt,command,cwd} when it still answers
+ *                          /global/health AND its own project is safe,
  *                          else start `opencode serve --port <free>
  *                          --hostname 127.0.0.1` (detached, stdio ignored, under
- *                          the caller's sanitized env) and keep it: respawn on
+ *                          the caller's sanitized env, FROM ITS OWN EMPTY
+ *                          data/opencode-serve/cwd) and keep it: respawn on
  *                          exit with exponential backoff, PARKED after 5 crashes
  *                          (loud in user actions, silent in the poll), stopped
- *                          on server exit. Started LAZILY on the first discovery
- *                          and only when the CLI is installed. After boot the
+ *                          on server exit, and STOPPED as a runaway when its
+ *                          /proc sample blows the CPU/RSS bounds. Started
+ *                          LAZILY on the first discovery and only when the CLI
+ *                          is installed AND autostart is on. After boot the
  *                          OpenAPI is probed once: the `fork` capability verdict
  *                          (POST /session/{sessionID}/fork present) is reported
  *                          through onCaps — capsOf('opencode').fork flips ONLY
@@ -36,6 +40,23 @@
  *                          budget — a hung serve never stalls the 5s
  *                          /api/sessions poll), readConversation(id) for the
  *                          serve-backed reader (8s, LOUD), forkSession(id).
+ *
+ * WHERE IT RUNS AND WHAT IT MAY TOUCH (2.369.45, the 2.369.42 runaway):
+ * OpenCode boots an "instance" per DIRECTORY and each instance recursively
+ * indexes + inotify-watches that tree (`fff-*` + `notify-rs` threads).
+ * Measured with /proc against a real 1.18.29 serve:
+ *   • v1 routes (/session, /session/:id, /session/:id/message, /project) boot
+ *     NOTHING; every v2 /api/session/{id}/… route boots an instance for that
+ *     session's directory (+19 threads, +200 MB, a full-tree watch).
+ *   • the serve's cwd decides its DEFAULT project (git walk UP, else the
+ *     'global' catch-all whose worktree is '/'), so the serve runs from its own
+ *     empty throwaway git repo under data/opencode-serve/cwd.
+ *   • listAllSessions takes the DIRECTORY-LESS listing first and only
+ *     bootstraps `scope=project` for real (vcs-backed) worktrees, never '/',
+ *     $HOME or the tmp dir.
+ * The 2.369.42 shape: the serve ran with cwd=$HOME (project '/') and the naming
+ * lookup used the v2 route on a session whose directory was /tmp — 209 CPU-min,
+ * 5.0 GB RSS, 30 021 inotify watches, 3.6 GB/s page-cache reads.
  *
  * 'acp-events' SYNTHESIS (messagesToAcpRecords): a stopped conversation is
  * rebuilt as the record stream the wrapper would have journaled, so the
@@ -59,11 +80,13 @@
  * Tool state → ACP status: pending→pending, running→in_progress, completed→completed, error→failed.
  *
  * NAMING: the shared rule (discovery-facts nameFromText over the FIRST user
- * message — the v2 endpoint GET /api/session/:id/message?limit=3&order=asc
- * returns messages oldest-first; v1 `limit` returns the NEWEST N) — cached per
- * id, at most NAME_BATCH lookups per discovery tick so a big store names
- * itself progressively without a request burst; fallback = OpenCode's own
- * title unless it is the "New session - <date>" placeholder.
+ * message) read from the v1 GET /session/:id/message list — which is the WHOLE
+ * conversation oldest-first (v1 `limit` returns the NEWEST N, so it cannot page
+ * from the front), capped at NAME_MAX_BYTES. The v2 asc endpoint is smaller but
+ * BOOTS AN INSTANCE — see above; never use it here. Cached per id, at most
+ * NAME_BATCH lookups per discovery tick so a big store names itself
+ * progressively without a request burst; fallback = OpenCode's own title unless
+ * it is the "New session - <date>" placeholder.
  *
  * NOT IN SCOPE (endpoints seen in the 1.18.29 OpenAPI, unwired): revert
  * (POST /session/{sessionID}/revert), question (GET /question, POST
@@ -74,7 +97,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const net = require('net');
-const { spawn } = require('child_process');
+const { spawn, execFile } = require('child_process');
 const { nameFromText } = require('./discovery-facts');
 const { AcpSessionMessages } = require('./acp-message-manager');
 
@@ -90,6 +113,14 @@ const NAME_BATCH = 6;
 const LIST_LIMIT = 500;
 const TITLE_PLACEHOLDER_RE = /^New session - /;
 const FORK_PATH = '/session/{sessionID}/fork';
+const NAME_MAX_BYTES = 1 << 20;    // the naming read is the WHOLE v1 message list — refuse a conversation bigger than this (it has a real title anyway)
+// ── the RUNAWAY guard (2.369.45, the 2.369.42 incident) ──
+const GUARD_SAMPLE_MS = 60000;                     // /proc sample cadence
+const GUARD_CPU_PCT = 150;                         // sustained CPU% (100% = one core) that counts as hot
+const GUARD_CPU_SUSTAIN_MS = 5 * 60 * 1000;        // …for this long ⇒ runaway
+const GUARD_RSS_BYTES = 2 * 1024 * 1024 * 1024;    // RSS above this ⇒ runaway at once
+const RUNAWAY_COOLDOWN_MS = 60 * 60 * 1000;        // a runaway is respawned at most once an hour
+const CLK_TCK = 100;                               // Linux USER_HZ (getconf CLK_TCK) — /proc stat ticks → seconds
 
 class OpencodeServeError extends Error {
   constructor(message, { status = 0, code = null, cause = null } = {}) {
@@ -128,6 +159,75 @@ function writeJsonAtomic(file, value) {
 const isoOf = (ms) => new Date(Number.isFinite(ms) && ms > 0 ? ms : Date.now()).toISOString();
 const isConnErr = (e) => e && (e.code === 'network' || e.code === 'ECONNREFUSED' || e.code === 'ECONNRESET');
 
+// ── where the serve runs, and which worktrees may be bootstrapped ──
+/** OpenCode resolves its DEFAULT project from the process cwd, and every
+ *  instance it boots recursively INDEXES + inotify-watches a directory tree
+ *  (the `fff-*` fast-file-finder threads + `notify-rs`). MEASURED on 1.18.29:
+ *    • cwd inside a git checkout  → project worktree = that checkout (the walk
+ *      goes UP; a plain `data/opencode-serve/cwd` resolves the whole VibeSpace
+ *      checkout, node_modules and all — a fake `.git` directory does NOT stop
+ *      it, only a real repo does)
+ *    • cwd with no repo above it  → the catch-all 'global' project, worktree '/'
+ *  So the serve gets its OWN empty directory made into a throwaway git repo:
+ *  the walk stops there and the default project is an empty tree. Falls back to
+ *  the bare directory (loudly) when `git init` is unavailable. */
+function serveCwdPath(dataDir) { return path.join(dataDir, 'opencode-serve', 'cwd'); }
+const SERVE_CWD_README = `This directory is the working directory of VibeSpace's \`opencode serve\` keeper
+(src/opencode-serve.js). It is deliberately EMPTY and its own throwaway git repo:
+OpenCode resolves its default project from the serve's cwd by walking UP for a
+git worktree, and any instance it boots recursively indexes + inotify-watches
+that tree. Pointing the serve at $HOME (2.369.42) resolved the '/' project.
+Do not put files here, do not delete it while the server runs.
+`;
+async function ensureServeCwd(dataDir, { execImpl = execFile, log = null } = {}) {
+  const dir = serveCwdPath(dataDir);
+  fs.mkdirSync(dir, { recursive: true });
+  try { fs.writeFileSync(path.join(dataDir, 'opencode-serve', 'README.txt'), SERVE_CWD_README); } catch { }
+  if (fs.existsSync(path.join(dir, '.git'))) return { dir, isolated: true };
+  const ok = await new Promise((resolve) => {
+    try { execImpl('git', ['init', '-q', '.'], { cwd: dir, timeout: 10000 }, (err) => resolve(!err)); }
+    catch { resolve(false); }
+  });
+  if (!ok) log?.warn?.('[opencode-serve] `git init` failed in the isolated serve cwd — OpenCode will resolve the ENCLOSING checkout (or "/") as its default project; nothing indexes it while discovery stays on the v1 routes, but the isolation is weaker');
+  return { dir, isolated: ok };
+}
+/** May we hand this /project row to a `scope=project&directory=` query?
+ *  '/' and $HOME are the 2.369.42 shapes (the whole filesystem / the whole
+ *  home); os.tmpdir() is the tree that actually burned. A REAL project row
+ *  carries `vcs` (verified 1.18.29: the git-backed rows do, the 'global'
+ *  catch-all does not) — that is the API's own "is a real project" signal, so
+ *  no fs call is needed (the never-block-the-event-loop law). */
+function bootstrappableWorktree(project) {
+  const w = project && typeof project.worktree === 'string' ? project.worktree.trim() : '';
+  if (!w || !path.isAbsolute(w)) return false;
+  const p = path.resolve(w);
+  if (p === path.parse(p).root) return false;
+  if (p === path.resolve(os.homedir())) return false;
+  if (p === path.resolve(os.tmpdir())) return false;
+  return !!project.vcs;
+}
+/** A recorded serve whose CURRENT project is '/' or $HOME is a 2.369.42
+ *  leftover: replace it instead of adopting it. */
+function unsafeWorktreeReason(worktree) {
+  const w = typeof worktree === 'string' && worktree.trim() ? path.resolve(worktree.trim()) : '';
+  if (!w) return null;
+  if (w === path.parse(w).root) return 'its project worktree is "/" — the WHOLE filesystem';
+  if (w === path.resolve(os.homedir())) return `its project worktree is the home directory (${w})`;
+  return null;
+}
+/** {cpuTicks, rssBytes} for a pid, or null. procfs only (no mountpoint, no
+ *  child process) — safe to read synchronously once a minute. */
+function readProcUsage(pid) {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const f = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    const cpuTicks = Number(f[11]) + Number(f[12]); // utime + stime
+    const rssKb = Number(/VmRSS:\s+(\d+)/.exec(fs.readFileSync(`/proc/${pid}/status`, 'utf8'))?.[1] || 0);
+    if (!Number.isFinite(cpuTicks)) return null;
+    return { cpuTicks, rssBytes: rssKb * 1024 };
+  } catch { return null; }
+}
+
 // ── the client ──
 class OpencodeServeClient {
   constructor(baseUrl, { timeoutMs = DEFAULT_TIMEOUT_MS, fetchImpl = null, auth = null } = {}) {
@@ -136,7 +236,7 @@ class OpencodeServeClient {
     this._fetch = fetchImpl || ((...a) => globalThis.fetch(...a));
     this._auth = auth && auth.password ? 'Basic ' + Buffer.from(`${auth.username || 'opencode'}:${auth.password}`).toString('base64') : null;
   }
-  async request(method, route, { query = null, body = null, timeoutMs = null } = {}) {
+  async request(method, route, { query = null, body = null, timeoutMs = null, maxBytes = 0 } = {}) {
     const url = new URL(this.baseUrl + route);
     for (const [k, v] of Object.entries(query || {})) if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, String(v));
     const ms = timeoutMs || this.timeoutMs;
@@ -148,7 +248,7 @@ class OpencodeServeClient {
       if (body != null) headers['content-type'] = 'application/json';
       if (this._auth) headers.authorization = this._auth;
       const res = await this._fetch(url, { method, headers, body: body != null ? JSON.stringify(body) : undefined, signal: ctl.signal });
-      const text = await res.text();
+      const text = await this._readBody(res, method, route, maxBytes);
       let json = null;
       if (text) { try { json = JSON.parse(text); } catch { json = null; } }
       if (!res.ok) {
@@ -162,9 +262,34 @@ class OpencodeServeClient {
       throw new OpencodeServeError(timedOut ? `${method} ${route} timed out after ${ms}ms` : `${method} ${route} failed: ${e?.cause?.code || e?.code || e?.message || e}`, { code: timedOut ? 'timeout' : (e?.cause?.code || e?.code || 'network'), cause: e });
     } finally { clearTimeout(timer); }
   }
+  /** Body text, refusing anything past `maxBytes` (0 = unbounded). The naming
+   *  read is the WHOLE v1 message list; six of those concurrently, unbounded,
+   *  into this process is an OOM waiting to happen. Only successful responses
+   *  are capped — an error body is always read whole for its message. */
+  async _readBody(res, method, route, maxBytes) {
+    if (!maxBytes || !res.ok || !res.body || typeof res.body.getReader !== 'function') return res.text();
+    const reader = res.body.getReader();
+    const chunks = []; let n = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      n += value.byteLength;
+      if (n > maxBytes) { try { await reader.cancel(); } catch { } throw new OpencodeServeError(`${method} ${route} response exceeded ${maxBytes} bytes`, { code: 'too-large' }); }
+      chunks.push(Buffer.from(value));
+    }
+    return Buffer.concat(chunks).toString('utf8');
+  }
   health(opts) { return this.request('GET', '/global/health', opts); }
   openapi(opts = {}) { return this.request('GET', '/doc', { timeoutMs: READ_TIMEOUT_MS, ...opts }); }
   listProjects(opts) { return this.request('GET', '/project', opts); }
+  /** The project THIS serve resolved from its own cwd (worktree '/' or $HOME = a 2.369.42 leftover). */
+  currentProject(opts) { return this.request('GET', '/project/current', opts); }
+  /** POST /instance/dispose?directory= — tears down the OpenCode instance (and
+   *  its file watcher) for a directory. Best-effort belt for the one place we
+   *  hand a directory to a mutating endpoint. */
+  disposeInstance(directory, { timeoutMs = null } = {}) {
+    return this.request('POST', '/instance/dispose', { query: { directory }, timeoutMs });
+  }
   /** GET /session — verified 1.18.29 semantics: bare `directory` = sessions
    *  whose directory is EXACTLY that path (so `/` matches nothing);
    *  `scope=project` + `directory=<worktree>` = the whole project; `roots`
@@ -172,19 +297,33 @@ class OpencodeServeClient {
   listSessions({ limit = LIST_LIMIT, directory = null, scope = null, roots = null, timeoutMs = null } = {}) {
     return this.request('GET', '/session', { query: { limit, directory, scope, roots: roots === null ? null : (roots ? 'true' : 'false') }, timeoutMs });
   }
-  /** Every session the store knows: /project × `scope=project&directory=
-   *  <worktree>` (a serve instance's bare /session is scoped to ITS cwd's
-   *  project), deduped by id; a failing/empty /project degrades to the bare
-   *  listing. */
+  /** Every session the store knows, deduped by id.
+   *  RUNG 1 = the DIRECTORY-LESS listing. Verified 1.18.29 on a real store: a
+   *  bare `GET /session` returns every session regardless of the serve's cwd
+   *  and bootstraps NO instance. (The v2 `GET /api/session` is the same set
+   *  with cursor pagination and also needs no directory; the v1 shape is the
+   *  one the rest of this module speaks, so that is the rung we take.)
+   *  RUNG 2 = `scope=project&directory=<worktree>`, and ONLY for worktrees that
+   *  pass bootstrappableWorktree: never '/', never $HOME, never the tmp dir,
+   *  never the 'global' catch-all row. 2.369.42 queried `directory=/` every
+   *  10s against a serve whose only project WAS '/'. */
   async listAllSessions({ limit = LIST_LIMIT, timeoutMs = null } = {}) {
+    const byId = new Map();
+    const add = (list) => { for (const s of Array.isArray(list) ? list : []) if (s && typeof s.id === 'string' && !byId.has(s.id)) byId.set(s.id, s); };
+    let bareErr = null;
+    try { add(await this.listSessions({ limit, timeoutMs })); } catch (e) { bareErr = e; }
     let projects = [];
     try { projects = await this.listProjects({ timeoutMs }); } catch { projects = []; }
-    const dirs = [...new Set((Array.isArray(projects) ? projects : []).map((p) => p && typeof p.worktree === 'string' ? p.worktree : null).filter(Boolean))];
-    const lists = dirs.length
-      ? await Promise.all(dirs.map((directory) => this.listSessions({ limit, directory, scope: 'project', timeoutMs }).catch(() => [])))
-      : [await this.listSessions({ limit, timeoutMs })];
-    const byId = new Map();
-    for (const list of lists) for (const s of Array.isArray(list) ? list : []) if (s && typeof s.id === 'string' && !byId.has(s.id)) byId.set(s.id, s);
+    const dirs = [], skipped = [];
+    for (const p of Array.isArray(projects) ? projects : []) {
+      const w = p && typeof p.worktree === 'string' ? p.worktree : '';
+      if (!w) continue;
+      if (bootstrappableWorktree(p)) { if (!dirs.includes(w)) dirs.push(w); }
+      else if (!skipped.includes(w)) skipped.push(w);
+    }
+    this.skippedWorktrees = skipped;
+    if (dirs.length) for (const l of await Promise.all(dirs.map((directory) => this.listSessions({ limit, directory, scope: 'project', timeoutMs }).catch(() => [])))) add(l);
+    if (!byId.size && bareErr) throw bareErr;
     return [...byId.values()];
   }
   getSession(id, opts) { return this.request('GET', `/session/${encodeURIComponent(id)}`, opts); }
@@ -192,11 +331,31 @@ class OpencodeServeClient {
   listMessages(id, { limit = null, before = null, timeoutMs = null } = {}) {
     return this.request('GET', `/session/${encodeURIComponent(id)}/message`, { query: { limit, before }, timeoutMs });
   }
-  /** The FIRST user message (v2 GET /api/session/:id/message?order=asc) → {id, text} | null. */
-  async firstUserMessage(id, opts = {}) {
-    const r = await this.request('GET', `/api/session/${encodeURIComponent(id)}/message`, { query: { limit: 3, order: 'asc' }, ...opts });
-    const first = (Array.isArray(r?.data) ? r.data : []).find((m) => m && m.type === 'user');
-    return first ? { id: first.id, text: String(first.text || '') } : null;
+  /** The FIRST user message → {id, text} | null.
+   *  THE NAMING LOOKUP MUST STAY ON THE v1 ROUTE. Measured on 1.18.29 with
+   *  /proc: every `GET /api/session/{id}/…` route (message, history, context,
+   *  the session itself) BOOTSTRAPS an OpenCode instance for that session's
+   *  DIRECTORY — +19 threads, a recursive `fff` index and an inotify watch of
+   *  the whole tree; the v1 routes (`/session/:id`, `/session/:id/message`,
+   *  `/session`, `/project`) boot nothing. 2.369.42 named sessions through
+   *  `/api/session/:id/message?order=asc`, the one session in the owner's
+   *  store had `directory: "/tmp"`, and the serve spent 209 CPU-minutes and
+   *  5.0 GB RSS on 30 021 inotify watches over that tree.
+   *  v1 returns the WHOLE list oldest-first (its `limit` is the NEWEST N, so
+   *  it cannot page from the front) — capped at NAME_MAX_BYTES; a conversation
+   *  bigger than that long ago earned a real OpenCode title to fall back on. */
+  async firstUserMessage(id, { timeoutMs = null, maxBytes = NAME_MAX_BYTES } = {}) {
+    const list = await this.request('GET', `/session/${encodeURIComponent(id)}/message`, { timeoutMs, maxBytes });
+    for (const m of Array.isArray(list) ? list : []) {
+      const info = m?.info || {};
+      if (info.role !== 'user') continue;
+      const parts = Array.isArray(m.parts) ? m.parts : [];
+      const texts = parts.filter((p) => p && p.type === 'text' && p.text && !p.ignored);
+      const visible = texts.filter((p) => !p.synthetic);
+      const text = (visible.length ? visible : texts).map((p) => String(p.text)).join('\n').trim();
+      if (text) return { id: String(info.id || ''), text };
+    }
+    return null;
   }
   fork(id, { messageID = null, directory = null, timeoutMs = READ_TIMEOUT_MS } = {}) {
     return this.request('POST', `/session/${encodeURIComponent(id)}/fork`, { query: { directory }, body: messageID ? { messageID } : {}, timeoutMs });
@@ -322,15 +481,22 @@ function sessionTitle(s) {
 // ── the locator / keeper ──
 function createServeLocator({
   dataDir, command, env = () => ({ ...process.env }), cwd = null, log = console,
-  fetchImpl = null, spawnImpl = spawn, bootTimeoutMs = BOOT_TIMEOUT_MS, backoffBaseMs = 1000,
+  fetchImpl = null, spawnImpl = spawn, execImpl = execFile, bootTimeoutMs = BOOT_TIMEOUT_MS, backoffBaseMs = 1000,
   maxCrashes = MAX_CRASHES, stopOnExit = false, onCaps = null, onState = null,
-  autostart = true, // false = REUSE ONLY (smoke harnesses: a SIGKILLed test server must not leave a serve behind)
+  autostart = true, // false (or a function returning false) = REUSE ONLY (smoke harnesses: a SIGKILLed test server must not leave a serve behind)
+  // ── the runaway guard (2.369.45) ──
+  readProc = readProcUsage, killPid = (pid, sig) => process.kill(pid, sig),
+  telemetry = null, now = Date.now, guardSampleMs = GUARD_SAMPLE_MS,
+  guardCpuPct = GUARD_CPU_PCT, guardCpuSustainMs = GUARD_CPU_SUSTAIN_MS, guardRssBytes = GUARD_RSS_BYTES,
+  runawayCooldownMs = RUNAWAY_COOLDOWN_MS,
 } = {}) {
   if (!dataDir) throw new Error('createServeLocator: dataDir is required (the record lives at data/opencode-serve.json)');
   const recordPath = path.join(dataDir, 'opencode-serve.json');
-  const state = { client: null, port: null, pid: null, startedAt: null, source: null, child: null, crashes: 0, parked: false, lastError: null, stopping: false, backoffUntil: 0, caps: null, version: null, capsProbed: false };
+  const state = { client: null, port: null, pid: null, startedAt: null, source: null, child: null, crashes: 0, parked: false, parkedKind: null, runawayUntil: 0, lastError: null, stopping: false, backoffUntil: 0, caps: null, version: null, capsProbed: false, cwd: cwd || null, cwdIsolated: null, cpuPct: null, rssBytes: null, sampledAt: null, skippedWorktrees: [] };
+  const guard = { prev: null, hotSince: 0, timer: null };
   let ensuring = null;
   let respawnTimer = null;
+  const autostartOn = () => !!(typeof autostart === 'function' ? autostart() : autostart);
   const commandOf = () => (typeof command === 'function' ? command() : command) || null;
   const authOf = () => { const e = env() || {}; return e.OPENCODE_SERVER_PASSWORD ? { username: e.OPENCODE_SERVER_USERNAME || 'opencode', password: e.OPENCODE_SERVER_PASSWORD } : null; };
   const mkClient = (port) => new OpencodeServeClient(`http://127.0.0.1:${port}`, { fetchImpl, auth: authOf() });
@@ -353,21 +519,64 @@ function createServeLocator({
   async function adopt(port, pid, source) {
     state.client = mkClient(port);
     state.port = port; state.pid = pid; state.source = source; state.startedAt = Date.now(); state.lastError = null;
+    guard.prev = null; guard.hotSince = 0; armGuard();
     notify();
     await probeCaps(state.client);
     notify();
     return state.client;
   }
+  // ── the RUNAWAY guard (2.369.45) ──────────────────────────────────────────
+  // A serve is not "hung", it BURNS: 2.369.42's instance sat at 157-169% CPU
+  // and 5.0 GB RSS for two hours while its file watcher crawled /tmp, and
+  // nothing in the product noticed. Sample the child's own /proc every minute;
+  // sustained CPU or an RSS blowout stops it, PARKS the locator as
+  // 'parked:runaway' (loud + telemetry + the harness availability reason) and
+  // refuses to respawn it more than once an hour.
+  function armGuard() {
+    if (guard.timer || !guardSampleMs) return;
+    guard.timer = setInterval(() => { try { sampleGuard(); } catch (e) { log?.warn?.(`[opencode-serve] resource sample failed: ${e.message}`); } }, guardSampleMs);
+    if (guard.timer.unref) guard.timer.unref();
+  }
+  function sampleGuard() {
+    if (state.stopping || state.parked || !state.pid) { guard.prev = null; return; }
+    const s = readProc(state.pid);
+    const t = now();
+    if (!s) { guard.prev = null; return; }
+    let cpuPct = null;
+    if (guard.prev && t > guard.prev.at) cpuPct = (s.cpuTicks - guard.prev.cpuTicks) * 100000 / CLK_TCK / (t - guard.prev.at);
+    guard.prev = { at: t, cpuTicks: s.cpuTicks };
+    state.cpuPct = cpuPct; state.rssBytes = s.rssBytes; state.sampledAt = t;
+    let why = null;
+    if (s.rssBytes > guardRssBytes) why = `RSS ${(s.rssBytes / 2 ** 30).toFixed(1)} GB (limit ${(guardRssBytes / 2 ** 30).toFixed(1)} GB)`;
+    else if (cpuPct !== null && cpuPct > guardCpuPct) {
+      if (!guard.hotSince) guard.hotSince = t;
+      if (t - guard.hotSince >= guardCpuSustainMs) why = `${cpuPct.toFixed(0)}% CPU sustained for ${Math.round((t - guard.hotSince) / 60000)} min (limit ${guardCpuPct}%)`;
+    } else guard.hotSince = 0;
+    if (why) parkRunaway(why); else notify();
+  }
+  function parkRunaway(why) {
+    const pid = state.pid, port = state.port;
+    state.parked = true; state.parkedKind = 'runaway'; state.runawayUntil = now() + runawayCooldownMs;
+    state.lastError = `opencode serve (pid ${pid}) was STOPPED as a runaway: ${why}`;
+    guard.prev = null; guard.hotSince = 0;
+    const ch = state.child;
+    state.child = null; state.client = null; state.port = null; state.pid = null;
+    try { if (ch) ch.kill('SIGTERM'); else if (pid && pid !== process.pid) killPid(pid, 'SIGTERM'); } catch { }
+    clearRecord();
+    log?.error?.(`[opencode-serve] RUNAWAY — ${state.lastError}. OpenCode boots an instance per session DIRECTORY and its file finder indexes + watches that whole tree; a session rooted at a huge directory burns the machine. Not restarting for ${Math.round(runawayCooldownMs / 60000)} min — turn autostart off (Settings → agents.opencodeServeAutostart) if it recurs.`);
+    try { telemetry?.({ name: 'opencode-serve-runaway', detail: `${why}${port ? ` port ${port}` : ''}`, value: Math.round(state.rssBytes / 1048576) }); } catch { }
+    notify();
+  }
   function onChildExit(child, code, signal) {
     if (state.child !== child) return;
     state.child = null; state.client = null; state.port = null; state.pid = null;
     clearRecord();
-    if (state.stopping) { notify(); return; }
+    if (state.stopping || state.parked) { notify(); return; } // a runaway/park already decided the outcome — never respawn on its own SIGTERM
     if (state.startedAt && Date.now() - state.startedAt >= HEALTHY_UPTIME_RESET_MS) state.crashes = 0;
     state.crashes++;
     state.lastError = `opencode serve exited (${signal || `code ${code}`})`;
     if (state.crashes >= maxCrashes) {
-      state.parked = true;
+      state.parked = true; state.parkedKind = 'crash';
       log?.error?.(`[opencode-serve] PARKED after ${state.crashes} crashes — ${state.lastError}; restart VibeSpace (or fix \`opencode serve\`) to retry`);
     } else {
       const wait = Math.min(30000, backoffBaseMs * 2 ** (state.crashes - 1));
@@ -387,31 +596,63 @@ function createServeLocator({
     }
     notify();
   }
+  /** null = adopt it; a string = why this recorded serve must be REPLACED.
+   *  The 2.369.42 self-heal: an instance whose own project is '/' or $HOME
+   *  indexes that whole tree the moment anything bootstraps it, so the owner's
+   *  leftover is stopped and respawned from the isolated cwd on update — no
+   *  manual step. A record written by THIS code (rec.cwd = our isolated dir)
+   *  skips the probe; a probe that fails NEVER churns (unknown ≠ unsafe). */
+  async function unsafeReuseReason(probe, rec) {
+    if (state.cwd && rec.cwd && path.resolve(rec.cwd) === path.resolve(state.cwd)) return null;
+    let cur = null;
+    try { cur = await probe.currentProject({ timeoutMs: DEFAULT_TIMEOUT_MS }); } catch { return null; }
+    const why = unsafeWorktreeReason(cur && cur.worktree);
+    return why ? `${why} (a 2.369.42 serve started from the server's own cwd)` : null;
+  }
   async function locate() {
     if (state.client) return state.client;
-    if (state.parked || state.stopping) return null;
+    if (state.stopping) return null;
+    if (state.parked) {
+      // a runaway earns exactly one retry per cooldown; a crash park is terminal until restart
+      if (state.parkedKind !== 'runaway' || now() < state.runawayUntil) return null;
+      state.parked = false; state.parkedKind = null; state.crashes = 0; state.lastError = null;
+      log?.warn?.('[opencode-serve] runaway cooldown elapsed — trying `opencode serve` once more');
+    }
     if (Date.now() < state.backoffUntil) return null;
+    const cmd = commandOf();
+    // the serve's OWN empty directory (see ensureServeCwd): resolved before the
+    // reuse probe so a recorded instance can be compared against it
+    if (cmd && !state.cwd) {
+      try { const r = await ensureServeCwd(dataDir, { execImpl, log }); state.cwd = r.dir; state.cwdIsolated = r.isolated; }
+      catch (e) { log?.warn?.(`[opencode-serve] isolated cwd unavailable (${e.message})`); }
+    }
     // 1) reuse a recorded instance (a previous VibeSpace's child that outlived a SIGKILL restart)
     const rec = readRecord();
     if (rec) {
       const probe = mkClient(rec.port);
-      if (await healthy(probe, DEFAULT_TIMEOUT_MS)) return adopt(rec.port, rec.pid || null, 'reused');
-      if (!pidAlive(rec.pid)) clearRecord();
+      if (await healthy(probe, DEFAULT_TIMEOUT_MS)) {
+        const bad = await unsafeReuseReason(probe, rec);
+        if (!bad) return adopt(rec.port, rec.pid || null, 'reused');
+        log?.warn?.(`[opencode-serve] replacing the recorded serve (pid ${rec.pid}, port ${rec.port}): ${bad}`);
+        // never signal ourselves: a record can name this very process (a stale
+        // pid reused after a reboot) and a self-SIGTERM would take the server down
+        try { if (rec.pid && rec.pid !== process.pid) killPid(rec.pid, 'SIGTERM'); } catch { }
+        clearRecord();
+      } else if (!pidAlive(rec.pid)) clearRecord();
     }
     // 2) start one — only when the CLI is installed and autostart is allowed
-    const cmd = commandOf();
     if (!cmd) { state.lastError = 'opencode CLI is not installed'; return null; }
-    if (!autostart) { state.lastError = 'opencode serve autostart is disabled on this instance (VIBESPACE_OPENCODE_SERVE=0 / smoke harness) — start `opencode serve` yourself or enable autostart'; return null; }
+    if (!autostartOn()) { state.lastError = 'opencode serve autostart is off (Settings → agents.opencodeServeAutostart, or VIBESPACE_OPENCODE_SERVE=0 / a smoke harness) — start `opencode serve` yourself or turn autostart back on'; return null; }
     const port = await freePort();
     let child;
     try {
-      child = spawnImpl(cmd, ['serve', '--port', String(port), '--hostname', '127.0.0.1', '--log-level', 'WARN'], { cwd: cwd || os.homedir(), env: env(), stdio: 'ignore', detached: true });
-    } catch (e) { state.lastError = `spawn failed: ${e.message}`; state.crashes++; if (state.crashes >= maxCrashes) state.parked = true; notify(); return null; }
+      child = spawnImpl(cmd, ['serve', '--port', String(port), '--hostname', '127.0.0.1', '--log-level', 'WARN'], { cwd: state.cwd || cwd || os.homedir(), env: env(), stdio: 'ignore', detached: true });
+    } catch (e) { state.lastError = `spawn failed: ${e.message}`; state.crashes++; if (state.crashes >= maxCrashes) { state.parked = true; state.parkedKind = 'crash'; } notify(); return null; }
     if (typeof child.unref === 'function') child.unref();
     state.child = child; state.pid = child.pid || null; state.startedAt = Date.now();
     child.once('error', (e) => { state.lastError = `spawn failed: ${e.message}`; });
     child.on('exit', (code, signal) => onChildExit(child, code, signal));
-    writeRecord({ port, pid: child.pid || null, startedAt: state.startedAt, command: cmd });
+    writeRecord({ port, pid: child.pid || null, startedAt: state.startedAt, command: cmd, cwd: state.cwd || cwd || null });
     const probe = mkClient(port);
     const t0 = Date.now();
     while (Date.now() - t0 < bootTimeoutMs) {
@@ -444,20 +685,21 @@ function createServeLocator({
   function stop() {
     state.stopping = true;
     clearTimeout(respawnTimer); respawnTimer = null;
+    if (guard.timer) { clearInterval(guard.timer); guard.timer = null; }
     const ch = state.child;
     state.child = null; state.client = null; state.port = null;
     if (ch) { try { ch.kill('SIGTERM'); } catch { } clearRecord(); }
   }
   function snapshot() {
-    return { port: state.port, pid: state.pid, startedAt: state.startedAt, source: state.source, crashes: state.crashes, parked: state.parked, lastError: state.lastError, caps: state.caps ? { ...state.caps } : null, version: state.version, capsProbed: state.capsProbed, installed: !!commandOf(), autostart: !!autostart, recordPath, ready: !!state.client };
+    return { port: state.port, pid: state.pid, startedAt: state.startedAt, source: state.source, crashes: state.crashes, parked: state.parked, parkedKind: state.parkedKind, runawayUntil: state.runawayUntil, lastError: state.lastError, caps: state.caps ? { ...state.caps } : null, version: state.version, capsProbed: state.capsProbed, installed: !!commandOf(), autostart: autostartOn(), cwd: state.cwd, cwdIsolated: state.cwdIsolated, cpuPct: state.cpuPct, rssBytes: state.rssBytes, sampledAt: state.sampledAt, recordPath, ready: !!state.client };
   }
   if (stopOnExit) process.once('exit', () => { try { stop(); } catch { } });
-  return { client, ensure, stop, invalidate, state: snapshot, command: commandOf, recordPath };
+  return { client, ensure, stop, invalidate, state: snapshot, command: commandOf, recordPath, _sampleGuard: sampleGuard };
 }
 
 // ── the store facts ──
 function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCacheMs = LIST_CACHE_MS, negativeCacheMs = NEGATIVE_CACHE_MS } = {}) {
-  const cache = { list: null, at: 0, negativeUntil: 0, lastError: null };
+  const cache = { list: null, at: 0, negativeUntil: 0, lastError: null, skippedWorktrees: [] };
   const names = new Map();      // id → { name, at }
   const naming = new Set();
   const convo = new Map();      // id → { at, session, messages, records }
@@ -466,7 +708,11 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
   function reasonUnavailable() {
     const st = locator.state();
     if (!st.installed) return 'OpenCode is not installed on this machine (no `opencode` on PATH — install it or set OPENCODE_CMD)';
+    // the runaway must SPEAK: the owner's instance burned for two hours with
+    // nothing in the product saying so (2.369.42)
+    if (st.parked && st.parkedKind === 'runaway') return `OpenCode serve was stopped by VibeSpace as a RUNAWAY — ${st.lastError || 'resource guard'}. It will not restart for up to an hour; turn autostart off in Settings (agents.opencodeServeAutostart) if it keeps happening.`;
     if (st.parked) return `OpenCode serve is parked after ${st.crashes} crashes (${st.lastError || 'unknown error'}) — restart VibeSpace to retry`;
+    if (st.autostart === false) return `OpenCode serve is not running and autostart is off (${st.lastError || 'Settings → agents.opencodeServeAutostart'})`;
     return `OpenCode serve is unreachable (${st.lastError || 'still starting'})`;
   }
   function assemble(list, activeSessions) {
@@ -526,6 +772,7 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
     if (!client) throw new OpencodeServeError(reasonUnavailable(), { code: 'unavailable' });
     const list = await withTimeout(client.listAllSessions({ timeoutMs: budgetMs }), budgetMs, 'session listing');
     cache.list = list; cache.at = now(); cache.lastError = null;
+    cache.skippedWorktrees = client.skippedWorktrees || [];
     nameSome(client, list).catch(() => { });
     return list;
   }
@@ -570,11 +817,16 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
     if (!st.caps?.fork) throw new OpencodeServeError(`this OpenCode serve (${st.version || 'unknown version'}) has no session fork endpoint (POST ${FORK_PATH}) — upgrade opencode`, { code: 'unsupported' });
     const forked = await client.fork(id, { directory: cwd || null, messageID, timeoutMs });
     if (!forked || typeof forked.id !== 'string') throw new OpencodeServeError('fork returned no session id', { code: 'protocol' });
+    // fork is the ONE call that hands a directory to a mutating endpoint —
+    // dispose the instance it may have bootstrapped (best effort; the forked
+    // session lives in sqlite and stays readable, verified 1.18.29)
+    const dir = cwd || forked.directory || null;
+    if (dir) await client.disposeInstance(dir, { timeoutMs: DEFAULT_TIMEOUT_MS }).catch(() => { });
     invalidate();
     return forked;
   }
   function invalidate() { cache.at = 0; cache.negativeUntil = 0; convo.clear(); }
-  function stateOf() { return { ...locator.state(), cachedSessions: cache.list ? cache.list.length : null, cacheAgeMs: cache.at ? now() - cache.at : null, negativeUntil: cache.negativeUntil, lastError: cache.lastError || locator.state().lastError, namesKnown: names.size }; }
+  function stateOf() { return { ...locator.state(), cachedSessions: cache.list ? cache.list.length : null, cacheAgeMs: cache.at ? now() - cache.at : null, negativeUntil: cache.negativeUntil, lastError: cache.lastError || locator.state().lastError, namesKnown: names.size, skippedWorktrees: cache.skippedWorktrees || [] }; }
   return { discover, readConversation, forkSession, invalidate, state: stateOf, reasonUnavailable, locator, _names: names };
 }
 
@@ -626,5 +878,7 @@ function uninstall() { const f = installed; installed = null; try { f?.locator?.
 module.exports = {
   OpencodeServeClient, OpencodeServeError, createServeLocator, createFacts, OpencodeServeSessionMessages,
   messagesToAcpRecords, acpKindOfTool, acpStatusOfState, sessionTitle, install, facts, uninstall,
+  bootstrappableWorktree, unsafeWorktreeReason, ensureServeCwd, serveCwdPath, readProcUsage,
   DEFAULT_TIMEOUT_MS, READ_TIMEOUT_MS, LIST_CACHE_MS, NEGATIVE_CACHE_MS, MAX_CRASHES, FORK_PATH,
+  NAME_MAX_BYTES, GUARD_CPU_PCT, GUARD_RSS_BYTES, GUARD_SAMPLE_MS, RUNAWAY_COOLDOWN_MS,
 };

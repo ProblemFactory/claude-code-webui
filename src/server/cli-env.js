@@ -13,7 +13,8 @@ const { createAdapterRegistry } = require('../adapters');
 const { capsOf, setVerifiedCap } = require('../backend-caps');
 
 function create({ rootDir, CLAUDE_CMD_RAW, CODEX_CMD_RAW, resolveCmd,
-  getOAuthToken, usagePollingEnabled, refreshCodexModels, broadcast = null }) {
+  getOAuthToken, usagePollingEnabled, refreshCodexModels, broadcast = null,
+  getTelemetry = () => null, getSetting = () => undefined }) {
   const USAGE_CACHE_DIR = path.join(rootDir, 'data', 'usage-cache');
 // ── X display detection (Linux clipboard / xclip) ──
 // The inherited DISPLAY is unreliable: the server is often (re)started from
@@ -135,7 +136,14 @@ const adapterRegistry = createAdapterRegistry({
  *  fork = the serve OpenAPI evidence) so the client's BACKEND_META merges the
  *  verdict instead of shipping a guess. */
 function harnessAvailability() {
-  return listHarnesses().map((h) => ({ id: h.id, label: h.label, kind: h.kind, installed: h.acp ? !!ACP_COMMANDS[h.id] : true, ...(h.acp ? { caps: { fork: !!capsOf(h.id).fork } } : {}) }));
+  return listHarnesses().map((h) => {
+    const row = { id: h.id, label: h.label, kind: h.kind, installed: h.acp ? !!ACP_COMMANDS[h.id] : true, ...(h.acp ? { caps: { fork: !!capsOf(h.id).fork } } : {}) };
+    // A harness whose STORE is broken must say so where the user looks (the
+    // 2.369.42 runaway burned for two hours in silence): parked/runaway =>
+    // the reason travels with /api/home and the harness-store-updated push.
+    try { const st = h.store?.serveState?.(); if (st && (st.parked || st.autostart === false) && h.store.unavailableReason) row.storeReason = String(h.store.unavailableReason()); } catch { }
+    return row;
+  });
 }
 // ── OpenCode serve locator (S9, B-03f2): the opencode harness's STORE facts
 // come from ONE `opencode serve` instance per VibeSpace — reused from
@@ -144,24 +152,40 @@ function harnessAvailability() {
 // keeper (backoff, parked after 5 crashes, stopped on exit). The fork verdict
 // from its OpenAPI flips capsOf('opencode').fork and is BROADCAST so open
 // clients learn it without a reload (the cache-invalidation-must-notify law).
-// Autostart opt-out: VIBESPACE_OPENCODE_SERVE=0 (explicit) or the test-harness
-// belt VIBESPACE_SKIP_AGENT_HOOKS=1 (every worktree smoke sets it and SIGKILLs
-// its server — a spawned serve would outlive that kill and pile up on the dev
-// box). Reuse of an already-running recorded instance still works; an explicit
-// VIBESPACE_OPENCODE_SERVE=1 wins over the belt.
-const OPENCODE_SERVE_AUTOSTART = process.env.VIBESPACE_OPENCODE_SERVE ? process.env.VIBESPACE_OPENCODE_SERVE !== '0' : process.env.VIBESPACE_SKIP_AGENT_HOOKS !== '1';
+// Autostart, in precedence order (2.369.45 — the env switch AND the setting are
+// both honoured): VIBESPACE_OPENCODE_SERVE=0/1 (explicit, wins over everything)
+// > the test-harness belt VIBESPACE_SKIP_AGENT_HOOKS=1 forces OFF (every
+// worktree smoke sets it and SIGKILLs its server — a spawned serve would
+// outlive that kill and pile up on the dev box) > the SETTING
+// agents.opencodeServeAutostart (default ON = the shipped behaviour). Read
+// through a FUNCTION so a live settings change takes effect without a restart.
+// Reuse of an already-running recorded instance still works with autostart off.
+const OPENCODE_SERVE_ENV = process.env.VIBESPACE_OPENCODE_SERVE ? process.env.VIBESPACE_OPENCODE_SERVE !== '0'
+  : (process.env.VIBESPACE_SKIP_AGENT_HOOKS === '1' ? false : null);
+const opencodeServeAutostart = () => (OPENCODE_SERVE_ENV !== null ? OPENCODE_SERVE_ENV : getSetting('agents.opencodeServeAutostart') !== false);
+let _opencodeStoreReason = null;
 const opencodeServe = require('../opencode-serve').install({
   dataDir: path.join(rootDir, 'data'),
   command: () => ACP_COMMANDS.opencode || null,
   env: () => require('../ws-handler').agentEnv(),
   log: console,
   stopOnExit: true,
-  autostart: OPENCODE_SERVE_AUTOSTART,
+  autostart: opencodeServeAutostart,
+  telemetry: (ev) => { try { getTelemetry()?.record({ kind: 'event', ...ev }); } catch { } },
   onCaps: (caps) => {
     setVerifiedCap('opencode', 'fork', !!caps.fork);
     try { broadcast?.({ type: 'harness-caps-updated', backend: 'opencode', caps: { fork: !!caps.fork } }); } catch { }
   },
+  // the runaway/park state is a USER-VISIBLE fact, not just telemetry: push it
+  // the moment it changes so open clients show it without a reload
+  onState: (st) => {
+    const reason = st.parked ? (harnessOf('opencode')?.store?.unavailableReason?.() || st.lastError || null) : null;
+    if (reason === _opencodeStoreReason) return;
+    _opencodeStoreReason = reason;
+    try { broadcast?.({ type: 'harness-store-updated', backend: 'opencode', parked: !!st.parked, parkedKind: st.parkedKind || null, reason }); } catch { }
+  },
 });
+function harnessOf(id) { try { return require('../harnesses').get(id); } catch { return null; } }
 
 probeCodexSandbox(adapterRegistry);
 

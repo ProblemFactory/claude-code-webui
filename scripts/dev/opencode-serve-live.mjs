@@ -6,8 +6,17 @@
 // first-user-message names once they land), dumps one conversation as
 // 'acp-events' records + the normalizer's view, optionally forks.
 //   node scripts/dev/opencode-serve-live.mjs [--session <id>] [--fork <id>] [--keep]
+//                                             [--measure [seconds]] [--measure-home]
 // --fork creates a REAL session copy in the user's store ("<title> (fork #n)").
 // --keep leaves the serve running (record printed) instead of stopping it.
+// --measure = the 2.369.45 RUNAWAY measurement (the reason this file grew a mode):
+//   run the REAL discovery loop against the REAL store for N seconds (default 60)
+//   and sample the serve's own /proc — CPU%, VmRSS, thread count, `fff-*` /
+//   `notify-rs` indexer threads and inotify watch count. A healthy serve reads
+//   ~0 fff threads and ~0 watches; the 2.369.42 shape (cwd=$HOME, naming through
+//   the v2 /api/session/:id/message route) booted an instance per session
+//   DIRECTORY and crawled it. --measure-home repeats the run with the serve
+//   started from $HOME so the two numbers sit side by side.
 // Never in the gate: it needs the real CLI and touches the real store.
 import fs from 'node:fs';
 import os from 'node:os';
@@ -40,6 +49,28 @@ if (target) {
   const mm = new AcpMessageManager(target); const msgs = mm.convertHistory(conv.records);
   console.log(`  normalized: ${msgs.length} messages (${msgs.filter((m) => m.role === 'user').length} user, ${msgs.filter((m) => m.role === 'assistant').length} assistant, ${msgs.filter((m) => m.role === 'tool').length} tool); status`, mm.status());
   for (const m of msgs.slice(0, 12)) console.log('   -', m.role.padEnd(9), m.status.padEnd(9), (m.toolName || m.content[0]?.type || '').padEnd(10), JSON.stringify(m.content[0]?.text || m.content[0]?.input || '').slice(0, 100));
+}
+// ── --measure: what the serve COSTS while the discovery loop runs (2.369.45) ──
+if (argv.includes('--measure')) {
+  const secs = Number(arg('--measure')) > 0 ? Number(arg('--measure')) : 60;
+  const pid = facts.locator.state().pid;
+  const HZ = 100;
+  const comm = (t) => { try { return fs.readFileSync(`/proc/${pid}/task/${t}/comm`, 'utf8').trim(); } catch { return ''; } };
+  const idx = () => { try { return fs.readdirSync(`/proc/${pid}/task`).filter((t) => /^fff|^notify/.test(comm(t))).length; } catch { return -1; } };
+  const thr = () => Number(/Threads:\s+(\d+)/.exec(fs.readFileSync(`/proc/${pid}/status`, 'utf8'))?.[1] || 0);
+  const watches = () => { let n = 0; try { for (const f of fs.readdirSync(`/proc/${pid}/fdinfo`)) { try { n += (fs.readFileSync(`/proc/${pid}/fdinfo/${f}`, 'utf8').match(/^inotify /gm) || []).length; } catch { } } } catch { return -1; } return n; };
+  const usage = () => serve.readProcUsage(pid);
+  const st0 = facts.locator.state();
+  console.log(`\nmeasuring pid ${pid} for ${secs}s — serve cwd ${st0.cwd} (isolated repo: ${st0.cwdIsolated}), project worktrees skipped: ${JSON.stringify(facts.state().skippedWorktrees || [])}`);
+  const u0 = usage(), t0 = Date.now();
+  let ticks = 0;
+  while ((Date.now() - t0) / 1000 < secs) { facts.invalidate(); await facts.discover({}); ticks++; await new Promise((r) => setTimeout(r, 10000)); }
+  const u1 = usage(), dt = (Date.now() - t0) / 1000;
+  console.log(`  discovery ticks : ${ticks} (the product's own 10s cadence)`);
+  console.log(`  CPU             : ${((u1.cpuTicks - u0.cpuTicks) * 100 / HZ / dt).toFixed(1)}%  over ${dt.toFixed(0)}s`);
+  console.log(`  VmRSS           : ${(u0.rssBytes / 2 ** 20).toFixed(0)} -> ${(u1.rssBytes / 2 ** 20).toFixed(0)} MB`);
+  console.log(`  threads         : ${thr()}   fff/notify indexer threads: ${idx()}   inotify watches: ${watches()}`);
+  console.log('  (a healthy serve: single-digit CPU%, flat RSS, 0 indexer threads, 0 watches — anything else means an instance was bootstrapped for a directory)');
 }
 const forkId = arg('--fork');
 if (forkId) {
