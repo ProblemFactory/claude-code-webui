@@ -40,7 +40,7 @@ const SESSION_FIELDS = {
   _outputStyle:        { owner: 'ws',     persisted: 'session-config', note: 'CLI output style commanded at spawn (Concise/Explanatory/…; stream-json has no /output-style, so it is spawn-only; 2.368.0)' },
   _streamingKind:      { owner: 'ws',     persisted: null,      note: 'streaming-label kind (compacting) — drives the client Stop two-step guard; set on a /compact send, reset with the label at turn end (2.365.0)' },
   _codexResetTriedAt:  { owner: 'engine', persisted: null,      note: 'codex reset-credit attempt throttle (one try per limit event, 10min floor; 2.368.21)' },
-  _turnWallSigs:       { owner: 'engine', persisted: null,      note: 'wall machine (2.369.0): wall signals accumulated on the CURRENT turn; the result record classifies' },
+  _turnWallSigs:       { owner: 'engine', persisted: null,      note: 'wall machine (2.369.0): wall signals accumulated on the CURRENT turn ({at, resetsAtMs, bucket, scopedName, key} — key = the org-verified cache key the mark landed on, B-2c9b); the result record classifies' },
   _turnWorkAfterSig:   { owner: 'engine', persisted: null,      note: 'wall machine: assistant records seen after the last wall signal (work evidence → turn classifies NORMAL)' },
   _wallProbeTimer:     { owner: 'engine', persisted: null,      note: 'wall machine: pending quota-probe backoff timer (30m→1h→2h) when no reset time is known' },
   _arFiring:           { owner: 'auto-resume', persisted: null, note: 'async pre-fire gate in flight (probe+verdict) — tick skips the session meanwhile' },

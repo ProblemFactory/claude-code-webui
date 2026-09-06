@@ -247,10 +247,11 @@ const T0 = Date.now();   // the module refuses waits >26h out, so the clock must
   // engine wiring: the machine owns every transition (2.355.0 wiring law)
   const eng = read('src/server/usage-pool-engine.js');
   ok('WIRING: rejected events are SIGNALS, not arms (the turn result classifies)', /if \(r\.dead\) \{[\s\S]{0,600}noteWallSignal\(session, \{ resetsAtMs/.test(eng) && !/armBestReset/.test(eng));
-  ok('WIRING: the banner is a BOOLEAN signal (no field extraction feeds the machine)', /noteWallSignal\(session, \{\}\)/.test(eng) && !/parseBannerResetMs/.test(eng));
-  ok('WIRING: both codex exhaustion sites signal + classify through the same machine', /noteWallSignal\(session, \{ resetsAtMs: \(Number\(tripped\?\.resetsAt\)/.test(eng) && /noteWallSignal\(session, \{ resetsAtMs: resets > nowSec \? resets \* 1000 : 0 \}\); noteTurnEnd\(session\);/.test(eng));
+  // the banner names its BUCKET (parseLimitBanner, the same name the cache mark used) and the KEY its mark landed on (B-2c9b) — never a TIME
+  ok('WIRING: the banner is a BOOLEAN signal (no time extraction feeds the machine)', /noteWallSignal\(session, \{ bucket: hit\.kind, scopedName: hit\.kind === 'scoped' \? hit\.name : null, key \}\)/.test(eng) && !/noteWallSignal\(session, \{[^}]*resetsAtMs[^}]*hit\./.test(eng) && !/parseBannerResetMs/.test(eng));
+  ok('WIRING: both codex exhaustion sites signal + classify through the same machine', /noteWallSignal\(session, \{ resetsAtMs: \(Number\(tripped\?\.resetsAt\)/.test(eng) && /noteWallSignal\(session, \{ resetsAtMs: resets > nowSec \? resets \* 1000 : 0, bucket: 'sevenDay', key: w2\?\.key \|\| codexQuotaKeyFor\(session\) \}\); noteTurnEnd\(session\);/.test(eng));
   ok('WIRING: turn classification = signals with no real work after the last one', /sigs\.length && workAfter <= 1/.test(eng) && /noteRecovered\?\.\(session\._webuiId, 'turn completed normally'\)/.test(eng));
-  ok('WIRING: a walled turn arms from quotaVerdictFor (usable ⇒ near fire; blocked ⇒ blockedUntil; unknown ⇒ probe)', /quotaVerdictFor\(scope, \{ model \}\)/.test(eng) && /scheduleWallProbe\(session, scope, model, 0\)/.test(eng));
+  ok('WIRING: a walled turn arms from the SESSION-AWARE quotaVerdictFor (usable ⇒ near fire; blocked ⇒ blockedUntil; unknown ⇒ probe)', /quotaVerdictFor\(scope, \{ model, session \}\)/.test(eng) && !/quotaVerdictFor\(scope, \{ model \}\)/.test(eng) && /scheduleWallProbe\(session, scope, model, 0\)/.test(eng));
   ok('WIRING: the probe ladder is 0→30m→1h→2h then a LOUD give-up', /WALL_PROBE_BACKOFF = \[0, 1800000, 3600000, 7200000\]/.test(eng) && /giving up \(manual resume needed\)/.test(eng));
   ok('WIRING: a CONFIDENT blocked verdict is VERIFIED too — one throttled probe on BLOCKED entry (a lying cache armed a 2.6-day wait on an alive account, inc-mtdsoj5f)', /_wallVerifyAt\.get\(scope\) \|\| 0\) > 10 \* 60e3/.test(eng) && /_wallVerifyAt\.set\(scope, Date\.now\(\)\);\s*\n\s*scheduleWallProbe\(session, scope, model, 0\)/.test(eng));
   ok('WIRING: pool verdict = any member usable / min over members blockedUntil', /verdicts\.find\(\(x\) => x\.v\.usable === true\)/.test(eng) && /Math\.min\(\.\.\.untils\)/.test(eng));
@@ -282,6 +283,129 @@ const T0 = Date.now();   // the module refuses waits >26h out, so the clock must
   ok('…and a true gate delivers the continue', sentV.length === 1 && sentV[0] === CONTINUE_PROMPT);
 }
 
+
+// ── §11 WALL = GROUND TRUTH + OBSERVED-ORG AWARE EVALUATION (B-2c9b, owner-
+// approved plan A+B 2026-09-05). Three same-day production occurrences: a
+// walled turn's verdict read the POOL scope and said "usable via <linked
+// member>" off the linked member's healthy cache, while the banner had landed
+// on the org the CLI was ACTUALLY on (193 usage-reading-reattributed events
+// had moved the session's readings there); the pool moved 1.5-3 min later
+// when a reading arrived and in-flight subagents died in the gap. Functional:
+// a REAL AccountManager pool (real symlinks + per-session links), the REAL
+// engine, the REAL auto-resume module, a fake OTel truth source. Fixtures are
+// shaped from that journal: member caches read healthy, the wall says no.
+{
+  const { AccountManager } = require(path.join(REPO, 'src/accounts.js'));
+  const engMod = require(path.join(REPO, 'src/server/usage-pool-engine.js'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-wall-'));
+  const dataDir = path.join(root, 'data');
+  const am = new AccountManager({ dataDir });
+  if (!am.poolSupported()) { console.log('  · SKIP §11 (pooled accounts are unsupported on ' + process.platform + ')'); }
+  else {
+    const login = (id) => fs.writeFileSync(path.join(am.subDir(id), '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'tok-' + id, refreshToken: 'r', expiresAt: Date.now() + 36e5, subscriptionType: 'max' } }), { mode: 0o600 });
+    const A = am.createSubscription({ name: 'Fish Max' }).id; login(A);
+    const B = am.createSubscription({ name: 'ProblemFactory Max' }).id; login(B);
+    const C = am.createSubscription({ name: 'Personal Max' }).id; login(C);
+    const P = am.createPool({ name: 'Pool' }).id;
+    am.setPoolTarget(P, B); // the pool DEFAULT sits on a healthy member — the per-session links are what the incident is about
+    am.updatePool(P, { auto: true, hot: true });
+    const cacheDir = path.join(dataDir, 'usage-cache'); fs.mkdirSync(cacheDir, { recursive: true });
+    const nowS = Math.floor(Date.now() / 1000), H = 3600;
+    const RESET_5H = nowS + 3 * H, RESET_7D = nowS + 3 * 86400;
+    const healthy = (u5, u7) => ({ fetchedAt: Date.now() - 60000, source: 'cli-usage', fiveHour: { utilization: u5, resetsAt: RESET_5H }, sevenDay: { utilization: u7, resetsAt: RESET_7D } });
+    const writeCache = (id, c) => fs.writeFileSync(path.join(cacheDir, id + '.json'), JSON.stringify(c));
+    const readCache = (id) => JSON.parse(fs.readFileSync(path.join(cacheDir, id + '.json'), 'utf8'));
+    writeCache(A, healthy(0.2, 0.3)); writeCache(B, healthy(0.1, 0.2)); writeCache(C, healthy(0.15, 0.25)); // "the cache for the LINKED member said fine"
+    const sessions = new Map();
+    const sent = [], notices = [], journal = [], events = [];
+    const obs = new Map(); // claudeSessionId → the OTel truth stream's latest observation
+    const origLog = console.log;
+    // capture ONLY the engine's journal lines; the suite's own ✓ lines pass through (they quote journal text and would double-count)
+    console.log = (...a) => { const s = a.join(' '); if (/^\[(wall|pool|auto-resume)\]/.test(s)) journal.push(s); else origLog(...a); };
+    const prevEv = global.__vsEvent; global.__vsEvent = (n, d) => { events.push([n, d]); };
+    const ar = create({ dataDir, activeSessions: sessions, serverSetting: () => true, sendToSession: (id, s2, text) => { sent.push([id, text]); return true; } });
+    const app = { get() { }, post() { }, put() { }, delete() { }, use() { }, locals: {} };
+    const eng = engMod.create({
+      app, rootDir: root, USAGE_CACHE_DIR: cacheDir, activeSessions: sessions,
+      wss: { clients: new Set() }, WS_OPEN: 1, broadcastToSession() { }, serverNotice: (k, t) => notices.push(t),
+      serverSetting: () => undefined, getAccounts: () => am, getHosts: () => null, getUsageHistory: () => null,
+      recordUsageAttribution() { }, adapterRegistry: { get() { return null; } },
+      getAutoResume: () => ar, getOtelIngest: () => ({ observedOrgFor: (cid) => obs.get(cid) || null }), getQuotaProbe: () => null,
+    });
+    const mkSess = (wid, cid, member) => {
+      const s = { backend: 'claude', mode: 'chat', host: null, _webuiId: wid, claudeSessionId: cid, _accountId: P, _autoResume: true, _servedModel: 'claude-fable-5', _servedModelAt: Date.now(), pty: { write() { } }, name: wid };
+      sessions.set(wid, s); am.ensureSessionPoolLink(P, wid, member); return s;
+    };
+    try {
+      // (a) the misattribution guard: ONE wall on the linked member, no OTel observation anywhere → held
+      const s1 = mkSess('w1', 'cid-1', A);
+      eng.noteWallSignal(s1, { resetsAtMs: RESET_5H * 1000, bucket: 'fiveHour', key: A });
+      eng.noteTurnEnd(s1);
+      ok('single unverified wall: the member cache is untouched (guard held — a single wall on an account the session is not verifiably on is not enough)', readCache(A).fiveHour.utilization === 0.2 && readCache(A).source === 'cli-usage', JSON.stringify(readCache(A)));
+      ok('…the link stays put and nothing fired', am.poolCurrentFor(P, 'w1') === A && sent.length === 0);
+      ok('…the session is still ARMED for the near fire (the verdict said usable)', ar.statusFor('w1').armed === true);
+      ok("…and the hold is journaled + telemetered ('wall-demote-held'), never silent", journal.some((l) => /\[wall\] w1: single wall on Fish Max .*holding the demotion/.test(l)) && events.some(([n]) => n === 'wall-demote-held'), journal.join(' | '));
+      // (b) a SECOND wall on the same account inside 120s → ground truth
+      eng.noteWallSignal(s1, { resetsAtMs: RESET_5H * 1000, bucket: 'fiveHour', key: A });
+      eng.noteTurnEnd(s1);
+      const cA = readCache(A);
+      ok("two walls in 120s: A.fiveHour exhausted (utilization 1, limited) with the SIGNAL's resetsAt, source 'wall', fetchedAt now", cA.fiveHour.utilization === 1 && cA.fiveHour.status === 'limited' && cA.fiveHour.resetsAt === RESET_5H && cA.source === 'wall' && Date.now() - cA.fetchedAt < 5000, JSON.stringify(cA));
+      ok('…only the affected bucket (7d untouched)', cA.sevenDay.utilization === 0.3);
+      ok("…journaled '[wall] demoted Fish Max 5h until <iso> (2 walls)'", journal.some((l) => /\[wall\] demoted Fish Max 5h until \d{4}-\d\d-\d\dT\S+ \(2 walls\)$/.test(l)), journal.filter((l) => /demoted/.test(l)).join(' | '));
+      ok("…telemetry 'wall-demote'", events.some(([n, d]) => n === 'wall-demote' && /:5h:2-walls$/.test(d)), JSON.stringify(events.filter(([n]) => /wall/.test(n))));
+      ok("…the pool moved the session's link OFF A in the SAME noteTurnEnd (no 1.5-3 minute reading lag)", am.poolCurrentFor(P, 'w1') !== A && [B, C].includes(am.poolCurrentFor(P, 'w1')), am.poolCurrentFor(P, 'w1'));
+      ok("…and the hot switch's fireNow delivered the continue in that tick (armed → continued, not a 45s wait)", sent.length === 1 && sent[0][0] === 'w1' && sent[0][1] === CONTINUE_PROMPT && ar.statusFor('w1').armed === false, JSON.stringify({ sent, st: ar.statusFor('w1') }));
+      ok('…the user was told (per-session switch notice)', notices.some((t) => /conversation "w1" moved to (ProblemFactory|Personal) Max/.test(t)), notices.join(' | '));
+      ok('…the walled-turn log names the demoted key — the pool verdict is no longer trusted alone', journal.some((l) => /\[wall\] w1: walled turn \(scope pool-\w+, demoted sub-\w+\) → usable via (ProblemFactory|Personal) Max/.test(l)), journal.filter((l) => /walled turn/.test(l)).join(' | '));
+      // (c) OBSERVED-ORG divergence: a session linked to B whose CLI the OTel truth stream sees on C
+      const s3 = mkSess('w3', 'cid-3', B);
+      obs.set('cid-3', { orgUuid: 'org-c', acct: C, known: true, ts: Date.now() - 30000 });
+      const cm = eng.sessionCurrentMember(s3, P);
+      ok('sessionCurrentMember: the observed member wins, the link is remembered, divergent', cm.id === C && cm.linkedId === B && cm.observedId === C && cm.divergent === true, JSON.stringify(cm));
+      ok("…logged once: '[pool] session w3 observed on Personal Max while linked to ProblemFactory Max'", journal.filter((l) => l === '[pool] session w3 observed on Personal Max while linked to ProblemFactory Max').length === 1, journal.filter((l) => /observed on/.test(l)).join(' | '));
+      eng.sessionCurrentMember(s3, P);
+      ok('…and not again inside 10 minutes', journal.filter((l) => /session w3 observed on/.test(l)).length === 1);
+      ok('resolveUsageKey follows the observation (live burn + probe matching attribute to C, not the link)', eng.resolveUsageKey(s3) === C && eng.usageCacheKeyFor(s3) === C);
+      const v = eng.quotaVerdictFor(P, { model: 'claude-fable-5', session: s3 });
+      ok('quotaVerdictFor names the OBSERVED member as current (on=C, linked=B, divergent) and judges it FIRST (via C)', v.usable === true && v.on === C && v.linked === B && v.divergent === true && v.via === 'Personal Max' && /observed on Personal Max while linked to ProblemFactory Max/.test(v.reason), JSON.stringify(v));
+      ok('negative control: without a session the pool verdict has no current-member context', eng.quotaVerdictFor(P, { model: 'claude-fable-5' }).on === undefined);
+      // a SINGLE wall on the observed member is ground truth (the observed-org rule, no ring needed); a key-less signal resolves the readings' way (org-verified → C)
+      eng._wallRing.clear();
+      eng.noteWallSignal(s3, { bucket: 'fiveHour' });
+      eng.noteTurnEnd(s3);
+      const cC = readCache(C);
+      ok('single wall on the OBSERVED member demotes it (observed-org rule); no signal reset ⇒ the cached future reset is kept', cC.fiveHour.utilization === 1 && cC.source === 'wall' && cC.fiveHour.resetsAt === RESET_5H, JSON.stringify(cC));
+      ok("…journaled as '(1 walls / observed-org)'", journal.some((l) => /\[wall\] demoted Personal Max 5h until \S+ \(1 walls \/ observed-org\)$/.test(l)), journal.filter((l) => /demoted Personal/.test(l)).join(' | '));
+      ok('…B (the link, healthy) is NOT touched', readCache(B).fiveHour.utilization === 0.1 && readCache(B).source === 'cli-usage');
+      ok('…the per-session pass decided FROM C (dead), re-pointed the link at B (same target — the creds-mtime bump the CLI re-reads on) and fireNow continued w3', am.poolCurrentFor(P, 'w3') === B && sent.some(([id]) => id === 'w3') && journal.some((l) => /\[pool\] per-session switch pool-\w+\/w3: sub-\w+ \(observed; linked sub-\w+\) → sub-\w+ \(re-point, same target\)/.test(l)), journal.filter((l) => /per-session switch/.test(l)).join(' | '));
+      ok('…a same-target re-point raises NO user notice (journal only)', !notices.some((t) => /"w3"/.test(t)), notices.join(' | '));
+      ok("…the walled-turn log carries the divergence '[on Personal Max, linked ProblemFactory Max]'", journal.some((l) => /\[wall\] w3: walled turn .*\[on Personal Max, linked ProblemFactory Max\]$/.test(l)));
+      // (d) staleness: an observation older than OBSERVED_ORG_RECENT_MS speaks for nothing
+      const s4 = mkSess('w4', 'cid-4', B);
+      obs.set('cid-4', { orgUuid: 'org-c', acct: C, known: true, ts: Date.now() - eng.OBSERVED_ORG_RECENT_MS - 1000 });
+      ok('a >10min-old observation falls back to the link (no divergence, burn attributed to the link)', eng.sessionCurrentMember(s4, P).id === B && eng.sessionCurrentMember(s4, P).divergent === false && eng.resolveUsageKey(s4) === B);
+      ok('…and a single wall keyed to that stale-observed member is HELD (not verifiably on it)', (eng._wallRing.clear(), eng.demoteWalledAccount(s4, [{ key: C, bucket: 'fiveHour', at: Date.now(), resetsAtMs: 0 }]).reason === 'unverified'));
+      // (e) named non-demotions
+      const s5 = { backend: 'claude', mode: 'chat', host: null, _webuiId: 'w5', claudeSessionId: 'cid-5', _accountId: A, pty: { write() { } } };
+      ok("a non-pooled session's walled turn returns 'not-pooled' (its own cache mark already IS the ground truth)", eng.demoteWalledAccount(s5, [{ key: A, bucket: 'fiveHour' }]).reason === 'not-pooled');
+      ok("a wall on a key that is no pool member returns 'not-a-member'", eng.demoteWalledAccount(s1, [{ key: 'sub-stranger', bucket: 'fiveHour' }]).reason === 'not-a-member');
+      ok('the ring counts WALLED TURNS per account: one turn with two records on the same key is ONE wall', (() => { eng._wallRing.clear(); const s6 = { _webuiId: 'w6' }; eng.noteWallSignal(s6, { key: 'sub-x', bucket: 'fiveHour' }); eng.noteWallSignal(s6, { key: 'sub-x', bucket: 'sevenDay' }); return eng.wallCount('sub-x') === 1; })());
+    } finally { console.log = origLog; global.__vsEvent = prevEv; }
+    // order-of-operations pins (the fix IS the order)
+    const eng2 = read('src/server/usage-pool-engine.js');
+    ok('PIN: onWalledTurn demotes BEFORE the verdict, and the verdict is session-aware', /function onWalledTurn\(session, sigs\) \{[\s\S]{0,700}demoteWalledAccount\(session, sigs\)[\s\S]{0,900}quotaVerdictFor\(scope, \{ model, session \}\)/.test(eng2));
+    ok("PIN: the walled turn's pool evaluation runs AFTER the arm (finally) so fireNow finds the session armed", /ar\.armIfEnabled\(id, session, Date\.now\(\) \+ 45000[\s\S]{0,2000}\} finally \{[\s\S]{0,600}maybePoolAutoSwitch\(session\);\s*\n\s*\}\s*\n\}/.test(eng2));
+    ok('PIN: noteTurnEnd evaluates the pool only on the NORMAL branch (the walled branch owns its own, after the arm)', /if \(sigs\.length && workAfter <= 1\) \{[\s\S]{0,600}return;\s*\n\s*\}\s*\n\s*maybePoolAutoSwitch\(session\);/.test(eng2) && !/session\._turnWallSigs = \[\]; session\._turnWorkAfterSig = 0;\s*\n\s*maybePoolAutoSwitch\(session\);/.test(eng2));
+    ok("PIN: the demotion rides captureRateLimitEvent with source 'wall' (ONE write path, no twin)", /captureRateLimitEvent\(\{ cacheDir: USAGE_CACHE_DIR, key: member\.id, identityIds: usageIdentityAccountIds\(member\.id\), ev, now, source: 'wall' \}\)/.test(eng2) && /source = 'rate-limit-event' \}\)/.test(read('src/rate-limit-capture.js')));
+    ok('PIN: the guard constants (≥2 walls inside a 120s ring, 10min observation recency) and the guard itself', /WALL_RING_MS = 120e3/.test(eng2) && /OBSERVED_ORG_RECENT_MS = 10 \* 60e3/.test(eng2) && /if \(walls < 2 && !observedMatch\)/.test(eng2));
+    ok('PIN: the per-session pool pass decides from sessionCurrentMember (observed over linked)', /const cm = sessionCurrentMember\(s2, poolId\);\s*\n\s*const curFor = cm\.id \|\| linkCur;/.test(eng2) && /decidePoolSwitch\(\{ currentId: curFor, members, readCache: projected/.test(eng2));
+    ok('PIN: resolveUsageKey is observed-aware for pooled sessions (live odometer, probe matching, derived cache keys)', /function resolveUsageKey\(session\)[\s\S]{0,800}sessionCurrentMember\(session, acct\)\.id/.test(eng2));
+    ok('PIN: both probe targets (wall ladder + pre-fire gate) are the member the session is ON', (eng2.match(/sessionCurrentMember\(session, scope\)\.id : scope/g) || []).length === 2);
+    ok('PIN: every wall signal carries the key its mark landed on (claude rejected + banner + all three codex sites)', /noteWallSignal\(session, \{ resetsAtMs: \(Number\(ev\.resetsAt\) \|\| 0\) \* 1000, bucket: ev\.kind, scopedName: ev\.scopedName, key \}\)/.test(eng2) && /noteWallSignal\(session, \{ bucket: hit\.kind, scopedName: hit\.kind === 'scoped' \? hit\.name : null, key \}\)/.test(eng2) && (eng2.match(/noteWallSignal\(session, \{ resetsAtMs:[^\n]*key: (w\.key|w2\?\.key \|\| codexQuotaKeyFor\(session\)|codexQuotaKeyFor\(session\)) \}\)/g) || []).length === 3);
+    ok('PIN: session-schema documents the signal shape on _turnWallSigs', /_turnWallSigs:[^\n]*\{at, resetsAtMs, bucket, scopedName, key\}/.test(read('src/session-schema.js')));
+    try { fs.rmSync(root, { recursive: true, force: true }); } catch { }
+  }
+}
 
 // ── FUNCTIONAL export-seam check (2.369.4 — the SIXTH unstaged-wiring strike,
 // and the worst: the entire wall machine sat dead in production for a day

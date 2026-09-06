@@ -147,5 +147,21 @@ fs.rmSync(dir, { recursive: true, force: true });
   ok(/if \(accountId && !acctRec\) continue;/.test(eng), '⑦ unregistered (deleted) account cache files are excluded from identity groups');
 }
 
+// ⑧ B-2c9b: the wall machine's ground-truth demotion rides THIS write path
+// with source 'wall' (one write discipline — never a twin writer); the
+// default label is unchanged for readings.
+{
+  const dir8 = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-rle8-'));
+  const rd = (id) => JSON.parse(fs.readFileSync(path.join(dir8, id + '.json'), 'utf8'));
+  fs.writeFileSync(path.join(dir8, 'sub-W.json'), JSON.stringify({ fetchedAt: 1000, source: 'cli-usage', fiveHour: { utilization: 0.2, resetsAt: 2_000_000_000 } }));
+  const wall = captureRateLimitEvent({ cacheDir: dir8, key: 'sub-W', identityIds: ['sub-W'], ev: { kind: 'fiveHour', status: 'rejected', utilization: null, resetsAt: null, overage: {} }, now: 5000, source: 'wall' });
+  ok(wall.ok && wall.dead && wall.wroteReading && rd('sub-W').source === 'wall' && rd('sub-W').fetchedAt === 5000, "⑧ source:'wall' labels the demotion write (a reading: fetchedAt bumped)");
+  ok(rd('sub-W').fiveHour.utilization === 1 && rd('sub-W').fiveHour.resetsAt === 2_000_000_000, '⑧ …no signal reset ⇒ the cached FUTURE reset is kept (the wall machine\'s resetsAt ladder: signal > cached > bounded guess)');
+  const rd2 = captureRateLimitEvent({ cacheDir: dir8, key: 'sub-W', identityIds: ['sub-W'], ev: rej, now: 6000 });
+  ok(rd2.ok && rd('sub-W').source === 'rate-limit-event', "⑧ the default label stays 'rate-limit-event' for real events");
+  ok(/source: 'wall'/.test(fs.readFileSync(new URL('../src/server/usage-pool-engine.js', import.meta.url), 'utf8')), '⑧ WIRING: the engine\'s demotion passes source wall through captureRateLimitEvent (no second writer)');
+  try { fs.rmSync(dir8, { recursive: true, force: true }); } catch { }
+}
+
 console.log(fail ? `FAIL (${fail})` : `ALL PASS (${pass})`);
 process.exit(fail ? 1 : 0);

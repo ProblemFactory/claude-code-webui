@@ -84,10 +84,14 @@ function parseRateLimitEvent(msg) {
  * sweep would otherwise re-anchor stale utilization with fresh cost (the
  * exact bounce-pair poison 2.267.0 fixed).
  *
+ * `source` (default 'rate-limit-event') labels the reading write — the wall
+ * machine's ground-truth demotion (B-2c9b) rides this SAME path with source
+ * 'wall' so anchors/estimator/verdicts see one write discipline, never a twin.
+ *
  * @returns {ok, dead, wroteReading} — dead=true when the bucket is exhausted
  *   (caller should treat it like a limit banner: immediate pool evaluation).
  */
-function captureRateLimitEvent({ cacheDir, key, identityIds, ev, now = Date.now() }) {
+function captureRateLimitEvent({ cacheDir, key, identityIds, ev, now = Date.now(), source = 'rate-limit-event' }) {
   if (!ev || (ev.kind !== 'fiveHour' && ev.kind !== 'sevenDay' && ev.kind !== 'scoped')) {
     // unknown bucket types: surface, never silently drop (the api_retry lesson)
     return { ok: false, dead: false, wroteReading: false, unknownType: ev?.rawType || null };
@@ -132,7 +136,7 @@ function captureRateLimitEvent({ cacheDir, key, identityIds, ev, now = Date.now(
       try { const c = JSON.parse(fs.readFileSync(fileFor(id), 'utf-8')) || {}; if ((Number(c.fetchedAt) || 0) > baseAt) { baseAt = Number(c.fetchedAt) || 0; base = c; } } catch { }
     }
     const cache = applyTo(base ? { ...base } : {});
-    if (reading) { cache.fetchedAt = now; cache.source = 'rate-limit-event'; }
+    if (reading) { cache.fetchedAt = now; cache.source = source || 'rate-limit-event'; }
     fs.mkdirSync(cacheDir, { recursive: true });
     const f = fileFor(key);
     fs.writeFileSync(f + '.tmp', JSON.stringify(cache)); fs.renameSync(f + '.tmp', f);

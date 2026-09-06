@@ -57,6 +57,19 @@ const _memberAuthFail = new Map();
 const _authNoteAt = new Map(); // member:sid → last evict attempt (throttle)
 const _authNoticeAt = new Map(); // memberId → last user notice (anti-spam)
 const AUTH_FAIL_TTL_MS = 10 * 60e3;
+// ── WALL = GROUND TRUTH (B-2c9b, owner-approved plan A+B 2026-09-05) ─────────
+// Three production occurrences in one day: a walled turn's verdict read the
+// POOL scope ("usable via <linked member>" off the linked member's healthy
+// cache) while the banner had landed on the org the CLI was ACTUALLY on (193
+// readings re-attributed away from the link); the pool moved 1.5-3 min later
+// when a reading arrived, and in-flight subagents died in the gap. Now: a
+// wall is ground truth for the account it lands on (readings only confirm),
+// and the engine evaluates a session on the member it is OBSERVED to bill.
+const OBSERVED_ORG_RECENT_MS = 10 * 60e3; // how fresh an OTel observation must be to speak for "the org this session is on NOW"
+const WALL_RING_MS = 120e3;              // the ≥2-walls guard window (misattribution defence, 2.368.34 class)
+const WALL_RING_MAX = 16;
+const _wallRing = new Map();             // account key → [{at, sid}] walled-turn timestamps (one entry per turn per key)
+const _divergenceLogAt = new Map();      // webuiId → last "observed on X while linked to Y" log (10min floor)
 // ── get_usage control channel + chat-mode limit banner (B-7edc/B-292b) ──────
 // The get_usage control request makes the CLI (first-party client) fetch usage
 // itself — strictly better ToS posture than our bare /api/oauth/usage call.
@@ -373,7 +386,16 @@ function sessionModelFor(s) {
 const _vsuPending = new Map(); // request_id → {resolve, timer}
 function resolveUsageKey(session) {
   let acct = session._accountId || null;
-  try { if (acct && accounts.get(acct)?.type === 'pooled') acct = accounts.poolCurrentFor(acct, session._webuiId || null) || acct; } catch {}
+  try {
+    if (acct && accounts.get(acct)?.type === 'pooled') {
+      // (B-2c9b plan B) the member the session is OBSERVED to bill (OTel
+      // truth, ≤10min) beats the link: a hot-switched CLI keeps its old token,
+      // so the link says where we POINTED it and the observation says what
+      // it is BURNING — the live odometer, probe matching and every cache
+      // key derived here follow the observation. No observation ⇒ the link.
+      acct = sessionCurrentMember(session, acct).id || acct;
+    }
+  } catch {}
   return acct || '__global__';
 }
 function writeUsageCacheForKey(key, parsed) {
@@ -477,6 +499,55 @@ function orgVerifiedKey(session, key, what) {
   } catch { }
   return key;
 }
+const nameOf = (id) => { try { return (id && accounts.get(id)?.name) || id || '?'; } catch { return id || '?'; } };
+/** (B-2c9b plan B) The pool member a session's requests are OBSERVED to bill:
+ *  the OTel truth stream's latest org for the session (≤ OBSERVED_ORG_RECENT_MS
+ *  old) resolved to a member of `poolId` — else null. A pure read: no
+ *  telemetry, no re-attribution side effects (orgVerifiedKey owns those for
+ *  readings; this answers "which member is this session on right now"). */
+function observedMemberFor(session, poolId) {
+  try {
+    if (!session || !poolId) return null;
+    const obs = getOtelIngest()?.observedOrgFor?.(session.claudeSessionId);
+    if (!obs || !obs.acct || Date.now() - (obs.ts || 0) > OBSERVED_ORG_RECENT_MS) return null;
+    const members = accounts.poolMembers(poolId) || [];
+    const hit = members.find((m) => m.id === obs.acct)
+      || members.find((m) => { try { return usageIdentityAccountIds(m.id).includes(obs.acct); } catch { return false; } });
+    return hit ? hit.id : null;
+  } catch { return null; }
+}
+/** What the engine BELIEVES a pooled session is on: the observed member when
+ *  the OTel truth names one, else its link (per-session link → pool default).
+ *  `divergent` = observed ≠ linked — logged once per session per 10 minutes
+ *  ('[pool] session <id> observed on <X> while linked to <Y>'). The hot-switch
+ *  symlink still targets the CHOSEN member; this only changes what the engine
+ *  evaluates the session AGAINST (verdicts, per-session switch, probe target,
+ *  live burn attribution). */
+function sessionCurrentMember(session, poolId) {
+  let linkedId = null;
+  try { linkedId = accounts.poolCurrentFor(poolId, session?._webuiId || null) || null; } catch { }
+  const observedId = observedMemberFor(session, poolId);
+  const divergent = !!observedId && observedId !== linkedId;
+  if (divergent) {
+    const sid = session._webuiId || session.claudeSessionId || '?';
+    const now = Date.now();
+    if (now - (_divergenceLogAt.get(sid) || 0) > 10 * 60e3) {
+      _divergenceLogAt.set(sid, now);
+      console.log(`[pool] session ${sid} observed on ${nameOf(observedId)} while linked to ${nameOf(linkedId)}`);
+      global.__vsEvent?.('pool-observed-divergence', `${observedId}≠${linkedId}`);
+    }
+  }
+  return { id: observedId || linkedId, linkedId, observedId, divergent };
+}
+/** Walled turns seen on an account (any session) inside WALL_RING_MS, counted
+ *  across its identity group. */
+function wallCount(key, now = Date.now()) {
+  let n = 0;
+  const ids = new Set([key]);
+  try { for (const id of usageIdentityAccountIds(key)) ids.add(id); } catch { }
+  for (const id of ids) for (const e of _wallRing.get(id) || []) if (now - e.at < WALL_RING_MS) n++;
+  return n;
+}
 // ── TURN-GRANULAR WALL MACHINE (2.369.0, owner-designed replacement for the
 // .27-.34 patch pile) ─────────────────────────────────────────────────────
 // Design (docs/design-wall-machine.md): wall SIGNALS (rejected events, the
@@ -491,22 +562,32 @@ function orgVerifiedKey(session, key, what) {
 
 // The account system's usability answer for a scope (pool id OR cache key),
 // model-projected. Pool = any member usable / min over members' blockedUntil.
-function quotaVerdictFor(scope, { model } = {}) {
+function quotaVerdictFor(scope, { model, session = null } = {}) {
   const nowSec = Math.floor(Date.now() / 1000);
   const fam = familyOfModel(model);
   const read = poolReadCache(null); // generic estimator-overlaid identity reader
   const proj = (c) => { try { return fam ? projectCacheForFamily(c, fam) : c; } catch { return c; } };
   const a = accounts.get(scope);
   if (a && a.type === 'pooled') {
-    const verdicts = (accounts.poolMembers(scope) || []).map((m) => ({ name: m.name || m.id, v: quotaVerdict(proj(read(m.id)), nowSec) }));
-    if (!verdicts.length) return { usable: null, known: false, blockedUntil: 0, reason: 'pool has no members' };
+    const members = accounts.poolMembers(scope) || [];
+    // (B-2c9b plan B) OBSERVED-ORG AWARE: the session's CURRENT member
+    // (observed over linked) is judged FIRST, so `via` names the account the
+    // session is actually on whenever that one is usable, and the verdict
+    // carries on/linked/divergent for the journal + tests.
+    const cm = session ? sessionCurrentMember(session, scope) : null;
+    const ordered = cm?.id ? [...members.filter((m) => m.id === cm.id), ...members.filter((m) => m.id !== cm.id)] : members;
+    const verdicts = ordered.map((m) => ({ name: m.name || m.id, v: quotaVerdict(proj(read(m.id)), nowSec) }));
+    const ctx = cm ? { on: cm.id, linked: cm.linkedId, divergent: cm.divergent } : {};
+    const note = cm?.divergent ? ` — session observed on ${nameOf(cm.observedId)} while linked to ${nameOf(cm.linkedId)}` : '';
+    if (!verdicts.length) return { usable: null, known: false, blockedUntil: 0, reason: 'pool has no members', ...ctx };
     const ok = verdicts.find((x) => x.v.usable === true);
-    if (ok) return { usable: true, known: true, blockedUntil: 0, via: ok.name, reason: `${ok.name} usable (${ok.v.reason})` };
+    if (ok) return { usable: true, known: true, blockedUntil: 0, via: ok.name, reason: `${ok.name} usable (${ok.v.reason})${note}`, ...ctx };
     const untils = verdicts.map((x) => x.v.blockedUntil).filter(Boolean);
     return {
       usable: false, known: true,
       blockedUntil: untils.length ? Math.min(...untils) : 0, // soonest-usable member; 0 = some member unknowable → probe
-      reason: verdicts.map((x) => `${x.name}: ${x.v.reason}`).join(' | '),
+      reason: verdicts.map((x) => `${x.name}: ${x.v.reason}`).join(' | ') + note,
+      ...ctx,
     };
   }
   return quotaVerdict(proj(read(scope)), nowSec);
@@ -521,8 +602,19 @@ function _wallScope(session) {
 /** A wall SIGNAL landed on the session's current turn (rejected event /
  *  banner boolean / codex typed exhaustion). No transition yet — the turn's
  *  RESULT decides. */
+function noteWallOnAccount(key, sid, now = Date.now()) {
+  const ring = (_wallRing.get(key) || []).filter((e) => now - e.at < WALL_RING_MS);
+  ring.push({ at: now, sid: sid || null });
+  _wallRing.set(key, ring.slice(-WALL_RING_MAX));
+}
 function noteWallSignal(session, sig = {}) {
-  (session._turnWallSigs = session._turnWallSigs || []).push({ at: Date.now(), resetsAtMs: Number(sig.resetsAtMs) || 0 });
+  const key = sig.key ? String(sig.key) : null; // the cache key the signal's mark landed on (org-verified at signal time)
+  const sigs = (session._turnWallSigs = session._turnWallSigs || []);
+  // the per-account ring counts WALLED TURNS, not records: one turn's banner
+  // + its rejected event are ONE wall (a single turn must not satisfy the
+  // ≥2-walls guard by itself)
+  if (key && !sigs.some((s) => s.key === key)) noteWallOnAccount(key, session._webuiId);
+  sigs.push({ at: Date.now(), resetsAtMs: Number(sig.resetsAtMs) || 0, bucket: sig.bucket || null, scopedName: sig.scopedName || null, key });
   session._turnWorkAfterSig = 0;
 }
 /** Main-thread assistant output — work evidence for turn classification. */
@@ -535,49 +627,133 @@ function noteTurnEnd(session) {
   const sigs = session._turnWallSigs || [];
   const workAfter = session._turnWorkAfterSig || 0;
   session._turnWallSigs = []; session._turnWorkAfterSig = 0;
-  maybePoolAutoSwitch(session); // the per-turn pool evaluation this boundary always ran
   if (sigs.length && workAfter <= 1) {
+    // BLOCKED entry owns this turn's pool evaluation (B-2c9b): it runs AFTER
+    // the demotion + the arm, so the link moves in the same tick and a hot
+    // switch's fireNow() finds the session armed
     try { onWalledTurn(session, sigs); } catch (e) { console.warn('[wall] blocked-entry failed:', e.message); }
     return;
   }
+  maybePoolAutoSwitch(session); // the per-turn pool evaluation this boundary always ran
   // a normally-completed turn is sufficient proof the session is not blocked
   try { getAutoResume()?.noteRecovered?.(session._webuiId, 'turn completed normally'); } catch { }
+}
+
+const BUCKET_LABEL = { fiveHour: '5h', sevenDay: '7d' };
+/** (B-2c9b plan A) WALL = GROUND TRUTH for the account it lands on. A walled
+ *  turn's signals name the cache key their mark landed on (the org-verified
+ *  key markLimitBanner / recordRateLimitEvent attribute readings with — a
+ *  live CLI holds its OLD token, the link is never the org it is on). When
+ *  that account is a member of the session's pool (or its linked member),
+ *  mark the affected bucket exhausted NOW — utilization 1, resetsAt = the
+ *  signal's, else the bucket's cached future reset, else the bounded 5h/24h
+ *  guess — through the SAME write path readings use (captureRateLimitEvent,
+ *  source 'wall'), so anchors/estimator/verdicts all see it in this tick.
+ *  MISATTRIBUTION GUARD (the 2.368.34 class): demote only when the account
+ *  saw ≥2 walled turns inside WALL_RING_MS (any sessions) OR it IS the
+ *  session's OTel-observed org — a single wall on an account the session is
+ *  not verifiably on is not enough. Every outcome returns a named reason. */
+function demoteWalledAccount(session, sigs) {
+  const poolId = session._accountId;
+  const a = poolId && accounts.get(poolId);
+  if (!a || a.type !== 'pooled') return { demoted: false, reason: 'not-pooled' };
+  const last = sigs.length ? sigs[sigs.length - 1] : null;
+  const wallKey = (last && last.key) || orgVerifiedKey(session, usageCacheKeyFor(session), 'wall');
+  const ids = new Set([wallKey]);
+  try { for (const id of usageIdentityAccountIds(wallKey)) ids.add(id); } catch { }
+  let linked = null; try { linked = accounts.poolCurrentFor(poolId, session._webuiId || null); } catch { }
+  const member = (accounts.poolMembers(poolId) || []).find((m) => ids.has(m.id)) || (linked && ids.has(linked) ? { id: linked, name: nameOf(linked) } : null);
+  if (!member) return { demoted: false, reason: 'not-a-member', key: wallKey };
+  const now = Date.now();
+  if (!(last && last.key)) noteWallOnAccount(wallKey, session._webuiId, now); // a key-less signal joins the ring at resolution time — this turn IS a wall on that account
+  const walls = wallCount(wallKey, now);
+  const observedId = observedMemberFor(session, poolId);
+  const observedMatch = !!observedId && ids.has(observedId);
+  if (walls < 2 && !observedMatch) {
+    console.log(`[wall] ${session._webuiId}: single wall on ${member.name} (session not observed there) — holding the demotion`);
+    global.__vsEvent?.('wall-demote-held', `${member.id}:${walls}`);
+    return { demoted: false, reason: 'unverified', key: member.id, walls };
+  }
+  // the buckets this turn's signals named for the account (a bucket-less
+  // signal = fiveHour, the banner's shortest-self-heal rule); the signal's
+  // resetsAt wins when it is in the future
+  const buckets = new Map();
+  for (const s of sigs) {
+    if (s.key && !ids.has(s.key)) continue;
+    const kind = s.bucket || 'fiveHour';
+    if (kind === 'scoped' && !s.scopedName) continue;
+    const k = kind === 'scoped' ? 'scoped:' + String(s.scopedName).toLowerCase() : kind;
+    const b = buckets.get(k) || { kind, scopedName: kind === 'scoped' ? String(s.scopedName).toLowerCase() : null, resetsAtMs: 0 };
+    b.resetsAtMs = Math.max(b.resetsAtMs, Number(s.resetsAtMs) || 0);
+    buckets.set(k, b);
+  }
+  const done = [];
+  for (const b of buckets.values()) {
+    const ev = { kind: b.kind, scopedName: b.scopedName, status: 'rejected', utilization: null, resetsAt: b.resetsAtMs > now ? Math.floor(b.resetsAtMs / 1000) : null, overage: {} };
+    const r = captureRateLimitEvent({ cacheDir: USAGE_CACHE_DIR, key: member.id, identityIds: usageIdentityAccountIds(member.id), ev, now, source: 'wall' });
+    if (!r.ok) { console.warn(`[wall] demotion write failed for ${member.name}: ${r.error || 'unknown'}`); continue; }
+    const label = b.kind === 'scoped' ? b.scopedName : BUCKET_LABEL[b.kind] || b.kind;
+    let until = 0;
+    try {
+      const c = JSON.parse(fs.readFileSync(path.join(USAGE_CACHE_DIR, String(member.id).replace(/[^\w.-]/g, '_') + '.json'), 'utf-8'));
+      const bk = b.kind === 'scoped' ? (c.scopedWeekly || []).find((x) => String(x?.name || '').toLowerCase() === b.scopedName) : c[b.kind];
+      until = (Number(bk?.resetsAt) || 0) * 1000;
+    } catch { }
+    console.log(`[wall] demoted ${member.name} ${label} until ${until ? new Date(until).toISOString() : 'unknown'} (${walls} walls${observedMatch ? ' / observed-org' : ''})`);
+    global.__vsEvent?.('wall-demote', `${member.id}:${label}:${observedMatch ? 'observed-org' : walls + '-walls'}`);
+    done.push({ label, until });
+  }
+  // (the write's fresh fetchedAt busts the estimator memo by itself — estimateFor re-anchors on a newer rawCache)
+  return { demoted: done.length > 0, reason: done.length ? 'demoted' : 'no-bucket', key: member.id, walls, observedMatch, buckets: done };
 }
 
 function onWalledTurn(session, sigs) {
   const id = session._webuiId;
   const model = sessionModelFor(session);
   const scope = _wallScope(session);
-  const ar = getAutoResume();
-  if (!ar?.armIfEnabled) return;
-  const v = quotaVerdictFor(scope, { model });
-  console.log(`[wall] ${id}: walled turn (scope ${scope}) → ${v.usable === true ? 'usable via ' + (v.via || '?') : v.usable === false ? 'blocked until ' + (v.blockedUntil ? new Date(v.blockedUntil).toISOString() : 'unknown') : 'no data'}`);
-  if (v.usable === true) {
-    // the pool eval just re-pointed (or a member is free): the session is
-    // idle-walled and nothing else will move it — a NEAR fire re-enters work
-    // through the normal machinery (pre-fire gate re-verifies; the delayed
-    // announcement outlives this, so a quick success stays silent)
-    ar.armIfEnabled(id, session, Date.now() + 45000, 'switched to a usable account');
-    return;
-  }
-  const evReset = Math.max(0, ...sigs.map((s2) => s2.resetsAtMs || 0));
-  const target = v.blockedUntil || evReset;
-  if (target > Date.now()) {
-    ar.armIfEnabled(id, session, target, v.reason || 'usage limit');
-    // VERIFY the cache's word (inc-mtdsoj5f, userW: an ALIVE account read
-    // dead-with-a-far-reset — "blocked until Aug-31" off stale data — until a
-    // MANUAL refresh fixed it; a confident cache can lie exactly like an
-    // absent one). One throttled probe re-verdicts: usable ⇒ the near-fire
-    // path takes over in seconds, still blocked ⇒ the arm stands corrected.
-    if (Date.now() - (_wallVerifyAt.get(scope) || 0) > 10 * 60e3) {
-      _wallVerifyAt.set(scope, Date.now());
-      scheduleWallProbe(session, scope, model, 0);
+  // (A) the wall is ground truth for the account it landed on — write it
+  // BEFORE the verdict reads the cache (readings only confirm)
+  let demoted = null;
+  try { demoted = demoteWalledAccount(session, sigs); } catch (e) { console.warn('[wall] demotion failed:', e.message); }
+  try {
+    const ar = getAutoResume();
+    if (!ar?.armIfEnabled) return;
+    const v = quotaVerdictFor(scope, { model, session });
+    console.log(`[wall] ${id}: walled turn (scope ${scope}${demoted?.demoted ? `, demoted ${demoted.key}` : ''}) → ${v.usable === true ? 'usable via ' + (v.via || '?') : v.usable === false ? 'blocked until ' + (v.blockedUntil ? new Date(v.blockedUntil).toISOString() : 'unknown') : 'no data'}${v.divergent ? ` [on ${nameOf(v.on)}, linked ${nameOf(v.linked)}]` : ''}`);
+    if (v.usable === true) {
+      // a member is free: the session is idle-walled and nothing else will
+      // move it — a NEAR fire re-enters work through the normal machinery
+      // (pre-fire gate re-verifies; the delayed announcement outlives this,
+      // so a quick success stays silent). The pool eval in `finally` runs
+      // with the session ARMED, so a hot switch's fireNow() continues it now.
+      ar.armIfEnabled(id, session, Date.now() + 45000, 'switched to a usable account');
+      return;
     }
-    return;
+    const evReset = Math.max(0, ...sigs.map((s2) => s2.resetsAtMs || 0));
+    const target = v.blockedUntil || evReset;
+    if (target > Date.now()) {
+      ar.armIfEnabled(id, session, target, v.reason || 'usage limit');
+      // VERIFY the cache's word (inc-mtdsoj5f, userW: an ALIVE account read
+      // dead-with-a-far-reset — "blocked until Aug-31" off stale data — until a
+      // MANUAL refresh fixed it; a confident cache can lie exactly like an
+      // absent one). One throttled probe re-verdicts: usable ⇒ the near-fire
+      // path takes over in seconds, still blocked ⇒ the arm stands corrected.
+      if (Date.now() - (_wallVerifyAt.get(scope) || 0) > 10 * 60e3) {
+        _wallVerifyAt.set(scope, Date.now());
+        scheduleWallProbe(session, scope, model, 0);
+      }
+      return;
+    }
+    // no reset time ANYWHERE (a rolled-over window's next reset only exists
+    // after a fresh reading) → probe the data gap, never guess
+    scheduleWallProbe(session, scope, model, 0);
+  } finally {
+    // the per-turn pool evaluation, AFTER the demotion and the arm: the link
+    // moves in this same tick (the demoted member reads dead; a divergent
+    // session is evaluated on the member it is observed on) and a hot
+    // switch's fireNow() continues the armed session
+    maybePoolAutoSwitch(session);
   }
-  // no reset time ANYWHERE (a rolled-over window's next reset only exists
-  // after a fresh reading) → probe the data gap, never guess
-  scheduleWallProbe(session, scope, model, 0);
 }
 
 // ── CAPS-ROUTED QUOTA PROBE (S4): ONE dispatcher for every "refresh this
@@ -662,9 +838,9 @@ function scheduleWallProbe(session, scope, model, attempt) {
       if (!activeSessions.has(id)) return;
       if (!getAutoResume()?.enabledFor?.(session)) return;
       const a = accounts.get(scope);
-      const target = a && a.type === 'pooled' ? accounts.poolCurrentFor(scope, id) : scope;
+      const target = a && a.type === 'pooled' ? sessionCurrentMember(session, scope).id : scope; // the member the session is ON (observed over linked, B-2c9b)
       if (target) await probeQuotaForKey(target, { session }).catch(() => { }); // caps-routed: never a claude spawn for a codex identity
-      const v = quotaVerdictFor(scope, { model });
+      const v = quotaVerdictFor(scope, { model, session });
       const ar = getAutoResume();
       if (v.usable === true) { ar?.armIfEnabled?.(id, session, Date.now() + 45000, 'account usable again'); return; }
       if (v.blockedUntil > Date.now()) { ar?.armIfEnabled?.(id, session, v.blockedUntil, v.reason); return; }
@@ -681,10 +857,10 @@ async function beforeAutoResumeFire(id, session) {
     const model = sessionModelFor(session);
     const scope = _wallScope(session);
     const a = accounts.get(scope);
-    const target = a && a.type === 'pooled' ? accounts.poolCurrentFor(scope, id) : scope;
+    const target = a && a.type === 'pooled' ? sessionCurrentMember(session, scope).id : scope; // the member the session is ON (observed over linked, B-2c9b)
     if (target) { try { await probeQuotaForKey(target, { session }); } catch { } } // caps-routed (S4): the identity's harness picks the rung
     maybePoolAutoSwitch(session);
-    const v = quotaVerdictFor(scope, { model });
+    const v = quotaVerdictFor(scope, { model, session });
     if (v.usable === false) {
       if (v.blockedUntil > Date.now()) getAutoResume()?.armIfEnabled?.(id, session, v.blockedUntil, 're-armed at fire: ' + v.reason);
       else scheduleWallProbe(session, scope, model, 1);
@@ -714,7 +890,7 @@ function recordRateLimitEvent(session, msg) {
       // wall-machine SIGNAL (2.369.0): no arming here — the turn's RESULT
       // classifies (a turn the switch rescues completes normally and never
       // enters BLOCKED; a genuinely walled turn arms off quotaVerdict).
-      try { noteWallSignal(session, { resetsAtMs: (Number(ev.resetsAt) || 0) * 1000 }); } catch { }
+      try { noteWallSignal(session, { resetsAtMs: (Number(ev.resetsAt) || 0) * 1000, bucket: ev.kind, scopedName: ev.scopedName, key }); } catch { }
     } else if (r.wroteReading) {
       try { if (ev.status && ev.status !== 'rejected') getAutoResume()?.noteRecovered?.(session._webuiId, 'fresh non-rejected reading'); } catch { }
       kickPoolEval();
@@ -779,7 +955,7 @@ function recordCodexQuotaSignal(session, payload) {
         global.__vsEvent?.('codex-reset-credit-failed', String(out || payload.error || 'unknown').slice(0, 60));
         maybePoolAutoSwitch(session);
         const resets = Number(session._codexLastResetsAt) || 0;
-        try { noteWallSignal(session, { resetsAtMs: resets * 1000 }); noteTurnEnd(session); } catch { }
+        try { noteWallSignal(session, { resetsAtMs: resets * 1000, bucket: 'sevenDay', key: codexQuotaKeyFor(session) }); noteTurnEnd(session); } catch { }
       }
       return;
     }
@@ -797,7 +973,7 @@ function recordCodexQuotaSignal(session, payload) {
         const tripped = sig.tripped; // the window rate_limit_reached_type named
         if (tryResetCredit(tripped?.resetsAt)) return; // outcome event continues the ladder
         maybePoolAutoSwitch(session); // another ChatGPT account = seconds, not hours
-        try { noteWallSignal(session, { resetsAtMs: (Number(tripped?.resetsAt) || 0) * 1000 }); } catch { }
+        try { noteWallSignal(session, { resetsAtMs: (Number(tripped?.resetsAt) || 0) * 1000, bucket: tripped && tripped === w.snap.fiveHour ? 'fiveHour' : 'sevenDay', key: w.key }); } catch { }
       } else {
         try { getAutoResume()?.noteRecovered?.(session._webuiId, 'fresh non-limited codex reading'); } catch { }
         kickPoolEval();
@@ -826,7 +1002,7 @@ function recordCodexQuotaSignal(session, payload) {
         global.__vsEvent?.('codex-usage-limit', info);
         if (tryResetCredit(resets)) return; // ① reset credit first when opted in
         maybePoolAutoSwitch(session);
-        try { noteWallSignal(session, { resetsAtMs: resets > nowSec ? resets * 1000 : 0 }); noteTurnEnd(session); } catch { }
+        try { noteWallSignal(session, { resetsAtMs: resets > nowSec ? resets * 1000 : 0, bucket: 'sevenDay', key: w2?.key || codexQuotaKeyFor(session) }); noteTurnEnd(session); } catch { }
       } else if (sig.kind === 'auth-failure') {
         global.__vsEvent?.('codex-auth-failure', session._accountId || 'global'); // v1: surfaced, not auto-evicted (claude's evict is creds-path-specific)
       }
@@ -895,8 +1071,10 @@ function markLimitBanner(session, text) {
     global.__vsEvent?.('usage-limit-banner-marked', `${key}:${hit.kind}`);
     maybePoolAutoSwitch(session); // freshest possible exhaustion signal — act now
     // wall-machine: the banner is a BOOLEAN signal only (owner: never parse
-    // text for data) — times come from quotaVerdict/probe at turn end
-    try { noteWallSignal(session, {}); } catch { }
+    // text for TIMES) — no resetsAtMs here; the bucket name is the same one
+    // parseLimitBanner gave the cache mark, and `key` is where that mark
+    // landed (the wall's account, B-2c9b). Times come from quotaVerdict/probe.
+    try { noteWallSignal(session, { bucket: hit.kind, scopedName: hit.kind === 'scoped' ? hit.name : null, key }); } catch { }
   } catch (e) { console.warn('[usage] banner mark failed:', e.message); }
 }
 
@@ -1145,10 +1323,17 @@ function maybePoolAutoSwitchForPool(poolId) {
       if (!poolCaps.planC) break; // plan-C per-session links need the backend's material path
       if ((s2.backend || 'claude') === 'codex') continue;
       if (s2._accountId !== poolId || s2.host) continue;
-      let curFor = null;
-      try { curFor = accounts.poolCurrentFor(poolId, sid); } catch { }
+      let linkCur = null;
+      try { linkCur = accounts.poolCurrentFor(poolId, sid); } catch { }
       const hasOwnLink = (() => { try { fs.lstatSync(accounts.sessionPoolLinkPath(poolId, sid)); return true; } catch { return false; } })();
-      if (!hasOwnLink || !curFor) continue;
+      if (!hasOwnLink || !linkCur) continue;
+      // (B-2c9b plan B) decide FROM the member the session is OBSERVED to bill
+      // (OTel truth, ≤10min): a hot-switched CLI keeps its old token, so the
+      // link says where we pointed it and the observation says what it is
+      // burning — a session walled on the observed member must move even
+      // when its link already reads healthy. No observation ⇒ the link.
+      const cm = sessionCurrentMember(s2, poolId);
+      const curFor = cm.id || linkCur;
       const fam = familyOfModel(sessionModelFor(s2));
       const projected = (id) => projectCacheForFamily(readCache(id), fam);
       const ds = decidePoolSwitch({ currentId: curFor, members, readCache: projected, nowSec: now / 1000, proactive: hot, hot, pessimism: darkTaintedAccounts() });
@@ -1161,8 +1346,11 @@ function maybePoolAutoSwitchForPool(poolId) {
         accounts.ensureSessionPoolLink(poolId, sid, ds.to);
         try { recordUsageAttribution({ claudeSessionId: s2.claudeSessionId || s2.backendSessionId, accountId: poolId }); } catch { }
         const toName = accounts.get(ds.to)?.name || ds.to;
-        serverNotice(`pool-sess-${sid}-${now}`, `Pool "${a.name}": conversation "${s2.name || sid}" moved to ${toName}${fam ? ` (its ${fam} quota${ds.fromRemaining != null ? ` was at ${Math.round(ds.fromRemaining)}%` : ''})` : ''}${a.hot ? '' : ' — restarting it'}`);
-        console.log(`[pool] per-session switch ${poolId}/${sid}: ${curFor} → ${ds.to} (fam=${fam || '?'}, from ${ds.fromRemaining}%)`);
+        // a same-target re-point (observed ≠ linked, the link was already on
+        // the chosen member) is not a user-visible switch: journal + the
+        // creds-mtime bump that makes the CLI re-read the link, no notice
+        if (ds.to !== linkCur) serverNotice(`pool-sess-${sid}-${now}`, `Pool "${a.name}": conversation "${s2.name || sid}" moved to ${toName}${cm.divergent ? ` (it was still running on ${nameOf(curFor)})` : ''}${fam ? ` (its ${fam} quota${ds.fromRemaining != null ? ` was at ${Math.round(ds.fromRemaining)}%` : ''})` : ''}${a.hot ? '' : ' — restarting it'}`);
+        console.log(`[pool] per-session switch ${poolId}/${sid}: ${curFor}${cm.divergent ? ` (observed; linked ${linkCur})` : ''} → ${ds.to}${ds.to === linkCur ? ' (re-point, same target)' : ''} (fam=${fam || '?'}, from ${ds.fromRemaining}%)`);
         // a hot re-point does not move an idle limit-blocked session by itself
         // (c1206711: the pool switched back and the session stayed dead) —
         // an ARMED session gets its continue NOW. Hot only: a cold switch
@@ -1301,6 +1489,7 @@ function maybeStopOnFallback(session, id, from, to) {
     poolChooserForModel, poolReadCache, probeUsageForAccountKey,
     noteSessionProduced, noteTurnEnd, noteWallSignal, beforeAutoResumeFire, quotaVerdictFor, probeUsageViaSession, recordRateLimitEvent, recordCodexQuotaSignal, resolveUsageKey,
     probeQuotaForKey, quotaSourceFor, quotaBackendFor, // S4 caps-routed quota probe + the per-harness QuotaSignalSource lookup (functional seams for test-quota-source)
+    observedMemberFor, sessionCurrentMember, demoteWalledAccount, wallCount, _wallRing, OBSERVED_ORG_RECENT_MS, WALL_RING_MS, // B-2c9b wall-ground-truth + observed-org seams (test-auto-resume §11)
     sessionModelFor, sweepUsageAnchors, usageCacheKeyFor,
     usageIdentityAccountIds, usageIdentityGroups, usageIdentityGroupsCached,
     writeUsageCacheForKey, clearSealedOrders, pushSealedOrders,
