@@ -31,17 +31,22 @@
 //     },
 //     "capabilities": {                          DECLARED at install, shown at enable, ENFORCED server-side:
 //       "server": { "fs": { "read": [abs|~ paths], "write": [abs|~ paths] },   node --permission allowlists (+ plugin dir, data dir)
+//                                                                               a path may end in ONE "*" (node's prefix wildcard); never over VibeSpace's own dirs
 //                   "childProcess": true,                                       --allow-child-process
 //                   "net": ["host", …] }                                        declared ONLY — node's permission model does not restrict network
 //     }
 //   }
-// 2.369.43 (security review) — three rules this file OWNS:
+// 2.369.43-.44 (security review) — four rules this file OWNS:
 //   • every free-text field goes through cleanText(): manifest text ends up in
 //     generated agent-tool shims, and a CR / U+2028 / U+2029 used to end the
 //     `//` comment there and execute the rest.
 //   • declared fs paths are COLLAPSED (duplicate slashes, `.` segments) before
 //     the forbidden-root test — node's permission model collapses them, so
 //     `/home/u//vibespace/data` and `/./` were grants nobody checked.
+//   • declared fs paths are matched the way node MATCHES them: a `*` truncates
+//     the pattern into a string prefix, so `/*` (and `<parent>/*`) had to be
+//     modelled or they walked straight past the forbidden roots — see
+//     normalizeFsPath.
 //   • needsConsent covers contributed agentTools: a shim is a program on every
 //     session's PATH (local, ssh hosts, paired devices), outside the sandbox.
 const ID_RE = /^[a-z0-9][a-z0-9-]*\.[a-z0-9][a-z0-9-]*$/;
@@ -93,9 +98,28 @@ function collapsePosixPath(p) {
   return '/' + out.join('/');
 }
 
-/** Normalize one declared fs path: absolute or `~`-rooted, no `..`, and never
- *  inside a forbidden root (the VibeSpace data dir / repo root). Returns
- *  { path } or { error }. `homeDir` expands `~` (falsy = keep literal). */
+/** Normalize one declared fs path: absolute or `~`-rooted, no `..`, never the
+ *  whole filesystem and never inside (or over) a forbidden root (the VibeSpace
+ *  data dir / repo root). Returns { path } or { error }. `homeDir` expands `~`
+ *  (falsy = keep literal).
+ *
+ *  WILDCARDS ARE PART OF THE GRAMMAR (2.369.44). Node's permission model reads
+ *  a declared path only up to the FIRST `*` and grants every path whose string
+ *  starts with what came before it — verified against node v24:
+ *  `--allow-fs-read=/t/a/*` and `--allow-fs-read=/t/a/*\/never-used` both read
+ *  `/t/a/b/c/f.txt`, `--allow-fs-read=/t/a/z*` reads `/t/a/zz.txt` but not
+ *  `/t/a/b/…`, and `--allow-fs-read=/*` reads /etc/hostname. The forbidden-root
+ *  test therefore has to run on that literal prefix: modelling the pattern as
+ *  a plain path let `["/*"]` — or `["<parent-of-the-install-dir>/*"]` — hand a
+ *  plugin process VibeSpace's own files while validation said nothing. So:
+ *    • at most ONE `*`, only as the LAST character (a `*` in the middle grants
+ *      everything before it and silently ignores the rest — refused loudly
+ *      rather than accepted as something narrower than it is);
+ *    • containment is tested against the literal prefix: a forbidden root that
+ *      STARTS WITH the prefix is covered by the grant (a wildcard on a parent
+ *      of a forbidden root is forbidden), and a prefix inside a forbidden root
+ *      is forbidden as before;
+ *    • `/` and `/*` are refused with or without forbidden roots. */
 function normalizeFsPath(raw, { homeDir = null, forbiddenRoots = [] } = {}) {
   if (typeof raw !== 'string' || !raw.trim()) return { error: 'must be a non-empty string' };
   let p = raw.trim();
@@ -103,6 +127,16 @@ function normalizeFsPath(raw, { homeDir = null, forbiddenRoots = [] } = {}) {
   if (tilde) p = homeDir ? String(homeDir).replace(/\/+$/, '') + p.slice(1) : p;
   else if (!p.startsWith('/')) return { error: `"${raw}" must be absolute or start with ~/` };
   if (p.split('/').some((seg) => seg === '..')) return { error: `"${raw}" must not contain ".."` };
+  // Split the wildcard off BEFORE collapsing: `/dir/*` (subtree) and `/dir*`
+  // (string prefix, so `/dirty` too) are different grants and collapsing the
+  // trailing slash away would silently widen the first into the second.
+  const star = p.indexOf('*');
+  if (star >= 0 && star !== p.length - 1) return { error: `"${raw}" puts "*" in the middle — node's permission model stops reading there and grants everything under "${p.slice(0, star)}", so write the pattern you mean with a single trailing "*"` };
+  let tail = '';
+  if (star >= 0) {
+    p = p.slice(0, -1);
+    if (p.endsWith('/')) { tail = '/*'; p = p.replace(/\/+$/, ''); } else tail = '*';
+  }
   if (p.startsWith('/')) {
     const collapsed = collapsePosixPath(p);
     if (collapsed === null) return { error: `"${raw}" must not contain ".."` };
@@ -110,14 +144,18 @@ function normalizeFsPath(raw, { homeDir = null, forbiddenRoots = [] } = {}) {
   } else if (p.length > 1) p = p.replace(/\/+$/, ''); // literal ~/… (no homeDir): trailing slashes only
   // after collapsing nothing may still hide a slash trick — a belt on the braces
   if (p.includes('//') || /(^|\/)\.(\/|$)/.test(p)) return { error: `"${raw}" is not a plain absolute path` };
+  if (p === '/' || p === '') return { error: `"${raw}" grants the whole filesystem — refused (a plugin may never be granted every file this user can reach)` };
+  // The STRING node compares against: everything at or under `p` for a plain
+  // path and for `…/*`, everything starting with `p` for `…pre*`.
+  const prefix = tail === '*' ? p : p + '/';
   for (const root of forbiddenRoots || []) {
     const rp = typeof root === 'string' ? root : root?.path;
     const label = typeof root === 'string' ? root : (root?.label || root?.path);
     if (!rp) continue;
     const r = String(rp).replace(/\/+$/, '');
-    if (p === r || p.startsWith(r + '/') || r.startsWith(p + '/') || p === '/') return { error: `"${raw}" covers ${label} — refused (a plugin may never be granted VibeSpace's own files)` };
+    if (p === r || p.startsWith(r + '/') || r.startsWith(prefix)) return { error: `"${raw}" covers ${label} — refused (a plugin may never be granted VibeSpace's own files)` };
   }
-  return { path: p };
+  return { path: p + tail };
 }
 
 /**

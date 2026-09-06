@@ -36,11 +36,13 @@
 // { trusted, trustedAt, capabilitiesHash }; a manifest whose consent-relevant
 // surface later changes hashes differently → disabled at discovery with a
 // notice, re-prompted. CONSENT IS PER PACKAGE, NOT PER ID (2.369.43): the
-// install record carries the package's contentHash, and installing over an
-// existing id keeps enabled/trust only when the package is byte-identical AND
-// from the same recorded source — otherwise it is new code behind a trusted
-// name, so it lands disabled with a notice (update() = the owner pulling the
-// source they already chose, consent rides along).
+// install record carries the package's contentHash, and installing under an id
+// THE REGISTRY STILL HOLDS CONSENT FOR keeps enabled/trust only when the
+// package is byte-identical AND from the same recorded source — otherwise it is
+// new code behind a trusted name, so it lands disabled with a notice. The test
+// is the REGISTRY record, never whether a folder was replaced (2.369.44:
+// enabled/trust outlive a hand-deleted plugin dir). update() = the owner
+// pulling the source they already chose, so consent rides along there.
 // State: data/plugin-registry.json { enabled, trust, installs } (atomic).
 // Every change broadcasts `plugins-manifests-updated` (multi-client law).
 // Uninstall NEVER deletes: plugin dir + state dir move to data/plugins-trash/.
@@ -375,9 +377,18 @@ fetch(api + '/api/agent/plugin-tool/${rec.id}/${t.name}', { method: 'POST', head
     // capabilitiesHash identical, so the drift check never fires). The consent
     // fast path survives only for a byte-identical package from the SAME
     // recorded source; anything else is new code and must be reviewed again.
+    // THE GATE IS THE REGISTRY, NEVER THE FOLDER (2.369.44): `r.replaced` only
+    // says a directory was overwritten, while `enabled` and `trust` live in
+    // data/plugin-registry.json keyed by id and OUTLIVE the directory — a
+    // hand-deleted plugin folder (or a half-finished install) leaves the
+    // consent record behind, and gating the reset on `replaced` let the next,
+    // DIFFERENT package under that id land pre-enabled and pre-trusted with no
+    // dialog at all. Consent survives only for a byte-identical package from
+    // the same recorded source; anything else is new code behind a name the
+    // owner trusted.
     const sameSource = !!prevInst && prevInst.source === r.source && prevInst.value === r.value;
     const sameContent = !!prevInst && !!prevInst.contentHash && prevInst.contentHash === r.contentHash;
-    const reconsent = r.replaced && !(sameSource && sameContent) && (!!registry.enabled[r.id] || !!registry.trust[r.id]);
+    const reconsent = !(sameSource && sameContent) && (!!registry.enabled[r.id] || !!registry.trust[r.id]);
     if (reconsent) { registry.enabled[r.id] = false; delete registry.trust[r.id]; }
     registry.installs[r.id] = { source: r.source, value: r.value, contentHash: r.contentHash || null, installedAt: prevInst?.installedAt || Date.now(), updatedAt: prevInst ? Date.now() : null };
     saveRegistry();
@@ -385,7 +396,7 @@ fetch(api + '/api/agent/plugin-tool/${rec.id}/${t.name}', { method: 'POST', head
     if (prev) stopChild(prev);
     discover();
     const rec = plugins.get(r.id);
-    if (rec && reconsent) { rec.notice = 'replaced by a different package — review what it asks for and enable it again'; log.warn?.(`[plugins] ${r.id}: ${rec.notice}`); tele('plugin-replaced-untrusted', r.id); }
+    if (rec && reconsent) { rec.notice = 'a different package under the same id — review what it asks for and enable it again'; log.warn?.(`[plugins] ${r.id}: ${rec.notice}`); tele('plugin-replaced-untrusted', r.id); }
     if (rec?.enabled) { rec.crashes = []; startChild(rec); }
     syncShims(); notify();
     tele('plugin-install', `${source} ${r.id}@${r.version}${r.replaced ? ' (replaced)' : ''}`);

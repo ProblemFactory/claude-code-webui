@@ -11,11 +11,16 @@
 //   ② capabilities.server.fs paths are collapsed the way node's permission
 //      model collapses them BEFORE the forbidden-root test (`//home`,
 //      `/home/u//vibespace/data`, `~//vibespace/data`, `/home/u/./vibespace/data`
-//      and `/./` all used to pass — `/./` grants the whole filesystem)
+//      and `/./` all used to pass — `/./` grants the whole filesystem) — and
+//      MATCHED the way node matches them: a `*` truncates the pattern into a
+//      string prefix, so `["/*"]` and `["<parent-of-the-install-dir>/*"]` walked
+//      straight past the forbidden roots (2.369.44)
 //   ③ contributed agent tools REQUIRE consent (they are programs on every
 //      session's PATH, outside the plugin's node --permission sandbox)
 //   ④ reinstalling a DIFFERENT package under an already-trusted id resets
-//      enabled + trust (the byte-identical fast path survives)
+//      enabled + trust (the byte-identical fast path survives) — the gate is
+//      the REGISTRY record, not whether a folder was replaced: enabled+trust
+//      outlive a hand-deleted plugin dir (2.369.44)
 //   ⑤ proxied /api/plugins/<id>/x/* replies are DATA on the app origin:
 //      nosniff + sandbox CSP, and no document content-type from an untrusted
 //      plugin
@@ -60,6 +65,25 @@ const allowed = normalizeFsPath('~/data//sub/', { homeDir: HOME, forbiddenRoots:
 ok(allowed.path === '/home/u/data/sub' && normalizeFsPath('/srv/x/', {}).path === '/srv/x' && normalizeFsPath('~', { homeDir: HOME }).path === HOME, `a legitimate path still normalizes (${JSON.stringify(allowed)})`);
 const capBad = V({ ...baseM, capabilities: { server: { fs: { write: ['/home/u//vibespace/data'] } } } }, { homeDir: HOME, forbiddenRoots: FORBIDDEN });
 ok(!capBad.ok && /covers the VibeSpace/.test(capBad.errors.join()), 'a manifest declaring the collapsed form of the data dir fails validation (named)', capBad.errors);
+
+// WILDCARDS (2.369.44): node reads a declared path only up to the FIRST `*` and
+// grants everything whose STRING starts with what came before it — so `/*`,
+// `<parent-of-a-forbidden-root>/*` and even a partial-segment `…/dat*` are
+// grants over VibeSpace's own files, and a `*` in the middle is far wider than
+// it reads. Modelling the pattern as a plain path let every one of these pass.
+const WILD_REFUSE = ['/*', '~/*', '/home/u/*', '/home/*', '/home/u/vibespace/dat*', '/home/u/vibespace/data/logs/*', '/home/u/proj/*/logs', '/home/u/proj/**'];
+const wildRefused = WILD_REFUSE.filter((p) => !!normalizeFsPath(p, { homeDir: HOME, forbiddenRoots: FORBIDDEN }).error);
+ok(wildRefused.length === WILD_REFUSE.length, `every wildcard whose node-side prefix reaches VibeSpace's own dirs (or the whole filesystem) is refused (${WILD_REFUSE.filter((p) => !wildRefused.includes(p)).join(' , ') || 'all refused'})`);
+const wildOk = normalizeFsPath('/home/u/projects/*', { homeDir: HOME, forbiddenRoots: FORBIDDEN });
+const wildOk2 = normalizeFsPath('~/projects/logs*', { homeDir: HOME, forbiddenRoots: FORBIDDEN });
+ok(wildOk.path === '/home/u/projects/*' && wildOk2.path === '/home/u/projects/logs*', `a wildcard under a legitimately allowed dir still passes, VERBATIM — the pattern reaching node is the one the owner read (${JSON.stringify([wildOk, wildOk2])})`);
+ok(normalizeFsPath('/srv/x/*', {}).path === '/srv/x/*' && normalizeFsPath('/srv/x*', {}).path === '/srv/x*', 'normalizing never collapses `/dir/*` (subtree) into `/dir*` (string prefix — it would also cover /srv/xyz)');
+const capWildRoot = V({ ...baseM, capabilities: { server: { fs: { read: ['/*'] } } } }, { homeDir: HOME, forbiddenRoots: FORBIDDEN });
+ok(!capWildRoot.ok && /whole filesystem/.test(capWildRoot.errors.join()), 'a manifest declaring "/*" fails validation, and says so', capWildRoot.errors);
+const capWildParent = V({ ...baseM, capabilities: { server: { fs: { write: ['/home/u/*'] } } } }, { homeDir: HOME, forbiddenRoots: FORBIDDEN });
+ok(!capWildParent.ok && /covers the VibeSpace/.test(capWildParent.errors.join()), 'a wildcard on a PARENT of a forbidden root fails validation, naming the dir it covers', capWildParent.errors);
+const capWildOk = V({ ...baseM, capabilities: { server: { fs: { read: ['~/projects/*'] } } } }, { homeDir: HOME, forbiddenRoots: FORBIDDEN });
+ok(capWildOk.ok && capWildOk.manifest.capabilities.server.fs.read[0] === '/home/u/projects/*' && capabilitySummary(capWildOk.manifest).some((i) => i.id === 'fs-read' && i.params.paths.includes('/home/u/projects/*')), 'a legitimate wildcard survives validation and reaches the consent summary (negative control)', capWildOk.errors);
 
 const toolsOnly = V({ ...baseM, contributes: { agentTools: [{ name: 'do', description: 'does', args: {} }] } });
 ok(needsConsent(toolsOnly.manifest) && capabilitySummary(toolsOnly.manifest).some((i) => i.id === 'agent-tools' && /OUTSIDE the plugin sandbox/.test(i.text)), 'contributed agent tools need consent and the summary says they run outside the sandbox');
@@ -160,6 +184,43 @@ ok(await waitFor(async () => (await row('acme.swap')).state === 'running', 20000
 const pxT = await j('/api/plugins/acme.swap/x/page');
 ok(/text\/html/.test(pxT.headers.get('content-type') || '') && /sandbox/.test(pxT.headers.get('content-security-policy') || ''), `a TRUSTED plugin may keep a document content-type, still under the sandbox CSP (${pxT.headers.get('content-type')})`);
 
+// …and the reset is gated on the REGISTRY RECORD, not on a folder having been
+// replaced (2.369.44). `enabled` and `trust` are keyed by id in
+// data/plugin-registry.json and OUTLIVE the directory: after a hand-deleted (or
+// half-finished) install there is nothing to replace, so `r.replaced` was false
+// and the next — DIFFERENT — package under that id landed pre-enabled and
+// pre-trusted, its client module served same-origin without one dialog.
+console.log('— consent must not outlive the package');
+const ghostM = { id: 'acme.ghost', version: '1.0.0', engines: { vibespace: '2.369.24' }, label: 'Ghost', client: 'module', clientEntry: 'client.js' };
+const mkGhost = (dir, marker) => { writeJson(path.join(dir, 'vibespace-plugin.json'), ghostM); fs.writeFileSync(path.join(dir, 'client.js'), `export function activate() { globalThis.__pkg = '${marker}'; }\n`); };
+const ghostA = path.join(srcRoot, 'g-a'), ghostB = path.join(srcRoot, 'g-b');
+mkGhost(ghostA, 'GHOST-A'); mkGhost(ghostB, 'GHOST-B');
+const reg = () => JSON.parse(fs.readFileSync(path.join(root, 'data', 'plugin-registry.json'), 'utf8'));
+const dropFolder = async () => { fs.rmSync(pdir('acme.ghost'), { recursive: true, force: true }); await post('/api/plugins/manifests/reload', {}); };
+await post('/api/plugins/install', { source: 'path', value: ghostA });
+await post('/api/plugins/manifests/acme.ghost/enabled', { enabled: true, trusted: true });
+ok((await row('acme.ghost')).trusted && (await j('/plugins/acme.ghost/client.js')).status === 200, 'ghost package A is trusted and its client module is served');
+await dropFolder();
+ok(reg().enabled['acme.ghost'] === true && !!reg().trust['acme.ghost'] && !(await row('acme.ghost')), 'THE REPRODUCTION: with the plugin folder hand-deleted the registry still holds enabled + trust for that id', reg().trust);
+const iG = await post('/api/plugins/install', { source: 'path', value: ghostB });
+const rowG = await row('acme.ghost');
+ok(iG.body.disabled === true && iG.body.consentRequired === true && !rowG.enabled && !rowG.trusted && !reg().trust['acme.ghost'] && /different package/.test(rowG.notice || ''), 'a DIFFERENT package installed where NO folder was replaced does not inherit consent — disabled, untrusted, notice', { install: iG.body, row: rowG });
+ok((await j('/plugins/acme.ghost/client.js')).status === 404, '…and the new package\'s client module is not served');
+await post('/api/plugins/manifests/acme.ghost/enabled', { enabled: true, trusted: true });
+await dropFolder();
+const iG2 = await post('/api/plugins/install', { source: 'path', value: ghostB });
+const rowG2 = await row('acme.ghost');
+const modG2 = await j('/plugins/acme.ghost/client.js');
+ok(!iG2.body.disabled && rowG2.enabled && rowG2.trusted && modG2.status === 200 && /GHOST-B/.test(modG2.body), 'NEGATIVE CONTROL: the SAME package from the SAME source keeps consent even when the folder had to be recreated', { install: iG2.body, row: rowG2 });
+
+// the wildcard rule through the REAL installer: a package asking for the parent
+// of the install dir never lands on disk
+const wildPkg = path.join(srcRoot, 'wild');
+writeJson(path.join(wildPkg, 'vibespace-plugin.json'), { id: 'acme.wild', version: '1.0.0', engines: { vibespace: '2.369.24' }, server: true, capabilities: { server: { fs: { read: [path.dirname(root) + '/*'] } } } });
+fs.writeFileSync(path.join(wildPkg, 'server.js'), "process.send({ t: 'hello', api: 1 });\n");
+const iW = await post('/api/plugins/install', { source: 'path', value: wildPkg });
+ok(iW.status === 400 && /invalid manifest/.test(iW.body.error || '') && /covers the VibeSpace/.test(iW.body.error || '') && !fs.existsSync(pdir('acme.wild')), `a package whose fs capability wildcards a PARENT of the install dir is refused by the real installer and never lands on disk (${(iW.body.error || '').slice(0, 120)})`);
+
 // ── ④ per-child intentional-stop mark ──
 console.log('— per-child stop mark');
 const HANG = "process.on('SIGTERM', () => {}); process.on('message', (m) => {}); setInterval(() => {}, 1000); process.send({ t: 'hello', api: 1 });\n";
@@ -214,6 +275,8 @@ ok(/async function stageFromPath/.test(pi) && /await fsp\.cp\(src, dest/.test(pi
 ok(/} finally {\n\s*if \(file\) \{ try \{ fs\.rmSync\(file, \{ force: true \}\); \} catch \{ \} \}/.test(pi), 'the uploaded-file cleanup wraps the WHOLE install (source validation included)');
 const pmSrc = read('src/plugin-manifest.js');
 ok(/function cleanText/.test(pmSrc) && /collapsePosixPath/.test(pmSrc) && /contributesAgentTools/.test(pmSrc), 'the validator owns cleanText + path collapsing + the agent-tools consent rule');
+ok(/const star = p\.indexOf\('\*'\)/.test(pmSrc) && /const prefix = tail === '\*' \? p : p \+ '\/'/.test(pmSrc) && /r\.startsWith\(prefix\)/.test(pmSrc), 'the forbidden-root test runs against the wildcard PREFIX node actually matches (never the raw pattern)');
+ok(/r\.replaced/.test(ld) && !/reconsent = r\.replaced/.test(ld) && /const reconsent = !\(sameSource && sameContent\) && \(!!registry\.enabled/.test(ld), 'the reinstall consent reset is gated on the REGISTRY record, not on a folder having been replaced');
 const pui = read('src/lib/plugins-ui.js');
 ok(/if \(res\.disabled\) showToast\(t\('This is a different package under the same id/.test(pui), 'the install dialog tells the user the replacement was left disabled (no silent failure)');
 for (const dict of ['src/lib/i18n-zh.js', 'src/lib/i18n-ja.js']) {
