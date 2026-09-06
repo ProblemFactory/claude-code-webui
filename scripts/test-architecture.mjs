@@ -50,7 +50,7 @@ const SHARED = new Set(['src/discovery-facts.js', 'src/sysinfo.js', 'src/machine
   // rate-limit-capture is fs/path-only by design ("so the device daemon can bundle it") — SHARED, not ORCH
   'src/rate-limit-capture.js',
   // harness descriptors (docs/design-harness-plugins.md §2.2): declarations + pure hooks over SHARED parsers;
-  // the daemon may bundle them for the S5 stream parse — they must never reach up into ORCH
+  // the daemon may bundle them (S5 kept the stream CONSUMERS in ORCH under src/server/stdout/ — descriptors only NAME the protocol) — they must never reach up into ORCH
   'src/harnesses/index.js', 'src/harnesses/claude.js', 'src/harnesses/codex.js', 'src/harnesses/shell.js',
   'src/harnesses/claude-quota.js', 'src/harnesses/codex-quota.js', 'src/harnesses/null-quota.js',
   // ACP v1 harness (S8): generic descriptor factory + first agent, adapter, normalizer (+ store reader)

@@ -257,7 +257,7 @@ const T0 = Date.now();   // the module refuses waits >26h out, so the clock must
   ok('WIRING: the pre-fire gate probes + re-verdicts and can VETO the spend', /async function beforeAutoResumeFire/.test(eng) && /if \(v\.usable === false\)/.test(eng) && /return false;/.test(eng));
   const srv8 = read('server.js');
   ok('WIRING: server.js routes beforeFire → beforeAutoResumeFire and provides the probe', /beforeFire: \(id, s\) => \{ try \{ return beforeAutoResumeFire\(id, s\); \}/.test(srv8) && /getQuotaProbe: \(\) => \{ try \{ return usage\.refreshViaCliPanel; \}/.test(srv8));
-  const ss8 = read('src/server/session-stdout.js');
+  const ss8 = read('src/server/stdout/claude-stream-json.js') + '\n' + read('src/server/stdout/codex-events.js'); // S5: per-protocol consumer modules
   ok("WIRING: the claude result record IS the turn boundary; codex task_complete too", /if \(msg\.type === 'result'\) \{ try \{ noteTurnEnd\?\.\(session\); \} catch \{ \} \}/.test(ss8) && /task_complete'\) \{\s*\n\s*try \{ noteTurnEnd\?\.\(session\); \} catch \{\}/.test(ss8));
 
   // the pre-fire VETO, functionally (async gate through a real create())

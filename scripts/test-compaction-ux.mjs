@@ -48,7 +48,8 @@ const read = (f) => fs.readFileSync(path.join(REPO, f), 'utf8');
   const ws = read('src/ws-handler.js');
   ok(/\^\\\/compact\\b/.test(ws) && ws.includes("_streamingKind = 'compacting'") && ws.includes("kind: 'compacting'"), 'ws-handler labels a /compact send kind=compacting and broadcasts it');
   ok(ws.includes('streamingKind: isStreaming ? (session._streamingKind || null) : null'), 'attach meta carries streamingKind (reconnect mid-compaction keeps the guard)');
-  const so = read('src/server/session-stdout.js');
+  // S5: the parse pipelines live in src/server/stdout/<protocol>.js
+  const so = ['claude-stream-json', 'codex-events', 'acp-events'].map((m) => read(`src/server/stdout/${m}.js`)).join('\n');
   ok(so.includes('session._streamingKind = null;'), 'turn end resets the kind with the label');
   ok((so.match(/kind: session\._streamingKind \|\| null/g) || []).length >= 2, 'every streaming-label broadcast carries the kind (API-retry relabels do not drop the guard)');
   ok(read('src/session-schema.js').includes('_streamingKind:'), '_streamingKind registered in the session schema');

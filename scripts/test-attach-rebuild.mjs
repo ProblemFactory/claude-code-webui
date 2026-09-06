@@ -164,15 +164,18 @@ const strip = (msgs) => JSON.stringify(msgs.map((m) => ({ ...m, ts: undefined })
 {
   const wsh = fs.readFileSync(path.join(REPO, 'src/ws-handler.js'), 'utf8');
   const so = fs.readFileSync(path.join(REPO, 'src/server/session-stdout.js'), 'utf8');
+  // S5: the three parse pipelines live in src/server/stdout/<protocol>.js — the live-feed sites moved with them
+  const stdoutDir = fs.readdirSync(path.join(REPO, 'src/server/stdout')).filter((f) => f.endsWith('.js')).map((f) => 'src/server/stdout/' + f);
+  const consumers = stdoutDir.map((f) => fs.readFileSync(path.join(REPO, f), 'utf8')).join('\n');
   ok(/await rebuildHistory\(session, data\.sessionId, sm\.raw\(\)\)/.test(wsh), 'attach rebuilds through rebuildHistory (time-sliced + gated)');
   ok(!/session\._normalizer\.convertHistory\(/.test(wsh), 'no sync session-normalizer convertHistory left in the ws attach path');
-  const serverSide = ['server.js', 'src/ws-handler.js', 'src/ws-create.js', 'src/agent-routes.js', 'src/routes/sessions.js', ...fs.readdirSync(path.join(REPO, 'src/server')).filter((f) => f.endsWith('.js')).map((f) => 'src/server/' + f)]
+  const serverSide = ['server.js', 'src/ws-handler.js', 'src/ws-create.js', 'src/agent-routes.js', 'src/routes/sessions.js', ...fs.readdirSync(path.join(REPO, 'src/server')).filter((f) => f.endsWith('.js')).map((f) => 'src/server/' + f), ...stdoutDir]
     .map((f) => fs.readFileSync(path.join(REPO, f), 'utf8')).join('\n');
   const direct = (serverSide.match(/_normalizer\??\.processLive\(/g) || []).length;
   const directCards = (serverSide.match(/_normalizer\??\.injectPeerCard\??\(/g) || []).length;
   ok(direct === 0, `every live-feed site across server.js + src/server + ws-handler goes through feedLive (direct _normalizer.processLive calls: ${direct})`);
   ok(directCards === 0, `every peer-card writer (Background Work notify, vibespace-msg, auto-resume notice) goes through feedPeerCard (direct injectPeerCard calls: ${directCards})`);
-  ok((wsh.match(/feedLive\(session, /g) || []).length === 2 && (so.match(/feedLive\(session, /g) || []).length === 4, 'the six known live sites (chat-input echo, permission payload, stdout parse ×4: codex / acp non-acp frames / acp records / claude) are all gated');
+  ok((wsh.match(/feedLive\(session, /g) || []).length === 2 && (consumers.match(/feedLive\(session, /g) || []).length === 4 && (so.match(/feedLive\(session, /g) || []).length === 0, 'the six known live sites (chat-input echo, permission payload, stdout consumers ×4: codex / acp non-acp frames / acp records / claude — session-stdout itself feeds nothing since S5) are all gated');
   ok(/type: 'killed', sessionId: requestedKillId, resolvedId: data\.sessionId, ok: true/.test(wsh) && /type: 'killed', sessionId: requestedKillId, resolvedId: data\.sessionId, ok: false, reason: 'not-found'/.test(wsh), "kill replies 'killed' to the REQUESTER in both outcomes, carrying the id the client ASKED for (the 2.179.0 remap must not orphan the request)");
   ok(/const requestedKillId = data\.sessionId;[\s\S]{0,400}data\.sessionId = eid; break;/.test(wsh), 'the requested id is captured BEFORE the stale-id remap');
   ok(/activeSessions\.get\(data\.sessionId\) !== session\) \{[\s\S]{0,200}code: 'ended-during-attach'/.test(wsh), 'attach re-checks liveness after the rebuild — a session killed meanwhile gets an error, never a live-looking attached');

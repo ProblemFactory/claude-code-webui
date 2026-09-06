@@ -286,10 +286,11 @@ setInterval(() => {}, 1e3);
   ok(/caps: \{ peerMessage: true, frameFile: true \}/.test(cw), 'codex-chat-wrapper advertises caps.frameFile in its boot meta');
   ok(/if \(msg\.type === '_frame_file'\) \{ msg = loadFrameFile\(msg\);/.test(cw), 'codex-chat-wrapper resolves _frame_file pointers on the stdin path (before the ready gate)');
   ok(/if \(!msg \|\| typeof msg !== 'object'\) \{ rejectStdinLine\(line\); continue; \}/.test(cw) && !/const msg = safeJsonParse\(line\);\n\s*if \(!msg\) continue;/.test(cw), 'NEGATIVE: an unparseable stdin line is no longer a silent continue');
-  // the ack has a consumer on BOTH server stdout branches (claude + codex-events)
-  const ss = fs.readFileSync(path.join(REPO, 'src/server/session-stdout.js'), 'utf8');
-  ok((ss.match(/if \(msg\.type === '_stdin_ack'\) \{ session\._stdinAckReceived = true; continue; \}/g) || []).length === 3, 'session-stdout consumes _stdin_ack on the claude, codex-events and acp-events branches');
-  ok(ss.indexOf("streamProto === 'codex-events'") < ss.indexOf("if (msg.type === '_stdin_ack')"), 'the codex-events branch consumer comes first in file order (the wrapper ack is not a dead emit)');
+  // the ack has a consumer in EVERY stdout consumer module (S5: src/server/stdout/<protocol>.js, one per declared protocol)
+  const ACK_SRC = "if \\(msg\\.type === '_stdin_ack'\\) \\{ session\\._stdinAckReceived = true; continue; \\}";
+  const perProto = Object.fromEntries(['claude-stream-json', 'codex-events', 'acp-events'].map((m) => [m, (fs.readFileSync(path.join(REPO, `src/server/stdout/${m}.js`), 'utf8').match(new RegExp(ACK_SRC, 'g')) || []).length]));
+  ok(perProto['claude-stream-json'] === 1 && perProto['codex-events'] === 1 && perProto['acp-events'] === 1, `each stdout consumer (claude-stream-json / codex-events / acp-events) consumes _stdin_ack exactly once (${JSON.stringify(perProto)})`);
+  ok(!new RegExp(ACK_SRC).test(fs.readFileSync(path.join(REPO, 'src/server/session-stdout.js'), 'utf8')), 'session-stdout itself parses no records since S5 (registry dispatch only) — the codex wrapper ack lands in stdout/codex-events.js, not a dead emit');
   fs.rmSync(bufs, { recursive: true, force: true }); fs.rmSync(metaDir, { recursive: true, force: true });
 }
 

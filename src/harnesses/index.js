@@ -8,6 +8,11 @@
 // descriptor file (built-in) or calls register() (plugin tier-5), never an
 // if-chain. Unknown ids fail LOUDLY — the gemini-as-claude fallthrough class
 // is a bug we already paid for once; nothing here ever defaults to claude.
+// The live stdout PARSE for a chat harness is NOT on the descriptor (it needs
+// orchestrator deps a daemon lacks): caps.streamProtocol NAMES it and
+// src/server/stdout/index.js RESOLVES it (S5) — test-harness-contract pins that
+// every chat harness's protocol has a registered consumer and that no
+// stdout/stream twin of caps.streamProtocol exists here.
 const { NULL_QUOTA } = require('./null-quota');
 
 const QUOTA_PROBE_RUNGS = Object.freeze(['cli-usage', 'rpc-rate-limits', null]);

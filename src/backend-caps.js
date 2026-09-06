@@ -18,9 +18,12 @@
 // A pool on a backend without hotSwitch 'verified' always cold-restarts
 // (kill → exited → resume), whatever its `hot` flag says.
 // streamProtocol names the live stdout PARSE PIPELINE a chat session needs —
-// session-stdout dispatches on THIS, never on the backend id, so a backend
-// without a registered pipeline refuses at spawn instead of being silently
-// parsed as claude stream-json (the gemini-as-claude fallthrough class).
+// session-stdout resolves THIS through the consumer registry
+// (src/server/stdout/index.js, harness S5), never the backend id, so a backend
+// without a registered consumer fails loudly at session start instead of being
+// silently parsed as claude stream-json (the gemini-as-claude fallthrough
+// class). This row is the ONE source of truth for the protocol — the harness
+// descriptor's caps IS this row; it carries no separate stdout:{protocol}.
 // peerDelivery names the LIVE lane for agent-to-agent/job messages
 // (conversation-deliver consults this, never the backend id):
 //   'cli-inbox'  — the CLI's own cross-session inbox socket (claude:

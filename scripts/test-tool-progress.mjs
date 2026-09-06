@@ -11,7 +11,7 @@ let failed = 0; const check=(n,c,e)=>{ if(c) console.log(`  ✓ ${n}`); else { f
 //    must check the TYPE first.
 const rec = { type:'tool_progress', tool_use_id:'toolu_X-heartbeat-0', tool_name:'Bash',
   parent_tool_use_id:'toolu_X', elapsed_time_seconds:30, heartbeat:true, session_id:'s', uuid:'u' };
-const src = fs.readFileSync('src/server/session-stdout.js', 'utf8');
+const src = fs.readFileSync('src/server/stdout/claude-stream-json.js', 'utf8'); // S5: the claude stream-json consumer module
 const iProgress = src.indexOf("msg.type === 'tool_progress'");
 const iSub = src.indexOf("} else if (msg.parent_tool_use_id || msg.isSidechain) {");
 check('server checks tool_progress BEFORE the subagent branch', iProgress > 0 && iSub > iProgress, `${iProgress}/${iSub}`);

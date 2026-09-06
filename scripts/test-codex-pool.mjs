@@ -83,7 +83,7 @@ ok('a signed-out target self-heals to a live member at spawn', r2 && am.poolCurr
   ok('recordCodexQuotaSignal exists: readings write the member cache, exhaustion switches then feeds the WALL MACHINE (2.369.0)', /function recordCodexQuotaSignal[\s\S]{0,3000}maybePoolAutoSwitch\(session\);[\s\S]{0,500}noteWallSignal/.test(eng));
   ok('…typed exhaustion enum covers the workspace variants (owned by the codex harness since S4)', /usage_limit_reached\|quota_exceeded\|usage_not_included\|workspace_owner_usage_limit_reached\|workspace_member_usage_limit_reached\|workspace_member_credits_depleted/.test(read('src/harnesses/codex-quota.js')) && !/CODEX_EXHAUSTION_RE/.test(eng));
   ok('…a pool-billed reading lands on the CURRENT MEMBER, never the pool wrapper', /a\.type === 'pooled'\) key = accounts\.poolCurrentFor\(key, session\._webuiId\)/.test(eng));
-  const ss = read('src/server/session-stdout.js');
+  const ss = read('src/server/stdout/codex-events.js'); // S5: the codex-events consumer module
   ok('the codex stdout pipeline feeds the engine (rate_limits_updated + task_failed + reset_credit_result)', /rate_limits_updated' \|\| msg\.payload\?\.type === 'task_failed' \|\| msg\.payload\?\.type === 'reset_credit_result'\)/.test(ss) && /recordCodexQuotaSignal\?\.\(session, msg\.payload\)/.test(ss));
   const w = read('data/bin/codex-chat-wrapper.js');
   ok('the wrapper RELAYS rateLimits to stdout (sidecar was display-only)', /emitTaskEvent\('rate_limits_updated', \{ rateLimits: params\.rateLimits \}\)/.test(w));

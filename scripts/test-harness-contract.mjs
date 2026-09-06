@@ -20,6 +20,7 @@ const { BackendAdapter } = require(path.join(REPO, 'src/adapters/base.js'));
 const { createAdapterRegistry } = require(path.join(REPO, 'src/adapters/index.js'));
 const { NORMALIZERS, createMessageManager } = require(path.join(REPO, 'src/normalizers.js'));
 const { capsOf, BACKEND_CAPS } = require(path.join(REPO, 'src/backend-caps.js'));
+const { hasConsumer, PROTOCOLS } = require(path.join(REPO, 'src/server/stdout/index.js')); // S5: protocol → stdout consumer registry
 const { BACKEND_META } = await import(path.join(REPO, 'src/lib/agent-meta.js'));
 const schemaSrc = fs.readFileSync(path.join(REPO, 'src/lib/settings-schema.js'), 'utf8');
 
@@ -57,6 +58,8 @@ for (const id of harnessIds()) {
     ok(h.inject && ['hooks', 'wrapper', 'acp'].includes(h.inject.kind) && typeof h.inject.sessionStartHonoured === 'boolean' && Array.isArray(h.inject.hookEvents), `${id}: declares its context-injection strategy (${h.inject?.kind}, sessionStartHonoured=${h.inject?.sessionStartHonoured})`);
     if (h.inject?.hookFile) ok(typeof h.inject.hookFile.file === 'function' && typeof h.inject.hookFile.file() === 'string' && typeof h.inject.hookFile.createIfMissing === 'boolean', `${id}: hook file declaration is well-formed (${h.inject.hookFile.file()})`);
     ok(typeof h.caps.streamProtocol === 'string', `${id}: caps name a stream protocol (${h.caps.streamProtocol})`);
+    ok(hasConsumer(h.caps.streamProtocol), `${id}: its stream protocol has a registered stdout consumer (src/server/stdout/index.js: ${h.caps.streamProtocol}) — the descriptor NAMES it, the registry RESOLVES it (S5)`);
+    ok(!('stdout' in h) && !('stream' in h), `${id}: no stdout/stream twin on the descriptor — caps.streamProtocol is the ONE source of truth`);
   }
   const meta = BACKEND_META[id];
   ok(meta && meta.id === id && meta.label && meta.badgeClass, `${id}: client BACKEND_META row exists`);
@@ -64,6 +67,9 @@ for (const id of harnessIds()) {
 }
 ok(Object.keys(BACKEND_META).every((id) => HARNESSES[id]), 'every client META row has a server harness (no client-only backend)');
 ok(chatHarnessIds().join(',') === 'claude,codex,opencode', `chat-capable harnesses: ${chatHarnessIds().join(',')}`);
+// S5 pins: the stdout registry covers exactly the declared protocols; an unknown one has no consumer (never a stream-json fallback)
+ok(PROTOCOLS.every((p) => chatHarnessIds().some((id) => HARNESSES[id].caps.streamProtocol === p)), `no dead stdout consumer row: every registered protocol is declared by a chat harness (${PROTOCOLS.join(',')})`);
+ok(!hasConsumer('gemini-events') && !hasConsumer(null) && !hasConsumer(capsOf('shell').streamProtocol), 'an unregistered / null protocol has NO stdout consumer (session-stdout reports it loudly; nothing defaults to stream-json)');
 ok(BACKEND_META.codex.fallbackModels[0] === 'gpt-6-astra', 'codex fallback model list leads with gpt-6-astra (0.153.4 catalog default)');
 // S7 pins: client settings-prefix / account-surface collapses are gone
 const libSrc = fs.readdirSync(path.join(REPO, 'src/lib')).filter((f) => f.endsWith('.js')).map((f) => fs.readFileSync(path.join(REPO, 'src/lib', f), 'utf8')).join('\n');

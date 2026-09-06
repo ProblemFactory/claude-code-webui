@@ -256,9 +256,10 @@ console.log('— normalizer (AcpMessageManager) over the journal');
 
 console.log('— wiring pins');
 {
-  const so = read('src/server/session-stdout.js');
-  ok('session-stdout has the acp-events consumer: id adoption from the session record, streaming from prompt_start/prompt_end, todos from plan, feedLive gate', /streamProto === 'acp-events'/.test(so) && /msg\.kind === 'session'/.test(so) && /msg\.kind === 'prompt_end'\) \{\s*\n\s*session\._isStreaming = false/.test(so) && /u\.sessionUpdate === 'plan'/.test(so) && /noteHarnessModels\?\.\(session\.backend, msg\.models\)/.test(so));
-  ok('…and every ACP record reaches the normalizer through feedLive (never processLive)', (so.match(/feedLive\(session, msg\)/g) || []).length >= 3 && !/_normalizer\.processLive/.test(so));
+  // S5: the acp-events consumer is its own module behind the stdout registry (src/server/stdout/acp-events.js)
+  const so = read('src/server/stdout/acp-events.js');
+  ok('stdout/acp-events.js is the acp-events consumer: id adoption from the session record, streaming from prompt_start/prompt_end, todos from plan, feedLive gate', /^const protocol = 'acp-events';$/m.test(so) && /msg\.kind === 'session'/.test(so) && /msg\.kind === 'prompt_end'\) \{\s*\n\s*session\._isStreaming = false/.test(so) && /u\.sessionUpdate === 'plan'/.test(so) && /noteHarnessModels\?\.\(session\.backend, msg\.models\)/.test(so));
+  ok('…registered under its protocol in the stdout registry, and every ACP record reaches the normalizer through feedLive (never processLive)', /'acp-events': require\('\.\/acp-events\.js'\)/.test(read('src/server/stdout/index.js')) && (so.match(/feedLive\(session, msg\)/g) || []).length === 2 && !/_normalizer\.processLive/.test(so));
   const sv = read('server.js');
   ok('server.js wires noteHarnessModels into the stdout engine and exposes harnessAvailability on app.locals', /noteHarnessModels: \(\.\.\.a\) => noteHarnessModels\(\.\.\.a\)/.test(sv) && /app\.locals\.harnessAvailability = harnessAvailability/.test(sv));
   const ce = read('src/server/cli-env.js');

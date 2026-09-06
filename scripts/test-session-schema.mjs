@@ -20,6 +20,7 @@ const FILES = [
   'server.js', 'src/ws-handler.js', 'src/ws-create.js', 'src/normalizers.js', // normalizers: the rebuild gate writes _rebuildQueue/_rebuildPromise (2.369.16)
   'src/routes/sessions.js', 'src/agent-routes.js', 'src/usage-routes.js',
   ...fs.readdirSync(path.join(REPO, 'src/server')).filter((f) => f.endsWith('.js')).map((f) => 'src/server/' + f),
+  ...fs.readdirSync(path.join(REPO, 'src/server/stdout')).filter((f) => f.endsWith('.js')).map((f) => 'src/server/stdout/' + f), // S5: the per-protocol stdout consumers (owner 'stdout')
 ];
 
 const writes = new Map(); // field → [file, ...]
