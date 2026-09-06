@@ -784,11 +784,17 @@ function extractCodexThreadMeta(filePath) {
           || '',
         );
         if (explicitName) name = explicitName;
-        forkedFromId = msg.payload?.forked_from_id || forkedFromId;
         if (Array.isArray(msg.payload?.forked_from)) forkedFromChain = msg.payload.forked_from;
         if ((msg.payload?.id || '') === threadId) {
           const p = msg.payload || {};
           const ord = (v) => (Number.isInteger(v) && v >= 0 ? v : null);
+          // forked_from_id from the thread's OWN meta only, like the boundary
+          // below: a sub-agent rollout copies its PARENT's session_meta at
+          // line 1 (29/79 local rollouts), whose forked_from_id names the
+          // GRANDPARENT — "last wins" paired the child's own boundary ordinal
+          // with the grandparent's id, so a merged fork read cut the wrong
+          // file (round-3 fixture: two real rollouts, byte copies).
+          if (!forkedFromId && p.forked_from_id) forkedFromId = p.forked_from_id;
           if (forkedFromOrdinal === null) {
             forkedFromOrdinal = ord(p.forked_from_ordinal_exclusive);
             const hb = p.history_base && typeof p.history_base === 'object' ? p.history_base : null;

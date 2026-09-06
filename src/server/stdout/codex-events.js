@@ -57,6 +57,13 @@ function create({ engine, deliverRef }) {
             : null;
           const sourceMeta = payload.source ? normalizeCodexSource(payload.source) : null;
           let changed = false;
+          // A mid-life thread id change (thread/fork, a resume that minted a
+          // new id) re-points the session here AND the normalizer's ledger-key
+          // default: the SAME wrapper_meta record reaches it through feedLive
+          // below (codex-message-manager._adoptThreadId replaces on
+          // wrapper_meta.threadId, constructor default or not), in stream
+          // order — a rebuild in flight queues it behind the history, which a
+          // direct assignment into the normalizer from here would not honour.
           if (nextThreadId && session.backendSessionId !== nextThreadId) {
             if (session.backendSessionId) {
               const prev = session.forkedFrom || [];

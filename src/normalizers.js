@@ -12,9 +12,12 @@ const NORMALIZERS = Object.fromEntries(Object.values(HARNESSES).map((h) => [h.id
 
 // opts (optional, harness-neutral): { threadId } — the READER's conversation
 // id for the transcript it opened. The codex normalizer keys its per-message
-// ledger meta by it (`cx:<thread>:<cumulative>`); a merged codex read carries
-// fork-ancestry / parent-provenance session_metas that must never re-point
-// that key, and a gap slab carries no session_meta at all. Normalizers that
+// ledger meta (`cx:<thread>:<cumulative>`) by each record's own FILE (a merged
+// read tags records with the rollout they came from — codex-session-store.
+// tagRecordThread) and uses this id as the DEFAULT for provenance-less records
+// (gap slabs carry no session_meta at all; the live buffer); the wrapper's
+// wrapper_meta.threadId re-points that default on a mid-life thread/fork, and
+// fork-ancestry / parent-provenance session_metas never do. Normalizers that
 // have no use for it ignore the extra argument.
 function createMessageManager(backend, sessionId, opts) {
   const Ctor = NORMALIZERS[backend || 'claude'];
@@ -74,7 +77,7 @@ let rebuildChain = Promise.resolve();
 function rebuildHistory(session, sessionId, records, { budgetMs, onProgress } = {}) {
   if (session._rebuildPromise) return session._rebuildPromise;
   const opHandlers = [...(session._normalizer?.listeners || [])];
-  const mm = createMessageManager(session.backend || 'claude', sessionId, { threadId: session.backendSessionId || session.claudeSessionId || null }); // pin the rendered conversation's id (codex ledger key; null before a fresh thread is adopted)
+  const mm = createMessageManager(session.backend || 'claude', sessionId, { threadId: session.backendSessionId || session.claudeSessionId || null }); // the rendered conversation's id = the codex ledger-key DEFAULT (file-tagged records key by their own file; wrapper_meta re-points it; null before a fresh thread is adopted)
   for (const h of opHandlers) mm.onOp(h);
   session._normalizer = mm;
   session._normEpoch = Date.now();

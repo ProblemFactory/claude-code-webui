@@ -327,9 +327,57 @@ const ok = (n, c, e) => { if (c) { pass++; console.log('  ✓ ' + n); } else { f
   prec2.processLive({ type: 'wrapper_meta', payload: { threadId: 'live' } }, false);
   ok('wrapper_meta.threadId (the live wrapper\'s own record) replaces — the file currently being written', prec2._threadId === 'live');
   const pinnedLive = new CodexMessageManager('t10f', { threadId: 'pin' });
-  pinnedLive.processLive({ type: 'wrapper_meta', payload: { threadId: 'other' } }, false);
   pinnedLive.processLive({ type: 'session_meta', payload: { id: 'other2' } }, false);
-  ok('a constructor thread id is never replaced by any record', pinnedLive._threadId === 'pin');
+  pinnedLive.processLive({ type: 'token_usage_record', payload: { thread_id: 'other3', response_id: 'resp_y', usage: { total_tokens: 1 } } }, false);
+  ok('a constructor thread id is the DEFAULT: session_meta / token_usage_record ids (ancestry, parent provenance, copied records) never replace it', pinnedLive._threadId === 'pin');
+  pinnedLive.processLive({ type: 'wrapper_meta', payload: { threadId: 'other' } }, false);
+  ok("…but the wrapper's OWN wrapper_meta.threadId re-points it — the file the wrapper writes NOW (a mid-life thread/fork); the pin is a default, not a lock (round 3)", pinnedLive._threadId === 'other');
+
+  // LIVE RE-POINT SEQUENCE (round 3, minor): codex-events.js re-points
+  // session.backendSessionId on wrapper_meta and pushes the old id onto
+  // forkedFrom, but a normalizer pinned at rebuild to the OLD id kept minting
+  // cx:<old>:… for every later token_count while the walker keyed the NEW file
+  // (cx:old-thread-x:4242 vs cx:new-thread-y:4242). The wrapper's thread/fork
+  // result records session_meta{id:new} then wrapper_meta{threadId:new}
+  // (codex-chat-wrapper updateMetaFromThread), so the SAME record that
+  // re-points the session re-points the normalizer, in stream order.
+  {
+    const OLD = '01a07400-0000-7000-8000-00000000000a', NEW = '01a07400-0000-7000-8000-00000000000b';
+    const U = (i, c, o, r, t) => ({ input_tokens: i, cached_input_tokens: c, cache_write_input_tokens: 0, output_tokens: o, reasoning_output_tokens: r, total_tokens: t });
+    const R2 = (type, payload, ts) => ({ timestamp: ts, type, payload });
+    const oldHalf = [
+      R2('session_meta', { id: OLD, cwd: '/home/u/proj', cli_version: '0.153.4' }, '2026-09-06T10:00:00.000Z'),
+      R2('turn_context', { turn_id: 't-old', model: 'gpt-6-astra', effort: 'high' }, '2026-09-06T10:00:01.000Z'),
+      R2('response_item', { type: 'message', id: 'msg_old', role: 'assistant', content: [{ type: 'output_text', text: 'before the fork' }] }, '2026-09-06T10:00:02.000Z'),
+      R2('event_msg', { type: 'token_count', info: { total_token_usage: U(4000, 0, 242, 0, 4242), last_token_usage: U(4000, 0, 242, 0, 4242), model_context_window: 828400 } }, '2026-09-06T10:00:03.000Z'),
+    ];
+    const newHalf = [
+      R2('session_meta', { id: NEW, forked_from_id: OLD, cwd: '/home/u/proj', cli_version: '0.153.4' }, '2026-09-06T10:01:00.000Z'),
+      R2('turn_context', { turn_id: 't-new', model: 'gpt-6-astra', effort: 'high' }, '2026-09-06T10:01:01.000Z'),
+      R2('response_item', { type: 'message', id: 'msg_new', role: 'assistant', content: [{ type: 'output_text', text: 'after the fork' }] }, '2026-09-06T10:01:02.000Z'),
+      R2('event_msg', { type: 'token_count', info: { total_token_usage: U(4000, 0, 242, 0, 4242), last_token_usage: U(4000, 0, 242, 0, 4242), model_context_window: 828400 } }, '2026-09-06T10:01:03.000Z'),
+    ];
+    // the live stream as the wrapper emits it: wrapper_meta right after each session_meta
+    const stream = [oldHalf[0], R2('wrapper_meta', { threadId: OLD, model: 'gpt-6-astra' }, oldHalf[0].timestamp), ...oldHalf.slice(1), newHalf[0], R2('wrapper_meta', { threadId: NEW, model: 'gpt-6-astra' }, newHalf[0].timestamp), ...newHalf.slice(1)];
+    const keysOf = (mm) => mm._ledgerKeys.map((k) => k.rid);
+    for (const [label, mm] of [['pinned at rebuild to the OLD id', new CodexMessageManager('t10g', { threadId: OLD })], ['fresh spawn (no pin)', new CodexMessageManager('t10h')]]) {
+      for (const r of stream) mm.processLive(r);
+      const before = mm.messages.find((m) => JSON.stringify(m.content).includes('before the fork')), after = mm.messages.find((m) => JSON.stringify(m.content).includes('after the fork'));
+      ok(`live re-point, ${label}: the message before the fork keys cx:<old>:4242, the one after keys cx:<new>:4242 (same cumulative, two files), both minted once, default now = new`, before?.meta?.requestId === `cx:${OLD}:4242` && after?.meta?.requestId === `cx:${NEW}:4242` && keysOf(mm).join(',') === `cx:${OLD}:4242,cx:${NEW}:4242` && mm._threadId === NEW, JSON.stringify({ before: before?.meta?.requestId, after: after?.meta?.requestId, keys: keysOf(mm), tid: mm._threadId }));
+    }
+    // the walker over the two files the two halves land in
+    const { runUsageWalk } = require(REPO + '/src/usage-walker.js');
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-cxrepoint-'));
+    const cxDir = path.join(home, '.codex', 'sessions', '2026', '09', '06');
+    fs.mkdirSync(cxDir, { recursive: true });
+    fs.writeFileSync(path.join(cxDir, `rollout-2026-09-06T10-00-00-${OLD}.jsonl`), oldHalf.map((r) => JSON.stringify(r)).join('\n') + '\n');
+    fs.writeFileSync(path.join(cxDir, `rollout-2026-09-06T10-01-00-${NEW}.jsonl`), newHalf.map((r) => JSON.stringify(r)).join('\n') + '\n');
+    const evs = runUsageWalk({ home, codexSessionsDir: path.join(home, '.codex', 'sessions'), cursorFile: path.join(home, 'cursor.json') }).events.map((l) => JSON.parse(l));
+    ok('walker: the same cumulative total in two files is TWO rids (cx:<old>:4242, cx:<new>:4242) — the set the re-pointed normalizer minted', evs.map((e) => e.rid).sort().join(',') === [`cx:${OLD}:4242`, `cx:${NEW}:4242`].sort().join(','), JSON.stringify(evs.map((e) => e.rid)));
+    fs.rmSync(home, { recursive: true, force: true });
+    const ce = fs.readFileSync(REPO + '/src/server/stdout/codex-events.js', 'utf8');
+    ok('WIRING: codex-events re-points session.backendSessionId on wrapper_meta.threadId and hands the SAME record to feedLive (the normalizer follows it in stream order — no direct re-pin from the consumer)', /msg\.type === 'wrapper_meta'\s*\?\s*payload\.threadId/.test(ce) && /session\.backendSessionId = nextThreadId/.test(ce) && /feedLive\(session, msg\)/.test(ce) && !/_normalizer\._threadId/.test(ce));
+  }
   // WIRING: every reader that has the thread id passes it (a normalizer fix
   // with no consumer is dead — 2.355.0)
   const nz = fs.readFileSync(REPO + '/src/normalizers.js', 'utf8');
@@ -409,6 +457,88 @@ const ok = (n, c, e) => { if (c) { pass++; console.log('  ✓ ' + n); } else { f
 {
   const cv = require('node:fs').readFileSync(REPO + '/src/lib/chat-view.js', 'utf8');
   ok('popup appends Model / Effort from the ledger event when meta.model / meta.effort are empty', /if \(!meta\.model && r\.model\) addAsyncRow\(t\('Model'\), r\.model\)/.test(cv) && /if \(!meta\.effort && r\.effort\) addAsyncRow\(t\('Effort'\), r\.effort\)/.test(cv));
+}
+
+// ── MERGED READ = per-RECORD file provenance (round-3 verifier, real data):
+// CodexSessionMessages prepends the fork PARENT's records (native 0.153 forks:
+// session_meta.forked_from_id + forked_from_ordinal_exclusive, cut at the
+// boundary; the wrapper's forkedFrom chain, whole) before the thread's own, so
+// a reader-wide thread id keyed every parent-half message `cx:<child>:<parent
+// cumulative>` — a key the ledger never minted for that thread and sometimes a
+// REAL child event's key (byte copies of two real rollouts: parentCorrect 0/30,
+// two parent messages resolving to CHILD ledger events; base e54b41e8 had
+// 28/30). Fixture = scripts/fixtures/codex-native-fork/: verbatim cuts of the
+// two real 0.153.4 rollouts (a sub-agent + its own sub-agent; ids, numbers,
+// ordinals, timestamps and response ids verbatim; paths/instructions/long text
+// anonymised) with `forked_from_ordinal_exclusive: 53` INJECTED into the
+// child's own session_meta (marked in the record) so the parent is a
+// Referenced-fork ancestor cut at parent ordinal 53. The walker's ground truth
+// stays per FILE — parent-half keys must be the parent file's rids.
+{
+  const fs = require('node:fs'), os = require('node:os');
+  const PARENT = '01a072d7-92f1-7c20-987b-a96af83c2e76', CHILD = '01a072d7-eeb4-73c3-b30f-486701a44580';
+  const FIX = path.join(REPO, 'scripts', 'fixtures', 'codex-native-fork');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-cxfork-'));
+  const cxDir = path.join(home, '.codex', 'sessions', '2026', '09', '05');
+  fs.mkdirSync(cxDir, { recursive: true });
+  for (const f of fs.readdirSync(FIX)) fs.copyFileSync(path.join(FIX, f), path.join(cxDir, f));
+  // adapters/codex binds CODEX_SESSIONS_DIR from os.homedir() at require time:
+  // HOME points at the fixture home for the FIRST require of the store only,
+  // then is restored (the corpus smoke below reads the real home).
+  ok('adapters/codex is not loaded before the fixture home is bound (CODEX_SESSIONS_DIR is a require-time constant)', !Object.keys(require.cache).some((k) => /[\\/]adapters[\\/]codex\.js$/.test(k)));
+  const realHome = process.env.HOME;
+  process.env.HOME = home;
+  let ST;
+  try { ST = require(REPO + '/src/codex-session-store.js'); } finally { process.env.HOME = realHome; }
+  const { runUsageWalk } = require(REPO + '/src/usage-walker.js');
+  const walkRids = new Map(); // sid → Set(rid)
+  for (const l of runUsageWalk({ home, codexSessionsDir: path.join(home, '.codex', 'sessions'), cursorFile: path.join(home, 'cursor.json') }).events) {
+    const e = JSON.parse(l);
+    if (!walkRids.has(e.sid)) walkRids.set(e.sid, new Set());
+    walkRids.get(e.sid).add(e.rid);
+  }
+  const P_RIDS = [20614, 41430, 67165, 2994636].map((n) => `cx:${PARENT}:${n}`), C_RIDS = [20674, 41391, 2989029].map((n) => `cx:${CHILD}:${n}`);
+  const sorted = (a) => [...a].sort().join(',');
+  ok('walker ground truth is per FILE: 4 parent + 3 child rids (cumulative totals verbatim from the real rollouts)', sorted(walkRids.get(PARENT) || []) === sorted(P_RIDS) && sorted(walkRids.get(CHILD) || []) === sorted(C_RIDS), JSON.stringify([...walkRids].map(([k, v]) => [k, [...v]])));
+  ok('the injected boundary makes the parent a Referenced-fork ancestor cut at parent ordinal 53 (the parent\'s own sub-agent ancestry ends there: no boundary of its own)', JSON.stringify(ST.resolveCodexForkAncestry(CHILD, [])) === JSON.stringify([{ id: PARENT, untilOrdinal: 53 }]), JSON.stringify(ST.resolveCodexForkAncestry(CHILD, [])));
+
+  // Drive the merged read record by record (what convertHistory does) and
+  // remember which FILE created each message — the verifier's measurement.
+  const drive = (session, label, pin) => {
+    const recs = new ST.CodexSessionMessages(session, label, {}).raw();
+    const mm = new CodexMessageManager(label, { threadId: pin });
+    const origin = new Map(), seen = new Set();
+    for (const r of recs) {
+      mm._processRecord(r, false);
+      for (const m of mm.messages) if (!seen.has(m.id)) { seen.add(m.id); origin.set(m.id, ST.recordThreadOf(r)); }
+    }
+    mm._finalizeStreaming(false, { includeReasoning: true });
+    const s = { parentMsgs: 0, parentCorrect: 0, parentToChild: 0, parentNowhere: 0, childMsgs: 0, childCorrect: 0, childBad: 0, untagged: recs.filter((r) => !ST.recordThreadOf(r)).length };
+    for (const m of mm.messages) {
+      const rid = m.meta?.requestId; if (!rid) continue;
+      if (origin.get(m.id) === PARENT) { s.parentMsgs++; if (walkRids.get(PARENT).has(rid)) s.parentCorrect++; else if (walkRids.get(CHILD).has(rid)) s.parentToChild++; else s.parentNowhere++; }
+      else { s.childMsgs++; if (walkRids.get(CHILD).has(rid)) s.childCorrect++; else s.childBad++; }
+    }
+    const minted = (tid) => mm._ledgerKeys.filter((k) => k.tid === tid).map((k) => k.rid);
+    return { recs, mm, s, minted };
+  };
+  // ① the native fork — no session state at all, the reader resolves the ancestry from the files
+  const nf = drive({ backend: 'codex', backendSessionId: CHILD, buffer: '' }, 'nf', CHILD);
+  ok('every merged record carries its FILE as provenance (parent-half tagged PARENT, child-half CHILD; nothing untagged; the tag is non-enumerable — never serialized)', nf.s.untagged === 0 && nf.recs.some((r) => ST.recordThreadOf(r) === PARENT) && nf.recs.some((r) => ST.recordThreadOf(r) === CHILD) && nf.recs.every((r) => !Object.keys(r).includes('__threadId')) && !JSON.stringify(nf.recs).includes('__threadId'), JSON.stringify(nf.s));
+  ok(`native fork: EVERY parent-half message keys to a PARENT-file ledger event — parentCorrect ${nf.s.parentCorrect}/${nf.s.parentMsgs} (the absolute pin: 0/N), zero parent→child collisions, zero nowhere`, nf.s.parentMsgs > 0 && nf.s.parentCorrect === nf.s.parentMsgs && nf.s.parentToChild === 0 && nf.s.parentNowhere === 0, JSON.stringify(nf.s));
+  ok(`native fork: every child-half message keys to a CHILD-file ledger event — ${nf.s.childCorrect}/${nf.s.childMsgs}`, nf.s.childMsgs > 0 && nf.s.childCorrect === nf.s.childMsgs && nf.s.childBad === 0, JSON.stringify(nf.s));
+  ok('native fork: parent-half MINTED keys ⊆ walker rids of the parent file = exactly the three below the boundary (the parent\'s post-fork response 2994636 is never minted — the parent\'s alone)', sorted(nf.minted(PARENT)) === sorted(P_RIDS.slice(0, 3)), JSON.stringify(nf.minted(PARENT)));
+  ok('native fork: child-half MINTED keys == walker rids of the child file (whole file); 6 keys minted, each once', sorted(nf.minted(CHILD)) === sorted(C_RIDS) && nf.mm._ledgerKeys.length === 6, JSON.stringify(nf.minted(CHILD)));
+  ok('native fork: every stamped message key is a minted key; no key under any third thread id', nf.mm.messages.filter((m) => m.meta?.requestId).every((m) => nf.mm._ledgerKeys.some((k) => k.rid === m.meta.requestId)) && nf.mm._ledgerKeys.every((k) => k.tid === PARENT || k.tid === CHILD));
+  // ② the wrapper-chain shape (session.forkedFrom names a superseded incarnation, merged WHOLE):
+  //    the same two files with the roles swapped so the ancestor carries NO native boundary
+  const wc = drive({ backend: 'codex', backendSessionId: PARENT, forkedFrom: [CHILD], buffer: '' }, 'wc', PARENT);
+  ok('wrapper chain (whole-file ancestor): ancestor-half minted keys == the walker\'s rids for the ancestor file; own-half == own file; 7 keys, every stamped key minted, no cross-file key', sorted(wc.minted(CHILD)) === sorted(C_RIDS) && sorted(wc.minted(PARENT)) === sorted(P_RIDS) && wc.mm._ledgerKeys.length === 7 && wc.mm.messages.filter((m) => m.meta?.requestId).every((m) => wc.mm._ledgerKeys.some((k) => k.rid === m.meta.requestId)), JSON.stringify({ c: wc.minted(CHILD), p: wc.minted(PARENT), s: wc.s }));
+  // ③ a gap slab / tail-only read of the child file ALONE (no provenance tags — the reader's id is the default)
+  const bareChild = new CodexMessageManager('gap', { threadId: CHILD });
+  for (const line of fs.readFileSync(path.join(cxDir, fs.readdirSync(cxDir).find((f) => f.includes(CHILD))), 'utf8').split('\n')) { if (line) bareChild._processRecord(JSON.parse(line), false); }
+  ok('provenance-less records (gap slab / tail-only read) key by the reader\'s default id — the child file alone mints exactly the walker\'s child rids', sorted(bareChild._ledgerKeys.map((k) => k.rid)) === sorted(C_RIDS) && bareChild._ledgerKeys.every((k) => k.tid === CHILD), JSON.stringify(bareChild._ledgerKeys));
+  fs.rmSync(home, { recursive: true, force: true });
 }
 
 // ── CORPUS SMOKE (verifier item 4): when this machine has ~/.codex/sessions,

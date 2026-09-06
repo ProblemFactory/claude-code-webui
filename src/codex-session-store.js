@@ -215,9 +215,39 @@ function cutRecordsAtOrdinal(records, untilOrdinal) {
   return (records || []).filter((r) => !Number.isInteger(r?.ordinal) || r.ordinal < untilOrdinal);
 }
 
+/** Per-record FILE provenance for a merged read. CodexSessionMessages
+ *  concatenates several rollouts (fork ancestry + the thread's own file), so a
+ *  record's ledger thread id is a fact about the FILE it came from — never
+ *  about the reader's session: the usage walker keys `cx:<file uuid>:<cum>`
+ *  per FILE, and a reader-wide id keyed every parent-half token_count of a
+ *  merged fork read `cx:<child>:…` (0/30 parent messages matched the parent's
+ *  ledger; two collided with real child events — round-3 verifier, real
+ *  rollouts). The tag is NON-ENUMERABLE: it never reaches JSON.stringify
+ *  (fingerprints, wire payloads, caches) and survives the sort copy below.
+ *  Buffer (live) records are deliberately left untagged — they follow the
+ *  normalizer's in-stream default (wrapper_meta.threadId = the file the
+ *  wrapper writes), see codex-message-manager._adoptThreadId. */
+const RECORD_THREAD_KEY = '__threadId';
+function tagRecordThread(records, threadId) {
+  if (!threadId) return records;
+  const tid = String(threadId);
+  for (const r of records || []) {
+    if (r && typeof r === 'object') Object.defineProperty(r, RECORD_THREAD_KEY, { value: tid, enumerable: false, configurable: true, writable: true });
+  }
+  return records;
+}
+function recordThreadOf(record) {
+  return record && typeof record === 'object' && typeof record[RECORD_THREAD_KEY] === 'string' && record[RECORD_THREAD_KEY] ? record[RECORD_THREAD_KEY] : null;
+}
+
 function sortRecords(records) {
   return records
-    .map((record, idx) => ({ ...record, __idx: idx, __ts: Date.parse(record.timestamp || '') || 0 }))
+    .map((record, idx) => {
+      const copy = { ...record, __idx: idx, __ts: Date.parse(record.timestamp || '') || 0 };
+      const tid = recordThreadOf(record);
+      if (tid) Object.defineProperty(copy, RECORD_THREAD_KEY, { value: tid, enumerable: false, configurable: true, writable: true }); // the spread drops non-enumerables
+      return copy;
+    })
     .sort((a, b) => (a.__ts - b.__ts) || (a.__idx - b.__idx));
 }
 
@@ -291,11 +321,15 @@ class CodexSessionMessages {
     // which the boundary then (correctly) rejects: bounded, never wrong records.
     const ancestry = resolveCodexForkAncestry(threadId, this._session?.forkedFrom || []);
     let history = [];
+    // Every file's records are tagged with THAT file's thread id (tagRecordThread)
+    // — the normalizer keys each response's ledger meta by the record's own
+    // file, exactly as the walker does; the reader's id is only the default
+    // for provenance-less records (the live buffer below).
     for (const { id: forkId, untilOrdinal } of ancestry) {
-      const forkHistory = cutRecordsAtOrdinal(parseCodexSessionJsonl(forkId), untilOrdinal);
+      const forkHistory = tagRecordThread(cutRecordsAtOrdinal(parseCodexSessionJsonl(forkId), untilOrdinal), forkId);
       if (forkHistory.length) history = mergeCodexRecords(history, forkHistory);
     }
-    const currentHistory = threadId ? parseCodexSessionJsonl(threadId) : [];
+    const currentHistory = threadId ? tagRecordThread(parseCodexSessionJsonl(threadId), threadId) : [];
     if (currentHistory.length) history = mergeCodexRecords(history, currentHistory);
     const live = parseBufferRecords(this._session?.buffer || '');
     this._all = mergeCodexRecords(history, live);
@@ -439,4 +473,7 @@ module.exports = {
   parseCodexSessionJsonl,
   resolveCodexForkAncestry,
   cutRecordsAtOrdinal,
+  tagRecordThread,
+  recordThreadOf,
+  RECORD_THREAD_KEY,
 };

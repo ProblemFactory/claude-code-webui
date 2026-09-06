@@ -196,9 +196,14 @@ function mergeToolInput(existingInput, extraInput) {
 }
 
 class CodexMessageManager {
-  // opts.threadId = the READER's thread id (the rollout being rendered):
-  // CodexSessionMessages / transcript-service / the view-only attach know
-  // which file they read — a pinned id is never re-pointed by any record.
+  // opts.threadId = the READER's thread id (the rollout being rendered) — the
+  // DEFAULT ledger thread id for records that carry no file provenance (gap
+  // slabs, tail-only reads, the live stream/buffer). A record a reader merged
+  // carries its OWN file's id (`__threadId`, codex-session-store.
+  // tagRecordThread) and keys by that; the wrapper's wrapper_meta.threadId
+  // re-points the default in-stream (a mid-life thread/fork). It is a default,
+  // not a lock — see _adoptThreadId for the precedence and the two real-data
+  // refutations behind it.
   constructor(sessionId, { threadId } = {}) {
     this.sessionId = sessionId;
     this.seq = 0; // rebuild belt only (R0 — ids are content-derived)
@@ -224,17 +229,18 @@ class CodexMessageManager {
     // IDENTICAL token_counts — 369/8490 in the local corpus — which must
     // neither re-stamp nor advance the mark, exactly as the walker dedups).
     this._threadId = threadId ? String(threadId) : null;
-    this._threadIdPinned = !!this._threadId;
+    this._recordThreadId = null; // FILE provenance of the record being processed (merged reads tag each record; null = use the default above)
     this._pendingUsageRecord = null;
     this._usageMark = 0;
-    this._lastRidKey = null;
-    // Every ledger key this normalizer minted, in order ({rid, mid, n} — n =
-    // messages stamped; n=0 is a CARDLESS response: back-to-back token_counts
-    // with no item, an agent_message event with no response_item twin — 215
-    // of 835 responses in one real sub-agent rollout). The corpus gate demands
-    // this set EQUALS the walker's rid set for the same file; a per-message
-    // check alone could never see the cardless ones. Tiny (one small object
-    // per model response); never serialized.
+    this._lastRidKeys = new Map(); // thread id → the last ledger key minted under it (the walker's per-FILE cur.lastRid; a merged read interleaves files)
+    // Every ledger key this normalizer minted, in order ({rid, mid, n, tid} —
+    // n = messages stamped; n=0 is a CARDLESS response: back-to-back
+    // token_counts with no item, an agent_message event with no response_item
+    // twin — 215 of 835 responses in one real sub-agent rollout; tid = the
+    // file the key belongs to). The corpus gate demands this set EQUALS the
+    // walker's rid set for the same file; a per-message check alone could
+    // never see the cardless ones. Tiny (one small object per model
+    // response); never serialized.
     this._ledgerKeys = [];
     this._status = {
       model: '',
@@ -442,6 +448,7 @@ class CodexMessageManager {
     if (!record || typeof record !== 'object') return;
     this._currentTs = toTs(record.timestamp);
     this._currentLine = Number.isFinite(record.__line) ? record.__line : null; // source file line (gap loads only)
+    this._recordThreadId = typeof record.__threadId === 'string' && record.__threadId ? record.__threadId : null; // FILE provenance (a merged read tags each record with the rollout it came from)
     if (record.type === 'turn_context') {
       this._processTurnContext(record, emit);
       return;
@@ -538,9 +545,14 @@ class CodexMessageManager {
     // messages and advance the mark past them for good (45/1143 messages wrong
     // in the local corpus). The walker returns on `rid === cur.lastRid`; so do
     // we — before touching the pending record or the mark.
-    const ridKey = cumTotal != null ? `${this._threadId || ''}:${cumTotal}` : null;
-    if (ridKey && ridKey === this._lastRidKey) return;
-    if (ridKey) this._lastRidKey = ridKey;
+    // THREAD ID = the record's own FILE when the reader tagged it (a merged
+    // fork read: parent-half records key `cx:<parent>:…` exactly as the walker
+    // keys the parent file), else the default (see _adoptThreadId). The
+    // duplicate mark is kept PER thread — the walker's cursor is per file.
+    const tid = this._recordThreadId || this._threadId || null;
+    const ridKey = cumTotal != null ? `${tid || ''}:${cumTotal}` : null;
+    if (ridKey && ridKey === this._lastRidKeys.get(tid || '')) return;
+    if (ridKey) this._lastRidKeys.set(tid || '', ridKey);
     const pend = this._pendingUsageRecord;
     this._pendingUsageRecord = null; // consumed by this token_count, matched or not
     const responseId = pend && pend.responseId && (pend.total == null || lastTotal == null || pend.total === lastTotal) ? pend.responseId : null;
@@ -554,7 +566,7 @@ class CodexMessageManager {
         output_tokens: output,
         ...(reasoning != null ? { reasoning_output_tokens: reasoning } : {}),
       },
-      requestId: this._threadId && cumTotal != null ? `cx:${this._threadId}:${cumTotal}` : null,
+      requestId: tid && cumTotal != null ? `cx:${tid}:${cumTotal}` : null,
       requestIdKind: 'ledger',
       msgId: responseId,
       msgIdKind: responseId ? 'response' : null,
@@ -570,7 +582,7 @@ class CodexMessageManager {
       if (emit) this._emit({ op: 'edit', id: m.id, fields: { meta } });
     }
     this._usageMark = this.messages.length;
-    this._ledgerKeys.push({ rid: meta.requestId, mid: meta.msgId, n: stamped });
+    this._ledgerKeys.push({ rid: meta.requestId, mid: meta.msgId, n: stamped, tid: tid || null });
   }
 
   // Once-per-process breadcrumb for an upstream type this normalizer does not
@@ -582,23 +594,32 @@ class CodexMessageManager {
     try { global.__vsEvent?.('codex-unknown-record:' + String(type || '(untyped)').slice(0, 48), kind); } catch {}
   }
 
-  // The ledger thread id = the conversation being RENDERED (the walker keys a
-  // rollout by its FILE uuid). Precedence, in order:
-  //   · a constructor threadId (the reader knows which file it opened) — never
-  //     replaced by any record;
-  //   · else wrapper_meta.threadId (the wrapper's OWN live record: the file
-  //     it is writing right now; a mid-life thread/fork re-points it) —
-  //     replaces;
-  //   · else the FIRST session_meta of the stream — a sub-agent rollout
-  //     carries its own session_meta at line 0 and the PARENT's at line 1
-  //     (29/79 local rollouts; 79/79 have their own FIRST), and the reader
-  //     prepends fork ANCESTRY session_metas, so "last wins" keyed 11 rollouts
+  // The ledger thread id of a record = the FILE it came from (the walker keys a
+  // rollout by its filename uuid). A record the reader merged carries that as
+  // `__threadId` (codex-session-store.tagRecordThread) and never consults this
+  // default. For PROVENANCE-LESS records (gap slabs, tail-only reads, the live
+  // stream and the wrapper buffer) the DEFAULT is, in order:
+  //   · a constructor threadId — the reader names the file it opened. A
+  //     default, NOT a lock: an absolute pin keyed every parent-half record of
+  //     a merged fork read `cx:<child>:…` (0/30 parent messages matched the
+  //     parent file's ledger, two collided with real child events — round-3
+  //     verifier, byte copies of two real rollouts);
+  //   · wrapper_meta.threadId — the wrapper's OWN record naming the file it
+  //     writes NOW; a mid-life thread/fork re-points it, constructor id or not
+  //     (the live stream after a re-point minted `cx:<old>:…` while the walker
+  //     keyed the new file). codex-events re-points session.backendSessionId
+  //     on the same record and the normalizer follows it IN-STREAM through
+  //     feedLive — ordering-correct across a rebuild queue, which a direct
+  //     re-pin from the consumer would not be;
+  //   · the FIRST session_meta of the stream fills a void only — a sub-agent
+  //     rollout carries its own at line 0 and the PARENT's at line 1 (29/79
+  //     local rollouts; 79/79 have their own FIRST), and a merged read
+  //     prepends fork-ANCESTRY session_metas, so "last wins" keyed 11 rollouts
   //     / 2320 messages to the parent and 64 keys COLLIDED with the parent
-  //     conversation's real ledger events (billing row named the wrong
-  //     conversation's account — adversarial verifier, real data);
-  //   · else token_usage_record.thread_id (fills a void only).
+  //     conversation's real ledger events (round-2 verifier, real data);
+  //   · token_usage_record.thread_id fills a void only.
   _adoptThreadId(id, { replace = false } = {}) {
-    if (this._threadIdPinned || !id) return;
+    if (!id) return;
     if (this._threadId && !replace) return;
     this._threadId = String(id);
   }
@@ -664,7 +685,7 @@ class CodexMessageManager {
 
   _processWrapperMeta(record, emit) {
     const payload = record.payload || {};
-    this._adoptThreadId(payload.threadId, { replace: true }); // the wrapper's own record names the file it writes (arrives before the first token_count)
+    this._adoptThreadId(payload.threadId, { replace: true }); // the wrapper's own record names the file it writes NOW (arrives before the first token_count; re-points the default on a mid-life thread/fork, constructor id or not)
     if (Array.isArray(payload.slashCommands)) {
       this._status.slashCommands = payload.slashCommands.slice(0, 32).map(String);
       // The init card may already exist (boot wrapper_meta / session_meta came
