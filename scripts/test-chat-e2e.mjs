@@ -17,6 +17,8 @@
 // VIBESPACE_CI_OAT secret; fork PRs get no secret and SKIP.
 import { execSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
+import net from 'node:net';
+const freePort = () => new Promise((res, rej) => { const s = net.createServer(); s.once('error', rej); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); }); });
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -31,7 +33,7 @@ let hasCli = false; try { execSync('command -v claude', { stdio: 'ignore', shell
 if (!hasCli) { console.log('SKIP: no claude CLI on PATH'); process.exit(0); }
 
 const MODEL = process.env.VIBESPACE_CI_MODEL || 'claude-haiku-4-5-20251001';
-const PORT = 3995;
+const PORT = await freePort(); // free port (2.369.46): fixed 3995 collided between concurrent gates
 const wt = `/tmp/vs-chat-e2e-${process.pid}`;
 let failed = 0;
 const check = (n, c, e) => { if (c) console.log(`  ✓ ${n}`); else { failed++; console.error(`  ✗ ${n}${e ? '\n    ' + String(e).slice(0, 300) : ''}`); } };

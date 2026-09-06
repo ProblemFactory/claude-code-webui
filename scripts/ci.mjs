@@ -84,7 +84,12 @@ const SUITES = [
 
 function run(name, cmd, args) {
   const s = Date.now();
-  const r = spawnSync(cmd, args, { cwd: repo, stdio: ['ignore', 'pipe', 'pipe'], timeout: 300000, encoding: 'utf-8' });
+  // Headless-chrome suites boot a worktree server + a browser; on a box that is
+  // also running other agents' gates they legitimately take minutes (three
+  // load-only reds on 2026-09-06 at the flat 300s cap). A hang still fails —
+  // the budget is doubled for the browser suites only, never removed.
+  const isBrowserSuite = /test-(client-boot|sidebar-rail|fold-ux|desktop-resume-paging|run-collapse-fold)/.test(String(args.join(' ')));
+  const r = spawnSync(cmd, args, { cwd: repo, stdio: ['ignore', 'pipe', 'pipe'], timeout: isBrowserSuite ? 600000 : 300000, encoding: 'utf-8' });
   const ms = Date.now() - s;
   if (r.status !== 0) {
     console.error(`\n✗ ${name} FAILED (${ms}ms) — release gate is RED, do not push\n`);

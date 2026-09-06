@@ -15,13 +15,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import net from 'node:net';
+const freePort = () => new Promise((res, rej) => { const s = net.createServer(); s.once('error', rej); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); }); });
 const require = createRequire(import.meta.url);
 
 const repo = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CHROME = ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser'].find((p) => fs.existsSync(p));
 if (!CHROME) { console.log('SKIP: no chrome/chromium'); process.exit(0); }
 
-const PORT = 3993, CDP_PORT = 9343;
+// FREE ports (2.369.46): two gates on one box used to collide on 3993/9343 — the
+// suite then waited 5–10 min on someone else's server/chrome and the gate read RED for 'load'.
+const PORT = await freePort(), CDP_PORT = await freePort();
 const wt = `/tmp/vs-client-boot-${process.pid}`;
 let failed = 0;
 const check = (n, c, e) => { if (c) console.log(`  ✓ ${n}`); else { failed++; console.error(`  ✗ ${n}${e ? '\n    ' + e : ''}`); } };
@@ -52,6 +56,8 @@ const cleanup = () => {
   try { fs.rmSync(`/tmp/vs-client-boot-chrome-${process.pid}`, { recursive: true, force: true }); } catch {}
 };
 process.on('exit', cleanup);
+// the gate's timeout kills us with SIGTERM — without these the worktree server + chrome outlive the suite (72 stale /tmp/vs-client-boot-* dirs found on 2026-09-06)
+for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => { cleanup(); process.exit(143); });
 
 for (let i = 0; i < 60; i++) { try { await fetch(`http://127.0.0.1:${PORT}/api/home`); break; } catch { await sleep(250); } }
 

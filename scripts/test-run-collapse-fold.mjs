@@ -3,11 +3,14 @@
 import { execSync, spawn } from 'node:child_process';
 import fs from 'node:fs'; import path from 'node:path';
 import { createRequire } from 'node:module';
+import net from 'node:net';
+const freePort = () => new Promise((res, rej) => { const s = net.createServer(); s.once('error', rej); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); }); });
 const require = createRequire(new URL('../server.js', import.meta.url));
 const repo = process.cwd();
 const CHROME = ['/usr/bin/google-chrome','/usr/bin/google-chrome-stable','/usr/bin/chromium'].find(p=>fs.existsSync(p));
 if (!CHROME) { console.log('SKIP: no chrome'); process.exit(0); }
-const PORT = 3992, CDP = 9342, wt = '/tmp/vs-foldtest', fakeHome = '/tmp/vs-fold-home';
+const PORT = await freePort(), CDP = await freePort(), wt = `/tmp/vs-foldtest-${process.pid}`, fakeHome = `/tmp/vs-fold-home-${process.pid}`, chromeDir = `/tmp/vs-fold-chrome-${process.pid}`; // per-pid + free ports (2.369.46): concurrent gates collided on fixed ports/dirs
+process.on('exit', () => { for (const d of [fakeHome, chromeDir]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} } });
 const sleep = ms => new Promise(r=>setTimeout(r,ms));
 let failed = 0; const check=(n,c,e)=>{ if(c) console.log(`  ✓ ${n}`); else { failed++; console.error(`  ✗ ${n}${e?' — '+e:''}`);} };
 try { execSync(`git worktree remove --force ${wt}`,{stdio:'ignore'}); } catch {}
@@ -17,8 +20,8 @@ fs.symlinkSync(path.join(repo,'node_modules'), path.join(wt,'node_modules'));
 execSync('npm run build',{cwd:wt,stdio:'ignore'});
 fs.mkdirSync(path.join(wt,'data'),{recursive:true}); fs.rmSync(fakeHome,{recursive:true,force:true}); fs.mkdirSync(fakeHome,{recursive:true});
 const srv = spawn(process.execPath,['server.js'],{cwd:wt,env:{...process.env,PORT:String(PORT),HOME:fakeHome,VIBESPACE_SKIP_AGENT_HOOKS:'1'},stdio:'ignore'});
-const chrome = spawn(CHROME,['--headless=new',`--remote-debugging-port=${CDP}`,'--no-first-run','--disable-gpu','--disable-background-timer-throttling','--user-data-dir=/tmp/vs-fold-chrome','about:blank'],{stdio:'ignore'});
-process.on('exit',()=>{ for (const p of [chrome,srv]) { try{p.kill('SIGKILL');}catch{} } try{execSync(`git worktree remove --force ${wt}`,{stdio:'ignore'});}catch{} try{fs.rmSync('/tmp/vs-fold-chrome',{recursive:true,force:true});}catch{} try{fs.rmSync(fakeHome,{recursive:true,force:true});}catch{} });
+const chrome = spawn(CHROME,['--headless=new',`--remote-debugging-port=${CDP}`,'--no-first-run','--disable-gpu','--disable-background-timer-throttling',`--user-data-dir=${chromeDir}`,'about:blank'],{stdio:'ignore'});
+process.on('exit',()=>{ for (const p of [chrome,srv]) { try{p.kill('SIGKILL');}catch{} } try{execSync(`git worktree remove --force ${wt}`,{stdio:'ignore'});}catch{} try{fs.rmSync(chromeDir,{recursive:true,force:true});}catch{} try{fs.rmSync(fakeHome,{recursive:true,force:true});}catch{} });
 for (let i=0;i<40;i++){ try { await fetch(`http://127.0.0.1:${PORT}/api/home`); break; } catch { await sleep(250);} }
 const WebSocket = require('ws');
 let target=null; for (let i=0;i<40&&!target;i++){ try{ const l=await (await fetch(`http://127.0.0.1:${CDP}/json`)).json(); target=l.find(t=>t.type==='page'); }catch{ await sleep(250);} }
