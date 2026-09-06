@@ -130,7 +130,7 @@ console.log('— ③ wiring pins');
   const css = read('public/chat.css');
   ok('.chat-tool-query styled with theme vars only', /\.chat-tool-query \{[\s\S]{0,400}var\(--text-secondary\)/.test(css) && !/\.chat-tool-query \{[^}]*#[0-9a-f]{3}/i.test(css));
   const cv = read('src/lib/chat-view.js');
-  ok('the fold summary line (per-kind counts, "N web searches") is untouched', /t\('\{n\} web searches', \{ n: byKind\.search \}\)/.test(cv));
+  ok('the fold summary line (per-kind counts, "N web searches") is untouched', /\['search', '\{n\} web searches'\]|t\('\{n\} web searches', \{ n: byKind\.search \}\)/.test(cv + read('src/lib/chat-run-summary.js')));
   const cm = read('src/codex-message-manager.js');
   ok('the codex normalizer renders through the same PURE module', /require\('\.\/search-card'\)/.test(cm) && /renderSearchOutput\(\{ query, action, results: event\.results, error: event\.error \}\)/.test(cm));
   ok("the 0.153.4 carrier (event_msg item_completed Extension web.search) is dispatched BEFORE the generic item_completed skip into the same web-search path", /if \(type === 'item_completed'\) return this\._processItemCompleted\(event, emit\);/.test(cm) && /it\.kind === 'web\.search'[\s\S]{0,200}_processWebSearchEvent\(\{ type: 'web_search_end', call_id: it\.id/.test(cm));

@@ -1861,6 +1861,7 @@ class ChatView {
           // fold opened to watch live output snapped shut the moment the
           // result landed).
           if (this._runExpanded?.has(oldEl)) this._runExpanded.add(newEl);
+          if (this._runStickyOpen?.has(oldEl)) this._runStickyOpen.add(newEl); // the user's deliberate-open mark rides the swap too (verifier: a full re-render otherwise let the pinned auto-refold snap it shut)
           oldEl.replaceWith(newEl);
           this._elements.set(id, newEl);
           this._renderers.addWrapToggles(newEl);
@@ -2983,6 +2984,7 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
       if (msg.ts) newEl.dataset.ts = msg.ts;
       if (oldEl.dataset.line) newEl.dataset.line = oldEl.dataset.line;
       if (this._runExpanded?.has(oldEl)) this._runExpanded.add(newEl);
+          if (this._runStickyOpen?.has(oldEl)) this._runStickyOpen.add(newEl); // the user's deliberate-open mark rides the swap too (verifier: a full re-render otherwise let the pinned auto-refold snap it shut)
       oldEl.replaceWith(newEl);
       this._elements.set(id, newEl);
       this._renderers.addWrapToggles(newEl);
