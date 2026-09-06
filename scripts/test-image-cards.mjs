@@ -277,7 +277,6 @@ const IMAGEVIEW_0153_JSONL = `
     { type: 'event_msg', payload: { type: 'item_completed', thread_id: 'th', turn_id: 'tu', item: { type: 'Reasoning', id: 'rs_0f70caa71c94cdcc016a9c7b15dd1087d0a867cd8e68931709', summary_text: [], raw_content: [] }, started_at_ms: 1788640021881, completed_at_ms: 1788640032584 } },
     { type: 'event_msg', payload: { type: 'item_completed', thread_id: 'th', turn_id: 'tu', item: { type: 'UserMessage', id: '01a07384-c7bd-7803-8165-9becb8b12a3c', client_id: '1788642582283-pvnt1d', content: [{ type: 'text', text: '…', text_elements: [] }] }, started_at_ms: 1788644476861, completed_at_ms: 1788644476861 } },
     { type: 'event_msg', payload: { type: 'item_completed', thread_id: 'th', turn_id: 'tu', item: { type: 'AgentMessage', id: 'msg_0f70caa71c94cdcc016a9c7aef9c4887d087009d07f2120212', content: [{ type: 'Text', text: '…' }], phase: 'commentary' }, started_at_ms: 1788639983635, completed_at_ms: 1788639987328 } },
-    { type: 'event_msg', payload: { type: 'item_completed', thread_id: 'th', turn_id: 'tu', item: { type: 'SubAgentActivity', id: 'call_nkmsaSMNBhRj6QRL4PtSc878', kind: 'started', agent_thread_id: '01a0779d-945f-7f42-8e3c-2e1c5ba43849', agent_path: '/root/usecases_v4' }, started_at_ms: 1788713210993, completed_at_ms: 1788713210993 } },
     { type: 'event_msg', payload: { type: 'item_completed', thread_id: 'th', turn_id: 'tu', item: { type: 'CommandExecution', id: 'exec-9b5911e2-85ef-4eb8-853d-da3f92417940', process_id: '8847', command: ['/usr/bin/zsh', '-lc', 'ls -lh'], cwd: 'file:///home/u/w/proj', status: 'failed', exit_code: 2 }, started_at_ms: 1788716114037, completed_at_ms: 1788716114037 } },
     { type: 'event_msg', payload: { type: 'item_started', item: { type: 'CommandExecution', id: 'exec-9b5911e2-85ef-4eb8-853d-da3f92417940' } } },
   ]);
@@ -285,7 +284,7 @@ const IMAGEVIEW_0153_JSONL = `
   // (Extension web.search / image_gen and SubAgentActivity completed are the
   // OTHER routed carriers of the same allowlist — they DO render, by design,
   // and test-codex-history owns them; they have no place in a no-card control.)
-  ok('other item types (Reasoning/UserMessage/AgentMessage/SubAgentActivity started/CommandExecution, started+completed) stay SKIPPED — no cards', noneMsgs.length === 0, noneMsgs.map((m) => m.role));
+  ok('other item types (Reasoning/UserMessage/AgentMessage/CommandExecution, started+completed) stay SKIPPED — no cards (SubAgentActivity renders collab activity rows since B-7473 and is owned by test-codex-subagents)', noneMsgs.length === 0, noneMsgs.map((m) => m.role));
   ok('…and none of them is reported as an unknown record', !seenEv.some((e) => /codex-unknown-record/.test(e)), seenEv);
   const cmm = read('src/codex-message-manager.js');
   // ONE ROUTER: item_completed goes through _processItemCompleted (the explicit
