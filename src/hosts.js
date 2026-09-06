@@ -19,7 +19,7 @@ const crypto = require('crypto');
 const { REMOTE_PRELUDE, nodeFinder } = require('./remote-shell.js');
 const { execFile } = require('child_process');
 const { claimJsonls, cwdToProjectDir } = require('./session-store');
-const { nameFromUserLine, interpretDiscoveryLines, synthesizeDiscoveryLines, isZstPath, isZstBuffer } = require('./discovery-facts');
+const { nameFromUserLine, interpretDiscoveryLines, synthesizeDiscoveryLines, isZstPath, isZstBuffer, ZSTD_MAGIC } = require('./discovery-facts');
 const { classifyPrivateKey } = require('./ssh-key-format');
 
 const SSH_BASE_OPTS = [
@@ -1133,15 +1133,49 @@ class HostManager {
     // a changed path invalidates the slot (full refetch), and a compressed
     // remote (or an already-compressed cache file) is NEVER delta-appended —
     // recompression rewrites the whole file, it does not append plain bytes.
-    const cacheIsCompressed = () => {
+    // HEALING A SLOT THE PRE-FIX CODE ALREADY CORRUPTED (same batch, review
+    // follow-up): provenance only protects slots THIS code wrote. A meta
+    // stamped before the field exists carries no remotePath, and reading that
+    // as "same file" is vacuously true — so an ALREADY spliced cache (plain
+    // prefix + the twin's bytes, stamped complete) kept passing the size/mtime
+    // short-circuit and was served forever, because a stopped thread never
+    // changes again. A meta WITHOUT provenance is therefore NOT valid: refetch
+    // whole once and rewrite it. And never take the meta's word about the
+    // BYTES either — a hybrid is visible in the file itself: the head tells
+    // plain from compressed, and an append always lands its foreign bytes at
+    // the TAIL. A plain transcript is UTF-8 JSON text, so neither marker can
+    // occur there legitimately: a raw NUL is invalid JSON (it must be escaped),
+    // and the frame magic's first two bytes `28 b5` are invalid UTF-8 (0xb5 is
+    // a continuation byte and '(' is not a lead byte) — no false positives, and
+    // a false one would only cost one refetch anyway.
+    const readCacheAt = (pos, len) => {
       let fd;
       try {
         fd = fs.openSync(cachePath, 'r');
-        const b = Buffer.alloc(4);
-        return fs.readSync(fd, b, 0, 4, 0) === 4 && isZstBuffer(b);
-      } catch { return false; } finally { if (fd !== undefined) { try { fs.closeSync(fd); } catch { } } }
+        const b = Buffer.alloc(len);
+        const n = fs.readSync(fd, b, 0, len, pos);
+        return b.subarray(0, Math.max(0, n));
+      } catch { return Buffer.alloc(0); } finally { if (fd !== undefined) { try { fs.closeSync(fd); } catch { } } }
     };
-    const sameRemote = (remotePath) => !meta || !meta.remotePath || meta.remotePath === remotePath;
+    const cacheIsCompressed = () => isZstBuffer(readCacheAt(0, 4));
+    const cacheBytesOk = (remotePath) => {
+      let csize = 0;
+      try { csize = fs.statSync(cachePath).size; } catch { return false; }
+      const head = readCacheAt(0, 4);
+      if (head.length < 4) return false;                                  // nothing to judge ⇒ refetch
+      if (isZstBuffer(head) !== isZstPath(remotePath)) return false;      // the other twin's bytes are in the slot
+      if (isZstPath(remotePath)) return true;                             // compressed: the magic IS the evidence
+      if (/\.jsonl$/i.test(cachePath) && head[0] !== 0x7b && head[0] !== 0x5b) return false; // a JSONL cache starts with a record
+      const tail = readCacheAt(Math.max(0, csize - 4096), Math.min(4096, csize));
+      return !tail.includes(0x00) && tail.indexOf(ZSTD_MAGIC) < 0;
+    };
+    // A pre-provenance meta heals by ONE whole refetch. The single exception:
+    // a remote grown past maxBytes cannot be refetched whole at all (the delta
+    // path is how such a slot got there), and failing "too large" on a
+    // transcript that worked yesterday is a worse answer than the byte check —
+    // there, a verified cache adopts the provenance we just resolved.
+    const sameRemote = (remotePath) => !!meta && meta.remotePath === remotePath;
+    const cacheUsable = (remotePath, size) => cacheBytesOk(remotePath) && (sameRemote(remotePath) || (!!meta && !meta.remotePath && size > maxBytes));
     // CS data-plane: INCREMENTAL slab sync — transcripts are append-only, so
     // when the cache already holds a prefix we fetch ONLY [cachedSize, size)
     // via read-range instead of re-pulling the whole file (the remote-jsonl
@@ -1164,14 +1198,14 @@ class HostManager {
         // size/mtime match would serve the stump FOREVER (the self-heal only
         // triggers when the remote file changes) — and the bytes must have come
         // from the SAME remote file (see the cache-slot note above)
-        if (meta && meta.size === size && meta.mtime === mtime && sameRemote(remotePath) && (() => { try { return fs.statSync(cachePath).size === size; } catch { return false; } })()) return cachePath;
+        if (meta && meta.size === size && meta.mtime === mtime && cacheUsable(remotePath, size) && (() => { try { return fs.statSync(cachePath).size === size; } catch { return false; } })()) return cachePath;
         fs.mkdirSync(dir, { recursive: true });
         let localSize = 0;
         try { localSize = fs.statSync(cachePath).size; } catch { }
         // append-only delta is legal ONLY when the same, uncompressed remote
         // file grew: a different remote path (or either side compressed) means
         // the cached prefix is not a prefix of what we are fetching
-        const canDelta = sameRemote(remotePath) && !isZstPath(remotePath) && !cacheIsCompressed();
+        const canDelta = cacheUsable(remotePath, size) && !isZstPath(remotePath) && !cacheIsCompressed();
         // the cap guards what we FETCH — with a warm prefix that's just the
         // delta, so a transcript growing past maxBytes keeps incrementing
         // instead of suddenly erroring (a 45MB real session was on track)
@@ -1216,8 +1250,8 @@ class HostManager {
     if (!out) return fs.existsSync(cachePath) ? cachePath : null; // gone remotely — keep stale cache if any
     const [sizeMtime, remotePath] = [out.split('\n')[0], out.split('\n')[1]];
     const [size, mtime] = sizeMtime.split(' ').map(Number);
-    // same stump-integrity + same-remote-file checks as the slab path above
-    if (meta && meta.size === size && meta.mtime === mtime && sameRemote(remotePath) && (() => { try { return fs.statSync(cachePath).size === size; } catch { return false; } })()) return cachePath;
+    // same stump-integrity + same-remote-file + cache-bytes checks as the slab path above
+    if (meta && meta.size === size && meta.mtime === mtime && cacheUsable(remotePath, size) && (() => { try { return fs.statSync(cachePath).size === size; } catch { return false; } })()) return cachePath;
     if (size > maxBytes) throw new Error(`remote transcript too large (${(size / 1048576) | 0}MB)`);
     const buf = await this._ssh(h, `cat ${JSON.stringify(remotePath)}`, { timeoutMs: 120000, maxBuffer: maxBytes + 1024, encoding: 'buffer' });
     fs.mkdirSync(dir, { recursive: true });

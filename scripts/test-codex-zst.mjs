@@ -16,6 +16,8 @@
 //   ⑤ descriptor store contract + route/consumer wiring pins
 //   ⑥ ONE remote cache slot, MANY remote files: hosts._fetchRemoteByFind against
 //      a stub device that switches .jsonl ⇄ .jsonl.zst under one conversation id
+//   ⑥b a slot the PRE-FIX code already spliced (hybrid bytes under a meta with no
+//      provenance) heals itself — the remote never has to move
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -341,6 +343,108 @@ console.log('— ⑥ ONE remote cache slot, MANY remote files (codex .jsonl ⇄ 
   reads.length = 0;
   await hm.fetchTranscript('hz', 'codex', TIDR);
   ok(reads.length === 0, 'an unchanged remote file serves the cache with no read at all');
+
+  // ── ⑥b A SLOT THE PRE-FIX CODE ALREADY CORRUPTED (review follow-up)
+  // The provenance fields only protect slots the FIXED code wrote. A meta
+  // stamped before them carries no remotePath, and reading that as "same
+  // file" is vacuously true — so a cache the old delta path had ALREADY
+  // spliced (plain prefix + the compressed twin's bytes, stamped complete)
+  // kept passing the size/mtime short-circuit and was served forever: a
+  // stopped thread never changes again, so nothing ever invalidated it. The
+  // heal must therefore need no movement on the remote side.
+  console.log('— ⑥b a pre-fix hybrid cache heals itself (no provenance in the meta)');
+  const slotOf = (tid) => ({
+    tid,
+    remotePath: `/home/u/.codex/sessions/2026/09/05/rollout-2026-09-05T00-00-00-${tid}.jsonl`,
+    cache: path.join(dataDir, 'remote-jsonl', 'hz', 'codex', `${tid}.jsonl`),
+  });
+  // the pre-fix cache-valid predicate, verbatim (the NEGATIVE CONTROL: it says
+  // "valid" for every fixture below, which is exactly why they were served)
+  const preFixValid = (m, rp, size, mtime, cache) => !!m && m.size === size && m.mtime === mtime
+    && (!m || !m.remotePath || m.remotePath === rp)
+    && (() => { try { return fs.statSync(cache).size === size; } catch { return false; } })();
+  const seedSlot = (s2, bytes, metaObj) => {
+    fs.mkdirSync(path.dirname(s2.cache), { recursive: true });
+    fs.writeFileSync(s2.cache, bytes);
+    fs.writeFileSync(s2.cache + '.meta', JSON.stringify(metaObj));
+  };
+  const tick = rec({ timestamp: '2026-09-05T00:02:00.000Z', type: 'event_msg', payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 7, cached_input_tokens: 0, output_tokens: 2 }, total_token_usage: { total_tokens: 9 } } } });
+
+  {   // plain prefix + the compressed twin's bytes appended (the reported shape)
+    const sl = slotOf('cccccccc-dddd-4eee-8fff-000000000001');
+    const prefix = Buffer.from(rollout(sl.tid, '/work/heal', 'already corrupted slot', 1));
+    const comp = zlib.zstdCompressSync(Buffer.from(rollout(sl.tid, '/work/heal', 'already corrupted slot', 3000)));
+    ok(comp.length > prefix.length, 'fixture: the compressed twin is larger than the cached plain prefix (what the old delta path needed)');
+    const hybrid = Buffer.concat([prefix, comp.subarray(prefix.length)]);   // byte-for-byte what the pre-fix delta wrote
+    seedSlot(sl, hybrid, { size: comp.length, mtime: 2000, fetchedAt: Date.now(), slab: true });   // PRE-FIX meta shape
+    remote.path = sl.remotePath + '.zst'; remote.data = comp; remote.mtime = 2000;
+    ok(hybrid.length === comp.length && !hybrid.equals(comp) && !DF.isZstBuffer(hybrid), 'REPRO: the hybrid has the remote file\'s exact size and mtime, but neither file\'s bytes');
+    ok(preFixValid(JSON.parse(fs.readFileSync(sl.cache + '.meta', 'utf8')), remote.path, comp.length, 2000, sl.cache), 'NEGATIVE CONTROL: the pre-fix predicate calls the hybrid VALID (vacuous sameRemote) — served forever');
+    reads.length = 0;
+    const healed = await hm.fetchTranscript('hz', 'codex', sl.tid);
+    ok(fs.readFileSync(healed).equals(comp), 'a meta WITHOUT provenance is not valid: the slot refetches WHOLE and now holds the remote\'s bytes', reads);
+    ok(metaOf(healed).remotePath === remote.path && metaOf(healed).compressed === true, '…and the rewritten meta carries the provenance the old one lacked');
+    reads.length = 0;
+    await hm.fetchTranscript('hz', 'codex', sl.tid);
+    ok(reads.length === 0 && fs.readFileSync(sl.cache).equals(comp), 'the heal costs exactly ONE refetch — the next poll short-circuits on the HEALED bytes');
+  }
+
+  {   // the mirror shape: plain bytes appended onto a cached COMPRESSED file
+    const sl = slotOf('cccccccc-dddd-4eee-8fff-000000000002');
+    const text = rollout(sl.tid, '/work/heal2', 'reverse hybrid slot', 400);
+    const plainBuf = Buffer.from(text), comp = zlib.zstdCompressSync(plainBuf);
+    ok(comp.length < plainBuf.length, 'fixture: the cached compressed bytes are shorter than the returning plain file');
+    seedSlot(sl, Buffer.concat([comp, plainBuf.subarray(comp.length)]), { size: plainBuf.length, mtime: 5000, fetchedAt: Date.now(), slab: true });
+    remote.path = sl.remotePath; remote.data = plainBuf; remote.mtime = 5000;
+    ok(preFixValid(JSON.parse(fs.readFileSync(sl.cache + '.meta', 'utf8')), remote.path, plainBuf.length, 5000, sl.cache), 'NEGATIVE CONTROL: the pre-fix predicate accepts the reverse hybrid too (zstd magic under a plain remote)');
+    const healed = await hm.fetchTranscript('hz', 'codex', sl.tid);
+    ok(fs.readFileSync(healed, 'utf8') === text, 'a cache whose MAGIC contradicts the resolved remote is refetched whole');
+    ok(metaOf(healed).compressed === false && metaOf(healed).remotePath === sl.remotePath, '…with the plain remote recorded');
+  }
+
+  {   // an INTACT legacy slot: one refetch, then business as usual
+    const sl = slotOf('cccccccc-dddd-4eee-8fff-000000000003');
+    const text = rollout(sl.tid, '/work/heal3', 'intact legacy slot', 20);
+    seedSlot(sl, Buffer.from(text), { size: Buffer.byteLength(text), mtime: 6000, fetchedAt: Date.now(), slab: true });
+    remote.path = sl.remotePath; remote.data = Buffer.from(text); remote.mtime = 6000;
+    reads.length = 0;
+    const c = await hm.fetchTranscript('hz', 'codex', sl.tid);
+    ok(fs.readFileSync(c, 'utf8') === text && reads.length === 1 && reads[0][1] === 0, `an intact pre-provenance slot refetches once too — the old meta cannot prove WHICH file filled it (${JSON.stringify(reads)})`);
+    reads.length = 0;
+    await hm.fetchTranscript('hz', 'codex', sl.tid);
+    ok(reads.length === 0 && metaOf(c).remotePath === sl.remotePath, 'the healed slot short-circuits on the next poll (provenance stamped)');
+    const grown = text + tick;
+    remote.data = Buffer.from(grown); remote.mtime = 7000;
+    reads.length = 0;
+    const c2 = await hm.fetchTranscript('hz', 'codex', sl.tid);
+    ok(fs.readFileSync(c2, 'utf8') === grown && reads.length === 1 && reads[0][1] === Buffer.byteLength(text), 'and the append-only DELTA win comes back after the heal');
+  }
+
+  {   // a legacy slot already PAST the fetch cap: a whole refetch is impossible
+    // (the delta path is how it got there), so verified bytes adopt the
+    // provenance instead of failing "remote transcript too large"
+    const sl = slotOf('cccccccc-dddd-4eee-8fff-000000000004');
+    const base = rollout(sl.tid, '/work/heal4', 'over the fetch cap', 300), grown = base + tick;
+    seedSlot(sl, Buffer.from(base), { size: Buffer.byteLength(base), mtime: 8000, fetchedAt: Date.now(), slab: true });
+    remote.path = sl.remotePath; remote.data = Buffer.from(grown); remote.mtime = 9000;
+    reads.length = 0;
+    let capErr = null;
+    let c = null;
+    try { c = await hm.fetchTranscript('hz', 'codex', sl.tid, { maxBytes: Buffer.byteLength(base) - 1 }); } catch (e) { capErr = String(e && e.message || e); }
+    ok(!capErr && fs.readFileSync(c, 'utf8') === grown && reads.length === 1 && reads[0][1] === Buffer.byteLength(base), `a slot already past maxBytes keeps syncing deltas instead of hard-failing (${capErr || JSON.stringify(reads)})`);
+    ok(metaOf(c).remotePath === sl.remotePath && metaOf(c).compressed === false, '…and gains provenance on the way through');
+  }
+
+  {   // the byte check is not only for old metas: a splice under a GOOD meta
+    const sl = slotOf('cccccccc-dddd-4eee-8fff-000000000005');
+    const text = rollout(sl.tid, '/work/heal5', 'spliced under a good meta', 30);
+    const spliced = Buffer.concat([Buffer.from(text.slice(0, -50)), Buffer.alloc(50, 0)]);
+    seedSlot(sl, spliced, { size: spliced.length, mtime: 9500, fetchedAt: Date.now(), slab: true, remotePath: sl.remotePath, compressed: false });
+    remote.path = sl.remotePath; remote.data = Buffer.from(text); remote.mtime = 9500;
+    ok(preFixValid(JSON.parse(fs.readFileSync(sl.cache + '.meta', 'utf8')), remote.path, spliced.length, 9500, sl.cache), 'NEGATIVE CONTROL: size + mtime + provenance all agree — only the BYTES say the cache is spliced');
+    const c = await hm.fetchTranscript('hz', 'codex', sl.tid);
+    ok(fs.readFileSync(c, 'utf8') === text, 'a cache whose TAIL is not text is refetched even under a provenance-carrying meta (an append always lands its foreign bytes at the tail)');
+  }
 }
 try { fs.rmSync(home, { recursive: true, force: true }); } catch {}
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);

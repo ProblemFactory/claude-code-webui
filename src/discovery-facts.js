@@ -568,5 +568,5 @@ module.exports = {
   extractTailIds, nameFromUserRecord, nameFromUserLine, nameFromText, pidLooksClaude, interpretDiscoveryLines, synthesizeDiscoveryLines, NAME_MAX,
   // S3 (codex facts + zstd rollouts)
   deriveCodexSessionName, nameFromCodexUserLine, listOpenCodexRolloutPaths, isCodexCommandLine, CODEX_TID_RE, CODEX_ROLLOUT_RE, codexThreadIdOf,
-  ZSTD_SUPPORTED, isZstPath, isZstBuffer, zstdDecompressFrames, zstdDecompressHead, readHeadText,
+  ZSTD_SUPPORTED, ZSTD_MAGIC, isZstPath, isZstBuffer, zstdDecompressFrames, zstdDecompressHead, readHeadText,
 };
