@@ -49,7 +49,7 @@ const meta = read('src/lib/agent-meta.js');
 ok(/caps: \{ fork: true, effort: true, review: true, outputStyle: false, autoResume: true, quotaRefresh: 'session-rpc', accounts: true \}/.test(meta), 'client META: codex caps.fork is true (the fork button/menu shows)');
 ok(/permissionModes: \['default', 'read-only', 'safe-yolo', 'yolo'\]/.test(meta) && /permissionModes: \['default', 'acceptEdits', 'bypassPermissions', 'plan', 'auto'\]/.test(meta), 'client META carries a permission-mode seed per backend');
 const sb = read('src/lib/chat-status-bar.js');
-ok(/BACKEND_META\[backend\]\?\.permissionModes/.test(sb) && /import \{ BACKEND_META, getBackendMeta, backendFeatureCaps \} from '\.\/agent-meta\.js'/.test(sb), 'the status bar seeds its permission dropdown from META (never claude modes on a codex chat before the first status)');
+ok(/BACKEND_META\[backend\]\?\.permissionModes/.test(sb) && /import \{ BACKEND_META, getBackendMeta, backendFeatureCaps, effortLabel \} from '\.\/agent-meta\.js'/.test(sb), 'the status bar seeds its permission dropdown from META (never claude modes on a codex chat before the first status)');
 const sf = read('src/lib/setup-flows.js');
 ok(/const named = b\.namedLoggedIn \|\| 0;/.test(sf) && !/key === 'claude' \? \(b\.namedLoggedIn/.test(sf) && /const acctBtn = b\.installed\n/.test(sf), 'onboarding counts named accounts and offers the accounts door for every installed backend');
 const sv = read('server.js');

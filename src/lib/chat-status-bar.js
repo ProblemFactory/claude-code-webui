@@ -1,6 +1,6 @@
 import { escHtml, showInputDialog, uiScale, showToast, fetchJson, copyText, absUrl } from './utils.js';
 import { UI_ICONS } from './icons.js';
-import { BACKEND_META, getBackendMeta, backendFeatureCaps } from './agent-meta.js';
+import { BACKEND_META, getBackendMeta, backendFeatureCaps, effortLabel } from './agent-meta.js';
 import { t } from './i18n.js';
 
 /**
@@ -972,7 +972,7 @@ export class ChatStatusBar {
         // model's reported levels from the models cache, fall back to the union
         // of all models, then to the classic ladder if the fetch fails.
         const codexLadder = (levels) => [{ value: '', label: t('Auto (model default)') },
-          ...levels.map(v => ({ value: v, label: v }))];
+          ...levels.map(v => ({ value: v, label: effortLabel(this._backend, v) }))]; // 'ultra' carries its delegation hint when the served model reports it
         const loading = document.createElement('div');
         loading.className = 'chat-status-dropdown-item chat-status-dim';
         loading.textContent = t('Loading…');

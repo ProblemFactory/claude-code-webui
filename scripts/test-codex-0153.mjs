@@ -182,5 +182,18 @@ console.log('— ② 0.153 record tolerance: known skips, agent chatter, sub-age
   ok(S.SKIPPED_RECORD_TYPES.has('world_state') && S.SKIPPED_EVENT_TYPES.has('item_completed') && S.SKIPPED_RESPONSE_ITEM_TYPES.has('additional_tools'), 'the skip sets are explicit and exported for the audit');
 }
 
+console.log('— ③ effort enum: ultra offered when the served model reports it, with its delegation hint (zh/ja)');
+{
+  const am = await import(path.join(REPO, 'src/lib/agent-meta.js'));
+  ok(am.BACKEND_META.codex.effortHints?.ultra && !am.BACKEND_META.claude.effortHints, "META.codex.effortHints names 'ultra' (claude has no such level)");
+  ok(am.effortLabel('codex', 'ultra', { capitalize: true }).startsWith('Ultra — ') && am.effortLabel('codex', 'ultra').startsWith('ultra — ') && am.effortLabel('codex', 'high', { capitalize: true }) === 'High' && am.effortLabel('claude', 'ultra') === 'ultra', 'effortLabel appends the hint for codex ultra only (plain names otherwise, no id comparison)', am.effortLabel('codex', 'ultra'));
+  const app = read('src/lib/app.js'), sb = read('src/lib/chat-status-bar.js');
+  ok(/const rank = \['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'\];/.test(app) && /label: effortLabel\('codex', e, \{ capitalize: true \}\)/.test(app) && /SETTINGS_SCHEMA\['codex\.defaultEffort'\]\.options = efforts\.map/.test(app), 'New-Session + settings pickers build the codex ladder from the served models\' union (ultra last) with the hinted label');
+  ok(/label: effortLabel\(this\._backend, v\)/.test(sb) && /cur\?\.efforts\?\.length \? cur\.efforts/.test(sb), 'status-bar dropdown prefers the CURRENT model\'s reported levels and labels them through effortLabel');
+  ok(/efforts: \(m\.supported_reasoning_levels \|\| \[\]\)\.map\(l => l && l\.effort\)/.test(read('server.js')), '/api/available-models carries each model\'s supported_reasoning_levels (the ultra source)');
+  const key = 'delegates to sub-agents (multi-agent), extra usage';
+  ok(read('src/lib/i18n-zh.js').includes(`"${key}":`) && read('src/lib/i18n-ja.js').includes(`"${key}":`), 'zh + ja carry the hint');
+}
+
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);
 process.exit(fail ? 1 : 0);

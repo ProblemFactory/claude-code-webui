@@ -2911,4 +2911,5 @@ export default {
   "{n} file reads": "{n} 件のファイル読み取り",
   "{n} web searches": "{n} 件の Web 検索",
   "{n} image reads": "{n} 件の画像表示",
+  "delegates to sub-agents (multi-agent), extra usage": "サブエージェントに委任（マルチエージェント）、追加使用量",
 };

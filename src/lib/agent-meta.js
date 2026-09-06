@@ -1,3 +1,5 @@
+import { t } from './i18n.js';
+
 export const BACKEND_META = {
   claude: {
     id: 'claude',
@@ -68,6 +70,12 @@ export const BACKEND_META = {
     caps: { fork: true, effort: true, review: true, outputStyle: false, autoResume: true, quotaRefresh: 'session-rpc', accounts: true },
     settingsPrefix: 'codex',
     permissionModes: ['default', 'read-only', 'safe-yolo', 'yolo'],
+    // Effort rows that deserve a one-line hint (B-21e4 item 3): 'ultra' is
+    // codex 0.153's multi-agent delegation level — the model spawns sub-agent
+    // threads, which burn extra usage. Offered only when the served model's
+    // catalog entry reports it (supported_reasoning_levels); English key,
+    // t() at render (effortLabel below).
+    effortHints: { ultra: 'delegates to sub-agents (multi-agent), extra usage' },
   },
   // OpenCode over ACP v1 (S8, design-harness-plugins §2.3). No accounts
   // roster (the agent holds its own provider login), no effort/fork/review
@@ -97,6 +105,17 @@ export const BACKEND_META = {
  *  unknown backend reads its OWN id family (never claude's — the old
  *  `=== 'codex' ? … : 'claude'` collapse fed a third backend claude's
  *  defaults). */
+/** Picker label for an effort level: the plain value (capitalized for the
+ *  New-Session / settings pickers, lowercase for the status-bar rows) plus the
+ *  harness's META `effortHints` one-liner when the level has one (codex
+ *  'ultra' → "… — delegates to sub-agents (multi-agent), extra usage"). */
+export function effortLabel(backend, value, { capitalize = false } = {}) {
+  const v = String(value || '');
+  const base = capitalize ? v.charAt(0).toUpperCase() + v.slice(1) : v;
+  const hint = BACKEND_META[backend]?.effortHints?.[v];
+  return hint ? `${base} — ${t(hint)}` : base;
+}
+
 export function settingsPrefixFor(backend) {
   const b = backend || 'claude';
   return BACKEND_META[b]?.settingsPrefix ?? b;

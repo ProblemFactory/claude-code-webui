@@ -2911,4 +2911,5 @@ export default {
   "{n} file reads": "{n} 次读文件",
   "{n} web searches": "{n} 次网页搜索",
   "{n} image reads": "{n} 次看图",
+  "delegates to sub-agents (multi-agent), extra usage": "委派给子代理（多代理），额外用量",
 };

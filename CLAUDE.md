@@ -237,7 +237,7 @@ src/
   sidebar-render-mobile.js — Mobile sidebar mixin (two-level folder/group navigation)
     mobile-nav.js — MobileNav class (window switcher, close, desktop tabs, gestures; 2.99.0: ⚙ gear → gs-menu + worst-of quota donut chip → usage popup — the taskbar with ALL its entry points is hidden ≤768px, these are … ⇒ kb-file-structure.md
     session-card.js — Session card renderer (SVG icons, composite backend+mode icons). ⇒ kb-file-structure.md
-    agent-meta.js      — Backend/agent metadata, SVG icon creation (createBackendIcon, createModeBackendIcon)
+    agent-meta.js      — Backend/agent metadata, SVG icon creation (createBackendIcon, createModeBackendIcon) + `effortLabel(backend, value, {capitalize})` = picker label with the harness's META `effortHints` one-liner (codex 'ultra' = 0.153 multi-agent delegation, extra usage — offered only when the served model's catalog entry reports it; B-21e4)
     file-explorer.js   — FileExplorer (browse, View menu, resizable columns, preview panel; uploads + ops clusters split out 2.93.0)
     file-explorer-uploads.js — installExplorerUploads: upload popover, batched multipart, inline progress + ring, synced history
     file-explorer-ops.js — installExplorerOps: context/background menus, clipboard copy/cut/paste, rename/delete/duplicate, archive compress/extract, properties

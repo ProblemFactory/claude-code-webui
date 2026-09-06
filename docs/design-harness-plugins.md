@@ -32,7 +32,7 @@
 
 外部调研带来的额外硬约束（Codex 侧）：
 - **版本**：0.153.0 起 rollout 可能是 `.jsonl.zst`；fork 带 `forked_from_id + forked_from_ordinal_exclusive`；（✅ B-21e4: extractCodexThreadMeta 读 `forked_from_id`/`forked_from_ordinal_exclusive`/`history_base`/`subagent_history_start_ordinal`, 只读线程自己的 session_meta; `resolveCodexForkAncestry` 把 Referenced fork 的父前缀按 ordinal 截断后前置, wrapper 链整体合并不变, 原生父线程不隐藏; gate test-codex-0153 ①）新行类型（world_state、inter_agent_communication*、retained_context、token_usage_record…）——session-store/usage-walker/parity 扫描器必须容错并支持 zst。（✅ B-21e4 item 2: CodexMessageManager 显式 skip 集 + 未知类型 telemetry `codex-unknown-record:<type>` 一次; agent_message / sub_agent_activity 渲染为 'agent' 折叠类的完整 tool 卡; gate test-codex-0153 ②）
-- **effort 枚举**扩到 none/minimal/low/medium/high/xhigh/max/ultra/persistent/custom，`ultra` = 主动多 agent 委派（额外子线程烧量）——控件与用量表要接受未知值并对 ultra 提示。
+- **effort 枚举**扩到 none/minimal/low/medium/high/xhigh/max/ultra/persistent/custom，`ultra` = 主动多 agent 委派（额外子线程烧量）——控件与用量表要接受未知值并对 ultra 提示。（✅ B-21e4 item 3: 三处选择器（新建会话/设置/状态栏）从 models_cache 的 supported_reasoning_levels 并集/当前模型列表出 ultra, 标签经 agent-meta `effortLabel` 带 META.effortHints 提示, zh/ja 已补; gate test-codex-0153 ③）
 - **resume**：分页时代用 `thread/resume {excludeTurns:true}` + `thread/turns|items/list`；全量 hydration 已 deprecated；`thread/read {includeTurns}` 是死会话只读回放的正解。
 - **配额被动捕获免费**：每条 rollout `token_count` 与 `account/rateLimits/updated` 都带 primary/secondary/resets_at/plan_type/credits/rateLimitReachedType——可直接喂 usage-anchors/estimator（今天只进 sidecar 展示）。
 - **进程模型机会**：`codex app-server daemon` + unix 控制 socket + TUI 重连（0.153.0）= 一台机器一个长命 app-server 拥有多线程并跨 VibeSpace 重启——R6 daemon-pipe 可对接该 socket 而非每会话一个 app-server。

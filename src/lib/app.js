@@ -45,7 +45,7 @@ import { registerWindowType, svgIcon16 } from './window-types.js';
 import { CustomizeMode, applyArrangement } from './customize-mode.js';
 import { installSessionPalette } from './session-palette.js';
 import { installUserTodos } from './user-todos-panel.js';
-import { BACKEND_META, createBackendIconHtml, getSessionKey, pickAgentIdentity, settingsPrefixFor } from './agent-meta.js';
+import { BACKEND_META, createBackendIconHtml, getSessionKey, pickAgentIdentity, settingsPrefixFor, effortLabel } from './agent-meta.js';
 
 const BACKEND_SESSION_OPTIONS = {
   claude: {
@@ -122,7 +122,7 @@ fetchJson('/api/available-models').then(data => {
       .sort((a, b) => (rank.indexOf(a) + 1 || 99) - (rank.indexOf(b) + 1 || 99));
     if (union.length) {
       const efforts = [{ value: '', label: t('Auto (model default)') },
-        ...union.map(e => ({ value: e, label: e.charAt(0).toUpperCase() + e.slice(1) }))];
+        ...union.map(e => ({ value: e, label: effortLabel('codex', e, { capitalize: true }) }))]; // 'ultra' carries its delegation hint (META.effortHints)
       BACKEND_SESSION_OPTIONS.codex.efforts = efforts;
       SETTINGS_SCHEMA['codex.defaultEffort'].options = efforts.map(e => ({ value: e.value, label: e.label }));
     }
