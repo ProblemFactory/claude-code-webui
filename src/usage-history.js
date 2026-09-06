@@ -17,6 +17,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 const { runUsageWalk } = require('./usage-walker.js');
 
 // API-equivalent prices, USD per MILLION tokens. Subscription sessions don't
@@ -432,6 +433,25 @@ class UsageHistory {
   _cost(ev) {
     const p = this._rateFor(ev.acct, this._tier(ev.model));
     return (ev.i * p.input + ev.o * p.output + ev.cw5 * p.cacheWrite5m + ev.cw1 * p.cacheWrite1h + ev.cr * p.cacheRead) / 1e6;
+  }
+  /** Stable token for the EFFECTIVE price table (tiers + per-account overrides
+   *  and discounts) — the VERSION half of any memo key over computed costs.
+   *  A pricing edit changes every historical cost while the ledger is
+   *  untouched, so a cost memo keyed only by ids+interval+event-count served
+   *  pre-edit dollars forever (2.369.43; the anchors' interval memo is the one
+   *  consumer). Recomputed only when `_pricing` is REPLACED — setPricing builds
+   *  a NEW object, the same identity check `_tier` uses for its tier keys. */
+  pricingToken() {
+    if (this._priceTok && this._priceTokFor === this._pricing) return this._priceTok;
+    let tok;
+    try {
+      tok = crypto.createHash('sha1').update(JSON.stringify([this._pricing?.tiers || null, this._pricing?.accounts || null])).digest('hex').slice(0, 12);
+    } catch {
+      tok = 'nohash-' + Date.now(); // unhashable table ⇒ a fresh token: never reuse another table's costs
+    }
+    this._priceTokFor = this._pricing;
+    this._priceTok = tok;
+    return tok;
   }
 
   // In-memory event cache — the "database" behind aggregate(). Shards are

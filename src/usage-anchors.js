@@ -97,13 +97,54 @@ function costBetween(usageHistory, accountId, fromMs, toMs) {
 // every historical anchor pair on every recompute (thousands of pairs, several
 // recomputes a minute — one per new anchor) — the pairs never change, only
 // the ledger grows. Key = ids + interval + the count of events at or before
-// `to` (a late backfill INTO the interval changes that count ⇒ recompute).
-const _costMemo = new Map();
-const COST_MEMO_MAX = 20000;
+// `to` (a late backfill INTO the interval changes that count ⇒ recompute)
+// + the PRICE-TABLE token.
+//
+// PRICING IS PART OF THE VERSION (2.369.43): a pricing edit (a tier rate or a
+// per-account discount, POST /api/usage-stats/pricing or a config import)
+// changes every historical cost while the event count is untouched — without
+// the token the memo served pre-edit dollars forever, so the learned rates and
+// every anchor's costSince kept quoting the old price table (reproduced: a 10×
+// tier edit AND a 50% account discount both returned the pre-edit total). No
+// token available ⇒ NO memo: an un-versionable cost is never cached.
+//
+// ONE MEMO PER LEDGER (2.369.43): it hangs off the UsageHistory instance
+// (WeakMap), so two ledgers can never read each other's costs through a key
+// that names neither.
+//
+// RANDOM VICTIM, NOT FIFO (2.369.43): learnRates walks one identity's anchor
+// pairs in the SAME order on every recompute — a cyclic reference string, the
+// one access pattern where FIFO *and* LRU fall off a CLIFF rather than
+// degrading (measured on this code: a 20000-key working set hits 100%, 21000
+// hits 0.0%, and the per-pair ledger walk comes back). Anchor files are
+// append-only forever (real production data: 5124 pairs over 28 days across 8
+// identities, ~180 new pairs/day), so the cap IS reached — with a random
+// victim the hit rate then decays as cap/working-set instead of vanishing.
+const _costMemos = new WeakMap(); // UsageHistory → { map, keys }
+const COST_MEMO_MAX = 20000;      // ≈10MB at ~530 bytes/entry (measured)
+function _memoFor(usageHistory) {
+  let m = _costMemos.get(usageHistory);
+  if (!m) { m = { map: new Map(), keys: [] }; _costMemos.set(usageHistory, m); }
+  return m;
+}
+function _memoPut(m, key, val) {
+  // map and keys move in lockstep (only a MISS inserts, so `key` is new); the
+  // length check keeps a future divergence from growing the map without bound
+  if (m.map.size >= COST_MEMO_MAX && m.keys.length) {
+    const j = Math.floor(Math.random() * m.keys.length);
+    m.map.delete(m.keys[j]);
+    m.keys[j] = m.keys[m.keys.length - 1];
+    m.keys.pop();
+  }
+  m.map.set(key, val);
+  m.keys.push(key);
+}
 function costBetweenMulti(usageHistory, accountIds, fromMs, toMs) {
   const want = new Set((accountIds || []).map((a) => a || '__global__'));
-  const memoKey = typeof usageHistory?._evCountUpTo === 'function' ? `${[...want].sort().join(',')}|${fromMs}|${toMs}|${usageHistory._evCountUpTo(toMs || Infinity)}` : null;
-  if (memoKey) { const hit = _costMemo.get(memoKey); if (hit) return { ...hit, byFamily: { ...hit.byFamily }, byClass: { ...hit.byClass } }; }
+  const versioned = typeof usageHistory?._evCountUpTo === 'function' && typeof usageHistory?.pricingToken === 'function';
+  const memo = versioned ? _memoFor(usageHistory) : null;
+  const memoKey = versioned ? `${[...want].sort().join(',')}|${fromMs}|${toMs}|${usageHistory._evCountUpTo(toMs || Infinity)}|${usageHistory.pricingToken()}` : null;
+  if (memoKey) { const hit = memo.map.get(memoKey); if (hit) return { ...hit, byFamily: { ...hit.byFamily }, byClass: { ...hit.byClass } }; }
   const out = { total: 0, byFamily: { fable: 0, opus: 0, sonnet: 0, haiku: 0, other: 0 }, byClass: { cw: 0, cr: 0, other: 0 }, requests: 0 };
   try {
     for (const ev of usageHistory._events(fromMs, toMs)) {
@@ -142,7 +183,7 @@ function costBetweenMulti(usageHistory, accountIds, fromMs, toMs) {
   out.total = Math.round(out.total * 10000) / 10000;
   for (const k of Object.keys(out.byFamily)) out.byFamily[k] = Math.round(out.byFamily[k] * 10000) / 10000;
   for (const k of Object.keys(out.byClass)) out.byClass[k] = Math.round(out.byClass[k] * 10000) / 10000;
-  if (memoKey) { if (_costMemo.size >= COST_MEMO_MAX) _costMemo.delete(_costMemo.keys().next().value); _costMemo.set(memoKey, { ...out, byFamily: { ...out.byFamily }, byClass: { ...out.byClass } }); }
+  if (memoKey) _memoPut(memo, memoKey, { ...out, byFamily: { ...out.byFamily }, byClass: { ...out.byClass } });
   return out;
 }
 

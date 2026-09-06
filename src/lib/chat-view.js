@@ -812,21 +812,55 @@ class ChatView {
         if (this._total > 0 && domCount === 0) track('event', 'chat-view-blank-persistent', this._telemDetail(`total=${this._total} dom=0`));
       }, 2500);
     } catch {}
-    // Auto-load more if content doesn't fill viewport (no scrollbar to trigger scroll event).
-    // inc-mtox23xw (2.369.36): 100ms after a re-attach REBUILD the fresh batch's
-    // content-visibility heights are still unresolved, so sh<=ch held for a TALL
-    // window and this fired an ungated _extendTop on a PINNED view — the slab
-    // landed 7s later (stalled server), trimBottom dropped the live tail and the
-    // view unpinned 1500px up ("content jumped after I sent a message"). Decide
-    // only after the settle window, and only for a genuinely SHORT view.
-    setTimeout(() => {
-      if (this._suspended || this._disposed) return; // hidden window: sh<=ch is an artifact, not "doesn't fill"
-      const list = this._messageList;
-      const rendered = list.querySelectorAll(':scope > .chat-msg').length;
-      if (this._windowStart > 0 && rendered < 30 && list.scrollHeight <= list.clientHeight) {
-        this._trace?.('autoFill', { rendered, sh: list.scrollHeight, ch: list.clientHeight });
+    this._scheduleAttachFill();
+  }
+
+  // ── SHORT-VIEW RESCUE after attach ────────────────────────────────────────
+  // Content that doesn't fill the viewport has NO scrollable range, so the
+  // scroll handler can never fire; on touch there is no wheel-up path either,
+  // so the window is a dead end with history it can't reach. The real case is
+  // fold-dominated (inc-mtajy6wr class): the attach slab's 50 cards collapse
+  // into a couple of run headers, far shorter than one viewport.
+  // inc-mtox23xw (2.369.36): 100ms after a re-attach REBUILD the fresh batch's
+  // content-visibility heights are still unresolved, so sh<=ch held for a TALL
+  // window and this fired an ungated _extendTop on a PINNED view — the slab
+  // landed 7s later (stalled server), trimBottom dropped the live tail and the
+  // view unpinned 1500px up ("content jumped after I sent a message"). That fix
+  // added `rendered < 30`, which is UNSATISFIABLE: every attach path ships
+  // tail(50) (ws-handler + transcripts.page), `_windowStart > 0` holds EXACTLY
+  // when those 50 arrived, and folding HIDES members (`.chat-run-collapsed`,
+  // display:none) without removing them — so `rendered` is ~50 whenever the
+  // gate is armed (measured over 33 real production transcripts: 50/50 render,
+  // min 50). The rescue has been dead code since.
+  // RE-DERIVED from the intent: the indeterminate geometry is TRANSIENT (the
+  // collapsedGeomSkip guard's own premise — it resolves inside ~1.5s), so
+  // CORROBORATE the reading instead of guessing a card count: measure twice
+  // across the settle window and require the same verdict with no structural
+  // change in between. The card count survives only as the harm bound — the
+  // rescue adds ONE page and never at a size where a trim could fire (the
+  // incident's actual damage was trimBottom eating the live tail).
+  _shortViewNeedsFill(list) {
+    if (!list || this._suspended || this._disposed) return false;
+    if (this._teleported) return false;        // teleport pages by file line — _maybeSeekEarlier owns that mode
+    if (!(this._windowStart > 0)) return false; // nothing above this window
+    const rendered = list.querySelectorAll(':scope > .chat-msg').length;
+    if (rendered + 50 > 150) return false;      // one more page must stay under the trim cap
+    return list.scrollHeight <= list.clientHeight; // no scrollable range at all
+  }
+
+  _scheduleAttachFill() {
+    clearTimeout(this._autoFillT1); clearTimeout(this._autoFillT2);
+    this._autoFillT1 = setTimeout(() => {
+      if (!this._shortViewNeedsFill(this._messageList)) return;
+      const structAt = this._lastStructuralAt || 0;
+      this._autoFillT2 = setTimeout(() => {
+        // the list changed under us (paging/trim/desktop resume) — those paths decide
+        if ((this._lastStructuralAt || 0) !== structAt) return;
+        const list = this._messageList;
+        if (!this._shortViewNeedsFill(list)) return; // the first reading was transient collapsed geometry
+        this._trace?.('autoFill', { rendered: list.querySelectorAll(':scope > .chat-msg').length, sh: list.scrollHeight, ch: list.clientHeight });
         this._extendTop();
-      }
+      }, 900);
     }, 700);
   }
 
@@ -3362,6 +3396,8 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
     this._statusBar?.dispose?.();
     this._disposed = true;
     if (this._blankProbe) { clearTimeout(this._blankProbe); this._blankProbe = null; }
+    if (this._autoFillT1) { clearTimeout(this._autoFillT1); this._autoFillT1 = null; }
+    if (this._autoFillT2) { clearTimeout(this._autoFillT2); this._autoFillT2 = null; }
     if (this._runsObserver) { this._runsObserver.disconnect(); this._runsObserver = null; }
     if (this._searchBarObserver) { this._searchBarObserver.disconnect(); this._searchBarObserver = null; }
     if (this._runsTimer) { clearTimeout(this._runsTimer); this._runsTimer = null; }
