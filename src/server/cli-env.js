@@ -10,9 +10,10 @@ const os = require('os');
 const path = require('path');
 const { execFile, execFileSync } = require('child_process');
 const { createAdapterRegistry } = require('../adapters');
+const { capsOf, setVerifiedCap } = require('../backend-caps');
 
 function create({ rootDir, CLAUDE_CMD_RAW, CODEX_CMD_RAW, resolveCmd,
-  getOAuthToken, usagePollingEnabled, refreshCodexModels }) {
+  getOAuthToken, usagePollingEnabled, refreshCodexModels, broadcast = null }) {
   const USAGE_CACHE_DIR = path.join(rootDir, 'data', 'usage-cache');
 // ── X display detection (Linux clipboard / xclip) ──
 // The inherited DISPLAY is unreliable: the server is often (re)started from
@@ -129,10 +130,38 @@ const adapterRegistry = createAdapterRegistry({
   ptyWrapper: path.join(rootDir, 'data', 'bin', 'pty-wrapper.js'),
   buffersDir: path.join(rootDir, 'data', 'session-buffers'),
 });
-/** Installed-state per harness for the client (New Session backend picker). */
+/** Installed-state per harness for the client (New Session backend picker).
+ *  ACP harnesses also carry their RUNTIME-VERIFIED feature caps (S9: opencode
+ *  fork = the serve OpenAPI evidence) so the client's BACKEND_META merges the
+ *  verdict instead of shipping a guess. */
 function harnessAvailability() {
-  return listHarnesses().map((h) => ({ id: h.id, label: h.label, kind: h.kind, installed: h.acp ? !!ACP_COMMANDS[h.id] : true }));
+  return listHarnesses().map((h) => ({ id: h.id, label: h.label, kind: h.kind, installed: h.acp ? !!ACP_COMMANDS[h.id] : true, ...(h.acp ? { caps: { fork: !!capsOf(h.id).fork } } : {}) }));
 }
+// ── OpenCode serve locator (S9, B-03f2): the opencode harness's STORE facts
+// come from ONE `opencode serve` instance per VibeSpace — reused from
+// data/opencode-serve.json when it still answers, else started LAZILY on the
+// first discovery (never at boot) under agentEnv(), kept by the module's own
+// keeper (backoff, parked after 5 crashes, stopped on exit). The fork verdict
+// from its OpenAPI flips capsOf('opencode').fork and is BROADCAST so open
+// clients learn it without a reload (the cache-invalidation-must-notify law).
+// Autostart opt-out: VIBESPACE_OPENCODE_SERVE=0 (explicit) or the test-harness
+// belt VIBESPACE_SKIP_AGENT_HOOKS=1 (every worktree smoke sets it and SIGKILLs
+// its server — a spawned serve would outlive that kill and pile up on the dev
+// box). Reuse of an already-running recorded instance still works; an explicit
+// VIBESPACE_OPENCODE_SERVE=1 wins over the belt.
+const OPENCODE_SERVE_AUTOSTART = process.env.VIBESPACE_OPENCODE_SERVE ? process.env.VIBESPACE_OPENCODE_SERVE !== '0' : process.env.VIBESPACE_SKIP_AGENT_HOOKS !== '1';
+const opencodeServe = require('../opencode-serve').install({
+  dataDir: path.join(rootDir, 'data'),
+  command: () => ACP_COMMANDS.opencode || null,
+  env: () => require('../ws-handler').agentEnv(),
+  log: console,
+  stopOnExit: true,
+  autostart: OPENCODE_SERVE_AUTOSTART,
+  onCaps: (caps) => {
+    setVerifiedCap('opencode', 'fork', !!caps.fork);
+    try { broadcast?.({ type: 'harness-caps-updated', backend: 'opencode', caps: { fork: !!caps.fork } }); } catch { }
+  },
+});
 
 probeCodexSandbox(adapterRegistry);
 
@@ -274,6 +303,6 @@ function refreshAvailableModels() {
     CLAUDE_CMD, CODEX_CMD, CODEX_LINUX_SANDBOX_CMD, CODEX_SANDBOX_SUPPORTED,
     CLAUDE_SUBSCRIPTION_LOGIN_HELPER, CLAUDE_SUPPORTS_NAME, PERMISSION_MODES,
     EFFORT_LEVELS, CLAUDE_MODEL_ALIASES, CLAUDE_KNOWN_MODELS, AVAILABLE_MODELS,
-    noteModelSeen, refreshAvailableModels, ACP_COMMANDS, harnessAvailability, noteHarnessModels };
+    noteModelSeen, refreshAvailableModels, ACP_COMMANDS, harnessAvailability, noteHarnessModels, opencodeServe };
 }
 module.exports = { create };

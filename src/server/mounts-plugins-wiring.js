@@ -552,6 +552,15 @@ function createSessionMessages(session, sessionId) {
   if (be && be !== 'claude' && be !== 'codex') {
     try {
       const h = require('../harnesses').get(be);
+      // S9: a store that builds its own reader (opencode: serve-backed for a
+      // STOPPED conversation, the wrapper journal for a LIVE one) gets the
+      // liveness FACT — transcript-service's synthetic session shape and a
+      // live session object are otherwise indistinguishable to the reader.
+      if (typeof h?.store?.createReader === 'function') {
+        let live = false;
+        for (const s of activeSessions.values()) if (s === session) { live = true; break; }
+        return h.store.createReader(session, sessionId, { buffersDir: BUFFERS_DIR, live });
+      }
       if (h?.store?.SessionMessages) return new h.store.SessionMessages(session, sessionId, { buffersDir: BUFFERS_DIR });
     } catch (e) { console.error(`[session-messages] ${e.message}`); }
   }

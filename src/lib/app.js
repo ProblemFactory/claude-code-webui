@@ -331,6 +331,14 @@ class App {
     // the instance's public address can flip while the tab is open (Ports
     // panel → This VibeSpace): every link helper reads it live, no reload
     this.ws.onGlobal((msg) => { if (msg.type === 'instance-url') setInstanceUrl(msg.status?.effectiveUrl || null); });
+    // S9: a harness capability verified at runtime (opencode fork = the serve
+    // OpenAPI evidence, probed lazily AFTER this client's /api/home) reaches
+    // every open client — the sidebar's Fork row reads BACKEND_META caps
+    this.ws.onGlobal((msg) => {
+      if (msg.type !== 'harness-caps-updated' || !msg.backend || !msg.caps || !BACKEND_META[msg.backend]?.caps) return;
+      Object.assign(BACKEND_META[msg.backend].caps, msg.caps);
+      try { this.sidebar?._render?.(); } catch {}
+    });
     this.ws.onGlobal((msg) => {
       if (msg.type === 'editor-open' && msg.filePath && msg.signalPath) {
         this._openExternalEditor(msg.filePath, msg.signalPath, msg.sessionId, msg.host);
@@ -353,6 +361,8 @@ class App {
       for (const h of Array.isArray(d.harnesses) ? d.harnesses : []) { // ACP harnesses (S8): offered only where their CLI is installed
         const opt = document.querySelector(`#input-backend option[value="${CSS.escape(String(h.id))}"]`);
         if (opt) opt.hidden = !h.installed;
+        // S9: runtime-verified caps (opencode fork = the serve OpenAPI evidence) replace the shipped guess
+        if (h.caps && BACKEND_META[h.id]?.caps) Object.assign(BACKEND_META[h.id].caps, h.caps);
       }
     }).catch(()=>{});
 

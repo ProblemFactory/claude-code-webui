@@ -63,16 +63,25 @@ function setup(ctx) {
     const resolvedSessionId = backendSessionId || claudeSessionId;
     if (!resolvedSessionId) return res.status(400).json({ error: 'backendSessionId or claudeSessionId required' });
     const ref = { backend: backend || 'claude', sessionId: resolvedSessionId, cwd, host: req.query.host };
-    if (req.query.turnmap) return res.json(await transcripts.turnmap(ref));
-    if (search) return res.json(await transcripts.searchIndexed(ref, search));
-    const payload = await transcripts.page(ref, { offset, limit, untilUuid: req.query.untilUuid });
-    if (req.query.withStatus) {
-      const st = await transcripts.status(ref);
-      payload.chatStatus = st.chatStatus;
-      payload.taskState = st.taskState;
-      payload.turnMap = (await transcripts.turnmap(ref)).turns;
+    try {
+      if (req.query.turnmap) return res.json(await transcripts.turnmap(ref));
+      if (search) return res.json(await transcripts.searchIndexed(ref, search));
+      const payload = await transcripts.page(ref, { offset, limit, untilUuid: req.query.untilUuid });
+      if (req.query.withStatus) {
+        const st = await transcripts.status(ref);
+        payload.chatStatus = st.chatStatus;
+        payload.taskState = st.taskState;
+        payload.turnMap = (await transcripts.turnmap(ref)).turns;
+      }
+      res.json(payload);
+    } catch (e) {
+      // S9: a serve-backed reader (opencode stopped conversation) REFUSES loudly
+      // when its store is unreachable/missing — an async handler without a
+      // catch turned that into a HUNG request (no reply at all; the HTTP probe
+      // caught it). The error must reach the client: 404 for a conversation
+      // the store does not know, 502 for an unreachable store.
+      res.status(e?.status === 404 ? 404 : 502).json({ error: e?.message || String(e), code: e?.code || 'transcript-error' });
     }
-    res.json(payload);
   });
 
   // ── Whole-file seek loading for huge JSONL files ──

@@ -84,4 +84,18 @@ function capsOf(backend) {
   return BACKEND_CAPS[backend || 'claude'] || NO_CAPS;
 }
 
-module.exports = { BACKEND_CAPS, capsOf };
+// RUNTIME-VERIFIED verdicts (S9, B-03f2): a capability that only a running
+// probe can prove — opencode `fork` = the serve instance's OpenAPI carries
+// POST /session/{sessionID}/fork — is written here by the prober with its
+// evidence; a declared row is never guessed true at spawn time. PURE: no I/O,
+// the caller (ORCH) brings the evidence. Unknown backend/key = a no-op that
+// returns false; the row object is mutated IN PLACE so descriptor.caps
+// (the same object, test-harness-contract pins the identity) sees it.
+function setVerifiedCap(backend, key, value) {
+  const row = BACKEND_CAPS[backend];
+  if (!row || typeof key !== 'string' || !(key in row)) return false;
+  row[key] = value;
+  return true;
+}
+
+module.exports = { BACKEND_CAPS, capsOf, setVerifiedCap };

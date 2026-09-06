@@ -141,6 +141,7 @@ function createTranscriptService({ activeSessions, createSessionMessages, hosts 
       return { mm: session._normalizer, session };
     }
     const sm = createSessionMessages(sessionShape(r, session));
+    if (typeof sm.prepare === 'function') await sm.prepare(); // S9: a serve-backed reader (opencode stopped conversation) loads here — LOUD on failure, a user opened it
     const mm = createMessageManager(r.backend, 'api');
     await mm.convertHistoryAsync(sm.raw());
     return { mm, session };
@@ -191,6 +192,7 @@ function createTranscriptService({ activeSessions, createSessionMessages, hosts 
       return viaDev;
     }
     const sm = createSessionMessages(sessionShape(r, session));
+    if (typeof sm.prepare === 'function') await sm.prepare(); // S9: a serve-backed reader (opencode stopped conversation) loads here — LOUD on failure, a user opened it
     const chatStatus = sm.chatStatus();
     if (session?._permissionMode && chatStatus && !chatStatus.permissionMode) {
       chatStatus.permissionMode = session._permissionMode;
@@ -204,6 +206,7 @@ function createTranscriptService({ activeSessions, createSessionMessages, hosts 
     if (viaDev) return viaDev;
     await refreshRemote(r);
     const sm = createSessionMessages(sessionShape(r, liveSession(r)));
+    if (typeof sm.prepare === 'function') await sm.prepare(); // S9: a serve-backed reader (opencode stopped conversation) loads here — LOUD on failure, a user opened it
     return sm.taskState() || {};
   }
 

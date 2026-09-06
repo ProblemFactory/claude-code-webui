@@ -9,6 +9,7 @@
 
 const { MessageManager } = require('./message-manager');
 const { capsOf } = require('./backend-caps');
+const { get: harnessOf } = require('./harnesses'); // S9: store-side fork (opencode serve) before the spawn
 const { createMessageManager } = require('./normalizers');
 const { listCodexThreads } = require('./codex-session-store');
 const { findCodexSessionJsonlPath, lastCodexTurnModel, lastCodexTurnEffort, extractCodexThreadMeta } = require('./adapters/codex');
@@ -299,6 +300,24 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
             : data.extraArgs
               ? (String(data.extraArgs).trim().match(/"[^"]*"|'[^']*'|\S+/g) || []).map(t => t.replace(/^(["'])(.*)\1$/, '$2'))
               : [];
+          // S9 (B-03f2): a harness whose STORE forks server-side (opencode:
+          // POST /session/:id/fork on the serve API) mints the NEW conversation
+          // id BEFORE the spawn — the session then resumes THAT id (the wrapper's
+          // session/load), nothing to adopt later. The user asked for a fork:
+          // any failure (not installed / serve parked / no fork endpoint / 404)
+          // is refused LOUDLY here, never degraded into a plain resume (that
+          // would put two writers on the parent — the B-4058 class).
+          if (data.fork && data.resume && data.resumeId && !data.hostId && typeof harnessOf(backend).store?.forkSession === 'function') {
+            let forked;
+            try { forked = await harnessOf(backend).store.forkSession(data.resumeId, { cwd }); }
+            catch (e) {
+              ws.send(JSON.stringify({ type: 'error', reqId: data.reqId, code: 'fork-failed', message: `Fork failed: ${e.message}` }));
+              break;
+            }
+            console.log(`[session] ${backend} fork minted ${forked.id} from ${data.resumeId}`);
+            data.forkedFromId = data.resumeId;
+            data.resumeId = forked.id;
+          }
           const sessionSpec = adapter.buildSessionArgs({
             cwd,
             model: data.model,
