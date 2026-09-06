@@ -383,7 +383,13 @@ function updateMetaFromThread(resp) {
     // built at spawn assumed a fork and includes the resume target, so drop
     // our own id to avoid a self-referencing fork chain (it made discovery
     // hide the thread from the session list after termination)
-    forked_from: (() => { const c = forkedFrom.filter((id) => id !== meta.threadId); return c.length ? c : undefined; })(),
+    forked_from: (() => { const c = [...new Set(forkedFrom)].filter((id) => id !== meta.threadId); return c.length ? c : undefined; })(),
+    // codex's OWN fork parent (thread/fork → Thread.forkedFromId in the 0.153.4
+    // bindings), echoed so the wrapper's copy of the meta names it too. The
+    // fork BOUNDARY ordinal is not on the wire — the rollout's own session_meta
+    // (history_base / forked_from_ordinal_exclusive) is its only source and
+    // extractCodexThreadMeta reads it from the file.
+    forked_from_id: thread.forkedFromId || thread.forked_from_id || undefined,
     agent_role: thread.agentRole || null,
     agent_nickname: thread.agentNickname || null,
   });

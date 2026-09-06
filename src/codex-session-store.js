@@ -155,6 +155,9 @@ function assembleCodexThreads({ metas, mergedThreadIds }, { activeSessions, open
       agentRole: meta.agentRole || '',
       agentNickname: meta.agentNickname || '',
       parentThreadId: meta.parentThreadId || null,
+      forkedFromId: meta.forkedFromId || null,                 // codex's own fork parent (0.153 thread/fork, sub-agent spawn) — NOT hidden: it is its own conversation
+      forkedFromOrdinal: Number.isInteger(meta.forkedFromOrdinal) ? meta.forkedFromOrdinal : null,
+      historyMode: meta.historyMode || null,
       webuiId: active?.id || null,
       webuiName: active?.session?.name || null,
       webuiMode: active?.session?.mode || null,
@@ -162,6 +165,54 @@ function assembleCodexThreads({ metas, mergedThreadIds }, { activeSessions, open
   }
   sessions.sort((a, b) => b.startedAt - a.startedAt);
   return sessions;
+}
+
+/** The fork ancestry a thread's read-only view prepends, oldest → newest
+ *  (codex 0.153 paginated forks). Two sources, ONE list:
+ *   · the wrapper's `forked_from` chain (superseded ids of THIS conversation
+ *     — merged whole, exactly as before; the fingerprint dedup absorbs the
+ *     twin records a copied history carries)
+ *   · codex's OWN `forked_from_id` parents whose boundary is KNOWN — a
+ *     'Referenced' fork's rollout holds none of the parent's records, only
+ *     `history_base.end_ordinal_exclusive` / `forked_from_ordinal_exclusive`
+ *     (parent-numbered): the parent's records below it ARE the fork's
+ *     history, its later turns belong to the parent alone.
+ *  Entry = { id, untilOrdinal|null } (null = whole file). A sub-agent's
+ *  `subagent_history_start_ordinal` is child-numbered and its rollout already
+ *  copies the inherited context, so it never adds an ancestor here. Depth-
+ *  capped (8), cycle-safe, a missing rollout ends the walk. */
+function resolveCodexForkAncestry(threadId, wrapperChain = []) {
+  const entries = [];
+  const seen = new Set(threadId ? [threadId] : []);
+  for (const id of Array.isArray(wrapperChain) ? wrapperChain : []) {
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    entries.push({ id, untilOrdinal: null });
+  }
+  const native = [];
+  let cur = threadId, depth = 0;
+  while (cur && depth++ < 8) {
+    const fp = findCodexSessionJsonlPath(cur);
+    if (!fp) break;
+    const m = extractCodexThreadMeta(fp);
+    const until = Number.isInteger(m.forkedFromOrdinal) ? m.forkedFromOrdinal : null;
+    if (!m.forkedFromId || until === null) break;
+    const parent = m.forkedFromId;
+    const existing = entries.find((e) => e.id === parent);
+    if (existing) existing.untilOrdinal = existing.untilOrdinal === null ? until : Math.min(existing.untilOrdinal, until);
+    else if (!seen.has(parent)) { seen.add(parent); native.unshift({ id: parent, untilOrdinal: until }); }
+    else break;
+    cur = parent;
+  }
+  return [...native, ...entries];
+}
+
+/** Keep only the records below a parent-numbered boundary. Records without a
+ *  top-level `ordinal` (pre-0.153 rollouts, wrapper buffer copies) are kept —
+ *  the boundary can only speak about records that carry one. */
+function cutRecordsAtOrdinal(records, untilOrdinal) {
+  if (!Number.isInteger(untilOrdinal)) return records;
+  return (records || []).filter((r) => !Number.isInteger(r?.ordinal) || r.ordinal < untilOrdinal);
 }
 
 function sortRecords(records) {
@@ -233,11 +284,15 @@ class CodexSessionMessages {
   _ensureParsed() {
     if (this._all) return;
     const threadId = getCodexHistorySessionId(this._session);
-    // Load forked-from chain first (oldest → newest), then current thread
-    const forkedFrom = this._session?.forkedFrom || [];
+    // Fork ancestry first (oldest → newest; the wrapper chain whole, codex's
+    // own 0.153 fork parents cut at their boundary ordinal), then the current
+    // thread. NOTE: parseCodexSessionJsonl is tail-bounded (32MB) — a
+    // Referenced fork off a parent larger than that reads the parent's TAIL,
+    // which the boundary then (correctly) rejects: bounded, never wrong records.
+    const ancestry = resolveCodexForkAncestry(threadId, this._session?.forkedFrom || []);
     let history = [];
-    for (const forkId of forkedFrom) {
-      const forkHistory = parseCodexSessionJsonl(forkId);
+    for (const { id: forkId, untilOrdinal } of ancestry) {
+      const forkHistory = cutRecordsAtOrdinal(parseCodexSessionJsonl(forkId), untilOrdinal);
       if (forkHistory.length) history = mergeCodexRecords(history, forkHistory);
     }
     const currentHistory = threadId ? parseCodexSessionJsonl(threadId) : [];
@@ -382,4 +437,6 @@ module.exports = {
   dirCacheStats,
   mergeCodexRecords,
   parseCodexSessionJsonl,
+  resolveCodexForkAncestry,
+  cutRecordsAtOrdinal,
 };

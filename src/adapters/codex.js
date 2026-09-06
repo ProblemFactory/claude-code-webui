@@ -729,6 +729,17 @@ function extractCodexThreadMeta(filePath) {
   let sourceMeta = normalizeCodexSource(null);
   let forkedFromId = null;
   let forkedFromChain = null;
+  // 0.153 fork boundary (SessionMeta in codex-rs protocol.rs, verified against
+  // the 0.153.4 generated bindings): `forked_from_ordinal_exclusive` (PARENT-
+  // numbered, exclusive) or `history_base {thread_id, end_ordinal_exclusive}`
+  // (a paginated 'Referenced' fork — the child rollout carries NO copy of the
+  // parent's records, its history IS the parent's prefix below that ordinal).
+  // `subagent_history_start_ordinal` is CHILD-numbered: a sub-agent rollout
+  // copies its inherited context in below it. Read from the thread's OWN
+  // session_meta only (a copied ancestor meta describes another boundary).
+  let forkedFromOrdinal = null;
+  let ownHistoryStartOrdinal = null;
+  let historyMode = null;
   let sessionAgentRole = '';
   let sessionAgentNickname = '';
   let reviewDetected = false;
@@ -765,6 +776,17 @@ function extractCodexThreadMeta(filePath) {
         if (explicitName) name = explicitName;
         forkedFromId = msg.payload?.forked_from_id || forkedFromId;
         if (Array.isArray(msg.payload?.forked_from)) forkedFromChain = msg.payload.forked_from;
+        if ((msg.payload?.id || '') === threadId) {
+          const p = msg.payload || {};
+          const ord = (v) => (Number.isInteger(v) && v >= 0 ? v : null);
+          if (forkedFromOrdinal === null) {
+            forkedFromOrdinal = ord(p.forked_from_ordinal_exclusive);
+            const hb = p.history_base && typeof p.history_base === 'object' ? p.history_base : null;
+            if (forkedFromOrdinal === null && hb && p.forked_from_id && hb.thread_id === p.forked_from_id) forkedFromOrdinal = ord(hb.end_ordinal_exclusive);
+          }
+          if (ownHistoryStartOrdinal === null) ownHistoryStartOrdinal = ord(p.subagent_history_start_ordinal);
+          if (!historyMode && typeof p.history_mode === 'string') historyMode = p.history_mode;
+        }
         if (!source) {
           source = msg.payload?.source || null;
           sourceMeta = normalizeCodexSource(source);
@@ -840,6 +862,10 @@ function extractCodexThreadMeta(filePath) {
     agentNickname: sourceMeta.agentNickname,
     parentThreadId: sourceMeta.parentThreadId,
     forkedFrom: forkedFromChain || [],
+    forkedFromId: forkedFromId || null,   // codex's own fork parent (thread/fork or a sub-agent spawn)
+    forkedFromOrdinal,                    // PARENT-numbered exclusive boundary (0.153 paginated forks), else null
+    ownHistoryStartOrdinal,               // CHILD-numbered: a sub-agent's own history starts here (inherited context below)
+    historyMode,                          // 'legacy' | 'paginated' (0.153), else null
   };
   // NEVER cache a failed extraction: a transient IO error (EMFILE under fd
   // pressure, mid-write race) would otherwise be cached keyed by the file's

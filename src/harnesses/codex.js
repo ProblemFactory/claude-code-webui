@@ -57,6 +57,10 @@ module.exports = {
     Reader: codexStore.CodexSessionMessages,
     createReader: (session, sessionId, opts) => new codexStore.CodexSessionMessages(session, sessionId, opts || {}),
     forkChain: (id) => { const p = findCodexSessionJsonlPath(id); return p ? (extractCodexThreadMeta(p).forkedFrom || []) : []; },
+    // (id, wrapperChain) → [{ id, untilOrdinal|null }] oldest→newest: the wrapper
+    // chain ∪ codex's own 0.153 fork parents cut at their boundary ordinal —
+    // what the read-only view prepends (codex-session-store.resolveCodexForkAncestry)
+    forkAncestry: (id, wrapperChain) => codexStore.resolveCodexForkAncestry(id, wrapperChain || []),
     writerSweep: (rid, shq, opts) => writerSweepScript(rid, shq, { ...(opts || {}), backend: 'codex' }),
     remoteFind: (id) => ({
       root: '"$HOME"/.codex/sessions',
