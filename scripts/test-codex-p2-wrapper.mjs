@@ -51,7 +51,11 @@ process.stdin.on('data', (d) => {
       if (turns === 1) {
         send({ method: 'item/started', params: { item: { type: 'mcpToolCall', id: 'mcp-1', server: 'github', tool: 'list_issues', arguments: { repo: 'x/y' }, status: 'inProgress' } } });
         send({ method: 'item/completed', params: { item: { type: 'mcpToolCall', id: 'mcp-1', server: 'github', tool: 'list_issues', arguments: { repo: 'x/y' }, status: 'completed', result: { content: [{ type: 'text', text: '3 issues' }] } } } });
-        send({ method: 'item/completed', params: { item: { type: 'webSearch', id: 'ws-1', query: 'vibespace acp', results: [{ title: 't', url: 'u' }] } } });
+        // the REAL v2 sequence (0.153.4 WebSearchItem): item/started is an EMPTY
+        // stub (query '', action null) — the query/action/results exist only on
+        // item/completed (owner screenshot: every card read {"query":"","action":null})
+        send({ method: 'item/started', params: { item: { type: 'webSearch', id: 'ws-1', query: '', action: null, results: null } } });
+        send({ method: 'item/completed', params: { item: { type: 'webSearch', id: 'ws-1', query: 'vibespace acp', action: { type: 'search', queries: ['vibespace acp', 'vibespace agent client protocol'] }, results: [{ type: 'text_result', ref_id: 'turn1search0', domain: 'example.org', title: 'ACP <b>spec</b>', url: 'https://example.org/acp', snippet: 'Agent  Client Protocol\\n overview' }] } } });
         send({ method: 'item/completed', params: { item: { type: 'imageView', id: 'img-1', path: '/tmp/shot.png' } } });
         // per-response usage (v2 camelCase shape, as the real app-server sends it) — the wrapper relays it as a token_count
         send({ method: 'thread/tokenUsage/updated', params: { threadId: 'th-p2', turnId: tid, tokenUsage: { total: { totalTokens: 5150, inputTokens: 5000, cachedInputTokens: 4000, cacheWriteInputTokens: 0, outputTokens: 150, reasoningOutputTokens: 40 }, last: { totalTokens: 5150, inputTokens: 5000, cachedInputTokens: 4000, cacheWriteInputTokens: 0, outputTokens: 150, reasoningOutputTokens: 40 }, modelContextWindow: 828400 } } });
@@ -88,7 +92,11 @@ sendLine({ type: 'chat-input', text: 'first', msgId: 'm1' });
 ok(await waitFor(() => rpc().some((m) => m.method === 'turn/start') && readMeta()?.activeTurnId === 'turn-1'), 'first chat-input starts a turn and the wrapper adopts it as active');
 ok(await waitFor(() => bufRecords().some((r) => r.type === 'response_item' && r.payload?.type === 'function_call' && r.payload.name === 'mcp__github__list_issues')), 'a LIVE mcpToolCall item is recorded as a function_call (mcp__<server>__<tool>)');
 ok(await waitFor(() => bufRecords().some((r) => r.payload?.type === 'function_call_output' && r.payload.call_id === 'mcp-1' && /3 issues/.test(r.payload.output))), 'its completion lands as function_call_output with the MCP result');
-ok(await waitFor(() => bufRecords().some((r) => r.payload?.type === 'function_call' && r.payload.name === 'web_search' && /vibespace acp/.test(r.payload.arguments))), 'a webSearch item is a visible web_search call');
+ok(await waitFor(() => bufRecords().some((r) => r.payload?.type === 'function_call' && r.payload.name === 'web_search' && r.payload.call_id === 'ws-1')), 'a webSearch item is a visible web_search call from item/started (the pending card)');
+// 2.369.43: the completion is codex's OWN rollout shape (event_msg web_search_end) carrying the FINAL query/action/results — not a function_call_output of raw JSON
+ok(await waitFor(() => bufRecords().some((r) => r.type === 'event_msg' && r.payload?.type === 'web_search_end' && r.payload.call_id === 'ws-1' && r.payload.query === 'vibespace acp' && r.payload.action?.type === 'search' && Array.isArray(r.payload.results) && r.payload.results[0]?.url === 'https://example.org/acp')), 'item/completed lands as event_msg web_search_end {call_id, query, action, results} (the rollout twin shape)');
+{ const wse = bufRecords().find((r) => r.type === 'event_msg' && r.payload?.type === 'web_search_end'); ok(wse && Object.keys(wse.payload).join(',') === 'type,call_id,query,action,results', `web_search_end key order mirrors codex-rs (fingerprint dedup with the rollout copy): ${wse && Object.keys(wse.payload).join(',')}`); }
+ok(!bufRecords().some((r) => r.payload?.type === 'function_call_output' && r.payload.call_id === 'ws-1'), 'no function_call_output twin for the search (one completion record, one edit)');
 ok(await waitFor(() => bufRecords().some((r) => r.payload?.type === 'function_call' && r.payload.name === 'view_image' && /shot\.png/.test(r.payload.arguments))), 'an imageView item is a visible view_image call');
 
 // ② second input while the turn is active → queued, never a second turn/start
@@ -120,6 +128,12 @@ mm.convertHistory([...bufRecords(), ...events().filter((e) => e.type === 'event_
 const tools = mm.messages.filter((m) => m.role === 'tool');
 ok(tools.some((m) => m.toolName && /list_issues/.test(m.toolName) && m.collapseKind === 'mcp' && m.toolStatus === 'ok'), `the MCP call renders as a tool card in the mcp fold kind, completed (${tools.map((m) => m.toolName + ':' + m.collapseKind + ':' + m.toolStatus).join(', ')})`);
 ok(tools.some((m) => (m.collapseKind === 'image' && /view_image|View Image/i.test(m.toolName)) || (m.collapseKind === 'search' && /web_search|Web Search/i.test(m.toolName))), 'view_image folds as image, web search / image view cards never fold (visible work)');
+{ // 2.369.43: ONE complete search card whose input carries the FINAL query/action and whose output is the rendered result list
+  const searches = tools.filter((m) => m.collapseKind === 'search');
+  const b = searches[0]?.content?.[0];
+  ok(searches.length === 1 && searches[0].status === 'complete' && b?.input?.query === 'vibespace acp' && b?.input?.action?.queries?.length === 2, `the webSearch item is ONE complete card with the final query/action (${searches.length} cards; input ${JSON.stringify(b?.input)})`);
+  ok(b && b.output === 'ACP <b>spec</b> — https://example.org/acp\nAgent Client Protocol overview', `…and a human result list, not raw JSON: ${JSON.stringify(b?.output)}`);
+}
 const sys = mm.messages.filter((m) => m.role === 'system').map((m) => m.content?.[0]?.text || '');
 ok(sys.some((t) => /Queued — runs after the current turn/.test(t)), 'the queued notice renders as a system card');
 ok(sys.some((t) => /Compacting context/.test(t)) && sys.some((t) => /Context compacted/.test(t)), 'compaction start + compacted render as system cards');

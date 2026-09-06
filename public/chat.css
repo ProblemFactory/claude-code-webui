@@ -216,6 +216,13 @@
   border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
   border-radius: 999px; line-height: 15px;
 }
+/* Search-card title: the query/url as muted inline text (2.369.43) — visible
+   without expanding Input; the full string rides the title tooltip */
+.chat-tool-query {
+  display: inline-block; vertical-align: bottom; margin-left: 6px; max-width: 60ch;
+  font-weight: 400; font-size: 11px; color: var(--text-secondary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .chat-tool-use details summary {
   cursor: pointer; font-size: 11px; color: var(--text-dim); padding: 2px 0;
 }

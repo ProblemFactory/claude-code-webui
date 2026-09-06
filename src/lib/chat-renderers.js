@@ -13,6 +13,7 @@ import { UI_ICONS } from './icons.js';
 import { agentMemoryPathRes } from './agent-meta.js';
 import { createBackendIconHtml, getBackendMeta } from './agent-meta.js';
 import { t } from './i18n.js';
+import { searchQueryOf } from '../search-card.js'; // shared with the server (CJS pulled into the bundle, like task-color-seq.js)
 
 // Agent-memory files get their own card treatment (user ask: a memory write
 // is a different concern than a project write — render "记忆更新 <name>"
@@ -39,6 +40,23 @@ export function toolHeaderHtml(name) {
   return escHtml(toolDisplayName(name));
 }
 
+// Search-kind cards carry their query/url IN THE TITLE (2.369.43, owner ask:
+// "see what was searched without expanding"): claude WebSearch/WebFetch by
+// tool name, codex web_search/web_fetch + ACP search tools by the normalizer's
+// `collapseKind` hint. The text is MODEL/WEB-controlled and syncs to every
+// client — escHtml on both the chip and its title attribute (XSS law); the
+// chip is truncated, the tooltip carries the full string. '' when nothing to
+// show (a pending codex card is an empty stub until item/completed).
+const SEARCH_TITLE_MAX = 90;
+export function searchQueryChipHtml(block, msg) {
+  const tn = block?.toolName;
+  if (!(msg?.collapseKind === 'search' || tn === 'WebSearch' || tn === 'WebFetch')) return '';
+  const q = searchQueryOf(block?.input);
+  if (!q) return '';
+  const short = q.length > SEARCH_TITLE_MAX ? q.slice(0, SEARCH_TITLE_MAX - 1) + '…' : q;
+  return ` <span class="chat-tool-query" title="${escHtml(q)}">${escHtml(short)}</span>`;
+}
+
 // Curated localized display names for harness built-in tools (fallback: raw
 // name — MCP/unknown tools keep their identifier as plain text; the typing
 // label and other TEXT contexts get "tool · server" for MCP). See also
@@ -53,6 +71,7 @@ export function toolDisplayName(name) {
     EnterPlanMode: t('Enter plan mode'), ExitPlanMode: t('Exit plan mode'),
     KillShell: t('Kill shell'), BashOutput: t('Shell output'),
     SendMessage: t('Send message'), Skill: t('Skill'),
+    web_search: t('Web search'), web_fetch: t('Fetch page'), // codex raw names (2.369.43) — same labels as claude's
   };
   if (M[name]) return M[name];
   const mcp = mcpParts(name);
@@ -465,7 +484,7 @@ class ChatRenderers {
         const label = `${UI_ICONS.hourglass} ${escHtml(verb)} ${this.clickablePath(fp, mb)}`;
         html = `<div class="chat-tool-pending"><span class="chat-tool-label">${label}</span><span class="chat-spinner"></span></div>`;
       } else {
-        const desc = isAgent && block.input?.description ? `${icon} Agent: ${escHtml(block.input.description)}${agentModelChip(block.input?.model)}` : `${icon} ${toolHeaderHtml(block.toolName)}`;
+        const desc = isAgent && block.input?.description ? `${icon} Agent: ${escHtml(block.input.description)}${agentModelChip(block.input?.model)}` : `${icon} ${toolHeaderHtml(block.toolName)}${searchQueryChipHtml(block, msg)}`;
         const inputStr = stripAnsi(typeof block.input === 'string' ? block.input : JSON.stringify(block.input, null, 2));
         const statusHtml = isPending
           ? `<div class="chat-tool-output-pending"><span class="chat-spinner"></span> ${t('running...')}</div>`
@@ -514,7 +533,7 @@ class ChatRenderers {
     const inputStr = stripAnsi(typeof block.input === 'string' ? block.input : JSON.stringify(block.input, null, 2));
 
     if (block.status === 'error') {
-      return `<div class="chat-tool-use"><span class="chat-tool-label" title="${escHtml(block.toolName)}">${toolCardIcon(block.toolName)} ${toolHeaderHtml(block.toolName)} ${this.clickablePath(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">${t('Input')}</summary><pre>${this.linkifyText(inputStr)}</pre></details><details class="chat-diff" open><summary class="chat-diff-summary chat-tool-error-label">\u2717 ${t('Error')}</summary><pre class="chat-tool-error-text">${this.linkifyText(resultText)}</pre></details></div>`;
+      return `<div class="chat-tool-use"><span class="chat-tool-label" title="${escHtml(block.toolName)}">${toolCardIcon(block.toolName)} ${toolHeaderHtml(block.toolName)}${searchQueryChipHtml(block, msg)} ${this.clickablePath(fp)}</span><details class="chat-diff"><summary class="chat-diff-summary">${t('Input')}</summary><pre>${this.linkifyText(inputStr)}</pre></details><details class="chat-diff" open><summary class="chat-diff-summary chat-tool-error-label">\u2717 ${t('Error')}</summary><pre class="chat-tool-error-text">${this.linkifyText(resultText)}</pre></details></div>`;
     }
     if (block.toolName === 'Patch') {
       const patchHtml = this.renderPatchDiff(block);
@@ -579,7 +598,7 @@ class ChatRenderers {
     }
     // Generic tool
     const firstLine = resultText.split('\n')[0].substring(0, 120) || t('(empty)');
-    return `<div class="chat-tool-use"><span class="chat-tool-label" title="${escHtml(block.toolName)}">${toolCardIcon(block.toolName)} ${toolHeaderHtml(block.toolName)}</span>${imagesHtml}<details class="chat-diff"><summary class="chat-diff-summary">${t('Input')}</summary><pre>${this.linkifyText(inputStr)}</pre></details><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${escHtml(firstLine)}</summary><pre>${this.linkifyText(resultText)}</pre></details></div>`;
+    return `<div class="chat-tool-use"><span class="chat-tool-label" title="${escHtml(block.toolName)}">${toolCardIcon(block.toolName)} ${toolHeaderHtml(block.toolName)}${searchQueryChipHtml(block, msg)}</span>${imagesHtml}<details class="chat-diff"><summary class="chat-diff-summary">${t('Input')}</summary><pre>${this.linkifyText(inputStr)}</pre></details><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${escHtml(firstLine)}</summary><pre>${this.linkifyText(resultText)}</pre></details></div>`;
   }
 
   /**

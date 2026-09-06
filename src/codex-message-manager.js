@@ -12,6 +12,8 @@
  */
 
 const { peerDisplayName } = require('./message-manager');
+// web-search cards: the ONE results renderer + the twin-dedup key (PURE, shared with the client's title chip)
+const { renderSearchOutput, searchActionKey } = require('./search-card');
 
 function safeJsonParse(text, fallback = null) {
   try { return JSON.parse(text); } catch { return fallback; }
@@ -143,7 +145,8 @@ const SKIPPED_EVENT_TYPES = new Set([
   'agent_message_content_delta', 'reasoning_content_delta', 'reasoning_raw_content_delta', 'plan_delta',
   // tool lifecycle noise — the function_call / function_call_output pair is the card
   'exec_command_begin', 'exec_command_end', 'exec_command_output_delta', 'exec_approval_request', 'apply_patch_approval_request', 'patch_apply_begin', 'patch_apply_updated',
-  'mcp_tool_call_begin', 'mcp_tool_call_end', 'web_search_begin', 'web_search_end', 'view_image_tool_call', 'image_generation_begin', 'image_generation_end', 'turn_diff', 'terminal_interaction',
+  // (web_search_begin / web_search_end are HANDLED — a rollout persists the search ONLY there, 2.369.43)
+  'mcp_tool_call_begin', 'mcp_tool_call_end', 'view_image_tool_call', 'image_generation_begin', 'image_generation_end', 'turn_diff', 'terminal_interaction',
   'collab_agent_spawn_begin', 'collab_agent_spawn_end', 'collab_agent_interaction_begin', 'collab_agent_interaction_end',
   // wrapper / engine side channels consumed elsewhere (pool engine, goal sync, usage meter, delivery ladder)
   'rate_limits_updated', 'goal_updated', 'goal_cleared', 'thread_goal_updated', 'thread_queue_changed', '_remote_state', 'peer_message_result', 'reset_credit_result',
@@ -740,7 +743,7 @@ class CodexMessageManager {
     if (type === 'agent_message') return this._processAgentMessageItem(item, emit);
     // older Responses-API items that were silently dropped: each is real work
     // the model did, rendered as a COMPLETE card in its fold kind
-    if (type === 'web_search_call') return this._finalizeToolCall(item.call_id || item.id || this._nextId(), { output: item.status ? `status: ${item.status}` : '', isError: false, extraInput: { query: item.action?.query || '', action: item.action?.type || null }, rawName: 'web_search' }, emit);
+    if (type === 'web_search_call') return this._processWebSearchCallItem(item, emit);
     if (type === 'tool_search_call') return this._processCustomToolCall({ ...item, name: 'tool_search', input: item.arguments ?? item.input ?? '' }, emit);
     if (type === 'tool_search_output') return this._processFunctionCallOutput({ ...item, output: item.output ?? (Array.isArray(item.tools) ? item.tools.map((t) => t?.name || '').filter(Boolean).join(', ') : '') }, emit);
     if (type === 'local_shell_call') return this._processCustomToolCall({ ...item, name: 'local_shell', input: item.action ?? {} }, emit);
@@ -997,9 +1000,67 @@ class CodexMessageManager {
     this._finalizeToolCall(toolCallId, { output, isError }, emit);
   }
 
+  // ── web search (2.369.43, owner: every codex web_search card read
+  // {"query":"","action":null} / "(empty)") ──
+  // Three carriers of ONE search, all landing on ONE card keyed by call_id:
+  //   ① the wrapper's function_call at item/started (query EMPTY — the v2
+  //      WebSearchItem is a stub until item/completed) = the pending card;
+  //   ② event_msg web_search_end {call_id, query, action, results} — codex's
+  //      own rollout record (the ONLY place a 0.153 rollout persists the
+  //      search; a rebuild used to render no search at all) AND what the
+  //      wrapper now emits at item/completed in the same shape: query/action
+  //      merge into the card's input, results render through search-card.js
+  //      (the same rendering live and rebuilt; the buffer/rollout copies edit
+  //      the same card in place, never a second one);
+  //   ③ the id-less Responses-API web_search_call item 0.14x rollouts write
+  //      right AFTER ② for the same search (action only, no call_id) — a twin
+  //      of the card just finalized, adopted by action key in either order.
+  // web_search_begin is not persisted (0 in every local rollout) but handled
+  // for the live stream: a pending card if none exists, else a query patch.
+  _processWebSearchEvent(event, emit) {
+    const callId = event.call_id || event.callId || this._nextId();
+    const query = typeof event.query === 'string' ? event.query : '';
+    const action = event.action && typeof event.action === 'object' && !Array.isArray(event.action) ? event.action : null;
+    if (event.type === 'web_search_begin') {
+      const msgId = this.toolCallMessageIds.get(callId);
+      const existing = msgId ? this.messageIndex.get(msgId) : null;
+      if (existing) {
+        // pending card already there (wrapper ①): patch the query in, keep it pending
+        const block = existing.content?.[0];
+        if (query && block && block.type === 'tool_call') {
+          block.input = mergeToolInput(block.input, { query });
+          if (emit) this._emit({ op: 'edit', id: existing.id, fields: { content: existing.content } });
+        }
+        return;
+      }
+      this._processFunctionCall({ call_id: callId, name: 'web_search', arguments: JSON.stringify({ query, action }) }, emit);
+      return;
+    }
+    const key = searchActionKey(action, query);
+    // ③ arrived first (not observed in the wild, but the pairing is order-free): adopt its card
+    if (!this.toolCallMessageIds.has(callId) && this._lastSearchCall && this._lastSearchCall.key === key) {
+      this.toolCallMessageIds.set(callId, this._lastSearchCall.msgId);
+      this._lastSearchCall = null;
+    }
+    const { output, isError } = renderSearchOutput({ query, action, results: event.results, error: event.error });
+    this._finalizeToolCall(callId, { output, isError, extraInput: { query, action }, rawName: 'web_search' }, emit);
+    this._lastSearchEnd = { key, msgId: this.toolCallMessageIds.get(callId) || null };
+  }
+
+  _processWebSearchCallItem(item, emit) {
+    const action = item.action && typeof item.action === 'object' && !Array.isArray(item.action) ? item.action : null;
+    const key = searchActionKey(action, action?.query);
+    const idLess = !item.call_id && !item.id;
+    if (idLess && this._lastSearchEnd && this._lastSearchEnd.key === key) { this._lastSearchEnd = null; return; } // twin of ②
+    const callId = item.call_id || item.id || this._nextId();
+    this._finalizeToolCall(callId, { output: item.status ? `status: ${item.status}` : '', isError: false, extraInput: { query: action?.query || '', action }, rawName: 'web_search' }, emit);
+    if (idLess) this._lastSearchCall = { key, msgId: this.toolCallMessageIds.get(callId) || null };
+  }
+
   _processEvent(event, emit) {
     const type = event.type;
     if (!type) return;
+    if (type === 'web_search_begin' || type === 'web_search_end') return this._processWebSearchEvent(event, emit);
 
     if (type === 'task_started') {
       if (event.turn_id || event.turnId) {

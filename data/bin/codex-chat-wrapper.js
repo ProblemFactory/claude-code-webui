@@ -545,7 +545,23 @@ function handleItemCompleted(item, itemId) {
 function _handleItemCompletedInner(item, itemId) {
   const state = itemState.get(itemId) || {};
   const type = state.type || item.type;
-  if (type === 'mcpToolCall' || type === 'dynamicToolCall' || type === 'webSearch') {
+  if (type === 'webSearch') {
+    if (!state.type) handleItemStarted(item, itemId); // completed without a started (short call)
+    // The v2 WebSearchItem is EMPTY at item/started (query '', action null) and
+    // only complete here — so the completion is recorded in codex's OWN rollout
+    // shape, `event_msg web_search_end {call_id, query, action, results}`, and
+    // the normalizer renders it (query/action merged into the pending card's
+    // input, results rendered as title — url / snippet). One renderer for the
+    // live record and the rollout twin; key order mirrors codex-rs so the two
+    // copies dedupe by fingerprint on re-attach. `results` is omitted when the
+    // item has none (codex skips a None), `error` only when the item carries one.
+    const ev = { call_id: itemId, query: asString(item.query), action: item.action && typeof item.action === 'object' ? item.action : null };
+    if (Array.isArray(item.results)) ev.results = item.results;
+    if (item.error) ev.error = typeof item.error === 'string' ? item.error : (item.error.message || JSON.stringify(item.error));
+    emitTaskEvent('web_search_end', ev);
+    return;
+  }
+  if (type === 'mcpToolCall' || type === 'dynamicToolCall') {
     if (!state.type) handleItemStarted(item, itemId); // completed without a started (rollout merge / short call)
     const failed = !!item.error || item.status === 'failed' || item.success === false;
     const out = item.error ? (item.error.message || JSON.stringify(item.error)) : (item.result ?? item.contentItems ?? item.results ?? '');

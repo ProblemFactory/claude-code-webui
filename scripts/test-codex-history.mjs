@@ -602,5 +602,82 @@ const ok = (n, c, e) => { if (c) { pass++; console.log('  ✓ ' + n); } else { f
     ok('corpus: the response id (msgId) matches the walker\'s mid on every minted key', files > 0 && midBad.length === 0, midBad.slice(0, 5).join(' | '));
   }
 }
+// ── web search (2.369.43, owner: every codex web_search card read
+// {"query":"","action":null} + "(empty)"). Shapes verbatim from real rollouts
+// (2026-08 0.153: event_msg web_search_end ONLY, call_id 'exec-…';
+// 2026-05 0.14x: web_search_end 'ws_…' immediately followed by an id-less
+// web_search_call item; ids/queries anonymised).
+{
+  const results = [
+    { type: 'text_result', domain: 'support.example.org', ref_id: 'turn4search0', snippet: 'The overall fraction of mastery points  for that course that you have achieved. ... We hope', title: 'What are Course and Unit Mastery? – Help Center', url: 'https://support.example.org/hc/en-us/articles/1' },
+    { type: 'text_result', domain: 'support.example.org', ref_id: 'turn4search1', snippet: 'Learn more about Mastery and Proficiency here.', title: 'How do Course Levels work? – Help Center', url: 'https://support.example.org/hc/en-us/articles/2' },
+  ];
+  // ① rollout rebuild (0.153): the search lives ONLY in web_search_end → a complete 'search' card
+  const mm = new CodexMessageManager('ws1');
+  const msgs = mm.convertHistory([
+    { timestamp: '2026-08-24T11:36:38.601Z', type: 'event_msg', payload: { type: 'web_search_end', call_id: 'exec-535c79a7-85aa-4e48-bf1a-d5211414fa3d', query: 'site:example.org interactive learning math', action: { type: 'search', queries: ['site:example.org interactive learning math', 'site:example.org mastery points skills'] }, results } },
+    { timestamp: '2026-08-24T11:36:47.983Z', type: 'event_msg', payload: { type: 'web_search_end', call_id: 'exec-c437b77a-036c-462b-8645-fa4e41bd1303', query: 'https://example.org/s6.pdf', action: { type: 'open_page', url: 'https://example.org/s6.pdf' }, results: [{ type: 'text_result', ref_id: 'turn6view0', snippet: 'Total lines: 1', title: 'Internal Error' }] } },
+    { timestamp: '2026-04-14T10:22:36.550Z', type: 'event_msg', payload: { type: 'web_search_end', call_id: 'ws_0a7dc088f2d154ff0169de156303b4819aab594cfac5296bc7', query: "'JSON output' in https://developers.example.org/cli", action: { type: 'find_in_page', url: 'https://developers.example.org/cli', pattern: 'JSON output' } } },
+  ]);
+  const cards = msgs.filter((m) => m.role === 'tool');
+  ok('a rollout with web_search_end ONLY (0.153) rebuilds every search as a card (it rendered none)', cards.length === 3 && cards.every((m) => m.collapseKind === 'search' && m.status === 'complete' && m.toolStatus === 'ok'), JSON.stringify(cards.map((m) => [m.collapseKind, m.status])));
+  const s0 = cards[0]?.content?.[0];
+  ok('search card input carries the final query + action', s0?.input?.query === 'site:example.org interactive learning math' && s0?.input?.action?.type === 'search' && s0.input.action.queries.length === 2, JSON.stringify(s0?.input));
+  ok('results render as "title — url\\nsnippet" blocks (whitespace collapsed), not raw JSON', s0?.output === 'What are Course and Unit Mastery? – Help Center — https://support.example.org/hc/en-us/articles/1\nThe overall fraction of mastery points for that course that you have achieved. ... We hope\n\nHow do Course Levels work? – Help Center — https://support.example.org/hc/en-us/articles/2\nLearn more about Mastery and Proficiency here.', JSON.stringify(s0?.output));
+  ok("open_page renders 'opened <url>' + the page result", cards[1]?.content?.[0]?.output === 'opened https://example.org/s6.pdf\n\nInternal Error\nTotal lines: 1', JSON.stringify(cards[1]?.content?.[0]?.output));
+  ok("find_in_page renders \"found '<pattern>' in <url>\" (no results key at all)", cards[2]?.content?.[0]?.output === "found 'JSON output' in https://developers.example.org/cli", JSON.stringify(cards[2]?.content?.[0]?.output));
+  ok('no unknown-record telemetry / system card for the handled event', !msgs.some((m) => m.role === 'system') && !CodexMessageManager.SKIPPED_EVENT_TYPES.has('web_search_end') && !CodexMessageManager.SKIPPED_EVENT_TYPES.has('web_search_begin'));
+
+  // ② LIVE: the wrapper's item/started function_call (EMPTY stub) + its
+  // web_search_end + the rollout's byte-identical web_search_end on re-attach → ONE card, edited in place
+  const live = new CodexMessageManager('ws2'); const ops = []; live.onOp((o) => ops.push(o));
+  const end = { type: 'web_search_end', call_id: 'exec-1', query: 'vibespace acp', action: { type: 'search', queries: ['vibespace acp'] }, results: [results[0]] };
+  live.processLive({ timestamp: '2026-09-06T00:00:00.000Z', type: 'response_item', payload: { type: 'function_call', name: 'web_search', arguments: '{"query":"","action":null}', call_id: 'exec-1' } });
+  const pendingBefore = live.messages.filter((m) => m.role === 'tool');
+  ok('live: the item/started stub is a pending search card', pendingBefore.length === 1 && pendingBefore[0].status === 'pending' && pendingBefore[0].collapseKind === 'search');
+  live.processLive({ timestamp: '2026-09-06T00:00:01.000Z', type: 'event_msg', payload: end });
+  live.processLive({ timestamp: '2026-09-06T00:00:01.050Z', type: 'event_msg', payload: { ...end } });
+  const liveCards = live.messages.filter((m) => m.role === 'tool');
+  const lb = liveCards[0]?.content?.[0];
+  ok('live: web_search_end (wrapper) + its rollout twin = still ONE card, complete, query merged into the input, results rendered', liveCards.length === 1 && liveCards[0].status === 'complete' && lb?.input?.query === 'vibespace acp' && lb?.input?.action?.type === 'search' && /Help Center — https:/.test(lb?.output || ''), JSON.stringify([liveCards.length, lb?.input, lb?.output]));
+  ok('live: ops = one create + edits on the SAME id (never a second create)', ops.filter((o) => o.op === 'create').length === 1 && ops.filter((o) => o.op === 'edit').every((o) => o.id === liveCards[0].id), JSON.stringify(ops.map((o) => o.op + ':' + o.id)));
+  // begin (not persisted by codex; live-stream tolerance): unknown call → pending card; known → query patch, still pending
+  const beg = new CodexMessageManager('ws3');
+  beg.processLive({ timestamp: '2026-09-06T00:00:00.000Z', type: 'event_msg', payload: { type: 'web_search_begin', call_id: 'exec-9', query: 'early q' } });
+  const bc = beg.messages.filter((m) => m.role === 'tool');
+  ok('web_search_begin without a card = pending search card with the query', bc.length === 1 && bc[0].status === 'pending' && bc[0].content[0].input.query === 'early q' && bc[0].collapseKind === 'search', JSON.stringify(bc[0]));
+  beg.processLive({ timestamp: '2026-09-06T00:00:00.500Z', type: 'event_msg', payload: { type: 'web_search_begin', call_id: 'exec-9', query: 'patched q' } });
+  beg.processLive({ timestamp: '2026-09-06T00:00:01.000Z', type: 'event_msg', payload: { type: 'web_search_end', call_id: 'exec-9', query: 'patched q', action: { type: 'search', queries: ['patched q'] }, results: [] } });
+  const bc2 = beg.messages.filter((m) => m.role === 'tool');
+  ok('begin+begin+end on one call_id = one card, completed with "no results"', bc2.length === 1 && bc2[0].status === 'complete' && bc2[0].content[0].input.query === 'patched q' && bc2[0].content[0].output === 'no results', JSON.stringify(bc2[0]?.content));
+  // error → is_error card (typed field on the item, relayed by the wrapper)
+  const er = new CodexMessageManager('ws4');
+  er.convertHistory([{ timestamp: '2026-09-06T00:00:01.000Z', type: 'event_msg', payload: { type: 'web_search_end', call_id: 'exec-e', query: 'q', action: { type: 'search', queries: ['q'] }, error: 'rate limited' } }]);
+  ok('a search error is an error card carrying the message', er.messages[0]?.toolStatus === 'error' && er.messages[0]?.content[0].output === 'rate limited' && er.messages[0]?.content[0].status === 'error');
+
+  // ③ 0.14x twin pair: web_search_end then the id-less web_search_call (same action) → ONE card; an orphan call still renders
+  const twin = new CodexMessageManager('ws5');
+  const tm = twin.convertHistory([
+    { timestamp: '2026-05-09T15:21:38.791Z', type: 'event_msg', payload: { type: 'web_search_end', call_id: 'ws_0c1fb930c3f4', query: 'GitHub request code review pull request', action: { type: 'search', query: 'GitHub request code review pull request', queries: ['GitHub request code review pull request', 'code review request API'] } } },
+    { timestamp: '2026-05-09T15:21:38.792Z', type: 'response_item', payload: { type: 'web_search_call', status: 'completed', action: { type: 'search', query: 'GitHub request code review pull request', queries: ['GitHub request code review pull request', 'code review request API'] } } },
+    { timestamp: '2026-05-15T12:35:22.275Z', type: 'event_msg', payload: { type: 'web_search_end', call_id: 'ws_067ac040eb74', query: 'https://ai.example.dev/docs/document-processing', action: { type: 'open_page', url: 'https://ai.example.dev/docs/document-processing' } } },
+    { timestamp: '2026-05-15T12:35:22.275Z', type: 'response_item', payload: { type: 'web_search_call', status: 'completed', action: { type: 'open_page', url: 'https://ai.example.dev/docs/document-processing' } } },
+    { timestamp: '2026-04-15T01:01:48.300Z', type: 'response_item', payload: { type: 'web_search_call', status: 'completed' } },
+  ]);
+  const tc = tm.filter((m) => m.role === 'tool');
+  ok('0.14x rollouts: web_search_end + its id-less web_search_call twin = ONE card each (2 searches + 1 orphan call = 3 cards, not 5)', tc.length === 3 && tc[0].content[0].input.query === 'GitHub request code review pull request' && tc[1].content[0].input.action?.url === 'https://ai.example.dev/docs/document-processing' && tc[2].content[0].output === 'status: completed', JSON.stringify(tc.map((m) => m.content[0].input)));
+  // reverse order (call first, then end) also pairs
+  const rev = new CodexMessageManager('ws6');
+  const rm = rev.convertHistory([
+    { timestamp: '2026-05-09T15:21:38.791Z', type: 'response_item', payload: { type: 'web_search_call', status: 'completed', action: { type: 'open_page', url: 'https://x.example/p' } } },
+    { timestamp: '2026-05-09T15:21:38.792Z', type: 'event_msg', payload: { type: 'web_search_end', call_id: 'ws_r', query: 'https://x.example/p', action: { type: 'open_page', url: 'https://x.example/p' }, results: [{ type: 'text_result', title: 'P', url: 'https://x.example/p', snippet: 'body' }] } },
+  ]);
+  const rc = rm.filter((m) => m.role === 'tool');
+  ok('…and in the reverse order: the end adopts the call\'s card (one card, results rendered)', rc.length === 1 && rc[0].content[0].output === 'opened https://x.example/p\n\nP — https://x.example/p\nbody', JSON.stringify(rc.map((m) => m.content[0].output)));
+  // wrapper: the completion path is codex's OWN shape; the empty-stub started record is the pending card
+  const wr = require('node:fs').readFileSync(REPO + '/data/bin/codex-chat-wrapper.js', 'utf8');
+  ok("wrapper records item/completed webSearch as event_msg web_search_end {call_id, query, action, results} — never a function_call_output of raw JSON", /if \(type === 'webSearch'\) \{[\s\S]{0,1400}emitTaskEvent\('web_search_end', ev\)/.test(wr) && !/type === 'mcpToolCall' \|\| type === 'dynamicToolCall' \|\| type === 'webSearch'/.test(wr));
+}
+
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);
 process.exit(fail ? 1 : 0);
