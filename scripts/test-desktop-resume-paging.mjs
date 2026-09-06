@@ -33,8 +33,15 @@
 // on the FIXED build (the source-level control rebuilds with
 // RESUME_SETTLE_MS = 0, which cannot host a timing-dependent repro).
 //
+// ROUND 3 adds three TRUSTED-INPUT legs (§4b): everything above dispatches
+// synthetic events or writes scrollTop, and the finding this branch fixes was
+// only visible with REAL input — a plain left-click during the settle used to
+// run the full _endResumeSettle() and hand the resume's own displacement a
+// stranded window. Input.dispatchMouseEvent is also the only way to touch a
+// native scrollbar, which has no DOM node to dispatch to.
+//
 // IN THE RELEASE GATE (scripts/ci.mjs) despite being heavy — two chrome runs
-// and two bundle builds, ~2.5 min here after round 2: this is the only place
+// and two bundle builds, ~3.5 min here after round 3: this is the only place
 // the whole path is exercised end to end, and its negative controls are what
 // prove the harness touches it at all. The cheap in-gate pins live in
 // test-chat-trim-guard.mjs (the browser-suite budget in ci.mjs is 600s).
@@ -346,6 +353,38 @@ const SCENARIO = `(async () => {
   }
   const wheelState = { loading: !!view._loading, pinned: !!view._pinned, ws: view._windowStart, st: Math.round(list.scrollTop) };
 
+  // ── HANDLES for the TRUSTED-INPUT legs (round 3). Those legs need real CDP
+  //    Input events dispatched from node at a precise offset from the resume,
+  //    so the page side exposes the pieces and node drives the clock.
+  window.__vs = {
+    view, list, snap, toTail, sinceResume,
+    arm: async () => {
+      await toTail();
+      await dm.switchTo(deskA); await sleep(1200);
+      view._traceRing = [];
+      await dm.switchTo(deskB);
+      const r = list.getBoundingClientRect();
+      return { since: sinceResume(), rect: { left: r.left, top: r.top, right: r.right, bottom: r.bottom, w: r.width, h: r.height } };
+    },
+    at: async (off) => { await waitTo(off); return sinceResume(); },
+    inject: async (off) => { await waitTo(off); const at = sinceResume(); list.scrollTop = 0; return at; },
+    top: () => { list.scrollTop = 0; },
+    finish: async (ms) => { await sleep(ms); return { ...snap(), sinceResume: sinceResume(),
+      traces: (view._traceRing || []).map((e) => e.tag + (e.via ? '/' + e.via : '') + (e.why ? '/' + e.why : '')) }; },
+    hit: (x, y) => { const el = document.elementFromPoint(x, y); return el ? (el.className || el.tagName) + '' : 'none'; },
+    // The semantic MINIMAP hides the native scrollbar
+    // (.chat-minimap-active { scrollbar-width: none }), so a native scrollbar
+    // drag is only reachable with the minimap off — which is exactly the
+    // configuration where _pointerDragScroll is the ONLY signal that a drag
+    // happened (with the minimap ON the reader drags the minimap, and that
+    // stamps through _noteUserNav('minimap') instead).
+    bareScrollbar: () => {
+      list.classList.remove('chat-minimap-active');
+      const r = list.getBoundingClientRect();
+      return { sbw: list.offsetWidth - list.clientWidth, right: r.right, top: r.top, bottom: r.bottom, h: r.height, st: Math.round(list.scrollTop) };
+    },
+  };
+
   return { ok: true, before, after, samples, traces, probeTraces, retail, wheelTraces, wheelState,
     nav, sweep, resumeWheel, navControl, cliffControl };
 })()`;
@@ -425,6 +464,119 @@ if (good?.ok) {
   check('…while a REAL wheel-up at resume+1400ms (inside the same horizon) still pages, and the unpin gate NEVER fires against a reader',
     good.resumeWheel.traces.includes('extendTop:done') && !good.resumeWheel.traces.includes('unpinSkipResume'),
     JSON.stringify(good.resumeWheel).slice(0, 400));
+}
+
+// ── 4b. ROUND 3, THE MAJOR — TRUSTED INPUT. Everything above dispatches
+//      synthetic events or writes scrollTop; the verifier reproduced this one
+//      with REAL CDP input, and that is the only way to prove what a CLICK
+//      does: `Input.dispatchMouseEvent` produces an isTrusted event that goes
+//      through the same listener chain a user's mouse does (and is the only
+//      way to drive a native scrollbar at all — it has no DOM to dispatch to).
+//      The three claims: a click during the settle is NOT a positioning act
+//      (the repair survives it), a wheel IS (it unpins and pages), and a
+//      scrollbar drag IS (it ends the repair though it has no event of its own).
+const mouse = (type, x, y, extra = {}) => cdp('Input.dispatchMouseEvent', {
+  type, x: Math.round(x), y: Math.round(y), button: extra.button || 'none', clickCount: extra.clickCount || 0,
+  buttons: extra.buttons || 0, ...(extra.deltaX !== undefined ? { deltaX: extra.deltaX, deltaY: extra.deltaY } : {}),
+});
+// wait until the page is `off` ms past ITS OWN resume stamp, then act — the
+// node↔page round trip is a few ms, and the offsets that matter are hundreds.
+const armAt = async (off) => {
+  const a = await evaljs('window.__vs.arm()');
+  const wait = off - (a.since || 0) - 8;
+  if (wait > 0) await sleep(wait);
+  return a;
+};
+const trusted = { };
+if (good?.ok) {
+  // (i) THE CLICK. At resume+300ms, a plain left click in the middle of the
+  //     message list; at +1400ms the resume's own input-LESS displacement.
+  //     Pre-fix the click ran the full _endResumeSettle() and the window was
+  //     stranded in history — the incident, reproduced behind a click.
+  const a = await armAt(300);
+  const cx = a.rect.left + a.rect.w / 2, cy = a.rect.top + a.rect.h / 2;
+  trusted.hit = await evaljs(`window.__vs.hit(${Math.round(cx)}, ${Math.round(cy)})`);
+  await mouse('mousePressed', cx, cy, { button: 'left', clickCount: 1, buttons: 1 });
+  await mouse('mouseReleased', cx, cy, { button: 'left', clickCount: 1, buttons: 0 });
+  trusted.clickAt = await evaljs('window.__vs.sinceResume()');
+  trusted.injectAt = await evaljs('window.__vs.inject(1400)');
+  trusted.click = await evaljs('window.__vs.finish(1600)');
+
+  // (i-control) the SAME leg with the split neutered on the instance: the
+  //     click ends the whole repair again (the pre-fix listener body), so the
+  //     +1400ms displacement must strand the window. Without this the leg
+  //     could be passing for the older guards' reasons.
+  await evaljs(`window.__vs.view._noteUserInput = function () { this._lastUserScrollAt = Date.now(); this._endResumeSettle(); };`);
+  const a2 = await armAt(300);
+  await mouse('mousePressed', a2.rect.left + a2.rect.w / 2, a2.rect.top + a2.rect.h / 2, { button: 'left', clickCount: 1, buttons: 1 });
+  await mouse('mouseReleased', a2.rect.left + a2.rect.w / 2, a2.rect.top + a2.rect.h / 2, { button: 'left', clickCount: 1, buttons: 0 });
+  await evaljs('window.__vs.inject(1400)');
+  trusted.clickControl = await evaljs('window.__vs.finish(1600)');
+  await evaljs('delete window.__vs.view._noteUserInput;');
+
+  // (ii) THE WHEEL at the same +300ms: a positioning act. It must unpin
+  //      IMMEDIATELY and page — the split must not cost a reader anything.
+  //      (Its FINAL pin state is not asserted: under collapsed geometry the
+  //      atBottom re-pin owns that, as round 2 measured.)
+  const a3 = await armAt(300);
+  const wx = a3.rect.left + a3.rect.w / 2, wy = a3.rect.top + a3.rect.h / 2;
+  let wheelPinned = null;
+  for (let i = 0; i < 6; i++) {
+    await evaljs('window.__vs.top()');                    // park at the top edge: a wheel-up there PAGES
+    await mouse('mouseWheel', wx, wy, { deltaX: 0, deltaY: -300 });
+    await sleep(60);
+    if (wheelPinned === null) wheelPinned = await evaljs('window.__vs.view._pinned');
+    await sleep(600);
+    const tr = await evaljs('(window.__vs.view._traceRing || []).map((e) => e.tag)');
+    if (tr.includes('extendTop:done')) break;
+  }
+  trusted.wheelPinned = wheelPinned;
+  trusted.wheel = await evaljs('window.__vs.finish(300)');
+
+  // (iii) THE SCROLLBAR DRAG at +300ms: press on the native scrollbar (which
+  //      has no DOM node — only trusted input can touch it) and drag up. It
+  //      produces a pointerdown and then plain scroll events, so it is
+  //      positioning only through _pointerDragScroll — and it must END the
+  //      repair: the re-tail may not drag this reader back to the tail.
+  const dragLeg = async () => {
+    await evaljs('window.__vs.bareScrollbar()');            // …before the desktop switch, so the resume measures the real geometry
+    await armAt(300);
+    const g = await evaljs('window.__vs.bareScrollbar()');  // …and again in case a minimap render re-added the class
+    const sx = g.right - Math.max(2, g.sbw / 2);
+    await mouse('mousePressed', sx, g.bottom - 25, { button: 'left', clickCount: 1, buttons: 1 });
+    await sleep(40);
+    const pointerDown = await evaljs('!!window.__vs.view._pointerDownAt');   // did the press reach the list at all?
+    for (let i = 1; i <= 6; i++) { await mouse('mouseMoved', sx, g.bottom - 25 - i * (g.h / 9), { button: 'left', buttons: 1 }); await sleep(30); }
+    await mouse('mouseReleased', sx, g.top + 60, { button: 'left', clickCount: 1, buttons: 0 });
+    const moved = await evaljs('Math.round(window.__vs.list.scrollTop)');
+    return { sbw: g.sbw, pointerDown, from: g.st, moved, ...await evaljs('window.__vs.finish(2600)') };   // past BOTH re-tail rungs
+  };
+  trusted.drag = await dragLeg();
+  // (iii-control) with the drag predicate neutered the drag is just a click
+  //      followed by displacement — the re-tail then drags the reader back to
+  //      the live tail, which is the whole reason the predicate exists.
+  await evaljs('window.__vs.view._pointerDragScroll = function () { return false; };');
+  trusted.dragControl = await dragLeg();
+  await evaljs('delete window.__vs.view._pointerDragScroll;');
+
+  console.log(`  [trusted] ${JSON.stringify(trusted).slice(0, 2400)}`);
+  check('TRUSTED CLICK: a real left-click in the message list at resume+300ms does NOT disarm the repair — the input-less displacement at +1400ms still ends PINNED at the tail (round-3 MAJOR)',
+    trusted.click.pinned === true && trusted.click.fromBottom <= 8,
+    JSON.stringify({ hit: trusted.hit, clickAt: trusted.clickAt, injectAt: trusted.injectAt, click: trusted.click }).slice(0, 600));
+  check('…and its control proves the leg touches the path: with the click running the OLD full _endResumeSettle() the same displacement strands the window',
+    trusted.clickControl.pinned === false || trusted.clickControl.fromBottom > 8, JSON.stringify(trusted.clickControl).slice(0, 500));
+  check('TRUSTED WHEEL: a real wheel-up at resume+300ms unpins IMMEDIATELY and pages (a positioning act loses nothing to the split)',
+    trusted.wheelPinned === false && trusted.wheel.traces.includes('extendTop:done') && !trusted.wheel.traces.includes('unpinSkipResume'),
+    JSON.stringify({ wheelPinned: trusted.wheelPinned, wheel: trusted.wheel }).slice(0, 600));
+  check('TRUSTED SCROLLBAR DRAG: a real drag at resume+300ms IS positioning (userPos/scrollbar-drag) — it ends the repair and the reader is left where they dragged to',
+    trusted.drag.traces.some((x) => x === 'userPos/scrollbar-drag') && trusted.drag.fromBottom > 8,
+    JSON.stringify(trusted.drag).slice(0, 700));
+  // POSITION, not the pin flag: the fixed leg ALSO ends `pinned:true` here —
+  // under collapsed geometry the scroll handler makes no boundary decision at
+  // all (collapsedGeomSkip), so the flag belongs to the 2.301.0 guard. What the
+  // drag stamp decides is WHERE the reader ends up.
+  check('…and its control proves the leg touches the path: with _pointerDragScroll neutered the SAME drag is dragged back to the live tail by the re-tail',
+    trusted.dragControl.fromBottom <= 8, JSON.stringify(trusted.dragControl).slice(0, 700));
 }
 
 // ── 5. NEGATIVE CONTROL: patch the gates out at SOURCE and rebuild ──

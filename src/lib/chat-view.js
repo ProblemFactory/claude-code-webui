@@ -42,6 +42,16 @@ const RESUME_RETAIL_AT_MS = [RESUME_SETTLE_MS + RESUME_RETAIL_SLACK_MS, 2000];
 // displacement the rungs cannot catch is exactly the one that arrives BETWEEN
 // them, so the evidence gate must outlive them.
 const RESUME_DISPLACEMENT_MS = 2800;
+// THE KEYS THAT MOVE THE VIEW. A keydown on one of these is a positioning act
+// (it scrolls the list itself); any other key is mere input — see
+// _notePositioning vs _noteUserInput (round-3 verifier's MAJOR).
+const NAV_KEYS = ['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'PageDown', 'PageUp', 'Home', 'End', ' '];
+// A scrollbar drag is the one positioning act with NO event of its own: it
+// produces a pointerdown and then plain scroll events. So a scroll that
+// follows a pointerdown this recently, and actually MOVED the view, IS the
+// drag — while a click that is followed by nothing never becomes positioning.
+const POINTER_DRAG_MS = 400;
+const POINTER_DRAG_PX = 2;
 
 /**
  * ChatView — renders a chat interface for stream-json mode sessions.
@@ -76,6 +86,14 @@ class ChatView {
     // chat-view-seek `userScrolled` idiom, generalised.
     this._resumeAt = 0;
     this._lastNavAt = 0;
+    // The last POSITIONING act (wheel / touchmove / navigation key / scrollbar
+    // drag). Deliberately NOT stamped by a bare click: `_lastUserScrollAt`
+    // answers "did the reader touch this view" (the paging gates want that),
+    // `_lastPositionAt` answers "did the reader MOVE it" — only the second may
+    // cancel the resume repair (round-3 verifier's MAJOR).
+    this._lastPositionAt = 0;
+    this._pointerDownAt = 0;
+    this._pointerDownScrollTop = 0;
     this._resumeRetailTimers = [];
 
     // Build DOM
@@ -290,12 +308,11 @@ class ChatView {
       this._showMsgMeta(msg, e.clientX, e.clientY);
     });
     this._messageList.addEventListener('wheel', (e) => {
-      this._lastUserScrollAt = Date.now();
-      // REAL input ends the resume settle (inc-mtq5bpjt-0o0n): the settle
-      // exists to suppress INPUT-LESS displacement while a just-shown window
-      // re-measures — it must never hold up a reader who actually scrolls
-      // (and it drops the pin SNAPSHOT with it: this reader owns the position).
-      this._endResumeSettle();
+      // A wheel is a POSITIONING act: it ends the resume settle AND drops the
+      // pin snapshot (inc-mtq5bpjt-0o0n) — the settle exists to suppress
+      // INPUT-LESS displacement while a just-shown window re-measures, and it
+      // must never hold up a reader who actually moved the view.
+      this._notePositioning('wheel');
       // DIRECTION of the user's intent. Content growth (content-visibility
       // resolving a freshly paged batch) moves scrollTop with NO direction of
       // its own — native scroll anchoring pushes it numerically DOWN to keep
@@ -303,13 +320,25 @@ class ChatView {
       // toward the end". This is the only reliable discriminator.
       if (e.deltaY) { this._wheelDir = e.deltaY > 0 ? 1 : -1; this._wheelDirAt = Date.now(); }
     }, { passive: true });
-    this._messageList.addEventListener('touchmove', () => { this._lastUserScrollAt = Date.now(); this._endResumeSettle(); }, { passive: true });
+    this._messageList.addEventListener('touchmove', () => this._notePositioning('touch'), { passive: true });
     // Scrollbar drags and keyboard paging produce NO wheel/touch events — they
     // must still count as user input for the positive-evidence gate below
     // (inc-mspemym2 round 5), or those readers stall at the window end.
-    this._messageList.addEventListener('pointerdown', () => { this._lastUserScrollAt = Date.now(); this._endResumeSettle(); }, { passive: true });
+    // A CLICK IS NOT A POSITIONING ACT (round-3 verifier's MAJOR): a plain
+    // pointerdown says the reader is HERE, not that they moved the view, so it
+    // stamps input and may end the settle WINDOW — but it keeps the pin
+    // snapshot and the re-tail series, or the resume's own input-less
+    // displacement reproduces the incident behind the click. A scrollbar drag
+    // becomes positioning on the SCROLL that follows it (_pointerDragScroll).
+    this._messageList.addEventListener('pointerdown', () => {
+      this._noteUserInput();
+      this._pointerDownAt = Date.now();
+      this._pointerDownScrollTop = this._messageList.scrollTop;
+    }, { passive: true });
     this._messageList.addEventListener('keydown', (e) => {
-      if (['ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', 'Home', 'End', ' '].includes(e.key)) { this._lastUserScrollAt = Date.now(); this._endResumeSettle(); }
+      // NAVIGATION keys move the view — everything else is mere input.
+      if (NAV_KEYS.includes(e.key)) this._notePositioning('key');
+      else this._noteUserInput();
     });
     this._messageList.addEventListener('wheel', (e) => {
       if (this._loading || !this._canPaginate) return;
@@ -360,14 +389,20 @@ class ChatView {
         // floating run bar (2.369.37): same frame, same layout pass, no decisions
         this._updateRunBar(scrollTop);
         if (this._programmaticScroll) return; // don't interfere with programmatic scrolls
+        // SCROLLBAR DRAG (round-3 MAJOR): the one positioning act with no
+        // event of its own — a scroll right after a pointerdown that really
+        // moved the view. Stamped HERE, above the settle return, because the
+        // drag must be able to end the very settle it starts inside.
+        if (this._pointerDragScroll(scrollTop)) { this._pointerDownAt = 0; this._notePositioning('scrollbar-drag'); }
         // RESUME SETTLE (inc-mtq5bpjt-0o0n): a window that was JUST un-hidden
         // is still re-measuring — the capture shows scrollTop transiting
         // 1967→0→1976→3297→1950 in 240ms with zero user input. Decide nothing
         // (not even the pin) off that geometry; the pin state the window had
         // when it was hidden is the truth until it settles — and it closes only
         // AFTER the pinned re-tail runs (it carries that timer's slack), so no
-        // displacement can slip between them. Real input clears it (see the
-        // wheel/touch/pointer/key listeners).
+        // displacement can slip between them. A POSITIONING act clears it and
+        // the repair with it; a bare click only ends the window (see
+        // _notePositioning vs _noteUserInput).
         // It sits BELOW the run-bar readout on purpose (round-2 verifier's
         // minor): the bar is a READOUT of the frame's scrollTop, not a
         // decision, and returning above it froze the 2.369.45 floating bar for
@@ -418,8 +453,10 @@ class ChatView {
           // still saying "this window was at the live tail" and no scroll or
           // navigation since the resume, an atBottom→false transition is
           // DISPLACEMENT, not intent — keep the pin and re-assert the bottom.
-          // A real wheel/touch/key/pointer or any nav clears the snapshot, so
-          // a reader who scrolls away at +1400ms unpins and pages normally.
+          // A real wheel/touch/nav-key/drag or any nav clears the snapshot,
+          // so a reader who scrolls away at +1400ms unpins and pages normally
+          // — but a mere CLICK does not (round-3 MAJOR: it left the resume's
+          // own displacement free to strand the window behind the click).
           if (this._pinned && this._resumeDisplacement()) {
             this._trace('unpinSkipResume', { st: Math.round(scrollTop), sinceResume: Date.now() - (this._resumeAt || 0) });
             this._scrollToBottom();
@@ -1330,15 +1367,25 @@ class ChatView {
    *  re-asserted once when it expires — the window carries that timer's slack,
    *  and the re-tail asserts off `_pinnedAtSuspend` (the pin as it was when the
    *  window was HIDDEN), so an input-less unpin in between cannot strand the
-   *  window in history. Real user input clears settle AND snapshot.
+   *  window in history. A POSITIONING act clears settle AND snapshot.
    *
    *  ROUND 2 — the settle was a one-shot CLIFF and the re-tail was BLIND to
    *  readers who navigate without touching the message list. Now: the re-tail
    *  is a bounded SERIES (RESUME_RETAIL_AT_MS) that bails the moment the
    *  reader positioned the view themselves after the resume
-   *  (`_navigatedSince` — wheel/touch/key/pointer, minimap, search reveal,
-   *  run-bar landing, any jump), and for RESUME_DISPLACEMENT_MS the UNPIN
-   *  itself needs positive evidence (`_resumeDisplacement`). */
+   *  (`_navigatedSince` — wheel/touch/nav key/scrollbar drag, minimap, search
+   *  reveal, run-bar landing, any jump), and for RESUME_DISPLACEMENT_MS the
+   *  UNPIN itself needs positive evidence (`_resumeDisplacement`).
+   *
+   *  ROUND 3 — a CLICK IS NOT A POSITIONING ACT. Every message-list listener
+   *  ran the full _endResumeSettle(), so a plain left-click/tap during the
+   *  settle disarmed the whole repair (window + snapshot + series) and the
+   *  resume's own input-less displacement then stranded the window exactly as
+   *  in the incident (reproduced with trusted CDP input). The effects are now
+   *  split: _noteUserInput (click, non-navigation key) stamps input and ends
+   *  the WINDOW; _notePositioning (wheel, touchmove, navigation keys, the
+   *  scroll that follows a pointerdown = a scrollbar drag) and _noteUserNav
+   *  are the only acts that drop the snapshot and the series. */
   setSuspended(on) {
     if (this._suspended === !!on) return;
     this._suspended = !!on;
@@ -1360,8 +1407,9 @@ class ChatView {
       // (`_pinnedAtSuspend`), not off the live flag: a window that was pinned
       // when it went away returns to the tail even if some transitional,
       // input-LESS displacement unpinned it on the way back (the live flag is
-      // the very thing the resume corrupts). Real user input drops the
-      // snapshot (_endResumeSettle) — a reader is never yanked to the bottom.
+      // the very thing the resume corrupts). A POSITIONING act drops the
+      // snapshot (_endResumeSettle) — a reader is never yanked to the bottom;
+      // a bare click does not, because it moved nothing (round-3 MAJOR).
       // …and it NEVER fires once the reader positioned the view themselves
       // after this resume. Only the four message-list listeners called
       // _endResumeSettle(), so a minimap drag / search reveal / run-bar
@@ -1407,10 +1455,53 @@ class ChatView {
     this._resumeRetailTimers = [];
   }
 
-  /** Real user input ends the resume settle AND drops the pin snapshot: the
+  /** A POSITIONING act ends the resume settle AND drops the pin snapshot: the
    *  settle exists to suppress INPUT-LESS displacement, never to fight a
-   *  reader who scrolled away on purpose right after a desktop switch. */
+   *  reader who moved the view on purpose right after a desktop switch. */
   _endResumeSettle() { this._resumeSettleUntil = 0; this._pinnedAtSuspend = false; this._clearResumeRetail(); }
+
+  /** A READER TOUCHED THE VIEW, but touching is not moving it (round-3
+   *  verifier's MAJOR, reproduced with trusted CDP input): a plain click or
+   *  tap in the message list during the 1.24s settle used to run the full
+   *  _endResumeSettle(), which dropped `_pinnedAtSuspend` and the re-tail
+   *  series — so the resume's OWN input-less displacement, arriving a beat
+   *  later behind the click, reproduced the incident. A click states WHERE the
+   *  reader is, not that the view moved, so it only stamps input (the paging
+   *  gates' `no-input` evidence, which a scrollbar-drag reader needs) and ends
+   *  the settle WINDOW; the repair machinery survives it untouched. */
+  _noteUserInput() {
+    this._lastUserScrollAt = Date.now();
+    this._resumeSettleUntil = 0;   // the WINDOW only — snapshot and re-tail series stay
+  }
+
+  /** THE READER MOVED THE VIEW — wheel, touchmove, a navigation key, or the
+   *  scroll that follows a pointerdown (a scrollbar drag, which has no event
+   *  of its own). This is the act that owns the position from here on, so it
+   *  ends the settle, drops the pin snapshot and cancels the re-tail series.
+   *  The off-list surfaces (minimap, search reveal, run bar, jumps) stamp
+   *  through _noteUserNav instead — same grade, different bookkeeping. */
+  _notePositioning(via) {
+    const now = Date.now();
+    this._lastUserScrollAt = now;
+    this._lastPositionAt = now;
+    // Traced only when it CANCELS something. The ring is coarse ON PURPOSE
+    // (the scroll tracer ignores moves under 400px) and the incident recorder
+    // keeps its last 200 entries — a per-wheel-event trace would evict exactly
+    // the history that diagnosed this incident.
+    if (via && (this._resumeSettleUntil || this._pinnedAtSuspend)) this._trace?.('userPos', { via });
+    this._endResumeSettle();
+  }
+
+  /** Is THIS scroll event a scrollbar drag? The drag is the only positioning
+   *  act that produces no wheel/touch/key event — its signature is a scroll
+   *  that follows a pointerdown within POINTER_DRAG_MS and actually displaced
+   *  the view. A click followed by nothing (or by the resume's own re-measure,
+   *  which lands far later) never qualifies. */
+  _pointerDragScroll(scrollTop) {
+    const at = this._pointerDownAt || 0;
+    if (!at || Date.now() - at > POINTER_DRAG_MS) return false;
+    return Math.abs(scrollTop - (this._pointerDownScrollTop || 0)) > POINTER_DRAG_PX;
+  }
 
   /** An explicit reader NAVIGATION that the message list's own listeners can
    *  never see: the minimap (pointer events on the container), a search
@@ -1426,11 +1517,14 @@ class ChatView {
 
   /** Did the READER position this view after `since`? The chat-view-seek
    *  `userScrolled = (this._lastUserScrollAt||0) > Math.max(jumpAt, revealAt)`
-   *  idiom, generalised over every positioning stamp we own: scroll input,
-   *  explicit nav, a jump landing (_scrollElStable sets _lastJumpAt) and a
-   *  search reveal. Automatic repositioning must lose to every one of them. */
+   *  idiom, generalised over every positioning stamp we own: a POSITIONING act
+   *  (_lastPositionAt — wheel/touch/nav key/scrollbar drag), explicit nav, a
+   *  jump landing (_scrollElStable sets _lastJumpAt) and a search reveal.
+   *  Automatic repositioning must lose to every one of them — and to NONE of
+   *  the acts that merely touched the view: `_lastUserScrollAt` is not read
+   *  here, because a click is not a positioning act (round-3 MAJOR). */
   _navigatedSince(since) {
-    return Math.max(this._lastNavAt || 0, this._lastUserScrollAt || 0,
+    return Math.max(this._lastNavAt || 0, this._lastPositionAt || 0,
       this._lastJumpAt || 0, this._search?._lastRevealAt || 0) > since;
   }
 

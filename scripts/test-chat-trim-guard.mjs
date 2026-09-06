@@ -145,20 +145,43 @@ ok('…and it asserts off the pin SNAPSHOT taken when the window was HIDDEN (a t
   && /if \(this\._pinned \|\| this\._pinnedAtSuspend\) \{/.test(cv));
 // ORDER pin. The settle return moved BELOW the run-bar readout (round-2
 // minor: returning above it froze the 2.369.45 floating bar for the whole
-// 1.24s settle) and stays ABOVE every pin/paging decision — so the budgets
-// are restated per segment: suspend→runBar ≤400 (was one 700 hop to the
-// settle), runBar→programmatic ≤200, programmatic→settle ≤1400 (the comment
-// block that explains why the readout comes first), settle→atBottom ≤2400.
-ok('the scroll handler updates the run-bar READOUT first, then no-ops for the settle BEFORE it touches the pin (transitional geometry must not unpin)',
-  /this\._suspended\) return;[\s\S]{0,400}this\._updateRunBar\(scrollTop\);[\s\S]{0,200}this\._programmaticScroll\) return;[\s\S]{0,1400}Date\.now\(\) < \(this\._resumeSettleUntil \|\| 0\)\) return;[\s\S]{0,2400}const atBottom =/.test(cv));
+// 1.24s settle) and stays ABOVE every pin/paging decision; round 3 puts the
+// scrollbar-drag stamp between the programmatic return and the settle (the
+// drag must be able to end the very settle it starts inside). Budgets per
+// segment: suspend→runBar ≤400 (was one 700 hop to the settle),
+// runBar→programmatic ≤200, programmatic→drag ≤600, drag→settle ≤1400 (the
+// comment block that explains why the readout comes first), settle→atBottom
+// ≤2400.
+ok('the scroll handler updates the run-bar READOUT first, stamps a scrollbar DRAG, then no-ops for the settle BEFORE it touches the pin (transitional geometry must not unpin)',
+  /this\._suspended\) return;[\s\S]{0,400}this\._updateRunBar\(scrollTop\);[\s\S]{0,200}this\._programmaticScroll\) return;[\s\S]{0,600}this\._pointerDragScroll\(scrollTop\)\)[\s\S]{0,1400}Date\.now\(\) < \(this\._resumeSettleUntil \|\| 0\)\) return;[\s\S]{0,2400}const atBottom =/.test(cv));
 ok('…and the UNPIN itself is gated on positive evidence for the rest of the horizon (the settle alone was a one-shot cliff)',
   /if \(this\._pinned && this\._resumeDisplacement\(\)\) \{[\s\S]{0,260}_scrollToBottom\(\);\s*return;\s*\}[\s\S]{0,200}this\._pinned = false;/.test(cv)
   && /_resumeDisplacement\(\) \{/.test(cv));
 ok('the loadHistory auto-fill DEFERS through the settle instead of deciding on transitional geometry',
   /const tryAutoFill = \(retries\) => \{[\s\S]{0,400}this\._resumeSettleUntil \|\| 0\) - Date\.now\(\)[\s\S]{0,200}tryAutoFill\(retries - 1\)/.test(cv));
-ok('REAL user input clears the settle AND the pin snapshot (wheel + touchmove + pointerdown + keydown — the settle only suppresses input-LESS displacement, it never fights a reader)',
-  (cv.match(/this\._endResumeSettle\(\);/g) || []).length >= 4
+ok('a POSITIONING act clears the settle AND the pin snapshot (the settle only suppresses input-LESS displacement, it never fights a reader who MOVED the view)',
+  /_notePositioning\(via\) \{[\s\S]{0,320}this\._lastPositionAt = now;[\s\S]{0,600}this\._endResumeSettle\(\);/.test(cv)
   && /_endResumeSettle\(\) \{ this\._resumeSettleUntil = 0; this\._pinnedAtSuspend = false; this\._clearResumeRetail\(\); \}/.test(cv));
+
+// ── ROUND 3, THE MAJOR (reproduced with TRUSTED CDP input): a plain
+// left-click/tap in the message list during the 1.24s settle ran the FULL
+// _endResumeSettle() — window + pin snapshot + re-tail series — so the
+// resume's own input-LESS displacement, arriving a beat later behind the
+// click, reproduced the incident. A click is not a positioning act: it says
+// where the reader IS, not that the view moved.
+ok('a bare CLICK / non-navigation key only stamps input and ends the settle WINDOW — the pin snapshot and the re-tail series survive it',
+  /_noteUserInput\(\) \{\s*this\._lastUserScrollAt = Date\.now\(\);\s*this\._resumeSettleUntil = 0;/.test(cv)
+  && !/_noteUserInput\(\) \{[\s\S]{0,200}_pinnedAtSuspend|_noteUserInput\(\) \{[\s\S]{0,200}_clearResumeRetail/.test(cv));
+ok('…and the message-list listeners route by GRADE: wheel/touchmove/navigation keys position, pointerdown and other keys merely input',
+  /addEventListener\('wheel', \(e\) => \{[\s\S]{0,400}this\._notePositioning\('wheel'\);/.test(cv)
+  && /addEventListener\('touchmove', \(\) => this\._notePositioning\('touch'\)/.test(cv)
+  && /addEventListener\('pointerdown', \(\) => \{\s*this\._noteUserInput\(\);\s*this\._pointerDownAt = Date\.now\(\);\s*this\._pointerDownScrollTop = this\._messageList\.scrollTop;/.test(cv)
+  && /if \(NAV_KEYS\.includes\(e\.key\)\) this\._notePositioning\('key'\);\s*else this\._noteUserInput\(\);/.test(cv)
+  && /const NAV_KEYS = \['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'PageDown', 'PageUp', 'Home', 'End', ' '\];/.test(cv));
+ok('…and a SCROLLBAR DRAG (pointerdown then a scroll that really moved the view) is positioning after all — the one positioning act with no event of its own',
+  /_pointerDragScroll\(scrollTop\) \{[\s\S]{0,400}Date\.now\(\) - at > POINTER_DRAG_MS\) return false;[\s\S]{0,200}> POINTER_DRAG_PX;/.test(cv)
+  && /const POINTER_DRAG_MS = 400;/.test(cv)
+  && /this\._pointerDragScroll\(scrollTop\)\) \{ this\._pointerDownAt = 0; this\._notePositioning\('scrollbar-drag'\); \}/.test(cv));
 
 // ── ROUND 2, THE MAJOR: only the four message-list listeners ended the settle,
 // so a reader who navigated through a surface that is NOT the list — the
@@ -169,8 +192,9 @@ ok('REAL user input clears the settle AND the pin snapshot (wheel + touchmove + 
 // re-tail compares nav-vs-resume: the chat-view-seek `userScrolled` idiom.
 ok('there is ONE navigation stamp (_noteUserNav) and it ends the settle like a wheel does',
   /_noteUserNav\(via\) \{[\s\S]{0,220}this\._lastNavAt = Date\.now\(\);[\s\S]{0,220}this\._endResumeSettle\(\);/.test(cv));
-ok('…and the reader-position test generalises the seek idiom over EVERY stamp (scroll input, nav, jump landing, search reveal)',
-  /_navigatedSince\(since\) \{[\s\S]{0,400}this\._lastNavAt \|\| 0[\s\S]{0,120}this\._lastUserScrollAt \|\| 0[\s\S]{0,160}this\._lastJumpAt \|\| 0[\s\S]{0,160}this\._search\?\._lastRevealAt \|\| 0[\s\S]{0,60}> since;/.test(cv));
+ok('…and the reader-position test generalises the seek idiom over every POSITIONING stamp (positioning act, nav, jump landing, search reveal) — and reads _lastUserScrollAt NOWHERE, because a click is not one (round 3)',
+  /_navigatedSince\(since\) \{[\s\S]{0,500}this\._lastNavAt \|\| 0[\s\S]{0,120}this\._lastPositionAt \|\| 0[\s\S]{0,160}this\._lastJumpAt \|\| 0[\s\S]{0,160}this\._search\?\._lastRevealAt \|\| 0[\s\S]{0,60}> since;/.test(cv)
+  && !/_navigatedSince\(since\) \{[\s\S]{0,500}_lastUserScrollAt/.test(cv));
 ok('the resume re-tail BAILS when the reader navigated after the resume (never yank a reader back to the tail)',
   /const resumeAt = this\._resumeAt;[\s\S]{0,400}if \(this\._navigatedSince\(resumeAt\)\) return;/.test(cv));
 ok('every off-list navigation surface stamps: minimap (index + time), search reveal, run-bar landing, jumpToIndex, user jumpToBottom',
@@ -283,6 +307,20 @@ if (typeof globalThis.requestAnimationFrame !== 'function') globalThis.requestAn
   ok('…as does a search reveal (it scrolls the list from outside the list\'s own listeners)',
     !navs[2].retailed && navs[2].v._pinned === false);
 
+  // ROUND 3: a CLICK during the settle must NOT disarm the repair, while a
+  // real positioning act still owns the position. This is the verifier's
+  // MAJOR in unit form — the pre-fix listener ran _endResumeSettle() for both.
+  const [clicked, positioned] = await Promise.all([
+    resumeThen((v) => { v._noteUserInput(); v._pinned = false; }),      // click, then the resume's own displacement
+    resumeThen((v) => { v._notePositioning('wheel'); v._pinned = false; }), // a reader who actually moved the view
+  ]);
+  ok('a CLICK during the settle leaves the repair armed — the input-LESS displacement behind it is still repaired (round-3 MAJOR)',
+    clicked.retailed && clicked.v._pinned === true);
+  ok('…while a real POSITIONING act during the settle still hands the position to the reader (nothing yanks them back)',
+    !positioned.retailed && positioned.v._pinned === false);
+  ok('…and the click did end the settle WINDOW (a reader who touched the view is never left with a frozen one)',
+    clicked.v._resumeSettleUntil === 0);
+
   // ROUND 2 (b): the re-assert SERIES — the transitional unpin is repaired at
   // every rung while the snapshot holds, not once at a cliff edge.
   const late = await (async () => {
@@ -301,14 +339,27 @@ if (typeof globalThis.requestAnimationFrame !== 'function') globalThis.requestAn
   // against the SHIPPED predicate.
   const disp = (over) => ChatView.prototype._resumeDisplacement.call(Object.assign(
     Object.create(ChatView.prototype),
-    { _resumeAt: Date.now() - 1400, _pinnedAtSuspend: true, _lastUserScrollAt: Date.now() - 9e5, _lastNavAt: 0, _lastJumpAt: 0 },
+    { _resumeAt: Date.now() - 1400, _pinnedAtSuspend: true, _lastUserScrollAt: Date.now() - 9e5, _lastPositionAt: 0, _lastNavAt: 0, _lastJumpAt: 0 },
     over));
   ok('unit: an input-less unpin 1.4s after a resume, off a pinned snapshot, is DISPLACEMENT', disp({}) === true);
-  ok('unit: …but a reader who scrolled since the resume is INTENT', disp({ _lastUserScrollAt: Date.now() }) === false);
+  ok('unit: …but a reader who MOVED the view since the resume is INTENT', disp({ _lastPositionAt: Date.now() }) === false);
+  ok('unit: …and a bare CLICK since the resume is NOT (round-3 MAJOR: it stamps input, it positions nothing)',
+    disp({ _lastUserScrollAt: Date.now() }) === true);
   ok('unit: …and so is a reader who navigated since the resume', disp({ _lastNavAt: Date.now() }) === false);
   ok('unit: a window that was reading history when it was hidden is never re-pinned', disp({ _pinnedAtSuspend: false }) === false);
   ok('unit: past the horizon the gate is off — a normal unpin must always be possible', disp({ _resumeAt: Date.now() - 4000 }) === false);
   ok('unit: a view that never resumed is unaffected (the gate is scoped to the resume)', disp({ _resumeAt: 0 }) === false);
+
+  // ROUND 3 (b): the scrollbar-drag predicate — the only way a drag can be
+  // told from a click, and the reason a click can stay non-positioning.
+  const drag = (over, st) => ChatView.prototype._pointerDragScroll.call(Object.assign(
+    Object.create(ChatView.prototype),
+    { _pointerDownAt: Date.now() - 50, _pointerDownScrollTop: 900 }, over), st);
+  ok('unit: a scroll right after a pointerdown that MOVED the view is a drag', drag({}, 400) === true);
+  ok('unit: …in either direction', drag({}, 1400) === true);
+  ok('unit: a pointerdown with no displacement is a CLICK, not a drag', drag({}, 901) === false);
+  ok('unit: a displacement long AFTER the pointerdown is the resume re-measuring, not a drag', drag({ _pointerDownAt: Date.now() - 1100 }, 0) === false);
+  ok('unit: …and with no pointerdown at all it is never a drag', drag({ _pointerDownAt: 0 }, 0) === false);
 }
 
 // ── WIRING PIN: the desktop show/hide path must keep flowing the flag (a new
