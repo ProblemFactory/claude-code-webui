@@ -311,6 +311,9 @@ const SETTINGS_SCHEMA = {
       { value: 'mcp', label: t('MCP tool calls (any server)') },
       { value: 'skill', label: t('Skill launches') },
       { value: 'agent', label: t('Sub-agent orchestration (spawn/wait/messages)') },
+      // NOT in the default set: a sub-agent's report is the answer the user is
+      // reading, not orchestration noise (B-7473 integration 2026-09-06)
+      { value: 'report', label: t('Sub-agent reports (a child agent’s written answer)') },
     ],
     label: t('Card kinds that collapse'),
     description: t('Which card kinds fold into the summary line, by MEANING — the same setting covers every backend (claude Bash and codex exec are both command runs). Enabled kinds collapse TOGETHER as one interleaved group (think → read → edit → run is the real work pattern; per-kind groups rarely get long enough to fold). Memory = operations on the agent\'s own memory directory — housekeeping, folded by default and listed as memory/<name> in the summary; project-file writes are off by default — diffs are usually worth seeing. A run of only thinking needs two or more; any tool card folds immediately. Cards waiting for your approval never fold.'),

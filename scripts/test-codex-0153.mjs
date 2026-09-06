@@ -164,10 +164,19 @@ console.log('— ② 0.153 record tolerance: known skips, agent chatter, sub-age
   const roles = mm.messages.map((m) => m.role);
   ok(!mm.messages.some((m) => m.role === 'system' && m.status !== 'complete'), 'no error card for any of the known/unknown 0.153 records', roles);
   ok(mm.messages.filter((m) => m.role === 'system').length === 1, 'known skips (world_state / token_usage_record / inter_agent_communication_metadata / item_completed) render NOTHING (only the init card exists)', roles);
-  const chatter = mm.messages.find((m) => m.toolName === 'Agent Message');
-  ok(chatter && chatter.role === 'tool' && chatter.collapseKind === 'agent' && chatter.status === 'complete' && /FINAL_ANSWER/.test(chatter.content[0].output) && /encrypted payload/.test(chatter.content[0].output) && chatter.content[0].input.author === '/root/water_waste', "agent_message (sub-agent ↔ root chatter) renders as a complete 'agent'-kind tool card, encrypted payload named", chatter && chatter.content[0]);
-  const sub = mm.messages.filter((m) => m.toolName === 'Sub-agent');
-  ok(sub.length === 1 && sub[0].collapseKind === 'agent' && /completed/.test(sub[0].content[0].output) && sub[0].status === 'complete', "sub_agent_activity started/interacted/completed = ONE 'agent'-kind card, edited in place on completion", sub.map((m) => m.content[0].output));
+  // B-7473: the sub-agent traffic is COLLAB ROWS now (an ENCRYPTED inbound
+  // message has no body to show), and consecutive rows coalesce into one
+  // message — 'started' + 'interacted' + the encrypted FINAL_ANSWER +
+  // 'completed' are four rows on ONE 'agent'-kind message, no blob in sight.
+  const collab = mm.messages.filter((m) => m.collab);
+  const rows = collab.flatMap((m) => m.collab.rows);
+  ok(collab.length === 1 && collab[0].role === 'tool' && collab[0].collapseKind === 'agent' && collab[0].status === 'complete', 'sub-agent traffic coalesces into ONE agent-kind message', collab.map((m) => m.content[0].output));
+  const inbound = rows.find((r) => r.dir === 'in');
+  ok(inbound && inbound.agentPath === '/root/water_waste' && inbound.agentName === 'water_waste' && inbound.msgType === 'FINAL_ANSWER' && inbound.encrypted === true, 'the encrypted agent_message is an inbound row with its msgType, marked encrypted', inbound);
+  ok(!/gAAAAAB/.test(JSON.stringify(mm.messages)), 'no encrypted blob reaches any rendered string');
+  const kinds = rows.filter((r) => r.dir === 'activity').map((r) => r.kind);
+  ok(JSON.stringify(kinds) === JSON.stringify(['started', 'interacted', 'completed']) && rows.every((r) => r.threadId === '01a072b1-186b-7711-8176-817d3f6d0fee'), 'started/interacted/completed each render once and carry the child thread id (click-through needs no lookup)', kinds);
+  ok(mm.status().subagents['/root/water_waste'] === '01a072b1-186b-7711-8176-817d3f6d0fee', 'status().subagents maps agentPath → agentThreadId', mm.status().subagents);
   const st = mm.status();
   ok(st.model === 'gpt-5.6-sol' && st.effort === 'ultra', 'thread_settings_applied + turn_context.effort feed status().model/effort (typed source, no card)', st);
   const asst = mm.messages.find((m) => m.role === 'assistant');
@@ -179,7 +188,12 @@ console.log('— ② 0.153 record tolerance: known skips, agent chatter, sub-age
   ok(names.filter((n) => n === 'codex-unknown-record:brand_new_item').length === 1 && names.includes('codex-unknown-record:brand_new_event') && names.includes('codex-unknown-record:brand_new_record'), 'unknown response_item / event_msg / record types fire telemetry codex-unknown-record:<type> ONCE per type', names);
   ok(!names.some((n) => /world_state|token_usage_record|inter_agent|item_completed|thread_settings|sub_agent|agent_message/.test(n)), 'known types never fire the unknown-record telemetry', names);
   const S = CodexMessageManager;
-  ok(S.SKIPPED_RECORD_TYPES.has('world_state') && S.SKIPPED_EVENT_TYPES.has('item_completed') && S.SKIPPED_RESPONSE_ITEM_TYPES.has('additional_tools'), 'the skip sets are explicit and exported for the audit');
+  // item_completed STAYS in the exported generic set and is DISPATCHED before
+  // it (_processEvent's first lines) — the router is an allowlist, so a kind it
+  // does not name falls through to the same skip it always had. The pin that
+  // matters is the ORDER, not the membership (test-codex-history mirrors it).
+  const cmSrc = fs.readFileSync(path.join(REPO, 'src/codex-message-manager.js'), 'utf8');
+  ok(S.SKIPPED_RECORD_TYPES.has('world_state') && S.SKIPPED_EVENT_TYPES.has('item_started') && S.SKIPPED_EVENT_TYPES.has('item_completed') && /if \(type === 'item_completed'\) return this\._processItemCompleted\(event, emit\);[\s\S]*if \(SKIPPED_EVENT_TYPES\.has\(type\)\) return;/.test(cmSrc) && S.SKIPPED_RESPONSE_ITEM_TYPES.has('additional_tools'), 'the skip sets are explicit and exported; item_completed is ROUTED FIRST (B-7473: the only 0.153.4 carrier of SubAgentActivity) and only then falls through the generic skip, its response_item twins named in the router');
 }
 
 console.log('— ③ effort enum: ultra offered when the served model reports it, with its delegation hint (zh/ja)');
@@ -279,7 +293,8 @@ console.log('— ⑤ thread/read fallback for a thread with NO rollout (0.153 pa
   ok(tools.c1?.k === 'bash' && tools.c1.s === 'complete' && tools.c1.out === 'total 0', 'commandExecution → Bash card with its aggregated output', tools.c1);
   ok(tools.m1?.k === 'mcp' && tools.m1.s === 'complete' && tools.m1.out === '3 issues', 'mcpToolCall → mcp fold card with the result text', tools.m1);
   ok(tools.f1?.k === 'write' && tools.f1.s === 'complete' && tools.f1.files?.[0] === '/w/a.js', 'fileChange → apply_patch write card naming the file', tools.f1);
-  ok(tools.w1?.k === 'search' && tools.i1?.k === 'image' && tools['subagent:01a07000-0000-7000-8000-0000000000dd']?.k === 'agent', 'webSearch / imageView / subAgentActivity land in their fold kinds', { w: tools.w1?.k, i: tools.i1?.k });
+  const saMsg = mm.messages.find((m) => m.collab?.rows?.some((r) => r.dir === 'activity'));
+  ok(tools.w1?.k === 'search' && tools.i1?.k === 'image' && saMsg?.collapseKind === 'agent' && saMsg.collab.rows[0].threadId === '01a07000-0000-7000-8000-0000000000dd', 'webSearch / imageView / subAgentActivity land in their fold kinds (the sub-agent row carries the child thread)', { w: tools.w1?.k, i: tools.i1?.k, sa: saMsg?.collab?.rows?.[0] });
   ok(tools.c3?.s === 'pending', 'an inProgress command stays a pending card (the turn is still open)', tools.c3);
   ok(mm.messages.some((m) => m.isCompact) && mm.messages.some((m) => m.role === 'system' && m.status === 'error' && /usage limit/.test(m.content[0].text)), 'contextCompaction → compaction marker; a failed turn → its error card');
   ok(TR.threadToRecords(null).length === 0 && TR.itemToRecords({ type: 'someFutureItem', id: 'z' }, '2026-09-05T00:00:00.000Z').length === 0, 'null thread / unknown item kinds map to nothing (never throw)');
@@ -323,6 +338,149 @@ console.log('— ⑤ thread/read fallback for a thread with NO rollout (0.153 pa
   ok(/require\('\.\.\/codex-thread-read'\)\.configure\(\{ codexCmd: CODEX_CMD \|\| null, enabled: !!CODEX_CMD \}\)/.test(read('src/server/cli-env.js')) && !/codex-thread-read/.test(read('server.js')), 'cli-env configures the fallback where CODEX_CMD is resolved (disabled when codex is absent; server.js untouched — the size ratchet)');
   ok(/'src\/codex-thread-read\.js'[,\]]/.test(read('scripts/test-architecture.mjs')), 'the module is registered in the SHARED tier');
   ok(HARNESSES.claude.store.warmTranscript === require(path.join(REPO, 'src/session-store.js')).warmSessionJsonlAsync, 'claude\'s hook is still the worker parse-cache warm (unchanged)');
+}
+
+console.log("— ⑥ multi-agent v2: sub-agent chatter is ATTRIBUTED, never a root reply (B-7473)");
+{
+  // FIXTURES CUT VERBATIM from a real 0.153.4 root rollout (session_meta
+  // cli_version "0.153.4", 2072 records, 12 sub-agents): ids/paths shortened,
+  // home paths scrubbed, encrypted blobs truncated to their fernet prefix.
+  // The owner's report: a sub-agent's "已完成，仅修改约定两文件：…" appeared as an
+  // ORDINARY assistant message in the ROOT window, some of them twice.
+  const { CodexMessageManager } = require(path.join(REPO, 'src/codex-message-manager.js'));
+  const TID = '01a0733f-f028-7462-9769-be3e761a4f19';
+  const TURN = '01a07340-04bc-7482-97fb-28ed6ed5a438';
+  const CHILD = '01a07340-6597-74f2-882c-f7092fecd5a0';
+  const BLOB = 'gAAAAABqnHsPfu_QPd2BKoPUgU269iLFrmymKTAuV3u1rIHFQtoiO-OHBkGdAPC4fGDNEkZ4JCp2Q9w1ZRr0YK0rpfiVBKLL2mp6cf9A3D3jevFG';
+  const ev = (item, extra = {}) => ({ timestamp: '2026-09-05T20:26:35.297Z', type: 'event_msg', payload: { type: 'item_completed', thread_id: TID, turn_id: TURN, item, started_at_ms: 1788639995297, completed_at_ms: 1788639995297, ...extra } });
+  const ri = (payload) => ({ timestamp: '2026-09-05T20:27:00.118Z', type: 'response_item', payload });
+  const SA = (kind, id, threadId = CHILD, agentPath = '/root/water_research') => ev({ type: 'SubAgentActivity', id, kind, agent_thread_id: threadId, agent_path: agentPath });
+  const PLAIN_BODY = '完成水系统研究：[water.md](research/water.md)。\n\n关键结论：\n\n- 主候选：**纯电焚烧＋循环淋浴**；车规安装仍需验证。';
+  const ROLLOUT_REPORT = ri({ type: 'agent_message', id: 'amsg_01a0734d-7cf3', author: '/root/water_research', recipient: '/root', content: [{ type: 'input_text', text: `Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/water_research\nPayload:\n${PLAIN_BODY}` }], internal_chat_message_metadata_passthrough: { turn_id: TURN, create_time: 1788640853.235 } });
+  const seq = [
+    { timestamp: '2026-09-05T20:26:10.474Z', type: 'session_meta', payload: { session_id: TID, id: TID, cwd: '/w/vanlife', originator: 'claude-code-webui', cli_version: '0.153.4', source: 'vscode', history_mode: 'paginated' } },
+    ri({ type: 'message', role: 'user', content: [{ type: 'input_text', text: '帮我构建设计一个房车' }] }),
+    // the root's OWN commentary reply — must stay an assistant bubble
+    ri({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '我会把它做成一个可推敲的完整房车方案。' }], phase: 'commentary' }),
+    // item_completed TWINS of records the response_item stream already rendered
+    ev({ type: 'AgentMessage', id: 'msg_0f70caa7', content: [{ type: 'Text', text: '我会把它做成一个可推敲的完整房车方案。' }], phase: 'commentary' }),
+    ev({ type: 'Reasoning', id: 'rs_0f70caa7', summary_text: [], raw_content: [] }),
+    ev({ type: 'CommandExecution', id: 'exec-e7475734', command: ['/usr/bin/zsh', '-lc', 'vibespace-status working'], status: 'completed', aggregated_output: 'status set: working\n', exit_code: 0 }),
+    ev({ type: 'UserMessage', id: 'u1', content: [{ type: 'text', text: '帮我构建设计一个房车' }] }),
+    // three spawns (the `message` argument is a fernet blob in the rollout)
+    ri({ type: 'function_call', id: 'fc_1', name: 'spawn_agent', namespace: 'collaboration', arguments: JSON.stringify({ task_name: 'water_research', message: BLOB }), call_id: 'call_ZCITcZYBFfmtfzyEdl6ATO27' }),
+    SA('started', 'call_ZCITcZYBFfmtfzyEdl6ATO27'),
+    ri({ type: 'function_call_output', id: 'fco_1', call_id: 'call_ZCITcZYBFfmtfzyEdl6ATO27', output: '{"task_name":"/root/water_research"}' }),
+    ri({ type: 'function_call', id: 'fc_2', name: 'spawn_agent', namespace: 'collaboration', arguments: JSON.stringify({ task_name: 'energy_research', message: BLOB }), call_id: 'call_t5pCGb2B' }),
+    ri({ type: 'function_call_output', id: 'fco_2', call_id: 'call_t5pCGb2B', output: '{"task_name":"/root/energy_research"}' }),
+    ri({ type: 'function_call', id: 'fc_3', name: 'spawn_agent', namespace: 'collaboration', arguments: JSON.stringify({ task_name: 'interior_research', message: BLOB }), call_id: 'call_iR3' }),
+    ri({ type: 'function_call_output', id: 'fco_3', call_id: 'call_iR3', output: '{"task_name":"/root/interior_research"}' }),
+    // interleaved inbound mail: ENCRYPTED MESSAGE, then the PLAINTEXT FINAL_ANSWER
+    { type: 'inter_agent_communication_metadata', payload: { trigger_turn: false } },
+    ri({ type: 'agent_message', id: 'amsg_01a07340-c696', author: '/root/water_research', recipient: '/root', content: [{ type: 'input_text', text: 'Message Type: MESSAGE\nTask name: /root\nSender: /root/water_research\nPayload:\n' }, { type: 'encrypted_content', encrypted_content: BLOB }], internal_chat_message_metadata_passthrough: { turn_id: TURN, create_time: 1788640020.118 } }),
+    ri({ type: 'function_call', id: 'fc_4', name: 'send_message', namespace: 'collaboration', arguments: JSON.stringify({ target: 'interior_research', message: BLOB }), call_id: 'call_XUSz' }),
+    ri({ type: 'function_call_output', id: 'fco_4', call_id: 'call_XUSz', output: '' }),
+    SA('interacted', 'call_SBIpWR9V'),
+    ri({ type: 'function_call', id: 'fc_5', name: 'wait', arguments: JSON.stringify({ cell_id: '3', max_tokens: 3000, yield_time_ms: 1000 }), call_id: 'call_6G7f' }),
+    SA('completed', 'subagent-completed-01a07340-65a1'),
+    ROLLOUT_REPORT,
+    ri({ type: 'function_call', id: 'fc_6', name: 'followup_task', namespace: 'collaboration', arguments: JSON.stringify({ target: 'water_research', message: BLOB }), call_id: 'call_W5Bs' }),
+    ri({ type: 'function_call_output', id: 'fco_6', call_id: 'call_W5Bs', output: '' }),
+  ];
+  const mm = new CodexMessageManager('t6473');
+  mm.convertHistory(seq);
+  const dump = JSON.stringify(mm.messages);
+
+  const assistants = mm.messages.filter((m) => m.role === 'assistant' && m.content[0]?.type === 'text');
+  ok(assistants.length === 1 && assistants[0].content[0].text === '我会把它做成一个可推敲的完整房车方案。', 'the ROOT\'s own reply is the ONLY assistant bubble — a sub-agent report never becomes one', assistants.map((m) => m.content[0].text));
+  ok(!/水系统研究/.test(JSON.stringify(assistants)), "the sub-agent's FINAL_ANSWER text is NOT in any assistant message (the owner's report)");
+  const report = mm.messages.find((m) => m.collab?.report);
+  ok(report && report.role === 'tool' && report.collapseKind === 'report' && report.collab.dir === 'in' && report.collab.agentName === 'water_research' && report.collab.msgType === 'FINAL_ANSWER' && report.content[0].output === PLAIN_BODY, 'the plaintext FINAL_ANSWER is an ATTRIBUTED sub-agent report in its OWN fold kind (author + msgType + markdown body, envelope stripped)', report && { c: report.collab, o: report.content[0].output.slice(0, 30) });
+  ok(report.collab.threadId === CHILD, 'the report carries the child thread id from SubAgentActivity (click-through needs no server lookup)', report.collab.threadId);
+  ok(!dump.includes(BLOB) && !/gAAAAAB/.test(dump), 'no encrypted blob reaches ANY rendered string (spawn/send/followup arguments + the encrypted inbound message)');
+  const rows = mm.messages.flatMap((m) => m.collab?.rows || []);
+  const byDir = rows.reduce((a, r) => { a[r.dir] = (a[r.dir] || 0) + 1; return a; }, {});
+  // NO DOUBLE RENDER (the merge rule, B-7473 integration 2026-09-06): a SubAgentActivity record whose
+  // own id IS a rendered collab call (0.153.4 census: started → spawn_agent
+  // 18/18, interacted → send_message/followup_task 214/214) is MAP-ONLY — the
+  // spawn row is already that fact. Here: 'started' rides call_ZCITc… (the
+  // spawn_agent call) ⇒ no row; 'interacted' rides a call this rollout cut does
+  // not contain ⇒ its own row; 'completed' synthesises subagent-completed-… ⇒
+  // its own row. The thread id is learned either way (next assert).
+  ok(byDir.spawn === 3 && byDir.out === 2 && byDir.wait === 1 && byDir.activity === 2 && byDir.in === 2, 'every collab record becomes exactly one row, and a lifecycle record that IS its own call renders no second row: 3 spawns, send+followup, wait, 2 lifecycle rows, 2 inbound', byDir);
+  // ── ENCRYPTED TWIN-DEDUP (B-7473 integration 2026-09-06 verifier finding, MAJOR): three DISTINCT
+  // encrypted messages from ONE agent inside ONE turn. VERBATIM from the owner's
+  // root rollout rollout-2026-09-05T13-26-05 (lines 49 / 71 / 159, cli_version
+  // 0.153.4, blobs truncated to their fernet prefix): distinct ids, distinct
+  // blobs, IDENTICAL visible envelope — body '' and msgType MESSAGE for all
+  // three. The old fallback key (turn, author, msgType, body) made them ONE
+  // (101 of that rollout's encrypted messages were dropped that way).
+  {
+    const ENVELOPE = 'Message Type: MESSAGE\nTask name: /root\nSender: /root/water_research\nPayload:\n';
+    const encMsg = (id, blob) => ri({ type: 'agent_message', id, author: '/root/water_research', recipient: '/root', content: [{ type: 'input_text', text: ENVELOPE }, { type: 'encrypted_content', encrypted_content: blob }], internal_chat_message_metadata_passthrough: { turn_id: TURN, create_time: 1788640020.118 } });
+    const enc = new CodexMessageManager('t6473enc');
+    enc.convertHistory([
+      { timestamp: '2026-09-05T20:26:10.474Z', type: 'session_meta', payload: { session_id: TID, id: TID, cwd: '/w/vanlife', cli_version: '0.153.4' } },
+      ri({ type: 'message', role: 'user', content: [{ type: 'input_text', text: '帮我构建设计一个房车' }] }),
+      encMsg('amsg_01a07340-c696-7080-a3f3-c55a42e62d04', 'gAAAAABqnHsPfu_QPd2BKoPUgU269iLFrmymKTAu…'),
+      encMsg('amsg_01a07341-d6a0-7862-8a6a-e8b7c7605847', 'gAAAAABqnHtJgvt7L7pxSssR69Sd8L3t83ffOkdg…'),
+      encMsg('amsg_01a0734d-7cf1-7401-9eae-556113fb55c3', 'gAAAAABqnHv8pHXVGQgtKRtX5C0c_AF1ySQUFv24…'),
+    ]);
+    const encRows = enc.messages.flatMap((m) => m.collab?.rows || []);
+    const encMsgs = enc.messages.filter((m) => m.collab);
+    ok(encRows.length === 3 && encRows.every((r) => r.dir === 'in' && r.encrypted && r.agentName === 'water_research'), 'THREE distinct encrypted messages from one agent in one turn stay THREE rows (the content leg cannot fire without content)', JSON.stringify(encRows));
+    ok(encMsgs.length === 1 && /3 messages/.test(encMsgs[0].content[0].output) && /water_research/.test(encMsgs[0].content[0].output), '…coalesced into ONE item that says "3 messages · water_research"', encMsgs.map((m) => m.content[0].output));
+    // the id leg still collapses a genuine re-read of the SAME record
+    enc.convertHistory([encMsg('amsg_01a07340-c696-7080-a3f3-c55a42e62d04', 'gAAAAABqnHsPfu_QPd2BKoPUgU269iLFrmymKTAu…')]);
+    ok(enc.messages.flatMap((m) => m.collab?.rows || []).length === 3, '…and re-feeding one of them (same id) adds NO fourth row (the id leg is intact)');
+  }
+  const spawnRow = rows.find((r) => r.dir === 'spawn' && r.agentPath === '/root/water_research');
+  ok(spawnRow && spawnRow.threadId === CHILD, "…and the suppressed 'started' record still taught the map: the spawn row carries the child thread id (click-through never depends on drawing a row)", spawnRow);
+  ok(rows.filter((r) => r.dir === 'spawn').every((r) => r.agentPath.startsWith('/root/')), 'the spawn OUTPUT ({"task_name":"/root/x"}) upgrades the row to the full agent path', rows.filter((r) => r.dir === 'spawn').map((r) => r.agentPath));
+  const encRow = rows.find((r) => r.dir === 'in' && r.encrypted);
+  ok(encRow && encRow.msgType === 'MESSAGE' && encRow.agentName === 'water_research', 'the ENCRYPTED inbound message is a one-line row with its msgType (no body to show)', encRow);
+  ok(rows.find((r) => r.dir === 'wait')?.cellId === '3' && rows.find((r) => r.dir === 'out')?.msgType === 'message' && rows.some((r) => r.dir === 'out' && r.msgType === 'followup'), 'wait carries its cell, send_message/followup_task carry their kinds', rows.filter((r) => r.dir === 'out' || r.dir === 'wait'));
+  const collabMsgs = mm.messages.filter((m) => m.collab && !m.collab.report);
+  ok(collabMsgs.length < rows.length && collabMsgs.every((m) => m.collapseKind === 'agent' && m.role === 'tool'), `consecutive one-line rows COALESCE (${rows.length - 1} rows in ${collabMsgs.length} messages), all 'agent'-kind`, collabMsgs.map((m) => m.content[0].output));
+  ok(mm.status().subagents['/root/water_research'] === CHILD, 'status().subagents exposes the agentPath → threadId map the client clicks through', mm.status().subagents);
+  const tools = mm.messages.filter((m) => m.role === 'tool' && !m.collab);
+  ok(tools.length === 0, 'the item_completed TWINS (AgentMessage/Reasoning/CommandExecution/UserMessage) render NOTHING extra', tools.map((m) => m.toolName));
+
+  // ── LIVE twin vs ROLLOUT twin: ONE message ──
+  // The wrapper records a child's item/completed agentMessage as an
+  // agent_message with the payload in output_text (no envelope, id msg_…);
+  // codex later writes its own copy into the ROOT rollout with the envelope
+  // and a DIFFERENT id (amsg_…). Merged, they must render once.
+  const LIVE_TWIN = { timestamp: '2026-09-05T20:40:53.100Z', type: 'response_item', payload: { type: 'agent_message', id: 'msg_0defcfe57bd8', thread_id: CHILD, turn_id: TURN, author: '/root/water_research', recipient: '/root', content: [{ type: 'output_text', text: PLAIN_BODY }], phase: 'final_answer', delivery: null, msg_type: 'FINAL_ANSWER' } };
+  for (const order of [[LIVE_TWIN, ROLLOUT_REPORT], [ROLLOUT_REPORT, LIVE_TWIN]]) {
+    const m2 = new CodexMessageManager('twin');
+    m2.convertHistory([SA('started', 'call_ZCITcZYBFfmtfzyEdl6ATO27'), ...order]);
+    const reports = m2.messages.filter((x) => x.collab?.report);
+    ok(reports.length === 1 && reports[0].content[0].output === PLAIN_BODY, `live twin + rollout twin → ONE report (${order[0] === LIVE_TWIN ? 'live first' : 'rollout first'})`, reports.length);
+  }
+  // …and the wrapper's thread_id/turn_id never break the buffer⇄rollout merge
+  const { mergeCodexRecords } = require(path.join(REPO, 'src/codex-session-store.js'));
+  const bufCopy = { timestamp: '2026-09-05T20:26:17.000Z', type: 'response_item', payload: { type: 'function_call', name: 'exec_command', arguments: '{"command":"ls"}', call_id: 'call_X', thread_id: TID, turn_id: TURN } };
+  const rollCopy = { timestamp: '2026-09-05T20:26:17.000Z', type: 'response_item', payload: { type: 'function_call', name: 'exec_command', arguments: '{"command":"ls"}', call_id: 'call_X', id: 'fc_X' } };
+  ok(mergeCodexRecords([rollCopy], [bufCopy]).length === 1, 'the wrapper item context (thread_id/turn_id) is stripped from the merge fingerprint — buffer and rollout twins still collide');
+  ok(CodexMessageManager.recordKey(bufCopy) === CodexMessageManager.recordKey(rollCopy), '…and from recordKey, so a rebuild mints the same message ids');
+
+  // ── LIVE coalescing must reach the DOM ──
+  // ChatView._onEditMessage only re-renders the element for a TERMINAL status;
+  // a content-only edit updates the stored message and leaves the old row on
+  // screen. Every coalescing edit therefore carries `status`.
+  {
+    const live = new CodexMessageManager('live6473');
+    const ops = [];
+    live.onOp((o) => ops.push(o));
+    live.processLive(SA('started', 'call_A'));
+    live.processLive(SA('completed', 'call_B'));
+    const edits = ops.filter((o) => o.op === 'edit');
+    ok(ops.filter((o) => o.op === 'create').length === 1 && edits.length === 1, 'a second consecutive row EDITS the first message instead of creating another', ops.map((o) => o.op).join(','));
+    ok(edits[0].fields.status === 'complete' && Array.isArray(edits[0].fields.collab?.rows) && edits[0].fields.collab.rows.length === 2, 'the coalescing edit carries status + the grown rows (or the DOM keeps the stale row)', JSON.stringify(edits[0].fields.collab?.rows?.length));
+    const cvSrc = read('src/lib/chat-view.js');
+    ok(/if \(fields\.status === 'complete' \|\| fields\.status === 'error' \|\| fields\.status === 'interrupted'\) \{/.test(cvSrc), 'WIRING PIN: the client re-render really is gated on a terminal status in fields');
+  }
 }
 
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);

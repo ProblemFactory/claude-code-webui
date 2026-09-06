@@ -14,9 +14,80 @@
 const { peerDisplayName } = require('./message-manager');
 // web-search cards: the ONE results renderer + the twin-dedup key (PURE, shared with the client's title chip)
 const { renderSearchOutput, searchActionKey, NO_SEARCH_DETAILS } = require('./search-card');
+const { agentName, collabSummaryText } = require('./collab-row');
 
 function safeJsonParse(text, fallback = null) {
   try { return JSON.parse(text); } catch { return fallback; }
+}
+
+// ── 0.153 multi-agent v2 (B-7473) ──
+// The inter-agent ENVELOPE codex puts in front of every sub-agent ↔ root
+// message. Mirrored in data/bin/codex-chat-wrapper.js (a shipped single file
+// that cannot require this module) — keep the two in lockstep.
+//   Message Type: FINAL_ANSWER
+//   Task name: /root
+//   Sender: /root/usecases_v4
+//   Payload:
+//   <the actual report>
+const AGENT_ENVELOPE_RE = /^Message Type:[ \t]*([A-Z_]+)\r?\n(?:Task name:[ \t]*(\S*)\r?\n)?Sender:[ \t]*(\S+)\r?\n(?:Payload:[ \t]*\r?\n?)?/;
+function parseAgentEnvelope(text) {
+  const s = String(text || '');
+  const m = AGENT_ENVELOPE_RE.exec(s);
+  if (!m) return null;
+  return { msgType: m[1], taskName: m[2] || '', sender: m[3], body: s.slice(m[0].length) };
+}
+
+// The collaboration tool family (codex-rs CollabAgentTool + the wrapper's
+// snake_case names). These are ORCHESTRATION, not work: they render as
+// one-line collab rows, never as tool cards with an (encrypted) payload.
+const COLLAB_TOOL_DIRS = {
+  spawn_agent: 'spawn',
+  send_message: 'out',
+  followup_task: 'out',
+  send_input: 'out',
+  interrupt_agent: 'out',
+  resume_agent: 'out',
+  close_agent: 'out',
+  list_agents: 'out',
+  wait: 'wait',
+  wait_agent: 'wait',
+};
+const COLLAB_MSG_TYPES = {
+  send_message: 'message',
+  followup_task: 'followup',
+  send_input: 'input',
+  interrupt_agent: 'interrupt',
+  resume_agent: 'resume',
+  close_agent: 'close',
+  list_agents: 'list',
+};
+// ONE IDENTITY PER SUB-AGENT (round-5 fix, measured on the owner's real
+// 0.153.4 root rollout, 4768 records): codex names the SAME child two ways.
+// The OUTBOUND side — a `send_message` / `followup_task` / `spawn_agent`
+// call's own arguments — carries a BARE `task_name` ("interior_research"),
+// while every inbound message, every spawn OUTPUT ({"task_name":"/root/x"} —
+// that is the proof of the intended shape) and every SubAgentActivity record
+// carries the absolute agent path ("/root/interior_research"). Keying rows on
+// the raw value split each agent in two: 35 distinct row paths for 19 real
+// children, the fold header drew the same agent as two chips, the sub-agents
+// count over-reported, and the agentPath→threadId map (absolute keys) never
+// matched an outbound row — 97 of 402 rows carried no thread id and so had NO
+// click-through. Normalising at the ONE place a row is built means every
+// consumer (chips, map lookup, back-fill, summary) sees one identity.
+// A value that already has a '/' is left alone (a nested child stays nested).
+function absAgentPath(name, ownPath) {
+  const s = String(name || '').trim();
+  if (!s || s.includes('/')) return s;
+  const own = String(ownPath || '').trim() || '/root';
+  return `${own.replace(/\/+$/, '')}/${s}`;
+}
+
+// An encrypted payload must never reach a rendered string: only these argument
+// keys may be shown, and `message` (the fernet blob) is deliberately absent.
+function collabDetailOf(input) {
+  if (!input || typeof input !== 'object') return '';
+  const raw = input.prompt || input.description || input.instructions || '';
+  return typeof raw === 'string' ? raw.replace(/\s+/g, ' ').trim().slice(0, 300) : '';
 }
 
 // Server-posted peer frames, ANCHORED at the start of a user message's text
@@ -162,10 +233,12 @@ const ITEM_COMPLETED_SKIPPED_TYPES = new Set([
 
 const SKIPPED_EVENT_TYPES = new Set([
   // twins of records already rendered from the response_item stream
-  // (item_completed = the GENERIC skip — _processItemCompleted runs first and
-  // routes the item kinds a 0.153.4 rollout persists nowhere else: Extension
-  // web.search / image_gen.generation, ImageView; unknown Extension kinds get
-  // telemetry codex-unknown-record:item_completed:<kind>)
+  // (item_completed = the GENERIC skip — _processItemCompleted runs FIRST, at
+  // the top of _processEvent, and routes the item kinds a 0.153.4 rollout
+  // persists nowhere else: Extension web.search / image_gen.generation,
+  // ImageView and — B-7473 — SubAgentActivity, the ONLY rollout carrier of
+  // sub-agent lifecycle there; unknown kinds get telemetry
+  // codex-unknown-record:item_completed:<type>)
   'user_message', 'agent_message', 'agent_reasoning', 'agent_reasoning_raw_content', 'raw_response_item', 'raw_response_completed', 'item_started', 'item_completed',
   'agent_message_content_delta', 'reasoning_content_delta', 'reasoning_raw_content_delta', 'plan_delta',
   // tool lifecycle noise — the function_call / function_call_output pair is the card
@@ -280,7 +353,16 @@ class CodexMessageManager {
       lastUsage: null,
       total_cost_usd: 0,
       subagentMetas: [],
+      // B-7473: agentPath → agentThreadId, learned from SubAgentActivity
+      // (0.153.4's only carrier of a child's thread id). The client uses it to
+      // open a sub-agent's rollout WITHOUT a server lookup.
+      subagents: {},
+      agentPath: '',
     };
+    // collab bookkeeping (B-7473)
+    this._collabByCall = new Map();   // call_id → { msgId, row } (spawn/send/wait rows awaiting their output)
+    this._collabSeen = new Set();     // sub-agent activity twins (live event + rollout item carry the same item id)
+    this._agentMsgSeen = new Map();   // turn-scoped (author, payload) → msgId — live twin vs rollout twin
   }
 
   // R0 (docs/design-three-tier.md): content-derived ids — same contract as
@@ -300,8 +382,11 @@ class CodexMessageManager {
   static recordKey(record) {
     const payload = record?.payload || record || {};
     // webui_peer = the wrapper's peer marker (buffer copy only) — stripped so
-    // the buffer and rollout copies of one peer message mint the SAME id
-    const { item_id, itemId, id, internal_chat_message_metadata_passthrough, webui_peer, ...stable } = payload;
+    // the buffer and rollout copies of one peer message mint the SAME id.
+    // thread_id/turn_id are the wrapper's B-7473 item context: only the LIVE
+    // copy carries them, so leaving them in would make every buffer record a
+    // stranger to its rollout twin (double cards on every attach).
+    const { item_id, itemId, id, internal_chat_message_metadata_passthrough, webui_peer, thread_id, turn_id, ...stable } = payload;
     let str;
     try { str = (record?.type || '') + ':' + JSON.stringify(stable); } catch { str = String(record?.type || ''); }
     let h = 0x811c9dc5;
@@ -657,6 +742,13 @@ class CodexMessageManager {
   _processSessionMeta(record, emit) {
     const payload = record.payload || {};
     this._adoptThreadId(payload.id); // FIRST session_meta wins (see _adoptThreadId)
+    // This thread's OWN agent path ('/root' for a primary thread, '/root/x'
+    // for a sub-agent rollout) — the reference point that makes an
+    // agent_message inbound or outbound. A sub-agent rollout also carries a
+    // COPY of its parent's meta, so only the first one wins (B-21e4 rule).
+    if (!this._status.agentPath && (payload.agent_path || payload.agentPath)) {
+      this._status.agentPath = String(payload.agent_path || payload.agentPath);
+    }
     if (!this._status.model && payload.model) this._status.model = payload.model;
     if (payload.model_provider) this._status.modelProvider = payload.model_provider;
     if (payload.permissionMode) this._status.permissionMode = payload.permissionMode;
@@ -779,28 +871,164 @@ class CodexMessageManager {
     this._noteUnknown('response_item', type);
   }
 
-  // 0.153 multi-agent v2: `agent_message` response items are the sub-agent ↔
-  // root chatter (author/recipient are agent paths like /root/water_waste; the
-  // payload rides an encrypted_content block, the visible envelope is the
-  // input_text "Message Type: … / Sender: … / Payload:"). Rendered as a
-  // COMPLETE tool card in the 'agent' fold kind — a system card here would
-  // split every surrounding run, and dropping it hid the whole collaboration.
+  // ── B-7473: sub-agent ↔ root chatter ──
+  // `agent_message` response items are the multi-agent v2 mail: author and
+  // recipient are agent PATHS (/root/water_research → /root), the payload
+  // rides an encrypted_content block and the visible part is the input_text
+  // envelope ("Message Type: … / Sender: … / Payload:"). The wrapper writes
+  // the LIVE twin of the same fact (a child's item/completed agentMessage, or
+  // an own-thread agentMessage that starts with the envelope) with
+  // content:[output_text] and msg_type set.
+  //
+  // Rendering rule (the owner's report — a sub-agent's FINAL_ANSWER read as
+  // the root agent's own reply, twice):
+  //   inbound + PLAINTEXT  → a distinct, ATTRIBUTED sub-agent report card
+  //   everything else      → a one-line collab row (coalesced with its peers)
+  // Neither is ever an assistant bubble, and an encrypted blob is never shown.
   _processAgentMessageItem(item, emit) {
     const parts = asArray(item.content);
     const visible = parts.filter((b) => b && (b.type === 'input_text' || b.type === 'output_text' || b.type === 'text')).map((b) => b.text || '').join('').trim();
-    const encrypted = parts.some((b) => b && (b.type === 'encrypted_content' || typeof b.encrypted_content === 'string'));
-    const output = visible + (encrypted ? `${visible ? '\n' : ''}[encrypted payload — withheld upstream]` : '');
-    const toolCallId = item.id || item.item_id || this._nextId();
+    const encBlob = parts.map((b) => (b && (typeof b.encrypted_content === 'string' ? b.encrypted_content : (b.type === 'encrypted_content' ? (b.text || b.data || '') : ''))) || '').find((x) => x) || '';
+    const encrypted = parts.some((b) => b && (b.type === 'encrypted_content' || typeof b.encrypted_content === 'string')) || !!item.encrypted;
+    const envelope = parseAgentEnvelope(visible);
+    const author = String(item.author || envelope?.sender || '');
+    const own = this._status.agentPath || '/root';
+    const dir = author && author !== own ? 'in' : 'out';
+    const msgType = String(item.msg_type || item.msgType || envelope?.msgType || (item.phase === 'final_answer' ? 'FINAL_ANSWER' : 'MESSAGE'));
+    const body = (envelope ? envelope.body : visible).trim();
+    // absAgentPath on BOTH legs: an envelope's `taskName` (and some recipient
+    // fields) are bare names, the author is an absolute path — one identity
+    const other = absAgentPath(dir === 'in' ? author : String(item.recipient || envelope?.taskName || ''), own);
+    const row = {
+      dir,
+      agentPath: other,
+      agentName: agentName(other),
+      msgType,
+      encrypted,
+      threadId: this._status.subagents[other] || String(item.thread_id || item.threadId || '') || null,
+      target: dir === 'out' ? other : '',
+    };
+    // TWIN DEDUP: the live record (wrapper, id msg_…) and the rollout record
+    // (id amsg_…) are the SAME message with different ids and different
+    // framing — id first, then the CONTENT leg within the turn.
+    //
+    // The content leg only exists where there IS content (B-7473 integration 2026-09-06, measured on
+    // the owner's real root rollout): an ENCRYPTED inter-agent message has body
+    // '' and msgType 'MESSAGE' for EVERY message, so a
+    // (turn, author, msgType, body) key collapses every message an agent sent in
+    // a turn into one — the verifier measured 101 of 140 encrypted messages
+    // silently dropped; a re-measure of the SAME (still-growing) rollout at 3648
+    // records says 120 of 168. All of them carry distinct ids AND distinct blobs,
+    // so the id leg never fired. An encrypted message therefore dedupes by ID, plus a
+    // discriminator taken from the fernet blob's first 32 chars (version +
+    // timestamp + IV — distinct per message) so a re-read of the same record
+    // still collapses if its id is ever missing.
+    const idKey = item.id || item.item_id ? `id:${item.id || item.item_id}` : '';
+    const contentKey = body
+      ? `t${this.turnIndex}:${author}:${msgType}:${body.slice(0, 400)}`
+      : (encBlob ? `t${this.turnIndex}:${author}:${msgType}:enc:${encBlob.slice(0, 32)}` : '');
+    if ((idKey && this._agentMsgSeen.has(idKey)) || (contentKey && this._agentMsgSeen.has(contentKey))) return;
+    if (idKey) this._agentMsgSeen.set(idKey, 1);
+    if (contentKey) this._agentMsgSeen.set(contentKey, 1);
+    // bounded: a twin's two copies are minutes apart at most (the merge sorts
+    // by timestamp), so an old key can never be needed again
+    while (this._agentMsgSeen.size > 4000) this._agentMsgSeen.delete(this._agentMsgSeen.keys().next().value);
+
+    if (dir === 'in' && !encrypted && body) {
+      this._createCollabReport(row, body, emit);
+      return;
+    }
+    this._pushCollabRow(row, emit);
+  }
+
+  /**
+   * A sub-agent REPORT: the plaintext payload a child sent home. role 'tool',
+   * rendered with an attribution header and the body as markdown — the renderer
+   * never confuses it with an assistant reply.
+   *
+   * collapseKind 'report', NOT 'agent' (B-7473 integration 2026-09-06): a report is the CONTENT the
+   * owner opened the window to read (the child's FINAL_ANSWER), while the
+   * one-line rows are orchestration noise. 'agent' is in the default
+   * chat.collapseKinds, so a report folded away by default and the owner had to
+   * expand the run to find the answer. 'report' is offered in the settings list
+   * but ships UNCHECKED — a user who wants the quiet view can tick it.
+   */
+  _createCollabReport(row, body, emit) {
+    const toolCallId = `collab:${row.agentPath || 'agent'}:${this.messages.length}`;
     const msg = this._create({
       role: 'tool',
       status: 'complete',
-      content: [{ type: 'tool_result', toolCallId, toolName: 'Agent Message', input: { author: item.author || '', recipient: item.recipient || '' }, output, status: 'ok' }],
+      content: [{ type: 'tool_result', toolCallId, toolName: 'Sub-agent report', input: { agent: row.agentPath, type: row.msgType }, output: body, status: 'ok' }],
       toolCallId,
-      toolName: 'Agent Message',
+      toolName: 'Sub-agent report',
+      toolStatus: 'ok',
+      collapseKind: 'report',
+    });
+    msg.collab = { ...row, report: true, rows: [row] };
+    if (emit) this._emit({ op: 'create', message: msg });
+    return msg;
+  }
+
+  /**
+   * A one-line collab row. CONSECUTIVE rows coalesce into ONE message (the
+   * orchestration of a dozen sub-agents otherwise buries the conversation):
+   * the last message is edited in place, live and on rebuild alike.
+   */
+  _pushCollabRow(row, emit) {
+    const last = this.messages[this.messages.length - 1];
+    if (last && last.collab && !last.collab.report && last.turnIndex === this.turnIndex) {
+      last.collab.rows.push(row);
+      const output = collabSummaryText(last.collab);
+      last.content = [{ ...(last.content?.[0] || {}), output, status: 'ok' }];
+      // `status` rides the edit ON PURPOSE: ChatView._onEditMessage only
+      // RE-RENDERS the element for a terminal status — a content-only edit
+      // updates the stored message and leaves the DOM showing the old row
+      // (the message is already complete; this changes no state).
+      if (emit) this._emit({ op: 'edit', id: last.id, fields: { status: 'complete', content: last.content, collab: last.collab } });
+      return last;
+    }
+    const toolCallId = `collab:${row.agentPath || row.target || 'agent'}:${this.messages.length}`;
+    const msg = this._create({
+      role: 'tool',
+      status: 'complete',
+      content: [{ type: 'tool_result', toolCallId, toolName: 'Sub-agent', input: {}, output: collabSummaryText(row), status: 'ok' }],
+      toolCallId,
+      toolName: 'Sub-agent',
       toolStatus: 'ok',
       collapseKind: 'agent',
     });
+    msg.collab = { ...row, rows: [row] };
     if (emit) this._emit({ op: 'create', message: msg });
+    return msg;
+  }
+
+  /**
+   * Learn (and remember) a child's agentPath → thread id.
+   *
+   * The BELT (round-5): rows are built through absAgentPath, so a row and this
+   * map agree by construction — but a carrier we have not met yet could still
+   * hand us a BARE name, and a row with no thread id has no click-through at
+   * all. So the back-fill also matches a row whose own path carries NO '/'
+   * against this key's last segment. Deliberately one-directional: an absolute
+   * row path must match EXACTLY (two different parents may each have a child
+   * called `research`, and mapping one onto the other's thread would open the
+   * wrong conversation — a wrong answer is worse than a missing one).
+   */
+  _noteSubagentThread(agentPath, threadId) {
+    if (!agentPath || !threadId) return;
+    if (this._status.subagents[agentPath] === threadId) return;
+    this._status.subagents = { ...this._status.subagents, [agentPath]: threadId };
+    const leaf = agentName(agentPath);
+    const matches = (p) => !!p && (p === agentPath || (!p.includes('/') && p === leaf));
+    // back-fill rows already rendered for this agent (the spawn row is written
+    // before SubAgentActivity names the thread)
+    for (const m of this.messages) {
+      if (!m.collab) continue;
+      for (const r of m.collab.rows || []) {
+        if (!r.threadId && matches(r.agentPath)) r.threadId = threadId;
+      }
+      if (!m.collab.threadId && matches(m.collab.agentPath)) m.collab.threadId = threadId;
+    }
   }
 
   goalState() { return this._goalState || null; }
@@ -935,7 +1163,48 @@ class CodexMessageManager {
     return true;
   }
 
+  /**
+   * A collaboration tool call (spawn_agent / send_message / followup_task /
+   * wait …) → a one-line collab row instead of a tool card. The `message`
+   * argument is an encrypted blob upstream, so a card would show a 3KB fernet
+   * string as "input"; the row shows WHO and WHAT KIND, and says the payload
+   * was withheld. Returns true when the call was consumed.
+   */
+  _processCollabToolCall(item, rawInput, emit) {
+    const name = String(item.name || '');
+    const dir = COLLAB_TOOL_DIRS[name];
+    if (!dir) return false;
+    const input = safeJsonParse(typeof rawInput === 'string' ? rawInput : JSON.stringify(rawInput ?? ''), null) || (rawInput && typeof rawInput === 'object' ? rawInput : {});
+    const toolCallId = item.call_id || item.callId || this._nextId();
+    // absAgentPath: the outbound call's `task_name` is BARE — every other
+    // carrier names the same child absolutely (see the helper's essay)
+    const target = absAgentPath(String(input.task_name || input.target || input.agent_path || input.agentPath || ''), this._status.agentPath);
+    const row = {
+      dir,
+      agentPath: target,
+      agentName: agentName(target),
+      nickname: String(item.agent_nickname || input.agentNickname || ''),
+      msgType: COLLAB_MSG_TYPES[name] || '',
+      encrypted: typeof input.message === 'string' && input.message.length > 0,
+      target,
+      cellId: input.cell_id != null ? String(input.cell_id) : '',
+      threadId: this._status.subagents[target] || (Array.isArray(input.receiverThreadIds) ? input.receiverThreadIds[0] : null) || null,
+      detail: collabDetailOf(input),
+    };
+    const msg = this._pushCollabRow(row, emit);
+    this._collabByCall.set(toolCallId, { msgId: msg.id, row });
+    // DURABLE marker (the _collabByCall entry is deleted when the call's output
+    // arrives): a SubAgentActivity record carrying this same id is this row's
+    // own twin, in either arrival order — see _processSubAgentActivity.
+    this._collabSeen.add('call:' + toolCallId);
+    // bounded: a call whose output never arrives (interrupted turn) would
+    // otherwise pin its row object for the manager's lifetime
+    while (this._collabByCall.size > 2000) this._collabByCall.delete(this._collabByCall.keys().next().value);
+    return true;
+  }
+
   _processFunctionCall(item, emit) {
+    if (this._processCollabToolCall(item, item.arguments, emit)) return;
     const toolCallId = item.call_id || item.callId || this._nextId();
     const parsedInput = parseToolInput(item.name, item.arguments);
     if (this._absorbTwinCall(toolCallId, parsedInput, emit)) return;
@@ -955,6 +1224,8 @@ class CodexMessageManager {
   }
 
   _processCustomToolCall(item, emit) {
+    const rawInput0 = item.input ?? item.arguments ?? '';
+    if (this._processCollabToolCall(item, rawInput0, emit)) return;
     const toolCallId = item.call_id || item.callId || this._nextId();
     const rawInput = item.input ?? item.arguments ?? '';
     const parsedInput = parseToolInput(item.name, rawInput);
@@ -1043,6 +1314,30 @@ class CodexMessageManager {
   _processFunctionCallOutput(item, emit) {
     const toolCallId = item.call_id || item.callId;
     if (!toolCallId) return;
+    // A collab call's output is either empty (send_message / followup_task) or
+    // the spawned agent's PATH ({"task_name":"/root/water_research"}) — never
+    // a message body. It enriches the row; it never becomes a card, and the
+    // `wait` output (a truncated base64 image in real rollouts) never renders.
+    const collab = this._collabByCall.get(toolCallId);
+    if (collab) {
+      this._collabByCall.delete(toolCallId);
+      const parsed = typeof item.output === 'string' ? safeJsonParse(item.output, null) : null;
+      const spawned = parsed && typeof parsed === 'object' ? absAgentPath(String(parsed.task_name || parsed.agent_path || ''), this._status.agentPath) : '';
+      if (spawned && spawned !== collab.row.agentPath) {
+        collab.row.agentPath = spawned;
+        collab.row.agentName = agentName(spawned);
+        collab.row.target = collab.row.target ? spawned : collab.row.target;
+        if (this._status.subagents[spawned]) collab.row.threadId = this._status.subagents[spawned];
+        const msg = this.messageIndex.get(collab.msgId);
+        if (msg) {
+          if (msg.collab && !msg.collab.rows.length) msg.collab.rows = [collab.row];
+          if (msg.collab && msg.collab.rows[0] === collab.row) Object.assign(msg.collab, collab.row);
+          msg.content = [{ ...(msg.content?.[0] || {}), output: collabSummaryText(msg.collab) }];
+          if (emit) this._emit({ op: 'edit', id: msg.id, fields: { status: 'complete', content: msg.content, collab: msg.collab } });
+        }
+      }
+      return;
+    }
     // custom_tool_call_output carries output as an ARRAY of {type:'input_text',
     // text} blocks (real rollout shape) — join the text instead of dumping a
     // JSON blob into the card.
@@ -1283,13 +1578,16 @@ class CodexMessageManager {
     }
     if (type === 'SubAgentActivity') {
       const kind = String(it.kind || '');
-      if (kind === 'started' || kind === 'interacted') return; // the spawn_agent / send_message card IS this record
-      if (kind === 'completed' || kind === 'interrupted') {
-        // a terminal record whose id already owns a card would be that call's
-        // twin (never seen — the CLI synthesises `subagent-completed-<uuid>` —
-        // but a double card is a failure nobody would report, so guard it)
-        if (it.id && this.toolCallMessageIds.has(String(it.id))) return;
-        this._processSubAgentActivity({ event_id: it.id, agent_thread_id: it.agent_thread_id || it.agentThreadId, agent_path: it.agent_path || it.agentPath, kind }, emit);
+      // EVERY kind reaches the ONE lifecycle implementation (B-7473 + the
+      // allowlist router merged): started/interacted carry the child's THREAD
+      // ID — the fact the click-through needs — and the map is filled even when
+      // the row itself is suppressed as its own call's twin (see
+      // _processSubAgentActivity). Unknown kinds still get the breadcrumb.
+      if (kind === 'started' || kind === 'interacted' || kind === 'completed' || kind === 'interrupted') {
+        // `detail` rides along: 0.153.4 never sets it on these four, but a kind
+        // that DOES carry a message must not lose it on the way through a
+        // hand-copied field list (the whitelist-drift class)
+        this._processSubAgentActivity({ event_id: it.id, agent_thread_id: it.agent_thread_id || it.agentThreadId, agent_path: it.agent_path || it.agentPath, kind, detail: it.detail }, emit);
         return;
       }
       this._noteUnknown('event_msg', 'item_completed:SubAgentActivity:' + (kind || '(unkinded)'));
@@ -1298,54 +1596,81 @@ class CodexMessageManager {
     this._noteUnknown('event_msg', 'item_completed:' + (type || '(untyped)'));
   }
 
-  // Codex sub-agents: a spawned agent THREAD tied to a tool call
+  // Codex sub-agents: the lifecycle of a spawned agent THREAD
   // (SubAgentActivityKind started | interacted | interrupted | completed,
-  // 0.153.4 protocol.rs). ONE card per sub-agent THREAD in the 'agent' fold kind
-  // (a system line split every surrounding run); 'interacted' is churn;
-  // completed/interrupted edit the card in place. No task-lifecycle chip: a
-  // sub-agent has no result payload to close on.
-  // Reached from THREE carriers, all keyed on the thread id: standalone event_msg
-  // sub_agent_activity (0.149.1 rollouts — 349 records), the thread/read mapper
-  // (src/codex-thread-read.js), and 0.153.4's item_completed SubAgentActivity
-  // (terminal kinds only — the others are their spawn/send call's own card).
-  // ONE card per thread, always — a repeated 'started' patches nothing (79
-  // (file, thread) pairs in the 0.149.1 corpus, ZERO with a second 'started', so
-  // this is idempotence, NOT a fix for an observed duplicate: an earlier count
-  // that said 19 of 43 pairs repeat was an artifact of comparing 8-char id
-  // PREFIXES, caught by an old-vs-new whole-corpus replay that showed no
-  // difference), and a TERMINAL record with no open card CREATES one, because on
-  // 0.153.4 the terminal record is the only one that reaches here.
+  // 0.153.4 protocol.rs). ONE implementation, ONE shape (B-7473 ∪ the
+  // item_completed allowlist router):
+  //   · it ALWAYS learns agentPath → agent_thread_id (`status().subagents`) —
+  //     that map is what makes an agent NAME clickable everywhere, and it is
+  //     learned even when no row is drawn;
+  //   · the fact renders as a one-line collab ACTIVITY row (dir 'activity'),
+  //     coalesced with its neighbours. The old standalone "Sub-agent" tool
+  //     CARD is RETIRED — a card per lifecycle event buried the conversation
+  //     the owner was reading, and the row carries the same three facts (who,
+  //     which kind, which thread) plus the click-through.
+  //   · NO DOUBLE RENDER: on 0.153.4 the record's own id IS the id of the tool
+  //     call that caused it (census: started → spawn_agent 18/18, interacted →
+  //     send_message 197 + followup_task 17), and that call already drew its
+  //     own collab row / tool card — so a record whose id is a known call is
+  //     map-only. Terminal records synthesise `subagent-completed-<uuid>`
+  //     (twinning nothing, 0/32) and therefore always draw their row.
+  // Three carriers, one path: standalone `event_msg sub_agent_activity`
+  // (0.149.1 rollouts — 349 records — and the wrapper's LIVE stream), the
+  // thread/read mapper (src/codex-thread-read.js), and 0.153.4's
+  // `item_completed {item:SubAgentActivity}` (the ONLY rollout carrier there).
+  // Twin dedupe: (thread, kind, id) and (thread, kind) — 'interacted' repeats
+  // per interaction and 'completed' is recorded more than once per thread
+  // (32 records over 18 threads in the local corpus), so the corpus replay
+  // draws one row per (thread, kind).
   _processSubAgentActivity(event, emit) {
     const tid = String(event.agent_thread_id || event.agentThreadId || '');
-    const key = 'subagent:' + (tid || event.event_id || 'x');
-    const kind = event.kind || '';
-    const terminal = kind === 'completed' || kind === 'interrupted';
-    if (kind !== 'started' && !terminal) return;
-    const label = `${event.agent_path || '(agent)'} — thread ${tid.slice(0, 13)}…`;
-    const failed = kind === 'interrupted';
-    const output = `Codex sub-agent ${kind === 'started' ? 'started' : kind}: ${label}`;
-    const status = failed ? 'error' : 'complete';
-    const toolStatus = failed ? 'error' : 'ok';
-    const existing = this.messageIndex.get(this.toolCallMessageIds.get(key));
-    if (existing) {
-      if (!terminal) return; // a repeated 'started' is not a second sub-agent
-      existing.status = status;
-      existing.toolStatus = toolStatus;
-      existing.content = [{ ...(existing.content?.[0] || {}), output, status: toolStatus }];
-      if (emit) this._emit({ op: 'edit', id: existing.id, fields: { status: existing.status, toolStatus: existing.toolStatus, content: existing.content } });
-      return;
+    const path = absAgentPath(String(event.agent_path || event.agentPath || ''), this._status.agentPath);
+    const kind = String(event.kind || '');
+    this._noteSubagentThread(path, tid); // always — even when the row is suppressed below
+    const id = event.event_id != null ? String(event.event_id) : '';
+    if (id && (this._collabSeen.has('call:' + id) || this.toolCallMessageIds.has(id))) return; // this record IS its own call's row/card
+    // a foreign-thread ERROR arrives as kind 'errored' with the message here
+    // (hover detail) — a child's failure is never the root's task_failed
+    const detail = event.detail ? String(event.detail).slice(0, 300) : '';
+    const key = `sa:${tid}:${kind}:${id}`;
+    if (kind === 'errored') {
+      // ERRORS ARE NOT INTERCHANGEABLE (round-5 fix). Every other kind repeats
+      // the same fact — 'interacted' once per interaction, 'completed' recorded
+      // more than once per thread — so a (thread, kind) key is the right
+      // coalescing for them. An 'errored' record carries a MESSAGE: a child
+      // that fails three times, differently worded, is three things the user
+      // must read, and the (thread, kind) key silently dropped every one after
+      // the first. Errors dedupe on their OWN identity: the event id when the
+      // carrier gives one, else the detail text (a genuine re-read of the same
+      // record still collapses; two different messages never do).
+      // The key carries the id AND the message: a genuine re-read of one record
+      // has both equal and still collapses, while two differently-worded errors
+      // never do — even if their ids collide (the wrapper's synthesized id is
+      // `foreign-error-<tid>-<Date.now()>`, and two failures inside one
+      // millisecond would otherwise share it; the wrapper now also appends a
+      // counter, but the key must not DEPEND on that being unique).
+      // (No eviction here on purpose: `_collabSeen` also holds the durable
+      // `call:<id>` double-render markers, and an FIFO sweep would drop one
+      // while its SubAgentActivity twin is still to come. The error lane adds
+      // at most one entry per record — the same growth class as the per-record
+      // `key` below, which this set has always held.)
+      const errKey = `sa:${tid}:errored:${id}|${detail}`;
+      if (this._collabSeen.has(errKey)) return;
+      this._collabSeen.add(errKey);
+    } else {
+      const kindKey = `sa:${tid}:${kind}`;
+      if (this._collabSeen.has(key) || this._collabSeen.has(kindKey)) return;
+      this._collabSeen.add(key);
+      this._collabSeen.add(kindKey);
     }
-    const msg = this._create({
-      role: 'tool',
-      status,
-      content: [{ type: 'tool_result', toolCallId: key, toolName: 'Sub-agent', input: { agent_path: event.agent_path || '', thread_id: tid }, output, status: toolStatus }],
-      toolCallId: key,
-      toolName: 'Sub-agent',
-      toolStatus,
-      collapseKind: 'agent',
-    });
-    this.toolCallMessageIds.set(key, msg.id);
-    if (emit) this._emit({ op: 'create', message: msg });
+    this._pushCollabRow({
+      dir: 'activity',
+      agentPath: path,
+      agentName: agentName(path),
+      kind,
+      threadId: tid || null,
+      detail,
+    }, emit);
   }
 
   _processEvent(event, emit) {

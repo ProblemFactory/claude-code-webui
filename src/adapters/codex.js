@@ -636,6 +636,12 @@ function normalizeCodexSource(source) {
       agentRole: spawn.agent_role || '',
       agentNickname: spawn.agent_nickname || '',
       parentThreadId: spawn.parent_thread_id || null,
+      // 0.153.4 multi-agent v2 (B-7473): the child's own path in the agent tree
+      // ('/root/water_research') and its depth — the ONLY server-side way to
+      // answer "which rollout is this collab row's sub-agent?" for a rollout
+      // that predates SubAgentActivity items.
+      agentPath: spawn.agent_path || '',
+      depth: Number.isInteger(spawn.depth) ? spawn.depth : null,
     };
   }
 
@@ -766,6 +772,8 @@ function extractCodexThreadMeta(filePath) {
   let historyMode = null;
   let sessionAgentRole = '';
   let sessionAgentNickname = '';
+  let sessionAgentPath = '';
+  let startedAt = 0;
   let reviewDetected = false;
   let reviewTarget = null;
   let reviewHint = '';
@@ -823,6 +831,13 @@ function extractCodexThreadMeta(filePath) {
         }
         sessionAgentRole = msg.payload?.agent_role || msg.payload?.agentRole || sessionAgentRole;
         sessionAgentNickname = msg.payload?.agent_nickname || msg.payload?.agentNickname || sessionAgentNickname;
+        // B-7473: the thread's own agent path + creation time (the sub-agent
+        // roster the /api/subagents fallback answers with). Own meta only —
+        // the inherited PARENT copy at ordinal 1 must not overwrite it.
+        if ((msg.payload?.id || '') === threadId) {
+          if (!sessionAgentPath) sessionAgentPath = msg.payload?.agent_path || msg.payload?.agentPath || '';
+          if (!startedAt) startedAt = Date.parse(msg.payload?.timestamp || '') || 0;
+        }
         continue;
       }
 
@@ -890,6 +905,9 @@ function extractCodexThreadMeta(filePath) {
     agentKind: sourceMeta.agentKind,
     agentRole: sourceMeta.agentRole,
     agentNickname: sourceMeta.agentNickname,
+    agentPath: sourceMeta.agentPath || sessionAgentPath || '',  // '/root/water_research' (B-7473 sub-agent roster)
+    depth: Number.isInteger(sourceMeta.depth) ? sourceMeta.depth : null,
+    startedAt: startedAt || 0,
     parentThreadId: sourceMeta.parentThreadId,
     forkedFrom: forkedFromChain || [],
     forkedFromId: forkedFromId || null,   // codex's own fork parent (thread/fork or a sub-agent spawn)

@@ -78,6 +78,15 @@ ok(/const fmtReset = \(ts, util(?:, est)?\) => \{/.test(um2) && (um2.match(/fmtR
     && tk('Read', { file_path: '/x/y.png' }) === 'read' && tk('Read', { file_path: '/x/logo.svg' }) === 'read' // EVIDENCE, not the extension (image-card review round 2, 2026-09-06)
     && RS.runSummaryParts(RS.countKinds(['search', 'search', 'image', 'read']), new Set(), tt).join(' · ') === '1 file reads · 2 web searches · 1 image reads'
     && /messageKind\(el\._rawMsg, \{ toolCard: el\.classList\.contains\('chat-msg-tool-result'\), isMemoryPath \}\)/.test(cv) && /'mcp', 'agent', 'search', 'image'\]\)/.test(cv), 'chat-view: WebSearch/WebFetch→search, Grep/Glob/LS→read, ToolSearch→lookup (folds under mcp, labelled apart); summary counts searches; default set includes search');
+  // B-7473 (integration 2026-09-06, kept through the round-5 rebase): the codex
+  // sub-agent 'report' kind and the inbound-message count belong to the PURE
+  // module's ONE kind table — an unlisted kind counted NaN and vanished
+  // (2.369.34), and a second map in chat-view would be exactly that bug again.
+  ok(RS.RUN_KINDS.includes('report') && RS.SUMMARY_ORDER.some(([k, key]) => k === 'report' && key === '{n} sub-agent reports')
+    && RS.SUMMARY_EXTRAS.includes('subAgentIn') && RS.SUMMARY_ORDER.some(([k, key]) => k === 'subAgentIn' && key === '{n} sub-agent messages')
+    && RS.countKinds(['report', 'report']).report === 2
+    && !/byKind = \{ thinking:/.test(cv) && /byKind\.subAgentIn = collabRows\.filter/.test(cv),
+  "chat-run-summary owns the B-7473 lines: 'report' is a RUN_KIND with its own summary entry, subAgentIn is a declared SUMMARY_EXTRA — chat-view keeps NO second kind map");
   const { CodexMessageManager } = require(path.join(REPO, 'src/codex-message-manager.js'));
   const cm2 = new CodexMessageManager('c2');
   cm2.processLive({ timestamp: new Date().toISOString(), type: 'response_item', payload: { type: 'function_call', call_id: 'ws1', name: 'web_search', arguments: '{"query":"rv solar"}' } });

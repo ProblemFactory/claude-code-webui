@@ -11,10 +11,21 @@
 // each one — an unlisted kind used to count `undefined++` = NaN and vanish
 // from the label (2.369.34); countKinds() now zero-fills from this list and
 // the test asserts SUMMARY_ORDER covers it.
-export const RUN_KINDS = ['thinking', 'bash', 'read', 'search', 'image', 'write', 'memory', 'mcp', 'lookup', 'agent', 'skill'];
+export const RUN_KINDS = ['thinking', 'bash', 'read', 'search', 'image', 'write', 'memory', 'mcp', 'lookup', 'agent', 'report', 'skill'];
+
+// Counts the CALLER supplies that are not card kinds — they are never
+// produced by messageKind() and never zero-filled, so an unset one simply
+// renders nothing (no `undefined++`, so no NaN). They still get their line
+// from the ONE SUMMARY_ORDER below so ordering never forks.
+//   subAgentIn = inbound codex collab rows in the run (B-7473): "5 agent ops"
+//   said nothing about a sub-agent having reported back.
+export const SUMMARY_EXTRAS = ['subAgentIn'];
 
 // Label order (kind → i18n key). 'skill' has no count line by design (a
 // "Launching skill" card is pure harness noise) — it still folds.
+// 'report' = a codex sub-agent's written answer (B-7473): it is CONTENT, so
+// the kind ships UNCHECKED in chat.collapseKinds; the line only appears for a
+// user who ticked it.
 const SUMMARY_ORDER = [
   ['thinking', '{n} thinking'],
   ['bash', '{n} Bash'],
@@ -25,7 +36,9 @@ const SUMMARY_ORDER = [
   ['memory', '{n} memory'],
   ['mcp', '{n} MCP'],
   ['lookup', '{n} tool lookups'],
+  ['subAgentIn', '{n} sub-agent messages'],
   ['agent', '{n} agent ops'],
+  ['report', '{n} sub-agent reports'],
   ['skill', null],
 ];
 

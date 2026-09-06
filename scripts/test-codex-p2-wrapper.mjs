@@ -64,6 +64,23 @@ process.stdin.on('data', (d) => {
         send({ method: 'item/completed', params: { item: { type: 'imageView', id: 'exec-fc9387a4-6df5-4b06-9f60-ed7b69463d26', path: 'file:///tmp/shot.png' } } });
         // per-response usage (v2 camelCase shape, as the real app-server sends it) — the wrapper relays it as a token_count
         send({ method: 'thread/tokenUsage/updated', params: { threadId: 'th-p2', turnId: tid, tokenUsage: { total: { totalTokens: 5150, inputTokens: 5000, cachedInputTokens: 4000, cacheWriteInputTokens: 0, outputTokens: 150, reasoningOutputTokens: 40 }, last: { totalTokens: 5150, inputTokens: 5000, cachedInputTokens: 4000, cacheWriteInputTokens: 0, outputTokens: 150, reasoningOutputTokens: 40 }, modelContextWindow: 828400 } } });
+        // B-7473 THREAD GATE: the app-server relays notifications for EVERY
+        // thread it hosts. (iii) own-thread lifecycle names the child; (i) the
+        // CHILD's own agentMessage; (ii) an own-thread message written FOR
+        // another agent (inter-agent envelope); (iv) the only real root reply.
+        send({ method: 'item/completed', params: { threadId: 'th-p2', turnId: tid, item: { type: 'subAgentActivity', id: 'call-sa1', kind: 'started', agentThreadId: 'th-child', agentPath: '/root/water_research' } } });
+        send({ method: 'item/completed', params: { threadId: 'th-child', turnId: 'turn-child', item: { type: 'agentMessage', id: 'msg-child', text: 'child FINAL_ANSWER body', phase: 'final_answer' } } });
+        send({ method: 'item/completed', params: { threadId: 'th-p2', turnId: tid, item: { type: 'agentMessage', id: 'msg-env', text: 'Message Type: FINAL_ANSWER\\nTask name: /root\\nSender: /root/usecases_v4\\nPayload:\\nenvelope body' } } });
+        send({ method: 'item/completed', params: { threadId: 'th-child', turnId: 'turn-child', item: { type: 'commandExecution', id: 'exec-child', command: ['ls'], status: 'completed', aggregatedOutput: 'x' } } });
+        // (v) an OWN-thread agentMessage with delivery 'async' and NO envelope:
+        // a question the USER must read. The first cut treated 'async' as
+        // inter-agent and DROPPED the text entirely (B-7473 integration 2026-09-06).
+        send({ method: 'item/completed', params: { threadId: 'th-p2', turnId: tid, item: { type: 'agentMessage', id: 'msg-async', text: 'Which layout do you prefer', phase: 'commentary', delivery: 'async' } } });
+        // (vi) a CHILD thread's ERROR notification (ErrorNotification carries
+        // threadId in the 0.153.4 bindings): it must never become the ROOT's
+        // task_failed / system card / turn end — it is the child's failure.
+        send({ method: 'error', params: { threadId: 'th-child', message: 'sub-agent ran out of context' } });
+        send({ method: 'item/completed', params: { threadId: 'th-p2', turnId: tid, item: { type: 'agentMessage', id: 'msg-root', text: 'root reply to the user', phase: 'commentary' } } });
       }
       continue;
     }
@@ -132,6 +149,35 @@ ok(await waitFor(() => readMeta()?.effortOverride === 'high'), '/effort sets the
 sendLine({ type: 'chat-input', text: '/review', msgId: 'm6' });
 ok(await waitFor(() => rpc().some((m) => m.method === 'review/start' && m.params.target?.type === 'uncommittedChanges')), '/review starts a review of the uncommitted changes');
 
+// ④ THREAD GATE (B-7473) — a sub-agent's message is never a root assistant bubble
+const isAM = (r) => r.type === 'response_item' && r.payload?.type === 'agent_message';
+ok(await waitFor(() => bufRecords().filter(isAM).length >= 2), 'the child-thread and envelope messages are recorded as agent_message records');
+const ams = bufRecords().filter(isAM);
+const childAm = ams.find((r) => r.payload.id === 'msg-child');
+ok(childAm && childAm.payload.thread_id === 'th-child' && childAm.payload.author === '/root/water_research' && childAm.payload.recipient === '/root' && /child FINAL_ANSWER body/.test(JSON.stringify(childAm.payload.content)), '(i) a CHILD thread\'s agentMessage is an attributed agent_message (author from the subAgentActivity map, its thread, its item id)', JSON.stringify(childAm?.payload));
+const envAm = ams.find((r) => r.payload.id === 'msg-env');
+ok(envAm && envAm.payload.author === '/root/usecases_v4' && envAm.payload.msg_type === 'FINAL_ANSWER' && envAm.payload.thread_id === 'th-p2', '(ii) an OWN-thread message carrying the inter-agent envelope is attributed to its Sender, never a root reply', JSON.stringify(envAm?.payload));
+const rootAsst = bufRecords().filter((r) => r.type === 'response_item' && r.payload?.type === 'message' && r.payload.role === 'assistant');
+// (iv) the root's OWN messages — the plain reply AND the delivery:'async'
+// question (B-7473 integration 2026-09-06: 'async' is not an inter-agent signal, the ENVELOPE is;
+// treating it as one dropped the question from the transcript entirely).
+ok(rootAsst.length === 2 && rootAsst.map((r) => r.payload.item_id).sort().join(',') === 'msg-async,msg-root' && /Which layout do you prefer/.test(JSON.stringify(rootAsst.map((r) => r.payload.content))), "(iv) the root's OWN messages are recorded as assistant messages — including a delivery:'async' question", rootAsst.map((r) => r.payload.item_id).join(','));
+// (vi) a CHILD's error notification never becomes the ROOT's task_failed
+const evs = bufRecords().filter((r) => r.type === 'event_msg');
+ok(!evs.some((r) => r.payload?.type === 'task_failed'), "(vi) a foreign thread's `error` notification is NOT the root's task_failed", JSON.stringify(evs.filter((r) => r.payload?.type === 'task_failed').map((r) => r.payload)));
+const errAct = evs.find((r) => r.payload?.type === 'sub_agent_activity' && r.payload.kind === 'errored');
+ok(errAct && errAct.payload.agent_thread_id === 'th-child' && /ran out of context/.test(errAct.payload.detail || ''), '…it is recorded as the CHILD\'s activity (kind errored, message on the row)', JSON.stringify(errAct?.payload));
+const saRec = bufRecords().find((r) => r.type === 'event_msg' && r.payload?.type === 'sub_agent_activity');
+ok(saRec && saRec.payload.agent_thread_id === 'th-child' && saRec.payload.agent_path === '/root/water_research' && saRec.payload.kind === 'started', '(iii) a subAgentActivity item becomes the live sub_agent_activity event', JSON.stringify(saRec?.payload));
+ok(readMeta()?.subagents?.['/root/water_research'] === 'th-child', '…and fills the agentPath → threadId map in the sidecar', JSON.stringify(readMeta()?.subagents));
+ok(readMeta()?.foreignDrops?.threads?.['th-child']?.agentMessages === 1 && readMeta().foreignDrops.threads['th-child'].dropped >= 1, 'other child-thread kinds are DROPPED and counted per thread (the commandExecution never became a root card)', JSON.stringify(readMeta()?.foreignDrops));
+ok(!bufRecords().some((r) => r.payload?.call_id === 'exec-child'), '…no exec_command record from the child thread');
+ok(readMeta()?.caps?.threadScoped === true, 'the wrapper adverts caps.threadScoped (features gate on what the process declares)');
+{
+  const rec = bufRecords().find((r) => r.type === 'response_item' && r.payload?.type === 'function_call' && r.payload.call_id === 'mcp-1');
+  ok(rec?.payload?.thread_id === 'th-p2' && rec.payload.turn_id === 'turn-1', 'every item record carries its thread_id/turn_id context', JSON.stringify({ t: rec?.payload?.thread_id, u: rec?.payload?.turn_id }));
+}
+
 // normalizer view of the same records
 const { CodexMessageManager } = require(path.join(REPO, 'src/codex-message-manager.js'));
 const mm = new CodexMessageManager('p2');
@@ -154,6 +200,18 @@ ok(tools.some((m) => (m.collapseKind === 'image' && /view_image|View Image/i.tes
   const after = mm.messages.filter((m) => m.collapseKind === 'image');
   ok(before.length === 1 && after.length === 1 && after[0].content[0].output === 'viewed /tmp/shot.png' && after[0].content[0].output === before[0].content[0].output, `the rollout ImageView copy edits the live card in place — one card, unchanged text (${JSON.stringify([before.length, after.length, after[0]?.content?.[0]?.output])})`);
 }
+const collabRows = mm.messages.flatMap((m) => m.collab?.rows || []);
+const asstTexts = mm.messages.filter((m) => m.role === 'assistant' && m.content?.[0]?.type === 'text').map((m) => m.content[0].text);
+ok(asstTexts.length === 2 && asstTexts.includes('root reply to the user') && asstTexts.includes('Which layout do you prefer'), 'normalizer view: the root\'s OWN messages are the only assistant bubbles — the sub-agent traffic is elsewhere', asstTexts);
+// (3) an own-thread agentMessage marked delivery:'async' is the ROOT talking to
+// the USER (a question) — the ENVELOPE is the only inter-agent signal
+ok(asstTexts.includes('Which layout do you prefer') && !mm.messages.some((m) => m.collab && JSON.stringify(m.collab).includes('Which layout')), "an own-thread delivery:'async' message stays in the transcript (it is not inter-agent)", asstTexts);
+// (2) a CHILD's error is the CHILD's: a collab activity row, never the root's failure
+const errRow = mm.messages.flatMap((m) => m.collab?.rows || []).find((r) => r.kind === 'errored');
+ok(errRow && errRow.threadId === 'th-child' && /ran out of context/.test(errRow.detail || ''), "a FOREIGN thread's error notification becomes a collab activity row with the message on hover", errRow);
+ok(!mm.messages.some((m) => m.role === 'system' && /error|failed/i.test(m.content?.[0]?.text || '')), "…and never the ROOT's task_failed / error system card", mm.messages.filter((m) => m.role === 'system').map((m) => m.content?.[0]?.text));
+ok(mm.messages.some((m) => m.collab?.report && m.collab.agentName === 'water_research') && mm.messages.some((m) => m.collab?.report && m.collab.agentName === 'usecases_v4'), 'both attributed messages render as sub-agent REPORTS with their author', mm.messages.filter((m) => m.collab?.report).map((m) => m.collab.agentName));
+ok(collabRows.some((r) => r.dir === 'activity' && r.threadId === 'th-child'), 'the lifecycle row carries the child thread id', collabRows.filter((r) => r.dir === 'activity'));
 const sys = mm.messages.filter((m) => m.role === 'system').map((m) => m.content?.[0]?.text || '');
 ok(sys.some((t) => /Queued — runs after the current turn/.test(t)), 'the queued notice renders as a system card');
 ok(sys.some((t) => /Compacting context/.test(t)) && sys.some((t) => /Context compacted/.test(t)), 'compaction start + compacted render as system cards');
@@ -181,6 +239,9 @@ ok(ops.some((o) => o.op === 'edit' && o.id === mcpCard?.id && o.fields?.meta?.re
 const wsrc = fs.readFileSync(path.join(REPO, 'data/bin/codex-chat-wrapper.js'), 'utf8');
 ok(/if \(meta\.threadId && meta\.activeTurnId\) \{\s*await request\('thread\/queue\/add'/.test(wsrc), 'wrapper pin: chat-input queues on an active turn');
 ok(/thread\/compact\/start/.test(wsrc) && /applySlashCommand\(text\)/.test(wsrc), 'wrapper pin: slash commands + real compact');
+ok(/const foreign = foreignThreadOf\(params\);/.test(wsrc) && /!THREAD_ID_NOT_SCOPE\.has\(method\)/.test(wsrc) && !/THREAD_SCOPED_METHODS/.test(wsrc), 'wrapper pin: the gate is INVERTED — a notification NAMING another thread is foreign unless allowlisted (a method whitelist goes stale: error / thread/compacted / thread/queue/changed / turn/diff/updated were all missing)');
+ok(/if \(replyAgentPath\) meta\.agentPath = replyAgentPath;/.test(wsrc), 'wrapper pin: meta.agentPath is ASSIGNED from the thread reply (it used to be read-only, so every fallback was dead)');
+ok(/itemCtx = \{ threadId: asString\(params\?\.threadId/.test(wsrc) && /function recordItem\(payload\)/.test(wsrc), 'wrapper pin: item records carry the notification\'s thread/turn context');
 const cm = fs.readFileSync(path.join(REPO, 'src/codex-message-manager.js'), 'utf8');
 ok(/this\._status\.slashCommands \|\| \[\]/.test(cm) && !/slashCommands: \[\],/.test(cm), 'normalizer pin: init slashCommands come from wrapper_meta (no hardcoded empty list left)');
 

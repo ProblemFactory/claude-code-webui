@@ -32,11 +32,13 @@ const ok = (n, c, e) => { if (c) { pass++; console.log('  ✓ ' + n); } else { f
     { type: 'event_msg', payload: { type: 'sub_agent_activity', event_id: 'call_B', occurred_at_ms: 1, agent_thread_id: '01a0338e-79d3-7820-a298-b119d4ec5bb3', agent_path: '/root/paper_analysis', kind: 'started' } },
     { type: 'event_msg', payload: { type: 'sub_agent_activity', event_id: 'call_B', occurred_at_ms: 2, agent_thread_id: '01a0338e-79d3-7820-a298-b119d4ec5bb3', agent_path: '/root/paper_analysis', kind: 'interacted' } },
   ]);
-  // B-21e4 item 2: the announcement is a COMPLETE tool card in the 'agent' fold
-  // kind (a system line split every surrounding run), never a task chip
+  // B-21e4 item 2 + the B-7473 integration 2026-09-06 merge: the announcement is a COMPLETE message
+  // in the 'agent' fold kind (a system line split every surrounding run), never
+  // a task chip — since the merge its content is one-line collab ACTIVITY rows,
+  // and consecutive rows coalesce into that ONE message.
   const lines = msgs.filter((m) => m.role === 'tool' && m.toolName === 'Sub-agent');
   ok('a sub-agent spawn is announced (it was fully invisible)', lines.length === 1 && /paper_analysis/.test(JSON.stringify(lines[0].content)) && lines[0].collapseKind === 'agent' && lines[0].status === 'complete');
-  ok("'interacted' churn does not spam extra lines", lines.length === 1 && !msgs.some((m) => m.role === 'system'));
+  ok("'interacted' churn does not spam extra messages (both kinds coalesce into the one card, one row each)", lines.length === 1 && (lines[0].collab?.rows || []).length === 2 && !msgs.some((m) => m.role === 'system'));
 }
 
 // ── live context%: contextWindow rides the usage meta ──
@@ -103,7 +105,15 @@ const ok = (n, c, e) => { if (c) { pass++; console.log('  ✓ ' + n); } else { f
   ]);
   const kinds = Object.fromEntries(msgs.filter((m) => m.role === 'tool').map((m) => [m.toolCallId, m.collapseKind]));
   ok("exec stamps 'bash' (the 0.149.x bare name — even formatToolName's exec_command mapping missed it)", kinds.k1 === 'bash', JSON.stringify(kinds));
-  ok("collab family stamps 'agent' (wait_agent / send_message)", kinds.k2 === 'agent' && kinds.k3 === 'agent');
+  // B-7473: the collab family is no longer a tool CARD (its `message` argument
+  // is an encrypted blob upstream) — it is a one-line row, still 'agent'-kind
+  // so it folds with the rest of the orchestration.
+  const collabMsgs = msgs.filter((m) => m.collab);
+  ok("collab family stamps 'agent' and renders as compact rows, not cards (wait_agent / send_message)",
+    collabMsgs.length === 1 && collabMsgs[0].collapseKind === 'agent'
+    && collabMsgs[0].collab.rows.length === 2
+    && collabMsgs[0].collab.rows[0].dir === 'wait' && collabMsgs[0].collab.rows[1].dir === 'out',
+    JSON.stringify(collabMsgs.map((m) => m.collab?.rows)));
   ok("apply_patch stamps 'write'", kinds.k4 === 'write');
   ok("…and exec now also gets the Bash display name", msgs.find((m) => m.toolCallId === 'k1')?.toolName === 'Bash');
   // 2.369.37 moved the classifier into the PURE module src/lib/chat-run-summary.js —
@@ -173,7 +183,12 @@ const ok = (n, c, e) => { if (c) { pass++; console.log('  ✓ ' + n); } else { f
     R('event_msg', { type: 'task_started', turn_id: 'turn-A', model_context_window: 828400 }),
     // real 0.153 reasoning is encrypted (no card); a summary is given here so a thinking card EXISTS to carry meta
     R('response_item', { type: 'reasoning', id: 'rs_1', summary: [{ type: 'summary_text', text: 'Reading the files first' }] }),
-    R('response_item', { type: 'function_call', id: 'fc_1', name: 'send_message', namespace: 'collaboration', arguments: '{"target":"/root","message":"…"}', call_id: 'call_A' }),
+    // a NON-collab function_call (real 0.153.4 shape: {name:'sleep', namespace:'clock'},
+    // rollout-2026-09-05T13-26-05 line 3246) — the collab family renders as a ROW,
+    // not a card, so the per-message-meta pin uses an ordinary tool card and the
+    // collab row's own meta is pinned separately below (B-7473 integration 2026-09-06).
+    R('response_item', { type: 'function_call', id: 'fc_1', name: 'sleep', namespace: 'clock', arguments: '{"duration_ms":30000}', call_id: 'call_A' }),
+    R('response_item', { type: 'function_call', id: 'fc_c', name: 'send_message', namespace: 'collaboration', arguments: '{"target":"/root/water_research","message":"gAAAAABqnFhPBYRChTsfQPDG…"}', call_id: 'call_C' }),
     R('token_usage_record', { thread_id: TID, turn_id: 'turn-A', session_id: TID, root_turn_id: 'turn-A', response_id: 'resp_A', usage: U(29940, 28416, 119, 0, 30059), turn_token_usage: U(29940, 28416, 119, 0, 30059), thread_token_usage: U(29940, 28416, 119, 0, 30059) }, '2026-09-05T21:42:56.678Z'),
     R('response_item', { type: 'function_call_output', id: 'fco_1', call_id: 'call_A', output: '' }, '2026-09-05T21:42:56.679Z'),
     R('event_msg', { type: 'token_count', info: { total_token_usage: U(29940, 28416, 119, 0, 30059), last_token_usage: U(29940, 28416, 119, 0, 30059), model_context_window: 828400 }, rate_limits: { limit_id: 'codex', primary: { used_percent: 12.0, window_minutes: 10080, resets_at: 1789224035 }, plan_type: 'pro' } }, '2026-09-05T21:42:56.680Z'),
@@ -199,6 +214,10 @@ const ok = (n, c, e) => { if (c) { pass++; console.log('  ✓ ' + n); } else { f
   ok('the SECOND response (a tool card whose output arrived between token_usage_record and token_count) gets ITS OWN meta — the first is not overwritten', callB?.meta?.requestId === `cx:${TID}:60318` && callB.meta.msgId === 'resp_B' && callB.meta.usage.input_tokens === 30071 - 29824 && callB.meta.usage.output_tokens === 188 && callA.meta.msgId === 'resp_A', JSON.stringify(callB?.meta));
   ok('the final assistant text carries the third response (reasoning tokens 227 of 267 output)', text?.meta?.requestId === `cx:${TID}:178376` && text.meta.msgId === 'resp_C' && text.meta.usage.reasoning_output_tokens === 227 && text.meta.usage.output_tokens === 267, JSON.stringify(text?.meta));
   ok('user records carry no meta (a response usage never belongs to the prompt)', user && user.meta == null);
+  // a collab ROW is a message like any other: it carries the SAME per-response
+  // meta, so the popup's billing row resolves for multi-agent orchestration too
+  const collabRowMsg = msgs.find((m) => m.collab && !m.collab.report);
+  ok('a collab row carries the response meta too (per-message billing is not lost when a call renders as a row)', collabRowMsg?.meta?.requestId === `cx:${TID}:30059` && collabRowMsg.meta.msgId === 'resp_A', JSON.stringify(collabRowMsg?.meta));
 
   // THE JOIN: the meta's requestId must equal the rid the ledger walker mints
   // for the SAME rollout (the key baked into every already-scanned ledger) and
@@ -433,10 +452,13 @@ const ok = (n, c, e) => { if (c) { pass++; console.log('  ✓ ' + n); } else { f
   const msgs = new CodexMessageManager('t11').convertHistory(window);
   const exec = msgs.find((m) => m.toolCallId === 'call_825hA5p3YQWaT3uDn2R4voLd');
   const reply = msgs.find((m) => m.role === 'assistant' && m.content[0]?.type === 'text');
-  const wait = msgs.find((m) => m.toolCallId === 'call_6G7f6gJNAxEwx4ft6dCxz9ex');
+  // `wait` is a COLLAB tool: since B-7473 it renders as a one-line row that
+  // coalesces with the encrypted inbound message above it — the meta rides the
+  // message the row landed in (B-7473 integration 2026-09-06).
+  const wait = msgs.find((m) => (m.collab?.rows || []).some((r) => r.dir === 'wait'));
   ok('the exec card (output landed before the first token_count) carries response A: cx:…:405135 / resp_A', exec?.meta?.requestId === `cx:${TID}:405135` && exec.meta.msgId === RESP_A && exec.meta.usage.output_tokens === 233, JSON.stringify(exec?.meta));
   ok('the assistant reply created AFTER token_count A is NOT stamped by the DUPLICATE token_count — it gets response B: cx:…:452465, resp_B, input 47299−46848 fresh / 46848 cached / output 31', reply?.meta?.requestId === `cx:${TID}:452465` && reply.meta.msgId === RESP_B && reply.meta.usage.input_tokens === 47299 - 46848 && reply.meta.usage.cache_read_input_tokens === 46848 && reply.meta.usage.output_tokens === 31 && reply.meta.usage.reasoning_output_tokens === 0, JSON.stringify(reply?.meta));
-  ok('…and the wait card of the same response shares it (the duplicate advanced no mark)', wait?.meta?.requestId === `cx:${TID}:452465` && wait.meta.msgId === RESP_B);
+  ok('…and the wait row of the same response shares it (the duplicate advanced no mark)', wait?.meta?.requestId === `cx:${TID}:452465` && wait.meta.msgId === RESP_B, JSON.stringify(wait?.meta));
   ok('every stamped message keys to one of the TWO real responses (never a third phantom)', msgs.filter((m) => m.meta).every((m) => [405135, 452465].some((n) => m.meta.requestId === `cx:${TID}:${n}`)), JSON.stringify(msgs.map((m) => m.meta?.requestId)));
   // walker on the same window: two events, deduped identically
   const { runUsageWalk } = require(REPO + '/src/usage-walker.js');
@@ -749,17 +771,25 @@ const ok = (n, c, e) => { if (c) { pass++; console.log('  ✓ ' + n); } else { f
   // 0.153.4, outer thread_id swapped, the spawn_agent argument blob shortened).
   const SA = {
     spawn: { timestamp: '2026-09-05T17:50:03.877Z', ordinal: 25, type: 'response_item', payload: { type: 'function_call', id: 'fc_0926a9d9621e17bd016a9c5648cb3487d0a456e3f4e822551c', name: 'spawn_agent', namespace: 'collaboration', arguments: '{"task_name":"platform_geometry","fork_turns":"all","message":"gAAAAABqnFZL1WV6nYX1adJg40e1HXBTW…"}', call_id: 'call_FB3Ljqfkix3j27IabuUA6SWg' } },
+    send: { timestamp: '2026-09-05T17:58:39.565Z', ordinal: 335, type: 'response_item', payload: { type: 'function_call', id: 'fc_0926a9d9621e17bd016a9c584e791c87d08e1b08937f6267a7', name: 'send_message', namespace: 'collaboration', arguments: '{"target":"/root/water_waste","message":"gAAAAABqnFhPBYRChTsfQPDG-tvU80kRwUP_B1V1AMRgsu2u…"}', call_id: 'call_CC8aEjKP1yfvOFIJkm7uYD2Y' } },
     started: { timestamp: '2026-09-05T17:50:03.895Z', ordinal: 26, type: 'event_msg', payload: { type: 'item_completed', thread_id: '01a0aaaa-0000-7000-8000-000000000001', turn_id: '01a072b0-bd02-7202-9560-c5ac2cb37b8b', item: { type: 'SubAgentActivity', id: 'call_FB3Ljqfkix3j27IabuUA6SWg', kind: 'started', agent_thread_id: '01a072b1-186b-7711-8176-817d3f6d0fee', agent_path: '/root/platform_geometry' }, started_at_ms: 1788630603895, completed_at_ms: 1788630603895 } },
     interacted: { timestamp: '2026-09-05T17:58:39.568Z', ordinal: 336, type: 'event_msg', payload: { type: 'item_completed', thread_id: '01a0aaaa-0000-7000-8000-000000000001', turn_id: '01a072b0-bd02-7202-9560-c5ac2cb37b8b', item: { type: 'SubAgentActivity', id: 'call_CC8aEjKP1yfvOFIJkm7uYD2Y', kind: 'interacted', agent_thread_id: '01a072b1-3025-79c2-b6d3-fa4acfa9f71a', agent_path: '/root/water_waste' }, started_at_ms: 1788630719568, completed_at_ms: 1788630719568 } },
     completed: { timestamp: '2026-09-05T17:56:56.136Z', ordinal: 241, type: 'event_msg', payload: { type: 'item_completed', thread_id: '01a0aaaa-0000-7000-8000-000000000001', turn_id: '01a072b0-bd02-7202-9560-c5ac2cb37b8b', item: { type: 'SubAgentActivity', id: 'subagent-completed-01a072b1-1877-7982-9080-00e077cd7747', kind: 'completed', agent_thread_id: '01a072b1-186b-7711-8176-817d3f6d0fee', agent_path: '/root/platform_geometry' }, started_at_ms: 1788631016136, completed_at_ms: 1788631016136 } },
   };
   const sa = new CodexMessageManager('ws0153sa');
-  const sam = sa.convertHistory([SA.spawn, SA.started, SA.interacted, SA.completed]);
+  const sam = sa.convertHistory([SA.spawn, SA.started, SA.send, SA.interacted, SA.completed]); // the REAL order: each call, then the lifecycle record it caused (rollout lines 25/26/335/336/241)
   const saTools = sam.filter((m) => m.role === 'tool');
-  ok('0.153.4: the TWINNED sub-agent records (started ↔ spawn_agent, interacted ↔ send_message) add NO card — their tool call is the card', saTools.filter((m) => m.content[0].toolCallId === 'call_FB3Ljqfkix3j27IabuUA6SWg').length === 1 && !saTools.some((m) => m.content[0].toolCallId === 'call_CC8aEjKP1yfvOFIJkm7uYD2Y'), JSON.stringify(saTools.map((m) => [m.toolName, m.content[0].toolCallId])));
-  const saCard = saTools.find((m) => m.toolName === 'Sub-agent');
-  ok("…and the kind:'completed' record (id `subagent-completed-<uuid>`, twinning NOTHING) renders the 'agent'-fold Sub-agent card it used to be silent about", saCard && saCard.status === 'complete' && saCard.collapseKind === 'agent' && saCard.content[0].toolCallId === 'subagent:01a072b1-186b-7711-8176-817d3f6d0fee' && /completed: \/root\/platform_geometry/.test(saCard.content[0].output), JSON.stringify(saCard?.content));
-  ok('exactly two cards for that sub-agent: its spawn_agent call and its completion (no third from the twins)', saTools.length === 2, JSON.stringify(saTools.map((m) => m.toolName)));
+  const saRows = sam.flatMap((m) => m.collab?.rows || []);
+  // B-7473 integration 2026-09-06 MERGE RULE: the standalone "Sub-agent" tool CARD is retired — every
+  // lifecycle fact is a one-line collab ACTIVITY row, and a record whose id IS
+  // its own call (started ↔ spawn_agent, interacted ↔ send_message) draws NO
+  // second row (the call's own row already said it), while still teaching the
+  // agentPath → threadId map.
+  ok('0.153.4: the TWINNED sub-agent records (started ↔ spawn_agent, interacted ↔ send_message) add NO row of their own — their call is the row', saRows.filter((r) => r.dir === 'spawn').length === 1 && saRows.filter((r) => r.dir === 'out').length === 1 && !saRows.some((r) => r.dir === 'activity' && (r.kind === 'started' || r.kind === 'interacted')), JSON.stringify(saRows));
+  ok('…yet both taught the map: status().subagents holds BOTH children (click-through never depends on drawing a row)', sa.status().subagents['/root/platform_geometry'] === '01a072b1-186b-7711-8176-817d3f6d0fee' && sa.status().subagents['/root/water_waste'] === '01a072b1-3025-79c2-b6d3-fa4acfa9f71a', JSON.stringify(sa.status().subagents));
+  const doneRow = saRows.find((r) => r.dir === 'activity');
+  ok("…and the kind:'completed' record (id `subagent-completed-<uuid>`, twinning NOTHING) renders the one lifecycle row it used to be silent about", doneRow && doneRow.kind === 'completed' && doneRow.agentName === 'platform_geometry' && doneRow.threadId === '01a072b1-186b-7711-8176-817d3f6d0fee', JSON.stringify(doneRow));
+  ok("every collab message folds under 'agent' and NO standalone Sub-agent card survives the merge", saTools.length > 0 && saTools.every((m) => m.collapseKind === 'agent' && m.collab) && !saTools.some((m) => String(m.content[0].toolCallId || '').startsWith('subagent:')), JSON.stringify(saTools.map((m) => [m.toolName, m.content[0].toolCallId, m.collapseKind])));
   // 0.149.1 persists the SAME facts as standalone sub_agent_activity events.
   // SYNTHETIC repetition (the 0.149.1 corpus has 79 (file, thread) pairs and NOT
   // ONE repeated 'started' — an old-vs-new replay of all 15 rollouts is
@@ -768,7 +798,10 @@ const ok = (n, c, e) => { if (c) { pass++; console.log('  ✓ ' + n); } else { f
   const rep2 = new CodexMessageManager('ws0149rep');
   const ev = (kind) => ({ type: 'event_msg', payload: { type: 'sub_agent_activity', event_id: 'call_R', agent_thread_id: '01a0338e-79d3-7820-a298-b119d4ec5bb3', agent_path: '/root/paper_analysis', kind } });
   const repm = rep2.convertHistory([ev('started'), ev('started'), ev('started'), ev('interacted'), ev('interrupted')]).filter((m) => m.role === 'tool');
-  ok("a repeated 'started' for one sub-agent thread is idempotent: still ONE card, closed by the terminal record", repm.length === 1 && repm[0].status === 'error' && /interrupted/.test(repm[0].content[0].output), JSON.stringify(repm.map((m) => [m.status, m.content[0].output])));
+  const repRows = repm.flatMap((m) => m.collab?.rows || []);
+  // 0.149.1 has no collab function_call for these ids in this cut, so each KIND
+  // draws its row — but a REPEATED kind never does (the (thread, kind) key).
+  ok("a repeated 'started' for one sub-agent thread is idempotent: one row per (thread, kind), coalesced into ONE message", repm.length === 1 && repRows.length === 3 && repRows.every((r) => r.dir === 'activity') && repRows.map((r) => r.kind).join(',') === 'started,interacted,interrupted', JSON.stringify(repRows));
   // an unrecognised TOP-LEVEL item.type: a breadcrumb, ONCE per type — never a
   // silent skip (the whole reason 245 searches were invisible). 'FutureThing' is
   // SYNTHETIC: the corpus has exactly the 10 types in the census comment.

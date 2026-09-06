@@ -289,7 +289,8 @@ const cxSess = mkCodex('w-cx', 'cxs-1', (m, s) => {
   const ur = read('src/usage-routes.js');
   ok('usage-routes defines NO quota normalizer of its own any more — it binds the registry and re-exports the old names', !/function normalizeCodexRateLimit\(/.test(ur) && !/function parseCliUsageText\(/.test(ur) && /harnesses\.get\('codex'\)\.quota\.normalize/.test(ur) && /module\.exports = \{ setupUsage, parseCliUsageText, normalizeCodexRateLimit \}/.test(ur));
   const arch = read('scripts/test-architecture.mjs');
-  ok('test-architecture tiers the harness modules as SHARED (never reaching up into ORCH) and backend-caps as PURE', /'src\/harnesses\/claude-quota\.js', 'src\/harnesses\/codex-quota\.js'/.test(arch) && /'src\/backend-caps\.js'[,\]]/.test(arch));
+  // both sides' pins kept: backend-caps is in the PURE SET (membership) AND inside the `const PURE = new Set([` literal (placement)
+  ok('test-architecture tiers the harness modules as SHARED (never reaching up into ORCH) and backend-caps as PURE', /'src\/harnesses\/claude-quota\.js', 'src\/harnesses\/codex-quota\.js'/.test(arch) && /'src\/backend-caps\.js'[,\]]/.test(arch) && /const PURE = new Set\(\[[^\]]*'src\/backend-caps\.js'/.test(arch));
   const ss = read('src/server/stdout/claude-stream-json.js') + '\n' + read('src/server/stdout/codex-events.js'); // S5: per-protocol consumer modules
   ok('the stdout consumers still feed both engine entry points (claude rate_limit_event / codex quota events) — S5 moved the parse behind the registry, S4 owns the signals', /recordRateLimitEvent\(session, msg\)/.test(ss) && /recordCodexQuotaSignal\?\.\(session, msg\.payload\)/.test(ss));
   ok('the codex wrapper still serves the verb the rpc rung writes (codex-read-limits → account/rateLimits/read → rate_limits_updated)', /msg\.type === 'codex-read-limits'/.test(read('data/bin/codex-chat-wrapper.js')) && /account\/rateLimits\/read/.test(read('data/bin/codex-chat-wrapper.js')));

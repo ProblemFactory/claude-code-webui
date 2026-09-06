@@ -538,6 +538,18 @@ class ChatView {
           description: e.target.dataset.desc,
         });
       }
+      // Codex collab row / sub-agent report: the agent NAME opens the child's
+      // rollout read-only (B-7473). Also reachable from a fold header, whose
+      // own click toggles the run — stop there.
+      const collabName = e.target.closest?.('.chat-collab-name');
+      if (collabName) {
+        e.stopPropagation();
+        this._openCollabAgent({
+          agentPath: collabName.dataset.agentPath || '',
+          threadId: collabName.dataset.threadId || '',
+        });
+        return;
+      }
       // View Workflow button (dynamic-workflow post-hoc detail)
       if (e.target.classList.contains('chat-workflow-view-btn')) {
         e.stopPropagation();
@@ -2257,6 +2269,35 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
     }
   }
 
+  /**
+   * Open a codex sub-agent's own conversation from a collab row (B-7473).
+   * In 0.153.4 the child's thread id rides SubAgentActivity, so the common
+   * path needs NO server call. Older rollouts (and a spawn row seen before the
+   * first activity item) fall back to GET /api/subagents, which walks the
+   * local session tree for `source.subagent.thread_spawn`; a remote session's
+   * children live on the OTHER machine, and the route says so rather than
+   * pretending the sub-agent never existed.
+   */
+  async _openCollabAgent({ agentPath, threadId }) {
+    const { backend, backendSessionId, host } = this._getSessionIds();
+    const name = String(agentPath || '').split('/').filter(Boolean).pop() || '';
+    if (threadId) { this._openSubagentViewer({ threadId, description: name || agentPath }); return; }
+    if (!backendSessionId) { showToast(t('This sub-agent’s conversation is not on this machine.')); return; }
+    const q = new URLSearchParams({ backend: backend || 'codex', threadId: backendSessionId });
+    if (host) q.set('host', host);
+    const r = await fetchJson(`/api/subagents?${q.toString()}`);
+    if (r?.error) { showToast(r.error); return; }
+    const list = Array.isArray(r?.subagents) ? r.subagents : [];
+    const hit = list.find((s) => s.agentPath === agentPath)
+      || (name ? list.find((s) => String(s.agentPath || '').endsWith('/' + name)) : null);
+    if (!hit?.threadId) {
+      track('codex-subagent-unresolved', { agent: String(agentPath || '').slice(0, 40), reason: r?.reason || 'not-found' });
+      showToast(t('This sub-agent’s conversation is not on this machine.'));
+      return;
+    }
+    this._openSubagentViewer({ threadId: hit.threadId, description: hit.nickname || name || agentPath, agentNickname: hit.nickname || '' });
+  }
+
   // Unified subagent viewer: works for both live (parentToolUseId) and completed (agentId)
   _openSubagentViewer({ parentToolUseId, threadId, agentId, description, agentRole = '', agentNickname = '' }) {
     const { backend, backendSessionId, claudeId, cwd, host } = this._getSessionIds();
@@ -3142,7 +3183,9 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
           header.className = 'chat-run-header';
           // per-kind counts (only non-zero kinds render) — countKinds zero-fills
           // EVERY kind the classifier can return (an unlisted kind used to count
-          // NaN and vanish from the summary, 2.369.34)
+          // NaN and vanish from the summary, 2.369.34). 'report' (a codex
+          // sub-agent's written answer, B-7473) is one of those kinds and lives
+          // in RUN_KINDS/SUMMARY_ORDER like every other — never a second map here.
           const memberKinds = members.map(memberKind);
           const byKind = countKinds(memberKinds);
           // single-server runs name the server — "8 MCP (chrome-devtools)";
@@ -3151,6 +3194,15 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
           members.forEach((el, i) => {
             if (memberKinds[i] === 'mcp') { const mp = mcpParts(el._rawMsg?.content?.[0]?.toolName); if (mp) mcpServers.add(mp.server); }
           });
+          // Codex multi-agent (B-7473): the collab rows in this run carry the
+          // sub-agent traffic. Inbound messages get their OWN count — "5 agent
+          // ops" said nothing about a sub-agent having reported back — and the
+          // agents named in the run become click-through chips on the header.
+          // It is a COUNT, not a card kind (SUMMARY_EXTRAS in chat-run-summary),
+          // so it is assigned into byKind and ordered by the one SUMMARY_ORDER.
+          const collabRows = [];
+          for (const el of members) for (const r of (el._rawMsg?.collab?.rows || [])) collabRows.push(r);
+          byKind.subAgentIn = collabRows.filter((r) => r.dir === 'in').length;
           // touched files (user ask: don't lose the paths): writes first with
           // a ✎ mark, then reads; deduped display names, capped at 4 + "+N".
           // memory/<name> marks agent-memory files vs project files.
@@ -3175,7 +3227,28 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
           const nErr = members.filter((el) => el._rawMsg?.toolStatus === 'error').length;
           const running = members.some((el) => el._rawMsg?.status === 'pending' || el._rawMsg?.status === 'streaming');
           const label = runSummaryLabel({ byKind, mcpServers, files, nErr, running }, t);
-          header.innerHTML = `<span class="chat-run-arrow">▸</span><span class="chat-run-label">${escHtml(label)}</span>`;
+          // "3 sub-agents: water_research, interior_research" (B-7473) — the same
+          // click-through as the rows themselves (the header's own onclick
+          // toggles the run, so each name stops propagation). Identity = the
+          // row's agentPath, which the normalizer normalises to an absolute
+          // path for EVERY direction (round-5: bare target vs '/root/x' showed
+          // one agent as two chips).
+          const agents = [];
+          for (const r of collabRows) {
+            const p = r.agentPath || r.target || '';
+            if (!p || agents.some((a) => a.path === p)) continue;
+            agents.push({ path: p, name: r.agentName || p.split('/').filter(Boolean).pop() || p, threadId: r.threadId || '' });
+          }
+          const agentsHtml = agents.length
+            ? ` <span class="chat-run-agents">${escHtml(t('{n} sub-agents', { n: agents.length }))}: ${agents.slice(0, 4).map((a) => `<span class="chat-collab-name" role="link" tabindex="0" data-agent-path="${escHtml(a.path)}"${a.threadId ? ` data-thread-id="${escHtml(a.threadId)}"` : ''}>${escHtml(a.name)}</span>`).join(', ')}${agents.length > 4 ? `, +${agents.length - 4}` : ''}</span>`
+            : '';
+          header.innerHTML = `<span class="chat-run-arrow">▸</span><span class="chat-run-label">${escHtml(label)}</span>${agentsHtml}`;
+          for (const nameEl of header.querySelectorAll('.chat-collab-name')) {
+            nameEl.onclick = (ev) => {
+              ev.stopPropagation();
+              this._openCollabAgent({ agentPath: nameEl.dataset.agentPath || '', threadId: nameEl.dataset.threadId || '' });
+            };
+          }
           const rec = { header, members, inline, footer: null, label, open: false };
           // Rebuilds happen on every list mutation — remember runs the user
           // opened so a new message doesn't re-collapse what they're reading.

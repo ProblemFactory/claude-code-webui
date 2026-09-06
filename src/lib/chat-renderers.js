@@ -15,6 +15,10 @@ import { createBackendIconHtml, getBackendMeta } from './agent-meta.js';
 import { t } from './i18n.js';
 import { searchQueryOf } from '../search-card.js'; // shared with the server (CJS pulled into the bundle, like task-color-seq.js)
 import { mcpParts } from './chat-run-summary.js';
+// PURE builder (CJS pulled into the bundle, like ssh-key-format.js) — the
+// codex multi-agent collab rows (B-7473). Escaper/translator/icons are
+// injected so the whole surface is unit-testable outside a browser.
+import { collabRowsHtml, collabReportHeadText, collabRowTitle } from '../collab-row.js';
 
 // Agent-memory files get their own card treatment (user ask: a memory write
 // is a different concern than a project write — render "记忆更新 <name>"
@@ -83,6 +87,15 @@ export function toolDisplayName(name) {
 // (covers Claude Bash/BashOutput/KillShell and Codex exec_command/write_stdin
 // which normalize to Bash/Terminal).
 const SHELL_TOOL_NAMES = new Set(['Bash', 'BashOutput', 'KillShell', 'Terminal']);
+// Direction icons for codex collab rows (see collab-row.js — SVG, never glyphs)
+export const COLLAB_ICONS = {
+  in: UI_ICONS.agentIn,
+  out: UI_ICONS.agentOut,
+  spawn: UI_ICONS.agentSpawn,
+  wait: UI_ICONS.hourglass,
+  activity: UI_ICONS.agentDot,
+  lock: UI_ICONS.lock,
+};
 const toolCardIcon = (name) => (name === 'Agent' ? UI_ICONS.robot : SHELL_TOOL_NAMES.has(name) ? UI_ICONS.terminal : UI_ICONS.wrench);
 // Model chip on Agent cards — shows the DECLARED model (tool input) at render;
 // _onSubagentMessage upgrades it to the model actually observed serving.
@@ -504,7 +517,42 @@ class ChatRenderers {
     return el;
   }
 
+  /**
+   * Codex multi-agent chatter (B-7473, the owner's "根本没区分出这是subagent
+   * 消息"): a sub-agent's PLAINTEXT report gets an attributed card (markdown
+   * body, sanitized exactly like assistant text, tinted strip + "name ·
+   * FINAL_ANSWER" header); everything else — encrypted inbound, outbound
+   * messages, spawns, waits, lifecycle — is a compact one-line row. The agent
+   * NAME is clickable (data-agent-path / data-thread-id → chat-view opens the
+   * child's rollout read-only). Every model-controlled string goes through
+   * escHtml inside collab-row.js.
+   */
+  _renderCollabMsg(msg) {
+    const el = document.createElement('div');
+    el.className = 'chat-msg chat-msg-assistant chat-msg-tool-result chat-msg-collab';
+    el._rawMsg = msg;
+    if (msg.toolCallId) el.dataset.toolId = msg.toolCallId;
+    const collab = msg.collab || {};
+    if (collab.report) {
+      el.classList.add('chat-agent-report');
+      const body = msg.content?.[0]?.output || '';
+      // head = "water_research · FINAL_ANSWER" (the ONE attribution string,
+      // shared with the plain-text surfaces) + the envelope as the tooltip
+      const head = collabReportHeadText(collab, t);
+      const nameAttrs = `${collab.agentPath ? ` data-agent-path="${escHtml(collab.agentPath)}"` : ''}${collab.threadId ? ` data-thread-id="${escHtml(collab.threadId)}"` : ''}`;
+      el.innerHTML = `<div class="chat-agent-report-head" title="${escHtml(`${head}\n${collabRowTitle(collab, t)}`)}">`
+        + `${COLLAB_ICONS.in}<span class="chat-collab-name" role="link" tabindex="0"${nameAttrs}>${escHtml(collab.agentName || collab.agentPath || t('sub-agent'))}</span>`
+        + `${collab.msgType ? `<span class="chat-collab-type">${escHtml(collab.msgType)}</span>` : ''}`
+        + `<span class="chat-agent-report-tag">${escHtml(t('sub-agent report'))}</span></div>`
+        + `<div class="chat-text chat-agent-report-body">${this.renderMarkdown(stripAnsi(body))}</div>`;
+      return el;
+    }
+    el.innerHTML = `<div class="chat-collab-line">${collabRowsHtml(collab, { esc: escHtml, t, icons: COLLAB_ICONS })}</div>`;
+    return el;
+  }
+
   renderToolMsg(msg) {
+    if (msg.collab) return this._renderCollabMsg(msg);
     const block = msg.content?.[0];
     if (!block) return null;
     const el = document.createElement('div');

@@ -251,8 +251,8 @@ const userRec = (n, text, extra = {}) => ({ timestamp: T(n), type: 'response_ite
   check('wrapper records the peer user message WITH the webui_peer marker (name + body) on both paths', /webui_peer: \{ name: fromName, body: cardText \}/.test(w) && (w.match(/recordPeerMessage\(\);/g) || []).length === 2);
   check('…and echoes fromName on failure so the re-stash keeps its label', /peer_message_result', \{ ok: false, reason: e\.message, text, fromName \}/.test(w));
   check('stdout/codex-events re-stash carries the echoed fromName (S5 consumer module)', /fromName: msg\.payload\.fromName \|\| null, text: String\(msg\.payload\.text\)/.test(read('src/server/stdout/codex-events.js')));
-  check('mergeCodexRecords fingerprint strips webui_peer', /internal_chat_message_metadata_passthrough, webui_peer, \.\.\.stablePayload/.test(read('src/codex-session-store.js')));
-  check('codex recordKey strips webui_peer', /internal_chat_message_metadata_passthrough, webui_peer, \.\.\.stable \}/.test(read('src/codex-message-manager.js')));
+  check('mergeCodexRecords fingerprint strips webui_peer', /const \{[^}]*webui_peer[^}]*\.\.\.stablePayload \} = payload;/.test(read('src/codex-session-store.js')));
+  check('codex recordKey strips webui_peer', /const \{[^}]*webui_peer[^}]*\.\.\.stable \} = payload;/.test(read('src/codex-message-manager.js')));
   check('feedPeerCard gates on method presence (no backend branch) — codex passes it now', /session\?\._normalizer\?\.injectPeerCard\) return false/.test(read('src/normalizers.js')));
   check('server.js emitPeerCard → feedPeerCard (auto-resume notify + delivery cards reach codex through the same gate)', (read('server.js').match(/feedPeerCard\(s, /g) || []).length >= 2);
 }

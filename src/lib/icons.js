@@ -70,6 +70,12 @@ export const UI_ICONS = {
   coin:      _s('<circle cx="8" cy="8" r="6"/><circle cx="8" cy="8" r="2.5"/>'),
   circle:    _s('<circle cx="8" cy="8" r="6"/>'),
   bolt:      _s('<path d="M9 1.2L3.8 9.2H7l-0.9 5.6L12.4 6.6H8.6z"/>', { fill: true }),
+  // Codex multi-agent collab rows (B-7473): direction is an ICON, never a
+  // glyph/emoji (§17) — inbound report, outbound message, spawn, lifecycle dot
+  agentIn:   _s('<path d="M14 8H4"/><path d="M8 4L4 8l4 4"/><path d="M2 2v12"/>'),
+  agentOut:  _s('<path d="M2 8h10"/><path d="M8 4l4 4-4 4"/><path d="M14 2v12"/>'),
+  agentSpawn: _s('<circle cx="8" cy="8" r="6"/><path d="M8 5v6M5 8h6"/>'),
+  agentDot:  _s('<circle cx="8" cy="8" r="3.2" fill="currentColor" stroke="none"/><circle cx="8" cy="8" r="6.2" opacity="0.45"/>'),
   // GitHub "repo-forked" octicon — used for fork-from-message in chat
   // Run-fold chrome (2.369.37): floating run bar + bottom collapse line
   chevronUp:   _s('<path d="M3.5 10l4.5-4.5 4.5 4.5"/>'),

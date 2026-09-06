@@ -283,12 +283,14 @@ function recordFingerprint(record, turnId) {
     // the wrapper's peer-message marker (buffer copy only; codex's rollout
     // copy of the same user message has just the text) — same twin rule, or
     // every delivered peer message rendered twice after a restart.
-    const { item_id, itemId, id, internal_chat_message_metadata_passthrough, webui_peer, ...stablePayload } = payload;
+    // thread_id/turn_id ride ONLY the wrapper's copy (B-7473 item context) —
+    // stripped for exactly the same reason.
+    const { item_id, itemId, id, internal_chat_message_metadata_passthrough, webui_peer, thread_id, turn_id, ...stablePayload } = payload;
     return `${turnId}:response_item:${payload.type}:${key}:${JSON.stringify(stablePayload)}`;
   }
   if (record.type === 'event_msg') {
     const key = payload.turn_id || payload.turnId || payload.call_id || payload.callId || payload.item_id || payload.itemId || payload.type || 'event';
-    const { item_id, itemId, id, internal_chat_message_metadata_passthrough, ...stablePayload } = payload;
+    const { item_id, itemId, id, internal_chat_message_metadata_passthrough, thread_id, turn_id, ...stablePayload } = payload;
     return `${turnId}:event_msg:${payload.type}:${key}:${JSON.stringify(stablePayload)}`;
   }
   return null;
@@ -457,6 +459,14 @@ function listCodexThreads({ activeSessions } = {}) {
   return assembleCodexThreads(collectCodexThreadMetas(), { activeSessions, openThreadIds: listOpenCodexThreadIds() });
 }
 
+/** The walk alone, OFF the event loop (the worker twin of
+ *  collectCodexThreadMetas; worker down ⇒ the same function runs inline).
+ *  Used by any request-path consumer that needs the metas but must not block
+ *  the loop — /api/subagents measured 193 ms of sync walk on a modest tree. */
+async function collectCodexThreadMetasAsync() {
+  return transcriptWorkerCall('codexThreadMetas', {}, collectCodexThreadMetas);
+}
+
 /** The 5s-poll listing (S3): walk + head reads + the /proc scan run in the
  *  transcript worker; only the assembly touches the main thread. Worker
  *  down ⇒ the same functions run inline (identical result, no isolation). */
@@ -476,6 +486,7 @@ module.exports = {
   listCodexThreads,
   listCodexThreadsAsync,
   collectCodexThreadMetas,
+  collectCodexThreadMetasAsync,
   assembleCodexThreads,
   listOpenCodexThreadIds,
   dirCacheStats,

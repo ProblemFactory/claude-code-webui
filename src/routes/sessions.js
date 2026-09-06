@@ -19,6 +19,7 @@ const { createMessageManager } = require('../normalizers');
 // session-store, codex worker-side rollout walk); no backend ternary here.
 const { list: listHarnesses } = require('../harnesses');
 const { findSessionJsonlPath } = require('../session-store');
+const { collectCodexThreadMetasAsync } = require('../codex-session-store');
 const { findCodexSessionJsonlPath, jsonlGapInfo, jsonlGapInfoAsync, readJsonlLineRange, readJsonlLineRangeAsync, scanJsonlUserTurns, scanJsonlUserTurnsAsync, searchJsonlFull, searchJsonlFullStream } = require('../adapters/codex');
 
 function getSessionKey(session = {}) {
@@ -159,6 +160,52 @@ function setup(ctx) {
     if (fromLine >= toLine) return res.json({ messages: [], fromLine: 0, toLine: 0, tailStartLine: gap.tailStartLine });
     const messages = await transcripts.gapSlab(ref, fp, fromLine, toLine);
     res.json({ messages, fromLine, toLine, tailStartLine: gap.tailStartLine, totalLines: gap.totalLines });
+  });
+
+  // The SUB-AGENT ROSTER of a conversation (B-7473) — the click-through
+  // FALLBACK for a codex collab row whose child thread id is not in the
+  // transcript. 0.153.4 puts `agent_thread_id` on every SubAgentActivity item,
+  // so the common path never gets here; older rollouts (and a spawn row seen
+  // before the first activity item) do.
+  //
+  // Source of truth: each child's OWN session_meta `source.subagent.
+  // thread_spawn` — the parent's rollout never lists its children. A REMOTE
+  // session's children live on the other machine: say so (a silent [] would
+  // read as "this sub-agent never existed").
+  //
+  // The walk runs OFF the event loop (B-7473 integration 2026-09-06): `collectCodexThreadMetasAsync`
+  // is the transcript-worker twin the 5s poll already uses. A user-action
+  // consumer is not an excuse — the sync walk measured 193 ms on a modest tree
+  // (never block the event loop: no sync fs against a home that may be NFS).
+  // The 10s per-root cache stays: the walk is not free even in the worker.
+  const _subagentCache = new Map(); // rootThreadId → { at, list }
+  router.get('/api/subagents', async (req, res) => {
+    const backend = String(req.query.backend || 'claude');
+    const threadId = String(req.query.threadId || '');
+    if (backend !== 'codex') return res.json({ subagents: [], reason: 'unsupported-backend' });
+    if (!threadId) return res.status(400).json({ error: 'threadId required' });
+    if (req.query.host) return res.json({ subagents: [], reason: 'remote-machine' });
+    const hit = _subagentCache.get(threadId);
+    if (hit && Date.now() - hit.at < 10000) return res.json({ subagents: hit.list, cached: true });
+    let list = [];
+    try {
+      const { metas } = await collectCodexThreadMetasAsync();
+      list = metas
+        .filter((m) => m.agentKind === 'subagent' && m.parentThreadId === threadId)
+        .map((m) => ({
+          agentPath: m.agentPath || '',
+          nickname: m.agentNickname || '',
+          threadId: m.threadId,
+          depth: m.depth ?? null,
+          startedAt: m.startedAt || m.updatedAt || 0,
+        }))
+        .sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
+    } catch (e) {
+      return res.status(500).json({ error: `sub-agent scan failed: ${e.message}` });
+    }
+    _subagentCache.set(threadId, { at: Date.now(), list });
+    if (_subagentCache.size > 64) _subagentCache.delete(_subagentCache.keys().next().value);
+    res.json({ subagents: list });
   });
 
   // Subagent messages for a given session + agentId

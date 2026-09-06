@@ -41,7 +41,8 @@ const resolveRel = (from, spec) => {
 
 // ── Tier membership (path-based; NEW files inherit their directory's tier) ──
 const PURE = new Set(['src/plugin-manifest.js', 'src/account-pool-auto.js', 'src/model-family.js', 'src/task-color-seq.js', 'src/ssh-key-format.js', 'src/session-schema.js', 'src/otel-truth.js', 'src/msg-acl.js', 'src/backend-caps.js',
-  'src/search-card.js']); // web-search card renderer + title query + twin key — shared server (codex normalizer) + browser (chat-renderers)
+  'src/search-card.js', // web-search card renderer + title query + twin key — shared server (codex normalizer) + browser (chat-renderers)
+  'src/collab-row.js']); // codex multi-agent collab row labels/HTML — esc/t/icons injected, so the XSS rule is unit-provable
 const SHARED = new Set(['src/discovery-facts.js', 'src/sysinfo.js', 'src/machine-probes.js', 'src/usage-walker.js',
   'src/transcript-service.js', 'src/ctx-sync.js', 'src/writer-sweep.js', 'src/remote-shell.js', 'src/account-material.js',
   'src/session-store.js', 'src/codex-session-store.js', 'src/normalizers.js', 'src/message-manager.js',

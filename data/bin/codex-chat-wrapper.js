@@ -182,7 +182,34 @@ function formatToolName(name) {
   if (name === 'resumeAgent') return 'resume_agent';
   if (name === 'wait') return 'wait_agent';
   if (name === 'closeAgent') return 'close_agent';
+  // 0.153 multi-agent v2 CollabAgentTool names (bindings: sendMessage /
+  // followupTask / interruptAgent / listAgents) — recorded in the rollout's
+  // snake_case so the live twin and the rollout twin classify identically.
+  if (name === 'sendMessage') return 'send_message';
+  if (name === 'followupTask') return 'followup_task';
+  if (name === 'interruptAgent') return 'interrupt_agent';
+  if (name === 'listAgents') return 'list_agents';
   return name || 'tool';
+}
+
+// The inter-agent envelope codex 0.153 puts in front of every sub-agent ↔ root
+// message ("Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/x\n
+// Payload:\n…"). An OWN-thread agentMessage that starts with it is a message
+// the model wrote FOR ANOTHER AGENT, never a reply to the user — it must not
+// become a root assistant bubble (the owner's "根本没区分出这是subagent消息").
+// Mirrored in src/codex-message-manager.js (parseAgentEnvelope); the wrapper is
+// a shipped single file and cannot require it.
+const AGENT_ENVELOPE_RE = /^Message Type:[ \t]*([A-Z_]+)\r?\n(?:Task name:[ \t]*(\S*)\r?\n)?Sender:[ \t]*(\S+)\r?\n/;
+function parseAgentEnvelope(text) {
+  const m = AGENT_ENVELOPE_RE.exec(String(text || ''));
+  return m ? { msgType: m[1], taskName: m[2] || '', sender: m[3] } : null;
+}
+
+function itemContentText(item) {
+  return asArray(item.content)
+    .filter((entry) => entry && (entry.type === 'output_text' || entry.type === 'text' || entry.type === 'input_text'))
+    .map((entry) => entry.text || '')
+    .join('');
 }
 
 function normalizeOutput(value) {
@@ -249,13 +276,26 @@ const meta = {
   tasks: {},
   pendingRequests: {},
   subagentMetas: [],
+  // 0.153 multi-agent v2: agentPath → agentThreadId learned from this thread's
+  // own subAgentActivity items (the ONLY live carrier of the child thread id;
+  // the rollout persists the same fact as item_completed/SubAgentActivity).
+  subagents: {},
+  // THREAD GATE (B-7473): the app-server relays notifications for EVERY thread
+  // it hosts — a sub-agent's agentMessage arrived here with the child's
+  // threadId and was recorded as a ROOT assistant message (owner report: a
+  // sub-agent's FINAL_ANSWER rendered as an ordinary reply, twice). Foreign-
+  // thread notifications are dropped and COUNTED here; only a child's
+  // agentMessage is kept, as an agent_message record attributed to the child.
+  foreignDrops: { total: 0, threads: {} },
   // Capability advert (the 2.361.1/2.364.1 law: features gate on what THIS
   // process declares in the file THIS process writes, never on version guesses).
   // frameFile: the server may hand >64KB chat frames over as a `_frame_file`
   // pointer line (design-harness-plugins §1 P1 — the bypass used to exclude
   // codex BY BACKEND ID, so a multi-image paste rode raw pty stdin and could
   // be shredded exactly like the 79928a2b claude poisoning, silently).
-  caps: { peerMessage: true, frameFile: true },
+  // threadScoped: every recorded item carries thread_id/turn_id and foreign
+  // threads never become root messages (B-7473).
+  caps: { peerMessage: true, frameFile: true, threadScoped: true },
 };
 
 let buffer = '';
@@ -366,6 +406,17 @@ function updateMetaFromThread(resp) {
   meta.modelProvider = resp?.modelProvider || thread.modelProvider || meta.modelProvider;
   meta.cwd = resp?.cwd || thread.cwd || meta.cwd;
   meta.approvalPolicy = typeof resp?.approvalPolicy === 'string' ? resp.approvalPolicy : meta.approvalPolicy;
+  // THIS thread's own agent path — the reference point that makes an
+  // agentMessage inbound or outbound (meta.agentPath is read in the agentMessage
+  // and foreign-thread paths; it was READ but never assigned until B-7473 integration 2026-09-06).
+  // 0.153.4's Thread struct carries agentNickname / agentRole / parentThreadId
+  // but NO agentPath (checked against the installed binary's serde field list),
+  // so this only fills in if a later version adds it — the reads keep their
+  // '/root' default, which is what a VibeSpace-spawned thread always is (we
+  // never spawn a sub-agent thread ourselves; a RESUMED sub-agent conversation
+  // gets the real path from codex's own session_meta at line 0 of its rollout).
+  const replyAgentPath = asString(resp?.agentPath || resp?.agent_path || thread.agentPath || thread.agent_path);
+  if (replyAgentPath) meta.agentPath = replyAgentPath;
   meta.permissionMode = permissionMode;
   if (resp?.reasoningEffort) meta.effort = resp.reasoningEffort;
   // EXPLICIT EFFORT ON EVERY TURN (B-21e4 item 4, the effort twin of the
@@ -401,6 +452,10 @@ function updateMetaFromThread(resp) {
     forked_from_id: thread.forkedFromId || thread.forked_from_id || undefined,
     agent_role: thread.agentRole || null,
     agent_nickname: thread.agentNickname || null,
+    // only when the server actually told us (never a guessed '/root': the
+    // normalizer's FIRST session_meta wins, and a wrong one would flip every
+    // inbound message to outbound)
+    agent_path: meta.agentPath || undefined,
   });
   record('wrapper_meta', {
     threadId: meta.threadId,
@@ -443,13 +498,132 @@ function trackTask(callId, patch) {
   scheduleMeta();
 }
 
+// ── Item context + thread gate (B-7473) ──
+// Every item notification names its thread + turn (ItemStartedNotification /
+// ItemCompletedNotification = {item, threadId, turnId, …} in the 0.153.4
+// bindings); the handlers below run synchronously, so the current item's
+// context rides a module variable and lands on every record as thread_id /
+// turn_id (stripped from the merge fingerprint + record key by the readers).
+let itemCtx = { threadId: null, turnId: null };
+function recordItem(payload) {
+  const ctx = {};
+  if (itemCtx.threadId) ctx.thread_id = itemCtx.threadId;
+  if (itemCtx.turnId) ctx.turn_id = itemCtx.turnId;
+  record('response_item', { ...payload, ...ctx });
+}
+// THE GATE IS INVERTED (B-7473 integration 2026-09-06): the app-server relays notifications for
+// EVERY thread it hosts, so the question is not "is this method in my list of
+// thread-scoped methods" (a list is a whitelist that goes stale — `error`,
+// `thread/compacted`, `thread/queue/changed` and `turn/diff/updated` all carry
+// threadId in the 0.153.4 bindings and were all MISSING from the first cut, so
+// a CHILD's error became the ROOT's task_failed + system card + turn_complete).
+// The question is: does THIS notification name a thread, and is it mine?
+//   params.threadId present && !== meta.threadId  ⇒ FOREIGN (unless allowlisted)
+//   no threadId, or equal, or meta.threadId not known yet (the thread/start
+//   reply is still in flight)                     ⇒ ours, handled as before.
+// A child's agentMessage is KEPT as an attributed agent_message record and a
+// child's error becomes a collab activity row; everything else is dropped +
+// counted in meta.foreignDrops.
+// Allowlist: methods whose threadId names something OTHER than the conversation
+// scope and must be processed anyway. thread/started + thread/resumed are NOT
+// here because they are handled ABOVE the gate — they are what TEACHES us our
+// own id. Empty today; a new method goes in here only with a reason.
+const THREAD_ID_NOT_SCOPE = new Set([]);
+function foreignThreadOf(params) {
+  const tid = asString(params?.threadId || params?.thread_id);
+  return tid && meta.threadId && tid !== meta.threadId ? tid : null;
+}
+const foreignLogged = new Set();
+function agentPathForThread(tid) {
+  for (const [p, id] of Object.entries(meta.subagents || {})) if (id === tid) return p;
+  return null;
+}
+function noteForeignDrop(method, tid, what) {
+  const fd = meta.foreignDrops || (meta.foreignDrops = { total: 0, threads: {} });
+  fd.total++;
+  const t = fd.threads[tid] || (fd.threads[tid] = { dropped: 0, agentMessages: 0, agentPath: null });
+  if (what === 'agent_message') t.agentMessages++; else t.dropped++;
+  if (!t.agentPath) t.agentPath = agentPathForThread(tid);
+  if (!foreignLogged.has(tid)) {
+    foreignLogged.add(tid);
+    log(`notification from another thread ${tid}${t.agentPath ? ` (${t.agentPath})` : ''} via ${method}${what ? ' / ' + what : ''} — not this conversation; gated (later ones only counted in meta.foreignDrops)`);
+  }
+  scheduleMeta();
+}
+function noteSubagent(item) {
+  const p = asString(item.agentPath || item.agent_path), tid = asString(item.agentThreadId || item.agent_thread_id);
+  if (!p || !tid) return;
+  if (meta.subagents[p] === tid) return;
+  meta.subagents[p] = tid;
+  scheduleMeta();
+}
+// The agent_message record — the rollout's own shape for sub-agent ↔ root
+// chatter ({author, recipient, content:[input_text envelope]}) plus the fields
+// only the live side knows: the item id (dedup against the rollout twin), the
+// author's thread, and msg_type/phase (a child's final_answer IS the
+// FINAL_ANSWER the rollout later stores in plaintext; commentary = MESSAGE).
+function recordAgentMessage({ id, threadId, turnId, author, recipient, text, phase, delivery, envelope }) {
+  record('response_item', {
+    type: 'agent_message',
+    id,
+    thread_id: threadId || null,
+    turn_id: turnId || null,
+    author,
+    recipient,
+    content: [{ type: envelope ? 'input_text' : 'output_text', text }],
+    phase: phase || null,
+    delivery: delivery || null,
+    msg_type: envelope ? envelope.msgType : (phase === 'final_answer' ? 'FINAL_ANSWER' : 'MESSAGE'),
+  });
+}
+// Monotonic suffix for the synthesized foreign-error id: `Date.now()` alone is
+// NOT unique (two child failures inside one millisecond shared an id, and any
+// id-keyed dedupe downstream would then swallow the second — round-5).
+let foreignErrorSeq = 0;
+function handleForeignThreadNotification(method, params, tid) {
+  const item = params?.item;
+  // A CHILD's failure is the CHILD's: it must never become this conversation's
+  // task_failed (which the client renders as a failed turn + a system card and
+  // which ends the root's streaming state). It is recorded as a collab activity
+  // row instead — the agent errored, with the message on the row's hover.
+  if (method === 'error') {
+    const msg = asString(params?.message || params?.error?.message) || 'error';
+    record('event_msg', {
+      type: 'sub_agent_activity',
+      event_id: `foreign-error-${tid}-${Date.now()}-${++foreignErrorSeq}`,
+      occurred_at_ms: Date.now(),
+      agent_thread_id: tid,
+      agent_path: agentPathForThread(tid) || '',
+      kind: 'errored',
+      detail: msg.slice(0, 300),
+      thread_id: meta.threadId || null,
+    });
+    noteForeignDrop(method, tid, 'error');
+    return;
+  }
+  if (method === 'item/completed' && item?.type === 'agentMessage') {
+    const text = asString(item.text) || itemContentText(item);
+    if (text) {
+      recordAgentMessage({
+        id: item.id, threadId: tid, turnId: params?.turnId || null,
+        author: agentPathForThread(tid) || tid, recipient: meta.agentPath || '/root',
+        text, phase: item.phase, delivery: item.delivery, envelope: null,
+      });
+      noteForeignDrop(method, tid, 'agent_message');
+      return;
+    }
+  }
+  if (item?.type === 'subAgentActivity') noteSubagent(item); // a grandchild's path→thread is still worth knowing
+  noteForeignDrop(method, tid, item?.type || null);
+}
+
 function handleItemStarted(item, itemId) {
   const type = item.type;
   itemState.set(itemId, { type, item, startedAt: Date.now() });
   if (type === 'commandExecution') {
     const command = asString(item.command) || asArray(item.command).join(' ');
     const input = { command, cwd: item.cwd || meta.cwd };
-    record('response_item', {
+    recordItem({
       type: 'function_call',
       name: 'exec_command',
       arguments: JSON.stringify(input),
@@ -460,7 +634,7 @@ function handleItemStarted(item, itemId) {
   }
   if (type === 'fileChange') {
     const input = { reason: item.reason || '', changes: item.changes || null, grantRoot: item.grantRoot || null };
-    record('response_item', {
+    recordItem({
       type: 'function_call',
       name: 'apply_patch',
       arguments: JSON.stringify(input),
@@ -469,19 +643,33 @@ function handleItemStarted(item, itemId) {
     emitTaskEvent('patch_apply_begin', { call_id: itemId, reason: item.reason || '' });
     return;
   }
+  if (type === 'subAgentActivity') {
+    // learn agentPath → agentThreadId as early as possible (a child's
+    // agentMessage may arrive before this item's completed notification)
+    noteSubagent(item);
+    return;
+  }
   if (type === 'collabAgentToolCall') {
     const tool = formatToolName(item.tool);
+    // v2 CollabAgentToolCall carries prompt/model/reasoningEffort/receiverThreadIds
+    // (no `input`); older shapes had input.description. The prompt is plaintext
+    // here (the rollout stores it encrypted) — kept, it is what the user asked
+    // the sub-agent to do.
     const input = { ...(item.input || {}), receiverThreadIds: item.receiverThreadIds || [] };
-    record('response_item', {
+    if (item.prompt) input.prompt = item.prompt;
+    if (item.model) input.model = item.model;
+    if (item.reasoningEffort) input.reasoningEffort = item.reasoningEffort;
+    recordItem({
       type: 'function_call',
       name: tool,
+      namespace: 'collaboration',
       arguments: JSON.stringify(input),
       call_id: itemId,
     });
     emitTaskEvent('collab_agent_begin', {
       call_id: itemId,
       tool,
-      description: item.agentNickname || item.agentRole || oneLine(item.input?.description || ''),
+      description: item.agentNickname || item.agentRole || oneLine(item.input?.description || item.prompt || '').slice(0, 160),
       receiver_thread_ids: item.receiverThreadIds || [],
       agent_role: item.agentRole || '',
       agent_nickname: item.agentNickname || '',
@@ -489,7 +677,7 @@ function handleItemStarted(item, itemId) {
     if (tool === 'spawn_agent') {
       const metas = (item.receiverThreadIds || []).map((threadId) => ({
         threadId,
-        description: item.input?.description || item.agentNickname || 'Agent',
+        description: item.input?.description || item.agentNickname || oneLine(item.prompt || '').slice(0, 120) || 'Agent',
         agentNickname: item.agentNickname || '',
         agentRole: item.agentRole || '',
       }));
@@ -501,7 +689,7 @@ function handleItemStarted(item, itemId) {
     trackTask(itemId, {
       id: itemId,
       type: 'agent',
-      description: item.input?.description || item.agentNickname || item.agentRole || 'Agent',
+      description: item.input?.description || item.agentNickname || item.agentRole || oneLine(item.prompt || '').slice(0, 120) || 'Agent',
       status: 'running',
       receiverThreadIds: item.receiverThreadIds || [],
     });
@@ -513,16 +701,16 @@ function handleItemStarted(item, itemId) {
   // function_call / function_call_output twins the normalizer already
   // renders (names chosen so collapseKindOf lands in the right fold kind).
   if (type === 'mcpToolCall') {
-    record('response_item', { type: 'function_call', name: `mcp__${item.server || 'mcp'}__${item.tool || 'tool'}`, arguments: JSON.stringify(item.arguments ?? {}), call_id: itemId });
+    recordItem({ type: 'function_call', name: `mcp__${item.server || 'mcp'}__${item.tool || 'tool'}`, arguments: JSON.stringify(item.arguments ?? {}), call_id: itemId });
     emitTaskEvent('mcp_tool_call_begin', { call_id: itemId, server: item.server || '', tool: item.tool || '' });
     return;
   }
   if (type === 'dynamicToolCall') {
-    record('response_item', { type: 'function_call', name: item.namespace ? `${item.namespace}.${item.tool || 'tool'}` : (item.tool || 'dynamic_tool'), arguments: JSON.stringify(item.arguments ?? {}), call_id: itemId });
+    recordItem({ type: 'function_call', name: item.namespace ? `${item.namespace}.${item.tool || 'tool'}` : (item.tool || 'dynamic_tool'), arguments: JSON.stringify(item.arguments ?? {}), call_id: itemId });
     return;
   }
   if (type === 'webSearch') {
-    record('response_item', { type: 'function_call', name: 'web_search', arguments: JSON.stringify({ query: item.query || '', action: item.action || null }), call_id: itemId });
+    recordItem({ type: 'function_call', name: 'web_search', arguments: JSON.stringify({ query: item.query || '', action: item.action || null }), call_id: itemId });
     return;
   }
   if (type === 'enteredReviewMode') {
@@ -565,7 +753,7 @@ function _handleItemCompletedInner(item, itemId) {
     if (!state.type) handleItemStarted(item, itemId); // completed without a started (rollout merge / short call)
     const failed = !!item.error || item.status === 'failed' || item.success === false;
     const out = item.error ? (item.error.message || JSON.stringify(item.error)) : (item.result ?? item.contentItems ?? item.results ?? '');
-    record('response_item', { type: 'function_call_output', call_id: itemId, output: typeof out === 'string' ? out : JSON.stringify(out), is_error: failed });
+    recordItem({ type: 'function_call_output', call_id: itemId, output: typeof out === 'string' ? out : JSON.stringify(out), is_error: failed });
     return;
   }
   if (type === 'imageView') {
@@ -573,8 +761,8 @@ function _handleItemCompletedInner(item, itemId) {
     // strips it — the live copy must render the SAME text or the one card
     // (same item id) rewrites itself on re-attach
     const p = String(item.path || '').replace(/^file:\/\//, '');
-    record('response_item', { type: 'function_call', name: 'view_image', arguments: JSON.stringify({ path: p }), call_id: itemId });
-    record('response_item', { type: 'function_call_output', call_id: itemId, output: `viewed ${p || 'image'}`, is_error: false });
+    recordItem({ type: 'function_call', name: 'view_image', arguments: JSON.stringify({ path: p }), call_id: itemId });
+    recordItem({ type: 'function_call_output', call_id: itemId, output: `viewed ${p || 'image'}`, is_error: false });
     return;
   }
   if (type === 'contextCompaction') {
@@ -582,20 +770,51 @@ function _handleItemCompletedInner(item, itemId) {
     emitTaskEvent('context_compacted', { item_id: itemId, source: 'item' });
     return;
   }
+  if (type === 'subAgentActivity') {
+    // Own-thread sub-agent lifecycle (0.153 v2: {id, kind, agentThreadId,
+    // agentPath}) → the live sub_agent_activity event the normalizer already
+    // renders (same shape the 0.149 rollouts persisted; 0.153 rollouts carry
+    // it as item_completed/SubAgentActivity — the normalizer routes both to
+    // ONE card path). The path→thread map is what makes the child clickable.
+    noteSubagent(item);
+    record('event_msg', {
+      type: 'sub_agent_activity',
+      event_id: itemId,
+      occurred_at_ms: Date.now(),
+      agent_thread_id: asString(item.agentThreadId || item.agent_thread_id),
+      agent_path: asString(item.agentPath || item.agent_path),
+      kind: asString(item.kind),
+      thread_id: itemCtx.threadId || meta.threadId || null,
+    });
+    return;
+  }
   if (type === 'agentMessage') {
-    const contentText = asArray(item.content)
-      .filter((entry) => entry.type === 'output_text' || entry.type === 'text')
-      .map((entry) => entry.text || '')
-      .join('');
-    const text = asString(item.text) || contentText;
+    const text = asString(item.text) || itemContentText(item);
     if (text) {
-      record('response_item', {
-        type: 'message',
-        role: 'assistant',
-        content: [{ type: 'output_text', text }],
-        phase: item.phase || null,
-        item_id: itemId,
-      });
+      const envelope = parseAgentEnvelope(text);
+      // The ENVELOPE is the verified signal that this text was written FOR
+      // another agent. `delivery === 'async'` is NOT (B-7473 integration 2026-09-06): on an
+      // OWN-thread agentMessage it marks a question/async reply the user is
+      // meant to read, and treating it as inter-agent DROPPED the text from the
+      // transcript entirely (an asked question simply vanished).
+      if (envelope) {
+        // Written FOR another agent (inter-agent envelope) — an agent_message
+        // record, never a root assistant message.
+        recordAgentMessage({
+          id: itemId, threadId: itemCtx.threadId || meta.threadId, turnId: itemCtx.turnId,
+          author: envelope ? envelope.sender : (meta.agentPath || '/root'),
+          recipient: envelope ? (envelope.taskName || meta.agentPath || '/root') : '',
+          text, phase: item.phase, delivery: item.delivery, envelope,
+        });
+      } else {
+        recordItem({
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text }],
+          phase: item.phase || null,
+          item_id: itemId,
+        });
+      }
     }
     meta.streaming = false;
     scheduleMeta();
@@ -604,7 +823,7 @@ function _handleItemCompletedInner(item, itemId) {
   if (type === 'reasoning') {
     const reasoningText = lastReasoningByItem.get(itemId) || '';
     if (reasoningText) {
-      record('response_item', {
+      recordItem({
         type: 'reasoning',
         summary: [{ type: 'summary_text', text: reasoningText }],
         content: null,
@@ -615,7 +834,7 @@ function _handleItemCompletedInner(item, itemId) {
   }
   if (type === 'commandExecution') {
     const output = normalizeOutput(item.aggregatedOutput || item.output || item.result || '');
-    record('response_item', {
+    recordItem({
       type: 'function_call_output',
       call_id: itemId,
       output,
@@ -632,7 +851,7 @@ function _handleItemCompletedInner(item, itemId) {
   }
   if (type === 'fileChange') {
     const output = normalizeOutput(item.aggregatedOutput || item.output || item.result || '');
-    record('response_item', {
+    recordItem({
       type: 'function_call_output',
       call_id: itemId,
       output,
@@ -649,8 +868,11 @@ function _handleItemCompletedInner(item, itemId) {
     return;
   }
   if (type === 'collabAgentToolCall') {
-    const output = normalizeOutput(item.output || item.result || item.message || '');
-    record('response_item', {
+    if (!state.type) handleItemStarted(item, itemId); // completed without a started (short spawn)
+    // v2 carries agentsStates {threadId: state} — the closest thing to the
+    // rollout's {"task_name": "/root/x"} output; never a message body.
+    const output = normalizeOutput(item.output || item.result || item.message || (item.agentsStates && Object.keys(item.agentsStates).length ? item.agentsStates : ''));
+    recordItem({
       type: 'function_call_output',
       call_id: itemId,
       output,
@@ -670,6 +892,12 @@ function handleNotification(method, params) {
   if (method === 'thread/started' || method === 'thread/resumed') {
     updateMetaFromThread(params || {});
     return;
+  }
+  // THREAD GATE (B-7473, inverted B-7473 integration 2026-09-06): anything that NAMES another thread
+  // is not this conversation — see handleForeignThreadNotification.
+  if (!THREAD_ID_NOT_SCOPE.has(method)) {
+    const foreign = foreignThreadOf(params);
+    if (foreign) { handleForeignThreadNotification(method, params, foreign); return; }
   }
   if (method === 'thread/status/changed') return;
   if (method === 'thread/goal/updated') {
@@ -822,8 +1050,11 @@ function handleNotification(method, params) {
     const item = params?.item || params || {};
     const itemId = params?.itemId || params?.item_id || item.id;
     if (!itemId) return;
-    if (method === 'item/started') handleItemStarted(item, itemId);
-    else handleItemCompleted(item, itemId);
+    itemCtx = { threadId: asString(params?.threadId || params?.thread_id) || meta.threadId || null, turnId: asString(params?.turnId || params?.turn_id) || currentTurnId || null };
+    try {
+      if (method === 'item/started') handleItemStarted(item, itemId);
+      else handleItemCompleted(item, itemId);
+    } finally { itemCtx = { threadId: null, turnId: null }; }
     return;
   }
   if (method === 'error') {

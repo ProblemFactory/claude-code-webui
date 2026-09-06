@@ -283,7 +283,9 @@ setInterval(() => {}, 1e3);
   ok(/stdinPayload\.length > 64 \* 1024 && !session\.host && session\.socketPath\) \{/.test(ws), 'bypass condition = size + local transport only; capability decides pointer-vs-raw-vs-refuse');
   // the codex wrapper side of the contract
   const cw = fs.readFileSync(path.join(REPO, 'data/bin/codex-chat-wrapper.js'), 'utf8');
-  ok(/caps: \{ peerMessage: true, frameFile: true \}/.test(cw), 'codex-chat-wrapper advertises caps.frameFile in its boot meta');
+  // the caps object GROWS (threadScoped joined it in B-7473) — pin the two the
+  // bypass gates on, not the literal object
+  ok(/caps: \{[^}]*peerMessage: true[^}]*\}/.test(cw) && /caps: \{[^}]*frameFile: true[^}]*\}/.test(cw), 'codex-chat-wrapper advertises caps.frameFile (+ peerMessage) in its boot meta');
   ok(/if \(msg\.type === '_frame_file'\) \{ msg = loadFrameFile\(msg\);/.test(cw), 'codex-chat-wrapper resolves _frame_file pointers on the stdin path (before the ready gate)');
   ok(/if \(!msg \|\| typeof msg !== 'object'\) \{ rejectStdinLine\(line\); continue; \}/.test(cw) && !/const msg = safeJsonParse\(line\);\n\s*if \(!msg\) continue;/.test(cw), 'NEGATIVE: an unparseable stdin line is no longer a silent continue');
   // the ack has a consumer in EVERY stdout consumer module (S5: src/server/stdout/<protocol>.js, one per declared protocol)
