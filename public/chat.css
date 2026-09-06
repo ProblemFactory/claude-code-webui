@@ -629,6 +629,13 @@ pre.chat-pre-wrapped { white-space: pre-wrap; word-break: break-all; }
 }
 .chat-long-msg > summary::-webkit-details-marker { display: none; }
 .chat-long-msg > summary::after { content: ' \25B8'; color: var(--text-dim); font-size: 10px; }
+/* history/paging pill — a .chat-view overlay child, NEVER a list row (an
+   in-flow row would be picked up by _withViewportAnchor/_trimTop and shift the
+   very scroll it exists to explain). Positioned HERE, not inline, so the
+   run-bar override below can move it (an inline top beats every selector). */
+.chat-history-status {
+  position: absolute; top: 6px; left: 50%; transform: translateX(-50%); z-index: 20; max-width: 80%;
+}
 .chat-pos-indicator {
   position: absolute; top: 8px; left: 50%; transform: translateX(-50%); z-index: 10;
   font-size: 10px; padding: 3px 8px; border-radius: var(--radius-sm); pointer-events: none;
@@ -964,11 +971,17 @@ body.hide-empty-thinking .chat-compact .chat-msg.chat-empty-thinking { display: 
 }
 .chat-run-bar-btn:hover { border-color: var(--accent); color: var(--accent); }
 .chat-run-bar-btn svg { width: 12px; height: 12px; }
-/* the position pill would sit on top of the bar — drop it below while shown */
-.chat-view.chat-run-bar-on .chat-pos-indicator { top: 34px; }
+/* the position pill and the history-load pill would sit ON the bar (both are
+   absolutely-positioned .chat-view overlays at the same top edge) — drop them
+   below it while it is shown; paging up INSIDE an open run shows both at once */
+.chat-view.chat-run-bar-on .chat-pos-indicator,
+.chat-view.chat-run-bar-on .chat-history-status { top: 34px; }
 @media (max-width: 768px) {
   .chat-run-bar-btn { min-width: 34px; height: 28px; }
   .chat-run-footer { padding: 6px 12px; }
+  /* taller touch targets ⇒ a taller bar */
+  .chat-view.chat-run-bar-on .chat-pos-indicator,
+  .chat-view.chat-run-bar-on .chat-history-status { top: 42px; }
 }
 
 /* Long-running tool heartbeat line (2.227.7) — distinct from the agent status

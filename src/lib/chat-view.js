@@ -145,6 +145,11 @@ class ChatView {
     });
     this._runsObserver.observe(this._messageList, { childList: true });
     this._runExpanded = new WeakSet(); // first member of runs the user opened
+    // Runs the user opened DELIBERATELY while they were NOT the live tail —
+    // exempt from the pinned auto-refold in _updateRuns (2026-09-06: that
+    // branch closed the very run a click had just opened). Keyed by member
+    // element like _runExpanded, because run records are rebuilt every pass.
+    this._runStickyOpen = new WeakSet();
     // Live re-fold on toggle — the observer only fires on list mutations, so
     // a settings change used to take effect on the NEXT message only.
     onSetting('chat.collapseRuns', () => this._updateRuns());
@@ -1109,8 +1114,10 @@ class ChatView {
     let el = this._historyStatus;
     if (!el || !el.isConnected) {
       el = document.createElement('div');
+      // positioned by chat.css (.chat-history-status) — NOT inline: while the
+      // floating run bar is up the pill has to drop below it, and an inline
+      // top would beat the stylesheet rule that does it (2026-09-06 review)
       el.className = 'chat-history-status';
-      el.style.cssText = 'position:absolute;top:6px;left:50%;transform:translateX(-50%);z-index:20;max-width:80%;';
       this._container.appendChild(el);
       this._historyStatus = el;
     }
@@ -3137,7 +3144,19 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
       // report: 一部分没折叠). Moving on re-folds it; reading history
       // (unpinned) never auto-collapses anything.
       if (this._pinned && built.length > 1) {
-        for (const r of built.slice(0, -1)) if (r.open) this._setRunOpen(r, false);
+        for (const r of built.slice(0, -1)) {
+          if (!r.open) continue;
+          // …EXCEPT a run the user just opened on purpose (it was already a
+          // non-last run when they clicked): _setRunOpen's footer insert is a
+          // childList mutation, so before 2026-09-06 the click scheduled a
+          // pass and this line closed the run the click had opened ~180ms
+          // later — every non-last header was a no-op while pinned (measured
+          // in headless chrome: open → [false] at t+320ms). An INHERITED open
+          // flag (the live tail grew past the run the user was watching) has
+          // no sticky mark and still re-folds — that is what this rule is for.
+          if (r.members.some((el) => this._runStickyOpen.has(el))) continue;
+          this._setRunOpen(r, false);
+        }
       }
       this._runs = built;
     } finally {
@@ -3198,18 +3217,53 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
       el.classList.toggle('chat-run-first', run.open && i === 0);
       el.classList.toggle('chat-run-last', run.open && i === n - 1);
     });
-    if (run.open) {
-      if (!run.footer) {
-        const f = document.createElement('div');
-        f.className = 'chat-run-footer';
-        f.innerHTML = `<span class="chat-run-arrow">${UI_ICONS.chevronUp}</span><span class="chat-run-label">${escHtml(t('Collapse'))} · ${escHtml(run.label)}</span>`;
-        f.onclick = () => this._collapseRunTo(run);
-        run.footer = f;
+    // The footer is a LIST CHILD, so inserting/removing it is a childList
+    // mutation. Inside a pass _runsMutating already covers that; a USER CLICK
+    // is not a pass, so the record scheduled ANOTHER pass — and while pinned
+    // that pass's auto-refold closed the run the click had just opened. Hide
+    // our own mutation exactly the way a pass drains its own records (the
+    // flag alone never suppressed anything: the observer callback is
+    // delivered at a microtask checkpoint, long after the flag is back to
+    // false). Drain only when we really mutated, so an unrelated pending
+    // record is never swallowed with it.
+    const outsidePass = !this._runsMutating;
+    let mutated = false;
+    if (outsidePass) this._runsMutating = true;
+    try {
+      if (run.open) {
+        if (!run.footer) {
+          const f = document.createElement('div');
+          f.className = 'chat-run-footer';
+          f.innerHTML = `<span class="chat-run-arrow">${UI_ICONS.chevronUp}</span><span class="chat-run-label">${escHtml(t('Collapse'))} · ${escHtml(run.label)}</span>`;
+          f.onclick = () => this._collapseRunTo(run);
+          run.footer = f;
+        }
+        const last = run.members[n - 1];
+        if (last?.parentNode === this._messageList && run.footer.previousSibling !== last) {
+          this._messageList.insertBefore(run.footer, last.nextSibling);
+          mutated = true;
+        }
+      } else if (run.footer?.isConnected) {
+        run.footer.remove();
+        mutated = true;
       }
-      const last = run.members[n - 1];
-      if (last?.parentNode === this._messageList) this._messageList.insertBefore(run.footer, last.nextSibling);
-    } else if (run.footer) {
-      run.footer.remove();
+    } finally {
+      if (outsidePass) {
+        this._runsMutating = false;
+        if (mutated) this._runsObserver?.takeRecords();
+      }
+    }
+    // A deliberate toggle on a run that is NOT the live tail means "I am
+    // reading this" — remember it so the pinned auto-refold spares it, and
+    // forget it the moment the user collapses it again. Opening the LAST run
+    // is the live-watching case the auto-refold exists for (2.227.x
+    // "一部分没折叠": a run expanded to watch one command's output
+    // used to stay expanded forever once the tail moved on), so it stays
+    // inherited-open and re-folds when it stops being last.
+    if (outsidePass) {
+      const isLast = this._runs?.length ? this._runs[this._runs.length - 1] === run : false;
+      const sticky = run.open && !isLast;
+      for (const el of run.members) { if (sticky) this._runStickyOpen.add(el); else this._runStickyOpen.delete(el); }
     }
     this._scheduleRunBar();
   }

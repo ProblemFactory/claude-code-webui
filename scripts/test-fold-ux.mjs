@@ -80,6 +80,12 @@ check('the floating bar lives on the .chat-view container, never in the list', /
 check('bar state is computed in the scroll rAF with the frame\'s already-read scrollTop, BEFORE the programmatic-scroll early return', /const \{ scrollTop, scrollHeight, clientHeight \} = this\._messageList;\n[^\n]*\n\s*this\._updateRunBar\(scrollTop\);\n\s*if \(this\._programmaticScroll\) return;/.test(cv));
 const barBody = cv.slice(cv.indexOf('  _updateRunBar(scrollTop) {'), cv.indexOf('  dispose() {'));
 check('_updateRunBar never pages/trims/pins (no _extendTop/_extendBottom/_trim*/_pinned writes)', barBody.length > 100 && !/_extendTop|_extendBottom|_trimTop|_trimBottom|_pinned =/.test(barBody));
+check('_setRunOpen hides its OWN footer mutation from the observer when called outside a pass (a user click is not a pass — the record used to schedule the pass that closed the run)',
+  /const outsidePass = !this\._runsMutating;/.test(cv) && /if \(outsidePass\) this\._runsMutating = true;/.test(cv) && /if \(mutated\) this\._runsObserver\?\.takeRecords\(\);/.test(cv));
+check('the pinned auto-refold still folds every non-last run EXCEPT one the user opened deliberately (_runStickyOpen, keyed by member like _runExpanded)',
+  /this\._runStickyOpen = new WeakSet\(\);/.test(cv) && /for \(const r of built\.slice\(0, -1\)\) \{/.test(cv)
+  && /if \(r\.members\.some\(\(el\) => this\._runStickyOpen\.has\(el\)\)\) continue;/.test(cv)
+  && /const isLast = this\._runs\?\.length \? this\._runs\[this\._runs\.length - 1\] === run : false;/.test(cv));
 check('collapse-from-bar/footer lands ABSOLUTELY on the header under the programmatic-scroll mute', /_landOnHeader\(run\) \{[\s\S]{0,700}this\._programmaticScroll = true;[\s\S]{0,400}list\.scrollTop = run\.header\.offsetTop;/.test(cv) && /_collapseRunTo\(run\) \{[\s\S]{0,200}this\._setRunOpen\(run, false\);\s*this\._landOnHeader\(run\);/.test(cv));
 const suspendBody = cv.slice(cv.indexOf('  setSuspended(on) {'), cv.indexOf('  async _extendTop('));
 check('suspend hides the bar; resume + every runs pass re-schedule it; dispose cancels the rAF', /if \(on\) this\._updateRunBar\(0\);/.test(suspendBody) && /this\._lastStructuralAt = Date\.now\(\);\n\s*this\._scheduleRunBar\(\);/.test(suspendBody) && /this\._runsObserver\?\.takeRecords\(\);\n\s*this\._scheduleRunBar\(\);/.test(cv) && /cancelAnimationFrame\(this\._runBarRaf\)/.test(cv));
@@ -90,6 +96,9 @@ const css = read('public/chat.css');
 check('chat.css: rail on members in BOTH role-indicator families, footer + bar styled with theme vars only', /\.chat-msg\.chat-run-member \{/.test(css) && /\[data-role-indicator="border"\] \.chat-msg\.chat-run-member \{/.test(css)
   && /\.chat-run-footer \{/.test(css) && /\.chat-run-bar \{/.test(css) && /\.chat-run-bar\.hidden \{ display: none; \}/.test(css)
   && !/chat-run-(member|footer|bar)[^}]*#[0-9a-f]{3,6}/i.test(css.slice(css.indexOf('Expanded-run legibility'))));
+check('the history-load pill is positioned by the STYLESHEET (an inline top beats every selector) and drops below the bar with the position pill',
+  !/chat-history-status';\n\s*el\.style\.cssText/.test(cv) && /\.chat-history-status \{\n\s*position: absolute; top: 6px;/.test(css)
+  && /\.chat-view\.chat-run-bar-on \.chat-pos-indicator,\n\.chat-view\.chat-run-bar-on \.chat-history-status \{ top: 34px; \}/.test(css));
 check('icons: SVG chevron + arrow-up-to-line in icons.js (no emoji)', /chevronUp:\s+_s\(/.test(read('src/lib/icons.js')) && /arrowUpToLine:\s+_s\(/.test(read('src/lib/icons.js')));
 for (const f of ['src/lib/i18n-zh.js', 'src/lib/i18n-ja.js']) {
   const d = read(f);
@@ -108,11 +117,16 @@ const wt = `/tmp/vs-foldux-${process.pid}`;
 const fakeHome = `${wt}-home`;
 const CWD = `${wt}-cwd`;
 const SID = 'f01d0000-0000-4000-8000-00000000ffee';
-// 30 Bash + 1 ToolSearch = a run taller than the window; 8 tall text turns
+// 28 Bash + 1 ToolSearch = a run taller than the window; 8 tall text turns
 // AFTER it so the header can land at the viewport top once the run collapses
-// (with nothing below, scrollTop just clamps to 0). Total 50 = exactly the
-// initial tail window, so the whole transcript renders without paging.
-const NBASH = 30, NTAIL = 8;
+// (with nothing below, scrollTop just clamps to 0), then a SHORT mcp run after
+// the last text turn. TWO runs is not decoration: the pinned auto-refold only
+// exists when built.length > 1 and its `built.slice(0, -1)` shape closes every
+// run except the LAST — with a single-run fixture the whole branch (and the
+// 2026-09-06 open-then-refold bug under it) was unreachable while 51 asserts
+// stayed green. Total 50 = exactly the initial tail window, so the whole
+// transcript renders without paging.
+const NBASH = 28, NTAIL = 8, NMCP = 2;
 {
   const lines = [];
   let ts0 = Date.now() - 3600e3;
@@ -134,6 +148,13 @@ const NBASH = 30, NTAIL = 8;
   for (let k = 0; k < NTAIL; k++) {
     push({ type: 'user', message: { role: 'user', content: `follow-up ${k}` }, uuid: `u-${n++}`, timestamp: ts() });
     push({ type: 'assistant', message: { id: `msg_${n}`, role: 'assistant', model: 'claude-fable-5', content: [{ type: 'text', text: `reply ${k}:\n${PROSE}` }], usage: { input_tokens: 1, output_tokens: 1 } }, uuid: `af-${n++}`, timestamp: ts() });
+  }
+  // run 2 — a short mcp run after the last text turn (the LAST run: the one
+  // the pinned auto-refold deliberately spares)
+  for (let m = 0; m < NMCP; m++) {
+    const tid = `toolu_m${m}`;
+    push({ type: 'assistant', message: { id: `msg_${n}`, role: 'assistant', model: 'claude-fable-5', content: [{ type: 'tool_use', id: tid, name: 'mcp__chrome-devtools__click', input: { uid: `e${m}` } }], usage: {} }, uuid: `tu-${n++}`, timestamp: ts() });
+    push({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: tid, content: `clicked ${m}\n` }] }, uuid: `tr-${n++}`, timestamp: ts() });
   }
   const proj = path.join(fakeHome, '.claude', 'projects', CWD.replace(/[/._]/g, '-'));
   fs.mkdirSync(proj, { recursive: true });
@@ -198,6 +219,7 @@ const opened = await evaljs(`(async () => {
     if (header) break;
     await sleep(250);
   }
+  for (let i = 0; i < 40 && list.querySelectorAll(':scope > .chat-run-header').length < 2; i++) await sleep(150);
   if (!header) return { ok: false, n: list ? list.querySelectorAll('.chat-msg').length : -1 };
   await sleep(900); // fold settle + initial pin
   window.__list = list;
@@ -205,7 +227,7 @@ const opened = await evaljs(`(async () => {
   return { ok: true, n: list.querySelectorAll(':scope > .chat-msg').length, headers: list.querySelectorAll(':scope > .chat-run-header').length,
     label: header.textContent.trim(), ch: list.clientHeight, sh: list.scrollHeight, cv: !!view };
 })()`);
-check('view-only chat rendered with ONE fold header over the tool run', opened?.ok && opened.headers === 1, JSON.stringify(opened));
+check('view-only chat rendered with TWO fold headers (the long tool run + the short mcp run)', opened?.ok && opened.headers === 2, JSON.stringify(opened));
 check(`header label = "${NBASH} Bash · 1 tool lookups · 1 ✗" — the ToolSearch is a tool lookup, never MCP (got: ${opened?.label})`, (opened?.label || '').replace(/^▸\s*/, '') === `${NBASH} Bash · 1 tool lookups · 1 ✗`);
 
 const state = () => evaljs(`(() => {
@@ -248,13 +270,13 @@ const click = async (sel, waitMs = 120) => evaljs(`(async () => {
 
 // collapsed: nothing of the expanded chrome
 const s0 = await state();
-check('collapsed run: no rail classes, no footer, no bar', !s0.open && s0.members === 0 && s0.footers === 0 && !s0.barShown && s0.collapsed === NBASH + 1, JSON.stringify(s0));
+check('collapsed run: no rail classes, no footer, no bar', !s0.open && s0.members === 0 && s0.footers === 0 && !s0.barShown && s0.collapsed === NBASH + 1 + NMCP, JSON.stringify(s0));
 check('the list stays FLAT (members are direct .chat-msg children; footer/bar are not .chat-msg)', s0.msgs > NBASH && !s0.footerIsMsg && !s0.barInList);
 
 // expand via the header
 await click('.chat-run-header', 400);
 const s1 = await state();
-check(`expanded: every member carries .chat-run-member (${s1.members}/${NBASH + 1}), first/last marked`, s1.open && s1.members === NBASH + 1 && s1.first && s1.last && s1.firstIsCard && s1.collapsed === 0, JSON.stringify(s1));
+check(`expanded: every member carries .chat-run-member (${s1.members}/${NBASH + 1}), first/last marked`, s1.open && s1.members === NBASH + 1 && s1.first && s1.last && s1.firstIsCard && s1.collapsed === NMCP, JSON.stringify(s1));
 check('expanded: the footer exists (non-.chat-msg) and reads "Collapse · <label>"', s1.footers === 1 && !s1.footerIsMsg && /^Collapse · /.test(s1.footerText) && s1.footerText.includes('tool lookups'), s1.footerText);
 check('expanded run is taller than the viewport (the reported situation)', s1.sh > s1.ch * 1.5, `sh=${s1.sh} ch=${s1.ch}`);
 check('header on screen ⇒ no floating bar (negative control)', (() => { const headerVisible = s1.headerTop >= s1.st && s1.headerTop < s1.st + s1.ch; return !headerVisible || !s1.barShown; })(), JSON.stringify(s1));
@@ -276,7 +298,7 @@ const s4 = await state();
 check('bar shown again after scrolling past the header', s4.barShown, JSON.stringify(s4));
 await click('.chat-run-bar', 80);
 const s5 = await state();
-check('bar click collapses the run: rail classes gone, footer gone, header closed', !s5.open && s5.members === 0 && s5.footers === 0 && s5.collapsed === NBASH + 1, JSON.stringify(s5));
+check('bar click collapses the run: rail classes gone, footer gone, header closed', !s5.open && s5.members === 0 && s5.footers === 0 && s5.collapsed === NBASH + 1 + NMCP, JSON.stringify(s5));
 check('fixture sanity: after the collapse the list can still scroll far enough to put the header at the top (else the landing would be unobservable)', s5.sh - s5.ch >= s5.headerTop, `sh=${s5.sh} ch=${s5.ch} headerTop=${s5.headerTop}`);
 check('…and the viewport lands on the header (within ±8px), bar hidden', Math.abs(s5.headerTop - s5.st) <= 8 && !s5.barShown, `headerTop=${s5.headerTop} st=${s5.st}`);
 await sleep(500); // the footer removal is a childList mutation → a debounced runs pass rebuilds the header
@@ -294,6 +316,86 @@ check('footer click collapses and scrolls the header into view (±8px); footer g
 await sleep(400);
 const s9 = await state();
 check('footer exists ONLY while expanded (still absent after the rebuild pass)', s9.footers === 0 && !s9.open && s9.members === 0);
+// ── PINNED + TWO runs: a user-opened run must survive the pass its own toggle
+//    causes (2026-09-06 refutation, measured on this fixture's parent: clicking
+//    any run header except the last, while pinned, opened the run and closed it
+//    again ~180ms later — _setRunOpen's footer insert is a childList mutation
+//    OUTSIDE a pass, so the observer scheduled one, and the pinned auto-refold
+//    (`built.slice(0, -1)`) closed exactly the run the click had opened). ──
+const chatView = (body) => evaljs(`(async () => {
+  const list = window.__list;
+  const cv = [...window.app.sessions.values()].find((s) => s && s._messageList === list);
+  if (!cv) return { err: 'no ChatView for the list' };
+  ${body}
+})()`);
+const runsState = () => chatView(`
+  const heads = [...list.querySelectorAll(':scope > .chat-run-header')];
+  return { pinned: !!cv._pinned, runs: cv._runs?.length || 0, heads: heads.length,
+    open: heads.map((h) => h.classList.contains('open')),
+    footers: list.querySelectorAll(':scope > .chat-run-footer').length,
+    members: list.querySelectorAll(':scope > .chat-msg.chat-run-member').length };`);
+
+// pin at the live tail (bottom-follow owns the scroll there — the state the
+// auto-refold exists for)
+await chatView(`list.scrollTop = list.scrollHeight; list.dispatchEvent(new Event('scroll'));
+  await new Promise((r) => setTimeout(r, 300)); return 1;`);
+const p0 = await runsState();
+check('fixture: TWO runs built and the view is PINNED at the tail (the auto-refold branch is now reachable)', p0.runs === 2 && p0.heads === 2 && p0.pinned && !p0.open[0] && !p0.open[1], JSON.stringify(p0));
+
+// expand the FIRST (non-last) run — the case the auto-refold used to eat
+await click('.chat-run-header', 600);
+const p1 = await runsState();
+check('PINNED: expanding the FIRST run is still open 600ms later (past the 180ms observer debounce) with its footer', p1.open[0] && p1.footers === 1 && p1.members === NBASH + 1, JSON.stringify(p1));
+// …and through an explicit pass (what a live append/trim would trigger)
+const p2 = await chatView(`cv._updateRuns(); await new Promise((r) => setTimeout(r, 250));
+  const heads = [...list.querySelectorAll(':scope > .chat-run-header')];
+  return { pinned: !!cv._pinned, open: heads.map((h) => h.classList.contains('open')), footers: list.querySelectorAll(':scope > .chat-run-footer').length, runs: cv._runs.length };`);
+check('PINNED: a full runs pass does NOT re-collapse the run the user opened (the deliberate toggle beats the heuristic)', p2.pinned && p2.open[0] && p2.footers === 1 && p2.runs === 2, JSON.stringify(p2));
+
+// the LAST run's behaviour is unchanged (it was always excluded by slice(0,-1))
+await chatView(`list.querySelectorAll(':scope > .chat-run-header')[1].click(); await new Promise((r) => setTimeout(r, 600)); return 1;`);
+const p3 = await runsState();
+check('PINNED: the LAST run still expands and stays open (unchanged), both runs open at once', p3.open[0] && p3.open[1] && p3.footers === 2 && p3.members === NBASH + 1 + NMCP, JSON.stringify(p3));
+const p4 = await chatView(`cv._updateRuns(); await new Promise((r) => setTimeout(r, 250));
+  const heads = [...list.querySelectorAll(':scope > .chat-run-header')];
+  return { open: heads.map((h) => h.classList.contains('open')), footers: list.querySelectorAll(':scope > .chat-run-footer').length };`);
+check('PINNED: both survive the next pass', p4.open[0] && p4.open[1] && p4.footers === 2, JSON.stringify(p4));
+
+// NEGATIVE CONTROL — the 2.227.x invariant the auto-refold exists for: an
+// INHERITED open flag (a run that was the live tail when it was opened and
+// then stopped being last) is still re-folded while pinned. Dropping the
+// user-intent mark leaves exactly that state.
+const p5 = await chatView(`
+  list.scrollTop = list.scrollHeight; list.dispatchEvent(new Event('scroll'));
+  await new Promise((r) => setTimeout(r, 250));
+  const pinnedBefore = !!cv._pinned;             // the flag the branch reads
+  cv._runStickyOpen = new WeakSet();             // …leaving only the inherited flag
+  cv._updateRuns();
+  await new Promise((r) => setTimeout(r, 250));
+  const heads = [...list.querySelectorAll(':scope > .chat-run-header')];
+  return { pinnedBefore, open: heads.map((h) => h.classList.contains('open')), footers: list.querySelectorAll(':scope > .chat-run-footer').length };`);
+check('negative control: without the user-intent mark the pinned auto-refold still folds every non-last run (2.227.x "一部分没折叠" holds)', p5.pinnedBefore && !p5.open[0] && p5.open[1] && p5.footers === 1, JSON.stringify(p5));
+
+// the history-load pill must not land ON the floating bar (both are absolutely
+// positioned .chat-view children; the pill used to carry an inline top:6px that
+// no stylesheet rule could push aside)
+const p6 = await chatView(`
+  cv._runStickyOpen = new WeakSet();
+  const h0 = list.querySelector(':scope > .chat-run-header');
+  if (!h0.classList.contains('open')) h0.click();
+  await new Promise((r) => setTimeout(r, 400));
+  list.scrollTop = h0.offsetTop + Math.round(list.clientHeight * 0.8); list.dispatchEvent(new Event('scroll'));
+  await new Promise((r) => setTimeout(r, 200));
+  cv._showHistoryStatus('Loading history…', { spinner: true, kind: 'loading' });
+  await new Promise((r) => setTimeout(r, 120));
+  const view = document.querySelector('.chat-view');
+  const bar = view.querySelector('.chat-run-bar'), pill = view.querySelector('.chat-history-status');
+  const r = { barShown: !!bar && !bar.classList.contains('hidden'), barBottom: bar ? bar.offsetTop + bar.offsetHeight : -1,
+    pillTop: pill ? pill.offsetTop : -1, pillInline: pill ? (pill.style.top || '') : 'none' };
+  cv._hideHistoryStatus();
+  return r;`);
+check('the history-load pill sits BELOW the floating run bar (no inline top left to beat the stylesheet)', p6.barShown && p6.pillTop >= p6.barBottom && p6.pillInline === '', JSON.stringify(p6));
+
 check('zero uncaught page exceptions during the whole flow', pageErrors.length === 0, pageErrors.slice(0, 3).join(' | '));
 
 ws.close();
