@@ -2926,6 +2926,8 @@ export default {
   "Image": "画像",
   "Image not available on this machine": "この端末では画像を利用できません",
   "spawn": "起動",
+  "waiting for sub-agent replies": "サブエージェントの返信待ち",
+  "cell": "セル",
   "wait": "待機",
   "Sender": "送信元",
   "Target": "宛先",

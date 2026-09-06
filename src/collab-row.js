@@ -45,7 +45,13 @@ function collabRowParts(row, t = T) {
   const r = row || {};
   const name = r.agentName || agentName(r.agentPath || r.target) || '';
   if (r.dir === 'spawn') return { pre: `${t('spawn')} `, name: name || t('agent'), post: '' };
-  if (r.dir === 'wait') return { pre: t('wait'), name: '', post: r.cellId ? ` · ${r.cellId}` : '' };
+  // owner (2026-09-06, "这个等待是在等待啥?"): the bare 'wait' row read as a
+  // mystery — say WHAT is awaited (the root blocks for its sub-agents' replies)
+  // and for how long (yield_time_ms from the call's own arguments)
+  if (r.dir === 'wait') {
+    const secs = r.yieldMs > 0 ? ` · ≤${Math.max(1, Math.round(r.yieldMs / 1000))}s` : '';
+    return { pre: t('waiting for sub-agent replies'), name: '', post: (r.cellId ? ` · ${t('cell')} ${r.cellId}` : '') + secs };
+  }
   if (r.dir === 'activity') return { pre: '', name: name || t('agent'), post: r.kind ? ` ${r.kind}` : '' };
   const type = r.msgType || (r.dir === 'out' ? 'message' : 'MESSAGE');
   return { pre: '', name: name || t('agent'), post: ` · ${type}` };

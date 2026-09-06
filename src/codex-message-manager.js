@@ -1188,6 +1188,7 @@ class CodexMessageManager {
       encrypted: typeof input.message === 'string' && input.message.length > 0,
       target,
       cellId: input.cell_id != null ? String(input.cell_id) : '',
+      yieldMs: Number(input.yield_time_ms) || 0, // wait: how long the root blocks for its sub-agents (shown on the row)
       threadId: this._status.subagents[target] || (Array.isArray(input.receiverThreadIds) ? input.receiverThreadIds[0] : null) || null,
       detail: collabDetailOf(input),
     };

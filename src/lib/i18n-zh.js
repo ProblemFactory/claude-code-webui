@@ -2926,6 +2926,8 @@ export default {
   "Image": "图片",
   "Image not available on this machine": "此机器上没有该图片",
   "spawn": "启动",
+  "waiting for sub-agent replies": "等待子 agent 回复",
+  "cell": "单元",
   "wait": "等待",
   "Sender": "发送方",
   "Target": "目标",
