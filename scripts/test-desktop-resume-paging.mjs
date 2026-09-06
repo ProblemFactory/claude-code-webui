@@ -24,10 +24,20 @@
 // probe — otherwise the harness proves nothing (a green test that never
 // touches the path is worse than no test).
 //
+// ROUND 2 adds two more repros on the same window: a reader who NAVIGATES
+// during the settle (minimap / search reveal / run bar / jumpToIndex — none of
+// them touch the message list's own listeners) must be left where they landed,
+// and an input-less displacement ANYWHERE in the resume horizon (1240 / 1400 /
+// 1900 / 2400 ms) must end pinned at the tail while a real wheel-up in that
+// same horizon still pages. Their negative controls are per-mechanism and run
+// on the FIXED build (the source-level control rebuilds with
+// RESUME_SETTLE_MS = 0, which cannot host a timing-dependent repro).
+//
 // IN THE RELEASE GATE (scripts/ci.mjs) despite being heavy — two chrome runs
-// and two bundle builds, ~1 min here: this is the only place the whole path is
-// exercised end to end, and its negative control is what proves the harness
-// touches it at all. The cheap in-gate pins live in test-chat-trim-guard.mjs.
+// and two bundle builds, ~2.5 min here after round 2: this is the only place
+// the whole path is exercised end to end, and its negative controls are what
+// prove the harness touches it at all. The cheap in-gate pins live in
+// test-chat-trim-guard.mjs (the browser-suite budget in ci.mjs is 600s).
 // Run: node scripts/test-desktop-resume-paging.mjs   (SKIPs without chrome)
 import { execSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -47,8 +57,8 @@ const chromeDir = `/tmp/vs-deskresume-chrome-${process.pid}`;
 const CWD = `/tmp/vs-deskresume-cwd-${process.pid}`;
 const SID = 'e2e00000-0000-4000-8000-0000000000d1';
 const PROJ = path.join(fakeHome, '.claude', 'projects', CWD.replace(/[/._]/g, '-'));
-let failed = 0;
-const check = (n, c, e) => { if (c) console.log(`  ✓ ${n}`); else { failed++; console.error(`  ✗ ${n}${e ? '\n    ' + e : ''}`); } };
+let failed = 0, passed = 0;   // COUNTED, not a hand-maintained constant (the pre-round-2 label said 15 for 16 checks)
+const check = (n, c, e) => { if (c) { passed++; console.log(`  ✓ ${n}`); } else { failed++; console.error(`  ✗ ${n}${e ? '\n    ' + e : ''}`); } };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ── 1. synthetic transcript > 34MB (JSONL_HEAD 2MB + JSONL_TAIL 32MB is the
@@ -231,6 +241,97 @@ const SCENARIO = `(async () => {
   const retail = { ...snap(), inject: injectedAt,
     traces: (view._traceRing || []).slice(mark4).map((e) => e.tag + (e.why ? '/' + e.why : '')) };
 
+  // ── ROUND 2 (a) THE MAJOR: a reader who NAVIGATES during the settle must be
+  //    left where they landed. Only the four MESSAGE-LIST listeners ended the
+  //    settle — the minimap lives on the container, the floating run bar on
+  //    view._container, and jumpToIndex/search reveal touch neither — so the
+  //    1240ms re-tail silently yanked such a reader back to the live tail
+  //    (measured: jump at +400ms → at +2600ms back at the tail, pinned).
+  const toTail = async () => {
+    if (view._teleported || view._windowEnd < view._total) await view.jumpToBottom();
+    view._pinned = true; view._scrollToBottom(); await sleep(1300);
+  };
+  // offsets are measured off the VIEW's own resume stamp, not off the click:
+  // dm.switchTo() awaits, so the click is always EARLIER than the resume.
+  const sinceResume = () => Date.now() - (view._resumeAt || Date.now());
+  const waitTo = async (off) => { await sleep(Math.max(0, off - sinceResume())); };
+  const navTargetIdx = Math.max(0, Math.floor(view._total * 0.2));
+  const navLeg = async () => {
+    await toTail();
+    await dm.switchTo(deskA); await sleep(1200);
+    await dm.switchTo(deskB);
+    await waitTo(400);
+    const jumpedAt = sinceResume();
+    await view.jumpToIndex(navTargetIdx);
+    const landed = snap();
+    await sleep(2600);                     // past BOTH re-tail rungs
+    return { jumpedAt, landed, after: snap() };
+  };
+  const nav = await navLeg();
+
+  // ── ROUND 2 (b) THE ONE-SHOT CLIFF: the settle protected its own edge only.
+  //    An input-less displacement at +1400ms unpinned and stranded the window
+  //    (3/3 sessions); +1240/+1280 survived only because _forceScrollToBottom's
+  //    10-frame chain happened to still be running. Every offset in the resume
+  //    horizon must end pinned at the tail.
+  const sweep = [];
+  for (const off of [1240, 1400, 1900, 2400]) {
+    await toTail();
+    await dm.switchTo(deskA); await sleep(1200);
+    await dm.switchTo(deskB);
+    view._traceRing = [];                  // own ring per leg (the 400-entry cap must not shift a mark)
+    await waitTo(off);
+    const at = sinceResume();
+    list.scrollTop = 0;                    // zero user input — a re-measure would do this
+    await sleep(1500);
+    sweep.push({ off, at, ...snap(), traces: (view._traceRing || []).map((e) => e.tag) });
+  }
+
+  // ── …and a REAL reader INSIDE that same horizon still unpins and pages: the
+  //    unpin gate must refuse displacement, never a reader.
+  await toTail();
+  await dm.switchTo(deskA); await sleep(1200);
+  await dm.switchTo(deskB);
+  await waitTo(1400);
+  view._traceRing = [];                    // own ring: the 400-entry cap must not shift a mark
+  let rwTraces = [];
+  for (let i = 0; i < 6; i++) {
+    list.scrollTop = 0;
+    list.dispatchEvent(new WheelEvent('wheel', { deltaY: -300, bubbles: true }));
+    await sleep(700);
+    rwTraces = (view._traceRing || []).map((e) => e.tag);
+    if (rwTraces.includes('extendTop:done')) break;
+  }
+  const resumeWheel = { traces: rwTraces, ...snap() };
+
+  // ── PER-MECHANISM NEGATIVE CONTROLS, on the FIXED build. The source-level
+  //    control below (§5) rebuilds with RESUME_SETTLE_MS = 0, which cannot
+  //    host either round-2 repro: both depend on the settle/re-tail TIMING
+  //    still existing while ONE protection is missing. So each protection is
+  //    neutered on the instance, in the same run, and the pre-fix failure must
+  //    come back — otherwise these two legs prove nothing.
+  view._navigatedSince = () => false;      // the re-tail blind to the reader again
+  view._noteUserNav = function () {};      // …and the off-list nav surfaces stop stamping
+  const navControl = await navLeg();
+  delete view._navigatedSince; delete view._noteUserNav;
+
+  //    The control injects at the SAME 1900ms offset the sweep above passes at
+  //    — an exact A/B on one offset. (Not 1400: the first run measured that the
+  //    1240 rung's own _forceScrollToBottom chain is still writing scrollTop
+  //    there and re-pinned the window even with the gate off — which is
+  //    precisely the accident the finding says the +1240/+1280 probes rode on.)
+  await toTail();
+  await dm.switchTo(deskA); await sleep(1200);
+  view._resumeDisplacement = () => false;  // the round-2 unpin gate off
+  await dm.switchTo(deskB);
+  await waitTo(1300);
+  view._clearResumeRetail();               // …and back to a ONE-SHOT cliff (the 1240 rung has fired)
+  await waitTo(1900);
+  list.scrollTop = 0;
+  await sleep(1500);
+  const cliffControl = snap();
+  delete view._resumeDisplacement;
+
   // ── and a REAL wheel-up: paging must still work for an actual reader.
   //    A reader produces a STREAM of wheel ticks, so send a few (a single
   //    synthetic tick can land while a previous load still holds _loading).
@@ -245,7 +346,8 @@ const SCENARIO = `(async () => {
   }
   const wheelState = { loading: !!view._loading, pinned: !!view._pinned, ws: view._windowStart, st: Math.round(list.scrollTop) };
 
-  return { ok: true, before, after, samples, traces, probeTraces, retail, wheelTraces, wheelState };
+  return { ok: true, before, after, samples, traces, probeTraces, retail, wheelTraces, wheelState,
+    nav, sweep, resumeWheel, navControl, cliffControl };
 })()`;
 
 const run = async (label) => {
@@ -291,6 +393,38 @@ if (good?.ok) {
     good.retail.pinned === true && good.retail.fromBottom <= 8, JSON.stringify(good.retail).slice(0, 500));
   check('a REAL wheel-up after the settle still pages normally (the gates refuse displacement, never a reader)',
     good.wheelTraces.includes('extendTop:done'), JSON.stringify({ wheelTraces: good.wheelTraces, wheelState: good.wheelState }));
+  // ── ROUND 2 ──
+  check('NAV DURING THE SETTLE: a jumpToIndex at resume+400ms STAYS where the reader jumped (the re-tail never yanks a navigating reader back to the tail)',
+    good.nav.after.ws === good.nav.landed.ws && good.nav.after.pinned === false && good.nav.after.we < good.nav.after.total,
+    JSON.stringify(good.nav).slice(0, 500));
+  check('…and its control proves the leg touches the path: with the nav stamps neutered the SAME jump is dragged back to the live tail',
+    good.navControl.after.ws !== good.navControl.landed.ws || good.navControl.after.pinned === true,
+    JSON.stringify(good.navControl).slice(0, 500));
+  check('DISPLACEMENT SWEEP: an input-less scrollTop→0 at 1240/1400/1900/2400ms after the resume ALL end pinned at the tail (the settle alone was a one-shot cliff)',
+    good.sweep.length === 4 && good.sweep.every((s) => s.pinned === true && s.fromBottom <= 8), JSON.stringify(good.sweep));
+  check('…and its control proves the leg touches the path: with the unpin gate off and a one-shot re-tail, the SAME +1900ms displacement strands the window',
+    good.cliffControl.pinned === false || good.cliffControl.fromBottom > 8, JSON.stringify(good.cliffControl));
+  // …and WHICH mechanism carries each offset, measured rather than assumed:
+  // 1240 is inside the settle (the scroll handler decides nothing and the rung
+  // re-tails), 1400 traced `collapsedGeomSkip` — the 2.301.0 guard still owns
+  // it, because `settling` runs 1500ms from the resume's structural stamp. Only
+  // past that window is the NEW gate the sole thing standing between an
+  // input-less displacement and a stranded window, so that is where it must
+  // show up. (A sweep that passes for an older guard's reasons is the "+1240
+  // survived by accident" mistake in test form.)
+  check('…and past every OLDER guard (1900/2400ms — beyond the 1500ms collapsed-geometry settling window) the sweep is carried by the unpin gate itself: unpinSkipResume',
+    good.sweep.filter((s) => s.off >= 1900).every((s) => s.traces.includes('unpinSkipResume')),
+    JSON.stringify(good.sweep.map((s) => ({ off: s.off, traces: s.traces }))).slice(0, 600));
+  // A real reader inside the horizon: the CLAIM is that the gate never fires
+  // against them and their page-up happens. The final pin state is NOT the
+  // gate's to decide — under collapsed geometry the scroll handler makes no
+  // decision at all and _extendTop's own pinned-tail invariant re-asserts the
+  // bottom (observed once across two runs: collapsedGeomSkip ×2 then
+  // extendTop:done, ending pinned). Asserting `pinned === false` here would be
+  // pinning someone else's mechanism.
+  check('…while a REAL wheel-up at resume+1400ms (inside the same horizon) still pages, and the unpin gate NEVER fires against a reader',
+    good.resumeWheel.traces.includes('extendTop:done') && !good.resumeWheel.traces.includes('unpinSkipResume'),
+    JSON.stringify(good.resumeWheel).slice(0, 400));
 }
 
 // ── 5. NEGATIVE CONTROL: patch the gates out at SOURCE and rebuild ──
@@ -324,5 +458,5 @@ check('NEGATIVE CONTROL: …and the re-tail-gap injection strands the window (un
   bad?.ok && (bad.retail.pinned === false || bad.retail.fromBottom > 8), JSON.stringify(bad?.retail).slice(0, 500));
 
 ws.close();
-console.log(failed ? `\n${failed} FAILED` : '\nALL PASS (15)');
+console.log(failed ? `\n${failed} FAILED (${passed} passed)` : `\nALL PASS (${passed})`);
 process.exit(failed ? 1 : 0);

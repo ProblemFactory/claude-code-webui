@@ -29,6 +29,19 @@ const RESUME_SETTLE_MS = 1200;
 // between — an input-less re-measure landing in that gap used to strand the
 // window in history for good.
 const RESUME_RETAIL_SLACK_MS = 40;
+// The pinned re-tail is a bounded SERIES, not a one-shot cliff (round-2
+// verifier's minor, reproduced 3/3): the re-measure keeps producing input-less
+// displacement after the settle expires — a scrollTop=0 injected at resume
+// +1400ms unpinned the window and stranded it, and +1240/+1280 only survived
+// because _forceScrollToBottom's 10-frame chain happened to still be running.
+const RESUME_RETAIL_AT_MS = [RESUME_SETTLE_MS + RESUME_RETAIL_SLACK_MS, 2000];
+// …and for that whole horizon an atBottom→false transition with NO scroll or
+// navigation since the resume is DISPLACEMENT, not intent: the unpin itself is
+// gated on positive evidence, exactly like the paging gates. 2.8s = past the
+// last re-tail rung (2000) with room for the re-measure's own tail — the
+// displacement the rungs cannot catch is exactly the one that arrives BETWEEN
+// them, so the evidence gate must outlive them.
+const RESUME_DISPLACEMENT_MS = 2800;
 
 /**
  * ChatView — renders a chat interface for stream-json mode sessions.
@@ -56,6 +69,14 @@ class ChatView {
     // window in history.
     this._resumeSettleUntil = 0;
     this._pinnedAtSuspend = false;
+    // When the resume happened, and when the reader last POSITIONED the view
+    // on purpose through a path that is not one of the message list's own
+    // input listeners (minimap, search reveal, floating run bar, jump). The
+    // re-tail and the unpin gate below both compare nav-vs-resume — the
+    // chat-view-seek `userScrolled` idiom, generalised.
+    this._resumeAt = 0;
+    this._lastNavAt = 0;
+    this._resumeRetailTimers = [];
 
     // Build DOM
     const container = document.createElement('div');
@@ -217,7 +238,14 @@ class ChatView {
     container.appendChild(this._posIndicator);
 
     // Scroll minimap — semantic scrollbar showing turns
-    this._chatMinimap = new ChatMinimap(container, this._messageList, (idx) => this.jumpToIndex(idx), (ts, line) => this._jumpToFileTime(ts, line));
+    // The minimap's pointer events live on the CONTAINER, not on the message
+    // list — none of the four list listeners that end the resume settle ever
+    // see a minimap drag, so the landing itself is the navigation stamp
+    // (round-2 verifier's MAJOR: a minimap/search/run-bar jump 400ms into a
+    // desktop resume was yanked back to the live tail 2.2s later).
+    this._chatMinimap = new ChatMinimap(container, this._messageList,
+      (idx) => { this._noteUserNav('minimap'); return this.jumpToIndex(idx); },
+      (ts, line) => { this._noteUserNav('minimap-time'); return this._jumpToFileTime(ts, line); });
     // Sync minimap bounds on resize
     // Minimap ResizeObserver is handled by ChatMinimap internally
 
@@ -328,6 +356,10 @@ class ChatView {
       requestAnimationFrame(() => {
         scrollTick = false;
         if (this._suspended) return; // hidden-desktop window: geometry is meaningless, decide nothing
+        const { scrollTop, scrollHeight, clientHeight } = this._messageList;
+        // floating run bar (2.369.37): same frame, same layout pass, no decisions
+        this._updateRunBar(scrollTop);
+        if (this._programmaticScroll) return; // don't interfere with programmatic scrolls
         // RESUME SETTLE (inc-mtq5bpjt-0o0n): a window that was JUST un-hidden
         // is still re-measuring — the capture shows scrollTop transiting
         // 1967→0→1976→3297→1950 in 240ms with zero user input. Decide nothing
@@ -336,11 +368,12 @@ class ChatView {
         // AFTER the pinned re-tail runs (it carries that timer's slack), so no
         // displacement can slip between them. Real input clears it (see the
         // wheel/touch/pointer/key listeners).
+        // It sits BELOW the run-bar readout on purpose (round-2 verifier's
+        // minor): the bar is a READOUT of the frame's scrollTop, not a
+        // decision, and returning above it froze the 2.369.45 floating bar for
+        // the whole settle — a resumed window showed the wrong run label (or
+        // kept a stale one) for 1.24s. Everything BELOW here is a decision.
         if (Date.now() < (this._resumeSettleUntil || 0)) return;
-        const { scrollTop, scrollHeight, clientHeight } = this._messageList;
-        // floating run bar (2.369.37): same frame, same layout pass, no decisions
-        this._updateRunBar(scrollTop);
-        if (this._programmaticScroll) return; // don't interfere with programmatic scrolls
         // COLLAPSED-GEOMETRY GUARD (inc-mso818ry, first real catch by the
         // 2.264.0 scroll tracer): while content-visibility leaves a fresh
         // batch unresolved, scrollHeight collapses to ≈clientHeight — "at
@@ -376,6 +409,22 @@ class ChatView {
           this._newMsgCount = 0;
           this._scrollBtn.classList.add('hidden');
         } else if (!atBottom) {
+          // POSITIVE-EVIDENCE UNPIN GATE (round-2 verifier's minor): the
+          // settle window was a one-shot CLIFF — the resume's re-measure keeps
+          // moving scrollTop after it expires, and an input-less displacement
+          // at resume+1400ms unpinned a pinned window and stranded it in
+          // history (3/3 sessions). So the UNPIN obeys the same law as every
+          // paging trigger: within the resume horizon, with the pin snapshot
+          // still saying "this window was at the live tail" and no scroll or
+          // navigation since the resume, an atBottom→false transition is
+          // DISPLACEMENT, not intent — keep the pin and re-assert the bottom.
+          // A real wheel/touch/key/pointer or any nav clears the snapshot, so
+          // a reader who scrolls away at +1400ms unpins and pages normally.
+          if (this._pinned && this._resumeDisplacement()) {
+            this._trace('unpinSkipResume', { st: Math.round(scrollTop), sinceResume: Date.now() - (this._resumeAt || 0) });
+            this._scrollToBottom();
+            return;
+          }
           if (this._pinned) this._trace('unpin', { st: Math.round(scrollTop), wheelAgo: this._lastUserScrollAt ? Date.now() - this._lastUserScrollAt : -1 });
           this._pinned = false;
           this._scrollBtn.classList.remove('hidden');
@@ -537,6 +586,9 @@ class ChatView {
       // Huge (elided) sessions: search the WHOLE file in {line, ts} coordinates
       getGapActive: () => !!this._gapMinimapActive,
       jumpToFileMatch: (m) => this.jumpToFileMatch(m),
+      // a REVEAL positions the viewport without any event the message list can
+      // see — it must end the resume settle like a wheel does
+      onNav: () => this._noteUserNav('search-reveal'),
     });
     container.insertBefore(this._search.element, this._messageList);
 
@@ -1278,7 +1330,15 @@ class ChatView {
    *  re-asserted once when it expires — the window carries that timer's slack,
    *  and the re-tail asserts off `_pinnedAtSuspend` (the pin as it was when the
    *  window was HIDDEN), so an input-less unpin in between cannot strand the
-   *  window in history. Real user input clears settle AND snapshot. */
+   *  window in history. Real user input clears settle AND snapshot.
+   *
+   *  ROUND 2 — the settle was a one-shot CLIFF and the re-tail was BLIND to
+   *  readers who navigate without touching the message list. Now: the re-tail
+   *  is a bounded SERIES (RESUME_RETAIL_AT_MS) that bails the moment the
+   *  reader positioned the view themselves after the resume
+   *  (`_navigatedSince` — wheel/touch/key/pointer, minimap, search reveal,
+   *  run-bar landing, any jump), and for RESUME_DISPLACEMENT_MS the UNPIN
+   *  itself needs positive evidence (`_resumeDisplacement`). */
   setSuspended(on) {
     if (this._suspended === !!on) return;
     this._suspended = !!on;
@@ -1289,7 +1349,8 @@ class ChatView {
       // The settle carries the re-tail timer's slack (see reTail below): the
       // scroll handler must not be free to decide in the gap BETWEEN the
       // window expiring and the re-tail running.
-      this._resumeSettleUntil = Date.now() + RESUME_SETTLE_MS + RESUME_RETAIL_SLACK_MS;
+      this._resumeAt = Date.now();
+      this._resumeSettleUntil = this._resumeAt + RESUME_SETTLE_MS + RESUME_RETAIL_SLACK_MS;
       // A pinned view returns to the LIVE tail — not just the DOM bottom
       // (inc-mtfi6034, mobile: touch paging near the top had trimmed the
       // window's tail, so windowEnd < total and a plain scroll landed on an
@@ -1301,10 +1362,18 @@ class ChatView {
       // input-LESS displacement unpinned it on the way back (the live flag is
       // the very thing the resume corrupts). Real user input drops the
       // snapshot (_endResumeSettle) — a reader is never yanked to the bottom.
+      // …and it NEVER fires once the reader positioned the view themselves
+      // after this resume. Only the four message-list listeners called
+      // _endResumeSettle(), so a minimap drag / search reveal / run-bar
+      // landing / jumpToIndex during the settle was silently yanked back to
+      // the live tail when the timer fired (round-2 verifier's MAJOR,
+      // measured: jump at +400ms → back at the tail, pinned, at +2600ms).
+      const resumeAt = this._resumeAt;
       const reTail = () => { try {
         if (this._disposed || this._suspended) return;
+        if (this._navigatedSince(resumeAt)) return;   // the reader went somewhere on purpose
         if (!this._pinned && !this._pinnedAtSuspend) return;
-        if (this._teleported || this._windowEnd < this._total) this.jumpToBottom(); // re-pins itself
+        if (this._teleported || this._windowEnd < this._total) this.jumpToBottom({ user: false }); // re-pins itself
         else {
           this._pinned = true;                            // re-assert: we ARE the live tail
           this._newMsgCount = 0;
@@ -1314,23 +1383,67 @@ class ChatView {
       } catch { } };
       if (this._pinned || this._pinnedAtSuspend) {
         requestAnimationFrame(reTail);           // look right immediately…
-        clearTimeout(this._resumeSettleTimer);   // …and again once the re-measure settles
-        this._resumeSettleTimer = setTimeout(() => { reTail(); this._pinnedAtSuspend = false; },
-          RESUME_SETTLE_MS + RESUME_RETAIL_SLACK_MS);
+        // …and again on a BOUNDED SERIES while the subtree keeps re-measuring:
+        // one shot at the settle's edge left every later displacement
+        // (measured: +1400ms) free to strand the window. The pin SNAPSHOT
+        // outlives the last rung so the unpin gate above still has its
+        // evidence for the rest of the horizon.
+        this._clearResumeRetail();
+        this._resumeRetailTimers = RESUME_RETAIL_AT_MS.map((ms) => setTimeout(reTail, ms));
+        this._resumeRetailTimers.push(setTimeout(() => { this._pinnedAtSuspend = false; }, RESUME_DISPLACEMENT_MS));
       } else this._pinnedAtSuspend = false;
     } else {
       // The LAST honest reading of the pin: while the window is hidden and
       // through the resume re-measure its geometry lies, so snapshot here.
       this._pinnedAtSuspend = this._pinned;
-      clearTimeout(this._resumeSettleTimer);
+      this._clearResumeRetail();
       this._resumeSettleUntil = 0;
+      this._resumeAt = 0;
     }
+  }
+
+  _clearResumeRetail() {
+    for (const tm of this._resumeRetailTimers || []) clearTimeout(tm);
+    this._resumeRetailTimers = [];
   }
 
   /** Real user input ends the resume settle AND drops the pin snapshot: the
    *  settle exists to suppress INPUT-LESS displacement, never to fight a
    *  reader who scrolled away on purpose right after a desktop switch. */
-  _endResumeSettle() { this._resumeSettleUntil = 0; this._pinnedAtSuspend = false; }
+  _endResumeSettle() { this._resumeSettleUntil = 0; this._pinnedAtSuspend = false; this._clearResumeRetail(); }
+
+  /** An explicit reader NAVIGATION that the message list's own listeners can
+   *  never see: the minimap (pointer events on the container), a search
+   *  reveal, the floating run bar (on this._container), jumpToIndex /
+   *  jumpToBottom. Stamps, and ends the resume settle exactly like a wheel —
+   *  round-2 verifier's MAJOR: without this the 1240ms re-tail yanked such a
+   *  reader back to the live tail. */
+  _noteUserNav(via) {
+    this._lastNavAt = Date.now();
+    this._trace?.('userNav', { via });
+    this._endResumeSettle();
+  }
+
+  /** Did the READER position this view after `since`? The chat-view-seek
+   *  `userScrolled = (this._lastUserScrollAt||0) > Math.max(jumpAt, revealAt)`
+   *  idiom, generalised over every positioning stamp we own: scroll input,
+   *  explicit nav, a jump landing (_scrollElStable sets _lastJumpAt) and a
+   *  search reveal. Automatic repositioning must lose to every one of them. */
+  _navigatedSince(since) {
+    return Math.max(this._lastNavAt || 0, this._lastUserScrollAt || 0,
+      this._lastJumpAt || 0, this._search?._lastRevealAt || 0) > since;
+  }
+
+  /** Is an atBottom→false transition the RESUME's own re-measure rather than
+   *  the reader? Positive evidence, like the paging gates: inside the resume
+   *  horizon, the pin snapshot still says this window was AT the live tail
+   *  when it was hidden, and nothing the reader did has landed since. */
+  _resumeDisplacement() {
+    const at = this._resumeAt || 0;
+    if (!at || Date.now() - at > RESUME_DISPLACEMENT_MS) return false;
+    if (!this._pinnedAtSuspend) return false;      // never dragged a window that was reading history
+    return !this._navigatedSince(at);
+  }
 
   /** Is an AUTOMATIC (observer- or geometry-driven) upward page allowed right
    *  now? ONE predicate for every such trigger — the gap sentinel's
@@ -1750,6 +1863,7 @@ class ChatView {
 
   // Jump to a specific message index: replace window entirely
   async jumpToIndex(targetIdx) {
+    this._noteUserNav('jumpToIndex');   // a chosen destination — the resume re-tail must never overrule it
     this._trace('jumpToIndex', { idx: targetIdx });
     this._traceExpect();
     const windowSize = 50;
@@ -1806,8 +1920,11 @@ class ChatView {
     if (this._search?.hasHighlight) this._search.applyHighlightLayer();
   }
 
-  // Jump to the bottom of the conversation
-  async jumpToBottom() {
+  // Jump to the bottom of the conversation. `user:false` = the resume re-tail
+  // calling it on the reader's behalf — it must not stamp a navigation (that
+  // would cancel its own bounded series and the unpin gate's evidence).
+  async jumpToBottom({ user = true } = {}) {
+    if (user) this._noteUserNav('jumpToBottom');
     const windowSize = 50;
     const start = Math.max(0, this._total - windowSize);
     // Same as jumpToIndex: never wipe the rendered view for a fetch that failed
@@ -3543,6 +3660,10 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
   _landOnHeader(run) {
     const list = this._messageList;
     if (!run?.header?.isConnected || !list) return;
+    // the floating run bar and the run footer live on this._container, so this
+    // landing reaches the list only as a scrollTop write — stamp it as the
+    // navigation it is (round-2 verifier's MAJOR)
+    this._noteUserNav('runBar');
     this._programmaticScroll = true;
     clearTimeout(this._jumpGuardTimer);
     this._jumpGuardTimer = setTimeout(() => { this._programmaticScroll = false; }, 400);
@@ -3633,7 +3754,7 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
     if (this._searchBarObserver) { this._searchBarObserver.disconnect(); this._searchBarObserver = null; }
     if (this._runsTimer) { clearTimeout(this._runsTimer); this._runsTimer = null; }
     if (this._runBarRaf) { cancelAnimationFrame(this._runBarRaf); this._runBarRaf = null; }
-    if (this._resumeSettleTimer) { clearTimeout(this._resumeSettleTimer); this._resumeSettleTimer = null; }
+    this._clearResumeRetail();
     if (this._traceWatchTimer) { clearInterval(this._traceWatchTimer); this._traceWatchTimer = null; }
     if (this._stallWatch) { clearInterval(this._stallWatch); this._stallWatch = null; }
     if (this._readOnlyPollTimer) clearTimeout(this._readOnlyPollTimer);

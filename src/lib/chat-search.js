@@ -14,7 +14,7 @@ class ChatSearch {
    * @param {(idx: number) => Promise<void>} callbacks.jumpToIndex
    * @param {() => {windowStart: number, windowEnd: number}} callbacks.getWindowBounds
    */
-  constructor(messageList, { getSessionIds, getSessionId, jumpToIndex, getWindowBounds, getGapActive, jumpToFileMatch }) {
+  constructor(messageList, { getSessionIds, getSessionId, jumpToIndex, getWindowBounds, getGapActive, jumpToFileMatch, onNav }) {
     this._messageList = messageList;
     this._getSessionIds = getSessionIds;
     this._getSessionId = getSessionId;
@@ -22,6 +22,9 @@ class ChatSearch {
     this._getWindowBounds = getWindowBounds;
     this._getGapActive = getGapActive || (() => false);
     this._jumpToFileMatch = jumpToFileMatch || null;
+    // A reveal SCROLLS the list from outside its own event listeners — the
+    // owner needs to know a reader positioned the view (desktop-resume re-tail).
+    this._onNav = onNav || null;
     this._fullFileMode = false;
     this._truncated = false;
 
@@ -287,6 +290,7 @@ class ChatSearch {
   _scrollToRange(range) {
     if (!range) return;
     this._lastRevealAt = Date.now();
+    this._onNav?.();
     this._lastRevealRun = () => this._scrollToRange(range); // replayed after c-v restore
     const list = this._messageList;
     let node = range.startContainer;

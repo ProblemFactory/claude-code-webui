@@ -341,6 +341,7 @@ export function installChatSeek(ChatView) {
   },
 
     async _jumpToFileTime(ts, line) {
+    this._noteUserNav('jumpToFileTime');   // minimap time landing: a reader act, not a re-measure
     // Already rendered in the live view? Just scroll (tight tolerance — beyond
     // ±2s the actual turn isn't rendered and we teleport instead).
     if (!this._teleported && this._scrollToNearestTs(ts, 2000)) return null;

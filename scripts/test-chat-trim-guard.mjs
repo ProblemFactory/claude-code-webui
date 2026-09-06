@@ -91,7 +91,8 @@ ok('a structural change between the readings hands the decision back to the pagi
 // window's geometry is meaningless — the paging machinery must make no
 // decisions off it, and a switch re-measures 4-6 windows at once.
 ok('ChatView.setSuspended exists and arms the structural settle window on resume', /setSuspended\(on\) \{/.test(cv) && /this\._lastStructuralAt = Date\.now\(\);/.test(cv.slice(cv.indexOf('setSuspended'))));
-ok('resume returns a pinned view to the LIVE tail — behind-the-tail windows take the full jumpToBottom (inc-mtfi6034 mobile old-position)', /this\._windowEnd < this\._total\) this\.jumpToBottom\(\);/.test(cv.slice(cv.indexOf('setSuspended'))));
+ok('resume returns a pinned view to the LIVE tail — behind-the-tail windows take the full jumpToBottom (inc-mtfi6034 mobile old-position), and it does NOT stamp a user navigation over its own series',
+  /this\._windowEnd < this\._total\) this\.jumpToBottom\(\{ user: false \}\);/.test(cv.slice(cv.indexOf('setSuspended'))));
 // four paging entries: extendTop / extendBottom / the scroll handler's
 // decisions / the short-view rescue (which answers `false`, not `return`)
 ok('all four paging entries gate on _suspended (extendTop/extendBottom/scroll decisions/short-view rescue)',
@@ -128,22 +129,63 @@ ok('the sentinel IntersectionObserver goes through _loadEarlierGap as an AUTOMAT
 ok('an explicit RETRY click bypasses the gate (auto: false — a click is intent)', /_loadEarlierGap\(markerEl, btn, \{ auto: false \}\)/.test(sk));
 ok('the scroll/wheel-driven _maybeSeekEarlier is an automatic caller too', /_maybeSeekEarlier\(\) \{[\s\S]{0,700}_loadEarlierGap\(s, null\);\s*\/\/ AUTOMATIC/.test(sk));
 ok('setSuspended(false) arms the resume settle window — WITH the re-tail timer\'s slack, so nothing can decide in the gap between the window expiring and the re-tail running',
-  /setSuspended\(on\) \{[\s\S]{0,900}this\._resumeSettleUntil = Date\.now\(\) \+ RESUME_SETTLE_MS \+ RESUME_RETAIL_SLACK_MS;/.test(cv)
+  /setSuspended\(on\) \{[\s\S]{0,900}this\._resumeAt = Date\.now\(\);\s*this\._resumeSettleUntil = this\._resumeAt \+ RESUME_SETTLE_MS \+ RESUME_RETAIL_SLACK_MS;/.test(cv)
   && /const RESUME_RETAIL_SLACK_MS = 40;/.test(cv));
-ok('…and the pinned re-tail is re-asserted when the settle expires (one hop: jumpToBottom only when behind the tail)',
-  /_resumeSettleTimer = setTimeout\(\(\) => \{ reTail\(\); this\._pinnedAtSuspend = false; \},\s*RESUME_SETTLE_MS \+ RESUME_RETAIL_SLACK_MS\);/.test(cv)
-  && /clearTimeout\(this\._resumeSettleTimer\)/.test(cv.slice(cv.indexOf('dispose()'))));
+ok('…and the pinned re-tail is a BOUNDED SERIES, not a one-shot cliff (round-2: an input-less displacement at resume+1400ms still stranded the window 3/3 — +1240/+1280 only survived on _forceScrollToBottom\'s 10-frame chain)',
+  /const RESUME_RETAIL_AT_MS = \[RESUME_SETTLE_MS \+ RESUME_RETAIL_SLACK_MS, 2000\];/.test(cv)
+  && /this\._resumeRetailTimers = RESUME_RETAIL_AT_MS\.map\(\(ms\) => setTimeout\(reTail, ms\)\);/.test(cv)
+  && /_clearResumeRetail\(\) \{[\s\S]{0,160}clearTimeout\(tm\)/.test(cv)
+  && /this\._clearResumeRetail\(\);/.test(cv.slice(cv.indexOf('\n  dispose() {'))));
+ok('…and the pin SNAPSHOT outlives the last re-tail, so the unpin gate keeps its evidence for the whole displacement horizon',
+  /const RESUME_DISPLACEMENT_MS = 2800;/.test(cv)
+  && /setTimeout\(\(\) => \{ this\._pinnedAtSuspend = false; \}, RESUME_DISPLACEMENT_MS\)/.test(cv));
 ok('…and it asserts off the pin SNAPSHOT taken when the window was HIDDEN (a transitional unpin during the resume must not strand the window in history)',
   /this\._pinnedAtSuspend = this\._pinned;/.test(cv)
   && /if \(!this\._pinned && !this\._pinnedAtSuspend\) return;/.test(cv)
   && /if \(this\._pinned \|\| this\._pinnedAtSuspend\) \{/.test(cv));
-ok('the scroll handler no-ops during the settle, BEFORE it touches the pin (transitional geometry must not unpin)',
-  /this\._suspended\) return;[\s\S]{0,700}Date\.now\(\) < \(this\._resumeSettleUntil \|\| 0\)\) return;[\s\S]{0,2600}const atBottom =/.test(cv));
+// ORDER pin. The settle return moved BELOW the run-bar readout (round-2
+// minor: returning above it froze the 2.369.45 floating bar for the whole
+// 1.24s settle) and stays ABOVE every pin/paging decision — so the budgets
+// are restated per segment: suspend→runBar ≤400 (was one 700 hop to the
+// settle), runBar→programmatic ≤200, programmatic→settle ≤1400 (the comment
+// block that explains why the readout comes first), settle→atBottom ≤2400.
+ok('the scroll handler updates the run-bar READOUT first, then no-ops for the settle BEFORE it touches the pin (transitional geometry must not unpin)',
+  /this\._suspended\) return;[\s\S]{0,400}this\._updateRunBar\(scrollTop\);[\s\S]{0,200}this\._programmaticScroll\) return;[\s\S]{0,1400}Date\.now\(\) < \(this\._resumeSettleUntil \|\| 0\)\) return;[\s\S]{0,2400}const atBottom =/.test(cv));
+ok('…and the UNPIN itself is gated on positive evidence for the rest of the horizon (the settle alone was a one-shot cliff)',
+  /if \(this\._pinned && this\._resumeDisplacement\(\)\) \{[\s\S]{0,260}_scrollToBottom\(\);\s*return;\s*\}[\s\S]{0,200}this\._pinned = false;/.test(cv)
+  && /_resumeDisplacement\(\) \{/.test(cv));
 ok('the loadHistory auto-fill DEFERS through the settle instead of deciding on transitional geometry',
   /const tryAutoFill = \(retries\) => \{[\s\S]{0,400}this\._resumeSettleUntil \|\| 0\) - Date\.now\(\)[\s\S]{0,200}tryAutoFill\(retries - 1\)/.test(cv));
 ok('REAL user input clears the settle AND the pin snapshot (wheel + touchmove + pointerdown + keydown — the settle only suppresses input-LESS displacement, it never fights a reader)',
   (cv.match(/this\._endResumeSettle\(\);/g) || []).length >= 4
-  && /_endResumeSettle\(\) \{ this\._resumeSettleUntil = 0; this\._pinnedAtSuspend = false; \}/.test(cv));
+  && /_endResumeSettle\(\) \{ this\._resumeSettleUntil = 0; this\._pinnedAtSuspend = false; this\._clearResumeRetail\(\); \}/.test(cv));
+
+// ── ROUND 2, THE MAJOR: only the four message-list listeners ended the settle,
+// so a reader who navigated through a surface that is NOT the list — the
+// minimap (its pointer events live on the container), a search reveal, the
+// floating run bar (this._container), jumpToIndex — was YANKED back to the
+// live tail by the 1240ms re-tail (measured: jump at +400ms → pinned at the
+// tail at +2600ms). Every such entry point stamps and ends the settle, and the
+// re-tail compares nav-vs-resume: the chat-view-seek `userScrolled` idiom.
+ok('there is ONE navigation stamp (_noteUserNav) and it ends the settle like a wheel does',
+  /_noteUserNav\(via\) \{[\s\S]{0,220}this\._lastNavAt = Date\.now\(\);[\s\S]{0,220}this\._endResumeSettle\(\);/.test(cv));
+ok('…and the reader-position test generalises the seek idiom over EVERY stamp (scroll input, nav, jump landing, search reveal)',
+  /_navigatedSince\(since\) \{[\s\S]{0,400}this\._lastNavAt \|\| 0[\s\S]{0,120}this\._lastUserScrollAt \|\| 0[\s\S]{0,160}this\._lastJumpAt \|\| 0[\s\S]{0,160}this\._search\?\._lastRevealAt \|\| 0[\s\S]{0,60}> since;/.test(cv));
+ok('the resume re-tail BAILS when the reader navigated after the resume (never yank a reader back to the tail)',
+  /const resumeAt = this\._resumeAt;[\s\S]{0,400}if \(this\._navigatedSince\(resumeAt\)\) return;/.test(cv));
+ok('every off-list navigation surface stamps: minimap (index + time), search reveal, run-bar landing, jumpToIndex, user jumpToBottom',
+  /_noteUserNav\('minimap'\); return this\.jumpToIndex/.test(cv)
+  && /_noteUserNav\('minimap-time'\); return this\._jumpToFileTime/.test(cv)
+  && /onNav: \(\) => this\._noteUserNav\('search-reveal'\)/.test(cv)
+  && /_landOnHeader\(run\) \{[\s\S]{0,400}this\._noteUserNav\('runBar'\);/.test(cv)
+  && /async jumpToIndex\(targetIdx\) \{\s*this\._noteUserNav\('jumpToIndex'\);/.test(cv)
+  && /async jumpToBottom\(\{ user = true \} = \{\}\) \{\s*if \(user\) this\._noteUserNav\('jumpToBottom'\);/.test(cv));
+{
+  const sch = fs.readFileSync(path.join(REPO, 'src/lib/chat-search.js'), 'utf8');
+  ok('…and ChatSearch actually calls it on a REVEAL (the reveal scrolls the list from outside its own listeners)',
+    /this\._onNav = onNav \|\| null;/.test(sch) && /this\._lastRevealAt = Date\.now\(\);\s*this\._onNav\?\.\(\);/.test(sch));
+  ok('…and the minimap time landing stamps in the seek module too', /_jumpToFileTime\(ts, line\) \{\s*this\._noteUserNav\('jumpToFileTime'\);/.test(sk));
+}
 ok('INVARIANT a pinned view never loses its tail: _extendTop skips trimBottom while pinned',
   /if \(this\._pinned\) this\._trace\('trimSkipPinned'[\s\S]{0,200}else this\._trimBottom\(\);/.test(cv));
 ok('…and re-asserts the tail after the prepend (the anchor restore fails under transitional geometry: anchored:false, scrollTop 0)',
@@ -224,6 +266,49 @@ if (typeof globalThis.requestAnimationFrame !== 'function') globalThis.requestAn
   ok('a transitional (input-LESS) unpin during the resume still ends at the LIVE tail — the re-tail asserts off the snapshot', gap.retailed && gap.v._pinned === true);
   ok('…and a REAL reader who scrolled away during the settle is left alone (input drops the snapshot)', !reader.retailed && reader.v._pinned === false);
   ok('a window that was NOT pinned when it was hidden is never dragged to the tail', !never.retailed && retails(never.v) === 0);
+
+  // ROUND 2 (a): a reader who NAVIGATED (minimap / search reveal / run bar /
+  // jumpToIndex) during the settle is left where they landed. The four
+  // message-list listeners were the only thing that ended the settle, so this
+  // reader used to be yanked to the live tail by the 1240ms re-tail.
+  const navs = await Promise.all([
+    resumeThen((v) => { v._pinned = false; v._noteUserNav('minimap'); }),
+    resumeThen((v) => { v._pinned = false; v._lastJumpAt = Date.now(); }),         // a jump LANDING (_scrollElStable) with no other stamp
+    resumeThen((v) => { v._pinned = false; v._search = { _lastRevealAt: Date.now() }; }), // a search reveal
+  ]);
+  ok('a reader who navigates during the settle (minimap/run-bar/jumpToIndex → _noteUserNav) is NEVER yanked back to the tail',
+    !navs[0].retailed && navs[0].v._pinned === false);
+  ok('…and a bare jump LANDING counts as navigation too (the seek idiom generalised: _lastJumpAt)',
+    !navs[1].retailed && navs[1].v._pinned === false);
+  ok('…as does a search reveal (it scrolls the list from outside the list\'s own listeners)',
+    !navs[2].retailed && navs[2].v._pinned === false);
+
+  // ROUND 2 (b): the re-assert SERIES — the transitional unpin is repaired at
+  // every rung while the snapshot holds, not once at a cliff edge.
+  const late = await (async () => {
+    const v = mkView();
+    v.setSuspended(true); v.setSuspended(false);
+    await nap(1400);                       // past the settle AND the first re-tail
+    const baseline = retails(v);
+    v._pinned = false;                     // input-LESS displacement, the 1400ms repro
+    await nap(900);                        // the 2000ms rung
+    return { v, repaired: retails(v) > baseline };
+  })();
+  ok('an input-LESS unpin AFTER the settle expires is still repaired by the bounded series (the +1400ms strand, 3/3 sessions)',
+    late.repaired && late.v._pinned === true);
+
+  // ROUND 2 (c): the UNPIN gate itself — positive evidence, DOM-free, run
+  // against the SHIPPED predicate.
+  const disp = (over) => ChatView.prototype._resumeDisplacement.call(Object.assign(
+    Object.create(ChatView.prototype),
+    { _resumeAt: Date.now() - 1400, _pinnedAtSuspend: true, _lastUserScrollAt: Date.now() - 9e5, _lastNavAt: 0, _lastJumpAt: 0 },
+    over));
+  ok('unit: an input-less unpin 1.4s after a resume, off a pinned snapshot, is DISPLACEMENT', disp({}) === true);
+  ok('unit: …but a reader who scrolled since the resume is INTENT', disp({ _lastUserScrollAt: Date.now() }) === false);
+  ok('unit: …and so is a reader who navigated since the resume', disp({ _lastNavAt: Date.now() }) === false);
+  ok('unit: a window that was reading history when it was hidden is never re-pinned', disp({ _pinnedAtSuspend: false }) === false);
+  ok('unit: past the horizon the gate is off — a normal unpin must always be possible', disp({ _resumeAt: Date.now() - 4000 }) === false);
+  ok('unit: a view that never resumed is unaffected (the gate is scoped to the resume)', disp({ _resumeAt: 0 }) === false);
 }
 
 // ── WIRING PIN: the desktop show/hide path must keep flowing the flag (a new
