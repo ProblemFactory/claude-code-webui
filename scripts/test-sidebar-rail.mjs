@@ -93,7 +93,10 @@ try {
     return evalJs(`!!document.querySelector('.rail-panel-${id}')`);
   };
   check('ports panel renders', await openPanel('ports'));
-  check('ports panel shows local machine scan', await evalJs(`document.querySelector('.rail-panel-ports .ports-machine') !== null`));
+  // The machine row lands after the async port scan fetch — poll instead of a
+  // fixed sleep (gate-only red under a loaded machine while standalone green).
+  const waitFor = async (expr, ms = 15000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { if (await evalJs(expr)) return true; await sleep(250); } return evalJs(expr); };
+  check('ports panel shows local machine scan', await waitFor(`document.querySelector('.rail-panel-ports .ports-machine') !== null`));
   check('agents panel renders', await openPanel('agents'));
   // redesign: roster header has the Add-account menu button, rows carry a ⋯ menu
   check('agents roster uses redesigned header', await evalJs(`!!document.querySelector('.rail-panel-agents .acct-roster-head .acct-add')`));
