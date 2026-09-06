@@ -68,7 +68,12 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
           // wrapper), so a second app-server on one rollout is the same
           // B-4058 double-writer class; match on backendSessionId (the live
           // thread id, kept current by session-stdout on every meta record).
-          if ((backend === 'claude' || backend === 'codex') && data.resume && data.resumeId && !data.fork) {
+          // Gated on the harness CAPS row (every chat harness with a stream
+          // protocol — claude/codex/opencode…), never an id list: the S9
+          // OpenCode serve store lists sessions this instance may already be
+          // driving through a live acp-wrapper, and a plain resume from a
+          // stale card would spawn a second `opencode acp` on one session.
+          if (capsOf(backend).streamProtocol && data.resume && data.resumeId && !data.fork) {
             let existing = null;
             for (const [eid, es] of activeSessions) {
               if ((es.backend || 'claude') !== backend) continue;
