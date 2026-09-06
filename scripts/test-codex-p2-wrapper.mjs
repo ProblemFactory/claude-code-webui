@@ -56,7 +56,12 @@ process.stdin.on('data', (d) => {
         // item/completed (owner screenshot: every card read {"query":"","action":null})
         send({ method: 'item/started', params: { item: { type: 'webSearch', id: 'ws-1', query: '', action: null, results: null } } });
         send({ method: 'item/completed', params: { item: { type: 'webSearch', id: 'ws-1', query: 'vibespace acp', action: { type: 'search', queries: ['vibespace acp', 'vibespace agent client protocol'] }, results: [{ type: 'text_result', ref_id: 'turn1search0', domain: 'example.org', title: 'ACP <b>spec</b>', url: 'https://example.org/acp', snippet: 'Agent  Client Protocol\\n overview' }] } } });
-        send({ method: 'item/completed', params: { item: { type: 'imageView', id: 'img-1', path: '/tmp/shot.png' } } });
+        // a page open: the v2 WebSearchAction spells it CAMELCASE (openPage / findInPage, schema 0.153.4) and the
+        // item id is the same 'exec-…' the rollout's Extension web.search item carries (one card live + rebuilt)
+        send({ method: 'item/started', params: { item: { type: 'webSearch', id: 'exec-a73a6d39-77ea-472b-b77d-c97a8f5a02e7', query: '', action: null, results: null } } });
+        send({ method: 'item/completed', params: { item: { type: 'webSearch', id: 'exec-a73a6d39-77ea-472b-b77d-c97a8f5a02e7', query: 'https://www.example9.org/shop', action: { type: 'openPage', url: 'https://www.example9.org/shop' }, results: [{ type: 'text_result', domain: 'www.example9.org', ref_id: 'turn96view0', snippet: 'Total lines: 217', title: 'Shop Infinity Showers', url: 'https://www.example9.org/shop' }] } } });
+        // a real ImageView item carries a file:// URL (0.153.4 rollouts: 48/48) — the id is the rollout item's id
+        send({ method: 'item/completed', params: { item: { type: 'imageView', id: 'exec-fc9387a4-6df5-4b06-9f60-ed7b69463d26', path: 'file:///tmp/shot.png' } } });
         // per-response usage (v2 camelCase shape, as the real app-server sends it) — the wrapper relays it as a token_count
         send({ method: 'thread/tokenUsage/updated', params: { threadId: 'th-p2', turnId: tid, tokenUsage: { total: { totalTokens: 5150, inputTokens: 5000, cachedInputTokens: 4000, cacheWriteInputTokens: 0, outputTokens: 150, reasoningOutputTokens: 40 }, last: { totalTokens: 5150, inputTokens: 5000, cachedInputTokens: 4000, cacheWriteInputTokens: 0, outputTokens: 150, reasoningOutputTokens: 40 }, modelContextWindow: 828400 } } });
       }
@@ -98,6 +103,12 @@ ok(await waitFor(() => bufRecords().some((r) => r.type === 'event_msg' && r.payl
 { const wse = bufRecords().find((r) => r.type === 'event_msg' && r.payload?.type === 'web_search_end'); ok(wse && Object.keys(wse.payload).join(',') === 'type,call_id,query,action,results', `web_search_end key order mirrors codex-rs (fingerprint dedup with the rollout copy): ${wse && Object.keys(wse.payload).join(',')}`); }
 ok(!bufRecords().some((r) => r.payload?.type === 'function_call_output' && r.payload.call_id === 'ws-1'), 'no function_call_output twin for the search (one completion record, one edit)');
 ok(await waitFor(() => bufRecords().some((r) => r.payload?.type === 'function_call' && r.payload.name === 'view_image' && /shot\.png/.test(r.payload.arguments))), 'an imageView item is a visible view_image call');
+// live and rebuilt must render the SAME card: the rollout's ImageView item is routed with file:// stripped,
+// so the live copy strips it too — otherwise the one card (same item id) rewrote its own text on re-attach
+{ const fc = bufRecords().find((r) => r.payload?.type === 'function_call' && r.payload.name === 'view_image');
+  await waitFor(() => bufRecords().some((r) => r.payload?.type === 'function_call_output' && r.payload.call_id === fc?.payload.call_id));
+  const fo = bufRecords().find((r) => r.payload?.type === 'function_call_output' && r.payload.call_id === fc?.payload.call_id)?.payload;
+  ok(fc && JSON.parse(fc.payload.arguments).path === '/tmp/shot.png' && fo?.output === 'viewed /tmp/shot.png', `the live view_image card carries the file://-stripped path, byte-identical to the rollout copy (${JSON.stringify([fc && JSON.parse(fc.payload.arguments).path, fo?.output])})`); }
 
 // ② second input while the turn is active → queued, never a second turn/start
 sendLine({ type: 'chat-input', text: 'second', msgId: 'm2' });
@@ -131,8 +142,17 @@ ok(tools.some((m) => (m.collapseKind === 'image' && /view_image|View Image/i.tes
 { // 2.369.43: ONE complete search card whose input carries the FINAL query/action and whose output is the rendered result list
   const searches = tools.filter((m) => m.collapseKind === 'search');
   const b = searches[0]?.content?.[0];
-  ok(searches.length === 1 && searches[0].status === 'complete' && b?.input?.query === 'vibespace acp' && b?.input?.action?.queries?.length === 2, `the webSearch item is ONE complete card with the final query/action (${searches.length} cards; input ${JSON.stringify(b?.input)})`);
+  ok(searches.length === 2 && searches[0].status === 'complete' && b?.input?.query === 'vibespace acp' && b?.input?.action?.queries?.length === 2, `the webSearch item is ONE complete card with the final query/action (${searches.length} cards; input ${JSON.stringify(b?.input)})`);
   ok(b && b.output === 'ACP <b>spec</b> — https://example.org/acp\nAgent Client Protocol overview', `…and a human result list, not raw JSON: ${JSON.stringify(b?.output)}`);
+  // the v2 camelCase page action (0.153.4 schema) renders its head live — and the exec-… id is the rollout Extension item's id
+  const o = searches[1]?.content?.[0];
+  ok(searches[1]?.status === 'complete' && o?.toolCallId === 'exec-a73a6d39-77ea-472b-b77d-c97a8f5a02e7' && o?.output === 'opened https://www.example9.org/shop\n\nShop Infinity Showers — https://www.example9.org/shop\nTotal lines: 217', `a live v2 openPage item is ONE complete card with the 'opened <url>' head (${JSON.stringify(o?.output)})`);
+}
+{ // live wrapper records + the rollout's OWN ImageView item_completed (same item id, file:// URL) = ONE card, one text
+  const before = mm.messages.filter((m) => m.collapseKind === 'image');
+  mm.processLive({ timestamp: new Date().toISOString(), type: 'event_msg', payload: { type: 'item_completed', item: { type: 'ImageView', id: 'exec-fc9387a4-6df5-4b06-9f60-ed7b69463d26', path: 'file:///tmp/shot.png' } } });
+  const after = mm.messages.filter((m) => m.collapseKind === 'image');
+  ok(before.length === 1 && after.length === 1 && after[0].content[0].output === 'viewed /tmp/shot.png' && after[0].content[0].output === before[0].content[0].output, `the rollout ImageView copy edits the live card in place — one card, unchanged text (${JSON.stringify([before.length, after.length, after[0]?.content?.[0]?.output])})`);
 }
 const sys = mm.messages.filter((m) => m.role === 'system').map((m) => m.content?.[0]?.text || '');
 ok(sys.some((t) => /Queued — runs after the current turn/.test(t)), 'the queued notice renders as a system card');

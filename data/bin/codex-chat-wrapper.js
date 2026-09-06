@@ -569,8 +569,12 @@ function _handleItemCompletedInner(item, itemId) {
     return;
   }
   if (type === 'imageView') {
-    record('response_item', { type: 'function_call', name: 'view_image', arguments: JSON.stringify({ path: item.path || '' }), call_id: itemId });
-    record('response_item', { type: 'function_call_output', call_id: itemId, output: `viewed ${item.path || 'image'}`, is_error: false });
+    // the rollout's own ImageView item carries a file:// URL and the normalizer
+    // strips it — the live copy must render the SAME text or the one card
+    // (same item id) rewrites itself on re-attach
+    const p = String(item.path || '').replace(/^file:\/\//, '');
+    record('response_item', { type: 'function_call', name: 'view_image', arguments: JSON.stringify({ path: p }), call_id: itemId });
+    record('response_item', { type: 'function_call_output', call_id: itemId, output: `viewed ${p || 'image'}`, is_error: false });
     return;
   }
   if (type === 'contextCompaction') {

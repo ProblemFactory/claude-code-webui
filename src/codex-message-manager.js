@@ -141,6 +141,10 @@ const SKIPPED_RESPONSE_ITEM_TYPES = new Set([
 ]);
 const SKIPPED_EVENT_TYPES = new Set([
   // twins of records already rendered from the response_item stream
+  // (item_completed = the GENERIC skip — _processItemCompleted runs first and
+  // routes the item kinds a 0.153.4 rollout persists nowhere else: Extension
+  // web.search / image_gen.generation, ImageView; unknown Extension kinds get
+  // telemetry codex-unknown-record:item_completed:<kind>)
   'user_message', 'agent_message', 'agent_reasoning', 'agent_reasoning_raw_content', 'raw_response_item', 'raw_response_completed', 'item_started', 'item_completed',
   'agent_message_content_delta', 'reasoning_content_delta', 'reasoning_raw_content_delta', 'plan_delta',
   // tool lifecycle noise — the function_call / function_call_output pair is the card
@@ -1001,20 +1005,40 @@ class CodexMessageManager {
   }
 
   // ── web search (2.369.43, owner: every codex web_search card read
-  // {"query":"","action":null} / "(empty)") ──
-  // Three carriers of ONE search, all landing on ONE card keyed by call_id:
-  //   ① the wrapper's function_call at item/started (query EMPTY — the v2
-  //      WebSearchItem is a stub until item/completed) = the pending card;
-  //   ② event_msg web_search_end {call_id, query, action, results} — codex's
-  //      own rollout record (the ONLY place a 0.153 rollout persists the
-  //      search; a rebuild used to render no search at all) AND what the
-  //      wrapper now emits at item/completed in the same shape: query/action
-  //      merge into the card's input, results render through search-card.js
-  //      (the same rendering live and rebuilt; the buffer/rollout copies edit
-  //      the same card in place, never a second one);
-  //   ③ the id-less Responses-API web_search_call item 0.14x rollouts write
-  //      right AFTER ② for the same search (action only, no call_id) — a twin
-  //      of the card just finalized, adopted by action key in either order.
+  // {"query":"","action":null} / "(empty)"; refuted + re-cut on real data
+  // 2026-09-06) ──
+  // ONE search = ONE card keyed by call_id, whichever carriers arrive. WHICH
+  // carrier a rollout writes depends on session_meta.cli_version (read-only
+  // fleet scan of every local rollout — the table lives in kb-file-structure.md):
+  //   0.120 / 0.125 / 0.130 — event_msg web_search_end {call_id:'ws_…', query,
+  //       action} (NEVER results: 1698 ends, 0 with the key) + an id-less
+  //       Responses-API web_search_call {status, action?} on the NEXT line for
+  //       the same search. An end with action {type:'other'} (query '') is
+  //       twinned by a call carrying NO action key at all; 0.125 also has long
+  //       runs of ORPHAN calls (no end) and 0.130 of ORPHAN ends (no call).
+  //   0.149.1 — web_search_end ONLY (call_id 'exec-…', results ALWAYS present:
+  //       35/35; no web_search_call item anywhere). item_completed starts here.
+  //   0.153.4 (installed) — NO web_search_end anywhere: the search persists
+  //       ONLY as event_msg item_completed {item:{type:'Extension',
+  //       kind:'web.search', id:'exec-…', query, action, results}} with the v2
+  //       camelCase action types (openPage / findInPage; url/pattern nullable),
+  //       routed here by _processItemCompleted under the SAME id the wrapper's
+  //       live card uses — three 0.153.4 rollouts with 20/43/30 searches
+  //       rendered ZERO cards while item_completed sat in the generic skip.
+  //   live (wrapper) — function_call web_search at item/started (EMPTY stub =
+  //       the pending card) + event_msg web_search_end at item/completed (the
+  //       v2 item relayed: query, camelCase action, results).
+  // Carriers merge: query/action into the card's input (mergeToolInput),
+  // results through search-card.js (one renderer live and rebuilt); a later
+  // copy EDITS the same card, never a second create.
+  // Twin pairing (0.120-0.130) is POSITIONAL: ONE slot holds the immediately
+  // preceding SEARCH record (end or id-less call — records in between never
+  // touch it, and both handlers overwrite it) and the next search record
+  // consumes or clears it, so an orphan call later in the file with the same
+  // action never pairs with a stale end. Whole-file replays: the 0.125 file =
+  // 96 orphan calls then 104 end+call twins ⇒ 200 cards; the 512 MB 0.130 file
+  // = 1524 ends + 1324 calls, every call an adjacent twin ⇒ 1524 cards, 0
+  // empty and 0 'no results'.
   // web_search_begin is not persisted (0 in every local rollout) but handled
   // for the live stream: a pending card if none exists, else a query patch.
   _processWebSearchEvent(event, emit) {
@@ -1037,30 +1061,83 @@ class CodexMessageManager {
       return;
     }
     const key = searchActionKey(action, query);
-    // ③ arrived first (not observed in the wild, but the pairing is order-free): adopt its card
-    if (!this.toolCallMessageIds.has(callId) && this._lastSearchCall && this._lastSearchCall.key === key) {
-      this.toolCallMessageIds.set(callId, this._lastSearchCall.msgId);
-      this._lastSearchCall = null;
-    }
+    // an id-less call on the PREVIOUS line (reverse order — not observed in the
+    // wild, the pairing is order-free): adopt its card; the slot is single-use
+    const prevCall = this._lastSearchCall;
+    this._lastSearchCall = null;
+    if (prevCall && prevCall.key === key && prevCall.msgId && !this.toolCallMessageIds.has(callId)) this.toolCallMessageIds.set(callId, prevCall.msgId);
     const { output, isError } = renderSearchOutput({ query, action, results: event.results, error: event.error });
     this._finalizeToolCall(callId, { output, isError, extraInput: { query, action }, rawName: 'web_search' }, emit);
-    this._lastSearchEnd = { key, msgId: this.toolCallMessageIds.get(callId) || null };
+    this._lastSearchEnd = { key };
   }
 
   _processWebSearchCallItem(item, emit) {
     const action = item.action && typeof item.action === 'object' && !Array.isArray(item.action) ? item.action : null;
     const key = searchActionKey(action, action?.query);
     const idLess = !item.call_id && !item.id;
-    if (idLess && this._lastSearchEnd && this._lastSearchEnd.key === key) { this._lastSearchEnd = null; return; } // twin of ②
+    // the slot holds the end on the PREVIOUS line only — consumed or cleared by
+    // this record either way (positional adjacency, never a stale match)
+    const prevEnd = this._lastSearchEnd;
+    this._lastSearchEnd = null;
+    if (idLess && prevEnd && prevEnd.key === key) return; // the end's twin (incl. {type:'other'} end ↔ action-less call)
     const callId = item.call_id || item.id || this._nextId();
     this._finalizeToolCall(callId, { output: item.status ? `status: ${item.status}` : '', isError: false, extraInput: { query: action?.query || '', action }, rawName: 'web_search' }, emit);
-    if (idLess) this._lastSearchCall = { key, msgId: this.toolCallMessageIds.get(callId) || null };
+    this._lastSearchCall = idLess ? { key, msgId: this.toolCallMessageIds.get(callId) || null } : null;
+  }
+
+  // ── event_msg item_completed (the 0.149+ ThreadItem lifecycle record) ──
+  // 0.153.4 CENSUS (25 local rollouts, snapshot 2026-09-06 — the corpus is LIVE
+  // and grows, so re-count rather than trusting these totals; the RATIOS are the
+  // claim. item_started is NEVER persisted — 0 records — so item_completed is the
+  // only lifecycle carrier):
+  //   Reasoning 1227 · AgentMessage 75 · CollabAgentToolCall 5 — the item id IS
+  //     a response_item id (twin 1228/1228, 75/75, 5/5) ⇒ generic skip.
+  //   CommandExecution 478 · FileChange 108 — no id twin, but each sits beside
+  //     the custom_tool_call `exec` that produced it (the apply_patch execs
+  //     match the FileChange count file by file) ⇒ generic skip.
+  //   UserMessage 29 — the prompt, already rendered from the response_item.
+  //   Extension:web.search 245 · Extension:image_gen.generation 3 · ImageView 48
+  //     — ZERO response_item twins by id: persisted NOWHERE else, so these are
+  //     routed here into the card path their live/legacy twin already uses.
+  // Those two are the only Extension KINDS in the corpus; any other kind is
+  // reported ONCE per kind as telemetry `codex-unknown-record:item_completed:
+  // <kind>` (the generic skip used to swallow it silently — the invisible-record
+  // class again) instead of being invented into a card.
+  _processItemCompleted(event, emit) {
+    const it = event.item && typeof event.item === 'object' && !Array.isArray(event.item) ? event.item : null;
+    if (!it) return;
+    if (it.type === 'Extension') {
+      if (it.kind === 'web.search') {
+        this._processWebSearchEvent({ type: 'web_search_end', call_id: it.id, query: it.query, action: it.action, results: it.results, error: it.error }, emit);
+        return;
+      }
+      if (it.kind === 'image_gen.generation') {
+        // the image_generation_call card path (rawName 'image_gen', visible —
+        // never folds); `result` is the base64 image (3 MB in the real record)
+        // and NEVER reaches the card — savedPath names the file instead
+        const savedPath = typeof it.savedPath === 'string' ? it.savedPath : '';
+        const failure = it.failure && typeof it.failure === 'object' ? (it.failure.message || JSON.stringify(it.failure)) : (typeof it.failure === 'string' ? it.failure : '');
+        const output = failure || [it.status ? `status: ${it.status}` : '', savedPath ? `saved ${savedPath}` : ''].filter(Boolean).join('\n');
+        this._finalizeToolCall(it.id || this._nextId(), { output, isError: !!failure, extraInput: { prompt: typeof it.revisedPrompt === 'string' ? it.revisedPrompt : '' }, rawName: 'image_gen' }, emit);
+        return;
+      }
+      this._noteUnknown('event_msg', 'item_completed:' + (it.kind || '(unkinded)'));
+      return;
+    }
+    if (it.type === 'ImageView') {
+      // the wrapper's live view_image card path (same item id ⇒ the rollout copy edits it in place)
+      const p = String(it.path || '').replace(/^file:\/\//, '');
+      this._finalizeToolCall(it.id || this._nextId(), { output: `viewed ${p || 'image'}`, isError: false, extraInput: { path: p }, rawName: 'view_image' }, emit);
+    }
+    // every other item type: twin of a rendered response_item — generic skip (SKIPPED_EVENT_TYPES)
   }
 
   _processEvent(event, emit) {
     const type = event.type;
     if (!type) return;
     if (type === 'web_search_begin' || type === 'web_search_end') return this._processWebSearchEvent(event, emit);
+    // BEFORE the generic skip: 0.153.4 persists web.search / image_gen / ImageView ONLY here
+    if (type === 'item_completed') return this._processItemCompleted(event, emit);
 
     if (type === 'task_started') {
       if (event.turn_id || event.turnId) {

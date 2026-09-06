@@ -5,7 +5,7 @@
 //      real input shapes (claude WebSearch {query} / WebFetch {url}, codex
 //      web_search {query, action} incl. the EMPTY item/started stub, ACP search),
 //      renderSearchOutput (results / open_page / find_in_page / error / caps),
-//      searchActionKey (0.14x twin pairing).
+//      searchActionKey (0.120-0.130 twin pairing).
 //   ② the REAL chat-renderers (esbuild-bundled for node, DOM shimmed): the
 //      generic/error/pending card headers carry `.chat-tool-query` with the
 //      query, XSS-escaped in both the text and the title attribute — the text
@@ -29,7 +29,7 @@ console.log('— ① search-card.js (pure)');
   ok('claude WebFetch {url, prompt}', searchQueryOf({ url: 'https://example.org/x', prompt: 'summarize' }) === 'https://example.org/x');
   ok('codex EMPTY started stub → nothing to show', searchQueryOf({ query: '', action: null }) === '');
   ok('codex completed {query, action.queries} → the query', searchQueryOf({ query: 'q1', action: { type: 'search', queries: ['q1', 'q2'] } }) === 'q1');
-  ok('codex action-only (0.14x web_search_call) → queries joined', searchQueryOf({ query: '', action: { type: 'search', queries: ['a', 'b'] } }) === 'a | b');
+  ok('codex action-only (web_search_call twin) → queries joined', searchQueryOf({ query: '', action: { type: 'search', queries: ['a', 'b'] } }) === 'a | b');
   ok('codex open_page → the url', searchQueryOf({ query: '', action: { type: 'open_page', url: 'https://x.example/p' } }) === 'https://x.example/p');
   ok("codex find_in_page → 'pattern' in url", searchQueryOf({ action: { type: 'find_in_page', url: 'https://x.example/p', pattern: 'JSON output' } }) === "'JSON output' in https://x.example/p");
   ok('ACP search {pattern} / string input / garbage', searchQueryOf({ pattern: 'TODO' }) === 'TODO' && searchQueryOf('raw q') === 'raw q' && searchQueryOf(null) === '' && searchQueryOf(42) === '' && searchQueryOf({ action: 'search' }) === '');
@@ -47,6 +47,23 @@ console.log('— ① search-card.js (pure)');
     && searchActionKey({ type: 'open_page', url: 'https://p' }, 'https://p') === searchActionKey({ type: 'open_page', url: 'https://p' }, undefined)
     && searchActionKey({ type: 'search', queries: ['a'] }, 'a') !== searchActionKey({ type: 'search', queries: ['b'] }, 'b'));
   ok('module is PURE (no requires) and registered in the PURE tier', !/require\(/.test(read('src/search-card.js')) && /'src\/search-card\.js'/.test(read('scripts/test-architecture.mjs')));
+
+  // ── verifier-refuted 2026-09-06 (real-data shapes, fleet scan by session_meta.cli_version) ──
+  const { actionType } = require(path.join(REPO, 'src/search-card.js'));
+  // the v2 app-server / 0.153.4 Extension item spells the page actions camelCase (schema: openPage / findInPage, url + pattern NULLABLE)
+  ok('actionType normalises both spellings (v2 camelCase + core snake_case) and unknown → other', actionType({ type: 'openPage' }) === 'open_page' && actionType({ type: 'findInPage' }) === 'find_in_page' && actionType({ type: 'open_page' }) === 'open_page' && actionType({ type: 'search' }) === 'search' && actionType({ type: 'other' }) === 'other' && actionType({ type: 'bogus' }) === 'other' && actionType(null) === '');
+  ok("v2 openPage renders 'opened <url>' like open_page", renderSearchOutput({ query: 'https://www.example9.org/shop', action: { type: 'openPage', url: 'https://www.example9.org/shop' }, results: [{ type: 'text_result', domain: 'www.example9.org', ref_id: 'turn96view0', snippet: 'Total lines: 217', title: 'Shop', url: 'https://www.example9.org/shop' }] }).output === 'opened https://www.example9.org/shop\n\nShop — https://www.example9.org/shop\nTotal lines: 217');
+  ok("v2 findInPage with url:null (real 0.153.4 record, query = the quoted pattern) → \"found '<pattern>'\" with NO fake location", renderSearchOutput({ query: "'openable window'", action: { type: 'findInPage', url: null, pattern: 'openable window' }, results: [{ type: 'text_result', domain: 'd', ref_id: 'r', snippet: 'Total lines: 1033', url: 'https://d/x.pdf' }] }).output === "found 'openable window'\n\nd — https://d/x.pdf\nTotal lines: 1033");
+  ok('searchQueryOf reads the camelCase actions too (title chip)', searchQueryOf({ query: '', action: { type: 'openPage', url: 'https://x.example/p' } }) === 'https://x.example/p' && searchQueryOf({ action: { type: 'findInPage', url: 'https://x.example/p', pattern: 'q' } }) === "'q' in https://x.example/p");
+  // 'no results' is a CLAIM only an EMPTY ARRAY supports — 0.120/0.125/0.130 ends never carry the key (1698 ends, 0 with it; 42/200 cards on the real 0.125 file claimed 'no results'), while 0.149.1 + 0.153.4 always do
+  ok("results ABSENT + plain search → 'searched: <query>' (no emptiness claim)", renderSearchOutput({ query: 'GitHub request code review', action: { type: 'search', query: 'GitHub request code review', queries: ['GitHub request code review', 'alt'] } }).output === 'searched: GitHub request code review');
+  ok("results ABSENT + open_page → the head only", renderSearchOutput({ query: 'https://p', action: { type: 'open_page', url: 'https://p' } }).output === 'opened https://p');
+  ok("results ABSENT + action {type:'other'} + query '' (real 0.120.0 end) → 'status: completed', never 'no results'", renderSearchOutput({ query: '', action: { type: 'other' } }).output === 'status: completed');
+  ok("results [] stays 'no results' (real 0.153.4 record with results: [])", renderSearchOutput({ query: 'q', action: { type: 'search', query: null, queries: ['q'] }, results: [] }).output === 'no results');
+  // twin key: {type:'other'} end ↔ action-less call are ONE bucket (real 2026-04-14 rollout lines 6417/6418)
+  ok("twin key: end {query:'', action:{type:'other'}} == call with NO action", searchActionKey({ type: 'other' }, '') === searchActionKey(undefined, undefined) && searchActionKey({ type: 'other' }, '') === searchActionKey(null, ''));
+  ok('twin key: a bare query without an action is still a SEARCH bucket, not other', searchActionKey(null, 'q') !== searchActionKey({ type: 'other' }, '') && searchActionKey(null, 'q') === searchActionKey({ type: 'search', query: 'q' }, undefined));
+  ok('twin key: camelCase and snake_case page actions key the same', searchActionKey({ type: 'openPage', url: 'https://p' }, 'https://p') === searchActionKey({ type: 'open_page', url: 'https://p' }, undefined));
 }
 
 console.log('— ② the real renderer (esbuild → node, DOM shimmed)');
@@ -116,6 +133,7 @@ console.log('— ③ wiring pins');
   ok('the fold summary line (per-kind counts, "N web searches") is untouched', /t\('\{n\} web searches', \{ n: byKind\.search \}\)/.test(cv));
   const cm = read('src/codex-message-manager.js');
   ok('the codex normalizer renders through the same PURE module', /require\('\.\/search-card'\)/.test(cm) && /renderSearchOutput\(\{ query, action, results: event\.results, error: event\.error \}\)/.test(cm));
+  ok("the 0.153.4 carrier (event_msg item_completed Extension web.search) is dispatched BEFORE the generic item_completed skip into the same web-search path", /if \(type === 'item_completed'\) return this\._processItemCompleted\(event, emit\);/.test(cm) && /it\.kind === 'web\.search'[\s\S]{0,200}_processWebSearchEvent\(\{ type: 'web_search_end', call_id: it\.id/.test(cm));
 }
 
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);

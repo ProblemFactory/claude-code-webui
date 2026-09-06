@@ -605,7 +605,7 @@ const ok = (n, c, e) => { if (c) { pass++; console.log('  ✓ ' + n); } else { f
 // ── web search (2.369.43, owner: every codex web_search card read
 // {"query":"","action":null} + "(empty)"). Shapes verbatim from real rollouts
 // (2026-08 0.153: event_msg web_search_end ONLY, call_id 'exec-…';
-// 2026-05 0.14x: web_search_end 'ws_…' immediately followed by an id-less
+// 2026-05 0.130: web_search_end 'ws_…' immediately followed by an id-less
 // web_search_call item; ids/queries anonymised).
 {
   const results = [
@@ -655,7 +655,7 @@ const ok = (n, c, e) => { if (c) { pass++; console.log('  ✓ ' + n); } else { f
   er.convertHistory([{ timestamp: '2026-09-06T00:00:01.000Z', type: 'event_msg', payload: { type: 'web_search_end', call_id: 'exec-e', query: 'q', action: { type: 'search', queries: ['q'] }, error: 'rate limited' } }]);
   ok('a search error is an error card carrying the message', er.messages[0]?.toolStatus === 'error' && er.messages[0]?.content[0].output === 'rate limited' && er.messages[0]?.content[0].status === 'error');
 
-  // ③ 0.14x twin pair: web_search_end then the id-less web_search_call (same action) → ONE card; an orphan call still renders
+  // ③ 0.120-0.130 twin pair: web_search_end then the id-less web_search_call (same action) → ONE card; an orphan call still renders
   const twin = new CodexMessageManager('ws5');
   const tm = twin.convertHistory([
     { timestamp: '2026-05-09T15:21:38.791Z', type: 'event_msg', payload: { type: 'web_search_end', call_id: 'ws_0c1fb930c3f4', query: 'GitHub request code review pull request', action: { type: 'search', query: 'GitHub request code review pull request', queries: ['GitHub request code review pull request', 'code review request API'] } } },
@@ -665,7 +665,7 @@ const ok = (n, c, e) => { if (c) { pass++; console.log('  ✓ ' + n); } else { f
     { timestamp: '2026-04-15T01:01:48.300Z', type: 'response_item', payload: { type: 'web_search_call', status: 'completed' } },
   ]);
   const tc = tm.filter((m) => m.role === 'tool');
-  ok('0.14x rollouts: web_search_end + its id-less web_search_call twin = ONE card each (2 searches + 1 orphan call = 3 cards, not 5)', tc.length === 3 && tc[0].content[0].input.query === 'GitHub request code review pull request' && tc[1].content[0].input.action?.url === 'https://ai.example.dev/docs/document-processing' && tc[2].content[0].output === 'status: completed', JSON.stringify(tc.map((m) => m.content[0].input)));
+  ok('0.120-0.130 rollouts: web_search_end + its id-less web_search_call twin = ONE card each (2 searches + 1 orphan call = 3 cards, not 5)', tc.length === 3 && tc[0].content[0].input.query === 'GitHub request code review pull request' && tc[1].content[0].input.action?.url === 'https://ai.example.dev/docs/document-processing' && tc[2].content[0].output === 'status: completed', JSON.stringify(tc.map((m) => m.content[0].input)));
   // reverse order (call first, then end) also pairs
   const rev = new CodexMessageManager('ws6');
   const rm = rev.convertHistory([
@@ -677,6 +677,124 @@ const ok = (n, c, e) => { if (c) { pass++; console.log('  ✓ ' + n); } else { f
   // wrapper: the completion path is codex's OWN shape; the empty-stub started record is the pending card
   const wr = require('node:fs').readFileSync(REPO + '/data/bin/codex-chat-wrapper.js', 'utf8');
   ok("wrapper records item/completed webSearch as event_msg web_search_end {call_id, query, action, results} — never a function_call_output of raw JSON", /if \(type === 'webSearch'\) \{[\s\S]{0,1400}emitTaskEvent\('web_search_end', ev\)/.test(wr) && !/type === 'mcpToolCall' \|\| type === 'dynamicToolCall' \|\| type === 'webSearch'/.test(wr));
+}
+
+// ── ④ the INSTALLED CLI (0.153.4) writes NONE of the above: a search persists
+// ONLY as event_msg item_completed {item:{type:'Extension', kind:'web.search'}}
+// (verifier-refuted 2026-09-06: three 0.153.4 rollouts with 20/43/30 searches
+// rendered ZERO cards while item_completed sat in the generic skip). Fixtures
+// cut VERBATIM from real rollouts, session_meta.cli_version 0.153.4 in every
+// one — rollout-2026-09-05T10-50-03 ordinal 44 (search, 18 results trimmed to
+// 3), …10-34-43 ordinals 157 (other), 321 (openPage), 231 (image_gen), 515
+// (ImageView), …10-50-09 ordinal 211 (findInPage, url:null), …11-32-29 ordinal
+// 153 (results: []); thread ids / domains swapped, thumbnail_url + base64 dropped.
+{
+  const F = {
+    search: { timestamp: '2026-09-05T17:50:28.974Z', ordinal: 44, type: 'event_msg', payload: { type: 'item_completed', thread_id: '01a0aaaa-0000-7000-8000-000000000002', turn_id: '01a072b1-1877-7982-9080-00e077cd7747', item: { type: 'Extension', kind: 'web.search', id: 'exec-56d2e923-6249-4d3e-8b7b-705f745169ab', query: 'site:www.example1.org technical specifications cargo volume payload battery 113 kWh wheelbase dimensions ...', action: { type: 'search', query: null, queries: ['site:www.example1.org technical specifications cargo volume payload battery 113 kWh wheelbase dimensions', 'site:www.example2.org specifications payload cargo length battery 110 kWh', 'site:www.example3.org brightdrop zevo 600 specs payload GVWR battery dimensions range', 'site:www.example4.org commercial-trucks/e-transit specs battery payload dimensions wheelbase'] }, results: [{ type: 'text_result', domain: 'www.example5.org', ref_id: 'turn0search0', snippet: 'on a 2025 eSprinter Cargo Van. ... Whether you need to charge your Mercedes-Benz van at home, on the go or keep your whole fleet', title: 'eSprinter | Mercedes-Benz Vans', url: 'https://www.example5.org/en/esprinter' }, { type: 'text_result', domain: 'www.example6.org', ref_id: 'turn0search1', snippet: '* Wheels, Full-size Spare Tire and Wheel with 3-Ton Jack ... For instance, by integrating the battery underneath the body of the vehicle, you can', title: '2025 E-Transit™', url: 'https://www.example6.org/commercial-trucks/e-transit/2025/' }, { type: 'text_result', domain: 'www.example5.org', ref_id: 'turn0search2', snippet: 'Wheelbase ... Payload ... Build Cargo Van WORKER Cargo Van WORKER, View Specifications#### Dimensions ... Cargo Volume:', title: '2026 Cargo Van | Sprinter | Mercedes-Benz Vans', url: 'https://www.example5.org/en/sprinter/cargo-van' }] }, started_at_ms: 1788630628042, completed_at_ms: 1788630628974 } },
+    other: { timestamp: '2026-09-05T17:53:45.818Z', ordinal: 157, type: 'event_msg', payload: { type: 'item_completed', thread_id: '01a0aaaa-0000-7000-8000-000000000001', turn_id: '01a072b0-bd02-7202-9560-c5ac2cb37b8b', item: { type: 'Extension', kind: 'web.search', id: 'exec-3faabe8a-0dc8-407c-aa5c-b645674ced96', query: '', action: { type: 'other' }, results: [{ type: 'text_result', domain: 'www.example7.org', ref_id: 'turn55view0', snippet: 'Total lines: 99', title: 'EV Range & Batteries | Ram Electric', url: 'https://www.example7.org/electric/range-and-batteries.html' }, { type: 'text_result', domain: 'www.example5.org', ref_id: 'turn55view1', snippet: 'Total lines: 325', title: 'eSprinter | Mercedes-Benz Vans', url: 'https://www.example5.org/en/esprinter' }, { type: 'text_result', domain: 'www.example8.org', ref_id: 'turn55view2', snippet: 'Total lines: 86', url: 'https://www.example8.org/content/dam/gmenvolve/na/us/en/index/pdfs/vans/02-pdfs/24GMFG-Zevo-400-600-v2.pdf' }] }, started_at_ms: 1788630824987, completed_at_ms: 1788630825818 } },
+    openPage: { timestamp: '2026-09-05T17:58:19.544Z', ordinal: 321, type: 'event_msg', payload: { type: 'item_completed', thread_id: '01a0aaaa-0000-7000-8000-000000000001', turn_id: '01a072b0-bd02-7202-9560-c5ac2cb37b8b', item: { type: 'Extension', kind: 'web.search', id: 'exec-a73a6d39-77ea-472b-b77d-c97a8f5a02e7', query: 'https://www.example9.org/shop', action: { type: 'openPage', url: 'https://www.example9.org/shop' }, results: [{ type: 'text_result', domain: 'www.example9.org', ref_id: 'turn96view0', snippet: 'Total lines: 217', title: 'Shop Infinity Showers — The Infinity Shower', url: 'https://www.example9.org/shop' }, { type: 'text_result', domain: 'www.example9.org', ref_id: 'turn96view1', snippet: 'Total lines: 273', title: 'Resource Center — The Infinity Shower', url: 'https://www.example9.org/care' }] }, started_at_ms: 1788631098906, completed_at_ms: 1788631099544 } },
+    findInPage: { timestamp: '2026-09-05T17:56:18.922Z', ordinal: 211, type: 'event_msg', payload: { type: 'item_completed', thread_id: '01a0aaaa-0000-7000-8000-000000000003', turn_id: '01a072b1-3030-76f3-b491-9ce9b0d3a8d5', item: { type: 'Extension', kind: 'web.search', id: 'exec-98a12c1a-e7ff-4f92-aeaa-ac2747c03dfb', query: "'openable window'", action: { type: 'findInPage', url: null, pattern: 'openable window' }, results: [{ type: 'text_result', domain: 'www.example10.org', ref_id: 'turn80view0', snippet: 'Total lines: 1033', url: 'https://www.example10.org/documents/1682580570361_Manual_Travel_Installation_NA_InD000013_01_2023.pdf' }, { type: 'text_result', domain: 'www.example10.org', ref_id: 'turn80view1', snippet: 'Total lines: 1033', url: 'https://www.example10.org/documents/1682580570361_Manual_Travel_Installation_NA_InD000013_01_2023.pdf' }] }, started_at_ms: 1788630978068, completed_at_ms: 1788630978922 } },
+    empty: { timestamp: '2026-09-05T18:34:59.474Z', ordinal: 153, type: 'event_msg', payload: { type: 'item_completed', thread_id: '01a0aaaa-0000-7000-8000-000000000004', turn_id: '01a072d7-eec1-7922-bd97-4650a404edb2', item: { type: 'Extension', kind: 'web.search', id: 'exec-7994354c-125e-4d64-a07a-f0eb9724d012', query: 'site:www.example11.org "Any vehicle equipped with air brakes" "Class C" driver\'s license RV ...', action: { type: 'search', query: null, queries: ['site:www.example11.org "Any vehicle equipped with air brakes" "Class C" driver\'s license RV', 'site:www.example11.org "air brakes" "non-commercial" recreational vehicle driver license', 'site:www.example11.org DMV motorhome air brake endorsement noncommercial', 'site:www.example12.org "air brakes" "recreational vehicle" driver license'] }, results: [] }, started_at_ms: 1788633298739, completed_at_ms: 1788633299474 } },
+    imageGen: { timestamp: '2026-09-05T17:56:46.976Z', ordinal: 231, type: 'event_msg', payload: { type: 'item_completed', thread_id: '01a0aaaa-0000-7000-8000-000000000001', turn_id: '01a072b0-bd02-7202-9560-c5ac2cb37b8b', item: { type: 'Extension', kind: 'image_gen.generation', id: 'exec-187fe7b0-73fc-493a-95f8-0c4a10c9d6e4', status: 'completed', revisedPrompt: 'Use case: stylized-concept\nAsset type: wide landing-page hero image for an engineering concept d…', result: '<base64 png omitted — 3,012,684 chars in the real record>', transparentBackground: false, failure: null, savedPath: '/home/user/.codex/generated_images/01a0aaaa-0000-7000-8000-000000000001/exec-187fe7b0-73fc-493a-95f8-0c4a10c9d6e4.png' }, started_at_ms: 1788630978684, completed_at_ms: 1788631006973 } },
+    imageView: { timestamp: '2026-09-05T18:17:29.751Z', ordinal: 515, type: 'event_msg', payload: { type: 'item_completed', thread_id: '01a0aaaa-0000-7000-8000-000000000001', turn_id: '01a072b0-bd02-7202-9560-c5ac2cb37b8b', item: { type: 'ImageView', id: 'exec-fc9387a4-6df5-4b06-9f60-ed7b69463d26', path: 'file:///home/user/workspace/project/orbiter-preview.png' }, started_at_ms: 1788632249751, completed_at_ms: 1788632249751 } },
+  };
+  const mm = new CodexMessageManager('ws0153');
+  const msgs = mm.convertHistory([F.search, F.other, F.openPage, F.findInPage, F.empty]);
+  const cards = msgs.filter((m) => m.role === 'tool');
+  ok('0.153.4: every Extension web.search item_completed rebuilds as a complete search card (it rendered NONE)', cards.length === 5 && cards.every((m) => m.collapseKind === 'search' && m.status === 'complete' && m.toolStatus === 'ok'), JSON.stringify(cards.map((m) => [m.collapseKind, m.status])));
+  const c0 = cards[0]?.content?.[0];
+  ok('the card is keyed by the Extension item id (exec-…) with the final query + the v2 action OBJECT in its input', c0?.toolCallId === 'exec-56d2e923-6249-4d3e-8b7b-705f745169ab' && c0.input.query.startsWith('site:www.example1.org technical') && c0.input.action?.type === 'search' && c0.input.action.queries.length === 4, JSON.stringify(c0?.input));
+  ok('results render as title — url / snippet blocks', c0?.output.startsWith('eSprinter | Mercedes-Benz Vans — https://www.example5.org/en/esprinter\non a 2025 eSprinter Cargo Van. ... Whether') && c0.output.split('\n\n').length === 3, JSON.stringify(c0?.output));
+  ok("action {type:'other'} (query '', real record): no head, the page results still render", cards[1]?.content?.[0]?.output.startsWith('EV Range & Batteries | Ram Electric — https://www.example7.org/electric/range-and-batteries.html\nTotal lines: 99'), JSON.stringify(cards[1]?.content?.[0]?.output));
+  ok("v2 camelCase openPage → 'opened <url>' head + results", cards[2]?.content?.[0]?.output === 'opened https://www.example9.org/shop\n\nShop Infinity Showers — The Infinity Shower — https://www.example9.org/shop\nTotal lines: 217\n\nResource Center — The Infinity Shower — https://www.example9.org/care\nTotal lines: 273', JSON.stringify(cards[2]?.content?.[0]?.output));
+  ok("v2 findInPage with url:null → \"found '<pattern>'\" (no fake location) + results", cards[3]?.content?.[0]?.output.startsWith("found 'openable window'\n\nwww.example10.org — https://www.example10.org/documents/"), JSON.stringify(cards[3]?.content?.[0]?.output));
+  ok("results: [] (real record) → 'no results' — the ONLY shape that supports the claim", cards[4]?.content?.[0]?.output === 'no results', JSON.stringify(cards[4]?.content?.[0]?.output));
+  ok('no system card / no unknown-record path for the handled kinds', !msgs.some((m) => m.role === 'system'));
+  // live + rollout = ONE card under the SAME exec-… id: wrapper function_call at item/started (empty stub),
+  // wrapper web_search_end at item/completed (v2 item relayed, camelCase action), then the rollout's own
+  // item_completed copy on re-attach → one create, edits on the same id
+  const live = new CodexMessageManager('ws0153live'); const ops = []; live.onOp((o) => ops.push(o));
+  const oid = F.openPage.payload.item.id;
+  live.processLive({ timestamp: '2026-09-05T17:58:18.906Z', type: 'response_item', payload: { type: 'function_call', name: 'web_search', arguments: '{"query":"","action":null}', call_id: oid } });
+  ok('live: the item/started stub is a pending search card', live.messages.filter((m) => m.role === 'tool').length === 1 && live.messages.find((m) => m.role === 'tool').status === 'pending');
+  live.processLive({ timestamp: '2026-09-05T17:58:19.544Z', type: 'event_msg', payload: { type: 'web_search_end', call_id: oid, query: F.openPage.payload.item.query, action: F.openPage.payload.item.action, results: F.openPage.payload.item.results } });
+  live.processLive(F.openPage);
+  const lc = live.messages.filter((m) => m.role === 'tool');
+  ok('live wrapper end + the rollout Extension copy = ONE complete card (one create, edits on the same id), opened-head rendered', lc.length === 1 && lc[0].status === 'complete' && lc[0].content[0].output.startsWith('opened https://www.example9.org/shop') && ops.filter((o) => o.op === 'create').length === 1 && ops.filter((o) => o.op === 'edit').every((o) => o.id === lc[0].id), JSON.stringify([lc.length, ops.map((o) => o.op)]));
+  // unknown Extension kinds: telemetry ONCE per kind (the generic skip swallowed them silently); known kinds never.
+  // 'web.sleep' is SYNTHETIC — the census of all 25 local 0.153.4 rollouts has exactly TWO Extension kinds
+  // (web.search 245, image_gen.generation 3), so an unseen kind is the negative control for the next one upstream adds.
+  const prevEv = global.__vsEvent; const names = []; global.__vsEvent = (n) => names.push(n);
+  const u = new CodexMessageManager('ws0153u');
+  const sleep = (id) => ({ ...F.other, payload: { ...F.other.payload, item: { type: 'Extension', kind: 'web.sleep', id, seconds: 2 } } });
+  u.convertHistory([sleep('exec-s1'), sleep('exec-s2'), F.search, F.imageGen, F.imageView]);
+  global.__vsEvent = prevEv;
+  ok("an unknown Extension kind fires 'codex-unknown-record:item_completed:<kind>' ONCE per kind and renders nothing; web.search / image_gen / ImageView never fire it", names.filter((n) => n === 'codex-unknown-record:item_completed:web.sleep').length === 1 && !names.some((n) => /web\.search|image_gen|ImageView/.test(n)) && !u.messages.some((m) => m.role === 'system'), JSON.stringify(names));
+  const ig = u.messages.find((m) => m.content?.[0]?.toolCallId === F.imageGen.payload.item.id);
+  ok("Extension image_gen.generation (0.153.4 persists it nowhere else) → the image_gen card: prompt in, status + saved path out, the 3 MB base64 NEVER copied", ig && ig.status === 'complete' && ig.collapseKind === null && ig.content[0].input.prompt.startsWith('Use case: stylized-concept') && ig.content[0].output === 'status: completed\nsaved /home/user/.codex/generated_images/01a0aaaa-0000-7000-8000-000000000001/exec-187fe7b0-73fc-493a-95f8-0c4a10c9d6e4.png' && !JSON.stringify(ig).includes('base64'), JSON.stringify(ig?.content));
+  const iv = u.messages.find((m) => m.content?.[0]?.toolCallId === F.imageView.payload.item.id);
+  ok("ImageView item_completed (no view_image function_call in any 0.153.4 rollout) → the view_image card path, file:// stripped", iv && iv.status === 'complete' && iv.collapseKind === 'image' && iv.content[0].output === 'viewed /home/user/workspace/project/orbiter-preview.png' && iv.content[0].input.path === '/home/user/workspace/project/orbiter-preview.png', JSON.stringify(iv?.content));
+  const cm = require('node:fs').readFileSync(REPO + '/src/codex-message-manager.js', 'utf8');
+  ok('item_completed stays in the exported generic skip set (test-codex-0153 audit) but is DISPATCHED before it', CodexMessageManager.SKIPPED_EVENT_TYPES.has('item_completed') && /if \(type === 'item_completed'\) return this\._processItemCompleted\(event, emit\);[\s\S]*if \(SKIPPED_EVENT_TYPES\.has\(type\)\) return;/.test(cm));
+}
+
+// ── ⑤ 0.120.0 / 0.125.0 twin pairing on REAL sequences (verifier: base 59 cards,
+// branch 62 on rollout-2026-04-14T03-14-36 — the {type:'other'} end and its
+// action-less call twin keyed apart, a second empty card per search).
+{
+  // verbatim lines 6417-6421 + 6430-6431 of rollout-2026-04-14T03-14-36 (cli_version 0.120.0; encrypted reasoning shortened)
+  const enc = (s) => ({ type: 'response_item', payload: { type: 'reasoning', summary: [], content: null, encrypted_content: s } });
+  const twin = new CodexMessageManager('ws0120');
+  const tm = twin.convertHistory([
+    { timestamp: '2026-04-14T23:13:32.583Z', ...enc('gAAAAABp3socWLBDT7uLWtfw3aIH7_ZX0sFMD9L24qSH8…') },
+    { timestamp: '2026-04-14T23:13:34.318Z', type: 'event_msg', payload: { type: 'web_search_end', call_id: 'ws_0b4984ba8f2fc2580169deca1c909c819bbcfd78384888fef1', query: '', action: { type: 'other' } } },
+    { timestamp: '2026-04-14T23:13:34.318Z', type: 'response_item', payload: { type: 'web_search_call', status: 'completed' } },
+    { timestamp: '2026-04-14T23:13:34.638Z', ...enc('gAAAAABp3soee_zQ1cpo2zzGTRbRqgSh2s_tV223jLeY…') },
+    { timestamp: '2026-04-14T23:13:36.620Z', type: 'event_msg', payload: { type: 'web_search_end', call_id: 'ws_0b4984ba8f2fc2580169deca1e9e90819b9a3951a38d5e0051', query: '', action: { type: 'other' } } },
+    { timestamp: '2026-04-14T23:13:36.620Z', type: 'response_item', payload: { type: 'web_search_call', status: 'completed' } },
+    { timestamp: '2026-04-14T23:13:48.316Z', ...enc('gAAAAABp3sosq8AK6b6hlmjx2M5-mBfn5Fg_FsoMUyDt…') },
+    { timestamp: '2026-04-14T23:13:50.402Z', type: 'event_msg', payload: { type: 'web_search_end', call_id: 'ws_0b4984ba8f2fc2580169deca2c4c7c819b8ccc11effbdd5e62', query: '', action: { type: 'other' } } },
+    { timestamp: '2026-04-14T23:13:50.402Z', type: 'response_item', payload: { type: 'web_search_call', status: 'completed' } },
+  ]);
+  const tc = tm.filter((m) => m.role === 'tool');
+  ok("0.120.0: an end with action {type:'other'} + its action-less web_search_call twin = ONE card each (3 pairs → 3 cards, not 6)", tc.length === 3 && tc.every((m) => m.status === 'complete' && m.collapseKind === 'search' && m.content[0].toolCallId.startsWith('ws_0b4984ba')), JSON.stringify(tc.map((m) => [m.content[0].toolCallId, m.content[0].input, m.content[0].output])));
+  ok("…and none of them claims 'no results' or renders the owner's empty {\"query\":\"\",\"action\":null} card", tc.every((m) => m.content[0].output === 'status: completed' && m.content[0].input.action?.type === 'other'), JSON.stringify(tc.map((m) => m.content[0].output)));
+  // an orphan action-less call with NO end on the previous line still renders (rollout-2026-04-14T17-37-37 line 598, 0.120.0)
+  const orphan = new CodexMessageManager('ws0120o');
+  const om = orphan.convertHistory([
+    { timestamp: '2026-04-15T01:01:48.300Z', type: 'response_item', payload: { type: 'web_search_call', status: 'completed' } },
+  ]).filter((m) => m.role === 'tool');
+  ok('an orphan action-less web_search_call (no end before it) still renders its status card', om.length === 1 && om[0].content[0].output === 'status: completed');
+
+  // PATTERN replays (scripts/fixtures/codex-web-search-patterns.json — the real record order + action identity of
+  // three rollouts, distilled read-only; queries synthesised per identity, no text carried). expectedCards is
+  // ground truth computed OUTSIDE the normalizer (ends + calls − adjacent action-matching twins).
+  const pat = JSON.parse(require('node:fs').readFileSync(REPO + '/scripts/fixtures/codex-web-search-patterns.json', 'utf8'));
+  const actionOf = (n, t) => t === 'search' ? { type: 'search', query: `q${n}`, queries: [`q${n}`, `q${n} alt`] } : t === 'open_page' ? { type: 'open_page', url: `https://example.org/p${n}` } : { type: 'find_in_page', url: `https://example.org/p${n}`, pattern: `needle ${n}` };
+  const queryOf = (n, t) => t === 'search' ? `q${n}` : t === 'open_page' ? `https://example.org/p${n}` : `'needle ${n}' in https://example.org/p${n}`;
+  const expand = (tokens, tag) => tokens.map((tok, i) => {
+    const ts = new Date(1776000000000 + i * 1000).toISOString();
+    if (tok === 'E~') return { timestamp: ts, type: 'event_msg', payload: { type: 'web_search_end', call_id: `ws_${tag}_${i}`, query: '', action: { type: 'other' } } };
+    if (tok === 'C-') return { timestamp: ts, type: 'response_item', payload: { type: 'web_search_call', status: 'completed' } };
+    const m = /^([EC])(\d+):(\w+)$/.exec(tok);
+    if (m[1] === 'E') return { timestamp: ts, type: 'event_msg', payload: { type: 'web_search_end', call_id: `ws_${tag}_${i}`, query: queryOf(m[2], m[3]), action: actionOf(m[2], m[3]) } };
+    return { timestamp: ts, type: 'response_item', payload: { type: 'web_search_call', status: 'completed', action: actionOf(m[2], m[3]) } };
+  });
+  for (const r of pat.rollouts) {
+    const recs = expand(r.tokens, r.cli_version.replace(/\./g, ''));
+    const m = new CodexMessageManager('ws' + r.cli_version);
+    const c = m.convertHistory(recs).filter((x) => x.role === 'tool');
+    ok(`${r.file.slice(0, 27)} (cli_version ${r.cli_version}): ${r.ends} ends + ${r.calls} calls, ${r.adjacentTwins} adjacent twins → ${r.expectedCards} cards`, r.tokens.length === r.ends + r.calls && c.length === r.expectedCards, `${c.length} cards from ${recs.length} records`);
+    ok(`…no card on that file claims 'no results' (0.120-0.130 never persist results) and every card is a complete search`, !c.some((x) => x.content[0].output === 'no results') && c.every((x) => x.status === 'complete' && x.collapseKind === 'search'), JSON.stringify(c.filter((x) => x.content[0].output === 'no results').length));
+  }
+  ok('the 0.125.0 pattern is the hard one: 96 ORPHAN calls first (some identical in a row), then 104 end+call twins', pat.rollouts[1].tokens.slice(0, 96).every((t) => t.startsWith('C')) && pat.rollouts[1].tokens[96].startsWith('E'));
+  // 0.130.0 is the mirror shape — 12 ORPHAN ENDS inside the window (an end whose next
+  // search record is another end): the slot must be overwritten, never left to pair a
+  // later call with a stale end (whole file: 1524 ends + 1324 calls ⇒ 1524 cards)
+  const p130 = pat.rollouts.find((r) => r.cli_version === '0.130.0');
+  let orphanEnds = 0;
+  for (let i = 0; i < p130.tokens.length; i++) if (p130.tokens[i].startsWith('E') && !(p130.tokens[i + 1] || '').startsWith('C')) orphanEnds++;
+  ok('the 0.130.0 window carries ORPHAN ENDS (the shape no other rollout has) and its twins are interleaved with them', orphanEnds === 12 && p130.ends === 106 && p130.calls === 94 && p130.expectedCards === 106, JSON.stringify({ orphanEnds, ends: p130.ends, calls: p130.calls }));
 }
 
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);
