@@ -123,10 +123,10 @@ const src = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-trust-src-'));
 fs.cpSync(path.join(REPO, 'docs/examples/hello-plugin'), path.join(src, 'hello'), { recursive: true });
 const inst = await post('/api/plugins/install', { source: 'path', value: path.join(src, 'hello') });
 ok(inst.status === 200 && inst.body.plugin?.id === 'example.hello' && inst.body.plugin.install?.source === 'path' && !inst.body.replaced && fs.existsSync(path.join(pdir('example.hello'), 'vibespace-plugin.json')), 'install from a local path lands under data/plugins/<id> with the source recorded', inst.body);
-ok((await row('example.hello')).contributes.settings.length === 1 && (await row('example.hello')).contributes.themes[0].ok === true && !(await row('example.hello')).needsConsent, 'the shipped example contributes a setting + a theme and needs no consent');
-ok((await post('/api/plugins/manifests/example.hello/enabled', { enabled: true })).status === 200 && await waitFor(async () => (await row('example.hello')).state === 'running', 25000), 'the installed example runs');
+ok((await row('example.hello')).contributes.settings.length === 1 && (await row('example.hello')).contributes.themes[0].ok === true && (await row('example.hello')).needsConsent, 'the shipped example contributes a setting + a theme, and needs consent for its agent tool (2.369.43: a shim on every session PATH is a capability)');
+ok((await post('/api/plugins/manifests/example.hello/enabled', { enabled: true, trusted: true })).status === 200 && await waitFor(async () => (await row('example.hello')).state === 'running', 25000), 'the installed example runs');
 const inst2 = await post('/api/plugins/install', { source: 'path', value: path.join(src, 'hello') });
-ok(inst2.status === 200 && inst2.body.replaced === true && inst2.body.previous && fs.existsSync(path.join(inst2.body.previous, 'plugin', 'vibespace-plugin.json')) && fs.existsSync(path.join(inst2.body.previous, 'why.json')), 'reinstalling MOVES the previous copy to data/plugins-trash (never deleted) and keeps the plugin enabled');
+ok(inst2.status === 200 && inst2.body.replaced === true && !inst2.body.disabled && (await row('example.hello')).trusted && inst2.body.previous && fs.existsSync(path.join(inst2.body.previous, 'plugin', 'vibespace-plugin.json')) && fs.existsSync(path.join(inst2.body.previous, 'why.json')), 'reinstalling the IDENTICAL package MOVES the previous copy to data/plugins-trash (never deleted) and keeps the plugin enabled + trusted', inst2.body);
 ok(await waitFor(async () => (await row('example.hello')).state === 'running', 25000), '…and restarts it (a fresh child, not the crash-backoff path)');
 fs.symlinkSync('/etc', path.join(src, 'hello', 'etc-link'));
 const sym = await post('/api/plugins/install', { source: 'path', value: path.join(src, 'hello') });
@@ -145,6 +145,7 @@ with zipfile.ZipFile(out, 'w') as z:
 const fd = new FormData(); fd.append('source', 'zip'); fd.append('value', 'hello.vsp'); fd.append('file', new Blob([fs.readFileSync(vsp)]), 'hello.vsp');
 const zr = await fetch(base_ + '/api/plugins/install', { method: 'POST', body: fd }); const zb = await zr.json();
 ok(zr.status === 200 && zb.plugin?.id === 'example.hello' && zb.replaced === true && zb.plugin.install.source === 'zip', 'a .vsp upload (multipart) installs, unwrapping the single top-level folder', zb);
+ok(zb.disabled === true && !(await row('example.hello')).enabled && !(await row('example.hello')).trusted, 'replacing an enabled plugin from a DIFFERENT source drops its consent (2.369.43 — consent covers a package, not an id)', zb);
 const evil = path.join(src, 'evil.vsp');
 execFileSync('python3', ['-c', `import zipfile,sys
 with zipfile.ZipFile(sys.argv[1], 'w') as z:
@@ -156,8 +157,9 @@ ok(er.status === 400 && /path traversal/.test(eb.error) && !fs.existsSync(path.j
 const up0 = await post('/api/plugins/manifests/example.hello/update', {});
 ok(up0.status === 400 && /uploaded file/.test(up0.body.error), 'update of a zip-installed plugin explains that a new upload replaces it');
 await post('/api/plugins/install', { source: 'path', value: path.join(src, 'hello') });
+await post('/api/plugins/manifests/example.hello/enabled', { enabled: true, trusted: true }); // the source swap above dropped consent — re-give it, then Update must keep it
 const up = await post('/api/plugins/manifests/example.hello/update', {});
-ok(up.status === 200 && up.body.plugin?.id === 'example.hello' && up.body.previous && (await row('example.hello')).install.updatedAt, 'update re-runs the recorded source (path) and trashes the previous copy');
+ok(up.status === 200 && up.body.plugin?.id === 'example.hello' && up.body.previous && (await row('example.hello')).install.updatedAt && (await row('example.hello')).trusted, 'update re-runs the recorded source (path), trashes the previous copy and KEEPS consent (the owner asked for this version from the source they already trusted; a changed capability surface still trips the drift check)');
 ok((await post('/api/plugins/manifests/example.hello/update', {})).status === 200 && (await post('/api/plugins/manifests/nope.nope/update', {})).status === 404, 'update: unknown id → 404');
 const stateFile = path.join(root, 'data', 'plugins-state', 'example.hello', 'counter.json');
 // the update just restarted the plugin process — wait for it (gate flake: POST /x/count raced a 'starting' state)

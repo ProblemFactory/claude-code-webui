@@ -54,7 +54,11 @@ let m = await j('/api/plugins/manifests');
 ok(m.status === 200 && m.body.plugins.some((p) => p.id === 'example.hello' && p.valid && !p.enabled), 'manifests lists the example plugin (valid, disabled by default)');
 ok(m.body.plugins.some((p) => p.id === 'broken.one' && !p.valid && p.errors.length), 'an invalid manifest is listed LOUDLY with its errors (never silently skipped)');
 ok((await j('/plugins/example.hello/index.html')).status === 404, 'assets are 404 while disabled');
-const en = await j('/api/plugins/manifests/example.hello/enabled', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: true }) });
+// contributed agent tools are a declared capability since 2.369.43 (the shim is
+// a program on every session's PATH, outside the plugin sandbox) → consent gate
+const noConsent = await j('/api/plugins/manifests/example.hello/enabled', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: true }) });
+ok(noConsent.status === 409 && noConsent.body.consentRequired === true && noConsent.body.capabilities.some((c) => c.id === 'agent-tools'), 'a plugin contributing agent tools cannot be enabled without consent (409 naming the tools)', noConsent.body);
+const en = await j('/api/plugins/manifests/example.hello/enabled', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: true, trusted: true }) });
 ok(en.status === 200 && en.body.plugin.enabled, 'enable persists and starts the plugin');
 ok(fs.existsSync(path.join(root, 'data', 'plugin-registry.json')), 'registry is written atomically to data/plugin-registry.json');
 ok(await waitFor(async () => (await j('/api/plugins/manifests')).body.plugins.find((p) => p.id === 'example.hello').state === 'running'), 'the forked server process says hello → state running');

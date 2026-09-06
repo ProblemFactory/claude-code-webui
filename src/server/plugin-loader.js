@@ -30,11 +30,17 @@
 //     only permitted source); with neither they fail with a clear message.
 //   • contributes.settings / contributes.themes are validated here and exposed
 //     on the manifest list; theme JSON files are served at /plugins/<id>/<file>.
-// CONSENT: enabling a `module` plugin or any plugin with declared capabilities
-// needs { trusted: true } on the enable request (the panel shows the
-// capability list first). The registry stores { trusted, trustedAt,
-// capabilitiesHash }; a manifest whose consent-relevant surface later changes
-// hashes differently → disabled at discovery with a notice, re-prompted.
+// CONSENT: enabling a `module` plugin, any plugin with declared capabilities,
+// or any plugin contributing agent tools needs { trusted: true } on the enable
+// request (the panel shows the capability list first). The registry stores
+// { trusted, trustedAt, capabilitiesHash }; a manifest whose consent-relevant
+// surface later changes hashes differently → disabled at discovery with a
+// notice, re-prompted. CONSENT IS PER PACKAGE, NOT PER ID (2.369.43): the
+// install record carries the package's contentHash, and installing over an
+// existing id keeps enabled/trust only when the package is byte-identical AND
+// from the same recorded source — otherwise it is new code behind a trusted
+// name, so it lands disabled with a notice (update() = the owner pulling the
+// source they already chose, consent rides along).
 // State: data/plugin-registry.json { enabled, trust, installs } (atomic).
 // Every change broadcasts `plugins-manifests-updated` (multi-client law).
 // Uninstall NEVER deletes: plugin dir + state dir move to data/plugins-trash/.
@@ -51,6 +57,8 @@ const { fork } = require('child_process');
 const { validateManifest, needsConsent, capabilitySummary, capabilitiesHash } = require('../plugin-manifest');
 
 const SANDBOX_CSP = "sandbox allow-scripts allow-popups allow-downloads allow-modals allow-forms";
+const PROXY_CSP = "sandbox; default-src 'none'";   // proxied route replies are DATA on the app origin — never a live document
+const DOCUMENT_CT = /^\s*(?:text\/html|application\/xhtml\+xml|image\/svg\+xml|text\/xml|application\/xml)\b/i;
 const IPC_TIMEOUT_MS = 30000;
 const MAX_CRASHES = 5;          // within CRASH_WINDOW_MS ⇒ parked (a crash loop must not hammer the box)
 const CRASH_WINDOW_MS = 10 * 60 * 1000;
@@ -62,7 +70,19 @@ function writeJsonAtomic(file, obj) {
   fs.writeFileSync(tmp, JSON.stringify(obj, null, 2));
   fs.renameSync(tmp, file);
 }
+const STOPPING = Symbol('vibespace.plugin.intentional-stop'); // per-CHILD mark: this process is being stopped on purpose
 const httpErr = (status, msg, payload) => Object.assign(new Error(msg), { status, payload });
+
+/** JS source literal for ANY manifest-supplied value. JSON.stringify escapes
+ *  quotes/backslashes/control characters but leaves U+2028/U+2029 (legal in a
+ *  string literal only since ES2019, and a statement terminator everywhere
+ *  else) — the shims run on remote hosts under whatever node is there, so both
+ *  get \uXXXX'd. The ONLY way manifest text may enter generated code. */
+function jsLiteral(v) {
+  return JSON.stringify(v === undefined ? null : v).replace(/[\u2028\u2029]/g, (c) => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
+}
+/** The tool's args schema as one JSON string (never a code fragment). */
+function jsonOf(v) { try { return JSON.stringify(v ?? {}); } catch { return '{}'; } }
 
 /** Theme file contract = the custom-theme shape ThemeManager.registerCustomTheme
  *  takes: { css: { '--var': 'value' }, terminal?: { background, … } }. Same
@@ -189,9 +209,14 @@ function create({ rootDir, app, broadcast = () => {}, agentEnv = () => ({ ...pro
       rec.child = null;
       for (const [, p] of rec.pending) { clearTimeout(p.timer); p.reject(new Error('plugin process exited')); }
       rec.pending.clear();
-      const wanted = rec.enabled && !rec._stopping;
+      // PER-CHILD stop mark (2.369.43): rec._stopping was one flag for a
+      // record that can hold TWO live children — while an old child was still
+      // exiting (SIGTERM…SIGKILL, up to 3s), a freshly started child that
+      // crashed at once read the OLD child's flag and was filed as an
+      // intentional stop: no crash count, no lastError, no restart. The mark
+      // belongs to the child that is being stopped.
+      const wanted = rec.enabled && !child[STOPPING];
       rec.state = wanted ? 'crashed' : 'stopped';
-      rec._stopping = false;
       if (wanted) {
         rec.crashes.push(Date.now());
         rec.lastError = classifyExit(rec.errTail, code, signal);
@@ -215,12 +240,12 @@ function create({ rootDir, app, broadcast = () => {}, agentEnv = () => ({ ...pro
     // >10s on the CI runner. The exit handler ignores a child that is no
     // longer rec.child, so nulling it here is exactly the intentional-stop mark.
     rec.child = null; rec.state = 'stopped';
-    rec._stopping = true;
+    child[STOPPING] = true;
     try { child.send({ t: 'shutdown' }); } catch { }
     const killer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { } }, 3000);
     killer.unref?.();
     try { child.kill('SIGTERM'); } catch { }
-    child.once('exit', () => { clearTimeout(killer); rec._stopping = false; });
+    child.once('exit', () => { clearTimeout(killer); });
   }
   function onChildMessage(rec, m) {
     if (!m || typeof m !== 'object') return;
@@ -262,15 +287,23 @@ function create({ rootDir, app, broadcast = () => {}, agentEnv = () => ({ ...pro
     for (const f of existing) if (!wanted.has(f)) { try { fs.unlinkSync(path.join(shimDir, f)); } catch { } }
     const baked = bakedInstanceUrl();
     for (const [name, { rec, t }] of wanted) {
+      // NEVER interpolate manifest free text into generated CODE (2.369.43): a
+      // lone CR / U+2028 / U+2029 in a description ends a `//` comment and the
+      // rest of it becomes executable JavaScript in a file that runs OUTSIDE
+      // the plugin sandbox with the session token in its env. Description and
+      // args ride jsLiteral() — a JSON string constant with every line
+      // terminator escaped — and the comment header carries only the
+      // regex-validated id/tool slugs.
       const body = `#!/usr/bin/env node
 // GENERATED by VibeSpace (plugin ${rec.id} tool "${t.name}") — do not edit; regenerated on every plugin change.
-// ${t.description.replace(/\n/g, ' ')}
-// Usage: ${name} [--key value ...] | ${name} '<json args>'    (args schema: ${JSON.stringify(t.args).replace(/\n/g, ' ')})
+// Usage: ${name} [--key value ...] | ${name} '<json args>'    (run with --help for the description + args schema)
+const DESCRIPTION = ${jsLiteral(t.description)};
+const ARGS_SCHEMA = ${jsLiteral(jsonOf(t.args))};
 const argv = process.argv.slice(2);
 let args = {};
 if (argv.length === 1 && /^\\s*\\{/.test(argv[0])) { try { args = JSON.parse(argv[0]); } catch { console.error('args must be JSON or --key value pairs'); process.exit(2); } }
 else { for (let i = 0; i < argv.length; i++) { const a = argv[i]; if (a.startsWith('--')) { const k = a.slice(2); const v = (i + 1 < argv.length && !argv[i + 1].startsWith('--')) ? argv[++i] : true; args[k] = v; } } }
-if (argv.includes('--help') || argv.includes('-h')) { console.log(${JSON.stringify(t.description)}); console.log('args: ' + ${JSON.stringify(JSON.stringify(t.args))}); process.exit(0); }
+if (argv.includes('--help') || argv.includes('-h')) { console.log(DESCRIPTION); console.log('args: ' + ARGS_SCHEMA); process.exit(0); }
 // Call-back address: the session's own channel first (VIBESPACE_API — on a remote
 // host this is the reverse tunnel back to the instance), else the instance's
 // PUBLIC URL baked in when this shim was generated. Never a guess.
@@ -333,16 +366,31 @@ fetch(api + '/api/agent/plugin-tool/${rec.id}/${t.name}', { method: 'POST', head
 
   async function install({ source, value, file } = {}) {
     const r = await installer.install({ source, value, file });
-    registry.installs[r.id] = { source: r.source, value: r.value, installedAt: registry.installs[r.id]?.installedAt || Date.now(), updatedAt: registry.installs[r.id] ? Date.now() : null };
+    const prevInst = registry.installs[r.id] || null;
+    // CONSENT DOES NOT TRANSFER TO NEW CODE (2.369.43): `enabled` and `trust`
+    // are keyed by plugin ID, so installing a DIFFERENT package that declares
+    // an already-trusted id used to inherit both — auto-enabled, still trusted,
+    // its client module served same-origin without a single dialog (a manifest
+    // that copies the trusted one's capability surface even keeps
+    // capabilitiesHash identical, so the drift check never fires). The consent
+    // fast path survives only for a byte-identical package from the SAME
+    // recorded source; anything else is new code and must be reviewed again.
+    const sameSource = !!prevInst && prevInst.source === r.source && prevInst.value === r.value;
+    const sameContent = !!prevInst && !!prevInst.contentHash && prevInst.contentHash === r.contentHash;
+    const reconsent = r.replaced && !(sameSource && sameContent) && (!!registry.enabled[r.id] || !!registry.trust[r.id]);
+    if (reconsent) { registry.enabled[r.id] = false; delete registry.trust[r.id]; }
+    registry.installs[r.id] = { source: r.source, value: r.value, contentHash: r.contentHash || null, installedAt: prevInst?.installedAt || Date.now(), updatedAt: prevInst ? Date.now() : null };
     saveRegistry();
     const prev = plugins.get(r.id);
     if (prev) stopChild(prev);
     discover();
     const rec = plugins.get(r.id);
+    if (rec && reconsent) { rec.notice = 'replaced by a different package — review what it asks for and enable it again'; log.warn?.(`[plugins] ${r.id}: ${rec.notice}`); tele('plugin-replaced-untrusted', r.id); }
     if (rec?.enabled) { rec.crashes = []; startChild(rec); }
     syncShims(); notify();
     tele('plugin-install', `${source} ${r.id}@${r.version}${r.replaced ? ' (replaced)' : ''}`);
-    return { plugin: list().find((p) => p.id === r.id), replaced: r.replaced, previous: r.previous, warnings: r.warnings };
+    const plugin = list().find((p) => p.id === r.id);
+    return { plugin, replaced: r.replaced, previous: r.previous, warnings: r.warnings, disabled: reconsent, consentRequired: reconsent && !!plugin?.needsConsent, notice: reconsent ? rec?.notice || null : null };
   }
   function uninstall(id) {
     const rec = plugins.get(id);
@@ -364,7 +412,11 @@ fetch(api + '/api/agent/plugin-tool/${rec.id}/${t.name}', { method: 'POST', head
     if (inst.source === 'zip') throw httpErr(400, `"${id}" was installed from an uploaded file — upload the new .vsp through Install plugin… (it replaces the installed copy)`);
     stopChild(rec);
     const r = await installer.install({ source: inst.source, value: inst.value, expectId: id });
-    registry.installs[id] = { ...inst, value: r.value, updatedAt: Date.now() }; saveRegistry();
+    // Update = the owner deliberately pulling a new version of THIS plugin from
+    // the source they already chose; consent rides along (a changed capability
+    // surface still trips the discovery drift check). The new fingerprint must
+    // be recorded, or a later reinstall would compare against a stale one.
+    registry.installs[id] = { ...inst, value: r.value, contentHash: r.contentHash || null, updatedAt: Date.now() }; saveRegistry();
     discover();
     const fresh = plugins.get(id);
     if (fresh?.enabled) { fresh.crashes = []; startChild(fresh); }
@@ -438,15 +490,29 @@ fetch(api + '/api/agent/plugin-tool/${rec.id}/${t.name}', { method: 'POST', head
       res.type(MIME[path.extname(fp).toLowerCase()] || 'application/octet-stream');
       fs.createReadStream(fp).pipe(res);
     });
-    // proxied plugin routes (server tier) — after cookie auth like every /api/*
+    // proxied plugin routes (server tier) — after cookie auth like every /api/*.
+    // The reply is DATA on the APP ORIGIN, never a document: a plugin that is
+    // enabled without consent picked its own content-type, so
+    // `contentType: 'text/html'` + a <script> was same-origin XSS against
+    // VibeSpace itself (2.369.43). Every proxied reply rides nosniff + an
+    // opaque-origin sandbox CSP, and a document type from an untrusted plugin
+    // is served as text (loudly, once per plugin). Plugin UI belongs in ui/.
     app.all('/api/plugins/:id/x/*', async (req, res) => {
       const rec = plugins.get(String(req.params.id));
       if (!rec || !rec.enabled || !rec.manifest?.contributes?.routes) return res.status(404).json({ error: 'plugin route not found' });
       try {
         const r = await ask(rec, { t: 'route', method: req.method, path: '/' + String(req.params[0] || ''), query: req.query || {}, headers: { 'content-type': req.headers['content-type'] || '' }, body: req.body ?? null });
         const status = Number(r.status) || 200;
+        res.setHeader('X-Content-Type-Options', 'nosniff');
+        res.setHeader('Content-Security-Policy', PROXY_CSP);
         if (r.body !== undefined && typeof r.body !== 'string') return res.status(status).json(r.body);
-        return res.status(status).type(r.contentType || 'text/plain').send(r.body === undefined ? '' : String(r.body));
+        let ct = String(r.contentType || 'text/plain');
+        if (!/^[\w.+-]+\/[\w.+-]+/.test(ct)) ct = 'text/plain; charset=utf-8'; // not a media type ⇒ express would look it up as an extension
+        if (DOCUMENT_CT.test(ct) && !isTrusted(rec)) {
+          if (!rec._ctWarned) { rec._ctWarned = true; log.warn?.(`[plugins] ${rec.id}: route answered ${ct} — served as text/plain (a document content-type on the app origin needs "Enable (trusted)"); serve UI from ui/ instead`); }
+          ct = 'text/plain; charset=utf-8';
+        }
+        return res.status(status).type(ct).send(r.body === undefined ? '' : String(r.body));
       } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
     });
     // agent tool calls: under /api/agent/ (cookie-exempt like every agent

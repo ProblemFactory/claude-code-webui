@@ -387,6 +387,9 @@ export function installPluginsUI(App) {
         }
         if (!res || res.error) return fail(res?.error || t('Install failed'));
         showToast(t('Installed {id} {version}', { id: res.plugin?.id || '', version: res.plugin?.version || '' }) + (res.replaced ? ' · ' + t('previous copy moved to trash') : ''));
+        // A replacement that is not the same package drops the old consent —
+        // say so, or the plugin silently comes back disabled (2.369.43).
+        if (res.disabled) showToast(t('This is a different package under the same id — it was left disabled. Review what it asks for and enable it again.'), { type: 'warn' });
         for (const w of res.warnings || []) showToast(w, { type: 'warn' });
         close(); onDone?.();
       } catch (e) { fail(e.message); }

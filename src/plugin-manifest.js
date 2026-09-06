@@ -35,6 +35,15 @@
 //                   "net": ["host", …] }                                        declared ONLY — node's permission model does not restrict network
 //     }
 //   }
+// 2.369.43 (security review) — three rules this file OWNS:
+//   • every free-text field goes through cleanText(): manifest text ends up in
+//     generated agent-tool shims, and a CR / U+2028 / U+2029 used to end the
+//     `//` comment there and execute the rest.
+//   • declared fs paths are COLLAPSED (duplicate slashes, `.` segments) before
+//     the forbidden-root test — node's permission model collapses them, so
+//     `/home/u//vibespace/data` and `/./` were grants nobody checked.
+//   • needsConsent covers contributed agentTools: a shim is a program on every
+//     session's PATH (local, ssh hosts, paired devices), outside the sandbox.
 const ID_RE = /^[a-z0-9][a-z0-9-]*\.[a-z0-9][a-z0-9-]*$/;
 const SLUG_RE = /^[a-z0-9][a-z0-9-]*$/;
 const KEY_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
@@ -58,16 +67,49 @@ function safeRelPath(p) {
   return true;
 }
 
+/** Free manifest TEXT (descriptions, labels, titles) is shown to humans AND —
+ *  for agent-tool descriptions — copied into generated files. Control
+ *  characters and the JS line terminators U+2028/U+2029 have no place in any of
+ *  them: a lone CR once ended a `//` comment in a generated shim and turned the
+ *  rest of the description into executable code (2.369.43). One choke point:
+ *  every free-text field in a manifest goes through here. */
+function cleanText(v, max) {
+  if (typeof v !== 'string') return '';
+  return v.replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
+}
+
+/** Collapse a POSIX path the way Node's permission model does before it
+ *  compares grants: duplicate slashes and `.` segments disappear (`/./` grants
+ *  `/`, `/a//b` grants `/a/b`). Returns null when a `..` segment survives.
+ *  MUST run before any prefix test — comparing the raw string let
+ *  `/home/u//vibespace/data` and `/./` slip past the forbidden roots. */
+function collapsePosixPath(p) {
+  const out = [];
+  for (const seg of String(p).split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') return null;
+    out.push(seg);
+  }
+  return '/' + out.join('/');
+}
+
 /** Normalize one declared fs path: absolute or `~`-rooted, no `..`, and never
  *  inside a forbidden root (the VibeSpace data dir / repo root). Returns
  *  { path } or { error }. `homeDir` expands `~` (falsy = keep literal). */
 function normalizeFsPath(raw, { homeDir = null, forbiddenRoots = [] } = {}) {
   if (typeof raw !== 'string' || !raw.trim()) return { error: 'must be a non-empty string' };
   let p = raw.trim();
-  if (p === '~' || p.startsWith('~/')) p = homeDir ? String(homeDir).replace(/\/+$/, '') + p.slice(1) : p;
+  const tilde = p === '~' || p.startsWith('~/');
+  if (tilde) p = homeDir ? String(homeDir).replace(/\/+$/, '') + p.slice(1) : p;
   else if (!p.startsWith('/')) return { error: `"${raw}" must be absolute or start with ~/` };
   if (p.split('/').some((seg) => seg === '..')) return { error: `"${raw}" must not contain ".."` };
-  if (p.length > 1) p = p.replace(/\/+$/, '');
+  if (p.startsWith('/')) {
+    const collapsed = collapsePosixPath(p);
+    if (collapsed === null) return { error: `"${raw}" must not contain ".."` };
+    p = collapsed;
+  } else if (p.length > 1) p = p.replace(/\/+$/, ''); // literal ~/… (no homeDir): trailing slashes only
+  // after collapsing nothing may still hide a slash trick — a belt on the braces
+  if (p.includes('//') || /(^|\/)\.(\/|$)/.test(p)) return { error: `"${raw}" is not a plain absolute path` };
   for (const root of forbiddenRoots || []) {
     const rp = typeof root === 'string' ? root : root?.path;
     const label = typeof root === 'string' ? root : (root?.label || root?.path);
@@ -97,8 +139,8 @@ function validateManifest(raw, { hostVersion = null, folderName = null, homeDir 
   const eng = raw.engines && typeof raw.engines === 'object' ? raw.engines.vibespace : undefined;
   if (typeof eng !== 'string' || !SEMVER_RE.test(eng)) errors.push('engines.vibespace must name the minimum host version (x.y.z)');
   else { m.engines = { vibespace: eng }; if (hostVersion && compareVersions(hostVersion, eng) < 0) errors.push(`requires VibeSpace ≥ ${eng} (this host is ${hostVersion})`); }
-  m.description = typeof raw.description === 'string' ? raw.description.slice(0, 500) : '';
-  m.label = typeof raw.label === 'string' && raw.label.trim() ? raw.label.trim().slice(0, 60) : (m.id ? m.id.split('.').slice(1).join('.') : '');
+  m.description = cleanText(raw.description, 500);
+  m.label = cleanText(raw.label, 60) || (m.id ? m.id.split('.').slice(1).join('.') : '');
   if (raw.icon !== undefined) {
     if (typeof raw.icon === 'string' && raw.icon.trimStart().startsWith('<svg') && raw.icon.length <= 4096 && !/<script|on[a-z]+=|javascript:|<foreignObject/i.test(raw.icon)) m.icon = raw.icon;
     else warnings.push('icon ignored: must be an inline <svg …> ≤ 4 KiB with no scripts/handlers');
@@ -124,7 +166,7 @@ function validateManifest(raw, { hostVersion = null, folderName = null, homeDir 
       if (typeof w.title !== 'string' || !w.title.trim()) errors.push(`contributes.windows[${i}].title required`);
       if (!safeRelPath(w.entry) || !/\.html?$/i.test(w.entry)) errors.push(`contributes.windows[${i}].entry must be a relative .html path inside ui/`);
       if (m.client === 'none') errors.push(`contributes.windows[${i}] needs client: "iframe" (or "module")`);
-      m.contributes.windows.push({ id: String(w.id), title: String(w.title || '').slice(0, 80), entry: String(w.entry || ''), singleton: w.singleton !== false });
+      m.contributes.windows.push({ id: String(w.id), title: cleanText(w.title, 80), entry: String(w.entry || ''), singleton: w.singleton !== false });
     });
   }
   if (c.agentTools !== undefined) {
@@ -135,7 +177,7 @@ function validateManifest(raw, { hostVersion = null, folderName = null, homeDir 
       if (typeof t.description !== 'string' || !t.description.trim()) errors.push(`contributes.agentTools[${i}].description required (agents read it)`);
       if (t.args !== undefined && (typeof t.args !== 'object' || Array.isArray(t.args))) errors.push(`contributes.agentTools[${i}].args must be a JSON-schema object`);
       if (!m.server) errors.push(`contributes.agentTools[${i}] needs server: true (the tool runs in the plugin's process)`);
-      m.contributes.agentTools.push({ name: String(t.name), description: String(t.description || '').slice(0, 400), args: t.args && typeof t.args === 'object' ? t.args : { type: 'object', properties: {} } });
+      m.contributes.agentTools.push({ name: String(t.name), description: cleanText(t.description, 400), args: t.args && typeof t.args === 'object' ? t.args : { type: 'object', properties: {} } });
     });
   }
   if (m.contributes.routes && !m.server) errors.push('contributes.routes needs server: true');
@@ -152,7 +194,7 @@ function validateManifest(raw, { hostVersion = null, folderName = null, homeDir 
         seen.add(s.key);
         if (!SETTING_TYPES.includes(s.type)) return errors.push(`${at}.type must be one of ${SETTING_TYPES.join('|')}`);
         if (typeof s.label !== 'string' || !s.label.trim()) return errors.push(`${at}.label required`);
-        const out = { key: s.key, type: s.type, label: String(s.label).slice(0, 80), description: typeof s.description === 'string' ? s.description.slice(0, 300) : '' };
+        const out = { key: s.key, type: s.type, label: cleanText(s.label, 80), description: cleanText(s.description, 300) };
         if (s.type === 'boolean') { if (typeof s.default !== 'boolean') return errors.push(`${at}.default must be true|false`); out.default = s.default; }
         else if (s.type === 'number') {
           if (typeof s.default !== 'number' || !Number.isFinite(s.default)) return errors.push(`${at}.default must be a number`);
@@ -187,7 +229,7 @@ function validateManifest(raw, { hostVersion = null, folderName = null, homeDir 
         seen.add(th.id);
         if (typeof th.label !== 'string' || !th.label.trim()) return errors.push(`${at}.label required`);
         if (!safeRelPath(th.file) || !/\.json$/i.test(th.file)) return errors.push(`${at}.file must be a relative .json path inside the plugin dir`);
-        m.contributes.themes.push({ id: th.id, label: String(th.label).trim().slice(0, 40), file: th.file });
+        m.contributes.themes.push({ id: th.id, label: cleanText(th.label, 40), file: th.file });
       });
     }
   }
@@ -224,14 +266,23 @@ function validateManifest(raw, { hostVersion = null, folderName = null, homeDir 
   return { ok: errors.length === 0, errors, warnings, manifest: errors.length ? null : m };
 }
 
-/** True when enabling this plugin must go through the consent dialog: a
- *  trusted (same-origin) client module, or any server-side power beyond the
- *  loader's implicit sandbox (plugin dir + data dir). */
+/** True when the manifest declares server-side power beyond the loader's
+ *  implicit sandbox (plugin dir + data dir). */
 function hasDeclaredCapabilities(m) {
   const s = m?.capabilities?.server || {};
   return !!(s.fs?.read?.length || s.fs?.write?.length || s.childProcess || s.net?.length);
 }
-function needsConsent(m) { return !!m && (m.client === 'module' || hasDeclaredCapabilities(m)); }
+/** Contributed agent tools are a CAPABILITY, not a convenience (2.369.43):
+ *  each one becomes an executable `data/bin/vibespace-tool-<id>-<name>` on
+ *  every session's PATH — local, on every ssh host and on every paired device —
+ *  running OUTSIDE the plugin's `node --permission` sandbox with the session's
+ *  token in its env. That is a bigger grant than the sandboxed process itself,
+ *  so it goes through the consent dialog like the other declared powers. */
+function contributesAgentTools(m) { return !!(m?.contributes?.agentTools?.length); }
+/** True when enabling this plugin must go through the consent dialog: a
+ *  trusted (same-origin) client module, any server-side power beyond the
+ *  loader's implicit sandbox, or contributed agent tools. */
+function needsConsent(m) { return !!m && (m.client === 'module' || hasDeclaredCapabilities(m) || contributesAgentTools(m)); }
 
 /**
  * Plain-words capability list for the consent dialog — the SAME items on the
@@ -248,11 +299,11 @@ function capabilitySummary(m) {
   else if (m.client === 'iframe') items.push({ id: 'client-iframe', text: 'Sandboxed UI: its windows run in an isolated origin and cannot read this page.', params: {} });
   if (m.server) items.push({ id: 'server-process', text: 'Runs its own server process, confined to its plugin folder and its data folder.', params: {} });
   if (s.fs?.read?.length) items.push({ id: 'fs-read', text: 'Server: read files under {paths}', params: { paths: s.fs.read.join(', ') } });
-  if (s.fs?.write?.length) items.push({ id: 'fs-write', text: 'Server: write files under {paths}', params: { paths: s.fs.write.join(', ') } });
+  if (s.fs?.write?.length) items.push({ id: 'fs-write', text: 'Server: write AND read files under {paths}', params: { paths: s.fs.write.join(', ') } }); // write implies read in the permission args — the summary must say so
   if (s.childProcess) items.push({ id: 'child-process', text: 'Server: run other programs (child processes) — those programs are NOT confined and can reach anything the server user can.', params: {} });
   if (s.net?.length) items.push({ id: 'net', text: 'Server: network access to {hosts} — declared only; the sandbox does not restrict network access.', params: { hosts: s.net.join(', ') } });
   const tools = (m.contributes?.agentTools || []).map((t) => t.name);
-  if (tools.length) items.push({ id: 'agent-tools', text: 'Adds agent tools every session can call: {names}', params: { names: tools.join(', ') } });
+  if (tools.length) items.push({ id: 'agent-tools', text: 'Adds agent tools every session can call: {names} — installed as programs on every session\'s PATH (this machine, ssh hosts and paired devices) and run OUTSIDE the plugin sandbox.', params: { names: tools.join(', ') } });
   if (!items.length) items.push({ id: 'none', text: 'No special capabilities declared.', params: {} });
   return items;
 }
@@ -281,4 +332,4 @@ function capabilitiesHash(m) {
   return fnv1a(subject, 0x811c9dc5) + fnv1a(subject.split('').reverse().join(''), 0x9747b28c);
 }
 
-module.exports = { validateManifest, compareVersions, safeRelPath, normalizeFsPath, hasDeclaredCapabilities, needsConsent, capabilitySummary, capabilitiesHash, ID_RE, CLIENT_TIERS, SETTING_TYPES };
+module.exports = { validateManifest, compareVersions, safeRelPath, normalizeFsPath, cleanText, hasDeclaredCapabilities, contributesAgentTools, needsConsent, capabilitySummary, capabilitiesHash, ID_RE, CLIENT_TIERS, SETTING_TYPES };

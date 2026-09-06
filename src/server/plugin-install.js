@@ -16,7 +16,14 @@
 // move into place. A previous copy of the same id is MOVED to the trash, never
 // deleted — same for uninstall: data/plugins-trash/<id>-<ts>/{plugin,state}.
 // ORCH tier. Pure staging helpers are exported for the test suite.
+// 2.369.43: the walk + the copy are ASYNC (an owner-supplied path must never
+// block the event loop), auditTree also returns a package contentHash (the
+// loader's "is this the same package?" test for reinstall consent), and the
+// uploaded temp file is removed on EVERY exit path (the source whitelist used
+// to throw above the try/finally).
 const fs = require('fs');
+const fsp = require('fs/promises');
+const crypto = require('crypto');
 const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
@@ -26,6 +33,7 @@ const MANIFEST = 'vibespace-plugin.json';
 const MAX_ZIP_BYTES = 50 * 1024 * 1024;       // upload / release asset cap
 const MAX_PACKAGE_BYTES = 200 * 1024 * 1024;  // unpacked cap (path/git/zip)
 const MAX_PACKAGE_FILES = 20000;
+const MAX_PACKAGE_DEPTH = 32;                 // a bounded walk (symlinks are refused, but depth is still capped)
 const GIT_TIMEOUT_MS = 60000;
 const GIT_HTTPS_RE = /^https:\/\/[A-Za-z0-9.-]+(?::\d+)?\/[A-Za-z0-9._\/-]+$/;
 const GIT_SSH_RE = /^(?:ssh:\/\/)?[A-Za-z0-9._-]+@[A-Za-z0-9.-]+(?::\d+)?[:/][A-Za-z0-9._\/-]+$/;
@@ -40,22 +48,52 @@ const run = (cmd, args, opts = {}) => new Promise((resolve, reject) => {
 
 const httpErr = (status, msg) => Object.assign(new Error(msg), { status });
 
-/** Walk a directory tree: refuse symlinks, count files/bytes, cap both. */
-function auditTree(root, { maxFiles = MAX_PACKAGE_FILES, maxBytes = MAX_PACKAGE_BYTES } = {}) {
+/** Walk a directory tree: refuse symlinks, count files/bytes, cap both, and
+ *  (opt-in) fingerprint the CONTENT — sha256 over `relpath\0size\0filehash` in
+ *  sorted order. That fingerprint is the installer's answer to "is this the
+ *  same package?", which is what lets the loader decide whether an existing
+ *  plugin's consent may survive a reinstall.
+ *  ASYNC BY LAW (2.369.43): this walks an OWNER-SUPPLIED path — the old sync
+ *  walk + sync ≤200 MB copy blocked the whole instance's event loop (the "never
+ *  block the event loop" law; three past outages came from exactly this). Depth
+ *  is bounded too: symlinks are refused, but a pathological tree must not
+ *  recurse without a limit. */
+async function auditTree(root, { maxFiles = MAX_PACKAGE_FILES, maxBytes = MAX_PACKAGE_BYTES, maxDepth = MAX_PACKAGE_DEPTH, hash = true } = {}) {
   let files = 0, bytes = 0;
-  const walk = (dir) => {
-    for (const d of fs.readdirSync(dir, { withFileTypes: true })) {
+  const entries = [];
+  const walk = async (dir, depth) => {
+    if (depth > maxDepth) throw httpErr(400, `package nests deeper than ${maxDepth} directories`);
+    for (const d of await fsp.readdir(dir, { withFileTypes: true })) {
       const p = path.join(dir, d.name);
       if (d.isSymbolicLink()) throw httpErr(400, `package contains a symlink (${path.relative(root, p)}) — symlinks are refused in plugin packages`);
-      if (d.isDirectory()) { walk(p); continue; }
+      if (d.isDirectory()) { await walk(p, depth + 1); continue; }
       if (!d.isFile()) throw httpErr(400, `package contains a non-regular file (${path.relative(root, p)})`);
-      files++; bytes += fs.statSync(p).size;
+      const st = await fsp.stat(p);
+      files++; bytes += st.size;
       if (files > maxFiles) throw httpErr(413, `package has more than ${maxFiles} files`);
       if (bytes > maxBytes) throw httpErr(413, `package is larger than ${Math.round(maxBytes / 1048576)} MB`);
+      entries.push({ rel: path.relative(root, p), size: st.size, abs: p });
     }
   };
-  walk(root);
-  return { files, bytes };
+  await walk(root, 0);
+  let contentHash = null;
+  if (hash) {
+    const h = crypto.createHash('sha256');
+    for (const e of entries.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0))) h.update(`${e.rel}\0${e.size}\0${await hashFile(e.abs)}\n`);
+    contentHash = h.digest('hex');
+  }
+  return { files, bytes, contentHash };
+}
+
+/** sha256 of one file, STREAMED (a 200 MB readFile would spike memory). */
+function hashFile(p) {
+  return new Promise((resolve, reject) => {
+    const h = crypto.createHash('sha256');
+    const s = fs.createReadStream(p);
+    s.on('error', reject);
+    s.on('data', (c) => h.update(c));
+    s.on('end', () => resolve(h.digest('hex')));
+  });
 }
 
 /** The directory inside `stage` that holds the manifest: the root, or a single
@@ -70,15 +108,15 @@ function findPackageRoot(stage) {
 function expandTilde(p) { return p === '~' || p.startsWith('~/') ? path.join(os.homedir(), p.slice(1)) : p; }
 
 // ── staging per source (each returns the directory holding the manifest) ──
-function stageFromPath(value, stage) {
+async function stageFromPath(value, stage) {
   const src = path.resolve(expandTilde(String(value || '').trim()));
   if (!src || src === '/') throw httpErr(400, 'path: give the directory that holds vibespace-plugin.json');
-  let st; try { st = fs.statSync(src); } catch { throw httpErr(400, `path: ${src} does not exist`); }
+  let st; try { st = await fsp.stat(src); } catch { throw httpErr(400, `path: ${src} does not exist`); }
   if (!st.isDirectory()) throw httpErr(400, `path: ${src} is not a directory`);
   if (!fs.existsSync(path.join(src, MANIFEST))) throw httpErr(400, `path: ${src} has no ${MANIFEST}`);
-  auditTree(src); // refuse symlinks + size before copying anything
+  await auditTree(src, { hash: false }); // refuse symlinks + size before copying anything (the STAGED copy is what gets fingerprinted)
   const dest = path.join(stage, 'pkg');
-  fs.cpSync(src, dest, { recursive: true, verbatimSymlinks: true, filter: (p) => path.basename(p) !== '.git' });
+  await fsp.cp(src, dest, { recursive: true, verbatimSymlinks: true, filter: (p) => path.basename(p) !== '.git' });
   return dest;
 }
 
@@ -94,7 +132,7 @@ async function stageFromGit(value, stage) {
     await run('git', args, { timeout: GIT_TIMEOUT_MS, env: { PATH: process.env.PATH, HOME: process.env.HOME, GIT_TERMINAL_PROMPT: '0', GIT_SSH_COMMAND: 'ssh -o BatchMode=yes' } });
   } catch (e) { throw httpErr(400, `git clone failed: ${e.message}${e.code === null || /timed?\s*out|ETIMEDOUT/i.test(e.message) ? ' (60s limit)' : ''}`); }
   try { fs.rmSync(path.join(dest, '.git'), { recursive: true, force: true }); } catch { }
-  auditTree(dest);
+  await auditTree(dest, { hash: false });
   return dest;
 }
 
@@ -117,7 +155,7 @@ async function stageFromZip(zipPath, stage) {
   fs.mkdirSync(dest, { recursive: true });
   try { await run('unzip', ['-q', '-o', zipPath, '-d', dest], { timeout: 120000 }); }
   catch (e) { if (!(e.code === 1)) throw httpErr(400, `unzip failed: ${e.message}`); } // exit 1 = warnings only
-  auditTree(dest);
+  await auditTree(dest, { hash: false });
   return dest;
 }
 
@@ -187,41 +225,50 @@ function create({ rootDir, hostVersion = null, forbiddenRoots = [], log = consol
   /**
    * Install (or replace) from a source. `expectId` (update) refuses a package
    * whose id differs from the record being updated.
-   * @returns {{ id, version, dir, replaced: boolean, previous: string|null, source, value, warnings }}
+   * `contentHash` fingerprints the staged package so the loader can tell a
+   * byte-identical reinstall from a DIFFERENT package claiming the same id.
+   * @returns {{ id, version, dir, replaced: boolean, previous: string|null, source, value, contentHash, warnings }}
    */
   async function install({ source, value, file = null, expectId = null } = {}) {
-    source = String(source || '').trim();
-    if (!['path', 'git', 'zip', 'github-release'].includes(source)) throw httpErr(400, 'source must be path | git | zip | github-release');
-    fs.mkdirSync(stagingDir, { recursive: true });
-    const stage = fs.mkdtempSync(path.join(stagingDir, 'st-'));
-    let resolvedValue = value;
+    // The uploaded temp file is cleaned in EVERY exit path — the source
+    // whitelist used to throw ABOVE the try/finally, so a bad `source` left the
+    // multipart upload sitting in os.tmpdir() forever (2.369.43).
     try {
-      let pkgDir;
-      if (source === 'path') pkgDir = stageFromPath(value, stage);
-      else if (source === 'git') pkgDir = await stageFromGit(value, stage);
-      else if (source === 'zip') {
-        if (!file) throw httpErr(400, 'zip: upload the .vsp file as the multipart field "file"');
-        pkgDir = await stageFromZip(file, stage);
-        resolvedValue = path.basename(String(value || file));
-      } else { const r = await stageFromGithubRelease(value, stage); pkgDir = r.dir; resolvedValue = r.resolvedValue; }
-      const root = findPackageRoot(pkgDir);
-      let raw;
-      try { raw = JSON.parse(fs.readFileSync(path.join(root, MANIFEST), 'utf-8')); }
-      catch (e) { throw httpErr(400, `${MANIFEST}: ${e.message}`); }
-      const v = validateManifest(raw, { hostVersion, homeDir: os.homedir(), forbiddenRoots });
-      if (!v.ok) throw httpErr(400, `invalid manifest: ${v.errors.join('; ')}`);
-      const id = v.manifest.id;
-      if (expectId && id !== expectId) throw httpErr(409, `the package is "${id}" but this record is "${expectId}" — install it as a new plugin instead`);
-      if (v.manifest.server && !fs.existsSync(path.join(root, 'server.js'))) throw httpErr(400, 'manifest says server: true but the package has no server.js');
-      const target = path.join(pluginsDir, id);
-      const replaced = fs.existsSync(target);
-      const previous = replaced ? trash(id, { reason: expectId ? 'update' : 'reinstall' }) : null;
-      fs.mkdirSync(pluginsDir, { recursive: true });
-      moveDir(root, target);
-      log.log?.(`[plugins] installed ${id}@${v.manifest.version} from ${source}${replaced ? ' (previous copy in trash)' : ''}`);
-      return { id, version: v.manifest.version, dir: target, replaced, previous, source, value: resolvedValue, warnings: v.warnings };
+      source = String(source || '').trim();
+      if (!['path', 'git', 'zip', 'github-release'].includes(source)) throw httpErr(400, 'source must be path | git | zip | github-release');
+      fs.mkdirSync(stagingDir, { recursive: true });
+      const stage = fs.mkdtempSync(path.join(stagingDir, 'st-'));
+      let resolvedValue = value;
+      try {
+        let pkgDir;
+        if (source === 'path') pkgDir = await stageFromPath(value, stage);
+        else if (source === 'git') pkgDir = await stageFromGit(value, stage);
+        else if (source === 'zip') {
+          if (!file) throw httpErr(400, 'zip: upload the .vsp file as the multipart field "file"');
+          pkgDir = await stageFromZip(file, stage);
+          resolvedValue = path.basename(String(value || file));
+        } else { const r = await stageFromGithubRelease(value, stage); pkgDir = r.dir; resolvedValue = r.resolvedValue; }
+        const root = findPackageRoot(pkgDir);
+        let raw;
+        try { raw = JSON.parse(fs.readFileSync(path.join(root, MANIFEST), 'utf-8')); }
+        catch (e) { throw httpErr(400, `${MANIFEST}: ${e.message}`); }
+        const v = validateManifest(raw, { hostVersion, homeDir: os.homedir(), forbiddenRoots });
+        if (!v.ok) throw httpErr(400, `invalid manifest: ${v.errors.join('; ')}`);
+        const id = v.manifest.id;
+        if (expectId && id !== expectId) throw httpErr(409, `the package is "${id}" but this record is "${expectId}" — install it as a new plugin instead`);
+        if (v.manifest.server && !fs.existsSync(path.join(root, 'server.js'))) throw httpErr(400, 'manifest says server: true but the package has no server.js');
+        const { contentHash } = await auditTree(root); // the fingerprint of what actually lands on disk
+        const target = path.join(pluginsDir, id);
+        const replaced = fs.existsSync(target);
+        const previous = replaced ? trash(id, { reason: expectId ? 'update' : 'reinstall' }) : null;
+        fs.mkdirSync(pluginsDir, { recursive: true });
+        moveDir(root, target);
+        log.log?.(`[plugins] installed ${id}@${v.manifest.version} from ${source}${replaced ? ' (previous copy in trash)' : ''}`);
+        return { id, version: v.manifest.version, dir: target, replaced, previous, source, value: resolvedValue, contentHash, warnings: v.warnings };
+      } finally {
+        try { fs.rmSync(stage, { recursive: true, force: true }); } catch { }
+      }
     } finally {
-      try { fs.rmSync(stage, { recursive: true, force: true }); } catch { }
       if (file) { try { fs.rmSync(file, { force: true }); } catch { } }
     }
   }
