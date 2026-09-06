@@ -1674,6 +1674,9 @@ const { decideCliRefresh } = require('./src/account-pool-auto.js');
 }
 // Normalizer-level settings reads (chat.hideEmptyHooks) go through the REAL store
 MessageManager.getSetting = (k) => { try { return serverSetting(k); } catch { return undefined; } };
+// codex 0.153 thread/read fallback (B-21e4 item 5): the codex store's warmTranscript may run ONE
+// bounded `codex app-server` read for a thread that has no rollout file here (disabled when codex is absent)
+require('./src/codex-thread-read').configure({ codexCmd: CODEX_CMD || null, enabled: !!CODEX_CMD });
 const { getOAuthToken, usagePollingEnabled, summarizeCodexRateLimit, summarizeCodexRateLimits } = usage;
 app.locals.harnessAvailability = harnessAvailability; app.get('/api/available-models', (req, res) => { // S8: /api/home reads harnessAvailability (installed ACP harnesses for the picker)
   refreshCodexModels(); // mtime-guarded local read — stays current despite old-CLI cache rewrites

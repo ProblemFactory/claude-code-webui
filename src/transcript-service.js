@@ -128,9 +128,10 @@ function createTranscriptService({ activeSessions, createSessionMessages, hosts 
   async function view(ref) {
     const r = norm(ref);
     await refreshRemote(r);
-    if (r.backend === 'claude') {
-      try { await warmSessionJsonlAsync(r.sessionId, r.cwd); } catch { }
-    }
+    // through the harness descriptor (S3): claude = worker parse-cache warm,
+    // codex = the 0.153 thread/read fallback for a MISSING rollout (B-21e4
+    // item 5, local only); a harness without the hook skips
+    try { const warm = harnessOf(r.backend || 'claude').store?.warmTranscript; if (warm) await warm(r.sessionId, r.cwd, { remote: !!r.host }); } catch { }
     const session = liveSession(r);
     // An attach rebuild in flight: join it instead of converting again
     // (review-caught: the HTTP side re-entered the exact sync stall the

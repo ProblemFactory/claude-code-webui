@@ -8,7 +8,8 @@ const { createMessageManager, feedLive, feedPeerCard, rebuildHistory } = require
 const { createWsHeartbeat } = require('./server/ws-heartbeat');
 const { listCodexThreads } = require('./codex-session-store');
 const { findCodexSessionJsonlPath, extractCodexThreadMeta } = require('./adapters/codex');
-const { cwdToProjectDir, findSessionJsonlPath, warmSessionJsonlAsync } = require('./session-store');
+const { cwdToProjectDir, findSessionJsonlPath } = require('./session-store');
+const { get: harnessOf } = require('./harnesses'); // S3: store.warmTranscript per harness (claude parse-cache warm / codex thread/read fallback)
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -813,9 +814,12 @@ function registerWsHandler(wss, ctx) {
                 // instead of blocking the loop ~0.5-1s per big-tail parse
                 // (the userL-incident spike class). Codex sessions parse
                 // their own rollouts sync (unwarmed) — smaller files today.
-                if ((session.backend || 'claude') === 'claude') {
-                  try { await warmSessionJsonlAsync(session.claudeSessionId || session.backendSessionId, session.cwd); } catch {}
-                }
+                // …through the harness descriptor (S3): claude = the worker parse
+                // cache warm above; codex = the 0.153 thread/read FALLBACK for a
+                // MISSING rollout (B-21e4 item 5, local only — the local
+                // app-server knows no remote thread); a harness without the
+                // hook skips. Never throws, never blocks the loop (child process).
+                try { const warm = harnessOf(session.backend || 'claude').store?.warmTranscript; if (warm) await warm(session.claudeSessionId || session.backendSessionId, session.cwd, { remote: !!session.host }); } catch {}
                 // TIME-SLICED + single-flight (2.369.16, userW inc-mtndq0vb):
                 // the old sync convertHistory blocked the loop for seconds per
                 // multi-MB transcript — after a restart, a reconnect storm of
@@ -939,6 +943,11 @@ function registerWsHandler(wss, ctx) {
               }
               catch (e) { console.error('remote jsonl fetch failed:', e.message); }
             }
+            // The harness's pre-read hook (S3 store.warmTranscript): claude warms
+            // its worker parse cache, codex reads a MISSING rollout through
+            // thread/read (B-21e4 item 5, local only) — a dead 0.153 thread whose
+            // history lives only in codex's paginated store still opens read-only.
+            try { const warm = harnessOf(data.backend || 'claude').store?.warmTranscript; if (warm) await warm(backendSessionId, data.cwd || '', { remote: !!data.host }); } catch {}
             const sm = createSessionMessages({
               backend: data.backend || 'claude',
               backendSessionId,

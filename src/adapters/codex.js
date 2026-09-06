@@ -586,7 +586,10 @@ function readJsonlLineRange(fp, startLine, endLine) {
 
 function parseCodexSessionJsonl(threadId) {
   const fp = findCodexSessionJsonlPath(threadId);
-  if (!fp) return [];
+  // MISSING ROLLOUT (B-21e4 item 5): serve the thread/read records the store's
+  // warmTranscript hook cached (0.153 paginated history with no rollout file on
+  // this machine). Lazy require — codex-thread-read never requires this module.
+  if (!fp) { try { return require('../codex-thread-read').cachedThreadRecords(threadId) || []; } catch { return []; } }
   const messages = [];
   try {
     // Tail-only: earlier history is seek-loaded on scroll (no seam marker).

@@ -5,6 +5,7 @@ const { CodexAdapter } = require('../adapters/codex');
 const { findCodexSessionJsonlPath, extractCodexThreadMeta } = require('../adapters/codex');
 const { CodexMessageManager } = require('../codex-message-manager');
 const codexStore = require('../codex-session-store');
+const codexThreadRead = require('../codex-thread-read');
 const { writerSweepScript } = require('../writer-sweep');
 const fs = require('fs');
 const os = require('os');
@@ -61,6 +62,13 @@ module.exports = {
     // chain ∪ codex's own 0.153 fork parents cut at their boundary ordinal —
     // what the read-only view prepends (codex-session-store.resolveCodexForkAncestry)
     forkAncestry: (id, wrapperChain) => codexStore.resolveCodexForkAncestry(id, wrapperChain || []),
+    // (id, cwd, {remote}) → Promise<bool>: the pre-read hook consumers await before
+    // constructing a reader (claude warms its worker parse cache here). For codex
+    // it is the 0.153 `thread/read` FALLBACK: a thread with NO rollout file on this
+    // machine is read once from a bounded `codex app-server` child and served by
+    // parseCodexSessionJsonl from the cache (B-21e4 item 5; local only — the local
+    // app-server knows no remote thread; a present rollout is always authoritative).
+    warmTranscript: (id, cwd, opts) => codexThreadRead.warmMissingThread(id, { locate: findCodexSessionJsonlPath, remote: !!(opts && opts.remote) }),
     writerSweep: (rid, shq, opts) => writerSweepScript(rid, shq, { ...(opts || {}), backend: 'codex' }),
     remoteFind: (id) => ({
       root: '"$HOME"/.codex/sessions',

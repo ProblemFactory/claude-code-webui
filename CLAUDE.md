@@ -140,6 +140,7 @@ src/
   message-manager.js — MessageManager (Claude stream-json → normalized messages with stable IDs; 2.368.30 parseBackgroundLaunch=后台启动ack→taskInfo合成, task_*系统subtype只在活流上存在, 落盘的ack+<task-notification>才是历史可用的生命周期真源, session-store taskState扫描共用同一解析器). ⇒ kb-file-structure.md
   codex-message-manager.js — CodexMessageManager (Codex JSON-RPC → normalized messages)
   codex-session-store.js — Codex session discovery (thread listing, JSONL parsing, forkedFrom chain merge)
+  codex-thread-read.js — codex 0.153 `thread/read` fallback for a thread with NO rollout file (paginated history store): pure Thread→records mapper + ONE bounded app-server read behind the descriptor's `store.warmTranscript` hook; local only, cached, never a session (B-21e4). ⇒ kb-file-structure.md
   normalizers.js       — createMessageManager(backend, id) factory for backend-agnostic normalization
   mounts.js — MountManager (rclone mounts, MULTI-SOURCE: typed records s3/drive/onedrive/gmail/webdav/sftp/vibespace/rclone via _rcloneFor; detached + boot adoption; one-click rclone install (data/bin, pinned 1.65.… ⇒ kb-file-structure.md
   gmail-sync.js — GmailSync (2.134.0, backlog B-64db): Gmail-as-a-folder — a 'gmail' mount = local dir of .eml files synced READ-ONLY from the Gmail API (GYB-style; NOT FUSE). ⇒ kb-file-structure.md

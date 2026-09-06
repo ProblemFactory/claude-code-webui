@@ -237,5 +237,93 @@ console.log('— ④ explicit model + effort on EVERY turn/start (resume continu
   ok(/model: meta\.model \|\| undefined,\s*\n\s*effort: effort \|\| undefined,/.test(w) && /if \(!effort && typeof resp\?\.reasoningEffort === 'string' && resp\.reasoningEffort\) \{ effort = resp\.reasoningEffort;/.test(w), 'wrapper pin: turn/start passes model + effort; an uncommanded effort is adopted from the thread reply');
 }
 
+console.log('— ⑤ thread/read fallback for a thread with NO rollout (0.153 paginated history; local only)');
+{
+  const TR = require(path.join(REPO, 'src/codex-thread-read.js'));
+  const { CodexMessageManager } = require(path.join(REPO, 'src/codex-message-manager.js'));
+  const MISSING = '01a07000-0000-7000-8000-00000000aaaa', UNKNOWN = '01a07000-0000-7000-8000-00000000bbbb', OTHER = '01a07000-0000-7000-8000-00000000cccc';
+  // v2 Thread fixture in the 0.153.4 `thread/read {includeTurns:true}` shape (field names from the generated bindings;
+  // the live probe on this machine answered a real thread with exactly these item types)
+  const T0 = 1788600000;
+  const THREAD = { id: MISSING, sessionId: MISSING, forkedFromId: null, parentThreadId: null, preview: 'hello from thread/read', ephemeral: false, historyMode: 'paginated', modelProvider: 'openai', model: 'gpt-6-astra', reasoningEffort: 'ultra', createdAt: T0, updatedAt: T0 + 100, status: { type: 'idle' }, path: null, cwd: '/w', cliVersion: '0.153.4', source: 'appServer', threadSource: null, agentNickname: null, agentRole: null, gitInfo: null, name: 'Van design', turns: [
+    { id: 't1', status: 'completed', error: null, startedAt: T0 + 1, completedAt: T0 + 20, durationMs: 19000, itemsView: 'full', items: [
+      { type: 'userMessage', id: 'u1', clientId: null, content: [{ type: 'text', text: 'hello from thread/read', text_elements: [] }] },
+      { type: 'reasoning', id: 'r1', summary: ['thinking about it'], content: [] },
+      { type: 'commandExecution', id: 'c1', command: 'ls -la', cwd: '/w', status: 'completed', aggregatedOutput: 'total 0', exitCode: 0, durationMs: 5, processId: null, source: 'agent', commandActions: [], pluginId: null, scriptPath: null },
+      { type: 'mcpToolCall', id: 'm1', server: 'github', tool: 'list_issues', status: 'completed', arguments: { repo: 'x/y' }, result: { content: [{ type: 'text', text: '3 issues' }], structuredContent: null, _meta: null }, error: null, durationMs: 9, appContext: null, pluginId: null, readOnlyHint: null },
+      { type: 'fileChange', id: 'f1', changes: [{ path: '/w/a.js', kind: { type: 'update' }, diff: '@@ -1 +1 @@\n-a\n+b' }], status: 'completed' },
+      { type: 'webSearch', id: 'w1', query: 'rv solar', action: { type: 'search', query: 'rv solar' } },
+      { type: 'imageView', id: 'i1', path: '/w/x.png' },
+      { type: 'subAgentActivity', id: 's1', kind: 'started', agentThreadId: '01a07000-0000-7000-8000-0000000000dd', agentPath: '/root/water' },
+      { type: 'agentMessage', id: 'a1', text: 'done: here is the plan', phase: 'final_answer', memoryCitation: null, delivery: null, questions: null },
+    ] },
+    { id: 't2', status: 'failed', error: { message: 'usage limit', codexErrorInfo: 'usage_limit_reached', additionalDetails: null, misalignment: null }, startedAt: T0 + 30, completedAt: T0 + 31, durationMs: 1000, itemsView: 'full', items: [
+      { type: 'userMessage', id: 'u2', clientId: null, content: [{ type: 'text', text: 'second', text_elements: [] }] },
+      { type: 'contextCompaction', id: 'cc1' },
+    ] },
+    { id: 't3', status: 'inProgress', error: null, startedAt: T0 + 40, completedAt: null, durationMs: null, itemsView: 'full', items: [
+      { type: 'userMessage', id: 'u3', clientId: null, content: [{ type: 'text', text: 'third', text_elements: [] }] },
+      { type: 'commandExecution', id: 'c3', command: 'sleep 100', cwd: '/w', status: 'inProgress', aggregatedOutput: null, exitCode: null, durationMs: null, processId: null, source: 'agent', commandActions: [], pluginId: null, scriptPath: null },
+      { type: 'hookPrompt', id: 'h1', fragments: [] },
+    ] },
+  ] };
+  // (a) PURE mapper → the normalizer renders it with the existing card pipeline
+  const recs = TR.threadToRecords(THREAD);
+  ok(recs[0].type === 'session_meta' && recs[0].payload.id === MISSING && recs[0].payload.model === 'gpt-6-astra' && recs[0].payload.read_via === 'thread/read', 'threadToRecords leads with a session_meta (id/model/cwd/history_mode) marked read_via', recs[0].payload);
+  const mm = new CodexMessageManager('tr');
+  mm.convertHistory(recs);
+  const users = mm.messages.filter((m) => m.role === 'user').map((m) => m.content[0].text);
+  ok(JSON.stringify(users) === JSON.stringify(['hello from thread/read', 'second', 'third']) && new Set(mm.messages.filter((m) => m.role === 'user').map((m) => m.turnIndex)).size === 3, 'three turns → three user bubbles on three turn indexes', users);
+  ok(mm.messages.some((m) => m.role === 'assistant' && m.content[0].type === 'text' && m.content[0].text === 'done: here is the plan') && mm.messages.some((m) => m.content[0].type === 'thinking' && /thinking about it/.test(m.content[0].text)), 'agentMessage → assistant text; reasoning summary → thinking block');
+  const tools = Object.fromEntries(mm.messages.filter((m) => m.role === 'tool').map((m) => [m.toolCallId, { k: m.collapseKind, s: m.status, out: m.content[0].output, files: m.content[0].input?.files }]));
+  ok(tools.c1?.k === 'bash' && tools.c1.s === 'complete' && tools.c1.out === 'total 0', 'commandExecution → Bash card with its aggregated output', tools.c1);
+  ok(tools.m1?.k === 'mcp' && tools.m1.s === 'complete' && tools.m1.out === '3 issues', 'mcpToolCall → mcp fold card with the result text', tools.m1);
+  ok(tools.f1?.k === 'write' && tools.f1.s === 'complete' && tools.f1.files?.[0] === '/w/a.js', 'fileChange → apply_patch write card naming the file', tools.f1);
+  ok(tools.w1?.k === 'search' && tools.i1?.k === 'image' && tools['subagent:01a07000-0000-7000-8000-0000000000dd']?.k === 'agent', 'webSearch / imageView / subAgentActivity land in their fold kinds', { w: tools.w1?.k, i: tools.i1?.k });
+  ok(tools.c3?.s === 'pending', 'an inProgress command stays a pending card (the turn is still open)', tools.c3);
+  ok(mm.messages.some((m) => m.isCompact) && mm.messages.some((m) => m.role === 'system' && m.status === 'error' && /usage limit/.test(m.content[0].text)), 'contextCompaction → compaction marker; a failed turn → its error card');
+  ok(TR.threadToRecords(null).length === 0 && TR.itemToRecords({ type: 'someFutureItem', id: 'z' }, '2026-09-05T00:00:00.000Z').length === 0, 'null thread / unknown item kinds map to nothing (never throw)');
+  // (b) the REAL fetch path against a stub app-server (a shell shim standing in for `codex`)
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-cx0153-tr-'));
+  const rpcLog = path.join(dir, 'rpc.jsonl');
+  fs.writeFileSync(path.join(dir, 'stub.js'), `const fs=require('fs');const THREAD=${JSON.stringify(THREAD)};let b='';process.stdin.setEncoding('utf8');process.stdin.on('data',(d)=>{b+=d;let i;while((i=b.indexOf('\\n'))!==-1){const l=b.slice(0,i);b=b.slice(i+1);if(!l.trim())continue;let m;try{m=JSON.parse(l)}catch{continue}fs.appendFileSync(${JSON.stringify(rpcLog)},l+'\\n');if(m.id===undefined||!m.method)continue;if(m.method==='initialize'){process.stdout.write(JSON.stringify({id:m.id,result:{}})+'\\n');continue;}if(m.method==='thread/read'){if(m.params.threadId===THREAD.id&&m.params.includeTurns===true)process.stdout.write(JSON.stringify({id:m.id,result:{thread:THREAD}})+'\\n');else process.stdout.write(JSON.stringify({id:m.id,error:{code:-32600,message:'thread not loaded: '+m.params.threadId}})+'\\n');continue;}process.stdout.write(JSON.stringify({id:m.id,result:{}})+'\\n');}});setInterval(()=>{},1e3);`);
+  const fake = path.join(dir, 'fake-codex');
+  fs.writeFileSync(fake, `#!/bin/sh\n[ "$1" = "app-server" ] || { echo "expected app-server, got $1" >&2; exit 2; }\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(path.join(dir, 'stub.js'))}\n`, { mode: 0o755 });
+  const rpc = () => { try { return fs.readFileSync(rpcLog, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
+  const reads = () => rpc().filter((m) => m.method === 'thread/read').length;
+  TR._resetForTests();
+  TR.configure({ codexCmd: fake, enabled: true });
+  const { HARNESSES } = require(path.join(REPO, 'src/harnesses/index.js'));
+  const warm = HARNESSES.codex.store.warmTranscript;
+  ok(typeof warm === 'function', 'the codex descriptor declares store.warmTranscript (the S3 pre-read hook claude already had)');
+  ok(await warm(MISSING, '/w', { remote: false }) === true && reads() === 1, 'a thread with NO rollout is read through ONE bounded app-server thread/read {includeTurns:true}', rpc().map((m) => m.method));
+  ok(rpc().some((m) => m.method === 'initialize' && m.params?.capabilities?.experimentalApi === true) && rpc().some((m) => m.method === 'initialized'), 'the read handshakes like the wrapper (initialize + initialized)');
+  ok((CX.parseCodexSessionJsonl(MISSING) || []).length === recs.length, 'parseCodexSessionJsonl serves the cached thread/read records when the rollout is missing');
+  const view = new ST.CodexSessionMessages({ backend: 'codex', backendSessionId: MISSING, buffer: '' }, 'tr');
+  ok(texts(view).includes('hello from thread/read') && view.chatStatus()?.model === 'gpt-6-astra', 'the read-only reader (CodexSessionMessages) renders the thread and its chatStatus names the model', { model: view.chatStatus()?.model });
+  ok(await warm(MISSING, '/w', {}) === true && reads() === 1, 'a second warm is a cache hit — no second app-server spawn');
+  ok(await warm(P, '/w', {}) === false && reads() === 1, 'a thread whose rollout EXISTS never triggers thread/read (the file is authoritative)');
+  ok(await warm(UNKNOWN, '/w', {}) === false && reads() === 2 && await warm(UNKNOWN, '/w', {}) === false && reads() === 2, 'an unknown thread (JSON-RPC error) → false, negative-cached (one spawn for two asks)');
+  ok(await warm(OTHER, '/w', { remote: true }) === false && reads() === 2, 'a REMOTE thread never spawns the local app-server (it knows no remote thread)');
+  TR.configure({ enabled: false });
+  ok(await warm(OTHER, '/w', {}) === false && reads() === 2, 'disabled (no codex on this box) → no spawn, honest false');
+  TR.configure({ enabled: true });
+  // timeout: a shim that never answers is killed and rejects within the bound
+  const dead = path.join(dir, 'dead-codex');
+  fs.writeFileSync(dead, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} -e "setInterval(()=>{},1e3)"\n`, { mode: 0o755 });
+  const t0 = Date.now();
+  const err = await TR.readThreadViaAppServer(OTHER, { codexCmd: dead, timeoutMs: 800 }).then(() => null, (e) => e.message);
+  ok(/timed out/.test(err || '') && Date.now() - t0 < 5000, `a silent app-server is killed on the timeout bound (${err})`);
+  fs.rmSync(dir, { recursive: true, force: true });
+  TR._resetForTests();
+  // (c) wiring pins — consumers reach the hook through the DESCRIPTOR (no claude ternary left)
+  const wsh = read('src/ws-handler.js'), tsv = read('src/transcript-service.js');
+  ok((wsh.match(/harnessOf\((?:session|data)\.backend \|\| 'claude'\)\.store\?\.warmTranscript/g) || []).length === 2 && !/if \(\(session\.backend \|\| 'claude'\) === 'claude'\) \{\s*\n\s*try \{ await warmSessionJsonlAsync/.test(wsh), 'ws-handler attach AND view-only paths warm through the descriptor (the claude-only ternary is gone)');
+  ok(/harnessOf\(r\.backend \|\| 'claude'\)\.store\?\.warmTranscript/.test(tsv) && !/if \(r\.backend === 'claude'\) \{\s*\n\s*try \{ await warmSessionJsonlAsync/.test(tsv), 'transcript-service.view warms through the descriptor');
+  ok(/require\('\.\/src\/codex-thread-read'\)\.configure\(\{ codexCmd: CODEX_CMD \|\| null, enabled: !!CODEX_CMD \}\)/.test(read('server.js')), 'server.js configures the fallback with the resolved CODEX_CMD (disabled when codex is absent)');
+  ok(/'src\/codex-thread-read\.js'\]\);/.test(read('scripts/test-architecture.mjs')), 'the module is registered in the SHARED tier');
+  ok(HARNESSES.claude.store.warmTranscript === require(path.join(REPO, 'src/session-store.js')).warmSessionJsonlAsync, 'claude\'s hook is still the worker parse-cache warm (unchanged)');
+}
+
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);
 process.exit(fail ? 1 : 0);
