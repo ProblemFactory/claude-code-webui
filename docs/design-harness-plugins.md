@@ -27,7 +27,7 @@
 | P2 | stdin ack | wrapper 冷启动（大线程 resume）>5s 无输出 → 服务器判 pty 坏、重发同一 chat-input → 就绪后处理两次（重复 user 气泡 + 第二条 steer 第一条） | codex-chat-wrapper.js stdin handler | stdin 行处理器顶部立即 emit `_stdin_ack`（服务端已消费） |
 | P2 ✅2.369.21 | 新手引导 / 计费切换器 / fork | 引导只认 claude 命名账号；切换器 codex 行不显示配额；codex fork 服务端已通但 caps.fork=false | setup-flows.js:265；session-lifecycle usageFor；agent-meta caps | per-backend 计算 namedLoggedIn；usageFor 读 `_codexAccountUsage`；真 wrapper 测过 thread/fork 后翻 caps.fork |
 | P2 | 发现热路径 | 5s /api/sessions 同步走 ~/.codex/sessions 树 + /proc（NFS 下每次 poll 都卡）；localDiscovery 开关对 codex 无效 | codex-session-store.js:46-118 | 走 transcript worker + mtime 缓存；agentd.localDiscovery 时消费 devSnap.codexRollouts |
-| P2 | 远程 / 配对设备 | 远程 codex 线程无名字、host 终端里活着的线程显示 stopped（Resume 造第二个 writer）；无 dial/daemon pipe codex 会话；incident 冻结拿不到 codex 转录 | discovery-facts / remote-shell / incident.js | ssh 脚本与 daemon 快照发 NC/CO 行；R6 按 streamProtocol 路由 pipe 会话；incident 用 findCodexSessionJsonlPath |
+| P2 | 远程 / 配对设备 | 远程 codex 线程无名字、host 终端里活着的线程显示 stopped（Resume 造第二个 writer）；无 dial/daemon pipe codex 会话；incident 冻结拿不到 codex 转录 | discovery-facts / remote-shell / incident.js | ssh 脚本与 daemon 快照发 NC/CO 行；R6 按 streamProtocol 路由 pipe 会话；incident ✅ B-8ebb: incident.js 经 harness 注册表 store.locate/remoteFind 冻结 codex rollout（本机+远程探测, .zst 含），无 backend 三目 |
 | P3 | personality ↔ 输出风格、状态标签、权限模式下拉首帧、effort/model-lock/设置前缀的 id 分支、远程 ⟳、终端 idle 检测、autoResume 设置命名、占位文案、design-kit 教学、host 配额快照、转录 rescue、keeper 重认领、远程活投递、外部 codex 终止、sidecar todos 恢复、workflow 芯片 cap、侧栏 backend 过滤默认 | 各 1 处，见 §附录 A 原始条目 | — | 随 §2 S7（客户端 caps 描述符）与 S3/S4 一起消化 |
 
 外部调研带来的额外硬约束（Codex 侧）：

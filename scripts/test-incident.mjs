@@ -71,6 +71,32 @@ check('frozen copy survives the original being clobbered',
   JSON.parse(fs.readFileSync(path.join(dir2, 'frozen', 'session-meta', 'cw-99-test.json'), 'utf8')).name === 'frozen probe');
 check('pending marker cleared after freeze', !fs.existsSync(path.join(dir2, 'env.json.pending')));
 
+// ── B-8ebb (last row): the freeze reaches CODEX rollouts too — through the
+// harness registry's store.locate (never a codex ternary in incident.js).
+// A codex thread id referenced by the report, its rollout in the remote-jsonl
+// cache (the local ~/.codex tree is the real user's — untouched), must land in
+// env.local.transcripts with identity + a frozen tail, tagged with its harness.
+const TID = '01a07000-0000-7000-8000-0000000000ee';
+const cxCache = path.join(wt, 'data', 'remote-jsonl', 'host-test', 'codex');
+fs.mkdirSync(cxCache, { recursive: true });
+fs.writeFileSync(path.join(cxCache, TID + '.jsonl'), '{"timestamp":"2026-09-05T10:00:00.000Z","ordinal":0,"type":"session_meta","payload":{"id":"' + TID + '","cwd":"/w","cli_version":"0.153.4"}}\n{"timestamp":"2026-09-05T10:00:01.000Z","ordinal":1,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"frozen codex probe"}]}}\n');
+const r3 = await post('/api/incident', { note: 'codex freeze', rings: {}, snapshot: { sessions: [{ id: TID, backend: 'codex', host: 'host-test' }, { id: CID, host: 'host-test' }] } });
+const dir3 = path.join(wt, 'data', 'incidents', r3.id);
+for (let i = 0; i < 60 && !fs.existsSync(path.join(dir3, 'env.json')); i++) await sleep(500);
+const env3 = JSON.parse(fs.readFileSync(path.join(dir3, 'env.json'), 'utf8'));
+const cx = env3.local.transcripts?.[TID];
+check('codex rollout fingerprinted through the harness store (sha256 + size + harness tag)', Array.isArray(cx) && cx.length === 1 && /^[0-9a-f]{64}$/.test(cx[0].sha256 || '') && cx[0].harness === 'codex' && cx[0].size > 0, JSON.stringify(cx));
+check('codex rollout tail frozen to disk (.tail.jsonl named by its cache dir)', fs.readdirSync(path.join(dir3, 'frozen', 'transcripts')).some((f) => f.startsWith(TID) && f.endsWith('.tail.jsonl')));
+check('the frozen codex tail is the real bytes', fs.readFileSync(path.join(dir3, 'frozen', 'transcripts', fs.readdirSync(path.join(dir3, 'frozen', 'transcripts')).find((f) => f.startsWith(TID))), 'utf8').includes('frozen codex probe'));
+check('the claude conversation in the same report still freezes exactly once (locate dedups against the scan)', Array.isArray(env3.local.transcripts?.[CID]) && env3.local.transcripts[CID].length === 1);
+// the remote probe is built from every harness's store.remoteFind — claude's line unchanged, codex's added
+const inc = (await import(path.join(repo, 'src', 'incident.js'))).default || (await import('node:module')).createRequire(import.meta.url)(path.join(repo, 'src', 'incident.js'));
+const probe = inc.buildRemoteTranscriptProbe([CID, TID]);
+check('remote probe: claude find line = the pre-B-8ebb expression', probe.includes(`find "$HOME"/.claude/projects -maxdepth 2 -name "${CID}.jsonl" 2>/dev/null | head -3); do probe_transcript "$f" "claude"; done`), probe.slice(0, 300));
+check('remote probe: codex rollouts (.jsonl and .jsonl.zst) probed under $HOME/.codex/sessions', probe.includes(`rollout-*${TID}.jsonl.zst`) && probe.includes('"$HOME"/.codex/sessions') && probe.includes('probe_transcript "$f" "codex"'), probe.slice(-400));
+check('REMOTE_SCRIPT defines probe_transcript once and embeds the per-harness lines', (() => { const s = inc.REMOTE_SCRIPT([CID]); return s.includes('probe_transcript() {') && s.includes('probe_transcript "$f" "claude"') && !s.includes('$HOME/.claude/projects -maxdepth 2 -name "$cid.jsonl"'); })());
+check('incident.js carries no backend id branch (the registry is the only harness knowledge)', !/['"]codex['"]\s*\?|backend === ['"]codex['"]|=== ['"]claude['"]/.test(fs.readFileSync(path.join(repo, 'src', 'incident.js'), 'utf8')));
+
 // ── 2.239.1: the dialog must actually render its submit button (the boss's
 // "怎么提交" screenshot — shell.footer was undefined, appendChild threw, no
 // button). Drive the REAL dialog in headless chrome and click through it.

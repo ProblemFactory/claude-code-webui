@@ -25,6 +25,11 @@ const os = require('os');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
 
+// The harness registry names where each harness's conversations live
+// (store.locate / store.remoteFind) — the freeze iterates it instead of
+// knowing any backend (B-8ebb). Lazy: incident.js stays importable alone.
+const listHarnesses = () => require('./harnesses').list();
+
 const MAX_HOSTS = 6;
 const MAX_CIDS = 12;
 const META_COPY_MAX = 64 * 1024;      // per session-meta / wrapper-meta file
@@ -156,10 +161,38 @@ async function captureLocal(dir, { dataDir, cids }) {
         if (fs.existsSync(fp)) hits.push(fp);
       }
     } catch {}
-    out.transcripts[cid] = hits.map((fp) => ({
-      path: fp, ...statOf(fp), sha256: sha256Head(fp),
-      frozenTail: copyCapped(fp, path.join(frozen, 'transcripts', `${cid}__${path.basename(path.dirname(fp))}.tail.jsonl`), TRANSCRIPT_TAIL),
-    }));
+    // HARNESS STORES (B-8ebb's last row): every registered harness's
+    // `store.locate(id)` names where ITS conversation lives — codex rollouts
+    // (rollout-*-<tid>.jsonl or .jsonl.zst, local tree or the remote-jsonl
+    // cache) join the freeze with the same identity + frozen tail; claude's
+    // locate resolves to the path the scan above already found (deduped).
+    // Never a codex ternary here — a third harness freezes by registering a
+    // store. Iterated through the registry, per harness try/caught.
+    const harnessOfPath = new Map();
+    try {
+      for (const h of listHarnesses()) {
+        const locate = h.store && typeof h.store.locate === 'function' ? h.store.locate : null;
+        if (!locate) continue;
+        let fp = null;
+        try { fp = locate(cid) || null; } catch { fp = null; }
+        if (!fp || typeof fp !== 'string' || fp.startsWith(' ')) continue;
+        if (!hits.includes(fp)) { try { if (fs.existsSync(fp)) hits.push(fp); } catch { } }
+        if (hits.includes(fp)) harnessOfPath.set(fp, h.id);
+      }
+    } catch (e) { out.transcriptsHarnessError = String(e.message || e).slice(0, 200); }
+    out.transcripts[cid] = hits.map((fp) => {
+      // a .jsonl.zst rollout freezes its raw tail (identity evidence: size +
+      // mtime + sha256 are what prove later divergence); flagged so a reader
+      // knows the tail bytes are compressed, not lines
+      const compressed = /\.zst$/i.test(fp);
+      const ext = compressed ? '.jsonl.zst' : '.jsonl';
+      return {
+        path: fp, ...statOf(fp), sha256: sha256Head(fp),
+        ...(harnessOfPath.has(fp) ? { harness: harnessOfPath.get(fp) } : {}),
+        ...(compressed ? { compressed: true } : {}),
+        frozenTail: copyCapped(fp, path.join(frozen, 'transcripts', `${cid}__${path.basename(path.dirname(fp))}.tail${ext}`), TRANSCRIPT_TAIL),
+      };
+    });
   }
 
   // storage + fs pressure (a full disk explains a whole class of weirdness)
@@ -168,9 +201,38 @@ async function captureLocal(dir, { dataDir, cids }) {
   return out;
 }
 
+/** The remote transcript probe lines, ONE per (conversation × harness) from
+ *  each registered harness's `store.remoteFind(id)` ({root, findExpr} — the
+ *  same expressions hosts.fetchTranscript uses): claude's `$HOME/.claude/projects
+ *  -maxdepth 2 -name "<id>.jsonl"` exactly as before, codex's
+ *  `$HOME/.codex/sessions … rollout-*<id>.jsonl(.zst)` now (B-8ebb). A
+ *  harness without remoteFind contributes nothing. Ids are pre-validated
+ *  ([\\w-]{6,64}) and JSON-quoted inside findExpr by the descriptors. */
+function buildRemoteTranscriptProbe(cids) {
+  const lines = [];
+  let harnesses = [];
+  try { harnesses = listHarnesses(); } catch { harnesses = []; }
+  for (const cid of cids || []) {
+    for (const h of harnesses) {
+      let rf = null;
+      try { rf = h.store && typeof h.store.remoteFind === 'function' ? h.store.remoteFind(cid) : null; } catch { rf = null; }
+      if (!rf || typeof rf.root !== 'string' || typeof rf.findExpr !== 'string') continue;
+      lines.push(`for f in $(find ${rf.root} ${rf.findExpr} 2>/dev/null | head -3); do probe_transcript "$f" ${JSON.stringify(h.id)}; done`);
+    }
+  }
+  return lines.join('\n');
+}
+
 /** REMOTE scene per host — one bounded read-only probe over the SAME channel
  *  the roster/status probes use (ssh or dial), so it works for both. */
 const REMOTE_SCRIPT = (cids) => `
+probe_transcript() {
+  echo "--- $1 [$2]"
+  stat -c 'size=%s mtime=%y' "$1" 2>/dev/null || stat -f 'size=%z mtime=%Sm' "$1" 2>/dev/null
+  echo "lines=$(wc -l < "$1" 2>/dev/null)"
+  echo "sha256=$( (sha256sum "$1" 2>/dev/null || shasum -a 256 "$1" 2>/dev/null) | awk '{print $1}')"
+  echo "lastts=$(tail -c 20000 "$1" 2>/dev/null | grep -ao '"timestamp":"[^"]*"' | tail -3 | tr '\\n' ' ')"
+}
 echo "== uptime"; uptime 2>/dev/null | head -1
 echo "== whoami"; id -un 2>/dev/null
 echo "== claude/dtach/keeper processes"
@@ -180,18 +242,11 @@ for f in $HOME/.claude/sessions/*.json; do [ -f "$f" ] && echo "--- $f" && head 
 echo "== keeper run dir"; ls -la $HOME/.vibespace/run/ 2>/dev/null | head -20
 echo "== agentd"; ls -la $HOME/.vibespace/ 2>/dev/null | head -20
 echo "== transcripts"
-for cid in ${cids.map((c) => `'${c}'`).join(' ')}; do
-  for f in $(find $HOME/.claude/projects -maxdepth 2 -name "$cid.jsonl" 2>/dev/null | head -3); do
-    echo "--- $f"
-    stat -c 'size=%s mtime=%y' "$f" 2>/dev/null || stat -f 'size=%z mtime=%Sm' "$f" 2>/dev/null
-    echo "lines=$(wc -l < "$f" 2>/dev/null)"
-    echo "sha256=$( (sha256sum "$f" 2>/dev/null || shasum -a 256 "$f" 2>/dev/null) | awk '{print $1}')"
-    echo "lastts=$(tail -c 20000 "$f" 2>/dev/null | grep -o '"timestamp":"[^"]*"' | tail -3 | tr '\\n' ' ')"
-  done
-done
+${buildRemoteTranscriptProbe(cids)}
 echo "== project dirs"; ls $HOME/.claude/projects 2>/dev/null | head -30
+echo "== codex sessions"; ls $HOME/.codex/sessions 2>/dev/null | head -10
 echo "== disk"; df -h $HOME 2>/dev/null | tail -2
-echo "== versions"; (claude --version 2>/dev/null || echo "claude: not on PATH"); node --version 2>/dev/null
+echo "== versions"; (claude --version 2>/dev/null || echo "claude: not on PATH"); (codex --version 2>/dev/null || echo "codex: not on PATH"); node --version 2>/dev/null
 `;
 
 async function captureRemote({ hosts, hostIds, cids }) {
@@ -212,4 +267,4 @@ async function captureRemote({ hosts, hostIds, cids }) {
   return out;
 }
 
-module.exports = { captureLocal, captureRemote };
+module.exports = { captureLocal, captureRemote, buildRemoteTranscriptProbe, REMOTE_SCRIPT };
