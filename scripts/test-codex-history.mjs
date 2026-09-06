@@ -852,7 +852,7 @@ const ok = (n, c, e) => { if (c) { pass++; console.log('  ✓ ' + n); } else { f
   ok('the 0.130.0 window carries ORPHAN ENDS (the shape no other rollout has) and its twins are interleaved with them', orphanEnds === 12 && p130.ends === 106 && p130.calls === 94 && p130.expectedCards === 106, JSON.stringify({ orphanEnds, ends: p130.ends, calls: p130.calls }));
 }
 
-// ── view_image in a REAL rollout (2.369.43; shapes verbatim from ~/.codex/sessions,
+// ── view_image in a REAL rollout (2.369.48; shapes verbatim from ~/.codex/sessions,
 // path sanitized): function_call → event_msg view_image_tool_call (formerly
 // SKIPPED) → function_call_output whose output is [{input_image, image_url:data:…}]
 {

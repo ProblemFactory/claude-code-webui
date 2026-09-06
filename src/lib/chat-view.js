@@ -115,7 +115,7 @@ class ChatView {
     // Media-card thumbnails that cannot load (file deleted, or a history viewed
     // from a machine that does not have it) swap to the honest "not available"
     // line — `error` does not bubble, so this is a CAPTURE-phase delegate on
-    // the list (no inline handlers in rendered HTML; 2.369.43)
+    // the list (no inline handlers in rendered HTML; 2.369.48)
     this._messageList.addEventListener('error', (e) => {
       const img = e.target;
       if (img?.tagName === 'IMG' && img.classList?.contains('chat-tool-img')) img.closest('.chat-media')?.classList.add('chat-media-broken');
@@ -3122,7 +3122,7 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
         const hasTool = members.some((el) => el.classList.contains('chat-msg-tool-result'));
         // THE IMAGE MEMBER IS EXEMPT, NOT THE RUN (image-card review round 2, 2026-09-06).
         // An image the owner asked to SEE must not vanish into "1 image read"
-        // (2.369.43): 'image' ships ON in chat.collapseKinds and the rule above
+        // (2.369.48): 'image' ships ON in chat.collapseKinds and the rule above
         // folds a LONE tool card, so every media card landed collapsed —
         // display:none, so the card was invisible without a click AND its
         // loading="lazy" thumbnail never even fetched. The first cut exempted

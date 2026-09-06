@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Image media cards (2.369.43, owner ask: "view image 能不能也多媒体化：可以展开
+// Image media cards (2.369.48, owner ask: "view image 能不能也多媒体化：可以展开
 // 直接看到图像内容，点开可以放大"). Every image a tool LOOKED AT renders as one
 // expandable media block (open by default, thumbnail in the body, click-to-zoom
 // through the standard .chat-img overlay), drawn from disk via /api/file/raw —
@@ -189,7 +189,7 @@ const readImg = (fp, extra = {}) => block({ toolName: 'Read', input: { file_path
   for (const k of ['"View image"', '"Image"', '"Image not available on this machine"']) ok(`i18n zh+ja carry ${k}`, zh.includes(k + ':') && ja.includes(k + ':'));
   ok('ci.mjs registers this suite', /'test-image-cards'/.test(read('scripts/ci.mjs')));
   const kb = read('docs/kb-features.md');
-  ok('kb-features documents the media card', /media card|media block/.test(kb) && /2\.369\.43/.test(kb));
+  ok('kb-features documents the media card', /media card|media block/.test(kb) && /2\.369\.48/.test(kb));
 }
 
 // ── ⑧ codex 0.153.4: `item_completed {item:{type:'ImageView'}}` IS the image view ──
@@ -199,7 +199,7 @@ const readImg = (fp, extra = {}) => block({ toolName: 'Read', input: { file_path
 // ImageView item — ZERO `function_call view_image`, ZERO
 // `view_image_tool_call`. Those two shapes appear only in the OLDER rollouts
 // here (0.125.0/0.128.0/0.130.0: 98 calls + 15 events) and in the wrapper's
-// LIVE stream. Until 2.369.43 both item_started and item_completed sat in
+// LIVE stream. Until 2.369.48 both item_started and item_completed sat in
 // SKIPPED_EVENT_TYPES, so a 0.153.4 conversation reopened from its rollout
 // showed NO image cards at all.
 // The 14 records below are cut VERBATIM from the 0.153.4 root rollout
@@ -226,7 +226,7 @@ const IMAGEVIEW_0153_JSONL = `
   const { CodexMessageManager } = require(path.join(REPO, 'src/codex-message-manager.js'));
   // COUNT CHECK on the real file's cut: 14 ImageView items → 14 image cards
   const cards = new CodexMessageManager('cx0153').convertHistory(IMAGEVIEW_0153_JSONL).filter((m) => m.role === 'tool');
-  ok('0.153.4 rollout: 14 ImageView item_completed records → 14 image cards (this file rendered ZERO before 2.369.43)', cards.length === 14, cards.length);
+  ok('0.153.4 rollout: 14 ImageView item_completed records → 14 image cards (this file rendered ZERO before 2.369.48)', cards.length === 14, cards.length);
   ok('…every card is COMPLETE — none left pending/streaming', cards.length === 14 && cards.every((m) => m.status === 'complete'), cards.map((m) => m.status).join(','));
   ok('…each folds under the image kind and is keyed by its own exec- item id', cards.every((m) => m.collapseKind === 'image') && new Set(cards.map((m) => m.toolCallId)).size === 14 && cards.every((m) => /^exec-[0-9a-f-]+$/.test(m.toolCallId)), cards.map((m) => m.toolCallId).slice(0, 2));
   const paths = cards.map((m) => m.content[0].input.path);
@@ -251,6 +251,14 @@ const IMAGEVIEW_0153_JSONL = `
     { type: 'event_msg', payload: { type: 'item_completed', thread_id: 't', turn_id: 'u', item: { type: 'ImageView', id: 'exec-a0e11416-83cd-405c-9fba-09876dbaae8f', path: 'file:///home/u/w/proj/renders/draft-entry.jpg' } } },
   ]).filter((m) => m.role === 'tool');
   ok('wrapper live stub + rollout ImageView (same exec- id, plain vs file:// path) = ONE complete card', merged.length === 1 && merged[0].status === 'complete' && merged[0].content[0].input.path === '/home/u/w/proj/renders/draft-entry.jpg', merged.map((m) => m.toolCallId + ':' + m.content[0].input.path));
+  // a live stub whose OUTPUT never arrived (the wrapper died mid-view) is still
+  // COMPLETED by the rollout's ImageView record — round-3 verifier A/B: master
+  // completed it, the first rebase left it 'pending' forever
+  const pend = new CodexMessageManager('cxPend').convertHistory([
+    { type: 'response_item', payload: { type: 'function_call', name: 'view_image', arguments: JSON.stringify({ path: '/home/u/w/proj/renders/late.png' }), call_id: 'exec-pend-1' } },
+    { type: 'event_msg', payload: { type: 'item_completed', thread_id: 't', turn_id: 'u', item: { type: 'ImageView', id: 'exec-pend-1', path: 'file:///home/u/w/proj/renders/late.png' } } },
+  ]).filter((m) => m.role === 'tool');
+  ok('a known-but-PENDING view_image call (no function_call_output) is completed by the rollout ImageView record — one complete card, never pending forever', pend.length === 1 && pend[0].status === 'complete' && pend[0].content[0].type === 'tool_result' && /viewed .*late\.png/.test(pend[0].content[0].output), pend.map((m) => ({ s: m.status, t: m.content[0].type, o: m.content[0].output })));
   // an ImageView item_started (not in the corpus, but harmless if it appears)
   // must not add a second card nor leave a pending one behind
   const st = new CodexMessageManager('cxStart').convertHistory([

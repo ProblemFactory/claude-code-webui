@@ -1005,7 +1005,7 @@ body.hide-empty-thinking .chat-compact .chat-msg.chat-empty-thinking { display: 
 /* Style-menu restart row + sidebar locate flash (2.369.8) */
 .chat-status-restart-row { color: var(--accent); font-weight: 600; }
 
-/* image media cards (2.369.35 the file not the bytes; 2.369.43 expandable
+/* image media cards (2.369.35 the file not the bytes; 2.369.48 expandable
    media block: open by default, thumbnail in the body, click-to-zoom via the
    chat-img overlay, honest "not available" line when the <img> errors) */
 .chat-tool-images { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0; }

@@ -1071,7 +1071,7 @@ class CodexMessageManager {
 
   // THE image-view card path — every carrier of "the agent looked at this
   // image" funnels through here, so `fileUrlToPath` is applied in exactly ONE
-  // place (2.369.43). The carriers:
+  // place (2.369.48). The carriers:
   //   · `function_call view_image {path}` — the wrapper's LIVE stub (plain path)
   //   · `event_msg view_image_tool_call {call_id, path}` — the ≤0.130 engine's
   //     own record; the ONLY trace when the function_call pair is absent (a
@@ -1088,7 +1088,14 @@ class CodexMessageManager {
     if (!toolCallId) return;
     const path = fileUrlToPath(typeof event.path === 'string' ? event.path : '');
     const known = this.toolCallMessageIds.has(toolCallId) || this.pendingToolCalls.has(toolCallId);
-    if (known) { if (path) this._absorbTwinCall(toolCallId, { path }, emit); return; }
+    if (known) {
+      if (path) this._absorbTwinCall(toolCallId, { path }, emit);
+      // a card whose CALL is known but whose output never came (the wrapper's
+      // live stub with no function_call_output) still completes on the
+      // rollout's ImageView item — otherwise it stayed 'pending' forever
+      // (round-3 verifier A/B: master completed it, the rebase did not)
+      if (!this.pendingToolCalls.has(toolCallId)) return;
+    }
     this._finalizeToolCall(toolCallId, { output: `viewed ${path || 'image'}`, isError: false, extraInput: { path }, rawName: 'view_image' }, emit);
   }
 
@@ -1346,7 +1353,7 @@ class CodexMessageManager {
     if (!type) return;
     if (type === 'web_search_begin' || type === 'web_search_end') return this._processWebSearchEvent(event, emit);
     // the ≤0.130 engine's own image-view record (the only trace when the
-    // function_call pair is absent) — routed, not skipped, since 2.369.43
+    // function_call pair is absent) — routed, not skipped, since 2.369.48
     if (type === 'view_image_tool_call') return this._processViewImageEvent(event, emit);
     // BEFORE the generic skip: 0.153.4 persists web.search / image_gen / ImageView ONLY here
     if (type === 'item_completed') return this._processItemCompleted(event, emit);

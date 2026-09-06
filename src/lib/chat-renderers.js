@@ -88,7 +88,7 @@ const toolCardIcon = (name) => (name === 'Agent' ? UI_ICONS.robot : SHELL_TOOL_N
 // _onSubagentMessage upgrades it to the model actually observed serving.
 const agentModelChip = (model) => (model ? `<span class="chat-agent-model">${escHtml(model)}</span>` : '');
 
-// ── Image media cards (2.369.43, owner: "view image 能不能也多媒体化") ──
+// ── Image media cards (2.369.48, owner: "view image 能不能也多媒体化") ──
 // Every image a tool looked at renders as ONE media block: an expandable
 // <details> (open by default — the owner wants to SEE it) whose body is the
 // image itself, click-to-zoom through the standard .chat-img overlay. The

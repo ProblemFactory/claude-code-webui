@@ -136,7 +136,10 @@ try {
   // first /procs fetch: POLL, never a fixed sleep — under the gate's parallel
   // load the first fetch can take several seconds and a 1.5s sleep went red
   // (2.369.16 gate flake: 6 process-table asserts + a null .click())
-  for (let i = 0; i < 80; i++) {
+  // 60s budget (was 20s): at load average 44 (owner renders + parallel gates)
+  // the /procs + sysinfo fetches took longer than 20s and the battery read
+  // RED for load alone (2.369.48 gate)
+  for (let i = 0; i < 240; i++) {
     if (await evalJs(`document.querySelectorAll('.rail-panel-system .prc-row').length > 5 && !!document.querySelector('.rail-panel-system .prc-pause') && !!document.querySelector('.rail-panel-system .sys-hist')`)) break;
     await sleep(250);
   }
@@ -146,16 +149,16 @@ try {
   check('rows carry a PID column', await evalJs(`(() => { const el = document.querySelector('.rail-panel-system .prc-row .prc-pid'); return !!el && /^\\d+$/.test(el.textContent); })()`));
   check('charts zone sits BEFORE the process table', await evalJs(`(() => { const p = document.querySelector('.rail-panel-system .sys-procs'); const h = document.querySelector('.rail-panel-system .sys-hist'); return !!p && !!h && (h.compareDocumentPosition(p) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0; })()`));
   // pause toggle freezes the table (no fetch-driven redraw while on)
-  await evalJs(`document.querySelector('.rail-panel-system .prc-pause').click()`);
+  await evalJs(`document.querySelector('.rail-panel-system .prc-pause')?.click()`);
   check('pause toggle arms', await evalJs(`document.querySelector('.rail-panel-system .prc-pause').classList.contains('on') && app.sidebar._prcPaused === true`));
-  await evalJs(`document.querySelector('.rail-panel-system .prc-pause').click()`);
+  await evalJs(`document.querySelector('.rail-panel-system .prc-pause')?.click()`);
   check('pause toggle disarms + refresh resumes', await evalJs(`app.sidebar._prcPaused === false`));
   await evalJs(`(() => { const s = document.querySelector('.rail-panel-system .prc-search'); s.value = 'node'; s.dispatchEvent(new Event('input')); })()`);
   await sleep(400);
   // filter matches the FULL cmd (the title attr), not the displayed basename —
   // `sh -c "node …"` rows legitimately show 'sh' while matching 'node'
   check('search filters the table', await evalJs(`(() => { const rows = [...document.querySelectorAll('.rail-panel-system .prc-row')]; return rows.length > 0 && rows.every((r) => (r.querySelector('.prc-name')?.title || '').toLowerCase().includes('node')); })()`));
-  await evalJs(`document.querySelector('.rail-panel-system .prc-row').click()`);
+  await evalJs(`document.querySelector('.rail-panel-system .prc-row')?.click()`);
   await sleep(200);
   check('row expands to detail with kill actions', await evalJs(`!!document.querySelector('.rail-panel-system .prc-detail .prc-act[data-sig="TERM"]') || !!document.querySelector('.rail-panel-system .prc-detail .empty-hint')`));
   await evalJs(`(() => { const s = document.querySelector('.rail-panel-system .prc-search'); s.value = ''; s.dispatchEvent(new Event('input')); })()`);

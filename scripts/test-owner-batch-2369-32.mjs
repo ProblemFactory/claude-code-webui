@@ -107,7 +107,7 @@ ok(/const fmtReset = \(ts, util(?:, est)?\) => \{/.test(um2) && (um2.match(/fmtR
   ok(b && b.type === 'tool_result' && b.output.length < 200 && /\[image image\/png · 586 KB\]/.test(b.output) && b.images?.[0]?.mediaType === 'image/png' && b.images[0].bytes === 600000 && JSON.stringify(card).length < 2000, `a Read-of-PNG tool result carries {mediaType, bytes} metadata, never the base64 (card ${JSON.stringify(card).length} bytes)`, b?.output?.slice(0, 80));
   ok(splitToolResultContent([{ type: 'text', text: 'hi' }]).text === '[{"type":"text","text":"hi"}]' && splitToolResultContent('plain').text === 'plain' && splitToolResultContent([{ type: 'text', text: 'a' }, { type: 'image', source: { media_type: 'image/jpeg', data: 'xx' } }]).images.length === 1, 'text/array results keep their exact previous shape; mixed results lift only the images');
   const cr2 = read('src/lib/chat-renderers.js');
-  // 2.369.43 seam (the pin follows the CODE, not the other way round): the
+  // 2.369.48 seam (the pin follows the CODE, not the other way round): the
   // lifted blocks feed ONE exported imageMediaHtml() whose thumbnail URL comes
   // from imageRawUrl() (= the file viewer's /api/file/raw, host-qualified);
   // the generic card splices ${mediaHtml}; no drawable path = a size chip.
