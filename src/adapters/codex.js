@@ -724,6 +724,20 @@ function deriveCodexAgentName(agentKind, agentRole, agentNickname) {
 const _threadMetaCache = new Map(); // filePath -> { mtimeMs, meta }
 const THREAD_META_HEAD_BYTES = 262144; // session_meta + first user msg live at the head
 
+// A thread that cannot be read VANISHES from the session list (no threadId ⇒
+// no card) — the loudest symptom with the quietest cause, so every failed
+// extraction says so VERBATIM once per file per 10 minutes (the discovery poll
+// is 5s: unthrottled this would be a log firehose). The compressed-head cap
+// bug lived behind a bare `catch {}` here for exactly this reason.
+const _extractFailLogged = new Map(); // filePath -> lastLoggedAt
+function _noteExtractFailure(filePath, e) {
+  const now = Date.now();
+  if (now - (_extractFailLogged.get(filePath) || 0) < 600000) return;
+  _extractFailLogged.set(filePath, now);
+  if (_extractFailLogged.size > 500) _extractFailLogged.delete(_extractFailLogged.keys().next().value);
+  console.warn(`[codex] thread meta unreadable, thread hidden until it reads: ${path.basename(filePath)}: ${e?.code || ''} ${e?.message || e}`.trim());
+}
+
 function extractCodexThreadMeta(filePath) {
   let cachedStat = null;
   try {
@@ -844,7 +858,7 @@ function extractCodexThreadMeta(filePath) {
         break;
       }
     }
-  } catch { extractFailed = true; }
+  } catch (e) { extractFailed = true; _noteExtractFailure(filePath, e); }
 
   if (!sourceMeta.agentRole && sessionAgentRole) sourceMeta.agentRole = sessionAgentRole;
   if (!sourceMeta.agentNickname && sessionAgentNickname) sourceMeta.agentNickname = sessionAgentNickname;

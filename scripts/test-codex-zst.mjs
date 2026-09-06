@@ -3,13 +3,19 @@
 // + zstd rollouts (codex ≥0.153). Real fixtures under a temp HOME:
 //   ① zstd readers (discovery-facts + adapters/codex): multi-frame decompress,
 //      bounded head reads, materialized plain twin, locate .jsonl.zst
+//   ①b (review batch) a >4×-compressing rollout at DEFAULT level still yields a
+//      head (bisected prefixes, never ''), and a failed head is never cached
 //   ② the usage walk (module + shipped scanner) counts a .zst rollout, with
 //      an incremental cursor (compressed-size keyed)
 //   ③ discovery interpretation: NC names (codex naming rule, truncated lines),
 //      CO open rollouts → remote-running, .zst thread ids, dedup of twins
 //   ④ the async codex listing keeps the MAIN THREAD free over a 2000-rollout
 //      tree (worker-side walk + dir-mtime cache) and lists every thread
+//   ④b the dir-listing settle guard is recorded at CAPTURE time (same-mtime-tick
+//      sibling repro via utimesSync)
 //   ⑤ descriptor store contract + route/consumer wiring pins
+//   ⑥ ONE remote cache slot, MANY remote files: hosts._fetchRemoteByFind against
+//      a stub device that switches .jsonl ⇄ .jsonl.zst under one conversation id
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -62,6 +68,58 @@ ok(headZ === zstText && headP === plainText, 'readHeadText returns plain text fo
 ok(DF.readHeadText(zstPath, 200).length <= 200 && DF.readHeadText(zstPath, 200).endsWith('\n'), 'readHeadText caps the PLAIN bytes and drops the cut-off last line');
 ok(DF.codexThreadIdOf(zstPath) === TID2 && DF.codexThreadIdOf(plainPath) === TID && DF.CODEX_ROLLOUT_RE.test('rollout-x.jsonl.zst') && !DF.CODEX_ROLLOUT_RE.test('notes.jsonl'), 'thread-id + rollout-name rules accept .jsonl and .jsonl.zst');
 const CX = require(path.join(REPO, 'src/adapters/codex.js'));
+
+// ── ①b A REAL-SHAPED ROLLOUT THAT COMPRESSES BETTER THAN 4× (the vanished-thread bug)
+// Measured on this dev box: compressing the 40 real ~/.codex rollouts at the
+// DEFAULT zstd level, 7 of them decompressed to more than the old
+// `max(plainBytes*4, 1MiB)` cap out of a ≤256KiB compressed prefix (ratios
+// 4.0–6.0, e.g. plain 1,115,325 → comp 195,087) — readHeadText returned '' for
+// every one, extractCodexThreadMeta produced threadId '' and the thread
+// VANISHED from /api/sessions (and the empty meta was then cached by mtime).
+// The fixture below is synthetic-but-representative (no real transcript text
+// in a public repo): mixed prose + high-entropy tokens, DEFAULT level, ratio
+// asserted > 4 so it keeps reproducing the real shape.
+const TID3 = '77777777-6666-4555-8444-333333333333';
+{
+  let seed = 42;
+  const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+  const words = 'the quick brown fox jumps over lazy dog parser lexer token stream buffer commit rebase render layout socket handler timeout retry cache index thread rollout session meta payload assistant reasoning output patch diff file path error stack trace request response usage tokens model context window bisect prefix compressed head discovery poll'.split(' ');
+  const sentence = (n) => Array.from({ length: n }, () => words[Math.floor(rnd() * words.length)]).join(' ');
+  let body = '';
+  for (let i = 0; Buffer.byteLength(body) < 1300000; i++) {
+    body += rec({ timestamp: '2026-09-05T00:00:00.000Z', type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: sentence(60) + ' ' + Array.from({ length: 40 }, () => Math.floor(rnd() * 4294967296).toString(36)).join(' ') }] } });
+  }
+  const bigText = rollout(TID3, '/work/big', 'high ratio rollout that used to vanish', 1) + body;
+  const bigComp = zlib.zstdCompressSync(Buffer.from(bigText));   // DEFAULT level, like codex writes
+  const bigPath = path.join(cxDir, `rollout-2026-09-05T00-00-00-${TID3}.jsonl.zst`);
+  fs.writeFileSync(bigPath, bigComp);
+  const HEAD = 262144; // adapters/codex THREAD_META_HEAD_BYTES
+  const ratio = Buffer.byteLength(bigText) / bigComp.length;
+  ok(ratio > 4 && Buffer.byteLength(bigText) > 1048576, `fixture is representative of the real rollouts: ratio ${ratio.toFixed(2)}× (>4) over ${(Buffer.byteLength(bigText) / 1048576).toFixed(2)}MB plain`);
+  let oldCap = null;
+  try { DF.zstdDecompressFrames(bigComp.subarray(0, Math.min(bigComp.length, HEAD)), { maxOutputLength: Math.max(HEAD * 4, 1024 * 1024) }); } catch (e) { oldCap = e.code; }
+  ok(oldCap === 'EZSTBIG', 'REPRO: the old one-shot ratio-guess cap throws on this file (that throw became an empty head)');
+  const bigHead = DF.readHeadText(bigPath, HEAD);
+  ok(bigHead.length > 0 && bigHead.length <= HEAD && bigHead.startsWith('{"timestamp"') && bigHead.endsWith('\n'), `readHeadText BISECTS the compressed prefix instead of guessing a ratio (${bigHead.length} plain bytes, never '')`);
+  ok(DF.zstdDecompressHead(bigComp, HEAD).length >= HEAD && DF.zstdDecompressHead(bigComp, HEAD).length <= Math.max(HEAD * 4, 1024 * 1024), 'zstdDecompressHead yields AT LEAST the requested head and never inflates the whole archive');
+  const bigMeta = CX.extractCodexThreadMeta(bigPath);
+  ok(bigMeta.threadId === TID3 && bigMeta.cwd === '/work/big' && bigMeta.name === 'high ratio rollout that used to vanish', 'the thread stays in the session list (threadId + cwd + name), where it used to vanish', bigMeta);
+  // A FAILED head must never be cached as a successful EMPTY meta: corrupt the
+  // file, read it (throws → no cache), then restore the content KEEPING THE
+  // SAME mtime — a cached empty meta would survive and hide the thread forever.
+  const corruptPath = path.join(cxDir, `rollout-2026-09-05T00-00-00-88888888-6666-4555-8444-333333333333.jsonl.zst`);
+  fs.writeFileSync(corruptPath, Buffer.concat([Buffer.from([0x28, 0xb5, 0x2f, 0xfd]), Buffer.from('not really a zstd frame at all')]));
+  const stamp = new Date(Date.now() - 60000);
+  fs.utimesSync(corruptPath, stamp, stamp);
+  let headErr = null; try { DF.readHeadText(corruptPath, HEAD); } catch (e) { headErr = e.code; }
+  ok(headErr === 'EZSTHEAD', 'an unreadable compressed head THROWS a coded error (it is not "an empty transcript")');
+  ok(CX.extractCodexThreadMeta(corruptPath).threadId === '', 'a failed extraction yields an empty meta…');
+  fs.writeFileSync(corruptPath, zlib.zstdCompressSync(Buffer.from(rollout('88888888-6666-4555-8444-333333333333', '/work/healed', 'healed rollout', 1))));
+  fs.utimesSync(corruptPath, stamp, stamp); // SAME mtime as the failed read
+  ok(CX.extractCodexThreadMeta(corruptPath).threadId === '88888888-6666-4555-8444-333333333333', '…and is NEVER cached by mtime — the next read sees the readable file');
+  fs.rmSync(bigPath); fs.rmSync(corruptPath);
+}
+
 ok(CX.findCodexSessionJsonlPath(TID2) === zstPath && CX.findCodexSessionJsonlPath(TID) === plainPath, 'findCodexSessionJsonlPath locates a .jsonl.zst rollout (plain wins when both exist)');
 const twin = CX.plainJsonlPath(zstPath);
 ok(twin !== zstPath && fs.readFileSync(twin, 'utf8') === zstText && CX.plainJsonlPath(plainPath) === plainPath, 'plainJsonlPath materializes a compressed rollout ONCE into the per-user temp cache; plain files return themselves');
@@ -112,6 +170,25 @@ console.log('— ③ discovery interpretation: NC names, CO liveness, .zst ids')
   ok(s2[0]?.name && /^a long questio/.test(s2[0].name), 'a TRUNCATED NC line still names from the cut "text":"…" fragment', { got: s2[0]?.name, cut });
   const twins = run([`C 1700001000 4000 ${rp}`, `C 1700000000 900 ${rp.replace(/\.jsonl$/, '.jsonl.zst')}`]);
   ok(twins.length === 1 && twins[0].sessionId === TID, 'a .jsonl and its .jsonl.zst twin list ONCE');
+  // TWIN ORDER, BOTH WAYS (the "plain wins" comment used to be a lie): both
+  // producers sort NEWEST FIRST and the .zst is written AFTER the last plain
+  // write, so in production the compressed twin came first — and it is the one
+  // whose head the ssh scanner often cannot read (no zstd(1) on the host), so
+  // the card lost the cwd/name its plain twin carried.
+  const rzTwin = rp.replace(/\.jsonl$/, '.jsonl.zst');
+  const twinLines = (first) => (first === 'zst'
+    ? [`C 1700002000 900 ${rzTwin}`, `C 1700001000 4000 ${rp}`]
+    : [`C 1700001000 4000 ${rp}`, `C 1700002000 900 ${rzTwin}`]
+  ).concat([`HC ${rp}\t"cwd":"/work/plain"`, `NC ${rp}\t${real}`]);
+  for (const first of ['zst', 'plain']) {
+    const t = run(twinLines(first));
+    ok(t.length === 1 && t[0].sessionId === TID && t[0].cwd === '/work/plain' && t[0].name === 'please fix the parser bug in lexer.js' && t[0].mtime === 1700002000000,
+      `twins list once with the PLAIN twin's facts and the newer mtime, ${first}-line-first (producer order must not decide)`, t[0]);
+  }
+  const twinZstFacts = run([`C 1700002000 900 ${rzTwin}`, `C 1700001000 4000 ${rp}`, `HC ${rzTwin}\t"cwd":"/work/zstonly"`]);
+  ok(twinZstFacts.length === 1 && twinZstFacts[0].cwd === '/work/zstonly', 'the twins\' facts MERGE — whichever line carries cwd/name fills it');
+  const twinRunning = run([`C 1700002000 900 ${rzTwin}`, `C 1700001000 4000 ${rp}`, `CO ${rp}`]);
+  ok(twinRunning[0].status === 'remote-running', 'a CO line on EITHER twin marks the one thread running');
   const lines = DF.synthesizeDiscoveryLines({ locks: [], jsonls: [], codexRollouts: [{ path: rz, size: 3000, mtimeMs: 1700000900000, headCwd: '/work/zst', userLines: [real] }], codexOpen: [rz] });
   ok(/^NC /m.test(lines) && /^CO /m.test(lines) && run(lines.split('\n'))[0].status === 'remote-running' && run(lines.split('\n'))[0].name === 'please fix the parser bug in lexer.js', 'the daemon snapshot (userLines + codexOpen) synthesizes NC/CO lines the same interpreter reads (device/ssh parity)');
   ok(DF.nameFromCodexUserLine(inj) === null && DF.nameFromCodexUserLine('{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"nope"}]}}') === null, 'assistant records and injected blocks never name a thread');
@@ -144,6 +221,39 @@ console.log('— ④ async listing keeps the main thread free (2000 rollouts)');
   ok(withLive.find((t) => t.sessionId === TID)?.status === 'live' && !withLive.find((t) => t.sessionId === TID2), 'a live webui session marks its thread live and hides its forkedFrom sources (unchanged merge rules)');
 }
 
+console.log('— ④b the dir-listing settle guard belongs to the CAPTURE, not the lookup');
+{
+  // Directory mtimes are coarse (1s on many filesystems, NFS included): a
+  // listing captured while the current tick was still open can miss a sibling
+  // created in that same second, and that sibling never bumps the mtime again.
+  // The guard used to be evaluated at LOOKUP time (`now - mtime > 2s`), so such
+  // a capture became trusted FOREVER once the clock moved on — the second
+  // rollout never appeared in the session list (the poll is 5s: the window is
+  // always over by the next lookup). utimesSync reproduces the same-tick case
+  // deterministically.
+  const CS = require(path.join(REPO, 'src/codex-session-store.js'));
+  const d = path.join(home, '.codex', 'sessions', '2026', '09', '07');
+  fs.mkdirSync(d, { recursive: true });
+  const mk = (n) => {
+    const tid = `abcdef${n}0-1111-4222-8333-44444444444${n}`;
+    fs.writeFileSync(path.join(d, `rollout-2026-09-07T00-00-0${n}-${tid}.jsonl`), rollout(tid, `/w/settle${n}`, `settle ${n}`, 1));
+    return tid;
+  };
+  const tidA = mk(1);
+  const tick = new Date();                       // the dir's mtime tick is OPEN right now
+  fs.utimesSync(d, tick, tick);
+  const first = CS.collectCodexThreadMetas().metas;
+  ok(first.some((m) => m.threadId === tidA), 'the unsettled capture lists what it saw');
+  const tidB = mk(2);                            // created in the SAME mtime tick…
+  fs.utimesSync(d, tick, tick);                  // …so the mtime does not move
+  await sleep(2100);                             // the lookup-time guard would now say "settled"
+  const second = CS.collectCodexThreadMetas().metas;
+  ok(second.some((m) => m.threadId === tidB), 'a listing captured UNSETTLED is re-read on the next lookup (the same-second sibling appears)');
+  const hitsBefore = CS.dirCacheStats().hits;
+  CS.collectCodexThreadMetas();
+  ok(CS.dirCacheStats().hits > hitsBefore, '…and the now-SETTLED capture is cached again (the readdir-per-poll win survives)');
+}
+
 console.log('— ⑤ descriptor store contract + wiring pins');
 {
   const { HARNESSES, chatHarnessIds } = require(path.join(REPO, 'src/harnesses/index.js'));
@@ -171,6 +281,66 @@ console.log('— ⑤ descriptor store contract + wiring pins');
   const uw = read('src/usage-walker.js'), sc = read('data/bin/vibespace-usage-scan');
   ok(/\\\.jsonl\(\\\.zst\)\?\$\/i/.test(uw) && /\\\.jsonl\(\\\.zst\)\?\$\/i/.test(sc) && /cur\.zsize === st\.size/.test(uw) && /cur\.zsize === st\.size/.test(sc) && /function zstdPlain\(buf\)/.test(uw) && /function zstdPlain\(buf\)/.test(sc), 'walker module + shipped scanner carry the SAME zst handling (lockstep)');
   ok(/'test-codex-zst'/.test(read('scripts/ci.mjs')), 'this suite is in the release gate');
+}
+
+console.log('— ⑥ ONE remote cache slot, MANY remote files (codex .jsonl ⇄ .jsonl.zst)');
+{
+  // hosts._fetchRemoteByFind keys ONE cache file per conversation id, but the
+  // codex remoteFind predicate matches BOTH the plain rollout and its
+  // compressed twin — and a host compresses a finished rollout. The meta used
+  // to record {size,mtime} only, so the append-only delta path concatenated the
+  // NEW file's bytes onto the OTHER file's cached prefix and stamped it
+  // complete; a stopped thread never changes again ⇒ served corrupt forever.
+  const { HostManager } = require(path.join(REPO, 'src/hosts.js'));
+  const dataDir = path.join(home, 'hostdata');
+  fs.mkdirSync(dataDir, { recursive: true });
+  const hm = new HostManager({ dataDir });
+  hm._state.hosts.push({ id: 'hz', name: 'Z', transport: 'dial' });   // dial ⇒ the device data-plane path
+  hm._ssh = async () => { throw new Error('the legacy ssh rung must not be needed here'); };
+  const TIDR = '99999999-8888-4777-8666-555555555555';
+  const remote = { path: '', data: Buffer.alloc(0), mtime: 1000 };
+  const reads = [];
+  let findCmd = '';
+  hm.deviceBounded = async () => ({
+    runCmd: async (cmd, args) => { findCmd = args[args.length - 1]; return { stdout: remote.path + '\n', stderr: '', code: 0 }; },
+    fsStat: async () => ({ stat: { size: remote.data.length, mtimeMs: remote.mtime * 1000 } }),
+    fsReadRange: async (p, off, len) => { reads.push([p, off, len]); return { data: remote.data.subarray(off, off + len) }; },
+  });
+  const rolloutPath = `/home/u/.codex/sessions/2026/09/05/rollout-2026-09-05T00-00-00-${TIDR}.jsonl`;
+  const metaOf = (p) => JSON.parse(fs.readFileSync(p + '.meta', 'utf8'));
+
+  const plainSmall = rollout(TIDR, '/work/remote', 'remote codex thread', 1);
+  remote.path = rolloutPath; remote.data = Buffer.from(plainSmall); remote.mtime = 1000;
+  const c1 = await hm.fetchTranscript('hz', 'codex', TIDR);
+  ok(fs.readFileSync(c1, 'utf8') === plainSmall, 'first fetch caches the plain rollout');
+  ok(/\| sort \| head -1/.test(findCmd), 'the remote locate is DETERMINISTIC and prefers the plain twin (find | sort | head -1)');
+  ok(metaOf(c1).remotePath === rolloutPath && metaOf(c1).compressed === false, 'the meta records WHICH remote file the bytes came from');
+
+  // the host compresses the finished rollout: same thread, different file
+  const compressed = zlib.zstdCompressSync(Buffer.from(rollout(TIDR, '/work/remote', 'remote codex thread', 2000)));
+  ok(compressed.length > plainSmall.length, 'fixture: the compressed twin is LARGER than the cached plain prefix (the delta path\'s precondition)');
+  remote.path = rolloutPath + '.zst'; remote.data = compressed; remote.mtime = 2000;
+  const c2 = await hm.fetchTranscript('hz', 'codex', TIDR);
+  const got2 = fs.readFileSync(c2);
+  ok(got2.equals(compressed) && DF.isZstBuffer(got2), 'a SWITCHED remote file is refetched whole — never compressed bytes appended onto the plain prefix', got2.subarray(0, 8).toString('hex'));
+  ok(metaOf(c2).remotePath.endsWith('.zst') && metaOf(c2).compressed === true, 'the meta follows the switch (compressed flag recorded)');
+
+  // …and back: a resumed thread writes plain again, over a COMPRESSED cache
+  const plainBig = rollout(TIDR, '/work/remote', 'remote codex thread', 800);
+  ok(Buffer.byteLength(plainBig) > compressed.length, 'fixture: the returning plain file is larger than the cached compressed bytes');
+  remote.path = rolloutPath; remote.data = Buffer.from(plainBig); remote.mtime = 3000;
+  const c3 = await hm.fetchTranscript('hz', 'codex', TIDR);
+  ok(fs.readFileSync(c3, 'utf8') === plainBig, 'a compressed cache is never delta-appended to either — the plain twin comes back whole');
+
+  // the slab win must survive: the SAME plain file growing still syncs a delta
+  reads.length = 0;
+  const plainGrown = plainBig + rec({ timestamp: '2026-09-05T00:01:00.000Z', type: 'event_msg', payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 5, cached_input_tokens: 0, output_tokens: 1 }, total_token_usage: { total_tokens: 6 } } } });
+  remote.data = Buffer.from(plainGrown); remote.mtime = 4000;
+  const c4 = await hm.fetchTranscript('hz', 'codex', TIDR);
+  ok(fs.readFileSync(c4, 'utf8') === plainGrown && reads.length === 1 && reads[0][1] === Buffer.byteLength(plainBig), `the same growing plain file still syncs as an append-only DELTA (${JSON.stringify(reads)})`);
+  reads.length = 0;
+  await hm.fetchTranscript('hz', 'codex', TIDR);
+  ok(reads.length === 0, 'an unchanged remote file serves the cache with no read at all');
 }
 try { fs.rmSync(home, { recursive: true, force: true }); } catch {}
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);

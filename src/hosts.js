@@ -19,7 +19,7 @@ const crypto = require('crypto');
 const { REMOTE_PRELUDE, nodeFinder } = require('./remote-shell.js');
 const { execFile } = require('child_process');
 const { claimJsonls, cwdToProjectDir } = require('./session-store');
-const { nameFromUserLine, interpretDiscoveryLines, synthesizeDiscoveryLines } = require('./discovery-facts');
+const { nameFromUserLine, interpretDiscoveryLines, synthesizeDiscoveryLines, isZstPath, isZstBuffer } = require('./discovery-facts');
 const { classifyPrivateKey } = require('./ssh-key-format');
 
 const SSH_BASE_OPTS = [
@@ -1121,6 +1121,27 @@ class HostManager {
     const metaPath = cachePath + '.meta';
     let meta = null;
     try { meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8')); } catch {}
+    // ONE CACHE SLOT, MANY REMOTE FILES (2.369.x, codex .zst). A backend's
+    // remoteFind predicate may resolve DIFFERENT files across polls — codex
+    // matches `rollout-*<tid>.jsonl` OR `….jsonl.zst`, and the host compresses
+    // a finished rollout — while the slot is keyed by conversation id only.
+    // The meta recorded {size,mtime} alone, so the append-only delta path
+    // happily concatenated the compressed file's bytes onto the cached PLAIN
+    // prefix (or vice versa) and stamped the result complete; a stopped thread
+    // never changes again, so the corrupt transcript was served forever. The
+    // meta now records the resolved remote path + whether it is compressed:
+    // a changed path invalidates the slot (full refetch), and a compressed
+    // remote (or an already-compressed cache file) is NEVER delta-appended —
+    // recompression rewrites the whole file, it does not append plain bytes.
+    const cacheIsCompressed = () => {
+      let fd;
+      try {
+        fd = fs.openSync(cachePath, 'r');
+        const b = Buffer.alloc(4);
+        return fs.readSync(fd, b, 0, 4, 0) === 4 && isZstBuffer(b);
+      } catch { return false; } finally { if (fd !== undefined) { try { fs.closeSync(fd); } catch { } } }
+    };
+    const sameRemote = (remotePath) => !meta || !meta.remotePath || meta.remotePath === remotePath;
     // CS data-plane: INCREMENTAL slab sync — transcripts are append-only, so
     // when the cache already holds a prefix we fetch ONLY [cachedSize, size)
     // via read-range instead of re-pulling the whole file (the remote-jsonl
@@ -1128,8 +1149,11 @@ class HostManager {
     if (this.dataPlaneOn?.() || h.transport === 'dial') {
       try {
         const dm = await this.deviceBounded(id);
-        // locate via the discovery snapshot (cached-ish) or a targeted find
-        const find = await dm.runCmd('sh', ['-c', `find ${root} ${findExpr} 2>/dev/null | head -1`]);
+        // locate via the discovery snapshot (cached-ish) or a targeted find —
+        // `sort` makes the pick DETERMINISTIC and prefers the plain twin
+        // (".jsonl" sorts before ".jsonl.zst"), so a codex thread whose
+        // rollout exists in both forms doesn't flap between them per poll
+        const find = await dm.runCmd('sh', ['-c', `find ${root} ${findExpr} 2>/dev/null | sort | head -1`]);
         const remotePath = find.stdout.trim();
         if (!remotePath) return fs.existsSync(cachePath) ? cachePath : null;
         const st = await dm.fsStat(remotePath);
@@ -1138,17 +1162,22 @@ class HostManager {
         // pre-2.187.0 truncated fetch stamped full-size meta over a 256KB stump,
         // and for a transcript that never grows again (stopped session) the
         // size/mtime match would serve the stump FOREVER (the self-heal only
-        // triggers when the remote file changes)
-        if (meta && meta.size === size && meta.mtime === mtime && (() => { try { return fs.statSync(cachePath).size === size; } catch { return false; } })()) return cachePath;
+        // triggers when the remote file changes) — and the bytes must have come
+        // from the SAME remote file (see the cache-slot note above)
+        if (meta && meta.size === size && meta.mtime === mtime && sameRemote(remotePath) && (() => { try { return fs.statSync(cachePath).size === size; } catch { return false; } })()) return cachePath;
         fs.mkdirSync(dir, { recursive: true });
         let localSize = 0;
         try { localSize = fs.statSync(cachePath).size; } catch { }
+        // append-only delta is legal ONLY when the same, uncompressed remote
+        // file grew: a different remote path (or either side compressed) means
+        // the cached prefix is not a prefix of what we are fetching
+        const canDelta = sameRemote(remotePath) && !isZstPath(remotePath) && !cacheIsCompressed();
         // the cap guards what we FETCH — with a warm prefix that's just the
         // delta, so a transcript growing past maxBytes keeps incrementing
         // instead of suddenly erroring (a 45MB real session was on track)
-        const fetchBytes = (localSize > 0 && localSize <= size && meta) ? size - localSize : size;
+        const fetchBytes = (canDelta && localSize > 0 && localSize <= size && meta) ? size - localSize : size;
         if (fetchBytes > maxBytes) throw new Error(`remote transcript too large (${(fetchBytes / 1048576) | 0}MB)`);
-        if (localSize > 0 && localSize <= size && meta) {
+        if (canDelta && localSize > 0 && localSize <= size && meta) {
           // append-only delta — the slab win
           if (size > localSize) {
             const delta = await dm.fsReadRange(remotePath, localSize, size - localSize);
@@ -1166,11 +1195,11 @@ class HostManager {
           fs.writeFileSync(tmp2, whole.data);
           fs.renameSync(tmp2, cachePath);
         }
-        fs.writeFileSync(metaPath, JSON.stringify({ size, mtime, fetchedAt: Date.now(), slab: true }));
+        fs.writeFileSync(metaPath, JSON.stringify({ size, mtime, fetchedAt: Date.now(), slab: true, remotePath, compressed: isZstPath(remotePath) }));
         return cachePath;
       } catch (e2) { /* legacy fallback below */ }
     }
-    const probe = `f=$(find ${root} ${findExpr} 2>/dev/null | head -1); [ -n "$f" ] && { stat -c '%s %Y' "$f" 2>/dev/null || stat -f '%z %m' "$f"; } && echo "$f"`;
+    const probe = `f=$(find ${root} ${findExpr} 2>/dev/null | sort | head -1); [ -n "$f" ] && { stat -c '%s %Y' "$f" 2>/dev/null || stat -f '%z %m' "$f"; } && echo "$f"`;
     let out;
     try {
       out = (await this._ssh(h, probe, { timeoutMs: 15000 })).toString().trim();
@@ -1187,15 +1216,15 @@ class HostManager {
     if (!out) return fs.existsSync(cachePath) ? cachePath : null; // gone remotely — keep stale cache if any
     const [sizeMtime, remotePath] = [out.split('\n')[0], out.split('\n')[1]];
     const [size, mtime] = sizeMtime.split(' ').map(Number);
-    // same stump-integrity check as the slab path above
-    if (meta && meta.size === size && meta.mtime === mtime && (() => { try { return fs.statSync(cachePath).size === size; } catch { return false; } })()) return cachePath;
+    // same stump-integrity + same-remote-file checks as the slab path above
+    if (meta && meta.size === size && meta.mtime === mtime && sameRemote(remotePath) && (() => { try { return fs.statSync(cachePath).size === size; } catch { return false; } })()) return cachePath;
     if (size > maxBytes) throw new Error(`remote transcript too large (${(size / 1048576) | 0}MB)`);
     const buf = await this._ssh(h, `cat ${JSON.stringify(remotePath)}`, { timeoutMs: 120000, maxBuffer: maxBytes + 1024, encoding: 'buffer' });
     fs.mkdirSync(dir, { recursive: true });
     const tmp = cachePath + '.tmp';
     fs.writeFileSync(tmp, buf);
     fs.renameSync(tmp, cachePath);
-    fs.writeFileSync(metaPath, JSON.stringify({ size, mtime, fetchedAt: Date.now() }));
+    fs.writeFileSync(metaPath, JSON.stringify({ size, mtime, fetchedAt: Date.now(), remotePath, compressed: isZstPath(remotePath) }));
     return cachePath;
   }
 

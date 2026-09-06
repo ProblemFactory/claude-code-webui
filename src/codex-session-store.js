@@ -80,7 +80,17 @@ function _listDirCached(dir) {
   let st;
   try { st = fs.statSync(dir); } catch { return null; }
   const hit = _dirCache.get(dir);
-  if (hit && hit.mtimeMs === st.mtimeMs && Date.now() - st.mtimeMs > DIR_CACHE_SETTLE_MS) { _dirStats.hits++; return hit; }
+  // SETTLEDNESS IS A PROPERTY OF THE CAPTURE, NOT OF THE LOOKUP. The guard
+  // exists because directory mtimes are coarse (1s on many filesystems, NFS
+  // included): a listing taken while the current mtime tick was still open
+  // may miss a sibling created in that same second — and that sibling never
+  // bumps the mtime again. Evaluating `now - mtime > 2s` at LOOKUP time (the
+  // 2.369 shape) trusted such a capture FOREVER once the clock passed
+  // mtime+2s: a rollout created in the same second as its neighbour never
+  // appeared in the session list (the poll is 5s, so the window is always
+  // over by the next lookup). Record it at FILL time instead — an unsettled
+  // capture is re-read on the next lookup until it is taken settled.
+  if (hit && hit.mtimeMs === st.mtimeMs && hit.settled) { _dirStats.hits++; return hit; }
   _dirStats.misses++;
   let entries = [];
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return null; }
@@ -91,7 +101,7 @@ function _listDirCached(dir) {
   }
   // plain before compressed so a thread with both lists its .jsonl (2.369 zst)
   files.sort((a, b) => (a.endsWith('.zst') ? 1 : 0) - (b.endsWith('.zst') ? 1 : 0));
-  const rec = { mtimeMs: st.mtimeMs, dirs, files };
+  const rec = { mtimeMs: st.mtimeMs, dirs, files, settled: Date.now() - st.mtimeMs > DIR_CACHE_SETTLE_MS };
   _dirCache.set(dir, rec);
   if (_dirCache.size > DIR_CACHE_MAX) _dirCache.delete(_dirCache.keys().next().value);
   return rec;

@@ -73,11 +73,48 @@ function zstdDecompressFrames(buf, { maxOutputLength = 256 * 1024 * 1024 } = {})
   return parts.length === 1 ? parts[0] : Buffer.concat(parts);
 }
 
+/** At least `plainBytes` of PLAIN text out of a zstd buffer, without ever
+ *  materializing the whole archive. A truncated compressed PREFIX decompresses
+ *  to whatever plain text it covers, so the head read BISECTS over prefix
+ *  sizes under a fixed output cap instead of one-shotting the whole buffer
+ *  under a RATIO GUESS. The guess was the bug (2.369.x): `maxOutputLength =
+ *  max(plainBytes*4, 1MiB)` threw EZSTBIG for every rollout that compresses
+ *  better than ~4× — 7 of 40 REAL rollouts on the dev box — and readHeadText
+ *  turned the throw into an EMPTY head, so extractCodexThreadMeta produced an
+ *  empty threadId and the thread VANISHED from the session list.
+ *  Returns ≥ plainBytes of plain text unless the input itself covers less. */
+function zstdDecompressHead(buf, plainBytes, { maxOutputLength } = {}) {
+  const cap = Math.max(Number(maxOutputLength) || 0, plainBytes * 4, 1024 * 1024);
+  let lo = 0;                 // largest compressed prefix known to fit under cap
+  let hi = buf.length + 1;    // smallest compressed prefix known to overflow it
+  let take = buf.length;      // start with everything we were handed
+  let best = Buffer.alloc(0);
+  for (let i = 0; i < 32 && take > lo && take > 0; i++) {
+    let out;
+    try { out = zstdDecompressFrames(buf.subarray(0, take), { maxOutputLength: cap }); }
+    catch (e) {
+      if (e && e.code === 'EZSTBIG') { hi = take; take = Math.floor((lo + hi) / 2); continue; }
+      throw e; // unsupported runtime / genuinely broken input — never a silent ''
+    }
+    if (out.length > best.length) best = out;
+    if (best.length >= plainBytes || take >= buf.length) return best;
+    lo = take;                                   // need MORE input for a full head
+    take = Math.floor((lo + Math.min(hi, buf.length + 1)) / 2);
+  }
+  return best;
+}
+
 /** The first `plainBytes` of a transcript's TEXT, plain or zstd (by extension
  *  OR magic — a remote .zst cached under a .jsonl name still reads). For zstd
  *  the read is bounded on the COMPRESSED side too (a prefix of plainBytes
- *  compressed bytes; ratio ≥1 in practice), never the whole archive. Cut-off
- *  last line dropped like every other head reader. */
+ *  compressed bytes; ratio ≥1 in practice), never the whole archive, and the
+ *  DECOMPRESSION is bounded by zstdDecompressHead's bisection rather than a
+ *  ratio guess. Cut-off last line dropped like every other head reader.
+ *  THROWS (coded: EZSTUNSUPPORTED / whatever zlib raised) when a compressed
+ *  head cannot be read — an unreadable head is NOT an empty transcript, and
+ *  every caller's catch must be free to treat it as a failed extraction
+ *  (adapters/codex's `extractFailed` — a failure cached by mtime hides the
+ *  thread forever). */
 function readHeadText(fp, plainBytes) {
   const st = fs.statSync(fp);
   const fd = fs.openSync(fp, 'r');
@@ -91,10 +128,12 @@ function readHeadText(fp, plainBytes) {
       if (n < st.size) head = head.slice(0, head.lastIndexOf('\n') + 1);
       return head;
     }
-    if (!ZSTD_SUPPORTED) return '';
-    let plain;
-    try { plain = zstdDecompressFrames(raw, { maxOutputLength: Math.max(plainBytes * 4, 1024 * 1024) }); }
-    catch { return ''; }
+    const plain = zstdDecompressHead(raw, plainBytes);
+    // A compressed input that yields NO plain text at all is a failed read
+    // (corrupt/garbage frame — zstdDecompressFrames breaks out of a broken
+    // frame by design so bounded prefixes work), never "an empty transcript".
+    // Saying '' here is what let adapters/codex cache an empty meta by mtime.
+    if (!plain.length && raw.length) throw Object.assign(new Error(`unreadable compressed head: ${path.basename(fp)}`), { code: 'EZSTHEAD' });
     let head = plain.toString('utf-8', 0, Math.min(plain.length, plainBytes));
     if (plain.length > plainBytes || n < st.size) head = head.slice(0, head.lastIndexOf('\n') + 1);
     return head;
@@ -465,15 +504,34 @@ function interpretDiscoveryLines(out, { hostId, hostName, claimJsonls }) {
   // codex-session-store uses). S3: a rollout held OPEN by a codex process on
   // the host (CO line) is RUNNING there → 'remote-running' (the client shows
   // it EXTERNAL and Resume refuses to double-write); names come from the NC
-  // lines through the codex naming rule. A .jsonl and a .jsonl.zst of the
-  // same thread list once (plain wins — first in mtime order).
-  const seenTid = new Set();
+  // lines through the codex naming rule.
+  // A .jsonl and its .jsonl.zst TWIN list ONCE, and the PLAIN twin's facts
+  // win: "first in mtime order" (both producers sort newest-first —
+  // hosts.js `sort -rn`, agentd.js `b.mtimeMs - a.mtimeMs`) actually picked
+  // the COMPRESSED twin, because compression happens AFTER the last write, so
+  // the .zst is always the newer file. The ssh scanner can only read a
+  // compressed head where the host has zstd(1), so the card silently lost the
+  // cwd/name its plain twin's HC/NC lines carried. Facts are MERGED (either
+  // twin fills what the other lacks) and mtime is the newer of the two — the
+  // pair is one thread.
+  const byTid = new Map(); // tid(lower) -> merged rollout facts
   for (const r of codexRollouts) {
     const tid = codexThreadIdOf(r.path);
-    if (!tid || seenTid.has(tid.toLowerCase())) continue;
-    seenTid.add(tid.toLowerCase());
-    const running = codexOpen.has(tid.toLowerCase());
-    sessions.push({ sessionId: tid, backend: 'codex', cwd: codexCwd.get(r.path) || null, name: codexNames.get(r.path) || null, status: running ? 'remote-running' : 'remote-stopped', host: hostId, hostName: hostName, mtime: r.mtime });
+    if (!tid) continue;
+    const key = tid.toLowerCase();
+    const plain = !isZstPath(r.path);
+    const cwd = codexCwd.get(r.path) || null;
+    const name = codexNames.get(r.path) || null;
+    const cur = byTid.get(key);
+    if (!cur) { byTid.set(key, { tid, plain, cwd, name, mtime: r.mtime }); continue; }
+    cur.mtime = Math.max(cur.mtime, r.mtime);
+    if (plain && !cur.plain) { cur.plain = true; cur.tid = tid; if (cwd) cur.cwd = cwd; if (name) cur.name = name; }
+    if (!cur.cwd && cwd) cur.cwd = cwd;
+    if (!cur.name && name) cur.name = name;
+  }
+  for (const [key, r] of byTid) {
+    const running = codexOpen.has(key);
+    sessions.push({ sessionId: r.tid, backend: 'codex', cwd: r.cwd || null, name: r.name || null, status: running ? 'remote-running' : 'remote-stopped', host: hostId, hostName: hostName, mtime: r.mtime });
   }
   return sessions;
 }
@@ -510,5 +568,5 @@ module.exports = {
   extractTailIds, nameFromUserRecord, nameFromUserLine, nameFromText, pidLooksClaude, interpretDiscoveryLines, synthesizeDiscoveryLines, NAME_MAX,
   // S3 (codex facts + zstd rollouts)
   deriveCodexSessionName, nameFromCodexUserLine, listOpenCodexRolloutPaths, isCodexCommandLine, CODEX_TID_RE, CODEX_ROLLOUT_RE, codexThreadIdOf,
-  ZSTD_SUPPORTED, isZstPath, isZstBuffer, zstdDecompressFrames, readHeadText,
+  ZSTD_SUPPORTED, isZstPath, isZstBuffer, zstdDecompressFrames, zstdDecompressHead, readHeadText,
 };
