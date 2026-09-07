@@ -3750,5 +3750,292 @@ console.log('— ⑫ no commit on this branch carries conflict markers (a clean 
   }
 }
 
+// ⑨ THE STEER-ALL BUBBLES (owner 2026-09-07: "我刚才在那个codex session里全给插入
+// 了，但是我只能看到我最后插入的一条消息"). Twenty-five queued submissions were
+// steered into the running turn and ONE bubble appeared — the only one this
+// wrapper had typed. The queue belongs to the THREAD and survives a
+// Terminate+Resume; the app-server's own carrier for an inherited submission
+// entering the turn (`item/completed {item:{type:'userMessage', clientId}}`)
+// had no branch in the wrapper. This leg owns the REBUILD half: what those
+// records must render to after a reload. (The LIVE half — the real wrapper
+// against a stub app-server that hands it an inherited queue — is
+// test-codex-p2-wrapper ⑥.)
+console.log('— ⑨ steered messages: one bubble each, live and after a reload');
+{
+  const { CodexMessageManager } = require(path.join(REPO, 'src/codex-message-manager.js'));
+  const { mergeCodexRecords, recordFingerprint, userTwinKeys, userRecordIdentity } = require(path.join(REPO, 'src/codex-session-store.js'));
+  const rollout = fs.readFileSync(path.join(REPO, 'scripts/fixtures/codex-steer-all-rollout.jsonl'), 'utf8')
+    .split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l));
+  const userRecs = rollout.filter((r) => r.type === 'response_item' && r.payload.type === 'message' && r.payload.role === 'user');
+  const twins = rollout.filter((r) => r.type === 'event_msg' && r.payload.type === 'item_completed' && r.payload.item?.type === 'UserMessage');
+
+  // THE FIXTURE IS THE SHAPE, not a convenience: a redacted copy of the owner's
+  // 07:38:44-45 window (keys, ordering, ~40ms cadence).
+  ok('the fixture is the rollout shape: 12 consecutive user records in ONE turn, each with its item_completed UserMessage twin', userRecs.length === 12 && twins.length === 12, `${userRecs.length}/${twins.length}`);
+  ok('…and NOT ONE `user_message` event for them — the queued path emits one, the steered path does not, which is why that carrier could not be reused',
+    !rollout.some((r) => r.type === 'event_msg' && r.payload.type === 'user_message'));
+  ok('every twin carries the submission\'s clientId (the ONLY identity the steered path publishes)', twins.every((r) => typeof r.payload.item.client_id === 'string' && r.payload.item.client_id));
+
+  const bodies = (mm) => mm.messages.filter((m) => m.role === 'user').map((m) => (m.content || []).map((c) => c.text || '').join(''));
+  const feed = (records) => { const mm = new CodexMessageManager('rb'); for (const r of records) mm.processLive(r); return mm; };
+
+  // (a) THE ROLLOUT ALONE — a reload of a session whose buffer has rotated away
+  {
+    const mm = feed(mergeCodexRecords(rollout, []));
+    const b = bodies(mm);
+    ok(`ROLLOUT ALONE: 12 user records → 12 bubbles (${b.length})`, b.length === 12, JSON.stringify(b.map((x) => x.slice(0, 22))));
+    ok('in queue order, each exactly once', b.every((x, i) => x.includes(`steered message ${i + 1} `)), JSON.stringify(b.map((x) => x.slice(0, 26))));
+    ok('the developer hooks message after each one is never a bubble', !b.some((x) => /developer message/.test(x)));
+    // THE ROUTING PIN: the twin is a DECIDED skip in the normalizer, not a
+    // silent drop — a kind that is neither routed nor listed fires telemetry.
+    ok('`item_completed:UserMessage` is an EXPLICIT skip in the normalizer (its response_item already rendered the bubble) — never an unknown record',
+      CodexMessageManager.ITEM_COMPLETED_SKIPPED_TYPES.has('UserMessage') && ![...CodexMessageManager._seenUnknownRecords].some((k) => /UserMessage/i.test(k)),
+      JSON.stringify([...CodexMessageManager._seenUnknownRecords]));
+  }
+
+  // (b) THE REAL REBUILD: the wrapper's own bubbles (written when each steer
+  // landed, carrying `webui_queue_id`) PLUS codex's copies of the same twelve.
+  const ourCopies = userRecs.map((r, i) => ({
+    timestamp: new Date(Date.parse(r.timestamp) - 42000).toISOString(),   // the steers landed 42s before the commits (measured)
+    type: 'response_item',
+    payload: { type: 'message', role: 'user', content: r.payload.content, webui_queue_id: `inh-${i + 1}` },
+  }));
+  {
+    const merged = mergeCodexRecords(rollout, ourCopies);
+    const mm = feed(merged);
+    const b = bodies(mm);
+    ok(`REBUILD: 24 records for 12 messages → 12 bubbles (${b.length})`, b.length === 12, JSON.stringify(b.map((x) => x.slice(0, 22))));
+    ok('still in queue order', b.every((x, i) => x.includes(`steered message ${i + 1} `)), JSON.stringify(b.map((x) => x.slice(0, 26))));
+    const users = mm.messages.filter((m) => m.role === 'user');
+    ok('the surviving copy is OURS, so every bubble keeps the queue id its chip joins on', users.every((m, i) => m.webuiMsgId === `inh-${i + 1}`), JSON.stringify(users.map((m) => m.webuiMsgId)));
+    // NEGATIVE CONTROL — the shipped-before algorithm: the fingerprint kept
+    // `webui_queue_id` inside the payload, so ours and codex's copy of one
+    // message were strangers.
+    const preFixFp = (r, turn) => {
+      if (r.type === 'response_item' && r.payload?.type === 'message' && r.payload.role === 'user' && r.payload.webui_queue_id) {
+        const moved = { ...r.payload, webui_queue_id: undefined, kept_queue_id: r.payload.webui_queue_id };
+        return recordFingerprint({ ...r, payload: moved }, turn);   // = the key a NON-stripped marker produced
+      }
+      return recordFingerprint(r, turn);
+    };
+    ok('the control only differs where the fix does: for a record with no webui marker it IS the shipped fingerprint',
+      preFixFp(rollout[2], 't') === recordFingerprint(rollout[2], 't'));
+    const preFixMerge = (hist, live) => {
+      const seen = new Set(); const out = []; let turn = 'prelude';
+      for (const r of [...hist, ...live].map((x, i) => ({ x, i, t: Date.parse(x.timestamp) || 0 })).sort((p, q) => (p.t - q.t) || (p.i - q.i)).map((p) => p.x)) {
+        if (r.type === 'turn_context') turn = r.payload?.turn_id || turn;
+        const fp = preFixFp(r, turn);
+        if (fp && seen.has(fp)) continue;
+        if (fp) seen.add(fp);
+        out.push(r);
+      }
+      return out;
+    };
+    const before = bodies(feed(preFixMerge(rollout, ourCopies)));
+    ok(`NEGATIVE CONTROL: without the marker strip the same 24 records render 24 bubbles — every steered message twice (${before.length})`, before.length === 24, before.length);
+  }
+
+  // (c) THE ID-KEYED TWIN — the second defect the owner's own session carried:
+  // every message TYPED here rendered twice after a reload (3/3 in the live
+  // buffer + rollout of the owner's own thread), because our copy keys on
+  // the webui msgId and codex's on its content.
+  const typed = (n, text, extra = {}) => ({ timestamp: new Date(Date.parse('2026-09-07T09:00:00.000Z') + n).toISOString(), type: 'response_item', payload: { type: 'message', role: 'user', webui_msg_id: `m-${n}`, content: [{ type: 'input_text', text }], ...extra } });
+  const codexCopy = (n, text, turn = 'turn-A') => ({ timestamp: new Date(Date.parse('2026-09-07T09:00:10.000Z') + n).toISOString(), type: 'response_item', payload: { type: 'message', id: `msg_c${n}`, role: 'user', content: [{ type: 'input_text', text }], internal_chat_message_metadata_passthrough: { turn_id: turn } } });
+  const tc = (id, atMs) => ({ timestamp: new Date(Date.parse('2026-09-07T09:00:00.000Z') + atMs).toISOString(), type: 'turn_context', payload: { turn_id: id } });
+  {
+    const mm = feed(mergeCodexRecords([tc('turn-A', -1000), codexCopy(1, 'run the tests again')], [typed(1, 'run the tests again')]));
+    ok('A TYPED message and codex\'s own commit copy are ONE bubble after a reload (they used to be two — measured on the owner\'s real session)', bodies(mm).length === 1, JSON.stringify(bodies(mm)));
+    ok('…and the surviving copy is ours, so the Queued/Steered chip still joins', mm.messages.find((m) => m.role === 'user')?.webuiMsgId === 'm-1');
+    // the QUEUED path puts the two copies in DIFFERENT turns (ours at send
+    // time, codex's in the turn that drained it) — a turn-scoped content key
+    // would not have collided, which is why the claim is turn-independent
+    const drained = mergeCodexRecords([tc('turn-A', -1000), tc('turn-B', 5000), codexCopy(2, 'and deploy it', 'turn-B')], [typed(2, 'and deploy it')]);
+    ok('the DRAINED path too: our copy in the turn it was typed in, codex\'s in the turn that ran it → still ONE bubble', bodies(feed(drained)).length === 1, JSON.stringify(bodies(feed(drained))));
+  }
+  // (d) NO COALESCING: two DISTINCT submissions of the SAME text are two
+  // messages — the reason the claim is COUNTED and the id key is not simply
+  // replaced by the content key.
+  {
+    const recs = mergeCodexRecords([tc('turn-A', -1000), codexCopy(3, 'go on'), codexCopy(4, 'go on')], [typed(3, 'go on'), typed(4, 'go on')]);
+    const mm = feed(recs);
+    ok('two identical-text sends inside one turn stay TWO bubbles (n claims in, n twins consumed)', bodies(mm).length === 2, JSON.stringify(bodies(mm)));
+    ok('…each keeping its own id', mm.messages.filter((m) => m.role === 'user').map((m) => m.webuiMsgId).join(',') === 'm-3,m-4');
+  }
+  // (e) FORWARD ONLY. A codex-side record that arrives BEFORE any claim must
+  // survive: letting a late claim swallow an earlier record would DELETE an old
+  // message from history the moment its text was typed again after the buffer
+  // had rotated away.
+  {
+    const early = { ...codexCopy(5, 'same words twice'), timestamp: '2026-09-07T08:00:00.000Z' };
+    const mm = feed(mergeCodexRecords([tc('turn-A', -1000), early, codexCopy(6, 'same words twice')], [typed(6, 'same words twice')]));
+    ok('an OLD codex-side bubble whose text is typed again later is never deleted (the claim looks forward only)', bodies(mm).length === 2, JSON.stringify(bodies(mm)));
+  }
+  // (e2) A FALSY webui id is not an identity: the wrapper writes
+  // `webui_msg_id: msg.msgId || ''`, so a frame that arrives without a msgId
+  // produced a copy that keyed on a payload codex's copy could never match.
+  {
+    const empty = { timestamp: '2026-09-07T09:20:00.000Z', type: 'response_item', payload: { type: 'message', role: 'user', webui_msg_id: '', content: [{ type: 'input_text', text: 'no msgid here' }] } };
+    const theirs = { timestamp: '2026-09-07T09:20:00.400Z', type: 'response_item', payload: { type: 'message', id: 'msg_e', role: 'user', content: [{ type: 'input_text', text: 'no msgid here' }], internal_chat_message_metadata_passthrough: { turn_id: 'turn-A' } } };
+    ok('an empty webui id keys exactly like the bare record — one bubble, not two', bodies(feed(mergeCodexRecords([tc('turn-A', -1000), theirs], [empty]))).length === 1);
+  }
+
+  // (f) REGRESSION GUARDS on the two neighbours of this rule.
+  {
+    const text = 'Message from session "beta" (via vibespace-msg) — please quote this back';
+    const mine = { timestamp: '2026-09-07T09:10:00.000Z', type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text }], webui_peer: { name: 'beta', body: 'please quote this back' } } };
+    const theirs = { timestamp: '2026-09-07T09:10:00.500Z', type: 'response_item', payload: { type: 'message', id: 'msg_peer', role: 'user', content: [{ type: 'input_text', text }], internal_chat_message_metadata_passthrough: { turn_id: 'turn-peer' } } };
+    const users = feed(mergeCodexRecords([theirs], [mine])).messages.filter((m) => m.role === 'user');
+    ok('a delivered peer message is still ONE labelled card after a rebuild', users.length === 1 && users[0].originKind === 'peer-message' && users[0].peerFrom === 'beta', JSON.stringify(users.map((m) => [m.originKind, m.peerFrom])));
+    // …and an INHERITED item is not "typed here": most of the owner's 25 were
+    // agent-to-agent messages, so peer detection still runs on our new record.
+    const inheritedPeer = feed([{ timestamp: '2026-09-07T09:11:00.000Z', type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Message from session "gamma" (via vibespace-msg) — inherited peer' }], webui_queue_id: 'inh-peer' } }]).messages.find((m) => m.role === 'user');
+    ok('a steered INHERITED peer message keeps its labelled card AND carries the queue id (a webui_msg_id would have made it an anonymous "You" bubble)',
+      inheritedPeer?.originKind === 'peer-message' && inheritedPeer.webuiMsgId === 'inh-peer', JSON.stringify([inheritedPeer?.originKind, inheritedPeer?.webuiMsgId]));
+  }
+  // (g) the marker is out-of-band on BOTH readers, or the twin never collapses
+  {
+    const marked = { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'x' }], webui_queue_id: 'inh-9' } };
+    const bare = { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'x' }] } };
+    ok('merge fingerprint: a marked inherited bubble keys exactly like the bare record codex writes', recordFingerprint(marked, 't') === recordFingerprint(bare, 't'));
+    ok('normalizer recordKey: both copies mint the SAME message id, so live and rebuilt agree whichever survives', CodexMessageManager.recordKey(marked) === CodexMessageManager.recordKey(bare));
+    ok('userRecordIdentity names only the ID-KEYED spellings (webui_queue_id keys on content, by design)',
+      userRecordIdentity(marked.payload) === '' && userRecordIdentity({ webui_msg_id: 'm1' }) === 'm1' && userRecordIdentity({ client_msg_id: 'c1' }) === 'c1');
+    ok('userTwinKeys: ours-vs-codex is decided by OUR markers, never by codex\'s fields', userTwinKeys(marked).ours === true && userTwinKeys(bare).ours === false && userTwinKeys(marked).claims === false && userTwinKeys({ type: 'response_item', payload: { type: 'message', role: 'user', webui_msg_id: 'm', content: [] } }).claims === true);
+    ok('…and a non-user record is not its business', userTwinKeys({ type: 'response_item', payload: { type: 'message', role: 'assistant', content: [] } }) === null && userTwinKeys({ type: 'event_msg', payload: {} }) === null);
+  }
+
+
+  // (h2) A STEER LANDS MID-STREAM, so its bubble must not close the reply it
+  // was steered INTO. Finalizing there cut the agent's message in two — the
+  // 2.368.16 fragmentation the peer branch already avoids — and a steer-all
+  // would have done it once per item. A TYPED record still finalizes: it can
+  // begin a turn, where closing the previous streams is exactly right.
+  {
+    const midStream = (marker) => {
+      const mm = new CodexMessageManager('mid');
+      const at = () => new Date().toISOString();
+      mm.processLive({ timestamp: at(), type: 'event_msg', payload: { type: 'task_started', turn_id: 't1' } });
+      mm.processLive({ timestamp: at(), type: 'event_msg', payload: { type: 'agent_message_delta', item_id: 'm1', delta: 'first half ' } });
+      mm.processLive({ timestamp: at(), type: 'response_item', payload: { type: 'message', role: 'user', ...marker, content: [{ type: 'input_text', text: 'steered mid-stream' }] } });
+      mm.processLive({ timestamp: at(), type: 'event_msg', payload: { type: 'agent_message_delta', item_id: 'm1', delta: 'second half' } });
+      return mm.messages.filter((m) => m.role === 'assistant');
+    };
+    const inh = midStream({ webui_queue_id: 'inh-1' });
+    ok('a steered bubble does NOT fragment the streaming reply it was injected into (2.368.16 class)', inh.length === 1 && (inh[0].content || []).map((c) => c.text).join('') === 'first half second half', JSON.stringify(inh.map((m) => (m.content || []).map((c) => c.text).join(''))));
+    ok('…and the typed path is unchanged: a send that can BEGIN a turn still finalizes the open streams', midStream({ webui_msg_id: 'm-1' }).length === 2);
+  }
+
+  // (i) IN A REAL BROWSER: the same messages, rendered by the REAL renderer
+  // into a REAL document. The owner's report is a COUNT of what is on screen,
+  // so the last hop is measured rather than argued — nothing between the
+  // normalizer and the DOM merges two bubbles into one.
+  {
+    const CHROME9 = ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser'].find((p) => fs.existsSync(p));
+    if (!CHROME9) {
+      console.log('  SKIP: no chrome/chromium on this box — the DOM half of ⑨ did not run');
+    } else {
+      // the LIVE shape: the wrapper's twelve records, then the steer results
+      // that chip them — exactly the frames the ws layer feeds the client.
+      const live = new CodexMessageManager('live');
+      for (const r of ourCopies) live.processLive(r);
+      for (let i = 1; i <= 12; i++) live.processLive({ timestamp: new Date().toISOString(), type: 'event_msg', payload: { type: 'queue_op_result', op: 'steer', id: `iq${i}`, msg_id: `inh-${i}`, ok: true, batch: 'steer-all' } });
+      const liveUsers = live.messages.filter((m) => m.role === 'user');
+      ok('LIVE (normalizer): twelve steered bubbles, each chipped by its queue_op_result',
+        liveUsers.length === 12 && liveUsers.filter((m) => m.queueState === 'steered').length === 12, JSON.stringify(liveUsers.map((m) => [m.webuiMsgId, m.queueState])));
+
+      const http = await import('node:http');
+      const net = await import('node:net');
+      const { spawn } = await import('node:child_process');
+      const esbuild = require(path.join(REPO, 'node_modules/esbuild'));
+      const WebSocket = require('ws');
+      const sleep9 = (ms) => new Promise((r) => setTimeout(r, ms));
+      const freePort = () => new Promise((res, rej) => { const s = net.createServer(); s.on('error', rej); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); }); });
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `vs-steerdom-${process.pid}-`));
+      const bundle = path.join(tmp, 'renderers.iife.js');
+      const bvStub = { name: 'stub-build-version', setup(b) { b.onResolve({ filter: /build-version\.js$/ }, () => ({ path: 'build-version', namespace: 'bv' })); b.onLoad({ filter: /.*/, namespace: 'bv' }, () => ({ contents: "export const BUILD_VERSION = 'test';", loader: 'js' })); } };
+      await esbuild.build({ entryPoints: [path.join(REPO, 'src/lib/chat-renderers.js')], bundle: true, format: 'iife', globalName: 'VS', platform: 'browser', target: 'es2022', outfile: bundle, logLevel: 'silent', loader: { '.css': 'text' }, plugins: [bvStub] });
+      const js = fs.readFileSync(bundle, 'utf8').replace(/<\/script/gi, '<\\/script');
+      const css = fs.readFileSync(path.join(REPO, 'public/chat.css'), 'utf8').replace(/<\/style/gi, '<\\/style');
+      const html = `<!doctype html><meta charset="utf-8"><title>steer</title><style>${css}</style><body><div id="list"></div></body><script>${js}</script>`;
+      const port = await freePort(), cdpPort = await freePort();
+      const srv = http.createServer((_q, r) => { r.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); r.end(html); }).listen(port, '127.0.0.1');
+      const chrome = spawn(CHROME9, ['--headless=new', `--remote-debugging-port=${cdpPort}`, '--no-first-run', '--no-sandbox', '--disable-gpu',
+        '--disable-dev-shm-usage', '--disable-background-timer-throttling', `--user-data-dir=${tmp}/chrome`, 'about:blank'], { stdio: 'ignore' });
+      let cws = null;
+      try {
+        let target = null;
+        for (let i = 0; i < 120 && !target; i++) {
+          try { target = (await (await fetch(`http://127.0.0.1:${cdpPort}/json`)).json()).find((x) => x.type === 'page'); } catch {}
+          if (!target) await sleep9(250);
+        }
+        if (!target) throw new Error('chrome never exposed a CDP page target');
+        cws = new WebSocket(target.webSocketDebuggerUrl, { maxPayload: 64 * 1024 * 1024 });
+        await new Promise((r, j) => { cws.on('open', r); cws.on('error', j); });
+        let seq = 0; const pend = new Map();
+        cws.on('message', (d) => { const m = JSON.parse(d); if (m.id && pend.has(m.id)) { pend.get(m.id)(m); pend.delete(m.id); } });
+        const cdp = (method, params = {}) => new Promise((res) => { const id = ++seq; pend.set(id, res); cws.send(JSON.stringify({ id, method, params })); });
+        const evaljs = async (expr) => {
+          const r = await cdp('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true });
+          if (r.result?.exceptionDetails) throw new Error(JSON.stringify(r.result.exceptionDetails).slice(0, 400));
+          return r.result?.result?.value;
+        };
+        await cdp('Runtime.enable'); await cdp('Page.enable');
+        await cdp('Page.navigate', { url: `http://127.0.0.1:${port}/` });
+        for (let i = 0; i < 80; i++) { if (await evaljs('!!(window.VS && window.VS.ChatRenderers)').catch(() => false)) break; await sleep9(150); }
+        const out = await evaljs(`(() => {
+          const list = document.getElementById('list');
+          const msgs = ${JSON.stringify(liveUsers)};
+          const r = new VS.ChatRenderers({ ws: { send() {} }, sessionId: 'sess-steer', app: null, backend: 'codex', compact: false,
+            messageList: list, onQueueChipClick: () => {}, getQueueCaps: () => ({ queue: true, steer: true, queueOps: true }) });
+          for (const m of msgs) { const el = r.renderUserMsg(m); if (el) list.appendChild(el); }
+          const bubbles = [...list.querySelectorAll(':scope > .chat-msg')];
+          return {
+            bubbles: bubbles.length,
+            plain: list.querySelectorAll(':scope > .chat-msg-user').length,
+            peers: list.querySelectorAll(':scope > .chat-peer-message').length,
+            chips: list.querySelectorAll('.chat-queue-chip').length,
+            steeredChips: [...list.querySelectorAll('.chat-queue-chip')].filter((c) => c.dataset.queueState === 'steered').length,
+            chipText: (list.querySelector('.chat-queue-chip')?.textContent || '').trim(),
+            texts: bubbles.map((b) => (b.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 40)),
+            bodies: bubbles.map((b) => (b.textContent || '').replace(/\\s+/g, ' ').trim()),
+            visible: bubbles.filter((b) => getComputedStyle(b).display !== 'none').length,
+          };
+        })()`);
+        ok(`BROWSER: twelve steered messages are twelve bubbles on screen (${out?.bubbles})`, !!out && out.bubbles === 12, JSON.stringify(out?.texts));
+        ok('ten "You" bubbles and the two agent-to-agent ones as labelled peer cards — inherited items are not all "typed here"', out.plain === 10 && out.peers === 2, JSON.stringify([out.plain, out.peers]));
+        ok('all twelve are actually displayed', out.visible === 12, String(out.visible));
+        ok('no two bubbles carry the same text — nothing merged them', new Set(out.texts).size === 12, JSON.stringify(out.texts));
+        // a peer card leads with its sender head, so the ORDER is read from the
+        // body — the two agent-to-agent items sit in their queue positions too
+        ok('and they are in queue order (peer cards included, read from the body under their sender head)',
+          out.bodies.every((t2, i) => t2.includes(`steered message ${i + 1} `)), JSON.stringify(out.texts));
+        ok(`every "You" bubble wears exactly one Steered chip (${out.chips}/${out.steeredChips}, "${out.chipText}")`, out.chips === 10 && out.steeredChips === 10 && /Steered/.test(out.chipText));
+      } catch (e) {
+        ok('the ⑨ browser leg ran', false, String(e.message || e).slice(0, 300));
+      } finally {
+        try { cws?.close(); } catch {}
+        try { chrome.kill('SIGKILL'); } catch {}
+        try { srv.close(); } catch {}
+        try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+      }
+    }
+  }
+
+  // (h) THE WRAPPER SIDE, by construction: the branch that records an inherited
+  // submission, the cid bookkeeping that stops it doubling our own bubbles, and
+  // the breadcrumb every OTHER unrouted item kind now leaves (its absence is
+  // how `userMessage` stayed lost through four releases).
+  {
+    const cw = read('data/bin/codex-chat-wrapper.js');
+    ok("item/completed routes `userMessage` — the app-server's own carrier for a submission entering the turn", /if \(type === 'userMessage'\) \{[\s\S]{0,220}recordInboundUserMessage\(asString\(item\.clientId \|\| item\.client_id\), userInputToContent\(item\.content\)/.test(cw));
+    ok('a landed steer writes the bubble AT ONCE, in queue order (the commit twin arrives up to a minute later)', /await request\('turn\/steer'[\s\S]{0,1600}recordInboundUserMessage\(cid, userInputToContent\(item\.input\), 'steered'\)/.test(cw));
+    ok('…and a REFUSED steer records nothing (that message is still queued)', /return \{ \.\.\.base, ok: false, detail: e\.message, \.\.\.classifySteerFailure\(e\.message\) \};\n  \}/.test(cw));
+    ok('every id whose bubble we already wrote is remembered — chat-input, the queued cid and the peer cid', (cw.match(/noteRecordedUserCid\(/g) || []).length >= 5);
+    ok('the record carries the queue id as an out-of-band marker, LAST, so the stable payload stays {type, role, content}', /record\('response_item', \{ type: 'message', role: 'user', content: blocks, webui_queue_id: id \}\)/.test(cw));
+    ok('an inherited queue row advertises the app-server cid as its msgId so the strip row and the bubble chip join', /msgId: known \? \(known\.msgId \|\| ''\) : cid/.test(cw) && /msg_id: known \? \(known\.msgId \|\| ''\) : cid/.test(cw));
+    ok('NO SILENT DROPS: an unrouted item/completed kind is logged once and counted in the sidecar', /noteUnhandledItem\(type\);\n\}/.test(cw) && /meta\.unhandledItems/.test(cw));
+    ok('…and the deliberate no-ops are NAMED (a set, not silence)', /NO_RENDER_COMPLETED_ITEMS = new Set\(\[[\s\S]{0,400}'hookPrompt'/.test(cw));
+  }
+}
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);
 process.exit(fail ? 1 : 0);

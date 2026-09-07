@@ -467,7 +467,7 @@ ok(ops.some((o) => o.op === 'edit' && o.id === mcpCard?.id && o.fields?.meta?.re
 // pins
 const wsrc = fs.readFileSync(path.join(REPO, 'data/bin/codex-chat-wrapper.js'), 'utf8');
 ok(/if \(meta\.threadId && meta\.activeTurnId\) \{[\s\S]{0,600}?await request\('thread\/queue\/add'/.test(wsrc), 'wrapper pin: chat-input queues on an active turn');
-ok(/noteQueued\(cid, \{ kind: 'user', msgId: msg\.msgId \|\| '' \}\);\s*\n\s*await request\('thread\/queue\/add'/.test(wsrc), "wrapper pin: the item's identity is registered BEFORE the add (the queue/changed refresh can beat the reply)");
+ok(/noteQueued\(cid, \{ kind: 'user', msgId: msg\.msgId \|\| '' \}\);[\s\S]{0,200}?await request\('thread\/queue\/add'/.test(wsrc) && /noteQueued\(cid, \{ kind: 'user'[\s\S]{0,200}?noteRecordedUserCid\(cid\);/.test(wsrc), "wrapper pin: the item's identity is registered BEFORE the add (the queue/changed refresh can beat the reply) — and so is the fact that its bubble already exists");
 ok(!/request\('thread\/queue\/remove'/.test(wsrc) && /thread\/queue\/delete', \{ threadId: meta\.threadId, queuedSubmissionId/.test(wsrc), 'wrapper pin: removal is thread/queue/DELETE with queuedSubmissionId — 0.153.4 has no thread/queue/remove');
 ok(/await request\('turn\/steer'[\s\S]{0,300}expectedTurnId: meta\.activeTurnId/.test(wsrc), 'wrapper pin: every steer carries the ACTIVE turn id as its precondition');
 ok(/try \{ await clearQueueForStop\(\); \}[\s\S]{0,600}?if \(stopTurnId\) await interruptTurn\(stopTurnId\);/.test(wsrc) && /entry\.promise = request\('turn\/interrupt'/.test(wsrc), 'wrapper pin: Stop clears the queue BEFORE turn/interrupt (the app-server drains what is left when the turn ends), and a sweep that throws may not eat the interrupt');
@@ -513,6 +513,7 @@ const spawnStub = (tag, stubBody) => {
     rpc: () => { try { return fs.readFileSync(rl, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } },
     meta: () => { try { return JSON.parse(fs.readFileSync(mt, 'utf8')); } catch { return null; } },
     send: (x) => proc.stdin.write(JSON.stringify(x) + '\n'),
+    dir: d,
     journal: () => { try { return fs.readFileSync(path.join(d, 'codex-chat-wrapper.log'), 'utf8'); } catch { return ''; } },
     stop: () => { try { proc.kill('SIGTERM'); } catch {} try { fs.rmSync(d, { recursive: true, force: true }); } catch {} },
   };
@@ -808,6 +809,195 @@ console.log('— ②f the steer whose queued copy could not be removed');
 }
 
 
+// ── ⑥ THE INHERITED QUEUE (owner 2026-09-07: "我刚才在那个codex session里全给插入
+// 了，但是我只能看到我最后插入的一条消息") ──────────────────────────────────
+// The app-server's queue belongs to the THREAD, so a resumed thread hands the
+// NEW wrapper a queue it never filled (measured on the owner's session:
+// `queue_changed n=25` two seconds after boot, every clientUserMessageId minted
+// by the wrapper this one replaced). Steering it put 25 messages into the turn
+// and produced ZERO bubbles: the app-server's own carrier for a submission
+// entering the turn — `item/completed {item:{type:'userMessage', clientId}}`,
+// 0.153.4 UserMessageThreadItem — fell off the end of _handleItemCompletedInner
+// with no branch and no breadcrumb. This leg drives the REAL wrapper against a
+// stub that behaves the way the app-server measurably does: it hands over an
+// inherited queue, keeps steered items until we delete them, and COMMITS them
+// (the item/completed twins) only later, at the next turn boundary.
+console.log('— ⑥ an INHERITED queue: every steered message gets its bubble, exactly once');
+const STUB_INHERIT = `
+const fs = require('fs');
+let b = ''; let turns = 0; let qseq = 0; let activeTurn = null; let committed = 0;
+const send = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+// Twelve submissions queued by the wrapper this one REPLACED: their client ids
+// are webui msgIds minted in a session that is gone, and this wrapper has never
+// heard of any of them.
+const queue = [];
+for (let i = 1; i <= 12; i++) queue.push({ id: 'iq' + i, clientUserMessageId: '1788731' + (200000 + i * 137) + '-inh' + i, input: [{ type: 'text', text: 'inherited message ' + i }] });
+const commit = (q) => {
+  // The commit is the app-server's, and it is LATE: on the owner's session the
+  // twins arrived 42s after the steers' replies.
+  send({ method: 'item/completed', params: { threadId: 'th-inh', turnId: activeTurn, item: { type: 'userMessage', id: 'um-' + (++committed), clientId: q.clientUserMessageId, content: q.input.map((x) => ({ ...x, text_elements: [] })) } } });
+};
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (d) => {
+  b += d; let i;
+  while ((i = b.indexOf('\\n')) !== -1) {
+    const line = b.slice(0, i); b = b.slice(i + 1);
+    if (!line.trim()) continue;
+    let m; try { m = JSON.parse(line); } catch { continue; }
+    if (m.id === undefined || !m.method) continue;
+    fs.appendFileSync(__RPCLOG__, line + '\\n');
+    if (m.method === 'thread/start') { send({ id: m.id, result: { thread: { id: 'th-inh' } } }); continue; }
+    if (m.method === 'turn/start') {
+      turns++; const tid = 'turn-' + turns; activeTurn = tid;
+      send({ id: m.id, result: { turn: { id: tid } } });
+      send({ method: 'turn/started', params: { turn: { id: tid } } });
+      // our OWN send: the app-server commits it too, with NO clientId (turn/start
+      // carries none) — the wrapper already wrote that bubble in handleInput
+      send({ method: 'item/completed', params: { threadId: 'th-inh', turnId: tid, item: { type: 'userMessage', id: 'um-own-' + turns, clientId: null, content: [{ type: 'text', text: 'typed here', text_elements: [] }] } } });
+      // …and one kind nothing routes, so the breadcrumb has something to say
+      send({ method: 'item/completed', params: { threadId: 'th-inh', turnId: tid, item: { type: 'holoDeck', id: 'hd-1' } } });
+      send({ method: 'item/completed', params: { threadId: 'th-inh', turnId: tid, item: { type: 'hookPrompt', id: 'hp-1', fragments: [] } } });
+      continue;
+    }
+    if (m.method === 'thread/queue/add') { const q = { id: 'q' + (++qseq), input: m.params.input, clientUserMessageId: m.params.clientUserMessageId }; queue.push(q); send({ id: m.id, result: { queuedSubmission: q } }); send({ method: 'thread/queue/changed', params: { threadId: 'th-inh' } }); continue; }
+    if (m.method === 'thread/queue/list') { send({ id: m.id, result: { data: queue.slice(), nextCursor: null } }); continue; }
+    if (m.method === 'thread/queue/delete') {
+      const at = queue.findIndex((q) => q.id === m.params.queuedSubmissionId);
+      if (at < 0) { send({ id: m.id, error: { code: -32600, message: 'queued submission not found' } }); continue; }
+      queue.splice(at, 1); send({ id: m.id, result: { deleted: true } }); send({ method: 'thread/queue/changed', params: { threadId: 'th-inh' } }); continue;
+    }
+    if (m.method === 'turn/steer') {
+      if (m.params.expectedTurnId !== activeTurn) { send({ id: m.id, error: { code: -32600, message: 'expected active turn id \\'' + m.params.expectedTurnId + '\\' but found \\'' + activeTurn + '\\'' } }); continue; }
+      send({ id: m.id, result: { turnId: activeTurn } });
+      // the steer LANDED; the commit twin follows later, out of band
+      const q = { clientUserMessageId: m.params.clientUserMessageId, input: m.params.input };
+      setTimeout(() => commit(q), 200);
+      continue;
+    }
+    send({ id: m.id, result: {} });
+  }
+});
+// A DRAINED item (no steer at all): the app-server ends the turn, starts a new
+// one for the next queued submission and commits it — the other way an
+// inherited message enters a turn.
+const DRAIN_FILE = __RPCLOG__.replace(/rpc\.jsonl$/, 'drain');
+setInterval(() => {
+  try { fs.unlinkSync(DRAIN_FILE); } catch { return; }
+  // whatever is still queued — or, once a steer-all has emptied the queue, one
+  // more submission from the session that is gone: the point is that NOTHING
+  // but the commit twin ever mentions it to this wrapper
+  const q = queue.shift() || { id: 'iq13', clientUserMessageId: '1788731999999-inh13', input: [{ type: 'text', text: 'inherited message 13' }] };
+  const ended = activeTurn; activeTurn = 'turn-drain';
+  send({ method: 'turn/completed', params: { turn: { id: ended }, status: 'completed' } });
+  send({ method: 'thread/queue/changed', params: { threadId: 'th-inh' } });
+  send({ method: 'turn/started', params: { turn: { id: 'turn-drain' } } });
+  commit(q);
+}, 40);
+`;
+{
+  const I = spawnStub('inherit', STUB_INHERIT);
+  const userRecs = () => I.events().filter((e) => e.type === 'response_item' && e.payload?.type === 'message' && e.payload.role === 'user');
+  ok(await waitFor(() => I.meta()?.threadId === 'th-inh'), 'inherit stub: the wrapper has a thread');
+  ok(await waitFor(() => I.lastQueue().length === 12), `the resumed thread's queue arrives at boot, all twelve items (${I.lastQueue().length})`);
+  ok(I.lastQueue().every((it, i) => it.msgId === `1788731${200000 + (i + 1) * 137}-inh${i + 1}`),
+    'an INHERITED row advertises the app-server\'s own clientUserMessageId as its msgId — the id the bubble will carry, so the strip row and the chip join', JSON.stringify(I.lastQueue().slice(0, 2)));
+  ok(userRecs().length === 0, 'nothing has been recorded for them yet: a queued message is not in the turn', JSON.stringify(userRecs().map((r) => r.payload.content)));
+
+  // a turn has to be running before anything can be steered into it
+  I.send({ type: 'chat-input', text: 'typed here', msgId: 'own-1' });
+  ok(await waitFor(() => I.meta()?.activeTurnId === 'turn-1'), 'a turn is running');
+  ok(await waitFor(() => userRecs().length === 1), 'our own send has its bubble, written by handleInput as always');
+
+  I.send({ type: 'queue-op', op: 'steer-all' });
+  ok(await waitFor(() => I.ops().filter((r) => r.op === 'steer' && r.ok).length === 12, 15000), `all twelve steer (${I.ops().filter((r) => r.op === 'steer').length})`);
+  const inherited = () => userRecs().filter((r) => r.payload.webui_queue_id);
+  ok(inherited().length === 12, `THE FIX: twelve steered messages, twelve bubbles — written AT THE STEER, not at the app-server's much later commit (${inherited().length})`, JSON.stringify(inherited().map((r) => r.payload.content[0].text)));
+  ok(inherited().every((r, i) => r.payload.content[0].text === `inherited message ${i + 1}`), 'in queue order', JSON.stringify(inherited().map((r) => r.payload.content[0].text)));
+  ok(inherited().every((r, i) => r.payload.webui_queue_id === `1788731${200000 + (i + 1) * 137}-inh${i + 1}`), 'each stamped with the submission id its queue row advertised');
+  ok(I.ops().filter((r) => r.op === 'steer' && r.ok).every((r) => /-inh\d+$/.test(r.msg_id || '')), 'every steer result names the same id, so the chip can flip', JSON.stringify(I.ops().filter((r) => r.op === 'steer').slice(0, 2)));
+  // THE COMMIT TWINS land ~200ms later: they must add NOTHING (this is the
+  // dedupe that keeps one message one bubble when both producers speak).
+  await sleep(700);
+  ok(inherited().length === 12, `the app-server's own item/completed twins add no second copy (${inherited().length})`, JSON.stringify(inherited().map((r) => r.payload.webui_queue_id)));
+  ok(userRecs().length === 13, `thirteen user records for thirteen messages, no duplicates (${userRecs().length})`);
+  ok(!userRecs().some((r) => r.payload.webui_queue_id && r.payload.webui_msg_id), 'a record carries ONE identity — the queue id or the webui msgId, never both');
+  ok(!userRecs().some((r) => /typed here/.test(JSON.stringify(r.payload.content)) && r.payload.webui_queue_id),
+    'our own message is never re-recorded from its clientId-less commit twin (turn/start carries no clientId — that bubble already exists)');
+
+  // THROUGH THE REAL NORMALIZER — the frames the REAL wrapper emitted, fed to
+  // the REAL server-side normalizer the ws layer feeds: this is what the chat
+  // window renders.
+  {
+    const nm = new CodexMessageManager('inh');
+    for (const e of I.events()) nm.processLive(e);
+    const users = nm.messages.filter((m) => m.role === 'user');
+    ok(users.length === 13, `LIVE: the wrapper's own frames render 13 user bubbles (${users.length})`, JSON.stringify(users.map((m) => (m.content || []).map((c) => c.text).join('').slice(0, 24))));
+    const texts = users.map((m) => (m.content || []).map((c) => c.text || '').join(''));
+    ok(new Set(texts).size === 13, 'each exactly once', JSON.stringify(texts));
+    ok(texts.slice(1).every((t, i) => t === `inherited message ${i + 1}`), 'in queue order, after the message typed here', JSON.stringify(texts));
+    const chipped = users.filter((m) => m.queueState === 'steered');
+    ok(chipped.length === 12, `and every steered bubble wears the Steered chip — the join the inherited msgId exists for (${chipped.length})`, JSON.stringify(users.map((m) => m.queueState || null)));
+  }
+
+  // THE DRAIN PATH: an inherited item the app-server runs by itself when a turn
+  // ends. No steer, so the item/completed twin is the ONLY notice we get.
+  {
+    const before = inherited().length;
+    fs.writeFileSync(path.join(I.dir, 'drain'), '1');
+    ok(await waitFor(() => inherited().length === before + 1), `a DRAINED inherited item gets its bubble from the commit twin alone (${inherited().length - before})`);
+    const last = inherited().slice(-1)[0];
+    ok(/inherited message/.test(last.payload.content[0].text) && /-inh\d+$/.test(last.payload.webui_queue_id), 'with the same shape and the same id', JSON.stringify(last.payload));
+  }
+
+  // NO SILENT DROPS: the unrouted kind is named, the deliberate no-op is not.
+  ok(await waitFor(() => !!I.meta()?.unhandledItems?.holoDeck), `an item/completed kind nothing routes is COUNTED in the sidecar (${JSON.stringify(I.meta()?.unhandledItems)})`);
+  ok(/unhandled item kind "holoDeck"/.test(I.journal()), 'and logged once, verbatim, in the wrapper journal');
+  ok(!I.meta()?.unhandledItems?.hookPrompt && !I.meta()?.unhandledItems?.userMessage, 'a NAMED no-op (hookPrompt) and the now-routed userMessage are not "unhandled"', JSON.stringify(I.meta()?.unhandledItems));
+  I.stop();
+
+  // THE NEGATIVE CONTROL, against the SHIPPED code: the same stub, the same
+  // steer-all, driven by the wrapper as it was before this fix. It is a
+  // dependency-free single file (fs/path/child_process), so it runs verbatim
+  // from git. If master ever stops reproducing the failure the control says so
+  // instead of passing for the wrong reason.
+  {
+    const { execFileSync } = await import('node:child_process');
+    let before = '';
+    try { before = execFileSync('git', ['-C', REPO, 'show', 'master:data/bin/codex-chat-wrapper.js'], { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 }); } catch (e) { before = ''; }
+    if (!before) {
+      console.log('  SKIP: `git show master:data/bin/codex-chat-wrapper.js` produced nothing — the pre-fix control did not run');
+    } else if (/type === 'userMessage'/.test(before)) {
+      console.log('  SKIP: master already routes item/completed userMessage — this control has served its purpose (it can only fail once)');
+    } else {
+      const cd = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-cxp2-prefix-'));
+      const cw = path.join(cd, 'codex-chat-wrapper.js');
+      fs.writeFileSync(cw, before);
+      const sid = 'sess-prefix-1700000000009';
+      const cb = path.join(cd, sid + '.buf'), cm2 = path.join(cd, sid + '.json'), crl = path.join(cd, 'rpc.jsonl');
+      const p2 = spawn(process.execPath, [cw, cb, cm2, process.execPath, '-e', STUB_INHERIT.replace(/__RPCLOG__/g, JSON.stringify(crl))], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: { ...process.env, CODEX_WEBUI_CWD: cd, VIBESPACE_API: '', VIBESPACE_SESSION_TOKEN: '', VIBESPACE_SKIP_AGENT_HOOKS: '1' },
+      });
+      let o2 = ''; p2.stdout.on('data', (x) => { o2 += x; }); p2.stderr.on('data', () => {});
+      const ev2 = () => o2.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+      const users2 = () => ev2().filter((e) => e.type === 'response_item' && e.payload?.type === 'message' && e.payload.role === 'user');
+      const meta2 = () => { try { return JSON.parse(fs.readFileSync(cm2, 'utf8')); } catch { return null; } };
+      const ops2 = () => ev2().filter((e) => e.type === 'event_msg' && e.payload?.type === 'queue_op_result').map((e) => e.payload);
+      await waitFor(() => meta2()?.threadId === 'th-inh');
+      p2.stdin.write(JSON.stringify({ type: 'chat-input', text: 'typed here', msgId: 'own-1' }) + '\n');
+      await waitFor(() => meta2()?.activeTurnId === 'turn-1');
+      p2.stdin.write(JSON.stringify({ type: 'queue-op', op: 'steer-all' }) + '\n');
+      await waitFor(() => ops2().filter((r) => r.op === 'steer' && r.ok).length === 12, 15000);
+      await sleep(900);   // long enough for every commit twin to have arrived
+      ok(ops2().filter((r) => r.op === 'steer' && r.ok).length === 12, 'PRE-FIX CONTROL: the shipped wrapper steers all twelve too — the messages DID enter the turn');
+      ok(users2().length === 1, `PRE-FIX CONTROL: …and renders ONE bubble, the message typed here — exactly the owner's report ("我只能看到我最后插入的一条消息") (${users2().length})`, JSON.stringify(users2().map((r) => r.payload.content?.[0]?.text)));
+      ok(!/unhandled item kind/.test((() => { try { return fs.readFileSync(path.join(cd, 'codex-chat-wrapper.log'), 'utf8'); } catch { return ''; } })()),
+        '…and said nothing about the twelve item kinds it dropped — the silence this fix also closes');
+      try { p2.kill('SIGTERM'); } catch {}
+      try { fs.rmSync(cd, { recursive: true, force: true }); } catch {}
+    }
+  }
+}
 // ── ⑦ THE VERB TABLE: reorder / edit / run-now / run-all (2026-09-07) ──────
 // A stub whose queue/list PAGINATES (2 per page, opaque cursors — the real
 // 0.153.4 answers `nextCursor` for a `limit`ed list, measured), whose

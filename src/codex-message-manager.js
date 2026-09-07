@@ -435,10 +435,14 @@ class CodexMessageManager {
     const payload = record?.payload || record || {};
     // webui_peer = the wrapper's peer marker (buffer copy only) — stripped so
     // the buffer and rollout copies of one peer message mint the SAME id.
+    // webui_queue_id (2026-09-07) is the same kind of marker on the bubble the
+    // wrapper writes for an INHERITED queue submission entering the turn: only
+    // ONE of the two copies survives the merge (either can win, see
+    // mergeCodexRecords), so the id must not depend on which.
     // thread_id/turn_id are the wrapper's B-7473 item context: only the LIVE
     // copy carries them, so leaving them in would make every buffer record a
     // stranger to its rollout twin (double cards on every attach).
-    const { item_id, itemId, id, internal_chat_message_metadata_passthrough, webui_peer, thread_id, turn_id, ...stable } = payload;
+    const { item_id, itemId, id, internal_chat_message_metadata_passthrough, webui_peer, webui_queue_id, webuiQueueId, thread_id, turn_id, ...stable } = payload;
     let str;
     try { str = (record?.type || '') + ':' + JSON.stringify(stable); } catch { str = String(record?.type || ''); }
     let h = 0x811c9dc5;
@@ -1162,6 +1166,19 @@ class CodexMessageManager {
     return true;
   }
 
+  /** STAMP THE ID ON THE MESSAGE ITSELF, not only into the side map:
+   *  `userMessageIds` never leaves the server, while the queue chip on the
+   *  CLIENT has to join a rendered bubble back onto its queue row. A map the
+   *  client cannot see is not an identity (round-1 review: every chip click
+   *  answered "no longer queued" because the bubble carried no id). Both
+   *  identities land in the same field — the client asks "which queue row is
+   *  this bubble", never "who minted the id". */
+  _stampUserIdentity(msg, id) {
+    if (!id) return;
+    msg.webuiMsgId = String(id);
+    this.userMessageIds.set(String(id), msg.id);
+  }
+
   _processResponseMessage(item, emit) {
     const role = item.role;
     // Detect Codex thread goal auto-continue messages (role=developer or user with goal context)
@@ -1186,6 +1203,15 @@ class CodexMessageManager {
       }
       if (!content.length) return;
       const webuiMsgId = item.webui_msg_id || item.webuiMsgId || item.client_msg_id || item.clientMsgId || null;
+      // The bubble the WRAPPER wrote for a submission it never typed — an item
+      // INHERITED from the wrapper this session replaced, steered into the turn
+      // or drained by the app-server (2026-09-07). Its id is the app-server's
+      // own clientUserMessageId, which is also what the strip row advertises,
+      // so the queue chip joins. It is a SECOND-CLASS identity on purpose: it
+      // does NOT suppress peer detection below (most of the 25 inherited items
+      // in the owner's session were agent-to-agent messages and must keep their
+      // labelled card), and it never reaches the merge fingerprint.
+      const queueMsgId = item.webui_queue_id || item.webuiQueueId || null;
       // Peer / notification record (rpc-queue lane live, rollout on rebuild)
       // → the labelled peer card, never an anonymous "You" bubble. NO
       // _finalizeStreaming here: a queued peer message is recorded while a
@@ -1198,17 +1224,25 @@ class CodexMessageManager {
         const msg = this._create({ role: 'user', status: 'complete', content: peer.content, turnIndex: this.turnIndex });
         msg.originKind = 'peer-message';
         msg.peerFrom = peer.from;
+        this._stampUserIdentity(msg, queueMsgId);
         if (emit) this._emit({ op: 'create', message: msg });
         return;
       }
-      this._finalizeStreaming(emit);
-      if (webuiMsgId) {
-        const existingId = this.userMessageIds.get(String(webuiMsgId));
+      // A record for an INHERITED queue submission exists ONLY mid-turn (a
+      // steer injects into the RUNNING turn; a drained item's turn has just
+      // started with nothing open yet), so it must not close the streams the
+      // way a typed send does: finalizing here cut the agent's reply in two —
+      // measured, and the same 2.368.16 fragmentation the peer branch above
+      // exists to avoid. A typed record keeps finalizing: it can BEGIN a turn.
+      if (!queueMsgId || webuiMsgId) this._finalizeStreaming(emit);
+      const identity = webuiMsgId || queueMsgId;
+      if (identity) {
+        const existingId = this.userMessageIds.get(String(identity));
         const existing = existingId ? this.messageIndex.get(existingId) : null;
         if (existing) {
           existing.content = content;
           existing.status = 'complete';
-          existing.webuiMsgId = String(webuiMsgId);
+          existing.webuiMsgId = String(identity);
           if (emit) this._emit({ op: 'edit', id: existing.id, fields: { content: existing.content, status: 'complete', webuiMsgId: existing.webuiMsgId } });
           return;
         }
@@ -1216,12 +1250,7 @@ class CodexMessageManager {
       this.turnIndex++;
       const msg = this._create({ role: 'user', content, turnIndex: this.turnIndex });
       if (item.webui_origin === 'auto-resume') msg.originKind = 'auto-resume'; // VibeSpace's continue prompt after a wall — labelled, not "you typed this" (2.369.32)
-      // STAMP THE WEBUI MSGID ON THE MESSAGE ITSELF, not only into the side
-      // map: `userMessageIds` never leaves the server, while the queue chip on
-      // the CLIENT has to join a rendered bubble back onto its queue row. A map
-      // the client cannot see is not an identity (round-1 review: every chip
-      // click answered "no longer queued" because the bubble carried no id).
-      if (webuiMsgId) { msg.webuiMsgId = String(webuiMsgId); this.userMessageIds.set(String(webuiMsgId), msg.id); }
+      this._stampUserIdentity(msg, identity);
       if (emit) this._emit({ op: 'create', message: msg });
       return;
     }

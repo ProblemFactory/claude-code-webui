@@ -294,6 +294,27 @@ impossible rather than a review promise.
 - **A chip clears when its message RUNS.** An item that leaves the queue without
   an explicit steer/remove was drained by the turn ending, so the bubble drops
   its chip instead of claiming to be queued forever.
+- **AN INHERITED QUEUE still gets its bubbles (2026-09-07).** The app-server's
+  queue belongs to the THREAD, not to the wrapper: Terminate + Resume (or a
+  server restart) hands the NEW wrapper a queue full of submissions it never
+  typed — the owner's session came back with 25 of them. Steering those used to
+  produce no bubbles at all ("我只能看到我最后插入的一条消息"), because the only
+  live notice of an inherited message entering the turn is the app-server's own
+  `item/completed {item:{type:'userMessage', clientId}}`, which nothing routed.
+  Now the wrapper writes that bubble itself — the moment a `turn/steer` LANDS
+  (its commit twin can be a minute later) and, for an item the app-server DRAINS
+  by itself, when the twin arrives — stamped with the submission's own
+  `clientUserMessageId`, which is also what the strip row advertises, so the
+  chip still says `Steered`. A message the wrapper typed is never recorded
+  twice, and an item entering the turn with NO clientId came through our own
+  `turn/start`, whose bubble already exists.
+- **One message, one bubble, after a reload too.** A user message is written by
+  BOTH producers — us (as it is sent) and codex (when it is committed into a
+  turn) — so the rebuild collapses the pair: an inherited bubble's marker is
+  stripped from the merge fingerprint, and an id-carrying copy of ours claims
+  its content so codex's copy of it is dropped. Two DIFFERENT sends of the same
+  text stay two messages, and a codex-side record that has no copy of ours is
+  never dropped.
 - **Live + attach parity.** The wrapper publishes the WHOLE queue on every
   change (and at boot, and at each turn start); that record replays through the
   buffer, so a reconnecting client's strip is rebuilt. `attached` and `created`

@@ -922,6 +922,23 @@ function handleItemCompleted(item, itemId) {
 function _handleItemCompletedInner(item, itemId) {
   const state = itemState.get(itemId) || {};
   const type = state.type || item.type;
+  // A USER MESSAGE ENTERING THE TURN (owner 2026-09-07: "我刚才在那个codex session
+  // 里全给插入了，但是我只能看到我最后插入的一条消息"). `UserMessageThreadItem`
+  // {type:'userMessage', id, clientId, content:UserInput[]} (0.153.4
+  // generate-json-schema) is the app-server's OWN carrier for "this submission
+  // is now part of the turn", and the ONLY live record of one we did not type:
+  // the queue belongs to the THREAD, so a resumed thread inherits every queued
+  // submission while this wrapper's queueMeta — and every bubble — starts
+  // empty. Until now the kind fell off the end of this function with no branch
+  // and no breadcrumb, so steering 25 inherited items produced 25 turns' worth
+  // of work and ZERO bubbles.
+  //   clientId ABSENT ⇒ the submission came through our own `turn/start`
+  //   (which carries none), whose bubble handleInput wrote before the RPC —
+  //   nothing to add. Same for one whose id we already recorded.
+  if (type === 'userMessage') {
+    recordInboundUserMessage(asString(item.clientId || item.client_id), userInputToContent(item.content), 'entered the turn');
+    return;
+  }
   if (type === 'webSearch') {
     if (!state.type) handleItemStarted(item, itemId); // completed without a started (short call)
     // The v2 WebSearchItem is EMPTY at item/started (query '', action null) and
@@ -1087,7 +1104,36 @@ function _handleItemCompletedInner(item, itemId) {
       receiver_thread_ids: item.receiverThreadIds || [],
     });
     trackTask(itemId, { status: item.status === 'failed' ? 'failed' : 'completed', resultText: output });
+    return;
   }
+  noteUnhandledItem(type);
+}
+
+// NO SILENT DROPS ON THE LIVE SIDE EITHER. The normalizer keeps an allowlist
+// plus a `codex-unknown-record` breadcrumb for every item kind it declines to
+// render; the wrapper — the OTHER allowlist, and the only place an app-server
+// item can still become a record — had neither, so a whole ThreadItem kind
+// could go missing with nothing to grep for. That is exactly how `userMessage`
+// stayed lost. Deliberate no-ops are NAMED here; anything else is logged once
+// per kind and counted in the sidecar so the shape is visible after the fact.
+// The 19 ThreadItem kinds of 0.153.4 (`generate-json-schema`) minus the twelve
+// routed above; each name here is a DECISION, not an oversight.
+const NO_RENDER_COMPLETED_ITEMS = new Set([
+  'hookPrompt',            // the hooks/context developer message — never a bubble
+  'enteredReviewMode', 'exitedReviewMode', // their notices are emitted at item/started
+  'functionCallOutput',    // the tool item's own completion carries the output
+  'plan',                  // turn/plan/updated is the carrier we relay (plan_updated)
+]);
+const unhandledItemsLogged = new Set();
+function noteUnhandledItem(type) {
+  const kind = asString(type) || '(untyped)';
+  if (NO_RENDER_COMPLETED_ITEMS.has(kind)) return;
+  const u = meta.unhandledItems || (meta.unhandledItems = {});
+  u[kind] = (u[kind] || 0) + 1;
+  scheduleMeta();
+  if (unhandledItemsLogged.has(kind)) return;
+  unhandledItemsLogged.add(kind);
+  log(`item/completed carries an unhandled item kind "${kind}" — nothing was recorded for it (later ones are only counted in meta.unhandledItems)`);
 }
 
 function handleNotification(method, params) {
@@ -1578,6 +1624,77 @@ let queueSweepSeq = 0;
 const STOP_SWEEP_RPC_MS = 2500;
 const STOP_SWEEP_TOTAL_MS = 6000;
 
+// ── WHO WROTE THE BUBBLE (owner 2026-09-07) ──────────────────────────────
+// A user message gets its bubble from the record THIS wrapper writes as the
+// text passes through it (handleInput's chat-input / peer-message lanes). The
+// app-server's QUEUE, however, belongs to the THREAD and outlives us: a
+// resumed thread hands the new wrapper a queue it never filled (measured on
+// the owner's session: `queue_changed n=25` two seconds after boot, every
+// `clientUserMessageId` minted by the wrapper this one replaced). Steering
+// that queue put 25 messages into the turn and produced ONE bubble — the one
+// typed after the resume.
+// So every client id whose bubble we have ALREADY written is remembered here,
+// and anything entering the turn under an id we do not know gets a record.
+// An entry is only load-bearing between a submission's SEND and its commit —
+// at most one turn's worth of queued messages (the owner's outlier was 25) —
+// so the FIFO cap is about a long session's memory, not about correctness.
+const recordedUserCids = new Set();
+function noteRecordedUserCid(cid) {
+  if (!cid) return;
+  recordedUserCids.add(String(cid));
+  if (recordedUserCids.size > 500) recordedUserCids.delete(recordedUserCids.keys().next().value);
+}
+
+/** `UserInput[]` (the wire shape queue rows and steers carry) → the
+ *  `response_item` content blocks a user record uses. The exact inverse of
+ *  encodeUserInput, and — for text and data-URL images — BYTE-IDENTICAL to
+ *  codex's own rollout copy of the same message (verified against 3/3 typed
+ *  messages in the owner's rollout), which is what makes the two copies
+ *  collapse into one bubble on rebuild (mergeCodexRecords).
+ *  A localImage/skill/mention block has no faithful rollout spelling, so it is
+ *  rendered as the same bracketed marker the queue strip shows rather than
+ *  guessed at (such a message can double after a reload; it can only occur for
+ *  an INHERITED queue, since our own sends already have their bubble). */
+function userInputToContent(input) {
+  const content = [];
+  for (const item of asArray(input)) {
+    if (!item || typeof item !== 'object') continue;
+    if (item.type === 'text' && item.text) content.push({ type: 'input_text', text: String(item.text) });
+    else if (item.type === 'image' && item.url) content.push({ type: 'input_image', image_url: String(item.url) });
+    else if (item.type === 'localImage' && item.path) content.push({ type: 'input_text', text: '[image]' });
+    else if (item.type === 'skill' && item.name) content.push({ type: 'input_text', text: `[skill ${item.name}]` });
+    else if (item.type === 'mention' && item.name) content.push({ type: 'input_text', text: `[@${item.name}]` });
+  }
+  return content;
+}
+
+/** Write the user bubble for a message entering the turn that this wrapper
+ *  never typed (an INHERITED queue item — steered by us, drained by the
+ *  app-server, or steered by a second attached client). Returns true when a
+ *  record was written.
+ *  `webui_queue_id` is an OUT-OF-BAND marker — the app-server's own
+ *  clientUserMessageId — that both readers strip from the merge fingerprint
+ *  and the message-id hash (exactly like `webui_peer`), so codex's rollout copy
+ *  of the same message collapses onto this one instead of doubling it, and the
+ *  live and rebuilt bubbles share one id. The normalizer additionally uses it
+ *  to join the bubble to its queue row, so the chip can say `Steered`.
+ *  The marker rides LAST so the stable payload stays {type, role, content}. */
+function recordInboundUserMessage(cid, content, via) {
+  const id = asString(cid);
+  if (!id || recordedUserCids.has(id)) return false;   // ours already, or the app-server's own turn/start commit
+  const blocks = asArray(content);
+  if (!blocks.length) {
+    // A submission we do not know, entering the turn, that we cannot render:
+    // say so rather than drop it the way `userMessage` itself was dropped.
+    log(`queued submission ${id} (${via}) entered the turn with no renderable content — no bubble written`);
+    return false;
+  }
+  noteRecordedUserCid(id);
+  record('response_item', { type: 'message', role: 'user', content: blocks, webui_queue_id: id });
+  log(`recorded the user bubble for queued submission ${id} (${via}) — this wrapper never typed it`);
+  return true;
+}
+
 function noteQueued(clientUserMessageId, info) {
   if (!clientUserMessageId) return;
   queueMeta.set(String(clientUserMessageId), { kind: 'user', msgId: '', ts: Date.now(), from: null, ...info });
@@ -1618,7 +1735,13 @@ function queueItemsFrom(data) {
     const full = queuedFullText(q?.input);
     return {
       id: asString(q?.id),
-      msgId: known?.msgId || '',
+      // An item WE queued joins its bubble through the webui msgId we minted.
+      // An INHERITED one (queued by the wrapper this session replaced — the
+      // queue belongs to the thread, not to us) has no such id, so the row
+      // carries the app-server's own clientUserMessageId: that is what the
+      // bubble we write when it enters the turn is stamped with, so the strip
+      // row and the bubble's chip still join.
+      msgId: known ? (known.msgId || '') : cid,
       preview: queuePreview(q?.input),
       ...((known?.kind || 'user') === 'user' && full && full.length <= QUEUE_EDIT_MAX_CHARS ? { text: full } : {}),
       ts: known?.ts || null,
@@ -1793,12 +1916,21 @@ async function steerInput(input, clientUserMessageId) {
 async function steerOne(item) {
   const cid = asString(item?.clientUserMessageId);
   const known = queueMeta.get(cid) || null;
-  const base = { op: 'steer', id: asString(item?.id), msg_id: known?.msgId || '' };
+  const base = { op: 'steer', id: asString(item?.id), msg_id: known ? (known.msgId || '') : cid };
   const st = await steerInput(item.input, cid);
   if (!st.ok) {
     if (st.detail) log(`turn/steer rejected for ${base.id}: ${st.detail}`);
     return { ...base, ...st };
   }
+  // THE STEER LANDED ⇒ the bubble exists NOW, in queue order, built from the
+  // input the queue itself carries — not when the app-server later commits the
+  // item (measured on the owner's session: the `item/completed` twins arrived
+  // 42s after the steers' replies, at the model's next turn boundary). A
+  // message that went in has to be visible the moment it went in, and the
+  // `queue_op_result` emitted right after this call needs the bubble to exist
+  // in order to chip it `Steered`. A steer that FAILED records nothing: that
+  // message is still queued. An item we typed ourselves is skipped by cid.
+  recordInboundUserMessage(cid, userInputToContent(item.input), 'steered');
   // The steer landed: the message is now IN the turn, so the queued copy must
   // go or it runs a second time (measured: steer never dequeues). The delete's
   // VERDICT is read here exactly as the Stop sweep reads it (round-3 review):
@@ -2456,6 +2588,10 @@ async function handleInput(msg) {
         ...(text ? [{ type: 'input_text', text }] : []),
       ],
     });
+    // THIS bubble exists now, so whatever the app-server later reports about
+    // the same submission (its own item/completed `userMessage`, or a steer we
+    // run over it) must not write a second one.
+    noteRecordedUserCid(msg.msgId);
     // SLASH COMMANDS (P2, design-harness-plugins §1): codex's init carries no
     // command list, so the wrapper serves the ones it can actually honour —
     // /compact runs a REAL compaction (thread/compact/start, verified on
@@ -2475,6 +2611,7 @@ async function handleInput(msg) {
       // can win the race with this call's own reply — an item whose msgId we
       // learn late renders with no bubble chip.
       noteQueued(cid, { kind: 'user', msgId: msg.msgId || '' });
+      noteRecordedUserCid(cid);   // the generated `queued-…` id when the client sent no msgId
       await request('thread/queue/add', {
         threadId: meta.threadId,
         input: encodeUserInput(text, attachments),
@@ -2582,6 +2719,7 @@ async function handleInput(msg) {
         // delivery ladder instead of losing something we already reported
         // delivered (the ACP wrapper's Stop-drop rule, same reason).
         noteQueued(cid, { kind: 'peer', msgId: '', from: fromName, text });
+        noteRecordedUserCid(cid);   // recordPeerMessage() below IS this submission's bubble
         await request('thread/queue/add', {
           threadId: meta.threadId,
           input: encodeUserInput(text, []),
