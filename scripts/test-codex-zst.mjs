@@ -851,6 +851,7 @@ console.log('— ⑥ ONE remote cache slot, MANY remote files (codex .jsonl ⇄ 
     const blindAppend = (hmx) => { hmx._appendDeltaAt = (p2, off, b) => { fs.appendFileSync(p2, b); return true; }; };            // the PRE-FIX write, verbatim
     const noSingleFlight = (hmx) => { hmx._fetchRemoteByFind = function (...a) { return this._fetchRemoteByFindOnce(...a); }; };  // the PRE-FIX entry point
     const noStampGuard = (hmx) => { hmx._prefixIsOurs = () => true; };                                                           // the PRE-FIX delta legality (round 5's leg removed)
+    const noHeal = (hmx) => { hmx._overStampedLegacySlot = () => false; };                                                       // the PRE-FIX code has no over-stamp heal (round 6's leg removed)
     const dialHm = (hid, rem, reads2, gate) => {
       const hmx = new HostManager({ dataDir });
       hmx._state.hosts.push({ id: hid, name: hid, transport: 'dial' });
@@ -1125,6 +1126,10 @@ console.log('— ⑥ ONE remote cache slot, MANY remote files (codex .jsonl ⇄ 
         hmJ._isTerminalFetchError = () => false;                              // the PRE-FIX catch: every throw is "try the other transport"
         hmJ._slotMovedEarlier = () => false;                                  // the PRE-FIX ssh rung: it never heard what the slab rung saw
         noStampGuard(hmJ);                                                    // the PRE-FIX delta legality
+        noHeal(hmJ);                                                          // …and round 6's over-stamp heal did not exist either — with `_slotMovedEarlier`
+                                                                              // neutered it would probe the remote for the gap, i.e. spend a read the pre-fix
+                                                                              // code never spent (the splice below reproduces either way; the tail COUNT is
+                                                                              // what the control pins, so the shape has to be the real pre-fix shape)
         let errN = null, gotN = null;
         const warnsAt = capturedWarns.length;
         await withWarns(async () => { try { gotN = await hmJ.fetchTranscript('hg2', 'codex', slN.tid, { maxBytes: prefix.length - 1 }); } catch (e) { errN = String(e && e.message || e); } });
@@ -1269,6 +1274,334 @@ console.log('— ⑥ ONE remote cache slot, MANY remote files (codex .jsonl ⇄ 
         const c3 = await hmN.fetchTranscript('hg7', 'codex', tid);
         ok(fs.readFileSync(c3).equals(rem.bytes) && log.cats.length === 1 && log.tails.length === 0 && metaAt().size === rem.bytes.length,
           `NEGATIVE CONTROL: a meta stamped with the stat value costs a WHOLE re-pull (and heals) — the delta win is what the honest stamp protects (${JSON.stringify(log)})`);
+      }
+    }
+
+    // ── ⑥h THE SHAPE ROUND 5 CONDEMNED BY MISTAKE (B-7638 round 6, the round-5
+    // verify's finding). "A delta may only extend bytes THIS cache's own
+    // writers stamped" is right about foreign appends and wrong about ONE
+    // innocent shape it cannot tell apart: until round 5 the whole `cat` rung
+    // stamped the PROBE's stat while `cat` returned everything the live
+    // transcript had grown to since, so a perfectly healthy fetch left
+    // meta.size < the file's real length. Under the cap that costs one whole
+    // re-pull; OVER the cap there is no whole re-pull, so every such slot — a
+    // remote stopped thread that opened yesterday — hard-failed FOREVER.
+    // The heal cannot be a local scan: the corruption round 5 exists for
+    // (⑥g/E2) appends ordinary text, which no local scan can distinguish from
+    // our own missing bytes. So the remote is ASKED: the gap [stamp, file) is
+    // read back and compared byte-for-byte. Equal ⇒ genuine prefix, re-stamp
+    // once with the marker; not equal ⇒ round 5's refusal stands, unchanged.
+    console.log('— ⑥h a pre-round-5 over-stamped slot heals once (and only the remote can say so)');
+    {
+      const rollLog = () => ({ cats: [], tails: [], probes: [] });
+      // an ssh rung that can serve the three commands this rung issues: the
+      // whole `cat`, the append-only `tail -c +N`, and the round-6 BOUNDED gap
+      // probe `tail -c +N … | head -c LEN` (matched FIRST — it is also a tail)
+      const sshRung = (hid, rem, log) => {
+        const hmx = new HostManager({ dataDir });
+        hmx._state.hosts.push({ id: hid, name: hid });                         // no transport ⇒ the legacy rung, which is the rung that produced this shape
+        hmx._ssh = async (h, cmd) => {
+          if (/^cat /.test(cmd)) { log.cats.push(cmd); return rem.bytes; }
+          const g = /^tail -c \+(\d+) .* \| head -c (\d+)$/.exec(cmd);
+          if (g) { const off = Number(g[1]) - 1, len = Number(g[2]); log.probes.push([off, len]); return rem.bytes.subarray(off, off + len); }
+          const m = /^tail -c \+(\d+) /.exec(cmd);
+          if (m) { log.tails.push(Number(m[1])); return rem.bytes.subarray(Number(m[1]) - 1); }
+          return Buffer.from(`${rem.bytes.length} ${rem.mtime}\n${rem.path}\n`);
+        };
+        return hmx;
+      };
+      // the meta the PRE-ROUND-5 whole `cat` left behind: the stat it was
+      // promised, not the bytes it wrote — and no `sizeExact` marker, because
+      // no writer stamped one yet
+      const seedOverStamped = (sl, held, stamped, mtime, extra = {}) => {
+        fs.mkdirSync(path.dirname(sl.cache), { recursive: true });
+        fs.writeFileSync(sl.cache, held);
+        fs.writeFileSync(sl.cache + '.meta', JSON.stringify({ size: stamped, mtime, fetchedAt: Date.now(), remotePath: sl.remotePath, compressed: false, v: 2, ...extra }));
+      };
+      const metaAt = (sl) => JSON.parse(fs.readFileSync(sl.cache + '.meta', 'utf8'));
+
+      // (I) THE VERIFIER'S SLOT — over the cap, stat-sized meta, a clean cache
+      // LONGER than it. Pre-fix: a permanent hard failure. Fixed: one bounded
+      // probe, one re-stamp, and the delta rides again.
+      {
+        const body = Buffer.from(rollout('cccccccc-dddd-4eee-8fff-000000000040', '/work/overstamp', 'the cat overtook the stat, over the cap', 40));
+        const over = Buffer.from(ticks(1, 3));                                  // what `cat` returned past the stat it was promised
+        const held = Buffer.concat([body, over]);                               // …and therefore what the cache holds
+        const grown = Buffer.concat([held, Buffer.from(ticks(4, 3))]);          // the remote has kept growing since
+        const CAP = grown.length - 1;                                           // a whole refetch is impossible by construction
+        ok(grown.length > CAP && over.length < CAP && held.length <= grown.length, `fixture: over the cap, with a bounded gap (${JSON.stringify({ stamped: body.length, held: held.length, remote: grown.length, cap: CAP })})`);
+
+        // NEGATIVE CONTROL FIRST (this is the reported harm): with round 6's
+        // heal removed the slot can never load again — not once, not ever.
+        const slN = slotFor('hh0', 'cccccccc-dddd-4eee-8fff-000000000040');
+        seedOverStamped(slN, held, body.length, 40000);
+        const metaBeforeN = fs.readFileSync(slN.cache + '.meta', 'utf8');
+        const logN = rollLog();
+        const hmN = sshRung('hh0', { path: slN.remotePath, bytes: grown, mtime: 40001 }, logN);
+        noHeal(hmN);
+        let errN = null, gotN = null;
+        try { gotN = await hmN.fetchTranscript('hh0', 'codex', slN.tid, { maxBytes: CAP }); } catch (e) { errN = String(e && e.message || e); }
+        ok(!gotN && /too large/.test(errN || '') && new RegExp(`holds ${held.length} bytes where the last fetch stamped ${body.length}`).test(errN || ''),
+          `REPRO: pre-fix, a slot the old cat over-stamped is refused over the cap (${errN})`);
+        let errN2 = null;
+        try { await hmN.fetchTranscript('hh0', 'codex', slN.tid, { maxBytes: CAP }); } catch (e) { errN2 = String(e && e.message || e); }
+        ok(errN2 === errN && logN.tails.length === 0 && logN.cats.length === 0 && fs.readFileSync(slN.cache + '.meta', 'utf8') === metaBeforeN,
+          'REPRO: …and it is PERMANENT — a stopped remote thread that opened yesterday never loads again (nothing on either side can ever move)');
+
+        // …and the same slot with the heal in place
+        const sl = slotFor('hh1', 'cccccccc-dddd-4eee-8fff-000000000041');
+        seedOverStamped(sl, held, body.length, 40000);
+        const log = rollLog();
+        const rem = { path: sl.remotePath, bytes: grown, mtime: 40001 };
+        const hm1 = sshRung('hh1', rem, log);
+        let err = null, got = null;
+        try { got = await hm1.fetchTranscript('hh1', 'codex', sl.tid, { maxBytes: CAP }); } catch (e) { err = String(e && e.message || e); }
+        ok(got && !err && fs.readFileSync(sl.cache).equals(grown),
+          `the over-cap slot loads again: the gap is verified against the remote and the delta lands on it (${err})`);
+        ok(log.probes.length === 1 && log.probes[0][0] === body.length && log.probes[0][1] === over.length && log.cats.length === 0 && log.tails.length === 1 && log.tails[0] === held.length + 1,
+          `…by ONE bounded probe of exactly [stamp, file) and then the ordinary tail delta — never a whole cat (${JSON.stringify(log)})`);
+        const m1 = metaAt(sl);
+        ok(m1.size === grown.length && m1.sizeExact === true && typeof m1.healedStampAt === 'number',
+          '…and the heal is RECORDED: the marker every writer now stamps, plus the fact that this slot was healed', m1);
+
+        // one more poll: the marker ends the heal, the delta keeps riding
+        rem.bytes = Buffer.concat([grown, Buffer.from(ticks(7, 2))]); rem.mtime = 40002;
+        const probesAfter = log.probes.length;
+        const c2 = await hm1.fetchTranscript('hh1', 'codex', sl.tid, { maxBytes: CAP });
+        ok(fs.readFileSync(c2).equals(rem.bytes) && log.probes.length === probesAfter && log.tails.length === 2 && log.cats.length === 0,
+          `the heal is paid ONCE per slot: the next poll rides the delta with no probe at all (${JSON.stringify(log)})`);
+      }
+
+
+      // (I3) THE HEAL IS DURABLE THE MOMENT IT IS PROVEN — not when the fetch
+      // that triggered it happens to finish. If the re-stamp rode home on the
+      // fetch's own meta write, a delta that then dies on the wire would throw
+      // the verification away and the NEXT poll would pay for the probe again,
+      // every time, on exactly the slots (over the cap, remote flaky) where the
+      // fetch is least likely to complete.
+      {
+        const sl = slotFor('hha', 'cccccccc-dddd-4eee-8fff-00000000004a');
+        const body = Buffer.from(rollout(sl.tid, '/work/overstamp-durable', 'the heal outlives its fetch', 40));
+        const held = Buffer.concat([body, Buffer.from(ticks(1, 3))]);
+        const grown = Buffer.concat([held, Buffer.from(ticks(4, 3))]);
+        const CAP = grown.length - 1;
+        seedOverStamped(sl, held, body.length, 48000);
+        const log = rollLog();
+        const rem = { path: sl.remotePath, bytes: grown, mtime: 48001 };
+        const hm8 = sshRung('hha', rem, log);
+        const okSsh = hm8._ssh.bind(hm8);
+        let deltaDies = true;
+        hm8._ssh = async (h, cmd) => { if (deltaDies && /^tail -c \+/.test(cmd) && !/\| head -c /.test(cmd)) throw new Error('connection reset while streaming the tail'); return okSsh(h, cmd); };
+        let err = null;
+        try { await hm8.fetchTranscript('hha', 'codex', sl.tid, { maxBytes: CAP }); } catch (e) { err = String(e && e.message || e); }
+        ok(err && /connection reset while streaming the tail/.test(err) && fs.readFileSync(sl.cache).equals(held),
+          `fixture: the heal succeeds and the delta behind it dies on the wire (${err})`);
+        const mid = metaAt(sl);
+        ok(mid.size === held.length && mid.sizeExact === true && typeof mid.healedStampAt === 'number',
+          'the verification is on disk the moment it is proven — a failed fetch cannot un-prove what the remote already confirmed', mid);
+        deltaDies = false;
+        const probesBefore = log.probes.length;
+        const c = await hm8.fetchTranscript('hha', 'codex', sl.tid, { maxBytes: CAP });
+        ok(fs.readFileSync(c).equals(grown) && log.probes.length === probesBefore && log.cats.length === 0,
+          `…so the retry rides the delta with no second probe (${JSON.stringify(log)})`);
+      }
+      // (I2) THE SLAB RUNG TWIN — the same heal, through the data plane's own
+      // read-range (twin guards must not drift: the ssh rung is where the shape
+      // comes from, but a dial host reads the very same slots).
+      {
+        const sl = slotFor('hh2', 'cccccccc-dddd-4eee-8fff-000000000042');
+        const body = Buffer.from(rollout(sl.tid, '/work/overstamp-slab', 'over-stamped, dial rung', 40));
+        const over = Buffer.from(ticks(1, 3));
+        const held = Buffer.concat([body, over]);
+        const grown = Buffer.concat([held, Buffer.from(ticks(4, 3))]);
+        const CAP = grown.length - 1;
+        seedOverStamped(sl, held, body.length, 41000);
+        const reads2 = [];
+        const hm2 = dialHm('hh2', { path: sl.remotePath, bytes: grown, mtime: 41001 }, reads2, null);
+        const c = await hm2.fetchTranscript('hh2', 'codex', sl.tid, { maxBytes: CAP });
+        ok(fs.readFileSync(c).equals(grown) && reads2.length === 2 && reads2[0][0] === body.length && reads2[0][1] === over.length && reads2[1][0] === held.length,
+          `slab rung: the gap probe then the delta, both bounded, no whole re-pull (${JSON.stringify(reads2)})`);
+        ok(metaAt(sl).size === grown.length && metaAt(sl).sizeExact === true, '…with the same re-stamp (one heal, two rungs, one implementation)', metaAt(sl));
+      }
+
+      // (J) A DIRTY LONGER CACHE — the bytes past the stamp are NOT the
+      // remote's. This is ⑥g's corruption wearing the same size signature, and
+      // it must still be refused: the heal is a byte comparison for exactly
+      // this reason (the foreign bytes are ordinary text).
+      {
+        const sl = slotFor('hh3', 'cccccccc-dddd-4eee-8fff-000000000043');
+        const body = Buffer.from(rollout(sl.tid, '/work/overstamp-dirty', 'a clean-looking foreign append', 40));
+        const over = Buffer.from(ticks(1, 3));
+        const foreign = Buffer.from('Y'.repeat(over.length));                   // plain text: no NUL, no zstd magic — no local scan can tell
+        const held = Buffer.concat([body, foreign]);
+        const grown = Buffer.concat([body, over, Buffer.from(ticks(4, 3))]);    // the remote's own bytes at that offset are `over`
+        const CAP = grown.length - 1;
+        ok(!foreign.includes(0x00) && foreign.indexOf(DF.ZSTD_MAGIC) < 0 && foreign.length === over.length,
+          'fixture: the foreign bytes are the same LENGTH and carry no splice marker — size and local evidence both say "fine"');
+        seedOverStamped(sl, held, body.length, 42000);
+        const metaBefore = fs.readFileSync(sl.cache + '.meta', 'utf8');
+        const log = rollLog();
+        const hm3 = sshRung('hh3', { path: sl.remotePath, bytes: grown, mtime: 42001 }, log);
+        let err = null, got = null;
+        try { got = await hm3.fetchTranscript('hh3', 'codex', sl.tid, { maxBytes: CAP }); } catch (e) { err = String(e && e.message || e); }
+        ok(!got && /too large/.test(err || '') && log.tails.length === 0 && log.cats.length === 0,
+          `a longer cache whose extra bytes are NOT the remote's is still refused — round 5 is not weakened by the heal (${got ? 'SERVED' : err})`);
+        ok(/CHECKED against the remote: they are not its own/.test(err || '') && new RegExp(`holds ${held.length} bytes where the last fetch stamped ${body.length}`).test(err || ''),
+          '…and the refusal reports what the heal LEARNED (a checked mismatch is a different diagnosis from an unchecked one)', err);
+        ok(fs.readFileSync(sl.cache).equals(held) && fs.readFileSync(sl.cache + '.meta', 'utf8') === metaBefore && log.probes.length === 1,
+          '…leaving cache AND meta byte-identical, after exactly one bounded probe', { probes: log.probes, meta: fs.readFileSync(sl.cache + '.meta', 'utf8') });
+        // the refusal is REMEMBERED (in memory, never stamped): the next poll
+        // costs nothing at all, and clearing the memo is what makes it re-probe
+        let err2 = null;
+        try { await hm3.fetchTranscript('hh3', 'codex', sl.tid, { maxBytes: CAP }); } catch (e) { err2 = String(e && e.message || e); }
+        ok(err2 && log.probes.length === 1 && fs.readFileSync(sl.cache + '.meta', 'utf8') === metaBefore,
+          'a refused slot is not re-probed every poll — the verdict is memoized in MEMORY, because stamping it on disk would freeze the corruption in', { probes: log.probes });
+        hm3._healRefusedAt.clear();
+        let err3 = null;
+        try { await hm3.fetchTranscript('hh3', 'codex', sl.tid, { maxBytes: CAP }); } catch (e) { err3 = String(e && e.message || e); }
+        ok(err3 && log.probes.length === 2, 'NEGATIVE CONTROL: with the memo cleared the same poll probes again (the memo is the reason, not a disk stamp)', { probes: log.probes });
+      }
+
+
+      // (J3) THE REMOTE COULD NOT BE ASKED — a probe that fails on the wire is
+      // a TRANSPORT fact, not a verdict about the cache: nothing is adopted,
+      // nothing is memoized (the next poll must be able to answer differently),
+      // the refusal says it is retryable, and the line it costs rides the same
+      // per-host budget as every other degrade line.
+      {
+        const sl = slotFor('hh9', 'cccccccc-dddd-4eee-8fff-000000000049');
+        const body = Buffer.from(rollout(sl.tid, '/work/overstamp-probe', 'the probe dies on the wire', 40));
+        const held = Buffer.concat([body, Buffer.from(ticks(1, 3))]);
+        const grown = Buffer.concat([held, Buffer.from(ticks(4, 3))]);
+        const CAP = grown.length - 1;
+        seedOverStamped(sl, held, body.length, 47000);
+        const metaBefore = fs.readFileSync(sl.cache + '.meta', 'utf8');
+        const log = rollLog();
+        const rem = { path: sl.remotePath, bytes: grown, mtime: 47001 };
+        const hm7 = sshRung('hh9', rem, log);
+        const okSsh = hm7._ssh.bind(hm7);
+        let probeDies = true;
+        hm7._ssh = async (h, cmd) => { if (probeDies && /\| head -c /.test(cmd)) throw new Error('connection reset while reading the gap'); return okSsh(h, cmd); };
+        const warns = [];
+        const orig = console.warn; console.warn = (...x) => warns.push(x.map(String).join(' '));
+        let err = null, got = null;
+        try { got = await hm7.fetchTranscript('hh9', 'codex', sl.tid, { maxBytes: CAP }); } catch (e) { err = String(e && e.message || e); } finally { console.warn = orig; }
+        ok(!got && /retryable on the next poll/.test(err || '') && fs.readFileSync(sl.cache + '.meta', 'utf8') === metaBefore && log.tails.length === 0,
+          `a probe that dies on the wire refuses as RETRYABLE and adopts nothing (${got ? 'SERVED' : err})`);
+        ok(warns.some((w) => w.includes('connection reset while reading the gap') && w.includes('hh9')), '…naming the wire fault verbatim, on the host it happened on', warns);
+        // …and it is NOT remembered: the very next poll asks again and heals
+        probeDies = false;
+        const c = await hm7.fetchTranscript('hh9', 'codex', sl.tid, { maxBytes: CAP });
+        ok(fs.readFileSync(c).equals(grown) && log.probes.length === 1 && metaAt(sl).sizeExact === true,
+          'NEGATIVE CONTROL: an unanswered question is not a refusal — the next poll probes again and the slot heals', { probes: log.probes, tails: log.tails });
+      }
+      // (J2) …and the free evidence comes FIRST: a splice marker buried deeper
+      // than the 4 KB tail window is caught by the local whole-file scan, with
+      // no remote round trip spent at all.
+      {
+        const sl = slotFor('hh4', 'cccccccc-dddd-4eee-8fff-000000000044');
+        const body = Buffer.from(rollout(sl.tid, '/work/overstamp-buried', 'buried marker under an over-stamp', 40));
+        const marker = zlib.zstdCompressSync(Buffer.from(rollout(sl.tid, '/work/overstamp-buried', 'buried marker under an over-stamp', 40))).subarray(0, 64);
+        const later = Buffer.from(tickN(9).repeat(80));
+        const held = Buffer.concat([body, marker, later]);
+        ok(later.length > 4096 && held.indexOf(DF.ZSTD_MAGIC) >= body.length, 'fixture: the marker sits above the 4 KB tail window (only the whole-file scan can see it)');
+        const grown = Buffer.concat([held, Buffer.from(ticks(4, 3))]);
+        const CAP = grown.length - 1;
+        seedOverStamped(sl, held, body.length, 43000);
+        const metaBefore = fs.readFileSync(sl.cache + '.meta', 'utf8');
+        const log = rollLog();
+        const hm4 = sshRung('hh4', { path: sl.remotePath, bytes: grown, mtime: 43001 }, log);
+        let err = null, got = null;
+        try { got = await hm4.fetchTranscript('hh4', 'codex', sl.tid, { maxBytes: CAP }); } catch (e) { err = String(e && e.message || e); }
+        ok(!got && log.probes.length === 0 && log.tails.length === 0 && fs.readFileSync(sl.cache + '.meta', 'utf8') === metaBefore,
+          `a cache carrying a buried splice marker is never healed, and never costs a remote read to find that out (${got ? 'SERVED' : err})`);
+        ok(/carries a splice marker/.test(err || '') && !/CHECKED against the remote/.test(err || ''),
+          '…and the refusal names the evidence it ACTUALLY has — claiming the remote check it skipped would be the "an error string is not a diagnosis" law with the sign flipped', err);
+      }
+
+      // (K) UNDER THE CAP the heal must NOT fire: a whole refetch is possible,
+      // and that is the remedy (adopting bytes you can simply re-fetch is a
+      // way of trusting what you did not have to trust).
+      {
+        const sl = slotFor('hh5', 'cccccccc-dddd-4eee-8fff-000000000045');
+        const body = Buffer.from(rollout(sl.tid, '/work/overstamp-under', 'over-stamped but under the cap', 40));
+        const held = Buffer.concat([body, Buffer.from(ticks(1, 3))]);
+        const grown = Buffer.concat([held, Buffer.from(ticks(4, 3))]);
+        seedOverStamped(sl, held, body.length, 44000);
+        const log = rollLog();
+        const hm5 = sshRung('hh5', { path: sl.remotePath, bytes: grown, mtime: 44001 }, log);
+        const c = await hm5.fetchTranscript('hh5', 'codex', sl.tid);            // default cap ⇒ way under
+        ok(fs.readFileSync(c).equals(grown) && log.cats.length === 1 && log.probes.length === 0 && log.tails.length === 0,
+          `under the cap the same shape is a whole refetch, with no probe and no adoption (${JSON.stringify(log)})`);
+        ok(metaAt(sl).size === grown.length && metaAt(sl).sizeExact === true && metaAt(sl).healedStampAt === undefined,
+          '…and the fetched bytes carry the exact-size marker, so this slot can never need the heal again', metaAt(sl));
+      }
+
+      // (L) A META THAT ALREADY CARRIES THE MARKER IS NEVER HEALED — round 5
+      // stays absolute where it is provably right: those writers stamp what the
+      // file holds, so a longer file under such a meta IS foreign bytes.
+      {
+        const sl = slotFor('hh6', 'cccccccc-dddd-4eee-8fff-000000000046');
+        const body = Buffer.from(rollout(sl.tid, '/work/marked', 'a marked meta is not healable', 40));
+        const over = Buffer.from(ticks(1, 3));
+        const held = Buffer.concat([body, over]);
+        const grown = Buffer.concat([held, Buffer.from(ticks(4, 3))]);
+        const CAP = grown.length - 1;
+        seedOverStamped(sl, held, body.length, 45000, { sizeExact: true });      // …the ONLY difference from (I)
+        const metaBefore = fs.readFileSync(sl.cache + '.meta', 'utf8');
+        const log = rollLog();
+        const hm6 = sshRung('hh6', { path: sl.remotePath, bytes: grown, mtime: 45001 }, log);
+        let err = null, got = null;
+        try { got = await hm6.fetchTranscript('hh6', 'codex', sl.tid, { maxBytes: CAP }); } catch (e) { err = String(e && e.message || e); }
+        ok(!got && log.probes.length === 0 && log.tails.length === 0 && fs.readFileSync(sl.cache + '.meta', 'utf8') === metaBefore,
+          `the heal is gated on the MARKER, not on the size alone: a round-5+ meta refuses without asking anyone (${got ? 'SERVED' : err})`);
+        ok(new RegExp(`holds ${held.length} bytes where the last fetch stamped ${body.length}`).test(err || '') && !/CHECKED against the remote|splice marker/.test(err || ''),
+          '…and says so without claiming a check it did not run', err);
+      }
+
+      // (M) THE DEGRADE LINE IS RATE-LIMITED PER HOST (round 6's second half).
+      // Round 5 made the data-plane fallback speak, which is the law — but the
+      // thing it degrades on is usually persistent, and every attach/poll comes
+      // through here. One line per host per minute, with the suppressed count
+      // carried onto the next one; a suppressed fault is not a forgotten one.
+      {
+        const mk = (hid, tid) => {
+          const sl = slotFor(hid, tid);
+          const body = Buffer.from(rollout(sl.tid, '/work/degrade-rate', 'the fallback repeats itself', 20));
+          const log = rollLog();
+          const hmx = sshRung(hid, { path: sl.remotePath, bytes: body, mtime: 46000 }, log);
+          hmx._state.hosts[0].transport = 'dial';                               // ⇒ the slab rung runs first…
+          hmx.deviceBounded = async () => { throw new Error('device link not responding — persistent synthetic fault'); };   // …and always fails
+          return { sl, body, log, hmx };
+        };
+        const a = mk('hh7', 'cccccccc-dddd-4eee-8fff-000000000047'), b2 = mk('hh8', 'cccccccc-dddd-4eee-8fff-000000000048');
+        const warns = [];
+        const orig = console.warn; console.warn = (...x) => warns.push(x.map(String).join(' '));
+        let wired = 0;
+        const origWarnOnce = a.hmx._warnDegradeOnce.bind(a.hmx);
+        a.hmx._warnDegradeOnce = (...x) => { if (/falling back to the ssh rung/.test(String(x[1]))) wired++; return origWarnOnce(...x); };
+        try {
+          for (let i = 0; i < 3; i++) { fs.rmSync(a.sl.cache + '.meta', { force: true }); await a.hmx.fetchTranscript('hh7', 'codex', a.sl.tid); }
+          await b2.hmx.fetchTranscript('hh8', 'codex', b2.sl.tid);
+        } finally { console.warn = orig; }
+        const lines = warns.filter((w) => /falling back to the ssh rung/.test(w));
+        ok(wired === 3 && lines.length === 2 && lines.filter((w) => w.includes('hh7')).length === 1,
+          `three degraded fetches on one host print ONE line, and a second host in the same window still prints its own (${JSON.stringify({ wired, lines })})`);
+        ok(lines.every((w) => w.includes('device link not responding — persistent synthetic fault')),
+          'DEGRADE-PATH LAW: the line that IS printed still names the swallowed fault verbatim', lines);
+        // …and the window is a window: the next one prints, carrying what the
+        // last one swallowed (driven on the method's own clock — the wiring
+        // above already proved the fetch path goes through it)
+        const later = [];
+        console.warn = (...x) => later.push(x.map(String).join(' '));
+        let printed = 0;
+        try {
+          const t0 = Date.now();
+          printed += origWarnOnce('hh7', 'A', t0 + 1000) ? 1 : 0;               // inside the window ⇒ suppressed (and counted)
+          printed += origWarnOnce('hh7', 'B', t0 + 61000) ? 1 : 0;              // …a minute later it speaks again
+        } finally { console.warn = orig; }
+        ok(printed === 1 && later.length === 1 && /^B \(\+3 similar suppressed in the last minute\)$/.test(later[0]),
+          'a new window prints again and reports how many faults the closed one swallowed', later);
       }
     }
   }
