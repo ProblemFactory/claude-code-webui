@@ -16,6 +16,7 @@
 // CLIENT. ORCH may use everything below it. CLIENT may use only PURE (via the
 // esbuild bundle) — never ORCH internals.
 import { spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -289,12 +290,71 @@ for (const [edge] of EXCEPTIONS) {
 //     --git-dir` (ownership = <base>/.git is itself a repository entry, so a
 //     tmpdir merely sitting INSIDE another repo still cannot borrow that
 //     index), and every skip carries git's own failing command + its stderr.
+//
+//     ROUND 7a — THE NEGATIVE CONTROL WAS STILL RUNNING IN SOMEONE ELSE'S
+//     ENVIRONMENT. Round 6 sanitized every git EXCEPT the one whose whole job
+//     is to be unsanitized: the RAW leg that proves the sanitizer matters. It
+//     built its `git add -f` env as `{ ...process.env, GIT_DIR, GIT_WORK_TREE,
+//     GIT_INDEX_FILE }` — three of the 25 names GIT_REDIRECTORS enumerates
+//     pinned, the other 22 still ambient. Measured, in throwaway repos: with
+//     GIT_OBJECT_DIRECTORY (or GIT_COMMON_DIR) exported at a third repository,
+//     that write puts its blobs THERE — a repo this suite was never pointed at
+//     — and `npm run build` stays green while doing it; and when the same
+//     ambient name points somewhere unwritable (a nonexistent dir, a 0500 dir)
+//     or at a non-repo, `npm run build` goes RED on the line "the guarded
+//     assert above is the sanitizer working, not the controls failing to run"
+//     — a message that accuses the sanitizer of a failure caused by a variable
+//     nobody in this file ever named. A negative control is a control: it may
+//     differ from the guarded run in exactly ONE named way. So the raw leg's
+//     env is now the SANITIZED base plus exactly the three decoy redirectors
+//     it is testing, and `repoStamp` hashes the WHOLE .git tree (round 6's
+//     config/index/HEAD stamp could not see the object channel at all, which
+//     is precisely the channel those two names steer). The block's own
+//     negative control for THIS finding is a third repository: the two names
+//     really are exported into our process for the whole block, and it must be
+//     byte-identical afterwards — with a sacrificial fourth repo proving the
+//     pre-fix base still reaches one (i.e. that the environment is genuinely
+//     hostile and the stamp genuinely detects the write).
+//
+//     ROUND 7b — THE SENTENCE OVERCLAIMED ITS SCOPE. "no source file carries a
+//     NUL byte" was measured over `git ls-files -- src data/bin scripts`, i.e.
+//     432 of the repository's 556 tracked files. The 124 outside included
+//     server.js (the bootstrap this very suite ratchets), install.sh, run.sh,
+//     editor-helper.sh, deploy/docker/*.sh, docs/screenshot-helper.js and
+//     docs/examples/hello-plugin/server.js — every one of them a file a human
+//     greps. The roots were never the point (the point was "tracked", which is
+//     what puts the 64 MB rclone out of scope), so the pathspec is gone: the
+//     census reads EVERY tracked file, and the scope pin now names server.js
+//     and install.sh alongside the three root witnesses.
 {
-  // A legitimately binary FIXTURE is not source; everything else in these
-  // trees is text by construction (the census at the time: .js .mjs .sh .json
-  // .jsonl .ps1 plus the extension-less agent CLIs in data/bin).
+  // A legitimately binary FIXTURE is not source; everything else in the index
+  // is text by construction. Measured 2026-09-07 over all 556 tracked files:
+  // 24 are skipped by extension (4 .png screenshots + 20 .woff2 fonts) and 0
+  // of the remaining 532 carry a NUL. A NEW binary fixture ⇒ add its extension
+  // here WITH a comment naming the file; never a directory exclusion (the
+  // tracked CLIs in data/bin must stay in scope).
   const BINARY_EXT = new Set(['.zst', '.gz', '.png', '.jpg', '.jpeg', '.gif', '.ico', '.woff', '.woff2', '.wasm', '.pdf', '.zip', '.tar']);
-  const CENSUS_ROOTS = ['src', 'data/bin', 'scripts'];
+
+  const tmpDirs = [];
+  const mkTmp = (tag) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), `arch-nul-${tag}-`)); tmpDirs.push(d); return d; };
+  // A repo's on-disk identity, byte-exact: EVERY file under .git, content-
+  // hashed (round 7 — the old ['config','index','HEAD'] stamp was blind to
+  // .git/objects, and the object store is exactly what GIT_OBJECT_DIRECTORY
+  // and GIT_COMMON_DIR re-point). Anything a redirected git touches shows up.
+  const repoStamp = (repo) => {
+    const out = [];
+    const walk = (dir, rel) => {
+      let ents;
+      try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { out.push(`${rel || '.'}/:<unreadable:${e.code}>`); return; }
+      for (const e of ents.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
+        const p = path.join(dir, e.name), r = rel ? `${rel}/${e.name}` : e.name;
+        if (e.isDirectory()) walk(p, r);
+        else { try { out.push(`${r}:${crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex')}`); } catch (err) { out.push(`${r}:<unreadable:${err.code}>`); } }
+      }
+    };
+    walk(path.join(repo, '.git'), '');
+    return JSON.stringify(out);
+  };
 
   // ── THE ONE SANITIZED GIT ENVIRONMENT (round 6) ──────────────────────────
   // Audited against git 2.51's own documented GIT_* list (git(1) "ENVIRONMENT
@@ -330,6 +390,41 @@ for (const [edge] of EXCEPTIONS) {
     for (const k of Object.keys(e)) if (/^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(k)) delete e[k];
     return e;
   };
+
+  // ── ROUND 7: THIS BLOCK REALLY RUNS IN A HOSTILE ENVIRONMENT ─────────────
+  // The suite cannot re-exec itself, so it exports the two redirectors that
+  // own git's OBJECT channel — the ones round 6's stamp could not see and the
+  // raw leg left ambient — into its own process, aimed at a throwaway repo,
+  // for the whole of the block below. Every git spawned from here on is
+  // therefore running with GIT_OBJECT_DIRECTORY/GIT_COMMON_DIR set at a
+  // repository nobody names on any command line; the assert at the end of the
+  // block is that it is byte-identical. Created BEFORE the injection, with an
+  // env sanitized by the same function, so the fixture itself cannot be bent.
+  let ambientThird = null, ambientBefore = null;
+  const ambientSaved = new Map();
+  const restoreAmbient = () => {
+    for (const [k, v] of ambientSaved) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    ambientSaved.clear();
+  };
+  {
+    const bootEnv = gitEnvFrom(process.env);
+    const d = mkTmp('ambient-third');
+    fs.mkdirSync(path.join(d, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(d, 'src/third.js'), 'const third = 1;\n');
+    const i = spawnSync('git', ['init', '-q', d], { cwd: d, encoding: 'utf-8', env: bootEnv });
+    const a = (!i.error && i.status === 0)
+      ? spawnSync('git', ['--git-dir', path.join(d, '.git'), '--work-tree', d, 'add', '-A'], { cwd: d, encoding: 'utf-8', env: bootEnv })
+      : { status: 1 };
+    if (!i.error && i.status === 0 && a.status === 0) {
+      ambientThird = d;
+      for (const [k, v] of [['GIT_OBJECT_DIRECTORY', path.join(d, '.git', 'objects')], ['GIT_COMMON_DIR', path.join(d, '.git')]]) {
+        ambientSaved.set(k, process.env[k]);
+        process.env[k] = v;
+      }
+      ambientBefore = repoStamp(d);
+    }
+  }
+
   const GIT_ENV = gitEnvFrom(process.env);
   // EVERY git in this block goes through these, read side and write side.
   const gitIn = (base, args, env = GIT_ENV, opts = {}) =>
@@ -358,7 +453,10 @@ for (const [edge] of EXCEPTIONS) {
       else why = `git -C <base> rev-parse --show-toplevel: ${gitWhy(top)}; --git-dir: ${gitWhy(gd)}${entry ? '' : '; and <base>/.git is not a repository entry'}`;
     }
     if (!owns) return { skip: why };
-    const ls = gitIn(base, ['ls-files', '-z', '--', ...CENSUS_ROOTS], env, { encoding: null, maxBuffer: 64 * 1024 * 1024 });
+    // NO PATHSPEC (round 7): "source" is defined by the INDEX, not by a list of
+    // directories — the roots were an unstated 432-of-556 sample that quietly
+    // excluded server.js, install.sh, run.sh and every deploy/docs script.
+    const ls = gitIn(base, ['ls-files', '-z'], env, { encoding: null, maxBuffer: 64 * 1024 * 1024 });
     if (ls.error || ls.status !== 0) return { skip: `git -C <base> ls-files: ${gitWhy(ls)}` };
     return { files: (ls.stdout ? ls.stdout.toString('utf-8') : '').split('\0').filter(Boolean) };
   };
@@ -381,14 +479,17 @@ for (const [edge] of EXCEPTIONS) {
     ok(true, `NUL-byte census SKIPPED — the tracked-source listing is genuinely unobtainable here, and a census must never fail a build over files it cannot scope; git's own words: ${c42.skip}`);
   } else {
     ok(!c42.offenders.length,
-      `no source file carries a NUL byte — one makes the WHOLE file invisible to grep/rg (${c42.files.length} tracked files; ${c42.offenders.slice(0, 3).join('; ') || 'clean'})`);
-    // SCOPE PIN: a mis-scoped listing (wrong roots, wrong repo, renamed tree)
-    // passes VACUOUSLY. Name files the census MUST have read — the incident's
-    // own module, this suite, and a tracked extension-less data/bin CLI (the
-    // root where the untracked artifacts live).
+      `no TRACKED file carries a NUL byte — one makes the WHOLE file invisible to grep/rg (${c42.files.length} tracked files, whole index; ${c42.offenders.slice(0, 3).join('; ') || 'clean'})`);
+    // SCOPE PIN: a mis-scoped listing (wrong pathspec, wrong repo, renamed
+    // tree) passes VACUOUSLY. Name files the census MUST have read — the
+    // incident's own module, this suite, a tracked extension-less data/bin CLI
+    // (the root where the untracked artifacts live), and two files that live
+    // in NEITHER of the old roots: the bootstrap this suite ratchets, and the
+    // installer every new checkout runs.
     const seen = new Set(c42.files);
-    ok(seen.has('src/codex-session-store.js') && seen.has('scripts/test-architecture.mjs') && seen.has('data/bin/vibespace-task'),
-      `census scope really covers src + scripts + data/bin (a vacuous listing cannot pass; ${c42.files.length} files)`);
+    const pins = ['src/codex-session-store.js', 'scripts/test-architecture.mjs', 'data/bin/vibespace-task', 'server.js', 'install.sh'];
+    ok(pins.every((f) => seen.has(f)),
+      `census scope really is the WHOLE index — src + scripts + data/bin AND the root files outside them (a vacuous listing cannot pass; ${c42.files.length} files; missing: ${JSON.stringify(pins.filter((f) => !seen.has(f)))})`);
   }
 
   // ── CONTROLS, in throwaway repos ─────────────────────────────────────────
@@ -422,14 +523,6 @@ for (const [edge] of EXCEPTIONS) {
   const setBare = (repo, v, env = GIT_ENV) =>
     spawnSync('git', ['--git-dir', path.join(repo, '.git'), 'config', 'core.bare', v],
       { cwd: repo, encoding: 'utf-8', env });
-  // A repo's on-disk identity, byte-exact: anything a redirected git touches
-  // shows up here.
-  const repoStamp = (repo) => JSON.stringify(['config', 'index', 'HEAD'].map((f) => {
-    try { return fs.readFileSync(path.join(repo, '.git', f)).toString('base64'); } catch (e) { return `absent:${e.code}`; }
-  }));
-  const tmpDirs = [];
-  const mkTmp = (tag) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), `arch-nul-${tag}-`)); tmpDirs.push(d); return d; };
-
   const tmp42 = mkTmp('ctl');
   try {
     plantFixture(tmp42);
@@ -522,25 +615,85 @@ for (const [edge] of EXCEPTIONS) {
         const ga = gi.status === 0 ? addFixture(under, gitEnvFrom(hostile)) : { status: 1 };
         const gc = census(under, gitEnvFrom(hostile));
         ok(repoStamp(guarded) === beforeG,
-          'CONTROL (the round-6 finding itself): with the sanitized environment, a hostile GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE/GIT_CONFIG_* leaves the OTHER repo byte-identical — config, index and HEAD all unchanged');
+          'CONTROL (the round-6 finding itself): with the sanitized environment, a hostile GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE/GIT_CONFIG_* leaves the OTHER repo byte-identical — every file under .git content-hashed, objects included (round 7)');
         ok(!!preSkip.skip && gi.status === 0 && ga.status === 0 && !gc.skip && gc.offenders.length === 1 && gc.offenders[0].startsWith('src/dirty.js'),
           `CONTROL: ...and the controls still did their real work in the throwaway repo, so the assert above is not vacuous (${JSON.stringify(gc.offenders || gc.skip)})`);
 
         // (b) RAW: the fixture repo really exists (created sanitized), and only
-        //     the `add` runs with the hostile environment unsanitized. It must
+        //     the `add` runs with the three decoy redirectors in place. It must
         //     reach `exposed` — measured: --git-dir/--work-tree do NOT override
         //     GIT_INDEX_FILE, which is exactly why the env is the fix.
+        //     ROUND 7: the base is GIT_ENV, not process.env. A negative control
+        //     may differ from the guarded run in exactly the ONE way it is
+        //     testing; `{ ...process.env, <3 names> }` left the other 22
+        //     redirectors ambient, so this write landed wherever the caller's
+        //     GIT_OBJECT_DIRECTORY/GIT_COMMON_DIR said (measured: a third repo,
+        //     silently — or, when that name pointed at a nonexistent/read-only
+        //     directory, a RED build blaming the sanitizer for it).
         const overExposed = mkTmp('ctl-exposed');
         plantFixture(overExposed);
-        const rawEnv = { ...process.env, GIT_DIR: path.join(exposed, '.git'), GIT_WORK_TREE: exposed, GIT_INDEX_FILE: path.join(exposed, '.git', 'index') };
+        const rawEnv = { ...GIT_ENV, GIT_DIR: path.join(exposed, '.git'), GIT_WORK_TREE: exposed, GIT_INDEX_FILE: path.join(exposed, '.git', 'index') };
         const beforeE = repoStamp(exposed);
         const ei = initRepo(overExposed);
         const ea = ei.status === 0 ? addFixture(overExposed, rawEnv) : { status: 1 };
-        ok(ei.status === 0 && ea.status === 0 && repoStamp(exposed) !== beforeE,
-          `NEGATIVE CONTROL: the same write control run with the RAW ambient environment DOES reach the other repo (${gitWhy(ea)}) — the guarded assert above is the sanitizer working, not the controls failing to run`);
+        // …and SAY the one-variable rule at the site, so a future `...process.env`
+        // fails here rather than only through the whole-block assert below.
+        const rawCarries = GIT_REDIRECTORS.filter((k) => k in rawEnv);
+        ok(ei.status === 0 && ea.status === 0 && repoStamp(exposed) !== beforeE
+          && JSON.stringify(rawCarries) === JSON.stringify(['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE']),
+          `NEGATIVE CONTROL: the same write control, differing from the guarded run in EXACTLY the three redirectors it names (${JSON.stringify(rawCarries)}), DOES reach the other repo (${gitWhy(ea)}) — the guarded assert above is the sanitizer working, not the controls failing to run`);
+
+        // (c) ROUND 7's own negative control, on a SACRIFICIAL fourth repo: the
+        //     PRE-FIX base — `{ ...process.env, GIT_DIR, GIT_WORK_TREE,
+        //     GIT_INDEX_FILE }`, three of 25 names pinned — really does carry
+        //     `git add` into a repository named on no command line, because
+        //     the ambient environment owns the object channel. We aim the two
+        //     ambient names at `probe` for the duration of this one call so
+        //     that `ambientThird` (asserted untouched below, over the WHOLE
+        //     block) keeps its meaning. If this leg ever goes green-by-nothing,
+        //     the ambient environment is not hostile and the assert below is
+        //     vacuous — so they are two halves of one control.
+        const probe = ambientThird ? makeDecoy('decoy-probe') : null;
+        const leakField = probe ? mkTmp('ctl-leak') : null;
+        let leakMoved = false, leakWhy = 'probe repo unavailable';
+        if (probe && leakField) {
+          plantFixture(leakField);
+          const beforeP = repoStamp(probe);
+          const li = initRepo(leakField);
+          const aimed = new Map();
+          for (const [k, v] of [['GIT_OBJECT_DIRECTORY', path.join(probe, '.git', 'objects')], ['GIT_COMMON_DIR', path.join(probe, '.git')]]) {
+            aimed.set(k, process.env[k]); process.env[k] = v;
+          }
+          const preFixEnv = { ...process.env, GIT_DIR: path.join(exposed, '.git'), GIT_WORK_TREE: exposed, GIT_INDEX_FILE: path.join(exposed, '.git', 'index') };
+          const la = li.status === 0 ? addFixture(leakField, preFixEnv) : { status: 1 };
+          for (const [k, v] of aimed) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+          leakMoved = li.status === 0 && la.status === 0 && repoStamp(probe) !== beforeP;
+          leakWhy = gitWhy(la);
+        }
+        ok(leakMoved,
+          `NEGATIVE CONTROL (the round-7 finding itself): the PRE-FIX raw base { ...process.env, GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE } carries the very same write into a THIRD repository reached only through the ambient GIT_OBJECT_DIRECTORY/GIT_COMMON_DIR — 3 pinned names cannot protect the other 22 (${leakWhy})`);
       }
     }
-  } finally { for (const d of tmpDirs) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} } }
+
+    // ── ROUND 7: THE WHOLE BLOCK, MEASURED FROM OUTSIDE ────────────────────
+    // Every git above ran with GIT_OBJECT_DIRECTORY and GIT_COMMON_DIR
+    // exported at `ambientThird`. Not one of them may have written a byte
+    // there — including the raw negative control, whose entire job is to be
+    // hostile in the three ways it NAMES. The env assert keeps this honest:
+    // an assert about an environment that was never set is not an assert.
+    if (!ambientThird) {
+      ok(true, 'CONTROLS SKIPPED: could not build the ambient third repository (git init/add unavailable here)');
+    } else {
+      const stillHostile = process.env.GIT_OBJECT_DIRECTORY === path.join(ambientThird, '.git', 'objects')
+        && process.env.GIT_COMMON_DIR === path.join(ambientThird, '.git');
+      const after = repoStamp(ambientThird);
+      ok(stillHostile && after === ambientBefore,
+        `CONTROL (the round-7 finding itself): with GIT_OBJECT_DIRECTORY + GIT_COMMON_DIR exported at a third repository for the WHOLE census block, that repository is byte-identical afterwards — every .git file hashed, objects included (hostile env still set: ${stillHostile})`);
+    }
+  } finally {
+    restoreAmbient();
+    for (const d of tmpDirs) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} }
+  }
 }
 
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);
