@@ -445,6 +445,127 @@ console.log('— ⑥ ONE remote cache slot, MANY remote files (codex .jsonl ⇄ 
     const c = await hm.fetchTranscript('hz', 'codex', sl.tid);
     ok(fs.readFileSync(c, 'utf8') === text, 'a cache whose TAIL is not text is refetched even under a provenance-carrying meta (an append always lands its foreign bytes at the tail)');
   }
+
+  // ── ⑥c THE ADOPTION EXCEPTION'S BLIND SPOT + the un-stamped rungs (B-7638)
+  // Three residuals the ⑥b verify pass confirmed:
+  //  (1) the over-cap ADOPTION kept bytes verified by a 4 KB TAIL read only —
+  //      but the pre-fix delta path kept appending AFTER it spliced, so the
+  //      marker is buried and a corrupt slot was adopted as "verified";
+  //  (2) neither rung wrote the adoption back, so the deep scan repeats every
+  //      poll and the ssh rung (no delta path) fails "too large" on the next
+  //      byte of growth;
+  //  (3) a transcript shorter than the 4-byte magic could never be verified at
+  //      all ⇒ fully re-pulled on EVERY poll, forever.
+  console.log('— ⑥c the adoption scans the WHOLE file, records itself, and tiny transcripts verify');
+  const tailOnlyClean = (b) => { const t = b.subarray(Math.max(0, b.length - 4096)); return !t.includes(0x00) && t.indexOf(DF.ZSTD_MAGIC) < 0; };
+  // a REACHABLE legacy rung for the refusal cases: the slab path's cap error
+  // falls through to ssh by design, and an ssh rung that cannot be reached at
+  // all triggers the host-down memo (which serves the stale cache) — that
+  // would hide the very refusal under test.
+  const sshDead = () => { hm._ssh = async () => { throw new Error('the legacy ssh rung must not be needed here'); }; };
+  const sshProbeOnly = () => {
+    hm._hostDownUntil?.clear();
+    hm._ssh = async (h, cmd) => {
+      if (/^cat /.test(cmd)) throw new Error('the refusal path must never whole-cat an over-cap remote');
+      return Buffer.from(`${remote.data.length} ${remote.mtime}\n${remote.path}\n`);
+    };
+  };
+
+  {   // (1) a splice BURIED under later appends — invisible to the tail window
+    const sl = slotOf('cccccccc-dddd-4eee-8fff-000000000006');
+    const head = Buffer.from(rollout(sl.tid, '/work/buried', 'buried splice', 40));
+    const foreign = zlib.zstdCompressSync(Buffer.from(rollout(sl.tid, '/work/buried', 'buried splice', 40))).subarray(0, 64);
+    const later = Buffer.from(tick.repeat(80));                 // the appends that buried it
+    ok(later.length > 4096, `fixture: the later appends bury the splice deeper than the 4 KB tail window (${later.length}B)`);
+    const buried = Buffer.concat([head, foreign, later]);
+    ok(tailOnlyClean(buried) && buried.indexOf(DF.ZSTD_MAGIC) >= 0, 'NEGATIVE CONTROL: a tail-only scan calls the buried hybrid verified — the marker is 6 KB from the end');
+    seedSlot(sl, buried, { size: buried.length, mtime: 11000, fetchedAt: Date.now(), slab: true });   // PRE-FIX meta
+    remote.path = sl.remotePath; remote.data = Buffer.concat([head, later, Buffer.alloc(foreign.length, 0x20)]); remote.mtime = 11000;
+    reads.length = 0; sshProbeOnly();
+    let err = null, got = null;
+    try { got = await hm.fetchTranscript('hz', 'codex', sl.tid, { maxBytes: buried.length - 1 }); } catch (e) { err = String(e && e.message || e); }
+    ok(!got, 'the over-cap adoption is refused: a splice buried under later appends is never served as verified', got && fs.readFileSync(got).equals(buried) ? 'SERVED THE HYBRID' : err);
+    ok(/could not be verified/.test(err || ''), '…and the refusal names the real fault instead of a bare "too large"', err);
+    ok(!(JSON.parse(fs.readFileSync(sl.cache + '.meta', 'utf8')).remotePath), 'a refused slot is NOT stamped with provenance (it would freeze the corruption in)');
+    sshDead(); hm._hostDownUntil?.clear();
+  }
+
+  {   // (1b) the chunked scan must see a magic that STRADDLES a chunk boundary
+    const sl = slotOf('cccccccc-dddd-4eee-8fff-000000000007');
+    const CH = 1 << 20;
+    const filler = (n) => Buffer.from('{"t":"' + 'x'.repeat(Math.max(0, n - 9)) + '"}\n');
+    const pre = filler(CH - 2);
+    ok(pre.length === CH - 2, `fixture: the first chunk ends 2 bytes into the zstd magic (${pre.length})`);
+    const straddle = Buffer.concat([pre, DF.ZSTD_MAGIC, filler(8192)]);
+    ok(tailOnlyClean(straddle), 'NEGATIVE CONTROL: the straddling magic is also outside the tail window');
+    seedSlot(sl, straddle, { size: straddle.length, mtime: 12000, fetchedAt: Date.now(), slab: true });
+    remote.path = sl.remotePath; remote.data = Buffer.alloc(straddle.length, 0x20); remote.mtime = 12000; sshProbeOnly();
+    let err2 = null, got2 = null;
+    try { got2 = await hm.fetchTranscript('hz', 'codex', sl.tid, { maxBytes: straddle.length - 1 }); } catch (e) { err2 = String(e && e.message || e); }
+    ok(!got2 && /could not be verified/.test(err2 || ''), 'a marker split across the 1 MiB chunk boundary is still caught (3-byte carry)', err2);
+    sshDead(); hm._hostDownUntil?.clear();
+  }
+
+  {   // (1c) POSITIVE CONTROL + (2) the adoption is stamped once, on BOTH rungs
+    const sl = slotOf('cccccccc-dddd-4eee-8fff-000000000008');
+    const big = Buffer.from(rollout(sl.tid, '/work/bigclean', 'clean over-cap slot', 9000));
+    ok(big.length > (1 << 20), `fixture: the clean slot spans more than one scan chunk (${big.length}B)`);
+    seedSlot(sl, big, { size: big.length, mtime: 13000, fetchedAt: Date.now(), slab: true });          // PRE-FIX meta
+    remote.path = sl.remotePath; remote.data = big; remote.mtime = 13000;
+    reads.length = 0;
+    const c8 = await hm.fetchTranscript('hz', 'codex', sl.tid, { maxBytes: big.length - 1 });
+    ok(fs.readFileSync(c8).equals(big) && reads.length === 0, 'a CLEAN over-cap slot still adopts after the whole-file scan (no false positive, no refetch)', reads);
+    const m8 = metaOf(c8);
+    ok(m8.remotePath === sl.remotePath && m8.compressed === false && m8.adopted === true, 'the adoption is WRITTEN BACK (provenance + an `adopted` marker) — the deep scan is paid once, not per poll', m8);
+  }
+
+  {   // (2) the ssh rung — no data plane at all — must stamp it too
+    const sshHm = new HostManager({ dataDir });
+    sshHm._state.hosts.push({ id: 'hssh', name: 'S' });                    // no transport ⇒ legacy ssh rung
+    const sl = { tid: 'cccccccc-dddd-4eee-8fff-000000000009', remotePath: '/home/u/.codex/sessions/2026/09/05/rollout-2026-09-05T00-00-00-cccccccc-dddd-4eee-8fff-000000000009.jsonl', cache: path.join(dataDir, 'remote-jsonl', 'hssh', 'codex', 'cccccccc-dddd-4eee-8fff-000000000009.jsonl') };
+    const body = Buffer.from(rollout(sl.tid, '/work/ssh', 'over-cap slot on the ssh rung', 300));
+    const cats = [];
+    sshHm._ssh = async (h, cmd) => {
+      if (/^cat /.test(cmd)) { cats.push(cmd); return body; }
+      return Buffer.from(`${body.length} 14000\n${sl.remotePath}\n`);
+    };
+    seedSlot(sl, body, { size: body.length, mtime: 14000, fetchedAt: Date.now() });                    // PRE-FIX meta
+    const c9 = await sshHm.fetchTranscript('hssh', 'codex', sl.tid, { maxBytes: body.length - 1 });
+    ok(fs.readFileSync(c9).equals(body) && cats.length === 0, 'the ssh rung adopts an over-cap verified slot without re-pulling it', cats);
+    const m9 = JSON.parse(fs.readFileSync(sl.cache + '.meta', 'utf8'));
+    ok(m9.remotePath === sl.remotePath && m9.adopted === true, 'the ssh rung STAMPS the meta before returning (it used to hand the cache back provenance-less forever)', m9);
+    // and now that the slot carries provenance, growth is a normal cache miss —
+    // not "too large" forever (the ssh rung has no delta path to grow through)
+    const grown = Buffer.concat([body, Buffer.from(tick)]);
+    sshHm._ssh = async (h, cmd) => { if (/^cat /.test(cmd)) { cats.push(cmd); return grown; } return Buffer.from(`${grown.length} 15000\n${sl.remotePath}\n`); };
+    const c9b = await sshHm.fetchTranscript('hssh', 'codex', sl.tid);
+    ok(fs.readFileSync(c9b).equals(grown) && cats.length === 1, 'the stamped slot then re-syncs normally when the remote grows', cats);
+  }
+
+  {   // (3) a transcript SHORTER than the 4-byte magic must verify, not re-pull
+    const sl = slotOf('cccccccc-dddd-4eee-8fff-00000000000a');
+    const tiny = Buffer.from('{}\n');
+    seedSlot(sl, tiny, { size: tiny.length, mtime: 16000, fetchedAt: Date.now(), slab: true, remotePath: sl.remotePath, compressed: false });
+    remote.path = sl.remotePath; remote.data = tiny; remote.mtime = 16000;
+    reads.length = 0;
+    const ct = await hm.fetchTranscript('hz', 'codex', sl.tid);
+    ok(fs.readFileSync(ct).equals(tiny) && reads.length === 0, 'a 3-byte transcript short-circuits on its cache (it used to be fully re-pulled on EVERY poll — nothing to judge by the 4-byte magic)', reads);
+    // …but the head still has to look like a record, and a compressed remote
+    // can never be shorter than its own magic
+    const sl2 = slotOf('cccccccc-dddd-4eee-8fff-00000000000b');
+    seedSlot(sl2, Buffer.from('xy'), { size: 2, mtime: 17000, fetchedAt: Date.now(), slab: true, remotePath: sl2.remotePath, compressed: false });
+    remote.path = sl2.remotePath; remote.data = Buffer.from(rollout(sl2.tid, '/work/tiny2', 'not a record head', 2)); remote.mtime = 17000;
+    reads.length = 0;
+    const ct2 = await hm.fetchTranscript('hz', 'codex', sl2.tid);
+    ok(reads.length === 1 && fs.readFileSync(ct2, 'utf8').startsWith('{'), 'NEGATIVE CONTROL: a short cache that does not start with a record is still refetched', reads);
+    const sl3 = slotOf('cccccccc-dddd-4eee-8fff-00000000000c');
+    const zbody = zlib.zstdCompressSync(Buffer.from(rollout(sl3.tid, '/work/tiny3', 'compressed twin', 3)));
+    seedSlot(sl3, Buffer.from([0x28, 0xb5]), { size: 2, mtime: 18000, fetchedAt: Date.now(), slab: true, remotePath: sl3.remotePath + '.zst', compressed: true });
+    remote.path = sl3.remotePath + '.zst'; remote.data = zbody; remote.mtime = 18000;
+    reads.length = 0;
+    const ct3 = await hm.fetchTranscript('hz', 'codex', sl3.tid);
+    ok(reads.length === 1 && fs.readFileSync(ct3).equals(zbody), 'NEGATIVE CONTROL: a 2-byte cache under a COMPRESSED remote is never called verified (a zstd frame is never shorter than its magic)', reads);
+  }
 }
 try { fs.rmSync(home, { recursive: true, force: true }); } catch {}
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);

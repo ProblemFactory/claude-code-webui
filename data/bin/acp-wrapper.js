@@ -270,6 +270,8 @@ let activePrompt = null;          // {id, cancelled}
 const promptQueue = [];           // [{blocks, meta}] — ACP has no queue verb; hold locally
 let replaying = false;            // session/load replay window (records carry replay:true)
 let nudgeTurnActive = false;
+let stopEpoch = 0;                // bumped by every interrupt — see maybeStopNudge
+let stopCheckAbort = null;        // the stop-check round trip currently in the air
 let markReady = null, markReadyFailed = null;
 const readyPromise = new Promise((resolve, reject) => { markReady = resolve; markReadyFailed = reject; });
 readyPromise.catch(() => {});
@@ -284,18 +286,40 @@ async function fetchContextPrefix() {
     return data && typeof data.context === 'string' ? data.context : '';
   } catch (e) { log(`prompt-context skipped: ${e.message}`); return ''; }
 }
+/** The stop-time bookkeeping nudge. It is OURS, not the user's — which decides
+ *  both of its edges:
+ *   · A Stop that lands INSIDE the stop-check round trip must not be followed
+ *     by a nudge turn. The fetch resolves after the interrupt has finished
+ *     (activePrompt is already null), so the old code walked straight into
+ *     runPrompt and BILLED a turn the user had just asked to stop — and the
+ *     only visible trace was a reminder appearing out of nowhere. The interrupt
+ *     bumps `stopEpoch` and aborts the request; the answer is discarded when
+ *     the epoch it started in is gone.
+ *   · When it does queue behind a running turn it queues SILENTLY: a
+ *     `queued_input` for an internal reminder painted a "Queued" system card
+ *     the user never sent and cannot act on (peer messages already ride
+ *     silentQueue for the same reason). */
 async function maybeStopNudge() {
   const api = process.env.VIBESPACE_API, token = process.env.VIBESPACE_SESSION_TOKEN;
   if (!api || !token || !meta.sessionId) return;
+  const epoch = stopEpoch;
+  const ac = new AbortController();
+  stopCheckAbort = ac;
+  const to = setTimeout(() => { try { ac.abort(new Error('stop-check timed out after 2500ms')); } catch { } }, 2500);
   try {
-    const res = await fetch(api + '/api/agent/stop-check', { headers: { Authorization: 'Bearer ' + token }, signal: AbortSignal.timeout(2500) });
+    const res = await fetch(api + '/api/agent/stop-check', { headers: { Authorization: 'Bearer ' + token }, signal: ac.signal });
     if (!res.ok) return;
     const d = await res.json();
     if (!d || !d.block || !d.reason) return;
+    if (epoch !== stopEpoch) { log('stop nudge dropped: Stop landed while the stop-check was in flight'); return; }
     nudgeTurnActive = true;
     log('stop nudge: one bookkeeping turn');
-    await runPrompt([{ type: 'text', text: '<vibespace-reminder>' + d.reason + '</vibespace-reminder>' }], { nudge: true });
-  } catch (e) { nudgeTurnActive = false; log('stop nudge skipped: ' + e.message); }
+    await runPrompt([{ type: 'text', text: '<vibespace-reminder>' + d.reason + '</vibespace-reminder>' }], { nudge: true, silentQueue: true });
+  } catch (e) {
+    nudgeTurnActive = false;
+    log(epoch !== stopEpoch ? 'stop nudge dropped: Stop landed while the stop-check was in flight'
+      : 'stop nudge skipped: ' + (e && e.message ? e.message : e));
+  } finally { clearTimeout(to); if (stopCheckAbort === ac) stopCheckAbort = null; }
 }
 
 // ── THE INPUT QUEUE (queue + remove; no steer in ACP v1) ──
@@ -504,6 +528,11 @@ async function handleInput(msg) {
       return;
     }
     case 'interrupt': {
+      // A stop-check round trip in the air belongs to the turn the user just
+      // stopped: record the Stop (epoch) and abort the request, so its answer
+      // is discarded instead of dispatching a billed nudge turn afterwards.
+      stopEpoch++;
+      if (stopCheckAbort) { try { stopCheckAbort.abort(new Error('interrupted by Stop')); } catch { } }
       // Stop means stop: ALWAYS drop what the user queued behind the running
       // turn. ACP has no queue verb so the queue is OURS — clearing it only in
       // the "nothing is running" branch meant the cancelled turn's own
@@ -537,8 +566,9 @@ async function handleInput(msg) {
       // ok/queued) — dropping it silently would lose a promised message, so it
       // goes back to the delivery ladder's stash (the acp-events consumer
       // re-stashes on ok:false).
-      let droppedNudges = 0;
+      let droppedNudges = 0, droppedPeers = 0;
       for (const q of dropped) {
+        if (q.opts?.peer) droppedPeers++;
         if (q.opts?.peer && q.opts.peerText) record('peer_result', { ok: false, reason: 'dropped by Stop before it was delivered', text: q.opts.peerText, fromName: q.opts.peerFrom || null });
         // A dropped NUDGE takes its latch with it. `nudgeTurnActive` is cleared
         // by endPrompt for the nudge's OWN turn — a queue entry that never runs
@@ -548,12 +578,14 @@ async function handleInput(msg) {
         // stop-check entirely). Per-turn state dies with the turn it belongs to.
         if (q.opts?.nudge) { droppedNudges++; nudgeTurnActive = false; }
       }
-      // Count only what the USER queued: the bookkeeping nudge is ours, and
-      // telling someone to "send it again" for a message they never sent is a
-      // lie (the log line below still carries the true total).
-      const userDropped = dropped.length - droppedNudges;
+      // Count only what the USER queued. The bookkeeping nudge is ours, and a
+      // dropped PEER message was never the user's to re-send either — it goes
+      // straight back to the delivery ladder above (peer_result ok:false) and
+      // arrives on its own, so "send it again" is both impossible and wrong
+      // advice. The log line below still carries the true total.
+      const userDropped = dropped.length - droppedNudges - droppedPeers;
       if (userDropped) notice('info', `Stop also dropped ${userDropped} queued message${userDropped === 1 ? '' : 's'} — send ${userDropped === 1 ? 'it' : 'them'} again to run ${userDropped === 1 ? 'it' : 'them'}.`, 'queue-cleared');
-      log(`interrupt: active=${!!activePrompt} dropped=${dropped.length} (nudges=${droppedNudges})`);
+      log(`interrupt: active=${!!activePrompt} dropped=${dropped.length} (nudges=${droppedNudges}, peers=${droppedPeers})`);
       return;
     }
     case 'queue-op': handleQueueOp(msg); return;

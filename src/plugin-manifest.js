@@ -46,7 +46,10 @@
 //   • declared fs paths are matched the way node MATCHES them: a `*` truncates
 //     the pattern into a string prefix, so `/*` (and `<parent>/*`) had to be
 //     modelled or they walked straight past the forbidden roots — see
-//     normalizeFsPath.
+//     normalizeFsPath. The two rules MEET at `~/.*`: node keeps `.*` as a
+//     segment while our collapse erased the dot and emitted `<home>*` — a
+//     dotfile glob silently widened into the whole home dir and every sibling
+//     path starting with it, so a `.` segment before `*` is refused (B-7638).
 //   • needsConsent covers contributed agentTools: a shim is a program on every
 //     session's PATH (local, ssh hosts, paired devices), outside the sandbox.
 const ID_RE = /^[a-z0-9][a-z0-9-]*\.[a-z0-9][a-z0-9-]*$/;
@@ -135,6 +138,15 @@ function normalizeFsPath(raw, { homeDir = null, forbiddenRoots = [] } = {}) {
   let tail = '';
   if (star >= 0) {
     p = p.slice(0, -1);
+    // `~/.*` is NOT "the dotfiles in my home dir". Node keeps `.*` as an
+    // ordinary segment (it only collapses a LONE `.`), so the author wrote the
+    // prefix `<home>/.` — but collapsing here erases the dot and emits `<home>*`,
+    // a STRING prefix granting the whole home directory AND every sibling path
+    // that starts with those characters (`/home/u2/…` for `/home/u*`). The
+    // widening is invisible: the manifest says one thing, node is handed
+    // another. Refuse the shape instead of silently rewriting it (the middle-`*`
+    // rule above, same reasoning).
+    if (/(^|\/)\.$/.test(p)) return { error: `"${raw}" ends in "/.*" — a "." segment before "*" is not a dotfile glob: it would be emitted as the string prefix "${collapsePosixPath(p) || ''}", covering that whole directory and every sibling path starting with it. Name the directory ("…/") or a literal name prefix instead` };
     if (p.endsWith('/')) { tail = '/*'; p = p.replace(/\/+$/, ''); } else tail = '*';
   }
   if (p.startsWith('/')) {

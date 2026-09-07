@@ -78,6 +78,19 @@ const wildOk = normalizeFsPath('/home/u/projects/*', { homeDir: HOME, forbiddenR
 const wildOk2 = normalizeFsPath('~/projects/logs*', { homeDir: HOME, forbiddenRoots: FORBIDDEN });
 ok(wildOk.path === '/home/u/projects/*' && wildOk2.path === '/home/u/projects/logs*', `a wildcard under a legitimately allowed dir still passes, VERBATIM — the pattern reaching node is the one the owner read (${JSON.stringify([wildOk, wildOk2])})`);
 ok(normalizeFsPath('/srv/x/*', {}).path === '/srv/x/*' && normalizeFsPath('/srv/x*', {}).path === '/srv/x*', 'normalizing never collapses `/dir/*` (subtree) into `/dir*` (string prefix — it would also cover /srv/xyz)');
+// …and the two rules MEET at `~/.*` (B-7638): node only collapses a LONE `.`
+// segment, so `<home>/.*` is the prefix `<home>/.` — dotfiles. Collapsing the
+// dot away HERE emitted `<home>*`: the whole home dir plus every sibling path
+// with the same character prefix (`/home/u2/…`). A home-dir glob may not widen
+// to every user, and the widening was invisible in the manifest.
+const DOTGLOB = ['~/.*', '/srv/a/.*', '/home/u/.*'];
+const dotRes = DOTGLOB.map((x) => normalizeFsPath(x, { homeDir: HOME, forbiddenRoots: FORBIDDEN }));
+ok(dotRes.every((r) => !r.path && /is not a dotfile glob/.test(r.error || '')), `a "." segment before "*" is refused, not silently widened into a string prefix (${JSON.stringify(dotRes)})`);
+ok(!dotRes.some((r) => (r.path || '').startsWith('/home/u*') || (r.path || '') === '/srv/a*'), 'NEGATIVE CONTROL: the pre-fix output "/home/u*" / "/srv/a*" (every sibling home) is never produced');
+const dotCap = V({ ...baseM, capabilities: { server: { fs: { read: ['~/.*'] } } } }, { homeDir: '/srv/bob', forbiddenRoots: FORBIDDEN });
+ok(!dotCap.ok && /is not a dotfile glob/.test(dotCap.errors.join()), 'the same refusal reaches manifest validation even when no forbidden root happens to sit under the widened prefix', dotCap.errors);
+const dotOk = [normalizeFsPath('~/.config/*', { homeDir: HOME }), normalizeFsPath('~/./*', { homeDir: HOME }), normalizeFsPath('~/.ssh', { homeDir: HOME })];
+ok(dotOk[0].path === '/home/u/.config/*' && dotOk[1].path === '/home/u/*' && dotOk[2].path === '/home/u/.ssh', `real dot-directories and a lone "." segment node itself collapses still normalize (${JSON.stringify(dotOk)})`);
 const capWildRoot = V({ ...baseM, capabilities: { server: { fs: { read: ['/*'] } } } }, { homeDir: HOME, forbiddenRoots: FORBIDDEN });
 ok(!capWildRoot.ok && /whole filesystem/.test(capWildRoot.errors.join()), 'a manifest declaring "/*" fails validation, and says so', capWildRoot.errors);
 const capWildParent = V({ ...baseM, capabilities: { server: { fs: { write: ['/home/u/*'] } } } }, { homeDir: HOME, forbiddenRoots: FORBIDDEN });

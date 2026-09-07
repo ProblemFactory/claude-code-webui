@@ -1158,16 +1158,54 @@ class HostManager {
       } catch { return Buffer.alloc(0); } finally { if (fd !== undefined) { try { fs.closeSync(fd); } catch { } } }
     };
     const cacheIsCompressed = () => isZstBuffer(readCacheAt(0, 4));
-    const cacheBytesOk = (remotePath) => {
+    const spliceMarkers = (buf) => buf.includes(0x00) || buf.indexOf(ZSTD_MAGIC) >= 0;
+    // The splice markers are looked for in the TAIL, because an append lands
+    // its foreign bytes there. ONE decision outlives that window: the over-cap
+    // ADOPTION below keeps bytes this code never fetched, and a slot the
+    // pre-fix delta path spliced and then kept appending to has the marker
+    // BURIED under the later appends — invisible to a 4KB tail read. So the
+    // adoption (and only the adoption, it is paid once per slot) scans the
+    // WHOLE file: chunked, with a 3-byte carry so a magic split across a
+    // chunk boundary is still seen.
+    const wholeCacheOk = (csize) => {
+      const CH = 1 << 20;
+      let fd;
+      try {
+        fd = fs.openSync(cachePath, 'r');
+        const buf = Buffer.alloc(CH + 3);        // [0,3) = the previous window's last 3 bytes
+        let pos = 0, carryLen = 0;
+        while (pos < csize) {
+          const n = fs.readSync(fd, buf, 3, Math.min(CH, csize - pos), pos);
+          if (n <= 0) return false;                                       // unreadable ⇒ cannot verify
+          const win = buf.subarray(3 - carryLen, 3 + n);
+          if (spliceMarkers(win)) return false;
+          pos += n;
+          carryLen = Math.min(3, win.length);
+          win.subarray(win.length - carryLen).copy(buf, 3 - carryLen);
+        }
+        return true;
+      } catch { return false; } finally { if (fd !== undefined) { try { fs.closeSync(fd); } catch { } } }
+    };
+    const cacheBytesOk = (remotePath, { deep = false } = {}) => {
       let csize = 0;
       try { csize = fs.statSync(cachePath).size; } catch { return false; }
       const head = readCacheAt(0, 4);
-      if (head.length < 4) return false;                                  // nothing to judge ⇒ refetch
-      if (isZstBuffer(head) !== isZstPath(remotePath)) return false;      // the other twin's bytes are in the slot
-      if (isZstPath(remotePath)) return true;                             // compressed: the magic IS the evidence
-      if (/\.jsonl$/i.test(cachePath) && head[0] !== 0x7b && head[0] !== 0x5b) return false; // a JSONL cache starts with a record
+      const zstRemote = isZstPath(remotePath);
+      if (head.length >= 4) {
+        if (isZstBuffer(head) !== zstRemote) return false;                // the other twin's bytes are in the slot
+        if (zstRemote) return true;                                       // compressed: the magic IS the evidence
+      } else if (zstRemote) {
+        return false;                                                     // a zstd frame is never shorter than its 4-byte magic
+      }
+      // A cache SHORTER than the magic cannot be judged BY the magic — but it
+      // also cannot BE a compressed frame nor hide a splice, and an empty or
+      // one-tiny-record transcript is perfectly legitimate. Reading that as
+      // "unverifiable ⇒ refetch" re-pulled every such transcript on EVERY poll
+      // forever (the check below still applies to whatever bytes exist).
+      if (head.length && /\.jsonl$/i.test(cachePath) && head[0] !== 0x7b && head[0] !== 0x5b) return false; // a JSONL cache starts with a record
+      if (deep) return wholeCacheOk(csize);
       const tail = readCacheAt(Math.max(0, csize - 4096), Math.min(4096, csize));
-      return !tail.includes(0x00) && tail.indexOf(ZSTD_MAGIC) < 0;
+      return !spliceMarkers(tail);
     };
     // A pre-provenance meta heals by ONE whole refetch. The single exception:
     // a remote grown past maxBytes cannot be refetched whole at all (the delta
@@ -1175,7 +1213,29 @@ class HostManager {
     // transcript that worked yesterday is a worse answer than the byte check —
     // there, a verified cache adopts the provenance we just resolved.
     const sameRemote = (remotePath) => !!meta && meta.remotePath === remotePath;
-    const cacheUsable = (remotePath, size) => cacheBytesOk(remotePath) && (sameRemote(remotePath) || (!!meta && !meta.remotePath && size > maxBytes));
+    const adopting = (remotePath, size) => !sameRemote(remotePath) && !!meta && !meta.remotePath && size > maxBytes;
+    const cacheUsable = (remotePath, size) => cacheBytesOk(remotePath, { deep: adopting(remotePath, size) })
+      && (sameRemote(remotePath) || adopting(remotePath, size));
+    // …and the adoption is RECORDED before we hand the cache back. Without the
+    // stamp the slot stays provenance-less forever: every later poll re-runs
+    // the whole-file scan, and on the ssh rung — which has no delta path at
+    // all — the very next byte of growth fails "remote transcript too large"
+    // instead of syncing. Writing it here is what makes the deep scan a
+    // ONE-TIME cost per slot (`adopted` marks bytes we verified rather than
+    // fetched, for anyone reading the meta later).
+    const stampAdoption = (remotePath, size, mtime) => {
+      if (sameRemote(remotePath)) return;
+      try {
+        meta = { ...(meta || {}), size, mtime, fetchedAt: Date.now(), remotePath, compressed: isZstPath(remotePath), adopted: true };
+        fs.writeFileSync(metaPath, JSON.stringify(meta));
+      } catch { }
+    };
+    // …and when a whole refetch is BOTH impossible (over the cap) and the only
+    // way out (the cache did not verify), say so. "remote transcript too large"
+    // alone sends the reader diagnosing a size problem on a slot whose real
+    // fault is spliced bytes — an error string is not a diagnosis.
+    const tooLarge = (n, cacheVerified) => new Error(`remote transcript too large (${(n / 1048576) | 0}MB)`
+      + (!cacheVerified && fs.existsSync(cachePath) ? ' — and the cached copy could not be verified (bytes from another file, or spliced); delete it to re-sync' : ''));
     // CS data-plane: INCREMENTAL slab sync — transcripts are append-only, so
     // when the cache already holds a prefix we fetch ONLY [cachedSize, size)
     // via read-range instead of re-pulling the whole file (the remote-jsonl
@@ -1198,19 +1258,20 @@ class HostManager {
         // size/mtime match would serve the stump FOREVER (the self-heal only
         // triggers when the remote file changes) — and the bytes must have come
         // from the SAME remote file (see the cache-slot note above)
-        if (meta && meta.size === size && meta.mtime === mtime && cacheUsable(remotePath, size) && (() => { try { return fs.statSync(cachePath).size === size; } catch { return false; } })()) return cachePath;
+        const usable = cacheUsable(remotePath, size);   // ONE verdict per poll (the adoption's whole-file scan is not run twice)
+        if (meta && meta.size === size && meta.mtime === mtime && usable && (() => { try { return fs.statSync(cachePath).size === size; } catch { return false; } })()) { stampAdoption(remotePath, size, mtime); return cachePath; }
         fs.mkdirSync(dir, { recursive: true });
         let localSize = 0;
         try { localSize = fs.statSync(cachePath).size; } catch { }
         // append-only delta is legal ONLY when the same, uncompressed remote
         // file grew: a different remote path (or either side compressed) means
         // the cached prefix is not a prefix of what we are fetching
-        const canDelta = cacheUsable(remotePath, size) && !isZstPath(remotePath) && !cacheIsCompressed();
+        const canDelta = usable && !isZstPath(remotePath) && !cacheIsCompressed();
         // the cap guards what we FETCH — with a warm prefix that's just the
         // delta, so a transcript growing past maxBytes keeps incrementing
         // instead of suddenly erroring (a 45MB real session was on track)
         const fetchBytes = (canDelta && localSize > 0 && localSize <= size && meta) ? size - localSize : size;
-        if (fetchBytes > maxBytes) throw new Error(`remote transcript too large (${(fetchBytes / 1048576) | 0}MB)`);
+        if (fetchBytes > maxBytes) throw tooLarge(fetchBytes, usable);
         if (canDelta && localSize > 0 && localSize <= size && meta) {
           // append-only delta — the slab win
           if (size > localSize) {
@@ -1251,8 +1312,9 @@ class HostManager {
     const [sizeMtime, remotePath] = [out.split('\n')[0], out.split('\n')[1]];
     const [size, mtime] = sizeMtime.split(' ').map(Number);
     // same stump-integrity + same-remote-file + cache-bytes checks as the slab path above
-    if (meta && meta.size === size && meta.mtime === mtime && cacheUsable(remotePath, size) && (() => { try { return fs.statSync(cachePath).size === size; } catch { return false; } })()) return cachePath;
-    if (size > maxBytes) throw new Error(`remote transcript too large (${(size / 1048576) | 0}MB)`);
+    const usableSsh = cacheUsable(remotePath, size);
+    if (meta && meta.size === size && meta.mtime === mtime && usableSsh && (() => { try { return fs.statSync(cachePath).size === size; } catch { return false; } })()) { stampAdoption(remotePath, size, mtime); return cachePath; }
+    if (size > maxBytes) throw tooLarge(size, usableSsh);
     const buf = await this._ssh(h, `cat ${JSON.stringify(remotePath)}`, { timeoutMs: 120000, maxBuffer: maxBytes + 1024, encoding: 'buffer' });
     fs.mkdirSync(dir, { recursive: true });
     const tmp = cachePath + '.tmp';

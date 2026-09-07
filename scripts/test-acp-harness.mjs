@@ -234,7 +234,12 @@ console.log('— Stop means stop (the cancel race + the local queue)');
     await sleep(1500); // long enough for a drained queue prompt to reach the agent
     ok('Stop with messages queued behind the turn: the queue is DROPPED — one prompt on the wire, one prompt_start, one cancelled prompt_end', w.mockCalls().filter((c) => c.method === 'session/prompt').length === 1 && w.findAll('prompt_start').length === 1 && w.findAll('prompt_end').length === 1 && w.find('prompt_end').stopReason === 'cancelled', { wire: w.mockCalls().map((c) => c.method), starts: w.findAll('prompt_start').length, ends: w.findAll('prompt_end').map((e) => e.stopReason) });
     const cleared = w.find('notice', (r) => r.noticeKind === 'queue-cleared');
-    ok('…the drop is LOUD and counts what was dropped (never a silent discard)', !!cleared && /dropped 2 queued messages/.test(cleared.text), cleared);
+    ok('…the drop is LOUD and counts what was dropped (never a silent discard)', !!cleared && /dropped 1 queued message —/.test(cleared.text), cleared);
+    // B-7638: the PEER entry dropped alongside it is NOT the user's to re-send.
+    // It goes straight back to the delivery ladder (peer_result ok:false, below)
+    // and arrives again on its own, so counting it here told the user to
+    // re-send a message they never sent and could not reach.
+    ok('…and a dropped PEER message is not counted in the "send it again" hint (it returns via the delivery ladder, the user never sent it)', !/2 queued/.test(cleared?.text || '') && !/queued messages/.test(cleared?.text || ''), cleared);
     const pr = w.findAll('peer_result');
     ok('…a dropped PEER message goes back to the delivery ladder (peer_result ok:false with its text — the consumer re-stashes it)', pr.length === 2 && pr[1].ok === false && pr[1].text === 'ping from B' && pr[1].fromName === 'B' && /Stop/.test(pr[1].reason || ''), pr);
     // THE BUBBLES must say REMOVED, not go blank. The normalizer clears the
@@ -315,6 +320,12 @@ console.log('— the stop-time bookkeeping nudge survives a Stop that drops it f
   const ENV = { VIBESPACE_API: `http://127.0.0.1:${api.address().port}`, VIBESPACE_SESSION_TOKEN: 'vsst_test' };
   const reminders = (w) => w.mockCalls().filter((c) => c.method === 'session/prompt' && JSON.stringify(c.params?.prompt || []).includes('vibespace-reminder'));
   const queued = (w) => w.findAll('queued_input');
+  // The nudge is ours: it rides the queue (kind 'system', so the strip is
+  // honest about what is waiting) but emits NO `queued_input` — that record is
+  // what paints a "Queued" card on a bubble the user sent, and there is no such
+  // bubble here (B-7638; peer messages already queue silentQueue for the same
+  // reason).
+  const nudgeInQueue = (w) => w.findAll('queue_changed').some((r) => (r.items || []).some((i) => i.kind === 'system'));
   // bounded wait that never throws: a regression must read as a FAILED ASSERT
   // (with its counters), not as an exception that kills the rest of the suite.
   const settle = async (pred, ms = 6000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { if (pred()) return true; await sleep(20); } return false; };
@@ -328,12 +339,13 @@ console.log('— the stop-time bookkeeping nudge survives a Stop that drops it f
     await w.waitFor(() => queued(w).length === 1, 3000, 'the user message queued');
     w.send({ type: 'permission-response', requestId: perm.requestId, approved: true, optionId: 'once' });
     await w.waitFor(() => w.find('prompt_end', (r) => r.stopReason === 'end_turn'), 8000, 'turn A end_turn');
-    await w.waitFor(() => queued(w).length === 2, 8000, 'the nudge queued behind the drained turn');
+    await w.waitFor(() => nudgeInQueue(w), 8000, 'the nudge queued behind the drained turn');
   }
   const w = startWrapper({ env: ENV });
   try {
     await nudgeIntoQueue(w);
-    ok('a stop-time nudge whose turn is already taken goes into the LOCAL QUEUE (stop-check answered, nothing on the wire yet)', stopChecks === 1 && reminders(w).length === 0, { stopChecks, prompts: w.mockCalls().filter((c) => c.method === 'session/prompt').length });
+    ok('a stop-time nudge whose turn is already taken goes into the LOCAL QUEUE (stop-check answered, nothing on the wire yet)', stopChecks === 1 && reminders(w).length === 0 && nudgeInQueue(w), { stopChecks, prompts: w.mockCalls().filter((c) => c.method === 'session/prompt').length });
+    ok('…and it queues SILENTLY: one `queued_input` for the ONE message the user queued, none for our bookkeeping nudge (it would paint a "Queued" card with no bubble behind it)', queued(w).length === 1 && queued(w)[0].msg_id === 'n2', queued(w));
     w.send({ type: 'interrupt' });                                               // ← Stop drops the QUEUED nudge
     await w.waitFor(() => w.find('prompt_end', (r) => r.stopReason === 'cancelled'), 8000, 'the running turn ends cancelled');
     await sleep(300);
@@ -358,6 +370,58 @@ console.log('— the stop-time bookkeeping nudge survives a Stop that drops it f
     ok('control: with no Stop the queued nudge RUNS after the turn it waited for, and that turn\'s own end_turn does not queue a second nudge (the latch holds)', ran && stopChecks === 1 && reminders(c).length === 1, { stopChecks, reminders: reminders(c).length, ends: c.findAll('prompt_end').map((e) => e.stopReason) });
     await sleep(600);
     ok('negative control: the nudge turn\'s own end_turn does NOT nudge again — one reminder, one stop-check, no reminder loop', stopChecks === 1 && reminders(c).length === 1 && c.findAll('prompt_end').length === 3, { stopChecks, reminders: reminders(c).length, ends: c.findAll('prompt_end').map((e) => e.stopReason) });
+  } finally { await c.stop(); api.close(); }
+}
+
+console.log('— Stop lands INSIDE the stop-check round trip: no billed nudge turn afterwards');
+{
+  // maybeStopNudge is a round trip: endPrompt fires it on end_turn and the turn
+  // is already over when the answer lands. A Stop inside that window used to
+  // change nothing — the fetch resolved into runPrompt, activePrompt was null,
+  // and the wrapper BILLED a fresh turn the user had just asked to stop (the
+  // only trace: a reminder appearing out of nowhere). The interrupt now records
+  // itself (epoch) and aborts the request in flight; a late answer is discarded.
+  let stopChecks = 0, holdMs = 900;
+  const api = http.createServer((req, res) => {
+    if (String(req.url).startsWith('/api/agent/stop-check')) {
+      stopChecks++;
+      setTimeout(() => { try { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ block: true, reason: 'fs — report your progress with vibespace-task' })); } catch { } }, holdMs);
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ context: '' }));
+  });
+  await new Promise((r) => api.listen(0, '127.0.0.1', r));
+  const ENV = { VIBESPACE_API: `http://127.0.0.1:${api.address().port}`, VIBESPACE_SESSION_TOKEN: 'vsst_test' };
+  const reminders = (w) => w.mockCalls().filter((c) => c.method === 'session/prompt' && JSON.stringify(c.params?.prompt || []).includes('vibespace-reminder'));
+  const wlog = (w) => { try { return fs.readFileSync(path.join(w.dir, 'acp-wrapper.log'), 'utf8'); } catch { return ''; } };
+
+  const w = startWrapper({ env: ENV });
+  try {
+    await w.waitFor(() => w.find('session'), 10000, 'session record');
+    w.send({ type: 'chat-input', text: 'fs check', msgId: 's1' });               // ends end_turn with no permission
+    await w.waitFor(() => w.find('prompt_end', (r) => r.stopReason === 'end_turn'), 8000, 'turn end_turn');
+    await w.waitFor(() => stopChecks === 1, 3000, 'the stop-check round trip is in the air');
+    w.send({ type: 'interrupt' });                                               // ← Stop, mid round trip
+    await sleep(holdMs + 900);                                                   // let the held answer land
+    ok('a Stop inside the stop-check round trip discards its answer — NO nudge turn is dispatched afterwards', reminders(w).length === 0 && w.findAll('prompt_start').length === 1, { reminders: reminders(w).length, starts: w.findAll('prompt_start').length, stopChecks });
+    ok('…and the drop is recorded, not silent (the reason names the race)', /stop nudge dropped: Stop landed while the stop-check was in flight/.test(wlog(w)), wlog(w).split('\n').filter((l) => /stop nudge/.test(l)).join(' | '));
+    ok('…the latch is not stranded either: nothing is queued and no phantom "send it again" notice', !w.find('notice', (r) => r.noticeKind === 'queue-cleared') && !w.findAll('queue_changed').some((r) => (r.items || []).length), w.findAll('queue_changed').map((r) => r.items?.length));
+    // and the session still nudges LATER — the discarded answer is not a latch
+    const later = await (async () => { const t0 = Date.now(); w.send({ type: 'chat-input', text: 'fs again', msgId: 's2' }); while (Date.now() - t0 < 9000) { if (reminders(w).length === 1) return true; await sleep(20); } return false; })();
+    ok('…and the NEXT completed turn nudges normally (the discarded answer left no latch behind)', later && stopChecks === 2, { stopChecks, reminders: reminders(w).length });
+  } finally { await w.stop(); }
+
+  // CONTROL: the very same held round trip, with NO Stop — the reminder DOES go
+  // out. Without this the assert above would also pass on a wrapper whose
+  // delayed stop-check simply never works.
+  stopChecks = 0;
+  const c = startWrapper({ env: ENV });
+  try {
+    await c.waitFor(() => c.find('session'), 10000, 'session record');
+    c.send({ type: 'chat-input', text: 'fs check', msgId: 'c1' });
+    await c.waitFor(() => c.find('prompt_end', (r) => r.stopReason === 'end_turn'), 8000, 'turn end_turn');
+    const got = await (async () => { const t0 = Date.now(); while (Date.now() - t0 < 9000) { if (reminders(c).length === 1) return true; await sleep(20); } return false; })();
+    ok('control: with no Stop the SAME held stop-check produces the reminder (the discard above is the Stop, not the delay)', got && stopChecks === 1, { stopChecks, reminders: reminders(c).length });
   } finally { await c.stop(); api.close(); }
 }
 
