@@ -359,6 +359,7 @@ class CodexMessageManager {
     // falls back to the old system card — a codex session spawned before the
     // queue/steer release must not wear a permanent, dead 'Queued' badge.
     this._queuePublished = false;
+    this._queueVerbs = null;              // the verb list that publication named (null = a pre-verb-table wrapper)
     this.pendingToolCalls = new Map();
     this.toolCallMessageIds = new Map();
     this.pendingApprovals = new Map();
@@ -1139,6 +1140,12 @@ class CodexMessageManager {
    *  signal that pairs with the sidecar's caps.inputQueue advert)? */
   queuePublished() { return !!this._queuePublished; }
 
+  /** WHICH verbs the running wrapper named in its last publication, or null if
+   *  it named none (a build older than the verb table). This is the REMOTE
+   *  advert: the orchestrator cannot read a sidecar that lives on another
+   *  machine, so the in-band list is the only one it will ever see. */
+  queueVerbsPublished() { return this._queueVerbs || null; }
+
   /** Stamp the queue chip on the user bubble a queued message belongs to.
    *  Returns false when there is no such bubble (peer messages carry no
    *  webui_msg_id) — the caller then falls back to a visible system notice, so
@@ -1854,18 +1861,27 @@ class CodexMessageManager {
     const items = Array.isArray(event.items) ? event.items : [];
     this._queue = items;
     this._queuePublished = true;
+    if (Array.isArray(event.verbs)) this._queueVerbs = event.verbs.map((v) => String(v));
     const live = new Set(items.map((it) => String(it.msgId || '')).filter(Boolean));
     for (const it of items) this._stampQueueChip(it.msgId, 'queued', emit);
     // Left the queue with no explicit steer/remove ⇒ it RAN: drop the chip
     // rather than leave a bubble claiming to be queued forever.
     for (const msgId of [...this._queuedMsgIds]) if (!live.has(msgId)) this._stampQueueChip(msgId, null, emit);
-    if (emit) this._emit({ op: 'meta', subtype: 'queue', items, supported: true });
+    if (emit) this._emit({ op: 'meta', subtype: 'queue', items, supported: true, verbs: this._queueVerbs || null });
   }
 
-  /** The outcome of one queue op. Success = a chip transition; failure = a
-   *  VISIBLE notice naming the reason (no silent failures). */
+  /** The outcome of one queue op. Success = a chip transition (for the two
+   *  verbs that CHANGE what a bubble means); failure = a VISIBLE notice naming
+   *  the reason (no silent failures). Either way the result is ALSO delivered
+   *  as a `meta` op so the queue strip can end the row's pending state — a
+   *  control that spins forever is the silent failure wearing a spinner. */
   _processQueueOpResult(event, emit) {
     const op = event.op, ok = event.ok !== false;
+    const text = ok ? '' : CodexMessageManager.queueOpFailureText(event);
+    // A BATCH verb (steer-all / run-all) answers with NO id — emit it anyway,
+    // with an empty id, so the client can end the pending state of the rows it
+    // marked. A result nobody can join to a row is a spinner that never stops.
+    if (emit) this._emit({ op: 'meta', subtype: 'queue-result', queueOp: op, id: String(event.id || ''), ok, reason: event.reason || null, text: text || null });
     if (ok && (op === 'steer' || op === 'remove')) {
       const state = op === 'steer' ? 'steered' : 'removed';
       this._stampQueueChip(event.msg_id || event.msgId, state, emit);
@@ -1875,8 +1891,10 @@ class CodexMessageManager {
       }
       return;
     }
-    if (ok) return;   // steer-all's own ok:true summary needs no card
-    const text = CodexMessageManager.queueOpFailureText(event);
+    // reorder / edit / run-now / run-all leave the bubble's MEANING untouched
+    // (it is still a queued message of yours) — the strip republished right
+    // after them is the visible confirmation, deliberately card-less.
+    if (ok) return;   // …as is steer-all's own ok:true summary
     if (!text) return;
     const msg = this._create({ role: 'system', status: 'complete', content: [{ type: 'system_info', text }], noticeKind: 'notice' });
     if (emit) this._emit({ op: 'create', message: msg });
@@ -1887,7 +1905,11 @@ class CodexMessageManager {
    *  point of the turn-ended case. */
   static queueOpFailureText(event) {
     const op = event.op === 'steer-all' ? 'steer-all' : event.op;
-    const what = op === 'remove' ? 'remove' : 'steer';
+    const what = op === 'remove' ? 'remove'
+      : op === 'reorder' ? 'move'
+        : op === 'edit' ? 'edit'
+          : (op === 'run-now' || op === 'run-all') ? 'start'
+            : 'steer';
     switch (event.reason) {
       case 'not-steerable':
         return `Cannot steer during a ${event.kind || 'review'} turn — the message stays queued and runs when this turn ends.`;
@@ -1895,9 +1917,29 @@ class CodexMessageManager {
       case 'no-active-turn':
         return 'The turn ended before the message could be steered — it stays queued and will simply run next.';
       case 'gone':
-        return what === 'remove' ? 'That message is no longer queued — it already ran.' : 'That message is no longer queued — it already ran.';
+        return 'That message is no longer queued — it already ran.';
       case 'no-thread':
         return 'The session has no thread yet — the queue is not available.';
+      // …the verb-table reasons (2026-09-07). Each says what is true NOW.
+      case 'busy':
+        return op === 'run-all'
+          ? 'A turn is already running — the queued messages run as soon as it ends.'
+          : 'A turn is already running — that message runs as soon as it ends.';
+      case 'not-editable':
+        return 'That message was sent by another agent — you can remove it, but not rewrite it.';
+      case 'anchor-gone':
+        return 'The message it was dropped after is no longer queued — nothing was moved.';
+      case 'stale-order':
+        // The app-server rejects an order that is not the WHOLE queue (measured
+        // 0.153.4: "must include every queued submission exactly once"), which
+        // is what a queue changing under the move looks like from here.
+        return 'The queue changed while that move was in flight — nothing was moved. Try again.';
+      case 'incomplete':
+        return `The queue could not be read to the end, so nothing was changed${event.detail ? ` (${event.detail})` : ''}.`;
+      case 'empty':
+        return 'Nothing is queued.';
+      case 'empty-text':
+        return 'An edited message needs some text — remove it instead.';
       case 'unknown-op':
         return `Unsupported queue action "${event.op}".`;
       default:

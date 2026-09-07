@@ -26,12 +26,21 @@ BackendAdapter.prototype.formatSetPermissionMode = function(mode) { throw new Er
 BackendAdapter.prototype.formatSetModel = function(model) { throw new Error('not implemented'); };
 BackendAdapter.prototype.formatSetEffort = function(effort) { throw new Error('not implemented'); };
 /**
- * QUEUE OPERATION → the wrapper stdin frame ({op:'steer'|'remove'|'steer-all', id}).
- * The harness's `inputModes` caps row (src/backend-caps.js) decides whether the
- * op is offered at all — ws-handler validates against it BEFORE calling this,
- * with a coded error the user can read. This throw is the second line of
- * defense: an adapter whose harness denies the op must REFUSE it with a reason,
- * never format a frame its wrapper would silently drop.
+ * QUEUE OPERATION → the wrapper stdin frame. The ws layer speaks RELATIVE,
+ * user-intent semantics and every adapter formats that same vocabulary:
+ *   {op:'remove'|'steer'|'run-now', id}
+ *   {op:'steer-all'|'run-all'}                 (no id — and run-all is its OWN
+ *                                               verb, never run-now minus its id)
+ *   {op:'reorder', id, afterId}                (afterId null = to the front)
+ *   {op:'edit',    id, text}
+ * The absolute RPC shapes (a full-order id array, a whole `input` array) are
+ * synthesised in the WRAPPER, which is the only layer that can re-read the
+ * live queue first — see src/backend-caps.js `queueVerbs`.
+ * The harness's `inputModes.queueVerbs` row decides whether the op is offered
+ * at all — ws-handler validates against it BEFORE calling this, with a coded
+ * error the user can read. This throw is the second line of defense: an
+ * adapter whose harness denies the op must REFUSE it with a reason, never
+ * format a frame its wrapper would silently drop.
  */
 BackendAdapter.prototype.formatQueueOp = function(op) { throw new Error('this backend has no input-queue operations'); };
 /**

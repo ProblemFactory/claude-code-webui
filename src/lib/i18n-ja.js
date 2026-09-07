@@ -3040,4 +3040,12 @@ export default {
   "{name} background service is running": "{name} バックグラウンドサービスが稼働中",
   "{name} keeps its conversations in its own database rather than in files, so VibeSpace cannot read a STOPPED conversation without asking {name} itself.": "{name} は会話をファイルではなく独自のデータベースに保存するため、{name} 自身に問い合わせない限り VibeSpace は停止した会話を読めません。",
   "{pct}% CPU": "{pct}% CPU",
+  "Run all now": "すべて今すぐ実行",
+  "Run the whole queue now, without waiting for the current turn": "現在のターンを待たずにキュー全体を今すぐ実行します",
+  "Run this one now": "これを今すぐ実行",
+  "Edit this queued message": "このキュー内メッセージを編集",
+  "Cancel editing": "編集をキャンセル",
+  "Editing a queued message — send to save, Esc to cancel": "キュー内メッセージを編集中 —— 送信で保存、Esc でキャンセル",
+  "Drag to reorder (Alt+Up / Alt+Down)": "ドラッグで並べ替え（Alt+↑ / Alt+↓）",
+  "Attachments cannot be added while editing a queued message — cancel the edit first.": "キュー内メッセージの編集中は添付を追加できません —— 先に編集をキャンセルしてください。",
 };

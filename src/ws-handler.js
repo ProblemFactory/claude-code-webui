@@ -10,7 +10,30 @@ const { listCodexThreads } = require('./codex-session-store');
 const { findCodexSessionJsonlPath, extractCodexThreadMeta } = require('./adapters/codex');
 const { cwdToProjectDir, findSessionJsonlPath } = require('./session-store');
 const { get: harnessOf } = require('./harnesses'); // S3: store.warmTranscript per harness (claude parse-cache warm / codex thread/read fallback)
-const { capsOf } = require('./backend-caps');      // inputModes gate for the 'queue-op' case (never a backend-id branch)
+const { capsOf } = require('./backend-caps');      // inputModes.queueVerbs gate for the 'queue-op' case (never a backend-id branch)
+
+/** The sentence a harness-level verb refusal carries. Every branch says what
+ *  happens to the message ANYWAY — a refusal that only says "no" leaves the
+ *  user wondering whether their message is lost (the no-silent-failures rule
+ *  applies to the WORDING too). English here like every other server notice;
+ *  the client renders the sentence as it arrives. */
+function queueVerbRefusal(op, label) {
+  switch (op) {
+    case 'steer':
+    case 'steer-all':
+      return `${label} cannot steer: a message sent during a turn runs after it. You can remove it instead.`;
+    case 'reorder':
+      return `${label} cannot reorder its queue — queued messages run in the order they were sent.`;
+    case 'edit':
+      return `${label} cannot edit a queued message — remove it and send a new one.`;
+    case 'run-now':
+      return `${label} cannot start a queued message early — it runs when the current turn ends.`;
+    case 'run-all':
+      return `${label} cannot run its queue early — the messages run when the current turn ends.`;
+    default:
+      return `${label} has no queue action "${op}".`;
+  }
+}
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -163,7 +186,7 @@ function pickCodexThreadCandidate({ activeSessions, webuiSessionId, cwd, created
 // on the STREAM (2.241.1 rule: pipe errors arrive as stream 'error' events).
 const { REMOTE_PRELUDE, nodeFinder, buildRemoteExec } = require('./remote-shell.js');
 const { sweepWriters } = require('./writer-sweep.js');
-const { wrapperCaps } = require('./server/wrapper-files.js');
+const { wrapperCaps, LEGACY_QUEUE_VERBS } = require('./server/wrapper-files.js');
 
 function execFileAsync(cmd, args, { input, timeout = 20000, maxBuffer = 8 * 1024 * 1024, encoding = 'buffer' } = {}) {
   return new Promise((resolve, reject) => {
@@ -586,49 +609,75 @@ function registerWsHandler(wss, ctx) {
           break;
         }
 
-        // QUEUE OPS on a message the user sent mid-turn (steer / remove /
-        // steer-all). TWO gates, both required:
-        //   ① the HARNESS's `inputModes` caps row (backend-caps — never a
-        //      backend id), i.e. what this kind of agent can do at all;
-        //   ② the RUNNING WRAPPER's own advert (`caps.inputQueue` in the
-        //      sidecar IT writes, read through wrapperCaps). A codex session
-        //      spawned before this release wears ① and would answer ② with
-        //      nothing: its wrapper drops the unknown stdin verb SILENTLY —
-        //      the 2.361.1/2.364.1 skew class, where a static capability was
-        //      trusted for a long-lived process. Never cache a negative
-        //      verdict (a wrapper resuming a huge thread writes its sidecar
-        //      late) — this is a rare user action, so read it each time.
-        // The reply is a CODED, `scope:'action'` error: the client renders it
-        // in-chat and leaves the live window alone (the inc-mt2arppw rule).
+        // QUEUE OPS on a message the user sent mid-turn (remove / steer /
+        // steer-all / reorder / edit / run-now / run-all). TWO gates, both
+        // required:
+        //   ① the HARNESS's verb table (`inputModes.queueVerbs` in
+        //      backend-caps — never a backend id), i.e. what this KIND of
+        //      agent can do at all;
+        //   ② the RUNNING WRAPPER's own advert (`caps.queueVerbs` in the
+        //      sidecar IT writes, read through wrapperCaps; a remote wrapper's
+        //      sidecar lives on ITS machine, so the in-band verb list its
+        //      queue publication carries is the fallback). A codex session
+        //      spawned before this release wears ① and would answer ② with the
+        //      three legacy verbs: its wrapper drops an unknown stdin verb
+        //      SILENTLY — the 2.361.1/2.364.1 skew class, where a static
+        //      capability was trusted for a long-lived process. Never cache a
+        //      negative verdict (a wrapper resuming a huge thread writes its
+        //      sidecar late) — this is a rare user action, so read it each time.
+        // The reply is a CODED, `scope:'action'` error carrying a machine
+        // `reason` as well as the sentence: the client renders it in-chat and
+        // leaves the live window alone (the inc-mt2arppw rule).
         case 'queue-op': {
           const session = activeSessions.get(data.sessionId);
-          const refuse = (message) => { try { ws.send(JSON.stringify({ type: 'error', code: 'queue-op-unsupported', scope: 'action', sessionId: data.sessionId, error: message, message })); } catch { } };
-          if (!session?.pty || session.mode !== 'chat') { refuse('This action needs a live chat session.'); break; }
+          const refuse = (message, reason) => { try { ws.send(JSON.stringify({ type: 'error', code: 'queue-op-unsupported', reason: reason || 'unsupported', scope: 'action', sessionId: data.sessionId, error: message, message })); } catch { } };
+          if (!session?.pty || session.mode !== 'chat') { refuse('This action needs a live chat session.', 'not-live'); break; }
           const adapter = adapterRegistry.get(session.backend);
-          if (!adapter) { refuse(`No adapter for backend "${session.backend}".`); break; }
+          if (!adapter) { refuse(`No adapter for backend "${session.backend}".`, 'no-adapter'); break; }
           const modes = capsOf(session.backend).inputModes || {};
+          const harnessVerbs = modes.queueVerbs || [];
           // harnessOf THROWS on an unknown id by design — the label is chrome,
           // so it degrades to the id rather than taking the socket down.
           let label = session.backend;
           try { label = harnessOf(session.backend).label || label; } catch { }
-          if (!modes.queueOps) { refuse(`${label} owns its own input queue — VibeSpace cannot list or change it.`); break; }
-          if ((data.op === 'steer' || data.op === 'steer-all') && !modes.steer) { refuse(`${label} cannot steer: a message sent during a turn runs after it. You can remove it instead.`); break; }
+          if (!harnessVerbs.length) { refuse(`${label} owns its own input queue — VibeSpace cannot list or change it.`, 'no-queue-ops'); break; }
+          if (!harnessVerbs.includes(data.op)) { refuse(queueVerbRefusal(data.op, label), 'verb-unsupported'); break; }
           // Sidecar advert OR the in-band proof: a REMOTE wrapper writes its
           // sidecar on ITS OWN machine, so `no-sidecar` there means "not local",
           // not "old" — but a wrapper that has actually published a queue on
-          // this stream demonstrably serves the verb.
+          // this stream demonstrably serves the verbs it named in that
+          // publication (and the legacy three if it named none).
           const wcaps = wrapperCaps(BUFFERS_DIR, data.sessionId, session.socketPath);
-          if (!wcaps.inputQueue && !session._normalizer?.queuePublished?.()) {
+          const inBand = session._normalizer?.queueVerbsPublished?.();
+          const served = wcaps.inputQueue ? wcaps.queueVerbs
+            : (Array.isArray(inBand) ? inBand
+              : (session._normalizer?.queuePublished?.() ? LEGACY_QUEUE_VERBS.slice() : null));
+          if (!served) {
             const started = wcaps.startedAt ? new Date(wcaps.startedAt).toISOString().replace('T', ' ').slice(0, 16) + ' UTC' : 'unknown time';
             refuse(wcaps.reason === 'no-sidecar'
               ? 'This session\'s agent has not reported its capabilities yet (still starting up?) — try again in a moment.'
-              : `This session's agent (started ${started}) predates the input-queue update, so it cannot act on its queue: the message runs when the current turn ends. Terminate + Resume the session to get the controls.`);
+              : `This session's agent (started ${started}) predates the input-queue update, so it cannot act on its queue: the message runs when the current turn ends. Terminate + Resume the session to get the controls.`, 'wrapper-no-queue');
             console.log(`[${data.sessionId}] queue-op ${data.op} REFUSED: wrapper caps ${wcaps.reason} (pid ${wcaps.pid}, started ${wcaps.startedAt})`);
             break;
           }
+          if (!served.includes(data.op)) {
+            refuse(`This session's agent is an older build that does not serve "${data.op}" — it serves ${served.join(', ')}. Terminate + Resume the session to get the newer controls.`, 'wrapper-verb-skew');
+            console.log(`[${data.sessionId}] queue-op ${data.op} REFUSED: running wrapper serves [${served.join(',')}]`);
+            break;
+          }
           let payload;
-          try { payload = adapter.formatQueueOp({ op: data.op, id: data.id || null }); }
-          catch (e) { refuse(e.message); break; }
+          try {
+            payload = adapter.formatQueueOp({
+              op: data.op,
+              id: data.id || null,
+              // `afterId: null` MEANS the front of the queue — carry the key
+              // only when the client actually sent one, so the adapter can
+              // tell "front" from "no anchor" and refuse the latter.
+              ...('afterId' in data ? { afterId: data.afterId === null ? null : String(data.afterId || '') } : {}),
+              ...('text' in data ? { text: typeof data.text === 'string' ? data.text : '' } : {}),
+            });
+          }
+          catch (e) { refuse(e.message, 'malformed'); break; }
           session.pty.write(payload + '\n');
           break;
         }
@@ -1024,7 +1073,17 @@ function registerWsHandler(wss, ctx) {
                 // gate on this AS WELL AS the harness caps row: a session
                 // spawned before the queue/steer release would otherwise wear
                 // controls whose frames its wrapper drops (2.361.1/2.364.1).
-                queueSupported: wcapsAttach.inputQueue || !!session._normalizer?.queuePublished?.(),
+                // …and WHICH verbs that wrapper serves, so the client renders
+                // exactly the controls this process can honour (an older
+                // wrapper gets the legacy three, never a dead reorder handle).
+                ...(() => {
+                  const wc = wcapsAttach; // the ONE sidecar read above (2.369.16 law)
+                  const inBand = session._normalizer?.queueVerbsPublished?.();
+                  const served = wc.inputQueue ? wc.queueVerbs
+                    : (Array.isArray(inBand) ? inBand
+                      : (session._normalizer?.queuePublished?.() ? LEGACY_QUEUE_VERBS.slice() : null));
+                  return { queueSupported: !!served, queueVerbs: served || [] };
+                })(),
                 // …and whether that same running wrapper serves the LIVE style
                 // verb. The client needs BOTH facts (2.369.58): with only the
                 // harness caps row, a session spawned before the live-switch

@@ -50,19 +50,27 @@ console.log('— ① the capability row (backend-caps ⇄ client META)');
   const { BACKEND_CAPS, capsOf } = require(path.join(REPO, 'src/backend-caps.js'));
   const { BACKEND_META } = await import(path.join(REPO, 'src/lib/agent-meta.js'));
   const { chatHarnessIds, HARNESSES } = require(path.join(REPO, 'src/harnesses/index.js'));
+  const { QUEUE_VERBS, deriveInputModes } = require(path.join(REPO, 'src/backend-caps.js'));
+  const shape = (queue, verbs) => JSON.stringify({ queue, steer: verbs.includes('steer'), queueOps: verbs.length > 0, queueVerbs: verbs });
   for (const id of Object.keys(BACKEND_CAPS)) {
     const m = BACKEND_CAPS[id].inputModes;
-    ok(`${id}: declares inputModes {queue, steer, queueOps} as booleans`, m && ['queue', 'steer', 'queueOps'].every((k) => typeof m[k] === 'boolean'), m);
+    ok(`${id}: declares a queueVerbs TABLE ⊆ the closed set (a typo'd verb is not a capability)`, Array.isArray(m?.queueVerbs) && m.queueVerbs.every((v) => QUEUE_VERBS.includes(v)), m);
+    // THE DERIVATION LAW: the booleans are a VIEW of the table, never a second
+    // place to edit — a row whose steer disagrees with its list is the exact
+    // two-sources-of-truth bug the table replaced.
+    ok(`${id}: steer === queueVerbs.includes('steer') (derived, not declared)`, m.steer === m.queueVerbs.includes('steer'), m);
+    ok(`${id}: queueOps === (queueVerbs.length > 0)`, m.queueOps === (m.queueVerbs.length > 0), m);
     // A harness that can steer must also be able to queue and to enumerate:
     // steering means "take THIS queued item and inject it", which needs both.
     ok(`${id}: steer ⇒ queue + queueOps (a steer names a queued item)`, !m.steer || (m.queue && m.queueOps), m);
     ok(`${id}: queueOps ⇒ queue (nothing to operate on otherwise)`, !m.queueOps || m.queue, m);
   }
-  ok('codex is the QUEUE+STEER harness (thread/queue/{add,list,delete} + turn/steer, all measured on 0.153.4)', JSON.stringify(capsOf('codex').inputModes) === JSON.stringify({ queue: true, steer: true, queueOps: true }));
-  ok('opencode (ACP v1) queues + removes but cannot steer (no such method in the protocol)', JSON.stringify(capsOf('opencode').inputModes) === JSON.stringify({ queue: true, steer: false, queueOps: true }));
-  ok("claude queues (the CLI's own stdin queue) but publishes NO queue state ⇒ no ops offered", JSON.stringify(capsOf('claude').inputModes) === JSON.stringify({ queue: true, steer: false, queueOps: false }));
-  ok('shell (terminal-only) has no input queue at all', JSON.stringify(capsOf('shell').inputModes) === JSON.stringify({ queue: false, steer: false, queueOps: false }));
-  ok('an unknown backend gets the all-false NO_CAPS row (never codex\'s by accident)', JSON.stringify(capsOf('gemini').inputModes) === JSON.stringify({ queue: false, steer: false, queueOps: false }));
+  ok('deriveInputModes IS the law (the same function the client mirror uses), and it drops a verb outside the closed set', JSON.stringify(deriveInputModes({ queue: true, queueVerbs: ['steer', 'teleport'] })) === shape(true, ['steer']));
+  ok('codex serves ALL SEVEN verbs (add/list/delete/update/reorder/start + turn/steer, every shape dumped from the 0.153.4 schema)', JSON.stringify(capsOf('codex').inputModes) === shape(true, ['remove', 'steer', 'steer-all', 'reorder', 'edit', 'run-now', 'run-all']), capsOf('codex').inputModes);
+  ok('opencode (ACP v1) removes/reorders/edits its own local queue but cannot steer, and cannot start one early (that queue only exists while a prompt runs)', JSON.stringify(capsOf('opencode').inputModes) === shape(true, ['remove', 'reorder', 'edit']), capsOf('opencode').inputModes);
+  ok("claude queues (the CLI's own stdin queue) but publishes NO queue state ⇒ an HONEST EMPTY verb table", JSON.stringify(capsOf('claude').inputModes) === shape(true, []));
+  ok('shell (terminal-only) has no input queue at all', JSON.stringify(capsOf('shell').inputModes) === shape(false, []));
+  ok('an unknown backend gets the all-false NO_CAPS row (never codex\'s by accident)', JSON.stringify(capsOf('gemini').inputModes) === shape(false, []));
   // the client gates its chrome on META; a drifted copy would offer a control
   // the server refuses (or hide one it would honour) — the S7 twin rule
   for (const id of Object.keys(BACKEND_META)) {
@@ -83,12 +91,44 @@ console.log('— ② the adapter verb (formatQueueOp)');
   ok('base.js DECLARES formatQueueOp (a harness that never implements it refuses, it does not crash on a missing method)', typeof BackendAdapter.prototype.formatQueueOp === 'function');
   const reg = createAdapterRegistry({ claudeCmd: 'claude', codexCmd: 'codex', codexSandboxSupported: true, chatWrapper: '/w/chat', codexChatWrapper: '/w/codex', acpWrapper: '/w/acp', acpCommands: { opencode: '/usr/bin/opencode' }, ptyWrapper: '/w/pty', buffersDir: '/b' });
   const threw = (fn) => { try { fn(); return null; } catch (e) { return e.message; } };
+  const acpAdapter = () => reg.get('opencode');
   const cx = reg.get('codex');
   ok('codex steer → the queue-op frame with the item id', JSON.parse(cx.formatQueueOp({ op: 'steer', id: 'q1' })).type === 'queue-op' && JSON.parse(cx.formatQueueOp({ op: 'steer', id: 'q1' })).op === 'steer' && JSON.parse(cx.formatQueueOp({ op: 'steer', id: 'q1' })).id === 'q1');
   ok('codex remove → the same frame shape', JSON.parse(cx.formatQueueOp({ op: 'remove', id: 'q2' })).op === 'remove');
   ok('codex steer-all needs no id', JSON.parse(cx.formatQueueOp({ op: 'steer-all' })).op === 'steer-all');
   ok('codex: an id-requiring op without an id is REFUSED (never a frame the wrapper would answer with "gone")', /needs an item id/.test(threw(() => cx.formatQueueOp({ op: 'steer' })) || ''));
-  ok('codex: an unknown op is refused by name', /unknown queue op "reorder"/.test(threw(() => cx.formatQueueOp({ op: 'reorder', id: 'q' })) || ''));
+  ok('codex: an unknown op is refused by name', /unknown queue op "teleport"/.test(threw(() => cx.formatQueueOp({ op: 'teleport', id: 'q' })) || ''));
+  // THE VERB TABLE IS A PROMISE: every verb a harness DECLARES must have a
+  // construction branch here, and every verb it does NOT declare must be
+  // refused. "Declared but unbuildable" is the 2.361.4 accept-and-ignore
+  // failure made structurally impossible.
+  {
+    const { QUEUE_VERBS, capsOf } = require(path.join(REPO, 'src/backend-caps.js'));
+    const args = { remove: { id: 'q1' }, steer: { id: 'q1' }, 'steer-all': {}, reorder: { id: 'q1', afterId: 'q2' }, edit: { id: 'q1', text: 'hi' }, 'run-now': { id: 'q1' }, 'run-all': {} };
+    for (const [backend, id] of [['codex', 'codex'], ['opencode', 'opencode'], ['claude', 'claude']]) {
+      const declared = capsOf(id).inputModes.queueVerbs;
+      const a = reg.get(backend);
+      for (const verb of QUEUE_VERBS) {
+        const out = (() => { try { return JSON.parse(a.formatQueueOp({ op: verb, ...args[verb] })); } catch (e) { return { _throw: e.message }; } })();
+        if (declared.includes(verb)) ok(`${id}: declares '${verb}' AND builds its frame`, out.type === 'queue-op' && out.op === (verb === 'remove' ? 'remove' : verb), out);
+        else ok(`${id}: does not declare '${verb}' ⇒ the adapter REFUSES it with a reason`, typeof out._throw === 'string' && out._throw.length > 20, out);
+      }
+    }
+  }
+  // the relative vocabulary (§2.1 decision 1): the ws layer never speaks the
+  // app-server's absolute shapes
+  ok('codex reorder carries the RELATIVE anchor', (() => { const f = JSON.parse(cx.formatQueueOp({ op: 'reorder', id: 'q1', afterId: 'q2' })); return f.op === 'reorder' && f.id === 'q1' && f.afterId === 'q2'; })());
+  ok('…and afterId null MEANS the front of the queue (a position, carried as such)', JSON.parse(cx.formatQueueOp({ op: 'reorder', id: 'q1', afterId: null })).afterId === null);
+  ok('…while a MISSING anchor is refused (the wrapper cannot guess where it goes)', /needs an anchor/.test(threw(() => cx.formatQueueOp({ op: 'reorder', id: 'q1' })) || ''));
+  ok('…and an item cannot be anchored to itself', /anchor an item to itself/.test(threw(() => cx.formatQueueOp({ op: 'reorder', id: 'q1', afterId: 'q1' })) || ''));
+  ok('codex edit carries the new TEXT only (the wrapper rebuilds the whole input)', (() => { const f = JSON.parse(cx.formatQueueOp({ op: 'edit', id: 'q1', text: 'new words' })); return f.op === 'edit' && f.id === 'q1' && f.text === 'new words' && !('input' in f); })());
+  ok('…and an empty edit is refused here (never a frame that would blank a queued message)', /needs the new message text/.test(threw(() => cx.formatQueueOp({ op: 'edit', id: 'q1', text: '   ' })) || ''));
+  // THE ONE THAT MUST NOT DEGRADE: thread/queue/start with no id DRAINS the
+  // whole queue, so a lost id has to be an error, never a silent run-all.
+  ok('RUN-NOW WITHOUT AN ID THROWS (a lost id must never become a drain)', /needs an item id/.test(threw(() => cx.formatQueueOp({ op: 'run-now' })) || ''), threw(() => cx.formatQueueOp({ op: 'run-now' })));
+  ok('…and run-all is its OWN verb, a different frame (never run-now minus its id)', JSON.parse(cx.formatQueueOp({ op: 'run-all' })).op === 'run-all' && JSON.parse(cx.formatQueueOp({ op: 'run-all' })).id === null);
+  ok('opencode reorder/edit build frames in the SAME relative vocabulary', JSON.parse(acpAdapter().formatQueueOp({ op: 'reorder', id: 'p1', afterId: null })).afterId === null && JSON.parse(acpAdapter().formatQueueOp({ op: 'edit', id: 'p1', text: 'x' })).text === 'x');
+  ok('opencode REFUSES run-now/run-all with the structural reason (its queue only exists while a prompt runs)', /one prompt at a time/.test(threw(() => acpAdapter().formatQueueOp({ op: 'run-now', id: 'p1' })) || ''), threw(() => acpAdapter().formatQueueOp({ op: 'run-now', id: 'p1' })));
   const acp = reg.get('opencode');
   ok('opencode remove → a frame', JSON.parse(acp.formatQueueOp({ op: 'remove', id: 'q1' })).op === 'remove');
   {
@@ -109,19 +149,46 @@ console.log('— ③ the ws case gates on the caps row AND the running wrapper')
   ok("ws-handler has ONE 'queue-op' case", !!m);
   const body = m ? m[1] : '';
   ok('it reads inputModes from backend-caps — no backend-id branch anywhere in the case', /capsOf\(session\.backend\)\.inputModes/.test(body) && !/=== 'codex'|=== 'claude'|=== 'opencode'/.test(body), body.slice(0, 400));
-  ok('queueOps false ⇒ refuse; steer with steer:false ⇒ refuse', /if \(!modes\.queueOps\)/.test(body) && /!modes\.steer/.test(body));
+  ok('the gate is the VERB TABLE, not a pair of booleans: no verbs ⇒ refuse, an undeclared verb ⇒ refuse WITH ITS OWN SENTENCE', /if \(!harnessVerbs\.length\)/.test(body) && /if \(!harnessVerbs\.includes\(data\.op\)\) \{ refuse\(queueVerbRefusal\(data\.op, label\)/.test(body), body.slice(0, 400));
+  {
+    // …and that sentence says what happens to the message ANYWAY (a refusal
+    // that only says "no" leaves the user wondering if it is lost).
+    const fn = /function queueVerbRefusal\(op, label\) \{[\s\S]*?\n\}/.exec(src)?.[0] || '';
+    const refusal = new Function('op', 'label', fn + '; return queueVerbRefusal(op, label);');
+    for (const [verb, must] of [['steer', /runs after it/], ['reorder', /order they were sent/], ['edit', /remove it and send a new one/], ['run-now', /runs when the current turn ends/], ['run-all', /run when the current turn ends/]]) {
+      ok(`ws refusal for '${verb}' names the harness AND what happens to the message`, /Claude/.test(refusal(verb, 'Claude')) && must.test(refusal(verb, 'Claude')), refusal(verb, 'Claude'));
+    }
+    ok('every refusal carries a machine `reason` beside the sentence (the client can branch, the user can read)', /refuse = \(message, reason\)/.test(body) && /reason: reason \|\| 'unsupported'/.test(body));
+  }
   ok("every refusal is CODED 'queue-op-unsupported' with a human reason (never silent, never a bare session error)", /code: 'queue-op-unsupported'/.test(body) && /error: message, message/.test(body) && !/ws\.send\(JSON\.stringify\(\{ type: 'error', sessionId: data\.sessionId \}\)\)/.test(body));
-  ok('the adapter throw is the second line of defense (formatQueueOp inside a try that refuses with e.message)', /try \{ payload = adapter\.formatQueueOp\(/.test(body) && /catch \(e\) \{ refuse\(e\.message\); break; \}/.test(body));
+  ok('the adapter throw is the second line of defense (formatQueueOp inside a try that refuses with e.message)', /payload = adapter\.formatQueueOp\(\{/.test(body) && /catch \(e\) \{ refuse\(e\.message, 'malformed'\); break; \}/.test(body));
+  ok("…and `afterId: null` reaches the adapter as a POSITION: the key is spread only when the client sent one (absent ≠ front)", /\.\.\.\('afterId' in data \? \{ afterId: data\.afterId === null \? null : String\(data\.afterId \|\| ''\) \} : \{\}\)/.test(body), body.slice(-1200));
   ok('the frame goes to the wrapper on stdin, like every other verb', /session\.pty\.write\(payload \+ '\\n'\)/.test(body));
   // GATE ②, THE WRAPPER SKEW (round-1 review): the caps row describes a KIND
   // of agent; a LONG-LIVED PROCESS is a different question. A codex session
   // spawned before this release satisfies the row and drops the frame
   // silently — the 2.361.1/2.364.1 class, twice shipped.
-  ok("…and ALSO on the RUNNING wrapper's own advert (wrapperCaps.inputQueue), not just the static row", /wrapperCaps\(BUFFERS_DIR, data\.sessionId, session\.socketPath\)/.test(body) && /if \(!wcaps\.inputQueue && !session\._normalizer\?\.queuePublished\?\.\(\)\)/.test(body), body.slice(-900));
+  ok("…and ALSO on the RUNNING wrapper's own advert (its sidecar verb list, or the in-band one for a remote wrapper), not just the static row", /wrapperCaps\(BUFFERS_DIR, data\.sessionId, session\.socketPath\)/.test(body) && /const served = wcaps\.inputQueue \? wcaps\.queueVerbs/.test(body) && /if \(!served\) \{/.test(body), body.slice(-1400));
+  ok('…and a wrapper that serves SOME verbs is refused only the ones it does not serve, naming what it does serve (skew, not a dead session)', /if \(!served\.includes\(data\.op\)\) \{[\s\S]{0,300}it serves \$\{served\.join\(', '\)\}/.test(body), body.slice(-1400));
   ok('…whose refusal says what happens to the message AND how to get the controls', /predates the input-queue update/.test(body) && /Terminate \+ Resume/.test(body) && /still starting up/.test(body));
   ok('the negative verdict is never cached on the session (a wrapper writing its sidecar late must not be locked out)', !/_wrapperInputQueue/.test(src));
-  ok('…and a REMOTE wrapper (its sidecar lives on ITS machine) is not mistaken for an old one — a published queue is proof enough', /!wcaps\.inputQueue && !session\._normalizer\?\.queuePublished\?\.\(\)/.test(body) && /queuePublished\?\.\(\)/.test(read('src/ws-handler.js')));
-  ok('wrapperCaps reads inputQueue from the sidecar the WRAPPER itself writes', /inputQueue: !!\(caps && caps\.inputQueue\)/.test(read('src/server/wrapper-files.js')));
+  ok('…and a REMOTE wrapper (its sidecar lives on ITS machine) is not mistaken for an old one — its in-band verb list, or a bare published queue, is proof enough', /session\._normalizer\?\.queueVerbsPublished\?\.\(\)/.test(body) && /queuePublished\?\.\(\) \? LEGACY_QUEUE_VERBS\.slice\(\) : null/.test(body));
+  {
+    // A pre-verb-table wrapper adverts `inputQueue` and NO list — it serves
+    // exactly the three verbs that existed then, and must keep serving them.
+    const wf = read('src/server/wrapper-files.js');
+    ok('wrapperCaps maps a verb-LESS inputQueue advert to the legacy three (never to the current seven)', /const LEGACY_QUEUE_VERBS = Object\.freeze\(\['remove', 'steer', 'steer-all'\]\)/.test(wf) && /Array\.isArray\(caps && caps\.queueVerbs\)[\s\S]{0,160}inputQueue \? LEGACY_QUEUE_VERBS\.slice\(\) : \[\]/.test(wf), wf.slice(-800));
+    const { wrapperCaps } = require(path.join(REPO, 'src/server/wrapper-files.js'));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-qcaps-'));
+    fs.writeFileSync(path.join(dir, 'sess-old.json'), JSON.stringify({ caps: { inputQueue: true } }));
+    fs.writeFileSync(path.join(dir, 'sess-new.json'), JSON.stringify({ caps: { inputQueue: true, queueVerbs: ['remove', 'reorder'] } }));
+    fs.writeFileSync(path.join(dir, 'sess-none.json'), JSON.stringify({ caps: { frameFile: true } }));
+    ok('…proven against a REAL sidecar file: old build ⇒ the legacy three', JSON.stringify(wrapperCaps(dir, 'sess-old', '/x').queueVerbs) === JSON.stringify(['remove', 'steer', 'steer-all']));
+    ok('…a build that NAMES its verbs ⇒ exactly those', JSON.stringify(wrapperCaps(dir, 'sess-new', '/x').queueVerbs) === JSON.stringify(['remove', 'reorder']));
+    ok('…and a wrapper with no queue at all ⇒ none', JSON.stringify(wrapperCaps(dir, 'sess-none', '/x').queueVerbs) === '[]' && wrapperCaps(dir, 'sess-none', '/x').inputQueue === false);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  ok('wrapperCaps reads inputQueue from the sidecar the WRAPPER itself writes', /const inputQueue = !!\(caps && caps\.inputQueue\)/.test(read('src/server/wrapper-files.js')));
   // CLIENT: a coded per-session error must NOT be read as an attach failure
   // (the 2.363.1 rule) — but "any code = scoped" is TOO WIDE: 'ended-during-
   // attach' is a coded error whose SESSION IS GONE and must keep the rescue.
@@ -133,25 +200,31 @@ console.log('— ③ the ws case gates on the caps row AND the running wrapper')
   ok('client: an attach failure still takes the view-only rescue path', /if \(!this\._tryViewOnlyRescue\(\)\)/.test(cv));
   // the queue rides EVERY window-birth payload (the 2.368.4 rule)
   ok("attach carries the queue from the normalizer", /queue: session\._normalizer\?\.queueState\?\.\(\) \|\| \[\]/.test(read('src/ws-handler.js')));
-  ok("…and the wrapper's queue advert rides the SAME payload (the client cannot read a sidecar)", /const wcapsAttach = wrapperCaps\(BUFFERS_DIR, data\.sessionId, session\.socketPath\);[\s\S]{0,2000}queueSupported: wcapsAttach\.inputQueue/.test(read('src/ws-handler.js')));
+  ok("…and the wrapper's queue advert — SUPPORTED **and the verb list** — rides the SAME payload (the client cannot read a sidecar), and it is computed from the ONE sidecar read the attach handler already made (2.369.16: no second /proc walk here)", /const wcapsAttach = wrapperCaps\(BUFFERS_DIR, data\.sessionId, session\.socketPath\);[\s\S]{0,3000}const wc = wcapsAttach;[\s\S]{0,700}return \{ queueSupported: !!served, queueVerbs: served \|\| \[\] \};/.test(read('src/ws-handler.js')));
   { const wsc = read('src/ws-create.js');
-    ok("…'created' carries both, and says the fresh wrapper has reported NOTHING yet", /queue: \[\],/.test(wsc) && /queueSupported: false,/.test(wsc)); }
-  ok('the client applies both through the carries-the-key guard, advert FIRST', /if \('queueSupported' in meta\) this\._setQueueSupported\(meta\.queueSupported\);\s*\n\s*if \('queue' in meta\) this\._setQueue\(meta\.queue\);/.test(cv));
+    ok("…'created' carries all three, and says the fresh wrapper has reported NOTHING yet", /queue: \[\],/.test(wsc) && /queueSupported: false,\n\s*queueVerbs: \[\],/.test(wsc)); }
+  ok('the client applies both through the carries-the-key guard, advert (and its verb list) FIRST', /if \('queueSupported' in meta\) this\._setQueueSupported\(meta\.queueSupported, meta\.queueVerbs\);\s*\n\s*if \('queue' in meta\) this\._setQueue\(meta\.queue\);/.test(cv));
   // ONE WRITER for the capability, because a FLIP has a consequence (the
   // rendered chips must be re-applied — round-2's MAJOR). A bare assignment
   // anywhere else silently skips it.
   ok('`_queueSupported` has exactly ONE writer besides its initialiser (_setQueueSupported), so every flip is observable',
-    (cv.match(/this\._queueSupported = /g) || []).length === 2 && /_setQueueSupported\(next\) \{[\s\S]{0,200}this\._queueSupported = val;\s*\n\s*this\._refreshQueueChips\(\);/.test(cv),
+    (cv.match(/this\._queueSupported = /g) || []).length === 2 && /_setQueueSupported\(next, verbs\) \{[\s\S]{0,700}this\._queueSupported = val;\s*\n\s*this\._queueVerbsServed = list;\s*\n\s*this\._refreshQueueChips\(\);/.test(cv),
     (cv.match(/this\._queueSupported = [^\n]*/g) || []));
-  ok("…and the live meta path uses it too (a wrapper's baseline queue_changed also arrives after the bubbles)", /if \(op\.supported\) this\._setQueueSupported\(true\);/.test(cv));
-  ok('wiring pin: the strip and the chip send the SAME ws message through one method', /this\.ws\.send\(\{ type: 'queue-op', sessionId: this\.sessionId, op, id: id \|\| null \}\)/.test(cv) && (cv.match(/type: 'queue-op'/g) || []).length === 1);
+  ok('…and the VERB LIST shares that one writer (a wrapper that gains verbs without changing `supported` must re-apply the chips too)',
+    (cv.match(/this\._queueVerbsServed = /g) || []).length === 2 && /JSON\.stringify\(list\) === JSON\.stringify\(this\._queueVerbsServed\)/.test(cv),
+    (cv.match(/this\._queueVerbsServed = [^\n]*/g) || []));
+  ok("…and the live meta path uses it too (a wrapper's baseline queue_changed also arrives after the bubbles), carrying the verbs it published", /if \(op\.supported\) this\._setQueueSupported\(true, op\.verbs \|\| undefined\);/.test(cv));
+  ok("a queue op's RESULT reaches the strip as its own meta op (a row that spins forever is the silent failure wearing a spinner)", /if \(op\.subtype === 'queue-result'\) \{ this\._chatInput\?\.setQueueOpResult\(op\.id, op\.ok !== false, op\.text \|\| ''\); return; \}/.test(cv));
+  ok('wiring pin: the strip, the row keyboard and the chip send the SAME ws message through one method', /const frame = \{ type: 'queue-op', sessionId: this\.sessionId, op, id: id \|\| null \};/.test(cv) && (cv.match(/type: 'queue-op'/g) || []).length === 1);
+  ok("…and the verb's own argument rides it: afterId only when the caller supplied one (null = the front), text only when it is a string", /if \(extra && 'afterId' in extra\) frame\.afterId = extra\.afterId === null \? null : String\(extra\.afterId\);/.test(cv) && /if \(extra && typeof extra\.text === 'string'\) frame\.text = extra\.text;/.test(cv));
   // NO DEAD CONTROLS: the chip is clickable only where the VIEW says steer
   // (harness row ∧ running wrapper — ONE definition), and every queue action
   // on a read-only/offline window SPEAKS through one choke point.
   const cr = read('src/lib/chat-renderers.js');
   ok('the bubble chip asks the VIEW whether this session can steer (no second capability definition in the renderer)', /_canSteerQueue\(\) \? this\._onQueueChipClick : null/.test(cr) && /this\._getQueueCaps\?\.\(\)\?\.steer/.test(cr) && /getQueueCaps: \(\) => this\._queueCaps\(\)/.test(cv));
-  ok('_queueCaps is the intersection: no wrapper advert ⇒ no controls at all', /if \(!this\._queueSupported\) return \{ queue: false, steer: false, queueOps: false \};/.test(cv));
-  ok('every queue action passes ONE liveness choke point that toasts (strip buttons included — a dead button that eats the click is the silent failure)', /_queueOpsLive\(\) \{/.test(cv) && /if \(!this\._queueOpsLive\(\)\) return;\s*\n\s*this\.ws\.send\(\{ type: 'queue-op'/.test(cv) && (cv.match(/showToast\(t\('This session is not live/g) || []).length === 1);
+  ok('_queueCaps is the intersection: no wrapper advert ⇒ no controls at all', /if \(!this\._queueSupported\) return NO_QUEUE_CAPS;/.test(cv) && /const NO_QUEUE_CAPS = Object\.freeze\(\{ queue: false, steer: false, queueOps: false, queueVerbs: Object\.freeze\(\[\]\) \}\);/.test(cv));
+  ok('…and it INTERSECTS the harness table with what the running wrapper serves, re-deriving steer/queueOps FROM the result (never carried over)', /const verbs = \(row\.queueVerbs \|\| \[\]\)\.filter\(\(v\) => !served \|\| served\.includes\(v\)\);/.test(cv) && /steer: verbs\.includes\('steer'\), queueOps: verbs\.length > 0, queueVerbs: verbs/.test(cv));
+  ok('every queue action passes ONE liveness choke point that toasts (strip buttons included — a dead button that eats the click is the silent failure)', /_queueOpsLive\(\) \{/.test(cv) && /if \(!this\._queueOpsLive\(\)\) return;\s*\n\s*const frame = \{ type: 'queue-op'/.test(cv) && (cv.match(/showToast\(t\('This session is not live/g) || []).length === 1);
   ok('…and the strip is DIMMED under .chat-input-disconnected, so the state is visible BEFORE the click', /\.chat-input-disconnected \.chat-queue-strip \{ opacity/.test(read('public/chat.css')));
   const cw2 = read('data/bin/codex-chat-wrapper.js');
   ok('removing a queued PEER message hands the text back to the delivery ladder (never a silent loss of a message already reported delivered)', /known\?\.kind === 'peer' && known\.text\) emitTaskEvent\('peer_message_result', \{ ok: false/.test(cw2));
@@ -287,24 +360,86 @@ console.log('— ⑤ the client strip (DOM-free render of the REAL ChatInput)');
   try { Object.defineProperty(globalThis, 'navigator', { value: { language: 'en', userAgent: 'node' }, configurable: true, writable: true }); } catch {}
   globalThis.localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
   const { ChatInput } = await import(out);
+  const { deriveInputModes: derive } = require(path.join(REPO, 'src/backend-caps.js'));
   const items = [
-    { id: 'q1', msgId: 'm1', preview: 'first one', ts: 1, kind: 'user' },
+    { id: 'q1', msgId: 'm1', preview: 'first one', text: 'first one', ts: 1, kind: 'user' },
     { id: 'q2', msgId: '', preview: 'ping', ts: 2, kind: 'peer', from: 'session B' },
   ];
-  const full = ChatInput.queueStripHtml(items, { steer: true, queueOps: true });
+  const CODEX_CAPS = derive({ queue: true, queueVerbs: ['remove', 'steer', 'steer-all', 'reorder', 'edit', 'run-now', 'run-all'] });
+  const full = ChatInput.queueStripHtml(items, CODEX_CAPS);
   ok('the strip heads with the count and what happens next', /2 queued — runs after this turn/.test(full), full.slice(0, 200));
   ok('one row per item, each carrying its app-server id', (full.match(/class="chat-queue-item"/g) || []).length === 2 && /data-queue-id="q1"/.test(full) && /data-queue-id="q2"/.test(full));
   ok('steer + remove buttons per row when the harness can steer', (full.match(/data-queue-op="steer"/g) || []).length === 2 && (full.match(/data-queue-op="remove"/g) || []).length === 2);
-  ok('"Steer all" appears only when MORE THAN ONE is queued', /data-queue-op="steer-all"/.test(full) && !/data-queue-op="steer-all"/.test(ChatInput.queueStripHtml([items[0]], { steer: true, queueOps: true })));
+  ok('"Steer all" appears only when MORE THAN ONE is queued', /data-queue-op="steer-all"/.test(full) && !/data-queue-op="steer-all"/.test(ChatInput.queueStripHtml([items[0]], CODEX_CAPS)));
   ok('a peer message is LISTED and LABELLED (hiding it would misstate what runs next)', /class="chat-queue-from">session B</.test(full));
-  const noSteer = ChatInput.queueStripHtml(items, { steer: false, queueOps: true });
+  const noSteer = ChatInput.queueStripHtml(items, derive({ queue: true, queueVerbs: ['remove'] }));
   ok('a harness that cannot steer offers ONLY remove — no steer button, no Steer all', !/data-queue-op="steer/.test(noSteer) && (noSteer.match(/data-queue-op="remove"/g) || []).length === 2);
   ok('rows are keyboard-reachable (tabindex) so Enter can steer a focused one', /class="chat-queue-item" tabindex="0"/.test(full));
   ok('icons are SVG, never a glyph (§17)', /<svg/.test(full) && !/[✕✖×⚡]/.test(full), full.slice(0, 120));
   // XSS: a preview is message text and syncs to EVERY client
   const evil = '<img src=x onerror=alert(1)>" onmouseover="y';
-  const xss = ChatInput.queueStripHtml([{ id: evil, msgId: '', preview: evil, kind: 'peer', from: evil }], { steer: true, queueOps: true });
-  ok('XSS: preview, sender and id are escaped everywhere they land (text + attributes)', !xss.includes('<img src=x') && !/onmouseover="y/.test(xss) && xss.includes('&lt;img') && (xss.match(/&quot;/g) || []).length >= 2, xss.slice(0, 300));
+  const xss = ChatInput.queueStripHtml([{ id: evil, msgId: '', preview: evil, text: evil, kind: 'peer', from: evil }], CODEX_CAPS, { [evil]: { state: 'refused', title: evil } });
+  ok('XSS: preview, sender, id AND a refusal reason are escaped everywhere they land (text + attributes)', !xss.includes('<img src=x') && !/onmouseover="y/.test(xss) && xss.includes('&lt;img') && (xss.match(/&quot;/g) || []).length >= 2, xss.slice(0, 300));
+
+  // ── ⑨ THE VERB TABLE DRIVES THE CONTROLS (design-harness-features §2.1) ──
+  // Every control is rendered from `caps.queueVerbs` — the harness table
+  // INTERSECTED with what the running wrapper serves — so a rendered control
+  // is one the server will honour.
+  const CTRL = { remove: 'data-queue-op="remove"', steer: 'data-queue-op="steer"', 'steer-all': 'data-queue-op="steer-all"', reorder: 'data-queue-drag=', edit: 'data-queue-op="edit"', 'run-now': 'data-queue-op="run-now"', 'run-all': 'data-queue-op="run-all"' };
+  for (const verb of Object.keys(CTRL)) {
+    const withIt = ChatInput.queueStripHtml(items, derive({ queue: true, queueVerbs: [verb] }));
+    const without = ChatInput.queueStripHtml(items, derive({ queue: true, queueVerbs: ['remove'].filter((v) => v !== verb) }));
+    // 'steer-all' needs >1 item to show, which `items` has; every other verb
+    // renders per row.
+    ok(`'${verb}' declared ⇒ its control is rendered`, withIt.includes(CTRL[verb]), withIt.slice(0, 260));
+    ok(`'${verb}' NOT declared ⇒ NO such control anywhere (never a button whose frame the ws layer refuses)`, !without.includes(CTRL[verb]), without.slice(0, 260));
+  }
+  {
+    const codex = ChatInput.queueStripHtml(items, CODEX_CAPS);
+    // PEER ITEMS: rewriting another agent's words would misattribute them (the
+    // wrapper refuses it too — the control is hidden because it MEANS it).
+    const rows = codex.split('class="chat-queue-item"').slice(1);
+    ok('the PEER row carries no edit control (its words are not yours to rewrite)', rows.length === 2 && !rows[1].includes('data-queue-op="edit"'), rows[1]?.slice(0, 300));
+    ok('…while your own row does', rows[0].includes('data-queue-op="edit"'));
+    // …and neither does an item the wrapper did NOT send the full text for:
+    // the 120-char preview would silently truncate the message on save.
+    const noText = ChatInput.queueStripHtml([{ id: 'q9', msgId: 'm9', preview: 'a very long message…', kind: 'user' }], CODEX_CAPS);
+    ok('an item whose FULL text the wrapper did not publish offers no edit control (editing a truncated preview would cut the message down)', !noText.includes('data-queue-op="edit"'), noText.slice(0, 300));
+    ok('the peer row is still LISTED and labelled, and still removable/movable', rows[1].includes('session B') && rows[1].includes('data-queue-op="remove"') && rows[1].includes('data-queue-drag='));
+    ok('"Run all now" is a HEADER control, distinct from per-row "Run this one now"', /chat-queue-head[\s\S]*?data-queue-op="run-all"/.test(codex) && (codex.match(/data-queue-op="run-now"/g) || []).length === 2);
+    ok('every new control is an SVG icon, never a ✎ / ▶ / ⠿ glyph (§17)', !/[✎▶⠿⇅↑↓]/.test(codex), (codex.match(/[✎▶⠿⇅↑↓]/g) || []).join(''));
+    ok('the drag handle names its KEYBOARD equivalent (a pointer-only control is half a control)', /title="[^"]*Alt\+Up[^"]*"/.test(codex), /title="[^"]*Alt[^"]*"/.exec(codex)?.[0]);
+  }
+  {
+    // ROW STATE: pending while an op is in flight, refused WITH the reason on
+    // the row (the system card scrolls away; the control the user pressed
+    // must speak for itself).
+    const st = new Map([['q1', { state: 'pending', title: '' }], ['q2', { state: 'refused', title: 'A turn is already running.' }]]);
+    const html = ChatInput.queueStripHtml(items, CODEX_CAPS, st);
+    ok('a row with an op in flight is marked pending', /data-queue-id="q1" data-queue-state="pending"/.test(html), html.slice(0, 400));
+    ok('a refused row is marked AND carries its reason', /data-queue-state="refused" title="A turn is already running\."/.test(html));
+    ok('an editing row says so, and its edit control becomes a cancel', /data-queue-state="editing"/.test(ChatInput.queueStripHtml(items, CODEX_CAPS, new Map([['q1', { state: 'editing', title: '' }]]))) && /data-queue-op="edit-cancel"/.test(ChatInput.queueStripHtml(items, CODEX_CAPS, new Map([['q1', { state: 'editing', title: '' }]]))));
+  }
+  {
+    // EVERY op's outcome has to REACH the strip, including the BATCH verbs
+    // that name no item (run-all / steer-all): the dispatch marks every row
+    // pending, so a result the client cannot join to a row leaves the whole
+    // strip spinning. Driven through the REAL normalizer.
+    const { CodexMessageManager: CMM } = require(path.join(REPO, 'src/codex-message-manager.js'));
+    const { AcpMessageManager: AMM } = require(path.join(REPO, 'src/acp-message-manager.js'));
+    const cm = new CMM('batch'); const cops = []; cm.onOp((o) => cops.push(o));
+    cm.processLive({ timestamp: new Date().toISOString(), type: 'event_msg', payload: { type: 'queue_op_result', op: 'run-all', id: '', ok: false, reason: 'busy', detail: 'a turn is running' } });
+    const res = cops.filter((o) => o.op === 'meta' && o.subtype === 'queue-result');
+    ok("a BATCH result (no id) still reaches the client as a queue-result meta op", res.length === 1 && res[0].id === '' && res[0].ok === false && res[0].reason === 'busy' && /already running/.test(res[0].text || ''), res);
+    const cm2 = new CMM('batch2'); const cops2 = []; cm2.onOp((o) => cops2.push(o));
+    cm2.processLive({ timestamp: new Date().toISOString(), type: 'event_msg', payload: { type: 'queue_op_result', op: 'reorder', id: 'q1', msg_id: 'm1', ok: true } });
+    ok('…and a per-item success does too (the row must stop spinning even when nothing else changes)', cops2.some((o) => o.subtype === 'queue-result' && o.id === 'q1' && o.ok === true));
+    ok('…while a successful reorder/edit stamps NO chip (the bubble is still your queued message; the strip is the confirmation)', !cops2.some((o) => o.op === 'edit' && o.fields?.queueState));
+    const am = new AMM('batch3'); const aops = []; am.onOp((o) => aops.push(o));
+    am.processLive({ ts: new Date().toISOString(), type: 'acp', kind: 'queue_op_result', op: 'reorder', id: 'p1', msg_id: 'a1', ok: true });
+    ok('ACP emits the same queue-result meta op (one client path, both harnesses)', aops.some((o) => o.op === 'meta' && o.subtype === 'queue-result' && o.id === 'p1' && o.ok === true), aops);
+    ok('…and does NOT stamp a removed/steered chip for a reorder (only a removal changes what a bubble means)', !aops.some((o) => o.op === 'edit' && o.fields?.queueState));
+  }
 
   // ⑨b THE HINT LINE, from the REAL ChatInput's own PURE composer.
   const { composerSendModes: modesOf } = await import(path.join(REPO, 'src/lib/agent-meta.js'));
@@ -794,6 +929,144 @@ console.log('— ⑥ the REAL wrapper against the REAL `codex app-server` (evide
   }
 }
 
+// ⑩ THE VERB TABLE AGAINST THE REAL `codex app-server` (0.153.4).
+// WHY a second real leg: ⑥ proves the wrapper talks to a real server; this one
+// proves the four NEW verbs' PARAMETER NAMES and SEMANTICS, using the wrapper's
+// OWN pure order/input builders (extracted from the file, so there is no twin
+// to drift) against the server that will actually answer them.
+// NOTHING IS BILLED AND NOTHING IS EVEN ATTEMPTED: the app-server runs on a
+// THROWAWAY, LOGGED-OUT CODEX_HOME. The queue verbs are server-side
+// bookkeeping and need no API at all — and the one turn the app-server starts
+// BY ITSELF (measured 2026-09-07: an add on an idle thread drains immediately)
+// dies on a 401 with no account attached. We never send turn/start or
+// thread/queue/start, and the leg ASSERTS that at the end.
+console.log('— ⑩ the four new verbs against a REAL codex app-server (isolated, logged-out CODEX_HOME — nothing billed)');
+{
+  const { spawnSync, spawn } = await import('node:child_process');
+  const which = spawnSync('codex', ['--version'], { encoding: 'utf8' });
+  if (which.status !== 0) {
+    console.log(`  SKIP: no working \`codex\` on PATH (${(which.error?.message || which.stderr || '').trim().slice(0, 80)})`);
+  } else {
+    const ver = (which.stdout || '').trim();
+    // The wrapper's OWN pure builders, lifted out of the file it ships in (it
+    // cannot be require()d — importing it would spawn codex).
+    const wsrc = read('data/bin/codex-chat-wrapper.js');
+    const lift = (name) => {
+      const m = new RegExp(`\\nfunction ${name}\\([\\s\\S]*?\\n\\}`).exec(wsrc);
+      if (!m) throw new Error(`could not lift ${name}() from the wrapper`);
+      return m[0];
+    };
+    const builders = new Function('asArray', `${lift('reorderedIds')}\n${lift('replaceQueuedText')}\nreturn { reorderedIds, replaceQueuedText };`)((v) => (Array.isArray(v) ? v : []));
+    ok('the wrapper\'s order/input builders are PURE enough to lift and drive directly (no twin in this test)', typeof builders.reorderedIds === 'function' && typeof builders.replaceQueuedText === 'function');
+
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-qv-home-'));
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-qv-cwd-'));
+    const srv = spawn('codex', ['app-server'], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, CODEX_HOME: home } });
+    let buf = '', rid = 0, stderr = '';
+    const pend = new Map(); const notes = []; const sentMethods = [];
+    srv.stdout.on('data', (d) => {
+      buf += d;
+      let i;
+      while ((i = buf.indexOf('\n')) !== -1) {
+        const line = buf.slice(0, i); buf = buf.slice(i + 1);
+        if (!line.trim()) continue;
+        let m; try { m = JSON.parse(line); } catch { continue; }
+        if (m.id !== undefined && pend.has(m.id)) { pend.get(m.id)(m); pend.delete(m.id); continue; }
+        if (m.method) notes.push(m.method);
+      }
+    });
+    srv.stderr.on('data', (d) => { stderr += d; });
+    const rpc = (method, params) => new Promise((res) => {
+      const id = ++rid;
+      sentMethods.push(method);
+      pend.set(id, res);
+      srv.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+      setTimeout(() => { if (pend.has(id)) { pend.delete(id); res({ timeout: true }); } }, 20000);
+    });
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    try {
+      const init = await rpc('initialize', { clientInfo: { name: 'vibespace-test', title: 'vibespace', version: '1' }, capabilities: { experimentalApi: true } });
+      srv.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'initialized', params: {} }) + '\n');
+      const th = await rpc('thread/start', { cwd });
+      const threadId = th?.result?.thread?.id;
+      if (!threadId) {
+        console.log(`  SKIP: \`codex app-server\` (${ver}) never started a thread — ${(stderr || 'no stderr').trim().slice(0, 140)}`);
+      } else {
+        ok(`${ver}: the queue verbs are gated on the experimentalApi capability the wrapper asks for (a future gate change fails HERE)`, !!init?.result, init?.error);
+        // The wrapper's own initialize must carry it, or every queue verb 404s
+        ok('…and the wrapper asks for exactly that capability', /await request\('initialize', \{ clientInfo, capabilities: \{ experimentalApi: true \} \}/.test(wsrc));
+        // FOUR adds: the first drains into the (doomed, unauthenticated) turn
+        // the server starts by itself, leaving three queued to work with.
+        const added = [];
+        for (const label of ['alpha', 'beta', 'gamma', 'delta']) {
+          const a = await rpc('thread/queue/add', { threadId, input: [{ type: 'text', text: label }], clientUserMessageId: 'cid-' + label });
+          if (a?.result?.queuedSubmission?.id) added.push({ id: a.result.queuedSubmission.id, label });
+        }
+        ok('thread/queue/add answers {queuedSubmission:{id,input,clientUserMessageId}} for every add', added.length === 4, added.map((x) => x.label));
+        await sleep(600);
+        // PAGING IS REAL: limit + the opaque nextCursor, followed to the end —
+        // exactly what listQueueAll does (a wrong param name fails here).
+        const page1 = await rpc('thread/queue/list', { threadId, limit: 1 });
+        ok('thread/queue/list takes `limit` and answers an opaque `nextCursor` (the wrapper pages on THIS)', Array.isArray(page1?.result?.data) && page1.result.data.length === 1 && typeof page1.result.nextCursor === 'string', page1?.result);
+        const walked = [...page1.result.data];
+        let cursor = page1.result.nextCursor, guard = 0;
+        while (cursor && guard++ < 10) {
+          const pg = await rpc('thread/queue/list', { threadId, cursor, limit: 1 });
+          walked.push(...(pg?.result?.data || []));
+          cursor = pg?.result?.nextCursor || null;
+        }
+        const whole = await rpc('thread/queue/list', { threadId });
+        const wholeIds = (whole?.result?.data || []).map((q) => q.id);
+        ok('…and a cursor walk to the END sees exactly what an unpaged list sees (a truncated walk would be a different queue)', JSON.stringify(walked.map((q) => q.id)) === JSON.stringify(wholeIds), { walked: walked.length, whole: wholeIds.length });
+        ok('an add on an IDLE thread is DRAINED by the server itself, so three of the four are still queued (this is why run-now/run-all can only matter on a resumed thread)', wholeIds.length === 3, wholeIds.length);
+        if (wholeIds.length >= 3) {
+          // REORDER: the wrapper's own relative→absolute translation, sent as
+          // the app-server's full-order array.
+          const moved = wholeIds[2], anchorId = null;   // to the FRONT
+          const order = builders.reorderedIds(wholeIds, moved, anchorId);
+          const r = await rpc('thread/queue/reorder', { threadId, queuedSubmissionIds: order });
+          ok('thread/queue/reorder accepts {threadId, queuedSubmissionIds} — the FULL order the wrapper computed from a relative move', !r?.error, r?.error?.message);
+          const after = await rpc('thread/queue/list', { threadId });
+          ok('…and the queue really comes back in that order', JSON.stringify((after?.result?.data || []).map((q) => q.id)) === JSON.stringify(order), { got: (after?.result?.data || []).map((q) => q.id), want: order });
+          // …and a PARTIAL order is REFUSED (measured: not a silent delete —
+          // which is why listQueueAll pages to the end for the op to WORK).
+          const partial = await rpc('thread/queue/reorder', { threadId, queuedSubmissionIds: order.slice(0, 2) });
+          ok('a full-order array that is NOT the whole queue is REFUSED (a truncated page would break the op, never silently drop items)', /every queued submission exactly once/i.test(partial?.error?.message || ''), partial);
+          // EDIT: the wrapper's exclusion rebuild, with an attachment that must
+          // survive the round trip.
+          const target = (after?.result?.data || [])[0];
+          const mixed = [{ type: 'text', text: 'old words', text_elements: [{ byteRange: { start: 0, end: 3 } }] }, { type: 'mention', name: 'notes', path: '/tmp/notes.md' }];
+          const input = builders.replaceQueuedText(mixed, 'brand new words');
+          const u = await rpc('thread/queue/update', { threadId, queuedSubmissionId: target.id, input });
+          ok('thread/queue/update accepts {threadId, queuedSubmissionId, input} — the WHOLE input array', !u?.error, u?.error?.message);
+          const after2 = await rpc('thread/queue/list', { threadId });
+          const back = (after2?.result?.data || []).find((q) => q.id === target.id);
+          ok('…and the edited text comes back, with the mention still there and the stale text_elements cleared', JSON.stringify(back?.input) === JSON.stringify([{ type: 'text', text: 'brand new words', text_elements: [] }, { type: 'mention', name: 'notes', path: '/tmp/notes.md' }]), back?.input);
+          // …and an id the server has drained is NOT FOUND, which the wrapper
+          // classifies as 'gone' rather than a bare error.
+          const missing = await rpc('thread/queue/update', { threadId, queuedSubmissionId: added[0].id, input: [{ type: 'text', text: 'x' }] });
+          ok("an update on an already-drained id answers 'not found' (the wrapper reports that as reason 'gone', i.e. it ran)", /not found/i.test(missing?.error?.message || '') && /if \(\/not found\/i\.test\(m\)\) return \{ reason: 'gone' \}/.test(wsrc), missing?.error);
+          // CLEAN UP: delete everything we queued (never `start` it).
+          for (const q of (after2?.result?.data || [])) await rpc('thread/queue/delete', { threadId, queuedSubmissionId: q.id });
+          const end = await rpc('thread/queue/list', { threadId });
+          ok('every queued item is deletable, and the queue ends empty', (end?.result?.data || []).length === 0, end?.result);
+        }
+        // THE SAFETY ASSERT: this leg never asks for inference.
+        ok('THE LEG NEVER STARTS A TURN: no turn/start and no thread/queue/start was sent (only the server\'s own idle drain, which a logged-out home cannot bill)', !sentMethods.includes('turn/start') && !sentMethods.includes('thread/queue/start'), sentMethods.join(','));
+        // …and if the server DID drain one into a turn, that turn must have
+        // failed on the missing login — the evidence that nothing was spent.
+        ok('…and any turn the server started by itself died unauthenticated (401 / an error notification): zero tokens, on a home with no account', !notes.includes('turn/started') || notes.includes('error') || /401 Unauthorized|Unauthorized/i.test(stderr), { notes: [...new Set(notes)], stderr: stderr.slice(-200) });
+      }
+    } catch (e) {
+      ok('the real-app-server verb leg ran', false, String(e.message || e).slice(0, 300));
+    } finally {
+      try { srv.kill('SIGKILL'); } catch { }
+      try { fs.rmSync(home, { recursive: true, force: true }); } catch { }
+      try { fs.rmSync(cwd, { recursive: true, force: true }); } catch { }
+    }
+  }
+}
+
 // ⑧ THE STOP BUTTON, ONE SHOT (round-3 review). Stop is not instantaneous: the
 // codex wrapper empties the app-server queue BEFORE it interrupts and that
 // sweep is capped at ~6s against a wedged app-server (and claude's §11
@@ -1202,6 +1475,235 @@ console.log('— ⑨e the chord in a REAL browser (trusted keystrokes) + the 375
       ok(`…and nothing overflows sideways at 375px (root ${pm.rootScrollW} ≤ ${pm.rootClientW}, section ${pm.secScrollW} ≤ ${pm.secClientW}, right edge ${pm.sec.right} ≤ ${pm.vw})`, pm.rootScrollW <= pm.rootClientW + 1 && pm.secScrollW <= pm.secClientW + 1 && pm.sec.right <= pm.vw + 1, pm);
     } catch (e) {
       ok('the browser leg ran', false, String(e.message || e).slice(0, 400));
+    } finally {
+      try { ws?.close(); } catch { }
+      try { chrome.kill('SIGKILL'); } catch { }
+      try { srv.close(); } catch { }
+      try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { }
+    }
+  }
+}
+
+// ⑪ THE CONTROLS IN A REAL BROWSER (trusted CDP input). The strip's markup is
+// already pinned DOM-free in ⑤, but a drag handle is not markup: it is pointer
+// capture, rAF-coalesced moves, midpoint hit-testing and a per-drag
+// AbortController. The frame it produces — and its `afterId` — can only be
+// proven by actually dragging. The edit control is here for the same reason:
+// "open the text in the input, send saves it" is three DOM states.
+console.log('— ⑪ drag-reorder / edit / run-all in a REAL browser (trusted pointer input)');
+{
+  const CHROME2 = ['/usr/bin/google-chrome',  '/usr/bin/google-chrome-stable',  '/usr/bin/chromium',  '/usr/bin/chromium-browser'].find((p) => fs.existsSync(p));
+  if (!CHROME2) {
+    console.log('  SKIP: no chrome/chromium on this box — the DOM half of ⑪ did not run');
+  } else {
+    const http = await import('node:http');
+    const net = await import('node:net');
+    const { spawn } = await import('node:child_process');
+    const esbuild = require(path.join(REPO, 'node_modules/esbuild'));
+    const WebSocket = require('ws');
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const freePort = () => new Promise((res, rej) => { const s = net.createServer(); s.on('error',  rej); s.listen(0, '127.0.0.1',  () => { const p = s.address().port; s.close(() => res(p)); }); });
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `vs-qverbs-${process.pid}-`));
+    const bundle = path.join(tmp, 'chat-input.iife.js');
+    const stub = { name: 'stub-build-version',  setup(b) { b.onResolve({ filter: /build-version\.js$/ }, () => ({ path: 'build-version',  namespace: 'bv' })); b.onLoad({ filter: /.*/, namespace: 'bv' }, () => ({ contents: "export const BUILD_VERSION = 'test';", loader: 'js' })); } };
+    await esbuild.build({ entryPoints: [path.join(REPO, 'src/lib/chat-input.js')], bundle: true, format: 'iife',  globalName: 'VS',  platform: 'browser',  target: 'es2022',  outfile: bundle, logLevel: 'silent',  loader: { '.css': 'text' }, plugins: [stub] });
+    const js = fs.readFileSync(bundle, 'utf8').replace(/<\/script/gi, '<\\/script');
+    const css = fs.readFileSync(path.join(REPO, 'public/chat.css'), 'utf8').replace(/<\/style/gi, '<\\/style');
+    const html = `<!doctype html><meta charset="utf-8"><title>queue verbs</title><style>${css}
+      body { margin: 0; background: #111; color: #eee; }
+      /* the strip is normally inside a sized window — give the rows real height
+         so the drag's midpoint hit-test has geometry to work with */
+      .chat-queue-item { height: 26px; }
+    </style><body></body><script>${js}</script>`;
+    const port = await freePort(), cdpPort = await freePort();
+    const srv = http.createServer((_q, r) => { r.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); r.end(html); }).listen(port, '127.0.0.1');
+    const chrome = spawn(CHROME2, ['--headless=new',  `--remote-debugging-port=${cdpPort}`,  '--no-first-run',  '--no-sandbox',  '--disable-gpu', 
+      '--disable-dev-shm-usage',  '--disable-background-timer-throttling',  `--user-data-dir=${tmp}/chrome`,  'about:blank'], { stdio: 'ignore' });
+    let ws = null;
+    try {
+      let target = null;
+      for (let i = 0; i < 120 && !target; i++) {
+        try { target = (await (await fetch(`http://127.0.0.1:${cdpPort}/json`)).json()).find((x) => x.type === 'page'); } catch { }
+        if (!target) await sleep(250);
+      }
+      if (!target) throw new Error('chrome never exposed a CDP page target');
+      ws = new WebSocket(target.webSocketDebuggerUrl, { maxPayload: 64 * 1024 * 1024 });
+      await new Promise((r, j) => { ws.on('open',  r); ws.on('error',  j); });
+      let seq = 0; const pend = new Map();
+      ws.on('message',  (d) => { const m = JSON.parse(d); if (m.id && pend.has(m.id)) { pend.get(m.id)(m); pend.delete(m.id); } });
+      const cdp = (method, params = {}) => new Promise((res) => { const id = ++seq; pend.set(id, res); ws.send(JSON.stringify({ id, method, params })); });
+      const evaljs = async (expr) => {
+        const r = await cdp('Runtime.evaluate',  { expression: expr, awaitPromise: true, returnByValue: true });
+        if (r.result?.exceptionDetails) throw new Error(JSON.stringify(r.result.exceptionDetails).slice(0, 500));
+        return r.result?.result?.value;
+      };
+      await cdp('Runtime.enable'); await cdp('Page.enable');
+      await cdp('Page.navigate',  { url: `http://127.0.0.1:${port}/` });
+      for (let i = 0; i < 80; i++) { if (await evaljs('!!(window.VS && window.VS.ChatInput)').catch(() => false)) break; await sleep(150); }
+
+      const { capsOf: caps11 } = require(path.join(REPO, 'src/backend-caps.js'));
+      const CODEX_VERBS = JSON.stringify(caps11('codex').inputModes);
+      const OPENCODE_VERBS = JSON.stringify(caps11('opencode').inputModes);
+      const CLAUDE_VERBS = JSON.stringify(caps11('claude').inputModes);
+      const built = await evaljs(`(() => {
+        window.__ops = [];
+        const ci = new VS.ChatInput({ send(){} }, 'sess-verbs',  { onSend(){}, onInterrupt(){}, onQueueOp: (op, id, extra) => window.__ops.push({ op, id, extra }) });
+        document.body.appendChild(ci.element);
+        window.__ci = ci;
+        window.__items = [
+          { id: 'q1',  msgId: 'm1',  preview: 'first',  text: 'first',  kind: 'user' },
+          { id: 'q2',  msgId: 'm2',  preview: 'second',  text: 'second',  kind: 'user' },
+          { id: 'q3',  msgId: '',  preview: 'ping',  kind: 'peer',  from: 'session B' },
+        ];
+        ci.setQueue(window.__items, ${CODEX_VERBS});
+        return document.querySelectorAll('.chat-queue-item').length;
+      })()`);
+      ok(`a real ChatInput renders the three queued rows (${built})`, built === 3);
+
+      // THE DRAG: press the FIRST row's grip, move past the SECOND row's
+      // midpoint, release. Trusted CDP input, so pointer capture, the rAF
+      // coalescing and the midpoint hit-test all run for real.
+      const gripBox = (n) => evaljs(`(() => { const g = document.querySelectorAll('.chat-queue-grip')[${n}]; const r = g.getBoundingClientRect(); return { x: r.left + r.width/2, y: r.top + r.height/2 }; })()`);
+      const rowBox = (n) => evaljs(`(() => { const g = document.querySelectorAll('.chat-queue-item')[${n}]; const r = g.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, mid: r.top + r.height/2 }; })()`);
+      const ops = () => evaljs('window.__ops');
+      {
+        const from = await gripBox(0), row2 = await rowBox(1);
+        await cdp('Input.dispatchMouseEvent',  { type: 'mousePressed',  x: from.x, y: from.y, button: 'left',  clickCount: 1, pointerType: 'mouse' });
+        // two moves: one small (proves the >3px gate), one past row 2's midpoint
+        await cdp('Input.dispatchMouseEvent',  { type: 'mouseMoved',  x: from.x, y: from.y + 2, button: 'left',  pointerType: 'mouse' });
+        await cdp('Input.dispatchMouseEvent',  { type: 'mouseMoved',  x: from.x, y: row2.mid + 3, button: 'left',  pointerType: 'mouse' });
+        await sleep(120);   // let the rAF-coalesced apply() run
+        const marked = await evaljs(`(() => ({ dragging: !!document.querySelector('.chat-queue-dragging'), after: document.querySelector('.chat-queue-drop-after')?.dataset.queueId || null }))()`);
+        ok(`the drag paints where it would land (dragging + drop-after q2): ${JSON.stringify(marked)}`, marked.dragging === true && marked.after === 'q2');
+        await cdp('Input.dispatchMouseEvent',  { type: 'mouseReleased',  x: from.x, y: row2.mid + 3, button: 'left',  clickCount: 1, pointerType: 'mouse' });
+        await sleep(120);
+        const sent = await ops();
+        ok(`THE DRAG SENDS A REORDER for the dragged row (${JSON.stringify(sent)})`, sent.length === 1 && sent[0].op === 'reorder' && sent[0].id === 'q1');
+        ok(`…with the RELATIVE anchor it was dropped behind (afterId=${JSON.stringify(sent[0].extra)})`, sent[0].extra?.afterId === 'q2');
+        const cleaned = await evaljs(`(() => ({ dragging: !!document.querySelector('.chat-queue-dragging'), after: !!document.querySelector('.chat-queue-drop-after'), pending: document.querySelector('[data-queue-state="pending"]')?.dataset.queueId || null }))()`);
+        ok('the drag chrome is gone on release', cleaned.dragging === false && cleaned.after === false);
+        ok('and the row shows the op is in flight (a control that looks idle after a click is the silent failure)', cleaned.pending === 'q1');
+      }
+      // DROP AT THE FRONT: afterId null is a POSITION, not a missing argument.
+      {
+        await evaljs('window.__ops = []; window.__ci.setQueue(window.__items, ' + CODEX_VERBS + ');');
+        const from = await gripBox(2), row0 = await rowBox(0);
+        await cdp('Input.dispatchMouseEvent',  { type: 'mousePressed',  x: from.x, y: from.y, button: 'left',  clickCount: 1, pointerType: 'mouse' });
+        await cdp('Input.dispatchMouseEvent',  { type: 'mouseMoved',  x: from.x, y: row0.top - 6, button: 'left',  pointerType: 'mouse' });
+        await sleep(120);
+        await cdp('Input.dispatchMouseEvent',  { type: 'mouseReleased',  x: from.x, y: row0.top - 6, button: 'left',  clickCount: 1, pointerType: 'mouse' });
+        await sleep(120);
+        const sent = await ops();
+        ok(`dropping above the first row means the FRONT, sent as afterId null (${JSON.stringify(sent)})`, sent.length === 1 && sent[0].op === 'reorder' && sent[0].id === 'q3' && sent[0].extra?.afterId === null);
+      }
+      // A PRESS THAT DOES NOT MOVE IS NOT A DRAG (a no-op reorder still costs
+      // an RPC, a republish and a pending flash).
+      {
+        await evaljs('window.__ops = []; window.__ci.setQueue(window.__items, ' + CODEX_VERBS + ');');
+        const from = await gripBox(0);
+        await cdp('Input.dispatchMouseEvent',  { type: 'mousePressed',  x: from.x, y: from.y, button: 'left',  clickCount: 1, pointerType: 'mouse' });
+        await cdp('Input.dispatchMouseEvent',  { type: 'mouseMoved',  x: from.x, y: from.y + 1, button: 'left',  pointerType: 'mouse' });
+        await cdp('Input.dispatchMouseEvent',  { type: 'mouseReleased',  x: from.x, y: from.y + 1, button: 'left',  clickCount: 1, pointerType: 'mouse' });
+        await sleep(120);
+        ok('a press that never moves sends nothing', (await ops()).length === 0);
+        // …and the per-drag listeners really are gone (a per-render controller
+        // would have torn them down MID-drag; a leaked one moves rows later).
+        const leaked = await evaljs(`(() => { const before = window.__ops.length; document.dispatchEvent(new PointerEvent('pointermove',  { clientY: 9999 })); return window.__ops.length - before; })()`);
+        ok('and no listener survives the release', leaked === 0);
+      }
+      // KEYBOARD: Alt+Down on a focused row is the same relative frame.
+      {
+        await evaljs('window.__ops = []; window.__ci.setQueue(window.__items, ' + CODEX_VERBS + ');');
+        const moved = await evaljs(`(() => {
+          const row = document.querySelectorAll('.chat-queue-item')[0];
+          row.focus();
+          row.dispatchEvent(new KeyboardEvent('keydown',  { key: 'ArrowDown',  altKey: true, bubbles: true }));
+          return window.__ops;
+        })()`);
+        ok(`Alt+Down on a focused row sends the SAME relative frame as the drag (${JSON.stringify(moved)})`, moved.length === 1 && moved[0].op === 'reorder' && moved[0].id === 'q1' && moved[0].extra?.afterId === 'q2');
+        const up = await evaljs(`(() => {
+          window.__ops = [];
+          const row = document.querySelectorAll('.chat-queue-item')[1];
+          row.focus();
+          row.dispatchEvent(new KeyboardEvent('keydown',  { key: 'ArrowUp',  altKey: true, bubbles: true }));
+          return window.__ops;
+        })()`);
+        ok(`Alt+Up moves the second row to the FRONT (${JSON.stringify(up)})`, up.length === 1 && up[0].id === 'q2' && up[0].extra?.afterId === null);
+        const edge = await evaljs(`(() => {
+          window.__ops = [];
+          const row = document.querySelectorAll('.chat-queue-item')[0];
+          row.focus();
+          row.dispatchEvent(new KeyboardEvent('keydown',  { key: 'ArrowUp',  altKey: true, bubbles: true }));
+          return window.__ops;
+        })()`);
+        ok('and the first row cannot move above itself', edge.length === 0);
+      }
+      // EDIT: open → the FULL text lands in the textarea → send saves it.
+      {
+        const opened = await evaljs(`(() => {
+          window.__ops = [];
+          window.__ci.setQueue(window.__items, ${CODEX_VERBS});
+          document.querySelector('.chat-input-area textarea, textarea').value = 'a draft I was typing';
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q2"]').click();
+          const ta = document.querySelector('textarea');
+          return { text: ta.value, ops: window.__ops.length, state: document.querySelector('[data-queue-id="q2"]')?.dataset.queueState, hint: !!document.querySelector('.chat-queue-editing') };
+        })()`);
+        ok(`the edit control OPENS the queued text (no frame yet — editing is a local mode): ${JSON.stringify(opened)}`, opened.text === 'second' && opened.ops === 0);
+        ok('the row says it is being edited, and the strip says how to finish', opened.state === 'editing' && opened.hint === true);
+        const saved = await evaljs(`(() => {
+          const ta = document.querySelector('textarea');
+          ta.value = 'second, rewritten';
+          window.__ci._send();
+          return { ops: window.__ops, text: ta.value, state: document.querySelector('[data-queue-id="q2"]')?.dataset.queueState };
+        })()`);
+        ok(`sending SAVES the edit as an edit frame, never as a new message (${JSON.stringify(saved.ops)})`, saved.ops.length === 1 && saved.ops[0].op === 'edit' && saved.ops[0].id === 'q2' && saved.ops[0].extra?.text === 'second, rewritten');
+        ok('and the draft the edit borrowed the textarea from is put back', saved.text === 'a draft I was typing');
+        ok('the row shows the save is in flight', saved.state === 'pending');
+        // …and a refusal ends the pending state ON THE ROW, with the reason.
+        // A BATCH verb marks EVERY row pending; its id-less result must end
+        // that — a strip left spinning is the failure the state exists to show.
+        const batch = await evaljs(`(() => {
+          window.__ci.setQueue(window.__items, ${CODEX_VERBS});
+          document.querySelector('[data-queue-op="run-all"]').click();
+          const during = [...document.querySelectorAll('.chat-queue-item')].map((r) => r.dataset.queueState || null);
+          window.__ci.setQueueOpResult('',  false, 'A turn is already running.');
+          const after = [...document.querySelectorAll('.chat-queue-item')].map((r) => r.dataset.queueState || null);
+          return { during, after, op: window.__ops.slice(-1)[0] };
+        })()`);
+        ok(`"Run all now" marks every row pending and sends the id-less verb (${JSON.stringify(batch.op)})`,  batch.during.every((x) => x === 'pending') && batch.op.op === 'run-all' && batch.op.id === null, batch);
+        ok('…and its result — which names no item — ends the pending state of ALL of them',  batch.after.every((x) => x === null), batch.after);
+        const refused = await evaljs(`(() => {
+          window.__ci.setQueue(window.__items, ${CODEX_VERBS});
+          window.__ci.setQueueOpResult('q2',  false, 'That message was sent by another agent.');
+          const row = document.querySelector('[data-queue-id="q2"]');
+          return { state: row?.dataset.queueState, title: row?.getAttribute('title') };
+        })()`);
+        ok(`a refusal marks the row and KEEPS the reason on it (${JSON.stringify(refused)})`, refused.state === 'refused' && /another agent/.test(refused.title || ''));
+        // Esc puts everything back.
+        const escaped = await evaljs(`(() => {
+          window.__ci.setQueue(window.__items, ${CODEX_VERBS});
+          const ta = document.querySelector('textarea');
+          ta.value = 'my draft';
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q1"]').click();
+          const during = ta.value;
+          ta.dispatchEvent(new KeyboardEvent('keydown',  { key: 'Escape',  bubbles: true }));
+          return { during, after: ta.value, state: document.querySelector('[data-queue-id="q1"]')?.dataset.queueState || null };
+        })()`);
+        ok(`Esc cancels the edit and restores the draft (${JSON.stringify(escaped)})`, escaped.during === 'first' && escaped.after === 'my draft' && escaped.state === null);
+      }
+      // THE HEADER CONTROL is per harness, from the verb table — codex has
+      // run-all, an ACP harness does not, and claude has no strip at all.
+      {
+        const codexHead = await evaljs(`(() => { window.__ci.setQueue(window.__items, ${CODEX_VERBS}); return { runAll: !!document.querySelector('[data-queue-op="run-all"]'), steerAll: !!document.querySelector('[data-queue-op="steer-all"]'), runNow: document.querySelectorAll('[data-queue-op="run-now"]').length, grips: document.querySelectorAll('.chat-queue-grip').length }; })()`);
+        ok(`codex: the header carries "Run all now" AND "Steer all", every row a run-now and a grip (${JSON.stringify(codexHead)})`, codexHead.runAll && codexHead.steerAll && codexHead.runNow === 3 && codexHead.grips === 3);
+        const acpHead = await evaljs(`(() => { window.__ci.setQueue(window.__items, ${OPENCODE_VERBS}); return { runAll: !!document.querySelector('[data-queue-op="run-all"]'), steerAll: !!document.querySelector('[data-queue-op="steer-all"]'), runNow: document.querySelectorAll('[data-queue-op="run-now"]').length, grips: document.querySelectorAll('.chat-queue-grip').length, edits: document.querySelectorAll('[data-queue-op="edit"]').length }; })()`);
+        ok(`an ACP harness gets NO run-all / steer-all / run-now (${JSON.stringify(acpHead)})`, !acpHead.runAll && !acpHead.steerAll && acpHead.runNow === 0);
+        ok('…but it does get the reorder grips and the edit controls it really serves (peer excluded)', acpHead.grips === 3 && acpHead.edits === 2, JSON.stringify(acpHead));
+        const claudeHead = await evaljs(`(() => { window.__ci.setQueue(window.__items, ${CLAUDE_VERBS}); const s = document.querySelector('.chat-queue-strip'); return { hidden: s.classList.contains('hidden'), html: s.innerHTML.length }; })()`);
+        ok(`claude publishes no queue ⇒ NO STRIP AT ALL, not an empty one (${JSON.stringify(claudeHead)})`, claudeHead.hidden && claudeHead.html === 0);
+      }
+    } catch (e) {
+      ok(false,'the browser leg of ⑪ ran',  String(e.message || e).slice(0, 400));
     } finally {
       try { ws?.close(); } catch { }
       try { chrome.kill('SIGKILL'); } catch { }

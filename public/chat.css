@@ -478,6 +478,22 @@
 .chat-queue-btn:hover { background: var(--bg-hover); color: var(--text); }
 .chat-queue-btn-remove:hover { color: var(--red); }
 .chat-queue-btn svg { width: 13px; height: 13px; display: block; }
+/* Reorder: grip + drop indicator + the row in flight. Theme vars only (§17). */
+.chat-queue-grip {
+  color: var(--text-dim); cursor: grab; flex-shrink: 0; display: inline-flex;
+  align-items: center; touch-action: none; /* the drag is ours, not the scroller's */
+}
+.chat-queue-grip:active { cursor: grabbing; }
+.chat-queue-grip svg { width: 12px; height: 12px; display: block; }
+.chat-queue-item.chat-queue-dragging { opacity: 0.5; }
+.chat-queue-item.chat-queue-drop-after { box-shadow: 0 2px 0 0 var(--accent); }
+.chat-queue-strip.chat-queue-drop-front .chat-queue-item:first-of-type { box-shadow: 0 -2px 0 0 var(--accent); }
+/* Per-row op state: an op in flight, and a refusal that keeps its reason in
+   the row's title (the system card scrolls away, the row does not). */
+.chat-queue-item[data-queue-state="pending"] { opacity: 0.55; }
+.chat-queue-item[data-queue-state="refused"] { box-shadow: inset 0 0 0 1px var(--red); }
+.chat-queue-item[data-queue-state="editing"] { box-shadow: inset 0 0 0 1px var(--accent); }
+.chat-queue-editing { color: var(--text-dim); font-size: 11px; padding: 2px 4px; }
 /* DISCONNECTED / read-only: the queue is still true (the wrapper holds it),
    but nothing can be done to it until the socket is back. Dim it so the state
    is visible BEFORE the click — clicks stay live on purpose, because

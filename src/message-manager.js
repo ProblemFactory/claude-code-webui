@@ -711,13 +711,18 @@ class MessageManager {
 
   /** The input queue (harness contract). ALWAYS EMPTY for claude: the CLI
    *  queues stdin messages itself and publishes no queue state — backend-caps
-   *  inputModes {queue:true, steer:false, queueOps:false} says so, and the
-   *  client's strip renders nothing. Present so every chat normalizer answers
-   *  the same question (test-harness-contract pins it) instead of the caller
-   *  learning which ones have the method. */
+   *  inputModes {queue:true, queueVerbs:[]} says so, and the client's strip
+   *  renders nothing. Present so every chat normalizer answers the same
+   *  question (test-harness-contract pins it) instead of the caller learning
+   *  which ones have the method. */
   queueState() { return []; }
   /** …and the CLI never publishes one, so the client's controls stay off. */
   queuePublished() { return false; }
+  /** …nor any verbs. `null` = "this wrapper has named no verb list", which is
+   *  a different fact from "it serves none" — the ws gate distinguishes them
+   *  (a pre-verb-table codex wrapper publishes a queue with no list and still
+   *  serves the legacy three). */
+  queueVerbsPublished() { return null; }
 
   _processUser(raw, emit) {
     this._finalizeStreaming(emit);

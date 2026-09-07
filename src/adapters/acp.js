@@ -78,15 +78,30 @@ class AcpAdapter extends BackendAdapter {
   formatSetModel(model) { return JSON.stringify({ type: 'set-model', model }); }
   formatSetEffort(effort) { return JSON.stringify({ type: 'set-effort', effort }); }
   // QUEUE OPS: ACP v1 has no queue verb, so the WRAPPER's promptQueue is the
-  // queue — it can be listed and an entry removed, but a running session/prompt
-  // cannot be steered (no such method in the protocol). The caps row
-  // (inputModes.steer=false) already stops ws-handler; refusing here WITH THE
-  // REASON is the second line of defense — never format a frame the wrapper
-  // would answer with "unknown stdin verb".
-  formatQueueOp({ op, id } = {}) {
+  // queue — a plain local array, which is why remove/reorder/edit are real
+  // here. Two things it can NOT do, each refused with the reason rather than
+  // formatted into a frame the wrapper would answer with "unknown stdin verb":
+  //   steer/steer-all — a running session/prompt cannot be interrupted with
+  //     new input (no such method in the protocol);
+  //   run-now/run-all — that queue only ever HAS entries while a prompt is
+  //     running (an idle wrapper dispatches immediately), so "run it now"
+  //     could only ever answer 'busy'. The caps row declares both false; this
+  //     is the second line of defense.
+  formatQueueOp({ op, id, afterId, text } = {}) {
     if (op === 'steer' || op === 'steer-all') throw new Error('ACP v1 has no steer: a running prompt cannot be interrupted with new input — the message runs after this turn, or you can remove it');
-    if (op !== 'remove') throw new Error(`unknown queue op "${op}"`);
-    if (!id) throw new Error('queue op "remove" needs an item id');
+    if (op === 'run-now' || op === 'run-all') throw new Error('ACP v1 runs one prompt at a time: a queued message only exists while a prompt is running, so it cannot be started early — it runs as soon as this one ends');
+    if (op !== 'remove' && op !== 'reorder' && op !== 'edit') throw new Error(`unknown queue op "${op}"`);
+    if (!id) throw new Error(`queue op "${op}" needs an item id`);
+    if (op === 'reorder') {
+      if (afterId === undefined) throw new Error('queue op "reorder" needs an anchor (afterId, or null for the front of the queue)');
+      const anchor = afterId === null ? null : String(afterId);
+      if (anchor === id) throw new Error('queue op "reorder" cannot anchor an item to itself');
+      return JSON.stringify({ type: 'queue-op', op, id, afterId: anchor });
+    }
+    if (op === 'edit') {
+      if (typeof text !== 'string' || !text.trim()) throw new Error('queue op "edit" needs the new message text');
+      return JSON.stringify({ type: 'queue-op', op, id, text });
+    }
     return JSON.stringify({ type: 'queue-op', op: 'remove', id });
   }
 

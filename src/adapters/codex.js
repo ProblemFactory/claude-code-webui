@@ -6,6 +6,7 @@
  */
 
 const { BackendAdapter } = require('./base');
+const { QUEUE_VERBS } = require('../backend-caps');   // the closed verb set — the caps row and this constructor read the SAME list
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -1065,16 +1066,43 @@ class CodexAdapter extends BackendAdapter {
     return JSON.stringify({ type: 'set-effort', effort });
   }
 
-  // QUEUE OPS (inputModes {queue,steer,queueOps} all true for codex): the
+  // QUEUE OPS — every verb in codex's `inputModes.queueVerbs` row has a branch
+  // here (a declared verb with no construction branch is a RED test). The
   // wrapper owns the queue THROUGH the app-server (thread/queue/list is the
-  // truth) and executes the op — 'steer' = turn/steer into the RUNNING turn
-  // then thread/queue/delete the copy (measured: a steer does NOT dequeue),
-  // 'remove' = thread/queue/delete, 'steer-all' = the same, per item, in queue
-  // order (measured: several steers in one turn are accepted).
-  formatQueueOp({ op, id } = {}) {
-    if (op !== 'steer' && op !== 'remove' && op !== 'steer-all') throw new Error(`unknown queue op "${op}"`);
-    if (op !== 'steer-all' && !id) throw new Error(`queue op "${op}" needs an item id`);
-    return JSON.stringify({ type: 'queue-op', op, id: id || null });
+  // truth) and executes the op:
+  //   'steer'     turn/steer into the RUNNING turn, then thread/queue/delete
+  //               the copy (measured: a steer does NOT dequeue)
+  //   'remove'    thread/queue/delete
+  //   'steer-all' the same, per item, in queue order (measured: several steers
+  //               in one turn are accepted)
+  //   'reorder'   RELATIVE here (`afterId`, null = to the front); the wrapper
+  //               re-lists and computes the app-server's absolute full-order
+  //               array. This layer must NOT speak in absolute orders: a full
+  //               order composed against a stale render deletes whatever a
+  //               peer queued in between (design-harness-features §2.1).
+  //   'edit'      the new TEXT only; the wrapper rebuilds the full `input`,
+  //               preserving attachments by exclusion.
+  //   'run-now'   ONE item, and the id is MANDATORY — thread/queue/start with
+  //               no id means "drain the whole queue", so a lost id must
+  //               become an error here, never a silent run-all.
+  //   'run-all'   the deliberate, separate drain verb.
+  formatQueueOp({ op, id, afterId, text } = {}) {
+    if (!QUEUE_VERBS.includes(op)) throw new Error(`unknown queue op "${op}"`);
+    if (op === 'steer-all' || op === 'run-all') return JSON.stringify({ type: 'queue-op', op, id: null });
+    if (!id) throw new Error(`queue op "${op}" needs an item id`);
+    if (op === 'reorder') {
+      // `afterId: null` is a POSITION (the front), not a missing argument —
+      // an absent key would be an ambiguity the wrapper cannot resolve.
+      if (afterId === undefined) throw new Error('queue op "reorder" needs an anchor (afterId, or null for the front of the queue)');
+      const anchor = afterId === null ? null : String(afterId);
+      if (anchor === id) throw new Error('queue op "reorder" cannot anchor an item to itself');
+      return JSON.stringify({ type: 'queue-op', op, id, afterId: anchor });
+    }
+    if (op === 'edit') {
+      if (typeof text !== 'string' || !text.trim()) throw new Error('queue op "edit" needs the new message text');
+      return JSON.stringify({ type: 'queue-op', op, id, text });
+    }
+    return JSON.stringify({ type: 'queue-op', op, id });
   }
 
   /** Build a preview user message for buffer before JSONL arrives */

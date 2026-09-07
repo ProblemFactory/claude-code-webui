@@ -117,6 +117,10 @@ const POINTER_DRAG_PX = 2;
 // empty window (round-1 review caught the over-generalization). A NEW
 // server-side refusal opts in either by joining this set or — preferred, so
 // the client needs no release — by carrying `scope:'action'` on the frame.
+// "This session has no queue surface" — one frozen object, so every caller of
+// _queueCaps() gets the SAME shape (a missing queueVerbs key would render a
+// strip with no controls instead of no strip).
+const NO_QUEUE_CAPS = Object.freeze({ queue: false, steer: false, queueOps: false, queueVerbs: Object.freeze([]) });
 const SCOPED_REFUSAL_CODES = new Set([
   'input-rejected',        // chat-input refused (size / frame-file capability)
   'not-codex-chat',        // a codex-only action on a non-codex or dead-chat session
@@ -191,6 +195,9 @@ class ChatView {
     // baseline `queue_changed` — both arrive long before anything can queue.
     this._queue = [];
     this._queueSupported = false;
+    // WHICH verbs the running wrapper serves (null = nothing has said yet —
+    // the harness row alone then decides, exactly as before the verb table).
+    this._queueVerbsServed = null;
     this._queueChipRaf = 0;   // pending re-application of the chips (see _setQueueSupported)
 
     // Build DOM
@@ -748,7 +755,7 @@ class ChatView {
       // restores enter-to-send for those who prefer it.
       isTouch: () => !!this.app?.isTouch,
       getTouchEnterSends: () => !!this.app?.settings?.get('chat.touchEnterSends'),
-      onQueueOp: (op, id) => this._sendQueueOp(op, id),
+      onQueueOp: (op, id, extra) => this._sendQueueOp(op, id, extra),
       // Alt+Enter in the composer runs the SAME contributed command the
       // registered keybinding does (owner: one verb, rebindable by plugins).
       onSteerChord: () => runCommand(STEER_NOW_COMMAND, { view: this }),
@@ -1187,8 +1194,18 @@ class ChatView {
    *      chip that never clears and a button whose frame is dropped silently
    *      (the 2.361.1/2.364.1 skew class). */
   _queueCaps() {
-    if (!this._queueSupported) return { queue: false, steer: false, queueOps: false };
-    return getBackendMeta(this._backendId())?.caps?.inputModes || { queue: false, steer: false, queueOps: false };
+    if (!this._queueSupported) return NO_QUEUE_CAPS;
+    const backend = this._backendId();
+    const row = getBackendMeta(backend)?.caps?.inputModes;
+    if (!row) return NO_QUEUE_CAPS;
+    // ③ …AND the verb table of the RUNNING wrapper: the harness may know
+    // 'reorder' while THIS process is an older build that would drop the
+    // frame. The intersection is what the user sees, and the derived
+    // steer/queueOps view is recomputed FROM it — never carried over from the
+    // harness row, or a control could survive its own gate.
+    const served = this._queueVerbsServed;
+    const verbs = (row.queueVerbs || []).filter((v) => !served || served.includes(v));
+    return { queue: !!row.queue, steer: verbs.includes('steer'), queueOps: verbs.length > 0, queueVerbs: verbs };
   }
 
   /** This view's harness id — the ONE resolution order (live session record,
@@ -1286,10 +1303,15 @@ class ChatView {
    *  direction — re-applies the chips of every rendered message that has a
    *  queueState. The strip has no such problem (it re-renders from
    *  `_setQueue`); the chips live inside bubbles nobody rebuilds. */
-  _setQueueSupported(next) {
+  _setQueueSupported(next, verbs) {
     const val = !!next;
-    if (val === this._queueSupported) return;
+    const list = Array.isArray(verbs) ? verbs.map((v) => String(v)) : this._queueVerbsServed;
+    // The VERB LIST is part of this flag, not a second one: a wrapper can
+    // advertise more verbs without `supported` changing (an attach after a
+    // Terminate+Resume), and that flip must re-apply the chips too.
+    if (val === this._queueSupported && JSON.stringify(list) === JSON.stringify(this._queueVerbsServed)) return;
     this._queueSupported = val;
+    this._queueVerbsServed = list;
     this._refreshQueueChips();
     // both faces of the flag are owned by its ONE writer (round-3 verifier): the
     // strip used to stay correct only by caller ordering
@@ -1332,9 +1354,16 @@ class ChatView {
     return false;
   }
 
-  _sendQueueOp(op, id) {
+  /** `extra` carries the verb's own argument — {afterId} for a reorder (null
+   *  MEANS the front of the queue, so the key is only spread when the caller
+   *  supplied one) and {text} for an edit. ONE writer of the frame, for the
+   *  strip, the row keyboard and the bubble chip alike. */
+  _sendQueueOp(op, id, extra) {
     if (!this._queueOpsLive()) return;
-    this.ws.send({ type: 'queue-op', sessionId: this.sessionId, op, id: id || null });
+    const frame = { type: 'queue-op', sessionId: this.sessionId, op, id: id || null };
+    if (extra && 'afterId' in extra) frame.afterId = extra.afterId === null ? null : String(extra.afterId);
+    if (extra && typeof extra.text === 'string') frame.text = extra.text;
+    this.ws.send(frame);
   }
 
   /** Steer the queued message a bubble belongs to (the chip entry point): the
@@ -1371,7 +1400,7 @@ class ChatView {
     // Attach/create replay of the input queue — carries-the-key guard, so a
     // partial-meta path never clears a live strip. The wrapper advert is read
     // FIRST: it decides which controls the items are rendered with.
-    if ('queueSupported' in meta) this._setQueueSupported(meta.queueSupported);
+    if ('queueSupported' in meta) this._setQueueSupported(meta.queueSupported, meta.queueVerbs);
     if ('queue' in meta) this._setQueue(meta.queue);
     // Does the RUNNING wrapper serve the live style verb? Same shape as
     // queueSupported and the same reason (2.361.1/2.364.1): the harness caps
@@ -2866,7 +2895,11 @@ class ChatView {
     // A published queue IS the wrapper's in-band "I serve queue ops" advert
     // (every current wrapper emits a baseline one at boot), so a window created
     // before its sidecar existed turns its controls on here.
-    if (op.subtype === 'queue') { if (op.supported) this._setQueueSupported(true); this._setQueue(op.items); return; }
+    if (op.subtype === 'queue') { if (op.supported) this._setQueueSupported(true, op.verbs || undefined); this._setQueue(op.items); return; }
+    // The outcome of ONE queue op: the strip row ends its pending state and,
+    // on a refusal, wears the reason (the system card the normalizer also
+    // emits scrolls away — the control the user pressed must speak too).
+    if (op.subtype === 'queue-result') { this._chatInput?.setQueueOpResult(op.id, op.ok !== false, op.text || ''); return; }
     if (op.subtype === 'served-model') {
       this._statusBar.setServedModel(op.data?.model || null);
       return;

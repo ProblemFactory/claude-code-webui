@@ -1,4 +1,12 @@
 import { t } from './i18n.js';
+// The queue VERB TABLE law lives once, in the PURE server module (CJS pulled
+// into the bundle like task-color-seq/search-card): each row below declares
+// its own {queue, queueVerbs} MIRROR of src/backend-caps.js and derives the
+// {steer, queueOps} view through the SAME function, so a drifted mirror is a
+// drifted verb LIST (which scripts/test-queue-steer.mjs ① deep-compares
+// against the server row) and never a hand-copied boolean that disagrees with
+// the list next to it.
+import { deriveInputModes } from '../backend-caps.js';
 
 export const BACKEND_META = {
   claude: {
@@ -29,7 +37,7 @@ export const BACKEND_META = {
     // responseStyle MIRRORS the server's backend-caps row too (values + live);
     // the chip is drawn when `values` is non-empty and the "Restart now to
     // apply" row appears only when `live` is false.
-    caps: { fork: true, effort: true, review: false, autoResume: true, accounts: true, inputModes: { queue: true, steer: false, queueOps: false }, responseStyle: { live: false, closed: false, values: ['Concise', 'Explanatory', 'Learning', 'Proactive'] } },
+    caps: { fork: true, effort: true, review: false, autoResume: true, accounts: true, inputModes: deriveInputModes({ queue: true, queueVerbs: [] }), responseStyle: { live: false, closed: false, values: ['Concise', 'Explanatory', 'Learning', 'Proactive'] } },
     // One-line hint per response-style VALUE (same contract as effortHints:
     // English key, t() at render — the VALUE itself is protocol and is never
     // translated).
@@ -81,7 +89,7 @@ export const BACKEND_META = {
     // fork: the thread-fork RPC exists but is unwired (flips when wired).
     // fork: true since 2.369.21 — thread/fork is wired end to end (wrapper
     // CODEX_WEBUI_FORK → thread/fork; server _forkRequested per caps).
-    caps: { fork: true, effort: true, review: true, autoResume: true, quotaRefresh: 'session-rpc', accounts: true, inputModes: { queue: true, steer: true, queueOps: true }, responseStyle: { live: true, closed: true, values: ['none', 'friendly', 'pragmatic'] } },
+    caps: { fork: true, effort: true, review: true, autoResume: true, quotaRefresh: 'session-rpc', accounts: true, inputModes: deriveInputModes({ queue: true, queueVerbs: ['remove', 'steer', 'steer-all', 'reorder', 'edit', 'run-now', 'run-all'] }), responseStyle: { live: true, closed: true, values: ['none', 'friendly', 'pragmatic'] } },
     // codex Personality values (0.153.4 schema): protocol strings, hinted here.
     responseStyleHints: {
       none: 'no persona — the model\u2019s plain voice',
@@ -122,7 +130,7 @@ export const BACKEND_META = {
     brandColor: '#4ade80',
     fallbackModels: [],
     modelsFromAgent: true,
-    caps: { fork: false, effort: false, review: false, autoResume: false, accounts: false, inputModes: { queue: true, steer: false, queueOps: true }, responseStyle: { live: false, closed: true, values: [] } },
+    caps: { fork: false, effort: false, review: false, autoResume: false, accounts: false, inputModes: deriveInputModes({ queue: true, queueVerbs: ['remove', 'reorder', 'edit'] }), responseStyle: { live: false, closed: true, values: [] } },
     settingsPrefix: 'opencode',
     permissionModes: ['build', 'plan'],
     // The STORE (stopped conversations: list/open/resume/fork) runs behind a

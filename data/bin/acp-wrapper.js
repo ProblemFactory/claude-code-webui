@@ -97,6 +97,12 @@ if (!bufferFile || !metaFile || !cmd) {
 
 // ── sidecar meta (the file THIS process writes; the server's capability gate
 // reads caps from HERE — the 2.361.1/2.364.1 law) ──
+// THE VERBS THIS BUILD SERVES (ACP v1 has no queue in the protocol, so the
+// wrapper's own promptQueue is the queue and these are array ops). Read by the
+// sidecar advert AND by every `queue_changed` publication — a remote wrapper's
+// sidecar is not on the orchestrator's disk.
+const ACP_QUEUE_VERBS = ['remove', 'reorder', 'edit'];
+
 const meta = {
   pid: process.pid,
   startedAt: Date.now(),
@@ -121,11 +127,13 @@ const meta = {
   // harnesses (backend-caps peerDelivery); the verb below exists for direct
   // callers/tests and flips this advert when the lane is switched on.
   // inputQueue: ACP v1 has NO queue verb, so this wrapper's promptQueue IS the
-  // queue — it publishes `queue_changed` and serves the `queue-op` stdin verb
-  // for 'remove' only (backend-caps inputModes.steer=false: a running
-  // session/prompt cannot be injected into, and pretending otherwise is the
-  // accept-and-ignore failure).
-  caps: { frameFile: true, peerMessage: false, inputQueue: true },
+  // queue — it publishes `queue_changed` and serves the `queue-op` stdin verb.
+  // queueVerbs: remove / reorder / edit, which on a LOCAL ARRAY are three
+  // splices. NOT steer (a running session/prompt cannot be injected into) and
+  // NOT run-now/run-all (this queue only has entries WHILE a prompt runs — an
+  // idle wrapper dispatches immediately — so "run it now" could only ever
+  // answer busy). Declaring either would be the accept-and-ignore failure.
+  caps: { frameFile: true, peerMessage: false, inputQueue: true, queueVerbs: ACP_QUEUE_VERBS },
   queue: [],
 };
 
@@ -322,7 +330,7 @@ async function maybeStopNudge() {
   } finally { clearTimeout(to); if (stopCheckAbort === ac) stopCheckAbort = null; }
 }
 
-// ── THE INPUT QUEUE (queue + remove; no steer in ACP v1) ──
+// ── THE INPUT QUEUE (remove / reorder / edit; no steer in ACP v1) ──
 // promptQueue is the queue, so the wrapper is also its PUBLISHER: the client's
 // queue strip and the bubble chips read `queue_changed`, exactly as they do for
 // codex — the difference between the harnesses is a capability row, never a
@@ -337,18 +345,31 @@ function acpQueuePreview(blocks) {
   const text = String(parts.join(' ')).replace(/\s+/g, ' ').trim();
   return text.length > 120 ? text.slice(0, 119) + '…' : text;
 }
+/** The FULL text of a queued prompt (the codex wrapper's twin): the client's
+ *  edit control opens THIS, never the 120-char preview — editing a truncated
+ *  copy would silently delete the rest. Capped; an item with no `text` offers
+ *  no edit control. */
+const QUEUE_EDIT_MAX_CHARS = 20000;
+function acpQueueFullText(blocks) {
+  const parts = [];
+  for (const b of asArray(blocks)) if (b?.type === 'text' && b.text) parts.push(String(b.text));
+  return parts.join('\n');
+}
 function publishQueue() {
   const items = promptQueue.map((q) => ({
     id: q.id,
     msgId: q.opts?.msgId || '',
     preview: acpQueuePreview(q.blocks),
+    ...(!q.opts?.peer && !q.opts?.nudge && acpQueueFullText(q.blocks) && acpQueueFullText(q.blocks).length <= QUEUE_EDIT_MAX_CHARS ? { text: acpQueueFullText(q.blocks) } : {}),
     ts: q.ts || null,
     kind: q.opts?.peer ? 'peer' : q.opts?.nudge ? 'system' : 'user',
     from: q.opts?.peerFrom || null,
   }));
   meta.queue = items;
   scheduleMeta();
-  record('queue_changed', { items, turn_id: meta.activePromptId || null });
+  // `verbs` rides every publication — the in-band twin of the sidecar advert
+  // (a remote wrapper's sidecar is not on the orchestrator's disk).
+  record('queue_changed', { items, turn_id: meta.activePromptId || null, verbs: ACP_QUEUE_VERBS });
 }
 
 function drainPromptQueue() {
@@ -358,18 +379,75 @@ function drainPromptQueue() {
   runPrompt(next.blocks, next.opts).catch((e) => log('queued prompt failed: ' + e.message));
 }
 
-/** queue-op stdin verb. 'remove' only — the caps row denies steer at the ws
- *  layer and the adapter refuses it with a reason; this arm exists so a frame
- *  that somehow reaches us is REPORTED, never silently dropped. */
+/** queue-op stdin verb — remove / reorder / edit (ACP_QUEUE_VERBS). The queue
+ *  is a LOCAL ARRAY here, so all three are splices; the ws layer and the
+ *  adapter already refuse steer / run-now / run-all with their reasons, and
+ *  the arm below exists so a frame that somehow reaches us is REPORTED, never
+ *  silently dropped.
+ *  The RELATIVE `afterId` vocabulary is the codex one verbatim (afterId null =
+ *  the front) — one client control, one meaning, whatever the harness. */
 function handleQueueOp(msg) {
   const op = String(msg?.op || '');
   const id = String(msg?.id || '');
-  if (op !== 'remove') {
-    record('queue_op_result', { op, id, ok: false, reason: op === 'steer' || op === 'steer-all' ? 'not-steerable' : 'unknown-op' });
+  if (!ACP_QUEUE_VERBS.includes(op)) {
+    record('queue_op_result', {
+      op, id, ok: false,
+      reason: op === 'steer' || op === 'steer-all' ? 'not-steerable' : (op === 'run-now' || op === 'run-all' ? 'not-startable' : 'unknown-op'),
+      detail: op === 'steer' || op === 'steer-all'
+        ? 'this agent cannot inject into a running prompt — the message runs after it'
+        : (op === 'run-now' || op === 'run-all'
+          ? 'this agent runs one prompt at a time — a queued message only exists while one is running, and starts as soon as it ends'
+          : `this agent has no queue action "${op}"`),
+    });
     return;
   }
   const idx = promptQueue.findIndex((q) => q.id === id);
-  if (idx < 0) { record('queue_op_result', { op, id, ok: false, reason: 'gone' }); publishQueue(); return; }
+  if (idx < 0) { record('queue_op_result', { op, id, ok: false, reason: 'gone', detail: 'it is no longer queued' }); publishQueue(); return; }
+  if (op === 'reorder') {
+    const afterId = msg?.afterId === null || msg?.afterId === undefined ? null : String(msg.afterId);
+    const [moved] = promptQueue.splice(idx, 1);
+    if (afterId === null) promptQueue.unshift(moved);
+    else {
+      const at = promptQueue.findIndex((q) => q.id === afterId);
+      if (at < 0) {
+        // The anchor left the queue between the drag and the drop (it ran, or
+        // Stop dropped it): put the item BACK where it was and say so.
+        promptQueue.splice(idx, 0, moved);
+        record('queue_op_result', { op, id, ok: false, reason: 'anchor-gone', detail: 'the message it was dropped after is no longer queued', msg_id: moved.opts?.msgId || '' });
+        publishQueue();
+        return;
+      }
+      promptQueue.splice(at + 1, 0, moved);
+    }
+    record('queue_op_result', { op, id, ok: true, msg_id: moved.opts?.msgId || '' });
+    publishQueue();
+    return;
+  }
+  if (op === 'edit') {
+    const entry = promptQueue[idx];
+    // Another agent's words are not ours to rewrite (the codex rule, same
+    // sentence) — and a nudge entry is the server's own bookkeeping turn.
+    if (entry.opts?.peer || entry.opts?.nudge) {
+      record('queue_op_result', { op, id, ok: false, reason: 'not-editable', detail: entry.opts?.peer ? 'it was sent by another agent — you can remove it, but not rewrite it' : 'it is a VibeSpace bookkeeping message, not yours to rewrite', msg_id: entry.opts?.msgId || '' });
+      return;
+    }
+    const text = typeof msg?.text === 'string' ? msg.text : '';
+    if (!text.trim()) { record('queue_op_result', { op, id, ok: false, reason: 'empty-text', detail: 'an edited message needs some text — remove it instead', msg_id: entry.opts?.msgId || '' }); return; }
+    // BY EXCLUSION, exactly like the codex wrapper: the first text block takes
+    // the new words, every other block (image, audio, resource_link, …) stays
+    // where it is — a whitelist would delete a future ACP content type.
+    const blocks = asArray(entry.blocks);
+    const out = []; let replaced = false;
+    for (const b of blocks) {
+      if (b && b.type === 'text') { if (!replaced) { replaced = true; out.push({ type: 'text', text }); } continue; }
+      out.push(b);
+    }
+    if (!replaced) out.unshift({ type: 'text', text });
+    entry.blocks = out;
+    record('queue_op_result', { op, id, ok: true, msg_id: entry.opts?.msgId || '' });
+    publishQueue();
+    return;
+  }
   const [dropped] = promptQueue.splice(idx, 1);
   // A queued PEER message was already reported delivered — removing it must
   // hand the text back to the delivery ladder (the Stop-drop rule).

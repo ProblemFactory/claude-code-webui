@@ -3041,4 +3041,12 @@ export default {
   "{name} background service is running": "{name} 后台服务已在运行",
   "{name} keeps its conversations in its own database rather than in files, so VibeSpace cannot read a STOPPED conversation without asking {name} itself.": "{name} 把对话存在它自己的数据库里而不是文件里, 所以不问 {name} 本身, VibeSpace 读不到已停止的对话。",
   "{pct}% CPU": "{pct}% CPU",
+  "Run all now": "立即全部运行",
+  "Run the whole queue now, without waiting for the current turn": "立即运行整个队列，不等当前这一轮结束",
+  "Run this one now": "立即运行这一条",
+  "Edit this queued message": "编辑这条排队中的消息",
+  "Cancel editing": "取消编辑",
+  "Editing a queued message — send to save, Esc to cancel": "正在编辑排队中的消息 —— 发送即保存，Esc 取消",
+  "Drag to reorder (Alt+Up / Alt+Down)": "拖动可重新排序（Alt+↑ / Alt+↓）",
+  "Attachments cannot be added while editing a queued message — cancel the edit first.": "编辑排队中的消息时不能添加附件 —— 请先取消编辑。",
 };

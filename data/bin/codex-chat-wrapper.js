@@ -335,6 +335,13 @@ const outQueue = [];       // outbound JSON-RPC lines queued while the pipe is d
 let permissionMode = backendPermissionMode;
 let currentPermission = resolvePermissionMode(permissionMode);
 
+// THE VERBS THIS BUILD SERVES — one list, read by the sidecar advert (what a
+// LOCAL server reads) and by every `queue_changed` publication (what a REMOTE
+// server reads: the sidecar lives on this machine, not on the orchestrator).
+// It mirrors backend-caps `inputModes.queueVerbs` for codex; a wrapper older
+// than a verb simply never names it, and the server refuses that verb for it.
+const QUEUE_VERBS_SERVED = ['remove', 'steer', 'steer-all', 'reorder', 'edit', 'run-now', 'run-all'];
+
 const meta = {
   pid: process.pid,
   startedAt: Date.now(),
@@ -381,15 +388,17 @@ const meta = {
   // threadScoped: every recorded item carries thread_id/turn_id and foreign
   // threads never become root messages (B-7473).
   // inputQueue: this wrapper OWNS the app-server's input queue — it publishes
-  // `queue_changed` on every change and serves the `queue-op` stdin verb
-  // (steer / remove / steer-all). backend-caps `inputModes` is what the ws
-  // layer gates on; this advert is the per-PROCESS truth for a long-lived
-  // wrapper that predates the feature (the 2.361.1/2.364.1 law).
+  // `queue_changed` on every change and serves the `queue-op` stdin verb.
+  // queueVerbs: WHICH verbs this build serves (the verb table of
+  // backend-caps `inputModes.queueVerbs`). backend-caps says what the HARNESS
+  // can do; this advert is the per-PROCESS truth for a long-lived wrapper that
+  // predates a verb (the 2.361.1/2.364.1 law) — a server reading `inputQueue`
+  // with no list must assume the pre-verb-table set, never the current one.
   // responseStyle: this wrapper serves `set-response-style` and applies it
   // LIVE (thread/settings/update). backend-caps `responseStyle.live` is what
   // the ws layer + the chip gate on; this advert is the per-PROCESS truth for
   // a wrapper spawned before the feature existed.
-  caps: { peerMessage: true, frameFile: true, threadScoped: true, inputQueue: true, responseStyle: true },
+  caps: { peerMessage: true, frameFile: true, threadScoped: true, inputQueue: true, queueVerbs: QUEUE_VERBS_SERVED, responseStyle: true },
   // The response style (codex Personality) this session actually runs with.
   // '' = the user made no choice ⇒ the key is never sent and ~/.codex/config.toml
   // decides. Reported so Session Properties can name the EFFECTIVE value.
@@ -1510,16 +1519,33 @@ const completedTurns = new Set();
 // The app-server OWNS the queue; we do not keep a shadow copy of it. Measured
 // against a live 0.153.4 `codex app-server` (scripts/test-codex-p2-wrapper
 // mirrors every shape):
-//   thread/queue/add    {threadId, input, clientUserMessageId}
-//                       → {queuedSubmission:{id, input, clientUserMessageId}}
-//   thread/queue/list   {threadId} → {data:[QueuedSubmission], nextCursor}
-//   thread/queue/delete {threadId, queuedSubmissionId} → {deleted:true}
-//   turn/steer          {threadId, input, expectedTurnId, clientUserMessageId?}
-//                       → {turnId}
+//   thread/queue/add     {threadId, input, clientUserMessageId}
+//                        → {queuedSubmission:{id, input, clientUserMessageId}}
+//   thread/queue/list    {threadId, cursor?, limit?}
+//                        → {data:[QueuedSubmission], nextCursor:string|null}
+//   thread/queue/delete  {threadId, queuedSubmissionId} → {deleted:boolean}
+//   thread/queue/update  {threadId, queuedSubmissionId, input}   // input REQUIRED
+//                        → {queuedSubmission}
+//   thread/queue/reorder {threadId, queuedSubmissionIds:[string]} → {}  // FULL ORDER
+//   thread/queue/start   {threadId, queuedSubmissionId?:string|null} → {turn}
+//                        // …with NO id = "run the whole queue now"
+//   turn/steer           {threadId, input, expectedTurnId, clientUserMessageId?}
+//                        → {turnId}
 // There is NO `thread/queue/remove` on 0.153.4 — the removal verb is
-// `delete` and its field is `queuedSubmissionId` (the full ClientRequest
-// variant list, printed by the server's own unknown-method error, also carries
-// update/reorder/start, which we do not use yet).
+// `delete` and its field is `queuedSubmissionId`. Shapes above are from the
+// 0.153.4 schema dump (`codex app-server generate-json-schema`), not guesses.
+// THE TWO DISCIPLINES OF THE FULL-ORDER VERB (design-harness-features §2.1):
+//   (a) `reorder` replaces the ENTIRE order, so the list it is computed from
+//       must be paged to the END — a truncated page + a full-order replace
+//       DELETES every queued item we never read. listQueueAll() is the only
+//       reader allowed to feed it, and it reports `complete` honestly.
+//   (b) the order is computed from a FRESH list at landing time, never from
+//       what the client had on screen: the peer lane (backend-caps
+//       peerDelivery 'rpc-queue') can `queue/add` between the render and the
+//       drop, and those unknown ids keep their server-side place simply
+//       because they are IN that fresh list. The ws frame therefore speaks
+//       RELATIVE (`afterId`, null = front) and the absolute array is born
+//       here, one RPC before it is sent.
 // Two measured facts drive the steer implementation:
 //   (1) turn/steer does NOT dequeue the item, not even when the steer carries
 //      the queued item's own clientUserMessageId => we delete it ourselves, or
@@ -1564,6 +1590,7 @@ function queuePreview(input) {
   for (const item of asArray(input)) {
     if (item?.type === 'text' && item.text) parts.push(String(item.text));
     else if (item?.type === 'image' || item?.type === 'localImage') parts.push('[image]');
+    else if (item?.type === 'audio' || item?.type === 'localAudio') parts.push('[audio]');
     else if (item?.type === 'skill' && item.name) parts.push(`[skill ${item.name}]`);
     else if (item?.type === 'mention' && item.name) parts.push(`[@${item.name}]`);
   }
@@ -1571,14 +1598,29 @@ function queuePreview(input) {
   return text.length > 120 ? text.slice(0, 119) + '…' : text;
 }
 
+/** The FULL text of a queued submission (its text elements, joined). The
+ *  client's edit control opens THIS, never the 120-char `preview`: editing a
+ *  truncated copy and sending it back would silently delete the rest of the
+ *  message. Capped — a megabyte paste is not something to ship on every
+ *  `queue_changed`, and an item with no `text` field simply offers no edit
+ *  control (an honest absence beats a lossy editor). */
+const QUEUE_EDIT_MAX_CHARS = 20000;
+function queuedFullText(input) {
+  const parts = [];
+  for (const item of asArray(input)) if (item?.type === 'text' && item.text) parts.push(String(item.text));
+  return parts.join('\n');
+}
+
 function queueItemsFrom(data) {
   return asArray(data).map((q) => {
     const cid = asString(q?.clientUserMessageId);
     const known = queueMeta.get(cid) || null;
+    const full = queuedFullText(q?.input);
     return {
       id: asString(q?.id),
       msgId: known?.msgId || '',
       preview: queuePreview(q?.input),
+      ...((known?.kind || 'user') === 'user' && full && full.length <= QUEUE_EDIT_MAX_CHARS ? { text: full } : {}),
       ts: known?.ts || null,
       // 'user' = typed here; 'peer' = an agent-to-agent / job message riding
       // the SAME lane (peerDelivery 'rpc-queue'). Hiding peers would make the
@@ -1602,11 +1644,47 @@ function publishQueue(items, { force = false } = {}) {
   queueFingerprint = fp;
   meta.queue = items;
   scheduleMeta();
-  emitTaskEvent('queue_changed', { items, turn_id: meta.activeTurnId || null });
+  // `verbs` rides EVERY publication: for a REMOTE session the orchestrator
+  // cannot read this machine's sidecar, so the in-band list is the only advert
+  // it will ever see (a publication with no `verbs` = a pre-verb-table build).
+  emitTaskEvent('queue_changed', { items, turn_id: meta.activeTurnId || null, verbs: QUEUE_VERBS_SERVED });
+}
+
+/** THE FULL QUEUE, paged to the END (`nextCursor`). Returns
+ *  {rows, complete} — `complete:false` means the walk stopped early (budget /
+ *  a server that keeps handing out cursors), and the caller must decide:
+ *  publishing a partial list is a degraded but honest view, computing a FULL
+ *  ORDER from one would silently delete the unread tail. Never collapse the
+ *  two — the pre-verb-table `refreshQueue` read page 1 and threw the cursor away,
+ *  which was harmless only because nothing consumed the order.
+ *  A cursor that repeats (or a page that never ends) stops the walk as
+ *  INCOMPLETE rather than looping forever. */
+const QUEUE_LIST_MAX_PAGES = 50;
+async function listQueueAll({ timeoutMs = 15000, budgetMs = null, deadline = null } = {}) {
+  const rows = [];
+  let cursor = null, pages = 0, complete = true;
+  const seen = new Set();
+  for (;;) {
+    if (deadline && Date.now() >= deadline) { complete = false; log(`thread/queue/list: out of budget after ${pages} page(s) — the queue was read PARTIALLY`); break; }
+    const params = { threadId: meta.threadId };
+    if (cursor) params.cursor = cursor;
+    const timeout = budgetMs ? budgetMs() : timeoutMs;
+    const resp = await request('thread/queue/list', params, timeout);
+    rows.push(...asArray(resp?.data || resp?.items));
+    const next = resp?.nextCursor;
+    if (next === undefined || next === null || next === '') break;
+    cursor = String(next);
+    if (seen.has(cursor)) { complete = false; log(`thread/queue/list: the app-server repeated cursor ${cursor} — stopping, the queue was read PARTIALLY`); break; }
+    seen.add(cursor);
+    if (++pages >= QUEUE_LIST_MAX_PAGES) { complete = false; log(`thread/queue/list: ${QUEUE_LIST_MAX_PAGES} pages without an end — stopping, the queue was read PARTIALLY`); break; }
+  }
+  return { rows, complete };
 }
 
 /** Re-read the authoritative queue. Single-flight + coalescing: the app-server
- *  fires thread/queue/changed per mutation and a steer-all makes several. */
+ *  fires thread/queue/changed per mutation and a steer-all makes several.
+ *  Pages to the end: a queue longer than one page used to publish (and mirror
+ *  into the sidecar) as if the tail did not exist. */
 async function refreshQueue({ timeoutMs = 15000 } = {}) {
   if (!meta.threadId) return;
   // The deletes a Stop sweep makes each fire thread/queue/changed; listing
@@ -1620,7 +1698,7 @@ async function refreshQueue({ timeoutMs = 15000 } = {}) {
     do {
       queueRefreshAgain = false;
       const gen = queueSweepSeq;
-      const resp = await request('thread/queue/list', { threadId: meta.threadId }, timeoutMs);
+      const listed = await listQueueAll({ timeoutMs });
       // A sweep OWNS the publish while it runs — drop this answer, prune
       // nothing (the sweep ends with its own refresh).
       if (queueSweepActive) return;
@@ -1630,10 +1708,15 @@ async function refreshQueue({ timeoutMs = 15000 } = {}) {
       // this call (single-flight), so returning here would publish NOTHING and
       // leave the strip showing the removed items.
       if (gen !== queueSweepSeq) { queueRefreshAgain = true; continue; }
-      const rows = asArray(resp?.data || resp?.items);
+      const rows = listed.rows;
       const items = queueItemsFrom(rows);
-      const live = new Set(rows.map((q) => asString(q?.clientUserMessageId)));
-      for (const cid of [...queueMeta.keys()]) if (!live.has(cid)) queueMeta.delete(cid);
+      // PRUNE ONLY ON A COMPLETE READ: a partial list would evict the meta
+      // (kind 'peer', the bubble's msgId) of every item on the pages we never
+      // reached, and those items are still queued.
+      if (listed.complete) {
+        const live = new Set(rows.map((q) => asString(q?.clientUserMessageId)));
+        for (const cid of [...queueMeta.keys()]) if (!live.has(cid)) queueMeta.delete(cid);
+      }
       publishQueue(items);
     } while (queueRefreshAgain);
   } catch (e) {
@@ -1647,6 +1730,25 @@ async function refreshQueue({ timeoutMs = 15000 } = {}) {
  *  0.153.4 wire carries only {code:-32600, message} — the typed CodexErrorInfo
  *  variants (NoActiveTurn / ExpectedTurnMismatch / ActiveTurnNotSteerable) never
  *  reach the client — so the message text is the only discriminator we have. */
+/** Classify a queue-MUTATION rejection. Measured against a live 0.153.4
+ *  app-server (logged-out isolated CODEX_HOME — the queue verbs are server-side
+ *  bookkeeping and need no API):
+ *    update/delete on an id the server has drained →
+ *      "queued submission not found: <id>"        ⇒ reason 'gone' (it RAN)
+ *    reorder with an array that is not the whole queue →
+ *      "queue reorder must include every queued submission exactly once"
+ *                                                 ⇒ reason 'stale-order'
+ *      (measured 2026-09-07: a truncated full order is REFUSED, it does NOT
+ *      silently delete the missing items — which is why paging to the end
+ *      matters for the op to WORK, not to avoid data loss.)
+ *  Everything else keeps the server's own words in `detail`. */
+function classifyQueueMutationFailure(message) {
+  const m = String(message || '');
+  if (/not found/i.test(m)) return { reason: 'gone' };
+  if (/every queued submission exactly once/i.test(m)) return { reason: 'stale-order' };
+  return { reason: 'error' };
+}
+
 function classifySteerFailure(message) {
   const m = String(message || '');
   if (/cannot steer a (review|compact) turn/i.test(m)) return { reason: 'not-steerable', kind: /review/i.test(m) ? 'review' : 'compact' };
@@ -1756,16 +1858,24 @@ async function _clearQueueForStop() {
   // the user seconds, not 15s per item, before `turn/interrupt` goes out.
   const deadline = Date.now() + STOP_SWEEP_TOTAL_MS;
   const rpcBudget = () => Math.min(STOP_SWEEP_RPC_MS, Math.max(250, deadline - Date.now()));
-  let data = [];
+  let data = [], listComplete = true;
   try {
-    const resp = await request('thread/queue/list', { threadId: meta.threadId }, rpcBudget());
-    data = asArray(resp?.data || resp?.items);
+    // Paged like every other reader, inside the SAME budget: a queue longer
+    // than one page used to leave its tail untouched by Stop, silently.
+    const listed = await listQueueAll({ budgetMs: rpcBudget, deadline });
+    data = listed.rows; listComplete = listed.complete;
   } catch (e) {
     // The degrade path logs the message VERBATIM (2.284.2) and SPEAKS: an
     // unreadable queue means Stop could not clear it, which the user must know.
     log('interrupt: thread/queue/list failed: ' + e.message + ' — the queue was NOT cleared');
     emitTaskEvent('queue_op_result', { op: 'remove', id: '', ok: false, reason: 'error', detail: e.message });
     return 0;
+  }
+  if (!listComplete) {
+    // Whatever we DID read is still deleted below — but the user must not be
+    // told the queue was cleared when part of it was never even enumerated.
+    log(`interrupt: the queue could not be read to the end (${data.length} item(s) enumerated) — anything beyond that stays queued and will run`);
+    emitTaskEvent('queue_op_result', { op: 'remove', id: '', ok: false, reason: 'incomplete', detail: 'the queue could not be read to the end — anything Stop did not enumerate is still queued and will run' });
   }
   if (!data.length) return 0;
   queueSweepSeq++;
@@ -1846,14 +1956,58 @@ function interruptTurn(turnId) {
   return entry.promise;
 }
 
+/** EDIT BY EXCLUSION (design-harness-features §2.1 / owner decision 1): the
+ *  new text replaces the FIRST `text` element and every other element is
+ *  carried over UNTOUCHED, IN PLACE — image / localImage / audio / localAudio /
+ *  skill / mention, and whatever an eighth UserInput variant turns out to be.
+ *  A whitelist ("keep the kinds I know") deletes attachments the day the
+ *  protocol grows, which is exactly what `queuePreview`'s [image] / [skill …] /
+ *  [@…] markers are telling the user is in there.
+ *  `text_elements` on the replaced element is CLEARED: those byteRanges index
+ *  the OLD text buffer, so keeping them would describe spans of a string that
+ *  no longer exists. Further text elements are dropped (their content is what
+ *  the user just rewrote); an input with no text element at all gets one at
+ *  index 0, matching encodeUserInput's own order (text first, attachments
+ *  after).
+ *  @returns {Array} the full replacement `input` array. PURE. */
+function replaceQueuedText(input, text) {
+  const out = [];
+  let replaced = false;
+  for (const el of asArray(input)) {
+    if (el && el.type === 'text') {
+      if (!replaced) { replaced = true; out.push({ type: 'text', text, text_elements: [] }); }
+      continue;
+    }
+    out.push(el);
+  }
+  if (!replaced) out.unshift({ type: 'text', text, text_elements: [] });
+  return out;
+}
+
+/** The order a RELATIVE move means, computed against the FRESH server order.
+ *  `afterId === null` = the front. Ids the caller never saw (a peer add
+ *  between render and landing) are already in `ids` at their server position
+ *  and simply stay there — that is the whole reason this translation happens
+ *  here and not in the client. Returns null when the anchor is gone.
+ *  PURE. */
+function reorderedIds(ids, id, afterId) {
+  const rest = ids.filter((x) => x !== id);
+  if (afterId === null) return [id, ...rest];
+  const at = rest.indexOf(afterId);
+  if (at < 0) return null;
+  return [...rest.slice(0, at + 1), id, ...rest.slice(at + 1)];
+}
+
 async function handleQueueOp(msg) {
   const op = asString(msg?.op);
   const id = asString(msg?.id);
-  if (!meta.threadId) { emitTaskEvent('queue_op_result', { op, id, ok: false, reason: 'no-thread' }); return; }
-  let data = [];
+  if (!meta.threadId) { emitTaskEvent('queue_op_result', { op, id, ok: false, reason: 'no-thread', detail: 'the session has no codex thread yet' }); return; }
+  let data = [], listComplete = true;
   try {
-    const resp = await request('thread/queue/list', { threadId: meta.threadId }, 15000);
-    data = asArray(resp?.data || resp?.items);
+    // FRESH and to the END — every verb below reasons about the whole queue,
+    // and `reorder` REPLACES it (a partial read there deletes the tail).
+    const listed = await listQueueAll({ timeoutMs: 15000 });
+    data = listed.rows; listComplete = listed.complete;
   } catch (e) {
     log(`queue-op ${op}: thread/queue/list failed: ${e.message}`);
     emitTaskEvent('queue_op_result', { op, id, ok: false, reason: 'error', detail: e.message });
@@ -1922,7 +2076,101 @@ async function handleQueueOp(msg) {
     await refreshQueue();
     return;
   }
-  emitTaskEvent('queue_op_result', { op, id, ok: false, reason: 'unknown-op' });
+  // ── REORDER (relative in, ABSOLUTE FULL ORDER out) ──
+  if (op === 'reorder') {
+    // A full-order replace computed from a partial read would DELETE every
+    // item on the pages we never got. Refuse, loudly, with what happened.
+    if (!listComplete) {
+      log(`queue-op reorder ${id}: the queue could not be read to the end — refusing to send a full order`);
+      emitTaskEvent('queue_op_result', { op, id, ok: false, reason: 'incomplete', detail: 'the queue could not be read to the end, and reordering replaces the whole order — nothing was changed' });
+      await refreshQueue();
+      return;
+    }
+    const ids = data.map((q) => asString(q?.id)).filter(Boolean);
+    const known = queueMeta.get(asString(data.find((q) => asString(q?.id) === id)?.clientUserMessageId)) || null;
+    if (!ids.includes(id)) { emitTaskEvent('queue_op_result', { op, id, ok: false, reason: 'gone', detail: 'it is no longer queued' }); await refreshQueue(); return; }
+    const afterId = msg?.afterId === null || msg?.afterId === undefined ? null : asString(msg.afterId);
+    const order = reorderedIds(ids, id, afterId);
+    if (!order) {
+      // The item it was dropped after left the queue in the meantime (it ran,
+      // or a peer/Stop removed it). Say so — do NOT invent a position.
+      emitTaskEvent('queue_op_result', { op, id, ok: false, reason: 'anchor-gone', detail: 'the message it was dropped after is no longer queued', msg_id: known?.msgId || '' });
+      await refreshQueue();
+      return;
+    }
+    if (order.join(',') === ids.join(',')) { emitTaskEvent('queue_op_result', { op, id, ok: true, reason: 'unchanged', msg_id: known?.msgId || '' }); await refreshQueue(); return; }
+    try {
+      await request('thread/queue/reorder', { threadId: meta.threadId, queuedSubmissionIds: order }, 15000);
+      emitTaskEvent('queue_op_result', { op, id, ok: true, msg_id: known?.msgId || '' });
+    } catch (e) {
+      log(`thread/queue/reorder failed for ${id}: ${e.message}`);
+      emitTaskEvent('queue_op_result', { op, id, ok: false, ...classifyQueueMutationFailure(e.message), detail: e.message, msg_id: known?.msgId || '' });
+    }
+    await refreshQueue();
+    return;
+  }
+  // ── EDIT (text only; every other input element survives by exclusion) ──
+  if (op === 'edit') {
+    const item = data.find((q) => asString(q?.id) === id);
+    if (!item) {
+      emitTaskEvent('queue_op_result', { op, id, ok: false, reason: listComplete ? 'gone' : 'incomplete', detail: listComplete ? 'it is no longer queued' : 'the queue could not be read to the end, so that message could not be found' });
+      await refreshQueue();
+      return;
+    }
+    const cid = asString(item.clientUserMessageId);
+    const known = queueMeta.get(cid) || null;
+    // A PEER entry is another agent's words (jobs / vibespace-msg ride this
+    // same lane). Rewriting them would put text in someone else's mouth —
+    // the client hides the control too, and this is the gate that MEANS it.
+    if (known?.kind === 'peer') {
+      emitTaskEvent('queue_op_result', { op, id, ok: false, reason: 'not-editable', detail: 'it was sent by another agent — you can remove it, but not rewrite it', msg_id: known?.msgId || '' });
+      return;
+    }
+    const text = typeof msg?.text === 'string' ? msg.text : '';
+    if (!text.trim()) { emitTaskEvent('queue_op_result', { op, id, ok: false, reason: 'empty-text', detail: 'an edited message needs some text — remove it instead', msg_id: known?.msgId || '' }); return; }
+    try {
+      await request('thread/queue/update', { threadId: meta.threadId, queuedSubmissionId: id, input: replaceQueuedText(item.input, text) }, 15000);
+      emitTaskEvent('queue_op_result', { op, id, ok: true, msg_id: known?.msgId || '' });
+    } catch (e) {
+      log(`thread/queue/update failed for ${id}: ${e.message}`);
+      emitTaskEvent('queue_op_result', { op, id, ok: false, ...classifyQueueMutationFailure(e.message), detail: e.message, msg_id: known?.msgId || '' });
+    }
+    await refreshQueue();
+    return;
+  }
+  // ── RUN NOW / RUN ALL (thread/queue/start, with and without an id) ──
+  if (op === 'run-now' || op === 'run-all') {
+    // BUSY = an explicit refusal, never a wait: "it will run when this turn
+    // ends" is already true, and queueing the request behind the turn would be
+    // accept-and-ignore (2.361.4) wearing a different hat.
+    if (meta.activeTurnId) {
+      emitTaskEvent('queue_op_result', { op, id, ok: false, reason: 'busy', detail: 'a turn is running — the queue runs as soon as it ends' });
+      return;
+    }
+    if (!data.length) { emitTaskEvent('queue_op_result', { op, id, ok: false, reason: 'empty', detail: 'nothing is queued' }); await refreshQueue(); return; }
+    if (op === 'run-now') {
+      const item = data.find((q) => asString(q?.id) === id);
+      if (!item) {
+        emitTaskEvent('queue_op_result', { op, id, ok: false, reason: listComplete ? 'gone' : 'incomplete', detail: listComplete ? 'it is no longer queued' : 'the queue could not be read to the end, so that message could not be found' });
+        await refreshQueue();
+        return;
+      }
+    }
+    const known = op === 'run-now' ? (queueMeta.get(asString(data.find((q) => asString(q?.id) === id)?.clientUserMessageId)) || null) : null;
+    try {
+      // The id is only ever OMITTED for the deliberate 'run-all' verb —
+      // thread/queue/start without one drains the whole queue.
+      const params = op === 'run-now' ? { threadId: meta.threadId, queuedSubmissionId: id } : { threadId: meta.threadId };
+      await request('thread/queue/start', params, 30000);
+      emitTaskEvent('queue_op_result', { op, id, ok: true, msg_id: known?.msgId || '' });
+    } catch (e) {
+      log(`thread/queue/start failed (${op}${id ? ' ' + id : ''}): ${e.message}`);
+      emitTaskEvent('queue_op_result', { op, id, ok: false, ...classifyQueueMutationFailure(e.message), detail: e.message, msg_id: known?.msgId || '' });
+    }
+    await refreshQueue();
+    return;
+  }
+  emitTaskEvent('queue_op_result', { op, id, ok: false, reason: 'unknown-op', detail: `this agent has no queue action "${op}"` });
 }
 
 // ── SERVER REQUESTS: ONE EXPLICIT BRANCH PER METHOD (2.369.58) ──

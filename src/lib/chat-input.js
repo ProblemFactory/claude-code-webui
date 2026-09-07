@@ -27,7 +27,7 @@ export class ChatInput {
     this._getUploadDir = getUploadDir || (() => '');
     this._isTouch = isTouch || (() => false);
     this._getTouchEnterSends = getTouchEnterSends || (() => false);
-    this._onQueueOp = onQueueOp || null;   // (op, id) → ws 'queue-op'
+    this._onQueueOp = onQueueOp || null;   // (op, id, extra) → ws 'queue-op'
     // THE CHORD (2026-09-07 owner ask). `onSteerChord` routes the composer's
     // Alt+Enter through the SAME command the registered keybinding runs
     // ('chat.steerNow' — one verb, one place a plugin can rebind); without a
@@ -38,7 +38,15 @@ export class ChatInput {
     // converts it the moment the harness reports it queued.
     this._onSteerSend = onSteerSend || null;
     this._queue = [];
-    this._queueCaps = { queue: false, steer: false, queueOps: false };
+    this._queueCaps = { queue: false, steer: false, queueOps: false, queueVerbs: [] };
+    // Per-ROW transient state, keyed by the app-server's queue id:
+    // 'pending' (an op is in flight), 'refused' (its result said no, with the
+    // sentence in `title`), 'editing' (this row's text is in the textarea).
+    // A row that leaves the queue loses its state — see setQueue.
+    this._queueRowState = new Map();
+    this._editingQueueId = null;     // the row being edited, if any
+    this._editDraftBefore = null;    // what was in the textarea before editing began
+    this._queueDrag = null;          // {id, ctl, ...} while a reorder drag runs
 
     // Attachment state
     this._attachments = [];
@@ -153,6 +161,8 @@ export class ChatInput {
         }
       }
       if (e.isComposing || e.keyCode === 229) return; // IME composing
+      // Editing a queued message: Esc puts the textarea back the way it was.
+      if (e.key === 'Escape' && this._editingQueueId) { e.preventDefault(); this._cancelQueueEdit(); return; }
       // Input history: ArrowUp on empty textarea recalls previous sent message
       if (e.key === 'ArrowUp' && !this._textarea.value.trim() && this._sentHistory?.length) {
         e.preventDefault();
@@ -767,6 +777,9 @@ export class ChatInput {
 
   dispose() {
     if (this._goalTimer) { clearTimeout(this._goalTimer); this._goalTimer = null; }
+    // A reorder drag in flight owns window-level listeners — a closed window
+    // must not keep them (the per-drag controller is what makes this one line).
+    if (this._queueDrag) { try { this._queueDrag.ctl.abort(); } catch { } this._queueDrag = null; }
     if (this._stopPendingTimer) { clearTimeout(this._stopPendingTimer); this._stopPendingTimer = null; }
     if (this._draftSyncHandler) {
       const sync = getStateSync();
@@ -786,6 +799,21 @@ export class ChatInput {
     if (this._disconnected) {
       showToast(t('Disconnected — reconnecting… your draft is kept'), { type: 'error' });
       return null;
+    }
+
+    // EDITING A QUEUED MESSAGE: the send control SAVES the edit instead of
+    // posting a new message (the strip row says so while the mode is on).
+    // Attachments are not part of an edit — the wrapper preserves the queued
+    // item's own attachments by exclusion, and silently dropping newly picked
+    // ones would be the accept-and-ignore failure.
+    if (this._editingQueueId) {
+      const id = this._editingQueueId;
+      if (hasAttachments) { showToast(t('Attachments cannot be added while editing a queued message — cancel the edit first.'), { type: 'error' }); return; }
+      this._editingQueueId = null;
+      if (this._editDraftBefore !== null) { this._textarea.value = this._editDraftBefore; this._autoSize?.(); }
+      this._editDraftBefore = null;
+      this._dispatchQueueOp('edit', id, { text });
+      return;
     }
 
     // Intercept /goal command — handled by wrapper, not sent as chat message
@@ -912,10 +940,16 @@ export class ChatInput {
   }
 
   /** The input queue + what this harness lets the user DO with it.
-   *  caps = backend-caps `inputModes` projected onto the client (agent-meta). */
+   *  caps = backend-caps `inputModes` projected onto the client (agent-meta):
+   *  `queueVerbs` is the table, `steer`/`queueOps` its derived view. */
   setQueue(items, caps) {
     this._queue = Array.isArray(items) ? items : [];
-    if (caps) this._queueCaps = { queue: !!caps.queue, steer: !!caps.steer, queueOps: !!caps.queueOps };
+    if (caps) this._queueCaps = { queue: !!caps.queue, steer: !!caps.steer, queueOps: !!caps.queueOps, queueVerbs: Array.isArray(caps.queueVerbs) ? caps.queueVerbs.slice() : [] };
+    // A row that left the queue cannot still be pending/refused/edited — the
+    // republish IS the outcome (a spinner outliving its row is a lie).
+    const live = new Set(this._queue.map((it) => String(it.id || '')));
+    for (const id of [...this._queueRowState.keys()]) if (!live.has(id)) this._queueRowState.delete(id);
+    if (this._editingQueueId && !live.has(this._editingQueueId)) this._cancelQueueEdit({ silent: true });
     this._renderQueue();
     // The caps are the OTHER input to the chord and its hint, and they arrive
     // AFTER the composer is on screen (attach payload / the wrapper's baseline
@@ -923,6 +957,83 @@ export class ChatInput {
     // permanently dead bubble chip. Repaint here, so a flip in either
     // direction reaches both faces.
     this._updateSendModes();
+  }
+
+  /** The outcome of ONE queue op (the normalizer's `queue-result` meta op).
+   *  Ends the row's pending state either way; a refusal MARKS the row and
+   *  keeps the sentence on it, because the system card scrolls away. */
+  setQueueOpResult(id, ok, text) {
+    const key = String(id || '');
+    if (!key) {
+      // A BATCH verb (run-all / steer-all) names no item: its result ends the
+      // pending state of every row the dispatch marked. The reason, if any,
+      // is on the system card the normalizer emitted — marking every row
+      // 'refused' for one queue-wide refusal would be noise, but leaving them
+      // spinning would be a lie.
+      for (const [k, v] of [...this._queueRowState]) if (v?.state === 'pending') this._queueRowState.delete(k);
+      this._renderQueue();
+      return;
+    }
+    if (ok) { if (this._queueRowState.get(key)?.state !== 'editing') this._queueRowState.delete(key); }
+    else this._queueRowState.set(key, { state: 'refused', title: text || '' });
+    if (!ok && this._editingQueueId === key) this._cancelQueueEdit({ silent: true });
+    this._renderQueue();
+  }
+
+  _queueHas(verb) { return (this._queueCaps.queueVerbs || []).includes(verb); }
+
+  /** Every strip action goes through here: mark the row pending FIRST (so the
+   *  control cannot be double-fired and the user sees that it took), then
+   *  send. The pending state ends on the op's result or on the republish. */
+  _dispatchQueueOp(op, id, extra) {
+    if (id) this._queueRowState.set(String(id), { state: 'pending', title: '' });
+    else for (const it of this._queue) this._queueRowState.set(String(it.id), { state: 'pending', title: '' });
+    this._renderQueue();
+    this._onQueueOp?.(op, id || null, extra);
+  }
+
+  /** Open a queued message's FULL text in the textarea. The strip carries that
+   *  full text (never the 120-char preview — editing a truncated copy and
+   *  saving it would delete the rest of the message), and an item without one
+   *  shows no edit control at all. */
+  _beginQueueEdit(id) {
+    const item = this._queue.find((it) => String(it.id) === String(id));
+    if (!item || typeof item.text !== 'string') return;
+    if (this._editingQueueId && this._editingQueueId !== String(id)) this._cancelQueueEdit({ silent: true });
+    if (this._editDraftBefore === null) this._editDraftBefore = this._textarea.value;
+    this._editingQueueId = String(id);
+    this._queueRowState.set(String(id), { state: 'editing', title: '' });
+    this._textarea.value = item.text;
+    this._autoSize?.();
+    this._renderQueue();
+    this._textarea.focus();
+    try { this._textarea.setSelectionRange(item.text.length, item.text.length); } catch { }
+  }
+
+  _cancelQueueEdit({ silent = false } = {}) {
+    const id = this._editingQueueId;
+    this._editingQueueId = null;
+    if (id && this._queueRowState.get(id)?.state === 'editing') this._queueRowState.delete(id);
+    if (this._editDraftBefore !== null) { this._textarea.value = this._editDraftBefore; this._autoSize?.(); }
+    this._editDraftBefore = null;
+    this._renderQueue();
+    if (!silent) this._textarea.focus();
+  }
+
+  /** Move a row one place by KEYBOARD (Alt+Up / Alt+Down on a focused row) —
+   *  the SAME relative frame the drag sends, so the two paths cannot drift. A
+   *  drag handle with no keyboard equivalent is a control half the users
+   *  cannot reach. */
+  _moveQueueRow(id, delta) {
+    if (!this._queueHas('reorder')) return;
+    const ids = this._queue.map((it) => String(it.id));
+    const from = ids.indexOf(String(id));
+    if (from < 0) return;
+    const to = from + delta;
+    if (to < 0 || to >= ids.length) return;
+    // afterId = the row it lands BEHIND (null = the front of the queue).
+    const afterId = to === 0 ? null : (delta < 0 ? ids[to - 1] : ids[to]);
+    this._dispatchQueueOp('reorder', String(id), { afterId });
   }
 
   _renderQueue() {
@@ -937,50 +1048,159 @@ export class ChatInput {
     // COLLAPSED to its header and a chevron toggles it (per-view memory only).
     const collapsed = this._queueCollapsed ?? (items.length > ChatInput.QUEUE_COLLAPSE_AT);
     strip.classList.toggle('chat-queue-collapsed', collapsed);
-    strip.innerHTML = ChatInput.queueStripHtml(items, this._queueCaps, { collapsed });
+    strip.innerHTML = ChatInput.queueStripHtml(items, this._queueCaps, this._queueRowState, { collapsed });
     const toggle = strip.querySelector('.chat-queue-toggle');
     if (toggle) toggle.onclick = (e) => { e.stopPropagation(); this._queueCollapsed = !collapsed; this._renderQueue(); };
     strip.querySelectorAll('[data-queue-op]').forEach((btn) => {
       btn.onclick = (e) => {
         e.stopPropagation();
-        this._onQueueOp?.(btn.dataset.queueOp, btn.dataset.queueId || null);
+        const op = btn.dataset.queueOp, id = btn.dataset.queueId || null;
+        // 'edit' is a LOCAL mode (open the text), not a frame — the frame goes
+        // out when the user sends. 'edit-cancel' is purely local too.
+        if (op === 'edit') { this._beginQueueEdit(id); return; }
+        if (op === 'edit-cancel') { this._cancelQueueEdit(); return; }
+        this._dispatchQueueOp(op, id);
       };
     });
-    // Enter on a focused row steers it (the row itself is the target — the
-    // buttons handle their own Enter as ordinary button activation).
+    // Enter on a focused row steers it; Alt+Up/Down is the keyboard reorder
+    // (the buttons handle their own Enter as ordinary button activation).
     strip.querySelectorAll('.chat-queue-item').forEach((row) => {
       row.onkeydown = (e) => {
-        if (e.key !== 'Enter' || e.target !== row) return;
+        if (e.target !== row) return;
+        const id = row.dataset.queueId || null;
+        if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+          e.preventDefault();
+          this._moveQueueRow(id, e.key === 'ArrowUp' ? -1 : 1);
+          return;
+        }
+        if (e.key !== 'Enter') return;
         e.preventDefault();
-        if (this._queueCaps.steer) this._onQueueOp?.('steer', row.dataset.queueId || null);
+        if (this._queueHas('steer')) this._dispatchQueueOp('steer', id);
+      };
+    });
+    if (this._queueHas('reorder')) this._bindQueueDrag(strip);
+  }
+
+  /** POINTER-event drag reorder (never HTML5 DnD: this strip lives inside a
+   *  window whose own drag machinery would fight a native drag image, and
+   *  touch has no HTML5 DnD at all). Moves are rAF-coalesced like every other
+   *  drag in the app, and the listeners hang on a PER-DRAG AbortController —
+   *  a per-render one tears its own listeners down MID-DRAG (the
+   *  listener-lifecycle law). */
+  _bindQueueDrag(strip) {
+    strip.querySelectorAll('[data-queue-drag]').forEach((grip) => {
+      grip.onpointerdown = (e) => {
+        if (e.button != null && e.button !== 0) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const id = String(grip.dataset.queueDrag || '');
+        const rows = [...strip.querySelectorAll('.chat-queue-item')];
+        const ids = this._queue.map((it) => String(it.id));
+        const ctl = new AbortController();
+        const drag = { id, ctl, y: e.clientY, raf: 0, afterId: undefined, moved: false };
+        this._queueDrag = drag;
+        const apply = () => {
+          drag.raf = 0;
+          // The row it would land BEHIND: the last OTHER row whose midpoint is
+          // above the pointer. null = the front of the queue.
+          let afterId = null;
+          for (const row of rows) {
+            if (row.dataset.queueId === id) continue;
+            const r = row.getBoundingClientRect();
+            if (drag.y > r.top + r.height / 2) afterId = row.dataset.queueId;
+          }
+          drag.afterId = afterId;
+          for (const row of rows) {
+            row.classList.toggle('chat-queue-dragging', row.dataset.queueId === id);
+            row.classList.toggle('chat-queue-drop-after', afterId != null && row.dataset.queueId === afterId);
+          }
+          strip.classList.toggle('chat-queue-drop-front', afterId === null);
+        };
+        const onMove = (ev) => {
+          drag.y = ev.clientY;
+          if (Math.abs(ev.clientY - e.clientY) > 3) drag.moved = true;
+          if (!drag.raf) drag.raf = (typeof requestAnimationFrame === 'function' ? requestAnimationFrame(apply) : setTimeout(apply, 16));
+        };
+        const finish = (send) => {
+          if (drag.raf) { try { cancelAnimationFrame(drag.raf); } catch { } drag.raf = 0; }
+          ctl.abort();
+          this._queueDrag = null;
+          for (const row of rows) row.classList.remove('chat-queue-dragging', 'chat-queue-drop-after');
+          strip.classList.remove('chat-queue-drop-front');
+          if (!send || !drag.moved || drag.afterId === undefined) return;
+          // A drop that lands where the row already is sends NOTHING (a no-op
+          // reorder still costs an RPC, a republish and a pending flash).
+          // Where the row would END UP vs where it is now: dropping a row back
+          // onto its own place sends nothing (a no-op reorder still costs an
+          // RPC, a republish and a pending flash).
+          const at = ids.indexOf(id);
+          const landing = drag.afterId === null ? 0 : ids.filter((x) => x !== id).indexOf(String(drag.afterId)) + 1;
+          if (landing === at) return;
+          this._dispatchQueueOp('reorder', id, { afterId: drag.afterId });
+        };
+        window.addEventListener('pointermove', onMove, { signal: ctl.signal });
+        window.addEventListener('pointerup', () => finish(true), { signal: ctl.signal });
+        window.addEventListener('pointercancel', () => finish(false), { signal: ctl.signal });
       };
     });
   }
 
   /** PURE markup for the strip (DOM-free testable; every interpolation escaped
-   *  — a queue preview is message text and syncs to every client). */
+   *  — a queue preview is message text and syncs to every client). Controls
+   *  come from `caps.queueVerbs`, the harness's verb table INTERSECTED with
+   *  what the running wrapper serves: a control that is rendered is a control
+   *  the server will honour. `rowState` (id → {state, title}) paints
+   *  pending / refused / editing. */
   /** More queued items than this ⇒ the strip starts collapsed to its header. */
   static get QUEUE_COLLAPSE_AT() { return 8; }
 
-  static queueStripHtml(items, caps = {}, { collapsed = false } = {}) {
+  static queueStripHtml(items, caps = {}, rowState = null, { collapsed = false } = {}) {
+    const verbs = caps.queueVerbs || [];
+    const has = (v) => verbs.includes(v);
+    const stateOf = (id) => (rowState && typeof rowState.get === 'function' ? rowState.get(String(id)) : (rowState ? rowState[String(id)] : null)) || null;
+    const btn = (op, id, icon, label, cls = '') => `<button type="button" class="chat-queue-btn${cls ? ' ' + cls : ''}" data-queue-op="${op}"${id ? ` data-queue-id="${escHtml(String(id))}"` : ''} title="${escHtml(label)}" aria-label="${escHtml(label)}">${icon}</button>`;
     const toggle = items.length > ChatInput.QUEUE_COLLAPSE_AT || collapsed
       ? `<button type="button" class="chat-queue-toggle" aria-expanded="${collapsed ? 'false' : 'true'}" title="${escHtml(collapsed ? t('Show the queued messages') : t('Hide the queued messages'))}">${collapsed ? UI_ICONS.chevronDown : UI_ICONS.chevronUp}</button>`
       : '';
     const head = `<div class="chat-queue-head">${UI_ICONS.queue}<span>${escHtml(t('{n} queued — runs after this turn', { n: items.length }))}</span>${toggle}${
-      caps.steer && items.length > 1
+      has('run-all')
+        ? `<button type="button" class="chat-queue-all" data-queue-op="run-all" title="${escHtml(t('Run the whole queue now, without waiting for the current turn'))}">${UI_ICONS.playAll}<span>${escHtml(t('Run all now'))}</span></button>`
+        : ''
+    }${
+      has('steer-all') && items.length > 1
         ? `<button type="button" class="chat-queue-all" data-queue-op="steer-all" title="${escHtml(t('Inject every queued message into the running turn, in order'))}">${UI_ICONS.bolt}<span>${escHtml(t('Steer all'))}</span></button>`
         : ''
     }</div>`;
     const rows = items.map((it) => {
       const id = escHtml(String(it.id || ''));
+      const st = stateOf(it.id);
       const from = it.kind === 'peer' && it.from ? `<span class="chat-queue-from">${escHtml(String(it.from))}</span>` : '';
-      const steer = caps.steer
-        ? `<button type="button" class="chat-queue-btn" data-queue-op="steer" data-queue-id="${id}" title="${escHtml(t('Steer now — the agent sees it at its next reply'))}" aria-label="${escHtml(t('Steer now — the agent sees it at its next reply'))}">${UI_ICONS.bolt}</button>`
+      // The drag handle is chrome for a pointer; Alt+Up/Down on the focused
+      // row is the keyboard path, and the title says so.
+      const grip = has('reorder')
+        ? `<span class="chat-queue-grip" data-queue-drag="${id}" title="${escHtml(t('Drag to reorder (Alt+Up / Alt+Down)'))}" aria-hidden="true">${UI_ICONS.grip}</span>`
         : '';
-      return `<div class="chat-queue-item" tabindex="0" data-queue-id="${id}">${from}<span class="chat-queue-preview">${escHtml(String(it.preview || ''))}</span>${steer}<button type="button" class="chat-queue-btn chat-queue-btn-remove" data-queue-op="remove" data-queue-id="${id}" title="${escHtml(t('Remove'))}" aria-label="${escHtml(t('Remove'))}">${UI_ICONS.close}</button></div>`;
+      // EDIT is offered only for a message that is (a) YOURS — rewriting
+      // another agent's words would misattribute them, and the wrapper
+      // refuses it too — and (b) carried in FULL by the wrapper; the preview
+      // is truncated and saving it back would cut the message down.
+      const edit = has('edit') && it.kind !== 'peer' && typeof it.text === 'string'
+        ? (st?.state === 'editing'
+          ? btn('edit-cancel', it.id, UI_ICONS.close, t('Cancel editing'), 'chat-queue-btn-editing')
+          : btn('edit', it.id, UI_ICONS.pencil, t('Edit this queued message')))
+        : '';
+      const runNow = has('run-now') ? btn('run-now', it.id, UI_ICONS.play, t('Run this one now')) : '';
+      const steer = has('steer') ? btn('steer', it.id, UI_ICONS.bolt, t('Steer now — the agent sees it at its next reply')) : '';
+      const remove = has('remove') ? btn('remove', it.id, UI_ICONS.close, t('Remove'), 'chat-queue-btn-remove') : '';
+      const stateAttr = st?.state ? ` data-queue-state="${escHtml(st.state)}"` : '';
+      const stateTitle = st?.title ? ` title="${escHtml(String(st.title))}"` : '';
+      return `<div class="chat-queue-item" tabindex="0" data-queue-id="${id}"${stateAttr}${stateTitle}>${grip}${from}<span class="chat-queue-preview">${escHtml(String(it.preview || ''))}</span>${edit}${runNow}${steer}${remove}</div>`;
     }).join('');
+    const editing = items.some((it) => stateOf(it.id)?.state === 'editing')
+      ? `<div class="chat-queue-editing">${escHtml(t('Editing a queued message — send to save, Esc to cancel'))}</div>`
+      : '';
     // The body is the ONLY thing that scrolls; a collapsed strip omits it.
-    return head + (collapsed ? '' : `<div class="chat-queue-body">${rows}</div>`);
+    return head + (collapsed ? '' : `<div class="chat-queue-body">${rows}</div>`) + editing;
   }
 
   _updateTodoDisplay() {

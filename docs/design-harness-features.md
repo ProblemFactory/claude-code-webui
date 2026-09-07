@@ -103,12 +103,20 @@
 | 批 | 内容 | 依赖 |
 |---|---|---|
 | **B1 诚实性 + 孪生**（全 S） | §2.2 三层面包屑 · §2.3 item 联合体普查 · §2.4 personality · §2.10 tombstone · §2.13 caps 门收口 | 无 |
-| **B2 队列动词**（owner 已决，M） | §2.1 全套 | 无（schema 已 dump） |
+| **B2 队列动词**（✅ 2026-09-07） | §2.1 全套 | 无（schema 已 dump） |
 | **B3 回合真相**（S+M） | §2.5 turnState + 逐工具集合 · §2.11 compact_progress · §2.6 init 帧加宽 + commands_changed · §2.7 ServerRequest 分发 | 无 |
 | **B4 抽象落地**（M–L） | §3.2 checkpoints（先 conversation）· §3.3 questions · §2.8 changes · §2.9 opencode acp --port | B3（turnState 是 checkpoints 的前置） |
 | **B5 生态**（M–L，各带决策） | §2.12 用户通道工具 · §2.14 速记表各项 · §3.7 工具通道 · gemini · worktree | 各自独立 |
 
-### 2.1 codex 队列动词 reorder / edit / run-now / run-all —— owner 已决，M
+### 2.1 codex 队列动词 reorder / edit / run-now / run-all —— ✅ 已落地 2026-09-07（owner 决策 (a)）
+
+> **状态（2026-09-07 实装）**：七动词表 `queueVerbs` 落在 backend-caps（旧的 `{steer,queueOps}` 布尔降为派生视图，客户端镜像用同一个 `deriveInputModes`）；ws 帧走相对语义并按动词表 + 运行中 wrapper 的动词广告双重门控；codex wrapper 里 `listQueueAll()`（翻完 `nextCursor`）/ `reorderedIds()` / `replaceQueuedText()` 三个纯函数把相对意图翻成 RPC 的绝对形状；ACP wrapper 也上了 `reorder`/`edit`（本地数组三个 splice），但 `run-now`/`run-all` 按**结构性理由**声明为 false——那条队列只在 prompt 运行期间存在，"现在就跑"只能永远答 busy。门：test-queue-steer 274（含真 0.153.4 app-server 腿 + 真浏览器 trusted 指针拖拽腿）/ test-codex-p2-wrapper 220（分页 stub + 背着 wrapper 注入的条目）/ test-acp-harness 114。
+>
+> **本轮实测把设计里两条断言改写了（证据优先）**：
+> ① 「分页截断 + 全序替换 = **静默删项**」**不成立**——0.153.4 对不完整的全序数组回 `-32600 queue reorder must include every queued submission exactly once`，是**大声拒收**而不是静默删除。翻完分页仍然是硬性纪律，但理由变成「不翻完这个动词根本不工作」，而不是「会丢数据」。分页本身也确实是真的：`limit:1` 实测回 `nextCursor:"1"`，游标可继续。
+> ② 队列动词需要 `initialize` 带 `capabilities.experimentalApi`（wrapper 一直带着；不带则每个 queue 方法回 "requires experimentalApi capability"）。另外实测到一条影响 run-now/run-all 价值判断的事实：**空闲线程上的 `thread/queue/add` 会被 app-server 立刻 drain 成一个 turn**，所以「空闲且队列非空」基本只出现在**恢复(resume)回来的线程**上——这正是这两个动词真正有用的场景，忙时一律明确拒绝。
+> 验证成本为零的做法（本轮用的）：一次性 `CODEX_HOME` + **未登录**跑真 app-server——队列动词是服务端簿记，不需要 API；app-server 自己 drain 出来的那个 turn 因 401 立刻死掉，零 token。测试腿自己断言从未发出 `turn/start` / `thread/queue/start`。
+
 
 **现状**。wrapper 今天用 `thread/queue/{add,list,delete}` + `turn/steer`（codex-chat-wrapper.js:1259-1272 有实测 census；:1390 steer 成功后自己 delete，因为 steer **不出队**）。ws 门在 ws-handler.js:552-583，adapter 三份 `formatQueueOp`（codex.js:1059 / claude-code.js:298 / acp.js:86），客户端 strip 在 chat-input.js:741 `queueStripHtml`（PURE、DOM-free 可测）。
 
@@ -313,7 +321,7 @@ inputModes: {
 
 **分层词汇**是这条抽象的核心：**ws 帧说相对语义**（`afterId` / `text`），**wrapper 说 RPC 的绝对形状**（全序 `queuedSubmissionIds` / 整包 `input` / 可空 `queuedSubmissionId`）。理由不是「参数名没 dump 出来」（已经 dump 了），而是：全序数组在多写者队列上是**竞态形状**，相对锚点才是用户意图的忠实表达，翻译与归并必须在**拿得到新鲜队列的那一层**做。同理，`edit` 的「保留」必须是**排除法**（保留一切不是被替换 text 元素的东西），不是白名单——白名单在 `UserInput` 加第八个变体的那天会静默删数据。
 
-四家现状：claude `[]`（CLI 自己拥有队列，既不发布也不接管——**诚实的空**）· codex 全七个 · opencode/ACP `['remove']`（ACP v1 无 steer，adapters/acp.js:86 的拒绝理由已写得很好，照旧）· gemini `[]`。
+四家现状（✅ 2026-09-07 实装）：claude `[]`（CLI 自己拥有队列，既不发布也不接管——**诚实的空**）· codex 全七个 · opencode/ACP `['remove','reorder','edit']`（比原计划多两个：promptQueue 是本地数组，重排/改写就是 splice；**run-now/run-all 仍然是 false，且理由是结构性的**——该队列只在 prompt 运行期间有条目，"立刻跑"只能答 busy，声明它就是 accept-and-ignore）· gemini `[]`。派生律 `steer === verbs.includes('steer')` / `queueOps === verbs.length>0` 由 `deriveInputModes()`（PURE，服务端与客户端镜像**共用同一个函数**）保证，test-queue-steer ① 对两边逐行钉。运行中 wrapper 还有自己的一层动词广告（sidecar `caps.queueVerbs` + 每条 `queue_changed` 的 `verbs`，远端会话只能看到后者），只报 `inputQueue` 不报列表的旧 wrapper 按 `remove/steer/steer-all` 对待——旧进程既不能被问它会静默丢弃的动词，也不能丢掉它本来就服务的动词。
 
 ### 3.2 checkpoints —— 回溯（新，四家里三家有）
 

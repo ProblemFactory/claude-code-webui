@@ -74,6 +74,12 @@ export const UI_ICONS = {
   close:     _s('<path d="M4 4l8 8M12 4l-8 8"/>'),
   // the input queue: messages waiting behind the running turn
   queue:     _s('<path d="M2.5 4h11M2.5 8h11M2.5 12h7"/>'),
+  // Queue-row controls (§17: SVG, never a ✎/▶/⠿ text glyph). grip = the
+  // drag handle, pencil = edit the queued text, playAll = run the WHOLE queue
+  // now (deliberately different from `play`, which runs ONE item).
+  grip:      _s('<circle cx="6" cy="4" r="1.1" fill="currentColor" stroke="none"/><circle cx="10" cy="4" r="1.1" fill="currentColor" stroke="none"/><circle cx="6" cy="8" r="1.1" fill="currentColor" stroke="none"/><circle cx="10" cy="8" r="1.1" fill="currentColor" stroke="none"/><circle cx="6" cy="12" r="1.1" fill="currentColor" stroke="none"/><circle cx="10" cy="12" r="1.1" fill="currentColor" stroke="none"/>'),
+  pencil:    _s('<path d="M11.3 2.3l2.4 2.4-8 8-3.2.8.8-3.2z"/><path d="M10 3.6l2.4 2.4"/>'),
+  playAll:   _s('<path d="M3 3.5l5 4.5-5 4.5z" fill="currentColor" stroke="none"/><path d="M8.5 3.5l5 4.5-5 4.5z" fill="currentColor" stroke="none"/>'),
   // Codex multi-agent collab rows (B-7473): direction is an ICON, never a
   // glyph/emoji (§17) — inbound report, outbound message, spawn, lifecycle dot
   agentIn:   _s('<path d="M14 8H4"/><path d="M8 4L4 8l4 4"/><path d="M2 2v12"/>'),

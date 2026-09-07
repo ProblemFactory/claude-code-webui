@@ -1813,6 +1813,9 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
             // controls on. Guessing 'true' here is the skew bug in miniature —
             // and nothing can be queued before the first turn anyway.
             queueSupported: false,
+            // Which queue verbs the (not-yet-written-sidecar) wrapper serves:
+            // nothing yet, for the same reason as `queueSupported: false`.
+            queueVerbs: [],
             // NO `responseStyleLive` here, deliberately: the sidecar that
             // adverts it is written seconds later, and the client's third
             // state (undefined = "not told yet") is the honest one — it TRIES

@@ -134,6 +134,7 @@ class AcpMessageManager {
     this._queue = [];                     // the wrapper's promptQueue, as published
     this._queuedMsgIds = new Set();       // bubbles currently wearing a 'queued' chip
     this._queuePublished = false;         // has this wrapper ever published a queue? (in-band capability signal)
+    this._queueVerbs = null;              // …and the verb list that publication named
     this.toolCards = new Map();           // toolCallId → message id
     this.pendingApprovals = new Map();    // requestId → {msgId, permission}
     this.streams = new Map();             // `${kind}:${messageId}` → message id (open agent/thought streams)
@@ -179,6 +180,7 @@ class AcpMessageManager {
   goalState() { return this._goalState; }      // ACP has no goal loop (stub — the status bar shows nothing)
   queueState() { return this._queue || []; }   // the input queue (attach payload)
   queuePublished() { return !!this._queuePublished; } // the RUNNING wrapper publishes a queue (pairs with sidecar caps.inputQueue)
+  queueVerbsPublished() { return this._queueVerbs || null; } // …and WHICH verbs it named (null = a pre-verb-table wrapper); the only advert a remote session has
   taskState() {
     return { tasks: {}, todos: Array.isArray(this._todos) ? this._todos : [] };
   }
@@ -355,19 +357,50 @@ class AcpMessageManager {
     const items = Array.isArray(rec.items) ? rec.items : [];
     this._queue = items;
     this._queuePublished = true;
+    if (Array.isArray(rec.verbs)) this._queueVerbs = rec.verbs.map((v) => String(v));
     const live = new Set(items.map((it) => String(it.msgId || '')).filter(Boolean));
     for (const it of items) this._stampQueueChip(it.msgId, 'queued', emit);
     for (const msgId of [...this._queuedMsgIds]) if (!live.has(msgId)) this._stampQueueChip(msgId, null, emit);
-    if (emit) this._emit({ op: 'meta', subtype: 'queue', items, supported: true });
+    if (emit) this._emit({ op: 'meta', subtype: 'queue', items, supported: true, verbs: this._queueVerbs || null });
   }
 
+  /** Same contract as the codex normalizer: a `meta` op for the strip (so a
+   *  pending row always ends), a chip transition only for the verbs that
+   *  change what a bubble MEANS, and a visible card for every failure.
+   *  The sentences are this harness's own — "cannot steer" here is a property
+   *  of ACP v1, not of a turn kind — so they stay next to the wrapper that
+   *  produces the reasons rather than sharing codex's switch. */
   _processQueueOpResult(rec, emit) {
-    if (rec.ok !== false) { this._stampQueueChip(rec.msg_id || rec.msgId, rec.op === 'remove' ? 'removed' : 'steered', emit); return; }
-    const text = rec.reason === 'gone' ? 'That message is no longer queued — it already ran.'
-      : rec.reason === 'not-steerable' ? 'This agent cannot steer a running turn — the message runs when this turn ends.'
-      : `Could not ${rec.op === 'remove' ? 'remove' : 'steer'} the queued message${rec.detail ? `: ${rec.detail}` : ''}.`;
+    const ok = rec.ok !== false;
+    const text = ok ? '' : AcpMessageManager.queueOpFailureText(rec);
+    // …with an empty id for a verb that names no item (the codex twin's rule).
+    if (emit) this._emit({ op: 'meta', subtype: 'queue-result', queueOp: rec.op, id: String(rec.id || ''), ok, reason: rec.reason || null, text: text || null });
+    if (ok) {
+      // 'reorder'/'edit' leave the bubble a queued message of yours — only a
+      // removal changes what it means. (ACP has no steer.)
+      if (rec.op === 'remove') this._stampQueueChip(rec.msg_id || rec.msgId, 'removed', emit);
+      return;
+    }
     const msg = this._create({ role: 'system', content: [{ type: 'system_info', text }], noticeKind: 'notice' });
     if (emit) this._emit({ op: 'create', message: msg });
+  }
+
+  /** PURE: the sentence for a failed ACP queue op (every branch says what is
+   *  true for the message NOW). */
+  static queueOpFailureText(rec) {
+    switch (rec.reason) {
+      case 'gone': return 'That message is no longer queued — it already ran.';
+      case 'not-steerable': return 'This agent cannot steer a running turn — the message runs when this turn ends.';
+      case 'not-startable': return 'This agent runs one prompt at a time — the queued message starts as soon as the current one ends.';
+      case 'not-editable': return 'That message is not yours to rewrite — you can remove it instead.';
+      case 'anchor-gone': return 'The message it was dropped after is no longer queued — nothing was moved.';
+      case 'empty-text': return 'An edited message needs some text — remove it instead.';
+      case 'unknown-op': return `Unsupported queue action "${rec.op}".`;
+      default: {
+        const what = rec.op === 'remove' ? 'remove' : rec.op === 'reorder' ? 'move' : rec.op === 'edit' ? 'edit' : 'steer';
+        return `Could not ${what} the queued message${rec.detail ? `: ${rec.detail}` : ''}.`;
+      }
+    }
   }
 
   _ensureInit(emit, source) {

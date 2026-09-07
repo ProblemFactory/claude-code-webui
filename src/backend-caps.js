@@ -39,19 +39,42 @@
 //   'stash-only' — no live lane; messages queue for next-turn injection.
 // inputModes names what a SEND DURING A TURN can do on this harness — the
 // queue/steer surface (ws 'queue-op', the client's queue strip and the bubble
-// chip all gate on THIS, never on a backend id):
-//   queue     — a message sent mid-turn is HELD and runs after the turn, and
-//               the harness REPORTS that state back to us (a CLI that queues
-//               silently still counts: claude's own stdin queue is real, it
-//               just has no readable state — see queueOps).
-//   steer     — a held message can be INJECTED into the running turn so the
-//               agent sees it at its next reply (codex `turn/steer`; measured
-//               on 0.153.4: several steers per turn are accepted, and a steer
-//               does NOT remove the queued copy — the wrapper deletes it).
-//   queueOps  — we can enumerate and MUTATE the queue (remove/steer an item).
-//               false for claude: the CLI owns the queue, publishes no list
-//               and takes no removal — offering a control we cannot honour is
-//               the accept-and-ignore failure the 2.361.4 lesson names.
+// chip all gate on THIS, never on a backend id). A row declares TWO facts:
+//   queue      — a message sent mid-turn is HELD and runs after the turn, and
+//                the harness REPORTS that state back to us (a CLI that queues
+//                silently still counts: claude's own stdin queue is real, it
+//                just has no readable state — see queueVerbs).
+//   queueVerbs — THE VERB TABLE (design-harness-features §3.1): the closed set
+//                of queue actions this harness actually SERVES. Adding a verb
+//                is one array entry + its three implementations (adapter
+//                frame, wrapper handler, client control), never a new boolean
+//                on five call sites.
+// The old `{steer, queueOps}` booleans are kept as a DERIVED VIEW of that list
+// (deriveInputModes below, materialized once at module load) so the existing
+// consumers keep reading what they always read — but there is exactly ONE
+// place to edit, and scripts/test-queue-steer.mjs ① pins the derivation law
+// (steer === verbs.includes('steer'), queueOps === verbs.length > 0) on both
+// this row AND the client's mirror in src/lib/agent-meta.js.
+//   'remove'    — drop a queued item (it never runs).
+//   'steer'     — INJECT it into the running turn so the agent sees it at its
+//                 next reply (codex `turn/steer`; measured on 0.153.4: several
+//                 steers per turn are accepted, and a steer does NOT remove
+//                 the queued copy — the wrapper deletes it).
+//   'steer-all' — the same, for every queued item in order.
+//   'reorder'   — move an item (ws frame: RELATIVE `afterId`; the wrapper
+//                 translates it into the app-server's absolute full-order
+//                 array — the two layers deliberately do not share vocabulary,
+//                 because a full order computed on a stale render would delete
+//                 whatever a peer queued in between).
+//   'edit'      — rewrite the TEXT of a queued item, preserving every other
+//                 input element by exclusion (never a whitelist).
+//   'run-now'   — run ONE queued item immediately (idle thread only).
+//   'run-all'   — run the whole queue immediately (idle thread only). A
+//                 SEPARATE verb, never run-now without an id: one lost id
+//                 would otherwise drain the queue.
+// A harness that declares a verb it cannot construct is a RED test, so
+// "offering a control we cannot honour" (the 2.361.4 accept-and-ignore
+// failure) is structurally impossible rather than a review promise.
 // responseStyle names the harness's "how should the agent talk" knob and,
 // crucially, WHEN it can be set (2.369.58 — the chip's "restart to apply" row
 // gates on `live`, never on a backend id):
@@ -79,6 +102,20 @@
 // choice" and the key is then NEVER sent — the agent keeps whatever its own
 // config file says. codex's 'none' is a real, DIFFERENT value ("no
 // personality"), so it can only arrive from an explicit pick.
+const QUEUE_VERBS = Object.freeze(['remove', 'steer', 'steer-all', 'reorder', 'edit', 'run-now', 'run-all']);
+
+/** The derived view of a queue verb table. PURE, shared with the CLIENT
+ *  (src/lib/agent-meta.js imports it — a PURE module is bundled directly), so
+ *  the LAW lives in one place even though each side declares its own row. */
+function deriveInputModes(row) {
+  const verbs = Object.freeze((row && Array.isArray(row.queueVerbs) ? row.queueVerbs : []).filter((v) => QUEUE_VERBS.includes(v)));
+  return Object.freeze({
+    queue: !!(row && row.queue),
+    steer: verbs.includes('steer'),
+    queueOps: verbs.length > 0,
+    queueVerbs: verbs,
+  });
+}
 const BACKEND_CAPS = {
   claude: {
     pool: true,
@@ -90,8 +127,9 @@ const BACKEND_CAPS = {
     fork: true,                   // --fork-session (+ --resume-session-at for a mid-conversation fork)
     streamProtocol: 'stream-json',
     peerDelivery: 'cli-inbox',
-    // The CLI queues stdin messages itself and reports nothing about it.
-    inputModes: { queue: true, steer: false, queueOps: false },
+    // The CLI queues stdin messages itself and reports nothing about it —
+    // an HONEST EMPTY verb table, not a missing feature.
+    inputModes: { queue: true, queueVerbs: [] },
     // --settings outputStyle, read once at spawn (stream-json has no
     // /output-style verb) ⇒ a change needs a restart.
     responseStyle: { live: false, closed: false, values: ['Concise', 'Explanatory', 'Learning', 'Proactive'] },
@@ -106,10 +144,11 @@ const BACKEND_CAPS = {
     fork: true,                   // thread/fork (whole-thread fork; the wrapper sends it when CODEX_WEBUI_FORK=1)
     streamProtocol: 'codex-events',
     peerDelivery: 'rpc-queue',
-    // thread/queue/{add,list,delete} + turn/steer — all four measured against
-    // a live 0.153.4 app-server (the removal verb is `delete` with
-    // `queuedSubmissionId`; there is NO `thread/queue/remove`).
-    inputModes: { queue: true, steer: true, queueOps: true },
+    // thread/queue/{add,list,delete,update,reorder,start} + turn/steer — every
+    // shape dumped from the 0.153.4 schema and exercised against a live
+    // app-server (the removal verb is `delete` with `queuedSubmissionId`;
+    // there is NO `thread/queue/remove`).
+    inputModes: { queue: true, queueVerbs: ['remove', 'steer', 'steer-all', 'reorder', 'edit', 'run-now', 'run-all'] },
     // Personality enum + thread/settings/update, both from the 0.153.4 schema
     // dump. LIVE: the running thread takes the new personality for its next
     // turn — no restart, no new conversation.
@@ -119,7 +158,7 @@ const BACKEND_CAPS = {
     pool: false, hotSwitch: 'unverified', planC: false, sealedOrders: false, resetCredit: false, quotaProbe: null, fork: false,
     streamProtocol: null, // terminal-only: no chat parse pipeline
     peerDelivery: 'stash-only',
-    inputModes: { queue: false, steer: false, queueOps: false },
+    inputModes: { queue: false, queueVerbs: [] },
     responseStyle: { live: false, closed: true, values: [] }, // terminal-only: no agent to style
   },
   // ACP v1 harnesses (S8, design-harness-plugins §2.3): the agent holds its
@@ -133,15 +172,24 @@ const BACKEND_CAPS = {
     peerDelivery: 'stash-only',
     frameFile: true,
     // ACP v1 has no queue verb, so the WRAPPER owns the queue (promptQueue) —
-    // it can list and remove, but it cannot inject into a running prompt
-    // (session/prompt is one-at-a-time; there is no steer in the protocol).
-    inputModes: { queue: true, steer: false, queueOps: true },
+    // a plain local array, which makes remove/reorder/edit cheap array ops it
+    // really serves. It cannot inject into a running prompt (session/prompt is
+    // one-at-a-time; there is no steer in the protocol), and run-now/run-all
+    // are declared FALSE for a structural reason, not laziness: that queue only
+    // ever has entries WHILE a prompt is running (an idle wrapper dispatches
+    // immediately), so "run it now" could only ever answer 'busy'.
+    inputModes: { queue: true, queueVerbs: ['remove', 'reorder', 'edit'] },
     // ACP v1 has no response-style/persona verb; the agent's own config owns it.
     responseStyle: { live: false, closed: true, values: [] },
   },
 };
 
-const NO_CAPS = Object.freeze({ pool: false, hotSwitch: 'unverified', planC: false, sealedOrders: false, resetCredit: false, quotaProbe: null, fork: false, streamProtocol: null, peerDelivery: 'stash-only', inputModes: Object.freeze({ queue: false, steer: false, queueOps: false }), responseStyle: Object.freeze({ live: false, closed: true, values: Object.freeze([]) }) });
+// The verb tables above are DECLARATIONS; the booleans every existing consumer
+// reads are computed from them exactly once, here, so no call site can see a
+// row whose `steer` disagrees with its `queueVerbs`.
+for (const row of Object.values(BACKEND_CAPS)) row.inputModes = deriveInputModes(row.inputModes);
+
+const NO_CAPS = Object.freeze({ pool: false, hotSwitch: 'unverified', planC: false, sealedOrders: false, resetCredit: false, quotaProbe: null, fork: false, streamProtocol: null, peerDelivery: 'stash-only', inputModes: deriveInputModes({ queue: false, queueVerbs: [] }), responseStyle: Object.freeze({ live: false, closed: true, values: Object.freeze([]) }) });
 
 function capsOf(backend) {
   return BACKEND_CAPS[backend || 'claude'] || NO_CAPS;
@@ -161,4 +209,4 @@ function setVerifiedCap(backend, key, value) {
   return true;
 }
 
-module.exports = { BACKEND_CAPS, capsOf, setVerifiedCap };
+module.exports = { BACKEND_CAPS, capsOf, setVerifiedCap, QUEUE_VERBS, deriveInputModes };

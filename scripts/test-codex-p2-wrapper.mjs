@@ -10,6 +10,9 @@
 //   ③ LIVE VISIBILITY — mcpToolCall / dynamicToolCall / webSearch /
 //      imageView / contextCompaction items become function_call twins and
 //      notices while the turn runs (they used to appear only after re-attach).
+//   ⑦ THE VERB TABLE — reorder / edit / run-now / run-all against a stub whose
+//      queue/list PAGINATES and whose reorder enforces the real full-order
+//      rule; items injected behind the wrapper's back model the peer lane.
 //   ⑤ STOP CLEARS THE QUEUE + its three round-2 regressions (§②d): a delete the
 //      app-server REFUSES ({deleted:false} = the item was drained, it RAN), a
 //      turn/started landing MID-SWEEP (the cached-list republish), and an
@@ -802,6 +805,227 @@ console.log('— ②f the steer whose queued copy could not be removed');
     ok(notice.some((t) => /may run a second time/.test(t)), 'and the possible double run is SAID', notice.join(' | '));
   }
   E.stop();
+}
+
+
+// ── ⑦ THE VERB TABLE: reorder / edit / run-now / run-all (2026-09-07) ──────
+// A stub whose queue/list PAGINATES (2 per page, opaque cursors — the real
+// 0.153.4 answers `nextCursor` for a `limit`ed list, measured), whose
+// `reorder` enforces the real server's rule ("must include every queued
+// submission exactly once"), and which can have items INJECTED behind the
+// wrapper's back — the peer lane adding between a render and a drop, which is
+// exactly the race the relative `afterId` frame exists to survive.
+console.log('— ⑦ reorder / edit / run-now / run-all against a paginating stub');
+const STUB_VERBS = `
+const fs = require('fs');
+let b = ''; let turns = 0; let queue = []; let qseq = 0; let activeTurn = null;
+const PAGE = 2;
+const send = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+const changed = () => send({ method: 'thread/queue/changed', params: { threadId: 'th-verbs' } });
+// INJECTION: items that appear in the queue with NO queue/add from the wrapper
+// (a peer message posted by the server, or a thread resumed with items on it).
+// Deliberately SILENT — no queue/changed — so the wrapper's last published
+// queue is stale, which is the state a relative reorder has to survive.
+setInterval(() => {
+  let raw; try { raw = fs.readFileSync(__INJECT__, 'utf8'); } catch { return; }
+  try { fs.unlinkSync(__INJECT__); } catch {}
+  let items; try { items = JSON.parse(raw); } catch { return; }
+  for (const it of items) queue.push({ id: it.id || ('inj' + (++qseq)), input: it.input, clientUserMessageId: it.cid || ('inj-cid-' + qseq) });
+}, 40);
+// A turn that ends WITHOUT draining: the resumed-thread shape (idle thread,
+// non-empty queue) — the only state in which run-now/run-all can do anything.
+setInterval(() => {
+  try { fs.unlinkSync(__ENDTURN__); } catch { return; }
+  if (!activeTurn) return;
+  const e = activeTurn; activeTurn = null;
+  send({ method: 'turn/completed', params: { turn: { id: e }, status: 'completed' } });
+}, 40);
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (d) => {
+  b += d; let i;
+  while ((i = b.indexOf('\\n')) !== -1) {
+    const line = b.slice(0, i); b = b.slice(i + 1);
+    if (!line.trim()) continue;
+    let m; try { m = JSON.parse(line); } catch { continue; }
+    if (m.id === undefined || !m.method) continue;
+    fs.appendFileSync(__RPCLOG__, line + '\\n');
+    if (m.method === 'thread/start') { send({ id: m.id, result: { thread: { id: 'th-verbs' } } }); continue; }
+    if (m.method === 'turn/start') { turns++; const tid = 'turn-' + turns; activeTurn = tid; send({ id: m.id, result: { turn: { id: tid } } }); send({ method: 'turn/started', params: { turn: { id: tid } } }); continue; }
+    if (m.method === 'thread/queue/add') { const q = { id: 'q' + (++qseq), input: m.params.input, clientUserMessageId: m.params.clientUserMessageId }; queue.push(q); send({ id: m.id, result: { queuedSubmission: q } }); changed(); continue; }
+    if (m.method === 'thread/queue/list') {
+      const off = m.params.cursor ? parseInt(m.params.cursor, 10) : 0;
+      const data = queue.slice(off, off + PAGE);
+      const next = off + PAGE < queue.length ? String(off + PAGE) : null;
+      send({ id: m.id, result: { data, nextCursor: next } });
+      continue;
+    }
+    if (m.method === 'thread/queue/delete') {
+      const at = queue.findIndex((q) => q.id === m.params.queuedSubmissionId);
+      if (at < 0) { send({ id: m.id, result: { deleted: false } }); continue; }
+      queue.splice(at, 1); send({ id: m.id, result: { deleted: true } }); changed(); continue;
+    }
+    if (m.method === 'thread/queue/reorder') {
+      const want = m.params.queuedSubmissionIds || [];
+      const have = queue.map((q) => q.id);
+      const same = want.length === have.length && new Set(want).size === want.length && have.every((id) => want.includes(id));
+      if (!same) { send({ id: m.id, error: { code: -32600, message: 'queue reorder must include every queued submission exactly once' } }); continue; }
+      queue = want.map((id) => queue.find((q) => q.id === id));
+      send({ id: m.id, result: {} }); changed(); continue;
+    }
+    if (m.method === 'thread/queue/update') {
+      const at = queue.findIndex((q) => q.id === m.params.queuedSubmissionId);
+      if (at < 0) { send({ id: m.id, error: { code: -32600, message: 'queued submission not found: ' + m.params.queuedSubmissionId } }); continue; }
+      queue[at] = { ...queue[at], input: m.params.input };
+      send({ id: m.id, result: { queuedSubmission: queue[at] } }); changed(); continue;
+    }
+    if (m.method === 'thread/queue/start') {
+      const qid = m.params.queuedSubmissionId;
+      if (qid) { const at = queue.findIndex((q) => q.id === qid); if (at >= 0) queue.splice(at, 1); }
+      else queue = [];
+      turns++; activeTurn = 'turn-' + turns;
+      send({ id: m.id, result: { turn: { id: activeTurn } } });
+      send({ method: 'turn/started', params: { turn: { id: activeTurn } } });
+      changed(); continue;
+    }
+    if (m.method === 'turn/interrupt') { send({ id: m.id, result: {} }); const e = activeTurn; activeTurn = null; send({ method: 'turn/completed', params: { turn: { id: e }, status: 'interrupted' } }); continue; }
+    send({ id: m.id, result: {} });
+  }
+});
+`;
+{
+  const injectFile = path.join(os.tmpdir(), `vs-cxp2-inject-${process.pid}.json`);
+  const endFile = path.join(os.tmpdir(), `vs-cxp2-endturn-${process.pid}.json`);
+  try { fs.unlinkSync(injectFile); } catch { }
+  try { fs.unlinkSync(endFile); } catch { }
+  const V = spawnStub('verbs', STUB_VERBS.replace(/__INJECT__/g, JSON.stringify(injectFile)).replace(/__ENDTURN__/g, JSON.stringify(endFile)));
+  const inject = (items) => fs.writeFileSync(injectFile, JSON.stringify(items));
+  const lastOp = (op) => V.ops().filter((r) => r.op === op).slice(-1)[0] || null;
+  const rpcOf = (method) => V.rpc().filter((m) => m.method === method);
+  ok(await waitFor(() => V.meta()?.threadId === 'th-verbs'), 'verb stub: the wrapper has a thread');
+
+  // A turn, then FIVE queued messages = three pages of two.
+  V.send({ type: 'chat-input', text: 'go', msgId: 'v0' });
+  ok(await waitFor(() => V.meta()?.activeTurnId === 'turn-1'), 'verb stub: a turn is running');
+  for (let i = 1; i <= 5; i++) V.send({ type: 'chat-input', text: 'msg ' + i, msgId: 'v' + i });
+  ok(await waitFor(() => V.lastQueue().length === 5), `THE PAGING FIX: a queue longer than one page is published WHOLE (${V.lastQueue().length} items; the pre-verb-table refreshQueue dropped nextCursor and published the first page only)`, JSON.stringify(V.lastQueue().map((i) => i.msgId)));
+  ok(rpcOf('thread/queue/list').some((m) => m.params.cursor), 'the wrapper really follows `cursor` (not just a bigger single request)', JSON.stringify(rpcOf('thread/queue/list').slice(-3).map((m) => m.params)));
+
+  // REORDER, with an item the client never saw injected in between.
+  {
+    const known = V.lastQueue().map((i) => i.id);
+    inject([{ id: 'peer-x', input: [{ type: 'text', text: 'posted by a peer' }] }]);
+    await sleep(200);
+    const before = rpcOf('thread/queue/reorder').length;
+    // move the FIRST item behind the THIRD — a relative frame, exactly what the
+    // client's drag sends.
+    V.send({ type: 'queue-op', op: 'reorder', id: known[0], afterId: known[2] });
+    ok(await waitFor(() => rpcOf('thread/queue/reorder').length > before), 'a relative reorder frame becomes a thread/queue/reorder RPC');
+    const sent = rpcOf('thread/queue/reorder').slice(-1)[0].params.queuedSubmissionIds;
+    ok(sent.length === 6 && sent.includes('peer-x'), `THE MERGE: the order is computed from a FRESH list, so an id queued between the render and the drop is IN it (${JSON.stringify(sent)})`);
+    ok(sent.indexOf('peer-x') === 5, '…at the place the SERVER has it, not appended by guesswork', JSON.stringify(sent));
+    ok(sent.indexOf(known[0]) === sent.indexOf(known[2]) + 1, '…and the moved item sits directly behind its anchor', JSON.stringify(sent));
+    ok(await waitFor(() => lastOp('reorder')?.ok === true), 'the reorder is reported ok', JSON.stringify(lastOp('reorder')));
+    ok(await waitFor(() => JSON.stringify(V.lastQueue().map((i) => i.id)) === JSON.stringify(sent)), 'and the CLOSING PUBLISH is the truth (the strip renders the order the server now has)', JSON.stringify(V.lastQueue().map((i) => i.id)));
+  }
+  // AN ANCHOR THAT LEFT: nothing is moved, and the user is told why.
+  {
+    const ids = V.lastQueue().map((i) => i.id);
+    const before = rpcOf('thread/queue/reorder').length;
+    V.send({ type: 'queue-op', op: 'reorder', id: ids[0], afterId: 'no-such-id' });
+    ok(await waitFor(() => lastOp('reorder')?.reason === 'anchor-gone'), `an anchor that is no longer queued answers 'anchor-gone' with what happened (${JSON.stringify(lastOp('reorder'))})`);
+    ok(rpcOf('thread/queue/reorder').length === before, 'and NO reorder RPC goes out — a guessed position is worse than a refusal');
+  }
+  // EDIT: every UserInput variant that is not the replaced text survives.
+  {
+    const SEVEN = [
+      { type: 'text', text: 'first', text_elements: [{ byteRange: { start: 0, end: 5 }, placeholder: '@x' }] },
+      { type: 'image', url: 'data:image/png;base64,AAAA', detail: 'high' },
+      { type: 'localImage', path: '/tmp/a.png', detail: null },
+      { type: 'audio', url: 'https://example.org/a.wav' },
+      { type: 'localAudio', path: '/tmp/a.wav' },
+      { type: 'skill', name: 'design', path: '/skills/design' },
+      { type: 'mention', name: 'notes', path: '/tmp/notes.md' },
+      { type: 'text', text: 'trailing words' },
+    ];
+    inject([{ id: 'mixed-1', input: SEVEN }]);
+    await sleep(250);
+    const before = rpcOf('thread/queue/update').length;
+    V.send({ type: 'queue-op', op: 'edit', id: 'mixed-1', text: 'rewritten' });
+    ok(await waitFor(() => rpcOf('thread/queue/update').length > before), 'an edit frame becomes a thread/queue/update RPC');
+    const p = rpcOf('thread/queue/update').slice(-1)[0].params;
+    ok(p.threadId === 'th-verbs' && p.queuedSubmissionId === 'mixed-1' && Array.isArray(p.input), 'update carries {threadId, queuedSubmissionId, input} — the WHOLE input array', JSON.stringify(p).slice(0, 200));
+    ok(p.input[0].type === 'text' && p.input[0].text === 'rewritten', 'the first text element carries the new words');
+    ok(Array.isArray(p.input[0].text_elements) && p.input[0].text_elements.length === 0, 'THE STALE SPANS ARE CLEARED: text_elements index the OLD buffer, so keeping them would describe a string that no longer exists', JSON.stringify(p.input[0]));
+    const kept = p.input.slice(1).map((x) => x.type);
+    ok(JSON.stringify(kept) === JSON.stringify(['image', 'localImage', 'audio', 'localAudio', 'skill', 'mention']), `PRESERVED BY EXCLUSION, in place: every non-text variant survives — including audio/localAudio, which a whitelist would have deleted (${JSON.stringify(kept)})`);
+    ok(JSON.stringify(p.input[1]) === JSON.stringify(SEVEN[1]) && JSON.stringify(p.input[6]) === JSON.stringify(SEVEN[6]), '…byte for byte, not re-encoded', JSON.stringify([p.input[1], p.input[6]]));
+    ok(!p.input.some((x, i) => i > 0 && x.type === 'text'), 'the trailing text element is gone (its words are what the user just rewrote)', JSON.stringify(p.input.map((x) => x.type)));
+    ok(await waitFor(() => lastOp('edit')?.ok === true), 'the edit is reported ok', JSON.stringify(lastOp('edit')));
+    ok(await waitFor(() => (V.lastQueue().find((i) => i.id === 'mixed-1')?.preview || '').startsWith('rewritten')), 'and the republished strip shows the NEW words (the visible confirmation of an edit)', JSON.stringify(V.lastQueue().find((i) => i.id === 'mixed-1')));
+    ok((V.lastQueue().find((i) => i.id === 'mixed-1')?.text || '') === 'rewritten', '…and the FULL text rides the item, so a second edit opens the real message and not a 120-char preview', JSON.stringify(V.lastQueue().find((i) => i.id === 'mixed-1')?.text));
+  }
+  // A PEER item is not editable — rewriting another agent's words would put
+  // text in its mouth. The client hides the control; this is the gate that
+  // MEANS it.
+  {
+    V.send({ type: 'peer-message', text: 'ping from F', fromName: 'session F' });
+    ok(await waitFor(() => V.lastQueue().some((i) => i.kind === 'peer')), 'a peer message is queued on the same lane');
+    const peer = V.lastQueue().find((i) => i.kind === 'peer');
+    ok(!('text' in peer), 'a peer row carries NO full text (nothing to open an editor on)', JSON.stringify(peer));
+    const before = rpcOf('thread/queue/update').length;
+    V.send({ type: 'queue-op', op: 'edit', id: peer.id, text: 'words I put in its mouth' });
+    ok(await waitFor(() => lastOp('edit')?.reason === 'not-editable'), `editing a peer item is REFUSED with the reason (${JSON.stringify(lastOp('edit'))})`);
+    ok(rpcOf('thread/queue/update').length === before, '…and no update RPC is sent at all');
+    V.send({ type: 'queue-op', op: 'remove', id: peer.id });
+    ok(await waitFor(() => !V.lastQueue().some((i) => i.kind === 'peer')), '…while removing it still works (you can drop it, you just cannot rewrite it)');
+  }
+  // RUN NOW / RUN ALL — refused while a turn runs, honoured when idle.
+  {
+    const beforeStart = rpcOf('thread/queue/start').length;
+    const target = V.lastQueue()[0].id;
+    V.send({ type: 'queue-op', op: 'run-now', id: target });
+    ok(await waitFor(() => lastOp('run-now')?.reason === 'busy'), `run-now during a turn is REFUSED with 'busy' and what is true instead (${JSON.stringify(lastOp('run-now'))})`);
+    ok(/runs as soon as it ends/.test(lastOp('run-now')?.detail || ''), '…the refusal says the message runs when the turn ends (never accept-and-ignore)', lastOp('run-now')?.detail);
+    V.send({ type: 'queue-op', op: 'run-all', id: null });
+    ok(await waitFor(() => lastOp('run-all')?.reason === 'busy'), 'run-all during a turn is refused the same way', JSON.stringify(lastOp('run-all')));
+    ok(rpcOf('thread/queue/start').length === beforeStart, 'NO thread/queue/start goes out while a turn is running', JSON.stringify(rpcOf('thread/queue/start').map((m) => m.params)));
+
+    // …now the turn ends WITHOUT draining (the resumed-thread shape).
+    fs.writeFileSync(endFile, '1');
+    ok(await waitFor(() => !V.meta()?.activeTurnId), 'the turn ends, leaving an IDLE thread with a non-empty queue (a resumed thread looks exactly like this)');
+    const queuedNow = V.lastQueue().map((i) => i.id);
+    V.send({ type: 'queue-op', op: 'run-now', id: queuedNow[1] });
+    ok(await waitFor(() => rpcOf('thread/queue/start').length === beforeStart + 1), 'run-now on an idle thread sends thread/queue/start');
+    const p1 = rpcOf('thread/queue/start').slice(-1)[0].params;
+    ok(p1.threadId === 'th-verbs' && p1.queuedSubmissionId === queuedNow[1], 'RUN-NOW NAMES ITS ITEM (an id-less start would drain the whole queue)', JSON.stringify(p1));
+    ok(await waitFor(() => lastOp('run-now')?.ok === true), 'and it is reported ok', JSON.stringify(lastOp('run-now')));
+
+    // and run-all: the SAME RPC with NO id at all. Wait for the wrapper to
+    // REGISTER the turn run-now started before ending it — the sidecar lags
+    // the in-memory state by a debounce, so "not busy on disk" is not "not
+    // busy", and racing it here would test the wrong refusal.
+    ok(await waitFor(() => !!V.meta()?.activeTurnId), 'the started item is running as a turn');
+    fs.writeFileSync(endFile, '1');
+    ok(await waitFor(() => !V.meta()?.activeTurnId), 'and that turn ends, idle again');
+    const before2 = rpcOf('thread/queue/start').length;
+    V.send({ type: 'queue-op', op: 'run-all', id: null });
+    ok(await waitFor(() => rpcOf('thread/queue/start').length === before2 + 1), 'run-all on an idle thread sends thread/queue/start too');
+    const p2 = rpcOf('thread/queue/start').slice(-1)[0].params;
+    ok(p2.threadId === 'th-verbs' && !('queuedSubmissionId' in p2), 'RUN-ALL OMITS the id entirely — a DIFFERENT request, not run-now with a lost argument', JSON.stringify(p2));
+    ok(await waitFor(() => V.lastQueue().length === 0), 'the queue drains and the closing publish says so', JSON.stringify(V.lastQueue()));
+    ok(await waitFor(() => !!V.meta()?.activeTurnId), 'the drain is running as a turn');
+    fs.writeFileSync(endFile, '1');
+    ok(await waitFor(() => !V.meta()?.activeTurnId), 'which ends, idle with an empty queue');
+    V.send({ type: 'queue-op', op: 'run-all', id: null });
+    ok(await waitFor(() => lastOp('run-all')?.reason === 'empty'), 'run-all with nothing queued says so instead of firing an empty start', JSON.stringify(lastOp('run-all')));
+  }
+  // The wrapper ADVERTS the verbs it serves, in the sidecar AND in-band (a
+  // remote wrapper's sidecar is on the other machine).
+  ok(JSON.stringify(V.meta()?.caps?.queueVerbs) === JSON.stringify(['remove', 'steer', 'steer-all', 'reorder', 'edit', 'run-now', 'run-all']), 'the sidecar adverts the verb list this build serves', JSON.stringify(V.meta()?.caps));
+  ok(V.queues().every((q) => Array.isArray(q.verbs) && q.verbs.includes('reorder')), 'EVERY queue_changed carries the same list in-band (the only advert a remote session ever sees)', JSON.stringify(V.queues().slice(-1)[0]?.verbs));
+  V.stop();
+  try { fs.unlinkSync(injectFile); } catch { }
+  try { fs.unlinkSync(endFile); } catch { }
 }
 
 try { w.kill('SIGTERM'); } catch {}

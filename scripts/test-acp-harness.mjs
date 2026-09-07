@@ -277,6 +277,46 @@ console.log('— the input queue: published, removable, order-preserving (no ste
     const refused = await w.waitFor(() => w.find('queue_op_result', (r) => r.op === 'steer'), 3000, 'steer refusal');
     ok('a steer that reaches an ACP wrapper is refused with reason not-steerable (ACP v1 has no steer)', refused.ok === false && refused.reason === 'not-steerable', refused);
     ok('…and the queue is untouched by the refusal', last().items.length === 2, last().items);
+    // run-now / run-all are declared FALSE for this harness for a STRUCTURAL
+    // reason (the queue only exists while a prompt runs), so a frame that
+    // reaches the wrapper anyway must say that, not "unknown op".
+    w.send({ type: 'queue-op', op: 'run-now', id: last().items[0].id });
+    const notStartable = await w.waitFor(() => w.find('queue_op_result', (r) => r.op === 'run-now'), 3000, 'run-now refusal');
+    ok('run-now on an ACP harness is refused with the structural reason (one prompt at a time — it starts as soon as this one ends)', notStartable.ok === false && notStartable.reason === 'not-startable' && /one prompt at a time/.test(notStartable.detail || ''), notStartable);
+
+    // REORDER: a local array splice, driven by the SAME relative frame the
+    // codex wrapper translates into a full-order array.
+    {
+      const ids = last().items.map((i) => i.id);
+      w.send({ type: 'queue-op', op: 'reorder', id: ids[0], afterId: ids[1] });
+      const r = await w.waitFor(() => w.find('queue_op_result', (r) => r.op === 'reorder'), 3000, 'reorder result');
+      ok('reorder moves the entry behind its anchor and reports ok', r.ok === true && r.msg_id === 'qb', r);
+      await w.waitFor(() => last().items.map((i) => i.msgId).join(',') === 'qc,qb', 3000, 'reordered');
+      ok('…and the republished queue is the new order (the strip renders it)', last().items.map((i) => i.msgId).join(',') === 'qc,qb', last().items.map((i) => i.msgId));
+      w.send({ type: 'queue-op', op: 'reorder', id: last().items[0].id, afterId: null });
+      await w.waitFor(() => w.findAll('queue_op_result', (r) => r.op === 'reorder').length === 2, 3000, 'front move');
+      ok('afterId null means the FRONT (already there ⇒ still ok, still published)', last().items.map((i) => i.msgId).join(',') === 'qc,qb', last().items.map((i) => i.msgId));
+      w.send({ type: 'queue-op', op: 'reorder', id: last().items[0].id, afterId: 'no-such-entry' });
+      const anchorGone = await w.waitFor(() => w.findAll('queue_op_result', (r) => r.op === 'reorder').slice(-1)[0]?.reason === 'anchor-gone' ? w.findAll('queue_op_result', (r) => r.op === 'reorder').slice(-1)[0] : null, 3000, 'anchor-gone');
+      ok('an anchor that is no longer queued moves NOTHING and says why', anchorGone.ok === false, anchorGone);
+      ok('…and the entry really is back where it was (a failed move must not eat the row)', last().items.map((i) => i.msgId).join(',') === 'qc,qb', last().items.map((i) => i.msgId));
+      // put the order back so the drain assertions below read as written
+      w.send({ type: 'queue-op', op: 'reorder', id: last().items.find((i) => i.msgId === 'qb').id, afterId: null });
+      await w.waitFor(() => last().items.map((i) => i.msgId).join(',') === 'qb,qc', 3000, 'order restored');
+    }
+    // EDIT: the same exclusion rule, on ACP content blocks.
+    {
+      const target = last().items.find((i) => i.msgId === 'qb');
+      ok('a queued entry carries its FULL text, so the edit control opens the message and not a truncated preview', target.text === 'first queued', target);
+      w.send({ type: 'queue-op', op: 'edit', id: target.id, text: 'first queued, rewritten' });
+      const e = await w.waitFor(() => w.find('queue_op_result', (r) => r.op === 'edit'), 3000, 'edit result');
+      ok('edit rewrites the queued text and reports ok', e.ok === true && e.msg_id === 'qb', e);
+      await w.waitFor(() => (last().items.find((i) => i.msgId === 'qb')?.preview || '').includes('rewritten'), 3000, 'edited preview');
+      ok('…and the republished strip shows the new words', /rewritten/.test(last().items.find((i) => i.msgId === 'qb').preview), last().items);
+      const emptyEdit = (() => { w.send({ type: 'queue-op', op: 'edit', id: target.id, text: '   ' }); return true; })();
+      const refusedEdit = await w.waitFor(() => w.findAll('queue_op_result', (r) => r.op === 'edit').slice(-1)[0]?.ok === false ? w.findAll('queue_op_result', (r) => r.op === 'edit').slice(-1)[0] : null, 3000, 'empty edit refused');
+      ok('an empty edit is refused (blanking a queued message is not an edit)', emptyEdit && refusedEdit.reason === 'empty-text', refusedEdit);
+    }
     // remove the FIRST: the second keeps its relative order and is what runs
     const firstId = last().items[0].id;
     w.send({ type: 'queue-op', op: 'remove', id: firstId });
@@ -294,8 +334,24 @@ console.log('— the input queue: published, removable, order-preserving (no ste
     await w.waitFor(() => w.findAll('prompt_start').length === 2, 8000, 'the queued prompt ran');
     const wire = JSON.stringify(w.mockCalls().filter((c) => c.method === 'session/prompt'));
     ok('drain order: the removed entry NEVER reaches the agent, the survivor does', wire.includes('second queued') && !wire.includes('first queued'), wire.slice(0, 200));
+    ok('…and the EDIT really changed what the agent would have received (the rewritten words never ran because that entry was removed, and its original text is nowhere on the wire)', !wire.includes('first queued'), wire.slice(0, 200));
     await w.waitFor(() => last().items.length === 0, 3000, 'queue empty');
     ok('…and the emptied queue is published (the strip clears)', last().items.length === 0);
+  } finally { await w.stop(); }
+}
+
+console.log('— the ACP wrapper adverts the queue verbs it serves');
+{
+  const w = startWrapper();
+  try {
+    await w.waitFor(() => w.find('session'), 10000, 'session record');
+    await w.waitFor(() => w.findAll('queue_changed').length > 0, 5000, 'a baseline queue publication');
+    const verbs = ['remove', 'reorder', 'edit'];
+    ok('every queue_changed carries the verb list in-band (the only advert a remote session sees)', w.findAll('queue_changed').every((q) => JSON.stringify(q.verbs) === JSON.stringify(verbs)), w.findAll('queue_changed').slice(-1)[0]?.verbs);
+    const meta = w.metaJson();
+    ok('…and the sidecar adverts the same list (what a LOCAL server reads)', JSON.stringify(meta?.caps?.queueVerbs) === JSON.stringify(verbs), meta?.caps);
+    const { capsOf } = require(path.join(REPO, 'src/backend-caps.js'));
+    ok('…which is exactly the harness caps row (a wrapper that served less would be refused those verbs, not silently drop them)', JSON.stringify(capsOf('opencode').inputModes.queueVerbs) === JSON.stringify(verbs), capsOf('opencode').inputModes.queueVerbs);
   } finally { await w.stop(); }
 }
 

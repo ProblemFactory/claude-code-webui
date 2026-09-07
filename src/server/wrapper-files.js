@@ -53,13 +53,27 @@ function resolveWrapperFiles(BUFFERS_DIR, id, sockPath) {
  *  serves the `queue-op` stdin verb. backend-caps says what the HARNESS can do;
  *  this says what THIS process can do — a codex session spawned before the
  *  queue/steer release wears the harness capability but would drop the frame
- *  silently (the 2.361.1/2.364.1 skew class), so both gates must pass. */
+ *  silently (the 2.361.1/2.364.1 skew class), so both gates must pass.
+ *  queueVerbs (verb table, design-harness-features §2.1): WHICH queue verbs
+ *  this process serves. A wrapper that adverts `inputQueue` but no list is a
+ *  2.369.55-or-older build — it serves exactly LEGACY_QUEUE_VERBS, so the new
+ *  verbs are refused for it with a reason while remove/steer keep working
+ *  (the skew rule again: an old process must never be asked for a verb it
+ *  would drop, and must never lose the verbs it does serve). */
+// What a wrapper that adverts `inputQueue` WITHOUT a verb list serves: the
+// three verbs that existed before the verb table (2.369.55 and older).
+const LEGACY_QUEUE_VERBS = Object.freeze(['remove', 'steer', 'steer-all']);
+
 function wrapperCaps(BUFFERS_DIR, id, sockPath) {
   const { sidecar } = resolveWrapperFiles(BUFFERS_DIR, id, sockPath);
   let m;
-  try { m = JSON.parse(fs.readFileSync(sidecar, 'utf-8')); } catch { return { frameFile: false, peerMessage: false, inputQueue: false, responseStyle: false, caps: null, reason: 'no-sidecar', startedAt: null, pid: null }; }
+  try { m = JSON.parse(fs.readFileSync(sidecar, 'utf-8')); } catch { return { frameFile: false, peerMessage: false, inputQueue: false, queueVerbs: [], responseStyle: false, caps: null, reason: 'no-sidecar', startedAt: null, pid: null }; }
   const caps = (m && m.caps && typeof m.caps === 'object') ? m.caps : null;
-  return { frameFile: !!(caps && caps.frameFile), peerMessage: !!(caps && caps.peerMessage), inputQueue: !!(caps && caps.inputQueue), responseStyle: !!(caps && caps.responseStyle), caps, reason: caps ? 'ok' : 'no-caps', startedAt: (m && m.startedAt) || null, pid: (m && m.pid) || null };
+  const inputQueue = !!(caps && caps.inputQueue);
+  const queueVerbs = Array.isArray(caps && caps.queueVerbs)
+    ? caps.queueVerbs.map((v) => String(v))
+    : (inputQueue ? LEGACY_QUEUE_VERBS.slice() : []);
+  return { frameFile: !!(caps && caps.frameFile), peerMessage: !!(caps && caps.peerMessage), inputQueue, queueVerbs, responseStyle: !!(caps && caps.responseStyle), caps, reason: caps ? 'ok' : 'no-caps', startedAt: (m && m.startedAt) || null, pid: (m && m.pid) || null };
 }
 
-module.exports = { resolveWrapperFiles, wrapperCaps };
+module.exports = { resolveWrapperFiles, wrapperCaps, LEGACY_QUEUE_VERBS };

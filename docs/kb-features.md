@@ -127,15 +127,22 @@ A codex `image_gen` result renders as the same media card a `view_image` does �
 
 #### Sending during a turn: QUEUED vs STEERED (2026-09-06, owner ask)
 A message typed while the agent is mid-turn does not interrupt it. What happens
-next is a **capability**, `backend-caps` `inputModes {queue, steer, queueOps}` —
-never a backend id; the ws layer, the strip and the chip all gate on that row:
+next is a **capability** — `backend-caps` `inputModes`, whose `queueVerbs`
+TABLE (2026-09-07) is the source of truth and whose old `{steer, queueOps}`
+booleans are a derived view of it — never a backend id; the ws layer, the strip
+and the chip all gate on that row:
 
-| harness | queue | steer | queueOps | what the user sees |
-|---|---|---|---|---|
-| **codex** | ✓ | ✓ | ✓ | the strip + per-item Steer/Remove + Steer all |
-| **opencode** (ACP v1) | ✓ | — | ✓ (remove only) | the strip + per-item Remove |
-| **claude** | ✓ | — | — | nothing: the CLI queues stdin itself and publishes no queue |
-| **shell** | — | — | — | n/a (terminal) |
+| harness | queue | queueVerbs | what the user sees |
+|---|---|---|---|
+| **codex** | ✓ | remove · steer · steer-all · reorder · edit · run-now · run-all | the strip, a drag handle + edit + Run-this-one + Steer per row, "Run all now" and "Steer all" in the header |
+| **opencode** (ACP v1) | ✓ | remove · reorder · edit | the strip, a drag handle + edit + Remove per row |
+| **claude** | ✓ | *(empty)* | nothing: the CLI queues stdin itself and publishes no queue |
+| **shell** | — | *(empty)* | n/a (terminal) |
+
+Adding a verb is one entry in that array plus its three implementations
+(adapter frame, wrapper handler, client control) — a verb declared but not
+constructible is a red test, so "a control we cannot honour" is structurally
+impossible rather than a review promise.
 
 - **Queued** — the message is held and runs when the current turn ends. Its own
   user bubble wears a `Queued` chip (there is no separate system card any more;
@@ -147,10 +154,37 @@ never a backend id; the ws layer, the strip and the chip all gate on that row:
   below) and its bubble's chip becomes `Steered`.
 - **The strip** sits directly above the input box: one row per queued item
   (≤120-char preview; an agent-to-agent message is listed and labelled with its
-  sender — hiding it would misstate what runs next), `Steer now` (only when the
-  harness can steer) and `Remove`, plus `Steer all` when more than one is
-  queued. Focus a row and press Enter to steer it. The `Queued` chip on the
+  sender — hiding it would misstate what runs next) and exactly the controls the
+  verb table allows — `Steer now`, `Remove`, a drag handle, an edit pencil and
+  `Run this one now` per row, `Steer all` (>1 queued) and `Run all now` in the
+  header. Focus a row and press Enter to steer it. The `Queued` chip on the
   bubble is a second entry point for the same action.
+- **Reorder (2026-09-07)** — drag a row by its handle, or focus it and press
+  **Alt+↑ / Alt+↓**. Both send the same RELATIVE intent ("put this one behind
+  that one"; dropping above the first row means the front), and the WRAPPER
+  translates it into the app-server's absolute full-order array against a
+  freshly read queue — so a message another agent queued between your render
+  and your drop keeps its place instead of being deleted or shuffled. If the row
+  you dropped behind has meanwhile run, nothing moves and the notice says so.
+- **Edit (2026-09-07)** — the pencil opens the queued message's FULL text in the
+  input box (not the truncated preview); sending saves it, Esc restores what you
+  were typing. Only the TEXT is replaced: images, audio, skills and @mentions
+  attached to that queued message are preserved untouched, by exclusion — so a
+  future attachment kind cannot be silently dropped by an edit. **An
+  agent-to-agent message has no pencil**: rewriting another agent's words would
+  misattribute them (the wrapper refuses it too, not just the UI). The bubble in
+  the transcript deliberately keeps the words you originally typed — it is the
+  record of what you sent; the strip row shows what will actually run.
+- **Run now / Run all now (2026-09-07)** — `thread/queue/start` with and without
+  an id. While a turn is running BOTH are refused out loud ("a turn is already
+  running — the queue runs as soon as it ends") rather than being queued behind
+  it, because that is already what happens. They matter on a RESUMED thread that
+  comes back idle with messages still queued. They are separate controls on
+  purpose: an id-less start drains the WHOLE queue, so a lost id must never
+  degrade into "run everything".
+- **A row shows what it is doing.** An op in flight dims its row; a refusal
+  marks it and keeps the reason on the row (the system card scrolls away, the
+  row does not); a row being edited says so, and the strip says how to finish.
 - **MULTI-QUEUE SEMANTICS (the rule to remember):** steering item N injects
   **only N**. The others keep their relative order and still run after the turn.
   A steered item is removed from the queue, so it never runs twice. `Steer all`
@@ -187,6 +221,11 @@ never a backend id; the ws layer, the strip and the chip all gate on that row:
   the OLD system card — otherwise that bubble wears a `Queued` chip that can
   never clear and never be acted on. Same law as the frame-file bypass
   (2.361.1/2.364.1): capability = what the RUNNING PROCESS says it can do.
+  Since the verb table (2026-09-07) that gate is per-VERB: the wrapper adverts the verb list it
+  serves (sidecar + on every `queue_changed`, because a remote wrapper's sidecar
+  is on the other machine), a build that names no list is taken to serve the
+  three verbs that existed before the table, and a verb it does not serve is
+  refused BY NAME while its other controls keep working.
 - **The chip is re-applied when the capability flips.** `_queueSupported` starts
   false and both of its sources arrive AFTER the bubbles are on screen (the
   attach payload is applied at the END of `loadHistory`; a live wrapper's
