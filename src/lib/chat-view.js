@@ -356,7 +356,11 @@ class ChatView {
     // Renderers (extracted rendering methods)
     this._renderers = new ChatRenderers({
       getSessionCtx: () => this._getSessionIds(), // view-only/terminated windows keep host+cwd via openSpec
-      onSendText: (txt) => this._chatInput?.sendText(txt), // in-chat action buttons (Compact now) — null-safe for view-only
+      // In-chat ACTION buttons (Compact now): product-authored text, so the
+      // send owns neither the draft slot nor the store — `carriesUserText`
+      // stays false EXPLICITLY (round-8: the flag is the difference between
+      // this caller and the design request below). Null-safe for view-only.
+      onSendText: (txt) => this._chatInput?.sendText(txt, { carriesUserText: false }),
       ws: wsManager,
       sessionId,
       app,
@@ -2989,7 +2993,12 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
     // textarea — the caller keeps it open on a false. Every reachable false
     // is one sendText already TOASTED (the chip exists only on a window that
     // has a live input, so the guard above cannot answer for the dropdown).
-    return this._chatInput.sendText(msg) !== false;
+    // CARRIES THE USER'S OWN WORDS (round-8): `b` is the brief they typed, and
+    // on a TRUE the dropdown closes and destroys the only other copy — so this
+    // send keeps the pending-send slot `_send` armed for it (the action
+    // default releases it) and a half-open socket hands the message back with
+    // a notice instead of losing it silently.
+    return this._chatInput.sendText(msg, { carriesUserText: true }) !== false;
   }
 
   // ── LIVE SUB-AGENT TRAFFIC (2026-09-07, owner: "这种互聊如果连续发生是不是应该

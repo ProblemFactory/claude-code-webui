@@ -55,7 +55,7 @@ const read = (f) => fs.readFileSync(path.join(REPO, f), 'utf8');
   ok(read('src/session-schema.js').includes('_streamingKind:'), '_streamingKind registered in the session schema');
   const ci = read('src/lib/chat-input.js');
   ok(ci.includes("kind === 'compacting'") && ci.includes('btn.dataset.armed') && ci.includes("t('Cancel compaction?')"), 'chat-input: Stop is a two-step confirm while compacting');
-  ok(ci.includes('sendText(text)') && /\^\\\/compact\\b/.test(ci), 'chat-input: programmatic sendText + immediate compacting label on a /compact send');
+  ok(ci.includes('sendText(text, { carriesUserText = false } = {})') && /\^\\\/compact\\b/.test(ci), 'chat-input: programmatic sendText + immediate compacting label on a /compact send');
   const cv = read('src/lib/chat-view.js');
   // (2026-09-07) the three call sites now go through _onServerStreamLabel — the
   // ONE place that remembers the server's label so the live sub-agent counter
@@ -63,7 +63,11 @@ const read = (f) => fs.readFileSync(path.join(REPO, f), 'utf8');
   ok(cv.includes('this._onServerStreamLabel(msg.label, msg.kind || null)') && cv.includes('meta?.streamingKind || null') && cv.includes('msg.streamingKind || null')
     && /_onServerStreamLabel\(label, kind\) \{[\s\S]{0,420}this\._showTyping\(label, kind \|\| null\);/.test(cv),
   'chat-view passes the kind through live label, attach meta and chat-status paths (all via the ONE _onServerStreamLabel)');
-  ok(cv.includes("onSendText: (txt) => this._chatInput?.sendText(txt)"), 'chat-view hands renderers a null-safe onSendText');
+  // Compact now is PRODUCT-authored text: it owns neither the pending-send slot
+  // nor the draft store, so it passes `carriesUserText: false` explicitly (the
+  // design request, whose payload is the user's own brief, passes true —
+  // round-8; pinned end-to-end in test-queue-steer).
+  ok(cv.includes("onSendText: (txt) => this._chatInput?.sendText(txt, { carriesUserText: false })"), 'chat-view hands renderers a null-safe onSendText with the ACTION semantics');
   const cr = read('src/lib/chat-renderers.js');
   ok(cr.includes("msg.errorKind === 'prompt-too-long'") && cr.includes('appendContextFullCard') && cr.includes("this._onSendText('/compact')"), 'renderer: prompt-too-long → guidance card whose Compact-now sends /compact');
   ok(cr.includes('else btn.remove();'), 'view-only windows get the explanation without a dead button');

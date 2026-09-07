@@ -910,7 +910,7 @@ console.log('— wiring + docs pins');
   // ROUND-5: THE EDITOR OWNS THE BOX — a DOM-free pin on the guard itself, so
   // the shape survives an edit that never opens a browser.
   ok('sendText REFUSES while a queued-message editor owns the box (an action can never be swallowed into an `edit`)',
-    /sendText\(text\) \{\n\s*if \(!this\._textarea\) return false;\n\s*if \(this\._editingQueueId \|\| this\._pendingEdit\) \{\n\s*showToast\(t\('Finish or cancel the queued-message edit first/.test(cinput));
+    /sendText\(text, \{ carriesUserText = false \} = \{\}\) \{\n\s*if \(!this\._textarea\) return false;\n\s*if \(this\._editingQueueId \|\| this\._pendingEdit\) \{\n\s*showToast\(t\('Finish or cancel the queued-message edit first/.test(cinput));
   ok('…and the action spends nothing of the user\'s: the half-typed box and the pending attachments are put back around the send',
     /const keptText = this\._textarea\.value;/.test(cinput) && /const keptAttachments = this\._attachments;/.test(cinput)
     && /if \(keptAttachments\.length\) \{ this\._attachments = keptAttachments; this\._renderAttachments\(\); \}/.test(cinput));
@@ -918,13 +918,13 @@ console.log('— wiring + docs pins');
     /_send\(\) \{\n\s*const text = this\._textarea\.value\.trim\(\);\n\s*const hasAttachments = this\._attachments\.length > 0;\n\s*if \(!text && !hasAttachments\) return false;/.test(cinput)
     && /const sent = this\._send\(\) !== false;/.test(cinput) && /\n    return sent;\n  \}/.test(cinput));
   ok('…and the draft SLOT is handed back with the text (confirmDelivery would clear the store out from under it)',
-    /this\._pendingSend = prevPendingSend \|\| null;/.test(cinput));
+    /if \(prevPendingSend\) this\._pendingSend = prevPendingSend;\n\s*else if \(!carriesUserText\) this\._pendingSend = null;/.test(cinput));
   // ROUND-6: the three follow-ups of the same audit.
   ok('round-6: an OLDER unconfirmed send keeps its slot rather than being cleared by the action that overwrote it',
-    /this\._pendingSend = prevPendingSend \|\| null;/.test(cinput)
+    /if \(prevPendingSend\) this\._pendingSend = prevPendingSend;/.test(cinput)
     && !/this\._pendingSend && this\._pendingSend !== prevPendingSend/.test(cinput));
   ok('round-6: the delivery echo only clears what THAT send put in the store (a restored prompt is not its to delete)',
-    /const stored = loadDraft\('chat', this\._sessionId\);\n\s*if \(stored && stored !== pending\.text && stored !== pending\.storeBefore\) return;\n\s*clearDraft\('chat', this\._sessionId\);/.test(cinput));
+    /const stored = loadDraft\('chat', this\._sessionId\);\n\s*if \(stored && stored !== pending\.text && !\(pending\.text === '' && stored === pending\.storeBefore\)\) return;\n\s*clearDraft\('chat', this\._sessionId\);/.test(cinput));
   ok('round-6: sendText puts the box back UNCONDITIONALLY (an empty box must not keep the action\'s own text after a bail-out)',
     /const sent = this\._send\(\) !== false;[\s\S]{0,900}?\n    this\._textarea\.value = keptText;\n/.test(cinput));
   ok('round-6: the LATE writer (uploaded paths) lands on the edit\'s stash, never on the editor\'s box',
@@ -938,11 +938,11 @@ console.log('— wiring + docs pins');
   // ⓐ THE RELEASE MUST STAND OUTSIDE THE GATE. Round-6 put the slot hand-back
   // INSIDE `if (keptText.trim())`, i.e. it never ran for the ORDINARY state of
   // an action button: an empty box.
-  ok('round-7: the draft-slot release is UNCONDITIONAL — outside the `keptText.trim()` gate, which an action fired from an EMPTY box never enters',
-    /\n    this\._textarea\.value = keptText;\n(?:\s*\/\/[^\n]*\n)*    this\._pendingSend = prevPendingSend \|\| null;\n    if \(keptText\.trim\(\)\) \{/.test(cinput));
+  ok('round-7: the draft-slot release stands OUTSIDE the `keptText.trim()` gate, which an action fired from an EMPTY box never enters',
+    /\n    this\._textarea\.value = keptText;\n(?:\s*\/\/[^\n]*\n)*    if \(prevPendingSend\) this\._pendingSend = prevPendingSend;\n    else if \(!carriesUserText\) this\._pendingSend = null;\n    if \(keptText\.trim\(\)\) \{/.test(cinput));
   ok('round-7: …and the store the action PINNED to its own text is put back to what was really there (captured beside the slot, before the send)',
     /const prevDraft = loadDraft\('chat', this\._sessionId\);/.test(cinput)
-    && /\} else \{\n(?:\s*\/\/[^\n]*\n)*      saveDraft\('chat', this\._sessionId, prevDraft\);\n    \}/.test(cinput));
+    && /\} else if \(!carriesUserText \|\| prevPendingSend\) \{\n(?:\s*\/\/[^\n]*\n)*      saveDraft\('chat', this\._sessionId, prevDraft\);\n    \}/.test(cinput));
   // ⓑ+ⓒ ONE helper for the three holders of unsent text, and it answers with
   // WHAT IT DID rather than one sentence for every outcome.
   ok('round-7: ONE `_announceUnsent` helper, THREE outcomes (nothing to restore / restored / box occupied)',
@@ -959,7 +959,37 @@ console.log('— wiring + docs pins');
   // its own can never clear anything again.
   ok('round-7: the send records what it displaced in the store, and the deferred clear accepts EITHER its pin or that value',
     /const storeBefore = loadDraft\('chat', this\._sessionId\);\n\s*if \(text\) saveDraft\('chat', this\._sessionId, text\);\n\s*this\._pendingSend = \{ text, storeBefore \};/.test(cinput)
-    && /if \(stored && stored !== pending\.text && stored !== pending\.storeBefore\) return;/.test(cinput));
+    && /if \(stored && stored !== pending\.text && !\(pending\.text === '' && stored === pending\.storeBefore\)\) return;/.test(cinput));
+  // ── ROUND-8: `sendText` HAS TWO KINDS OF CALLER, and round-7 released for
+  // both. The design request is a message BUILT AROUND THE USER'S OWN BRIEF,
+  // typed into a dropdown that closes on a true — the slot `_send` arms is
+  // then the only copy, so releasing it made a half-open socket lose the
+  // brief with zero trace (round 6, whose release sat inside the trim gate,
+  // had restored it with a notice). The flag names the difference; the
+  // DEFAULT is the action semantics, so a forgetful caller loses a rescue
+  // rather than leaving someone else's text armed in the box.
+  ok('round-8: `sendText` takes `carriesUserText`, defaulting to the ACTION semantics',
+    /sendText\(text, \{ carriesUserText = false \} = \{\}\) \{/.test(cinput));
+  ok('round-8: the release is scoped by WHO AUTHORED the payload — an older unconfirmed send still wins, and only an ACTION releases to nothing',
+    /if \(prevPendingSend\) this\._pendingSend = prevPendingSend;\n\s*else if \(!carriesUserText\) this\._pendingSend = null;/.test(cinput)
+    && !/this\._pendingSend = prevPendingSend \|\| null;/.test(cinput));
+  ok("round-8: …and the store restore is skipped for exactly that case, so `_send`'s pin survives for a user-authored payload",
+    /\} else if \(!carriesUserText \|\| prevPendingSend\) \{/.test(cinput));
+  ok('round-8: the `storeBefore` arm of the deferred clear is scoped to a send with NO text of its own (a text-carrying send may only clear its own pin)',
+    /!\(pending\.text === '' && stored === pending\.storeBefore\)/.test(cinput)
+    && !/stored !== pending\.storeBefore/.test(cinput));
+  // BOTH CALL SITES SAY WHICH THEY ARE, at the call — the flag is a claim
+  // about the payload's author and it lives where the payload is built.
+  {
+    const cview = read('src/lib/chat-view.js');
+    ok('round-8: the in-chat action button passes `carriesUserText: false` explicitly (product-authored text owns nothing)',
+      /onSendText: \(txt\) => this\._chatInput\?\.sendText\(txt, \{ carriesUserText: false \}\),/.test(cview));
+    ok('round-8: …and the design request passes true, because the dropdown that holds the brief closes on a true',
+      /return this\._chatInput\.sendText\(msg, \{ carriesUserText: true \}\) !== false;/.test(cview));
+    ok('round-8: those are still the ONLY two callers (a third would have to make the same choice on purpose)',
+      [...cview.matchAll(/\.sendText\(/g)].length === 2
+      && [...cinput.matchAll(/\n  sendText\(/g)].length === 1);
+  }
   // The new sentences are real i18n keys (a missing zh/ja entry ships English).
   {
     const zh = read('src/lib/i18n-zh.js'), ja = read('src/lib/i18n-ja.js');
@@ -988,7 +1018,7 @@ console.log('— wiring + docs pins');
     /if \(this\._onSendText\('\/compact'\) === false\) btn\.disabled = false;/.test(read('src/lib/chat-renderers.js')));
   ok('the design dropdown keeps the typed brief when the send is refused (it closed BEFORE the send)',
     /if \(this\._onDesignRequest\(brief, \{ public: pubCb\.checked \}\) === false\) return;\n\s*dropdown\.remove\(\);/.test(read('src/lib/chat-status-bar.js'))
-    && /return this\._chatInput\.sendText\(msg\) !== false;/.test(read('src/lib/chat-view.js')));
+    && /return this\._chatInput\.sendText\(msg, \{ carriesUserText: true \}\) !== false;/.test(read('src/lib/chat-view.js')));
   const cw = read('data/bin/codex-chat-wrapper.js');
   const aw = read('data/bin/acp-wrapper.js');
   ok('BOTH wrappers serve the new stdin verb in the same batch (the frame-file lesson)', /msg\.type === 'queue-op'/.test(cw) && /case 'queue-op':/.test(aw));
@@ -3236,6 +3266,162 @@ console.log('— ⑪ drag-reorder / edit / run-all in a REAL browser (trusted po
         })()`);
         ok(`round-7: words typed AFTER the send are still not the echo's to delete (${JSON.stringify(typedAfter)})`,
           typedAfter.after === 'brand new words, typed after the send');
+
+        // ── ROUND-8 VERIFIER (MAJOR): `sendText` HAS TWO KINDS OF CALLER.
+        // Round-7 made the release unconditional — correct for an ACTION
+        // (`Compact now` is product-authored text that owns nothing), wrong for
+        // the DESIGN REQUEST, whose payload is built around a brief the USER
+        // typed into a dropdown that closes the moment the send is accepted.
+        // With the slot released, a send that died in a half-open socket took
+        // the brief with it and said nothing; round 6 (whose release sat inside
+        // the trim gate the dropdown's empty box never enters) had restored it.
+        const R7_SEND_TEXT = `function (text) {                 // the round-7 body, verbatim
+            if (!this._textarea) return false;
+            if (this._editingQueueId || this._pendingEdit) return false;
+            const keptText = this._textarea.value;
+            const keptAttachments = this._attachments;
+            const prevPendingSend = this._pendingSend;
+            const prevDraft = VS.loadDraft('chat', this._sessionId);
+            if (keptAttachments.length) { this._attachments = []; this._renderAttachments(); }
+            this._textarea.value = String(text || '');
+            const sent = this._send() !== false;
+            if (keptAttachments.length) { this._attachments = keptAttachments; this._renderAttachments(); }
+            this._textarea.value = keptText;
+            this._pendingSend = prevPendingSend || null;
+            if (keptText.trim()) {
+              this._autoSize?.();
+              VS.saveDraft('chat', this._sessionId, keptText);
+            } else {
+              VS.saveDraft('chat', this._sessionId, prevDraft);
+            }
+            return sent;
+          }`;
+        const DESIGN_MSG = '[VibeSpace design request] a dark pricing page for my side project';
+        // ONE scenario, BOTH callers, the same empty box: the only difference
+        // is the flag, so the leg proves what the flag is for.
+        const twoCallers = (neuter) => `(() => {
+          ${neuter ? 'window.__ci.sendText = ' + R7_SEND_TEXT + ';' : ''}
+          const ta = document.querySelector('textarea');
+          ta.value = '';                                // an action button's box, and the dropdown's
+          window.__ci.sendText('/compact');             // ① the ACTION caller (no flag = the default)
+          const afterAction = { slot: window.__ci._pendingSend?.text ?? null, draft: VS.loadDraft('chat', 'sess-verbs') };
+          const answer = window.__ci.sendText(${JSON.stringify(DESIGN_MSG)}, { carriesUserText: true });   // ② the DESIGN caller
+          const out = { answer, afterAction, slot: window.__ci._pendingSend?.text ?? null,
+            draft: VS.loadDraft('chat', 'sess-verbs'), box: ta.value, sent: window.__sent.length };
+          window.__ci.setDisconnected(true);            // …the frame went into a half-open socket
+          out.afterDead = { box: ta.value, toast: document.getElementById('global-toasts')?.textContent || '' };
+          window.__ci.setDisconnected(false);
+          ${neuter ? 'delete window.__ci.sendText;' : ''}
+          ta.value = '';
+          window.__ci.hideTyping(); window.__ci._pendingSend = null;
+          VS.saveDraft('chat', 'sess-verbs', '');
+          clearTimeout(window.__ci._draftTimer); window.__ci._draftTimer = null;
+          return out;
+        })()`;
+        await evaljs(setup(''));
+        const twoCallersFixed = await evaljs(twoCallers(false));
+        ok(`round-8: the ACTION still arms nothing from an empty box — the default is unchanged (${JSON.stringify(twoCallersFixed.afterAction)})`,
+          twoCallersFixed.afterAction.slot === null && twoCallersFixed.afterAction.draft === '');
+        ok(`round-8: …while the design request KEEPS the slot its send armed, because the brief is the user's (${JSON.stringify({ answer: twoCallersFixed.answer, slot: twoCallersFixed.slot, sent: twoCallersFixed.sent })})`,
+          twoCallersFixed.answer === true && twoCallersFixed.slot === DESIGN_MSG && twoCallersFixed.sent === 2 && twoCallersFixed.box === '');
+        ok(`round-8: …so a half-open socket hands the brief back with a notice instead of losing it (${JSON.stringify({ box: twoCallersFixed.afterDead.box.slice(0, 46), toast: twoCallersFixed.afterDead.toast.slice(0, 60) })})`,
+          twoCallersFixed.afterDead.box === DESIGN_MSG && /restored to the input/.test(twoCallersFixed.afterDead.toast));
+
+        // NEGATIVE CONTROL: the round-7 body — one release for both callers.
+        await evaljs(setup(''));
+        const twoCallersNeutered = await evaljs(twoCallers(true));
+        ok(`negative control: the round-7 release drops the design request's slot AND its pin (${JSON.stringify({ slot: twoCallersNeutered.slot, draft: twoCallersNeutered.draft })})`,
+          twoCallersNeutered.slot === null && twoCallersNeutered.draft === '');
+        ok(`…so the user's brief vanishes with the socket, with zero trace — the defect, reproduced (${JSON.stringify(twoCallersNeutered.afterDead)})`,
+          twoCallersNeutered.afterDead.box === '' && twoCallersNeutered.afterDead.toast === '');
+
+        // …and the OLDER send still wins over a user-authored payload: it is the
+        // user's too, it is older, and it is what this send displaced.
+        await evaljs(setup(''));
+        const designOverOlder = await evaljs(`(() => {
+          const ta = document.querySelector('textarea');
+          ta.value = 'a message the user just sent';
+          window.__ci._send();                          // the USER's send — unconfirmed
+          const answer = window.__ci.sendText(${JSON.stringify(DESIGN_MSG)}, { carriesUserText: true });
+          const out = { answer, slot: window.__ci._pendingSend?.text ?? null, draft: VS.loadDraft('chat', 'sess-verbs') };
+          window.__ci.setDisconnected(true);
+          out.afterDead = { box: ta.value, toast: document.getElementById('global-toasts')?.textContent || '' };
+          window.__ci.setDisconnected(false);
+          ta.value = '';
+          window.__ci.hideTyping(); window.__ci._pendingSend = null;
+          VS.saveDraft('chat', 'sess-verbs', '');
+          clearTimeout(window.__ci._draftTimer); window.__ci._draftTimer = null;
+          return out;
+        })()`);
+        ok(`round-8: with an older unconfirmed send in flight the OLDER one keeps the slot and the pin (${JSON.stringify({ slot: designOverOlder.slot, draft: designOverOlder.draft })})`,
+          designOverOlder.answer === true && designOverOlder.slot === 'a message the user just sent' && designOverOlder.draft === 'a message the user just sent');
+        ok(`…and it is the one the dead socket restores (${JSON.stringify(designOverOlder.afterDead)})`,
+          designOverOlder.afterDead.box === 'a message the user just sent' && /restored to the input/.test(designOverOlder.afterDead.toast));
+
+        // ── ROUND-8 (MINOR): THE `storeBefore` ARM IS FOR A SEND WITH NO TEXT.
+        // Round-7 let ANY send clear the store when the value it displaced is
+        // back there — but a send that pinned its own text can only prove
+        // delivery of THAT, and a reappearing pre-send value (re-typed,
+        // recalled with ArrowUp, re-pasted, or handed back by `sendText`) is
+        // words that were never sent, sitting where the pin demonstrably is not.
+        const R7_CONFIRM = `function () {                        // the round-7 body, verbatim
+            const pending = this._pendingSend;
+            if (!pending) return;
+            this._pendingSend = null;
+            const stored = VS.loadDraft('chat', this._sessionId);
+            if (stored && stored !== pending.text && stored !== pending.storeBefore) return;
+            VS.saveDraft('chat', this._sessionId, '');
+          }`;
+        const reappearScenario = (neuter) => `(() => {
+          ${neuter ? 'window.__ci.confirmDelivery = ' + R7_CONFIRM + ';' : ''}
+          const ta = document.querySelector('textarea');
+          ta.value = 'a message I am sending now';
+          window.__ci._send();                          // pins its own text; storeBefore = the draft it displaced
+          const pinned = VS.loadDraft('chat', 'sess-verbs');
+          const slot = { text: window.__ci._pendingSend?.text ?? null, storeBefore: window.__ci._pendingSend?.storeBefore ?? null };
+          VS.saveDraft('chat', 'sess-verbs', 'the words I had drafted');   // the user types them again
+          window.__ci.confirmDelivery();                // the server answers on the socket
+          const out = { pinned, slot, after: VS.loadDraft('chat', 'sess-verbs') };
+          ${neuter ? 'delete window.__ci.confirmDelivery;' : ''}
+          ta.value = '';
+          window.__ci.hideTyping(); window.__ci._pendingSend = null;
+          VS.saveDraft('chat', 'sess-verbs', '');
+          clearTimeout(window.__ci._draftTimer); window.__ci._draftTimer = null;
+          return out;
+        })()`;
+        await evaljs(setup('the words I had drafted'));
+        const reappear = await evaljs(reappearScenario(false));
+        ok(`round-8 (setup): the send pins its own text and records what it displaced (${JSON.stringify(reappear)})`,
+          reappear.pinned === 'a message I am sending now' && reappear.slot.text === 'a message I am sending now'
+          && reappear.slot.storeBefore === 'the words I had drafted');
+        ok(`round-8: the echo of a TEXT-carrying send does not delete a reappearing pre-send draft (${JSON.stringify(reappear.after)})`,
+          reappear.after === 'the words I had drafted');
+        await evaljs(setup('the words I had drafted'));
+        const reappearNeutered = await evaljs(reappearScenario(true));
+        ok(`negative control: the unscoped \`storeBefore\` arm empties the draft channel — the defect, reproduced (${JSON.stringify(reappearNeutered.after)})`,
+          reappearNeutered.after === '');
+
+        // …and the case the arm EXISTS for is untouched: a send with no text of
+        // its own still clears what it displaced (the round-7 zombie draft).
+        await evaljs(setup('text I deleted inside the debounce window'));
+        const pinlessStillClears = await evaljs(`(() => {
+          const ta = document.querySelector('textarea');
+          ta.value = '';
+          window.__ci._attachments = ${ATTACH};
+          window.__ci._renderAttachments();
+          window.__ci._send();                          // an image with no words: pins nothing
+          const slot = { text: window.__ci._pendingSend?.text ?? null, storeBefore: window.__ci._pendingSend?.storeBefore ?? null };
+          window.__ci.confirmDelivery();
+          const out = { slot, after: VS.loadDraft('chat', 'sess-verbs') };
+          window.__ci._attachments = []; window.__ci._renderAttachments();
+          window.__ci.hideTyping(); window.__ci._pendingSend = null;
+          VS.saveDraft('chat', 'sess-verbs', '');
+          clearTimeout(window.__ci._draftTimer); window.__ci._draftTimer = null;
+          return out;
+        })()`);
+        ok(`round-8: the pinless (attachments-only) send still clears what it displaced — the scoping kept its own case (${JSON.stringify(pinlessStillClears)})`,
+          pinlessStillClears.slot.text === '' && pinlessStillClears.slot.storeBefore === 'text I deleted inside the debounce window'
+          && pinlessStillClears.after === '');
 
         await evaljs(`(() => { window.__ci.setQueue(window.__items, ${CODEX_VERBS}); document.querySelector('textarea').value = ''; window.__ci._pendingSend = null; document.getElementById('global-toasts')?.replaceChildren(); })()`);
       }

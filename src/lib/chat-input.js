@@ -673,8 +673,27 @@ export class ChatInput {
    *  used to delete it from both the box and the store, and to hand the user's
    *  pasted screenshots to `/compact`. Both are put back around the send.
    *  The text is an ACTION, never a user command that arms a draft-protected
-   *  slot of its own (`/goal`) — those belong on the normal Send path. */
-  sendText(text) {
+   *  slot of its own (`/goal`) — those belong on the normal Send path.
+   *
+   *  …EXCEPT WHEN THE PAYLOAD IS THE USER'S OWN WORDS (`carriesUserText`,
+   *  round-8 verifier). This method has TWO kinds of caller and round-7
+   *  released the slot and the store for both of them:
+   *    · an ACTION (`Compact now`) — a fixed string the product authored. It
+   *      owns nothing: releasing is exactly right, and arming a slot for it
+   *      would type `/compact` into the user's box on the next disconnect.
+   *    · the DESIGN REQUEST — a message BUILT AROUND A BRIEF THE USER TYPED,
+   *      into a dropdown that closes the moment the send is accepted. The
+   *      slot `_send` arms is then the ONLY copy: with it released, a send
+   *      that died in a half-open socket vanished with zero trace, where the
+   *      round-6 code (whose release sat inside `if (keptText.trim())`, i.e.
+   *      never ran for the dropdown's empty box) had restored it with a
+   *      notice. So `carriesUserText` keeps `_send`'s OWN pin — slot and
+   *      store — whenever there is no older send to hand back to.
+   *  An older unconfirmed send still wins either way: it is the user's too,
+   *  it is older, and it is what the action displaced. DEFAULT is the ACTION
+   *  semantics, so a caller that forgets the flag releases (loses a rescue at
+   *  worst) instead of leaving somebody else's text armed in the box. */
+  sendText(text, { carriesUserText = false } = {}) {
     if (!this._textarea) return false;
     if (this._editingQueueId || this._pendingEdit) {
       showToast(t('Finish or cancel the queued-message edit first — the action was not sent'), { type: 'error' });
@@ -685,8 +704,10 @@ export class ChatInput {
     // WHAT THE ACTION IS ABOUT TO DISPLACE, captured BEFORE `_send` runs: the
     // slot (`_send` overwrites `_pendingSend`) and the draft store (`_send`
     // PINS it to the action's own text). Both belong to the user and both are
-    // put back below — unconditionally, because "the box was empty" is the
-    // ordinary state of an action button, not a case with nothing to restore.
+    // put back below whenever they are the user's: "the box was empty" is the
+    // ordinary state of an action button, not a case with nothing to restore,
+    // and the ONE exception (a `carriesUserText` payload with no older send to
+    // hand back to) is spelled out at the release itself.
     const prevPendingSend = this._pendingSend;
     const prevDraft = loadDraft('chat', this._sessionId);
     if (keptAttachments.length) { this._attachments = []; this._renderAttachments(); }
@@ -702,7 +723,8 @@ export class ChatInput {
     // it got there. Writing `keptText` back is a no-op when `_send` took the
     // box (it already emptied it), so one line answers both halves.
     this._textarea.value = keptText;
-    // THE DRAFT SLOT GOES BACK UNCONDITIONALLY TOO (round-7 verifier). `_send`
+    // THE DRAFT SLOT GOES BACK TOO (round-7 verifier; round-8 scoped it by who
+    // AUTHORED the payload, see the header). `_send`
     // pinned the store to the action's own text and armed `_pendingSend` so a
     // dead socket could restore it — an ACTION is not a user message and owns
     // neither. Leaving the slot armed did two different kinds of damage, and
@@ -716,20 +738,29 @@ export class ChatInput {
     //     disconnect typed `/compact` into the user's empty input under a
     //     toast telling them their message had been restored.
     // Handing the previous slot back is exactly the old `= null` when there
-    // was none.
-    this._pendingSend = prevPendingSend || null;
+    // was none — UNLESS this payload carries the user's own words and there is
+    // no older send to hand back to (round-8): then `_send`'s pin is the only
+    // copy of what they typed and releasing it is the silent loss above.
+    if (prevPendingSend) this._pendingSend = prevPendingSend;
+    else if (!carriesUserText) this._pendingSend = null;
     if (keptText.trim()) {
       this._autoSize?.();
       // The store is written HERE rather than left to the 300 ms debounce
       // (`_send` cancelled the pending autosave and pinned the store to its
       // own text), so the prompt that came back to the box is durable again.
+      // (This overwrites `_send`'s pin even for a `carriesUserText` payload:
+      // the box text is the user's too, it is the copy they can SEE, and the
+      // dead-socket notice degrades honestly to "the input already had text".)
       saveDraft('chat', this._sessionId, keptText);
-    } else {
+    } else if (!carriesUserText || prevPendingSend) {
       // Nothing of the user's was in the box — but the action still pinned the
       // store to its own text, which would come back as this session's draft
       // on the next window open (and, with the slot released, is never cleared
       // by the delivery echo either). Put back what was actually there;
       // `loadDraft` answers '' for "nothing", which is what `clearDraft` writes.
+      // Skipped for a `carriesUserText` payload keeping its own slot: that pin
+      // is what `setDisconnected` restores from and what `confirmDelivery`
+      // clears once delivery is proven, so it is transient by construction.
       saveDraft('chat', this._sessionId, prevDraft);
     }
     return sent;
@@ -935,8 +966,16 @@ export class ChatInput {
     // the value it found there and never overwrote (a send with no text of its
     // own — attachments only — pins nothing, so comparing against `text`
     // alone made its clear a permanent no-op).
+    // THE `storeBefore` ARM IS FOR THE PINLESS SEND ONLY (round-8 verifier).
+    // Accepting it for EVERY send widens the clear back out over text this
+    // send never touched: a send that pinned its own text leaves the value it
+    // displaced behind, and if that value is in the store when the echo lands
+    // — the user re-typed it, recalled it with ArrowUp, re-pasted the same
+    // snippet, or `sendText` handed it back — those are words that were never
+    // sent, and the pin the clear was written for is demonstrably NOT there.
+    // A send with text can only ever clear its own pin.
     const stored = loadDraft('chat', this._sessionId);
-    if (stored && stored !== pending.text && stored !== pending.storeBefore) return;
+    if (stored && stored !== pending.text && !(pending.text === '' && stored === pending.storeBefore)) return;
     clearDraft('chat', this._sessionId);
   }
 
