@@ -1068,6 +1068,16 @@ class ChatView {
     this._windowEnd = this._total;
     this._loading = false;
 
+    // THE FRAME BEFORE THE HISTORY IT CLASSIFIES (§2.6, round 2). The memory
+    // dirs the init frame names decide whether a Read/Write/Edit card renders
+    // as a memory operation, and a system card is only re-rendered on a status
+    // TRANSITION — so learning them in applyStatus (below, after the loop)
+    // came too late for every memory card in the slab we are about to render,
+    // and they stayed misclassified for the life of the window. It cannot
+    // self-heal from the card's own side effect either: the init record sits
+    // hundreds of records before the tail-50 an attach carries. noteMemoryPaths
+    // writes into a Set — calling it here AND in applyStatus is idempotent.
+    if (meta?.chatStatus?.initFrame?.memoryPaths) noteMemoryPaths(meta.chatStatus.initFrame.memoryPaths);
     this._loadingHistory = true;
     for (const msg of messages) this._onCreateMessage(msg);
     this._loadingHistory = false;
@@ -1461,9 +1471,16 @@ class ChatView {
   // Fork a new session from a specific assistant message (the chat fork button).
   // Resolves this view's session, then hands off to app.forkFromMessage which
   // adds --resume-session-at <uuid> so the branch is truncated at this point.
+  // BOTH halves of the capability read the SAME row (§2.13): the button is
+  // drawn on caps.forkAtMessage (chat-renderers addForkBtn) and so is this
+  // handler — a backend-id gate here meant the first harness to gain the row
+  // would get a visible button whose click did nothing and said nothing.
+  // And when the capability IS there but the ids are not yet, the user hears
+  // it: a click that silently returns is the no-silent-failures law.
   _forkFromMessage(uuid, msg) {
     const { backend, backendSessionId, cwd, host } = this._getSessionIds();
-    if (backend !== 'claude' || !backendSessionId || !uuid) return;
+    if (!backendFeatureCaps(backend).forkAtMessage) return;
+    if (!backendSessionId || !uuid) { showToast(t('Session id not known yet — try again after the first reply'), { type: 'error' }); return; }
     const allSess = this.app.sidebar?._allSessions || [];
     const match = allSess.find(s => s.webuiId === this.sessionId)
       || allSess.find(s => (s.backendSessionId || s.sessionId) === backendSessionId);

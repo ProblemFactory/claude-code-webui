@@ -14,13 +14,30 @@
 // Part 1 (node): the SCHEMA PIN (every field name we read is re-grepped out of
 //   the installed 2.1.257 binary's own zod schema — dumped, never guessed;
 //   explicit SKIP with evidence when no binary is installed), the normalizer
-//   over the real fixture frame (ops, REPLACE semantics, degradation on an old
-//   CLI), the pure client rules (completion filter / health strip / memory
-//   paths) and the chatStatus attach twin.
+//   over the real fixture frame (ops, REPLACE semantics, the absent-not-empty
+//   degradation, one card per DISTINCT frame), the pure client rules
+//   (completion filter / health strip / memory paths) and the chatStatus
+//   attach twin.
 // Part 2 (headless chrome, SKIPs without chrome): the real ChatRenderers in a
 //   real document — the health strip is in the ALWAYS-VISIBLE summary, the
-//   inventory is behind the <details>, an old-CLI frame renders NOTHING, and
-//   the 375×667 measurement (nothing overflows sideways).
+//   inventory is behind the <details>, the REAL codex/ACP frame-less records
+//   render NOTHING, 33 identical spawns draw ONE card, the memory-dir ordering
+//   is proven both ways, and the 375×667 measurement (nothing overflows).
+//
+// ROUND 2 (an adversarial verifier reproduced three defects — all confirmed
+// against real data before being fixed):
+//   ① "the card renders only when the frame widened" was a false description
+//      of a gate that every claude init passes (`tools` etc. are REQUIRED in
+//      the schema), and the round-1 negative control used a 3-key synthetic
+//      record no CLI has ever emitted. Measured over this instance's own
+//      data/session-buffers: 62/62 init records drew a card AND a warning
+//      strip; one conversation held 33 of them. Fixed by stating the gate
+//      honestly, marking repeats in the normalizer, and controlling against
+//      the REAL frame-less producers (codex + ACP).
+//   ② loadHistory applied the frame's memory dirs AFTER rendering the slab
+//      they classify (§4/§5 legs below).
+//   ③ the per-message fork HANDLER still gated on a backend id while its
+//      button had moved to caps (§5 leg + test-harness-contract SITES).
 // Run: node scripts/test-init-frame.mjs
 import fs from 'node:fs';
 import os from 'node:os';
@@ -47,8 +64,12 @@ try { claudeBin = fs.realpathSync(execFileSync('bash', ['-lc', 'command -v claud
 // A bounded window after a literal marker inside the (215MB, single-line)
 // binary. `grep -o '<marker>.\{0,9000\}'` needs half a minute on a line that
 // long — a streaming indexOf is ~200ms and is exactly as literal.
+// `marker` is a literal string OR a RegExp (the minifier renames the zod
+// helpers between builds — 2.1.257 spells the init variant `subtype:I("init")`
+// and 2.1.238 `subtype:kt("init")` — so a cross-version pin cannot be literal).
 const binWindow = (file, marker, len) => {
   const fd = fs.openSync(file, 'r');
+  const isRe = marker instanceof RegExp;
   try {
     const CH = 8 << 20, buf = Buffer.alloc(CH);
     let carry = '', out = null, pos = 0;
@@ -58,12 +79,51 @@ const binWindow = (file, marker, len) => {
       pos += n;
       const chunk = carry + buf.toString('latin1', 0, n);
       if (out !== null) out += chunk;
+      else if (isRe) { const m = marker.exec(chunk); if (m) out = chunk.slice(m.index); }
       else { const i = chunk.indexOf(marker); if (i >= 0) out = chunk.slice(i); }
       if (out !== null && out.length >= len) break;
-      carry = chunk.slice(-Math.max(marker.length, 64));
+      carry = chunk.slice(-(isRe ? 256 : Math.max(marker.length, 64)));
     }
     return out ? out.slice(0, len) : '';
   } finally { fs.closeSync(fd); }
+};
+const INIT_SCHEMA_RE = /subtype:\w+\("init"\),agents:/;
+
+// Read ONE field's declaration out of a zod object literal: from `<name>:` to
+// the matching TOP-LEVEL comma, tracking (), [], {} and string literals (the
+// `.describe(...)` payloads are full of commas, parens and escaped quotes).
+// Returns null when the field is not in the window at all.
+function zodField(win, name) {
+  const at = win.indexOf(name + ':');
+  if (at < 0) return null;
+  let i = at + name.length + 1, depth = 0, q = null;
+  for (; i < win.length; i++) {
+    const c = win[i];
+    if (q) { if (c === '\\') i++; else if (c === q) q = null; continue; }
+    if (c === '"' || c === "'" || c === '`') { q = c; continue; }
+    if (c === '(' || c === '[' || c === '{') depth++;
+    else if (c === ')' || c === ']' || c === '}') { if (depth === 0) break; depth--; }
+    else if (c === ',' && depth === 0) break;
+  }
+  return win.slice(at + name.length + 1, i);
+}
+// Optional for THIS field, not for something nested inside it: `plugins` is
+// `T(c({… source:i().optional() …}))` — a plain regex reads the inner row's
+// modifier and calls the required field optional. So only a `.optional()` at
+// nesting depth 0 of the declaration counts.
+const zodOptional = (win, name) => {
+  const d = zodField(win, name);
+  if (d === null) return null;
+  let depth = 0, q = null;
+  for (let i = 0; i < d.length; i++) {
+    const c = d[i];
+    if (q) { if (c === '\\') i++; else if (c === q) q = null; continue; }
+    if (c === '"' || c === "'" || c === '`') { q = c; continue; }
+    if (c === '(' || c === '[' || c === '{') { depth++; continue; }
+    if (c === ')' || c === ']' || c === '}') { depth--; continue; }
+    if (depth === 0 && c === '.' && (d.startsWith('.optional()', i) || d.startsWith('.nullish()', i))) return true;
+  }
+  return false;
 };
 if (!claudeBin || !fs.existsSync(claudeBin)) {
   skip('every consumed init field exists in the CLI\'s own schema', 'no claude binary on this box (the fixture keys stand unverified here — a box with the CLI re-greps them)');
@@ -82,6 +142,52 @@ if (!claudeBin || !fs.existsSync(claudeBin)) {
   }
   const cc = binWindow(claudeBin, 'commands_changed"),commands:', 600);
   ok('`commands_changed` is a full-list REPLACE push in the CLI\'s own words ("Clients should REPLACE their cached command list")', /REPLACE their cached command list/.test(cc), cc.slice(0, 200));
+}
+
+// ── 1b. WHICH KEYS ARE REQUIRED — the fact that makes "the card renders only
+// when the frame widened" a FALSE description of the gate (round 2). If the
+// widened keys were optional, their presence would be evidence that this CLI
+// is new; they are not, so every claude init frame carries them and every
+// claude init renders a card. Measured over EVERY installed version, not just
+// the one on PATH — the claim under test is about old CLIs.
+console.log('— required vs optional (the gate is not a version test)');
+{
+  const REQUIRED = ['tools', 'mcp_servers', 'skills', 'plugins', 'output_style', 'claude_code_version', 'model', 'permissionMode', 'slash_commands', 'cwd'];
+  const OPTIONAL = ['agents', 'betas', 'terminal_slash_commands', 'plugin_errors', 'plugin_warnings', 'mcp_server_errors', 'memory_paths'];
+  const versionsDir = path.join(os.homedir(), '.local/share/claude/versions');
+  let bins = [];
+  try { bins = fs.readdirSync(versionsDir).map((v) => path.join(versionsDir, v)).filter((f) => { try { return fs.statSync(f).isFile(); } catch { return false; } }); } catch { }
+  if (claudeBin && fs.existsSync(claudeBin) && !bins.includes(claudeBin)) bins.push(claudeBin);
+  if (!bins.length) {
+    skip('the widened init keys are REQUIRED in every installed CLI', 'no claude binaries on this box (~/.local/share/claude/versions is absent) — the required/optional split stands unverified here');
+  } else {
+    const rows = [];
+    for (const bin of bins) {
+      const win = binWindow(bin, INIT_SCHEMA_RE, 9000);
+      if (!win) { rows.push([path.basename(bin), null]); continue; }
+      rows.push([path.basename(bin), {
+        req: REQUIRED.filter((f) => zodOptional(win, f) === false),
+        wrongReq: REQUIRED.filter((f) => zodOptional(win, f) !== false),
+        opt: OPTIONAL.filter((f) => zodOptional(win, f) === true),
+        wrongOpt: OPTIONAL.filter((f) => zodOptional(win, f) !== true),
+      }]);
+    }
+    const seen = rows.filter((r) => r[1]);
+    if (!seen.length) skip('the widened init keys are REQUIRED in every installed CLI', `no init schema window in ${rows.map((r) => r[0]).join(', ')} (upstream reshaped it — re-dump)`);
+    else {
+      ok(`tools/mcp_servers/skills/plugins/output_style/claude_code_version are NON-optional in every installed CLI (${seen.map((r) => r[0]).join(', ')}) — so "carries a widened key" is NOT evidence of a new CLI`,
+        seen.every((r) => r[1].wrongReq.length === 0), seen.map((r) => `${r[0]}: ${r[1].wrongReq.join(',')}`).join(' | '));
+      ok('…NEGATIVE CONTROL for the reader itself: agents/betas/terminal_slash_commands/plugin_errors/plugin_warnings/mcp_server_errors/memory_paths ARE `.optional()` (a checker that answered "required" for everything would fail here)',
+        seen.every((r) => r[1].wrongOpt.length === 0), seen.map((r) => `${r[0]}: ${r[1].wrongOpt.join(',')}`).join(' | '));
+      ok('…and a field the schema does not declare reads as ABSENT, not as required', zodOptional(binWindow(seen.length ? bins[0] : claudeBin, INIT_SCHEMA_RE, 9000), 'memory_dirs') === null);
+      // The consequence, measured on the pure predicate the card gates on: a
+      // frame built from ONLY the required keys already renders.
+      const requiredOnly = { type: 'system', subtype: 'init', model: 'claude-opus-4', permissionMode: 'default', cwd: '/w', tools: ['Bash', 'Read'], mcp_servers: [{ name: 'a', status: 'connected' }], slash_commands: ['compact'], output_style: 'default', skills: [], plugins: [], claude_code_version: '2.1.238', apiKeySource: 'none', uuid: 'u-req', session_id: 's' };
+      const rf = initFrameFacts(requiredOnly);
+      ok('…so the card\'s own facts are present on a frame with NOTHING optional set (this is why the gate is documented as "has facts to show", never as "the CLI widened")',
+        !!(rf.tools?.length && rf.mcpServers?.length && rf.version) && !('agents' in rf) && !('memoryPaths' in rf), JSON.stringify(rf).slice(0, 200));
+    }
+  }
 }
 
 // ── 2. the normalizer over the REAL frame ──────────────────────────────────
@@ -118,11 +224,14 @@ const runLive = (records) => {
   })());
 }
 {
-  // OLD CLI: a frame that predates every widened field ⇒ nothing extra, no crash.
+  // ABSENT ≠ EMPTY — a PROPERTY of initFrameFacts over a record that omits the
+  // keys, NOT a claim about any shipped CLI: the required/optional pin above
+  // measured that no installed claude omits the widened ones (round 2 — the
+  // round-1 wording called this "an old CLI" and that was never verified).
   const old = { type: 'system', subtype: 'init', model: 'claude-opus-4', permissionMode: 'default', slash_commands: ['compact'], session_id: 's', uuid: 'u-old' };
   const { ops } = runLive([old]);
   const f = ops[0].message.content[0].initData.frame;
-  ok('DEGRADE: an old-CLI init frame yields only what it said (slashCommands) — absent keys stay ABSENT, never empty arrays that would read as "zero skills"',
+  ok('DEGRADE: a record that omits the widened keys yields only what it said (slashCommands) — absent keys stay ABSENT, never empty arrays that would read as "zero skills"',
     Object.keys(f).join(',') === 'slashCommands' && !('skills' in f) && !('mcpServers' in f) && !('memoryPaths' in f), JSON.stringify(f));
   ok('…and its command list still reaches the composer, with an EMPTY terminal subset (filters nothing)',
     ops.some((o) => o.op === 'meta' && o.subtype === 'slash-commands' && o.data.commands.join() === 'compact' && o.data.terminal.length === 0));
@@ -167,6 +276,56 @@ const runLive = (records) => {
   ok('commands_changed is a HANDLED subtype (no unknown-subtype breadcrumb), while a genuinely new subtype still trips it',
     !seen.some(([k, d]) => k === 'cli-unknown-system-subtype' && d === 'commands_changed')
     && seen.some(([k, d]) => k === 'cli-unknown-system-subtype' && d === 'brand_new_thing'), JSON.stringify(seen));
+}
+
+// ── 2b. ONE CARD PER DISTINCT FRAME (round 2) ──────────────────────────────
+// The measurement that forced this, taken on this instance's own
+// data/session-buffers (a ROTATING window — these are snapshots, and the
+// verifier independently measured the same 05:34 one):
+//   2026-09-07 05:34 — 62 `system`/`init` records in 13 conversations, 62 of
+//     them carrying a health issue, 33 byte-identical ones in ONE conversation;
+//   2026-09-07 05:40 (after the ring buffers rotated) — 30 records, 14 distinct
+//     frames, 30 with issues, 6 max in one conversation.
+// Both agree on the shape: 2x-33x redundancy at a 100% warned rate, every one
+// of which passed the round-1 gate and drew a card AND a warning strip. The
+// normalizer now states the fact (`frameRepeat`); the renderer draws nothing
+// for a repeat.
+console.log('— one card per DISTINCT frame');
+{
+  const spawn = (n) => ({ ...FRAME, uuid: 'u-init-' + n, session_id: 's-' + n });
+  const { ops } = runLive(Array.from({ length: 33 }, (_, i) => spawn(i)));
+  const inits = ops.filter((o) => o.op === 'create').map((o) => o.message.content[0].initData);
+  ok('33 identical init records (the maximum observed in one real buffer here) create 33 records but only ONE non-repeat frame',
+    inits.length === 33 && inits.filter((d) => !d.frameRepeat).length === 1 && inits[0].frameRepeat === false, `${inits.length} inits, ${inits.filter((d) => !d.frameRepeat).length} non-repeat`);
+  ok('…and every repeat still carries the WHOLE frame + the per-spawn side-effect facts (the card is suppressed, the facts are not)',
+    inits.at(-1).frameRepeat === true && inits.at(-1).frame.mcpServers[1].status === 'failed' && inits.at(-1).model === FRAME.model && inits.at(-1).slashCommands.length === FRAME.slash_commands.length);
+}
+{
+  // NEGATIVE CONTROL for the dedup: a frame that CHANGED is never a repeat.
+  const healthy = { ...FRAME, uuid: 'u-b', mcp_servers: [{ name: 'github', status: 'connected' }, { name: 'drive', status: 'connected' }, { name: 'fs', status: 'connected' }] };
+  const { ops } = runLive([FRAME, { ...FRAME, uuid: 'u-a2' }, healthy, { ...FRAME, uuid: 'u-c' }]);
+  const flags = ops.filter((o) => o.op === 'create').map((o) => o.message.content[0].initData.frameRepeat);
+  ok('a frame that CHANGED always draws — failed→connected is one card, and going back to the earlier state is another (the comparison is with the PREVIOUS init, never with any earlier one)',
+    flags.join(',') === 'false,true,false,false', flags.join(','));
+}
+{
+  // The trap this was written against: `commands_changed` patches
+  // `_initFrame.slashCommands` IN PLACE. If the fingerprint were read off that
+  // object instead of snapshotted at init time, the next identical init would
+  // read as "changed" and the dedup would silently stop working.
+  const changed = { type: 'system', subtype: 'commands_changed', uuid: 'u-cc2', commands: [{ name: 'compact' }] };
+  const { ops } = runLive([FRAME, changed, { ...FRAME, uuid: 'u-again' }]);
+  const flags = ops.filter((o) => o.op === 'create').map((o) => o.message.content[0].initData.frameRepeat);
+  ok('a commands_changed BETWEEN two identical inits does not fake a change (the fingerprint is snapshotted at init, before the in-place patch)', flags.join(',') === 'false,true', flags.join(','));
+}
+{
+  // Rebuild parity: a restarted window replays the same buffer and must land
+  // on the same cards — a per-instance flag that only existed on the live path
+  // would make history and live disagree.
+  const recs = [FRAME, { ...FRAME, uuid: 'u-r2' }, { ...FRAME, uuid: 'u-r3' }];
+  const live = runLive(recs).ops.filter((o) => o.op === 'create').map((o) => o.message.content[0].initData.frameRepeat);
+  const rebuilt = new MessageManager('sess-rb').convertHistory(recs).filter((m) => m.content[0]?.initData).map((m) => m.content[0].initData.frameRepeat);
+  ok('history rebuild marks the SAME repeats as the live stream (same records, same cards)', live.join(',') === rebuilt.join(',') && rebuilt.join(',') === 'false,true,true', `${live.join(',')} vs ${rebuilt.join(',')}`);
 }
 
 // ── 3. the pure client rules ───────────────────────────────────────────────
@@ -245,10 +404,35 @@ console.log('— wiring pins');
     /setSlashCommands\(se\.slashCommands, \{ terminal: se\.terminalSlashCommands \|\| null \}\)/.test(cv) && /setSlashCommands\(status\.slashCommands, \{ terminal: status\.initFrame\?\.terminalSlashCommands \|\| null \}\)/.test(cv));
   ok('…and both feed the frame-declared memory dirs to the classifier', (cv.match(/noteMemoryPaths\(/g) || []).length >= 2);
   ok('setSlashCommands REPLACES through the ONE pure rule (no local filtering twin)', /this\._slashCommands = slashCompletionList\(cmds, terminal\);/.test(ci));
-  ok('the renderer builds the card from the frame and returns it (it used to return el:null unconditionally)', /return \{ el: this\.buildInitCard\(f\), sideEffect \};/.test(cr));
+  ok('the renderer builds the card from the frame and returns it (it used to return el:null unconditionally), passing the repeat verdict through',
+    /return \{ el: this\.buildInitCard\(f, \{ repeat: !!d\.frameRepeat \}\), sideEffect \};/.test(cr));
   for (const [file, what] of [['src/acp-message-manager.js', 'ACP available_commands_update'], ['src/codex-message-manager.js', 'codex wrapper_meta']]) {
     ok(`${what} emits the SAME meta op (one client path, no local/remote twin)`, /op: 'meta', subtype: 'slash-commands'/.test(read(file)));
   }
+
+  // ORDER PIN (round 2). The frame-declared memory dirs must reach the
+  // classifier BEFORE loadHistory renders the slab they classify: applyStatus
+  // runs after the render loop, and a system/tool card is not re-rendered on a
+  // status change, so a late noteMemoryPaths leaves every memory card in the
+  // attached window rendered as an ordinary file card for the life of that
+  // window. Positions, not presence — this pin fails on a HOISTED-BACK edit.
+  const orderOk = (src) => {
+    const loop = src.indexOf('for (const msg of messages) this._onCreateMessage(msg);');
+    const hoist = src.indexOf('if (meta?.chatStatus?.initFrame?.memoryPaths) noteMemoryPaths(');
+    return loop > 0 && hoist > 0 && hoist < loop;
+  };
+  ok('loadHistory learns the frame-declared memory dirs BEFORE it renders the history they classify', orderOk(cv));
+  ok('…NEGATIVE CONTROL: the same checker FAILS on the pre-fix source (the hoist removed — proof it measures order, not presence)',
+    !orderOk(cv.replace(/\n *if \(meta\?\.chatStatus\?\.initFrame\?\.memoryPaths\) noteMemoryPaths\([^\n]*\n/, '\n')));
+
+  // §2.13: BOTH halves of forkAtMessage read the SAME row. The button lives in
+  // chat-renderers, the handler in chat-view — round 1 gated only the button,
+  // so the first harness to gain the row would have shown a dead control.
+  const forkHandler = cv.slice(cv.indexOf('_forkFromMessage(uuid, msg) {'), cv.indexOf('_forkFromMessage(uuid, msg) {') + 600);
+  ok('the per-message fork HANDLER gates on caps.forkAtMessage, like the button — no backend id left',
+    /backendFeatureCaps\(backend\)\.forkAtMessage/.test(forkHandler) && !/backend !== 'claude'/.test(forkHandler), forkHandler.split('\n').slice(0, 6).join(' / '));
+  ok('…and a click that cannot proceed SPEAKS (no-silent-failures) instead of returning silently', /showToast\(t\('Session id not known yet/.test(forkHandler));
+  ok('…NEGATIVE CONTROL: the checker catches a planted backend-id gate', /backend !== 'claude'/.test(forkHandler + "\n if (backend !== 'claude') return;"));
 }
 
 // ── 6. the card in a REAL browser + the 375×667 measurement ────────────────
@@ -265,7 +449,8 @@ if (!CHROME) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `vs-initcard-${process.pid}-`));
   const stub = { name: 'stub-build-version', setup(b) { b.onResolve({ filter: /build-version\.js$/ }, () => ({ path: 'build-version', namespace: 'bv' })); b.onLoad({ filter: /.*/, namespace: 'bv' }, () => ({ contents: "export const BUILD_VERSION = 'test';", loader: 'js' })); } };
   const entry = path.join(tmp, 'entry.js');
-  fs.writeFileSync(entry, `export { ChatRenderers } from ${JSON.stringify(path.join(REPO, 'src/lib/chat-renderers.js'))};\n`);
+  fs.writeFileSync(entry, `export { ChatRenderers } from ${JSON.stringify(path.join(REPO, 'src/lib/chat-renderers.js'))};\n`
+    + `export * as AM from ${JSON.stringify(path.join(REPO, 'src/lib/agent-meta.js'))};\n`);
   const bundle = path.join(tmp, 'init.iife.js');
   await esbuild.build({ entryPoints: [entry], bundle: true, format: 'iife', globalName: 'VS', platform: 'browser', target: 'es2022', outfile: bundle, logLevel: 'silent', loader: { '.css': 'text' }, plugins: [stub] });
   const js = fs.readFileSync(bundle, 'utf8').replace(/<\/script/gi, '<\\/script');
@@ -357,15 +542,85 @@ if (!CHROME) {
     ok('XSS: frame text is escaped, never markup (a plugin/skill name syncs to every client)',
       (await evaljs('!window.__pwned')) && !/<img src=x/.test(r2.rawHtml) && /&lt;img src=x/.test(r2.rawHtml), r2.rawHtml.slice(0, 200));
 
-    const old = { type: 'system', subtype: 'init', model: 'claude-opus-4', permissionMode: 'default', slash_commands: ['compact'], uuid: 'u-old' };
-    const r3 = await render(norm(old));
-    ok('NEGATIVE CONTROL: an old-CLI / codex / ACP init record renders NOTHING (today\'s behaviour is preserved exactly), yet still applies its side effect',
-      r3.rendered === false && r3.sideEffect.model === 'claude-opus-4' && r3.sideEffect.slashCommands.join() === 'compact', JSON.stringify(r3).slice(0, 200));
+    // NEGATIVE CONTROLS — the round-1 leg used a hand-made 3-key claude record
+    // that no CLI has ever emitted, so it green-lit the claim "an old claude
+    // CLI renders nothing" while measuring nothing. The producers that really
+    // do render nothing are codex and ACP/OpenCode, whose normalizers build
+    // initData WITHOUT a frame at all — so the control is now their REAL
+    // output, and the honest statement about old claude CLIs is the OPPOSITE
+    // one, asserted right below on a real pre-widening keyset.
+    const { CodexMessageManager } = require(path.join(REPO, 'src/codex-message-manager.js'));
+    const { AcpMessageManager } = require(path.join(REPO, 'src/acp-message-manager.js'));
+    const cxOps = []; const cx = new CodexMessageManager('cx-1'); cx.onOp((o) => cxOps.push(o));
+    cx.processLive({ timestamp: '2026-09-07T00:00:00.000Z', type: 'session_meta', payload: { id: '01a07386-3386-7203-adfb-7c4ba193e24d', cwd: '/w', model: 'gpt-6-astra', cli_version: '0.153.4' } });
+    const cxInit = cxOps.find((o) => o.op === 'create' && o.message.content?.[0]?.initData)?.message;
+    const acpOps = []; const acp = new AcpMessageManager('acp-1'); acp.onOp((o) => acpOps.push(o));
+    acp.processLive({ type: 'acp', kind: 'session', sessionId: 'sess-acp', how: 'new', model: 'mock/fast', mode: 'build', agentInfo: { name: 'mock-acp' } });
+    const acpInit = acpOps.find((o) => o.op === 'create' && o.message.content?.[0]?.initData)?.message;
+    ok('the two REAL frame-less producers exist and were driven (codex session_meta / ACP session record)', !!cxInit && !!acpInit && !cxInit.content[0].initData.frame && !acpInit.content[0].initData.frame);
+    const rCx = await render(JSON.stringify(cxInit));
+    const rAcp = await render(JSON.stringify(acpInit));
+    ok('NEGATIVE CONTROL: the codex and ACP/OpenCode init records — REAL normalizer output, no `frame` key — render NOTHING, yet still apply their side effects',
+      rCx.rendered === false && rCx.sideEffect.model === 'gpt-6-astra' && rAcp.rendered === false && rAcp.sideEffect.model === 'mock/fast',
+      JSON.stringify({ cx: rCx.rendered, cxSe: rCx.sideEffect, acp: rAcp.rendered, acpSe: rAcp.sideEffect }).slice(0, 300));
+
+    // The claim the round-1 fixture pretended to test, stated honestly and the
+    // right way round: a frame carrying ONLY the keys the schema makes
+    // REQUIRED (the 2.1.238 keyset) DOES render — every installed claude CLI
+    // gets a card. What it does not get, with everything healthy, is a strip.
+    const preWiden = { type: 'system', subtype: 'init', model: 'claude-opus-4', permissionMode: 'default', cwd: '/w', tools: ['Bash', 'Read', 'Write'], mcp_servers: [{ name: 'a', status: 'connected' }], slash_commands: ['compact'], output_style: 'default', skills: [], plugins: [], claude_code_version: '2.1.238', apiKeySource: 'none', uuid: 'u-238', session_id: 's' };
+    const r3 = await render(norm(preWiden));
+    ok('a frame with ONLY the schema-REQUIRED keys (2.1.238 keyset, all healthy) renders a card and NO health strip — the gate is "has facts", not "is a new CLI"',
+      r3.rendered === true && !r3.warnText && /3/.test(r3.bodyText) && r3.sideEffect.model === 'claude-opus-4', JSON.stringify({ r: r3.rendered, w: r3.warnText, b: r3.bodyText.slice(0, 120) }));
 
     const healthy = { ...FRAME, mcp_servers: [{ name: 'a', status: 'connected' }], plugin_errors: undefined, mcp_server_errors: undefined };
     const r4 = await render(norm(healthy));
     ok('a healthy session gets the card WITHOUT a health strip (and no "all good" claim — an absent error key is not a clean load)',
       r4.rendered && !r4.warnText, JSON.stringify({ w: r4.warnText }));
+
+    // THE REPEAT, end to end: 33 identical spawns → ONE card in the document.
+    const repeats = (() => {
+      const mm = new MessageManager('sess-rep');
+      const msgs = mm.convertHistory(Array.from({ length: 33 }, (_, i) => ({ ...FRAME, uuid: 'u-rep-' + i, session_id: 's-' + i })));
+      return JSON.stringify(msgs.filter((m) => m.content?.[0]?.initData));
+    })();
+    const rRep = await evaljs(`(() => {
+      const list = document.getElementById('list');
+      list.innerHTML = '';
+      const r = new VS.ChatRenderers({ sessionId: 'view-x', backend: 'claude', messageList: list });
+      let se = 0;
+      for (const msg of ${repeats}) { const out = r.renderSystemMsg(msg); if (out.el) list.appendChild(out.el); if (out.sideEffect && out.sideEffect.model) se++; }
+      return { cards: list.querySelectorAll('.chat-msg-init').length, strips: list.querySelectorAll('.chat-init-warn').length, sideEffects: se };
+    })()`);
+    ok(`a conversation whose 33 spawns all report the SAME frame draws ONE card and ONE health strip (round 1 drew 33 of each), while all 33 side effects still apply`,
+      rRep.cards === 1 && rRep.strips === 1 && rRep.sideEffects === 33, JSON.stringify(rRep));
+
+    // MEMORY CLASSIFICATION IS ORDER-SENSITIVE (the loadHistory hoist). Same
+    // card, same renderer — only "has the classifier been told yet" differs,
+    // and a system card is never re-rendered, so the late answer never lands.
+    const memMsgs = (() => {
+      const mm = new MessageManager('sess-mem');
+      const msgs = mm.convertHistory([
+        { type: 'assistant', message: { id: 'm1', role: 'assistant', model: 'claude-fable-5', content: [{ type: 'tool_use', id: 'tu1', name: 'Write', input: { file_path: '/srv/agentmem/notes.md', content: 'remembered' } }] }, uuid: 'ua1', timestamp: '2026-09-07T00:00:00.000Z' },
+        { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu1', content: 'ok' }] }, uuid: 'uu1', timestamp: '2026-09-07T00:00:01.000Z' },
+      ]);
+      return JSON.stringify(msgs.filter((m) => m.role === 'tool'));
+    })();
+    const rMem = await evaljs(`(() => {
+      const list = document.getElementById('list');
+      const draw = () => { list.innerHTML = '';
+        const r = new VS.ChatRenderers({ sessionId: 'view-x', backend: 'claude', messageList: list });
+        for (const m of ${memMsgs}) { const el = r.renderToolMsg(m); if (el) list.appendChild(el); }
+        return (list.textContent || '').replace(/\\s+/g, ' ').trim(); };
+      VS.AM._resetMemoryPaths();
+      const before = draw();
+      VS.AM.noteMemoryPaths({ auto: '/srv/agentmem' });
+      const after = draw();
+      VS.AM._resetMemoryPaths();
+      return { before, after };
+    })()`);
+    ok('a Write into a directory only the FRAME names renders as an ordinary Write until the classifier is told, and as a Memory update once it is — which is why loadHistory must learn the dirs before it renders the slab',
+      /Write/.test(rMem.before) && !/Memory update/.test(rMem.before) && /Memory update/.test(rMem.after) && /notes\.md/.test(rMem.after), JSON.stringify(rMem).slice(0, 300));
 
     // ── ≤768px (375×667): the standing rule ──
     await setViewport(375, 667);

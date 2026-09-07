@@ -53,8 +53,11 @@ const HANDLED_SYSTEM_SUBTYPES = new Set([
 // ── THE claude INIT FRAME (2.1.257 `system`/`init`) ─────────────────────────
 // Every field below is VERBATIM from the binary's own zod schema (dumped, per
 // the facts law — `strings` over the 2.1.257 binary, the `xie` schema object),
-// and every one is optional on the wire: an older CLI omits it, and a consumer
-// that finds nothing must fall back to what it does today. We used to keep
+// every one is optional TO US — a consumer that finds nothing must fall back to
+// what it does today — but NOT optional in the schema: only agents / betas /
+// terminal_slash_commands / plugin_errors / plugin_warnings / mcp_server_errors
+// / memory_paths carry `.optional()` (measured over 2.1.238/.239/.257), so the
+// presence of any other key says nothing about which CLI wrote it. We used to keep
 // three of them (model / permissionMode / slash_commands) and drop the rest,
 // so a FAILED MCP server — a real, present condition in this instance's own
 // sessions — was invisible: its tools simply did not exist.
@@ -90,7 +93,8 @@ const objList = (v, keys, cap) => (Array.isArray(v)
 
 /** The facts of a claude init frame, in CLIENT spelling. Null-valued keys are
  *  dropped so "the CLI said nothing" and "the CLI said empty" stay different
- *  answers (an old CLI must never look like a session with zero skills). */
+ *  answers (a producer that says nothing must never look like a session with
+ *  zero skills — codex/ACP build initData with no frame at all). */
 function initFrameFacts(raw) {
   const out = {};
   const put = (k, v) => { if (v != null) out[k] = v; };
@@ -524,6 +528,30 @@ class MessageManager {
     // (see the unhandled-subtype breadcrumb at the tail of this method)
     if (raw.subtype === 'init') {
       const frame = initFrameFacts(raw);
+      // ONE CARD PER *DISTINCT* FRAME (round 2). A conversation carries one
+      // init record per spawn — every resume, every server restart, every
+      // wrapper respawn — and they are overwhelmingly identical. Measured on
+      // this instance's own data/session-buffers (a ROTATING window, so the
+      // numbers are snapshots): 2026-09-07 05:34 = 62 init records in 13
+      // conversations, 62 of them carrying a health issue, 33 byte-identical
+      // ones in ONE conversation; a re-measure at 05:40, after the ring
+      // buffers had rotated, = 30 records / 14 distinct frames / 30 with
+      // issues / 6 max. Both agree on the shape: 2×–33× redundancy at a 100%
+      // warned rate. Restating the same session-start facts — and the same
+      // "4 not working" strip — 33 times tells the reader nothing the first
+      // one did not. So an init whose frame equals the PREVIOUS init's is marked
+      // `frameRepeat` and the renderer draws nothing for it; every side
+      // effect (model, permission mode, command list, memory dirs) still
+      // applies, because those are per-spawn facts even when they repeat.
+      // A frame that CHANGED always draws: a server that went connected →
+      // failed, a skill discovered mid-session, a CLI upgrade, another model
+      // are exactly what the card exists to show.
+      // The fingerprint is taken HERE, before `commands_changed` patches
+      // `_initFrame.slashCommands` in place, so the comparison is always
+      // init-vs-init and never init-vs-patched-init.
+      const framePrint = JSON.stringify(frame);
+      const frameRepeat = this._lastInitPrint !== undefined && framePrint === this._lastInitPrint;
+      this._lastInitPrint = framePrint;
       this._initFrame = frame;
       const msg = this._create({
         role: 'system', status: 'complete',
@@ -534,9 +562,15 @@ class MessageManager {
             // The WIDENED frame (§2.6): the same record already carried these
             // and we dropped every one of them. Field names are verbatim from
             // the 2.1.257 zod schema (`system`/`init` variant) — dumped, not
-            // guessed — and every one is OPTIONAL here: an older CLI simply
-            // has no key and every consumer degrades to today's behaviour.
-            frame,
+            // guessed. NOTE (round 2, corrected): in the CLI's own schema
+            // `tools` / `mcp_servers` / `skills` / `plugins` / `output_style`
+            // / `claude_code_version` are REQUIRED, so the presence of a
+            // widened key is NOT evidence that a particular CLI is new — see
+            // buildInitCard, which must never be described as gating on it.
+            // The keys that really are `.optional()` (agents, betas,
+            // terminal_slash_commands, plugin_errors, plugin_warnings,
+            // mcp_server_errors, memory_paths) stay ABSENT when unsent.
+            frame, frameRepeat,
           },
         }],
       });

@@ -1066,7 +1066,11 @@ console.log('— stream-json: init frame widening + commands_changed');
     (() => { const l = slashCompletionList(cmdOps()[0].data.commands, cmdOps()[0].data.terminal); return !l.includes('/doctor') && !l.includes('/color') && l.includes('/compact'); })());
   ok('the health strip has something to say for this frame (a failed + a needs-auth server, a skipped config, a demoted plugin)…',
     initHealthIssues(frame).length === 4, JSON.stringify(initHealthIssues(frame)));
-  ok('…NEGATIVE CONTROL: an OLD CLI\'s three-field init frame carries no widened facts at all (absent ≠ empty) and reports no health issues, so nothing renders',
+  // NOTE (round 2): this is a record that OMITS the widened keys — a shape
+  // property, not a claim about any shipped claude CLI (scripts/test-init-frame
+  // pins those keys as REQUIRED in 2.1.238/.239/.257, so no installed CLI
+  // produces it; codex/ACP produce initData with no frame at all).
+  ok('…NEGATIVE CONTROL: an init record that omits the widened keys carries no facts at all (absent ≠ empty) and reports no health issues, so nothing renders',
     (() => {
       const s2 = mkSession('claude', 'w-init-old'); const p2 = fakePty();
       so.setupSessionPty(s2, 'w-init-old', p2);

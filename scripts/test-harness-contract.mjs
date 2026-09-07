@@ -195,6 +195,10 @@ const SITES = [
   ['src/lib/chat-view.js', '_syncReviewAvailability() {', 8, 'client review availability'],
   ['src/lib/chat-view.js', '_startReadOnlyPolling() {', 8, 'client detached-review poll'],
   ['src/lib/chat-renderers.js', 'addForkBtn(el, msg) {', 8, 'per-message fork button'],
+  // The ACTION half of the same capability. Round 1 gated only the button, so
+  // the first harness whose row said forkAtMessage:true would have shown a
+  // control whose click returned silently on a `backend !== 'claude'` branch.
+  ['src/lib/chat-view.js', '_forkFromMessage(uuid, msg) {', 8, 'per-message fork handler'],
 ];
 for (const [file, marker, lines, label] of SITES) {
   const block = blockOf(fs.readFileSync(path.join(REPO, file), 'utf8'), marker, lines);

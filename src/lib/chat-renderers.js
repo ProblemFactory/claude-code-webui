@@ -881,9 +881,10 @@ class ChatRenderers {
       return { el, sideEffect: null };
     }
     // system.init — metadata side effects, plus (since §2.6) a compact card
-    // for the facts the frame carries that have NO other home. The card is
-    // rendered ONLY when the frame widened: a codex/ACP init record, or a
-    // claude CLI predating the fields, keeps today's invisible behaviour.
+    // for the facts the frame carries that have NO other home. A record with
+    // no `frame` (codex, ACP/OpenCode) keeps today's invisible behaviour, and
+    // a frame that merely REPEATS the previous init draws nothing while its
+    // side effects still apply — see buildInitCard for both rules.
     if (msg.content?.[0]?.initData) {
       const d = msg.content[0].initData;
       const f = d.frame || null;
@@ -893,7 +894,7 @@ class ChatRenderers {
       if (d.slashCommands) sideEffect.slashCommands = d.slashCommands;
       if (f?.terminalSlashCommands) sideEffect.terminalSlashCommands = f.terminalSlashCommands;
       if (f?.memoryPaths) sideEffect.memoryPaths = f.memoryPaths;
-      return { el: this.buildInitCard(f), sideEffect };
+      return { el: this.buildInitCard(f, { repeat: !!d.frameRepeat }), sideEffect };
     }
     // Hook events — compact collapsible
     if (msg.content?.[0]?.hookData) {
@@ -1259,23 +1260,45 @@ class ChatRenderers {
     return tpl.innerHTML;
   }
 
-  /** THE SESSION-START CARD (§2.6). Renders only for a frame that actually
-   *  carries the widened fields — every other init record (codex, ACP, a
-   *  claude CLI older than the fields) returns null and stays invisible, which
-   *  is exactly today's behaviour.
-   *  Shape: one quiet collapsed line. What is WRONG (a non-connected MCP
+  /** THE SESSION-START CARD (§2.6).
+   *
+   *  WHAT RENDERS — and what this gate is NOT (round 2, a false claim
+   *  corrected): `hasFacts` is "does this frame carry anything the card can
+   *  show", NOT "is this CLI new enough". In the CLI's own zod schema
+   *  `tools` / `mcp_servers` / `skills` / `plugins` / `output_style` /
+   *  `claude_code_version` are REQUIRED (scripts/test-init-frame.mjs re-reads
+   *  the schema out of EVERY installed CLI — 2.1.238/.239/.257 here — and pins
+   *  which keys really are `.optional()`), so EVERY claude init frame passes
+   *  it and a claude session
+   *  gets a card. What returns null here is a producer that builds `initData`
+   *  with NO frame at all — codex (codex-message-manager) and ACP/OpenCode
+   *  (acp-message-manager) both send only {model, permissionMode,
+   *  slashCommands} — plus any frame whose every card fact is empty.
+   *
+   *  HOW OFTEN — once per DISTINCT frame. The normalizer marks an init whose
+   *  frame equals the previous init's as `frameRepeat` (see _processSystem,
+   *  which carries the measurement): a conversation carries one init per spawn
+   *  and this instance's own buffers held 33 byte-identical ones in a single
+   *  conversation, which would have been 33 cards and 33 health strips. A
+   *  frame that CHANGED still draws.
+   *
+   *  SHAPE: one quiet collapsed line. What is WRONG (a non-connected MCP
    *  server, a demoted plugin, a skipped --mcp-config entry) sits in the
-   *  ALWAYS-VISIBLE summary — a health strip behind a click would not fix the
-   *  invisibility it exists for — while the inventory (skills, plugins, MCP
-   *  servers, tools, betas, version) is one <details> away.
+   *  ALWAYS-VISIBLE summary in warning colour — a health strip behind a click
+   *  would not fix the invisibility it exists for — while the inventory
+   *  (skills, plugins, MCP servers, tools, betas, version) is one <details>
+   *  away. On this box EVERY distinct frame carries issues (a genuinely
+   *  failing MCP server — 62/62 records at the first measurement, 30/30 at the
+   *  second), so "quiet" means one warned line per conversation, not zero.
    *  Strings are chrome ⇒ t(); every value from the frame is escaped and shown
    *  verbatim (statuses/plugin ids are protocol text, never translated). */
-  buildInitCard(frame) {
+  buildInitCard(frame, { repeat = false } = {}) {
     if (!frame) return null;
+    if (repeat) return null;
     const skills = frame.skills || [], plugins = frame.plugins || [], servers = frame.mcpServers || [], tools = frame.tools || [], agents = frame.agents || [];
     const issues = initHealthIssues(frame);
-    const hasInventory = skills.length || plugins.length || servers.length || tools.length || agents.length || frame.outputStyle || frame.version;
-    if (!issues.length && !hasInventory) return null;
+    const hasFacts = skills.length || plugins.length || servers.length || tools.length || agents.length || frame.outputStyle || frame.version;
+    if (!issues.length && !hasFacts) return null;
     const el = document.createElement('div');
     el.className = 'chat-msg chat-msg-system chat-msg-init';
     const chips = [];
