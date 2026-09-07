@@ -16,7 +16,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
-const { writerSweepScript, sweepWriters, parseSwept } = require('../src/writer-sweep.js');
+const { writerSweepScript, sweepWriters, parseSwept, fdScanShellFns } = require('../src/writer-sweep.js');
 
 let pass = 0, fail = 0;
 const ok = (c, n) => { if (c) { pass++; console.log('  ✓ ' + n); } else { fail++; console.error('  ✗ ' + n); } };
@@ -44,7 +44,20 @@ const script = writerSweepScript('rid-abc', shq);
 ok(script.includes("RID='rid-abc'"), 'script quotes the conversation id');
 ok(script.includes('/proc') && script.includes('lsof'), 'script covers Linux (/proc) AND macOS/BSD (lsof)');
 ok(script.includes('.claude/sessions') && script.includes('.vibespace'), 'script sweeps lock files and pipe-session metas');
-ok((script.match(/SWEPT:/g) || []).length >= 3, 'every kill leg reports what it terminated');
+// Intent, not a count: a sweep is destructive, so NO kill may be silent. (The
+// count form broke the moment B-3185 collapsed three copy-pasted kill lines
+// into one function — the same assertion, expressed as a fact about the text.)
+for (const [name, s] of [['claude', script], ['codex', writerSweepScript('rid-abc', shq, { backend: 'codex' })]]) {
+  const kills = s.split('\n').filter((l) => /kill -TERM/.test(l));
+  ok(kills.length >= 2 && kills.every((l) => l.includes('SWEPT:')), `${name}: every kill leg reports what it terminated (${kills.length} legs)`);
+}
+// B-3185: the fd scan is BATCHED — one `ls -l` per 400 fd directories, never a
+// fork PER PROCESS. `/proc/[0-9]*` may therefore appear exactly once (inside
+// vs_fd_scan) in either script.
+for (const [name, s] of [['claude', script], ['codex', writerSweepScript('rid-abc', shq, { backend: 'codex' })]]) {
+  ok((s.match(/\/proc\/\[0-9\]\*/g) || []).length === 1 && s.includes('vs_fd_scan'), `${name}: exactly ONE /proc walk, through the shared batched scan`);
+  ok(!/ls -l "\$pdir/.test(s) && !/ps -p "\$pid" -o args=\S*\) in \*/.test(s), `${name}: no per-process ls fork and no whole-argv substring identity test`);
+}
 
 // ── 2. LOCAL and REMOTE run the IDENTICAL script ──
 const localDev = fakeDevice('local', { swept: ['111'] });
@@ -75,43 +88,91 @@ try { await sweepWriters(mkHosts(fakeDevice('local', { fail: true })), null, 'ri
 catch (e) { threw = e; }
 ok(threw, 'local failure throws (caller decides to warn) instead of silently claiming a sweep');
 
-// ── 6. Real script execution against a real process on this machine ──
-// Proves the script's fd-scan leg actually finds a holder (Linux only).
+// ── 6. Real script execution against real holder processes on this machine ──
+// Proves the fd-scan leg finds a holder AND that "is this the CLI?" is decided
+// by the EXECUTABLE, not by a substring of the command line (B-3185).
+//
+// The old guard substring-matched 'claude' anywhere in `ps -o args=`, so it
+// killed anything whose argv merely NAMED a path under ~/.claude —
+// `tail -f ~/.claude/projects/<id>.jsonl`, an editor, and (the incident that
+// forced the workaround this section used to carry) THIS SUITE, whose own argv
+// is an absolute path inside a git worktree under ~/.claude/worktrees/ where
+// the worktree-only-smokes law puts every agent: it matched its own guard and
+// SIGTERMed itself before the assertion ran — exit 143, gate red, code fine.
+// So the suite now HOLDS THE TRANSCRIPT ITSELF as the primary negative control
+// (with a SIGTERM trap, so a regression is a red assertion instead of a
+// mysterious 143) and the fixtures cover every shape the real CLI ships in.
 if (fs.existsSync('/proc/self')) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-sweep-'));
-  const jsonl = path.join(dir, 'rid-live.jsonl');
-  fs.writeFileSync(jsonl, '{}\n');
   const { execFileSync, spawn } = await import('node:child_process');
-  // The holder is a SEPARATE process with a neutral argv, never this one: the
-  // script's guard substring-matches 'claude' anywhere in `ps -o args=` (the
-  // real CLI runs as `node …/claude/cli.js`, so the looseness is load-bearing),
-  // and this suite's own argv is its absolute path — inside a git worktree
-  // under ~/.claude/worktrees/ (the worktree-only-smokes law puts EVERY agent
-  // there) the suite matched its own guard and SIGTERMed itself before the
-  // assertion ran: exit 143, gate red, on code that is completely fine.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-sweep-'));
+  const proj = path.join(dir, '.claude', 'projects', '-w');
+  fs.mkdirSync(proj, { recursive: true });
+  const jsonl = path.join(proj, 'rid-live.jsonl');
+  fs.writeFileSync(jsonl, '{}\n');
   const holderSrc = (readyPath) => `require('fs').openSync(${JSON.stringify(jsonl)}, 'r'); require('fs').writeFileSync(${JSON.stringify(readyPath)}, '1'); setTimeout(() => {}, 60000);`;
-  const neutralReady = path.join(dir, 'ready-neutral');
-  const neutral = spawn(process.execPath, ['-e', holderSrc(neutralReady)], { cwd: os.tmpdir(), stdio: 'ignore' });
-  // POSITIVE CONTROL for the same run: a holder whose argv DOES look like the
-  // CLI must be swept — without it, "never killed" would also pass if the
-  // fd-scan leg found no holder at all.
-  const claudeReady = path.join(dir, 'ready-claude');
-  const claudeScript = path.join(dir, 'claude-cli.js');
-  fs.writeFileSync(claudeScript, holderSrc(claudeReady));
-  const fake = spawn(process.execPath, [claudeScript], { cwd: os.tmpdir(), stdio: 'ignore' });
+  const holders = [];
+  const spawnHolder = (name, cmd, args, opts = {}) => {
+    const ready = path.join(dir, 'ready-' + name);
+    const p = spawn(cmd, args.map((a) => (a === '@SRC@' ? holderSrc(ready) : a)), { cwd: os.tmpdir(), stdio: 'ignore', ...opts });
+    holders.push({ name, p, ready });
+    return p;
+  };
+  const mkScript = (rel, ready) => { const f = path.join(dir, rel); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, holderSrc(path.join(dir, 'ready-' + ready))); return f; };
+
+  // WRITERS (must be swept) — the three shapes the CLI actually ships in.
+  const nativeBin = path.join(dir, 'bin', 'claude');            // native install / bin shim
+  fs.mkdirSync(path.dirname(nativeBin), { recursive: true });
+  fs.symlinkSync(process.execPath, nativeBin);
+  const wNative = spawnHolder('w-native', nativeBin, ['-e', '@SRC@']);
+  const wNpm = spawnHolder('w-npm', process.execPath, [mkScript('node_modules/@anthropic-ai/claude-code/cli.js', 'w-npm')]);
+  const shimPath = mkScript('lib/bin/claude', 'w-shim');          // `node <prefix>/bin/claude` (shebang shim)
+  const wShim = spawnHolder('w-shim', process.execPath, [shimPath]);
+
+  // READERS (must survive) — every one of them was killed by the old guard.
+  const rTail = spawn('tail', ['-f', jsonl], { cwd: os.tmpdir(), stdio: 'ignore' });
+  const rWorktree = spawnHolder('r-worktree', process.execPath, [mkScript('.claude/worktrees/wf_x/scripts/suite.js', 'r-worktree')]);
+  const rOtherCli = spawnHolder('r-othercli', process.execPath, [mkScript('tools/cli.js', 'r-othercli')]); // a cli.js NOT under a claude package
+  const rNeutral = spawnHolder('r-neutral', process.execPath, ['-e', '@SRC@']);
+  // …and the suite itself: same fd, and (when run from an agent worktree) the
+  // very argv that used to match. A SIGTERM here must not kill the run.
+  let selfTermed = false;
+  const onTerm = () => { selfTermed = true; };
+  process.on('SIGTERM', onTerm);
+  const selfFd = fs.openSync(jsonl, 'r');
+
+  // A negative control is only meaningful once the scan can actually SEE the
+  // holder: wait until every fixture really has the transcript open.
+  const holdsIt = (pid) => {
+    try { return fs.readdirSync(`/proc/${pid}/fd`).some((f) => { try { return fs.readlinkSync(`/proc/${pid}/fd/${f}`) === jsonl; } catch { return false; } }); }
+    catch { return false; }
+  };
   const t0 = Date.now();
-  while ((!fs.existsSync(neutralReady) || !fs.existsSync(claudeReady)) && Date.now() - t0 < 5000) await new Promise((r) => setTimeout(r, 20));
-  // 90s, not the production 20s budget: this leg walks EVERY /proc entry's fd
-  // table, which is ~24s on the shared dev box (2300 processes) and seconds on
-  // a quiet one — the assertion is about the script's BEHAVIOUR, and a
-  // load-dependent timeout would make the release gate a coin flip.
+  while ((holders.some((h) => !fs.existsSync(h.ready)) || !holdsIt(rTail.pid)) && Date.now() - t0 < 8000) await new Promise((r) => setTimeout(r, 20));
+  ok(holdsIt(rTail.pid), '`tail -f` fixture really has the transcript open (the negative control is not vacuous)');
+  // 90s, not the production 20s budget: the assertion is about the script's
+  // BEHAVIOUR and a load-dependent timeout would make the release gate a coin
+  // flip. (The batched scan itself measures ~3s at 3678 processes.)
+  const scanStart = Date.now();
   const out = execFileSync('sh', ['-c', writerSweepScript('rid-live', shq)], { encoding: 'utf8', timeout: 90000, env: { ...process.env, HOME: dir } });
-  await new Promise((r) => setTimeout(r, 200));
+  const scanMs = Date.now() - scanStart;
+  await new Promise((r) => setTimeout(r, 300));
   const alive = (p) => { try { process.kill(p, 0); return true; } catch { return false; } };
-  const swept = parseSwept(out);
-  ok(fs.existsSync(claudeReady) && swept.map(Number).includes(fake.pid) && !alive(fake.pid), 'the real script\'s fd-scan leg finds a claude-looking holder and SIGTERMs it (positive control)', { swept, pid: fake.pid });
-  ok(fs.existsSync(neutralReady) && !swept.map(Number).includes(neutral.pid) && alive(neutral.pid), 'a NON-claude holder of the transcript is never killed (cmdline guard) — and it is still alive', { swept, pid: neutral.pid });
-  for (const h of [neutral, fake]) { try { h.kill('SIGKILL'); } catch {} }
+  const swept = parseSwept(out).map(Number);
+  const started = (name) => fs.existsSync(path.join(dir, 'ready-' + name));
+  const wasSwept = (name, p) => started(name) && swept.includes(p.pid) && !alive(p.pid);
+  const survived = (name, p) => started(name) && !swept.includes(p.pid) && alive(p.pid);
+  ok(wasSwept('w-native', wNative), 'WRITER swept: a native `…/bin/claude` holder (argv[0] basename) — positive control that the scan reached the holder at all', { swept });
+  ok(wasSwept('w-npm', wNpm), 'WRITER swept: `node …/@anthropic-ai/claude-code/cli.js` (the npm entry point)', { swept });
+  ok(wasSwept('w-shim', wShim), 'WRITER swept: `node <prefix>/bin/claude` (the shebang bin shim)', { swept });
+  ok(!swept.includes(rTail.pid) && alive(rTail.pid), 'READER survives: `tail -f <HOME>/.claude/projects/…/<id>.jsonl` is NOT a transcript writer (B-3185)', { swept, pid: rTail.pid });
+  ok(survived('r-worktree', rWorktree), 'READER survives: a process running from a path under .claude/worktrees/ (the suite\'s own self-kill shape)', { swept });
+  ok(survived('r-othercli', rOtherCli), 'READER survives: a `cli.js` that is not under a claude package', { swept });
+  ok(survived('r-neutral', rNeutral), 'READER survives: a neutral `node -e` holder', { swept });
+  ok(!selfTermed && !swept.includes(process.pid), `the SUITE ITSELF holds the transcript open and is never swept (ran from ${process.argv[1].includes('.claude') ? 'a .claude path — the real regression shape' : 'a non-.claude path'})`, { swept, pid: process.pid });
+  console.log(`  · fd scan + sweep wall time: ${scanMs}ms over ${execFileSync('sh', ['-c', 'ls -d /proc/[0-9]* | wc -l'], { encoding: 'utf8' }).trim()} processes`);
+  fs.closeSync(selfFd);
+  process.off('SIGTERM', onTerm);
+  for (const h of [...holders.map((h) => h.p), rTail]) { try { h.kill('SIGKILL'); } catch {} }
   fs.rmSync(dir, { recursive: true, force: true });
 } else { console.log('  · /proc absent — skipping the live fd-scan leg'); }
 
@@ -177,23 +238,31 @@ if (fs.existsSync('/proc/self')) {
   const runScript = (script) => parseSwept(execFileSync('sh', ['-c', script], { encoding: 'utf8', timeout: 30000, env: { ...process.env, HOME: home } }));
   const runSweep = (opts = {}) => runScript(writerSweepScript(tid, shq, { backend: 'codex', ...opts }));
   const idle = 'setTimeout(() => {}, 60000)';
-  // a process that holds `file` open (fd 0) with the given argv tail + env
-  const holder = (file, argvTail, extraEnv = {}) => {
+  // B-3185: the fixture's EXECUTABLE has to be the codex binary, because that
+  // is what the guard now reads. The real vendor binary is
+  // …/@openai/codex-linux-x64/vendor/<triple>/bin/codex (the npm `codex.js`
+  // shim spawns it by path), so a node symlinked to that basename reproduces
+  // exactly what `ps`/`/proc/<pid>/exe` show for a live app-server.
+  fs.mkdirSync(path.join(home, 'bin'), { recursive: true });
+  const codexBin = path.join(home, 'bin', 'codex');
+  fs.symlinkSync(process.execPath, codexBin);
+  // a process that holds `file` open (fd 0), running `cmd` with the given argv
+  const holder = (file, extraEnv = {}, cmd = codexBin, argvTail = []) => {
     const fd = fs.openSync(file, 'r');
-    const p = spawn(process.execPath, ['-e', idle, ...argvTail], { stdio: [fd, 'ignore', 'ignore'], env: { ...process.env, ...extraEnv } });
+    const p = spawn(cmd, ['-e', idle, ...argvTail], { stdio: [fd, 'ignore', 'ignore'], env: { ...process.env, ...extraEnv } });
     fs.closeSync(fd);
     return p;
   };
   const exited = (p) => new Promise((res) => { if (p.exitCode !== null || p.signalCode) return res(p.signalCode); p.once('exit', (c, s) => res(s)); });
   const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
-  const h1 = holder(rollout, ['codex', 'app-server']);
+  const h1 = holder(rollout);
   await sleep(300);
   ok(runSweep().includes(String(h1.pid)), `an external codex app-server holding rollout-*-<threadId>.jsonl open is swept (SWEPT:${h1.pid})`);
   ok((await exited(h1)) === 'SIGTERM', 'the holder actually received SIGTERM');
   ok(runSweep().length === 0, 'released → the sweep finds nothing (clean)');
 
-  const h2 = holder(rollout, ['codex', 'app-server'], { CLAUDE_WEBUI_SESSION_ID: 'sess-live-1' });
+  const h2 = holder(rollout, { CLAUDE_WEBUI_SESSION_ID: 'sess-live-1' });
   await sleep(300);
   ok(!runSweep({ protectSids: ['sess-live-1'] }).includes(String(h2.pid)) && alive(h2.pid), 'a holder under a LIVE VibeSpace codex session (protect list) is NEVER swept');
   ok(runSweep({ protectSids: ['sess-other'] }).includes(String(h2.pid)), 'the same holder IS swept once its session is not live (protect mismatch)');
@@ -206,17 +275,22 @@ if (fs.existsSync('/proc/self')) {
 
   const zst = rollout + '.zst';
   fs.writeFileSync(zst, 'zst');
-  const h4 = holder(zst, ['codex', 'app-server']);
+  const h4 = holder(zst);
   await sleep(300);
   ok(runSweep().includes(String(h4.pid)), 'an open rollout-*-<threadId>.jsonl.zst (codex ≥0.153 compression) holder is swept');
   await exited(h4);
 
-  const h5 = holder(rollout, ['viewer']);
+  const h5 = holder(rollout, {}, process.execPath);
+  // The codex twin of the B-3185 report: `tail -f` on a rollout has '/.codex/'
+  // in its argv, which is all the old `*codex*` substring guard demanded.
+  const h5b = spawn('tail', ['-f', rollout], { stdio: 'ignore' });
   await sleep(300);
-  ok(!runSweep().includes(String(h5.pid)) && alive(h5.pid), 'a NON-codex holder of the rollout is never killed (cmdline guard)');
-  h5.kill('SIGKILL');
+  const sweptRun = runSweep();
+  ok(!sweptRun.includes(String(h5.pid)) && alive(h5.pid), 'a NON-codex holder of the rollout is never killed (executable guard)');
+  ok(!sweptRun.includes(String(h5b.pid)) && alive(h5b.pid), '`tail -f <HOME>/.codex/sessions/…/rollout-….jsonl` is never killed (B-3185)');
+  h5.kill('SIGKILL'); h5b.kill('SIGKILL');
 
-  const h6 = holder(rollout, ['codex', 'app-server']);
+  const h6 = holder(rollout);
   await sleep(300);
   ok(!runScript(writerSweepScript(tid, shq)).includes(String(h6.pid)) && alive(h6.pid), 'the CLAUDE script never sweeps a codex holder (backend legs are disjoint)');
   h6.kill('SIGKILL');
@@ -266,6 +340,24 @@ if (fs.existsSync('/proc/self')) {
   ok(/&& \(backend === 'claude' \|\| backend === 'codex'\) && \/\^\[\\w-\]\+\$\/\.test\(data\.resumeId\) && hosts\)/.test(src), 'the LOCAL sweep gate admits codex');
   const client = fs.readFileSync(new URL('../src/lib/session-lifecycle.js', import.meta.url), 'utf8');
   ok(/resend: \(backend === 'claude' \|\| backend === 'codex'\) && !!resumeId && !fork/.test(client), 'client re-sends codex resumes on reconnect (safe only because the guard now covers codex)');
+}
+
+// ── 11. THE fd scan is ONE implementation (B-3185 wiring pin). boot-restore's
+// "which conversations does a live claude still hold?" probe is the same scan
+// with the kill removed; it used to be its own per-FD `readlink` loop, which
+// on this machine meant 405,735 forks against a 6s timeout — it ALWAYS failed,
+// and the bare catch turned that into "nobody is live". A fix that lives in
+// one copy and not the other is the twin-drift class, so pin the wiring.
+{
+  const boot = fs.readFileSync(new URL('../src/server/boot-restore.js', import.meta.url), 'utf8');
+  ok(/require\('\.\.\/writer-sweep\.js'\)/.test(boot) && /fdScanShellFns\(\)/.test(boot), 'boot-restore builds its live-conversation probe from THE shared fd scan');
+  ok(!/for p in \/proc\/\[0-9\]\*\/fd\/\*/.test(boot), 'boot-restore no longer forks a readlink per FD (ARG_MAX overflow + guaranteed timeout)');
+  ok(/console\.warn\('\[boot-restore\] live-conversation fd scan failed/.test(boot), 'a failed probe SAYS SO instead of silently degrading to "nobody is live"');
+  const fns = fdScanShellFns();
+  ok(fns.includes('vs_fd_scan') && fns.includes('vs_fd_pids') && fns.includes('/proc/self/fd'),
+    'the shared scan exports both entry points and keeps the >1-operand guarantee `ls -l` needs for its headers');
+  ok(writerSweepScript('r', shq).includes(fns) && writerSweepScript('r', shq, { backend: 'codex' }).includes(fns),
+    'both backends embed the scan VERBATIM (no per-backend copy to drift)');
 }
 
 console.log(fail ? `FAIL (${fail})` : `ALL PASS (${pass})`);

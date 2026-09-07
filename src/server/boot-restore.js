@@ -12,6 +12,7 @@ const { execFileSync, spawn } = require('child_process');
 const { createMessageManager } = require('../normalizers');
 const { cwdToProjectDir, dedupWebuiSockets } = require('../session-store');
 const { pickCodexThreadCandidate } = require('../ws-handler');
+const { fdScanShellFns } = require('../writer-sweep.js');
 
 const { mk } = require('./lazy.js');
 
@@ -97,14 +98,29 @@ function restoreSessions() {
   }
   // ONE /proc pass: which conversations have a live claude holding their JSONL?
   // (a lingering dtach husk whose claude crashed has a DEAD conversation and
-  // must lose to a live one). Cheap alternation grep over all readlinks.
+  // must lose to a live one).
+  //
+  // B-3185: this used to fork a `readlink` PER FD — 405,735 of them on the dev
+  // box, ~6.4 minutes — so it ALWAYS blew its own 6s timeout, and the catch
+  // turned that into a silent empty set: every local conversation looked dead
+  // and the dedup could retire the wrong socket. (Its `/proc/[0-9]*/fd/*` glob
+  // also overflows ARG_MAX at that size.) It now runs THE batched fd scan the
+  // writer sweep uses — 3.0s at 3678 processes — and a failure SAYS SO.
   let liveConvos = new Set();
-  if (dedupMetas.length) {
+  const dedupIds = [...new Set(dedupMetas.map(({ m }) => m.claudeSessionId).filter((s) => /^[\w-]+$/.test(s || '')))];
+  if (dedupIds.length) {
     try {
-      const pat = dedupMetas.map(({ m }) => m.claudeSessionId).join('\\|');
-      const out = execFileSync('sh', ['-c', `for p in /proc/[0-9]*/fd/*; do readlink "$p" 2>/dev/null; done | grep -o '[0-9a-f-]*\\.jsonl' | grep -o '${pat}'`], { encoding: 'utf-8', timeout: 6000 });
-      liveConvos = new Set(out.split('\n').map((s) => s.trim()).filter(Boolean));
-    } catch {} // grep exits 1 when nothing matched — leaves the set empty
+      const pat = `/(${dedupIds.join('|')})[.]jsonl`;
+      const script = `${fdScanShellFns()}\nvs_fd_scan '${pat}' | cut -f2`;
+      const out = execFileSync('sh', ['-c', script], { encoding: 'utf-8', timeout: 20000 });
+      const held = out.split('\n');
+      for (const id of dedupIds) if (held.some((t) => t.includes(`/${id}.jsonl`))) liveConvos.add(id);
+    } catch (e) {
+      // Degrading to "nobody is live" is survivable (the dedup falls back to
+      // createdAt), but it must never be silent again — that is what hid this
+      // for as long as it was broken.
+      console.warn('[boot-restore] live-conversation fd scan failed:', e?.message || e);
+    }
   }
   // REMOTE sockets: the /proc scan can't see a claude running ON THE HOST, so
   // claudeAlive was unconditionally false and duplicate sockets of one remote
