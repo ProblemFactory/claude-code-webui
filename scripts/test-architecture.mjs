@@ -15,6 +15,7 @@
 // RULES (direction of knowledge): DEVICE/SHARED/PURE know nothing of ORCH or
 // CLIENT. ORCH may use everything below it. CLIENT may use only PURE (via the
 // esbuild bundle) — never ORCH internals.
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -229,43 +230,107 @@ for (const [edge] of EXCEPTIONS) {
 //     review, an incident, a twin sweep — silently skipped it. A separator
 //     that cannot collide with the data is fine; spelling it as a raw byte
 //     instead of the escape (byte-identical at runtime) is not.
+//
+//     ROUND 5 — THE CENSUS READS SOURCE, NOT THE WORKING TREE. Round 4 walked
+//     the three roots with readdirSync, but data/bin is exactly where the
+//     PRODUCT installs its own runtime artifacts: installRclone() drops a
+//     64 MB arch-specific `rclone` there (gitignored since 2.368.9) plus
+//     rclone-dl.zip, and boot generates vibespace-status and the agentd
+//     bundle. Byte 7 of that download is a NUL, so the census turned
+//     `npm run build` RED on every instance that had ever used a storage
+//     mount — and this build is not optional: it is the pre-push release gate
+//     AND the in-app "Update VibeSpace…" step, so the service never
+//     restarted. `git ls-files` answers "what is SOURCE" structurally, which
+//     puts every gitignored runtime artifact out of scope BY CONSTRUCTION
+//     rather than by an extension blocklist the next 64 MB download would
+//     evade again (432 tracked files: ~3 ms to LIST, ~25 ms to read the
+//     9.3 MB of source — where the walk it replaces also read that 64 MB
+//     binary in full just to look at byte 7). No git metadata
+//     (tarball / git-archive / npm pack) ⇒ the source list is unknowable ⇒
+//     SKIP with a reason: a census may decline to run, but it must never fail
+//     a build over files it was never meant to read.
 {
   // A legitimately binary FIXTURE is not source; everything else in these
   // trees is text by construction (the census at the time: .js .mjs .sh .json
   // .jsonl .ps1 plus the extension-less agent CLIs in data/bin).
   const BINARY_EXT = new Set(['.zst', '.gz', '.png', '.jpg', '.jpeg', '.gif', '.ico', '.woff', '.woff2', '.wasm', '.pdf', '.zip', '.tar']);
-  const nulOffenders = (base, roots) => {
-    const out = [];
-    for (const root of roots) {
-      (function walk(dir) {
-        let entries;
-        try { entries = fs.readdirSync(path.join(base, dir), { withFileTypes: true }); } catch { return; }
-        for (const e of entries) {
-          const p42 = dir + '/' + e.name;
-          if (e.isDirectory()) { walk(p42); continue; }
-          if (!e.isFile() || BINARY_EXT.has(path.extname(e.name).toLowerCase())) continue;
-          let buf;
-          try { buf = fs.readFileSync(path.join(base, p42)); } catch { continue; }
-          const at = buf.indexOf(0);
-          if (at !== -1) out.push(`${p42} (byte ${at}, line ${buf.slice(0, at).toString('utf-8').split('\n').length})`);
-        }
-      })(root);
-    }
-    return out;
+  const CENSUS_ROOTS = ['src', 'data/bin', 'scripts'];
+  // The tracked-source listing for a tree, or null when git cannot answer FOR
+  // THAT TREE (no git binary, no metadata, or `base` is not itself the work
+  // tree root — a tmpdir that happens to sit inside some other repo must not
+  // borrow that repo's index).
+  const trackedSource = (base) => {
+    try {
+      const top = spawnSync('git', ['-C', base, 'rev-parse', '--show-toplevel'], { encoding: 'utf-8' });
+      if (top.error || top.status !== 0) return null;
+      if (fs.realpathSync(top.stdout.trim()) !== fs.realpathSync(base)) return null;
+    } catch { return null; }
+    const ls = spawnSync('git', ['-C', base, 'ls-files', '-z', '--', ...CENSUS_ROOTS], { maxBuffer: 64 * 1024 * 1024 });
+    if (ls.error || ls.status !== 0 || !ls.stdout) return null;
+    return ls.stdout.toString('utf-8').split('\0').filter(Boolean);
   };
-  const offenders = nulOffenders(REPO, ['src', 'data/bin', 'scripts']);
-  ok(!offenders.length, `no source file carries a NUL byte — one makes the WHOLE file invisible to grep/rg (${offenders.slice(0, 3).join('; ') || 'clean'})`);
-  // NEGATIVE CONTROL: the scanner has to actually see one — and must not fire
-  // on the escape sequence that replaced it, nor on a binary fixture.
+  const census = (base) => {
+    const files = trackedSource(base);
+    if (!files) return null; // the caller SKIPS — never fails
+    const offenders = [];
+    for (const f of files) {
+      if (BINARY_EXT.has(path.extname(f).toLowerCase())) continue;
+      let buf;
+      try { buf = fs.readFileSync(path.join(base, f)); } catch { continue; } // tracked but absent from the work tree
+      const at = buf.indexOf(0);
+      if (at !== -1) offenders.push(`${f} (byte ${at}, line ${buf.slice(0, at).toString('utf-8').split('\n').length})`);
+    }
+    return { files, offenders };
+  };
+
+  const c42 = census(REPO);
+  if (!c42) {
+    ok(true, 'NUL-byte census SKIPPED: this tree has no readable git index (export/tarball) — the source list is unknowable, and a census never fails a build over files it cannot scope');
+  } else {
+    ok(!c42.offenders.length,
+      `no source file carries a NUL byte — one makes the WHOLE file invisible to grep/rg (${c42.files.length} tracked files; ${c42.offenders.slice(0, 3).join('; ') || 'clean'})`);
+    // SCOPE PIN: a mis-scoped listing (wrong roots, wrong repo, renamed tree)
+    // passes VACUOUSLY. Name files the census MUST have read — the incident's
+    // own module, this suite, and a tracked extension-less data/bin CLI (the
+    // root where the untracked artifacts live).
+    const seen = new Set(c42.files);
+    ok(seen.has('src/codex-session-store.js') && seen.has('scripts/test-architecture.mjs') && seen.has('data/bin/vibespace-task'),
+      `census scope really covers src + scripts + data/bin (a vacuous listing cannot pass; ${c42.files.length} files)`);
+  }
+
+  // CONTROLS, in a throwaway repo — "source" is now defined by the INDEX, so
+  // the fixture has to have one. Planted-but-untracked is the rclone class and
+  // must be structurally invisible; that is the whole point of the round-5 fix.
   const tmp42 = fs.mkdtempSync(path.join(os.tmpdir(), 'arch-nul-'));
   try {
     fs.mkdirSync(path.join(tmp42, 'src'));
+    fs.mkdirSync(path.join(tmp42, 'data', 'bin'), { recursive: true });
     fs.writeFileSync(path.join(tmp42, 'src/clean.js'), 'const k = `a\\u0000b`; // the escape, not the byte\n');
     fs.writeFileSync(path.join(tmp42, 'src/dirty.js'), Buffer.concat([Buffer.from('const k = `a'), Buffer.from([0]), Buffer.from('b`;\n')]));
     fs.writeFileSync(path.join(tmp42, 'src/rollout.zst'), Buffer.from([0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x01]));
-    const found = nulOffenders(tmp42, ['src']);
-    ok(found.length === 1 && found[0].startsWith('src/dirty.js (byte 12, line 1)'),
-      `NEGATIVE CONTROL: a planted NUL is found, while the escape and a binary fixture are not (${JSON.stringify(found)})`);
+    // the rclone class: an extension-less binary the PRODUCT installs into a
+    // scanned root, gitignored exactly like the real one.
+    fs.writeFileSync(path.join(tmp42, '.gitignore'), 'data/bin/rclone\n');
+    fs.writeFileSync(path.join(tmp42, 'data/bin/rclone'), Buffer.concat([Buffer.from('\x7fELF'), Buffer.alloc(2048)]));
+    // ...and an untracked source file, to prove the gate is the INDEX and not .gitignore.
+    fs.writeFileSync(path.join(tmp42, 'src/untracked.js'), Buffer.concat([Buffer.from('x'), Buffer.from([0]), Buffer.from('\n')]));
+
+    ok(census(tmp42) === null,
+      'CONTROL: a tree with no git metadata SKIPS (unknowable source list is not a build failure — the tarball/export case)');
+
+    const init = spawnSync('git', ['-C', tmp42, 'init', '-q'], { encoding: 'utf-8' });
+    // -f so a developer's global core.excludesFile (e.g. a blanket *.zst) can
+    // never quietly shrink the control — we still never add data/bin/rclone.
+    const add = spawnSync('git', ['-C', tmp42, 'add', '-f', '--', 'src/clean.js', 'src/dirty.js', 'src/rollout.zst', '.gitignore'], { encoding: 'utf-8' });
+    if (init.error || init.status !== 0 || add.status !== 0) {
+      ok(true, `CONTROLS SKIPPED: git init/add unavailable here (${(init.stderr || add.stderr || init.error?.message || '').trim().slice(0, 80)})`);
+    } else {
+      const found = census(tmp42);
+      ok(!!found && found.offenders.length === 1 && found.offenders[0].startsWith('src/dirty.js (byte 12, line 1)'),
+        `CONTROL: a TRACKED NUL is found, while the \\u0000 escape and a binary fixture are not (${JSON.stringify(found && found.offenders)})`);
+      ok(!!found && !found.files.some((f) => f === 'data/bin/rclone' || f === 'src/untracked.js'),
+        `CONTROL: files the product installs/generates at runtime are OUT OF SCOPE — untracked never reaches the census, however big or binary (${JSON.stringify(found && found.files)})`);
+    }
   } finally { try { fs.rmSync(tmp42, { recursive: true, force: true }); } catch {} }
 }
 
