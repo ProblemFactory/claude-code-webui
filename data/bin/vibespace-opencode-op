@@ -25,13 +25,22 @@
  * indexes + inotify-watches that tree — measured); the directory-less session
  * listing is the only listing; and a serve we started is left running for the
  * next op with its port recorded, never re-spawned per call.
+ *
+ * …AND THE RECORD IS A PROMISE (round 11, the local settlement's twin): a
+ * recorded serve that does not answer is SETTLED before anything overwrites it
+ * — dead pid ⇒ clear + spawn; a pid that is provably not that serve ⇒ clear,
+ * never signalled; verified ours + still silent after a longer confirm probe ⇒
+ * SIGTERM + bounded wait; unidentifiable or still running ⇒ FAIL with the
+ * reason instead of spawning over it. Orphaning a live `opencode serve` is
+ * worse out here than at home: this host has no keeper, no runaway guard, no
+ * park and no ⚙ card, so nothing can ever reach it again.
  */
 const fs = require('fs');
 const os = require('os');
 const net = require('net');
 const path = require('path');
 const http = require('http');
-const { spawn, execFile } = require('child_process');
+const { spawn, execFile, execFileSync } = require('child_process');
 
 const HOME = process.env.HOME || os.homedir();
 const BASE = path.join(HOME, '.vibespace');
@@ -42,6 +51,13 @@ const BOOT_TIMEOUT_MS = 20000;
 const DEFAULT_TIMEOUT_MS = 8000;
 const LIST_LIMIT = 500;
 const NAME_MAX_BYTES = 1 << 20;
+// ── the RECORDED-SERVE settlement (round 11) — the PARITY twin of
+//    src/opencode-serve.js's; scripts/test-opencode-remote.mjs drives BOTH
+//    classifiers over the same inputs and fails on the first disagreement,
+//    and pins these three budgets against the module's exported constants.
+const RECORD_CONFIRM_TIMEOUT_MS = 4000;
+const RECORD_KILL_WAIT_MS = 3000;
+const RECORD_KILL_POLL_MS = 150;
 
 function out(obj) { process.stdout.write(JSON.stringify(obj) + '\n'); }
 function fail(msg) { out({ ok: false, error: String(msg && msg.message ? msg.message : msg) }); process.exit(0); }
@@ -85,6 +101,7 @@ function freePort() {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function readRecord() { try { const r = JSON.parse(fs.readFileSync(RECORD, 'utf8')); return r && r.port > 0 ? r : null; } catch { return null; } }
+function deleteRecord() { try { fs.unlinkSync(RECORD); } catch { } }
 function writeRecord(r) {
   try {
     fs.mkdirSync(BASE, { recursive: true });
@@ -93,7 +110,7 @@ function writeRecord(r) {
     fs.renameSync(tmp, RECORD);         // atomic, like every VibeSpace json write
   } catch { }
 }
-async function healthy(port) { try { const h = await req(port, 'GET', '/global/health', { timeoutMs: 2500 }); return !!h && h.healthy !== false; } catch { return false; } }
+async function healthy(port, timeoutMs = 2500) { try { const h = await req(port, 'GET', '/global/health', { timeoutMs }); return !!h && h.healthy !== false; } catch { return false; } }
 
 function ensureCwd() {
   fs.mkdirSync(CWD, { recursive: true });
@@ -102,10 +119,111 @@ function ensureCwd() {
   return new Promise((resolve) => execFile('git', ['init', '-q', CWD], { timeout: 10000 }, () => resolve()));
 }
 
-/** Reuse the recorded serve when it still answers, else start one. */
+// ── THE RECORDED-SERVE SETTLEMENT, ported from src/opencode-serve.js
+//    (round 11). The unfixed twin of the local bug: `locate()` probed the
+//    recorded port and, on ANY non-answer, spawned a SECOND serve and
+//    overwrote the record — orphaning a live `opencode serve` on SOMEONE
+//    ELSE'S machine, where there is no keeper, no runaway guard, no park and
+//    no ⚙ card, so nothing can ever reach it again. Reproduced: a record whose
+//    pid is alive and whose port never answers ⇒ two serves, one unnamed.
+//
+//    THE IDENTITY LADDER is /proc first, `ps` where there is no /proc
+//    (BSD/macOS) — an ssh host is exactly where a non-Linux machine turns up,
+//    and this is a VALUE read, never an existence probe (that is `pidAlive`'s
+//    kill -0). Same order, same budgets as src/opencode-serve.js's readers;
+//    a checkout-less host cannot require them, which is why they are here.
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
+}
+let psMemo = null;
+function readPsIdentity(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  if (psMemo && psMemo.pid === pid) return psMemo.val;
+  let val = null;
+  try {
+    const out2 = execFileSync('ps', ['-p', String(pid), '-o', 'uid=,args='], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] });
+    const line = String(out2 || '').split('\n').map((l) => l.trim()).find((l) => /^\d+\s+\S/.test(l));
+    const m = line ? /^(\d+)\s+(.*)$/.exec(line) : null;
+    if (m) { const argv = m[2].split(/\s+/).filter((s) => s !== ''); val = { uid: Number(m[1]), argv: argv.length ? argv : null }; }
+  } catch { val = null; }
+  psMemo = { pid, val };
+  return val;
+}
+function readProcCmdline(pid) {
+  try { const a = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter((s) => s !== ''); if (a.length) return a; } catch { }
+  const ps = readPsIdentity(pid);
+  return ps && ps.argv ? ps.argv : null;
+}
+function readProcUid(pid) {
+  try { return fs.statSync(`/proc/${pid}`).uid; } catch { }
+  const ps = readPsIdentity(pid);
+  return ps && Number.isFinite(ps.uid) ? ps.uid : null;
+}
+let hostReadable = null;
+function hostCanIdentify() {
+  if (hostReadable === null) { const own = readProcCmdline(process.pid); hostReadable = Array.isArray(own) && own.length > 0; }
+  return hostReadable;
+}
+// PARITY TWIN of src/opencode-serve.js classifyRecordedPid — same verdicts for
+// the same inputs (asserted by scripts/test-opencode-remote.mjs).
+function classifyRecordedPid(rec, o) {
+  const { pid = null, argv = null, uid = null, selfUid = null, selfPid = null, hostReadable: hr = true } = o || {};
+  if (!Number.isInteger(pid) || pid <= 0) return { verdict: 'other', why: 'the record carries no pid' };
+  if (selfPid != null && pid === selfPid) return { verdict: 'other', why: `pid ${pid} is THIS process — a recycled pid, never the serve` };
+  if (uid != null && selfUid != null && uid !== selfUid) return { verdict: 'other', why: `pid ${pid} runs as uid ${uid}, not as this user (uid ${selfUid}) — we never spawned it` };
+  const args = Array.isArray(argv) ? argv.filter((a) => typeof a === 'string' && a !== '') : [];
+  if (!args.length) {
+    if (hr === false) return { verdict: 'blind', why: `this host cannot identify ANY process (no /proc and no usable \`ps\`), so pid ${pid} being alive says nothing about whether it is the recorded serve` };
+    if (!Array.isArray(argv)) return { verdict: 'unknown', why: `the command line of pid ${pid} is unreadable (hidepid, or the process just vanished) on a host that can read other processes` };
+    return { verdict: 'unknown', why: `pid ${pid} has an EMPTY command line (a zombie or a kernel thread)` };
+  }
+  const port = String(rec && rec.port);
+  const hasServe = args.includes('serve');
+  const hasPort = args.some((a, i) => (a === '--port' && args[i + 1] === port) || a === `--port=${port}`);
+  if (hasServe && hasPort) return { verdict: 'ours', why: `its command line is \`${args.slice(0, 6).join(' ')}\`` };
+  return { verdict: 'other', why: `pid ${pid} is now \`${args.slice(0, 4).join(' ')}\` — not the \`serve --port ${port}\` this record was written for` };
+}
+async function waitForExit(pid, budgetMs) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < budgetMs) { await sleep(RECORD_KILL_POLL_MS); if (!pidAlive(pid)) return true; }
+  return !pidAlive(pid);
+}
+/** 'answered' = reuse rec.port · 'clear' = the record is gone, spawn ·
+ *  throws = we may neither adopt nor replace it, and the reason SAYS SO
+ *  (there is no park to fall back on out here: the op fails honestly and the
+ *  hub surfaces the machine-side message). */
+async function settleRecordedServe(rec) {
+  const pid = Number.isInteger(rec.pid) && rec.pid > 0 ? rec.pid : null;
+  if (!pidAlive(pid)) { deleteRecord(); return 'clear'; }
+  const v = classifyRecordedPid(rec, {
+    pid, argv: readProcCmdline(pid), uid: readProcUid(pid),
+    selfUid: typeof process.getuid === 'function' ? process.getuid() : null, selfPid: process.pid,
+    hostReadable: hostCanIdentify(),
+  });
+  // a host that can identify NOTHING gives a live pid no meaning: clear the
+  // stale bookkeeping and start fresh, but never signal what we cannot name
+  if (v.verdict === 'blind' || v.verdict === 'other') { deleteRecord(); return 'clear'; }
+  if (v.verdict === 'unknown') {
+    throw new Error(`a recorded \`opencode serve\` (pid ${pid}, port ${rec.port}) is alive but unresponsive and could not be verified — ${v.why}. Refusing to start a second serve over it: stop that process, or delete ${RECORD}, on that machine.`);
+  }
+  // 'ours' — one LONGER probe first: a cold 1.18.29 needs ~1.2s, and slow is not wedged
+  if (await healthy(rec.port, RECORD_CONFIRM_TIMEOUT_MS)) return 'answered';
+  try { process.kill(pid, 'SIGTERM'); } catch { }
+  if (!(await waitForExit(pid, RECORD_KILL_WAIT_MS))) {
+    throw new Error(`the recorded \`opencode serve\` (pid ${pid}, port ${rec.port}) did not exit within ${RECORD_KILL_WAIT_MS}ms of SIGTERM and is STILL RUNNING. Refusing to start a second serve over it: stop that process, or delete ${RECORD}, on that machine.`);
+  }
+  deleteRecord();
+  return 'clear';
+}
+
+/** Reuse the recorded serve when it still answers, else settle it and start one. */
 async function locate() {
   const rec = readRecord();
-  if (rec && await healthy(rec.port)) return rec.port;
+  if (rec) {
+    if (await healthy(rec.port)) return rec.port;
+    if (await settleRecordedServe(rec) === 'answered') return rec.port;
+  }
   await ensureCwd();
   const port = await freePort();
   const child = spawn(CMD, ['serve', '--port', String(port), '--hostname', '127.0.0.1', '--log-level', 'WARN'],

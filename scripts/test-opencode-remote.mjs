@@ -30,6 +30,7 @@ const serve = require(path.join(REPO, 'src/opencode-serve.js'));
 
 let pass = 0; const fails = [];
 const ok = (name, cond, detail) => { if (cond) { pass++; console.log(`  ✓ ${name}`); } else { fails.push(name); console.log(`  ✗ ${name}${detail ? ' — ' + (typeof detail === 'string' ? detail : JSON.stringify(detail)) : ''}`); } };
+const skip = (name, why) => { pass++; console.log(`  ⊘ SKIP ${name} — ${why}`); };
 const read = (rel) => fs.readFileSync(path.join(REPO, rel), 'utf-8');
 const SCRIPT = read('data/bin/vibespace-opencode-op');
 
@@ -170,7 +171,234 @@ console.log('\n— RESOURCE DISCIPLINE ON SOMEONE ELSE\'S MACHINE —');
   ok('…takes the DIRECTORY-LESS listing and never bootstraps a project on a host that is not ours', /'\/session' \+ q\(\{ limit/.test(SCRIPT) && !/scope=project/.test(SCRIPT) && !/scope: 'project'/.test(SCRIPT));
   ok('…caps every response it reads into memory', /maxBytes/.test(SCRIPT));
   ok('…writes its record atomically (tmp + rename)', /renameSync/.test(SCRIPT));
-  ok('…and reuses a healthy recorded serve instead of spawning per call', /if \(rec && await healthy\(rec\.port\)\) return rec\.port;/.test(SCRIPT));
+  ok('…and reuses a healthy recorded serve instead of spawning per call, then SETTLES the record before anything overwrites it (round 11)',
+    /if \(await healthy\(rec\.port\)\) return rec\.port;/.test(SCRIPT) && /await settleRecordedServe\(rec\) === 'answered'/.test(SCRIPT));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE RECORDED-SERVE SETTLEMENT IS ONE DECISION ON EVERY MACHINE (round 11).
+//
+// Round 10 fixed the local keeper: a recorded serve that is ALIVE but silent is
+// never spawned over. The shipped script carried the UNFIXED twin — `locate()`
+// probed the recorded port and, on any non-answer, started a second serve and
+// overwrote the record. Out here that is strictly worse than at home: an ssh
+// host has no keeper, no runaway guard, no park and no ⚙ card, so an orphaned
+// `opencode serve` keeps indexing + inotify-watching whatever tree it was
+// started on and NOTHING can ever reach it again (the 2.369.50 burn, on someone
+// else's machine).
+//
+// This section is the usage-scanner parity pattern applied to a DECISION rather
+// than to a data walk: the two classifiers are driven over the SAME table and
+// must not disagree, the three budgets are pinned to the module's exported
+// numbers, and then the real script is driven through each verdict against a
+// real silent socket and real processes.
+console.log('\n— THE RECORDED-SERVE SETTLEMENT IS ONE DECISION ON EVERY MACHINE (round 11) —');
+{
+  /** The script cannot be require()d (it is a stdin CLI, and a checkout-less
+   *  host is the whole point), so the classifier is lifted out of its source
+   *  by brace-matching and evaluated. It is a PURE function of its two
+   *  arguments — if that ever stops being true this extraction throws and the
+   *  assert below goes red rather than quietly testing nothing. */
+  const scriptClassify = (() => {
+    const i = SCRIPT.indexOf('function classifyRecordedPid(');
+    if (i < 0) return null;
+    let depth = 0, end = -1;
+    for (let k = SCRIPT.indexOf('{', i); k < SCRIPT.length; k++) {
+      if (SCRIPT[k] === '{') depth++;
+      else if (SCRIPT[k] === '}' && --depth === 0) { end = k; break; }
+    }
+    if (end < 0) return null;
+    try { return new Function(`${SCRIPT.slice(i, end + 1)}; return classifyRecordedPid;`)(); } catch { return null; }
+  })();
+  ok('the shipped script carries its OWN copy of the verdict, and it is extractable — so "the two rungs agree" is testable at all', typeof scriptClassify === 'function');
+
+  const REC = { port: 4711, pid: 321, command: '/usr/bin/opencode' };
+  const self = { selfUid: 1000, selfPid: 999 };
+  // one row per DECISION the settlement can reach, on both rungs
+  const TABLE = [
+    ['a live serve running the recorded port, as us', { pid: 321, argv: ['/usr/bin/opencode', 'serve', '--port', '4711'], uid: 1000 }, 'ours'],
+    ['…the `--port=N` spelling of the same fact', { pid: 321, argv: ['opencode', 'serve', '--port=4711'], uid: 1000 }, 'ours'],
+    ['…re-exec\'d through a runtime (argv[0] is not the discriminator, the PORT is)', { pid: 321, argv: ['/usr/bin/bun', 'opencode.js', 'serve', '--port', '4711'], uid: 1000 }, 'ours'],
+    ['a serve on a DIFFERENT port is not this record\'s serve', { pid: 321, argv: ['opencode', 'serve', '--port', '4712'], uid: 1000 }, 'other'],
+    // …and the two halves of "ours" are BOTH required, each pinned on its own:
+    // a loosened word test or a dropped port test is exactly the one-sided edit
+    // this parity gate exists to catch (it slipped through once, unpinned).
+    ['a word that merely LOOKS like it (`server`, not `serve`)', { pid: 321, argv: ['opencode', 'server', '--port', '4711'], uid: 1000 }, 'other'],
+    ['`serve` with no port at all', { pid: 321, argv: ['opencode', 'serve'], uid: 1000 }, 'other'],
+    ['the recorded port on a process that is not serving', { pid: 321, argv: ['curl', 'http://127.0.0.1', '--port', '4711'], uid: 1000 }, 'other'],
+    ['a port that only PREFIX-matches the record (4711 vs 47110)', { pid: 321, argv: ['opencode', 'serve', '--port', '47110'], uid: 1000 }, 'other'],
+    ['an unrelated program that inherited the pid', { pid: 321, argv: ['/usr/bin/python3', 'train.py'], uid: 1000 }, 'other'],
+    ['another USER\'s process — never ours, never signalled', { pid: 321, argv: ['opencode', 'serve', '--port', '4711'], uid: 1001 }, 'other'],
+    ['the record naming THIS process (a recycled pid)', { pid: 999, argv: ['node', 'x.js'], uid: 1000 }, 'other'],
+    ['a record with no pid at all', { pid: null }, 'other'],
+    ['UNREADABLE on a host that reads other processes (hidepid / it just vanished)', { pid: 321, argv: null, uid: null, hostReadable: true }, 'unknown'],
+    ['an EMPTY command line there (a zombie)', { pid: 321, argv: [], uid: 1000, hostReadable: true }, 'unknown'],
+    ['…the SAME silence on a host that cannot read its own pid = no reader at all', { pid: 321, argv: null, uid: null, hostReadable: false }, 'blind'],
+    ['…and evidence still beats the host-level claim', { pid: 321, argv: ['opencode', 'serve', '--port', '4711'], uid: 1000, hostReadable: false }, 'ours'],
+  ];
+  const rows = TABLE.map(([label, o, want]) => ({
+    label, want,
+    local: serve.classifyRecordedPid(REC, { ...self, ...o }).verdict,
+    ssh: scriptClassify ? scriptClassify(REC, { ...self, ...o }).verdict : null,
+  }));
+  ok('PARITY: every input reaches the SAME verdict on the local rung and the shipped script — and it is the verdict the table names',
+    rows.every((r) => r.local === r.want && r.ssh === r.want), rows.filter((r) => r.local !== r.want || r.ssh !== r.want));
+  // …and a one-sided edit is what this catches, so prove the comparison BITES
+  ok('(the control) the comparison is not vacuous: a deliberately wrong expectation is rejected by both rungs',
+    !!scriptClassify && serve.classifyRecordedPid(REC, { ...self, pid: 321, argv: ['python3'], uid: 1000 }).verdict !== 'ours'
+    && scriptClassify(REC, { ...self, pid: 321, argv: ['python3'], uid: 1000 }).verdict !== 'ours');
+  const num = (name) => { const m = new RegExp(`const ${name} = (\\d+);`).exec(SCRIPT); return m ? Number(m[1]) : null; };
+  ok('…and the two rungs wait the SAME number of milliseconds before deciding (confirm probe / SIGTERM budget / poll)',
+    num('RECORD_CONFIRM_TIMEOUT_MS') === serve.RECORD_CONFIRM_TIMEOUT_MS && num('RECORD_KILL_WAIT_MS') === serve.RECORD_KILL_WAIT_MS
+    && num('RECORD_KILL_POLL_MS') === serve.RECORD_KILL_POLL_MS,
+    { ssh: ['RECORD_CONFIRM_TIMEOUT_MS', 'RECORD_KILL_WAIT_MS', 'RECORD_KILL_POLL_MS'].map(num), local: [serve.RECORD_CONFIRM_TIMEOUT_MS, serve.RECORD_KILL_WAIT_MS, serve.RECORD_KILL_POLL_MS] });
+  ok('…and the script names the two ways out in its refusal, exactly like the local park does (stop that process, or delete the record)',
+    /Refusing to start a second serve over it: stop that process, or delete/.test(SCRIPT));
+}
+
+/** …AND NOW THE REAL SCRIPT, against a real silent socket and real processes.
+ *  Only two things are faked: the `opencode` binary (OPENCODE_CMD → a script
+ *  that logs every invocation, so "spawned NOTHING" is a measurement, not an
+ *  inference) and the recorded serve's socket. */
+{
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
+  const http = await import('node:http');
+  const { spawn } = await import('node:child_process');
+  const homes = [], kids = [], servers = [];
+
+  /** accepts, answers the first `hangFirst` requests never, then answers. */
+  const socket = async (hangFirst = Infinity) => {
+    let seen = 0; const held = [];
+    const srv = http.createServer((req, res) => {
+      if (++seen <= hangFirst) { held.push(res); return; }
+      res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ healthy: true, version: '1.18.29' }));
+    });
+    await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+    const h = { port: srv.address().port, close: () => new Promise((r) => { for (const x of held) { try { x.destroy(); } catch { } } srv.close(() => r()); }) };
+    servers.push(h); return h;
+  };
+  const mkHome = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-oc-r11-')); fs.mkdirSync(path.join(d, '.vibespace'), { recursive: true }); homes.push(d); return d; };
+  const writeRec = (home, rec) => fs.writeFileSync(path.join(home, '.vibespace', 'opencode-serve.json'), JSON.stringify(rec));
+  const readRec = (home) => { try { return JSON.parse(fs.readFileSync(path.join(home, '.vibespace', 'opencode-serve.json'), 'utf8')); } catch { return null; } };
+  /** a fake `opencode` that ANSWERS /global/health — so a spawn that happens
+   *  really succeeds, and the leg can tell "refused to spawn" from "spawned
+   *  and the boot failed". Every invocation appends to spawn.log. */
+  const fakeCli = (home) => {
+    const p = path.join(home, 'fake-opencode');
+    fs.writeFileSync(p, `#!/usr/bin/env node
+const fs=require('fs'),http=require('http');
+fs.appendFileSync(process.env.FAKE_LOG, process.pid+' '+process.argv.slice(2).join(' ')+'\\n');
+const port=Number(process.argv[process.argv.indexOf('--port')+1]);
+http.createServer((q,s)=>{s.setHeader('content-type','application/json');s.end(JSON.stringify({healthy:true,version:'fake'}))}).listen(port,'127.0.0.1');
+`, { mode: 0o755 });
+    return p;
+  };
+  /** a REAL process the record can name. `ours:true` ⇒ its /proc cmdline is
+   *  `… serve --port <port>`; `stubborn:true` ⇒ it records SIGTERM and lives. */
+  const holder = async (home, { ours, port, stubborn = false }) => {
+    const sigFile = path.join(home, `sigterm-${Math.random().toString(36).slice(2)}`);
+    const body = `const fs=require('fs');process.on('SIGTERM',()=>{try{fs.appendFileSync(${JSON.stringify(sigFile)},'x')}catch{}${stubborn ? '' : ';process.exit(0)'}});setInterval(()=>{},10000)`;
+    const argv = ours ? ['serve', '--port', String(port), '--hostname', '127.0.0.1'] : ['train.py', '--epochs', '3'];
+    const kid = spawn(process.execPath, ['-e', body, ...argv], { stdio: 'ignore' });
+    kids.push(kid);
+    for (let i = 0; i < 40 && !alive(kid.pid); i++) await sleep(25);
+    return { pid: kid.pid, signalled: () => fs.existsSync(sigFile) };
+  };
+  /** the REAL shipped script (or a pre-fix copy of it), one op, one HOME. */
+  const runIn = (home, { script = path.join(REPO, 'data/bin/vibespace-opencode-op'), op = 'state', params = {} } = {}) => new Promise((resolve) => {
+    const child = execFile(process.execPath, [script], {
+      env: { ...process.env, HOME: home, OPENCODE_CMD: fakeCli(home), FAKE_LOG: path.join(home, 'spawn.log') }, timeout: 60000,
+    }, (err, stdout) => {
+      if (err) return resolve({ ok: false, error: 'RUNNER: ' + err.message + '\n' + stdout });
+      try { resolve(JSON.parse(String(stdout).trim().split('\n').pop())); } catch { resolve({ ok: false, error: 'unparsable: ' + stdout }); }
+    });
+    child.stdin.end(JSON.stringify({ op, params }));
+  });
+  const spawns = (home) => { try { return fs.readFileSync(path.join(home, 'spawn.log'), 'utf8').trim().split('\n').filter(Boolean); } catch { return []; } };
+
+  // the PRE-FIX copy of the script: the one line round 11 replaced
+  const preFix = (() => {
+    const from = "  if (rec) {\n    if (await healthy(rec.port)) return rec.port;\n    if (await settleRecordedServe(rec) === 'answered') return rec.port;\n  }";
+    if (SCRIPT.split(from).length - 1 !== 1) return null;
+    const f = path.join(os.tmpdir(), `vs-oc-op-prefix-${process.pid}`);
+    fs.writeFileSync(f, SCRIPT.split(from).join('  if (rec && await healthy(rec.port)) return rec.port;'), { mode: 0o755 });
+    return f;
+  })();
+  ok('(the control itself) a PRE-FIX copy of the shipped script can be built — the A/B below is only meaningful against it', !!preFix);
+
+  // ① THE ONE THE ROUND FIXED: alive, verifiably that serve, and it will not die.
+  {
+    const home = mkHome(); const sock = await socket();
+    const h = await holder(home, { ours: true, port: sock.port, stubborn: true });
+    writeRec(home, { port: sock.port, pid: h.pid, startedAt: Date.now(), cwd: home });
+    const r = await runIn(home);
+    const rec = readRec(home);
+    ok('a recorded serve that is ALIVE and silent is NOT spawned over: the op fails honestly and starts nothing',
+      r.ok === false && spawns(home).length === 0, { r, spawns: spawns(home) });
+    ok('…the record still names the OLD serve (the next op can still find it; nothing was orphaned)',
+      !!rec && rec.port === sock.port && rec.pid === h.pid, rec);
+    ok('…the refusal names the pid, the port, the record file and both ways out',
+      /did not exit within/.test(r.error || '') && (r.error || '').includes(String(h.pid)) && (r.error || '').includes(String(sock.port))
+      && /opencode-serve\.json/.test(r.error || '') && /stop that process, or delete/.test(r.error || ''), r.error);
+    ok('…and it DID try to stop it first (a refusal is the last rung, not the first)', h.signalled() === true && alive(h.pid) === true);
+    if (!preFix) skip('NEGATIVE CONTROL: the pre-fix script orphans that serve', 'no pre-fix copy');
+    else {
+      const home2 = mkHome(); const sock2 = await socket();
+      const h2 = await holder(home2, { ours: true, port: sock2.port, stubborn: true });
+      writeRec(home2, { port: sock2.port, pid: h2.pid, startedAt: Date.now(), cwd: home2 });
+      const ctl = await runIn(home2, { script: preFix });
+      const rec2 = readRec(home2);
+      ok('NEGATIVE CONTROL: the PRE-FIX script starts a SECOND serve and overwrites the record — the live one is now unnamed, and on an ssh host nothing can ever reach it again',
+        ctl.ok === true && spawns(home2).length === 1 && !!rec2 && rec2.port !== sock2.port && alive(h2.pid) === true, { ctl, rec2, spawns: spawns(home2) });
+    }
+  }
+
+  // ② THE DEAD PID: the record is stale bookkeeping — clear it and start one.
+  {
+    const home = mkHome(); const sock = await socket();
+    const gone = spawn(process.execPath, ['-e', 'process.exit(0)'], { stdio: 'ignore' });
+    await new Promise((r) => gone.once('exit', r));
+    for (let i = 0; i < 40 && alive(gone.pid); i++) await sleep(25);
+    writeRec(home, { port: sock.port, pid: gone.pid, startedAt: Date.now(), cwd: home });
+    const r = await runIn(home);
+    const rec = readRec(home);
+    ok('a recorded serve whose pid is DEAD is cleared and replaced — the op succeeds on the new serve',
+      r.ok === true && spawns(home).length === 1 && !!rec && rec.port !== sock.port, { r, rec, spawns: spawns(home) });
+  }
+
+  // ③ A RECYCLED PID: alive, provably NOT that serve — replace the record, and
+  //    never signal a stranger by number.
+  {
+    const home = mkHome(); const sock = await socket();
+    const h = await holder(home, { ours: false, port: sock.port });
+    writeRec(home, { port: sock.port, pid: h.pid, startedAt: Date.now(), cwd: home });
+    const r = await runIn(home);
+    const rec = readRec(home);
+    ok('a recorded pid that is alive but is NOT that serve (a recycled number) is cleared and replaced',
+      r.ok === true && spawns(home).length === 1 && !!rec && rec.port !== sock.port, { r, rec, spawns: spawns(home) });
+    ok('…and that stranger is never signalled — it is still running, and it never saw a SIGTERM',
+      alive(h.pid) === true && h.signalled() === false);
+  }
+
+  // ④ SLOW IS NOT WEDGED: the confirm probe answers, so the serve is REUSED and
+  //    nothing is stopped or started (the positive control the refusal needs).
+  {
+    const home = mkHome(); const sock = await socket(1);   // the first probe hangs, the confirm probe answers
+    const h = await holder(home, { ours: true, port: sock.port });
+    writeRec(home, { port: sock.port, pid: h.pid, startedAt: Date.now(), cwd: home });
+    const r = await runIn(home);
+    const rec = readRec(home);
+    ok('a recorded serve that misses the first probe but answers the LONGER confirm one is adopted, not replaced',
+      r.ok === true && spawns(home).length === 0 && !!rec && rec.port === sock.port && rec.pid === h.pid, { r, rec, spawns: spawns(home) });
+    ok('…and it is never signalled for being slow', alive(h.pid) === true && h.signalled() === false);
+  }
+
+  for (const k of kids) { try { process.kill(k.pid, 'SIGKILL'); } catch { } }
+  for (const h of homes) { for (const l of spawns(h)) { const pid = Number(l.split(' ')[0]); try { process.kill(pid, 'SIGKILL'); } catch { } } }
+  for (const s of servers) { try { await s.close(); } catch { } }
+  if (preFix) { try { fs.rmSync(preFix, { force: true }); } catch { } }
+  for (const h of homes) fs.rmSync(h, { recursive: true, force: true });
 }
 
 console.log(`\n${fails.length ? fails.length + ' FAILED' : 'ALL PASS'} (${pass} passed)`);
