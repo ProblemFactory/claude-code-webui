@@ -4,6 +4,41 @@ VibeSpace plugins are folders under `data/plugins/<id>/` with a `vibespace-plugi
 
 The smallest complete plugin is `docs/examples/hello-plugin` (one iframe window, one proxied route, one agent tool, one setting, one theme).
 
+## Built-in plugins (⚙ → Plugins, top of the panel)
+
+Three capabilities ship with VibeSpace itself and appear above the installed
+plugins. They are not manifest packages — they are host features with the same
+enable / start / stop / status shape, stored in `data/plugins.json`.
+
+| Plugin | What it does | Default |
+|---|---|---|
+| **Tailscale** | Join your tailnet so this instance can reach home/LAN machines. The node key lives in the plugin's state dir, so a container rebuild reconnects without re-login. | off |
+| **Public URLs (frp)** | Publish a forwarded port through the shared frp relay as a shareable link. Needs the relay configured (env or the fields in the card). | off (auto-on where the relay is injected) |
+| **OpenCode background service** | Runs `opencode serve` on 127.0.0.1 so **stopped** OpenCode conversations can be listed, opened, resumed and forked. OpenCode keeps its conversations in its own database rather than in files, so without it only *running* OpenCode sessions appear. | **off** |
+
+### OpenCode background service
+
+There is nothing to install (it runs *your* `opencode` CLI — VibeSpace never
+downloads one) and nothing to configure (it binds a free loopback port). The
+switch is deliberate:
+
+- The **first** time you use OpenCode here — creating an OpenCode session, or
+  opening/forking an OpenCode conversation — VibeSpace shows one dialog:
+  **Enable & start** or **Not now**. The answer is remembered for the whole
+  instance, so you are asked once no matter how many tabs or devices you use.
+- Enabling continues whatever you were doing: the serve starts and the pending
+  open/fork re-runs once it answers.
+- While it is off, the session list carries a row saying *"Stopped OpenCode
+  conversations are hidden — its background service is off"* with an Enable
+  action. ⚙ → Plugins is the other way back.
+- Disabling it **stops the process** — including one left running by a previous
+  VibeSpace — and nothing restarts it.
+- VibeSpace samples the serve's CPU and memory and stops it (visibly, with the
+  numbers) if it runs away; it will not restart it for an hour.
+- `VIBESPACE_OPENCODE_SERVE=1` / `=0` is an ops override that wins over the
+  switch; the card then says it is forced by the environment and disables the
+  controls.
+
 ## Manifest (`vibespace-plugin.json`)
 
 ```jsonc

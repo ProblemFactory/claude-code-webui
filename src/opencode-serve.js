@@ -29,7 +29,12 @@
  *                          on server exit, and STOPPED as a runaway when its
  *                          /proc sample blows the CPU/RSS bounds. Started
  *                          LAZILY on the first discovery and only when the CLI
- *                          is installed AND autostart is on. After boot the
+ *                          is installed AND autostart is on — and autostart is
+ *                          DEFAULT OFF (owner decision 2026-09-07): the switch
+ *                          is the built-in 'opencode-serve' PLUGIN the user
+ *                          enables deliberately (decideAutostart below is the
+ *                          ONE decision; src/plugins.js is its control surface,
+ *                          this module stays the facts). After boot the
  *                          OpenAPI is probed once: the `fork` capability verdict
  *                          (POST /session/{sessionID}/fork present) is reported
  *                          through onCaps — capsOf('opencode').fork flips ONLY
@@ -158,6 +163,28 @@ function writeJsonAtomic(file, value) {
 }
 const isoOf = (ms) => new Date(Number.isFinite(ms) && ms > 0 ? ms : Date.now()).toISOString();
 const isConnErr = (e) => e && (e.code === 'network' || e.code === 'ECONNREFUSED' || e.code === 'ECONNRESET');
+
+// ── THE autostart decision (ONE implementation; cli-env only wires the inputs) ──
+/** The ops override, if any: `VIBESPACE_OPENCODE_SERVE=1/0` → true/false,
+ *  unset/empty → null. Kept here (not in cli-env) so the plugin control
+ *  surface and the keeper read the SAME switch — a second parse of the same
+ *  env var is the twin class this repo keeps paying for. */
+function serveEnvOverride(env = process.env) {
+  const v = env && env.VIBESPACE_OPENCODE_SERVE;
+  if (v === undefined || v === null || v === '') return null;
+  return v !== '0';
+}
+/** May the keeper START a serve right now?
+ *  env override (ops, wins) > the 'opencode-serve' PLUGIN record
+ *  (enabled && desiredUp). DEFAULT OFF — owner decision 2026-09-07: nothing
+ *  starts a background third-party daemon on this machine until the user
+ *  enables the plugin. (Reuse of an ALREADY-RUNNING recorded instance is a
+ *  separate rung and still works: adopting costs nothing.) */
+function decideAutostart({ env = process.env, pluginWantsUp = false } = {}) {
+  const o = serveEnvOverride(env);
+  if (o !== null) return o;
+  return !!pluginWantsUp;
+}
 
 // ── where the serve runs, and which worktrees may be bootstrapped ──
 /** OpenCode resolves its DEFAULT project from the process cwd, and every
@@ -568,7 +595,7 @@ function createServeLocator({
     state.child = null; state.client = null; state.port = null; state.pid = null;
     try { if (ch) ch.kill('SIGTERM'); else if (pid && pid !== process.pid) killPid(pid, 'SIGTERM'); } catch { }
     clearRecord();
-    log?.error?.(`[opencode-serve] RUNAWAY — ${state.lastError}. OpenCode boots an instance per session DIRECTORY and its file finder indexes + watches that whole tree; a session rooted at a huge directory burns the machine. Not restarting for ${Math.round(runawayCooldownMs / 60000)} min — turn autostart off (Settings → agents.opencodeServeAutostart) if it recurs.`);
+    log?.error?.(`[opencode-serve] RUNAWAY — ${state.lastError}. OpenCode boots an instance per session DIRECTORY and its file finder indexes + watches that whole tree; a session rooted at a huge directory burns the machine. Not restarting for ${Math.round(runawayCooldownMs / 60000)} min — disable the "OpenCode background service" plugin (⚙ → Plugins) if it recurs.`);
     try { telemetry?.({ name: 'opencode-serve-runaway', detail: `${why}${port ? ` port ${port}` : ''}`, value: Math.round(state.rssBytes / 1048576) }); } catch { }
     notify();
   }
@@ -649,7 +676,7 @@ function createServeLocator({
     }
     // 2) start one — only when the CLI is installed and autostart is allowed
     if (!cmd) { state.lastError = 'opencode CLI is not installed'; return null; }
-    if (!autostartOn()) { state.lastError = 'opencode serve autostart is off (Settings → agents.opencodeServeAutostart, or VIBESPACE_OPENCODE_SERVE=0 / a smoke harness) — start `opencode serve` yourself or turn autostart back on'; return null; }
+    if (!autostartOn()) { state.lastError = serveEnvOverride() === false ? 'the OpenCode background service is forced OFF by VIBESPACE_OPENCODE_SERVE=0 on this instance' : 'the OpenCode background service is off — enable the "OpenCode background service" plugin (⚙ → Plugins) to start it'; return null; }
     const port = await freePort();
     let child;
     try {
@@ -689,19 +716,44 @@ function createServeLocator({
     state.lastError = reason || 'connection lost';
     notify();
   }
-  function stop() {
+  /** An EXPLICIT user start (the plugin's Start / Enable & start button).
+   *  Clears a previous stop() and any park — a user asking for it IS the
+   *  deliberate retry a crash/runaway park waits for — then runs the ladder.
+   *  Returns the ensure() promise so the caller can report the outcome. */
+  function start() {
+    state.stopping = false;
+    state.parked = false; state.parkedKind = null; state.crashes = 0;
+    state.backoffUntil = 0; state.runawayUntil = 0; state.lastError = null;
+    notify();
+    return ensure();
+  }
+  /** Stop the keeper. `killRecorded` = ALSO SIGTERM an instance we merely
+   *  ADOPTED from data/opencode-serve.json (a previous VibeSpace's child).
+   *  The process-exit path deliberately leaves an adopted instance alone (the
+   *  next boot reuses it); a user turning the service OFF means STOP IT. */
+  function stop({ killRecorded = false } = {}) {
     state.stopping = true;
     clearTimeout(respawnTimer); respawnTimer = null;
     if (guard.timer) { clearInterval(guard.timer); guard.timer = null; }
     const ch = state.child;
+    const livePid = state.pid;
     state.child = null; state.client = null; state.port = null;
     if (ch) { try { ch.kill('SIGTERM'); } catch { } clearRecord(); }
+    else if (killRecorded) {
+      const rec = readRecord();
+      const target = livePid || rec?.pid || null;
+      // never signal ourselves: a stale pid can name this very process
+      try { if (target && target !== process.pid) killPid(target, 'SIGTERM'); } catch { }
+      clearRecord();
+    }
+    state.pid = null; state.source = null;
+    notify();
   }
   function snapshot() {
-    return { port: state.port, pid: state.pid, startedAt: state.startedAt, source: state.source, crashes: state.crashes, parked: state.parked, parkedKind: state.parkedKind, runawayUntil: state.runawayUntil, lastError: state.lastError, caps: state.caps ? { ...state.caps } : null, version: state.version, capsProbed: state.capsProbed, installed: !!commandOf(), autostart: autostartOn(), cwd: state.cwd, cwdIsolated: state.cwdIsolated, cpuPct: state.cpuPct, rssBytes: state.rssBytes, sampledAt: state.sampledAt, recordPath, ready: !!state.client };
+    return { port: state.port, pid: state.pid, startedAt: state.startedAt, source: state.source, crashes: state.crashes, parked: state.parked, parkedKind: state.parkedKind, runawayUntil: state.runawayUntil, lastError: state.lastError, caps: state.caps ? { ...state.caps } : null, version: state.version, capsProbed: state.capsProbed, installed: !!commandOf(), autostart: autostartOn(), envForced: serveEnvOverride(), stopped: !!state.stopping, cwd: state.cwd, cwdIsolated: state.cwdIsolated, cpuPct: state.cpuPct, rssBytes: state.rssBytes, sampledAt: state.sampledAt, recordPath, ready: !!state.client };
   }
   if (stopOnExit) process.once('exit', () => { try { stop(); } catch { } });
-  return { client, ensure, stop, invalidate, state: snapshot, command: commandOf, recordPath, _sampleGuard: sampleGuard };
+  return { client, ensure, start, stop, invalidate, state: snapshot, command: commandOf, recordPath, _sampleGuard: sampleGuard };
 }
 
 // ── the store facts ──
@@ -717,9 +769,11 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
     if (!st.installed) return 'OpenCode is not installed on this machine (no `opencode` on PATH — install it or set OPENCODE_CMD)';
     // the runaway must SPEAK: the owner's instance burned for two hours with
     // nothing in the product saying so (2.369.42)
-    if (st.parked && st.parkedKind === 'runaway') return `OpenCode serve was stopped by VibeSpace as a RUNAWAY — ${st.lastError || 'resource guard'}. It will not restart for up to an hour; turn autostart off in Settings (agents.opencodeServeAutostart) if it keeps happening.`;
-    if (st.parked) return `OpenCode serve is parked after ${st.crashes} crashes (${st.lastError || 'unknown error'}) — restart VibeSpace to retry`;
-    if (st.autostart === false) return `OpenCode serve is not running and autostart is off (${st.lastError || 'Settings → agents.opencodeServeAutostart'})`;
+    if (st.parked && st.parkedKind === 'runaway') return `OpenCode serve was stopped by VibeSpace as a RUNAWAY — ${st.lastError || 'resource guard'}. It will not restart for up to an hour; disable the "OpenCode background service" plugin (⚙ → Plugins) if it keeps happening.`;
+    if (st.parked) return `OpenCode serve is parked after ${st.crashes} crashes (${st.lastError || 'unknown error'}) — start it again from ⚙ → Plugins → OpenCode background service`;
+    if (st.autostart === false) return st.envForced === false
+      ? 'the OpenCode background service is forced OFF by VIBESPACE_OPENCODE_SERVE=0 on this instance — stopped OpenCode conversations cannot be listed or opened'
+      : 'the OpenCode background service is off — enable the "OpenCode background service" plugin (⚙ → Plugins) to list, open, resume and fork STOPPED OpenCode conversations';
     return `OpenCode serve is unreachable (${st.lastError || 'still starting'})`;
   }
   function assemble(list, activeSessions) {
@@ -872,7 +926,7 @@ const NULL_FACTS = Object.freeze({
   readConversation: async (id) => { throw new OpencodeServeError(`OpenCode serve is not configured on this instance (conversation ${id})`, { code: 'unconfigured' }); },
   forkSession: async () => { throw new OpencodeServeError('OpenCode serve is not configured on this instance', { code: 'unconfigured' }); },
   invalidate: () => { },
-  state: () => ({ installed: false, ready: false, parked: false, caps: null, configured: false }),
+  state: () => ({ installed: false, ready: false, parked: false, caps: null, configured: false, autostart: false, envForced: null, stopped: true }),
   reasonUnavailable: () => 'OpenCode serve is not configured on this instance',
   locator: null,
 });
@@ -890,6 +944,7 @@ module.exports = {
   OpencodeServeClient, OpencodeServeError, createServeLocator, createFacts, OpencodeServeSessionMessages,
   messagesToAcpRecords, acpKindOfTool, acpStatusOfState, sessionTitle, install, facts, uninstall,
   bootstrappableWorktree, unsafeWorktreeReason, ensureServeCwd, serveCwdPath, readProcUsage,
+  serveEnvOverride, decideAutostart, SERVICE_PLUGIN_ID: 'opencode-serve',
   DEFAULT_TIMEOUT_MS, READ_TIMEOUT_MS, LIST_CACHE_MS, NEGATIVE_CACHE_MS, MAX_CRASHES, FORK_PATH,
   NAME_MAX_BYTES, GUARD_CPU_PCT, GUARD_RSS_BYTES, GUARD_SAMPLE_MS, RUNAWAY_COOLDOWN_MS,
 };

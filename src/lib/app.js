@@ -347,7 +347,25 @@ class App {
       if (msg.type !== 'harness-store-updated' || !msg.backend || !BACKEND_META[msg.backend]) return;
       const prev = BACKEND_META[msg.backend].storeReason || null;
       BACKEND_META[msg.backend].storeReason = msg.reason || null;
+      if (msg.service !== undefined) BACKEND_META[msg.backend].service = msg.service || null;
       if (msg.reason && msg.reason !== prev) showToast(`${BACKEND_META[msg.backend].label || msg.backend}: ${msg.reason}`, { type: 'error' });
+      try { this.sidebar?._render?.(); } catch {}
+    });
+    // A harness's background service is controlled by a built-in PLUGIN
+    // (opencode → 'opencode-serve'): enable/disable/"asked once" are instance
+    // state, so every client learns them from the same broadcast (multi-client
+    // law) and the sidebar's "history is hidden" row follows.
+    this.ws.onGlobal((msg) => {
+      if (msg.type !== 'plugins-updated' || !msg.services) return;
+      let changed = false;
+      for (const meta of Object.values(BACKEND_META)) {
+        if (!meta.servicePlugin) continue;
+        const s = msg.services[meta.servicePlugin];
+        if (s === undefined) continue;
+        meta.service = s || null;
+        changed = true;
+      }
+      if (changed) { try { this.sidebar?._render?.(); } catch {} }
     });
     this.ws.onGlobal((msg) => {
       if (msg.type === 'editor-open' && msg.filePath && msg.signalPath) {
@@ -375,6 +393,7 @@ class App {
         if (h.caps && BACKEND_META[h.id]?.caps) Object.assign(BACKEND_META[h.id].caps, h.caps);
         if (BACKEND_META[h.id]) {
           BACKEND_META[h.id].storeReason = h.storeReason || null; // a parked/runaway store carries WHY (2.369.50)
+          if (h.service !== undefined) BACKEND_META[h.id].service = h.service || null; // the control plugin's state (opencode-serve, default OFF)
           // passive surface: a park that happened while no client was connected
           // must still be seen on the next page load (one toast per reason)
           if (h.storeReason && !(this._storeReasonShown ||= new Set()).has(h.id + ':' + h.storeReason)) {

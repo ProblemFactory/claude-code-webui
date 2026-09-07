@@ -140,7 +140,8 @@ Everything VibeSpace adds *into* your agent sessions lives here — and all of i
 | `agents.stopNudgeExtra` | text | `''` | Custom text prepended to the stop nudge (≤500 chars) |
 | `agents.allowGroupManagement` | boolean | `false` | Let designated "Group manager" sessions create/configure Task Groups via CLI |
 | `agents.groupManagementRoots` | string | `~` | Comma-separated path prefixes manager agents may use for group folders |
-| `agents.opencodeServeAutostart` | boolean | `true` | Start one background `opencode serve` on 127.0.0.1 so STOPPED OpenCode conversations list/open/resume/fork from the sidebar (OpenCode keeps its sessions in its own database, not in files). Off = OpenCode conversations only appear while running; an already-running serve is still reused. `VIBESPACE_OPENCODE_SERVE=0/1` overrides this setting. The keeper samples the serve's CPU/RSS and stops it (visibly) if it runs away. |
+
+> **Removed 2026-09-07: `agents.opencodeServeAutostart`.** The OpenCode background service (`opencode serve` on 127.0.0.1, which makes STOPPED OpenCode conversations list / open / resume / fork) is now the built-in **OpenCode background service** plugin — ⚙ → Plugins — and it is **off by default**. The first time you use OpenCode, VibeSpace offers to turn it on (once; "Not now" is remembered for the whole instance). `VIBESPACE_OPENCODE_SERVE=0/1` still overrides the plugin as an ops switch and the Plugins panel shows it as "forced by the environment". A stored value for the old setting is ignored — no migration.
 
 ### Claude
 

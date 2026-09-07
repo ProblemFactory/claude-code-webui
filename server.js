@@ -101,7 +101,7 @@ const { X_ENV, detectXDisplay, refreshXEnv, stabilizeXAuth, adapterRegistry,
   rootDir: __dirname, CLAUDE_CMD_RAW, CODEX_CMD_RAW, resolveCmd,
   getOAuthToken: (...a) => getOAuthToken(...a),
   usagePollingEnabled: (...a) => usagePollingEnabled(...a),
-  refreshCodexModels: (...a) => refreshCodexModels(...a), broadcast: (m) => bcastAll(m), getTelemetry: () => { try { return telemetry; } catch { return null; } }, getSetting: (k) => serverSetting(k), // S9: opencode serve caps verdict → 'harness-caps-updated'; runaway telemetry + agents.opencodeServeAutostart (lazy — both defined below)
+  refreshCodexModels: (...a) => refreshCodexModels(...a), broadcast: (m) => bcastAll(m), getTelemetry: () => { try { return telemetry; } catch { return null; } }, getPlugins: () => { try { return plugins; } catch { return null; } }, // S9: opencode serve caps verdict → 'harness-caps-updated'; runaway telemetry + the 'opencode-serve' PLUGIN is the autostart switch (lazy — both defined below)
 });
 // ── Codex model list (from ~/.codex/models_cache.json) ──
 // That cache is last-writer-wins AND version-gated server-side: a still-running

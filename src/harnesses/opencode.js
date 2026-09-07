@@ -39,6 +39,11 @@ const harness = acpHarness({
 });
 
 Object.assign(harness.store, {
+  // The background service is OPT-IN and lives behind a built-in plugin
+  // (2026-09-07 owner decision, default OFF): naming it here is how the
+  // client learns which control surface turns this store on — cli-env puts
+  // plugins.serviceState(servicePlugin) on the /api/home harness row.
+  servicePlugin: serve.SERVICE_PLUGIN_ID,
   // async ({activeSessions}) → session entries; [] (silently) until the serve
   // instance is up, when the CLI is missing, or while negative-cached
   discover: ({ activeSessions } = {}) => serve.facts().discover({ activeSessions }),

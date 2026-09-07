@@ -94,6 +94,12 @@ Moved VERBATIM out of CLAUDE.md (tier-2 pass).
 - `POST /api/sessions/:id/msg-reachability` (cookie) — {level: inherit|visible|messageable} per-session widening override.
 - agentd op `peer-post` {cid, text} → `peer-post-result` {ok, reason, peerName} (capability 'peer-post').
 
+#### Host-capability plugins (⚙ → Plugins; src/plugins.js)
+- `GET /api/plugins` — `{plugins:[…]}` for the panel (tailscale / frp / opencode-serve): def + `enabled` + that plugin's `status()`.
+- `GET /api/plugins/:id/status` · `POST /api/plugins/:id/{install|start|stop|login|enabled|mode|config}` — the per-plugin lifecycle (all cookie-authed; each returns `{error}` with a reason, never a silent no-op).
+- `POST /api/plugins/:id/prompted` `{prompted}` (2026-09-07) — "we already offered this plugin". The OpenCode background service is off by default and its first-use dialog is asked ONCE **per instance**, so the flag is store state (data/plugins.json) that broadcasts — never per-browser localStorage.
+- Broadcast `plugins-updated` carries `{plugins, services}`; `services[<id>]` is the compact `{enabled, desiredUp, prompted, installed, running, starting, parked, envForced, reason}` row. `/api/home`'s harness rows carry the same row as `service` when a harness descriptor declares `store.servicePlugin`.
+
 ### OTel truth ingest (2.361.0)
 - `POST /otel/v1/logs` — OTLP JSON from LOCAL claude CLIs (spawn-injected env). Cookie-exempt; the ONLY gate = loopback remoteAddress + per-boot `x-vibespace-otel` header token. api_request events → truth map (rid→acct) + corrective attribution + data/usage-history/otel-truth.ndjson.
 - `POST /otel/v1/metrics`, `POST /otel/v1/traces` — tolerant 200 (not consumed; exporter configured logs-only).

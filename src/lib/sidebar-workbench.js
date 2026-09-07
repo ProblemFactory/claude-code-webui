@@ -581,6 +581,15 @@ export function installSidebarWorkbench(Sidebar) {
       // and the apply/clear controls. Marks are collected on the cards; this
       // bar commits them all at once so the list never reshuffles mid-select.
       if (this._manageMode) this.listEl.appendChild(this._buildManageBar());
+      // A harness whose STOPPED conversations live behind an opt-in background
+      // service (opencode → the 'opencode-serve' plugin, OFF by default since
+      // 2026-09-07) must SAY that its history is missing — otherwise this list
+      // is silently incomplete, which reads exactly like a bug. It belongs
+      // HERE, not in _renderInner: the workbench wipes listEl and owns the
+      // sessions list on desktop AND mobile. Shown only once the user has met
+      // the harness here (a session in the list, or we already offered the
+      // service); ⚙ → Plugins stays the other way back.
+      this._renderServiceHintRows?.(sessions);
       const now = Date.now();
       const isLive = (s) => s.status === 'live' || s.status === 'tmux' || s.status === 'external' || s.status === 'remote-running';
       const live = sessions.filter(isLive);

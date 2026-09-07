@@ -379,12 +379,6 @@ const SETTINGS_SCHEMA = {
     description: t('Registers VibeSpace as a Claude Code channel in NEW local claude sessions (research-preview CLI feature, enabled per spawn via the development-channels flag). Job notifications then arrive as structured <channel source="vibespace"> events instead of plain peer messages, and this becomes the bridge for future external chat integrations. Sessions must be recreated to pick up a change. Leave off unless experimenting.'),
     category: t('Integration'), liveApply: true,
   },
-  'agents.opencodeServeAutostart': {
-    type: 'boolean', default: true,
-    label: t('OpenCode: start a background serve for stopped conversations'),
-    description: t('VibeSpace lists, opens, resumes and forks STOPPED OpenCode conversations through one lazily started `opencode serve` on 127.0.0.1 (OpenCode keeps its sessions in its own database, not in files). Turn this off and OpenCode conversations only appear while they are running; an already-running serve is still reused. VIBESPACE_OPENCODE_SERVE=0/1 overrides this setting.'),
-    category: t('Integration'), liveApply: true,
-  },
   'agents.stopNudgeStaleMinutes': {
     type: 'number', default: 10, min: 0, max: 240, step: 1,
     label: t('Stop nudge: staleness threshold (minutes)'),

@@ -1,7 +1,7 @@
 import { Resizer } from './resizer.js';
 import { agoText, escHtml, createPopover, hostStateChip, sessionMatchesFilter, showContextMenu } from './utils.js';
 import { t as tr } from './i18n.js';
-import { createAgentKindIcon, createBackendIcon, getAgentKindMeta, getBackendMeta, getSessionKey } from './agent-meta.js';
+import { BACKEND_META, createAgentKindIcon, createBackendIcon, getAgentKindMeta, getBackendMeta, getSessionKey } from './agent-meta.js';
 import { installSidebarState } from './sidebar-state.js';
 import { installSidebarRender } from './sidebar-render.js';
 import { installSidebarRenderMobile } from './sidebar-render-mobile.js';
@@ -854,6 +854,30 @@ class Sidebar {
   // vibespace-status calls fire these constantly) reset the scroll to top;
   // only the 5s-poll digest path used to preserve it. A view change (tab /
   // board sub-view / mobile drill-down) resets deliberately — different content.
+  /** "Stopped OpenCode conversations are hidden — turn the service on."
+   *  ONE row per harness that declares a control plugin (BACKEND_META
+   *  .servicePlugin), gated on the state the server broadcasts. Chrome gates
+   *  on the DECLARATION, never on a backend id. */
+  _renderServiceHintRows(sessions) {
+    for (const meta of Object.values(BACKEND_META)) {
+      const svc = meta.servicePlugin ? meta.service : null;
+      if (!svc || !svc.installed || svc.enabled || svc.running) continue;
+      if (svc.envForced === false) continue;   // ops turned it off — not the user's to fix here
+      const met = svc.prompted || (sessions || []).some((x) => (x.backend || 'claude') === meta.id);
+      if (!met) continue;                      // never nag someone who has not used this harness here
+      const row = document.createElement('div');
+      row.className = 'empty-hint sidebar-service-hint';
+      const label = document.createElement('span');
+      label.textContent = tr('Stopped {name} conversations are hidden — its background service is off.', { name: meta.label || meta.id }) + ' ';
+      const enable = document.createElement('button');
+      enable.className = 'mounts-btn sidebar-service-enable';
+      enable.textContent = tr('Enable…');
+      enable.onclick = () => { this.app.enableHarnessService?.(meta.id); };
+      row.append(label, enable);
+      this.listEl.appendChild(row);
+    }
+  }
+
   _render() {
     // The ACTUAL scrolling element moved over time (.sidebar-section
     // classically; #all-sessions-list itself in the current layout — measured

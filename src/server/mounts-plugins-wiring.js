@@ -276,6 +276,12 @@ app.post('/api/plugins/:id/mode', (req, res) => {
 app.post('/api/plugins/:id/config', (req, res) => {
   try { res.json(plugins.setConfig(req.params.id, req.body || {})); } catch (e) { res.status(400).json({ error: e.message }); }
 });
+// "we already offered this plugin" — the first-use dialog is asked ONCE per
+// instance (owner: "Not now" is remembered), so the flag is INSTANCE state
+// (data/plugins.json) that broadcasts, never per-browser localStorage.
+app.post('/api/plugins/:id/prompted', (req, res) => {
+  try { res.json(plugins.setPrompted(req.params.id, req.body?.prompted !== false)); } catch (e) { res.status(400).json({ error: e.message }); }
+});
 
 // PLUGIN LOADER (Ph2, 2.369.24; Ph4 2.369.30): manifest plugins under
 // data/plugins — iframe assets, trusted client modules, forked server

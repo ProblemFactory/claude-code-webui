@@ -17,6 +17,15 @@
 // coexist with a system daemon. The node key lives in the statedir → a pod
 // rebuild reconnects WITHOUT re-login (the whole point).
 //
+// THIRD plugin: OPENCODE-SERVE (2026-09-07, owner decision) — the background
+// `opencode serve` that lets STOPPED OpenCode conversations list / open /
+// resume / fork. It is DEFAULT OFF and exists as a plugin precisely so the
+// user turns a third-party background daemon on DELIBERATELY (the 2.369.42
+// runaway is why). This manager is only the CONTROL SURFACE: the serve facts,
+// keeper and resource guard stay in the SHARED module src/opencode-serve.js
+// (ONE implementation) — here we own enabled/desiredUp/prompted, boot replay
+// and the status the UI renders.
+//
 // State: data/plugins.json { plugins: { <id>: { enabled, config, desiredUp } } }
 // (enabled = replay at boot; runtime pid/state live in the plugin dir itself).
 const fs = require('fs');
@@ -44,12 +53,17 @@ function pidCmdline(pid) {
 }
 function pidAlive(pid) { try { process.kill(pid, 0); return true; } catch { return false; } }
 
+const OPENCODE_SERVE_ID = 'opencode-serve';
+
 class PluginManager {
-  constructor({ dataDir, broadcast }) {
+  // opencodeServe = the SHARED serve module (injected so tests can drive a
+  // fake keeper); the installed singleton is resolved lazily through facts().
+  constructor({ dataDir, broadcast, opencodeServe = null }) {
     this._file = path.join(dataDir, 'plugins.json');
     this.broadcast = broadcast || (() => {});
     try { this._state = JSON.parse(fs.readFileSync(this._file, 'utf-8')); } catch { this._state = { plugins: {} }; }
     this._loginProcs = new Map(); // id → {proc, authUrl}
+    this._serve = opencodeServe || require('./opencode-serve');
   }
 
   _save() {
@@ -63,7 +77,7 @@ class PluginManager {
   _rec(id) { return (this._state.plugins[id] = this._state.plugins[id] || {}); }
   // restored 2.343.1 — a dead-code sweep (dc37220) deleted this while 8 call
   // sites remained; every plugin-state broadcast (and publish) threw since.
-  _notify() { this.broadcast({ type: 'plugins-updated', plugins: this.list() }); }
+  _notify() { this.broadcast({ type: 'plugins-updated', ...this._snapshot() }); }
 
   // ── registry ──
   defs() {
@@ -78,17 +92,56 @@ class PluginManager {
         label: 'Public URLs (frp)',
         description: 'Expose a machine’s dev server on the public internet via the frp relay — share a preview link. Off by default; needs the relay configured.',
       },
+      [OPENCODE_SERVE_ID]: {
+        id: OPENCODE_SERVE_ID,
+        label: 'OpenCode background service',
+        description: 'Lists, opens, resumes and forks STOPPED OpenCode conversations. OpenCode keeps its sessions in its own database rather than in files, so VibeSpace runs `opencode serve` on 127.0.0.1 to read them. Off by default; it stops when you disable it.',
+      },
     };
   }
 
-  list() {
-    return Object.values(this.defs()).map((d) => {
+  /** ONE pass over every plugin → the panel rows AND the compact service rows.
+   *  Deliberately one pass: `status('tailscale')` shells out (pgrep + `tailscale
+   *  status --json`, 5s timeout) on the event loop, so building the two shapes
+   *  with two walks would double that cost on every plugin broadcast. */
+  _snapshot() {
+    const plugins = [], services = {};
+    for (const d of Object.values(this.defs())) {
       const rec = this._state.plugins[d.id] || {};
       let st = {};
       try { st = this.status(d.id); } catch (e) { st = { error: e.message }; }
-      return { ...d, enabled: !!rec.enabled, ...st };
-    });
+      plugins.push({ ...d, enabled: !!rec.enabled, ...st });
+      services[d.id] = this._serviceRow(d, rec, st);
+    }
+    return { plugins, services };
   }
+  _serviceRow(d, rec, st) {
+    return {
+      id: d.id, label: d.label, description: d.description,
+      enabled: st.enabled !== undefined ? !!st.enabled : !!rec.enabled,
+      desiredUp: !!st.desiredUp, prompted: !!st.prompted,
+      installed: !!st.installed, running: !!st.running, starting: !!st.starting,
+      parked: !!st.parked, envForced: st.envForced === undefined ? null : st.envForced,
+      reason: st.reason || st.lastError || st.error || null,
+    };
+  }
+
+  list() { return this._snapshot().plugins; }
+  services() { return this._snapshot().services; }
+
+  /** The COMPACT state a harness/feature surface needs to decide "is my
+   *  background service on?" for ONE plugin — cheap (no sibling probes),
+   *  carried on /api/home's harness rows. */
+  serviceState(id) {
+    const d = this.defs()[id];
+    if (!d) return null;
+    let st = {};
+    try { st = this.status(id); } catch (e) { st = { error: e.message }; }
+    return this._serviceRow(d, this._state.plugins[id] || {}, st);
+  }
+  /** THE plugin half of the serve autostart decision (the env override half
+   *  lives in src/opencode-serve.js — ONE parse of that switch). */
+  wantsServiceUp(id) { const rec = this._state.plugins[id] || {}; return !!(rec.enabled && rec.desiredUp); }
 
   setMode(id, mode) {
     if (id !== 'tailscale') throw new Error('unknown plugin: ' + id);
@@ -112,6 +165,7 @@ class PluginManager {
   }
 
   setConfig(id, patch = {}) {
+    if (id === OPENCODE_SERVE_ID) throw new Error('the OpenCode background service has nothing to configure — it binds a free port on 127.0.0.1');
     if (id === 'frp') {
       // user override of the cluster-injected relay defaults (empty string ⇒
       // clear the override → fall back to env). Restart if running to apply.
@@ -137,9 +191,29 @@ class PluginManager {
 
   setEnabled(id, enabled) {
     if (!this.defs()[id]) throw new Error('unknown plugin: ' + id);
+    // The OpenCode service is not a "also start it at boot" checkbox — it IS
+    // the switch, and `enabled`/`desiredUp` move in LOCKSTEP. Anything else is
+    // a silent no-op: an enabled-but-not-desiredUp record leaves autostart
+    // false, so ticking the box would do nothing until a restart that also
+    // does nothing. On ⇒ start now and at every boot; off ⇒ STOP the daemon
+    // (a background process the user just turned off that keeps burning CPU
+    // is the 2.369.42 shape).
+    if (id === OPENCODE_SERVE_ID) return void (enabled ? this._ocStart() : this._ocStop());
     this._rec(id).enabled = !!enabled;
     this._save();
     this._notify();
+  }
+
+  /** "We already asked" — the first-use dialog is shown ONCE per instance
+   *  (owner: "Not now" must be remembered). Broadcast like every other
+   *  persistent state change so a second tab never re-asks. */
+  setPrompted(id, prompted = true) {
+    if (!this.defs()[id]) throw new Error('unknown plugin: ' + id);
+    const rec = this._rec(id);
+    if (prompted) rec.promptedAt = Date.now(); else delete rec.promptedAt;
+    this._save();
+    this._notify();
+    return { prompted: !!rec.promptedAt };
   }
 
   // Boot replay: rootfs is volatile — restart enabled plugins that were up.
@@ -149,6 +223,20 @@ class PluginManager {
   bootReplay() {
     for (const id of Object.keys(this.defs())) {
       const rec = this._state.plugins[id] || {};
+      if (id === OPENCODE_SERVE_ID) {
+        // enabled + desiredUp ⇒ start with the server (the keeper would also
+        // start it lazily on the first discovery; replaying makes "it is on"
+        // true before anyone looks). Never when the CLI is absent or the env
+        // forces it off — _ocStart says so loudly and boot replay is silent.
+        if (!rec.enabled || !rec.desiredUp) continue;
+        try {
+          const st = this._ocStatus();
+          if (!st.installed || st.envForced === false || st.running) continue;
+          console.log('[plugins] boot replay: starting the OpenCode background service');
+          this._ocStart();
+        } catch (e) { console.warn('[plugins] boot replay opencode-serve failed:', e.message); }
+        continue;
+      }
       if (id === 'frp') {
         if (!this._frpEffectiveEnabled() || !this._frpConfigured()) continue;
         (async () => {
@@ -214,6 +302,7 @@ class PluginManager {
   }
 
   async install(id) {
+    if (id === OPENCODE_SERVE_ID) return this._ocInstall();
     if (id === 'frp') return this._frpInstall();
     if (id !== 'tailscale') throw new Error('unknown plugin: ' + id);
     const arch = { x64: 'amd64', arm64: 'arm64' }[process.arch];
@@ -245,6 +334,7 @@ class PluginManager {
   }
 
   start(id) {
+    if (id === OPENCODE_SERVE_ID) return this._ocStart();
     if (id === 'frp') return this._frpStart();
     if (id !== 'tailscale') throw new Error('unknown plugin: ' + id);
     if (this._systemTailscaled()) throw new Error('a system tailscaled is already running — this machine is managed outside VibeSpace');
@@ -281,6 +371,7 @@ class PluginManager {
   }
 
   stop(id) {
+    if (id === OPENCODE_SERVE_ID) return this._ocStop();
     if (id === 'frp') return this._frpStop();
     if (id !== 'tailscale') throw new Error('unknown plugin: ' + id);
     const pid = this._tsOurDaemonPid();
@@ -298,6 +389,7 @@ class PluginManager {
   }
 
   status(id) {
+    if (id === OPENCODE_SERVE_ID) return this._ocStatus();
     if (id === 'frp') return this._frpStatus();
     if (id !== 'tailscale') throw new Error('unknown plugin: ' + id);
     const rec = this._state.plugins.tailscale || {};
@@ -373,6 +465,83 @@ class PluginManager {
       });
       setTimeout(() => { if (!entry.authUrl && proc.exitCode === null) resolve({ pending: true }); }, 15000);
     });
+  }
+
+  // ── opencode-serve (the OpenCode background service, 2026-09-07) ──────────
+  // CONTROL SURFACE ONLY. Every fact (installed / running / parked / runaway
+  // numbers) comes from the ONE keeper in src/opencode-serve.js; this class
+  // owns nothing but the user's intent (enabled / desiredUp / prompted).
+  _ocFacts() { try { return this._serve.facts(); } catch { return null; } }
+  _ocServeState() { try { return this._ocFacts()?.state() || {}; } catch (e) { return { error: e.message }; } }
+  _ocLocator() { const f = this._ocFacts(); return f && f.locator ? f.locator : null; }
+
+  /** There is nothing for VibeSpace to download: the service IS the user's own
+   *  `opencode` CLI. "Installed" = cli-env resolved that executable. Say how to
+   *  get it instead of pretending we can (no silent failure, no dead button). */
+  _ocInstall() {
+    const st = this._ocServeState();
+    if (!st.installed) throw new Error('the `opencode` CLI is not on PATH — install OpenCode (https://opencode.ai), then reload this panel (or set OPENCODE_CMD and restart VibeSpace)');
+    return { installed: true, version: st.version || null };
+  }
+
+  _ocStart() {
+    const st = this._ocServeState();
+    if (!st.installed) throw new Error('the `opencode` CLI is not on PATH — install OpenCode (https://opencode.ai) first');
+    if (this._serve.serveEnvOverride() === false) throw new Error('VIBESPACE_OPENCODE_SERVE=0 is set on this instance — the OpenCode background service is forced off by the environment');
+    const rec = this._rec(OPENCODE_SERVE_ID);
+    rec.enabled = true;      // Start IS the enable: autostart reads enabled && desiredUp
+    rec.desiredUp = true;
+    this._save();
+    const loc = this._ocLocator();
+    // the keeper's own ladder (reuse → spawn → boot wait ≤20s) runs in the
+    // background; the UI shows 'starting…' from status() until it answers.
+    // Dropping the facts caches is part of starting: the 10s NEGATIVE cache
+    // was filled while the service was off, and without this the sidebar
+    // would keep showing "no stopped conversations" after the user turned it
+    // on (the cache-invalidation law — one dirty signal at the entry point).
+    if (loc?.start) Promise.resolve(loc.start()).catch(() => { }).then(() => { try { this._ocFacts()?.invalidate?.(); } catch { } this._notify(); });
+    this._notify();
+    return { starting: true };
+  }
+
+  _ocStop() {
+    const rec = this._rec(OPENCODE_SERVE_ID);
+    rec.enabled = false;          // lockstep with desiredUp — ONE switch, no "enabled but off" limbo
+    rec.desiredUp = false;
+    this._save();
+    // killRecorded: a serve we merely ADOPTED is still a VibeSpace-started
+    // daemon — "off" must mean the process is gone, not "we stopped looking"
+    try { this._ocLocator()?.stop?.({ killRecorded: true }); } catch { }
+    this._notify();
+    return { stopped: true };
+  }
+
+  _ocStatus() {
+    const rec = this._state.plugins[OPENCODE_SERVE_ID] || {};
+    const st = this._ocServeState();
+    const envForced = this._serve.serveEnvOverride();
+    const enabled = envForced === true ? true : envForced === false ? false : !!rec.enabled;
+    const running = !!st.ready;
+    return {
+      installed: !!st.installed,
+      configured: !!st.installed,
+      enabled,
+      desiredUp: !!rec.desiredUp,
+      prompted: !!rec.promptedAt,
+      envForced,                       // true = forced on, false = forced off, null = the plugin decides
+      running,
+      starting: !running && !st.parked && !!st.installed && !!st.autostart,
+      parked: !!st.parked,
+      parkedKind: st.parkedKind || null,
+      port: st.port || null,
+      pid: st.pid || null,
+      source: st.source || null,       // 'spawned' | 'reused'
+      version: st.version || null,
+      cpuPct: st.cpuPct == null ? null : Math.round(st.cpuPct),
+      rssMb: st.rssBytes ? Math.round(st.rssBytes / 1048576) : null,
+      lastError: st.lastError || null,
+      reason: running ? null : (() => { try { return this._ocFacts()?.reasonUnavailable?.() || null; } catch { return null; } })(),
+    };
   }
 
   // ── frp (public port exposure via the shared frps relay) ──────────────────
@@ -677,4 +846,4 @@ async function probeProto(target, { timeoutMs = 2500 } = {}) {
   return isHttp ? 'http' : 'tcp';
 }
 
-module.exports = { PluginManager, probeProto };
+module.exports = { PluginManager, probeProto, OPENCODE_SERVE_ID };

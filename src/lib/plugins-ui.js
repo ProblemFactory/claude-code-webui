@@ -3,7 +3,14 @@
 // Manage-Agents visual language; the login flow mirrors guided Drive OAuth
 // (server captures the auth URL, user opens it, we poll status until Running).
 import { createModalShell, fetchJson, showToast, showConfirmDialog, showContextMenu, escHtml, copyText } from './utils.js';
+import { BACKEND_META } from './agent-meta.js';
 import { t } from './i18n.js';
+
+// How long we wait for a just-enabled background service to answer before we
+// hand the pending user action back anyway (the keeper's own boot budget is
+// 20s; a serve that is still coming up reports 'starting', never a spinner
+// that never ends).
+const SERVICE_START_WAIT_MS = 25000;
 
 export function installPluginsUI(App) {
   Object.assign(App.prototype, {
@@ -36,14 +43,30 @@ export function installPluginsUI(App) {
         card.className = 'plugin-card';
         const running = !!p.running;
         const isFrp = p.id === 'frp';
-        const stateTxt = isFrp
-          ? (p.configured === false ? t('relay not configured on this instance')
-            : running ? t('connected') : p.installed ? t('stopped') : t('not installed'))
-          : p.mode === 'system' ? t('managed by the system (outside VibeSpace)')
-            : running ? (p.backendState === 'Running' ? t('connected') : (p.backendState || t('starting…')))
-              : p.installed ? t('stopped') : t('not installed');
-        const dot = `<span class="plugin-dot ${isFrp ? (running ? 'ok' : '') : (running && p.backendState === 'Running' ? 'ok' : running ? 'warn' : '')}"></span>`;
+        const isOc = p.id === 'opencode-serve';
+        const stateTxt = isOc
+          ? (!p.installed ? t('the opencode CLI is not installed')
+            : p.parkedKind === 'runaway' ? t('stopped as a runaway')
+              : p.parked ? t('parked after repeated crashes')
+                : running ? t('running on 127.0.0.1:{port}', { port: p.port || '?' })
+                  : p.starting ? t('starting…') : t('turned off'))
+          : isFrp
+            ? (p.configured === false ? t('relay not configured on this instance')
+              : running ? t('connected') : p.installed ? t('stopped') : t('not installed'))
+            : p.mode === 'system' ? t('managed by the system (outside VibeSpace)')
+              : running ? (p.backendState === 'Running' ? t('connected') : (p.backendState || t('starting…')))
+                : p.installed ? t('stopped') : t('not installed');
+        const dot = `<span class="plugin-dot ${isOc ? (running ? 'ok' : p.parked ? 'err' : p.starting ? 'warn' : '')
+          : isFrp ? (running ? 'ok' : '')
+            : (running && p.backendState === 'Running' ? 'ok' : running ? 'warn' : '')}"></span>`;
         let detail = '';
+        if (isOc) {
+          if (p.envForced === true) detail += `<div class="plugin-detail plugin-cfg-hint">${escHtml(t('Forced ON by the environment (VIBESPACE_OPENCODE_SERVE=1) — the switch below is ignored on this instance.'))}</div>`;
+          if (p.envForced === false) detail += `<div class="plugin-detail plugin-cfg-warn">${escHtml(t('Forced OFF by the environment (VIBESPACE_OPENCODE_SERVE=0) — the switch below is ignored on this instance.'))}</div>`;
+          if (!p.installed) detail += `<div class="plugin-detail plugin-cfg-warn">${escHtml(t('The `opencode` CLI was not found on PATH. Install OpenCode (https://opencode.ai) — VibeSpace runs YOUR copy, it never downloads one.'))}</div>`;
+          if (running) detail += `<div class="plugin-detail">${escHtml(t('opencode {version} · pid {pid} · {source}', { version: p.version || '?', pid: p.pid || '?', source: p.source === 'reused' ? t('adopted an already-running serve') : t('started by VibeSpace') }))}${p.rssMb ? ' · ' + escHtml(t('{mb} MB', { mb: p.rssMb })) : ''}${p.cpuPct != null ? ' · ' + escHtml(t('{pct}% CPU', { pct: p.cpuPct })) : ''}</div>`;
+          if (!running && p.reason) detail += `<div class="plugin-detail plugin-cfg-warn">${escHtml(p.reason)}</div>`;
+        }
         if (isFrp && p.configured) detail += `<div class="plugin-detail">${escHtml(t('Relay'))}: <code>${escHtml(p.server || '')}</code> · ${escHtml(t('publishes forwarded ports to {host}', { host: p.publicHost }))}</div>`;
         if (isFrp && p.configured === false) {
           // Name the MISSING field (2.227.10) — "not configured" alone sent a
@@ -93,7 +116,29 @@ export function installPluginsUI(App) {
         // frp: no login/mode/flags. The relay config fields (below) always
         // show so the user can enter/override the relay; install/start appear
         // only once a relay is configured (env default or user-entered).
-        if (p.mode !== 'system') {
+        if (isOc) {
+          // The OpenCode service has nothing to install (it runs the user's own
+          // CLI) and nothing to configure — Start / Stop and one deliberate
+          // on-switch. The env override, when set, WINS: say so and disable the
+          // controls rather than offering a button that can only fail.
+          const locked = p.envForced !== null && p.envForced !== undefined;
+          if (p.installed && !locked) {
+            if (running || p.starting) btn(t('Stop'), '', () => api('stop'));
+            else btn(p.parked ? t('Start again') : t('Enable & start'), 'mounts-btn-primary', () => api('start'));
+          }
+          // ONE switch, in lockstep with Start/Stop above (the server keeps
+          // enabled and desiredUp together): ticking it starts the service now
+          // AND on every boot; unticking it stops the daemon. A checkbox that
+          // only wrote a boot flag would be a visible no-op.
+          const lbl = document.createElement('label');
+          lbl.className = 'plugin-boot';
+          const cb = document.createElement('input');
+          cb.type = 'checkbox'; cb.checked = !!p.enabled; cb.disabled = locked || !p.installed;
+          cb.onchange = () => api('enabled', { body: JSON.stringify({ enabled: cb.checked }) })
+            .catch((e) => { cb.checked = !!p.enabled; showToast(e.message, { type: 'error' }); });
+          lbl.append(cb, document.createTextNode(' ' + t('Run this service whenever VibeSpace runs')));
+          actions.appendChild(lbl);
+        } else if (p.mode !== 'system') {
           if (isFrp && !p.configured) {
             // no relay yet — show only the config fields (added after actions)
           } else if (!p.installed) {
@@ -395,6 +440,126 @@ export function installPluginsUI(App) {
       } catch (e) { fail(e.message); }
     };
     setTimeout(() => val.focus(), 0);
+  },
+
+  // ── HARNESS BACKGROUND SERVICES (2026-09-07, owner decision) ──────────────
+  // A harness whose STORE needs a background daemon (opencode → the built-in
+  // 'opencode-serve' plugin) ships it OFF. The first time the user actually
+  // USES that harness we offer it ONCE — the "asked" flag is INSTANCE state
+  // (data/plugins.json, broadcast), never per-browser, so a second tab and a
+  // second device never re-ask.
+
+  /** Fresh state of a harness's control plugin (cheap: no probes on this id).
+   *  Falls back to the broadcast-cached copy when the server is unreachable —
+   *  a network blip must not pop a dialog claiming the service is off. */
+  async _harnessServiceState(backend) {
+    const meta = BACKEND_META[backend];
+    if (!meta?.servicePlugin) return null;
+    const r = await fetchJson(`/api/plugins/${encodeURIComponent(meta.servicePlugin)}/status`);
+    if (!r || r.error) return meta.service || null;
+    meta.service = { ...(meta.service || {}), ...r, id: meta.servicePlugin };
+    return meta.service;
+  },
+
+  /** Offer the harness's background service if it is off and we have not
+   *  asked yet. Resolves TRUE when the service is (or has just become)
+   *  available. `needsService` = the pending action cannot work without it,
+   *  so a refusal must SAY so; `retry` runs after a successful enable. */
+  async maybeOfferHarnessService(backend, { needsService = false, retry = null } = {}) {
+    const meta = BACKEND_META[backend];
+    if (!meta?.servicePlugin) return true;
+    // ONE offer at a time: a layout restore can open five OpenCode history
+    // windows in the same tick, and five stacked dialogs (each writing the
+    // "asked" flag) is the same bug as asking twice.
+    const inFlight = (this._svcOffers ||= new Map()).get(meta.servicePlugin);
+    // a joiner still gets ITS pending action back when the shared offer wins
+    if (inFlight) return inFlight.then((okv) => { if (okv) { try { retry?.(); } catch {} } return okv; });
+    const p = this._offerHarnessService(backend, { needsService, retry }).finally(() => this._svcOffers.delete(meta.servicePlugin));
+    this._svcOffers.set(meta.servicePlugin, p);
+    return p;
+  },
+
+  async _offerHarnessService(backend, { needsService = false, retry = null } = {}) {
+    const meta = BACKEND_META[backend];
+    const st = await this._harnessServiceState(backend);
+    if (!st) return false;
+    if (st.running) return true;
+    // Nothing to offer: the harness CLI itself is missing, or ops forced the
+    // service off with VIBESPACE_OPENCODE_SERVE=0 — both are honest dead ends,
+    // and a failed user action must still hear WHY (no silent failure).
+    if (!st.installed || st.envForced === false || st.enabled || st.prompted) {
+      if (needsService && !st.enabled) showToast(st.reason || t('The background service for {name} is off — turn it on in ⚙ → Plugins.', { name: meta.label || backend }), { type: 'error' });
+      return !!st.enabled;
+    }
+    const accepted = await this._harnessServiceDialog(meta, st);
+    // WE ASKED — record it either way. "Not now" must never be re-asked, and an
+    // accepted offer that the user later turns off is exactly the case where
+    // the sidebar's "history is hidden" row has to appear (it gates on the
+    // same flag). The ⚙ → Plugins panel and that row stay the way back.
+    // the content-type is load-bearing: express.json() only parses a JSON body
+    // when it is declared, and a body-less POST would fall back to a default
+    const r = await fetchJson(`/api/plugins/${encodeURIComponent(meta.servicePlugin)}/prompted`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompted: true }) });
+    if (r && !r.error) meta.service = { ...(meta.service || {}), prompted: true };
+    if (!accepted) return false;
+    return this.enableHarnessService(backend, { retry });
+  },
+
+  /** Enable + start the service, then wait (bounded) for it to answer and run
+   *  the pending action. Every failure reaches the user. */
+  async enableHarnessService(backend, { retry = null } = {}) {
+    const meta = BACKEND_META[backend];
+    if (!meta?.servicePlugin) return false;
+    const post = (tail, body) => fetchJson(`/api/plugins/${encodeURIComponent(meta.servicePlugin)}/${tail}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}) })
+      .then((x) => { if (!x) throw new Error(t('Server unreachable — nothing was changed')); if (x.error) throw new Error(x.error); return x; });
+    try {
+      await post('enabled', { enabled: true });
+      await post('start');
+    } catch (e) { showToast(e.message || t('Failed'), { type: 'error' }); return false; }
+    showToast(t('Starting the {name} background service…', { name: meta.label || backend }));
+    const until = Date.now() + SERVICE_START_WAIT_MS;
+    let st = null;
+    while (Date.now() < until) {
+      await new Promise((r) => setTimeout(r, 700));
+      st = await this._harnessServiceState(backend);
+      if (st?.running || (st && !st.starting && st.reason)) break;
+    }
+    try { this.sidebar?._render?.(); } catch {}
+    if (st?.running) { showToast(t('{name} background service is running', { name: meta.label || backend })); retry?.(); return true; }
+    // Not a spinner forever: say what the state actually is and leave the
+    // panel as the place to look.
+    showToast(st?.reason || t('The {name} background service has not answered yet — check ⚙ → Plugins.', { name: meta.label || backend }), { type: 'warn' });
+    return false;
+  },
+
+  /** The ONE first-use dialog (never a native confirm). Resolves true on
+   *  "Enable & start", false on "Not now" / Esc / backdrop. */
+  _harnessServiceDialog(meta, st) {
+    return new Promise((resolve) => {
+      let decided = false;
+      const { body, close } = createModalShell({
+        id: 'harness-service-dialog', minWidth: '460px', escapeToClose: true,
+        title: t('Turn on the {name} background service?', { name: meta.label || meta.id }),
+        onClose: () => { if (!decided) resolve(false); },
+      });
+      body.innerHTML = `
+        <div class="usage-note">${escHtml(t('{name} keeps its conversations in its own database rather than in files, so VibeSpace cannot read a STOPPED conversation without asking {name} itself.', { name: meta.label || meta.id }))}</div>
+        <ul class="plugin-caps-list">
+          <li class="plugin-cap">${escHtml(t('Lists, opens, resumes and forks stopped {name} conversations in the sidebar', { name: meta.label || meta.id }))}</li>
+          <li class="plugin-cap">${escHtml(t('Runs `opencode serve` on 127.0.0.1 (loopback only) using your own installed CLI — nothing is downloaded and nothing is exposed'))}</li>
+          <li class="plugin-cap">${escHtml(t('Stops as soon as you disable it in ⚙ → Plugins, and VibeSpace stops it by itself if it starts burning CPU or memory'))}</li>
+        </ul>
+        <div class="plugin-cfg-hint">${escHtml(t('Running sessions do not need it. You will only be asked once — ⚙ → Plugins can turn it on later.'))}</div>
+        <div class="dialog-actions plugin-consent-actions"></div>`;
+      const actions = body.querySelector('.plugin-consent-actions');
+      const later = document.createElement('button');
+      later.className = 'mounts-btn'; later.textContent = t('Not now');
+      later.onclick = () => { decided = true; close(); resolve(false); };
+      const go = document.createElement('button');
+      go.className = 'mounts-btn plugin-consent-accept'; go.textContent = t('Enable & start');
+      go.onclick = () => { decided = true; close(); resolve(true); };
+      actions.append(later, go);
+      setTimeout(() => go.focus(), 0);
+    });
   },
   });
 }

@@ -14,7 +14,7 @@ const { capsOf, setVerifiedCap } = require('../backend-caps');
 
 function create({ rootDir, CLAUDE_CMD_RAW, CODEX_CMD_RAW, resolveCmd,
   getOAuthToken, usagePollingEnabled, refreshCodexModels, broadcast = null,
-  getTelemetry = () => null, getSetting = () => undefined }) {
+  getTelemetry = () => null, getPlugins = () => null }) {
   const USAGE_CACHE_DIR = path.join(rootDir, 'data', 'usage-cache');
 // ── X display detection (Linux clipboard / xclip) ──
 // The inherited DISPLAY is unreliable: the server is often (re)started from
@@ -142,6 +142,10 @@ function harnessAvailability() {
     // 2.369.42 runaway burned for two hours in silence): parked/runaway =>
     // the reason travels with /api/home and the harness-store-updated push.
     try { const st = h.store?.serveState?.(); if (st && (st.parked || (!st.ready && st.autostart === false)) && h.store.unavailableReason) row.storeReason = String(h.store.unavailableReason()); } catch { }
+    // A harness whose store runs behind a CONTROL PLUGIN declares it
+    // (store.servicePlugin); the client needs enabled/prompted to decide
+    // whether to show the first-use prompt and the "history is hidden" row.
+    if (h.store?.servicePlugin) { try { row.service = getPlugins()?.serviceState?.(h.store.servicePlugin) || null; } catch { row.service = null; } }
     return row;
   });
 }
@@ -152,19 +156,21 @@ function harnessAvailability() {
 // keeper (backoff, parked after 5 crashes, stopped on exit). The fork verdict
 // from its OpenAPI flips capsOf('opencode').fork and is BROADCAST so open
 // clients learn it without a reload (the cache-invalidation-must-notify law).
-// Autostart, in precedence order (2.369.50 — the env switch AND the setting are
-// both honoured): VIBESPACE_OPENCODE_SERVE=0/1 (explicit, wins over everything)
-// > the test-harness belt VIBESPACE_SKIP_AGENT_HOOKS=1 forces OFF (every
-// worktree smoke sets it and SIGKILLs its server — a spawned serve would
-// outlive that kill and pile up on the dev box) > the SETTING
-// agents.opencodeServeAutostart (default ON = the shipped behaviour). Read
-// through a FUNCTION so a live settings change takes effect without a restart.
-// Reuse of an already-running recorded instance still works with autostart off.
-const OPENCODE_SERVE_ENV = process.env.VIBESPACE_OPENCODE_SERVE ? process.env.VIBESPACE_OPENCODE_SERVE !== '0'
-  : (process.env.VIBESPACE_SKIP_AGENT_HOOKS === '1' ? false : null);
-const opencodeServeAutostart = () => (OPENCODE_SERVE_ENV !== null ? OPENCODE_SERVE_ENV : getSetting('agents.opencodeServeAutostart') !== false);
+// Autostart is DEFAULT OFF (owner decision 2026-09-07): the switch is the
+// built-in 'opencode-serve' PLUGIN the user enables deliberately. The decision
+// itself lives ONCE, in the shared module (decideAutostart): the ops override
+// VIBESPACE_OPENCODE_SERVE=0/1 wins, else the plugin record (enabled &&
+// desiredUp). Read through a FUNCTION so enabling the plugin takes effect
+// without a restart; reuse of an already-running recorded instance still works
+// with autostart off. (The old `agents.opencodeServeAutostart` setting and the
+// VIBESPACE_SKIP_AGENT_HOOKS belt are GONE with it — nothing starts a
+// third-party daemon on a fresh instance any more, so smokes need no belt.)
+const opencodeServeModule = require('../opencode-serve');
+const opencodeServeAutostart = () => opencodeServeModule.decideAutostart({
+  pluginWantsUp: (() => { try { return !!getPlugins()?.wantsServiceUp?.(opencodeServeModule.SERVICE_PLUGIN_ID); } catch { return false; } })(),
+});
 let _opencodeStoreReason = null;
-const opencodeServe = require('../opencode-serve').install({
+const opencodeServe = opencodeServeModule.install({
   dataDir: path.join(rootDir, 'data'),
   command: () => ACP_COMMANDS.opencode || null,
   env: () => require('../ws-handler').agentEnv(),
@@ -180,9 +186,15 @@ const opencodeServe = require('../opencode-serve').install({
   // the moment it changes so open clients show it without a reload
   onState: (st) => {
     const reason = st.parked ? (harnessOf('opencode')?.store?.unavailableReason?.() || st.lastError || null) : null;
-    if (reason === _opencodeStoreReason) return;
-    _opencodeStoreReason = reason;
-    try { broadcast?.({ type: 'harness-store-updated', backend: 'opencode', parked: !!st.parked, parkedKind: st.parkedKind || null, reason }); } catch { }
+    // the READINESS transition matters too (the first-use prompt waits for
+    // "starting → running"), so the dedupe key carries it — a bare reason
+    // compare would swallow every state change that has no error text
+    const key = `${reason || ''}|${st.ready ? 1 : 0}|${st.parkedKind || ''}`;
+    if (key === _opencodeStoreReason) return;
+    _opencodeStoreReason = key;
+    let service = null;
+    try { service = getPlugins()?.serviceState?.(opencodeServeModule.SERVICE_PLUGIN_ID) || null; } catch { }
+    try { broadcast?.({ type: 'harness-store-updated', backend: 'opencode', parked: !!st.parked, parkedKind: st.parkedKind || null, ready: !!st.ready, reason, service }); } catch { }
   },
 });
 function harnessOf(id) { try { return require('../harnesses').get(id); } catch { return null; } }

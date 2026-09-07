@@ -118,6 +118,13 @@ export const BACKEND_META = {
     caps: { fork: false, effort: false, review: false, autoResume: false, accounts: false, inputModes: { queue: true, steer: false, queueOps: true }, responseStyle: { live: false, closed: true, values: [] } },
     settingsPrefix: 'opencode',
     permissionModes: ['build', 'plan'],
+    // The STORE (stopped conversations: list/open/resume/fork) runs behind a
+    // built-in plugin that is OFF by default (2026-09-07 owner decision) —
+    // the id is the mirror of the harness descriptor's store.servicePlugin,
+    // and `service` is filled from /api/home + the plugins-updated /
+    // harness-store-updated pushes. Chrome gates on THIS, never on the id.
+    servicePlugin: 'opencode-serve',
+    service: null,
   },
 };
 

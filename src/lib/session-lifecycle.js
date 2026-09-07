@@ -22,6 +22,17 @@ export function installSessionLifecycle(App, ctx = {}) {
 
   createSession({ cwd, name, model, permission, extraArgs, resumeId, mode, syncId, effort, outputStyle, autoResume, fork, hostId, keeperSid, backend = 'claude', backendSessionId, agentKind, agentRole, agentNickname, sourceKind, parentThreadId, initialMessage, initialCommand, forkAtUuid, forkTitle, taskId, accountId, modelLock, lockModel, ephemeral = false, winBounds, recreateCwd = false, ignoreNoConvo = false, onCreateResult }) {
     try { track('event', `session-create:${backend || 'claude'}:${mode || 'default'}`); } catch {}
+    // FIRST USE of a harness whose history lives behind an opt-in background
+    // service (opencode → the 'opencode-serve' plugin, default OFF since
+    // 2026-09-07): offer it ONCE, here at the funnel every create/resume/fork
+    // passes through. NOT awaited — a NEW live session never needs the
+    // service, so the spawn must not wait on a dialog. The fork path awaits it
+    // in _doForkSession instead (a fork is minted THROUGH the service).
+    // needsService stays false: a resume rides the agent's own session load,
+    // only LISTING and reading stopped conversations need the service.
+    // fire-and-forget, but never as an UNHANDLED rejection (the offer is a
+    // side quest; it must not surface as a console error on a normal create)
+    if (!fork) { try { Promise.resolve(this.maybeOfferHarnessService?.(backend, { needsService: false })).catch(() => {}); } catch {} }
     cwd = stripCwdHostLabel(cwd); // merged-record display cwd ("host: /path") must never reach a spawn
     this._hideWelcome();
     const defaults = this._getBackendSessionDefaults(backend);
@@ -1256,9 +1267,13 @@ export function installSessionLifecycle(App, ctx = {}) {
     return forkName;
   },
 
-  _doForkSession(sessionInfo, initialMessage = '', resumeAt = null, customName = '') {
+  async _doForkSession(sessionInfo, initialMessage = '', resumeAt = null, customName = '') {
     const backend = sessionInfo.backend || 'claude';
     const resumeId = sessionInfo.backendSessionId || sessionInfo.sessionId;
+    // A fork of an OpenCode conversation is MINTED through the background
+    // service (POST /session/:id/fork) — unlike a resume it genuinely cannot
+    // work without it, so this one waits for the offer and only then spawns.
+    try { await this.maybeOfferHarnessService?.(backend, { needsService: true }); } catch {}
     const forkName = (customName && customName.trim()) || this._defaultForkName(sessionInfo);
 
     const mode = sessionInfo.webuiMode || this.settings.get('session.defaultMode') || 'chat';
@@ -1288,7 +1303,7 @@ export function installSessionLifecycle(App, ctx = {}) {
   },
 
   // Open a stopped session as view-only (load JSONL, no claude --resume)
-  viewSession(sessionId, cwd, sessionName, { syncId, backend = 'claude', backendSessionId, agentKind, agentRole, agentNickname, sourceKind, parentThreadId, hostId } = {}) {
+  viewSession(sessionId, cwd, sessionName, { syncId, backend = 'claude', backendSessionId, agentKind, agentRole, agentNickname, sourceKind, parentThreadId, hostId, offerService = true } = {}) {
     cwd = stripCwdHostLabel(cwd);
     this._closeSidebarOnMobile();
     this._hideWelcome();
@@ -1320,6 +1335,30 @@ export function installSessionLifecycle(App, ctx = {}) {
       // A sub-agent's own conversation (claude Task viewer, codex collab child
       // thread) is read-only by NATURE, not by death — no Resume bar.
       subagentView: (agentKind || 'primary') === 'subagent' || sourceKind === 'subagent' });
+    // Reading a STOPPED conversation is exactly what the opt-in background
+    // service exists for: offer it (once) while the read-only attach runs, and
+    // when it is enabled re-open this window against the now-live store — the
+    // pending action continues instead of leaving an error pane behind.
+    if (offerService) try {
+      Promise.resolve(this.maybeOfferHarnessService?.(backend, {
+        needsService: true,
+        retry: () => {
+          if (!this.wm.windows.has(winInfo.id)) return;
+          // keep the window where it was (geometry AND desktop) — the same
+          // rule createSession's winBounds follows, or the reopened history
+          // "moves" to whatever desktop happens to be active (2.295.0 class)
+          const bounds = this._snapshotWinBounds?.(this.wm.windows.get(winInfo.id));
+          this.wm.closeWindow(winInfo.id);
+          const again = this.viewSession(sessionId, cwd, sessionName, { syncId, backend, backendSessionId, agentKind, agentRole, agentNickname, sourceKind, parentThreadId, hostId, offerService: false });
+          if (!again) return;
+          if (bounds?.gridBounds) { again.gridBounds = { ...bounds.gridBounds }; this.wm._applyGridBounds(again); }
+          const dm = this.desktopManager, home = bounds?.desktopId;
+          if (home && home !== '__stage__' && home !== again._desktopId && (dm?._desktops || []).some((d) => d.id === home)) {
+            try { dm.moveWindowToDesktop(again.id, home); } catch {}
+          }
+        },
+      })).catch(() => {});
+    } catch {}
     return winInfo;
   },
 
@@ -1454,6 +1493,7 @@ function replayAttachSession(app, spec, { syncId } = {}) {
         agentKind: spec.agentKind, agentRole: spec.agentRole,
         agentNickname: spec.agentNickname, sourceKind: spec.sourceKind,
         parentThreadId: spec.parentThreadId,
+        offerService: false, // a layout REPLAY is not the user reaching for OpenCode history — never pop the first-use dialog on boot
       });
     }
   }
@@ -1483,6 +1523,7 @@ function replayViewSession(app, spec, { syncId } = {}) {
     agentNickname: spec.agentNickname,
     sourceKind: spec.sourceKind,
     parentThreadId: spec.parentThreadId,
+    offerService: false, // layout restore / cross-client replay — not a user action, so no first-use dialog on boot
   });
 }
 

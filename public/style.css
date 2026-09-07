@@ -500,6 +500,11 @@ html, body {
 .task-detail-progress-exp[open] summary::after { content: ''; }
 .task-detail-progress-detail { margin: 3px 0 4px 14px; padding-left: 8px; border-left: 2px solid var(--border); white-space: pre-wrap; color: var(--text-secondary); font-size: 10px; line-height: 1.45; }
 .empty-hint { padding: 12px; text-align: center; color: var(--text-dim); font-size: 11px; }
+/* "history is hidden — the background service is off" row (2026-09-07): a
+   left-aligned notice + inline Enable action, so an incomplete session list
+   always says WHY (silent-failure rule) and carries its own way out. */
+.sidebar-service-hint { text-align: left; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; line-height: 1.4; }
+.sidebar-service-hint .sidebar-service-enable { padding: 2px 8px; font-size: 11px; border-radius: var(--radius-sm); flex: 0 0 auto; }
 .session-item-card.archived { opacity: 0.5; }
 .session-item-card.archived .session-card-name { text-decoration: line-through; }
 .session-item-card.highlighted {
