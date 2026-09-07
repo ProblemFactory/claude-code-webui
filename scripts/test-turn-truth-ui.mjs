@@ -96,28 +96,67 @@ const done = () => { console.log(failed ? `\n${failed} FAILED (${passed} passed)
     JSON.stringify([bad, good]));
 }
 
-// ── ⓪ b THE THIRD EXIT OF THE COMPACTION STAGE — also chrome-free ───────
-//    Round 6 closed the two exits the SERVER can see. Session death is the
-//    third one and it is client-side: the wrapper dies mid-compaction, no
-//    record ever arrives, and the view keeps `_compactStage` on the last
-//    mid-compaction frame — `compactInFlight()` stays true forever, so every
-//    later "Prompt is too long" card opens on "Compacting: running <hook>
-//    hooks…" for a process that is gone. The behaviour is measured in chrome
-//    below; this guard pins the WIRING, because a named retirement nobody
-//    calls is the 2.331.0 lesson verbatim.
+// ── ⓪ b SESSION DEATH RETIRES EVERY CLIENT-HELD "RIGHT NOW" CLAIM ───────
+//    (chrome-free wiring pin; the CONSEQUENCE is measured in chrome, leg ⑦)
+//    Round 6 closed the two exits the SERVER can see for the compaction
+//    stage. Session death is the third one and it is client-side: the wrapper
+//    dies, no record ever arrives, and the view keeps its last frame forever.
+//    Round 8's verifier found the round-7 fix was ONE LINE SHORT — the
+//    compaction stage is not the only claim of that shape held on this view:
+//      • `_compactStage`  → "a compaction is running"       (round 7)
+//      • `_turnState`     → "the agent is waiting for you"  (round 8, the chip
+//                            pulses on a dead session, forever)
+//      • `_inFlightTools` → "this tool is executing"        (round 8; the
+//                            DORMANT twin — `set_in_progress_tool_use_ids`
+//                            never reaches our stdout, so no user sees it
+//                            today, but the lane is kept alive by tests and
+//                            must be right the day the CLI forwards one)
+//    Each is a statement about a process that is GONE, and each is drawn
+//    until something overwrites it — nothing ever will. A retirement nobody
+//    calls is the 2.331.0 lesson verbatim, so the CALLS are pinned here.
 {
   const cv = fs.readFileSync(path.join(repo, 'src/lib/chat-view.js'), 'utf8');
   const exitedAt = cv.indexOf("msg.type === 'exited'");
-  const branch = exitedAt >= 0 ? cv.slice(exitedAt, exitedAt + 900) : '';
+  // The branch EXACTLY, not a byte window: a call that drifts into the NEXT
+  // `else if` must not be counted as this branch's.
+  const rest = exitedAt >= 0 ? cv.slice(exitedAt) : '';
+  const nextAt = rest.indexOf("} else if (msg.type ===", 10);
+  const branch = exitedAt >= 0 ? (nextAt > 0 ? rest.slice(0, nextAt) : rest.slice(0, 2000)) : '';
   check('the client retirement is ONE named method (the twin of the server’s retireCompaction)',
     /_retireCompactionStage\(\)\s*\{/.test(cv) && /compactInFlight\?\.\(\)/.test(cv), 'no _retireCompactionStage in chat-view.js');
-  check("…and the 'exited' branch CALLS it (a retirement nobody calls is the 2.331.0 unstaged-wiring class)",
-    exitedAt >= 0 && /this\._retireCompactionStage\(\)/.test(branch), `exitedAt=${exitedAt}`);
-  // NEGATIVE CONTROL for this guard: the round-6 shape (the same branch with
-  // no call) must be REPORTED, or the guard is decoration.
-  const bad = "} else if (msg.type === 'exited' && msg.sessionId === sessionId) {\n  this._hideTyping();\n  this._renderers.appendSystem('Session ended.');\n  this._setReadOnly();\n}";
-  check('NEGATIVE CONTROL: the guard detects the round-6 branch (hideTyping + system line + read-only, and no retirement)',
-    !/this\._retireCompactionStage\(\)/.test(bad));
+  // …and ONE OWNER for the whole set. Round 7 called the compaction retirement
+  // straight from the branch, so "which claims does session death retire" had
+  // no home and the answer stayed one line long. Now the branch calls one
+  // named method and the ENUMERATION is what this guard reads.
+  const ownerAt = cv.indexOf('_retireLiveClaims() {');
+  const owner = ownerAt >= 0 ? cv.slice(ownerAt, ownerAt + 700).split('\n  }')[0] : '';
+  check("the 'exited' branch calls ONE named retirement (a retirement nobody calls is the 2.331.0 unstaged-wiring class)",
+    exitedAt >= 0 && /this\._retireLiveClaims\(\)/.test(branch), `exitedAt=${exitedAt} branch=${JSON.stringify(branch.slice(0, 300))}`);
+  // ONE table, three rows — a fourth live claim added later gets a row here
+  // and a leg in ⑦; the shape of the omission is identical every time.
+  const CLAIMS = [
+    ['the compaction stage (round 7)', /this\._retireCompactionStage\(\)/],
+    ['the harness turn-state chip (round 8)', /this\._statusBar\?\.setTurnState\?\.\(null\)/],
+    ['the executing-tool run set (round 8, dormant lane)', /this\._onToolsInProgress\(\[\]\)/],
+  ];
+  for (const [what, re] of CLAIMS) {
+    check(`…and that retirement retires ${what} — a claim about RIGHT NOW dies with its producer`,
+      ownerAt >= 0 && re.test(owner), `ownerAt=${ownerAt} owner=${JSON.stringify(owner.slice(0, 400))}`);
+  }
+  // NEGATIVE CONTROLS for this guard: the round-6 shape AND the round-7 shape
+  // (which retired the compaction stage and nothing else) must each be
+  // REPORTED, or the guard is decoration that would have passed on the very
+  // code being fixed — plus an owner that forgot one row.
+  const r6branch = "} else if (msg.type === 'exited' && msg.sessionId === sessionId) {\n  this._hideTyping();\n  this._renderers.appendSystem('Session ended.');\n  this._setReadOnly();\n}";
+  const r7branch = "} else if (msg.type === 'exited' && msg.sessionId === sessionId) {\n  this._hideTyping();\n  this._retireCompactionStage();\n  this._renderers.appendSystem('Session ended.');\n  this._setReadOnly();\n}";
+  const missing = (src) => CLAIMS.filter(([, re]) => !re.test(src)).length;
+  check('NEGATIVE CONTROL: the guard detects the round-6 branch (hideTyping + system line + read-only, no retirement at all)',
+    !/this\._retireLiveClaims\(\)/.test(r6branch) && missing(r6branch) === 3, String(missing(r6branch)));
+  check('NEGATIVE CONTROL: …and the round-7 branch, which retired the compaction stage and nothing else (the shape this round fixes)',
+    !/this\._retireLiveClaims\(\)/.test(r7branch) && missing(r7branch) === 2, String(missing(r7branch)));
+  const halfOwner = '_retireLiveClaims() {\n    const wasCompacting = this._retireCompactionStage();\n    this._onToolsInProgress([]);\n    return wasCompacting;';
+  check('NEGATIVE CONTROL: …and an OWNER that forgot the chip is reported by name (the enumeration is the thing being guarded)',
+    missing(halfOwner) === 1 && !CLAIMS[1][1].test(halfOwner), String(missing(halfOwner)));
 }
 
 const CHROME = ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser'].find((p) => fs.existsSync(p));
@@ -505,7 +544,7 @@ if (!opened?.ok) { console.error(pageErrors.join('\n')); done(); }
     const midTxt = watching.querySelector('.chat-ctx-full-hint').textContent.trim();
     const midInFlight = v._renderers.compactInFlight();
     // …and now the session dies. THE call the 'exited' branch makes.
-    const retired = v._retireCompactionStage();
+    const retired = v._retireLiveClaims();
     await sleep(60);
     const watchedTxt = watching.querySelector('.chat-ctx-full-hint').textContent.trim();
     const endInFlight = v._renderers.compactInFlight();
@@ -515,7 +554,7 @@ if (!opened?.ok) { console.error(pageErrors.join('\n')); done(); }
     // NEGATIVE CONTROL: a view that never compacted must not be made to claim
     // one ended. Fresh state, same call.
     v._compactStage = null; v._renderers.setCompactStage(null);
-    const retiredAgain = v._retireCompactionStage();
+    const retiredAgain = v._retireLiveClaims();
     const virgin = v._renderers.appendContextFullCard('Prompt is too long');
     await sleep(60);
     const virginTxt = virgin.querySelector('.chat-ctx-full-hint').textContent.trim();
@@ -752,6 +791,88 @@ if (!opened?.ok) { console.error(pageErrors.join('\n')); done(); }
   check(`the struck gap message still fits the 375px viewport (w=${m?.rbRect?.w})`, m?.rbRect?.inViewport === true, JSON.stringify(m?.rbRect));
   check('…and the model marks are unchanged by the gap render (it READS view state, it must never write it)',
     JSON.stringify(m?.modelMarks) === '["superseded","rollback",null]', JSON.stringify(m?.modelMarks));
+}
+
+// ── ⑦ SESSION DEATH RETIRES THE CHIP AND THE DOT (round 8) ────────────────
+//    The behaviour behind ⓪b's wiring pin, measured on the real client and
+//    driven through the REAL dispatcher, because the defect IS the dispatcher
+//    branch — calling the retirement directly would exercise the method while
+//    the bug lives one level up (that is exactly how round 7 shipped it).
+//    Failure mode: a session terminated or crashed while the turn was PARKED
+//    keeps a pulsing "waiting for you — the turn is paused, not finished
+//    (reported by the harness)" chip forever, on a dead session.
+//
+//    `window.__v` CANNOT be used for this: a view-only ChatView installs a
+//    MINIMAL handler (`msg` ops only, chat-view.js's `if (this._readOnly)`
+//    early return), so it never receives a turn-state push in the first place
+//    — the claims only exist on a LIVE view. So this leg builds one the way
+//    session-lifecycle does (`new ChatView(winInfo, app.ws, id, app)`, no
+//    options = live) on its own window, and closes it again. No session is
+//    spawned: the frames are the ws frames the server sends, fed to the real
+//    `_handler`, which is the code under test.
+{
+  const m = await evaljs(`(async () => {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const CV = window.__v.constructor;
+    const app = window.app;
+    const SID = 'live-b3r8-' + Date.now().toString(36);
+    const win = app.wm.createWindow({ title: 'turn-truth live', type: 'chat' });
+    const live = new CV(win, app.ws, SID, app);
+    window.__live = { view: live, winId: win.id };
+    await sleep(200);
+    const sb = live._statusBar;
+    const chips = () => sb._element.querySelectorAll('.chat-status-turnstate').length;
+    const built = { handler: typeof live._handler === 'function', readOnly: !!live._readOnly, chips: chips() };
+    // a tool card to carry the executing dot. CLONED from a message the real
+    // normalizer produced for the fixture (never a hand-written shape — the
+    // "fixture self-consistent but production dead" class), re-identified so
+    // it is this view's own message.
+    const srcCard = [...window.__v._messageList.querySelectorAll('[data-tool-id]')].filter((c) => !c.classList.contains('chat-gap-msg'))[0];
+    const src = window.__v._messages.find((x) => x.id === srcCard.dataset.msgId);
+    const clone = JSON.parse(JSON.stringify(src));
+    clone.id = 'live-tool-msg-1';
+    const toolId = srcCard.dataset.toolId;
+    live._onCreateMessage(clone);
+    await sleep(120);
+    const card = live._messageList.querySelector('[data-tool-id="' + toolId + '"]');
+    const dot = () => (card ? card.classList.contains('chat-tool-inflight') : null);
+    // THE HARNESS PARKS THE TURN — the exact ws frames the server broadcasts
+    live._handler({ type: 'streaming-label', sessionId: SID, label: 'running Bash', kind: null });
+    live._handler({ type: 'turn-state', sessionId: SID, state: 'requires_action' });
+    live._handler({ type: 'tools-in-progress', sessionId: SID, ids: [toolId] });
+    await sleep(160);
+    const parked = { chips: chips(), state: sb._turnState, dot: dot(),
+      text: (sb._element.querySelector('.chat-status-turnstate') || {}).textContent || '' };
+    // NEGATIVE CONTROL: ANOTHER session's death must change nothing here
+    live._handler({ type: 'exited', sessionId: SID + '-someone-else', reason: null, detail: 'not ours' });
+    await sleep(120);
+    const other = { chips: chips(), state: sb._turnState, dot: dot(), readOnly: !!live._readOnly };
+    // …and now THIS session dies
+    live._handler({ type: 'exited', sessionId: SID, reason: null, detail: 'wrapper died' });
+    await sleep(200);
+    const dead = { chips: chips(), state: sb._turnState, dot: dot(),
+      held: live._inFlightTools ? live._inFlightTools.size : -1,
+      readOnly: !!live._readOnly,
+      ended: /Session ended|会话已结束|セッションが終了/.test(live._messageList.textContent || '') };
+    // teardown: only the window this chain created (never a heuristic match)
+    try { live.dispose(); } catch (e) {}
+    try { app.wm.closeWindow(window.__live.winId); } catch (e) {}
+    window.__live = null;
+    return { built, parked, other, dead };
+  })()`);
+  check(`CONTROL: a LIVE ChatView was built (full dispatcher, not the read-only stub) with no chip on it yet (${JSON.stringify(m?.built)})`,
+    m?.built?.handler === true && m?.built?.readOnly === false && m?.built?.chips === 0, JSON.stringify(m?.built));
+  check(`CONTROL: the harness parked the turn, so the chip is UP before the session dies (${JSON.stringify(m?.parked)})`,
+    m?.parked?.chips === 1 && m?.parked?.state === 'requires_action' && /waiting for you|等你操作|あなた待ち/.test(m?.parked?.text || ''), JSON.stringify(m?.parked));
+  check('CONTROL: …and the executing-tool dot is on the card too (the dormant twin of the same claim)', m?.parked?.dot === true, JSON.stringify(m?.parked));
+  check('NEGATIVE CONTROL: ANOTHER session dying leaves this view untouched — the retirement is session-scoped, never unconditional',
+    m?.other?.chips === 1 && m?.other?.state === 'requires_action' && m?.other?.dot === true && m?.other?.readOnly === false, JSON.stringify(m?.other));
+  check('session death RETIRES the "waiting for you" chip — a pulsing claim about RIGHT NOW must not outlive its producer',
+    m?.dead?.chips === 0 && m?.dead?.state === null, JSON.stringify(m?.dead));
+  check('…and the executing-tool dot goes with it (nothing is executing inside a process that is gone)',
+    m?.dead?.dot === false && m?.dead?.held === 0, JSON.stringify(m?.dead));
+  check('…while the rest of the branch is unchanged: the session-ended notice is written and the view went read-only',
+    m?.dead?.ended === true && m?.dead?.readOnly === true, JSON.stringify(m?.dead));
 }
 
 check('no uncaught page exceptions during the measurement', pageErrors.length === 0, pageErrors.slice(0, 3).join(' | '));

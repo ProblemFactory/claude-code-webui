@@ -150,9 +150,12 @@ const inflight = (id) => calls.broadcasts.filter((b) => b.id === id && b.type ==
   p.data(J({ type: 'system', subtype: 'session_state_changed', state: 'running', uuid: 'u-st-1', session_id: 'sid-b3' }));
   ok("session_state_changed 'running' → streaming ON, state latched, turn-state broadcast", s._isStreaming === true && s._turnState === 'running' && s._turnStateSeen === true && turnStates('w-b3').join(',') === 'running');
   ok('…and it does NOT re-broadcast the session list: the card payload carries no turn state, so that would be a cost with no reader', calls.broadcasts.filter((b) => b.id === 'w-b3' && b.type === 'turn-state').length === 1);
-  // ③ the third state
+  // ③ the third state. It keeps the turn alive and it does NOT touch the
+  //    spinner line — the chip is that state's one voice (round 8; see the
+  //    dedicated leg ⑨ below for why a spinner line here can never be retracted).
   p.data(J({ type: 'system', subtype: 'session_state_changed', state: 'requires_action', uuid: 'u-st-2', session_id: 'sid-b3' }));
-  ok("'requires_action' keeps the turn ALIVE (it is paused on the user, not over) and labels it", s._isStreaming === true && s._turnState === 'requires_action' && labels('w-b3').includes('waiting for you'));
+  ok("'requires_action' keeps the turn ALIVE (it is paused on the user, not over) and writes NO spinner line — the chip is that state's one voice",
+    s._isStreaming === true && s._turnState === 'requires_action' && s._streamingLabel === 'thinking...' && !labels('w-b3').includes('waiting for you'), `label=${JSON.stringify(s._streamingLabel)} labels=${JSON.stringify(labels('w-b3'))}`);
   // ④ THE POINT: a result no longer ends a turn the harness says is running
   p.data(J({ type: 'result', subtype: 'success', session_id: 'sid-b3', duration_ms: 1 }));
   ok('under authority a `result` does NOT end the turn (the CLI’s idle fires later, after the bg-agent loop)', s._isStreaming === true && s._turnState === 'requires_action');
@@ -188,6 +191,89 @@ const inflight = (id) => calls.broadcasts.filter((b) => b.id === id && b.type ==
   const cps = calls.broadcasts.filter((b) => b.id === 'w-b3' && b.type === 'compact-progress').map((b) => b.event);
   ok('every compact_progress record reaches the client (the card swaps its apology for the stage)', cps.join(',') === 'hooks_start,compact_start,compact_start,compact_end', cps.join(','));
   ok('…and it is card-less too: no compaction message was normalized', !s._ops.some((o) => o.op === 'create' && JSON.stringify(o.message?.content || '').includes('Compacting')));
+}
+{
+  // ── ⑨ THE PERMISSION PAUSE, END TO END (round 8) ─────────────────────────
+  //    The exact wire sequence a permission prompt produces, MEASURED on
+  //    claude 2.1.257 in the wrapper's spawn shape (--output-format stream-json
+  //    --input-format stream-json --verbose --permission-prompt-tool stdio,
+  //    piped, + --permission-mode default):
+  //
+  //      2344ms  assistant  tool_use:Write
+  //      3073ms  system/session_state_changed  state=requires_action
+  //      3073ms  control_request can_use_tool
+  //      9079ms  ANSWERED allow
+  //      9080ms  system/session_state_changed  state=running
+  //      9086ms  user  tool_result
+  //
+  //    Note what the `running` record does NOT carry: which tool is executing.
+  //    So a spinner line that is only true DURING the pause can never be
+  //    RETRACTED from the wire — the round-7 shape wrote 'waiting for you'
+  //    onto the line at `requires_action`, and then `running` (whose whole job
+  //    is "leave the derived label alone") faithfully preserved it for the
+  //    entire tool run, while the status-bar chip had already flipped back to
+  //    'running'. Two surfaces, one fact, opposite answers — and the label was
+  //    wrong for as long as the tool ran (minutes, for a Bash).
+  //    The turn state's voice is the CHIP (kb-features §Turn truth: "`idle` and
+  //    `running` draw nothing … one fact must not have two voices"); the
+  //    spinner line belongs to the records that name what is happening.
+  const s = mkSession('claude', 'w-b3-perm'); const p = fakePty();
+  so.setupSessionPty(s, 'w-b3-perm', p);
+  const L = () => labels('w-b3-perm');
+  const T = () => turnStates('w-b3-perm');
+  // the two surfaces, sampled at the same instant, all the way through
+  const film = [];
+  const shot = (at) => film.push({ at, label: s._streamingLabel ?? null, chip: T()[T().length - 1] ?? null });
+  p.data(J({ type: 'user', session_id: 'sid-p', message: { role: 'user', content: 'write a file' } }));
+  p.data(J({ type: 'system', subtype: 'session_state_changed', state: 'running', uuid: 'p1', session_id: 'sid-p' }));
+  shot('turn-start');
+  p.data(J({ type: 'assistant', session_id: 'sid-p', uuid: 'p2', message: { id: 'm1', model: 'claude-fable-5', role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_1', name: 'Write', input: {} }] } }));
+  shot('tool_use');
+  p.data(J({ type: 'system', subtype: 'session_state_changed', state: 'requires_action', uuid: 'p3', session_id: 'sid-p' }));
+  shot('parked');
+  p.data(J({ type: 'system', subtype: 'session_state_changed', state: 'running', uuid: 'p4', session_id: 'sid-p' }));
+  shot('answered');
+  // the tool now RUNS. tool_progress heartbeats are the only records a long
+  // tool emits (real shape, captured from a `Bash sleep 6` turn) — none of
+  // them touches the label, which is exactly why a stale one survives.
+  for (let i = 1; i <= 6; i++) p.data(J({ type: 'tool_progress', tool_use_id: 'toolu_1-h' + i, tool_name: 'Write', parent_tool_use_id: 'toolu_1', elapsed_time_seconds: i * 30, heartbeat: true, session_id: 'sid-p' }));
+  shot('3min-later');
+  p.data(J({ type: 'user', session_id: 'sid-p', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'ok' }] } }));
+  shot('tool_result');
+  const at = (k) => film.find((f) => f.at === k) || {};
+  ok("the parked turn keeps the DERIVED line ('running Write') — the tool card is still what is happening; the chip carries 'waiting for you'",
+    at('parked').label === 'running Write' && at('parked').chip === 'requires_action', JSON.stringify(at('parked')));
+  ok('THE DEFECT: once the permission is answered the line must not still say "waiting for you" — nothing on the wire could ever retract it',
+    at('answered').label !== 'waiting for you' && at('answered').chip === 'running', JSON.stringify(at('answered')));
+  ok("…and it is the accurate line that survives the pause, not a generic one ('running Write', for the whole tool run)",
+    at('answered').label === 'running Write' && at('3min-later').label === 'running Write', JSON.stringify([at('answered'), at('3min-later')]));
+  // THE CONSEQUENCE, stated as the invariant rather than as one sample: at no
+  // point may the spinner line claim the turn is parked while the chip says it
+  // is running. This is the assert that fails on the round-7 shape for four of
+  // the six frames, not just one.
+  const contradictions = film.filter((f) => f.label === 'waiting for you' && f.chip !== 'requires_action');
+  ok('the two surfaces never contradict each other across the whole sequence (one fact, one voice)',
+    contradictions.length === 0, JSON.stringify(film));
+  ok('…and the spinner never carried that line at all — the chip is the only place that state is said',
+    !L().includes('waiting for you'), JSON.stringify(L()));
+  ok('the tool_result closes the tool and the line goes back to the generic one', at('tool_result').label === 'thinking...', JSON.stringify(at('tool_result')));
+  ok('the chip itself is unchanged by this fix: exactly the three transitions the harness reported', T().join(',') === 'running,requires_action,running', T().join(','));
+  // NEGATIVE CONTROL 1 — the fix must not turn the 'running' branch into a
+  // no-op: onto an EMPTY line a bare 'running' still says something.
+  const s2 = mkSession('claude', 'w-b3-perm2'); const p2 = fakePty();
+  so.setupSessionPty(s2, 'w-b3-perm2', p2);
+  p2.data(J({ type: 'system', subtype: 'session_state_changed', state: 'requires_action', uuid: 'q1', session_id: 'sid-q' }));
+  const parkedFromCold = s2._streamingLabel;
+  p2.data(J({ type: 'system', subtype: 'session_state_changed', state: 'running', uuid: 'q2', session_id: 'sid-q' }));
+  ok("NEGATIVE CONTROL: a bare 'running' onto an EMPTY line still writes 'thinking...' (the branch is gated, not deleted)",
+    s2._streamingLabel === 'thinking...' && labels('w-b3-perm2').includes('thinking...'), `parkedFromCold=${JSON.stringify(parkedFromCold)} then=${JSON.stringify(s2._streamingLabel)}`);
+  // NEGATIVE CONTROL 2 — turn state may still CLEAR the line. 'idle' is the one
+  // label write that is a retirement, and it must survive the fix.
+  p2.data(J({ type: 'assistant', session_id: 'sid-q', uuid: 'q3', message: { id: 'm2', model: 'claude-fable-5', role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_2', name: 'Bash', input: {} }] } }));
+  const beforeIdle = s2._streamingLabel;
+  p2.data(J({ type: 'system', subtype: 'session_state_changed', state: 'idle', uuid: 'q4', session_id: 'sid-q' }));
+  ok("NEGATIVE CONTROL: 'idle' still CLEARS the line (the one label write that is a retirement is untouched)",
+    beforeIdle === 'running Bash' && s2._streamingLabel === '' && s2._isStreaming === false, `beforeIdle=${JSON.stringify(beforeIdle)} after=${JSON.stringify(s2._streamingLabel)}`);
 }
 {
   // ⓑ SHAPE PARITY INSIDE A LANE THAT NEVER REACHES US. Round 4 corrected the
@@ -941,7 +1027,13 @@ setTimeout(() => process.exit(0), 60000);
     turnStateEffect('idle').streaming === false && turnStateEffect('idle').label === ''
     && turnStateEffect('running').streaming === true && turnStateEffect('running').label === 'thinking...'
     && turnStateEffect('running', { hasLabel: true }).label === null   // a live tool label is not stomped by a bare 'running'
-    && turnStateEffect('requires_action').streaming === true && turnStateEffect('requires_action').label === 'waiting for you'
+    // round 8: 'requires_action' writes NO line, with or without one there.
+    // Every label this function DOES write ('' on idle, 'thinking...' onto an
+    // empty line) stays true for as long as the turn runs; 'waiting for you'
+    // would not, and nothing on the wire can retract it (see leg ⑨).
+    && turnStateEffect('requires_action').streaming === true && turnStateEffect('requires_action').label === null
+    && turnStateEffect('requires_action', { hasLabel: true }).label === null
+    && turnStateEffect('requires_action', { hasLabel: false }).label === null
     && turnStateEffect('wedged') === null);
 }
 

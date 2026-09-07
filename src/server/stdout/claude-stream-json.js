@@ -517,6 +517,11 @@ function create({ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes,
               // reconciliation reads, so the live view and a re-attach can never
               // disagree about a session's turn.
               const st = msg.state;
+              // `hasLabel` = "something is already on the spinner line, so a
+              // bare `running` must not stomp it". It is SOUND only because
+              // turnStateEffect never writes a line that goes stale (round 8):
+              // the only lines it can put there are '' and 'thinking...', so
+              // whatever is on the line when a `running` arrives is still true.
               const eff = turnStateEffect(st, { hasLabel: !!session._streamingLabel });
               const first = !session._turnStateSeen;
               session._turnStateSeen = true;

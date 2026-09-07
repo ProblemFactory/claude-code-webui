@@ -960,7 +960,10 @@ class ChatView {
         this._onCompactProgress(msg);
       } else if (msg.type === 'exited' && msg.sessionId === sessionId) {
         this._hideTyping();
-        this._retireCompactionStage();
+        // THE THIRD EXIT of every "right now" claim this view holds — the
+        // compaction stage, the harness's turn-state chip, the executing-tool
+        // run set. One owner, because round 7 retired only the first of them.
+        this._retireLiveClaims();
         if (msg.reason === 'not_logged_in') {
           this._renderers.appendSystem(t('Not logged in — please log in to continue.'));
           this._setReadOnly();
@@ -3487,6 +3490,32 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
     if (!this._renderers?.compactInFlight?.()) return false;
     this._onCompactProgress({ event: 'compact_end', hookType: null, hint: null, result: null, error: null });
     return true;
+  }
+
+  /** SESSION DEATH — retire EVERY claim this view holds about what is
+   *  happening RIGHT NOW (round 8). The producer is gone: no record can ever
+   *  arrive to correct any of them, so each one is drawn until the window is
+   *  closed.
+   *
+   *  ONE owner, because the ENUMERATION is what round 7 got wrong. It retired
+   *  the compaction stage — correctly — and stopped there, while two claims of
+   *  exactly the same shape kept being drawn on a dead session:
+   *    • `_compactStage`  "a compaction is running"      (round 7)
+   *    • `_turnState`     "the agent is waiting for you"  — a PULSING chip on a
+   *      session that can never answer. `null` is not `idle`: it means nobody
+   *      reports a state any more, so the chip goes away instead of asserting
+   *      a state a dead process cannot be in.
+   *    • `_inFlightTools` "this tool is executing" — the DORMANT lane (no
+   *      harness publishes `set_in_progress_tool_use_ids` today, §2.5), but a
+   *      mark that outlives its process is the same defect whichever lane
+   *      wrote it, and this one has no second delta coming by construction.
+   *  A new live claim goes HERE, and gets a row in test-turn-truth-ui ⓪b.
+   *  Returns whether a compaction was in flight (the round-7 contract). */
+  _retireLiveClaims() {
+    const wasCompacting = this._retireCompactionStage();
+    this._statusBar?.setTurnState?.(null);
+    this._onToolsInProgress([]);
+    return wasCompacting;
   }
 
   /** Replace a finished agent card's live activity with its终态 (2.233.1).

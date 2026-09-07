@@ -41,11 +41,27 @@ function isTurnState(v) { return TURN_STATES.includes(v); }
  *  `label` — the spinner text, or null for "leave the derived label alone"
  *      (a 'running' state says nothing about WHICH tool is running; the
  *      assistant records still own that). '' clears it.
- *  Unknown state ⇒ null: the caller must ignore the record entirely. */
+ *  Unknown state ⇒ null: the caller must ignore the record entirely.
+ *
+ *  THE RULE THIS FUNCTION OBEYS (round 8, after a reproduced defect): a turn
+ *  state may only write a spinner line that stays TRUE for the rest of the
+ *  turn. Look at what the wire gives us — `{state:'running'}` and nothing
+ *  else; it does not name the tool that is now executing, so there is no
+ *  record that can RETRACT a line whose truth ended when the state changed.
+ *  'requires_action' therefore writes NO line at all (the round-7 shape wrote
+ *  'waiting for you', and the very next `running` record — whose whole job is
+ *  "leave the derived label alone" — then preserved it for the entire tool
+ *  run, contradicting the chip that had already flipped back). Its voice is
+ *  the status-bar chip, per kb-features §Turn truth: "`idle` and `running`
+ *  draw nothing … one fact must not have two voices" — and the same sentence
+ *  cuts the other way here, because the chip already says this one.
+ *  What is left is exactly the two writes that cannot go stale: '' on idle
+ *  (a retirement) and 'thinking...' onto an EMPTY line, which stays true until
+ *  a record that names something better replaces it. */
 function turnStateEffect(state, { hasLabel = false } = {}) {
   if (!isTurnState(state)) return null;
   if (state === 'idle') return { streaming: false, label: '' };
-  if (state === 'requires_action') return { streaming: true, label: 'waiting for you' };
+  if (state === 'requires_action') return { streaming: true, label: null };
   return { streaming: true, label: hasLabel ? null : 'thinking...' };
 }
 
