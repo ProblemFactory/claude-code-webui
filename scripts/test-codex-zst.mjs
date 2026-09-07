@@ -1591,17 +1591,204 @@ console.log('— ⑥ ONE remote cache slot, MANY remote files (codex .jsonl ⇄ 
           'DEGRADE-PATH LAW: the line that IS printed still names the swallowed fault verbatim', lines);
         // …and the window is a window: the next one prints, carrying what the
         // last one swallowed (driven on the method's own clock — the wiring
-        // above already proved the fetch path goes through it)
+        // above already proved the fetch path goes through it).
+        // ROUND 7: and the window is per FAULT, not per host. Round 6 keyed it
+        // on the host alone, so the first fault held the whole minute and every
+        // DIFFERENT fault inside it — the gap probe dying while the link flaps,
+        // a free identifier an extraction left behind (the 2.340.2 class this
+        // line exists to expose) — was dropped into a "+N similar" tally that
+        // names nothing: the rate limiter became the silent catch it replaced.
+        const SAME = '[hosts] hh7: data-plane transcript fetch failed (device link not responding — persistent synthetic fault) — falling back to the ssh rung';
+        const OTHER = "[hosts] hh7: could not read the remote's [4096,8192) to check an over-stamped cache slot (connection reset by peer)";
+        const OTHER_N = "[hosts] hh7: could not read the remote's [77,910) to check an over-stamped cache slot (connection reset by peer)";
         const later = [];
         console.warn = (...x) => later.push(x.map(String).join(' '));
-        let printed = 0;
+        let printed = 0, distinct = null, repeat = null;
         try {
           const t0 = Date.now();
-          printed += origWarnOnce('hh7', 'A', t0 + 1000) ? 1 : 0;               // inside the window ⇒ suppressed (and counted)
-          printed += origWarnOnce('hh7', 'B', t0 + 61000) ? 1 : 0;              // …a minute later it speaks again
+          printed += origWarnOnce('hh7', SAME, t0 + 1000) ? 1 : 0;              // the SAME fault, inside the window ⇒ suppressed (and counted)
+          distinct = origWarnOnce('hh7', OTHER, t0 + 1500);                     // a DIFFERENT fault, same host, same minute ⇒ must still speak
+          repeat = origWarnOnce('hh7', OTHER_N, t0 + 2000);                     // …differing only in byte offsets ⇒ the same CLASS ⇒ suppressed
+          printed += origWarnOnce('hh7', SAME, t0 + 61000) ? 1 : 0;             // …and a minute later the first class speaks again
         } finally { console.warn = orig; }
-        ok(printed === 1 && later.length === 1 && /^B \(\+3 similar suppressed in the last minute\)$/.test(later[0]),
+        ok(distinct === true && later[0] === OTHER,
+          'a DIFFERENT fault inside the window still speaks — "+N similar" may only ever count things that ARE similar', { distinct, later });
+        ok(repeat === false, 'NEGATIVE CONTROL: two lines of the same sentence differing only in byte offsets are ONE class — the rate limit still bites where it should', { repeat, later });
+        ok(printed === 1 && later.length === 2 && /falling back to the ssh rung \(\+3 similar suppressed in the last minute\)$/.test(later[1]),
           'a new window prints again and reports how many faults the closed one swallowed', later);
+        // A/B ON THE KEY ITSELF: round 6's key (host alone) vs round 7's, same
+        // two faults, same clock — this is the reported harm, reproduced.
+        const preLines = [], postLines = [];
+        const pre = new HostManager({ dataDir }), post = new HostManager({ dataDir });
+        pre._degradeClassKey = (hid) => String(hid);                            // round 6's key, verbatim
+        let preFirst, preOther, postFirst, postOther;
+        console.warn = (...x) => preLines.push(x.map(String).join(' '));
+        const t1 = Date.now();
+        try {
+          preFirst = pre._warnDegradeOnce('hx', SAME, t1); preOther = pre._warnDegradeOnce('hx', OTHER, t1 + 1500);
+          console.warn = (...x) => postLines.push(x.map(String).join(' '));
+          postFirst = post._warnDegradeOnce('hx', SAME, t1); postOther = post._warnDegradeOnce('hx', OTHER, t1 + 1500);
+        } finally { console.warn = orig; }
+        ok(preFirst === true && preOther === false && preLines.length === 1,
+          'REPRO: with the host-only key the second, DIFFERENT fault is dropped entirely — the journal never learns the gap probe failed', preLines);
+        ok(postFirst === true && postOther === true && postLines.length === 2 && postLines[1] === OTHER,
+          '…and with the class key both faults are on the record, each rate-limited on its own', postLines);
+      }
+
+      // (N) THE WHOLE-FILE SCAN IS PAID ONCE PER SLOT — NOT ONCE PER RUNG PER
+      // POLL, AND NOT AGAIN NEXT POLL (round 7, the round-6 verify's first
+      // finding). The scan is a SYNCHRONOUS read of the entire cache file on
+      // the event loop, and the shipped shape ran it twice in one poll (the
+      // slab rung's `cacheUsable`, then the ssh rung's after the fallback) and
+      // again on every poll — because the slots that owe it are exactly the
+      // ones that REFUSE, and a refused poll leaves the meta byte-identical by
+      // design, so nothing ever retires the legacy marker. Every session poll,
+      // window attach and goal-sync tick comes through here: a 64 MB slot read
+      // whole, twice, forever. The verdict is about BYTES, so it is memoized
+      // against the bytes it judged.
+      {
+        // a host with BOTH rungs live: the slab rung's "too large" is not a
+        // terminal verdict, so it degrades to the ssh rung — one poll, two
+        // `cacheUsable` calls, which is where the doubling came from.
+        const bothRungs = (hid, rem, log) => {
+          const hmx = sshRung(hid, rem, log);
+          hmx._state.hosts[0].transport = 'dial';
+          hmx.deviceBounded = async () => ({
+            runCmd: async () => ({ stdout: rem.path + '\n', stderr: '', code: 0 }),
+            fsStat: async () => ({ stat: { size: rem.bytes.length, mtimeMs: rem.mtime * 1000 } }),
+            fsReadRange: async (p2, off, len) => ({ data: rem.bytes.subarray(off, off + len) }),
+          });
+          return hmx;
+        };
+        const body = Buffer.from(rollout('cccccccc-dddd-4eee-8fff-00000000004b', '/work/scan-count', 'a slot that refuses every poll', 400));
+        const foreign = Buffer.from('Y'.repeat(600));                            // plain text, no splice marker: the scan PASSES, the remote check is what refuses
+        const held = Buffer.concat([body, foreign]);
+        const grown = Buffer.concat([body, Buffer.from(ticks(1, 3)), Buffer.from(ticks(40, 3))]);
+        const CAP = grown.length - 1;
+        ok(held.length < (1 << 20) && held.length < grown.length && foreign.length < CAP,
+          `fixture: an over-cap slot that refuses every poll, in ONE scan chunk (so one scan = one read at the carry offset) — ${JSON.stringify({ held: held.length, remote: grown.length, cap: CAP })}`);
+        const scans = [];
+        const origReadSync = fs.readSync;
+        fs.readSync = (fd, buf, off, len, pos) => { if (off === 3) scans.push(len); return origReadSync(fd, buf, off, len, pos); };  // offset 3 = the carry buffer, unique to the whole-file scan
+        const poll = async (hmx, hid, sl) => { try { await hmx.fetchTranscript(hid, 'codex', sl.tid, { maxBytes: CAP }); return null; } catch (e) { return String(e && e.message || e); } };
+        const warns = [];
+        const origW = console.warn; console.warn = (...x) => warns.push(x.map(String).join(' '));
+        try {
+          // REPRO: the shipped shape (no memo at all), three polls
+          const slN = slotFor('hn0', 'cccccccc-dddd-4eee-8fff-00000000004b');
+          seedOverStamped(slN, held, body.length, 50000, { v: undefined });      // a LEGACY meta: the population that owes the scan
+          const hmN = bothRungs('hn0', { path: slN.remotePath, bytes: grown, mtime: 50001 }, rollLog());
+          hmN._deepScanMemo = { get: () => undefined, set: () => { }, delete: () => { }, size: 0 };   // the pre-fix code remembered nothing
+          const at = [];
+          for (let i = 0; i < 3; i++) { await poll(hmN, 'hn0', slN); at.push(scans.length); }
+          ok(at[0] >= 2 && at[1] - at[0] >= 2 && at[2] - at[1] >= 2,
+            `REPRO: the whole file is scanned twice per poll and again every poll — on a slot that can only ever refuse (${JSON.stringify(at)})`);
+
+          // …and with the memo: ONE scan for the slot, two rungs, three polls
+          const sl = slotFor('hn1', 'cccccccc-dddd-4eee-8fff-00000000004c');
+          seedOverStamped(sl, held, body.length, 50000, { v: undefined });
+          const metaBefore = fs.readFileSync(sl.cache + '.meta', 'utf8');
+          const hm = bothRungs('hn1', { path: sl.remotePath, bytes: grown, mtime: 50001 }, rollLog());
+          const base = scans.length;
+          const errs = [];
+          for (let i = 0; i < 3; i++) errs.push(await poll(hm, 'hn1', sl));
+          ok(scans.length - base === 1, `the whole-file scan is paid ONCE for the slot — not per rung, not per poll (${scans.length - base} scans in 3 polls over 2 rungs)`);
+          ok(errs.every((e) => e && /CHECKED against the remote: they are not its own/.test(e)) && errs[0] === errs[1] && errs[1] === errs[2],
+            '…and the refusal is unchanged: the same diagnosis every poll, from a check nobody had to re-run', errs[0]);
+          ok(fs.readFileSync(sl.cache + '.meta', 'utf8') === metaBefore, '…leaving the meta byte-identical (a refused poll never stamps — the memo lives in MEMORY)');
+
+          const b2 = scans.length;
+          hm._deepScanMemo.clear();
+          await poll(hm, 'hn1', sl);
+          ok(scans.length - b2 === 1, 'NEGATIVE CONTROL: with the memo cleared the very same poll scans again — the memo is the reason, not a deleted code path', scans.length - b2);
+
+          const b3 = scans.length;
+          fs.appendFileSync(sl.cache, 'x');                                      // something outside this fetch wrote the slot
+          await poll(hm, 'hn1', sl);
+          ok(scans.length - b3 === 1, '…and a slot whose BYTES changed is judged again — a verdict about bytes may never outlive them', scans.length - b3);
+          const b4 = scans.length;
+          await poll(hm, 'hn1', sl);
+          ok(scans.length === b4, '…then settles back to zero scans per poll on the new bytes', scans.length - b4);
+
+          // …and a scan that could not RUN is not a verdict about the bytes:
+          // it refuses this poll (a scan that did not happen is not a pass)
+          // and remembers nothing, so a transient EMFILE cannot freeze a
+          // healthy slot for the whole TTL.
+          hm._deepScanMemo.clear();
+          const origOpen = fs.openSync;
+          fs.openSync = (fp, ...a) => { if (String(fp) === sl.cache) throw Object.assign(new Error('EMFILE: too many open files'), { code: 'EMFILE' }); return origOpen(fp, ...a); };
+          let errU = null;
+          try { errU = await poll(hm, 'hn1', sl); } finally { fs.openSync = origOpen; }
+          ok(/could not be verified/.test(errU || ''), 'an unreadable cache refuses the poll — a scan that could not run is not a pass', errU);
+          const b5 = scans.length;
+          await poll(hm, 'hn1', sl);
+          ok(scans.length - b5 === 1, '…and remembers NOTHING: the next poll scans again (an IO failure is not a verdict, the same line the heal draws for a dead probe)', scans.length - b5);
+        } finally { fs.readSync = origReadSync; console.warn = origW; }
+      }
+
+      // (O) THE SLOT SHIFTED WHILE THE GAP WAS BEING CHECKED (round 7, the
+      // round-6 verify's third finding). The heal compares the cache's
+      // [stamp, EOF) with the remote's own bytes — and the two sides are taken
+      // at different times: `localSize` from a stat before the round trip, the
+      // local bytes after it. A slot that shrinks in between (a truncation, a
+      // non-atomic writer, an operator repairing it) hands back a short region,
+      // and the pre-fix code called that mismatch 'foreign' — "the bytes past
+      // that point were CHECKED against the remote: they are not its own" —
+      // and MEMOIZED it, so one transient shrink condemned a healthy over-cap
+      // slot for ten minutes. A slot that changed under the probe is the MOVED
+      // class instead: terminal for this poll, remembered by nobody.
+      {
+        const mkSlot = (hid, tid) => {
+          const sl = slotFor(hid, tid);
+          const body = Buffer.from(rollout(sl.tid, '/work/shrink-race', 'the slot shrank under the probe', 40));
+          const over = Buffer.from(ticks(1, 3));
+          const held = Buffer.concat([body, over]);
+          const grown = Buffer.concat([held, Buffer.from(ticks(4, 3))]);
+          seedOverStamped(sl, held, body.length, 53000);
+          return { sl, body, over, held, grown, CAP: grown.length - 1 };
+        };
+        // …an ssh rung whose GAP PROBE races a writer that truncates the slot
+        const racing = (f, hid) => {
+          const log = rollLog();
+          const hmx = sshRung(hid, { path: f.sl.remotePath, bytes: f.grown, mtime: 53001 }, log);
+          const okSsh = hmx._ssh.bind(hmx);
+          let raced = false;
+          hmx._ssh = async (h, cmd) => {
+            const r = await okSsh(h, cmd);
+            if (/\| head -c /.test(cmd) && !raced) { raced = true; fs.writeFileSync(f.sl.cache, f.body); }   // truncate+rewrite, inside the probe's window
+            return r;
+          };
+          return { hmx, log, raced: () => raced };
+        };
+        const fetchErr = async (hmx, hid, f) => { try { return { path: await hmx.fetchTranscript(hid, 'codex', f.sl.tid, { maxBytes: f.CAP }) }; } catch (e) { return { err: String(e && e.message || e) }; } };
+
+        // REPRO: the pre-fix comparison — the guard neutered, everything else identical
+        const fN = mkSlot('ho0', 'cccccccc-dddd-4eee-8fff-00000000004d');
+        const rN = racing(fN, 'ho0');
+        rN.hmx._healGapIsStillOurs = () => true;                                 // the pre-fix code asked nothing about the file it was comparing
+        const outN = await fetchErr(rN.hmx, 'ho0', fN);
+        ok(!outN.path && /CHECKED against the remote: they are not its own/.test(outN.err || '') && rN.raced(),
+          `REPRO: a slot that SHRANK under the probe is reported as a proven foreign append (${outN.err})`);
+        ok(rN.hmx._healRefusedAt.get(fN.sl.cache)?.why === 'foreign',
+          'REPRO: …and that verdict is MEMOIZED — a fact about a race, frozen for ten minutes as a fact about the bytes', rN.hmx._healRefusedAt.get(fN.sl.cache));
+        fs.writeFileSync(fN.sl.cache, fN.held);                                  // the writer finished: the slot is whole and healthy again
+        const outN2 = await fetchErr(rN.hmx, 'ho0', fN);
+        ok(!outN2.path && /CHECKED against the remote/.test(outN2.err || '') && rN.log.probes.length === 1,
+          'REPRO: …so the healthy slot stays condemned on the next poll, with no probe left to correct it', { probes: rN.log.probes });
+
+        // …and with the guard in place
+        const f = mkSlot('ho1', 'cccccccc-dddd-4eee-8fff-00000000004e');
+        const metaBefore = fs.readFileSync(f.sl.cache + '.meta', 'utf8');
+        const r = racing(f, 'ho1');
+        const out = await fetchErr(r.hmx, 'ho1', f);
+        ok(!out.path && /changed size while those bytes were being checked/.test(out.err || '') && !/CHECKED against the remote/.test(out.err || ''),
+          `the same race is the MOVED class: it says the file shifted, and never claims a comparison it could not make (${out.err})`);
+        ok(!(r.hmx._healRefusedAt && r.hmx._healRefusedAt.has(f.sl.cache)) && fs.readFileSync(f.sl.cache + '.meta', 'utf8') === metaBefore,
+          '…memoizing nothing and stamping nothing — the next poll must be free to answer differently', [...(r.hmx._healRefusedAt || new Map()).keys()]);
+        fs.writeFileSync(f.sl.cache, f.held);                                    // same recovery as the repro's
+        const out2 = await fetchErr(r.hmx, 'ho1', f);
+        ok(out2.path && fs.readFileSync(out2.path).equals(f.grown) && metaAt(f.sl).sizeExact === true && r.log.probes.length === 2,
+          'NEGATIVE CONTROL: the very next poll heals the slot the race refused — the transient costs one poll, not ten minutes', { err: out2.err, probes: r.log.probes });
       }
     }
   }

@@ -1177,6 +1177,25 @@ class HostManager {
    *  Extracted as a method for the same reason `_appendDeltaAt` is: a test can
    *  neuter it and show the pre-fix seal. */
   _prefixIsOurs(localSize, meta) { return localSize <= stampedSizeOf(meta); }   // NaN ⇒ false ⇒ whole refetch
+  /** IS THIS STILL THE FILE WE MEASURED? (B-7638 round 7 — the round-6 verify's
+   *  third finding). The over-stamp heal compares the cache's [stamp, EOF)
+   *  against the remote's own bytes, and BOTH sides of that comparison were
+   *  taken at different times: `localSize` comes from a stat before the remote
+   *  round trip, the local bytes are read after it. A slot that shrinks in
+   *  between (a truncation, a non-atomic writer, an operator repairing it)
+   *  hands back a short — or entirely different — region, and comparing THAT
+   *  against the remote yields a mismatch which is a fact about the race, not
+   *  about the bytes: the pre-fix code called it 'foreign' ("the bytes past
+   *  that point were CHECKED against the remote: they are not its own") and
+   *  MEMOIZED that verdict for ten minutes, so one transient shrink condemned
+   *  a perfectly healthy over-cap slot until the memo expired. A slot that
+   *  changed under the probe is the MOVED class instead: terminal for this
+   *  poll, remembered by nobody. Extracted as a method for the usual reason —
+   *  a test can neuter it and show the pre-fix mis-diagnosis. */
+  _healGapIsStillOurs(cachePath, localSize, localGap, gap) {
+    if (!Buffer.isBuffer(localGap) || localGap.length < gap) return false;      // the region we judged is no longer readable
+    try { return fs.statSync(cachePath).size === localSize; } catch { return false; }
+  }
   /** …AND THE ONE SHAPE THAT RULE MUST NOT CONDEMN (B-7638 round 6). A cache
    *  LONGER than its stamp is the corruption above — EXCEPT when the stamp
    *  itself was short, which is exactly what the whole `cat` rung produced
@@ -1195,20 +1214,40 @@ class HostManager {
     const stamped = stampedSizeOf(meta);
     return !!meta && meta.sizeExact !== true && Number.isFinite(stamped) && localSize > stamped;
   }
-  /** ≤1 DEGRADE LINE PER HOST PER MINUTE (B-7638 round 6). Round 5 made the
-   *  data-plane fallback speak (repo law: what a catch swallows, it names) —
-   *  but the thing it degrades on is usually PERSISTENT (a device link that is
-   *  down stays down), and every session poll, every window attach and every
-   *  goal-sync tick fetches transcripts. A line per fetch buries the journal
-   *  in one repeating sentence, which is a different way of saying nothing.
-   *  Rate-limited per host so the FIRST fault in each window is always printed
-   *  verbatim, with a count of what the window suppressed carried onto the next
-   *  one (a suppressed fault is not a forgotten fault). */
+  /** ≤1 DEGRADE LINE PER HOST **PER FAULT** PER MINUTE (B-7638 round 6; the
+   *  key is round 7's). Round 5 made the data-plane fallback speak (repo law:
+   *  what a catch swallows, it names) — but the thing it degrades on is usually
+   *  PERSISTENT (a device link that is down stays down), and every session
+   *  poll, every window attach and every goal-sync tick fetches transcripts. A
+   *  line per fetch buries the journal in one repeating sentence, which is a
+   *  different way of saying nothing. So the FIRST fault in each window is
+   *  printed verbatim, with a count of what the window suppressed carried onto
+   *  the next one (a suppressed fault is not a forgotten fault).
+   *  ROUND 7 — "similar" has to MEAN similar. Round 6 keyed the window on the
+   *  host alone, so the first fault held the whole minute and a DIFFERENT fault
+   *  on that host inside it (the gap probe dying while the link flaps, a free
+   *  identifier an extraction left behind — the 2.340.2 class this line exists
+   *  to expose) was dropped into a "+N similar" tally that names nothing: the
+   *  rate limiter became the silent catch it replaced. The window is therefore
+   *  keyed on the host AND the message's CLASS — the same sentence with its
+   *  offsets/sizes/ids blanked — so each distinct fault speaks once a minute
+   *  and only genuine repeats are counted. */
+  _degradeClassKey(id, msg) {
+    return id + '\u0000' + String(msg == null ? '' : msg)
+      .replace(/0x[0-9a-fA-F]+/g, '#')       // hex offsets
+      .replace(/\d+/g, '#')                  // byte offsets, sizes, pids, ports, clock values
+      .replace(/\s+/g, ' ').trim().slice(0, 400);
+  }
   _warnDegradeOnce(id, msg, nowMs = Date.now()) {
     const seen = (this._degradeWarnAt ||= new Map());
-    const st = seen.get(id) || { at: 0, n: 0 };
-    if (nowMs - st.at < 60000) { seen.set(id, { at: st.at, n: st.n + 1 }); return false; }
-    seen.set(id, { at: nowMs, n: 0 });
+    const key = this._degradeClassKey(id, msg);
+    const st = seen.get(key) || { at: 0, n: 0 };
+    if (nowMs - st.at < 60000) { seen.set(key, { at: st.at, n: st.n + 1 }); return false; }
+    // the map is a rate limiter, not a log: a fault class nobody has seen in
+    // ten minutes carries no count worth reporting, so it is dropped rather
+    // than kept forever (one entry per distinct fault per host otherwise).
+    if (seen.size > 500) for (const [k, v] of seen) if (nowMs - v.at >= 600000) seen.delete(k);
+    seen.set(key, { at: nowMs, n: 0 });
     console.warn(msg + (st.n ? ` (+${st.n} similar suppressed in the last minute)` : ''));
     return true;
   }
@@ -1301,6 +1340,12 @@ class HostManager {
     // adoption (and only the adoption, it is paid once per slot) scans the
     // WHOLE file: chunked, with a 3-byte carry so a magic split across a
     // chunk boundary is still seen.
+    // …and it answers in THREE states (round 7): true = scanned clean, false =
+    // a marker is in there (a verdict about the bytes), null = the file could
+    // not be read at all — which is not a verdict about anything. The caller
+    // refuses this poll either way, but only a VERDICT is remembered: a
+    // transient EMFILE must not freeze a healthy slot for ten minutes (the
+    // same line the heal draws between 'unverified' and a refusal).
     const wholeCacheOk = (csize) => {
       const CH = 1 << 20;
       let fd;
@@ -1310,7 +1355,7 @@ class HostManager {
         let pos = 0, carryLen = 0;
         while (pos < csize) {
           const n = fs.readSync(fd, buf, 3, Math.min(CH, csize - pos), pos);
-          if (n <= 0) return false;                                       // unreadable ⇒ cannot verify
+          if (n <= 0) return null;                                        // unreadable ⇒ cannot verify
           const win = buf.subarray(3 - carryLen, 3 + n);
           if (spliceMarkers(win)) return false;
           pos += n;
@@ -1318,11 +1363,39 @@ class HostManager {
           win.subarray(win.length - carryLen).copy(buf, 3 - carryLen);
         }
         return true;
-      } catch { return false; } finally { if (fd !== undefined) { try { fs.closeSync(fd); } catch { } } }
+      } catch { return null; } finally { if (fd !== undefined) { try { fs.closeSync(fd); } catch { } } }
+    };
+    // ONE WHOLE-FILE SCAN PER SLOT — not one per RUNG per POLL (B-7638 round
+    // 7, the round-6 verify's finding). The scan above is a synchronous read of
+    // the entire cache file on the event loop, and the shipped shape paid for
+    // it twice in a single poll (the slab rung's `cacheUsable`, then the ssh
+    // rung's after the fallback — plus the heal's own, on a meta the version
+    // marker calls current) and again on EVERY poll, because the slots that
+    // need it are exactly the ones that REFUSE: a refused poll leaves the meta
+    // byte-identical by design, so nothing ever retires the legacy marker and
+    // a 64 MB slot was re-read on every session poll, attach and goal-sync
+    // tick, forever. The verdict is a statement about BYTES, so it is memoized
+    // against the bytes it was made on — the cache file's identity (inode,
+    // size, mtime): our own writers all change size or mtime (and drop the
+    // entry outright), and anything that rewrites the slot behind us
+    // invalidates it the same way. TTL'd so a slot nobody touches re-verifies
+    // eventually rather than being trusted from memory forever.
+    const scanMemo = (this._deepScanMemo ||= new Map());
+    const dropScanMemo = () => { scanMemo.delete(cachePath); };
+    const deepCacheOk = (stt) => {
+      const key = `${stt.ino}:${stt.size}:${stt.mtimeMs}`;
+      const hit = scanMemo.get(cachePath);
+      if (hit && hit.key === key && Date.now() - hit.at < 600000) return hit.ok;
+      const ok = wholeCacheOk(stt.size);
+      if (ok === null) return false;                                      // no verdict to remember — refuse this poll, ask again on the next
+      if (scanMemo.size > 500) for (const [k, v] of scanMemo) if (Date.now() - v.at >= 600000) scanMemo.delete(k);
+      scanMemo.set(cachePath, { key, ok, at: Date.now() });
+      return ok;
     };
     const cacheBytesOk = (remotePath, { deep = false } = {}) => {
-      let csize = 0;
-      try { csize = fs.statSync(cachePath).size; } catch { return false; }
+      let stt = null;
+      try { stt = fs.statSync(cachePath); } catch { return false; }
+      const csize = stt.size;
       const head = readCacheAt(0, 4);
       const zstRemote = isZstPath(remotePath);
       if (head.length >= 4) {
@@ -1337,7 +1410,7 @@ class HostManager {
       // "unverifiable ⇒ refetch" re-pulled every such transcript on EVERY poll
       // forever (the check below still applies to whatever bytes exist).
       if (head.length && /\.jsonl$/i.test(cachePath) && head[0] !== 0x7b && head[0] !== 0x5b) return false; // a JSONL cache starts with a record
-      if (deep) return wholeCacheOk(csize);
+      if (deep) return deepCacheOk(stt);
       const tail = readCacheAt(Math.max(0, csize - 4096), Math.min(4096, csize));
       return !spliceMarkers(tail);
     };
@@ -1442,7 +1515,7 @@ class HostManager {
     // refetch), only for metas without the `sizeExact` marker (a round-5+
     // writer cannot over-stamp), and once per slot (the re-stamp ends it).
     let healVerdict = 'skip';
-    const healOverStamp = async (remotePath, localSize, size, { usable, deepDone, readRemote }) => {
+    const healOverStamp = async (remotePath, localSize, size, { usable, readRemote }) => {
       healVerdict = 'skip';
       // A REFUSAL IS REMEMBERED, NEVER STAMPED (round 6). The disk invariant is
       // that a refused poll leaves cache AND meta byte-identical (stamping a
@@ -1472,16 +1545,31 @@ class HostManager {
       const stamped = stampedSizeOf(meta), gap = localSize - stamped;
       if (localSize > size || gap > maxBytes) return refuse('unbounded');       // longer than the remote / a gap we cannot bound: not a prefix we can prove
       // the local evidence first (it is free): a slot carrying a splice marker
-      // anywhere is not healed no matter what the gap compares to. A legacy
-      // meta has already paid for that scan in this very poll — never twice.
-      if (!deepDone && !cacheBytesOk(remotePath, { deep: true })) return refuse('spliced');
+      // anywhere is not healed no matter what the gap compares to. "Free" is
+      // now literal (round 7): the scan asks the same memoized verdict
+      // `cacheUsable` already asked this poll, on the same bytes, so the heal
+      // can state the check outright instead of inferring from a `deepDone`
+      // flag whether some earlier caller happened to have run it.
+      if (!cacheBytesOk(remotePath, { deep: true })) return refuse('spliced');
       let remoteGap = null;
       try { remoteGap = await readRemote(stamped, gap); } catch (e) {
         this._warnDegradeOnce(id, `[hosts] ${id}: could not read the remote's [${stamped},${localSize}) to check an over-stamped cache slot (${e && e.message || e})`);
         return (healVerdict = 'unverified');                                    // a TRANSPORT failure — retry next poll, never adopt on faith
       }
       if (!Buffer.isBuffer(remoteGap) || remoteGap.length < gap) return (healVerdict = 'unverified');
-      if (!remoteGap.subarray(0, gap).equals(readCacheAt(stamped, gap))) return refuse('foreign');
+      // …and the comparison must be about THE FILE WE MEASURED (round 7).
+      // `localSize` was stat'd before the remote round trip; a slot that
+      // changes inside that window — a truncation, an operator repairing it,
+      // anything writing the slot — makes `readCacheAt` hand back a different
+      // (or short) region, and comparing THAT against the remote produces a
+      // mismatch which is a fact about the race, not about the bytes. Calling
+      // it 'foreign' would both mis-diagnose it and MEMOIZE a proven-corruption
+      // verdict for ten minutes about a file that no longer exists. A slot
+      // that shifted under the probe is the MOVED class: terminal for this
+      // poll (nothing is adopted), remembered by nobody, re-judged next poll.
+      const localGap = readCacheAt(stamped, gap);
+      if (!this._healGapIsStillOurs(cachePath, localSize, localGap, gap)) return (healVerdict = 'shifted');
+      if (!remoteGap.subarray(0, gap).equals(localGap)) return refuse('foreign');
       try {
         meta = { ...meta, size: localSize, sizeExact: true, healedStampAt: Date.now(), v: META_V };
         fs.writeFileSync(metaPath, JSON.stringify(meta));
@@ -1500,6 +1588,7 @@ class HostManager {
       spliced: ', and it carries a splice marker (bytes from another file, or an older spliced append), so those bytes cannot be adopted either',
       foreign: ', and the bytes past that point were CHECKED against the remote: they are not its own',
       moved: ', and this poll watched the slot move — those bytes came from outside this cache',
+      shifted: ', and the cached file changed size while those bytes were being checked, so nothing was compared (retryable on the next poll)',
       unverified: ', and the remote could not be read to check whether those bytes are its own (retryable on the next poll)',
     };
     const healNote = () => HEAL_NOTES[healVerdict] || '';
@@ -1538,8 +1627,7 @@ class HostManager {
         // size/mtime match would serve the stump FOREVER (the self-heal only
         // triggers when the remote file changes) — and the bytes must have come
         // from the SAME remote file (see the cache-slot note above)
-        const deepDone = legacyMeta();                 // …and whether THAT verdict already paid for the whole-file scan (the heal below must not pay twice)
-        const usable = cacheUsable(remotePath, size);   // ONE verdict per poll (a legacy slot's whole-file scan is not run twice)
+        const usable = cacheUsable(remotePath, size);   // ONE verdict per poll AND per rung: the whole-file scan behind it is memoized against the bytes it judged (round 7)
         if (meta && meta.size === size && meta.mtime === mtime && usable && (() => { try { return fs.statSync(cachePath).size === size; } catch { return false; } })()) { stampVerified(remotePath, size, mtime); return cachePath; }
         fs.mkdirSync(dir, { recursive: true });
         let localSize = 0;
@@ -1548,7 +1636,7 @@ class HostManager {
         // (round 6): a pre-round-5 stamp is short by construction, and over the
         // cap the rule below would strand the slot forever. It may rewrite
         // `meta` (verified against the remote's own bytes) or say why it did not.
-        await healOverStamp(remotePath, localSize, size, { usable, deepDone, readRemote: async (off, len) => (await dm.fsReadRange(remotePath, off, len)).data });
+        await healOverStamp(remotePath, localSize, size, { usable, readRemote: async (off, len) => (await dm.fsReadRange(remotePath, off, len)).data });
         // append-only delta is legal ONLY when the same, uncompressed remote
         // file grew: a different remote path (or either side compressed) means
         // the cached prefix is not a prefix of what we are fetching. The
@@ -1579,7 +1667,8 @@ class HostManager {
           // file is still fetchable, so fall through to the whole read below;
           // over it (where the delta is the only road) fail loudly rather than
           // splice — the corruption this whole batch exists to prevent.
-          if (!this._appendDeltaAt(cachePath, localSize, delta.data)) {
+          if (this._appendDeltaAt(cachePath, localSize, delta.data)) dropScanMemo();   // the bytes changed ⇒ so does the verdict about them
+          else {
             // MOVEMENT OUTLIVES THIS RUNG (round 5). The verdict used to be a
             // plain Error thrown INSIDE the data-plane try, so the over-cap
             // refusal landed in the silent fallback catch and the ssh rung
@@ -1601,6 +1690,7 @@ class HostManager {
           const tmp2 = cachePath + '.tmp';
           fs.writeFileSync(tmp2, whole.data);
           fs.renameSync(tmp2, cachePath);
+          dropScanMemo();
         }
         fs.writeFileSync(metaPath, JSON.stringify(nextMeta({ size, mtime, slab: true, remotePath }, { whole: !grewSlab })));
         return cachePath;
@@ -1636,7 +1726,6 @@ class HostManager {
     const [sizeMtime, remotePath] = [out.split('\n')[0], out.split('\n')[1]];
     const [size, mtime] = sizeMtime.split(' ').map(Number);
     // same stump-integrity + same-remote-file + cache-bytes checks as the slab path above
-    const deepDoneSsh = legacyMeta();
     const usableSsh = cacheUsable(remotePath, size);
     if (meta && meta.size === size && meta.mtime === mtime && usableSsh && (() => { try { return fs.statSync(cachePath).size === size; } catch { return false; } })()) { stampVerified(remotePath, size, mtime); return cachePath; }
     let localSizeSsh = 0;
@@ -1647,7 +1736,7 @@ class HostManager {
     // and BSD alike); a host without `head -c` degrades to a longer answer,
     // whose first LEN bytes are still exactly the region under test.
     await healOverStamp(remotePath, localSizeSsh, size, {
-      usable: usableSsh, deepDone: deepDoneSsh,
+      usable: usableSsh,
       readRemote: async (off, len) => this._ssh(h, `tail -c +${off + 1} ${JSON.stringify(remotePath)} | head -c ${len}`, { timeoutMs: 120000, maxBuffer: maxBytes + 1024, encoding: 'buffer' }),
     });
     // APPEND-ONLY DELTA ON THE LEGACY RUNG TOO (B-7638 round 2). The slab rung
@@ -1686,6 +1775,7 @@ class HostManager {
           // appending welds a DUPLICATE region on. The throw lands in the
           // fallback below — whole `cat` under the cap, a hard failure over it.
           if (!this._appendDeltaAt(cachePath, localSizeSsh, delta)) throw slotMovedError(`cache slot moved under the tail delta (offset ${localSizeSsh}) — refusing to splice`);
+          dropScanMemo();
           stampSize = localSizeSsh + delta.length;
         }
         grewSsh = true;
@@ -1709,6 +1799,7 @@ class HostManager {
       const tmp = cachePath + '.tmp';
       fs.writeFileSync(tmp, buf);
       fs.renameSync(tmp, cachePath);
+      dropScanMemo();
       // STAMP WHAT THE FILE ACTUALLY HOLDS (round 5) — the rule the tail branch
       // above already follows. `cat` runs after the probe stat, so a live
       // transcript hands back MORE bytes than `size`; stamping the stat value
