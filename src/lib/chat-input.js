@@ -46,10 +46,16 @@ export class ChatInput {
     this._queueRowState = new Map();
     this._editingQueueId = null;     // the row being edited, if any
     this._editDraftBefore = null;    // what was in the textarea before editing began
+    // The queued message's OWN text as the editor opened it. It is what tells
+    // "the user rewrote this" from "the box still holds the original", which
+    // is the whole difference between a cancel that may restore the pre-edit
+    // draft and one that must not (setQueue's dropped-row branch, round-3).
+    this._editOriginalText = null;
     // An edit whose frame is OUT but whose RESULT has not landed:
-    // {id, text, draftBefore}. The typed rewrite lives here (and stays in the
-    // textarea) until the wrapper's answer proves it landed — see
-    // _resolvePendingEdit.
+    // {id, text, raw, original, draftBefore}. The typed rewrite lives here
+    // (and stays in the textarea) until the wrapper's answer proves it landed
+    // — see _resolvePendingEdit. `text` is what was SENT (trimmed); `raw` is
+    // what is in the BOX, and only `raw` may be compared against the textarea.
     this._pendingEdit = null;
     this._queueDrag = null;          // {id, ctl, ...} while a reorder drag runs
 
@@ -805,6 +811,18 @@ export class ChatInput {
   }
 
   dispose() {
+    // AN UNSENT REWRITE MUST NOT DIE WITH THE VIEW. Ordinary typed text is
+    // already in the store when a window closes (the 300ms autosave), but edit
+    // mode deliberately keeps that autosave OFF (law ②) — so a view torn down
+    // mid-edit was the one path where the user's words existed nowhere but a
+    // textarea about to be destroyed. Only the UNSENT case: once the frame is
+    // out the text is on its way into the queued message itself, and stashing
+    // a copy of an edit that LANDED would leave the user's own queue item
+    // sitting in the input as a draft.
+    if (this._editingQueueId && this._textarea) {
+      const typed = this._textarea.value;
+      if (typed.trim() && typed !== this._editOriginalText) saveDraft('chat', this._sessionId, typed);
+    }
     if (this._goalTimer) { clearTimeout(this._goalTimer); this._goalTimer = null; }
     if (this._editTimer) { clearTimeout(this._editTimer); this._editTimer = null; }
     // A reorder drag in flight owns window-level listeners — a closed window
@@ -848,8 +866,16 @@ export class ChatInput {
       // app-server drains the ORIGINAL, and the answer is 'gone'. The text
       // stays in the box (and in `_pendingEdit`) until _resolvePendingEdit
       // either puts the draft back (ok) or hands the rewrite back (refused).
-      this._pendingEdit = { id, text, draftBefore: this._editDraftBefore };
+      // `raw` is WHAT IS IN THE BOX, kept separately from the trimmed `text`
+      // that goes on the wire (round-3 verifier): _resolvePendingEdit's
+      // "the user typed something else meanwhile" guard compares the textarea
+      // against this, and comparing it against the TRIMMED payload made every
+      // rewrite ending in a space or a newline take the bail-out — i.e. every
+      // outcome of a multi-line edit silently did nothing, which is exactly
+      // the round-2 MAJOR this pending state was introduced to fix.
+      this._pendingEdit = { id, text, raw: this._textarea.value, original: this._editOriginalText, draftBefore: this._editDraftBefore };
       this._editDraftBefore = null;
+      this._editOriginalText = null;
       // Last-resort release: every ordinary path answers (the wrapper's
       // result, a ws refusal, the republish that drops the row, a dead
       // socket), but a wrapper that dies mid-save answers nothing and the
@@ -998,7 +1024,7 @@ export class ChatInput {
     // republish IS the outcome (a spinner outliving its row is a lie).
     const live = new Set(this._queue.map((it) => String(it.id || '')));
     for (const id of [...this._queueRowState.keys()]) if (!live.has(id)) this._queueRowState.delete(id);
-    if (this._editingQueueId && !live.has(this._editingQueueId)) this._cancelQueueEdit({ silent: true });
+    if (this._editingQueueId && !live.has(this._editingQueueId)) this._abandonEditOfDroppedRow();
     // …and an edit still in flight whose ROW is gone lost the race: the item
     // ran (or Stop dropped it) before the rewrite landed. The republish IS
     // that answer — hand the typed text back here too, or it dies with the row
@@ -1042,6 +1068,32 @@ export class ChatInput {
     this._renderQueue();
   }
 
+  /** THE ROW BEING EDITED LEFT THE QUEUE WHILE THE USER WAS STILL TYPING
+   *  (round-3 verifier). This is the same race `_resolvePendingEdit`'s
+   *  row-gone branch answers for a rewrite already sent — you rewrite the
+   *  FRONT item, the turn ends, the app-server drains the original — but in
+   *  the much LARGER window BEFORE Send, where nothing is pending yet. The
+   *  ordinary cancel restores the pre-edit draft OVER the textarea, which
+   *  here would silently delete words the user never chose to throw away.
+   *  A rewrite is kept exactly the way the post-Send twin keeps it (draft +
+   *  toast); an untouched editor is just closed. `_cancelQueueEdit` stays for
+   *  the paths where the USER abandoned the edit (Esc, switching rows). */
+  _abandonEditOfDroppedRow() {
+    const id = this._editingQueueId;
+    const typed = this._textarea ? this._textarea.value : '';
+    const original = typeof this._editOriginalText === 'string' ? this._editOriginalText : '';
+    // Untouched (or emptied) editor ⇒ there is nothing of the user's in the
+    // box; the pre-edit draft is what belongs there.
+    if (typed === original || !typed.trim()) { this._cancelQueueEdit({ silent: true }); return; }
+    this._editingQueueId = null;
+    this._editOriginalText = null;
+    this._editDraftBefore = null;          // the rewrite IS this session's draft now
+    if (id && this._queueRowState.get(id)?.state === 'editing') this._queueRowState.delete(id);
+    saveDraft('chat', this._sessionId, typed);
+    this._renderQueue();
+    showToast(t('That queued message could not be edited — your rewritten text was kept in the input.'), { type: 'error' });
+  }
+
   /** The outcome of an edit whose frame is already OUT (`_pendingEdit`).
    *  `ok` restores the draft the edit borrowed the textarea from; a REFUSAL
    *  hands the rewrite back — 'gone' is the normal race for this control (you
@@ -1052,14 +1104,37 @@ export class ChatInput {
     if (!p) return;
     this._pendingEdit = null;
     if (this._editTimer) { clearTimeout(this._editTimer); this._editTimer = null; }
-    if (!this._textarea) return;
+    // NO EXIT FROM HERE MAY LEAVE A SPINNER (round-3 verifier). The row is
+    // 'pending' only while THIS edit is in flight and this function IS the end
+    // of that flight, but two of the callers write no row state at all (the
+    // dead socket, the 20s fallback) — so a bail-out below used to leave the
+    // row spinning for the rest of the session. setQueueOpResult has already
+    // written 'refused'/cleared before calling us, so this only ever clears a
+    // mark nobody else answered.
+    let spinning = false;
+    if (this._queueRowState.get(p.id)?.state === 'pending') { this._queueRowState.delete(p.id); spinning = true; }
+    const bail = () => { if (spinning) this._renderQueue(); };
+    if (!this._textarea) { bail(); return; }
     // The user started typing something ELSE while the save was in flight —
     // that text is theirs, and neither outcome may overwrite it (the same
-    // guard the _pendingSend restore uses).
-    if (this._textarea.value !== p.text) return;
+    // guard the _pendingSend restore uses). Compare against what was in the
+    // BOX (`raw`), never against the trimmed payload that went on the wire:
+    // a rewrite ending in a newline is not "something else".
+    if (this._textarea.value !== (typeof p.raw === 'string' ? p.raw : p.text)) {
+      // …and it is the session's DRAFT from here on. Edit mode keeps the
+      // debounced autosave off for the whole flight (law ②), so those
+      // keystrokes are in a volatile textarea and NOWHERE else — the store
+      // still holds the pre-edit draft, and the window closing now (or any
+      // other client's sync) would take them with it. The edit is over, so
+      // the draft channel belongs to the box again.
+      saveDraft('chat', this._sessionId, this._textarea.value);
+      bail();
+      return;
+    }
     if (ok) {
       this._textarea.value = typeof p.draftBefore === 'string' ? p.draftBefore : '';
       this._autoSize?.();
+      bail();
       return;
     }
     const live = this._queue.some((it) => String(it.id || '') === p.id);
@@ -1068,14 +1143,19 @@ export class ChatInput {
       // (Send saves, Esc restores the draft) with the reason on the row.
       this._editingQueueId = p.id;
       this._editDraftBefore = typeof p.draftBefore === 'string' ? p.draftBefore : '';
+      this._editOriginalText = typeof p.original === 'string' ? p.original
+        : (this._queue.find((it) => String(it.id || '') === p.id)?.text ?? null);
       this._queueRowState.set(p.id, { state: 'editing', title: reasonText || this._queueRowState.get(p.id)?.title || '' });
       this._renderQueue();
       return;
     }
     // The row is GONE: the rewrite becomes this session's draft, and the toast
     // says where it went — finding your own words in the input with no
-    // explanation is the silent failure wearing a full textarea.
-    saveDraft('chat', this._sessionId, p.text);
+    // explanation is the silent failure wearing a full textarea. The DRAFT is
+    // what is in the box (raw), so the store and the textarea agree — saving
+    // the trimmed twin desynced them by exactly the whitespace the user typed.
+    saveDraft('chat', this._sessionId, this._textarea.value);
+    bail();
     showToast(t('That queued message could not be edited — your rewritten text was kept in the input.'), { type: 'error' });
   }
 
@@ -1129,6 +1209,9 @@ export class ChatInput {
     this._draftTimer = null;
     saveDraft('chat', this._sessionId, this._editDraftBefore);
     this._editingQueueId = String(id);
+    // What the editor OPENED with — the discriminator setQueue needs when the
+    // row disappears mid-typing (a box still holding this is not a rewrite).
+    this._editOriginalText = item.text;
     this._queueRowState.set(String(id), { state: 'editing', title: '' });
     this._textarea.value = item.text;
     this._autoSize?.();
@@ -1143,6 +1226,7 @@ export class ChatInput {
     if (id && this._queueRowState.get(id)?.state === 'editing') this._queueRowState.delete(id);
     if (this._editDraftBefore !== null) { this._textarea.value = this._editDraftBefore; this._autoSize?.(); }
     this._editDraftBefore = null;
+    this._editOriginalText = null;
     this._renderQueue();
     if (!silent) this._textarea.focus();
   }

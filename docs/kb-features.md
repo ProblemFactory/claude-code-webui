@@ -185,7 +185,15 @@ impossible rather than a review promise.
   session's draft: what you type is not persisted as the draft and another
   client's draft sync cannot overwrite it mid-edit. A single edit at a time; a
   very long rewrite (>20000 characters) is refused out loud rather than sent
-  through a channel that would shred it.
+  through a channel that would shred it. The SAME rescue covers the bigger
+  window BEFORE you press Send: if the message you are rewriting runs (or is
+  removed) while you are still typing, your words are kept in the input, saved
+  as the draft and explained by a toast — they are never replaced by the draft
+  the editor borrowed the box from. An editor you never typed into just closes,
+  silently, and Esc still restores your draft exactly as before. Closing the
+  window (or swapping the tab) mid-rewrite keeps the unsent text as the draft
+  too — the one thing that never happens is your words existing only in a box
+  that is about to disappear.
 - **Run now / Run all now (2026-09-07)** — `thread/queue/start` with and without
   an id. While a turn is running BOTH are refused out loud ("a turn is already
   running — the queue runs as soon as it ends") rather than being queued behind

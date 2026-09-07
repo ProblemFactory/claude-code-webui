@@ -1589,7 +1589,19 @@ console.log('— ⑪ drag-reorder / edit / run-all in a REAL browser (trusted po
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `vs-qverbs-${process.pid}-`));
     const bundle = path.join(tmp, 'chat-input.iife.js');
     const stub = { name: 'stub-build-version',  setup(b) { b.onResolve({ filter: /build-version\.js$/ }, () => ({ path: 'build-version',  namespace: 'bv' })); b.onLoad({ filter: /.*/, namespace: 'bv' }, () => ({ contents: "export const BUILD_VERSION = 'test';", loader: 'js' })); } };
-    await esbuild.build({ entryPoints: [path.join(REPO, 'src/lib/chat-input.js')], bundle: true, format: 'iife',  globalName: 'VS',  platform: 'browser',  target: 'es2022',  outfile: bundle, logLevel: 'silent',  loader: { '.css': 'text' }, plugins: [stub] });
+    // ONE module instance for the component AND the draft channel it writes
+    // to: `saveDraft` is a no-op until a StateSync exists, so a second bundle
+    // would give the test its own dead singleton and every draft assertion
+    // below would pass vacuously. The virtual entry re-exports both halves of
+    // the REAL modules (round-3 verifier's evidence used a real StateSync).
+    const vEntry = { name: 'virtual-entry',  setup(b) {
+      b.onResolve({ filter: /^vs-entry$/ }, () => ({ path: 'vs-entry',  namespace: 'vse' }));
+      b.onLoad({ filter: /.*/, namespace: 'vse' }, () => ({
+        contents: `export { ChatInput } from ${JSON.stringify(path.join(REPO, 'src/lib/chat-input.js'))};\n`
+          + `export { initStateSync, getStateSync, saveDraft, loadDraft } from ${JSON.stringify(path.join(REPO, 'src/lib/utils.js'))};\n`,
+        resolveDir: REPO, loader: 'js' }));
+    } };
+    await esbuild.build({ entryPoints: ['vs-entry'], bundle: true, format: 'iife',  globalName: 'VS',  platform: 'browser',  target: 'es2022',  outfile: bundle, logLevel: 'silent',  loader: { '.css': 'text' }, plugins: [stub, vEntry] });
     const js = fs.readFileSync(bundle, 'utf8').replace(/<\/script/gi, '<\\/script');
     const css = fs.readFileSync(path.join(REPO, 'public/chat.css'), 'utf8').replace(/<\/style/gi, '<\\/style');
     const html = `<!doctype html><meta charset="utf-8"><title>queue verbs</title><style>${css}
@@ -1628,9 +1640,20 @@ console.log('— ⑪ drag-reorder / edit / run-all in a REAL browser (trusted po
       const CODEX_VERBS = JSON.stringify(caps11('codex').inputModes);
       const OPENCODE_VERBS = JSON.stringify(caps11('opencode').inputModes);
       const CLAUDE_VERBS = JSON.stringify(caps11('claude').inputModes);
+      // A REAL StateSync over a fake socket: `saveDraft`/`loadDraft` are the
+      // draft channel this control is forbidden to borrow (round-2 finding 5)
+      // and required to fall back to when a rewrite loses its row (round-3) —
+      // both are unobservable without one. /api/sync/* 404s into HTML here, so
+      // init lands on its own catch and the store starts empty.
+      const syncReady = await evaljs(`(async () => {
+        window.__stateSets = [];
+        await VS.initStateSync({ onGlobal(){}, onStateChange(){}, send: (m) => window.__stateSets.push(m) });
+        return !!VS.getStateSync();
+      })()`);
+      ok('a REAL StateSync backs the draft channel (saveDraft is a silent no-op without one — every draft assert below would pass vacuously)', syncReady === true);
       const built = await evaljs(`(() => {
-        window.__ops = [];
-        const ci = new VS.ChatInput({ send(){} }, 'sess-verbs',  { onSend(){}, onInterrupt(){}, onQueueOp: (op, id, extra) => window.__ops.push({ op, id, extra }) });
+        window.__ops = []; window.__sent = [];
+        const ci = new VS.ChatInput({ send(f){ window.__sent.push(f); } }, 'sess-verbs',  { onSend(){}, onInterrupt(){}, onQueueOp: (op, id, extra) => window.__ops.push({ op, id, extra }) });
         document.body.appendChild(ci.element);
         window.__ci = ci;
         window.__items = [
@@ -1933,6 +1956,254 @@ console.log('— ⑪ drag-reorder / edit / run-all in a REAL browser (trusted po
         })()`);
         ok(`…and opening the editor DISARMS the autosave the last keystroke armed (${JSON.stringify(armedBefore)})`, armedBefore.armed === true && armedBefore.afterOpen === null && armedBefore.stashed === 'still typing my draft' && armedBefore.box === 'first');
         ok(`…and another client's draft sync lands on the STASHED draft, never on the rewrite (${JSON.stringify(drafts)})`, drafts.kept === 'first, being rewritten' && drafts.stashed === 'a draft from another client' && drafts.afterEsc === 'a draft from another client');
+      }
+      // ── ROUND-3 VERIFIER, finding 1: THE GUARD COMPARED THE WRONG STRING.
+      // `_send` trims before it dispatches, and `_pendingEdit` stored only the
+      // TRIMMED payload, while _resolvePendingEdit compared it against the RAW
+      // textarea. Any rewrite ending in a space or a newline — i.e. every
+      // multi-line one — therefore took the "the user typed something else"
+      // early return on EVERY outcome, silently disarming the round-2 MAJOR
+      // fix and resurrecting the round-1 spinner. The pending state now
+      // carries `raw` (what is in the BOX) and only that may be compared.
+      {
+        const setup = (draft) => `(() => {
+          window.__ci.setQueue(window.__items, ${CODEX_VERBS});
+          window.__ci._pendingSend = null;
+          window.__ci.setDisconnected(false);
+          document.getElementById('global-toasts')?.replaceChildren();
+          window.__ops = []; window.__sent = [];
+          const ta = document.querySelector('textarea');
+          ta.value = ${JSON.stringify(String(draft))};
+          VS.saveDraft('chat', 'sess-verbs', ${JSON.stringify(String(draft))});
+          return true;
+        })()`;
+        const rowState = (id) => `(document.querySelector('[data-queue-id="` + id + `"]')?.dataset.queueState || null)`;
+
+        // (a) THE OK OUTCOME. The measured consequence of the bail-out was not
+        // just "the draft did not come back": the rewrite stayed in the box, so
+        // the NEXT Send posted the queued message a second time as a new chat
+        // message, and the real draft was gone forever.
+        await evaljs(setup('my real draft'));
+        const okNl = await evaljs(`(() => {
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q1"]').click();
+          const ta = document.querySelector('textarea');
+          ta.value = 'line one\\nline two\\n';
+          window.__ci._send();
+          const frame = window.__ops[0];
+          window.__ci.setQueueOpResult('q1', true, '');
+          const afterOk = { box: ta.value, pending: !!window.__ci._pendingEdit, state: ` + rowState('q1') + ` };
+          window.__ci._send();                       // the very next Send
+          return { frame, afterOk, sent: window.__sent.map((f) => f.text), draft: VS.loadDraft('chat', 'sess-verbs') };
+        })()`);
+        ok(`a multi-line rewrite still goes on the wire TRIMMED (the payload was never the bug): ${JSON.stringify(okNl.frame)}`, okNl.frame?.op === 'edit' && okNl.frame?.extra?.text === 'line one\nline two');
+        ok(`finding 1(a): the ok result puts the pre-edit draft back even when the rewrite ended in a newline (${JSON.stringify(okNl.afterOk)})`, okNl.afterOk.box === 'my real draft' && okNl.afterOk.pending === false && okNl.afterOk.state === null);
+        ok(`…so the queued message is NOT posted a second time as a new chat message (${JSON.stringify(okNl.sent)})`, okNl.sent.length === 1 && okNl.sent[0] === 'my real draft');
+
+        // (b) REFUSED, ROW STILL QUEUED ⇒ straight back into edit mode.
+        await evaljs(setup('my real draft'));
+        const refusedWs = await evaljs(`(() => {
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q1"]').click();
+          const ta = document.querySelector('textarea');
+          ta.value = 'rewrite trailing space ';
+          window.__ci._send();
+          window.__ci.setQueueOpResult('q1', false, 'The agent could not be reached.');
+          const out = { box: ta.value, editing: window.__ci._editingQueueId, state: ` + rowState('q1') + `, title: document.querySelector('[data-queue-id="q1"]')?.getAttribute('title') || '' };
+          ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          return out;
+        })()`);
+        ok(`finding 1(b): a refusal of a rewrite ending in a SPACE still hands it back into edit mode (${JSON.stringify(refusedWs)})`, refusedWs.box === 'rewrite trailing space ' && refusedWs.editing === 'q1' && refusedWs.state === 'editing' && /could not be reached/.test(refusedWs.title));
+
+        // (c) THE ROW IS GONE ⇒ draft + toast. Without the fix the rewrite
+        // lived only in a volatile textarea: closing the window lost it.
+        await evaljs(setup('my real draft'));
+        const goneWs = await evaljs(`(() => {
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q2"]').click();
+          const ta = document.querySelector('textarea');
+          ta.value = 'gone-row rewrite\\n';
+          window.__ci._send();
+          window.__ci.setQueue([window.__items[0], window.__items[2]], ${CODEX_VERBS});
+          const out = { box: ta.value, draft: VS.loadDraft('chat', 'sess-verbs'), toast: document.getElementById('global-toasts')?.textContent || '', pending: !!window.__ci._pendingEdit };
+          window.__ci.setQueue(window.__items, ${CODEX_VERBS});
+          return out;
+        })()`);
+        ok(`finding 1(c): a rewrite ending in a newline whose ROW LEFT THE QUEUE is persisted as the draft, not just left in a volatile box (${JSON.stringify(goneWs)})`, goneWs.box === 'gone-row rewrite\n' && goneWs.draft === 'gone-row rewrite\n' && /kept in the input/.test(goneWs.toast) && goneWs.pending === false);
+
+        // (d) THE SPINNER. The socket-death and 20s paths write no row state
+        // at all, so a bail-out left the row 'pending' with no result ever
+        // coming — the round-1 finding-3 lie, resurrected by the skew.
+        await evaljs(setup('my real draft'));
+        const deadSock = await evaljs(`(() => {
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q1"]').click();
+          const ta = document.querySelector('textarea');
+          ta.value = 'disconnected rewrite\\n';
+          window.__ci._send();
+          const during = ` + rowState('q1') + `;
+          window.__ci.setDisconnected(true);
+          window.__ci.setDisconnected(false);
+          window.__ci.setQueue(window.__items, ${CODEX_VERBS});     // the reconnect republish
+          const out = { during, after: ` + rowState('q1') + `, box: ta.value, editing: window.__ci._editingQueueId, pending: !!window.__ci._pendingEdit };
+          ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          return out;
+        })()`);
+        ok(`finding 1(d): a dead socket ENDS the row's pending state for a whitespace-carrying rewrite too — no exit from _resolvePendingEdit may leave a spinner (${JSON.stringify(deadSock)})`, deadSock.during === 'pending' && deadSock.after !== 'pending' && deadSock.pending === false && deadSock.box === 'disconnected rewrite\n' && deadSock.editing === 'q1');
+
+        // NEGATIVE CONTROL for (a)–(d): the guard is not simply gone. A user
+        // who really did type something ELSE keeps their words — and the row
+        // still stops spinning.
+        await evaljs(setup('my real draft'));
+        const changedMind = await evaljs(`(() => {
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q1"]').click();
+          const ta = document.querySelector('textarea');
+          ta.value = 'rewrite\\n';
+          window.__ci._send();
+          ta.value = 'I changed my mind entirely';        // the user typed something ELSE
+          window.__ci.setDisconnected(true);
+          window.__ci.setDisconnected(false);
+          const out = { box: ta.value, state: ` + rowState('q1') + `, editing: window.__ci._editingQueueId, pending: !!window.__ci._pendingEdit };
+          window.__ci.setQueue(window.__items, ${CODEX_VERBS});
+          return out;
+        })()`);
+        ok(`negative control: text the user typed AFTER the send is never overwritten by either outcome (${JSON.stringify(changedMind)})`, changedMind.box === 'I changed my mind entirely' && changedMind.editing === null && changedMind.pending === false);
+        ok('…and that bail-out ALSO ends the row state (the guard may protect the text, never the spinner)', changedMind.state !== 'pending', changedMind);
+
+        // ── ROUND-3 VERIFIER, finding 2: THE SAME RACE, BEFORE SEND. The row
+        // being edited leaving the queue while the user is still TYPING went
+        // through `_cancelQueueEdit({silent:true})`, which overwrites the
+        // textarea with the pre-edit draft — no save, no toast, the words are
+        // simply gone. This window (seconds of typing) is far larger than the
+        // post-Send one finding 1 covers.
+        await evaljs(setup('my real draft'));
+        const typingLost = await evaljs(`(() => {
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q1"]').click();
+          const ta = document.querySelector('textarea');
+          ta.value = 'ten seconds of typing that must not vanish';    // NOT sent
+          window.__ci.setQueue([window.__items[1], window.__items[2]], ${CODEX_VERBS});
+          const out = { box: ta.value, draft: VS.loadDraft('chat', 'sess-verbs'), toast: document.getElementById('global-toasts')?.textContent || '', editing: window.__ci._editingQueueId };
+          window.__ci.setQueue(window.__items, ${CODEX_VERBS});
+          return out;
+        })()`);
+        ok(`finding 2: a republish that DRAINS the row being edited keeps the in-progress rewrite (${JSON.stringify(typingLost.box)})`, typingLost.box === 'ten seconds of typing that must not vanish' && typingLost.editing === null);
+        ok(`…persists it as the draft and says where it went (${JSON.stringify({ draft: typingLost.draft, toast: typingLost.toast.slice(0, 80) })})`, typingLost.draft === 'ten seconds of typing that must not vanish' && /kept in the input/.test(typingLost.toast));
+
+        // NEGATIVE CONTROL 1: an UNTOUCHED editor is not a rewrite — the row
+        // vanishing there restores the pre-edit draft silently, exactly as
+        // before (a toast for every drained queue would be noise).
+        await evaljs(setup('my real draft'));
+        const untouched = await evaljs(`(() => {
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q1"]').click();
+          const opened = document.querySelector('textarea').value;
+          window.__ci.setQueue([window.__items[1], window.__items[2]], ${CODEX_VERBS});
+          const out = { opened, box: document.querySelector('textarea').value, draft: VS.loadDraft('chat', 'sess-verbs'), toast: document.getElementById('global-toasts')?.textContent || '' };
+          window.__ci.setQueue(window.__items, ${CODEX_VERBS});
+          return out;
+        })()`);
+        ok(`negative control: an untouched editor whose row is drained restores the pre-edit draft, silently (${JSON.stringify(untouched)})`, untouched.opened === 'first' && untouched.box === 'my real draft' && untouched.draft === 'my real draft' && untouched.toast === '');
+
+        // NEGATIVE CONTROL 2: a republish that KEEPS the edited row must not
+        // touch the edit at all (peer messages republish constantly).
+        await evaljs(setup('my real draft'));
+        const kept = await evaljs(`(() => {
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q1"]').click();
+          const ta = document.querySelector('textarea');
+          ta.value = 'still rewriting';
+          window.__ci.setQueue([window.__items[0], window.__items[2], { id: 'q9', msgId: '', preview: 'a peer just queued this', kind: 'peer', from: 'session C' }], ${CODEX_VERBS});
+          const out = { box: ta.value, editing: window.__ci._editingQueueId, toast: document.getElementById('global-toasts')?.textContent || '' };
+          ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          window.__ci.setQueue(window.__items, ${CODEX_VERBS});
+          return out;
+        })()`);
+        ok(`negative control: a republish that keeps the edited row changes nothing (${JSON.stringify(kept)})`, kept.box === 'still rewriting' && kept.editing === 'q1' && kept.toast === '');
+
+        // NEGATIVE CONTROL 3: the USER abandoning the edit (Esc) is still the
+        // plain restore — the fix must not turn every cancel into a toast.
+        await evaljs(setup('my real draft'));
+        const escRewrite = await evaljs(`(() => {
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q1"]').click();
+          const ta = document.querySelector('textarea');
+          ta.value = 'a rewrite the user themself abandons';
+          ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          return { box: ta.value, draft: VS.loadDraft('chat', 'sess-verbs'), toast: document.getElementById('global-toasts')?.textContent || '' };
+        })()`);
+        ok(`negative control: Esc still restores the draft over a rewrite, with no toast (${JSON.stringify(escRewrite)})`, escRewrite.box === 'my real draft' && escRewrite.draft === 'my real draft' && escRewrite.toast === '');
+
+        // ── THE SAME CLASS, TWO PATHS THE TWO FINDINGS LEFT OPEN. Both are
+        // "typed words exist ONLY in a textarea": law ② switches the debounced
+        // autosave OFF for the whole edit, so the "your draft is already saved"
+        // that covers ordinary typing does not hold here.
+        // (i) THE BAIL-OUT ITSELF. The guard that protects text the user typed
+        // AFTER the send returns without persisting it — the store still holds
+        // the pre-edit draft, so that text died with the window.
+        await evaljs(setup('my real draft'));
+        const bailDraft = await evaljs(`(() => {
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q1"]').click();
+          const ta = document.querySelector('textarea');
+          ta.value = 'rewrite\\n';
+          window.__ci._send();
+          ta.value = 'the words I typed while it was saving';
+          window.__ci.setQueueOpResult('q1', true, '');
+          const out = { box: ta.value, draft: VS.loadDraft('chat', 'sess-verbs'), pending: !!window.__ci._pendingEdit };
+          window.__ci.setQueue(window.__items, ${CODEX_VERBS});
+          return out;
+        })()`);
+        ok(`the bail-out PERSISTS the text it protects — the edit is over, so the draft channel belongs to the box again (${JSON.stringify(bailDraft)})`, bailDraft.box === 'the words I typed while it was saving' && bailDraft.draft === 'the words I typed while it was saving' && bailDraft.pending === false);
+
+        // NEGATIVE CONTROL: the ordinary ok outcome must NOT push the rewrite
+        // into the draft store — the pre-edit draft is what comes back, in the
+        // box AND in the store (law ②: edit mode borrows the textarea only).
+        await evaljs(setup('my real draft'));
+        const okDraft = await evaljs(`(() => {
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q1"]').click();
+          const ta = document.querySelector('textarea');
+          ta.value = 'first, rewritten once more\\n';
+          window.__ci._send();
+          window.__ci.setQueueOpResult('q1', true, '');
+          const out = { box: ta.value, draft: VS.loadDraft('chat', 'sess-verbs') };
+          window.__ci.setQueue(window.__items, ${CODEX_VERBS});
+          return out;
+        })()`);
+        ok(`negative control: a save that LANDED leaves the pre-edit draft in the store, never the rewrite (${JSON.stringify(okDraft)})`, okDraft.box === 'my real draft' && okDraft.draft === 'my real draft');
+
+        // (ii) THE VIEW TORN DOWN MID-EDIT (window closed, tab swapped, view
+        // replaced). Its own ChatInput on its own session id, so disposing it
+        // cannot disturb the rest of this suite.
+        const disposeCase = await evaljs(`(() => {
+          const mk = (sid) => {
+            const ci = new VS.ChatInput({ send(){} }, sid, { onSend(){}, onInterrupt(){}, onQueueOp: () => true });
+            document.body.appendChild(ci.element);
+            ci.setQueue([{ id: 'd1', msgId: 'md1', preview: 'queued', text: 'the queued message', kind: 'user' }], ${CODEX_VERBS});
+            const ta = ci.element.querySelector('textarea');
+            ta.value = 'the draft I had';
+            VS.saveDraft('chat', sid, 'the draft I had');
+            return { ci, ta };
+          };
+          const out = {};
+          // typed, never sent ⇒ the words are kept
+          { const { ci, ta } = mk('sess-dispose-a');
+            ci.element.querySelector('[data-queue-op="edit"][data-queue-id="d1"]').click();
+            ta.value = 'a rewrite the closing window must not eat';
+            ci.dispose(); ci.element.remove();
+            out.typed = VS.loadDraft('chat', 'sess-dispose-a'); }
+          // NEGATIVE CONTROL 1: an untouched editor is not a rewrite
+          { const { ci } = mk('sess-dispose-b');
+            ci.element.querySelector('[data-queue-op="edit"][data-queue-id="d1"]').click();
+            ci.dispose(); ci.element.remove();
+            out.untouched = VS.loadDraft('chat', 'sess-dispose-b'); }
+          // NEGATIVE CONTROL 2: the frame is already OUT ⇒ the text is on its
+          // way into the queued message; stashing a copy would leave the user
+          // their own queue item as a draft.
+          { const { ci, ta } = mk('sess-dispose-c');
+            ci.element.querySelector('[data-queue-op="edit"][data-queue-id="d1"]').click();
+            ta.value = 'a rewrite already on the wire';
+            ci._send();
+            out.sentPending = !!ci._pendingEdit;
+            ci.dispose(); ci.element.remove();
+            out.sent = VS.loadDraft('chat', 'sess-dispose-c'); }
+          return out;
+        })()`);
+        ok(`a view torn down mid-edit keeps the UNSENT rewrite (edit mode holds the autosave off, so nothing else would have) (${JSON.stringify(disposeCase.typed)})`, disposeCase.typed === 'a rewrite the closing window must not eat');
+        ok(`negative control: an untouched editor leaves the real draft in the store (${JSON.stringify(disposeCase.untouched)})`, disposeCase.untouched === 'the draft I had');
+        ok(`negative control: a rewrite already ON THE WIRE is not stashed as the draft (${JSON.stringify({ pending: disposeCase.sentPending, draft: disposeCase.sent })})`, disposeCase.sentPending === true && disposeCase.sent === 'the draft I had');
+        await evaljs(`(() => { window.__ci.setQueue(window.__items, ${CODEX_VERBS}); document.querySelector('textarea').value = ''; window.__ci._pendingSend = null; document.getElementById('global-toasts')?.replaceChildren(); })()`);
       }
       // THE HEADER CONTROL is per harness, from the verb table — codex has
       // run-all, an ACP harness does not, and claude has no strip at all.
