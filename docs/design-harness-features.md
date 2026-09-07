@@ -247,6 +247,8 @@ inputModes: {
 > 处置：`caps.inProgressTools` 全线 **false**（服务器 + 客户端镜像），消费分支/广播/attach 字段/`.chat-tool-inflight` 全部保留为**休眠代码**并在注释里点名那个吞掉它的回调；kb 与本节都按「没有任何用户看得见这个点」的口径写。翻牌条件不是读到新 schema，而是 test-stdout-registry 的**上线可达性腿**（每次运行都用装好的 CLI 真跑一个只读工具）观测到 ≥1 条 —— 那条腿在**两个方向**上断言 caps 与线路一致，所以它红的时候就是该翻牌的时候。
 > **教训（记进 §8.1）**：一个记录「在 schema 里 / 有 describe / 有发射点」都不等于**到达我们**；自己合成 fixture 的套件永远分不清「解析对了」与「从没来过」。能力位是**对某个界面的承诺**，没有线路证据就不许为真。
 
+> **落地修订（round 5）：这条上线可达性腿的卫生。** 它跑在**用户的真 $HOME** 上（要真凭据，不能给一次性 HOME），而它每次 `npm run ci` 都会跑 —— 于是 CLI 为它写的真转录被产品自己的 `discoverClaudeSessions` 当成 12 条 `status:"stopped"` 的垃圾会话列进侧边栏（每次 push 一条）。round 4 只修了副作用的 env 一半。现在探针**什么都不留**（自删临时 cwd + 转录 + per-session env 目录；启动时扫掉 >10 分钟的旧残留；原始 stdout 改成一个固定路径每次覆盖），回归钉的是**后果**——删完之后向 `session-store` 要一次发现，探针会话必须为 0，负控是那份原始抓取仍在。细节见 §8.2 第 21 条。
+
 ### 2.6 claude init 帧加宽 + `commands_changed` 后续推送 —— M
 
 **现状**：`_processSystem` 的 init 分支只取三个字段（message-manager.js:398：`raw.model` / `raw.permissionMode` / `raw.slash_commands`）。整帧还有 `tools` / `mcp_servers[{name,status}]` / `agents` / `skills` / `plugins[{name,path,source,version}]` / `plugin_errors[{plugin,type,message}]` / `terminal_slash_commands` / `output_style` / `memory_paths{auto,team}` / `betas` / `claude_code_version`。逐个 grep：全 0。
@@ -314,6 +316,7 @@ inputModes: {
 > `tombstone` 在我们的线路上一次都没出现过：24 份生产 buffer 0 条、上线可达性探针 0 条，而且 `grep -rl '"type":"tombstone"' ~/.claude/projects/` = **0 个文件**，所以重建/gap 那条持久化路径也不可能产出它。
 > 但它与上面两条**不同类**，不能一并降级：它是**被 `yield` 到查询流上**的（`for(let eu of Bu) yield{type:"tombstone",message:eu}`，185068785 / 185075330），不是交给回调的 —— 也就是「没观测到」而非「结构上到不了」。它也**不可廉价触发**：两个发射点都挂在**服务端 refusal-fallback** 路径上（`ks.type==="refusal_no_fallback"`、以及带 `server_fallback` / `api_refusal_category` 的那支），即安全分类器中途拒答后换模型；没有不去**故意诱发一次拒答**就能确定性复现的探针，那不是测试套件该做的事。
 > 处置：`_processTombstone` 与 `superseded`（隐藏）渲染**原样保留为休眠代码**并按 rebuild/gap 三条路钉住行为；kb-features / kb-file-structure / 本节一律写明「今天生效的撤回通道是 codex `thread_rolled_back`（3 份真实 rollout 验证过），claude 那半未在线路上观测到」。真发生一次 refusal fallback 时它就已经是对的。
+> **round 5 复核：本节无变化。** 这一轮的可达性腿又跑了一次（`tombstone` 仍 0 条），四条 rebuild/gap 路径的 computed-style 断言与两个负控全绿；round-5 的三条缺陷都落在 §2.11 与探针卫生上，不涉及撤回语义。
 
 ### 2.11 `compact_progress`：压缩进度 —— S
 
@@ -327,6 +330,11 @@ inputModes: {
 > `system/status{status:"compacting"}` → `system/hook_started SessionStart:compact` → `hook_response` → `system/status{status:null,compact_result:"success"}` → `system/compact_boundary{trigger:"auto"}`，**0 条 `compact_progress`**。24 份 buffer 合计：1 条 compact_boundary、0 条 compact_progress。
 > 处置：§2.11 改由 `system/status` 驱动 —— `_streamingKind`、spinner label、以及「Compact now」卡片的阶段/结局全部来自它，并顺带覆盖 **AUTO 压缩**（用户从没打过 `/compact`，ws-handler 的发送点结构上看不见它，而这正是长会话唯一会遇到的那种）；压缩进行中的 `hook_started` 是这条通道**唯一**的中间阶段，严格门控在 `_streamingKind==='compacting'` 内（普通 turn 里 hook_started 极常见）。`'status'` 进 `HANDLED_SYSTEM_SUBTYPES`（card-less，理由与 api_retry/session_state_changed 同）；同一 subtype 还承载 CLI 的**权限模式回声**（`{status:null,permissionMode}`，199038328），必须不被读成「压缩结束」—— 判据是有没有结局字段。`compact_progress` 分支保留为**形状对等**，注释写明没有任何 VibeSpace 拉起的 CLI 发出过它，test-stdout-registry 的那条腿标题也从「线路上的真拼写」改成形状对等说明。
 > 收尾还有一条诚实性：`compact_end` **不再**回落到那句「要 1–2 分钟，别按 Stop」——它描述的事情已经结束了；卡片改说真实结局（`compact_result` / `compact_error`）。
+
+> **落地修订（round 5）：那个「终态」只属于它描述的那次压缩，不属于这个视图的余生。**
+> round 4 让 `compact_end` **粘住**（正在看这次压缩的卡片不该在它刚成功的瞬间倒回致歉句），但**没有任何地方清掉它**。于是一个视图的**第一次**压缩——现在恰好包含 round 4 才接上的 **AUTO** 压缩，那是用户没有任何动作就会发生的——把 `_compactStage` 永久钉成 `{event:'compact_end',result:'success'}`；此后每一张「Prompt is too long」引导卡都在按钮下面写「Compaction finished.」，而这张卡存在的全部意义就是那句可操作的指引（1–2 分钟别按 Stop / 它说 Conversation too long 就去终端 Esc Esc 回退几条再压）。375×667 headless chrome 复现（真 bundle、真 server，按服务器为生产 AUTO 捕获所构建的帧逐条回放，屏幕上先没有卡片）：held stage = `{"event":"compact_end","result":"success"}`，随后建的卡片 `.chat-ctx-full-hint` 读到 `Compaction finished.`。
+> 修法=**把「有没有压缩在跑」变成一个具名判定**：`compactInFlight()`（`_compactStage` 存在且 `event !== 'compact_end'`），`appendContextFullCard` 只在它为真时用阶段句、否则用 `compactFallbackHint()`；`setCompactStage` 照旧改写**已经在屏幕上**的每条 hint ⇒ 看着这次压缩的卡片保留结局（round 4 不回退），后建的卡片重新可操作。
+> 同一轮还有一条：**「结束了」不等于「成功了」**。`compact_end` 带**空结局**是真的线路形状——PreCompact hook **拦下**压缩时 CLI 发的是一条不带任何 metadata 的 `sdk_status status:null`（2.1.257 `if(ye.blockedBy) …onCompactEvent({type:"sdk_status",status:null})`），而保留下来的 `compact_progress` 那条道每一帧都硬写 `result:null`。两种情况都**什么都没压**，卡片却会说「Compaction finished.」。⇒ `compactHintText` 只在 `result === 'success'` 时说「完成」，空结局说「Compaction ended.」（新增 zh/ja 词条），失败/其它结局仍按原样说出 CLI 自己的理由。
 
 ### 2.12 claude 的两个用户通道工具 SendUserMessage / SendUserFile —— S/M（决策 8）
 
@@ -555,3 +563,11 @@ r2 稿经独立核查后逐条订正，已在正文就地改写的不再重复�
 18. **`tombstone` 是 UNVERIFIED，不是 DISPROVEN。** 它被 `yield` 到查询流（不是回调），但 24 份 buffer、探针、以及 7450 份 `~/.claude/projects/*.jsonl` 里都 0 命中；两个发射点都在**服务端 refusal-fallback** 路径上，没有不诱发拒答就能确定性触发的探针。⇒ 撤回通道今天**实际上只有 codex**（`thread_rolled_back`，3 份真实 rollout 验证）；claude 那半保留为休眠代码并在 kb 里如实标注。
 
 **为什么前两轮都没抓到**：三条的回归都是套件**自己合成**的记录 —— 那种腿只能证明「我们解析对了」，永远证不了「它来过」。**修法是机制而不是措辞**：test-stdout-registry 现在有一条**上线可达性腿**（scripts/probe-claude-stdout.mjs：用装好的 CLI、wrapper 的精确 flag 形状、跑一个只读工具、最便宜的模型，无 CLI/没跑起工具/超时一律**响亮 SKIP**——测不了就绝不当成不存在的证据），它在**两个方向**上断言 caps 与线路一致：今天 0 条 ⇒ 能力位必须为 false；哪天真到了 ⇒ 这条腿变红并直接写明去哪两个文件把它翻成 true。
+
+### 8.2 第四次核查（round 5，2026-09-07）——round 4 自己带进来的三条
+
+19. **粘住的压缩终态没有归属期。** 见 §2.11 的 round-5 修订：`compact_end` 被保留却从不清除，一个视图的第一次压缩（含 AUTO）永久替换掉「Prompt is too long」卡片的可操作指引。⇒ `compactInFlight()` 把「阶段」和「这张卡刚建出来该说什么」分开；已经在屏幕上的卡片保留结局，新建的卡片重新可操作。
+20. **`compact_end` 的空结局被读成成功。** PreCompact hook 拦下压缩（`blockedBy`）时 CLI 发的是不带 metadata 的 `sdk_status status:null`，我们的 `system/status` 分支照样合成 `compact_end{result:null}`；保留下来的 `compact_progress` 那条道更是每帧硬写 `result:null`。两种情况什么都没压，卡片却说「Compaction finished.」。⇒ 只有 CLI 自己的 `"success"` 才配说完成，空结局说「Compaction ended.」。
+21. **上线可达性腿在用户的真 $HOME 上留垃圾。** 它需要这台机器的真凭据，所以**不能**给它一个一次性 HOME —— 于是每次 `npm run ci`（即每次非 docs 的 push，走强制 pre-push 门）都让 CLI 在 `~/.claude/projects/<cwd 编码>/` 里写下一份真转录，`/tmp/vs-wire-probe-*` 也留一个目录。用产品**自己的** `discoverClaudeSessions` 实测：4480 个会话里 **12 个是探针会话**（`status:"stopped"`，名字是探针那句 prompt），也就是每次 push 往用户侧边栏塞一条垃圾会话 + 一个垃圾 cwd 分组；连 CLI 的 `~/.claude/session-env/<sid>/` 也各留一个。round 4 修掉了这个副作用的 env 一半（剥掉 `VIBESPACE_*`，免得 hook 去动真任务板），文件系统这一半没修。⇒ 探针现在**什么都不留**：报告时删掉自己的临时 cwd、CLI 为它写的转录、以及那些 per-session env 目录（`rmdir` 非递归，将来 CLI 往里放东西就宁可不删）；启动时**扫掉**早先版本留下的（只扫 mtime > 10 分钟的，并发跑的另一个探针不会被误伤；前缀由 `os.tmpdir()` 经 CLI 自己的 `cwd.replace(/[/._]/g,'-')` 编码算出，精确到不可能命中别的目录）；原始 stdout 改写到**一个固定路径**（`$TMPDIR/vs-wire-probe.last.jsonl`，每次覆盖）而不是每次一份。回归钉的是**后果**：删除后向 `session-store` 要一次发现，探针会话数必须为 0；负控=那份原始抓取仍然存在且不在被删掉的 cwd 里（清理不等于毁掉证据）。实测：扫除后 12 → 0（项目目录、/tmp 目录、session-env 各 12 个），发现结果 4480 → 4468、探针会话 0。
+
+**通则（这一轮新增）**：① 一个「最后已知状态」被**保留**时，必须同时回答「它属于谁、到什么时候为止」——否则它就成了那个视图的永久声音；② **每次 push 都会跑的测试没有资格在用户的真实数据目录里留下东西**，副作用要按「进程/环境/文件系统」逐面清点，修了一面不等于修完。

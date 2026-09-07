@@ -3447,7 +3447,15 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
    *
    *  A compact_end is KEPT, not dropped: "how it ended" is the last true thing
    *  we know, and a card still on screen would otherwise silently fall back to
-   *  the 1–2-minute apology the moment the compaction succeeded. */
+   *  the 1–2-minute apology the moment the compaction succeeded.
+   *
+   *  …but a HELD terminal stage belongs to the compaction it describes, not to
+   *  the view forever. It is pushed into the cards that WATCHED the compaction
+   *  (setCompactStage) and no further: a card BUILT later opens on the guidance
+   *  again, because `compactInFlight()` is false. Without that split the first
+   *  compaction of a view — including the AUTO one, which no user action
+   *  precedes — silently replaced the actionable sentence every later "Prompt
+   *  is too long" card exists to give. */
   _onCompactProgress(msg) {
     this._compactStage = {
       event: msg.event || '',

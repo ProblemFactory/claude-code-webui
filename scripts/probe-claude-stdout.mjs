@@ -24,15 +24,83 @@
 // Everything that is not a clean measurement reports `skip` with a reason — a
 // probe that cannot measure must never be read as evidence of absence.
 //
+// IT MUST LEAVE NOTHING BEHIND. This runs inside `npm run ci`, i.e. on EVERY
+// non-docs push through the mandatory pre-push gate, against the developer's
+// REAL $HOME — the probe needs the machine's actual claude credentials, so it
+// cannot be given a throwaway HOME. A real CLI turn therefore writes a real
+// transcript to `~/.claude/projects/<cwd-encoded>/`, and VibeSpace's own
+// discovery lists every one of them as a stopped session in the sidebar (12
+// junk sessions had accumulated by the time this was measured, one per push,
+// each with its own cwd folder group). The env half of the same lesson is
+// below (VIBESPACE_* stripped so the hook cannot touch the task board); this
+// is the filesystem half: the temp cwd, the transcript the CLI wrote for it,
+// and the CLI's per-session env dir are all removed when the probe reports,
+// old ones are swept at startup, and the raw stdout goes to ONE fixed path
+// that is overwritten each run instead of accumulating.
+//
 // Output (stdout, one line): {"ok":true, version, args, cwd, toolUses,
-//   toolResults, types:{<type>:<count>}, raw} | {"skip":"<reason>"}
+//   toolResults, types:{<type>:<count>}, raw, cleaned} | {"skip":"<reason>"}
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
 const BUDGET_MS = Number(process.env.VIBESPACE_WIRE_PROBE_MS || 90000);
-const out = (o) => { process.stdout.write(JSON.stringify(o) + '\n'); process.exit(0); };
+const PREFIX = 'vs-wire-probe-';
+const HOME = process.env.HOME || os.homedir();
+const PROJECTS = path.join(HOME, '.claude', 'projects');
+const SESSION_ENV = path.join(HOME, '.claude', 'session-env');
+// cwdToProjectDir (src/session-store.js) — the CLI's own deterministic
+// encoding. Built from os.tmpdir() so the sweep prefix is EXACT and can never
+// match a directory that is not one of this probe's throwaway cwds.
+const encode = (p) => p.replace(/[/._]/g, '-');
+const PROJ_PREFIX = encode(path.join(os.tmpdir(), PREFIX));
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const rmDir = (p) => { try { fs.rmSync(p, { recursive: true, force: true }); } catch { } };
+// The CLI leaves an EMPTY dir per session id. rmdir (never recursive): if a
+// future CLI puts something in there, this refuses rather than deleting it.
+const rmEmptyDir = (p) => { try { fs.rmdirSync(p); } catch { } };
+
+/** Remove the transcript + session-env the CLI wrote for ONE throwaway cwd.
+ *  `ids` may be empty — the project dir's own `<uuid>.jsonl` names are the
+ *  authoritative list, which is also how a LEFTOVER dir gets fully cleaned. */
+function purgeProject(projDir, ids = []) {
+  if (path.dirname(projDir) !== PROJECTS || !path.basename(projDir).startsWith(PROJ_PREFIX)) return 0;
+  const sids = new Set(ids.filter((s) => UUID.test(s)));
+  try { for (const f of fs.readdirSync(projDir)) if (f.endsWith('.jsonl') && UUID.test(f.slice(0, -6))) sids.add(f.slice(0, -6)); } catch { }
+  for (const sid of sids) rmEmptyDir(path.join(SESSION_ENV, sid));
+  rmDir(projDir);
+  return 1;
+}
+
+// ── SWEEP of everything earlier versions of this probe left behind. Runs
+//    BEFORE the CLI check, so even a machine with no claude cleans up.
+//    STALE ONLY (>10min): a concurrently running probe's cwd must survive.
+const STALE_MS = 10 * 60 * 1000;
+const stale = (p) => { try { return Date.now() - fs.statSync(p).mtimeMs > STALE_MS; } catch { return false; } };
+let swept = 0;
+for (const d of (() => { try { return fs.readdirSync(os.tmpdir(), { withFileTypes: true }); } catch { return []; } })()) {
+  const p = path.join(os.tmpdir(), d.name);
+  if (d.isDirectory() && d.name.startsWith(PREFIX) && stale(p)) { rmDir(p); swept++; }
+}
+for (const d of (() => { try { return fs.readdirSync(PROJECTS, { withFileTypes: true }); } catch { return []; } })()) {
+  const p = path.join(PROJECTS, d.name);
+  if (d.isDirectory() && d.name.startsWith(PROJ_PREFIX) && stale(p)) swept += purgeProject(p);
+}
+
+let cwd = null;
+const sessionIds = new Set();
+let cleaned = null;
+/** Idempotent, and safe before the temp dir exists (every early `skip` path
+ *  goes through `out` too). */
+function cleanupRun() {
+  if (!cwd || cleaned) return;
+  purgeProject(path.join(PROJECTS, encode(cwd)), [...sessionIds]);
+  if (path.dirname(cwd) === os.tmpdir() && path.basename(cwd).startsWith(PREFIX)) rmDir(cwd);
+  cleaned = { cwd, swept };
+}
+const out = (o) => { cleanupRun(); process.stdout.write(JSON.stringify({ ...o, cleaned }) + '\n'); process.exit(0); };
 
 let bin = null;
 try { bin = execFileSync('sh', ['-c', 'command -v claude'], { encoding: 'utf8' }).trim(); } catch { }
@@ -40,7 +108,7 @@ if (!bin) out({ skip: 'no claude CLI on PATH' });
 let version = '?';
 try { version = execFileSync(bin, ['--version'], { encoding: 'utf8', timeout: 20000 }).trim(); } catch (e) { out({ skip: `claude --version failed: ${e.message}` }); }
 
-const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-wire-probe-'));
+cwd = fs.mkdtempSync(path.join(os.tmpdir(), PREFIX));
 for (const n of ['a', 'b', 'c']) fs.writeFileSync(path.join(cwd, `probe-${n}.txt`), `probe file ${n}\nsecond line\n`);
 
 // chat-wrapper.js's flags, verbatim (data/bin/chat-wrapper.js "Ensure
@@ -66,25 +134,36 @@ if (env.PATH) env.PATH = env.PATH.split(':').filter((d) => !/(^|\/)data\/bin(\/|
 let child;
 try { child = spawn(bin, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] }); } catch (e) { out({ skip: `spawn failed: ${e.message}` }); }
 
-const rawPath = path.join(cwd, 'stdout.jsonl');
-const raw = fs.createWriteStream(rawPath);
+// ONE fixed path, overwritten each run and OUTSIDE the throwaway cwd (which is
+// deleted): the raw capture is for reading a failure, and a per-run copy is
+// exactly the accumulation this probe stopped doing. Buffered and written
+// synchronously at the end — `out` exits the process, which would truncate a
+// write stream anyway. Capped so a runaway CLI cannot eat memory.
+const rawPath = path.join(os.tmpdir(), 'vs-wire-probe.last.jsonl');
+const RAW_CAP = 8 * 1024 * 1024;
+const rawChunks = []; let rawBytes = 0;
 const types = {}; let toolUses = 0, toolResults = 0, buf = '', stderr = '';
 const note = (t) => { types[t] = (types[t] || 0) + 1; };
 let done = false;
 const finish = (extra) => {
   if (done) return; done = true;
   clearTimeout(timer);
+  try { fs.writeFileSync(rawPath, Buffer.concat(rawChunks)); } catch { }
   out({ ok: true, version, bin, args, cwd, raw: rawPath, toolUses, toolResults, types, stderr: stderr.slice(-400), ...extra });
 };
 
 child.stdout.on('data', (d) => {
-  raw.write(d); buf += d.toString();
+  if (rawBytes < RAW_CAP) { rawChunks.push(d); rawBytes += d.length; }
+  buf += d.toString();
   let i;
   while ((i = buf.indexOf('\n')) >= 0) {
     const line = buf.slice(0, i); buf = buf.slice(i + 1);
     if (!line.trim()) continue;
     let r; try { r = JSON.parse(line); } catch { note('«non-json»'); continue; }
     note(r.type === 'system' ? 'system/' + r.subtype : r.type);
+    // Every session id the CLI names is one we made it create — the cleanup
+    // has to know them to remove the per-session env dirs it leaves behind.
+    if (typeof r.session_id === 'string') sessionIds.add(r.session_id);
     if (r.type === 'assistant' && Array.isArray(r.message?.content)) for (const b of r.message.content) if (b?.type === 'tool_use') toolUses++;
     if (r.type === 'user' && Array.isArray(r.message?.content)) for (const b of r.message.content) if (b?.type === 'tool_result') toolResults++;
     if (r.type === 'control_request' && r.request?.subtype === 'can_use_tool') {

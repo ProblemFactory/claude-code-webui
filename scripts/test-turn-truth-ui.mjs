@@ -286,6 +286,99 @@ if (!opened?.ok) { console.error(pageErrors.join('\n')); done(); }
   check(`…and so does the outcome sentence (${m?.wEnd}px)`, m?.endInViewport === true && m?.wEnd > 0 && m.wEnd <= 375, m);
 }
 
+// ── ②b THE STAGE BELONGS TO ITS COMPACTION, NOT TO THE VIEW ────────────────
+// Round 4 made a `compact_end` STICK (a card watching the compaction must not
+// revert to "this takes 1–2 minutes" the moment it finished). Round-5 finding:
+// nothing ever cleared it, so the FIRST compaction of a view — now including
+// the AUTO one round 4 wired up, which no user action precedes — permanently
+// replaced the guidance card's actionable sentence for the rest of the view's
+// life. The exact frames the server builds for the production AUTO capture are
+// replayed here with NO card on screen; the card is appended AFTERWARDS, and
+// what it must read is the thing it exists to say.
+{
+  const m = await evaljs(`(async () => {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const v = window.__v;
+    for (const el of [...v._messageList.querySelectorAll('.chat-ctx-full')]) el.closest('.chat-msg').remove();
+    v._compactStage = null;
+    v._renderers.setCompactStage(null);
+    // THE PRODUCTION AUTO COMPACTION (data/session-buffers/sess-5-*.buf):
+    // status compacting -> hook_started SessionStart:compact -> status null +
+    // compact_result success. Nobody typed /compact; there is no card yet.
+    v._onCompactProgress({ event: 'compact_start', hookType: null, hint: null, result: null, error: null });
+    v._onCompactProgress({ event: 'hooks_start', hookType: 'SessionStart:compact', hint: null, result: null, error: null });
+    v._onCompactProgress({ event: 'compact_end', hookType: null, hint: null, result: 'success', error: null });
+    await sleep(80);
+    const held = JSON.stringify(v._compactStage);
+    // ...and only NOW does the context fill up again
+    const card = v._renderers.appendContextFullCard('Prompt is too long');
+    await sleep(80);
+    const hint = card.querySelector('.chat-ctx-full-hint');
+    const later = hint.textContent.trim();
+    const r = hint.getBoundingClientRect();
+    const btn = card.querySelector('.chat-ctx-compact-btn');
+    // NEGATIVE CONTROL 1: a card built while a compaction IS in flight still
+    // opens on the live stage (that is what round 4 bought and must survive).
+    v._onCompactProgress({ event: 'compact_start', hookType: null, hint: 'summarizing 812 messages', result: null, error: null });
+    await sleep(60);
+    const card2 = v._renderers.appendContextFullCard('Prompt is too long');
+    await sleep(60);
+    const liveNew = card2.querySelector('.chat-ctx-full-hint').textContent.trim();
+    // NEGATIVE CONTROL 2: the card that WATCHED the compaction keeps its
+    // outcome - the round-4 behaviour, unchanged.
+    v._onCompactProgress({ event: 'compact_end', hookType: null, hint: null, result: 'success', error: null });
+    await sleep(60);
+    const watchedEnd = card2.querySelector('.chat-ctx-full-hint').textContent.trim();
+    // ...and a THIRD card, built after that end, is actionable again.
+    const card3 = v._renderers.appendContextFullCard('Prompt is too long');
+    await sleep(60);
+    const third = card3.querySelector('.chat-ctx-full-hint').textContent.trim();
+    for (const el of [card, card2, card3]) el.remove();
+    return { held, later, liveNew, watchedEnd, third,
+             hasBtn: !!btn, w: Math.round(r.width), inViewport: r.left >= -1 && r.right <= innerWidth + 1 };
+  })()`);
+  const APOLOGY = /1.2 minutes|1–2|1〜2|do not press Stop|不要按 Stop|Stop を押さないで/;
+  check('the terminal stage is still HELD after the compaction (round 4: the last true thing we know)', /compact_end/.test(m?.held || ''), m?.held);
+  check('…but a card built AFTER it opens on the actionable guidance, not on "Compaction finished."',
+    APOLOGY.test(m?.later || '') && !/finish|完成|完了/.test(m?.later || ''), m?.later);
+  check('…with its Compact-now button still there (the card is unchanged apart from the sentence)', m?.hasBtn === true, m);
+  check('NEGATIVE CONTROL: a card built while a compaction is IN FLIGHT still opens on the live stage', /summarizing 812 messages/.test(m?.liveNew || ''), m?.liveNew);
+  check('NEGATIVE CONTROL: the card that WATCHED the compaction keeps its outcome (round 4 preserved)', /finish|完成|完了/.test(m?.watchedEnd || ''), m?.watchedEnd);
+  check('…and the next card after that end is actionable again (the stage never becomes the view’s permanent voice)', APOLOGY.test(m?.third || ''), m?.third);
+  check(`the late card's hint still fits the 375px viewport (${m?.w}px)`, m?.inViewport === true && m?.w > 0 && m.w <= 375, m);
+}
+
+// ── ②c "ENDED" IS NOT "SUCCEEDED" ───────────────────────────────────────────
+// The wire really produces a `compact_end` with NO outcome: a PreCompact hook
+// that BLOCKS the compaction makes the CLI emit `sdk_status status:null` with
+// no metadata at all, and the retained `compact_progress` lane hardcodes
+// result:null on every frame. Nothing was compacted — the card must not say it
+// finished.
+{
+  const m = await evaljs(`(async () => {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const v = window.__v;
+    for (const el of [...v._messageList.querySelectorAll('.chat-ctx-full')]) el.closest('.chat-msg').remove();
+    v._compactStage = null; v._renderers.setCompactStage(null);
+    const card = v._renderers.appendContextFullCard('Prompt is too long');
+    await sleep(60);
+    v._onCompactProgress({ event: 'compact_start', hookType: null, hint: null, result: null, error: null });
+    await sleep(40);
+    v._onCompactProgress({ event: 'compact_end', hookType: null, hint: null, result: null, error: null });
+    await sleep(60);
+    const blocked = card.querySelector('.chat-ctx-full-hint').textContent.trim();
+    v._onCompactProgress({ event: 'compact_end', hookType: null, hint: null, result: 'success', error: null });
+    await sleep(60);
+    const success = card.querySelector('.chat-ctx-full-hint').textContent.trim();
+    card.remove();
+    return { blocked, success };
+  })()`);
+  check('a compact_end with NO outcome says the compaction ENDED, never that it finished (a hook-blocked compaction compacted nothing)',
+    !!m?.blocked && !/finished|完成了|完了しました/.test(m.blocked) && /ended|结束|終了/i.test(m.blocked), m?.blocked);
+  check('…while POSITIVE CONTROL compact_result:"success" does say it finished (the two are not collapsed)',
+    /finish|完成|完了/.test(m?.success || '') && m.success !== m.blocked, JSON.stringify([m?.success, m?.blocked]));
+}
+
 // ── ③ retraction: two kinds, two treatments ─────────────────────────────────
 {
   const m = await evaljs(`(async () => {

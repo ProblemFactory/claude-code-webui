@@ -1271,6 +1271,25 @@ class ChatRenderers {
     for (const el of this._messageList?.querySelectorAll?.('.chat-ctx-full-hint') || []) el.textContent = hint;
   }
 
+  /** THE guidance sentence: what the card says when there is no compaction to
+   *  report. Named so the "is a compaction in flight?" decision has ONE answer
+   *  to fall back to, in both readers below. */
+  compactFallbackHint() {
+    return t('Compacting a large conversation takes 1–2 minutes — do not press Stop. If it answers “Conversation too long”, rewind a few messages in terminal mode (Esc Esc) and compact again.');
+  }
+
+  /** Is a compaction RUNNING right now? A `compact_end` is deliberately KEPT
+   *  (setCompactStage) so a card that WATCHED the compaction does not revert to
+   *  "this takes 1–2 minutes" the instant it succeeded — but that stage belongs
+   *  to THAT compaction, not to the view forever. Nothing else ever cleared it,
+   *  so before this predicate the first compaction of a view (including the
+   *  AUTO one, which no user action precedes) permanently replaced the guidance
+   *  every later card exists to give. */
+  compactInFlight() {
+    const s = this._compactStage;
+    return !!(s && s.event && s.event !== 'compact_end');
+  }
+
   /** THE sentence under the "Compact now" button. Before 2026-09 this was a
    *  hardcoded apology — the only thing we could say, because the CLI's
    *  compaction was a black box. The `system/status` lane opened it (§2.11), so
@@ -1279,21 +1298,35 @@ class ChatRenderers {
    *  the card states the real stage — and, at the end, the real OUTCOME: the
    *  wire carries `compact_result` ("success") / `compact_error`, and a card
    *  that reverted to the apology after a successful compaction would be
-   *  telling the user to keep waiting for something that already finished. */
+   *  telling the user to keep waiting for something that already finished.
+   *
+   *  "ENDED" IS NOT "SUCCEEDED". A `compact_end` with NO outcome field is a
+   *  real wire shape, not a theoretical one: a PreCompact hook that BLOCKS the
+   *  compaction makes the CLI emit a bare `sdk_status status:null` with no
+   *  metadata (2.1.257 `if(ye.blockedBy) … onCompactEvent({type:"sdk_status",
+   *  status:null})`), and the retained `compact_progress` lane hardcodes
+   *  result:null on every frame. Nothing was compacted in either case — only
+   *  the CLI's own "success" may be reported as one. */
   compactHintText() {
     const s = this._compactStage;
-    if (!s) return t('Compacting a large conversation takes 1–2 minutes — do not press Stop. If it answers “Conversation too long”, rewind a few messages in terminal mode (Esc Esc) and compact again.');
+    if (!s) return this.compactFallbackHint();
     if (s.event === 'hooks_start') return t('Compacting: running {hook} hooks…', { hook: String(s.hookType || 'hook').replace(/_/g, ' ') });
     if (s.event === 'compact_start') return s.hint ? t('Compacting: {hint}', { hint: s.hint }) : t('Compacting the conversation…');
     if (s.error) return t('Compaction failed: {error}', { error: String(s.error).slice(0, 160) });
     if (s.result && s.result !== 'success') return t('Compaction ended: {result}', { result: String(s.result).slice(0, 60) });
-    return t('Compaction finished.');
+    if (s.result === 'success') return t('Compaction finished.');
+    return t('Compaction ended.');
   }
 
   /** "Prompt is too long" guidance card (2.365.0): the context window is full
    *  and EVERY later send fails the same way until the conversation is
    *  compacted — say so and offer the action. View-only windows (no live
-   *  input) get the explanation without the button. */
+   *  input) get the explanation without the button.
+   *
+   *  A NEW card opens on the guidance unless a compaction is actually running:
+   *  the held terminal stage describes a compaction that is over, and this card
+   *  is about the context being full AGAIN. `setCompactStage` still rewrites
+   *  every hint on screen, so a card built here does join the NEXT compaction. */
   appendContextFullCard(text) {
     const el = document.createElement('div');
     el.className = 'chat-msg chat-msg-system';
@@ -1301,7 +1334,7 @@ class ChatRenderers {
       + `<div class="chat-ctx-full-title">${escHtml(text)}</div>`
       + `<div class="chat-ctx-full-help">${escHtml(t('The conversation no longer fits the model’s context window — every new message will fail the same way until it is compacted.'))}</div>`
       + `<div class="chat-ctx-full-actions"><button class="chat-ctx-compact-btn">${escHtml(t('Compact now'))}</button>`
-      + `<span class="chat-ctx-full-hint">${escHtml(this.compactHintText())}</span></div>`
+      + `<span class="chat-ctx-full-hint">${escHtml(this.compactInFlight() ? this.compactHintText() : this.compactFallbackHint())}</span></div>`
       + `</div>`;
     const btn = el.querySelector('.chat-ctx-compact-btn');
     // The button disables itself so the minute-long compaction is not fired

@@ -366,6 +366,34 @@ const inflight = (id) => calls.broadcasts.filter((b) => b.id === id && b.type ==
         : 'caps says the CLI reports a run set, but none arrived — demote the row, no surface may claim the executing dot');
     ok(`compact_progress is still absent from our stdout (${n('compact_progress')}) — §2.11 runs on system/status, and leg ⓑ is shape parity only`, n('compact_progress') === 0, JSON.stringify(res.types));
   }
+  // ── ⓕ' THE PROBE LEAVES NOTHING BEHIND ────────────────────────────────────
+  //    This leg runs on EVERY non-docs push (pre-push → npm run ci) against the
+  //    developer's REAL $HOME — it needs the machine's actual credentials, so
+  //    it cannot be handed a throwaway one. A real CLI turn therefore writes a
+  //    real transcript, and the product's OWN discovery lists it: 12 junk
+  //    "stopped" sessions (and 12 junk cwd folder groups) had accumulated in
+  //    the sidebar, one per push. Measured as the CONSEQUENCE — asked of
+  //    session-store, not of the filesystem.
+  if (res?.ok) {
+    const { cwdToProjectDir, discoverClaudeSessions } = require(path.join(REPO, 'src/session-store.js'));
+    const home = process.env.HOME || os.homedir();
+    const projDir = path.join(home, '.claude', 'projects', cwdToProjectDir(res.cwd));
+    ok(`the probe removed its own temp cwd (${res.cwd})`, !fs.existsSync(res.cwd), 'the throwaway cwd survived — it becomes a junk folder group in the sidebar');
+    ok('…and the transcript the CLI wrote for it (no junk session in the user’s sidebar)', !fs.existsSync(projDir), projDir);
+    const projs = (() => { try { return fs.readdirSync(path.join(home, '.claude', 'projects')); } catch { return []; } })();
+    ok('…and it swept the leftovers of every earlier run (none of this probe’s project dirs remain)',
+      !projs.some((d) => d.startsWith(cwdToProjectDir(path.join(os.tmpdir(), 'vs-wire-probe-')))),
+      'older probe transcripts are still there — the sweep did not run');
+    // NEGATIVE CONTROL: the raw capture is deliberately KEPT, at ONE fixed path
+    // outside the deleted cwd — cleanup must not mean "lost the evidence".
+    ok('NEGATIVE CONTROL: the raw stdout capture survives at one fixed, overwritten path (a failure is still debuggable)',
+      typeof res.raw === 'string' && !res.raw.startsWith(res.cwd) && fs.existsSync(res.raw), res.raw);
+    // THE CONSEQUENCE, asked of the product: discovery must not see one.
+    const list = await discoverClaudeSessions({ activeSessions: new Map() });
+    const junk = list.filter((s) => /vs-wire-probe-/.test(s.cwd || ''));
+    ok(`the product’s own session discovery lists ZERO probe sessions (${list.length} sessions scanned)`, junk.length === 0,
+      JSON.stringify(junk.slice(0, 3).map((s) => ({ cwd: s.cwd, status: s.status }))));
+  }
 }
 {
   // ⑨ RETRACTION on the live stream: a tombstone for a message we rendered.
@@ -560,10 +588,19 @@ console.log('— wiring pins');
       && /if \('turnState' in meta\)/.test(cv) && /if \('inProgressTools' in meta\)/.test(cv));
     ok("the status bar draws the third state and NEVER asserts one it was not told (null ≠ idle)",
       /this\._turnState === 'requires_action'/.test(sb) && /const next = \(v === 'idle' \|\| v === 'running' \|\| v === 'requires_action'\) \? v : null;/.test(sb));
-    ok('the hardcoded compaction apology is now the FALLBACK of one hint function, used by the card',
-      /compactHintText\(\) \{/.test(cr) && /if \(!s\) return t\('Compacting a large conversation takes 1/.test(cr)
-      && /chat-ctx-full-hint">\$\{escHtml\(this\.compactHintText\(\)\)\}/.test(cr)
+    ok('the hardcoded compaction apology is now the FALLBACK of one hint function (ONE copy of the sentence, in compactFallbackHint)',
+      /compactHintText\(\) \{/.test(cr) && /compactFallbackHint\(\) \{/.test(cr) && /if \(!s\) return this\.compactFallbackHint\(\);/.test(cr)
       && (cr.match(/Compacting a large conversation takes 1/g) || []).length === 1);
+    // WIRING PIN (round 5): the fix lives at the CARD's build site — a held
+    // terminal stage must not become the view's permanent voice. A pure
+    // predicate whose call site is not staged is the 2.355.0 class.
+    ok('…and a NEW card gates that sentence on compactInFlight(), never on the held stage',
+      /compactInFlight\(\) \{/.test(cr) && /s\.event !== 'compact_end'/.test(cr)
+      && /chat-ctx-full-hint">\$\{escHtml\(this\.compactInFlight\(\) \? this\.compactHintText\(\) : this\.compactFallbackHint\(\)\)\}/.test(cr),
+      'appendContextFullCard renders the held stage into a card built after the compaction ended');
+    ok('…and only the CLI’s own "success" is reported as FINISHED (a hook-blocked compaction ends with no outcome and compacted nothing)',
+      /if \(s\.result === 'success'\) return t\('Compaction finished\.'\);/.test(cr) && /return t\('Compaction ended\.'\);/.test(cr),
+      'a compact_end with result:null still claims success');
     const ro = read('src/rewind-ops.js');
     ok("both harnesses emit the SAME 'rewound' op through the one PURE builder",
       /rewoundOp\(\{ harness: 'claude'/.test(mm) && /rewoundOp\(\{ harness: 'codex'/.test(read('src/codex-message-manager.js'))
