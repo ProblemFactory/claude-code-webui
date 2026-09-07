@@ -65,6 +65,7 @@ const SUITES = [
   'test-instance-url', // this instance's own public address: frp mapping layered over agentd.publicUrl (never written), one publisher of the relay proxy
   'test-design-kit', // /design kit from the installed CLI: extraction (cli-dir + binary parity), adaptation all-or-nothing, helper --check, wiring
   'test-published-pages', // instance-hosted shareable HTML: publish/serve/auth-gate/CSP-sandbox/upsert + wiring pins
+  'test-worktree-userchan-ui', // owner rulings 8(c)+9: the two NEW surfaces measured at 375×667 in headless chrome — the New Session worktree checkbox (present for claude, GONE + CLEARED for a harness without the flag) and the SendUserMessage/SendUserFile cards (no horizontal overflow, long file names wrap; SKIPs without chrome)
   'test-peer-msg-card', // peer message visible on the LIVE stream (result.origin mining + 3-site dedup) + the codex twin (injectPeerCard, webui_peer marker live/rebuild, marker-blind twin dedup, feedPeerCard no longer false for codex)
   'test-pool-auto', 'test-account-pool', 'test-account-verdicts',
   'test-login-expiry', // a subscription's LOGIN SESSION has its own absolute deadline: pure reading (incl. the CLI-wiped shape), pool gates (dead ⇒ never usable, near ⇒ never a switch target), the once-per-threshold inbox ladder on a fake clock (restart-survival + re-login reset), the STRING every blocked/inbox surface prints (a login is never a spent quota bucket; a wiped file is never "expired" at a future date), wiring pins

@@ -161,6 +161,48 @@
 //                      WHOLE thread and has no per-message boundary, so a
 //                      per-message fork button gated on `fork` would be a
 //                      button that cannot work. Two capabilities, two rows.
+// worktree names the harness's PER-SESSION GIT WORKTREE knob (owner ruling 9,
+// design-harness-features §5.1). Every surface — the New Session checkbox, the
+// Session Properties row, the session-card badge, the ws refusal — gates on
+// THIS row, never on a backend id.
+//   supported      — the harness can run a session in its own git worktree.
+//   flag           — the EXACT argv token, dumped from `claude --help` on
+//                    2.1.257: `-w, --worktree [name]` ("Create a new git
+//                    worktree for this session (optionally specify a name)").
+//   named          — the flag takes an OPTIONAL name. We never send one: the
+//                    CLI's auto-generated name is unique per session, whereas
+//                    a name we chose would collide with an existing worktree
+//                    (two sessions in one tree) and would put a user string in
+//                    argv for no gain.
+//   requiresGitRepo — the CLI REFUSES outside a git repo and exits 1 before the
+//                    session exists (measured 2026-09-07: "Error: Can only use
+//                    --worktree in a git repository, but /tmp/notarepo is not a
+//                    git repository."), so we must refuse first, with a reason.
+//   hookEscape     — …but "not a git repo" is NOT the whole gate. The 2.1.257
+//                    decompiled condition is `if(!pX() && !await rh())` where
+//                    `pX(){return fB("WorktreeCreate").length>0}` and `rh()` is
+//                    the cached is-git-repo — i.e. the CLI ALSO accepts
+//                    --worktree outside a repo when a WorktreeCreate hook is
+//                    configured, which is exactly what its own error text
+//                    tells you to do ("Configure a WorktreeCreate hook in
+//                    settings.json to use --worktree with other VCS systems").
+//                    A preflight that is STRICTER than the CLI it protects is
+//                    a false refusal, so the hook is a probed fact too and
+//                    this row names the event to look for.
+//   landsIn/branchPrefix — where it puts the tree, for the honest UI hint.
+//                    Measured on 2.1.257: `claude --worktree probe5` in
+//                    /tmp/wtprobe created /tmp/wtprobe/.claude/worktrees/probe5
+//                    on branch `worktree-probe5` (locked), and the CLI process
+//                    CHDIR'd into it (/proc/<pid>/cwd) — which is why the init
+//                    frame's `cwd` is the worktree path and is the ONLY typed
+//                    record we read it from.
+// NEVER `--tmux`: its help says "Create a tmux session for the worktree
+// (requires --worktree)", and dtach is our persistence layer — a tmux inside
+// our dtach session is a second multiplexer nobody attaches to (owner ruling 9
+// spells this out).
+const NO_WORKTREE = Object.freeze({ supported: false, flag: null, named: false, requiresGitRepo: false, hookEscape: null, landsIn: null, branchPrefix: null });
+const CLAUDE_WORKTREE = Object.freeze({ supported: true, flag: '--worktree', named: true, requiresGitRepo: true, hookEscape: 'WorktreeCreate', landsIn: '.claude/worktrees/<name>', branchPrefix: 'worktree-' });
+
 const QUEUE_VERBS = Object.freeze(['remove', 'steer', 'steer-all', 'reorder', 'edit', 'run-now', 'run-all']);
 
 /** What a wrapper that advertises a queue but NAMES NO VERBS is taken to
@@ -212,6 +254,10 @@ const BACKEND_CAPS = {
     // --settings outputStyle, read once at spawn (stream-json has no
     // /output-style verb) ⇒ a change needs a restart.
     responseStyle: { live: false, closed: false, values: ['Concise', 'Explanatory', 'Learning', 'Proactive'] },
+    // `-w, --worktree [name]` — the only harness of the four that has it
+    // (gemini 0.33.2 does NOT: 0 hits in the package, correcting an earlier
+    // draft; codex/opencode have no per-session worktree flag).
+    worktree: CLAUDE_WORKTREE,
   },
   codex: {
     pool: true,
@@ -240,6 +286,7 @@ const BACKEND_CAPS = {
     // dump. LIVE: the running thread takes the new personality for its next
     // turn — no restart, no new conversation.
     responseStyle: { live: true, closed: true, values: ['none', 'friendly', 'pragmatic'] },
+    worktree: NO_WORKTREE,
   },
   shell: {
     pool: false, hotSwitch: 'unverified', planC: false, sealedOrders: false, resetCredit: false, quotaProbe: null, fork: false,
@@ -249,6 +296,7 @@ const BACKEND_CAPS = {
     inputModes: { queue: false, queueVerbs: [] },
     turnState: null, inProgressTools: false, // terminal-only: there is no turn
     responseStyle: { live: false, closed: true, values: [] }, // terminal-only: no agent to style
+    worktree: NO_WORKTREE,
   },
   // ACP v1 harnesses (S8, design-harness-plugins §2.3): the agent holds its
   // own login/provider config — no pool, no quota probe, no credential
@@ -277,6 +325,9 @@ const BACKEND_CAPS = {
     inProgressTools: false,
     // ACP v1 has no response-style/persona verb; the agent's own config owns it.
     responseStyle: { live: false, closed: true, values: [] },
+    // OpenCode sandboxes into a worktree by its OWN policy; there is no
+    // per-session flag we can pass, so the row is honestly false.
+    worktree: NO_WORKTREE,
   },
 };
 
@@ -285,7 +336,7 @@ const BACKEND_CAPS = {
 // row whose `steer` disagrees with its `queueVerbs`.
 for (const row of Object.values(BACKEND_CAPS)) row.inputModes = deriveInputModes(row.inputModes);
 
-const NO_CAPS = Object.freeze({ pool: false, hotSwitch: 'unverified', planC: false, sealedOrders: false, resetCredit: false, quotaProbe: null, fork: false, forkAtMessage: false, review: false, renameWriteback: false, streamProtocol: null, peerDelivery: 'stash-only', inputModes: deriveInputModes({ queue: false, queueVerbs: [] }), turnState: null, inProgressTools: false, responseStyle: Object.freeze({ live: false, closed: true, values: Object.freeze([]) }) });
+const NO_CAPS = Object.freeze({ pool: false, hotSwitch: 'unverified', planC: false, sealedOrders: false, resetCredit: false, quotaProbe: null, fork: false, forkAtMessage: false, review: false, renameWriteback: false, streamProtocol: null, worktree: NO_WORKTREE, peerDelivery: 'stash-only', inputModes: deriveInputModes({ queue: false, queueVerbs: [] }), turnState: null, inProgressTools: false, responseStyle: Object.freeze({ live: false, closed: true, values: Object.freeze([]) }) });
 
 function capsOf(backend) {
   return BACKEND_CAPS[backend || 'claude'] || NO_CAPS;
@@ -340,4 +391,70 @@ function setVerifiedCap(backend, key, value) {
   return true;
 }
 
-module.exports = { BACKEND_CAPS, capsOf, setVerifiedCap, QUEUE_VERBS, LEGACY_QUEUE_VERBS, deriveInputModes, notificationDelivery };
+
+// ── worktree: the PURE spawn rules (owner ruling 9) ─────────────────────────
+// Two questions, answered here so no surface has to know the CLI's semantics:
+//
+//   worktreeRefusal — CAN this spawn honour the request at all? The CLI exits
+//     1 outside a git repo BEFORE the session exists, so a refusal here is the
+//     difference between "a reason" and "the window died instantly".
+//     `isGitRepo` is a TRI-STATE: true / false / null = the probe could not
+//     answer (unreachable host, timeout). null is NOT false — refusing a real
+//     repo because a probe timed out would be worse than letting the CLI
+//     speak for itself, so it passes with `unverified` recorded.
+//     `hasWorktreeHook` is the SECOND half of the CLI's own condition (see the
+//     caps row: `!pX() && !rh()`), tri-state for the same reason. It can only
+//     ever RESCUE a spawn, never cause a refusal — a definite hook makes a
+//     definite non-repo legal, because that is precisely the configuration the
+//     CLI's error text tells the user to create. The asymmetry is deliberate
+//     and it is the conservative direction on BOTH sides: an unknown hook
+//     (unreadable settings) still refuses a KNOWN non-repo, because there the
+//     alternative is the instantly-dead window this preflight exists to
+//     prevent — and the refusal message names the hook so a mis-detected hook
+//     user is told exactly which configuration we failed to see, rather than
+//     being left with "not a git repository" and no way forward.
+//
+//   worktreeSpawnArgs — does THIS spawn pass the flag? Not "did the user tick
+//     the box": the CLI RECORDS the worktree on the session and RE-ENTERS it
+//     by itself on --resume (2.1.257 decompiled: the resume path calls
+//     y6(host, se.worktreeSession) and reports 'worktree-gone' / "cannot
+//     resume into worktree …" when that fails), while --fork-session
+//     explicitly STRIPS the binding (Une(se, {stripWorktreeSession:true})).
+//     So:  new  + want ⇒ pass          (create the worktree)
+//          fork + want ⇒ pass          (the fork inherits nothing)
+//          resume      ⇒ NEVER pass    (a second --worktree = a SECOND
+//                                       worktree; the CLI re-enters its own)
+//     A resume of a session whose worktree was deleted continues in the plain
+//     cwd and says so — the CLI's own notice, which we do not second-guess.
+const WORKTREE_REASONS = Object.freeze(['unsupported', 'not-a-git-repo']);
+
+function worktreeCaps(backend) {
+  return capsOf(backend).worktree || NO_WORKTREE;
+}
+
+/** @returns {null | {reason:'unsupported'|'not-a-git-repo', backend:string, hookEscape:string|null}} */
+function worktreeRefusal({ backend, want, isGitRepo, hasWorktreeHook }) {
+  if (!want) return null;
+  const wt = worktreeCaps(backend);
+  if (!wt.supported) return { reason: 'unsupported', backend: backend || '', hookEscape: null };
+  // The CLI's own gate is `hook OR repo` — mirror BOTH halves, or we refuse
+  // spawns the CLI would have accepted (the whole point of `hookEscape`).
+  if (wt.requiresGitRepo && isGitRepo === false && hasWorktreeHook !== true) {
+    return { reason: 'not-a-git-repo', backend: backend || '', hookEscape: wt.hookEscape || null };
+  }
+  return null;
+}
+
+/** @returns {{args:string[], pass:boolean, why:'new'|'fork'|'resume-rebinds'|'off'|'unsupported'}} */
+function worktreeSpawnArgs({ backend, want, resume, fork }) {
+  const wt = worktreeCaps(backend);
+  if (!want) return { args: [], pass: false, why: 'off' };
+  if (!wt.supported) return { args: [], pass: false, why: 'unsupported' };
+  if (resume && !fork) return { args: [], pass: false, why: 'resume-rebinds' };
+  // NO name argument on purpose (see the caps row): the CLI mints a unique
+  // one, a name of ours would collide and put a user string in argv.
+  return { args: [wt.flag], pass: true, why: fork ? 'fork' : 'new' };
+}
+
+module.exports = { BACKEND_CAPS, capsOf, setVerifiedCap, QUEUE_VERBS, LEGACY_QUEUE_VERBS, deriveInputModes, notificationDelivery,
+  NO_WORKTREE, WORKTREE_REASONS, worktreeCaps, worktreeRefusal, worktreeSpawnArgs };

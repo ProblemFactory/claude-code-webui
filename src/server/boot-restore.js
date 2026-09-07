@@ -299,6 +299,7 @@ function restoreSessions() {
       _effort: meta.effort || null,
       _modelOrigin: meta.modelOrigin || null, _effortOrigin: meta.effortOrigin || null, // B-6b6d: the spawn's model/effort ORIGIN survives a restart (else the panel's honest row degrades to a guess)
       _outputStyle: meta.outputStyle || null, // 2.369.58: the chip must not report "default" for a session really running a style
+      _worktree: !!meta.worktree, _worktreePath: meta.worktreePath || null, // owner ruling 9: the badge + the CLI-announced path survive a restart
       _modelLocked: !!meta.modelLocked,
       _lockedModel: meta.lockedModel || null,
       agentToken: meta.agentToken || null, // vibespace-status auth survives restarts
@@ -488,6 +489,7 @@ function restoreAgentdPipeSessions() {
       _permissionMode: meta.permissionMode || null, _effort: meta.effort || null,
       _modelOrigin: meta.modelOrigin || null, _effortOrigin: meta.effortOrigin || null, // B-6b6d: the spawn's model/effort ORIGIN survives a restart (else the panel's honest row degrades to a guess)
       _outputStyle: meta.outputStyle || null,
+      _worktree: !!meta.worktree, _worktreePath: meta.worktreePath || null, // owner ruling 9
       _spawnModel: meta.spawnModel || null, _pickedModel: meta.pickedModel || null, _pickedModelAt: meta.pickedModelAt || 0,
       _msgReachability: meta.msgReachability || null,
     };
@@ -595,6 +597,7 @@ async function readoptOrphanKeeperSessions() {
       _effort: meta.effort || null,
       _modelOrigin: meta.modelOrigin || null, _effortOrigin: meta.effortOrigin || null, // B-6b6d: the spawn's model/effort ORIGIN survives a restart (else the panel's honest row degrades to a guess)
       _outputStyle: meta.outputStyle || null, // 2.369.58: the chip must not report "default" for a session really running a style
+      _worktree: !!meta.worktree, _worktreePath: meta.worktreePath || null, // owner ruling 9: the badge + the CLI-announced path survive a restart
       _modelLocked: !!meta.modelLocked,
       _lockedModel: meta.lockedModel || null,
       _initialGroupId: meta.taskId || null,

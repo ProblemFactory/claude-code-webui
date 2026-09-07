@@ -2,6 +2,7 @@ import { agoText, escHtml, copyText, createPopover, showConfirmDialog, showConte
 import { t as tr } from './i18n.js';
 import { registerCommand, registerMenuItem, menuItems } from './contributions.js';
 import { SESSION_STATE_META, SESSION_URGENCY_META } from './sidebar-tasks.js';
+import { UI_ICONS } from './icons.js';
 import { createBackendIcon, createAgentKindIcon, createModeBackendIcon, getBackendMeta, getAgentKindMeta, getAgentRoleLabel, getAgentRoleShortLabel, getSessionKey, backendFeatureCaps, settingsPrefixFor } from './agent-meta.js';
 
 /** Inline SVG icon helper — returns an HTML string for a 12x12 stroked icon */
@@ -298,6 +299,9 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
           return '';
         })()}
         ${s.hostName ? `<span class="session-host-badge" data-tip="Remote session on ${escHtml(s.hostName)}">${escHtml(s.hostName)}</span>` : ''}
+        ${s.worktree ? `<span class="session-card-badge badge-worktree" data-tip="${escHtml(s.worktreePath
+            ? tr('Running in its own git worktree: {path}', { path: s.worktreePath })
+            : tr('Running in its own git worktree (the CLI has not reported the path yet)'))}">${UI_ICONS.worktree}</span>` : ''}
         ${s.todo && s.todo.total > 0 && s.todo.done < s.todo.total ? `<span class="session-todo-pill" data-tip="${escHtml(s.todo.current ? tr('Now: {step}', { step: s.todo.current }) : tr('Agent steps'))} ${tr('({done}/{total} done)', { done: s.todo.done, total: s.todo.total })}"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5l1.2 1.2L5.5 3.4M2 9.5l1.2 1.2 2.3-2.3M8 4.5h6M8 9.5h6M8 13h4"/></svg>${s.todo.done}/${s.todo.total}</span>` : ''}
         <span class="sess-state-chip" style="display:none"></span>
       </div>

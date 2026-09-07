@@ -54,6 +54,34 @@ for (const f of ['src/hosts.js', 'src/ws-handler.js', 'src/ws-create.js']) {
   const handRolled = (ws.match(/exec env `/g) || []).length + (ws.match(/`exec env/g) || []).length;
   ok(handRolled === 0, `no hand-assembled 'exec env' spawn lines left in ws-handler (found ${handRolled})`);
   ok((ws.match(/buildRemoteExec\(\{/g) || []).length === 5, 'all five builders route through buildRemoteExec');
+
+  // ── PER-SESSION GIT WORKTREE reaches a REMOTE spawn (owner ruling 9) ──
+  // The flag is not a special case anywhere in the transport: the ADAPTER
+  // emits it into sessionSpec.args, ws-create shq's every arg into `parts`,
+  // and buildRemoteExec composes the line — so this leg proves the whole
+  // chain by driving the REAL adapter and the REAL builder, and pins that no
+  // remote builder acquired a hand-written worktree branch of its own.
+  const { ClaudeCodeAdapter } = require('../src/adapters/claude-code.js');
+  const ad = new ClaudeCodeAdapter({ claudeCmd: '/usr/bin/claude', chatWrapper: '/w/chat', ptyWrapper: '/w/pty', buffersDir: '/b' });
+  const remoteLine = (opts) => {
+    const spec = ad.buildSessionArgs({ cwd: '/home/u/proj', mode: 'chat', ...opts });
+    const rcmd = 'claude';
+    return buildRemoteExec({ cwd: '/home/u/proj', shq, pre: buildRemoteShellPrelude({ toolsOnPath: true }), parts: ['TERM=xterm-256color', rcmd, ...spec.args.map(shq)] });
+  };
+  const wtNew = remoteLine({ worktree: true });
+  ok(wtNew.includes(` '--worktree'`), 'a remote NEW session carries --worktree, quoted like every other arg (no bespoke transport branch)');
+  ok((wtNew.match(/--worktree/g) || []).length === 1, '…exactly once (no duplicate from a second builder)');
+  ok(!wtNew.includes('--tmux'), '…and NEVER --tmux (dtach is our persistence layer; the CLI would open a tmux nobody attaches to)');
+  ok(!remoteLine({ worktree: true, resumeId: 'abc' }).includes('--worktree'),
+    'a remote RESUME carries NO --worktree (the CLI re-enters its own recorded worktree — a second flag would add a SECOND tree on the host)');
+  ok(remoteLine({ worktree: true, resumeId: 'abc', fork: true }).includes(` '--worktree'`),
+    'a remote FORK carries it again (--fork-session strips the binding)');
+  ok(!remoteLine({}).includes('--worktree'), 'an ordinary remote spawn carries nothing new');
+  // A hand-written builder would need the flag as a STRING LITERAL; prose in a
+  // comment (the preflight block explains the CLI's refusal verbatim) is not a
+  // second implementation. Strip comments first so the guard measures CODE.
+  const wsCode = ws.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+  ok(!/['"`]--worktree/.test(wsCode), 'no remote builder hand-writes a --worktree literal — it can only arrive through the adapter args (drift guard)');
 }
 
 console.log(fail ? `FAIL (${fail})` : `ALL PASS (${pass})`);

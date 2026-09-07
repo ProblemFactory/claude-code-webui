@@ -1088,6 +1088,153 @@ console.log('— stream-json: init frame widening + commands_changed');
     })());
 }
 
+// ── 3a-bis. the claude agent→user channel (--brief): SendUserMessage /
+// SendUserFile (owner ruling 8(c), design-harness-features §2.12) ──
+// REAL tool_use records — the exact shape the CLI emits for these two tools,
+// whose input schemas were dumped from the 2.1.257 binary's own zod
+// definitions (see src/user-channel.js). Both must reach the normalizer as
+// tool cards, SendUserFile must publish its LOCAL files through the
+// published-pages channel and announce the relative link, and an UNRELATED
+// tool must be classified as NOT a user message (the negative control).
+console.log('— agent→user channel (SendUserMessage / SendUserFile)');
+{
+  const { userChannelKind, userChannelRecord, userFilePaths } = require(path.join(REPO, 'src/user-channel.js'));
+  // (a) the classifier — the ONE gate every surface reads
+  ok('SendUserMessage / its documented alias Brief / SendUserFile classify; every other tool is NOT a user message',
+    userChannelKind('SendUserMessage') === 'message' && userChannelKind('Brief') === 'message' && userChannelKind('SendUserFile') === 'file'
+    && ['Bash', 'Read', 'Write', 'TodoWrite', 'Agent', 'WebSearch', 'mcp__x__send_user_message', 'SendMessage', '', null, undefined].every((n) => userChannelKind(n) === null),
+    JSON.stringify(['Bash', 'SendMessage'].map(userChannelKind)));
+
+  // (b) REAL SendUserMessage tool_use → a typed record with the message text
+  const sumInput = { message: 'The build is green.\n\n- 3 tests added', attachments: ['out/report.md', { file_uuid: 'file_abc', file_name: 'shot.png', size: 2048, is_image: true }], status: 'proactive' };
+  const sumRec = userChannelRecord({ toolName: 'SendUserMessage', input: sumInput, output: null });
+  ok('SendUserMessage tool_use → {kind:message, status, markdown text}', sumRec?.kind === 'message' && sumRec.status === 'proactive' && sumRec.message.startsWith('The build is green.'), JSON.stringify(sumRec && { k: sumRec.kind, s: sumRec.status }));
+  ok('…both attachment FORMS survive (a bare path string AND the device attach_file object, passed through verbatim)',
+    sumRec.files.length === 2 && sumRec.files[0].path === 'out/report.md' && sumRec.files[1].fileUuid === 'file_abc' && sumRec.files[1].isImage === true, JSON.stringify(sumRec.files));
+  // the MINIMAL input form the binary uses when attachments are off
+  const minRec = userChannelRecord({ toolName: 'SendUserMessage', input: { message: 'hi' }, output: null });
+  ok('…the MINIMAL {message} input form (no status, no attachments) still renders — a reader that REQUIRED them would blank the card', minRec?.kind === 'message' && minRec.message === 'hi' && minRec.status === null);
+  // the resolved OUTPUT is merged, never used as a fallback that hides a failure
+  const outRec = userChannelRecord({
+    toolName: 'SendUserMessage', input: { message: 'see attached', attachments: ['a.png', 'gone.png'], status: 'normal' },
+    output: JSON.stringify({ message: 'see attached', attachments: [{ path: '/p/a.png', size: 10, isImage: true }, { path: '/p/gone.png', size: 0, isImage: false, upload_error: 'file not found' }], sentAt: '2026-09-07T00:00:00Z' }),
+  });
+  ok("…the tool RESULT is MERGED with the input: a file the CLI could not deliver keeps its row AND its upload_error (never 'output if present else input')",
+    outRec.files.length === 2 && outRec.files.some((f) => f.error === 'file not found') && outRec.files.every((f) => f.resolved), JSON.stringify(outRec.files.map((f) => [f.name, f.error])));
+
+  // (c) REAL SendUserFile tool_use → paths resolved against the CLI's own cwd
+  const sufInput = { files: ['report.md', '/abs/chart.png'], caption: 'before vs after', status: 'normal', display: 'render' };
+  const sufRec = userChannelRecord({ toolName: 'SendUserFile', input: sufInput, output: null });
+  ok('SendUserFile tool_use → {kind:file, caption, display, files}', sufRec?.kind === 'file' && sufRec.caption === 'before vs after' && sufRec.display === 'render' && sufRec.files.length === 2);
+  ok("…a bare STRING in `files` is accepted too (the CLI's own preprocessor coerces it)", userChannelRecord({ toolName: 'SendUserFile', input: { files: 'only.md', status: 'normal' }, output: null }).files.length === 1);
+  ok('…relative paths resolve against the directory the CLI is REALLY in (a --worktree session announces its worktree), absolutes are left alone',
+    JSON.stringify(userFilePaths(sufRec, '/repo/.claude/worktrees/w1')) === JSON.stringify(['/repo/.claude/worktrees/w1/report.md', '/abs/chart.png']));
+
+  // (d) END TO END on the real consumer: a live SendUserFile record publishes
+  // its files and broadcasts the RELATIVE link (2.366.1: never an absolute URL).
+  const pagesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-userfile-'));
+  const filesDir = path.join(pagesDir, 'work'); fs.mkdirSync(filesDir);
+  fs.writeFileSync(path.join(filesDir, 'chart.png'), Buffer.from('89504e470d0a1a0a', 'hex'));
+  fs.writeFileSync(path.join(filesDir, 'notes.md'), '# hi');
+  const pages = require(path.join(REPO, 'src/server/published-pages.js')).create({ dataDir: pagesDir });
+  const so2 = require(path.join(REPO, 'src/server/session-stdout.js')).create({
+    rootDir: tmp, BUFFERS_DIR, META_DIR, DTACH_CMD: 'dtach', USAGE_SCANNER_PATH: path.join(tmp, 'nonexistent'),
+    CLAUDE_STREAM_TYPES: new Set(['system', 'assistant', 'user', 'result']), _seenStreamTypes: new Set(), activeSessions, engine,
+    checkClaudeGoalStatus() { }, broadcastToSession: (s, id, m) => calls.broadcasts.push({ id, ...m }), broadcastActiveSessions: () => { calls.active++; },
+    noteModelSeen: () => { }, noteHarnessModels: () => { }, recordUsageAttribution() { }, daemonPtyShim: (h) => h,
+    sbSeenFirst: () => true, getDeviceMgr: () => null, getHosts: () => null,
+    getUsageHistory: () => ({ _cost: () => 0, ingestRemoteEvents() { } }), getTelemetry: () => null, getNoConvoRef: () => ({ map: new Map() }),
+    getDeliver: () => ({ stashFor() { } }), getPages: () => pages,
+  });
+  const s4 = mkSession('claude', 'w-userfile'); s4.cwd = filesDir;
+  const p4 = fakePty();
+  so2.setupSessionPty(s4, 'w-userfile', p4);
+  p4.data(J({ type: 'assistant', session_id: 'sid-uf', uuid: 'u-uf', message: { id: 'msg_uf', model: 'claude-fable-5', role: 'assistant', content: [
+    { type: 'tool_use', id: 'toolu_uf1', name: 'SendUserFile', input: { files: ['chart.png', 'notes.md', 'missing.bin'], caption: 'the run', status: 'proactive' } },
+  ] } }));
+  await new Promise((r) => setTimeout(r, 250)); // the publish is async by design (never block the event loop)
+  const pubMsg = calls.broadcasts.filter((b) => b.id === 'w-userfile' && b.type === 'user-file-published').slice(-1)[0];
+  ok("a live SendUserFile record publishes through published-pages and broadcasts the rows, keyed by the card's OWN toolCallId", !!pubMsg && pubMsg.toolCallId === 'toolu_uf1' && pubMsg.files.length === 3, JSON.stringify(pubMsg && pubMsg.files));
+  const okRows = (pubMsg?.files || []).filter((f) => f.link);
+  ok('…every existing file gets a RELATIVE /p/<id> link (the 2.366.1 URL law: the server never guesses an absolute URL)',
+    okRows.length === 2 && okRows.every((f) => /^\/p\/pg[a-z0-9]{10}$/.test(f.link)), JSON.stringify(okRows.map((f) => f.link)));
+  ok('…a file that does not exist is reported ON THE ROW rather than silently dropped (no-silent-failures)',
+    (pubMsg?.files || []).some((f) => f.name === 'missing.bin' && /not found/i.test(f.error || '')), JSON.stringify((pubMsg?.files || []).map((f) => [f.name, f.error])));
+  const stored = pages.list({}).filter((p) => p.sessionId === 'w-userfile');
+  ok('…the pages are session-owned and PRIVATE by default (a VibeSpace login is the gate)', stored.length === 2 && stored.every((p) => p.public === false), JSON.stringify(stored.map((p) => [p.name, p.public, p.mediaType])));
+  ok('…a binary file is stored with its own media type (never served as a document), a text one as plain text',
+    stored.find((p) => p.name === 'chart.png')?.mediaType === 'image/png' && stored.find((p) => p.name === 'notes.md')?.mediaType === 'text/plain', JSON.stringify(stored.map((p) => [p.name, p.mediaType])));
+
+  // (e) NEGATIVE CONTROL: an unrelated tool in the SAME shape publishes
+  // nothing and is not a user message.
+  const before = calls.broadcasts.length;
+  p4.data(J({ type: 'assistant', session_id: 'sid-uf', uuid: 'u-uf2', message: { id: 'msg_uf2', model: 'claude-fable-5', role: 'assistant', content: [
+    { type: 'tool_use', id: 'toolu_bash1', name: 'Bash', input: { command: 'cat chart.png', files: ['chart.png'], status: 'proactive' } },
+  ] } }));
+  await new Promise((r) => setTimeout(r, 200));
+  ok('NEGATIVE CONTROL: an unrelated tool carrying the SAME field names is never treated as a user message — nothing published, nothing broadcast',
+    !calls.broadcasts.slice(before).some((b) => b.type === 'user-file-published')
+    && userChannelKind('Bash') === null && userChannelRecord({ toolName: 'Bash', input: { files: ['chart.png'], status: 'proactive' }, output: null }) === null
+    && pages.list({}).length === 2, JSON.stringify(pages.list({}).map((p) => p.name)));
+
+  // (f) the REMOTE rule: a session whose files live on another machine
+  // publishes nothing here (we cannot read them, and a guess would be worse).
+  const s5 = mkSession('claude', 'w-userfile-remote'); s5.cwd = filesDir; s5.host = 'h1';
+  const p5 = fakePty(); so2.setupSessionPty(s5, 'w-userfile-remote', p5);
+  p5.data(J({ type: 'assistant', session_id: 'sid-uf3', uuid: 'u-uf3', message: { id: 'msg_uf3', model: 'claude-fable-5', role: 'assistant', content: [
+    { type: 'tool_use', id: 'toolu_uf3', name: 'SendUserFile', input: { files: ['chart.png'], status: 'normal' } },
+  ] } }));
+  await new Promise((r) => setTimeout(r, 200));
+  ok('a REMOTE session publishes nothing (its files are on another machine — an honest absence, not a guessed link)',
+    !calls.broadcasts.some((b) => b.id === 'w-userfile-remote' && b.type === 'user-file-published') && pages.list({}).length === 2);
+
+  // (g) the WORKTREE PATH the CLI itself announced (owner ruling 9) — the init
+  // frame's own `cwd`, a typed record, recorded ONLY for a session that asked.
+  const s6 = mkSession('claude', 'w-wt'); s6.cwd = '/repo'; s6._worktree = true;
+  const p6 = fakePty(); so2.setupSessionPty(s6, 'w-wt', p6);
+  p6.data(J({ type: 'system', subtype: 'init', session_id: 'sid-wt', cwd: '/repo/.claude/worktrees/w1', model: 'claude-fable-5' }));
+  ok('a --worktree session records the directory the CLI ANNOUNCED in its init frame (never a path composed from a naming rule) + persists + broadcasts it',
+    s6._worktreePath === '/repo/.claude/worktrees/w1' && meta(s6)?.worktreePath === '/repo/.claude/worktrees/w1' && meta(s6)?.worktree === true
+    && calls.broadcasts.some((b) => b.id === 'w-wt' && b.type === 'worktree-path' && b.worktreePath === '/repo/.claude/worktrees/w1'), JSON.stringify(meta(s6)));
+  const s7 = mkSession('claude', 'w-nowt'); s7.cwd = '/repo';
+  const p7 = fakePty(); so2.setupSessionPty(s7, 'w-nowt', p7);
+  p7.data(J({ type: 'system', subtype: 'init', session_id: 'sid-nowt', cwd: '/somewhere/else', model: 'claude-fable-5' }));
+  ok('NEGATIVE CONTROL: a session that did NOT ask for a worktree never grows one, whatever cwd the CLI reports',
+    !s7._worktreePath && !meta(s7)?.worktreePath && !calls.broadcasts.some((b) => b.id === 'w-nowt' && b.type === 'worktree-path'));
+  ok('…a trailing slash is cosmetic, not a second directory (the badge must not appear because of one)',
+    (() => { const s7b = mkSession('claude', 'w-slash'); s7b.cwd = '/repo'; s7b._worktree = true;
+      const p7b = fakePty(); so2.setupSessionPty(s7b, 'w-slash', p7b);
+      p7b.data(J({ type: 'system', subtype: 'init', session_id: 'sid-slash', cwd: '/repo/', model: 'claude-fable-5' }));
+      return s7b._worktree === false && !s7b._worktreePath; })());
+
+  // (h) THE ARBITER'S OTHER DIRECTION (the badge must never outlive the fact).
+  // The CLI's own 'worktree-gone' path continues "in the current directory
+  // without worktree isolation. The worktree binding has been cleared."
+  // (2.1.257 verbatim) and a resume can only RE-ENTER a recorded worktree,
+  // never create one — in both cases it reports the very cwd we launched it
+  // in, and an intent nobody honoured must stop being drawn as a fact.
+  const s8 = mkSession('claude', 'w-wt-gone'); s8.cwd = '/repo'; s8._worktree = true; s8._worktreePath = '/repo/.claude/worktrees/old';
+  const p8 = fakePty(); so2.setupSessionPty(s8, 'w-wt-gone', p8);
+  p8.data(J({ type: 'system', subtype: 'init', session_id: 'sid-gone', cwd: '/repo', model: 'claude-fable-5' }));
+  const goneMsg = calls.broadcasts.filter((b) => b.id === 'w-wt-gone' && b.type === 'worktree-path').slice(-1)[0];
+  ok("the CLI reporting the LAUNCH directory retires the live worktree fact (its own 'worktree-gone' path / a resume that could not create one) — state, meta and broadcast all agree",
+    s8._worktree === false && s8._worktreePath === null
+    && meta(s8)?.worktree === undefined && meta(s8)?.worktreePath === undefined
+    && !!goneMsg && goneMsg.worktree === false && goneMsg.worktreePath === null,
+    JSON.stringify({ live: s8._worktree, path: s8._worktreePath, meta: meta(s8), msg: goneMsg && { w: goneMsg.worktree, p: goneMsg.worktreePath } }));
+  ok('…and the isolated case still SAYS worktree:true on the same broadcast, so one reader handles both',
+    calls.broadcasts.some((b) => b.id === 'w-wt' && b.type === 'worktree-path' && b.worktree === true));
+  // NEGATIVE CONTROL: the retirement is not a free-running clear — a SECOND
+  // init frame that still names the worktree leaves the fact standing (and
+  // does not re-broadcast, so a re-attach storm cannot flap the badge).
+  const beforeWt = calls.broadcasts.filter((b) => b.id === 'w-wt').length;
+  p6.data(J({ type: 'system', subtype: 'init', session_id: 'sid-wt', cwd: '/repo/.claude/worktrees/w1', model: 'claude-fable-5' }));
+  ok('NEGATIVE CONTROL: an unchanged init frame neither clears the fact nor re-broadcasts it (idempotent)',
+    s6._worktree === true && s6._worktreePath === '/repo/.claude/worktrees/w1'
+    && calls.broadcasts.filter((b) => b.id === 'w-wt').length === beforeWt);
+  try { fs.rmSync(pagesDir, { recursive: true, force: true }); } catch { }
+}
+
 // ── 3b. codex-events consumer ──
 console.log('— codex-events');
 {
@@ -1171,7 +1318,7 @@ console.log('— builder');
 console.log('— wiring pins');
 {
   const ss = read('src/server/session-stdout.js');
-  ok('session-stdout requires the registry and builds it ONCE in create() with the orchestrator deps', /require\('\.\/stdout\/index\.js'\)/.test(ss) && (ss.match(/createStdoutRegistry\(/g) || []).length === 1 && /createStdoutRegistry\(\{ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes, USAGE_SCANNER_PATH,\s*\n\s*checkClaudeGoalStatus, noteModelSeen, noteHarnessModels, sbSeenFirst, hosts, usageHistory, deliverRef \}\)/.test(ss));
+  ok('session-stdout requires the registry and builds it ONCE in create() with the orchestrator deps', /require\('\.\/stdout\/index\.js'\)/.test(ss) && (ss.match(/createStdoutRegistry\(/g) || []).length === 1 && /createStdoutRegistry\(\{ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes, USAGE_SCANNER_PATH,\s*\n\s*checkClaudeGoalStatus, noteModelSeen, noteHarnessModels, sbSeenFirst, hosts, usageHistory, deliverRef, pagesRef \}\)/.test(ss));
   ok('…hands its own closures (feedLive, broadcasts, meta store, todo helpers) as ONE helpers object', /const stdoutHelpers = \{ feedLive, broadcastToSession, broadcastActiveSessions, readSessionMeta, writeSessionMeta,\s*\n\s*updateSessionTodos, applyTaskToolUpdate, emitTaskListTodos \};/.test(ss));
   ok('…setupSessionPty resolves caps.streamProtocol → registry → attach (no protocol branch left in session-stdout)', /const consumer = streamProto \? stdoutConsumers\.get\(streamProto\) : null;/.test(ss) && /consumer\.attach\(session, id, ptyProcess, stdoutHelpers\);/.test(ss) && !/streamProto === '/.test(ss) && !/feedLive\(session, /.test(ss) && !/_stdin_ack/.test(ss));
   ok('…the no-protocol text is unchanged and the no-consumer case is its own loud line + event', /has no streamProtocol in src\/backend-caps\.js — chat output passes through RAW \(register a pipeline\)/.test(ss) && /registers no consumer for it — chat output passes through RAW \(register one\)/.test(ss) && /'chat-protocol-no-consumer'/.test(ss));
@@ -1182,7 +1329,7 @@ console.log('— wiring pins');
     const src = read(`src/server/stdout/${m}.js`);
     ok(`${m}.js: create(deps) → { protocol: '${proto}', attach(session, id, ptyProcess, helpers) }, feeds the normalizer only through feedLive`, new RegExp(`^const protocol = '${proto}';$`, 'm').test(src) && /function attach\(session, id, ptyProcess, \{ feedLive, broadcastToSession, broadcastActiveSessions, readSessionMeta, writeSessionMeta/.test(src) && /return \{ protocol, attach \};/.test(src) && /feedLive\(session, msg\)/.test(src) && !/_normalizer\.processLive/.test(src));
   }
-  ok('the claude consumer keeps the session-brain wiring EXACTLY (sbSeenFirst registration precedes the served-model latch; sbSeenFirst arrives via deps)', /sbSeenFirst\(session, msg\);\s*\n\s*if \(msg\.type === 'assistant' && !msg\.parent_tool_use_id && !msg\.isSidechain\s*\n\s*&& msg\.message\?\.model/.test(read('src/server/stdout/claude-stream-json.js')) && /checkClaudeGoalStatus, noteModelSeen, sbSeenFirst, hosts, usageHistory \}\)/.test(read('src/server/stdout/claude-stream-json.js')));
+  ok('the claude consumer keeps the session-brain wiring EXACTLY (sbSeenFirst registration precedes the served-model latch; sbSeenFirst arrives via deps)', /sbSeenFirst\(session, msg\);\s*\n\s*if \(msg\.type === 'assistant' && !msg\.parent_tool_use_id && !msg\.isSidechain\s*\n\s*&& msg\.message\?\.model/.test(read('src/server/stdout/claude-stream-json.js')) && /checkClaudeGoalStatus, noteModelSeen, sbSeenFirst, hosts, usageHistory, pagesRef \}\)/.test(read('src/server/stdout/claude-stream-json.js')));
   ok('test-harness-contract pins descriptor↔consumer coverage; ci.mjs runs this suite; test-session-schema + test-attach-rebuild scan src/server/stdout/', /hasConsumer\(h\.caps\.streamProtocol\)/.test(read('scripts/test-harness-contract.mjs')) && /'test-stdout-registry'/.test(read('scripts/ci.mjs')) && /src\/server\/stdout/.test(read('scripts/test-session-schema.mjs')) && /src\/server\/stdout/.test(read('scripts/test-attach-rebuild.mjs')));
   // B3 turn truth (§2.5/§2.10/§2.11) — the seams a green unit test cannot see
   {

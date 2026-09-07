@@ -186,6 +186,7 @@
         <label id="row-effort"><span data-i18n>Effort</span><select id="input-effort"></select></label>
         <label id="row-account"><span data-i18n>Account</span><select id="input-account"><option value="">Default (Subscription)</option></select></label>
         <label id="row-extra-args"><span data-i18n>Additional Arguments</span><input type="text" id="input-extra-args" placeholder="--verbose"></label>
+        <label id="row-worktree" class="dialog-check-row hidden"><input type="checkbox" id="input-worktree"><span data-i18n>Run in a git worktree</span><span class="dialog-check-hint" id="worktree-hint" data-i18n>The agent gets its own checkout under .claude/worktrees/ on a new branch, so it never touches your working tree. Needs a git repository.</span></label>
       </div>
       <div class="dialog-footer"><button class="btn-cancel" data-i18n>Cancel</button><button class="btn-create" data-i18n>Create Session</button></div>
     </div>

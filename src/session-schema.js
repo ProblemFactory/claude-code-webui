@@ -90,6 +90,8 @@ const SESSION_FIELDS = {
   _resumeWarning:      { owner: 'ws',     persisted: null,      note: 'non-fatal resume degradation note for the client' },
   _reattachAttempts:   { owner: 'stdout', persisted: null,      note: 'bounded dead-socket re-attach counter' },
   _cwdRecreated:       { owner: 'ws',     persisted: 'meta',    note: 'B-7812 recreate-cwd notice armed' },
+  _worktree:           { owner: 'ws',     persisted: 'meta',    note: 'the user asked THIS session to run in its own git worktree (claude --worktree, owner ruling 9). Persisted so a restart/resume keeps describing the session honestly and the badge survives; the FLAG itself is only re-emitted on a fork (worktreeSpawnArgs) because the CLI re-enters its recorded worktree on --resume by itself' },
+  _worktreePath:       { owner: 'stdout', persisted: 'meta',    note: 'the worktree directory the CLI ITSELF announced in its init frame `cwd` (typed record, never inferred: the CLI chdir\'s into <repo>/.claude/worktrees/<name> and reports it). null until the first init frame; Session Properties shows it'  },
 
   // remote / transport
   _remoteState:        { owner: 'stdout', persisted: 'wrapper', note: 'remote keeper link state (reconnecting chip)' },

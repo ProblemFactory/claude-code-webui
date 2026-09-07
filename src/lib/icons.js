@@ -91,5 +91,9 @@ export const UI_ICONS = {
   chevronUp:   _s('<path d="M3.5 10l4.5-4.5 4.5 4.5"/>'),
   chevronDown: _s('<path d="M3.5 6l4.5 4.5L12.5 6"/>'),
   arrowUpToLine: _s('<path d="M3 2.5h10"/><path d="M8 13.5V5.5M4.5 9L8 5.5 11.5 9"/>'),
+  // A git worktree: the repo folder with a branch tipped out of it (owner
+  // ruling 9's session-card badge + the New Session row). SVG only — never an
+  // emoji (the icon law).
+  worktree: _s('<path d="M1.5 4.2a1 1 0 011-1h3.1l1.2 1.6h6.7a1 1 0 011 1v6.4a1 1 0 01-1 1H2.5a1 1 0 01-1-1z"/><path d="M6.2 10.6V8.4a1 1 0 011-1h2.6"/><circle cx="6.2" cy="11.6" r="1"/><circle cx="10.6" cy="7.4" r="1"/>'),
   forkBranch: _s('<path d="M5 5.372v.878c0 .414.336.75.75.75h4.5a.75.75 0 0 0 .75-.75v-.878a2.25 2.25 0 1 1 1.5 0v.878a2.25 2.25 0 0 1-2.25 2.25h-1.5v2.128a2.251 2.251 0 1 1-1.5 0V8.5h-1.5A2.25 2.25 0 0 1 3.5 6.25v-.878a2.25 2.25 0 1 1 1.5 0ZM5 3.25a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Zm6.75.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm-3 8.75a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Z"/>', { fill: true }),
 };

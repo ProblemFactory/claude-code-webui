@@ -626,6 +626,44 @@ const SETTINGS_SCHEMA = {
     description: t('When safeguards flag a message, pause the turn instead of automatically switching to another model (the CLI\'s "Switch models when a message is flagged" set to off). Applies to new sessions at start and to running chat sessions from their next turn; sessions started while enabled also cover their subagents. A stopped turn shows a notice — rephrase and resend to continue.'),
     category: t('Claude'), liveApply: true,
   },
+  // ── agent→user channel + prompt-cache levers (owner ruling 8(c),
+  // design-harness-features §2.12/§1.3). Every one of these is DEFAULT OFF and
+  // maps to ONE flag dumped from `claude --help` (2.1.257); the adapter
+  // validates the value before it becomes an argv token. ──
+  'claude.brief': {
+    type: 'boolean', default: false,
+    label: t('Let the agent send you messages and files (--brief)'),
+    description: t('Starts new Claude sessions with the CLI\'s agent-to-user channel enabled: the agent gets the SendUserMessage and SendUserFile tools and VibeSpace renders each call as a highlighted "message for you" card (files are published to a private link in this instance). Off by default because it changes how the agent writes — with --brief, plain text outside the tool is hidden from the message view. Applies to newly started sessions.'),
+    category: t('Claude'), liveApply: true,
+  },
+  'claude.systemPromptSnapshot': {
+    type: 'enum', default: '', options: [
+      { value: '', label: t('CLI default') },
+      { value: 'on', label: t('On — record once, reuse verbatim') },
+      { value: 'off', label: t('Off — never record') },
+    ],
+    label: t('System prompt snapshot (--system-prompt-snapshot)'),
+    description: t('Passes the CLI\'s --system-prompt-snapshot flag to new Claude sessions: "on" records the system prompt once per conversation and reuses it verbatim on every request and resume, which keeps the prompt cache warm across resumes. Blank = leave the CLI\'s own default alone.'),
+    category: t('Claude'), liveApply: true,
+  },
+  'claude.excludeDynamicSystemPromptSections': {
+    type: 'boolean', default: false,
+    label: t('Move per-machine prompt sections into the first message'),
+    description: t('Passes --exclude-dynamic-system-prompt-sections: the cwd, environment info, memory paths and git status move out of the system prompt and into the first user message, so the cached prefix is identical across machines and users. Only applies with the default system prompt. Off by default — measure before turning it on.'),
+    category: t('Claude'), liveApply: true,
+  },
+  'claude.autocompact': {
+    type: 'enum', default: '', combobox: true, options: [
+      { value: '', label: t('CLI default') },
+      { value: 'auto', label: t('Auto') },
+      { value: '100k', label: '100k' },
+      { value: '200k', label: '200k' },
+      { value: '500k', label: '500k' },
+    ],
+    label: t('Auto-compact window size (--autocompact)'),
+    description: t('Passes --autocompact to new Claude sessions. "auto", or a token budget between 100k and 1M (e.g. 500k, 200000). A smaller window compacts sooner, which keeps each request cheaper at the cost of more compaction. Blank = the CLI decides. A value the CLI would reject is ignored rather than passed on.'),
+    category: t('Claude'), liveApply: true,
+  },
   'claude.tuiRenderer': {
     type: 'enum', default: '',
     options: [

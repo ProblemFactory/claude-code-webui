@@ -19,9 +19,9 @@ const { HARNESSES, harnessOf, harnessIds, chatHarnessIds, REQUIRED_DESCRIPTOR_KE
 const { BackendAdapter } = require(path.join(REPO, 'src/adapters/base.js'));
 const { createAdapterRegistry } = require(path.join(REPO, 'src/adapters/index.js'));
 const { NORMALIZERS, createMessageManager } = require(path.join(REPO, 'src/normalizers.js'));
-const { capsOf, BACKEND_CAPS } = require(path.join(REPO, 'src/backend-caps.js'));
+const { capsOf, BACKEND_CAPS, worktreeCaps, worktreeRefusal, worktreeSpawnArgs, NO_WORKTREE } = require(path.join(REPO, 'src/backend-caps.js'));
 const { hasConsumer, PROTOCOLS } = require(path.join(REPO, 'src/server/stdout/index.js')); // S5: protocol → stdout consumer registry
-const { BACKEND_META, backendFeatureCaps } = await import(path.join(REPO, 'src/lib/agent-meta.js'));
+const { BACKEND_META, backendFeatureCaps, worktreeCapsFor } = await import(path.join(REPO, 'src/lib/agent-meta.js'));
 const schemaSrc = fs.readFileSync(path.join(REPO, 'src/lib/settings-schema.js'), 'utf8');
 
 ok(harnessIds().length >= 3 && ['claude', 'codex', 'shell'].every((id) => HARNESSES[id]), `registry carries the three built-in harnesses (${harnessIds().join(', ')})`);
@@ -237,6 +237,102 @@ for (const id of [...Object.keys(BACKEND_META), 'gemini', undefined])
   ok(backendFeatureCaps(id).renameWriteback === (id === 'codex'), `renameWriteback(${String(id)}) === (id==='codex') — the trigger's verdict is unchanged for every shipped backend`);
 ok(backendFeatureCaps(undefined).renameWriteback === false && backendFeatureCaps('gemini').renameWriteback === false,
   '…and an unknown/absent backend gets the all-false row (chrome never asks for something the harness cannot do)');
+
+
+// ── PER-SESSION GIT WORKTREE (owner ruling 9) ──
+// The caps row is the ONE gate every surface reads, so the client mirror is
+// deep-compared here: a drifted mirror would offer a checkbox for a flag the
+// spawn refuses (exactly the §2.13 `review` drift this suite exists to stop).
+console.log('— worktree caps (owner ruling 9)');
+{
+  for (const id of Object.keys(BACKEND_META)) {
+    const server = capsOf(id).worktree, client = BACKEND_META[id].caps?.worktree;
+    ok(!!server && typeof server.supported === 'boolean', `${id}: server backend-caps declares a worktree row`);
+    // A META row that declares `caps` at all MUST carry the mirror; a row with
+    // no caps object (shell — terminal-only, no feature chrome) reads the
+    // all-false NO_WORKTREE default, which is what the server row says too.
+    // Both spellings are asserted, so neither side can drift alone.
+    if (BACKEND_META[id].caps) ok(JSON.stringify(client) === JSON.stringify(server), `${id}: client META caps.worktree deep-equals the server row (no drift)`, JSON.stringify({ client, server }));
+    else ok(client === undefined && server.supported === false, `${id}: no client caps row at all ⇒ the server row must be the all-false one`, JSON.stringify(server));
+    ok(JSON.stringify(worktreeCapsFor(id)) === JSON.stringify(worktreeCaps(id)), `${id}: the two readers (client worktreeCapsFor / server worktreeCaps) agree`);
+  }
+  // The FACTS, dumped from `claude --help` on 2.1.257 and measured on a real
+  // repo (see the caps-row comment): only claude has the flag, it is spelled
+  // --worktree, and it needs a git repository.
+  ok(capsOf('claude').worktree.supported && capsOf('claude').worktree.flag === '--worktree' && capsOf('claude').worktree.requiresGitRepo === true
+    && ['codex', 'shell', 'opencode'].every((id) => capsOf(id).worktree.supported === false),
+    'claude is the only harness with the flag, spelled exactly --worktree, needing a git repo');
+  ok(worktreeCaps('gemini') === NO_WORKTREE, "an unknown backend gets the all-false NO_WORKTREE row (never claude's by accident)");
+  // NEVER --tmux (its own help: "Create a tmux session for the worktree
+  // (requires --worktree)") — dtach is the persistence layer.
+  const capsSrc = fs.readFileSync(path.join(REPO, 'src/backend-caps.js'), 'utf8');
+  const adapterSrc = fs.readFileSync(path.join(REPO, 'src/adapters/claude-code.js'), 'utf8');
+  ok(!/flag:\s*'--tmux'/.test(capsSrc) && !/args\.push\('--tmux'/.test(adapterSrc) && /--tmux must never be spawned/.test(adapterSrc),
+    'no harness declares --tmux and the claude adapter never pushes it');
+  // REFUSAL is a tri-state read: only a DEFINITIVE "not a repo" refuses.
+  ok(!worktreeRefusal({ backend: 'claude', want: false, isGitRepo: false }), 'worktreeRefusal: not asked ⇒ no refusal, whatever the probe said');
+  ok(worktreeRefusal({ backend: 'codex', want: true, isGitRepo: true })?.reason === 'unsupported', 'worktreeRefusal: a harness without the flag refuses with `unsupported`');
+  ok(worktreeRefusal({ backend: 'claude', want: true, isGitRepo: false })?.reason === 'not-a-git-repo', 'worktreeRefusal: a definitive non-repo refuses with `not-a-git-repo`');
+  ok(worktreeRefusal({ backend: 'claude', want: true, isGitRepo: null }) === null, 'worktreeRefusal: an UNANSWERABLE probe (null) is NOT a refusal — the CLI speaks for itself');
+  // THE HOOK ESCAPE — the CLI's gate is `WorktreeCreate hook OR git repo`
+  // (2.1.257: `if(!pX() && !await rh())`, pX = fB("WorktreeCreate").length>0).
+  // Mirroring only the repo half is a FALSE REFUSAL of exactly the setup the
+  // CLI's own error text recommends ("Configure a WorktreeCreate hook in
+  // settings.json to use --worktree with other VCS systems").
+  ok(capsOf('claude').worktree.hookEscape === 'WorktreeCreate', 'the caps row NAMES the hook event that makes a non-repo legal');
+  ok(worktreeRefusal({ backend: 'claude', want: true, isGitRepo: false, hasWorktreeHook: true }) === null,
+    'worktreeRefusal: a definite WorktreeCreate hook RESCUES a definite non-repo (the CLI would have accepted it)');
+  ok(worktreeRefusal({ backend: 'claude', want: true, isGitRepo: false, hasWorktreeHook: null })?.reason === 'not-a-git-repo',
+    'worktreeRefusal: an UNKNOWN hook still refuses a KNOWN non-repo (the alternative is the instantly-dead window)');
+  ok(worktreeRefusal({ backend: 'claude', want: true, isGitRepo: false, hasWorktreeHook: false })?.hookEscape === 'WorktreeCreate',
+    'worktreeRefusal: the refusal CARRIES the escape hatch so the message can name it (no dead end for a non-git VCS)');
+  // NEGATIVE CONTROL: the hook may only ever RESCUE — it can never itself
+  // cause, or suppress, an `unsupported` refusal on a harness without the flag.
+  ok(worktreeRefusal({ backend: 'codex', want: true, isGitRepo: true, hasWorktreeHook: true })?.reason === 'unsupported'
+    && worktreeRefusal({ backend: 'claude', want: true, isGitRepo: true, hasWorktreeHook: false }) === null,
+    'NEGATIVE CONTROL: the hook never creates a refusal and never overrides `unsupported`');
+  // WIRING PIN (2.355.0's law: a pure fix with no staged call site is a fix
+  // that ships dead) — ws-create must actually probe the hook and hand it to
+  // the rule, on BOTH transports.
+  const wsCreateSrc = fs.readFileSync(path.join(REPO, 'src/ws-create.js'), 'utf8');
+  ok(/claudeWorktreeHookConfigured/.test(wsCreateSrc) && /hooks\.WorktreeCreate/.test(wsCreateSrc)
+    && /worktreeRefusal\(\{[^}]*hasWorktreeHook\b/.test(wsCreateSrc) && /__VS_WTHOOK_YES__/.test(wsCreateSrc),
+    'WIRING: ws-create probes the hook locally AND over the host shell, and passes it to worktreeRefusal');
+  ok(/refusal\.hookEscape/.test(wsCreateSrc), 'WIRING: the refusal message names the hook escape hatch from the caps row');
+  // WHICH SPAWNS PASS THE FLAG (2.1.257 decompiled): a resume RE-ENTERS the
+  // recorded worktree by itself (y6(host, se.worktreeSession)), a fork STRIPS
+  // the binding (Une(se,{stripWorktreeSession:true})).
+  const wt = (o) => worktreeSpawnArgs({ backend: 'claude', ...o });
+  ok(JSON.stringify(wt({ want: true }).args) === '["--worktree"]' && wt({ want: true }).why === 'new', 'worktreeSpawnArgs: a NEW session passes --worktree with NO name (the CLI mints a unique one)');
+  ok(wt({ want: true, resume: true }).pass === false && wt({ want: true, resume: true }).why === 'resume-rebinds', 'worktreeSpawnArgs: a plain RESUME passes NOTHING (the CLI re-enters its own recorded worktree; a second flag = a SECOND worktree)');
+  ok(JSON.stringify(wt({ want: true, resume: true, fork: true }).args) === '["--worktree"]' && wt({ want: true, resume: true, fork: true }).why === 'fork', 'worktreeSpawnArgs: a FORK passes it again (--fork-session strips the binding)');
+  ok(wt({ want: false }).args.length === 0 && worktreeSpawnArgs({ backend: 'codex', want: true }).args.length === 0, 'worktreeSpawnArgs: not asked / unsupported harness ⇒ no args');
+  // The client surfaces gate on the CAPS ROW, never on a backend id.
+  const appSrc = fs.readFileSync(path.join(REPO, 'src/lib/app.js'), 'utf8');
+  const propsSrc = fs.readFileSync(path.join(REPO, 'src/lib/session-props.js'), 'utf8');
+  ok(/worktreeCapsFor\(backend\)\.supported/.test(appSrc) && /worktreeCapsFor\(s\.backend \|\| 'claude'\)/.test(propsSrc)
+    && !/backend === 'claude'[^\n]*worktree/.test(appSrc) && !/worktree[^\n]*backend === 'claude'/.test(propsSrc),
+    'the New Session row + the Session Properties row gate on worktreeCapsFor(backend).supported (no backend-id branch)');
+  // BOTH surfaces are a real CHECKBOX writing the same per-session key, so the
+  // pick a user makes in the dialog and the one they change later are ONE
+  // fact (`cfg.worktree`), which resumeSession/fork read back.
+  const lifeSrc = fs.readFileSync(path.join(REPO, 'src/lib/session-lifecycle.js'), 'utf8');
+  const sideSrc = fs.readFileSync(path.join(REPO, 'src/lib/sidebar-state.js'), 'utf8');
+  ok(/id="input-worktree"/.test(fs.readFileSync(path.join(REPO, 'public/index.html'), 'utf8'))
+    && /getElementById\('input-worktree'\)\?\.checked/.test(appSrc)
+    && /setSessionConfig\?\.\(s, \{ \.\.\.\(sidebar\.getSessionConfig\?\.\(s\) \|\| \{\}\), worktree: cb\.checked \|\| undefined \}\)/.test(propsSrc),
+    'the tick is a CHECKBOX in both places, writing the one per-session key (dialog → create, properties → cfg.worktree)');
+  ok(/'lockModel', 'outputStyle', 'worktree'\]/.test(sideSrc)
+    && /worktree: worktree !== undefined \? worktree : savedCfg\.worktree/.test(lifeSrc),
+    "…and the saved pick SURVIVES (sidebar-state keeps 'worktree' in the persisted config keys; resumeSession reads it back)");
+  // The LIVE fact is the CLI's, not the checkbox's: the init-frame arbiter can
+  // turn it off, and the client must not write that back over the user's pick.
+  const viewSrc = fs.readFileSync(path.join(REPO, 'src/lib/chat-view.js'), 'utf8');
+  ok(/if \('worktree' in msg\) this\._worktree = !!msg\.worktree;/.test(viewSrc)
+    && /if \(ids\?\.backendSessionId && this\._worktree\)/.test(viewSrc)
+    && /if \(!cfg\.worktree\) this\.app\?\.sidebar\?\.setSessionConfig/.test(viewSrc),
+    'the saved pick LATCHES ON only — a live fact the CLI corrected never erases the preference (chat-view applyMeta + worktree-path)');
+}
 
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);
 process.exit(fail ? 1 : 0);

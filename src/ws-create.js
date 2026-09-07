@@ -8,7 +8,7 @@
  */
 
 const { MessageManager } = require('./message-manager');
-const { capsOf } = require('./backend-caps');
+const { capsOf, worktreeRefusal } = require('./backend-caps');
 const { get: harnessOf } = require('./harnesses'); // S9: store-side fork (opencode serve) before the spawn
 const { createMessageManager } = require('./normalizers');
 const { listCodexThreads } = require('./codex-session-store');
@@ -20,6 +20,45 @@ const { REMOTE_PRELUDE, buildRemoteExec, nodeFinder } = require('./remote-shell'
 const { sweepWriters } = require('./writer-sweep');
 const { resumeSpawnPick, applyOriginHint, continuityLogLine } = require('./resume-continuity');
 const { openOpencodePty } = require('./server/opencode-pty-bridge'); // S9 remainder (c): a serve-owned pty as a normal terminal session
+
+/**
+ * Is a `WorktreeCreate` hook configured for a claude run in `cwd`? — the
+ * SECOND half of the CLI's own --worktree gate (2.1.257:
+ * `pX(){return fB("WorktreeCreate").length>0}`, OR'd with is-git-repo), so a
+ * user driving another VCS through the hook the CLI's error text recommends is
+ * not refused by a preflight that only looked for `.git`.
+ *
+ * Deliberately a CHEAP, WIDE read rather than a reimplementation of the CLI's
+ * settings merge: the three files a user can put it in, size-capped, async
+ * (never block the event loop), and any parse/IO failure answers `null` =
+ * "could not tell" rather than `false`. Only the presence of the event key
+ * matters — we never execute, inspect or report the hook's command.
+ * @returns {Promise<boolean|null>}
+ */
+async function claudeWorktreeHookConfigured(cwd) {
+  const fsp = require('fs').promises;
+  const path = require('path');
+  const home = process.env.CLAUDE_CONFIG_DIR || path.join(require('os').homedir(), '.claude');
+  const files = [
+    path.join(home, 'settings.json'),
+    path.join(cwd || '.', '.claude', 'settings.json'),
+    path.join(cwd || '.', '.claude', 'settings.local.json'),
+  ];
+  for (const fp of files) {
+    let txt;
+    try {
+      const st = await fsp.stat(fp);
+      if (!st.isFile() || st.size > 512 * 1024) continue;   // a settings file that big is not one we can reason about
+      txt = await fsp.readFile(fp, 'utf8');
+    } catch { continue; }                                    // absent is not a failure — it simply has no hook
+    try {
+      const j = JSON.parse(txt);
+      const h = j && j.hooks && j.hooks.WorktreeCreate;
+      if (Array.isArray(h) ? h.length > 0 : !!h) return true;
+    } catch { return null; }                                 // unparseable ⇒ we genuinely cannot tell
+  }
+  return false;  // every readable settings file was silent about the event
+}
 
 function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
   execFileAsync, pickCodexThreadCandidate, getSessionKey, normalizeComparablePath }) {
@@ -289,6 +328,81 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
               break;
             }
           }
+          // PER-SESSION GIT WORKTREE preflight (owner ruling 9). `--worktree`
+          // makes the CLI exit 1 outside a git repo BEFORE the session exists
+          // ("Error: Can only use --worktree in a git repository, but <dir> is
+          // not a git repository." — measured on 2.1.257), so the user would
+          // see a window that died instantly with the reason buried in the
+          // buffer. Refuse HERE, with the reason and scope:'action' (a
+          // session-scoped error flips live windows read-only — inc-mt2arppw).
+          // CS separation: `hostId` is a PARAMETER — the same probe runs
+          // locally through a bounded child process and on any machine handle
+          // (ssh host OR dial device) through hosts._hostShell, exactly like
+          // the cwd preflight above. A probe that cannot ANSWER (unreachable,
+          // timeout) is not a refusal: it is `null`, and the spawn proceeds
+          // with the CLI free to speak for itself.
+          // The CLI's gate is `WorktreeCreate hook OR git repo` (2.1.257:
+          // `if(!pX() && !await rh())`), so the probe answers BOTH halves —
+          // mirroring only the repo half would refuse the very configuration
+          // the CLI's own error text tells a non-git user to create.
+          if (data.worktree) {
+            const refuseNow = worktreeRefusal({ backend, want: true, isGitRepo: true, hasWorktreeHook: null }); // caps-only check first (no probe for a harness that has no flag)
+            if (refuseNow) {
+              ws.send(JSON.stringify({
+                type: 'error', reqId: data.reqId, scope: 'action', code: 'worktree-unsupported',
+                message: `${backend} sessions cannot run in their own git worktree — that flag exists only on Claude Code.`,
+              }));
+              break;
+            }
+            let isGitRepo = null;
+            let hasWorktreeHook = null;
+            let hostName = '';
+            try {
+              if (!data.hostId) {
+                isGitRepo = await new Promise((resolve) => {
+                  execFile('git', ['-C', cwd, 'rev-parse', '--is-inside-work-tree'], { timeout: 6000 }, (err, out) => {
+                    if (err && err.killed) return resolve(null);            // timeout ⇒ unknown, never a refusal
+                    if (err && err.code === undefined) return resolve(null); // git missing / spawn failure ⇒ unknown
+                    resolve(String(out || '').trim() === 'true');
+                  });
+                });
+                // Only worth asking when the repo half already failed — this
+                // is the rescue branch, not a fact any other surface wants.
+                if (isGitRepo === false) hasWorktreeHook = await claudeWorktreeHookConfigured(cwd);
+              } else if (hosts) {
+                const hh = hosts.get(data.hostId);
+                if (hh) {
+                  hostName = hh.name || hh.host || '';
+                  const q = cwd.replace(/'/g, `'\\''`);
+                  // ONE round trip answers both halves — a second ssh hop to
+                  // ask about the hook would double the preflight's latency on
+                  // every non-repo folder.
+                  const out = await Promise.race([
+                    hosts._hostShell(hh, `cd '${q}' 2>/dev/null && git rev-parse --is-inside-work-tree 2>/dev/null && echo __VS_GIT_OK__ || echo __VS_GIT_NO__; `
+                      + `grep -l '"WorktreeCreate"' "$HOME/.claude/settings.json" .claude/settings.json .claude/settings.local.json 2>/dev/null | head -1 | grep -q . && echo __VS_WTHOOK_YES__ || echo __VS_WTHOOK_NO__`, { timeoutMs: 8000 }),
+                    new Promise((r) => setTimeout(() => r(''), 8500)),
+                  ]);
+                  const txt = String(out);
+                  isGitRepo = txt.includes('__VS_GIT_OK__') ? true : (txt.includes('__VS_GIT_NO__') ? false : null);
+                  hasWorktreeHook = txt.includes('__VS_WTHOOK_YES__') ? true : (txt.includes('__VS_WTHOOK_NO__') ? false : null);
+                }
+              }
+            } catch { /* probe failure = unknown, never a refusal */ }
+            const refusal = worktreeRefusal({ backend, want: true, isGitRepo, hasWorktreeHook });
+            if (refusal) {
+              global.__vsEvent?.('spawn-worktree-refused', `${data.hostId ? 'host' : 'local'}/${refusal.reason}`);
+              ws.send(JSON.stringify({
+                type: 'error', reqId: data.reqId, scope: 'action', code: 'worktree-not-a-git-repo', cwd, hostName: hostName || undefined,
+                // The escape hatch is the CLI's OWN advice, so a user working
+                // in another VCS is told what to configure instead of being
+                // left at a dead end (and a hook we simply could not read is
+                // named here rather than silently overruling them).
+                message: `"Run in a git worktree" needs a git repository${data.hostId ? ` on ${hostName || "the session's machine"}` : ''}, and ${cwd} is not one — start the session there without the worktree option, run \`git init\` in that folder, or configure a ${refusal.hookEscape || 'WorktreeCreate'} hook in settings.json to use --worktree with another VCS.`,
+              }));
+              break;
+            }
+            if (isGitRepo === null) console.warn(`[session] worktree requested but the git-repo probe could not answer for ${cwd} — letting the CLI decide`);
+          }
           // ROOT FIX (2.304.0): the socket name is DERIVED FROM THE ID, not
           // minted independently. A session had TWO identities built from two
           // separate expressions (`sess-<seq>-<now>` and `cw-<seq>-<now>`);
@@ -439,6 +553,23 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
               return (!rs.closed || rs.values.includes(want)) ? want : '';
             })()),
             extraArgs,
+            // PER-SESSION GIT WORKTREE (owner ruling 9): the client's tick,
+            // preflighted above. `fork` already rides this object; the PURE
+            // rule in backend-caps decides whether the flag is actually
+            // emitted (never on a plain resume — the CLI re-enters its own).
+            worktree: !!data.worktree,
+            // --brief + the prompt-cache trio (owner ruling 8(c)): INSTANCE
+            // settings read server-side, so every create path (new, resume,
+            // layout restore, billing switch) behaves the same — the same
+            // reason disableModelFallback is read here and not in the client.
+            brief: (() => { try { return serverSetting('claude.brief') === true; } catch { return false; } })(),
+            promptCache: (() => {
+              const out = {};
+              for (const k of ['claude.systemPromptSnapshot', 'claude.excludeDynamicSystemPromptSections', 'claude.autocompact']) {
+                try { out[k] = serverSetting(k); } catch { /* unreadable settings store: leave the flag off */ }
+              }
+              return out;
+            })(),
             initialPrompt: data.initialPrompt || '',
             mode: sessionMode,
             tuiRenderer: data.tuiRenderer || '',
@@ -1743,6 +1874,7 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
           // must report what the session actually runs with, not just what the
           // client asked for (a default-sourced Concise showed as "默认")
           if (data._effOutputStyle) session._outputStyle = data._effOutputStyle;
+          if (data.worktree) session._worktree = true;   // owner ruling 9: the tick is a per-session fact (badge + Session Properties + resume carry)
           if (data.autoResume !== undefined && data.autoResume !== null) session._autoResume = !!data.autoResume;
           session._spawnModel = data.model || null; // model ladder's floor (plan C) // per-session pool link key (plan C) — the id the session is registered under
           attachedSessions.add(id);
@@ -1818,6 +1950,8 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
             modelOrigin: session._modelOrigin || null, // B-6b6d: which fact the spawn's model/effort came from — a restart must not turn an honest
             effortOrigin: session._effortOrigin || null, // "this conversation's own value" row into a guess
             outputStyle: session._outputStyle || null, // 2.369.58: the EFFECTIVE response style survives a server restart (the chip otherwise reported "default" for a session really running one)
+            worktree: session._worktree || undefined,       // owner ruling 9: the badge + properties row survive a server restart
+            worktreePath: session._worktreePath || undefined, // filled by the init frame (the CLI's own announced cwd)
             modelLocked: session._modelLocked || undefined, // #6: survive server restart (else a resumed lock's badge silently reverts — review-caught)
             lockedModel: session._lockedModel || undefined,
             agentToken: session.agentToken || null,
@@ -1965,6 +2099,11 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
             effort: session._effort || null,
             spawnModel: session._spawnModel || null,
             spawnOrigin: { model: session._modelOrigin || null, effort: session._effortOrigin || null },
+            // Same reason (2.368.4): the CREATOR is the window that has to
+            // draw the worktree badge, and it never receives an 'attached'.
+            // Always present so the client's carries-the-key guard fires.
+            worktree: !!session._worktree,
+            worktreePath: session._worktreePath || null,
             autoResume: autoResume?.statusFor?.(id) || null,
             // A freshly spawned/resumed wrapper always starts with an EMPTY
             // input queue — stated explicitly (not omitted) so the creator's

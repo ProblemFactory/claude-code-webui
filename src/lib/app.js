@@ -45,7 +45,7 @@ import { registerWindowType, svgIcon16 } from './window-types.js';
 import { CustomizeMode, applyArrangement } from './customize-mode.js';
 import { installSessionPalette } from './session-palette.js';
 import { installUserTodos } from './user-todos-panel.js';
-import { BACKEND_META, createBackendIconHtml, getSessionKey, pickAgentIdentity, settingsPrefixFor, effortLabel, noteModelCatalog } from './agent-meta.js';
+import { BACKEND_META, createBackendIconHtml, getSessionKey, pickAgentIdentity, settingsPrefixFor, effortLabel, noteModelCatalog, worktreeCapsFor } from './agent-meta.js';
 
 const BACKEND_SESSION_OPTIONS = {
   claude: {
@@ -1488,6 +1488,9 @@ class App {
         extraArgs: document.getElementById('input-extra-args').value.trim(),
         taskId: document.getElementById('input-task')?.value || undefined,
         accountId: document.getElementById('input-account')?.value || undefined,
+        // Only send it when the harness HAS the row (the box is hidden + cleared
+        // otherwise, but the read is gated too so a stale DOM cannot leak it).
+        worktree: worktreeCapsFor(backend).supported && !!document.getElementById('input-worktree')?.checked,
       });
       this.hideDialogs();
     });
@@ -1546,10 +1549,15 @@ class App {
     for (const [id, hide] of [
       ['row-mode', isShell], ['row-model', isShell], ['custom-model-row', isShell],
       ['row-permission', isShell], ['row-effort', isShell || BACKEND_META[backend]?.caps?.effort === false], ['row-extra-args', isShell],
+      // Per-session git worktree (owner ruling 9): gated on the CAPS ROW, not
+      // on a backend id — a harness without the flag simply has no row, and
+      // the box is cleared so a stale tick can never ride a create.
+      ['row-worktree', isShell || !worktreeCapsFor(backend).supported],
     ]) {
       const el = document.getElementById(id);
       if (el) el.classList.toggle('hidden', hide);
     }
+    { const wt = document.getElementById('input-worktree'); if (wt && !worktreeCapsFor(backend).supported) wt.checked = false; }
     if (isShell) return; // nothing else to populate
 
     const cfg = BACKEND_SESSION_OPTIONS[backend] || BACKEND_SESSION_OPTIONS.claude;

@@ -31,14 +31,79 @@ const { MessageManager } = require('../../message-manager');
 const { cwdToProjectDir } = require('../../session-store');
 const { ClaudeCodeAdapter } = require('../../adapters/claude-code.js');
 const { isTurnState, turnStateEffect } = require('../../turn-state.js');
+const { userChannelKind, userChannelRecord, userFilePaths } = require('../../user-channel.js');
+
+// SendUserFile → the published-pages channel (owner ruling 8(c),
+// design-harness-features §2.12). The CLI's tool names LOCAL files; we turn
+// each into a session-owned, PRIVATE-by-default snapshot the front end can
+// link to. Bounded on purpose: a chat card is not a file server.
+const USER_FILE_MAX_BYTES = 8 * 1024 * 1024;
+const USER_FILE_EXT_TYPES = new Map(Object.entries({
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
+  '.webp': 'image/webp', '.avif': 'image/avif', '.pdf': 'application/pdf', '.svg': 'image/svg+xml',
+  '.html': 'text/html', '.htm': 'text/html',
+  '.txt': 'text/plain', '.md': 'text/plain', '.log': 'text/plain', '.json': 'text/plain',
+  '.csv': 'text/plain', '.diff': 'text/plain', '.patch': 'text/plain', '.yml': 'text/plain', '.yaml': 'text/plain',
+}));
 
 const protocol = 'stream-json';
 
 function create({ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes, USAGE_SCANNER_PATH,
-  checkClaudeGoalStatus, noteModelSeen, sbSeenFirst, hosts, usageHistory }) {
+  checkClaudeGoalStatus, noteModelSeen, sbSeenFirst, hosts, usageHistory, pagesRef }) {
   const { _vsuPending, armWorkflowUsageWatcher, kickPoolEval, markLimitBanner,
     maybeRepinLockedModel, maybeStopOnFallback, notePoolAuthFailure,
     modelsMatch, noteSessionProduced, noteTurnEnd, recordRateLimitEvent, resolveUsageKey, usageEstimator } = engine;
+  /**
+   * Publish the files ONE SendUserFile call names, then tell the session's
+   * clients where they landed. Fire-and-forget and fully async (the
+   * never-block-the-event-loop law: a sent file can sit on a wedged mount).
+   * Every failure is reported ON THE CARD via the same broadcast — a file the
+   * agent believes it delivered and the user never received is precisely the
+   * silent failure this product does not tolerate.
+   */
+  async function publishUserFiles(session, id, block, { broadcastToSession }) {
+    const rec = userChannelRecord({ toolName: block.name, input: block.input, output: null });
+    if (!rec) return;
+    const base = session._worktreePath || session.cwd || '';
+    const paths = userFilePaths(rec, base);
+    if (!paths.length) return;
+    const out = [];
+    for (const abs of paths) {
+      const name = abs.slice(abs.lastIndexOf('/') + 1);
+      try {
+        const st = await fs.promises.stat(abs);
+        if (!st.isFile()) { out.push({ path: abs, name, error: 'not a file' }); continue; }
+        if (st.size > USER_FILE_MAX_BYTES) { out.push({ path: abs, name, error: `too large to publish (${Math.round(st.size / 1024 / 1024)}MB > ${USER_FILE_MAX_BYTES / 1024 / 1024}MB)` }); continue; }
+        const buf = await fs.promises.readFile(abs);
+        const ext = (abs.match(/\.[A-Za-z0-9]+$/) || [''])[0].toLowerCase();
+        // An unknown extension publishes as a DOWNLOAD (octet-stream), never
+        // as a document: published-pages re-normalizes this anyway, but the
+        // intent is stated here too.
+        const mediaType = USER_FILE_EXT_TYPES.get(ext) || 'application/octet-stream';
+        const pages = pagesRef;
+        if (!pages || typeof pages.publishContent !== 'function') { out.push({ path: abs, name, error: 'publishing is unavailable on this instance' }); continue; }
+        const r = pages.publishContent({
+          html: buf, name, srcKey: 'local:' + abs,
+          // PRIVATE by default — a VibeSpace login is the gate. The user can
+          // flip a single page public from the Pages surface, deliberately.
+          makePublic: false,
+          sessionId: id, conversationId: session.backendSessionId || session.claudeSessionId || null,
+          mediaType: mediaType === 'text/html' ? '' : mediaType, // '' ⇒ the existing HTML page path, prelude and all
+        });
+        if (r?.error) { out.push({ path: abs, name, error: r.error }); continue; }
+        // RELATIVE path only (the 2.366.1 URL law): the server does not know
+        // how it is being reached, so the browser joins this with its own
+        // origin. Never a remembered/guessed absolute URL.
+        out.push({ path: abs, name, link: r.page.path, pageId: r.page.id, size: st.size });
+      } catch (e) {
+        out.push({ path: abs, name, error: e && e.code === 'ENOENT' ? 'file not found' : `could not read: ${e && e.message ? e.message : 'unknown error'}` });
+      }
+    }
+    if (!out.length) return;
+    try { broadcastToSession(session, id, { type: 'user-file-published', sessionId: id, toolCallId: block.id, files: out }); } catch { }
+    global.__vsEvent?.('user-file-published', `${out.filter((f) => f.link).length}/${out.length}`);
+  }
+
   function attach(session, id, ptyProcess, { feedLive, broadcastToSession, broadcastActiveSessions, readSessionMeta, writeSessionMeta, updateSessionTodos, applyTaskToolUpdate, emitTaskListTodos }) {
     let lineBuf = '';
     if (!session.subagentBuffers) session.subagentBuffers = new Map();
@@ -293,6 +358,48 @@ function create({ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes,
             }
           }
 
+          // THE WORKTREE THE CLI ITSELF ANNOUNCED (owner ruling 9) — and it is
+          // the ARBITER IN BOTH DIRECTIONS, not just a path harvester.
+          //
+          // A `--worktree` spawn chdir's into <repo>/.claude/worktrees/<name>
+          // (2.1.257: `pCn(repo,name) = join(repo,'.claude','worktrees',name)`,
+          // `setup_worktree_ms` + `worktree_chdir:` run in SETUP, before the
+          // session stream exists), so the init record's `cwd` is that
+          // directory — a TYPED record, never a path we compose from a naming
+          // rule we would then have to keep in sync with the CLI (and which a
+          // WorktreeCreate hook can put anywhere at all).
+          //
+          // The SAME record also settles the opposite case, which is the one
+          // that would otherwise make the badge lie:
+          //   · the CLI's own 'worktree-gone' path — "the worktree … no longer
+          //     exists; continuing in the current directory without worktree
+          //     isolation. The worktree binding has been cleared." (2.1.257
+          //     verbatim) — the conversation KEEPS our `worktree:true` intent
+          //     while the process is plainly not isolated;
+          //   · a resume that carries the saved tick for a conversation the
+          //     CLI never bound to a worktree (a resume can only RE-ENTER a
+          //     recorded worktree, never create one — `--worktree` is emitted
+          //     on new/fork only, see worktreeSpawnArgs).
+          // In both, the CLI reports the very directory we launched it in.
+          // "Same cwd" is therefore the process saying "I am not isolated",
+          // and the badge must go — an intent nobody honoured is not a fact.
+          // Trailing slashes are cosmetic; nothing else is normalized, because
+          // a path we massaged is no longer the record the CLI gave us.
+          if (msg.type === 'system' && msg.subtype === 'init' && session._worktree && typeof msg.cwd === 'string' && msg.cwd) {
+            const trim = (p) => String(p || '').replace(/\/+$/, '');
+            const announced = trim(msg.cwd);
+            const launched = trim(session.cwd);
+            const isolated = !!announced && !!launched && announced !== launched;
+            const nextPath = isolated ? announced : null;
+            if (isolated ? session._worktreePath !== nextPath : (session._worktreePath || session._worktree)) {
+              session._worktreePath = nextPath;
+              if (!isolated) session._worktree = false;   // the LIVE fact only; the user's saved pick is theirs to change
+              if (session.sockName) writeSessionMeta(session.sockName, { ...(readSessionMeta(session.sockName) || {}), worktree: isolated || undefined, worktreePath: nextPath || undefined });
+              broadcastToSession(session, id, { type: 'worktree-path', sessionId: id, worktree: isolated, worktreePath: nextPath });
+              broadcastActiveSessions();
+            }
+          }
+
           // get_usage control-response (vsu- ids are OURS): payload nests at
           // response.response (live-verified 2026-08-09); resolve the ⟳
           // probe's promise + persist. Other control_responses untouched.
@@ -433,6 +540,24 @@ function create({ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes,
               if (b.name === 'TodoWrite' && Array.isArray(b.input?.todos)) updateSessionTodos(session, b.input.todos);
               else if (b.name === 'TaskCreate') (session._pendingTaskCreates ||= new Map()).set(b.id, b.input || {});
               else if (b.name === 'TaskUpdate' && b.input?.taskId) applyTaskToolUpdate(session, b.input);
+            }
+          }
+
+          // SendUserFile → a private link in THIS instance (owner ruling 8(c)).
+          // The tool is the CLI's first-class "hand the user a file" channel;
+          // publishing it here means the chat card can carry a link the user
+          // can open, share with a colleague, or keep after the session dies —
+          // which is exactly what published pages already are.
+          // LOCAL sessions only: the paths are on the machine the CLI runs on,
+          // and a remote session's files are not ours to read (the card still
+          // renders, it simply carries no link — an honest absence, not a
+          // guess). Paths resolve against the directory the CLI ITSELF is in
+          // (`_worktreePath` for a --worktree session, else the session cwd) —
+          // the tool's own describe says "absolute or relative to cwd".
+          if (msg.type === 'assistant' && Array.isArray(msg.message?.content) && !session.host) {
+            for (const b of msg.message.content) {
+              if (b?.type !== 'tool_use' || userChannelKind(b.name) !== 'file') continue;
+              publishUserFiles(session, id, b, { broadcastToSession });
             }
           }
           if (msg.type === 'user' && Array.isArray(msg.message?.content) && session._pendingTaskCreates?.size) {

@@ -377,6 +377,11 @@ class ChatView {
       // live sub-agent traffic (2026-09-07): only the view knows whether a
       // collab card is still the one the next row lands in on a live turn
       isCollabLive: (msg) => this._noteCollabHeadPainted(msg?.id, this._liveCollabId() === msg?.id),
+      // SendUserFile links (owner ruling 8(c)): toolCallId → the rows the
+      // server published for that call. Filled by the live broadcast AND by
+      // one /api/pages read on attach, so a reloaded history shows the same
+      // links a live session does.
+      getPublishedFiles: () => this._publishedUserFiles,
     });
 
     // Position indicator (shows when not at bottom, e.g. "120-170 / 3000")
@@ -922,6 +927,26 @@ class ChatView {
         if (msg.live) showToast(msg.outputStyle
           ? t('Response style \u201c{v}\u201d applies from the next turn', { v: msg.outputStyle })
           : t('Response style cleared \u2014 the agent\u2019s own config applies again'));
+      } else if (msg.type === 'user-file-published' && msg.sessionId === sessionId) {
+        // The server published the files ONE SendUserFile call named (owner
+        // ruling 8(c)). Keyed by toolCallId — the same id the card carries —
+        // so a re-render (scroll, trim, slab reload) always finds them again.
+        this._notePublishedUserFiles(msg.toolCallId, msg.files);
+      } else if (msg.type === 'worktree-path' && msg.sessionId === sessionId) {
+        // The CLI announced whether this run is really isolated, and where
+        // (its own init-frame cwd — owner ruling 9). The frame is the ARBITER
+        // in both directions: `worktree:false` is the CLI saying this run is
+        // NOT isolated (its worktree was gone, or a resume could not create
+        // one), so the live fact drops — while the SAVED pick stays the
+        // user's, because a fact we were wrong about is not a preference they
+        // changed (the one-way latch in _applyLiveMeta below).
+        //
+        // Only the LIVE flag is kept here: the badge and the Session
+        // Properties path both read the `active-sessions` payload, which the
+        // server rebroadcasts in the very same branch that sends this frame.
+        // A `sidebar.refresh…()` call here would be a no-op that LOOKS like
+        // the thing keeping the badge honest.
+        if ('worktree' in msg) this._worktree = !!msg.worktree;
       } else if (msg.type === 'page-published' && msg.sessionId === sessionId) {
         // ONE notify point server-side (dialog + agent publishes): the status
         // bar's design chip is the live list; the agent's reply carries the link
@@ -1466,6 +1491,35 @@ class ChatView {
         this._statusBar?.setOutputStylePending?.(cfg.outputStyle !== undefined ? cfg.outputStyle : undefined);
       } catch { }
     }
+    // The per-session git worktree (owner ruling 9): `worktree` is the user's
+    // tick, `worktreePath` is what the CLI itself announced. Carries-the-key
+    // guarded like every other field here — a partial meta must not erase a
+    // badge the session really has.
+    if ('worktree' in meta) {
+      this._worktree = !!meta.worktree;
+      // Record the CHOICE against the conversation the moment its id exists,
+      // so a later resume/restart/fork carries it (the New Session dialog
+      // cannot: the conversation has no id yet when the box is ticked).
+      // ONE-WAY on purpose — it only ever LATCHES ON. The saved key means
+      // "this conversation should run isolated" (a standing preference the
+      // user owns and unticks in Session Properties); the live `_worktree`
+      // means "this run is isolated", and the init-frame arbiter can turn
+      // THAT off on its own (a deleted worktree). Letting the live fact erase
+      // the preference would silently discard a pick because of a transient —
+      // the auto-resume `noteRecovered` lesson, in a different subsystem.
+      try {
+        const ids = this._getSessionIds();
+        if (ids?.backendSessionId && this._worktree) {
+          const key = { backend: ids.backend || 'claude', backendSessionId: ids.backendSessionId };
+          const cfg = this.app?.sidebar?.getSessionConfig?.(key) || {};
+          if (!cfg.worktree) this.app?.sidebar?.setSessionConfig?.(key, { ...cfg, worktree: true });
+        }
+      } catch { }
+    }
+    // One read of this conversation's published files, so a RELOADED history
+    // shows the same SendUserFile links a live session does (the broadcast
+    // only reaches clients that were connected at publish time).
+    try { this._loadPublishedUserFiles(); } catch { }
   }
 
   // Fork a new session from a specific assistant message (the chat fork button).
@@ -3403,6 +3457,73 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
    * guard) whose constructor never ran: setSuspended(false) → _tickCollab on
    * such a view must not throw, or the whole resume suite dies at import time.
    */
+  /**
+   * SendUserFile publish rows for one tool call (owner ruling 8(c)).
+   * Stored per toolCallId — the id the card carries — and the affected card is
+   * re-rendered in place. Bounded: a long conversation must not grow an
+   * unbounded map, and the OLDEST entries are the ones already scrolled away.
+   */
+  _notePublishedUserFiles(toolCallId, files) {
+    if (!toolCallId || !Array.isArray(files) || !files.length) return;
+    const map = (this._publishedUserFiles ||= new Map());
+    map.delete(toolCallId);         // re-insert = most-recently-published last
+    map.set(toolCallId, files);
+    while (map.size > 500) map.delete(map.keys().next().value);
+    this._rerenderToolCard(toolCallId);
+  }
+
+  /** Re-render ONE tool card in place (no window/pin/scroll change). */
+  _rerenderToolCard(toolCallId) {
+    try {
+      const el = this._messageList?.querySelector(`[data-tool-id="${CSS.escape(String(toolCallId))}"]`);
+      const raw = el?._rawMsg;
+      if (!el || !raw) return;
+      const next = this._renderers.renderToolMsg(raw);
+      if (next) el.replaceWith(next);
+    } catch { /* a card that is not currently rendered simply gets the link on its next render */ }
+  }
+
+  /**
+   * One read of the pages this CONVERSATION owns, so a reloaded history shows
+   * the same links a live session does (the broadcast only reaches clients
+   * that were connected when the file was published). Best-effort and silent:
+   * a missing link is an absent affordance, never an error toast.
+   */
+  async _loadPublishedUserFiles() {
+    const convId = (() => { try { return this._getSessionIds()?.backendSessionId || ''; } catch { return ''; } })();
+    if (!convId || this._publishedFilesLoaded) return;
+    this._publishedFilesLoaded = true;
+    const r = await fetchJson(`/api/pages?conversationId=${encodeURIComponent(convId)}`);
+    const pages = r && Array.isArray(r.pages) ? r.pages : [];
+    if (!pages.length) return;
+    // srcKey is 'local:<abs path>' — the same key the publisher used, so the
+    // card matches on PATH (a card knows its paths; it does not know page ids).
+    this._publishedPagesByPath = new Map(pages.map((p) => [String(p.srcKey || '').replace(/^local:/, ''), p]));
+    this._rerenderUserFileCards();
+  }
+
+  /** Re-render every user-file card once the page list has landed. */
+  _rerenderUserFileCards() {
+    if (!this._publishedPagesByPath?.size) return;
+    for (const el of this._messageList?.querySelectorAll('.chat-msg-userchan') || []) {
+      const raw = el._rawMsg;
+      const b = raw?.content?.[0];
+      if (!raw?.toolCallId || !b) continue;
+      const rows = [];
+      const files = Array.isArray(b.input?.files) ? b.input.files : (typeof b.input?.files === 'string' ? [b.input.files] : []);
+      for (const f of files) {
+        const abs = String(f).startsWith('/') ? String(f) : '';
+        const page = abs ? this._publishedPagesByPath.get(abs) : null;
+        // A relative path in the record can still be matched by BASENAME —
+        // the publisher resolved it against the CLI's own cwd, which the
+        // client does not know (and must not guess).
+        const hit = page || [...this._publishedPagesByPath.entries()].find(([k]) => k.endsWith('/' + String(f).replace(/^\.\//, '')))?.[1];
+        if (hit) rows.push({ path: abs || String(f), name: String(f).split('/').pop(), link: hit.path });
+      }
+      if (rows.length) { (this._publishedUserFiles ||= new Map()).set(raw.toolCallId, rows); this._rerenderToolCard(raw.toolCallId); }
+    }
+  }
+
   _noteCollabHeadPainted(id, live) {
     if (id) {
       const ids = (this._liveHeadIds ||= new Set());

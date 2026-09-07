@@ -447,8 +447,9 @@ export function installSidebarState(SidebarClass) {
     // (the Session Properties toggle never saved), AND 'outputStyle'/'autoResume'
     // in 2.368.0 (the status-bar style pick vanished on resume — FOURTH strike,
     // owner-caught within hours) — keep it in sync with EVERY per-session
-    // config writer, and test-auto-resume now pins it.
-    for (const k of ['model', 'effort', 'permission', 'account', 'groupManager', 'modelLock', 'lockModel', 'outputStyle']) {
+    // config writer, and test-auto-resume now pins it. 'worktree' joined it
+    // with owner ruling 9 (the tick has to survive a resume/restart).
+    for (const k of ['model', 'effort', 'permission', 'account', 'groupManager', 'modelLock', 'lockModel', 'outputStyle', 'worktree']) {
       if (config?.[k]) clean[k] = config[k];
     }
     // autoResume is TRI-STATE: an explicit false must persist (its whole point

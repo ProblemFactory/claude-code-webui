@@ -24,19 +24,20 @@ function create({ rootDir, BUFFERS_DIR, META_DIR, DTACH_CMD, USAGE_SCANNER_PATH,
   CLAUDE_STREAM_TYPES, _seenStreamTypes, activeSessions, engine,
   checkClaudeGoalStatus, broadcastToSession, broadcastActiveSessions,
   noteModelSeen, noteHarnessModels, recordUsageAttribution, daemonPtyShim, sbSeenFirst, getDeviceMgr,
-  getHosts, getUsageHistory, getTelemetry, getNoConvoRef, getDeliver }) {
+  getHosts, getUsageHistory, getTelemetry, getNoConvoRef, getDeliver, getPages }) {
   const hosts = mk(getHosts);
   const usageHistory = mk(getUsageHistory);
   const telemetry = mk(getTelemetry);
   const noConvoRef = mk(getNoConvoRef);
   const deliverRef = mk(getDeliver);
+  const pagesRef = mk(getPages);
   const ensureDir = (p) => { if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true }); };
   // S5: ONE consumer per declared stream protocol (src/server/stdout/), built
   // once with the orchestrator deps the inline branches used to close over;
   // this engine's own closures (meta store, todo helpers, broadcasts, the
   // feedLive gate) ride `stdoutHelpers` into every attach.
   const stdoutConsumers = createStdoutRegistry({ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes, USAGE_SCANNER_PATH,
-    checkClaudeGoalStatus, noteModelSeen, noteHarnessModels, sbSeenFirst, hosts, usageHistory, deliverRef });
+    checkClaudeGoalStatus, noteModelSeen, noteHarnessModels, sbSeenFirst, hosts, usageHistory, deliverRef, pagesRef });
   const stdoutHelpers = { feedLive, broadcastToSession, broadcastActiveSessions, readSessionMeta, writeSessionMeta,
     updateSessionTodos, applyTaskToolUpdate, emitTaskListTodos };
 // ── PTY setup helper (onData + onExit wiring) ──

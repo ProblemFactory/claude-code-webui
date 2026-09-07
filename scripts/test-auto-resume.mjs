@@ -237,7 +237,13 @@ const T0 = Date.now();   // the module refuses waits >26h out, so the clock must
   // the attach path copied the payload into meta KEY BY KEY, a hand list that
   // silently lacked outputStyle/autoResume (the whitelist-drift class, fifth
   // strike): both attach-shaped call sites must pass the payload WHOLESALE.
-  ok("'created' carries the live style + auto-resume state (always, null = default)", /type: 'created'[\s\S]{0,1800}outputStyle: session\._outputStyle \|\| null[\s\S]{0,900}autoResume: autoResume\?\.statusFor\?\.\(id\) \|\| null/.test(read('src/ws-create.js')));
+  // The gap between the two keys is deliberately WIDE: what this pins is that
+  // BOTH facts ride the `created` payload (the creator never gets 'attached'),
+  // not that they are adjacent lines. Owner ruling 9 legitimately added
+  // `worktree`/`worktreePath` between them for exactly the same reason, and a
+  // pin that turns "a third field joined the same list" into a red test is
+  // pinning formatting instead of behaviour.
+  ok("'created' carries the live style + auto-resume state (always, null = default)", /type: 'created'[\s\S]{0,1800}outputStyle: session\._outputStyle \|\| null[\s\S]{0,1600}autoResume: autoResume\?\.statusFor\?\.\(id\) \|\| null/.test(read('src/ws-create.js')));
   ok("…and (B-6b6d) the effort this spawn RESOLVED to plus WHICH FACT it came from — on a resume the client sends none", /type: 'created'[\s\S]{0,2400}effort: session\._effort \|\| null,[\s\S]{0,200}spawnOrigin: \{ model: session\._modelOrigin/.test(read('src/ws-create.js')));
   const sl2 = read('src/lib/session-lifecycle.js');
   ok('the created handler APPLIES it (HTTP history load has no meta)', /if \(spawnedEffort\) chatView\.applyStatus[\s\S]{0,600}chatView\._applyLiveMeta\?\.\(msg\)/.test(sl2)

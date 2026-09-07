@@ -311,6 +311,14 @@ html, body {
   border-radius: var(--radius); max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .badge-sub svg { width: 10px; height: 10px; flex-shrink: 0; }
+/* Per-session git worktree (owner ruling 9): a quiet green marker saying this
+   session works in its own checkout, so it can never touch the folder you are
+   editing. Icon-only — the path lives in the tooltip and Session Properties. */
+.badge-worktree {
+  background: color-mix(in srgb, var(--green, #3fb950) 16%, transparent); color: var(--green, #3fb950);
+  display: inline-flex; align-items: center; padding: 1px 3px;
+}
+.badge-worktree svg { width: 10px; height: 10px; flex-shrink: 0; }
 .acct-type-icon { flex-shrink: 0; display: inline-flex; color: var(--text-secondary); }
 .acct-type-icon svg { width: 14px; height: 14px; }
 /* Icon action buttons (default star / rename / delete) — consistent across all
@@ -1398,6 +1406,24 @@ html, body {
 .dialog-body input:focus, .dialog-body select:focus, .dialog-body textarea:focus { outline: none; border-color: var(--accent); }
 .dialog-hint { font-size: 11px; color: var(--text-dim); line-height: 1.45; margin: 0; }
 .dialog-hint.hidden { display: none; } /* no global .hidden in this project */
+/* A CHECKBOX row inside a dialog body. `.dialog-body label.dialog-check-row`
+   must out-rank `.dialog-body label` (0,1,1), whose column flex would stack
+   the box above its text — same precedent as label.pool-mem-row. The hint is
+   a third line under both, indented past the box. */
+.dialog-body label.dialog-check-row, .dialog-check-row {
+  display: grid; grid-template-columns: auto 1fr; align-items: center;
+  column-gap: 8px; row-gap: 2px; font-size: 12px; color: var(--text); cursor: pointer;
+}
+.dialog-check-row input[type="checkbox"] { margin: 0; width: auto; justify-self: start; }
+.dialog-check-hint { grid-column: 2; font-size: 11px; color: var(--text-dim); line-height: 1.4; }
+/* …and the HIDE rule must out-rank BOTH of them. `.dialog label.hidden`
+   (0,2,1) above is what actually hides every other dialog row, and the grid
+   rule here ties it on specificity while coming LATER in the file — so the
+   plain `.dialog-check-row.hidden` this used to carry lost, and the row stayed
+   on screen for a harness with no such flag (measured at 375×667 in
+   scripts/test-worktree-userchan-ui.mjs, which is why that suite exists).
+   No global .hidden in this project: every component brings its own. */
+.dialog-body label.dialog-check-row.hidden, .dialog-check-row.hidden { display: none; }
 .dialog-footer {
   padding: 10px 14px; border-top: 1px solid var(--border);
   display: flex; justify-content: flex-end; gap: 6px;
@@ -2903,6 +2929,13 @@ label.mounts-conf-row { display: flex; flex-direction: row; align-items: center;
 /* Session Properties window */
 .session-props .session-detail-row { padding: 2px 0; display: flex; align-items: center; gap: 8px; }
 .session-props .session-detail-label { flex-shrink: 0; width: 72px; color: var(--text-dim); font-size: 10px; }
+/* A filesystem path inside a properties row: monospace, and the row opts out
+   of the one-line ellipsis (a worktree path is long by construction — the
+   default .session-detail-value is nowrap/ellipsis, which would hide the end
+   that actually identifies the checkout). */
+.session-detail-path { font-family: var(--font-mono, monospace); font-size: 11px; word-break: break-all; }
+.session-detail-row.sp-wrap { align-items: flex-start; }
+.session-detail-row.sp-wrap .session-detail-value { white-space: normal; overflow: visible; text-overflow: clip; }
 .session-props-group { display: flex; align-items: center; gap: 6px; font-size: 11px; padding: 2px 0; cursor: pointer; color: var(--text-secondary); }
 .session-props-group input { margin: 0; width: 12px; height: 12px; }
 .session-props .session-history-list, .session-props .session-steps-list { max-height: 180px; overflow-y: auto; }

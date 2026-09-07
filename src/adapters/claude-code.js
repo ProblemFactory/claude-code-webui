@@ -13,9 +13,52 @@
  */
 
 const { BackendAdapter } = require('./base');
+const { worktreeSpawnArgs } = require('../backend-caps');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+
+/**
+ * PROMPT-CACHE LEVERS (owner ruling 8(c): settings, ALL default OFF).
+ * Each row maps ONE setting key to its EXACT flag, dumped from
+ * `claude --help` on 2.1.257 — never an invented spelling:
+ *   --system-prompt-snapshot <on|off>
+ *       "Record the system prompt once per conversation and reuse it verbatim
+ *        on every request and resume (recommended: on)."
+ *   --exclude-dynamic-system-prompt-sections   (boolean, no value)
+ *       "Move per-machine sections (cwd, env info, memory paths, git status)
+ *        from the system prompt into the first user message. Improves
+ *        cross-user prompt-cache reuse."
+ *   --autocompact <auto|tokens>
+ *       "Auto-compact window size (auto, or 100k–1M tokens)". The CLI's own
+ *        validator: "It must be 'auto', or between 100k and 1M (e.g. 500k,
+ *        200000, or 200 as shorthand)".
+ * `validate` is what keeps an argv token honest: a settings value the CLI
+ * would reject must never reach a spawn (it exits before the session exists),
+ * and a value with whitespace/shell metacharacters must never reach argv at
+ * all — an empty/invalid value simply drops the flag (spawn hygiene: flags
+ * carry switches, never secrets and never unvalidated user text).
+ */
+const PROMPT_CACHE_FLAGS = [
+  { key: 'claude.systemPromptSnapshot', flag: '--system-prompt-snapshot', kind: 'value', validate: (v) => (v === 'on' || v === 'off' ? v : null) },
+  { key: 'claude.excludeDynamicSystemPromptSections', flag: '--exclude-dynamic-system-prompt-sections', kind: 'boolean' },
+  { key: 'claude.autocompact', flag: '--autocompact', kind: 'value', validate: (v) => validAutocompact(v) },
+];
+
+/** 'auto' | 100k–1M as the CLI spells it. Returns null (⇒ drop the flag) for
+ *  anything else, INCLUDING an out-of-range number: the CLI would exit 1. */
+function validAutocompact(v) {
+  const s = String(v == null ? '' : v).trim().toLowerCase();
+  if (!s) return null;
+  if (s === 'auto') return 'auto';
+  const m = /^(\d+)(k|m)?$/.exec(s);
+  if (!m) return null;
+  const n = Number(m[1]) * (m[2] === 'k' ? 1e3 : m[2] === 'm' ? 1e6 : 1);
+  // "200 as shorthand" = 200k — the CLI's own example, so a bare number under
+  // 1000 is read the same way here rather than refused as out of range.
+  const tokens = (!m[2] && n < 1000) ? n * 1e3 : n;
+  return (tokens >= 1e5 && tokens <= 1e6) ? s : null;
+}
 
 class ClaudeCodeAdapter extends BackendAdapter {
   /**
@@ -56,6 +99,32 @@ class ClaudeCodeAdapter extends BackendAdapter {
       args.push('--effort', effort);
     }
     if (extraArgs.length) args.push(...extraArgs);
+    // PER-SESSION GIT WORKTREE (owner ruling 9). The decision is the PURE
+    // rule in backend-caps — the flag is passed on a NEW session and on a
+    // FORK, never on a plain resume (the CLI re-enters its own recorded
+    // worktree there; a second --worktree would create a second tree).
+    // `--tmux` is NEVER emitted: its own help says it needs --worktree, and a
+    // tmux inside our dtach session is a second multiplexer nobody attaches
+    // to. The assert below is the guard, not a comment.
+    if (mode === 'chat' || mode === 'terminal') {
+      const wt = worktreeSpawnArgs({ backend: 'claude', want: !!options.worktree, resume: !!resumeId, fork: !!options.fork });
+      if (wt.pass) args.push(...wt.args);
+      if (wt.args.includes('--tmux')) throw new Error('claude adapter: --tmux must never be spawned (dtach is the persistence layer)');
+    }
+    // AGENT→USER CHANNEL (owner ruling 8(c), setting `claude.brief`, default
+    // OFF): `--brief  Enable SendUserMessage tool for agent-to-user
+    // communication` — the CLI's own first-class channel, which VibeSpace now
+    // renders as a highlighted card (src/user-channel.js). A boolean switch,
+    // no value, so nothing user-typed reaches argv.
+    if (options.brief) args.push('--brief');
+    // Prompt-cache levers — each an explicit setting, each validated against
+    // the CLI's own accepted vocabulary before it becomes an argv token.
+    for (const row of PROMPT_CACHE_FLAGS) {
+      const raw = options.promptCache ? options.promptCache[row.key] : undefined;
+      if (row.kind === 'boolean') { if (raw === true) args.push(row.flag); continue; }
+      const v = row.validate(raw);
+      if (v) args.push(row.flag, v);
+    }
     // Disable model fallback (2.228.0, user request "stop instead of becoming
     // opus"): switchModelsOnFlag=false is the CLI's OWN settings key ("When
     // off, your session will pause instead") — it stops the server-lane

@@ -1,6 +1,6 @@
 import { escHtml, copyText, showConfirmDialog, taskGroupColor } from './utils.js';
 import { SESSION_STATE_META, SESSION_URGENCY_META } from './sidebar-tasks.js';
-import { getBackendMeta, getAgentKindMeta, getAgentRoleLabel, responseStyleCaps, responseStyleOrigin, spawnValueOrigin, effortDisplay, composerSendModes, notificationDeliveryFor } from './agent-meta.js';
+import { getBackendMeta, getAgentKindMeta, getAgentRoleLabel, responseStyleCaps, responseStyleOrigin, spawnValueOrigin, effortDisplay, composerSendModes, notificationDeliveryFor, worktreeCapsFor } from './agent-meta.js';
 import { t } from './i18n.js';
 import { registerOpenAction } from './window-types.js';
 
@@ -321,6 +321,57 @@ export function openSessionProps(app, sessionRef, { syncId } = {}) {
       row(cfgSection(), t('Response style'),
         `${escHtml(shown || t('agent default'))} <span class="chat-status-dim">${escHtml('(' + origin + ')')}</span>${pendBit}`,
         { wrap: true });   // same family, same reason
+    }
+
+    // ── Per-session git worktree (owner ruling 9) ──
+    // TWO facts, said apart, exactly like the response-style row above — and
+    // they are genuinely different things, so they never share a control:
+    //   · `s.worktree` / `s.worktreePath` = what THIS RUN is, decided by the
+    //     CLI's own init frame (the arbiter, both directions: a worktree it
+    //     could not re-enter turns the live fact OFF). Read-only by nature —
+    //     a running process cannot be moved into or out of a checkout.
+    //   · `cfg.worktree` = the standing PICK for this conversation, which is
+    //     what a fork (and a restart from this config) asks for. That one is
+    //     the CHECKBOX, mirroring the New Session dialog's row.
+    // A resume is deliberately NOT in that list: `--worktree` is emitted on a
+    // new session and on a fork only, because the CLI records the binding on
+    // the conversation and re-enters it by itself (2.1.257 `worktreeSession`,
+    // stripped by --fork-session) — a second flag would create a SECOND tree.
+    // The hint says exactly that, so an unticked box is never a broken promise.
+    // Gated on the CAPS MIRROR, never on a backend id.
+    {
+      const wtCaps = worktreeCapsFor(s.backend || 'claude');
+      const live = !!s.worktree;
+      if (wtCaps.supported) {
+        const sec = cfgSection();
+        const lbl = document.createElement('label');
+        lbl.className = 'session-props-group';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = cfg.worktree === undefined ? live : !!cfg.worktree;
+        cb.onchange = () => sidebar.setSessionConfig?.(s, { ...(sidebar.getSessionConfig?.(s) || {}), worktree: cb.checked || undefined });
+        const txt = document.createElement('span');
+        txt.textContent = t('Run in a git worktree');
+        lbl.append(cb, txt);
+        sec.appendChild(lbl);
+        const hint = document.createElement('div');
+        hint.className = 'empty-hint';
+        hint.textContent = t('Applies when a new session or a fork starts. A resume re-enters whatever worktree the CLI recorded for this conversation, so it cannot gain or lose one.');
+        sec.appendChild(hint);
+        // What this RUN actually is — the CLI's own word, or an honest absence.
+        if (live) {
+          const r = row(sec, t('Git worktree'), s.worktreePath
+            ? `<span class="session-detail-path">${escHtml(s.worktreePath)}</span>`
+            : escHtml(t('on \u2014 the CLI has not reported the directory yet')),
+          s.worktreePath ? { copy: s.worktreePath } : {});
+          r.classList.add('sp-wrap');
+        } else if (cfg.worktree) {
+          // Ticked, but this run is not isolated — say so rather than letting
+          // the checkbox imply otherwise (the CLI clears a binding whose
+          // worktree is gone, and a resume can never create one).
+          row(sec, t('Git worktree'), `<span class="chat-status-dim">${escHtml(t('not isolated in this run'))}</span>`);
+        }
+      }
     }
 
     // ── What a send DURING a running turn does here (2026-09-07) ──

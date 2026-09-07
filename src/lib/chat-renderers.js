@@ -19,6 +19,10 @@ import { mcpParts } from './chat-run-summary.js';
 // codex multi-agent collab rows (B-7473). Escaper/translator/icons are
 // injected so the whole surface is unit-testable outside a browser.
 import { collabRowsHtml, collabReportHeadText, collabRowTitle } from '../collab-row.js';
+// PURE builder for claude's OWN agent→user channel (--brief: SendUserMessage /
+// SendUserFile). Same contract as collab-row: esc/t/icons injected, so the
+// escaping is provable in a unit test rather than reviewed by eye.
+import { userChannelKind, userChannelRecord, userMessageCardHtml, userFileCardHtml } from '../user-channel.js';
 
 // Agent-memory files get their own card treatment (user ask: a memory write
 // is a different concern than a project write — render "记忆更新 <name>"
@@ -240,7 +244,7 @@ class ChatRenderers {
    * @param {HTMLElement} opts.messageList - Message list DOM element
    * @param {Function} [opts.onPermissionResolve] - Called when a permission is resolved (allow/deny)
    */
-  constructor({ ws, sessionId, app, backend = 'claude', compact, messageList, onPermissionResolve, onFork, getSessionCtx, onSendText, onQueueChipClick, getQueueCaps, isCollabLive }) {
+  constructor({ ws, sessionId, app, backend = 'claude', compact, messageList, onPermissionResolve, onFork, getSessionCtx, onSendText, onQueueChipClick, getQueueCaps, isCollabLive, getPublishedFiles }) {
     // Is THIS collab card the one the next row would coalesce into, on a turn
     // that is still streaming? Only the VIEW knows (it owns the streaming flag
     // and the message list), and the answer decides live age vs frozen span.
@@ -259,6 +263,7 @@ class ChatRenderers {
     this._onPermissionResolve = onPermissionResolve || (() => {});
     this._onFork = onFork || null;
     this._getSessionCtx = getSessionCtx || null;
+    this._getPublishedFiles = getPublishedFiles || null; // toolCallId → published SendUserFile rows (owner ruling 8(c))
     this.setupLinkHandler();
   }
 
@@ -268,12 +273,16 @@ class ChatRenderers {
   // their host/cwd and probed the LOCAL machine (audit 2.192.0). ChatView's
   // _getSessionIds already solves this (openSpec fallback) — prefer it.
   _sessionCtx() {
+    // publishedFiles rides the SAME accessor every link resolver already
+    // calls, so a view-only / terminated window gets it too (its map is empty
+    // until the /api/pages read lands, and an absent link is simply not drawn).
+    const published = (() => { try { return this._getPublishedFiles?.() || null; } catch { return null; } })();
     try {
       const ids = this._getSessionCtx?.();
-      if (ids && (ids.cwd || ids.host)) return { cwd: ids.cwd || '', host: ids.host || null };
+      if (ids && (ids.cwd || ids.host)) return { cwd: ids.cwd || '', host: ids.host || null, publishedFiles: published };
     } catch {}
     const sess = (this.app?.sidebar?._allSessions || []).find(s => s.webuiId === this.sessionId);
-    return { cwd: sess?.cwd || '', host: sess?.host || null };
+    return { cwd: sess?.cwd || '', host: sess?.host || null, publishedFiles: published };
   }
 
   // ── Message renderers ──
@@ -620,6 +629,48 @@ class ChatRenderers {
     return el;
   }
 
+  /**
+   * The two user-channel cards. `block` is a tool_call (pending) or a
+   * tool_result (done) — BOTH render, because the message is meant for the
+   * human the moment the agent writes it, not when the tool result lands.
+   * Returns null when there is genuinely nothing to show, so the caller falls
+   * back to the ordinary tool card rather than drawing an empty highlight.
+   */
+  _renderUserChannelMsg(el, block, msg) {
+    const rec = userChannelRecord({ toolName: block.toolName, input: block.input, output: block.output });
+    if (!rec) return null;
+    if (rec.kind === 'message') {
+      if (!rec.message && !rec.files.length) return null;
+      // markdown per the tool's own describe ("Supports markdown formatting").
+      // renderMarkdown is DOMPurify(marked(...)) — the ONE sanitizer; the PURE
+      // builder never carries one (it escapes instead).
+      const body = rec.message ? `<div class="chat-text">${this.renderMarkdown(rec.message)}</div>` : '';
+      el.classList.add('chat-msg-userchan');
+      this.wrapMsg(el, 'tool', UI_ICONS.mail, userMessageCardHtml(rec, { esc: escHtml, t, icons: { mail: UI_ICONS.mail }, body }));
+      return el;
+    }
+    if (!rec.files.length) return null;
+    // The RELATIVE link the server published this file under, joined with the
+    // browser's own origin (2.366.1: the server never guesses an absolute
+    // URL). `_publishedUserFiles` is ChatView's per-session map, filled by the
+    // live `user-file-published` broadcast and by the /api/pages read on
+    // attach — absent = no link yet, which the card simply does not draw.
+    const published = this._sessionCtx?.().publishedFiles || null;
+    const rowsForCall = published && msg.toolCallId ? published.get(msg.toolCallId) : null;
+    const rowFor = (f) => (rowsForCall ? rowsForCall.find((r) => r.path === f.path || r.name === f.name) : null) || null;
+    // A publish that FAILED here (missing file, too large, unreadable) is a
+    // delivery the agent believes happened — it goes on the card next to the
+    // file, in the same slot as the CLI's own upload_error (no-silent-failures).
+    for (const f of rec.files) { const r = rowFor(f); if (r && r.error && !f.error) f.error = r.error; }
+    const link = (f) => { const r = rowFor(f); return r && r.link ? absUrl(r.link) : ''; };
+    const note = this._sessionCtx?.().host
+      ? t('Files sent from a remote session are not published here — open them on that machine.')
+      : '';
+    el.classList.add('chat-msg-userchan');
+    this.wrapMsg(el, 'tool', UI_ICONS.upload, userFileCardHtml(rec, { esc: escHtml, t, icons: { upload: UI_ICONS.upload }, link, note }));
+    return el;
+  }
+
   renderToolMsg(msg) {
     if (msg.collab) return this._renderCollabMsg(msg);
     const block = msg.content?.[0];
@@ -628,6 +679,18 @@ class ChatRenderers {
     el.className = 'chat-msg chat-msg-assistant chat-msg-tool-result';
     el._rawMsg = msg;
     if (msg.toolCallId) el.dataset.toolId = msg.toolCallId;
+    // claude's OWN agent→user channel (--brief). These two are NOT generic
+    // tool calls: SendUserMessage IS the reply the human is meant to read
+    // (with --brief the CLI hides plain text outside it from the message
+    // view), and SendUserFile is a delivery. A generic "✓ SendUserMessage /
+    // Input / Output" card buries both. Rendered by the PURE builder so the
+    // escaping is testable; a tool that is NOT part of the channel falls
+    // straight through to the normal card below (the negative control in
+    // scripts/test-stdout-registry.mjs pins that).
+    if (userChannelKind(block.toolName)) {
+      const card = this._renderUserChannelMsg(el, block, msg);
+      if (card) return card;
+    }
     let html;
 
     if (block.type === 'tool_call') {
