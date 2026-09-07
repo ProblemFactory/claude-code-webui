@@ -140,6 +140,18 @@ if (fs.existsSync('/proc/self')) {
   process.on('SIGTERM', onTerm);
   const selfFd = fs.openSync(jsonl, 'r');
 
+  // THE LOCK-FILE LEG is the one that actually reaches a live claude: measured
+  // on the installed CLI (2.1.226, native), a running claude does NOT keep its
+  // transcript open — it appends and closes, and a machine-wide scan found zero
+  // holders of any ~/.claude/projects/**.jsonl while 16 CLIs were running. So
+  // the CLI's own ~/.claude/sessions/<pid>.json registry gets the same two
+  // controls, with neither fixture holding the fd (only the lock file names it).
+  const sessDir = path.join(dir, '.claude', 'sessions');
+  fs.mkdirSync(sessDir, { recursive: true });
+  const lockWriter = spawn(nativeBin, ['-e', 'setTimeout(()=>{},60000)'], { cwd: os.tmpdir(), stdio: 'ignore' });
+  const lockStale = spawn(process.execPath, ['-e', 'setTimeout(()=>{},60000)'], { cwd: os.tmpdir(), stdio: 'ignore' });
+  for (const p of [lockWriter, lockStale]) fs.writeFileSync(path.join(sessDir, `${p.pid}.json`), JSON.stringify({ pid: p.pid, sessionId: 'rid-live', cwd: dir, version: '2.1.226' }) + '\n');
+
   // A negative control is only meaningful once the scan can actually SEE the
   // holder: wait until every fixture really has the transcript open.
   const holdsIt = (pid) => {
@@ -169,10 +181,12 @@ if (fs.existsSync('/proc/self')) {
   ok(survived('r-othercli', rOtherCli), 'READER survives: a `cli.js` that is not under a claude package', { swept });
   ok(survived('r-neutral', rNeutral), 'READER survives: a neutral `node -e` holder', { swept });
   ok(!selfTermed && !swept.includes(process.pid), `the SUITE ITSELF holds the transcript open and is never swept (ran from ${process.argv[1].includes('.claude') ? 'a .claude path — the real regression shape' : 'a non-.claude path'})`, { swept, pid: process.pid });
-  console.log(`  · fd scan + sweep wall time: ${scanMs}ms over ${execFileSync('sh', ['-c', 'ls -d /proc/[0-9]* | wc -l'], { encoding: 'utf8' }).trim()} processes`);
+  ok(swept.includes(lockWriter.pid) && !alive(lockWriter.pid), 'LOCK-FILE leg: a claude named by its own ~/.claude/sessions/<pid>.json is swept even though it holds no fd (the leg that reaches a REAL live claude)', { swept });
+  ok(!swept.includes(lockStale.pid) && alive(lockStale.pid), 'LOCK-FILE leg: a STALE lock file whose pid was reused by something that is not claude kills nothing', { swept });
+  console.log(`  · fd scan + sweep wall time: ${scanMs}ms over ${execFileSync('sh', ['-c', 'ls -d /proc/[0-9]* 2>/dev/null | wc -l'], { encoding: 'utf8' }).trim()} processes`);
   fs.closeSync(selfFd);
   process.off('SIGTERM', onTerm);
-  for (const h of [...holders.map((h) => h.p), rTail]) { try { h.kill('SIGKILL'); } catch {} }
+  for (const h of [...holders.map((h) => h.p), rTail, lockWriter, lockStale]) { try { h.kill('SIGKILL'); } catch {} }
   fs.rmSync(dir, { recursive: true, force: true });
 } else { console.log('  · /proc absent — skipping the live fd-scan leg'); }
 

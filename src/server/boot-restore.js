@@ -102,10 +102,21 @@ function restoreSessions() {
   //
   // B-3185: this used to fork a `readlink` PER FD — 405,735 of them on the dev
   // box, ~6.4 minutes — so it ALWAYS blew its own 6s timeout, and the catch
-  // turned that into a silent empty set: every local conversation looked dead
-  // and the dedup could retire the wrong socket. (Its `/proc/[0-9]*/fd/*` glob
-  // also overflows ARG_MAX at that size.) It now runs THE batched fd scan the
-  // writer sweep uses — 3.0s at 3678 processes — and a failure SAYS SO.
+  // turned that into a silent empty set. (Its `/proc/[0-9]*/fd/*` glob also
+  // overflows ARG_MAX at that size.) It now runs THE batched fd scan the writer
+  // sweep uses — 3.0s at 3678 processes — and a failure SAYS SO.
+  //
+  // HONEST LIMIT, measured on the installed CLI (2.1.226, native binary): a
+  // live claude does NOT keep its transcript open — it appends and closes, and
+  // a machine-wide scan found ZERO processes holding any
+  // ~/.claude/projects/**.jsonl. So this answers "nobody" for current claude
+  // however fast it runs; it only sees a holder that really exists. The CLI's
+  // OWN registry (~/.claude/sessions/<pid>.json, sessionId + pid + procStart)
+  // is the accurate liveness source — deliberately NOT swapped in here,
+  // because retiring is destructive (SIGTERM + unlink the dtach socket) and
+  // changing which socket boot destroys is its own decision, not a rider on a
+  // performance fix. Backlog: give claudeAlive the registry, keyed with the
+  // procStart counter-capture so pid reuse cannot fake it.
   let liveConvos = new Set();
   const dedupIds = [...new Set(dedupMetas.map(({ m }) => m.claudeSessionId).filter((s) => /^[\w-]+$/.test(s || '')))];
   if (dedupIds.length) {
