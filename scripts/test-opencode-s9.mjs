@@ -1195,29 +1195,34 @@ console.log('\n— ROUND 7 (the sixth review: stop() vs the KEEPER ladder alread
  *  This is src/opencode-serve.js with exactly this fix's checks removed; its
  *  relative requires are re-pointed at the repo so it can live in /tmp. */
 const R7_NEUTER = [
-  ['the acquisition-point check in adopt()', 'async function adopt(port, pid, source) {\n    if (state.stopping) return null;', 'async function adopt(port, pid, source) {', 1],
-  ['the reuse-probe check', '        if (state.stopping) return null;\n        // THE OPS KILL SWITCH', '        // THE OPS KILL SWITCH', 1],
-  ['the isolated-cwd check', '      if (state.stopping) return null;   // `git init` is an await too: a disable landing in it used to reach the spawn below\n', '', 1],
-  ['the pre-spawn check', '    if (state.stopping) return null;   // never START a third-party daemon for a service that was turned off mid-ladder\n', '', 1],
+  ['the acquisition-point check in adopt()', 'async function adopt(port, pid, source, epoch) {\n    if (cancelled(epoch)) return null;', 'async function adopt(port, pid, source, epoch) {', 1],
+  ['the reuse-probe check', '        if (cancelled(epoch)) return null;\n        // THE OPS KILL SWITCH', '        // THE OPS KILL SWITCH', 1],
+  ['the isolated-cwd check', '      if (cancelled(epoch)) return null;   // `git init` is an await too: a disable landing in it used to reach the spawn below\n', '', 1],
+  ['the pre-spawn check', '    if (cancelled(epoch)) return null;   // never START a third-party daemon for a service that was turned off mid-ladder\n', '', 1],
   // the boot loop, restored to its exact pre-fix shape: ONE combined bail at
   // the top that walks away from the child, and NO check after the probe
-  ['the boot-loop bail', "      if (state.stopping) return abandon({ why: 'the background service was turned off' });\n      if (state.child !== child) return abandon();", '      if (state.stopping || state.child !== child) return null;', 1],
-  ['the post-probe check', "        if (state.stopping) return abandon({ why: 'the background service was turned off' });\n", '', 1],
+  ['the boot-loop bail', '      if (cancelled(epoch)) return abandon({ why: cancelWhy() });\n      if (state.child !== child) return abandon();', '      if (state.stopping || state.child !== child) return null;', 1],
+  ['the post-probe check', '        if (cancelled(epoch)) return abandon({ why: cancelWhy() });\n', '', 1],
 ];
-let unfixedServe = null, unfixedServeWhy = null, unfixedServeFile = null;
-try {
-  let src = read('src/opencode-serve.js');
-  for (const [name, from, to, count] of R7_NEUTER) {
-    const hits = src.split(from).length - 1;
-    if (hits !== count) throw new Error(`the negative control is stale: "${name}" matched ${hits}× (expected ${count}) — re-derive it from the current source`);
-    src = src.split(from).join(to);
-  }
-  src = src.replace(/require\('\.\/([\w-]+)'\)/g, (_m, n) => `require(${JSON.stringify(path.join(REPO, 'src', `${n}.js`))})`);
-  const f = path.join(os.tmpdir(), `vs-oc-serve-unfixed-${process.pid}.js`);
-  fs.writeFileSync(f, src);
-  unfixedServe = require(f);
-  unfixedServeFile = f;
-} catch (e) { unfixedServeWhy = e.message; }
+/** Build a copy of src/opencode-serve.js with exactly `table`'s checks removed.
+ *  Shared by ROUND 7 and ROUND 8 so every control is derived the same way (and
+ *  its replacement counts asserted the same way). */
+function buildNeutered(tag, table) {
+  try {
+    let src = read('src/opencode-serve.js');
+    for (const [name, from, to, count] of table) {
+      const hits = src.split(from).length - 1;
+      if (hits !== count) throw new Error(`the negative control is stale: "${name}" matched ${hits}× (expected ${count}) — re-derive it from the current source`);
+      src = src.split(from).join(to);
+    }
+    src = src.replace(/require\('\.\/([\w-]+)'\)/g, (_m, n) => `require(${JSON.stringify(path.join(REPO, 'src', `${n}.js`))})`);
+    const f = path.join(os.tmpdir(), `vs-oc-serve-${tag}-${process.pid}.js`);
+    fs.writeFileSync(f, src);
+    return { mod: require(f), why: null, file: f };
+  } catch (e) { return { mod: null, why: e.message, file: null }; }
+}
+const r7Ctl = buildNeutered('unfixed', R7_NEUTER);
+const unfixedServe = r7Ctl.mod, unfixedServeWhy = r7Ctl.why, unfixedServeFile = r7Ctl.file;
 ok('(the control itself) an UNFIXED copy of the keeper can be built from the current source — the A/B below is only meaningful against it', !!unfixedServe, unfixedServeWhy);
 
 /** ONE harness for all three windows: drive the REAL wiring (install() +
@@ -1328,7 +1333,176 @@ for (const [win, label] of [['reuse', 'the reuse health probe on a BUSY recorded
     /ROUND 7/.test(kfs) && /adopt\(\)/.test(kfs)
     && /A SERVICE THAT WAS TURNED OFF STILL ADOPTED/.test(read('docs/kb-bugfix-invariants.md'))
     && /S9 REMAINDER ROUND 7/.test(read('CLAUDE.md')));
+  // …and the SIZE of that control is stated as a number the TABLE owns, in all
+  // three places (round 8 finding 3: the essays said "five" while R7_NEUTER had
+  // six entries — a count written by hand drifts silently, and a negative
+  // control the reader mis-sizes is one they cannot re-derive)
+  const n7 = R7_NEUTER.length;
+  const stated = [['docs/kb-bugfix-invariants.md', new RegExp(`exactly these ${n7} checks`)], ['docs/kb-file-structure.md', new RegExp(`its ${n7} replacements`)], ['CLAUDE.md', new RegExp(`把这 ${n7} 个检查删掉`)]];
+  ok(`docs: the ROUND 7 negative control's size is stated as the number R7_NEUTER owns (${n7}) in all three places`,
+    stated.every(([f, re]) => re.test(read(f))), stated.filter(([f, re]) => !re.test(read(f))).map(([f]) => f));
   if (unfixedServeFile) { try { fs.rmSync(unfixedServeFile, { force: true }); } catch { } }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ROUND 8 — A LEVEL IS NOT A CANCELLATION. Round 7 put the guard at the
+// ACQUISITION point, but it guarded on `state.stopping`, which is a LEVEL:
+// `stop()` raises it and the very next `start()` lowers it. Across a Disable→
+// Enable pair (a user turning it off, then changing their mind — or the panel's
+// own Stop/Start), the ladder that was in flight the whole time sails past
+// every one of those checks and publishes what it gathered BEFORE the stop,
+// while the fresh `ensure()` JOINS the cancelled attempt instead of starting
+// its own. Reproduced through the real wiring below. The fix is a per-attempt
+// token: `state.stopEpoch`, bumped by `stop()` AND by every new `locate()`.
+console.log('\n— ROUND 8 (the seventh review: a Disable→Enable pair inside one ladder) —');
+const R8_NEUTER = [
+  ['the epoch in cancelled()', 'const cancelled = (epoch) => state.stopping || epoch !== state.stopEpoch;', 'const cancelled = (epoch) => state.stopping;', 1],
+  ['the cancelled attempt is detached in stop()', '    state.stopEpoch++;\n    ensuring = null;\n', '    state.stopEpoch++;\n', 1],
+];
+const R8_ABANDON_NEUTER = [
+  ["abandon()'s SIGTERM", "      if (state.child === child) { state.child = null; state.pid = null; }\n      try { child.kill('SIGTERM'); } catch { }\n", '      if (state.child === child) { state.child = null; state.pid = null; }\n', 1],
+];
+const r8EpochCtl = buildNeutered('r8-epoch', [R8_NEUTER[0]]);
+const r8DetachCtl = buildNeutered('r8-detach', [R8_NEUTER[1]]);
+const r8AbandonCtl = buildNeutered('r8-abandon', R8_ABANDON_NEUTER);
+ok('(the controls themselves) one copy per mechanism can be built from the current source — each neuters exactly ONE of this round\'s checks',
+  !!r8EpochCtl.mod && !!r8DetachCtl.mod && !!r8AbandonCtl.mod, [r8EpochCtl.why, r8DetachCtl.why, r8AbandonCtl.why]);
+
+/** THE REAL WIRING, exactly as the plugin drives it (`_ocStop` then `_ocStart`
+ *  in src/plugins.js): a RECORDED serve that outlived a restart and is BUSY
+ *  (700ms per request — 1.18.29 answers /global/health in ~1.2s cold), a
+ *  Disable landing inside the reuse probe, and an Enable 50ms later while that
+ *  same probe is STILL in flight. `enable:false` = the round-7 shape (stop and
+ *  stay stopped); `disable:false` = the positive control that this harness
+ *  really can adopt the recorded serve, so "did not adopt it" is not vacuous. */
+async function r8Run(mod, { disable = true, enable = true } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-oc-r8-data-'));
+  const ocHome = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-oc-r8-home-'));
+  const storeDir = path.join(ocHome, '.local/share/opencode');
+  fs.mkdirSync(storeDir, { recursive: true });
+  fs.writeFileSync(path.join(storeDir, 'opencode.db'), 'x');
+  const mocks = [];
+  let wantUp = true, spawns = 0;
+  const kills = [], adoptions = [];
+  const RECORDED_PID = 987654;      // never this process: stop({killRecorded}) refuses to signal itself
+  const st = createMockState(); st.delayMs = 700;
+  const mock = await startMockServe({ state: st });
+  mocks.push(mock);
+  fs.writeFileSync(path.join(dir, 'opencode-serve.json'), JSON.stringify({ port: mock.port, pid: RECORDED_PID, startedAt: Date.now(), cwd: dir }));
+  const facts = mod.install({
+    dataDir: dir, command: '/usr/bin/opencode', log: { warn() { }, error() { }, log() { } }, guardSampleMs: 0,
+    autostart: () => wantUp, readProc: () => ({ cpuTicks: 0, rssBytes: 1024 }),
+    killPid: (pid, sig) => { kills.push([pid, sig]); },     // the recorded serve is "killed" on paper: closing it would change the window under test
+    makeLane: (deps) => events.createLiveLane({ ...deps, env: { HOME: ocHome }, fetchImpl: async () => { throw new Error('no serve'); }, onExternal: () => { } }),
+    onState: (s) => { if (s && s.ready) { const k = `${s.source}:${s.port}`; if (adoptions[adoptions.length - 1] !== k) adoptions.push(k); } },
+    spawnImpl: (_cmd, args) => {
+      spawns++;
+      const port = Number(args[args.indexOf('--port') + 1]);
+      startMockServe({ port, state: createMockState() }).then((m) => mocks.push(m)).catch(() => { });
+      const c = new EventEmitter(); c.pid = 4242; c.unref = () => { }; c.kill = () => { }; return c;
+    },
+  });
+  facts.locator.start();                       // the plugin's Start — NOT awaited, exactly as the route leaves it
+  await sleep(400);                            // …now inside the 700ms reuse health probe
+  let startResult = 'not-clicked';
+  if (disable) { wantUp = false; facts.locator.stop({ killRecorded: true }); }
+  if (disable && enable) {
+    await sleep(50);
+    wantUp = true;
+    startResult = 'pending';
+    // _ocStart's own shape: it REPORTS the outcome of the promise start() returns
+    Promise.resolve(facts.locator.start()).then((c) => { startResult = c ? 'client' : 'null'; }, () => { startResult = 'threw'; });
+  }
+  await sleep(3000);
+  const lst = facts.locator.state();
+  const out = {
+    ready: !!lst.ready, source: lst.source || null, port: lst.port, recordedPort: mock.port, startResult,
+    adoptions, spawns, kills, lane: facts.state().liveLane !== null,
+    adoptedTheKilledServe: lst.source === 'reused' && lst.port === mock.port,
+    record: (() => { try { return JSON.parse(fs.readFileSync(path.join(dir, 'opencode-serve.json'), 'utf8')).port; } catch { return null; } })(),
+  };
+  mod.uninstall();
+  for (const m of mocks) { try { await m.close(); } catch { } }
+  for (const d of [dir, ocHome]) fs.rmSync(d, { recursive: true, force: true });
+  return out;
+}
+{
+  const plain = await r8Run(serve, { disable: false });
+  ok('(the control) with nobody touching it, this harness DOES adopt the recorded serve — so "did not adopt it" below is a real difference', plain.source === 'reused' && plain.port === plain.recordedPort && plain.spawns === 0, plain);
+  const off = await r8Run(serve, { enable: false });
+  ok('(round 7, still) a Disable with no Enable publishes nothing at all', off.ready === false && off.source === null && off.spawns === 0, off);
+
+  const fixed = await r8Run(serve);
+  ok('a Disable→Enable pair NEVER republishes the serve the Disable SIGTERMed', fixed.adoptedTheKilledServe === false && fixed.kills.some(([p, s]) => p === 987654 && s === 'SIGTERM'), fixed);
+  ok('…and the Enable runs its OWN ladder: exactly one spawn, adopted as `spawned` on a live port', fixed.spawns === 1 && fixed.source === 'spawned' && fixed.port !== fixed.recordedPort, fixed);
+  ok('…exactly ONE client is ever published, and ONE lane follows it', fixed.adoptions.length === 1 && fixed.lane === true, fixed);
+  ok('…and the Enable\'s own start() resolves that client, so the route reports the truth', fixed.startResult === 'client', fixed);
+  ok('…and the record left behind names the serve we are actually talking to (what the NEXT boot adopts)', fixed.record === fixed.port, fixed);
+
+  if (!r8EpochCtl.mod) skip('NEGATIVE CONTROL: without the epoch, the cancelled ladder republishes the killed serve', r8EpochCtl.why);
+  else {
+    const ctl = await r8Run(r8EpochCtl.mod);
+    ok('NEGATIVE CONTROL: with `cancelled()` reduced to the `state.stopping` LEVEL, the cancelled ladder wakes up after the Enable and publishes the SIGTERMed serve — TWO adoptions, the second a dead process',
+      ctl.adoptions.length === 2 && ctl.adoptedTheKilledServe === true, ctl);
+  }
+  if (!r8DetachCtl.mod) skip('NEGATIVE CONTROL: without the detach, the Enable joins the cancelled attempt', r8DetachCtl.why);
+  else {
+    const ctl = await r8Run(r8DetachCtl.mod);
+    ok('NEGATIVE CONTROL: without `ensuring = null` in stop(), the Enable JOINS the cancelled attempt and its start() resolves null — a click the route reports as "did nothing"',
+      ctl.startResult === 'null', ctl);
+  }
+}
+
+/** FINDING 2: abandon() SIGTERMs the child it holds, and `stop()` has ALREADY
+ *  nulled `state.child` by then — which is why abandon's `state.child === child`
+ *  branch is a no-op on every path we have, and why it must stay conditional
+ *  (a newer ladder's handle lives in that slot). Both halves are measured
+ *  here with a mock child that RECORDS its kills, tagged by the phase they
+ *  arrive in, so "abandon killed it" cannot be confused with "stop killed it". */
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-oc-r8-abandon-'));
+  const runAbandon = async (mod) => {
+    let phase = 'boot';
+    const kills = [];
+    let wantUp = true;
+    const loc = mod.createServeLocator({
+      dataDir: dir, command: '/usr/bin/opencode', log: { warn() { }, error() { }, log() { } }, guardSampleMs: 0,
+      autostart: () => wantUp, bootTimeoutMs: 20000,
+      execImpl: (_c, _a, _o, cb) => cb(null, '', ''),      // the isolated cwd, without a real `git init`
+      spawnImpl: () => { const c = new EventEmitter(); c.pid = 4242; c.unref = () => { }; c.kill = (sig) => kills.push(`${phase}:${sig}`); return c; },
+    });
+    loc.start();                                          // nothing ever answers on that port: the boot wait rungs
+    await sleep(500);
+    const spawned = loc.state();
+    wantUp = false;
+    phase = 'stop'; loc.stop(); phase = 'after-stop';      // synchronous — anything later is abandon()'s
+    const afterStop = loc.state();
+    await sleep(700);                                     // past the next boot-loop rung
+    return { kills, spawnedPid: spawned.pid, afterStopPid: afterStop.pid, lastError: loc.state().lastError, record: fs.existsSync(path.join(dir, 'opencode-serve.json')) };
+  };
+  const r = await runAbandon(serve);
+  ok('(the setup) the boot wait really did have a child in flight', r.spawnedPid === 4242, r);
+  ok('stop() nulls `state.child`/`state.pid` FIRST — abandon() finds the slot already empty, which is why its conditional null is a no-op (and must never be unconditional: a newer ladder owns that slot)', r.afterStopPid === null, r);
+  ok('…and abandon() STILL SIGTERMs the child it holds in its closure — the second kill arrives after stop() returned', JSON.stringify(r.kills) === JSON.stringify(['stop:SIGTERM', 'after-stop:SIGTERM']), r.kills);
+  ok('…and it says so honestly (the boot was OURS to stop) and leaves no record for the next boot to ADOPT', /was starting when the background service was turned off/.test(r.lastError || '') && r.record === false, r);
+  if (!r8AbandonCtl.mod) skip("NEGATIVE CONTROL: without abandon()'s kill the child survives the bail", r8AbandonCtl.why);
+  else {
+    const ctl = await runAbandon(r8AbandonCtl.mod);
+    ok("NEGATIVE CONTROL: with abandon()'s SIGTERM removed, only stop()'s kill is recorded — the assert above can fail", JSON.stringify(ctl.kills) === JSON.stringify(['stop:SIGTERM']), ctl.kills);
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+{
+  const kfs = read('docs/kb-file-structure.md');
+  const n8 = R8_NEUTER.length;
+  ok('docs: "a level is not a cancellation" is in the kb essays + the incident file + the index',
+    /ROUND 8/.test(kfs) && /stopEpoch/.test(kfs)
+    && /A LEVEL IS NOT A CANCELLATION/.test(read('docs/kb-bugfix-invariants.md'))
+    && /S9 REMAINDER ROUND 8/.test(read('CLAUDE.md')));
+  ok(`docs: the ROUND 8 negative control's size is stated as the number R8_NEUTER owns (${n8})`,
+    new RegExp(`one per mechanism, ${n8} of them`).test(read('docs/kb-bugfix-invariants.md')) && new RegExp(`${n8} single-mechanism controls`).test(kfs),
+    [n8]);
+  for (const f of [r8EpochCtl.file, r8DetachCtl.file, r8AbandonCtl.file]) if (f) { try { fs.rmSync(f, { force: true }); } catch { } }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

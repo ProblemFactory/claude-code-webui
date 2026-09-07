@@ -751,7 +751,7 @@ function createServeLocator({
 } = {}) {
   if (!dataDir) throw new Error('createServeLocator: dataDir is required (the record lives at data/opencode-serve.json)');
   const recordPath = path.join(dataDir, 'opencode-serve.json');
-  const state = { client: null, port: null, pid: null, startedAt: null, source: null, child: null, crashes: 0, parked: false, parkedKind: null, runawayUntil: 0, lastError: null, stopping: false, backoffUntil: 0, caps: null, version: null, capsProbed: false, cwd: cwd || null, cwdIsolated: null, cpuPct: null, rssBytes: null, sampledAt: null, skippedWorktrees: [] };
+  const state = { client: null, port: null, pid: null, startedAt: null, source: null, child: null, crashes: 0, parked: false, parkedKind: null, runawayUntil: 0, lastError: null, stopping: false, stopEpoch: 0, backoffUntil: 0, caps: null, version: null, capsProbed: false, cwd: cwd || null, cwdIsolated: null, cpuPct: null, rssBytes: null, sampledAt: null, skippedWorktrees: [] };
   const guard = { prev: null, hotSince: 0, timer: null };
   let ensuring = null;
   let respawnTimer = null;
@@ -775,11 +775,25 @@ function createServeLocator({
     state.capsProbed = true;
     try { onCaps?.({ ...state.caps }, snapshot()); } catch (e) { log?.error?.(`[opencode-serve] onCaps failed: ${e.message}`); }
   }
+  /** IS THE ATTEMPT THAT CAPTURED `epoch` STILL THE ONE ALLOWED TO PUBLISH?
+   *  (round 8). `state.stopping` alone is a LEVEL, and a level is not terminal
+   *  across a Disable→Enable pair: `stop()` sets it, `start()` clears it 50 ms
+   *  later, and the ladder that was in flight the whole time sails past every
+   *  `state.stopping` check and publishes evidence it gathered BEFORE the stop
+   *  — measured: a Disable inside the 700 ms reuse probe followed by an Enable
+   *  adopted `source:'reused'` on the exact port `stop({killRecorded:true})`
+   *  had just SIGTERMed and whose record it had deleted, while the fresh
+   *  `ensure()` (which joined the cancelled attempt instead of starting its
+   *  own) spawned nothing. So the token is an EPOCH, bumped by `stop()` AND by
+   *  every new `locate()`: a cancelled attempt can never become valid again,
+   *  and only the NEWEST attempt may take ownership. Same shape as round 6's
+   *  per-arm cancellation in the live lane, one layer up. */
+  const cancelled = (epoch) => state.stopping || epoch !== state.stopEpoch;
   /** THE ACQUISITION POINT (round 7 — the same rule round 6 applied to the
    *  live lane, one layer up). This is the ONLY place `state.client` is ever
    *  assigned, so it is the only place that can refuse to hand a client to a
    *  service that was turned OFF while we were awaiting something. `locate()`
-   *  checks `state.stopping` at ENTRY only, and every rung below reaches this
+   *  checks its cancellation at ENTRY only, and every rung below reaches this
    *  call after at least one await (the reuse health probe, the safety probe,
    *  the boot wait) — none of which `stop()` can cancel. Publishing here after
    *  a stop is not a cosmetic lie: it sets `ready:true`, RE-ARMS the runaway
@@ -789,8 +803,8 @@ function createServeLocator({
    *  fires `onExternal`, for a service they just disabled. Reproduced through
    *  the real wiring (install() + locator.start() + locator.stop()) with a
    *  busy serve, and again with a stop landing inside the boot probe. */
-  async function adopt(port, pid, source) {
-    if (state.stopping) return null;
+  async function adopt(port, pid, source, epoch) {
+    if (cancelled(epoch)) return null;
     state.client = mkClient(port);
     state.port = port; state.pid = pid; state.source = source; state.startedAt = Date.now(); state.lastError = null;
     guard.prev = null; guard.hotSince = 0; armGuard();
@@ -888,6 +902,11 @@ function createServeLocator({
   async function locate() {
     if (state.client) return state.client;
     if (state.stopping) return null;
+    // THIS attempt's cancellation token (round 8). Bumping it here as well as
+    // in stop() means a ladder is cancelled BOTH by a stop and by a newer
+    // ladder starting — so the Enable after a Disable cannot be served by the
+    // run the Disable killed, and two ladders can never both reach adopt().
+    const epoch = ++state.stopEpoch;
     if (state.parked) {
       // a runaway earns exactly one retry per cooldown; a crash park is terminal until restart
       if (state.parkedKind !== 'runaway' || now() < state.runawayUntil) return null;
@@ -906,7 +925,7 @@ function createServeLocator({
     if (cmd && !state.cwd && (rec || autostartOn())) {
       try { const r = await ensureServeCwd(dataDir, { execImpl, log }); state.cwd = r.dir; state.cwdIsolated = r.isolated; }
       catch (e) { log?.warn?.(`[opencode-serve] isolated cwd unavailable (${e.message})`); }
-      if (state.stopping) return null;   // `git init` is an await too: a disable landing in it used to reach the spawn below
+      if (cancelled(epoch)) return null;   // `git init` is an await too: a disable landing in it used to reach the spawn below
     }
     if (rec) {
       const probe = mkClient(rec.port);
@@ -916,7 +935,7 @@ function createServeLocator({
         // disable never even evaluates the reuse verdict — it does not signal a
         // recorded pid we were about to replace, on behalf of a service that is
         // already being torn down by stop({killRecorded}).
-        if (state.stopping) return null;
+        if (cancelled(epoch)) return null;
         // THE OPS KILL SWITCH IS AUTHORITATIVE OVER ADOPTION, not just over
         // spawning (2026-09-07 follow-up): this rung runs BEFORE the autostart
         // gate below, so VIBESPACE_OPENCODE_SERVE=0 used to stop us STARTING a
@@ -927,7 +946,7 @@ function createServeLocator({
         const bad = serveEnvOverride() === false
           ? 'VIBESPACE_OPENCODE_SERVE=0 is set on this instance — the ops kill switch stops an adopted serve too'
           : await unsafeReuseReason(probe, rec);
-        if (!bad) return adopt(rec.port, rec.pid || null, 'reused');
+        if (!bad) return adopt(rec.port, rec.pid || null, 'reused', epoch);
         log?.warn?.(`[opencode-serve] replacing the recorded serve (pid ${rec.pid}, port ${rec.port}): ${bad}`);
         // never signal ourselves: a record can name this very process (a stale
         // pid reused after a reboot) and a self-SIGTERM would take the server down
@@ -939,7 +958,7 @@ function createServeLocator({
     if (!cmd) { state.lastError = 'opencode CLI is not installed'; return null; }
     if (!autostartOn()) { state.lastError = serveEnvOverride() === false ? 'the OpenCode background service is forced OFF by VIBESPACE_OPENCODE_SERVE=0 on this instance' : 'the OpenCode background service is off — enable the "OpenCode background service" plugin (⚙ → Plugins) to start it'; return null; }
     const port = await freePort();
-    if (state.stopping) return null;   // never START a third-party daemon for a service that was turned off mid-ladder
+    if (cancelled(epoch)) return null;   // never START a third-party daemon for a service that was turned off mid-ladder
     let child;
     try {
       child = spawnImpl(cmd, ['serve', '--port', String(port), '--hostname', '127.0.0.1', '--log-level', 'WARN'], { cwd: state.cwd || cwd || os.homedir(), env: env(), stdio: 'ignore', detached: true });
@@ -957,25 +976,35 @@ function createServeLocator({
      *  left a live `opencode serve` plus a record the NEXT boot would adopt,
      *  for a service the user had just turned off. */
     const abandon = ({ why = null } = {}) => {
-      // `why` only when WE decided: a child that exited on its own already has
-      // onChildExit's honest lastError, and overwriting it would hide the crash
+      // `why` only when WE decided AND the stop is still the current story: a
+      // child that exited on its own already has onChildExit's honest
+      // lastError (overwriting it would hide the crash), and a run cancelled by
+      // a NEWER ladder must not write a complaint the new ladder is about to
+      // contradict — it would surface on a healthy locator at the next notify.
       if (why) { state.lastError = `opencode serve was starting when ${why} — stopped it`; log?.warn?.(`[opencode-serve] ${state.lastError} (pid ${child.pid || '?'}, port ${port})`); }
+      // A no-op on every path we have: `stop()` nulls `state.child` before this
+      // runs, and a newer ladder owns a DIFFERENT child — which is exactly why
+      // it must not null unconditionally (that would drop the live handle a
+      // newer ladder just took). Kept so a future caller that abandons without
+      // a preceding stop cannot leave a stale handle; the SIGTERM below and
+      // this invariant are pinned by test-opencode-s9's abandon leg.
       if (state.child === child) { state.child = null; state.pid = null; }
       try { child.kill('SIGTERM'); } catch { }
       const r = readRecord();
       if (r && r.port === port) clearRecord();   // never clear a record that names a DIFFERENT serve
       return null;
     };
+    const cancelWhy = () => (state.stopping ? 'the background service was turned off' : null);
     while (Date.now() - t0 < bootTimeoutMs) {
-      if (state.stopping) return abandon({ why: 'the background service was turned off' });
+      if (cancelled(epoch)) return abandon({ why: cancelWhy() });
       if (state.child !== child) return abandon();
       // the health probe is an await of its own (up to 1s per rung, over a
       // boot wait of up to 20s — the whole window in which a user watching
       // "starting…" gives up and clicks Disable)
       if (await healthy(probe, 1000)) {
-        if (state.stopping) return abandon({ why: 'the background service was turned off' });
+        if (cancelled(epoch)) return abandon({ why: cancelWhy() });
         log?.log?.(`[opencode-serve] started pid ${child.pid} on 127.0.0.1:${port} (${Date.now() - t0}ms)`);
-        return adopt(port, child.pid || null, 'spawned');
+        return adopt(port, child.pid || null, 'spawned', epoch);
       }
       await wait(200);
     }
@@ -986,7 +1015,13 @@ function createServeLocator({
   }
   function ensure() {
     if (state.client) return Promise.resolve(state.client);
-    if (!ensuring) ensuring = locate().catch((e) => { state.lastError = e.message; notify(); return null; }).finally(() => { ensuring = null; });
+    if (!ensuring) {
+      // the in-flight attempt is single-flight, but `stop()` DETACHES it (round
+      // 8) — so this settle handler must only clear the slot it still owns, or
+      // a cancelled ladder finishing late would drop the live one that replaced it
+      const p = locate().catch((e) => { state.lastError = e.message; notify(); return null; }).finally(() => { if (ensuring === p) ensuring = null; });
+      ensuring = p;
+    }
     return ensuring;
   }
   /** A client within `budgetMs`, else null (the boot continues in the background). */
@@ -1018,6 +1053,14 @@ function createServeLocator({
    *  next boot reuses it); a user turning the service OFF means STOP IT. */
   function stop({ killRecorded = false } = {}) {
     state.stopping = true;
+    // CANCEL THE ATTEMPT, don't just raise a flag (round 8). `state.stopping` is
+    // cleared again by the very next start(), so on its own it lets a Disable→
+    // Enable pair be served by the ladder the Disable killed; the epoch makes
+    // the cancellation terminal, and detaching `ensuring` makes the Enable's
+    // ensure() start its OWN ladder instead of joining the cancelled one (which
+    // now resolves null — an Enable that silently did nothing).
+    state.stopEpoch++;
+    ensuring = null;
     clearTimeout(respawnTimer); respawnTimer = null;
     if (guard.timer) { clearInterval(guard.timer); guard.timer = null; }
     const ch = state.child;
