@@ -3049,6 +3049,7 @@ export default {
   "running on 127.0.0.1:{port}": "実行中 127.0.0.1:{port}",
   "started by VibeSpace": "VibeSpace が起動",
   "stopped as a runaway": "暴走として停止済み",
+  "blocked by a serve we could not identify": "特定できない serve に阻まれています",
   "the opencode CLI is not installed": "opencode コマンドが未インストール",
   "{mb} MB": "{mb} MB",
   "{name} background service is running": "{name} バックグラウンドサービスが稼働中",

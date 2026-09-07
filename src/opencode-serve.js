@@ -157,6 +157,20 @@ const GUARD_CPU_PCT = 150;                         // sustained CPU% (100% = one
 const GUARD_CPU_SUSTAIN_MS = 5 * 60 * 1000;        // …for this long ⇒ runaway
 const GUARD_RSS_BYTES = 2 * 1024 * 1024 * 1024;    // RSS above this ⇒ runaway at once
 const RUNAWAY_COOLDOWN_MS = 60 * 60 * 1000;        // a runaway is respawned at most once an hour
+// ── the RECORDED-SERVE settlement (round 10) ──
+/** A recorded serve that missed the 1.5s budget gets ONE longer probe before
+ *  we conclude it is wedged: a busy 1.18.29 answers /global/health in hundreds
+ *  of ms but a cold one takes ~1.2s, and "slow" must not read as "stop it". */
+const RECORD_CONFIRM_TIMEOUT_MS = 4000;
+/** How long we wait for a SIGTERMed serve to actually exit before refusing to
+ *  start a replacement over it. */
+const RECORD_KILL_WAIT_MS = 3000;
+const RECORD_KILL_POLL_MS = 150;
+/** A 'blocked' park (a live serve we could not identify or could not stop)
+ *  re-tries on its own: the state can heal without us (the serve answers
+ *  again, or the process exits), and a park that only a button can leave would
+ *  keep OpenCode dark long after the machine fixed itself. */
+const BLOCKED_RETRY_MS = 10 * 60 * 1000;
 const CLK_TCK = 100;                               // Linux USER_HZ (getconf CLK_TCK) — /proc stat ticks → seconds
 
 class OpencodeServeError extends Error {
@@ -290,6 +304,50 @@ function readProcUsage(pid) {
     if (!Number.isFinite(cpuTicks)) return null;
     return { cpuTicks, rssBytes: rssKb * 1024 };
   } catch { return null; }
+}
+
+/** The argv of a live pid, or null when procfs cannot say (no /proc on this
+ *  platform, hidepid, or the process vanished between the two reads). */
+function readProcCmdline(pid) {
+  try { return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter((s) => s !== ''); } catch { return null; }
+}
+/** The uid a live pid runs as, or null. */
+function readProcUid(pid) {
+  try { return fs.statSync(`/proc/${pid}`).uid; } catch { return null; }
+}
+/** IS THIS ALIVE PID REALLY THE SERVE THE RECORD NAMES? (round 10 — PURE, the
+ *  procfs reads are the caller's.) `pidAlive` answers "something is running
+ *  under that number", which is NOT the same claim: pids are recycled, and the
+ *  record can outlive its serve by weeks. The verdicts, and what each one
+ *  licenses:
+ *    'ours'    — the process is running `serve` with the recorded `--port`, as
+ *                this same user ⇒ we may SIGTERM it before replacing it.
+ *    'other'   — positive evidence it is NOT the serve (a different uid, this
+ *                very server process, a different command line) ⇒ the recorded
+ *                serve is GONE, so the record is stale bookkeeping we may
+ *                delete — but we must NEVER signal that pid.
+ *    'unknown' — procfs said nothing (a non-Linux host, hidepid, a zombie's
+ *                empty cmdline) ⇒ neither kill nor overwrite: a serve may be
+ *                running under it, and starting a second one over a record we
+ *                are about to rewrite is exactly the orphan this record exists
+ *                to prevent. */
+function classifyRecordedPid(rec, { pid = null, argv = null, uid = null, selfUid = null, selfPid = null } = {}) {
+  if (!Number.isInteger(pid) || pid <= 0) return { verdict: 'other', why: 'the record carries no pid' };
+  if (selfPid != null && pid === selfPid) return { verdict: 'other', why: `pid ${pid} is THIS server process — a recycled pid, never the serve` };
+  if (uid != null && selfUid != null && uid !== selfUid) return { verdict: 'other', why: `pid ${pid} runs as uid ${uid}, not as the user this server runs as (uid ${selfUid}) — we never spawned it` };
+  if (!Array.isArray(argv)) return { verdict: 'unknown', why: `the command line of pid ${pid} is unreadable (no /proc on this platform, hidepid, or the process just vanished)` };
+  const args = argv.filter((a) => typeof a === 'string' && a !== '');
+  if (!args.length) return { verdict: 'unknown', why: `pid ${pid} has an EMPTY command line (a zombie or a kernel thread)` };
+  const port = String(rec && rec.port);
+  // the PORT is the discriminator: `serve` alone is a common word, but a
+  // process holding the exact port this record was written for, under our own
+  // uid, is the serve or nothing. (argv[0] is deliberately NOT compared: the
+  // `opencode` launcher can re-exec its runtime, so the recorded `command` is
+  // not guaranteed to be argv[0] of the live process.)
+  const hasServe = args.includes('serve');
+  const hasPort = args.some((a, i) => (a === '--port' && args[i + 1] === port) || a === `--port=${port}`);
+  if (hasServe && hasPort) return { verdict: 'ours', why: `its command line is \`${args.slice(0, 6).join(' ')}\`` };
+  return { verdict: 'other', why: `pid ${pid} is now \`${args.slice(0, 4).join(' ')}\` — not the \`serve --port ${port}\` this record was written for` };
 }
 
 // ── the client ──
@@ -745,13 +803,16 @@ function createServeLocator({
   autostart = true, // false (or a function returning false) = REUSE ONLY (smoke harnesses: a SIGKILLed test server must not leave a serve behind)
   // ── the runaway guard (2.369.50) ──
   readProc = readProcUsage, killPid = (pid, sig) => process.kill(pid, sig),
+  // ── the recorded-serve settlement (round 10) ──
+  readCmdline = readProcCmdline, readUid = readProcUid,
+  confirmTimeoutMs = RECORD_CONFIRM_TIMEOUT_MS, killWaitMs = RECORD_KILL_WAIT_MS, blockedRetryMs = BLOCKED_RETRY_MS,
   telemetry = null, now = Date.now, guardSampleMs = GUARD_SAMPLE_MS,
   guardCpuPct = GUARD_CPU_PCT, guardCpuSustainMs = GUARD_CPU_SUSTAIN_MS, guardRssBytes = GUARD_RSS_BYTES,
   runawayCooldownMs = RUNAWAY_COOLDOWN_MS,
 } = {}) {
   if (!dataDir) throw new Error('createServeLocator: dataDir is required (the record lives at data/opencode-serve.json)');
   const recordPath = path.join(dataDir, 'opencode-serve.json');
-  const state = { client: null, port: null, pid: null, startedAt: null, source: null, child: null, crashes: 0, parked: false, parkedKind: null, runawayUntil: 0, lastError: null, stopping: false, stopEpoch: 0, backoffUntil: 0, caps: null, version: null, capsProbed: false, cwd: cwd || null, cwdIsolated: null, cpuPct: null, rssBytes: null, sampledAt: null, skippedWorktrees: [] };
+  const state = { client: null, port: null, pid: null, startedAt: null, source: null, child: null, crashes: 0, parked: false, parkedKind: null, runawayUntil: 0, retryAfter: 0, lastError: null, stopping: false, stopEpoch: 0, backoffUntil: 0, caps: null, version: null, capsProbed: false, cwd: cwd || null, cwdIsolated: null, cpuPct: null, rssBytes: null, sampledAt: null, skippedWorktrees: [] };
   const guard = { prev: null, hotSince: 0, timer: null };
   let ensuring = null;
   let respawnTimer = null;
@@ -867,6 +928,7 @@ function createServeLocator({
   function parkRunaway(why) {
     const pid = state.pid, port = state.port;
     state.parked = true; state.parkedKind = 'runaway'; state.runawayUntil = now() + runawayCooldownMs;
+    state.retryAfter = state.runawayUntil;
     state.lastError = `opencode serve (pid ${pid}) was STOPPED as a runaway: ${why}`;
     guard.prev = null; guard.hotSince = 0;
     const ch = state.child;
@@ -890,7 +952,7 @@ function createServeLocator({
     state.crashes++;
     state.lastError = `opencode serve exited (${signal || `code ${code}`})`;
     if (state.crashes >= maxCrashes) {
-      state.parked = true; state.parkedKind = 'crash';
+      state.parked = true; state.parkedKind = 'crash'; state.retryAfter = 0;   // terminal until an explicit start(): a crash park has NO deadline
       log?.error?.(`[opencode-serve] PARKED after ${state.crashes} crashes — ${state.lastError}; restart VibeSpace (or fix \`opencode serve\`) to retry`);
     } else {
       const wait = Math.min(30000, backoffBaseMs * 2 ** (state.crashes - 1));
@@ -925,6 +987,85 @@ function createServeLocator({
     const why = unsafeWorktreeReason(cur && cur.worktree);
     return why ? `${why} (a 2.369.42 serve started from the server's own cwd)` : null;
   }
+  /** THE RECORD IS A PROMISE TO THE NEXT BOOT — so "we are about to overwrite
+   *  it" has to be a DECISION (round 10). A recorded serve whose
+   *  `/global/health` did not answer used to fall THROUGH this rung whenever
+   *  its pid was alive: not killed, not cleared, not even logged — and the
+   *  spawn below then rewrote data/opencode-serve.json with the new child,
+   *  leaving a live `opencode serve` that NOTHING on disk names. No
+   *  concurrency needed; it happened on every restart of a wedged serve.
+   *  (Reproduced through install() + locator.start(): the recorded process
+   *  still running, the record naming a different port, silence in the log.)
+   *  Such an orphan keeps indexing and inotify-watching whatever it was
+   *  working on, and neither the runaway guard — which samples OUR child — nor
+   *  `stop({killRecorded})` — which reads the record — can ever reach it.
+   *
+   *  The outcomes, each one OWNED:
+   *    'answered'  — one longer probe answered after all ⇒ the caller adopts it
+   *                  (slow is not wedged: a cold 1.18.29 needs ~1.2s).
+   *    'clear'     — the recorded serve is provably gone (dead pid, a recycled
+   *                  pid, or we stopped it and SAW it exit) ⇒ the record is
+   *                  deleted and the spawn may write its own.
+   *    'keep'      — we are not going to spawn (no CLI / service off), so
+   *                  nothing overwrites it and it still NAMES a live process.
+   *    'blocked'   — something is alive that we could not identify or could not
+   *                  stop ⇒ never signal it, never start a second serve over
+   *                  it, and SAY SO (a park with an honest lastError, which is
+   *                  the harness store reason the plugin card and the client
+   *                  toast read).
+   *    'cancelled' — a stop, or a newer ladder, owns this record now. */
+  async function settleRecordedServe(rec, owned, probe, epoch, willSpawn) {
+    const pid = Number.isInteger(rec.pid) && rec.pid > 0 ? rec.pid : null;
+    if (!pidAlive(pid)) { clearRecord(owned); return 'clear'; }
+    if (!willSpawn) return 'keep';
+    const v = classifyRecordedPid(rec, {
+      pid, argv: readCmdline(pid), uid: readUid(pid),
+      selfUid: typeof process.getuid === 'function' ? process.getuid() : null, selfPid: process.pid,
+    });
+    if (v.verdict === 'other') {
+      log?.warn?.(`[opencode-serve] the recorded serve is gone (${v.why}) — clearing ${recordPath} and starting a fresh one`);
+      clearRecord(owned);
+      return 'clear';
+    }
+    if (v.verdict === 'unknown') {
+      blockOnRecord(`a recorded \`opencode serve\` (pid ${pid}, port ${rec.port}) is alive but unresponsive and could not be verified — ${v.why}. VibeSpace will NOT start a second serve over it: stop that process, or delete ${recordPath}, then start the service again (it re-checks every ${Math.round(blockedRetryMs / 60000)} min).`);
+      return 'blocked';
+    }
+    // 'ours' — and the classifier answers 'other' for THIS process, which is
+    // the one pid that must never be signalled, so no self-kill is reachable here.
+    if (await healthy(probe, confirmTimeoutMs)) return 'answered';
+    if (cancelled(epoch)) return 'cancelled';
+    log?.warn?.(`[opencode-serve] the recorded serve (pid ${pid}, port ${rec.port}) is ALIVE but answered no /global/health in ${DEFAULT_TIMEOUT_MS}+${confirmTimeoutMs}ms (${v.why}) — stopping it before starting a replacement`);
+    try { killPid(pid, 'SIGTERM'); } catch (e) { log?.warn?.(`[opencode-serve] SIGTERM to pid ${pid} failed: ${e.message}`); }
+    const gone = await waitForExit(pid, killWaitMs);
+    // the wait is an await like every other one in this rung: a newer ladder
+    // (or a stop) may own the record by now, and round 9's rule is that a
+    // cancelled attempt does not touch it — the owner re-reads this pid itself
+    if (cancelled(epoch)) return 'cancelled';
+    if (!gone) {
+      blockOnRecord(`the recorded \`opencode serve\` (pid ${pid}, port ${rec.port}) did not exit within ${killWaitMs}ms of SIGTERM and is STILL RUNNING. VibeSpace will NOT start a second serve over it: stop that process, or delete ${recordPath}, then start the service again (it re-checks every ${Math.round(blockedRetryMs / 60000)} min).`);
+      return 'blocked';
+    }
+    clearRecord(owned);
+    return 'clear';
+  }
+  async function waitForExit(pid, budgetMs) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < budgetMs) { await wait(RECORD_KILL_POLL_MS); if (!pidAlive(pid)) return true; }
+    return !pidAlive(pid);
+  }
+  /** A live serve we may neither adopt, identify nor stop is a BROKEN store,
+   *  not an off one — so it PARKS (the only state `storeFailureReason` lets
+   *  speak, 2026-09-07) with a sentence naming the pid, the port and the two
+   *  things that fix it. It re-tries on its own cooldown because the state can
+   *  heal without the user: the serve may answer again, or the process may exit. */
+  function blockOnRecord(why) {
+    state.parked = true; state.parkedKind = 'blocked'; state.retryAfter = now() + blockedRetryMs;
+    state.lastError = why;
+    log?.error?.(`[opencode-serve] ${why}`);
+    try { telemetry?.({ name: 'opencode-serve-blocked', detail: why }); } catch { }
+    notify();
+  }
   async function locate() {
     if (state.client) return state.client;
     if (state.stopping) return null;
@@ -934,10 +1075,14 @@ function createServeLocator({
     // run the Disable killed, and two ladders can never both reach adopt().
     const epoch = ++state.stopEpoch;
     if (state.parked) {
-      // a runaway earns exactly one retry per cooldown; a crash park is terminal until restart
-      if (state.parkedKind !== 'runaway' || now() < state.runawayUntil) return null;
-      state.parked = false; state.parkedKind = null; state.crashes = 0; state.lastError = null;
-      log?.warn?.('[opencode-serve] runaway cooldown elapsed — trying `opencode serve` once more');
+      // a runaway — and a 'blocked' record (round 10) — earns exactly one retry
+      // per cooldown; a crash park stays terminal until an explicit start().
+      // `retryAfter` is the ONE gate so a new retryable park cannot be added
+      // without giving it a deadline (0 = never on its own).
+      if (!state.retryAfter || now() < state.retryAfter) return null;
+      const was = state.parkedKind;
+      state.parked = false; state.parkedKind = null; state.crashes = 0; state.lastError = null; state.retryAfter = 0;
+      log?.warn?.(`[opencode-serve] ${was === 'blocked' ? 'blocked-record' : 'runaway'} cooldown elapsed — trying \`opencode serve\` once more`);
     }
     if (Date.now() < state.backoffUntil) return null;
     const cmd = commandOf();
@@ -958,7 +1103,22 @@ function createServeLocator({
       // the ownership claim every clear in this rung makes: we may only delete
       // the record if it is still THIS one (round 9 — see clearRecord)
       const owned = { port: rec.port, pid: rec.pid || null };
-      if (await healthy(probe, DEFAULT_TIMEOUT_MS)) {
+      // A SILENT PROBE IS NOT A VERDICT ON THE PROCESS (round 10). The only
+      // arm this rung owned was a DEAD pid; an ALIVE one fell THROUGH to the
+      // spawn below, whose writeRecord then buried it. Everything that can
+      // happen to a record we are about to overwrite is decided in ONE place
+      // now (settleRecordedServe) — including 'keep', which falls through to
+      // the spawn GATES below so they refuse with the honest "not installed" /
+      // "service off" reason while the record keeps naming its live process
+      // (that record is exactly what stop({killRecorded}) reads).
+      let answered = await healthy(probe, DEFAULT_TIMEOUT_MS);
+      if (!answered) {
+        if (cancelled(epoch)) return null;
+        const settled = await settleRecordedServe(rec, owned, probe, epoch, !!cmd && autostartOn());
+        if (settled === 'blocked' || settled === 'cancelled') return null;
+        answered = settled === 'answered';
+      }
+      if (answered) {
         // …and the probe itself is an await (a BUSY serve answers /global/health
         // in hundreds of ms). Checking here as well as in adopt() means a
         // disable never even evaluates the reuse verdict — it does not signal a
@@ -992,11 +1152,7 @@ function createServeLocator({
         // pid reused after a reboot) and a self-SIGTERM would take the server down
         try { if (rec.pid && rec.pid !== process.pid) killPid(rec.pid, 'SIGTERM'); } catch { }
         clearRecord(owned);
-        // the health probe is an await too (up to DEFAULT_TIMEOUT_MS on a serve
-        // that never answers), so its arm needs the same check: a cancelled
-        // ladder must not clean up after a record that is no longer the one it
-        // read — an uncancelled one still clears a genuinely dead pid.
-      } else if (!cancelled(epoch) && !pidAlive(rec.pid)) clearRecord(owned);
+      }
     }
     // 2) start one — only when the CLI is installed and autostart is allowed
     if (!cmd) { state.lastError = 'opencode CLI is not installed'; return null; }
@@ -1006,7 +1162,7 @@ function createServeLocator({
     let child;
     try {
       child = spawnImpl(cmd, ['serve', '--port', String(port), '--hostname', '127.0.0.1', '--log-level', 'WARN'], { cwd: state.cwd || cwd || os.homedir(), env: env(), stdio: 'ignore', detached: true });
-    } catch (e) { state.lastError = `spawn failed: ${e.message}`; state.crashes++; if (state.crashes >= maxCrashes) { state.parked = true; state.parkedKind = 'crash'; } notify(); return null; }
+    } catch (e) { state.lastError = `spawn failed: ${e.message}`; state.crashes++; if (state.crashes >= maxCrashes) { state.parked = true; state.parkedKind = 'crash'; state.retryAfter = 0; } notify(); return null; }
     if (typeof child.unref === 'function') child.unref();
     state.child = child; state.pid = child.pid || null; state.startedAt = Date.now();
     child.once('error', (e) => { state.lastError = `spawn failed: ${e.message}`; });
@@ -1093,7 +1249,7 @@ function createServeLocator({
   function start() {
     state.stopping = false;
     state.parked = false; state.parkedKind = null; state.crashes = 0;
-    state.backoffUntil = 0; state.runawayUntil = 0; state.lastError = null;
+    state.backoffUntil = 0; state.runawayUntil = 0; state.retryAfter = 0; state.lastError = null;
     notify();
     return ensure();
   }
@@ -1189,6 +1345,9 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
     // the runaway must SPEAK: the owner's instance burned for two hours with
     // nothing in the product saying so (2.369.42)
     if (st.parked && st.parkedKind === 'runaway') return `OpenCode serve was stopped by VibeSpace as a RUNAWAY — ${st.lastError || 'resource guard'}. It will not restart for up to an hour; disable the "OpenCode background service" plugin (⚙ → Plugins) if it keeps happening.`;
+    // a BLOCKED record is not a crash loop: it names a process the user has to
+    // deal with, and its own lastError is the whole instruction (round 10)
+    if (st.parked && st.parkedKind === 'blocked') return st.lastError || 'a recorded `opencode serve` is alive but unreachable and could not be identified — stop that process, or delete data/opencode-serve.json, then start the service again';
     if (st.parked) return `OpenCode serve is parked after ${st.crashes} crashes (${st.lastError || 'unknown error'}) — start it again from ⚙ → Plugins → OpenCode background service`;
     if (st.autostart === false) return st.envForced === false
       ? 'the OpenCode background service is forced OFF by VIBESPACE_OPENCODE_SERVE=0 on this instance — stopped OpenCode conversations cannot be listed or opened'
@@ -1920,6 +2079,7 @@ module.exports = {
   OpencodeServeClient, OpencodeServeError, createServeLocator, createFacts, OpencodeServeSessionMessages,
   messagesToAcpRecords, acpKindOfTool, acpStatusOfState, sessionTitle, install, facts, uninstall,
   bootstrappableWorktree, unsafeWorktreeReason, ensureServeCwd, serveCwdPath, readProcUsage,
+  classifyRecordedPid, readProcCmdline, readProcUid, RECORD_CONFIRM_TIMEOUT_MS, RECORD_KILL_WAIT_MS, BLOCKED_RETRY_MS,
   normalizeAskQuestions, askAnswerMap, askAnswersToPositional, revertNoticeText, EXTERNAL_WINDOW_MS, OWN_WRITE_WINDOW_MS,
   serveEnvOverride, decideAutostart, SERVICE_PLUGIN_ID: 'opencode-serve',
   DEFAULT_TIMEOUT_MS, READ_TIMEOUT_MS, LIST_CACHE_MS, NEGATIVE_CACHE_MS, MAX_CRASHES, FORK_PATH,

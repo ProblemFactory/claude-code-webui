@@ -1532,7 +1532,10 @@ const R9_VERDICT_CHECK = [
   ['the reuse-verdict cancellation check', '        if (cancelled(epoch)) return null;\n        log?.warn?.(`[opencode-serve] replacing the recorded serve', '        log?.warn?.(`[opencode-serve] replacing the recorded serve', 1],
 ];
 const R9_DEADPID_CHECK = [
-  ['the dead-pid arm cancellation check', '} else if (!cancelled(epoch) && !pidAlive(rec.pid)) clearRecord(owned);', '} else if (!pidAlive(rec.pid)) clearRecord(owned);', 1],
+  // round 10 moved the dead-pid arm INSIDE settleRecordedServe, so the check
+  // this control removes is the one that now guards the whole settlement (the
+  // dead-pid clear is its first line) — same mechanism, one layer out
+  ['the unresponsive-record cancellation check', '        if (cancelled(epoch)) return null;\n        const settled = await settleRecordedServe', '        const settled = await settleRecordedServe', 1],
 ];
 const R9_NEUTER = [...R9_VERDICT_CHECK, ...R9_DEADPID_CHECK, ...R9_OWNED_CHECK];
 const r9PreFix = buildNeutered('r9-prefix', R9_NEUTER);
@@ -1729,6 +1732,265 @@ for (const [win, label] of [['bad', "the reuse VERDICT probe on a '/'-worktree l
   ok(`docs: the ROUND 9 pre-fix control's size is stated as the number R9_NEUTER owns (${n9})`,
     new RegExp(`removing all ${n9}`).test(read('docs/kb-bugfix-invariants.md')) && new RegExp(`its ${n9} replacements`).test(kfs), [n9]);
   for (const f of [r9PreFix.file, r9VerdictCtl.file, r9DeadPidCtl.file, r9OwnedCtl.file]) if (f) { try { fs.rmSync(f, { force: true }); } catch { } }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ROUND 10 — THE RECORD WE WERE ABOUT TO OVERWRITE. Rounds 7-9 hardened this
+// rung against a CONCURRENT ladder; this one needs no concurrency at all. The
+// reuse rung owned exactly ONE arm of an unanswered health probe — a DEAD
+// recorded pid — and an ALIVE one fell THROUGH to the spawn, whose writeRecord
+// then buried it: a live `opencode serve` that nothing on disk names, on every
+// restart of a wedged serve, in silence. Neither the runaway guard (it samples
+// OUR child) nor `stop({killRecorded})` (it reads the record) can ever reach
+// that process again, while OpenCode keeps indexing and inotify-watching
+// whatever it had booted. So "we are about to overwrite this record" is now a
+// DECISION with named outcomes (settleRecordedServe), and the two it may not
+// make — killing a pid that is someone else's, and starting a second serve
+// over one we cannot account for — are refused OUT LOUD.
+console.log('\n— ROUND 10 (the ninth review: a recorded serve that is ALIVE and silent) —');
+/** THE PRE-FIX CONTROL: the settlement replaced by the exact fall-through it
+ *  grew out of (the reuse rung with only the dead-pid arm). */
+const R10_NEUTER = [
+  ['the owned settlement of an unresponsive record',
+    "      let answered = await healthy(probe, DEFAULT_TIMEOUT_MS);\n      if (!answered) {\n        if (cancelled(epoch)) return null;\n        const settled = await settleRecordedServe(rec, owned, probe, epoch, !!cmd && autostartOn());\n        if (settled === 'blocked' || settled === 'cancelled') return null;\n        answered = settled === 'answered';\n      }\n      if (answered) {",
+    '      if (await healthy(probe, DEFAULT_TIMEOUT_MS)) {', 1],
+  ['the dead-pid arm, back as a fall-through',
+    '        clearRecord(owned);\n      }\n    }',
+    '        clearRecord(owned);\n      } else if (!cancelled(epoch) && !pidAlive(rec.pid)) clearRecord(owned);\n    }', 1],
+];
+const r10Ctl = buildNeutered('r10-prefix', R10_NEUTER);
+ok('(the control itself) a PRE-FIX copy of the keeper can be built from the current source — the A/B below is only meaningful against it', !!r10Ctl.mod, r10Ctl.why);
+
+const alivePid = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
+const readRec = (dir) => { try { return JSON.parse(fs.readFileSync(path.join(dir, 'opencode-serve.json'), 'utf8')); } catch { return null; } };
+
+/** THE PURE VERDICT, first — `pidAlive` answers "something runs under that
+ *  number", which is NOT "that is the serve": pids are recycled and a record
+ *  can outlive its serve by weeks. Everything the settlement is allowed to do
+ *  hangs off this classification, so it is pinned as a table AND against a
+ *  REAL process (the readers and the classifier must agree on real procfs). */
+{
+  const { classifyRecordedPid, readProcCmdline, readProcUid } = serve;
+  const rec = { port: 4711, pid: 321, command: '/usr/bin/opencode' };
+  const c = (o) => classifyRecordedPid(rec, { pid: 321, selfUid: 1000, selfPid: 999, ...o }).verdict;
+  ok('OURS: a live process running `serve` with the RECORDED port, as this user',
+    c({ argv: ['/usr/bin/opencode', 'serve', '--port', '4711', '--hostname', '127.0.0.1'], uid: 1000 }) === 'ours');
+  ok('…and the `--port=4711` spelling of the same fact', c({ argv: ['opencode', 'serve', '--port=4711'], uid: 1000 }) === 'ours');
+  ok('…even when argv[0] is a runtime rather than the recorded `command` (the launcher may re-exec — the PORT is the discriminator, not argv[0])',
+    c({ argv: ['/usr/bin/bun', '/home/u/.opencode/bin/opencode.js', 'serve', '--port', '4711'], uid: 1000 }) === 'ours');
+  ok('OTHER: a serve on a DIFFERENT port is not this record\'s serve', c({ argv: ['opencode', 'serve', '--port', '4712'], uid: 1000 }) === 'other');
+  ok('OTHER: an unrelated program that merely inherited the pid', c({ argv: ['/usr/bin/python3', 'train.py'], uid: 1000 }) === 'other');
+  ok('OTHER: another USER\'s process — we never spawned it, so it can never be ours (and must never be signalled)',
+    c({ argv: ['opencode', 'serve', '--port', '4711'], uid: 1001 }) === 'other');
+  ok('OTHER: the record naming THIS server process (a pid recycled onto us) — the one pid a SIGTERM must never reach',
+    classifyRecordedPid(rec, { pid: 999, selfPid: 999, selfUid: 1000, uid: 1000, argv: ['node', 'server.js'] }).verdict === 'other');
+  ok('UNKNOWN: procfs said nothing (no /proc on this platform, hidepid) — neither kill nor overwrite', c({ argv: null, uid: null }) === 'unknown');
+  ok('UNKNOWN: an EMPTY command line (a zombie) is not evidence of anything', c({ argv: [], uid: 1000 }) === 'unknown');
+  ok('a record with no pid is not a live process claim', classifyRecordedPid(rec, { pid: null }).verdict === 'other');
+  // …and the same call against a REAL process, through the REAL reader
+  const kid = spawn(process.execPath, ['-e', 'setInterval(()=>{},10000)', 'serve', '--port', '4711'], { stdio: 'ignore' });
+  await sleep(300);
+  const realArgv = readProcCmdline(kid.pid);
+  const realVerdict = classifyRecordedPid(rec, { pid: kid.pid, argv: realArgv, uid: readProcUid(kid.pid), selfUid: process.getuid(), selfPid: process.pid });
+  ok('the REAL reader over a REAL /proc feeds the same verdict (the table is not a fiction about procfs)',
+    Array.isArray(realArgv) && realArgv.includes('serve') && realVerdict.verdict === 'ours', { realArgv, realVerdict });
+  try { process.kill(kid.pid, 'SIGKILL'); } catch { }
+}
+
+/** ONE harness for every arm, through the REAL wiring (install() +
+ *  locator.start()). The recorded serve is TWO real things:
+ *    • a listening socket at the recorded port — 'hung' (accepts, never
+ *      answers, so the probe burns its whole budget), 'slow' (answers at
+ *      2.5s: past the 1.5s budget, inside the confirm probe) or 'healthy';
+ *    • a REAL process for the recorded pid — 'ours' (its /proc cmdline is
+ *      `… serve --port <the recorded port>`), 'stubborn' (the same, ignoring
+ *      SIGTERM), 'other' (a live process that is NOT that serve: the recycled
+ *      pid that must never be signalled) or 'dead' (a pid nothing runs under).
+ *  Only `spawnImpl` is stubbed (it starts a REAL mock serve on the port the
+ *  keeper chose) and, for the unverifiable arm, the procfs reader — a platform
+ *  without /proc is not reproducible on this one. `killPid` records the signal
+ *  AND really sends it: a bounded wait for an exit is only meaningful against
+ *  a process that can actually exit. */
+async function r10Run(mod, { socket = 'hung', recorded = 'ours', autostart = true, readCmdline = null } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-oc-r10-data-'));
+  const ocHome = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-oc-r10-home-'));
+  const storeDir = path.join(ocHome, '.local/share/opencode');
+  fs.mkdirSync(storeDir, { recursive: true });
+  fs.writeFileSync(path.join(storeDir, 'opencode.db'), 'x');
+  const mocks = [], kids = [], kills = [], warns = [];
+  let spawns = 0, recPort = null, recPid = 987654;      // 'dead' = not running, and never this process
+  if (socket === 'hung') { const h = await startHungServe(); mocks.push(h); recPort = h.port; }
+  else { const st = createMockState(); if (socket === 'slow') st.delayMs = 2500; const m = await startMockServe({ state: st }); mocks.push(m); recPort = m.port; }
+  if (recorded !== 'dead') {
+    const body = recorded === 'stubborn' ? "process.on('SIGTERM',()=>{}); setInterval(()=>{},10000)" : 'setInterval(()=>{},10000)';
+    const argv = recorded === 'other' ? [] : ['serve', '--port', String(recPort), '--hostname', '127.0.0.1'];
+    const kid = spawn(process.execPath, ['-e', body, ...argv], { stdio: 'ignore' });
+    kids.push(kid); recPid = kid.pid;
+    for (let i = 0; i < 40 && !alivePid(recPid); i++) await sleep(25);   // the record may only claim a process that is really there
+  }
+  fs.writeFileSync(path.join(dir, 'opencode-serve.json'), JSON.stringify({ port: recPort, pid: recPid, startedAt: Date.now(), command: '/usr/bin/opencode', cwd: dir }));
+  const facts = mod.install({
+    dataDir: dir, command: '/usr/bin/opencode', guardSampleMs: 0,
+    log: { warn: (m) => warns.push(String(m)), error: (m) => warns.push(String(m)), log() { } },
+    autostart: () => autostart, readProc: () => ({ cpuTicks: 0, rssBytes: 1024 }),
+    killPid: (pid, sig) => { kills.push([pid, sig]); process.kill(pid, sig); },
+    ...(readCmdline ? { readCmdline } : {}),
+    makeLane: (deps) => events.createLiveLane({ ...deps, env: { HOME: ocHome }, fetchImpl: async () => { throw new Error('no serve'); }, onExternal: () => { } }),
+    spawnImpl: (_cmd, args) => {
+      spawns++;
+      const port = Number(args[args.indexOf('--port') + 1]);
+      startMockServe({ port, state: createMockState() }).then((m) => mocks.push(m)).catch(() => { });
+      const c = new EventEmitter(); c.pid = 4242; c.unref = () => { }; c.kill = () => { }; return c;
+    },
+  });
+  await facts.locator.start();                          // the plugin's Start — it resolves when the ladder settles
+  const st = facts.locator.state();
+  const rec = readRec(dir);
+  const out = {
+    ready: !!st.ready, source: st.source || null, port: st.port, parked: !!st.parked, parkedKind: st.parkedKind || null,
+    lastError: st.lastError || null, reason: facts.reasonUnavailable(), snap: st,
+    spawns, kills, warns, recordedPort: recPort, recordedPid: recPid, recordPort: rec ? rec.port : null,
+    recordedAlive: recorded === 'dead' ? false : alivePid(recPid),
+    // THE COUNT THAT NAMES THE FAILURE: our own serve plus anything still
+    // running at the recorded one. Two = the orphan (only one of them is named
+    // on disk, and nothing can ever reach the other).
+    liveServes: (recorded === 'dead' ? 0 : (alivePid(recPid) ? 1 : 0)) + spawns,
+  };
+  mod.uninstall();
+  for (const k of kids) { try { process.kill(k.pid, 'SIGKILL'); } catch { } }
+  for (const m of mocks) { try { await m.close(); } catch { } }
+  for (const d of [dir, ocHome]) fs.rmSync(d, { recursive: true, force: true });
+  return out;
+}
+{
+  const { storeFailureReason } = require(path.join(REPO, 'src/server/cli-env.js'));
+  // ① the shape that needed no concurrency at all
+  const fixed = await r10Run(serve, { socket: 'hung', recorded: 'ours' });
+  ok('a recorded serve that is ALIVE but never answers is STOPPED before its replacement starts — after locate() there is exactly ONE live serve and the record names it',
+    fixed.liveServes === 1 && fixed.recordedAlive === false && fixed.spawns === 1 && fixed.source === 'spawned' && fixed.recordPort === fixed.port, fixed);
+  ok('…signalled once, BY PID, after proving from /proc that the pid really is that serve — and never this process',
+    fixed.kills.length === 1 && fixed.kills[0][0] === fixed.recordedPid && fixed.kills[0][1] === 'SIGTERM' && fixed.recordedPid !== process.pid, fixed.kills);
+  ok('…and it SPOKE: one warn naming the pid, the port and the budget it missed (the fall-through logged nothing at all)',
+    fixed.warns.some((w) => w.includes(String(fixed.recordedPid)) && w.includes(String(fixed.recordedPort)) && /ALIVE but answered no \/global\/health/.test(w)), fixed.warns);
+  if (!r10Ctl.mod) skip('NEGATIVE CONTROL: the fall-through leaves two live serves', r10Ctl.why);
+  else {
+    const ctl = await r10Run(r10Ctl.mod, { socket: 'hung', recorded: 'ours' });
+    ok('NEGATIVE CONTROL: with the settlement replaced by the fall-through it grew out of, the recorded serve is STILL RUNNING while the record names the NEW one — two live serves, one of them unreachable forever, and not one signal or log line',
+      ctl.liveServes === 2 && ctl.recordedAlive === true && ctl.spawns === 1 && ctl.recordPort === ctl.port && ctl.recordPort !== ctl.recordedPort && ctl.kills.length === 0, ctl);
+  }
+  // ② the pid we cannot account for: neither killed nor spawned over, and SAID
+  const unknown = await r10Run(serve, { socket: 'hung', recorded: 'ours', readCmdline: () => null });
+  ok('a live recorded pid we CANNOT prove is ours is neither signalled nor spawned over',
+    unknown.spawns === 0 && unknown.kills.length === 0 && unknown.recordedAlive === true && unknown.recordPort === unknown.recordedPort, unknown);
+  ok('…the locator publishes a BLOCKED park whose lastError names the pid, the port, the record file and both ways out',
+    unknown.parked === true && unknown.parkedKind === 'blocked' && /pid \d+/.test(unknown.lastError || '') && /port \d+/.test(unknown.lastError || '')
+    && (unknown.lastError || '').includes('opencode-serve.json') && /stop that process/.test(unknown.lastError || ''), unknown.lastError);
+  ok('…/api/home REPORTS it through the SAME predicate the red toast reads — a blocked record IS a broken store, unlike a service that is merely off',
+    storeFailureReason({ id: 'opencode', store: { serveState: () => unknown.snap, unavailableReason: () => unknown.reason } }) === unknown.lastError
+    && storeFailureReason({ id: 'opencode', store: { serveState: () => ({ ...unknown.snap, parked: false, parkedKind: null }), unavailableReason: () => unknown.reason } }) === null,
+    unknown.reason);
+  ok("…and the ⚙ card does not call it a crash loop: the opencode row has its own 'blocked' branch, translated in zh + ja",
+    /parkedKind === 'blocked'/.test(read('src/lib/plugins-ui.js'))
+    && /blocked by a serve we could not identify/.test(read('src/lib/i18n-zh.js'))
+    && /blocked by a serve we could not identify/.test(read('src/lib/i18n-ja.js')));
+  // ③ it did not die: the same refusal, on the other side of the SIGTERM
+  const stubborn = await r10Run(serve, { socket: 'hung', recorded: 'stubborn' });
+  ok('a recorded serve that IGNORES SIGTERM is not spawned over either — we waited for the exit, it never came, and the state says exactly that',
+    stubborn.spawns === 0 && stubborn.kills.length === 1 && stubborn.recordedAlive === true && stubborn.parkedKind === 'blocked'
+    && /did not exit within/.test(stubborn.lastError || '') && stubborn.recordPort === stubborn.recordedPort, stubborn);
+  // ④ the recycled pid: clear the stale record, NEVER signal the stranger
+  const other = await r10Run(serve, { socket: 'hung', recorded: 'other' });
+  ok('a recorded pid that is alive but is NOT that serve (a recycled pid) is never signalled — the stale record is cleared and a fresh serve starts',
+    other.kills.length === 0 && other.recordedAlive === true && other.spawns === 1 && other.recordPort === other.port && other.recordPort !== other.recordedPort, other);
+  // ⑤ the two positive controls the guards must not break
+  const healthy = await r10Run(serve, { socket: 'healthy', recorded: 'ours' });
+  ok('(positive control) a HEALTHY recorded serve is still ADOPTED untouched — no /proc verdict, no signal, no spawn, the record unchanged',
+    healthy.source === 'reused' && healthy.ready === true && healthy.spawns === 0 && healthy.kills.length === 0
+    && healthy.recordedAlive === true && healthy.recordPort === healthy.recordedPort, healthy);
+  const slow = await r10Run(serve, { socket: 'slow', recorded: 'ours' });
+  ok('(positive control) SLOW IS NOT WEDGED: a recorded serve that misses the 1.5s budget but answers the longer confirm probe is ADOPTED, not stopped (a cold 1.18.29 needs ~1.2s)',
+    slow.source === 'reused' && slow.spawns === 0 && slow.kills.length === 0 && slow.recordedAlive === true, slow);
+  // ⑥ …and the two arms that must keep behaving exactly as they did
+  const off = await r10Run(serve, { socket: 'hung', recorded: 'ours', autostart: false });
+  ok('with the service OFF nothing overwrites the record, so nothing may act on it: no signal, no spawn, no park — it still NAMES the live process stop({killRecorded}) would stop',
+    off.kills.length === 0 && off.spawns === 0 && off.parked === false && off.recordedAlive === true && off.recordPort === off.recordedPort, off);
+  const dead = await r10Run(serve, { socket: 'hung', recorded: 'dead' });
+  ok('(positive control) a record whose pid is genuinely DEAD is still cleared and replaced — the settlement refuses to act blindly, not to act',
+    dead.spawns === 1 && dead.kills.length === 0 && dead.recordPort === dead.port, dead);
+}
+{
+  // ⑦ A PARK'S DEADLINE BELONGS TO THE PARK THAT SET IT. `retryAfter` is now
+  //    the ONE gate that lets a park end by itself (round 10 generalised the
+  //    runaway's), so a 'blocked' cooldown left behind by an earlier park must
+  //    never become the exit a CRASH park — terminal by design — uses to
+  //    unpark itself. start() clears the deadline with the park; a crash park
+  //    sets none. Both sites, or neither: the control removes all three.
+  const R10_DEADLINE_NEUTER = [
+    ["start()'s deadline reset", 'state.backoffUntil = 0; state.runawayUntil = 0; state.retryAfter = 0; state.lastError = null;', 'state.backoffUntil = 0; state.runawayUntil = 0; state.lastError = null;', 1],
+    ['the crash park declaring it has none (spawn failure)', "state.parked = true; state.parkedKind = 'crash'; state.retryAfter = 0; } notify(); return null; }", "state.parked = true; state.parkedKind = 'crash'; } notify(); return null; }", 1],
+    ['the crash park declaring it has none (child exit)', "state.parked = true; state.parkedKind = 'crash'; state.retryAfter = 0;   // terminal until an explicit start(): a crash park has NO deadline", "state.parked = true; state.parkedKind = 'crash';", 1],
+  ];
+  const deadlineCtl = buildNeutered('r10-deadline', R10_DEADLINE_NEUTER);
+  /** blocked park (deadline 1ms = already in the past) → the user's Start →
+   *  a spawn that fails → a CRASH park. Then a spawn that WOULD work: only a
+   *  locator that unparked itself can reach it. */
+  const runDeadline = async (mod) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-oc-r10-deadline-'));
+    const hung = await startHungServe();
+    const mocks = [hung];
+    const kid = spawn(process.execPath, ['-e', 'setInterval(()=>{},10000)', 'serve', '--port', String(hung.port)], { stdio: 'ignore' });
+    for (let i = 0; i < 40 && !alivePid(kid.pid); i++) await sleep(25);
+    fs.writeFileSync(path.join(dir, 'opencode-serve.json'), JSON.stringify({ port: hung.port, pid: kid.pid, startedAt: Date.now(), command: '/usr/bin/opencode', cwd: dir }));
+    let spawnMode = 'throw';
+    const loc = mod.createServeLocator({
+      dataDir: dir, command: '/usr/bin/opencode', log: { warn() { }, error() { }, log() { } }, guardSampleMs: 0,
+      autostart: true, maxCrashes: 1, blockedRetryMs: 1,
+      readCmdline: () => null,                                   // the live recorded pid is unverifiable ⇒ the first ladder BLOCKS
+      killPid: () => { }, execImpl: (_c, _a, _o, cb) => cb(null, '', ''),
+      spawnImpl: (_c, args) => {
+        if (spawnMode === 'throw') throw new Error('nope');
+        const port = Number(args[args.indexOf('--port') + 1]);
+        startMockServe({ port, state: createMockState() }).then((m) => mocks.push(m)).catch(() => { });
+        const c = new EventEmitter(); c.pid = 4242; c.unref = () => { }; c.kill = () => { }; return c;
+      },
+    });
+    await loc.ensure();
+    const blocked = loc.state();
+    fs.rmSync(path.join(dir, 'opencode-serve.json'), { force: true });   // that record is dealt with; what follows is about the CRASH park
+    await loc.start();
+    const crashed = loc.state();
+    spawnMode = 'ok';
+    const reopened = await loc.client({ budgetMs: 2500 });
+    const end = loc.state();
+    loc.stop();
+    try { process.kill(kid.pid, 'SIGKILL'); } catch { }
+    for (const m of mocks) { try { await m.close(); } catch { } }
+    fs.rmSync(dir, { recursive: true, force: true });
+    return { blockedKind: blocked.parkedKind, crashedKind: crashed.parkedKind, reopened: !!reopened, endParked: !!end.parked, endKind: end.parkedKind };
+  };
+  const d = await runDeadline(serve);
+  ok('(the setup) an unverifiable live record parks BLOCKED, and the user\'s Start then runs into a spawn failure that parks CRASH',
+    d.blockedKind === 'blocked' && d.crashedKind === 'crash', d);
+  ok('a CRASH park stays terminal even though a blocked park set a cooldown earlier — a park\'s deadline is cleared with the park that owns it',
+    d.reopened === false && d.endParked === true && d.endKind === 'crash', d);
+  if (!deadlineCtl.mod) skip('NEGATIVE CONTROL: a stale cooldown lets a crash park unpark itself', deadlineCtl.why);
+  else {
+    const ctl = await runDeadline(deadlineCtl.mod);
+    ok('NEGATIVE CONTROL: with the deadline resets removed, the CRASH park inherits the blocked park\'s elapsed cooldown and restarts itself — the terminal park quietly stops being terminal',
+      ctl.crashedKind === 'crash' && ctl.reopened === true && ctl.endParked === false, ctl);
+    try { fs.rmSync(deadlineCtl.file, { force: true }); } catch { }
+  }
+}
+{
+  const kfs = read('docs/kb-file-structure.md');
+  const n10 = R10_NEUTER.length;
+  ok('docs: "the record we were about to overwrite" is in the kb essays + the incident file + the index',
+    /ROUND 10/.test(kfs) && /settleRecordedServe/.test(kfs)
+    && /THE RECORD WE WERE ABOUT TO OVERWRITE/.test(read('docs/kb-bugfix-invariants.md'))
+    && /S9 REMAINDER ROUND 10/.test(read('CLAUDE.md')));
+  ok(`docs: the ROUND 10 pre-fix control's size is stated as the number R10_NEUTER owns (${n10})`,
+    new RegExp(`its ${n10} replacements`).test(kfs), [n10]);
+  if (r10Ctl.file) { try { fs.rmSync(r10Ctl.file, { force: true }); } catch { } }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

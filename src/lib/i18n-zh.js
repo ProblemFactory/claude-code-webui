@@ -3050,6 +3050,7 @@ export default {
   "running on 127.0.0.1:{port}": "运行中, 127.0.0.1:{port}",
   "started by VibeSpace": "由 VibeSpace 启动",
   "stopped as a runaway": "因失控被停止",
+  "blocked by a serve we could not identify": "被一个无法确认身份的 serve 挡住",
   "the opencode CLI is not installed": "未安装 opencode 命令",
   "{mb} MB": "{mb} MB",
   "{name} background service is running": "{name} 后台服务已在运行",
