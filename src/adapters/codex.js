@@ -1060,6 +1060,17 @@ class CodexAdapter extends BackendAdapter {
     return JSON.stringify({ type: 'set-response-style', style: style || '' });
   }
 
+  // READ-ONLY permission-rule read (owner ruling 10): the wrapper answers with
+  // `config/read {cwd, includeLayers:true}` — layers + origins, i.e. "which
+  // layer won this key". It asks the SESSION's own app-server on purpose: a
+  // fresh child cannot see the `sessionFlags` layer (`-c` overrides this
+  // session was spawned with), so it would answer about a different session.
+  // No write verb exists here and none is planned (config/value/write's
+  // optimistic concurrency makes a careless write data loss).
+  formatReadPermissionRules({ requestId = '' } = {}) {
+    return JSON.stringify({ type: 'read-permission-rules', requestId: String(requestId || '') });
+  }
+
   // Mid-session effort switch: wrapper stores it and passes it on the next
   // turn/start (effort is a per-turn param, like model).
   formatSetEffort(effort) {

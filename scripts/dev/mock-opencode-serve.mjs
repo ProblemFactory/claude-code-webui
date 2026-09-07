@@ -22,6 +22,19 @@ export const SESSIONS = () => ([
 // cwd resolved to — on the owner's 2.369.42 box, "/" (the whole filesystem).
 export const PROJECTS = [{ id: 'proj_a', worktree: '/work/alpha', vcs: 'git', time: { created: 1, updated: 2 }, sandboxes: [] }, { id: 'global', worktree: '/', time: { created: 1, updated: 2 }, sandboxes: [] }];
 
+/** The v1 `GET /config` body (operationId `config.get`, optional `directory`)
+ *  — the READ-ONLY permission-rule view's source. Shape verified against a
+ *  real 1.18.29 serve: the top-level keys are that machine's own answer, and
+ *  the `permission` block follows the doc's `PermissionConfig` schema —
+ *  `anyOf` [ an action string | an object whose keys are the 15 tool names
+ *  (read/edit/glob/grep/list/lsp/bash/webfetch/websearch/task/skill/question/
+ *  todowrite/doom_loop/external_directory) each holding an action string or a
+ *  {pattern: action} map ]. */
+export const CONFIG = {
+  $schema: 'https://opencode.ai/config.json', command: {}, plugin: [], username: 'someone', mode: {}, agent: {},
+  permission: { edit: 'allow', bash: { 'git push*': 'deny', 'rm -rf*': 'deny', '*': 'ask' }, external_directory: 'deny', webfetch: 'ask' },
+};
+
 /** v1 messages for ses_a1: user → assistant (reasoning, text, read tool ok, edit tool error, subtask, step parts) → user → aborted assistant → user (no reply yet) */
 export const MESSAGES = {
   ses_a1: [
@@ -90,6 +103,7 @@ export function createMockState(opts = {}) {
     statuses: {},             // GET /session/status
     sse: new Set(),           // open /global/event responses
     paths: opts.paths || { home: '/home/mock', state: '/home/mock/.local/state/opencode', config: '/home/mock/.config/opencode', worktree: '/work/alpha', directory: '/work/alpha' },
+    config: opts.config || JSON.parse(JSON.stringify(CONFIG)),   // the v1 /config body (permission rules)
     // the serve's OWN project (GET /project/current) — what the 2.369.42
     // self-heal probes on a recorded instance; '/' = the leftover shape
     currentWorktree: opts.currentWorktree || '/work/alpha',
@@ -142,6 +156,20 @@ export function makeHandler(state) {
       if (req.method === 'GET' && p === '/global/health') return json(res, 200, { healthy: true, version: '1.18.29' });
       if (req.method === 'GET' && p === '/doc') return json(res, 200, openapiDoc({ withFork: state.withFork }));
       if (req.method === 'GET' && p === '/project') return json(res, 200, PROJECTS);
+      // v1 `config.get` — the permission-rule view's ONE source. MEASURED on a
+      // real 1.18.29 serve (2026-09-07, /proc, same method as 2.369.50): four
+      // calls left threads at 15, inotify fds at 0 and RSS flat ⇒ it boots no
+      // instance, which is why the view may call it.
+      if (req.method === 'GET' && p === '/config') return json(res, 200, state.config || CONFIG);
+      // …and the v2 TWIN that must never be called. MEASURED on the same
+      // process minutes later: `GET /api/permission/saved` took it from
+      // threads 13 → 37, inotify fds 0 → 2, RSS 345 → 507 MB. Modelled here so
+      // a reader that reaches for the obvious-looking route turns this suite
+      // red instead of turning the fleet slow.
+      if (req.method === 'GET' && p === '/api/permission/saved') {
+        state.instances.add(state.currentWorktree);
+        return json(res, 200, { data: [] });
+      }
       if (req.method === 'GET' && p === '/project/current') return json(res, 200, { id: 'global', worktree: state.currentWorktree, time: { created: 1, updated: 2 }, sandboxes: [] });
       if (req.method === 'POST' && p === '/instance/dispose') {
         const dir = url.searchParams.get('directory') || '';

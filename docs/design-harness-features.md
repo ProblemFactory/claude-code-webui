@@ -88,7 +88,7 @@
 | 每会话 worktree | 原生 `-w` | — | 原生 sandbox worktree | 原生 `-w` | **缺**（决策 9） |
 | 临时 / 不落盘会话 | 原生 `--no-session-persistence` | 原生 `ephemeral` | — | — | **缺** |
 | 提示缓存杠杆 | 原生 `--system-prompt-snapshot` / `--exclude-dynamic-system-prompt-sections` / `--autocompact` | — | — | — | **缺**（决策 8） |
-| 零成本本地 oracle | `agents --json` / `auth status` | `doctor --json` | `/global/health`、`opencode stats` | `debug *` | **缺**（决策 6） |
+| 零成本本地 oracle | ~~`agents --json` / `auth status`~~ **实测各 5 个 INET connect ⇒ 否** | ~~`doctor --json`~~ **16 个 ⇒ 否**；改上 `login status` / `mcp list --json` / `features list`（各 0 个） | `/global/health`、`opencode stats` | `debug *` | **✅ 2026-09-07 实装**（人触发按钮，证据进 test-vendor-whitelist；kb-design-lessons §9） |
 | 分享对话 / 上传 | via /bug | 原生 feedback/upload | 原生 opncd.ai 分享 | — | **拒**（§4，决策 7） |
 | 远程 agent 传输 | Remote Control | 原生 app-server `ws://` | 原生 `attach <url>` + mDNS | — | **拒**（走机器句柄，§4） |
 
@@ -376,7 +376,7 @@ inputModes: {
 | claude `background_tasks` / `stop_task` | 工具卡两个按钮 → 两个 control_request；不带 `tool_use_id` = 全部后台化 | test-stdout-registry + 渲染 fixture | M |
 | codex `thread/list` + `search` + **`items/list` / `turns/list` / `timeline/list`** | descriptor 加 `store.discoverViaProtocol`（bounded app-server child，照抄 codex-thread-read 的模式），优先它、失败回落文件遍历；三个分页 list 是**协议级转录分页**，与我们纯文件式的大转录故事（slab、.zst head、远端增量）是同一问题的第二个解 | test-codex-zst 扩 + 真 app-server 档 | M/L |
 | opencode SSE `/event` | 替掉 10s 轮询 + 补上「external driver 不可检测」洞。**动工前 /proc 实测订阅本身起不起 instance**；订阅是我们拥有的长连接 ⇒ 采样/设界/退避/出声一样不少，**并且每事件与整条流都要字节上限**（2.369.50 法则：整份响应读进 server 必须有上限）；`message.removed` / `message.part.removed` 必须处理（与 §2.10 同一条不变量） | test-opencode-serve + /proc A/B | M |
-| 权限规则面（codex permissionProfile / opencode saved permissions / gemini policy） | 只读展示：一张「这条规则从哪来」的层次视图（codex `config/read` 的 layers+origins 恰是我们自己设置面缺的视图） | 渲染 fixture | M |
+| ~~权限规则面（codex permissionProfile / opencode saved permissions / gemini policy）~~ **✅ 2026-09-07 实装（裁决 10 只读）** | 只读展示：一张「这条规则从哪来」的层次视图。落地=PURE `src/permission-rules.js`（记录形状+DOM-free 树渲染器，esc/t 注入⇒XSS 可单测证明）+ ORCH `src/server/permission-rules.js`（按 caps 行 `permissionRules{source,session,instance,liveVerb}` 选 rung，绝不按 backend id）+ 客户端 `src/lib/permission-rules-view.js`（Session Properties 一节 + Manage Agents 模态）。三条 rung：claude=文档化的 settings 层级读盘（managed/user/project/local + 每个 `managed-settings.d/*.json` 各算一个来源；缺文件/解析失败/无 permissions 块是三种不同的诚实注记）· codex=`config/read {includeLayers:true}` 的 layers+origins，**会话作用域必须走会话自己的 wrapper**（`sessionFlags` 层=本会话 spawn 时的 `-c`，新起的 child 看不见），实例作用域=一个有界 app-server child（照抄 codex-thread-read 模式）· opencode=serve 的 **v1 `/config`**（绝不碰 v2 `/api/permission/saved`：2026-09-07 /proc 复测，v1 四次调用 threads 15/inotify 0/RSS 平，v2 一次就 13→37 threads、0→2 inotify、345→507 MB）。**只读是结构性的**：没有写路由、没有写动词、wrapper 从不构造 `config/value/write`/`config/batchWrite`（§4.5）。新增唯一 stdin 动词 `read-permission-rules`，**两个 wrapper 同批**（codex 真答、ACP 答 `unsupported-by-protocol` + 它唯一拥有的权限事实=live mode），unknown-verb 出声。 | scripts/test-permission-rules.mjs（87：纯模型/渲染 fixture + 服务端读真文件与假活会话 + headless chrome 375×667）· test-codex-p2-wrapper ⑧ · test-acp-harness · test-opencode-serve ③（v1-only 路由钉 + v2 负控）· test-harness-contract（caps 镜像深比对） | M |
 
 ---
 
@@ -464,6 +464,8 @@ CLAUDE.md 的 program-use billing 法律：会话跑交互式 PTY，**永不**�
 
 exactly two files 的规矩不变（scripts/test-vendor-whitelist 执行）。三个**候选**本地 oracle（`claude agents --json`、`claude auth status`、`codex doctor --json`）与 codex `account/usage/read` 都很有用，但它们的「零 vendor HTTP」性质**必须逐条举证**，不能靠形状推断——`auth status` 尤其可疑，max 封号复盘的主因正是后台的 auth/usage 型调用。因此它们统一进**决策 6**，需要 owner 就「每条附一份不发请求的证据 + 白名单豁免理由 + 只走人触发/已有节拍」拍板。auto-cli 那条 owner 批准的例外**不得泛化**。
 
+**✅ 2026-09-07 结论（裁决 6 落地）**：三个候选**逐条实测后全部否掉**（`claude auth status --json` 5、`claude agents --json` 5、`codex doctor --json` 16 个 INET connect，方法与逐字数字见 kb-design-lessons §9），本节「不能靠形状推断」的怀疑被证实——`auth status` 连**没有凭据**、且四个抑流量 env 全开时都照样连 api.anthropic.com。上线的是另外三条实测 0 connect 的 codex 只读命令，注册表 `src/local-oracles.js` 逐条带证据 + 把被否的三条永久留作负控；codex `account/usage/read` 仍未动（它是 app-server RPC 不是 CLI oracle，另立）。
+
 ### 4.3 沙箱与安全红线
 
 - **codex 沙箱**：2.369.17 打开 loopback 只为让 vibespace-* 工具能用。**不得再放宽**——不默认 `--yolo`/`danger-full-access`，不把 `--auto`/`--allow-all-tools`/`bypassPermissions` 做成一键默认。
@@ -512,13 +514,15 @@ claude Remote Control / `--cloud` / `/teleport` / `/schedule` routines：我们*
 | 3 | (a) 不选就不传 |
 | 4 | 立项，**两条硬约束**：① 权限按会话 token 作用域——agent **不能枚举、猜测或访问**不属于它的会话/任务/账号/文件；② **渐进式披露**——先注入一个入口工具 + 极简清单，子工具按需展开，绝不一次注入全部（owner 明指 context rot）。先出安全+披露设计再建 |
 | 5 | 做（先按上文在隔离目录用 0.58.0 重验 oauth-personal） |
-| 6 | 用（逐条附「不发 vendor 请求」证据进白名单豁免；人触发/已有节拍） |
+| 6 | 用（逐条附「不发 vendor 请求」证据进白名单豁免；人触发/已有节拍）— **✅ 2026-09-07 实装，且证据把三个候选全部否掉**：`strace -f -qq -e trace=network` + 隔离空 HOME 实测 `claude auth status --json` 5 个 INET connect（api.anthropic.com，**无凭据时照连**，四个抑流量 env 全开仍是 5）、`claude agents --json` 5 个（而且 `--help` 说它列的是**后台会话**不是已装 agent，本来也答非所问）、`codex doctor --json` 16 个（它自己的报告点名 `network.provider_reachability` / `network.websocket_reachability`，`--help` 无离线开关）⇒ **一条 claude oracle 都不上线**；改上三条实测 0 connect 的 codex 只读命令（`login status` / `mcp list --json` / `features list`）。注册表 `src/local-oracles.js` 逐条带证据，被否的三条永久留作**负控**；test-vendor-whitelist 双向执法，并在 strace+CLI 都在时**重测**每条上线的 oracle（先用一次故意的 loopback connect 证明探测器看得见，绿才不是空绿；被否的三条**故意不重跑**——每次 push 都跑正是本法禁止的「定时」形状） |
 | 7 | (b) share 不做；feedback/upload 只作「报告问题」面板可选项 |
 | 8 | (c)：只默认开 `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS`（纯可观测性），`--brief` 与提示缓存三件套做设置项默认关（owner 2026-09-07 「按你说的来」） |
 | 9 | 做（只传 `--worktree`，绝不 `--tmux`）—— ✅ 已落地 2026-09-07：`backend-caps` 新增 `worktree` 能力行（客户端 `agent-meta` 镜像，test-harness-contract 深比对）；两个纯函数 `worktreeRefusal`（cwd 不是 git 仓库就带理由 + `scope:'action'` 拒绝，探针**三态**——答不出来不算拒绝；镜像 CLI 自己的 `hook OR repo` 门，`WorktreeCreate` hook 可救）与 `worktreeSpawnArgs`（新建/fork 发标志，**普通 resume 绝不发**——CLI 自己会重新进入它记录的 worktree）；init 帧的 `cwd` 是**双向仲裁者**（不同=记录路径，相同=这次运行没被隔离，撤销徽标）；勾选框在 New Session 与 Session Properties，卡片徽标 SVG，远程经 buildRemoteExec 原样携带 |
 | 10 | (a) 只读 |
+| 9 | 做（只传 `--worktree`，绝不 `--tmux`） |
+| 10 | (a) 只读 — **✅ 2026-09-07 实装**，见 §2.14 该行 |
 
-执行顺序（受机器并发限制）：B1 诚实批（§2.2/2.3/2.4/2.7）→ §2.1 队列动词（等 Stop 清队列链落地，同一 wrapper 文件）→ §3.2/3.3/3.5/3.4 → worktree 勾选 + §2.14 权限只读 + oracle → Gemini → §3.7 工具提供方。
+执行顺序（受机器并发限制）：B1 诚实批（§2.2/2.3/2.4/2.7）→ §2.1 队列动词（等 Stop 清队列链落地，同一 wrapper 文件）→ §3.2/3.3/3.5/3.4 → worktree 勾选 + ~~§2.14 权限只读 + oracle~~（**✅ 2026-09-07 落地**；worktree 勾选仍未做）→ Gemini → §3.7 工具提供方。
 
 ## 6. 落地纪律（每批都适用）
 

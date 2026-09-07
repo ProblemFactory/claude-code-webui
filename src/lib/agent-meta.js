@@ -44,7 +44,7 @@ export const BACKEND_META = {
     // inProgressTools is FALSE on every harness today: claude's record for it
     // never leaves the CLI's own host callback (backend-caps.js carries the
     // dump + the wire measurement), so nothing may draw an "executing" dot.
-    caps: { fork: true, forkAtMessage: true, review: false, renameWriteback: false, effort: true, autoResume: true, accounts: true, peerDelivery: 'cli-inbox', inputModes: deriveInputModes({ queue: true, queueVerbs: [] }), turnState: 'authoritative', inProgressTools: false, responseStyle: { live: false, closed: false, values: ['Concise', 'Explanatory', 'Learning', 'Proactive'] }, worktree: { supported: true, flag: '--worktree', named: true, requiresGitRepo: true, hookEscape: 'WorktreeCreate', landsIn: '.claude/worktrees/<name>', branchPrefix: 'worktree-' } },
+    caps: { fork: true, forkAtMessage: true, review: false, renameWriteback: false, effort: true, autoResume: true, accounts: true, peerDelivery: 'cli-inbox', inputModes: deriveInputModes({ queue: true, queueVerbs: [] }), turnState: 'authoritative', inProgressTools: false, responseStyle: { live: false, closed: false, values: ['Concise', 'Explanatory', 'Learning', 'Proactive'] }, worktree: { supported: true, flag: '--worktree', named: true, requiresGitRepo: true, hookEscape: 'WorktreeCreate', landsIn: '.claude/worktrees/<name>', branchPrefix: 'worktree-' }, permissionRules: { source: 'settings-files', session: true, instance: true, liveVerb: false } },
     // One-line hint per response-style VALUE (same contract as effortHints:
     // English key, t() at render — the VALUE itself is protocol and is never
     // translated).
@@ -96,7 +96,7 @@ export const BACKEND_META = {
     // fork: the thread-fork RPC exists but is unwired (flips when wired).
     // fork: true since 2.369.21 — thread/fork is wired end to end (wrapper
     // CODEX_WEBUI_FORK → thread/fork; server _forkRequested per caps).
-    caps: { fork: true, forkAtMessage: false, review: true, renameWriteback: true, effort: true, autoResume: true, quotaRefresh: 'session-rpc', accounts: true, peerDelivery: 'rpc-queue', inputModes: deriveInputModes({ queue: true, queueVerbs: ['remove', 'steer', 'steer-all', 'reorder', 'edit', 'run-now', 'run-all'] }), turnState: 'authoritative', inProgressTools: false, responseStyle: { live: true, closed: true, values: ['none', 'friendly', 'pragmatic'] }, worktree: NO_WORKTREE },
+    caps: { fork: true, forkAtMessage: false, review: true, renameWriteback: true, effort: true, autoResume: true, quotaRefresh: 'session-rpc', accounts: true, peerDelivery: 'rpc-queue', inputModes: deriveInputModes({ queue: true, queueVerbs: ['remove', 'steer', 'steer-all', 'reorder', 'edit', 'run-now', 'run-all'] }), turnState: 'authoritative', inProgressTools: false, responseStyle: { live: true, closed: true, values: ['none', 'friendly', 'pragmatic'] }, worktree: NO_WORKTREE, permissionRules: { source: 'config-read', session: true, instance: true, liveVerb: true } },
     // codex Personality values (0.153.4 schema): protocol strings, hinted here.
     responseStyleHints: {
       none: 'no persona — the model\u2019s plain voice',
@@ -137,7 +137,7 @@ export const BACKEND_META = {
     brandColor: '#4ade80',
     fallbackModels: [],
     modelsFromAgent: true,
-    caps: { fork: false, forkAtMessage: false, review: false, renameWriteback: false, effort: false, autoResume: false, accounts: false, peerDelivery: 'stash-only', inputModes: deriveInputModes({ queue: true, queueVerbs: ['remove', 'reorder', 'edit'] }), turnState: 'authoritative', inProgressTools: false, responseStyle: { live: false, closed: true, values: [] }, worktree: NO_WORKTREE },
+    caps: { fork: false, forkAtMessage: false, review: false, renameWriteback: false, effort: false, autoResume: false, accounts: false, peerDelivery: 'stash-only', inputModes: deriveInputModes({ queue: true, queueVerbs: ['remove', 'reorder', 'edit'] }), turnState: 'authoritative', inProgressTools: false, responseStyle: { live: false, closed: true, values: [] }, worktree: NO_WORKTREE, permissionRules: { source: 'serve-config', session: false, instance: true, liveVerb: false } },
     settingsPrefix: 'opencode',
     permissionModes: ['build', 'plan'],
     // The STORE (stopped conversations: list/open/resume/fork) runs behind a
@@ -342,7 +342,7 @@ export function settingsPrefixFor(backend) {
 }
 
 /** Feature caps for a backend (all-false for unknown/shell — chrome shows nothing it can't do). */
-const NO_FEATURE_CAPS = Object.freeze({ fork: false, forkAtMessage: false, review: false, renameWriteback: false, effort: false, autoResume: false, responseStyle: Object.freeze({ live: false, closed: true, values: Object.freeze([]) }), worktree: NO_WORKTREE });
+const NO_FEATURE_CAPS = Object.freeze({ fork: false, forkAtMessage: false, review: false, renameWriteback: false, effort: false, autoResume: false, responseStyle: Object.freeze({ live: false, closed: true, values: Object.freeze([]) }), worktree: NO_WORKTREE, permissionRules: Object.freeze({ source: null, session: false, instance: false, liveVerb: false }) });
 export function backendFeatureCaps(backend) {
   return BACKEND_META[backend]?.caps || NO_FEATURE_CAPS;
 }
@@ -356,6 +356,15 @@ export function backendFeatureCaps(backend) {
  *  notifications steer, human peer messages queue). */
 export function notificationDeliveryFor(backend) {
   return notificationDelivery(BACKEND_META[backend]?.caps || null);
+}
+
+/** THE READ-ONLY PERMISSION-RULE ROW (owner ruling 10), mirroring
+ *  src/backend-caps.js `permissionRules`. Every surface that decides whether
+ *  to draw the "Permission rules" section, and at which SCOPE, reads THIS —
+ *  never a backend id. `source: null` ⇒ the section is not drawn at all.
+ *  scripts/test-harness-contract.mjs deep-compares it against the server row. */
+export function permissionRulesCaps(backend) {
+  return (BACKEND_META[backend]?.caps || NO_FEATURE_CAPS).permissionRules || NO_FEATURE_CAPS.permissionRules;
 }
 
 /** Every backend's agent-memory path pattern (see BACKEND_META.claude). */

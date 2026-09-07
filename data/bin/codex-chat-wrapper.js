@@ -342,6 +342,24 @@ let currentPermission = resolvePermissionMode(permissionMode);
 // than a verb simply never names it, and the server refuses that verb for it.
 const QUEUE_VERBS_SERVED = ['remove', 'steer', 'steer-all', 'reorder', 'edit', 'run-now', 'run-all'];
 
+// THE PERMISSION-BEARING CONFIG KEYS this wrapper reports for the READ-ONLY
+// "where does this rule come from" view (owner ruling 10). Mirrors
+// CODEX_PERMISSION_KEYS in src/permission-rules.js — the wrapper is a SHIPPED
+// SINGLE FILE (it runs on hosts with no checkout, so it cannot require the
+// pure module), which is exactly how the usage scanner drifted twice; the
+// parity is pinned by scripts/test-codex-p2-wrapper.mjs.
+// WHY THE SESSION'S OWN WRAPPER AND NOT A FRESH CHILD: `config/read` resolves
+// a `sessionFlags` LAYER — the `-c` overrides this session was spawned with.
+// A bounded `codex app-server` child started later cannot see them, so it
+// would answer a different question than "what rules is THIS session under".
+const PERMISSION_CONFIG_KEYS = ['approval_policy', 'approvals_reviewer', 'sandbox_mode', 'sandbox_workspace_write',
+  'permissions', 'default_permissions', 'include_permissions_instructions'];
+// Hard ceiling on the emitted record. A real store answered `config/read` with
+// 378 origin keys (hundreds of them other projects' trust levels); this record
+// rides the same journal every message does, so it is capped and SAYS when it
+// was capped rather than growing without bound (2.369.50's byte-limit law).
+const PERMISSION_RULES_MAX_BYTES = 32 * 1024;
+
 const meta = {
   pid: process.pid,
   startedAt: Date.now(),
@@ -398,7 +416,12 @@ const meta = {
   // LIVE (thread/settings/update). backend-caps `responseStyle.live` is what
   // the ws layer + the chip gate on; this advert is the per-PROCESS truth for
   // a wrapper spawned before the feature existed.
-  caps: { peerMessage: true, frameFile: true, threadScoped: true, inputQueue: true, queueVerbs: QUEUE_VERBS_SERVED, responseStyle: true },
+  // permissionRules: this wrapper serves the READ-ONLY `read-permission-rules`
+  // stdin verb (config/read layers+origins). Per-PROCESS truth, same skew law
+  // as responseStyle/inputQueue — an older wrapper never adverts it and the ws
+  // layer refuses the verb for that session with a reason instead of writing a
+  // frame it would drop silently.
+  caps: { peerMessage: true, frameFile: true, threadScoped: true, inputQueue: true, queueVerbs: QUEUE_VERBS_SERVED, responseStyle: true, permissionRules: true },
   // The response style (codex Personality) this session actually runs with.
   // '' = the user made no choice ⇒ the key is never sent and ~/.codex/config.toml
   // decides. Reported so Session Properties can name the EFFECTIVE value.
@@ -2915,6 +2938,52 @@ async function handleInput(msg) {
   }
   if (msg.type === 'codex-read-limits') {
     await readAccountLimits(true);
+    return;
+  }
+  if (msg.type === 'read-permission-rules') {
+    // READ-ONLY (owner ruling 10 — 只读). `config/read` is a pure read; the
+    // WRITE twins (`config/value/write`, `config/batchWrite`) are deliberately
+    // never sent from here and never will be: their optimistic-concurrency
+    // `expectedVersion` turns one careless write into data loss
+    // (design-harness-features §4.5).
+    const requestId = typeof msg.requestId === 'string' ? msg.requestId : '';
+    try {
+      const cwd = meta.cwd || baseCwd || '';
+      const r = await request('config/read', { cwd: cwd || null, includeLayers: true }, 20000);
+      const cfg = (r && typeof r.config === 'object' && r.config) ? r.config : {};
+      const origins = (r && typeof r.origins === 'object' && r.origins) ? r.origins : {};
+      // Only the permission-bearing keys travel — never the whole config (it
+      // carries the user's model/provider/plugin/marketplace world) and never
+      // the whole projects table (378 origin keys on a real store, hundreds of
+      // them OTHER people's project paths: an agent-visible journal is the
+      // wrong place for that).
+      const outConfig = {}, outOrigins = {};
+      for (const k of PERMISSION_CONFIG_KEYS) {
+        if (!(k in cfg)) continue;
+        outConfig[k] = cfg[k];
+        if (origins[k]) outOrigins[k] = origins[k];
+      }
+      if (cwd && cfg.projects && typeof cfg.projects === 'object' && cfg.projects[cwd] && typeof cfg.projects[cwd] === 'object') {
+        const tl = cfg.projects[cwd].trust_level;
+        if (tl !== undefined && tl !== null) {
+          outConfig.projects = { [cwd]: { trust_level: tl } };
+          const ok2 = `projects.${cwd}.trust_level`;
+          if (origins[ok2]) outOrigins[ok2] = origins[ok2];
+        }
+      }
+      // layers WITHOUT their `config` blobs: we want each layer's identity
+      // (its source variant + file + version), not a second copy of the config.
+      const layers = (Array.isArray(r && r.layers) ? r.layers : []).map((l) => ({
+        name: l && l.name, version: l && l.version ? String(l.version) : '', disabledReason: (l && l.disabledReason) || null,
+      }));
+      let payload = { ok: true, requestId, cwd, source: 'config/read', config: outConfig, origins: outOrigins, layers, truncated: false };
+      if (Buffer.byteLength(JSON.stringify(payload), 'utf8') > PERMISSION_RULES_MAX_BYTES) {
+        payload = { ...payload, origins: {}, truncated: true };
+      }
+      emitTaskEvent('permission_rules', payload);
+    } catch (e) {
+      emitTaskEvent('permission_rules', { ok: false, requestId, reason: 'read-failed', detail: String((e && e.message) || e) });
+    }
     return;
   }
   if (msg.type === 'codex-reset-credit') {

@@ -10,7 +10,7 @@
 // session object.
 const protocol = 'acp-events';
 
-function create({ engine, noteHarnessModels, deliverRef }) {
+function create({ engine, noteHarnessModels, deliverRef, permissionRulesRef }) {
   const { noteTurnEnd } = engine;
   function attach(session, id, ptyProcess, { feedLive, broadcastToSession, broadcastActiveSessions, readSessionMeta, writeSessionMeta, updateSessionTodos }) {
     let lineBuf = '';
@@ -81,6 +81,11 @@ function create({ engine, noteHarnessModels, deliverRef }) {
             else if (u.sessionUpdate === 'plan' && Array.isArray(u.entries)) {
               updateSessionTodos(session, u.entries.map((e) => ({ content: String(e?.content || ''), status: e?.status === 'in_progress' ? 'in_progress' : (e?.status === 'completed' ? 'completed' : 'pending') })));
             }
+          } else if (msg.kind === 'permission_rules') {
+            // READ-ONLY rule answer (ruling 10). For ACP the answer is always
+            // 'unsupported-by-protocol' + the live mode — routed anyway, so a
+            // pending read gets a TYPED refusal instead of a timeout.
+            try { permissionRulesRef?.()?.onWrapperRecord?.(id, msg); } catch (e) { console.warn(`[permission-rules] ${id}: answer handling failed: ${e.message}`); }
           } else if (msg.kind === 'peer_result' && msg.ok === false && msg.text) {
             // same honesty rule as the codex rpc-queue lane: a promised message never silently dies
             const cid = session.backendSessionId;

@@ -13,7 +13,7 @@ const { normalizeCodexSource } = require('../../adapters/codex');
 
 const protocol = 'codex-events';
 
-function create({ engine, deliverRef }) {
+function create({ engine, deliverRef, permissionRulesRef }) {
   const { noteTurnEnd, recordCodexQuotaSignal } = engine;
   function attach(session, id, ptyProcess, { feedLive, broadcastToSession, broadcastActiveSessions, readSessionMeta, writeSessionMeta, updateSessionTodos }) {
     let lineBuf = '';
@@ -223,6 +223,15 @@ function create({ engine, deliverRef }) {
           // shows a queued notification the design says should have steered.
           if (msg.type === 'event_msg' && msg.payload?.type === 'peer_message_result' && msg.payload.ok === true && msg.payload.steerFailed) {
             console.log(`[deliver] rpc-queue: turn/steer refused (${msg.payload.steerFailed}${msg.payload.steerDetail ? ': ' + msg.payload.steerDetail : ''}) — the notification took the '${msg.payload.mode}' lane instead`);
+          }
+          // READ-ONLY permission-rule answer (owner ruling 10): the wrapper
+          // replied to `read-permission-rules`. It goes BOTH ways — to the
+          // pending HTTP read that asked for it (by requestId) and to every
+          // client attached to this session, so a second window watching the
+          // same session sees the same tree without asking again (the
+          // cache-invalidation-must-NOTIFY law).
+          if (msg.type === 'event_msg' && msg.payload?.type === 'permission_rules') {
+            try { permissionRulesRef?.()?.onWrapperRecord?.(id, msg.payload); } catch (e) { console.warn(`[permission-rules] ${id}: answer handling failed: ${e.message}`); }
           }
           // Codex plan tool → the session's live TODO summary (board pill)
           if (msg.type === 'event_msg' && msg.payload?.type === 'plan_updated' && Array.isArray(msg.payload.plan)) {

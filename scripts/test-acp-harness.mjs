@@ -366,6 +366,35 @@ console.log('— the ACP wrapper adverts the queue verbs it serves');
   } finally { await w.stop(); }
 }
 
+console.log('— read-permission-rules: a TYPED refusal, never silence (owner ruling 10)');
+{
+  // The rules themselves come from the SERVE's v1 /config (server-side). What
+  // the WRAPPER owes is an ANSWER: a wrapper that adverts nothing is
+  // indistinguishable from one too old to answer, and the ws layer would then
+  // refuse with the wrong reason ("your agent is old") for a harness that will
+  // never have the method. The design's landing discipline is explicit: a new
+  // stdin verb lands in BOTH wrappers in the same batch, unknown-verb loud.
+  const w = startWrapper();
+  try {
+    await w.waitFor(() => w.find('session'), 10000, 'session record');
+    ok('the sidecar adverts caps.permissionRules (this wrapper SERVES the verb — its answer is a refusal, which is a different fact from "too old")',
+      w.metaJson()?.caps?.permissionRules === true, w.metaJson()?.caps);
+    w.send({ type: 'read-permission-rules', requestId: 'acp-rq-1' });
+    await w.waitFor(() => w.find('permission_rules'), 5000, 'a permission_rules record');
+    const r = w.find('permission_rules');
+    ok('the answer is TYPED: ok:false + a machine-readable reason (ACP v1 has no config-read method)',
+      r.ok === false && r.reason === 'unsupported-by-protocol' && /config-read/.test(r.detail || ''), JSON.stringify(r).slice(0, 200));
+    ok('…and it carries the requestId back, so a pending read is correlated instead of timing out', r.requestId === 'acp-rq-1');
+    ok('…plus the ONE permission fact ACP does carry: the session\'s live mode (the panel is never blank)',
+      typeof r.mode === 'string' && Array.isArray(r.modes) && r.modes.length > 0, JSON.stringify({ mode: r.mode, modes: r.modes }));
+    ok('the verb produced NO unknown-verb notice (it is served, not fallen through)',
+      !w.findAll('notice').some((n) => n.noticeKind === 'unknown-verb'));
+    const { capsOf } = require(path.join(REPO, 'src/backend-caps.js'));
+    ok('the harness caps row says the SESSION scope is not opencode\'s (its serve reports ONE resolved config with no per-key origin) — so the server never asks the session for the rules themselves',
+      capsOf('opencode').permissionRules.session === false && capsOf('opencode').permissionRules.instance === true && capsOf('opencode').permissionRules.source === 'serve-config');
+  } finally { await w.stop(); }
+}
+
 console.log('— the stop-time bookkeeping nudge survives a Stop that drops it from the queue');
 {
   // The nudge is FETCHED by endPrompt (a /api/agent/stop-check round trip) and

@@ -3537,3 +3537,44 @@ body.sidebar-right .sidebar.rail-collapsed { transform: translateX(0); }
    class with NO rule — an unsized SVG in a flex row scales to its viewBox and
    swallowed the row (500px icon, title squeezed to 0). Size it like Folders. */
 .mobile-folder-icon { width: 18px; height: 18px; flex-shrink: 0; vertical-align: -3px; }
+
+/* ── READ-ONLY permission-rule tree + local-oracle output (owner rulings 10/6) ──
+   The tree is deliberately flat: one block per SOURCE (a settings layer, a
+   codex config layer, the OpenCode resolved config), its file path as a
+   copy-able button, then its rules. Colour comes from theme vars only. */
+.perm-rules { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
+.perm-rules-empty { font-size: 11px; color: var(--text-dim); line-height: 1.5; padding: 6px 0; }
+.perm-rules-note { font-size: 10px; color: var(--text-dim); }
+.perm-layer { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 8px; background: var(--bg-secondary); min-width: 0; }
+.perm-layer-absent { opacity: 0.62; }
+.perm-layer-head { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; font-size: 11px; }
+.perm-layer-name { font-weight: 600; }
+.perm-layer-scope { color: var(--text-dim); font-size: 10px; }
+.perm-layer-count { margin-left: auto; color: var(--text-dim); font-size: 10px; white-space: nowrap; }
+.perm-layer-path { display: flex; align-items: center; gap: 4px; width: 100%; margin: 4px 0 0; padding: 2px 4px; font: inherit; font-size: 10px; font-family: var(--font-mono, monospace); color: var(--text-dim);
+  background: transparent; border: 1px solid transparent; border-radius: var(--radius-sm); cursor: pointer; text-align: left; min-width: 0; }
+.perm-layer-path:hover { border-color: var(--border); color: var(--text); }
+.perm-layer-path span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.perm-layer-path svg { width: 11px; height: 11px; flex: 0 0 auto; }
+.perm-layer-path-none { cursor: default; font-style: italic; }
+.perm-layer-note { font-size: 10px; color: var(--text-dim); margin-top: 3px; }
+.perm-rule-list { list-style: none; margin: 5px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.perm-rule { display: flex; align-items: baseline; gap: 6px; font-size: 11px; min-width: 0; flex-wrap: wrap; }
+.perm-rule-kind { flex: 0 0 auto; font-size: 9px; text-transform: uppercase; letter-spacing: 0.04em; padding: 0 4px; border-radius: var(--radius-sm); border: 1px solid var(--border); color: var(--text-dim); }
+.perm-rule-allow .perm-rule-kind { color: var(--green); border-color: color-mix(in srgb, var(--green) 45%, transparent); }
+.perm-rule-deny .perm-rule-kind { color: var(--red); border-color: color-mix(in srgb, var(--red) 45%, transparent); }
+.perm-rule-ask .perm-rule-kind { color: var(--yellow); border-color: color-mix(in srgb, var(--yellow) 45%, transparent); }
+.perm-rule-value { font-family: var(--font-mono, monospace); overflow-wrap: anywhere; min-width: 0; }
+.perm-rule-key { color: var(--text-dim); font-size: 10px; overflow-wrap: anywhere; }
+.perm-rule-note { color: var(--text-dim); font-size: 10px; font-style: italic; }
+.oracle-cmd { font-family: var(--font-mono, monospace); font-size: 11px; color: var(--text-dim); margin: 6px 0 4px; overflow-wrap: anywhere; }
+.oracle-note { font-size: 10px; color: var(--text-dim); margin: 6px 0 2px; }
+.oracle-body { margin: 0; padding: 8px; max-height: 46vh; overflow: auto; font-family: var(--font-mono, monospace); font-size: 11px; line-height: 1.5;
+  background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius-sm); white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 768px) {
+  /* One column: the count chip moves under the name instead of pushing it, and
+     the path button is a full-width tap target. */
+  .perm-layer-count { margin-left: 0; }
+  .perm-layer-path { padding: 5px 4px; }
+  .oracle-body { max-height: 52vh; font-size: 10px; }
+}

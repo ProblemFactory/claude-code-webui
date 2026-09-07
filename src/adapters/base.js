@@ -51,6 +51,16 @@ BackendAdapter.prototype.formatQueueOp = function(op) { throw new Error('this ba
  * writing a frame its wrapper would drop on the floor.
  */
 BackendAdapter.prototype.formatSetResponseStyle = function(style) { throw new Error('this backend applies its response style at spawn only'); };
+/**
+ * READ-ONLY PERMISSION-RULE READ → the wrapper stdin frame (owner ruling 10).
+ * Only harnesses whose `permissionRules` source is 'config-read' or 'acp'
+ * implement it; ws-handler checks the PURE registry
+ * (src/permission-rules.js PERMISSION_RULE_SOURCES) AND the running wrapper's
+ * own advert BEFORE calling, so a harness whose rules come off disk (claude:
+ * the settings hierarchy, read server-side) never writes a frame at all.
+ * There is deliberately NO write twin anywhere in this interface.
+ */
+BackendAdapter.prototype.formatReadPermissionRules = function(opts) { throw new Error('this backend does not expose its permission rules over the session'); };
 /** Extra actions after sending interrupt (e.g. delayed SIGINT fallback) */
 BackendAdapter.prototype.postInterrupt = function(session, sessionId) {};
 

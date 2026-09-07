@@ -1,6 +1,7 @@
 import { escHtml, copyText, showConfirmDialog, taskGroupColor } from './utils.js';
 import { SESSION_STATE_META, SESSION_URGENCY_META } from './sidebar-tasks.js';
-import { getBackendMeta, getAgentKindMeta, getAgentRoleLabel, responseStyleCaps, responseStyleOrigin, spawnValueOrigin, effortDisplay, composerSendModes, notificationDeliveryFor, worktreeCapsFor, worktreePick } from './agent-meta.js';
+import { getBackendMeta, getAgentKindMeta, getAgentRoleLabel, responseStyleCaps, responseStyleOrigin, spawnValueOrigin, effortDisplay, composerSendModes, notificationDeliveryFor, worktreeCapsFor, worktreePick, permissionRulesCaps } from './agent-meta.js';
+import { loadInto } from './permission-rules-view.js';
 import { t } from './i18n.js';
 import { registerOpenAction } from './window-types.js';
 
@@ -394,6 +395,43 @@ export function openSessionProps(app, sessionRef, { syncId } = {}) {
         if (sm.queueSegment) bits.push(t('Enter queues it — it runs after this turn'));
         if (sm.steerSegment) bits.push(t('Alt+Enter injects it into the running turn (the agent sees it at its next reply)'));
         row(cfgSection(), t('Sending during a turn'), escHtml(bits.join(' \u00b7 ')));
+      }
+    }
+
+    // ── Permission rules (READ-ONLY, owner ruling 10) ──
+    // "Where does this rule come from" for THIS session. Gated on the caps row
+    // (`permissionRules`), never on a backend id — a harness with no rule
+    // surface (shell) gets no section at all, and one that only answers for
+    // the whole machine (opencode: the serve reports ONE resolved config with
+    // no per-key origin) says so instead of pretending it is session-scoped.
+    // HUMAN-TRIGGERED: the tree loads on the button, never on render — the
+    // codex rung asks the session's own agent, and a panel that re-rendered on
+    // every broadcast would ask it again on every broadcast.
+    {
+      const prCaps = permissionRulesCaps(s.backend || 'claude');
+      if (prCaps.source) {
+        const prSec = section(t('Permission rules'));
+        const hint = document.createElement('div');
+        hint.className = 'agents-note';
+        hint.textContent = prCaps.session
+          ? t('Read-only: which rule comes from which file or layer.')
+          : t('Read-only, and machine-wide: this agent reports one resolved set of rules, not a per-session one.');
+        prSec.appendChild(hint);
+        const tree = document.createElement('div');
+        const btn = document.createElement('button');
+        btn.className = 'task-detail-btn';
+        btn.textContent = t('Show rules…');
+        btn.onclick = () => {
+          btn.disabled = true;
+          loadInto(tree, {
+            backend: s.backend || 'claude',
+            scope: prCaps.session ? 'session' : 'instance',
+            sessionId: prCaps.session ? (s.webuiId || '') : '',
+            cwd: s.cwd || '',
+            host: s.hostId || '',
+          }).finally(() => { btn.disabled = false; btn.textContent = t('Reload rules'); });
+        };
+        prSec.append(btn, tree);
       }
     }
 

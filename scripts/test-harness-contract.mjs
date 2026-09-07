@@ -66,6 +66,38 @@ for (const id of harnessIds()) {
   if (h.kind === 'chat') ok(Array.isArray(meta.fallbackModels) && (meta.fallbackModels.length > 0 || meta.modelsFromAgent === true) && meta.caps, `${id}: client META carries fallbackModels (or modelsFromAgent) + feature caps`);
 }
 ok(Object.keys(BACKEND_META).every((id) => HARNESSES[id]), 'every client META row has a server harness (no client-only backend)');
+// ── the caps MIRROR (design-harness-features §6 landing discipline): a caps row
+// the client also carries must be BYTE-IDENTICAL to the server's, and a row the
+// client carries ALONE is how §2.13's `review` drifted (client had it, server
+// never did, so nothing could disagree). Deep-compared per row, per backend.
+{
+  const MIRRORED = ['permissionRules', 'responseStyle', 'inputModes'];  // rows both tiers carry
+  const norm = (v) => JSON.stringify(v, Object.keys(v || {}).sort());
+  // A caps-LESS client row is deliberate for a backend with no agent (`shell`
+  // carries no caps object at all, so every chrome gate reads the all-false
+  // fallback). Those are asserted through the fallback below, not row by row.
+  const mirroredIds = Object.keys(BACKEND_META).filter((id) => BACKEND_META[id].caps);
+  for (const row of MIRRORED) {
+    for (const id of mirroredIds) {
+      const server = capsOf(id)[row], client = BACKEND_META[id].caps[row];
+      ok(server !== undefined && client !== undefined && norm(server) === norm(client),
+        `${id}: client META caps.${row} mirrors the server backend-caps row exactly`,
+        `server=${JSON.stringify(server)} client=${JSON.stringify(client)}`);
+    }
+    // …and the row cannot be a client-only invention (the §2.13 drift shape)
+    ok(Object.keys(BACKEND_CAPS).every((id) => BACKEND_CAPS[id][row] !== undefined),
+      `every SERVER harness row declares ${row} (a client-only caps row is how \`review\` drifted)`);
+  }
+  const { backendFeatureCaps } = await import(path.join(REPO, 'src/lib/agent-meta.js'));
+  // shell / an unknown id: both tiers must land on the SAME all-false row, or a
+  // surface would offer a no-agent session something no server rung can answer.
+  for (const id of ['shell', 'nope-not-a-backend']) {
+    ok(norm(backendFeatureCaps(id).permissionRules) === norm(capsOf(id).permissionRules) && capsOf(id).permissionRules.source === null,
+      `${id}: the all-false permissionRules row reads identically on both tiers (chrome shows nothing it cannot do)`,
+      `server=${JSON.stringify(capsOf(id).permissionRules)} client=${JSON.stringify(backendFeatureCaps(id).permissionRules)}`);
+  }
+  ok(!BACKEND_META.shell.caps, 'shell carries NO client caps object on purpose — its chrome resolves through the all-false fallback');
+}
 ok(chatHarnessIds().join(',') === 'claude,codex,opencode', `chat-capable harnesses: ${chatHarnessIds().join(',')}`);
 // S5 pins: the stdout registry covers exactly the declared protocols; an unknown one has no consumer (never a stream-json fallback)
 ok(PROTOCOLS.every((p) => chatHarnessIds().some((id) => HARNESSES[id].caps.streamProtocol === p)), `no dead stdout consumer row: every registered protocol is declared by a chat harness (${PROTOCOLS.join(',')})`);

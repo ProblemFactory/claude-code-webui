@@ -4,6 +4,13 @@ import { t } from './i18n.js';
 import { SETTINGS_SCHEMA } from './settings-schema.js';
 import { agoText, api, copyText, createModalShell, escHtml, estDisplayPair, fetchJson, showConfirmDialog, showContextMenu, showInputDialog, showToast } from './utils.js';
 import { track } from './telemetry-client.js';
+import { openPermissionRulesDialog, runLocalOracle } from './permission-rules-view.js';
+import { permissionRulesCaps } from './agent-meta.js';
+// The oracle registry + its measured PROOFS and the measured-and-REJECTED
+// candidates are PURE and shared with the server (CJS pulled into the bundle
+// like search-card.js): the menu can only offer what the server will run, and
+// a rejected candidate is NAMED here rather than silently missing.
+import { oraclesFor, rejectedFor } from '../local-oracles.js';
 
 // Roster order = TYPE, never add-order (2.268.5): pool → subscription → API
 // key, name-sorted within a type. ONE comparator for both rosters (2.369.18 —
@@ -88,6 +95,46 @@ function remoteClaudeSubscriptionLoginCommand(id) {
 
 export function installManageAgents(App, ctx = {}) {
   Object.assign(App.prototype, {
+  /**
+   * THE READ-ONLY "rules & checks" MENU BLOCK (owner rulings 10 + 6), shared
+   * by both account rosters so the two never drift.
+   *   · "Permission rules…" — the read-only tree, offered when the caps row
+   *     says this harness answers at INSTANCE scope. Never on a remote host
+   *     section: the rules live on that machine and the reader is local.
+   *   · one row per registered LOCAL ORACLE for this harness — human-triggered,
+   *     measured zero-network, run under the account's own config dir.
+   *   · when a harness has NO oracles, the measured-and-REJECTED candidates
+   *     are shown DISABLED with the reason, because "there is nothing here"
+   *     and "we measured these and they phone home" are different facts and
+   *     the second one is the one worth knowing.
+   */
+  _rulesAndChecksItems(backend, { accountId = '', accountName = '', selectedHost = null } = {}) {
+    if (selectedHost) return [];                       // local machine only — say nothing rather than guess
+    const items = [];
+    const caps = permissionRulesCaps(backend);
+    if (caps.source && caps.instance) {
+      items.push({
+        label: t('Permission rules…'),
+        title: t('Read-only: which permission rule comes from which file or layer'),
+        action: () => openPermissionRulesDialog({ backend, accountId, accountName }),
+      });
+    }
+    const oracles = oraclesFor(backend);
+    for (const o of oracles) {
+      items.push({
+        label: t('{check}…', { check: o.label }),
+        title: `${o.description} (${backend} ${o.argv.join(' ')})`,
+        action: () => runLocalOracle({ id: o.id, label: o.label, accountId, accountName }),
+      });
+    }
+    if (!oracles.length) {
+      for (const r of rejectedFor(backend)) {
+        items.push({ label: t('{cmd} — not offered', { cmd: r.label }), disabled: true, title: r.verdict });
+      }
+    }
+    return items.length ? [{ separator: true }, ...items] : [];
+  },
+
   // ── Manage Agents dialog: install/login status + login/update actions ──
   // One place for CLI lifecycle instead of scattered menu entries. Login and
   // update both run visibly in a shell terminal window (nothing hidden).
@@ -963,6 +1010,7 @@ export function installManageAgents(App, ctx = {}) {
         // the Anthropic roster uses (2.369.18)
         if (a?.pooled && !selectedHost) items.splice(0, 1, ...this._poolMenuItems(id, a, refresh));
         if (!a?.pooled && a?.loggedIn && (!a.email || a.emailDeclared)) items.push({ label: a.email ? t('edit email') : t('set email…'), action: doEmail });
+        items.push(...this._rulesAndChecksItems('codex', { accountId: id, accountName: a?.name || '', selectedHost }));
         items.push({ separator: true }, { label: t('Remove account'), action: doDelete });
         showContextMenu(r.left, r.bottom + 4, items);
       }
@@ -1138,6 +1186,20 @@ export function installManageAgents(App, ctx = {}) {
           updBtn.title = b.updateCmd;
           updBtn.onclick = () => run(absCmd(b.updateCmd));
           actions.appendChild(updBtn);
+        }
+        // READ-ONLY rule view + the human-triggered local checks for the
+        // MACHINE's own login (rulings 10 + 6). The per-account rosters carry
+        // the same block for named accounts; this row is the only door for a
+        // machine that has none. Local only — a remote host's rules and CLI
+        // live on that machine and this reader does not.
+        {
+          const checks = this._rulesAndChecksItems(b.key, { selectedHost });
+          if (info.installed && checks.length) {
+            const chkBtn = document.createElement('button'); chkBtn.className = 'agent-btn'; chkBtn.textContent = t('Rules & checks');
+            chkBtn.title = t('Read-only: permission rules, plus local checks that make no network requests');
+            chkBtn.onclick = () => { const rect = chkBtn.getBoundingClientRect(); showContextMenu(rect.left, rect.bottom + 4, checks.filter((x) => !x.separator)); };
+            actions.appendChild(chkBtn);
+          }
         }
         // Ephemeral-install warning (2.229.0, LOCAL machine only — remote
         // hosts' layout is theirs): a claude living outside $HOME (image-baked
@@ -2217,6 +2279,7 @@ export function installManageAgents(App, ctx = {}) {
             if (act != null) { copyText(r2.key); showToast(t('Copied')); }
           } catch { showToast(t('Could not read the key'), { type: 'error' }); }
         } });
+        items.push(...this._rulesAndChecksItems('claude', { accountId: id, accountName: a?.name || '', selectedHost }));
         items.push({ separator: true }, { label: t('Remove account'), action: doDelete });
         showContextMenu(r.left, r.bottom + 4, items);
       }

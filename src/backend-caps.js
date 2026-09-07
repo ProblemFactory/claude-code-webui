@@ -203,6 +203,26 @@
 const NO_WORKTREE = Object.freeze({ supported: false, flag: null, named: false, requiresGitRepo: false, hookEscape: null, landsIn: null, branchPrefix: null });
 const CLAUDE_WORKTREE = Object.freeze({ supported: true, flag: '--worktree', named: true, requiresGitRepo: true, hookEscape: 'WorktreeCreate', landsIn: '.claude/worktrees/<name>', branchPrefix: 'worktree-' });
 
+// permissionRules names WHERE this harness's permission rules can be READ from
+// and at which SCOPE — the read-only "where does this rule come from" view
+// (owner ruling 10 of design-harness-features §5.1) gates on THIS row, never
+// on a backend id. It is a READ capability by construction: there is no write
+// verb anywhere behind it, and none is planned (codex `config/value/write`'s
+// optimistic concurrency turns one careless write into data loss, §4.5).
+//   source  — the closed vocabulary in src/permission-rules.js
+//             (PERMISSION_RULE_SOURCES). null = this harness has no
+//             permission-rule surface at all and the view is never offered.
+//   session — the SESSION-scoped read is possible (Session Properties). For
+//             codex this is true for a REAL reason: `config/read` resolves a
+//             `sessionFlags` layer — the `-c` overrides this session was
+//             spawned with — which only the session's own app-server can see.
+//   instance— the instance-wide read is possible (Manage Agents). claude reads
+//             files, so both scopes work; opencode's serve knows nothing about
+//             a particular session's cwd, so only the instance scope is true.
+//   liveVerb— the session-scoped read needs the RUNNING wrapper to serve the
+//             `read-permission-rules` stdin verb (⇒ the per-process advert
+//             gate applies, the 2.361.1/2.364.1 skew law). false = the server
+//             can answer without touching the session at all.
 const QUEUE_VERBS = Object.freeze(['remove', 'steer', 'steer-all', 'reorder', 'edit', 'run-now', 'run-all']);
 
 /** What a wrapper that advertises a queue but NAMES NO VERBS is taken to
@@ -258,6 +278,10 @@ const BACKEND_CAPS = {
     // (gemini 0.33.2 does NOT: 0 hits in the package, correcting an earlier
     // draft; codex/opencode have no per-session worktree flag).
     worktree: CLAUDE_WORKTREE,
+    // The documented settings hierarchy read straight off disk (managed /
+    // user / project / local settings.json + permissions.allow|deny|ask).
+    // No session needed and no live verb: the files ARE the answer.
+    permissionRules: { source: 'settings-files', session: true, instance: true, liveVerb: false },
   },
   codex: {
     pool: true,
@@ -287,6 +311,10 @@ const BACKEND_CAPS = {
     // turn — no restart, no new conversation.
     responseStyle: { live: true, closed: true, values: ['none', 'friendly', 'pragmatic'] },
     worktree: NO_WORKTREE,
+    // app-server `config/read {cwd, includeLayers:true}` → layers + origins.
+    // liveVerb: the SESSION scope goes through the session's own wrapper —
+    // a fresh child cannot see the `sessionFlags` layer.
+    permissionRules: { source: 'config-read', session: true, instance: true, liveVerb: true },
   },
   shell: {
     pool: false, hotSwitch: 'unverified', planC: false, sealedOrders: false, resetCredit: false, quotaProbe: null, fork: false,
@@ -297,6 +325,7 @@ const BACKEND_CAPS = {
     turnState: null, inProgressTools: false, // terminal-only: there is no turn
     responseStyle: { live: false, closed: true, values: [] }, // terminal-only: no agent to style
     worktree: NO_WORKTREE,
+    permissionRules: { source: null, session: false, instance: false, liveVerb: false }, // no agent ⇒ no rules
   },
   // ACP v1 harnesses (S8, design-harness-plugins §2.3): the agent holds its
   // own login/provider config — no pool, no quota probe, no credential
@@ -328,6 +357,14 @@ const BACKEND_CAPS = {
     // OpenCode sandboxes into a worktree by its OWN policy; there is no
     // per-session flag we can pass, so the row is honestly false.
     worktree: NO_WORKTREE,
+    // The rules come from the SERVE's v1 `GET /config` (measured 1.18.29:
+    // zero instance boot; the v2 `/api/permission/saved` boots one — threads
+    // 15→37, inotify fds 0→2, RSS 316→482 MB — so it is never called).
+    // session:false — the serve resolves ONE config and reports no origin
+    // per key; claiming a session scope would promise a per-project answer
+    // OpenCode does not give. liveVerb:false — the wrapper is not the source
+    // (it answers 'unsupported-by-protocol'; the serve is).
+    permissionRules: { source: 'serve-config', session: false, instance: true, liveVerb: false },
   },
 };
 
@@ -336,7 +373,7 @@ const BACKEND_CAPS = {
 // row whose `steer` disagrees with its `queueVerbs`.
 for (const row of Object.values(BACKEND_CAPS)) row.inputModes = deriveInputModes(row.inputModes);
 
-const NO_CAPS = Object.freeze({ pool: false, hotSwitch: 'unverified', planC: false, sealedOrders: false, resetCredit: false, quotaProbe: null, fork: false, forkAtMessage: false, review: false, renameWriteback: false, streamProtocol: null, worktree: NO_WORKTREE, peerDelivery: 'stash-only', inputModes: deriveInputModes({ queue: false, queueVerbs: [] }), turnState: null, inProgressTools: false, responseStyle: Object.freeze({ live: false, closed: true, values: Object.freeze([]) }) });
+const NO_CAPS = Object.freeze({ pool: false, hotSwitch: 'unverified', planC: false, sealedOrders: false, resetCredit: false, quotaProbe: null, fork: false, forkAtMessage: false, review: false, renameWriteback: false, streamProtocol: null, worktree: NO_WORKTREE, peerDelivery: 'stash-only', inputModes: deriveInputModes({ queue: false, queueVerbs: [] }), turnState: null, inProgressTools: false, permissionRules: Object.freeze({ source: null, session: false, instance: false, liveVerb: false }), responseStyle: Object.freeze({ live: false, closed: true, values: Object.freeze([]) }) });
 
 function capsOf(backend) {
   return BACKEND_CAPS[backend || 'claude'] || NO_CAPS;

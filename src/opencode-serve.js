@@ -152,6 +152,7 @@ const LIST_LIMIT = 500;
 const TITLE_PLACEHOLDER_RE = /^New session - /;
 const FORK_PATH = '/session/{sessionID}/fork';
 const NAME_MAX_BYTES = 1 << 20;    // the naming read is the WHOLE v1 message list — refuse a conversation bigger than this (it has a real title anyway)
+const CONFIG_MAX_BYTES = 512 * 1024;  // the v1 /config read (permission rules) — a whole response into this process always carries a cap (2.369.50)
 // ── the RUNAWAY guard (2.369.50, the 2.369.42 incident) ──
 const GUARD_SAMPLE_MS = 60000;                     // /proc sample cadence
 const GUARD_CPU_PCT = 150;                         // sustained CPU% (100% = one core) that counts as hot
@@ -502,6 +503,20 @@ class OpencodeServeClient {
   }
   fork(id, { messageID = null, directory = null, timeoutMs = READ_TIMEOUT_MS } = {}) {
     return this.request('POST', `/session/${encodeURIComponent(id)}/fork`, { query: { directory }, body: messageID ? { messageID } : {}, timeoutMs });
+  }
+  /** GET /config — the RESOLVED OpenCode config, v1 (the read-only permission-
+   *  rule view's source; owner ruling 10).
+   *  ROUTE LAW, re-measured 1.18.29 on 2026-09-07 with /proc, same method as
+   *  2.369.50: this route boots NOTHING (threads 14→15, inotify fds 0→0,
+   *  RSS flat, stable across four calls — one worker thread, no instance).
+   *  The obvious-looking v2 twin `GET /api/permission/saved` DOES boot one on
+   *  the same process: threads 15→**37**, inotify fds 0→**2**, RSS
+   *  316→**482 MB**. It is never called, and scripts/test-opencode-serve.mjs
+   *  pins that no `/api/` route string exists in this module.
+   *  Byte-capped like every other whole-response read (a config carries the
+   *  user's provider/mcp/plugin world). */
+  config({ directory = null, timeoutMs = null, maxBytes = CONFIG_MAX_BYTES } = {}) {
+    return this.request('GET', '/config', { query: { directory }, timeoutMs, maxBytes });
   }
   children(id, opts) { return this.request('GET', `/session/${encodeURIComponent(id)}/children`, opts); }
   /** GET /session/status → {sessionID: SessionStatus} for the sessions THIS
@@ -1424,6 +1439,7 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
   const names = new Map();      // id → { name, at }
   const naming = new Set();
   const convo = new Map();      // id → { at, session, messages, records }
+  const cfgCache = new Map();   // directory('' = none) → { at, config } — the v1 /config read
   let listing = null;
   // ── THE LIVE LANE (S9 remainder, B-eac2) — see armLive() ──
   const live = {
@@ -1752,7 +1768,30 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
     invalidate();
     return forked;
   }
-  function invalidate() { cache.at = 0; cache.dirty = true; cache.negativeUntil = 0; convo.clear(); }
+  /** The RESOLVED OpenCode config for the READ-ONLY permission-rule view
+   *  (owner ruling 10). USER ACTION ⇒ LOUD: a failure returns the reason, it
+   *  never degrades into "this agent has no rules". v1 `/config` only — see
+   *  the client method for the /proc measurement that says why.
+   *  Cached briefly (a config does not change between two clicks) and NEVER
+   *  negative-cached: the user asking again after fixing their config must get
+   *  the new answer. */
+  async function readConfig({ directory = null, timeoutMs = READ_TIMEOUT_MS } = {}) {
+    const key = directory || '';
+    const hit = cfgCache.get(key);
+    if (hit && now() - hit.at < listCacheMs) return hit.config;
+    const client = await locator.client({ budgetMs: timeoutMs });
+    if (!client) throw new OpencodeServeError(reasonUnavailable(), { code: 'unavailable' });
+    let config;
+    try { config = await client.config({ directory, timeoutMs }); }
+    catch (e) {
+      if (isConnErr(e)) locator.invalidate(e.message);
+      throw new OpencodeServeError(`OpenCode config could not be read: ${e.message}`, { status: e.status, code: e.code, cause: e });
+    }
+    cfgCache.set(key, { at: now(), config: config || {} });
+    if (cfgCache.size > 8) cfgCache.delete(cfgCache.keys().next().value);
+    return config || {};
+  }
+  function invalidate() { cache.at = 0; cache.dirty = true; cache.negativeUntil = 0; convo.clear(); cfgCache.clear(); }
 
   // -- USER ACTIONS over the serve (LOUD by contract: every failure names the
   //    cause; a silent no-op here is the "no silent failures" law broken) --
@@ -2037,7 +2076,7 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
     return { ...locator.state(), cachedSessions: cache.list ? cache.list.length : null, cacheAgeMs: cache.at ? now() - cache.at : null, negativeUntil: cache.negativeUntil, lastError: cache.lastError || locator.state().lastError, namesKnown: names.size, skippedWorktrees: cache.skippedWorktrees || [],
       liveLane: laneSt, liveLaneHealthy: laneHealthy(), pendingQuestions: questionsWarm() ? live.questions.size : 0, busySessions: live.statuses.size, dirty: !!cache.dirty };
   }
-  return { discover, sessionModel, readConversation, forkSession, invalidate, state: stateOf, reasonUnavailable, locator, _names: names,
+  return { discover, sessionModel, readConversation, readConfig, forkSession, invalidate, state: stateOf, reasonUnavailable, locator, _names: names,
     revertTo, unrevert, pendingQuestions, answerQuestion, rejectQuestion, openPty, closePty, resizePty, reapPtys, todos, statusMap,
     armLive, stopLive, _live: live };
 }
@@ -2073,6 +2112,7 @@ const NULL_FACTS = Object.freeze({
   sessionModel: async () => '',   // no serve ⇒ no answer; the ladder logs the fall back to the instance default
   readConversation: async (id) => { throw new OpencodeServeError(`OpenCode serve is not configured on this instance (conversation ${id})`, { code: 'unconfigured' }); },
   forkSession: async () => { throw new OpencodeServeError('OpenCode serve is not configured on this instance', { code: 'unconfigured' }); },
+  readConfig: async () => { throw new OpencodeServeError('OpenCode serve is not configured on this instance', { code: 'unconfigured' }); },
   invalidate: () => { },
   state: () => ({ installed: false, ready: false, parked: false, caps: null, configured: false, autostart: false, envForced: null, stopped: true, liveLane: null, liveLaneHealthy: false, pendingQuestions: 0, busySessions: 0 }),
   reasonUnavailable: () => 'OpenCode serve is not configured on this instance',
@@ -2205,5 +2245,5 @@ module.exports = {
   normalizeAskQuestions, askAnswerMap, askAnswersToPositional, revertNoticeText, EXTERNAL_WINDOW_MS, OWN_WRITE_WINDOW_MS,
   serveEnvOverride, decideAutostart, SERVICE_PLUGIN_ID: 'opencode-serve',
   DEFAULT_TIMEOUT_MS, READ_TIMEOUT_MS, LIST_CACHE_MS, NEGATIVE_CACHE_MS, MAX_CRASHES, FORK_PATH,
-  NAME_MAX_BYTES, GUARD_CPU_PCT, GUARD_RSS_BYTES, GUARD_SAMPLE_MS, RUNAWAY_COOLDOWN_MS, MIN_REFRESH_MS, PTY_TIMEOUT_MS,
+  NAME_MAX_BYTES, CONFIG_MAX_BYTES, GUARD_CPU_PCT, GUARD_RSS_BYTES, GUARD_SAMPLE_MS, RUNAWAY_COOLDOWN_MS, MIN_REFRESH_MS, PTY_TIMEOUT_MS,
 };
