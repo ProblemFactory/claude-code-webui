@@ -563,6 +563,232 @@ console.log('\n— ROUND 3 (findings from the second review of this branch) —'
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// The FOURTH pass over this branch. Three defects, each reproduced against a
+// real 1.18.29 serve (/proc thread + inotify-wd sampling, same-origin A/B)
+// BEFORE the fix; each assert is the mechanism, each with the negative control
+// that proves the fix did not simply switch the feature off.
+console.log('\n— ROUND 4 (findings from the third review of this branch) —');
+{
+  // ① THE PTY FAMILY HANDED A USER DIRECTORY TO THE SERVE — the 2.369.42 /
+  //    2.369.50 incident class, re-introduced on the one NEW path that takes a
+  //    directory from the user. `?directory=X` is what BOOTS the OpenCode
+  //    instance for X (recursive index + inotify watch of the whole tree) and
+  //    NOTHING in the pty family releases it: measured on a 200-dir/4046-file
+  //    repo, one "open a terminal here" left 204 watch descriptors and +23
+  //    threads alive across DELETE, and across three open/close cycles
+  //    (40/204 → 37/204, ×3). Without the query: 4 watches, and
+  //    `readlink /proc/<shell>/cwd` is the SAME target in both arms — the query
+  //    buys the shell nothing, the `cwd` BODY field places it.
+  const mock = await startMockServe({ state: createMockState() });
+  const facts = serve.createFacts(fixedLocator(mock.url), { log: { warn() { } } });
+  const USER_DIR = '/work/alpha-huge-repo';
+  const before = new Set(mock.state.instances);
+  const opened = await facts.openPty({ cwd: USER_DIR, title: 'round4' });
+  ok('opening a serve terminal in a user directory boots NO OpenCode instance for that tree (the whole 2.369.50 lesson)',
+    !mock.state.instances.has(USER_DIR), [...mock.state.instances]);
+  ok('…the shell still runs THERE (the `cwd` rides the body, which is what places it — measured identical in both arms)', opened.pty.cwd === USER_DIR, opened.pty);
+  ok('…and the ws url carries no `directory` either (the upgrade is served by the same per-instance registry)', !/[?&]directory=/.test(opened.url), opened.url);
+  // NEGATIVE CONTROL on the SAME mock: the OLD shape still leaks, so the assert
+  // above is measuring the mechanism and not a mock that cannot tell.
+  const oldUrl = new URL(mock.url + '/pty');
+  oldUrl.searchParams.set('directory', USER_DIR);
+  const oldPty = await (await fetch(oldUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ cwd: USER_DIR }) })).json();
+  ok('negative control: the OLD `?directory=` shape DOES boot it (and DELETE frees nothing — the mock models the measurement)',
+    mock.state.instances.has(USER_DIR), [...mock.state.instances]);
+  const delUrl = new URL(mock.url + `/pty/${oldPty.id}`);
+  delUrl.searchParams.set('directory', USER_DIR);
+  await fetch(delUrl, { method: 'DELETE' });
+  ok('…and closing it does NOT release the instance it booted (only POST /instance/dispose does — measured)', mock.state.instances.has(USER_DIR));
+  ok('precondition: none of this was already booted before the leg', before.size === 0 || !before.has(USER_DIR));
+
+  // CHANGE THEM TOGETHER OR NOT AT ALL: the pty registry is PER INSTANCE
+  // (measured: `PUT /pty/{id}?directory=X` on a pty created without the query
+  // answers 404 PtyNotFoundError). A half-migrated family opens a terminal that
+  // can never be resized, closed or reaped.
+  const client = fixedLocator(mock.url)._client;
+  ok('the WHOLE family lands on one instance: get + resize + close all resolve the pty the create made',
+    (await client.ptyGet(opened.pty.id))?.id === opened.pty.id
+    && (await facts.resizePty(opened.pty.id, { rows: 40, cols: 120, cwd: USER_DIR }))?.ok === true
+    && (await facts.closePty(opened.pty.id, { cwd: USER_DIR }))?.ok === true);
+  const opened2 = await facts.openPty({ cwd: USER_DIR, title: 'cross' });
+  const crossUrl = new URL(mock.url + `/pty/${opened2.pty.id}`);
+  crossUrl.searchParams.set('directory', USER_DIR);
+  ok('negative control: the same id WITH a `directory` query is a 404 — which is why the family may never be half-migrated',
+    (await fetch(crossUrl, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ size: { rows: 1, cols: 1 } }) })).status === 404);
+  await facts.closePty(opened2.pty.id, {});
+  // SOURCE PIN: the six methods are the only place this could come back.
+  const src = read('src/opencode-serve.js');
+  const ptyBlock = src.slice(src.indexOf('  // ── PTY (a shell the SERVE owns'), src.indexOf('  authHeader()'));
+  ok('source pin: not one method of the pty family builds a `directory` query', ptyBlock.length > 200 && !/directory/.test(ptyBlock.replace(/^\s*\*.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '')), ptyBlock.split('\n').filter((l) => /directory/.test(l) && !/^\s*[*/]/.test(l)));
+  await mock.close();
+}
+{
+  // ② A SERVE-OWNED PTY OUTLIVES US, AND HAD NO REAPER. `_opencodePtyId` was
+  //    written and read NOWHERE; `ptyList()` was never called. A serve pty is
+  //    deliberately not dtach-restorable (socketPath is null), so after a
+  //    SIGKILL/OOM restart — or ANY restart while the serve was ADOPTED from
+  //    data/opencode-serve.json, where our exit hook has no child to kill —
+  //    its shell kept running with nothing left that could reach or kill it.
+  //    Verified on the real serve: a pty survives our socket closing and is
+  //    re-connectable; it only 404s once its own shell exits.
+  const mock = await startMockServe({ state: createMockState() });
+  const held = [];
+  const facts = serve.createFacts(fixedLocator(mock.url), { log: { warn() { } }, heldPtyIds: () => held });
+  const orphan = await facts.openPty({ cwd: '/work/alpha', title: 'orphan' });
+  const keeper = await facts.openPty({ cwd: '/work/alpha', title: 'held-by-a-session' });
+  held.push(keeper.pty.id);
+  // NEGATIVE CONTROL FIRST: before the restart, BOTH are ours (live.ptys knows
+  // the one no session has registered yet) — a sweep must never kill a terminal
+  // the user is still opening.
+  const preRestart = await facts.reapPtys({ force: true });
+  ok('a pty this process opened is KEPT even before a session records it (the open→register window is not a kill window)',
+    preRestart.removed.length === 0 && mock.state.ptys.size === 2, preRestart);
+  // …and the window BEFORE we even know the id (the serve has made the pty,
+  // openPty has not returned) is not raced but REFUSED: a sweep is only
+  // answerable while nobody is opening a terminal.
+  facts._live.ptyOpening++;
+  const markBefore = facts._live.reapedFor;
+  const busy = await facts.reapPtys({ force: true, attempts: 2, settleMs: 10 });
+  ok('a sweep REFUSES while an open is in flight, and does not advance the swept marker (it retries later instead of racing)',
+    busy.ok === false && /being opened/.test(busy.reason || '') && facts._live.reapedFor === markBefore, { busy, markBefore, now: facts._live.reapedFor });
+  ok('…and it did not DELETE anything while refusing', mock.state.ptys.size === 2, [...mock.state.ptys.keys()]);
+  facts._live.ptyOpening--;
+  // NEGATIVE CONTROL: with the flag cleared the very same call sweeps normally
+  // — the guard is a gate, not an off switch.
+  const unbusy = await facts.reapPtys({ force: true });
+  ok('negative control: with nothing in flight the same call sweeps normally (the guard is a gate, not an off switch)', unbusy.ok === true, unbusy);
+  facts._live.ptys.clear();                     // ← the restart: in-memory knowledge is gone, only the session field survives
+  const reaped = await facts.reapPtys({ force: true });
+  ok('after a restart the orphan nobody holds is reaped', reaped.removed.includes(orphan.pty.id), reaped);
+  ok('…and the one a live session still holds (session._opencodePtyId, via heldPtyIds) is NOT', mock.state.ptys.has(keeper.pty.id) && !reaped.removed.includes(keeper.pty.id), [...mock.state.ptys.keys()]);
+  ok('…and the sweep asked the DIRECTORY-LESS list (it must not boot an instance to clean up)',
+    mock.state.requests.includes('GET /pty') && !mock.state.requests.some((r) => /^GET \/pty\?.*directory=/.test(r)), mock.state.requests.filter((r) => r.startsWith('GET /pty')));
+  await mock.close();
+}
+{
+  // …and the reaper is WIRED: it runs on the ready edge of each serve PROCESS
+  // (the one moment "which of its terminals can still be reached" is
+  // answerable), exactly once, without a caller.
+  const mock = await startMockServe({ state: createMockState() });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-oc-reap-'));
+  fs.writeFileSync(path.join(dir, 'opencode-serve.json'), JSON.stringify({ port: mock.port, pid: process.pid, startedAt: Date.now(), cwd: dir }));
+  // a shell left behind by the process that died — created straight on the serve
+  const stale = await (await fetch(mock.url + '/pty', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ cwd: '/work/alpha', title: 'left over from before the restart' }) })).json();
+  const facts = serve.install({
+    dataDir: dir, command: '/usr/bin/opencode', cwd: dir, log: { warn() { }, error() { } }, guardSampleMs: 0,
+    spawnImpl: () => { throw new Error('must not spawn — this leg ADOPTS the recorded serve, which is the case where our exit hook had no child to kill'); },
+    readProc: () => ({ cpuTicks: 0, rssBytes: 1024 }),
+    heldPtyIds: () => [],
+    // the lane is what makes the locator locate in production (the first
+    // discovery does the same); NOTHING here ever calls reapPtys itself
+    makeLane: (deps) => ({ start() { deps.locator.client({ budgetMs: 5000 }).catch(() => { }); }, kick() { }, stop() { }, state: () => ({ sse: { connected: false }, watch: { active: false } }) }),
+  });
+  for (let i = 0; i < 200 && mock.state.ptys.has(stale.id); i++) await sleep(50);
+  ok('boot: adopting a serve that outlived us reaps the terminals nobody can reach any more — no caller, on the ready edge', !mock.state.ptys.has(stale.id), [...mock.state.ptys.keys()]);
+  ok('…and it did it through the reaper, not by accident (the DELETE is the only way a pty leaves the serve)', mock.state.requests.some((r) => r === `DELETE /pty/${stale.id}`), mock.state.requests.filter((r) => r.startsWith('DELETE /pty')));
+  const again = await facts.reapPtys();
+  ok('…and it is idempotent per serve PROCESS (a routine notify must not re-sweep and race a terminal being opened)', again.skipped === 'already-reaped', again);
+  serve.uninstall();
+  await mock.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+  // THE WIRING PIN (the 2.355.0 law: a fix whose call site is not staged is a
+  // green unit test over dead code). `_opencodePtyId` finally has a reader.
+  const srv = read('server.js'), cli = read('src/server/cli-env.js');
+  ok('wiring: server.js hands cli-env the live sessions\' pty ids and cli-env passes them to the facts as heldPtyIds',
+    /getHeldPtyIds:\s*\(\)\s*=>/.test(srv) && /_opencodePtyId/.test(srv)
+    && /getHeldPtyIds/.test(cli) && /heldPtyIds:\s*\(\)\s*=>/.test(cli));
+  ok('…so the session field has a consumer at last (it was written in ws-create and read nowhere)',
+    /_opencodePtyId/.test(read('src/ws-create.js')) && /_opencodePtyId/.test(srv));
+}
+{
+  // ③ THE LIVE LANE COULD LIE ABOUT ITSELF, TWO WAYS. `active` is what
+  //    laneHealthy() switches the list-refresh fallback OFF on, and it was true
+  //    for any directory that merely EXISTED — while armWatch() latched the
+  //    boot-time guess from the SERVER's env, so the documented lazy
+  //    re-resolution against the serve's own `GET /path` home never ran on any
+  //    machine that had ever run opencode. Reproduced with the real wiring:
+  //    watch = the server's store, `liveLaneHealthy` true, and a session made
+  //    by a SECOND opencode process on the serve's REAL store never appeared
+  //    (8s, zero GET /session issued because the lane claimed health).
+  const existsButEmpty = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-oc-notastore-'));
+  const w1 = events.createStoreWatch({ dirs: [existsButEmpty], log: { warn() { } } });
+  ok('a directory that EXISTS but holds no opencode.db is not a store watch — `active` stays false and says why',
+    w1.state().active === false && /opencode\.db/.test(JSON.stringify(w1.state().failed)), w1.state());
+  w1.stop();
+  const realStore = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-oc-isastore-'));
+  fs.writeFileSync(path.join(realStore, 'opencode.db'), 'x');
+  const w2 = events.createStoreWatch({ dirs: [realStore], log: { warn() { } } });
+  const w2Broken = !w2.state().active && envExhausted(JSON.stringify(w2.state().failed));
+  if (w2Broken) skip('positive control: a directory WITH opencode.db does attach', `this machine cannot fs.watch right now: ${JSON.stringify(w2.state().failed).slice(0, 160)}`);
+  else ok('positive control: a directory WITH opencode.db does attach (the honesty check did not just switch the lane off)', w2.state().active === true, w2.state());
+  w2.stop();
+
+  // …and the false `active` had a CONSEQUENCE: it turned the fallback off.
+  const mock = await startMockServe({ state: createMockState() });
+  const factsBlind = serve.createFacts(fixedLocator(mock.url), { log: { warn() { } }, listCacheMs: 50 });
+  factsBlind.armLive((deps) => events.createLiveLane({ ...deps, storeDirs: [existsButEmpty], debounceMs: 60 })).start();
+  await sleep(400);
+  ok('a lane whose watch attached to a NON-store is NOT healthy, so the timed refresh stays on (blind is worse than slow)', factsBlind.state().liveLaneHealthy === false, factsBlind.state().liveLane);
+  const n0 = mock.state.requests.filter((r) => r.startsWith('GET /session?')).length;
+  await factsBlind.discover({});
+  await sleep(80);
+  await factsBlind.discover({});
+  ok('…and it really does re-list (the fallback is alive, not merely reported)', mock.state.requests.filter((r) => r.startsWith('GET /session?')).length > n0 + 1);
+  factsBlind.stopLive();
+
+  // RE-RESOLUTION on connect: the serve's `GET /path` home wins over the boot
+  // guess, and ONLY when it actually differs.
+  const serverHome = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-oc-serverhome-'));
+  fs.mkdirSync(path.join(serverHome, '.local/share/opencode'), { recursive: true });
+  fs.writeFileSync(path.join(serverHome, '.local/share/opencode', 'opencode.db'), 'x');
+  // THE BOOT ARM HAS NO SERVE — that is the whole premise (a locator that
+  // already answers would resolve the serve's home at boot and there would be
+  // nothing to re-resolve). This one comes up only after the boot arm ran,
+  // exactly like a plugin the user enables a moment later.
+  let serveUp = false;
+  const fx = fixedLocator(mock.url);
+  const lateLocator = { ...fx, client: async () => (serveUp ? fx._client : null), ensure: async () => (serveUp ? fx._client : null) };
+  const seen = [];
+  const lane = events.createLiveLane({
+    locator: lateLocator, env: { HOME: serverHome }, log: { warn() { } },
+    onEvent: (i) => seen.push(i.kind), onExternal: () => { }, debounceMs: 60,
+  });
+  await lane._armWatch('boot');
+  serveUp = true;
+  const bootDirs = lane.state().watch.watching.slice();
+  const bootBroken = !lane.state().watch.active && envExhausted(JSON.stringify(lane.state().watch.failed));
+  await lane._armWatch('connected');
+  const afterDirs = lane.state().watch.watching.slice();
+  if (bootBroken) skip('the store dirs are RE-RESOLVED against the serve on connect, not latched at boot', 'fs.watch is exhausted on this machine');
+  else {
+    ok('the boot arm can only guess from OUR env (the serve does not exist yet)', bootDirs.length === 1 && bootDirs[0] === path.join(serverHome, '.local/share/opencode'), bootDirs);
+    // the mock's home is /home/mock, which does not exist here — so the
+    // re-resolution is observable as "the dir SET changed and we re-armed",
+    // and the surviving watch is still the real one (a non-existent dir is
+    // reported, never watched)
+    ok('a `connected` RE-RESOLVES against the serve\'s own GET /path home and re-arms (the latch is gone)',
+      lane.state().rearms === 1 && JSON.stringify(lane.state().watch.failed).includes('/home/mock'), lane.state());
+    ok('…and the real store is still watched afterwards (re-arming is not losing the watch)', afterDirs.includes(path.join(serverHome, '.local/share/opencode')), afterDirs);
+    const rearmsBefore = lane.state().rearms;
+    await lane._armWatch('connected');
+    await lane._armWatch('connected');
+    ok('NEGATIVE CONTROL: two more connects with the SAME dirs do not re-arm anything (a reconnect storm must not churn the watchers)',
+      lane.state().rearms === rearmsBefore && JSON.stringify(lane.state().watch.watching) === JSON.stringify(afterDirs), lane.state());
+  }
+  lane.stop();
+  await mock.close();
+  for (const d of [existsButEmpty, realStore, serverHome]) fs.rmSync(d, { recursive: true, force: true });
+}
+{
+  // the three mechanisms are written down where the next person will look
+  const kfs = read('docs/kb-file-structure.md');
+  ok('docs: the directory-free pty family, the pty reaper and the re-resolved store watch are in the kb essays + the incident file',
+    /reapPtys/.test(kfs) && /no `directory`|NO `directory`|directory-free/i.test(kfs) && /re-resolv/i.test(kfs)
+    && /A SERVE TERMINAL INDEXED THE USER'S REPO/.test(read('docs/kb-bugfix-invariants.md'))
+    && /S9 REMAINDER ROUND 4/.test(read('CLAUDE.md')));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 console.log('\n— REAL BINARY (skips WITH EVIDENCE when opencode is absent) —');
 {
   let version = null;
@@ -641,9 +867,59 @@ console.log('\n— REAL BINARY (skips WITH EVIDENCE when opencode is absent) —
       ok('…and the notice is gone', !rConv2.records.some((r) => r.noticeKind === 'revert'));
       await fetch(client.baseUrl + `/session/${sess.id}`, { method: 'DELETE' }).catch(() => { });
       try {
-        const pty = await facts.openPty({ cwd, title: 's9 gate' });
+        // ROUND 4, MEASURED not assumed: opening a terminal must not make the
+        // serve index and inotify-watch the user's tree. Same-origin A/B on
+        // THIS serve — the product path, then the OLD `?directory=` shape —
+        // with /proc thread + `inotify wd` sampling. On the owner's box the old
+        // shape left 204 watch descriptors alive across DELETE; here the target
+        // is a purpose-built ~60-directory tree so the delta is unmistakable
+        // without costing the machine's inotify budget.
+        const wdTree = path.join(home, 'wd-tree');
+        // FILES, not just directories: measured, OpenCode's watcher follows the
+        // indexed tree, and 60 EMPTY dirs produced only a 4-watch delta even
+        // with the old shape (the control has to be able to fail).
+        for (let i = 0; i < 60; i++) {
+          fs.mkdirSync(path.join(wdTree, 'd' + i), { recursive: true });
+          for (let j = 0; j < 3; j++) fs.writeFileSync(path.join(wdTree, 'd' + i, `f${j}.txt`), 'x');
+        }
+        try { execFileSync('git', ['init', '-q', wdTree], { timeout: 10000 }); } catch { }
+        const servePid = facts.locator.state().pid;
+        const wds = () => {
+          let n = 0;
+          try { for (const fd of fs.readdirSync(`/proc/${servePid}/fdinfo`)) { let t = ''; try { t = fs.readFileSync(`/proc/${servePid}/fdinfo/${fd}`, 'utf-8'); } catch { continue; } n += (t.match(/^inotify wd:/gm) || []).length; } } catch { return -1; }
+          return n;
+        };
+        const wBase = wds();
+        const pty = await facts.openPty({ cwd: wdTree, title: 's9 gate' });
         ok('…and a REAL serve pty opens with a loopback ws url (no ticket on an unsecured serve)', /^ws:\/\/127\.0\.0\.1:\d+\/pty\/pty_/.test(pty.url) && pty.ticketed === false, pty.url);
-        await facts.closePty(pty.pty.id, { cwd });
+        let shellCwd = null;
+        try { shellCwd = fs.readlinkSync(`/proc/${pty.pty.pid}/cwd`); } catch { shellCwd = null; }
+        if (shellCwd === null) skip('…in the directory the user asked for', 'the shell pid is not readable in /proc here');
+        else ok('…in the directory the user asked for (the `cwd` BODY field places the shell — the query never did)', shellCwd === fs.realpathSync(wdTree), { shellCwd, wdTree });
+        await sleep(2500);
+        const wOpen = wds();
+        await facts.closePty(pty.pty.id, { cwd: wdTree });
+        await sleep(2000);
+        const wClose = wds();
+        // the NEGATIVE CONTROL: the OLD shape, on the same serve, same tree
+        const ou = new URL(client.baseUrl + '/pty'); ou.searchParams.set('directory', wdTree);
+        const oldPty = await (await fetch(ou, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ cwd: wdTree, command: '/bin/bash' }) })).json();
+        await sleep(2500);
+        const wOld = wds();
+        const du = new URL(client.baseUrl + `/pty/${oldPty.id}`); du.searchParams.set('directory', wdTree);
+        await fetch(du, { method: 'DELETE' }).catch(() => { });
+        await sleep(2000);
+        const wOldClose = wds();
+        if (wBase < 0) skip('…and it indexes NOTHING of that tree (/proc inotify delta, with the old shape as the control)', 'no /proc fdinfo for the serve on this platform');
+        else if (wOld <= wOpen) skip('…and it indexes NOTHING of that tree (/proc inotify delta)', `the control did not reproduce here (base=${wBase} new=${wOpen} old=${wOld}) — inotify may be exhausted`);
+        else ok('…and it indexes NOTHING of that tree: the product path leaves the watch count flat while the OLD `?directory=` shape adds a watch per directory AND keeps them after DELETE',
+          wOpen - wBase <= 4 && wClose - wBase <= 4 && wOld - wOpen >= 20 && wOldClose >= wOld - 4, { wBase, wOpen, wClose, wOld, wOldClose });
+        // …and the reaper really removes a serve-owned pty nobody holds
+        const orphan = await facts.openPty({ cwd, title: 's9 reaper' });
+        facts._live.ptys.clear();
+        const swept = await facts.reapPtys({ force: true });
+        const stillThere = (await client.ptyList({ timeoutMs: 8000 })).some((x) => x.id === orphan.pty.id);
+        ok('…and reapPtys() removes a REAL serve-owned terminal no session can reach (the shell the restart stranded)', swept.removed?.includes(orphan.pty.id) && !stillThere, { swept, stillThere });
       } catch (e) {
         // opening a pty BOOTS the OpenCode instance for that directory, which
         // needs inotify watches this box may be out of

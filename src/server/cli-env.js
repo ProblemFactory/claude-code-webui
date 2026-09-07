@@ -42,7 +42,7 @@ function storeFailureReason(h, st = null) {
 
 function create({ rootDir, CLAUDE_CMD_RAW, CODEX_CMD_RAW, resolveCmd,
   getOAuthToken, usagePollingEnabled, refreshCodexModels, broadcast = null,
-  getTelemetry = () => null, getPlugins = () => null }) {
+  getTelemetry = () => null, getPlugins = () => null, getHeldPtyIds = () => [] }) {
   const USAGE_CACHE_DIR = path.join(rootDir, 'data', 'usage-cache');
 // ── X display detection (Linux clipboard / xclip) ──
 // The inherited DISPLAY is unreliable: the server is often (re)started from
@@ -214,6 +214,15 @@ const opencodeServe = opencodeServeModule.install({
   stopOnExit: true,
   autostart: opencodeServeAutostart,
   telemetry: (ev) => { try { getTelemetry()?.record({ kind: 'event', ...ev }); } catch { } },
+  // ORPHANED SERVE TERMINALS (S9 remainder round 4). The serve outlives this
+  // process: on a SIGKILL/OOM restart — and on ANY restart while the serve was
+  // adopted from data/opencode-serve.json, where our exit hook has no child to
+  // kill — every serve-owned shell keeps running with no session, no
+  // socketPath (a serve pty is deliberately not dtach-restorable) and no window
+  // able to reach it. The facts sweep them on the ready edge of each serve
+  // PROCESS, keeping every pty this process opened plus every one a live
+  // session still holds — which is the only consumer of session._opencodePtyId.
+  heldPtyIds: () => { try { return getHeldPtyIds() || []; } catch { return []; } },
   // THE LIVE LANE'S DIRTY SIGNAL IS A CACHE INVALIDATION A CLIENT ALSO CACHES
   // (S9 remainder piece (d), B-eac2): the sidebar holds the merged session
   // list, so "the OpenCode store changed" must NOTIFY — the law, and the only

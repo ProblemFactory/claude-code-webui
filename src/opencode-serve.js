@@ -93,10 +93,18 @@
  * progressively without a request burst; fallback = OpenCode's own title unless
  * it is the "New session - <date>" placeholder.
  *
- * NOT IN SCOPE (endpoints seen in the 1.18.29 OpenAPI, unwired): revert
- * (POST /session/{sessionID}/revert), question (GET /question, POST
- * /question/{requestID}/reply), pty (/pty…), the SSE event stream (/event,
- * /global/event) — see the S9 row in docs/design-harness-plugins.md.
+ * WIRED BY THE S9 REMAINDER (B-eac2 — the old "NOT IN SCOPE" list is empty):
+ * revert/unrevert, the `question` ask lane, the pty family, and the SSE stream
+ * (src/opencode-events.js) which REPLACED the 10s list poll.
+ *
+ * THE PTY FAMILY SENDS NO `directory` (round 4 — the one place a user
+ * directory could still reach the serve). A `?directory=` query is what BOOTS
+ * an instance, `DELETE /pty/{id}` frees nothing it booted, and measured on a
+ * 200-dir repo that is 204 inotify watches per terminal that outlive every
+ * close, vs 4 without it — with an identical shell cwd, because the shell's
+ * directory rides the request BODY. See OpencodeServeClient's pty block.
+ * A serve pty also OUTLIVES this process, so `reapPtys()` sweeps the ones no
+ * session can reach on the ready edge of each serve process.
  */
 const fs = require('fs');
 const os = require('os');
@@ -465,41 +473,64 @@ class OpencodeServeClient {
   }
 
   // ── PTY (a shell the SERVE owns, on the serve's machine) ───────────────
-  /** MEASURED: `GET /pty` alone boots the instance for the serve's DEFAULT
-   *  directory (16→38 threads, 0→19 indexer threads) — the serve's cwd is our
-   *  own empty throwaway repo, so that is cheap here, but a `directory=` query
-   *  boots (and recursively watches) THAT tree. Every pty call therefore takes
-   *  an explicit directory only when the user asked for a terminal there. */
-  ptyList({ directory = null, timeoutMs = null } = {}) { return this.request('GET', '/pty', { query: { directory }, timeoutMs }); }
-  ptyCreate({ command = null, args = null, cwd = null, title = null, env = null, directory = null, timeoutMs = PTY_TIMEOUT_MS } = {}) {
+  /** THE PTY FAMILY NEVER SENDS `directory` — round 4 of B-eac2, and the whole
+   *  reason it is spelled out here (a helpful-looking `{ directory }` in ONE of
+   *  these six methods re-opens the 2.369.42/2.369.50 incident).
+   *
+   *  A pty is addressed by its ptyID, but the pty REGISTRY is per OpenCode
+   *  INSTANCE, and `?directory=X` is what picks (and BOOTS) the instance. So a
+   *  `directory` query on `POST /pty` bootstraps an instance for the user's
+   *  worktree — which recursively indexes and inotify-watches it — while
+   *  `DELETE /pty/{id}` releases NOTHING but the shell. Measured, same-origin
+   *  A/B, fresh serve per arm, target = a 200-dir/4046-file repo, /proc
+   *  Threads + `inotify wd` count over /proc/<serve>/fdinfo/*:
+   *    with `?directory=`  base[thr,wd]=[16,0] → open#1 [44,204] → close#1
+   *                        [41,204] → open/close #2,#3 … [41,204]  (never freed)
+   *    without it          base[16,0] → open#1 [45,4] → close#1 [42,4] → …[42,4]
+   *  and `readlink /proc/<shell>/cwd` = the target directory in BOTH arms: the
+   *  query buys the SHELL nothing (the `cwd` BODY field is what places it), it
+   *  only decides which instance owns the registry entry. The only thing that
+   *  frees the watches is `POST /instance/dispose` — i.e. the terminal would
+   *  have to hold a whole indexed instance for its entire lifetime and dispose
+   *  it on close, when it can simply never boot one.
+   *
+   *  CHANGE THEM TOGETHER OR NOT AT ALL: measured, `PUT /pty/{id}?directory=X`
+   *  on a pty created WITHOUT the query answers 404 PtyNotFoundError (and vice
+   *  versa) — a half-migrated family is a terminal that cannot be resized,
+   *  closed or reaped. `serveCwdPath()` (our own empty throwaway repo) is the
+   *  default instance every call below lands on; that instance's fixed cost is
+   *  the 4 watches above. */
+  ptyList({ timeoutMs = null } = {}) { return this.request('GET', '/pty', { timeoutMs }); }
+  ptyCreate({ command = null, args = null, cwd = null, title = null, env = null, timeoutMs = PTY_TIMEOUT_MS } = {}) {
     const body = {};
     if (command) body.command = command;
     if (Array.isArray(args)) body.args = args;
-    if (cwd) body.cwd = cwd;
+    if (cwd) body.cwd = cwd;            // where the SHELL runs — measured to place it, with no instance boot
     if (title) body.title = title;
     if (env && typeof env === 'object') body.env = env;
-    return this.request('POST', '/pty', { query: { directory }, body, timeoutMs });
+    return this.request('POST', '/pty', { body, timeoutMs });
   }
-  ptyGet(ptyId, { directory = null, timeoutMs = null } = {}) { return this.request('GET', `/pty/${encodeURIComponent(ptyId)}`, { query: { directory }, timeoutMs }); }
-  ptyResize(ptyId, { rows, cols, directory = null, timeoutMs = null } = {}) {
-    return this.request('PUT', `/pty/${encodeURIComponent(ptyId)}`, { query: { directory }, body: { size: { rows, cols } }, timeoutMs });
+  ptyGet(ptyId, { timeoutMs = null } = {}) { return this.request('GET', `/pty/${encodeURIComponent(ptyId)}`, { timeoutMs }); }
+  ptyResize(ptyId, { rows, cols, timeoutMs = null } = {}) {
+    return this.request('PUT', `/pty/${encodeURIComponent(ptyId)}`, { body: { size: { rows, cols } }, timeoutMs });
   }
-  ptyRemove(ptyId, { directory = null, timeoutMs = READ_TIMEOUT_MS } = {}) { return this.request('DELETE', `/pty/${encodeURIComponent(ptyId)}`, { query: { directory }, timeoutMs }); }
+  ptyRemove(ptyId, { timeoutMs = READ_TIMEOUT_MS } = {}) { return this.request('DELETE', `/pty/${encodeURIComponent(ptyId)}`, { timeoutMs }); }
   /** POST /pty/:id/connect-token → {ticket, expires_in}. On an UNSECURED
    *  loopback serve 1.18.29 answers PtyForbiddenError ("Invalid PTY connect
    *  token request") and the ws upgrade needs no ticket at all — verified on
    *  the wire. So the caller mints a ticket when it can and connects without
    *  one when it cannot; the ticket NEVER reaches a browser either way. */
-  ptyTicket(ptyId, { directory = null, timeoutMs = READ_TIMEOUT_MS } = {}) {
-    return this.request('POST', `/pty/${encodeURIComponent(ptyId)}/connect-token`, { query: { directory }, timeoutMs });
+  ptyTicket(ptyId, { timeoutMs = READ_TIMEOUT_MS } = {}) {
+    return this.request('POST', `/pty/${encodeURIComponent(ptyId)}/connect-token`, { timeoutMs });
   }
   /** The ws URL for a pty stream (SERVER-SIDE ONLY — the browser never learns
-   *  the serve's port; ws-create bridges it into the normal terminal path). */
-  ptyConnectUrl(ptyId, { ticket = null, cursor = null, directory = null } = {}) {
+   *  the serve's port; ws-create bridges it into the normal terminal path).
+   *  No `directory` here either: measured, the upgrade succeeds and the shell
+   *  is in its `cwd` with the query gone (both arms echoed a bash prompt). */
+  ptyConnectUrl(ptyId, { ticket = null, cursor = null } = {}) {
     const u = new URL(this.baseUrl + `/pty/${encodeURIComponent(ptyId)}/connect`);
     if (ticket) u.searchParams.set('ticket', ticket);
     if (cursor) u.searchParams.set('cursor', String(cursor));
-    if (directory) u.searchParams.set('directory', directory);
     u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
     return u.toString();
   }
@@ -966,7 +997,8 @@ function createServeLocator({
 
 // ── the store facts ──
 function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCacheMs = LIST_CACHE_MS, negativeCacheMs = NEGATIVE_CACHE_MS,
-  externalWindowMs = EXTERNAL_WINDOW_MS, ownWriteWindowMs = OWN_WRITE_WINDOW_MS, onChange = null, log = console } = {}) {
+  externalWindowMs = EXTERNAL_WINDOW_MS, ownWriteWindowMs = OWN_WRITE_WINDOW_MS, onChange = null, log = console,
+  heldPtyIds = null } = {}) {
   const cache = { list: null, at: 0, negativeUntil: 0, lastError: null, skippedWorktrees: [], dirty: true };
   const names = new Map();      // id → { name, at }
   const naming = new Set();
@@ -980,6 +1012,10 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
     lastUpdated: new Map(),     // opencode session id → the last `time.updated` we saw in a list
     activeElsewhere: new Map(), // opencode session id → ts of the last observed CHANGE we did not make
     ownWrites: new Map(),       // opencode session id → { at, updated } of a mutation WE made (see noteOwnWrite)
+    ptys: new Set(),            // serve pty ids THIS process opened — the reaper's "ours", independent of session registration
+    ptyOpening: 0,              // opens IN FLIGHT (the serve may already hold a pty whose id we do not know yet)
+    ptyOpenSeq: 0,              // monotonic count of opens STARTED — the reaper compares it across its listing
+    reapedFor: null,            // `${pid}:${port}:${startedAt}` of the serve we already swept (reapPtys runs once per serve process)
   };
 
   function reasonUnavailable() {
@@ -1364,32 +1400,107 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
   /** A shell the SERVE owns, on the serve's machine (piece (c)). Returns
    *  everything the caller needs to bridge it onto the normal ws terminal
    *  path -- INCLUDING the ws url + auth header, which is why this value
-   *  never leaves the server process. A `cwd` boots an OpenCode instance for
-   *  that tree (measured); it is the user's own explicit "open a terminal
-   *  HERE", never something a poll does. */
+   *  never leaves the server process.
+   *
+   *  `cwd` places the SHELL and nothing else: it rides the request BODY, never
+   *  a `directory` query, so opening a terminal in a 200-directory repo boots
+   *  NO OpenCode instance for that repo (round 4 — see the pty family in
+   *  OpencodeServeClient for the /proc A/B: 204 inotify watches that outlived
+   *  every close, vs 4). `cwd` stays in the signature because it is the shell's
+   *  working directory and the op table carries it; it must never become a
+   *  query again. */
   async function openPty({ cwd = null, command = null, args = null, title = null, env = null, timeoutMs = PTY_TIMEOUT_MS } = {}) {
     const client = await userClient(timeoutMs);
     let pty;
-    try { pty = await client.ptyCreate({ cwd, command, args, title, env, directory: cwd || null, timeoutMs }); }
-    catch (e) { if (isConnErr(e)) locator.invalidate(e.message); throw new OpencodeServeError(`OpenCode could not open a terminal${cwd ? ' in ' + cwd : ''}: ${e.message}`, { status: e.status, code: e.code, cause: e }); }
-    if (!pty || typeof pty.id !== 'string') throw new OpencodeServeError('OpenCode returned no pty id', { code: 'protocol' });
+    // THE ONE WINDOW THE REAPER CANNOT REASON ABOUT is between "the serve made
+    // the pty" and "we learned its id": a sweep listing right there would see a
+    // terminal it cannot recognise as ours. So an open is ANNOUNCED before the
+    // request and only un-announced after the id is recorded — reapPtys refuses
+    // to sweep while one is in flight (see there) rather than racing it.
+    live.ptyOpening++; live.ptyOpenSeq++;
+    try {
+      try { pty = await client.ptyCreate({ cwd, command, args, title, env, timeoutMs }); }
+      catch (e) { if (isConnErr(e)) locator.invalidate(e.message); throw new OpencodeServeError(`OpenCode could not open a terminal${cwd ? ' in ' + cwd : ''}: ${e.message}`, { status: e.status, code: e.code, cause: e }); }
+      if (!pty || typeof pty.id !== 'string') throw new OpencodeServeError('OpenCode returned no pty id', { code: 'protocol' });
+      live.ptys.add(String(pty.id));
+    } finally { live.ptyOpening--; }
     // A ticket is only mintable on a SECURED serve (1.18.29 answers
     // PtyForbiddenError on an unsecured one and the ws needs none) -- try, and
     // connect without it when the serve says no. The ticket never leaves here.
     let ticket = null;
-    try { ticket = (await client.ptyTicket(pty.id, { directory: cwd || null, timeoutMs: READ_TIMEOUT_MS }))?.ticket || null; } catch { ticket = null; }
-    return { pty, url: client.ptyConnectUrl(pty.id, { ticket, directory: cwd || null }), auth: client.authHeader(), ticketed: !!ticket };
+    try { ticket = (await client.ptyTicket(pty.id, { timeoutMs: READ_TIMEOUT_MS }))?.ticket || null; } catch { ticket = null; }
+    return { pty, url: client.ptyConnectUrl(pty.id, { ticket }), auth: client.authHeader(), ticketed: !!ticket };
   }
+  /** `cwd` is accepted (the op table carries it) and deliberately UNUSED: a pty
+   *  is addressed by its id on the default instance — see openPty. */
   async function closePty(ptyId, { cwd = null, timeoutMs = READ_TIMEOUT_MS } = {}) {
     const client = await userClient(timeoutMs);
-    try { await client.ptyRemove(ptyId, { directory: cwd || null, timeoutMs }); } catch (e) { throw new OpencodeServeError(`OpenCode could not close terminal ${ptyId}: ${e.message}`, { status: e.status, code: e.code, cause: e }); }
+    try { await client.ptyRemove(ptyId, { timeoutMs }); } catch (e) { throw new OpencodeServeError(`OpenCode could not close terminal ${ptyId}: ${e.message}`, { status: e.status, code: e.code, cause: e }); }
+    live.ptys.delete(String(ptyId));
     return { ok: true };
   }
+  /** …same for `cwd` here. */
   async function resizePty(ptyId, { rows, cols, cwd = null, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
     const client = await locator.client({ budgetMs: timeoutMs });
     if (!client) return { ok: false };                 // a resize is not worth an error dialog
-    try { await client.ptyResize(ptyId, { rows, cols, directory: cwd || null, timeoutMs }); return { ok: true }; }
+    try { await client.ptyResize(ptyId, { rows, cols, timeoutMs }); return { ok: true }; }
     catch { return { ok: false }; }
+  }
+  /** REAP THE PTYS NOBODY CAN REACH ANY MORE (round 4). The serve OUTLIVES us:
+   *  a SIGKILL/OOM restart (or any restart while the serve was ADOPTED from
+   *  data/opencode-serve.json, where `state.child` is null so our exit hook has
+   *  nothing to kill) leaves every serve-owned shell running with no session,
+   *  no socketPath (deliberately — a serve pty is not dtach-restorable) and no
+   *  window able to reach it. Measured: a pty survives our websocket closing
+   *  and is re-connectable; it only disappears when its own shell exits or the
+   *  serve dies.
+   *
+   *  So this is the adopt-or-reap ladder the dtach/job paths already use, on
+   *  the ONE moment it is answerable: a serve became reachable. KEEP =
+   *  everything this process opened (`live.ptys`) UNION everything a live
+   *  session still holds (`heldPtyIds()` reads session._opencodePtyId — the
+   *  field's consumer). Everything else on the serve is unreachable by
+   *  construction and is removed.
+   *  Runs ONCE per serve PROCESS (pid+port+startedAt): a respawned serve has no
+   *  ptys to reap, and re-running on every state notify would race a terminal
+   *  the user is opening. */
+  async function reapPtys({ timeoutMs = READ_TIMEOUT_MS, force = false, attempts = 3, settleMs = 1500 } = {}) {
+    const client = await locator.client({ budgetMs: timeoutMs });
+    if (!client) return { ok: false, reason: reasonUnavailable() };
+    const st = locator.state?.() || {};
+    const key = `${st.pid || 0}:${st.port || 0}:${st.startedAt || 0}`;
+    if (!force && live.reapedFor === key) return { ok: true, skipped: 'already-reaped', key };
+    // A SWEEP IS ONLY ANSWERABLE WHILE NOBODY IS OPENING A TERMINAL. Between
+    // the serve creating a pty and openPty recording its id, that pty is in the
+    // serve's list and in no keep set — so instead of racing it, refuse and
+    // retry: quiet BEFORE the listing, and the same open-count AFTER it, means
+    // no create was issued during the window. Never marked done on a refusal,
+    // so the next ready edge (or an explicit call) tries again.
+    let list = null, busy = null;
+    for (let i = 0; i < Math.max(1, attempts) && list === null; i++) {
+      if (i) await new Promise((r) => { const t = setTimeout(r, settleMs); t.unref?.(); });
+      if (live.ptyOpening > 0) { busy = 'a terminal is being opened'; continue; }
+      const seq0 = live.ptyOpenSeq;
+      let got;
+      try { got = await client.ptyList({ timeoutMs }); }
+      catch (e) { return { ok: false, reason: e.message }; }   // NOT marked done: a failed sweep retries on the next ready edge
+      if (live.ptyOpening > 0 || live.ptyOpenSeq !== seq0) { busy = 'a terminal was opened while listing'; continue; }
+      list = got;
+    }
+    if (list === null) return { ok: false, reason: busy || 'could not take a quiet listing' };
+    live.reapedFor = key;
+    let held = [];
+    try { held = heldPtyIds ? (heldPtyIds() || []) : []; } catch { held = []; }
+    const keep = new Set([...live.ptys, ...held].map((x) => String(x)));
+    const removed = [], failed = [];
+    for (const p of Array.isArray(list) ? list : []) {
+      const id = p && typeof p.id === 'string' ? p.id : '';
+      if (!id || keep.has(id)) continue;
+      try { await client.ptyRemove(id, { timeoutMs }); removed.push(id); }
+      catch (e) { failed.push({ id, reason: e.message }); }
+    }
+    if (removed.length) log?.warn?.(`[opencode-serve] reaped ${removed.length} orphaned serve terminal(s) no session can reach: ${removed.join(', ')}`);
+    return { ok: true, key, removed, failed, kept: [...keep] };
   }
   /** The agent's own todo list for a conversation (cheap v1 route). */
   async function todos(id, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
@@ -1453,7 +1564,7 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
       liveLane: laneSt, liveLaneHealthy: laneHealthy(), pendingQuestions: live.questions.size, busySessions: live.statuses.size, dirty: !!cache.dirty };
   }
   return { discover, sessionModel, readConversation, forkSession, invalidate, state: stateOf, reasonUnavailable, locator, _names: names,
-    revertTo, unrevert, pendingQuestions, answerQuestion, rejectQuestion, openPty, closePty, resizePty, todos, statusMap,
+    revertTo, unrevert, pendingQuestions, answerQuestion, rejectQuestion, openPty, closePty, resizePty, reapPtys, todos, statusMap,
     armLive, stopLive, _live: live };
 }
 
@@ -1503,6 +1614,7 @@ const NULL_FACTS = Object.freeze({
   openPty: async () => { throw new OpencodeServeError('OpenCode serve is not configured on this instance', { code: 'unconfigured' }); },
   closePty: async () => ({ ok: false }),
   resizePty: async () => ({ ok: false }),
+  reapPtys: async () => ({ ok: false, reason: 'OpenCode serve is not configured on this instance' }),
   todos: async () => [],
   statusMap: async () => ({}),
   armLive: () => null,
@@ -1515,7 +1627,7 @@ function install(opts) {
   // callback is the only place that knows "a serve is now reachable on port
   // N". Wrapping it HERE — before the locator exists — is what makes the hook
   // real; the caller's onState still runs first and unchanged.
-  const laneRef = { lane: null, lastPort: null };
+  const laneRef = { lane: null, lastPort: null, facts: null };
   const locatorOpts = opts.locator ? opts : {
     ...opts,
     onState: (st) => {
@@ -1525,10 +1637,19 @@ function install(opts) {
       if (port === laneRef.lastPort) return;      // NOT every notify(): the guard samples one a minute
       laneRef.lastPort = port;
       try { laneRef.lane?.kick(); } catch { }
+      // …and the SAME edge is the adopt-or-reap moment (round 4): "a serve is
+      // reachable" is the only instant at which "which of its terminals can
+      // still be reached from here" is answerable. Idempotent per serve
+      // process; off the caller's stack so a slow sweep never delays a notify.
+      const rt = setImmediate(() => {
+        Promise.resolve(laneRef.facts?.reapPtys?.()).catch((e) => (opts.log || console).warn?.(`[opencode-serve] pty reap failed: ${e.message}`));
+      });
+      rt.unref?.();
     },
   };
   const locator = opts.locator || createServeLocator(locatorOpts);
   installed = createFacts(locator, opts);
+  laneRef.facts = installed;
   // THE LIVE LANE replaces the 10s list poll (piece (d) of B-eac2). It is armed
   // here, not lazily at the first discovery, because its whole job is to notice
   // changes NOBODY asked about; `makeLane` is injectable so a unit test can arm

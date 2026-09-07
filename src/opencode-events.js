@@ -31,6 +31,12 @@
  *      process writes, and fs.watch turns that into an event. Debounced,
  *      failure-tolerant (an unwatchable dir degrades to "no external signal",
  *      loudly once), and it never reads the file — only its mtime events.
+ *      ROUND 4, two ways this lane could LIE about itself, both closed: it is
+ *      `active` only for a directory that actually holds `opencode.db` (a
+ *      leftover empty dir is not a store), and its dirs are RE-RESOLVED on
+ *      every `connected` against the serve's own `GET /path` home instead of
+ *      being latched from the boot-time env guess. A false `active` is worse
+ *      than none: laneHealthy() switches the list-refresh fallback off on it.
  *
  * classifyEvent() is PURE: it maps an OpenCode event payload onto the facts
  * this product caches, so the cache invalidation lives in one testable table
@@ -47,6 +53,11 @@ const RECONNECT_MAX_MS = 30000;
  *  even though the socket is open. Heartbeats were measured at ~10s. */
 const SSE_IDLE_TIMEOUT_MS = 45000;
 const STORE_DEBOUNCE_MS = 400;
+/** The file whose presence PROVES a directory is an OpenCode store. A watch on
+ *  a directory that merely exists is not a store watch, and `active` is the
+ *  flag laneHealthy() switches the list-refresh fallback off on — see
+ *  createStoreWatch. Verified 1.18.29: the serve creates it at boot. */
+const STORE_DB_FILE = 'opencode.db';
 
 /** Incremental `text/event-stream` framer. PURE: (carry, chunk) → {carry, frames}.
  *  Only the `data:` lines matter (OpenCode sends no event names/ids); a frame
@@ -218,7 +229,18 @@ function createEventStream({
  *  This is the ONLY lane that sees a TUI (a different process on the same
  *  sqlite) — see the header. It never reads the db; a missing/unwatchable dir
  *  is reported ONCE and degrades to "no external signal" rather than throwing
- *  (an OpenCode that has never run has no data dir yet). */
+ *  (an OpenCode that has never run has no data dir yet).
+ *
+ *  `active` MEANS "we are watching a real OpenCode store" (round 4). It is the
+ *  flag laneHealthy() uses to switch the timed list refresh OFF, so a watch on
+ *  a directory that merely EXISTS — `$HOME/.local/share/opencode` left behind
+ *  by an OpenCode that keeps its store elsewhere, or simply the wrong HOME —
+ *  would report a healthy lane while carrying no signal at all, and the product
+ *  would go silently blind to every other opencode process (the exact blind
+ *  spot this lane exists to close). A directory with no `opencode.db` is
+ *  therefore recorded in `failed` and NOT watched: not-a-store degrades to
+ *  "unknown", which keeps the timer fallback on, and the next reconnect
+ *  re-arms (the serve creates the db at boot). */
 function createStoreWatch({ dirs = [], onDirty = null, debounceMs = STORE_DEBOUNCE_MS, log = console, watchImpl = fs.watch, existsImpl = fs.existsSync } = {}) {
   const watchers = [];
   const state = { watching: [], failed: [], hits: 0, lastAt: 0 };
@@ -232,6 +254,9 @@ function createStoreWatch({ dirs = [], onDirty = null, debounceMs = STORE_DEBOUN
   for (const dir of Array.isArray(dirs) ? dirs : []) {
     if (!dir || typeof dir !== 'string') continue;
     if (!existsImpl(dir)) { state.failed.push({ dir, reason: 'not created yet' }); continue; }
+    // EXISTS ≠ IS THE STORE. Watching a stray directory would report a healthy
+    // lane that can never fire (see the header).
+    if (!existsImpl(path.join(dir, STORE_DB_FILE))) { state.failed.push({ dir, reason: `no ${STORE_DB_FILE} (not an OpenCode store)` }); continue; }
     try {
       const w = watchImpl(dir, { persistent: false }, (_ev, name) => {
         // opencode.db / -wal / -shm are the store; `log/` and `repos/` churn
@@ -277,48 +302,74 @@ function storeDirsFor({ env = process.env, home = null, serveHome = null } = {})
  *  opencode process did -- the only lane that sees a TUI). Callers treat the
  *  pair as one thing: while it is healthy, no timer re-reads the session list.
  *
- *  The store dirs are resolved LAZILY, once the serve answers `GET /path`,
- *  because before the serve exists we do not know whose HOME it runs under;
- *  a serve that never comes up simply leaves the watch inactive (which
- *  laneHealthy() reads as "not healthy" -> the timer fallback stays on). */
+ *  THE STORE DIRS ARE RE-RESOLVED, NOT LATCHED (round 4). The boot arm can only
+ *  guess from OUR OWN env — no serve exists yet — and on every machine that has
+ *  ever run opencode `$HOME/.local/share/opencode` already exists, so the guess
+ *  ALWAYS attached and the documented "resolve lazily once the serve answers
+ *  GET /path" never ran. That is a watch on a store the serve may not use,
+ *  reported as `active`, which makes laneHealthy() true, which switches the
+ *  list-refresh fallback OFF — the product goes blind to every other opencode
+ *  process while claiming a healthy lane. So the boot arm stays (it is right in
+ *  the default deployment and costs nothing), and EVERY `connected` re-resolves
+ *  against the serve's own home and re-arms only when the answer DIFFERS —
+ *  matching dirs are left untouched, so a reconnect storm cannot churn the
+ *  watchers. A serve that never comes up simply leaves the watch inactive
+ *  (which laneHealthy() reads as "not healthy" -> the timer fallback stays on). */
 function createLiveLane({ locator, onEvent = null, onExternal = null, onState = null, log = console,
   storeDirs = null, env = process.env, fetchImpl = null, watchImpl = fs.watch, existsImpl = fs.existsSync,
   debounceMs = STORE_DEBOUNCE_MS, idleTimeoutMs = SSE_IDLE_TIMEOUT_MS } = {}) {
   let watch = null;
   let watchTried = false;
+  let watchedDirs = [];            // the dirs the CURRENT watch was built from (re-resolution compares against this)
+  let rearms = 0;                  // how many times a `connected` moved the watch — a state fact, not a counter for its own sake
   const stream = createEventStream({
     locator, log, fetchImpl, idleTimeoutMs,
     onEvent: (info, raw) => {
       // a (re)connect is also the moment to (re)arm the store watch: the serve
       // may have moved, and a failed watch must be retried rather than lost
-      if (info.kind === 'connected') armWatch().catch(() => { });
+      if (info.kind === 'connected') armWatch('connected').catch(() => { });
       try { onEvent?.(info, raw); } catch (e) { log?.warn?.(`[opencode-events] onEvent failed: ${e.message}`); }
     },
     onState: () => { try { onState?.(state()); } catch { } },
   });
-  async function armWatch() {
-    if (watch || watchTried) return watch;
-    watchTried = true;
-    let dirs = Array.isArray(storeDirs) && storeDirs.length ? storeDirs : null;
-    if (!dirs) {
-      let serveHome = null;
-      try { const c = await locator.client({ budgetMs: 2000 }); if (c) serveHome = (await c.paths({ timeoutMs: 2000 }))?.home || null; } catch { }
-      dirs = storeDirsFor({ env, serveHome });
+  /** Injected dirs win (a unit test / an explicit deployment). Otherwise ask
+   *  the SERVE whose HOME it runs under and derive from that; with no serve the
+   *  answer is our own env, which is the boot guess. */
+  async function resolveDirs() {
+    if (Array.isArray(storeDirs) && storeDirs.length) return storeDirs.slice();
+    let serveHome = null;
+    try { const c = await locator.client({ budgetMs: 2000 }); if (c) serveHome = (await c.paths({ timeoutMs: 2000 }))?.home || null; } catch { }
+    return storeDirsFor({ env, serveHome });
+  }
+  const sameDirs = (a, b) => a.length === b.length && a.every((d, i) => d === b[i]);
+  /** @param why 'boot' (no serve yet — the env guess) | 'connected' (the serve
+   *  can now name its own home, so re-resolve and move the watch if it moved). */
+  async function armWatch(why = 'boot') {
+    if (watch && why !== 'connected') return watch;       // already attached and nothing new is knowable
+    if (!watch && watchTried && why !== 'connected') return watch;
+    const dirs = await resolveDirs();
+    if (watch) {
+      if (sameDirs(dirs, watchedDirs)) return watch;      // NOTHING MOVED: never churn the watchers on a reconnect
+      log?.warn?.(`[opencode-events] the OpenCode store moved (${watchedDirs.join(', ') || 'none'} → ${dirs.join(', ') || 'none'}) — re-arming the store watch`);
+      try { watch.stop(); } catch { }
+      watch = null; watchedDirs = []; rearms++;
     }
+    watchTried = true;
     watch = createStoreWatch({ dirs, debounceMs, log, watchImpl, existsImpl, onDirty: (reason) => { try { onExternal?.(reason); } catch (e) { log?.warn?.(`[opencode-events] onExternal failed: ${e.message}`); } } });
+    watchedDirs = dirs.slice();
     // a watch that could not attach ANYWHERE is not a watch: let the next
     // reconnect try again (the store dir is created the first time opencode runs)
-    if (!watch.state().active) { watch.stop(); watch = null; watchTried = false; }
+    if (!watch.state().active) { watch.stop(); watch = null; watchTried = false; watchedDirs = []; }
     try { onState?.(state()); } catch { }
     return watch;
   }
   function state() {
-    return { sse: stream.state(), watch: watch ? watch.state() : { watching: [], failed: [], hits: 0, lastAt: 0, active: false } };
+    return { sse: stream.state(), rearms, watch: watch ? watch.state() : { watching: [], failed: [], hits: 0, lastAt: 0, active: false } };
   }
   return {
-    start() { stream.start(); armWatch().catch(() => { }); return state(); },
+    start() { stream.start(); armWatch('boot').catch(() => { }); return state(); },
     kick() { stream.kick(); },
-    stop() { stream.stop(); try { watch?.stop(); } catch { } watch = null; watchTried = false; },
+    stop() { stream.stop(); try { watch?.stop(); } catch { } watch = null; watchTried = false; watchedDirs = []; },
     state,
     _armWatch: armWatch,
   };
@@ -326,5 +377,5 @@ function createLiveLane({ locator, onEvent = null, onExternal = null, onState = 
 
 module.exports = {
   SSE_ROUTE, sseFrames, classifyEvent, createEventStream, createStoreWatch, createLiveLane, storeDirsFor,
-  RECONNECT_BASE_MS, RECONNECT_MAX_MS, SSE_IDLE_TIMEOUT_MS, STORE_DEBOUNCE_MS,
+  RECONNECT_BASE_MS, RECONNECT_MAX_MS, SSE_IDLE_TIMEOUT_MS, STORE_DEBOUNCE_MS, STORE_DB_FILE,
 };

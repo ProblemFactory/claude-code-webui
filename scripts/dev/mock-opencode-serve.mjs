@@ -267,34 +267,58 @@ export function makeHandler(state) {
         return json(res, 200, true);
       }
 
-      // ── PTY ── (GET /pty boots the DEFAULT-directory instance — measured)
-      if (req.method === 'GET' && p === '/pty') { state.instances.add(url.searchParams.get('directory') || state.paths.worktree); return json(res, 200, [...state.ptys.values()]); }
+      // ── PTY ──
+      // TWO MEASURED FACTS, both modelled here because the product's whole pty
+      // fix depends on them (real 1.18.29, /proc + inotify-wd sampling):
+      //  ① `?directory=X` BOOTS the instance for X (a full recursive index +
+      //     inotify watch of that tree: 204 wds on a 200-dir repo) and NOTHING
+      //     in the pty family releases it — only POST /instance/dispose does.
+      //     With no query, the DEFAULT-directory instance is used instead (our
+      //     own empty throwaway repo: 4 wds). The `cwd` BODY field places the
+      //     SHELL and boots nothing.
+      //  ② the pty REGISTRY is PER INSTANCE: `PUT /pty/{id}?directory=X` on a
+      //     pty created WITHOUT the query answers 404 PtyNotFoundError, and
+      //     vice versa. So a half-migrated family = a terminal that can be
+      //     opened and never resized, closed or reaped.
+      const ptyInstance = (u) => u.searchParams.get('directory') || state.paths.worktree;
+      const ptyLookup = (id, u) => { const t = state.ptys.get(id); return t && t._instance === ptyInstance(u) ? t : null; };
+      if (req.method === 'GET' && p === '/pty') {
+        const inst = ptyInstance(url);
+        state.instances.add(inst);
+        return json(res, 200, [...state.ptys.values()].filter((t) => t._instance === inst).map(({ _instance, ...rest }) => rest));
+      }
       if (req.method === 'POST' && p === '/pty') {
         return readBody(req, (body) => {
           const id = `pty_mock${++state.ptySeq}`;
+          const inst = ptyInstance(url);
           const pty = { id, title: (body && body.title) || 'shell', command: (body && body.command) || '/bin/bash', args: [], cwd: (body && body.cwd) || state.paths.worktree, status: 'running', pid: 4242 + state.ptySeq };
+          Object.defineProperty(pty, '_instance', { value: inst, enumerable: false });
           state.ptys.set(id, pty);
-          if (pty.cwd) state.instances.add(pty.cwd);
-          emit(state, { directory: pty.cwd, payload: { id: 'evt_pc', type: 'pty.created', properties: { info: pty } } });
+          state.instances.add(inst);      // ONLY the query's directory — never the body's cwd
+          emit(state, { directory: inst, payload: { id: 'evt_pc', type: 'pty.created', properties: { info: pty } } });
           return json(res, 200, pty);
         });
       }
-      if ((m = p.match(/^\/pty\/([^/]+)$/)) && req.method === 'GET') { const t = state.ptys.get(decodeURIComponent(m[1])); return t ? json(res, 200, t) : json(res, 404, { name: 'PtyNotFoundError', data: { message: 'not found' } }); }
+      if ((m = p.match(/^\/pty\/([^/]+)$/)) && req.method === 'GET') { const t = ptyLookup(decodeURIComponent(m[1]), url); return t ? json(res, 200, t) : json(res, 404, { name: 'PtyNotFoundError', data: { message: 'PTY session not found: ' + decodeURIComponent(m[1]) } }); }
       if ((m = p.match(/^\/pty\/([^/]+)$/)) && req.method === 'PUT') {
-        const t = state.ptys.get(decodeURIComponent(m[1]));
-        if (!t) return json(res, 404, { name: 'PtyNotFoundError', data: { message: 'not found' } });
+        const t = ptyLookup(decodeURIComponent(m[1]), url);
+        if (!t) return json(res, 404, { name: 'PtyNotFoundError', data: { message: 'PTY session not found: ' + decodeURIComponent(m[1]) } });
         return readBody(req, (body) => { if (body && body.size) t.size = body.size; if (body && body.title) t.title = body.title; return json(res, 200, t); });
       }
       if ((m = p.match(/^\/pty\/([^/]+)$/)) && req.method === 'DELETE') {
         const id = decodeURIComponent(m[1]);
-        const t = state.ptys.get(id);
+        const t = ptyLookup(id, url);
+        if (!t) return json(res, 404, { name: 'PtyNotFoundError', data: { message: 'PTY session not found: ' + id } });
         state.ptys.delete(id);
-        if (t) emit(state, { directory: t.cwd, payload: { id: 'evt_pd', type: 'pty.deleted', properties: { id } } });
-        return json(res, 200, !!t);
+        // the shell dies; the INSTANCE the create booted is deliberately NOT
+        // released — that is the leak the product now refuses to create
+        emit(state, { directory: t._instance, payload: { id: 'evt_pd', type: 'pty.deleted', properties: { id } } });
+        return json(res, 200, true);
       }
       if ((m = p.match(/^\/pty\/([^/]+)\/connect-token$/)) && req.method === 'POST') {
         // a real UNSECURED 1.18.29 serve refuses this (PtyForbiddenError) while
         // the ws upgrade itself needs no ticket — the bridge must cope
+        if (!ptyLookup(decodeURIComponent(m[1]), url)) return json(res, 404, { name: 'PtyNotFoundError', data: { message: 'PTY session not found: ' + decodeURIComponent(m[1]) } });
         if (!state.ptyTicketsAllowed) return json(res, 403, { name: 'PtyForbiddenError', data: { message: 'Invalid PTY connect token request' } });
         return json(res, 200, { ticket: 'tkt_' + decodeURIComponent(m[1]), expires_in: 60 });
       }
@@ -325,7 +349,12 @@ export function startMockServe({ port = 0, state = null, pty = false } = {}) {
       // client surfaces as `Unexpected server response: 404`). Modelled here
       // because the bridge's reconnect rule depends on telling that verdict
       // apart from a dropped transport.
-      if (!st.ptys.has(decodeURIComponent(m[1]))) {
+      // …and the ws upgrade is served by the SAME per-instance registry, so a
+      // `directory` query on a pty created without one is a 404 here too (that
+      // is the whole reason the pty family must change together).
+      const upPty = st.ptys.get(decodeURIComponent(m[1]));
+      const upInstance = u.searchParams.get('directory') || st.paths.worktree;
+      if (!upPty || upPty._instance !== upInstance) {
         st.requests.push(`WS404 ${u.pathname}${u.search}`);
         const body = JSON.stringify({ _tag: 'PtyNotFoundError', message: 'PTY session not found' });
         socket.end(`HTTP/1.1 404 Not Found\r\ncontent-type: application/json\r\ncontent-length: ${Buffer.byteLength(body)}\r\nconnection: close\r\n\r\n${body}`);

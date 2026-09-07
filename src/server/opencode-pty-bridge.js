@@ -28,6 +28,17 @@
  * A dropped socket therefore RECONNECTS (bounded) instead of ending the
  * session; the session ends when the pty itself exits (`GET /pty/{id}` says
  * `exited`, or the user kills the window, which deletes it).
+ * …and it also survives OUR PROCESS. A serve pty is not dtach-restorable
+ * (`socketPath` is null by design), so a SIGKILL/OOM restart — or any restart
+ * while the serve was ADOPTED — used to leave the shell running forever with
+ * nothing able to reach it. It still is not re-bridged, but `facts.reapPtys()`
+ * removes it on the next serve ready edge (round 4), keyed off the live
+ * sessions' `_opencodePtyId`.
+ *
+ * The `cwd` below rides `pty-close`/`pty-resize` because the SHARED op table
+ * carries it; the client deliberately makes NO use of it. It must never become
+ * a `directory` query again — that is what booted and permanently
+ * inotify-watched the user's whole worktree (see src/opencode-serve.js).
  */
 const { access } = require('./opencode-access');
 

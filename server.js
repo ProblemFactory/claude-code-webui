@@ -102,6 +102,7 @@ const { X_ENV, detectXDisplay, refreshXEnv, stabilizeXAuth, adapterRegistry,
   getOAuthToken: (...a) => getOAuthToken(...a),
   usagePollingEnabled: (...a) => usagePollingEnabled(...a),
   refreshCodexModels: (...a) => refreshCodexModels(...a), broadcast: (m) => bcastAll(m), getTelemetry: () => { try { return telemetry; } catch { return null; } }, getPlugins: () => { try { return plugins; } catch { return null; } }, // S9: opencode serve caps verdict → 'harness-caps-updated'; runaway telemetry + the 'opencode-serve' PLUGIN is the autostart switch (lazy — both defined below)
+  getHeldPtyIds: () => { try { return [...activeSessions.values()].map((s) => s?._opencodePtyId).filter(Boolean); } catch { return []; } }, // S9 r4: the ONE reader of session._opencodePtyId — the serve-pty reaper's keep set (lazy like getPlugins: activeSessions is declared below)
 });
 // ── Codex model list (from ~/.codex/models_cache.json) ──
 // That cache is last-writer-wins AND version-gated server-side: a still-running
