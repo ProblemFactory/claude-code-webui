@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.369.60 — the queue strip is bounded (owner: "堆满了queue，不能翻页，然后看不到任何对话内容和发送框了")
+
+- **A long queue no longer swallows the chat window.** The queued-message rows now live in their own scrollable body capped at 8 rows or 40% of the viewport, whichever is smaller (35% on phones ≤768px), so the message list and the input box stay on screen however many items are queued. Past 8 items the strip starts COLLAPSED to its header ("25 queued — runs after this turn", Steer all) with a chevron to expand; the choice is remembered per view. Measured with the real stylesheet and 30 rows in headless chrome: phone 375×667 → body 183 px, scrollable, textarea inside the viewport, 240 px left for messages; desktop 1280×800 → body capped at 216 px.
+- Notification steering (system notifications inject into the running turn instead of queueing as billed turns) follows in a separate release once verified; the official Codex TUI's own semantics were researched today and shape it (Enter = steer, Tab = queue; a steer never carries the queue).
+
 ## 2.369.59 — the OpenCode background service is a plugin, default OFF (owner decision 2026-09-07; two adversarial rounds)
 
 - **`opencode serve` is now the third built-in plugin** next to Tailscale and frp (⚙ → Plugins), DEFAULT OFF. The plugin is a control surface only: the keeper, the /proc runaway guard and every store fact stay in the shared serve module; the manager owns user intent (`enabled`/`desiredUp` move in lockstep, `promptedAt`). Disable STOPS the process, including one merely adopted from an earlier run, and nothing respawns it. `install()` names https://opencode.ai instead of offering a dead button (it runs YOUR CLI); config is refused (a free loopback port); boot replay = enabled + desiredUp. `decideAutostart({env, pluginWantsUp})` is THE decision: `VIBESPACE_OPENCODE_SERVE=0/1` wins as an ops override (the panel says "forced by the environment" and disables the controls), else the plugin record, default OFF.

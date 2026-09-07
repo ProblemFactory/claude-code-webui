@@ -2958,6 +2958,8 @@ export default {
   "Queued": "排队中",
   "Steered": "已插入本轮",
   "Steer all": "全部插入",
+  "Show the queued messages": "显示排队中的消息",
+  "Hide the queued messages": "隐藏排队中的消息",
   "Steer now — the agent sees it at its next reply": "立即插入 —— agent 在下一次回复时就会看到",
   "Inject every queued message into the running turn, in order": "按顺序把队列中的每条消息插入正在进行的这一轮",
   "{n} queued — runs after this turn": "{n} 条排队中 —— 本轮结束后运行",

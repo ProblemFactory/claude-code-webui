@@ -822,7 +822,15 @@ export class ChatInput {
     const items = this._queueCaps.queueOps ? this._queue : [];
     if (!items.length) { strip.classList.add('hidden'); strip.innerHTML = ''; return; }
     strip.classList.remove('hidden');
-    strip.innerHTML = ChatInput.queueStripHtml(items, this._queueCaps);
+    // BOUNDED (2.369.60, owner: 25 queued job notifications swallowed the whole
+    // window — no scrolling, no messages, no input box). The rows live in a
+    // scrollable body capped by CSS; past QUEUE_COLLAPSE_AT the strip starts
+    // COLLAPSED to its header and a chevron toggles it (per-view memory only).
+    const collapsed = this._queueCollapsed ?? (items.length > ChatInput.QUEUE_COLLAPSE_AT);
+    strip.classList.toggle('chat-queue-collapsed', collapsed);
+    strip.innerHTML = ChatInput.queueStripHtml(items, this._queueCaps, { collapsed });
+    const toggle = strip.querySelector('.chat-queue-toggle');
+    if (toggle) toggle.onclick = (e) => { e.stopPropagation(); this._queueCollapsed = !collapsed; this._renderQueue(); };
     strip.querySelectorAll('[data-queue-op]').forEach((btn) => {
       btn.onclick = (e) => {
         e.stopPropagation();
@@ -842,8 +850,14 @@ export class ChatInput {
 
   /** PURE markup for the strip (DOM-free testable; every interpolation escaped
    *  — a queue preview is message text and syncs to every client). */
-  static queueStripHtml(items, caps = {}) {
-    const head = `<div class="chat-queue-head">${UI_ICONS.queue}<span>${escHtml(t('{n} queued — runs after this turn', { n: items.length }))}</span>${
+  /** More queued items than this ⇒ the strip starts collapsed to its header. */
+  static get QUEUE_COLLAPSE_AT() { return 8; }
+
+  static queueStripHtml(items, caps = {}, { collapsed = false } = {}) {
+    const toggle = items.length > ChatInput.QUEUE_COLLAPSE_AT || collapsed
+      ? `<button type="button" class="chat-queue-toggle" aria-expanded="${collapsed ? 'false' : 'true'}" title="${escHtml(collapsed ? t('Show the queued messages') : t('Hide the queued messages'))}">${collapsed ? UI_ICONS.chevronDown : UI_ICONS.chevronUp}</button>`
+      : '';
+    const head = `<div class="chat-queue-head">${UI_ICONS.queue}<span>${escHtml(t('{n} queued — runs after this turn', { n: items.length }))}</span>${toggle}${
       caps.steer && items.length > 1
         ? `<button type="button" class="chat-queue-all" data-queue-op="steer-all" title="${escHtml(t('Inject every queued message into the running turn, in order'))}">${UI_ICONS.bolt}<span>${escHtml(t('Steer all'))}</span></button>`
         : ''
@@ -856,7 +870,8 @@ export class ChatInput {
         : '';
       return `<div class="chat-queue-item" tabindex="0" data-queue-id="${id}">${from}<span class="chat-queue-preview">${escHtml(String(it.preview || ''))}</span>${steer}<button type="button" class="chat-queue-btn chat-queue-btn-remove" data-queue-op="remove" data-queue-id="${id}" title="${escHtml(t('Remove'))}" aria-label="${escHtml(t('Remove'))}">${UI_ICONS.close}</button></div>`;
     }).join('');
-    return head + rows;
+    // The body is the ONLY thing that scrolls; a collapsed strip omits it.
+    return head + (collapsed ? '' : `<div class="chat-queue-body">${rows}</div>`);
   }
 
   _updateTodoDisplay() {

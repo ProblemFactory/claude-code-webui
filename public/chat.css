@@ -436,6 +436,21 @@
   font-size: 11px; color: var(--text-dim);
 }
 .chat-queue-head svg { width: 12px; height: 12px; flex-shrink: 0; }
+/* BOUNDED strip (2.369.60): only the body scrolls — 8 rows or 40% of the
+   viewport, whichever is smaller — so the message list and the input box are
+   always on screen however long the queue gets (25 job notifications once
+   swallowed the whole window). Mobile keeps more room for the thumb keyboard. */
+.chat-queue-body {
+  display: flex; flex-direction: column; gap: 3px; min-height: 0;
+  max-height: min(40vh, 216px); overflow-y: auto; overscroll-behavior: contain;
+}
+@media (max-width: 768px) { .chat-queue-body { max-height: 35vh; } }
+.chat-queue-toggle {
+  background: none; border: none; color: var(--text-dim); cursor: pointer;
+  padding: 1px 3px; border-radius: var(--radius-sm); display: inline-flex; align-items: center;
+}
+.chat-queue-toggle:hover { background: var(--bg-hover); color: var(--text); }
+.chat-queue-toggle svg { width: 12px; height: 12px; }
 .chat-queue-all {
   margin-left: auto; display: inline-flex; align-items: center; gap: 4px;
   background: none; border: 1px solid var(--border); border-radius: var(--radius-sm);

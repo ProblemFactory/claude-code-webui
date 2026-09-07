@@ -2958,6 +2958,8 @@ export default {
   "Queued": "キュー待ち",
   "Steered": "現ターンに投入済み",
   "Steer all": "すべて投入",
+  "Show the queued messages": "キュー内のメッセージを表示",
+  "Hide the queued messages": "キュー内のメッセージを隠す",
   "Steer now — the agent sees it at its next reply": "今すぐ投入 —— エージェントは次の返信時に読みます",
   "Inject every queued message into the running turn, in order": "キュー内のすべてのメッセージを順番に現在のターンへ投入します",
   "{n} queued — runs after this turn": "{n} 件キュー待ち —— このターンの後に実行",
