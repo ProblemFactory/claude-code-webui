@@ -3127,6 +3127,8 @@ export default {
   "plugin {name}": "プラグイン {name}",
   "MCP {name}": "MCP {name}",
   "{n} not working": "{n} 件が動作していません",
+  "Reported by the harness at session start — click for the list": "セッション開始時に harness が報告 — クリックで一覧表示",
+  "Reported by the harness in this session’s start frame.": "このセッションの開始フレームで harness が報告した内容です。",
   "Skills": "スキル",
   "MCP servers": "MCP サーバー",
   "Subagents": "サブエージェント",

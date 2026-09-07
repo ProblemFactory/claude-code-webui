@@ -1,6 +1,6 @@
 import { escHtml, showInputDialog, uiScale, showToast, fetchJson, copyText, absUrl } from './utils.js';
 import { UI_ICONS } from './icons.js';
-import { BACKEND_META, getBackendMeta, backendFeatureCaps, effortDisplay, effortLabel, noteModelCatalog, responseStyleLabel, responseStyleCaps, styleAppliesLive } from './agent-meta.js';
+import { BACKEND_META, getBackendMeta, backendFeatureCaps, effortDisplay, effortLabel, noteModelCatalog, responseStyleLabel, responseStyleCaps, styleAppliesLive, initHealthLabel } from './agent-meta.js';
 import { t } from './i18n.js';
 
 /**
@@ -61,6 +61,9 @@ export class ChatStatusBar {
     // offers claude modes on a codex chat; the live list overrides on status
     this._permissionModes = BACKEND_META[backend]?.permissionModes ? [...BACKEND_META[backend].permissionModes] : null;
     this._activeTasks = null;
+    // §2.6 round 4 — null = never told (no chip), [] = told and nothing broken
+    this._initHealth = null;
+    this._initHealthKey = undefined;
     this._goal = null;
     this._goalElapsed = 0;
     this._goalStatus = null;
@@ -342,6 +345,28 @@ export class ChatStatusBar {
 
   /** What the live session was SPAWNED with (attach payload) + the pending-wait state. */
   setOutputStyle(v) { this._outputStyle = v || ''; this.render(); }
+
+  /** SESSION HEALTH (§2.6, round 4) — the init frame's non-working MCP
+      servers / config entries / plugins, given a home that survives the
+      transcript scrolling away. Fed by BOTH paths so a window that opens
+      later agrees with one that watched the session start: the live init
+      record's side effect, and `chatStatus.initFrame` on attach/HTTP.
+      Rows in, rows out — the CALLER runs initHealthIssues (the one
+      classifier), this only displays. An EMPTY array is a real answer
+      ("nothing is reported broken now") and clears the chip; the caller is
+      responsible for never turning an ABSENT frame into one. */
+  setInitHealth(issues) {
+    const rows = Array.isArray(issues) ? issues : [];
+    const key = rows.map((i) => `${i.kind}\u0000${i.name}\u0000${i.detail}`).join('\u0001');
+    if (key === this._initHealthKey) return;
+    this._initHealthKey = key;
+    this._initHealth = rows;
+    this.render();
+  }
+
+  /** The ONE spelling of a health row — shared with the init card. */
+  _healthLabel(issue) { return initHealthLabel(issue); }
+
   /** A pick that has not taken effect yet (spawn-only key): shown on the chip
    *  so the choice is VISIBLY saved — 2.368.0 dropped it silently and the
    *  inert chip was the only symptom the owner had. */
@@ -434,6 +459,24 @@ export class ChatStatusBar {
     // harness itself reported it, never inferred, never on a backend id.
     if (this._turnState === 'requires_action') {
       parts.push(`<span class="chat-status-turnstate chat-status-needs-action" title="${escHtml(t('The agent is waiting for you — the turn is paused, not finished (reported by the harness).'))}">${UI_ICONS.hourglass} ${escHtml(t('waiting for you'))}</span>`);
+    // SESSION HEALTH (§2.6, round 4) — the init frame's non-working MCP
+    // servers / config entries / plugins, on the ONE surface that does not
+    // depend on where the transcript is scrolled. The init CARD carries the
+    // same rows, but a card is a record at a POSITION: it is suppressed as a
+    // `frameRepeat`, and on an attach it usually sits hundreds of records
+    // before the tail-50 the window loads — measured on this instance's own
+    // buffers, 2 of the 9 multi-init conversations render an init record with
+    // no drawable card at all, so the "{n} not working" strip a live watcher
+    // saw was simply absent for a window that opened later. That is the exact
+    // invisibility §2.6 exists to end, so the fact gets a PINNED home fed by
+    // both paths (live init side effect + attach chatStatus.initFrame).
+    // Absent frame ⇒ untouched (ABSENT ≠ CLEAN, see initHealthIssues); a frame
+    // that reports everything connected CLEARS it — a gauge that cannot fall
+    // is not a gauge.
+    if (this._initHealth?.length) {
+      const rows = this._initHealth.map((i) => this._healthLabel(i));
+      const tip = t('Reported by the harness at session start — click for the list') + '\n' + rows.join('\n');
+      parts.push(`<span class="chat-status-health chat-status-clickable" title="${escHtml(tip)}">${UI_ICONS.alert} ${escHtml(t('{n} not working', { n: this._initHealth.length }))}</span>`);
     }
 
     // Goal indicator — always rendered so there's a discoverable entry point
@@ -792,6 +835,26 @@ export class ChatStatusBar {
         item.onclick = (ev) => { ev.stopPropagation(); dropdown.remove(); this._onOpenWorkflow?.(wf.runId, wf.name); };
         dropdown.appendChild(item);
       }
+      return;
+    }
+    // Session-health chip -> the same rows the init card lists. Touch has no
+    // hover, so the tooltip alone would make this fact unreadable on the very
+    // surface (≤768px) where the init card is hardest to scroll back to.
+    const healthEl = e.target.closest('.chat-status-health');
+    if (healthEl && this._initHealth?.length) {
+      e.stopPropagation();
+      const dropdown = showDropdown(healthEl);
+      if (!dropdown) return;
+      for (const issue of this._initHealth) {
+        const item = document.createElement('div');
+        item.className = 'chat-status-dropdown-item chat-status-health-row';
+        item.innerHTML = `${UI_ICONS.alert} ${escHtml(this._healthLabel(issue))}`;
+        dropdown.appendChild(item);
+      }
+      const note = document.createElement('div');
+      note.className = 'chat-status-dropdown-note';
+      note.textContent = t('Reported by the harness in this session\u2019s start frame.');
+      dropdown.appendChild(note);
       return;
     }
     // Background tasks click -> popup

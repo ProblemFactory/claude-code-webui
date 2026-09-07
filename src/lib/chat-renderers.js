@@ -10,7 +10,7 @@ import { escHtml, copyText, showContextMenu, showToast, absUrl } from './utils.j
 import { track } from './telemetry-client.js';
 import { renderCodeBlock, rehighlightCodeBlock, stripAnsi, getHljsLanguages } from './highlight.js';
 import { UI_ICONS } from './icons.js';
-import { isAgentMemoryPath, backendFeatureCaps, initHealthIssues } from './agent-meta.js';
+import { isAgentMemoryPath, backendFeatureCaps, initHealthIssues, initHealthLabel } from './agent-meta.js';
 import { createBackendIconHtml, getBackendMeta } from './agent-meta.js';
 import { t } from './i18n.js';
 import { searchQueryOf } from '../search-card.js'; // shared with the server (CJS pulled into the bundle, like task-color-seq.js)
@@ -894,6 +894,10 @@ class ChatRenderers {
       if (d.slashCommands) sideEffect.slashCommands = d.slashCommands;
       if (f?.terminalSlashCommands) sideEffect.terminalSlashCommands = f.terminalSlashCommands;
       if (f?.memoryPaths) sideEffect.memoryPaths = f.memoryPaths;
+      // The health facts ride the SIDE EFFECT, not the card (§2.6 round 4):
+      // they must reach the pinned status-bar chip even when this record
+      // draws nothing (`frameRepeat`), which is the majority of inits.
+      if (f) sideEffect.initFrame = f;
       return { el: this.buildInitCard(f, { repeat: !!d.frameRepeat }), sideEffect };
     }
     // Hook events — compact collapsible
@@ -1304,7 +1308,9 @@ class ChatRenderers {
     const chips = [];
     if (skills.length) chips.push(t('{n} skills', { n: skills.length }));
     if (frame.outputStyle) chips.push(t('output style: {style}', { style: frame.outputStyle }));
-    const issueLabel = (i) => (i.kind === 'plugin' ? t('plugin {name}', { name: i.name }) : t('MCP {name}', { name: i.name })) + (i.detail ? ' — ' + i.detail : '');
+    // The SHARED composition (agent-meta) — the status-bar chip shows the
+    // same rows on the attach path and the two must not spell them differently.
+    const issueLabel = initHealthLabel;
     const warn = issues.length
       ? `<span class="chat-init-warn" title="${escHtml(issues.map(issueLabel).join('\n'))}">${UI_ICONS.alert} ${escHtml(t('{n} not working', { n: issues.length }))}</span>`
       : '';

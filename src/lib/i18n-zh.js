@@ -3128,6 +3128,8 @@ export default {
   "plugin {name}": "插件 {name}",
   "MCP {name}": "MCP {name}",
   "{n} not working": "{n} 项不可用",
+  "Reported by the harness at session start — click for the list": "由 harness 在会话启动时报告 — 点击查看列表",
+  "Reported by the harness in this session’s start frame.": "来自本会话启动帧中 harness 的报告。",
   "Skills": "技能",
   "MCP servers": "MCP 服务器",
   "Subagents": "子代理",

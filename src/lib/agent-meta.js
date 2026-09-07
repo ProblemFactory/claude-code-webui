@@ -408,6 +408,22 @@ export function initHealthIssues(frame) {
   return out;
 }
 
+/** PURE: the one human label for an initHealthIssues() row (§2.6, round 4).
+ *  TWO surfaces now show these rows — the init card's warn strip/detail list
+ *  (chat-renderers) and the pinned status-bar chip that gives the same facts
+ *  an ATTACH path (chat-status-bar) — and the whole point of the second one
+ *  is that a window which opens later AGREES with one that watched the
+ *  session start. Two spellings of "MCP x — failed" would be exactly the
+ *  disagreement it exists to remove, so the composition lives here once.
+ *  `detail` is protocol text (an open status vocabulary, an upstream error
+ *  message) and is shown VERBATIM — never translated, never mapped. */
+export function initHealthLabel(issue) {
+  if (!issue) return '';
+  const name = issue.name || '';
+  const head = issue.kind === 'plugin' ? t('plugin {name}', { name }) : t('MCP {name}', { name });
+  return head + (issue.detail ? ' — ' + issue.detail : '');
+}
+
 /** PURE: the composer's slash-command completion list. TWO rules, both from
  *  the init frame (§2.6):
  *    ① `terminal_slash_commands` is upstream's own "Subset of slash_commands

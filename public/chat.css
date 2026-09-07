@@ -27,6 +27,17 @@
 .chat-status-goal { color: var(--accent); font-weight: 600; }
 .chat-status-goal-empty { opacity: 0.45; filter: grayscale(0.6); }
 .chat-status-remote { color: var(--yellow, #e5c07b); background: color-mix(in srgb, var(--yellow, #e5c07b) 12%, transparent); border-radius: 999px; padding: 0 6px; animation: chat-remote-pulse 1.6s ease-in-out infinite; }
+/* Session-health chip (§2.6 round 4): the init frame's non-working MCP
+   servers / plugins, on the ONE surface that survives the transcript
+   scrolling away. Warning colour, NO pulse — this is a standing condition,
+   not a transient like the reconnect chip. On ≤768px the status bar is a
+   single swipeable row whose children are flex-shrink:0, so this keeps its
+   full label there and is reachable by a horizontal swipe; it sits right
+   after the model/effort badges so it is the third chip, not the last. */
+.chat-status-health { color: var(--yellow, #e5c07b); background: color-mix(in srgb, var(--yellow, #e5c07b) 12%, transparent); border-radius: 999px; padding: 0 6px; display: inline-flex; align-items: center; gap: 3px; }
+.chat-status-health svg { width: 10px; height: 10px; flex-shrink: 0; }
+.chat-status-health-row { display: flex; align-items: center; gap: 5px; color: var(--yellow, #e5c07b); max-width: 320px; white-space: normal; }
+.chat-status-health-row svg { width: 11px; height: 11px; flex-shrink: 0; }
 @keyframes chat-remote-pulse { 50% { opacity: 0.55; } }
 .chat-status-goal-empty:hover { opacity: 1; filter: none; }
 .chat-goal-timer { font-variant-numeric: tabular-nums; }

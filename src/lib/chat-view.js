@@ -9,7 +9,7 @@ import { ChatInput } from './chat-input.js';
 import { ChatStatusBar } from './chat-status-bar.js';
 import { UI_ICONS } from './icons.js';
 import { t } from './i18n.js';
-import { isAgentMemoryPath, effortDisplay, getBackendMeta, backendFeatureCaps, noteMemoryPaths } from './agent-meta.js';
+import { isAgentMemoryPath, effortDisplay, getBackendMeta, backendFeatureCaps, noteMemoryPaths, initHealthIssues } from './agent-meta.js';
 import { registerCommand, registerKeybinding, runCommand, hasCommand } from './contributions.js';
 // The verb list a wrapper that publishes a queue WITHOUT naming verbs serves —
 // the SAME array the server maps a verb-less sidecar onto (src/server/
@@ -2686,6 +2686,9 @@ class ChatView {
           if (se.permMode) this._statusBar.setPermMode(se.permMode);
           if (se.slashCommands && this._chatInput) this._chatInput.setSlashCommands(se.slashCommands, { terminal: se.terminalSlashCommands || null });
           if (se.memoryPaths) noteMemoryPaths(se.memoryPaths);
+          // The LIVE half of the health twin — a mid-session respawn's init
+          // re-states them, and a repeat frame still applies its side effects.
+          if (se.initFrame) this._applyInitHealth(se.initFrame);
           this._statusBar.render();
         }
         el = result?.el || null;
@@ -3880,6 +3883,27 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
     if (status.slashCommands && this._chatInput) {
       this._chatInput.setSlashCommands(status.slashCommands, { terminal: status.initFrame?.terminalSlashCommands || null });
     }
+    this._applyInitHealth(status.initFrame);
+  }
+
+  /** THE ONE application point for the init frame's health facts (§2.6,
+   *  round 4) — fed by the live init record's side effect AND by
+   *  chatStatus.initFrame on attach/HTTP, because the two must AGREE.
+   *  Why it cannot live in the init card alone: the card is suppressed for a
+   *  `frameRepeat`, and on an attach the init record usually sits hundreds of
+   *  records before the tail-50 the window loads. Measured on this instance's
+   *  own buffers: 9 conversations carry more than one init, and in 2 of them
+   *  (the two largest — i.e. exactly the long-running ones that accumulate MCP
+   *  failures) the rendered tail contains an init record and ZERO drawable
+   *  cards, so a "{n} not working" strip that a live watcher saw was simply
+   *  absent for a window opened later. The chip is not gated on the slab: a
+   *  guard that depends on where the transcript is scrolled is a guard that
+   *  fails while paging (the class this file has been bitten by repeatedly).
+   *  ABSENT ≠ CLEAN: no frame ⇒ say nothing (initHealthIssues' own law); a
+   *  frame reporting everything connected ⇒ [] ⇒ the chip clears. */
+  _applyInitHealth(frame) {
+    if (!frame) return;
+    this._statusBar.setInitHealth(initHealthIssues(frame));
   }
 
   _scrollToBottom() {

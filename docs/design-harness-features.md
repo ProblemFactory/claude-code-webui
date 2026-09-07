@@ -528,6 +528,8 @@ claude Remote Control / `--cloud` / `/teleport` / `/schedule` routines：我们*
 - 改了行为 ⇒ 同一个 commit 更新对应 kb 文件（CLAUDE.md 顶部的契约）。
 - 涉及第三方守护进程（opencode serve / ACP HTTP 面 / codex app-server child）⇒ 采样、设界、可停、出声；**路由成本要 `/proc` 实测，不能从 API 形状推断**；任何整份响应读进 server 进程必须带**字节上限**。
 - **能 dump 的 schema 不许猜；从缺席论证前先跑一次**（§4.1 的 `--replay-user-messages` 就是被这条打回的）。
+- **给某个 harness 新增一条 op ⇒ 先看它会不会打乱别的套件对 `ops[索引]` 的断言**（§2.6 round 4）：`available_commands_update` 的命令表 op 与 `session` 记录的 init 卡**没有顺序关系**——mock agent 先回 session/new 的 result 再发那条通知，wrapper 的 `session` 记录来自前者的 async 续段而后者同步落账，所以 `[update, session]` 是真实进程的**普通交错**（实测 test-acp-harness 1/16 变红，master 同文件 0/10）。断言要**按腿自己的名字查**（`ops.find(o => o.op === 'create' && …initData)`），不要按索引——索引断言测的是对方的时序，不是我们的规范；再补一条**两种顺序都喂一遍**的确定性属性腿，并把旧的索引式断言留作负控（它在两种顺序下自相矛盾）。
+- **一个「让 X 不再隐形」的事实必须有 attach 路径，不能只挂在会滚走/会被去重掉的卡片上**（§2.6 round 4）：init 卡按 `frameRepeat` 去重，而 attach 只加载 tail-50、init 记录通常在它前面几百条——本机 9 个多 init 会话里最大的 2 个正好是「窗口里有 init 记录、一张卡都画不出来」。凡是 `chatStatus` 已经在送、却只有卡片一个消费者的事实，都要问一句「后开的窗口看得见吗」。守卫**不许**按 slab 内容门控（会随分页失效）；`ABSENT ≠ CLEAN`（没帧就闭嘴）而「全部 connected」必须能把提示**清掉**。
 
 ---
 

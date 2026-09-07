@@ -535,6 +535,105 @@ console.log('— wiring pins');
   ok('…NEGATIVE CONTROL: the checker catches a planted backend-id gate', /backend !== 'claude'/.test(forkHandler + "\n if (backend !== 'claude') return;"));
 }
 
+// ── 5b. ROUND 4: the HEALTH facts need the same attach twin the command
+//   list got. `frameRepeat` suppresses the card, and on an attach the init
+//   record usually sits hundreds of records before the tail-50 the window
+//   loads — so the "{n} not working" strip a live watcher saw was simply
+//   absent for a window opened later, which is the exact invisibility §2.6
+//   exists to end. The facts already travelled (chatStatus.initFrame) and
+//   nothing consumed them.
+console.log('— health facts on the attach path (round 4)');
+{
+  // USER turns, not assistant chunks: the normalizer MERGES consecutive
+  // assistant text into one message, so 60 of those would collapse to 1 and
+  // the slab would never be big enough to push the init out of the tail.
+  const filler = (i) => ({ type: 'user', message: { role: 'user', content: `turn ${i}` }, uuid: `uu${i}`, timestamp: '2026-09-07T00:00:00.000Z' });
+  // A conversation that RE-SPAWNED: two identical init frames, > a tail-50
+  // apart, with ordinary turns between them. This is the ordinary shape (one
+  // init per spawn; round 2 measured 33 identical ones in ONE conversation).
+  const records = [FRAME, ...Array.from({ length: 60 }, (_, i) => filler(i)), FRAME, ...Array.from({ length: 5 }, (_, i) => filler(100 + i))];
+  const mm = new MessageManager('sess-health');
+  mm.convertHistory(records);
+  const slab = mm.tail(50);
+  const initsInSlab = slab.filter((m) => m.content?.[0]?.initData);
+  const drawable = initsInSlab.filter((m) => !m.content[0].initData.frameRepeat);
+  ok('THE HARM, deterministically: the attached slab CONTAINS an init record and NOT ONE of them is drawable (every one is a frameRepeat) — so buildInitCard returns null for the whole window',
+    initsInSlab.length >= 1 && drawable.length === 0, JSON.stringify({ inits: initsInSlab.length, drawable: drawable.length, slab: slab.length }));
+  const framesInSlab = initsInSlab.map((m) => m.content[0].initData.frame).filter(Boolean);
+  ok('…while the frame those very records carry names 4 broken things — the facts are IN the window, they just had no surface',
+    framesInSlab.length >= 1 && AM.initHealthIssues(framesInSlab[0]).length === 4, JSON.stringify(AM.initHealthIssues(framesInSlab[0] || null)));
+
+  // The MEASURED CONSEQUENCE at the client seam: the renderer's side effect
+  // (which runs for a repeat too) and the attach status both hand the SAME
+  // rows to the chip, so a window that opens later agrees with one that
+  // watched the session start.
+  const cr = require(path.join(REPO, 'src/lib/chat-renderers.js'));
+  void cr; // (the renderer itself needs a document — the chrome leg drives it)
+  const repeatMsg = initsInSlab[0];
+  ok('the normalizer keeps the FRAME on a repeat record (the side effect is what carries the facts, not the card)',
+    !!repeatMsg.content[0].initData.frame && repeatMsg.content[0].initData.frameRepeat === true);
+
+  // The attach twin: chatStatus.initFrame is the NEWEST init, and it is what
+  // applyStatus feeds the chip.
+  const tmp2 = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-health-'));
+  const cwd2 = path.join(tmp2, 'proj');
+  const sid2 = '11111111-2222-4333-8444-555555555555';
+  const proj2 = path.join(tmp2, '.claude', 'projects', cwd2.replace(/[/._]/g, '-'));
+  fs.mkdirSync(proj2, { recursive: true }); fs.mkdirSync(cwd2, { recursive: true });
+  fs.writeFileSync(path.join(proj2, `${sid2}.jsonl`), JSON.stringify({ type: 'assistant', message: { id: 'm1', role: 'assistant', model: 'claude-fable-5', content: [{ type: 'text', text: 'hi' }], usage: { input_tokens: 5, output_tokens: 2 } }, uuid: 'u2', timestamp: new Date().toISOString() }) + '\n');
+  const { SessionMessages } = require(path.join(REPO, 'src/session-store.js'));
+  const statusOf = (recs) => {
+    const prevHome = process.env.HOME; process.env.HOME = tmp2;
+    try {
+      return new SessionMessages({ backend: 'claude', backendSessionId: sid2, claudeSessionId: sid2, cwd: cwd2, buffer: recs.map((r) => JSON.stringify(r)).join('\n') },
+        null, { buffersDir: path.join(tmp2, 'buf'), permissionModes: [] }).chatStatus();
+    } finally { process.env.HOME = prevHome; }
+  };
+  const stH = statusOf(records);
+  ok('the ATTACH twin already delivers the health facts — chatStatus.initFrame names the same 4 (nothing new has to travel; this is a CONSUMER that was missing)',
+    AM.initHealthIssues(stH?.initFrame).length === 4, JSON.stringify({ mcp: stH?.initFrame?.mcpServers?.length, cfg: stH?.initFrame?.mcpServerErrors?.length, plug: stH?.initFrame?.pluginErrors?.length }));
+
+  // NEGATIVE CONTROL ①: a frame that reports everything connected is a real
+  // answer, and it must be able to CLEAR the chip — a gauge that cannot fall
+  // is not a gauge.
+  const healthy = { ...FRAME, mcp_servers: [{ name: 'chrome-devtools', status: 'connected' }] };
+  delete healthy.mcp_server_errors; delete healthy.plugin_errors;
+  const stClean = statusOf([healthy]);
+  ok('NEGATIVE CONTROL: an all-connected frame yields ZERO rows (so the chip clears) while the SAME reader on the broken frame yields 4 — the measurement is of the frame, not of the code path',
+    AM.initHealthIssues(stClean?.initFrame).length === 0 && AM.initHealthIssues(stH?.initFrame).length === 4);
+  // NEGATIVE CONTROL ②: ABSENT ≠ CLEAN. codex/ACP/an older CLI carry no
+  // frame at all, and applyStatus must then say NOTHING rather than assert
+  // health (initHealthIssues' own documented law, restated at the consumer).
+  ok('NEGATIVE CONTROL: no frame at all ⇒ no rows AND the consumer returns before touching the chip (ABSENT ≠ CLEAN — a codex window must not claim "nothing broken")',
+    AM.initHealthIssues(null).length === 0 && AM.initHealthIssues(undefined).length === 0);
+  fs.rmSync(tmp2, { recursive: true, force: true });
+
+  // ONE SPELLING. Two surfaces now render these rows; two spellings of
+  // "MCP github — failed" would be exactly the disagreement the second
+  // surface exists to remove.
+  const issues = AM.initHealthIssues(stH?.initFrame);
+  ok('the row label is ONE pure function shared by the card and the chip (initHealthLabel), and it shows the protocol detail VERBATIM',
+    typeof AM.initHealthLabel === 'function' && AM.initHealthLabel(issues.find((i) => i.name === 'github')) === 'MCP github — failed'
+    && AM.initHealthLabel(issues.find((i) => i.kind === 'plugin')).startsWith('plugin old-helper — unsatisfied_dependency')
+    && AM.initHealthLabel(null) === '', issues.map((i) => AM.initHealthLabel(i)));
+
+  // WIRING PINS — the 2.331.0 lesson again: the pure rows are useless without
+  // the three call sites that carry them from both paths to the one chip.
+  const cvSrc = fs.readFileSync(path.join(REPO, 'src/lib/chat-view.js'), 'utf8');
+  const crSrc = fs.readFileSync(path.join(REPO, 'src/lib/chat-renderers.js'), 'utf8');
+  const sbSrc = fs.readFileSync(path.join(REPO, 'src/lib/chat-status-bar.js'), 'utf8');
+  ok('WIRING: the renderer puts the frame on the SIDE EFFECT (which runs for a repeat, when the card does not)', /if \(f\) sideEffect\.initFrame = f;/.test(crSrc));
+  ok('WIRING: ChatView feeds the chip from BOTH paths through ONE method — the live side effect and applyStatus\'s attach frame',
+    /if \(se\.initFrame\) this\._applyInitHealth\(se\.initFrame\);/.test(cvSrc) && /this\._applyInitHealth\(status\.initFrame\);/.test(cvSrc));
+  ok('WIRING: that ONE method is the only caller of setInitHealth, and it returns on a falsy frame (ABSENT ≠ CLEAN, enforced at the call site not just in the doc)',
+    /_applyInitHealth\(frame\) \{\s*\n\s*if \(!frame\) return;\s*\n\s*this\._statusBar\.setInitHealth\(initHealthIssues\(frame\)\);/.test(cvSrc)
+    && (cvSrc.match(/setInitHealth\(/g) || []).length === 1);
+  ok('WIRING: the card and the chip import the SAME label (no second literal left in chat-renderers)',
+    /initHealthLabel/.test(crSrc) && /initHealthLabel/.test(sbSrc) && !/t\('MCP \{name\}', \{ name: i\.name \}\)/.test(crSrc));
+  ok('WIRING: the chip is NOT gated on what is in the slab — a guard that depends on where the transcript is scrolled fails while paging',
+    !/_windowStart|_messages\.some/.test(cvSrc.slice(cvSrc.indexOf('_applyInitHealth(frame) {'), cvSrc.indexOf('_applyInitHealth(frame) {') + 220)));
+}
+
 // ── 6. the card in a REAL browser + the 375×667 measurement ────────────────
 console.log('— the card in chrome');
 const CHROME = ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser'].find((p) => fs.existsSync(p));
@@ -550,6 +649,7 @@ if (!CHROME) {
   const stub = { name: 'stub-build-version', setup(b) { b.onResolve({ filter: /build-version\.js$/ }, () => ({ path: 'build-version', namespace: 'bv' })); b.onLoad({ filter: /.*/, namespace: 'bv' }, () => ({ contents: "export const BUILD_VERSION = 'test';", loader: 'js' })); } };
   const entry = path.join(tmp, 'entry.js');
   fs.writeFileSync(entry, `export { ChatRenderers } from ${JSON.stringify(path.join(REPO, 'src/lib/chat-renderers.js'))};\n`
+    + `export { ChatStatusBar } from ${JSON.stringify(path.join(REPO, 'src/lib/chat-status-bar.js'))};\n`
     + `export * as AM from ${JSON.stringify(path.join(REPO, 'src/lib/agent-meta.js'))};\n`);
   const bundle = path.join(tmp, 'init.iife.js');
   await esbuild.build({ entryPoints: [entry], bundle: true, format: 'iife', globalName: 'VS', platform: 'browser', target: 'es2022', outfile: bundle, logLevel: 'silent', loader: { '.css': 'text' }, plugins: [stub] });
@@ -559,7 +659,7 @@ if (!CHROME) {
   const html = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>init card</title>`
     + `<style>${base}</style><style>${css}</style>`
     + `<style>html,body{margin:0;height:100%}#host{position:fixed;inset:0;display:flex;flex-direction:column}#list{flex:1;min-height:0;overflow:auto}</style>`
-    + `<body><div id="host" class="chat-view"><div id="list" class="chat-message-list"></div></div><script>${js}</script>`;
+    + `<body><div id="host" class="chat-view"><div id="list" class="chat-message-list"></div><div id="bar"></div></div><script>${js}</script>`;
   const port = await freePort(), cdpPort = await freePort();
   const srv = http.createServer((_q, r) => { r.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); r.end(html); }).listen(port, '127.0.0.1');
   const chrome = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${cdpPort}`, '--no-first-run', '--no-sandbox', '--disable-gpu',
@@ -586,7 +686,7 @@ if (!CHROME) {
     const setViewport = (width, height) => cdp('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: width <= 768 });
     await setViewport(1280, 800);
     await cdp('Page.navigate', { url: `http://127.0.0.1:${port}/` });
-    for (let i = 0; i < 80; i++) { if (await evaljs('!!(window.VS && window.VS.ChatRenderers)').catch(() => false)) break; await sleep(150); }
+    for (let i = 0; i < 80; i++) { if (await evaljs('!!(window.VS && window.VS.ChatRenderers && window.VS.ChatStatusBar)').catch(() => false)) break; await sleep(150); }
 
     // The REAL renderSystemMsg path over the REAL normalizer output — not a
     // hand-built element: the card, its side effect and the frame all have to
@@ -722,9 +822,111 @@ if (!CHROME) {
     ok('a Write into a directory only the FRAME names renders as an ordinary Write until the classifier is told, and as a Memory update once it is — which is why loadHistory must learn the dirs before it renders the slab',
       /Write/.test(rMem.before) && !/Memory update/.test(rMem.before) && /Memory update/.test(rMem.after) && /notes\.md/.test(rMem.after), JSON.stringify(rMem).slice(0, 300));
 
+    // ── ROUND 4: the SAME slab that draws no card must still SPEAK ──
+    // The consequence measured end to end in a real document: a window whose
+    // rendered tail holds only `frameRepeat` inits draws no init card at all
+    // (that is the pre-fix state, asserted here as the FIRST half), and the
+    // status-bar chip — fed the frame the same records carry — is what makes
+    // the dead MCP server visible anyway.
+    const repeatSlabJson = (() => {
+      const mm2 = new MessageManager('sess-chrome-health');
+      const fill = (i) => ({ type: 'user', message: { role: 'user', content: `turn ${i}` }, uuid: `uc${i}`, timestamp: '2026-09-07T00:00:00.000Z' });
+      mm2.convertHistory([FRAME, ...Array.from({ length: 60 }, (_, i) => fill(i)), FRAME, ...Array.from({ length: 5 }, (_, i) => fill(100 + i))]);
+      return JSON.stringify(mm2.tail(50));
+    })();
+    const frameJson = JSON.stringify(initFrameFacts(FRAME));
+    const cleanFrameJson = (() => { const f = { ...FRAME, mcp_servers: [{ name: 'chrome-devtools', status: 'connected' }] }; delete f.mcp_server_errors; delete f.plugin_errors; return JSON.stringify(initFrameFacts(f)); })();
+    const mkBar = `(() => {
+      const host = document.getElementById('bar');
+      host.innerHTML = '';
+      const bar = new VS.ChatStatusBar({ send(){}, on(){}, onGlobal(){} }, 'sess-chrome-health', { backend: 'claude', getToolMsg: () => null, openSubagentViewer(){}, openInTempEditor(){}, getWorkflowIds: () => ({}) });
+      host.appendChild(bar.element);
+      window.__bar = bar;
+      return bar;
+    })()`;
+    const chipProbe = async (frameExpr) => evaljs(`(() => {
+      const list = document.getElementById('list');
+      list.innerHTML = '';
+      const r = new VS.ChatRenderers({ sessionId: 'view-x', backend: 'claude', messageList: list });
+      // render the ATTACHED slab exactly as loadHistory does
+      let sideFrames = 0;
+      for (const m of ${repeatSlabJson}) {
+        if (m.role !== 'system') continue;
+        const out = r.renderSystemMsg(m);
+        if (out?.sideEffect?.initFrame) sideFrames++;
+        if (out?.el) list.appendChild(out.el);
+      }
+      ${mkBar};
+      const frame = ${frameExpr};
+      // the ChatView seam, verbatim: rows in from the ONE classifier
+      if (frame) window.__bar.setInitHealth(VS.AM.initHealthIssues(frame));
+      window.__bar.render();
+      const chip = document.querySelector('.chat-status-health');
+      const cs = chip ? getComputedStyle(chip) : null;
+      const barCs = getComputedStyle(document.querySelector('.chat-status-bar'));
+      return {
+        cards: list.querySelectorAll('.chat-msg-init').length,
+        initRecordsInSlab: ${repeatSlabJson}.filter((m) => m.content && m.content[0] && m.content[0].initData).length,
+        sideFrames,
+        chip: !!chip,
+        chipText: chip ? chip.textContent.replace(/\s+/g, ' ').trim() : '',
+        chipTitle: chip ? chip.getAttribute('title') : '',
+        chipVisible: !!(chip && cs.display !== 'none' && cs.visibility !== 'hidden' && chip.getBoundingClientRect().width > 0),
+        chipColor: cs ? cs.color : '', barColor: barCs.color,
+        chipSvg: !!(chip && chip.querySelector('svg')),
+        chipHtml: chip ? chip.innerHTML : '',
+      };
+    })()`);
+    await setViewport(1280, 800);
+    await sleep(80);
+    const hBroken = await chipProbe(frameJson);
+    ok(`the attached slab draws ZERO init cards (${hBroken.cards}) even though ${hBroken.initRecordsInSlab} init record(s) are in it — the pre-fix window, reproduced in a real document`,
+      hBroken.cards === 0 && hBroken.initRecordsInSlab >= 1, hBroken);
+    ok('…and the side effect of those card-less records still carries the frame, so the facts reach the chip', hBroken.sideFrames >= 1, hBroken.sideFrames);
+    ok(`THE FIX, measured: the same window shows a VISIBLE "${hBroken.chipText}" chip in warning colour (computed ${hBroken.chipColor}, bar text ${hBroken.barColor}) with an inline SVG (never an emoji)`,
+      hBroken.chip && hBroken.chipVisible && /4/.test(hBroken.chipText) && hBroken.chipColor !== hBroken.barColor && hBroken.chipSvg
+      && !/[\u{1F300}-\u{1FAFF}]/u.test(hBroken.chipHtml), hBroken);
+    ok('…its tooltip names every row VERBATIM (the protocol status is never translated or mapped)',
+      /MCP github — failed/.test(hBroken.chipTitle) && /MCP drive — needs-auth/.test(hBroken.chipTitle)
+      && /MCP notes — url_missing_type/.test(hBroken.chipTitle) && /plugin old-helper — unsatisfied_dependency/.test(hBroken.chipTitle), hBroken.chipTitle);
+    const hClean = await chipProbe(cleanFrameJson);
+    ok('NEGATIVE CONTROL: an all-connected frame draws NO chip (a gauge that cannot fall is not a gauge) — same code path, same slab, only the frame changed',
+      !hClean.chip && hClean.cards === 0, hClean);
+    const hNone = await chipProbe('null');
+    ok('NEGATIVE CONTROL: never told (codex/ACP/older CLI — no frame at all) draws no chip either, so nothing ever claims "all healthy"', !hNone.chip, hNone);
+    // ABSENT ≠ CLEAN at the seam: a later status WITHOUT a frame must not
+    // erase what a live init already reported.
+    const hKeep = await evaljs(`(() => {
+      const frame = ${frameJson};
+      ${mkBar};
+      window.__bar.setInitHealth(VS.AM.initHealthIssues(frame));
+      window.__bar.render();
+      const had = !!document.querySelector('.chat-status-health');
+      // ChatView._applyInitHealth's guard, verbatim: a falsy frame returns
+      // before touching the chip.
+      const frame2 = null; if (frame2) window.__bar.setInitHealth(VS.AM.initHealthIssues(frame2));
+      window.__bar.render();
+      return { had, still: !!document.querySelector('.chat-status-health') };
+    })()`);
+    ok('a later status carrying NO frame leaves the chip standing (ABSENT ≠ CLEAN — an attach that cannot see the frame must not silently declare the session healthy)', hKeep.had && hKeep.still, hKeep);
+    // Touch has no hover: the rows must be reachable by CLICK.
+    const hClick = await evaljs(`(() => {
+      const frame = ${frameJson};
+      ${mkBar};
+      window.__bar.popupContainer = document.getElementById('host');
+      window.__bar.setInitHealth(VS.AM.initHealthIssues(frame));
+      window.__bar.render();
+      document.querySelector('.chat-status-health').click();
+      const rows = [...document.querySelectorAll('.chat-status-health-row')].map((r) => r.textContent.replace(/\s+/g, ' ').trim());
+      return { rows, note: (document.querySelector('.chat-status-dropdown-note') || {}).textContent || '', esc: !!document.querySelector('.chat-status-dropdown[data-popover]') };
+    })()`);
+    ok(`clicking the chip lists all 4 rows (touch has no hover — the tooltip alone would be unreadable on the surface where the card is hardest to reach) and joins the app-wide Escape protocol`,
+      hClick.rows.length === 4 && /MCP github — failed/.test(hClick.rows.join(' | ')) && hClick.esc && /start frame/.test(hClick.note), hClick);
+
     // ── ≤768px (375×667): the standing rule ──
     await setViewport(375, 667);
     await sleep(120);
+    await evaljs(`(() => { const frame = ${frameJson}; ${mkBar}; window.__bar.setInitHealth(VS.AM.initHealthIssues(frame)); window.__bar.render(); })()`);
     const m = await evaljs(`(() => {
       const list = document.getElementById('list');
       list.innerHTML = '';
@@ -741,12 +943,33 @@ if (!CHROME) {
       details.open = true;
       const body = card.querySelector('.chat-init-body');
       const after = { bodyRight: body.getBoundingClientRect().right, listScrollW: list.scrollWidth, listClientW: list.clientWidth, bodyH: body.getBoundingClientRect().height };
-      return { vw: innerWidth, before, after };
+      // …and the round-4 chip on the same 375px bar
+      const bar = document.querySelector('.chat-status-bar');
+      const chip = document.querySelector('.chat-status-health');
+      const bcs = bar ? getComputedStyle(bar) : null;
+      const ccs = chip ? getComputedStyle(chip) : null;
+      const chipInfo = chip ? {
+        w: chip.getBoundingClientRect().width, left: chip.getBoundingClientRect().left,
+        text: chip.textContent.replace(/\s+/g, ' ').trim(),
+        clipped: chip.scrollWidth > chip.clientWidth + 1,
+        shrink: ccs.flexShrink, barWrap: bcs.flexWrap, barOverflowX: bcs.overflowX,
+        // reachable = fully on screen now, or scrollable into view by a swipe
+        onScreen: chip.getBoundingClientRect().right <= innerWidth + 1,
+        barScrollable: bar.scrollWidth > bar.clientWidth,
+        index: [...bar.children].indexOf(chip),
+        children: bar.children.length,
+      } : null;
+      return { vw: innerWidth, before, after, chip: chipInfo };
     })()`);
     ok(`375×667 collapsed: the card and its health strip stay inside the viewport (card ${Math.round(m.before.cardW)} ≤ ${m.vw}, strip right ${Math.round(m.before.warnRight)} ≤ ${m.vw}) and the list does not scroll sideways (${m.before.listScrollW} ≤ ${m.before.listClientW})`,
       m.before.cardW <= m.vw + 1 && m.before.warnRight <= m.vw + 1 && m.before.listScrollW <= m.before.listClientW + 1, m);
     ok(`375×667: the summary is a WRAPPING row, and at this width it does not overflow its own box (flex-wrap ${m.before.sumWrap}, scrollWidth ${m.before.sumScrollW} ≤ ${m.before.sumClientW}, height ${Math.round(m.before.sumH)}px) — a longer style name or a bigger count wraps to a second line instead of clipping`,
       m.before.sumWrap === 'wrap' && m.before.sumScrollW <= m.before.sumClientW + 1, m.before);
+    ok(`375×667: the health chip keeps its FULL label on the narrow bar (${m.chip && Math.round(m.chip.w)}px, text "${m.chip && m.chip.text}", not clipped by its own box) and never shrinks away — the ≤768px bar is a single swipeable nowrap row (flex-wrap ${m.chip && m.chip.barWrap}, overflow-x ${m.chip && m.chip.barOverflowX}) so it is reachable ${m.chip && m.chip.onScreen ? 'without scrolling' : 'by a horizontal swipe'}`,
+      !!m.chip && m.chip.w > 0 && !m.chip.clipped && m.chip.shrink === '0' && m.chip.barWrap === 'nowrap' && m.chip.barOverflowX === 'auto'
+      && (m.chip.onScreen || m.chip.barScrollable), m.chip);
+    ok(`375×667: it sits near the FRONT of the bar (child ${m.chip && m.chip.index} of ${m.chip && m.chip.children}) — a warning parked behind eight chips on a 375px row is a warning nobody swipes to`,
+      !!m.chip && m.chip.index >= 0 && m.chip.index <= 2, m.chip);
     ok(`375×667 expanded: the inventory wraps too — long verbatim lists break instead of pushing the transcript sideways (body right ${Math.round(m.after.bodyRight)} ≤ ${m.vw}, scrollWidth ${m.after.listScrollW} ≤ ${m.after.listClientW}, body ${Math.round(m.after.bodyH)}px tall)`,
       m.after.bodyRight <= m.vw + 1 && m.after.listScrollW <= m.after.listClientW + 1 && m.after.bodyH > 0, m.after);
   } catch (e) {
