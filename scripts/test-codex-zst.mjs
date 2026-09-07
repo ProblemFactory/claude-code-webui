@@ -21,6 +21,10 @@
 //   ⑥f ONE WRITER PER SLOT: two overlapping fetches coalesce (one remote read,
 //      one append) and an append offset the slot has moved past is refetched
 //      whole instead of spliced — both rungs, each with its pre-fix repro
+//   ⑥g …and that refusal is TERMINAL: it survives the data-plane fallback
+//      (typed verdict + the movement outliving its rung + "grow only what we
+//      stamped"), the fallback logs whatever it does swallow VERBATIM, and the
+//      whole `cat` stamps the bytes it fetched — pre-fix repro + leg isolation
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -846,6 +850,7 @@ console.log('— ⑥ ONE remote cache slot, MANY remote files (codex .jsonl ⇄ 
     };
     const blindAppend = (hmx) => { hmx._appendDeltaAt = (p2, off, b) => { fs.appendFileSync(p2, b); return true; }; };            // the PRE-FIX write, verbatim
     const noSingleFlight = (hmx) => { hmx._fetchRemoteByFind = function (...a) { return this._fetchRemoteByFindOnce(...a); }; };  // the PRE-FIX entry point
+    const noStampGuard = (hmx) => { hmx._prefixIsOurs = () => true; };                                                           // the PRE-FIX delta legality (round 5's leg removed)
     const dialHm = (hid, rem, reads2, gate) => {
       const hmx = new HostManager({ dataDir });
       hmx._state.hosts.push({ id: hid, name: hid, transport: 'dial' });
@@ -914,7 +919,7 @@ console.log('— ⑥ ONE remote cache slot, MANY remote files (codex .jsonl ⇄ 
       const rem = { path: sl.remotePath, bytes: grown, mtime: 31001 };
       const reads2 = [], gate = gateOf();
       const hmB = dialHm('hf2', rem, reads2, gate);
-      blindAppend(hmB); noSingleFlight(hmB);
+      blindAppend(hmB); noSingleFlight(hmB); noStampGuard(hmB);   // round 5's leg is removed too — the SEAL below is what it independently blocks (⑥g/E)
       const c1 = hmB.fetchTranscript('hf2', 'codex', sl.tid);
       await sleep(20);
       const c2 = hmB.fetchTranscript('hf2', 'codex', sl.tid);
@@ -1029,6 +1034,242 @@ console.log('— ⑥ ONE remote cache slot, MANY remote files (codex .jsonl ⇄ 
         `over the cap a moved slot fails LOUDLY and never splices (${capErr})`);
       ok(after.length === prefix.length + 1 && after.subarray(0, prefix.length).equals(prefix),
         '…and the refused poll adds nothing of its own to the slot (only the foreign write that moved it is there)');
+    }
+
+    // ── ⑥g A MOVED SLOT IS TERMINAL ON EVERY RUNG (B-7638 round 5). (D) above
+    // proved the refusal on the rung that owns the LAST road — but the slab
+    // rung's copy of it was thrown INSIDE the data-plane try, whose catch
+    // degrades every failure to the ssh rung. So on a dial host with a
+    // reachable ssh fallback the over-cap refusal was swallowed silently, and
+    // the ssh rung then recomputed its offset from the MOVED file and spliced:
+    // right-size / wrong-bytes cache, meta stamped COMPLETE, and a stopped
+    // conversation serves it forever. THREE independent legs fix it — the
+    // verdict is a CODE the catch re-throws; what one rung learned about the
+    // slot outlives it (the ssh rung is denied a delta even when the slab rung
+    // fell through for an unrelated reason); and a delta may only extend bytes
+    // this cache's own writers STAMPED, which is the same knowledge one poll
+    // later, when the foreign bytes are simply in the file and every in-window
+    // check answers "fine" — plus the degrade-path law: whatever the catch DOES
+    // swallow, it says verbatim. Each leg is neuterable on its own below.
+    console.log('— ⑥g the moved-slot refusal survives the data-plane fallback (and the fallback speaks)');
+    {
+      const dialWithSsh = (hid, rem, reads2, log) => {
+        const hmx = new HostManager({ dataDir });
+        hmx._state.hosts.push({ id: hid, name: hid, transport: 'dial' });    // dial ⇒ slab rung FIRST, ssh rung underneath it
+        hmx.deviceBounded = async () => ({
+          runCmd: async () => ({ stdout: rem.path + '\n', stderr: '', code: 0 }),
+          fsStat: async () => { if (rem.statFails) throw new Error(rem.statFails); return { stat: { size: rem.bytes.length, mtimeMs: rem.mtime * 1000 } }; },
+          fsReadRange: async (p2, off, len) => {
+            reads2.push([off, len]);
+            if (rem.beforeRead) { rem.beforeRead(); rem.beforeRead = null; }
+            return { data: rem.bytes.subarray(off, off + len) };
+          },
+        });
+        hmx._ssh = async (h, cmd) => {                                        // a REACHABLE legacy rung — the whole point
+          if (/^cat /.test(cmd)) { log.cats.push(cmd); return rem.bytes; }
+          const m = /^tail -c \+(\d+) /.exec(cmd);
+          if (m) { log.tails.push(Number(m[1])); return rem.bytes.subarray(Number(m[1]) - 1); }
+          return Buffer.from(`${rem.bytes.length} ${rem.mtime}\n${rem.path}\n`);
+        };
+        return hmx;
+      };
+      const FOREIGN = Buffer.from('X'.repeat(203));                           // the verifier's foreign writer, byte for byte
+      const metaTextOf = (sl) => fs.readFileSync(sl.cache + '.meta', 'utf8');
+      const capturedWarns = [];
+      const withWarns = async (fn) => {
+        const orig = console.warn; console.warn = (...a) => { capturedWarns.push(a.map(String).join(' ')); };
+        try { return await fn(); } finally { console.warn = orig; }
+      };
+
+      // (E) THE VERIFIER'S SCENARIO — dial transport, slab rung first, ssh
+      // fallback reachable, remote past the cap, a foreign writer during
+      // fsReadRange. The fetch must FAIL, on both rungs, touching nothing.
+      {
+        const sl = slotFor('hg1', 'cccccccc-dddd-4eee-8fff-000000000030');
+        const prefix = Buffer.from(rollout(sl.tid, '/work/terminal', 'moved over the cap, dial rung', 40));
+        const grown = Buffer.concat([prefix, Buffer.from(ticks(1, 3))]);
+        seedFor(sl, prefix, 36000);
+        const metaBefore = metaTextOf(sl);
+        const reads2 = [], log = { cats: [], tails: [] };
+        const rem = { path: sl.remotePath, bytes: grown, mtime: 36001, beforeRead: () => fs.appendFileSync(sl.cache, FOREIGN) };
+        const hmI = dialWithSsh('hg1', rem, reads2, log);
+        let err = null, got = null;
+        await withWarns(async () => { try { got = await hmI.fetchTranscript('hg1', 'codex', sl.tid, { maxBytes: prefix.length - 1 }); } catch (e) { err = String(e && e.message || e); } });
+        ok(!got && /refusing to splice/.test(err || ''), `the over-cap refusal reaches the CALLER instead of dying in the data-plane catch (${got ? 'SERVED' : err})`);
+        ok(log.tails.length === 0 && log.cats.length === 0, `…and the ssh rung never runs a delta (nor anything else) after the slab rung watched the slot move (${JSON.stringify(log)})`);
+        const after = fs.readFileSync(sl.cache);
+        ok(after.length === prefix.length + FOREIGN.length && after.subarray(0, prefix.length).equals(prefix) && metaTextOf(sl) === metaBefore,
+          '…the cache carries only the foreign write that moved it, and the meta is byte-identical to what the poll found', { len: after.length, meta: metaTextOf(sl) });
+
+        // (E2) THE SAME SLOT ONE POLL LATER — the movement is over, but the
+        // file still holds bytes we never stamped. The in-window guard cannot
+        // see that (its offset now MATCHES the foreign tail); the stamped-size
+        // invariant is what keeps the delta off, forever.
+        reads2.length = 0; log.cats.length = 0; log.tails.length = 0;
+        rem.beforeRead = null;
+        let err2 = null, got2 = null;
+        await withWarns(async () => { try { got2 = await hmI.fetchTranscript('hg1', 'codex', sl.tid, { maxBytes: prefix.length - 1 }); } catch (e) { err2 = String(e && e.message || e); } });
+        ok(!got2 && log.tails.length === 0 && log.cats.length === 0 && fs.readFileSync(sl.cache).equals(after) && metaTextOf(sl) === metaBefore,
+          'the NEXT poll refuses too — a slot that grew outside our writers is never delta-grown, on either rung', { err2, log });
+        ok(/holds \d+ bytes where the last fetch stamped \d+/.test(err2 || '') && /cannot be re-fetched whole/.test(err2 || ''),
+          '…and the refusal names THAT fault (not a bare "too large", not the spliced-bytes one)', err2);
+
+        // NEGATIVE CONTROL: the pre-fix shape, both legs neutered — the
+        // verdict degrades silently and the ssh rung splices exactly as
+        // reported: right size, wrong bytes, stamped COMPLETE, served forever.
+        const slN = slotFor('hg2', 'cccccccc-dddd-4eee-8fff-000000000031');
+        seedFor(slN, prefix, 36000);
+        const readsN = [], logN = { cats: [], tails: [] };
+        const remN = { path: slN.remotePath, bytes: grown, mtime: 36001, beforeRead: () => fs.appendFileSync(slN.cache, FOREIGN) };
+        const hmJ = dialWithSsh('hg2', remN, readsN, logN);
+        hmJ._isTerminalFetchError = () => false;                              // the PRE-FIX catch: every throw is "try the other transport"
+        hmJ._slotMovedEarlier = () => false;                                  // the PRE-FIX ssh rung: it never heard what the slab rung saw
+        noStampGuard(hmJ);                                                    // the PRE-FIX delta legality
+        let errN = null, gotN = null;
+        const warnsAt = capturedWarns.length;
+        await withWarns(async () => { try { gotN = await hmJ.fetchTranscript('hg2', 'codex', slN.tid, { maxBytes: prefix.length - 1 }); } catch (e) { errN = String(e && e.message || e); } });
+        const spliced = fs.readFileSync(slN.cache);
+        const metaN = JSON.parse(metaTextOf(slN));
+        ok(!errN && gotN && logN.tails.length === 1 && spliced.length === grown.length && !spliced.equals(grown) && metaN.size === grown.length,
+          `REPRO: with both legs removed the ssh rung splices off the MOVED offset — right size, wrong bytes, stamped COMPLETE (${JSON.stringify({ errN, tails: logN.tails, len: spliced.length, want: grown.length, meta: metaN.size })})`);
+        ok(spliced.subarray(prefix.length, prefix.length + FOREIGN.length).equals(FOREIGN) && !spliced.subarray(prefix.length).equals(grown.subarray(prefix.length)),
+          `REPRO: the remote's bytes [${prefix.length},${prefix.length + FOREIGN.length}) are gone — the foreign write sits in their place`);
+        readsN.length = 0; logN.tails.length = 0;
+        const servedAgain = await hmJ.fetchTranscript('hg2', 'codex', slN.tid, { maxBytes: prefix.length - 1 });
+        ok(servedAgain && readsN.length === 0 && logN.tails.length === 0 && !fs.readFileSync(slN.cache).equals(grown),
+          'REPRO: and the sealed slot short-circuits on every later poll — a stopped conversation serves the corrupt transcript forever');
+        // …and the ONE thing the pre-fix code did not leave behind either: a line saying it happened
+        ok(capturedWarns.slice(warnsAt).some((w) => /refusing to splice/.test(w)),
+          'DEGRADE-PATH LAW: when the fallback DOES swallow that verdict, it at least logs it verbatim (pre-fix: not a single line)', capturedWarns.slice(warnsAt));
+
+        // (E3) LEG ISOLATION — each of the three guards is load-bearing on its
+        // own, and this suite can show it by neutering exactly one. Here only
+        // the TYPED verdict is gone: the other two still keep the splice off,
+        // but the caller is handed "too large" about a slot whose real fault is
+        // a cache that moved (an error string is not a diagnosis), decided by a
+        // rung that never saw the movement. (E2) isolates the stamped-size leg
+        // — a fresh poll, nothing moving, the flag necessarily false — and (F)
+        // below isolates the flag with the stamped-size leg neutered.
+        const slI = slotFor('hg6', 'cccccccc-dddd-4eee-8fff-000000000035');
+        seedFor(slI, prefix, 36000);
+        const metaI = fs.readFileSync(slI.cache + '.meta', 'utf8');
+        const readsI = [], logI = { cats: [], tails: [] };
+        const remI = { path: slI.remotePath, bytes: grown, mtime: 36001, beforeRead: () => fs.appendFileSync(slI.cache, FOREIGN) };
+        const hmI2 = dialWithSsh('hg6', remI, readsI, logI);
+        hmI2._isTerminalFetchError = () => false;                             // ONLY this leg removed
+        let errI = null, gotI = null;
+        await withWarns(async () => { try { gotI = await hmI2.fetchTranscript('hg6', 'codex', slI.tid, { maxBytes: prefix.length - 1 }); } catch (e) { errI = String(e && e.message || e); } });
+        ok(!gotI && logI.tails.length === 0 && fs.readFileSync(slI.cache).length === prefix.length + FOREIGN.length && fs.readFileSync(slI.cache + '.meta', 'utf8') === metaI,
+          'LEG ISOLATION: with only the typed verdict removed the other two legs still refuse the splice', { errI, logI });
+        ok(/too large/.test(errI || '') && !/refusing to splice/.test(errI || ''),
+          '…but the caller loses the diagnosis (it hears "too large" about a slot that MOVED) — which is why the verdict travels as a code', errI);
+      }
+
+      // (F) UNDER THE CAP the same movement is a WHOLE refetch, not a failure —
+      // and if the slab rung's own whole read then dies, the ssh rung must
+      // still refuse the delta: the movement was learned by a rung that is
+      // gone, so it travels in `slotMoved`. The stamped-size leg is NEUTERED
+      // here on purpose, so the only thing that can keep the tail off is that
+      // flag (an isolated single-leg proof; (E2) covers the other leg alone).
+      {
+        const sl = slotFor('hg3', 'cccccccc-dddd-4eee-8fff-000000000032');
+        const prefix = Buffer.from(rollout(sl.tid, '/work/terminal-under', 'moved under the cap, dial rung', 40));
+        const grown = Buffer.concat([prefix, Buffer.from(ticks(1, 3))]);
+        seedFor(sl, prefix, 37000);
+        const reads2 = [], log = { cats: [], tails: [] };
+        const rem = { path: sl.remotePath, bytes: grown, mtime: 37001, beforeRead: () => fs.appendFileSync(sl.cache, Buffer.from('X')) };
+        const hmK = dialWithSsh('hg3', rem, reads2, log);
+        const c = await hmK.fetchTranscript('hg3', 'codex', sl.tid);
+        ok(fs.readFileSync(c).equals(grown) && reads2.length === 2 && reads2[1][0] === 0 && log.tails.length === 0 && log.cats.length === 0,
+          `under the cap a moved slot is refetched WHOLE on the slab rung and never reaches the ssh one (${JSON.stringify({ reads: reads2, log })})`);
+
+        const sl2 = slotFor('hg4', 'cccccccc-dddd-4eee-8fff-000000000033');
+        seedFor(sl2, prefix, 37000);
+        const reads3 = [], log2 = { cats: [], tails: [] };
+        let readsSeen = 0;
+        const rem2 = { path: sl2.remotePath, bytes: grown, mtime: 37001, beforeRead: () => fs.appendFileSync(sl2.cache, Buffer.from('X')) };
+        const hmL = dialWithSsh('hg4', rem2, reads3, log2);
+        noStampGuard(hmL);                                                    // ← only `slotMoved` can keep the ssh delta off now
+        const dev = await hmL.deviceBounded();
+        hmL.deviceBounded = async () => ({ ...dev, fsReadRange: async (p2, off, len) => { if (++readsSeen === 2) throw new Error('data plane died before the whole refetch landed'); return dev.fsReadRange(p2, off, len); } });
+        let errF = null, cF = null;
+        await withWarns(async () => { try { cF = await hmL.fetchTranscript('hg4', 'codex', sl2.tid); } catch (e) { errF = String(e && e.message || e); } });
+        ok(!errF && cF && fs.readFileSync(cF).equals(grown) && log2.cats.length === 1 && log2.tails.length === 0,
+          `…and when the slab rung's own whole refetch dies, the ssh rung whole-cats instead of deltaing off the moved offset (${errF || JSON.stringify(log2)})`);
+      }
+
+      // (G) THE DEGRADE PATH SPEAKS (the round-5 MINOR). The data-plane catch
+      // used to swallow EVERY fault silently — a refusal, a transport fault, a
+      // free-identifier ReferenceError an extraction left behind (2.340.2 class,
+      // dead for three days behind exactly such a catch). Whatever it degrades,
+      // it now names verbatim.
+      {
+        const sl = slotFor('hg5', 'cccccccc-dddd-4eee-8fff-000000000034');
+        const body = Buffer.from(rollout(sl.tid, '/work/degrade', 'the fallback speaks', 40));
+        const reads2 = [], log = { cats: [], tails: [] };
+        const rem = { path: sl.remotePath, bytes: body, mtime: 38000, statFails: 'device link not responding within 6s — synthetic probe fault' };
+        const hmM = dialWithSsh('hg5', rem, reads2, log);
+        const warns = [];
+        const orig = console.warn; console.warn = (...a) => warns.push(a.map(String).join(' '));
+        let cD = null;
+        try { cD = await hmM.fetchTranscript('hg5', 'codex', sl.tid); } finally { console.warn = orig; }
+        ok(cD && fs.readFileSync(cD).equals(body) && log.cats.length === 1, 'a data-plane fault still degrades to the ssh rung (the fetch completes)', log);
+        ok(warns.some((w) => w.includes('device link not responding within 6s — synthetic probe fault') && w.includes('hg5')),
+          'DEGRADE-PATH LAW: the swallowed error is logged VERBATIM, with the host it happened on', warns);
+        // NEGATIVE CONTROL: the line is not unconditional noise — a healthy
+        // data-plane fetch degrades nothing and says nothing.
+        rem.statFails = null; rem.mtime = 38001; rem.bytes = Buffer.concat([body, Buffer.from(ticks(1, 2))]);
+        warns.length = 0; log.cats.length = 0;
+        console.warn = (...a) => warns.push(a.map(String).join(' '));
+        let cE = null;
+        try { cE = await hmM.fetchTranscript('hg5', 'codex', sl.tid); } finally { console.warn = orig; }
+        ok(cE && fs.readFileSync(cE).equals(rem.bytes) && log.cats.length === 0 && !warns.some((w) => /falling back to the ssh rung/.test(w)),
+          'NEGATIVE CONTROL: a healthy data-plane fetch logs no fallback line at all', warns);
+      }
+
+      // (H) …AND THE WHOLE `cat` MUST STAMP WHAT IT FETCHED. `cat` runs after
+      // the probe stat, so a live transcript hands back MORE bytes than the
+      // stat promised — and that rung stamped the STAT value, leaving
+      // meta.size < the file's real length after a perfectly healthy fetch.
+      // The round-5 invariant would then read our own whole fetch as bytes
+      // that "grew outside our writers" and refuse the next delta (over the
+      // cap: a hard failure). The tail branch of the same rung has always
+      // stamped the real length; the two writers now agree.
+      {
+        const hmN = new HostManager({ dataDir });
+        hmN._state.hosts.push({ id: 'hg7', name: 'hg7' });                    // no transport ⇒ legacy ssh rung
+        const tid = 'cccccccc-dddd-4eee-8fff-000000000036';
+        const rpath = `/home/u/.codex/sessions/2026/09/05/rollout-2026-09-05T00-00-00-${tid}.jsonl`;
+        const cache = path.join(dataDir, 'remote-jsonl', 'hg7', 'codex', `${tid}.jsonl`);
+        const body = Buffer.from(rollout(tid, '/work/overtake', 'the cat overtook the stat', 40));
+        const rem = { statSize: body.length, bytes: Buffer.concat([body, Buffer.from(ticks(1, 2))]), mtime: 39000 };   // grew between the probe and the cat
+        const log = { cats: [], tails: [] };
+        hmN._ssh = async (h, cmd) => {
+          if (/^cat /.test(cmd)) { log.cats.push(cmd); return rem.bytes; }
+          const m = /^tail -c \+(\d+) /.exec(cmd);
+          if (m) { log.tails.push(Number(m[1])); return rem.bytes.subarray(Number(m[1]) - 1); }
+          return Buffer.from(`${rem.statSize} ${rem.mtime}\n${rpath}\n`);
+        };
+        const metaAt = () => JSON.parse(fs.readFileSync(cache + '.meta', 'utf8'));
+        const c1 = await hmN.fetchTranscript('hg7', 'codex', tid);
+        ok(fs.readFileSync(c1).equals(rem.bytes) && log.cats.length === 1 && metaAt().size === rem.bytes.length,
+          `a whole cat that overtakes the stat stamps the bytes it FETCHED, not the ones it was promised (${metaAt().size} vs stat ${rem.statSize} vs file ${rem.bytes.length})`);
+        const before = rem.bytes;
+        rem.bytes = Buffer.concat([before, Buffer.from(ticks(3, 2))]); rem.statSize = rem.bytes.length; rem.mtime = 39001;
+        log.cats.length = 0; log.tails.length = 0;
+        const c2 = await hmN.fetchTranscript('hg7', 'codex', tid);
+        ok(fs.readFileSync(c2).equals(rem.bytes) && log.tails.length === 1 && log.tails[0] === before.length + 1 && log.cats.length === 0,
+          `…which is what lets the NEXT poll still ride the append-only delta (${JSON.stringify(log)})`);
+        // NEGATIVE CONTROL: the pre-fix stamp (the stat value) on the same
+        // slot — the invariant now reads the fetch's own extra bytes as
+        // foreign and re-pulls the whole file instead of the tail.
+        fs.writeFileSync(cache + '.meta', JSON.stringify({ ...metaAt(), size: before.length - Buffer.byteLength(ticks(1, 2)) }));
+        rem.bytes = Buffer.concat([rem.bytes, Buffer.from(ticks(5, 2))]); rem.statSize = rem.bytes.length; rem.mtime = 39002;
+        log.cats.length = 0; log.tails.length = 0;
+        const c3 = await hmN.fetchTranscript('hg7', 'codex', tid);
+        ok(fs.readFileSync(c3).equals(rem.bytes) && log.cats.length === 1 && log.tails.length === 0 && metaAt().size === rem.bytes.length,
+          `NEGATIVE CONTROL: a meta stamped with the stat value costs a WHOLE re-pull (and heals) — the delta win is what the honest stamp protects (${JSON.stringify(log)})`);
+      }
     }
   }
 }

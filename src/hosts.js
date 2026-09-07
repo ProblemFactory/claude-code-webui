@@ -37,6 +37,22 @@ const SSH_BASE_OPTS = [
   '-o', 'TCPKeepAlive=yes',
 ];
 
+/** A MOVED CACHE SLOT IS TERMINAL ON EVERY RUNG (B-7638 round 5). The remote
+ *  transcript fetch has two rungs, and the data plane's failures degrade to the
+ *  ssh one by design — a `catch` that treats EVERY throw as "this transport did
+ *  not work, try the other". The over-cap "the slot moved, refusing to splice"
+ *  verdict is not that kind of failure: it is a statement about the CACHE, true
+ *  on every transport, and letting it degrade handed the next rung the moved
+ *  file to delta from (right-size / wrong-bytes cache, stamped complete, served
+ *  forever — the exact corruption the refusal exists to prevent). So the verdict
+ *  travels as a CODE the fallback re-throws, never as a message nobody reads. */
+const SLOT_MOVED = 'ESLOTMOVED';
+const slotMovedError = (msg) => Object.assign(new Error(msg), { code: SLOT_MOVED });
+/** How many bytes the LAST fetch of a remote-transcript slot stamped (B-7638
+ *  round 5) — ONE definition, because the delta legality test and the error
+ *  that explains a refusal must not be able to disagree about it. */
+const stampedSizeOf = (meta) => (meta && Number.isFinite(Number(meta.size)) ? Number(meta.size) : NaN);
+
 class HostManager {
   constructor({ dataDir }) {
     this.convIndex = new (require('./conversation-index.js').ConversationIndex)({ dataDir });
@@ -1131,6 +1147,36 @@ class HostManager {
       return true;
     } finally { if (fd !== undefined) { try { fs.closeSync(fd); } catch { } } }
   }
+  /** TERMINAL vs DEGRADABLE (B-7638 round 5). The data-plane rung's catch means
+   *  "this transport did not work — try the other one", and that is right for
+   *  every TRANSPORT failure. A verdict about the CACHE is not one: it is true
+   *  on every rung, and degrading it handed the ssh rung the moved file to
+   *  compute a fresh offset from. Extracted as a method for the usual reason:
+   *  a test can neuter it and show the pre-fix silent swallow. */
+  _isTerminalFetchError(e) { return !!e && e.code === SLOT_MOVED; }
+  /** DID AN EARLIER RUNG WATCH THIS SLOT MOVE? (B-7638 round 5) — in-window
+   *  knowledge that must not die with the rung that learned it. The slab rung
+   *  can see the movement and then fail for an unrelated reason (its own whole
+   *  refetch dying, the device link dropping), and the ssh rung underneath
+   *  would otherwise compute a fresh offset from the moved file and splice.
+   *  Neuterable like its two siblings, so each leg can be shown load-bearing
+   *  on its own. */
+  _slotMovedEarlier(observed) { return !!(observed && observed.moved); }
+  /** IS THIS PREFIX STILL OURS? (B-7638 round 5) — the durable half of
+   *  `_appendDeltaAt`'s question. That guard only sees a slot that moves DURING
+   *  the remote read; one poll later the foreign bytes are simply IN the file,
+   *  the offset it re-reads matches them and the append lands right behind
+   *  them — right-size / wrong-bytes cache, stamped complete, served forever.
+   *  So the delta rungs also ask the meta: a delta may only extend bytes THIS
+   *  cache's own writers put there, i.e. the file may not hold MORE than the
+   *  last fetch stamped. A SHORTER file is deliberately allowed — a positional
+   *  append only ever writes at the end, so it is still a genuine prefix (a
+   *  crash between the append and the meta write, a truncation), and refusing
+   *  it would strand every over-cap slot that ever crashed mid-write. A meta
+   *  without a usable size is not a prefix claim at all ⇒ whole refetch.
+   *  Extracted as a method for the same reason `_appendDeltaAt` is: a test can
+   *  neuter it and show the pre-fix seal. */
+  _prefixIsOurs(localSize, meta) { return localSize <= stampedSizeOf(meta); }   // NaN ⇒ false ⇒ whole refetch
   // ONE FETCH PER CACHE SLOT AT A TIME (B-7638 round 4). The delta rungs are
   // read-then-append against a size measured before the read, so two
   // OVERLAPPING fetches of the same slot — the session poll and a user opening
@@ -1307,19 +1353,38 @@ class HostManager {
       if (whole) { delete m.adopted; delete m.slab; }
       return { ...m, ...fields, fetchedAt: Date.now(), compressed: isZstPath(fields.remotePath), v: META_V };
     };
+    // GROW ONLY WHAT WE STAMPED (B-7638 round 5). `_appendDeltaAt` catches a
+    // slot that moves DURING the remote read; the same movement one poll
+    // EARLIER is invisible to it — the foreign bytes are already in the file,
+    // so the offset it re-reads matches and the append lands right after them,
+    // and the stamp then says COMPLETE with the remote's bytes for that region
+    // missing forever. The durable form of the same question is asked of the
+    // meta instead of the clock: a delta may only extend bytes THIS cache's
+    // own writers put there, i.e. the file may not hold MORE than the last
+    // fetch stamped. Larger = something appended behind our back (the exact
+    // corruption); smaller is left alone deliberately — a positional append
+    // only ever writes at the end, so a short file is still a genuine prefix
+    // (a crash between the append and the meta write, or a truncation), and
+    // refusing it would strand every over-cap slot that ever crashed mid-write.
+    const stampedSize = () => stampedSizeOf(meta);                       // for the refusal's own words — the DECISION is _prefixIsOurs
+    const heldStampedBytes = (localSize) => this._prefixIsOurs(localSize, meta);
     // …and when a whole refetch is BOTH impossible (over the cap) and the only
-    // way out (the cache did not verify), say so — including that there is no
-    // remedy on this side. "remote transcript too large" alone sends the reader
-    // diagnosing a size problem on a slot whose real fault is spliced bytes; an
-    // error string is not a diagnosis, and neither is advice that cannot work
-    // (this suffix is reachable ONLY when the remote is past the cap, so
-    // deleting the cache just destroys the last copy and fails identically).
-    const tooLarge = (n, cacheVerified) => new Error(`remote transcript too large (${(n / 1048576) | 0}MB)`
-      + (!cacheVerified && fs.existsSync(cachePath) ? ` — and the cached copy could not be verified (bytes from another file, or spliced), so there is no prefix to grow from; the remote is past the ${(maxBytes / 1048576) | 0}MB fetch cap and cannot be re-fetched whole (deleting the cache would not help)` : ''));
+    // way out (the cache cannot be grown), say so — naming WHICH fault, and
+    // including that there is no remedy on this side. "remote transcript too
+    // large" alone sends the reader diagnosing a size problem on a slot whose
+    // real fault is spliced (or foreign-appended) bytes; an error string is not
+    // a diagnosis, and neither is advice that cannot work (this suffix is
+    // reachable ONLY when the remote is past the cap, so deleting the cache
+    // just destroys the last copy and fails identically).
+    const cacheFault = (localSize, verified) => (!verified ? 'the cached copy could not be verified (bytes from another file, or spliced)'
+      : (meta && localSize > 0 && !heldStampedBytes(localSize) ? `the cached copy holds ${localSize} bytes where the last fetch stamped ${stampedSize()} (it grew outside this cache's own writers, so it is no longer a prefix of the remote)` : ''));
+    const tooLarge = (n, fault) => new Error(`remote transcript too large (${(n / 1048576) | 0}MB)`
+      + (fault && fs.existsSync(cachePath) ? ` — and ${fault}, so there is no prefix to grow from; the remote is past the ${(maxBytes / 1048576) | 0}MB fetch cap and cannot be re-fetched whole (deleting the cache would not help)` : ''));
     // CS data-plane: INCREMENTAL slab sync — transcripts are append-only, so
     // when the cache already holds a prefix we fetch ONLY [cachedSize, size)
     // via read-range instead of re-pulling the whole file (the remote-jsonl
     // whole-file cache's biggest cost). Any failure → legacy ssh path below.
+    const observed = { moved: false };      // what the slab rung learns about the SLOT, read by the ssh rung (see the append refusal below)
     if (this.dataPlaneOn?.() || h.transport === 'dial') {
       try {
         const dm = await this.deviceBounded(id);
@@ -1351,13 +1416,15 @@ class HostManager {
         // archive shorter than the remote — yet re-compression REWRITES the
         // archive, so the "delta" would weld a foreign frame tail onto the old
         // frames. Negative-controlled in test-codex-zst ⑥d on BOTH rungs.
-        const canDelta = usable && !isZstPath(remotePath) && !cacheIsCompressed();
+        // …and ONLY over bytes this cache's own writers put there (round 5):
+        // a slot that grew behind our back is no longer a prefix of the remote.
+        const canDelta = usable && !isZstPath(remotePath) && !cacheIsCompressed() && heldStampedBytes(localSize);
         // the cap guards what we FETCH — with a warm prefix that's just the
         // delta, so a transcript growing past maxBytes keeps incrementing
         // instead of suddenly erroring (a 45MB real session was on track)
         const deltaSlab = canDelta && localSize > 0 && localSize <= size && !!meta;
         const fetchBytes = deltaSlab ? size - localSize : size;
-        if (fetchBytes > maxBytes) throw tooLarge(fetchBytes, usable);
+        if (fetchBytes > maxBytes) throw tooLarge(fetchBytes, cacheFault(localSize, usable));
         let grewSlab = deltaSlab;
         if (deltaSlab && size > localSize) {
           // append-only delta — the slab win
@@ -1372,7 +1439,16 @@ class HostManager {
           // over it (where the delta is the only road) fail loudly rather than
           // splice — the corruption this whole batch exists to prevent.
           if (!this._appendDeltaAt(cachePath, localSize, delta.data)) {
-            if (size > maxBytes) throw new Error(`cache slot moved under the delta (offset ${localSize}) and the remote is past the ${(maxBytes / 1048576) | 0}MB fetch cap — refusing to splice`);
+            // MOVEMENT OUTLIVES THIS RUNG (round 5). The verdict used to be a
+            // plain Error thrown INSIDE the data-plane try, so the over-cap
+            // refusal landed in the silent fallback catch and the ssh rung
+            // then recomputed its offset from the MOVED file and spliced —
+            // right size, wrong bytes, stamped complete, served forever. It is
+            // now typed (the catch re-throws it) and the flag below denies the
+            // next rung a delta even when the failure that got us there was
+            // something else entirely (a whole refetch that then failed).
+            observed.moved = true;
+            if (size > maxBytes) throw slotMovedError(`cache slot moved under the delta (offset ${localSize}) and the remote is past the ${(maxBytes / 1048576) | 0}MB fetch cap — refusing to splice`);
             console.warn(`[hosts] ${id}: cache slot moved under the slab delta (offset ${localSize}) — refetching whole`);
             grewSlab = false;
           }
@@ -1387,7 +1463,17 @@ class HostManager {
         }
         fs.writeFileSync(metaPath, JSON.stringify(nextMeta({ size, mtime, slab: true, remotePath }, { whole: !grewSlab })));
         return cachePath;
-      } catch (e2) { /* legacy fallback below */ }
+      } catch (e2) {
+        // A CACHE VERDICT IS NOT A TRANSPORT FAILURE (round 5): the moved-slot
+        // refusal is true on every rung, so it is re-thrown instead of degraded.
+        if (this._isTerminalFetchError(e2)) throw e2;
+        // …and everything that IS degraded says so VERBATIM (repo law): this
+        // catch swallowed every data-plane fault silently — including the
+        // refusal above and any free-identifier ReferenceError an extraction
+        // leaves behind (2.340.2 class) — so the only signal a fetch had
+        // degraded was the ssh cost nobody was measuring.
+        console.warn(`[hosts] ${id}: data-plane transcript fetch failed (${e2 && e2.message || e2}) — falling back to the ssh rung`);
+      }
     }
     const probe = `f=$(find ${root} ${findExpr} 2>/dev/null | sort | head -1); [ -n "$f" ] && { stat -c '%s %Y' "$f" 2>/dev/null || stat -f '%z %m' "$f"; } && echo "$f"`;
     let out;
@@ -1421,9 +1507,14 @@ class HostManager {
     // .zst remote over a .zst cache is a whole refetch, ⑥d — cached prefix no
     // longer than the remote), same never-stamp-bytes-we-didn't-get rule;
     // `tail -c +N` is 1-based on both GNU and BSD.
-    const canDeltaSsh = usableSsh && !isZstPath(remotePath) && !cacheIsCompressed() && localSizeSsh > 0 && localSizeSsh <= size && !!meta;
+    // …plus the two round-5 clauses: never a delta after the slab rung watched
+    // this slot move (`observed.moved`, in-window knowledge that must not die
+    // with the rung that learned it), and never over bytes we did not stamp
+    // (`heldStampedBytes`, the same knowledge one poll later — the file itself
+    // still carries the foreign append long after the race that wrote it).
+    const canDeltaSsh = usableSsh && !this._slotMovedEarlier(observed) && !isZstPath(remotePath) && !cacheIsCompressed() && localSizeSsh > 0 && localSizeSsh <= size && !!meta && heldStampedBytes(localSizeSsh);
     const fetchBytesSsh = canDeltaSsh ? size - localSizeSsh : size;
-    if (fetchBytesSsh > maxBytes) throw tooLarge(fetchBytesSsh, usableSsh);
+    if (fetchBytesSsh > maxBytes) throw tooLarge(fetchBytesSsh, cacheFault(localSizeSsh, usableSsh));
     fs.mkdirSync(dir, { recursive: true });
     let stampSize = size;
     let grewSsh = false;
@@ -1441,7 +1532,7 @@ class HostManager {
           // measured before the `tail` ran; if anything moved the cache since,
           // appending welds a DUPLICATE region on. The throw lands in the
           // fallback below — whole `cat` under the cap, a hard failure over it.
-          if (!this._appendDeltaAt(cachePath, localSizeSsh, delta)) throw new Error(`cache slot moved under the tail delta (offset ${localSizeSsh}) — refusing to splice`);
+          if (!this._appendDeltaAt(cachePath, localSizeSsh, delta)) throw slotMovedError(`cache slot moved under the tail delta (offset ${localSizeSsh}) — refusing to splice`);
           stampSize = localSizeSsh + delta.length;
         }
         grewSsh = true;
@@ -1465,6 +1556,15 @@ class HostManager {
       const tmp = cachePath + '.tmp';
       fs.writeFileSync(tmp, buf);
       fs.renameSync(tmp, cachePath);
+      // STAMP WHAT THE FILE ACTUALLY HOLDS (round 5) — the rule the tail branch
+      // above already follows. `cat` runs after the probe stat, so a live
+      // transcript hands back MORE bytes than `size`; stamping the stat value
+      // left meta.size < the file's real length on a perfectly healthy fetch,
+      // and the "grew outside our writers" invariant would then read its own
+      // whole fetch as foreign bytes and refuse the next delta (over the cap,
+      // that is a hard failure). The slab rung's whole read is length-checked,
+      // so it has no such gap.
+      stampSize = buf.length;
     }
     fs.writeFileSync(metaPath, JSON.stringify(nextMeta({ size: stampSize, mtime, remotePath }, { whole: !grewSsh })));
     return cachePath;
