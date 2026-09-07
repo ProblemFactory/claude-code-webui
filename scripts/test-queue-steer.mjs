@@ -587,6 +587,7 @@ console.log('— ⑦ FUNCTIONAL client: a normalizer-produced bubble → a real 
       // message as its OWN turn — which is the ONLY way this timer survives to
       // fire at all (a busy wrapper queues, and a queued item drains the
       // pending entry). The turn ends, the next one starts.
+      ChatView.prototype._noteTurnBoundary.call(ranOwn.view); // what the turn_complete meta op does first
       ChatView.prototype._hideTyping.call(ranOwn.view);
       ChatView.prototype._showTyping.call(ranOwn.view, 'thinking...');
       await wait(150);
@@ -601,16 +602,29 @@ console.log('— ⑦ FUNCTIONAL client: a normalizer-produced bubble → a real 
       // honest apology would be silenced by a single "running Bash".
       {
         const repaint = mkSteerView();
-        const e0 = repaint.view._turnEpoch;
+        const e0 = repaint.view._turnEpoch || 0; // a fresh view has seen no boundary yet (round 3: the epoch is stamped by turn_complete, not by the arm)
         ChatView.prototype._steerAfterSend.call(repaint.view, 'm-lost');
         ChatView.prototype._showTyping.call(repaint.view, 'running Bash');
         ChatView.prototype._showTyping.call(repaint.view, 'thinking...');
-        ok('a LABEL REPAINT is not a new turn (the epoch advances only where the flag arms)', repaint.view._turnEpoch === e0 && e0 >= 1, { e0, now: repaint.view._turnEpoch });
+        ok('a LABEL REPAINT is not a new turn (the epoch never moves on a label)', (repaint.view._turnEpoch || 0) === e0, { e0, now: repaint.view._turnEpoch });
         await wait(150);
         ok('…so the still-running apology survives a relabelled turn (the fix silences the NEXT turn, never this one)', repaint.notes.length === 1 && /could not be injected/.test(repaint.notes[0]), repaint.notes);
         ChatView.prototype._hideTyping.call(repaint.view);
         ChatView.prototype._showTyping.call(repaint.view, 'thinking...');
-        ok('…and a REAL turn boundary does advance it (hide → show = a new identity)', repaint.view._turnEpoch === e0 + 1, repaint.view._turnEpoch);
+        ok('…and a hide→show INSIDE the turn (permission answer, reconnect) is NOT a new identity either (round 3)', (repaint.view._turnEpoch || 0) === e0, repaint.view._turnEpoch);
+        ChatView.prototype._noteTurnBoundary.call(repaint.view);
+        ok('…only the REAL boundary (the turn_complete meta op) advances it', repaint.view._turnEpoch === e0 + 1, repaint.view._turnEpoch);
+      }
+      // ROUND 3: the flag dropping and re-arming inside ONE turn (a permission
+      // resolve hides the line, the next label re-arms it) must NOT silence the
+      // honest apology — the message is still un-injected in the SAME turn.
+      {
+        const mid = mkSteerView();
+        ChatView.prototype._steerAfterSend.call(mid.view, 'm-lost');
+        ChatView.prototype._hideTyping.call(mid.view);
+        ChatView.prototype._showTyping.call(mid.view, 'thinking...');
+        await wait(150);
+        ok('a hide/re-arm inside the same turn keeps the apology (no turn_complete ⇒ same turn ⇒ still un-injected)', mid.notes.length === 1 && /could not be injected/.test(mid.notes[0]), mid.notes);
       }
       ok('the sentence is translated (zh + ja)', read('src/lib/i18n-zh.js').includes('Sent — but it could not be injected into the running turn') && read('src/lib/i18n-ja.js').includes('Sent — but it could not be injected into the running turn'));
       // …and a CONVERSION inside the window cancels the timer: no apology for
@@ -714,8 +728,10 @@ console.log('— wiring + docs pins');
   { const cv3 = read('src/lib/chat-view.js');
     ok('the steer timeout compares the TURN it was armed in (a re-armed flag is not the same turn)',
       /const turnAtSend = this\._turnEpoch \|\| 0;/.test(cv3) && /if \(\(this\._turnEpoch \|\| 0\) !== turnAtSend\) return;/.test(cv3));
-    ok('…and the epoch is stamped on the SAME null→armed transition as _typingSince (a label repaint is not a new turn)',
-      /if \(!this\._typingSince\) \{\s*\n\s*this\._typingSince = Date\.now\(\);[\s\S]{0,120}this\._turnEpoch = \(this\._turnEpoch \|\| 0\) \+ 1;/.test(cv3)
+    ok('…and the epoch advances ONLY at the real boundary: _noteTurnBoundary, called first thing by the turn_complete meta op — never on the label arm (round 3)',
+      /_noteTurnBoundary\(\) \{ this\._turnEpoch = \(this\._turnEpoch \|\| 0\) \+ 1; \}/.test(cv3)
+      && /op\.subtype === 'turn_complete'\) \{\s*\n\s*this\._noteTurnBoundary\(\);/.test(cv3)
+      && !/if \(!this\._typingSince\) \{[\s\S]{0,160}_turnEpoch/.test(cv3)
       && (cv3.match(/this\._turnEpoch = /g) || []).length === 1); }
   { const kbd = read('docs/keyboard-shortcuts.md');
     ok('docs/keyboard-shortcuts.md carries the chord, the per-harness table and the ≤768px behaviour', /\*\*Alt\+Enter\*\*/.test(kbd) && /Sending while a turn is running/.test(kbd) && /chat\.steerNow/.test(kbd) && /Touch \/ ≤768px/.test(kbd)); }

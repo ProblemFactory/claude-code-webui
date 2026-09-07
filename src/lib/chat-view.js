@@ -2879,6 +2879,7 @@ class ChatView {
         if (gs.sentinel) this._renderers.appendSystem(t('Goal set: {condition}', { condition: gs.condition }));
       }
     } else if (op.subtype === 'turn_complete') {
+      this._noteTurnBoundary();
       this._hideTyping();
       this._statusBar.addCost(op.data?.cost, op.data?.modelUsage);
       // Blink window
@@ -3125,19 +3126,18 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
     }
   }
 
+  /** THE TURN'S IDENTITY advances at the REAL boundary — every normalizer's
+   *  `turn_complete` meta op — never on a label arm: `_typingSince` is a TIME
+   *  and a time is not an identity (the turn that ends and the one that
+   *  starts next can arm in the SAME millisecond), and the flag also drops
+   *  and re-arms INSIDE a turn (a permission answer, a reconnect), which must
+   *  not read as a new turn — the 2.302.0 capture-the-counter rule, applied to
+   *  the flag itself (steer-chord round 3). */
+  _noteTurnBoundary() { this._turnEpoch = (this._turnEpoch || 0) + 1; }
+
   // _showTyping / _hideTyping delegate to ChatInput (normal) or readOnly _streamStatus
   _showTyping(label = t('thinking...'), kind = null) {
-    // ARM (once per turn) — and stamp THE TURN'S IDENTITY at the same instant.
-    // `_typingSince` is a TIME, and a time is not an identity: the turn that
-    // ends and the turn that starts next can arm in the SAME millisecond (a
-    // queued message becomes its own turn the moment the previous one ends),
-    // so anything asking "is the turn I was in still the one running?" must
-    // compare `_turnEpoch` and never the timestamp — the 2.302.0
-    // capture-the-counter rule, applied to the flag itself.
-    if (!this._typingSince) {
-      this._typingSince = Date.now();               // watchdog arm
-      this._turnEpoch = (this._turnEpoch || 0) + 1; // …and this turn's id
-    }
+    if (!this._typingSince) this._typingSince = Date.now(); // watchdog arm
     if (this._chatInput) { this._chatInput.showTyping(label, kind); return; }
     // readOnly fallback — same shape as ChatInput's line (label in its own
     // `.chat-stream-label`), so a ticking age is a textContent write and not a
