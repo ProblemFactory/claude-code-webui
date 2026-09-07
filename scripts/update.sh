@@ -88,6 +88,17 @@ if ! git pull --ff-only; then
   fi
 fi
 echo "== npm install"
+# A stray entry named node_modules/node_modules (a self-referential symlink left
+# by an agent whose shell cwd reset to this checkout before its `ln -s`) makes
+# npm's reify fail with ENOTDIR on rename — real incident 2026-09-07, the owner's
+# Update died at this step. Only a symlink or an EMPTY directory is removed.
+if [ -L node_modules/node_modules ]; then
+  echo "== removing stray symlink node_modules/node_modules -> $(readlink node_modules/node_modules)"
+  rm -f node_modules/node_modules
+elif [ -d node_modules/node_modules ] && [ -z "$(ls -A node_modules/node_modules 2>/dev/null)" ]; then
+  echo "== removing empty stray dir node_modules/node_modules"
+  rmdir node_modules/node_modules
+fi
 npm install --no-audit --no-fund
 echo "== build"
 npm run build

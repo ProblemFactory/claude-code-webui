@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.369.56 — Update no longer dies on a stray `node_modules/node_modules`
+
+- **Owner's ⚙ → Update failed (exit 236) at `npm install`:** `ENOTDIR: rename node_modules/node_modules`. A worktree agent's `ln -s <checkout>/node_modules node_modules` had run with its shell cwd reset to the production checkout (the harness resets cwd between calls), so the link landed INSIDE the real node_modules as a self-referential symlink and npm's reify choked on it. scripts/update.sh now removes a symlink (or an empty dir) at that path before `npm install`, saying so in the log; a populated directory is never touched.
+
 ## 2.369.55 — codex Stop also clears the app-server queue (owner decision 2026-09-07; three adversarial rounds)
 
 - **Behaviour:** pressing Stop in a codex session now drops every QUEUED message, matching ACP (until now the app-server drained the queue the instant the interrupt landed, so a queued message RAN right after Stop). The wrapper's `interrupt` verb lists the queue and deletes every item BEFORE `turn/interrupt` (order, not a flag — clearing afterwards loses the race); each dropped bubble's chip reads **Removed (stopped)** through the same `queue_op_result` frame ACP emits; a queued peer/job message goes back to the delivery ladder (`peer_message_result ok:false`) for next-turn injection; failures speak (a failed list = "the queue was NOT cleared", a failed delete = that item is still queued and will run). No extra "Stop dropped N" notice for codex: every dropped item owns a bubble.
