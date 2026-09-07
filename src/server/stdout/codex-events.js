@@ -57,16 +57,27 @@ function create({ engine, deliverRef }) {
             : null;
           const sourceMeta = payload.source ? normalizeCodexSource(payload.source) : null;
           let changed = false;
-          // THE SESSION'S EFFORT, from the process that owns it (2.369.61):
+          // THE SESSION'S EFFORT, from the process that owns it (2.369.62):
           // `session._effort` used to move only when a CLIENT clicked the
           // status-bar picker, so an effort the wrapper adopted from the thread
           // (spawn env empty) or a `/effort` typed into the chat never reached
           // session-meta — and the next resume spawned with a stale value that
           // then labelled every turn. wrapper_meta.effortNext = what the next
           // turn will run at = exactly what a resume must carry.
-          if (msg.type === 'wrapper_meta') {
-            const nextEffort = payload.effortNext || payload.effort || null;
-            if (nextEffort && (session._effort || null) !== nextEffort) {
+          //
+          // ONE FACT, NOT TWO (r2 review): `effortNext` is the ONLY field this
+          // may read. `effort` is the LAST TURN's level — the very conflation
+          // this release exists to end — and `effortNext: null` is a POSITIVE
+          // statement ("nothing pending: the agent's own config decides"), not
+          // a gap to fill. Falling back to `effort` made picking "Auto (model
+          // default)" write the last turn's level into session-meta, so the
+          // attach payload, the chip after a restart and the next resume spawn
+          // all re-commanded a level the user had just cleared. A wrapper that
+          // predates this release sends NEITHER field ⇒ `undefined` ⇒ we leave
+          // `session._effort` exactly where master left it.
+          if (msg.type === 'wrapper_meta' && payload.effortNext !== undefined) {
+            const nextEffort = payload.effortNext || null;
+            if ((session._effort || null) !== nextEffort) {
               session._effort = nextEffort;
               changed = true;
             }

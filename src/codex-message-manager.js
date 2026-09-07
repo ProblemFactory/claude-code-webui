@@ -397,7 +397,7 @@ class CodexMessageManager {
       contextWindow: 0,
       lastUsage: null,
       total_cost_usd: 0,
-      // TWO effort facts (2.369.61): `effort` = what the CURRENT (or last) turn
+      // TWO effort facts (2.369.62): `effort` = what the CURRENT (or last) turn
       // is running at — the value baked onto that turn's message meta — and
       // `effortNext` = the pick that applies from the next turn. Conflating them
       // is how a turn codex ran at 'ultra' reported 'xhigh' per message.
@@ -850,7 +850,7 @@ class CodexMessageManager {
     // THE TURN'S effort (turn_context.effort, codex 0.149+ and the wrapper's
     // live twin). A record that names one also settles the pending question:
     // `effort_next` present = a re-pick is waiting for the next turn, absent =
-    // nothing is (2.369.61 — the wrapper states both).
+    // nothing is (2.369.62 — the wrapper states both).
     if (payload.effort) {
       const next = payload.effort_next || payload.effortNext || null;
       this._noteEffort(String(payload.effort), next ? String(next) : null, emit);
@@ -899,7 +899,7 @@ class CodexMessageManager {
     if (payload.permissionMode) this._status.permissionMode = payload.permissionMode;
     if (payload.contextWindow) this._status.contextWindow = payload.contextWindow;
     // The wrapper's own effort pair — the FALLBACK that makes a mid-turn attach
-    // honest (2.369.61): the buffer may hold no turn_context yet (a session
+    // honest (2.369.62): the buffer may hold no turn_context yet (a session
     // attached between boot and the first turn), and after a re-pick this is
     // the record that carries the pending value.
     if (payload.effort || payload.effortNext !== undefined) {
@@ -2005,7 +2005,7 @@ class CodexMessageManager {
       // for the status bar; never a card.
       const s = event.thread_settings && typeof event.thread_settings === 'object' ? event.thread_settings : {};
       if (s.model) this._status.model = String(s.model);
-      // The THREAD's effort = what the next turn will run at (2.369.61: it is
+      // The THREAD's effort = what the next turn will run at (2.369.62: it is
       // NOT a statement about the turn in flight, which keeps the value its own
       // turn_context named — a set-effort mid-turn must not relabel the
       // messages already produced). Before any turn has named one it is also

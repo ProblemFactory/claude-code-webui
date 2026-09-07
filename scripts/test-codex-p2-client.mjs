@@ -60,7 +60,7 @@ ok(/permissionModes: \['default', 'read-only', 'safe-yolo', 'yolo'\]/.test(metaS
 const sb = read('src/lib/chat-status-bar.js');
 // The SUBSTANCE is the seed expression + the fact that the names come from
 // agent-meta. Pinning the whole import list verbatim made every new helper a
-// false failure (2.369.61: effortDisplay/noteModelCatalog), so name only what
+// false failure (2.369.62: effortDisplay/noteModelCatalog), so name only what
 // this assertion is actually about.
 ok(/BACKEND_META\[backend\]\?\.permissionModes/.test(sb) && /import \{[^}]*\bBACKEND_META\b[^}]*\} from '\.\/agent-meta\.js'/.test(sb), 'the status bar seeds its permission dropdown from META (never claude modes on a codex chat before the first status)');
 const sf = read('src/lib/setup-flows.js');

@@ -97,7 +97,7 @@ export const BACKEND_META = {
     // t() at render (effortLabel below).
     effortHints: { ultra: 'delegates to sub-agents (multi-agent), extra usage' },
     // The effort value that is NOT a reasoning level but a delegation MODE
-    // (2.369.61): under codex 'ultra' the model still reasons at the served
+    // (2.369.62): under codex 'ultra' the model still reasons at the served
     // model's catalog `multi_agent_reasoning_effort` (gpt-6-astra: xhigh), so
     // a user who picked ultra and reads "xhigh" in the metadata popup is
     // seeing a TRUE fact stated as if it were their own pick. Surfaces gate on
@@ -150,7 +150,7 @@ export function effortLabel(backend, value, { capitalize = false } = {}) {
   return hint ? `${base} — ${t(hint)}` : base;
 }
 
-// ── MODEL CATALOG (2.369.61) ──
+// ── MODEL CATALOG (2.369.62) ──
 // The per-model facts /api/available-models carries that are NOT pickable
 // options — today only `multiAgentEffort` (the catalog's own
 // multi_agent_reasoning_effort). Kept HERE rather than in app.js because the

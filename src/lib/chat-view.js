@@ -1433,7 +1433,7 @@ class ChatView {
     // 'ultra' is a delegation MODE, not a level — effortDisplay names the
     // level the served model really reasons at (catalog
     // multi_agent_reasoning_effort), so a user who picked ultra does not read
-    // a bare 'xhigh' here and conclude their pick was dropped (2.369.61).
+    // a bare 'xhigh' here and conclude their pick was dropped (2.369.62).
     if (meta.effort) add(t('Effort'), effortDisplay(this._backendId(), meta.effort, { model: meta.model }));
     add(t('Stop reason'), meta.stopReason);
     // Codex has no vendor request id: its requestId is the LEDGER's synthetic
@@ -2871,7 +2871,7 @@ class ChatView {
       this._statusBar.setServedModel(op.data?.model || null);
       return;
     }
-    // Live effort (2.369.61): the running turn's value AND the pending pick.
+    // Live effort (2.369.62): the running turn's value AND the pending pick.
     // Fired by turn_context / wrapper_meta / thread_settings_applied alike, so
     // a `/effort` typed into the chat or another client's pick lands here with
     // no re-attach and no rollout re-read.

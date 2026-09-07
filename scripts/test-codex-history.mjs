@@ -483,7 +483,7 @@ const ok = (n, c, e) => { if (c) { pass++; console.log('  ✓ ' + n); } else { f
 // record's own meta has none (rows appended only when the sync rows lacked them).
 {
   const cv = require('node:fs').readFileSync(REPO + '/src/lib/chat-view.js', 'utf8');
-  // the Effort row goes through effortDisplay since 2.369.61 ('ultra' is a
+  // the Effort row goes through effortDisplay since 2.369.62 ('ultra' is a
   // delegation MODE and the popup names the level the model really reasons at)
   // — the FALLBACK this pin is about is unchanged: ledger value when the
   // record's own meta carries none.

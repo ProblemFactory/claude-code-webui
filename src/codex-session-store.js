@@ -304,18 +304,56 @@ function isWrapperTurnContext(record) {
   return p.wrapper === true || p.modelPinned !== undefined;
 }
 
+/** The wrapper's own copy of a settings record (r2 review). codex's rollout
+ *  copy of `thread_settings_applied` carries NINE thread_settings keys
+ *  (model_provider_id, approvals_reviewer, collaboration_mode,
+ *  permission_profile…) where ours carries five, so the two can never share a
+ *  fingerprint — without the marker a rebuilt history holds an unattributable
+ *  twin of codex's own record. */
+function isWrapperSettingsRecord(record) {
+  return record?.payload?.wrapper === true;
+}
+
+/** The VALUES a settings record states, as one string — the twin key for the
+ *  fold below. Deliberately only the fields both spellings carry. */
+function settingsSignature(record) {
+  const s = record?.payload?.thread_settings || record?.payload?.threadSettings || {};
+  return [s.model || '', s.approval_policy || s.approvalPolicy || '', s.reasoning_effort || s.reasoningEffort || '', s.personality || ''].join('|');
+}
+
 function mergeCodexRecords(historyRecords, liveRecords) {
   const merged = [];
   const seen = new Set();
   const keptTurnContexts = new Map(); // fingerprint → the copy that made it into `merged`
+  // The most recent thread_settings_applied that made it into `merged`, and the
+  // values it stated. ADJACENCY is the whole point: a conversation that goes
+  // high → ultra → high states the same signature twice on purpose, and folding
+  // the third record into the FIRST would make the rebuilt status report
+  // 'ultra' at the end. Only a repeat with nothing of its own kind in between
+  // is a twin of the same event.
+  let lastSettings = null; // { record, sig, turnId }
   let currentTurnId = 'prelude';
   for (const record of sortRecords([...(historyRecords || []), ...(liveRecords || [])])) {
     if (record.type === 'turn_context') {
       currentTurnId = record.payload?.turn_id || record.payload?.turnId || currentTurnId;
     }
+    const settingsSig = record.type === 'event_msg' && record.payload?.type === 'thread_settings_applied'
+      ? settingsSignature(record) : null;
+    if (settingsSig !== null) {
+      const twin = lastSettings && lastSettings.sig === settingsSig && lastSettings.turnId === currentTurnId ? lastSettings.record : null;
+      if (twin) {
+        // Same event, two authors. codex's own copy is the record; ours only
+        // ever stood in for it (the live buffer has no rollout). Keep the
+        // FIRST copy's position (it is the same moment either way) and take
+        // codex's payload when it is the one that arrived second — never
+        // mutate in place, `twin` is sortRecords' own shallow copy.
+        if (isWrapperSettingsRecord(twin) && !isWrapperSettingsRecord(record)) twin.payload = { ...record.payload };
+        continue;
+      }
+    }
     const fp = recordFingerprint(record, currentTurnId);
     if (fp && seen.has(fp)) {
-      // TURN_CONTEXT TWINS (2.369.61, the effort incident): the wrapper
+      // TURN_CONTEXT TWINS (2.369.62, the effort incident): the wrapper
       // synthesizes one the moment `turn/started` arrives (live visibility) and
       // codex writes its own when the turn really begins — same turn id, same
       // fingerprint, and OURS is always the earlier of the two, so first-wins
@@ -339,6 +377,10 @@ function mergeCodexRecords(historyRecords, liveRecords) {
     }
     if (fp) seen.add(fp);
     if (fp && record.type === 'turn_context') keptTurnContexts.set(fp, record);
+    // remembered only once the record really made it into `merged` — a pointer
+    // at a record the fingerprint dedup dropped would fold codex's copy into
+    // something no reader ever sees
+    if (settingsSig !== null) lastSettings = { record, sig: settingsSig, turnId: currentTurnId };
     delete record.__idx;
     delete record.__ts;
     merged.push(record);
@@ -414,7 +456,7 @@ class CodexSessionMessages {
       permissionModes: ['default', 'read-only', 'safe-yolo', 'yolo'],
       subagentMetas: [],
       // effort = what the LAST turn ran at; effortNext = the pick that applies
-      // from the next one (2.369.61 — one field could not say both, and the
+      // from the next one (2.369.62 — one field could not say both, and the
       // popup baked the wrong one onto every message of a turn)
       effort: null,
       effortNext: null,
@@ -427,7 +469,7 @@ class CodexSessionMessages {
     if (meta?.contextWindow) status.contextWindow = meta.contextWindow;
     if (meta?.subagentMetas) status.subagentMetas = meta.subagentMetas;
     if (meta?.sandbox) status.sandbox = meta.sandbox;
-    // the wrapper's live pair (2.369.61) — records below still override the
+    // the wrapper's live pair (2.369.62) — records below still override the
     // live-turn value, but a session attached before its first turn_context
     // (or one whose pick has not started a turn yet) is honest right away
     if (meta?.effort) status.effort = meta.effort;

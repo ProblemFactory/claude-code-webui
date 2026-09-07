@@ -129,7 +129,7 @@ function refreshCodexModels() {
       const ctx = m.context_window ? (m.context_window >= 1000000 ? Math.round(m.context_window / 1000000) + 'M' : Math.round(m.context_window / 1000) + 'k') : '';
       // Per-model reasoning levels ride along: GPT-5.6 made efforts
       // model-specific (sol/terra add max+ultra, luna tops out at max) —
-      // clients derive dropdowns from this instead of a stale hardcoded list. Plus multiAgentEffort (2.369.61) = the level a DELEGATING effort really reasons at ('ultra' is a mode, not a level); '' = the catalog names none ⇒ the label stays a bare "ultra", never a hardcoded one (kb agent-meta.js).
+      // clients derive dropdowns from this instead of a stale hardcoded list. Plus multiAgentEffort (2.369.62) = the level a DELEGATING effort really reasons at ('ultra' is a mode, not a level); '' = the catalog names none ⇒ the label stays a bare "ultra", never a hardcoded one (kb agent-meta.js).
       return { id: m.slug, label: (m.display_name || m.slug) + (ctx ? ` (${ctx})` : ''), efforts: (m.supported_reasoning_levels || []).map(l => l && l.effort).filter(Boolean), multiAgentEffort: m.multi_agent_reasoning_effort || '' };
     }).filter(m => m.id);
     let changed = false;

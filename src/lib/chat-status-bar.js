@@ -125,7 +125,7 @@ export class ChatStatusBar {
     if (status.total_cost_usd) this._statusCost = status.total_cost_usd;
     if (status.permissionMode) this._statusPermMode = status.permissionMode;
     if (status.permissionModes) this._permissionModes = status.permissionModes;
-    // TWO effort facts (2.369.61): the chip shows what applies GOING FORWARD
+    // TWO effort facts (2.369.62): the chip shows what applies GOING FORWARD
     // (`effortNext` — which is also what the optimistic click below sets), the
     // tooltip names the running turn's own value when it differs. A store that
     // only knows one of them (claude: the last COMMANDED value) still sets both.
@@ -153,7 +153,7 @@ export class ChatStatusBar {
     this.render();
   }
 
-  /** LIVE effort update (2.369.61) — the normalizer's `meta/effort` op, fired
+  /** LIVE effort update (2.369.62) — the normalizer's `meta/effort` op, fired
    *  by every carrier of the two facts (a turn's own turn_context, the
    *  wrapper's status record, codex's thread_settings_applied). Without this
    *  the chip only moved on the clicking client's optimistic write, and a
@@ -369,7 +369,7 @@ export class ChatStatusBar {
       parts.push(`<span class="chat-status-model chat-status-clickable${known ? '' : ' chat-status-dim'}${mismatch ? ' chat-status-model-fallback' : ''}${locked ? ' chat-status-model-locked' : ''}" title="${escHtml(title)}${escHtml(lockTip)}">${label}</span>`);
       const eKnown = !!this._statusEffort;
       // The DELEGATION mode reads as a downgrade unless the tooltip names the
-      // level the model really reasons at (2.369.61 — codex 'ultra' runs the
+      // level the model really reasons at (2.369.62 — codex 'ultra' runs the
       // model at the catalog's multi_agent_reasoning_effort, and every other
       // readout honestly says that level). The chip keeps the picked word.
       const eShown = effortDisplay(this._backend, this._statusEffort, { model: this._servedModel || this._statusModel });
@@ -1055,7 +1055,7 @@ export class ChatStatusBar {
           if (!dropdown.isConnected) return;
           loading.remove();
           const models = (data?.codex || []).filter(m => m.id);
-          noteModelCatalog('codex', models); // per-model multiAgentEffort for the effort tooltip (2.369.61)
+          noteModelCatalog('codex', models); // per-model multiAgentEffort for the effort tooltip (2.369.62)
           const rank = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
           const cur = models.find(m => m.id === this._statusModel);
           let levels = (cur?.efforts?.length ? cur.efforts : [...new Set(models.flatMap(m => m.efforts || []))])

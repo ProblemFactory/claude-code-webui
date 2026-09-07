@@ -276,7 +276,7 @@ const resumeId = process.env.CODEX_WEBUI_RESUME_ID || '';
 const model = process.env.CODEX_WEBUI_MODEL || '';
 // meta.modelPinned (2.369.32): set when the spawn carried a model or set-model ran — see updateMetaFromThread
 let effort = process.env.CODEX_WEBUI_EFFORT || ''; // mutable: set-effort updates it mid-session — the COMMANDED effort for the NEXT turn, never a statement about the running one
-// ── THE EFFORT A TURN IS RUNNING AT (2.369.61, owner's "调成了 ultra 但 metadata 显示 xhigh") ──
+// ── THE EFFORT A TURN IS RUNNING AT (2.369.62, owner's "调成了 ultra 但 metadata 显示 xhigh") ──
 // turn_context is the record every reader takes a turn's reasoning effort from
 // (the message-meta popup bakes it onto each message of the turn). OURS is
 // SYNTHESIZED at `turn/started`, and the 0.153.4 schema settles where the value
@@ -350,7 +350,7 @@ const meta = {
   permissionMode,
   approvalPolicy: currentPermission.approvalPolicy,
   sandbox: currentPermission.sandbox,
-  // THREE effort facts, never one (2.369.61): `effort` = the LIVE turn's (what
+  // THREE effort facts, never one (2.369.62): `effort` = the LIVE turn's (what
   // the popup must show for its messages), `effortNext` = the commanded value
   // the next turn will use, `threadEffort` = the app-server's own word for the
   // thread. They differ exactly when a user re-picks mid-turn — which is the
@@ -536,7 +536,7 @@ function updateMetaFromThread(resp) {
   // `effort`); a set-effort back to '' deliberately hands the choice back.
   if (!effort && typeof resp?.reasoningEffort === 'string' && resp.reasoningEffort) { effort = resp.reasoningEffort; meta.effortAdopted = effort; }
   meta.effortNext = effort || threadEffort || '';
-  // LIVE-TWIN CORRECTION (2.369.61): the resume reply can land AFTER the
+  // LIVE-TWIN CORRECTION (2.369.62): the resume reply can land AFTER the
   // app-server has already pushed `turn/started` for a turn it auto-continued —
   // that is the incident's exact stdout order (goal_cleared, turn/started, then
   // the thread/resume reply, all inside one millisecond). The turn_context we
@@ -604,7 +604,7 @@ function recordWrapperMeta() {
     contextWindow: meta.contextWindow || 0,
     activeTurnId: meta.activeTurnId || null,
     slashCommands: SLASH_COMMANDS, // the wrapper-served commands (chat-input autocomplete)
-    // TWO honest effort facts (2.369.61): what the live turn RUNS at, and what
+    // TWO honest effort facts (2.369.62): what the live turn RUNS at, and what
     // the next one WILL run at. A client attaching mid-turn reads both from
     // this record — no rollout re-read, no waiting for the next turn_context.
     effort: liveTurnEffort() || null,
@@ -627,7 +627,7 @@ function buildTurnContext(turnId) {
     model: meta.model || model || '',
     modelPinned: !!model,
     wrapper: true, // this copy is SYNTHESIZED — codex's own turn_context outranks it (merge fold)
-    // THIS TURN's effort, never the pending one (2.369.61). `effort_next` is
+    // THIS TURN's effort, never the pending one (2.369.62). `effort_next` is
     // stated only when a re-pick is waiting for the next turn — a reader that
     // sees both can say "running at X, switching to Y" instead of guessing.
     effort: liveTurnEffort() || null,
@@ -1122,7 +1122,12 @@ function handleNotification(method, params) {
     // including changes made outside this wrapper (the codex TUI, another
     // client). Recorded in codex's OWN rollout shape (`thread_settings_applied`
     // with snake_case `reasoning_effort`) so the live twin and the rebuilt
-    // history feed the normalizer the same record.
+    // history feed the normalizer the same record — but MARKED `wrapper: true`
+    // (r2 review), because the record is still one WE wrote: codex's own
+    // rollout copy carries 9 thread_settings keys (model_provider_id,
+    // approvals_reviewer, collaboration_mode, permission_profile…) to our 5, so
+    // the two never share a fingerprint and a rebuilt history would otherwise
+    // hold an unattributable twin. mergeCodexRecords folds ours into codex's.
     const s = params?.threadSettings || params?.thread_settings || {};
     if (typeof s.effort === 'string' && s.effort) { threadEffort = s.effort; meta.threadEffort = threadEffort; }
     else if (s.effort === null) { threadEffort = ''; meta.threadEffort = ''; }
@@ -1131,6 +1136,7 @@ function handleNotification(method, params) {
     record('event_msg', {
       type: 'thread_settings_applied',
       thread_id: params?.threadId || meta.threadId,
+      wrapper: true,
       thread_settings: {
         model: s.model || meta.model || '',
         approval_policy: s.approvalPolicy || meta.approvalPolicy || '',
@@ -1194,7 +1200,7 @@ function handleNotification(method, params) {
     currentTurnId = params?.turn?.id || params?.turnId || params?.id || currentTurnId;
     meta.activeTurnId = currentTurnId;
     meta.streaming = true;
-    // WHOSE turn is this, and what does it run at (2.369.61)? A turn/start of
+    // WHOSE turn is this, and what does it run at (2.369.62)? A turn/start of
     // ours is in flight ⇒ ours, at the effort we just sent (which also became
     // the thread's). Otherwise the app-server started it (drain / auto-continue)
     // ⇒ the THREAD's effort. `effort` is only the last-resort guess, and the
@@ -2363,7 +2369,7 @@ async function handleInput(msg) {
     effort = msg.effort || '';
     meta.effortOverride = effort;
     meta.effortNext = effort || threadEffort || '';
-    // …and tell the APP-SERVER, not just ourselves (2.369.61): only turn/start
+    // …and tell the APP-SERVER, not just ourselves (2.369.62): only turn/start
     // carries our value, so before this a turn the app-server starts on its own
     // (queue drain, resume auto-continue, goal continuation) still ran at the
     // OLD effort while our UI claimed the new one. ThreadSettingsUpdateParams
@@ -2371,31 +2377,42 @@ async function handleInput(msg) {
     // turns" (0.153.4) — exactly this verb. Our belief moves only if it is
     // ACCEPTED; a refusal leaves the per-turn path (turn/start) as the fallback
     // it always was.
+    let settingsAccepted = false;
     if (meta.threadId) {
       try {
         await request('thread/settings/update', { threadId: meta.threadId, effort: effort || null }, 30000);
         threadEffort = effort;
         meta.threadEffort = threadEffort;
+        settingsAccepted = true;
       } catch (e) {
         log('thread/settings/update (effort) refused, per-turn effort still applies: ' + e.message);
       }
     }
-    // The pending pick reaches every OTHER client and any mid-turn attach
-    // through these two records — no rollout re-read, no waiting for the next
-    // turn to start. `thread_settings_applied` is codex's own rollout shape and
-    // its fingerprint carries the VALUE, so a rebuild keeps each change (a
-    // second wrapper_meta for the same turn would fold into the first).
-    record('event_msg', {
-      type: 'thread_settings_applied',
-      thread_id: meta.threadId,
-      thread_settings: {
-        model: meta.model || '',
-        approval_policy: meta.approvalPolicy || '',
-        cwd: meta.cwd || '',
-        reasoning_effort: (effort || threadEffort) || null,
-        personality: personality || null,
-      },
-    });
+    // ONLY WHAT CODEX AGREED TO (r2 review). `thread_settings_applied` states
+    // what the THREAD is set to; emitting it after a REFUSED
+    // thread/settings/update wrote a record — in codex's own rollout spelling,
+    // unmarked — describing a setting codex had just rejected, and a rebuilt
+    // history kept it forever (our 5-key payload never dedups against codex's
+    // 9-key one). So: applied ⇒ record it, marked `wrapper: true` the way the
+    // synthesized turn_context is; refused (or no thread to command yet) ⇒ say
+    // nothing about the thread. The PENDING pick still reaches every other
+    // client and any mid-turn attach either way, through the wrapper's own
+    // status record below (`effortNext`) — that one is a statement about US,
+    // which is exactly what a refusal leaves true.
+    if (settingsAccepted) {
+      record('event_msg', {
+        type: 'thread_settings_applied',
+        thread_id: meta.threadId,
+        wrapper: true,
+        thread_settings: {
+          model: meta.model || '',
+          approval_policy: meta.approvalPolicy || '',
+          cwd: meta.cwd || '',
+          reasoning_effort: effort || null,
+          personality: personality || null,
+        },
+      });
+    }
     recordWrapperMeta();
     scheduleMeta();
     log('Effort set for next turn: ' + (effort || '(default)'));

@@ -112,7 +112,7 @@ fetchJson('/api/available-models').then(data => {
     SETTINGS_SCHEMA['claude.defaultModel'].options = toSchemaOptions(data.claude);
   }
   // Per-model facts that are not pickable options (multiAgentEffort) — the
-  // metadata popup and the status-bar tooltip read them from here (2.369.61).
+  // metadata popup and the status-bar tooltip read them from here (2.369.62).
   for (const be of Object.keys(data)) noteModelCatalog(be, data[be]);
   if (data.codex?.length) {
     BACKEND_SESSION_OPTIONS.codex.models = data.codex;
