@@ -23,6 +23,7 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { execFileSync, spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import http from 'node:http';
 import { startMockServe, createMockState, QUESTION_PART, emit } from './dev/mock-opencode-serve.mjs';
 
 const require = createRequire(import.meta.url);
@@ -1503,6 +1504,231 @@ async function r8Run(mod, { disable = true, enable = true } = {}) {
     new RegExp(`one per mechanism, ${n8} of them`).test(read('docs/kb-bugfix-invariants.md')) && new RegExp(`${n8} single-mechanism controls`).test(kfs),
     [n8]);
   for (const f of [r8EpochCtl.file, r8DetachCtl.file, r8AbandonCtl.file]) if (f) { try { fs.rmSync(f, { force: true }); } catch { } }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ROUND 9 — A RECORD YOU DO NOT OWN. Round 8 made `stop()` DETACH the in-flight
+// ladder (`ensuring = null`) so an Enable starts its own — which is also the
+// first time TWO ladders can be alive at once. Every post-await site got the
+// epoch check except the reuse rung's two `clearRecord()` calls: the verdict
+// `await unsafeReuseReason(probe, rec)` is followed by an unguarded
+// `killPid(rec.pid) + clearRecord()`, and the dead-pid arm runs after a
+// DEFAULT_TIMEOUT_MS health probe with no check either. A ladder cancelled by a
+// newer one therefore deleted data/opencode-serve.json AFTER the new ladder had
+// written its own — leaving a LIVE spawned serve with no record for the next
+// boot to adopt or kill, the orphaned third-party daemon the record exists to
+// prevent. `abandon()` even states the rule it was the only site to follow.
+console.log('\n— ROUND 9 (the eighth review: two ladders, one record) —');
+/** THE PRE-FIX CONTROL: src/opencode-serve.js with BOTH epoch checks AND the
+ *  ownership test in clearRecord() removed — i.e. the exact shape the incident
+ *  was reproduced against. The fix is deliberately two layers (a cancelled
+ *  ladder must not ACT, and no clear may name someone else's serve), so the
+ *  control that reproduces the ORIGINAL loss has to remove both; the
+ *  single-mechanism controls below then show each layer is load-bearing alone. */
+const R9_OWNED_CHECK = [
+  ["clearRecord()'s ownership test", '    if (owns) {\n      const r = readRecord();\n      if (!r) return false;\n      if (owns.port != null && r.port !== owns.port) return false;\n      if ((r.pid ?? null) !== (owns.pid ?? null)) return false;\n    }\n', '', 1],
+];
+const R9_VERDICT_CHECK = [
+  ['the reuse-verdict cancellation check', '        if (cancelled(epoch)) return null;\n        log?.warn?.(`[opencode-serve] replacing the recorded serve', '        log?.warn?.(`[opencode-serve] replacing the recorded serve', 1],
+];
+const R9_DEADPID_CHECK = [
+  ['the dead-pid arm cancellation check', '} else if (!cancelled(epoch) && !pidAlive(rec.pid)) clearRecord(owned);', '} else if (!pidAlive(rec.pid)) clearRecord(owned);', 1],
+];
+const R9_NEUTER = [...R9_VERDICT_CHECK, ...R9_DEADPID_CHECK, ...R9_OWNED_CHECK];
+const r9PreFix = buildNeutered('r9-prefix', R9_NEUTER);
+const r9VerdictCtl = buildNeutered('r9-verdict', R9_VERDICT_CHECK);
+const r9DeadPidCtl = buildNeutered('r9-deadpid', R9_DEADPID_CHECK);
+const r9OwnedCtl = buildNeutered('r9-owned', R9_OWNED_CHECK);
+ok('(the controls themselves) a PRE-FIX copy and one copy per mechanism can be built from the current source',
+  !!r9PreFix.mod && !!r9VerdictCtl.mod && !!r9DeadPidCtl.mod && !!r9OwnedCtl.mod,
+  [r9PreFix.why, r9VerdictCtl.why, r9DeadPidCtl.why, r9OwnedCtl.why]);
+
+/** A recorded serve whose `/global/health` NEVER answers: the request runs the
+ *  full DEFAULT_TIMEOUT_MS, which is the await the dead-pid arm sits behind.
+ *  (A closed port would fail in microseconds and there would be no window.) */
+function startHungServe() {
+  return new Promise((resolve) => {
+    const held = [];
+    const srv = http.createServer((req, res) => { held.push(res); });
+    srv.listen(0, '127.0.0.1', () => resolve({
+      port: srv.address().port,
+      close: () => new Promise((r) => { for (const h of held) { try { h.destroy(); } catch { } } srv.close(() => r()); }),
+    }));
+  });
+}
+
+/** THE REAL WIRING again (`_ocStop` then `_ocStart` in src/plugins.js), with the
+ *  Disable landing in the await each arm of the reuse rung sits behind:
+ *    'bad'  — a BUSY recorded serve whose own project is '/' (the 2.369.42
+ *             leftover the rung must REPLACE): health answers at ~700ms, the
+ *             verdict probe answers at ~1400ms, so a Disable at T+1000 lands
+ *             inside `unsafeReuseReason` — PAST round 7's post-health check.
+ *    'dead' — a recorded serve that never answers at all and a recorded pid
+ *             that is not running: the dead-pid arm, behind the 1.5s timeout.
+ *  `autostart:false` = the ladder may clean up but may never spawn (the
+ *  positive control that an UNCANCELLED ladder still clears a dead record). */
+async function r9Run(mod, { window: win, disable = true, enable = true, autostart = true } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-oc-r9-data-'));
+  const ocHome = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-oc-r9-home-'));
+  const storeDir = path.join(ocHome, '.local/share/opencode');
+  fs.mkdirSync(storeDir, { recursive: true });
+  fs.writeFileSync(path.join(storeDir, 'opencode.db'), 'x');
+  const mocks = [];
+  let wantUp = autostart, spawns = 0;
+  const kills = [], adoptions = [];
+  const RECORDED_PID = 987654;      // never this process, and not running: `pidAlive` is false for it
+  let recPort = null;
+  if (win === 'bad') {
+    const st = createMockState({ currentWorktree: '/' }); st.delayMs = 700;
+    const m = await startMockServe({ state: st }); mocks.push(m); recPort = m.port;
+  } else {
+    const h = await startHungServe(); mocks.push(h); recPort = h.port;
+  }
+  fs.writeFileSync(path.join(dir, 'opencode-serve.json'), JSON.stringify({ port: recPort, pid: RECORDED_PID, startedAt: Date.now(), cwd: dir }));
+  const facts = mod.install({
+    dataDir: dir, command: '/usr/bin/opencode', log: { warn() { }, error() { }, log() { } }, guardSampleMs: 0,
+    autostart: () => wantUp, readProc: () => ({ cpuTicks: 0, rssBytes: 1024 }),
+    killPid: (pid, sig) => { kills.push([pid, sig]); },   // on paper: really closing the mock would change the window under test
+    makeLane: (deps) => events.createLiveLane({ ...deps, env: { HOME: ocHome }, fetchImpl: async () => { throw new Error('no serve'); }, onExternal: () => { } }),
+    onState: (s) => { if (s && s.ready) { const k = `${s.source}:${s.port}`; if (adoptions[adoptions.length - 1] !== k) adoptions.push(k); } },
+    spawnImpl: (_cmd, args) => {
+      spawns++;
+      const port = Number(args[args.indexOf('--port') + 1]);
+      startMockServe({ port, state: createMockState() }).then((m) => mocks.push(m)).catch(() => { });
+      const c = new EventEmitter(); c.pid = 4242; c.unref = () => { }; c.kill = () => { }; return c;
+    },
+  });
+  facts.locator.start();                              // the plugin's Start — NOT awaited, exactly as the route leaves it
+  await sleep(win === 'bad' ? 1000 : 900);            // …now inside the await this window names
+  if (disable) { wantUp = false; facts.locator.stop({ killRecorded: true }); }
+  if (disable && enable) { await sleep(50); wantUp = autostart; facts.locator.start(); }
+  await sleep(3200);                                  // past the stale ladder's own await
+  const lst = facts.locator.state();
+  const rec = (() => { try { return JSON.parse(fs.readFileSync(path.join(dir, 'opencode-serve.json'), 'utf8')); } catch { return null; } })();
+  const out = {
+    ready: !!lst.ready, source: lst.source || null, port: lst.port, recordedPort: recPort, spawns, kills, adoptions,
+    record: rec ? rec.port : null, recordPid: rec ? rec.pid : null,
+    // THE FAILURE, named: a serve we started is running and nothing on disk says so
+    orphaned: !!lst.ready && lst.source === 'spawned' && (!rec || rec.port !== lst.port),
+    killsOfRecorded: kills.filter(([p]) => p === RECORDED_PID).length,
+  };
+  mod.uninstall();
+  for (const m of mocks) { try { await m.close(); } catch { } }
+  for (const d of [dir, ocHome]) fs.rmSync(d, { recursive: true, force: true });
+  return out;
+}
+for (const [win, label] of [['bad', "the reuse VERDICT probe on a '/'-worktree leftover"], ['dead', 'the health timeout of a recorded serve that never answers']]) {
+  const plain = await r9Run(serve, { window: win, disable: false });
+  ok(`(the control) with nobody touching it, ${label} really does replace the recorded serve and record the replacement`,
+    plain.spawns === 1 && plain.source === 'spawned' && plain.record === plain.port && plain.killsOfRecorded === (win === 'bad' ? 1 : 0), plain);
+
+  const fixed = await r9Run(serve, { window: win });
+  ok(`a Disable→Enable landing in ${label} leaves the record naming the serve we are actually talking to`,
+    fixed.ready === true && fixed.source === 'spawned' && fixed.record === fixed.port && fixed.orphaned === false, fixed);
+  ok('…the Enable spawned exactly once and published exactly one client', fixed.spawns === 1 && fixed.adoptions.length === 1, fixed);
+  ok('…and the cancelled ladder signalled NOTHING of its own: the only SIGTERM to the recorded pid is stop({killRecorded})\'s',
+    fixed.killsOfRecorded === 1, fixed);
+
+  if (!r9PreFix.mod) skip(`NEGATIVE CONTROL: the pre-fix keeper orphans its own serve through ${label}`, r9PreFix.why);
+  else {
+    const ctl = await r9Run(r9PreFix.mod, { window: win });
+    ok(`NEGATIVE CONTROL: the PRE-FIX keeper (both epoch checks + the ownership test removed) DELETES the live ladder's record through ${label} — a running \`opencode serve\` the next boot can neither adopt nor kill`,
+      ctl.ready === true && ctl.orphaned === true && ctl.record === null, ctl);
+  }
+}
+{
+  // …and each layer alone, so a future edit cannot quietly drop one of them
+  if (!r9VerdictCtl.mod) skip('NEGATIVE CONTROL: without the verdict check the cancelled ladder still ACTS', r9VerdictCtl.why);
+  else {
+    const ctl = await r9Run(r9VerdictCtl.mod, { window: 'bad' });
+    ok('NEGATIVE CONTROL: with ONLY the reuse-verdict `cancelled(epoch)` removed, the cancelled ladder still SIGTERMs the recorded pid on its own account (two kills) — and the record survives only because the OWNERSHIP layer refuses its clear',
+      ctl.killsOfRecorded === 2 && ctl.record === ctl.port, ctl);
+  }
+  if (!r9DeadPidCtl.mod) skip('NEGATIVE CONTROL: the dead-pid arm alone', r9DeadPidCtl.why);
+  else {
+    const ctl = await r9Run(r9DeadPidCtl.mod, { window: 'dead' });
+    ok('NEGATIVE CONTROL: with ONLY the dead-pid arm\'s `cancelled(epoch)` removed, the stale ladder reaches the clear and the OWNERSHIP layer alone holds the record (the two layers are independent — the pre-fix control above needs both gone)',
+      ctl.record === ctl.port && ctl.orphaned === false, ctl);
+  }
+  // THE POSITIVE CONTROL the guards must not break: an UNCANCELLED ladder still
+  // cleans up after a record whose pid is genuinely dead (autostart off, so the
+  // rung may clear but may not spawn — the cleanup is the only thing measured)
+  const cleanup = await r9Run(serve, { window: 'dead', disable: false, autostart: false });
+  ok('(positive control) an UNCANCELLED ladder still CLEARS a record whose pid is dead and whose serve never answers — the guards refuse a cancelled clear, not every clear',
+    cleanup.record === null && cleanup.spawns === 0 && cleanup.ready === false, cleanup);
+}
+
+/** THE PORT-RECYCLE VARIANT of the same rule, in `abandon()`. `freePort()` hands
+ *  out a port that is free RIGHT NOW, so the port an abandoned child was given
+ *  is re-bindable by the very ladder that cancelled it (its own child was
+ *  SIGTERMed first) — and the old `r.port === port` test would then delete the
+ *  NEW ladder's record for the serve it is actually talking to. `freePort()` is
+ *  not injectable, so the recycled state is written onto disk directly: the
+ *  record is REWRITTEN to {the abandoned child's port, the NEW child's pid},
+ *  byte-for-byte the shape `writeRecord` produces when the OS hands the port
+ *  back. The claim is the PAIR, so abandon() must refuse it. */
+{
+  const runRecycle = async (mod) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-oc-r9-recycle-'));
+    const recordPath = path.join(dir, 'opencode-serve.json');
+    const spawned = [];
+    let wantUp = true, pidSeq = 5000;
+    const loc = mod.createServeLocator({
+      dataDir: dir, command: '/usr/bin/opencode', log: { warn() { }, error() { }, log() { } }, guardSampleMs: 0,
+      autostart: () => wantUp, bootTimeoutMs: 20000,
+      execImpl: (_c, _a, _o, cb) => cb(null, '', ''),      // the isolated cwd, without a real `git init`
+      // a boot probe that HANGS until its own timeout: each rung of the boot
+      // wait then costs the full second, which is what puts ladder A's bail
+      // AFTER the recycled record is on disk (a closed port would refuse in
+      // microseconds and abandon() would run before the recycle, measuring
+      // nothing). This is the same "starting…" window rounds 7-8 used.
+      fetchImpl: (_u, o) => new Promise((_res, rej) => {
+        const sig = o && o.signal;
+        if (sig) sig.addEventListener('abort', () => rej(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true });
+      }),
+      spawnImpl: (_c, args) => {                            // nothing ever answers on these ports: both ladders sit in the boot wait
+        const port = Number(args[args.indexOf('--port') + 1]);
+        const c = new EventEmitter(); c.pid = ++pidSeq; c.unref = () => { }; c.kill = () => { };
+        spawned.push({ port, pid: c.pid });
+        return c;
+      },
+    });
+    loc.start();
+    await sleep(400);                                      // ladder A is in its boot wait, its record on disk
+    loc.stop();                                            // kills child A, clears the record, cancels ladder A
+    loc.start();                                           // ladder B: a new child, a new record
+    await sleep(400);
+    const [a, b] = spawned;
+    // …and now the OS hands ladder B the port ladder A just freed
+    if (a && b) fs.writeFileSync(recordPath, JSON.stringify({ port: a.port, pid: b.pid, startedAt: Date.now(), command: '/usr/bin/opencode', cwd: dir }));
+    await sleep(1600);                                     // ladder A's next boot-loop rung (probe timeout + 200ms) → abandon()
+    const rec = (() => { try { return JSON.parse(fs.readFileSync(recordPath, 'utf8')); } catch { return null; } })();
+    loc.stop();
+    const out = { spawns: spawned.length, samePortWritten: !!(a && b), recordPid: rec ? rec.pid : null, livePid: b ? b.pid : null };
+    fs.rmSync(dir, { recursive: true, force: true });
+    return out;
+  };
+  const r = await runRecycle(serve);
+  ok('(the setup) two ladders really spawned, and the record was rewritten to the recycled shape', r.spawns === 2 && r.samePortWritten === true, r);
+  ok("abandon() REFUSES to clear a record that carries the newer ladder's pid on the port it is giving up — port equality is not identity",
+    r.recordPid === r.livePid, r);
+  if (!r9OwnedCtl.mod) skip("NEGATIVE CONTROL: without the ownership test abandon() deletes the newer ladder's record", r9OwnedCtl.why);
+  else {
+    const ctl = await runRecycle(r9OwnedCtl.mod);
+    ok("NEGATIVE CONTROL: with ONLY clearRecord()'s ownership test removed, the abandoned ladder deletes the record naming the LIVE serve (port matched, pid did not)",
+      ctl.spawns === 2 && ctl.recordPid === null, ctl);
+  }
+}
+{
+  const kfs = read('docs/kb-file-structure.md');
+  const n9 = R9_NEUTER.length;
+  ok('docs: "a record you do not own" is in the kb essays + the incident file + the index',
+    /ROUND 9/.test(kfs) && /clearRecord/.test(kfs)
+    && /A RECORD YOU DO NOT OWN/.test(read('docs/kb-bugfix-invariants.md'))
+    && /S9 REMAINDER ROUND 9/.test(read('CLAUDE.md')));
+  ok(`docs: the ROUND 9 pre-fix control's size is stated as the number R9_NEUTER owns (${n9})`,
+    new RegExp(`removing all ${n9}`).test(read('docs/kb-bugfix-invariants.md')) && new RegExp(`its ${n9} replacements`).test(kfs), [n9]);
+  for (const f of [r9PreFix.file, r9VerdictCtl.file, r9DeadPidCtl.file, r9OwnedCtl.file]) if (f) { try { fs.rmSync(f, { force: true }); } catch { } }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

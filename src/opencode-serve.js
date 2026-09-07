@@ -762,7 +762,29 @@ function createServeLocator({
   const notify = () => { try { onState?.(snapshot()); } catch { } };
   function readRecord() { try { const r = JSON.parse(fs.readFileSync(recordPath, 'utf8')); return r && Number.isInteger(r.port) && r.port > 0 ? r : null; } catch { return null; } }
   function writeRecord(r) { try { writeJsonAtomic(recordPath, r); } catch (e) { log?.warn?.(`[opencode-serve] record write failed: ${e.message}`); } }
-  function clearRecord() { try { fs.unlinkSync(recordPath); } catch { } }
+  /** EVERY CLEAR NAMES THE SERVE IT BELIEVES IS RECORDED (round 9).
+   *  data/opencode-serve.json is a promise to the NEXT boot: "this port/pid is
+   *  ours — adopt it or kill it". Deleting one you do not own leaves a live
+   *  third-party daemon nobody can find, which is the exact class the record
+   *  exists to prevent. Round 8's `ensuring = null` let TWO ladders run at once
+   *  for the first time, so "the record on disk is mine" stopped being true by
+   *  construction: `owns` = {port, pid} is checked against what is actually
+   *  there and a mismatch REFUSES (returns false). Port alone is not identity —
+   *  a port freed by one ladder is re-bindable by the next — so the pid the
+   *  record was written with is part of the claim.
+   *  `clearRecord(null)` (unconditional) is reserved for `stop()`: it is
+   *  synchronous, it bumps the epoch FIRST, and "the user turned it off" is the
+   *  one instruction that outranks every record on disk. */
+  function clearRecord(owns = null) {
+    if (owns) {
+      const r = readRecord();
+      if (!r) return false;
+      if (owns.port != null && r.port !== owns.port) return false;
+      if ((r.pid ?? null) !== (owns.pid ?? null)) return false;
+    }
+    try { fs.unlinkSync(recordPath); } catch { }
+    return true;
+  }
   // /global/health carries the CLI version ({healthy, version:'1.18.29'}); /doc's info.version is the API doc's own
   async function healthy(client, ms) { try { const h = await client.health({ timeoutMs: ms }); if (h && typeof h.version === 'string') state.version = h.version; return !!h && h.healthy !== false; } catch { return false; } }
   async function probeCaps(client) {
@@ -850,15 +872,19 @@ function createServeLocator({
     const ch = state.child;
     state.child = null; state.client = null; state.port = null; state.pid = null;
     try { if (ch) ch.kill('SIGTERM'); else if (pid && pid !== process.pid) killPid(pid, 'SIGTERM'); } catch { }
-    clearRecord();
+    clearRecord({ port, pid });   // the serve we just stopped, named (round 9)
     log?.error?.(`[opencode-serve] RUNAWAY — ${state.lastError}. OpenCode boots an instance per session DIRECTORY and its file finder indexes + watches that whole tree; a session rooted at a huge directory burns the machine. Not restarting for ${Math.round(runawayCooldownMs / 60000)} min — disable the "OpenCode background service" plugin (⚙ → Plugins) if it recurs.`);
     try { telemetry?.({ name: 'opencode-serve-runaway', detail: `${why}${port ? ` port ${port}` : ''}`, value: Math.round(state.rssBytes / 1048576) }); } catch { }
     notify();
   }
-  function onChildExit(child, code, signal) {
+  function onChildExit(child, code, signal, port) {
     if (state.child !== child) return;
     state.child = null; state.client = null; state.port = null; state.pid = null;
-    clearRecord();
+    // the record this child was spawned with, named (round 9): `state.port` is
+    // still null while a child dies DURING its boot wait, so the port travels
+    // from the spawn site instead — and naming it means a late exit event can
+    // never delete a newer ladder's record.
+    clearRecord({ port, pid: child.pid || null });
     if (state.stopping || state.parked) { notify(); return; } // a runaway/park already decided the outcome — never respawn on its own SIGTERM
     if (state.startedAt && Date.now() - state.startedAt >= HEALTHY_UPTIME_RESET_MS) state.crashes = 0;
     state.crashes++;
@@ -929,6 +955,9 @@ function createServeLocator({
     }
     if (rec) {
       const probe = mkClient(rec.port);
+      // the ownership claim every clear in this rung makes: we may only delete
+      // the record if it is still THIS one (round 9 — see clearRecord)
+      const owned = { port: rec.port, pid: rec.pid || null };
       if (await healthy(probe, DEFAULT_TIMEOUT_MS)) {
         // …and the probe itself is an await (a BUSY serve answers /global/health
         // in hundreds of ms). Checking here as well as in adopt() means a
@@ -947,12 +976,27 @@ function createServeLocator({
           ? 'VIBESPACE_OPENCODE_SERVE=0 is set on this instance — the ops kill switch stops an adopted serve too'
           : await unsafeReuseReason(probe, rec);
         if (!bad) return adopt(rec.port, rec.pid || null, 'reused', epoch);
+        // …AND THE VERDICT IS AN AWAIT OF ITS OWN (round 9): `unsafeReuseReason`
+        // probes `GET /project/current` on that same busy serve. Round 8 made
+        // two ladders concurrent for the first time (`stop()` detaches the
+        // in-flight one so the Enable starts its own), and this branch — the
+        // only post-await site left without the check — then SIGTERMed a pid
+        // and DELETED THE RECORD on a verdict about a serve the newer ladder
+        // had already replaced. Measured: Disable at T, Enable at T+50 ms, the
+        // stale ladder waking at T+1.4 s wiped the record the Enable's spawn
+        // had just written — a live `opencode serve` the next boot can neither
+        // adopt nor kill, the orphaned-daemon class this record exists for.
+        if (cancelled(epoch)) return null;
         log?.warn?.(`[opencode-serve] replacing the recorded serve (pid ${rec.pid}, port ${rec.port}): ${bad}`);
         // never signal ourselves: a record can name this very process (a stale
         // pid reused after a reboot) and a self-SIGTERM would take the server down
         try { if (rec.pid && rec.pid !== process.pid) killPid(rec.pid, 'SIGTERM'); } catch { }
-        clearRecord();
-      } else if (!pidAlive(rec.pid)) clearRecord();
+        clearRecord(owned);
+        // the health probe is an await too (up to DEFAULT_TIMEOUT_MS on a serve
+        // that never answers), so its arm needs the same check: a cancelled
+        // ladder must not clean up after a record that is no longer the one it
+        // read — an uncancelled one still clears a genuinely dead pid.
+      } else if (!cancelled(epoch) && !pidAlive(rec.pid)) clearRecord(owned);
     }
     // 2) start one — only when the CLI is installed and autostart is allowed
     if (!cmd) { state.lastError = 'opencode CLI is not installed'; return null; }
@@ -966,7 +1010,7 @@ function createServeLocator({
     if (typeof child.unref === 'function') child.unref();
     state.child = child; state.pid = child.pid || null; state.startedAt = Date.now();
     child.once('error', (e) => { state.lastError = `spawn failed: ${e.message}`; });
-    child.on('exit', (code, signal) => onChildExit(child, code, signal));
+    child.on('exit', (code, signal) => onChildExit(child, code, signal, port));
     writeRecord({ port, pid: child.pid || null, startedAt: state.startedAt, command: cmd, cwd: state.cwd || cwd || null });
     const probe = mkClient(port);
     const t0 = Date.now();
@@ -990,8 +1034,14 @@ function createServeLocator({
       // this invariant are pinned by test-opencode-s9's abandon leg.
       if (state.child === child) { state.child = null; state.pid = null; }
       try { child.kill('SIGTERM'); } catch { }
-      const r = readRecord();
-      if (r && r.port === port) clearRecord();   // never clear a record that names a DIFFERENT serve
+      // never clear a record that names a DIFFERENT serve — and PORT ALONE
+      // CANNOT SAY THAT (round 9): `freePort()` hands out a port that is free
+      // right now, so the port this abandoned child was given is re-bindable
+      // by the very ladder that cancelled it, and the old `r.port === port`
+      // test would then delete the NEW ladder's record for the serve it is
+      // actually talking to. The claim is {port, pid} — the pair writeRecord
+      // wrote — so a recycled port with a different child fails it.
+      clearRecord({ port, pid: child.pid || null });
       return null;
     };
     const cancelWhy = () => (state.stopping ? 'the background service was turned off' : null);
@@ -1066,6 +1116,10 @@ function createServeLocator({
     const ch = state.child;
     const livePid = state.pid;
     state.child = null; state.client = null; state.port = null;
+    // UNCONDITIONAL, deliberately (round 9): `stop()` is synchronous and bumps
+    // the epoch FIRST, so no ladder can be interleaved with these lines, and
+    // "the user turned the service off" outranks whatever is on disk — leaving
+    // a record here is how "off" becomes "the next boot adopts it again".
     if (ch) { try { ch.kill('SIGTERM'); } catch { } clearRecord(); }
     else if (killRecorded) {
       const rec = readRecord();
