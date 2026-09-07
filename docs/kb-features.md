@@ -199,7 +199,16 @@ impossible rather than a review promise.
   already sent — an unsent rewrite, and also anything typed DURING a save that
   has not been answered yet (the draft autosave is off for that whole window) —
   so the one thing that never happens is your words existing only in a box that
-  is about to disappear.
+  is about to disappear. **And an in-chat action button cannot walk into your
+  edit** (2026-09-07): "Compact now" and the design request type into the same
+  input, so while an edit is open they are REFUSED with a toast ("finish or
+  cancel the queued-message edit first — the action was not sent") instead of
+  rewriting your queued message to `/compact`; the button stays clickable and
+  the design dropdown keeps the brief you typed, so finishing the edit and
+  clicking again is all it takes. With no edit open those actions also hand back
+  whatever they wrote over: a half-typed prompt returns to the box and to the
+  draft, and pending attachments stay pending instead of riding along with the
+  action.
 - **Run now / Run all now (2026-09-07)** — `thread/queue/start` with and without
   an id. While a turn is running BOTH are refused out loud ("a turn is already
   running — the queue runs as soon as it ends") rather than being queued behind

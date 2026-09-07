@@ -272,7 +272,7 @@ class ChatView {
       onRestartSession: readOnly ? null : () => this.app?.restartConversationInPlace?.({ webuiId: this.sessionId }),
       // Design chip (2.366.0): a brief → a design request the agent fulfils
       // with the design kit and publishes to THIS VibeSpace (view-only windows: none)
-      onDesignRequest: readOnly ? null : (brief, opts) => this._sendDesignRequest(brief, opts),
+      onDesignRequest: readOnly ? null : (brief, opts) => this._sendDesignRequest(brief, opts), // false = refused (the dropdown keeps the brief)
       // Running-workflow chips: click → live detail window; poll needs ids
       onOpenWorkflow: (runId, name) => {
         const ids = this._getSessionIds();
@@ -2977,14 +2977,19 @@ class ChatView {
    *  `vibespace-page publish`. Agent-facing text: English, not t(). */
   _sendDesignRequest(brief, { public: pub = false } = {}) {
     const b = String(brief || '').trim();
-    if (!b || !this._chatInput) return;
+    if (!b || !this._chatInput) return false;
     const msg = `[VibeSpace design request] ${b}
 
 Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
 1. Run \`vibespace-page kit\` — it prints "Base directory for this skill: <dir>".
 2. Read <dir>/SKILL.md and follow it exactly: author the .dc.html artboards (and canvas.json for several), seed with seed-canvas.mjs, run its --check. Work inside a new subdirectory designs/<short-slug>/ of the current working directory (create it) so the working files and the seeded ~2 MB page never land in a repo root. Do not use the Artifact tool, artifact-capabilities or anything pointing at claude.ai.
 3. Publish with \`vibespace-page publish <seeded file> --title "<what I would call it>"${pub ? ' --public' : ''}\` and reply with the share link plus a line on what you drafted and assumed.`;
-    this._chatInput.sendText(msg);
+    // ANSWER THE DIALOG (round-5): sendText refuses while a queued-message
+    // edit owns the input, and the brief exists only in the dropdown's own
+    // textarea — the caller keeps it open on a false. Every reachable false
+    // is one sendText already TOASTED (the chip exists only on a window that
+    // has a live input, so the guard above cannot answer for the dropdown).
+    return this._chatInput.sendText(msg) !== false;
   }
 
   // ── LIVE SUB-AGENT TRAFFIC (2026-09-07, owner: "这种互聊如果连续发生是不是应该

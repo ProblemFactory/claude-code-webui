@@ -510,10 +510,13 @@ console.log('— ⑤ the client strip (DOM-free render of the REAL ChatInput)');
     const cant = mkCI({ _queueCaps: srvCaps('claude').inputModes, _isStreaming: true, _send: () => { sends++; return 'x'; } });
     ok('steerNow() on a harness that cannot steer sends NOTHING at all', cant.steerNow() === false && sends === 1);
   }
-  // _send's new contract, at the source: three null returns and one msgId
+  // _send's MERGED contract, at the source (2.369.61 chord ⊕ round-5 bail-out):
+  // a STRING msgId when a queueable message went out, `true` when it took the
+  // box without one (/goal, an edit), `false` on every bail.
   {
     const src = read('src/lib/chat-input.js');
-    ok('_send returns the msgId (and null on every non-send path: empty, disconnected, /goal)', /return msgId;/.test(src) && (src.match(/return null;/g) || []).length >= 3, (src.match(/return null;[^\n]*/g) || []));
+    ok('_send returns the msgId for a real message, `true` when it took the box without one (/goal, an edit), and `false` on every bail — the chord reads the id, sendText reads the bail',
+      /return msgId;/.test(src) && (src.match(/return false;/g) || []).length >= 3 && /const msgId = typeof r === 'string' \? r : null;/.test(src), (src.match(/return (false|true|msgId);[^\n]*/g) || []));
   }
 }
 
@@ -904,6 +907,28 @@ console.log('— wiring + docs pins');
   const cinput = read('src/lib/chat-input.js');
   ok('the strip is the FIRST child of the input area (above the box, as designed)', /inputArea\.append\(this\._queueStrip, this\._attachArea/.test(cinput));
   ok('the strip renders nothing for a harness without queueOps (no dead control)', /const items = this\._queueCaps\.queueOps \? this\._queue : \[\];/.test(cinput));
+  // ROUND-5: THE EDITOR OWNS THE BOX — a DOM-free pin on the guard itself, so
+  // the shape survives an edit that never opens a browser.
+  ok('sendText REFUSES while a queued-message editor owns the box (an action can never be swallowed into an `edit`)',
+    /sendText\(text\) \{\n\s*if \(!this\._textarea\) return false;\n\s*if \(this\._editingQueueId \|\| this\._pendingEdit\) \{\n\s*showToast\(t\('Finish or cancel the queued-message edit first/.test(cinput));
+  ok('…and the action spends nothing of the user\'s: the half-typed box and the pending attachments are put back around the send',
+    /const keptText = this\._textarea\.value;/.test(cinput) && /const keptAttachments = this\._attachments;/.test(cinput)
+    && /if \(keptAttachments\.length\) \{ this\._attachments = keptAttachments; this\._renderAttachments\(\); \}/.test(cinput));
+  ok('…and `_send` ANSWERS whether it took the box, so a bail-out reaches the action\'s caller as a refusal too',
+    /_send\(\) \{\n\s*const text = this\._textarea\.value\.trim\(\);\n\s*const hasAttachments = this\._attachments\.length > 0;\n\s*if \(!text && !hasAttachments\) return false;/.test(cinput)
+    && /const sent = this\._send\(\) !== false;/.test(cinput) && /\n    return sent;\n  \}/.test(cinput));
+  ok('…and the draft SLOT is handed back with the text (confirmDelivery would clear the store out from under it)',
+    /if \(this\._pendingSend && this\._pendingSend !== prevPendingSend\) this\._pendingSend = null;/.test(cinput));
+  ok('…and every OTHER programmatic writer of the textarea is audited where they live (guard or reason, one list)',
+    /EVERY PROGRAMMATIC WRITER OF THE TEXTAREA/.test(cinput) && /input-history recall \(ArrowUp\/ArrowDown\)/.test(cinput));
+  // A refusal that leaves the control dead is the offered action disappearing
+  // right after its own toast said to come back — both callers must survive it,
+  // and the design brief lives ONLY in that dropdown's textarea.
+  ok('the Compact-now button re-enables itself when the send is refused',
+    /if \(this\._onSendText\('\/compact'\) === false\) btn\.disabled = false;/.test(read('src/lib/chat-renderers.js')));
+  ok('the design dropdown keeps the typed brief when the send is refused (it closed BEFORE the send)',
+    /if \(this\._onDesignRequest\(brief, \{ public: pubCb\.checked \}\) === false\) return;\n\s*dropdown\.remove\(\);/.test(read('src/lib/chat-status-bar.js'))
+    && /return this\._chatInput\.sendText\(msg\) !== false;/.test(read('src/lib/chat-view.js')));
   const cw = read('data/bin/codex-chat-wrapper.js');
   const aw = read('data/bin/acp-wrapper.js');
   ok('BOTH wrappers serve the new stdin verb in the same batch (the frame-file lesson)', /msg\.type === 'queue-op'/.test(cw) && /case 'queue-op':/.test(aw));
@@ -2405,6 +2430,166 @@ console.log('— ⑪ drag-reorder / edit / run-all in a REAL browser (trusted po
           return out;
         })()`);
         ok(`…and a second editor DURING a save is refused out loud, box untouched (${JSON.stringify(whilePending)})`, whilePending.box === 'a rewrite on the wire' && whilePending.editing === null && whilePending.pending === true && /still saving/.test(whilePending.toast));
+
+        // ── ROUND-5 VERIFIER (MAJOR): A PROGRAMMATIC SEND FIRED WHILE AN
+        // EDITOR IS OPEN. `sendText` is the path every in-chat action button
+        // takes (Compact now, the design request): it wrote its text straight
+        // into the textarea and called `_send` — which, in edit mode, SAVES
+        // the box as an `edit` op. One click therefore rewrote the queued
+        // message to "/compact", never ran the action, and destroyed the
+        // rewrite (law ② keeps it out of the draft store for the whole edit,
+        // so it lived nowhere else). The guard is the sibling of
+        // _beginQueueEdit's: refuse OUT LOUD, touch nothing.
+        await evaljs(setup('my real draft'));
+        const actionWhileEditing = await evaljs(`(() => {
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q1"]').click();
+          const ta = document.querySelector('textarea');
+          ta.value = 'the rewrite I am still typing';
+          const answer = window.__ci.sendText('/compact');
+          const out = { answer, box: ta.value, editing: window.__ci._editingQueueId, pending: !!window.__ci._pendingEdit,
+            ops: window.__ops.map((o) => o.op + ':' + (o.extra?.text ?? '')), sent: window.__sent.map((f) => f.text),
+            toast: document.getElementById('global-toasts')?.textContent || '' };
+          ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          window.__ci.setQueue(window.__items, ${CODEX_VERBS});
+          return out;
+        })()`);
+        ok(`round-5: an action fired during an open edit is REFUSED, and says so (${JSON.stringify({ answer: actionWhileEditing.answer, toast: actionWhileEditing.toast.slice(0, 90) })})`,
+          actionWhileEditing.answer === false && /Finish or cancel the queued-message edit/.test(actionWhileEditing.toast));
+        ok(`…NOTHING went on the wire — no queue-op frame, no chat message (${JSON.stringify({ ops: actionWhileEditing.ops, sent: actionWhileEditing.sent })})`,
+          actionWhileEditing.ops.length === 0 && actionWhileEditing.sent.length === 0);
+        ok(`…and the box is untouched: the rewrite is still there and the row is still being edited (${JSON.stringify({ box: actionWhileEditing.box, editing: actionWhileEditing.editing })})`,
+          actionWhileEditing.box === 'the rewrite I am still typing' && actionWhileEditing.editing === 'q1' && actionWhileEditing.pending === false);
+
+        // …and the OTHER half of "the editor owns the box": the save is already
+        // on the wire (`_pendingEdit`). The rewrite is in the box waiting for a
+        // result that may hand it back — an action written over it is the same
+        // loss with a frame already gone.
+        await evaljs(setup('my real draft'));
+        const actionWhilePending = await evaljs(`(() => {
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q1"]').click();
+          const ta = document.querySelector('textarea');
+          ta.value = 'a rewrite on the wire';
+          window.__ci._send();
+          const answer = window.__ci.sendText('/compact');
+          const out = { answer, box: ta.value, pending: !!window.__ci._pendingEdit,
+            ops: window.__ops.map((o) => o.op + ':' + (o.extra?.text ?? '')), sent: window.__sent.map((f) => f.text),
+            toast: document.getElementById('global-toasts')?.textContent || '' };
+          window.__ci.setQueueOpResult('q1', true, '');
+          window.__ci.setQueue(window.__items, ${CODEX_VERBS});
+          return out;
+        })()`);
+        ok(`…an action fired while the SAVE is in flight is refused the same way (${JSON.stringify({ answer: actionWhilePending.answer, box: actionWhilePending.box, sent: actionWhilePending.sent })})`,
+          actionWhilePending.answer === false && actionWhilePending.box === 'a rewrite on the wire' && actionWhilePending.sent.length === 0 && /Finish or cancel the queued-message edit/.test(actionWhilePending.toast));
+        ok(`…and the ONLY frame out is the user's own edit, carrying the user's own words (${JSON.stringify(actionWhilePending.ops)})`,
+          actionWhilePending.ops.length === 1 && actionWhilePending.ops[0] === 'edit:a rewrite on the wire');
+
+        // NEGATIVE CONTROL (instance-level neuter): the pre-fix body, verbatim.
+        await evaljs(setup('my real draft'));
+        const actionNeutered = await evaljs(`(() => {
+          window.__ci.sendText = function (text) {           // the pre-fix body
+            if (!this._textarea) return;
+            this._textarea.value = String(text || '');
+            this._send();
+          };
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q1"]').click();
+          const ta = document.querySelector('textarea');
+          ta.value = 'the rewrite I am still typing';
+          window.__ci.sendText('/compact');
+          const out = { box: ta.value, editing: window.__ci._editingQueueId, pending: !!window.__ci._pendingEdit,
+            ops: window.__ops.map((o) => o.op + ':' + (o.extra?.text ?? '')), sent: window.__sent.map((f) => f.text),
+            toast: document.getElementById('global-toasts')?.textContent || '' };
+          delete window.__ci.sendText;
+          window.__ci.setQueueOpResult('q1', true, '');
+          window.__ci.setQueue(window.__items, ${CODEX_VERBS});
+          return out;
+        })()`);
+        ok(`negative control: the pre-fix sendText turns the ACTION into an edit of the queued message — the defect, reproduced (${JSON.stringify(actionNeutered.ops)})`,
+          actionNeutered.ops.length === 1 && actionNeutered.ops[0] === 'edit:/compact');
+        ok(`…the action never reaches the agent and the rewrite is gone from the box (${JSON.stringify({ sent: actionNeutered.sent, box: actionNeutered.box, toast: actionNeutered.toast })})`,
+          actionNeutered.sent.length === 0 && actionNeutered.box === '/compact' && actionNeutered.toast === '');
+
+        // POSITIVE CONTROL: with NO edit open the action goes out exactly as
+        // before — and (same audit) it spends nothing of the user's: a
+        // half-typed prompt comes back to the box AND to the draft store,
+        // which `_send` had just pinned to the action's own text.
+        await evaljs(setup('a half-typed prompt'));
+        const actionNormally = await evaljs(`(() => {
+          const ta = document.querySelector('textarea');
+          const answer = window.__ci.sendText('/compact');
+          const out = { answer, box: ta.value, draft: VS.loadDraft('chat', 'sess-verbs'),
+            sent: window.__sent.map((f) => f.text), ops: window.__ops.length };
+          window.__ci.hideTyping();
+          window.__ci._pendingSend = null;
+          return out;
+        })()`);
+        ok(`positive control: with no edit open the action IS sent (${JSON.stringify({ answer: actionNormally.answer, sent: actionNormally.sent, ops: actionNormally.ops })})`,
+          actionNormally.answer === true && actionNormally.sent.length === 1 && actionNormally.sent[0] === '/compact' && actionNormally.ops === 0);
+        ok(`…and the half-typed prompt it wrote over is handed back to the box AND the draft store (${JSON.stringify({ box: actionNormally.box, draft: actionNormally.draft })})`,
+          actionNormally.box === 'a half-typed prompt' && actionNormally.draft === 'a half-typed prompt');
+
+        // A REFUSED send (dead socket) must reach the caller too, or the
+        // Compact button disables itself over a send that never happened.
+        await evaljs(setup('a half-typed prompt'));
+        const actionOffline = await evaljs(`(() => {
+          window.__ci.setDisconnected(true);
+          const ta = document.querySelector('textarea');
+          const answer = window.__ci.sendText('/compact');
+          const out = { answer, box: ta.value, sent: window.__sent.map((f) => f.text),
+            toast: document.getElementById('global-toasts')?.textContent || '' };
+          window.__ci.setDisconnected(false);
+          window.__ci._pendingSend = null;
+          return out;
+        })()`);
+        ok(`…a send REFUSED by a dead socket answers false as well, with the typed prompt back in the box (${JSON.stringify(actionOffline)})`,
+          actionOffline.answer === false && actionOffline.sent.length === 0 && actionOffline.box === 'a half-typed prompt' && /Disconnected/.test(actionOffline.toast));
+
+        // THE DRAFT SLOT GOES WITH THE TEXT THAT CAME BACK: `_send` arms
+        // `_pendingSend` for the ACTION and `confirmDelivery()` clears the
+        // store on the first inbound frame — which would have deleted the
+        // user's prompt from the store moments after it was handed back.
+        await evaljs(setup('a half-typed prompt'));
+        const actionSlot = await evaljs(`(() => {
+          window.__ci.sendText('/compact');
+          const armed = !!window.__ci._pendingSend;
+          window.__ci.confirmDelivery();                 // the server answered
+          const out = { armed, draft: VS.loadDraft('chat', 'sess-verbs'), box: document.querySelector('textarea').value };
+          window.__ci.hideTyping(); window.__ci._pendingSend = null;
+          return out;
+        })()`);
+        ok(`…and the action releases the draft slot, so the delivery echo cannot clear the user's prompt out of the store (${JSON.stringify(actionSlot)})`,
+          actionSlot.armed === false && actionSlot.draft === 'a half-typed prompt' && actionSlot.box === 'a half-typed prompt');
+
+        // NEGATIVE CONTROL: leave the slot armed (the pre-fix state) and the
+        // very same echo takes the draft with it.
+        await evaljs(setup('a half-typed prompt'));
+        const slotNeutered = await evaljs(`(() => {
+          window.__ci.sendText('/compact');
+          window.__ci._pendingSend = { text: '/compact' };   // as _send left it
+          window.__ci.confirmDelivery();
+          const out = { draft: VS.loadDraft('chat', 'sess-verbs'), box: document.querySelector('textarea').value };
+          window.__ci.hideTyping(); window.__ci._pendingSend = null;
+          return out;
+        })()`);
+        ok(`negative control: with the slot still armed the delivery echo clears the store — the box is the only copy again (${JSON.stringify(slotNeutered)})`,
+          slotNeutered.draft === '' && slotNeutered.box === 'a half-typed prompt');
+
+        // …and the user's pending ATTACHMENTS are not folded into the action's
+        // frame (`_send` builds an image message whenever any are pending).
+        await evaljs(setup(''));
+        const actionAttachments = await evaljs(`(() => {
+          window.__ci._attachments = [{ base64: 'aGk=', mediaType: 'image/png', dataUrl: 'data:image/png;base64,aGk=', name: 'shot.png' }];
+          window.__ci._renderAttachments();
+          const answer = window.__ci.sendText('/compact');
+          const out = { answer, sent: window.__sent.map((f) => f.text), kept: window.__ci._attachments.length,
+            chips: document.querySelectorAll('.chat-attach-item').length };
+          window.__ci._attachments = []; window.__ci._renderAttachments();
+          window.__ci.hideTyping(); window.__ci._pendingSend = null;
+          return out;
+        })()`);
+        ok(`…and pending attachments are NOT spent by the action — it sends a plain text frame (${JSON.stringify(actionAttachments.sent)})`,
+          actionAttachments.sent.length === 1 && actionAttachments.sent[0] === '/compact');
+        ok(`…and they are still pending afterwards, chip and all (${JSON.stringify({ kept: actionAttachments.kept, chips: actionAttachments.chips })})`,
+          actionAttachments.kept === 1 && actionAttachments.chips === 1);
         await evaljs(`(() => { window.__ci.setQueue(window.__items, ${CODEX_VERBS}); document.querySelector('textarea').value = ''; window.__ci._pendingSend = null; document.getElementById('global-toasts')?.replaceChildren(); })()`);
       }
       // THE HEADER CONTROL is per harness, from the verb table — codex has

@@ -1257,7 +1257,11 @@ class ChatRenderers {
       + `<span class="chat-ctx-full-hint">${escHtml(t('Compacting a large conversation takes 1–2 minutes — do not press Stop. If it answers “Conversation too long”, rewind a few messages in terminal mode (Esc Esc) and compact again.'))}</span></div>`
       + `</div>`;
     const btn = el.querySelector('.chat-ctx-compact-btn');
-    if (this._onSendText) btn.onclick = () => { btn.disabled = true; this._onSendText('/compact'); };
+    // The button disables itself so the minute-long compaction is not fired
+    // twice — but a REFUSED send (a queued-message edit owns the input,
+    // round-5) never starts one, and a dead control is the offered action
+    // quietly disappearing after its own toast said to try again.
+    if (this._onSendText) btn.onclick = () => { btn.disabled = true; if (this._onSendText('/compact') === false) btn.disabled = false; };
     else btn.remove();
     this._messageList.appendChild(el);
     return el;

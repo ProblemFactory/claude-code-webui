@@ -610,8 +610,12 @@ export class ChatStatusBar {
     go.onclick = () => {
       const brief = ta.value.trim();
       if (!brief) { ta.focus(); return; }
+      // THE BRIEF LIVES ONLY IN THIS TEXTAREA (round-5 audit): closing the
+      // dropdown first meant a REFUSED send — a queued-message edit owns the
+      // chat input — took the typed brief with it, right after a toast told
+      // the user to finish that edit and come back.
+      if (this._onDesignRequest(brief, { public: pubCb.checked }) === false) return;
       dropdown.remove();
-      this._onDesignRequest(brief, { public: pubCb.checked });
     };
     row.append(pubLabel, go);
     box.append(kitLine, ta, row);

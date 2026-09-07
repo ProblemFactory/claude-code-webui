@@ -512,8 +512,11 @@ export class ChatInput {
    *  @returns {boolean} whether a message actually went out */
   steerNow() {
     if (!this.steerChordAllowed) return false;
-    const msgId = this._send();
-    if (!msgId) return false;   // empty composer / disconnected — _send already spoke
+    const r = this._send();
+    // ONLY a string is a queueable message's id — `true` means _send took the
+    // box for a control frame (/goal, an edit), `false` that it bailed.
+    const msgId = typeof r === 'string' ? r : null;
+    if (!msgId) return false;   // empty composer / disconnected / not a message — _send already spoke
     this._onSteerSend?.(msgId);
     return true;
   }
@@ -615,11 +618,62 @@ export class ChatInput {
   }
 
   /** Programmatic send through the FULL _send path (draft keep, history ring,
-   *  dead-socket defenses) — for in-chat action buttons such as Compact now. */
+   *  dead-socket defenses) — for in-chat action buttons such as Compact now
+   *  and the design request. Answers `false` when it REFUSED (nothing typed
+   *  was touched), so the control that fired it can stay usable and keep the
+   *  words the user typed into IT (chat-renderers re-enables its button;
+   *  the design dropdown keeps the brief).
+   *
+   *  THE EDITOR OWNS THE BOX (round-5 verifier). While a queued message is
+   *  open for rewriting (`_editingQueueId`) or its save is unanswered
+   *  (`_pendingEdit`), the textarea is not a draft box: it holds THAT
+   *  message, and `_send` SAVES it as an `edit` op instead of posting a
+   *  message. Writing an action into it did three wrong things at once — the
+   *  queued message was silently rewritten to the action's text, the action
+   *  never reached the agent, and the unsent rewrite (which law ② deliberately
+   *  keeps OUT of the draft store for the whole edit, so it lives nowhere
+   *  else) was destroyed. Same answer as the sibling guard in _beginQueueEdit:
+   *  refuse OUT LOUD and touch nothing.
+   *
+   *  AND THE ACTION SPENDS NOTHING OF THE USER'S (same audit). `_send` clears
+   *  the box, PINS the draft store to what it sent, and folds any pending
+   *  attachments into the frame — so an action fired over a half-typed prompt
+   *  used to delete it from both the box and the store, and to hand the user's
+   *  pasted screenshots to `/compact`. Both are put back around the send.
+   *  The text is an ACTION, never a user command that arms a draft-protected
+   *  slot of its own (`/goal`) — those belong on the normal Send path. */
   sendText(text) {
-    if (!this._textarea) return;
+    if (!this._textarea) return false;
+    if (this._editingQueueId || this._pendingEdit) {
+      showToast(t('Finish or cancel the queued-message edit first — the action was not sent'), { type: 'error' });
+      return false;
+    }
+    const keptText = this._textarea.value;
+    const keptAttachments = this._attachments;
+    const prevPendingSend = this._pendingSend;
+    if (keptAttachments.length) { this._attachments = []; this._renderAttachments(); }
     this._textarea.value = String(text || '');
-    this._send();
+    const sent = this._send() !== false;
+    if (keptAttachments.length) { this._attachments = keptAttachments; this._renderAttachments(); }
+    if (keptText.trim()) {
+      // Also on the REFUSED path (`_send` bails on a dead socket leaving the
+      // action text in the box): the action is a button click away, the typed
+      // prompt is not.
+      this._textarea.value = keptText;
+      this._autoSize?.();
+      // THE DRAFT SLOT GOES WITH THE TEXT THAT CAME BACK. `_send` pinned the
+      // store to the action's own text and armed `_pendingSend` so a dead
+      // socket could restore it — and `confirmDelivery()` clears the store on
+      // the first inbound frame. Leaving that armed would have deleted the
+      // user's prompt from the store milliseconds later (the box would be the
+      // only copy again, which is the whole failure class). The action is a
+      // button click away, so this call's slot is released and the store is
+      // written HERE rather than left to the 300 ms debounce. An OLDER
+      // unconfirmed send keeps its own slot (identity compare).
+      if (this._pendingSend && this._pendingSend !== prevPendingSend) this._pendingSend = null;
+      saveDraft('chat', this._sessionId, keptText);
+    }
+    return sent;
   }
 
   hideTyping() {
@@ -847,6 +901,31 @@ export class ChatInput {
 
   // ── Private ──
 
+  // EVERY PROGRAMMATIC WRITER OF THE TEXTAREA, AND WHY IT IS SAFE WHILE A
+  // QUEUED MESSAGE IS OPEN FOR EDITING (round-5 audit — the box is the editor,
+  // so a write there is a write to the QUEUED MESSAGE, not to a draft):
+  //   · `sendText` (in-chat actions, design request) — REFUSES out loud. It
+  //     was the hole: the action became an `edit` op and ate the rewrite.
+  //   · the constructor's draft restore — runs before this input exists, so
+  //     no editor can be open.
+  //   · another client's draft sync — lands on the STASH (`_editDraftBefore` /
+  //     `_pendingEdit.draftBefore`), never on the live box (round-2 finding 5).
+  //   · the slash-command dropdown (Tab/Enter/click) — a USER action ON the
+  //     box, offered only because the user typed `/…` INTO it; it replaces
+  //     text they are looking at, exactly as it does for a draft, and Esc
+  //     still hands the pre-edit draft back.
+  //   · input-history recall (ArrowUp/ArrowDown) — entry is gated on an EMPTY
+  //     box, and an empty editor is not a rewrite (`_rewriteInBox` and
+  //     `_unstashedEditText` both answer null for it), so it can destroy
+  //     nothing; what it puts there is visible and becomes the rewrite.
+  //   · the unconfirmed-send / unconfirmed-goal restores (dead socket, 10s
+  //     goal timeout) — they write ONLY a box whose trimmed value is empty
+  //     (same reasoning), they dispatch nothing, and they announce themselves.
+  //   · attachments — never touch the textarea, and `_send` REFUSES an edit
+  //     that carries them rather than dropping them silently.
+  //   · `_send` / `_resolvePendingEdit` / `_beginQueueEdit` / `_cancelQueueEdit`
+  //     — the edit machinery itself; each hands the text somewhere first.
+
   /** What the textarea holds that exists NOWHERE ELSE, or null. Edit mode
    *  keeps the debounced autosave off for the WHOLE flight — `_editingQueueId`
    *  OR `_pendingEdit` disarms it (the `input` listener) — so the in-flight
@@ -873,16 +952,24 @@ export class ChatInput {
     return typed === baseline ? null : typed;
   }
 
-  /** @returns {string|null} the msgId that went out, or null when nothing did
-   *  (empty composer / disconnected / a /goal command, which is not a message).
-   *  `steerNow()` needs it to name the queued item it must convert. */
+  /** THE ONE SEND PATH, and it answers TWO questions with one value (the
+   *  merge of 2.369.61's chord and the round-5 bail-out fix — both callers
+   *  need a different fact and neither may lose it):
+   *    · a STRING = the msgId of the queueable message that went out
+   *      (`steerNow()` needs it: a steer NAMES a queued item);
+   *    · `true`  = it TOOK the box but produced no queueable message
+   *      (a `/goal` control frame, a queued-message edit);
+   *    · `false` = it BAILED with the text still in the box — `sendText`
+   *      turns that into its own `false` so the control that fired it comes
+   *      back (round-5), and `steerNow()` reports no steerable send.
+   *  Every other caller is a user pressing Send and ignores it. */
   _send() {
     const text = this._textarea.value.trim();
     const hasAttachments = this._attachments.length > 0;
-    if (!text && !hasAttachments) return null;
+    if (!text && !hasAttachments) return false;
     if (this._disconnected) {
       showToast(t('Disconnected — reconnecting… your draft is kept'), { type: 'error' });
-      return null;
+      return false;
     }
 
     // EDITING A QUEUED MESSAGE: the send control SAVES the edit instead of
@@ -892,7 +979,7 @@ export class ChatInput {
     // ones would be the accept-and-ignore failure.
     if (this._editingQueueId) {
       const id = this._editingQueueId;
-      if (hasAttachments) { showToast(t('Attachments cannot be added while editing a queued message — cancel the edit first.'), { type: 'error' }); return; }
+      if (hasAttachments) { showToast(t('Attachments cannot be added while editing a queued message — cancel the edit first.'), { type: 'error' }); return false; }
       this._editingQueueId = null;
       // THE REWRITE IS KEPT UNTIL THE RESULT PROVES IT LANDED (round-2
       // verifier, same law as _pendingSend below): restoring the pre-edit
@@ -924,7 +1011,7 @@ export class ChatInput {
         this._resolvePendingEdit(false, t('The edit was not confirmed — the session may be unresponsive.'));
       }, 20000);
       this._dispatchQueueOp('edit', id, { text });
-      return;
+      return true;
     }
 
     // Intercept /goal command — handled by wrapper, not sent as chat message
@@ -949,7 +1036,10 @@ export class ChatInput {
       // broadcast (confirmGoal) proves it landed; a 10s silence restores the
       // text and says so. Same shape as the _pendingSend defense below.
       this._markGoalPending(text);
-      return null;   // a /goal is a control frame, never a queueable message
+      // A /goal is a control frame: it took the box (so `sendText` must not
+      // report a bail) but it is not a queueable message, so `steerNow()`
+      // gets no id and reports no steerable send.
+      return true;
     }
 
     const msgId = Date.now() + '-' + Math.random().toString(36).slice(2, 8);
