@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { execFileSync } from 'node:child_process';
 const require = createRequire(import.meta.url);
 const REPO = path.resolve(new URL('..', import.meta.url).pathname);
 let pass = 0, fail = 0;
@@ -82,6 +83,10 @@ const mkSession = (backend, id, { normalizer = true } = {}) => {
   return s;
 };
 const J = (o) => JSON.stringify(o) + '\n';
+// The worktree arbiter's "same directory" branch asks git (a bounded child
+// process — the never-block-the-event-loop law), so its verdict lands on a
+// later tick than the frame that triggered it.
+const settle = (ms = 400) => new Promise((r) => setTimeout(r, ms));
 const meta = (s) => { try { return JSON.parse(fs.readFileSync(path.join(META_DIR, s.sockName + '.json'), 'utf8')); } catch { return null; } };
 const labels = (id) => calls.broadcasts.filter((b) => b.id === id && b.type === 'streaming-label').map((b) => b.label);
 const outputs = (id) => calls.broadcasts.filter((b) => b.id === id && b.type === 'output').map((b) => b.data);
@@ -1324,21 +1329,28 @@ console.log('— agent→user channel (SendUserMessage / SendUserFile)');
   p7.data(J({ type: 'system', subtype: 'init', session_id: 'sid-nowt', cwd: '/somewhere/else', model: 'claude-fable-5' }));
   ok('NEGATIVE CONTROL: a session that did NOT ask for a worktree never grows one, whatever cwd the CLI reports',
     !s7._worktreePath && !meta(s7)?.worktreePath && !calls.broadcasts.some((b) => b.id === 'w-nowt' && b.type === 'worktree-path'));
+  const s7b = mkSession('claude', 'w-slash'); s7b.cwd = '/repo'; s7b._worktree = true;
+  const p7b = fakePty(); so2.setupSessionPty(s7b, 'w-slash', p7b);
+  p7b.data(J({ type: 'system', subtype: 'init', session_id: 'sid-slash', cwd: '/repo/', model: 'claude-fable-5' }));
+  await settle();   // "same directory" is now PROBED (see (h) below), so the verdict lands a tick later
   ok('…a trailing slash is cosmetic, not a second directory (the badge must not appear because of one)',
-    (() => { const s7b = mkSession('claude', 'w-slash'); s7b.cwd = '/repo'; s7b._worktree = true;
-      const p7b = fakePty(); so2.setupSessionPty(s7b, 'w-slash', p7b);
-      p7b.data(J({ type: 'system', subtype: 'init', session_id: 'sid-slash', cwd: '/repo/', model: 'claude-fable-5' }));
-      return s7b._worktree === false && !s7b._worktreePath; })());
+    s7b._worktree === false && !s7b._worktreePath, JSON.stringify({ w: s7b._worktree, p: s7b._worktreePath }));
 
   // (h) THE ARBITER'S OTHER DIRECTION (the badge must never outlive the fact).
   // The CLI's own 'worktree-gone' path continues "in the current directory
   // without worktree isolation. The worktree binding has been cleared."
-  // (2.1.257 verbatim) and a resume can only RE-ENTER a recorded worktree,
-  // never create one — in both cases it reports the very cwd we launched it
-  // in, and an intent nobody honoured must stop being drawn as a fact.
+  // (2.1.257 verbatim) — it reports the very cwd we launched it in, and an
+  // intent nobody honoured must stop being drawn as a fact.
+  //
+  // ROUND 4: "same cwd" is NOT the verdict, it is the QUESTION — a plain
+  // RESUME of a worktree conversation also satisfies it (see (h2)), so the
+  // retirement is now gated on git positively saying the announced directory
+  // is not a linked worktree. `/repo` does not exist here, which git answers
+  // (exit 128, a NUMERIC code) — "certainly not a linked worktree".
   const s8 = mkSession('claude', 'w-wt-gone'); s8.cwd = '/repo'; s8._worktree = true; s8._worktreePath = '/repo/.claude/worktrees/old';
   const p8 = fakePty(); so2.setupSessionPty(s8, 'w-wt-gone', p8);
   p8.data(J({ type: 'system', subtype: 'init', session_id: 'sid-gone', cwd: '/repo', model: 'claude-fable-5' }));
+  await settle();
   const goneMsg = calls.broadcasts.filter((b) => b.id === 'w-wt-gone' && b.type === 'worktree-path').slice(-1)[0];
   ok("the CLI reporting the LAUNCH directory retires the live worktree fact (its own 'worktree-gone' path / a resume that could not create one) — state, meta and broadcast all agree",
     s8._worktree === false && s8._worktreePath === null
@@ -1352,9 +1364,169 @@ console.log('— agent→user channel (SendUserMessage / SendUserFile)');
   // does not re-broadcast, so a re-attach storm cannot flap the badge).
   const beforeWt = calls.broadcasts.filter((b) => b.id === 'w-wt').length;
   p6.data(J({ type: 'system', subtype: 'init', session_id: 'sid-wt', cwd: '/repo/.claude/worktrees/w1', model: 'claude-fable-5' }));
+  await settle();
   ok('NEGATIVE CONTROL: an unchanged init frame neither clears the fact nor re-broadcasts it (idempotent)',
     s6._worktree === true && s6._worktreePath === '/repo/.claude/worktrees/w1'
     && calls.broadcasts.filter((b) => b.id === 'w-wt').length === beforeWt);
+
+  // ── (h2) THE RESUME OF AN ISOLATED CONVERSATION (round-4 verifier) ────────
+  // A resume launches in the DISCOVERY cwd, and for a worktree conversation
+  // that IS the worktree: the CLI wrote its transcript from in there, so the
+  // JSONL's own `cwd` (src/session-store.js) and the project-dir encoding both
+  // name it — measured on this machine, `claude --worktree` in
+  // /tmp/vs-wtrepo-probe produced ~/.claude/projects/-tmp-vs-wtrepo-probe--
+  // claude-worktrees-probe9. So launched === announced for a run that IS
+  // isolated, and the pre-fix rule retired the fact: badge gone, meta
+  // stripped, `worktree:false` broadcast, and permanently, because
+  // boot-restore reads `_worktree: !!meta.worktree`.
+  //
+  // Driven against a REAL repo with a REAL linked worktree (no fixture can
+  // stand in for what `git rev-parse` answers).
+  const wtBase = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-wtprobe-'));
+  const gitOk = (() => { try { execFileSync('git', ['-C', wtBase, 'init', '-q', '-b', 'main'], { stdio: 'ignore' }); return true; } catch { return false; } })();
+  if (!gitOk) {
+    console.log('  SKIP: git is not available — the linked-worktree arbiter legs did not run');
+  } else {
+    fs.writeFileSync(path.join(wtBase, 'a.txt'), 'a\n');
+    execFileSync('git', ['-C', wtBase, 'add', '-A'], { stdio: 'ignore' });
+    execFileSync('git', ['-C', wtBase, '-c', 'user.email=a@b', '-c', 'user.name=a', 'commit', '-qm', 'one'], { stdio: 'ignore' });
+    const WT = path.join(wtBase, '.claude', 'worktrees', 'w1');
+    execFileSync('git', ['-C', wtBase, 'worktree', 'add', '-q', '--detach', WT], { stdio: 'ignore' });
+
+    const s9 = mkSession('claude', 'w-wt-resume'); s9.cwd = WT; s9._worktree = true;
+    const p9 = fakePty(); so2.setupSessionPty(s9, 'w-wt-resume', p9);
+    p9.data(J({ type: 'system', subtype: 'init', session_id: 'sid-resume', cwd: WT, model: 'claude-fable-5' }));
+    await settle();
+    const resumeMsg = calls.broadcasts.filter((b) => b.id === 'w-wt-resume' && b.type === 'worktree-path').slice(-1)[0];
+    ok('a RESUME that re-enters its worktree keeps the fact: git says the announced directory IS a linked worktree, so state, meta and broadcast all say isolated WITH the path',
+      s9._worktree === true && s9._worktreePath === WT
+      && meta(s9)?.worktree === true && meta(s9)?.worktreePath === WT
+      && !!resumeMsg && resumeMsg.worktree === true && resumeMsg.worktreePath === WT,
+      JSON.stringify({ live: s9._worktree, path: s9._worktreePath, meta: meta(s9), msg: resumeMsg }));
+    // NEGATIVE CONTROL — a PATCHED COPY OF THE REAL MODULE (never a re-typed
+    // rule): the shipped consumer with its probe branch replaced by the
+    // pre-fix statement (`same cwd ⇒ not isolated`), injected into the module
+    // cache so the REAL registry/session-stdout attach it, then driven through
+    // the very same scenario. The patch is asserted to have HIT, so a future
+    // edit that makes it stop matching fails here instead of silently turning
+    // this control green.
+    {
+      const realId = require.resolve(path.join(REPO, 'src/server/stdout/claude-stream-json.js'));
+      const idxId = require.resolve(path.join(REPO, 'src/server/stdout/index.js'));
+      const soId = require.resolve(path.join(REPO, 'src/server/session-stdout.js'));
+      const srcTxt = fs.readFileSync(realId, 'utf8');
+      const FROM = `            if (announced && launched && announced !== launched) {
+              applyWorktreeVerdict(true);
+            } else if (announced && launched && wtProbedDir !== announced) {`;
+      const TO = `            if (announced && launched) {
+              applyWorktreeVerdict(announced !== launched);   // PRE-FIX: "same cwd" WAS the verdict
+            } else if (false) {`;
+      ok('NEGATIVE CONTROL: the mutation patch matches the shipped arbiter (a control that no longer patches anything is not a control)', srcTxt.includes(FROM));
+      const patchedPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'vs-wtpatch-')), 'claude-stream-json-prefix.cjs');
+      fs.writeFileSync(patchedPath, srcTxt.replace(FROM, TO).replace(/require\('\.\.\/\.\.\//g, `require('${REPO}/src/`));
+      delete require.cache[idxId]; delete require.cache[soId];
+      require.cache[realId] = { id: realId, filename: realId, loaded: true, exports: require(patchedPath) };
+      const soPre = require(soId).create({
+        rootDir: tmp, BUFFERS_DIR, META_DIR, DTACH_CMD: 'dtach', USAGE_SCANNER_PATH: path.join(tmp, 'nonexistent'),
+        CLAUDE_STREAM_TYPES: new Set(['system', 'assistant', 'user', 'result']), _seenStreamTypes: new Set(), activeSessions, engine,
+        checkClaudeGoalStatus() { }, broadcastToSession: (s, id, m) => calls.broadcasts.push({ id, ...m }), broadcastActiveSessions: () => { calls.active++; },
+        noteModelSeen: () => { }, noteHarnessModels: () => { }, recordUsageAttribution() { }, daemonPtyShim: (h) => h,
+        sbSeenFirst: () => true, getDeviceMgr: () => null, getHosts: () => null,
+        getUsageHistory: () => ({ _cost: () => 0, ingestRemoteEvents() { } }), getTelemetry: () => null, getNoConvoRef: () => ({ map: new Map() }),
+        getDeliver: () => ({ stashFor() { } }), getPages: () => pages,
+      });
+      const sPre = mkSession('claude', 'w-wt-prefix'); sPre.cwd = WT; sPre._worktree = true;
+      const pPre = fakePty(); soPre.setupSessionPty(sPre, 'w-wt-prefix', pPre);
+      pPre.data(J({ type: 'system', subtype: 'init', session_id: 'sid-prefix', cwd: WT, model: 'claude-fable-5' }));
+      await settle();
+      const preMsg = calls.broadcasts.filter((b) => b.id === 'w-wt-prefix' && b.type === 'worktree-path').slice(-1)[0];
+      ok('NEGATIVE CONTROL: with the pre-fix statement the SAME genuinely-isolated resume loses the fact — live false, meta stripped, `worktree:false` broadcast (and boot-restore would read it back as false forever)',
+        sPre._worktree === false && sPre._worktreePath === null
+        && meta(sPre)?.worktree === undefined && meta(sPre)?.worktreePath === undefined
+        && !!preMsg && preMsg.worktree === false,
+        JSON.stringify({ live: sPre._worktree, meta: meta(sPre), msg: preMsg }));
+      delete require.cache[realId]; delete require.cache[idxId]; delete require.cache[soId];
+      try { fs.rmSync(path.dirname(patchedPath), { recursive: true, force: true }); } catch { }
+    }
+
+    // A PLAIN CHECKOUT is the other half of the same question: same directory,
+    // and git says the two dirs agree ⇒ the fact really is retired.
+    const s10 = mkSession('claude', 'w-wt-plain'); s10.cwd = wtBase; s10._worktree = true; s10._worktreePath = path.join(wtBase, 'stale');
+    const p10 = fakePty(); so2.setupSessionPty(s10, 'w-wt-plain', p10);
+    p10.data(J({ type: 'system', subtype: 'init', session_id: 'sid-plain', cwd: wtBase, model: 'claude-fable-5' }));
+    await settle();
+    const plainMsg = calls.broadcasts.filter((b) => b.id === 'w-wt-plain' && b.type === 'worktree-path').slice(-1)[0];
+    ok('…while the SAME shape over a plain checkout still retires it (git: --git-dir === --git-common-dir) — the arbiter kept both directions',
+      s10._worktree === false && s10._worktreePath === null && meta(s10)?.worktree === undefined
+      && !!plainMsg && plainMsg.worktree === false, JSON.stringify({ live: s10._worktree, meta: meta(s10), msg: plainMsg }));
+
+    // A directory git cannot see a repository in at all (the B-7812
+    // recreate-cwd shape: the worktree is gone and the folder was rebuilt).
+    const bare = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-wtnorepo-'));
+    const s11 = mkSession('claude', 'w-wt-norepo'); s11.cwd = bare; s11._worktree = true;
+    const p11 = fakePty(); so2.setupSessionPty(s11, 'w-wt-norepo', p11);
+    p11.data(J({ type: 'system', subtype: 'init', session_id: 'sid-norepo', cwd: bare, model: 'claude-fable-5' }));
+    await settle();
+    ok('…and a directory that is not a repository at all retires it too (a non-repo is certainly not a linked worktree)',
+      s11._worktree === false && !s11._worktreePath && calls.broadcasts.some((b) => b.id === 'w-wt-norepo' && b.type === 'worktree-path' && b.worktree === false));
+
+    // THE TRI-STATE: a probe that cannot ANSWER retires nothing. Made real by
+    // taking `git` off PATH — the measured spawn failure (code 'ENOENT', a
+    // STRING, not the numeric exit code git itself returns).
+    const s12 = mkSession('claude', 'w-wt-unknown'); s12.cwd = wtBase; s12._worktree = true; s12._worktreePath = WT;
+    const p12 = fakePty(); so2.setupSessionPty(s12, 'w-wt-unknown', p12);
+    const realPath = process.env.PATH;
+    const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-nopath-'));
+    process.env.PATH = emptyDir;
+    const eventsBefore = calls.events.length;
+    p12.data(J({ type: 'system', subtype: 'init', session_id: 'sid-unknown', cwd: wtBase, model: 'claude-fable-5' }));
+    await settle();
+    ok('a probe that CANNOT answer (no git on PATH) leaves BOTH facts untouched and says so — the same tri-state rule the ws-create preflight follows',
+      s12._worktree === true && s12._worktreePath === WT && !meta(s12)?.worktree
+      && !calls.broadcasts.some((b) => b.id === 'w-wt-unknown' && b.type === 'worktree-path')
+      && calls.events.slice(eventsBefore).some(([k]) => k === 'worktree-probe-unknown'),
+      JSON.stringify({ live: s12._worktree, path: s12._worktreePath, ev: calls.events.slice(eventsBefore) }));
+    // …and the probe is asked ONCE per attach per directory (a re-attach storm
+    // or a repeated init frame must not spawn a child process per frame).
+    const evAfterFirst = calls.events.filter(([k]) => k === 'worktree-probe-unknown').length;
+    p12.data(J({ type: 'system', subtype: 'init', session_id: 'sid-unknown', cwd: wtBase, model: 'claude-fable-5' }));
+    await settle();
+    ok('…and a repeated init frame does not re-probe (once per attach per directory — the guard against a re-attach storm)',
+      calls.events.filter(([k]) => k === 'worktree-probe-unknown').length === evAfterFirst, String(evAfterFirst));
+    process.env.PATH = realPath;
+
+    // CS SEPARATION: `hostId` is a PARAMETER. The same question is asked of a
+    // REMOTE machine through the machine handle — driven here through a fake
+    // transport (a real ssh hop is not this suite's job), asserting that the
+    // consumer reads the shell's MARKERS rather than an exit code.
+    const shellSeen = [];
+    const so3 = require(path.join(REPO, 'src/server/session-stdout.js')).create({
+      rootDir: tmp, BUFFERS_DIR, META_DIR, DTACH_CMD: 'dtach', USAGE_SCANNER_PATH: path.join(tmp, 'nonexistent'),
+      CLAUDE_STREAM_TYPES: new Set(['system', 'assistant', 'user', 'result']), _seenStreamTypes: new Set(), activeSessions, engine,
+      checkClaudeGoalStatus() { }, broadcastToSession: (s, id, m) => calls.broadcasts.push({ id, ...m }), broadcastActiveSessions: () => { calls.active++; },
+      noteModelSeen: () => { }, noteHarnessModels: () => { }, recordUsageAttribution() { }, daemonPtyShim: (h) => h,
+      sbSeenFirst: () => true, getDeviceMgr: () => null,
+      getHosts: () => ({ get: (hid) => ({ id: hid, name: 'probe-host' }), async _hostShell(h, script) { shellSeen.push(script); return shellSeen.length === 1 ? '__VS_WT_YES__\n' : '__VS_WT_NO__\n'; } }),
+      getUsageHistory: () => ({ _cost: () => 0, ingestRemoteEvents() { } }), getTelemetry: () => null, getNoConvoRef: () => ({ map: new Map() }),
+      getDeliver: () => ({ stashFor() { } }), getPages: () => pages,
+    });
+    const sr1 = mkSession('claude', 'w-wt-remote'); sr1.cwd = '/srv/proj'; sr1.host = 'h1'; sr1._worktree = true;
+    const pr1 = fakePty(); so3.setupSessionPty(sr1, 'w-wt-remote', pr1);
+    pr1.data(J({ type: 'system', subtype: 'init', session_id: 'sid-remote', cwd: '/srv/proj', model: 'claude-fable-5' }));
+    await settle();
+    ok("a REMOTE session asks the machine it actually runs on (hostId is a PARAMETER, not a branch) and keeps the fact on __VS_WT_YES__",
+      sr1._worktree === true && sr1._worktreePath === '/srv/proj' && shellSeen.length === 1
+      && /rev-parse --git-dir/.test(shellSeen[0]) && /--git-common-dir/.test(shellSeen[0]),
+      JSON.stringify({ live: sr1._worktree, p: sr1._worktreePath, script: shellSeen[0] }));
+    const sr2 = mkSession('claude', 'w-wt-remote2'); sr2.cwd = '/srv/proj2'; sr2.host = 'h1'; sr2._worktree = true;
+    const pr2 = fakePty(); so3.setupSessionPty(sr2, 'w-wt-remote2', pr2);
+    pr2.data(J({ type: 'system', subtype: 'init', session_id: 'sid-remote2', cwd: '/srv/proj2', model: 'claude-fable-5' }));
+    await settle();
+    ok('…and retires it on __VS_WT_NO__ (both directions ride the same one marker protocol)',
+      sr2._worktree === false && !sr2._worktreePath, JSON.stringify({ live: sr2._worktree }));
+
+    try { fs.rmSync(wtBase, { recursive: true, force: true }); fs.rmSync(bare, { recursive: true, force: true }); fs.rmSync(emptyDir, { recursive: true, force: true }); } catch { }
+  }
   try { fs.rmSync(pagesDir, { recursive: true, force: true }); } catch { }
 }
 

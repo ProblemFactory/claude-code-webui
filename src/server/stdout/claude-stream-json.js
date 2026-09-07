@@ -27,6 +27,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { execFile } = require('child_process');
 const { MessageManager } = require('../../message-manager');
 const { cwdToProjectDir } = require('../../session-store');
 const { ClaudeCodeAdapter } = require('../../adapters/claude-code.js');
@@ -53,6 +54,80 @@ function create({ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes,
   const { _vsuPending, armWorkflowUsageWatcher, kickPoolEval, markLimitBanner,
     maybeRepinLockedModel, maybeStopOnFallback, notePoolAuthFailure,
     modelsMatch, noteSessionProduced, noteTurnEnd, recordRateLimitEvent, resolveUsageKey, usageEstimator } = engine;
+
+  /**
+   * IS THIS DIRECTORY A LINKED GIT WORKTREE? (round-4 verifier — the positive
+   * half of the init-frame arbiter below.)
+   *
+   *   true  — yes: `--git-dir` and `--git-common-dir` disagree, which is what
+   *           a linked worktree IS (`<common>/worktrees/<name>` vs `<common>`;
+   *           a plain checkout answers `.git` twice).
+   *   false — no: git answered and they agree, or git cannot see a repository
+   *           there at all (a non-repo directory is certainly not one — this
+   *           is the B-7812 recreate-cwd shape, where the worktree is gone and
+   *           the folder was rebuilt EMPTY). KNOWN LIMIT: a WorktreeCreate
+   *           hook can isolate a run under another VCS, and such a directory
+   *           also answers "not a git repo"; a resume that re-enters it in
+   *           place therefore retires the badge. Nothing on this machine can
+   *           tell those two apart, and the CLI's own flag is git-shaped.
+   *   null  — COULD NOT ANSWER (no git, spawn failure, timeout, an unreachable
+   *           host). A probe that cannot answer must retire nothing.
+   *
+   * CS separation: `hostId` is a PARAMETER — the same question is asked of the
+   * machine the session actually runs on, locally through a bounded child
+   * process and on any machine handle through hosts._hostShell, exactly like
+   * the ws-create worktree preflight. Bounded and async on both rungs (the
+   * never-block-the-event-loop law), and reached at most once per attach per
+   * directory.
+   *
+   * The local spawn gets a GIT_*-free env: git's "which repository am I
+   * talking about" layer lives in the environment (GIT_DIR/GIT_WORK_TREE/…),
+   * and this server can itself have been started from inside a session that
+   * exported them — inheriting them would make the probe answer about a
+   * different repository altogether.
+   */
+  function probeLinkedWorktree(session, dir) {
+    const same = (a, b) => path.resolve(dir, String(a || '').trim()) === path.resolve(dir, String(b || '').trim());
+    if (session.host) {
+      if (!hosts || typeof hosts._hostShell !== 'function') return Promise.resolve(null);
+      let h = null;
+      try { h = hosts.get(session.host); } catch { h = null; }
+      if (!h) return Promise.resolve(null);
+      const q = dir.replace(/'/g, `'\\''`);
+      // Markers, never exit codes: "not a repo" and "git is missing" are two
+      // different answers and only one of them retires a fact.
+      const script = `command -v git >/dev/null 2>&1 || { echo __VS_WT_UNKNOWN__; exit 0; }; `
+        + `cd '${q}' 2>/dev/null || { echo __VS_WT_NO__; exit 0; }; `
+        + `a=$(git rev-parse --git-dir 2>/dev/null); b=$(git rev-parse --git-common-dir 2>/dev/null); `
+        + `if [ -z "$a" ]; then echo __VS_WT_NO__; elif [ "$a" = "$b" ]; then echo __VS_WT_NO__; else echo __VS_WT_YES__; fi`;
+      return Promise.race([
+        hosts._hostShell(h, script, { timeoutMs: 8000 }),
+        new Promise((r) => setTimeout(() => r(''), 8500)),
+      ]).then((out) => {
+        const txt = String(out || '');
+        if (txt.includes('__VS_WT_YES__')) return true;
+        if (txt.includes('__VS_WT_NO__')) return false;
+        return null;                                   // UNKNOWN marker, empty, or a timeout
+      }).catch(() => null);
+    }
+    const env = {};
+    for (const [k, v] of Object.entries(process.env)) if (!/^GIT_/.test(k)) env[k] = v;
+    return new Promise((resolve) => {
+      execFile('git', ['-C', dir, 'rev-parse', '--git-dir', '--git-common-dir'], { timeout: 6000, env }, (err, out) => {
+        // MEASURED error shapes (node v24, git 2.51): a non-repo/missing dir
+        // exits 128 (`err.code` NUMBER), a missing binary reports
+        // `code:'ENOENT'` (a STRING, and `killed` undefined), a timeout sets
+        // `killed`. So only a NUMERIC exit code means "git answered".
+        if (err && err.killed) return resolve(null);              // timeout ⇒ unknown
+        if (err && typeof err.code !== 'number') return resolve(null); // git missing / spawn failure ⇒ unknown
+        if (err) return resolve(false);                            // git spoke: not a repository / no such directory
+        const [a, b] = String(out || '').split('\n');
+        if (!a || !b) return resolve(null);                        // an answer we cannot read is not an answer
+        resolve(!same(a, b));
+      });
+    });
+  }
+
   /**
    * Publish the files ONE SendUserFile call names, then tell the session's
    * clients where they landed. Fire-and-forget and fully async (the
@@ -128,6 +203,11 @@ function create({ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes,
 
   function attach(session, id, ptyProcess, { feedLive, broadcastToSession, broadcastActiveSessions, readSessionMeta, writeSessionMeta, updateSessionTodos, applyTaskToolUpdate, emitTaskListTodos }) {
     let lineBuf = '';
+    // The directory the linked-worktree probe has already been asked about for
+    // THIS attach (see the init-frame arbiter below). Per-attach closure state,
+    // like lineBuf — not a session `_field` — so a re-attach simply asks once
+    // more and a probe never runs per init frame.
+    let wtProbedDir = '';
     if (!session.subagentBuffers) session.subagentBuffers = new Map();
     if (!session.subagentEmittedUuids) session.subagentEmittedUuids = new Map(); // toolUseId → Set<uuid>
     if (!session.subagentWatchers) session.subagentWatchers = new Map(); // toolUseId → {watcher, offset}
@@ -403,22 +483,61 @@ function create({ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes,
           //     recorded worktree, never create one — `--worktree` is emitted
           //     on new/fork only, see worktreeSpawnArgs).
           // In both, the CLI reports the very directory we launched it in.
-          // "Same cwd" is therefore the process saying "I am not isolated",
-          // and the badge must go — an intent nobody honoured is not a fact.
+          //
+          // BUT "same cwd" IS NOT ITSELF THE ANSWER (round-4 verifier). It is a
+          // NEGATIVE inference, and a plain RESUME of a worktree conversation
+          // satisfies it: the resume launches in the DISCOVERY cwd, which for
+          // such a conversation IS the worktree — the CLI wrote its transcript
+          // from in there, so the JSONL's own `cwd` (session-store) and the
+          // project-dir encoding both name the worktree (measured: a
+          // `claude --worktree` run in /tmp/vs-wtrepo-probe produced
+          // ~/.claude/projects/-tmp-vs-wtrepo-probe--claude-worktrees-probe9).
+          // So EVERY resumed worktree session announced the directory it was
+          // launched in and had its live fact retired: badge gone, meta
+          // stripped, `worktree:false` broadcast, Session Properties saying
+          // "not isolated in this run" — about a run that is genuinely
+          // isolated, and permanently, because boot-restore reads the meta.
+          //
+          // The positive question is "is the announced directory a LINKED git
+          // worktree?", which git answers by itself: inside one, `--git-dir`
+          // (<common>/worktrees/<name>) and `--git-common-dir` (<common>)
+          // differ; in a plain checkout they are the same. So:
+          //   announced !== launched            ⇒ isolated (no probe, the CLI
+          //                                       moved: the fast path)
+          //   announced === launched, linked    ⇒ isolated, path = announced
+          //   announced === launched, not linked⇒ retire the fact
+          //   the probe cannot ANSWER           ⇒ touch NOTHING (the same
+          //                                       tri-state rule the ws-create
+          //                                       worktree preflight follows)
           // Trailing slashes are cosmetic; nothing else is normalized, because
           // a path we massaged is no longer the record the CLI gave us.
           if (msg.type === 'system' && msg.subtype === 'init' && session._worktree && typeof msg.cwd === 'string' && msg.cwd) {
             const trim = (p) => String(p || '').replace(/\/+$/, '');
             const announced = trim(msg.cwd);
             const launched = trim(session.cwd);
-            const isolated = !!announced && !!launched && announced !== launched;
-            const nextPath = isolated ? announced : null;
-            if (isolated ? session._worktreePath !== nextPath : (session._worktreePath || session._worktree)) {
+            // ONE application point for both the sync and the probed verdict.
+            const applyWorktreeVerdict = (isolated) => {
+              const nextPath = isolated ? announced : null;
+              if (!(isolated ? session._worktreePath !== nextPath : (session._worktreePath || session._worktree))) return;
               session._worktreePath = nextPath;
               if (!isolated) session._worktree = false;   // the LIVE fact only; the user's saved pick is theirs to change
               if (session.sockName) writeSessionMeta(session.sockName, { ...(readSessionMeta(session.sockName) || {}), worktree: isolated || undefined, worktreePath: nextPath || undefined });
               broadcastToSession(session, id, { type: 'worktree-path', sessionId: id, worktree: isolated, worktreePath: nextPath });
               broadcastActiveSessions();
+            };
+            if (announced && launched && announced !== launched) {
+              applyWorktreeVerdict(true);
+            } else if (announced && launched && wtProbedDir !== announced) {
+              wtProbedDir = announced;                    // once per attach per directory (a re-attach storm must not spawn a probe per frame)
+              probeLinkedWorktree(session, announced).then((linked) => {
+                if (!activeSessions.has(id) || !session._worktree) return;  // the run ended, or the fact is already retired
+                if (linked === null) {
+                  console.warn(`[session] worktree: could not tell whether ${announced} is a linked git worktree — leaving the session's worktree fact untouched`);
+                  global.__vsEvent?.('worktree-probe-unknown', session.host ? 'host' : 'local');
+                  return;                                 // a probe that cannot answer never retires a fact
+                }
+                applyWorktreeVerdict(linked);
+              }).catch(() => { });
             }
           }
 

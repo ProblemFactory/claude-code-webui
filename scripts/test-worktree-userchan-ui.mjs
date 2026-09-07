@@ -25,6 +25,7 @@
 // boot smoke — the repo's own data/ is PRODUCTION (#127 class).
 import { execSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -126,6 +127,75 @@ console.log('— _swapMessageEl bookkeeping');
     (cvSrc.match(/this\._swapMessageEl\(/g) || []).length === 3 && !/if \(next\) el\.replaceWith\(next\);/.test(cvSrc));
 }
 
+// ── 1b-bis. NODE leg: a RELOADED history re-attaches its SendUserFile links ──
+// The live path keys published rows by toolCallId (the broadcast carries it).
+// A reloaded history has no broadcast: `_loadPublishedUserFiles` reads the
+// conversation's pages and matches them to the cards BY PATH. Round 3 gave the
+// channel its own `srcKey` namespace (`userfile:<conv>:<abs>`, so a delivered
+// file cannot take over the user's own page) but left this reader stripping a
+// `local:` prefix off the key — a no-op on the new shape, so every ABSOLUTE
+// path stopped resolving while relative ones kept working by accident through
+// the basename fallback. Driven against the REAL published-pages module (the
+// producer of the very keys this reader parses) and the REAL ChatView method.
+console.log('— reloaded history: SendUserFile links (round-4 verifier)');
+{
+  const { ChatView } = await import(path.join(repo, 'src/lib/chat-view.js'));
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-ucf-pages-'));
+  const pages = require(path.join(repo, 'src/server/published-pages.js')).create({ dataDir });
+  const CONV = 'conv-9f2a';
+  // The publisher's own call, verbatim from src/server/stdout/claude-stream-json.js.
+  const publish = (abs) => pages.publishContent({
+    html: Buffer.from('# hi'), name: abs.split('/').pop(),
+    srcKey: `userfile:${CONV}:${abs}`, srcPath: abs,
+    sessionId: 'sess-1', conversationId: CONV, mediaType: 'text/plain',
+  });
+  const ABS = '/tmp/vs-ucf/report.md';        // what `files: ['absolute or relative to cwd']` documents
+  const REL_ABS = '/repo/wt/notes.md';        // published from a RELATIVE path the CLI resolved
+  const pubAbs = publish(ABS), pubRel = publish(REL_ABS);
+  ok('the real publisher stores both pages under the channel key namespace, with their PATH recorded alongside it',
+    pubAbs.page.srcKey === `userfile:${CONV}:${ABS}` && pubAbs.page.srcPath === ABS && pubRel.page.srcPath === REL_ABS,
+    JSON.stringify([pubAbs.page.srcKey, pubAbs.page.srcPath]));
+
+  const mkCard = (toolCallId, files) => ({
+    _rawMsg: { id: 'm-' + toolCallId, role: 'tool', toolCallId, content: [{ type: 'tool_call', toolName: 'SendUserFile', input: { files } }] },
+  });
+  const cards = [mkCard('tc-abs', [ABS]), mkCard('tc-rel', ['notes.md'])];
+  const rerendered = [];
+  const listed = pages.list({ conversationId: CONV });
+  let askedUrl = '';
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => { askedUrl = String(url); return { json: async () => ({ pages: listed }) }; };
+  const view = Object.assign(Object.create(ChatView.prototype), {
+    _getSessionIds: () => ({ backend: 'claude', backendSessionId: CONV }),
+    _messageList: { querySelectorAll: () => cards },
+    _rerenderToolCard: (tc) => rerendered.push(tc),
+  });
+  try { await view._loadPublishedUserFiles(); } finally { globalThis.fetch = realFetch; }
+
+  ok('it asks for THIS conversation’s pages (a card must never link a page another conversation published)',
+    askedUrl.includes('/api/pages?conversationId=' + encodeURIComponent(CONV)), askedUrl);
+  const rows = view._publishedUserFiles || new Map();
+  ok('an ABSOLUTE path in the record gets its link back after a reload — the exact case the round-3 key change silently broke',
+    rows.get('tc-abs')?.[0]?.link === pubAbs.page.path && rerendered.includes('tc-abs'),
+    JSON.stringify({ rows: [...rows], rerendered }));
+  ok('…and a RELATIVE one still resolves by basename (the client does not know the CLI’s cwd and must not guess)',
+    rows.get('tc-rel')?.[0]?.link === pubRel.page.path && rerendered.includes('tc-rel'), JSON.stringify([...rows]));
+
+  // NEGATIVE CONTROL: the pre-fix statement, verbatim, over the SAME real list.
+  const preMap = new Map(listed.map((p) => [String(p.srcKey || '').replace(/^local:/, ''), p]));
+  const preLookup = (f) => {
+    const abs = String(f).startsWith('/') ? String(f) : '';
+    const page = abs ? preMap.get(abs) : null;
+    const hit = page || [...preMap.entries()].find(([k]) => k.endsWith('/' + String(f).replace(/^\.\//, '')))?.[1];
+    return hit ? hit.path : null;
+  };
+  ok('NEGATIVE CONTROL: the pre-fix `srcKey.replace(/^local:/,"")` map finds NOTHING for the absolute path (while the relative one still hits) — path-shape-dependent silence, reproduced on the real records',
+    preLookup(ABS) === null && preLookup('notes.md') === pubRel.page.path, JSON.stringify({ abs: preLookup(ABS), rel: preLookup('notes.md') }));
+  ok('…and the shipped reader no longer hand-parses the upsert key at all (it reads the page’s own srcPath)',
+    !/srcKey \|\| ''\)\.replace\(\/\^local:/.test(fs.readFileSync(path.join(repo, 'src/lib/chat-view.js'), 'utf8')));
+  try { fs.rmSync(dataDir, { recursive: true, force: true }); } catch { }
+}
+
 // ── 1c. NODE leg: the payload → _merge() whitelist (round-3 verifier, BLOCKER) ──
 // `_merge()` REBUILDS the session row rather than spreading it (the webui half
 // is renamed into webuiId/webuiName/webuiMode, `cwd` becomes the composed
@@ -151,8 +221,12 @@ console.log('— active-sessions payload → _merge() (whitelist drift)');
   ok('the active-sessions payload parsed (the guard has something to compare against)', payloadKeys.size >= 20, [...payloadKeys].join(','));
 
   const sb = fs.readFileSync(path.join(repo, 'src/lib/sidebar.js'), 'utf8');
-  const listSrc = sb.split('const LIVE_SESSION_FACTS = Object.freeze([')[1].split(']);')[0];
-  const facts = [...listSrc.matchAll(/'([^']+)'/g)].map((m) => m[1]);
+  const listSrc = sb.split('const LIVE_SESSION_FACTS = Object.freeze({')[1].split('\n});')[0];
+  // Each row is `name: { digest: <projection|null> }` — the fact is always
+  // CARRIED, and `digest` says whether it also GATES the re-render (round-4).
+  const factRows = [...listSrc.matchAll(/(?:^|[,{])\s*([A-Za-z_$][\w$]*)\s*:\s*\{\s*digest:\s*(null|\()/gm)].map((m) => [m[1], m[2] !== 'null']);
+  const facts = factRows.map(([k]) => k);
+  const gating = factRows.filter(([, g]) => g).map(([k]) => k);
   // Keys _merge() handles by NAME (renamed, derived, or composed) — everything
   // else in the payload must ride LIVE_SESSION_FACTS.
   const HANDLED = new Set(['id', 'name', 'cwd', 'host', 'hostName', 'createdAt', 'backend', 'backendSessionId',
@@ -163,6 +237,43 @@ console.log('— active-sessions payload → _merge() (whitelist drift)');
     missing.length === 0, 'not carried: ' + JSON.stringify(missing));
   ok('…and no dead entries (a fact the payload stopped sending must leave the list)', dead.length === 0, 'dead: ' + JSON.stringify(dead));
   ok('…the facts this round found dead are on it', ['worktree', 'worktreePath', 'outputStyle', 'remoteState'].every((k) => facts.includes(k)), facts.join(','));
+  ok('…every row states its render-gate choice (the parse saw all of them — a row this regex cannot read would silently drop out of BOTH halves of the guard)',
+    facts.length >= 8 && facts.length === (listSrc.match(/digest:/g) || []).length, JSON.stringify(factRows));
+  // ROUND 4: reaching `_merge()` is only half the hop — `_mergeAndRender()`
+  // re-renders only when its DIGEST changes, and the digest named none of
+  // these, so the `worktree-path` broadcast repainted nothing.
+  ok('the four facts whose SURFACES have no partial-update path gate the render digest (badge, path tooltip, transport chip, response-style row)',
+    ['worktree', 'worktreePath', 'remoteState', 'outputStyle'].every((k) => gating.includes(k)), gating.join(','));
+  ok('…and the object-valued ones are carried-only ON PURPOSE (`todo` changes several times per TURN, `auth` is re-pointed by the pool — gating on either is the 2.72.0/2.106.1 re-render churn)',
+    !gating.includes('todo') && !gating.includes('auth'), gating.join(','));
+  // WIRING PIN (the 2.331.0 lesson: a pure helper nobody calls is dead code
+  // with a green unit test) — the digest expression must USE the projection.
+  const digestLine = sb.split('\n').find((l) => l.includes('const digest = JSON.stringify('));
+  ok('…and the render gate actually CALLS the projection (a fact list the digest does not read is the same drift one level down)',
+    !!digestLine && digestLine.includes('${liveFactsDigestPart(s)}'), String(digestLine).slice(0, 200));
+  // NEGATIVE CONTROL: the SHIPPED digest expression with that one call removed
+  // (a patched copy, asserted to have hit) cannot tell the two rows apart —
+  // the failure this round found, reproduced on the real expression.
+  {
+    const mkRow = (over) => ({ sessionKey: 'claude:conv-9', status: 'live', name: 'p', webuiName: 'p', webuiId: 'sess-9',
+      agentKind: 'primary', agentRole: '', agentNickname: '', worktree: true, worktreePath: '/repo/.claude/worktrees/w1',
+      remoteState: null, outputStyle: null, ...over });
+    const body = digestLine.trim().replace(/^const digest = /, '').replace(/;$/, '');
+    const prefix = body.replace('${liveFactsDigestPart(s)}', '');
+    ok('NEGATIVE CONTROL: the mutation really removed the call (else the control below is comparing the fixed expression with itself)', prefix !== body && !prefix.includes('liveFactsDigestPart'));
+    const evalDigest = (expr, rows) => {
+      const self = { _allSessions: rows, _getSessionStateKey: (s) => s.sessionKey };
+      // eslint-disable-next-line no-new-func
+      return new Function('liveFactsDigestPart', 'return ' + expr).call(self, (s) => `:${s.worktree ? 1 : 0}:${s.worktreePath || ''}:${s.remoteState || ''}:${s.outputStyle || ''}`);
+    };
+    const isolated = [mkRow({})];
+    const retired = [mkRow({ worktree: false, worktreePath: null })];
+    const unreachable = [mkRow({ remoteState: 'reconnecting' })];
+    ok('NEGATIVE CONTROL: without the projection the digest is IDENTICAL for "isolated" vs "the CLI just retired the fact" and for "host unreachable" — nothing repaints',
+      evalDigest(prefix, isolated) === evalDigest(prefix, retired) && evalDigest(prefix, isolated) === evalDigest(prefix, unreachable));
+    ok('…and WITH it all three differ (the shipped expression, driven — this is what makes the broadcast repaint the card)',
+      evalDigest(body, isolated) !== evalDigest(body, retired) && evalDigest(body, isolated) !== evalDigest(body, unreachable));
+  }
   // NEGATIVE CONTROL: the guard must actually be able to fail.
   const negFacts = facts.filter((k) => k !== 'worktree');
   ok('NEGATIVE CONTROL: with `worktree` removed from the list the guard names it as uncarried (the check is not vacuous)',
@@ -195,6 +306,31 @@ console.log('— §17: no literal colours in the new CSS');
 }
 
 // ── 2. BROWSER leg ──
+// IT MEASURES THE BUILT BUNDLE, NOT src/ (round 4, caught in the act): the
+// worktree overlay copies `public/` as it stands, so a bundle older than the
+// sources under test silently measures the PREVIOUS build — which is how three
+// green legs turned red the moment the real bundle came back, with nothing in
+// the output naming the cause. Say it out loud instead.
+{
+  // src/agentd/ is EXCLUDED: it is the daemon's own tree (never in the client
+  // bundle — test-architecture enforces that), and `npm run build:agentd`
+  // rewrites src/agentd/version.js AFTER esbuild, so it is newer than a
+  // perfectly fresh bundle every single time.
+  const newest = (dir) => {
+    let t = 0;
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const f = path.join(dir, e.name);
+      if (e.isDirectory()) { if (e.name !== 'agentd') t = Math.max(t, newest(f)); }
+      else if (/\.(js|css)$/.test(e.name)) t = Math.max(t, fs.statSync(f).mtimeMs);
+    }
+    return t;
+  };
+  const bundle = path.join(repo, 'public/bundle.js');
+  const built = fs.existsSync(bundle) ? fs.statSync(bundle).mtimeMs : 0;
+  const src = newest(path.join(repo, 'src'));
+  ok('the built bundle is at least as new as src/ — the browser legs below measure public/bundle.js, so a stale one measures the previous build (run `npm run build`)',
+    built >= src, `bundle ${built ? new Date(built).toISOString() : 'MISSING'} < src ${new Date(src).toISOString()}`);
+}
 const CHROME = ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser'].find((p) => fs.existsSync(p));
 if (!CHROME) { console.log('SKIP: no chrome/chromium — the 375×667 measurement did not run'); console.log(fail ? `FAIL (${fail})` : `ALL PASS (${pass})`); process.exit(fail ? 1 : 0); }
 
@@ -691,6 +827,69 @@ console.log('— E. the active-sessions payload really reaches the surfaces that
   ok('Session Properties shows the announced worktree path instead of claiming the session is not isolated',
     props.showsPath === true && props.saysNotIsolated === false, JSON.stringify(props));
   ok('…and the response-style row finally has a live value to show (the sibling fact from the same payload)', props.style === true, JSON.stringify(props));
+
+  // ── THE RENDER GATE (round-4 verifier) ──────────────────────────────────
+  // Reaching `_merge()` is half the hop. `_mergeAndRender()` only re-renders
+  // when its DIGEST changes, and the digest named none of the live facts — so
+  // the `worktree-path` broadcast this branch added specifically to keep the
+  // badge honest repainted NOTHING, and the "host unreachable" chip could not
+  // draw on the transition either (neither surface has a partial-update path:
+  // both exist only inside renderSessionCard). Driven on the REAL sidebar with
+  // the REAL payload rows, counting the REAL renders.
+  const gate = await ev(`(() => {
+    const sb = window.app.sidebar;
+    const base = sb._webuiSessions[0];
+    const n = { c: 0 };
+    const orig = sb._render;
+    sb._render = function () { n.c++; };
+    // Each pass changes EXACTLY ONE fact relative to the previous one — a
+    // pass rebuilt from the base would also revert the previous field, and
+    // then every step would look like it gated the render.
+    let cur = { ...base };
+    const pass = (patch) => { cur = { ...cur, ...patch }; sb._webuiSessions = [cur]; sb._mergeAndRender(); return n.c; };
+    try {
+      const first = pass({});
+      const same = pass({});                                                    // identical payload ⇒ no churn
+      const wtGone = pass({ worktree: false, worktreePath: null });             // the worktree-path broadcast's own shape
+      const wtBack = pass({ worktree: true, worktreePath: base.worktreePath });
+      const unreachable = pass({ remoteState: 'reconnecting' });                // 2.219.1 chip
+      const style = pass({ outputStyle: 'Explanatory' });                       // 2.369.58 row
+      const todo = pass({ todo: { done: 2, total: 5, current: 'writing the thing' } });
+      return { first, same, wtGone, wtBack, unreachable, style, todo };
+    } finally { sb._render = orig; }
+  })()`);
+  ok('the live worktree fact GATES the re-render: flipping it repaints the list (the broadcast finally reaches the badge)',
+    gate.wtGone === gate.same + 1 && gate.wtBack === gate.wtGone + 1, JSON.stringify(gate));
+  ok('…so do the transport chip and the response-style row (the same class, found by the same measurement)',
+    gate.unreachable === gate.wtBack + 1 && gate.style === gate.unreachable + 1, JSON.stringify(gate));
+  ok('NEGATIVE CONTROL: an IDENTICAL payload still renders nothing — the digest keeps suppressing the 5s-poll churn it exists for',
+    gate.same === gate.first, JSON.stringify(gate));
+  ok('NEGATIVE CONTROL: `todo` is carried but deliberately NOT gating (it changes several times per turn; gating on it is the churn the digest forbids) — a measured choice, pinned so it cannot flip silently',
+    gate.todo === gate.style, JSON.stringify(gate));
+
+  // …and the consequence on the rendered CARD, not just the counter.
+  const painted = await ev(`(() => {
+    const sb = window.app.sidebar;
+    const base = { ...sb._webuiSessions[0], worktree: true, worktreePath: ${JSON.stringify(WT)} };
+    // At 375px the list renders FOLDER GROUPS until you drill into one, so the
+    // measurement drills in deliberately — leaving it to whatever state an
+    // earlier leg left behind made this leg order-dependent (it measured zero
+    // cards and called it a pass-or-fail at random).
+    const drill = { type: 'folder', key: base.cwd, label: 'probe' };
+    const bakDrill = sb._mobileDrilldown, bakTab = sb._activeTab, bakView = sb._activeView;
+    sb._mobileDrilldown = drill; sb._activeTab = 'sessions'; sb._activeView = null;
+    const badges = () => sb.listEl.querySelectorAll('.badge-worktree').length;
+    try {
+      sb._webuiSessions = [base]; sb._sessionDigest = null; sb._mergeAndRender();
+      const before = badges();
+      const cards = sb.listEl.querySelectorAll('.session-item-card').length;
+      sb._webuiSessions = [{ ...base, worktree: false, worktreePath: null }]; sb._mergeAndRender();
+      return { before, after: badges(), cards, drilled: !!sb._mobileMode };
+    } finally { sb._mobileDrilldown = bakDrill; sb._activeTab = bakTab; sb._activeView = bakView; }
+  })()`);
+  ok('the probe row really is rendered in the 375px list (else the badge measurement below would pass by drawing nothing)', painted.cards >= 1, JSON.stringify(painted));
+  ok('the drawn card follows: the badge is in the list while the run is isolated and GONE once the CLI retires the fact (the pre-fix digest left it there until an unrelated field changed)',
+    painted.before >= 1 && painted.after === 0, JSON.stringify(painted));
 
   await ev(`(() => {
     const p = window.__mergeProbe;

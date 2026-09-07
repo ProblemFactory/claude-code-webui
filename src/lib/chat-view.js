@@ -3594,9 +3594,18 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
     const r = await fetchJson(`/api/pages?conversationId=${encodeURIComponent(convId)}`);
     const pages = r && Array.isArray(r.pages) ? r.pages : [];
     if (!pages.length) return;
-    // srcKey is 'local:<abs path>' — the same key the publisher used, so the
-    // card matches on PATH (a card knows its paths; it does not know page ids).
-    this._publishedPagesByPath = new Map(pages.map((p) => [String(p.srcKey || '').replace(/^local:/, ''), p]));
+    // A card knows its PATHS; it does not know page ids — so the map is keyed
+    // by the page's own `srcPath`, which is the path fact published-pages
+    // records for exactly this reason. Never by parsing a path back out of
+    // `srcKey`: that key is an UPSERT IDENTITY whose format is the publisher's
+    // business, and hand-parsing it drifted the moment the channel got its own
+    // namespace (round-3 made it `userfile:<conv>:<abs>` so a delivered file
+    // could not take over the user's own page — and the `local:`-stripping
+    // line here silently stopped matching every ABSOLUTE path, which is what
+    // the SendUserFile schema documents agents send; only relative paths kept
+    // resolving, by accident, through the basename fallback below).
+    this._publishedPagesByPath = new Map(
+      pages.map((p) => [String(p.srcPath || ''), p]).filter(([k]) => k));
     this._rerenderUserFileCards();
   }
 
