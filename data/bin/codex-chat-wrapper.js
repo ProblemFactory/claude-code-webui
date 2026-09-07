@@ -1284,10 +1284,23 @@ const completedTurns = new Set();
 const queueMeta = new Map();   // clientUserMessageId → {kind:'user'|'peer', msgId, ts, from}
 let queueFingerprint = null;
 let queueRefreshInFlight = false, queueRefreshAgain = false;
-// Stop is emptying the queue: hold every OTHER publish until the sweep has
-// emitted its per-item removal results (see clearQueueForStop — a republish
-// that overtakes a result tells the user the message RAN).
+// Stop is emptying the queue: hold every publish until the sweep has emitted
+// its per-item removal results (see clearQueueForStop — a republish that
+// overtakes a result tells the user the message RAN). The latch lives on
+// publishQueue, the ONE choke point, because refreshQueue is NOT the only
+// publisher: `turn/started` re-publishes meta.queue with no RPC at all, and
+// mid-sweep that cached list is stale — it resurrected bubbles the sweep had
+// already reported as removed, with their real msgIds (round-2 review).
+// queueSweepSeq additionally invalidates a list that was already IN FLIGHT
+// when the sweep began: it answers after the latch drops, with pre-sweep rows.
 let queueSweepActive = false;
+let queueSweepSeq = 0;
+// Stop is a SAFETY CONTROL: it must not sit behind a wedged app-server. Every
+// RPC the sweep makes is budgeted, the whole sweep is capped, and whatever is
+// left when the cap expires is REPORTED (ok:false) instead of delaying the
+// interrupt (round-2 review: 15s per RPC × N items before the user's Stop).
+const STOP_SWEEP_RPC_MS = 2500;
+const STOP_SWEEP_TOTAL_MS = 6000;
 
 function noteQueued(clientUserMessageId, info) {
   if (!clientUserMessageId) return;
@@ -1328,6 +1341,12 @@ function queueItemsFrom(data) {
 
 /** Publish the queue to every consumer (client strip, attach replay, sidecar). */
 function publishQueue(items, { force = false } = {}) {
+  // THE LATCH (see queueSweepActive): while Stop empties the queue the only
+  // truthful publish is the one the sweep itself makes when it is done. Every
+  // other publisher — a per-delete queue/changed refresh, the turn/started
+  // republish of the CACHED list — would list items the user has already been
+  // told were removed.
+  if (queueSweepActive) return;
   const fp = JSON.stringify(items.map((it) => [it.id, it.msgId, it.kind]));
   if (!force && fp === queueFingerprint) return;
   queueFingerprint = fp;
@@ -1338,18 +1357,29 @@ function publishQueue(items, { force = false } = {}) {
 
 /** Re-read the authoritative queue. Single-flight + coalescing: the app-server
  *  fires thread/queue/changed per mutation and a steer-all makes several. */
-async function refreshQueue() {
+async function refreshQueue({ timeoutMs = 15000 } = {}) {
   if (!meta.threadId) return;
-  // The deletes a Stop sweep makes each fire thread/queue/changed; letting them
-  // publish mid-sweep would race the sweep's own removal results. The sweep
-  // always ends with its own refresh, so nothing is lost by dropping these.
+  // The deletes a Stop sweep makes each fire thread/queue/changed; listing
+  // mid-sweep is pure waste (publishQueue is latched anyway) and on a wedged
+  // app-server it piles hanging RPCs behind the user's Stop. The sweep always
+  // ends with its own refresh, so nothing is lost by dropping these.
   if (queueSweepActive) return;
   if (queueRefreshInFlight) { queueRefreshAgain = true; return; }
   queueRefreshInFlight = true;
   try {
     do {
       queueRefreshAgain = false;
-      const resp = await request('thread/queue/list', { threadId: meta.threadId }, 15000);
+      const gen = queueSweepSeq;
+      const resp = await request('thread/queue/list', { threadId: meta.threadId }, timeoutMs);
+      // A sweep OWNS the publish while it runs — drop this answer, prune
+      // nothing (the sweep ends with its own refresh).
+      if (queueSweepActive) return;
+      // A sweep that STARTED and FINISHED while this list was in flight makes
+      // the answer stale: it enumerates rows Stop has since dropped. Re-list
+      // instead of returning — the sweep's own closing refresh coalesced into
+      // this call (single-flight), so returning here would publish NOTHING and
+      // leave the strip showing the removed items.
+      if (gen !== queueSweepSeq) { queueRefreshAgain = true; continue; }
       const rows = asArray(resp?.data || resp?.items);
       const items = queueItemsFrom(rows);
       const live = new Set(rows.map((q) => asString(q?.clientUserMessageId)));
@@ -1404,6 +1434,20 @@ async function steerOne(item) {
   return { ...base, ok: true };
 }
 
+/** `thread/queue/delete` WITH the app-server's own verdict. `{deleted:false}`
+ *  is a real outcome, not an error: the item left the queue between our list
+ *  and this call, and since the app-server DRAINS its own queue, "left the
+ *  queue" means it RAN. Ignoring the flag chips a `Removed` on a message that
+ *  is running right now, and hands an already-delivered peer message back to
+ *  the delivery ladder for a SECOND delivery (round-2 review).
+ *  @returns {Promise<boolean>} true = we removed it; false = it was already gone.
+ *  An app-server that omits the flag ACKED the delete — only an explicit
+ *  `false` is a refusal. */
+async function deleteQueuedItem(id, timeoutMs = 15000) {
+  const resp = await request('thread/queue/delete', { threadId: meta.threadId, queuedSubmissionId: id }, timeoutMs);
+  return resp?.deleted !== false;
+}
+
 /** STOP CLEARS THE QUEUE (owner decision 2026-09-07 — every harness now, the
  *  ACP wrapper already did). The app-server DRAINS its own queue when a turn
  *  ends, including a turn ended by turn/interrupt (measured: the drained item
@@ -1415,14 +1459,26 @@ async function steerOne(item) {
  *       explicit result (= "it ran") — a bare empty queue_changed would tell
  *       the user their message RAN when Stop threw it away (the ACP round-1
  *       review lesson, same frame, same reason).
+ *   (c) the app-server's OWN verdict decides what we claim: {deleted:false}
+ *       means it drained the item first, so that message is RUNNING — it is
+ *       reported ok:false reason 'gone', never a `Removed` chip, and a peer
+ *       entry on that path is NOT handed back to the delivery ladder;
+ *   (d) the sweep is BUDGETED (per-RPC + overall): Stop is a safety control,
+ *       so a wedged app-server gets the interrupt anyway and whatever is still
+ *       queued is REPORTED instead of the button hanging (round-2 review).
  *  Nothing here is silent: a failed delete reports queue_op_result ok:false
  *  (the item is still queued and WILL run) and lands in the wrapper journal.
  *  @returns {Promise<number>} how many items left the queue. */
 async function clearQueueForStop() {
   if (!meta.threadId) return 0;
+  // THE BUDGET (round-2 review): Stop is a safety control. Every RPC below is
+  // short-fused and the whole sweep is capped, so a wedged app-server costs
+  // the user seconds, not 15s per item, before `turn/interrupt` goes out.
+  const deadline = Date.now() + STOP_SWEEP_TOTAL_MS;
+  const rpcBudget = () => Math.min(STOP_SWEEP_RPC_MS, Math.max(250, deadline - Date.now()));
   let data = [];
   try {
-    const resp = await request('thread/queue/list', { threadId: meta.threadId }, 15000);
+    const resp = await request('thread/queue/list', { threadId: meta.threadId }, rpcBudget());
     data = asArray(resp?.data || resp?.items);
   } catch (e) {
     // The degrade path logs the message VERBATIM (2.284.2) and SPEAKS: an
@@ -1432,21 +1488,45 @@ async function clearQueueForStop() {
     return 0;
   }
   if (!data.length) return 0;
+  queueSweepSeq++;
   queueSweepActive = true;
   let removed = 0;
   try {
-    for (const q of data) {
+    for (let i = 0; i < data.length; i++) {
+      const q = data[i];
       const id = asString(q?.id);
       const cid = asString(q?.clientUserMessageId);
       const known = queueMeta.get(cid) || null;
+      // OUT OF BUDGET: report everything still queued (it WILL run) and let the
+      // interrupt go out NOW. A Stop that waits on a dead app-server is a dead
+      // button — the one failure mode this control may never have.
+      if (Date.now() >= deadline) {
+        const left = data.slice(i);
+        log(`interrupt: queue sweep out of budget (${STOP_SWEEP_TOTAL_MS}ms) with ${left.length} item(s) still queued — they stay queued and will run`);
+        for (const r of left) {
+          const rknown = queueMeta.get(asString(r?.clientUserMessageId)) || null;
+          emitTaskEvent('queue_op_result', { op: 'remove', id: asString(r?.id), ok: false, reason: 'timeout', detail: `the app-server did not answer within ${STOP_SWEEP_TOTAL_MS}ms — Stop did not wait`, msg_id: rknown?.msgId || '' });
+        }
+        break;
+      }
+      let ours = false;
       try {
-        await request('thread/queue/delete', { threadId: meta.threadId, queuedSubmissionId: id }, 15000);
+        ours = await deleteQueuedItem(id, rpcBudget());
       } catch (e) {
         log(`interrupt: thread/queue/delete failed for ${id} (${e.message}) — it stays queued and will run`);
         emitTaskEvent('queue_op_result', { op: 'remove', id, ok: false, reason: 'error', detail: e.message, msg_id: known?.msgId || '' });
         continue;
       }
       queueMeta.delete(cid);
+      if (!ours) {
+        // {deleted:false}: the app-server drained it between our list and this
+        // call, so it is RUNNING. `gone` renders "no longer queued — it already
+        // ran"; a `Removed` chip here would be a lie, and re-stashing a peer
+        // message that really ran would deliver it a second time.
+        log(`interrupt: ${id} had already left the queue (deleted:false) — it RAN, it was not stopped`);
+        emitTaskEvent('queue_op_result', { op: 'remove', id, ok: false, reason: 'gone', msg_id: known?.msgId || '' });
+        continue;
+      }
       removed++;
       emitTaskEvent('queue_op_result', { op: 'remove', id, ok: true, msg_id: known?.msgId || '', reason: 'stopped' });
       // A queued PEER/job message was already reported delivered (peer_message_result
@@ -1458,7 +1538,9 @@ async function clearQueueForStop() {
   } finally { queueSweepActive = false; }
   // The republish comes AFTER every result above — the truth, not an assumed
   // empty: an item whose delete failed is still there and must still be listed.
-  await refreshQueue();
+  // Budgeted like the rest of the sweep: `turn/interrupt` is the caller's very
+  // next statement and must not wait on this list.
+  await refreshQueue({ timeoutMs: rpcBudget() });
   return removed;
 }
 
@@ -1481,8 +1563,17 @@ async function handleQueueOp(msg) {
     if (!item) { emitTaskEvent('queue_op_result', { op, id, ok: false, reason: 'gone' }); await refreshQueue(); return; }
     const known = queueMeta.get(asString(item.clientUserMessageId)) || null;
     try {
-      await request('thread/queue/delete', { threadId: meta.threadId, queuedSubmissionId: id }, 15000);
+      // The SAME verdict the Stop sweep reads: {deleted:false} = the item was
+      // drained between the list above and this call ⇒ it RAN. Reporting a
+      // removal would chip a running message and re-stash a delivered one.
+      const ours = await deleteQueuedItem(id);
       queueMeta.delete(asString(item.clientUserMessageId));
+      if (!ours) {
+        log(`thread/queue/delete refused for ${id} (deleted:false) — it had already left the queue, i.e. it ran`);
+        emitTaskEvent('queue_op_result', { op, id, ok: false, reason: 'gone', msg_id: known?.msgId || '' });
+        await refreshQueue();
+        return;
+      }
       // A queued PEER/job message was already reported delivered (peer_message_result
       // ok:'queued') — removing it must give the text back to the ladder, which
       // re-stashes it for next-turn injection. Never a silent loss.

@@ -10,6 +10,10 @@
 //   ③ LIVE VISIBILITY — mcpToolCall / dynamicToolCall / webSearch /
 //      imageView / contextCompaction items become function_call twins and
 //      notices while the turn runs (they used to appear only after re-attach).
+//   ⑤ STOP CLEARS THE QUEUE + its three round-2 regressions (§②d): a delete the
+//      app-server REFUSES ({deleted:false} = the item was drained, it RAN), a
+//      turn/started landing MID-SWEEP (the cached-list republish), and an
+//      app-server that stops answering (Stop is a safety control, it is capped).
 // Functional: the REAL codex-chat-wrapper against a stub app-server that
 // keeps the first turn ACTIVE and pushes item notifications.
 import fs from 'node:fs';
@@ -464,7 +468,11 @@ ok(/noteQueued\(cid, \{ kind: 'user', msgId: msg\.msgId \|\| '' \}\);\s*\n\s*awa
 ok(!/request\('thread\/queue\/remove'/.test(wsrc) && /thread\/queue\/delete', \{ threadId: meta\.threadId, queuedSubmissionId/.test(wsrc), 'wrapper pin: removal is thread/queue/DELETE with queuedSubmissionId — 0.153.4 has no thread/queue/remove');
 ok(/await request\('turn\/steer'[\s\S]{0,300}expectedTurnId: meta\.activeTurnId/.test(wsrc), 'wrapper pin: every steer carries the ACTIVE turn id as its precondition');
 ok(/await clearQueueForStop\(\);\s*\n\s*if \(meta\.activeTurnId\) await request\('turn\/interrupt'/.test(wsrc), 'wrapper pin: Stop clears the queue BEFORE turn/interrupt (the app-server drains what is left when the turn ends)');
-ok(/emitTaskEvent\('queue_op_result', \{ op: 'remove', id, ok: true, msg_id: known\?\.msgId \|\| '', reason: 'stopped' \}\);/.test(wsrc) && /await refreshQueue\(\);\s*\n\s*return removed;/.test(wsrc), "wrapper pin: every dropped item is reported as a removal BEFORE the republish (a cleared chip reads as 'it ran')");
+ok(/emitTaskEvent\('queue_op_result', \{ op: 'remove', id, ok: true, msg_id: known\?\.msgId \|\| '', reason: 'stopped' \}\);/.test(wsrc) && /await refreshQueue\(\{ timeoutMs: rpcBudget\(\) \}\);\s*\n\s*return removed;/.test(wsrc), "wrapper pin: every dropped item is reported as a removal BEFORE the republish (a cleared chip reads as 'it ran'), and that republish is BUDGETED like the rest of the sweep");
+// round-2 pins: the three defects, in the source
+ok(/if \(queueSweepActive\) return;\n\s*const fp = JSON\.stringify/.test(wsrc), 'wrapper pin: the sweep latch sits on publishQueue — the ONE choke point (turn/started republishes the CACHED list with no RPC at all)');
+ok(/return resp\?\.deleted !== false;/.test(wsrc) && /ours = await deleteQueuedItem\(id, rpcBudget\(\)\);/.test(wsrc), "wrapper pin: the delete's own {deleted:false} verdict is READ (an item drained between the list and the delete RAN — it is not a Stop removal)");
+ok(/const deadline = Date\.now\(\) \+ STOP_SWEEP_TOTAL_MS;/.test(wsrc) && /const rpcBudget = \(\) => Math\.min\(STOP_SWEEP_RPC_MS/.test(wsrc), 'wrapper pin: the sweep is budgeted per-RPC AND overall — Stop is a safety control, not a queue-management routine');
 ok(/if \(method === 'thread\/queue\/changed'\) \{ refreshQueue\(\); return; \}/.test(wsrc), 'wrapper pin: the app-server\'s queue/changed drives a re-LIST (the notification carries no items)');
 ok(/thread\/compact\/start/.test(wsrc) && /applySlashCommand\(text\)/.test(wsrc), 'wrapper pin: slash commands + real compact');
 ok(/const foreign = foreignThreadOf\(params\);/.test(wsrc) && /!THREAD_ID_NOT_SCOPE\.has\(method\)/.test(wsrc) && !/THREAD_SCOPED_METHODS/.test(wsrc), 'wrapper pin: the gate is INVERTED — a notification NAMING another thread is foreign unless allowlisted (a method whitelist goes stale: error / thread/compacted / thread/queue/changed / turn/diff/updated were all missing)');
@@ -472,6 +480,192 @@ ok(/if \(replyAgentPath\) meta\.agentPath = replyAgentPath;/.test(wsrc), 'wrappe
 ok(/itemCtx = \{ threadId: asString\(params\?\.threadId/.test(wsrc) && /function recordItem\(payload\)/.test(wsrc), 'wrapper pin: item records carry the notification\'s thread/turn context');
 const cm = fs.readFileSync(path.join(REPO, 'src/codex-message-manager.js'), 'utf8');
 ok(/this\._status\.slashCommands \|\| \[\]/.test(cm) && !/slashCommands: \[\],/.test(cm), 'normalizer pin: init slashCommands come from wrapper_meta (no hardcoded empty list left)');
+
+// ── ②d STOP, ROUND 2: the three defects an adversarial verifier found in the
+// first cut. Each needs an app-server the main stub deliberately is NOT (one
+// that refuses a delete / announces a turn mid-sweep / stops answering), so
+// each leg drives its OWN wrapper against its own stub — reaching these states
+// from the main stub would poison every assertion above.
+console.log('— ②d Stop, round 2: the refused delete, the mid-sweep republish, the wedged app-server');
+const spawnStub = (tag, stubBody) => {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), `vs-cxp2-${tag}-`));
+  const sid = `sess-${tag}-1700000000009`;
+  const b = path.join(d, sid + '.buf'), mt = path.join(d, sid + '.json'), rl = path.join(d, 'rpc.jsonl');
+  const proc = spawn(process.execPath, [path.join(REPO, 'data/bin/codex-chat-wrapper.js'), b, mt, process.execPath, '-e', stubBody.replace(/__RPCLOG__/g, JSON.stringify(rl))], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: { ...process.env, CODEX_WEBUI_CWD: d, VIBESPACE_API: '', VIBESPACE_SESSION_TOKEN: '', VIBESPACE_SKIP_AGENT_HOOKS: '1' },
+  });
+  let o = ''; proc.stdout.on('data', (x) => { o += x; }); proc.stderr.on('data', () => {});
+  const evs = () => o.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+  return {
+    events: evs,
+    msgs: () => evs().filter((e) => e.type === 'event_msg').map((e) => e.payload),
+    ops: () => evs().filter((e) => e.type === 'event_msg' && e.payload?.type === 'queue_op_result').map((e) => e.payload),
+    queues: () => evs().filter((e) => e.type === 'event_msg' && e.payload?.type === 'queue_changed').map((e) => e.payload),
+    lastQueue: () => (evs().filter((e) => e.type === 'event_msg' && e.payload?.type === 'queue_changed').slice(-1)[0]?.payload?.items) || [],
+    rpc: () => { try { return fs.readFileSync(rl, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } },
+    meta: () => { try { return JSON.parse(fs.readFileSync(mt, 'utf8')); } catch { return null; } },
+    send: (x) => proc.stdin.write(JSON.stringify(x) + '\n'),
+    stop: () => { try { proc.kill('SIGTERM'); } catch {} try { fs.rmSync(d, { recursive: true, force: true }); } catch {} },
+  };
+};
+
+// (1)+(2) — an app-server that DRAINS a queued item between our list and our
+// delete: it answers {deleted:false} (0.153.4 answers the flag, it does not
+// error) and the drained item starts a turn, so a `turn/started` lands while
+// the sweep is still deleting.
+const STUB_RACE = `
+const fs = require('fs');
+let b = ''; let turns = 0; let queue = []; let qseq = 0; let activeTurn = null; let announced = false;
+const send = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (d) => {
+  b += d; let i;
+  while ((i = b.indexOf('\\n')) !== -1) {
+    const line = b.slice(0, i); b = b.slice(i + 1);
+    if (!line.trim()) continue;
+    let m; try { m = JSON.parse(line); } catch { continue; }
+    if (m.id === undefined || !m.method) continue;
+    fs.appendFileSync(__RPCLOG__, line + '\\n');
+    if (m.method === 'thread/start') { send({ id: m.id, result: { thread: { id: 'th-race' } } }); continue; }
+    if (m.method === 'turn/start') { turns++; const tid = 'turn-' + turns; activeTurn = tid; send({ id: m.id, result: { turn: { id: tid } } }); send({ method: 'turn/started', params: { turn: { id: tid } } }); continue; }
+    if (m.method === 'thread/queue/add') { const q = { id: 'q' + (++qseq), input: m.params.input, clientUserMessageId: m.params.clientUserMessageId }; queue.push(q); send({ id: m.id, result: { queuedSubmission: q } }); send({ method: 'thread/queue/changed', params: { threadId: 'th-race' } }); continue; }
+    if (m.method === 'thread/queue/list') { send({ id: m.id, result: { data: queue.slice(), nextCursor: null } }); continue; }
+    if (m.method === 'thread/queue/delete') {
+      const at = queue.findIndex((q) => q.id === m.params.queuedSubmissionId);
+      if (at >= 0 && JSON.stringify(queue[at].input).includes('[ran]')) {
+        // THE RACE: this one was drained a moment ago and is RUNNING now, so
+        // the delete is refused — and the drained item's own turn/started
+        // arrives before the reply, i.e. while the sweep is mid-flight.
+        queue.splice(at, 1);
+        if (!announced) { announced = true; turns++; activeTurn = 'turn-' + turns; send({ method: 'turn/started', params: { turn: { id: activeTurn } } }); }
+        send({ id: m.id, result: { deleted: false } });
+        send({ method: 'thread/queue/changed', params: { threadId: 'th-race' } });
+        continue;
+      }
+      if (at < 0) { send({ id: m.id, error: { code: -32600, message: 'queued submission not found' } }); continue; }
+      queue.splice(at, 1); send({ id: m.id, result: { deleted: true } }); send({ method: 'thread/queue/changed', params: { threadId: 'th-race' } }); continue;
+    }
+    if (m.method === 'turn/interrupt') { send({ id: m.id, result: {} }); const e = activeTurn; activeTurn = null; send({ method: 'turn/completed', params: { turn: { id: e }, status: 'interrupted' } }); continue; }
+    send({ id: m.id, result: {} });
+  }
+});
+`;
+{
+  const A = spawnStub('race', STUB_RACE);
+  ok(await waitFor(() => A.meta()?.threadId === 'th-race'), 'race stub: the wrapper has a thread');
+  A.send({ type: 'chat-input', text: 'go', msgId: 'a0' });
+  ok(await waitFor(() => A.meta()?.activeTurnId === 'turn-1'), 'race stub: a turn is running');
+  A.send({ type: 'chat-input', text: '[ran] runaway', msgId: 'a1' });
+  A.send({ type: 'peer-message', text: '[ran] ping from D', fromName: 'session D' });
+  A.send({ type: 'chat-input', text: 'really stopped', msgId: 'a3' });
+  ok(await waitFor(() => A.lastQueue().length === 3), `race stub: three items queued behind it (${JSON.stringify(A.lastQueue().map((i) => i.preview))})`);
+  const qItems = A.lastQueue();
+  const byPreview = (needle) => qItems.find((i) => i.preview.includes(needle));
+  const runaway = byPreview('runaway'), peerItem = byPreview('ping from D'), stopped = byPreview('really stopped');
+  const sweptIds = qItems.map((i) => i.id);
+  const peersBeforeA = A.msgs().filter((m) => m.type === 'peer_message_result').length;
+  A.send({ type: 'interrupt' });
+  ok(await waitFor(() => A.ops().filter((r) => r.op === 'remove').length >= 3), `race stub: Stop reports every listed item (${JSON.stringify(A.ops())})`);
+  // (1) a delete the app-server REFUSED is not a removal. The item left the
+  // queue on its own = it RAN, and the chip must not read `Removed`.
+  const rRun = A.ops().find((r) => r.id === runaway.id);
+  ok(rRun && rRun.ok === false && rRun.reason === 'gone' && rRun.msg_id === 'a1', `a {deleted:false} reply is reported ok:false reason 'gone' — never a fake 'stopped' removal (${JSON.stringify(rRun)})`);
+  const rPeer = A.ops().find((r) => r.id === peerItem.id);
+  ok(rPeer && rPeer.ok === false && rPeer.reason === 'gone', `…the same verdict for a peer item the app-server drained (${JSON.stringify(rPeer)})`, JSON.stringify(A.ops()));
+  // …and a peer message that really RAN must NOT go back to the delivery
+  // ladder: it was delivered, re-stashing it would deliver it a second time.
+  const peersA = A.msgs().filter((m) => m.type === 'peer_message_result').slice(peersBeforeA);
+  ok(!peersA.some((r) => r.ok === false && String(r.text || '').includes('ping from D')), `an agent-to-agent message that RAN is not re-stashed (a second delivery) — ${JSON.stringify(peersA)}`);
+  // the item that really was deleted still reports the Stop removal
+  const rStop = A.ops().find((r) => r.id === stopped.id);
+  ok(rStop && rStop.ok === true && rStop.reason === 'stopped' && rStop.msg_id === 'a3', `the item Stop really did drop is still reported ok:true reason 'stopped' (${JSON.stringify(rStop)})`);
+  // (2) the turn/started that landed MID-SWEEP must not republish the wrapper's
+  // CACHED item list: those bubbles have already been told they are gone.
+  const evA = A.events().filter((e) => e.type === 'event_msg');
+  const startedIdx = evA.findIndex((e) => e.payload?.type === 'task_started' && e.payload.turn_id === 'turn-2');
+  const lastOpIdx = evA.map((e) => e.payload?.type === 'queue_op_result').lastIndexOf(true);
+  ok(startedIdx >= 0 && startedIdx < lastOpIdx, `the drained item's turn/started really arrived WHILE the sweep was running (task_started@${startedIdx} < last removal result@${lastOpIdx})`);
+  const resurrected = evA.slice(startedIdx + 1).filter((e) => e.payload?.type === 'queue_changed' && (e.payload.items || []).some((it) => sweptIds.includes(it.id)));
+  ok(resurrected.length === 0, `no publish after the mid-sweep turn/started resurrects a swept item (the republish rides the CACHED list and carries the real msgIds) — ${JSON.stringify(resurrected.map((e) => e.payload.items))}`);
+  ok(await waitFor(() => A.lastQueue().length === 0), `the sweep's own closing refresh is the one truthful publish, and it is empty (${JSON.stringify(A.lastQueue())})`);
+  // through the REAL normalizer: the runaway bubble must not wear `Removed`
+  const mmA = new CodexMessageManager('p2-race');
+  mmA.convertHistory(A.events());
+  const userA = (needle) => mmA.messages.find((m) => m.role === 'user' && JSON.stringify(m.content).includes(needle));
+  ok(userA('runaway') && userA('runaway').queueState !== 'removed', `the bubble of a message that RAN never reads 'Removed' (${userA('runaway')?.queueState || 'no chip'})`);
+  ok(userA('really stopped')?.queueState === 'removed', `…while the one Stop really dropped does (${userA('really stopped')?.queueState})`);
+  const sysA = mmA.messages.filter((m) => m.role === 'system').map((m) => m.content?.[0]?.text || '');
+  ok(sysA.some((t) => /no longer queued — it already ran/.test(t)), 'and the user is TOLD that one already ran (nothing silent)', sysA.join(' | '));
+  A.stop();
+}
+
+// (3) — an app-server that stops answering. Stop is a SAFETY CONTROL: it must
+// reach turn/interrupt on a budget and REPORT what it could not clear, never
+// sit behind 15s-per-RPC × N items with the user's Stop button dead.
+const STUB_WEDGE = `
+const fs = require('fs');
+let b = ''; let turns = 0; let queue = []; let qseq = 0; let activeTurn = null;
+const send = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (d) => {
+  b += d; let i;
+  while ((i = b.indexOf('\\n')) !== -1) {
+    const line = b.slice(0, i); b = b.slice(i + 1);
+    if (!line.trim()) continue;
+    let m; try { m = JSON.parse(line); } catch { continue; }
+    if (m.id === undefined || !m.method) continue;
+    fs.appendFileSync(__RPCLOG__, line + '\\n');
+    if (m.method === __STALL__) continue;   // WEDGED: received, logged, never answered
+    if (m.method === 'thread/start') { send({ id: m.id, result: { thread: { id: 'th-wedge' } } }); continue; }
+    if (m.method === 'turn/start') { turns++; const tid = 'turn-' + turns; activeTurn = tid; send({ id: m.id, result: { turn: { id: tid } } }); send({ method: 'turn/started', params: { turn: { id: tid } } }); continue; }
+    if (m.method === 'thread/queue/add') { const q = { id: 'q' + (++qseq), input: m.params.input, clientUserMessageId: m.params.clientUserMessageId }; queue.push(q); send({ id: m.id, result: { queuedSubmission: q } }); send({ method: 'thread/queue/changed', params: { threadId: 'th-wedge' } }); continue; }
+    if (m.method === 'thread/queue/list') { send({ id: m.id, result: { data: queue.slice(), nextCursor: null } }); continue; }
+    if (m.method === 'turn/interrupt') { send({ id: m.id, result: {} }); const e = activeTurn; activeTurn = null; send({ method: 'turn/completed', params: { turn: { id: e }, status: 'interrupted' } }); continue; }
+    send({ id: m.id, result: {} });
+  }
+});
+`;
+{
+  // (3a) the LIST never answers: nothing can be enumerated, so nothing may be
+  // claimed cleared — and the interrupt still goes out on the sweep's budget.
+  const B = spawnStub('wedge-list', STUB_WEDGE.replace(/__STALL__/g, "'thread/queue/list'"));
+  ok(await waitFor(() => B.meta()?.threadId === 'th-wedge'), 'wedged-list stub: the wrapper has a thread');
+  B.send({ type: 'chat-input', text: 'go', msgId: 'b0' });
+  ok(await waitFor(() => B.meta()?.activeTurnId === 'turn-1'), 'wedged-list stub: a turn is running');
+  B.send({ type: 'chat-input', text: 'queued behind it', msgId: 'b1' });
+  ok(await waitFor(() => B.rpc().some((m) => m.method === 'thread/queue/add')), 'wedged-list stub: a message is queued');
+  const t0 = Date.now();
+  B.send({ type: 'interrupt' });
+  const gotB = await waitFor(() => B.rpc().some((m) => m.method === 'turn/interrupt'), 20000);
+  const elapsedB = Date.now() - t0;
+  ok(gotB && elapsedB < 10000, `Stop reaches turn/interrupt on the sweep's budget even when thread/queue/list never answers (${elapsedB}ms; the 15s-per-RPC cut took 15s+ before sending it)`);
+  ok(B.ops().some((r) => r.op === 'remove' && r.ok === false), `…and it SPEAKS: the queue was NOT cleared (${JSON.stringify(B.ops())})`);
+  ok(!B.ops().some((r) => r.ok === true), 'nothing is reported removed when nothing could be read', JSON.stringify(B.ops()));
+  B.stop();
+}
+{
+  // (3b) the DELETEs never answer: the cap must expire mid-sweep, the items it
+  // never reached must be reported (they stay queued and WILL run), and the
+  // interrupt must go out anyway.
+  const C = spawnStub('wedge-del', STUB_WEDGE.replace(/__STALL__/g, "'thread/queue/delete'"));
+  ok(await waitFor(() => C.meta()?.threadId === 'th-wedge'), 'wedged-delete stub: the wrapper has a thread');
+  C.send({ type: 'chat-input', text: 'go', msgId: 'c0' });
+  ok(await waitFor(() => C.meta()?.activeTurnId === 'turn-1'), 'wedged-delete stub: a turn is running');
+  for (const n of [1, 2, 3, 4]) C.send({ type: 'chat-input', text: `queued ${n}`, msgId: `c${n}` });
+  ok(await waitFor(() => C.lastQueue().length === 4), `wedged-delete stub: four messages queued (${C.lastQueue().length})`);
+  const queuedIds = C.lastQueue().map((i) => i.id);
+  const t0 = Date.now();
+  C.send({ type: 'interrupt' });
+  const gotC = await waitFor(() => C.rpc().some((m) => m.method === 'turn/interrupt'), 25000);
+  const elapsedC = Date.now() - t0;
+  ok(gotC && elapsedC < 10000, `Stop reaches turn/interrupt within the overall cap when every thread/queue/delete hangs (${elapsedC}ms for 4 items; 15s each before)`);
+  const rms = C.ops().filter((r) => r.op === 'remove');
+  ok(rms.length === 4 && rms.every((r) => r.ok === false) && queuedIds.every((id) => rms.some((r) => r.id === id)), `every item Stop could NOT clear is reported ok:false, by id (${JSON.stringify(rms.map((r) => [r.id, r.ok, r.reason]))})`);
+  ok(rms.some((r) => r.reason === 'timeout' && /did not answer/.test(r.detail || '')), 'the items the expired cap never even reached are reported as timeouts — reporting what was NOT cleared is the point', JSON.stringify(rms.map((r) => r.reason)));
+  ok(C.lastQueue().length === 4, `…and the strip still lists them: they are still queued and will run (${C.lastQueue().length})`);
+  C.stop();
+}
 
 try { w.kill('SIGTERM'); } catch {}
 await sleep(300);

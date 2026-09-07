@@ -217,6 +217,22 @@ never a backend id; the ws layer, the strip and the chip all gate on that row:
   ran. (codex-side difference kept deliberately: no extra "send it again" notice
   — every dropped codex item has its own bubble whose chip flips to `Removed`,
   while ACP's notice also covers entries with no bubble.)
+- **Stop only claims what Stop actually did (round-2 review, three fixes).**
+  ① The app-server can DRAIN an item between the sweep's `thread/queue/list` and
+  its `thread/queue/delete`; it answers `{deleted:false}` (a verdict, not an
+  error) and that message is *running*. It is reported `ok:false, reason:'gone'`
+  — "no longer queued — it already ran" — so the bubble never reads `Removed`,
+  and an agent-to-agent message on that path is NOT re-stashed (it really was
+  delivered; giving it back would deliver it twice). ② While the sweep runs the
+  ONLY truthful publish is its own closing one: the latch sits on the wrapper's
+  single publish choke point, not just on the queue re-read, because a
+  `turn/started` (the drained item's own turn!) re-publishes the CACHED list
+  with no RPC at all and used to resurrect the just-removed bubbles as
+  `Queued`. ③ Stop is a safety control, so the sweep is BUDGETED — ~2.5s per
+  RPC, ~6s overall — and when the budget expires `turn/interrupt` goes out
+  immediately while everything still queued is reported `ok:false` ("it stays
+  queued and will run"). A wedged app-server used to hold the Stop button for
+  15s per RPC per queued item.
 - Measured facts behind the codex implementation (0.153.4, live app-server):
   the removal verb is `thread/queue/delete {threadId, queuedSubmissionId}` —
   **there is no `thread/queue/remove`**; `thread/queue/changed` carries only
