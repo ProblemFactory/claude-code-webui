@@ -7,7 +7,7 @@
  * See CLAUDE.md §9 + accounts.js §ban-safety before changing ANY cadence here.
  */
 const fs = require('fs');
-const { loginState } = require('./login-state.js'); // THE credential-state reader (shared with the pool engine + the repair migration)
+const { accountLoginState } = require('./login-state.js'); // THE credential-state reader (shared with the pool engine + the repair migration)
 const path = require('path');
 const os = require('os');
 const { execFileSync } = require('child_process');
@@ -467,6 +467,13 @@ async function refreshViaCliPanel(key) {
     // preserve org identity + any fields the panel doesn't carry
     let prev = {}; try { prev = JSON.parse(fs.readFileSync(f, 'utf-8')); } catch { }
     const merged = { ...prev, ...u, scopedWeekly: u.scopedWeekly?.length ? u.scopedWeekly : (prev.scopedWeekly || []) };
+    // A preserve-merge inherits IDENTITY, never PROVENANCE (2026-09-07 r2):
+    // `corroborated` is a verdict about the write that carried it. This panel
+    // has no session, so there is nothing to corroborate with — inheriting the
+    // last session-write's verdict rendered "via own /usage panel · not
+    // corroborated" about a reading the account made about itself. Same rule
+    // as captureRateLimitEvent (which deletes it when undefined).
+    if (u.corroborated === undefined) delete merged.corroborated;
     // WEEKLY RESET PROJECTION (2.369.33, owner ask): the panel omits '· resets'
     // for a bucket at 0%, but weekly windows repeat on a fixed 7-day anchor —
     // carry the last observed weekly reset forward (projectReset) and mark it
@@ -590,6 +597,7 @@ app.post('/api/usage/refresh', async (req, res) => {
             let prev = null; try { prev = JSON.parse(fs.readFileSync(f, 'utf-8')); } catch { }
             if (prev?.fetchedAt && prev.fetchedAt >= j.fetchedAt) continue;
             const merged = { ...(prev || {}), ...j, source: 'remote-statusline' };
+            if (j.corroborated === undefined) delete merged.corroborated; // provenance belongs to the write that made it — the host's own label, if it sent one, describes THIS reading
             fs.writeFileSync(f + '.tmp', JSON.stringify(merged)); fs.renameSync(f + '.tmp', f);
           }
         } catch { }
@@ -945,17 +953,23 @@ app.get('/api/usage', (req, res) => {
       } catch { return {}; }
     })(),
     // CREDENTIAL STATE per named claude account (2026-09-07, panel honesty):
-    // live / expired / wiped / missing, with `since` = the instant the login
-    // stopped being able to produce a reading (src/login-state.js — the SAME
-    // predicate the pool's slot validation and the repair migration use). The
-    // panel shows a signed-out member's LAST REAL reading with "stale since",
-    // instead of presenting five-day-old foreign numbers as current.
+    // live / expired / wiped / missing / oat, with `since` = the instant the
+    // account stopped being able to produce a reading (src/login-state.js —
+    // the SAME module the pool's slot validation and the repair migration
+    // read). The panel shows a signed-out member's LAST REAL reading with
+    // "stale since", instead of presenting five-day-old foreign numbers as
+    // current.
+    // ACCOUNT-level, not file-level (r2): a wiped dir + a valid long-lived
+    // token is a working account (`oatOnly` spawns, its readings are its own),
+    // so the panel must not tell the user it is signed out and must not flag
+    // its own fresh readings as somebody else's. `accountLoginState` answers
+    // for both channels; `oatMintedAt` rides list() already.
     logins: (() => {
       try {
         const out = {};
         for (const a of (accounts.list().accounts || [])) {
           if ((a.backend || 'claude') !== 'claude' || a.type !== 'subscription') continue;
-          const st = loginState(accounts.subCredsPath(a.id), { backend: 'claude' });
+          const st = accountLoginState(accounts.subCredsPath(a.id), { backend: 'claude', oatMintedAt: a.oat ? (a.oatMintedAt || null) : null });
           out[a.id] = { state: st.state, usable: st.usable, since: st.since || null };
         }
         return out;

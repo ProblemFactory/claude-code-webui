@@ -42,10 +42,26 @@ function create({ rootDir, serverNotice }) {
         const members = [];
         let names = [];
         try { names = fs.readdirSync(subsDir); } catch { return; }
+        // A member's credential DIR is only half its login (2026-09-07 r2): an
+        // account with a wiped dir and a valid LONG-LIVED TOKEN still spawns
+        // (`oatOnly`) and still produces readings under its own key, so
+        // enumerating members from disk alone dated a live account's "death"
+        // from the wipe and archived everything it wrote afterwards. Read the
+        // roster for `oatMintedAt` — presence + timestamp only, the encrypted
+        // token is never touched (and this migration still runs before any
+        // AccountManager exists).
+        const oatMinted = (() => {
+          const out = {};
+          try {
+            const st = JSON.parse(fs.readFileSync(path.join(dataDir, 'accounts.json'), 'utf-8'));
+            for (const a of (st?.accounts || [])) if (a && a.id && a.oatEnc && a.oatMintedAt) out[a.id] = Number(a.oatMintedAt) || 0;
+          } catch { }
+          return out;
+        })();
         for (const d of names) {
           if (!/^sub-[\w-]+$/.test(d)) continue;                  // pools are symlinks, con-* are login scratch
           try { if (fs.lstatSync(path.join(subsDir, d)).isSymbolicLink()) continue; } catch { continue; }
-          members.push({ id: d, backend: 'claude', credsPath: path.join(subsDir, d, '.credentials.json') });
+          members.push({ id: d, backend: 'claude', credsPath: path.join(subsDir, d, '.credentials.json'), oatMintedAt: oatMinted[d] || null });
         }
         const transitions = new SlotTransitions({ dataDir });
         let journalText = null;

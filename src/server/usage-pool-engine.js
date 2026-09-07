@@ -301,12 +301,17 @@ async function pushSealedOrders(poolId) {
   // (the memo below is per-pool AND the daemon now stores per-pool slots, so a
   // second pool's push can no longer evict the first — review finding)
   await dm.poolOrders(orders, (events) => {
-    // fallback switches executed while this server was down: surface + let
-    // the by-time ledger attribution reconcile billing (it already keys on
-    // the symlink target's real account at scan time)
+    // fallback switches executed while this server was down: surface them AND
+    // RECORD THEM (2026-09-07 r2). The by-time attribution is only as honest
+    // as the transition ledger, and a device-executed re-point that leaves no
+    // row makes `slotAt()` answer with the last ORCHESTRATOR row — a
+    // confident wrong answer about the exact window (server down) where late
+    // attribution has nothing else to go on. accounts.js stays the single
+    // writer; the event already carries every field it needs.
     for (const ev of events) {
       serverNotice('sealed-orders-' + ev.ts, `账号池 ${accounts.get(ev.poolId)?.name || ev.poolId} 在服务器离线期间因触限自动切换到 ${accounts.get(ev.to)?.name || ev.to}（sealed-orders 应急反射）`, { level: 'warn' });
       try { console.log('[sealed-orders] device-executed fallback switch:', JSON.stringify(ev)); } catch { }
+      try { accounts.noteDeviceRepoint({ link: ev.link, poolId: ev.poolId, from: ev.from, to: ev.to, at: ev.ts, why: 'sealed-orders' }); } catch { }
     }
     try { dm.ackPoolOrdersLog(); } catch { }
   });
@@ -467,6 +472,16 @@ function writeUsageCacheForKey(key, parsed) {
     const f = path.join(USAGE_CACHE_DIR, key.replace(/[^\w.-]/g, '_') + '.json');
     let prev = {}; try { prev = JSON.parse(fs.readFileSync(f, 'utf-8')) || {}; } catch {}
     const merged = { ...prev, ...parsed };
+    // PROVENANCE IS NOT PRESERVED (2026-09-07 r2, reproduced): `corroborated`
+    // is a verdict about ONE write — did the OTel observation agree with the
+    // credential slot THAT reading was filed on. A preserve-merge inherits
+    // whatever the previous producer decided, so a probe/panel result written
+    // over a diverged rate_limit_event rendered as "via own /usage panel · not
+    // corroborated": an old verdict attached to a reading it does not
+    // describe (and, for a session-less producer, one there is nothing to
+    // corroborate WITH). captureRateLimitEvent and markLimitBanner already
+    // delete-or-set it per write; every preserve-merge writer must too.
+    if (parsed.corroborated === undefined) delete merged.corroborated; else merged.corroborated = !!parsed.corroborated;
     // preserve-merge like the statusline hook: never clobber known scoped/org
     // data with an empty answer
     if ((!parsed.scopedWeekly || !parsed.scopedWeekly.length) && Array.isArray(prev.scopedWeekly) && prev.scopedWeekly.length) {
@@ -531,10 +546,29 @@ app.locals.usageIdentityAccountIds = usageIdentityAccountIds;
 // three-tier design). A REMOTE session on the host's own CLI login has no
 // account id → the host bucket (usage-cache/host-<id>.json, the popup's
 // machine rows) — resolveUsageKey alone mapped those to '__global__' and
-// misattributed the HOST's quota to the LOCAL machine login.
+// misattributed the HOST's quota to the LOCAL machine login. (That sentence
+// was written when only claude existed here; it is made exact below.)
+// THE HOST BUCKET IS THE CLAUDE MACHINE LOGIN'S PER-HOST FORM (2026-09-07 r2,
+// reproduced): `host-<id>.json` has exactly ONE meaning everywhere it is read
+// or written — that host's own CLAUDE login (usage-routes seeds `_hostUsage`
+// from it, the remote statusline harvest writes the host's `__global__` into
+// it, the on-demand ⟳ overwrites it with an OAuth panel, the Agents machine
+// rows render it). Codex's machine identity is NOT host-scoped: its own
+// resolver (`codexQuotaKeyFor`, still the twin `noteWallSignal` uses) has
+// always answered '__global_codex__' for an account-less session, and the
+// codex panel only seeds files matching /^(cxs-…|__global_codex__)\.json$/.
+// The pre-r2 rule keyed on "remote AND no account", so the moment readings and
+// rejections began sharing ONE resolver it became the route by which a REMOTE
+// codex session's rate_limits_updated snapshot overwrote the host's claude
+// numbers — and disappeared from codex's own panel.
+// Written as a TRANSFORM OF THE ANSWER rather than a backend test: whatever
+// machine identity resolveUsageKey names, only `__global__` (the claude
+// machine login) has a per-host form. An account-billed session never resolves
+// to it, so "no account" is implied; every other machine identity — codex's
+// today, a future harness's tomorrow — passes through untouched.
 function usageCacheKeyFor(session) {
-  if (session?.host && !session._accountId) return 'host-' + session.host;
-  return resolveUsageKey(session);
+  const key = resolveUsageKey(session);
+  return (session?.host && key === '__global__') ? 'host-' + session.host : key;
 }
 // Passive quota capture from the CLI's own rate_limit_event records (B-e5c9,
 // 2.289.0) — ONE shared implementation (src/rate-limit-capture.js) for local
@@ -643,7 +677,15 @@ function validateBillingSlot(poolId, linkedId) {
 }
 /** The credential state of one CLAUDE account key (src/login-state.js — the
  *  shared reader; also what the panels and the migration read, one
- *  implementation). null = "no opinion": a pseudo key ('__global__', 'host-…'),
+ *  implementation).
+ *  DELIBERATELY THE FILE, NOT THE ACCOUNT (2026-09-07 r2): the panels and the
+ *  repair ask `accountLoginState`, which also counts a long-lived token — but
+ *  this function answers "does the credential SLOT hold credentials", and a
+ *  pooled session's CLI reads whatever the SYMLINK points at. An oat lives in
+ *  accounts.json and is delivered as spawn ENV; re-pointing a link can never
+ *  hand it to a running CLI, so for a slot the file is the whole answer.
+ *  Making this one oat-aware would make a wiped member a valid switch target.
+ *  null = "no opinion": a pseudo key ('__global__', 'host-…'),
  *  a codex account (its slot machinery does not exist — capsOf('codex')
  *  .hotSwitch is 'impossible', so there is no re-point to be wrong about), or
  *  an unreadable roster.

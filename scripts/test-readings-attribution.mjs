@@ -53,7 +53,7 @@ const code = (f) => read(f).split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test
 const engMod = require(path.join(REPO, 'src/server/usage-pool-engine.js'));
 const { AccountManager } = require(path.join(REPO, 'src/accounts.js'));
 const { SlotTransitions } = require(path.join(REPO, 'src/slot-transitions.js'));
-const { loginState } = require(path.join(REPO, 'src/login-state.js'));
+const { loginState, accountLoginState, OAT_TTL_MS } = require(path.join(REPO, 'src/login-state.js'));
 const repair = require(path.join(REPO, 'src/reading-repair.js'));
 
 const cleanup = [];
@@ -66,8 +66,11 @@ const CREDS = (id, { wiped = false, expiresAt = null, refreshExpiresAt = null } 
 });
 
 /** A real pool of three logged-in subscriptions + the real engine. FISH is the
- *  OTel-observed (spawn-time) org, LINK is the credential slot. */
-function mkWorld() {
+ *  OTel-observed (spawn-time) org, LINK is the credential slot.
+ *  `hosts` (r2 §11b) injects a device-manager stub so pushSealedOrders can be
+ *  driven for real; every other caller passes nothing and gets `null`, which
+ *  is what the engine sees on an instance with no daemon. */
+function mkWorld({ hosts = null } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-readattr-'));
   cleanup.push(root);
   const dataDir = path.join(root, 'data');
@@ -94,7 +97,7 @@ function mkWorld() {
   const eng = engMod.create({
     app, rootDir: root, USAGE_CACHE_DIR: cacheDir, activeSessions: sessions,
     wss: { clients: new Set() }, WS_OPEN: 1, broadcastToSession() { }, serverNotice: (k, t) => notices.push(t),
-    serverSetting: () => undefined, getAccounts: () => am, getHosts: () => null, getUsageHistory: () => null,
+    serverSetting: () => undefined, getAccounts: () => am, getHosts: () => hosts, getUsageHistory: () => null,
     recordUsageAttribution() { }, adapterRegistry: { get() { return null; } },
     getAutoResume: () => null, getOtelIngest: () => ({ observedOrgFor: (cid) => obs.get(cid) || null }), getQuotaProbe: () => null,
   });
@@ -470,6 +473,319 @@ if (!probe) {
   ok('§9 login-state has ONE home, and every consumer imports it from there', ["src/server/usage-pool-engine.js", "src/usage-routes.js", "src/reading-repair.js"].every((f) => /require\('\.\.?\/(\.\.\/)?login-state\.js'\)/.test(read(f))));
   ok('§9 the migration is registered append-only with a dated id', /id: '2026-09-reattribute-readings-by-slot'/.test(read('src/server/migrations.js')));
   ok('§9 …and it says out loud what it did, even when that is nothing', /\[migrate\] readings-by-slot:/.test(read('src/server/migrations.js')));
+}
+
+// ── §11 ROUND 2: the six defects the adversarial verifier reproduced ────────
+// Every leg drives the REAL producer / the REAL merge / the REAL migration,
+// and carries a negative control that fails without the fix.
+
+// (a) MAJOR — a REMOTE CODEX reading was routed into the HOST'S CLAUDE bucket.
+//     `usageCacheKeyFor`'s first rule ("a remote session with no account →
+//     host-<id>") is a CLAUDE fact: usage-routes seeds _hostUsage from those
+//     files, the remote statusline harvest writes the host's `__global__`
+//     into them and the Agents machine rows render them. Codex remote chat is
+//     supported (ws-create "codex remote chat rides the SAME keeper") and its
+//     stdout consumer calls recordCodexQuotaSignal with no host gate, so once
+//     readings started sharing ONE resolver the codex snapshot began
+//     OVERWRITING the host's claude numbers — and disappearing from codex's
+//     own panel, whose disk seed only matches cxs-* / __global_codex__.
+{
+  const w = mkWorld(); const cap = quiet();
+  const remoteClaude = { backend: 'claude', mode: 'chat', host: 'h1', _accountId: null, _webuiId: 'sess-cl-h1', claudeSessionId: 'cid-cl-h1', pty: { write() { } } };
+  const remoteCodex = { backend: 'codex', mode: 'chat', host: 'h1', _accountId: null, _webuiId: 'sess-cx-h1', claudeSessionId: 'cid-cx-h1', pty: { write() { } } };
+  w.sessions.set('sess-cl-h1', remoteClaude); w.sessions.set('sess-cx-h1', remoteCodex);
+  // ① the host's own claude login reports its quota (the file's ONE meaning)
+  w.eng.recordRateLimitEvent(remoteClaude, { type: 'rate_limit_event', rate_limit_info: { status: 'allowed', rateLimitType: 'seven_day', utilization: 0.11, resets_at: w.R7, resetsAt: w.R7 } });
+  const hostFile = path.join(w.cacheDir, 'host-h1.json');
+  // age it a minute: the codex snapshot below carries `fetchedAt: now`, and
+  // its writer only overwrites a STRICTLY OLDER file — two writes inside the
+  // same millisecond would make this leg pass for the wrong reason.
+  try { const j = JSON.parse(fs.readFileSync(hostFile, 'utf8')); j.fetchedAt -= 60000; fs.writeFileSync(hostFile, JSON.stringify(j)); } catch { }
+  const hostBefore = fs.existsSync(hostFile) ? fs.readFileSync(hostFile, 'utf8') : null;
+  ok('§11a a REMOTE CLAUDE session with no account still fills the HOST bucket (2.289.0, unchanged)', !!hostBefore && Math.abs(JSON.parse(hostBefore).sevenDay.utilization - 0.11) < 1e-9, String(hostBefore).slice(0, 120));
+  // ② the same host runs a codex session
+  w.codexReading(remoteCodex);
+  const hostAfter = fs.existsSync(hostFile) ? fs.readFileSync(hostFile, 'utf8') : null;
+  const cxFile = path.join(w.cacheDir, '__global_codex__.json');
+  const cx = (() => { try { return JSON.parse(fs.readFileSync(cxFile, 'utf8')); } catch { return null; } })();
+  cap.done();
+  ok('§11a …and a REMOTE CODEX reading lands on the codex machine identity', !!cx && cx.limitId === 'codex' && Math.abs(cx.sevenDay.utilization - 0.3) < 1e-9, JSON.stringify(cx && { l: cx.limitId, s: cx.sevenDay }));
+  ok('§11a …leaving the host\'s CLAUDE bucket byte-identical (that file has exactly one meaning everywhere it is read)', hostAfter === hostBefore, `${String(hostBefore).slice(0, 80)} → ${String(hostAfter).slice(0, 80)}`);
+  // NEGATIVE CONTROL: the pre-fix rule, applied to the very same session,
+  // names the file we just proved untouched.
+  const preFixKey = (s2) => (s2.host && !s2._accountId) ? 'host-' + s2.host : (s2._accountId || '__global__');
+  ok('§11a NEGATIVE CONTROL: the pre-fix host rule sends that codex snapshot to host-h1 — the claude file, with codex numbers and no `source`', preFixKey(remoteCodex) === 'host-h1' && w.eng.readingSlotFor(remoteCodex).key === '__global_codex__', `pre-fix=${preFixKey(remoteCodex)} now=${w.eng.readingSlotFor(remoteCodex).key}`);
+  ok('§11a …and the reading resolver agrees with the un-pinned codex twin again (readingSlotFor vs codexQuotaKeyFor, which noteWallSignal uses on the same session)', w.eng.readingSlotFor(remoteCodex).key === '__global_codex__' && w.eng.resolveUsageKey(remoteCodex) === '__global_codex__');
+  // the codex panel's disk seed must actually be able to see it
+  const seedLine = read('src/usage-routes.js').split('\n').find((l) => /exec\(fn\)/.test(l) && /cxs/.test(l));
+  const lit = seedLine && seedLine.match(/\/(\^\(cxs[^/]+)\//);
+  const seedRe = lit ? new RegExp(lit[1]) : null;
+  ok('§11a …so the codex panel\'s own disk seed can read it (a host-<id> file would be invisible to it)', !!seedRe && seedRe.test('__global_codex__.json') && !seedRe.test('host-h1.json'), String(seedLine).trim().slice(0, 120));
+  // …and the rule is a TRANSFORM OF THE ANSWER, not a backend test: every
+  // machine identity except the claude one passes through, so a third harness
+  // keeps whatever key it already had (a `backend === 'claude'` spelling would
+  // have silently moved remote OpenCode/ACP sessions off the host bucket).
+  const remoteAcp = { backend: 'opencode', mode: 'chat', host: 'h1', _accountId: null, _webuiId: 'sess-oc-h1', pty: { write() { } } };
+  ok('§11a a THIRD backend\'s remote session is untouched by the fix (it resolves to the claude machine identity today, so it keeps the host bucket it always had)', w.eng.readingSlotFor(remoteAcp).key === 'host-h1', w.eng.readingSlotFor(remoteAcp).key);
+}
+
+// (b) MEDIUM — the DAEMON's sealed-orders reflex re-points a credential link
+//     while this server is DOWN (agentd `_execute` → repointPoolSymlink,
+//     deliberately bypassing accounts.js). It left no ledger row, so slotAt()
+//     answered with the last ORCHESTRATOR transition: a confident WRONG
+//     answer in the exact window where late attribution has nothing else.
+{
+  const evs = [];
+  let acked = false;
+  const dm = {
+    poolOrders: async (orders, cb) => { evs.push(orders); if (cb) cb(dm._events || []); },
+    ackPoolOrdersLog: () => { acked = true; },
+  };
+  const w = mkWorld({ hosts: { device: async () => dm } });
+  const st = w.am.slotTransitions;
+  const link = w.am.sessionPoolLinkPath(w.P, w.SID);
+  const at = Date.now() + 5000; // the device executed it "later" than the spawn row
+  // BEFORE: the ledger's answer for that instant is the last row WE wrote
+  ok('§11b NEGATIVE CONTROL: with no row for the device-executed switch the ledger answers with the ORCHESTRATOR\'s last transition — confidently WRONG, not "unknown"', st.slotAt(w.SID, at).id === w.LINK, JSON.stringify(st.slotAt(w.SID, at)));
+  dm._events = [{ ts: at, poolId: w.P, sid: w.SID, banner: 'fiveHour', from: w.am.subDir(w.LINK), to: w.SPARE, link }];
+  const cap = quiet();
+  await w.eng.pushSealedOrders(w.P);
+  cap.done();
+  const row = st.all().find((r) => r.at === at);
+  ok('§11b the reconcile callback RECORDS every device-executed re-point (accounts.js still the single writer)', !!row && row.to === w.SPARE && row.from === w.LINK && row.sessionId === w.SID && row.why === 'sealed-orders', JSON.stringify(row));
+  ok('§11b …so slotAt() moves at the instant the DEVICE acted', st.slotAt(w.SID, at).id === w.SPARE && st.slotAt(w.SID, at - 1).id === w.LINK, JSON.stringify(st.slotAt(w.SID, at)));
+  ok('§11b …and the pending-report ack still runs', acked === true && evs.length === 1);
+  // a re-delivered log (crash between report and ack) is ONE fact
+  const n = st.all().length;
+  ok('§11b a REPLAYED device log does not duplicate the row (the daemon clears its log only on ack, and the in-memory dedup dies with the process)', w.am.noteDeviceRepoint({ link, poolId: w.P, from: w.am.subDir(w.LINK), to: w.SPARE, at }) === null && st.all().length === n);
+  // the POOL DEFAULT link moving decides for every session without one
+  const at2 = at + 60000;
+  w.am.noteDeviceRepoint({ link: w.am.subDir(w.P), poolId: w.P, from: w.am.subDir(w.SPARE), to: w.FISH, at: at2 });
+  ok('§11b …and a move of the pool DEFAULT link is recorded as the default (sessionId null), so it answers for sessions with no link of their own', st.slotAt('some-other-session', at2, { poolId: w.P }).scope === 'default' && st.slotAt('some-other-session', at2, { poolId: w.P }).id === w.FISH, JSON.stringify(st.slotAt('some-other-session', at2, { poolId: w.P })));
+  ok('§11b an unresolvable `from` is left null, never guessed (the daemon reports a PATH, the ledger stores ids)', (() => {
+    const at3 = at2 + 60000;
+    w.am.noteDeviceRepoint({ link, poolId: w.P, from: '/somewhere/sub-not-an-account', to: w.LINK, at: at3 });
+    const r = st.all().find((x) => x.at === at3);
+    return !!r && r.from === null && r.to === w.LINK;
+  })());
+}
+
+// (c) MEDIUM — when the migration archives the ONLY attribution entry of a
+//     conversation, the baked ledger events kept the refuted account FOREVER:
+//     UsageHistory's re-bake deliberately skips a sid with no attribution
+//     entries ("the baked value is the only record we have"), which stopped
+//     being true the moment the repair emptied it.
+{
+  const DEADX = 'sub-dead0000', LIVEX = 'sub-live0000';
+  const WIPE = Date.parse('2026-09-03T05:55:00Z'), AFTER2 = Date.parse('2026-09-07T06:30:00Z');
+  const mkRebakeFixture = () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-rebake-')); cleanup.push(d);
+    const dataDir = path.join(d, 'data');
+    for (const p2 of ['subs/' + DEADX, 'usage-cache', 'usage-history', 'session-meta']) fs.mkdirSync(path.join(dataDir, p2), { recursive: true });
+    const cp = path.join(dataDir, 'subs', DEADX, '.credentials.json');
+    fs.writeFileSync(cp, JSON.stringify({ claudeAiOauth: { accessToken: '', refreshToken: '', expiresAt: 0 } }));
+    fs.utimesSync(cp, WIPE / 1000, WIPE / 1000);
+    const hist = path.join(dataDir, 'usage-history');
+    // conv-X: its ONLY entry is on the dead account (the old OTel corrective
+    // record fired whenever the observation disagreed with attribAt, which
+    // answers acct:null for a sid with no entries — so a conversation's FIRST
+    // and only entry could be a corrective one).
+    // conv-Y: keeps an entry (the ordinary re-bake path).
+    // conv-Z: never had one (the deliberate "leave it" rule).
+    fs.writeFileSync(path.join(hist, 'attribution.ndjson'), [
+      { sid: 'conv-X', acct: DEADX, pool: 'pool-1', ts: AFTER2 },
+      { sid: 'conv-Y', acct: LIVEX, pool: 'pool-1', ts: WIPE - 3600e3 },
+    ].map((r) => JSON.stringify(r)).join('\n') + '\n');
+    fs.writeFileSync(path.join(hist, 'events-2026-09.ndjson'), [
+      { ts: AFTER2, sid: 'conv-X', acct: DEADX, atype: 'subscription', aname: 'Personal', model: 'm', cost: 1 },
+      { ts: AFTER2, sid: 'conv-Y', acct: LIVEX, atype: 'subscription', aname: 'Live', model: 'm', cost: 1 },
+      { ts: AFTER2, sid: 'conv-Z', acct: 'sub-zzz', atype: 'subscription', aname: 'Z', model: 'm', cost: 1 },
+    ].map((r) => JSON.stringify(r)).join('\n') + '\n');
+    fs.writeFileSync(path.join(hist, '.attrib-rebake-v1'), '{}');
+    // session-meta: conv-X was created under the LIVE account — the
+    // un-refuted fallback the archive exists to expose
+    fs.writeFileSync(path.join(dataDir, 'session-meta', 'sess-x.json'), JSON.stringify({ claudeSessionId: 'conv-X', accountId: LIVEX, backend: 'claude' }));
+    return { dataDir, hist };
+  };
+  const runRepairAndRebake = ({ dataDir, hist }, { dropEmptiedList = false } = {}) => {
+    const cap = quiet();
+    repair.repairReadings({ dataDir, members: [{ id: DEADX, credsPath: path.join(dataDir, 'subs', DEADX, '.credentials.json') }], transitions: new SlotTransitions({ dataDir }), id: 'T3' });
+    if (dropEmptiedList) { try { fs.unlinkSync(path.join(hist, '.attrib-emptied.json')); } catch { } }
+    const UH = require(path.join(REPO, 'src/usage-history.js')).UsageHistory;
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-rebake-home-')); cleanup.push(home);
+    const uh = new UH({ dataDir, homeDir: home, resolveAccount: (id) => (id === LIVEX ? { type: 'subscription', name: 'Live' } : null) });
+    uh._maybeRebakeAttribution();
+    cap.done();
+    return fs.readFileSync(path.join(hist, 'events-2026-09.ndjson'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  };
+  const fixed = mkRebakeFixture();
+  const evAfter = runRepairAndRebake(fixed);
+  const x = evAfter.find((e) => e.sid === 'conv-X');
+  ok('§11c an event whose conversation LOST its only attribution entry is re-baked off the refuted account…', x.acct === LIVEX && x.aname === 'Live', JSON.stringify(x));
+  ok('§11c …onto the session-meta account, which is the un-refuted record we still hold', JSON.parse(fs.readFileSync(path.join(fixed.dataDir, 'session-meta', 'sess-x.json'), 'utf8')).accountId === LIVEX);
+  ok('§11c …the repair NAMES those conversations for the re-bake (a list that stays true, so any later generation inherits it)', JSON.parse(fs.readFileSync(path.join(fixed.hist, '.attrib-emptied.json'), 'utf8')).includes('conv-X'));
+  ok('§11c a conversation that KEEPS an entry still re-bakes the ordinary way', evAfter.find((e) => e.sid === 'conv-Y').acct === LIVEX);
+  ok('§11c …and one that NEVER had an entry is left exactly as it was (the deliberate rule this fix does not widen)', (() => { const z = evAfter.find((e) => e.sid === 'conv-Z'); return z.acct === 'sub-zzz' && z.aname === 'Z'; })());
+  // NEGATIVE CONTROL: the same repair, the same re-bake, without the list
+  const ctl = mkRebakeFixture();
+  const evCtl = runRepairAndRebake(ctl, { dropEmptiedList: true });
+  ok('§11c NEGATIVE CONTROL: without the emptied list the re-bake skips that sid and the event keeps the refuted account forever', evCtl.find((e) => e.sid === 'conv-X').acct === DEADX, JSON.stringify(evCtl.find((e) => e.sid === 'conv-X')));
+  ok('§11c …and the attribution store really was emptied for it (so "clear the marker and re-bake" could never have reached it)', !fs.readFileSync(path.join(ctl.hist, 'attribution.ndjson'), 'utf8').includes('conv-X'));
+}
+
+// (d) MEDIUM — a wiped local credential dir is NOT "this account cannot
+//     produce readings": with a valid long-lived token (B-211a) the account
+//     spawns (`oatOnly`) and its readings are its own. The repair archived
+//     every one of them and rewound the panel.
+{
+  const now = Date.now();
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-oat-')); cleanup.push(d);
+  const wf = (name, body, mtime) => { const f = path.join(d, name); fs.writeFileSync(f, body); if (mtime) fs.utimesSync(f, mtime / 1000, mtime / 1000); return f; };
+  const WIPED_AT = now - 5 * 86400e3;
+  const wiped = wf('w.json', JSON.stringify({ claudeAiOauth: { accessToken: '', refreshToken: '', expiresAt: 0 } }), WIPED_AT);
+  ok('§11d the FILE reader is unchanged: a wiped dir is wiped', loginState(wiped, { now }).state === 'wiped' && loginState(wiped, { now }).usable === false);
+  const withOat = accountLoginState(wiped, { now, oatMintedAt: now - 86400e3 });
+  ok('§11d the ACCOUNT reader says the account is usable through its long-lived token', withOat.state === 'oat' && withOat.usable === true && withOat.since === null, JSON.stringify(withOat));
+  const deadOat = accountLoginState(wiped, { now, oatMintedAt: now - (OAT_TTL_MS + 86400e3) });
+  ok('§11d …and when BOTH channels are dead it dies at the LATER instant, never the earlier one', deadOat.usable === false && deadOat.since === Math.max(Math.round(fs.statSync(wiped).mtimeMs), now - 86400e3), JSON.stringify(deadOat));
+  ok('§11d …an oat also DATES an account whose dir was never there at all ("missing" has no mtime to speak with)', (() => {
+    const st2 = accountLoginState(path.join(d, 'nope.json'), { now, oatMintedAt: now - (OAT_TTL_MS + 3600e3) });
+    return st2.usable === false && st2.since === now - 3600e3;
+  })());
+  ok('§11d …and with no token at all it is byte-for-byte the file answer (one predicate, no second opinion)', JSON.stringify(accountLoginState(wiped, { now })) === JSON.stringify(loginState(wiped, { now })));
+  ok('§11d the TTL has ONE definition — accounts.js reads it from login-state (a second copy is a twin that expires on a different day)', probe.am.OAT_TTL_MS === OAT_TTL_MS && OAT_TTL_MS > 0);
+
+  // the MIGRATION, end to end: an oat-only member's stores must not be touched
+  const mkOatFixture = ({ oatMintedAt }) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-oatmig-')); cleanup.push(root);
+    const dataDir = path.join(root, 'data');
+    const OAT = 'sub-oatonly00';
+    for (const p2 of ['subs/' + OAT, 'usage-cache', 'usage-anchors', 'usage-history']) fs.mkdirSync(path.join(dataDir, p2), { recursive: true });
+    const cp = path.join(dataDir, 'subs', OAT, '.credentials.json');
+    fs.writeFileSync(cp, JSON.stringify({ claudeAiOauth: { accessToken: '', refreshToken: '', expiresAt: 0 } }));
+    fs.utimesSync(cp, WIPED_AT / 1000, WIPED_AT / 1000);
+    fs.writeFileSync(path.join(dataDir, 'accounts.json'), JSON.stringify({ version: 1, accounts: [{ id: OAT, name: 'Token account', type: 'subscription', backend: 'claude', ...(oatMintedAt ? { oatEnc: 'x:y:z', oatMintedAt } : {}) }] }));
+    // a FRESH reading it legitimately produced an hour ago, plus its anchors
+    fs.writeFileSync(path.join(dataDir, 'usage-cache', OAT + '.json'), JSON.stringify({ fiveHour: { utilization: 0.42 }, sevenDay: { utilization: 0.61 }, fetchedAt: now - 3600e3, source: 'rate-limit-event', orgUuid: 'oat-org' }));
+    fs.writeFileSync(path.join(dataDir, 'usage-anchors', 'anchors-org_oat.ndjson'), [
+      { ts: WIPED_AT - 86400e3, fetchedAt: WIPED_AT - 86400e3, source: 'passive', accountId: OAT, identityKey: 'org:oat', buckets: { fiveHour: { u: 0.1 }, sevenDay: { u: 0.2 } }, prevFetchedAt: null, costSince: null },
+      { ts: now - 3600e3, fetchedAt: now - 3600e3, source: 'passive', accountId: OAT, identityKey: 'org:oat', buckets: { fiveHour: { u: 0.42 }, sevenDay: { u: 0.61 } }, prevFetchedAt: WIPED_AT - 86400e3, costSince: { total: 3 } },
+    ].map((r) => JSON.stringify(r)).join('\n') + '\n');
+    fs.writeFileSync(path.join(dataDir, 'usage-anchors', 'rates.json'), JSON.stringify({ 'org:oat': { computedAt: 1, nAnchors: 2, buckets: {} } }));
+    fs.writeFileSync(path.join(dataDir, 'usage-history', 'attribution.ndjson'), JSON.stringify({ sid: 'conv-oat', acct: OAT, ts: now - 3600e3 }) + '\n');
+    return { root, dataDir, OAT };
+  };
+  const runMigration = (root) => {
+    const notes = [];
+    const cap = quiet();
+    const { MIGRATIONS } = require(path.join(REPO, 'src/server/migrations.js')).create({ rootDir: root, serverNotice: (k, t2) => notes.push(t2) });
+    const m = MIGRATIONS.find((x) => x.id === '2026-09-reattribute-readings-by-slot');
+    m.run();
+    cap.done();
+    return notes;
+  };
+  {
+    const f = mkOatFixture({ oatMintedAt: now - 86400e3 });
+    const before = fs.readFileSync(path.join(f.dataDir, 'usage-cache', f.OAT + '.json'), 'utf8');
+    const anchorsBefore = fs.readFileSync(path.join(f.dataDir, 'usage-anchors', 'anchors-org_oat.ndjson'), 'utf8');
+    const notes = runMigration(f.root);
+    ok('§11d MIGRATION: an oat-only member\'s fresh reading survives (it really is that account\'s)', fs.readFileSync(path.join(f.dataDir, 'usage-cache', f.OAT + '.json'), 'utf8') === before, fs.readFileSync(path.join(f.dataDir, 'usage-cache', f.OAT + '.json'), 'utf8').slice(0, 120));
+    ok('§11d …its anchors and the instance-wide learned rates survive too', fs.readFileSync(path.join(f.dataDir, 'usage-anchors', 'anchors-org_oat.ndjson'), 'utf8') === anchorsBefore && fs.existsSync(path.join(f.dataDir, 'usage-anchors', 'rates.json')));
+    ok('§11d …its attribution entry survives, and nothing was archived', fs.readFileSync(path.join(f.dataDir, 'usage-history', 'attribution.ndjson'), 'utf8').includes('conv-oat') && !fs.existsSync(path.join(f.dataDir, 'archive')) && notes.length === 0);
+  }
+  {
+    // NEGATIVE CONTROL: the very same fixture with NO token — every store IS
+    // repaired, so the assertions above are not vacuous.
+    const f = mkOatFixture({ oatMintedAt: null });
+    runMigration(f.root);
+    const after = JSON.parse(fs.readFileSync(path.join(f.dataDir, 'usage-cache', f.OAT + '.json'), 'utf8'));
+    ok('§11d NEGATIVE CONTROL: the identical fixture WITHOUT a token is repaired — cache rewound to the pre-wipe reading…', Math.abs(after.fiveHour.utilization - 0.1) < 1e-9 && after.fetchedAt === WIPED_AT - 86400e3, JSON.stringify(after));
+    ok('§11d …the fresh anchor dropped, rates.json deleted, the attribution entry archived', fs.readFileSync(path.join(f.dataDir, 'usage-anchors', 'anchors-org_oat.ndjson'), 'utf8').trim().split('\n').length === 1 && !fs.existsSync(path.join(f.dataDir, 'usage-anchors', 'rates.json')) && !fs.readFileSync(path.join(f.dataDir, 'usage-history', 'attribution.ndjson'), 'utf8').includes('conv-oat'));
+    // an EXPIRED token is dead again — the account really cannot produce now
+    const f2 = mkOatFixture({ oatMintedAt: now - (OAT_TTL_MS + 86400e3) });
+    runMigration(f2.root);
+    ok('§11d …and an EXPIRED token gets the same treatment (a token that cannot spawn is not a channel)', JSON.parse(fs.readFileSync(path.join(f2.dataDir, 'usage-cache', f2.OAT + '.json'), 'utf8')).fetchedAt === WIPED_AT - 86400e3);
+  }
+  // the SLOT question deliberately does NOT inherit the token: a symlink
+  // cannot deliver an env var to a running CLI.
+  {
+    const w2 = mkWorld();
+    // a REAL long-lived token on the member the session's link points at…
+    w2.am.setOat(w2.LINK, 'sk-ant-oat01-' + 'x'.repeat(48));
+    fs.writeFileSync(path.join(w2.am.subDir(w2.LINK), '.credentials.json'), CREDS(w2.LINK, { wiped: true }));
+    const acctSt = accountLoginState(w2.am.subCredsPath(w2.LINK), { oatMintedAt: (w2.am.list().accounts.find((a) => a.id === w2.LINK) || {}).oatMintedAt || null });
+    ok('§11d …the ACCOUNT can still spawn and produce readings through that token', acctSt.usable === true && acctSt.state === 'oat', JSON.stringify(acctSt));
+    const bm = w2.eng.sessionBillingMember(w2.session, w2.P);
+    ok('§11d a POOL SLOT pointing at that same member never validates — an oat lives in accounts.json and rides spawn ENV, so re-pointing a link can never hand it to a RUNNING CLI (a wiped login is dropped by poolMembers before the state leg even runs; §5 pins the doubly-expired shape that reaches it)', bm.slotOk === false && bm.slotReason === 'slot-not-a-member', JSON.stringify(bm));
+    ok('§11d …and the engine\'s reader is the FILE one, deliberately (making it account-aware would make a wiped member a valid switch TARGET)', /const st = memberLoginState\(linkedId\);/.test(read('src/server/usage-pool-engine.js')) && /loginState\(fp, \{ backend: 'claude' \}\)/.test(read('src/server/usage-pool-engine.js')) && /DELIBERATELY THE FILE, NOT THE ACCOUNT/.test(read('src/server/usage-pool-engine.js')));
+  }
+}
+
+// (e) MINOR — `corroborated` is a verdict about ONE write. Both preserve-merge
+//     writers inherited the previous producer's verdict, so a panel result
+//     rendered as "via own /usage panel · not corroborated" — an old verdict
+//     attached to a reading it does not describe, and for a session-less
+//     producer there is nothing to corroborate WITH.
+{
+  const w = mkWorld(); const cap = quiet();
+  w.writeCache(w.LINK, { ...w.readCache(w.LINK), source: 'rate-limit-event', corroborated: false, orgUuid: 'org-keep', orgName: 'Keep' });
+  w.eng.writeUsageCacheForKey(w.LINK, { fiveHour: { utilization: 0.5 }, sevenDay: { utilization: 0.6 }, source: 'on-demand', fetchedAt: Date.now() });
+  const merged = w.readCache(w.LINK);
+  cap.done();
+  ok('§11e a preserve-merge does NOT inherit the previous write\'s corroboration verdict', merged.corroborated === undefined && merged.source === 'on-demand', JSON.stringify({ c: merged.corroborated, s: merged.source }));
+  ok('§11e …while it still preserves IDENTITY, which is a fact about the account rather than about one reading', merged.orgUuid === 'org-keep' && merged.orgName === 'Keep');
+  ok('§11e …and a caller that DOES supply a verdict keeps it (undefined ⇒ delete is the rule captureRateLimitEvent states; an unconditional delete would be accept-and-ignore)', (() => {
+    w.eng.writeUsageCacheForKey(w.LINK, { fiveHour: { utilization: 0.7 }, source: 'on-demand', fetchedAt: Date.now(), corroborated: true });
+    return w.readCache(w.LINK).corroborated === true;
+  })());
+  // NEGATIVE CONTROL: a producer that DOES have an opinion still stamps it
+  {
+    const w2 = mkWorld(); const cap2 = quiet();
+    w2.am.ensureSessionPoolLink(w2.P, w2.SID, w2.SPARE, { why: 'per-session-switch' }); // OTel still names FISH ⇒ divergence
+    w2.reading(0.5); w2.endTurn();
+    cap2.done();
+    ok('§11e NEGATIVE CONTROL: a producer whose own write HAS a verdict still stamps it (the label is not being deleted, it is being un-inherited)', w2.readCache(w2.SPARE).corroborated === false);
+  }
+  // DRIFT GUARD: every preserve-merge writer of a usage-cache file must decide
+  // the label for its own write.
+  {
+    // EXECUTABLE lines only — a comment that merely mentions the field is how
+    // the first version of this guard passed while the fix was reverted.
+    const bad = [];
+    let seen = 0;
+    for (const f of ['src/server/usage-pool-engine.js', 'src/usage-routes.js', 'src/rate-limit-capture.js']) {
+      const src = code(f);
+      const re = /const (?:merged|cache) = [^;\n]*\{ \.\.\./g;
+      let m2;
+      while ((m2 = re.exec(src))) {
+        seen++;
+        const after = src.slice(m2.index, m2.index + 700);
+        if (!/delete\s+\w+\.corroborated|\w+\.corroborated\s*=/.test(after)) bad.push(`${f}: ${after.split('\n')[0].trim().slice(0, 60)}`);
+      }
+    }
+    ok('§11e DRIFT GUARD: every usage-cache merge in the three writer files DECIDES `corroborated` for its own write (a statement, not a mention)', bad.length === 0 && seen >= 5, `${seen} merges scanned (writeUsageCacheForKey, markLimitBanner, refreshViaCliPanel, the remote-statusline harvest, captureRateLimitEvent); offenders: ${bad.join(' | ')}`);
+  }
+}
+
+// (f) LOW — the kb essay a reader reaches FIRST still documented the mechanism
+//     this change deleted. A refuted claim stays on record, but it must be
+//     MARKED refuted where it lives.
+{
+  // PER MENTION, not per line: these essays are single giant paragraphs, so a
+  // line-level rule passes as soon as ANY other sentence on it says REFUTED
+  // (measured — it let the very sentence this leg exists for slip back in).
+  for (const f of ['docs/kb-file-structure.md', 'docs/kb-bugfix-invariants.md']) {
+    const src = read(f);
+    const stale = [];
+    let hits = 0;
+    for (const m2 of src.matchAll(/sessionReadingMember|unsatisfiable guard/g)) {
+      hits++;
+      const near = src.slice(Math.max(0, m2.index - 40), m2.index + 260);
+      if (!/REFUTED|DELETED/.test(near)) stale.push(near.slice(0, 100).replace(/\s+/g, ' '));
+    }
+    ok(`§11f ${f}: every mention of the deleted resolver / the "unsatisfiable guard" claim is marked REFUTED WHERE IT STANDS (${hits} mentions)`, stale.length === 0 && hits >= 3, stale.join(' | '));
+  }
+  ok('§11f …and both essays name the resolver that replaced it', /readingSlotFor/.test(read('docs/kb-file-structure.md')) && /readingSlotFor/.test(read('docs/kb-bugfix-invariants.md')));
 }
 
 // ── §10 the panel, in a REAL browser at 375×667 ────────────────────────────

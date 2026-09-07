@@ -33,6 +33,11 @@ const LOGIN_UNKNOWN = () => ({ state: 'unknown', refreshExpiresAt: null, accessE
 // (spawn, engine, manual route, signed-out self-heal, account removal all go
 // through them), so no caller can create a hole by forgetting to record one.
 const { SlotTransitions } = require('./slot-transitions.js');
+// The long-lived-token lifetime has ONE definition (2026-09-07 r2): the panel
+// and the readings repair must date an oat's death exactly the way the spawn
+// resolver does, and they read it from src/login-state.js (no AccountManager
+// to construct at migration time). Same number, one place.
+const { OAT_TTL_MS: OAT_TTL_MS_SHARED } = require('./login-state.js');
 
 class AccountManager {
   constructor({ dataDir, onChange, platform = process.platform }) {
@@ -883,7 +888,7 @@ class AccountManager {
   // CLI errors until re-mint. Minting the token is treated as the per-account
   // consent to run it on remote machines (finer-grained than the global
   // shipSubscriptionToRemote toggle, which stays for full-login shipping).
-  OAT_TTL_MS = 31536000 * 1000;
+  OAT_TTL_MS = OAT_TTL_MS_SHARED;
 
   setOat(id, token) {
     const a = this.get(id);
@@ -1004,6 +1009,42 @@ class AccountManager {
    *  whole job). */
   _noteSlot({ sessionId = null, poolId = null, from = null, to = null, why = null } = {}) {
     try { this.slotTransitions.record({ sessionId, poolId, from, to, at: Date.now(), why }); } catch { }
+  }
+  /** A re-point THIS SERVER DID NOT MAKE (2026-09-07 r2, reproduced).
+   *
+   *  The daemon's sealed-orders reflex re-points a pool credential link while
+   *  the orchestrator is DOWN (src/agentd/agentd.js `_execute` →
+   *  account-material.repointPoolSymlink, deliberately bypassing this class —
+   *  it runs on a machine with no AccountManager). Without a row for it,
+   *  `slotAt()` answers with the last ORCHESTRATOR transition: a confident
+   *  WRONG answer instead of the "unknown" the ledger promises, and exactly in
+   *  the window where reconstructing history matters most (readings written
+   *  during a server outage). The device already reports every event it
+   *  executed, with every field the ledger needs — this is where they land, so
+   *  "accounts.js is the single writer" stays TRUE and physical rather than
+   *  becoming a grep that hides a hole.
+   *
+   *  `from` is the readlink TARGET (a directory path, the only thing the
+   *  daemon can read), `link` names WHICH link moved — a per-session (plan C)
+   *  link lives directly under poolLinksDir, anything else is the pool's own
+   *  default link and therefore `sessionId:null`.
+   *
+   *  IDEMPOTENT under a replay: the daemon clears its log only on
+   *  `ackPoolOrdersLog`, so a crash between report and ack re-delivers the
+   *  same events, and the in-memory dedup does not survive a restart — an
+   *  identical (sessionId, to, at) row is one fact. */
+  noteDeviceRepoint({ link = null, poolId = null, from = null, to = null, at = Date.now(), why = 'sealed-orders' } = {}) {
+    try {
+      if (!to || !poolId) return null;
+      let sessionId = null;
+      const lp = String(link || '');
+      if (lp && path.dirname(lp) === this.poolLinksDir(poolId)) sessionId = path.basename(lp);
+      const fromBase = from ? path.basename(String(from)) : null;
+      const fromId = fromBase && this.get(fromBase) ? fromBase : null; // unresolvable ⇒ say nothing, never guess
+      const ts = Number(at) || Date.now();
+      if (this.slotTransitions.all().some((r) => r.at === ts && r.to === to && (r.sessionId || null) === sessionId)) return null;
+      return this.slotTransitions.record({ sessionId, poolId, from: fromId, to, at: ts, why });
+    } catch { return null; }
   }
   /** The real account THIS session bills to: its own link's target, else the
    *  pool default. The link IS the state at both granularities. */

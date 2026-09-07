@@ -216,10 +216,24 @@ class UsageHistory {
   // attributed pre-binding history to the account's first attribution entry).
   // Only events whose sid HAS attribution entries are recomputed — for sids
   // without any, the baked value is the only record we have, leave it.
+  // …UNLESS the readings repair EMPTIED that sid (2026-09-07 r2): when the
+  // migration archives every attribution entry of a conversation, the baked
+  // value is no longer "the only record we have", it is the record the
+  // refuted rule wrote — and the sid is now missing from the map, so the
+  // guard above would preserve it forever. reading-repair names those sids in
+  // .attrib-emptied.json; for them `_acctAt` falls through to the session-meta
+  // account, which is the un-refuted fallback the archive was meant to expose.
+  _emptiedAttribSids() {
+    try {
+      const raw = JSON.parse(fs.readFileSync(path.join(this.dir, '.attrib-emptied.json'), 'utf-8'));
+      return new Set(Array.isArray(raw) ? raw : []);
+    } catch { return new Set(); }
+  }
   _maybeRebakeAttribution() {
     const marker = path.join(this.dir, '.attrib-rebake-v1');
     try { if (fs.existsSync(marker)) return; } catch {}
     const attrib = this._attribMap();
+    const emptied = this._emptiedAttribSids();
     const meta = this._metaMap();
     let shards = [];
     try { shards = fs.readdirSync(this.dir).filter((f) => /^events-\d{4}-\d{2}\.ndjson$/.test(f)); } catch {}
@@ -232,7 +246,7 @@ class UsageHistory {
       for (const line of data.split('\n')) {
         if (!line) continue;
         let e; try { e = JSON.parse(line); } catch { out.push(line); continue; }
-        if (e.sid && attrib[e.sid]) {
+        if (e.sid && (attrib[e.sid] || emptied.has(e.sid))) {
           const acct = this._acctAt(e.sid, e.ts, attrib, meta[e.sid]?.acct);
           // remote-host events (atype 'host') are attributed at ingest — the
           // LOCAL attribution log knows nothing about remote sids and would

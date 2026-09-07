@@ -32,8 +32,14 @@ const path = require('path');
 /** Every state a credential file can be in. `usable` = the CLI could make a
  *  request with it right now (or refresh into one); everything else is a
  *  reason a member must not be a switch target and its readings must not be
- *  believed after `since`. */
+ *  believed after `since`. 'oat' is not a file state — it is the ACCOUNT-level
+ *  answer below (a long-lived token, no login dir needed). */
 const STATES = ['live', 'expired', 'wiped', 'missing', 'unreadable'];
+/** The long-lived-token lifetime (B-211a `claude setup-token`). DEFINED HERE
+ *  and imported by AccountManager (`this.OAT_TTL_MS`) so the panel, the repair
+ *  migration and the spawn resolver cannot disagree about when a token dies;
+ *  the suite asserts the two are the same number. */
+const OAT_TTL_MS = 31536000 * 1000;
 
 function _stat(p) { try { return fs.statSync(p); } catch { return null; } }
 // mtimeMs is FRACTIONAL on ext4/NFS; a marker instant that everything else
@@ -94,6 +100,47 @@ function loginState(credsPath, { now = Date.now(), backend = null } = {}) {
   return { ...base, ...r, usable: r.state === 'live' };
 }
 
+/** THE ACCOUNT-level question — "can this account produce a reading at all?"
+ *  — which is NOT the same as the credential FILE question above.
+ *
+ *  A claude subscription has TWO delivery channels (B-211a): the credential
+ *  DIR (CLAUDE_SECURESTORAGE_CONFIG_DIR → .credentials.json) and a LONG-LIVED
+ *  TOKEN minted by `claude setup-token`, which `resolveForSpawn` ships as
+ *  CLAUDE_CODE_OAUTH_TOKEN when the dir has no login (`oatOnly`). Such a
+ *  session is a normal, supported, spawnable session: it carries
+ *  `_accountId = sub-X` and `VIBESPACE_ACCOUNT_KEY = sub-X`, so its
+ *  rate_limit_event / statusline readings land on usage-cache/sub-X.json and
+ *  are 100% that account's. Treating "the local credential dir is wiped" as
+ *  "this account cannot produce readings" would archive every legitimate
+ *  reading it ever wrote and rewind its panel to whatever predates the wipe
+ *  (measured on a fixture: a 1h-old reading replaced by a 6-day-old one, its
+ *  fresh anchor dropped, the instance's learned rates deleted).
+ *
+ *  WHO MUST ASK THIS ONE: anything reasoning about READINGS or about what the
+ *  panel should claim (reading-repair's death markers, /api/usage `logins`).
+ *  WHO MUST NOT: the pool's slot validation. A pooled session's CLI reads
+ *  whatever the credential SYMLINK points at, and a token stored in
+ *  accounts.json cannot be delivered by re-pointing a symlink — for the SLOT,
+ *  the file is the whole answer (usage-pool-engine.memberLoginState keeps
+ *  calling `loginState`, deliberately).
+ *
+ *  @param oatMintedAt when the long-lived token was minted (accounts.json
+ *         `oatMintedAt`; null/absent = no token). No decryption needed — the
+ *         token's VALUE is irrelevant to this question.
+ */
+function accountLoginState(credsPath, { oatMintedAt = null, oatTtlMs = OAT_TTL_MS, now = Date.now(), backend = 'claude' } = {}) {
+  const st = loginState(credsPath, { now, backend });
+  const minted = Number(oatMintedAt) || 0;
+  if (!minted) return st;
+  const oatExpiresAt = minted + (Number(oatTtlMs) || OAT_TTL_MS);
+  if (st.usable) return { ...st, oat: true, oatExpiresAt };
+  if (oatExpiresAt > now) return { ...st, state: 'oat', usable: true, since: null, oat: true, oatExpiresAt };
+  // Both channels are dead. It stopped being able to produce anything at the
+  // LATER of the two instants — and an oat gives a DATE to an account whose
+  // dir was never there at all ('missing' has no mtime to speak with).
+  return { ...st, oat: true, oatExpiresAt, since: Math.max(Number(st.since) || 0, oatExpiresAt) || null };
+}
+
 /** "Believe nothing this identity produced after T." null = no such instant
  *  (the login is live, or we cannot prove when it died). */
 function lastKnownGoodAt(state) {
@@ -101,4 +148,4 @@ function lastKnownGoodAt(state) {
   return Number(state.since) || null;
 }
 
-module.exports = { loginState, lastKnownGoodAt, STATES };
+module.exports = { loginState, accountLoginState, lastKnownGoodAt, STATES, OAT_TTL_MS };

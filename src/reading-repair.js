@@ -34,7 +34,7 @@
 // restart-safe (each store is rewritten atomically, tmp+rename).
 const fs = require('fs');
 const path = require('path');
-const { loginState } = require('./login-state.js');
+const { accountLoginState } = require('./login-state.js');
 
 function _readJson(f) { try { return JSON.parse(fs.readFileSync(f, 'utf-8')); } catch { return null; } }
 function _writeAtomic(f, text) { fs.writeFileSync(f + '.tmp', text); fs.renameSync(f + '.tmp', f); }
@@ -44,15 +44,28 @@ function _appendArchive(archiveDir, name, rows) {
   fs.appendFileSync(path.join(archiveDir, name), rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
 }
 
-/** members: [{id, credsPath, backend}] → Map(id → {state, since}) for every
- *  member that CANNOT produce a reading and can say since when. A live login,
- *  or a dead one with no recoverable instant, contributes nothing: this
- *  migration only ever acts on proof. */
+/** members: [{id, credsPath, backend, oatMintedAt}] → Map(id → {state, since})
+ *  for every member that CANNOT produce a reading and can say since when. A
+ *  live login, or a dead one with no recoverable instant, contributes nothing:
+ *  this migration only ever acts on proof.
+ *
+ *  THE QUESTION IS THE ACCOUNT'S, NOT THE FILE'S (2026-09-07 r2, reproduced):
+ *  a claude subscription whose local credential dir is wiped but which holds a
+ *  valid LONG-LIVED TOKEN (B-211a) is a supported, spawnable, reading-PRODUCING
+ *  configuration — `resolveForSpawn` returns `{oatOnly:true, localEnv:
+ *  {CLAUDE_CODE_OAUTH_TOKEN}}` and the session still carries `_accountId =
+ *  sub-X`, so its readings legitimately land on usage-cache/sub-X.json. Dating
+ *  its "death" from the wipe would archive every one of them: measured on a
+ *  fixture (creds wiped 5d ago, valid oat, one 1h-old reading) the panel was
+ *  rewound to a 6-day-old snapshot, the fresh anchor dropped and the
+ *  instance-wide rates.json deleted. `accountLoginState` asks BOTH channels;
+ *  the caller supplies `oatMintedAt` from accounts.json (no decryption — the
+ *  token's value is irrelevant to "was it alive then"). */
 function deathMarkers(members, { now = Date.now() } = {}) {
   const out = new Map();
   for (const m of members || []) {
     if (!m || !m.id || !m.credsPath) continue;
-    const st = loginState(m.credsPath, { now, backend: m.backend || 'claude' });
+    const st = accountLoginState(m.credsPath, { now, backend: m.backend || 'claude', oatMintedAt: m.oatMintedAt || null });
     if (st.usable) continue;
     if (!st.since) continue; // dead but undateable ⇒ we can prove nothing about any entry
     out.set(m.id, { state: st.state, since: st.since });
@@ -237,16 +250,20 @@ function repairAnchors({ anchorsDir, archiveDir, markers, anchorFiles, id }) {
 
 // ── ① + ② attribution repair (the only store whose entries NAME a session) ──
 function repairAttribution({ historyDir, archiveDir, markers, transitions, id }) {
-  const res = { scanned: 0, foreign: 0, reattributed: 0, archived: 0 };
+  const res = { scanned: 0, foreign: 0, reattributed: 0, archived: 0, emptied: 0 };
   const fp = path.join(historyDir, 'attribution.ndjson');
   let txt = ''; try { txt = fs.readFileSync(fp, 'utf-8'); } catch { return res; }
   const out = [], archived = [];
+  // Which conversations LOSE their last entry here (2026-09-07 r2) — see the
+  // note at the re-bake hand-off below.
+  const sidsBefore = new Set(), sidsKept = new Set();
   let dirty = false;
   for (const line of txt.split('\n')) {
     if (!line) continue;
     let r; try { r = JSON.parse(line); } catch { out.push(line); continue; }
     res.scanned++;
-    if (!isForeign(markers, r.acct, r.ts)) { out.push(line); continue; }
+    if (r.sid) sidsBefore.add(r.sid);
+    if (!isForeign(markers, r.acct, r.ts)) { out.push(line); if (r.sid) sidsKept.add(r.sid); continue; }
     res.foreign++;
     const m = markers.get(r.acct);
     // ① the transition ledger is the ONLY thing that can say where this
@@ -257,6 +274,7 @@ function repairAttribution({ historyDir, archiveDir, markers, transitions, id })
     if (slot && slot.id && slot.id !== r.acct && !isForeign(markers, slot.id, r.ts)) {
       archived.push({ migration: id, at: Date.now(), store: 'attribution', reason: `re-attributed to ${slot.id} (slot transition at ${new Date(slot.at).toISOString()}, scope ${slot.scope})`, entry: r });
       out.push(JSON.stringify({ ...r, acct: slot.id, repairedBy: id }));
+      if (r.sid) sidsKept.add(r.sid);
       res.reattributed++; dirty = true;
       continue;
     }
@@ -266,9 +284,32 @@ function repairAttribution({ historyDir, archiveDir, markers, transitions, id })
   if (dirty) {
     _appendArchive(archiveDir, 'readings-foreign-attribution.ndjson', archived);
     _writeAtomic(fp, out.join('\n') + (out.length ? '\n' : ''));
-    // the baked ledger events carry the acct this walk produced — clearing the
-    // existing one-shot marker makes UsageHistory's own re-bake (unchanged,
-    // proven) recompute every event from the cleaned walk on the next scan
+    // HAND-OFF TO THE RE-BAKE. The baked ledger events carry the acct this
+    // walk produced, so clearing the one-shot marker makes UsageHistory's own
+    // re-bake recompute them from the cleaned walk on the next scan.
+    // …EXCEPT for a conversation whose entries were ALL archived (2026-09-07
+    // r2, reproduced): the re-bake only recomputes `if (e.sid && attrib[e.sid])`
+    // — a deliberate rule from when the baked value came from the WALK ("for
+    // sids without any, the baked value is the only record we have"). After
+    // this repair that is no longer true: those events carry the value the
+    // REFUTED attribution wrote, and the sid is now absent from the map, so
+    // they would keep the dead account forever. Such sids exist by
+    // construction — the old OTel corrective record fired whenever the
+    // observation disagreed with `attribAt`, which answers acct:null for a sid
+    // with no entries, so a conversation's FIRST and only entry could be a
+    // corrective one. Name them for the re-bake; `_acctAt` then falls back to
+    // session-meta (the pool/account the session was created with — a fact we
+    // still hold), which is exactly the un-refuted answer.
+    // The list is APPENDED and kept: it stays true (those sids have no
+    // attribution entries), so any later re-bake generation inherits it.
+    const emptied = [...sidsBefore].filter((sid) => !sidsKept.has(sid));
+    res.emptied = emptied.length;
+    if (emptied.length) {
+      const f = path.join(historyDir, '.attrib-emptied.json');
+      const prev = _readJson(f);
+      const merged = [...new Set([...(Array.isArray(prev) ? prev : []), ...emptied])].slice(-20000);
+      try { _writeAtomic(f, JSON.stringify(merged)); } catch { }
+    }
     try { fs.unlinkSync(path.join(historyDir, '.attrib-rebake-v1')); } catch { }
   }
   return res;
