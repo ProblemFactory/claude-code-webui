@@ -566,7 +566,7 @@ console.log('— ⑩ version marker');
   ok(staleLines.length === 0, 'no site still names the number master took as a live cross-reference', JSON.stringify(staleLines).slice(0, 300));
 
   const { execFileSync } = await import('node:child_process');
-  const git = (...a) => execFileSync('git', ['-C', REPO, ...a], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  const git = (...a) => execFileSync('git', ['-C', REPO, ...a], { maxBuffer: 64 * 1024 * 1024, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
   const REF = ['origin/master', 'master'].find((r) => { try { git('rev-parse', '--verify', r); return true; } catch { return false; } });
   /** Everything on the INTEGRATION BRANCH that already claims this number:
    *  release commit subjects (`<n>: …`) and CHANGELOG headings (`## <n> — …`).
