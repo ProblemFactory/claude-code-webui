@@ -1016,7 +1016,29 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
     ptyOpening: 0,              // opens IN FLIGHT (the serve may already hold a pty whose id we do not know yet)
     ptyOpenSeq: 0,              // monotonic count of opens STARTED — the reaper compares it across its listing
     reapedFor: null,            // `${pid}:${port}:${startedAt}` of the serve we already swept (reapPtys runs once per serve process)
+    // THE QUESTION MAP IS PER SERVE PROCESS (round 5). `/question` is answered
+    // out of the serve's OWN memory, so a serve that restarted — a keeper
+    // respawn, an OOM, a new port, an adopted instance replaced — has NO
+    // pending asks at all while this warm map still holds every `que_…` the
+    // PREVIOUS process minted. readConversation joins an open ask in the
+    // transcript to this map and only re-reads the authoritative list when the
+    // map is EMPTY, so a warm-but-dead map renders precisely the answerable
+    // card whose Submit can only fail — the thing the `stale` marker exists to
+    // prevent. So the map carries the serve process it was filled under, and a
+    // map stamped for a DIFFERENT process is not "known", it is "unknown".
+    questionsFor: null,         // `${pid}:${port}:${startedAt}` the question map was filled under (null = never / dropped)
   };
+  /** The serve PROCESS a fact belongs to. Same key the pty reaper uses. */
+  function serveKey() { const st = locator.state?.() || {}; return `${st.pid || 0}:${st.port || 0}:${st.startedAt || 0}`; }
+  /** Is the warm question map still about the serve we are talking to? */
+  function questionsWarm() { return live.questions.size > 0 && live.questionsFor === serveKey(); }
+  /** A question fact arriving from the CURRENT serve (an event, a listing).
+   *  Drops a map belonging to an older process first — stamping a stale map as
+   *  current is how a dead `que_…` would become answerable again. */
+  function questionEpoch() {
+    const k = serveKey();
+    if (live.questionsFor !== k) { live.questions.clear(); live.questionsFor = k; }
+  }
 
   function reasonUnavailable() {
     const st = locator.state();
@@ -1055,6 +1077,7 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
     return 'stopped';
   }
   function pendingQuestionsFor(sessionId) {
+    if (!questionsWarm()) return [];      // a map minted by a serve that is gone answers nothing
     const out = [];
     for (const q of live.questions.values()) if (q.sessionID === sessionId) out.push(q);
     return out;
@@ -1267,8 +1290,11 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
     const open = records.filter((r) => r.kind === 'permission_request' && !r.resolved);
     if (open.length) {
       // the live lane keeps this map warm, but a server that just restarted
-      // has an empty one — re-read the authoritative list ONCE rather than
-      // rendering a card whose Submit could only fail
+      // has an empty one — and one whose SERVE restarted has a map full of
+      // `que_…` ids that process no longer knows (pendingQuestionsFor answers
+      // [] for it, see the questionsFor epoch). Either way: re-read the
+      // authoritative list ONCE rather than rendering a card whose Submit
+      // could only fail.
       let pend = pendingQuestionsFor(id);
       if (!pend.length) { try { pend = await pendingQuestions({ sessionId: id, refresh: true }); } catch { pend = []; } }
       for (const r of open) {
@@ -1345,16 +1371,19 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
       const client = await userClient(timeoutMs);
       const list = await client.questions({ timeoutMs });
       live.questions.clear();
+      // the list is authoritative FOR THIS SERVE PROCESS — stamp it, so the
+      // next process's readers know this map is not about them
+      live.questionsFor = serveKey();
       for (const q of Array.isArray(list) ? list : []) if (q && q.id) live.questions.set(String(q.id), { ...q, at: now() });
     }
-    const all = [...live.questions.values()];
+    const all = questionsWarm() ? [...live.questions.values()] : [];
     return sessionId ? all.filter((q) => q.sessionID === sessionId) : all;
   }
   /** Answer an ask through the REAL route. `answers` is either OpenCode's own
    *  positional array-of-arrays, or the card's question-text map (converted
    *  here -- the conversion is PURE and lives with the shape it belongs to). */
   async function answerQuestion(requestId, answers, { timeoutMs = READ_TIMEOUT_MS } = {}) {
-    let q = live.questions.get(String(requestId)) || null;
+    let q = questionsWarm() ? (live.questions.get(String(requestId)) || null) : null;
     // THE CARD'S MAP IS KEYED BY QUESTION TEXT, so converting it back to
     // OpenCode's positional form NEEDS the question list. A server that
     // restarted between rendering the card and the user pressing Submit has an
@@ -1384,7 +1413,7 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
     return { ok: true, sessionID: q?.sessionID || null, answers: positional };
   }
   async function rejectQuestion(requestId, { timeoutMs = READ_TIMEOUT_MS } = {}) {
-    let q = live.questions.get(String(requestId)) || null;
+    let q = questionsWarm() ? (live.questions.get(String(requestId)) || null) : null;
     // same cold-map read as the reply path, for the same reason: a rejection
     // moves the row too, and only the question names the conversation
     if (!q) { try { await pendingQuestions({ refresh: true, timeoutMs }); q = live.questions.get(String(requestId)) || null; } catch { } }
@@ -1516,6 +1545,26 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
     return map || {};
   }
 
+  /** DROP AND RE-READ THE PENDING ASKS (round 5). A (re)connect is the one
+   *  moment we know we may have missed `question.asked/replied/rejected`
+   *  frames AND the one moment the serve on the other end may be a DIFFERENT
+   *  process than the one that minted the ids in the warm map. `/question` is
+   *  per process (its answer comes out of the serve's own memory) and boots no
+   *  instance — measured — so the reconnect pays for one cheap read, exactly
+   *  like the busy map above.
+   *  DROP FIRST, then read: a failed read must leave "unknown" (⇒ open ask
+   *  cards render `stale`, which is honest and answerable-by-nobody) rather
+   *  than "known" from a serve that no longer exists (⇒ a Submit that can only
+   *  fail — the dead Submit the `stale` marker was built for). */
+  function refreshQuestions(why) {
+    const had = live.questions.size;
+    live.questions.clear();
+    live.questionsFor = null;             // UNKNOWN until the authoritative list answers
+    return pendingQuestions({ refresh: true })
+      .catch((e) => { log?.warn?.(`[opencode-serve] the pending-ask list could not be re-read after ${why} (${e.message}) — open ask cards render stale until it answers`); return []; })
+      .then(() => { if (had || live.questions.size) markDirty('questions'); });
+  }
+
   /** ARM THE LIVE LANE (piece (d)). `makeLane` is injected so these facts
    *  never hard-depend on the event module's IO inside a unit test. */
   function armLive(makeLane) {
@@ -1530,7 +1579,7 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
         // for the length of a turn. `/session/status` is the authoritative
         // answer, needs no directory and boots no instance (measured), so the
         // reconnect pays for one cheap read.
-        if (info.kind === 'connected') { statusMap().catch(() => { }); }
+        if (info.kind === 'connected') { statusMap().catch(() => { }); refreshQuestions('a reconnect').catch(() => { }); }
         if (info.kind === 'status' && info.sessionId) {
           if (info.status && info.status.type && info.status.type !== 'idle') live.statuses.set(info.sessionId, info.status);
           else live.statuses.delete(info.sessionId);
@@ -1538,6 +1587,7 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
           return;
         }
         if (info.kind === 'question') {
+          questionEpoch();                 // a fact from the CURRENT serve; a map from an older one is dropped, never inherited
           if (info.question) live.questions.set(String(info.questionId), { ...info.question, at: now() });
           else live.questions.delete(String(info.questionId));
           if (info.sessionId) convo.delete(info.sessionId);
@@ -1561,7 +1611,7 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
   function stateOf() {
     const laneSt = live.lane?.state?.() || null;
     return { ...locator.state(), cachedSessions: cache.list ? cache.list.length : null, cacheAgeMs: cache.at ? now() - cache.at : null, negativeUntil: cache.negativeUntil, lastError: cache.lastError || locator.state().lastError, namesKnown: names.size, skippedWorktrees: cache.skippedWorktrees || [],
-      liveLane: laneSt, liveLaneHealthy: laneHealthy(), pendingQuestions: live.questions.size, busySessions: live.statuses.size, dirty: !!cache.dirty };
+      liveLane: laneSt, liveLaneHealthy: laneHealthy(), pendingQuestions: questionsWarm() ? live.questions.size : 0, busySessions: live.statuses.size, dirty: !!cache.dirty };
   }
   return { discover, sessionModel, readConversation, forkSession, invalidate, state: stateOf, reasonUnavailable, locator, _names: names,
     revertTo, unrevert, pendingQuestions, answerQuestion, rejectQuestion, openPty, closePty, resizePty, reapPtys, todos, statusMap,
@@ -1627,11 +1677,15 @@ function install(opts) {
   // callback is the only place that knows "a serve is now reachable on port
   // N". Wrapping it HERE — before the locator exists — is what makes the hook
   // real; the caller's onState still runs first and unchanged.
-  const laneRef = { lane: null, lastPort: null, facts: null };
+  const laneRef = { lane: null, lastPort: null, facts: null, sync: () => { } };
   const locatorOpts = opts.locator ? opts : {
     ...opts,
     onState: (st) => {
       try { opts.onState?.(st); } catch (e) { (opts.log || console).warn?.(`[opencode-serve] onState failed: ${e.message}`); }
+      // THE LANE LIVES AND DIES WITH THE SERVICE (round 5, see below): every
+      // locator state change — the plugin's start/stop, an adoption, a park —
+      // is where it is started or torn down.
+      laneRef.sync(st);
       const port = st && st.ready ? (st.port || null) : null;
       if (!port) { laneRef.lastPort = null; return; }
       if (port === laneRef.lastPort) return;      // NOT every notify(): the guard samples one a minute
@@ -1654,20 +1708,54 @@ function install(opts) {
   // here, not lazily at the first discovery, because its whole job is to notice
   // changes NOBODY asked about; `makeLane` is injectable so a unit test can arm
   // a fake one, and `false` disables it entirely (the timer fallback returns).
+  //
+  // BUT IT ONLY RUNS WHILE THE SERVICE DOES (round 5). The lane is a CLIENT of
+  // the serve: `start()` arms an fs.watch on the USER's real OpenCode store
+  // (resolved from the env THIS server runs under) plus an SSE reconnect loop
+  // with its own timers. With the background service OFF — the shipped default
+  // since 2026-09-07, where the rule is that NOTHING of ours runs or watches —
+  // install() started it anyway at boot, so an unrelated `opencode` process's
+  // writes to ~/.local/share/opencode woke a server whose OpenCode feature the
+  // user never turned on. So the lane follows ONE predicate:
+  //   • the SAME decision the locator spawns on (opts.autostart =
+  //     decideAutostart: the ops override, else the plugin record), OR
+  //   • a serve is actually READY — which covers the one case that decision
+  //     does not: a RECORDED instance we merely ADOPT (allowed with the plugin
+  //     off, and once we are talking to it, following it costs nothing new).
+  // Enabling the plugin flips the decision AND notifies (locator.start()), so
+  // the lane comes up without a restart; disabling stops the process and the
+  // lane with it — SSE socket, backoff timer and store watch.
+  const wantsAutostart = () => { try { const a = opts.autostart; return a === undefined ? true : !!(typeof a === 'function' ? a() : a); } catch { return false; } };
+  const laneWanted = (st) => { try { return !!(st && st.ready) || wantsAutostart(); } catch { return false; } };
   if (opts.live !== false) {
     const makeLane = opts.makeLane || ((deps) => require('./opencode-events').createLiveLane({ ...deps, storeDirs: opts.storeDirs }));
-    try {
-      const lane = installed.armLive(makeLane);
-      lane.start();
-      // FOLLOW THE SERVE. The stream backs off to 30s while there is nothing
-      // to connect to (the service is off, the keeper is respawning), so
-      // "enable the plugin" or "the serve came back on a NEW port" would
-      // otherwise take up to half a minute to become live again. The locator
-      // already tells us: kick on the READY EDGE (and on a port change) —
-      // never on every notify(), which fires each guard sample and would
-      // re-open the socket once a minute for nothing.
-      laneRef.lane = lane;
-    } catch (e) { (opts.log || console).warn?.(`[opencode-serve] live lane could not start: ${e.message} -- falling back to the timed list refresh`); }
+    laneRef.sync = (st) => {
+      // a notify arriving after uninstall() (or after a second install) must
+      // never re-arm a lane on facts nobody is using any more
+      if (installed !== laneRef.facts) return;
+      let known = st;
+      if (!known) { try { known = locator.state?.(); } catch { known = null; } }
+      const want = laneWanted(known);
+      if (want === !!laneRef.lane) return;
+      if (want) {
+        try {
+          const lane = laneRef.facts.armLive(makeLane);
+          lane.start();
+          // FOLLOW THE SERVE. The stream backs off to 30s while there is
+          // nothing to connect to (the keeper is respawning), so "the serve
+          // came back on a NEW port" would otherwise take up to half a minute
+          // to become live again. The locator already tells us: kick on the
+          // READY EDGE (and on a port change) — never on every notify(), which
+          // fires each guard sample and would re-open the socket once a minute
+          // for nothing.
+          laneRef.lane = lane;
+        } catch (e) { (opts.log || console).warn?.(`[opencode-serve] live lane could not start: ${e.message} -- falling back to the timed list refresh`); }
+      } else {
+        laneRef.lane = null; laneRef.lastPort = null;
+        try { laneRef.facts.stopLive(); } catch { }
+      }
+    };
+    laneRef.sync(null);           // sync reads the locator itself, inside its own guard
   }
   // …and enforce the ops kill switch AT BOOT rather than at the first
   // discovery: with VIBESPACE_OPENCODE_SERVE=0 a serve that outlived a restart

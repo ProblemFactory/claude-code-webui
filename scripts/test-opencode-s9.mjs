@@ -789,6 +789,272 @@ console.log('\n— ROUND 4 (findings from the third review of this branch) —')
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// The adversarial pass over ROUND 4's own code. Both findings were reproduced
+// against the mechanism before they were fixed.
+console.log('\n— ROUND 5 (findings from the fourth review of this branch) —');
+/** OUR OWN inotify watch descriptors pointing at `dir` (Linux /proc: every
+ *  fs.watch is an inotify wd whose `ino:` is the watched directory's inode, in
+ *  hex). -1 = this platform has no /proc/self/fdinfo, so the leg SKIPS. */
+function inotifyWdsOn(dir, pid = 'self') {
+  let ino;
+  try { ino = fs.statSync(dir).ino.toString(16); } catch { return -1; }
+  const re = new RegExp(`^inotify .*\\bino:0*${ino}\\b`);
+  let n = 0, saw = false;
+  try {
+    for (const fd of fs.readdirSync(`/proc/${pid}/fdinfo`)) {
+      let t = '';
+      try { t = fs.readFileSync(`/proc/${pid}/fdinfo/${fd}`, 'utf-8'); } catch { continue; }
+      saw = true;
+      for (const l of t.split('\n')) if (re.test(l)) n++;
+    }
+  } catch { return -1; }
+  return saw ? n : -1;
+}
+{
+  // ① A WARM QUESTION MAP OUTLIVES THE SERVE THAT MINTED IT.
+  //    `/question` is answered out of the serve's OWN memory — verified on a
+  //    real 1.18.29: a fresh process answers `[]` no matter what the previous
+  //    one was holding. readConversation joins an OPEN ask in the transcript to
+  //    that warm map and re-reads the authoritative list only when the map is
+  //    EMPTY, so a serve that restarted (a keeper respawn, a new port, an
+  //    adopted instance replaced) left every open ask joined to a `que_…`
+  //    nobody holds: an answerable card whose Submit can only fail — the exact
+  //    dead Submit the `stale` marker exists to prevent.
+  const mkState = (withQuestion) => {
+    const st = createMockState();
+    st.messages.ses_a2.push({ info: { id: 'msg_bq', sessionID: 'ses_a2', role: 'assistant', time: { created: 1788601100000, completed: 1788601111000 }, modelID: 'deepseek-v4', providerID: 'deepseek', agent: 'plan', finish: 'stop' }, parts: [QUESTION_PART(false)] });
+    st.questions = withQuestion ? [{ id: 'que_live1', sessionID: 'ses_a2', questions: QUESTION_PART(false).state.input.questions, tool: { messageID: 'msg_bq', callID: 'call_question_1' } }] : [];
+    return st;
+  };
+  const A = await startMockServe({ state: mkState(true) });
+  const B = await startMockServe({ state: mkState(false) });   // the SAME conversation, a DIFFERENT serve process
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-oc-qmap-'));
+  const rec = (port) => fs.writeFileSync(path.join(dir, 'opencode-serve.json'), JSON.stringify({ port, pid: process.pid, startedAt: Date.now(), cwd: dir }));
+  rec(A.port);
+  const facts = serve.install({
+    dataDir: dir, command: '/usr/bin/opencode', cwd: dir, log: { warn() { }, error() { } }, guardSampleMs: 0,
+    spawnImpl: () => { throw new Error('must not spawn — this leg adopts the recorded serve'); },
+    readProc: () => ({ cpuTicks: 0, rssBytes: 1024 }),
+    makeLane: (deps) => ({ start() { deps.locator.client({ budgetMs: 5000 }).catch(() => { }); }, kick() { }, stop() { }, state: () => ({ sse: { connected: true }, watch: { active: true } }) }),
+  });
+  for (let i = 0; i < 200 && !facts.state().ready; i++) await sleep(50);
+  const askCard = async () => { facts.invalidate(); const c = await facts.readConversation('ses_a2'); return c.records.find((r) => r.kind === 'permission_request'); };
+  const live1 = await askCard();
+  ok('(positive control) while the serve that minted it is alive, the open ask is joined to que_live1 and is NOT stale', live1?.requestId === 'que_live1' && !live1.stale, live1 && { requestId: live1.requestId, stale: live1.stale });
+  ok('…and it was the WARM map that answered (the fact the defect rode on)', facts.state().pendingQuestions === 1, facts.state().pendingQuestions);
+
+  // THE SERVE RESTARTS: a new process on a new port with no memory of que_live1.
+  await A.close();
+  rec(B.port);
+  facts.locator.invalidate('the serve went away');
+  for (let i = 0; i < 200 && facts.state().port !== B.port; i++) { await facts.locator.ensure(); await sleep(50); }
+  ok('(setup) the locator followed the serve to the replacement process', facts.state().ready === true && facts.state().port === B.port, facts.state());
+  const afterRestart = await askCard();
+  ok('a serve RESTART makes the warm map UNKNOWN: the same open ask renders STALE, never joined to the dead que_live1', afterRestart?.stale === true && afterRestart?.requestId !== 'que_live1', afterRestart && { requestId: afterRestart.requestId, stale: afterRestart.stale });
+  ok('…because it re-read the authoritative list from the NEW process instead of trusting the map', B.state.requests.includes('GET /question'), B.state.requests);
+  const mm = new AcpMessageManager('ses_a2');
+  const card = mm.convertHistory((await facts.readConversation('ses_a2')).records).find((m) => m.permission?.kind === 'user_input');
+  ok('…and the flag reaches the rendered card, which is where the dead Submit would have been', card?.permission?.stale === true, card?.permission);
+  ok('…and the facts stop CLAIMING pending asks that belong to a process that is gone', facts.state().pendingQuestions === 0, facts.state().pendingQuestions);
+  serve.uninstall();
+  await B.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+{
+  // ①b …AND A RECONNECT IS THE OTHER HALF, on the SAME serve process: we were
+  //    off the wire while `question.replied/rejected` frames went by. The
+  //    reconnect handler re-read the busy map (`/session/status`) and NOT the
+  //    questions, so the warm map kept answering for asks the serve had already
+  //    closed. `/question` is the authoritative list and boots no instance —
+  //    the reconnect pays for one cheap read, exactly like the busy map.
+  const st = createMockState();
+  st.messages.ses_a2.push({ info: { id: 'msg_bq', sessionID: 'ses_a2', role: 'assistant', time: { created: 1788601100000, completed: 1788601111000 }, modelID: 'deepseek-v4', providerID: 'deepseek', agent: 'plan', finish: 'stop' }, parts: [QUESTION_PART(false)] });
+  const askQ = { id: 'que_live1', sessionID: 'ses_a2', questions: QUESTION_PART(false).state.input.questions, tool: { messageID: 'msg_bq', callID: 'call_question_1' } };
+  st.questions = [askQ];
+  const mock = await startMockServe({ state: st });
+  const facts = serve.createFacts(fixedLocator(mock.url), { log: { warn() { } } });
+  let onEvent = null;
+  facts.armLive((deps) => { onEvent = deps.onEvent; return { start() { }, kick() { }, stop() { }, state: () => ({ sse: { connected: true }, watch: { active: true } }) }; }).start();
+  await facts.pendingQuestions({ refresh: true });
+  const card = async () => { facts.invalidate(); const c = await facts.readConversation('ses_a2'); return c.records.find((r) => r.kind === 'permission_request'); };
+  ok('(setup) the warm map holds the live ask and the card is answerable', facts.state().pendingQuestions === 1 && (await card())?.requestId === 'que_live1');
+  st.questions = [];                       // another client of the SAME serve answered it while our stream was down
+  ok('(the mechanism under test) a warm map keeps answering with no reconnect — which is why the reconnect has to re-read it', (await card())?.requestId === 'que_live1', facts.state().pendingQuestions);
+  const reads0 = mock.state.requests.filter((r) => r === 'GET /question').length;
+  const qReads = () => mock.state.requests.filter((r) => r === 'GET /question').length;
+  onEvent({ kind: 'connected', sessionId: '', dirty: { sessions: true } });
+  // wait for the READ, not for the drop: dropping the map is synchronous, so
+  // polling `pendingQuestions === 0` would pass before the fix even existed
+  for (let i = 0; i < 80 && qReads() === reads0; i++) await sleep(50);
+  ok('a (re)connect DROPS and re-reads the pending asks, exactly like the busy map it already re-read', qReads() > reads0 && facts.state().pendingQuestions === 0, { reads0, now: qReads(), pending: facts.state().pendingQuestions });
+  ok('…so an ask the serve has already closed renders STALE on the very next read', (await card())?.stale === true);
+  // NEGATIVE CONTROL: the refresh must not break the case that WORKS — a
+  // reconnect while the ask is genuinely still pending leaves it answerable.
+  st.questions = [askQ];
+  onEvent({ kind: 'connected', sessionId: '', dirty: { sessions: true } });
+  for (let i = 0; i < 80 && !facts.state().pendingQuestions; i++) await sleep(50);
+  const back = await card();
+  ok('NEGATIVE CONTROL: a reconnect while the ask is REALLY pending leaves the card answerable (the refresh is not a blanket "stale")', back?.requestId === 'que_live1' && !back.stale, back && { requestId: back.requestId, stale: back.stale });
+  facts.stopLive();
+  await mock.close();
+}
+{
+  // ② WITH THE BACKGROUND SERVICE OFF, NOTHING OF OURS MAY RUN OR WATCH
+  //    (the 2.369.59 default). install() started the live lane unconditionally,
+  //    and lane.start() arms an fs.watch on the USER's REAL OpenCode store —
+  //    resolved from the env THIS server runs under — plus an SSE reconnect
+  //    loop with its own timers. So on a fresh instance whose owner never
+  //    turned OpenCode on, an unrelated `opencode` process's writes to
+  //    ~/.local/share/opencode woke our server, forever.
+  const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-oc-store-off-'));
+  fs.writeFileSync(path.join(storeDir, 'opencode.db'), 'x');    // a REAL-looking store: the old boot arm would attach here
+  const base = inotifyWdsOn(storeDir);
+  const mock = await startMockServe({ state: createMockState() });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-oc-off-'));
+  let wantUp = false;
+  const facts = serve.install({
+    dataDir: dir, command: '/usr/bin/opencode', cwd: dir, log: { warn() { }, error() { } }, guardSampleMs: 0,
+    autostart: () => wantUp, storeDirs: [storeDir],
+    spawnImpl: () => { throw new Error('must not spawn while the service is off'); },
+    readProc: () => ({ cpuTicks: 0, rssBytes: 1024 }),
+  });
+  const rows = await facts.discover({});                        // the 5s /api/sessions poll, with the service off
+  await sleep(700);
+  ok('with the service OFF install() arms NO live lane at all', facts.state().liveLane === null, facts.state().liveLane);
+  if (base < 0) skip('…so ZERO fs.watch handles on the user\'s OpenCode store', 'no /proc/self/fdinfo on this platform');
+  else ok('…so ZERO fs.watch handles on the user\'s OpenCode store (a service nobody turned on watches nothing)', inotifyWdsOn(storeDir) === base && base === 0, { base, now: inotifyWdsOn(storeDir) });
+  ok('…and the discovery answers empty without one request to any serve', rows.length === 0 && mock.state.requests.length === 0, mock.state.requests);
+  ok('…and the timed list refresh is therefore still the freshness source (an absent lane is never "healthy")', facts.state().liveLaneHealthy === false);
+
+  // TURNING IT ON is the same decision the keeper spawns on, so it takes effect
+  // without a restart: the plugin writes its record, calls locator.start(), and
+  // the state change is where the lane comes up.
+  wantUp = true;
+  fs.writeFileSync(path.join(dir, 'opencode-serve.json'), JSON.stringify({ port: mock.port, pid: process.pid, startedAt: Date.now(), cwd: dir }));
+  await facts.locator.start();
+  for (let i = 0; i < 200 && !(facts.state().liveLane?.watch?.active && facts.state().liveLane?.sse?.connected); i++) await sleep(50);
+  const laneSt = facts.state().liveLane;
+  const watchBroken = !laneSt?.watch?.active && envExhausted(JSON.stringify(laneSt?.watch?.failed || []));
+  ok('turning the service ON starts the lane, with no restart (the same predicate the keeper spawns on)', facts.state().liveLane !== null, laneSt);
+  ok('…and the SSE lane subscribed to the serve it adopted', mock.state.requests.some((r) => r.startsWith('GET /global/event')), mock.state.requests.slice(0, 6));
+  if (base < 0 || watchBroken) skip('…and NOW the store is watched (positive control: the measurement can see a watch)', watchBroken ? `this machine cannot fs.watch right now: ${JSON.stringify(laneSt.watch.failed).slice(0, 160)}` : 'no /proc/self/fdinfo on this platform');
+  else ok('…and NOW the store IS watched — the positive control that proves the OFF measurement could have failed', inotifyWdsOn(storeDir) > base, { base, now: inotifyWdsOn(storeDir) });
+
+  // TURNING IT OFF AGAIN must give the handles back, not merely ignore them.
+  wantUp = false;
+  facts.locator.stop({ killRecorded: false });
+  for (let i = 0; i < 200 && facts.state().liveLane; i++) await sleep(50);
+  ok('turning it OFF tears the lane down again (SSE socket, backoff timer and watch)', facts.state().liveLane === null, facts.state().liveLane);
+  if (base < 0 || watchBroken) skip('…and the fs.watch handle on the store is RELEASED', 'measured only where /proc and fs.watch both work');
+  else ok('…and the fs.watch handle on the store is RELEASED, not just ignored', inotifyWdsOn(storeDir) === base, { base, now: inotifyWdsOn(storeDir) });
+  serve.uninstall();
+  await mock.close();
+  for (const d of [dir, storeDir]) fs.rmSync(d, { recursive: true, force: true });
+}
+{
+  // …and both mechanisms are written down where the next person will look
+  const kfs = read('docs/kb-file-structure.md');
+  ok('docs: the per-process question map and the service-gated lane are in the kb essays + the incident file + the index',
+    /questionsFor/.test(kfs) && /ROUND 5/.test(kfs)
+    && /A DEAD ASK STAYED ANSWERABLE/.test(read('docs/kb-bugfix-invariants.md'))
+    && /S9 REMAINDER ROUND 5/.test(read('CLAUDE.md')));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE WIRING, ON A REAL BOOT. The unit A/B above drives install() directly; this
+// one starts the actual server the way a user's instance starts, with a fresh
+// data/ and the plugin at its shipped default (OFF), and MEASURES what the
+// process holds. The positive control is the same instance with the plugin
+// turned on through the real route — so "zero" cannot be zero by accident.
+console.log('\n— A REAL BOOT WITH THE SERVICE OFF (nothing of ours runs or watches) —');
+{
+  const net = await import('node:net');
+  const freePort = () => new Promise((res) => { const s2 = net.createServer(); s2.listen(0, '127.0.0.1', () => { const p2 = s2.address().port; s2.close(() => res(p2)); }); });
+  let ocVersion = null;
+  try { ocVersion = execFileSync(process.env.OPENCODE_CMD || 'opencode', ['--version'], { encoding: 'utf-8', timeout: 15000 }).trim(); } catch { ocVersion = null; }
+  const wt = `/tmp/vs-oc-s9-boot-${process.pid}`;
+  const ocHome = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-oc-boot-home-'));
+  const storeDir = path.join(ocHome, '.local/share/opencode');
+  fs.mkdirSync(storeDir, { recursive: true });
+  // AN EXISTING STORE. On every machine that has ever run opencode this
+  // directory is already there, which is precisely why the boot arm always
+  // attached: `armWatch('boot')` guessed it from the server's own env.
+  fs.writeFileSync(path.join(storeDir, 'opencode.db'), 'x');
+  const PORT = await freePort();
+  let srv = null;
+  const cleanup = () => {
+    try { srv?.kill('SIGKILL'); } catch { }
+    try { const r = JSON.parse(fs.readFileSync(path.join(wt, 'data', 'opencode-serve.json'), 'utf8')); if (r.pid) process.kill(r.pid, 'SIGKILL'); } catch { }
+    try { execFileSync('git', ['worktree', 'remove', '--force', wt], { cwd: REPO, stdio: 'ignore' }); } catch { }
+    for (const d of [wt, ocHome]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { } }
+  };
+  process.on('exit', cleanup);
+  try {
+    try { execFileSync('git', ['worktree', 'remove', '--force', wt], { cwd: REPO, stdio: 'ignore' }); } catch { }
+    execFileSync('git', ['worktree', 'add', '--detach', wt, 'HEAD'], { cwd: REPO, stdio: 'ignore' });
+    for (const f of ['src', 'public', 'server.js', 'package.json', 'data/bin']) execFileSync('bash', ['-c', `mkdir -p ${wt}/${path.dirname(f)} && rm -rf ${wt}/${f} && cp -r ${REPO}/${f} ${wt}/${f}`]);
+    fs.symlinkSync(path.join(REPO, 'node_modules'), path.join(wt, 'node_modules'));
+    const env = {
+      ...process.env, PORT: String(PORT), VIBESPACE_PASSWORD: '',
+      VIBESPACE_OPENCODE_SERVE: '',                     // no ops override: the PLUGIN is the switch, exactly as a user has it
+      HOME: ocHome, XDG_DATA_HOME: path.join(ocHome, '.local/share'), XDG_CONFIG_HOME: path.join(ocHome, '.config'),
+      XDG_CACHE_HOME: path.join(ocHome, '.cache'), XDG_STATE_HOME: path.join(ocHome, '.local/state'),
+    };
+    const bootLog = [];
+    srv = spawn(process.execPath, ['server.js'], { cwd: wt, stdio: ['ignore', 'pipe', 'pipe'], env });
+    srv.stdout.on('data', (d) => { bootLog.push(String(d)); if (bootLog.length > 200) bootLog.shift(); });
+    srv.stderr.on('data', (d) => { bootLog.push(String(d)); if (bootLog.length > 200) bootLog.shift(); });
+    let up = false;
+    for (let i = 0; i < 160 && !up; i++) { try { up = (await fetch(`http://127.0.0.1:${PORT}/api/home`)).ok; } catch { } if (!up) await sleep(250); }
+    if (!up) skip('a fresh instance with the background service OFF watches nothing', `the worktree server did not boot here: ${bootLog.join('').slice(-200)}`);
+    else {
+      // drive the sweep the sidebar drives, several times: nothing may arm lazily
+      for (let i = 0; i < 5; i++) { await fetch(`http://127.0.0.1:${PORT}/api/sessions`).catch(() => { }); await sleep(400); }
+      // …and give the 5s plugin boot replay time to run and decide NOT to start
+      await sleep(6000);
+      const wdsOff = inotifyWdsOn(storeDir, srv.pid);
+      if (wdsOff < 0) skip('a REAL boot with the service off holds ZERO fs.watch handles on the OpenCode store', 'no /proc/<pid>/fdinfo on this platform');
+      else ok('a REAL boot with the background service OFF holds ZERO fs.watch handles on the user\'s OpenCode store', wdsOff === 0, { wdsOff, storeDir });
+      ok('…and started no serve at all: no record, and not even the throwaway cwd a spawn would need', !fs.existsSync(path.join(wt, 'data', 'opencode-serve.json')) && !fs.existsSync(path.join(wt, 'data', 'opencode-serve')), fs.readdirSync(path.join(wt, 'data')).filter((x) => /opencode/.test(x)));
+      const home = await fetch(`http://127.0.0.1:${PORT}/api/home`).then((r) => r.json()).catch(() => null);
+      const ocRow = (home?.harnesses || []).find((h) => h.id === 'opencode') || null;
+      ok('…and /api/home calls it OFF, not BROKEN (a deliberately-off service is no error toast)', !!ocRow && !ocRow.storeReason && ocRow.service && ocRow.service.enabled === false, ocRow);
+
+      // POSITIVE CONTROL, same process, same measurement: turn it on the way a
+      // user does. Without this, "0 watches" could just be a measurement that
+      // never works.
+      if (!ocVersion) skip('…and turning the plugin ON makes THIS instance watch the store (the control)', 'no `opencode` on PATH — the control needs a serve that really boots');
+      else {
+        fs.rmSync(path.join(storeDir, 'opencode.db'), { force: true });   // let the REAL serve create a REAL sqlite here
+        await fetch(`http://127.0.0.1:${PORT}/api/plugins/opencode-serve/enabled`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: true }) }).catch(() => { });
+        let st = null;
+        for (let i = 0; i < 120 && !(st && st.ready); i++) { await sleep(500); st = await fetch(`http://127.0.0.1:${PORT}/api/opencode/state`).then((r) => r.json()).catch(() => null); }
+        if (!st?.ready) skip('…and turning the plugin ON makes THIS instance watch the store (the control)', `the serve did not come up here: ${st?.lastError || 'no state'}`);
+        else {
+          let wdsOn = 0;
+          for (let i = 0; i < 120 && wdsOn <= 0; i++) { wdsOn = inotifyWdsOn(storeDir, srv.pid); if (wdsOn <= 0) await sleep(500); }
+          if (wdsOn < 0) skip('…and turning the plugin ON makes THIS instance watch the store (the control)', 'no /proc/<pid>/fdinfo on this platform');
+          else if (wdsOn === 0) skip('…and turning the plugin ON makes THIS instance watch the store (the control)', 'the lane never attached a watch here (an inotify-exhausted box degrades LOUDLY by design)');
+          else {
+            ok('…and turning the plugin ON makes THIS SAME instance watch the store — the control that proves the OFF measurement could fail', wdsOn > 0, { wdsOn });
+            const servePid = st.pid;
+            await fetch(`http://127.0.0.1:${PORT}/api/plugins/opencode-serve/enabled`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: false }) }).catch(() => { });
+            let wdsBack = wdsOn;
+            for (let i = 0; i < 120 && wdsBack > 0; i++) { await sleep(500); wdsBack = inotifyWdsOn(storeDir, srv.pid); }
+            const stillAlive = (() => { try { process.kill(servePid, 0); return true; } catch { return false; } })();
+            ok('…and turning it OFF gives the watch back AND stops the daemon (off means the process is gone)', wdsBack === 0 && !stillAlive, { wdsBack, servePid, stillAlive });
+          }
+        }
+      }
+    }
+  } catch (e) {
+    ok('the real-boot leg ran without an unexpected error', false, String(e && e.message || e));
+  }
+  cleanup();
+  process.removeListener('exit', cleanup);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 console.log('\n— REAL BINARY (skips WITH EVIDENCE when opencode is absent) —');
 {
   let version = null;
@@ -936,6 +1202,57 @@ console.log('\n— REAL BINARY (skips WITH EVIDENCE when opencode is absent) —
       }
     }
     try { facts.locator.stop({ killRecorded: true }); } catch { }
+    await sleep(300);
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The PREMISE the warm question map violated, on the real binary: `/question`
+// is answered out of ONE serve process's memory. A real ask cannot be minted
+// without spending a model turn (there is no create route — `POST
+// /api/question/request` does not exist; the v2 path is a LIST), so the leg
+// drives the real restart and the real routes with a `que_…` we plant the way
+// a `question.asked` frame would.
+console.log('\n— REAL BINARY: THE PENDING-ASK LIST IS PER SERVE PROCESS —');
+{
+  let version = null;
+  try { version = execFileSync(process.env.OPENCODE_CMD || 'opencode', ['--version'], { encoding: 'utf-8', timeout: 15000 }).trim(); } catch { version = null; }
+  if (!version) skip('a REAL serve restart makes a warm ask map unanswerable', 'no `opencode` on PATH (set OPENCODE_CMD)');
+  else {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-oc-qreal-'));
+    const cwd = path.join(home, 'cwd');
+    fs.mkdirSync(cwd, { recursive: true });
+    try { execFileSync('git', ['init', '-q', cwd], { timeout: 10000 }); } catch { }
+    const env = { ...process.env, HOME: home, XDG_DATA_HOME: path.join(home, '.local/share'), XDG_CONFIG_HOME: path.join(home, '.config'), XDG_CACHE_HOME: path.join(home, '.cache'), XDG_STATE_HOME: path.join(home, '.local/state') };
+    const facts = serve.install({ dataDir: path.join(home, 'data'), command: process.env.OPENCODE_CMD || 'opencode', env: () => env, log: { warn() { }, error() { } }, stopOnExit: true, autostart: true, live: false, backoffBaseMs: 300 });
+    let client = null;
+    try { client = await facts.locator.ensure(); } catch { client = null; }
+    if (!client) skip(`a REAL serve restart makes a warm ask map unanswerable (${version})`, facts.reasonUnavailable());
+    else {
+      ok(`a REAL opencode serve (${version}) answers /question with an EMPTY list on a fresh process`, (await facts.pendingQuestions({ refresh: true })).length === 0);
+      // plant the ask this process would have learned from a `question.asked`
+      // frame: the map is now warm AND stamped for the RUNNING serve
+      facts._live.questions.set('que_real1', { id: 'que_real1', sessionID: 'ses_real', questions: [{ question: 'Red or blue?', header: 'Color', options: [{ label: 'Red' }, { label: 'Blue' }] }], tool: { messageID: 'msg_r', callID: 'call_r' }, at: Date.now() });
+      ok('…and a pending ask on the RUNNING serve is warm, so a card would be joined to it', facts.state().pendingQuestions === 1 && (await facts.pendingQuestions({ sessionId: 'ses_real' })).length === 1, facts.state().pendingQuestions);
+      const pid1 = facts.locator.state().pid, port1 = facts.locator.state().port;
+      // THE RESTART: the keeper's own respawn path, on a real child
+      try { process.kill(pid1, 'SIGTERM'); } catch { }
+      let st2 = facts.locator.state();
+      for (let i = 0; i < 200 && !(st2.ready && st2.pid && st2.pid !== pid1); i++) { await sleep(150); await facts.locator.client({ budgetMs: 1500 }).catch(() => { }); st2 = facts.locator.state(); }
+      if (!(st2.ready && st2.pid !== pid1)) skip('…and the REAL replacement serve knows nothing of it', `the keeper did not bring a replacement up here: ${st2.lastError || 'no state'}`);
+      else {
+        const client2 = await facts.locator.client({ budgetMs: 8000 });
+        ok('a REAL restarted serve is a NEW process on a NEW port whose /question is EMPTY (the list is per process)', st2.port !== port1 && (await client2.questions({ timeoutMs: 8000 })).length === 0, { pid1, port1, pid2: st2.pid, port2: st2.port });
+        ok('…so the warm map stops being trusted: the facts claim ZERO pending asks', facts.state().pendingQuestions === 0, facts.state().pendingQuestions);
+        ok('…and pendingQuestions() answers [] instead of inventing one (⇒ readConversation marks the card STALE)', (await facts.pendingQuestions({ sessionId: 'ses_real' })).length === 0);
+        let broke = null;
+        try { await facts.answerQuestion('que_real1', [['Blue']]); } catch (e) { broke = e; }
+        ok('…and answering the dead id fails LOUDLY against the real serve — the Submit a stale card must never offer', !!broke && /que_real1/.test(broke.message), broke?.message);
+      }
+    }
+    try { facts.locator.stop({ killRecorded: true }); } catch { }
+    serve.uninstall();
     await sleep(300);
     fs.rmSync(home, { recursive: true, force: true });
   }
