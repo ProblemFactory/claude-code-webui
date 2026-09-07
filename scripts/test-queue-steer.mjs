@@ -4061,7 +4061,14 @@ console.log('— ⑨ steered messages: one bubble each, live and after a reload'
     const cw = read('data/bin/codex-chat-wrapper.js');
     ok("item/completed routes `userMessage` — the app-server's own carrier for a submission entering the turn", /if \(type === 'userMessage'\) \{[\s\S]{0,220}recordInboundUserMessage\(asString\(item\.clientId \|\| item\.client_id\), userInputToContent\(item\.content\)/.test(cw));
     ok('a landed steer writes the bubble AT ONCE, in queue order (the commit twin arrives up to a minute later)', /await request\('turn\/steer'[\s\S]{0,1600}recordInboundUserMessage\(cid, userInputToContent\(item\.input\), 'steered'\)/.test(cw));
-    ok('…and a REFUSED steer records nothing (that message is still queued)', /return \{ \.\.\.base, ok: false, detail: e\.message, \.\.\.classifySteerFailure\(e\.message\) \};\n  \}/.test(cw));
+    // INTEGRATION (2026-09-07): the `turn/steer` call itself now lives in
+    // `steerInput`, which the notification lane shares — so the fact this pin
+    // owns is stated where it happens: steerOne RETURNS the refusal (whatever
+    // `steerInput` classified) BEFORE the line that writes the bubble.
+    ok('…and a REFUSED steer records nothing (that message is still queued)',
+      /const st = await steerInput\(item\.input, cid\);\n\s*if \(!st\.ok\) \{[\s\S]{0,220}?return \{ \.\.\.base, \.\.\.st \};\n\s*\}/.test(cw)
+      && /if \(!st\.ok\) \{[\s\S]{0,1200}?recordInboundUserMessage\(cid, userInputToContent\(item\.input\), 'steered'\)/.test(cw)
+      && !/steerInput[\s\S]{0,400}?recordInboundUserMessage/.test(cw.slice(cw.indexOf('async function steerInput'), cw.indexOf('async function steerOne'))));
     ok('every id whose bubble we already wrote is remembered — chat-input, the queued cid and the peer cid', (cw.match(/noteRecordedUserCid\(/g) || []).length >= 5);
     ok('the record carries the queue id + its producer as out-of-band markers, LAST, so the stable payload stays {type, role, content}',
       /record\('response_item', \{\n\s*type: 'message', role: 'user', content: blocks, webui_queue_id: id, webui_queue_via: kind,\n\s*\.\.\.\(kind === 'drained' \? \{ webui_after_commit: true \} : \{\}\),\n\s*\}\);/.test(cw));

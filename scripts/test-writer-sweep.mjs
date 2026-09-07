@@ -2013,7 +2013,7 @@ if (fs.existsSync('/proc/self')) {
   for (const p of spids) { try { process.kill(p, 'SIGKILL'); } catch { } }
   fs.rmSync(sdir, { recursive: true, force: true });
 } else { console.log('  · /proc absent — skipping the signal-verdict legs'); }
-function a2key(a) { return a.file + ' ' + a.needle; }
+function a2key(a) { return a.file + '\u0000' + a.needle; }
 
 // ── 13. THE KB ADVERTISES A NUMBER (r2, defect 7). It said 66 while the suite
 // ran 68 — a small lie, but the kb is the operating manual and the number is

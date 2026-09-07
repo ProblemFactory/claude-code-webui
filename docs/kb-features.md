@@ -274,7 +274,14 @@ impossible rather than a review promise.
   has no steer METHOD either (`session/prompt` is one-at-a-time), so a
   notification that does reach a busy ACP wrapper queues and answers
   `steer:'unsupported'` instead of accepting and ignoring it. Any harness with
-  no live lane stashes for the next turn the same way. Session Properties → Background Work shows the effective
+  no live lane stashes for the next turn the same way.
+  A steered notification is a submission ENTERING THE TURN like any other, so it
+  goes in under a NAME (`notifCid`): the wrapper registers that id as one whose
+  bubble already exists before it writes the labelled card, and carries it on
+  the record as `webui_queue_id`. Without the registration the app-server's own
+  `item/completed {userMessage, clientId}` — which arrives at the next turn
+  boundary — would write a second, anonymous bubble beside the card; without the
+  id, two identical notifications inside one turn would collide on content. Session Properties → Background Work shows the effective
   answer for the session you are looking at.
 - **MULTI-QUEUE SEMANTICS (the rule to remember):** steering item N injects
   **only N**. The others keep their relative order and still run after the turn.

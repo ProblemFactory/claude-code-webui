@@ -129,7 +129,11 @@ const w = read('data/bin/codex-chat-wrapper.js');
 // running wrapper serves) — the advert this suite owns is still peerMessage.
 ok('the codex wrapper adverts caps.peerMessage in its sidecar meta', /caps: \{ peerMessage: true(, [a-zA-Z]+: (?:true|[A-Z_]+))* \}/.test(w), /caps: \{[^}]*\}/.exec(w)?.[0]);
 ok("…serves the 'peer-message' verb: busy ⇒ thread/queue/add, idle ⇒ turn/start", /msg\.type === 'peer-message'/.test(w) && /meta\.activeTurnId\) \{[\s\S]{0,600}?await request\('thread\/queue\/add'/.test(w) && /noteQueued\(cid, \{ kind: 'peer', msgId: '', from: fromName, text \}\)/.test(w) && /await startTurn\(text\);/.test(w));
-ok('…records the peer user message itself (item notifications never carry userMessage) — with the webui_peer marker, on both the queued and the turn path', /const recordPeerMessage = \(\) => record\('response_item', \{ type: 'message', role: 'user', content: \[\{ type: 'input_text', text \}\], webui_peer: \{ name: fromName, body: cardText \} \}\)/.test(w) && /thread\/queue\/add[\s\S]{0,400}recordPeerMessage\(\);/.test(w) && /await startTurn\(text\);\s*\n\s*recordPeerMessage\(\);/.test(w));
+// The record grew TWO named facts (2026-09-07 rounds 2-3): which side of
+// codex's own copy it lands on, and the submission id the app-server knows it
+// by. The pin follows the shape; what it owns is unchanged — every lane writes
+// the SAME labelled record.
+ok('…records the peer user message itself (item notifications never carry userMessage) — with the webui_peer marker, on the steered, queued and turn paths', /const recordPeerMessage = \(afterCommit, queueCid\) => record\('response_item', \{\n\s*type: 'message', role: 'user', content: \[\{ type: 'input_text', text \}\],\n\s*webui_peer: \{ name: fromName, body: cardText \},/.test(w) && /thread\/queue\/add[\s\S]{0,400}recordPeerMessage\(false, cid\);/.test(w) && /await startTurn\(text\);\s*\n\s*recordPeerMessage\(true, ''\);/.test(w));
 ok('…reports peer_message_result on EVERY lane, echoing text + fromName on failure so the server can re-stash with its label', /peer_message_result', \{ ok: true, mode: 'steered' \}/.test(w) && /peer_message_result', \{ ok: true, mode: 'queued', \.\.\.fell \}/.test(w) && /peer_message_result', \{ ok: true, mode: 'turn', \.\.\.fell \}/.test(w) && /peer_message_result', \{ ok: false, reason: e\.message, text, fromName \}/.test(w));
 // the NOTIFICATION rule, at the wrapper: typed frame → steer lane; unknown
 // origin → peer; the ACP wrapper has no steer verb and says so on the wire.

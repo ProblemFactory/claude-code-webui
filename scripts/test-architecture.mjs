@@ -655,7 +655,7 @@ for (const [edge] of EXCEPTIONS) {
         //     vacuous — so they are two halves of one control.
         const probe = ambientThird ? makeDecoy('decoy-probe') : null;
         const leakField = probe ? mkTmp('ctl-leak') : null;
-        let leakMoved = false, leakWhy = 'probe repo unavailable';
+        let leakMoved = false, leakWhy = 'probe repo unavailable', preFixCarries = null;
         if (probe && leakField) {
           plantFixture(leakField);
           const beforeP = repoStamp(probe);
@@ -664,14 +664,34 @@ for (const [edge] of EXCEPTIONS) {
           for (const [k, v] of [['GIT_OBJECT_DIRECTORY', path.join(probe, '.git', 'objects')], ['GIT_COMMON_DIR', path.join(probe, '.git')]]) {
             aimed.set(k, process.env[k]); process.env[k] = v;
           }
-          const preFixEnv = { ...process.env, GIT_DIR: path.join(exposed, '.git'), GIT_WORK_TREE: exposed, GIT_INDEX_FILE: path.join(exposed, '.git', 'index') };
+          //     THE SAME ONE-VARIABLE RULE AS (b), APPLIED TO THIS LEG: the
+          //     pre-fix base is spelled on the SANITIZED env plus exactly the
+          //     two ambient names this control is about. `{ ...process.env, … }`
+          //     left the other twenty redirectors ambient, so a caller whose
+          //     shell already exported GIT_LITERAL_PATHSPECS=1/
+          //     GIT_ICASE_PATHSPECS=1 (git perfectly healthy) or
+          //     GIT_CONFIG_COUNT=1 turned `npm run build` RED here — with a
+          //     message blaming the round-7 finding for its own environment.
+          //     What is being demonstrated is the OBJECT channel, and that is
+          //     named, not inherited.
+          const preFixEnv = {
+            ...GIT_ENV,
+            GIT_OBJECT_DIRECTORY: process.env.GIT_OBJECT_DIRECTORY,
+            GIT_COMMON_DIR: process.env.GIT_COMMON_DIR,
+            GIT_DIR: path.join(exposed, '.git'),
+            GIT_WORK_TREE: exposed,
+            GIT_INDEX_FILE: path.join(exposed, '.git', 'index'),
+          };
+          for (const k of Object.keys(preFixEnv)) if (preFixEnv[k] === undefined) delete preFixEnv[k];
+          preFixCarries = GIT_REDIRECTORS.filter((k) => k in preFixEnv);
           const la = li.status === 0 ? addFixture(leakField, preFixEnv) : { status: 1 };
           for (const [k, v] of aimed) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
           leakMoved = li.status === 0 && la.status === 0 && repoStamp(probe) !== beforeP;
           leakWhy = gitWhy(la);
         }
-        ok(leakMoved,
-          `NEGATIVE CONTROL (the round-7 finding itself): the PRE-FIX raw base { ...process.env, GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE } carries the very same write into a THIRD repository reached only through the ambient GIT_OBJECT_DIRECTORY/GIT_COMMON_DIR — 3 pinned names cannot protect the other 22 (${leakWhy})`);
+        const PREFIX_EXPECTED = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR', 'GIT_OBJECT_DIRECTORY'];
+        ok(leakMoved && JSON.stringify(preFixCarries) === JSON.stringify(PREFIX_EXPECTED),
+          `NEGATIVE CONTROL (the round-7 finding itself): the PRE-FIX base — sanitized, PLUS exactly the object-channel names this leg demonstrates (${JSON.stringify(preFixCarries)}) — carries the very same write into a THIRD repository named on no command line, because 3 pinned names cannot protect the object channel (${leakWhy})`);
       }
     }
 
