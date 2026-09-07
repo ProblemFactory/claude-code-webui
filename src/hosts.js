@@ -638,7 +638,10 @@ class HostManager {
   /** Kill an EXTERNAL/tmux agent process ON the host (sidebar Terminate for
    *  remote-discovered sessions — the pid is remote). Validates the pid is a
    *  claude/codex process there before SIGTERM (killPidShell = THE shared
-   *  identity); device link first, ssh fallback (dial machines have no ssh). */
+   *  identity); device link first, ssh fallback (dial machines have no ssh).
+   *  FOUR outcomes since r5 — VS_OK / VS_GONE are the only ones that return,
+   *  VS_NOTAGENT and VS_UNKNOWN both THROW, because "nothing was signalled" is
+   *  never a success (see killPidShell for the busybox `ps -p` incident). */
   async killRemotePid(id, pid) {
     const h = this.get(id);
     const p = parseInt(pid, 10);
@@ -650,6 +653,13 @@ class HostManager {
       catch (e) { if (h.transport === 'dial') throw new Error('device unreachable: ' + e.message); }
     }
     if (!out) out = String(await this._ssh(h, cmd));
+    // r5: FOUR outcomes. VS_UNKNOWN is "it is alive and I could not read a
+    // thing about it" — nothing was signalled, so it must not be reported as a
+    // success (the busybox `ps -p` hole answered VS_GONE = success + gone) nor
+    // as the finding "not an agent", which we did not make. It is checked
+    // FIRST so a future caller cannot reach the generic `kill failed:` line
+    // and paste a token at the user instead of an explanation.
+    if (out.includes('VS_UNKNOWN')) throw new Error('that PID is running on the host but its command line could not be read there — nothing was terminated');
     if (out.includes('VS_NOTAGENT')) throw new Error('that PID is not a claude/codex process on the host');
     if (!out.includes('VS_OK') && !out.includes('VS_GONE')) throw new Error('kill failed: ' + out.trim().slice(0, 120));
     this.invalidateDiscovery(id); // the card should flip on the next poll
@@ -2180,11 +2190,45 @@ ${codexOpenRolloutsShell()}
  *
  *  It now asks the ONE identity (src/cli-identity.js, embedded as shell text
  *  because a host has no checkout), for BOTH CLI names, exactly like the sweep.
- *  The three outcomes are unchanged so the caller and its error strings are:
- *  `VS_GONE` (no such process — `ps` prints nothing), `VS_OK` (killed),
- *  `VS_NOTAGENT` (alive, but not an agent CLI). The existence test stays `ps`
- *  rather than `kill -0`: `kill -0` also fails with EPERM on another user's
- *  process, which would report a live foreign process as "gone".
+ *
+ *  THE EXISTENCE TEST WAS `ps -p N -o args=`, AND BUSYBOX `ps` HAS NO `-p`
+ *  (r5, found by review). Measured on this box, busybox 1.37.0: `ps -p N -o
+ *  args=` prints `ps: invalid option -- 'p'` + a usage block to STDERR and
+ *  exits 1, so the capture — whose whole point was `2>/dev/null` — is EMPTY
+ *  for every pid alive or dead. On a host whose login shell lives in busybox
+ *  (Alpine images, embedded boxes, any `ash` rootfs — and remember both ssh
+ *  rungs hand this text to the REMOTE USER'S shell, the r3 lesson), EVERY
+ *  Terminate answered `VS_GONE` and `killRemotePid` returned
+ *  `{success:true, gone:true}` while NOTHING had been signalled: the route
+ *  told the user the process was already gone, the sidebar flipped the card,
+ *  and the CLI kept running and kept writing. A capability the probe does not
+ *  have must never read as a FACT about the pid.
+ *
+ *  EXISTENCE IS NOW A LADDER, AND EVERY RUNG IS POSITIVE EVIDENCE (`vs_alive`).
+ *  `kill -0` is POSIX and a SHELL BUILTIN everywhere (dash/bash/busybox/zsh/
+ *  ksh — no fork, no `ps` dialect), and when it SUCCEEDS the pid exists, full
+ *  stop. r4's objection was only ever about its FAILURE: kill(2) with signal 0
+ *  runs the same permission check as a real signal, so EPERM (another user's
+ *  live process) and ESRCH (gone) are one exit status — which is why a failure
+ *  is not the verdict here, it is the question handed to the next rung:
+ *  `[ -d /proc/N ]` (Linux, incl. every busybox host, world-visible for
+ *  processes we may not signal) and then `ps -p N` (the no-/proc rung: BSD and
+ *  macOS `ps` do have `-p`). Only when all three say nothing do we say
+ *  `VS_GONE`. The sibling probe in src/server/sysinfo-wiring.js keeps its
+ *  `ps -p` because there it sits on the FAILURE branch of a `kill` that was
+ *  already attempted — it explains an outcome, it can never manufacture one.
+ *  (Honest edge: under `hidepid=2` a foreign process is invisible to both
+ *  /proc rungs and to `ps`, and reads as gone — exactly as it did before.)
+ *
+ *  …AND "I COULD NOT LOOK" IS NOT "IT IS NOT AN AGENT" (r5). Once the pid is
+ *  known to exist, `vs_is_cli` returning false has two very different causes:
+ *  we read its argv/exe and it is a `tail` (a FINDING), or we could read
+ *  NEITHER (no /proc AND a `ps` that cannot answer — precisely the busybox +
+ *  no-/proc combination above). `vs_known` separates them, so the outcomes are
+ *  now FOUR: `VS_GONE` (no rung can see the pid), `VS_OK` (killed),
+ *  `VS_NOTAGENT` (alive, evidence read, not an agent CLI), `VS_UNKNOWN`
+ *  (alive, NO evidence readable — nothing was signalled, and the caller says
+ *  so rather than inventing either of the other three).
  *
  *  Exit status: every branch ends 0 except a failing `kill`, which is the ONE
  *  thing the caller does want to hear about (`_ssh` rejects a non-zero exit) —
@@ -2195,10 +2239,29 @@ function killPidShell(pid) {
   // one place that builds the text — never "the caller validated it".
   if (!Number.isInteger(p) || p <= 1) throw new Error('bad pid');
   return `${cliIdentityShellFns()}
-C=$(ps -p ${p} -o args= 2>/dev/null)
-if [ -z "$C" ]; then echo VS_GONE
+vs_alive() {
+  # POSITIVE EVIDENCE ONLY, and never from one dialect of ps. \`kill -0\` is a
+  # builtin in every shell that can interpret this text; its SUCCESS is proof.
+  # Its failure is ambiguous (EPERM vs ESRCH share an exit status), so it is
+  # handed on rather than believed: \`[ -d /proc/N ]\` covers Linux (busybox
+  # included) and \`ps -p N\` the no-/proc rung (BSD/macOS ps has -p).
+  kill -0 "$1" 2>/dev/null && return 0
+  [ -d "/proc/$1" ] && return 0
+  ps -p "$1" >/dev/null 2>&1
+}
+vs_known() {
+  # Did we manage to READ anything about this pid? The same two sources
+  # vs_is_cli uses, in the same order, through the same capture — so
+  # "not an agent" is only ever said about evidence we actually held.
+  vs_cap vs_argv "$1" 0
+  [ -n "$vs_c_v" ] && return 0
+  vs_cap readlink "/proc/$1/exe"
+  [ -n "$vs_c_v" ]
+}
+if ! vs_alive ${p}; then echo VS_GONE
 elif vs_is_cli ${p} claude || vs_is_cli ${p} codex; then kill -TERM ${p} && echo VS_OK
-else echo VS_NOTAGENT
+elif vs_known ${p}; then echo VS_NOTAGENT
+else echo VS_UNKNOWN
 fi`;
 }
 

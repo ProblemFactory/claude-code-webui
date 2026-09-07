@@ -32,20 +32,62 @@ fs.writeFileSync(path.join(projB, SID3 + '.jsonl'), rec(SID3, 'beta conversation
 // (B-3185 r3): this suite's whole point is that the DEVICE snapshot and the
 // LOCAL sweep answer identically, and the two ask "is this pid claude?" through
 // different rungs — the local sweep reads `ps -o comm=` (session-store
-// isProcessClaude: the name of the file that was EXEC'd) while the device path
-// runs the shared executable predicate (discovery-facts pidLooksClaude →
-// src/cli-identity.js isCliProcess: argv[0] / interpreter operand / /proc/exe).
-// On real processes those agree exactly — measured on the dev box, 16 of 4277
-// processes, both rules, the same 16 — and THIS ASSERTION IS THAT TWIN'S PARITY
-// GATE, so the fixture has to be a shape that occurs in production. The old
-// fixture (`#!/bin/sh` script named claude) was not: the kernel gives the sh
-// process argv[0] `/bin/sh` while `comm` stays `claude`, so it passed the local
-// rung and failed the executable one — an artifact pinning a disagreement that
-// no real install produces (and a wrapper script's lock file names the CHILD's
-// pid anyway). A COPY of /bin/sh named `claude` gives comm `claude` AND argv[0]
-// `<home>/claude`; a symlink would not (node renames its own comm to
-// `MainThread`, and /bin/sleep can be a uutils multi-call binary that dispatches
-// on argv[0]). It blocks on an empty stdin pipe, so it needs no child.
+// `isProcessClaudeAsync`, reached ONLY from `isLockClaude`'s no-procStart
+// fallback, which is why this lock fixture carries no numeric `procStart`)
+// while the device path runs the shared executable predicate (discovery-facts
+// pidLooksClaude → src/cli-identity.js isCliProcess: argv[0] / interpreter
+// operand / /proc/exe).
+//   THE NAME IN THAT SENTENCE WAS STALE FOR SIX COMMITS (r5, review defect 2):
+// it named the SYNC twin B-3185 r4 DELETED (that name is deliberately not
+// spelled anywhere above — the guard below asserts no module defines it and
+// this note never says it) — and it glossed
+// `comm` as "the name of the file that was EXEC'd", which r4 measured to be
+// false as an identity claim: comm is 15 bytes the process may set for itself
+// (node renames its own main thread to `MainThread`, so an npm-installed
+// `node …/claude-code/cli.js` answers NO), matched here as a SUBSTRING (so
+// `claude-keeper` answers YES). Both errors point the next reader at a rule the
+// campaign retired, on the page that explains why the twin is allowed to
+// survive — so the names are now DRIFT-GUARDED a few lines below.
+// The surviving twin is discovery-only: it decides whether a card reads
+// RUNNING, never who receives a SIGTERM (every kill path asks THE identity).
+// On real processes the two rungs agree exactly — measured on the dev box, 16
+// of 4277 processes, both rules, the same 16 — and THIS ASSERTION IS THAT
+// TWIN'S PARITY GATE, so the fixture has to be a shape that occurs in
+// production. The old fixture (`#!/bin/sh` script named claude) was not: the
+// kernel gives the sh process argv[0] `/bin/sh` while `comm` stays `claude`, so
+// it passed the local rung and failed the executable one — an artifact pinning
+// a disagreement that no real install produces (and a wrapper script's lock
+// file names the CHILD's pid anyway). A COPY of /bin/sh named `claude` gives
+// comm `claude` AND argv[0] `<home>/claude`; a symlink would not (node renames
+// its own comm to `MainThread`, and /bin/sleep can be a uutils multi-call
+// binary that dispatches on argv[0]). It blocks on an empty stdin pipe, so it
+// needs no child.
+
+// ── DRIFT GUARD FOR THE PARAGRAPH ABOVE (r5, review defect 2) ──────────────
+// A comment that names a deleted identity function is not cosmetic here: this
+// file is the page that argues WHY a second spelling of "is this pid claude?"
+// is allowed to exist, so a stale name in it is an invitation to re-add the
+// rule B-3185 retired. Every identity function the note names must be DEFINED
+// in one of the three modules the note attributes them to, and the deleted sync
+// twin must be nameable nowhere — not in the note, not in session-store's code.
+const IDENT_MODULES = ['src/session-store.js', 'src/cli-identity.js', 'src/discovery-facts.js'];
+const identSrcs = IDENT_MODULES.map((rel) => fs.readFileSync(path.join(REPO, rel), 'utf8'));
+const identDefines = (n) => identSrcs.some((s) => new RegExp(`function ${n}\\b`).test(s));
+const selfSrc = fs.readFileSync(new URL(import.meta.url), 'utf8');
+const noteSrc = selfSrc.slice(selfSrc.indexOf('// A live lock claiming SID1.'), selfSrc.indexOf('// \u2500\u2500 DRIFT GUARD'));
+const namesInNote = [...new Set([...noteSrc.matchAll(/\b(is[A-Z]\w+|pidLooks\w+)\b/g)].map((m) => m[1]))];
+ok(noteSrc.length > 400 && namesInNote.length >= 3 && namesInNote.every(identDefines),
+  `every identity function the note above names is really DEFINED in one of ${IDENT_MODULES.join(' / ')} (${namesInNote.join(', ')})`,
+  { named: namesInNote, undefinedOnes: namesInNote.filter((n) => !identDefines(n)) });
+const codeOnly = (t) => t.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+ok(!/isProcessClaude\b(?!Async)/.test(noteSrc) && !/isProcessClaude\b(?!Async)/.test(codeOnly(identSrcs[0])),
+  'the SYNC twin that B-3185 r4 deleted is named neither in the note above nor in session-store\'s code');
+// NEGATIVE CONTROL: the verbatim pre-r5 sentence, so the two asserts above are
+// shown to FIRE on the drift they name rather than being vacuously true.
+const STALE_NOTE = '// LOCAL sweep reads `ps -o comm=` (session-store\n// isProcessClaude: the name of the file that was EXEC\'d)';
+ok(/isProcessClaude\b(?!Async)/.test(STALE_NOTE) && !identDefines('isProcessClaude') && identDefines('isProcessClaudeAsync'),
+  'NEGATIVE CONTROL: the pre-r5 sentence names `isProcessClaude`, which no module defines any more — while the name the note now uses IS defined');
+
 const { execFileSync, spawn } = require('child_process');
 const fakeClaude = path.join(home, 'claude');
 fs.copyFileSync(fs.realpathSync('/bin/sh'), fakeClaude); fs.chmodSync(fakeClaude, 0o755);

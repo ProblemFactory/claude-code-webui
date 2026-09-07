@@ -1306,6 +1306,261 @@ if (fs.existsSync('/proc/self')) {
   fs.rmSync(kdir, { recursive: true, force: true });
 } else { console.log('  · /proc absent — skipping the kill-path legs'); }
 
+// ── 15. THE `ps` FALLBACK RUNG — THE NO-/proc HALF NOBODY HAD DRIVEN (r5,
+// defect 1). `vs_argv`'s `else` branch is what runs on a machine with no /proc
+// (macOS/BSD ssh hosts), and r4 changed it — it flattens the `ps` blob with
+// `tr '\n' ' '` first, "the way the JS twin's /\s+/ split always did". That
+// sentence was a DESCRIPTION: the branch had no assertion of its own and no
+// control, on this Linux box every fixture takes the /proc rung, and the one
+// leg that reaches the branch at all (the vanished-pid stderr leg in §1) only
+// looks at stderr. So the half of the r4 fix that lives here shipped unproven —
+// (r) again: a branch no test can reach is a branch that drifts.
+//
+// Reaching it needs TWO environment substitutions and NO edit to the text under
+// test: (a) re-root `/proc/$1/` so BOTH reads miss, which is exactly what
+// "there is no /proc here" means (r3's re-root technique, widened from the
+// cmdline literal to the exe one — leaving the exe read live let rung 3 answer
+// from `/proc/<pid>/exe` and the ps rung was never the decider); (b) a `ps` on
+// PATH that does NOT flatten a newline inside an argv word. (b) is a stand-in
+// on purpose and the assertion says so: measured here, procps 4.x `ps -o args=`
+// RENDERS an embedded newline as a space, so this box's own `ps` cannot produce
+// the multi-line blob the fix is about — and the branch only ever runs on a
+// platform whose `ps` this box does not have. The stand-in reads the REAL argv
+// out of /proc and joins the words with single spaces, so the only thing it
+// invents is the one byte the local `ps` refuses to emit.
+//
+// The invariant under test is PARITY OF THE SAME RUNG: the shell's ps fallback
+// and the JS twin's ps fallback see the identical lossy blob (`ps` cannot
+// recover word boundaries — both spellings answer `claude` for fixture A, which
+// the /proc rung calls `tail`; that is a property of `ps`, not a defect), and
+// they must read it the same way. And the JS side is DRIVEN, not mirrored: a
+// child node process with a preload that makes the two /proc reads throw runs
+// the SHIPPED `procArgv`/`isCliProcess` on the same live pids.
+if (fs.existsSync('/proc/self')) {
+  const { spawn, spawnSync } = await import('node:child_process');
+  const pdir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-psfb-'));
+  const shimDir = path.join(pdir, 'shim');
+  fs.mkdirSync(shimDir, { recursive: true });
+  const shimPs = path.join(shimDir, 'ps');
+  fs.writeFileSync(shimPs, `#!/bin/sh
+# Stand-in for a \`ps\` on a machine with no /proc: \`-p PID -o args=\` prints the
+# argv words joined by single spaces WITHOUT flattening a newline inside a word.
+# It invents nothing else — the words come from the live process.
+pid=""
+while [ $# -gt 0 ]; do case "$1" in -p) shift; pid=$1;; esac; shift; done
+[ -n "$pid" ] || exit 1
+[ -r "/proc/$pid/cmdline" ] || exit 1
+tr '\\0' ' ' < "/proc/$pid/cmdline" | sed 's/ $//'
+echo
+`);
+  fs.chmodSync(shimPs, 0o755);
+  const pmk = (rel) => { const p = path.join(pdir, rel); fs.mkdirSync(path.dirname(p), { recursive: true }); fs.copyFileSync(fs.realpathSync('/bin/sh'), p); fs.chmodSync(p, 0o755); return p; };
+  const pprocs = [];
+  const pspawn = (img, argv0) => { const p = spawn(img, ['-c', 'read x'], { argv0, cwd: os.tmpdir(), stdio: ['pipe', 'ignore', 'ignore'] }); pprocs.push(p); return p; };
+  // the SAME two directions §6's /proc fixtures use, plus a plain one so the
+  // control can be shown to be alive rather than simply answering NO.
+  const imgNlA = pmk('a/claude');
+  const psNlTail = pspawn(imgNlA, imgNlA + '\n/usr/bin/tail');   // …/claude<LF>/usr/bin/tail
+  const imgNlB = pmk('d\nname/claude');
+  const psNlCli = pspawn(imgNlB, imgNlB);                        // …/d<LF>name/claude
+  const imgPlain = pmk('c/claude');
+  const psPlain = pspawn(imgPlain, imgPlain);                    // …/c/claude
+  const psFix = [['ps-nl-tail', psNlTail], ['ps-nl-cli', psNlCli], ['ps-plain', psPlain]];
+  const pArgv0 = (pid) => { try { return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0')[0] || ''; } catch { return ''; } };
+  { const t = Date.now(); while (psFix.some(([, p]) => !pArgv0(p.pid)) && Date.now() - t < 10000) await new Promise((r) => setTimeout(r, 20)); }
+  ok(psFix.every(([, p]) => !!pArgv0(p.pid)) && pArgv0(psNlTail.pid).includes('\n') && pArgv0(psNlCli.pid).includes('\n'),
+    'the ps-rung fixtures are live and have EXEC\'d their own argv, two of them carrying a newline INSIDE argv[0] (read back out of /proc)',
+    { argv0s: psFix.map(([n, p]) => [n, JSON.stringify(pArgv0(p.pid))]) });
+  // THE STAND-IN IS THE POINT, SO IT IS ASSERTED: this box's `ps` cannot make
+  // the input the fix is about, which is why the branch was never exercised.
+  const realPsOut = spawnSync('ps', ['-p', String(psNlTail.pid), '-o', 'args='], { encoding: 'utf8' }).stdout || '';
+  ok(realPsOut.trimEnd().split('\n').length === 1,
+    'MEASURED: this box\'s procps `ps -o args=` renders the embedded newline as a SPACE — one line — so the local `ps` cannot produce the multi-line blob the r4 flattening exists for (the stand-in below is not decoration)',
+    { realPs: JSON.stringify(realPsOut) });
+  const shimOut = spawnSync(shimPs, ['-p', String(psNlTail.pid), '-o', 'args='], { encoding: 'utf8' }).stdout || '';
+  ok(shimOut.trimEnd().split('\n').length === 2 && shimOut.startsWith(pArgv0(psNlTail.pid).split('\n')[0]),
+    '…and the stand-in DOES — its blob is two lines built from the live process\'s own argv words (the control below has something to get wrong)',
+    { shim: JSON.stringify(shimOut) });
+  // (a) the re-root: BOTH /proc reads must miss, or rung 3 decides instead.
+  const psIdent = cliIdentityShellFns();
+  ok((psIdent.match(/\/proc\/\$1\//g) || []).length === 3,
+    'the identity text reaches /proc through exactly the three literals the re-root rewrites (two cmdline + one exe) — the substitution cannot silently miss one');
+  const noProcIdent = psIdent.split('/proc/$1/').join(`${pdir}/noproc/$1/`);
+  const SHIPPED_PS_LINE = `ps -p "$1" -o args= 2>/dev/null | tr '\\n' ' ' | awk -v i="$(($2 + 1))" '{ print $i }'`;
+  // git 77ac0825:src/cli-identity.js — the verbatim pre-r4 fallback line.
+  const PRE_R4_PS_LINE = `ps -p "$1" -o args= 2>/dev/null | awk -v i="$(($2 + 1))" '{ print $i }'`;
+  ok(noProcIdent !== psIdent && !noProcIdent.includes('/proc/$1/') && noProcIdent.includes(SHIPPED_PS_LINE),
+    'the no-/proc copy changed ONLY the /proc root — the `ps` fallback under test is the SHIPPED line, byte for byte');
+  const preR4Ps = noProcIdent.replace(SHIPPED_PS_LINE, () => PRE_R4_PS_LINE);
+  const psParses = (t) => { try { return spawnSync('sh', ['-n', '-c', t], { timeout: 20000 }).status === 0; } catch { return false; } };
+  ok(preR4Ps !== noProcIdent && preR4Ps.includes(PRE_R4_PS_LINE) && !preR4Ps.includes(SHIPPED_PS_LINE) && psParses(preR4Ps),
+    'the negative control is that same copy with ONLY the `tr \'\\n\' \' \'` flattening removed — the VERBATIM pre-r4 line — and it PARSES (a broken revert answers NO for everything and fakes a pass)');
+  // (b) the environment: the stand-in `ps` first on PATH, for BOTH spellings.
+  const psEnv = { ...process.env, PATH: shimDir + ':' + process.env.PATH };
+  const shArgvWord = (fns, pid, i) => String(spawnSync('sh', ['-c', `${fns}\nvs_cap vs_argv "$1" ${i}; printf '%s' "$vs_c_v"`, 'sh', String(pid)], { encoding: 'utf8', env: psEnv, timeout: 20000 }).stdout || '');
+  const shSaysCli = (fns, pid) => spawnSync('sh', ['-c', `${fns}\nvs_is_cli "$1" claude`, 'sh', String(pid)], { encoding: 'utf8', env: psEnv, timeout: 20000 }).status === 0;
+  // The JS twin is DRIVEN into the same rung, not mirrored: the shipped
+  // procArgv/isCliProcess run in a child whose /proc reads throw.
+  const jsDrv = path.join(pdir, 'noproc-driver.cjs');
+  const identPath = new URL('../src/cli-identity.js', import.meta.url).pathname;
+  fs.writeFileSync(jsDrv, `const fs = require('fs');
+const rr = fs.readFileSync, rl = fs.readlinkSync;
+const gone = () => { const e = new Error('ENOENT: this machine has no /proc'); e.code = 'ENOENT'; throw e; };
+fs.readFileSync = (p, ...r) => (typeof p === 'string' && /^\\/proc\\/\\d+\\/cmdline$/.test(p) ? gone() : rr(p, ...r));
+fs.readlinkSync = (p, ...r) => (typeof p === 'string' && /^\\/proc\\/\\d+\\/exe$/.test(p) ? gone() : rl(p, ...r));
+const { procArgv, isCliProcess } = require(${JSON.stringify(identPath)});
+const pid = process.argv[2];
+console.log(JSON.stringify({ argv: [0, 1, 2].map((i) => procArgv(pid, i)), isCli: isCliProcess(pid, 'claude') }));
+`);
+  const jsNoProc = (pid) => { try { return JSON.parse(spawnSync(process.execPath, [jsDrv, String(pid)], { encoding: 'utf8', env: psEnv, timeout: 20000 }).stdout || 'null'); } catch { return null; } };
+  const jsRows = psFix.map(([n, p]) => [n, jsNoProc(p.pid)]);
+  ok(jsRows.every(([, r]) => r && Array.isArray(r.argv) && r.argv[0]),
+    'the JS twin really TOOK its own `ps` fallback (the /proc reads throw in that child) and answered from the stand-in blob — it is driven, not mirrored',
+    { js: jsRows.map(([n, r]) => [n, r && r.argv[0]]) });
+  ok(psFix.every(([n, p], k) => [0, 1, 2].every((i) => shArgvWord(noProcIdent, p.pid, i) === jsRows[k][1].argv[i])),
+    'PARITY: the SHIPPED shell `ps` fallback returns the identical word for argv[0..2] on all three fixtures — the two spellings index the same blob the same way',
+    { shell: psFix.map(([n, p]) => [n, [0, 1, 2].map((i) => shArgvWord(noProcIdent, p.pid, i))]), js: jsRows.map(([n, r]) => [n, r.argv]) });
+  ok(psFix.every(([, p], k) => shSaysCli(noProcIdent, p.pid) === jsRows[k][1].isCli),
+    '…and the same VERDICT on all three (this rung reads a blob `ps` already flattened: fixture A is `claude` to BOTH spellings, which the /proc rung calls `tail` — a property of `ps`, not a divergence)',
+    { shell: psFix.map(([n, p]) => [n, shSaysCli(noProcIdent, p.pid)]), js: jsRows.map(([n, r]) => [n, r.isCli]) });
+  const preR4Verdicts = psFix.map(([n, p]) => [n, shSaysCli(preR4Ps, p.pid)]);
+  ok(preR4Verdicts[2][1] === jsRows[2][1].isCli,
+    'the control is NOT simply dead: on the fixture with no newline it agrees with the JS twin exactly as the shipped line does');
+  ok(preR4Verdicts[0][1] !== jsRows[0][1].isCli && preR4Verdicts[1][1] !== jsRows[1][1].isCli,
+    'NEGATIVE CONTROL: without the flattening, `awk` prints field i of EVERY line, so the pre-r4 fallback answers the OPPOSITE of the JS twin on BOTH newline fixtures — a real writer survives the sweep (A) and a `tail` reader is SIGTERMed (B), on the same live pids',
+    { preR4: preR4Verdicts, js: jsRows.map(([n, r]) => [n, r.isCli]) });
+  for (const p of pprocs) { try { p.kill('SIGKILL'); } catch { } }
+  fs.rmSync(pdir, { recursive: true, force: true });
+} else { console.log('  · /proc absent — skipping the `ps`-fallback rung legs'); }
+
+// ── 16. THE REMOTE TERMINATE UNDER BUSYBOX (r5, defect 3). §14 proved
+// killPidShell asks THE identity; it drove the script under `sh` only. The
+// EXISTENCE test in front of that identity was `C=$(ps -p N -o args=)` — and
+// busybox `ps` has no `-p` (measured below, busybox 1.37.0: it prints a usage
+// block to stderr and exits 1), so the capture, whose whole point is
+// `2>/dev/null`, is EMPTY for a live pid exactly as it is for a dead one. On a
+// busybox login shell EVERY Terminate answered VS_GONE and killRemotePid
+// returned `{success:true, gone:true}` while NOTHING had been signalled: the
+// route said the process was already gone, the card flipped, the CLI kept
+// running and kept writing. Same class as (q): the text runs under the REMOTE
+// USER'S shell, so "POSIX sh" is the floor and busybox is a real floor.
+//
+// The fix is a ladder of POSITIVE evidence (`kill -0`, then `[ -d /proc/N ]`,
+// then `ps -p N`) plus a fourth outcome — a pid that EXISTS but whose argv and
+// exe are both unreadable is VS_UNKNOWN, never "gone" and never "not an agent".
+if (fs.existsSync('/proc/self')) {
+  const { spawn, spawnSync } = await import('node:child_process');
+  const { killPidShell: kps } = require('../src/hosts.js');
+  const bbPath = ['/usr/bin/busybox', '/bin/busybox'].find((p) => fs.existsSync(p));
+  const bdir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-bbkill-'));
+  const btx = path.join(bdir, '.claude', 'projects', '-w', 'rid.jsonl');
+  fs.mkdirSync(path.dirname(btx), { recursive: true });
+  fs.writeFileSync(btx, '{}\n');
+  const bprocs = [];
+  const bReader = () => { const p = spawn('tail', ['-f', btx], { cwd: os.tmpdir(), stdio: 'ignore' }); bprocs.push(p); return p; };
+  const bCli = (name, sub) => {
+    const img = path.join(bdir, sub, name);
+    fs.mkdirSync(path.dirname(img), { recursive: true });
+    fs.copyFileSync(fs.realpathSync('/bin/sh'), img); fs.chmodSync(img, 0o755);
+    const p = spawn(img, ['-c', 'read x'], { cwd: os.tmpdir(), stdio: ['pipe', 'ignore', 'ignore'] });
+    bprocs.push(p); return p;
+  };
+  const bReaderCtl = bReader(), bReaderShip = bReader(), bReaderUnk = bReader();
+  const bCliCtl = bCli('claude', 'b1'), bCliShip = bCli('codex', 'b2');
+  const bArgv = (pid) => { try { return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter(Boolean); } catch { return []; } };
+  { const t = Date.now(); while (bprocs.some((p) => bArgv(p.pid).length === 0) && Date.now() - t < 10000) await new Promise((r) => setTimeout(r, 20)); }
+  const bAlive = (p) => { try { process.kill(p.pid, 0); return true; } catch { return false; } };
+  ok(bprocs.every((p) => bArgv(p.pid).length > 0 && bAlive(p)),
+    'every busybox kill-path fixture is live and has EXEC\'d its own argv before any verdict is taken',
+    { argvs: bprocs.map((p) => bArgv(p.pid).join(' ').slice(0, 50)) });
+  if (!bbPath) console.log('  · busybox absent — the busybox kill-path legs below are SKIPPED (install busybox to run them)');
+  const runIn = (argv, script) => {
+    const r = spawnSync(argv[0], [...argv.slice(1), '-c', script], { encoding: 'utf8', timeout: 20000 });
+    return String(r.stdout || '').trim();
+  };
+  const bbArgv = bbPath ? [bbPath, 'sh'] : null;
+  // busybox `ps` really cannot answer the pre-r5 probe — asserted, not assumed.
+  const bbPsOut = bbPath ? spawnSync(bbPath, ['ps', '-p', String(bReaderCtl.pid), '-o', 'args='], { encoding: 'utf8' }) : null;
+  ok(!bbPath || ((bbPsOut.stdout || '') === '' && /invalid option/.test(bbPsOut.stderr || '')),
+    'MEASURED: busybox `ps -p N -o args=` prints NOTHING on stdout and complains on stderr — the pre-r5 capture is empty for a LIVE pid',
+    { stdout: bbPsOut && bbPsOut.stdout, stderr: bbPsOut && String(bbPsOut.stderr || '').split('\n')[0] });
+  // git ddab79bf:src/hosts.js — the verbatim pre-r5 script.
+  const preR5Kill = (p) => `${cliIdentityShellFns()}
+C=$(ps -p ${p} -o args= 2>/dev/null)
+if [ -z "$C" ]; then echo VS_GONE
+elif vs_is_cli ${p} claude || vs_is_cli ${p} codex; then kill -TERM ${p} && echo VS_OK
+else echo VS_NOTAGENT
+fi`;
+  const ctlReader = bbPath ? runIn(bbArgv, preR5Kill(bReaderCtl.pid)) : null;
+  const ctlCli = bbPath ? runIn(bbArgv, preR5Kill(bCliCtl.pid)) : null;
+  await new Promise((r) => setTimeout(r, 250));
+  ok(!bbPath || (ctlReader === 'VS_GONE' && ctlCli === 'VS_GONE' && bAlive(bReaderCtl) && bAlive(bCliCtl)),
+    'NEGATIVE CONTROL: under busybox the pre-r5 script answers VS_GONE for BOTH a live reader AND a live `claude` — killRemotePid would have returned {success:true, gone:true} with nothing signalled, and both processes are still running',
+    { reader: ctlReader, cli: ctlCli, readerAlive: bAlive(bReaderCtl), cliAlive: bAlive(bCliCtl) });
+  ok(!bbPath || runIn(bbArgv, kps(bReaderShip.pid)) === 'VS_NOTAGENT',
+    'the SHIPPED script under busybox REFUSES the reader by name (VS_NOTAGENT) instead of calling it gone');
+  ok(!bbPath || bAlive(bReaderShip), '…and that reader is still alive');
+  const bbKilled = bbPath ? runIn(bbArgv, kps(bCliShip.pid)) : null;
+  await new Promise((r) => setTimeout(r, 300));
+  ok(!bbPath || (bbKilled === 'VS_OK' && !bAlive(bCliShip)),
+    'POSITIVE CONTROL: a real `codex` IS terminated by the shipped script under busybox — the ladder did not simply stop answering', { out: bbKilled });
+  const bDead = Number(fs.readFileSync('/proc/sys/kernel/pid_max', 'utf8').trim()) + 1;
+  ok(!bbPath || runIn(bbArgv, kps(bDead)) === 'VS_GONE',
+    '…and a pid that is really not there still answers VS_GONE under busybox (the ladder is not stuck on "alive")');
+  // THE FOURTH OUTCOME. "Alive but unreadable" is reachable exactly where the
+  // incident lives: no /proc (macOS/BSD) AND a `ps` that cannot answer -p.
+  // Re-root every /proc literal in the WHOLE script — identity, vs_alive's
+  // `[ -d /proc/N ]` and vs_known's exe read — because that is one fact about
+  // the machine, not three edits.
+  const shippedKill = kps(bReaderUnk.pid);
+  const noProcKill = shippedKill.split('/proc/').join(`${bdir}/noproc/`);
+  ok(noProcKill !== shippedKill && !noProcKill.includes('/proc/') && noProcKill.includes('kill -0 "$1"'),
+    'the no-/proc copy of the kill script changed ONLY the /proc root — vs_alive\'s `kill -0` rung and the identity text are the shipped bytes');
+  const unkOut = bbPath ? runIn(bbArgv, noProcKill) : null;
+  const unkCtl = bbPath ? runIn(bbArgv, noProcKill.replace(/if ! vs_alive \d+; then[\s\S]*$/, () => {
+    const p = bReaderUnk.pid;
+    return `C=$(ps -p ${p} -o args= 2>/dev/null)\nif [ -z "$C" ]; then echo VS_GONE\nelif vs_is_cli ${p} claude || vs_is_cli ${p} codex; then kill -TERM ${p} && echo VS_OK\nelse echo VS_NOTAGENT\nfi`;
+  })) : null;
+  await new Promise((r) => setTimeout(r, 250));
+  ok(!bbPath || (unkOut === 'VS_UNKNOWN' && bAlive(bReaderUnk)),
+    'no /proc AND a `ps` that cannot answer ⇒ VS_UNKNOWN: the pid is known ALIVE (kill -0) and NOTHING about it could be read, so the script says so instead of guessing — and the process survives',
+    { out: unkOut });
+  ok(!bbPath || unkCtl === 'VS_GONE',
+    'NEGATIVE CONTROL: the pre-r5 decision block on that SAME machine shape answers VS_GONE — the outcome the fourth verdict exists to stop', { out: unkCtl });
+  // …and the CALLER must not turn either honest refusal into a success.
+  const { HostManager: HM5 } = require('../src/hosts.js');
+  const hmDir5 = path.join(bdir, 'hm');
+  fs.mkdirSync(hmDir5, { recursive: true });
+  const hm5 = new HM5({ dataDir: hmDir5 });
+  hm5._state.hosts = [{ id: 'h5', name: 'h5', transport: 'dial', host: 'x', user: 'u' }];
+  hm5.invalidateDiscovery = () => { };
+  const stubOut = (text) => { hm5.deviceBounded = async () => ({ async runCmd() { return { stdout: text }; } }); };
+  const callKill5 = async (text) => { stubOut(text); try { return { ok: await hm5.killRemotePid('h5', 4242) }; } catch (e) { return { err: e.message }; } };
+  const unknownReply = await callKill5('VS_UNKNOWN\n');
+  ok(/could not be read/.test(unknownReply.err || '') && !unknownReply.ok,
+    'killRemotePid THROWS on VS_UNKNOWN with an explanation — never {success:true}, and never the generic `kill failed: <token>` line', { unknownReply });
+  const goneReply = await callKill5('VS_GONE\n');
+  const okReply = await callKill5('VS_OK\n');
+  ok(goneReply.ok?.success === true && goneReply.ok?.gone === true && okReply.ok?.success === true && okReply.ok?.gone === false,
+    '…and the two outcomes that MAY return still do (VS_GONE ⇒ gone:true, VS_OK ⇒ gone:false) — the new branch did not swallow them', { goneReply, okReply });
+  // STRUCTURAL: the busybox-unsafe probe must not come back, and the enumerated
+  // SIBLING (sysinfo-wiring's signalProc) is named with its reason — its
+  // `ps -p` sits on the FAILURE branch of a kill that was already ATTEMPTED, so
+  // it can only mislabel an outcome, never manufacture one.
+  const kpsText = kps(4242);
+  ok(/kill -0 "\$1" 2>\/dev\/null && return 0/.test(kpsText) && !/^C=\$\(ps -p \d+ -o args=/m.test(kpsText),
+    'WIRING PIN: the shipped kill script probes existence with `kill -0` and carries no `C=$(ps -p N -o args=)` existence capture');
+  ok(/^C=\$\(ps -p \d+ -o args=/m.test(preR5Kill(4242)),
+    'NEGATIVE CONTROL: that pin names a shape that really exists — it FIRES on the verbatim pre-r5 script');
+  const sysSrc = fs.readFileSync(new URL('../src/server/sysinfo-wiring.js', import.meta.url), 'utf8');
+  const sigScript = (sysSrc.match(/const script = `[\s\S]*?`;/) || [''])[0];
+  ok(sigScript.includes('if kill -') && sigScript.indexOf('if kill -') < sigScript.indexOf('ps -p'),
+    'ENUMERATED SIBLING: signalProc still ATTEMPTS the kill before any `ps -p` runs, so its busybox-blind probe can only mislabel EPERM as ESRCH — it can never report a kill that did not happen as a success',
+    { sigScript: sigScript.slice(0, 200) });
+  for (const p of bprocs) { try { p.kill('SIGKILL'); } catch { } }
+  fs.rmSync(bdir, { recursive: true, force: true });
+} else { console.log('  · /proc absent — skipping the busybox kill-path legs'); }
+
 // ── 13. THE KB ADVERTISES A NUMBER (r2, defect 7). It said 66 while the suite
 // ran 68 — a small lie, but the kb is the operating manual and the number is
 // how a reader decides whether an essay still describes the code. Self-checking

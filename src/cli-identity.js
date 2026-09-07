@@ -67,6 +67,18 @@
  * line" IS "the Nth NUL-record" in both spellings, and the `ps` fallback
  * flattens its blob the way the JS twin's /\s+/ split already did.
  *
+ * THAT LAST CLAUSE WAS PROSE UNTIL r5. `vs_argv`'s `else` branch only runs
+ * where there is no /proc, so on a Linux box every fixture takes the rung
+ * above it and the sentence had no assertion behind it. test-writer-sweep §15
+ * now DRIVES it without editing a byte of this file: it re-roots `/proc/$1/`
+ * (all THREE literals — leaving the exe read live lets rung 3 answer and the
+ * `ps` rung never decides), puts a stand-in `ps` first on PATH (measured:
+ * procps renders an embedded newline as a SPACE, so this box's own `ps`
+ * cannot produce the input the flattening exists for), and runs `procArgv` /
+ * `isCliProcess` in a child whose /proc reads THROW so the JS twin really
+ * takes its own fallback. Both must return the same word and the same
+ * verdict; the control is this line without the `tr`.
+ *
  * …AND THE VALUE STILL HAD TO SURVIVE `$(…)`, WHICH STRIPS EVERY TRAILING
  * NEWLINE (r4, second half — found by MEASURING the first half rather than
  * describing it). A word or path that ENDS in one read `…/claude` in the shell
