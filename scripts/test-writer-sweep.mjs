@@ -1727,10 +1727,31 @@ if (fs.existsSync('/proc/self')) {
   // test on any kill/signal path. Every surviving occurrence is listed here
   // WITH its reason, and a dead entry fails too — an allowlist nobody prunes
   // is how the last one survived.
-  const KILL_PATH_FILES = ['src/cli-identity.js', 'src/writer-sweep.js', 'src/hosts.js',
-    'src/server/sysinfo-wiring.js', 'src/session-store.js', 'src/routes/sessions.js',
-    'scripts/vibespace-agentd-install.sh',
-    ...String(spawnSync('git', ['ls-files', 'data/bin'], { encoding: 'utf8', cwd: new URL('..', import.meta.url).pathname }).stdout || '').split('\n').filter(Boolean)];
+  //
+  // r7 (found by review): that invariant was true and the INSTRUMENT enforcing
+  // it was a HAND-WRITTEN list of seven files. A hand list is the same
+  // instrument this bug has already defeated three times — r4 found the retired
+  // rule alive on a kill path nobody had counted (hosts.js killRemotePid), r5
+  // counted the sibling and let it go, r6 found that the reason r5 wrote for it
+  // described only the SECOND of that script's two `ps -p` calls. A hand list
+  // enforces a rule exactly where its author already looked, which is never
+  // where the next one lands. So the file set is DERIVED, by grep, from the
+  // question the rule is about: every non-test file under src/, data/bin/ and
+  // scripts/ — plus the repo-root scripts, where server.js lives — whose text
+  // SENDS OR PROBES A SIGNAL (kill -TERM/-9/-0/…, SIGTERM/SIGKILL, pkill,
+  // process.kill(, killRemotePid, signalProc, vs_alive). Embedded remote
+  // scripts ride along twice: as the source they are written in, and (leg (k))
+  // as the text their builders actually EMIT. The derived list is PRINTED, so
+  // a reviewer checks what was swept instead of trusting this comment's count
+  // of it.
+  //
+  // A grep OVER-approximates on purpose and the printed list says so: the
+  // i18n dictionaries and the process-manager UI match on the WORD `SIGSTOP`,
+  // the adapters on `SIGINT`. A false positive only widens where the rule is
+  // enforced; a false NEGATIVE is the entire bug this leg exists for.
+  const KILL_MARKERS = /kill\s+-(?:TERM|KILL|HUP|INT|QUIT|STOP|CONT|USR1|USR2|9|0)\b|\bSIG(?:TERM|KILL|HUP|INT|QUIT|STOP|CONT)\b|\bpkill\b|process\.kill\s*\(|\bkillRemotePid\b|\bsignalProc\b|\bvs_alive\b/;
+  const SWEEP_ROOTS = ['src', 'data/bin', 'scripts'];
+  const CODE_EXT = /\.(?:js|mjs|cjs|sh)$/;
   const PS_P_ALLOWED = [
     { file: 'src/cli-identity.js', needle: `ps -p "$1" -o args= 2>/dev/null | tr`,
       why: 'ARGV READ (vs_argv, the no-/proc rung). It asks for a VALUE, never for existence: a `ps` that cannot answer yields an empty word, and an empty argv word already means "no evidence" to vs_is_cli / vs_known.' },
@@ -1746,24 +1767,235 @@ if (fs.existsSync('/proc/self')) {
       why: 'ARGV READ gated by `kill -0 "$P" || return 1`, and daemon_up explicitly ACCEPTS the empty answer (`""` is a matching case) — a `ps` that cannot answer never reports a healthy daemon as down.' },
   ];
   const isComment = (l) => /^\s*(\/\/|\*|\/\*|#)/.test(l);
-  const stray = [];
-  const hitNeedles = new Set();
-  for (const f of KILL_PATH_FILES) {
-    let src = '';
-    try { src = fs.readFileSync(new URL('../' + f, import.meta.url), 'utf8'); } catch { continue; }
-    src.split('\n').forEach((line, i) => {
+  // The line scanner, used against BOTH files on disk and the shell text a
+  // builder composes at RUNTIME (leg (k) — a source scan cannot see a probe
+  // assembled from pieces).
+  const scanPsP = (label, text, allow) => {
+    const stray = [], hit = new Set();
+    String(text).split('\n').forEach((line, i) => {
       if (isComment(line) || !line.includes('ps -p')) return;
-      const hit = PS_P_ALLOWED.find((a) => a.file === f && line.includes(a.needle));
-      if (hit) hitNeedles.add(a2key(hit)); else stray.push(`${f}:${i + 1}: ${line.trim().slice(0, 90)}`);
+      const a = allow.find((x) => (x.file === label || x.file === '*') && line.includes(x.needle));
+      if (a) hit.add(a2key(a)); else stray.push(`${label}:${i + 1}: ${line.trim().slice(0, 90)}`);
     });
-  }
-  ok(!stray.length,
+    return { stray, hit };
+  };
+  // GENERATED files are a THIRD bucket, not a skip and not an allowlist row.
+  // `data/bin/vibespace-agentd.js` is the esbuild bundle of src/agentd/** — it
+  // carries cli-identity's and writer-sweep's `ps -p` lines VERBATIM, under a
+  // filename that can never appear in a per-file allowlist (and rebuilding it
+  // is what every developer does before running a suite, so a naive sweep goes
+  // red on a clean tree — measured here before this bucket existed). Skipping
+  // it outright would be an enumeration by another name, so instead the rule
+  // for a generated file is STRICTER and needs no author: every `ps -p` line in
+  // it must appear VERBATIM in an AUTHORED file this sweep already walked. A
+  // build step that injected a probe of its own has nowhere to hide, and the
+  // authored copy is still the only place a reason may be written.
+  //
+  // GITIGNORED is the predicate on purpose, and it is not "trusted": a file git
+  // is told to ignore is not part of the shipped SOURCE, so "which author owes
+  // this line a reason" is not a question it can answer — "does it faithfully
+  // copy text that already has one" is. Everything else, tracked or untracked,
+  // is AUTHORED and gets the strict allowlist (see control ⑥: the temp roots
+  // have no git at all, so nothing there can claim this bucket).
+  const gitIgnoredSet = (root, rels) => {
+    if (!rels.length) return new Set();
+    // No git (the temp roots in (j)) ⇒ empty ⇒ every file counts as AUTHORED,
+    // which is the safe direction: an unprovable file gets the strict allowlist.
+    const r = spawnSync('git', ['check-ignore', '--stdin'], { cwd: root, input: rels.join('\n') + '\n', encoding: 'utf8', maxBuffer: 32 << 20 });
+    return new Set(String(r.stdout || '').split('\n').filter(Boolean));
+  };
+  // THE DERIVATION, parameterised by ROOT precisely so the controls in (j) can
+  // point the SHIPPED sweep at a tree that DOES contain the retired shape — a
+  // sweep only ever run against a clean tree is a sweep proven to say nothing.
+  const sweepKillPaths = (root, allow, generatedFor = gitIgnoredSet) => {
+    const all = [];
+    const walk = (rel) => {
+      const abs = path.join(root, rel);
+      let st; try { st = fs.statSync(abs); } catch { return; }
+      if (st.isDirectory()) {
+        for (const e of fs.readdirSync(abs).sort()) {
+          if (e === 'node_modules' || e === '.git') continue;
+          walk(path.join(rel, e));
+        }
+        return;
+      }
+      all.push(rel);
+    };
+    for (const r of SWEEP_ROOTS) walk(r);
+    for (const e of fs.readdirSync(root).sort()) {   // the repo ROOT itself: server.js, run.sh, install.sh
+      try { if (fs.statSync(path.join(root, e)).isFile()) all.push(e); } catch { }
+    }
+    const gen = generatedFor(root, all);
+    const files = [], generated = [], stray = [], hit = new Set(), skipped = [], genLines = [];
+    for (const rel of all) {
+      // The SUITES are excluded on purpose, and this file is the proof: a
+      // regression test for a retired shape has to be able to write it down.
+      if (/^test-/.test(path.basename(rel))) { skipped.push(rel); continue; }
+      let buf; try { buf = fs.readFileSync(path.join(root, rel)); } catch { continue; }
+      if (buf.length > (4 << 20) || buf.includes(0)) continue;    // oversized / binaries
+      const src = buf.toString('utf8');
+      if (!CODE_EXT.test(rel) && !src.startsWith('#!')) continue; // .md/.json, and the extension-less agent CLIs by shebang
+      if (!KILL_MARKERS.test(src)) continue;
+      if (gen.has(rel)) {
+        generated.push(rel);
+        src.split('\n').forEach((line, i) => {
+          if (!isComment(line) && line.includes('ps -p')) genLines.push({ at: `${rel}:${i + 1}`, text: line.trim() });
+        });
+        continue;
+      }
+      files.push(rel);
+      const r = scanPsP(rel, src, allow);
+      stray.push(...r.stray);
+      for (const k of r.hit) hit.add(k);
+    }
+    // Every authored `ps -p` line, for the generated bucket to be judged against.
+    const authored = new Set();
+    for (const rel of files) {
+      for (const line of fs.readFileSync(path.join(root, rel), 'utf8').split('\n')) {
+        if (!isComment(line) && line.includes('ps -p')) authored.add(line.trim());
+      }
+    }
+    const genUnauthored = genLines.filter((l) => !authored.has(l.text)).map((l) => `${l.at}: ${l.text.slice(0, 90)}`);
+    return { files, generated, stray, hit, skipped, genUnauthored };
+  };
+  const REPO_ROOT = new URL('..', import.meta.url).pathname;
+  const swp = sweepKillPaths(REPO_ROOT, PS_P_ALLOWED);
+  console.log(`  · STANDING SWEEP derived ${swp.files.length} files that send or name a signal (by grep, not by hand — deliberately over-inclusive):`);
+  for (let i = 0; i < swp.files.length; i += 4) console.log('      ' + swp.files.slice(i, i + 4).join('  '));
+  ok(!swp.stray.length,
     'STANDING SWEEP: no `ps -p` on any kill/signal path outside the allowlist — a new one must be added there WITH its reason (existence tests are not allowed at all)',
-    { stray });
-  const deadEntries = PS_P_ALLOWED.filter((a) => !hitNeedles.has(a2key(a))).map((a) => `${a.file}: ${a.needle}`);
+    { stray: swp.stray });
+  const deadEntries = PS_P_ALLOWED.filter((a) => !swp.hit.has(a2key(a))).map((a) => `${a.file}: ${a.needle}`);
   ok(!deadEntries.length,
     '…and every allowlist entry still names a line that EXISTS — a stale exemption is how the last busybox-blind probe survived a round of review',
     { deadEntries });
+  if (swp.generated.length) console.log(`  · …plus ${swp.generated.length} GENERATED kill/signal-path file(s), judged against the authored text instead of the allowlist: ${swp.generated.join(' ')}`);
+  ok(!swp.genUnauthored.length,
+    'a GENERATED kill/signal-path file (the esbuild daemon bundle) carries no `ps -p` line that is not VERBATIM in an authored file the sweep walked — a build step cannot introduce a probe, and the reason still lives with the author',
+    { genUnauthored: swp.genUnauthored, generated: swp.generated });
+  // (i) THE r7 DEFECT ITSELF, pinned in both directions.
+  // git 1d81ff5c:scripts/test-writer-sweep.mjs — the verbatim r6 hand list.
+  const R6_HAND = new Set(['src/cli-identity.js', 'src/writer-sweep.js', 'src/hosts.js',
+    'src/server/sysinfo-wiring.js', 'src/session-store.js', 'src/routes/sessions.js',
+    'scripts/vibespace-agentd-install.sh',
+    ...String(spawnSync('git', ['ls-files', 'data/bin'], { encoding: 'utf8', cwd: REPO_ROOT }).stdout || '').split('\n').filter(Boolean)]);
+  const lostByDerivation = [...R6_HAND].filter((f) => {
+    let src = ''; try { src = fs.readFileSync(path.join(REPO_ROOT, f), 'utf8'); } catch { return false; }
+    return KILL_MARKERS.test(src) && !swp.files.includes(f);
+  });
+  ok(!lostByDerivation.length,
+    'the DERIVED set loses nothing the r6 hand list covered — every hand-listed file that really is a kill/signal path is still swept (this reddens if the walk roots are ever narrowed)',
+    { lostByDerivation });
+  // Named because they are PERMANENT kill paths, not because a list of names is
+  // the rule: jobs kills its own wrapper handles, boot-restore retires dtach
+  // sessions, plugins/vnc/port-forward/opencode-serve stop daemons they
+  // started, the agentd owns device-side session pipes, ws-handler/ws-create
+  // carry the kill+teardown cases, and server.js wires signalProc. Every one
+  // was a place a new `ps -p` existence probe could have landed under r6
+  // without reddening a thing.
+  const R7_GAINED_MUST = ['server.js', 'src/jobs.js', 'src/server/boot-restore.js',
+    'src/plugins.js', 'src/vnc.js', 'src/port-forward.js', 'src/agentd/agentd.js',
+    'src/ws-handler.js', 'src/ws-create.js', 'src/opencode-serve.js'];
+  const gained = swp.files.filter((f) => !R6_HAND.has(f));
+  ok(R7_GAINED_MUST.every((f) => swp.files.includes(f) && !R6_HAND.has(f)) && gained.length >= R7_GAINED_MUST.length,
+    `REGRESSION PIN (r7): the r6 hand list MISSED ${gained.length} real kill/signal-path files — the derivation covers them, and re-narrowing to any hand list turns this red`,
+    { missing: R7_GAINED_MUST.filter((f) => !swp.files.includes(f)), gained });
+  // (j) NEGATIVE + POSITIVE CONTROLS, against a TEMP ROOT built to contain each
+  // shape, so "no stray" above is a measurement rather than a tautology.
+  const ncRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-sweep-nc-'));
+  fs.mkdirSync(path.join(ncRoot, 'src', 'server'), { recursive: true });
+  fs.mkdirSync(path.join(ncRoot, 'data', 'bin'), { recursive: true });
+  fs.mkdirSync(path.join(ncRoot, 'scripts'), { recursive: true });
+  // ① the retired shape on a BRAND-NEW kill path (git cf20753a's probe, moved
+  //    into a file no hand list would ever have named).
+  fs.writeFileSync(path.join(ncRoot, 'src', 'server', 'new-kill-path.js'),
+    'function sig(pid) {\n'
+    + '  return `if kill -TERM ${pid} 2>/dev/null; then sleep 0.5; '
+    + 'if ps -p ${pid} >/dev/null 2>&1; then echo OK-ALIVE; else echo OK-GONE; fi; fi`;\n}\n');
+  // ② an ALLOWLISTED line copied verbatim into another file: the exemption is
+  //    per FILE, so the copy is still stray — an allowlist that travelled with
+  //    the text would exempt every future paste of it.
+  fs.writeFileSync(path.join(ncRoot, 'src', 'impostor.js'),
+    'const t = `kill -TERM "$1"\n  ps -p "$1" >/dev/null 2>&1\n`;\n');
+  // ③ POSITIVE CONTROL: a kill path with no `ps -p` is swept and NOT stray.
+  fs.writeFileSync(path.join(ncRoot, 'src', 'clean-kill-path.js'),
+    'function stop(p) { process.kill(p, "SIGTERM"); }\n');
+  // ④ SCOPE, stated rather than assumed: a `ps -p` with no signal anywhere in
+  //    the file is not a kill path — this rule is about the probe before a kill.
+  fs.writeFileSync(path.join(ncRoot, 'src', 'not-a-kill-path.js'),
+    'const argv = `ps -p "$1" -o args=`;\n');
+  // ⑤ the suites must stay free to write the retired shape down.
+  fs.writeFileSync(path.join(ncRoot, 'scripts', 'test-something.mjs'),
+    'const retired = `kill -TERM ${p}; ps -p ${p} >/dev/null 2>&1`;\n');
+  // ⑥ the extension-less agent CLIs (vibespace-job, vibespace-remote-keeper …)
+  //    ship onto every host; r6 reached data/bin only by shelling out to
+  //    `git ls-files`, which does not see a GENERATED tool (vibespace-status is
+  //    deliberately untracked) — the shebang rung is what reaches them now.
+  fs.writeFileSync(path.join(ncRoot, 'data', 'bin', 'vibespace-newtool'),
+    '#!/bin/sh\nkill -TERM "$1" 2>/dev/null\nif ps -p "$1" >/dev/null 2>&1; then echo ALIVE; fi\n');
+  const nc = sweepKillPaths(ncRoot, PS_P_ALLOWED);
+  const ncStray = (f) => nc.stray.some((s) => s.startsWith(f + ':'));
+  ok(ncStray('src/server/new-kill-path.js'),
+    'NEGATIVE CONTROL: a NEW file carrying the retired `ps -p N >/dev/null 2>&1` existence probe next to a kill IS caught — the derivation reaches files no hand list named',
+    { stray: nc.stray });
+  ok(ncStray('src/impostor.js'),
+    'NEGATIVE CONTROL: an ALLOWLISTED line copied into a different file is still stray — the exemption is per file, it does not travel with the text');
+  ok(nc.files.includes('src/clean-kill-path.js') && !ncStray('src/clean-kill-path.js'),
+    'POSITIVE CONTROL: a kill path with no `ps -p` at all is swept and stays green — the sweep is not simply stuck on "stray"');
+  ok(!nc.files.includes('src/not-a-kill-path.js'),
+    'SCOPE, measured not assumed: a `ps -p` in a file that signals nothing is NOT swept — the rule is about the probe in front of a kill');
+  ok(!nc.files.includes('scripts/test-something.mjs') && nc.skipped.includes('scripts/test-something.mjs'),
+    '…and the suites are excluded, which is the only reason THIS file may write the retired shape down as a control');
+  ok(nc.files.includes('data/bin/vibespace-newtool') && ncStray('data/bin/vibespace-newtool'),
+    'the extension-less agent CLIs are reached by their SHEBANG — a GENERATED (untracked) tool on every host\'s PATH was outside r6\'s `git ls-files data/bin` sweep');
+  // ⑦⑧ THE GENERATED BUCKET, both ways. ⑦ a bundle that only COPIES an
+  //     authored probe passes (this is the daemon bundle's real shape, and the
+  //     reason a clean `npm run build` must not redden the sweep); ⑧ the same
+  //     bundle with ONE extra probe its sources never contained is caught.
+  //     (the copy is line-for-line, exactly as esbuild emits a template
+  //     literal — that is what makes "verbatim in an authored file" decidable.)
+  fs.writeFileSync(path.join(ncRoot, 'data', 'bin', 'fake-bundle.js'),
+    'const t = `kill -TERM "$1"\n  ps -p "$1" >/dev/null 2>&1\n`;\n');
+  const genOnly = (root, rels) => new Set(rels.filter((r) => /fake-bundle|injected-bundle/.test(r)));
+  const ncGen = sweepKillPaths(ncRoot, PS_P_ALLOWED, genOnly);
+  ok(ncGen.generated.includes('data/bin/fake-bundle.js') && !ncGen.genUnauthored.length
+    && !ncGen.stray.some((s) => s.startsWith('data/bin/fake-bundle.js')),
+    'POSITIVE CONTROL: a GENERATED file whose only `ps -p` is a verbatim COPY of an authored one passes — a rebuilt daemon bundle never reddens a clean tree (it did before this bucket existed)',
+    { generated: ncGen.generated, genUnauthored: ncGen.genUnauthored });
+  fs.writeFileSync(path.join(ncRoot, 'data', 'bin', 'injected-bundle.js'),
+    'kill -TERM\nconst injected = `if ps -p $PID 2>/dev/null; then :; fi`;\n');
+  const ncGen2 = sweepKillPaths(ncRoot, PS_P_ALLOWED, genOnly);
+  ok(ncGen2.genUnauthored.some((s) => s.startsWith('data/bin/injected-bundle.js')),
+    'NEGATIVE CONTROL: a GENERATED file carrying a `ps -p` line that exists in NO authored file is caught — "generated" buys a different question, never an exemption',
+    { genUnauthored: ncGen2.genUnauthored });
+  fs.rmSync(ncRoot, { recursive: true, force: true });
+  // (k) THE EMBEDDED REMOTE SCRIPTS, as the machine actually receives them.
+  // Every leg above reads FILES; a builder that composes its probe at runtime
+  // ships a shape no source scan can see. These are the shipped bytes — the
+  // same texts §14/§16/§17 run for real.
+  const { killPidShell: kpsSweep, codexOpenRolloutsShell: corSweep } = require('../src/hosts.js');
+  const BUILT = [
+    ['cli-identity.pidAliveShellFn()', cliIdentity.pidAliveShellFn()],
+    ['cli-identity.cliIdentityShellFns()', cliIdentity.cliIdentityShellFns()],
+    ['writer-sweep.fdScanShellFns()', fdScanShellFns()],
+    ['writer-sweep.writerSweepScript(claude)', writerSweepScript('rid-sweep', shq)],
+    ['writer-sweep.writerSweepScript(codex)', writerSweepScript('rid-sweep', shq, { backend: 'codex', protectSids: ['sess-1'] })],
+    ['hosts.killPidShell(4242)', kpsSweep(4242)],
+    ['hosts.codexOpenRolloutsShell()', corSweep()],
+    ['sysinfo-wiring.signalVerdictScript(4242,TERM)', signalVerdictScript(4242, 'TERM')],
+  ];
+  // Matched by NEEDLE only here (`file: '*'`): a built script is a COMPOSITION
+  // of several files, so "which file authored this line" is not a question it
+  // can answer — and every needle is already justified above.
+  const anyFile = PS_P_ALLOWED.map((a) => ({ ...a, file: '*' }));
+  const builtStray = BUILT.flatMap(([label, text]) => scanPsP(label, text, anyFile).stray);
+  console.log('  · embedded remote scripts, `ps -p` occurrences as BUILT: '
+    + BUILT.map(([l, t]) => `${l.split('(')[0]}=${(String(t).match(/ps -p/g) || []).length}`).join(' '));
+  ok(!builtStray.length,
+    'the EMBEDDED REMOTE SCRIPTS carry no `ps -p` beyond the allowlisted argv/environ reads and `vs_alive`\'s own last rung — checked on the BUILT text, the only place a runtime-composed probe exists',
+    { builtStray });
+  ok(scanPsP('pre-r6 signal script', preR6Sig(4242, 'TERM'), anyFile).stray.length === 1,
+    'NEGATIVE CONTROL: that same built-text scanner FIRES on the verbatim pre-r6 signal script — leg (k) is a measurement, not an empty loop');
   for (const p of spids) { try { process.kill(p, 'SIGKILL'); } catch { } }
   fs.rmSync(sdir, { recursive: true, force: true });
 } else { console.log('  · /proc absent — skipping the signal-verdict legs'); }
