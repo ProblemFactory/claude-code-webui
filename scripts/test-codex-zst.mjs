@@ -18,6 +18,9 @@
 //      a stub device that switches .jsonl ⇄ .jsonl.zst under one conversation id
 //   ⑥b a slot the PRE-FIX code already spliced (hybrid bytes under a meta with no
 //      provenance) heals itself — the remote never has to move
+//   ⑥f ONE WRITER PER SLOT: two overlapping fetches coalesce (one remote read,
+//      one append) and an append offset the slot has moved past is refetched
+//      whole instead of spliced — both rungs, each with its pre-fix repro
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -801,6 +804,232 @@ console.log('— ⑥ ONE remote cache slot, MANY remote files (codex .jsonl ⇄ 
     try { await sshHm3.fetchTranscript('hz3', 'codex', tid, { maxBytes: body.length - 1 }); } catch (e) { overErr = String(e && e.message || e); }
     ok(/illegal option/.test(overErr || '') && cats.length === 0, 'NEGATIVE CONTROL: over the cap the delta failure is still a hard failure and never a whole cat (which could not fit anyway)', { overErr, cats: cats.length });
     ok(fs.readFileSync(cache).equals(body) && metaAt().size === body.length && metaAt().adopted === true, '…and the refused poll leaves the cache and its meta exactly as they were', metaAt());
+  }
+
+  // ── ⑥f TWO OVERLAPPING FETCHES OF ONE SLOT (B-7638 round 4). Both rungs are
+  // read-then-append against a size measured BEFORE the remote read, and
+  // nothing serialized the slot: the 5s session poll and a user opening the
+  // window (or two clients, or goal-sync and an attach) each computed the same
+  // offset from the same stat and each appended the same tail — the cache grew
+  // a DUPLICATED region. That alone self-heals (the doubled file no longer
+  // matches its meta ⇒ whole refetch), which is why it survived every earlier
+  // review; the permanent damage comes one poll later: once the remote passes
+  // the doubled size the delta legality test holds again, the next tail is
+  // appended at the doubled offset and the stamp says COMPLETE — with a region
+  // duplicated and the region behind it MISSING, on a stopped conversation
+  // that never changes again. Fixed by two independent legs, each with its own
+  // negative control: the slot is single-flighted (one fetch per slot at a
+  // time) AND the append refuses any offset that is no longer the end of the
+  // file (positional write; whole refetch under the cap, loud over it).
+  console.log('— ⑥f one writer per cache slot: overlapping fetches coalesce, a moved slot is never spliced');
+  {
+    const tickN = (n) => rec({ timestamp: `2026-09-05T00:${String(n).padStart(2, '0')}:00.000Z`, type: 'event_msg', payload: { type: 'token_count', info: { last_token_usage: { input_tokens: n, cached_input_tokens: n, output_tokens: n }, total_token_usage: { total_tokens: 3 * n } } } });
+    // DISTINCT records per tick: a duplicated region built from IDENTICAL ones is
+    // byte-identical to the correct file, and the repro would silently pass.
+    const ticks = (from, n) => Array.from({ length: n }, (_, i) => tickN(from + i)).join('');
+    const slotFor = (hid, tid) => ({
+      tid,
+      remotePath: `/home/u/.codex/sessions/2026/09/05/rollout-2026-09-05T00-00-00-${tid}.jsonl`,
+      cache: path.join(dataDir, 'remote-jsonl', hid, 'codex', `${tid}.jsonl`),
+    });
+    const seedFor = (sl, bytes, mtime) => {
+      fs.mkdirSync(path.dirname(sl.cache), { recursive: true });
+      fs.writeFileSync(sl.cache, bytes);
+      fs.writeFileSync(sl.cache + '.meta', JSON.stringify({ size: bytes.length, mtime, fetchedAt: Date.now(), remotePath: sl.remotePath, compressed: false, v: 2 }));
+    };
+    const gateOf = () => { const g = {}; g.p = new Promise((r) => { g.open = r; }); return g; };
+    const countAppends = (hmx) => {
+      const orig = hmx._appendDeltaAt.bind(hmx);
+      const c = { n: 0 };
+      hmx._appendDeltaAt = (p2, off, b) => { c.n++; return orig(p2, off, b); };
+      return c;
+    };
+    const blindAppend = (hmx) => { hmx._appendDeltaAt = (p2, off, b) => { fs.appendFileSync(p2, b); return true; }; };            // the PRE-FIX write, verbatim
+    const noSingleFlight = (hmx) => { hmx._fetchRemoteByFind = function (...a) { return this._fetchRemoteByFindOnce(...a); }; };  // the PRE-FIX entry point
+    const dialHm = (hid, rem, reads2, gate) => {
+      const hmx = new HostManager({ dataDir });
+      hmx._state.hosts.push({ id: hid, name: hid, transport: 'dial' });
+      hmx._ssh = async () => { throw new Error('the legacy ssh rung must not be needed here'); };
+      hmx.deviceBounded = async () => ({
+        runCmd: async () => ({ stdout: rem.path + '\n', stderr: '', code: 0 }),
+        fsStat: async () => ({ stat: { size: rem.bytes.length, mtimeMs: rem.mtime * 1000 } }),
+        fsReadRange: async (p2, off, len) => {
+          reads2.push([off, len]);
+          if (gate && gate.p) await gate.p;
+          if (rem.beforeRead) { rem.beforeRead(); rem.beforeRead = null; }
+          return { data: rem.bytes.subarray(off, off + len) };
+        },
+      });
+      return hmx;
+    };
+    const sshHm = (hid, rem, log) => {
+      const hmx = new HostManager({ dataDir });
+      hmx._state.hosts.push({ id: hid, name: hid });
+      hmx._ssh = async (h, cmd) => {
+        if (/^cat /.test(cmd)) { log.cats.push(cmd); return rem.bytes; }
+        const m = /^tail -c \+(\d+) /.exec(cmd);
+        if (m) {
+          log.tails.push(Number(m[1]));
+          if (rem.gate && rem.gate.p) await rem.gate.p;
+          if (rem.beforeRead) { rem.beforeRead(); rem.beforeRead = null; }
+          return rem.bytes.subarray(Number(m[1]) - 1);
+        }
+        return Buffer.from(`${rem.bytes.length} ${rem.mtime}\n${rem.path}\n`);
+      };
+      return hmx;
+    };
+
+    // (A) SLAB RUNG — two overlapping fetches of one slot
+    {
+      const sl = slotFor('hf1', 'cccccccc-dddd-4eee-8fff-000000000020');
+      const prefix = Buffer.from(rollout(sl.tid, '/work/race', 'two clients, one slot', 40));
+      const grown = Buffer.concat([prefix, Buffer.from(ticks(1, 3))]);
+      seedFor(sl, prefix, 30000);
+      const rem = { path: sl.remotePath, bytes: grown, mtime: 30001 };
+      const reads2 = [], gate = gateOf();
+      const hmA = dialHm('hf1', rem, reads2, gate);
+      const appends = countAppends(hmA);
+      const c1 = hmA.fetchTranscript('hf1', 'codex', sl.tid);
+      await sleep(20);                                   // the first fetch is parked inside its remote read
+      const c2 = hmA.fetchTranscript('hf1', 'codex', sl.tid);
+      await sleep(20);                                   // …and so is the second, if anything let it get that far
+      gate.open();
+      const [p1, p2] = await Promise.all([c1, c2]);
+      const got = fs.readFileSync(sl.cache);
+      ok(p1 === p2 && reads2.length === 1 && reads2[0][0] === prefix.length && appends.n === 1,
+        `two overlapping fetches of one slot = ONE remote read and ONE append (${JSON.stringify({ reads: reads2, appends: appends.n, same: p1 === p2 })})`);
+      ok(got.equals(grown) && JSON.parse(fs.readFileSync(sl.cache + '.meta', 'utf8')).size === grown.length,
+        `…and the cache is byte-exact (${got.length} vs ${grown.length}B)`);
+    }
+
+    // (A′) NEGATIVE CONTROL: the same race with BOTH legs removed — the cache
+    // doubles, and the poll after the remote passes the doubled size stamps
+    // the duplicated file COMPLETE and serves it forever.
+    {
+      const sl = slotFor('hf2', 'cccccccc-dddd-4eee-8fff-000000000021');
+      const prefix = Buffer.from(rollout(sl.tid, '/work/race', 'pre-fix doubling', 40));
+      const delta = Buffer.from(ticks(1, 3));
+      const grown = Buffer.concat([prefix, delta]);
+      seedFor(sl, prefix, 31000);
+      const rem = { path: sl.remotePath, bytes: grown, mtime: 31001 };
+      const reads2 = [], gate = gateOf();
+      const hmB = dialHm('hf2', rem, reads2, gate);
+      blindAppend(hmB); noSingleFlight(hmB);
+      const c1 = hmB.fetchTranscript('hf2', 'codex', sl.tid);
+      await sleep(20);
+      const c2 = hmB.fetchTranscript('hf2', 'codex', sl.tid);
+      await sleep(20);                                   // BOTH offsets are computed before EITHER append — the real race
+      gate.open();
+      await Promise.all([c1, c2]);
+      const doubled = fs.readFileSync(sl.cache);
+      ok(reads2.length === 2 && doubled.length === prefix.length + 2 * delta.length && doubled.subarray(prefix.length).equals(Buffer.concat([delta, delta])),
+        `REPRO: without the guards both fetches append the SAME tail — the cache carries a duplicated region (${doubled.length} vs ${grown.length}B)`);
+      // …and one more poll, once the remote has passed the doubled size, seals it
+      const grown2 = Buffer.concat([grown, Buffer.from(ticks(4, 4))]);
+      ok(grown2.length > doubled.length, 'fixture: the remote grows past the doubled cache (what makes the corruption permanent)');
+      rem.bytes = grown2; rem.mtime = 31002;
+      reads2.length = 0;
+      const cSealed = await hmB.fetchTranscript('hf2', 'codex', sl.tid);
+      const sealed = fs.readFileSync(cSealed);
+      ok(sealed.length === grown2.length && !sealed.equals(grown2) && JSON.parse(fs.readFileSync(sl.cache + '.meta', 'utf8')).size === grown2.length,
+        `REPRO: the next delta stamps the spliced file COMPLETE — right size, wrong bytes (duplicated region + the records behind it lost) ${JSON.stringify({ sealed: sealed.length, want: grown2.length, meta: JSON.parse(fs.readFileSync(sl.cache + '.meta', 'utf8')).size, equal: sealed.equals(grown2), reads: reads2 })}`);
+      reads2.length = 0;
+      await hmB.fetchTranscript('hf2', 'codex', sl.tid);
+      ok(reads2.length === 0, 'REPRO: and the corrupt slot then short-circuits on every later poll — served forever (a stopped thread never changes again)');
+    }
+
+    // (B) SSH RUNG — the same race on the last rung
+    {
+      const sl = slotFor('hf3', 'cccccccc-dddd-4eee-8fff-000000000022');
+      const prefix = Buffer.from(rollout(sl.tid, '/work/race-ssh', 'two clients, one slot, ssh', 40));
+      const grown = Buffer.concat([prefix, Buffer.from(ticks(1, 3))]);
+      seedFor(sl, prefix, 32000);
+      const log = { cats: [], tails: [] };
+      const rem = { path: sl.remotePath, bytes: grown, mtime: 32001, gate: gateOf() };
+      const hmC = sshHm('hf3', rem, log);
+      const appends = countAppends(hmC);
+      const c1 = hmC.fetchTranscript('hf3', 'codex', sl.tid);
+      await sleep(20);
+      const c2 = hmC.fetchTranscript('hf3', 'codex', sl.tid);
+      await sleep(20);
+      rem.gate.open();
+      const [p1, p2] = await Promise.all([c1, c2]);
+      ok(p1 === p2 && log.tails.length === 1 && log.cats.length === 0 && appends.n === 1 && fs.readFileSync(sl.cache).equals(grown),
+        `ssh rung: overlapping fetches coalesce too — one tail, one append, byte-exact cache (${JSON.stringify({ tails: log.tails, cats: log.cats.length, appends: appends.n })})`);
+      // NEGATIVE CONTROL on the same rung
+      const sl2 = slotFor('hf4', 'cccccccc-dddd-4eee-8fff-000000000023');
+      const prefix2 = Buffer.from(rollout(sl2.tid, '/work/race-ssh', 'pre-fix doubling, ssh', 40));
+      const delta2 = Buffer.from(ticks(1, 3));
+      seedFor(sl2, prefix2, 33000);
+      const log2 = { cats: [], tails: [] };
+      const rem2 = { path: sl2.remotePath, bytes: Buffer.concat([prefix2, delta2]), mtime: 33001, gate: gateOf() };
+      const hmD = sshHm('hf4', rem2, log2);
+      blindAppend(hmD); noSingleFlight(hmD);
+      const d1 = hmD.fetchTranscript('hf4', 'codex', sl2.tid);
+      await sleep(20);
+      const d2 = hmD.fetchTranscript('hf4', 'codex', sl2.tid);
+      await sleep(20);
+      rem2.gate.open();
+      await Promise.all([d1, d2]);
+      ok(log2.tails.length === 2 && fs.readFileSync(sl2.cache).length === prefix2.length + 2 * delta2.length,
+        `REPRO: the ssh rung doubles the same way without the guards (${JSON.stringify({ tails: log2.tails, size: fs.readFileSync(sl2.cache).length })})`);
+    }
+
+    // (C) THE SLOT MOVED WHILE THE REMOTE READ WAS IN FLIGHT — the offset is
+    // stale even with no second fetch in this process (a heal, an operator, a
+    // future caller that bypasses the lock). Under the cap: refetch whole.
+    {
+      const sl = slotFor('hf5', 'cccccccc-dddd-4eee-8fff-000000000024');
+      const prefix = Buffer.from(rollout(sl.tid, '/work/moved', 'the slot moved under the delta', 40));
+      const grown = Buffer.concat([prefix, Buffer.from(ticks(1, 3))]);
+      const reads2 = [];
+      seedFor(sl, prefix, 34000);
+      const rem = { path: sl.remotePath, bytes: grown, mtime: 34001, beforeRead: () => fs.appendFileSync(sl.cache, Buffer.from('X')) };
+      const hmE = dialHm('hf5', rem, reads2, null);
+      const c = await hmE.fetchTranscript('hf5', 'codex', sl.tid);
+      ok(fs.readFileSync(c).equals(grown) && reads2.length === 2 && reads2[1][0] === 0 && reads2[1][1] === grown.length,
+        `slab rung: an append offset the slot has moved past triggers a WHOLE refetch, never a splice (${JSON.stringify(reads2)})`);
+      // NEGATIVE CONTROL: the pre-fix blind append welds the tail on anyway
+      const slN = slotFor('hf6', 'cccccccc-dddd-4eee-8fff-000000000025');
+      seedFor(slN, prefix, 34000);
+      const readsN = [];
+      const remN = { path: slN.remotePath, bytes: grown, mtime: 34001, beforeRead: () => fs.appendFileSync(slN.cache, Buffer.from('X')) };
+      const hmF = dialHm('hf6', remN, readsN, null);
+      blindAppend(hmF);
+      await hmF.fetchTranscript('hf6', 'codex', slN.tid);
+      const spliced = fs.readFileSync(slN.cache);
+      ok(!spliced.equals(grown) && spliced.length === grown.length + 1 && readsN.length === 1,
+        `REPRO: the blind append splices the foreign byte in and keeps the tail (${spliced.length} vs ${grown.length}B)`);
+      // …and the same leg on the ssh rung (twin guards must not drift)
+      const slS = slotFor('hf7', 'cccccccc-dddd-4eee-8fff-000000000026');
+      seedFor(slS, prefix, 34000);
+      const logS = { cats: [], tails: [] };
+      const remS = { path: slS.remotePath, bytes: grown, mtime: 34001, beforeRead: () => fs.appendFileSync(slS.cache, Buffer.from('X')) };
+      const hmG = sshHm('hf7', remS, logS);
+      const cs = await hmG.fetchTranscript('hf7', 'codex', slS.tid);
+      ok(fs.readFileSync(cs).equals(grown) && logS.tails.length === 1 && logS.cats.length === 1,
+        `ssh rung: same — the moved slot falls back to the whole cat (${JSON.stringify({ tails: logS.tails, cats: logS.cats.length })})`);
+    }
+
+    // (D) …but OVER the cap a whole refetch is impossible by construction, so a
+    // moved slot is a loud failure, never a splice — and the cache is left
+    // exactly as it was found.
+    {
+      const sl = slotFor('hf8', 'cccccccc-dddd-4eee-8fff-000000000027');
+      const prefix = Buffer.from(rollout(sl.tid, '/work/moved-cap', 'moved over the cap', 40));
+      const grown = Buffer.concat([prefix, Buffer.from(ticks(1, 3))]);
+      seedFor(sl, prefix, 35000);
+      const log = { cats: [], tails: [] };
+      const rem = { path: sl.remotePath, bytes: grown, mtime: 35001, beforeRead: () => fs.appendFileSync(sl.cache, Buffer.from('X')) };
+      const hmH = sshHm('hf8', rem, log);
+      let capErr = null;
+      try { await hmH.fetchTranscript('hf8', 'codex', sl.tid, { maxBytes: prefix.length - 1 }); } catch (e) { capErr = String(e && e.message || e); }
+      const after = fs.readFileSync(sl.cache);
+      ok(/refusing to splice/.test(capErr || '') && log.cats.length === 0,
+        `over the cap a moved slot fails LOUDLY and never splices (${capErr})`);
+      ok(after.length === prefix.length + 1 && after.subarray(0, prefix.length).equals(prefix),
+        '…and the refused poll adds nothing of its own to the slot (only the foreign write that moved it is there)');
+    }
   }
 }
 try { fs.rmSync(home, { recursive: true, force: true }); } catch {}

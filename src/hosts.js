@@ -1103,12 +1103,65 @@ class HostManager {
     if (h.id === 'claude') { try { this.convIndex.note(sessionId, id, { src: 'fetch' }); } catch { } } // conversation-location index (R3 tail)
     return r;
   }
+  /** APPEND A DELTA ONLY AT THE OFFSET IT WAS COMPUTED FROM (B-7638 round 4).
+   *  Both rungs derive the append offset from a stat taken BEFORE the remote
+   *  read; anything that moves the cache inside that window (another fetch of
+   *  the same slot, a heal, an operator) makes the offset stale, and a blind
+   *  `appendFileSync` then welds a DUPLICATE region onto the file — which the
+   *  same poll stamps as complete. So the write re-reads the size through the
+   *  fd it is about to write with, and writes POSITIONALLY: at a matching
+   *  offset the write is idempotent (the same bytes land in the same place),
+   *  and at a mismatching one it does not happen at all. false = "the slot
+   *  moved" ⇒ the caller refetches whole (or fails loudly when a whole refetch
+   *  is impossible), never splices. Extracted as a method so a test can neuter
+   *  it and show the pre-fix doubling. */
+  _appendDeltaAt(cachePath, offset, buf) {
+    let fd;
+    try {
+      try { fd = fs.openSync(cachePath, 'r+'); } catch { return false; }     // no prefix to grow — whole refetch
+      if (fs.fstatSync(fd).size !== offset) return false;                    // the slot moved under the delta
+      // …and write the WHOLE delta: writeSync may return short on a big buffer
+      // (appendFileSync loops internally; a positional write does not), and a
+      // silently truncated tail is the 2.187.0 stump class one layer down.
+      for (let off = 0; off < buf.length;) {
+        const n = fs.writeSync(fd, buf, off, buf.length - off, offset + off);
+        if (!(n > 0)) throw new Error(`short cache write at ${offset + off}`);
+        off += n;
+      }
+      return true;
+    } finally { if (fd !== undefined) { try { fs.closeSync(fd); } catch { } } }
+  }
+  // ONE FETCH PER CACHE SLOT AT A TIME (B-7638 round 4). The delta rungs are
+  // read-then-append against a size measured before the read, so two
+  // OVERLAPPING fetches of the same slot — the session poll and a user opening
+  // the window, two clients, goal-sync and an attach — each computed the same
+  // offset from the same stat and each appended the same tail: the cache grew
+  // a duplicated region, and once the remote passed the doubled size the next
+  // delta stamped the spliced file COMPLETE. A stopped conversation never
+  // changes again, so it then served duplicated (and, past the doubled point,
+  // missing) records forever. The slot is the shared mutable resource, so the
+  // slot is what gets serialized: a second caller awaits the FIRST caller's
+  // verdict instead of racing it (one remote read, one append). Every caller
+  // resolves its cap from the same harness descriptor, so a coalesced caller
+  // cannot lose a cap it needed — and the next poll re-decides with its own.
+  async _fetchRemoteByFind(id, findExpr, cacheRel, opts = {}) {
+    const slot = path.join(this.dataDir, 'remote-jsonl', cacheRel);
+    const inflight = (this._slotFetches ||= new Map());
+    const cur = inflight.get(slot);
+    if (cur) return cur;
+    const run = this._fetchRemoteByFindOnce(id, findExpr, cacheRel, opts);   // async ⇒ rejects, never throws synchronously
+    inflight.set(slot, run);
+    const clear = () => { if (inflight.get(slot) === run) inflight.delete(slot); };
+    run.then(clear, clear);
+    return run;
+  }
   // Shared fetch-and-cache core (generalized from fetchSessionJsonl 2.191.0 —
   // findExpr = the find(1) predicate under "$HOME"/.claude/projects; cacheRel
   // = path under data/remote-jsonl/). All the 2.187.0/2.188.1 integrity
   // invariants live HERE: count-gated reads, never stamp meta for bytes not
-  // received, cache-valid requires the FILE to hold meta.size bytes.
-  async _fetchRemoteByFind(id, findExpr, cacheRel, { maxBytes = 64 * 1024 * 1024, root = '"$HOME"/.claude/projects' } = {}) {
+  // received, cache-valid requires the FILE to hold meta.size bytes. Reached
+  // ONLY through the single-flight wrapper above — one writer per slot.
+  async _fetchRemoteByFindOnce(id, findExpr, cacheRel, { maxBytes = 64 * 1024 * 1024, root = '"$HOME"/.claude/projects' } = {}) {
     const h = this.get(id);
     const cachePath = path.join(this.dataDir, 'remote-jsonl', cacheRel);
     // Known-unreachable host memo (2.218.0, real report): with the host DOWN,
@@ -1305,17 +1358,26 @@ class HostManager {
         const deltaSlab = canDelta && localSize > 0 && localSize <= size && !!meta;
         const fetchBytes = deltaSlab ? size - localSize : size;
         if (fetchBytes > maxBytes) throw tooLarge(fetchBytes, usable);
-        if (deltaSlab) {
+        let grewSlab = deltaSlab;
+        if (deltaSlab && size > localSize) {
           // append-only delta — the slab win
-          if (size > localSize) {
-            const delta = await dm.fsReadRange(remotePath, localSize, size - localSize);
-            // NEVER stamp meta for bytes we didn't get (a truncated read once
-            // cached a 256KB prefix as a "complete" 45MB transcript — the
-            // permanently-ancient-history incident); mismatch → legacy ssh
-            if (delta.data.length !== size - localSize) throw new Error(`short read-range: ${delta.data.length} of ${size - localSize}`);
-            fs.appendFileSync(cachePath, delta.data);
+          const delta = await dm.fsReadRange(remotePath, localSize, size - localSize);
+          // NEVER stamp meta for bytes we didn't get (a truncated read once
+          // cached a 256KB prefix as a "complete" 45MB transcript — the
+          // permanently-ancient-history incident); mismatch → legacy ssh
+          if (delta.data.length !== size - localSize) throw new Error(`short read-range: ${delta.data.length} of ${size - localSize}`);
+          // …and never at an offset the slot has already moved past (round 4):
+          // a stale offset appends a DUPLICATE region. Under the cap the whole
+          // file is still fetchable, so fall through to the whole read below;
+          // over it (where the delta is the only road) fail loudly rather than
+          // splice — the corruption this whole batch exists to prevent.
+          if (!this._appendDeltaAt(cachePath, localSize, delta.data)) {
+            if (size > maxBytes) throw new Error(`cache slot moved under the delta (offset ${localSize}) and the remote is past the ${(maxBytes / 1048576) | 0}MB fetch cap — refusing to splice`);
+            console.warn(`[hosts] ${id}: cache slot moved under the slab delta (offset ${localSize}) — refetching whole`);
+            grewSlab = false;
           }
-        } else {
+        }
+        if (!grewSlab) {
           // no/invalid prefix (or remote rotated smaller) — full streamed fetch
           const whole = await dm.fsReadRange(remotePath, 0, size);
           if (whole.data.length !== size) throw new Error(`short read-range: ${whole.data.length} of ${size}`);
@@ -1323,7 +1385,7 @@ class HostManager {
           fs.writeFileSync(tmp2, whole.data);
           fs.renameSync(tmp2, cachePath);
         }
-        fs.writeFileSync(metaPath, JSON.stringify(nextMeta({ size, mtime, slab: true, remotePath }, { whole: !deltaSlab })));
+        fs.writeFileSync(metaPath, JSON.stringify(nextMeta({ size, mtime, slab: true, remotePath }, { whole: !grewSlab })));
         return cachePath;
       } catch (e2) { /* legacy fallback below */ }
     }
@@ -1375,7 +1437,11 @@ class HostManager {
           // extra tail bytes are genuinely its next bytes — so keep them and
           // stamp what the file ACTUALLY holds (the stump check compares the two).
           if (delta.length < size - localSizeSsh) throw new Error(`short tail read: ${delta.length} of ${size - localSizeSsh}`);
-          fs.appendFileSync(cachePath, delta);
+          // …and the offset must still be the END of the slot (round 4). It was
+          // measured before the `tail` ran; if anything moved the cache since,
+          // appending welds a DUPLICATE region on. The throw lands in the
+          // fallback below — whole `cat` under the cap, a hard failure over it.
+          if (!this._appendDeltaAt(cachePath, localSizeSsh, delta)) throw new Error(`cache slot moved under the tail delta (offset ${localSizeSsh}) — refusing to splice`);
           stampSize = localSizeSsh + delta.length;
         }
         grewSsh = true;
