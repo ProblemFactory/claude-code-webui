@@ -1,6 +1,6 @@
 // Session lifecycle: create/attach/resume/fork/view/kill + billing switcher + openSpec replay (mixin split from app.js, 2.82.0 audit seam).
 import { ChatView } from './chat-view.js';
-import { backendFeatureCaps } from './agent-meta.js';
+import { backendFeatureCaps, worktreePick } from './agent-meta.js';
 import { track, metric } from './telemetry-client.js';
 import { t } from './i18n.js';
 import { registerWindowType, replayOpenSpec as replayOpenSpecViaRegistry, svgIcon16 } from './window-types.js';
@@ -1366,6 +1366,18 @@ export function installSessionLifecycle(App, ctx = {}) {
     const forkArgs = backend === 'claude'
       ? ('--fork-session' + (resumeAt ? ` --resume-session-at ${resumeAt}` : ''))
       : '';
+    // PER-SESSION GIT WORKTREE (owner ruling 9). A fork is the OTHER spawn that
+    // emits `--worktree` (worktreeSpawnArgs: `--fork-session` STRIPS the CLI's
+    // recorded `worktreeSession`, so the branch inherits nothing and would run
+    // in the user's real working tree unless we ask again). Round-2 verifier,
+    // MAJOR: this call carried no `worktree` key at all, so that branch had NO
+    // producer in production — the Session Properties hint ("Applies when a new
+    // session or a fork starts") promised something the product could not do,
+    // and the suite pinned the pure rule with a call no site could make.
+    // The answer is the ONE rule the checkbox itself displays: the standing
+    // pick if there is one, else what the run being forked turned out to be.
+    const forkCfg = this.sidebar?.getSessionConfig?.(sessionInfo) || {};
+    const forkWorktree = worktreePick({ saved: forkCfg.worktree, live: sessionInfo.worktree });
     this.createSession({
       cwd: sessionInfo.cwd,
       name: forkName,
@@ -1374,6 +1386,7 @@ export function installSessionLifecycle(App, ctx = {}) {
       backend,
       backendSessionId: resumeId,
       fork: true,
+      worktree: forkWorktree || undefined,
       // remote sessions fork ON their host — omitting this spawned a LOCAL
       // `claude --resume <remote-id> --fork-session` against a transcript
       // that doesn't exist here (audit 2.192.0)

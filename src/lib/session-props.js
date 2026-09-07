@@ -1,6 +1,6 @@
 import { escHtml, copyText, showConfirmDialog, taskGroupColor } from './utils.js';
 import { SESSION_STATE_META, SESSION_URGENCY_META } from './sidebar-tasks.js';
-import { getBackendMeta, getAgentKindMeta, getAgentRoleLabel, responseStyleCaps, responseStyleOrigin, spawnValueOrigin, effortDisplay, composerSendModes, notificationDeliveryFor, worktreeCapsFor } from './agent-meta.js';
+import { getBackendMeta, getAgentKindMeta, getAgentRoleLabel, responseStyleCaps, responseStyleOrigin, spawnValueOrigin, effortDisplay, composerSendModes, notificationDeliveryFor, worktreeCapsFor, worktreePick } from './agent-meta.js';
 import { t } from './i18n.js';
 import { registerOpenAction } from './window-types.js';
 
@@ -348,8 +348,15 @@ export function openSessionProps(app, sessionRef, { syncId } = {}) {
         lbl.className = 'session-props-group';
         const cb = document.createElement('input');
         cb.type = 'checkbox';
-        cb.checked = cfg.worktree === undefined ? live : !!cfg.worktree;
-        cb.onchange = () => sidebar.setSessionConfig?.(s, { ...(sidebar.getSessionConfig?.(s) || {}), worktree: cb.checked || undefined });
+        // ONE rule, shared with the fork path (worktreePick): an absent pick
+        // shows what this RUN is, and the box the user is looking at is
+        // therefore exactly what a fork of this conversation will ask for.
+        cb.checked = worktreePick({ saved: cfg.worktree, live });
+        // The pick is TRI-STATE and written as a BOOLEAN: `false` has to
+        // persist, or unticking the box while the run IS isolated is a control
+        // that re-checks itself on the next render (accept-and-ignore) — and
+        // the fork would keep inheriting a preference the user just revoked.
+        cb.onchange = () => sidebar.setSessionConfig?.(s, { ...(sidebar.getSessionConfig?.(s) || {}), worktree: cb.checked });
         const txt = document.createElement('span');
         txt.textContent = t('Run in a git worktree');
         lbl.append(cb, txt);
@@ -365,7 +372,7 @@ export function openSessionProps(app, sessionRef, { syncId } = {}) {
             : escHtml(t('on \u2014 the CLI has not reported the directory yet')),
           s.worktreePath ? { copy: s.worktreePath } : {});
           r.classList.add('sp-wrap');
-        } else if (cfg.worktree) {
+        } else if (cfg.worktree === true) {
           // Ticked, but this run is not isolated — say so rather than letting
           // the checkbox imply otherwise (the CLI clears a binding whose
           // worktree is gone, and a resume can never create one).

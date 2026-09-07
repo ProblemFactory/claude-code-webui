@@ -695,7 +695,8 @@ console.log('— ⑦ FUNCTIONAL client: a normalizer-produced bubble → a real 
     ok('the legacy verb list has ONE definition, in the PURE module both ends import (server mapping ⇄ client mapping)',
       legacy === JSON.stringify(['remove', 'steer', 'steer-all'])
       && require(path.join(REPO, 'src/server/wrapper-files.js')).LEGACY_QUEUE_VERBS === LEGACY_QUEUE_VERBS
-      && /import \{ LEGACY_QUEUE_VERBS \} from '\.\.\/backend-caps\.js';/.test(read('src/lib/chat-view.js')));
+      && /import \{[^}]*\bLEGACY_QUEUE_VERBS\b[^}]*\} from '\.\.\/backend-caps\.js';/.test(read('src/lib/chat-view.js'))
+      && !/const LEGACY_QUEUE_VERBS\s*=/.test(read('src/lib/chat-view.js')));
     // THE REPRODUCTION: the create payload says "nothing known" and then a
     // pre-verb-table wrapper publishes a queue with no `verbs`.
     const v1 = mkFresh(null);

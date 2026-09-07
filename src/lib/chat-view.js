@@ -15,7 +15,7 @@ import { registerCommand, registerKeybinding, runCommand, hasCommand } from './c
 // the SAME array the server maps a verb-less sidecar onto (src/server/
 // wrapper-files.js). Imported, never re-typed: the two ends disagreeing about
 // "no list" is the bug this constant now prevents.
-import { LEGACY_QUEUE_VERBS } from '../backend-caps.js';
+import { LEGACY_QUEUE_VERBS, worktreeLatchWrite } from '../backend-caps.js';
 import { mcpParts, messageKind, foldToggleFor, countKinds, runSummaryLabel } from './chat-run-summary.js';
 import { collabTrafficStats, collabHeadText, collabRunPart, subAgentStreamLabel } from '../collab-row.js';
 
@@ -941,12 +941,27 @@ class ChatView {
         // user's, because a fact we were wrong about is not a preference they
         // changed (the one-way latch in _applyLiveMeta below).
         //
-        // Only the LIVE flag is kept here: the badge and the Session
-        // Properties path both read the `active-sessions` payload, which the
-        // server rebroadcasts in the very same branch that sends this frame.
-        // A `sidebar.refresh…()` call here would be a no-op that LOOKS like
-        // the thing keeping the badge honest.
-        if ('worktree' in msg) this._worktree = !!msg.worktree;
+        // The badge and the Session Properties path both read the
+        // `active-sessions` payload, which the server rebroadcasts in the very
+        // same branch that sends this frame — so this handler does NOT redraw
+        // anything, and a `sidebar.refresh…()` call here would be a no-op that
+        // LOOKS like the thing keeping the badge honest.
+        //
+        // What it DOES do is run the latch, and that is the whole reason the
+        // branch exists (round-2 verifier: it used to write `this._worktree`
+        // and nothing read it — `_applyLiveMeta` reassigns the field on the
+        // line above its only reader, so the assignment here was unobservable
+        // and the suite pinned a dead line). This frame is the FIRST moment a
+        // brand-new worktree session can record its pick: the box is ticked
+        // before the conversation has an id, the `created` payload arrives
+        // before the CLI has announced one, and the creator never gets an
+        // 'attached' (2.368.4) — but the id-adoption branch that runs just
+        // BEFORE this frame server-side has already broadcast it.
+        // The BODY is a prototype method, not a closure: a branch that lives
+        // only inside the live-view constructor can be pinned by grep and
+        // nothing else, which is how the pre-fix version stayed green while
+        // doing nothing at all.
+        this._onWorktreePath(msg);
       } else if (msg.type === 'page-published' && msg.sessionId === sessionId) {
         // ONE notify point server-side (dialog + agent publishes): the status
         // bar's design chip is the live list; the agent's reply carries the link
@@ -1497,24 +1512,7 @@ class ChatView {
     // badge the session really has.
     if ('worktree' in meta) {
       this._worktree = !!meta.worktree;
-      // Record the CHOICE against the conversation the moment its id exists,
-      // so a later resume/restart/fork carries it (the New Session dialog
-      // cannot: the conversation has no id yet when the box is ticked).
-      // ONE-WAY on purpose — it only ever LATCHES ON. The saved key means
-      // "this conversation should run isolated" (a standing preference the
-      // user owns and unticks in Session Properties); the live `_worktree`
-      // means "this run is isolated", and the init-frame arbiter can turn
-      // THAT off on its own (a deleted worktree). Letting the live fact erase
-      // the preference would silently discard a pick because of a transient —
-      // the auto-resume `noteRecovered` lesson, in a different subsystem.
-      try {
-        const ids = this._getSessionIds();
-        if (ids?.backendSessionId && this._worktree) {
-          const key = { backend: ids.backend || 'claude', backendSessionId: ids.backendSessionId };
-          const cfg = this.app?.sidebar?.getSessionConfig?.(key) || {};
-          if (!cfg.worktree) this.app?.sidebar?.setSessionConfig?.(key, { ...cfg, worktree: true });
-        }
-      } catch { }
+      this._latchWorktreePick();
     }
     // One read of this conversation's published files, so a RELOADED history
     // shows the same SendUserFile links a live session does (the broadcast
@@ -2942,20 +2940,7 @@ class ChatView {
         }
         if (newEl) {
           this._trace?.('editReplace', { id, status: fields.status });
-          newEl.dataset.msgId = id;
-          if (msg.ts) newEl.dataset.ts = msg.ts; // keep time-coordinate minimap data on re-render
-          // Run open/closed memory is keyed by ELEMENT — transfer it across the
-          // swap or a run whose every member gets replaced within one debounce
-          // window re-collapses on the user (review-confirmed: a single-Bash
-          // fold opened to watch live output snapped shut the moment the
-          // result landed).
-          if (this._runExpanded?.has(oldEl)) this._runExpanded.add(newEl);
-          if (this._runStickyOpen?.has(oldEl)) this._runStickyOpen.add(newEl); // the user's deliberate-open mark rides the swap too (verifier: a full re-render otherwise let the pinned auto-refold snap it shut)
-          this._applyElementMarks(newEl, msg);
-          oldEl.replaceWith(newEl);
-          this._elements.set(id, newEl);
-          this._renderers.addWrapToggles(newEl);
-          this._renderers.addOpenInEditorBtn(newEl);
+          this._swapMessageEl(oldEl, newEl, id);
         }
       }
     }
@@ -3472,6 +3457,108 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
     this._rerenderToolCard(toolCallId);
   }
 
+  /**
+   * THE message-element swap — every in-place re-render goes through here.
+   *
+   * A rendered message element is not just DOM: it carries the bookkeeping the
+   * rest of this class reads it BY. `dataset.msgId` is how both trims account
+   * for it (`els[i].dataset.msgId`), how jumpToIndex / search reveal / the
+   * minimap find it, and the key `_elements` maps to it; `dataset.ts` is the
+   * minimap's time coordinate; `dataset.line` is the seek machinery's file
+   * offset; `.chat-gap-msg` is what keeps a gap-loaded element OUT of the
+   * window accounting; and the two run-fold marks are keyed BY ELEMENT.
+   * None of it is produced by the renderers (grep `dataset.msgId` in
+   * chat-renderers.js = 0 hits) — it is applied at the append site, so a swap
+   * that forgets any of it silently unregisters the message.
+   *
+   * Round-2 verifier, MAJOR: `_rerenderToolCard` was a bare `replaceWith`, so a
+   * SendUserFile card that got its link from the `user-file-published`
+   * broadcast left `_elements` pointing at a DETACHED node — the tool_result
+   * edit then "replaced" a parentless element (a spec no-op) and the card
+   * stayed pending forever, while the visible element, now without a msgId,
+   * was trimmed out of the DOM with its id still in `_renderedMsgIds` (so
+   * re-extending the window early-returned and the message was gone for good).
+   * Three sites did this by hand and one of them was wrong; now there is one.
+   */
+  _swapMessageEl(oldEl, newEl, id) {
+    if (!oldEl || !newEl) return null;
+    const msgId = id || oldEl.dataset?.msgId || '';
+    const raw = newEl._rawMsg || oldEl._rawMsg;
+    if (msgId) newEl.dataset.msgId = msgId;
+    // Time coordinate for the minimap. The RECORD first, then whatever the old
+    // element already carried — renderSystemMsg deliberately stores a stub
+    // `_rawMsg = {role:'system'}`, so reading only the record would silently
+    // drop a system message's ts on every re-render.
+    const ts = raw?.ts || oldEl.dataset?.ts;
+    if (ts) newEl.dataset.ts = ts;
+    if (oldEl.dataset?.line) newEl.dataset.line = oldEl.dataset.line;
+    // A gap-loaded element is deliberately NOT part of the window: carry the
+    // class or the swap promotes it into both trims' accounting.
+    if (oldEl.classList?.contains('chat-gap-msg')) newEl.classList.add('chat-gap-msg');
+    // Run open/closed memory is keyed by ELEMENT — transfer it across the swap
+    // or a run whose every member gets replaced within one debounce window
+    // re-collapses on the user (review-confirmed: a single-Bash fold opened to
+    // watch live output snapped shut the moment the result landed). The
+    // user's deliberate-open mark rides too (verifier: a full re-render
+    // otherwise let the pinned auto-refold snap it shut).
+    if (this._runExpanded?.has(oldEl)) this._runExpanded.add(newEl);
+    if (this._runStickyOpen?.has(oldEl)) this._runStickyOpen.add(newEl);
+    // …and the VIEW-STATE marks (B3 §2.10/§3.5). A retraction's strike-through
+    // and the in-progress dot are written into the DOM, so they die with every
+    // element that gets replaced — the rule is "every path that builds an
+    // element for a message re-derives them", and collapsing the two swap sites
+    // into this method made this the place that owes it for both. `raw` is the
+    // same record the dataset above is read from, so a stub-`_rawMsg` system
+    // element is marked from whatever it does carry rather than not at all.
+    this._applyElementMarks(newEl, raw);
+    oldEl.replaceWith(newEl);
+    // Only re-point the map when it really pointed HERE: a gap-loaded element
+    // is not in `_elements` at all, and clobbering a different live element's
+    // entry would strand THAT one instead.
+    if (msgId && this._elements?.get(msgId) === oldEl) this._elements.set(msgId, newEl);
+    this._renderers.addWrapToggles(newEl);
+    this._renderers.addOpenInEditorBtn(newEl);
+    return newEl;
+  }
+
+  /**
+   * The CLI announced whether THIS run is really isolated, and where (owner
+   * ruling 9). Carries-the-key guarded like every other live fact: a frame
+   * that says nothing about the worktree must not clear a badge.
+   */
+  _onWorktreePath(msg) {
+    if (!msg || !('worktree' in msg)) return;
+    this._worktree = !!msg.worktree;
+    this._latchWorktreePick();
+  }
+
+  /**
+   * Record the CHOICE against the conversation the moment its id exists, so a
+   * later resume/restart/FORK carries it (the New Session dialog cannot: the
+   * conversation has no id yet when the box is ticked).
+   *
+   * ONE-WAY on purpose — it only ever LATCHES ON, and only over an ABSENT
+   * pick (worktreeLatchWrite). The saved key means "this conversation should
+   * run isolated" (a standing preference the user owns and unticks in Session
+   * Properties); the live `_worktree` means "this run is isolated", and the
+   * init-frame arbiter can turn THAT off on its own (a deleted worktree).
+   * Letting the live fact write the preference would silently discard a pick
+   * because of a transient — the auto-resume `noteRecovered` lesson, in a
+   * different subsystem — and letting it write over an explicit `false` would
+   * overrule a decision with a fact.
+   */
+  _latchWorktreePick() {
+    try {
+      const ids = this._getSessionIds();
+      if (!ids?.backendSessionId) return;
+      const key = { backend: ids.backend || 'claude', backendSessionId: ids.backendSessionId };
+      const cfg = this.app?.sidebar?.getSessionConfig?.(key) || {};
+      if (worktreeLatchWrite({ saved: cfg.worktree, live: this._worktree }) === true) {
+        this.app?.sidebar?.setSessionConfig?.(key, { ...cfg, worktree: true });
+      }
+    } catch { }
+  }
+
   /** Re-render ONE tool card in place (no window/pin/scroll change). */
   _rerenderToolCard(toolCallId) {
     try {
@@ -3479,7 +3566,7 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
       const raw = el?._rawMsg;
       if (!el || !raw) return;
       const next = this._renderers.renderToolMsg(raw);
-      if (next) el.replaceWith(next);
+      if (next) this._swapMessageEl(el, next);
     } catch { /* a card that is not currently rendered simply gets the link on its next render */ }
   }
 
@@ -4748,16 +4835,7 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
         }
       } catch {}
       if (!newEl) continue;
-      newEl.dataset.msgId = id;
-      if (msg.ts) newEl.dataset.ts = msg.ts;
-      if (oldEl.dataset.line) newEl.dataset.line = oldEl.dataset.line;
-      if (this._runExpanded?.has(oldEl)) this._runExpanded.add(newEl);
-          if (this._runStickyOpen?.has(oldEl)) this._runStickyOpen.add(newEl); // the user's deliberate-open mark rides the swap too (verifier: a full re-render otherwise let the pinned auto-refold snap it shut)
-      this._applyElementMarks(newEl, msg);
-      oldEl.replaceWith(newEl);
-      this._elements.set(id, newEl);
-      this._renderers.addWrapToggles(newEl);
-      this._renderers.addOpenInEditorBtn(newEl);
+      this._swapMessageEl(oldEl, newEl, id);
     }
     this._updateRuns();
   }

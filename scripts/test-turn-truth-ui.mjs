@@ -58,6 +58,15 @@ const done = () => { console.log(failed ? `\n${failed} FAILED (${passed} passed)
 {
   const BUILDER = /\.renderAssistantMsg\(/g;   // a CALL — chat-renderers' definition has no leading dot
   const MARK = /this\._applyElementMarks\(/g;
+  // A builder may DELEGATE. Owner ruling 9's round 2 collapsed the two
+  // element-SWAP sites into one named method (`_swapMessageEl`), which is the
+  // same law one level up: the marks are re-derived in exactly one place for
+  // both. So a site satisfies this guard by calling the mark directly OR by
+  // handing the element to that method — and the delegate is then held to the
+  // mark itself by its own assert below, so the escape hatch cannot be used to
+  // launder a builder that marks nothing.
+  const DELEGATE = /this\._swapMessageEl\(/;
+  const MARKED = /this\._applyElementMarks\(/;
   // 2000 chars: the known sites sit 636–1165 chars from their mark call and the
   // two nearest builders are 5191 apart, so the window can never borrow the
   // NEXT builder's call and pass a site that has none of its own.
@@ -66,7 +75,8 @@ const done = () => { console.log(failed ? `\n${failed} FAILED (${passed} passed)
     const out = { builders: 0, marks: (src.match(MARK) || []).length, unmarked: [] };
     for (const b of src.matchAll(BUILDER)) {
       out.builders++;
-      if (!/this\._applyElementMarks\(/.test(src.slice(b.index, b.index + WIN))) {
+      const win = src.slice(b.index, b.index + WIN);
+      if (!MARKED.test(win) && !DELEGATE.test(win)) {
         out.unmarked.push(src.slice(0, b.index).split('\n').length);
       }
     }
@@ -83,17 +93,35 @@ const done = () => { console.log(failed ? `\n${failed} FAILED (${passed} passed)
     builders += r.builders; marks += r.marks;
     for (const line of r.unmarked) unmarked.push(`${f}:${line}`);
   }
-  check(`every path that BUILDS an element for a message re-derives its marks (${builders} builders, ${marks} call sites)`,
-    builders >= 4 && marks === builders && unmarked.length === 0,
+  check(`every path that BUILDS an element for a message re-derives its marks, directly or through the ONE swap method (${builders} builders, ${marks} direct call sites)`,
+    builders >= 4 && marks >= 1 && unmarked.length === 0,
     unmarked.length ? 'unmarked builders: ' + unmarked.join(', ') : `builders=${builders} marks=${marks}`);
+  // …and the delegate owes the mark. Without this, "call `_swapMessageEl`"
+  // would be a way to satisfy the guard while marking nothing at all.
+  const swapSrc = fs.readFileSync(path.join(repo, 'src/lib/chat-view.js'), 'utf8');
+  const swapBody = (() => {
+    const i = swapSrc.indexOf('_swapMessageEl(oldEl, newEl, id) {');
+    if (i < 0) return null;
+    let depth = 0;
+    for (let k = swapSrc.indexOf('{', i); k < swapSrc.length; k++) {
+      if (swapSrc[k] === '{') depth++;
+      else if (swapSrc[k] === '}' && --depth === 0) return swapSrc.slice(i, k + 1);
+    }
+    return null;
+  })();
+  check('…and the ONE swap method re-derives the marks itself — the delegation the guard accepts is not a hole in it',
+    !!swapBody && MARKED.test(swapBody) && /oldEl\.replaceWith\(newEl\)/.test(swapBody),
+    swapBody ? swapBody.slice(0, 160) : 'no _swapMessageEl found');
   // NEGATIVE CONTROL for the guard itself — a matcher that can only ever say
   // "clean" is not a guard. The exact shape round 3 found (a builder switch
   // with no mark call) must be REPORTED, and the fixed shape must not be.
   const bad = scan("switch(m.role){case 'assistant': el = this._renderers.renderAssistantMsg(m); break;}\nel.classList.add('chat-gap-msg');\nreturn el;");
   const good = scan("switch(m.role){case 'assistant': el = this._renderers.renderAssistantMsg(m); break;}\nthis._applyElementMarks(el, m);\nreturn el;");
-  check('NEGATIVE CONTROL: the guard actually detects an unmarked builder (and passes the marked twin)',
-    bad.builders === 1 && bad.unmarked.length === 1 && good.builders === 1 && good.unmarked.length === 0,
-    JSON.stringify([bad, good]));
+  const viaSwap = scan("switch(m.role){case 'assistant': el = this._renderers.renderAssistantMsg(m); break;}\nthis._swapMessageEl(oldEl, el, id);\nreturn el;");
+  check('NEGATIVE CONTROL: the guard actually detects an unmarked builder (and passes both the marked twin and the one that delegates)',
+    bad.builders === 1 && bad.unmarked.length === 1 && good.builders === 1 && good.unmarked.length === 0
+    && viaSwap.builders === 1 && viaSwap.unmarked.length === 0,
+    JSON.stringify([bad, good, viaSwap]));
 }
 
 // ── ⓪ b SESSION DEATH RETIRES EVERY CLIENT-HELD "RIGHT NOW" CLAIM ───────

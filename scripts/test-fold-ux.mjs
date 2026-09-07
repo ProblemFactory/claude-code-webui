@@ -96,9 +96,12 @@ const barBody = cv.slice(cv.indexOf('  _updateRunBar(scrollTop) {'), cv.indexOf(
 check('_updateRunBar never pages/trims/pins (no _extendTop/_extendBottom/_trim*/_pinned writes)', barBody.length > 100 && !/_extendTop|_extendBottom|_trimTop|_trimBottom|_pinned =/.test(barBody));
 check('_setRunOpen hides its OWN footer mutation from the observer when called outside a pass (a user click is not a pass — the record used to schedule the pass that closed the run)',
   /const outsidePass = !this\._runsMutating;/.test(cv) && /if \(outsidePass\) this\._runsMutating = true;/.test(cv) && /if \(mutated\) this\._runsObserver\?\.takeRecords\(\);/.test(cv));
-check('the sticky (user-opened) mark is carried across BOTH element-swap sites like _runExpanded (edit replace + compact-mode re-render)',
-  (cv.match(/if \(this\._runStickyOpen\?\.has\(oldEl\)\) this\._runStickyOpen\.add\(newEl\);/g) || []).length === 2
-  && (cv.match(/if \(this\._runExpanded\?\.has\(oldEl\)\) this\._runExpanded\.add\(newEl\);/g) || []).length === 2);
+check('the sticky (user-opened) mark rides EVERY element swap — ONE helper, and no site replaces an element behind its back (2026-09-07: a third, hand-rolled site carried none of it)',
+  (cv.match(/if \(this\._runStickyOpen\?\.has\(oldEl\)\) this\._runStickyOpen\.add\(newEl\);/g) || []).length === 1
+  && (cv.match(/if \(this\._runExpanded\?\.has\(oldEl\)\) this\._runExpanded\.add\(newEl\);/g) || []).length === 1
+  && /_swapMessageEl\(oldEl, newEl, id\) \{/.test(cv)
+  && (cv.match(/this\._swapMessageEl\(/g) || []).length === 3
+  && (cv.match(/\.replaceWith\(/g) || []).length === 1);
 check('the pinned auto-refold still folds every non-last run EXCEPT one the user opened deliberately (_runStickyOpen, keyed by member like _runExpanded)',
   /this\._runStickyOpen = new WeakSet\(\);/.test(cv) && /for \(const r of built\.slice\(0, -1\)\) \{/.test(cv)
   && /if \(r\.members\.some\(\(el\) => this\._runStickyOpen\.has\(el\)\)\) continue;/.test(cv)

@@ -19,9 +19,9 @@ const { HARNESSES, harnessOf, harnessIds, chatHarnessIds, REQUIRED_DESCRIPTOR_KE
 const { BackendAdapter } = require(path.join(REPO, 'src/adapters/base.js'));
 const { createAdapterRegistry } = require(path.join(REPO, 'src/adapters/index.js'));
 const { NORMALIZERS, createMessageManager } = require(path.join(REPO, 'src/normalizers.js'));
-const { capsOf, BACKEND_CAPS, worktreeCaps, worktreeRefusal, worktreeSpawnArgs, NO_WORKTREE } = require(path.join(REPO, 'src/backend-caps.js'));
+const { capsOf, BACKEND_CAPS, worktreeCaps, worktreeRefusal, worktreeSpawnArgs, worktreePick, worktreeLatchWrite, NO_WORKTREE } = require(path.join(REPO, 'src/backend-caps.js'));
 const { hasConsumer, PROTOCOLS } = require(path.join(REPO, 'src/server/stdout/index.js')); // S5: protocol → stdout consumer registry
-const { BACKEND_META, backendFeatureCaps, worktreeCapsFor } = await import(path.join(REPO, 'src/lib/agent-meta.js'));
+const { BACKEND_META, backendFeatureCaps, worktreeCapsFor, worktreePick: clientWorktreePick, worktreeLatchWrite: clientWorktreeLatchWrite } = await import(path.join(REPO, 'src/lib/agent-meta.js'));
 const schemaSrc = fs.readFileSync(path.join(REPO, 'src/lib/settings-schema.js'), 'utf8');
 
 ok(harnessIds().length >= 3 && ['claude', 'codex', 'shell'].every((id) => HARNESSES[id]), `registry carries the three built-in harnesses (${harnessIds().join(', ')})`);
@@ -320,19 +320,134 @@ console.log('— worktree caps (owner ruling 9)');
   const sideSrc = fs.readFileSync(path.join(REPO, 'src/lib/sidebar-state.js'), 'utf8');
   ok(/id="input-worktree"/.test(fs.readFileSync(path.join(REPO, 'public/index.html'), 'utf8'))
     && /getElementById\('input-worktree'\)\?\.checked/.test(appSrc)
-    && /setSessionConfig\?\.\(s, \{ \.\.\.\(sidebar\.getSessionConfig\?\.\(s\) \|\| \{\}\), worktree: cb\.checked \|\| undefined \}\)/.test(propsSrc),
+    && /setSessionConfig\?\.\(s, \{ \.\.\.\(sidebar\.getSessionConfig\?\.\(s\) \|\| \{\}\), worktree: cb\.checked \}\)/.test(propsSrc),
     'the tick is a CHECKBOX in both places, writing the one per-session key (dialog → create, properties → cfg.worktree)');
-  ok(/'lockModel', 'outputStyle', 'worktree'\]/.test(sideSrc)
+  ok(/if \(config\?\.worktree === true \|\| config\?\.worktree === false\) clean\.worktree = config\.worktree;/.test(sideSrc)
+    && !/'outputStyle', 'worktree'\]/.test(sideSrc)
     && /worktree: worktree !== undefined \? worktree : savedCfg\.worktree/.test(lifeSrc),
-    "…and the saved pick SURVIVES (sidebar-state keeps 'worktree' in the persisted config keys; resumeSession reads it back)");
-  // The LIVE fact is the CLI's, not the checkbox's: the init-frame arbiter can
-  // turn it off, and the client must not write that back over the user's pick.
-  const viewSrc = fs.readFileSync(path.join(REPO, 'src/lib/chat-view.js'), 'utf8');
-  ok(/if \('worktree' in msg\) this\._worktree = !!msg\.worktree;/.test(viewSrc)
-    && /if \(ids\?\.backendSessionId && this\._worktree\)/.test(viewSrc)
-    && /if \(!cfg\.worktree\) this\.app\?\.sidebar\?\.setSessionConfig/.test(viewSrc),
-    'the saved pick LATCHES ON only — a live fact the CLI corrected never erases the preference (chat-view applyMeta + worktree-path)');
+    "…and the saved pick SURVIVES as a TRI-STATE (sidebar-state persists an explicit false like autoResume — the truthy list would erase an untick; resumeSession reads it back)");
 }
+
+const wsCreateSrc = fs.readFileSync(path.join(REPO, 'src/ws-create.js'), 'utf8');
+
+// ── THE PICK vs THE LIVE FACT (round-2 verifier, MAJOR + the untick it exposed)
+// Two different things, and every surface that asks "would the NEXT run of this
+// conversation be isolated?" must answer with ONE function.
+{
+  const pick = (saved, live) => worktreePick({ saved, live });
+  ok(pick(true, false) === true && pick(true, true) === true, 'worktreePick: an explicit tick wins, whatever this run turned out to be');
+  ok(pick(false, true) === false && pick(false, false) === false,
+    'worktreePick: an explicit UNTICK is a DECISION — a live isolated run never resurrects it (the accept-and-ignore the truthy-only key used to produce)');
+  ok(pick(undefined, true) === true && pick(undefined, false) === false,
+    'worktreePick: no pick on record ⇒ this RUN answers (the normal state right after a New Session tick — the conversation has no id yet)');
+  // NEGATIVE CONTROL: the rule is not "any falsy saved value defers to live" —
+  // that is precisely the shape that made the untick unrepresentable.
+  ok(pick(false, true) !== pick(undefined, true),
+    'NEGATIVE CONTROL: `false` and `undefined` are DIFFERENT answers under the same live fact (a truthy test collapses them and the untick disappears)');
+  ok(worktreeLatchWrite({ saved: undefined, live: true }) === true, 'worktreeLatchWrite: an ABSENT pick records what this run turned out to be');
+  ok(worktreeLatchWrite({ saved: undefined, live: false }) === null
+    && worktreeLatchWrite({ saved: true, live: false }) === null
+    && worktreeLatchWrite({ saved: true, live: true }) === null,
+    'worktreeLatchWrite: ONE-WAY — it never writes OFF, and never rewrites a pick that already exists');
+  ok(worktreeLatchWrite({ saved: false, live: true }) === null,
+    'NEGATIVE CONTROL: an explicit `false` is never overruled by a live isolated run (a fact we were wrong about is not a preference the user changed — and neither is one they revoked)');
+  ok(clientWorktreePick === worktreePick && clientWorktreeLatchWrite === worktreeLatchWrite,
+    'the CLIENT surfaces import the SAME function objects through agent-meta (no paraphrase — the fork lost the pick entirely by having none)');
+}
+
+// ── WIRING: who actually PRODUCES each branch of worktreeSpawnArgs ──────────
+{
+  const propsSrc2 = fs.readFileSync(path.join(REPO, 'src/lib/session-props.js'), 'utf8');
+  const lifeSrc2 = fs.readFileSync(path.join(REPO, 'src/lib/session-lifecycle.js'), 'utf8');
+  const viewSrc = fs.readFileSync(path.join(REPO, 'src/lib/chat-view.js'), 'utf8');
+  ok(/cb\.checked = worktreePick\(\{ saved: cfg\.worktree, live \}\);/.test(propsSrc2)
+    && /worktree: cb\.checked \}\)/.test(propsSrc2) && !/worktree: cb\.checked \|\| undefined/.test(propsSrc2),
+    'WIRING: the Session Properties checkbox READS worktreePick and WRITES a boolean (so unticking sticks)');
+  // The fork call site — the round-2 MAJOR. `fork ⇒ pass` had no producer at
+  // all: `_doForkSession`'s createSession carried no `worktree` key, so the
+  // branch was pinned by a call no site could make.
+  const forkBlock = lifeSrc2.slice(lifeSrc2.indexOf('async _doForkSession('), lifeSrc2.indexOf('// Open a stopped session as view-only'));
+  ok(forkBlock.length > 200 && /worktreePick\(\{ saved: forkCfg\.worktree, live: sessionInfo\.worktree \}\)/.test(forkBlock)
+    && /worktree: forkWorktree \|\| undefined,/.test(forkBlock),
+    'WIRING: _doForkSession RESOLVES the pick and passes it on the create (a fork is the other spawn that emits --worktree)');
+  ok(/const wtWillPass = worktreeSpawnArgs\(\{/.test(wsCreateSrc) && /if \(wtWillPass\) \{/.test(wsCreateSrc)
+    && /resume: !!\(data\.resume && data\.resumeId\)/.test(wsCreateSrc) && /fork: !!data\.fork/.test(wsCreateSrc),
+    'WIRING: the ws-create repo preflight gates on the EMITTED decision, not on the tick (a resume never sends the flag)');
+  // BOTH entry points reach the one latch, and BOTH bodies are prototype
+  // methods — scripts/test-worktree-userchan-ui.mjs drives them for real. The
+  // ws branch is now a one-line delegation precisely because a body that lives
+  // only inside the live-view constructor closure can be pinned by grep and by
+  // nothing else (which is how the pre-fix dead write stayed green).
+  ok(/msg\.type === 'worktree-path'[\s\S]{0,2000}this\._onWorktreePath\(msg\);/.test(viewSrc)
+    && /_onWorktreePath\(msg\) \{[\s\S]{0,240}this\._latchWorktreePick\(\);/.test(viewSrc)
+    && /if \('worktree' in meta\) \{[\s\S]{0,80}this\._latchWorktreePick\(\);/.test(viewSrc)
+    && /worktreeLatchWrite\(\{ saved: cfg\.worktree, live: this\._worktree \}\) === true/.test(viewSrc),
+    'WIRING: BOTH chat-view entry points run the one latch, and both bodies are drivable prototype methods (the worktree-path branch used to write a field nobody read)');
+  // The swap bookkeeping (round-2 verifier, MAJOR): three sites, one helper.
+  ok((viewSrc.match(/this\._swapMessageEl\(/g) || []).length === 3
+    && /_swapMessageEl\(oldEl, newEl, id\) \{/.test(viewSrc)
+    && !/if \(next\) el\.replaceWith\(next\);/.test(viewSrc),
+    'WIRING: every in-place message re-render goes through _swapMessageEl (the tool-card swap was a bare replaceWith)');
+}
+
+// ── THE PREFLIGHT, DRIVEN THROUGH THE REAL ws-create HANDLER ────────────────
+// Not a grep: the handler is constructed with stub deps and a `buildSessionArgs`
+// that THROWS a sentinel, so execution stops exactly where the spawn would
+// start — every refusal above it is real, and nothing is ever spawned.
+{
+  const SENTINEL = Symbol('spawn');
+  const drive = async (mod, data) => {
+    const sent = [], built = [];
+    const adapter = { installed: true, buildSessionArgs(o) { built.push(o); const e = new Error('probe'); e[SENTINEL] = true; throw e; } };
+    const handler = mod.createWsCreateHandler({
+      ctx: {
+        activeSessions: new Map(), WS_OPEN: 1, adapterRegistry: { get: () => adapter },
+        sessionCounterRef: { value: 0 }, hosts: null, accounts: null, os, fs, path,
+        serverSetting: () => '', SOCKETS_DIR: '/tmp/vs-wtprobe-sockets', BUFFERS_DIR: '/tmp/vs-wtprobe-buffers',
+        broadcastActiveSessions() { }, broadcastToSession() { },
+      },
+      agentEnv: () => ({}), crashLoopRef: { map: new Map() }, noConvoRef: { map: new Map() },
+      execFileAsync: async () => ({ stdout: '', stderr: '' }), pickCodexThreadCandidate: () => null,
+      getSessionKey: (s) => `${s.backend}:${s.backendSessionId}`, normalizeComparablePath: (p) => p,
+    });
+    try { await handler({ readyState: 1, send: (t) => sent.push(JSON.parse(t)) }, data, new Set()); }
+    catch (e) { if (!e[SENTINEL]) throw e; }
+    return { codes: sent.map((m) => m.code || m.type), built };
+  };
+  const NOREPO = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-notarepo-'));
+  const RID = '11111111-2222-3333-4444-555555555555';
+  const base = { backend: 'claude', mode: 'chat', cwd: NOREPO, worktree: true, reqId: 'r' };
+  const wsCreate = require(path.join(REPO, 'src/ws-create.js'));
+
+  const newSess = await drive(wsCreate, { ...base });
+  ok(newSess.codes.join() === 'worktree-not-a-git-repo' && newSess.built.length === 0,
+    'PREFLIGHT: a NEW session in a non-repo is refused BEFORE the spawn (the instantly-dead window this exists to prevent)', JSON.stringify(newSess.codes));
+  const resumed = await drive(wsCreate, { ...base, resume: true, resumeId: RID, ignoreNoConvo: true });
+  ok(resumed.codes.length === 0 && resumed.built.length === 1 && resumed.built[0].worktree === true && resumed.built[0].fork === false,
+    'PREFLIGHT: a plain RESUME of the same conversation in the same non-repo folder is NOT refused — the spawn would not send the flag at all (round-2 verifier)', JSON.stringify(resumed.codes));
+  ok(worktreeSpawnArgs({ backend: 'claude', want: true, resume: true, fork: false }).args.length === 0,
+    '…and the adapter proves it: the same options emit no --worktree (the refusal would have been for a flag nobody sends)');
+  const forked = await drive(wsCreate, { ...base, resume: true, fork: true, resumeId: RID, ignoreNoConvo: true });
+  ok(forked.codes.join() === 'worktree-not-a-git-repo' && forked.built.length === 0,
+    'NEGATIVE CONTROL: a FORK in that same non-repo IS still refused — it really does emit --worktree, so the gate is the decision and not a blanket skip', JSON.stringify(forked.codes));
+  const codexResume = await drive(wsCreate, { ...base, backend: 'codex', resume: true, resumeId: 'th_x', ignoreNoConvo: true });
+  ok(codexResume.codes.join() === 'worktree-unsupported' && codexResume.built.length === 0,
+    'NEGATIVE CONTROL: `unsupported` stays UNCONDITIONAL — a harness with no such flag refuses on a resume too (accept-and-ignore is the 2.361.4 failure)', JSON.stringify(codexResume.codes));
+
+  // MUTATION CONTROL: the pre-fix gate, reproduced from the product source. The
+  // copy lives beside the original so its relative requires still resolve.
+  const mutSrc = wsCreateSrc.replace('if (wtWillPass) {', 'if (data.worktree) {');
+  ok(mutSrc !== wsCreateSrc, 'MUTATION CONTROL: the gate is one identifiable line');
+  const mutPath = path.join(REPO, 'src', `.ws-create-negctl-${process.pid}.js`);
+  try {
+    fs.writeFileSync(mutPath, mutSrc);
+    const mutResume = await drive(require(mutPath), { ...base, resume: true, resumeId: RID, ignoreNoConvo: true });
+    ok(mutResume.codes.join() === 'worktree-not-a-git-repo' && mutResume.built.length === 0,
+      '…and with it the RESUME is refused again — the pre-fix behaviour, reproduced from the product source (so the leg above measures the fix)', JSON.stringify(mutResume.codes));
+  } finally { try { fs.rmSync(mutPath, { force: true }); } catch { } }
+  try { fs.rmSync(NOREPO, { recursive: true, force: true }); } catch { }
+}
+
 
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);
 process.exit(fail ? 1 : 0);

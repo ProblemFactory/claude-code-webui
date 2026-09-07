@@ -6,7 +6,7 @@ import { t } from './i18n.js';
 // drifted verb LIST (which scripts/test-queue-steer.mjs ① deep-compares
 // against the server row) and never a hand-copied boolean that disagrees with
 // the list next to it.
-import { deriveInputModes, notificationDelivery, worktreeCaps as serverWorktreeCaps, NO_WORKTREE } from '../backend-caps.js';
+import { deriveInputModes, notificationDelivery, worktreeCaps as serverWorktreeCaps, NO_WORKTREE, worktreePick, worktreeLatchWrite } from '../backend-caps.js';
 
 export const BACKEND_META = {
   claude: {
@@ -231,6 +231,12 @@ export function responseStyleCaps(backend) {
 export function worktreeCapsFor(backend) {
   return backendFeatureCaps(backend).worktree || NO_WORKTREE;
 }
+
+/** The PURE per-session worktree rules, re-exported so every CLIENT surface
+ *  (the Session Properties checkbox, the fork path, the chat-view latch) reads
+ *  the ONE implementation that lives beside the spawn rules — a paraphrase in
+ *  two places is how the fork lost the pick entirely (round-2 verifier). */
+export { worktreePick, worktreeLatchWrite };
 
 /** PURE (DOM-free, suite-tested): can a style change land on THIS session
  *  without a restart? TWO independent facts — and forgetting the second one is

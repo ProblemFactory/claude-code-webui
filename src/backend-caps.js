@@ -393,7 +393,9 @@ function setVerifiedCap(backend, key, value) {
 
 
 // ── worktree: the PURE spawn rules (owner ruling 9) ─────────────────────────
-// Two questions, answered here so no surface has to know the CLI's semantics:
+// FOUR questions, answered here so no surface has to know the CLI's semantics
+// (the last two joined in round 2, after the verifier found the fork branch had
+// no producer and the untick could not be expressed):
 //
 //   worktreeRefusal — CAN this spawn honour the request at all? The CLI exits
 //     1 outside a git repo BEFORE the session exists, so a refusal here is the
@@ -426,6 +428,37 @@ function setVerifiedCap(backend, key, value) {
 //                                       worktree; the CLI re-enters its own)
 //     A resume of a session whose worktree was deleted continues in the plain
 //     cwd and says so — the CLI's own notice, which we do not second-guess.
+//
+//   worktreePick — WHICH answer a surface must give to "would the NEXT run of
+//     this conversation be isolated?". Two facts feed it and they are not the
+//     same thing (round-2 verifier, MAJOR: the fork path read NEITHER, so the
+//     `fork ⇒ pass` branch above had no producer in production at all — a
+//     fork of an isolated conversation quietly ran in the user's real working
+//     tree while Session Properties promised otherwise):
+//       saved — the per-session PICK (`cfg.worktree`), TRI-STATE:
+//               true      = the user asked for it (New Session tick, or the
+//                           Session Properties checkbox),
+//               false     = the user explicitly said NO — and nothing may
+//                           resurrect that, least of all a live run that
+//                           happens to be isolated (this used to be a
+//                           truthy-only stored key, so unticking the box while
+//                           the run WAS isolated re-checked itself on the next
+//                           render: an accept-and-ignore control, 2.361.4),
+//               undefined = no pick on record, which is the NORMAL state right
+//                           after a New Session tick (the conversation has no
+//                           id yet when the box is ticked).
+//       live  — what the RUN we are looking at turned out to be, i.e. the
+//               init-frame arbiter's verdict.
+//     An absent pick therefore defers to the live fact, which is exactly what
+//     the Session Properties checkbox has always DISPLAYED — so the fork and
+//     the checkbox now answer with ONE function instead of two paraphrases.
+//
+//   worktreeLatchWrite — should the saved pick RECORD what this run turned out
+//     to be? ONE-WAY on purpose: only an ABSENT pick is ever written, and only
+//     to `true`. The live fact is the CLI's and it can drop on its own (a
+//     deleted worktree), so letting it write would silently discard a
+//     preference because of a transient; and an explicit `false` is a decision
+//     the user made, which a fact never overrules.
 const WORKTREE_REASONS = Object.freeze(['unsupported', 'not-a-git-repo']);
 
 function worktreeCaps(backend) {
@@ -445,6 +478,20 @@ function worktreeRefusal({ backend, want, isGitRepo, hasWorktreeHook }) {
   return null;
 }
 
+/** WOULD THE NEXT RUN OF THIS CONVERSATION BE ISOLATED? — see the block above.
+ *  @returns {boolean} */
+function worktreePick({ saved, live }) {
+  if (saved === true) return true;
+  if (saved === false) return false;   // an explicit NO is a decision, never overruled by a fact
+  return !!live;                       // no pick on record ⇒ this run answers for it
+}
+
+/** SHOULD THE SAVED PICK RECORD WHAT THIS RUN TURNED OUT TO BE? — see above.
+ *  @returns {true|null} `true` = write the pick ON; null = leave it alone. */
+function worktreeLatchWrite({ saved, live }) {
+  return (saved === undefined && live === true) ? true : null;
+}
+
 /** @returns {{args:string[], pass:boolean, why:'new'|'fork'|'resume-rebinds'|'off'|'unsupported'}} */
 function worktreeSpawnArgs({ backend, want, resume, fork }) {
   const wt = worktreeCaps(backend);
@@ -457,4 +504,4 @@ function worktreeSpawnArgs({ backend, want, resume, fork }) {
 }
 
 module.exports = { BACKEND_CAPS, capsOf, setVerifiedCap, QUEUE_VERBS, LEGACY_QUEUE_VERBS, deriveInputModes, notificationDelivery,
-  NO_WORKTREE, WORKTREE_REASONS, worktreeCaps, worktreeRefusal, worktreeSpawnArgs };
+  NO_WORKTREE, WORKTREE_REASONS, worktreeCaps, worktreeRefusal, worktreeSpawnArgs, worktreePick, worktreeLatchWrite };

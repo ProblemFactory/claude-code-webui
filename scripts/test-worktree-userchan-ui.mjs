@@ -54,6 +54,78 @@ const MARKER = '"><img src=x onerror=alert(1)>';
     !fileHtml.includes('<img src=x') && fileHtml.includes('href="/p/pg'), fileHtml.slice(0, 160));
 }
 
+
+// ── 1b. NODE leg: THE message-element swap (round-2 verifier, MAJOR) ────────
+// A rendered message element carries the bookkeeping the rest of ChatView
+// reads it BY — `dataset.msgId` (both trims, jumpToIndex, search reveal, the
+// minimap, and the `_elements` key), `dataset.ts`, `dataset.line`, the
+// `.chat-gap-msg` exemption, and the two element-keyed run-fold marks. None of
+// it comes from the renderers, so a swap that forgets any of it silently
+// unregisters the message. `_rerenderToolCard` (the SendUserFile link path)
+// was a bare `replaceWith`; this drives the REAL method through the prototype
+// against DOM doubles, then reproduces the pre-fix statement verbatim.
+console.log('— _swapMessageEl bookkeeping');
+{
+  const { ChatView } = await import(path.join(repo, 'src/lib/chat-view.js'));
+  if (!globalThis.CSS) globalThis.CSS = { escape: (s) => String(s).replace(/["\\]/g, '\\$&') };
+  const mkEl = (over = {}) => {
+    const el = {
+      dataset: {}, _rawMsg: null, parent: null,
+      classList: { _s: new Set(), add(c) { this._s.add(c); }, contains(c) { return this._s.has(c); } },
+      replaceWith(next) { const l = this.parent; if (!l) return; l.children[l.children.indexOf(this)] = next; next.parent = l; this.parent = null; },
+      ...over,
+    };
+    return el;
+  };
+  const mkView = ({ gap = false } = {}) => {
+    const raw = { id: 'm1', role: 'tool', toolCallId: 'tc1', ts: 1757200000000, content: [{ type: 'tool_call', toolName: 'SendUserFile', input: { files: ['/tmp/a.png'] } }] };
+    const oldEl = mkEl({ dataset: { msgId: 'm1', ts: '1757200000000', line: '4242' }, _rawMsg: raw });
+    if (gap) oldEl.classList.add('chat-gap-msg');
+    const list = { children: [oldEl], querySelector: () => oldEl };
+    oldEl.parent = list;
+    const rendered = [];
+    const v = Object.assign(Object.create(ChatView.prototype), {
+      _messageList: list,
+      _elements: new Map([['m1', oldEl]]),
+      _runExpanded: new Set([oldEl]),
+      _runStickyOpen: new Set([oldEl]),
+      _renderers: {
+        renderToolMsg: (m) => { const e = mkEl({ _rawMsg: m }); rendered.push(e); return e; },
+        addWrapToggles: (e) => { e.__wrap = true; },
+        addOpenInEditorBtn: (e) => { e.__editor = true; },
+      },
+    });
+    return { v, list, oldEl, rendered };
+  };
+
+  const w = mkView();
+  w.v._rerenderToolCard('tc1');
+  const next = w.list.children[0];
+  ok('_rerenderToolCard swaps the element in place', next !== w.oldEl && w.rendered[0] === next);
+  ok('…and the new element keeps its message id (the key both trims, the minimap and search all read)', next.dataset.msgId === 'm1', JSON.stringify(next.dataset));
+  ok('…its time coordinate and file offset ride across', next.dataset.ts === 1757200000000 && next.dataset.line === '4242', JSON.stringify(next.dataset));
+  ok('…_elements now points at the ATTACHED node (the detached entry is what froze the card at pending)', w.v._elements.get('m1') === next && next.parent === w.list);
+  ok('…the element-keyed run-fold marks transfer (an open fold must not snap shut on a link arriving)', w.v._runExpanded.has(next) && w.v._runStickyOpen.has(next));
+  ok('…and the per-element affordances are re-installed', next.__wrap === true && next.__editor === true);
+
+  const g = mkView({ gap: true });
+  g.v._rerenderToolCard('tc1');
+  ok('a GAP-loaded card stays gap-loaded across the swap (else it is promoted into the window accounting both trims do)',
+    g.list.children[0].classList.contains('chat-gap-msg'));
+
+  // NEGATIVE CONTROL: the pre-fix statement, verbatim (`if (next) el.replaceWith(next);`).
+  const n = mkView();
+  { const el = n.list.querySelector(); const raw = el._rawMsg; const nx = n.v._renderers.renderToolMsg(raw); if (nx) el.replaceWith(nx); }
+  const bad = n.list.children[0];
+  ok('NEGATIVE CONTROL: the pre-fix bare replaceWith loses the msgId AND strands _elements on the detached node — reproduced, so the asserts above measure the fix',
+    bad.dataset.msgId === undefined && n.v._elements.get('m1') === n.oldEl && n.oldEl.parent === null,
+    JSON.stringify({ ds: bad.dataset, stranded: n.v._elements.get('m1') === n.oldEl }));
+  // …and the shipped source really does route all three swap sites through it.
+  const cvSrc = fs.readFileSync(path.join(repo, 'src/lib/chat-view.js'), 'utf8');
+  ok('…and no swap site hand-rolls the bookkeeping any more (3 call sites, one helper)',
+    (cvSrc.match(/this\._swapMessageEl\(/g) || []).length === 3 && !/if \(next\) el\.replaceWith\(next\);/.test(cvSrc));
+}
+
 // ── 2. BROWSER leg ──
 const CHROME = ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser'].find((p) => fs.existsSync(p));
 if (!CHROME) { console.log('SKIP: no chrome/chromium — the 375×667 measurement did not run'); console.log(fail ? `FAIL (${fail})` : `ALL PASS (${pass})`); process.exit(fail ? 1 : 0); }
@@ -252,6 +324,184 @@ console.log('— B. the SendUserMessage / SendUserFile cards at 375×667');
   ok('NEGATIVE CONTROL: neutralise the wrap rule and the long path DOES overflow the 375px column — the pass above is the CSS working',
     neg.linkR > neg.listW + 1 || neg.listSW > neg.listW + 1, JSON.stringify(neg));
   await ev(`document.getElementById('vs-card-probe')?.remove()`);
+}
+
+
+console.log('— C. a REAL ChatView: the SendUserFile card lifecycle');
+{
+  // The node leg above proves the helper. This one proves the PATH: a real
+  // ChatView (created by app.viewSession, so it is the shipped constructor,
+  // renderers and DOM), a real SendUserFile tool message through _onOp, the
+  // real `user-file-published` handler, then the real tool_result edit — which
+  // is exactly the ordering the server produces with `claude.brief` on.
+  const CONV = '9f2a0000-1111-2222-3333-444455556666';
+  const setup = await ev(`(async () => {
+    window.app.viewSession(${JSON.stringify(CONV)}, '/tmp', 'wt-userfile-probe', { backend: 'claude', offerService: false });
+    await new Promise(r => setTimeout(r, 400));
+    const entry = [...window.app.sessions.entries()].find(([, v]) => v && v.sessionId === 'view-' + ${JSON.stringify(CONV)});
+    if (!entry) return { ok: false, ids: [...window.app.sessions.keys()] };
+    window.__wtProbe = { winId: entry[0], v: entry[1] };
+    return { ok: true, winId: entry[0], hasList: !!entry[1]._messageList };
+  })()`);
+  ok('a real read-only ChatView exists to drive (shipped constructor + renderers, not a hand-built chain)', setup?.ok === true && setup.hasList, JSON.stringify(setup));
+
+  const lifecycle = await ev(`(() => {
+    const v = window.__wtProbe.v;
+    v._pinned = true; v._teleported = false; v._loadingHistory = false;   // a live tail, so a create RENDERS rather than counting
+    const MID = 'ucf-probe-1', TCID = 'toolu_wtprobe1';
+    const call = { type: 'tool_call', toolName: 'SendUserFile', input: { files: ['/tmp/vs-probe-report.png'], caption: 'the run' } };
+    v._onOp({ op: 'create', message: { id: MID, role: 'tool', toolCallId: TCID, ts: Date.now(), status: 'pending', content: [call] } });
+    const list = v._messageList;
+    const snap = (tag) => {
+      const el = list.querySelector('[data-tool-id="' + TCID + '"]');
+      const mapped = v._elements.get(MID);
+      const link = el && el.querySelector('.chat-userfile-link');
+      return {
+        tag,
+        cards: list.querySelectorAll('.chat-msg-userchan').length,
+        msgId: el ? (el.dataset.msgId || null) : null,
+        ts: el ? !!el.dataset.ts : false,
+        mappedIsVisible: mapped === el,
+        mappedConnected: !!(mapped && mapped.isConnected),
+        href: link ? link.getAttribute('href') : null,
+        // the tool_result's own attachments[].size — present ONLY once the
+        // resolved output has been merged into the record (a visible,
+        // record-derived difference between pending and resolved)
+        meta: el ? [...el.querySelectorAll('.chat-userfile-meta')].map(e => e.textContent.trim()).join('|') : null,
+        trimSees: [...list.querySelectorAll('.chat-msg:not(.chat-gap-msg)')].filter(e => e.dataset.msgId === MID).length,
+      };
+    };
+    const before = snap('pending');
+    // the server's own broadcast shape (claude-stream-json 'user-file-published')
+    v._notePublishedUserFiles(TCID, [{ path: '/tmp/vs-probe-report.png', name: 'vs-probe-report.png', link: '/p/pgwtprobe1' }]);
+    const published = snap('published');
+    // …and then the tool_result lands, which re-renders through the OTHER swap site
+    const result = { attachments: [{ path: '/tmp/vs-probe-report.png', size: 20480 }], sentAt: '2026-09-07T12:00:00Z' };
+    v._onOp({ op: 'edit', id: MID, fields: { status: 'complete', content: [{ ...call, type: 'tool_result', output: JSON.stringify(result) }] } });
+    const done = snap('resolved');
+    return { before, published, done };
+  })()`);
+
+  ok('the pending card renders and is registered (data-msg-id + _elements + the trims can see it)',
+    lifecycle.before.msgId === 'ucf-probe-1' && lifecycle.before.mappedIsVisible && lifecycle.before.trimSees === 1,
+    JSON.stringify(lifecycle.before));
+  // absUrl joins the RELATIVE link the server published with the browser's own
+  // origin (2.366.1 — the server never guesses an absolute URL), so the href is
+  // origin + /p/<id> and it is the SUFFIX that is the product's fact.
+  ok('the user-file-published broadcast puts the LINK on the card…',
+    /^https?:\/\/[^/]+\/p\/pgwtprobe1$/.test(lifecycle.published.href || '') && lifecycle.published.cards === 1, JSON.stringify(lifecycle.published));
+  ok('…and the swapped-in element is STILL the registered one — attached, msgId intact, visible to both trims (round-2 verifier: it used to be an orphan)',
+    lifecycle.published.msgId === 'ucf-probe-1' && lifecycle.published.mappedIsVisible && lifecycle.published.mappedConnected && lifecycle.published.trimSees === 1,
+    JSON.stringify(lifecycle.published));
+  ok('the tool_result then reaches the VISIBLE card (the edit used to "replace" a parentless node — a spec no-op — so the card stayed pending forever)',
+    lifecycle.done.msgId === 'ucf-probe-1' && lifecycle.done.mappedIsVisible && /\/p\/pgwtprobe1$/.test(lifecycle.done.href || '')
+    && lifecycle.done.cards === 1 && lifecycle.published.meta === '' && /20 KB/.test(lifecycle.done.meta || ''),
+    JSON.stringify(lifecycle.done));
+
+  // MUTATION CONTROL: the pre-fix swap, on the same real view and the same
+  // sequence — a bare replaceWith, which is what `_rerenderToolCard` did.
+  const neg = await ev(`(() => {
+    const v = window.__wtProbe.v;
+    const orig = v._swapMessageEl;
+    v._swapMessageEl = function (oldEl, newEl) { if (oldEl && newEl) oldEl.replaceWith(newEl); return newEl; };
+    try {
+      const MID = 'ucf-probe-2', TCID = 'toolu_wtprobe2';
+      const call = { type: 'tool_call', toolName: 'SendUserFile', input: { files: ['/tmp/vs-probe-two.png'] } };
+      v._onOp({ op: 'create', message: { id: MID, role: 'tool', toolCallId: TCID, ts: Date.now(), status: 'pending', content: [call] } });
+      v._notePublishedUserFiles(TCID, [{ path: '/tmp/vs-probe-two.png', name: 'vs-probe-two.png', link: '/p/pgwtprobe2' }]);
+      const list = v._messageList;
+      const el = list.querySelector('[data-tool-id="' + TCID + '"]');
+      const mapped = v._elements.get(MID);
+      const result = { attachments: [{ path: '/tmp/vs-probe-two.png', size: 20480 }], sentAt: '2026-09-07T12:00:00Z' };
+      v._onOp({ op: 'edit', id: MID, fields: { status: 'complete', content: [{ ...call, type: 'tool_result', output: JSON.stringify(result) }] } });
+      const after = list.querySelector('[data-tool-id="' + TCID + '"]');
+      return {
+        msgId: el ? (el.dataset.msgId || null) : null,
+        stranded: !!(mapped && !mapped.isConnected),
+        // the resolved size never reaches the visible card: the edit replaced a
+        // PARENTLESS node (a spec no-op), so the card is frozen at pending
+        editReachedTheVisibleCard: after ? [...after.querySelectorAll('.chat-userfile-meta')].some(e => /20 KB/.test(e.textContent)) : null,
+        visibleIsMapped: after === v._elements.get(MID),
+        trimSees: [...list.querySelectorAll('.chat-msg:not(.chat-gap-msg)')].filter(e => e.dataset.msgId === MID).length,
+      };
+    } finally { v._swapMessageEl = orig; }
+  })()`);
+  ok('NEGATIVE CONTROL: with the pre-fix bare replaceWith the same sequence strands _elements on a detached node and the visible card loses its msgId — the failure, reproduced on the real view',
+    neg.msgId === null && neg.stranded === true && neg.visibleIsMapped === false && neg.trimSees === 0 && neg.editReachedTheVisibleCard === false,
+    JSON.stringify(neg));
+
+  // Close ONLY the window this leg created (feedback_no_browser_cleanup_heuristics).
+  await ev(`(() => { const id = window.__wtProbe?.winId; if (id) window.app.wm.closeWindow(id); delete window.__wtProbe; return true; })()`);
+}
+
+
+console.log('— D. the worktree-path frame RECORDS the pick (round-2 verifier, the dead write)');
+{
+  // The `worktree-path` frame is the FIRST moment a brand-new isolated session
+  // can record its pick: the box is ticked before the conversation has an id,
+  // the `created` payload arrives before the CLI has announced one, and the
+  // creator never gets an 'attached' (2.368.4). This drives the REAL ws branch
+  // — the frame goes through WsManager's own global handler list, exactly as
+  // the server's broadcast would.
+  const CONV = '7c130000-aaaa-bbbb-cccc-ddddeeeeffff';
+  const prep = await ev(`(async () => {
+    window.app.viewSession(${JSON.stringify(CONV)}, '/tmp', 'wt-latch-probe', { backend: 'claude', offerService: false });
+    await new Promise(r => setTimeout(r, 400));
+    const entry = [...window.app.sessions.entries()].find(([, v]) => v && v.sessionId === 'view-' + ${JSON.stringify(CONV)});
+    if (!entry) return { ok: false };
+    window.__wtLatch = { winId: entry[0], v: entry[1], key: { backend: 'claude', backendSessionId: ${JSON.stringify(CONV)} } };
+    return { ok: true, ids: entry[1]._getSessionIds() };
+  })()`);
+  ok('the latch probe resolves the conversation identity the frame will be recorded against',
+    prep?.ok === true && prep.ids?.backendSessionId === CONV, JSON.stringify(prep));
+
+  // Both entry points are PROTOTYPE methods (`_onWorktreePath` for the live
+  // frame, `_applyLiveMeta` for the attach payload), so this drives the real
+  // code — not a re-implementation — against the real sidebar store. `null` is
+  // used for "no key on record" because an `undefined` property is dropped by
+  // CDP's returnByValue and would make an absent assert look like a pass.
+  const run = await ev(`(() => {
+    const { v, key } = window.__wtLatch;
+    const sb = window.app.sidebar;
+    const saved = () => { const c = sb.getSessionConfig(key) || {}; return 'worktree' in c ? c.worktree : null; };
+    const clear = () => { const c = sb.getSessionConfig(key) || {}; delete c.worktree; sb.setSessionConfig(key, { ...c }); };
+    const frame = (worktree) => v._onWorktreePath({ type: 'worktree-path', sessionId: v.sessionId, worktree, worktreePath: worktree ? '/repo/.claude/worktrees/swift-owl' : null });
+    const out = {};
+    clear(); out.beforeAny = saved();
+    frame(true); out.afterOn = saved(); out.liveOn = v._worktree;
+    // an explicit UNTICK must survive a run that IS isolated
+    sb.setSessionConfig(key, { ...(sb.getSessionConfig(key) || {}), worktree: false });
+    frame(true); out.afterOnWithExplicitFalse = saved();
+    // and a NOT-isolated run must not write a pick at all
+    clear(); frame(false); out.afterOff = saved(); out.liveOff = v._worktree;
+    // a frame that says nothing about the worktree must not touch either fact
+    clear(); frame(true); v._onWorktreePath({ type: 'worktree-path', sessionId: v.sessionId }); out.afterSilent = saved(); out.liveSilent = v._worktree;
+    // the ATTACH payload runs the same latch (the other entry point)
+    clear(); v._worktree = false; v._applyLiveMeta({ worktree: true }); out.afterMeta = saved(); out.liveMeta = v._worktree;
+    // PRE-FIX: the branch wrote _worktree and nothing else (the field is
+    // reassigned on the line above its only reader, so it was unobservable)
+    clear();
+    const orig = v._latchWorktreePick;
+    v._latchWorktreePick = function () { };
+    try { frame(true); out.preFixSaved = saved(); out.preFixLive = v._worktree; } finally { v._latchWorktreePick = orig; }
+    clear();
+    return out;
+  })()`);
+
+  ok('an ABSENT pick is recorded the moment the CLI says this run is isolated (a new worktree session’s tick finally reaches the store)',
+    run.beforeAny === null && run.afterOn === true && run.liveOn === true, JSON.stringify(run));
+  ok('…and the ATTACH payload runs the same latch (one implementation, two entry points)',
+    run.afterMeta === true && run.liveMeta === true, JSON.stringify(run));
+  ok('NEGATIVE CONTROL: an explicit UNTICK is not overruled by the same frame (a fact never overrides a decision)',
+    run.afterOnWithExplicitFalse === false, JSON.stringify(run));
+  ok('NEGATIVE CONTROL: a NOT-isolated run writes no pick at all — the latch is ONE-WAY (the live fact drops, the preference is untouched)',
+    run.afterOff === null && run.liveOff === false, JSON.stringify(run));
+  ok('NEGATIVE CONTROL: a frame that carries no `worktree` key changes neither fact (carries-the-key guard)',
+    run.afterSilent === true && run.liveSilent === true, JSON.stringify(run));
+  ok('NEGATIVE CONTROL: with the latch removed the frame records NOTHING while still writing the live field — the pre-fix branch, reproduced (it was pinned as if it were the mechanism)',
+    run.preFixSaved === null && run.preFixLive === true, JSON.stringify(run));
+
+  await ev(`(() => { const id = window.__wtLatch?.winId; if (id) window.app.wm.closeWindow(id); delete window.__wtLatch; return true; })()`);
 }
 
 ws.close();

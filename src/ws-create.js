@@ -8,7 +8,7 @@
  */
 
 const { MessageManager } = require('./message-manager');
-const { capsOf, worktreeRefusal } = require('./backend-caps');
+const { capsOf, worktreeRefusal, worktreeSpawnArgs } = require('./backend-caps');
 const { get: harnessOf } = require('./harnesses'); // S9: store-side fork (opencode serve) before the spawn
 const { createMessageManager } = require('./normalizers');
 const { listCodexThreads } = require('./codex-session-store');
@@ -354,6 +354,28 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
               }));
               break;
             }
+          }
+          // …but the REPO probe may only gate the spawns that actually EMIT the
+          // flag. Round-2 verifier: gating it on `data.worktree` alone refused
+          // a spawn that would never have sent `--worktree` at all — a plain
+          // RESUME (worktreeSpawnArgs `resume-rebinds`: the CLI re-enters its
+          // own recorded worktree), which carries the standing pick on every
+          // restart/resume-all. A user whose repo later disappeared (incl. the
+          // B-7812 recreate-cwd path, which rebuilds the folder EMPTY) could
+          // then never resume that conversation again, refused for a flag the
+          // spawn does not send. That is exactly what the comment above
+          // forbids: a preflight STRICTER than the CLI it protects is a false
+          // refusal. `unsupported` above stays unconditional — asking a
+          // harness for something it has no flag for is a broken promise
+          // whatever the spawn kind, and accept-and-ignore is the 2.361.4
+          // failure.
+          const wtWillPass = worktreeSpawnArgs({
+            backend,
+            want: !!data.worktree,
+            resume: !!(data.resume && data.resumeId),
+            fork: !!data.fork,
+          }).pass;
+          if (wtWillPass) {
             let isGitRepo = null;
             let hasWorktreeHook = null;
             let hostName = '';

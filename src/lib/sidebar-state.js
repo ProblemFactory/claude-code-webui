@@ -447,15 +447,22 @@ export function installSidebarState(SidebarClass) {
     // (the Session Properties toggle never saved), AND 'outputStyle'/'autoResume'
     // in 2.368.0 (the status-bar style pick vanished on resume — FOURTH strike,
     // owner-caught within hours) — keep it in sync with EVERY per-session
-    // config writer, and test-auto-resume now pins it. 'worktree' joined it
-    // with owner ruling 9 (the tick has to survive a resume/restart).
-    for (const k of ['model', 'effort', 'permission', 'account', 'groupManager', 'modelLock', 'lockModel', 'outputStyle', 'worktree']) {
+    // config writer, and test-auto-resume now pins it. (Owner ruling 9's
+    // 'worktree' is one of the TRI-STATE keys below, not this truthy list.)
+    for (const k of ['model', 'effort', 'permission', 'account', 'groupManager', 'modelLock', 'lockModel', 'outputStyle']) {
       if (config?.[k]) clean[k] = config[k];
     }
     // autoResume is TRI-STATE: an explicit false must persist (its whole point
     // is that a per-session OFF beats the global default being ON) — the
     // truthy filter above would erase it.
     if (config?.autoResume === true || config?.autoResume === false) clean.autoResume = config.autoResume;
+    // worktree is TRI-STATE for the SAME reason (owner ruling 9, round-2
+    // verifier): absent = "no pick on record, the live run answers"
+    // (worktreePick), so a truthy-only filter made an explicit UNTICK
+    // indistinguishable from never having chosen — the Session Properties box
+    // re-checked itself on the next render while the run was isolated, and a
+    // fork kept inheriting a preference the user had just revoked.
+    if (config?.worktree === true || config?.worktree === false) clean.worktree = config.worktree;
     if (Object.keys(clean).length) this._sessionConfigs[stateKey] = clean;
     else delete this._sessionConfigs[stateKey];
     const legacyId = this._getLegacySessionId(sessionOrKey);
