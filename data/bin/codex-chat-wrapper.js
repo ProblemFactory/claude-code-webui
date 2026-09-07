@@ -1488,11 +1488,11 @@ async function maybeStopNudge() {
 const SLASH_COMMANDS = ['compact', 'review', 'model', 'effort'];
 const SLASH_COMMAND_RE = /^\/(compact|review|model|effort)(?:\s+(.*))?$/s;
 /** Does this text end HERE — answered by the wrapper, never sent to the
- *  app-server as a user message? ONE definition, shared by applySlashCommand
- *  (which acts on it) and the chat-input record (which must declare
- *  `webui_no_commit` for exactly the same texts): a second spelling of this
+ *  app-server as a user message? ONE definition: handleInput gates BOTH the
+ *  retraction of the bubble's twin claim and the call to applySlashCommand on
+ *  it (round 4 collapsed the two gates into one — a second spelling of this
  *  rule would drift, and a record that claims a twin it will never get deletes
- *  an unrelated message later (round 3). */
+ *  an unrelated message later). */
 function isWrapperSlashCommand(text) {
   return SLASH_COMMAND_RE.test(String(text || '').trim());
 }
@@ -1663,8 +1663,13 @@ function noteRecordedUserCid(cid) {
 /** A user record we ALREADY wrote will never be committed by the app-server.
  *  Our copy is written before the submission is accepted (the bubble has to
  *  appear when the user presses Enter, not when an RPC returns), so this is
- *  learned AFTER the fact: the send threw, or the queued item was removed by
- *  Stop / by the user before it ran. The record STAYS — the user really did
+ *  usually learned AFTER the fact: the send threw, or the queued item was
+ *  removed by Stop / by the user before it ran. It is ALSO how the one case we
+ *  know in advance speaks (a wrapper-served slash command, round 4) — because
+ *  the record itself is not ours alone: the SERVER writes a preview copy of the
+ *  same submission under the same id and it lands FIRST, so a marker on OUR
+ *  record is never the copy the merge reads. An out-of-line event that names
+ *  the ID reaches whichever copy survived. The record STAYS — the user really did
  *  send that text and the bubble is the truth — but the reader must not let it
  *  CLAIM a codex twin, because no twin will ever come and a leaked claim
  *  deletes an unrelated codex-only record of the same text later (round-2
@@ -1674,8 +1679,8 @@ function noteRecordedUserCid(cid) {
  *  second copy of that algorithm, free to drift. A record with no identity
  *  (`webui_msg_id: ''` — a client frame that carried no msgId) cannot be
  *  retracted; it also never keys by id, so it is the one shape this cannot
- *  cover. Sibling of `webui_no_commit`, which says the same thing at write
- *  time for the cases the wrapper knows in advance (its slash commands). */
+ *  cover, and the chat-input path never produces it (ws-handler mints a msgId
+ *  for every frame that carries none). */
 function retractUserRecord(id, reason) {
   const msgId = asString(id);
   if (!msgId || !recordedUserCids.has(msgId)) return false;
@@ -2646,7 +2651,6 @@ async function handleInput(msg) {
     const normalized = normalizeChatInput(msg.text || '');
     const attachments = [...normalized.attachments, ...(msg.attachments || [])];
     const text = normalized.text || '';
-    const noCommit = !attachments.length && isWrapperSlashCommand(text);
     // ONE SPELLING FOR BOTH PRODUCERS (round 3). What codex persists is what
     // `encodeUserInput` SENT, so our copy is that same array mapped back
     // through userInputToContent — never a hand-rolled second ordering. The
@@ -2662,10 +2666,6 @@ async function handleInput(msg) {
       role: 'user',
       webui_msg_id: msg.msgId || '',
       content: userInputToContent(encodeUserInput(text, attachments)),
-      // A wrapper-served slash command is answered HERE: the text never becomes
-      // a user message on the app-server, so this record has no twin to retire
-      // its claim against and must not make one (round 3).
-      ...(noCommit ? { webui_no_commit: true } : {}),
     });
     // THIS bubble exists now, so whatever the app-server later reports about
     // the same submission (its own item/completed `userMessage`, or a steer we
@@ -2676,7 +2676,30 @@ async function handleInput(msg) {
     // /compact runs a REAL compaction (thread/compact/start, verified on
     // 0.153.4) instead of a wasted model turn, /review starts a review of the
     // uncommitted changes, /model + /effort reuse the set-* verbs.
-    if (!attachments.length && await applySlashCommand(text)) return;
+    // ROUND 4: THE TEXT ENDS HERE, so the bubble must stop claiming a codex
+    // twin — and it says so with a RETRACTION, not with a marker on the record
+    // above. Round 3 declared it at write time (`webui_no_commit`), which was
+    // INERT in production: the SERVER writes its own preview copy of this same
+    // submission (CodexAdapter._buildUserPreview → session.buffer, ws-handler)
+    // under the SAME webui_msg_id, it lands FIRST, and the merge keeps whichever
+    // copy is first — so the claim was always made under the UNMARKED record and
+    // a later codex-only record of the same text was still deleted (measured:
+    // preview+wrapper+later codex record ⇒ 1 bubble, the r3 leg was green only
+    // because its scaffold omitted the preview). The retraction names the
+    // submission by ID, which BOTH copies carry, so it withdraws the claim
+    // whichever one made it. No producer knows at write time any more: the only
+    // one that could — the server preview — must not, because the command list
+    // belongs to the wrapper (SLASH_COMMANDS, advertised through wrapper_meta),
+    // and a second regex in the adapter is exactly the drift this comment block
+    // has been warning about since round 3.
+    // WITHDRAWN BEFORE THE COMMAND RUNS, not after: /compact takes 1–2 minutes
+    // and a wrapper killed in that window would leave the claim standing
+    // forever. Same predicate as the executor, so the two cannot disagree.
+    if (!attachments.length && isWrapperSlashCommand(text)) {
+      retractUserRecord(msg.msgId, 'served by the wrapper as a slash command');
+      await applySlashCommand(text);
+      return;
+    }
     // SEND WHILE BUSY (P2): a turn is active ⇒ thread/queue/add (runs right
     // after the current turn — the same lane peer messages use) instead of
     // turn/start, which codex either STEERS into the running turn or, for

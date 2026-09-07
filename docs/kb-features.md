@@ -348,12 +348,18 @@ impossible rather than a review promise.
   becomes a user message: a wrapper-served slash command (`/compact`, `/review`,
   `/model`, `/effort`), a send whose RPC threw, a queued item Stop or the user
   removed before it ran. Such a claim is never consumed and later DELETES an
-  unrelated codex-only record of the same text. A producer that KNOWS says so on
-  the record (`webui_no_commit`, decided by the same predicate `applySlashCommand`
-  acts on); a producer that LEARNS it afterwards says so out of line — the
-  `webui_user_retracted` event, which names the record by IDENTITY (a data URL
-  can be megabytes, and a second copy of the reader's content-key algorithm
-  would drift). Either way the BUBBLE stays — the user really sent that text,
+  unrelated codex-only record of the same text. EVERY such case says so OUT OF
+  LINE — the `webui_user_retracted` event, which names the submission by
+  IDENTITY (a data URL can be megabytes, and a second copy of the reader's
+  content-key algorithm would drift). There is no write-time declaration
+  (round 4 removed `webui_no_commit`): a typed message has TWO copies of ours,
+  the wrapper's and the SERVER's preview (`CodexAdapter._buildUserPreview` →
+  `session.buffer`), the preview lands FIRST and is therefore the copy that
+  claims, and only the wrapper knows which texts are its own slash commands —
+  so a marker on the wrapper's record was unreachable in production. An id is
+  a fact both copies carry. The slash command retracts BEFORE it runs
+  (`/compact` takes 1–2 minutes; a wrapper killed inside that window must not
+  leave the claim standing). Either way the BUBBLE stays — the user really sent that text,
   and `task_failed` is what reports the failure; only the claim goes. An item
   the app-server had already DRAINED (`{deleted:false}` = it ran) is never
   retracted. The queued PEER copy now carries its app-server cid as the same

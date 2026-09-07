@@ -1483,8 +1483,10 @@ ok(/mode: 'steered'/.test(wsrc) && /steerFailed: steerFailed\.reason/.test(wsrc)
 //     wrapper-served slash command, a send whose RPC threw, a queued item
 //     removed before it ran. Such a record must not CLAIM a twin — a claim no
 //     twin can consume deletes an unrelated codex-only record of the same text
-//     later. The wrapper says so at write time (`webui_no_commit`) when it
-//     knows, and out of line (`webui_user_retracted`) when it learns.
+//     later. The wrapper says so OUT OF LINE in every case
+//     (`webui_user_retracted`, naming the submission by ID) — round 4 removed
+//     the write-time marker, which could only ever ride ONE of the two copies
+//     of ours and never the one the merge reads (see (a2) and (b2)).
 // Driven against the REAL wrapper, so the assertions are about what it WRITES.
 console.log('— ⑦ our copy: one spelling, and a submission that never landed claims nothing');
 const STUB_R3 = `
@@ -1594,9 +1596,27 @@ process.stdin.on('data', (d) => {
   }
 
   // (b2) A WRAPPER-SERVED SLASH COMMAND: answered here, never sent.
+  // ROUND 4: it RETRACTS instead of declaring `webui_no_commit` on its own
+  // record. The declaration was inert in production — the SERVER writes a
+  // preview copy of the same submission first (see (a2)), so the copy the merge
+  // reads never carried the marker. The retraction names the ID, which both
+  // copies carry; the rebuild below proves it on the production scaffold.
   R.send({ type: 'chat-input', text: '/compact', msgId: 'sl-1' });
   ok(await waitFor(() => !!recOf('sl-1')), '/compact renders as the user bubble it is');
-  ok(recOf('sl-1').payload.webui_no_commit === true, 'and DECLARES that it never becomes a user message on the app-server', JSON.stringify(recOf('sl-1').payload));
+  ok(await waitFor(() => retractions().some((r) => r.msg_id === 'sl-1' && /slash command/.test(r.reason || ''))),
+    'and its twin claim is RETRACTED — the text never becomes a user message on the app-server', JSON.stringify(retractions()));
+  ok(recOf('sl-1').payload.webui_no_commit === undefined && !Object.keys(recOf('sl-1').payload).some((k) => /no_?[Cc]ommit/.test(k)),
+    '…and the record itself declares NOTHING (a marker only one of the two copies carries is unreachable)', JSON.stringify(recOf('sl-1').payload));
+  // WITHDRAWN BEFORE THE COMMAND RUNS: /compact takes 1–2 minutes on a real
+  // thread, and a wrapper killed inside that window must not leave a claim
+  // standing over a message it never sent.
+  {
+    const idx = (pred) => R.events().findIndex(pred);
+    const atRetract = idx((e) => e.type === 'event_msg' && e.payload?.type === 'webui_user_retracted' && e.payload.msg_id === 'sl-1');
+    const atCompact = idx((e) => e.payload?.type === 'compact_started');
+    ok(atRetract >= 0 && atCompact >= 0 && atRetract < atCompact,
+      '…and it is written BEFORE the command starts running, not after it finishes', `retract@${atRetract} compact_started@${atCompact}`);
+  }
   ok(await waitFor(() => rpcOf('thread/compact/start').length === 1), '…because the wrapper answered it itself (thread/compact/start, no queue add)');
   ok(!rpcOf('thread/queue/add').some((m) => JSON.stringify(m.params.input || []).includes('/compact')), 'the text was never queued either');
 
@@ -1619,23 +1639,44 @@ process.stdin.on('data', (d) => {
   ok(await waitFor(() => R.lastQueue().some((it) => it.msgId === 'st-1')), 'one more message is queued');
   R.send({ type: 'interrupt' });
   ok(await waitFor(() => retractions().some((r) => r.msg_id === 'st-1' && /Stop/.test(r.reason || ''))), 'Stop clears the queue → that bubble is retracted too', JSON.stringify(retractions()));
-  // FIVE, not four: the parity frame in (a2) was queued behind the running
+  // SIX, not five: the parity frame in (a2) was queued behind the running
   // turn, so Stop swept it too — the same rule, arrived at from a leg that was
-  // not written to test it.
-  ok(retractions().length === 5 && new Set(retractions().map((r) => r.msg_id)).size === 5
-    && ['b-1', 'q-1', 'rm-1', 'img-2', 'st-1'].every((id) => retractions().some((r) => r.msg_id === id)),
-    `exactly one retraction per submission that never landed, five of them (${retractions().length})`, JSON.stringify(retractions().map((r) => r.msg_id)));
-  ok(!retractions().some((r) => r.msg_id === 'img-1' || r.msg_id === 'sl-1'),
-    'and NONE for the message that did land, nor for the slash command (which declared itself on the record instead)', JSON.stringify(retractions().map((r) => r.msg_id)));
+  // not written to test it — and round 4 added the slash command to this list
+  // (its write-time declaration was unreachable in production).
+  ok(retractions().length === 6 && new Set(retractions().map((r) => r.msg_id)).size === 6
+    && ['b-1', 'sl-1', 'q-1', 'rm-1', 'img-2', 'st-1'].every((id) => retractions().some((r) => r.msg_id === id)),
+    `exactly one retraction per submission that never landed, six of them (${retractions().length})`, JSON.stringify(retractions().map((r) => r.msg_id)));
+  ok(!retractions().some((r) => r.msg_id === 'img-1'),
+    'and NONE for the message that did land', JSON.stringify(retractions().map((r) => r.msg_id)));
 
-  // THE REBUILD — the wrapper's REAL records, merged with the rollout a codex
-  // that behaved this way would have written: ONE copy, for the one submission
-  // that actually committed. Every retracted text then arrives again as a
-  // codex-only record in a much later turn (another client, or the same words
-  // after the buffer rotated) — and must survive.
+  // THE REBUILD — the wrapper's REAL records ON THE PRODUCTION SCAFFOLD,
+  // merged with the rollout a codex that behaved this way would have written:
+  // ONE copy, for the one submission that actually committed. Every retracted
+  // text then arrives again as a codex-only record in a much later turn
+  // (another client, or the same words after the buffer rotated) — and must
+  // survive.
+  // THE SCAFFOLD INCLUDES THE SERVER'S PREVIEW (round 4): ws-handler appends
+  // CodexAdapter._buildUserPreview(text, msgId) to session.buffer for EVERY
+  // chat-input, before the wrapper's own line can arrive. It carries the same
+  // webui_msg_id, so it wins the fingerprint and IT is the copy that claims.
+  // A rebuild written without it (round 3's) cannot see anything the wrapper
+  // says on its own record, which is exactly how the inert declaration passed.
   {
     const { mergeCodexRecords } = require(path.join(REPO, 'src/codex-session-store.js'));
-    const ours = R.events().filter((e) => e.type === 'response_item' || (e.type === 'event_msg' && e.payload?.type === 'webui_user_retracted'));
+    const { CodexAdapter } = require(path.join(REPO, 'src/adapters/codex.js'));
+    const wrapperRecs = R.events().filter((e) => e.type === 'response_item' || (e.type === 'event_msg' && e.payload?.type === 'webui_user_retracted'));
+    // One preview per text-only chat-input we sent, spelled by the REAL
+    // adapter from the SAME text and id the client sent, 20ms ahead of the
+    // wrapper's copy (pty round-trip; the server writes it synchronously).
+    const SENT = [['b-1', 'boom now'], ['img-2', JSON.stringify({ type: 'user', message: { content: [{ type: 'text', text: 'twin check' }, { type: 'image', source: { media_type: 'image/png', data: 'iVBORw0KGgo=' } }] } })], ['sl-1', '/compact'], ['q-1', 'qboom please'], ['rm-1', 'to be removed'], ['st-1', 'stop me']];
+    const previews = SENT.map(([id, text]) => {
+      const rec = wrapperRecs.find((e) => e.payload?.webui_msg_id === id);
+      const p = CodexAdapter._buildUserPreview(text, id);
+      return { ...p, timestamp: new Date(Date.parse(rec.timestamp) - 20).toISOString() };
+    });
+    ok(previews.length === 6 && previews.every((p) => p && p.payload.webui_msg_id && p.payload.content.length),
+      'the server preview producer is in the scaffold: one per chat-input, built by the real adapter from the real frame', JSON.stringify(previews.map((p) => p.payload.webui_msg_id)));
+    const ours = [...previews, ...wrapperRecs];
     const base = Date.parse(userRecs()[0].timestamp);
     const tc = (id, ms) => ({ timestamp: new Date(base + ms).toISOString(), type: 'turn_context', payload: { turn_id: id } });
     const theirs = (id, text, ms, tid) => ({ timestamp: new Date(base + ms).toISOString(), type: 'response_item', payload: { type: 'message', id, role: 'user', content: [{ type: 'input_text', text }, ...(text === 'look at this' ? [{ type: 'input_image', image_url: IMG, detail: 'auto' }] : [])], internal_chat_message_metadata_passthrough: { turn_id: tid } } });
@@ -1651,22 +1692,27 @@ process.stdin.on('data', (d) => {
     ];
     const render = (records) => { const mm = new CodexMessageManager('r3-rb'); for (const r of records) mm.processLive(r); return mm.messages.filter((m) => m.role === 'user').map((m) => (m.content || []).map((c) => c.text || '').join('') || '(image)'); };
     const rb = render(mergeCodexRecords(rollout, ours));
-    ok(rb.length === 12, `REBUILD: 7 messages of ours + 5 unrelated codex records = 12 bubbles, none deleted, none doubled (${rb.length})`, JSON.stringify(rb));
+    ok(rb.length === 12, `REBUILD: 7 messages of ours (each with its server preview) + 5 unrelated codex records = 12 bubbles, none deleted, none doubled (${rb.length})`, JSON.stringify(rb));
     ok(rb.filter((t) => t === 'twin check').length === 1, 'the parity message (three records of ours for it, no codex copy) is ONE bubble', JSON.stringify(rb));
     ok(rb.filter((t) => t === 'look at this').length === 1, 'the image message — the only one that committed — collapses to ONE bubble', JSON.stringify(rb));
     for (const t of ['boom now', '/compact', 'qboom please', 'to be removed', 'stop me']) {
       ok(rb.filter((x) => x === t).length === 2, `"${t}": ours AND the unrelated later record both survive`, JSON.stringify(rb));
     }
-    // NEGATIVE CONTROL — the same run with the wrapper's declarations stripped:
+    // NEGATIVE CONTROL — the same run with the wrapper's retractions stripped:
     // a wrapper that stays silent about the submissions that never landed
     // deletes five real messages from the rebuild.
-    const silent = ours.filter((e) => !(e.type === 'event_msg')).map((e) => {
-      if (e.payload?.webui_no_commit === undefined) return e;
-      const { webui_no_commit, ...rest } = e.payload;
-      return { ...e, payload: rest };
-    });
+    const silent = ours.filter((e) => e.type !== 'event_msg');
     const ctlRb = render(mergeCodexRecords(rollout, silent));
-    ok(ctlRb.length === 7, `NEGATIVE CONTROL: strip the retractions + the no-commit marker and five codex-only messages are deleted (${ctlRb.length} of 12)`, JSON.stringify(ctlRb));
+    ok(ctlRb.length === 7, `NEGATIVE CONTROL: strip the retractions and five codex-only messages are deleted (${ctlRb.length} of 12)`, JSON.stringify(ctlRb));
+    // …and the SLASH COMMAND alone, which is the round-4 finding: everything
+    // else the wrapper does is unchanged, only its retraction is dropped, and
+    // the turn-9 '/compact' record disappears. This is the leg r3 could not
+    // have failed — its scaffold had no preview, so the marker on the
+    // wrapper's own record was still the copy that claimed.
+    const noSlashRetraction = ours.filter((e) => !(e.type === 'event_msg' && e.payload?.msg_id === 'sl-1'));
+    const ctlSlash = render(mergeCodexRecords(rollout, noSlashRetraction));
+    ok(ctlSlash.filter((t) => t === '/compact').length === 1 && ctlSlash.length === 11,
+      `NEGATIVE CONTROL (the finding): drop ONLY the slash command's retraction and the unrelated turn-9 '/compact' is deleted (${ctlSlash.length} of 12)`, JSON.stringify(ctlSlash));
   }
   R.stop();
 }

@@ -4339,24 +4339,53 @@ console.log('— ⑨ steered messages: one bubble each, live and after a reload'
     // short-circuited by `seen`; a claim whose twin never existed leaked, and
     // the leaked claim later DELETED a legitimate codex-only record of the same
     // text — round-2 finding ④ through a second back door.
-    // THE RULE: a producer that KNOWS says so on the record (`webui_no_commit`);
-    // a producer that LEARNS it afterwards says so out of line (the
-    // `webui_user_retracted` event, which names the record by identity — the
-    // text can be megabytes of data URL). Both feed one predicate: does this
-    // copy of ours claim?
+    // THE RULE (round 4): EVERY such case says so OUT OF LINE — the
+    // `webui_user_retracted` event, which names the submission by identity (the
+    // text can be megabytes of data URL). Round 3 also had a write-time
+    // declaration (`webui_no_commit`) for the case the wrapper knows in
+    // advance, and it was INERT: a typed message has TWO copies of ours — the
+    // wrapper's and the SERVER's preview (CodexAdapter._buildUserPreview →
+    // session.buffer, ws-handler) — under the same webui_msg_id, the preview
+    // lands FIRST and therefore wins the fingerprint, so the claim was always
+    // made under the UNMARKED record. Only a marker on EVERY copy could have
+    // worked, and only the wrapper knows which texts are its own slash
+    // commands. An id names the submission, and both copies carry the id.
     {
       const noCommit = (id, text, ms) => mine({ webui_msg_id: id, webui_no_commit: true }, text, ms);
       const retract = (id, ms, reason = 'thread/queue/add failed: boom') => ({ timestamp: new Date(T + ms).toISOString(), type: 'event_msg', payload: { type: 'webui_user_retracted', msg_id: id, reason } });
-      // ① the slash command: ours in turn A, a codex-only 'continue' of the
-      // same text in turn B (another client, or the same words typed after the
-      // buffer rotated). Both must render.
+      // ① the slash command, ON THE PRODUCTION SCAFFOLD: the server's preview
+      // record (built here by the REAL adapter from one real client frame, as
+      // ws-handler builds it) + the wrapper's own copy + the retraction, in
+      // turn A; a codex-only '/compact' of the same text in turn B (another
+      // client, or the same words after the buffer rotated). Both must render.
+      const { CodexAdapter } = require(path.join(REPO, 'src/adapters/codex.js'));
+      const preview = (id, text, ms) => ({ ...CodexAdapter._buildUserPreview(text, id), timestamp: new Date(T + ms).toISOString() });
       const slashRoll = [turn('turn-A', 0), turn('turn-B', 60000), theirs('msg_s1', '/compact', 91000, 'turn-B')];
-      ok('a wrapper-served /compact never reaches the app-server, so it claims nothing — a later codex-only record of the same text survives',
-        bubbles(mergeCodexRecords(slashRoll, [noCommit('m-s1', '/compact', 1000)])).length === 2,
-        bubbles(mergeCodexRecords(slashRoll, [noCommit('m-s1', '/compact', 1000)])));
-      const ctl9a = loadPatched('src/codex-session-store.js', [['    claims: ours && !noCommit,\n', '    claims: ours,\n']]);
-      ok('NEGATIVE CONTROL: let it claim anyway and the turn-B message is deleted',
-        ctl9a.mergeCodexRecords(slashRoll, [noCommit('m-s1', '/compact', 1000)]).filter((r) => r.payload?.role === 'user').length === 1);
+      const slashOurs = [preview('m-s1', '/compact', 900), mine({ webui_msg_id: 'm-s1' }, '/compact', 1000), retract('m-s1', 1010, 'served by the wrapper as a slash command')];
+      ok('a wrapper-served /compact never reaches the app-server, so its claim is WITHDRAWN — a later codex-only record of the same text survives',
+        bubbles(mergeCodexRecords(slashRoll, slashOurs)).length === 2,
+        bubbles(mergeCodexRecords(slashRoll, slashOurs)));
+      ok('…and the two copies of ours are still ONE bubble (the preview wins the fingerprint, the wrapper\'s copy folds into it)',
+        bubbles(mergeCodexRecords([turn('turn-A', 0)], slashOurs)).length === 1,
+        bubbles(mergeCodexRecords([turn('turn-A', 0)], slashOurs)));
+      ok('NEGATIVE CONTROL (data): drop the retraction and the leaked claim deletes the turn-B message',
+        bubbles(mergeCodexRecords(slashRoll, slashOurs.slice(0, 2))).length === 1);
+      // THE ROUND-4 FINDING ITSELF, reproduced against ROUND 3's OWN READER
+      // (rebuilt here by patch, so the claim is what r3 shipped). Same code,
+      // two scaffolds: r3's leg (wrapper record only) is green, and the
+      // production one (the server preview in front of it) deletes the turn-B
+      // message — the marker is unreachable because it is not on the copy that
+      // claims. A write-time declaration cannot work while a second producer
+      // writes the same submission first.
+      const ctl9a = loadPatched('src/codex-session-store.js', [[
+        '    claims: ours,\n', '    claims: ours && payload.webui_no_commit !== true,\n',
+      ]]);
+      const r3bubbles = (records) => { const mm = new CodexMessageManager('r3-reader'); for (const r of records) mm.processLive(r); return mm.messages.filter((m) => m.role === 'user').map((m) => (m.content || []).map((c) => c.text || '').join('')); };
+      ok('round 3\'s reader, on round 3\'s scaffold (wrapper record only): the marker works — 2 bubbles',
+        r3bubbles(ctl9a.mergeCodexRecords(slashRoll, [noCommit('m-s1', '/compact', 1000)])).length === 2);
+      ok('THE FINDING: round 3\'s reader on the PRODUCTION scaffold (server preview first) — the marker is inert and the turn-B message is deleted',
+        r3bubbles(ctl9a.mergeCodexRecords(slashRoll, [preview('m-s1', '/compact', 900), noCommit('m-s1', '/compact', 1000)])).length === 1,
+        r3bubbles(ctl9a.mergeCodexRecords(slashRoll, [preview('m-s1', '/compact', 900), noCommit('m-s1', '/compact', 1000)])));
       // ② the send whose RPC threw, retracted out of line — the SAME scenario
       // an arbitrarily long time later (turn A → turn Z), because the claim
       // ledger is turn-independent by design.
@@ -4400,38 +4429,58 @@ console.log('— ⑨ steered messages: one bubble each, live and after a reload'
         CodexMessageManager.SKIPPED_EVENT_TYPES.has('webui_user_retracted')
         && ![...CodexMessageManager._seenUnknownRecords].some((k) => /webui_user_retracted/.test(k)),
         JSON.stringify([...CodexMessageManager._seenUnknownRecords]));
-      // ⑤ THE PURE FUNCTIONS.
-      ok('userTwinKeys: `claims` is false exactly for a record that says it will never be committed, and such a record never yields either',
+      // ⑤ THE PURE FUNCTIONS. Round 4: EVERY copy of ours claims, and only the
+      // retraction withdraws — there is no write-time exemption left, because
+      // no producer can make one on the copy the merge actually reads.
+      ok('userTwinKeys: every copy of OURS claims, codex\'s copy never does',
         userTwinKeys(mine({ webui_msg_id: 'm' }, 'x', 0)).claims === true
-        && userTwinKeys(noCommit('m', 'x', 0)).claims === false
-        && userTwinKeys(noCommit('m', 'x', 0)).ours === true
-        && userTwinKeys(noCommit('m', 'x', 0)).late === false
-        && userTwinKeys({ type: 'response_item', payload: { type: 'message', role: 'user', content: [], webui_peer: { name: 'b' }, webui_no_commit: true } }).late === false
+        && userTwinKeys(preview('m', 'x', 0)).claims === true
+        && userTwinKeys(preview('m', 'x', 0)).ours === true
         && userTwinKeys(theirs('msg_x', 'x', 0)).claims === false);
       ok('retractionIdOf names the event and nothing else',
         retractionIdOf(retract('m-1', 0)) === 'm-1' && retractionIdOf({ type: 'event_msg', payload: { type: 'queue_op_result' } }) === ''
         && retractionIdOf(mine({ webui_msg_id: 'm' }, 'x', 0)) === '' && retractionIdOf(null) === '');
-      ok('…and the marker is stripped from the merge fingerprint AND the normalizer\'s record key, so the same message keys the same with or without it',
+      // THE LEGACY MARKER stays out of every key. Nothing writes it any more,
+      // but wrappers are long-lived (dtach survives an update — 2.361.1), so a
+      // record from a round-3 wrapper must still key like the same message
+      // without it, or those buffers double every typed message on reload.
+      ok('the legacy `webui_no_commit` marker is stripped from the merge fingerprint, the twin content key AND the normalizer\'s record key',
         recordFingerprint(noCommit('m-k', 'x', 0), 't') === recordFingerprint(mine({ webui_msg_id: 'm-k' }, 'x', 0), 't')
+        && userTwinKeys(noCommit('m-k', 'x', 0)).contentKey === userTwinKeys(mine({ webui_msg_id: 'm-k' }, 'x', 0)).contentKey
+        && userTwinKeys(noCommit('m-k', 'x', 0)).contentKey === userTwinKeys(theirs('msg_k', 'x', 0)).contentKey
         && CodexMessageManager.recordKey(noCommit('m-k', 'x', 0)) === CodexMessageManager.recordKey(mine({ webui_msg_id: 'm-k' }, 'x', 0)));
+      ok('…and an r3-era buffer still collapses with codex\'s commit copy (the marker no longer suppresses the claim, so the pair retires normally)',
+        bubbles(mergeCodexRecords([turn('turn-A', 0), theirs('msg_l1', 'legacy', 30000)], [noCommit('m-l1', 'legacy', 1000)])).length === 1);
+      // …and NO producer writes it any more. A marker with a reader rule and no
+      // writer is the shape this round removed; a marker with a writer that the
+      // preview overrides is the shape it removed BEFORE that.
+      ok('NO producer writes `webui_no_commit`: not the wrapper, not the adapter\'s preview, not the ws layer',
+        ['data/bin/codex-chat-wrapper.js', 'src/adapters/codex.js', 'src/ws-handler.js']
+          .every((f) => !/webui_no_commit\s*:/.test(read(f))));
       // ⑥ WIRING PINS — the reader's rule is dead unless the wrapper speaks it.
       const cw9 = read('data/bin/codex-chat-wrapper.js');
-      ok('WIRING PIN: the no-commit declaration uses the SAME predicate applySlashCommand acts on (one regex, no second spelling to drift)',
-        /const noCommit = !attachments\.length && isWrapperSlashCommand\(text\);/.test(cw9)
-        && /\.\.\.\(noCommit \? \{ webui_no_commit: true \} : \{\}\),/.test(cw9)
-        && /if \(!attachments\.length && await applySlashCommand\(text\)\) return;/.test(cw9)
+      // ONE GATE (round 4): the same predicate both withdraws the claim and
+      // decides that the wrapper serves the text — two gates sharing a regex
+      // were what round 3 had, and the declaration they fed was unreachable.
+      ok('WIRING PIN: the retraction and the executor are behind ONE gate (one regex, no second spelling to drift)',
+        /if \(!attachments\.length && isWrapperSlashCommand\(text\)\) \{\n\s*retractUserRecord\(msg\.msgId, 'served by the wrapper as a slash command'\);\n\s*await applySlashCommand\(text\);\n\s*return;\n\s*\}/.test(cw9)
         // ONE regex object, used by the predicate AND by the executor: a second
         // literal listing the commands is what would drift the two apart.
         && /^const SLASH_COMMAND_RE = /m.test(cw9)
         && /function isWrapperSlashCommand\(text\) \{\n\s*return SLASH_COMMAND_RE\.test/.test(cw9)
         && /const m = SLASH_COMMAND_RE\.exec\(String\(text \|\| ''\)\.trim\(\)\);/.test(cw9)
         && (cw9.match(/\/\^\\\/\(compact\|review\|model\|effort\)/g) || []).length === 1);
-      ok('WIRING PIN: every path that learns the submission never landed retracts — turn/start, thread/queue/add, an explicit remove, the Stop sweep',
-        (cw9.match(/retractUserRecord\(/g) || []).length === 5
+      // …and it is withdrawn BEFORE the command runs: /compact takes 1–2
+      // minutes, and a wrapper killed inside that window would otherwise leave
+      // a claim standing over a message it never sent.
+      ok('WIRING PIN: the retraction precedes the await, not the return', cw9.indexOf("retractUserRecord(msg.msgId, 'served by the wrapper as a slash command')") < cw9.indexOf('await applySlashCommand(text);'));
+      ok('WIRING PIN: every path where the submission never lands retracts — turn/start, thread/queue/add, an explicit remove, the Stop sweep, a wrapper-served slash command',
+        (cw9.match(/retractUserRecord\(/g) || []).length === 6
         && /retractUserRecord\(msg\.msgId \|\| cid, 'thread\/queue\/add failed: '/.test(cw9)
         && /retractUserRecord\(msg\.msgId, 'turn\/start failed: '/.test(cw9)
         && /retractUserRecord\(item\.clientUserMessageId, 'removed from the queue before it ran'\)/.test(cw9)
-        && /retractUserRecord\(cid, 'dropped by Stop before it ran'\)/.test(cw9));
+        && /retractUserRecord\(cid, 'dropped by Stop before it ran'\)/.test(cw9)
+        && /retractUserRecord\(msg\.msgId, 'served by the wrapper as a slash command'\)/.test(cw9));
       ok('…and a retraction is only ever emitted for a record we actually wrote', /if \(!msgId \|\| !recordedUserCids\.has\(msgId\)\) return false;/.test(cw9));
     }
 

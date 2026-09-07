@@ -16,6 +16,7 @@
 // CLIENT. ORCH may use everything below it. CLIENT may use only PURE (via the
 // esbuild bundle) — never ORCH internals.
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 const REPO = path.resolve(new URL('..', import.meta.url).pathname);
@@ -217,6 +218,55 @@ for (const [edge] of EXCEPTIONS) {
     'manage-agents reads stop-nudge bounds from SETTINGS_SCHEMA (no hardcoded twin)');
   ok(!/Number\(inp\.value\)\s*\|\|/.test(ma),
     'no falsy-default coalescing on number inputs (explicit 0 is a valid value)');
+}
+
+// 42. NO CONTROL BYTES IN SOURCE (steer-all round 4). Two raw NUL bytes — one
+//     used as the separator inside a Map key, one echoed in the comment above
+//     it — made src/codex-session-store.js BINARY: file(1) called it "data",
+//     `grep -n USER_RETRACTION_EVENT` on the very file that DEFINES that
+//     constant printed nothing at all, and ripgrep answered "binary file
+//     matches" with no line. Every search-driven read of that module — a
+//     review, an incident, a twin sweep — silently skipped it. A separator
+//     that cannot collide with the data is fine; spelling it as a raw byte
+//     instead of the escape (byte-identical at runtime) is not.
+{
+  // A legitimately binary FIXTURE is not source; everything else in these
+  // trees is text by construction (the census at the time: .js .mjs .sh .json
+  // .jsonl .ps1 plus the extension-less agent CLIs in data/bin).
+  const BINARY_EXT = new Set(['.zst', '.gz', '.png', '.jpg', '.jpeg', '.gif', '.ico', '.woff', '.woff2', '.wasm', '.pdf', '.zip', '.tar']);
+  const nulOffenders = (base, roots) => {
+    const out = [];
+    for (const root of roots) {
+      (function walk(dir) {
+        let entries;
+        try { entries = fs.readdirSync(path.join(base, dir), { withFileTypes: true }); } catch { return; }
+        for (const e of entries) {
+          const p42 = dir + '/' + e.name;
+          if (e.isDirectory()) { walk(p42); continue; }
+          if (!e.isFile() || BINARY_EXT.has(path.extname(e.name).toLowerCase())) continue;
+          let buf;
+          try { buf = fs.readFileSync(path.join(base, p42)); } catch { continue; }
+          const at = buf.indexOf(0);
+          if (at !== -1) out.push(`${p42} (byte ${at}, line ${buf.slice(0, at).toString('utf-8').split('\n').length})`);
+        }
+      })(root);
+    }
+    return out;
+  };
+  const offenders = nulOffenders(REPO, ['src', 'data/bin', 'scripts']);
+  ok(!offenders.length, `no source file carries a NUL byte — one makes the WHOLE file invisible to grep/rg (${offenders.slice(0, 3).join('; ') || 'clean'})`);
+  // NEGATIVE CONTROL: the scanner has to actually see one — and must not fire
+  // on the escape sequence that replaced it, nor on a binary fixture.
+  const tmp42 = fs.mkdtempSync(path.join(os.tmpdir(), 'arch-nul-'));
+  try {
+    fs.mkdirSync(path.join(tmp42, 'src'));
+    fs.writeFileSync(path.join(tmp42, 'src/clean.js'), 'const k = `a\\u0000b`; // the escape, not the byte\n');
+    fs.writeFileSync(path.join(tmp42, 'src/dirty.js'), Buffer.concat([Buffer.from('const k = `a'), Buffer.from([0]), Buffer.from('b`;\n')]));
+    fs.writeFileSync(path.join(tmp42, 'src/rollout.zst'), Buffer.from([0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x01]));
+    const found = nulOffenders(tmp42, ['src']);
+    ok(found.length === 1 && found[0].startsWith('src/dirty.js (byte 12, line 1)'),
+      `NEGATIVE CONTROL: a planted NUL is found, while the escape and a binary fixture are not (${JSON.stringify(found)})`);
+  } finally { try { fs.rmSync(tmp42, { recursive: true, force: true }); } catch {} }
 }
 
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);

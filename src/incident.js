@@ -175,7 +175,12 @@ async function captureLocal(dir, { dataDir, cids }) {
         if (!locate) continue;
         let fp = null;
         try { fp = locate(cid) || null; } catch { fp = null; }
-        if (!fp || typeof fp !== 'string' || fp.startsWith(' ')) continue;
+        // A NUL-prefixed "path" is an opaque HANDLE, never a real file
+        // (transcript-service's DEVICE_HANDLE convention). Spelled as an
+        // escape rather than the raw byte it used to be: one control
+        // character makes the whole source file binary to grep/ripgrep,
+        // and nothing in it can be found by search after that.
+        if (!fp || typeof fp !== 'string' || fp.startsWith('\u0000')) continue;
         if (!hits.includes(fp)) { try { if (fs.existsSync(fp)) hits.push(fp); } catch { } }
         if (hits.includes(fp)) harnessOfPath.set(fp, h.id);
       }

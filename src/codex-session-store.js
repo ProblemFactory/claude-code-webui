@@ -402,6 +402,11 @@ function settingsSignature(record) {
 // unconsumed codex copy of the same content IN THE SAME TURN (a submission's
 // two copies are always in the turn that committed it) by dropping ITSELF.
 // Nothing earlier is ever deleted, and a steered/typed record never yields.
+// `webui_no_commit` has NO producer since round 4 (see userTwinKeys) but stays
+// on this list: wrappers are long-lived (dtach survives an update — the
+// 2.361.1 skew class), and a marker only one producer ever wrote must never
+// be the difference between two copies of one message. Retire it when no
+// buffer written by a round-3 wrapper can still be replayed.
 const WEBUI_USER_MARKERS = ['webui_msg_id', 'webuiMsgId', 'client_msg_id', 'clientMsgId', 'webui_queue_id', 'webuiQueueId', 'webui_queue_via', 'webui_after_commit', 'webuiAfterCommit', 'webui_no_commit', 'webuiNoCommit', 'webui_origin', 'webui_peer'];
 const TWIN_VOLATILE_FIELDS = ['id', 'item_id', 'itemId', 'internal_chat_message_metadata_passthrough', 'thread_id', 'turn_id'];
 // The event the wrapper writes when it learns that a user record it ALREADY
@@ -466,27 +471,32 @@ function userTwinKeys(record) {
   // when no pre-marker buffers survive.
   const marked = payload.webui_after_commit === true || payload.webuiAfterCommit === true;
   // A SUBMISSION THAT NEVER REACHED THE APP-SERVER has no twin to retire the
-  // pair against, so it must not claim (round 3): our copy is written BEFORE
-  // the submission is accepted, and a wrapper-served slash command (/compact,
-  // /review, /model, /effort) is answered by the wrapper itself — the text
-  // never becomes a user message. Such a record SAYS so, and a leaked claim
-  // would delete an unrelated codex-only record of the same text later, which
-  // is round-2 finding ④ through a second back door. Learned-later cases (a
-  // send whose RPC threw, an item removed from the queue before it ran) say
-  // the same thing out of line, with the retraction event below.
-  const noCommit = payload.webui_no_commit === true || payload.webuiNoCommit === true;
+  // pair against, so its claim must be withdrawn (round 3): our copy is written
+  // BEFORE the submission is accepted, and a wrapper-served slash command
+  // (/compact, /review, /model, /effort) is answered by the wrapper itself —
+  // the text never becomes a user message. A leaked claim would delete an
+  // unrelated codex-only record of the same text later, which is round-2
+  // finding ④ through a second back door.
+  // THERE IS NO WRITE-TIME DECLARATION FOR THIS (round 4). Round 3 had one — a
+  // `webui_no_commit` marker on the record — and it was INERT: a typed message
+  // has TWO copies of ours, the wrapper's and the SERVER's preview
+  // (CodexAdapter._buildUserPreview, written first and therefore the copy this
+  // function is asked about), and only the wrapper can know that a text is one
+  // of its own slash commands. Every case now speaks through the retraction
+  // event below, which names the submission by ID — a fact both copies carry.
   return {
     ours,
-    claims: ours && !noCommit,
-    late: ours && !noCommit && (marked || payload.webui_peer !== undefined),
+    claims: ours,
+    late: ours && (marked || payload.webui_peer !== undefined),
     contentKey,
   };
 }
 
 /** The submission id a `webui_user_retracted` event names, or ''. The wrapper
- *  emits it when it learns — after the fact — that a user record it already
- *  wrote will never be committed by the app-server (the RPC threw, or the
- *  queued item was removed by Stop / by the user before it ran). It names the
+ *  emits it when a user record it already wrote will never be committed by the
+ *  app-server — learned after the fact (the RPC threw, or the queued item was
+ *  removed by Stop / by the user before it ran) or known at once (a
+ *  wrapper-served slash command). It names the
  *  record by IDENTITY, never by content: the text can be megabytes of data URL,
  *  and re-deriving a content key inside the wrapper would be a second copy of
  *  userContentKey's algorithm, free to drift from this one. */
@@ -509,7 +519,7 @@ function mergeCodexRecords(historyRecords, liveRecords) {
   // is a twin of the same event.
   let lastSettings = null; // { record, sig, turnId }
   const userClaims = new Map();   // content key → copies of OURS no codex twin has consumed yet (forward, turn-independent)
-  const codexUserOut = new Map(); // `<turn> <content key>` → codex copies emitted in THIS turn no late twin of ours has consumed
+  const codexUserOut = new Map(); // `<turn>\u0000<content key>` → codex copies emitted in THIS turn no late twin of ours has consumed
   const oursByIdentity = new Map(); // submission id → the content key the copy of OURS carrying that id claimed under (what a retraction names)
   let currentTurnId = 'prelude';
   for (const record of sortRecords([...(historyRecords || []), ...(liveRecords || [])])) {
@@ -585,7 +595,7 @@ function mergeCodexRecords(historyRecords, liveRecords) {
     }
     const twin = userTwinKeys(record);
     if (twin) {
-      const turnKey = `${currentTurnId} ${twin.contentKey}`;
+      const turnKey = `${currentTurnId}\u0000${twin.contentKey}`;
       if (twin.ours) {
         const emitted = twin.late ? (codexUserOut.get(turnKey) || 0) : 0;
         if (emitted > 0) {   // we are the LATE copy and codex's is already on screen — yield, never delete
