@@ -211,10 +211,18 @@ function create({ engine, deliverRef, permissionRulesRef }) {
           // failure (queue/add rejected, turn/start error) must RE-STASH the
           // text for next-turn injection — never silently lose a promised
           // message. (ok:true needs no action: the wrapper recorded it.)
+          // PROPERTY ACCESS, never a call (round-3 verifier, reproduced): the
+          // lazy singleton refs are mk() Proxies over a plain `{}` target —
+          // truthy, but NOT callable. `deliverRef()` threw TypeError on every
+          // failed delivery and the bare `catch {}` ate it, so this lane
+          // logged "re-stashing" and stashed nothing. The catch now logs the
+          // message verbatim: a degrade path that swallows its own bug is the
+          // only reason this survived (2.276.0 writer-sweep lesson).
           if (msg.type === 'event_msg' && msg.payload?.type === 'peer_message_result' && msg.payload.ok === false && msg.payload.text) {
             const cid = session.backendSessionId || session.claudeSessionId;
             console.log(`[deliver] rpc-queue wrapper delivery failed (${msg.payload.reason || 'unknown'}) — re-stashing for ${cid}`);
-            try { if (cid) deliverRef()?.stashFor(cid, { source: 'agent', fromName: msg.payload.fromName || null, text: String(msg.payload.text) }); } catch {}
+            try { if (cid) deliverRef?.stashFor?.(cid, { source: 'agent', fromName: msg.payload.fromName || null, text: String(msg.payload.text) }); }
+            catch (e) { console.warn(`[deliver] ${id}: re-stash failed: ${e.message}`); }
           }
           // A notification that could NOT be steered fell back to the queue
           // (the turn ended between the check and the RPC, or it was a
@@ -235,8 +243,15 @@ function create({ engine, deliverRef, permissionRulesRef }) {
           // deliberately card-less, never an "unknown record" (round-2
           // verifier: the earlier version of this comment promised a live
           // broadcast the client never implemented).
+          // PROPERTY ACCESS, never a call (round-3 verifier, reproduced on the
+          // real registry): `permissionRulesRef` is an mk() Proxy over `{}` —
+          // `ref()` is a TypeError, so EVERY answer was dropped and every
+          // "Show rules…" on a live codex session waited out the 20s timeout
+          // and reported `read-failed`. The Proxy's get trap already returns a
+          // BOUND method, or `undefined` while the singleton is not up yet, so
+          // the optional chain is the whole null check.
           if (msg.type === 'event_msg' && msg.payload?.type === 'permission_rules') {
-            try { permissionRulesRef?.()?.onWrapperRecord?.(id, msg.payload); } catch (e) { console.warn(`[permission-rules] ${id}: answer handling failed: ${e.message}`); }
+            try { permissionRulesRef?.onWrapperRecord?.(id, msg.payload); } catch (e) { console.warn(`[permission-rules] ${id}: answer handling failed: ${e.message}`); }
           }
           // Codex plan tool → the session's live TODO summary (board pill)
           if (msg.type === 'event_msg' && msg.payload?.type === 'plan_updated' && Array.isArray(msg.payload.plan)) {

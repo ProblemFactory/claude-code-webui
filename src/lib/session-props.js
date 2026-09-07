@@ -1,7 +1,7 @@
 import { escHtml, copyText, showConfirmDialog, stripCwdHostLabel, taskGroupColor } from './utils.js';
 import { SESSION_STATE_META, SESSION_URGENCY_META } from './sidebar-tasks.js';
 import { getBackendMeta, getAgentKindMeta, getAgentRoleLabel, responseStyleCaps, responseStyleOrigin, spawnValueOrigin, effortDisplay, composerSendModes, notificationDeliveryFor, worktreeCapsFor, worktreePick, permissionRulesCaps } from './agent-meta.js';
-import { loadInto } from './permission-rules-view.js';
+import { loadInto, renderInto } from './permission-rules-view.js';
 import { t } from './i18n.js';
 import { registerOpenAction } from './window-types.js';
 
@@ -405,8 +405,20 @@ export function openSessionProps(app, sessionRef, { syncId } = {}) {
     // the whole machine (opencode: the serve reports ONE resolved config with
     // no per-key origin) says so instead of pretending it is session-scoped.
     // HUMAN-TRIGGERED: the tree loads on the button, never on render — the
-    // codex rung asks the session's own agent, and a panel that re-rendered on
-    // every broadcast would ask it again on every broadcast.
+    // codex rung asks the session's own agent (a 20s round trip on ITS
+    // app-server), and a panel that re-rendered on every broadcast would ask
+    // it again on every broadcast.
+    //
+    // …WHICH IS EXACTLY WHY THE LOADED RECORD IS KEPT ON THE WINDOW (round-3
+    // verifier, reproduced at 375×667): `render()` starts with
+    // `root.innerHTML = ''` and re-runs on every 'active-sessions' broadcast —
+    // i.e. continuously while the session you opened Properties for is
+    // working. The tree the user just paid an agent round trip for vanished
+    // within a second and the button went back to "Show rules…". The record is
+    // re-RENDERED (never re-fetched: nothing here may talk to the agent
+    // without a click) and it is keyed by the QUERY it answered, so if the
+    // session's backend/cwd/host changes underneath, the stale tree is dropped
+    // rather than relabelled — a tree is an answer to one specific question.
     {
       const prCaps = permissionRulesCaps(s.backend || 'claude');
       if (prCaps.source) {
@@ -417,33 +429,50 @@ export function openSessionProps(app, sessionRef, { syncId } = {}) {
           ? t('Read-only: which rule comes from which file or layer.')
           : t('Read-only, and machine-wide: this agent reports one resolved set of rules, not a per-session one.');
         prSec.appendChild(hint);
+        const query = {
+          backend: s.backend || 'claude',
+          scope: prCaps.session ? 'session' : 'instance',
+          sessionId: prCaps.session ? (s.webuiId || '') : '',
+          // TWO fields of a merged session record, both of which have been
+          // wrong here before (round-2 verifier, both reproduced):
+          //  · `s.host` is the field. `s.hostId` does not exist on a session
+          //    — it is an OPENSPEC name (session-card.js / sidebar-tasks.js
+          //    both MAP `hostId: s.host` when they build one), so reading it
+          //    here sent `host=` EMPTY for every remote session and the
+          //    server's `remote-session` guard never fired: the panel showed
+          //    THIS machine's ~/.claude/settings.json as the remote
+          //    session's rules.
+          //  · `s.cwd` on a merged record is the host-labeled DISPLAY string
+          //    ("box: /home/u/proj", sidebar.js _merge) — the 2.225.2 law
+          //    says it must never reach an operation, and a settings-file
+          //    reader is an operation. Strip it here too, so a mistake in
+          //    ONE of the two fields cannot compose a fake path either.
+          cwd: stripCwdHostLabel(s.cwd || ''),
+          host: s.host || '',
+        };
+        const queryKey = JSON.stringify(query);
         const tree = document.createElement('div');
         const btn = document.createElement('button');
         btn.className = 'task-detail-btn';
-        btn.textContent = t('Show rules…');
+        const held = winInfo._permRulesLoaded;
+        const haveHeld = !!held && held.key === queryKey && !!held.record;
+        btn.textContent = haveHeld ? t('Reload rules') : t('Show rules…');
+        if (haveHeld) renderInto(tree, held.record);
         btn.onclick = () => {
           btn.disabled = true;
-          loadInto(tree, {
-            backend: s.backend || 'claude',
-            scope: prCaps.session ? 'session' : 'instance',
-            sessionId: prCaps.session ? (s.webuiId || '') : '',
-            // TWO fields of a merged session record, both of which have been
-            // wrong here before (round-2 verifier, both reproduced):
-            //  · `s.host` is the field. `s.hostId` does not exist on a session
-            //    — it is an OPENSPEC name (session-card.js / sidebar-tasks.js
-            //    both MAP `hostId: s.host` when they build one), so reading it
-            //    here sent `host=` EMPTY for every remote session and the
-            //    server's `remote-session` guard never fired: the panel showed
-            //    THIS machine's ~/.claude/settings.json as the remote
-            //    session's rules.
-            //  · `s.cwd` on a merged record is the host-labeled DISPLAY string
-            //    ("box: /home/u/proj", sidebar.js _merge) — the 2.225.2 law
-            //    says it must never reach an operation, and a settings-file
-            //    reader is an operation. Strip it here too, so a mistake in
-            //    ONE of the two fields cannot compose a fake path either.
-            cwd: stripCwdHostLabel(s.cwd || ''),
-            host: s.host || '',
-          }).finally(() => { btn.disabled = false; btn.textContent = t('Reload rules'); });
+          loadInto(tree, query)
+            .then((rec) => {
+              if (!rec) return;
+              winInfo._permRulesLoaded = { key: queryKey, record: rec };
+              // A broadcast that lands WHILE the read is in flight rebuilt the
+              // section around a now-detached tree, and loadInto correctly
+              // refuses to paint a detached node — so the answer would have
+              // been held and never shown. Repaint from the held record (no
+              // second fetch, so the click is still the only thing that ever
+              // asks the agent).
+              if (!tree.isConnected) render();
+            })
+            .finally(() => { btn.disabled = false; btn.textContent = t('Reload rules'); });
         };
         prSec.append(btn, tree);
       }

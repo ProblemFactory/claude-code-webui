@@ -74,9 +74,20 @@ export function summaryLine(record) { return ruleTreeSummary(record, { t }); }
 
 /**
  * Load + render, with an honest in-flight state. HUMAN-TRIGGERED by every
- * caller (a click) — nothing here polls, and the codex instance rung spawns a
- * bounded app-server child, so an automatic refresh would be a process per
- * repaint.
+ * caller (a click): nothing in this file polls, refreshes on a broadcast, or
+ * retries. The reason is the COST of the rungs that are still offered — the
+ * codex session rung is a full round trip to that session's own running
+ * app-server (20s ceiling), so an automatic refresh would spend an agent's
+ * turn per repaint. (It is no longer "a process per repaint": the codex
+ * INSTANCE rung, which did spawn a bounded app-server child, was measured
+ * phoning the vendor and deleted in round 2 — `permissionRules.instance:false`
+ * + the `would-connect` refusal. Keeping that as the stated reason would have
+ * left a rule justified by a mechanism that no longer exists.)
+ *
+ * Returns the record on every path, INCLUDING the one where `el` was detached
+ * mid-flight — a caller that holds the record (session-props.js keeps it on
+ * the window so a re-render does not throw the answer away) must be able to
+ * repaint without asking again.
  */
 export async function loadInto(el, query) {
   el.classList.add('perm-rules');

@@ -159,7 +159,30 @@ ok('server.js DESTRUCTURES recordCodexQuotaSignal from the engine (was exported-
 ok('…and forwards it to session-stdout in the engine object', /modelsMatch, noteSessionProduced, noteTurnEnd, noteWallSignal, recordCodexQuotaSignal, recordRateLimitEvent, resolveUsageKey, usageEstimator \}/.test(srv));
 ok('…and passes getDeliver for the re-stash fallback', /getDeliver: \(\) => \{ try \{ return deliver; \} catch \{ return null; \} \}/.test(srv));
 const ss = read('src/server/stdout/codex-events.js'); // S5: the codex-events consumer module
-ok('stdout/codex-events re-stashes on peer_message_result ok:false (a promised message is never silently lost), keeping the echoed label', /peer_message_result' && msg\.payload\.ok === false && msg\.payload\.text/.test(ss) && /stashFor\(cid, \{ source: 'agent', fromName: msg\.payload\.fromName \|\| null, text: String\(msg\.payload\.text\) \}\)/.test(ss));
+ok('stdout/codex-events re-stashes on peer_message_result ok:false (a promised message is never silently lost), keeping the echoed label', /peer_message_result' && msg\.payload\.ok === false && msg\.payload\.text/.test(ss) && /stashFor\?\.\(cid, \{ source: 'agent', fromName: msg\.payload\.fromName \|\| null, text: String\(msg\.payload\.text\) \}\)/.test(ss));
+// …and it reaches stashFor THROUGH the lazy ref rather than calling it (round
+// 3, reproduced): `deliverRef` is an mk() Proxy over a plain `{}` — truthy but
+// NOT callable — so the shipped `deliverRef()?.stashFor(...)` threw TypeError
+// into a bare `catch {}` on every failed delivery: the log line above said
+// "re-stashing" and nothing was stashed. This grep only pins the SPELLING; the
+// FUNCTIONAL proof (feed the record through the real stdout registry with an
+// mk()-wrapped ref and assert stashFor received it, plus a drift guard over
+// every consumer) lives in scripts/test-permission-rules.mjs, because a pin
+// like this one is exactly what made the broken line look protected.
+// Comment lines are exempt from the negative half — they are where the retired
+// spelling is NAMED so the next reader knows what not to write.
+const codeOnly = (src) => src.split('\n').filter((l) => !/^\s*(\/\/|\*)/.test(l)).join('\n');
+ok('…through the lazy ref, never CALLING it (a mk() Proxy is not a function — the shipped `deliverRef()` threw into a bare catch)', /deliverRef\?\.stashFor\?\./.test(ss) && !/deliverRef\s*\(/.test(codeOnly(ss)));
+ok('…and the degrade catch on that path REPORTS instead of swallowing (2.276.0 — the silent catch is why this lived)', /catch \(e\) \{ console\.warn\(`\[deliver\] \$\{id\}: re-stash failed/.test(ss));
+const acpEv = read('src/server/stdout/acp-events.js');
+ok('ACP twin: same two properties on its own peer_result lane (the two consumers were copies of each other, so the bug was too)', /deliverRef\?\.stashFor\?\./.test(acpEv) && !/deliverRef\s*\(/.test(codeOnly(acpEv)) && /re-stash failed/.test(acpEv));
+// NEGATIVE CONTROL: the shipped line really is what this pair rejects, and the
+// replacement really is what it accepts (otherwise "no offender" is a regex bug).
+ok('NEGATIVE CONTROL: the pin rejects the exact line that shipped and accepts the one that replaced it', (() => {
+  const bad = "            try { if (cid) deliverRef()?.stashFor(cid, { source: 'agent' }); } catch {}";
+  const good = "            try { if (cid) deliverRef?.stashFor?.(cid, { source: 'agent' }); } catch (e) {}";
+  return /deliverRef\s*\(/.test(codeOnly(bad)) && !/deliverRef\s*\(/.test(codeOnly(good));
+})());
 const wf = read('src/server/wrapper-files.js');
 ok('wrapperCaps surfaces peerMessage (stateless, negative verdicts never cached)', /peerMessage: !!\(caps && caps\.peerMessage\)/.test(wf));
 

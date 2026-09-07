@@ -437,6 +437,218 @@ const mod = mkModule();
     execSync(`grep -rl "permission_rules" ${JSON.stringify(path.join(REPO, 'src/lib'))} || true`, { encoding: 'utf8' }).trim() === '');
 }
 
+// ── WIRING PIN: the answer travels through the REAL stdout seam (round 3) ──
+// The block above proves the SHAPING; this proves the DELIVERY, because the
+// two failed independently. The suite used to call `mod.onWrapperRecord(...)`
+// on the module directly — green — while the only production caller was
+// `permissionRulesRef?.()`, and `permissionRulesRef` is an mk() Proxy whose
+// TARGET IS A PLAIN OBJECT: truthy, `?.` passes, and the call is a TypeError.
+// Every "Show rules…" on a live codex session therefore waited out the 20s
+// timeout and reported `read-failed`. That is the 2.355.0 unstaged-wiring
+// class, and only a test that goes through `createStdoutRegistry` with an
+// mk()-wrapped ref — exactly as src/server/session-stdout.js builds it — can
+// see it.
+{
+  const { createStdoutRegistry } = require(path.join(REPO, 'src/server/stdout/index.js'));
+  const { mk } = require(path.join(REPO, 'src/server/lazy.js'));
+  // The primitive, stated once so the reason the asserts below exist is not folklore.
+  {
+    let threw = null;
+    const ref = mk(() => ({ onWrapperRecord() { return 'ok'; } }));
+    try { ref?.(); } catch (e) { threw = e.message; }
+    check('THE PRIMITIVE: an mk() lazy ref is NOT callable — `ref()` throws even though `ref?.` passes (its Proxy target is `{}`)',
+      /is not a function/.test(threw || ''), String(threw));
+    check('THE PRIMITIVE: …and property access through it returns a BOUND method, which is why every consumer must use `ref?.method?.()`',
+      ref?.onWrapperRecord?.() === 'ok' && mk(() => null)?.onWrapperRecord?.() === undefined);
+  }
+  // Drive the real consumers on a fake pty, with the deps wired the way the
+  // engine wires them.
+  const driveConsumer = (protocol, { pr, deliver } = {}) => {
+    const warns = [], logs = [];
+    const oWarn = console.warn, oLog = console.log, oErr = console.error;
+    console.warn = (...a) => warns.push(a.join(' '));
+    console.log = (...a) => logs.push(a.join(' '));
+    console.error = (...a) => warns.push(a.join(' '));
+    let reg, consumer, feed = null;
+    try {
+      reg = createStdoutRegistry({
+        activeSessions: new Map(),
+        engine: { noteTurnEnd() { }, noteTurnStart() { }, recordCodexQuotaSignal() { }, recordClaudeQuotaSignal() { } },
+        CLAUDE_STREAM_TYPES: new Set(), _seenStreamTypes: new Set(), USAGE_SCANNER_PATH: '/nonexistent',
+        checkClaudeGoalStatus() { }, noteModelSeen() { }, noteHarnessModels() { }, sbSeenFirst() { },
+        hosts: mk(() => null), usageHistory: mk(() => null),
+        deliverRef: mk(() => deliver ?? null),
+        permissionRulesRef: mk(() => pr ?? null),
+      });
+      consumer = reg.get(protocol);
+      const session = { buffer: '', backend: protocol === 'acp-events' ? 'opencode' : 'codex', backendSessionId: 'cid-1' };
+      consumer.attach(session, 'sess-wire', { onData: (cb) => { feed = cb; }, onExit: () => { } }, {
+        feedLive() { }, broadcastToSession() { }, broadcastActiveSessions() { },
+        readSessionMeta: () => ({}), writeSessionMeta() { }, updateSessionTodos() { },
+        applyTaskToolUpdate() { }, emitTaskListTodos() { },
+      });
+    } finally { console.warn = oWarn; console.log = oLog; console.error = oErr; }
+    return {
+      feed: (obj) => {
+        const w = console.warn, l = console.log, e2 = console.error;
+        console.warn = (...a) => warns.push(a.join(' '));
+        console.log = (...a) => logs.push(a.join(' '));
+        console.error = (...a) => warns.push(a.join(' '));
+        try { feed(JSON.stringify(obj) + '\n'); } finally { console.warn = w; console.log = l; console.error = e2; }
+      },
+      warns, logs,
+    };
+  };
+  const codexAnswer = (rid) => ({ type: 'event_msg', payload: { type: 'permission_rules', ok: true, requestId: rid, cwd: '/w', config: CODEX_FIXTURE.config, origins: CODEX_FIXTURE.origins, layers: CODEX_FIXTURE.layers } });
+  const codexFailedPeer = { type: 'event_msg', payload: { type: 'peer_message_result', ok: false, reason: 'queue-refused', text: 'hello peer', fromName: 'bob' } };
+  // `type:'acp'` is load-bearing — the consumer forwards anything else straight
+  // to feedLive, so a fixture without it would test nothing and pass.
+  const acpAnswer = (rid) => ({ type: 'acp', kind: 'permission_rules', ok: false, requestId: rid, reason: 'unsupported-by-protocol', detail: 'ACP v1 has no config-read method', mode: 'build', modes: ['build'] });
+  const acpFailedPeer = { type: 'acp', kind: 'peer_result', ok: false, reason: 'no-lane', text: 'hello acp', fromName: 'bob' };
+
+  for (const [protocol, answer, failedPeer] of [['codex-events', codexAnswer, codexFailedPeer], ['acp-events', acpAnswer, acpFailedPeer]]) {
+    // ① the real seam delivers the permission-rule answer to the real sink
+    const got = [];
+    const d = driveConsumer(protocol, { pr: { onWrapperRecord: (sid, p) => got.push([sid, p]) }, deliver: { stashFor() { } } });
+    d.feed(answer('rq-1'));
+    check(`WIRING PIN (${protocol}): a permission_rules answer reaches the reader's onWrapperRecord through the REAL registry + a real mk() ref`,
+      got.length === 1 && got[0][0] === 'sess-wire', JSON.stringify({ got: got.length, warns: d.warns }));
+    check(`WIRING PIN (${protocol}): …and it arrives with its requestId, so the pending read can be matched (never "the next record wins")`,
+      got.length === 1 && (got[0][1]?.requestId || got[0][1]?.payload?.requestId) === 'rq-1', JSON.stringify(got[0]?.[1] || null));
+
+    // ② NEGATIVE CONTROL — a neutered ref must make this leg RED, so the pass
+    // above is a measurement of the seam and not of a fake in the path.
+    const neutered = driveConsumer(protocol, { pr: null, deliver: null });
+    neutered.feed(answer('rq-2'));
+    check(`NEGATIVE CONTROL (${protocol}): with the singleton not up yet the answer simply goes nowhere — no throw, no crash of the stdout loop`,
+      neutered.warns.length === 0, JSON.stringify(neutered.warns));
+
+    // ③ the degrade path LOGS VERBATIM (2.276.0): a sink that throws must be
+    // reported, because a silent catch is exactly how this bug survived.
+    const boom = driveConsumer(protocol, { pr: { onWrapperRecord() { throw new Error('sink exploded'); } }, deliver: { stashFor() { } } });
+    boom.feed(answer('rq-3'));
+    check(`WIRING PIN (${protocol}): a throwing sink is reported with the message VERBATIM (a catch that hides its own bug is how this one lived)`,
+      boom.warns.some((w) => /sink exploded/.test(w)), JSON.stringify(boom.warns));
+
+    // ④ the SAME primitive on the delivery lane — "a promised message never
+    // silently dies" was false here too: deliverRef() threw into a bare catch,
+    // so the log said "re-stashing" and nothing was stashed.
+    const wantText = failedPeer.payload?.text ?? failedPeer.text;
+    const stashed = [];
+    const dl = driveConsumer(protocol, { pr: { onWrapperRecord() { } }, deliver: { stashFor: (cid, o) => stashed.push([cid, o]) } });
+    dl.feed(failedPeer);
+    check(`WIRING PIN (${protocol}): a FAILED peer delivery really reaches stashFor — the log line and the stash are now the same fact`,
+      stashed.length === 1 && stashed[0][0] === 'cid-1' && stashed[0][1].text === wantText,
+      JSON.stringify({ stashed, logs: dl.logs, warns: dl.warns }));
+    check(`WIRING PIN (${protocol}): …and the "re-stashing" log is not a promise the code does not keep`,
+      dl.logs.some((l) => /re-stashing/.test(l)) && stashed.length === 1, JSON.stringify({ logs: dl.logs, stashed: stashed.length }));
+    const dlBoom = driveConsumer(protocol, { pr: { onWrapperRecord() { } }, deliver: { stashFor() { throw new Error('stash exploded'); } } });
+    dlBoom.feed(failedPeer);
+    check(`WIRING PIN (${protocol}): a stash that throws SAYS SO (the bare catch that ate this for 3 releases is gone)`,
+      dlBoom.warns.some((w) => /stash exploded/.test(w)), JSON.stringify(dlBoom.warns));
+  }
+
+  // ⑤ STANDING SWEEP: every module that builds mk() refs, not just this one.
+  // The two offenders were copies of each other in src/server/stdout/, but the
+  // PROPERTY that makes them wrong ("an mk() ref is a Proxy over `{}`, so a call
+  // is always a TypeError") belongs to src/server/lazy.js and holds in every
+  // module that uses it. Enumerating the directory I had just been looking at is
+  // the tool this class of bug has already beaten twice, so the file set is
+  // DERIVED (every .js under src/ + server.js that REQUIRES src/server/lazy.js
+  // and binds an mk() ref) and PRINTED. Per file, the names are the ones THAT
+  // file binds: `hosts` in session-stdout is a lazy ref, `hosts` elsewhere may
+  // be an ordinary object.
+  {
+    const walk = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+      const full = path.join(dir, e.name);
+      return e.isDirectory() ? walk(full) : (e.name.endsWith('.js') ? [full] : []);
+    });
+    const candidates = [...walk(path.join(REPO, 'src')), path.join(REPO, 'server.js')];
+    const builders = [];       // [relPath, [lazy names it binds]]
+    const offenders = [];
+    for (const full of candidates) {
+      const src = fs.readFileSync(full, 'utf8');
+      // `mk` must be THE lazy bridge, not a name collision: src/lib/terminal.js
+      // has a local `const mk = (cls) => …` DOM helper, and sweeping its
+      // `badge` binding would some day fail a legitimate call. Over-inclusion
+      // is cheap, but not when it can turn an unrelated line red.
+      if (!/require\((['"])[.\/]*lazy\.js\1\)/.test(src)) continue;
+      const names = [...new Set([...src.matchAll(/const\s+(\w+)\s*=\s*mk\(/g)].map((m) => m[1]))];
+      if (!names.length) continue;
+      const rel = path.relative(REPO, full);
+      builders.push([rel, names]);
+      src.split('\n').forEach((line, i) => {
+        if (/^\s*(\/\/|\*)/.test(line)) return;                     // comments may NAME the retired spelling
+        // `ref(` or `ref?.(` — a CALL. `ref?.method?.(` and `ref.method(` do
+        // not match, because the `(` must follow the name (with at most an
+        // optional-chain punctuator between), never a property name.
+        for (const n of names) {
+          if (new RegExp(`\\b${n}\\s*(\\?\\.)?\\s*\\(`).test(line)) offenders.push(`${rel}:${i + 1}: ${line.trim().slice(0, 110)}`);
+        }
+      });
+    }
+    // The consumers do not BUILD their refs (session-stdout hands them in), so
+    // they are swept with the names their engine binds — the seam the bug used.
+    const engine = builders.find(([rel]) => rel === 'src/server/session-stdout.js');
+    if (engine) {
+      for (const f of fs.readdirSync(path.join(REPO, 'src/server/stdout')).filter((n) => n.endsWith('.js'))) {
+        const rel = path.join('src/server/stdout', f);
+        fs.readFileSync(path.join(REPO, rel), 'utf8').split('\n').forEach((line, i) => {
+          if (/^\s*(\/\/|\*)/.test(line)) return;
+          for (const n of engine[1]) {
+            if (new RegExp(`\\b${n}\\s*(\\?\\.)?\\s*\\(`).test(line)) offenders.push(`${rel}:${i + 1}: ${line.trim().slice(0, 110)}`);
+          }
+        });
+      }
+    }
+    console.log('    swept for mk()-ref CALLS: ' + builders.map(([rel, n]) => `${rel}(${n.length})`).join(', ') + ' + src/server/stdout/*');
+    check('standing sweep: the derived file set is non-empty, is every real importer of src/server/lazy.js, and includes the engine that hands the refs to the stdout consumers',
+      builders.length >= 5 && !!engine && engine[1].length >= 4
+      && !builders.some(([r]) => r === 'src/lib/terminal.js'), JSON.stringify(builders.map(([r]) => r)));
+    check('standing sweep: NOTHING calls a lazy mk() ref as a function (its Proxy target is `{}` — the call is always a TypeError)',
+      offenders.length === 0, offenders.join('\n    '));
+    // NEGATIVE CONTROL: the detector really matches the two lines that shipped,
+    // and does NOT match the two that replaced them — otherwise the zero above
+    // is a broken regex rather than a clean tree.
+    const bad = ['try { permissionRulesRef?.()?.onWrapperRecord?.(id, msg.payload); } catch (e) {}',
+      'try { if (cid) deliverRef()?.stashFor(cid, { source: \'agent\' }); } catch {}'];
+    const good = ['try { permissionRulesRef?.onWrapperRecord?.(id, msg.payload); } catch (e) {}',
+      'try { if (cid) deliverRef?.stashFor?.(cid, { source: \'agent\' }); } catch (e) {}',
+      'const r = hosts.device(hostId); usageHistory.record(ev);'];
+    const hits = (s) => ['permissionRulesRef', 'deliverRef', 'hosts', 'usageHistory'].some((n) => new RegExp(`\\b${n}\\s*(\\?\\.)?\\s*\\(`).test(s));
+    check('NEGATIVE CONTROL: the sweep matches BOTH lines that shipped, and neither of the two that replaced them (nor an ordinary `ref.method()`)',
+      bad.every(hits) && good.every((s) => !hits(s)), JSON.stringify({ bad: bad.map(hits), good: good.map(hits) }));
+  }
+}
+
+// ── COMMENTS STATE WHAT THE CODE DOES (round 3) ──
+// This batch's own stated value is that a comment describing a mechanism that
+// was deleted (or never existed) is a defect — it is what shipped the
+// "second window sees the same tree" promise in round 2. Two more were found
+// in round 3, so both are pinned the same way, each with a control that fails
+// if the pin is checking a string nobody would write anyway.
+{
+  const view = fs.readFileSync(path.join(REPO, 'src/lib/permission-rules-view.js'), 'utf8');
+  check('the view no longer justifies its human-trigger rule with the codex INSTANCE rung — round 2 DELETED that rung (`permissionRules.instance:false`)',
+    !/instance rung spawns a bounded app-server child/.test(view));
+  check('…and it states the reason that is actually true today: the codex SESSION rung is a round trip to that session\'s own app-server',
+    /session rung is a full round trip/.test(view) && /would-connect/.test(view));
+  const base = fs.readFileSync(path.join(REPO, 'src/adapters/base.js'), 'utf8');
+  const prDoc = base.slice(Math.max(0, base.indexOf('READ-ONLY PERMISSION-RULE READ')), base.indexOf('formatReadPermissionRules ='));
+  check('the adapter doc for the read verb no longer names ws-handler as its gate — there is no ws message for this verb at all',
+    prDoc.length > 100 && !/ws-handler/.test(prDoc), prDoc.slice(0, 240));
+  check('…and it names the REAL gates: src/server/permission-rules.js read() (caps row) + readViaSession() (the wrapper advert)',
+    /server\/permission-rules\.js/.test(prDoc) && /readViaSession/.test(prDoc) && /wrapperCaps/.test(prDoc), prDoc.slice(0, 400));
+  // the FACT the comment now asserts, measured rather than believed
+  const wsSrc = fs.readFileSync(path.join(REPO, 'src/ws-handler.js'), 'utf8');
+  const createSrc = fs.readFileSync(path.join(REPO, 'src/ws-create.js'), 'utf8');
+  check('MEASURED: no ws layer calls formatReadPermissionRules — the ONLY caller is the HTTP reader',
+    !/formatReadPermissionRules/.test(wsSrc) && !/formatReadPermissionRules/.test(createSrc)
+    && /formatReadPermissionRules/.test(fs.readFileSync(path.join(REPO, 'src/server/permission-rules.js'), 'utf8')));
+  check('NEGATIVE CONTROL: its two SIBLING verbs really are ws-gated, so "no ws-handler" is a distinction this file draws and not a blanket that would pass anywhere',
+    /formatSetResponseStyle/.test(wsSrc) && /formatQueueOp/.test(wsSrc));
+}
+
 // the registry's own shape (the vendor-whitelist suite enforces the proofs)
 {
   check('every shipped oracle declares argv + a json flag + a proof', ORACLES_MOD.ORACLES.every((o) => Array.isArray(o.argv) && o.argv.length && typeof o.json === 'boolean' && o.proof));
@@ -736,6 +948,120 @@ if (!CHROME) {
     }
     check('375×667 WIRING PIN: no copy-path button offers a path that exists on neither machine',
       !remote.error && (remote.paths || []).length === 0, JSON.stringify(remote.paths));
+
+    // ── THE WINDOW'S OWN RE-RENDER MUST NOT EAT THE ANSWER (round 3) ──
+    // `render()` opens with `root.innerHTML = ''` and re-runs on every
+    // 'active-sessions' broadcast — which fires on every session
+    // create/exit/attach AND on every agent TodoWrite (coalesced to 500ms
+    // server-side), i.e. continuously while the very session you opened
+    // Properties for is working. The tree the user paid a click (and, on
+    // codex, a 20s agent round trip) for vanished within a second and the
+    // button went back to "Show rules…". Reproduced here at 375×667 before the
+    // fix: layers 4 → 0, label "Reload rules" → "Show rules…".
+    // The SENTINEL is what makes this leg non-vacuous: it must be GONE
+    // afterwards, proving the broadcast really rebuilt the body and the tree
+    // survived a real re-render rather than a no-op.
+    const rerender = await evaljs(`(async () => {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      document.querySelectorAll('.modal-overlay, #perm-rules-dialog, #local-oracle-dialog').forEach((e) => e.remove());
+      const out = { made: [], reads: 0 };
+      const realFetch = window.fetch;
+      window.fetch = function (u) { try { if (String(u).includes('/api/permission-rules')) out.reads++; } catch (e) { } return realFetch.apply(this, arguments); };
+      try {
+        const s = { sessionId: 'pr-rerender', webuiId: 'pr-rerender', backend: 'claude', mode: 'chat',
+                    cwd: '/tmp', name: 'perm-rules rerender probe', status: 'live' };
+        const w = window.app.openSessionProps(s);
+        if (!w) return { error: 'openSessionProps returned nothing' };
+        out.made.push(w.id);
+        const btnOf = () => [...w.content.querySelectorAll('button')].find((b) => /Show rules|Reload rules/.test(b.textContent));
+        const btn = btnOf();
+        if (!btn) return { error: 'no rules button' };
+        btn.click();
+        for (let i = 0; i < 80; i++) { if (w.content.querySelector('.perm-rules .perm-layer')) break; await sleep(150); }
+        out.layersAfterClick = w.content.querySelectorAll('.perm-rules .perm-layer').length;
+        out.labelAfterClick = (btnOf() || {}).textContent || '';
+        out.readsAfterClick = out.reads;
+        const sentinel = document.createElement('i');
+        sentinel.id = 'pr-rerender-sentinel';
+        w.content.querySelector('.session-props').appendChild(sentinel);
+        // byte-identical to WsManager's own dispatch (src/lib/ws.js onmessage)
+        [...window.app.ws.globalHandlers].forEach((h) => { try { h({ type: 'active-sessions', sessions: [] }); } catch (e) { } });
+        await sleep(900);                                   // past the 300ms trailing-edge debounce
+        out.sentinelSurvived = !!w.content.querySelector('#pr-rerender-sentinel');
+        out.layersAfterBroadcast = w.content.querySelectorAll('.perm-rules .perm-layer').length;
+        out.rulesAfterBroadcast = w.content.querySelectorAll('.perm-rules .perm-rule').length;
+        out.labelAfterBroadcast = (btnOf() || {}).textContent || '';
+        out.editControls = w.content.querySelectorAll('.perm-rules input, .perm-rules select, .perm-rules textarea, .perm-rules [contenteditable]').length;
+        out.readsAfterBroadcast = out.reads;
+        // …and a record only answers the question it was ASKED. Change the
+        // session's cwd underneath and the held tree must be DROPPED, not
+        // relabelled onto a different question.
+        s.cwd = '/tmp/somewhere-else';
+        [...window.app.ws.globalHandlers].forEach((h) => { try { h({ type: 'active-sessions', sessions: [] }); } catch (e) { } });
+        await sleep(900);
+        out.layersAfterCwdChange = w.content.querySelectorAll('.perm-rules .perm-layer').length;
+        out.labelAfterCwdChange = (btnOf() || {}).textContent || '';
+        out.readsAfterCwdChange = out.reads;
+      } finally {
+        window.fetch = realFetch;
+        try { document.getElementById('pr-rerender-sentinel').remove(); } catch (e) { }
+        for (const id of out.made) { try { window.app.wm.closeWindow(id); } catch (e) { } }
+      }
+      return out;
+    })()`);
+    check('375×667 RE-RENDER PIN: an active-sessions broadcast really rebuilt the body (the sentinel is gone) — so the next assert is a measurement, not a no-op',
+      !rerender.error && rerender.layersAfterClick >= 1 && rerender.sentinelSurvived === false, JSON.stringify(rerender));
+    check('375×667 RE-RENDER PIN: …and the loaded tree SURVIVES it, layer-for-layer, with the button still saying "Reload rules"',
+      !rerender.error && rerender.layersAfterBroadcast === rerender.layersAfterClick && rerender.rulesAfterBroadcast >= 3
+      && /Reload rules/.test(rerender.labelAfterBroadcast || '') && rerender.editControls === 0, JSON.stringify(rerender));
+    check('375×667 RE-RENDER PIN: it survives by RE-RENDERING the held record — the broadcast asks the server (and, on codex, the agent) NOTHING',
+      !rerender.error && rerender.readsAfterClick === 1 && rerender.readsAfterBroadcast === 1, JSON.stringify(rerender));
+    check('NEGATIVE CONTROL: change the question (the session\'s cwd) and the held tree is DROPPED back to "Show rules…" — a tree answers ONE query, and nothing re-fetches on its own',
+      !rerender.error && rerender.layersAfterCwdChange === 0 && /Show rules/.test(rerender.labelAfterCwdChange || '')
+      && rerender.readsAfterCwdChange === 1, JSON.stringify(rerender));
+
+    // A broadcast landing WHILE the read is in flight detaches the tree, and
+    // loadInto correctly refuses to paint a detached node — so the answer
+    // would be held and never shown. It must repaint from the held record,
+    // still without a second fetch.
+    const inflight = await evaljs(`(async () => {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      document.querySelectorAll('.modal-overlay, #perm-rules-dialog, #local-oracle-dialog').forEach((e) => e.remove());
+      const out = { made: [], reads: 0 };
+      const realFetch = window.fetch;
+      window.fetch = function (u) {
+        const isRead = String(u).includes('/api/permission-rules');
+        if (isRead) out.reads++;
+        const p = realFetch.apply(this, arguments);
+        return isRead ? p.then(async (r) => { await sleep(1200); return r; }) : p;
+      };
+      try {
+        const s = { sessionId: 'pr-inflight', webuiId: 'pr-inflight', backend: 'claude', mode: 'chat',
+                    cwd: '/tmp', name: 'perm-rules inflight probe', status: 'live' };
+        const w = window.app.openSessionProps(s);
+        if (!w) return { error: 'openSessionProps returned nothing' };
+        out.made.push(w.id);
+        const btnOf = () => [...w.content.querySelectorAll('button')].find((b) => /Show rules|Reload rules/.test(b.textContent));
+        const btn = btnOf();
+        if (!btn) return { error: 'no rules button' };
+        btn.click();
+        await sleep(150);                                   // still reading
+        [...window.app.ws.globalHandlers].forEach((h) => { try { h({ type: 'active-sessions', sessions: [] }); } catch (e) { } });
+        await sleep(500);                                   // the rebuild happened mid-flight
+        out.detachedMidFlight = w.content.querySelectorAll('.perm-rules .perm-layer').length === 0;
+        for (let i = 0; i < 80; i++) { if (w.content.querySelector('.perm-rules .perm-layer')) break; await sleep(150); }
+        out.layers = w.content.querySelectorAll('.perm-rules .perm-layer').length;
+        out.label = (btnOf() || {}).textContent || '';
+      } finally {
+        window.fetch = realFetch;
+        for (const id of out.made) { try { window.app.wm.closeWindow(id); } catch (e) { } }
+      }
+      return out;
+    })()`);
+    check('375×667 RE-RENDER PIN: a broadcast DURING the read does not lose the answer — it lands on the rebuilt section, from the held record, with no second fetch',
+      !inflight.error && inflight.detachedMidFlight === true && inflight.layers >= 1
+      && /Reload rules/.test(inflight.label || '') && inflight.reads === 1, JSON.stringify(inflight));
+
     try { ws.close(); } catch { }
   }
   cleanup();
