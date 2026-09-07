@@ -3048,4 +3048,8 @@ export default {
   "Editing a queued message — send to save, Esc to cancel": "キュー内メッセージを編集中 —— 送信で保存、Esc でキャンセル",
   "Drag to reorder (Alt+Up / Alt+Down)": "ドラッグで並べ替え（Alt+↑ / Alt+↓）",
   "Attachments cannot be added while editing a queued message — cancel the edit first.": "キュー内メッセージの編集中は添付を追加できません —— 先に編集をキャンセルしてください。",
+  "That queued message could not be edited — your rewritten text was kept in the input.": "そのキュー内メッセージは編集できませんでした —— 書き直した本文は入力欄に残してあります。",
+  "The previous edit is still saving — one moment.": "前回の編集をまだ保存中です —— 少しお待ちください。",
+  "The edit was not confirmed — the session may be unresponsive.": "編集が確認できませんでした —— セッションが応答していない可能性があります。",
+  "Connection lost — the edit may not have been saved.": "接続が切れました —— この編集は保存されていない可能性があります。",
 };

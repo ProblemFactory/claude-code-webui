@@ -3049,4 +3049,8 @@ export default {
   "Editing a queued message — send to save, Esc to cancel": "正在编辑排队中的消息 —— 发送即保存，Esc 取消",
   "Drag to reorder (Alt+Up / Alt+Down)": "拖动可重新排序（Alt+↑ / Alt+↓）",
   "Attachments cannot be added while editing a queued message — cancel the edit first.": "编辑排队中的消息时不能添加附件 —— 请先取消编辑。",
+  "That queued message could not be edited — your rewritten text was kept in the input.": "这条排队消息没能改成 —— 你重写的文字已保留在输入框里。",
+  "The previous edit is still saving — one moment.": "上一次编辑还在保存中 —— 请稍候。",
+  "The edit was not confirmed — the session may be unresponsive.": "编辑没有得到确认 —— 该会话可能没有响应。",
+  "Connection lost — the edit may not have been saved.": "连接已断开 —— 这次编辑可能没有保存。",
 };

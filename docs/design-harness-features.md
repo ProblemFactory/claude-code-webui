@@ -110,7 +110,15 @@
 
 ### 2.1 codex 队列动词 reorder / edit / run-now / run-all —— ✅ 已落地 2026-09-07（owner 决策 (a)）
 
-> **状态（2026-09-07 实装）**：七动词表 `queueVerbs` 落在 backend-caps（旧的 `{steer,queueOps}` 布尔降为派生视图，客户端镜像用同一个 `deriveInputModes`）；ws 帧走相对语义并按动词表 + 运行中 wrapper 的动词广告双重门控；codex wrapper 里 `listQueueAll()`（翻完 `nextCursor`）/ `reorderedIds()` / `replaceQueuedText()` 三个纯函数把相对意图翻成 RPC 的绝对形状；ACP wrapper 也上了 `reorder`/`edit`（本地数组三个 splice），但 `run-now`/`run-all` 按**结构性理由**声明为 false——那条队列只在 prompt 运行期间存在，"现在就跑"只能永远答 busy。门：test-queue-steer 274（含真 0.153.4 app-server 腿 + 真浏览器 trusted 指针拖拽腿）/ test-codex-p2-wrapper 220（分页 stub + 背着 wrapper 注入的条目）/ test-acp-harness 114。
+> **状态（2026-09-07 实装）**：七动词表 `queueVerbs` 落在 backend-caps（旧的 `{steer,queueOps}` 布尔降为派生视图，客户端镜像用同一个 `deriveInputModes`）；ws 帧走相对语义并按动词表 + 运行中 wrapper 的动词广告双重门控；codex wrapper 里 `listQueueAll()`（翻完 `nextCursor`）/ `reorderedIds()` / `replaceQueuedText()` 三个纯函数把相对意图翻成 RPC 的绝对形状；ACP wrapper 也上了 `reorder`/`edit`（本地数组三个 splice），但 `run-now`/`run-all` 按**结构性理由**声明为 false——那条队列只在 prompt 运行期间存在，"现在就跑"只能永远答 busy。门：test-queue-steer 312（含真 0.153.4 app-server 腿 + 真浏览器 trusted 指针拖拽腿）/ test-codex-p2-wrapper 220（分页 stub + 背着 wrapper 注入的条目）/ test-acp-harness 114。
+>
+> **round-2 对抗验证：6 条真缺陷（2 major + 4 minor），全部已修 + 每条一个回归断言（都做了负控：在修复前的代码上逐条变红）**：
+> ① **被拒的编辑会毁掉用户刚打的字**——`_send()` 在发帧之前就把草稿写回输入框，而 `ok:false` 回来时没有任何地方还留着那段重写；而 `gone` 正是这个控件的**常态竞态**（改队首那条，你打字期间 turn 结束，app-server 把**原文**跑了）。改为 `_pendingEdit{id,text,draftBefore}`：文字留在框里直到有结果，成功才还草稿（且框里仍是原文才还），被拒就**把重写交还**——还在队列里就直接回到编辑态（理由挂在行上），已经没了就变成草稿 + 吐司说明去向。收口：结果/ws 拒绝/republish 掉行/掉线/20s 兜底，且同一时刻只允许一个编辑。
+> ② **拖拽期间的一次 republish 会让落点变成队尾**——闭包在 pointerdown 时抓死了行元素，`queue_changed` 重建 `innerHTML` 后它们全是**游离节点**（rect 全零 ⇒ 中点判定认为指针在每一行下面）。改为每帧 `liveRows()` 重查、`finish()` 里按当前 `this._queue` 重算 ids、被拖的行中途出队就什么都不发，并让 `_renderQueue` 对进行中的拖拽重跑一次 `apply()`（指示器不丢）。
+> ③ **pending 行可能永远转下去**——`_dispatchQueueOp` 先标记再发，但 ws 层 `queue-op-unsupported` 不会变成 `queue-result`，而 `_queueOpsLive()` 为假时干脆什么都没发。改：`_sendQueueOp` 返回布尔、发不出去就撤销标记；服务端拒绝帧**回显 `op`+`id`**，`_onSessionError` 据此结束该行。
+> ④ **动词漂移规则被写反了**——服务端把「不知道」发成 `queueVerbs: []`，客户端拿它做交集 ⇒ 一个只报 `inputQueue` 的旧 wrapper**整条 strip 消失**（kb-api 写的恰好相反）。改：不知道就发 `null`，客户端对**没带 verbs 的 `queue_changed`** 做与服务端相同的映射（`LEGACY_QUEUE_VERBS`，该数组移入 PURE 的 backend-caps，两端共用一份）。
+> ⑤ **编辑态借用了草稿通道**——重写会被当作会话草稿存盘并同步到其它客户端，反向也成立（别人的草稿同步会盖掉正在编辑的文本）。改：编辑期间跳过防抖 `saveDraft`，入站草稿同步落到**暂存的草稿**上。
+> ⑥ **`edit` 重新打开了无上限的裸 stdin 通道**——`queue-op` 直写 pty 且不过 frame-file 旁路，正是那类被撕碎的路径。改：按 wrapper 自己的 `QUEUE_EDIT_MAX_CHARS`(20000) 拒绝过长文本，并在**成帧之后**再按 `QUEUE_OP_MAX_BYTES`(64KiB) 拒绝（JSON 转义能把字符数放大六倍，字符上限推不出字节上限），两条都带证据、都不静默。
 >
 > **本轮实测把设计里两条断言改写了（证据优先）**：
 > ① 「分页截断 + 全序替换 = **静默删项**」**不成立**——0.153.4 对不完整的全序数组回 `-32600 queue reorder must include every queued submission exactly once`，是**大声拒收**而不是静默删除。翻完分页仍然是硬性纪律，但理由变成「不翻完这个动词根本不工作」，而不是「会丢数据」。分页本身也确实是真的：`limit:1` 实测回 `nextCursor:"1"`，游标可继续。

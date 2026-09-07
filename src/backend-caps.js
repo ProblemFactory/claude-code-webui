@@ -104,6 +104,17 @@
 // personality"), so it can only arrive from an explicit pick.
 const QUEUE_VERBS = Object.freeze(['remove', 'steer', 'steer-all', 'reorder', 'edit', 'run-now', 'run-all']);
 
+/** What a wrapper that advertises a queue but NAMES NO VERBS is taken to
+ *  serve — i.e. every build up to and including 2.369.55, which had exactly
+ *  these three. It lives HERE, in the PURE module, because BOTH sides need it:
+ *  the server maps a verb-less sidecar/publication onto it (src/server/
+ *  wrapper-files.js re-exports this very array) and the CLIENT applies the
+ *  SAME mapping to a verb-less in-band `queue_changed` — a client that instead
+ *  read "no verbs" as "serves nothing" hid the whole strip from an older
+ *  session the server was happily serving (round-2 verifier). One list, one
+ *  meaning, both ends. */
+const LEGACY_QUEUE_VERBS = Object.freeze(['remove', 'steer', 'steer-all']);
+
 /** The derived view of a queue verb table. PURE, shared with the CLIENT
  *  (src/lib/agent-meta.js imports it — a PURE module is bundled directly), so
  *  the LAW lives in one place even though each side declares its own row. */
@@ -209,4 +220,4 @@ function setVerifiedCap(backend, key, value) {
   return true;
 }
 
-module.exports = { BACKEND_CAPS, capsOf, setVerifiedCap, QUEUE_VERBS, deriveInputModes };
+module.exports = { BACKEND_CAPS, capsOf, setVerifiedCap, QUEUE_VERBS, LEGACY_QUEUE_VERBS, deriveInputModes };

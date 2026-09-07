@@ -175,6 +175,17 @@ impossible rather than a review promise.
   misattribute them (the wrapper refuses it too, not just the UI). The bubble in
   the transcript deliberately keeps the words you originally typed — it is the
   record of what you sent; the strip row shows what will actually run.
+  **Your rewrite is never spent on a refusal.** The typed text stays in the box
+  until the save is answered — the borrowed draft comes back only on success.
+  If the save is refused (the usual case is a race: the turn ended while you
+  were typing and the app-server ran the ORIGINAL), the rewrite is handed back —
+  still queued ⇒ you are put straight back into edit mode with the reason on the
+  row; already gone ⇒ your text becomes the input's draft and a toast says so,
+  ready to send as a new message. While an edit is open the box is NOT this
+  session's draft: what you type is not persisted as the draft and another
+  client's draft sync cannot overwrite it mid-edit. A single edit at a time; a
+  very long rewrite (>20000 characters) is refused out loud rather than sent
+  through a channel that would shred it.
 - **Run now / Run all now (2026-09-07)** — `thread/queue/start` with and without
   an id. While a turn is running BOTH are refused out loud ("a turn is already
   running — the queue runs as soon as it ends") rather than being queued behind
@@ -185,6 +196,13 @@ impossible rather than a review promise.
 - **A row shows what it is doing.** An op in flight dims its row; a refusal
   marks it and keeps the reason on the row (the system card scrolls away, the
   row does not); a row being edited says so, and the strip says how to finish.
+  A row NEVER spins forever: if the window is disconnected/read-only the click
+  sends nothing and the mark is undone with a toast, and a refusal from the
+  server names the row it refused so the spinner ends there too.
+- **The strip stays correct while you are dragging.** A queue that changes
+  mid-drag (a peer message arrives, another client removes an item) re-renders
+  the rows under your pointer; the drop still lands where you dropped it, and a
+  row that left the queue during the drag simply does not move anything.
 - **MULTI-QUEUE SEMANTICS (the rule to remember):** steering item N injects
   **only N**. The others keep their relative order and still run after the turn.
   A steered item is removed from the queue, so it never runs twice. `Steer all`

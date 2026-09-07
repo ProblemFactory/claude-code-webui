@@ -11,6 +11,11 @@ import { UI_ICONS } from './icons.js';
 import { t } from './i18n.js';
 import { agentMemoryPathRes, effortDisplay, getBackendMeta } from './agent-meta.js';
 import { registerCommand, registerKeybinding, runCommand, hasCommand } from './contributions.js';
+// The verb list a wrapper that publishes a queue WITHOUT naming verbs serves —
+// the SAME array the server maps a verb-less sidecar onto (src/server/
+// wrapper-files.js). Imported, never re-typed: the two ends disagreeing about
+// "no list" is the bug this constant now prevents.
+import { LEGACY_QUEUE_VERBS } from '../backend-caps.js';
 import { mcpParts, messageKind, foldToggleFor, countKinds, runSummaryLabel } from './chat-run-summary.js';
 import { collabTrafficStats, collabHeadText, collabRunPart, subAgentStreamLabel } from '../collab-row.js';
 
@@ -1357,13 +1362,17 @@ class ChatView {
   /** `extra` carries the verb's own argument — {afterId} for a reorder (null
    *  MEANS the front of the queue, so the key is only spread when the caller
    *  supplied one) and {text} for an edit. ONE writer of the frame, for the
-   *  strip, the row keyboard and the bubble chip alike. */
+   *  strip, the row keyboard and the bubble chip alike.
+   *  RETURNS whether a frame actually went out: the strip marks the row
+   *  pending BEFORE dispatching, and a dispatch that sends nothing must undo
+   *  that mark (nothing will ever answer it — round-2 verifier). */
   _sendQueueOp(op, id, extra) {
-    if (!this._queueOpsLive()) return;
+    if (!this._queueOpsLive()) return false;
     const frame = { type: 'queue-op', sessionId: this.sessionId, op, id: id || null };
     if (extra && 'afterId' in extra) frame.afterId = extra.afterId === null ? null : String(extra.afterId);
     if (extra && typeof extra.text === 'string') frame.text = extra.text;
     this.ws.send(frame);
+    return true;
   }
 
   /** Steer the queued message a bubble belongs to (the chip entry point): the
@@ -2895,7 +2904,13 @@ class ChatView {
     // A published queue IS the wrapper's in-band "I serve queue ops" advert
     // (every current wrapper emits a baseline one at boot), so a window created
     // before its sidecar existed turns its controls on here.
-    if (op.subtype === 'queue') { if (op.supported) this._setQueueSupported(true, op.verbs || undefined); this._setQueue(op.items); return; }
+    // A publication that NAMES NO VERBS is a pre-verb-table wrapper, and it is
+    // mapped onto the legacy three EXACTLY as the server maps a verb-less
+    // sidecar (round-2 verifier: `|| undefined` fell back to whatever was
+    // known before, which for a fresh window is the create/attach payload's
+    // "nothing known" — the intersection then hid the ENTIRE strip from a
+    // session the server would have served remove/steer/steer-all for).
+    if (op.subtype === 'queue') { if (op.supported) this._setQueueSupported(true, Array.isArray(op.verbs) ? op.verbs : LEGACY_QUEUE_VERBS.slice()); this._setQueue(op.items); return; }
     // The outcome of ONE queue op: the strip row ends its pending state and,
     // on a refusal, wears the reason (the system card the normalizer also
     // emits scrolls away — the control the user pressed must speak too).
@@ -3864,6 +3879,13 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
       // choice (2.369.58). 'style-not-live' covers transient/other reasons (a
       // sidecar not written yet, a dead session) and must change no belief.
       if (msg.code === 'style-wrapper-old') this._statusBar?.setResponseStyleLive?.(false);
+      // A QUEUE-OP refusal from the ws layer never becomes a `queue-result`
+      // meta op (the wrapper never saw the frame), so the row the strip marked
+      // pending had no way back — it spun forever (round-2 verifier). The
+      // refusal echoes the op's own `id` for exactly this join; an id-less
+      // batch verb ends every pending row, which is what setQueueOpResult('')
+      // already means.
+      if (msg.code === 'queue-op-unsupported') { try { this._chatInput?.setQueueOpResult(msg.id || '', false, msg.message || msg.error || ''); } catch { } }
       this._renderers.appendSystem('✗ ' + (msg.message || msg.error || t('Message rejected.')));
       try { track('event', msg.code === 'input-rejected' ? 'chat-input-rejected' : 'chat-action-refused', this._telemDetail(`${msg.code || 'action'}: ${msg.message || msg.error || ''}`)); } catch {}
       return;

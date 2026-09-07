@@ -46,6 +46,11 @@ export class ChatInput {
     this._queueRowState = new Map();
     this._editingQueueId = null;     // the row being edited, if any
     this._editDraftBefore = null;    // what was in the textarea before editing began
+    // An edit whose frame is OUT but whose RESULT has not landed:
+    // {id, text, draftBefore}. The typed rewrite lives here (and stays in the
+    // textarea) until the wrapper's answer proves it landed — see
+    // _resolvePendingEdit.
+    this._pendingEdit = null;
     this._queueDrag = null;          // {id, ctl, ...} while a reorder drag runs
 
     // Attachment state
@@ -126,11 +131,27 @@ export class ChatInput {
       this._autoSize();
       // Debounced draft save
       clearTimeout(this._draftTimer);
+      this._draftTimer = null;
+      // EDIT MODE BORROWS THE TEXTAREA, NOT THE DRAFT CHANNEL (round-2
+      // verifier): while a queued message is being rewritten, what is in the
+      // box is THAT MESSAGE — persisting it as this session's draft would
+      // push the queued text into data/drafts.json and, through StateSync,
+      // into every other client's input box, while THIS box shows the real
+      // draft again the moment the edit ends. The pre-edit draft is held in
+      // `_editDraftBefore` / `_pendingEdit.draftBefore` and restored from
+      // there; the store keeps whatever it had.
+      if (this._editingQueueId || this._pendingEdit) return;
       this._draftTimer = setTimeout(() => saveDraft('chat', this._sessionId, this._textarea.value), 300);
     });
 
     // Sync draft from other clients via StateSync
     this._draftSyncHandler = (value) => {
+      // …and the same wall in the other direction: another client's draft must
+      // not overwrite a rewrite in progress (the next send would then save the
+      // FOREIGN text into the queued message). Land it on the draft we will
+      // restore when the edit finishes instead of on the live textarea.
+      if (this._pendingEdit) { this._pendingEdit.draftBefore = value || ''; return; }
+      if (this._editingQueueId) { this._editDraftBefore = value || ''; return; }
       this._textarea.value = value || '';
       this._autoSize?.();
     };
@@ -694,6 +715,14 @@ export class ChatInput {
       this.hideTyping();
       showToast(t('Connection lost — your message may not have been sent; the text was restored to the input'), { type: 'error' });
     }
+    if (disconnected && this._pendingEdit) {
+      // Same class: the edit frame may never have reached the server, and its
+      // result certainly will not arrive on this socket. The rewrite is
+      // already in the textarea — end the wait and say so (a row left
+      // spinning behind a dead socket is the lie the row state exists to
+      // prevent).
+      this._resolvePendingEdit(false, t('Connection lost — the edit may not have been saved.'));
+    }
     if (disconnected && this._pendingGoal) {
       // Same class as the unconfirmed send above — don't make the user wait out
       // the 10s timer when the socket is already known dead.
@@ -777,6 +806,7 @@ export class ChatInput {
 
   dispose() {
     if (this._goalTimer) { clearTimeout(this._goalTimer); this._goalTimer = null; }
+    if (this._editTimer) { clearTimeout(this._editTimer); this._editTimer = null; }
     // A reorder drag in flight owns window-level listeners — a closed window
     // must not keep them (the per-drag controller is what makes this one line).
     if (this._queueDrag) { try { this._queueDrag.ctl.abort(); } catch { } this._queueDrag = null; }
@@ -810,8 +840,27 @@ export class ChatInput {
       const id = this._editingQueueId;
       if (hasAttachments) { showToast(t('Attachments cannot be added while editing a queued message — cancel the edit first.'), { type: 'error' }); return; }
       this._editingQueueId = null;
-      if (this._editDraftBefore !== null) { this._textarea.value = this._editDraftBefore; this._autoSize?.(); }
+      // THE REWRITE IS KEPT UNTIL THE RESULT PROVES IT LANDED (round-2
+      // verifier, same law as _pendingSend below): restoring the pre-edit
+      // draft HERE threw the typed text away before the frame was even sent,
+      // and a refusal is the NORMAL race for this control — you rewrite the
+      // item at the FRONT of the queue, the turn ends while you type, the
+      // app-server drains the ORIGINAL, and the answer is 'gone'. The text
+      // stays in the box (and in `_pendingEdit`) until _resolvePendingEdit
+      // either puts the draft back (ok) or hands the rewrite back (refused).
+      this._pendingEdit = { id, text, draftBefore: this._editDraftBefore };
       this._editDraftBefore = null;
+      // Last-resort release: every ordinary path answers (the wrapper's
+      // result, a ws refusal, the republish that drops the row, a dead
+      // socket), but a wrapper that dies mid-save answers nothing and the
+      // rewrite would sit in a box that refuses to open another edit. The
+      // text is already safe IN the box — this only ends the wait and says so.
+      clearTimeout(this._editTimer);
+      this._editTimer = setTimeout(() => {
+        this._editTimer = null;
+        if (this._pendingEdit?.id !== id) return;
+        this._resolvePendingEdit(false, t('The edit was not confirmed — the session may be unresponsive.'));
+      }, 20000);
       this._dispatchQueueOp('edit', id, { text });
       return;
     }
@@ -950,6 +999,11 @@ export class ChatInput {
     const live = new Set(this._queue.map((it) => String(it.id || '')));
     for (const id of [...this._queueRowState.keys()]) if (!live.has(id)) this._queueRowState.delete(id);
     if (this._editingQueueId && !live.has(this._editingQueueId)) this._cancelQueueEdit({ silent: true });
+    // …and an edit still in flight whose ROW is gone lost the race: the item
+    // ran (or Stop dropped it) before the rewrite landed. The republish IS
+    // that answer — hand the typed text back here too, or it dies with the row
+    // and no result ever comes.
+    if (this._pendingEdit && !live.has(this._pendingEdit.id)) this._resolvePendingEdit(false);
     this._renderQueue();
     // The caps are the OTHER input to the chord and its hint, and they arrive
     // AFTER the composer is on screen (attach payload / the wrapper's baseline
@@ -970,26 +1024,85 @@ export class ChatInput {
       // is on the system card the normalizer emitted — marking every row
       // 'refused' for one queue-wide refusal would be noise, but leaving them
       // spinning would be a lie.
-      for (const [k, v] of [...this._queueRowState]) if (v?.state === 'pending') this._queueRowState.delete(k);
+      for (const [k, v] of [...this._queueRowState]) {
+        // …except the row of an edit whose own result has not come back yet:
+        // its save IS still in flight, and clearing that spinner would be the
+        // opposite lie.
+        if (this._pendingEdit && k === this._pendingEdit.id) continue;
+        if (v?.state === 'pending') this._queueRowState.delete(k);
+      }
       this._renderQueue();
       return;
     }
     if (ok) { if (this._queueRowState.get(key)?.state !== 'editing') this._queueRowState.delete(key); }
     else this._queueRowState.set(key, { state: 'refused', title: text || '' });
-    if (!ok && this._editingQueueId === key) this._cancelQueueEdit({ silent: true });
+    // THE EDIT'S OWN ANSWER: ok puts the pre-edit draft back, a refusal hands
+    // the rewrite back to the user (never the moment it is thrown away).
+    if (this._pendingEdit && this._pendingEdit.id === key) this._resolvePendingEdit(ok, text || '');
     this._renderQueue();
+  }
+
+  /** The outcome of an edit whose frame is already OUT (`_pendingEdit`).
+   *  `ok` restores the draft the edit borrowed the textarea from; a REFUSAL
+   *  hands the rewrite back — 'gone' is the normal race for this control (you
+   *  rewrite the front item, the turn ends while you type, the app-server runs
+   *  the ORIGINAL), and the typed text must never be what pays for it. */
+  _resolvePendingEdit(ok, reasonText = '') {
+    const p = this._pendingEdit;
+    if (!p) return;
+    this._pendingEdit = null;
+    if (this._editTimer) { clearTimeout(this._editTimer); this._editTimer = null; }
+    if (!this._textarea) return;
+    // The user started typing something ELSE while the save was in flight —
+    // that text is theirs, and neither outcome may overwrite it (the same
+    // guard the _pendingSend restore uses).
+    if (this._textarea.value !== p.text) return;
+    if (ok) {
+      this._textarea.value = typeof p.draftBefore === 'string' ? p.draftBefore : '';
+      this._autoSize?.();
+      return;
+    }
+    const live = this._queue.some((it) => String(it.id || '') === p.id);
+    if (live) {
+      // Still queued ⇒ the save can simply be retried: go back INTO edit mode
+      // (Send saves, Esc restores the draft) with the reason on the row.
+      this._editingQueueId = p.id;
+      this._editDraftBefore = typeof p.draftBefore === 'string' ? p.draftBefore : '';
+      this._queueRowState.set(p.id, { state: 'editing', title: reasonText || this._queueRowState.get(p.id)?.title || '' });
+      this._renderQueue();
+      return;
+    }
+    // The row is GONE: the rewrite becomes this session's draft, and the toast
+    // says where it went — finding your own words in the input with no
+    // explanation is the silent failure wearing a full textarea.
+    saveDraft('chat', this._sessionId, p.text);
+    showToast(t('That queued message could not be edited — your rewritten text was kept in the input.'), { type: 'error' });
   }
 
   _queueHas(verb) { return (this._queueCaps.queueVerbs || []).includes(verb); }
 
   /** Every strip action goes through here: mark the row pending FIRST (so the
    *  control cannot be double-fired and the user sees that it took), then
-   *  send. The pending state ends on the op's result or on the republish. */
+   *  send. The pending state ends on the op's result, on a ws-layer refusal
+   *  (which echoes the id back), or on the republish that removes the row.
+   *  A dispatch that sends NOTHING — `_sendQueueOp` refusing a dead/read-only
+   *  window — UNDOES the mark right here: the republish does not clear it
+   *  (the row never left the queue) and no result will ever come, so the row
+   *  spun forever after one click on a disconnected window (round-2
+   *  verifier). The callback answers `false` for exactly that case. */
   _dispatchQueueOp(op, id, extra) {
-    if (id) this._queueRowState.set(String(id), { state: 'pending', title: '' });
-    else for (const it of this._queue) this._queueRowState.set(String(it.id), { state: 'pending', title: '' });
+    const marked = id ? [String(id)] : this._queue.map((it) => String(it.id));
+    for (const k of marked) this._queueRowState.set(k, { state: 'pending', title: '' });
     this._renderQueue();
-    this._onQueueOp?.(op, id || null, extra);
+    const sent = this._onQueueOp?.(op, id || null, extra);
+    if (sent === false) {
+      for (const k of marked) if (this._queueRowState.get(k)?.state === 'pending') this._queueRowState.delete(k);
+      // An edit that was never sent is not a refused edit — put the user
+      // straight back into edit mode with their text (nothing left the client).
+      if (op === 'edit' && this._pendingEdit && this._pendingEdit.id === String(id)) this._resolvePendingEdit(false);
+      this._renderQueue();
+    }
+    return sent;
   }
 
   /** Open a queued message's FULL text in the textarea. The strip carries that
@@ -999,8 +1112,22 @@ export class ChatInput {
   _beginQueueEdit(id) {
     const item = this._queue.find((it) => String(it.id) === String(id));
     if (!item || typeof item.text !== 'string') return;
+    // ONE edit at a time: the textarea is the editor, and opening a second
+    // message in it while the first save is unanswered would leave that
+    // rewrite with nowhere to be handed back to. Sub-second in practice, and
+    // the 20s fallback guarantees the block ends.
+    if (this._pendingEdit) { showToast(t('The previous edit is still saving — one moment.')); return; }
     if (this._editingQueueId && this._editingQueueId !== String(id)) this._cancelQueueEdit({ silent: true });
     if (this._editDraftBefore === null) this._editDraftBefore = this._textarea.value;
+    // PIN THE DRAFT AND DISARM THE PENDING AUTOSAVE (the same door as the
+    // guard on the `input` listener, from the other side): a debounce armed by
+    // the last keystroke fires ~300ms from now and would read the textarea
+    // AFTER we put the queued message in it — persisting that message as this
+    // session's draft. Same shape as _send's "cancel the pending autosave and
+    // pin the draft to exactly what was sent".
+    clearTimeout(this._draftTimer);
+    this._draftTimer = null;
+    saveDraft('chat', this._sessionId, this._editDraftBefore);
     this._editingQueueId = String(id);
     this._queueRowState.set(String(id), { state: 'editing', title: '' });
     this._textarea.value = item.text;
@@ -1079,6 +1206,10 @@ export class ChatInput {
       };
     });
     if (this._queueHas('reorder')) this._bindQueueDrag(strip);
+    // A republish landed MID-DRAG: the new rows carry none of the drag
+    // chrome, so re-run the hit test against them right away (the drag itself
+    // survives — its listeners are on `window` under its own controller).
+    if (this._queueDrag?.apply) { try { this._queueDrag.apply(); } catch { } }
   }
 
   /** POINTER-event drag reorder (never HTML5 DnD: this strip lives inside a
@@ -1094,16 +1225,22 @@ export class ChatInput {
         e.preventDefault();
         e.stopPropagation();
         const id = String(grip.dataset.queueDrag || '');
-        const rows = [...strip.querySelectorAll('.chat-queue-item')];
-        const ids = this._queue.map((it) => String(it.id));
         const ctl = new AbortController();
         const drag = { id, ctl, y: e.clientY, raf: 0, afterId: undefined, moved: false };
         this._queueDrag = drag;
+        // THE ROWS ARE RE-QUERIED EVERY FRAME, NEVER CAPTURED (round-2
+        // verifier): a `queue_changed` republish during the ~1s drag (a peer
+        // message, another client, an item leaving) rebuilds `strip.innerHTML`,
+        // and every element the closure held is then DETACHED — a detached
+        // node's rect is all zeros, so the midpoint test said "below every
+        // row" and the drop silently landed the item at the END of the queue.
+        const liveRows = () => [...strip.querySelectorAll('.chat-queue-item')];
         const apply = () => {
           drag.raf = 0;
           // The row it would land BEHIND: the last OTHER row whose midpoint is
           // above the pointer. null = the front of the queue.
           let afterId = null;
+          const rows = liveRows();
           for (const row of rows) {
             if (row.dataset.queueId === id) continue;
             const r = row.getBoundingClientRect();
@@ -1116,6 +1253,10 @@ export class ChatInput {
           }
           strip.classList.toggle('chat-queue-drop-front', afterId === null);
         };
+        // …and a re-render mid-drag repaints the indicator on the NEW rows
+        // (the classes live on elements that no longer exist) — `_renderQueue`
+        // calls this when a drag is running.
+        drag.apply = apply;
         const onMove = (ev) => {
           drag.y = ev.clientY;
           if (Math.abs(ev.clientY - e.clientY) > 3) drag.moved = true;
@@ -1125,15 +1266,19 @@ export class ChatInput {
           if (drag.raf) { try { cancelAnimationFrame(drag.raf); } catch { } drag.raf = 0; }
           ctl.abort();
           this._queueDrag = null;
-          for (const row of rows) row.classList.remove('chat-queue-dragging', 'chat-queue-drop-after');
+          for (const row of liveRows()) row.classList.remove('chat-queue-dragging', 'chat-queue-drop-after');
           strip.classList.remove('chat-queue-drop-front');
           if (!send || !drag.moved || drag.afterId === undefined) return;
+          // The order as it is NOW, not as it was at pointerdown — same reason
+          // as the rows above: the no-op test and the landing index must be
+          // computed against the queue the user is actually looking at.
+          const ids = this._queue.map((it) => String(it.id));
+          const at = ids.indexOf(id);
+          // The dragged row left the queue mid-drag (it ran, or Stop dropped
+          // it): there is nothing to reorder, and sending would earn a 'gone'.
+          if (at < 0) return;
           // A drop that lands where the row already is sends NOTHING (a no-op
           // reorder still costs an RPC, a republish and a pending flash).
-          // Where the row would END UP vs where it is now: dropping a row back
-          // onto its own place sends nothing (a no-op reorder still costs an
-          // RPC, a republish and a pending flash).
-          const at = ids.indexOf(id);
           const landing = drag.afterId === null ? 0 : ids.filter((x) => x !== id).indexOf(String(drag.afterId)) + 1;
           if (landing === at) return;
           this._dispatchQueueOp('reorder', id, { afterId: drag.afterId });

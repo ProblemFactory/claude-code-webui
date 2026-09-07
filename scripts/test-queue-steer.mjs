@@ -164,6 +164,29 @@ console.log('— ③ the ws case gates on the caps row AND the running wrapper')
   ok('the adapter throw is the second line of defense (formatQueueOp inside a try that refuses with e.message)', /payload = adapter\.formatQueueOp\(\{/.test(body) && /catch \(e\) \{ refuse\(e\.message, 'malformed'\); break; \}/.test(body));
   ok("…and `afterId: null` reaches the adapter as a POSITION: the key is spread only when the client sent one (absent ≠ front)", /\.\.\.\('afterId' in data \? \{ afterId: data\.afterId === null \? null : String\(data\.afterId \|\| ''\) \} : \{\}\)/.test(body), body.slice(-1200));
   ok('the frame goes to the wrapper on stdin, like every other verb', /session\.pty\.write\(payload \+ '\\n'\)/.test(body));
+  // ── ROUND-2 VERIFIER, finding 6: `edit` is the one verb that carries USER
+  // TEXT, and this frame reaches the wrapper over RAW PTY STDIN — the `input`
+  // case routes anything large through the frame file precisely because a big
+  // pty write gets shredded (the 79928a2b/c1206711 class). Two bounds, both
+  // loud: the wrapper's own edit cap, and the transport ceiling AFTER JSON
+  // escaping (a control-char string grows sixfold, so the first does not imply
+  // the second).
+  ok('finding 6: an over-long edit text is REFUSED with evidence before the frame is built (never an unbounded raw-stdin write)',
+    /if \(typeof data\.text === 'string' && data\.text\.length > QUEUE_EDIT_MAX_CHARS\) \{/.test(body) && /'text-too-long'/.test(body) && /it was NOT saved/.test(body), body.slice(-1600));
+  ok('…and the built FRAME is bounded too (JSON escaping can multiply the text sixfold), refused with its own reason',
+    /if \(payload\.length > QUEUE_OP_MAX_BYTES\) \{/.test(body) && /'frame-too-large'/.test(body) && /it was NOT sent/.test(body), body.slice(-1200));
+  {
+    const { QUEUE_EDIT_MAX_CHARS, QUEUE_OP_MAX_BYTES } = require(path.join(REPO, 'src/server/wrapper-files.js'));
+    const wrapperCap = Number(/const QUEUE_EDIT_MAX_CHARS = (\d+);/.exec(read('data/bin/codex-chat-wrapper.js'))?.[1]);
+    ok(`…and the server's cap IS the wrapper's own (${QUEUE_EDIT_MAX_CHARS} = ${wrapperCap}) — refusing at a limit the wrapper does not share would refuse edits it would have accepted`,
+      QUEUE_EDIT_MAX_CHARS === 20000 && wrapperCap === QUEUE_EDIT_MAX_CHARS, { QUEUE_EDIT_MAX_CHARS, wrapperCap });
+    ok('…and the transport ceiling is the SAME 64KiB the `input` case treats as the shredding threshold', QUEUE_OP_MAX_BYTES === 64 * 1024 && /stdinPayload\.length > 64 \* 1024/.test(src));
+  }
+  // ── finding 3 (server half): a ws refusal never becomes a `queue_op_result`,
+  // so the strip could not find the row it had marked pending. The refusal
+  // echoes the op AND its id for exactly that join.
+  ok('finding 3: every queue-op refusal ECHOES the op and its id (the client marked that row pending before sending; nothing else will ever answer it)',
+    /op: data\.op \|\| null, id: data\.id \|\| null/.test(body), body.slice(0, 900));
   // GATE ②, THE WRAPPER SKEW (round-1 review): the caps row describes a KIND
   // of agent; a LONG-LIVED PROCESS is a different question. A codex session
   // spawned before this release satisfies the row and drops the frame
@@ -177,7 +200,7 @@ console.log('— ③ the ws case gates on the caps row AND the running wrapper')
     // A pre-verb-table wrapper adverts `inputQueue` and NO list — it serves
     // exactly the three verbs that existed then, and must keep serving them.
     const wf = read('src/server/wrapper-files.js');
-    ok('wrapperCaps maps a verb-LESS inputQueue advert to the legacy three (never to the current seven)', /const LEGACY_QUEUE_VERBS = Object\.freeze\(\['remove', 'steer', 'steer-all'\]\)/.test(wf) && /Array\.isArray\(caps && caps\.queueVerbs\)[\s\S]{0,160}inputQueue \? LEGACY_QUEUE_VERBS\.slice\(\) : \[\]/.test(wf), wf.slice(-800));
+    ok('wrapperCaps maps a verb-LESS inputQueue advert to the legacy three (never to the current seven)', /const \{ LEGACY_QUEUE_VERBS \} = require\('\.\.\/backend-caps\.js'\);/.test(wf) && /Array\.isArray\(caps && caps\.queueVerbs\)[\s\S]{0,160}inputQueue \? LEGACY_QUEUE_VERBS\.slice\(\) : \[\]/.test(wf), wf.slice(-800));
     const { wrapperCaps } = require(path.join(REPO, 'src/server/wrapper-files.js'));
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-qcaps-'));
     fs.writeFileSync(path.join(dir, 'sess-old.json'), JSON.stringify({ caps: { inputQueue: true } }));
@@ -200,9 +223,9 @@ console.log('— ③ the ws case gates on the caps row AND the running wrapper')
   ok('client: an attach failure still takes the view-only rescue path', /if \(!this\._tryViewOnlyRescue\(\)\)/.test(cv));
   // the queue rides EVERY window-birth payload (the 2.368.4 rule)
   ok("attach carries the queue from the normalizer", /queue: session\._normalizer\?\.queueState\?\.\(\) \|\| \[\]/.test(read('src/ws-handler.js')));
-  ok("…and the wrapper's queue advert — SUPPORTED **and the verb list** — rides the SAME payload (the client cannot read a sidecar), and it is computed from the ONE sidecar read the attach handler already made (2.369.16: no second /proc walk here)", /const wcapsAttach = wrapperCaps\(BUFFERS_DIR, data\.sessionId, session\.socketPath\);[\s\S]{0,3000}const wc = wcapsAttach;[\s\S]{0,700}return \{ queueSupported: !!served, queueVerbs: served \|\| \[\] \};/.test(read('src/ws-handler.js')));
+  ok("…and the wrapper's queue advert — SUPPORTED **and the verb list** — rides the SAME payload (the client cannot read a sidecar), and it is computed from the ONE sidecar read the attach handler already made (2.369.16: no second /proc walk here)", /const wcapsAttach = wrapperCaps\(BUFFERS_DIR, data\.sessionId, session\.socketPath\);[\s\S]{0,3000}const wc = wcapsAttach;[\s\S]{0,700}return \{ queueSupported: !!served, queueVerbs: served \|\| null \};/.test(read('src/ws-handler.js')));
   { const wsc = read('src/ws-create.js');
-    ok("…'created' carries all three, and says the fresh wrapper has reported NOTHING yet", /queue: \[\],/.test(wsc) && /queueSupported: false,\n\s*queueVerbs: \[\],/.test(wsc)); }
+    ok("…'created' carries all three, and says the fresh wrapper has reported NOTHING yet", /queue: \[\],/.test(wsc) && /queueSupported: false,[\s\S]{0,400}queueVerbs: null,/.test(wsc)); }
   ok('the client applies both through the carries-the-key guard, advert (and its verb list) FIRST', /if \('queueSupported' in meta\) this\._setQueueSupported\(meta\.queueSupported, meta\.queueVerbs\);\s*\n\s*if \('queue' in meta\) this\._setQueue\(meta\.queue\);/.test(cv));
   // ONE WRITER for the capability, because a FLIP has a consequence (the
   // rendered chips must be re-applied — round-2's MAJOR). A bare assignment
@@ -213,7 +236,7 @@ console.log('— ③ the ws case gates on the caps row AND the running wrapper')
   ok('…and the VERB LIST shares that one writer (a wrapper that gains verbs without changing `supported` must re-apply the chips too)',
     (cv.match(/this\._queueVerbsServed = /g) || []).length === 2 && /JSON\.stringify\(list\) === JSON\.stringify\(this\._queueVerbsServed\)/.test(cv),
     (cv.match(/this\._queueVerbsServed = [^\n]*/g) || []));
-  ok("…and the live meta path uses it too (a wrapper's baseline queue_changed also arrives after the bubbles), carrying the verbs it published", /if \(op\.supported\) this\._setQueueSupported\(true, op\.verbs \|\| undefined\);/.test(cv));
+  ok("…and the live meta path uses it too (a wrapper's baseline queue_changed also arrives after the bubbles), carrying the verbs it published", /if \(op\.supported\) this\._setQueueSupported\(true, Array\.isArray\(op\.verbs\) \? op\.verbs : LEGACY_QUEUE_VERBS\.slice\(\)\);/.test(cv));
   ok("a queue op's RESULT reaches the strip as its own meta op (a row that spins forever is the silent failure wearing a spinner)", /if \(op\.subtype === 'queue-result'\) \{ this\._chatInput\?\.setQueueOpResult\(op\.id, op\.ok !== false, op\.text \|\| ''\); return; \}/.test(cv));
   ok('wiring pin: the strip, the row keyboard and the chip send the SAME ws message through one method', /const frame = \{ type: 'queue-op', sessionId: this\.sessionId, op, id: id \|\| null \};/.test(cv) && (cv.match(/type: 'queue-op'/g) || []).length === 1);
   ok("…and the verb's own argument rides it: afterId only when the caller supplied one (null = the front), text only when it is a string", /if \(extra && 'afterId' in extra\) frame\.afterId = extra\.afterId === null \? null : String\(extra\.afterId\);/.test(cv) && /if \(extra && typeof extra\.text === 'string'\) frame\.text = extra\.text;/.test(cv));
@@ -224,7 +247,7 @@ console.log('— ③ the ws case gates on the caps row AND the running wrapper')
   ok('the bubble chip asks the VIEW whether this session can steer (no second capability definition in the renderer)', /_canSteerQueue\(\) \? this\._onQueueChipClick : null/.test(cr) && /this\._getQueueCaps\?\.\(\)\?\.steer/.test(cr) && /getQueueCaps: \(\) => this\._queueCaps\(\)/.test(cv));
   ok('_queueCaps is the intersection: no wrapper advert ⇒ no controls at all', /if \(!this\._queueSupported\) return NO_QUEUE_CAPS;/.test(cv) && /const NO_QUEUE_CAPS = Object\.freeze\(\{ queue: false, steer: false, queueOps: false, queueVerbs: Object\.freeze\(\[\]\) \}\);/.test(cv));
   ok('…and it INTERSECTS the harness table with what the running wrapper serves, re-deriving steer/queueOps FROM the result (never carried over)', /const verbs = \(row\.queueVerbs \|\| \[\]\)\.filter\(\(v\) => !served \|\| served\.includes\(v\)\);/.test(cv) && /steer: verbs\.includes\('steer'\), queueOps: verbs\.length > 0, queueVerbs: verbs/.test(cv));
-  ok('every queue action passes ONE liveness choke point that toasts (strip buttons included — a dead button that eats the click is the silent failure)', /_queueOpsLive\(\) \{/.test(cv) && /if \(!this\._queueOpsLive\(\)\) return;\s*\n\s*const frame = \{ type: 'queue-op'/.test(cv) && (cv.match(/showToast\(t\('This session is not live/g) || []).length === 1);
+  ok('every queue action passes ONE liveness choke point that toasts (strip buttons included — a dead button that eats the click is the silent failure)', /_queueOpsLive\(\) \{/.test(cv) && /if \(!this\._queueOpsLive\(\)\) return false;\s*\n\s*const frame = \{ type: 'queue-op'/.test(cv) && (cv.match(/showToast\(t\('This session is not live/g) || []).length === 1);
   ok('…and the strip is DIMMED under .chat-input-disconnected, so the state is visible BEFORE the click', /\.chat-input-disconnected \.chat-queue-strip \{ opacity/.test(read('public/chat.css')));
   const cw2 = read('data/bin/codex-chat-wrapper.js');
   ok('removing a queued PEER message hands the text back to the delivery ladder (never a silent loss of a message already reported delivered)', /known\?\.kind === 'peer' && known\.text\) emitTaskEvent\('peer_message_result', \{ ok: false/.test(cw2));
@@ -579,6 +602,61 @@ console.log('— ⑦ FUNCTIONAL client: a normalizer-produced bubble → a real 
   ChatView.prototype._onSessionError.call(mkView({ _tryViewOnlyRescue: () => false }), { type: 'error', sessionId: 'sess-9', code: 'ended-during-attach', message: 'gone' });
   ok('…and when even the rescue cannot work, the window says so and goes read-only', readOnlyed === 1 && notices.some((n) => /gone/.test(n)));
 
+  // ── ROUND-2 VERIFIER, finding 3 (client half): a ws-layer refusal is the ONE
+  // outcome that never arrives as a `queue-result` meta op, so the row the
+  // strip marked pending had nothing to end it — one click on a verb this
+  // wrapper does not serve left a spinner on the row forever.
+  {
+    const results = [];
+    const view = mkView({ _chatInput: { setQueueOpResult: (...a) => results.push(a) } });
+    ChatView.prototype._onSessionError.call(view, { type: 'error', sessionId: 'sess-9', code: 'queue-op-unsupported', scope: 'action', op: 'run-now', id: 'q7', message: 'This session\'s agent is an older build.' });
+    ok(`finding 3: a ws refusal ENDS the row's pending state, carrying its reason (${JSON.stringify(results)})`, results.length === 1 && results[0][0] === 'q7' && results[0][1] === false && /older build/.test(results[0][2] || ''), results);
+    results.length = 0;
+    ChatView.prototype._onSessionError.call(view, { type: 'error', sessionId: 'sess-9', code: 'queue-op-unsupported', scope: 'action', op: 'run-all', id: null, message: 'A turn is running.' });
+    ok('…and a BATCH verb (no id) ends every pending row, which is what an empty id already means to the strip', results.length === 1 && results[0][0] === '');
+    results.length = 0;
+    ChatView.prototype._onSessionError.call(view, { type: 'error', sessionId: 'sess-9', code: 'input-rejected', message: 'too big' });
+    ok('…and an unrelated scoped refusal touches no queue row', results.length === 0, results);
+  }
+
+  // ── ROUND-2 VERIFIER, finding 4: "no verb list" is UNKNOWN on the payload
+  // path and "the pre-table three" on the in-band path — reading it as "serves
+  // nothing" made the intersection empty and hid the ENTIRE strip from a
+  // session the server was happily serving remove/steer/steer-all for
+  // (kb-api's documented behaviour, inverted).
+  {
+    const { LEGACY_QUEUE_VERBS } = require(path.join(REPO, 'src/backend-caps.js'));
+    const mkFresh = (served) => Object.assign(Object.create(ChatView.prototype), {
+      sessionId: 'sess-legacy', ws: { send() {} }, _readOnly: false, _disconnected: false,
+      _chatInput: null, _disposed: false, _messages: [], _elements: new Map(), _queue: [],
+      _queueSupported: false, _queueVerbsServed: served, _queueChipRaf: 0,
+      _getSessionIds: () => ({ backend: 'codex' }), winInfo: { backend: 'codex' },
+    });
+    const legacy = JSON.stringify([...LEGACY_QUEUE_VERBS]);
+    ok('the legacy verb list has ONE definition, in the PURE module both ends import (server mapping ⇄ client mapping)',
+      legacy === JSON.stringify(['remove', 'steer', 'steer-all'])
+      && require(path.join(REPO, 'src/server/wrapper-files.js')).LEGACY_QUEUE_VERBS === LEGACY_QUEUE_VERBS
+      && /import \{ LEGACY_QUEUE_VERBS \} from '\.\.\/backend-caps\.js';/.test(read('src/lib/chat-view.js')));
+    // THE REPRODUCTION: the create payload says "nothing known" and then a
+    // pre-verb-table wrapper publishes a queue with no `verbs`.
+    const v1 = mkFresh(null);
+    ChatView.prototype._onMeta.call(v1, { op: 'meta', subtype: 'queue', supported: true, items: [] });
+    ok(`finding 4: a verb-LESS publication yields the legacy three, never an empty strip (${JSON.stringify(v1._queueCaps().queueVerbs)})`, JSON.stringify(v1._queueCaps().queueVerbs) === legacy && v1._queueCaps().queueOps === true);
+    // …and the shape the OLD server sent (an empty ARRAY for "unknown") must
+    // not survive as a filter either.
+    const v2 = mkFresh([]);
+    ChatView.prototype._onMeta.call(v2, { op: 'meta', subtype: 'queue', supported: true, items: [] });
+    ok('…and an inherited empty list does not silently keep filtering everything out', JSON.stringify(v2._queueCaps().queueVerbs) === legacy);
+    // NEGATIVE CONTROL: a publication that DOES name verbs is still obeyed to
+    // the letter (the mapping is for the verb-less case only).
+    const v3 = mkFresh(null);
+    ChatView.prototype._onMeta.call(v3, { op: 'meta', subtype: 'queue', supported: true, items: [], verbs: ['remove', 'reorder'] });
+    ok('…while a wrapper that NAMES its verbs is intersected exactly as before', JSON.stringify(v3._queueCaps().queueVerbs) === JSON.stringify(['remove', 'reorder']));
+    const v4 = mkFresh(null);
+    ChatView.prototype._onMeta.call(v4, { op: 'meta', subtype: 'queue', supported: true, items: [], verbs: [] });
+    ok('…and a wrapper that explicitly serves NOTHING still gets no controls (an empty list is a real answer)', JSON.stringify(v4._queueCaps().queueVerbs) === '[]');
+  }
+
   // ── THE MAJOR round 2 found: THE CHIP IS RENDERED BEFORE THE CAPABILITY
   // ARRIVES. `_queueSupported` starts false; loadHistory renders EVERY message
   // and only then calls `_applyLiveMeta` (which carries the attach payload's
@@ -824,6 +902,11 @@ console.log('— wiring + docs pins');
   ok('kb-features documents QUEUED vs STEERED incl. the multi-queue rule', /QUEUED vs STEERED/.test(read('docs/kb-features.md')) && /steering item N injects\s*\n?\s*\*\*only N\*\*/.test(read('docs/kb-features.md')));
   ok("kb-api documents the ws 'queue-op' message + the queue_changed/queue_op_result events", /\*\*Input queue \(`queue-op`/.test(read('docs/kb-api.md')) && /queue_op_result \{op, id, msg_id, ok, reason, detail\}/.test(read('docs/kb-api.md')));
   ok('design-harness-plugins §1 records the closure on its own P2 row', /两种发送模式 ✅2026-09-06/.test(read('docs/design-harness-plugins.md')));
+  ok('…and the round-2 client laws are written down where the strip lives (kb-file-structure) and where the user reads (kb-features)',
+    /THE QUEUE STRIP'S CLIENT LAWS/.test(read('docs/kb-file-structure.md')) && /Your rewrite is never spent on a refusal/.test(read('docs/kb-features.md')));
+  ok('…and kb-api documents the echoed op/id and BOTH size gates on the one verb that carries user text',
+    /`op` and `id` are ECHOED/.test(read('docs/kb-api.md')) && /text-too-long/.test(read('docs/kb-api.md')) && /frame-too-large/.test(read('docs/kb-api.md')));
+  ok('design-harness-features §2.1 records the adversarial round with its six findings', /round-2 对抗验证：6 条真缺陷/.test(read('docs/design-harness-features.md')));
   { const kbfs = read('docs/kb-file-structure.md');
     ok('kb-file-structure carries the wrapper/normalizer/ws essays (the measured app-server facts live there)',
       /THE INPUT QUEUE — QUEUED vs STEERED/.test(kbfs) && /QUEUE STATE IS SESSION STATE, NEVER A MESSAGE/.test(kbfs) && /the ONE new case for QUEUED vs STEERED/.test(kbfs) && /no `remove`/.test(kbfs)); }
@@ -1596,6 +1679,41 @@ console.log('— ⑪ drag-reorder / edit / run-all in a REAL browser (trusted po
         const sent = await ops();
         ok(`dropping above the first row means the FRONT, sent as afterId null (${JSON.stringify(sent)})`, sent.length === 1 && sent[0].op === 'reorder' && sent[0].id === 'q3' && sent[0].extra?.afterId === null);
       }
+      // ── ROUND-2 VERIFIER, finding 2: A REPUBLISH DURING THE DRAG. Every
+      // `queue_changed` rebuilds `strip.innerHTML`, so the rows a closure
+      // captured at pointerdown are DETACHED — and a detached node's rect is
+      // all zeros, so the midpoint test said "below every row" and the drop
+      // landed the item silently at the END of the queue. The trigger is
+      // ordinary: a peer message, another client, an item leaving.
+      {
+        await evaljs('window.__ops = []; window.__ci.setQueue(window.__items, ' + CODEX_VERBS + ');');
+        const from = await gripBox(0), row2 = await rowBox(1);
+        await cdp('Input.dispatchMouseEvent',  { type: 'mousePressed',  x: from.x, y: from.y, button: 'left',  clickCount: 1, pointerType: 'mouse' });
+        await cdp('Input.dispatchMouseEvent',  { type: 'mouseMoved',  x: from.x, y: row2.mid + 4, button: 'left',  pointerType: 'mouse' });
+        await sleep(120);
+        // …a peer queues a message MID-DRAG (the real 1s window)
+        const during = await evaljs(`(() => {
+          window.__ci.setQueue([...window.__items, { id: 'q4',  msgId: '',  preview: 'a peer just queued this',  kind: 'peer',  from: 'session C' }], ${CODEX_VERBS});
+          return { rows: document.querySelectorAll('.chat-queue-item').length, after: document.querySelector('.chat-queue-drop-after')?.dataset.queueId || null };
+        })()`);
+        ok(`the republish lands (4 rows) and the drop indicator is REPAINTED on the new rows (${JSON.stringify(during)})`, during.rows === 4 && during.after === 'q2');
+        await cdp('Input.dispatchMouseEvent',  { type: 'mouseReleased',  x: from.x, y: row2.mid + 4, button: 'left',  clickCount: 1, pointerType: 'mouse' });
+        await sleep(120);
+        const sent = await ops();
+        ok(`finding 2: the drop still lands WHERE IT WAS DROPPED after a mid-drag republish (${JSON.stringify(sent)})`, sent.length === 1 && sent[0].op === 'reorder' && sent[0].id === 'q1' && sent[0].extra?.afterId === 'q2');
+        // …and the dragged row LEAVING the queue mid-drag sends nothing at all
+        // (there is nothing left to reorder; sending would earn a 'gone').
+        await evaljs('window.__ops = []; window.__ci.setQueue(window.__items, ' + CODEX_VERBS + ');');
+        const g0 = await gripBox(0), r2 = await rowBox(1);
+        await cdp('Input.dispatchMouseEvent',  { type: 'mousePressed',  x: g0.x, y: g0.y, button: 'left',  clickCount: 1, pointerType: 'mouse' });
+        await cdp('Input.dispatchMouseEvent',  { type: 'mouseMoved',  x: g0.x, y: r2.mid + 4, button: 'left',  pointerType: 'mouse' });
+        await sleep(120);
+        await evaljs(`window.__ci.setQueue(window.__items.slice(1), ${CODEX_VERBS});`);
+        await cdp('Input.dispatchMouseEvent',  { type: 'mouseReleased',  x: g0.x, y: r2.mid + 4, button: 'left',  clickCount: 1, pointerType: 'mouse' });
+        await sleep(120);
+        ok('…and a row that LEFT the queue mid-drag sends no reorder at all', (await ops()).length === 0);
+        await evaljs('window.__ci.setQueue(window.__items, ' + CODEX_VERBS + ');');
+      }
       // A PRESS THAT DOES NOT MOVE IS NOT A DRAG (a no-op reorder still costs
       // an RPC, a republish and a pending flash).
       {
@@ -1657,8 +1775,48 @@ console.log('— ⑪ drag-reorder / edit / run-all in a REAL browser (trusted po
           return { ops: window.__ops, text: ta.value, state: document.querySelector('[data-queue-id="q2"]')?.dataset.queueState };
         })()`);
         ok(`sending SAVES the edit as an edit frame, never as a new message (${JSON.stringify(saved.ops)})`, saved.ops.length === 1 && saved.ops[0].op === 'edit' && saved.ops[0].id === 'q2' && saved.ops[0].extra?.text === 'second, rewritten');
-        ok('and the draft the edit borrowed the textarea from is put back', saved.text === 'a draft I was typing');
+        // ROUND-2 MAJOR (finding 1): the rewrite used to be thrown away HERE —
+        // the draft was restored before the frame was even sent, and nothing
+        // held the typed text when the answer came back ok:false. It now stays
+        // in the box (and in `_pendingEdit`) until the result proves it landed.
+        ok(`the typed rewrite STAYS in the box while the save is unanswered (${JSON.stringify(saved.text)})`, saved.text === 'second, rewritten');
         ok('the row shows the save is in flight', saved.state === 'pending');
+        const okd = await evaljs(`(() => {
+          window.__ci.setQueueOpResult('q2',  true, '');
+          return { text: document.querySelector('textarea').value, state: document.querySelector('[data-queue-id="q2"]')?.dataset.queueState || null, pending: !!window.__ci._pendingEdit };
+        })()`);
+        ok(`…and ONLY the ok result puts the borrowed draft back (${JSON.stringify(okd)})`, okd.text === 'a draft I was typing' && okd.state === null && okd.pending === false);
+        // A REFUSAL WHOSE ROW IS STILL QUEUED: the rewrite is handed back INTO
+        // edit mode (Send retries, Esc restores the draft), with the reason on
+        // the row — nothing the user typed is spent on the refusal.
+        const refusedLive = await evaljs(`(() => {
+          window.__ops = [];
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q1"]').click();
+          const ta = document.querySelector('textarea');
+          ta.value = 'first, rewritten';
+          window.__ci._send();
+          window.__ci.setQueueOpResult('q1',  false, 'The agent could not be reached.');
+          const row = document.querySelector('[data-queue-id="q1"]');
+          return { text: ta.value, state: row?.dataset.queueState, title: row?.getAttribute('title'), editing: window.__ci._editingQueueId };
+        })()`);
+        ok(`A REFUSED EDIT KEEPS THE REWRITE (${JSON.stringify(refusedLive)})`, refusedLive.text === 'first, rewritten');
+        ok('…and, the row still being queued, puts the user back in edit mode with the reason on it', refusedLive.state === 'editing' && refusedLive.editing === 'q1' && /could not be reached/.test(refusedLive.title || ''));
+        await evaljs(`(() => { document.querySelector('textarea').dispatchEvent(new KeyboardEvent('keydown',  { key: 'Escape',  bubbles: true })); })()`);
+        // …and THE NORMAL RACE: the item ran while you were typing, so the row
+        // is GONE. The republish is the answer, the text becomes the draft, and
+        // a toast says where it went (finding your own words in the input with
+        // no explanation is the silent failure wearing a full textarea).
+        const refusedGone = await evaljs(`(() => {
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q2"]').click();
+          const ta = document.querySelector('textarea');
+          ta.value = 'second, rewritten again';
+          window.__ci._send();
+          window.__ci.setQueue([window.__items[0], window.__items[2]], ${CODEX_VERBS});
+          return { text: ta.value, pending: !!window.__ci._pendingEdit, toast: document.getElementById('global-toasts')?.textContent || '' };
+        })()`);
+        ok(`…and a rewrite whose ROW LEFT THE QUEUE survives too (${JSON.stringify(refusedGone.text)})`, refusedGone.text === 'second, rewritten again' && refusedGone.pending === false);
+        ok(`…with a toast saying where the text went (${JSON.stringify(refusedGone.toast.slice(0, 90))})`, /kept in the input/.test(refusedGone.toast));
+        await evaljs(`(() => { document.querySelector('textarea').value = 'a draft I was typing'; window.__ci.setQueue(window.__items, ${CODEX_VERBS}); })()`);
         // …and a refusal ends the pending state ON THE ROW, with the reason.
         // A BATCH verb marks EVERY row pending; its id-less result must end
         // that — a strip left spinning is the failure the state exists to show.
@@ -1690,6 +1848,91 @@ console.log('— ⑪ drag-reorder / edit / run-all in a REAL browser (trusted po
           return { during, after: ta.value, state: document.querySelector('[data-queue-id="q1"]')?.dataset.queueState || null };
         })()`);
         ok(`Esc cancels the edit and restores the draft (${JSON.stringify(escaped)})`, escaped.during === 'first' && escaped.after === 'my draft' && escaped.state === null);
+      }
+      // ── ROUND-2 VERIFIER, finding 3 (client half): the row is marked pending
+      // BEFORE the frame is dispatched, and two live paths send NOTHING — the
+      // view's liveness choke point (disconnected / read-only) and a ws-layer
+      // refusal. Neither produces a result, and the republish does not clear a
+      // row that never left the queue, so one click left a spinner forever.
+      {
+        const undone = await evaljs(`(() => {
+          window.__ci.setQueue(window.__items, ${CODEX_VERBS});
+          const prev = window.__ci._onQueueOp;
+          window.__ci._onQueueOp = () => false;      // _sendQueueOp refused: nothing went out
+          document.querySelector('[data-queue-op="run-now"][data-queue-id="q1"]').click();
+          const after = document.querySelector('[data-queue-id="q1"]')?.dataset.queueState || null;
+          window.__ci._onQueueOp = prev;
+          document.querySelector('[data-queue-op="run-now"][data-queue-id="q1"]').click();
+          const sentToo = document.querySelector('[data-queue-id="q1"]')?.dataset.queueState || null;
+          window.__ci.setQueue(window.__items, ${CODEX_VERBS});
+          return { after, sentToo };
+        })()`);
+        ok(`finding 3: a dispatch that sends NOTHING undoes its own pending mark (${JSON.stringify(undone)})`, undone.after === null);
+        ok('…and the positive control still marks the row (the state only lies when nothing was sent)', undone.sentToo === 'pending');
+        const batchUndone = await evaljs(`(() => {
+          const prev = window.__ci._onQueueOp;
+          window.__ci._onQueueOp = () => false;
+          document.querySelector('[data-queue-op="run-all"]').click();
+          const states = [...document.querySelectorAll('.chat-queue-item')].map((r) => r.dataset.queueState || null);
+          window.__ci._onQueueOp = prev;
+          return states;
+        })()`);
+        ok(`…including the batch verb, which marked EVERY row (${JSON.stringify(batchUndone)})`, batchUndone.every((x) => x === null));
+        const editUndone = await evaljs(`(() => {
+          window.__ci.setQueue(window.__items, ${CODEX_VERBS});
+          document.querySelector('textarea').value = 'a draft I was typing';
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q1"]').click();
+          const ta = document.querySelector('textarea');
+          ta.value = 'never left the client';
+          const prev = window.__ci._onQueueOp;
+          window.__ci._onQueueOp = () => false;
+          window.__ci._send();
+          window.__ci._onQueueOp = prev;
+          const out = { text: ta.value, editing: window.__ci._editingQueueId, pending: !!window.__ci._pendingEdit, state: document.querySelector('[data-queue-id="q1"]')?.dataset.queueState || null };
+          ta.dispatchEvent(new KeyboardEvent('keydown',  { key: 'Escape',  bubbles: true }));
+          return out;
+        })()`);
+        ok(`…and an edit that never left the client puts the user straight back in edit mode with the text (${JSON.stringify(editUndone)})`, editUndone.text === 'never left the client' && editUndone.editing === 'q1' && editUndone.pending === false && editUndone.state === 'editing');
+      }
+      // ── ROUND-2 VERIFIER, finding 5: EDIT MODE BORROWS THE TEXTAREA, NOT THE
+      // DRAFT CHANNEL. Typing a rewrite used to persist the QUEUED MESSAGE as
+      // this session's draft (and sync it to every other client), while this
+      // box went back to showing the real draft; the reverse bit too — an
+      // incoming draft sync overwrote the rewrite mid-edit.
+      {
+        const drafts = await evaljs(`(() => {
+          window.__ci.setQueue(window.__items, ${CODEX_VERBS});
+          const ta = document.querySelector('textarea');
+          ta.value = 'my real draft';
+          ta.dispatchEvent(new Event('input',  { bubbles: true }));
+          const normal = window.__ci._draftTimer !== null;              // the ordinary path DOES save
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q1"]').click();
+          ta.value = 'first, being rewritten';
+          ta.dispatchEvent(new Event('input',  { bubbles: true }));
+          const whileEditing = window.__ci._draftTimer;                 // …and edit mode does NOT
+          // an incoming draft sync from ANOTHER client must not touch the rewrite
+          window.__ci._draftSyncHandler('a draft from another client');
+          const kept = ta.value, stashed = window.__ci._editDraftBefore;
+          ta.dispatchEvent(new KeyboardEvent('keydown',  { key: 'Escape',  bubbles: true }));
+          return { normal, whileEditing, kept, stashed, afterEsc: ta.value };
+        })()`);
+        ok(`finding 5: the debounced draft save is armed normally and SKIPPED while editing a queued message (${JSON.stringify({ normal: drafts.normal, whileEditing: drafts.whileEditing })})`, drafts.normal === true && drafts.whileEditing === null);
+        // …and the OTHER door into the same leak: a debounce armed by the last
+        // keystroke BEFORE the pencil was clicked would fire ~300ms later and
+        // read the textarea after the queued message landed in it.
+        const armedBefore = await evaljs(`(() => {
+          window.__ci.setQueue(window.__items, ${CODEX_VERBS});
+          const ta = document.querySelector('textarea');
+          ta.value = 'still typing my draft';
+          ta.dispatchEvent(new Event('input',  { bubbles: true }));   // 300ms autosave armed
+          const armed = window.__ci._draftTimer !== null;
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q1"]').click();
+          const out = { armed, afterOpen: window.__ci._draftTimer, stashed: window.__ci._editDraftBefore, box: ta.value };
+          ta.dispatchEvent(new KeyboardEvent('keydown',  { key: 'Escape',  bubbles: true }));
+          return out;
+        })()`);
+        ok(`…and opening the editor DISARMS the autosave the last keystroke armed (${JSON.stringify(armedBefore)})`, armedBefore.armed === true && armedBefore.afterOpen === null && armedBefore.stashed === 'still typing my draft' && armedBefore.box === 'first');
+        ok(`…and another client's draft sync lands on the STASHED draft, never on the rewrite (${JSON.stringify(drafts)})`, drafts.kept === 'first, being rewritten' && drafts.stashed === 'a draft from another client' && drafts.afterEsc === 'a draft from another client');
       }
       // THE HEADER CONTROL is per harness, from the verb table — codex has
       // run-all, an ACP harness does not, and claude has no strip at all.

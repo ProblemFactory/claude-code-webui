@@ -61,8 +61,28 @@ function resolveWrapperFiles(BUFFERS_DIR, id, sockPath) {
  *  (the skew rule again: an old process must never be asked for a verb it
  *  would drop, and must never lose the verbs it does serve). */
 // What a wrapper that adverts `inputQueue` WITHOUT a verb list serves: the
-// three verbs that existed before the verb table (2.369.55 and older).
-const LEGACY_QUEUE_VERBS = Object.freeze(['remove', 'steer', 'steer-all']);
+// three verbs that existed before the verb table (2.369.55 and older). The
+// list itself lives in the PURE module — the CLIENT applies the same mapping
+// to a verb-less in-band publication, and two hand-kept copies of "what an old
+// wrapper serves" is how the two ends came to disagree (round-2 verifier).
+const { LEGACY_QUEUE_VERBS } = require('../backend-caps.js');
+
+/** The longest text a queue `edit` may carry. The WRAPPER's own limit (it
+ *  publishes `text` — i.e. offers the edit control at all — only for items at
+ *  or under this, `QUEUE_EDIT_MAX_CHARS` in data/bin/codex-chat-wrapper.js,
+ *  parity-pinned by scripts/test-queue-steer.mjs), mirrored here because the
+ *  queue-op frame goes to the wrapper over RAW PTY STDIN with no frame-file
+ *  bypass: an unbounded `text` is the shredding class the bypass exists to
+ *  prevent (kb-bugfix-invariants, the 79928a2b/c1206711 line). A wrapper that
+ *  never offered the control cannot be handed a megabyte through it. */
+const QUEUE_EDIT_MAX_CHARS = 20000;
+
+/** …and the transport ceiling for ANY queue-op frame: the pty-stdin write path
+ *  is only safe below the same 64KiB the `input` case uses to decide it needs
+ *  the frame file. JSON escaping can multiply a string by six (control chars →
+ *  \uXXXX), so the char cap above does not imply this one — both are checked,
+ *  and neither is silent. */
+const QUEUE_OP_MAX_BYTES = 64 * 1024;
 
 function wrapperCaps(BUFFERS_DIR, id, sockPath) {
   const { sidecar } = resolveWrapperFiles(BUFFERS_DIR, id, sockPath);
@@ -76,4 +96,4 @@ function wrapperCaps(BUFFERS_DIR, id, sockPath) {
   return { frameFile: !!(caps && caps.frameFile), peerMessage: !!(caps && caps.peerMessage), inputQueue, queueVerbs, responseStyle: !!(caps && caps.responseStyle), caps, reason: caps ? 'ok' : 'no-caps', startedAt: (m && m.startedAt) || null, pid: (m && m.pid) || null };
 }
 
-module.exports = { resolveWrapperFiles, wrapperCaps, LEGACY_QUEUE_VERBS };
+module.exports = { resolveWrapperFiles, wrapperCaps, LEGACY_QUEUE_VERBS, QUEUE_EDIT_MAX_CHARS, QUEUE_OP_MAX_BYTES };

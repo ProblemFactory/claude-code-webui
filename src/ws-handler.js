@@ -186,7 +186,7 @@ function pickCodexThreadCandidate({ activeSessions, webuiSessionId, cwd, created
 // on the STREAM (2.241.1 rule: pipe errors arrive as stream 'error' events).
 const { REMOTE_PRELUDE, nodeFinder, buildRemoteExec } = require('./remote-shell.js');
 const { sweepWriters } = require('./writer-sweep.js');
-const { wrapperCaps, LEGACY_QUEUE_VERBS } = require('./server/wrapper-files.js');
+const { wrapperCaps, LEGACY_QUEUE_VERBS, QUEUE_EDIT_MAX_CHARS, QUEUE_OP_MAX_BYTES } = require('./server/wrapper-files.js');
 
 function execFileAsync(cmd, args, { input, timeout = 20000, maxBuffer = 8 * 1024 * 1024, encoding = 'buffer' } = {}) {
   return new Promise((resolve, reject) => {
@@ -630,7 +630,11 @@ function registerWsHandler(wss, ctx) {
         // leaves the live window alone (the inc-mt2arppw rule).
         case 'queue-op': {
           const session = activeSessions.get(data.sessionId);
-          const refuse = (message, reason) => { try { ws.send(JSON.stringify({ type: 'error', code: 'queue-op-unsupported', reason: reason || 'unsupported', scope: 'action', sessionId: data.sessionId, error: message, message })); } catch { } };
+          // The refusal ECHOES the op and its id: this reply never becomes a
+          // `queue_op_result` (the wrapper never saw the frame), so the id is
+          // the only way the strip can find the row it marked pending and end
+          // it (round-2 verifier — those rows spun forever).
+          const refuse = (message, reason) => { try { ws.send(JSON.stringify({ type: 'error', code: 'queue-op-unsupported', reason: reason || 'unsupported', scope: 'action', sessionId: data.sessionId, op: data.op || null, id: data.id || null, error: message, message })); } catch { } };
           if (!session?.pty || session.mode !== 'chat') { refuse('This action needs a live chat session.', 'not-live'); break; }
           const adapter = adapterRegistry.get(session.backend);
           if (!adapter) { refuse(`No adapter for backend "${session.backend}".`, 'no-adapter'); break; }
@@ -665,6 +669,17 @@ function registerWsHandler(wss, ctx) {
             console.log(`[${data.sessionId}] queue-op ${data.op} REFUSED: running wrapper serves [${served.join(',')}]`);
             break;
           }
+          // SIZE, BEFORE THE FRAME IS BUILT: `edit` is the one verb that
+          // carries user text, and this frame reaches the wrapper over RAW PTY
+          // STDIN — the `input` case routes anything large through the frame
+          // file precisely because a big pty write gets shredded (the
+          // 79928a2b/c1206711 class). Refuse with evidence rather than send
+          // something that may arrive in pieces; the client keeps the typed
+          // text and re-opens the editor on the refusal.
+          if (typeof data.text === 'string' && data.text.length > QUEUE_EDIT_MAX_CHARS) {
+            refuse(`That edit is too long (${data.text.length.toLocaleString('en-US')} characters; the limit is ${QUEUE_EDIT_MAX_CHARS.toLocaleString('en-US')}): it was NOT saved. Shorten it, or remove the queued message and send a new one.`, 'text-too-long');
+            break;
+          }
           let payload;
           try {
             payload = adapter.formatQueueOp({
@@ -678,6 +693,13 @@ function registerWsHandler(wss, ctx) {
             });
           }
           catch (e) { refuse(e.message, 'malformed'); break; }
+          // …and the frame ITSELF, after JSON escaping (a control-char-heavy
+          // string grows sixfold): the char cap above does not bound this one.
+          if (payload.length > QUEUE_OP_MAX_BYTES) {
+            refuse(`That queue action does not fit in one message to the agent (${payload.length.toLocaleString('en-US')} bytes; the limit is ${QUEUE_OP_MAX_BYTES.toLocaleString('en-US')}): it was NOT sent.`, 'frame-too-large');
+            console.log(`[${data.sessionId}] queue-op ${data.op} REFUSED: frame ${payload.length}B over the ${QUEUE_OP_MAX_BYTES}B pty-stdin ceiling`);
+            break;
+          }
           session.pty.write(payload + '\n');
           break;
         }
@@ -1082,7 +1104,11 @@ function registerWsHandler(wss, ctx) {
                   const served = wc.inputQueue ? wc.queueVerbs
                     : (Array.isArray(inBand) ? inBand
                       : (session._normalizer?.queuePublished?.() ? LEGACY_QUEUE_VERBS.slice() : null));
-                  return { queueSupported: !!served, queueVerbs: served || [] };
+                  // NULL means "we do not know", NOT "it serves nothing": an
+                  // empty ARRAY is a real answer (a wrapper that named no
+                  // verbs) and the client intersects with it, so answering []
+                  // for the unknown case hid every control (round-2 verifier).
+                  return { queueSupported: !!served, queueVerbs: served || null };
                 })(),
                 // …and whether that same running wrapper serves the LIVE style
                 // verb. The client needs BOTH facts (2.369.58): with only the
