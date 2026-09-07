@@ -3060,4 +3060,13 @@ export default {
   "Connection lost — your last message may not have been sent": "连接已断开 —— 你的上一条消息可能没有发出",
   "Connection lost before the goal was set — the input already had text, so your command was left alone": "目标设置前连接已断开 —— 输入框里已有内容，所以没有动你的指令",
   "Goal not confirmed — the session may be unresponsive. The input already had text, so your command was left alone.": "目标未确认 —— 该会话可能没有响应。输入框里已有内容，所以没有动你的指令。",
+  "While busy": "会话忙时",
+  "Steered into the running turn": "插入正在进行的这一轮",
+  "Queued — runs after the current turn": "排队 —— 在当前这一轮之后运行",
+  "The CLI decides (it queues mid-turn itself)": "由 CLI 决定（它自己在轮次中排队）",
+  "Stashed — injected at the next turn": "暂存 —— 在下一轮注入",
+  "A notification arriving mid-turn joins the RUNNING turn and carries only itself — the input queue is untouched, and several notifications merge into one injection (Codex TUI parity). Messages from other agents are different: they QUEUE and run as their own turn, because a person’s message is its own task.": "轮次进行中到达的系统通知会并入**正在进行**的这一轮, 且只携带它自己 —— 输入队列原封不动, 多条通知会合并成一次注入(与 Codex TUI 一致)。其他 agent 发来的消息不同: 它们仍然**排队**并作为自己的一轮运行, 因为别人的消息本身就是一件事。",
+  "This harness has no steer verb, so a notification arriving mid-turn waits in the input queue and runs as its own turn afterwards — like a message from another agent.": "这个 harness 没有 steer 动词, 所以轮次进行中到达的通知会在输入队列里等待, 之后作为自己的一轮运行 —— 与其他 agent 发来的消息一样。",
+  "Delivery goes through the CLI’s own inbox: it queues a mid-turn notification itself and opens a turn when the session is idle. Same for messages from other agents.": "投递走 CLI 自己的收件箱: 轮次进行中的通知由它自己排队, 会话空闲时它会开启一轮。其他 agent 的消息同理。",
+  "This harness has no live delivery lane, so notifications and agent messages are stashed and injected at the session’s next turn.": "这个 harness 没有活投递通道, 所以通知与 agent 消息都会被暂存, 在该会话的下一轮注入。",
 };

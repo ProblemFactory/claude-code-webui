@@ -3059,4 +3059,13 @@ export default {
   "Connection lost — your last message may not have been sent": "接続が切れました —— 直前のメッセージは送信されていない可能性があります",
   "Connection lost before the goal was set — the input already had text, so your command was left alone": "目標を設定する前に接続が切れました —— 入力欄に既にテキストがあったため、コマンドはそのままにしています",
   "Goal not confirmed — the session may be unresponsive. The input already had text, so your command was left alone.": "目標が確認されませんでした —— セッションが応答していない可能性があります。入力欄に既にテキストがあったため、コマンドはそのままにしています。",
+  "While busy": "実行中のとき",
+  "Steered into the running turn": "実行中のターンに差し込む",
+  "Queued — runs after the current turn": "キュー —— 現在のターンの後に実行",
+  "The CLI decides (it queues mid-turn itself)": "CLI が決定します（ターン中は CLI 自身がキューします）",
+  "Stashed — injected at the next turn": "保留 —— 次のターンで注入",
+  "A notification arriving mid-turn joins the RUNNING turn and carries only itself — the input queue is untouched, and several notifications merge into one injection (Codex TUI parity). Messages from other agents are different: they QUEUE and run as their own turn, because a person’s message is its own task.": "ターン中に届いた通知は**実行中**のターンに合流し、自分自身だけを運びます —— 入力キューには一切触れず、複数の通知はひとつの注入にまとまります（Codex TUI と同じ）。他のエージェントからのメッセージは別扱いで、キューに入り自分のターンとして実行されます（人のメッセージはそれ自体がひとつの用件だからです）。",
+  "This harness has no steer verb, so a notification arriving mid-turn waits in the input queue and runs as its own turn afterwards — like a message from another agent.": "このハーネスには steer 動詞がないため、ターン中に届いた通知は入力キューで待ち、その後に自分のターンとして実行されます —— 他のエージェントからのメッセージと同じです。",
+  "Delivery goes through the CLI’s own inbox: it queues a mid-turn notification itself and opens a turn when the session is idle. Same for messages from other agents.": "配信は CLI 自身の受信箱を通ります。ターン中の通知は CLI がキューし、セッションがアイドルならターンを開始します。他のエージェントからのメッセージも同様です。",
+  "This harness has no live delivery lane, so notifications and agent messages are stashed and injected at the session’s next turn.": "このハーネスにはライブ配信レーンがないため、通知もエージェントのメッセージも保留され、そのセッションの次のターンで注入されます。",
 };

@@ -677,6 +677,16 @@ async function handleInput(msg) {
       if (!text.trim()) return;
       const fromName = msg.fromName ? String(msg.fromName) : null;
       const cardText = typeof msg.cardText === 'string' && msg.cardText.trim() ? msg.cardText : null;
+      // The delivery ladder types the frame ('notification' = VibeSpace itself
+      // speaking, 'peer' = another session's message). On codex a BUSY
+      // notification is STEERED into the running turn (turn/steer); ACP v1 has
+      // NO steer method at all — `session/prompt` is one-at-a-time and there is
+      // no verb to inject into a running prompt (backend-caps: opencode's
+      // queueVerbs deliberately omit 'steer') — so a notification arriving mid
+      // prompt QUEUES here like any other message. That is not accept-and-
+      // ignore: the result SAYS the steer was unavailable, so the difference is
+      // on the wire rather than only in this comment.
+      const peerKind = msg.kind === 'notification' ? 'notification' : 'peer';
       const body = `Message from ${fromName || 'another session'}:\n${text}`;
       try {
         record('user', { msgId: '', content: [{ type: 'text', text }], peer: { name: fromName, body: cardText } });
@@ -684,7 +694,7 @@ async function handleInput(msg) {
         // peerText/peerFrom ride the queue entry so a Stop that drops it can
         // hand the message back to the delivery ladder instead of losing it.
         await runPrompt([{ type: 'text', text: body }], { peer: true, silentQueue: true, peerText: text, peerFrom: fromName });
-        record('peer_result', { ok: true, mode: queued ? 'queued' : 'turn' });
+        record('peer_result', { ok: true, mode: queued ? 'queued' : 'turn', ...(peerKind === 'notification' && queued ? { steer: 'unsupported' } : {}) });
       } catch (e) {
         record('peer_result', { ok: false, reason: e.message, text, fromName });
       }

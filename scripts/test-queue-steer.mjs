@@ -1027,6 +1027,18 @@ console.log('— wiring + docs pins');
   // DISTINCT phrases per file (a loose grep matched 'queue-operation' in an
   // unrelated essay and the docs pin passed while the docs were empty)
   ok('kb-features documents QUEUED vs STEERED incl. the multi-queue rule', /QUEUED vs STEERED/.test(read('docs/kb-features.md')) && /steering item N injects\s*\n?\s*\*\*only N\*\*/.test(read('docs/kb-features.md')));
+  // 2026-09-07: the SECOND rule that lives in this section — a VibeSpace
+  // notification steers, a person's message queues, and a steer carries only
+  // itself. It must be written where the user reads it AND cite the upstream
+  // sources, because "a steer carries only itself" is what makes it safe.
+  {
+    const kbf = read('docs/kb-features.md');
+    ok('kb-features states the notification rule in the same section', /SYSTEM NOTIFICATIONS STEER, PEOPLE QUEUE/.test(kbf) && /a steer carries only itself/.test(kbf));
+    ok('…with the codex-rs sources cited (turn_processor.rs + get_pending_input/split_off)', /turn_processor\.rs/.test(kbf) && /get_pending_input/.test(kbf) && /split_off\(0\)/.test(kbf));
+    ok('…and names the derived lane per harness (never a backend-id branch)', /notificationDelivery/.test(kbf) && /cli-inbox/.test(kbf) && /steer:'unsupported'|steer:.unsupported./.test(kbf));
+    ok('kb-features Background Work says the floor+stash drain as ONE block', /renderNotifStash/.test(kbf) && /ONE rendered block/.test(kbf));
+    ok("kb-api documents the peer-message frame's typed origin", /TYPED ORIGIN/.test(read('docs/kb-api.md')) && /mode:'steered'/.test(read('docs/kb-api.md')));
+  }
   ok("kb-api documents the ws 'queue-op' message + the queue_changed/queue_op_result events", /\*\*Input queue \(`queue-op`/.test(read('docs/kb-api.md')) && /queue_op_result \{op, id, msg_id, ok, reason, detail\}/.test(read('docs/kb-api.md')));
   ok('design-harness-plugins §1 records the closure on its own P2 row', /两种发送模式 ✅2026-09-06/.test(read('docs/design-harness-plugins.md')));
   ok('…and the round-2 client laws are written down where the strip lives (kb-file-structure) and where the user reads (kb-features)',
@@ -1034,6 +1046,7 @@ console.log('— wiring + docs pins');
   ok('…and kb-api documents the echoed op/id and BOTH size gates on the one verb that carries user text',
     /`op` and `id` are ECHOED/.test(read('docs/kb-api.md')) && /text-too-long/.test(read('docs/kb-api.md')) && /frame-too-large/.test(read('docs/kb-api.md')));
   ok('design-harness-features §2.1 records the adversarial round with its six findings', /round-2 对抗验证：6 条真缺陷/.test(read('docs/design-harness-features.md')));
+  ok('…and §2.1b records the notification-steer decision with its upstream citations', /### 2\.1b/.test(read('docs/design-harness-features.md')) && /turn_processor\.rs:1023-1039/.test(read('docs/design-harness-features.md')) && /split_off\(0\)/.test(read('docs/design-harness-features.md')));
   { const kbfs = read('docs/kb-file-structure.md');
     ok('kb-file-structure carries the wrapper/normalizer/ws essays (the measured app-server facts live there)',
       /THE INPUT QUEUE — QUEUED vs STEERED/.test(kbfs) && /QUEUE STATE IS SESSION STATE, NEVER A MESSAGE/.test(kbfs) && /the ONE new case for QUEUED vs STEERED/.test(kbfs) && /no `remove`/.test(kbfs)); }

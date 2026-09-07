@@ -229,6 +229,15 @@ console.log('— Stop means stop (the cancel race + the local queue)');
     await w.waitFor(() => w.find('queued_input', (r) => r.msg_id === 'q2'), 3000, 'queued_input');
     w.send({ type: 'peer-message', text: 'ping from B', fromName: 'B' });  // queues too (silently)
     await w.waitFor(() => w.find('peer_result', (r) => r.mode === 'queued'), 3000, 'queued peer_result');
+    // A VIBESPACE NOTIFICATION (2026-09-07): on codex a busy one is STEERED
+    // into the running turn (turn/steer). ACP v1 has NO steer method —
+    // session/prompt is one-at-a-time, which is why opencode's queueVerbs omit
+    // 'steer' — so it QUEUES here, and the result SAYS the steer was
+    // unavailable rather than accepting the tag and ignoring it (2.361.4 law).
+    w.send({ type: 'peer-message', text: '[VibeSpace Background Work] task "nightly" (job-1): done.', fromName: 'Background Work · nightly', kind: 'notification' });
+    const notifRes = await w.waitFor(() => w.find('peer_result', (r) => r.steer === 'unsupported'), 3000, 'notification peer_result');
+    ok("a busy VibeSpace NOTIFICATION queues here and says the steer was unavailable (ACP v1 has no steer verb — codex steers, this harness cannot)", notifRes.ok === true && notifRes.mode === 'queued' && notifRes.steer === 'unsupported', notifRes);
+    ok('…and it really is queued (nothing is dropped by the tag)', w.mockCalls().filter((c) => c.method === 'session/prompt').length === 1, w.mockCalls().map((c) => c.method).join(','));
     w.send({ type: 'interrupt' });
     await w.waitFor(() => w.find('prompt_end'), 8000, 'prompt_end');
     await sleep(1500); // long enough for a drained queue prompt to reach the agent
@@ -241,14 +250,16 @@ console.log('— Stop means stop (the cancel race + the local queue)');
     // re-send a message they never sent and could not reach.
     ok('…and a dropped PEER message is not counted in the "send it again" hint (it returns via the delivery ladder, the user never sent it)', !/2 queued/.test(cleared?.text || '') && !/queued messages/.test(cleared?.text || ''), cleared);
     const pr = w.findAll('peer_result');
-    ok('…a dropped PEER message goes back to the delivery ladder (peer_result ok:false with its text — the consumer re-stashes it)', pr.length === 2 && pr[1].ok === false && pr[1].text === 'ping from B' && pr[1].fromName === 'B' && /Stop/.test(pr[1].reason || ''), pr);
+    const dropped = pr.filter((r) => r.ok === false);
+    ok('…a dropped PEER message goes back to the delivery ladder (peer_result ok:false with its text — the consumer re-stashes it)', dropped.some((r) => r.text === 'ping from B' && r.fromName === 'B' && /Stop/.test(r.reason || '')), pr);
+    ok('…and so does the dropped NOTIFICATION (a promised message is a promised message, whoever sent it)', dropped.some((r) => /Background Work/.test(r.fromName || '') && /Stop/.test(r.reason || '')), dropped);
     // THE BUBBLES must say REMOVED, not go blank. The normalizer clears the
     // chip of anything that leaves the queue with no explicit result — that
     // reads as "it ran", the opposite of what Stop did (round-1 review). So
     // each dropped entry gets its own removal result BEFORE the republish.
     {
       const rms = w.findAll('queue_op_result', (r) => r.op === 'remove' && r.ok === true);
-      ok("…each dropped bubble is told it was REMOVED (a cleared chip would claim the message RAN)", rms.length === 2 && rms.some((r) => r.msg_id === 'q2') && rms.every((r) => r.reason === 'stopped'), rms);
+      ok("…each dropped bubble is told it was REMOVED (a cleared chip would claim the message RAN)", rms.length === 3 && rms.some((r) => r.msg_id === 'q2') && rms.every((r) => r.reason === 'stopped'), rms);
       const at = (pred) => w.records.map((r, i) => [r, i]).filter(([r]) => r.type === 'acp' && pred(r)).slice(-1)[0]?.[1] ?? -1;
       const lastRm = at((r) => r.kind === 'queue_op_result');
       const emptyQ = at((r) => r.kind === 'queue_changed' && (r.items || []).length === 0);

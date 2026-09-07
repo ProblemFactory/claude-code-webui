@@ -179,6 +179,24 @@ inputModes: {
 
 **门**：`test-queue-steer` 新增第⑧组（动词表一致性 / 每动词拒绝理由 / 按动词表出控件 / peer 无编辑控件 / run-now 缺 id 抛错）；`test-codex-p2-wrapper` 加「edit 保留 audio+localAudio+skill 并清 text_elements」「reorder 前必须翻完分页」「重排前重新 list 归并未知 id」「run-all 与 run-now 不同帧」四行；第⑥档**真 app-server** 钉参数名与响应形状（该档已存在，无二进制/未登录按证据 SKIP）。**尺寸 M。**
 
+### 2.1b 系统通知 STEER，人发的消息照旧排队 —— ✅ 已落地 2026-09-07（owner 决策）
+
+> **起因（owner 现场）**：一个 codex 会话攒了 **20** 条 `[VibeSpace Background Work] task … done`，每条都是一个**独立的排队项** —— 当前这轮之后还有 20 个计费 turn 在等。owner：「系统通知默认应该是 steering 的」；查完 TUI 语义后：「按照 TUI 实现吧」。
+>
+> **规则一句话**：*VibeSpace 自己说的话（Background Work 事件、系统通知）插进正在跑的那一轮；别的会话里的人发来的消息照旧排队跑自己那一轮；一次 steer 只携带它自己。*
+>
+> **「只携带自己」是上游语义, 不是我们的设计**（rust-v0.153.4，逐行核对）：`turn/steer` 把 `params.input` 映射成**一个** `TurnInput::UserInput` 并以 `TurnInputMode::Steer` 提交（`app-server/src/request_processors/turn_processor.rs:1023-1039`）；core 在**每次模型请求前**把待处理的 steer 整批 drain（`core/src/session/turn.rs:312-323` → `session/input_queue.rs` 的 `get_pending_input`，`pending_input.items.split_off(0)`）。所以①连续来的通知**自己就会合并**成一次注入，②**队列一动不动** —— 用户排在后面的消息保持原位与原顺序（套件里这一条是「顺手把队列一起送过去」那个变体的负控：那个变体必须把它们 delete 掉）。
+>
+> **接缝**（改动都落在既有的那条投递梯上，没有新层）：
+> - `src/server/conversation-deliver.js` 给 rung 1.5 的 stdin 帧加 **typed origin** `kind:'notification'|'peer'`（缺失/未知一律 `'peer'`，老调用方不会悄悄换道）。**梯子只打标不选道** —— 只有 wrapper 知道此刻有没有 turn 在跑。
+> - `src/jobs.js _deliverTo` 打 `kind:'notification'`；`vibespace-msg`（`/api/agent/msg/send`）不传，即 `'peer'`。
+> - `data/bin/codex-chat-wrapper.js`：忙 + notification ⇒ `steerInput()`（把 `steerOne` 里那唯一一处 `turn/steer` 提出来共用），回 `peer_message_result {ok:true, mode:'steered'}`，并写与另两条道**同一条** `recordPeerMessage()` 记录（带 `webui_peer` 标记 ⇒ 活流与重建都是同一张带署名的卡）。steer 被拒是**设计内的路**（turn 在检查与 RPC 之间结束；review/compact 轮不可 steer）：重读 `meta.activeTurnId` 回落到 queue/turn，并在结果里 `steerFailed`+`steerDetail` 点名，服务端 `stdout/codex-events` 打日志 —— 排队的通知永远是**看得见的**偏离，不是静默的。
+> - `data/bin/acp-wrapper.js`：ACP v1 **根本没有 steer 方法**（`session/prompt` 一次一个，opencode 的 `queueVerbs` 也正是按这个结构性理由不含 `steer`），所以忙时通知照旧排队，但回包明说 `steer:'unsupported'` —— 不是 accept-and-ignore。
+> - **能力位是派生的, 不是新声明的**：`backend-caps.notificationDelivery({peerDelivery, inputModes})` → `steer | queue | cli-inbox | stash`，与「`inputModes.steer` 是 `queueVerbs` 的视图」同一条派生律 ⇒ 「通知要 steer」没有第二处可编辑，下游也绝不按 backend id 分支。claude 留在 `cli-inbox`（它自己的收件箱在轮次中排队，那条道是 CLI 的，我们不写它 stdin）。客户端 `BACKEND_META.caps` 同时镜像 `peerDelivery` 并共用同一个纯函数（`notificationDeliveryFor`），会话属性 → Background Work 就照它说话。
+> - **引擎侧一个字没改**：30s/会话的洪泛地板与 `pendingNotifs` stash 原样保留 —— 正是它们把一阵爆发变成一个**批**：一阵里只有第一条 distinct 事件走投递，其余入 stash，而 stash 由注入路由（agent-routes SessionStart + prompt-context）渲染成**一整块**（`job-model renderNotifStash`）搭下一轮的车，绝不逐条重回投递梯（那正是一个批重新变成 N 条排队消息的路径）。
+>
+> **门**：test-codex-p2-wrapper ②f（自带 stub app-server，三种 steer 模式：空队列 ⇒ 恰好一次 `turn/steer` 且零 `thread/queue/add`；三条排队时 ⇒ 仍只多一次 steer、**零** `thread/queue/delete`、三条原位原序；人发的帧与无 kind 的帧都排队；turn 中途结束 ⇒ 回落成自己的一轮；不可 steer 的轮 ⇒ 回落进队列；卡片活流/重建/与 codex 自己 rollout 副本合并后都只有一张；XSS 通知按数据承载）/ test-peer-delivery 44（派生道表 + 客户端镜像防漂移 + 帧打标与未知归一 + 五个接线 pin）/ test-jobs-engine（地板→stash→**一块**排空）/ test-acp-harness（通知在 ACP 上排队并自报 `steer:'unsupported'`，Stop 掉的通知同样交还投递梯）。
+
 ### 2.2 三层「未知记录」面包屑 —— S，全表性价比最高
 
 **现状**（三处不同病）：

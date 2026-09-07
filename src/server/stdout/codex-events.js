@@ -193,6 +193,14 @@ function create({ engine, deliverRef }) {
             console.log(`[deliver] rpc-queue wrapper delivery failed (${msg.payload.reason || 'unknown'}) — re-stashing for ${cid}`);
             try { if (cid) deliverRef()?.stashFor(cid, { source: 'agent', fromName: msg.payload.fromName || null, text: String(msg.payload.text) }); } catch {}
           }
+          // A notification that could NOT be steered fell back to the queue
+          // (the turn ended between the check and the RPC, or it was a
+          // review/compact turn). It was delivered either way — but the lane
+          // it actually took is the fact an operator needs when a session
+          // shows a queued notification the design says should have steered.
+          if (msg.type === 'event_msg' && msg.payload?.type === 'peer_message_result' && msg.payload.ok === true && msg.payload.steerFailed) {
+            console.log(`[deliver] rpc-queue: turn/steer refused (${msg.payload.steerFailed}${msg.payload.steerDetail ? ': ' + msg.payload.steerDetail : ''}) — the notification took the '${msg.payload.mode}' lane instead`);
+          }
           // Codex plan tool → the session's live TODO summary (board pill)
           if (msg.type === 'event_msg' && msg.payload?.type === 'plan_updated' && Array.isArray(msg.payload.plan)) {
             updateSessionTodos(session, msg.payload.plan.map((p) => ({

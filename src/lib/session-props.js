@@ -1,6 +1,6 @@
 import { escHtml, copyText, showConfirmDialog, taskGroupColor } from './utils.js';
 import { SESSION_STATE_META, SESSION_URGENCY_META } from './sidebar-tasks.js';
-import { getBackendMeta, getAgentKindMeta, getAgentRoleLabel, responseStyleCaps, responseStyleOrigin, composerSendModes } from './agent-meta.js';
+import { getBackendMeta, getAgentKindMeta, getAgentRoleLabel, responseStyleCaps, responseStyleOrigin, composerSendModes, notificationDeliveryFor } from './agent-meta.js';
 import { t } from './i18n.js';
 import { registerOpenAction } from './window-types.js';
 
@@ -370,6 +370,29 @@ export function openSessionProps(app, sessionRef, { syncId } = {}) {
         ? t('Background jobs owned by this conversation message it when they finish, fail, get parked, or ask for input; while it is closed, notifications queue and inject at resume. Toggle globally in Settings → Integration, per group in the group window.')
         : t('This conversation is NOT notified when its background jobs finish — agents must poll. Toggle globally in Settings → Integration, per group in the group window.');
       bwSec.appendChild(hint);
+      // HOW a notification reaches a BUSY session — derived from the harness
+      // capability row (backend-caps peerDelivery + inputModes.steer), never
+      // from a backend id. Owner decision 2026-09-07: notifications STEER,
+      // human messages QUEUE, and a steer carries only itself.
+      if (eff) {
+        const lane = notificationDeliveryFor(s.backend || 'claude');
+        const laneRow = document.createElement('div');
+        laneRow.className = 'session-detail-row';
+        const laneValue = lane === 'steer' ? t('Steered into the running turn')
+          : lane === 'queue' ? t('Queued — runs after the current turn')
+            : lane === 'cli-inbox' ? t('The CLI decides (it queues mid-turn itself)')
+              : t('Stashed — injected at the next turn');
+        laneRow.innerHTML = `<span class="session-detail-label">${escHtml(t('While busy'))}</span><span class="session-detail-value">${escHtml(laneValue)}</span>`;
+        bwSec.appendChild(laneRow);
+        const laneHint = document.createElement('div');
+        laneHint.className = 'empty-hint';
+        laneHint.textContent = lane === 'steer'
+          ? t('A notification arriving mid-turn joins the RUNNING turn and carries only itself — the input queue is untouched, and several notifications merge into one injection (Codex TUI parity). Messages from other agents are different: they QUEUE and run as their own turn, because a person\u2019s message is its own task.')
+          : lane === 'queue' ? t('This harness has no steer verb, so a notification arriving mid-turn waits in the input queue and runs as its own turn afterwards — like a message from another agent.')
+            : lane === 'cli-inbox' ? t('Delivery goes through the CLI\u2019s own inbox: it queues a mid-turn notification itself and opens a turn when the session is idle. Same for messages from other agents.')
+              : t('This harness has no live delivery lane, so notifications and agent messages are stashed and injected at the session\u2019s next turn.');
+        bwSec.appendChild(laneHint);
+      }
     }
 
     // ── Agent steps (native TODO) ──

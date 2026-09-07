@@ -11,6 +11,7 @@ import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { JobManager } = require('../src/jobs.js');
+const jobModel = require('../src/job-model.js');
 let pass = 0, fail = 0;
 const ok = (c, n, e) => { if (c) { pass++; console.log('  ✓ ' + n); } else { fail++; console.error('  ✗ ' + n + (e ? ' — ' + e : '')); } };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -96,11 +97,16 @@ try {
   C.d.notifyGlobal = () => true;
   C._notifyRate.clear(); // earlier phases posted for conv-T — reset the floor
   C.pendingNotifs.clear();
-  C.d.deliverToConversation = async (cid, text) => { delivered.push({ cid, text }); return { ok: true, lane: 'message', peerName: 'peer-X' }; };
+  C.d.deliverToConversation = async (cid, text, opts) => { delivered.push({ cid, text, opts }); return { ok: true, lane: 'message', peerName: 'peer-X' }; };
   const rn1 = C.create({ kind: 'task', name: 'notif-ok', cmd: { argv: ['sh', '-c', 'exit 1'] }, owner }, caller);
   const jn1 = C.jobs.get(rn1.job.id);
   ok(await until(() => jn1.state === 'failed' && jn1.lastNotify && jn1.lastNotify.lane === 'message' && jn1.lastNotify.ok, 15000), 'failed task messages the owner conversation (lastNotify lane=message)', JSON.stringify(jn1.lastNotify));
   ok(delivered.length === 1 && delivered[0].cid === 'conv-T' && delivered[0].text.includes(jn1.id), 'delivery targeted the owner conversation lineage id and named the job');
+  // TYPED ORIGIN (2026-09-07, owner: 系统通知默认应该是steering的): every owner
+  // notification says on the wire that it is a NOTIFICATION, so a busy codex
+  // session steers it into the running turn instead of opening its own billed
+  // turn afterwards. The ENGINE never picks the lane — the wrapper does.
+  ok(delivered[0].opts && delivered[0].opts.kind === 'notification', "…and is TYPED kind:'notification' (a person's vibespace-msg is 'peer' and keeps queueing)", JSON.stringify(delivered[0].opts));
   // stash lane: delivery fails → durable per-conversation queue, drained at injection
   C.d.deliverToConversation = async () => ({ ok: false, reason: 'no live inbox' });
   C._notifyRate.clear();
@@ -118,6 +124,40 @@ try {
   const rn3 = C.create({ kind: 'task', name: 'notif-off', notify: 'off', cmd: { argv: ['sh', '-c', 'exit 1'] }, owner }, caller);
   const jn3 = C.jobs.get(rn3.job.id);
   ok(await until(() => jn3.state === 'failed', 15000) && (await sleep(300), !jn3.lastNotify || jn3.lastNotify.lane === 'off'), 'notify:off job never posts (lastNotify lane=off)', JSON.stringify(jn3.lastNotify));
+  // 7c-bis. THE FLOOD FLOOR + THE DRAIN ARE **ONE FRAME**, not N (2026-09-07).
+  // The floor is what turns a burst into a batch: only the FIRST distinct event
+  // in 30s is posted, every other one is STASHED. And the stash is drained by
+  // the injection routes as a SINGLE rendered block (job-model renderNotifStash)
+  // that rides the conversation's next turn — it is never handed back to the
+  // delivery ladder entry by entry, which is exactly how 20 job events would
+  // become 20 queued messages again.
+  {
+    const posts = [];
+    C.d.deliverToConversation = async (cid, text, opts) => { posts.push({ cid, text, opts }); return { ok: true, lane: 'message', peerName: 'peer-X' }; };
+    C._notifyRate.clear();
+    C.pendingNotifs.clear();
+    // a SYNTHETIC record (the jb-floor idiom above): a real spawned job would
+    // also fire its own terminal notification and pollute the next phase
+    const jb = { id: 'jb-burst', name: 'burst', kind: 'task', state: 'done', owner: { conversation: { id: 'conv-T' } } };
+    for (const n of [1, 2, 3, 4, 5, 6]) C._notifyOwner(jb, { what: `step ${n} finished` });
+    await sleep(200);
+    ok(posts.length === 1 && /step 1 finished/.test(posts[0].text), `a burst of six events posts ONCE — the 30s floor holds the rest (${posts.length} posts)`, JSON.stringify(posts.map((p) => p.text.slice(0, 60))));
+    const stashed = C.pendingNotifs.get('conv-T') || [];
+    ok(stashed.length === 5 && stashed.every((e) => e.jobId === jb.id), `the five floored events are STASHED, not dropped (${stashed.length})`, JSON.stringify(stashed.map((e) => e.text)));
+    ok(!(jb.notifyLog || []).some((e) => e.lane === 'message' && e.ok && (jb.notifyLog || []).filter((x) => x.lane === 'message').length > 1), 'the journal shows ONE socket post for the burst', JSON.stringify((jb.notifyLog || []).map((e) => e.lane)));
+    const drained = C.drainNotifs('conv-T');
+    ok(drained.length === 5 && C.drainNotifs('conv-T').length === 0, 'the drain hands over the whole batch AT ONCE and clears', String(drained.length));
+    ok(posts.length === 1, 'draining posts NOTHING through the delivery ladder — the batch rides the next injection, it never becomes five more frames', String(posts.length));
+    const block = jobModel.renderNotifStash(drained);
+    const heads = (block.match(/<vibespace-jobs-missed-while-away>/g) || []).length;
+    ok(heads === 1 && block.includes('step 2 finished') && block.includes('step 6 finished'), `…and it renders as ONE block carrying every entry (${heads} block(s), ${block.length}B)`, block.slice(0, 200));
+    // the injection site is the ONLY consumer of that stash (a second consumer
+    // that re-delivered per entry is exactly the failure this pins against)
+    const ar = fs.readFileSync(new URL('../src/agent-routes.js', import.meta.url), 'utf-8');
+    ok(/const drained = jm\.drainNotifs\(caller\.conversationId\);[\s\S]{0,900}?jobModel\.renderNotifStash\(drained/.test(ar) && !/for \(const [a-z] of drained\) [\s\S]{0,80}deliverToConversation/.test(ar),
+      'wiring pin: the drain sites render ONE block and never re-enter the delivery ladder per entry');
+  }
+
   // 7d. notify-ACTION crons reach the OWNER CONVERSATION too (2.361.5, the
   //     设备运维大师 hunt): the notify action used to hit only the user inbox —
   //     the agent that scheduled its own reminder was never messaged. Also

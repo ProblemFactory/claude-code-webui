@@ -83,14 +83,27 @@ function create({ dataDir, peerMsg, getHosts, getConvIndex, serverSetting, activ
     } catch { return null; }
   }
 
-  /** One delivery attempt down the ladder. Returns {ok, lane, peerName?,
+  /** One delivery attempt down the ladder. Returns {ok, lane, kind, peerName?,
    *  hostId?, reason?} — the caller decides whether a miss stashes (jobs and
    *  agent-msg both do; a future fire-and-forget source may not).
    *  opts.fromName/opts.cardText label the CHAT CARD the server renders on a
    *  successful post (2.363.0): the CLI records server-posted injections with
    *  a body-less origin (unregistered poster), so the delivery site is the
-   *  ONLY party that can render the message visibly in the live window. */
+   *  ONLY party that can render the message visibly in the live window.
+   *  opts.kind TYPES THE ORIGIN (2026-09-07, owner: "系统通知默认应该是steering的"):
+   *    'notification' — VibeSpace itself speaking: a Background Work event, a
+   *                     system notice. Nobody is waiting for a reply, so on a
+   *                     harness whose notification lane is 'steer'
+   *                     (backend-caps notificationDelivery) it joins the
+   *                     RUNNING turn instead of becoming its own billed one.
+   *    'peer'         — a human/agent message from another session (default):
+   *                     it is somebody's message, it gets its own turn.
+   *  The ladder only TAGS the frame — the receiving wrapper owns the lane
+   *  decision, because only it knows whether a turn is running right now. */
   async function deliverToConversation(cid, text, opts = {}) {
+    // Unknown/absent origin = 'peer', the conservative lane (an older caller
+    // never silently gains the steer behaviour).
+    const kind = opts.kind === 'notification' ? 'notification' : 'peer';
     const cardOk = () => { try { emitPeerCard?.(cid, { fromName: opts.fromName || null, text: opts.cardText || text }); } catch (e) { log('[deliver] card emit failed:', e.message); } };
     // rung 0: VibeSpace channel socket (experimental, per-session opt-in)
     try {
@@ -100,7 +113,7 @@ function create({ dataDir, peerMsg, getHosts, getConvIndex, serverSetting, activ
           const sock = path.join(dataDir, 'channel-socks', wid + '.sock');
           if (!fs.existsSync(sock)) continue;
           const rc = await peerMsg.postChannelEvent(sock, text, { kind: 'peer_message' });
-          if (rc.ok) { cardOk(); return { ok: true, lane: 'channel', peerName: s.name || null }; }
+          if (rc.ok) { cardOk(); return { ok: true, lane: 'channel', kind, peerName: s.name || null }; }
         }
       }
     } catch (e) { log('[deliver] channel lane failed (falling through):', e.message); }
@@ -109,7 +122,7 @@ function create({ dataDir, peerMsg, getHosts, getConvIndex, serverSetting, activ
       const peer = peerMsg.findPeer(cid);
       if (peer) {
         const r = await peerMsg.postToPeer(peer, text);
-        if (r.ok) { cardOk(); return { ok: true, lane: 'message', peerName: peer.name || null }; }
+        if (r.ok) { cardOk(); return { ok: true, lane: 'message', kind, peerName: peer.name || null }; }
         log(`[deliver] local peer post to ${peer.socketPath} failed: ${r.reason}`);
         return { ok: false, lane: 'message', reason: r.reason };
       }
@@ -131,8 +144,8 @@ function create({ dataDir, peerMsg, getHosts, getConvIndex, serverSetting, activ
     const rpc = findRpcPeer(cid);
     if (rpc) {
       try {
-        rpc.s.pty.write(JSON.stringify({ type: 'peer-message', text, fromName: opts.fromName || null, cardText: opts.cardText || null }) + '\n');
-        return { ok: true, lane: 'rpc-queue', peerName: rpc.s.name || null };
+        rpc.s.pty.write(JSON.stringify({ type: 'peer-message', text, fromName: opts.fromName || null, cardText: opts.cardText || null, kind }) + '\n');
+        return { ok: true, lane: 'rpc-queue', kind, peerName: rpc.s.name || null };
       } catch (e) { log('[deliver] rpc-queue write failed (falling through): ' + e.message); }
     }
     // rung 2: the owning machine's daemon posts to ITS local registry
@@ -145,7 +158,7 @@ function create({ dataDir, peerMsg, getHosts, getConvIndex, serverSetting, activ
         // the stash rung honestly instead (the background connect still heals).
         const dm = await (hosts.deviceBounded ? hosts.deviceBounded(hid, 6000) : hosts.device(hid));
         const r = await dm.peerPost({ cid, text });
-        if (r && r.ok) { cardOk(); return { ok: true, lane: 'remote-message', peerName: r.peerName || null, hostId: hid }; }
+        if (r && r.ok) { cardOk(); return { ok: true, lane: 'remote-message', kind, peerName: r.peerName || null, hostId: hid }; }
         return { ok: false, lane: 'remote-message', hostId: hid, reason: (r && r.reason) || 'remote daemon could not reach the inbox' };
       } catch (e) {
         // capability gate / daemon down — an honest miss, the stash covers it

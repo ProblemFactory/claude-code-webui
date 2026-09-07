@@ -198,8 +198,16 @@ class JobManager {
       for (const [k, v] of this._notifyRate) if (!v.ts || v.ts < cut) this._notifyRate.delete(k);
       if (this._notifyRate.size > 500) this._notifyRate.clear();
     }
+    // kind:'notification' TYPES THE FRAME (2026-09-07, owner: 系统通知默认应该是
+    // steering的): nobody is waiting for a reply here, so on a harness whose
+    // notification lane is 'steer' (backend-caps notificationDelivery) this
+    // joins the RUNNING turn instead of becoming its own billed turn after it.
+    // The ENGINE does not decide the lane — the receiving wrapper does, because
+    // only it knows whether a turn is running. The 30s floor + stash below stay
+    // exactly as they were: a floored batch is drained as ONE injected block by
+    // agent-routes (renderNotifStash), never re-delivered per entry.
     const deliver = this.d.deliverToConversation
-      ? this.d.deliverToConversation(cid, text, { fromName: 'Background Work · ' + (job.name || job.id) })
+      ? this.d.deliverToConversation(cid, text, { fromName: 'Background Work · ' + (job.name || job.id), kind: 'notification' })
       : Promise.resolve({ ok: false, reason: 'no delivery lane wired' });
     Promise.resolve(deliver).then((r) => {
       if (r && r.ok) {

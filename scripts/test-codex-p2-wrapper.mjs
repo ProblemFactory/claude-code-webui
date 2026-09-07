@@ -1028,6 +1028,224 @@ process.stdin.on('data', (d) => {
   try { fs.unlinkSync(endFile); } catch { }
 }
 
+
+// ── ②f NOTIFICATIONS STEER, HUMANS QUEUE (owner decision 2026-09-07: a codex
+// session had accumulated 20 "[VibeSpace Background Work] … done" items as 20
+// SEPARATE queued submissions = 20 billed turns after the one it was running;
+// "系统通知默认应该是steering的", then "按照TUI实现吧").
+// THE RULE, and what each leg below proves:
+//   · a VIBESPACE NOTIFICATION (frame kind:'notification') arriving while a
+//     turn runs is STEERED into that turn — one turn/steer, no queue/add.
+//   · the steer carries ONLY ITSELF: the queue is neither read nor written,
+//     so items already queued keep their place AND their order (the negative
+//     control for the "carry the queue along" variant, which would have had
+//     to delete them).
+//   · a HUMAN peer message (kind:'peer', and any untyped frame from an older
+//     server) keeps today's behaviour: thread/queue/add, its own turn.
+//   · a REFUSED steer is a designed path — the message falls back to the
+//     queue/turn lane and the result SAYS the steer was refused.
+// Upstream sources for "a steer carries only itself" (rust-v0.153.4):
+//   app-server/src/request_processors/turn_processor.rs:1023-1039 — turn/steer
+//   maps `params.input` into ONE TurnInput::UserInput, TurnInputMode::Steer;
+//   core/src/session/turn.rs:312-323 → session/input_queue.rs
+//   `get_pending_input` (`pending_input.items.split_off(0)`) — core drains all
+//   pending steers wholesale before each model request, so consecutive
+//   notifications merge by themselves.
+console.log('— ②f notifications steer, humans queue');
+const STUB_NOTIF = `
+const fs = require('fs');
+let b = ''; let turns = 0; let queue = []; let qseq = 0; let activeTurn = null;
+const STEER = __STEERMODE__;
+const send = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (d) => {
+  b += d; let i;
+  while ((i = b.indexOf('\\n')) !== -1) {
+    const line = b.slice(0, i); b = b.slice(i + 1);
+    if (!line.trim()) continue;
+    let m; try { m = JSON.parse(line); } catch { continue; }
+    if (m.id === undefined || !m.method) continue;
+    fs.appendFileSync(__RPCLOG__, line + '\\n');
+    if (m.method === 'thread/start') { send({ id: m.id, result: { thread: { id: 'th-notif' } } }); continue; }
+    if (m.method === 'turn/start') { turns++; const tid = 'turn-' + turns; activeTurn = tid; send({ id: m.id, result: { turn: { id: tid } } }); send({ method: 'turn/started', params: { turn: { id: tid } } }); continue; }
+    if (m.method === 'thread/queue/add') { const q = { id: 'q' + (++qseq), input: m.params.input, clientUserMessageId: m.params.clientUserMessageId }; queue.push(q); send({ id: m.id, result: { queuedSubmission: q } }); send({ method: 'thread/queue/changed', params: { threadId: 'th-notif' } }); continue; }
+    if (m.method === 'thread/queue/list') { send({ id: m.id, result: { data: queue.slice(), nextCursor: null } }); continue; }
+    if (m.method === 'thread/queue/delete') {
+      const at = queue.findIndex((q) => q.id === m.params.queuedSubmissionId);
+      if (at < 0) { send({ id: m.id, error: { code: -32600, message: 'queued submission not found' } }); continue; }
+      queue.splice(at, 1); send({ id: m.id, result: { deleted: true } }); send({ method: 'thread/queue/changed', params: { threadId: 'th-notif' } }); continue;
+    }
+    if (m.method === 'turn/steer') {
+      if (STEER === 'review') { send({ id: m.id, error: { code: -32600, message: 'cannot steer a review turn' } }); continue; }
+      if (STEER === 'ended') {
+        // THE RACE THE FALLBACK EXISTS FOR: the turn finished between the
+        // wrapper's activeTurnId check and this RPC. The notification lands
+        // FIRST (that is the order a real app-server produces), then the error.
+        const e = activeTurn; activeTurn = null;
+        send({ method: 'turn/completed', params: { turn: { id: e }, status: 'completed' } });
+        send({ id: m.id, error: { code: -32600, message: 'no active turn to steer' } });
+        continue;
+      }
+      if (m.params.expectedTurnId !== activeTurn) { send({ id: m.id, error: { code: -32600, message: 'expected active turn id \`' + m.params.expectedTurnId + '\` but found \`' + activeTurn + '\`' } }); continue; }
+      send({ id: m.id, result: { turnId: activeTurn } });
+      continue;
+    }
+    if (m.method === 'turn/interrupt') { send({ id: m.id, result: {} }); const e = activeTurn; activeTurn = null; send({ method: 'turn/completed', params: { turn: { id: e }, status: 'interrupted' } }); continue; }
+    send({ id: m.id, result: {} });
+  }
+});
+`;
+const NOTIF_TEXT = '[VibeSpace Background Work] task "nightly" (job-1): done.';
+{
+  const N = spawnStub('notif', STUB_NOTIF.replace(/__STEERMODE__/g, "'ok'"));
+  const peerResults = () => N.msgs().filter((m) => m.type === 'peer_message_result');
+  ok(await waitFor(() => N.meta()?.threadId === 'th-notif'), 'notif stub: the wrapper has a thread');
+  N.send({ type: 'chat-input', text: 'long running work', msgId: 'n0' });
+  ok(await waitFor(() => N.meta()?.activeTurnId === 'turn-1'), 'notif stub: a turn is running');
+
+  // (1) EMPTY QUEUE — one steer, nothing queued
+  N.send({ type: 'peer-message', text: NOTIF_TEXT, fromName: 'Background Work · nightly', kind: 'notification' });
+  ok(await waitFor(() => peerResults().length === 1), 'the notification is answered', JSON.stringify(peerResults()));
+  ok(peerResults()[0].ok === true && peerResults()[0].mode === 'steered', `…with mode 'steered' (${JSON.stringify(peerResults()[0])})`);
+  {
+    const st = N.rpc().filter((m) => m.method === 'turn/steer');
+    ok(st.length === 1 && st[0].params.expectedTurnId === 'turn-1' && JSON.stringify(st[0].params.input) === JSON.stringify([{ type: 'text', text: NOTIF_TEXT }]),
+      `EXACTLY ONE turn/steer, on the running turn, carrying only the notification (${JSON.stringify(st.map((m) => m.params))})`);
+    ok(!N.rpc().some((m) => m.method === 'thread/queue/add'), 'and ZERO thread/queue/add — a notification never becomes a turn of its own', JSON.stringify(N.rpc().map((m) => m.method)));
+    ok(N.lastQueue().length === 0, `the queue stays empty (${JSON.stringify(N.lastQueue())})`);
+  }
+
+  // (2) THREE QUEUED ITEMS — the steer must not touch them (negative control
+  // for the "carry the queue with it" variant: that one deletes what it sends)
+  for (const n of [1, 2, 3]) N.send({ type: 'chat-input', text: `queued ${n}`, msgId: `n${n}` });
+  ok(await waitFor(() => N.lastQueue().length === 3), `three messages queued behind the turn (${JSON.stringify(N.lastQueue().map((i) => i.preview))})`);
+  const idsBefore = N.lastQueue().map((i) => i.id).join(',');
+  const previewsBefore = N.lastQueue().map((i) => i.preview).join('|');
+  const steersBefore = N.rpc().filter((m) => m.method === 'turn/steer').length;
+  const delsBefore = N.rpc().filter((m) => m.method === 'thread/queue/delete').length;
+  const addsBefore = N.rpc().filter((m) => m.method === 'thread/queue/add').length;
+  N.send({ type: 'peer-message', text: '[VibeSpace Background Work] task "hourly" (job-2): failed.', fromName: 'Background Work · hourly', kind: 'notification' });
+  ok(await waitFor(() => peerResults().length === 2), 'the second notification is answered');
+  ok(peerResults()[1].mode === 'steered', `…also steered, with a non-empty queue (${JSON.stringify(peerResults()[1])})`);
+  ok(N.rpc().filter((m) => m.method === 'turn/steer').length === steersBefore + 1, 'exactly ONE more turn/steer (never one per queued item)');
+  ok(N.rpc().filter((m) => m.method === 'thread/queue/delete').length === delsBefore, 'ZERO thread/queue/delete — the steer carried only itself, so nothing had to be dequeued', String(N.rpc().filter((m) => m.method === 'thread/queue/delete').length - delsBefore));
+  ok(N.rpc().filter((m) => m.method === 'thread/queue/add').length === addsBefore, 'ZERO thread/queue/add for the notification');
+  ok(N.lastQueue().map((i) => i.id).join(',') === idsBefore && N.lastQueue().map((i) => i.preview).join('|') === previewsBefore,
+    `the three queued messages are all still there, in the same ORDER (${JSON.stringify(N.lastQueue().map((i) => i.preview))})`);
+  {
+    const st = N.rpc().filter((m) => m.method === 'turn/steer').slice(-1)[0];
+    ok(!JSON.stringify(st.params.input).includes('queued 1'), 'and the steer body carries no queued item', JSON.stringify(st.params.input));
+  }
+
+  // (3) A HUMAN PEER MESSAGE queues, exactly as before — including an UNTYPED
+  // frame (an older server that does not send `kind` at all).
+  N.send({ type: 'peer-message', text: 'Message from session "B" (via vibespace-msg): can you look at X?', fromName: 'session B', kind: 'peer' });
+  ok(await waitFor(() => N.lastQueue().length === 4), `a human peer message QUEUES (${JSON.stringify(N.lastQueue().map((i) => i.kind))})`);
+  ok(peerResults().slice(-1)[0].mode === 'queued', `…and reports mode 'queued' (${JSON.stringify(peerResults().slice(-1)[0])})`);
+  ok(N.rpc().filter((m) => m.method === 'turn/steer').length === steersBefore + 1, "no steer for a human message — a person's message is its own turn");
+  N.send({ type: 'peer-message', text: 'Message from session "C" (via vibespace-msg): untyped frame', fromName: 'session C' });
+  ok(await waitFor(() => N.lastQueue().length === 5), 'an UNTYPED frame (older server) queues too — unknown origin takes the conservative lane');
+  ok(peerResults().slice(-1)[0].mode === 'queued', `…reported as queued (${JSON.stringify(peerResults().slice(-1)[0])})`);
+
+  // (4) THE NORMALIZER: the steered notification is a LABELLED peer card, live
+  // and on a rebuild from the same records (one card, never a "You" bubble).
+  {
+    const live = new CodexMessageManager('p2-notif-live'); const liveOps = [];
+    live.onOp((o) => liveOps.push(o));
+    for (const r of N.events()) live.processLive(r);
+    const card = live.messages.filter((m) => m.originKind === 'peer-message' && JSON.stringify(m.content).includes('nightly'));
+    ok(card.length === 1 && card[0].role === 'user' && card[0].peerFrom === 'Background Work · nightly',
+      `LIVE: the steered notification renders as ONE labelled peer card (${JSON.stringify(card.map((m) => [m.originKind, m.peerFrom]))})`);
+    ok(liveOps.some((o) => o.op === 'create' && o.message?.id === card[0]?.id), '…delivered to open windows through the normal create op');
+    const rebuilt = new CodexMessageManager('p2-notif-rebuild');
+    rebuilt.convertHistory(N.events());
+    const rcard = rebuilt.messages.filter((m) => m.originKind === 'peer-message' && JSON.stringify(m.content).includes('nightly'));
+    ok(rcard.length === 1 && rcard[0].peerFrom === 'Background Work · nightly',
+      `REBUILD: the same record replays to the same ONE card (${JSON.stringify(rcard.map((m) => m.peerFrom))})`);
+    // A steered message ends up in codex's OWN rollout too (the app-server
+    // records the user input it was handed), so on the next attach the buffer
+    // copy and the rollout copy are twins. They collapse at the REAL seam —
+    // mergeCodexRecords' fingerprint, which strips the wrapper's webui_peer
+    // marker exactly so these two are the same record. Feed it both.
+    {
+      const { mergeCodexRecords } = require(path.join(REPO, 'src/codex-session-store.js'));
+      const ours = N.events().filter((e) => e.type === 'response_item' && JSON.stringify(e.payload?.webui_peer || {}).includes('nightly'));
+      const rolloutTwin = { timestamp: ours[0].timestamp, type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: NOTIF_TEXT }], id: 'item-rollout-1' } };
+      const merged = mergeCodexRecords([rolloutTwin], JSON.parse(JSON.stringify(ours)));
+      ok(ours.length === 1 && merged.length === 1, `the buffer copy and codex's rollout copy of the steered message are ONE record after the merge (${merged.length})`, JSON.stringify(merged));
+      const both = new CodexMessageManager('p2-notif-merged');
+      both.convertHistory(merged);
+      const cards = both.messages.filter((m) => JSON.stringify(m.content).includes('nightly'));
+      ok(cards.length === 1 && cards[0].originKind === 'peer-message' && cards[0].peerFrom === 'Background Work · nightly',
+        `…so a re-attach renders ONE labelled card, not a doubled bubble (${JSON.stringify(cards.map((m) => [m.originKind, m.peerFrom]))})`);
+      // …and the marker-less rollout copy ALONE still reads as a notification
+      // (the server frame shape is the fallback carrier on a buffer-less rebuild)
+      const roll = new CodexMessageManager('p2-notif-rollout');
+      roll.convertHistory([rolloutTwin]);
+      ok(roll.messages[0]?.originKind === 'peer-message', 'the frame text alone still reads as a notification on a marker-less rebuild', roll.messages[0]?.originKind);
+    }
+  }
+
+  // (5) XSS: a notification's text and its LABEL are peer-controlled and sync
+  // to every client — they must reach the renderer as DATA, never as markup.
+  {
+    const evil = '<img src=x onerror="alert(1)">';
+    N.send({ type: 'peer-message', text: `[VibeSpace Background Work] task "${evil}" (job-3): done.`, fromName: `Background Work · ${evil}`, kind: 'notification' });
+    ok(await waitFor(() => N.events().some((e) => e.type === 'response_item' && JSON.stringify(e.payload?.webui_peer || {}).includes('onerror'))), 'the hostile label reaches the record verbatim (the wrapper builds no HTML)');
+    const mmx = new CodexMessageManager('p2-notif-xss');
+    mmx.convertHistory(N.events());
+    const bad = mmx.messages.find((m) => m.originKind === 'peer-message' && String(m.peerFrom || '').includes('onerror'));
+    ok(bad && bad.peerFrom === `Background Work · ${evil}` && bad.content[0].text.includes(evil) && !JSON.stringify(bad).includes('<span'),
+      'the normalizer carries text and label as DATA — no markup is ever built here', JSON.stringify(bad && [bad.peerFrom, bad.content[0].text]).slice(0, 200));
+    const cr = fs.readFileSync(path.join(REPO, 'src/lib/chat-renderers.js'), 'utf8');
+    ok(/const nameHtml = msg\.peerFrom[\s\S]{0,200}escHtml\(msg\.peerFrom\)/.test(cr), 'renderer pin: the peer/notification LABEL goes through escHtml before it enters innerHTML');
+    ok(/<div class="chat-text">\$\{this\.renderMarkdown\(core\.trim\(\)\)\}<\/div>/.test(cr) && /renderMarkdown\(text\) \{[\s\S]{0,400}DOMPurify\.sanitize\(marked\.parse/.test(cr), 'renderer pin: the BODY goes through renderMarkdown, i.e. DOMPurify (the XSS law)');
+  }
+  N.stop();
+}
+{
+  // (6) A REFUSED STEER FALLS BACK — and says so. Two shapes:
+  //   (a) the turn ended between the check and the RPC ⇒ the message runs as
+  //       its own turn (the idle lane), never lost.
+  const E = spawnStub('notif-ended', STUB_NOTIF.replace(/__STEERMODE__/g, "'ended'"));
+  const eRes = () => E.msgs().filter((m) => m.type === 'peer_message_result');
+  ok(await waitFor(() => E.meta()?.threadId === 'th-notif'), 'ended-race stub: the wrapper has a thread');
+  E.send({ type: 'chat-input', text: 'work', msgId: 'e0' });
+  ok(await waitFor(() => E.meta()?.activeTurnId === 'turn-1'), 'ended-race stub: a turn is running');
+  const startsBeforeE = E.rpc().filter((m) => m.method === 'turn/start').length;
+  E.send({ type: 'peer-message', text: NOTIF_TEXT, fromName: 'Background Work · nightly', kind: 'notification' });
+  ok(await waitFor(() => eRes().length === 1), 'the notification is answered even though the steer was refused', JSON.stringify(eRes()));
+  ok(eRes()[0].ok === true && eRes()[0].mode === 'turn' && eRes()[0].steerFailed === 'no-active-turn',
+    `…the turn ended mid-flight ⇒ it runs as its OWN turn and the result NAMES the refused steer (${JSON.stringify(eRes()[0])})`);
+  ok(E.rpc().filter((m) => m.method === 'turn/start').length === startsBeforeE + 1, 'exactly one turn/start for the fallen-back notification');
+  ok(E.events().some((e) => e.type === 'response_item' && JSON.stringify(e.payload?.webui_peer || {}).includes('nightly')), 'the message is recorded on the fallback path too (the card still renders)');
+  E.stop();
+}
+{
+  //   (b) a turn that CANNOT be steered (review/compact) ⇒ it queues, and the
+  //       result names the refusal instead of silently looking like a normal
+  //       queue decision.
+  const R = spawnStub('notif-review', STUB_NOTIF.replace(/__STEERMODE__/g, "'review'"));
+  const rRes = () => R.msgs().filter((m) => m.type === 'peer_message_result');
+  ok(await waitFor(() => R.meta()?.threadId === 'th-notif'), 'unsteerable stub: the wrapper has a thread');
+  R.send({ type: 'chat-input', text: 'work', msgId: 'r0' });
+  ok(await waitFor(() => R.meta()?.activeTurnId === 'turn-1'), 'unsteerable stub: a turn is running');
+  R.send({ type: 'peer-message', text: NOTIF_TEXT, fromName: 'Background Work · nightly', kind: 'notification' });
+  ok(await waitFor(() => rRes().length === 1), 'the notification is answered');
+  ok(rRes()[0].ok === true && rRes()[0].mode === 'queued' && rRes()[0].steerFailed === 'not-steerable' && /review/.test(rRes()[0].steerDetail || ''),
+    `an unsteerable turn ⇒ QUEUED, with the refusal named and the server's own words kept (${JSON.stringify(rRes()[0])})`);
+  ok(await waitFor(() => R.lastQueue().some((i) => i.kind === 'peer')), 'and the message really is in the queue (nothing was lost)', JSON.stringify(R.lastQueue()));
+  ok(R.rpc().filter((m) => m.method === 'turn/steer').length === 1, 'the refused steer is tried ONCE, never retried in a loop');
+  R.stop();
+}
+// wrapper pins for the rule (the 2.355.0 unstaged-wiring lesson: a behaviour
+// with no call-site pin can be reverted by an extraction and stay green)
+ok(/const peerKind = msg\.kind === 'notification' \? 'notification' : 'peer';/.test(wsrc), "wrapper pin: the frame's typed origin decides the lane, and an untyped frame is a PEER");
+ok(/if \(peerKind === 'notification' && meta\.activeTurnId\) \{[\s\S]{0,200}?await steerInput\(encodeUserInput\(text, \[\]\), /.test(wsrc), 'wrapper pin: a notification on a busy session takes the steer lane');
+ok(/async function steerInput\(input, clientUserMessageId\) \{[\s\S]{0,400}?await request\('turn\/steer'/.test(wsrc) && /steerInput\(item\.input, cid\)/.test(wsrc), 'wrapper pin: ONE turn/steer call site (steerInput), shared by the queue verb and the notification lane');
+ok(!/steerInput[\s\S]{0,300}queue\/list/.test(wsrc) && /input,\n\s*expectedTurnId: meta\.activeTurnId,/.test(wsrc), "wrapper pin: steerInput sends the caller's input and nothing else — it never reads or writes the queue");
+ok(/mode: 'steered'/.test(wsrc) && /steerFailed: steerFailed\.reason/.test(wsrc), 'wrapper pin: the result reports the lane, and a fallback names the refused steer');
+
 try { w.kill('SIGTERM'); } catch {}
 await sleep(300);
 try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}

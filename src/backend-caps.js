@@ -206,6 +206,41 @@ function capsOf(backend) {
   return BACKEND_CAPS[backend || 'claude'] || NO_CAPS;
 }
 
+// WHICH LANE A **VIBESPACE NOTIFICATION** TAKES WHEN THE RECEIVER IS BUSY
+// (owner decision 2026-09-07, after a codex session accumulated 20
+// "[VibeSpace Background Work] … done" items as 20 SEPARATE queued
+// submissions = 20 billed turns after the one it was running):
+//   'steer'     — inject it into the RUNNING turn (codex `turn/steer`).
+//                 TUI parity, and it is the reason this is safe: a steer
+//                 carries ONLY its own items (codex-rs
+//                 app-server/src/request_processors/turn_processor.rs:1023-1039
+//                 maps `params.input` into ONE TurnInput::UserInput and
+//                 submits it with TurnInputMode::Steer), and core drains
+//                 every pending steer WHOLESALE before each model request
+//                 (core/src/session/turn.rs:312-323 → session/input_queue.rs
+//                 get_pending_input, `pending_input.items.split_off(0)`), so
+//                 consecutive notifications merge by themselves. The QUEUE is
+//                 never read and never written by a steer.
+//   'queue'     — held and run as its OWN turn after this one (a harness with
+//                 a queue but no steer verb — ACP v1 has no such method).
+//   'cli-inbox' — the CLI owns the decision (claude's inbox queues a mid-turn
+//                 delivery itself and opens a billed turn when idle).
+//   'stash'     — no live lane at all; injected at the next turn.
+// DERIVED, never declared: a harness that serves the 'steer' verb on the
+// 'rpc-queue' lane steers its notifications — the same law that makes
+// inputModes.steer a VIEW of queueVerbs, so there is no second place to edit
+// and no backend-id branch anywhere downstream. HUMAN peer messages (frame
+// kind 'peer') deliberately do NOT take this lane: a person's message is its
+// own turn, and stealing it into someone else's running turn would change what
+// the agent was asked to do mid-answer.
+function notificationDelivery(caps) {
+  const c = caps || NO_CAPS;
+  const modes = c.inputModes || NO_CAPS.inputModes;
+  if (c.peerDelivery === 'rpc-queue') return modes.steer ? 'steer' : 'queue';
+  if (c.peerDelivery === 'cli-inbox') return 'cli-inbox';
+  return 'stash';
+}
+
 // RUNTIME-VERIFIED verdicts (S9, B-03f2): a capability that only a running
 // probe can prove — opencode `fork` = the serve instance's OpenAPI carries
 // POST /session/{sessionID}/fork — is written here by the prober with its
@@ -220,4 +255,4 @@ function setVerifiedCap(backend, key, value) {
   return true;
 }
 
-module.exports = { BACKEND_CAPS, capsOf, setVerifiedCap, QUEUE_VERBS, LEGACY_QUEUE_VERBS, deriveInputModes };
+module.exports = { BACKEND_CAPS, capsOf, setVerifiedCap, QUEUE_VERBS, LEGACY_QUEUE_VERBS, deriveInputModes, notificationDelivery };

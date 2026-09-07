@@ -248,7 +248,10 @@ const userRec = (n, text, extra = {}) => ({ timestamp: T(n), type: 'response_ite
   check('rpc-queue frame carries fromName + cardText', /type: 'peer-message', text, fromName: opts\.fromName \|\| null, cardText: opts\.cardText \|\| null/.test(cd));
   check('…and that lane still emits NO in-memory card (the wrapper record is the ONE carrier — a card here double-renders live)', !/const rpc = findRpcPeer\(cid\);[\s\S]{0,400}cardOk\(\)/.test(cd));
   const w = read('data/bin/codex-chat-wrapper.js');
-  check('wrapper records the peer user message WITH the webui_peer marker (name + body) on both paths', /webui_peer: \{ name: fromName, body: cardText \}/.test(w) && (w.match(/recordPeerMessage\(\);/g) || []).length === 2);
+  // THREE paths since 2026-09-07 (notifications steer): steered / queued /
+  // own turn. Every one of them must write the SAME record, or a notification
+  // that took the steer lane would render as an anonymous "You" bubble.
+  check('wrapper records the peer user message WITH the webui_peer marker (name + body) on ALL THREE delivery paths', /webui_peer: \{ name: fromName, body: cardText \}/.test(w) && (w.match(/recordPeerMessage\(\);/g) || []).length === 3);
   check('…and echoes fromName on failure so the re-stash keeps its label', /peer_message_result', \{ ok: false, reason: e\.message, text, fromName \}/.test(w));
   check('stdout/codex-events re-stash carries the echoed fromName (S5 consumer module)', /fromName: msg\.payload\.fromName \|\| null, text: String\(msg\.payload\.text\)/.test(read('src/server/stdout/codex-events.js')));
   check('mergeCodexRecords fingerprint strips webui_peer', /const \{[^}]*webui_peer[^}]*\.\.\.stablePayload \} = payload;/.test(read('src/codex-session-store.js')));

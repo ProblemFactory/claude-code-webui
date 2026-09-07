@@ -93,6 +93,25 @@ Moved VERBATIM out of CLAUDE.md (tier-2 pass).
 - `POST /api/agent/msg/send` (vsst_) — {to: name|cid, text ≤16KB} → delivered {lane, machine?} | stashed. 30s/pair floor, 10min dup dedupe, uniform not-found.
 - `POST /api/sessions/:id/msg-reachability` (cookie) — {level: inherit|visible|messageable} per-session widening override.
 - agentd op `peer-post` {cid, text} → `peer-post-result` {ok, reason, peerName} (capability 'peer-post').
+- **The wrapper stdin frame carries a TYPED ORIGIN (2026-09-07)**: rung 1.5 of the
+  delivery ladder writes `{type:'peer-message', text, fromName, cardText, kind}`
+  where `kind` is `'notification'` (VibeSpace itself speaking — a Background Work
+  event, a system notice; set by `jobs.js _deliverTo`) or `'peer'` (a person's
+  message from another session — `POST /api/agent/msg/send`, and the DEFAULT for
+  any absent/unknown value, so an older caller never silently changes lane).
+  `deliverToConversation(cid, text, {kind})` echoes the resolved kind in its
+  result. The LADDER only tags; the receiving WRAPPER picks the lane, because
+  only it knows whether a turn is running. On codex a busy `'notification'` is
+  **steered** (`turn/steer` with just that text — the queue is neither read nor
+  written) and answers `peer_message_result {ok:true, mode:'steered'}`; a busy
+  `'peer'` still answers `mode:'queued'`; idle is `mode:'turn'` for both. A
+  refused steer (the turn ended between the check and the RPC, or a
+  review/compact turn) FALLS BACK to the queue/turn lane and says so:
+  `{ok:true, mode:'queued'|'turn', steerFailed:<reason>, steerDetail?}`. The ACP
+  wrapper has no steer method at all, so it answers `peer_result {ok:true,
+  mode:'queued', steer:'unsupported'}`. Which lane a harness uses is DERIVED
+  from its capability row — `backend-caps notificationDelivery({peerDelivery,
+  inputModes})` → `steer | queue | cli-inbox | stash` — never a backend id.
 
 #### Host-capability plugins (⚙ → Plugins; src/plugins.js)
 - `GET /api/plugins` — `{plugins:[…]}` for the panel (tailscale / frp / opencode-serve): def + `enabled` + that plugin's `status()`.

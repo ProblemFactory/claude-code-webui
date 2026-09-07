@@ -1758,21 +1758,46 @@ function classifySteerFailure(message) {
   return { reason: 'error' };
 }
 
+/** THE ONE turn/steer CALL. Injects `input` into the RUNNING turn and NOTHING
+ *  else — TUI parity, which is the whole reason a notification may take this
+ *  lane: codex's own `turn/steer` maps `params.input` into a single
+ *  TurnInput::UserInput (codex-rs app-server/src/request_processors/
+ *  turn_processor.rs:1023-1039) and core drains every pending steer wholesale
+ *  before the next model request (core/src/session/turn.rs:312-323 →
+ *  session/input_queue.rs `get_pending_input`, `pending_input.items.split_off(0)`),
+ *  so consecutive steers merge by themselves. The QUEUE is neither read nor
+ *  written here — callers that also want the queued copy gone delete it
+ *  themselves (steerOne).
+ *  HONESTY about what `ok` means: it is the app-server's `Steered` verdict,
+ *  i.e. the input was ACCEPTED into the turn's pending set. If that turn has
+ *  already emitted its visible final answer, core has flipped its
+ *  MailboxDeliveryPhase to NextTurn (state/turn.rs:50-57) and the item waits
+ *  for a later request instead — upstream behaviour, identical for the queue
+ *  `steer` verb, and not something the RPC reports back to us.
+ *  @returns {Promise<{ok:true}|{ok:false, reason:string, kind?:string, detail?:string}>} */
+async function steerInput(input, clientUserMessageId) {
+  if (!meta.activeTurnId) return { ok: false, reason: 'no-active-turn' };
+  try {
+    await request('turn/steer', {
+      threadId: meta.threadId,
+      input,
+      expectedTurnId: meta.activeTurnId,
+      clientUserMessageId: clientUserMessageId || undefined,
+    }, 30000);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, detail: e.message, ...classifySteerFailure(e.message) };
+  }
+}
+
 async function steerOne(item) {
   const cid = asString(item?.clientUserMessageId);
   const known = queueMeta.get(cid) || null;
   const base = { op: 'steer', id: asString(item?.id), msg_id: known?.msgId || '' };
-  if (!meta.activeTurnId) return { ...base, ok: false, reason: 'no-active-turn' };
-  try {
-    await request('turn/steer', {
-      threadId: meta.threadId,
-      input: item.input,
-      expectedTurnId: meta.activeTurnId,
-      clientUserMessageId: cid || undefined,
-    }, 30000);
-  } catch (e) {
-    log(`turn/steer rejected for ${base.id}: ${e.message}`);
-    return { ...base, ok: false, detail: e.message, ...classifySteerFailure(e.message) };
+  const st = await steerInput(item.input, cid);
+  if (!st.ok) {
+    if (st.detail) log(`turn/steer rejected for ${base.id}: ${st.detail}`);
+    return { ...base, ...st };
   }
   // The steer landed: the message is now IN the turn, so the queued copy must
   // go or it runs a second time (measured: steer never dequeues). The delete's
@@ -2515,12 +2540,42 @@ async function handleInput(msg) {
     // message and the two dedup on rebuild (recordKey + mergeCodexRecords
     // both strip webui_peer). Absent name ⇒ the normalizer falls back to
     // parsing the server frame, exactly as a rollout-only rebuild does.
+    //
+    // BUSY + kind 'notification' ⇒ turn/STEER (owner decision 2026-09-07,
+    // after a codex session accumulated 20 "[VibeSpace Background Work] …"
+    // items as 20 SEPARATE queued submissions = 20 billed turns after the
+    // one it was running). "按照TUI实现吧": the steer carries ONLY this
+    // notification (steerInput's doc cites the two upstream sources), the
+    // queue is neither read nor written, and consecutive notifications merge
+    // in codex's own pending-input drain. HUMAN peer messages keep queueing:
+    // a person's message is its own turn, and folding it into someone else's
+    // running turn would change the task mid-answer.
     const text = String(msg.text || '');
     if (!text.trim()) return;
     const fromName = msg.fromName ? String(msg.fromName) : null;
     const cardText = typeof msg.cardText === 'string' && msg.cardText.trim() ? msg.cardText : null;
+    // The delivery ladder types the frame; anything else (an older server, a
+    // direct caller) is a peer — the conservative lane.
+    const peerKind = msg.kind === 'notification' ? 'notification' : 'peer';
     const recordPeerMessage = () => record('response_item', { type: 'message', role: 'user', content: [{ type: 'input_text', text }], webui_peer: { name: fromName, body: cardText } });
     try {
+      // A steer that is REFUSED is a designed path (the turn ended between
+      // our check and the RPC; a review/compact turn is not steerable), and
+      // it must not lose the message: fall through to the queue/turn lane and
+      // SAY SO in the result, so the delivery journal shows what happened.
+      let steerFailed = null;
+      if (peerKind === 'notification' && meta.activeTurnId) {
+        const st = await steerInput(encodeUserInput(text, []), `notif-${process.pid}-${nextId++}`);
+        if (st.ok) {
+          recordPeerMessage();
+          emitTaskEvent('peer_message_result', { ok: true, mode: 'steered' });
+          log('notification STEERED into the running turn (it carries only itself; the queue is untouched)');
+          return;
+        }
+        steerFailed = st;
+        log(`notification steer refused (${st.reason}${st.detail ? ': ' + st.detail : ''}) — falling back to the queue lane`);
+      }
+      const fell = steerFailed ? { steerFailed: steerFailed.reason, ...(steerFailed.detail ? { steerDetail: steerFailed.detail } : {}) } : {};
       if (meta.activeTurnId) {
         const cid = `peer-${process.pid}-${nextId++}`;
         // `text` rides the entry so a REMOVE can hand the message back to the
@@ -2533,12 +2588,12 @@ async function handleInput(msg) {
           clientUserMessageId: cid,
         }, 30000);
         recordPeerMessage();
-        emitTaskEvent('peer_message_result', { ok: true, mode: 'queued' });
+        emitTaskEvent('peer_message_result', { ok: true, mode: 'queued', ...fell });
         log('peer message queued (turn active; runs after the current turn)');
       } else {
         await startTurn(text);
         recordPeerMessage();
-        emitTaskEvent('peer_message_result', { ok: true, mode: 'turn' });
+        emitTaskEvent('peer_message_result', { ok: true, mode: 'turn', ...fell });
       }
     } catch (e) {
       // fromName rides the failure echo so the server's re-stash keeps the
