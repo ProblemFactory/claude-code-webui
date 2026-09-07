@@ -307,7 +307,8 @@ if (!probe) {
   const cache = path.join(dataDir, 'usage-cache');
   const anchors = path.join(dataDir, 'usage-anchors');
   const hist = path.join(dataDir, 'usage-history');
-  for (const p of [subs, cache, anchors, hist]) fs.mkdirSync(p, { recursive: true });
+  const smeta = path.join(dataDir, 'session-meta');
+  for (const p of [subs, cache, anchors, hist, smeta]) fs.mkdirSync(p, { recursive: true });
   const DEAD = 'sub-cac86a3ff4d1';   // "Personal Max": credentials emptied 2026-09-03T05:55Z
   const LIVE = 'sub-889f3a3822a7';   // still logged in
   const WIPE_AT = Date.parse('2026-09-03T05:55:23.829Z');
@@ -348,10 +349,18 @@ if (!probe) {
   ].map((r) => JSON.stringify(r)).join('\n') + '\n');
   fs.writeFileSync(path.join(hist, '.attrib-rebake-v1'), '{}');
 
+  // TWO NAMESPACES, as on disk (2026-09-07 r3): the ledger is keyed by the
+  // WEBUI session key (`sess-<seq>-<ms>` — what ensureSessionPoolLink is called
+  // with) and attribution by the CLAUDE conversation id (a UUID). session-meta
+  // (`cw-<seq>-<ms>.json`) is the join. The r2 fixture used ONE id for both and
+  // could therefore never fail the way production did (the winId-vs-id class).
+  const KEY2 = 'sess-2-' + (AFTER - 86400e3);
+  fs.writeFileSync(path.join(smeta, 'cw-2-' + (AFTER - 86400e3) + '.json'), JSON.stringify({ claudeSessionId: 'conv-2', accountId: 'pool-1', backend: 'claude' }));
+  fs.writeFileSync(path.join(smeta, 'cw-1-' + (AFTER - 86400e3) + '.json'), JSON.stringify({ claudeSessionId: 'conv-1', accountId: 'pool-1', backend: 'claude' }));
   // the transition ledger knows where conv-2 really was (the recorded case);
-  // conv-1 has no record (the historical case)
+  // conv-1 is joinable but has NO row (the historical case)
   const tr = new SlotTransitions({ dataDir });
-  tr.record({ sessionId: 'conv-2', poolId: 'pool-1', from: DEAD, to: LIVE, at: AFTER - 60000, why: 'per-session-switch' });
+  tr.record({ sessionId: KEY2, poolId: 'pool-1', from: DEAD, to: LIVE, at: AFTER - 60000, why: 'per-session-switch' });
 
   const members = [DEAD, LIVE].map((id) => ({ id, backend: 'claude', credsPath: path.join(subs, id, '.credentials.json') }));
   const rep = repair.repairReadings({ dataDir, members, transitions: tr, id: 'T' });
@@ -788,6 +797,302 @@ if (!probe) {
   ok('§11f …and both essays name the resolver that replaced it', /readingSlotFor/.test(read('docs/kb-file-structure.md')) && /readingSlotFor/.test(read('docs/kb-bugfix-invariants.md')));
 }
 
+// ── §12 ROUND 3: the five defects the adversarial verifier reproduced ───────
+// Same discipline as §11: drive the REAL producer / the REAL migration, and
+// carry a negative control that fails without the fix.
+
+// (a) MAJOR — THE TWO NAMESPACES. The slot-transition ledger is keyed by the
+//     WEBUI session key (`sess-<seq>-<ms>`: what ensureSessionPoolLink is
+//     called with, what a plan-C link's basename spells, what the engine's
+//     journal line prints) while attribution.ndjson is keyed by the CLAUDE
+//     CONVERSATION id (a UUID: what recordUsageAttribution receives). The
+//     repair looked the ledger up with the conversation id, so a session-scoped
+//     row could never match: every plan-C conversation silently got the POOL
+//     DEFAULT's answer, and that answer was WRITTEN INTO THE LIVE STORE — the
+//     conversation's spend moved to a member its own link was never on.
+{
+  const DEAD = 'sub-dead0000', BST = 'sub-bstack00', FISH = 'sub-fish0000';
+  const T = Date.parse('2026-09-07T06:30:00Z');
+  const WIPE = T - 5 * 86400e3;
+  const CONV = '2f1a9c40-e15f-48e9-bea4-5a1cb9e7cb9b';   // the shape in attribution.ndjson
+  const SEQ = 7, KEY_AT = T - 86400e3;
+  const KEY = `sess-${SEQ}-${KEY_AT}`;                    // the shape in data/pool-links/<pool>/
+  const mkFixture = ({ withMeta = true, ownRow = true } = {}) => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-join-')); cleanup.push(d);
+    const dataDir = path.join(d, 'data');
+    for (const p2 of ['subs/' + DEAD, 'usage-cache', 'usage-history', 'session-meta']) fs.mkdirSync(path.join(dataDir, p2), { recursive: true });
+    const cp = path.join(dataDir, 'subs', DEAD, '.credentials.json');
+    fs.writeFileSync(cp, JSON.stringify({ claudeAiOauth: { accessToken: '', refreshToken: '', expiresAt: 0 } }));
+    fs.utimesSync(cp, WIPE / 1000, WIPE / 1000);
+    const hist = path.join(dataDir, 'usage-history');
+    fs.writeFileSync(path.join(hist, 'attribution.ndjson'), JSON.stringify({ sid: CONV, acct: DEAD, pool: 'pool-1', ts: T }) + '\n');
+    if (withMeta) fs.writeFileSync(path.join(dataDir, 'session-meta', `cw-${SEQ}-${KEY_AT}.json`), JSON.stringify({ claudeSessionId: CONV, accountId: 'pool-1', backend: 'claude' }));
+    const tr = new SlotTransitions({ dataDir });
+    tr.record({ sessionId: null, poolId: 'pool-1', from: null, to: BST, at: T - 2000, why: 'pool-target' });          // the pool DEFAULT
+    if (ownRow) tr.record({ sessionId: KEY, poolId: 'pool-1', from: BST, to: FISH, at: T - 1000, why: 'per-session-switch' }); // THIS conversation's link
+    return { dataDir, hist, cp, tr };
+  };
+  const runRepair = (f) => { const cap = quiet(); const r = repair.repairReadings({ dataDir: f.dataDir, members: [{ id: DEAD, credsPath: f.cp }], transitions: f.tr, id: 'R3' }); cap.done(); return r.attribution; };
+  const lines = (f) => fs.readFileSync(path.join(f.hist, 'attribution.ndjson'), 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  const archLine = (f) => { try { return JSON.parse(fs.readFileSync(path.join(f.dataDir, 'archive', 'readings-foreign-attribution.ndjson'), 'utf8').trim().split('\n')[0]); } catch { return null; } };
+
+  {
+    const f = mkFixture();
+    const rep = runRepair(f);
+    const row = lines(f)[0];
+    ok('§12a a conversation is re-attributed to ITS OWN credential link\'s target, joined through session-meta (the ledger speaks webui keys, attribution speaks conversation ids)', rep.reattributed === 1 && row.acct === FISH && row.repairedBy === 'R3', JSON.stringify({ rep, row }));
+    ok('§12a …and the archived copy NAMES the webui session it was joined through', /scope session, via session sess-7-/.test(String(archLine(f)?.reason)), String(archLine(f)?.reason));
+  }
+  {
+    // NEGATIVE CONTROL #1: the pre-fix lookup, run against this very ledger.
+    const f = mkFixture();
+    const byConv = f.tr.slotAt(CONV, T, { poolId: 'pool-1' });
+    const byKey = f.tr.slotAt(KEY, T, { poolId: 'pool-1' });
+    ok('§12a NEGATIVE CONTROL: asked with the CONVERSATION id the ledger falls to the POOL DEFAULT — a member this conversation\'s link was never on', byConv.id === BST && byConv.scope === 'default' && byKey.id === FISH && byKey.scope === 'session', JSON.stringify({ byConv, byKey }));
+    ok('§12a …and it SAYS that its own-link answer is unknown, so a caller about to rewrite a stored fact can refuse', byConv.ownLinkUnknown === true && byKey.ownLinkUnknown === undefined, JSON.stringify(byConv));
+    ok('§12a …while asking about the DEFAULT ITSELF (no session named) carries no flag — that is exactly the question it answers', f.tr.slotAt(null, T, { poolId: 'pool-1' }).ownLinkUnknown === undefined);
+  }
+  {
+    // NEGATIVE CONTROL #2: unjoinable (session-meta gone) ⇒ ARCHIVE, never the
+    // default's answer. This is the shape the bug produced on every entry.
+    const f = mkFixture({ withMeta: false });
+    const rep = runRepair(f);
+    ok('§12a a conversation we cannot join to a webui key is ARCHIVED, not re-attributed to whatever the pool default happened to be', rep.reattributed === 0 && rep.archived === 1 && rep.unjoinable === 1 && lines(f).length === 0, JSON.stringify(rep));
+    ok('§12a …and the reason says WHICH evidence was missing', /no webui session key for this conversation/.test(String(archLine(f)?.reason)), String(archLine(f)?.reason));
+  }
+  {
+    // joinable, but only the DEFAULT has a row: still not evidence about a
+    // conversation that may have had a link of its own.
+    const f = mkFixture({ ownRow: false });
+    const rep = runRepair(f);
+    ok('§12a a joinable conversation with only a POOL-DEFAULT row is archived too (the default is not evidence about a session that may have had its own link)', rep.reattributed === 0 && rep.archived === 1, JSON.stringify(rep));
+    ok('§12a …and says so', /only the POOL DEFAULT answers for it/.test(String(archLine(f)?.reason)), String(archLine(f)?.reason));
+  }
+  {
+    // ONE CONVERSATION, MANY WEBUI KEYS: a resume mints a new sess-* under the
+    // same claudeSessionId, so the join is one-to-many over time.
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-join2-')); cleanup.push(d);
+    const dataDir = path.join(d, 'data');
+    for (const p2 of ['subs/' + DEAD, 'usage-history', 'session-meta']) fs.mkdirSync(path.join(dataDir, p2), { recursive: true });
+    const cp = path.join(dataDir, 'subs', DEAD, '.credentials.json');
+    fs.writeFileSync(cp, JSON.stringify({ claudeAiOauth: { accessToken: '', refreshToken: '', expiresAt: 0 } }));
+    fs.utimesSync(cp, WIPE / 1000, WIPE / 1000);
+    const A_AT = T - 3 * 86400e3, B_AT = T - 3600e3;      // the resume happened an hour before the entry
+    fs.writeFileSync(path.join(dataDir, 'session-meta', `cw-3-${A_AT}.json`), JSON.stringify({ claudeSessionId: CONV, accountId: 'pool-1' }));
+    fs.writeFileSync(path.join(dataDir, 'session-meta', `cw-9-${B_AT}.json`), JSON.stringify({ claudeSessionId: CONV, accountId: 'pool-1' }));
+    fs.writeFileSync(path.join(dataDir, 'usage-history', 'attribution.ndjson'), JSON.stringify({ sid: CONV, acct: DEAD, pool: 'pool-1', ts: T }) + '\n');
+    const tr = new SlotTransitions({ dataDir });
+    tr.record({ sessionId: `sess-3-${A_AT}`, poolId: 'pool-1', from: null, to: BST, at: A_AT, why: 'spawn' });
+    tr.record({ sessionId: `sess-9-${B_AT}`, poolId: 'pool-1', from: null, to: FISH, at: B_AT, why: 'spawn' });
+    const keys = repair.sessionKeysFor(repair._sessionKeyMap(dataDir), CONV, T);
+    ok('§12a a conversation carried by SEVERAL webui sessions (resume/fork) offers every candidate, and the latest row at that instant wins', keys.length === 2 && tr.slotAt(keys, T, { poolId: 'pool-1' }).id === FISH, JSON.stringify({ keys, hit: tr.slotAt(keys, T, { poolId: 'pool-1' }) }));
+    ok('§12a …and a key minted AFTER the entry is not a candidate for it (the key carries its own creation ms)', repair.sessionKeysFor(repair._sessionKeyMap(dataDir), CONV, A_AT + 1).length === 1);
+    const cap = quiet();
+    repair.repairReadings({ dataDir, members: [{ id: DEAD, credsPath: cp }], transitions: tr, id: 'R3b' });
+    cap.done();
+    ok('§12a …end to end: the entry lands on the member the RESUMED session\'s link was on', JSON.parse(fs.readFileSync(path.join(dataDir, 'usage-history', 'attribution.ndjson'), 'utf8').trim()).acct === FISH);
+  }
+  // WIRING PIN: a pure join that the orchestrator never hands dataDir to is the
+  // 2.355.0 unstaged-wiring class.
+  ok('§12a WIRING: repairReadings passes dataDir into repairAttribution, and the lookup goes through the join (never the raw sid)', /repairAttribution\(\{ dataDir, historyDir:/.test(read('src/reading-repair.js')) && /transitions\.slotAt\(keys, r\.ts/.test(read('src/reading-repair.js')) && !/transitions\.slotAt\(r\.sid/.test(code('src/reading-repair.js')));
+  ok('§12a WIRING: the journal backfill records the SAME namespace the engine prints (webui id), so its rows are joinable by the same map', /per-session switch \$\{poolId\}\/\$\{sid\}/.test(read('src/server/usage-pool-engine.js')) && /const row = s\n\s*\? \{ sessionId: s\[2\]/.test(read('src/reading-repair.js')));
+}
+
+// (b) MEDIUM — the r2 emptied-sid fix re-bakes through `_acctAt`'s session-meta
+//     fallback, and for a POOLED session that field is the POOL id. So ledger
+//     events got `acct:'pool-…', atype:'pooled'` — a pseudo-account that holds
+//     no credentials, surfacing as a spender in the account dimension, which
+//     server.js forbids in so many words.
+{
+  const UH = require(path.join(REPO, 'src/usage-history.js')).UsageHistory;
+  const T = Date.parse('2026-09-07T06:30:00Z');
+  const mk = (metaAcct, resolve) => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-poolbake-')); cleanup.push(d);
+    const dataDir = path.join(d, 'data');
+    for (const p2 of ['usage-history', 'session-meta']) fs.mkdirSync(path.join(dataDir, p2), { recursive: true });
+    const hist = path.join(dataDir, 'usage-history');
+    fs.writeFileSync(path.join(hist, 'events-2026-09.ndjson'), JSON.stringify({ ts: T, sid: 'S', acct: 'sub-dead', atype: 'subscription', aname: 'Dead', pool: 'pool-abc123def456', model: 'm', cost: 1 }) + '\n');
+    fs.writeFileSync(path.join(hist, 'attribution.ndjson'), '');
+    fs.writeFileSync(path.join(hist, '.attrib-emptied.json'), JSON.stringify(['S']));
+    fs.writeFileSync(path.join(dataDir, 'session-meta', 'cw-1-1.json'), JSON.stringify({ claudeSessionId: 'S', accountId: metaAcct, backend: 'claude' }));
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-poolbake-h-')); cleanup.push(home);
+    const cap = quiet();
+    new UH({ dataDir, homeDir: home, resolveAccount: resolve })._maybeRebakeAttribution();
+    cap.done();
+    return JSON.parse(fs.readFileSync(path.join(hist, 'events-2026-09.ndjson'), 'utf8').trim());
+  };
+  // the CLAUDE pool: the injected resolver reports type 'pooled'
+  const e1 = mk('pool-abc123def456', (id) => (id === 'pool-abc123def456' ? { type: 'pooled', name: 'My Pool' } : null));
+  ok('§12b an emptied conversation whose session-meta names a POOL falls to GLOBAL, never to the pool id (a pseudo-account cannot be a spender)', e1.acct === null && e1.atype === 'global' && e1.aname === null, JSON.stringify(e1));
+  ok('§12b …and the `pool` tag survives, so the per-pool total still sees the spend it really carried', e1.pool === 'pool-abc123def456');
+  // the CODEX pool: server.js's resolveAccount maps backend 'codex' to a single
+  // type BEFORE a.type is read, so it reports 'codex-subscription' — the type
+  // leg alone misses every codex pool, which is why the minted id shape is the
+  // primary test.
+  const e2 = mk('pool-abc123def456', () => ({ type: 'codex-subscription', name: 'Codex Pool' }));
+  ok('§12b …a CODEX pool is caught too, by the minted id shape (its injected type says "codex-subscription")', e2.acct === null && e2.atype === 'global', JSON.stringify(e2));
+  // and the TYPE leg is not decoration: an id outside the minted shape still
+  // resolves through it
+  const e3 = mk('legacy-pool-1', (id) => (id === 'legacy-pool-1' ? { type: 'pooled', name: 'Legacy' } : null));
+  ok('§12b …and an id OUTSIDE the minted shape is caught by the type leg (both legs are load-bearing, neither is unfalsifiable)', e3.acct === null && e3.atype === 'global', JSON.stringify(e3));
+  // NEGATIVE CONTROL: an ordinary account still falls back the r2 way
+  const e4 = mk('sub-live0000', (id) => (id === 'sub-live0000' ? { type: 'subscription', name: 'Live' } : null));
+  ok('§12b NEGATIVE CONTROL: an ordinary subscription in session-meta is still the un-refuted fallback (the fix drops POOLS, it does not disable the fallback)', e4.acct === 'sub-live0000' && e4.atype === 'subscription' && e4.aname === 'Live', JSON.stringify(e4));
+  ok('§12b …and this is server.js\'s own invariant, applied at the second site that reaches the same decision', /never to the pool id itself/.test(read('server.js')) && /_nonPoolAcct/.test(code('src/usage-history.js')));
+}
+
+// (c) MINOR — the provenance line labelled EVERY codex reading "via unknown /
+//     No producer recorded this reading". The codex snapshot writers stamped
+//     no `source`: normalizeCodexRateLimit is a PURE payload mapper and cannot
+//     know which channel carried it, so nobody named the one codex producer
+//     that exists. The honesty feature was lying about it.
+{
+  const S = await import(path.join(REPO, 'src/lib/usage-source.js'));
+  const w = mkWorld(); const cap = quiet();
+  const cs = { backend: 'codex', mode: 'chat', host: null, _webuiId: 'sess-cx3', claudeSessionId: 'cid-cx3', _accountId: null, pty: { write() { } } };
+  w.sessions.set('sess-cx3', cs);
+  w.codexReading(cs);
+  cap.done();
+  const g = JSON.parse(fs.readFileSync(path.join(w.cacheDir, '__global_codex__.json'), 'utf8'));
+  ok('§12c the LIVE codex producer stamps its own name at the write', g.source === 'codex-rate-limits', JSON.stringify({ source: g.source }));
+  const src = S.readingSource(g.source);
+  ok('§12c …so the panel names it instead of "unknown"', src.key === 'session' && src.label !== 'unknown' && !/No producer recorded/.test(src.tip), JSON.stringify(src));
+  ok('§12c the ROLLOUT-TAIL producer gets its own name (a transcript read is a different freshness story from a live push)', S.readingSource('codex-rollout').key === 'transcript' && S.readingSource('codex-rollout').label !== 'unknown');
+  // A REFUSAL is not a push, and the `sig.snapshot ||` fallback on that branch
+  // SYNTHESIZES a spent bucket that is not a reading at all — `writeSnap` takes
+  // the source as a PARAMETER so each channel names itself.
+  {
+    const w2 = mkWorld(); const cap2 = quiet();
+    const cs2 = { backend: 'codex', mode: 'chat', host: null, _webuiId: 'sess-cx4', claudeSessionId: 'cid-cx4', _accountId: null, pty: { write() { } } };
+    w2.sessions.set('sess-cx4', cs2);
+    w2.eng.recordCodexQuotaSignal(cs2, { type: 'task_failed', error: 'usage limit reached', codexErrorInfo: 'usage_limit_reached', resetsAt: Math.floor(Date.now() / 1000) + 3600 });
+    cap2.done();
+    const g2 = (() => { try { return JSON.parse(fs.readFileSync(path.join(w2.cacheDir, '__global_codex__.json'), 'utf8')); } catch { return null; } })();
+    ok('§12c a codex REFUSAL is stamped as the limit banner it is, never as the live push (the same branch also SYNTHESIZES a spent bucket, which is not a reading)', !!g2 && g2.source === 'limit-banner' && S.readingSource(g2.source).key === 'banner', JSON.stringify(g2 && { source: g2.source, u7: g2.sevenDay?.utilization }));
+  }
+  ok('§12c …both new keys carry zh+ja entries', (() => {
+    const zh = read('src/lib/i18n-zh.js'), ja = read('src/lib/i18n-ja.js');
+    return ['session transcript', "A live Codex session on this account's credential slot pushed its own rate limits."].every((k) => zh.includes(JSON.stringify(k).slice(1, -1)) && ja.includes(JSON.stringify(k).slice(1, -1)));
+  })());
+  // WIRING: every codex snapshot writer stamps, and the PURE mapper still does
+  // not (the channel is not a property of the payload).
+  const cq = require(path.join(REPO, 'src/harnesses/codex-quota.js'));
+  const bare = cq.normalizeCodexRateLimit({ primary: { used_percent: 20, window_minutes: 300, resets_at: 1 } }, Date.now());
+  // scoped to normalizeCodexRateLimit's OWN body: `signalFromStream` further
+  // down legitimately returns a `source` naming which STREAM RECORD produced a
+  // signal — a different field from a reading's producer, and a loose grep here
+  // matched it (the assertion has to name the function it is about).
+  const cqSrc = read('src/harnesses/codex-quota.js');
+  const normBody = cqSrc.slice(cqSrc.indexOf('function normalizeCodexRateLimit'), cqSrc.indexOf('// The typed exhaustion enum'));
+  ok('§12c the PURE normalizer still stamps nothing — the channel is named at the WRITE, never inferred from the payload shape', bare.source === undefined && normBody.length > 500 && !/\bsource\b\s*[:=]/.test(normBody), `${normBody.length}B scanned`);
+  ok('§12c WIRING: every codex snapshot writer stamps a source, and the engine takes it as a PARAMETER (one helper, two channels — one of which does not always carry a reading)', /const writeSnap = \(snap, source\) =>/.test(read('src/server/usage-pool-engine.js')) && /snap\.source = source;/.test(read('src/server/usage-pool-engine.js')) && /writeSnap\(snap0, 'codex-rate-limits'\)/.test(read('src/server/usage-pool-engine.js')) && /writeSnap\(snap, 'limit-banner'\)/.test(read('src/server/usage-pool-engine.js')) && /if \(snap\) snap\.source = 'codex-rate-limits';/.test(read('src/usage-routes.js')) && /normalized\.source = 'codex-rollout';/.test(read('src/usage-routes.js')));
+  // NEGATIVE CONTROL: the verbatim-unknown rule is intact for a producer we
+  // have genuinely never met — the fix names OUR writers, it does not bucket.
+  ok('§12c NEGATIVE CONTROL: an unmet producer is still reported verbatim, and a MISSING one still says "unknown"', S.readingSource('some-future-writer').key === 'other' && S.readingSource('some-future-writer').label === 'some-future-writer' && S.readingSource(undefined).key === 'unknown');
+}
+
+// (d) MINOR — the statusline resolved the credential link at WRITE time, so it
+//     honoured a re-point one turn EARLIER than the server's own rule allows:
+//     `rate_limits` is the CLI's LAST API response, made with the PREVIOUS
+//     credentials, so the first post-switch render filed the old member's
+//     numbers under the new one — stamped fresh, and then anchored as ground
+//     truth (the B-b3cd odometer-flap class, on the write path).
+{
+  const { execFileSync } = await import('node:child_process');
+  const SCRIPT = path.join(REPO, 'data/bin/vibespace-usage');
+  const mk = () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-sline-')); cleanup.push(d);
+    for (const p2 of ['subs/sub-old', 'subs/sub-new', 'usage-cache', 'pool-links/pool-1']) fs.mkdirSync(path.join(d, p2), { recursive: true });
+    const link = path.join(d, 'pool-links/pool-1/sess-1-1');
+    fs.symlinkSync(path.join(d, 'subs/sub-old'), link);
+    return { d, link, point: (to) => { fs.unlinkSync(link); fs.symlinkSync(path.join(d, 'subs', to), link); } };
+  };
+  const P = (p5, p7) => JSON.stringify({ session_id: 'conv-sline', rate_limits: { five_hour: { used_percentage: p5, resets_at: 1788800000 }, seven_day: { used_percentage: p7, resets_at: 1789000000 } } });
+  const render = (w, payload) => execFileSync(process.execPath, [SCRIPT], { input: payload, encoding: 'utf8', env: { ...process.env, VIBESPACE_USAGE_CACHE: path.join(w.d, 'usage-cache'), VIBESPACE_ACCOUNT_KEY: 'pool-1', VIBESPACE_ACCOUNT_LINK: w.link } });
+  const cacheOf = (w, id) => { try { return JSON.parse(fs.readFileSync(path.join(w.d, 'usage-cache', id + '.json'), 'utf8')); } catch { return null; } };
+
+  {
+    const w = mk();
+    render(w, P(42, 61));               // produced by sub-old
+    w.point('sub-new');                 // the pool re-points; no request has happened yet
+    render(w, P(42, 61));               // the SAME numbers — still sub-old's
+    ok('§12d the first render after a re-point does NOT move the previous slot\'s numbers onto the new member', cacheOf(w, 'sub-new') === null && Math.abs(cacheOf(w, 'sub-old').fiveHour.utilization - 0.42) < 1e-9, JSON.stringify({ neu: cacheOf(w, 'sub-new'), old: cacheOf(w, 'sub-old')?.fiveHour }));
+    render(w, P(7, 9));                 // the first response the NEW credentials produced
+    ok('§12d …and the first DIFFERING payload — the first one the new credentials produced — lands on the new member', Math.abs(cacheOf(w, 'sub-new').fiveHour.utilization - 0.07) < 1e-9 && Math.abs(cacheOf(w, 'sub-old').fiveHour.utilization - 0.42) < 1e-9, JSON.stringify({ neu: cacheOf(w, 'sub-new').fiveHour, old: cacheOf(w, 'sub-old').fiveHour }));
+  }
+  {
+    // A render that the 8s THROTTLE skipped is still an OBSERVATION: the state
+    // must record it, or the next payload after a switch looks "new".
+    const w = mk();
+    render(w, P(42, 61));               // written under sub-old
+    render(w, P(55, 66));               // throttled (mtime < 8s) — but seen, under sub-old
+    w.point('sub-new');
+    render(w, P(55, 66));               // same as the throttled render ⇒ must be held
+    ok('§12d a payload the throttle SKIPPED still counts as evidence about which credentials produced it', cacheOf(w, 'sub-new') === null && Math.abs(cacheOf(w, 'sub-old').fiveHour.utilization - 0.42) < 1e-9, JSON.stringify(cacheOf(w, 'sub-new')));
+  }
+  {
+    // NEGATIVE CONTROL: delete the state between the switch and the render and
+    // the pre-fix behaviour returns exactly — the old numbers land on the new
+    // member, stamped fresh.
+    const w = mk();
+    render(w, P(42, 61));
+    w.point('sub-new');
+    for (const n of fs.readdirSync(path.join(w.d, 'usage-cache'))) if (n.startsWith('.slot-')) fs.unlinkSync(path.join(w.d, 'usage-cache', n));
+    render(w, P(42, 61));
+    const neu = cacheOf(w, 'sub-new');
+    ok('§12d NEGATIVE CONTROL: without the slot state the identical payload lands on the new member, stamped fresh (the pre-fix write, reproduced)', !!neu && Math.abs(neu.fiveHour.utilization - 0.42) < 1e-9 && neu.fetchedAt > Date.now() - 60000, JSON.stringify(neu && { u: neu.fiveHour.utilization, fresh: neu.fetchedAt > Date.now() - 60000 }));
+  }
+  {
+    // it costs an UNPOOLED session nothing, and the state file is invisible to
+    // every usage-cache scanner (they all filter on `.json`)
+    const w = mk();
+    execFileSync(process.execPath, [SCRIPT], { input: P(11, 22), encoding: 'utf8', env: { ...process.env, VIBESPACE_USAGE_CACHE: path.join(w.d, 'usage-cache'), VIBESPACE_ACCOUNT_KEY: 'sub-plain00' } });
+    const names = fs.readdirSync(path.join(w.d, 'usage-cache'));
+    ok('§12d a session with NO credential link writes no slot state at all (it cannot switch under itself)', !names.some((n) => n.startsWith('.slot-')) && names.includes('sub-plain00.json'), JSON.stringify(names));
+    const w2 = mk();
+    render(w2, P(1, 2));
+    ok('§12d …and the state file carries no `.json`, so every usage-cache scanner keeps ignoring it', fs.readdirSync(path.join(w2.d, 'usage-cache')).some((n) => n.startsWith('.slot-') && !n.endsWith('.json')));
+  }
+  ok('§12d the rule NAMES the server-side twin it mirrors (one reading-lag rule, two implementations that must not drift)', /a re-point reaches the running CLI on its NEXT request/i.test(read('src/server/usage-pool-engine.js')) && /NEXT request/.test(read('data/bin/vibespace-usage')));
+}
+
+// (e) LOW — record()'s dedup key was the sessionId alone, so EVERY pool shared
+//     one `__default__` bucket. A member can belong to several pools (this
+//     instance's has members:null = every subscription), so two pools moving
+//     their defaults to the same member inside DEDUP_MS lost the second row —
+//     and slotAt, which filters by poolId, then answered that pool with its
+//     previous, now-WRONG default: a confident answer from a ledger whose
+//     contract is "unknown, never agreement".
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-dedupkey-')); cleanup.push(d);
+  const st = new SlotTransitions({ dataDir: d });
+  const t0 = 1788000000000;
+  st.record({ sessionId: null, poolId: 'pool-B', from: null, to: 'sub-old', at: t0 - 300000, why: 'pool-target' });
+  const a = st.record({ sessionId: null, poolId: 'pool-A', from: 'sub-x', to: 'sub-shared', at: t0, why: 'pool-target' });
+  const b = st.record({ sessionId: null, poolId: 'pool-B', from: 'sub-old', to: 'sub-shared', at: t0 + 10000, why: 'pool-target' });
+  ok('§12e two pools re-pointing their DEFAULTS to the same member 10s apart produce TWO rows', !!a && !!b, JSON.stringify({ a: !!a, b: !!b }));
+  ok('§12e …and slotAt answers each pool with its own', st.slotAt(null, t0 + 20000, { poolId: 'pool-A' }).id === 'sub-shared' && st.slotAt(null, t0 + 20000, { poolId: 'pool-B' }).id === 'sub-shared', JSON.stringify([st.slotAt(null, t0 + 20000, { poolId: 'pool-A' }), st.slotAt(null, t0 + 20000, { poolId: 'pool-B' })]));
+  // NEGATIVE CONTROL: the old key rule, applied to the very same sequence.
+  {
+    const d2 = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-dedupkey2-')); cleanup.push(d2);
+    const st2 = new SlotTransitions({ dataDir: d2 });
+    st2._key = (sessionId) => sessionId || '__default__';   // the pre-fix key, verbatim
+    st2.record({ sessionId: null, poolId: 'pool-B', from: null, to: 'sub-old', at: t0 - 300000, why: 'pool-target' });
+    st2.record({ sessionId: null, poolId: 'pool-A', from: 'sub-x', to: 'sub-shared', at: t0, why: 'pool-target' });
+    const b2 = st2.record({ sessionId: null, poolId: 'pool-B', from: 'sub-old', to: 'sub-shared', at: t0 + 10000, why: 'pool-target' });
+    ok('§12e NEGATIVE CONTROL: with the pre-fix key pool B\'s row is dropped and the ledger answers it CONFIDENTLY WRONG (sub-old), which is worse than "unknown"', b2 === null && st2.slotAt(null, t0 + 20000, { poolId: 'pool-B' }).id === 'sub-old', JSON.stringify(st2.slotAt(null, t0 + 20000, { poolId: 'pool-B' })));
+  }
+  // the SESSION dedup is unchanged: a session key is globally unique and a
+  // conversation belongs to exactly one pool, so it needs nothing more.
+  ok('§12e a repeated re-point of the SAME session link inside the window is still ONE fact', (() => {
+    const n = st.all().length;
+    st.record({ sessionId: 'sess-9-1', poolId: 'pool-A', to: 'sub-z', at: t0 });
+    const mid = st.all().length;
+    st.record({ sessionId: 'sess-9-1', poolId: 'pool-A', to: 'sub-z', at: t0 + 100 });
+    return mid === n + 1 && st.all().length === mid;
+  })());
+}
+
 // ── §10 the panel, in a REAL browser at 375×667 ────────────────────────────
 // A pure-function test cannot tell you the line is legible on a phone, and the
 // incident's whole user-facing half is "the panel said Updated 3min ago about
@@ -889,6 +1194,27 @@ if (!probe) {
         })()`);
         const H2 = html2 || '';
         ok('§10 NEGATIVE CONTROL: a live member reading its OWN /usage panel shows that source + "corroborated", and NO warning', /own \/usage panel/.test(H2) && /corroborated/.test(H2) && !/usage-warn/.test(H2), H2.replace(/\s+/g, ' ').slice(0, 300));
+        // §12c IN THE REAL PANEL: the CODEX section used to say "via unknown /
+        // No producer recorded this reading" about the only codex producer we
+        // ship. Feed the snapshot the way /api/usage carries it (codexRateLimit
+        // is what the 'auto' selection falls back to with no codex accounts).
+        const cxSnap = { limitId: 'codex', limitName: '', planType: 'plus', fiveHour: { utilization: 0.2, usedPercent: 20, resetsAt: 0 }, sevenDay: { utilization: 0.3, usedPercent: 30, resetsAt: 0 }, fetchedAt: Date.now() };
+        const renderCodex = async (snap) => {
+          const p2 = { ...payload, accounts: {}, logins: {}, codexRateLimit: snap };
+          const h = await ev('(() => {'
+            + 'window.app._accounts = { accounts: [], defaultAccountId: null, defaultCodexAccountId: null };'
+            + 'window.app._applyUsage(' + JSON.stringify(p2) + ');'
+            + 'window.app._renderUsage();'
+            + "return document.getElementById('usage-popup').innerHTML;"
+            + '})()');
+          // the codex section is the one that starts at its own 5-hour bar
+          const i = String(h || '').indexOf('5-hour limit');
+          return i >= 0 ? String(h).slice(i) : '';
+        };
+        const Hcx = await renderCodex({ ...cxSnap, source: 'codex-rate-limits' });
+        ok('§10 the CODEX panel names its producer instead of "via unknown"', /class="usage-src"/.test(Hcx) && /own session/.test(Hcx) && !/unknown/.test(Hcx) && !/No producer recorded/.test(Hcx), Hcx.replace(/\s+/g, ' ').slice(-280));
+        const HcxOld = await renderCodex(cxSnap);   // the PRE-FIX snapshot: no `source` at all
+        ok('§10 NEGATIVE CONTROL: the pre-fix codex snapshot (no `source`) renders exactly the sentence the fix removes', /unknown/.test(HcxOld) && /No producer recorded/.test(HcxOld), HcxOld.replace(/\s+/g, ' ').slice(-280));
         cws.close();
       }
     } catch (e) {

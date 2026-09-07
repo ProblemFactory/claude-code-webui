@@ -37,7 +37,17 @@ class SlotTransitions {
     this._cache = null;         // {mtimeMs, size, rows}
   }
 
-  _key(sessionId) { return sessionId || '__default__'; }
+  /** The dedup key is the LINK, not the session (2026-09-07 r3, reproduced).
+   *  A session key (`sess-<seq>-<ms>`) is globally unique and a conversation
+   *  belongs to exactly one pool, so a session row needs nothing more — but
+   *  every POOL DEFAULT shared the single bucket `__default__`, and a member
+   *  can belong to several pools (this instance's pool has `members:null` =
+   *  every subscription). Two pools re-pointing their defaults to the SAME
+   *  member inside DEDUP_MS therefore dropped the second row, and `slotAt`
+   *  — which filters by poolId when reading — then answered that pool with
+   *  its previous, now-wrong default: a confidently wrong answer out of a
+   *  ledger whose whole contract is "unknown, never agreement". */
+  _key(sessionId, poolId) { return sessionId || ('__default__:' + (poolId || '')); }
 
   /** Append one transition. Returns the written row, or null when it was a
    *  duplicate of the previous one for the same link inside DEDUP_MS.
@@ -46,7 +56,7 @@ class SlotTransitions {
    *  lines in the fire-loop journal were the only trace anyone had). */
   record({ sessionId = null, poolId = null, from = null, to = null, at = Date.now(), why = null } = {}) {
     if (!to) return null;
-    const k = this._key(sessionId);
+    const k = this._key(sessionId, poolId);
     const prev = this._last.get(k);
     if (prev && prev.to === to && at - prev.at < DEDUP_MS) return null;
     const row = { sessionId: sessionId || null, poolId: poolId || null, from: from || null, to, at, ...(why ? { why: String(why).slice(0, 40) } : {}) };
@@ -88,17 +98,40 @@ class SlotTransitions {
    *  transition at or before that instant, else the POOL DEFAULT's latest one
    *  (a session with no link of its own bills through the default), else null
    *  — "we have no record", which callers must treat as unknown, NEVER as
-   *  agreement. */
+   *  agreement.
+   *
+   *  `sessionId` may be a STRING or an ARRAY of keys that all name the same
+   *  conversation (2026-09-07 r3): the ledger is keyed by the WEBUI session
+   *  key while the attribution log is keyed by the CLAUDE conversation id, and
+   *  one conversation can be carried by several webui sessions over its life
+   *  (every resume/fork mints a new `sess-<seq>-<ms>`). The caller that owns
+   *  the translation passes every candidate; the latest matching row wins,
+   *  which is the session that was actually live at `at`.
+   *
+   *  `ownLinkUnknown` (2026-09-07 r3, reproduced): TRUE when a session was
+   *  NAMED but only the pool default answered. The default is the right answer
+   *  for a session that has no link of its own — and we cannot tell that apart
+   *  from "it had one and we have no row for it" (every row before this
+   *  release, and every row whose webui key we could not resolve). A caller
+   *  that is about to REWRITE a stored fact must treat that as unknown; a
+   *  caller that only wants the pool's current default (sessionId null) never
+   *  sees the flag, because that is exactly the question the default answers. */
   slotAt(sessionId, at, { poolId = null } = {}) {
+    const keys = Array.isArray(sessionId) ? sessionId.filter(Boolean) : (sessionId ? [sessionId] : []);
+    const named = new Set(keys);
     let own = null, dflt = null;
     for (const r of this.all()) {
       if (r.at > at) break;
       if (poolId && r.poolId && r.poolId !== poolId) continue;
-      if (r.sessionId && sessionId && r.sessionId === sessionId) own = r;
+      if (r.sessionId && named.has(r.sessionId)) own = r;
       else if (!r.sessionId) dflt = r;
     }
     const hit = own || dflt;
-    return hit ? { id: hit.to, at: hit.at, scope: own ? 'session' : 'default', why: hit.why || null } : null;
+    if (!hit) return null;
+    return {
+      id: hit.to, at: hit.at, scope: own ? 'session' : 'default', why: hit.why || null,
+      ...(!own && named.size ? { ownLinkUnknown: true } : {}),
+    };
   }
 
   /** Every transition of one conversation (oldest first) — the migration walks

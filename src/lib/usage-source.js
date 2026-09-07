@@ -10,9 +10,17 @@
 // cannot produce readings at all says so with the age of its last real one.
 //
 // The `source` values are the ones the writers stamp (rate-limit-capture,
-// markLimitBanner, refreshViaCliPanel, data/bin/vibespace-usage, the codex
-// snapshot, the wall demotion). An UNKNOWN value is named verbatim rather than
-// bucketed — a new producer must be visible, not silently labelled "session".
+// markLimitBanner, refreshViaCliPanel, data/bin/vibespace-usage, the two codex
+// snapshot writers, the wall demotion). An UNKNOWN value is named verbatim
+// rather than bucketed — a new producer must be visible, not silently labelled
+// "session".
+//
+// A PRODUCER THAT EXISTS MUST HAVE A NAME (2026-09-07 r3, reproduced): the
+// codex writers stamped nothing, so every codex panel said "via unknown — No
+// producer recorded this reading" about the only codex producer there is. The
+// verbatim-unknown rule is for a producer we have not MET; using it on one we
+// ship is the honesty feature lying. The stamp belongs at the write, where the
+// channel is known — never inferred here from the shape of the snapshot.
 
 /** @returns {{key:string, label:string, tip:string}} */
 export function readingSource(source, { corroborated = undefined, t = (s) => s } = {}) {
@@ -28,6 +36,13 @@ export function readingSource(source, { corroborated = undefined, t = (s) => s }
       return { key: 'remote', label: t('session on another machine'), tip: t('Harvested from a remote host that ran this account.') };
     case 'rate-limit-event':
       return { key: 'session', label: t('own session'), tip: t("A live session on this account's credential slot reported its own quota.") };
+    // The two CODEX producers (2026-09-07 r3). They existed all along and were
+    // rendered "via unknown" because nothing stamped them: `normalizeCodexRateLimit`
+    // is a pure payload mapper, so the channel has to be named at the write.
+    case 'codex-rate-limits':
+      return { key: 'session', label: t('own session'), tip: t("A live Codex session on this account's credential slot pushed its own rate limits.") };
+    case 'codex-rollout':
+      return { key: 'transcript', label: t('session transcript'), tip: t('Read from a recent Codex session transcript on this machine — as fresh as that session\'s last turn, not as of now.') };
     case 'limit-banner':
       return { key: 'banner', label: t('own session (limit hit)'), tip: t("A session on this account's credential slot was refused by the limit.") };
     case 'wall':

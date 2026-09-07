@@ -1340,13 +1340,22 @@ function recordRateLimitEvent(session, msg) {
 function recordCodexQuotaSignal(session, payload) {
   try {
     const sig = quotaSourceFor(session.backend).signalFromStream({ type: 'event_msg', payload });
-    const writeSnap = (snap) => {
+    // `source` is a PARAMETER, not an assumption: this helper serves two
+    // channels and one of them does not always carry a reading (see the
+    // task_failed call site, which synthesizes a spent-bucket snapshot).
+    const writeSnap = (snap, source) => {
       if (!snap) return null;
       // ONE attribution function for readings (2026-09-07): the codex snapshot
       // is a VALUE like every other, so it goes through the same turn-pinned
       // validated slot instead of re-deriving "the pool's current member" per
       // record. codexQuotaKeyFor is the un-pinned twin (probe matching).
       const key = readingSlotFor(session).key || codexQuotaKeyFor(session);
+      // STAMP THE PRODUCER AT THE WRITE (2026-09-07 r3, reproduced): the
+      // provenance line reads `snap.source`, and `normalizeCodexRateLimit` is
+      // a PURE payload mapper that cannot know which channel carried it — so
+      // every codex panel rendered "via unknown · No producer recorded this
+      // reading" about the one codex producer that exists.
+      snap.source = source;
       try {
         fs.mkdirSync(USAGE_CACHE_DIR, { recursive: true });
         const f = path.join(USAGE_CACHE_DIR, String(key).replace(/[^\w.-]/g, '_') + '.json');
@@ -1406,7 +1415,8 @@ function recordCodexQuotaSignal(session, payload) {
       // the harness normalized the snapshot (window-by-length, exhaustion
       // markers, the on-demand resetCredits count) — sig.snapshot is it
       const snap0 = sig?.snapshot || null;
-      const w = writeSnap(snap0);
+      // the live app-server push — the codex twin of claude's 'rate-limit-event'
+      const w = writeSnap(snap0, 'codex-rate-limits');
       // an rpc-rate-limits probe waiting on this session settles AFTER the
       // cache write — its next quotaVerdictFor already reads the fresh file
       settleCodexLimitsWaiters(session, w ? { ok: true } : { ok: false, reason: 'unparseable rateLimits' });
@@ -1442,7 +1452,12 @@ function recordCodexQuotaSignal(session, payload) {
           limitId: 'codex', sevenDay: { utilization: 1, usedPercent: 100, windowMinutes: 10080, resetsAt: resets > nowSec ? resets : nowSec + 24 * 3600, status: 'limited' },
           fiveHour: null, rateLimitReachedType: 'unknown', fetchedAt: Date.now(),
         };
-        const w2 = writeSnap(snap);
+        // A REFUSAL, not a push: this is codex's 'limit-banner' — the claude
+        // vocabulary already names it ("own session (limit hit)"), and the
+        // `sig.snapshot ||` fallback above SYNTHESIZES a spent bucket, which is
+        // not a reading at all. Calling either one 'codex-rate-limits' would
+        // claim a producer that did not produce it.
+        const w2 = writeSnap(snap, 'limit-banner');
         global.__vsEvent?.('codex-usage-limit', info);
         if (tryResetCredit(resets)) return; // ① reset credit first when opted in
         maybePoolAutoSwitch(session);

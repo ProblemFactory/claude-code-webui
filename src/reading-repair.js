@@ -106,6 +106,12 @@ function backfillFromJournal(text, transitions) {
     res.lines++;
     const at = _lineTs(line);
     if (!at) { res.undated++; continue; }
+    // `s[2]` is the WEBUI session key — usage-pool-engine prints the
+    // activeSessions loop key ("[pool] per-session switch <pool>/<webuiId>"),
+    // which is the same namespace ensureSessionPoolLink records under. That
+    // agreement is why the r3 join lives at the READ side (repairAttribution)
+    // rather than here: every writer already speaks webui keys, only the
+    // attribution log speaks conversation ids.
     const row = s
       ? { sessionId: s[2], poolId: s[1], from: s[3], to: s[4], at, why: 'journal-backfill' }
       : { sessionId: null, poolId: p[1], from: p[2], to: p[3], at, why: 'journal-backfill' };
@@ -249,10 +255,68 @@ function repairAnchors({ anchorsDir, archiveDir, markers, anchorFiles, id }) {
 }
 
 // ── ① + ② attribution repair (the only store whose entries NAME a session) ──
-function repairAttribution({ historyDir, archiveDir, markers, transitions, id }) {
-  const res = { scanned: 0, foreign: 0, reattributed: 0, archived: 0, emptied: 0 };
+/** THE JOIN THE TWO STORES DID NOT HAVE (2026-09-07 r3, reproduced).
+ *
+ *  The transition ledger is keyed by the WEBUI session key (`sess-<seq>-<ms>`)
+ *  — that is what `ensureSessionPoolLink` is called with, what the daemon's
+ *  link basename spells, and what the engine's journal line prints. The
+ *  attribution log is keyed by the CLAUDE CONVERSATION id (a UUID) — that is
+ *  what `recordUsageAttribution` receives. Looking one up with the other's key
+ *  can never match a session-scoped row, so every plan-C conversation silently
+ *  fell through to the POOL DEFAULT's answer, and that answer was written into
+ *  the live store: a conversation's spend moved to a member its own credential
+ *  link was never on.
+ *
+ *  Translating here (rather than recording both ids on the row) is deliberate:
+ *  a row is written at the instant a LINK moves, and at spawn the conversation
+ *  id does not exist yet; the daemon's sealed-orders reflex and the journal
+ *  backfill have only the link path / the printed webui id. session-meta holds
+ *  the mapping for every one of them, uniformly and after the fact.
+ *
+ *  ONE CONVERSATION, MANY WEBUI KEYS: a resume or fork carries the same
+ *  claudeSessionId under a new `sess-…`, so this is one-to-MANY over time. We
+ *  return every candidate whose key is not NEWER than the entry (the key
+ *  embeds its own creation ms), and `slotAt` picks the latest matching row —
+ *  i.e. the session that was actually live at that instant. A key we cannot
+ *  date is always a candidate (fixtures, hand-written keys).
+ *
+ *  @returns Map(claudeSessionId → [{key, at}])  */
+function _sessionKeyMap(dataDir) {
+  const out = new Map();
+  const dir = path.join(dataDir, 'session-meta');
+  let files = [];
+  try { files = fs.readdirSync(dir); } catch { return out; }
+  for (const fn of files) {
+    if (!fn.endsWith('.json')) continue;
+    const m = _readJson(path.join(dir, fn));
+    if (!m) continue;
+    const sid = m.claudeSessionId || m.backendSessionId;
+    if (!sid) continue;
+    // the meta FILE is `cw-<seq>-<ms>.json`; the session key is
+    // `sess-<seq>-<ms>` (ws-create derives one from the other — 2.304.0, "the
+    // socket name is DERIVED FROM THE ID"), so the key is recoverable from the
+    // filename alone and does not depend on any field being persisted.
+    const base = fn.slice(0, -5);
+    if (!/^cw-\d+-\d+$/.test(base)) continue;
+    const key = 'sess-' + base.slice('cw-'.length);
+    const at = Number(base.slice(base.lastIndexOf('-') + 1)) || null;
+    const list = out.get(sid) || [];
+    list.push({ key, at });
+    out.set(sid, list);
+  }
+  return out;
+}
+/** Every webui key that could have been carrying conversation `sid` at `ts`. */
+function sessionKeysFor(keyMap, sid, ts) {
+  const list = (keyMap && keyMap.get(sid)) || [];
+  return list.filter((e) => e.at == null || e.at <= ts).map((e) => e.key);
+}
+
+function repairAttribution({ dataDir, historyDir, archiveDir, markers, transitions, id }) {
+  const res = { scanned: 0, foreign: 0, reattributed: 0, archived: 0, emptied: 0, unjoinable: 0 };
   const fp = path.join(historyDir, 'attribution.ndjson');
   let txt = ''; try { txt = fs.readFileSync(fp, 'utf-8'); } catch { return res; }
+  const keyMap = _sessionKeyMap(dataDir || path.dirname(historyDir));
   const out = [], archived = [];
   // Which conversations LOSE their last entry here (2026-09-07 r2) — see the
   // note at the re-bake hand-off below.
@@ -270,15 +334,31 @@ function repairAttribution({ historyDir, archiveDir, markers, transitions, id })
     // conversation really was at that instant. Present (or backfilled from a
     // journal) ⇒ re-attribute; absent ⇒ archive, which makes the by-time walk
     // fall back to this session's previous, un-refuted entry.
-    const slot = transitions ? transitions.slotAt(r.sid, r.ts, { poolId: r.pool || null }) : null;
-    if (slot && slot.id && slot.id !== r.acct && !isForeign(markers, slot.id, r.ts)) {
-      archived.push({ migration: id, at: Date.now(), store: 'attribution', reason: `re-attributed to ${slot.id} (slot transition at ${new Date(slot.at).toISOString()}, scope ${slot.scope})`, entry: r });
+    //
+    // The ledger speaks WEBUI keys and this entry names a CONVERSATION, so the
+    // lookup goes through the session-meta join above. Only a SESSION-SCOPED
+    // row may rewrite a stored fact (2026-09-07 r3): the pool default is the
+    // right answer for a conversation that had no link of its own, and we
+    // cannot prove that about a historical entry — substituting it moved a
+    // conversation's spend onto a member its own link was never on. Unjoinable
+    // and default-only entries are ARCHIVED, which is the honest outcome the
+    // ledger's "unknown, never agreement" contract already promises.
+    const keys = sessionKeysFor(keyMap, r.sid, r.ts);
+    const slot = (transitions && keys.length) ? transitions.slotAt(keys, r.ts, { poolId: r.pool || null }) : null;
+    const usable = slot && slot.scope === 'session' && !slot.ownLinkUnknown;
+    if (usable && slot.id && slot.id !== r.acct && !isForeign(markers, slot.id, r.ts)) {
+      archived.push({ migration: id, at: Date.now(), store: 'attribution', reason: `re-attributed to ${slot.id} (slot transition at ${new Date(slot.at).toISOString()}, scope ${slot.scope}, via session ${keys.join('/')})`, entry: r });
       out.push(JSON.stringify({ ...r, acct: slot.id, repairedBy: id }));
       if (r.sid) sidsKept.add(r.sid);
       res.reattributed++; dirty = true;
       continue;
     }
-    archived.push({ migration: id, at: Date.now(), store: 'attribution', reason: `attributed to ${r.acct} at ${new Date(r.ts).toISOString()}, after that login was ${m.state} at ${new Date(m.since).toISOString()}; no slot transition on record ⇒ cannot re-attribute`, entry: r });
+    if (!keys.length) res.unjoinable++;
+    const why = !keys.length
+      ? 'no webui session key for this conversation (session-meta is gone) ⇒ the ledger cannot be asked about it'
+      : slot ? 'only the POOL DEFAULT answers for it — its own link is unknown, and the default is not evidence about a conversation that may have had one'
+        : 'no slot transition on record';
+    archived.push({ migration: id, at: Date.now(), store: 'attribution', reason: `attributed to ${r.acct} at ${new Date(r.ts).toISOString()}, after that login was ${m.state} at ${new Date(m.since).toISOString()}; ${why} ⇒ cannot re-attribute`, entry: r });
     res.archived++; dirty = true;
   }
   if (dirty) {
@@ -330,7 +410,7 @@ function repairReadings({ dataDir, members, transitions, id = 'readings-by-slot'
     report.caches = repairUsageCaches({ cacheDir: path.join(dataDir, 'usage-cache'), archiveDir, markers, anchorFiles, id });
     report.anchors = repairAnchors({ anchorsDir, archiveDir, markers, anchorFiles, id });
   }
-  report.attribution = repairAttribution({ historyDir: path.join(dataDir, 'usage-history'), archiveDir, markers, transitions, id });
+  report.attribution = repairAttribution({ dataDir, historyDir: path.join(dataDir, 'usage-history'), archiveDir, markers, transitions, id });
   return report;
 }
 
@@ -347,4 +427,4 @@ function findJournal(dataDir) {
   return null;
 }
 
-module.exports = { repairReadings, deathMarkers, isForeign, backfillFromJournal, findJournal, repairUsageCaches, repairAnchors, repairAttribution };
+module.exports = { repairReadings, deathMarkers, isForeign, backfillFromJournal, findJournal, repairUsageCaches, repairAnchors, repairAttribution, sessionKeysFor, _sessionKeyMap };

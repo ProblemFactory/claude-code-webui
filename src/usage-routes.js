@@ -739,6 +739,10 @@ function readCodexWrapperRateLimit(sessionId) {
   try {
     const meta = JSON.parse(fs.readFileSync(path.join(BUFFERS_DIR, sessionId + '.json'), 'utf-8'));
     const snap = normalizeCodexRateLimit(meta?.rateLimits, meta?.rateLimitsFetchedAt || meta?.startedAt || Date.now());
+    // The RUNNING wrapper's own sidecar: the same `rate_limits_updated` push
+    // the engine consumes live, read back off disk — one producer, one name
+    // (2026-09-07 r3).
+    if (snap) snap.source = 'codex-rate-limits';
     // stored reset-credit count (wrapper reads it once at startup + on ⟳)
     if (snap && meta?.rateLimitResetCredits) {
       const rc = meta.rateLimitResetCredits;
@@ -776,7 +780,10 @@ function readLatestCodexRateLimitFromJsonl(filePath) {
       const timestamp = record?.timestamp ? Date.parse(record.timestamp) : 0;
       const rateLimits = record?.payload?.rate_limits || null;
       const normalized = normalizeCodexRateLimit(rateLimits, Number.isFinite(timestamp) ? timestamp : Date.now());
-      if (normalized) return normalized;
+      // Mined from a rollout TRANSCRIPT, not from a live stream — a different
+      // producer with a different freshness story, so it says so (2026-09-07
+      // r3: the codex panel used to label every reading "via unknown").
+      if (normalized) { normalized.source = 'codex-rollout'; return normalized; }
     }
   } catch {}
   return null;

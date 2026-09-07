@@ -84,10 +84,75 @@ function accountKey() {
   return String(process.env.VIBESPACE_ACCOUNT_KEY || '__global__');
 }
 
+// THE READING IS ONE REQUEST OLDER THAN THE LINK (2026-09-07 r3, reproduced).
+//
+// `accountKey()` resolves the credential slot at WRITE time, but `rate_limits`
+// is the CLI's LAST API RESPONSE — made with the credentials the link pointed
+// at BEFORE a re-point. So the first statusline render after a pool switch
+// filed the old member's numbers under the new one, stamped `fetchedAt: now`,
+// and `sweepUsageAnchors` (any usage-cache write is ground truth) turned that
+// into an anchor for an account that had produced none of it — the B-b3cd
+// odometer-flap class, on the write path.
+//
+// The server side already has this rule: `readingSlotFor` pins the slot for
+// the turn because "a re-point reaches the running CLI on its NEXT request,
+// never the reading already in flight". The statusline has no turn boundary to
+// pin against, so it uses the only evidence it has — the NUMBERS. While the
+// link has moved but the payload still carries the readings we already saw
+// under the previous target, the reading is that target's and is not re-filed.
+// The first DIFFERING payload is the first one the new credentials produced.
+//
+// State lives beside the cache as `.slot-<id>` (no `.json`, so every
+// usage-cache scanner keeps ignoring it) and only for POOLED sessions — a
+// session with no link cannot switch under itself, so it pays nothing.
+const SLOT_STATE_MAX = 200;
+function rlFingerprint(rl) {
+  const w = (x) => (x && typeof x === 'object') ? `${x.used_percentage}/${x.resets_at}` : '-';
+  return `${w(rl.five_hour)}|${w(rl.seven_day)}`;
+}
+function slotStateFile(p) {
+  const id = String((p && p.session_id) || path.basename(process.env.VIBESPACE_ACCOUNT_LINK || '')).replace(/[^\w.-]/g, '_');
+  return id ? path.join(CACHE_DIR, '.slot-' + id.slice(0, 80)) : null;
+}
+function readSlotState(f) { try { return JSON.parse(fs.readFileSync(f, 'utf-8')); } catch { return null; } }
+function writeSlotState(f, st, fresh) {
+  try {
+    fs.mkdirSync(CACHE_DIR, { recursive: true });
+    // Bound the directory ONCE per conversation (only when creating a new
+    // state file) — a readdir on every statusline render would be a cost with
+    // no purpose.
+    if (fresh) {
+      const all = fs.readdirSync(CACHE_DIR).filter((n) => n.startsWith('.slot-'));
+      if (all.length > SLOT_STATE_MAX) {
+        const byAge = all.map((n) => ({ n, t: (() => { try { return fs.statSync(path.join(CACHE_DIR, n)).mtimeMs; } catch { return 0; } })() })).sort((a, b) => a.t - b.t);
+        for (const e of byAge.slice(0, all.length - SLOT_STATE_MAX)) { try { fs.unlinkSync(path.join(CACHE_DIR, e.n)); } catch {} }
+      }
+    }
+    fs.writeFileSync(f + '.tmp', JSON.stringify(st));
+    fs.renameSync(f + '.tmp', f);
+  } catch {}
+}
+
 function writeUsage(p) {
   const rl = p && p.rate_limits;
   if (!rl) return; // absent for API-key sessions / before the first API response
   const key = accountKey().replace(/[^\w.-]/g, '_');
+  if (process.env.VIBESPACE_ACCOUNT_LINK) {
+    const sf = slotStateFile(p);
+    if (sf) {
+      const fp = rlFingerprint(rl);
+      const st = readSlotState(sf);
+      // The state is updated on every OBSERVATION, not only on every write:
+      // the throttle below skips most renders, and a payload seen (but not
+      // written) under the old target is still evidence about which
+      // credentials produced the numbers we are looking at now.
+      if (st && st.key && st.key !== key && st.fp === fp) {
+        writeSlotState(sf, { key: st.key, fp }, false);
+        return; // these numbers are the PREVIOUS slot's — leave them there
+      }
+      writeSlotState(sf, { key, fp }, !st);
+    }
+  }
   const f = path.join(CACHE_DIR, key + '.json');
   // Throttle: the statusline re-renders often; one write / 25s per account is
   // plenty (usage windows move slowly) and keeps disk churn negligible.

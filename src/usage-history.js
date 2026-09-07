@@ -122,7 +122,37 @@ class UsageHistory {
       // initial ledger backfill ran AFTER the account was attached).
       return ts >= list[0].ts - 10 * 60 * 1000 ? list[0].acct : null;
     }
-    return metaAcct || null;
+    return this._nonPoolAcct(metaAcct);
+  }
+  /** A POOLED pseudo-account is NEVER a spender in the account dimension —
+   *  server.js states the invariant at the other site that reaches this
+   *  decision ("an unresolvable pool target falls to GLOBAL, never to the pool
+   *  id itself"), and this fallback is the second one (2026-09-07 r3,
+   *  reproduced). session-meta's `accountId` is the SPAWN identity, which for
+   *  a pooled session is the pool (ws-create `_accountId = spawnAccount.id`,
+   *  and `resolveForSpawn` returns the pool's own id) — so falling back to it
+   *  baked `acct:'pool-…', atype:'pooled'` onto ledger events, double-counting
+   *  the pool against its own members and putting a thing that cannot hold
+   *  credentials in the per-account totals.
+   *
+   *  Which MEMBER it was is deliberately not guessed here: this fallback only
+   *  runs when the conversation has no attribution entry at all, which is
+   *  exactly the case the repair could not resolve from the transition ledger
+   *  either. Global (acct null) is the honest answer; the `pool` tag the event
+   *  already carries keeps the per-pool total correct.
+   *
+   *  TWO LEGS ON PURPOSE: the injected `resolveAccount` (server.js) reports a
+   *  CODEX pool as 'codex-subscription' — it maps `backend === 'codex'` to a
+   *  single type before `a.type` is ever read — so the type test alone misses
+   *  every codex pool. The id shape is minted in exactly one place
+   *  (accounts.createPool, `'pool-' + randomBytes(6).hex`). */
+  _nonPoolAcct(acct) { return this._poolIdOf(acct) ? null : (acct || null); }
+  /** `acct` when it IS a pooled pseudo-account, else null. */
+  _poolIdOf(acct) {
+    if (!acct) return null;
+    if (/^pool-[0-9a-f]{6,}$/i.test(String(acct))) return acct;
+    try { if (this._resolveAccount && this._resolveAccount(acct)?.type === 'pooled') return acct; } catch { }
+    return null;
   }
   // The POOLED pseudo-account (if any) active for session `sid` at time `ts` —
   // same by-time walk as _acctAt but returns the pool tag. Baked onto events so
@@ -316,7 +346,11 @@ class UsageHistory {
           // data/slot-transitions.jsonl. undefined = no override → walk.
           const tr = this._truthLookup ? this._truthLookup(ev.rid) : undefined;
           const acct = tr !== undefined ? tr : this._acctAt(ev.sid, ev.ts, attrib, minfo.acct);
-          const pool = this._poolAt(ev.sid, ev.ts, attrib);
+          // `_nonPoolAcct` drops a pool id out of the ACCOUNT dimension; the
+          // spend still flowed THROUGH that pool, so keep the tag rather than
+          // losing it from the per-pool total (the walk has no attribution
+          // entry to get it from — that is the same case).
+          const pool = this._poolAt(ev.sid, ev.ts, attrib) || this._poolIdOf(minfo.acct);
           const ainfo = acct ? (this._resolveAccount(acct) || null) : null;
           push({
             rid: ev.rid,
