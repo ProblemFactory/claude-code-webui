@@ -63,13 +63,36 @@ const AUTH_FAIL_TTL_MS = 10 * 60e3;
 // cache) while the banner had landed on the org the CLI was ACTUALLY on (193
 // readings re-attributed away from the link); the pool moved 1.5-3 min later
 // when a reading arrived, and in-flight subagents died in the gap. Now: a
-// wall is ground truth for the account it lands on (readings only confirm),
-// and the engine evaluates a session on the member it is OBSERVED to bill.
-const OBSERVED_ORG_RECENT_MS = 10 * 60e3; // how fresh an OTel observation must be to speak for "the org this session is on NOW"
-const WALL_RING_MS = 120e3;              // the ≥2-walls guard window (misattribution defence, 2.368.34 class)
+// wall is ground truth for the account it lands on (readings only confirm).
+// (The second half of that sentence — "the engine evaluates a session on the
+// member it is OBSERVED to bill" — was REFUTED on 2026-09-07; see the block
+// directly below, which is what governs every blocking decision now.)
+// ── ATTRIBUTION BY LINK, OBSERVATION AS CORROBORATION (2026-09-07, owner
+// decision ut-1c6c15a2db ①/④ after the 130-fire loop) ───────────────────────
+// B-2c9b made the OTel-observed org OVERRIDE the link for blocking decisions.
+// The owner's post-mortem corrected the premise: an `api_request` record's
+// organization.id comes from the identity the CLI cached in its config dir at
+// SPAWN, not from the token that authorized the request — so after a hot
+// re-point the process reads the NEW credential file (that is what the
+// mtime-bump exists for) while its telemetry keeps naming the OLD org.
+// Consequence, reproduced in scripts/test-auto-resume-loop.mjs: every
+// rejection landed on the observed org, the LINKED member's cache stayed
+// "healthy" forever, the verdict kept answering "usable via <link>", the
+// per-session pass "switched" to the member it was already on, and fireNow()
+// continued a session that was rejected again half a second later — 130 times.
+// So: a REJECTION is a fact about the credential SLOT the CLI reads (the
+// link, validated), the observation is corroboration in the journal and in
+// telemetry. Quota VALUES (utilization readings) keep the B-b3cd
+// observed-org routing — a value describes whatever token produced it; only
+// the identity of a WALL moved.
+const OBSERVED_ORG_RECENT_MS = 10 * 60e3; // how fresh an OTel observation must be to speak at all
+const WALL_RING_MS = 120e3;              // the ≥2-walls corroboration window for a wall we cannot tie to a slot
 const WALL_RING_MAX = 16;
+const SESSION_WALL_MS = 10 * 60e3;       // "this member rejected THIS session" — dead for its verdicts + switch targets
 const _wallRing = new Map();             // account key → [{at, sid}] walled-turn timestamps (one entry per turn per key)
 const _divergenceLogAt = new Map();      // webuiId → last "observed on X while linked to Y" log (10min floor)
+const _sessionWalls = new Map();         // webuiId → Map(memberId → ts): the members that walled THIS session
+const _noTargetLogAt = new Map();        // webuiId → last "nowhere to go" per-session log (10min floor)
 // ── get_usage control channel + chat-mode limit banner (B-7edc/B-292b) ──────
 // The get_usage control request makes the CLI (first-party client) fetch usage
 // itself — strictly better ToS posture than our bare /api/oauth/usage call.
@@ -388,12 +411,12 @@ function resolveUsageKey(session) {
   let acct = session._accountId || null;
   try {
     if (acct && accounts.get(acct)?.type === 'pooled') {
-      // (B-2c9b plan B) the member the session is OBSERVED to bill (OTel
-      // truth, ≤10min) beats the link: a hot-switched CLI keeps its old token,
-      // so the link says where we POINTED it and the observation says what
-      // it is BURNING — the live odometer, probe matching and every cache
-      // key derived here follow the observation. No observation ⇒ the link.
-      acct = sessionCurrentMember(session, acct).id || acct;
+      // VALUES follow the observation (B-b3cd): a utilization number
+      // describes whatever token produced it, so the live odometer, probe
+      // matching and every cache key derived here take the observed member.
+      // No observation ⇒ the link. BLOCKING decisions deliberately do NOT
+      // come through here — they read sessionBillingMember (2026-09-07).
+      acct = sessionReadingMember(session, acct).id || acct;
     }
   } catch {}
   return acct || '__global__';
@@ -500,7 +523,10 @@ function orgVerifiedKey(session, key, what) {
   return key;
 }
 const nameOf = (id) => { try { return (id && accounts.get(id)?.name) || id || '?'; } catch { return id || '?'; } };
-/** (B-2c9b plan B) The pool member a session's requests are OBSERVED to bill:
+/** The pool member the OTel truth stream last SAW this session's requests on
+ *  — i.e. the identity the CLI cached at spawn, not necessarily the one whose
+ *  credentials it is reading now (2026-09-07). Routes VALUES, corroborates a
+ *  wall; never decides a blocking question on its own:
  *  the OTel truth stream's latest org for the session (≤ OBSERVED_ORG_RECENT_MS
  *  old) resolved to a member of `poolId` — else null. A pure read: no
  *  telemetry, no re-attribution side effects (orgVerifiedKey owns those for
@@ -516,29 +542,117 @@ function observedMemberFor(session, poolId) {
     return hit ? hit.id : null;
   } catch { return null; }
 }
-/** What the engine BELIEVES a pooled session is on: the observed member when
- *  the OTel truth names one, else its link (per-session link → pool default).
- *  `divergent` = observed ≠ linked — logged once per session per 10 minutes
- *  ('[pool] session <id> observed on <X> while linked to <Y>'). The hot-switch
- *  symlink still targets the CHOSEN member; this only changes what the engine
- *  evaluates the session AGAINST (verdicts, per-session switch, probe target,
- *  live burn attribution). */
-function sessionCurrentMember(session, poolId) {
+function noteDivergence(session, observedId, linkedId) {
+  if (!observedId || observedId === linkedId) return false;
+  const sid = session?._webuiId || session?.claudeSessionId || '?';
+  const now = Date.now();
+  if (now - (_divergenceLogAt.get(sid) || 0) > 10 * 60e3) {
+    _divergenceLogAt.set(sid, now);
+    console.log(`[pool] session ${sid} observed on ${nameOf(observedId)} while linked to ${nameOf(linkedId)}`);
+    global.__vsEvent?.('pool-observed-divergence', `${observedId}≠${linkedId}`);
+  }
+  return true;
+}
+/** Where a pooled session's quota READINGS belong: the observed member when
+ *  the OTel truth names one, else its link. VALUES only (resolveUsageKey →
+ *  the live odometer, probe-session matching, derived cache keys) — B-b3cd's
+ *  odometer-flap defence. It deliberately does NOT decide anything about
+ *  BLOCKING any more; that is sessionBillingMember. */
+function sessionReadingMember(session, poolId) {
   let linkedId = null;
   try { linkedId = accounts.poolCurrentFor(poolId, session?._webuiId || null) || null; } catch { }
   const observedId = observedMemberFor(session, poolId);
-  const divergent = !!observedId && observedId !== linkedId;
-  if (divergent) {
-    const sid = session._webuiId || session.claudeSessionId || '?';
-    const now = Date.now();
-    if (now - (_divergenceLogAt.get(sid) || 0) > 10 * 60e3) {
-      _divergenceLogAt.set(sid, now);
-      console.log(`[pool] session ${sid} observed on ${nameOf(observedId)} while linked to ${nameOf(linkedId)}`);
-      global.__vsEvent?.('pool-observed-divergence', `${observedId}≠${linkedId}`);
-    }
-  }
+  const divergent = noteDivergence(session, observedId, linkedId);
   return { id: observedId || linkedId, linkedId, observedId, divergent };
 }
+/** TOKEN-SLOT VALIDATION: is the credential slot this session's CLI reads
+ *  really `linkedId`'s? The slot is the per-session symlink (or the pool's
+ *  default link for a session that has none) — `poolCurrentFor` resolves the
+ *  symlink itself, so a non-null answer already means "the link points at a
+ *  known account". These legs add the two things that make it AUTHORITY for a
+ *  wall: the target is a member of THIS pool, and it holds credentials. When
+ *  a leg fails we say WHICH — an unvalidated slot degrades to the old
+ *  ≥2-walls corroboration instead of silently demoting the wrong account. */
+function validateBillingSlot(poolId, linkedId) {
+  if (!linkedId) return { ok: false, reason: 'no-slot' };            // no link, or it resolves to no known account (poolCurrentFor readlinks it)
+  try {
+    // poolMembers() is the ONE authority here and it already filters by
+    // loggedIn — a separate credentials leg would be an unsatisfiable guard
+    // (it can only disagree with itself), i.e. deleted functionality wearing
+    // a check's clothes.
+    if (!(accounts.poolMembers(poolId) || []).some((m) => m.id === linkedId)) return { ok: false, reason: 'slot-not-a-member' };
+  } catch { return { ok: false, reason: 'slot-unreadable' }; }
+  return { ok: true, reason: null };
+}
+/** THE member a pooled session's requests are BILLED to: its link, validated
+ *  against the credential slot. Every blocking decision uses this — the wall's
+ *  demotion target, the verdict order, the per-session switch's `currentId`,
+ *  both probe targets and the identity the loop breaker keys fires on.
+ *  `observedId`/`divergent` ride along as corroboration for the journal. */
+function sessionBillingMember(session, poolId) {
+  let linkedId = null;
+  try { linkedId = accounts.poolCurrentFor(poolId, session?._webuiId || null) || null; } catch { }
+  const observedId = observedMemberFor(session, poolId);
+  const divergent = noteDivergence(session, observedId, linkedId);
+  const slot = validateBillingSlot(poolId, linkedId);
+  return { id: linkedId, linkedId, observedId, divergent, slotOk: slot.ok, slotReason: slot.reason };
+}
+/** THE identity a REJECTION belongs to: the credential slot this session's
+ *  CLI reads, and whether that slot VALIDATED. Pooled ⇒ the validated link
+ *  member; otherwise the session's own account/host key (fixed at spawn, so
+ *  trivially its own slot). Deliberately NOT orgVerifiedKey — see the header
+ *  note. `slotOk` travels ON THE SIGNAL because it is only true AT THE MOMENT
+ *  THE REJECTION ARRIVES: by the time the turn ends the pool has usually
+ *  re-pointed the link off the account that just refused us. */
+function wallSlotFor(session) {
+  try {
+    const poolId = session?._accountId || null;
+    const a = poolId && accounts.get(poolId);
+    if (a && a.type === 'pooled') {
+      const b = sessionBillingMember(session, poolId);
+      return { key: b.id || poolId, slotOk: !!b.slotOk && !!b.id, slotReason: b.slotReason };
+    }
+  } catch { }
+  const key = usageCacheKeyFor(session);
+  return { key, slotOk: !!key, slotReason: null }; // no pool = one fixed creds dir for the whole session
+}
+function wallKeyFor(session) { return wallSlotFor(session).key; }
+/** The identity + label a CONTINUE fired into this session would land on —
+ *  auto-resume's `fireIdentity` dep. Deliberately wallKeyFor: the breaker's
+ *  "the fire onto X failed" and the wall machine's "X rejected this session"
+ *  must name the same X, or the breaker quarantines an account nothing ever
+ *  rejects. */
+function fireIdentityFor(session) {
+  try {
+    const key = wallKeyFor(session);
+    if (!key) return null;
+    return { key, name: nameOf(key) };
+  } catch { return null; }
+}
+/** "This member rejected THIS session at T" — written where a wall resolves to
+ *  a member, read by the verdict (it cannot answer `usable` through such a
+ *  member) and by the per-session switch (it cannot pick one). Session-scoped
+ *  and self-expiring: a pool-wide fact would be the 2.368.34 misattribution
+ *  class again. */
+function noteSessionWall(sid, memberId, now = Date.now()) {
+  if (!sid || !memberId) return;
+  let m = _sessionWalls.get(sid);
+  if (!m) { m = new Map(); _sessionWalls.set(sid, m); }
+  m.set(memberId, now);
+  for (const [k, t] of m) if (now - t > SESSION_WALL_MS) m.delete(k);
+  if (_sessionWalls.size > 512) { const k = _sessionWalls.keys().next().value; _sessionWalls.delete(k); }
+}
+function sessionWalledMembers(sid, now = Date.now()) {
+  const out = new Set();
+  const m = sid && _sessionWalls.get(sid);
+  if (m) for (const [k, t] of m) if (now - t < SESSION_WALL_MS) out.add(k);
+  // the loop breaker's own memory (a continue we fired that came back
+  // rejected) is the same fact seen from the other side — one union, so a
+  // restart-surviving failure record still steers the next target choice
+  try { for (const k of getAutoResume()?.recentFireFailures?.(sid) || []) out.add(k); } catch { }
+  return out;
+}
+
 /** Walled turns seen on an account (any session) inside WALL_RING_MS, counted
  *  across its identity group. */
 function wallCount(key, now = Date.now()) {
@@ -570,18 +684,31 @@ function quotaVerdictFor(scope, { model, session = null } = {}) {
   const a = accounts.get(scope);
   if (a && a.type === 'pooled') {
     const members = accounts.poolMembers(scope) || [];
-    // (B-2c9b plan B) OBSERVED-ORG AWARE: the session's CURRENT member
-    // (observed over linked) is judged FIRST, so `via` names the account the
-    // session is actually on whenever that one is usable, and the verdict
-    // carries on/linked/divergent for the journal + tests.
-    const cm = session ? sessionCurrentMember(session, scope) : null;
+    // The member whose credentials the CLI reads is judged FIRST, so `via`
+    // names the account the session is actually billing whenever that one is
+    // usable; the verdict carries on/linked/observed/divergent/slotOk for the
+    // journal + tests. (Was "observed over linked" under B-2c9b plan B until
+    // 2026-09-07 — the observation names the SPAWN-time identity, so judging
+    // it first is how the loop kept finding a "usable" member to re-fire at.)
+    const cm = session ? sessionBillingMember(session, scope) : null;
     const ordered = cm?.id ? [...members.filter((m) => m.id === cm.id), ...members.filter((m) => m.id !== cm.id)] : members;
-    const verdicts = ordered.map((m) => ({ name: m.name || m.id, v: quotaVerdict(proj(read(m.id)), nowSec) }));
-    const ctx = cm ? { on: cm.id, linked: cm.linkedId, divergent: cm.divergent } : {};
+    // A member that answered THIS session's turn with a limit rejection is
+    // dead-until-reset for this session's verdicts, whatever its cache says
+    // (2026-09-07: the loop's every cycle re-read a "healthy" member that had
+    // just rejected us). Its own blockedUntil still counts toward the wait.
+    const walled = session ? sessionWalledMembers(session._webuiId) : new Set();
+    const verdicts = ordered.map((m) => {
+      const v = quotaVerdict(proj(read(m.id)), nowSec);
+      if (walled.has(m.id) && v.usable !== false) {
+        return { id: m.id, name: m.name || m.id, v: { ...v, usable: false, reason: `rejected this conversation (${v.reason})` } };
+      }
+      return { id: m.id, name: m.name || m.id, v };
+    });
+    const ctx = cm ? { on: cm.id, linked: cm.linkedId, observed: cm.observedId || null, divergent: cm.divergent, slotOk: cm.slotOk } : {};
     const note = cm?.divergent ? ` — session observed on ${nameOf(cm.observedId)} while linked to ${nameOf(cm.linkedId)}` : '';
     if (!verdicts.length) return { usable: null, known: false, blockedUntil: 0, reason: 'pool has no members', ...ctx };
     const ok = verdicts.find((x) => x.v.usable === true);
-    if (ok) return { usable: true, known: true, blockedUntil: 0, via: ok.name, reason: `${ok.name} usable (${ok.v.reason})${note}`, ...ctx };
+    if (ok) return { usable: true, known: true, blockedUntil: 0, via: ok.name, viaId: ok.id, reason: `${ok.name} usable (${ok.v.reason})${note}`, ...ctx };
     const untils = verdicts.map((x) => x.v.blockedUntil).filter(Boolean);
     return {
       usable: false, known: true,
@@ -593,10 +720,15 @@ function quotaVerdictFor(scope, { model, session = null } = {}) {
   return quotaVerdict(proj(read(scope)), nowSec);
 }
 
+/** The identity whose quota is BLOCKING this session (the verdict's scope):
+ *  the pool, or — for an unpooled session — its own credential slot. Not
+ *  orgVerifiedKey: routing the VERDICT to the spawn-time org means asking a
+ *  different account whether this session may spend (the pooled half of that
+ *  mistake is what produced the 2026-09-07 fire loop). */
 function _wallScope(session) {
   const a = session._accountId && accounts.get(session._accountId);
   if (a && a.type === 'pooled') return session._accountId;
-  return orgVerifiedKey(session, usageCacheKeyFor(session), 'wall-machine');
+  return wallKeyFor(session);
 }
 
 /** A wall SIGNAL landed on the session's current turn (rejected event /
@@ -614,7 +746,7 @@ function noteWallSignal(session, sig = {}) {
   // + its rejected event are ONE wall (a single turn must not satisfy the
   // ≥2-walls guard by itself)
   if (key && !sigs.some((s) => s.key === key)) noteWallOnAccount(key, session._webuiId);
-  sigs.push({ at: Date.now(), resetsAtMs: Number(sig.resetsAtMs) || 0, bucket: sig.bucket || null, scopedName: sig.scopedName || null, key });
+  sigs.push({ at: Date.now(), resetsAtMs: Number(sig.resetsAtMs) || 0, bucket: sig.bucket || null, scopedName: sig.scopedName || null, key, slot: !!sig.slot });
   session._turnWorkAfterSig = 0;
 }
 /** Main-thread assistant output — work evidence for turn classification. */
@@ -640,37 +772,49 @@ function noteTurnEnd(session) {
 }
 
 const BUCKET_LABEL = { fiveHour: '5h', sevenDay: '7d' };
-/** (B-2c9b plan A) WALL = GROUND TRUTH for the account it lands on. A walled
- *  turn's signals name the cache key their mark landed on (the org-verified
- *  key markLimitBanner / recordRateLimitEvent attribute readings with — a
- *  live CLI holds its OLD token, the link is never the org it is on). When
- *  that account is a member of the session's pool (or its linked member),
- *  mark the affected bucket exhausted NOW — utilization 1, resetsAt = the
- *  signal's, else the bucket's cached future reset, else the bounded 5h/24h
- *  guess — through the SAME write path readings use (captureRateLimitEvent,
- *  source 'wall'), so anchors/estimator/verdicts all see it in this tick.
- *  MISATTRIBUTION GUARD (the 2.368.34 class): demote only when the account
- *  saw ≥2 walled turns inside WALL_RING_MS (any sessions) OR it IS the
- *  session's OTel-observed org — a single wall on an account the session is
- *  not verifiably on is not enough. Every outcome returns a named reason. */
+/** (B-2c9b plan A, re-based 2026-09-07) WALL = GROUND TRUTH for the account
+ *  whose credentials the CLI actually read. A walled turn's signals name the
+ *  key their mark landed on — for a rejection that key is now the session's
+ *  TOKEN SLOT (wallKeyFor: the validated link), not the OTel-observed org,
+ *  because the observation names the identity the CLI cached at spawn (see
+ *  the header note). Mark the affected bucket exhausted NOW — utilization 1,
+ *  resetsAt = the signal's, else the bucket's cached future reset, else the
+ *  bounded 5h/24h guess — through the SAME write path readings use
+ *  (captureRateLimitEvent, source 'wall'), so anchors/estimator/verdicts all
+ *  see it in this tick.
+ *  VERIFICATION LADDER (the 2.368.34 misattribution class still applies to
+ *  every account that is NOT the session's slot): the session's own validated
+ *  slot is authority by itself — we know what the symlink points at, which is
+ *  strictly better evidence than a telemetry attribute. Anything else needs
+ *  the old corroboration: ≥2 walled turns inside WALL_RING_MS (any session)
+ *  OR the account IS the session's OTel-observed org. Every outcome returns a
+ *  named reason. */
 function demoteWalledAccount(session, sigs) {
   const poolId = session._accountId;
   const a = poolId && accounts.get(poolId);
   if (!a || a.type !== 'pooled') return { demoted: false, reason: 'not-pooled' };
   const last = sigs.length ? sigs[sigs.length - 1] : null;
-  const wallKey = (last && last.key) || orgVerifiedKey(session, usageCacheKeyFor(session), 'wall');
+  const wallKey = (last && last.key) || wallKeyFor(session);
   const ids = new Set([wallKey]);
   try { for (const id of usageIdentityAccountIds(wallKey)) ids.add(id); } catch { }
-  let linked = null; try { linked = accounts.poolCurrentFor(poolId, session._webuiId || null); } catch { }
-  const member = (accounts.poolMembers(poolId) || []).find((m) => ids.has(m.id)) || (linked && ids.has(linked) ? { id: linked, name: nameOf(linked) } : null);
+  const slot = sessionBillingMember(session, poolId);
+  const member = (accounts.poolMembers(poolId) || []).find((m) => ids.has(m.id)) || (slot.id && ids.has(slot.id) ? { id: slot.id, name: nameOf(slot.id) } : null);
+  // "was this key the session's credential slot when the rejection arrived" —
+  // asked of the SIGNAL, because the link may have moved since (see wallSlotFor)
+  const slotSignal = sigs.some((x) => x && x.slot && (!x.key || ids.has(x.key)));
   if (!member) return { demoted: false, reason: 'not-a-member', key: wallKey };
   const now = Date.now();
   if (!(last && last.key)) noteWallOnAccount(wallKey, session._webuiId, now); // a key-less signal joins the ring at resolution time — this turn IS a wall on that account
   const walls = wallCount(wallKey, now);
   const observedId = observedMemberFor(session, poolId);
   const observedMatch = !!observedId && ids.has(observedId);
-  if (walls < 2 && !observedMatch) {
-    console.log(`[wall] ${session._webuiId}: single wall on ${member.name} (session not observed there) — holding the demotion`);
+  const slotMatch = slotSignal || (!!slot.slotOk && !!slot.id && ids.has(slot.id));
+  // this member said no to THIS session — true whether or not we demote it,
+  // and the fact the verdict + the next target choice read
+  noteSessionWall(session._webuiId, member.id, now);
+  if (!slotMatch && walls < 2 && !observedMatch) {
+    const held = (slot.id && ids.has(slot.id)) ? `this session's slot, but unvalidated: ${slot.slotReason || 'unknown'}` : "not this session's credential slot";
+    console.log(`[wall] ${session._webuiId}: single wall on ${member.name} (${held}) — holding the demotion`);
     global.__vsEvent?.('wall-demote-held', `${member.id}:${walls}`);
     return { demoted: false, reason: 'unverified', key: member.id, walls };
   }
@@ -699,18 +843,23 @@ function demoteWalledAccount(session, sigs) {
       const bk = b.kind === 'scoped' ? (c.scopedWeekly || []).find((x) => String(x?.name || '').toLowerCase() === b.scopedName) : c[b.kind];
       until = (Number(bk?.resetsAt) || 0) * 1000;
     } catch { }
-    console.log(`[wall] demoted ${member.name} ${label} until ${until ? new Date(until).toISOString() : 'unknown'} (${walls} walls${observedMatch ? ' / observed-org' : ''})`);
-    global.__vsEvent?.('wall-demote', `${member.id}:${label}:${observedMatch ? 'observed-org' : walls + '-walls'}`);
+    const why = slotMatch ? 'credential slot' : observedMatch ? 'observed-org' : walls + '-walls';
+    console.log(`[wall] demoted ${member.name} ${label} until ${until ? new Date(until).toISOString() : 'unknown'} (${walls} walls / ${why})`);
+    global.__vsEvent?.('wall-demote', `${member.id}:${label}:${why}`);
     done.push({ label, until });
   }
   // (the write's fresh fetchedAt busts the estimator memo by itself — estimateFor re-anchors on a newer rawCache)
-  return { demoted: done.length > 0, reason: done.length ? 'demoted' : 'no-bucket', key: member.id, walls, observedMatch, buckets: done };
+  return { demoted: done.length > 0, reason: done.length ? 'demoted' : 'no-bucket', key: member.id, walls, observedMatch, slotMatch, buckets: done };
 }
 
 function onWalledTurn(session, sigs) {
   const id = session._webuiId;
   const model = sessionModelFor(session);
   const scope = _wallScope(session);
+  // FIRST: if this walled turn is the answer to a continue WE fired, that
+  // fire FAILED. The breaker has to learn it before anything below re-arms
+  // or re-switches — that ordering is the loop's off-switch (2026-09-07).
+  try { getAutoResume()?.noteFireOutcome?.(id, false, 'limit rejection'); } catch { }
   // (A) the wall is ground truth for the account it landed on — write it
   // BEFORE the verdict reads the cache (readings only confirm)
   let demoted = null;
@@ -719,15 +868,24 @@ function onWalledTurn(session, sigs) {
     const ar = getAutoResume();
     if (!ar?.armIfEnabled) return;
     const v = quotaVerdictFor(scope, { model, session });
-    console.log(`[wall] ${id}: walled turn (scope ${scope}${demoted?.demoted ? `, demoted ${demoted.key}` : ''}) → ${v.usable === true ? 'usable via ' + (v.via || '?') : v.usable === false ? 'blocked until ' + (v.blockedUntil ? new Date(v.blockedUntil).toISOString() : 'unknown') : 'no data'}${v.divergent ? ` [on ${nameOf(v.on)}, linked ${nameOf(v.linked)}]` : ''}`);
+    console.log(`[wall] ${id}: walled turn (scope ${scope}${demoted?.demoted ? `, demoted ${demoted.key}` : ''}) → ${v.usable === true ? 'usable via ' + (v.via || '?') : v.usable === false ? 'blocked until ' + (v.blockedUntil ? new Date(v.blockedUntil).toISOString() : 'unknown') : 'no data'}${v.divergent ? ` [billing ${nameOf(v.linked)}, OTel observed ${nameOf(v.observed)}]` : ''}`);
     if (v.usable === true) {
       // a member is free: the session is idle-walled and nothing else will
       // move it — a NEAR fire re-enters work through the normal machinery
       // (pre-fire gate re-verifies; the delayed announcement outlives this,
       // so a quick success stays silent). The pool eval in `finally` runs
       // with the session ARMED, so a hot switch's fireNow() continues it now.
-      ar.armIfEnabled(id, session, Date.now() + 45000, 'switched to a usable account');
-      return;
+      // The target must DIFFER from the identity that just rejected us —
+      // quotaVerdictFor cannot answer `usable` through a walled member, so
+      // reaching here with viaId === the wall's member would mean the two
+      // disagree about identity; say so instead of arming (2026-09-07).
+      if (v.viaId && demoted?.key && v.viaId === demoted.key) {
+        console.log(`[wall] ${id}: the only usable member IS the one that just rejected this conversation (${nameOf(v.viaId)}) — not re-firing`);
+        global.__vsEvent?.('wall-usable-is-rejector', String(v.viaId));
+      } else {
+        ar.armIfEnabled(id, session, Date.now() + 45000, `switched to a usable account (${v.via || '?'})`);
+        return;
+      }
     }
     const evReset = Math.max(0, ...sigs.map((s2) => s2.resetsAtMs || 0));
     const target = v.blockedUntil || evReset;
@@ -749,9 +907,10 @@ function onWalledTurn(session, sigs) {
     scheduleWallProbe(session, scope, model, 0);
   } finally {
     // the per-turn pool evaluation, AFTER the demotion and the arm: the link
-    // moves in this same tick (the demoted member reads dead; a divergent
-    // session is evaluated on the member it is observed on) and a hot
-    // switch's fireNow() continues the armed session
+    // moves in this same tick (the demoted member reads dead; the decision is
+    // taken FROM the member whose credentials the CLI reads) and a hot
+    // switch's fireNow() continues the armed session — through the breaker,
+    // which refuses a second continue onto an identity that just rejected it
     maybePoolAutoSwitch(session);
   }
 }
@@ -838,7 +997,7 @@ function scheduleWallProbe(session, scope, model, attempt) {
       if (!activeSessions.has(id)) return;
       if (!getAutoResume()?.enabledFor?.(session)) return;
       const a = accounts.get(scope);
-      const target = a && a.type === 'pooled' ? sessionCurrentMember(session, scope).id : scope; // the member the session is ON (observed over linked, B-2c9b)
+      const target = a && a.type === 'pooled' ? sessionBillingMember(session, scope).id : scope; // the member whose credentials the CLI reads (2026-09-07: the link, slot-validated)
       if (target) await probeQuotaForKey(target, { session }).catch(() => { }); // caps-routed: never a claude spawn for a codex identity
       const v = quotaVerdictFor(scope, { model, session });
       const ar = getAutoResume();
@@ -852,13 +1011,23 @@ function scheduleWallProbe(session, scope, model, attempt) {
 
 /** The pre-fire gate (auto-resume beforeFire): probe fresh quota, re-check
  *  the verdict — false vetoes the spend and re-arms to the new blockedUntil. */
+const _preFireProbeAt = new Map(); // probe target → last pre-fire probe (60s floor)
 async function beforeAutoResumeFire(id, session) {
   try {
     const model = sessionModelFor(session);
     const scope = _wallScope(session);
     const a = accounts.get(scope);
-    const target = a && a.type === 'pooled' ? sessionCurrentMember(session, scope).id : scope; // the member the session is ON (observed over linked, B-2c9b)
-    if (target) { try { await probeQuotaForKey(target, { session }); } catch { } } // caps-routed (S4): the identity's harness picks the rung
+    const target = a && a.type === 'pooled' ? sessionBillingMember(session, scope).id : scope; // the member whose credentials the CLI reads (2026-09-07: the link, slot-validated)
+    // The immediate (pool-switch) path runs this gate too since 2026-09-07,
+    // so the probe needs a floor: the wall demotion wrote this target's cache
+    // microseconds ago, and a `claude -p /usage` spawn per hot switch would be
+    // a new cost on a path that fires in bursts. The RE-VERDICT below always
+    // runs — only the spawn is throttled.
+    const probedAt = target ? _preFireProbeAt.get(target) || 0 : 0;
+    if (target && Date.now() - probedAt > 60e3) {
+      _preFireProbeAt.set(target, Date.now());
+      try { await probeQuotaForKey(target, { session }); } catch { } // caps-routed (S4): the identity's harness picks the rung
+    }
     maybePoolAutoSwitch(session);
     const v = quotaVerdictFor(scope, { model, session });
     if (v.usable === false) {
@@ -879,7 +1048,16 @@ function recordRateLimitEvent(session, msg) {
     // Session-scoped actions below (pool switch, auto-resume) stay on THIS
     // session regardless of re-attribution: it is genuinely blocked no
     // matter whose bucket filled.
-    const key = orgVerifiedKey(session, usageCacheKeyFor(session), 'rate-limit-event:' + ev.kind);
+    // A REJECTION is a fact about the credential SLOT the CLI reads (the
+    // validated link) — a READING is a fact about whatever token produced its
+    // numbers, which is where orgVerifiedKey's observed-org routing belongs
+    // (B-b3cd odometer flap, unchanged). Mixing the two put every rejection on
+    // the spawn-time org and left the linked member reading "healthy"
+    // forever — the 2026-09-07 fire loop.
+    const slot = ev.status === 'rejected' ? wallSlotFor(session) : null;
+    const key = slot && slot.key
+      ? slot.key
+      : orgVerifiedKey(session, usageCacheKeyFor(session), 'rate-limit-event:' + ev.kind);
     const r = captureRateLimitEvent({ cacheDir: USAGE_CACHE_DIR, key, identityIds: usageIdentityAccountIds(key), ev });
     if (r.unknownType) { global.__vsEvent?.('rate-limit-event-unknown-type', r.unknownType); return; }
     global.__vsEvent?.('rate-limit-event', `${key}:${ev.kind}:${ev.status}${r.wroteReading ? ':reading' : ''}`);
@@ -890,7 +1068,7 @@ function recordRateLimitEvent(session, msg) {
       // wall-machine SIGNAL (2.369.0): no arming here — the turn's RESULT
       // classifies (a turn the switch rescues completes normally and never
       // enters BLOCKED; a genuinely walled turn arms off quotaVerdict).
-      try { noteWallSignal(session, { resetsAtMs: (Number(ev.resetsAt) || 0) * 1000, bucket: ev.kind, scopedName: ev.scopedName, key }); } catch { }
+      try { noteWallSignal(session, { resetsAtMs: (Number(ev.resetsAt) || 0) * 1000, bucket: ev.kind, scopedName: ev.scopedName, key, slot: !!slot?.slotOk }); } catch { }
     } else if (r.wroteReading) {
       try { if (ev.status && ev.status !== 'rejected') getAutoResume()?.noteRecovered?.(session._webuiId, 'fresh non-rejected reading'); } catch { }
       kickPoolEval();
@@ -1016,9 +1194,12 @@ function markLimitBanner(session, text) {
     if (!hit) return;
 
     // host-aware (2.289.0) — a remote host-login banner belongs to the host
-    // bucket, not __global__; org-verified (B-b3cd) — a stale-token session's
-    // banner marks the org it is actually ON, not the linked account.
-    const key = orgVerifiedKey(session, usageCacheKeyFor(session), 'limit-banner');
+    // bucket, not __global__. The banner is a REJECTION (the CLI refused the
+    // turn), so since 2026-09-07 it marks the session's credential SLOT, the
+    // same identity the wall machine demotes — not the OTel-observed org
+    // (that names the identity cached at spawn; see the header note).
+    const slot = wallSlotFor(session);
+    const key = slot.key || orgVerifiedKey(session, usageCacheKeyFor(session), 'limit-banner');
     const nowSec = Math.floor(Date.now() / 1000);
     const bump = (b, fallbackResetSec) => ({
       ...(b || {}),
@@ -1074,7 +1255,7 @@ function markLimitBanner(session, text) {
     // text for TIMES) — no resetsAtMs here; the bucket name is the same one
     // parseLimitBanner gave the cache mark, and `key` is where that mark
     // landed (the wall's account, B-2c9b). Times come from quotaVerdict/probe.
-    try { noteWallSignal(session, { bucket: hit.kind, scopedName: hit.kind === 'scoped' ? hit.name : null, key }); } catch { }
+    try { noteWallSignal(session, { bucket: hit.kind, scopedName: hit.kind === 'scoped' ? hit.name : null, key, slot: !!slot.slotOk }); } catch { }
   } catch (e) { console.warn('[usage] banner mark failed:', e.message); }
 }
 
@@ -1327,17 +1508,32 @@ function maybePoolAutoSwitchForPool(poolId) {
       try { linkCur = accounts.poolCurrentFor(poolId, sid); } catch { }
       const hasOwnLink = (() => { try { fs.lstatSync(accounts.sessionPoolLinkPath(poolId, sid)); return true; } catch { return false; } })();
       if (!hasOwnLink || !linkCur) continue;
-      // (B-2c9b plan B) decide FROM the member the session is OBSERVED to bill
-      // (OTel truth, ≤10min): a hot-switched CLI keeps its old token, so the
-      // link says where we pointed it and the observation says what it is
-      // burning — a session walled on the observed member must move even
-      // when its link already reads healthy. No observation ⇒ the link.
-      const cm = sessionCurrentMember(s2, poolId);
+      // Decide FROM the member whose credentials this session's CLI reads —
+      // its token slot (2026-09-07, reversing B-2c9b plan B for DECISIONS):
+      // deciding from the OTel-observed org made every cycle of the fire loop
+      // "switch" to the member the link was already on ("re-point, same
+      // target", 740 of them in the incident journal) and then fire again.
+      // The observation still rides along in the log line as corroboration.
+      const cm = sessionBillingMember(s2, poolId);
       const curFor = cm.id || linkCur;
       const fam = familyOfModel(sessionModelFor(s2));
       const projected = (id) => projectCacheForFamily(readCache(id), fam);
-      const ds = decidePoolSwitch({ currentId: curFor, members, readCache: projected, nowSec: now / 1000, proactive: hot, hot, pessimism: darkTaintedAccounts() });
-      if (!ds || !ds.to) continue;
+      // never pick a member that just answered THIS session with a limit
+      // rejection (verdict-level twin of the same fact)
+      const rejected = [...sessionWalledMembers(sid, now)];
+      const ds = decidePoolSwitch({ currentId: curFor, members, readCache: projected, nowSec: now / 1000, proactive: hot, hot, pessimism: darkTaintedAccounts(), exclude: rejected, explain: true });
+      if (!ds || !ds.to) {
+        // "every candidate already said no to this conversation" is the state
+        // only the USER can fix — say it once per session per 10min instead of
+        // silently continuing (the breaker's in-chat notice covers the user
+        // side; this is the operator's line)
+        if (ds && ds.reason === 'all-rejected' && now - (_noTargetLogAt.get(sid) || 0) > 10 * 60e3) {
+          _noTargetLogAt.set(sid, now);
+          console.log(`[pool] per-session ${poolId}/${sid}: nowhere to go — ${rejected.length} member(s) already rejected this conversation`);
+          global.__vsEvent?.('pool-sess-all-rejected', `${sid}:${rejected.length}`);
+        }
+        continue;
+      }
       const dwellKey = poolId + ':' + sid;
       const lastS = _poolSwitchAt.get(dwellKey) || 0;
       if (now - lastS < 180000 && !(ds.fromRemaining != null && ds.fromRemaining < POOL_HARD_PCT)) continue;
@@ -1489,7 +1685,8 @@ function maybeStopOnFallback(session, id, from, to) {
     poolChooserForModel, poolReadCache, probeUsageForAccountKey,
     noteSessionProduced, noteTurnEnd, noteWallSignal, beforeAutoResumeFire, quotaVerdictFor, probeUsageViaSession, recordRateLimitEvent, recordCodexQuotaSignal, resolveUsageKey,
     probeQuotaForKey, quotaSourceFor, quotaBackendFor, // S4 caps-routed quota probe + the per-harness QuotaSignalSource lookup (functional seams for test-quota-source)
-    observedMemberFor, sessionCurrentMember, demoteWalledAccount, wallCount, _wallRing, OBSERVED_ORG_RECENT_MS, WALL_RING_MS, // B-2c9b wall-ground-truth + observed-org seams (test-auto-resume §11)
+    observedMemberFor, sessionReadingMember, sessionBillingMember, wallKeyFor, fireIdentityFor, demoteWalledAccount, wallCount, sessionWalledMembers,
+    _wallRing, _sessionWalls, OBSERVED_ORG_RECENT_MS, WALL_RING_MS, SESSION_WALL_MS, // wall-ground-truth + token-slot + session-wall seams (test-auto-resume §11, test-auto-resume-loop)
     sessionModelFor, sweepUsageAnchors, usageCacheKeyFor,
     usageIdentityAccountIds, usageIdentityGroups, usageIdentityGroupsCached,
     writeUsageCacheForKey, clearSealedOrders, pushSealedOrders,

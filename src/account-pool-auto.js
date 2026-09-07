@@ -114,6 +114,14 @@ function bucketRems(cache, nowSec) {
 // remaining is docked by pct on BOTH sides of a decision — the current
 // target trips exhaustion earlier AND a dark-tainted candidate looks worse
 // (switching ONTO invisible burn is as dangerous as staying on it).
+// exclude = [accountId] — members this DECISION may not choose, whatever the
+// caches say (2026-09-07 loop incident): a member that answered this exact
+// session's continue with another limit rejection is not a candidate for the
+// next 10 minutes. It is a per-SESSION fact (the per-session pass passes it;
+// the pool-level decision never does) and it is deliberately separate from
+// `pessimism`, which docks a percentage — "this one just said no to this
+// conversation" is not a number, and docking it would let a big enough gap
+// re-select it on the very next tick.
 // EDF comparator — ONE implementation for the live decision AND the
 // sealed-orders ranked snapshot the daemon holds (design §Pool management).
 function edfCompare(a, b) {
@@ -143,7 +151,8 @@ function rankPoolMembers({ members, readCache, nowSec }) {
   return out;
 }
 
-function decidePoolSwitch({ currentId, members, readCache, nowSec, proactive = false, hot = proactive, pessimism = {}, explain = false }) {
+function decidePoolSwitch({ currentId, members, readCache, nowSec, proactive = false, hot = proactive, pessimism = {}, exclude = null, explain = false }) {
+  const excluded = exclude && exclude.length ? new Set(exclude) : null;
   // `explain` keeps the historical contract (null = no switch) for every
   // existing caller and test, while letting the engine ask WHY nothing
   // happened — a pool sitting on a dead account must not be silent.
@@ -177,8 +186,10 @@ function decidePoolSwitch({ currentId, members, readCache, nowSec, proactive = f
   // no-deadline candidates (unknown / reset-passed-fresh) rank last, ordered
   // by effective remaining (unknown = 50, the v2 rule).
   const ranked = [];
+  let excludedN = 0;
   for (const m of members) {
     if (m.id === currentId) continue;
+    if (excluded && excluded.has(m.id)) { excludedN++; continue; } // just rejected this session — not a candidate
     const c = readCache(m.id);
     const r = dockRem(m.id, accountRemaining(c, nowSec));
     const br = dock(m.id, bucketRems(c, nowSec));
@@ -191,7 +202,7 @@ function decidePoolSwitch({ currentId, members, readCache, nowSec, proactive = f
     ranked.push({ id: m.id, name: m.name, eff, known: r.known, settleOk, remaining: r.known ? r.remaining : null, deadline: weeklyDeadline(c, nowSec) });
   }
   ranked.sort(edfCompare);
-  if (!ranked.length) return none('no-members', { fromRemaining: cur.known ? cur.remaining : null, ...bucketDetail(curBr) });
+  if (!ranked.length) return none(excludedN ? 'all-rejected' : 'no-members', { fromRemaining: cur.known ? cur.remaining : null, excluded: excludedN || undefined, ...bucketDetail(curBr) });
 
   const bestSettle = ranked.find((r) => r.settleOk) || null;
   if (exhausted) {
