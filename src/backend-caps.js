@@ -314,7 +314,16 @@ const BACKEND_CAPS = {
     // app-server `config/read {cwd, includeLayers:true}` → layers + origins.
     // liveVerb: the SESSION scope goes through the session's own wrapper —
     // a fresh child cannot see the `sessionFlags` layer.
-    permissionRules: { source: 'config-read', session: true, instance: true, liveVerb: true },
+    // instance:FALSE (round-2 verifier, 2026-09-07) — the instance scope has no
+    // session to ask, so the only way to answer it is a FRESH `codex
+    // app-server` child, and that child was measured (strace, empty CODEX_HOME
+    // ⇒ logged out) opening 7 INET connects incl. chatgpt.com:443 before it
+    // will answer. That is the same class this repo rejects `codex doctor` for.
+    // The measurement and the verdict live in src/local-oracles.js as
+    // `codex-app-server-config-read` with `blocks:'codex.permissionRules.
+    // instance'`; test-vendor-whitelist asserts THIS row and that entry agree,
+    // so re-enabling it without re-measuring fails the build.
+    permissionRules: { source: 'config-read', session: true, instance: false, liveVerb: true },
   },
   shell: {
     pool: false, hotSwitch: 'unverified', planC: false, sealedOrders: false, resetCredit: false, quotaProbe: null, fork: false,

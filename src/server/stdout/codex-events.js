@@ -225,11 +225,16 @@ function create({ engine, deliverRef, permissionRulesRef }) {
             console.log(`[deliver] rpc-queue: turn/steer refused (${msg.payload.steerFailed}${msg.payload.steerDetail ? ': ' + msg.payload.steerDetail : ''}) — the notification took the '${msg.payload.mode}' lane instead`);
           }
           // READ-ONLY permission-rule answer (owner ruling 10): the wrapper
-          // replied to `read-permission-rules`. It goes BOTH ways — to the
-          // pending HTTP read that asked for it (by requestId) and to every
-          // client attached to this session, so a second window watching the
-          // same session sees the same tree without asking again (the
-          // cache-invalidation-must-NOTIFY law).
+          // replied to `read-permission-rules`. It goes to exactly ONE place —
+          // the pending HTTP read that asked for it, matched by requestId.
+          // It is NOT a client-facing record: nothing in the browser consumes
+          // a `permission_rules` record, so a second window watching the same
+          // session still has to click its own button (each door is
+          // human-triggered by design; there is no cached tree to invalidate).
+          // It is in the normalizer's SKIPPED_EVENT_TYPES for that reason —
+          // deliberately card-less, never an "unknown record" (round-2
+          // verifier: the earlier version of this comment promised a live
+          // broadcast the client never implemented).
           if (msg.type === 'event_msg' && msg.payload?.type === 'permission_rules') {
             try { permissionRulesRef?.()?.onWrapperRecord?.(id, msg.payload); } catch (e) { console.warn(`[permission-rules] ${id}: answer handling failed: ${e.message}`); }
           }

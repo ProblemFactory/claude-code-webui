@@ -335,7 +335,13 @@ class AcpMessageManager {
       case 'queue_changed': return this._processQueueChanged(record, emit);
       case 'queue_op_result': return this._processQueueOpResult(record, emit);
       case 'notice': return this._processNotice(record, emit);
-      default: return; // client_request / notification / peer_result: journal-only
+      // client_request / notification / peer_result / permission_rules:
+      // journal-only. `permission_rules` is named here for the same reason
+      // codex's normalizer lists it in SKIPPED_EVENT_TYPES — it is the typed
+      // answer to the read-only `read-permission-rules` verb, correlated by
+      // requestId to one pending HTTP read, never a card and never a client
+      // record (round-2 verifier).
+      default: return;
     }
   }
 

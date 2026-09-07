@@ -22,22 +22,31 @@
  * live on that machine and this module says so instead of guessing):
  *   claude    the documented settings hierarchy, read off disk. No session
  *             needed. cwd + HOME are the only inputs.
- *   codex     SESSION scope → the session's OWN wrapper (`read-permission-
- *             rules` stdin verb → `config/read` on its app-server). It has to
- *             be the session's own: `config/read` resolves a `sessionFlags`
- *             layer that a fresh child cannot see.
- *             INSTANCE scope → ONE bounded `codex app-server` child, the
- *             src/codex-thread-read.js pattern verbatim (bounded, cached,
- *             killed, never a session). HUMAN-TRIGGERED only.
+ *   codex     SESSION scope ONLY → the session's OWN wrapper (`read-permission-
+ *             rules` stdin verb → `config/read` on its already-running
+ *             app-server). It has to be the session's own for a second reason
+ *             beyond cost: `config/read` resolves a `sessionFlags` layer that
+ *             a fresh child cannot see.
+ *             INSTANCE scope → NOT OFFERED. The first cut spawned a bounded
+ *             `codex app-server` child for it; measured (strace, empty
+ *             CODEX_HOME) that child opens 7 INET connects incl. chatgpt.com
+ *             :443 before answering. `permissionRules.instance` is false and
+ *             `read()` answers 'would-connect' with the measurement. Proof +
+ *             verdict: src/local-oracles.js `codex-app-server-config-read`.
  *   opencode  the serve's v1 `GET /config` (never a v2 route: measured, it
  *             boots an OpenCode instance — 2.369.50's law).
+ *
+ * ZERO NEW PROCESSES except the measured oracle registry: the only `spawn` in
+ * this file is `spawn(cmd, o.argv.slice())` in runOracle, and
+ * scripts/test-vendor-whitelist.mjs pins that count — a future child here has
+ * to arrive through a registry entry, which cannot be added without a proof.
  */
 const fsp = require('fs/promises');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 const PR = require('../permission-rules');
-const { oracle } = require('../local-oracles');
+const { oracle, blockedCapability } = require('../local-oracles');
 const { capsOf } = require('../backend-caps');
 const { wrapperCaps } = require('./wrapper-files.js');   // the ONLY reader of a wrapper's self-reported caps (2.364.1)
 const harnesses = require('../harnesses');
@@ -48,8 +57,6 @@ const harnesses = require('../harnesses');
 const SETTINGS_MAX_BYTES = 1 << 20;
 /** How long one bounded `codex app-server` config read may take. */
 const CODEX_READ_TIMEOUT_MS = 20000;
-/** Instance-scope codex reads are cached: the child costs a process spawn. */
-const CODEX_CACHE_MS = 60 * 1000;
 /** An oracle's output is shown in a modal; cap what we read out of it. */
 const ORACLE_MAX_BYTES = 256 * 1024;
 
@@ -80,8 +87,6 @@ function resolveOracleCmd(backend, refs = {}) {
 }
 
 function create({ activeSessions, adapterRegistry, accounts, agentEnv, buffersDir, codexCmdRef, telemetry } = {}) {
-  const codexCache = new Map();   // cwd → { at, record }
-
   // ── claude: the settings hierarchy off disk ──
   async function readOneSettings(file) {
     try {
@@ -129,83 +134,27 @@ function create({ activeSessions, adapterRegistry, accounts, agentEnv, buffersDi
     return PR.claudeRulesRecord(reads, { cwd: cwd || null, host, scope });
   }
 
-  // ── codex: ONE bounded app-server child (instance scope) ──
-  /** initialize → initialized → config/read → kill. Modelled on
-   *  src/codex-thread-read.js readThreadViaAppServer, including the SIGTERM →
-   *  SIGKILL ladder: this child is a resource we own. */
-  function codexConfigReadViaChild(cwd, { cmd, env, timeoutMs = CODEX_READ_TIMEOUT_MS } = {}) {
-    return new Promise((resolve, reject) => {
-      if (!cmd) return reject(new Error('codex command not configured on this machine'));
-      let child, settled = false, buf = '', nextId = 1;
-      const pending = new Map();
-      const finish = (err, val) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        try { child?.kill('SIGTERM'); } catch { }
-        setTimeout(() => { try { child?.kill('SIGKILL'); } catch { } }, 2000).unref?.();
-        err ? reject(err) : resolve(val);
-      };
-      const timer = setTimeout(() => finish(new Error(`config/read timed out after ${timeoutMs}ms`)), timeoutMs);
-      const request = (method, params) => new Promise((res, rej) => {
-        const id = nextId++;
-        pending.set(id, { res, rej });
-        try { child.stdin.write(JSON.stringify({ id, method, params }) + '\n'); } catch (e) { pending.delete(id); rej(e); }
-      });
-      try { child = spawn(cmd, ['app-server'], { stdio: ['pipe', 'pipe', 'pipe'], env: env || process.env }); }
-      catch (e) { return finish(e); }
-      child.on('error', (e) => finish(e));
-      child.on('exit', (code) => finish(new Error(`codex app-server exited (${code}) before config/read answered`)));
-      child.stderr.on('data', () => { });
-      child.stdout.on('data', (chunk) => {
-        buf += chunk;
-        let i;
-        while ((i = buf.indexOf('\n')) !== -1) {
-          const line = buf.slice(0, i); buf = buf.slice(i + 1);
-          if (!line.trim()) continue;
-          let m; try { m = JSON.parse(line); } catch { continue; }
-          if (m && m.id !== undefined && !m.method && pending.has(m.id)) {
-            const p = pending.get(m.id); pending.delete(m.id);
-            if (m.error) p.rej(new Error(m.error.message || `JSON-RPC ${m.id} failed`)); else p.res(m.result);
-          }
-        }
-      });
-      (async () => {
-        await request('initialize', { clientInfo: { name: 'claude-code-webui', title: 'VibeSpace permission rules', version: '2.0.0' }, capabilities: { experimentalApi: true } });
-        try { child.stdin.write(JSON.stringify({ method: 'initialized' }) + '\n'); } catch { }
-        const r = await request('config/read', { cwd: cwd || null, includeLayers: true });
-        if (!r || typeof r !== 'object') throw new Error('config/read returned nothing');
-        finish(null, r);
-      })().catch((e) => finish(e));
-    });
-  }
-
-  /** codex instance scope. HUMAN-TRIGGERED (it spawns a child); cached so a
-   *  double-click is one spawn. `accountId` picks the isolated CODEX_HOME so
-   *  the answer is about the account the user clicked. */
-  async function readCodexRulesViaChild({ cwd = '', accountId = null, scope = 'instance', host = null } = {}) {
-    const key = `${accountId || ''}|${cwd || ''}`;
-    const hit = codexCache.get(key);
-    if (hit && Date.now() - hit.at < CODEX_CACHE_MS) return hit.record;
-    const cmd = typeof codexCmdRef === 'function' ? codexCmdRef() : codexCmdRef;
-    if (!cmd) return PR.unavailable('codex', 'not-installed', 'Codex is not installed on this machine, so its config layers cannot be read here.', { cwd: cwd || null, host, scope });
-    const env = { ...(agentEnv ? agentEnv() : process.env) };
-    if (accountId) {
-      try {
-        const spawnAcct = accounts?.resolveForSpawn?.(accountId, 'codex');
-        Object.assign(env, spawnAcct?.localEnv || {});
-      } catch (e) {
-        return PR.unavailable('codex', 'read-failed', `that account could not be resolved: ${e.message}`, { cwd: cwd || null, host, scope });
-      }
-    }
-    let resp;
-    try { resp = await codexConfigReadViaChild(cwd, { cmd, env }); }
-    catch (e) { return PR.unavailable('codex', 'read-failed', e.message, { cwd: cwd || null, host, scope }); }
-    const record = PR.codexRulesRecord(resp, { cwd: cwd || null, host, scope });
-    codexCache.set(key, { at: Date.now(), record });
-    if (codexCache.size > 16) codexCache.delete(codexCache.keys().next().value);
-    return record;
-  }
+  // ── codex INSTANCE scope: DELETED, and the deletion is the fix ──
+  // The first cut answered it with ONE bounded `codex app-server` child
+  // (the src/codex-thread-read.js pattern). Measured on this very code path
+  // (strace -f -e trace=network, `env -i HOME=<empty dir>` ⇒ logged out, codex
+  // 0.153.4): 7 INET connects, 2 of them port 443 to chatgpt.com — i.e. it
+  // phones the vendor before it will read a local TOML. That is the class
+  // src/local-oracles.js rejects `codex doctor` for, offered from a menu whose
+  // sibling rows promise "no network requests (measured)".
+  //
+  // So the capability is OFF (`permissionRules.instance:false`) rather than
+  // connecting, the measurement is a permanent negative control
+  // (`codex-app-server-config-read`, with `blocks:` naming that caps row), and
+  // `read()` below answers the instance scope with THAT verdict instead of a
+  // generic refusal. Two knock-on properties worth naming:
+  //   · there is no longer any spawn in this module except the oracle runner's
+  //     `spawn(cmd, o.argv.slice())` — test-vendor-whitelist pins that count,
+  //     so a future child here must arrive through the measured registry.
+  //   · the round-2 verifier's separate finding (this reader's cache was
+  //     consulted at entry and written after the await, so two concurrent
+  //     identical reads were TWO spawns despite a doc-comment promising one)
+  //     is resolved by removal — there is no spawn left to double.
 
   // ── opencode: the serve's v1 /config ──
   async function readOpencodeRules({ cwd = '', scope = 'instance', host = null } = {}) {
@@ -321,6 +270,20 @@ function create({ activeSessions, adapterRegistry, accounts, agentEnv, buffersDi
    * honestly rather than with this machine's files (`hostId` is a parameter,
    * but the FILES are not here — CS separation would need the read to move to
    * the machine, which is a separate change and is named as such).
+   *
+   * THE HOST GUARD SITS ABOVE THE RUNG CHOICE, DELIBERATELY (round-2 verifier
+   * asked; this is the answer). It is obviously right for the disk/serve rungs
+   * — those files are on the other machine. For a remote CODEX session it also
+   * refuses, even though the frame WOULD reach the remote wrapper's stdin
+   * (session.pty is bridged), because the second gate cannot be honoured
+   * there: `wrapperCaps()` reads the sidecar the wrapper writes on ITS OWN
+   * machine, so a remote session always reads back 'no-sidecar' and would be
+   * refused as `wrapper-old` — "still starting up? try again in a moment",
+   * forever, which is a lie with an actionable-looking suggestion (the
+   * error-text-is-not-diagnosis rule). Given a choice between one honest
+   * refusal and one misleading one we take the honest one; making it WORK
+   * needs a remote advert channel (the wrapper's boot caps ride stdout, they
+   * are simply not recorded per session today) and that is a separate change.
    */
   async function read(q = {}) {
     const backend = q.backend || 'claude';
@@ -332,11 +295,21 @@ function create({ activeSessions, adapterRegistry, accounts, agentEnv, buffersDi
     if (q.host) {
       return PR.unavailable(backend, 'remote-session', `These rules live on ${q.host} — VibeSpace reads permission rules on this machine only.`, { cwd: q.cwd || null, host: q.host, scope });
     }
-    if (scope === 'session' && !caps.session) {
-      return PR.unavailable(backend, 'unsupported-harness', 'This harness reports one resolved set of rules for the whole machine, not per session.', { cwd: q.cwd || null, scope });
-    }
-    if (scope === 'instance' && !caps.instance) {
-      return PR.unavailable(backend, 'unsupported-harness', 'This harness only answers for a running session.', { cwd: q.cwd || null, scope });
+    // A scope the caps row turns off has TWO possible reasons, and they are
+    // different facts: the harness genuinely cannot answer it, or we MEASURED
+    // the only way to answer it reaching the vendor and declined. Ask the
+    // registry which one this is rather than hand-writing a sentence that goes
+    // stale the day the measurement is redone.
+    for (const [want, on, generic] of [['session', caps.session, 'This harness reports one resolved set of rules for the whole machine, not per session.'],
+      ['instance', caps.instance, 'This harness only answers for a running session.']]) {
+      if (scope !== want || on) continue;
+      const blocked = blockedCapability(backend, `permissionRules.${want}`);
+      if (blocked) {
+        return PR.unavailable(backend, 'would-connect',
+          `${blocked.verdict} (measured ${blocked.measured.date} with ${blocked.measured.tool} on ${blocked.measured.version}: ${blocked.measured.inetConnects} connections.)`,
+          { cwd: q.cwd || null, scope });
+      }
+      return PR.unavailable(backend, 'unsupported-harness', generic, { cwd: q.cwd || null, scope });
     }
     if (caps.source === 'settings-files') {
       return readClaudeRules({ cwd: scope === 'session' ? (q.cwd || '') : '', scope, host: null });
@@ -345,8 +318,11 @@ function create({ activeSessions, adapterRegistry, accounts, agentEnv, buffersDi
       return readOpencodeRules({ cwd: q.cwd || '', scope, host: null });
     }
     if (caps.source === 'config-read') {
-      if (scope === 'session' && q.sessionId) return readViaSession(q.sessionId);
-      return readCodexRulesViaChild({ cwd: q.cwd || '', accountId: q.accountId || null, scope, host: null });
+      // Session scope only (see the deleted-rung note above): the session's own
+      // app-server is already running and already connected, so asking it over
+      // stdin opens nothing new.
+      if (q.sessionId) return readViaSession(q.sessionId);
+      return PR.unavailable(backend, 'no-live-session', 'This needs a live chat session — the rules a stopped session ran under are not recorded anywhere we can read.', { cwd: q.cwd || null, scope });
     }
     return PR.unavailable(backend, 'unknown', 'no reader is wired for this harness', { cwd: q.cwd || null, scope });
   }
@@ -433,10 +409,10 @@ function create({ activeSessions, adapterRegistry, accounts, agentEnv, buffersDi
   }
 
   return {
-    read, readClaudeRules, readCodexRulesViaChild, readOpencodeRules, readViaSession,
+    read, readClaudeRules, readOpencodeRules, readViaSession,
     onWrapperRecord, runOracle, registerRoutes,
     SETTINGS_MAX_BYTES, ORACLE_MAX_BYTES, CODEX_READ_TIMEOUT_MS,
   };
 }
 
-module.exports = { create, resolveOracleCmd, SETTINGS_MAX_BYTES, ORACLE_MAX_BYTES, CODEX_READ_TIMEOUT_MS, CODEX_CACHE_MS };
+module.exports = { create, resolveOracleCmd, SETTINGS_MAX_BYTES, ORACLE_MAX_BYTES, CODEX_READ_TIMEOUT_MS };

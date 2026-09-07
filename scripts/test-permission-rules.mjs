@@ -203,6 +203,22 @@ const CODEX_FIXTURE = {
     capsOf('opencode').permissionRules.instance === true && capsOf('opencode').permissionRules.session === false);
   check('codex is the only harness whose session rung needs the RUNNING wrapper (liveVerb)',
     capsOf('codex').permissionRules.liveVerb === true && capsOf('claude').permissionRules.liveVerb === false && capsOf('opencode').permissionRules.liveVerb === false);
+  // round-2 verifier: the codex INSTANCE scope is OFF because the only way to
+  // answer it (a fresh `codex app-server`) was measured connecting to
+  // chatgpt.com. The caps row is the ONE gate every surface reads, so it is
+  // where the decision lives — and the rejection record must agree with it.
+  check('codex declares session-ONLY: the instance scope would need a fresh app-server child, measured connecting to the vendor',
+    capsOf('codex').permissionRules.session === true && capsOf('codex').permissionRules.instance === false);
+  {
+    const blk = ORACLES_MOD.blockedCapability('codex', 'permissionRules.instance');
+    check('the switched-off capability is explained by a MEASURED rejection, not by a hand-written sentence',
+      !!blk && blk.id === 'codex-app-server-config-read' && blk.measured.inetConnects > 0 && /chatgpt\.com/.test(blk.measured.host || ''),
+      JSON.stringify(blk && blk.measured));
+    check('NEGATIVE CONTROL: a capability that is ON has no blocking rejection (the mechanism cannot mark a live feature)',
+      ORACLES_MOD.blockedCapability('claude', 'permissionRules.instance') === null && capsOf('claude').permissionRules.instance === true);
+    check('the measured-and-rejected app-server read can never be looked up as a runnable oracle',
+      !ORACLES_MOD.oracle('codex-app-server-config-read') && !!ORACLES_MOD.rejected('codex-app-server-config-read'));
+  }
   const unknown = capsOf('gemini-that-does-not-exist').permissionRules;
   check('an unknown backend gets the all-false row (chrome shows nothing it cannot do)', unknown.source === null && unknown.session === false && unknown.instance === false);
 }
@@ -279,9 +295,32 @@ const mod = mkModule();
   const r4 = await mod.read({ backend: 'codex', scope: 'session', sessionId: 'nope' });
   check('routing: codex session scope with no live session = no-live-session (a stopped session\'s rules are not recorded anywhere)',
     r4.ok === false && r4.reason === 'no-live-session');
+  // ── the codex INSTANCE scope is not offered, and it SAYS WHY (round 2) ──
+  // It used to spawn `codex app-server`, which was measured opening 7 INET
+  // connects (2 × chatgpt.com:443) with an EMPTY CODEX_HOME. The refusal must
+  // carry its own reason code — 'unsupported-harness' would have been a lie
+  // (this harness CAN answer; we decline to ask it that way).
   const r5 = await mod.read({ backend: 'codex', scope: 'instance', cwd: '/x' });
-  check('routing: codex instance scope with no codex installed = not-installed (honest, never an empty tree)',
-    r5.ok === false && r5.reason === 'not-installed');
+  check('routing: codex instance scope answers would-connect and NAMES the measurement (never a silent capability, never a spawn)',
+    r5.ok === false && r5.reason === 'would-connect' && /chatgpt\.com/.test(r5.detail || '') && /strace/.test(r5.detail || '')
+    && r5.layers.length === 0, JSON.stringify(r5).slice(0, 300));
+  check('routing: would-connect is a DECLARED reason code (a UI branching on an undeclared code is a bug)',
+    PR.UNAVAILABLE_REASONS.includes('would-connect'));
+  // NEGATIVE CONTROL: the sibling refusal is still the generic one, so
+  // 'would-connect' cannot be what this reader says whenever a scope is off.
+  const r5b = await mod.read({ backend: 'opencode', scope: 'session' });
+  check('NEGATIVE CONTROL: a scope that is off for an ORDINARY reason still answers unsupported-harness (would-connect is not the new default)',
+    r5b.ok === false && r5b.reason === 'unsupported-harness' && !/chatgpt/.test(r5b.detail || ''));
+  // …and the read must not have started anything. The strongest available
+  // proof in-process: with a codexCmdRef that would BE the spawn, an instance
+  // read still refuses without ever asking for the command.
+  {
+    let asked = 0;
+    const armed = mkModule({ codexCmdRef: () => { asked++; return '/usr/bin/codex'; } });
+    const r = await armed.read({ backend: 'codex', scope: 'instance', cwd: '/x', accountId: 'acct-1' });
+    check('the instance refusal never even resolves the codex command — there is no path left that could spawn (asked=' + asked + ')',
+      asked === 0 && r.reason === 'would-connect');
+  }
 }
 // the wrapper-advert SKEW gate + the live round trip
 {
@@ -362,6 +401,42 @@ const mod = mkModule();
       r2.ok === true && r2.json !== null && !r2.jsonError, JSON.stringify({ exit: r2.exitCode, jsonError: r2.jsonError, out: (r2.stdout || '').slice(0, 80) }));
   }
 }
+// ── the ANSWER is a side channel, not a record (round-2 verifier) ──
+// `permission_rules` travels on the same stdout stream as conversation
+// records, so it reaches the normalizer too. It must be DELIBERATELY SKIPPED:
+// an unlisted type fires `codex-unknown-record:<type>`, and that breadcrumb's
+// only job is to announce a genuine upstream addition. Every user who clicked
+// "Show rules…" on a codex session was poisoning it.
+{
+  const { CodexMessageManager } = require(path.join(REPO, 'src/codex-message-manager.js'));
+  const fire = (type) => {
+    CodexMessageManager._seenUnknownRecords?.clear?.();
+    const seen = [];
+    const prev = global.__vsEvent;
+    global.__vsEvent = (n, d) => seen.push([n, d]);
+    try {
+      new CodexMessageManager('t-pr').processLive({
+        type: 'event_msg',
+        payload: { type, ok: true, requestId: 'pr1', cwd: '/w', config: {}, origins: {}, layers: [] },
+      });
+    } finally { global.__vsEvent = prev; }
+    return seen;
+  };
+  check('the wrapper\'s permission_rules answer fires NO unknown-record breadcrumb (it is a named side channel, deliberately card-less)',
+    fire('permission_rules').length === 0, JSON.stringify(fire('permission_rules')));
+  // NEGATIVE CONTROL: the detector still sees a genuinely unknown type, so the
+  // zero above is a measurement and not a blind spot.
+  const ctl = fire('some_future_codex_event');
+  check('NEGATIVE CONTROL: a genuinely unknown event_msg type still fires the breadcrumb (the signal this fix protects is alive)',
+    ctl.length === 1 && ctl[0][0] === 'codex-unknown-record:some_future_codex_event', JSON.stringify(ctl));
+  // the comment that promised a client broadcast the client never had
+  const ce = fs.readFileSync(path.join(REPO, 'src/server/stdout/codex-events.js'), 'utf8');
+  check('the codex stdout consumer no longer promises a live broadcast to other windows (nothing on the client reads this record)',
+    /permission_rules/.test(ce) && !/second window watching the same session sees the same tree/.test(ce));
+  check('…and no client module consumes a permission_rules record, which is why that promise had to go',
+    execSync(`grep -rl "permission_rules" ${JSON.stringify(path.join(REPO, 'src/lib'))} || true`, { encoding: 'utf8' }).trim() === '');
+}
+
 // the registry's own shape (the vendor-whitelist suite enforces the proofs)
 {
   check('every shipped oracle declares argv + a json flag + a proof', ORACLES_MOD.ORACLES.every((o) => Array.isArray(o.argv) && o.argv.length && typeof o.json === 'boolean' && o.proof));
@@ -529,6 +604,28 @@ if (!CHROME) {
     check('375×667: the oracle output wraps instead of scrolling the page sideways',
       !oracle.error && oracle.preScrollW <= oracle.preClientW + 1 && oracle.docScrollW <= oracle.inner + 1, JSON.stringify(oracle));
 
+    // ── the MISSING button is explained where the button would have been ──
+    // codex ships three oracles, so the old "rejections only when there are
+    // none" rule would have hidden the one rejection that explains why
+    // "Permission rules…" is absent for a codex account (round-2 verifier).
+    const menus = await evaljs(`(() => {
+      const row = (b) => window.app._rulesAndChecksItems(b, {}).map((i) => ({ label: i.label || (i.separator ? '—' : ''), disabled: !!i.disabled, title: i.title || '' }));
+      return { codex: row('codex'), claude: row('claude'), shell: row('shell') };
+    })()`);
+    const cRows = menus.codex || [];
+    check('375×667: a codex account gets NO "Permission rules…" row (the instance rung would have spawned a connecting app-server)',
+      !cRows.some((r) => /^Permission rules/.test(r.label)), JSON.stringify(cRows.map((r) => r.label)));
+    check('375×667: …and it gets a DISABLED row naming the measurement instead, right where the button would have been',
+      cRows.some((r) => r.disabled && /app-server/.test(r.label) && /chatgpt\.com/.test(r.title)), JSON.stringify(cRows));
+    check('375×667: its three measured-clean oracles are still offered and still enabled (the fix removed one rung, not the feature)',
+      cRows.filter((r) => !r.disabled && /…$/.test(r.label)).length === 3, JSON.stringify(cRows.map((r) => r.label)));
+    check('NEGATIVE CONTROL: claude — which has NO oracles at all — still lists ALL its rejected candidates, and still offers its own rule view',
+      (menus.claude || []).some((r) => /^Permission rules/.test(r.label))
+      && (menus.claude || []).filter((r) => r.disabled).length === ORACLES_MOD.rejectedFor('claude').length
+      && ORACLES_MOD.rejectedFor('claude').length >= 2,
+      JSON.stringify((menus.claude || []).map((r) => r.label)));
+    check('NEGATIVE CONTROL: shell contributes no rows at all (no agent ⇒ no rules and no checks)', (menus.shell || []).length === 0, JSON.stringify(menus.shell));
+
     // ── THE SECOND SURFACE: Session Properties, through the REAL door ──
     // `app.openSessionProps(sessionObject)` is the method every card/menu/chat
     // header calls. A structural grep would have passed for a section that
@@ -582,6 +679,63 @@ if (!CHROME) {
       !props.error && props.treeScrollW <= props.treeClientW + 1 && props.docScrollW <= props.inner + 1, JSON.stringify(props));
     check('a SHELL session gets no section at all, and an OPENCODE one says machine-wide (the caps row gates the chrome, not a backend id)',
       !props.error && props.shellHasSection === false && props.ocHasSection === true && /machine-wide/.test(props.ocHint || ''), JSON.stringify(props));
+
+    // ── WIRING PIN: a REMOTE session, through the REAL door (round 2) ──
+    // The server's `remote-session` guard was already correct and its own test
+    // was green — but the CLIENT read `s.hostId`, a field a session record
+    // does not have (`hostId` is an OPENSPEC name), so `host=` went out EMPTY
+    // and the panel answered a remote session with THIS machine's
+    // ~/.claude/settings.json. A test that calls `read({host})` directly can
+    // never see that (the 2.355.0 unstaged-wiring class), so this drives
+    // `app.openSessionProps` with a merged record shaped exactly like
+    // sidebar.js _merge builds one: `host` set, and `cwd` carrying the
+    // host-labeled DISPLAY string that must never be used as a path.
+    const remote = await evaljs(`(async () => {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      document.querySelectorAll('.modal-overlay, #perm-rules-dialog, #local-oracle-dialog').forEach((e) => e.remove());
+      const out = { made: [], sent: [] };
+      // capture what the door actually asks the server for
+      const realFetch = window.fetch;
+      window.fetch = function (u, o) { try { if (String(u).includes('/api/permission-rules')) out.sent.push(String(u)); } catch (e) { } return realFetch.apply(this, arguments); };
+      try {
+        const s = { sessionId: 'pr-remote', webuiId: 'pr-remote', backend: 'claude', mode: 'chat',
+                    cwd: 'aidev-box: /home/remoteuser/proj', host: 'aidev-box', hostName: 'aidev-box',
+                    name: 'perm-rules remote probe', status: 'live' };
+        const w = window.app.openSessionProps(s);
+        if (!w) return { error: 'openSessionProps returned nothing for the remote session' };
+        out.made.push(w.id);
+        const btn = [...w.content.querySelectorAll('button')].find((b) => /Show rules/.test(b.textContent));
+        if (!btn) return { error: 'no Show rules button on the remote session' };
+        btn.click();
+        // NOT '.perm-rules-empty' alone — loadInto uses that same class for its
+        // "Reading…" placeholder, so polling for it lands on the in-flight
+        // state. The rendered REFUSAL is the one that carries data-reason.
+        let empty = null;
+        for (let i = 0; i < 80 && !empty; i++) { empty = w.content.querySelector('.perm-rules .perm-rules-empty[data-reason]'); if (!empty) await sleep(150); }
+        const tree = w.content.querySelector('.perm-rules');
+        out.reason = empty ? (empty.dataset.reason || '') : '';
+        out.text = empty ? empty.textContent : '';
+        out.layers = tree ? tree.querySelectorAll('.perm-layer').length : 0;
+        out.paths = tree ? [...tree.querySelectorAll('.perm-layer-path[data-copy]')].map((b) => b.dataset.copy) : [];
+      } finally {
+        window.fetch = realFetch;
+        for (const id of out.made) { try { window.app.wm.closeWindow(id); } catch (e) { } }
+      }
+      return out;
+    })()`);
+    check('375×667 WIRING PIN: a REMOTE session\'s Properties says the rules live on that machine — never this machine\'s files under a remote label',
+      !remote.error && remote.reason === 'remote-session' && /aidev-box/.test(remote.text || '') && remote.layers === 0, JSON.stringify(remote));
+    check('375×667 WIRING PIN: the door really sent host= (the field is `s.host`; `hostId` is an openSpec name and does not exist on a session)',
+      !remote.error && (remote.sent || []).some((u) => /[?&]host=aidev-box/.test(u)), JSON.stringify(remote.sent));
+    {
+      // the DISPLAY cwd ("aidev-box: /home/remoteuser/proj") is a grouping KEY
+      // and must never travel as a path (2.225.2). It must arrive stripped.
+      const cwds = (remote.sent || []).map((u) => new URL(u, 'http://x').searchParams.get('cwd'));
+      check('375×667 WIRING PIN: it never sends the host-labeled DISPLAY cwd as a path (2.225.2 — that string must not reach an operation)',
+        !remote.error && cwds.length > 0 && cwds.every((c) => c === '/home/remoteuser/proj'), JSON.stringify(cwds));
+    }
+    check('375×667 WIRING PIN: no copy-path button offers a path that exists on neither machine',
+      !remote.error && (remote.paths || []).length === 0, JSON.stringify(remote.paths));
     try { ws.close(); } catch { }
   }
   cleanup();

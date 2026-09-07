@@ -332,6 +332,12 @@ const UNAVAILABLE_REASONS = Object.freeze([
   'store-unavailable',     // opencode: the serve is off/parked
   'wrapper-old',           // the running wrapper predates the read verb
   'no-live-session',       // codex session scope needs the session's own app-server
+  // the only way to answer THIS scope was MEASURED to reach the vendor, so it
+  // is not offered (§ban-safety). Distinct from 'unsupported-harness' on
+  // purpose (the 2.363.1 law — one refusal type with several meanings must
+  // carry a code): the harness CAN answer, we decline to ask it that way, and
+  // the detail carries the measurement. src/local-oracles.js holds the proof.
+  'would-connect',
   'read-failed',           // the read was attempted and failed (detail carries the words)
   'no-config',             // the harness answered, with nothing in it
   'unknown',

@@ -1,4 +1,4 @@
-import { escHtml, copyText, showConfirmDialog, taskGroupColor } from './utils.js';
+import { escHtml, copyText, showConfirmDialog, stripCwdHostLabel, taskGroupColor } from './utils.js';
 import { SESSION_STATE_META, SESSION_URGENCY_META } from './sidebar-tasks.js';
 import { getBackendMeta, getAgentKindMeta, getAgentRoleLabel, responseStyleCaps, responseStyleOrigin, spawnValueOrigin, effortDisplay, composerSendModes, notificationDeliveryFor, worktreeCapsFor, worktreePick, permissionRulesCaps } from './agent-meta.js';
 import { loadInto } from './permission-rules-view.js';
@@ -427,8 +427,22 @@ export function openSessionProps(app, sessionRef, { syncId } = {}) {
             backend: s.backend || 'claude',
             scope: prCaps.session ? 'session' : 'instance',
             sessionId: prCaps.session ? (s.webuiId || '') : '',
-            cwd: s.cwd || '',
-            host: s.hostId || '',
+            // TWO fields of a merged session record, both of which have been
+            // wrong here before (round-2 verifier, both reproduced):
+            //  · `s.host` is the field. `s.hostId` does not exist on a session
+            //    — it is an OPENSPEC name (session-card.js / sidebar-tasks.js
+            //    both MAP `hostId: s.host` when they build one), so reading it
+            //    here sent `host=` EMPTY for every remote session and the
+            //    server's `remote-session` guard never fired: the panel showed
+            //    THIS machine's ~/.claude/settings.json as the remote
+            //    session's rules.
+            //  · `s.cwd` on a merged record is the host-labeled DISPLAY string
+            //    ("box: /home/u/proj", sidebar.js _merge) — the 2.225.2 law
+            //    says it must never reach an operation, and a settings-file
+            //    reader is an operation. Strip it here too, so a mistake in
+            //    ONE of the two fields cannot compose a fake path either.
+            cwd: stripCwdHostLabel(s.cwd || ''),
+            host: s.host || '',
           }).finally(() => { btn.disabled = false; btn.textContent = t('Reload rules'); });
         };
         prSec.append(btn, tree);

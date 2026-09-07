@@ -153,12 +153,56 @@ ok(/get_usage/.test(adapter) && !VENDOR.test(adapter), 'claude-code adapter: get
 // exactly the "on a timer" shape §ban-safety forbids. Their numbers are the
 // hand-measurement recorded in src/local-oracles.js with tool + date + version.
 {
-  const { ORACLES, NOT_ORACLES, PROOF_KEYS, oracle, rejected } = require(path.join(REPO, 'src/local-oracles.js'));
+  const { ORACLES, NOT_ORACLES, PROOF_KEYS, oracle, rejected, blockedCapability, blockingRejectionsFor } = require(path.join(REPO, 'src/local-oracles.js'));
   const runner = fs.readFileSync(path.join(REPO, 'src/server/permission-rules.js'), 'utf-8');
+  // "IN-PROCESS" is load-bearing (round-2 verifier). This assert reads the
+  // file's own text, so it can only ever speak about requests this MODULE
+  // constructs — it says nothing about what a child it spawns does, and the
+  // first cut of this module spawned `codex app-server`, which connects to
+  // chatgpt.com. The companion assert below is the one that covers children.
   ok(!VENDOR.test(runner) && !REQUESTY.test(runner.split('\n').filter((l) => VENDOR.test(l)).join('\n')),
-    'src/server/permission-rules.js (the oracle runner + rule reader) constructs NO vendor request');
+    'src/server/permission-rules.js (the oracle runner + rule reader) constructs NO vendor request IN-PROCESS');
   ok(/spawn\(cmd, o\.argv\.slice\(\)/.test(runner),
     'the oracle runner spawns the REGISTRY\'s frozen argv — a caller cannot supply its own command');
+  // …AND that is the ONLY child it starts. A file that may spawn a vendor CLI
+  // needs every such spawn to come from the measured registry, because the
+  // registry is the thing that cannot accept an entry without a proof. A
+  // second `spawn(` here is exactly how a 7-connect app-server child shipped
+  // under a menu advertising "no network requests (measured)".
+  {
+    // count CODE spawns only: the comments above the runner quote the call on
+    // purpose (they explain why it is the only one), and a census that counts
+    // its own documentation is a census that gets silenced by rewording it.
+    const code = runner.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+    const spawns = (code.match(/\bspawn\s*\(/g) || []).length;
+    ok(spawns === 1, `src/server/permission-rules.js starts exactly ONE kind of child — the registry oracle (found ${spawns} spawn call(s) in code; a new one must go through src/local-oracles.js, which needs a measurement)`);
+    // the counter must be able to SEE a second one, or the 1 above is luck
+    ok(((code + '\n  const x = spawn(other, []);').match(/\bspawn\s*\(/g) || []).length === 2,
+      'NEGATIVE CONTROL: the spawn census counts a second call when one is present (so "exactly one" is a measurement)');
+    ok(!/'app-server'/.test(runner) && !/"app-server"/.test(runner),
+      'src/server/permission-rules.js starts no `codex app-server` child: measured 2026-09-07 at 7 INET connects incl. chatgpt.com:443 with an EMPTY CODEX_HOME, so the codex INSTANCE scope is not offered at all');
+  }
+  // A rejection that claims to explain a missing capability must actually
+  // match a caps row that is OFF. Otherwise the note is decoration and the
+  // connecting path is live again — the exact regression this round fixes.
+  {
+    const { capsOf } = require(path.join(REPO, 'src/backend-caps.js'));
+    const dig = (o, p) => p.split('.').reduce((a, k) => (a == null ? a : a[k]), o);
+    const blocking = NOT_ORACLES.filter((r) => r.blocks);
+    ok(blocking.length > 0, `at least one rejection explains a switched-off capability (${blocking.map((r) => r.blocks).join(', ') || 'none'})`);
+    for (const r of blocking) {
+      const [backend, ...rest] = r.blocks.split('.');
+      const capPath = rest.join('.');
+      const live = dig(capsOf(backend), capPath);
+      ok(live === false, `${r.id}: the capability it blocks (${r.blocks}) is really OFF — re-enabling it needs a NEW measurement, not just a caps edit (found ${JSON.stringify(live)})`);
+      ok(blockedCapability(backend, capPath) === r, `${r.id}: is reachable through blockedCapability('${backend}', '${capPath}') — the server's refusal and the menu's note read the SAME record`);
+      ok(blockingRejectionsFor(backend).includes(r), `${r.id}: appears in blockingRejectionsFor('${backend}') so the menu shows it EVEN THOUGH ${backend} has shipped oracles (a missing button must be explained)`);
+    }
+    // the client mirror must agree, or the chrome offers a door the server refuses
+    const meta = fs.readFileSync(path.join(REPO, 'src/lib/agent-meta.js'), 'utf-8');
+    ok(/permissionRules: \{ source: 'config-read', session: true, instance: false, liveVerb: true \}/.test(meta),
+      'src/lib/agent-meta.js mirrors codex permissionRules.instance:false (a client that still offered the row would fetch a refusal)');
+  }
   ok(!/setInterval|setTimeout\([^)]*runOracle/.test(runner) && /app\.post\('\/api\/local-oracle/.test(runner),
     'an oracle runs ONLY on a POST (a button): nothing schedules one, and the route is not a pre-fetchable GET');
   ok(ORACLES.length > 0, `at least one measured-clean oracle ships (${ORACLES.map((o) => o.id).join(', ') || 'none'})`);
@@ -182,6 +226,20 @@ ok(/get_usage/.test(adapter) && !VENDOR.test(adapter), 'claude-code adapter: get
     'the three candidates the design proposed (claude auth status / claude agents / codex doctor) are all recorded as MEASURED AND REJECTED — the negative control that keeps them out');
   ok(!ORACLES.some((o) => o.backend === 'claude'),
     'no claude oracle ships: every measured claude subcommand reached api.anthropic.com, including with every traffic-suppressing env set');
+  // THE OTHER app-server SPAWN IN THE REPO (round-2 verifier, same root cause).
+  // src/codex-thread-read.js is shipped B-21e4 code whose behaviour this round
+  // deliberately does NOT change — but it carried the same unmeasured "no
+  // network of ours" claim, and a false comment is how the next reader ships
+  // the same mistake. The measurement now lives in it; this assert keeps it
+  // there. (An UNMEASURED reassurance is worse than none: it is the sentence
+  // someone will cite as the precedent.)
+  {
+    const ctr = fs.readFileSync(path.join(REPO, 'src/codex-thread-read.js'), 'utf-8');
+    ok(!/no\s+network\s+of\s+ours/.test(ctr),
+      'src/codex-thread-read.js no longer claims its `codex app-server` child makes no network calls (measured: it connects to chatgpt.com even logged out)');
+    ok(/strace/.test(ctr) && /chatgpt\.com/.test(ctr) && /B-af31/.test(ctr),
+      'src/codex-thread-read.js records the measurement + the tool + the backlog id that owns the §ban-safety decision, instead of a reassurance nobody checked');
+  }
 
   // ── (b) the live re-measurement ──
   const has = (bin) => { try { execFileSync('sh', ['-c', `command -v ${bin}`], { stdio: 'pipe' }); return true; } catch { return false; } };

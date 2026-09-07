@@ -274,7 +274,15 @@ const SKIPPED_EVENT_TYPES = new Set([
   'mcp_tool_call_begin', 'mcp_tool_call_end', 'image_generation_begin', 'image_generation_end', 'turn_diff', 'terminal_interaction',
   'collab_agent_spawn_begin', 'collab_agent_spawn_end', 'collab_agent_interaction_begin', 'collab_agent_interaction_end',
   // wrapper / engine side channels consumed elsewhere (pool engine, goal sync, usage meter, delivery ladder)
-  'rate_limits_updated', 'goal_updated', 'goal_cleared', 'thread_goal_updated', 'thread_queue_changed', '_remote_state', 'peer_message_result', 'reset_credit_result',
+  // permission_rules = the wrapper's answer to the READ-ONLY
+  // `read-permission-rules` verb (owner ruling 10). It is correlated by
+  // requestId to ONE pending HTTP read in src/server/permission-rules.js and
+  // has no conversation meaning at all — it is not a card, and it is not a
+  // client-side record either. Without this row every user who clicked "Show
+  // rules…" on a codex session fired a false `codex-unknown-record:
+  // permission_rules` breadcrumb, poisoning the signal whose whole job is to
+  // announce genuine upstream additions (round-2 verifier).
+  'rate_limits_updated', 'goal_updated', 'goal_cleared', 'thread_goal_updated', 'thread_queue_changed', '_remote_state', 'peer_message_result', 'reset_credit_result', 'permission_rules',
   // webui_user_retracted = the wrapper telling the READER that a user record it
   // already wrote will never be committed by the app-server (round 3). It is a
   // merge-time fact about the claim ledger (mergeCodexRecords), never a card:

@@ -10,7 +10,7 @@ import { permissionRulesCaps } from './agent-meta.js';
 // candidates are PURE and shared with the server (CJS pulled into the bundle
 // like search-card.js): the menu can only offer what the server will run, and
 // a rejected candidate is NAMED here rather than silently missing.
-import { oraclesFor, rejectedFor } from '../local-oracles.js';
+import { oraclesFor, rejectedFor, blockingRejectionsFor } from '../local-oracles.js';
 
 // Roster order = TYPE, never add-order (2.268.5): pool → subscription → API
 // key, name-sorted within a type. ONE comparator for both rosters (2.369.18 —
@@ -107,6 +107,11 @@ export function installManageAgents(App, ctx = {}) {
    *     are shown DISABLED with the reason, because "there is nothing here"
    *     and "we measured these and they phone home" are different facts and
    *     the second one is the one worth knowing.
+   *   · a rejection that carries `blocks` is shown ALWAYS (round-2 verifier).
+   *     It explains a MISSING BUTTON rather than an empty menu, and the one
+   *     such row today belongs to codex — which has three shipped oracles, so
+   *     the "only when there are none" rule would have hidden precisely the
+   *     rejection a user needs to see when "Permission rules…" is not there.
    */
   _rulesAndChecksItems(backend, { accountId = '', accountName = '', selectedHost = null } = {}) {
     if (selectedHost) return [];                       // local machine only — say nothing rather than guess
@@ -127,10 +132,11 @@ export function installManageAgents(App, ctx = {}) {
         action: () => runLocalOracle({ id: o.id, label: o.label, accountId, accountName }),
       });
     }
-    if (!oracles.length) {
-      for (const r of rejectedFor(backend)) {
-        items.push({ label: t('{cmd} — not offered', { cmd: r.label }), disabled: true, title: r.verdict });
-      }
+    // the honest note. `blocks` rows always; the rest only when the menu would
+    // otherwise be empty (they answer "why is there nothing here").
+    const notes = oracles.length ? blockingRejectionsFor(backend) : rejectedFor(backend);
+    for (const r of notes) {
+      items.push({ label: t('{cmd} — not offered', { cmd: r.label }), disabled: true, title: r.verdict });
     }
     return items.length ? [{ separator: true }, ...items] : [];
   },
