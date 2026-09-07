@@ -22,6 +22,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { execFileSync, spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { startMockServe, createMockState, QUESTION_PART, emit } from './dev/mock-opencode-serve.mjs';
 
 const require = createRequire(import.meta.url);
@@ -958,6 +959,222 @@ function inotifyWdsOn(dir, pid = 'self') {
     /questionsFor/.test(kfs) && /ROUND 5/.test(kfs)
     && /A DEAD ASK STAYED ANSWERABLE/.test(read('docs/kb-bugfix-invariants.md'))
     && /S9 REMAINDER ROUND 5/.test(read('CLAUDE.md')));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The adversarial pass over ROUND 5's own code. ROUND 5 made the lane follow
+// the service; this one makes stop() TERMINAL for the work the lane had already
+// started, which is the half that leaked.
+console.log('\n— ROUND 6 (the fifth review of this branch: stop() vs an arm already in flight) —');
+/** THE NEGATIVE CONTROL, built from the SHIPPED source. A leg that only proves
+ *  "the fixed lane holds nothing" cannot tell a fix from a broken measurement,
+ *  so every assert below runs on TWO modules: this one is src/opencode-events.js
+ *  with exactly this fix's guards removed, and it MUST leak. The replacements
+ *  are asserted to match ONCE each — a control that silently stops neutering
+ *  anything is worse than no control (it turns the A/B into two green arms). */
+const R6_NEUTER = [
+  ['the lane stop flag', 'laneStopped = true; stream.stop();', 'stream.stop();'],
+  ['the SSE post-locator check', 'const client = await locator.client({ budgetMs: connectBudgetMs });\n    if (state.stopped) return;', 'const client = await locator.client({ budgetMs: connectBudgetMs });'],
+  ['the SSE post-fetch check', 'if (state.stopped) { try { ctl.abort(); } catch { } return; }', ''],
+  ['the resolveDirs early-out', 'if (c && !laneStopped)', 'if (c)'],
+];
+let unfixedEvents = null, unfixedWhy = null, unfixedFile = null;
+try {
+  let src = read('src/opencode-events.js');
+  for (const [name, from, to] of R6_NEUTER) {
+    const hits = src.split(from).length - 1;
+    if (hits !== 1) throw new Error(`the negative control is stale: "${name}" matched ${hits}× (expected 1) — re-derive it from the current source`);
+    src = src.replace(from, to);
+  }
+  const f = path.join(os.tmpdir(), `vs-oc-events-unfixed-${process.pid}.js`);
+  fs.writeFileSync(f, src);
+  unfixedEvents = require(f);
+  unfixedFile = f;
+} catch (e) { unfixedWhy = e.message; }
+ok('(the control itself) an UNFIXED copy of the lane can be built from the current source — the A/B below is only meaningful against it', !!unfixedEvents, unfixedWhy);
+/** A child process that spawns fine and then never answers `/global/health`, so
+ *  `locator.client({budgetMs})` spends its WHOLE budget — the state a user who
+ *  is turning the service off is most likely in (an OpenCode that cannot boot),
+ *  and the window `stop()` could not reach into. */
+const stalledChild = () => { const c = new EventEmitter(); c.pid = null; c.unref = () => { }; c.kill = () => { }; return c; };
+
+{
+  // ① THE MECHANISM, at its narrowest: `start()` fires `armWatch()` without
+  //    awaiting it, so a `stop()` in the SAME TICK lands after the guard the
+  //    lane had (the entry check) and before the assignment. No timing needed —
+  //    one microtask of `resolveDirs()` is a wide enough window for the leak.
+  const arm = async (mod) => {
+    const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-oc-r6-tick-'));
+    fs.writeFileSync(path.join(storeDir, 'opencode.db'), 'x');   // a REAL store: the watch attaches here
+    const base = inotifyWdsOn(storeDir);
+    let externals = 0;
+    const lane = mod.createLiveLane({
+      locator: { client: async () => null, state: () => ({ lastError: 'the OpenCode background service is off' }) },
+      storeDirs: [storeDir], log: { warn() { } }, fetchImpl: async () => { throw new Error('no serve'); },
+      onExternal: () => { externals++; },
+    });
+    lane.start();
+    lane.stop();                       // the user clicks Disable before the arm resolves
+    await sleep(400);
+    const leaked = base < 0 ? -1 : inotifyWdsOn(storeDir) - base;
+    fs.writeFileSync(path.join(storeDir, 'opencode.db-wal'), 'y');   // an unrelated opencode writes the store
+    await sleep(900);
+    const st = lane.state();
+    fs.rmSync(storeDir, { recursive: true, force: true });
+    return { base, leaked, externals, st };
+  };
+  const fixedR = await arm(events);
+  const ctlR = unfixedEvents ? await arm(unfixedEvents) : null;
+  if (fixedR.base < 0) skip('a stop() in the same tick as start() leaves NO fs.watch on the store', 'no /proc/self/fdinfo on this platform');
+  else {
+    ok('a stop() landing in the SAME TICK as start() leaves NO fs.watch on the user\'s store', fixedR.leaked === 0, fixedR);
+    ok('…and the lane it stopped never reports a watch it does not hold', fixedR.st.watch.active === false && fixedR.st.watch.watching.length === 0, fixedR.st.watch);
+    ok('…and a write to the store after the service went OFF wakes NOTHING (no dirty signal, no /api/sessions sweep)', fixedR.externals === 0, fixedR.externals);
+    if (!ctlR) skip('NEGATIVE CONTROL: the unfixed lane leaks that same watch', unfixedWhy || 'no control module');
+    else if (ctlR.base < 0) skip('NEGATIVE CONTROL: the unfixed lane leaks that same watch', 'the control could not be measured here');
+    else ok('NEGATIVE CONTROL: the UNFIXED lane leaks exactly that watch, and it still fires — so the zero above is a fix, not a broken measurement',
+      ctlR.leaked >= 1 && ctlR.externals >= 1, ctlR);
+  }
+}
+{
+  // ② THE PRODUCT WIRING, with a serve that CANNOT BOOT. `armWatch()` awaits
+  //    `resolveDirs()` → `locator.client({budgetMs:2000})`, and that budget is
+  //    spent in full exactly here — so a disable anywhere in the first seconds
+  //    lands mid-await. Measured on the real thing at 0/500/1000 ms; modelled
+  //    here through install()/locator.start()/locator.stop(), the same calls the
+  //    plugin route makes.
+  const toggle = async (mod, delayMs) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-oc-r6-prod-'));
+    const ocHome = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-oc-r6-home-'));
+    const storeDir = path.join(ocHome, '.local/share/opencode');
+    fs.mkdirSync(storeDir, { recursive: true });
+    fs.writeFileSync(path.join(storeDir, 'opencode.db'), 'x');
+    const base = inotifyWdsOn(storeDir);
+    let wantUp = false, externals = 0;
+    const facts = serve.install({
+      dataDir: dir, command: '/usr/bin/opencode', cwd: dir, log: { warn() { }, error() { } }, guardSampleMs: 0,
+      autostart: () => wantUp, spawnImpl: () => stalledChild(), readProc: () => ({ cpuTicks: 0, rssBytes: 1024 }),
+      makeLane: (deps) => mod.createLiveLane({ ...deps, env: { HOME: ocHome }, fetchImpl: async () => { throw new Error('no serve'); }, onExternal: () => { externals++; } }),
+    });
+    wantUp = true;
+    facts.locator.start();               // NOT awaited: notify() arms the lane, the boot runs on
+    await sleep(delayMs);
+    const armed = facts.state().liveLane !== null;
+    wantUp = false;
+    facts.locator.stop({ killRecorded: false });
+    await sleep(900);
+    const leaked = base < 0 ? -1 : inotifyWdsOn(storeDir) - base;
+    fs.writeFileSync(path.join(storeDir, 'opencode.db-wal'), 'y');
+    await sleep(700);
+    const laneGone = facts.state().liveLane === null;
+    serve.uninstall();
+    for (const d of [dir, ocHome]) fs.rmSync(d, { recursive: true, force: true });
+    return { base, armed, laneGone, leaked, externals };
+  };
+  const delays = [0, 1200];
+  const fixedRuns = [];
+  for (const d of delays) fixedRuns.push([d, await toggle(events, d)]);
+  ok('(setup) enabling the service arms the lane through the real install()/locator wiring, and disabling takes it down', fixedRuns.every(([, r]) => r.armed && r.laneGone), fixedRuns);
+  if (fixedRuns[0][1].base < 0) skip('disabling the service DURING the arm leaves no watch behind', 'no /proc/self/fdinfo on this platform');
+  else {
+    ok('disabling the service while the arm is still in flight (0 ms and mid-await, a serve that cannot boot) leaves ZERO watches on the store', fixedRuns.every(([, r]) => r.leaked === 0), fixedRuns);
+    ok('…and nothing of ours answers a store write afterwards', fixedRuns.every(([, r]) => r.externals === 0), fixedRuns);
+    if (!unfixedEvents) skip('NEGATIVE CONTROL: the unfixed lane leaks at every one of those delays', unfixedWhy || 'no control module');
+    else {
+      const ctlRuns = [];
+      for (const d of delays) ctlRuns.push([d, await toggle(unfixedEvents, d)]);
+      ok('NEGATIVE CONTROL: the UNFIXED lane leaks one watch at EVERY delay and still broadcasts — the leak is in the arm, not in the toggle', ctlRuns.every(([, r]) => r.leaked >= 1 && r.externals >= 1), ctlRuns);
+    }
+  }
+}
+{
+  // ③ …AND WHILE THE KEEPER IS PARKED (5 crashes): the state in which a user
+  //    is most likely to give up and turn the service off. `start()` would
+  //    clear the park, so the re-arm here rides a plain notify — the lane comes
+  //    up because the decision (autostart) says so, exactly as install() wires it.
+  const parkedRun = async (mod) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-oc-r6-park-'));
+    const ocHome = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-oc-r6-parkhome-'));
+    const storeDir = path.join(ocHome, '.local/share/opencode');
+    fs.mkdirSync(storeDir, { recursive: true });
+    fs.writeFileSync(path.join(storeDir, 'opencode.db'), 'x');
+    const base = inotifyWdsOn(storeDir);
+    let wantUp = true, externals = 0;
+    const facts = serve.install({
+      dataDir: dir, command: '/usr/bin/opencode', cwd: dir, log: { warn() { }, error() { } }, guardSampleMs: 0,
+      autostart: () => wantUp, spawnImpl: () => { throw new Error('opencode serve: cannot boot here'); },
+      readProc: () => ({ cpuTicks: 0, rssBytes: 1024 }),
+      makeLane: (deps) => mod.createLiveLane({ ...deps, env: { HOME: ocHome }, fetchImpl: async () => { throw new Error('no serve'); }, onExternal: () => { externals++; } }),
+    });
+    for (let i = 0; i < 8 && !facts.locator.state().parked; i++) await facts.locator.ensure();
+    const parked = facts.locator.state().parked;
+    wantUp = false; facts.locator.stop({ killRecorded: false });   // the lane armed at install: take it down first
+    await sleep(400);
+    const between = base < 0 ? -1 : inotifyWdsOn(storeDir) - base;
+    wantUp = true; facts.locator.invalidate('a plugin toggle while the keeper is parked');
+    const armed = facts.state().liveLane !== null;
+    wantUp = false; facts.locator.stop({ killRecorded: false });   // …and off again in the SAME TICK
+    await sleep(900);
+    const leaked = base < 0 ? -1 : inotifyWdsOn(storeDir) - base;
+    fs.writeFileSync(path.join(storeDir, 'opencode.db-wal'), 'y');
+    await sleep(700);
+    serve.uninstall();
+    for (const d of [dir, ocHome]) fs.rmSync(d, { recursive: true, force: true });
+    return { base, parked, armed, between, leaked, externals };
+  };
+  const r = await parkedRun(events);
+  ok('(setup) the keeper really is PARKED after its crash budget, and the lane still arms on the plugin decision', r.parked === true && r.armed === true, r);
+  if (r.base < 0) skip('disabling a PARKED service leaves no watch behind', 'no /proc/self/fdinfo on this platform');
+  else {
+    ok('the first disable gave every handle back (the state the second toggle is measured from)', r.between === 0, r);
+    ok('disabling while the keeper is PARKED leaves ZERO watches, and nothing answers a later store write', r.leaked === 0 && r.externals === 0, r);
+    if (!unfixedEvents) skip('NEGATIVE CONTROL: the unfixed lane leaks on the parked toggle too', unfixedWhy || 'no control module');
+    else {
+      const c = await parkedRun(unfixedEvents);
+      ok('NEGATIVE CONTROL: the UNFIXED lane leaks on the parked toggle too', c.leaked >= 1 && c.externals >= 1, c);
+    }
+  }
+}
+{
+  // ④ THE SSE HALF, on a real socket: `connectOnce()` is async before it owns
+  //    anything, so a stop() inside `locator.client()` aborted a controller that
+  //    did not exist yet and the continuation opened a subscription nobody could
+  //    ever close. Heartbeats keep it alive, so it never even trips the idle
+  //    abort — the serve holds an open response for a service the user turned off.
+  const sseRun = async (mod) => {
+    const mock = await startMockServe({ state: createMockState() });
+    const client = new serve.OpencodeServeClient(mock.url);
+    const lane = mod.createLiveLane({
+      locator: { client: async () => { await sleep(250); return client; }, state: () => ({ lastError: null }) },
+      storeDirs: [], env: { HOME: path.join(os.tmpdir(), `vs-oc-r6-nohome-${process.pid}`) }, log: { warn() { } },
+    });
+    lane.start();
+    await sleep(80);                    // inside locator.client(), before any fetch exists
+    lane.stop();
+    await sleep(1400);                  // past the connect, past a heartbeat
+    const out = { open: mock.state.sse.size, claims: lane.state().sse.connected, requests: [...mock.state.requests] };
+    lane.stop();
+    await mock.close();
+    return out;
+  };
+  const f = await sseRun(events);
+  ok('a stop() landing inside locator.client() opens NO SSE subscription on the serve', f.open === 0, f);
+  ok('…and the stopped lane does not claim to be connected (it used to report stopped AND connected at once)', f.claims === false, f);
+  ok('…and it asks the serve for nothing further, not even the store path it was resolving', f.requests.length === 0, f.requests);
+  if (!unfixedEvents) skip('NEGATIVE CONTROL: the unfixed stream opens that socket after stop()', unfixedWhy || 'no control module');
+  else {
+    const c = await sseRun(unfixedEvents);
+    ok('NEGATIVE CONTROL: the UNFIXED stream opens the subscription AFTER stop() and keeps it open, while claiming to be connected', c.open >= 1 && c.claims === true, c);
+  }
+}
+{
+  // …and the invariant is written down where the next person will look
+  const kfs = read('docs/kb-file-structure.md');
+  ok('docs: "stop() is terminal for work already in flight" is in the kb essays + the incident file + the index',
+    /ROUND 6/.test(kfs) && /laneStopped/.test(kfs)
+    && /A SERVICE THAT WAS TURNED OFF KEPT THE WATCH/.test(read('docs/kb-bugfix-invariants.md'))
+    && /S9 REMAINDER ROUND 6/.test(read('CLAUDE.md')));
+  if (unfixedFile) { try { fs.rmSync(unfixedFile, { force: true }); } catch { } }   // the control is an artefact of THIS run; an 'exit' hook would not survive the browser leg's removeAllListeners
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

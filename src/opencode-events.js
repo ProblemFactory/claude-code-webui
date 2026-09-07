@@ -162,12 +162,26 @@ function createEventStream({
     if (idleTimer.unref) idleTimer.unref();
   }
   async function connectOnce() {
+    // STOP() IS TERMINAL, AND THIS FUNCTION IS ASYNC BEFORE IT OWNS ANYTHING
+    // (round 6, reproduced). `stop()` can only abort the controller that
+    // EXISTS when it runs; while we are inside `locator.client()` — up to
+    // `connectBudgetMs`, and that budget is fully spent on exactly the machine
+    // where the serve is parked or absent — `ctl` is still null or the PREVIOUS
+    // connection's, so a stop landing here aborted nothing and the line below
+    // then opened a brand-new SSE socket for a stream nobody can reach again.
+    // Its heartbeats (~10s) keep it open forever, so it never even trips the
+    // idle abort: a service the user turned OFF kept pushing frames.
     const client = await locator.client({ budgetMs: connectBudgetMs });
+    if (state.stopped) return;
     if (!client) throw new Error(locator.state?.().lastError || 'opencode serve unavailable');
     ctl = new AbortController();
     const headers = { accept: 'text/event-stream' };
     if (client._auth) headers.authorization = client._auth;
     const res = await doFetch(new URL(client.baseUrl + SSE_ROUTE), { method: 'GET', headers, signal: ctl.signal });
+    // …and the same for the fetch itself: from here on `stop()` DOES reach us
+    // (it aborts `ctl`), except in the microtask where the response has already
+    // settled — an abort then no longer cancels the body we are about to read.
+    if (state.stopped) { try { ctl.abort(); } catch { } return; }
     if (!res.ok || !res.body) throw new Error(`GET ${SSE_ROUTE} → HTTP ${res.status}`);
     state.connected = true; state.attempts = 0; state.connectedAt = now(); state.lastError = null;
     notify();
@@ -322,6 +336,12 @@ function createLiveLane({ locator, onEvent = null, onExternal = null, onState = 
   let watchTried = false;
   let watchedDirs = [];            // the dirs the CURRENT watch was built from (re-resolution compares against this)
   let rearms = 0;                  // how many times a `connected` moved the watch — a state fact, not a counter for its own sake
+  /** THE LANE IS SINGLE-USE (round 6). `stop()` is the moment the service went
+   *  OFF, and it must be TERMINAL for work already in flight, not merely for
+   *  work not yet started — see attachWatch. A re-enable never restarts this
+   *  object: opencode-serve's `stopLive()` drops it and `armLive()` builds a
+   *  fresh one, so "stopped" can safely be a one-way door. */
+  let laneStopped = false;
   const stream = createEventStream({
     locator, log, fetchImpl, idleTimeoutMs,
     onEvent: (info, raw) => {
@@ -338,13 +358,37 @@ function createLiveLane({ locator, onEvent = null, onExternal = null, onState = 
   async function resolveDirs() {
     if (Array.isArray(storeDirs) && storeDirs.length) return storeDirs.slice();
     let serveHome = null;
-    try { const c = await locator.client({ budgetMs: 2000 }); if (c) serveHome = (await c.paths({ timeoutMs: 2000 }))?.home || null; } catch { }
+    // the SECOND await is skipped when the service went off while we were in
+    // the first: an in-flight call cannot be cancelled, but a stopped lane owes
+    // the serve no further requests (the answer is discarded by attachWatch)
+    try { const c = await locator.client({ budgetMs: 2000 }); if (c && !laneStopped) serveHome = (await c.paths({ timeoutMs: 2000 }))?.home || null; } catch { }
     return storeDirsFor({ env, serveHome });
   }
   const sameDirs = (a, b) => a.length === b.length && a.every((d, i) => d === b[i]);
+  /** THE ONE PLACE a store watch is attached to this lane — and therefore the
+   *  one place that can refuse to attach one to a DEAD lane (round 6, a
+   *  reproduced leak). `armWatch()` is async: it awaits `resolveDirs()`, which
+   *  asks the locator for the serve's own HOME (up to 2s, and the full budget
+   *  is spent exactly when the serve is parked or absent — the state a user who
+   *  is turning the service OFF is most likely in). `stop()` cannot cancel a
+   *  call already sitting at that await, so the continuation used to assign
+   *  `watch = createStoreWatch(...)` onto a lane nobody holds any more: an
+   *  fs.watch on the user's real OpenCode store that no `stop()` can ever
+   *  reach, surviving uninstall(). Measured through the real install()/locator
+   *  wiring: disabling at 0 ms and at 1200 ms — and with the keeper genuinely
+   *  PARKED — each leaked one inotify wd on the store, and that leaked watch
+   *  still fired `onExternal` — an 'opencode-updated' broadcast, and a
+   *  fleet-wide /api/sessions sweep, for a feature the user had turned OFF.
+   *  Attaching is synchronous from here, so the check cannot go stale. */
+  function attachWatch(w, dirs) {
+    if (laneStopped) { try { w.stop(); } catch { } return null; }
+    watch = w; watchedDirs = dirs.slice();
+    return w;
+  }
   /** @param why 'boot' (no serve yet — the env guess) | 'connected' (the serve
    *  can now name its own home, so re-resolve and move the watch if it moved). */
   async function armWatch(why = 'boot') {
+    if (laneStopped) return null;                         // a queued `connected` frame must not re-arm a lane the service turned off
     if (watch && why !== 'connected') return watch;       // already attached and nothing new is knowable
     if (!watch && watchTried && why !== 'connected') return watch;
     const dirs = await resolveDirs();
@@ -355,8 +399,8 @@ function createLiveLane({ locator, onEvent = null, onExternal = null, onState = 
       watch = null; watchedDirs = []; rearms++;
     }
     watchTried = true;
-    watch = createStoreWatch({ dirs, debounceMs, log, watchImpl, existsImpl, onDirty: (reason) => { try { onExternal?.(reason); } catch (e) { log?.warn?.(`[opencode-events] onExternal failed: ${e.message}`); } } });
-    watchedDirs = dirs.slice();
+    const built = createStoreWatch({ dirs, debounceMs, log, watchImpl, existsImpl, onDirty: (reason) => { try { onExternal?.(reason); } catch (e) { log?.warn?.(`[opencode-events] onExternal failed: ${e.message}`); } } });
+    if (!attachWatch(built, dirs)) { watchTried = false; watchedDirs = []; return null; }   // stop() landed while we were resolving: built, closed, never held
     // a watch that could not attach ANYWHERE is not a watch: let the next
     // reconnect try again (the store dir is created the first time opencode runs)
     if (!watch.state().active) { watch.stop(); watch = null; watchTried = false; watchedDirs = []; }
@@ -367,9 +411,12 @@ function createLiveLane({ locator, onEvent = null, onExternal = null, onState = 
     return { sse: stream.state(), rearms, watch: watch ? watch.state() : { watching: [], failed: [], hits: 0, lastAt: 0, active: false } };
   }
   return {
-    start() { stream.start(); armWatch('boot').catch(() => { }); return state(); },
-    kick() { stream.kick(); },
-    stop() { stream.stop(); try { watch?.stop(); } catch { } watch = null; watchTried = false; watchedDirs = []; },
+    start() { if (laneStopped) return state(); stream.start(); armWatch('boot').catch(() => { }); return state(); },
+    kick() { if (laneStopped) return; stream.kick(); },
+    /** TERMINAL: the flag goes up FIRST, so an `armWatch()`/`connectOnce()`
+     *  already at its await releases what it built instead of handing it to a
+     *  lane nobody holds. Everything already attached is closed here. */
+    stop() { laneStopped = true; stream.stop(); try { watch?.stop(); } catch { } watch = null; watchTried = false; watchedDirs = []; },
     state,
     _armWatch: armWatch,
   };
