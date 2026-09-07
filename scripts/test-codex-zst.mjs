@@ -487,6 +487,15 @@ console.log('— ⑥ ONE remote cache slot, MANY remote files (codex .jsonl ⇄ 
     ok(!got, 'the over-cap adoption is refused: a splice buried under later appends is never served as verified', got && fs.readFileSync(got).equals(buried) ? 'SERVED THE HYBRID' : err);
     ok(/could not be verified/.test(err || ''), '…and the refusal names the real fault instead of a bare "too large"', err);
     ok(!(JSON.parse(fs.readFileSync(sl.cache + '.meta', 'utf8')).remotePath), 'a refused slot is NOT stamped with provenance (it would freeze the corruption in)');
+    // ROUND 2: the suffix must not hand out a remedy that cannot work. It is
+    // reachable ONLY when the remote is past the cap — where a whole refetch is
+    // impossible by construction — so "delete it to re-sync" destroyed the only
+    // local copy and failed identically.
+    ok(!/delete it to re-sync/.test(err || '') && /cannot be re-fetched whole/.test(err || ''), 'the refusal states that the remote is past the cap, not a deletion that cannot repair anything', err);
+    fs.rmSync(sl.cache); fs.rmSync(sl.cache + '.meta');                 // do exactly what the old text told the user to do
+    let errAfterDelete = null;
+    try { await hm.fetchTranscript('hz', 'codex', sl.tid, { maxBytes: buried.length - 1 }); } catch (e) { errAfterDelete = String(e && e.message || e); }
+    ok(/too large/.test(errAfterDelete || '') && !fs.existsSync(sl.cache), 'NEGATIVE CONTROL: deleting the cache as the old text instructed fails identically — with the last local copy gone', errAfterDelete);
     sshDead(); hm._hostDownUntil?.clear();
   }
 
@@ -506,6 +515,48 @@ console.log('— ⑥ ONE remote cache slot, MANY remote files (codex .jsonl ⇄ 
     sshDead(); hm._hostDownUntil?.clear();
   }
 
+  {   // (1d) THE HYBRID THE SHIPPED CODE ALREADY STAMPED (round 2 of the verify).
+      // Provenance is not evidence that the bytes were ever deep-checked: the
+      // tail-only adoption accepted a buried hybrid and the delta path then
+      // wrote remotePath onto that very slot — so `sameRemote` is TRUE for
+      // exactly the corruption the whole-file scan exists to find, and gating
+      // the scan on "no provenance" would serve those slots forever. Any meta
+      // written before this fix (no schema marker) owes ONE whole-file scan.
+    const sl = slotOf('cccccccc-dddd-4eee-8fff-00000000000d');
+    const head = Buffer.from(rollout(sl.tid, '/work/stamped', 'already-stamped hybrid', 40));
+    const foreign = zlib.zstdCompressSync(Buffer.from(rollout(sl.tid, '/work/stamped', 'already-stamped hybrid', 40))).subarray(0, 64);
+    const later = Buffer.from(tick.repeat(80));
+    const buried = Buffer.concat([head, foreign, later]);
+    ok(tailOnlyClean(buried) && buried.indexOf(DF.ZSTD_MAGIC) >= 0, 'NEGATIVE CONTROL: the tail window sees nothing wrong with this slot either');
+    // the meta the SHIPPED adoption + delta path left behind: provenance, no schema marker
+    seedSlot(sl, buried, { size: buried.length, mtime: 19000, fetchedAt: Date.now(), slab: true, remotePath: sl.remotePath, compressed: false });
+    remote.path = sl.remotePath; remote.data = Buffer.concat([head, later, Buffer.alloc(foreign.length, 0x20)]); remote.mtime = 19000;
+    sshProbeOnly();
+    let e3 = null, g3 = null;
+    try { g3 = await hm.fetchTranscript('hz', 'codex', sl.tid, { maxBytes: buried.length - 1 }); } catch (e) { e3 = String(e && e.message || e); }
+    ok(!g3 && /could not be verified/.test(e3 || ''), 'a hybrid that already CARRIES provenance is deep-checked once and refused (sameRemote is not evidence of verified bytes)', g3 ? 'SERVED THE HYBRID' : e3);
+    sshDead(); hm._hostDownUntil?.clear();
+  }
+
+  {   // (1e) …and that scan is paid ONCE: a clean legacy slot is verified,
+      // re-stamped with the schema marker, and tail-only from then on.
+    const sl = slotOf('cccccccc-dddd-4eee-8fff-00000000000e');
+    const clean = Buffer.from(rollout(sl.tid, '/work/stampedok', 'clean legacy-provenance slot', 400));
+    seedSlot(sl, clean, { size: clean.length, mtime: 20000, fetchedAt: Date.now(), slab: true, remotePath: sl.remotePath, compressed: false });
+    remote.path = sl.remotePath; remote.data = clean; remote.mtime = 20000;
+    const origReadSync = fs.readSync, deepReads = [];
+    fs.readSync = (fd, buf, off, len, pos) => { if (off === 3) deepReads.push(len); return origReadSync(fd, buf, off, len, pos); };  // offset 3 = the carry buffer, unique to the whole-file scan
+    try {
+      reads.length = 0;
+      const p1 = await hm.fetchTranscript('hz', 'codex', sl.tid);
+      ok(fs.readFileSync(p1).equals(clean) && reads.length === 0 && deepReads.length > 0, 'a legacy-provenance slot is whole-file verified before its bytes are trusted (and then served, no refetch)', { deepReads, reads });
+      ok(metaOf(p1).v >= 2, '…and re-stamped with the schema marker every meta writer now carries', metaOf(p1));
+      const n1 = deepReads.length;
+      await hm.fetchTranscript('hz', 'codex', sl.tid);
+      ok(deepReads.length === n1, 'the whole-file scan is paid ONCE per slot, never per poll (the next poll is tail-only)', { first: n1, after: deepReads.length });
+    } finally { fs.readSync = origReadSync; }
+  }
+
   {   // (1c) POSITIVE CONTROL + (2) the adoption is stamped once, on BOTH rungs
     const sl = slotOf('cccccccc-dddd-4eee-8fff-000000000008');
     const big = Buffer.from(rollout(sl.tid, '/work/bigclean', 'clean over-cap slot', 9000));
@@ -519,27 +570,67 @@ console.log('— ⑥ ONE remote cache slot, MANY remote files (codex .jsonl ⇄ 
     ok(m8.remotePath === sl.remotePath && m8.compressed === false && m8.adopted === true, 'the adoption is WRITTEN BACK (provenance + an `adopted` marker) — the deep scan is paid once, not per poll', m8);
   }
 
-  {   // (2) the ssh rung — no data plane at all — must stamp it too
+  {   // (2) the ssh rung — no data plane at all — must stamp the adoption too,
+      // AND be able to GROW the slot it adopted. ROUND 2 of the verify: the
+      // stamp alone changes nothing here. The short-circuit needs
+      // meta.size === size, so the very next byte of growth fell straight into
+      // "remote transcript too large" with no fallback — a >maxBytes transcript
+      // that opened yesterday was an error today. The rung now carries the same
+      // append-only delta the slab rung has had since 2.187.0, and every poll
+      // below keeps the SAME cap the slot was adopted under (dropping the cap on
+      // the growth poll is what let the un-fixed rung look green).
     const sshHm = new HostManager({ dataDir });
     sshHm._state.hosts.push({ id: 'hssh', name: 'S' });                    // no transport ⇒ legacy ssh rung
     const sl = { tid: 'cccccccc-dddd-4eee-8fff-000000000009', remotePath: '/home/u/.codex/sessions/2026/09/05/rollout-2026-09-05T00-00-00-cccccccc-dddd-4eee-8fff-000000000009.jsonl', cache: path.join(dataDir, 'remote-jsonl', 'hssh', 'codex', 'cccccccc-dddd-4eee-8fff-000000000009.jsonl') };
     const body = Buffer.from(rollout(sl.tid, '/work/ssh', 'over-cap slot on the ssh rung', 300));
-    const cats = [];
+    const CAP = body.length - 1;                                           // the slot is ALREADY past the fetch cap
+    const cats = [], tails = [];
+    const rem = { bytes: body, size: body.length, mtime: 14000 };          // what the host reports vs what it serves
     sshHm._ssh = async (h, cmd) => {
-      if (/^cat /.test(cmd)) { cats.push(cmd); return body; }
-      return Buffer.from(`${body.length} 14000\n${sl.remotePath}\n`);
+      if (/^cat /.test(cmd)) { cats.push(cmd); return rem.bytes; }
+      const m = /^tail -c \+(\d+) /.exec(cmd);
+      if (m) { tails.push(Number(m[1])); return rem.bytes.subarray(Number(m[1]) - 1); }   // `tail -c +N` is 1-based
+      return Buffer.from(`${rem.size} ${rem.mtime}\n${sl.remotePath}\n`);
     };
     seedSlot(sl, body, { size: body.length, mtime: 14000, fetchedAt: Date.now() });                    // PRE-FIX meta
-    const c9 = await sshHm.fetchTranscript('hssh', 'codex', sl.tid, { maxBytes: body.length - 1 });
+    const c9 = await sshHm.fetchTranscript('hssh', 'codex', sl.tid, { maxBytes: CAP });
     ok(fs.readFileSync(c9).equals(body) && cats.length === 0, 'the ssh rung adopts an over-cap verified slot without re-pulling it', cats);
     const m9 = JSON.parse(fs.readFileSync(sl.cache + '.meta', 'utf8'));
     ok(m9.remotePath === sl.remotePath && m9.adopted === true, 'the ssh rung STAMPS the meta before returning (it used to hand the cache back provenance-less forever)', m9);
-    // and now that the slot carries provenance, growth is a normal cache miss —
-    // not "too large" forever (the ssh rung has no delta path to grow through)
+    // …and now the remote grows, under the cap it was adopted with
     const grown = Buffer.concat([body, Buffer.from(tick)]);
-    sshHm._ssh = async (h, cmd) => { if (/^cat /.test(cmd)) { cats.push(cmd); return grown; } return Buffer.from(`${grown.length} 15000\n${sl.remotePath}\n`); };
-    const c9b = await sshHm.fetchTranscript('hssh', 'codex', sl.tid);
-    ok(fs.readFileSync(c9b).equals(grown) && cats.length === 1, 'the stamped slot then re-syncs normally when the remote grows', cats);
+    rem.bytes = grown; rem.size = grown.length; rem.mtime = 15000;
+    ok(grown.length > CAP, `fixture: a whole re-pull is still impossible (${grown.length}B remote vs a ${CAP}B cap) — the growth rides a delta or not at all`);
+    let growErr = null, c9b = null;
+    try { c9b = await sshHm.fetchTranscript('hssh', 'codex', sl.tid, { maxBytes: CAP }); } catch (e) { growErr = String(e && e.message || e); }
+    ok(!growErr && c9b && fs.readFileSync(c9b).equals(grown), 'an over-cap ssh slot GROWS instead of hard-failing "too large" on its next byte (forever, since nothing else can move)', growErr);
+    ok(cats.length === 0 && tails.length === 1 && tails[0] === body.length + 1, `…by an append-only tail delta off the cached prefix, never a whole cat (${JSON.stringify({ cats: cats.length, tails })})`);
+    const m9b = JSON.parse(fs.readFileSync(sl.cache + '.meta', 'utf8'));
+    ok(m9b.size === grown.length && m9b.mtime === 15000 && m9b.v >= 2, '…and the meta follows the growth (schema marker carried by every writer)', m9b);
+    // a LIVE transcript overtakes the stat between probe and read: the extra
+    // tail bytes ARE the file's next bytes (append-only), so they are kept and
+    // the meta stamps what the cache actually holds — the stump check compares
+    // the two, and a hard failure here would be a regression on the last rung.
+    const grown2 = Buffer.concat([grown, Buffer.from(tick)]);
+    rem.bytes = grown2; rem.size = grown.length + 1; rem.mtime = 16000;
+    const c9c = await sshHm.fetchTranscript('hssh', 'codex', sl.tid, { maxBytes: CAP });
+    const m9c = JSON.parse(fs.readFileSync(sl.cache + '.meta', 'utf8'));
+    ok(fs.readFileSync(c9c).equals(grown2) && m9c.size === grown2.length, 'a read that overtakes the stat keeps the extra bytes and stamps the REAL size', m9c);
+    // …but FEWER bytes than the stat promised is a truncated read: never stamped
+    rem.size = grown2.length + Buffer.byteLength(tick); rem.mtime = 17000;   // promises bytes the host will not serve
+    const metaBefore = fs.readFileSync(sl.cache + '.meta', 'utf8');
+    let shortErr = null;
+    try { await sshHm.fetchTranscript('hssh', 'codex', sl.tid, { maxBytes: CAP }); } catch (e) { shortErr = String(e && e.message || e); }
+    ok(/short tail read/.test(shortErr || ''), 'a truncated tail read throws instead of stamping bytes we did not get (the 2.187.0 stump rule)', shortErr);
+    ok(fs.readFileSync(sl.cache + '.meta', 'utf8') === metaBefore, '…and the meta is left exactly as it was', fs.readFileSync(sl.cache + '.meta', 'utf8'));
+    // NEGATIVE CONTROL: a slot whose bytes do NOT verify has no prefix to grow
+    // from — the honest cap error, not a silent delta off unverified bytes
+    fs.writeFileSync(sl.cache, Buffer.concat([grown2.subarray(0, grown2.length - 8), Buffer.alloc(8, 0)]));
+    rem.bytes = grown2; rem.size = grown2.length + 1; rem.mtime = 18000;
+    const tailsBefore = tails.length;
+    let badErr = null;
+    try { await sshHm.fetchTranscript('hssh', 'codex', sl.tid, { maxBytes: CAP }); } catch (e) { badErr = String(e && e.message || e); }
+    ok(/too large/.test(badErr || '') && /could not be verified/.test(badErr || '') && tails.length === tailsBefore && cats.length === 0, 'NEGATIVE CONTROL: an unverifiable cache is never delta-grown — the cap error names the real fault instead', { badErr, tails });
   }
 
   {   // (3) a transcript SHORTER than the 4-byte magic must verify, not re-pull

@@ -1214,28 +1214,41 @@ class HostManager {
     // there, a verified cache adopts the provenance we just resolved.
     const sameRemote = (remotePath) => !!meta && meta.remotePath === remotePath;
     const adopting = (remotePath, size) => !sameRemote(remotePath) && !!meta && !meta.remotePath && size > maxBytes;
-    const cacheUsable = (remotePath, size) => cacheBytesOk(remotePath, { deep: adopting(remotePath, size) })
-      && (sameRemote(remotePath) || adopting(remotePath, size));
-    // …and the adoption is RECORDED before we hand the cache back. Without the
-    // stamp the slot stays provenance-less forever: every later poll re-runs
-    // the whole-file scan, and on the ssh rung — which has no delta path at
-    // all — the very next byte of growth fails "remote transcript too large"
-    // instead of syncing. Writing it here is what makes the deep scan a
-    // ONE-TIME cost per slot (`adopted` marks bytes we verified rather than
-    // fetched, for anyone reading the meta later).
-    const stampAdoption = (remotePath, size, mtime) => {
-      if (sameRemote(remotePath)) return;
+    // WHICH SLOTS OWE WHOLE-FILE EVIDENCE (review round 2). Provenance alone is
+    // not proof the bytes were ever deep-checked: the tail-only adoption that
+    // shipped before this fix ADOPTED a buried hybrid and then let the delta
+    // path stamp remotePath onto it, so `sameRemote` is true for exactly the
+    // corruption this scan exists to find. A meta is trusted on the cheap tail
+    // check only once it carries the schema marker every writer below stamps —
+    // i.e. once THIS code verified (or fetched) the bytes. Older metas pay for
+    // one whole-file scan the first time their bytes are trusted, and are
+    // re-stamped so it is paid ONCE per slot, never per poll.
+    const META_V = 2;
+    const legacyMeta = () => !!meta && !(Number(meta.v) >= META_V);
+    const provenanceOk = (remotePath, size) => sameRemote(remotePath) || adopting(remotePath, size);
+    const cacheUsable = (remotePath, size) => provenanceOk(remotePath, size)   // cheap verdict first — the deep scan only runs on bytes we might actually trust
+      && cacheBytesOk(remotePath, { deep: legacyMeta() });
+    // …and the verification is RECORDED before we hand the cache back. Without
+    // the stamp the slot stays legacy forever and every later poll re-runs the
+    // whole-file scan. `adopted` additionally marks bytes we VERIFIED rather
+    // than fetched (the over-cap exception), for anyone reading the meta later.
+    const stampVerified = (remotePath, size, mtime) => {
+      const adopt = !sameRemote(remotePath);
+      if (!adopt && !legacyMeta()) return;                                  // already ours, already current-schema
       try {
-        meta = { ...(meta || {}), size, mtime, fetchedAt: Date.now(), remotePath, compressed: isZstPath(remotePath), adopted: true };
+        meta = { ...(meta || {}), size, mtime, fetchedAt: Date.now(), remotePath, compressed: isZstPath(remotePath), v: META_V, ...(adopt ? { adopted: true } : {}) };
         fs.writeFileSync(metaPath, JSON.stringify(meta));
       } catch { }
     };
     // …and when a whole refetch is BOTH impossible (over the cap) and the only
-    // way out (the cache did not verify), say so. "remote transcript too large"
-    // alone sends the reader diagnosing a size problem on a slot whose real
-    // fault is spliced bytes — an error string is not a diagnosis.
+    // way out (the cache did not verify), say so — including that there is no
+    // remedy on this side. "remote transcript too large" alone sends the reader
+    // diagnosing a size problem on a slot whose real fault is spliced bytes; an
+    // error string is not a diagnosis, and neither is advice that cannot work
+    // (this suffix is reachable ONLY when the remote is past the cap, so
+    // deleting the cache just destroys the last copy and fails identically).
     const tooLarge = (n, cacheVerified) => new Error(`remote transcript too large (${(n / 1048576) | 0}MB)`
-      + (!cacheVerified && fs.existsSync(cachePath) ? ' — and the cached copy could not be verified (bytes from another file, or spliced); delete it to re-sync' : ''));
+      + (!cacheVerified && fs.existsSync(cachePath) ? ` — and the cached copy could not be verified (bytes from another file, or spliced), so there is no prefix to grow from; the remote is past the ${(maxBytes / 1048576) | 0}MB fetch cap and cannot be re-fetched whole (deleting the cache would not help)` : ''));
     // CS data-plane: INCREMENTAL slab sync — transcripts are append-only, so
     // when the cache already holds a prefix we fetch ONLY [cachedSize, size)
     // via read-range instead of re-pulling the whole file (the remote-jsonl
@@ -1258,8 +1271,8 @@ class HostManager {
         // size/mtime match would serve the stump FOREVER (the self-heal only
         // triggers when the remote file changes) — and the bytes must have come
         // from the SAME remote file (see the cache-slot note above)
-        const usable = cacheUsable(remotePath, size);   // ONE verdict per poll (the adoption's whole-file scan is not run twice)
-        if (meta && meta.size === size && meta.mtime === mtime && usable && (() => { try { return fs.statSync(cachePath).size === size; } catch { return false; } })()) { stampAdoption(remotePath, size, mtime); return cachePath; }
+        const usable = cacheUsable(remotePath, size);   // ONE verdict per poll (a legacy slot's whole-file scan is not run twice)
+        if (meta && meta.size === size && meta.mtime === mtime && usable && (() => { try { return fs.statSync(cachePath).size === size; } catch { return false; } })()) { stampVerified(remotePath, size, mtime); return cachePath; }
         fs.mkdirSync(dir, { recursive: true });
         let localSize = 0;
         try { localSize = fs.statSync(cachePath).size; } catch { }
@@ -1290,7 +1303,7 @@ class HostManager {
           fs.writeFileSync(tmp2, whole.data);
           fs.renameSync(tmp2, cachePath);
         }
-        fs.writeFileSync(metaPath, JSON.stringify({ size, mtime, fetchedAt: Date.now(), slab: true, remotePath, compressed: isZstPath(remotePath) }));
+        fs.writeFileSync(metaPath, JSON.stringify({ size, mtime, fetchedAt: Date.now(), slab: true, remotePath, compressed: isZstPath(remotePath), v: META_V }));
         return cachePath;
       } catch (e2) { /* legacy fallback below */ }
     }
@@ -1313,14 +1326,42 @@ class HostManager {
     const [size, mtime] = sizeMtime.split(' ').map(Number);
     // same stump-integrity + same-remote-file + cache-bytes checks as the slab path above
     const usableSsh = cacheUsable(remotePath, size);
-    if (meta && meta.size === size && meta.mtime === mtime && usableSsh && (() => { try { return fs.statSync(cachePath).size === size; } catch { return false; } })()) { stampAdoption(remotePath, size, mtime); return cachePath; }
-    if (size > maxBytes) throw tooLarge(size, usableSsh);
-    const buf = await this._ssh(h, `cat ${JSON.stringify(remotePath)}`, { timeoutMs: 120000, maxBuffer: maxBytes + 1024, encoding: 'buffer' });
+    if (meta && meta.size === size && meta.mtime === mtime && usableSsh && (() => { try { return fs.statSync(cachePath).size === size; } catch { return false; } })()) { stampVerified(remotePath, size, mtime); return cachePath; }
+    let localSizeSsh = 0;
+    try { localSizeSsh = fs.statSync(cachePath).size; } catch { }
+    // APPEND-ONLY DELTA ON THE LEGACY RUNG TOO (B-7638 round 2). The slab rung
+    // has grown an over-cap slot by its delta since 2.187.0; this rung only
+    // ever whole-`cat`ted, so the SAME conversation — one the data plane is
+    // off/failing for — hard-failed "too large" on its very next byte of
+    // growth: a >maxBytes transcript that opened yesterday is an error today,
+    // with no fallback to the verified cache. Same legality test as the slab
+    // rung (same remote file, uncompressed on both sides, cached prefix no
+    // longer than the remote), same never-stamp-bytes-we-didn't-get rule;
+    // `tail -c +N` is 1-based on both GNU and BSD.
+    const canDeltaSsh = usableSsh && !isZstPath(remotePath) && !cacheIsCompressed() && localSizeSsh > 0 && localSizeSsh <= size && !!meta;
+    const fetchBytesSsh = canDeltaSsh ? size - localSizeSsh : size;
+    if (fetchBytesSsh > maxBytes) throw tooLarge(fetchBytesSsh, usableSsh);
     fs.mkdirSync(dir, { recursive: true });
-    const tmp = cachePath + '.tmp';
-    fs.writeFileSync(tmp, buf);
-    fs.renameSync(tmp, cachePath);
-    fs.writeFileSync(metaPath, JSON.stringify({ size, mtime, fetchedAt: Date.now(), remotePath, compressed: isZstPath(remotePath) }));
+    let stampSize = size;
+    if (canDeltaSsh) {
+      if (size > localSizeSsh) {
+        const delta = await this._ssh(h, `tail -c +${localSizeSsh + 1} ${JSON.stringify(remotePath)}`, { timeoutMs: 120000, maxBuffer: maxBytes + 1024, encoding: 'buffer' });
+        // fewer bytes than the stat promised = a truncated read: never stamp
+        // those (the 2.187.0 stump rule). MORE is normal on a live transcript —
+        // it grew between the stat and the read, and an append-only file's
+        // extra tail bytes are genuinely its next bytes — so keep them and
+        // stamp what the file ACTUALLY holds (the stump check compares the two).
+        if (delta.length < size - localSizeSsh) throw new Error(`short tail read: ${delta.length} of ${size - localSizeSsh}`);
+        fs.appendFileSync(cachePath, delta);
+        stampSize = localSizeSsh + delta.length;
+      }
+    } else {
+      const buf = await this._ssh(h, `cat ${JSON.stringify(remotePath)}`, { timeoutMs: 120000, maxBuffer: maxBytes + 1024, encoding: 'buffer' });
+      const tmp = cachePath + '.tmp';
+      fs.writeFileSync(tmp, buf);
+      fs.renameSync(tmp, cachePath);
+    }
+    fs.writeFileSync(metaPath, JSON.stringify({ size: stampSize, mtime, fetchedAt: Date.now(), remotePath, compressed: isZstPath(remotePath), v: META_V }));
     return cachePath;
   }
 
