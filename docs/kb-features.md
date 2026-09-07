@@ -310,11 +310,27 @@ impossible rather than a review promise.
   `turn/start`, whose bubble already exists.
 - **One message, one bubble, after a reload too.** A user message is written by
   BOTH producers — us (as it is sent) and codex (when it is committed into a
-  turn) — so the rebuild collapses the pair: an inherited bubble's marker is
-  stripped from the merge fingerprint, and an id-carrying copy of ours claims
-  its content so codex's copy of it is dropped. Two DIFFERENT sends of the same
-  text stay two messages, and a codex-side record that has no copy of ours is
-  never dropped.
+  turn) — so the rebuild collapses the pair: an id-carrying copy of ours CLAIMS
+  its content and codex's copy of it consumes the claim and is dropped. Two
+  DIFFERENT sends of the same text stay two messages, and a codex-side record
+  that has no copy of ours is never dropped.
+- **A submission's identity is an ID, never its text (round 2, 2026-09-07).**
+  Every user record is keyed by the id its producer minted — ours by the webui /
+  queue id, codex's by its own `msg_…` — so two messages with the SAME text in
+  one turn are two bubbles live AND after a reload. Keying them on content
+  deleted real messages: 27 of the 95 user messages in the owner's own rollout
+  vanished on reload, and 133 across the local corpus of 89 rollouts (every
+  collision a different id AND a different `create_time` — distinct submissions,
+  not duplicates). Pre-0.15x rollouts carry no ids and keep the old content key.
+- **Which side of the commit our copy was written on decides how the pair is
+  retired.** Ours normally comes first (a send, a steer that lands ~42s before
+  the commit), so codex's later copy consumes our claim. The two producers that
+  write AFTER the app-server has already persisted its own copy — the
+  `item/completed` twin for an item the app-server drained, and the IDLE peer
+  path (`turn/start` commits before the wrapper records) — mark the record
+  `webui_after_commit`, and such a record yields to the copy already on screen
+  instead of doubling the message. A new producer of a user record answers that
+  one question before it ships (the census is a test).
 - **Live + attach parity.** The wrapper publishes the WHOLE queue on every
   change (and at boot, and at each turn start); that record replays through the
   buffer, so a reconnecting client's strip is rebuilt. `attached` and `created`

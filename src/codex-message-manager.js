@@ -435,14 +435,14 @@ class CodexMessageManager {
     const payload = record?.payload || record || {};
     // webui_peer = the wrapper's peer marker (buffer copy only) — stripped so
     // the buffer and rollout copies of one peer message mint the SAME id.
-    // webui_queue_id (2026-09-07) is the same kind of marker on the bubble the
-    // wrapper writes for an INHERITED queue submission entering the turn: only
-    // ONE of the two copies survives the merge (either can win, see
-    // mergeCodexRecords), so the id must not depend on which.
+    // webui_queue_id / webui_queue_via (2026-09-07) are the same kind of marker
+    // on the bubble the wrapper writes for an INHERITED queue submission
+    // entering the turn: only ONE of the two copies survives the merge (either
+    // can win, see mergeCodexRecords), so the id must not depend on which.
     // thread_id/turn_id are the wrapper's B-7473 item context: only the LIVE
     // copy carries them, so leaving them in would make every buffer record a
     // stranger to its rollout twin (double cards on every attach).
-    const { item_id, itemId, id, internal_chat_message_metadata_passthrough, webui_peer, webui_queue_id, webuiQueueId, thread_id, turn_id, ...stable } = payload;
+    const { item_id, itemId, id, internal_chat_message_metadata_passthrough, webui_peer, webui_queue_id, webuiQueueId, webui_queue_via, webuiQueueVia, webui_after_commit, webuiAfterCommit, thread_id, turn_id, ...stable } = payload;
     let str;
     try { str = (record?.type || '') + ':' + JSON.stringify(stable); } catch { str = String(record?.type || ''); }
     let h = 0x811c9dc5;
@@ -601,8 +601,12 @@ class CodexMessageManager {
       // A peer card is NOT a turn boundary: a queued peer message
       // (thread/queue/add while a turn runs) or an injected notice lands
       // MID-turn, and stopping the scan there left the active turn's open
-      // streams 'streaming' forever at task_complete.
-      if (m.role === 'user' && m.originKind !== 'peer-message') break;
+      // streams 'streaming' forever at task_complete. `midTurn` is the same
+      // statement for the bubble of an INHERITED queue submission (steered into
+      // the running turn / drained into one that just started): both are
+      // messages that entered a turn without beginning it, and neither closes
+      // the streams it landed among, so neither may hide them from this scan.
+      if (m.role === 'user' && m.originKind !== 'peer-message' && !m.midTurn) break;
       if (m.status === 'streaming') {
         // Only finalize reasoning if explicitly asked (e.g. turn end)
         if (!includeReasoning && m.content?.[0]?.type === 'thinking') continue;
@@ -1250,6 +1254,13 @@ class CodexMessageManager {
       this.turnIndex++;
       const msg = this._create({ role: 'user', content, turnIndex: this.turnIndex });
       if (item.webui_origin === 'auto-resume') msg.originKind = 'auto-resume'; // VibeSpace's continue prompt after a wall — labelled, not "you typed this" (2.369.32)
+      // …and a bubble that does not CLOSE the turn's open streams must not be a
+      // turn BOUNDARY for the backward scan either (round 2): skipping the
+      // finalize while still stopping the scan left a reply that was open when
+      // the turn ended stranded at 'streaming' forever — a phantom spinner on a
+      // dead, read-only conversation. Same exemption, same reason, as the peer
+      // card on the line that reads this flag.
+      if (queueMsgId && !webuiMsgId) msg.midTurn = true;
       this._stampUserIdentity(msg, identity);
       if (emit) this._emit({ op: 'create', message: msg });
       return;

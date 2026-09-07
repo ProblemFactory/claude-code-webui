@@ -949,6 +949,43 @@ setInterval(() => {
     ok(/inherited message/.test(last.payload.content[0].text) && /-inh\d+$/.test(last.payload.webui_queue_id), 'with the same shape and the same id', JSON.stringify(last.payload));
   }
 
+
+  // ROUND 2 — WHICH PRODUCER WROTE EACH RECORD, and the REBUILD that reads them
+  // back. The two writers of an inherited bubble sit on opposite sides of
+  // codex's own copy in time (a steer lands ~42s before the commit; the drained
+  // item's only notice IS the commit twin), and the reader retires the pair
+  // differently for each — so the record has to say which one wrote it.
+  {
+    const steeredRecs = inherited().filter((r) => r.payload.webui_queue_via === 'steered');
+    const drainedRecs = inherited().filter((r) => r.payload.webui_queue_via === 'drained');
+    ok(steeredRecs.length === 12 && drainedRecs.length === 1, `every inherited record names its producer: 12 steered + 1 drained (${steeredRecs.length}/${drainedRecs.length})`, JSON.stringify(inherited().map((r) => r.payload.webui_queue_via)));
+    ok(inherited().every((r) => Object.keys(r.payload).join(',') === (r.payload.webui_queue_via === 'drained' ? 'type,role,content,webui_queue_id,webui_queue_via,webui_after_commit' : 'type,role,content,webui_queue_id,webui_queue_via')),
+      'and the markers ride LAST, so the stable payload stays {type, role, content}', JSON.stringify(inherited().map((r) => Object.keys(r.payload).join(','))));
+    // The reader's contract is the commit-order fact, not the producer label:
+    // the drained twin is the one the app-server had already persisted when we
+    // wrote it, and it is the ONLY inherited record that says so.
+    ok(drainedRecs.every((r) => r.payload.webui_after_commit === true) && steeredRecs.every((r) => r.payload.webui_after_commit === undefined),
+      'only the record written AFTER the app-server committed the message declares it', JSON.stringify(inherited().map((r) => [r.payload.webui_queue_via, r.payload.webui_after_commit || false])));
+
+    // THE REBUILD: codex writes its own copy of every one of these messages into
+    // the rollout — 42s after a steer, ~1ms BEFORE the drained item's twin
+    // reached us — and a reload merges the two sides. Each message must survive
+    // exactly once, in order (the owner's report is a COUNT on screen).
+    const { mergeCodexRecords } = require(path.join(REPO, 'src/codex-session-store.js'));
+    const ourRecs = userRecs();
+    const codexCopies = ourRecs.map((r, i) => ({
+      timestamp: new Date(Date.parse(r.timestamp) + (r.payload.webui_queue_via === 'drained' ? -1 : 42000)).toISOString(),
+      type: 'response_item',
+      payload: { type: 'message', id: `msg_rebuild_${i}`, role: 'user', content: r.payload.content, internal_chat_message_metadata_passthrough: { turn_id: 'turn-1' } },
+    }));
+    const nm2 = new CodexMessageManager('inh-rb');
+    for (const r of mergeCodexRecords(codexCopies, ourRecs)) nm2.processLive(r);
+    const rb = nm2.messages.filter((m) => m.role === 'user').map((m) => (m.content || []).map((c) => c.text || '').join(''));
+    ok(rb.length === ourRecs.length, `REBUILD: ${ourRecs.length} messages × 2 producers → ${rb.length} bubbles (${ourRecs.length} expected)`, JSON.stringify(rb.map((t) => t.slice(0, 24))));
+    ok(new Set(rb).size === rb.length, 'each exactly once — nothing doubled and nothing deleted', JSON.stringify(rb.map((t) => t.slice(0, 24))));
+    ok(rb.filter((t) => /inherited message/.test(t)).every((t, i) => t === `inherited message ${i + 1}`), 'and still in queue order after the merge', JSON.stringify(rb.map((t) => t.slice(0, 24))));
+  }
+
   // NO SILENT DROPS: the unrouted kind is named, the deliberate no-op is not.
   ok(await waitFor(() => !!I.meta()?.unhandledItems?.holoDeck), `an item/completed kind nothing routes is COUNTED in the sidecar (${JSON.stringify(I.meta()?.unhandledItems)})`);
   ok(/unhandled item kind "holoDeck"/.test(I.journal()), 'and logged once, verbatim, in the wrapper journal');

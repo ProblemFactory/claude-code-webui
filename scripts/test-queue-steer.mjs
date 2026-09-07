@@ -3763,7 +3763,7 @@ console.log('— ⑫ no commit on this branch carries conflict markers (a clean 
 console.log('— ⑨ steered messages: one bubble each, live and after a reload');
 {
   const { CodexMessageManager } = require(path.join(REPO, 'src/codex-message-manager.js'));
-  const { mergeCodexRecords, recordFingerprint, userTwinKeys, userRecordIdentity } = require(path.join(REPO, 'src/codex-session-store.js'));
+  const { mergeCodexRecords, recordFingerprint, userTwinKeys, userRecordIdentity, codexRecordIdentity } = require(path.join(REPO, 'src/codex-session-store.js'));
   const rollout = fs.readFileSync(path.join(REPO, 'scripts/fixtures/codex-steer-all-rollout.jsonl'), 'utf8')
     .split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l));
   const userRecs = rollout.filter((r) => r.type === 'response_item' && r.payload.type === 'message' && r.payload.role === 'user');
@@ -3892,15 +3892,47 @@ console.log('— ⑨ steered messages: one bubble each, live and after a reload'
     ok('a steered INHERITED peer message keeps its labelled card AND carries the queue id (a webui_msg_id would have made it an anonymous "You" bubble)',
       inheritedPeer?.originKind === 'peer-message' && inheritedPeer.webuiMsgId === 'inh-peer', JSON.stringify([inheritedPeer?.originKind, inheritedPeer?.webuiMsgId]));
   }
-  // (g) the marker is out-of-band on BOTH readers, or the twin never collapses
+  // (g) WHAT EACH COPY IS KEYED BY. Round 1 keyed the inherited bubble on its
+  // CONTENT so codex's copy would collapse onto it — which silently deleted the
+  // second of two same-text steers (round 2, (j1) below). Every user record is
+  // now keyed by the id of the SUBMISSION it carries — ours by the webui/queue
+  // id, codex's by its own `msg_…` — and the ours↔codex pair is retired by the
+  // content CLAIM instead. The marker still stays out of the NORMALIZER's id
+  // hash, so live and rebuilt agree whichever copy survives.
   {
-    const marked = { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'x' }], webui_queue_id: 'inh-9' } };
+    const marked = { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'x' }], webui_queue_id: 'inh-9', webui_queue_via: 'steered' } };
     const bare = { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'x' }] } };
-    ok('merge fingerprint: a marked inherited bubble keys exactly like the bare record codex writes', recordFingerprint(marked, 't') === recordFingerprint(bare, 't'));
-    ok('normalizer recordKey: both copies mint the SAME message id, so live and rebuilt agree whichever survives', CodexMessageManager.recordKey(marked) === CodexMessageManager.recordKey(bare));
-    ok('userRecordIdentity names only the ID-KEYED spellings (webui_queue_id keys on content, by design)',
-      userRecordIdentity(marked.payload) === '' && userRecordIdentity({ webui_msg_id: 'm1' }) === 'm1' && userRecordIdentity({ client_msg_id: 'c1' }) === 'c1');
-    ok('userTwinKeys: ours-vs-codex is decided by OUR markers, never by codex\'s fields', userTwinKeys(marked).ours === true && userTwinKeys(bare).ours === false && userTwinKeys(marked).claims === false && userTwinKeys({ type: 'response_item', payload: { type: 'message', role: 'user', webui_msg_id: 'm', content: [] } }).claims === true);
+    const codexOwn = { type: 'response_item', payload: { type: 'message', id: 'msg_1', role: 'user', content: [{ type: 'input_text', text: 'x' }] } };
+    const marked2 = { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'x' }], webui_queue_id: 'inh-10', webui_queue_via: 'steered' } };
+    ok('merge fingerprint: an inherited bubble keys by the app-server cid — a SUBMISSION id, never its text',
+      recordFingerprint(marked, 't') === 't:response_item:user:inh-9' && recordFingerprint(marked, 't') !== recordFingerprint(marked2, 't'),
+      [recordFingerprint(marked, 't'), recordFingerprint(marked2, 't')]);
+    ok('…and codex\'s own copy keys by the id IT minted, in its own namespace', recordFingerprint(codexOwn, 't') === 't:response_item:user#codex:msg_1' && recordFingerprint(bare, 't') !== recordFingerprint(codexOwn, 't'));
+    ok('codexRecordIdentity: codex\'s id when it has one, empty for the pre-0.15x records that carry none (they keep the content key)',
+      codexRecordIdentity(codexOwn.payload) === 'msg_1' && codexRecordIdentity(bare.payload) === '');
+    ok('normalizer recordKey: both copies mint the SAME message id, so live and rebuilt agree whichever survives', CodexMessageManager.recordKey(marked) === CodexMessageManager.recordKey(bare) && CodexMessageManager.recordKey(codexOwn) === CodexMessageManager.recordKey(bare));
+    ok('userRecordIdentity names every SUBMISSION-id spelling — webui_queue_id included (it IS the cid a previous wrapper minted)',
+      userRecordIdentity(marked.payload) === 'inh-9' && userRecordIdentity({ webui_msg_id: 'm1' }) === 'm1' && userRecordIdentity({ client_msg_id: 'c1' }) === 'c1' && userRecordIdentity(bare.payload) === '');
+    ok('userTwinKeys: ours-vs-codex is decided by OUR markers, never by codex\'s fields', userTwinKeys(marked).ours === true && userTwinKeys(bare).ours === false && userTwinKeys(codexOwn).ours === false);
+    // `late` = "the app-server had already persisted its own copy when this
+    // record was written" — ONE reader-facing marker, set by every producer of
+    // ours that writes after the commit (the drained item/completed twin, the
+    // idle peer path). The forensic `webui_queue_via` label is NOT the contract:
+    // reading it would have made the rule queue-only, and the peer idle path
+    // (measured by test-peer-msg-card) doubles the moment it is.
+    ok('…and `late` is decided by webui_after_commit, not by which producer\'s label a record carries',
+      userTwinKeys(marked).late === false
+      && userTwinKeys({ type: 'response_item', payload: { type: 'message', role: 'user', content: [], webui_queue_id: 'i', webui_queue_via: 'drained', webui_after_commit: true } }).late === true
+      && userTwinKeys({ type: 'response_item', payload: { type: 'message', role: 'user', content: [], webui_peer: { name: 'b' }, webui_after_commit: true } }).late === true
+      && userTwinKeys({ type: 'response_item', payload: { type: 'message', role: 'user', content: [], webui_queue_id: 'i', webui_queue_via: 'drained' } }).late === false
+      && userTwinKeys({ type: 'response_item', payload: { type: 'message', role: 'user', webui_msg_id: 'm', content: [] } }).late === false && userTwinKeys(bare).late === false);
+    // COMPAT RUNG: a PEER copy is late-capable with or without the marker —
+    // every wrapper shipped before it wrote the idle-path record (which lands
+    // after turn/start committed codex's copy) unmarked, and those buffers live
+    // on inside sessions that are running right now. The queue bubble needs no
+    // such rung: no unmarked one was ever released.
+    ok('…and an UNMARKED peer copy is late-capable anyway (a running wrapper\'s buffer predates the marker)',
+      userTwinKeys({ type: 'response_item', payload: { type: 'message', role: 'user', content: [], webui_peer: { name: 'b' } } }).late === true);
     ok('…and a non-user record is not its business', userTwinKeys({ type: 'response_item', payload: { type: 'message', role: 'assistant', content: [] } }) === null && userTwinKeys({ type: 'event_msg', payload: {} }) === null);
   }
 
@@ -4031,10 +4063,208 @@ console.log('— ⑨ steered messages: one bubble each, live and after a reload'
     ok('a landed steer writes the bubble AT ONCE, in queue order (the commit twin arrives up to a minute later)', /await request\('turn\/steer'[\s\S]{0,1600}recordInboundUserMessage\(cid, userInputToContent\(item\.input\), 'steered'\)/.test(cw));
     ok('…and a REFUSED steer records nothing (that message is still queued)', /return \{ \.\.\.base, ok: false, detail: e\.message, \.\.\.classifySteerFailure\(e\.message\) \};\n  \}/.test(cw));
     ok('every id whose bubble we already wrote is remembered — chat-input, the queued cid and the peer cid', (cw.match(/noteRecordedUserCid\(/g) || []).length >= 5);
-    ok('the record carries the queue id as an out-of-band marker, LAST, so the stable payload stays {type, role, content}', /record\('response_item', \{ type: 'message', role: 'user', content: blocks, webui_queue_id: id \}\)/.test(cw));
+    ok('the record carries the queue id + its producer as out-of-band markers, LAST, so the stable payload stays {type, role, content}',
+      /record\('response_item', \{\n\s*type: 'message', role: 'user', content: blocks, webui_queue_id: id, webui_queue_via: kind,\n\s*\.\.\.\(kind === 'drained' \? \{ webui_after_commit: true \} : \{\}\),\n\s*\}\);/.test(cw));
+    // WHICH producer wrote it is load-bearing, not decoration: the two sit on
+    // opposite sides of codex's own copy in time, and only the LATE one may
+    // yield to it (see (j3)). A `via` the reader does not know must degrade to
+    // the EARLY meaning — an unnamed producer may never delete a bubble.
+    ok('…and the producer is a NAMED enum, defaulting to the early meaning', /INBOUND_USER_VIA = \{ steered: 'steered', drained: 'drained' \}/.test(cw) && /INBOUND_USER_VIA\[via\] \|\| 'steered'/.test(cw));
+    ok('the item/completed twin — the one that arrives AFTER codex persisted its own copy — is the record marked \'drained\'', /if \(type === 'userMessage'\) \{[\s\S]{0,260}, 'drained'\);/.test(cw));
     ok('an inherited queue row advertises the app-server cid as its msgId so the strip row and the bubble chip join', /msgId: known \? \(known\.msgId \|\| ''\) : cid/.test(cw) && /msg_id: known \? \(known\.msgId \|\| ''\) : cid/.test(cw));
     ok('NO SILENT DROPS: an unrouted item/completed kind is logged once and counted in the sidecar', /noteUnhandledItem\(type\);\n\}/.test(cw) && /meta\.unhandledItems/.test(cw));
     ok('…and the deliberate no-ops are NAMED (a set, not silence)', /NO_RENDER_COMPLETED_ITEMS = new Set\(\[[\s\S]{0,400}'hookPrompt'/.test(cw));
+  }
+
+  // (j) ROUND 2 — the defects an adversarial verifier reproduced against (a)-(h)
+  // above, each with a NEGATIVE CONTROL that runs the same scenario through the
+  // shipped code MINUS the clause that fixes it. The controls are patched copies
+  // of the REAL modules, never hand-written imitations: an imitation agrees with
+  // whatever I believe the old code did (2.369.44 lesson), and every patch here
+  // asserts it matched, so a control that silently patched nothing is red.
+  {
+    const patchDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-steer-ctl-'));
+    let ctlSeq = 0;
+    const loadPatched = (rel, patches) => {
+      let src = read(rel).replace(/require\('\.\/([^']+)'\)/g, (m, p) => `require(${JSON.stringify(path.join(REPO, 'src', p))})`);
+      for (const [from, to] of patches) {
+        if (!src.includes(from)) throw new Error(`negative control did not match in ${rel}: ${String(from).slice(0, 70)}`);
+        src = src.replace(from, to);
+      }
+      const file = path.join(patchDir, `ctl-${++ctlSeq}-` + path.basename(rel));
+      fs.writeFileSync(file, src);
+      return require(file);
+    };
+    const T = Date.parse('2026-09-07T09:00:00.000Z');
+    const turn = (id, ms) => ({ timestamp: new Date(T + ms).toISOString(), type: 'turn_context', payload: { turn_id: id } });
+    const mine = (extra, text, ms) => ({ timestamp: new Date(T + ms).toISOString(), type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text }], ...extra } });
+    const theirs = (id, text, ms, tid = 'turn-A') => ({ timestamp: new Date(T + ms).toISOString(), type: 'response_item', payload: { type: 'message', ...(id ? { id } : {}), role: 'user', content: [{ type: 'input_text', text }], internal_chat_message_metadata_passthrough: { turn_id: tid } } });
+    const bubbles = (records) => { const mm = new CodexMessageManager('r2'); for (const r of records) mm.processLive(r); return mm.messages.filter((m) => m.role === 'user').map((m) => (m.content || []).map((c) => c.text || '').join('')); };
+    const steered = (cid, text, ms) => mine({ webui_queue_id: cid, webui_queue_via: 'steered' }, text, ms);
+    const drained = (cid, text, ms) => mine({ webui_queue_id: cid, webui_queue_via: 'drained', webui_after_commit: true }, text, ms);
+
+    // (j1) THE MAJOR: two INHERITED items with the SAME text steered into one
+    // turn. Live they are two bubbles; round 1 keyed the bubble on its CONTENT,
+    // so the rebuild dropped the second — a steered message deleted, and live
+    // and reload disagreeing, in the scenario this whole section exists for.
+    // ('continue', 'go on', identical agent-to-agent notices — a 25-item queue
+    // makes this ordinary.)
+    {
+      const live = [steered('inh-1', 'go on', 1000), steered('inh-2', 'go on', 1100)];
+      const rollout = [turn('turn-A', 0), theirs('msg_1', 'go on', 43000), theirs('msg_2', 'go on', 43100)];
+      ok('LIVE: two same-text steers are two bubbles', bubbles(live).length === 2, bubbles(live));
+      ok('REBUILD: …and still two after a reload, each once', bubbles(mergeCodexRecords(rollout, live)).length === 2, bubbles(mergeCodexRecords(rollout, live)));
+      const users = (() => { const mm = new CodexMessageManager('r2'); for (const r of mergeCodexRecords(rollout, live)) mm.processLive(r); return mm.messages.filter((m) => m.role === 'user'); })();
+      ok('…both keeping their own queue id, so each chip joins its own row', users.map((m) => m.webuiMsgId).join(',') === 'inh-1,inh-2', users.map((m) => m.webuiMsgId));
+      // NEGATIVE CONTROL — the shipped store with round 1's keying restored:
+      // every user record keyed by CONTENT (the queue id out of the
+      // submission-id list, codex's own id not in the key, the two producers
+      // sharing one namespace). It deletes the second steered message.
+      const contentKeyed = [
+        ["  return payload.webui_msg_id || payload.webuiMsgId || payload.client_msg_id || payload.clientMsgId\n    || payload.webui_queue_id || payload.webuiQueueId || '';",
+          "  return payload.webui_msg_id || payload.webuiMsgId || payload.client_msg_id || payload.clientMsgId || '';"],
+        ["      const codexId = codexRecordIdentity(payload);\n      if (codexId) return `${turnId}:response_item:user#codex:${codexId}`;", ''],
+        ['      return `${turnId}:response_item:user#${userRecordIsOurs(payload) ? \'ours\' : \'codex\'}:${userContentKey(payload) || \'\'}`;', ''],
+      ];
+      const ctl = loadPatched('src/codex-session-store.js', contentKeyed);
+      ok('NEGATIVE CONTROL: with round 1\'s content keying the same records rebuild to ONE bubble', bubbles(ctl.mergeCodexRecords(rollout, live)).length === 1, bubbles(ctl.mergeCodexRecords(rollout, live)));
+    }
+
+    // (j2) THE SAME LOSS WITH NO BUFFER AT ALL — codex's own records. A user
+    // submission's identity is the id its producer minted, never its text:
+    // MEASURED on the local rollout corpus (89 files, 572 user records), the
+    // turn-scoped content key deleted 133 real messages on reload, every
+    // collision carrying a different `id` AND a different `create_time` — 133
+    // distinct submissions, zero genuine duplicates.
+    {
+      const rollout = [turn('turn-A', 0), theirs('msg_1', 'X', 1000), theirs('msg_2', 'Y', 1100), theirs('msg_3', 'X', 1200)];
+      ok('ROLLOUT ALONE: two distinct submissions of the same text in one turn stay two bubbles, in order', bubbles(mergeCodexRecords(rollout, [])).join('|') === 'X|Y|X', bubbles(mergeCodexRecords(rollout, [])));
+      const ctl = loadPatched('src/codex-session-store.js', [[
+        "      const codexId = codexRecordIdentity(payload);\n      if (codexId) return `${turnId}:response_item:user#codex:${codexId}`;",
+        '',
+      ]]);
+      ok("NEGATIVE CONTROL: without codex's own id in the key, the third record is deleted on reload", ctl.mergeCodexRecords(rollout, []).filter((r) => r.payload?.role === 'user').length === 2, bubbles(ctl.mergeCodexRecords(rollout, [])));
+      // …and a fork replay (the SAME record in two files, sharing codex's id)
+      // must still collapse — the reason the key may not simply become "content
+      // plus position". Real fork chains reuse the parent's ids (measured 4/4
+      // and 9/9 on local rollouts).
+      const parent = [turn('turn-A', 0), theirs('msg_1', 'X', 1000)];
+      ok('…while a fork replaying its parent record (same id, two files) is still ONE bubble', bubbles(mergeCodexRecords(parent, [theirs('msg_1', 'X', 1000)])).length === 1);
+    }
+
+    // (j3) WHICH PRODUCER WROTE OUR COPY decides how the pair is retired,
+    // because they sit on opposite sides of codex's own record in time. A steer
+    // lands ~42s before the commit (ours claims, codex's copy consumes); a
+    // DRAINED item is only ever announced by the item/completed twin, which
+    // arrives after codex has already persisted its record — so that copy of
+    // ours yields instead, or the bubble doubles.
+    {
+      const rollout = [turn('turn-A', 0), theirs('msg_1', 'do it', 5000)];
+      ok('DRAIN: codex\'s record first, our late twin 1ms later → ONE bubble', bubbles(mergeCodexRecords(rollout, [drained('inh-1', 'do it', 5001)])).length === 1);
+      ok('NEGATIVE CONTROL: the same records with our copy marked \'steered\' (a producer-blind marker) → TWO', bubbles(mergeCodexRecords(rollout, [steered('inh-1', 'do it', 5001)])).length === 2);
+      ok('…and a drained bubble whose codex record has not been flushed yet still renders (it yields only to a copy that EXISTS)',
+        bubbles(mergeCodexRecords([turn('turn-A', 0)], [drained('inh-1', 'do it', 5001)])).length === 1);
+      ok('…and it never yields to an identical message from ANOTHER turn (the pair is always inside the turn that committed it)',
+        bubbles(mergeCodexRecords([turn('turn-A', 0), theirs('msg_0', 'do it', 1000), turn('turn-B', 20000), theirs('msg_1', 'do it', 25000)], [drained('inh-1', 'do it', 25001)])).length === 2);
+      ok('STEER keeps its 42s-early claim: ours survives with its chip, codex\'s commit copy is dropped',
+        (() => { const mm = new CodexMessageManager('r2'); for (const r of mergeCodexRecords([turn('turn-A', 0), theirs('msg_1', 'do it', 43000)], [steered('inh-1', 'do it', 1000)])) mm.processLive(r); const u = mm.messages.filter((m) => m.role === 'user'); return u.length === 1 && u[0].webuiMsgId === 'inh-1'; })());
+    }
+
+    // (j4) THE CLAIM LEDGER vs THE DUPLICATE CHECK. A claim that is never
+    // retired DELETES an unrelated message later — the failure the forward-only
+    // rule exists to prevent, arriving through the back door.
+    {
+      const live = [steered('inh-1', 'run the tests', 1000), mine({ webui_msg_id: 'm1' }, 'run the tests', 1100)];
+      const rollout = [turn('turn-A', 0), theirs('msg_1', 'run the tests', 43000), theirs('msg_2', 'run the tests', 43100),
+        turn('turn-B', 90000), theirs('msg_3', 'run the tests', 91000, 'turn-B')];
+      ok('a codex-only message in a LATER turn survives a rebuild that also carries two copies of ours', bubbles(mergeCodexRecords(rollout, live)).length === 3, bubbles(mergeCodexRecords(rollout, live)));
+      // The structural reason: ours and codex's copies never share a fingerprint
+      // namespace, so `seen` can only ever collapse one producer's own record.
+      const ourBare = { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'q' }], webui_msg_id: '' } };
+      const theirBare = { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'q' }] } };
+      ok('…and with NEITHER side carrying an id, the two producers still key apart (a duplicate is a fact only within one producer)',
+        recordFingerprint(ourBare, 't') !== recordFingerprint(theirBare, 't') && /user#ours:/.test(recordFingerprint(ourBare, 't')) && /user#codex:/.test(recordFingerprint(theirBare, 't')),
+        [recordFingerprint(ourBare, 't'), recordFingerprint(theirBare, 't')]);
+      ok('…yet that pair is still ONE bubble after a rebuild — the claim retires it, not a shared key',
+        bubbles(mergeCodexRecords([turn('turn-A', 0), { ...theirBare, timestamp: new Date(T + 5000).toISOString() }], [{ ...ourBare, timestamp: new Date(T + 1000).toISOString() }])).length === 1);
+      // The pre-0.15x shape is the one place a "duplicate" is INFERRED from
+      // content; there the inferred duplicate must still retire the claim it
+      // stands for, or the leak deletes the later message.
+      const legacy = (text, ms, tid = 'turn-A') => theirs(null, text, ms, tid);
+      const legacyRollout = [turn('turn-A', 0), legacy('ship it', 9000), legacy('ship it', 9100), turn('turn-B', 60000), legacy('ship it', 61000, 'turn-B')];
+      const legacyLive = [mine({ webui_peer: { name: 'b', body: 'ship it' } }, 'ship it', 1000), mine({ webui_msg_id: 'm1' }, 'ship it', 1100)];
+      ok('LEGACY (id-less records): a claim standing for a content-inferred duplicate is retired, so no message is deleted',
+        bubbles(mergeCodexRecords(legacyRollout, legacyLive)).length === 3, bubbles(mergeCodexRecords(legacyRollout, legacyLive)));
+      const ctl4 = loadPatched('src/codex-session-store.js', [[
+        '      const dup = userTwinKeys(record);\n      if (dup && !dup.ours && !codexRecordIdentity(record.payload || {})) {\n        const claimed = userClaims.get(dup.contentKey) || 0;\n        if (claimed > 0) userClaims.set(dup.contentKey, claimed - 1);\n      }\n',
+        '',
+      ]]);
+      ok('NEGATIVE CONTROL: without that retirement the leaked claim eats the turn-B message', ctl4.mergeCodexRecords(legacyRollout, legacyLive).filter((r) => r.payload?.role === 'user').length === 2);
+      // …and an EXACT duplicate (same codex id in two sources) must NOT eat a
+      // claim: there the duplicate is a fact, and consuming one would render a
+      // later distinct submission twice.
+      ok('an id-carrying duplicate leaves the ledger alone (2 sends of one text → 2 bubbles, not 3)',
+        bubbles(mergeCodexRecords([turn('turn-A', 0), theirs('msg_1', 'go', 9000), theirs('msg_1', 'go', 9000), theirs('msg_2', 'go', 30000)],
+          [mine({ webui_msg_id: 'm1' }, 'go', 1000), mine({ webui_msg_id: 'm2' }, 'go', 1100)])).length === 2);
+    }
+
+    // (j5) A BUBBLE THAT DOES NOT CLOSE THE TURN'S STREAMS MUST NOT HIDE THEM
+    // from the finalizer either. The inherited record deliberately skips
+    // _finalizeStreaming (it lands mid-turn), but it was still a hard `break` in
+    // that function's backward scan, so a reply left open when the turn ended
+    // stayed 'streaming' forever — a phantom spinner on a dead, read-only
+    // conversation. Every attach runs this path.
+    {
+      const deadTurn = (marker) => [
+        { timestamp: new Date(T).toISOString(), type: 'event_msg', payload: { type: 'task_started', turn_id: 't1' } },
+        { timestamp: new Date(T + 100).toISOString(), type: 'event_msg', payload: { type: 'agent_message_delta', item_id: 'm1', delta: 'half a reply' } },
+        marker('inh-1', 'steer one', 200), marker('inh-2', 'steer two', 300), marker('inh-3', 'steer three', 400),
+      ];
+      const statuses = (records, Manager = CodexMessageManager) => { const mm = new Manager('dead'); mm.convertHistory(records); return mm.messages.map((m) => `${m.role}:${m.status}`); };
+      ok('a reply the wrapper never closed is COMPLETE after a rebuild, not a phantom spinner', statuses(deadTurn(steered)).join(',') === 'assistant:complete,user:complete,user:complete,user:complete', statuses(deadTurn(steered)));
+      ok('…exactly as it already was for a typed send', statuses(deadTurn((id, text, ms) => mine({ webui_msg_id: id }, text, ms))).join(',') === 'assistant:complete,user:complete,user:complete,user:complete');
+      const ctl5 = loadPatched('src/codex-message-manager.js', [[
+        "      if (m.role === 'user' && m.originKind !== 'peer-message' && !m.midTurn) break;",
+        "      if (m.role === 'user' && m.originKind !== 'peer-message') break;",
+      ]]);
+      ok('NEGATIVE CONTROL: without the mid-turn exemption the same records leave the reply streaming forever', statuses(deadTurn(steered), ctl5.CodexMessageManager)[0] === 'assistant:streaming');
+      // …and the exemption must not resurrect the fragmentation it replaced:
+      // a steered bubble still does NOT close the reply it was injected into.
+      const midStream = (marker) => {
+        const mm = new CodexMessageManager('mid');
+        mm.processLive({ timestamp: new Date(T).toISOString(), type: 'event_msg', payload: { type: 'task_started', turn_id: 't1' } });
+        mm.processLive({ timestamp: new Date(T + 10).toISOString(), type: 'event_msg', payload: { type: 'agent_message_delta', item_id: 'm1', delta: 'first half ' } });
+        mm.processLive(marker('inh-1', 'steered mid-stream', 20));
+        mm.processLive({ timestamp: new Date(T + 30).toISOString(), type: 'event_msg', payload: { type: 'agent_message_delta', item_id: 'm1', delta: 'second half' } });
+        return mm.messages.filter((m) => m.role === 'assistant');
+      };
+      ok('the steered bubble still does not fragment the reply it was injected into (2.368.16 class)', midStream(steered).length === 1 && (midStream(steered)[0].content || []).map((c) => c.text).join('') === 'first half second half');
+      ok('…and the flag rides only the inherited bubble, never a typed one', (() => {
+        const mm = new CodexMessageManager('flag');
+        mm.processLive(steered('inh-1', 'a', 0)); mm.processLive(mine({ webui_msg_id: 'm1' }, 'b', 10));
+        const u = mm.messages.filter((m) => m.role === 'user');
+        return u[0].midTurn === true && !u[1].midTurn;
+      })());
+    }
+
+    // (j6) THE CENSUS. The yield rule above is only as complete as the list of
+    // producers that DECLARE their commit order — the round-2 peer regression
+    // (test-peer-msg-card, idle path) was exactly a producer nobody had asked
+    // the question of. Three writers of a user record exist in the wrapper; a
+    // fourth must answer "had the app-server committed it yet?" before it
+    // ships, so this count is a gate, not a decoration.
+    {
+      const cw = read('data/bin/codex-chat-wrapper.js');
+      const producers = cw.match(/record\('response_item',[\s\S]{0,300}?role: 'user'/g) || [];
+      ok(producers.length === 3, `every wrapper producer of a user record is accounted for: chat-input (early), the inherited-queue bubble (steer early / drain late), the peer copy (queued early / idle late) — found ${producers.length}`, producers.length);
+      ok(/webui_after_commit/.test(cw) && (cw.match(/webui_after_commit: true/g) || []).length === 2, 'and exactly the two LATE ones declare it', (cw.match(/webui_after_commit: true/g) || []).length);
+    }
+
+    // (j7) THE ROUTING PIN stays: neither reader may go back to dropping the
+    // app-server's own carrier in silence.
+    ok('`item_completed:UserMessage` is still an EXPLICIT skip in the normalizer, and the wrapper still routes `userMessage`',
+      CodexMessageManager.ITEM_COMPLETED_SKIPPED_TYPES.has('UserMessage') && /if \(type === 'userMessage'\)/.test(read('data/bin/codex-chat-wrapper.js')));
+    try { fs.rmSync(patchDir, { recursive: true, force: true }); } catch {}
   }
 }
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);

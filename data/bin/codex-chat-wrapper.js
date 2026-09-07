@@ -935,8 +935,13 @@ function _handleItemCompletedInner(item, itemId) {
   //   clientId ABSENT ⇒ the submission came through our own `turn/start`
   //   (which carries none), whose bubble handleInput wrote before the RPC —
   //   nothing to add. Same for one whose id we already recorded.
+  //   This notification is the LATE producer: the app-server has already
+  //   persisted its own copy of the message when it sends it, so the record
+  //   below is marked 'drained' and the reader lets it yield to that copy
+  //   instead of doubling the bubble (a steer, which lands ~42s earlier, is
+  //   marked 'steered' and never yields).
   if (type === 'userMessage') {
-    recordInboundUserMessage(asString(item.clientId || item.client_id), userInputToContent(item.content), 'entered the turn');
+    recordInboundUserMessage(asString(item.clientId || item.client_id), userInputToContent(item.content), 'drained');
     return;
   }
   if (type === 'webSearch') {
@@ -1673,25 +1678,42 @@ function userInputToContent(input) {
  *  app-server, or steered by a second attached client). Returns true when a
  *  record was written.
  *  `webui_queue_id` is an OUT-OF-BAND marker — the app-server's own
- *  clientUserMessageId — that both readers strip from the merge fingerprint
- *  and the message-id hash (exactly like `webui_peer`), so codex's rollout copy
- *  of the same message collapses onto this one instead of doubling it, and the
- *  live and rebuilt bubbles share one id. The normalizer additionally uses it
- *  to join the bubble to its queue row, so the chip can say `Steered`.
- *  The marker rides LAST so the stable payload stays {type, role, content}. */
+ *  clientUserMessageId — that both readers strip from the message-id hash
+ *  (exactly like `webui_peer`), so the live and rebuilt bubbles share one id,
+ *  while the merge keys the record BY it: the cid names one submission, and two
+ *  inherited items with the same text are two messages (round 2 — keying that
+ *  bubble on its content deleted the second one on reload). codex's own copy of
+ *  the message is retired against ours by the merge's content CLAIM.
+ *  `webui_queue_via` says which producer wrote it — forensics for a buffer dump
+ *  ('steered' = the instant `turn/steer` landed, ~42s BEFORE the app-server
+ *  commits the message, measured on the owner's session; 'drained' = the
+ *  app-server ran the item itself and its `item/completed` twin was the only
+ *  notice) — while `webui_after_commit` is the READER's contract, set by every
+ *  producer of ours that writes AFTER the app-server has already persisted its
+ *  own copy of the submission (here and the idle peer path). Ours normally
+ *  comes first, so the merge lets codex's later copy consume our claim; a
+ *  record that comes LAST has to yield to the copy already on screen instead,
+ *  or one message renders twice. One reader-facing marker for that fact, so a
+ *  new producer answers ONE question: had the app-server committed it yet?
+ *  The markers ride LAST so the stable payload stays {type, role, content}. */
+const INBOUND_USER_VIA = { steered: 'steered', drained: 'drained' };
 function recordInboundUserMessage(cid, content, via) {
   const id = asString(cid);
+  const kind = INBOUND_USER_VIA[via] || 'steered';   // an unnamed producer is treated as EARLY: it may never delete a bubble
   if (!id || recordedUserCids.has(id)) return false;   // ours already, or the app-server's own turn/start commit
   const blocks = asArray(content);
   if (!blocks.length) {
     // A submission we do not know, entering the turn, that we cannot render:
     // say so rather than drop it the way `userMessage` itself was dropped.
-    log(`queued submission ${id} (${via}) entered the turn with no renderable content — no bubble written`);
+    log(`queued submission ${id} (${kind}) entered the turn with no renderable content — no bubble written`);
     return false;
   }
   noteRecordedUserCid(id);
-  record('response_item', { type: 'message', role: 'user', content: blocks, webui_queue_id: id });
-  log(`recorded the user bubble for queued submission ${id} (${via}) — this wrapper never typed it`);
+  record('response_item', {
+    type: 'message', role: 'user', content: blocks, webui_queue_id: id, webui_queue_via: kind,
+    ...(kind === 'drained' ? { webui_after_commit: true } : {}),
+  });
+  log(`recorded the user bubble for queued submission ${id} (${kind}) — this wrapper never typed it`);
   return true;
 }
 
@@ -2694,7 +2716,17 @@ async function handleInput(msg) {
     // The delivery ladder types the frame; anything else (an older server, a
     // direct caller) is a peer — the conservative lane.
     const peerKind = msg.kind === 'notification' ? 'notification' : 'peer';
-    const recordPeerMessage = () => record('response_item', { type: 'message', role: 'user', content: [{ type: 'input_text', text }], webui_peer: { name: fromName, body: cardText } });
+    // afterCommit: on the IDLE path `turn/start` has ALREADY persisted the
+    // app-server's own copy of this message by the time we get here, so this
+    // record is the LATE one of the pair and must yield to that copy on a
+    // rebuild instead of doubling the card. On the queued path nothing is
+    // committed yet (the copy appears when the queue drains), so ours is first
+    // and claims the content as usual.
+    const recordPeerMessage = (afterCommit) => record('response_item', {
+      type: 'message', role: 'user', content: [{ type: 'input_text', text }],
+      webui_peer: { name: fromName, body: cardText },
+      ...(afterCommit ? { webui_after_commit: true } : {}),
+    });
     try {
       // A steer that is REFUSED is a designed path (the turn ended between
       // our check and the RPC; a review/compact turn is not steerable), and
@@ -2704,7 +2736,7 @@ async function handleInput(msg) {
       if (peerKind === 'notification' && meta.activeTurnId) {
         const st = await steerInput(encodeUserInput(text, []), `notif-${process.pid}-${nextId++}`);
         if (st.ok) {
-          recordPeerMessage();
+          recordPeerMessage(false);   // steered: the commit twin lands at the next turn boundary — ours is first
           emitTaskEvent('peer_message_result', { ok: true, mode: 'steered' });
           log('notification STEERED into the running turn (it carries only itself; the queue is untouched)');
           return;
@@ -2725,12 +2757,12 @@ async function handleInput(msg) {
           input: encodeUserInput(text, []),
           clientUserMessageId: cid,
         }, 30000);
-        recordPeerMessage();
+        recordPeerMessage(false);   // queued: codex commits its copy when the queue drains — ours is first
         emitTaskEvent('peer_message_result', { ok: true, mode: 'queued', ...fell });
         log('peer message queued (turn active; runs after the current turn)');
       } else {
         await startTurn(text);
-        recordPeerMessage();
+        recordPeerMessage(true);    // idle: turn/start already persisted codex's copy — ours is the late twin
         emitTaskEvent('peer_message_result', { ok: true, mode: 'turn', ...fell });
       }
     } catch (e) {

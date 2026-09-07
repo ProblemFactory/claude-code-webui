@@ -213,8 +213,12 @@ const userRec = (n, text, extra = {}) => ({ timestamp: T(n), type: 'response_ite
 {
   const turnCtx = { timestamp: T(0), type: 'turn_context', payload: { turn_id: 't1', cwd: '/w', approval_policy: 'on-request', model: 'gpt-5' } };
   const rollout = (n) => userRec(n, VM_FRAME);
-  const buffer = (n) => userRec(n, VM_FRAME, { webui_peer: { name: 'scout-7', body: 'found the doc you wanted' } });
-  for (const [label, hist, live] of [['idle path (rollout copy first)', [turnCtx, rollout(1)], [buffer(2)]], ['queued path (wrapper copy first)', [turnCtx, rollout(2)], [buffer(1)]]]) {
+  const buffer = (n, afterCommit) => userRec(n, VM_FRAME, { webui_peer: { name: 'scout-7', body: 'found the doc you wanted' }, ...(afterCommit ? { webui_after_commit: true } : {}) });
+  // The two orders are TWO PRODUCERS, not luck: on the idle path turn/start
+  // persisted codex's copy before the wrapper wrote its own (so that record
+  // carries `webui_after_commit` and yields to the copy already there), on the
+  // queued path ours is written first and claims the content forward.
+  for (const [label, hist, live] of [['idle path (rollout copy first)', [turnCtx, rollout(1)], [buffer(2, true)]], ['queued path (wrapper copy first)', [turnCtx, rollout(2)], [buffer(1, false)]]]) {
     const merged = mergeCodexRecords(JSON.parse(JSON.stringify(hist)), JSON.parse(JSON.stringify(live)));
     const users = merged.filter((r) => r.type === 'response_item' && r.payload.role === 'user');
     check(`${label}: the twins still DEDUP in mergeCodexRecords (webui_peer stripped from the fingerprint)`, users.length === 1, `got ${users.length}`);
@@ -251,7 +255,15 @@ const userRec = (n, text, extra = {}) => ({ timestamp: T(n), type: 'response_ite
   // THREE paths since 2026-09-07 (notifications steer): steered / queued /
   // own turn. Every one of them must write the SAME record, or a notification
   // that took the steer lane would render as an anonymous "You" bubble.
-  check('wrapper records the peer user message WITH the webui_peer marker (name + body) on ALL THREE delivery paths', /webui_peer: \{ name: fromName, body: cardText \}/.test(w) && (w.match(/recordPeerMessage\(\);/g) || []).length === 3);
+  check('wrapper records the peer user message WITH the webui_peer marker (name + body) on ALL THREE delivery paths', /webui_peer: \{ name: fromName, body: cardText \}/.test(w) && (w.match(/recordPeerMessage\((true|false)\);/g) || []).length === 3);
+  // WHICH SIDE OF CODEX'S OWN COPY this record lands on is the rebuild's whole
+  // question (2026-09-07 round 2): on the IDLE path `turn/start` has already
+  // persisted codex's copy when we get here, so ours is the LATE twin and says
+  // so; on the queued path nothing is committed yet and ours claims first, and
+  // a STEERED notification's commit twin only lands at the next turn boundary.
+  check('…and each path declares whether the app-server had already committed the message (idle=true after turn/start, queued=false)',
+    /await startTurn\(text\);\n\s*recordPeerMessage\(true\);/.test(w) && /clientUserMessageId: cid,\n\s*\}, 30000\);\n\s*recordPeerMessage\(false\);/.test(w));
+  check('…through the ONE reader-facing marker for that fact', /\.\.\.\(afterCommit \? \{ webui_after_commit: true \} : \{\}\)/.test(w));
   check('…and echoes fromName on failure so the re-stash keeps its label', /peer_message_result', \{ ok: false, reason: e\.message, text, fromName \}/.test(w));
   check('stdout/codex-events re-stash carries the echoed fromName (S5 consumer module)', /fromName: msg\.payload\.fromName \|\| null, text: String\(msg\.payload\.text\)/.test(read('src/server/stdout/codex-events.js')));
   check('mergeCodexRecords fingerprint strips webui_peer', /const \{[^}]*webui_peer[^}]*\.\.\.stablePayload \} = payload;/.test(read('src/codex-session-store.js')));

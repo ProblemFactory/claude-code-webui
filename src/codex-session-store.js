@@ -262,12 +262,34 @@ function sortRecords(records) {
 }
 
 /** The webui id a user record is FINGERPRINTED by, in every spelling a producer
- *  uses. `webui_queue_id` is deliberately NOT here — an inherited queue bubble
- *  keys on its content so codex's own copy of the same message collapses onto
- *  it (see userTwinKeys). ONE spelling, so the fingerprint and the twin rule
- *  can never disagree about which copies are id-keyed. */
+ *  uses. ONE spelling, so the fingerprint and the twin rule can never disagree
+ *  about which copies are id-keyed.
+ *  `webui_queue_id` IS one of them (round 2, 2026-09-07): it is the app-server's
+ *  clientUserMessageId for the submission whose bubble we wrote — for an
+ *  INHERITED queue item that value is literally the webui msgId the wrapper we
+ *  replaced minted, so the two spellings name the same submission and belong in
+ *  the same namespace. Keying it on CONTENT instead (round 1) silently deleted a
+ *  steered message: two inherited items with the SAME text in one turn hashed
+ *  identically and the second was dropped on rebuild — two bubbles live, one
+ *  after a reload, in the exact scenario this code exists to fix. */
 function userRecordIdentity(payload) {
-  return payload.webui_msg_id || payload.webuiMsgId || payload.client_msg_id || payload.clientMsgId || '';
+  return payload.webui_msg_id || payload.webuiMsgId || payload.client_msg_id || payload.clientMsgId
+    || payload.webui_queue_id || payload.webuiQueueId || '';
+}
+
+/** Codex's OWN id for a user message — `msg_…`, minted per SUBMISSION.
+ *  A user record that carries none of our markers is codex's copy, and its
+ *  identity is this id, never its text: MEASURED on the local rollout corpus
+ *  (89 files), the turn-scoped CONTENT key deleted 133 real user messages on
+ *  reload — every collision a different `id` AND a different `create_time`,
+ *  i.e. 133 distinct submissions, zero genuine duplicates. Cross-file dedup
+ *  (a native fork replays its parent's records) survives because a fork REUSES
+ *  the parent's ids (measured: 4/4 and 9/9 shared on real fork chains).
+ *  Pre-0.15x rollouts wrote no id (144/572 records, all in files ≤2026-05, none
+ *  mixed) — those fall back to the content key, i.e. their behaviour is
+ *  byte-identical to before. */
+function codexRecordIdentity(payload) {
+  return typeof payload.id === 'string' && payload.id ? payload.id : '';
 }
 
 function recordFingerprint(record, turnId) {
@@ -282,6 +304,22 @@ function recordFingerprint(record, turnId) {
     if (payload.type === 'message' && payload.role === 'user') {
       const webuiMsgId = userRecordIdentity(payload);
       if (webuiMsgId) return `${turnId}:response_item:user:${webuiMsgId}`;
+      // Codex's own copy: keyed by the id IT minted for this submission (see
+      // codexRecordIdentity). Separate namespace — a `msg_…` and a webui id
+      // are different id spaces, and the ours↔codex twin is retired by the
+      // CLAIM below, never by a shared key.
+      const codexId = codexRecordIdentity(payload);
+      if (codexId) return `${turnId}:response_item:user#codex:${codexId}`;
+      // NEITHER side has an id: a pre-0.15x rollout record, or a copy of OURS
+      // whose webui id arrived empty (the wrapper writes `webui_msg_id:
+      // msg.msgId || ''`). Content is the only fact left — but the two
+      // PRODUCERS stay in separate namespaces, so `seen` can only ever collapse
+      // copies of ONE producer's record. That is what makes "a record dropped
+      // as a duplicate has already had its twin effect applied" true, and with
+      // it the round-2 claim leak (a claim short-circuited by `seen` and never
+      // retired, which later deleted an unrelated message) structurally
+      // impossible. The ours↔codex pair is retired by the CLAIM, as everywhere.
+      return `${turnId}:response_item:user#${userRecordIsOurs(payload) ? 'ours' : 'codex'}:${userContentKey(payload) || ''}`;
     }
     const key = payload.call_id || payload.callId || payload.role || payload.type || 'item';
     // Strip volatile fields — the SAME item serializes differently on each
@@ -293,18 +331,12 @@ function recordFingerprint(record, turnId) {
     // copy of the same user message has just the text) — same twin rule, or
     // every delivered peer message rendered twice after a restart.
     // thread_id/turn_id ride ONLY the wrapper's copy (B-7473 item context) —
-    // stripped for exactly the same reason. webui_queue_id (2026-09-07) is the
-    // same kind of marker on the bubble the wrapper writes for an INHERITED
-    // queue submission entering the turn: the app-server's own
-    // clientUserMessageId, which its rollout copy of that message never
-    // carries. Stripping it (rather than keying on it like webui_msg_id) is
-    // what makes the two copies collapse — both are written INSIDE the turn
-    // that commits the message, so their turn-scoped content keys agree.
-    // …and a webui id that is FALSY carries no identity at all — reaching this
-    // line means the id branch above declined it — so it must not make our copy
-    // a stranger to codex's either (the wrapper writes `webui_msg_id: msg.msgId
-    // || ''`, so a frame that arrives without a msgId produced exactly that).
-    const { item_id, itemId, id, internal_chat_message_metadata_passthrough, webui_peer, webui_queue_id, webuiQueueId,
+    // stripped for exactly the same reason. The webui user markers are listed
+    // here for a record that carries one WITHOUT being a `message`/user pair
+    // (the branch above owns every user message and always returns): a marker
+    // must never be the difference between our copy and codex's, wherever it
+    // rides.
+    const { item_id, itemId, id, internal_chat_message_metadata_passthrough, webui_peer, webui_queue_id, webuiQueueId, webui_queue_via, webui_after_commit, webuiAfterCommit,
       webui_msg_id, webuiMsgId, client_msg_id, clientMsgId, thread_id, turn_id, ...stablePayload } = payload;
     return `${turnId}:response_item:${payload.type}:${key}:${JSON.stringify(stablePayload)}`;
   }
@@ -355,33 +387,70 @@ function settingsSignature(record) {
 // are two messages. So an id-keyed copy of OURS CLAIMS its content, and the
 // next codex-side copy of that content CONSUMES the claim and is dropped —
 // n copies in, n bubbles out, in order.
-// FORWARD ONLY, never a pre-pass: a claim covers copies that come AFTER it.
-// Ours is always written first (send/steer time < commit time). Letting a late
-// claim swallow an EARLIER codex record would DELETE an old message from
-// history whenever the same text was typed again after the buffer had rotated
-// away — so a twin that ties on the millisecond renders twice instead. A
-// duplicate is a nuisance; a deletion is data loss.
-// Records whose fingerprint is already content-based (a peer copy, an inherited
-// queue bubble) need no claim: their twin dedups on the fingerprint itself.
-const WEBUI_USER_MARKERS = ['webui_msg_id', 'webuiMsgId', 'client_msg_id', 'clientMsgId', 'webui_queue_id', 'webuiQueueId', 'webui_origin', 'webui_peer'];
+// FORWARD ONLY for a claim of OURS: it covers copies that come AFTER it. Ours
+// is written first on every path that TYPES or STEERS the text (send/steer time
+// < commit time). Letting a late claim swallow an EARLIER codex record would
+// DELETE an old message from history whenever the same text was typed again
+// after the buffer had rotated away — so a twin that ties on the millisecond
+// renders twice instead. A duplicate is a nuisance; a deletion is data loss.
+// THE ONE COPY OF OURS THAT IS WRITTEN LAST (round 2) is the bubble for an
+// inherited queue item the app-server DRAINED itself: its only trigger is the
+// `item/completed` twin, which the app-server emits AFTER it has persisted its
+// own record, so no forward claim of ours can ever retire that pair. The
+// wrapper marks that record `webui_queue_via:'drained'` — a FACT about how it
+// was produced, not a guess about timing — and such a record yields to an
+// unconsumed codex copy of the same content IN THE SAME TURN (a submission's
+// two copies are always in the turn that committed it) by dropping ITSELF.
+// Nothing earlier is ever deleted, and a steered/typed record never yields.
+const WEBUI_USER_MARKERS = ['webui_msg_id', 'webuiMsgId', 'client_msg_id', 'clientMsgId', 'webui_queue_id', 'webuiQueueId', 'webui_queue_via', 'webui_after_commit', 'webuiAfterCommit', 'webui_origin', 'webui_peer'];
 const TWIN_VOLATILE_FIELDS = ['id', 'item_id', 'itemId', 'internal_chat_message_metadata_passthrough', 'thread_id', 'turn_id'];
 
-/** {ours, claims, contentKey} for a user message response_item, else null.
+/** Does this user payload come from US? Any webui marker at all — so only a
+ *  record with none can be codex's own. */
+function userRecordIsOurs(payload) {
+  return WEBUI_USER_MARKERS.some((k) => payload[k] !== undefined);
+}
+
+/** The content of a user message, with every marker and volatile field of both
+ *  producers removed — ONE definition, shared by the fingerprint's id-less
+ *  fallback and the twin claim, so the two can never disagree about what "the
+ *  same text" is. Null when the payload cannot be serialized. */
+function userContentKey(payload) {
+  const bare = { ...payload };
+  for (const k of [...WEBUI_USER_MARKERS, ...TWIN_VOLATILE_FIELDS]) delete bare[k];
+  try { return 'user:' + JSON.stringify(bare); } catch { return null; }
+}
+
+/** {ours, late, contentKey} for a user message response_item, else null.
  *  `ours` = the record carries ANY webui marker, so only a record with none can
  *  be codex's own — keying "codex's copy" on the presence of ITS fields
  *  (`internal_chat_…passthrough`, a `msg_` id) instead would be a guess: 147 of
- *  629 user records in the local rollout corpus carry neither. */
+ *  629 user records in the local rollout corpus carry neither.
+ *  EVERY copy of ours claims (round 2). Round 1 claimed only the id-keyed ones
+ *  because a content-keyed copy of ours collided with codex's copy on the
+ *  fingerprint itself; now that codex's copy is keyed by ITS id, the claim is
+ *  the ONLY thing that retires the pair, for a peer copy and a falsy-webui-id
+ *  copy exactly as much as for a typed one. */
 function userTwinKeys(record) {
   if (!record || record.type !== 'response_item') return null;
   const payload = record.payload || {};
   if (payload.type !== 'message' || payload.role !== 'user') return null;
-  const bare = { ...payload };
-  for (const k of [...WEBUI_USER_MARKERS, ...TWIN_VOLATILE_FIELDS]) delete bare[k];
-  let contentKey;
-  try { contentKey = 'user:' + JSON.stringify(bare); } catch { return null; }
+  const contentKey = userContentKey(payload);
+  if (contentKey === null) return null;
+  const ours = userRecordIsOurs(payload);
+  // A copy of ours that was written AFTER the app-server persisted its own is
+  // the one a forward claim can never retire — it says so with
+  // `webui_after_commit`. COMPAT RUNG: a PEER copy is late-capable whether or
+  // not it says so, because every wrapper shipped before that marker wrote the
+  // idle-path record (post-`turn/start`, i.e. after the commit) unmarked, and
+  // those buffers live on inside running sessions. Yielding costs such a record
+  // nothing when it really was first: it only ever yields to a codex copy
+  // ALREADY emitted in the same turn, which cannot exist yet. Retire the rung
+  // when no pre-marker buffers survive.
+  const marked = payload.webui_after_commit === true || payload.webuiAfterCommit === true;
   return {
-    ours: WEBUI_USER_MARKERS.some((k) => payload[k] !== undefined),
-    claims: !!userRecordIdentity(payload),   // exactly the copies the fingerprint keys by ID
+    ours,
+    late: ours && (marked || payload.webui_peer !== undefined),
     contentKey,
   };
 }
@@ -397,7 +466,8 @@ function mergeCodexRecords(historyRecords, liveRecords) {
   // 'ultra' at the end. Only a repeat with nothing of its own kind in between
   // is a twin of the same event.
   let lastSettings = null; // { record, sig, turnId }
-  const userClaims = new Map();   // content key → id-keyed copies of OURS no codex twin has consumed yet
+  const userClaims = new Map();   // content key → copies of OURS no codex twin has consumed yet (forward, turn-independent)
+  const codexUserOut = new Map(); // `<turn> <content key>` → codex copies emitted in THIS turn no late twin of ours has consumed
   let currentTurnId = 'prelude';
   for (const record of sortRecords([...(historyRecords || []), ...(liveRecords || [])])) {
     if (record.type === 'turn_context') {
@@ -418,6 +488,14 @@ function mergeCodexRecords(historyRecords, liveRecords) {
       }
     }
     const fp = recordFingerprint(record, currentTurnId);
+    // The SAME record from two sources — already decided (emitted, or dropped
+    // as a twin, which also marks the fingerprint). It must not touch the claim
+    // ledgers a second time… UNLESS its identity was INFERRED FROM CONTENT: a
+    // pre-0.15x record carries no id of its own, so "duplicate" is a guess and
+    // this may be a second submission of the same text whose twin claim would
+    // otherwise leak — and a leaked claim DELETES an unrelated message later,
+    // while retiring one duplicate too many only ever renders one extra bubble.
+    // A deletion is data loss; a duplicate is a nuisance (round-2 finding).
     if (fp && seen.has(fp)) {
       // TURN_CONTEXT TWINS (2.369.62, the effort incident): the wrapper
       // synthesizes one the moment `turn/started` arrives (live visibility) and
@@ -439,12 +517,33 @@ function mergeCodexRecords(historyRecords, liveRecords) {
         if (!isWrapperTurnContext(record)) delete folded.effort_next; // codex's copy settles it: nothing pending in a rebuilt history
         kept.payload = folded;
       }
+      const dup = userTwinKeys(record);
+      if (dup && !dup.ours && !codexRecordIdentity(record.payload || {})) {
+        const claimed = userClaims.get(dup.contentKey) || 0;
+        if (claimed > 0) userClaims.set(dup.contentKey, claimed - 1);
+      }
       continue;
     }
     const twin = userTwinKeys(record);
-    if (twin && !twin.ours) {
-      const claimed = userClaims.get(twin.contentKey) || 0;
-      if (claimed > 0) { userClaims.set(twin.contentKey, claimed - 1); continue; }   // codex's copy of a bubble we already have
+    if (twin) {
+      const turnKey = `${currentTurnId} ${twin.contentKey}`;
+      if (twin.ours) {
+        const emitted = twin.late ? (codexUserOut.get(turnKey) || 0) : 0;
+        if (emitted > 0) {   // we are the LATE copy and codex's is already on screen — yield, never delete
+          codexUserOut.set(turnKey, emitted - 1);
+          if (fp) seen.add(fp);
+          continue;
+        }
+        userClaims.set(twin.contentKey, (userClaims.get(twin.contentKey) || 0) + 1);
+      } else {
+        const claimed = userClaims.get(twin.contentKey) || 0;
+        if (claimed > 0) {   // codex's copy of a bubble we already have
+          userClaims.set(twin.contentKey, claimed - 1);
+          if (fp) seen.add(fp);
+          continue;
+        }
+        codexUserOut.set(turnKey, (codexUserOut.get(turnKey) || 0) + 1);
+      }
     }
     if (fp) seen.add(fp);
     if (fp && record.type === 'turn_context') keptTurnContexts.set(fp, record);
@@ -452,7 +551,6 @@ function mergeCodexRecords(historyRecords, liveRecords) {
     // at a record the fingerprint dedup dropped would fold codex's copy into
     // something no reader ever sees
     if (settingsSig !== null) lastSettings = { record, sig: settingsSig, turnId: currentTurnId };
-    if (twin?.claims) userClaims.set(twin.contentKey, (userClaims.get(twin.contentKey) || 0) + 1);
     delete record.__idx;
     delete record.__ts;
     merged.push(record);
@@ -662,6 +760,7 @@ module.exports = {
   recordFingerprint,
   userTwinKeys,
   userRecordIdentity,
+  codexRecordIdentity,
   parseCodexSessionJsonl,
   resolveCodexForkAncestry,
   cutRecordsAtOrdinal,
