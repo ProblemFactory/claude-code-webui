@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.369.66 — auto-resume fired 130 times into a wall (owner: "你的切换功能发疯了") — four adversarial rounds
+
+- **The incident.** Two sessions re-fired their "You can continue now" continue 130 and 32 times over 4.5 hours, up to twice a second, each cycle writing a "账号池已切换到 PandyMax" card into the conversation. Root cause, confirmed on the frozen journal and reproduced against the real engine and a real pool: the CLI's rejection was attributed to the OTel-observed org (the identity the CLI cached at spawn), never to the member whose credentials it actually used, so that member kept a "usable" verdict; the engine re-armed with "switched to a usable account", the per-session hot switch re-pointed to the same member, and `fireNow` had no memory of the fire that had just failed and skipped the pre-fire gate.
+- **Wall verdict by credential slot (owner decision ①④).** A rejection lands on the session's linked member — captured ONCE when the rejection arrives, because the first record of a rejection already re-points the link — and that member is dead-until-reset for verdicts and can never be the per-session switch's target; the OTel-observed org is telemetry only.
+- **Loop breaker.** A fire answered by another rejection is a FAILED fire: same-identity quarantine (10 min), immediate-fire backoff (0 / 60 s / 5 min), a hard cap of three immediate fires per session per hour, all persisted so a restart cannot hand the loop a fresh budget; the immediate path runs the same pre-fire gate as the timed one. Only proof of WORK (a completed turn, the user's own prompt) clears the memory — a passive quota reading, twenty times more frequent than a rejection, only disarms the wait.
+- **One honest line.** The refusal notice is a pure function of the refusal reason with a per-class budget: backoff and fire-pending are journal-only; "no member can serve — add a member or move the session" requires the pool's own verdict; the success card is once per distinct target per window.
+- Mitigation is no longer needed: sessions that had auto-resume switched off can turn it back on.
+- New suite scripts/test-auto-resume-loop.mjs (186 asserts: the frozen journal replayed at 2/s through the real engine, the negative-control matrix that re-fires ≥10 times, restart survival, the derived noteRecovered audit table).
+
 ## 2.369.65 — codex "Steer all" showed one bubble of 25 (owner 2026-09-07) — seven adversarial rounds + a merge review
 
 - **Every inherited queue submission gets its bubble.** The app-server's queue belongs to the THREAD, so after Terminate+Resume the new wrapper inherits items it never recorded; the only live carrier for a steered submission entering the turn is `item/completed {userMessage, clientId}`, which nothing routed — 25 items steered, one bubble drawn. Now an unrecorded submission entering a turn grows its own bubble, keyed by the codex id (never by content).
