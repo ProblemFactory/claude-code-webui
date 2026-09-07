@@ -21,7 +21,7 @@ const { createAdapterRegistry } = require(path.join(REPO, 'src/adapters/index.js
 const { NORMALIZERS, createMessageManager } = require(path.join(REPO, 'src/normalizers.js'));
 const { capsOf, BACKEND_CAPS } = require(path.join(REPO, 'src/backend-caps.js'));
 const { hasConsumer, PROTOCOLS } = require(path.join(REPO, 'src/server/stdout/index.js')); // S5: protocol → stdout consumer registry
-const { BACKEND_META } = await import(path.join(REPO, 'src/lib/agent-meta.js'));
+const { BACKEND_META, backendFeatureCaps } = await import(path.join(REPO, 'src/lib/agent-meta.js'));
 const schemaSrc = fs.readFileSync(path.join(REPO, 'src/lib/settings-schema.js'), 'utf8');
 
 ok(harnessIds().length >= 3 && ['claude', 'codex', 'shell'].every((id) => HARNESSES[id]), `registry carries the three built-in harnesses (${harnessIds().join(', ')})`);
@@ -199,6 +199,13 @@ const SITES = [
   // the first harness whose row said forkAtMessage:true would have shown a
   // control whose click returned silently on a `backend !== 'claude'` branch.
   ['src/lib/chat-view.js', '_forkFromMessage(uuid, msg) {', 8, 'per-message fork handler'],
+  // The TRIGGER half of renameWriteback (round 3). The pin above covers the ws
+  // case that DOES the writeback; this is the only site that decides whether
+  // the `rename-session` frame is produced at all, and it read
+  // `sessionOrKey?.backend === 'codex'`. Same latent shape as the fork defect
+  // with the halves swapped: the first harness whose row flips to true would
+  // have had a server ready to write and a client that never asks.
+  ['src/lib/sidebar-state.js', 'proto.renameSession = async function', 28, 'client rename-writeback trigger'],
 ];
 for (const [file, marker, lines, label] of SITES) {
   const block = blockOf(fs.readFileSync(path.join(REPO, file), 'utf8'), marker, lines);
@@ -206,6 +213,28 @@ for (const [file, marker, lines, label] of SITES) {
   ok(block !== null && !hasBackendIdGate(block), `${label}: gated on caps, no backend-id branch left`, block ? block.split('\n').filter((l) => hasBackendIdGate(l)).join(' / ') : 'marker gone');
   ok(hasBackendIdGate(`${block}\n  if (backend !== 'claude') return;`), `${label}: NEGATIVE CONTROL — the checker DOES catch a planted backend-id gate`);
 }
+
+// "No backend-id branch left" is an ABSENCE test, and deleting the gate
+// outright also passes it — which for the rename trigger is a real behaviour
+// change (the ws case writes session.name + session-meta and broadcasts, so
+// sending the frame for claude is not a no-op). So the trigger is ALSO pinned
+// positively: it must read the capability row.
+const READS_RENAME_CAP = /backendFeatureCaps\(sessionOrKey\?\.backend\)\.renameWriteback/;
+const renameTrigger = blockOf(fs.readFileSync(path.join(REPO, 'src/lib/sidebar-state.js'), 'utf8'), 'proto.renameSession = async function', 28);
+ok(READS_RENAME_CAP.test(renameTrigger || ''), 'client rename-writeback trigger: reads caps.renameWriteback (the mirror row test-harness-contract deep-compares), so it cannot be silently DELETED either');
+ok(!READS_RENAME_CAP.test("if (sessionOrKey?.backend === 'codex' && name.trim()) this.app.renameBackendSession?.(sessionOrKey, name.trim());"),
+  '…NEGATIVE CONTROL: that checker reads FALSE on the pre-fix backend-id line');
+ok(/import \{ getSessionKey, backendFeatureCaps \} from '\.\/agent-meta\.js';/.test(fs.readFileSync(path.join(REPO, 'src/lib/sidebar-state.js'), 'utf8')),
+  '…and the predicate is the SHARED one (agent-meta), not a local caps twin');
+// ZERO BEHAVIOUR CHANGE TODAY (the reason this is a drift fix, not a feature):
+// the predicate the trigger now reads answers exactly what the deleted id test
+// answered, for every backend that ships — and for the two falsy shapes the
+// call site really passes (a bare string session key, and an unknown backend),
+// where `sessionOrKey?.backend` is undefined.
+for (const id of [...Object.keys(BACKEND_META), 'gemini', undefined])
+  ok(backendFeatureCaps(id).renameWriteback === (id === 'codex'), `renameWriteback(${String(id)}) === (id==='codex') — the trigger's verdict is unchanged for every shipped backend`);
+ok(backendFeatureCaps(undefined).renameWriteback === false && backendFeatureCaps('gemini').renameWriteback === false,
+  '…and an unknown/absent backend gets the all-false row (chrome never asks for something the harness cannot do)');
 
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);
 process.exit(fail ? 1 : 0);

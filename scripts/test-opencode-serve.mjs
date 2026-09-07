@@ -346,7 +346,19 @@ console.log('— ⑤ serve-backed reader + the harness store contract');
 console.log('— ⑥ caps verdict');
 {
   const h = require(path.join(REPO, 'src/harnesses/opencode.js'));
-  ok('shipped verdict: capsOf(opencode).fork is false until the serve OpenAPI proves it', capsOf('opencode').fork === false && /fork: false,\n    streamProtocol: 'acp-events'/.test(read('src/backend-caps.js')));
+  // The source pin asserts what the opencode ROW DECLARES, not the byte layout
+  // of one line (the bd2289f2 lesson, repeated): the §2.13 caps收口 appended
+  // forkAtMessage/review/renameWriteback to that same line, and an adjacency
+  // regex went red on the reflow while every fact it meant to pin was still
+  // true. Row-scoped, so a `fork: true` anywhere ELSE in the file cannot
+  // satisfy it either.
+  const capsSrc = read('src/backend-caps.js');
+  const rowOf = (src, id) => { const i = src.indexOf(`\n  ${id}: {`); if (i < 0) return ''; const e = src.indexOf('\n  },', i); return e < 0 ? '' : src.slice(i, e); };
+  const ocRow = rowOf(capsSrc, 'opencode');
+  ok('shipped verdict: capsOf(opencode).fork is false until the serve OpenAPI proves it (row-scoped source pin, layout-independent)',
+    capsOf('opencode').fork === false && /\bfork: false\b/.test(ocRow) && /streamProtocol: 'acp-events'/.test(ocRow), ocRow.slice(0, 200));
+  ok('…NEGATIVE CONTROL: the row extractor is bounded and the pin catches a flipped declaration (a `fork: true` planted in the row fails; the claude row is a different row)',
+    /\bfork: true\b/.test(ocRow.replace('fork: false', 'fork: true')) && !/streamProtocol: 'acp-events'/.test(rowOf(capsSrc, 'claude')) && rowOf(capsSrc, 'nosuch') === '');
   ok('setVerifiedCap flips the SAME row object the descriptor holds', setVerifiedCap('opencode', 'fork', true) === true && capsOf('opencode').fork === true && h.caps === capsOf('opencode') && h.caps.fork === true && BACKEND_CAPS.opencode.fork === true);
   ok('setVerifiedCap refuses an unknown backend or key (returns false, no row grows)', setVerifiedCap('gemini', 'fork', true) === false && setVerifiedCap('claude', 'nope', 1) === false && !('nope' in BACKEND_CAPS.claude));
   setVerifiedCap('opencode', 'fork', false);

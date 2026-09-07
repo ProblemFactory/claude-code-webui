@@ -5,7 +5,7 @@
  * Installed on Sidebar.prototype via installSidebarState(Sidebar).
  * All methods use `this` (Sidebar instance context).
  */
-import { getSessionKey } from './agent-meta.js';
+import { getSessionKey, backendFeatureCaps } from './agent-meta.js';
 import { showToast, showInputDialog } from './utils.js';
 import { t as tr } from './i18n.js';
 
@@ -477,7 +477,16 @@ export function installSidebarState(SidebarClass) {
     if (legacyId && legacyId !== stateKey) delete this._customNames[legacyId];
     this._pushUserState(); this._render();
     const newName = name.trim() || currentName || (legacyId ? legacyId.substring(0, 12) + '...' : tr('Session'));
-    if (sessionOrKey?.backend === 'codex' && name.trim()) this.app.renameBackendSession?.(sessionOrKey, name.trim());
+    // Write the new name back into the AGENT's own store only where the
+    // harness HAS one (§2.13 `renameWriteback` — codex's thread name; claude's
+    // JSONL carries no title, so a rename stays ours). This is the TRIGGER half
+    // of the capability and the ws case is the action half (ws-handler.js
+    // `rename-session`, which also writes session.name + session-meta and
+    // broadcasts): both must read the same row, or the first harness whose row
+    // flips to true gets a server ready to write and a client that never asks
+    // — the mirror image of the round-2 fork defect (button on caps, handler on
+    // an id). Never a backend id.
+    if (backendFeatureCaps(sessionOrKey?.backend).renameWriteback && name.trim()) this.app.renameBackendSession?.(sessionOrKey, name.trim());
     this.app.syncSessionName(sessionOrKey, newName);
   };
 

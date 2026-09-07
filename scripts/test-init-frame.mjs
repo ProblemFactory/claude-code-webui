@@ -38,6 +38,19 @@
 //      they classify (§4/§5 legs below).
 //   ③ the per-message fork HANDLER still gated on a backend id while its
 //      button had moved to caps (§5 leg + test-harness-contract SITES).
+//
+// ROUND 3 (two more, both reproduced against the real reader first):
+//   ① the chatStatus twin applied the `commands_changed` push even when a
+//      NEWER `init` followed it, so after a resume the composer got the
+//      PRE-restart list while the live path (same records) got the new one —
+//      and applyStatus runs after loadHistory's loop, so the stale answer
+//      OVERWROTE the correct one the init card's own side effect had set.
+//      Round 2's leg only pinned [init, push], which passes either way; the
+//      §4 section now drives BOTH orders through BOTH paths and keeps the
+//      pre-fix rule as the negative control.
+//   ② the CLIENT trigger of renameWriteback still read a backend id while
+//      its server half read caps (test-harness-contract SITES + a POSITIVE
+//      pin, because deleting that gate would also pass an absence test).
 // Run: node scripts/test-init-frame.mjs
 import fs from 'node:fs';
 import os from 'node:os';
@@ -375,21 +388,108 @@ console.log('— chatStatus twin (attach path)');
     JSON.stringify({ type: 'user', message: { role: 'user', content: 'hi' }, uuid: 'u1', timestamp: ts }),
     JSON.stringify({ type: 'assistant', message: { id: 'm1', role: 'assistant', model: 'claude-fable-5', content: [{ type: 'text', text: 'hello' }], usage: { input_tokens: 5, output_tokens: 2 } }, uuid: 'u2', timestamp: ts }),
   ].join('\n') + '\n');
-  const prevHome = process.env.HOME;
-  process.env.HOME = tmp;
   const { SessionMessages } = require(path.join(REPO, 'src/session-store.js'));
-  // init + a later commands_changed, as they really arrive: stdout-only
-  // records in the session BUFFER, never in the JSONL.
-  const buffer = [JSON.stringify({ ...FRAME, session_id: sid }),
-    JSON.stringify({ type: 'system', subtype: 'commands_changed', session_id: sid, uuid: 'u-cc', commands: [{ name: 'compact' }, { name: 'doctor' }, { name: 'newly-found' }] })].join('\n');
-  const st = new SessionMessages({ backend: 'claude', backendSessionId: sid, claudeSessionId: sid, cwd, buffer }, null, { buffersDir: path.join(tmp, 'buf'), permissionModes: [] }).chatStatus();
-  process.env.HOME = prevHome;
+  // The stdout-only records (init / commands_changed) arrive in the session
+  // BUFFER, never in the JSONL — HOME is sandboxed for the duration of the
+  // parse because SessionMessages resolves the project dir off it.
+  const twin = (records) => {
+    const prevHome = process.env.HOME;
+    process.env.HOME = tmp;
+    try {
+      return new SessionMessages({ backend: 'claude', backendSessionId: sid, claudeSessionId: sid, cwd, buffer: records.map((r) => JSON.stringify(r)).join('\n') },
+        null, { buffersDir: path.join(tmp, 'buf'), permissionModes: [] }).chatStatus();
+    } finally { process.env.HOME = prevHome; }
+  };
+  // What a window that WATCHED the same records live ends up showing: the last
+  // `slash-commands` meta op the normalizer emitted.
+  const liveFinal = (records) => {
+    const mm = new MessageManager(sid);
+    const ops = [];
+    mm.onOp((op) => ops.push(op));
+    for (const r of records) mm.processLive(structuredClone(r));
+    const metas = ops.filter((o) => o.op === 'meta' && o.subtype === 'slash-commands');
+    return metas.length ? metas[metas.length - 1].data : null;
+  };
+  const INIT = { ...FRAME, session_id: sid };
+  const PUSH = { type: 'system', subtype: 'commands_changed', session_id: sid, uuid: 'u-cc', commands: [{ name: 'compact' }, { name: 'doctor' }, { name: 'newly-found' }] };
+  // A RESUME / wrapper respawn: the same conversation re-inits AFTER the push,
+  // with its own (fresh) list. Not a corner case — one init per SPAWN, and the
+  // round-2 measurement found 33 in a single conversation.
+  const REINIT = { ...FRAME, session_id: sid, uuid: 'u-init2', slash_commands: ['compact', 'doctor', 'color', 'resumed-fresh'], terminal_slash_commands: ['doctor', 'color'] };
+
+  const st = twin([INIT, PUSH]);
   ok('a window that ATTACHES (or reloads) gets the same two facts as one that watched the push live: the CURRENT list + the terminal subset',
     st && st.slashCommands.join(',') === 'compact,doctor,newly-found' && st.initFrame?.terminalSlashCommands.join(',') === 'doctor', JSON.stringify({ sc: st?.slashCommands, tf: st?.initFrame?.terminalSlashCommands }));
   ok('…and the memory dirs + health facts, so a window whose init card is outside the loaded tail still classifies memory writes and can be told what is broken',
     st.initFrame?.memoryPaths?.auto?.endsWith('/memory') && AM.initHealthIssues(st.initFrame).length === 4, JSON.stringify(st.initFrame?.memoryPaths));
   ok('…the completion the composer would build from the attach payload hides the terminal commands too (ONE rule, both paths)',
     !AM.slashCompletionList(st.slashCommands, st.initFrame.terminalSlashCommands).includes('/doctor'));
+
+  // ORDER, NOT PRESENCE (round 3 — an adversarial verifier reproduced this).
+  // "The newest frame wins" is an ORDERING rule, and the twin used to take the
+  // first `commands_changed` and the first `init` its backward scan met and
+  // then apply the push UNCONDITIONALLY — so after a resume the composer got
+  // the PRE-restart list while a window that watched the same records live got
+  // the new one. Actively harmful, not merely absent: applyStatus() runs AFTER
+  // loadHistory's render loop, so the stale list OVERWROTE the correct one the
+  // slab's own init-card side effect had just set.
+  const stB = twin([INIT, PUSH, REINIT]);
+  ok('a RE-INIT after the push wins: the composer gets the list the NEWEST init declared, not the pre-restart push',
+    stB?.slashCommands?.join(',') === 'compact,doctor,color,resumed-fresh', JSON.stringify({ sc: stB?.slashCommands }));
+  ok('…and the terminal subset is intersected with THAT list, never with the older push (which dropped /color from the newest frame\'s own subset)',
+    stB?.initFrame?.terminalSlashCommands?.join(',') === 'doctor,color', JSON.stringify({ tf: stB?.initFrame?.terminalSlashCommands }));
+
+  // Degradation: an init that names NO commands. Impossible on a real CLI
+  // (`slash_commands` is REQUIRED in the 2.1.257 zod schema — see §1), so this
+  // is the old/other-producer branch: live, `_emitSlashCommands` returns early
+  // on it, so the last thing that SPOKE still stands, and the twin must agree.
+  const REINIT_SILENT = { ...FRAME, session_id: sid, uuid: 'u-init3' };
+  delete REINIT_SILENT.slash_commands; delete REINIT_SILENT.terminal_slash_commands;
+  const stC = twin([INIT, PUSH, REINIT_SILENT]);
+  ok('an init that declares NO command list does not erase the push before it (an absent list is not an empty one)',
+    stC?.slashCommands?.join(',') === 'compact,doctor,newly-found', JSON.stringify({ sc: stC?.slashCommands }));
+
+  // THE INVARIANT ITSELF: a window that opens after the push agrees with one
+  // that watched it happen — on EVERY order, not just the one round 2 pinned.
+  for (const [label, records, expect] of [['push last', [INIT, PUSH], st], ['re-init last', [INIT, PUSH, REINIT], stB], ['silent re-init last', [INIT, PUSH, REINIT_SILENT], stC]]) {
+    const live = liveFinal(records);
+    ok(`live and attach AGREE on the same records (${label})`,
+      !!live && !!expect && live.commands.join(',') === (expect.slashCommands || []).join(','),
+      JSON.stringify({ live: live?.commands, twin: expect?.slashCommands }));
+  }
+
+  // NEGATIVE CONTROL — the PRE-FIX rule, re-implemented verbatim (first push +
+  // first init the backward scan meets, push applied unconditionally). It must
+  // still agree on the order round 2 pinned and DISAGREE on the re-init order:
+  // proof that these legs measure the ORDERING (a leg that only pins
+  // [init, push] passes either way) and that the agreement checker above can
+  // actually detect a divergence rather than always reading true.
+  const preFix = (records) => {
+    let frame = null, pushed = null;
+    for (let i = records.length - 1; i >= 0; i--) {
+      const m = records[i];
+      if (!pushed && m.type === 'system' && m.subtype === 'commands_changed') pushed = commandNames(m.commands);
+      if (!frame && m.type === 'system' && m.subtype === 'init') frame = initFrameFacts(m);
+      if (frame && pushed) break;
+    }
+    if (!frame) return { slashCommands: pushed || null, terminalSlashCommands: null };
+    if (pushed) frame.slashCommands = pushed;
+    if (frame.terminalSlashCommands && frame.slashCommands) frame.terminalSlashCommands = frame.terminalSlashCommands.filter((c) => frame.slashCommands.includes(c));
+    return frame;
+  };
+  ok('NEGATIVE CONTROL: the pre-fix rule agrees on the order round 2 pinned (so that leg alone could never have caught this)',
+    preFix([INIT, PUSH]).slashCommands.join(',') === st.slashCommands.join(','));
+  const preB = preFix([INIT, PUSH, REINIT]);
+  ok('…and serves the PRE-restart list + a subset mixed from two different frames on the re-init order (the reproduced defect)',
+    preB.slashCommands.join(',') === 'compact,doctor,newly-found' && preB.terminalSlashCommands.join(',') === 'doctor', JSON.stringify(preB.slashCommands));
+  ok('…so the live-vs-attach agreement leg DOES fail on it — the checker is not vacuous',
+    preB.slashCommands.join(',') !== liveFinal([INIT, PUSH, REINIT]).commands.join(','));
+
+  // WIRING PIN (the 2.331.0 lesson): the fix is an index comparison in the
+  // shipped reader, not a local re-implementation in this file.
+  const ss = fs.readFileSync(path.join(REPO, 'src/session-store.js'), 'utf8');
+  ok('chatStatus compares the POSITIONS of the push and the init (never applies the push unconditionally)',
+    /pushedIdx > initIdx/.test(ss) && !/if \(pushedCommands\) initFrame\.slashCommands = pushedCommands;/.test(ss));
   try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { }
 }
 
