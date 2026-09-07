@@ -437,7 +437,7 @@ claude Remote Control / `--cloud` / `/teleport` / `/schedule` routines：我们*
 | 5 | 做（先按上文在隔离目录用 0.58.0 重验 oauth-personal） |
 | 6 | 用（逐条附「不发 vendor 请求」证据进白名单豁免；人触发/已有节拍） |
 | 7 | (b) share 不做；feedback/upload 只作「报告问题」面板可选项 |
-| 8 | **待定**（owner 尚未看到这条）：建议 (c)——只默认开 `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS`（纯可观测性），`--brief` 与提示缓存三件套做设置项默认关 |
+| 8 | (c)：只默认开 `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS`（纯可观测性），`--brief` 与提示缓存三件套做设置项默认关（owner 2026-09-07 「按你说的来」） |
 | 9 | 做（只传 `--worktree`，绝不 `--tmux`） |
 | 10 | (a) 只读 |
 
