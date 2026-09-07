@@ -536,14 +536,22 @@ function registerWsHandler(wss, ctx) {
         }
 
         // QUEUE OPS on a message the user sent mid-turn (steer / remove /
-        // steer-all). Validated against the harness's `inputModes` caps row —
-        // never against a backend id — so a harness without the capability gets
-        // a NAMED refusal instead of a frame its wrapper would drop silently.
-        // The reply is a CODED error: the client renders it in-chat and leaves
-        // the live window alone (the inc-mt2arppw rule).
+        // steer-all). TWO gates, both required:
+        //   ① the HARNESS's `inputModes` caps row (backend-caps — never a
+        //      backend id), i.e. what this kind of agent can do at all;
+        //   ② the RUNNING WRAPPER's own advert (`caps.inputQueue` in the
+        //      sidecar IT writes, read through wrapperCaps). A codex session
+        //      spawned before this release wears ① and would answer ② with
+        //      nothing: its wrapper drops the unknown stdin verb SILENTLY —
+        //      the 2.361.1/2.364.1 skew class, where a static capability was
+        //      trusted for a long-lived process. Never cache a negative
+        //      verdict (a wrapper resuming a huge thread writes its sidecar
+        //      late) — this is a rare user action, so read it each time.
+        // The reply is a CODED, `scope:'action'` error: the client renders it
+        // in-chat and leaves the live window alone (the inc-mt2arppw rule).
         case 'queue-op': {
           const session = activeSessions.get(data.sessionId);
-          const refuse = (message) => { try { ws.send(JSON.stringify({ type: 'error', code: 'queue-op-unsupported', sessionId: data.sessionId, error: message, message })); } catch { } };
+          const refuse = (message) => { try { ws.send(JSON.stringify({ type: 'error', code: 'queue-op-unsupported', scope: 'action', sessionId: data.sessionId, error: message, message })); } catch { } };
           if (!session?.pty || session.mode !== 'chat') { refuse('This action needs a live chat session.'); break; }
           const adapter = adapterRegistry.get(session.backend);
           if (!adapter) { refuse(`No adapter for backend "${session.backend}".`); break; }
@@ -554,6 +562,19 @@ function registerWsHandler(wss, ctx) {
           try { label = harnessOf(session.backend).label || label; } catch { }
           if (!modes.queueOps) { refuse(`${label} owns its own input queue — VibeSpace cannot list or change it.`); break; }
           if ((data.op === 'steer' || data.op === 'steer-all') && !modes.steer) { refuse(`${label} cannot steer: a message sent during a turn runs after it. You can remove it instead.`); break; }
+          // Sidecar advert OR the in-band proof: a REMOTE wrapper writes its
+          // sidecar on ITS OWN machine, so `no-sidecar` there means "not local",
+          // not "old" — but a wrapper that has actually published a queue on
+          // this stream demonstrably serves the verb.
+          const wcaps = wrapperCaps(BUFFERS_DIR, data.sessionId, session.socketPath);
+          if (!wcaps.inputQueue && !session._normalizer?.queuePublished?.()) {
+            const started = wcaps.startedAt ? new Date(wcaps.startedAt).toISOString().replace('T', ' ').slice(0, 16) + ' UTC' : 'unknown time';
+            refuse(wcaps.reason === 'no-sidecar'
+              ? 'This session\'s agent has not reported its capabilities yet (still starting up?) — try again in a moment.'
+              : `This session's agent (started ${started}) predates the input-queue update, so it cannot act on its queue: the message runs when the current turn ends. Terminate + Resume the session to get the controls.`);
+            console.log(`[${data.sessionId}] queue-op ${data.op} REFUSED: wrapper caps ${wcaps.reason} (pid ${wcaps.pid}, started ${wcaps.startedAt})`);
+            break;
+          }
           let payload;
           try { payload = adapter.formatQueueOp({ op: data.op, id: data.id || null }); }
           catch (e) { refuse(e.message); break; }
@@ -937,6 +958,12 @@ function registerWsHandler(wss, ctx) {
                 // ALWAYS present so a reconnecting client can clear a stale
                 // strip; harnesses without a queue report [].
                 queue: session._normalizer?.queueState?.() || [],
+                // …and whether the RUNNING wrapper actually publishes/serves a
+                // queue (its own sidecar advert). The client's strip and chip
+                // gate on this AS WELL AS the harness caps row: a session
+                // spawned before the queue/steer release would otherwise wear
+                // controls whose frames its wrapper drops (2.361.1/2.364.1).
+                queueSupported: wrapperCaps(BUFFERS_DIR, data.sessionId, session.socketPath).inputQueue || !!session._normalizer?.queuePublished?.(),
                 normEpoch: session._normEpoch || 0,
                 remoteState: session._remoteState || (session._bareRemote ? { state: 'unprotected' } : null),
                 goal: session._goal || null, goalElapsed: session._goalElapsed || 0, goalStatus: session._goalStatus || null }));

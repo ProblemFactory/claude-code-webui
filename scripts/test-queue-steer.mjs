@@ -12,9 +12,13 @@
 //   ② ADAPTER VERB `formatQueueOp({op,id})`: each adapter formats the frames it
 //      can honour and REFUSES the rest WITH A REASON (the accept-and-ignore
 //      failure of 2.361.4 is what we are avoiding).
-//   ③ ws 'queue-op' VALIDATION against the caps row — coded, never silent,
-//      and never a session-scoped error that would flip a live window
-//      read-only (inc-mt2arppw).
+//   ③ ws 'queue-op' VALIDATION against TWO gates — the harness caps row AND
+//      the RUNNING wrapper's own sidecar advert (a session spawned before this
+//      release satisfies the row and drops the frame: 2.361.1/2.364.1) —
+//      coded, never silent, and never a session-scoped error that would flip a
+//      live window read-only (inc-mt2arppw). The scoped-refusal codes are an
+//      EXPLICIT set: 'ended-during-attach' is coded AND fatal, and must keep
+//      taking the view-only rescue.
 //   ④ NORMALIZER: queue_changed → a `meta` op (session state, NOT a transcript
 //      message) + the bubble chip; multi-queue semantics (steering N injects
 //      ONLY N, the others keep their order); the failure sentences.
@@ -26,6 +30,11 @@
 //      assumed a `thread/queue/remove` that does not exist on 0.153.4. A
 //      renamed method or param must fail HERE, not in a fleet report.
 //      Evidence-SKIPs (with the reason) without the binary or a login.
+//   ⑦ FUNCTIONAL client: chat-view is DOM-free at import, so a REAL
+//      normalizer-produced bubble drives the REAL _steerQueuedMessage into a
+//      REAL ws frame (the round-1 blocker was a join on a field nobody wrote —
+//      every grep-level pin passed), and _onSessionError is driven for both
+//      meanings of a per-session `error`.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -93,7 +102,7 @@ console.log('— ② the adapter verb (formatQueueOp)');
   ok('shell inherits the base refusal (a terminal has no input queue)', /no input-queue operations/.test(threw(() => reg.get('shell').formatQueueOp({ op: 'remove', id: 'x' })) || ''));
 }
 
-console.log('— ③ the ws case gates on the caps row');
+console.log('— ③ the ws case gates on the caps row AND the running wrapper');
 {
   const src = read('src/ws-handler.js');
   const m = /case 'queue-op': \{([\s\S]*?)\n        \}/.exec(src);
@@ -104,23 +113,49 @@ console.log('— ③ the ws case gates on the caps row');
   ok("every refusal is CODED 'queue-op-unsupported' with a human reason (never silent, never a bare session error)", /code: 'queue-op-unsupported'/.test(body) && /error: message, message/.test(body) && !/ws\.send\(JSON\.stringify\(\{ type: 'error', sessionId: data\.sessionId \}\)\)/.test(body));
   ok('the adapter throw is the second line of defense (formatQueueOp inside a try that refuses with e.message)', /try \{ payload = adapter\.formatQueueOp\(/.test(body) && /catch \(e\) \{ refuse\(e\.message\); break; \}/.test(body));
   ok('the frame goes to the wrapper on stdin, like every other verb', /session\.pty\.write\(payload \+ '\\n'\)/.test(body));
-  // CLIENT: a coded per-session error must NOT be read as an attach failure —
-  // the 2.363.1 rule, generalized so the NEXT code is safe by construction
+  // GATE ②, THE WRAPPER SKEW (round-1 review): the caps row describes a KIND
+  // of agent; a LONG-LIVED PROCESS is a different question. A codex session
+  // spawned before this release satisfies the row and drops the frame
+  // silently — the 2.361.1/2.364.1 class, twice shipped.
+  ok("…and ALSO on the RUNNING wrapper's own advert (wrapperCaps.inputQueue), not just the static row", /wrapperCaps\(BUFFERS_DIR, data\.sessionId, session\.socketPath\)/.test(body) && /if \(!wcaps\.inputQueue && !session\._normalizer\?\.queuePublished\?\.\(\)\)/.test(body), body.slice(-900));
+  ok('…whose refusal says what happens to the message AND how to get the controls', /predates the input-queue update/.test(body) && /Terminate \+ Resume/.test(body) && /still starting up/.test(body));
+  ok('the negative verdict is never cached on the session (a wrapper writing its sidecar late must not be locked out)', !/_wrapperInputQueue/.test(src));
+  ok('…and a REMOTE wrapper (its sidecar lives on ITS machine) is not mistaken for an old one — a published queue is proof enough', /!wcaps\.inputQueue && !session\._normalizer\?\.queuePublished\?\.\(\)/.test(body) && /queuePublished\?\.\(\)/.test(read('src/ws-handler.js')));
+  ok('wrapperCaps reads inputQueue from the sidecar the WRAPPER itself writes', /inputQueue: !!\(caps && caps\.inputQueue\)/.test(read('src/server/wrapper-files.js')));
+  // CLIENT: a coded per-session error must NOT be read as an attach failure
+  // (the 2.363.1 rule) — but "any code = scoped" is TOO WIDE: 'ended-during-
+  // attach' is a coded error whose SESSION IS GONE and must keep the rescue.
   const cv = read('src/lib/chat-view.js');
-  ok('client: ANY coded per-session error renders in chat and leaves the window alone (generalized from input-rejected)', /if \(msg\.code\) \{\s*\n\s*this\._hideTyping\(\);/.test(cv) && !/if \(msg\.code === 'input-rejected'\) \{/.test(cv));
-  ok('client: an error with NO code is still the attach failure it always was (view-only rescue path intact)', /if \(!this\._tryViewOnlyRescue\(\)\)/.test(cv));
+  const scopedSet = /const SCOPED_REFUSAL_CODES = new Set\(\[([\s\S]*?)\]\);/.exec(cv)?.[1] || '';
+  ok('client: the scoped-refusal codes are an EXPLICIT allow-list, not "anything with a code"', /'input-rejected'/.test(scopedSet) && /'not-codex-chat'/.test(scopedSet) && /'queue-op-unsupported'/.test(scopedSet), scopedSet);
+  ok("…'ended-during-attach' is NOT in it (its session is dead — a live-looking empty window is the regression)", !!scopedSet && !/ended-during-attach/.test(scopedSet), scopedSet);
+  ok("…and a NEW server refusal can opt in without a client release via scope:'action'", /msg\?\.scope === 'action'/.test(cv) && /scope: 'action'/.test(body));
+  ok('client: an attach failure still takes the view-only rescue path', /if \(!this\._tryViewOnlyRescue\(\)\)/.test(cv));
   // the queue rides EVERY window-birth payload (the 2.368.4 rule)
   ok("attach carries the queue from the normalizer", /queue: session\._normalizer\?\.queueState\?\.\(\) \|\| \[\]/.test(read('src/ws-handler.js')));
-  ok("…and 'created' carries it too (the creator never gets an 'attached')", /queue: \[\],/.test(read('src/ws-create.js')));
-  ok('the client applies it through the carries-the-key guard', /if \('queue' in meta\) this\._setQueue\(meta\.queue\);/.test(cv));
+  ok("…and the wrapper's queue advert rides the SAME payload (the client cannot read a sidecar)", /queueSupported: wrapperCaps\(BUFFERS_DIR, data\.sessionId, session\.socketPath\)\.inputQueue/.test(read('src/ws-handler.js')));
+  { const wsc = read('src/ws-create.js');
+    ok("…'created' carries both, and says the fresh wrapper has reported NOTHING yet", /queue: \[\],/.test(wsc) && /queueSupported: false,/.test(wsc)); }
+  ok('the client applies both through the carries-the-key guard, advert FIRST', /if \('queueSupported' in meta\) this\._queueSupported = !!meta\.queueSupported;\s*\n\s*if \('queue' in meta\) this\._setQueue\(meta\.queue\);/.test(cv));
   ok('wiring pin: the strip and the chip send the SAME ws message through one method', /this\.ws\.send\(\{ type: 'queue-op', sessionId: this\.sessionId, op, id: id \|\| null \}\)/.test(cv) && (cv.match(/type: 'queue-op'/g) || []).length === 1);
-  // NO DEAD CONTROLS: the chip is only rendered clickable where the harness can
-  // actually steer, and a click on a window that went read-only/offline SPEAKS
+  // NO DEAD CONTROLS: the chip is clickable only where the VIEW says steer
+  // (harness row ∧ running wrapper — ONE definition), and every queue action
+  // on a read-only/offline window SPEAKS through one choke point.
   const cr = read('src/lib/chat-renderers.js');
-  ok('the bubble chip is clickable only where the caps row says steer (an ACP/claude chip is inert by construction)', /_canSteerQueue\(\) \? this\._onQueueChipClick : null/.test(cr) && /getBackendMeta\(this\.backend\)\?\.caps\?\.inputModes\?\.steer/.test(cr));
-  ok('a chip click on a dead/disconnected window explains itself instead of doing nothing', /if \(this\._readOnly \|\| this\._disconnected\) \{ showToast\(t\('This session is not live/.test(cv));
+  ok('the bubble chip asks the VIEW whether this session can steer (no second capability definition in the renderer)', /_canSteerQueue\(\) \? this\._onQueueChipClick : null/.test(cr) && /this\._getQueueCaps\?\.\(\)\?\.steer/.test(cr) && /getQueueCaps: \(\) => this\._queueCaps\(\)/.test(cv));
+  ok('_queueCaps is the intersection: no wrapper advert ⇒ no controls at all', /if \(!this\._queueSupported\) return \{ queue: false, steer: false, queueOps: false \};/.test(cv));
+  ok('every queue action passes ONE liveness choke point that toasts (strip buttons included — a dead button that eats the click is the silent failure)', /_queueOpsLive\(\) \{/.test(cv) && /if \(!this\._queueOpsLive\(\)\) return;\s*\n\s*this\.ws\.send\(\{ type: 'queue-op'/.test(cv) && (cv.match(/showToast\(t\('This session is not live/g) || []).length === 1);
+  ok('…and the strip is DIMMED under .chat-input-disconnected, so the state is visible BEFORE the click', /\.chat-input-disconnected \.chat-queue-strip \{ opacity/.test(read('public/chat.css')));
   const cw2 = read('data/bin/codex-chat-wrapper.js');
   ok('removing a queued PEER message hands the text back to the delivery ladder (never a silent loss of a message already reported delivered)', /known\?\.kind === 'peer' && known\.text\) emitTaskEvent\('peer_message_result', \{ ok: false/.test(cw2));
+  // A refused Steer-all printed the SAME failure twice, and the batch card
+  // defaulted the turn kind to "review" (so a compact turn was named wrong).
+  ok('a refused steer-all prints ONE card (the per-item result, which carries the real reason AND kind); the batch abort is journal-only', /log\(`steer-all aborted after/.test(cw2) && !/emitTaskEvent\('queue_op_result', \{ op: 'steer-all', ok: false/.test(cw2));
+  ok('…and its SUCCESS summary is still emitted (bookkeeping, card-less by normalizer construction)', /emitTaskEvent\('queue_op_result', \{ op: 'steer-all', ok: true, done \}\)/.test(cw2));
+  // Stop drops the ACP queue — the bubbles must say 'removed', not clear as if
+  // they had RUN (the normalizer clears a chip that left with no result).
+  const aw2 = read('data/bin/acp-wrapper.js');
+  ok("ACP Stop reports each dropped entry as a removal BEFORE the republish (a cleared chip means 'it ran')", /for \(const q of dropped\) record\('queue_op_result', \{ op: 'remove', id: q\.id, ok: true, msg_id: q\.opts\?\.msgId \|\| '', reason: 'stopped' \}\);\s*\n\s*if \(dropped\.length\) publishQueue\(\);/.test(aw2));
 }
 
 console.log('— ④ the normalizer: session state + chips + multi-queue semantics');
@@ -154,6 +189,18 @@ console.log('— ④ the normalizer: session state + chips + multi-queue semanti
   const mm2 = new CodexMessageManager('q2');
   mm2.processLive({ timestamp: new Date().toISOString(), type: 'event_msg', payload: { type: 'queued_input', msg_id: '', turn_id: 't1' } });
   ok('queued_input with no bubble to stamp falls back to the visible system card (never silent)', mm2.messages.some((m) => m.role === 'system' && /Queued — runs after the current turn/.test(m.content[0].text)), mm2.messages);
+  // WRAPPER SKEW, normalizer side (round-1 review): a codex session spawned
+  // BEFORE this release emits `queued_input` (it has since 2.369.20) and never
+  // a `queue_changed`. Stamping a chip there paints a 'Queued' badge that can
+  // never clear and never be acted on — so with no published queue we keep the
+  // old system card, which at least states the truth.
+  const mm4 = new CodexMessageManager('q4');
+  ok('a wrapper that has published no queue is not treated as one that has', mm4.queuePublished() === false);
+  mm4.processLive({ timestamp: new Date().toISOString(), type: 'response_item', payload: { type: 'message', role: 'user', webui_msg_id: 'z1', content: [{ type: 'input_text', text: 'later' }] } });
+  mm4.processLive({ timestamp: new Date().toISOString(), type: 'event_msg', payload: { type: 'queued_input', msg_id: 'z1', turn_id: 't9' } });
+  ok('PRE-RELEASE WRAPPER: queued_input keeps the old system card and stamps NO dead chip', mm4.messages.find((m) => m.role === 'user')?.queueState == null && mm4.messages.some((m) => m.role === 'system' && /Queued — runs after the current turn/.test(m.content[0].text)), mm4.messages.map((m) => [m.role, m.queueState]));
+  mm4.processLive({ timestamp: new Date().toISOString(), type: 'event_msg', payload: { type: 'queue_changed', items: [{ id: 'zq', msgId: 'z1', preview: 'later', kind: 'user' }] } });
+  ok('…and the moment the wrapper DOES publish a queue, the chip appears and queuePublished() flips', mm4.queuePublished() === true && mm4.messages.find((m) => m.role === 'user')?.queueState === 'queued');
   // the failure sentences: every one says what happens to the message NOW
   const F = CodexMessageManager.queueOpFailureText;
   ok('review/compact turn: refused, and the message still runs when the turn ends', /Cannot steer during a review turn/.test(F({ op: 'steer', reason: 'not-steerable', kind: 'review' })) && /runs when this turn ends/.test(F({ op: 'steer', reason: 'not-steerable', kind: 'review' })));
@@ -170,6 +217,9 @@ console.log('— ④ the normalizer: session state + chips + multi-queue semanti
   ok('ACP: queue_changed → the SAME meta op + the SAME chip (one client path for both harnesses)', aops.some((o) => o.op === 'meta' && o.subtype === 'queue' && o.items.length === 1) && am.messages.find((m) => m.role === 'user')?.queueState === 'queued' && am.queueState().length === 1);
   am.processLive({ ts: new Date().toISOString(), type: 'acp', kind: 'queue_op_result', op: 'remove', id: 'p1', msg_id: 'a1', ok: true });
   ok("ACP: a removed entry's bubble wears 'removed'", am.messages.find((m) => m.role === 'user')?.queueState === 'removed');
+  ok('ACP: the user bubble carries its webui msgId too (one join, both harnesses)', am.messages.find((m) => m.role === 'user')?.webuiMsgId === 'a1');
+  ok("the meta op CARRIES the wrapper's advert, so a window created before the sidecar existed turns its controls on", aops.some((o) => o.op === 'meta' && o.subtype === 'queue' && o.supported === true) && ops.some((o) => o.op === 'meta' && o.subtype === 'queue' && o.supported === true));
+  ok('every CHAT normalizer answers queuePublished() (the same question everywhere, claude says never)', [mm, am].every((n) => typeof n.queuePublished === 'function') && require(path.join(REPO, 'src/message-manager.js')).MessageManager.prototype.queuePublished() === false);
 }
 
 console.log('— ⑤ the client strip (DOM-free render of the REAL ChatInput)');
@@ -206,6 +256,92 @@ console.log('— ⑤ the client strip (DOM-free render of the REAL ChatInput)');
   const evil = '<img src=x onerror=alert(1)>" onmouseover="y';
   const xss = ChatInput.queueStripHtml([{ id: evil, msgId: '', preview: evil, kind: 'peer', from: evil }], { steer: true, queueOps: true });
   ok('XSS: preview, sender and id are escaped everywhere they land (text + attributes)', !xss.includes('<img src=x') && !/onmouseover="y/.test(xss) && xss.includes('&lt;img') && (xss.match(/&quot;/g) || []).length >= 2, xss.slice(0, 300));
+}
+
+console.log('— ⑦ FUNCTIONAL client: a normalizer-produced bubble → a real queue-op, and the error split');
+{
+  // chat-view.js is DOM-free at IMPORT (the trim-guard suite relies on the
+  // same property), so the decisions run here for real instead of by grep.
+  // A minimal document stub only exists for showToast, whose text is captured.
+  const created = [];
+  const mkEl = () => {
+    const e = {
+      className: '', id: '', textContent: '', style: {}, dataset: {}, children: [],
+      classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+      setAttribute() {}, append() {}, appendChild(c) { this.children.push(c); return c; }, remove() {},
+      addEventListener() {}, removeEventListener() {}, querySelector: () => null, querySelectorAll: () => [],
+      getBoundingClientRect: () => ({ top: 0, bottom: 0, left: 0, right: 0 }), offsetParent: null,
+      get firstChild() { return this.children[0] || null; },
+    };
+    created.push(e); return e;
+  };
+  globalThis.document = { createElement: mkEl, getElementById: () => null, body: mkEl(), documentElement: mkEl(), addEventListener() {}, removeEventListener() {}, querySelector: () => null, querySelectorAll: () => [] };
+  const toasts = () => created.filter((e) => e.className === 'global-toast-body').map((e) => e.textContent);
+
+  const { ChatView } = await import(path.join(REPO, 'src/lib/chat-view.js'));
+  const { CodexMessageManager } = require(path.join(REPO, 'src/codex-message-manager.js'));
+
+  // THE BLOCKER round 1 found: the chip's join used msg.webuiMsgId, which
+  // nothing ever wrote — the webui id lived ONLY in the normalizer's private
+  // userMessageIds map, which never leaves the server. Every chip click
+  // answered "That message is no longer queued". Drive the REAL pair.
+  const mm = new CodexMessageManager('fn');
+  const now = new Date().toISOString();
+  mm.processLive({ timestamp: now, type: 'response_item', payload: { type: 'message', role: 'user', webui_msg_id: 'm7', content: [{ type: 'input_text', text: 'hello' }] } });
+  mm.processLive({ timestamp: now, type: 'event_msg', payload: { type: 'queue_changed', items: [{ id: 'q7', msgId: 'm7', preview: 'hello', ts: 1, kind: 'user' }], turn_id: 't1' } });
+  const bubble = mm.messages.find((x) => x.role === 'user');
+  ok('the normalizer stamps the webui msgId ON the message (a server-only side map is not an identity the client can join on)', bubble?.webuiMsgId === 'm7', bubble);
+  ok('…and it is the id the chip joins on', ChatView.prototype._msgIdOf.call(null, bubble) === 'm7');
+
+  let sent = [], notices = [];
+  const mkView = (over = {}) => Object.assign(Object.create(ChatView.prototype), {
+    sessionId: 'sess-9', ws: { send: (m) => sent.push(m) },
+    _readOnly: false, _disconnected: false, _chatInput: null,
+    _queue: mm.queueState(), _queueSupported: true,
+    _getSessionIds: () => ({ backend: 'codex' }), winInfo: { backend: 'codex' },
+    _renderers: { appendSystem: (txt) => notices.push(txt) },
+    _hideTyping() {}, _telemDetail: (x) => String(x || ''),
+    _tryViewOnlyRescue: () => { rescued++; return true; }, _setReadOnly() { readOnlyed++; },
+  }, over);
+  let rescued = 0, readOnlyed = 0;
+
+  sent = []; notices = [];
+  ChatView.prototype._steerQueuedMessage.call(mkView(), bubble);
+  ok('THE FIX, END TO END: clicking a queued bubble\'s chip sends the queue-op for THAT item', sent.length === 1 && sent[0].type === 'queue-op' && sent[0].op === 'steer' && sent[0].id === 'q7' && sent[0].sessionId === 'sess-9', { sent, notices });
+  ok('…and says nothing wrong about the message', notices.length === 0, notices);
+
+  sent = []; notices = [];
+  const other = { id: 'x', role: 'user', webuiMsgId: 'm-gone' };
+  ChatView.prototype._steerQueuedMessage.call(mkView(), other);
+  ok('a bubble that is NOT in the queue any more is told so, and nothing is sent', sent.length === 0 && notices.some((n) => /no longer queued/.test(n)), { sent, notices });
+
+  sent = []; notices = [];
+  ChatView.prototype._steerQueuedMessage.call(mkView({ _queueSupported: false }), bubble);
+  ok('a session whose RUNNING wrapper never advertised a queue offers nothing (the skew gate, client side)', sent.length === 0 && notices.length === 0);
+
+  sent = []; notices = [];
+  const before = toasts().length;
+  ChatView.prototype._sendQueueOp.call(mkView({ _disconnected: true }), 'remove', 'q7');
+  ok('a strip button on a DISCONNECTED window sends nothing and TOASTS (it used to silently do nothing)', sent.length === 0 && toasts().length === before + 1 && /not live/.test(toasts().slice(-1)[0] || ''), toasts().slice(-1));
+  sent = []; notices = [];
+  ChatView.prototype._steerQueuedMessage.call(mkView({ _readOnly: true }), bubble);
+  ok('…and a read-only window blames the SOCKET, not the message', sent.length === 0 && !notices.some((n) => /no longer queued/.test(n)), notices);
+
+  // THE MAJOR round 1 found: "any coded error is a scoped refusal" quietly
+  // regressed 'ended-during-attach' (ws-handler, after the history rebuild) —
+  // its session IS gone, so it must keep the view-only rescue + Resume bar.
+  notices = []; rescued = 0; readOnlyed = 0;
+  ChatView.prototype._onSessionError.call(mkView(), { type: 'error', sessionId: 'sess-9', code: 'queue-op-unsupported', scope: 'action', message: 'nope' });
+  ok('a scoped refusal renders in chat and leaves the window ALONE (inc-mt2arppw)', rescued === 0 && readOnlyed === 0 && notices.some((n) => /nope/.test(n)), { notices, rescued, readOnlyed });
+  notices = []; rescued = 0; readOnlyed = 0;
+  ChatView.prototype._onSessionError.call(mkView(), { type: 'error', sessionId: 'sess-9', code: 'ended-during-attach', message: 'Session sess-9 ended while its history was loading' });
+  ok("THE REGRESSION GUARD: 'ended-during-attach' still takes the view-only rescue (never a live-looking empty window)", rescued === 1 && notices.length === 0, { notices, rescued });
+  notices = []; rescued = 0; readOnlyed = 0;
+  ChatView.prototype._onSessionError.call(mkView(), { type: 'error', sessionId: 'sess-9', message: 'Session not found' });
+  ok('a code-LESS error is the attach failure it always was', rescued === 1);
+  notices = []; rescued = 0; readOnlyed = 0;
+  ChatView.prototype._onSessionError.call(mkView({ _tryViewOnlyRescue: () => false }), { type: 'error', sessionId: 'sess-9', code: 'ended-during-attach', message: 'gone' });
+  ok('…and when even the rescue cannot work, the window says so and goes read-only', readOnlyed === 1 && notices.some((n) => /gone/.test(n)));
 }
 
 console.log('— wiring + docs pins');

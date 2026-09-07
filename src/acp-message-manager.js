@@ -133,6 +133,7 @@ class AcpMessageManager {
     this.userMessageIds = new Map();      // webui msgId → message id
     this._queue = [];                     // the wrapper's promptQueue, as published
     this._queuedMsgIds = new Set();       // bubbles currently wearing a 'queued' chip
+    this._queuePublished = false;         // has this wrapper ever published a queue? (in-band capability signal)
     this.toolCards = new Map();           // toolCallId → message id
     this.pendingApprovals = new Map();    // requestId → {msgId, permission}
     this.streams = new Map();             // `${kind}:${messageId}` → message id (open agent/thought streams)
@@ -177,6 +178,7 @@ class AcpMessageManager {
   status() { return { ...this._status }; }
   goalState() { return this._goalState; }      // ACP has no goal loop (stub — the status bar shows nothing)
   queueState() { return this._queue || []; }   // the input queue (attach payload)
+  queuePublished() { return !!this._queuePublished; } // the RUNNING wrapper publishes a queue (pairs with sidecar caps.inputQueue)
   taskState() {
     return { tasks: {}, todos: Array.isArray(this._todos) ? this._todos : [] };
   }
@@ -320,8 +322,10 @@ class AcpMessageManager {
       case 'permission_resolved': return this._resolvePermission(String(record.requestId), record.outcome === 'selected' && /^allow/.test(record.optionKind || '') ? 'allowed' : 'denied', emit, record.optionId || null);
       case 'queued_input': {
         // The chip on the bubble IS the notice (codex parity); the card is the
-        // fallback for a queued entry with no bubble of its own.
-        if (this._stampQueueChip(record.msg_id || record.msgId, 'queued', emit)) return;
+        // fallback for a queued entry with no bubble of its own — and for a
+        // wrapper that publishes NO queue (pre-release process), whose chip
+        // could never clear or be acted on.
+        if (this._queuePublished && this._stampQueueChip(record.msg_id || record.msgId, 'queued', emit)) return;
         const msg = this._create({ role: 'system', content: [{ type: 'system_info', text: 'Queued — runs after the current turn' }], noticeKind: 'notice' });
         if (emit) this._emit({ op: 'create', message: msg });
         return;
@@ -350,10 +354,11 @@ class AcpMessageManager {
   _processQueueChanged(rec, emit) {
     const items = Array.isArray(rec.items) ? rec.items : [];
     this._queue = items;
+    this._queuePublished = true;
     const live = new Set(items.map((it) => String(it.msgId || '')).filter(Boolean));
     for (const it of items) this._stampQueueChip(it.msgId, 'queued', emit);
     for (const msgId of [...this._queuedMsgIds]) if (!live.has(msgId)) this._stampQueueChip(msgId, null, emit);
-    if (emit) this._emit({ op: 'meta', subtype: 'queue', items });
+    if (emit) this._emit({ op: 'meta', subtype: 'queue', items, supported: true });
   }
 
   _processQueueOpResult(rec, emit) {
@@ -438,14 +443,18 @@ class AcpMessageManager {
       const existing = existingId ? this.messageIndex.get(existingId) : null;
       if (existing) {
         existing.content = content; existing.status = 'complete';
+        existing.webuiMsgId = msgId;
         this._lastPromptText = text;
-        if (emit) this._emit({ op: 'edit', id: existing.id, fields: { content, status: 'complete' } });
+        if (emit) this._emit({ op: 'edit', id: existing.id, fields: { content, status: 'complete', webuiMsgId: msgId } });
         return;
       }
     }
     this.turnIndex++;
     const msg = this._create({ role: 'user', content, turnIndex: this.turnIndex });
-    if (msgId) this.userMessageIds.set(msgId, msg.id);
+    // The webui msgId rides the MESSAGE (not only the side map): the queue chip
+    // joins a rendered bubble to its queue row on the CLIENT, which never sees
+    // `userMessageIds`. Same stamp as the codex normalizer.
+    if (msgId) { msg.webuiMsgId = msgId; this.userMessageIds.set(msgId, msg.id); }
     this._lastPromptText = text;
     if (emit) this._emit({ op: 'create', message: msg });
   }

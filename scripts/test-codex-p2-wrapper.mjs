@@ -239,6 +239,26 @@ ok(await waitFor(() => lastQueue().length === 1 && lastQueue()[0].msgId === 'm10
 sendLine({ type: 'queue-op', op: 'steer', id: lastQueue()[0].id });
 ok(await waitFor(() => opResults().some((r) => r.op === 'steer' && r.ok === false && r.reason === 'not-steerable' && r.kind === 'review')), `a review turn refuses the steer, CLASSIFIED (${JSON.stringify(opResults().slice(-1))})`);
 ok(lastQueue().length === 1 && lastQueue()[0].msgId === 'm10', 'the refused item STAYS queued (it still runs when the turn ends)', JSON.stringify(lastQueue()));
+// A REFUSED steer-all must speak ONCE. It used to emit the per-item failure
+// AND a `{op:'steer-all', ok:false, reason}` summary — two cards from one
+// failure, and the summary carried no `kind`, so the normalizer's sentence
+// defaulted to "review" and named a compact turn wrong (round-1 review).
+{
+  sendLine({ type: 'chat-input', text: 'also during review', msgId: 'm11' });
+  ok(await waitFor(() => lastQueue().length === 2), 'two queued behind the un-steerable review turn');
+  const before = opResults().length;
+  sendLine({ type: 'queue-op', op: 'steer-all' });
+  ok(await waitFor(() => opResults().length > before), 'steer-all answers');
+  const after = opResults().slice(before);
+  ok(after.filter((r) => r.ok === false).length === 1, `a refused steer-all reports the failure ONCE — the per-item result, not a second batch card (${JSON.stringify(after)})`);
+  ok(after[0].op === 'steer' && after[0].reason === 'not-steerable' && after[0].kind === 'review' && after[0].batch === 'steer-all', '…and THAT result carries the real reason, the real turn kind and its batch provenance', JSON.stringify(after[0]));
+  ok(!after.some((r) => r.op === 'steer-all'), 'no {op:"steer-all", ok:false} summary event at all (it lives in the wrapper journal)', JSON.stringify(after));
+  ok(lastQueue().length === 2, 'both items stay queued in order after the refused batch', JSON.stringify(lastQueue()));
+  // put the queue back to ONE item: the stub app-server drains a single entry
+  // per turn end, and the next assertions are about that drain.
+  sendLine({ type: 'queue-op', op: 'remove', id: lastQueue()[1].id });
+  ok(await waitFor(() => lastQueue().length === 1 && lastQueue()[0].msgId === 'm10'), 'the extra probe message is removed again', JSON.stringify(lastQueue()));
+}
 // turn end → the APP-SERVER drains the queue itself; the wrapper republishes
 sendLine({ type: 'interrupt' });
 ok(await waitFor(() => lastQueue().length === 0), 'when the turn ends the queued message runs (the app-server drains) and the published queue empties');

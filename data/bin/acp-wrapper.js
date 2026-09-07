@@ -510,6 +510,13 @@ async function handleInput(msg) {
       // drainPromptQueue() dispatched the queued prompt the instant Stop
       // landed, i.e. the agent kept working after Stop.
       const dropped = promptQueue.splice(0, promptQueue.length);
+      // Each dropped entry gets its OWN removal result BEFORE the republish.
+      // Order is load-bearing: the normalizer clears the chip of any bubble
+      // that left the queue without an explicit result (= "it ran"), so a bare
+      // `queue_changed: []` here would tell the user their message RAN when
+      // Stop threw it away. The result stamps 'removed' first, and the empty
+      // republish then leaves those bubbles alone (round-1 review).
+      for (const q of dropped) record('queue_op_result', { op: 'remove', id: q.id, ok: true, msg_id: q.opts?.msgId || '', reason: 'stopped' });
       if (dropped.length) publishQueue();
       if (activePrompt) {
         activePrompt.cancelled = true;

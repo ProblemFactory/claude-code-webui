@@ -60,6 +60,25 @@ const NAV_KEYS = ['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'PageDown',
 // is a click no matter how close in time a displacement lands; a
 // press-and-hold-then-drag is positioning for the whole press.
 const POINTER_DRAG_PX = 2;
+// SCOPED REFUSALS — a per-session `error` frame that rejects ONE ACTION and
+// leaves the session alive (inc-mt2arppw: a too-large paste flipped the LIVE
+// window into the Resume bar, because the only reading of a session-scoped
+// error was "attach failed"). This is an EXPLICIT ALLOW-LIST, not "anything
+// with a code": `ended-during-attach` (ws-handler, after the history rebuild)
+// is a coded error whose session is GONE, and it must keep taking the
+// view-only rescue + Resume bar or a dead session renders as a live-looking
+// empty window (round-1 review caught the over-generalization). A NEW
+// server-side refusal opts in either by joining this set or — preferred, so
+// the client needs no release — by carrying `scope:'action'` on the frame.
+const SCOPED_REFUSAL_CODES = new Set([
+  'input-rejected',        // chat-input refused (size / frame-file capability)
+  'not-codex-chat',        // a codex-only action on a non-codex or dead-chat session
+  'queue-op-unsupported',  // the harness has no such input-queue operation
+]);
+/** Is this `error` frame a refusal of one action (vs. "this session is gone")? */
+function isScopedRefusal(msg) {
+  return msg?.scope === 'action' || (!!msg?.code && SCOPED_REFUSAL_CODES.has(msg.code));
+}
 
 /**
  * ChatView — renders a chat interface for stream-json mode sessions.
@@ -106,6 +125,13 @@ class ChatView {
     this._pointerDownOnScrollbar = false;
     this._pointerDownScrollTop = 0;
     this._resumeRetailTimers = [];
+    // INPUT QUEUE (mid-turn sends). `_queueSupported` starts FALSE: we do not
+    // yet know whether THIS session's running wrapper publishes a queue, and
+    // guessing yes is the wrapper-skew bug (a chip that never clears). It
+    // flips on the attach payload's `queueSupported` or the wrapper's own
+    // baseline `queue_changed` — both arrive long before anything can queue.
+    this._queue = [];
+    this._queueSupported = false;
 
     // Build DOM
     const container = document.createElement('div');
@@ -258,8 +284,11 @@ class ChatView {
       onPermissionResolve: () => { this._hideTyping(); this._updateRuns(); },
       onFork: (uuid, msg) => this._forkFromMessage(uuid, msg),
       // A 'queued' chip on a bubble is a second entry point for the same op as
-      // the strip's Steer button — one path, one ws message.
+      // the strip's Steer button — one path, one ws message. The renderer asks
+      // the VIEW what the queue allows (harness row ∧ running wrapper), so
+      // there is exactly one definition of "can steer".
       onQueueChipClick: (msg) => this._steerQueuedMessage(msg),
+      getQueueCaps: () => this._queueCaps(),
     });
 
     // Position indicator (shows when not at bottom, e.g. "120-170 / 3000")
@@ -798,34 +827,7 @@ class ChatView {
         if (msg.normEpoch) this._normEpoch = msg.normEpoch;
         if (msg.remoteState) this._statusBar?.setRemoteState(msg.remoteState);
       } else if (msg.type === 'error' && msg.sessionId === sessionId) {
-        // SEND refusal ≠ attach failure (inc-mt2arppw, userW: every too-large
-        // paste flipped the LIVE window into the Resume bar — the session was
-        // never broken, and the refusal text rode msg.error which this branch
-        // never read, so the user saw a dead-looking window with no reason).
-        // A coded input rejection renders in-chat and leaves the view alone.
-        // GENERALIZED (2026-09-06, the queue-op case): a per-session error that
-        // carries a `code` is a SCOPED refusal of one action — render it in
-        // chat and leave the window alone. Only a code-LESS error is the
-        // "attach failed" it used to be read as. ('not-codex-chat' had the same
-        // bug as input-rejected before this and read-only'd a live window.)
-        if (msg.code) {
-          this._hideTyping();
-          this._renderers.appendSystem('✗ ' + (msg.message || msg.error || t('Message rejected.')));
-          try { track('event', msg.code === 'input-rejected' ? 'chat-input-rejected' : 'chat-action-refused', this._telemDetail(`${msg.code}: ${msg.message || msg.error || ''}`)); } catch {}
-          return;
-        }
-        // Attach failed (e.g. stale serverId replayed from a saved layout).
-        // If NOTHING is rendered yet and the identity is known, rescue into
-        // the view-only pipeline (saved history + Resume bar) — after an OOM
-        // kill / pod recreation every window replays a dead serverId, and
-        // read-only-ing the empty pane opened 12 BLANK windows at once (real
-        // fleet report). Only when even that can't work, show the bare error.
-        this._hideTyping();
-        if (!this._tryViewOnlyRescue()) {
-          this._renderers.appendSystem(msg.message || msg.error || t('Session not found.'));
-          this._setReadOnly();
-        }
-        try { track('event', 'chat-attach-failed', this._telemDetail(msg.message)); } catch {}
+        this._onSessionError(msg);
       }
     };
     this.ws.onGlobal(this._handler);
@@ -1050,9 +1052,18 @@ class ChatView {
   }
 
   // ── THE INPUT QUEUE (messages sent DURING a turn) ────────────────────────
-  /** What THIS harness lets the user do with its queue (backend-caps
-   *  `inputModes`, projected onto the client through BACKEND_META). */
+  /** What the user may actually DO with this session's queue. TWO gates, both
+   *  required (the ws layer applies the same pair):
+   *    ① the HARNESS row — backend-caps `inputModes`, projected onto the client
+   *      through BACKEND_META (never a backend-id branch);
+   *    ② the RUNNING WRAPPER — `_queueSupported`, which arrives on the attach
+   *      payload (sidecar caps.inputQueue) and from the wrapper's own baseline
+   *      `queue_changed`. A codex session spawned before the queue/steer
+   *      release satisfies ① and NOT ② — offering it controls would leave a
+   *      chip that never clears and a button whose frame is dropped silently
+   *      (the 2.361.1/2.364.1 skew class). */
   _queueCaps() {
+    if (!this._queueSupported) return { queue: false, steer: false, queueOps: false };
     const backend = this._getSessionIds()?.backend || this.winInfo?.backend || 'claude';
     return getBackendMeta(backend)?.caps?.inputModes || { queue: false, steer: false, queueOps: false };
   }
@@ -1062,24 +1073,38 @@ class ChatView {
     this._chatInput?.setQueue(this._queue, this._queueCaps());
   }
 
+  /** THE choke point for every queue action (strip buttons, row Enter, bubble
+   *  chip). A dead/disconnected window SPEAKS instead of swallowing the click
+   *  (no-silent-failures); the strip is dimmed by .chat-input-disconnected so
+   *  the state is visible before the click too. */
+  _queueOpsLive() {
+    if (!this._readOnly && !this._disconnected) return true;
+    showToast(t('This session is not live — reconnect to act on queued messages.'));
+    return false;
+  }
+
   _sendQueueOp(op, id) {
-    if (this._readOnly || this._disconnected) return;
+    if (!this._queueOpsLive()) return;
     this.ws.send({ type: 'queue-op', sessionId: this.sessionId, op, id: id || null });
   }
 
   /** Steer the queued message a bubble belongs to (the chip entry point): the
-   *  bubble knows its own webui msgId, the queue row knows the app-server id —
-   *  join on msgId, and say so when the item has already left the queue. */
+   *  bubble knows its own webui msgId (stamped by the normalizer that owns the
+   *  userMessageIds map), the queue row knows the app-server id — join on
+   *  msgId, and say so when the item has already left the queue. */
   _steerQueuedMessage(msg) {
     if (!this._queueCaps().steer) return;
-    if (this._readOnly || this._disconnected) { showToast(t('This session is not live — reconnect to steer queued messages.')); return; }
+    // Liveness FIRST: a disconnected window would otherwise blame the message
+    // ("it already ran") for what is really a dead socket.
+    if (!this._queueOpsLive()) return;
     const mine = (this._queue || []).find((it) => it.msgId && this._msgIdOf(msg) === it.msgId);
     if (!mine) { this._renderers.appendSystem(t('That message is no longer queued — it already ran.')); return; }
     this._sendQueueOp('steer', mine.id);
   }
 
   /** The webui msgId a rendered user bubble was created from (the normalizer's
-   *  userMessageIds key). Kept as a helper so the join has ONE definition. */
+   *  userMessageIds key, stamped onto the message as `webuiMsgId` — a server-
+   *  only side map is not an identity the client can join on). ONE definition. */
   _msgIdOf(msg) {
     return String(msg?.webuiMsgId || msg?.msgId || '');
   }
@@ -1095,7 +1120,9 @@ class ChatView {
   _applyLiveMeta(meta) {
     if (!meta) return;
     // Attach/create replay of the input queue — carries-the-key guard, so a
-    // partial-meta path never clears a live strip.
+    // partial-meta path never clears a live strip. The wrapper advert is read
+    // FIRST: it decides which controls the items are rendered with.
+    if ('queueSupported' in meta) this._queueSupported = !!meta.queueSupported;
     if ('queue' in meta) this._setQueue(meta.queue);
     if ('autoResume' in meta) this._statusBar?.setAutoResume?.(meta.autoResume || null);
     if ('outputStyle' in meta) {
@@ -2534,7 +2561,10 @@ class ChatView {
   }
 
   _onMeta(op) {
-    if (op.subtype === 'queue') { this._setQueue(op.items); return; }
+    // A published queue IS the wrapper's in-band "I serve queue ops" advert
+    // (every current wrapper emits a baseline one at boot), so a window created
+    // before its sidecar existed turns its controls on here.
+    if (op.subtype === 'queue') { if (op.supported) this._queueSupported = true; this._setQueue(op.items); return; }
     if (op.subtype === 'served-model') {
       this._statusBar.setServedModel(op.data?.model || null);
       return;
@@ -3219,6 +3249,36 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
     this._readOnly = true;
     if (this._chatInput) this._chatInput.setReadOnly();
     this._showResumeBar();
+  }
+
+  /** A per-session `error` frame. TWO meanings, and conflating them is a
+   *  shipped incident in both directions: a SCOPED refusal (one action denied,
+   *  session alive) renders in chat and leaves the view untouched, while an
+   *  attach failure rescues into the read-only history + Resume bar. */
+  _onSessionError(msg) {
+    // SEND refusal ≠ attach failure (inc-mt2arppw, userW: every too-large
+    // paste flipped the LIVE window into the Resume bar — the session was
+    // never broken, and the refusal text rode msg.error which this branch
+    // never read, so the user saw a dead-looking window with no reason).
+    if (isScopedRefusal(msg)) {
+      this._hideTyping();
+      this._renderers.appendSystem('✗ ' + (msg.message || msg.error || t('Message rejected.')));
+      try { track('event', msg.code === 'input-rejected' ? 'chat-input-rejected' : 'chat-action-refused', this._telemDetail(`${msg.code || 'action'}: ${msg.message || msg.error || ''}`)); } catch {}
+      return;
+    }
+    // Attach failed (e.g. stale serverId replayed from a saved layout, or
+    // 'ended-during-attach': the session died while its history was loading).
+    // If NOTHING is rendered yet and the identity is known, rescue into
+    // the view-only pipeline (saved history + Resume bar) — after an OOM
+    // kill / pod recreation every window replays a dead serverId, and
+    // read-only-ing the empty pane opened 12 BLANK windows at once (real
+    // fleet report). Only when even that can't work, show the bare error.
+    this._hideTyping();
+    if (!this._tryViewOnlyRescue()) {
+      this._renderers.appendSystem(msg.message || msg.error || t('Session not found.'));
+      this._setReadOnly();
+    }
+    try { track('event', 'chat-attach-failed', this._telemDetail(msg.message)); } catch {}
   }
 
   // Attach failed for a window that never rendered anything — flip it into
@@ -3991,7 +4051,7 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
   }
 }
 
-export { ChatView };
+export { ChatView, isScopedRefusal };
 
 // Gap-seek (huge-JSONL continuous scroll) methods live in their own module.
 installChatSeek(ChatView);

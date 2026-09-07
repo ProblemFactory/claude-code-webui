@@ -44,13 +44,18 @@ function resolveWrapperFiles(BUFFERS_DIR, id, sockPath) {
  *  sessions that were already new (owner: three restarts + an update for
  *  nothing). STATELESS by design — callers must not cache a negative verdict
  *  (a wrapper resuming a huge transcript may not have written its sidecar yet).
- *  Returns { frameFile, peerMessage, caps, reason: 'ok'|'no-caps'|'no-sidecar', startedAt, pid }. */
+ *  Returns { frameFile, peerMessage, inputQueue, caps, reason: 'ok'|'no-caps'|'no-sidecar', startedAt, pid }.
+ *  inputQueue (2026-09-06): the RUNNING wrapper publishes `queue_changed` and
+ *  serves the `queue-op` stdin verb. backend-caps says what the HARNESS can do;
+ *  this says what THIS process can do — a codex session spawned before the
+ *  queue/steer release wears the harness capability but would drop the frame
+ *  silently (the 2.361.1/2.364.1 skew class), so both gates must pass. */
 function wrapperCaps(BUFFERS_DIR, id, sockPath) {
   const { sidecar } = resolveWrapperFiles(BUFFERS_DIR, id, sockPath);
   let m;
-  try { m = JSON.parse(fs.readFileSync(sidecar, 'utf-8')); } catch { return { frameFile: false, peerMessage: false, caps: null, reason: 'no-sidecar', startedAt: null, pid: null }; }
+  try { m = JSON.parse(fs.readFileSync(sidecar, 'utf-8')); } catch { return { frameFile: false, peerMessage: false, inputQueue: false, caps: null, reason: 'no-sidecar', startedAt: null, pid: null }; }
   const caps = (m && m.caps && typeof m.caps === 'object') ? m.caps : null;
-  return { frameFile: !!(caps && caps.frameFile), peerMessage: !!(caps && caps.peerMessage), caps, reason: caps ? 'ok' : 'no-caps', startedAt: (m && m.startedAt) || null, pid: (m && m.pid) || null };
+  return { frameFile: !!(caps && caps.frameFile), peerMessage: !!(caps && caps.peerMessage), inputQueue: !!(caps && caps.inputQueue), caps, reason: caps ? 'ok' : 'no-caps', startedAt: (m && m.startedAt) || null, pid: (m && m.pid) || null };
 }
 
 module.exports = { resolveWrapperFiles, wrapperCaps };

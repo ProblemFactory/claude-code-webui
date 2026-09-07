@@ -2945,7 +2945,7 @@ export default {
   "{n} sub-agents": "{n} 个子代理",
   "This sub-agent’s conversation is not on this machine.": "该子代理的对话不在本机。",
   // input queue / steer (codex thread/queue + turn/steer; ACP promptQueue)
-  "This session is not live — reconnect to steer queued messages.": "该会话当前不是活的 —— 重新连接后才能插入队列中的消息。",
+  "This session is not live — reconnect to act on queued messages.": "该会话当前不是活的 —— 重新连接后才能操作队列中的消息。",
   "Queued": "排队中",
   "Steered": "已插入本轮",
   "Steer all": "全部插入",

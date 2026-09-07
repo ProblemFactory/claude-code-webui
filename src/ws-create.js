@@ -1789,6 +1789,12 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
             // input queue — stated explicitly (not omitted) so the creator's
             // carries-the-key guard clears any strip a recycled window kept.
             queue: [],
+            // The wrapper has not written its sidecar yet, so we do not KNOW
+            // whether it publishes a queue: say false and let its own baseline
+            // `queue_changed` (published at boot, seconds later) turn the
+            // controls on. Guessing 'true' here is the skew bug in miniature —
+            // and nothing can be queued before the first turn anyway.
+            queueSupported: false,
             warning: session._resumeWarning || undefined, // 2.271.0 T1-2: sweep-skipped-under-lag double-write risk
             // A sweep is DESTRUCTIVE by design (it SIGTERMs another claude that
             // held this transcript). Never do that silently — 2.276.0.

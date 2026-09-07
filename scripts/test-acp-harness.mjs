@@ -237,6 +237,18 @@ console.log('— Stop means stop (the cancel race + the local queue)');
     ok('…the drop is LOUD and counts what was dropped (never a silent discard)', !!cleared && /dropped 2 queued messages/.test(cleared.text), cleared);
     const pr = w.findAll('peer_result');
     ok('…a dropped PEER message goes back to the delivery ladder (peer_result ok:false with its text — the consumer re-stashes it)', pr.length === 2 && pr[1].ok === false && pr[1].text === 'ping from B' && pr[1].fromName === 'B' && /Stop/.test(pr[1].reason || ''), pr);
+    // THE BUBBLES must say REMOVED, not go blank. The normalizer clears the
+    // chip of anything that leaves the queue with no explicit result — that
+    // reads as "it ran", the opposite of what Stop did (round-1 review). So
+    // each dropped entry gets its own removal result BEFORE the republish.
+    {
+      const rms = w.findAll('queue_op_result', (r) => r.op === 'remove' && r.ok === true);
+      ok("…each dropped bubble is told it was REMOVED (a cleared chip would claim the message RAN)", rms.length === 2 && rms.some((r) => r.msg_id === 'q2') && rms.every((r) => r.reason === 'stopped'), rms);
+      const at = (pred) => w.records.map((r, i) => [r, i]).filter(([r]) => r.type === 'acp' && pred(r)).slice(-1)[0]?.[1] ?? -1;
+      const lastRm = at((r) => r.kind === 'queue_op_result');
+      const emptyQ = at((r) => r.kind === 'queue_changed' && (r.items || []).length === 0);
+      ok('…and the removals are recorded BEFORE the emptied queue is republished (order is the whole fix)', lastRm >= 0 && emptyQ > lastRm, { lastRm, emptyQ });
+    }
     ok('…and the session stays usable: streaming cleared, no pending permission left', w.metaJson()?.streaming === false && Object.keys(w.metaJson()?.pendingRequests || {}).length === 0, w.metaJson());
   } finally { await w.stop(); }
 }

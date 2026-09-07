@@ -321,6 +321,12 @@ class CodexMessageManager {
     // without an explicit steer/remove can have its chip cleared — it RAN.
     this._queue = [];
     this._queuedMsgIds = new Set();
+    // Has THIS wrapper ever published a queue? A `queue_changed` (every new
+    // wrapper emits a baseline one at boot) is the in-band proof. Without it
+    // the chip has no way to ever clear or be acted on, so `queued_input`
+    // falls back to the old system card — a codex session spawned before the
+    // queue/steer release must not wear a permanent, dead 'Queued' badge.
+    this._queuePublished = false;
     this.pendingToolCalls = new Map();
     this.toolCallMessageIds = new Map();
     this.pendingApprovals = new Map();
@@ -1042,6 +1048,10 @@ class CodexMessageManager {
   /** The input queue as last published by the wrapper (attach payload). */
   queueState() { return this._queue || []; }
 
+  /** Did the RUNNING wrapper publish a queue at all (the in-band capability
+   *  signal that pairs with the sidecar's caps.inputQueue advert)? */
+  queuePublished() { return !!this._queuePublished; }
+
   /** Stamp the queue chip on the user bubble a queued message belongs to.
    *  Returns false when there is no such bubble (peer messages carry no
    *  webui_msg_id) — the caller then falls back to a visible system notice, so
@@ -1104,14 +1114,20 @@ class CodexMessageManager {
         if (existing) {
           existing.content = content;
           existing.status = 'complete';
-          if (emit) this._emit({ op: 'edit', id: existing.id, fields: { content: existing.content, status: 'complete' } });
+          existing.webuiMsgId = String(webuiMsgId);
+          if (emit) this._emit({ op: 'edit', id: existing.id, fields: { content: existing.content, status: 'complete', webuiMsgId: existing.webuiMsgId } });
           return;
         }
       }
       this.turnIndex++;
       const msg = this._create({ role: 'user', content, turnIndex: this.turnIndex });
       if (item.webui_origin === 'auto-resume') msg.originKind = 'auto-resume'; // VibeSpace's continue prompt after a wall — labelled, not "you typed this" (2.369.32)
-      if (webuiMsgId) this.userMessageIds.set(String(webuiMsgId), msg.id);
+      // STAMP THE WEBUI MSGID ON THE MESSAGE ITSELF, not only into the side
+      // map: `userMessageIds` never leaves the server, while the queue chip on
+      // the CLIENT has to join a rendered bubble back onto its queue row. A map
+      // the client cannot see is not an identity (round-1 review: every chip
+      // click answered "no longer queued" because the bubble carried no id).
+      if (webuiMsgId) { msg.webuiMsgId = String(webuiMsgId); this.userMessageIds.set(String(webuiMsgId), msg.id); }
       if (emit) this._emit({ op: 'create', message: msg });
       return;
     }
@@ -1704,12 +1720,13 @@ class CodexMessageManager {
   _processQueueChanged(event, emit) {
     const items = Array.isArray(event.items) ? event.items : [];
     this._queue = items;
+    this._queuePublished = true;
     const live = new Set(items.map((it) => String(it.msgId || '')).filter(Boolean));
     for (const it of items) this._stampQueueChip(it.msgId, 'queued', emit);
     // Left the queue with no explicit steer/remove ⇒ it RAN: drop the chip
     // rather than leave a bubble claiming to be queued forever.
     for (const msgId of [...this._queuedMsgIds]) if (!live.has(msgId)) this._stampQueueChip(msgId, null, emit);
-    if (emit) this._emit({ op: 'meta', subtype: 'queue', items });
+    if (emit) this._emit({ op: 'meta', subtype: 'queue', items, supported: true });
   }
 
   /** The outcome of one queue op. Success = a chip transition; failure = a
@@ -1783,7 +1800,7 @@ class CodexMessageManager {
     // and in the strip above the input — the old system card said the same
     // thing a third time and pushed the conversation down. The card survives
     // ONLY as the fallback for a queued message with no bubble of its own.
-    if (type === 'queued_input' && this._stampQueueChip(event.msg_id || event.msgId, 'queued', emit)) return;
+    if (type === 'queued_input' && this._queuePublished && this._stampQueueChip(event.msg_id || event.msgId, 'queued', emit)) return;
     if (type === 'queue_changed') return this._processQueueChanged(event, emit);
     if (type === 'queue_op_result') return this._processQueueOpResult(event, emit);
     if (type === 'queued_input' || type === 'compact_started' || type === 'context_compacted' || type === 'command_applied') {

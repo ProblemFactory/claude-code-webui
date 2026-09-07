@@ -716,6 +716,8 @@ class MessageManager {
    *  the same question (test-harness-contract pins it) instead of the caller
    *  learning which ones have the method. */
   queueState() { return []; }
+  /** …and the CLI never publishes one, so the client's controls stay off. */
+  queuePublished() { return false; }
 
   _processUser(raw, emit) {
     this._finalizeStreaming(emit);

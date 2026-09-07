@@ -456,6 +456,15 @@
 .chat-queue-btn:hover { background: var(--bg-hover); color: var(--text); }
 .chat-queue-btn-remove:hover { color: var(--red); }
 .chat-queue-btn svg { width: 13px; height: 13px; display: block; }
+/* DISCONNECTED / read-only: the queue is still true (the wrapper holds it),
+   but nothing can be done to it until the socket is back. Dim it so the state
+   is visible BEFORE the click — clicks stay live on purpose, because
+   _queueOpsLive() answers them with a toast (a dead control that swallows the
+   click is the silent failure this replaces). */
+.chat-input-disconnected .chat-queue-strip { opacity: 0.45; }
+.chat-input-disconnected .chat-queue-btn,
+.chat-input-disconnected .chat-queue-all,
+.chat-input-disconnected .chat-queue-item { cursor: not-allowed; }
 
 /* Queue chip on the user bubble the queued message belongs to */
 .chat-queue-chip {
@@ -471,6 +480,7 @@
 .chat-queue-chip svg { width: 10px; height: 10px; }
 .chat-queue-chip-queued { cursor: pointer; }
 .chat-queue-chip-queued:hover { background: var(--bg-hover); color: var(--text); }
+.chat-queue-chip:disabled { cursor: default; }
 .chat-queue-chip-steered { color: var(--accent); border-color: var(--accent); }
 .chat-queue-chip-removed { text-decoration: line-through; }
 .chat-input-wrap { flex: 1; position: relative; min-width: 0; display: flex; align-items: flex-end; gap: 6px; }

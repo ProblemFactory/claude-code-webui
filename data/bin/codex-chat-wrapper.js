@@ -1445,7 +1445,18 @@ async function handleQueueOp(msg) {
     for (const item of data) {
       const r = await steerOne(item);
       emitTaskEvent('queue_op_result', { ...r, op: 'steer', batch: 'steer-all' });
-      if (!r.ok) { emitTaskEvent('queue_op_result', { op: 'steer-all', ok: false, reason: r.reason, detail: r.detail || null, done, remaining: data.length - done }); await refreshQueue(); return; }
+      if (!r.ok) {
+        // NO SECOND EVENT for the abort: the per-item result above is the
+        // user-facing one and it carries the real reason AND the real turn
+        // kind. A `{op:'steer-all', reason}` summary rendered a SECOND card
+        // from the same failure, and its wording defaulted the kind to
+        // "review" — so a compact turn was refused twice, once wrongly
+        // (round-1 review). The abort stays in the journal, where an operator
+        // reading the wrapper log wants it.
+        log(`steer-all aborted after ${done}/${data.length}: ${r.reason}${r.detail ? ' — ' + r.detail : ''}`);
+        await refreshQueue();
+        return;
+      }
       done++;
     }
     emitTaskEvent('queue_op_result', { op: 'steer-all', ok: true, done });

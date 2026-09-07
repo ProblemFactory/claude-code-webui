@@ -2945,7 +2945,7 @@ export default {
   "{n} sub-agents": "{n} 個のサブエージェント",
   "This sub-agent’s conversation is not on this machine.": "このサブエージェントの会話はこのマシンにはありません。",
   // input queue / steer (codex thread/queue + turn/steer; ACP promptQueue)
-  "This session is not live — reconnect to steer queued messages.": "このセッションはライブではありません —— 再接続するとキュー内のメッセージを投入できます。",
+  "This session is not live — reconnect to act on queued messages.": "このセッションはライブではありません —— 再接続するとキュー内のメッセージを操作できます。",
   "Queued": "キュー待ち",
   "Steered": "現ターンに投入済み",
   "Steer all": "すべて投入",

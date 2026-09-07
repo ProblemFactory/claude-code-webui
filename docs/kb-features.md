@@ -160,6 +160,28 @@ never a backend id; the ws layer, the strip and the chip all gate on that row:
   change (and at boot, and at each turn start); that record replays through the
   buffer, so a reconnecting client's strip is rebuilt. `attached` and `created`
   both carry `queue`.
+- **THE SECOND GATE — the RUNNING wrapper, not just the harness row.** The caps
+  row describes a KIND of agent; a dtach session started before this release is
+  a different question. Both wrappers advertise `caps.inputQueue` in the sidecar
+  THEY write, `wrapperCaps()` reads it (or, for a REMOTE wrapper whose sidecar
+  lives on its own machine, the normalizer's in-band `queuePublished()`), and
+  the ws `queue-op` case refuses without it ("its agent predates the input-queue update … Terminate + Resume
+  the session to get the controls"); `attached` carries `queueSupported` so the
+  client's strip and chip are off too, and `created` says `false` because a
+  freshly spawned wrapper has reported nothing yet (its own baseline
+  `queue_changed`, seconds later, turns them on). On the normalizer side, a
+  `queued_input` from a wrapper that has never published a queue falls back to
+  the OLD system card — otherwise that bubble wears a `Queued` chip that can
+  never clear and never be acted on. Same law as the frame-file bypass
+  (2.361.1/2.364.1): capability = what the RUNNING PROCESS says it can do.
+- **The chip joins on `webuiMsgId`, stamped on the message.** The normalizer's
+  `userMessageIds` map is server-side only; the bubble carries the id itself so
+  the client can match it to a queue row (without it every chip click answered
+  "That message is no longer queued").
+- **A dead or disconnected window SPEAKS.** Every queue action goes through one
+  liveness check that toasts ("This session is not live — reconnect…") instead
+  of swallowing the click, and the strip is dimmed under
+  `.chat-input-disconnected` so the state is visible before the click.
 - **Removing a queued agent-to-agent / job message gives it back.** It was
   already reported delivered, so `remove` re-reports `peer_message_result
   ok:false` with the text and sender and the delivery ladder re-stashes it for
@@ -171,7 +193,11 @@ never a backend id; the ws layer, the strip and the chip all gate on that row:
   it; the wrapper only re-reads the queue so the strip states the truth. This is
   the upstream client's behaviour, not a choice we made, and the strip's Remove
   button is now the way to act on it. Changing codex's Stop to clear the queue
-  would be a product-default change and is deliberately NOT done here.
+  would be a product-default change and is deliberately NOT done here. On the
+  ACP side the drop reports a `queue_op_result {op:'remove', ok:true}` per
+  dropped entry BEFORE it republishes the emptied queue, so those bubbles read
+  `Removed`; a bare empty republish would have cleared their chips, which the
+  client reads as "it ran" — the exact opposite of what Stop did.
 - Measured facts behind the codex implementation (0.153.4, live app-server):
   the removal verb is `thread/queue/delete {threadId, queuedSubmissionId}` —
   **there is no `thread/queue/remove`**; `thread/queue/changed` carries only

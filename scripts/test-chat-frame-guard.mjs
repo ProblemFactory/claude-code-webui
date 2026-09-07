@@ -305,8 +305,15 @@ setInterval(() => {}, 1e3);
   ok((ws.match(/code: 'input-rejected'/g) || []).length >= 2, 'both chat-input refusal sites carry code:input-rejected');
   ok(/code: 'input-rejected',[^\n]*message:/.test(ws.replace(/\n\s*/g, ' ')), 'refusals carry the text in the message field the client reads');
   const cv = fs.readFileSync(path.join(REPO, 'src/lib/chat-view.js'), 'utf8');
-  ok(cv.includes("msg.code === 'input-rejected'"), 'chat-view renders coded refusals in-chat (no read-only flip)');
-  ok(cv.indexOf("msg.code === 'input-rejected'") < cv.indexOf('_tryViewOnlyRescue'), 'refusal branch runs BEFORE the attach-failure rescue');
+  // The rule is now an EXPLICIT set of scoped codes rather than a single
+  // literal (2026-09-06: "any coded error is scoped" would have swallowed
+  // 'ended-during-attach', whose session really is gone — test-queue-steer ⑦
+  // drives both meanings functionally). Order is asserted INSIDE the handler:
+  // position in the file is meaningless for class methods.
+  const scopedSet = /const SCOPED_REFUSAL_CODES = new Set\(\[([\s\S]*?)\]\);/.exec(cv)?.[1] || '';
+  ok(/'input-rejected'/.test(scopedSet), 'chat-view renders coded input refusals in-chat (no read-only flip)');
+  const errBody = /_onSessionError\(msg\) \{([\s\S]*?)\n  \}/.exec(cv)?.[1] || '';
+  ok(!!errBody && errBody.indexOf('isScopedRefusal(msg)') >= 0 && errBody.indexOf('isScopedRefusal(msg)') < errBody.indexOf('_tryViewOnlyRescue'), 'refusal branch runs BEFORE the attach-failure rescue');
   const ir = fs.readFileSync(path.join(REPO, 'src/lib/incident-recorder.js'), 'utf8');
   ok(ir.includes('msg.message || msg.error'), 'incident ring captures error-field texts (the msg:"" forensic gap)');
 }

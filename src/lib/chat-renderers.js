@@ -227,9 +227,10 @@ class ChatRenderers {
    * @param {HTMLElement} opts.messageList - Message list DOM element
    * @param {Function} [opts.onPermissionResolve] - Called when a permission is resolved (allow/deny)
    */
-  constructor({ ws, sessionId, app, backend = 'claude', compact, messageList, onPermissionResolve, onFork, getSessionCtx, onSendText, onQueueChipClick }) {
+  constructor({ ws, sessionId, app, backend = 'claude', compact, messageList, onPermissionResolve, onFork, getSessionCtx, onSendText, onQueueChipClick, getQueueCaps }) {
     this._onSendText = onSendText || null; // in-chat action buttons send through the live input (null = view-only)
     this._onQueueChipClick = onQueueChipClick || null; // clicking a 'queued' chip steers that message (live windows only)
+    this._getQueueCaps = getQueueCaps || null; // the VIEW's queue capability (harness row ∧ running wrapper); absent = view-only ⇒ inert chip
     this.ws = ws;
     this.sessionId = sessionId;
     this.app = app;
@@ -352,9 +353,12 @@ class ChatRenderers {
     return el;
   }
 
-  /** Can THIS session's harness inject a queued message into the running turn?
-   *  (backend-caps `inputModes.steer`, projected onto the client via META.) */
-  _canSteerQueue() { return !!getBackendMeta(this.backend)?.caps?.inputModes?.steer; }
+  /** Can THIS SESSION inject a queued message into the running turn? ONE
+   *  definition, owned by the view (backend-caps `inputModes.steer` projected
+   *  through META **and** the running wrapper's own queue advert) — a renderer
+   *  built without it (view-only history) renders the chip inert, which is
+   *  exactly right: a dead session steers nothing. */
+  _canSteerQueue() { return !!this._getQueueCaps?.()?.steer; }
 
   /** THE QUEUE CHIP on a user bubble — 'queued' (waiting behind the running
    *  turn, clickable to steer where the harness allows it), 'steered' (injected
