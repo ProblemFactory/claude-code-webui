@@ -1178,6 +1178,160 @@ const stalledChild = () => { const c = new EventEmitter(); c.pid = null; c.unref
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ROUND 7 — THE SAME RULE, ONE LAYER UP. Round 6 made the LIVE LANE's stop()
+// terminal for work already in flight. But nothing the user clicks starts that
+// lane: install() starts it from what the KEEPER publishes (`laneWanted =
+// st.ready || wantsAutostart()`), and `locate()` checks `state.stopping` only
+// at ENTRY. Every rung under that entry reaches `adopt()` — the ONE place a
+// client is ever published — after an await `stop()` cannot cancel (the reuse
+// health probe on a BUSY serve, `git init` in the isolated cwd, the ≤20s boot
+// wait). So a Disable landing inside one re-published `ready:true`, re-armed
+// the runaway-guard interval stop() had just cleared, and built a BRAND-NEW
+// lane whose own `laneStopped` is false by construction — an fs.watch on the
+// user's real OpenCode store, firing, for a service they had just turned off.
+console.log('\n— ROUND 7 (the sixth review: stop() vs the KEEPER ladder already in flight) —');
+/** The negative control again (round 6's rule: a leg that only proves "the
+ *  fixed keeper holds nothing" cannot tell a fix from a broken measurement).
+ *  This is src/opencode-serve.js with exactly this fix's checks removed; its
+ *  relative requires are re-pointed at the repo so it can live in /tmp. */
+const R7_NEUTER = [
+  ['the acquisition-point check in adopt()', 'async function adopt(port, pid, source) {\n    if (state.stopping) return null;', 'async function adopt(port, pid, source) {', 1],
+  ['the reuse-probe check', '        if (state.stopping) return null;\n        // THE OPS KILL SWITCH', '        // THE OPS KILL SWITCH', 1],
+  ['the isolated-cwd check', '      if (state.stopping) return null;   // `git init` is an await too: a disable landing in it used to reach the spawn below\n', '', 1],
+  ['the pre-spawn check', '    if (state.stopping) return null;   // never START a third-party daemon for a service that was turned off mid-ladder\n', '', 1],
+  // the boot loop, restored to its exact pre-fix shape: ONE combined bail at
+  // the top that walks away from the child, and NO check after the probe
+  ['the boot-loop bail', "      if (state.stopping) return abandon({ why: 'the background service was turned off' });\n      if (state.child !== child) return abandon();", '      if (state.stopping || state.child !== child) return null;', 1],
+  ['the post-probe check', "        if (state.stopping) return abandon({ why: 'the background service was turned off' });\n", '', 1],
+];
+let unfixedServe = null, unfixedServeWhy = null, unfixedServeFile = null;
+try {
+  let src = read('src/opencode-serve.js');
+  for (const [name, from, to, count] of R7_NEUTER) {
+    const hits = src.split(from).length - 1;
+    if (hits !== count) throw new Error(`the negative control is stale: "${name}" matched ${hits}× (expected ${count}) — re-derive it from the current source`);
+    src = src.split(from).join(to);
+  }
+  src = src.replace(/require\('\.\/([\w-]+)'\)/g, (_m, n) => `require(${JSON.stringify(path.join(REPO, 'src', `${n}.js`))})`);
+  const f = path.join(os.tmpdir(), `vs-oc-serve-unfixed-${process.pid}.js`);
+  fs.writeFileSync(f, src);
+  unfixedServe = require(f);
+  unfixedServeFile = f;
+} catch (e) { unfixedServeWhy = e.message; }
+ok('(the control itself) an UNFIXED copy of the keeper can be built from the current source — the A/B below is only meaningful against it', !!unfixedServe, unfixedServeWhy);
+
+/** ONE harness for all three windows: drive the REAL wiring (install() +
+ *  locator.start() + locator.stop(), the `_ocStart`/`_ocStop` pair in
+ *  src/plugins.js) with a REAL live lane over a REAL store dir, and land the
+ *  Disable inside the await named by `window`. `disable:false` is the positive
+ *  control on the same harness — the guards must not break a normal boot. */
+async function r7Run(mod, { window: win, disable = true }) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-oc-r7-data-'));
+  const ocHome = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-oc-r7-home-'));
+  const storeDir = path.join(ocHome, '.local/share/opencode');
+  fs.mkdirSync(storeDir, { recursive: true });
+  fs.writeFileSync(path.join(storeDir, 'opencode.db'), 'x');
+  const base = inotifyWdsOn(storeDir);
+  const mocks = [];
+  let wantUp = true, externals = 0, spawns = 0;
+  const opts = {
+    dataDir: dir, command: '/usr/bin/opencode', log: { warn() { }, error() { }, log() { } }, guardSampleMs: 0,
+    autostart: () => wantUp, readProc: () => ({ cpuTicks: 0, rssBytes: 1024 }),
+    makeLane: (deps) => events.createLiveLane({ ...deps, env: { HOME: ocHome }, fetchImpl: async () => { throw new Error('no serve'); }, onExternal: () => { externals++; } }),
+    spawnImpl: () => { throw new Error('this window must not spawn'); },
+  };
+  if (win === 'reuse') {
+    // A RECORDED serve that outlived a VibeSpace restart, and is BUSY: 1.18.29
+    // answers /global/health in ~1.2s cold, so hundreds of ms is the normal
+    // case, not a contrived one.
+    const st = createMockState(); st.delayMs = 700;
+    const mock = await startMockServe({ state: st });
+    mocks.push(mock);
+    fs.writeFileSync(path.join(dir, 'opencode-serve.json'), JSON.stringify({ port: mock.port, pid: process.pid, startedAt: Date.now(), cwd: dir }));
+  } else if (win === 'boot') {
+    // A spawn whose serve binds the port at once but takes 700ms to answer
+    // /global/health — i.e. the "starting…" window the user gives up in.
+    opts.spawnImpl = (cmd, args) => {
+      spawns++;
+      const port = Number(args[args.indexOf('--port') + 1]);
+      const st = createMockState(); st.delayMs = 700;
+      startMockServe({ port, state: st }).then((m) => mocks.push(m)).catch(() => { });
+      const c = new EventEmitter(); c.pid = null; c.unref = () => { }; c.kill = () => { }; return c;
+    };
+  } else if (win === 'cwd') {
+    // The `git init` of the isolated serve cwd is an await of its own, and the
+    // rung AFTER it starts a third-party daemon.
+    opts.execImpl = (_cmd, _args, _o, cb) => { setTimeout(() => cb(null, '', ''), 600); };
+    opts.spawnImpl = () => { spawns++; const c = new EventEmitter(); c.pid = 99111; c.unref = () => { }; c.kill = () => { }; return c; };
+    opts.bootTimeoutMs = 1500;   // nothing ever answers here: the point is WHETHER we spawned, not the boot wait
+  }
+  const facts = mod.install(opts);
+  facts.locator.start();                       // the plugin's Start — NOT awaited, exactly as the route leaves it
+  await sleep(win === 'cwd' ? 250 : 400);      // …now inside the await this window names
+  // THE 'cwd' WINDOW DELIBERATELY LEAVES THE PLUGIN RECORD ON. That is the
+  // whole point of it: the pre-fix spawn was refused in production only
+  // because `_ocStop` writes the record BEFORE calling stop(), so the re-read
+  // `autostartOn()` happened to be false. `stop()` must be authoritative on
+  // its own — so this window asks exactly that, and its asserts are about
+  // "did we start a daemon", not about the lane (which legitimately follows
+  // the still-on autostart decision here).
+  if (disable) { if (win !== 'cwd') wantUp = false; facts.locator.stop({ killRecorded: true }); }
+  await sleep(3000);                           // past the await, past the lane's own arm
+  const lst = facts.locator.state();
+  const leaked = base < 0 ? -1 : inotifyWdsOn(storeDir) - base;
+  fs.writeFileSync(path.join(storeDir, 'opencode.db-wal'), 'y');   // an unrelated opencode writes the store
+  await sleep(900);
+  const out = { base, ready: !!lst.ready, source: lst.source || null, stopped: !!lst.stopped, lane: facts.state().liveLane !== null, leaked, externals, spawns, record: fs.existsSync(path.join(dir, 'opencode-serve.json')) };
+  mod.uninstall();
+  for (const m of mocks) { try { await m.close(); } catch { } }
+  for (const d of [dir, ocHome]) fs.rmSync(d, { recursive: true, force: true });
+  return out;
+}
+for (const [win, label] of [['reuse', 'the reuse health probe on a BUSY recorded serve'], ['boot', 'the ≤20s boot wait of a serve it just spawned'], ['cwd', 'the `git init` of the isolated serve cwd']]) {
+  const on = await r7Run(serve, { window: win, disable: false });
+  const off = await r7Run(serve, { window: win, disable: true });
+  if (win === 'cwd') {
+    // ≥1, not ===1: with nothing ever answering, the keeper's own ladder
+    // legitimately retries (the lane's resolveDirs asks for a client again)
+    ok(`(the control) without a Disable, ${label} still reaches the spawn`, on.spawns >= 1, on);
+    ok('a Disable landing in the isolated-cwd await starts NO third-party daemon at all', off.spawns === 0 && off.ready === false, off);
+    ok('…and leaves no record for the next boot to ADOPT (a spawn after "off" was also a serve that outlives us)', off.record === false, off);
+  } else {
+    ok(`(the control) without a Disable, a serve reached through ${label} is adopted and the lane comes up`, on.ready === true && on.lane === true, on);
+    ok(`a Disable landing inside ${label} never publishes a client (\`ready\` stays false)`, off.ready === false && off.source === null, off);
+    ok('…and therefore builds NO live lane for a service that is off', off.lane === false, off);
+  }
+  // the watch asserts belong to the two windows where the service is really
+  // OFF; the 'cwd' window deliberately leaves autostart ON (see r7Run)
+  if (win !== 'cwd') {
+    if (off.base < 0) skip(`…and holds no fs.watch on the user's store (${win})`, 'no /proc/self/fdinfo on this platform');
+    else {
+      ok(`…and holds ZERO fs.watch handles on the user's OpenCode store (${win})`, off.leaked === 0, off);
+      ok(`…and a later store write wakes NOTHING — no dirty signal, no /api/sessions sweep (${win})`, off.externals === 0, off);
+      if (on.leaked < 1) skip(`…(positive control) the same harness DOES watch the store while the service is on (${win})`, `the lane never attached a watch here (${JSON.stringify(on)})`);
+      else ok(`…(positive control) the same harness DOES watch the store while the service is on — the zero above could have failed (${win})`, on.leaked >= 1, on);
+    }
+  }
+  if (!unfixedServe) skip(`NEGATIVE CONTROL: the unfixed keeper leaks through ${label}`, unfixedServeWhy || 'no control module');
+  else {
+    const ctl = await r7Run(unfixedServe, { window: win, disable: true });
+    if (win === 'cwd') ok(`NEGATIVE CONTROL: the UNFIXED keeper starts a serve AFTER the stop, through ${label}`, ctl.spawns >= 1, ctl);
+    else if (ctl.base < 0) skip(`NEGATIVE CONTROL: the unfixed keeper leaks through ${label}`, 'the control could not be measured here');
+    else ok(`NEGATIVE CONTROL: the UNFIXED keeper publishes ready:true AFTER the stop, arms a lane, watches the user's store and still fires — through ${label}`,
+      ctl.ready === true && ctl.stopped === true && ctl.lane === true && ctl.leaked >= 1 && ctl.externals >= 1, ctl);
+  }
+}
+{
+  // …and the invariant is written down where the next person will look
+  const kfs = read('docs/kb-file-structure.md');
+  ok('docs: "the check belongs at the ACQUISITION point" is in the kb essays + the incident file + the index',
+    /ROUND 7/.test(kfs) && /adopt\(\)/.test(kfs)
+    && /A SERVICE THAT WAS TURNED OFF STILL ADOPTED/.test(read('docs/kb-bugfix-invariants.md'))
+    && /S9 REMAINDER ROUND 7/.test(read('CLAUDE.md')));
+  if (unfixedServeFile) { try { fs.rmSync(unfixedServeFile, { force: true }); } catch { } }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // THE WIRING, ON A REAL BOOT. The unit A/B above drives install() directly; this
 // one starts the actual server the way a user's instance starts, with a fresh
 // data/ and the plugin at its shipped default (OFF), and MEASURES what the
@@ -1254,12 +1408,26 @@ console.log('\n— A REAL BOOT WITH THE SERVICE OFF (nothing of ours runs or wat
           else if (wdsOn === 0) skip('…and turning the plugin ON makes THIS instance watch the store (the control)', 'the lane never attached a watch here (an inotify-exhausted box degrades LOUDLY by design)');
           else {
             ok('…and turning the plugin ON makes THIS SAME instance watch the store — the control that proves the OFF measurement could fail', wdsOn > 0, { wdsOn });
-            const servePid = st.pid;
+            // THE PID COMES FROM THE RECORD, NOT FROM /api/opencode/state.
+            // That route answers through OPENCODE_OPS.state, whose result()
+            // normaliser (src/opencode-remote.js) emits no `pid` — so the old
+            // `process.kill(st.pid, 0)` called kill(undefined), threw a
+            // TypeError into the catch, and `stillAlive` was PERMANENTLY
+            // false: the "stops the daemon" half of this assert could not
+            // fail, whatever the product did. A missing pid is now a failure
+            // of its own, and the liveness helper returns null (never a
+            // reassuring `false`) when it has nothing to ask about.
+            let servePid = null;
+            try { servePid = JSON.parse(fs.readFileSync(path.join(wt, 'data', 'opencode-serve.json'), 'utf8')).pid; } catch { servePid = null; }
+            ok('(the measurement) the running serve names its pid in data/opencode-serve.json — without one, a liveness check passes by accident', typeof servePid === 'number' && servePid > 0, { servePid, state: { ready: st.ready, port: st.port } });
+            const alive = (pid) => { if (typeof pid !== 'number' || pid <= 0) return null; try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
+            ok('(the control) …and that pid is ALIVE while the service is on — so "gone" below is a real transition', alive(servePid) === true, { servePid, alive: alive(servePid) });
             await fetch(`http://127.0.0.1:${PORT}/api/plugins/opencode-serve/enabled`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: false }) }).catch(() => { });
             let wdsBack = wdsOn;
             for (let i = 0; i < 120 && wdsBack > 0; i++) { await sleep(500); wdsBack = inotifyWdsOn(storeDir, srv.pid); }
-            const stillAlive = (() => { try { process.kill(servePid, 0); return true; } catch { return false; } })();
-            ok('…and turning it OFF gives the watch back AND stops the daemon (off means the process is gone)', wdsBack === 0 && !stillAlive, { wdsBack, servePid, stillAlive });
+            let stillAlive = alive(servePid);
+            for (let i = 0; i < 40 && stillAlive === true; i++) { await sleep(250); stillAlive = alive(servePid); }   // SIGTERM → exit is not instant
+            ok('…and turning it OFF gives the watch back AND stops the daemon (off means the process is gone)', wdsBack === 0 && stillAlive === false, { wdsBack, servePid, stillAlive });
           }
         }
       }

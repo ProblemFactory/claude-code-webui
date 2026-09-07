@@ -775,7 +775,22 @@ function createServeLocator({
     state.capsProbed = true;
     try { onCaps?.({ ...state.caps }, snapshot()); } catch (e) { log?.error?.(`[opencode-serve] onCaps failed: ${e.message}`); }
   }
+  /** THE ACQUISITION POINT (round 7 — the same rule round 6 applied to the
+   *  live lane, one layer up). This is the ONLY place `state.client` is ever
+   *  assigned, so it is the only place that can refuse to hand a client to a
+   *  service that was turned OFF while we were awaiting something. `locate()`
+   *  checks `state.stopping` at ENTRY only, and every rung below reaches this
+   *  call after at least one await (the reuse health probe, the safety probe,
+   *  the boot wait) — none of which `stop()` can cancel. Publishing here after
+   *  a stop is not a cosmetic lie: it sets `ready:true`, RE-ARMS the runaway
+   *  guard interval `stop()` just cleared, and through `laneWanted` (install())
+   *  builds a BRAND-NEW live lane whose own `laneStopped` is false by
+   *  construction — so the user's real OpenCode store is watched again, and
+   *  fires `onExternal`, for a service they just disabled. Reproduced through
+   *  the real wiring (install() + locator.start() + locator.stop()) with a
+   *  busy serve, and again with a stop landing inside the boot probe. */
   async function adopt(port, pid, source) {
+    if (state.stopping) return null;
     state.client = mkClient(port);
     state.port = port; state.pid = pid; state.source = source; state.startedAt = Date.now(); state.lastError = null;
     guard.prev = null; guard.hotSince = 0; armGuard();
@@ -891,10 +906,17 @@ function createServeLocator({
     if (cmd && !state.cwd && (rec || autostartOn())) {
       try { const r = await ensureServeCwd(dataDir, { execImpl, log }); state.cwd = r.dir; state.cwdIsolated = r.isolated; }
       catch (e) { log?.warn?.(`[opencode-serve] isolated cwd unavailable (${e.message})`); }
+      if (state.stopping) return null;   // `git init` is an await too: a disable landing in it used to reach the spawn below
     }
     if (rec) {
       const probe = mkClient(rec.port);
       if (await healthy(probe, DEFAULT_TIMEOUT_MS)) {
+        // …and the probe itself is an await (a BUSY serve answers /global/health
+        // in hundreds of ms). Checking here as well as in adopt() means a
+        // disable never even evaluates the reuse verdict — it does not signal a
+        // recorded pid we were about to replace, on behalf of a service that is
+        // already being torn down by stop({killRecorded}).
+        if (state.stopping) return null;
         // THE OPS KILL SWITCH IS AUTHORITATIVE OVER ADOPTION, not just over
         // spawning (2026-09-07 follow-up): this rung runs BEFORE the autostart
         // gate below, so VIBESPACE_OPENCODE_SERVE=0 used to stop us STARTING a
@@ -917,6 +939,7 @@ function createServeLocator({
     if (!cmd) { state.lastError = 'opencode CLI is not installed'; return null; }
     if (!autostartOn()) { state.lastError = serveEnvOverride() === false ? 'the OpenCode background service is forced OFF by VIBESPACE_OPENCODE_SERVE=0 on this instance' : 'the OpenCode background service is off — enable the "OpenCode background service" plugin (⚙ → Plugins) to start it'; return null; }
     const port = await freePort();
+    if (state.stopping) return null;   // never START a third-party daemon for a service that was turned off mid-ladder
     let child;
     try {
       child = spawnImpl(cmd, ['serve', '--port', String(port), '--hostname', '127.0.0.1', '--log-level', 'WARN'], { cwd: state.cwd || cwd || os.homedir(), env: env(), stdio: 'ignore', detached: true });
@@ -928,9 +951,32 @@ function createServeLocator({
     writeRecord({ port, pid: child.pid || null, startedAt: state.startedAt, command: cmd, cwd: state.cwd || cwd || null });
     const probe = mkClient(port);
     const t0 = Date.now();
+    /** A boot we walk away from must not leave the child behind. `stop()` ran
+     *  BEFORE this child existed, so it had nothing to kill and its
+     *  `clearRecord()` came before our `writeRecord()` — the old `return null`
+     *  left a live `opencode serve` plus a record the NEXT boot would adopt,
+     *  for a service the user had just turned off. */
+    const abandon = ({ why = null } = {}) => {
+      // `why` only when WE decided: a child that exited on its own already has
+      // onChildExit's honest lastError, and overwriting it would hide the crash
+      if (why) { state.lastError = `opencode serve was starting when ${why} — stopped it`; log?.warn?.(`[opencode-serve] ${state.lastError} (pid ${child.pid || '?'}, port ${port})`); }
+      if (state.child === child) { state.child = null; state.pid = null; }
+      try { child.kill('SIGTERM'); } catch { }
+      const r = readRecord();
+      if (r && r.port === port) clearRecord();   // never clear a record that names a DIFFERENT serve
+      return null;
+    };
     while (Date.now() - t0 < bootTimeoutMs) {
-      if (state.stopping || state.child !== child) return null;
-      if (await healthy(probe, 1000)) { log?.log?.(`[opencode-serve] started pid ${child.pid} on 127.0.0.1:${port} (${Date.now() - t0}ms)`); return adopt(port, child.pid || null, 'spawned'); }
+      if (state.stopping) return abandon({ why: 'the background service was turned off' });
+      if (state.child !== child) return abandon();
+      // the health probe is an await of its own (up to 1s per rung, over a
+      // boot wait of up to 20s — the whole window in which a user watching
+      // "starting…" gives up and clicks Disable)
+      if (await healthy(probe, 1000)) {
+        if (state.stopping) return abandon({ why: 'the background service was turned off' });
+        log?.log?.(`[opencode-serve] started pid ${child.pid} on 127.0.0.1:${port} (${Date.now() - t0}ms)`);
+        return adopt(port, child.pid || null, 'spawned');
+      }
       await wait(200);
     }
     state.lastError = `opencode serve did not answer on 127.0.0.1:${port} within ${bootTimeoutMs}ms`;
