@@ -27,6 +27,12 @@ export class ChatStatusBar {
     // says no. Harness caps alone are not enough — see styleAppliesLive.
     this._responseStyleLive = undefined;
     this._autoResume = null;       // {enabled, explicit, globalDefault, armed, resetsAt} from the server
+    // The harness's OWN turn state (§2.5/§3.5): 'idle'|'running'|
+    // 'requires_action', or null = this session has never reported one (old
+    // CLI / spawned without CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS / a harness
+    // whose caps row says it cannot). null is NOT 'idle' — an unreported state
+    // must never be drawn as a claim.
+    this._turnState = null;
     this._pages = []; // pages published from this session (server truth via /api/pages + page-published)
     this._sessionId = sessionId;
     this._backend = backend;
@@ -344,6 +350,14 @@ export class ChatStatusBar {
    *  — the second half of "can this session be re-styled live". */
   setResponseStyleLive(v) { this._responseStyleLive = (v === undefined || v === null) ? undefined : !!v; this.render(); }
   setAutoResume(st) { this._autoResume = st || null; this.render(); }
+  /** The harness's authoritative turn state. `null`/undefined = not reported —
+   *  keeps the chip off entirely rather than asserting 'idle'. */
+  setTurnState(v) {
+    const next = (v === 'idle' || v === 'running' || v === 'requires_action') ? v : null;
+    if (next === this._turnState) return;
+    this._turnState = next;
+    this.render();
+  }
 
   setReviewEnabled(enabled) {
     this._reviewEnabled = !!enabled;
@@ -409,6 +423,17 @@ export class ChatStatusBar {
         + (eLive ? '\n' + t('{effort} is still in effect until the next turn starts', { effort: eLive }) : '')
         + (eOriginLine ? '\n' + eOriginLine() : '');
       parts.push(`<span class="chat-status-effort chat-status-clickable${eKnown ? '' : ' chat-status-dim'}" title="${escHtml(eFull)}">${eKnown ? escHtml(this._statusEffort) : t('effort: ?')}</span>`);
+    }
+
+    // TURN STATE, third value (§2.5). idle/running are ALREADY said by the
+    // composer's spinner, so drawing them here would be a second voice for the
+    // same fact; 'requires_action' is the one this product could never say —
+    // today it is guessed from "is a permission card on screen", which is blind
+    // to every other reason the CLI parks a turn (an MCP elicitation, a
+    // request_user_dialog, a tool waiting on the host). Drawn ONLY when the
+    // harness itself reported it, never inferred, never on a backend id.
+    if (this._turnState === 'requires_action') {
+      parts.push(`<span class="chat-status-turnstate chat-status-needs-action" title="${escHtml(t('The agent is waiting for you — the turn is paused, not finished (reported by the harness).'))}">${UI_ICONS.hourglass} ${escHtml(t('waiting for you'))}</span>`);
     }
 
     // Goal indicator — always rendered so there's a discoverable entry point

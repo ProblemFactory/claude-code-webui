@@ -199,5 +199,40 @@ const strip = (msgs) => JSON.stringify(msgs.map((m) => ({ ...m, ts: undefined })
   ok(/convertHistoryAsync[\s\S]{0,400}try \{ this\._processRecord\(record, false\); \}/.test(cmm), 'codex convertHistoryAsync isolates per record (one bad rollout record must not reject the rebuild)');
 }
 
+// ── ④ attach streaming reconciliation (design-harness-features §2.5) ───────
+// The 2.339.2 heal ("the wrapper says the turn ended, the server still thinks
+// it is streaming") gained a SECOND, higher rung: the harness's own turn state.
+// The decision is PURE and shared with the live consumer, because a twin
+// between "what the stream said" and "what attach believes" is the whole
+// stuck-thinking family.
+{
+  const { reconcileAttachStreaming, SIDECAR_SETTLE_MS, AUTHORITATIVE_SETTLE_MS } = require(path.join(REPO, 'src/turn-state.js'));
+  // no authority at all — today's behaviour, byte for byte
+  ok(reconcileAttachStreaming({ isStreaming: true, sidecar: { streaming: false, ageMs: SIDECAR_SETTLE_MS + 1 } }).action === 'sidecar-heal',
+    'no turn-state record: the 3s sidecar heal is unchanged (an old CLI keeps exactly the 2.339.2 behaviour)');
+  ok(reconcileAttachStreaming({ isStreaming: true, sidecar: { streaming: false, ageMs: SIDECAR_SETTLE_MS - 1 } }).action === 'none',
+    '…and it still refuses to heal inside the settle window (the mid-pipeline race guard)');
+  // authority present
+  ok(reconcileAttachStreaming({ turnStateSeen: true, turnState: 'running', isStreaming: false }).isStreaming === true,
+    'authority: a re-attach mid-turn shows the turn as RUNNING even though nothing in the derived path could say so');
+  ok(reconcileAttachStreaming({ turnStateSeen: true, turnState: 'requires_action', isStreaming: false }).isStreaming === true,
+    "authority: 'requires_action' is a LIVE turn (paused on the user) — auto-resume must not treat it as idle");
+  ok(reconcileAttachStreaming({ turnStateSeen: true, turnState: 'idle', isStreaming: true }).clearLabel === true,
+    'authority: idle clears the stale spinner label along with the flag');
+  ok(reconcileAttachStreaming({ turnStateSeen: true, turnState: 'running', isStreaming: true, sidecar: { streaming: false, ageMs: AUTHORITATIVE_SETTLE_MS - 1 } }).action === 'none',
+    'authority: the sidecar (a derived observer) does not outrank the harness inside the 30s window');
+  const stale = reconcileAttachStreaming({ turnStateSeen: true, turnState: 'running', isStreaming: true, sidecar: { streaming: false, ageMs: AUTHORITATIVE_SETTLE_MS + 1 } });
+  ok(stale.action === 'sidecar-heal' && stale.staleAuthority === true,
+    'authority: past 30s the backstop fires anyway and FLAGS it — a lost `idle` record must never wedge a session on "thinking" forever');
+  // wiring: the ws attach path uses this decision and nothing else
+  const wsh = fs.readFileSync(path.join(REPO, 'src/ws-handler.js'), 'utf8');
+  ok(/const rec = reconcileAttachStreaming\(\{/.test(wsh) && !/Date\.now\(\) - st\.mtimeMs > 3000/.test(wsh),
+    'ws attach reconciles through the pure decision (the inline 3s comparison is gone — no twin)');
+  ok(/session\._turnState = 'idle';/.test(wsh),
+    'a stale-authority heal also RESETS the remembered state (else the next attach undoes the heal)');
+  ok(/turnState: session\._turnStateSeen \? \(session\._turnState \|\| null\) : null,/.test(wsh),
+    'the attach payload states the turn state tri-state (null = never reported, which is NOT idle)');
+}
+
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);
 process.exit(fail ? 1 : 0);

@@ -108,5 +108,48 @@ ok(/for \(const ev of ALL_HOOK_EVENTS\)/.test(atg) && /ALL_HOOK_EVENTS = \[\.\.\
 ok(/HOOK_FILES = Object\.fromEntries\(listHarnesses\(\)/.test(atg) && /HOOK_EVENTS_FOR = \(harness\) => \{ const h = listHarnesses\(\)/.test(atg) && !/harness === 'claude' \? \[/.test(atg), 'agent-tool-generators: hook files + events come from the registry (no per-harness literals)');
 ok(HARNESSES.claude.inject.hookEvents.includes('Stop') && !HARNESSES.codex.inject.hookEvents.includes('Stop') && HARNESSES.codex.inject.sessionStartHonoured === false, 'claude registers Stop, codex does not and ignores SessionStart (zero behaviour change)');
 
+// ── turnState / inProgressTools (design-harness-features §2.5 + §3.5) ──
+// Where "is a turn running" comes from, declared per harness and MIRRORED on
+// the client. §6's landing rule: a caps row the server does not have must not
+// exist on the client either — that is exactly how `review` drifted.
+console.log('— turnState');
+{
+  for (const id of Object.keys(BACKEND_CAPS)) {
+    const row = BACKEND_CAPS[id];
+    ok([null, 'authoritative', 'derived'].includes(row.turnState) && typeof row.inProgressTools === 'boolean',
+      `${id}: declares turnState + inProgressTools (${row.turnState} / ${row.inProgressTools})`);
+  }
+  ok(capsOf('claude').turnState === 'authoritative' && capsOf('claude').inProgressTools === true,
+    "claude publishes BOTH: system/session_state_changed (idle|running|requires_action) and set_in_progress_tool_use_ids — the only harness with a tool-granular run set");
+  ok(capsOf('codex').turnState === 'authoritative' && capsOf('codex').inProgressTools === false,
+    'codex: turn/started + turn/completed are its own turn boundaries; no run-set record exists');
+  ok(capsOf('opencode').turnState === 'authoritative' && capsOf('opencode').inProgressTools === false,
+    "opencode (ACP v1): prompt_end's stop reason is the agent's own statement that the prompt is over");
+  ok(capsOf('shell').turnState === null && capsOf('shell').inProgressTools === false, 'shell declares no turn concept at all (terminal-only)');
+  ok(capsOf('gemini').turnState === null && capsOf('gemini').inProgressTools === false, "an unknown backend gets the no-turn row (never claude's by accident)");
+  // The declaration must be TRUE of the consumer: each authoritative harness's
+  // stdout consumer flips _isStreaming from its own protocol records.
+  const consumers = { claude: 'claude-stream-json', codex: 'codex-events', opencode: 'acp-events' };
+  for (const [id, mod] of Object.entries(consumers)) {
+    const src = fs.readFileSync(path.join(REPO, `src/server/stdout/${mod}.js`), 'utf8');
+    ok(capsOf(id).turnState !== 'authoritative' || /session\._isStreaming = /.test(src),
+      `${id}: the 'authoritative' claim is backed by its consumer actually driving _isStreaming (${mod}.js)`);
+  }
+  // …and the CLIENT mirror deep-equals it, key by key, in both directions.
+  for (const id of Object.keys(BACKEND_META)) {
+    const caps = BACKEND_META[id].caps;
+    if (!caps) continue; // shell carries no caps object
+    ok(caps.turnState === capsOf(id).turnState && caps.inProgressTools === capsOf(id).inProgressTools,
+      `${id}: client META mirrors turnState/inProgressTools exactly (no drift)`, JSON.stringify({ client: [caps.turnState, caps.inProgressTools], server: [capsOf(id).turnState, capsOf(id).inProgressTools] }));
+    for (const k of ['turnState', 'inProgressTools']) {
+      ok(k in capsOf(id), `${id}: the client's ${k} row EXISTS on the server (a client-only caps row is forbidden — the 'review' drift)`);
+    }
+  }
+  // The client gates on the ROW, never on a backend id.
+  const sb = fs.readFileSync(path.join(REPO, 'src/lib/chat-status-bar.js'), 'utf8');
+  ok(!/_backend === 'claude'[^\n]*turnState|turnState[^\n]*_backend === 'claude'/.test(sb),
+    'the status bar never asks "is this claude?" to decide whether to draw the turn state');
+}
+
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);
 process.exit(fail ? 1 : 0);

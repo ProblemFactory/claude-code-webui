@@ -84,6 +84,7 @@ const SUITES = [
   'test-peer-delivery', // peerDelivery registry lane: codex rpc-queue rung (real deliver.create + sidecar) + wiring pins
   'test-quota-source',  // harness S4: per-harness QuotaSignalSource (normalize/signalFromStream/probe/classifyAuthFailure on real shapes) + the caps-routed probe dispatcher (no claude spawn for codex identities) + wiring pins
   'test-chat-trim-guard', // fold-dominated window trim guard (inc-mtajy6wr white-screen) pins
+  'test-turn-truth-ui', // B3 turn truth, BROWSER half at 375×667: the status bar's third state ('requires_action' — the value we never had), the compaction card's apology→real-stage swap, tombstone-removes vs rollback-strikes, the tool-granular run set (SKIPs without chrome)
   'test-fold-ux',       // run-fold honesty (ToolSearch = tool lookups, never MCP; pure summary composer) + expanded-run legibility (rail/floating bar/footer) — node unit + headless-chrome fixture (SKIPs the chrome half without chrome)
   'test-task-lifecycle', // background Agent/Workflow/Bash lifecycle from HISTORY (launch acks + persisted notifications)
   'test-local-device', 'test-sysinfo-op', 'test-transcript-parity',

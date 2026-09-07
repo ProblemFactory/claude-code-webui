@@ -75,6 +75,35 @@
 // A harness that declares a verb it cannot construct is a RED test, so
 // "offering a control we cannot honour" (the 2.361.4 accept-and-ignore
 // failure) is structurally impossible rather than a review promise.
+// turnState names WHERE "is a turn running right now" comes from
+// (design-harness-features §3.5). Everything that gates on streaming — the
+// composer's Stop button, auto-resume's "it is already working" skip, the
+// attach payload's isStreaming — reads ONE flag; this row says whether that
+// flag is the harness's own statement or our inference:
+//   'authoritative' — the harness PUBLISHES turn state and we drive the flag
+//                     from it (claude: system/session_state_changed
+//                     {idle|running|requires_action}, the CLI's own words
+//                     "authoritative turn-over signal"; codex: turn/started +
+//                     turn/completed; ACP: prompt_start / prompt_end's stop
+//                     reason). Per SESSION the fact is still tri-state — an
+//                     old CLI, or claude without the spawn env below, never
+//                     emits one, so the consumer stays on the derived path
+//                     until the FIRST record arrives and only THEN reports
+//                     authoritative. Declaring it here says the PROTOCOL can,
+//                     never that this session did.
+//   'derived'       — we infer it from record shapes (no such harness today;
+//                     the value exists so a future one can say so honestly).
+//   null            — no turn concept at all (shell).
+// inProgressTools names the TOOL-GRANULAR truth: whether the harness reports
+// which tool_use ids are executing right now (claude's
+// set_in_progress_tool_use_ids: "Surfaces use this to show which tools are
+// running"). false everywhere else — codex/ACP report per-item lifecycle, and
+// a card's spinner is derived from its own item there.
+// CLAUDE'S SPAWN PREREQUISITE (owner decision 8(c), design §5.1): the CLI only
+// emits session_state_changed when CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS is in
+// its environment — src/adapters/claude-code.js sets it on every claude spawn.
+// It is pure observability (no behaviour change), which is why it is the ONE
+// spawn default that changed in this batch.
 // responseStyle names the harness's "how should the agent talk" knob and,
 // crucially, WHEN it can be set (2.369.58 — the chip's "restart to apply" row
 // gates on `live`, never on a backend id):
@@ -141,6 +170,10 @@ const BACKEND_CAPS = {
     // The CLI queues stdin messages itself and reports nothing about it —
     // an HONEST EMPTY verb table, not a missing feature.
     inputModes: { queue: true, queueVerbs: [] },
+    // system/session_state_changed (env-gated at spawn) + the tool-granular
+    // set_in_progress_tool_use_ids — the only harness that publishes both.
+    turnState: 'authoritative',
+    inProgressTools: true,
     // --settings outputStyle, read once at spawn (stream-json has no
     // /output-style verb) ⇒ a change needs a restart.
     responseStyle: { live: false, closed: false, values: ['Concise', 'Explanatory', 'Learning', 'Proactive'] },
@@ -160,6 +193,11 @@ const BACKEND_CAPS = {
     // app-server (the removal verb is `delete` with `queuedSubmissionId`;
     // there is NO `thread/queue/remove`).
     inputModes: { queue: true, queueVerbs: ['remove', 'steer', 'steer-all', 'reorder', 'edit', 'run-now', 'run-all'] },
+    // turn/started (+ turn_id) and turn/completed / turn_aborted / task_failed
+    // are the app-server's own turn boundaries — already the only thing the
+    // codex consumer flips _isStreaming on. No tool-granular set exists.
+    turnState: 'authoritative',
+    inProgressTools: false,
     // Personality enum + thread/settings/update, both from the 0.153.4 schema
     // dump. LIVE: the running thread takes the new personality for its next
     // turn — no restart, no new conversation.
@@ -170,6 +208,7 @@ const BACKEND_CAPS = {
     streamProtocol: null, // terminal-only: no chat parse pipeline
     peerDelivery: 'stash-only',
     inputModes: { queue: false, queueVerbs: [] },
+    turnState: null, inProgressTools: false, // terminal-only: there is no turn
     responseStyle: { live: false, closed: true, values: [] }, // terminal-only: no agent to style
   },
   // ACP v1 harnesses (S8, design-harness-plugins §2.3): the agent holds its
@@ -190,6 +229,10 @@ const BACKEND_CAPS = {
     // ever has entries WHILE a prompt is running (an idle wrapper dispatches
     // immediately), so "run it now" could only ever answer 'busy'.
     inputModes: { queue: true, queueVerbs: ['remove', 'reorder', 'edit'] },
+    // ACP v1's prompt_end carries a stop reason — the agent's own statement
+    // that the prompt is over (acp-events already drives the flag from it).
+    turnState: 'authoritative',
+    inProgressTools: false,
     // ACP v1 has no response-style/persona verb; the agent's own config owns it.
     responseStyle: { live: false, closed: true, values: [] },
   },
@@ -200,7 +243,7 @@ const BACKEND_CAPS = {
 // row whose `steer` disagrees with its `queueVerbs`.
 for (const row of Object.values(BACKEND_CAPS)) row.inputModes = deriveInputModes(row.inputModes);
 
-const NO_CAPS = Object.freeze({ pool: false, hotSwitch: 'unverified', planC: false, sealedOrders: false, resetCredit: false, quotaProbe: null, fork: false, streamProtocol: null, peerDelivery: 'stash-only', inputModes: deriveInputModes({ queue: false, queueVerbs: [] }), responseStyle: Object.freeze({ live: false, closed: true, values: Object.freeze([]) }) });
+const NO_CAPS = Object.freeze({ pool: false, hotSwitch: 'unverified', planC: false, sealedOrders: false, resetCredit: false, quotaProbe: null, fork: false, streamProtocol: null, peerDelivery: 'stash-only', inputModes: deriveInputModes({ queue: false, queueVerbs: [] }), turnState: null, inProgressTools: false, responseStyle: Object.freeze({ live: false, closed: true, values: Object.freeze([]) }) });
 
 function capsOf(backend) {
   return BACKEND_CAPS[backend || 'claude'] || NO_CAPS;

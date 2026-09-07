@@ -862,6 +862,25 @@ class ChatRenderers {
       el.innerHTML = `<span class="chat-system-text">${escHtml(t('⚠ Model auto-fallback: {from} → {to} (the harness switched models, e.g. capacity/overload; /model or the badge menu sets it back)', { from: b.fallbackFrom || '?', to: b.fallbackTo || '?' }))}</span>`;
       return { el, sideEffect: null };
     }
+    // ROLLBACK NOTICE (§2.10 / §3.2): the normalizer bakes English (it cannot
+    // know the device language) and carries the NUMBERS, so the sentence is
+    // rebuilt here — the same contract as the model-fallback notices above.
+    if (msg.noticeKind === 'rewound' && msg.content?.[0]) {
+      const d = msg.content[0].rewindData || {};
+      const n = Number(d.numTurns) || 0;
+      const found = Number(d.turnsFound) || 0;
+      const el = document.createElement('div');
+      el.className = 'chat-msg chat-msg-system chat-system-notification chat-msg-rewind-notice';
+      // The honest two-number case: the agent dropped N turns but only `found`
+      // of them were ever on this screen (a resumed thread whose earlier turns
+      // we never rendered). Saying "rolled back N" there would strike history
+      // that is still showing.
+      const line = found && found < n
+        ? t('↶ Rolled back {found} of the {n} turns the agent dropped — the rest were already outside this view.', { found, n })
+        : t('↶ Rolled back {n} turn(s) — they are no longer part of the conversation the agent can see.', { n: n || found });
+      el.innerHTML = `<span class="chat-system-text">${escHtml(line)}</span>`;
+      return { el, sideEffect: null };
+    }
     // system.init — extract metadata, don't render
     if (msg.content?.[0]?.initData) {
       const d = msg.content[0].initData;
@@ -1243,6 +1262,29 @@ class ChatRenderers {
     return el;
   }
 
+  /** The CLI's live compaction stage (§2.11), or null when it has told us
+   *  nothing. Held here so a card rendered later still opens on the live stage,
+   *  and pushed into any card already on screen. */
+  setCompactStage(stage) {
+    this._compactStage = stage || null;
+    const hint = this.compactHintText();
+    for (const el of this._messageList?.querySelectorAll?.('.chat-ctx-full-hint') || []) el.textContent = hint;
+  }
+
+  /** THE sentence under the "Compact now" button. Before 2026-09 this was a
+   *  hardcoded apology — the only thing we could say, because the CLI's
+   *  compaction was a black box. `compact_progress` opened it, so the apology
+   *  is now the FALLBACK: shown only while no progress record has arrived (an
+   *  old CLI, or the seconds before the first one). Once one has, the card
+   *  states the real stage. */
+  compactHintText() {
+    const s = this._compactStage;
+    if (!s) return t('Compacting a large conversation takes 1–2 minutes — do not press Stop. If it answers “Conversation too long”, rewind a few messages in terminal mode (Esc Esc) and compact again.');
+    if (s.event === 'hooks_start') return t('Compacting: running {hook} hooks…', { hook: String(s.hookType || 'hook').replace(/_/g, ' ') });
+    if (s.event === 'compact_start') return s.hint ? t('Compacting: {hint}', { hint: s.hint }) : t('Compacting the conversation…');
+    return t('Compaction finished.');
+  }
+
   /** "Prompt is too long" guidance card (2.365.0): the context window is full
    *  and EVERY later send fails the same way until the conversation is
    *  compacted — say so and offer the action. View-only windows (no live
@@ -1254,7 +1296,7 @@ class ChatRenderers {
       + `<div class="chat-ctx-full-title">${escHtml(text)}</div>`
       + `<div class="chat-ctx-full-help">${escHtml(t('The conversation no longer fits the model’s context window — every new message will fail the same way until it is compacted.'))}</div>`
       + `<div class="chat-ctx-full-actions"><button class="chat-ctx-compact-btn">${escHtml(t('Compact now'))}</button>`
-      + `<span class="chat-ctx-full-hint">${escHtml(t('Compacting a large conversation takes 1–2 minutes — do not press Stop. If it answers “Conversation too long”, rewind a few messages in terminal mode (Esc Esc) and compact again.'))}</span></div>`
+      + `<span class="chat-ctx-full-hint">${escHtml(this.compactHintText())}</span></div>`
       + `</div>`;
     const btn = el.querySelector('.chat-ctx-compact-btn');
     // The button disables itself so the minute-long compaction is not fired

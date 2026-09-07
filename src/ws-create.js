@@ -1942,6 +1942,11 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
             // (an empty list is a real answer the client would intersect with,
             // leaving a session with no controls at all).
             queueVerbs: null,
+            // NO `turnState` here either, for the same reason and one more: a
+            // just-spawned CLI has not run a turn yet, so it has said nothing
+            // about turn state. null/absent = "not told yet"; the client keeps
+            // the derived path until the first `turn-state` push arrives — the
+            // same tri-state honesty as responseStyleLive below.
             // NO `responseStyleLive` here, deliberately: the sidecar that
             // adverts it is written seconds later, and the client's third
             // state (undefined = "not told yet") is the honest one — it TRIES

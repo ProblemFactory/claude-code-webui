@@ -11,6 +11,7 @@ const { findCodexSessionJsonlPath, extractCodexThreadMeta } = require('./adapter
 const { cwdToProjectDir, findSessionJsonlPath } = require('./session-store');
 const { get: harnessOf } = require('./harnesses'); // S3: store.warmTranscript per harness (claude parse-cache warm / codex thread/read fallback)
 const { capsOf } = require('./backend-caps');      // inputModes.queueVerbs gate for the 'queue-op' case (never a backend-id branch)
+const { reconcileAttachStreaming } = require('./turn-state'); // §2.5: ONE attach-time streaming decision, shared with the live consumer
 
 /** The sentence a harness-level verb refusal carries. Every branch says what
  *  happens to the message ANYWAY — a refusal that only says "no" leaves the
@@ -1049,26 +1050,51 @@ function registerWsHandler(wss, ctx) {
               const turnMap = session._normalizer ? session._normalizer.turnMap() : [];
               const pendingPerms = sm.activePendingPermissions?.() || {};
               // session._isStreaming is tracked explicitly from protocol signals
-              // (result/compact_boundary/user for Claude, turn events for Codex).
-              // Falls back to wrapper metadata file for sessions not yet tracked.
-              // STREAMING RECONCILIATION (2.339.2, stuck-thinking incident):
-              // the wrapper's sidecar flips streaming:false the moment the
-              // result record flows — if the server still believes this LOCAL
-              // chat session is mid-turn while the wrapper disagrees (and the
-              // sidecar has been settled >3s, so no mid-pipeline race), the
-              // server missed the turn end (restart window / parse detach).
-              // Heal here so an attach can never show thinking forever.
-              if (session._isStreaming && !session.host && session.mode === 'chat') {
-                try {
-                  const wf = require('./server/wrapper-files.js').resolveWrapperFiles(BUFFERS_DIR, data.sessionId, path.join(SOCKETS_DIR, data.sessionId.replace(/^sess-/, 'cw-')));
-                  const st = fs.statSync(wf.sidecar);
-                  const sc = JSON.parse(fs.readFileSync(wf.sidecar, 'utf-8'));
-                  if (sc.streaming === false && Date.now() - st.mtimeMs > 3000) {
-                    console.log(`[session] ${data.sessionId}: wrapper says the turn ENDED but server still streaming — healing (missed result)`);
-                    session._isStreaming = false;
-                    session._streamingLabel = '';
+              // (result/compact_boundary/user for claude and — since §2.5 — its
+              // own session_state_changed; turn events for codex; prompt_end for
+              // ACP). Falls back to the wrapper metadata file for sessions the
+              // server is not tracking yet.
+              // ATTACH RECONCILIATION — ONE decision, PURE
+              // (src/turn-state.js reconcileAttachStreaming), shared with the
+              // live consumer's reading of what each state means. Two rungs, in
+              // order:
+              //   ① the harness's OWN last turn state wins in BOTH directions,
+              //     including "still running" — which the derived path could
+              //     never say, because the CLI's `idle` fires after the bg-agent
+              //     loop exits, strictly later than `result`.
+              //   ② the wrapper sidecar stays the BACKSTOP (2.339.2: it flips
+              //     streaming:false the moment the result record flows). It is a
+              //     DERIVED observer, so it never outranks the harness — but it
+              //     is the only thing between us and a session that shows
+              //     "thinking" forever if an `idle` record is ever lost. Under
+              //     authority its settle window is 30s instead of 3s, and when it
+              //     fires anyway the override SAYS so (telemetry) instead of
+              //     quietly deciding the new signal was wrong.
+              if (session.mode === 'chat') {
+                let sidecar = null;
+                if (session._isStreaming && !session.host) {
+                  try {
+                    const wf = require('./server/wrapper-files.js').resolveWrapperFiles(BUFFERS_DIR, data.sessionId, path.join(SOCKETS_DIR, data.sessionId.replace(/^sess-/, 'cw-')));
+                    const st = fs.statSync(wf.sidecar);
+                    const sc = JSON.parse(fs.readFileSync(wf.sidecar, 'utf-8'));
+                    sidecar = { streaming: sc.streaming, ageMs: Date.now() - st.mtimeMs };
+                  } catch { sidecar = null; } // unreadable sidecar heals nothing
+                }
+                const rec = reconcileAttachStreaming({
+                  turnStateSeen: session._turnStateSeen === true, turnState: session._turnState || null,
+                  isStreaming: !!session._isStreaming, sidecar,
+                });
+                if (rec.action !== 'none') {
+                  console.log(`[session] ${data.sessionId}: streaming reconciled (${rec.action}${rec.staleAuthority ? `, the harness last said ${session._turnState}` : ''}) \u2192 ${rec.isStreaming}`);
+                  session._isStreaming = rec.isStreaming;
+                  if (rec.clearLabel) session._streamingLabel = '';
+                  if (rec.staleAuthority) {
+                    try { telemetry?.record?.({ kind: 'event', name: 'turn-state-stale', detail: String(session._turnState || '') }); } catch { }
+                    // the override is a STATE change, not a display tweak:
+                    // leaving 'running' behind would make the NEXT attach undo it
+                    session._turnState = 'idle';
                   }
-                } catch { }
+                }
               }
               const isStreaming = session._isStreaming ?? sm.isStreaming;
               const streamingLabel = isStreaming ? (session._streamingLabel || 'thinking...') : '';
@@ -1130,6 +1156,13 @@ function registerWsHandler(wss, ctx) {
                 // cannot" — the client keeps its "try it" state instead of
                 // wearing a restart row it does not need.
                 responseStyleLive: wcapsAttach.reason === 'no-sidecar' ? null : !!wcapsAttach.responseStyle,
+                // The harness's OWN turn state and the tool ids it says are
+                // running (§2.5). TRI-STATE like responseStyleLive: null = this
+                // session has never emitted one (old CLI / spawned before the
+                // env), and the client then keeps showing the derived state
+                // instead of wearing a third state nobody reported.
+                turnState: session._turnStateSeen ? (session._turnState || null) : null,
+                inProgressTools: session._inProgressTools ? [...session._inProgressTools] : [],
                 normEpoch: session._normEpoch || 0,
                 remoteState: session._remoteState || (session._bareRemote ? { state: 'unprotected' } : null),
                 goal: session._goal || null, goalElapsed: session._goalElapsed || 0, goalStatus: session._goalStatus || null }));

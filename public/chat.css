@@ -31,6 +31,17 @@
 .chat-status-goal-empty:hover { opacity: 1; filter: none; }
 .chat-goal-timer { font-variant-numeric: tabular-nums; }
 .chat-status-style { color: var(--text-secondary); }
+/* Authoritative turn state, third value (design-harness-features §2.5): drawn
+   only for 'requires_action' — idle/running are already said by the composer's
+   spinner, and a second voice for one fact is how two surfaces start to
+   disagree. The pulse is the same 1.6s cadence as the remote-state chip so the
+   bar has ONE "something needs you" rhythm. */
+.chat-status-turnstate { border-radius: 999px; padding: 0 6px; }
+.chat-status-needs-action {
+  color: var(--yellow, #e5c07b); font-weight: 600;
+  background: color-mix(in srgb, var(--yellow, #e5c07b) 14%, transparent);
+  animation: chat-remote-pulse 1.6s ease-in-out infinite;
+}
 .chat-status-autoresume { color: var(--text-secondary); }
 .chat-status-autoresume-on { color: var(--accent); font-weight: 600; }
 .chat-status-autoresume-armed { color: var(--yellow, #f59e0b); font-weight: 600; }
@@ -1165,6 +1176,33 @@ body.hide-empty-thinking .chat-compact .chat-msg.chat-empty-thinking { display: 
 /* Long-running tool heartbeat line (2.227.7) — distinct from the agent status
    line: no count, no View Log (a Bash call has no transcript to open). */
 .chat-tool-progress { font-size: 11px; color: var(--text-dim); padding: 2px 0 0 2px; font-style: italic; }
+/* THE tool that is executing right now (claude set_in_progress_tool_use_ids —
+   caps.inProgressTools). A pending card is not the same thing as a RUNNING
+   one: between parse and execution a tool can be sitting on a permission
+   prompt, and only this record can tell them apart. */
+.chat-tool-inflight .chat-tool-label::after {
+  content: ''; display: inline-block; width: 6px; height: 6px; margin-left: 6px; border-radius: 50%;
+  background: var(--accent); animation: chat-remote-pulse 1.2s ease-in-out infinite; vertical-align: middle;
+}
+/* RETRACTED history (§2.10). Two kinds, two treatments — see src/rewind-ops.js:
+   a claude tombstone means "the CLI replaced this partial, remove it", so it
+   goes; a codex rollback means "these turns were taken back", which must stay
+   VISIBLE or we would silently rewrite what someone remembers reading.
+   No global .hidden in this project — each component declares its own. */
+/* Class-ON-class, and the compact variant spelled out: `.chat-compact .chat-msg
+   { display: block }` is (0,2,0) and a bare `.chat-msg-superseded` (0,1,0)
+   loses to it — measured in headless chrome at 375px, where compact mode is on
+   (the no-global-.hidden law's other half: verify hiding by COMPUTED display,
+   never by the class being present). */
+.chat-msg.chat-msg-superseded,
+.chat-compact .chat-msg.chat-msg-superseded { display: none; }
+.chat-msg-rewound { opacity: 0.45; }
+.chat-msg-rewound .chat-text, .chat-msg-rewound .chat-system-text { text-decoration: line-through; }
+.chat-rewound-tag {
+  display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 999px;
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--text-dim); border: 1px solid var(--border);
+}
 
 /* Background-task lifecycle chip on Agent/Workflow cards (2.368.30) */
 .chat-task-status-chip {

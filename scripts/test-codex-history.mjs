@@ -907,5 +907,81 @@ const ok = (n, c, e) => { if (c) { pass++; console.log('  ✓ ' + n); } else { f
   ok('an engine event with no call pair (history without the wrapper stub) still becomes a complete card', tools.some((m) => m.toolCallId === 'call_orphan' && m.status === 'complete' && m.content[0].input.path === '/w/orphan.png'));
   ok('view_image_tool_call is routed, not skipped', !CodexMessageManager.SKIPPED_EVENT_TYPES.has('view_image_tool_call'));}
 
+// ── thread_rolled_back: a rollback made from the codex TUI (design §2.10/§3.2)
+// The record is `{type:'event_msg', payload:{type:'thread_rolled_back',
+// num_turns:N}}` — ThreadRolledBackEvent has EXACTLY one field (0.153.4 serde
+// dump), and `thread/rollback`'s own param doc defines it: "The number of turns
+// to drop from the end of the thread." The rollout persists the identical
+// payload the live stream carries (confirmed on the owner's two real rollouts
+// that contain it), so ONE handler covers both reads.
+// Until this landed the record sat in SKIPPED_EVENT_TYPES: the rolled-back
+// turns stayed on screen as history the agent no longer has.
+{
+  const turns = (n) => {
+    const recs = [];
+    for (let i = 1; i <= n; i++) {
+      recs.push({ type: 'event_msg', payload: { type: 'task_started', turn_id: `turn_${i}` } });
+      recs.push({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: `question ${i}` }] } });
+      recs.push({ type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: `answer ${i}` }] } });
+      recs.push({ type: 'event_msg', payload: { type: 'task_complete' } });
+    }
+    return recs;
+  };
+  const ROLLBACK = { type: 'event_msg', payload: { type: 'thread_rolled_back', num_turns: 1 } };
+
+  // NEGATIVE CONTROL FIRST — without the record, all three turns render.
+  const before = new CodexMessageManager('t-rb-neg');
+  before.convertHistory(turns(3));
+  const liveBefore = before.messages.filter((m) => !m.rewound);
+  ok('negative control: three turns, no rollback record ⇒ three turns rendered',
+    before.turnMap().length === 3 && liveBefore.filter((m) => m.role === 'user').length === 3, String(before.turnMap().length));
+
+  // …then the same three turns followed by the record.
+  const after = new CodexMessageManager('t-rb');
+  after.convertHistory([...turns(3), ROLLBACK]);
+  const live = after.messages.filter((m) => !m.rewound && m.noticeKind !== 'rewound');
+  ok('three turns then thread_rolled_back num_turns=1 ⇒ TWO turns rendered (the third is struck, not deleted)',
+    live.filter((m) => m.role === 'user').length === 2 && !JSON.stringify(live).includes('question 3') && !JSON.stringify(live).includes('answer 3'),
+    JSON.stringify(live.filter((m) => m.role === 'user').map((m) => m.content?.[0]?.text)));
+  ok('…the minimap stops offering the ghost turn (turnMap counts the notice, never the rolled-back turn)',
+    after.turnMap().filter((e) => e.preview === 'question 3').length === 0 && after.turnMap().filter((e) => e.role === 'user').length === 2,
+    JSON.stringify(after.turnMap().map((e) => e.preview)));
+  ok('…and NOTHING was spliced: the messages are still there, marked (the virtual window’s indices are load-bearing)',
+    after.total === after.messages.length && after.messages.filter((m) => m.rewound === 'rollback').length >= 2
+    && JSON.stringify(after.messages).includes('question 3'), String(after.messages.filter((m) => m.rewound).length));
+  const notice = after.messages.find((m) => m.noticeKind === 'rewound');
+  ok('…the transcript SAYS it happened, with the numbers the renderer localizes from',
+    notice && notice.role === 'system' && notice.content[0].rewindData.numTurns === 1 && notice.content[0].rewindData.harness === 'codex' && /Rolled back 1 turn\b/.test(notice.content[0].text), JSON.stringify(notice?.content?.[0]));
+
+  // LIVE stream = the same handler (the record has one shape, not two).
+  const liveMM = new CodexMessageManager('t-rb-live');
+  const ops = [];
+  liveMM.onOp((op) => ops.push(op));
+  for (const r of turns(3)) liveMM.processLive(r);
+  liveMM.processLive(ROLLBACK);
+  const rew = ops.filter((o) => o.op === 'meta' && o.subtype === 'rewound');
+  ok('live: ONE normalized ‘rewound’ meta op, kind rollback, numTurns stated and toMessageId explicitly null',
+    rew.length === 1 && rew[0].data.harness === 'codex' && rew[0].data.numTurns === 1 && rew[0].data.kind === 'rollback' && rew[0].data.toMessageId === null && rew[0].data.ids.length >= 2, JSON.stringify(rew[0]?.data));
+  ok('live and rebuilt agree on WHICH messages went (same handler, same order)',
+    rew[0].data.ids.length === after.messages.filter((m) => m.rewound === 'rollback').length, `${rew[0].data.ids.length} vs ${after.messages.filter((m) => m.rewound === 'rollback').length}`);
+
+  // Two rollbacks in a row each take N LIVE turns (never double-count).
+  const twice = new CodexMessageManager('t-rb-2');
+  twice.convertHistory([...turns(3), ROLLBACK, ROLLBACK]);
+  ok('a second rollback takes the next live turn, not the one already gone',
+    twice.messages.filter((m) => !m.rewound && m.role === 'user').length === 1, String(twice.messages.filter((m) => !m.rewound && m.role === 'user').length));
+
+  // num_turns larger than the visible history: honest, not silent.
+  const deep = new CodexMessageManager('t-rb-deep');
+  deep.convertHistory([...turns(2), { type: 'event_msg', payload: { type: 'thread_rolled_back', num_turns: 11 } }]);
+  const deepNotice = deep.messages.find((m) => m.noticeKind === 'rewound');
+  ok('num_turns beyond what we ever rendered reports BOTH numbers (11 asked, 2 found) instead of claiming 11 were struck',
+    deepNotice.content[0].rewindData.numTurns === 11 && deepNotice.content[0].rewindData.turnsFound === 2
+    && deep.messages.filter((m) => !m.rewound && m.role === 'user').length === 0, JSON.stringify(deepNotice.content[0].rewindData));
+
+  ok('thread_rolled_back is routed, not skipped (it was in SKIPPED_EVENT_TYPES since the codex normalizer existed)',
+    !CodexMessageManager.SKIPPED_EVENT_TYPES.has('thread_rolled_back'));
+}
+
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);
 process.exit(fail ? 1 : 0);

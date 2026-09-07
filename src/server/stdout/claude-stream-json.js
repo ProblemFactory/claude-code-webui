@@ -30,6 +30,7 @@ const path = require('path');
 const { MessageManager } = require('../../message-manager');
 const { cwdToProjectDir } = require('../../session-store');
 const { ClaudeCodeAdapter } = require('../../adapters/claude-code.js');
+const { isTurnState, turnStateEffect } = require('../../turn-state.js');
 
 const protocol = 'stream-json';
 
@@ -401,14 +402,64 @@ function create({ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes,
             }
           }
 
+          // TOOL-GRANULAR RUN SET (§2.5, caps `inProgressTools`). The CLI's own
+          // describe: "Emitted when tool execution adds/removes tool_use ids
+          // from the mid-execution set (after permission grant, before
+          // result). Surfaces use this to show which tools are running."
+          // Card-less like the two above — it drives the tool cards' spinner,
+          // not the transcript, so it is consumed HERE and never normalized
+          // (the normalizer has no case for it; a rebuild replays it into a
+          // no-op, which is correct: a run set is live-only by nature).
+          if (msg.type === 'set_in_progress_tool_use_ids' && msg.op && Array.isArray(msg.op.ids)) {
+            const set = (session._inProgressTools ||= new Set());
+            const ids = msg.op.ids.filter((x) => typeof x === 'string' && x).slice(0, 200);
+            if (msg.op.action === 'add') for (const t of ids) set.add(t);
+            else if (msg.op.action === 'remove') for (const t of ids) set.delete(t);
+            else { global.__vsEvent?.('cli-unknown-inprogress-action', String(msg.op.action).slice(0, 40)); }
+            broadcastToSession(session, id, { type: 'tools-in-progress', sessionId: id, ids: [...set] });
+            continue;
+          }
           // Track turn lifecycle: streaming state + activity label (broadcast to clients)
           {
             let newLabel = null;
+            // AUTHORITATIVE TURN STATE (§2.5/§3.5). Once THIS session has shown
+            // us one `system/session_state_changed`, the harness's own words
+            // own `_isStreaming` and the derived writes below stand down. The
+            // flag is per SESSION and starts false: an old CLI, or one spawned
+            // before src/adapters/claude-code.js started setting
+            // CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS, simply never sets it and
+            // keeps today's result/compact_boundary/user inference forever —
+            // degradation is the default path, not an error path.
+            const authoritative = session._turnStateSeen === true;
             if (msg.type === 'result' || (msg.type === 'system' && msg.subtype === 'compact_boundary')) {
-              session._isStreaming = false;
+              if (!authoritative) session._isStreaming = false;
               session._fallbackStopFired = false; // one auto-stop per turn (claude.disableModelFallback belt)
               session._streamingKind = null;
               newLabel = '';
+            } else if (msg.type === 'system' && msg.subtype === 'session_state_changed' && isTurnState(msg.state)) {
+              // The CLI's own turn state. describe: "'idle' fires after
+              // heldBackResult flushes and the bg-agent do-while exits —
+              // authoritative turn-over signal". That is strictly LATER than
+              // our `result` guess, which is why a background agent still
+              // working after the result used to look finished. What each state
+              // MEANS is the PURE turnStateEffect — the same function the attach
+              // reconciliation reads, so the live view and a re-attach can never
+              // disagree about a session's turn.
+              const st = msg.state;
+              const eff = turnStateEffect(st, { hasLabel: !!session._streamingLabel });
+              const first = !session._turnStateSeen;
+              session._turnStateSeen = true;
+              const changed = session._turnState !== st;
+              session._turnState = st;
+              session._isStreaming = eff.streaming;
+              if (!eff.streaming) { session._fallbackStopFired = false; session._streamingKind = null; }
+              if (eff.label !== null) newLabel = eff.label;
+              // Only on a CHANGE (the CLI can restate the same state) — and NOT
+              // through broadcastActiveSessions: the session-card payload
+              // carries no turn state at all, so re-broadcasting the whole list
+              // here would be a cost with no reader (and a comment claiming a
+              // chip that does not exist).
+              if (changed || first) broadcastToSession(session, id, { type: 'turn-state', sessionId: id, state: st, authoritative: true });
             } else if (msg.type === 'user' && !msg.parent_tool_use_id && !msg.isSidechain) {
               // Local-command echoes (e.g. "<local-command-stdout>Set model
               // to ...") are user records with NO turn behind them — treating
@@ -430,7 +481,7 @@ function create({ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes,
                 }
               }
               if (!/^<local-command-/.test(uText.trim())) {
-                session._isStreaming = true;
+                if (!authoritative) session._isStreaming = true;
                 newLabel = 'thinking...';
               }
             } else if (msg.type === 'assistant' && !msg.parent_tool_use_id && !msg.isSidechain) {
@@ -453,6 +504,30 @@ function create({ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes,
               // AUTH-class failure (2.335.0): a pooled session must route
               // AROUND a banned/expired member, not retry into it forever
               try { notePoolAuthFailure?.(session, id, { status: msg.error_status, message: msg.error, attempt: msg.attempt }); } catch { }
+            } else if (msg.type === 'compact_progress' && msg.event && typeof msg.event === 'object') {
+              // COMPACTION PROGRESS (§2.11) — the 2.284.2 api_retry channel
+              // exactly: the spinner LABEL, deliberately card-less (three
+              // records per compaction would be three cards). Shapes are the
+              // CLI's own discriminated union (2.1.257 zod dump):
+              //   hooks_start  {hook_type: pre_compact|post_compact|session_start}
+              //   compact_start{hint_text?: string|null}
+              //   compact_end
+              // Until one of these arrives the client shows the old hardcoded
+              // "takes 1–2 minutes" apology; from here on it shows the STAGE.
+              const ev = msg.event;
+              session._streamingKind = ev.type === 'compact_end' ? null : 'compacting';
+              if (ev.type === 'hooks_start') newLabel = `Compacting: running ${String(ev.hook_type || 'hook').replace(/_/g, ' ')} hooks…`;
+              else if (ev.type === 'compact_start') {
+                const hint = ev.hint_text ? String(ev.hint_text).slice(0, 160) : '';
+                newLabel = hint ? `Compacting: ${hint}` : 'Compacting the conversation…';
+              } else if (ev.type === 'compact_end') newLabel = 'thinking...';
+              // The card-less record still has to reach the client that draws
+              // the guidance card — it is the ONLY way the card knows a real
+              // progress lane exists (the fallback text stops being shown).
+              broadcastToSession(session, id, {
+                type: 'compact-progress', sessionId: id, event: ev.type || '',
+                hookType: ev.hook_type || null, hint: ev.hint_text ? String(ev.hint_text).slice(0, 160) : null,
+              });
             }
             if (newLabel !== null && session._streamingLabel !== newLabel) {
               session._streamingLabel = newLabel;

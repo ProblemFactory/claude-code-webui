@@ -26,6 +26,7 @@ const { CONSUMERS, PROTOCOLS, hasConsumer, createStdoutRegistry } = require(path
 const { BACKEND_CAPS, capsOf } = require(path.join(REPO, 'src/backend-caps.js'));
 const { HARNESSES, chatHarnessIds } = require(path.join(REPO, 'src/harnesses/index.js'));
 const { createMessageManager } = require(path.join(REPO, 'src/normalizers.js'));
+const { reconcileAttachStreaming, turnStateEffect } = require(path.join(REPO, 'src/turn-state.js'));
 
 // ── 1. registry shape ──
 console.log('— registry');
@@ -56,7 +57,7 @@ const engine = {
 };
 const so = require(path.join(REPO, 'src/server/session-stdout.js')).create({
   rootDir: tmp, BUFFERS_DIR, META_DIR, DTACH_CMD: 'dtach', USAGE_SCANNER_PATH: path.join(tmp, 'nonexistent'),
-  CLAUDE_STREAM_TYPES: new Set(['system', 'assistant', 'user', 'result', '_stdin_ack', 'tool_progress']), _seenStreamTypes: new Set(), activeSessions, engine,
+  CLAUDE_STREAM_TYPES: new Set(['system', 'assistant', 'user', 'result', '_stdin_ack', 'tool_progress', 'set_in_progress_tool_use_ids', 'compact_progress', 'tombstone']), _seenStreamTypes: new Set(), activeSessions, engine,
   checkClaudeGoalStatus() { }, broadcastToSession: (s, id, m) => calls.broadcasts.push({ id, ...m }), broadcastActiveSessions: () => { calls.active++; },
   noteModelSeen: (m) => calls.modelSeen.push(m), noteHarnessModels: (b, ms) => calls.harnessModels.push([b, ms]), recordUsageAttribution() { }, daemonPtyShim: (h) => h,
   sbSeenFirst: (s, msg) => { calls.sbSeen.push(msg.type); return true; }, getDeviceMgr: () => null, getHosts: () => null,
@@ -113,6 +114,121 @@ console.log('— stream-json (claude)');
   p.data(J({ type: 'tool_progress', tool_use_id: 'toolu_X-heartbeat-0', tool_name: 'Bash', parent_tool_use_id: 'toolu_X', elapsed_time_seconds: 30, heartbeat: true, session_id: 'sid-claude-1' }));
   ok('tool_progress rides its own channel, never the subagent path', calls.broadcasts.some((b) => b.id === 'w-claude' && b.type === 'tool-progress' && b.elapsedSeconds === 30) && !calls.broadcasts.some((b) => b.id === 'w-claude' && b.type === 'subagent-message'));
   ok('the session buffer accumulates the raw stream', s.buffer.includes('hello from claude'));
+}
+
+// ── 3a-B3. TURN TRUTH: authoritative turn state, the run set, compaction stage,
+//           retraction — every record shape below is the 2.1.257 binary's own
+//           zod schema, dumped, not remembered:
+//   session_state_changed      c({type:I("system"),subtype:I("session_state_changed"),
+//                                 state:ee(["idle","running","requires_action"]),uuid:X(),session_id:i()})
+//   set_in_progress_tool_use_ids c({type:I(...),op:c({action:ee(["add","remove"]),ids:T(i())}),uuid,session_id})
+//   compact_progress           c({type:I(...),event:ki("type",[c({type:I("hooks_start"),hook_type:ee(["pre_compact","post_compact","session_start"])}),
+//                                 c({type:I("compact_start"),hint_text:i().nullable().optional()}),c({type:I("compact_end")})]),uuid,session_id})
+//   tombstone                  c({type:I("tombstone"),message:de(),uuid:X(),session_id:i()})
+console.log('— B3 turn truth (claude)');
+const turnStates = (id) => calls.broadcasts.filter((b) => b.id === id && b.type === 'turn-state').map((b) => b.state);
+const inflight = (id) => calls.broadcasts.filter((b) => b.id === id && b.type === 'tools-in-progress').map((b) => b.ids.join(','));
+{
+  // ① ENV-ABSENT DEGRADATION — the default path. No session_state_changed ever
+  //    arrives (an old CLI, or a session spawned before the spawn env), so the
+  //    derived result/user inference must be untouched and NOTHING may claim
+  //    authority. This leg runs FIRST because it is the shape most sessions in
+  //    the fleet will have for weeks.
+  const s = mkSession('claude', 'w-b3-derived'); const p = fakePty();
+  so.setupSessionPty(s, 'w-b3-derived', p);
+  p.data(J({ type: 'user', session_id: 'sid-d', message: { role: 'user', content: 'go' } }));
+  ok('env absent: a user record still starts the turn (derived path intact)', s._isStreaming === true && s._turnStateSeen === undefined && s._turnState === undefined);
+  p.data(J({ type: 'result', subtype: 'success', session_id: 'sid-d', duration_ms: 1 }));
+  ok('env absent: a result still ENDS the turn (no authority ⇒ no change in behaviour)', s._isStreaming === false && !turnStates('w-b3-derived').length);
+  const rec0 = reconcileAttachStreaming({ turnStateSeen: false, turnState: null, isStreaming: true, sidecar: { streaming: false, ageMs: 4000 } });
+  ok('env absent: attach reconciliation is exactly the 2.339.2 sidecar heal (3s settle)', rec0.action === 'sidecar-heal' && rec0.isStreaming === false && rec0.staleAuthority === false, JSON.stringify(rec0));
+}
+{
+  const s = mkSession('claude', 'w-b3'); const p = fakePty();
+  so.setupSessionPty(s, 'w-b3', p);
+  // ② the FIRST authoritative record
+  p.data(J({ type: 'system', subtype: 'session_state_changed', state: 'running', uuid: 'u-st-1', session_id: 'sid-b3' }));
+  ok("session_state_changed 'running' → streaming ON, state latched, turn-state broadcast", s._isStreaming === true && s._turnState === 'running' && s._turnStateSeen === true && turnStates('w-b3').join(',') === 'running');
+  ok('…and it does NOT re-broadcast the session list: the card payload carries no turn state, so that would be a cost with no reader', calls.broadcasts.filter((b) => b.id === 'w-b3' && b.type === 'turn-state').length === 1);
+  // ③ the third state
+  p.data(J({ type: 'system', subtype: 'session_state_changed', state: 'requires_action', uuid: 'u-st-2', session_id: 'sid-b3' }));
+  ok("'requires_action' keeps the turn ALIVE (it is paused on the user, not over) and labels it", s._isStreaming === true && s._turnState === 'requires_action' && labels('w-b3').includes('waiting for you'));
+  // ④ THE POINT: a result no longer ends a turn the harness says is running
+  p.data(J({ type: 'result', subtype: 'success', session_id: 'sid-b3', duration_ms: 1 }));
+  ok('under authority a `result` does NOT end the turn (the CLI’s idle fires later, after the bg-agent loop)', s._isStreaming === true && s._turnState === 'requires_action');
+  ok('…but the turn-boundary owner still ran (noteTurnEnd is about billing/pool, not about streaming)', calls.turnEnd.includes(s));
+  // ⑤ a stray user record cannot restart a turn the harness has not restarted
+  p.data(J({ type: 'system', subtype: 'session_state_changed', state: 'idle', uuid: 'u-st-3', session_id: 'sid-b3' }));
+  ok("'idle' ends the turn and clears the label", s._isStreaming === false && s._streamingLabel === '');
+  p.data(J({ type: 'user', session_id: 'sid-b3', message: { role: 'user', content: 'peer note' } }));
+  ok('under authority a user record does NOT flip streaming back on (the derived write stood down)', s._isStreaming === false);
+  ok('…and the state broadcasts are exactly the three transitions, no repeats', turnStates('w-b3').join(',') === 'running,requires_action,idle');
+  // ⑥ an out-of-enum state changes NOTHING (never coerced to idle)
+  p.data(J({ type: 'system', subtype: 'session_state_changed', state: 'wedged', uuid: 'u-st-4', session_id: 'sid-b3' }));
+  ok('an unknown state leaves the belief untouched (no coercion to idle)', s._turnState === 'idle' && turnStates('w-b3').length === 3);
+  // ⑦ the tool-granular run set
+  p.data(J({ type: 'set_in_progress_tool_use_ids', op: { action: 'add', ids: ['toolu_a', 'toolu_b'] }, uuid: 'u-ip-1', session_id: 'sid-b3' }));
+  p.data(J({ type: 'set_in_progress_tool_use_ids', op: { action: 'remove', ids: ['toolu_a'] }, uuid: 'u-ip-2', session_id: 'sid-b3' }));
+  ok('set_in_progress_tool_use_ids add/remove resolve to a SET, broadcast whole each time', inflight('w-b3').join(' | ') === 'toolu_a,toolu_b | toolu_b' && [...s._inProgressTools].join(',') === 'toolu_b', inflight('w-b3').join(' | '));
+  ok('…and it is card-less: nothing about it reached the normalizer', !s._fed.some((m) => m.type === 'set_in_progress_tool_use_ids'));
+  {
+    const before = calls.events.length;
+    p.data(J({ type: 'set_in_progress_tool_use_ids', op: { action: 'toggle', ids: ['toolu_c'] }, uuid: 'u-ip-3', session_id: 'sid-b3' }));
+    ok('an unknown op action is a BREADCRUMB, not a silent guess (the set is unchanged)', calls.events.slice(before).some(([k, d]) => k === 'cli-unknown-inprogress-action' && d === 'toggle') && [...s._inProgressTools].join(',') === 'toolu_b');
+  }
+  // ⑧ compaction stage — three records, three labels, one broadcast each
+  p.data(J({ type: 'compact_progress', event: { type: 'hooks_start', hook_type: 'pre_compact' }, uuid: 'u-cp-1', session_id: 'sid-b3' }));
+  ok("compact_progress hooks_start → a REAL stage label (not the hardcoded apology)", labels('w-b3').includes('Compacting: running pre compact hooks…') && s._streamingKind === 'compacting');
+  p.data(J({ type: 'compact_progress', event: { type: 'compact_start', hint_text: 'summarizing 812 messages' }, uuid: 'u-cp-2', session_id: 'sid-b3' }));
+  ok('…compact_start carries the CLI’s own hint_text into the label', labels('w-b3').includes('Compacting: summarizing 812 messages'));
+  p.data(J({ type: 'compact_progress', event: { type: 'compact_start' }, uuid: 'u-cp-2b', session_id: 'sid-b3' }));
+  ok('…a hint-less compact_start still says what is happening (hint_text is nullable+optional in the schema)', labels('w-b3').includes('Compacting the conversation…'));
+  p.data(J({ type: 'compact_progress', event: { type: 'compact_end' }, uuid: 'u-cp-3', session_id: 'sid-b3' }));
+  ok('compact_end clears the compacting kind (the Stop two-step guard goes back to normal)', s._streamingKind === null);
+  const cps = calls.broadcasts.filter((b) => b.id === 'w-b3' && b.type === 'compact-progress').map((b) => b.event);
+  ok('every compact_progress record reaches the client (the card swaps its apology for the stage)', cps.join(',') === 'hooks_start,compact_start,compact_start,compact_end', cps.join(','));
+  ok('…and it is card-less too: no compaction message was normalized', !s._ops.some((o) => o.op === 'create' && JSON.stringify(o.message?.content || '').includes('Compacting')));
+}
+{
+  // ⑨ RETRACTION on the live stream: a tombstone for a message we rendered
+  const s = mkSession('claude', 'w-b3-tomb'); const p = fakePty();
+  so.setupSessionPty(s, 'w-b3-tomb', p);
+  p.data(J({ type: 'assistant', session_id: 'sid-t', uuid: 'u-partial', message: { id: 'msg_partial', model: 'claude-fable-5', role: 'assistant', content: [{ type: 'text', text: 'half a sentence' }] } }));
+  const created = s._ops.find((o) => o.op === 'create' && JSON.stringify(o.message?.content || '').includes('half a sentence'));
+  ok('the partial assistant message rendered first (there is something to retract)', !!created);
+  p.data(J({ type: 'tombstone', message: { type: 'assistant', uuid: 'u-partial', message: { id: 'msg_partial' } }, uuid: 'u-tomb', session_id: 'sid-t' }));
+  const rew = s._ops.filter((o) => o.op === 'meta' && o.subtype === 'rewound');
+  ok("tombstone → ONE normalized 'rewound' meta op naming the message", rew.length === 1 && rew[0].data.ids.includes(created.message.id) && rew[0].data.toMessageId === created.message.id, JSON.stringify(rew[0]?.data));
+  ok("…kind 'superseded' (the CLI replaced a partial orphan — the view removes it), harness named, numTurns null but PRESENT", rew[0].data.kind === 'superseded' && rew[0].data.harness === 'claude' && 'numTurns' in rew[0].data && rew[0].data.numTurns === null);
+  ok('…and the normalizer’s own copy is marked, so a rebuild shows the same thing', s._normalizer.messages.find((m) => m.id === created.message.id)?.rewound === 'superseded');
+  ok('…the message is MARKED, never spliced: total is unchanged (the virtual window’s indices are load-bearing)', s._normalizer.total === s._normalizer.messages.length && s._normalizer.messages.some((m) => m.id === created.message.id));
+  {
+    const before = s._ops.length;
+    p.data(J({ type: 'tombstone', message: { type: 'assistant', uuid: 'u-never-seen' }, uuid: 'u-tomb-2', session_id: 'sid-t' }));
+    ok('NEGATIVE CONTROL: a tombstone for a message we never rendered emits nothing (no op telling the view to strike what it does not have)', s._ops.length === before);
+  }
+}
+{
+  // ⑩ ATTACH RECONCILIATION — the PURE decision both the consumer and the ws
+  //    attach path read (a twin between those two is the 2.339.2 class).
+  const live = reconcileAttachStreaming({ turnStateSeen: true, turnState: 'running', isStreaming: false, sidecar: null });
+  ok('attach: the harness says running while the server thinks idle ⇒ streaming is turned back ON (a direction the derived path never had)', live.action === 'authoritative' && live.isStreaming === true && live.clearLabel === false);
+  const done = reconcileAttachStreaming({ turnStateSeen: true, turnState: 'idle', isStreaming: true, sidecar: null });
+  ok('attach: the harness says idle ⇒ streaming off + label cleared', done.action === 'authoritative' && done.isStreaming === false && done.clearLabel === true);
+  const held = reconcileAttachStreaming({ turnStateSeen: true, turnState: 'running', isStreaming: true, sidecar: { streaming: false, ageMs: 5000 } });
+  ok('attach: a sidecar that disagreed 5s ago does NOT outrank the harness (that is the derived observer we replaced)', held.action === 'none' && held.isStreaming === true);
+  const stale = reconcileAttachStreaming({ turnStateSeen: true, turnState: 'running', isStreaming: true, sidecar: { streaming: false, ageMs: 45000 } });
+  ok('attach: after 30s of disagreement the backstop fires anyway AND says so (a lost `idle` must never wedge a session on "thinking")', stale.action === 'sidecar-heal' && stale.isStreaming === false && stale.staleAuthority === true);
+  const noSidecar = reconcileAttachStreaming({ turnStateSeen: false, turnState: null, isStreaming: true, sidecar: null });
+  ok('attach: an unreadable sidecar heals nothing (absence is not evidence)', noSidecar.action === 'none' && noSidecar.isStreaming === true);
+  const cantStart = reconcileAttachStreaming({ turnStateSeen: false, turnState: null, isStreaming: false, sidecar: { streaming: true, ageMs: 60000 } });
+  ok('attach: the sidecar can only END a turn, never start one (a stale streaming:true is not evidence THIS turn is alive)', cantStart.action === 'none' && cantStart.isStreaming === false);
+  ok('turnStateEffect is the ONE reading of each state (the consumer and the reconciler share it)',
+    turnStateEffect('idle').streaming === false && turnStateEffect('idle').label === ''
+    && turnStateEffect('running').streaming === true && turnStateEffect('running').label === 'thinking...'
+    && turnStateEffect('running', { hasLabel: true }).label === null   // a live tool label is not stomped by a bare 'running'
+    && turnStateEffect('requires_action').streaming === true && turnStateEffect('requires_action').label === 'waiting for you'
+    && turnStateEffect('wedged') === null);
 }
 
 // ── 3b. codex-events consumer ──
@@ -211,6 +327,63 @@ console.log('— wiring pins');
   }
   ok('the claude consumer keeps the session-brain wiring EXACTLY (sbSeenFirst registration precedes the served-model latch; sbSeenFirst arrives via deps)', /sbSeenFirst\(session, msg\);\s*\n\s*if \(msg\.type === 'assistant' && !msg\.parent_tool_use_id && !msg\.isSidechain\s*\n\s*&& msg\.message\?\.model/.test(read('src/server/stdout/claude-stream-json.js')) && /checkClaudeGoalStatus, noteModelSeen, sbSeenFirst, hosts, usageHistory \}\)/.test(read('src/server/stdout/claude-stream-json.js')));
   ok('test-harness-contract pins descriptor↔consumer coverage; ci.mjs runs this suite; test-session-schema + test-attach-rebuild scan src/server/stdout/', /hasConsumer\(h\.caps\.streamProtocol\)/.test(read('scripts/test-harness-contract.mjs')) && /'test-stdout-registry'/.test(read('scripts/ci.mjs')) && /src\/server\/stdout/.test(read('scripts/test-session-schema.mjs')) && /src\/server\/stdout/.test(read('scripts/test-attach-rebuild.mjs')));
+  // B3 turn truth (§2.5/§2.10/§2.11) — the seams a green unit test cannot see
+  {
+    const cs = read('src/server/stdout/claude-stream-json.js');
+    const ad = read('src/adapters/claude-code.js');
+    const mm = read('src/message-manager.js');
+    const wsh = read('src/ws-handler.js');
+    const srv = read('server.js');
+    // FUNCTIONAL, not a regex: the record only exists if the real adapter puts
+    // the env on the real spawn spec. A grep would pass on a commented-out line.
+    {
+      const { ClaudeCodeAdapter } = require(path.join(REPO, 'src/adapters/claude-code.js'));
+      const ca = new ClaudeCodeAdapter({ claudeCmd: 'claude', chatWrapper: '/w/chat', ptyWrapper: '/w/pty', buffersDir: '/b' });
+      const chat = ca.buildSessionArgs({ cwd: '/tmp', mode: 'chat', permissionMode: 'default' });
+      const term = ca.buildSessionArgs({ cwd: '/tmp', mode: 'terminal' });
+      ok('the spawn env that MAKES the record exist is on every claude CHAT spawn (without it the whole consumer is dead code)',
+        chat.env.CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS === '1', JSON.stringify(chat.env));
+      ok('…and NOT on a terminal spawn: the stream-json parse is its only reader, and we did not verify what the TUI sink does with an extra record',
+        term.env.CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS === undefined, JSON.stringify(term.env));
+      ok('…it rides the spawn env, never an allowlist: agentEnv() is a DROP table, so ws-handler needs no entry for it',
+        /AGENT_ENV_DROP/.test(wsh) && !/CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS/.test(wsh) && /env\.CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS = '1';/.test(ad));
+    }
+    ok('session_state_changed is listed as HANDLED so the unknown-subtype breadcrumb stops lying about it',
+      /'session_state_changed',/.test(mm.slice(0, mm.indexOf('])'))));
+    ok('the three new top-level types are in server.js CLAUDE_STREAM_TYPES (the 2.289.0 mistake: the set lagging the handler)',
+      /'set_in_progress_tool_use_ids', 'compact_progress', 'tombstone'/.test(srv));
+    ok('the consumer reads the PURE turn-state module, and so does the ws attach path (ONE decision, no twin)',
+      /require\('\.\.\/\.\.\/turn-state\.js'\)/.test(cs) && /turnStateEffect\(st, \{ hasLabel: !!session\._streamingLabel \}\)/.test(cs)
+      && /reconcileAttachStreaming \} = require\('\.\/turn-state'\)/.test(wsh) && /const rec = reconcileAttachStreaming\(\{/.test(wsh));
+    ok('the derived writes are GATED on the authority latch, not deleted (an old CLI keeps every one of them)',
+      /const authoritative = session\._turnStateSeen === true;/.test(cs) && /if \(!authoritative\) session\._isStreaming = false;/.test(cs) && /if \(!authoritative\) session\._isStreaming = true;/.test(cs));
+    ok('the attach payload carries the tri-state turnState + the run set (null = never reported, NOT idle)',
+      /turnState: session\._turnStateSeen \? \(session\._turnState \|\| null\) : null,/.test(wsh) && /inProgressTools: session\._inProgressTools \? \[\.\.\.session\._inProgressTools\] : \[\],/.test(wsh));
+    const cv = read('src/lib/chat-view.js');
+    const sb = read('src/lib/chat-status-bar.js');
+    const cr = read('src/lib/chat-renderers.js');
+    ok('the client consumes all three pushes and both payload keys',
+      /msg\.type === 'turn-state'/.test(cv) && /msg\.type === 'tools-in-progress'/.test(cv) && /msg\.type === 'compact-progress'/.test(cv)
+      && /if \('turnState' in meta\)/.test(cv) && /if \('inProgressTools' in meta\)/.test(cv));
+    ok("the status bar draws the third state and NEVER asserts one it was not told (null ≠ idle)",
+      /this\._turnState === 'requires_action'/.test(sb) && /const next = \(v === 'idle' \|\| v === 'running' \|\| v === 'requires_action'\) \? v : null;/.test(sb));
+    ok('the hardcoded compaction apology is now the FALLBACK of one hint function, used by the card',
+      /compactHintText\(\) \{/.test(cr) && /if \(!s\) return t\('Compacting a large conversation takes 1/.test(cr)
+      && /chat-ctx-full-hint">\$\{escHtml\(this\.compactHintText\(\)\)\}/.test(cr)
+      && (cr.match(/Compacting a large conversation takes 1/g) || []).length === 1);
+    const ro = read('src/rewind-ops.js');
+    ok("both harnesses emit the SAME 'rewound' op through the one PURE builder",
+      /rewoundOp\(\{ harness: 'claude'/.test(mm) && /rewoundOp\(\{ harness: 'codex'/.test(read('src/codex-message-manager.js'))
+      && /module\.exports = \{ rewoundByRecord, rewoundByTurns, applyRewound, rewoundOp, REWOUND_KINDS \};/.test(ro));
+    ok("codex's thread_rolled_back is OUT of SKIPPED_EVENT_TYPES and routed (it was invisible history)",
+      !/'thread_rolled_back'/.test(read('src/codex-message-manager.js').split('SKIPPED_EVENT_TYPES')[1].split('\n]')[0])
+      && /if \(type === 'thread_rolled_back'\) return this\._processRolledBack\(event, emit\);/.test(read('src/codex-message-manager.js')));
+    ok('both normalizers drop rewound messages from turnMap (the minimap must not point at ghosts)',
+      /if \(m\.rewound\) continue;/.test(mm) && /if \(m\.rewound\) continue;/.test(read('src/codex-message-manager.js')));
+    const css = read('public/chat.css');
+    ok('the two retraction kinds have their OWN display rules (no global .hidden in this project)',
+      /\.chat-msg-superseded \{ display: none; \}/.test(css) && /\.chat-msg-rewound \{/.test(css) && /\.chat-tool-inflight \.chat-tool-label::after/.test(css));
+  }
   const arch = read('scripts/test-architecture.mjs');
   ok('test-architecture tiers src/server/stdout/ as ORCH by path (startsWith src/server/) — the consumers may use the engine; SHARED descriptors never reach up into them', /p\.startsWith\('src\/server\/'\)/.test(arch) && !/src\/server\/stdout/.test(read('src/harnesses/index.js').replace(/\/\/[^\n]*/g, '')) && !/require\(['"]\.\.\/server\//.test(read('src/harnesses/index.js')));
 }

@@ -84,6 +84,25 @@ class ClaudeCodeAdapter extends BackendAdapter {
       mergeSettings({ switchModelsOnFlag: false });
       env.CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK = '1';
     }
+    // AUTHORITATIVE TURN STATE (design-harness-features §2.5/§3.5, owner
+    // decision 8(c)): 2.1.257 emits `system/session_state_changed`
+    // {idle|running|requires_action} — its own describe calls 'idle' the
+    // "authoritative turn-over signal" — ONLY when this env var is set
+    // (`if (a.CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS) mu({type:"system",
+    // subtype:"session_state_changed", state:e})`, verified in the binary).
+    // Without it the consumer branch is dead code and `_isStreaming` keeps
+    // being INFERRED from result/compact_boundary — the fuzzy area both
+    // 2.339.2 (stuck thinking) and 2.369.16 (attach storm) landed in.
+    // It is the ONE spawn default this batch changes: pure observability, no
+    // behaviour change in the CLI, so nothing about the turn itself differs.
+    // Set on the spawn env, never on AGENT_ENV_KEEP — agentEnv() is a DROP
+    // table (ws-handler.js: everything not dropped is passed through), so an
+    // allowlist edit would be both wrong and unnecessary.
+    // CHAT ONLY. The consumer is the stream-json parse; a terminal session has
+    // no such reader, and we have not proven what the TUI's own yield sink does
+    // with an extra record — turning a record ON for a surface that cannot use
+    // it is exactly the kind of unverified spawn change this batch is not for.
+    if (mode === 'chat') env.CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS = '1';
     // Per-session apiKeyHelper neutralization (2.236.0, userN's "can't
     // switch to my subscription" on a keyHelper machine): a configured
     // apiKeyHelper in the merged settings UNCONDITIONALLY overrides claude.ai

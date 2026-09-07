@@ -53,7 +53,9 @@ const PURE = new Set(['src/plugin-manifest.js', 'src/account-pool-auto.js', 'src
   // THE RESUME LADDER (B-6b6d): "the conversation's own value wins on a resume,
   // the instance default is a NEW-session default" — ONE decision for the spawn
   // (ws-create) and for what the client is allowed to send (session-lifecycle).
-  'src/resume-continuity.js']);
+  'src/resume-continuity.js',
+  'src/rewind-ops.js', // claude tombstone / codex thread_rolled_back → ONE 'rewound' meta op; index-stable marking, no I/O
+  'src/turn-state.js']); // authoritative turn state: the live consumer and the attach reconciliation must decide identically
 const SHARED = new Set(['src/discovery-facts.js', 'src/sysinfo.js', 'src/machine-probes.js', 'src/usage-walker.js',
   'src/transcript-service.js', 'src/ctx-sync.js', 'src/writer-sweep.js', 'src/remote-shell.js', 'src/account-material.js',
   // THE agent-CLI process identity, one rule in two spellings (B-3185 r3): the JS twin

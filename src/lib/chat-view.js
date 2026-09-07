@@ -945,6 +945,19 @@ class ChatView {
         this._onSubagentMessage(msg.parentToolUseId, msg.message);
       } else if (msg.type === 'tool-progress' && msg.sessionId === sessionId) {
         this._onToolProgress(msg);
+      } else if (msg.type === 'turn-state' && msg.sessionId === sessionId) {
+        // The harness's OWN turn state (§2.5). Arrives only from a harness that
+        // publishes one; a session that never does simply never sends this and
+        // the status bar's third state stays unclaimed.
+        this._statusBar?.setTurnState?.(msg.state || null);
+      } else if (msg.type === 'tools-in-progress' && msg.sessionId === sessionId) {
+        this._onToolsInProgress(msg.ids || []);
+      } else if (msg.type === 'compact-progress' && msg.sessionId === sessionId) {
+        // A REAL progress lane exists for this session — the guidance card's
+        // hardcoded "takes 1–2 minutes" apology becomes the fallback and the
+        // stage takes its place (§2.11). The spinner label itself rides the
+        // normal streaming-label broadcast.
+        this._onCompactProgress(msg);
       } else if (msg.type === 'exited' && msg.sessionId === sessionId) {
         this._hideTyping();
         if (msg.reason === 'not_logged_in') {
@@ -1421,6 +1434,11 @@ class ChatView {
     // queueSupported and the same reason (2.361.1/2.364.1): the harness caps
     // row is about the PROTOCOL, this is about the process that is running.
     if ('responseStyleLive' in meta) this._statusBar?.setResponseStyleLive?.(meta.responseStyleLive);
+    // The harness's own turn state + the tool ids it says are running (§2.5).
+    // Carries-the-key guards, and `null` is a real value here: "this session
+    // has never reported one" — the chip stays off rather than claiming idle.
+    if ('turnState' in meta) this._statusBar?.setTurnState?.(meta.turnState || null);
+    if ('inProgressTools' in meta) this._onToolsInProgress(meta.inProgressTools || []);
     if ('autoResume' in meta) this._statusBar?.setAutoResume?.(meta.autoResume || null);
     // WHERE this spawn's model/effort came from (B-6b6d) — the resume ladder's
     // verdict, so the effort tooltip can say "carried over from this
@@ -2658,6 +2676,10 @@ class ChatView {
     if (!el) return;
     el.dataset.msgId = msg.id;
     if (msg.ts) el.dataset.ts = msg.ts; // for time-coordinate minimap positioning
+    // Retraction survives a REBUILD (§2.10): the normalizer marks the message
+    // in record order, so a reload of the transcript shows the same rewound
+    // history the live stream did — one code path for both.
+    if (msg.rewound) this._markRewoundEl(el, msg.rewound);
     this._elements.set(msg.id, el);
     this._messageList.appendChild(el);
     this._renderers.addWrapToggles(el);
@@ -2938,6 +2960,15 @@ class ChatView {
       this._statusBar.setEffort(op.data?.effort || null, op.data?.effortNext ?? null);
       return;
     }
+    // RETRACTED HISTORY (§2.10 / §3.2). ONE op for both harnesses: claude's
+    // `tombstone` (kind 'superseded' — the CLI replaced a partial orphan and
+    // asks consumers to remove it) and codex's `thread_rolled_back` (kind
+    // 'rollback' — turns deliberately taken back, struck through in place so
+    // nobody's memory of reading them is silently rewritten). Marking, never
+    // splicing: the message array's indices back the virtual window's
+    // slice(offset,limit) and `total`, and re-indexing them under a reader is
+    // where three paging incidents came from.
+    if (op.subtype === 'rewound') { this._applyRewound(op.data); return; }
     if (op.subtype === 'usage') {
       this._statusBar.updateUsage(op.data);
     } else if (op.subtype === 'todos') {
@@ -2966,6 +2997,39 @@ class ChatView {
         this.winInfo.element.classList.add('window-waiting');
         if (this.winInfo._notifyChanged) this.winInfo._notifyChanged();
       }
+    }
+  }
+
+  /** Mark the named messages as retracted, live. Idempotent (the same op can
+   *  arrive again on a reconnect replay) and index-stable — the elements stay
+   *  where they are and only gain a class. */
+  _applyRewound(data) {
+    const ids = Array.isArray(data?.ids) ? data.ids : [];
+    const kind = data?.kind === 'superseded' ? 'superseded' : 'rollback';
+    if (!ids.length) return;
+    const want = new Set(ids);
+    for (const m of this._messages) if (m && want.has(m.id)) m.rewound = kind;
+    for (const id of ids) {
+      const el = this._elements.get(id);
+      if (el) this._markRewoundEl(el, kind);
+    }
+    // The minimap is NOT re-rendered here: ChatMinimap.render(turnMap) needs a
+    // turn map, and the only authority for one is the server normalizer (which
+    // already drops rewound turns). Fabricating a client-side map to blank the
+    // ghost markers would be a second source of truth for turn positions.
+  }
+
+  /** ONE place that turns the mark into DOM (create-path and live op share it,
+   *  so a rebuilt history and a live retraction can never look different). */
+  _markRewoundEl(el, kind) {
+    if (!el) return;
+    el.classList.add(kind === 'superseded' ? 'chat-msg-superseded' : 'chat-msg-rewound');
+    if (kind !== 'superseded' && !el.querySelector('.chat-rewound-tag')) {
+      const tag = document.createElement('span');
+      tag.className = 'chat-rewound-tag';
+      tag.textContent = t('rewound');
+      tag.title = t('The agent rolled this turn back — it is no longer part of the conversation it can see.');
+      el.appendChild(tag);
     }
   }
 
@@ -3303,6 +3367,34 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
     const s = Number(elapsedSeconds);
     const human = !Number.isFinite(s) ? '' : s < 60 ? `${Math.round(s)}s` : `${Math.floor(s / 60)}m${String(Math.round(s % 60)).padStart(2, '0')}s`;
     el.textContent = human ? t('still running · {elapsed}', { elapsed: human }) : t('still running');
+  }
+
+  /** The tool ids the harness says are EXECUTING right now (§2.5, claude
+   *  `set_in_progress_tool_use_ids`; caps.inProgressTools). Until this record
+   *  existed a tool card span "pending" from the moment it was parsed —
+   *  including the whole permission wait, where nothing is running at all.
+   *  Set-based and idempotent: the record is a delta, this is the resolved set,
+   *  so a reconnect that replays it lands on the same DOM. */
+  _onToolsInProgress(ids) {
+    if (!this._messageList) return;
+    const want = new Set(Array.isArray(ids) ? ids : []);
+    this._inFlightTools = want;
+    for (const el of this._messageList.querySelectorAll('[data-tool-id]')) {
+      el.classList.toggle('chat-tool-inflight', want.has(el.dataset.toolId));
+    }
+  }
+
+  /** Compaction stage from the CLI's own `compact_progress` record. Held on the
+   *  view so a card rendered LATER (or re-rendered) still shows the live stage
+   *  instead of the generic apology. */
+  _onCompactProgress(msg) {
+    const done = msg.event === 'compact_end';
+    this._compactStage = done ? null : {
+      event: msg.event || '',
+      hookType: msg.hookType || null,
+      hint: msg.hint || null,
+    };
+    this._renderers?.setCompactStage?.(this._compactStage);
   }
 
   /** Replace a finished agent card's live activity with its终态 (2.233.1).

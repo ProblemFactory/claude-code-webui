@@ -13,6 +13,8 @@
  * NormalizedMessage format via their own normalizer.
  */
 
+const { rewoundByRecord, applyRewound, rewoundOp } = require('./rewind-ops.js');
+
 // System subtypes _processSystem actually renders/consumes — anything else
 // trips the unhandled-subtype breadcrumb (2.227.5). Keep in sync when adding
 // a branch; task_* are handled under the tool_use_id path.
@@ -25,6 +27,14 @@ const HANDLED_SYSTEM_SUBTYPES = new Set([
   // attempt would spam the transcript. Listed here so the unknown-subtype
   // breadcrumb stops firing for it.
   'api_retry',
+  // session_state_changed is DELIBERATELY card-less too: it is the CLI's own
+  // authoritative turn state (idle|running|requires_action, env-gated at spawn
+  // — see src/adapters/claude-code.js) and the SERVER consumer drives
+  // _isStreaming + the status bar's third state from it. A card per state flip
+  // would be several per turn. Listed so the unknown-subtype breadcrumb stops
+  // firing for a record we handle (the 2.289.0 rate_limit_event lesson: the
+  // set lagging the handler made the breadcrumb lie).
+  'session_state_changed',
 ]);
 
 
@@ -256,6 +266,9 @@ class MessageManager {
     let lastTurn = -1;
     for (let i = 0; i < this.messages.length; i++) {
       const m = this.messages[i];
+      // A RETRACTED message is not a turn marker: the minimap must never offer
+      // a jump to a turn the harness itself has taken back (§2.10).
+      if (m.rewound) continue;
       const t = m.turnIndex ?? 0;
       if (t !== lastTurn) {
         const entry = { turnIndex: t, startIdx: i, ts: m.ts, role: m.role };
@@ -387,7 +400,25 @@ class MessageManager {
       case 'control_request': return this._processControlRequest(raw, emit);
       case 'control_response': return this._processControlResponse(raw, emit);
       case 'control_cancel_request': return this._processControlCancel(raw, emit);
+      // A previously-yielded message was RETRACTED upstream (§2.10). We render
+      // AND persist the stream, so without this the orphan lived forever.
+      case 'tombstone': return this._processTombstone(raw, emit);
     }
+  }
+
+  /** claude `tombstone` → the ONE 'rewound' meta op (src/rewind-ops.js).
+   *  The record's `message` is the CLI's internal Message; we resolve it by the
+   *  identities our own ids are minted from (record uuid, API message.id).
+   *  A tombstone for a message we never rendered emits NOTHING — a no-op op
+   *  would tell the view to strike a message it does not have. */
+  _processTombstone(raw, emit) {
+    const tomb = raw && raw.message;
+    if (!tomb || typeof tomb !== 'object') return;
+    const uuid = tomb.uuid || null;
+    const messageId = tomb.message?.id || tomb.id || null;
+    const ids = applyRewound(this.messages, rewoundByRecord(this.messages, { uuid, messageId }), 'superseded');
+    if (!ids.length) return;
+    if (emit) this._emit(rewoundOp({ harness: 'claude', toMessageId: ids[0], ids, kind: 'superseded', ts: this._currentTs }));
   }
 
   _processSystem(raw, emit) {
