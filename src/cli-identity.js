@@ -56,6 +56,28 @@
  * the transcript — survived it. The double-writer corruption class the sweep
  * prevents is most likely precisely when an update has just landed.
  *
+ * ARGV IS A LIST OF NUL-SEPARATED WORDS, AND A WORD MAY CONTAIN A NEWLINE
+ * (r4). The JS side reads that list directly; the shell side could not, so it
+ * turned NULs into newlines and took the Nth LINE — which is the FIRST LINE of
+ * the Nth word. The two spellings therefore disagreed about who a process is
+ * exactly when a word carries a newline, and the disagreement pointed the wrong
+ * way on a KILL path: argv[0] `/opt/x/claude<LF>/usr/bin/tail` is basename
+ * `tail` to JS and `claude` to the old shell (verified on a live process). The
+ * shell now parks real newlines on \001 across the line select, so "the Nth
+ * line" IS "the Nth NUL-record" in both spellings, and the `ps` fallback
+ * flattens its blob the way the JS twin's /\s+/ split already did.
+ *
+ * …AND THE VALUE STILL HAD TO SURVIVE `$(…)`, WHICH STRIPS EVERY TRAILING
+ * NEWLINE (r4, second half — found by MEASURING the first half rather than
+ * describing it). A word or path that ENDS in one read `…/claude` in the shell
+ * and `…/claude<LF>` in JS: the shell said YES where this file says NO, on the
+ * paths that kill. All three captures were affected — argv[0] (rung 1), the
+ * interpreter operand (rung 2) and `readlink /proc/<pid>/exe` (rung 3, which no
+ * argv fixture can reach) — and a TRAILING \001 was eaten the same way, since
+ * the park byte comes back out as a newline. `vs_cap` below captures all three:
+ * a sentinel byte inside the subshell protects the tail, then exactly one
+ * terminator — the one the producer printed — comes off.
+ *
  * THE SHELL TEXT RUNS UNDER THE REMOTE LOGIN SHELL, NOT `sh`. The device rung
  * runs it as `sh -c`, but both ssh rungs — the sweep's fallback
  * (writer-sweep.js sweepWriters) and the discovery CO leg (hosts.js `_ssh`) —
@@ -154,19 +176,64 @@ function cliIdentityShellFns() {
     # the redirect itself fails LOUDLY (shell-level) when the pid exits between
     # the test and the open — routine in a machine-wide scan, so the whole
     # compound, not just tr, is silenced
-    { tr '\\0' '\\n' < "/proc/$1/cmdline" | sed -n "$(($2 + 1))p"; } 2>/dev/null
+    #
+    # NUL-SAFE (r4). An argv WORD may itself contain a newline, and the JS twin
+    # reads the NUL-separated record — so "turn NULs into newlines and take the
+    # Nth LINE" answered with the FIRST LINE of the Nth word, and the two
+    # spellings disagreed about who a process is. On a KILL path that is not
+    # cosmetic: argv[0] \`/opt/x/claude<LF>/usr/bin/tail\` has basename \`tail\`
+    # (the JS twin: not the CLI) and first line \`/opt/x/claude\` (the old shell:
+    # the CLI) — a reader the sweep would have swept. Real newlines are
+    # parked on \\001 while the line select runs and restored after it, so the
+    # Nth line IS the Nth NUL-record in both spellings. The word's TRAILING
+    # bytes are then preserved by vs_cap below — \`$(…)\` would eat them, and
+    # that half of the same defect is the one that says YES where the JS twin
+    # says NO. (Residue: a literal \\001 inside an argv word comes back as a
+    # newline. It cannot move a \`/\`, so the basename splits at the same place
+    # in both spellings and every comparison here is against a name carrying
+    # neither byte — the swap can only make a word look LESS like the CLI.)
+    { tr '\\n' '\\001' < "/proc/$1/cmdline" | tr '\\0' '\\n' | sed -n "$(($2 + 1))p" | tr '\\001' '\\n'; } 2>/dev/null
   else
-    ps -p "$1" -o args= 2>/dev/null | awk -v i="$(($2 + 1))" '{ print $i }'
+    # \`ps\` answers with one blob and the JS twin splits it on /\\s+/, which
+    # treats a newline exactly like a space; awk splits per LINE, so without
+    # flattening first the two spellings index different words whenever \`ps\`
+    # wraps or an argument carries a newline.
+    ps -p "$1" -o args= 2>/dev/null | tr '\\n' ' ' | awk -v i="$(($2 + 1))" '{ print $i }'
   fi
 }
+vs_cap() {
+  # CAPTURE THE EXACT BYTES (r4). \`$(…)\` strips EVERY trailing newline, so
+  # parking newlines above was only half the fix: a word (or a path) that ENDS
+  # in one still read differently in the two spellings, and in the direction
+  # that KILLS — JS keeps \`…/claude<LF>\` (basename \`claude<LF>\`, NOT the
+  # CLI) while the shell was handed \`…/claude\` (the CLI). A sentinel byte
+  # appended INSIDE the subshell protects the tail; then exactly ONE terminator
+  # — the one the producer itself added (sed / awk / readlink each print
+  # value + LF) — comes off. Measured: without this, argv[0] \`/usr/bin/claude\`
+  # + LF answered YES here and NO in \`isCliProcess\`.
+  #
+  # The next TWO lines are ONE assignment: a single-quoted LITERAL newline (the
+  # only portable way to name one, and \${v%"\$nl"} needs it as a value). Do not
+  # "tidy" them onto one line — and keep the quotes: an unquoted pattern is how
+  # the auto-update suffix strip further down silently died under zsh.
+  # (The word it strips is not spelled here on purpose: the suite's negative
+  # control removes that mechanism and then asserts NO mention survives.)
+  vs_c_nl='
+'
+  vs_c_v=$("$@" 2>/dev/null; printf x)
+  vs_c_v=\${vs_c_v%x}
+  vs_c_v=\${vs_c_v%"$vs_c_nl"}
+}
 vs_is_cli() {
-  vs_c_a0=$(vs_argv "$1" 0)
+  vs_cap vs_argv "$1" 0
+  vs_c_a0=$vs_c_v
   case "\${vs_c_a0##*/}" in "$2"|"$2".exe) return 0;; esac
   case "\${vs_c_a0##*/}" in
     node|nodejs|node.exe|bun|deno)
       vs_c_i=1
       while [ "$vs_c_i" -le ${MAX_INTERP_FLAGS} ]; do
-        vs_c_a=$(vs_argv "$1" "$vs_c_i")
+        vs_cap vs_argv "$1" "$vs_c_i"
+        vs_c_a=$vs_c_v
         [ -n "$vs_c_a" ] || return 1
         case "$vs_c_a" in -*) vs_c_i=$((vs_c_i + 1)); continue;; esac
         vs_c_d=\${vs_c_a%/*}
@@ -179,7 +246,8 @@ vs_is_cli() {
       return 1
       ;;
   esac
-  vs_c_e=$(readlink "/proc/$1/exe" 2>/dev/null)
+  vs_cap readlink "/proc/$1/exe"
+  vs_c_e=$vs_c_v
   [ -n "$vs_c_e" ] || return 1
   # the kernel appends " (deleted)" once the image is replaced on disk — which
   # is what an auto-update does to a LIVE session, so BOTH executable rungs

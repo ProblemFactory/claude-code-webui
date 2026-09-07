@@ -70,12 +70,11 @@ function findTmuxTarget(pid, paneMap) {
   return null;
 }
 
-function isProcessClaude(pid) {
-  try {
-    const cmd = execFileSync('ps', ['-p', String(pid), '-o', 'comm='], { encoding: 'utf-8', timeout: 2000 }).trim();
-    return cmd === 'claude' || cmd.includes('claude');
-  } catch { return false; }
-}
+// The SYNC `isProcessClaude` is GONE (B-3185 r4). Its one caller was
+// /api/kill-pid's local branch — a SIGTERM gate — and a kill decision belongs
+// to THE identity (src/cli-identity.js), which that route now asks for both CLI
+// names, like its own remote branch's shell twin. Only the async twin below
+// survives, and only where it never kills anything.
 
 // ── ASYNC discovery helpers (2.242.0) ──
 // The /api/sessions sweep ran these as execFileSync — a live V8 profile on the
@@ -109,6 +108,27 @@ async function findTmuxTargetAsync(pid, paneMap) {
   return null;
 }
 
+// THE LAST `comm` IDENTITY, AND ITS REAL BLAST RADIUS (B-3185 r4 — r3 recorded
+// this twin with the wrong one). Exactly ONE caller: `isLockClaude` below, as
+// the fallback taken when a claude lock file carries no NUMERIC `procStart`
+// (macOS locks write `procStartFt`) or /proc could not be read — which feeds
+// the discovery sweep's "does this lock still have a live owner?" question and
+// nothing else. It decides whether a CARD READS RUNNING. It is NOT on any kill
+// path any more (the /api/kill-pid gate that used its sync twin now asks
+// src/cli-identity.js) — a card it credits wrongly does hand that pid to the
+// sidebar's Terminate, but the ROUTE re-asks THE identity and refuses, which is
+// the whole point of gating the kill where the kill happens rather than
+// trusting the label that led there. It must not become one either: `ps -o
+// comm=` is 15 bytes
+// of a name the process may set for itself (node renames its main thread to
+// `MainThread` — measured — so an npm-installed `node …/claude-code/cli.js`
+// answers NO here), matched as a SUBSTRING (so `claude-keeper` answers YES).
+// Both errors are survivable for a label and neither is survivable for a
+// SIGTERM. It is kept rather than ported because on the path that reaches it
+// (macOS, every lock) `isCliProcess` is SYNCHRONOUS — a per-lock blocking fork
+// is the 2.242.0 event-loop stall this whole async family exists to avoid — and
+// on Linux `procStart` answers first with a pure file read. scripts/
+// test-local-discovery-device.mjs compares the two rungs on a live fixture.
 async function isProcessClaudeAsync(pid) {
   const out = await execFileP('ps', ['-p', String(pid), '-o', 'comm='], { timeout: 2000 });
   const cmd = String(out || '').trim();
@@ -1156,7 +1176,6 @@ module.exports = {
   recoverCwdFromProjDir,
   getTmuxPaneMap,
   findTmuxTarget,
-  isProcessClaude,
   getTmuxPaneMapAsync,
   findTmuxTargetAsync,
   isProcessClaudeAsync,

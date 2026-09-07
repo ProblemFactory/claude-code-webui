@@ -637,13 +637,13 @@ class HostManager {
 
   /** Kill an EXTERNAL/tmux agent process ON the host (sidebar Terminate for
    *  remote-discovered sessions — the pid is remote). Validates the pid is a
-   *  claude/codex process there before SIGTERM; device link first, ssh
-   *  fallback (dial machines have no ssh). */
+   *  claude/codex process there before SIGTERM (killPidShell = THE shared
+   *  identity); device link first, ssh fallback (dial machines have no ssh). */
   async killRemotePid(id, pid) {
     const h = this.get(id);
     const p = parseInt(pid, 10);
     if (!Number.isFinite(p) || p <= 1) throw new Error('bad pid');
-    const cmd = `C=$(ps -p ${p} -o args= 2>/dev/null); case "$C" in *claude*|*codex*) kill -TERM ${p} && echo VS_OK;; "") echo VS_GONE;; *) echo VS_NOTAGENT;; esac`;
+    const cmd = killPidShell(p);
     let out = '';
     if (h.transport === 'dial' || this.dataPlaneOn?.()) {
       try { const dm = await this.deviceBounded(id); out = String((await dm.runCmd('sh', ['-c', cmd], { timeoutMs: 10000 })).stdout || ''); }
@@ -2165,6 +2165,43 @@ ${codexOpenRolloutsShell()}
   }
 }
 
+/** THE remote Terminate script (`killRemotePid`) — the OTHER kill path, and
+ *  the one B-3185 left behind (r4, found by review).
+ *
+ *  It used to decide "may I SIGTERM this pid?" with
+ *  `case "$(ps -p N -o args=)" in *claude*|*codex*)` — the exact whole-argv
+ *  substring rule the sweep retired, still live on a path that KILLS, on a
+ *  machine the user cannot see. Everything the retired rule got wrong applies
+ *  here verbatim and worse: a remote `tail -f ~/.claude/projects/<id>.jsonl`,
+ *  an editor with the transcript open, a wrapper whose ARGUMENTS name
+ *  `…/bin/codex`, or a dtach master carrying the whole `claude --resume …`
+ *  command line (SIGTERMing which DESTROYS the session) all matched — and the
+ *  route answered `{success:true}`, so the user was told the terminate worked.
+ *
+ *  It now asks the ONE identity (src/cli-identity.js, embedded as shell text
+ *  because a host has no checkout), for BOTH CLI names, exactly like the sweep.
+ *  The three outcomes are unchanged so the caller and its error strings are:
+ *  `VS_GONE` (no such process — `ps` prints nothing), `VS_OK` (killed),
+ *  `VS_NOTAGENT` (alive, but not an agent CLI). The existence test stays `ps`
+ *  rather than `kill -0`: `kill -0` also fails with EPERM on another user's
+ *  process, which would report a live foreign process as "gone".
+ *
+ *  Exit status: every branch ends 0 except a failing `kill`, which is the ONE
+ *  thing the caller does want to hear about (`_ssh` rejects a non-zero exit) —
+ *  a FINDING never decides the status (the r2 lesson), only the ACT does. */
+function killPidShell(pid) {
+  const p = Number(pid);
+  // The pid is interpolated into shell text: it must be a number, here, at the
+  // one place that builds the text — never "the caller validated it".
+  if (!Number.isInteger(p) || p <= 1) throw new Error('bad pid');
+  return `${cliIdentityShellFns()}
+C=$(ps -p ${p} -o args= 2>/dev/null)
+if [ -z "$C" ]; then echo VS_GONE
+elif vs_is_cli ${p} claude || vs_is_cli ${p} codex; then kill -TERM ${p} && echo VS_OK
+else echo VS_NOTAGENT
+fi`;
+}
+
 /** CO leg of the ssh discovery script: rollout files held OPEN by a codex
  *  process = RUNNING threads (codex has no lock files). THE STANDING-SWEEP TWIN
  *  OF B-3185 (r2): this leg used to carry all three shapes that fix retired —
@@ -2330,4 +2367,4 @@ HostManager.prototype.bootstrap = function (id, onEvent) {
   });
 };
 
-module.exports = { HostManager, codexOpenRolloutsShell };
+module.exports = { HostManager, codexOpenRolloutsShell, killPidShell };

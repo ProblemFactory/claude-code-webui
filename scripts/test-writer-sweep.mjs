@@ -154,7 +154,7 @@ if (fs.existsSync('/proc/self')) {
   // script whose stderr the callers read. The whole compound is silenced now.
   const { spawnSync } = await import('node:child_process');
   const idFns = cliIdentityShellFns();
-  ok(/\{ tr '\\0' '\\n' < "\/proc\/\$1\/cmdline" \| sed[^}]*; \} 2>\/dev\/null/.test(idFns),
+  ok(/\{ tr [^{}]*< "\/proc\/\$1\/cmdline"[^{}]*\| sed[^{}]*; \} 2>\/dev\/null/.test(idFns),
     'vs_argv silences the WHOLE cmdline compound, not just `tr` (a failed redirect is a shell-level error)');
   const gone = Number(fs.readFileSync('/proc/sys/kernel/pid_max', 'utf8').trim()) + 1;
   const r = spawnSync('sh', ['-c', `${idFns}\nvs_argv ${gone} 0; vs_is_cli ${gone} claude`], { encoding: 'utf8', timeout: 20000 });
@@ -192,10 +192,12 @@ if (fs.existsSync('/proc/self')) {
   ok((idFns.match(/\/proc\/\$1\/cmdline/g) || []).length === 2,
     'vs_argv names the cmdline through exactly the two literals the re-root substitutes (the substitution cannot silently miss one)');
   const rerooted = idFns.split('/proc/$1/cmdline').join(`${argvDir}/$1/cmdline`);
-  const shippedCompound = `{ tr '\\0' '\\n' < "${argvDir}/$1/cmdline" | sed -n "$(($2 + 1))p"; } 2>/dev/null`;
-  // git 3b928ca4:src/writer-sweep.js — the redirect FIRST, `2>/dev/null` after,
-  // so the shell's own complaint about the failed open is never covered.
-  const preFixCompound = `tr '\\0' '\\n' < "${argvDir}/$1/cmdline" 2>/dev/null | sed -n "$(($2 + 1))p"`;
+  const shippedCompound = `{ tr '\\n' '\\001' < "${argvDir}/$1/cmdline" | tr '\\0' '\\n' | sed -n "$(($2 + 1))p" | tr '\\001' '\\n'; } 2>/dev/null`;
+  // git 3b928ca4:src/writer-sweep.js — the redirect FIRST, `2>/dev/null` on the
+  // reading `tr` ALONE, so the shell's own complaint about the failed open is
+  // never covered. (Spelled against the r4 pipeline: the defect under test is
+  // WHERE the redirection sits, not how many stages follow it.)
+  const preFixCompound = `tr '\\n' '\\001' < "${argvDir}/$1/cmdline" 2>/dev/null | tr '\\0' '\\n' | sed -n "$(($2 + 1))p" | tr '\\001' '\\n'`;
   const preFixed = rerooted.replace(shippedCompound, preFixCompound);
   ok(rerooted !== idFns && !rerooted.includes('/proc/$1/cmdline') && rerooted.includes(shippedCompound),
     'the re-rooted copy changed ONLY the /proc path — the silencing structure under test is the shipped text');
@@ -347,6 +349,53 @@ if (fs.existsSync('/proc/self')) {
   const wDelBasename = delHolder(delBinImg, '/opt/launch/agent-runner'); // rung 3a: exe basename IS the CLI, launcher argv[0]
   const delFixtures = [['w-deleted-versions', wDelVersions], ['w-deleted-basename', wDelBasename]];
 
+  // A WORD OF argv MAY CONTAIN A NEWLINE (r4, defect 3). argv is a list of
+  // NUL-separated words: the JS twin reads that list, but the shell could not,
+  // so it turned NULs into newlines and took the Nth LINE — i.e. the FIRST LINE
+  // of the Nth word. The two spellings then answered DIFFERENTLY about the same
+  // live process, in both directions, and one of them is a kill decision:
+  //   · `/usr/bin/claude<LF>/usr/bin/tail` — basename `tail` (JS: not the CLI),
+  //     first line `/usr/bin/claude` (old shell: the CLI) ⇒ the sweep SIGTERMs a
+  //     reader, the exact B-3185 harm through a different door;
+  //   · `<dir>/dir<LF>name/claude` — basename `claude` (JS: the CLI), first line
+  //     `<dir>/dir` (old shell: not the CLI) ⇒ a real writer survives the sweep
+  //     and the double-writer corruption the sweep exists to prevent happens.
+  // Neither fixture holds the transcript (identity is the whole question here),
+  // and the image lives OUTSIDE any `versions/` dir so rung 3 cannot answer for
+  // them — the verdict is about argv[0] and nothing else.
+  const nlDir = path.join(dir, 'nl');
+  fs.mkdirSync(nlDir, { recursive: true });
+  const nlImg = path.join(nlDir, 'runner');
+  fs.copyFileSync(fs.realpathSync('/bin/sh'), nlImg);
+  fs.chmodSync(nlImg, 0o755);
+  const nlHolder = (argv0) => spawn(nlImg, ['-c', 'read x'], { argv0, cwd: os.tmpdir(), stdio: ['pipe', 'ignore', 'ignore'] });
+  const rNlFirstLine = nlHolder('/usr/bin/claude\n/usr/bin/tail');   // JS: no · pre-r4 shell: YES (a kill)
+  const wNlInWord = nlHolder(path.join(nlDir, 'dir\nname', 'claude')); // JS: YES · pre-r4 shell: no (a survivor)
+  const nlFixtures = [['r-nl-first-line', rNlFirstLine, false], ['w-nl-in-word', wNlInWord, true]];
+
+  // …AND THE OTHER HALF OF THE SAME DEFECT: THE WORD'S *TRAILING* BYTES.
+  // Parking newlines on \001 fixes "the Nth line is the Nth record", but the
+  // value still had to survive `$(…)`, which strips EVERY trailing newline —
+  // so a word (or an exe path) that ENDS in one read `…/claude` in the shell
+  // and `…/claude<LF>` in JS, and the shell's answer is the permissive one, on
+  // a path that kills. Three fixtures, one per capture vs_cap now protects:
+  //   · argv[0] `…/claude<LF>`      — rung 1, the `$(vs_argv …)` capture;
+  //   · argv[0] `…/claude<0x01>`    — the \001 park itself: it becomes a newline
+  //     on the way out, so WITHOUT the sentinel it too was eaten (the code
+  //     comment used to claim this residue could only ever look LESS like the
+  //     CLI — for a TRAILING \001 that was false);
+  //   · exe `…/claude<LF>` with a launcher argv[0] — rung 3, the `$(readlink …)`
+  //     capture, which no argv fixture can reach.
+  const nlTrailImg = path.join(nlDir, 'claude\n');   // a REAL image whose basename ends in LF
+  fs.copyFileSync(fs.realpathSync('/bin/sh'), nlTrailImg);
+  fs.chmodSync(nlTrailImg, 0o755);
+  const rArgvTrailNl = nlHolder('/usr/bin/claude\n');
+  const rArgvTrailCtl = nlHolder('/usr/bin/claude' + String.fromCharCode(1)); // a LITERAL \001, spelled so no editor eats it
+  const rExeTrailNl = spawn(nlTrailImg, ['-c', 'read x'], { argv0: '/opt/launch/agent-runner', cwd: os.tmpdir(), stdio: ['pipe', 'ignore', 'ignore'] });
+  // every one of them is NOT the CLI — the shared rule compares against a name
+  // that carries neither byte, so a trailing one can only mean "not it".
+  const capFixtures = [['r-argv-trail-nl', rArgvTrailNl], ['r-argv-trail-ctl', rArgvTrailCtl], ['r-exe-trail-nl', rExeTrailNl]];
+
   // …and the suite itself: same fd, and (when run from an agent worktree) the
   // very argv that used to match. A SIGTERM here must not kill the run.
   let selfTermed = false;
@@ -455,6 +504,63 @@ if (fs.existsSync('/proc/self')) {
     'NEGATIVE CONTROL: without the strip BOTH exe rungs miss the very process the sweep exists to stop — the CLI that was auto-updated mid-session',
     { verdicts: delFixtures.map(([n, p]) => [n, isCliWith(noStripIdent, p.pid, 'claude')]) });
 
+  // ── A NEWLINE INSIDE AN argv WORD (r4, defect 3) ──────────────────────────
+  // The fixtures must really be in the state under test before any verdict
+  // means anything: argv[0] present AND containing a newline.
+  const argv0Of = (pid) => { try { return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0')[0] || ''; } catch { return ''; } };
+  const tNl = Date.now();
+  while (nlFixtures.some(([, p]) => !argv0Of(p.pid).includes('\n')) && Date.now() - tNl < 10000) await new Promise((r) => setTimeout(r, 20));
+  ok(nlFixtures.every(([, p]) => argv0Of(p.pid).includes('\n')),
+    'the newline fixtures really carry a newline INSIDE argv[0] (read back out of /proc — the state under test, not a description of it)',
+    { argv0s: nlFixtures.map(([n, p]) => [n, JSON.stringify(argv0Of(p.pid))]) });
+  // The control is the shipped text with ONLY the /proc reader reverted to the
+  // pre-r4 line — one substitution, everything else byte-identical.
+  const R4_ARGV_NEW = `tr '\\n' '\\001' < "/proc/$1/cmdline" | tr '\\0' '\\n' | sed -n "$(($2 + 1))p" | tr '\\001' '\\n'`;
+  const R4_ARGV_OLD = `tr '\\0' '\\n' < "/proc/$1/cmdline" | sed -n "$(($2 + 1))p"`;
+  const preR4Ident = shippedIdent.replace(R4_ARGV_NEW, () => R4_ARGV_OLD);
+  ok(preR4Ident !== shippedIdent && !preR4Ident.includes(R4_ARGV_NEW) && shParses(preR4Ident),
+    'the newline negative control is the shipped identity with ONLY the pre-r4 `vs_argv` /proc reader put back — and it PARSES (a broken revert answers NO for everything and fakes a pass)');
+  ok(isCliWith(preR4Ident, wNative.pid, 'claude') && !isCliWith(preR4Ident, rTail.pid, 'claude'),
+    '…and it is NOT simply dead: the pre-r4 reader still answers YES for a normal claude and NO for `tail`');
+  ok(nlFixtures.every(([, p, want]) => isCliProcess(p.pid, 'claude') === want),
+    'the JS twin reads the NUL-separated record: `…/claude<LF>…/tail` is NOT the CLI, `…/dir<LF>name/claude` IS',
+    { js: nlFixtures.map(([n, p]) => [n, isCliProcess(p.pid, 'claude')]) });
+  ok(nlFixtures.every(([, p, want]) => isCliWith(preR4Ident, p.pid, 'claude') !== want),
+    'NEGATIVE CONTROL: the pre-r4 shell answers the OPPOSITE of the JS twin on BOTH fixtures — it would have SIGTERMed a `tail` reader and spared a real writer, on the same live pids',
+    { preR4: nlFixtures.map(([n, p]) => [n, isCliWith(preR4Ident, p.pid, 'claude')]) });
+  ok(nlFixtures.every(([, p, want]) => isCliWith(shippedIdent, p.pid, 'claude') === want),
+    'the SHIPPED shell now agrees with the JS twin on both — "the Nth line" is "the Nth NUL-record" in either spelling');
+
+  // …and the TRAILING half of the same defect (`$(…)` eats trailing newlines).
+  // Its control reverts the three CAPTURES vs_cap replaced and nothing else.
+  const CAPS = [
+    ['vs_cap vs_argv "$1" 0\n  vs_c_a0=$vs_c_v', 'vs_c_a0=$(vs_argv "$1" 0)'],
+    ['vs_cap vs_argv "$1" "$vs_c_i"\n        vs_c_a=$vs_c_v', 'vs_c_a=$(vs_argv "$1" "$vs_c_i")'],
+    ['vs_cap readlink "/proc/$1/exe"\n  vs_c_e=$vs_c_v', 'vs_c_e=$(readlink "/proc/$1/exe" 2>/dev/null)'],
+  ];
+  ok(CAPS.every(([now]) => shippedIdent.includes(now)),
+    'every capture the trailing-bytes fix protects is present in the SHIPPED text under the exact spelling the control reverts (the substitution cannot silently miss one)');
+  const preCapIdent = CAPS.reduce((t, [now, was]) => t.replace(now, () => was), shippedIdent);
+  ok(preCapIdent !== shippedIdent && !/vs_cap (vs_argv|readlink)/.test(preCapIdent) && shParses(preCapIdent),
+    'the trailing-bytes negative control is the shipped identity with ONLY those three captures put back — no `vs_cap` call survives, and it PARSES');
+  ok(isCliWith(preCapIdent, wNative.pid, 'claude') && !isCliWith(preCapIdent, rTail.pid, 'claude'),
+    '…and it is NOT simply dead: the pre-vs_cap captures still answer YES for a normal claude and NO for `tail`');
+  const tCap = Date.now();
+  const capReady = () => argv0Of(rArgvTrailNl.pid).endsWith('\n')
+    && argv0Of(rArgvTrailCtl.pid).endsWith(String.fromCharCode(1))
+    && exeOf(rExeTrailNl.pid).endsWith('\n');
+  while (!capReady() && Date.now() - tCap < 10000) await new Promise((r) => setTimeout(r, 20));
+  ok(capReady(),
+    'the trailing-byte fixtures really END in the byte under test — argv[0] in LF / in \\001, and an exe PATH in LF (all read back out of /proc)',
+    { argv0s: capFixtures.map(([n, p]) => [n, JSON.stringify(argv0Of(p.pid))]), exe: JSON.stringify(exeOf(rExeTrailNl.pid)) });
+  ok(capFixtures.every(([, p]) => isCliProcess(p.pid, 'claude') === false),
+    'THE identity says NO to all three: a name that ends in a byte the CLI\'s name does not carry is a different name');
+  ok(capFixtures.every(([, p]) => isCliWith(preCapIdent, p.pid, 'claude') === true),
+    'NEGATIVE CONTROL: without vs_cap the shell says YES to all three — `$(…)` ate the trailing byte, so the sweep and the remote Terminate would SIGTERM a process THE identity refuses (and the \\001 residue the code comment called harmless was not)',
+    { preCap: capFixtures.map(([n, p]) => [n, isCliWith(preCapIdent, p.pid, 'claude')]) });
+  ok(capFixtures.every(([, p]) => isCliWith(shippedIdent, p.pid, 'claude') === false),
+    'the SHIPPED shell agrees with the JS twin on all three — the capture preserves the word, including its last byte');
+
   // ── THE SHELL THAT RUNS THIS TEXT IS NOT `sh` (r3 round 2) ────────────────
   // The device rung runs the script as `sh -c`, but BOTH ssh rungs — the
   // sweep's fallback (sweepWriters) and the discovery CO leg (hosts.js `_ssh`)
@@ -473,7 +579,9 @@ if (fs.existsSync('/proc/self')) {
     catch { return false; }
   };
   // the fixtures whose verdict DEPENDS on the strip, plus two that must not move
-  const shellProbe = [...delFixtures, ['w-native', wNative], ['r-helper-reexec', rHelperReexec]];
+  // (the trailing-byte fixtures ride along on purpose: `${v%"$nl"}` is exactly
+  //  the quoted-pattern construct the `(deleted)` strip got wrong under zsh)
+  const shellProbe = [...delFixtures, ...nlFixtures.map(([n, p]) => [n, p]), ...capFixtures, ['w-native', wNative], ['r-helper-reexec', rHelperReexec]];
   const verdictsUnder = (argv, fns) => shellProbe.map(([n, p]) => `${n}=${isCliUnder(argv, fns, p.pid, 'claude')}`).join(',');
   const shBaseline = verdictsUnder(['/bin/sh'], shippedIdent);
   ok(/vs_c_e=\$\{vs_c_e%'[^']* \(deleted\)[^']*'\}|vs_c_e=\$\{vs_c_e%"[^"]* \(deleted\)[^"]*"\}|\\\(deleted\\\)/.test(shippedIdent),
@@ -507,6 +615,8 @@ if (fs.existsSync('/proc/self')) {
     ['r-tail', rTail.pid], ['r-worktree', rWorktree.pid], ['r-othercli', rOtherCli.pid], ['r-neutral', rNeutral.pid],
     ['w-image-direct', wImageDirect.pid], ['w-presents-as-cli', wPresentsAsCli.pid], ['r-helper-reexec', rHelperReexec.pid],
     ['w-deleted-versions', wDelVersions.pid], ['w-deleted-basename', wDelBasename.pid],
+    ['r-nl-first-line', rNlFirstLine.pid], ['w-nl-in-word', wNlInWord.pid],
+    ...capFixtures.map(([n, p]) => [n, p.pid]),
     ['self-abs', selfAbs.pid], ['self-rel', selfRel.pid], ['lock-writer', lockWriter.pid], ['lock-stale', lockStale.pid],
     ['this-suite', process.pid], ['dead-pid', Number(fs.readFileSync('/proc/sys/kernel/pid_max', 'utf8').trim()) + 1],
   ];
@@ -573,7 +683,7 @@ if (fs.existsSync('/proc/self')) {
   console.log(`  · fd scan + sweep wall time: ${scanMs}ms over ${execFileSync('sh', ['-c', 'ls -d /proc/[0-9]* 2>/dev/null | wc -l'], { encoding: 'utf8' }).trim()} processes`);
   fs.closeSync(selfFd);
   process.off('SIGTERM', onTerm);
-  for (const h of [...holders.map((h) => h.p), rTail, lockWriter, lockStale, ...versFixtures.map(([, p]) => p), ...delFixtures.map(([, p]) => p)]) { try { h.kill('SIGKILL'); } catch {} }
+  for (const h of [...holders.map((h) => h.p), rTail, lockWriter, lockStale, ...versFixtures.map(([, p]) => p), ...delFixtures.map(([, p]) => p), ...nlFixtures.map(([, p]) => p), ...capFixtures.map(([, p]) => p)]) { try { h.kill('SIGKILL'); } catch {} }
   fs.rmSync(dir, { recursive: true, force: true });
 } else { console.log('  · /proc absent — skipping the live fd-scan leg'); }
 
@@ -1007,6 +1117,194 @@ function isCodexCommandLine(cmdline = '') {
   ok(!/SIGTERM|process\.kill|kill -TERM/.test(factsCode) && !/SIGTERM|process\.kill|kill -TERM/.test(identCode),
     'neither discovery-facts nor the shared identity module contains a kill path (they classify; only the sweep script kills)');
 }
+
+// ── 14. THE OTHER KILL PATHS (r4, defect 1 — the standing sweep, re-measured
+// on the question "who else decides that a pid may be SIGTERMed?"). B-3185
+// fixed the sweep, then discovery; both of THOSE are enumerated by §12. The
+// answer nobody had asked for is /api/kill-pid — the sidebar's Terminate for a
+// discovered EXTERNAL session — and it was a two-spelling rule on BOTH sides:
+//   · remote (hosts.js killRemotePid): `case "$(ps -p N -o args=)" in
+//     *claude*|*codex*)` — the retired whole-argv substring, live on a kill
+//     path, on a machine the user cannot look at. A remote `tail -f` on a
+//     transcript, an editor, a wrapper whose ARGUMENTS name `…/bin/codex`, or a
+//     dtach master carrying `…/claude --resume …` (killing which destroys the
+//     session) all matched, and the route reported success.
+//   · local: `ps -o comm=` + `.includes('claude')` — which is neither an
+//     executable test (node renames its own main thread to `MainThread`, so an
+//     npm-installed `node …/claude-code/cli.js` was NOT killable at all) nor a
+//     whole match (`claude-keeper` was).
+// Both now ask THE identity. Driven functionally: the real shell text against
+// real processes, and the real express handler through the real router.
+if (fs.existsSync('/proc/self')) {
+  const { execFileSync, spawn } = await import('node:child_process');
+  const kdir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-kill-'));
+  const kproj = path.join(kdir, '.claude', 'projects', '-w');
+  fs.mkdirSync(kproj, { recursive: true });
+  const ktx = path.join(kproj, 'rid-kill.jsonl');
+  fs.writeFileSync(ktx, '{}\n');
+  const krollout = path.join(kdir, '.codex', 'sessions', '2026', 'rollout-2026-09-07T00-00-00-abc.jsonl');
+  fs.mkdirSync(path.dirname(krollout), { recursive: true });
+  fs.writeFileSync(krollout, '{}\n');
+  // EVERY fixture is registered with the argv it must ALREADY have before any
+  // verdict is taken. "cmdline contains a NUL" is not enough: between fork and
+  // exec the child still shows the SUITE's own command line — which, run from
+  // an agent worktree, contains `.claude` — so a too-early read would judge the
+  // wrong argv (and, for the real-CLI fixtures, the wrong way).
+  const kprocs = [];
+  const kargv = (pid) => { try { return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter(Boolean); } catch { return []; } };
+  const track = (p, expect) => { kprocs.push({ p, expect }); return p; };
+  // READERS whose ARGV merely names a CLI path — the shape the retired rule
+  // could not tell from a writer. Two identical claude-shaped ones: the control
+  // gets to kill its own victim, so the shipped verdict is not measured on a
+  // process the control already destroyed.
+  const reader = (file) => track(spawn('tail', ['-f', file], { cwd: os.tmpdir(), stdio: 'ignore' }), (a) => a[0]?.endsWith('tail') && a[2] === file);
+  const rVictim = reader(ktx);           // for the retired script
+  const rClaudePath = reader(ktx);       // for the shipped remote script
+  const rLocalPath = reader(ktx);        // for the shipped LOCAL route — its own fixture, so a
+                                         // remote-leg regression cannot also redden the local assert
+  const rCodexPath = reader(krollout);   // argv names …/.codex/…rollout… ⇒ matched `*codex*`
+  // REAL CLIs — a copy of /bin/sh named `claude` / `codex` (rung 1: argv[0]
+  // basename). A symlink would resolve /proc/<pid>/exe back to the interpreter.
+  const realCli = (name, sub = 'bin') => {
+    const img = path.join(kdir, sub, name);
+    fs.mkdirSync(path.dirname(img), { recursive: true });
+    fs.copyFileSync(fs.realpathSync('/bin/sh'), img);
+    fs.chmodSync(img, 0o755);
+    return track(spawn(img, ['-c', 'read x'], { cwd: os.tmpdir(), stdio: ['pipe', 'ignore', 'ignore'] }), (a) => a[0] === img);
+  };
+  const wClaude = realCli('claude');
+  const wCodex = realCli('codex');
+  // …and the shape the LOCAL comm rule could never kill: an npm-install CLI.
+  const cliJs = path.join(kdir, 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js');
+  fs.mkdirSync(path.dirname(cliJs), { recursive: true });
+  fs.writeFileSync(cliJs, 'setTimeout(() => {}, 60000);');
+  const wNpmCli = track(spawn(process.execPath, [cliJs], { cwd: os.tmpdir(), stdio: 'ignore' }), (a) => a[1] === cliJs);
+  const alive2 = (p) => { try { process.kill(p.pid, 0); return true; } catch { return false; } };
+  const kReady = ({ p, expect }) => expect(kargv(p.pid));
+  const tK = Date.now();
+  while (kprocs.some((e) => !kReady(e)) && Date.now() - tK < 10000) await new Promise((r) => setTimeout(r, 20));
+  ok(kprocs.every((e) => kReady(e) && alive2(e.p)),
+    'every kill-path fixture is live and has EXEC\'d its own argv (not the suite\'s, which a pre-exec read would have judged) before any verdict is taken',
+    { argvs: kprocs.map((e) => kargv(e.p.pid).join(' ').slice(0, 60)) });
+
+  // ── the REMOTE script, run for real (it is transport-agnostic text) ──
+  const { killPidShell } = require('../src/hosts.js');
+  // A non-zero exit is a RESULT here (a failing `kill` is the one thing the
+  // script is allowed to report that way) — read it, never throw out of the
+  // section: an exception is not a red assertion.
+  const runKill = (script) => {
+    try { return String(execFileSync('sh', ['-c', script], { encoding: 'utf8', timeout: 20000 }) || '').trim(); }
+    catch (e) { return String(e.stdout || '').trim() + `|EXIT:${e.status}`; }
+  };
+  // git 77ac0825:src/hosts.js — the verbatim pre-r4 line.
+  const retiredKillShell = (p) => `C=$(ps -p ${p} -o args= 2>/dev/null); case "$C" in *claude*|*codex*) kill -TERM ${p} && echo VS_OK;; "") echo VS_GONE;; *) echo VS_NOTAGENT;; esac`;
+  const retiredSays = runKill(retiredKillShell(rVictim.pid));
+  await new Promise((r) => setTimeout(r, 300));
+  ok(retiredSays.includes('VS_OK') && !alive2(rVictim),
+    'NEGATIVE CONTROL: the pre-r4 remote script KILLS `tail -f …/.claude/projects/<id>.jsonl` and reports success — a reader terminated on a machine the user cannot see',
+    { out: retiredSays });
+  const shippedClaudePath = runKill(killPidShell(rClaudePath.pid));
+  const shippedCodexPath = runKill(killPidShell(rCodexPath.pid));
+  await new Promise((r) => setTimeout(r, 300));
+  ok(shippedClaudePath.includes('VS_NOTAGENT') && alive2(rClaudePath),
+    'the shipped remote script REFUSES a pid whose argv merely NAMES a claude transcript, and the reader survives', { out: shippedClaudePath });
+  ok(shippedCodexPath.includes('VS_NOTAGENT') && alive2(rCodexPath),
+    '…and the same for a codex rollout path (the retired rule matched `*codex*` there too)', { out: shippedCodexPath });
+  const killedClaude = runKill(killPidShell(wClaude.pid));
+  const killedCodex = runKill(killPidShell(wCodex.pid));
+  await new Promise((r) => setTimeout(r, 300));
+  ok(killedClaude.includes('VS_OK') && !alive2(wClaude),
+    'POSITIVE CONTROL: a REAL claude CLI is still terminated by the shipped script (the narrowing did not break Terminate)', { out: killedClaude });
+  ok(killedCodex.includes('VS_OK') && !alive2(wCodex),
+    '…and a real codex CLI too (both names go through the shared identity)', { out: killedCodex });
+  const deadPid = Number(fs.readFileSync('/proc/sys/kernel/pid_max', 'utf8').trim()) + 1;
+  ok(runKill(killPidShell(deadPid)).includes('VS_GONE'),
+    'a pid that is not there still answers VS_GONE — the caller\'s three outcomes are unchanged');
+  ok(killPidShell(4242).includes(cliIdentityShellFns()) && !/\*claude\*\|\*codex\*/.test(killPidShell(4242)),
+    'the remote Terminate script embeds THE shared identity VERBATIM and carries no whole-argv case');
+  let badPidRejected = false;
+  try { killPidShell('7; kill -9 -1'); } catch { badPidRejected = true; }
+  ok(badPidRejected, 'the script builder rejects a non-integer pid AT the place that builds shell text (never "the caller validated it")');
+
+  // …and the script through the METHOD that ships it. A builder used by a
+  // method but referenced as a free identifier throws only when the METHOD RUNS
+  // (the 5th/6th/7th lost-binding incidents), and no structural pin can see
+  // that. The device link is stubbed with "run it right here", which is exactly
+  // what a device does with `sh -c <script>`.
+  const { HostManager } = require('../src/hosts.js');
+  const hmDir = path.join(kdir, 'hm');
+  fs.mkdirSync(hmDir, { recursive: true });
+  const hm = new HostManager({ dataDir: hmDir });
+  hm._state.hosts = [{ id: 'h1', name: 'h1', transport: 'dial', host: 'x', user: 'u' }];
+  hm.deviceBounded = async () => ({
+    async runCmd(cmd, args) { try { return { stdout: execFileSync(cmd, args, { encoding: 'utf8', timeout: 20000 }) }; } catch (e) { return { stdout: String(e.stdout || '') }; } },
+  });
+  hm.invalidateDiscovery = () => { };
+  const rMethod = reader(ktx), wMethod = realCli('claude', 'bin2'); // a SECOND real CLI: same name, own dir
+  { const t = Date.now(); while ([rMethod, wMethod].some((p) => !kprocs.find((e) => e.p === p) || !kReady(kprocs.find((e) => e.p === p))) && Date.now() - t < 10000) await new Promise((r) => setTimeout(r, 20)); }
+  let methodRefused = '';
+  try { await hm.killRemotePid('h1', rMethod.pid); } catch (e) { methodRefused = e.message; }
+  ok(/not a claude\/codex process/.test(methodRefused) && alive2(rMethod),
+    'killRemotePid ITSELF (the shipped method, device link stubbed to run the script here) refuses the reader — the builder is really wired, not just exported', { methodRefused });
+  const methodKilled = await hm.killRemotePid('h1', wMethod.pid).catch((e) => ({ error: e.message }));
+  await new Promise((r) => setTimeout(r, 300));
+  ok(methodKilled?.success === true && !alive2(wMethod),
+    '…and terminates a real CLI through that same method', { methodKilled });
+
+  // ── the LOCAL branch, through the REAL express handler ──
+  const sessionsMod = require('../src/routes/sessions.js');
+  sessionsMod.setup({
+    activeSessions: new Map(), webuiPids: new Set(), refreshWebuiPids: () => { },
+    createSessionMessages: () => ({}), BUFFERS_DIR: kdir, PERMISSION_MODES: [],
+    execFileSync, hosts: { device: async () => { throw new Error('no device in this test'); } },
+    accounts: null, sessionAuth: () => ({}), serverSetting: () => undefined,
+  });
+  const killLayer = sessionsMod.router.stack.find((l) => l.route?.path === '/api/kill-pid');
+  const callKill = (pid) => new Promise((resolve) => {
+    const res = { code: 200, status(c) { this.code = c; return this; }, json(b) { resolve({ code: this.code, body: b }); } };
+    Promise.resolve(killLayer.route.stack[0].handle({ body: { pid } }, res)).catch((e) => resolve({ code: 0, body: { error: String(e) } }));
+  });
+  ok(!!killLayer, 'the /api/kill-pid route is reachable through the real router (the handler below is the shipped one)');
+  // NEGATIVE CONTROL for the local branch: the retired comm rule, verbatim.
+  const retiredComm = (pid) => { try { const c = execFileSync('ps', ['-p', String(pid), '-o', 'comm='], { encoding: 'utf-8', timeout: 2000 }).trim(); return c === 'claude' || c.includes('claude'); } catch { return false; } };
+  ok(retiredComm(wNpmCli.pid) === false && isCliProcess(wNpmCli.pid, 'claude') === true,
+    'NEGATIVE CONTROL: the retired `ps -o comm=` rule says NOT-claude for a live `node …/@anthropic-ai/claude-code/cli.js` (node renames its main thread to `MainThread`) — Terminate could never kill an npm-installed CLI',
+    { comm: (() => { try { return execFileSync('ps', ['-p', String(wNpmCli.pid), '-o', 'comm='], { encoding: 'utf-8' }).trim(); } catch { return '?'; } })() });
+  const localReader = await callKill(rLocalPath.pid);
+  await new Promise((r) => setTimeout(r, 200));
+  ok(localReader.code === 400 && /not a claude\/codex process/.test(localReader.body?.error || '') && alive2(rLocalPath),
+    'LOCAL branch: a reader whose argv merely names a transcript is REFUSED (400) and survives', { got: localReader });
+  const localNpm = await callKill(wNpmCli.pid);
+  await new Promise((r) => setTimeout(r, 300));
+  ok(localNpm.body?.success === true && !alive2(wNpmCli),
+    'LOCAL branch: the npm-shape CLI the comm rule could not see IS terminated now', { got: localNpm });
+
+  // ── the structural line: no kill path asks anything but THE identity ──
+  const sessSrc = fs.readFileSync(new URL('../src/routes/sessions.js', import.meta.url), 'utf8');
+  const storeSrc = fs.readFileSync(new URL('../src/session-store.js', import.meta.url), 'utf8');
+  const hostsSrc2 = fs.readFileSync(new URL('../src/hosts.js', import.meta.url), 'utf8');
+  const codeOnly2 = (t) => t.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*|#)/.test(l)).join('\n').replace(/\/\*[\s\S]*?\*\//g, '');
+  ok(/isCliProcess\(pid, 'claude'\)/.test(sessSrc) && /isCliProcess\(pid, 'codex'\)/.test(sessSrc) && !/isProcessClaude/.test(sessSrc),
+    'WIRING PIN: /api/kill-pid\'s local branch asks the shared predicate for BOTH names, and the comm-substring import is gone from the route module');
+  ok(/const cmd = killPidShell\(p\);/.test(hostsSrc2) && !/\*claude\*\|\*codex\*/.test(codeOnly2(hostsSrc2)),
+    'WIRING PIN: killRemotePid builds its script from killPidShell, and no copy of the retired whole-argv case survives in hosts.js CODE');
+  ok(/\*claude\*\|\*codex\*/.test(retiredKillShell(1234)) && /comm/.test(String(retiredComm)),
+    'NEGATIVE CONTROL: both pins name shapes that really exist — they FIRE on the verbatim pre-r4 remote line and on the retired comm rule');
+  // The surviving comm twin is DISCOVERY-ONLY, and that is the whole record
+  // r3 got wrong (it named "the local sweep's PID-reuse fallback" and missed
+  // that its SYNC twin gated a SIGTERM). One caller, named here so a second one
+  // turns this red.
+  const asyncCallers = storeSrc.split('\n')
+    .map((l, i) => ({ l, i }))
+    .filter(({ l }) => /isProcessClaudeAsync\(/.test(l) && !/^async function|^\s*(\/\/|\*)/.test(l));
+  ok(asyncCallers.length === 1 && /return isProcessClaudeAsync\(pid\);/.test(asyncCallers[0].l),
+    'the surviving `comm` twin has exactly ONE caller — isLockClaude\'s no-procStart fallback (a card label, never a kill)',
+    { callers: asyncCallers.map((c) => c.l.trim()) });
+  ok(!/isProcessClaude\b(?!Async)/.test(codeOnly2(storeSrc)),
+    'and its SYNC twin — the one that gated /api/kill-pid\'s SIGTERM — no longer exists');
+  for (const { p } of kprocs) { try { p.kill('SIGKILL'); } catch { } }
+  fs.rmSync(kdir, { recursive: true, force: true });
+} else { console.log('  · /proc absent — skipping the kill-path legs'); }
 
 // ── 13. THE KB ADVERTISES A NUMBER (r2, defect 7). It said 66 while the suite
 // ran 68 — a small lie, but the kb is the operating manual and the number is

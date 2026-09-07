@@ -11,8 +11,11 @@ const os = require('os');
 const router = express.Router();
 
 const {
-  cwdToProjectDir, isProcessClaude, isProcessClaudeAsync, execFileP, isSubagentMessage,
+  cwdToProjectDir, execFileP, isSubagentMessage,
 } = require('../session-store');
+// THE agent-CLI identity, one rule for every machine (B-3185) — /api/kill-pid's
+// LOCAL branch asks it exactly like the remote branch's shell twin does.
+const { isCliProcess } = require('../cli-identity');
 const { createMessageManager } = require('../normalizers');
 // S3: discovery iterates the harness registry — each descriptor's
 // store.discover lists its own sessions (claude lock-first sweep in
@@ -511,7 +514,21 @@ function setup(ctx) {
         await hosts.killRemotePid(String(host), pid);
         return res.json({ success: true });
       }
-      if (!isProcessClaude(pid)) return res.status(400).json({ error: 'PID is not a claude process' });
+      // THE SAME QUESTION AS THE REMOTE BRANCH ABOVE, SO THE SAME RULE (B-3185
+      // r4). `hostId` is a parameter, never a branch — but this route WAS a
+      // branch: remote asked a whole-argv substring, local asked
+      // `ps -o comm=` + `.includes('claude')`. Both are retired here. comm is
+      // not the executable test it looks like: it is 15 bytes of a name the
+      // process may set itself (measured — node renames its own main thread to
+      // `MainThread`, so an npm-installed `node …/claude-code/cli.js` reported
+      // NOT-claude and Terminate answered "PID is not a claude process" for a
+      // real live CLI), and as a SUBSTRING it also accepts anything that calls
+      // itself `claude-…`. isCliProcess is the sweep's own rule; codex is
+      // accepted because the remote branch always did and the sidebar lists
+      // both backends' external sessions.
+      if (!isCliProcess(pid, 'claude') && !isCliProcess(pid, 'codex')) {
+        return res.status(400).json({ error: 'PID is not a claude/codex process' });
+      }
       process.kill(pid, 'SIGTERM');
       res.json({ success: true });
     } catch (err) { res.status(500).json({ error: err.message }); }
