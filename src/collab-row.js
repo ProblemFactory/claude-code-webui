@@ -32,6 +32,13 @@
  * here is stored server-side, and the only difference between the LIVE and the
  * FROZEN form is the last segment: a ticking relative age while the turn runs,
  * the absolute span of the traffic once it stops.
+ *
+ * THREE SURFACES = THREE SCOPES (2026-09-07 r2, and they are meant to differ):
+ * `collabHeadText` describes ONE coalesced card, `collabRunPart` the folded
+ * RUN, `subAgentStreamLabel` the whole TURN. Same composer, same wording, but
+ * a card that stopped growing at 4 events sits under a run of 5 while the
+ * spinner counts the turn's 5 — so the free-floating one (the spinner) says
+ * "this turn" out loud; the other two are read inside the thing they count.
  */
 
 // Default translator: the ENGLISH key with {param} substitution — the server
@@ -174,13 +181,22 @@ function collabRunPart(stats, { now = Date.now(), live = false, t = T } = {}) {
 
 /**
  * The streaming status line while the newest typed record is collab traffic:
- * "Sub-agents working — 47 messages, last 4s ago". It says the turn is ALIVE,
- * which the generic "thinking…" cannot.
+ * "Sub-agents working — 47 sub-agent events this turn, last 4s ago". It says
+ * the turn is ALIVE, which the generic "thinking…" cannot.
+ *
+ * "THIS TURN" IS LOAD-BEARING (2026-09-07 r2). The three surfaces are three
+ * SCOPES of the same traffic and they legitimately show different numbers at
+ * the same moment: the card head counts ONE coalesced card (a report or a tool
+ * card between two bursts starts a new one), the run header counts the folded
+ * RUN, and this line counts the whole TURN — which is the number the owner
+ * asked for ("连续数量"). The other two sit inside the thing they describe;
+ * this one floats free above the composer, so it is the one that must NAME its
+ * scope, or "4" on the card next to "5" on the spinner reads as a bug.
  */
 function subAgentStreamLabel(stats, { now = Date.now(), t = T } = {}) {
   const msgs = collabCountParts(stats, t)[0];
-  if (!stats?.lastTs) return t('Sub-agents working — {msgs}', { msgs });
-  return t('Sub-agents working — {msgs}, last {age} ago', { msgs, age: collabAgeText(now - stats.lastTs, t) });
+  if (!stats?.lastTs) return t('Sub-agents working — {msgs} this turn', { msgs });
+  return t('Sub-agents working — {msgs} this turn, last {age} ago', { msgs, age: collabAgeText(now - stats.lastTs, t) });
 }
 
 /** The distinct "name (TYPE)" labels of a coalesced card, in row order. */

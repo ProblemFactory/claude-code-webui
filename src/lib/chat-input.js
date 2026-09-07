@@ -402,21 +402,37 @@ export class ChatInput {
 
   showTyping(label = t('thinking...'), kind = null) {
     if (!this._streamStatus) return;
-    // UNCHANGED LABEL = NO-OP (2026-09-07, the live sub-agent counter): the
-    // view re-asserts this line every second while collab traffic ticks, and
-    // a blind innerHTML rewrite would rebuild the Stop button each time —
-    // throwing away the two-step compaction ARM mid-confirmation and churning
-    // the DOM for nothing. The guard requires the button to still be there, so
-    // a repaint after _showPending's button-less line still renders.
-    if (this._isStreaming && this._typingLabel === label && this._typingKind === kind
-        && this._streamStatus.querySelector('.chat-interrupt-btn')) { this._pendingLine = false; return; }
+    // A TEXT CHANGE NEVER REBUILDS THE BUTTON (2026-09-07 r2 — the live
+    // sub-agent counter's own regression, caught by the adversarial verifier).
+    // The view re-asserts this line every second while collab traffic ticks
+    // and the label CHANGES on every tick (the age), so an "unchanged label"
+    // memo can never protect anything: a blind innerHTML rewrite destroyed
+    // `.chat-interrupt-btn` once a second. A mousedown whose target leaves the
+    // DOM before mouseup fires `click` on the common ancestor (.chat-stream-
+    // status, no handler) — the interrupt is lost with no toast and no log
+    // (measured: 6/10 trusted clicks delivered while ticking, 10/10 with a
+    // stable node; keyboard focus on Stop died within 1.4s, i.e. 100%) in
+    // exactly the moment the user believes the turn is wedged and reaches for
+    // Stop. So while the turn streams, the button is still there and the KIND
+    // (which decides what the button DOES) is unchanged, write ONLY the label
+    // text — the button node, its focus and the two-step compaction ARM all
+    // survive. _showPending's button-less line has no `.chat-interrupt-btn`,
+    // so it always falls through to the full render.
+    const liveBtn = this._isStreaming ? this._streamStatus.querySelector('.chat-interrupt-btn') : null;
+    const labelEl = liveBtn && this._typingKind === kind ? this._streamStatus.querySelector('.chat-stream-label') : null;
+    if (labelEl) {
+      if (this._typingLabel !== label) { labelEl.textContent = label; this._typingLabel = label; }
+      this._pendingLine = false;
+      this._streamStatus.classList.remove('hidden');
+      return;
+    }
     this._typingLabel = label;
     this._typingKind = kind;
     this._pendingLine = false; // a real turn owns the line now (see _clearPending)
     // Remembered so the button can be re-rendered in place when the pending
     // Stop state ends (the label keeps changing under it while the turn runs).
     this._typingLabel = label; this._typingKind = kind;
-    this._streamStatus.innerHTML = `<span class="chat-spinner"></span> ${escHtml(label)}<button class="chat-interrupt-btn" title="${escHtml(t('Interrupt'))}">\u25A0 ${escHtml(t('Stop'))}</button>`;
+    this._streamStatus.innerHTML = `<span class="chat-spinner"></span> <span class="chat-stream-label">${escHtml(label)}</span><button class="chat-interrupt-btn" title="${escHtml(t('Interrupt'))}">\u25A0 ${escHtml(t('Stop'))}</button>`;
     const btn = this._streamStatus.querySelector('.chat-interrupt-btn');
     // A STOP ALREADY IN FLIGHT OWNS THE BUTTON (round-3 review). showTyping is
     // re-run on every label change, so re-applying the pending state HERE is
@@ -622,7 +638,7 @@ export class ChatInput {
   // WITHOUT the interrupt button showTyping renders — there is no turn to stop.
   _showPending(label) {
     if (!this._streamStatus) return;
-    this._typingLabel = null; // this line has no Stop button — the showTyping memo must not match it
+    this._typingLabel = null; // this line has no Stop button — showTyping must fall through to a full render
     this._pendingLine = true;
     this._streamStatus.innerHTML = `<span class="chat-spinner"></span> ${escHtml(label)}`;
     this._streamStatus.classList.remove('hidden');

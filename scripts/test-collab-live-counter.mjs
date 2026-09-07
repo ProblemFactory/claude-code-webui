@@ -98,9 +98,18 @@ console.log('— ① counts, pluralisation, age granularity, live vs frozen');
     && CR.collabRunPart(CR.collabTrafficStats({ rows: [] }), { t }) === '',
     [CR.collabRunPart(many, { live: false, t }), CR.collabRunPart(many, { live: true, now: T0 + 252000 + 65000, t })].join(' | '));
   check('the spinner label states the count and the age, and degrades honestly with no clock',
-    CR.subAgentStreamLabel(many, { now: T0 + 252000 + 4000, t }) === 'Sub-agents working — 3 messages, last 4s ago'
-    && CR.subAgentStreamLabel(noTs, { t }) === 'Sub-agents working — 2 messages',
+    CR.subAgentStreamLabel(many, { now: T0 + 252000 + 4000, t }) === 'Sub-agents working — 3 messages this turn, last 4s ago'
+    && CR.subAgentStreamLabel(noTs, { t }) === 'Sub-agents working — 2 messages this turn',
     CR.subAgentStreamLabel(many, { now: T0 + 252000 + 4000, t }));
+  // r2 (verifier MINOR): the three surfaces are three SCOPES — card / run /
+  // turn — and they legitimately show different numbers at the same moment.
+  // The two that are read INSIDE the thing they count stay bare; the one that
+  // floats free above the composer must say which scope it means.
+  check('the free-floating spinner NAMES its scope ("this turn"); the card head and the run segment do not (they are read inside their own container)',
+    / this turn/.test(CR.subAgentStreamLabel(many, { now: T0, t }))
+    && !/this turn/.test(CR.collabHeadText(many, { live: true, now: T0, t }))
+    && !/this turn/.test(CR.collabRunPart(many, { live: true, now: T0, t })),
+    [CR.subAgentStreamLabel(many, { now: T0, t }), CR.collabHeadText(many, { live: true, now: T0, t })].join(' | '));
 }
 
 console.log('— ② the head is a rendered element, escaped, and never replaces a lone row');
@@ -203,8 +212,9 @@ console.log('— ④ wiring pins (a pure composer with an unstaged call site is 
   const ci = read('src/lib/chat-input.js');
   const rs = read('src/lib/chat-run-summary.js');
   check('chat-view imports the composers from the PURE collab module', /import \{ collabTrafficStats, collabHeadText, collabRunPart, subAgentStreamLabel \} from '\.\.\/collab-row\.js';/.test(cv));
-  check('the renderer asks the VIEW whether a card is live (view-only ⇒ always frozen)',
-    /isCollabLive: \(msg\) => this\._liveCollabId\(\) === msg\?\.id,/.test(cv) && /this\._isCollabLive = isCollabLive \|\| null;/.test(cr)
+  check('the renderer asks the VIEW whether a card is live (view-only ⇒ always frozen) and the answer is REMEMBERED',
+    /isCollabLive: \(msg\) => this\._noteCollabHeadPainted\(msg\?\.id, this\._liveCollabId\(\) === msg\?\.id\),/.test(cv)
+    && /this\._isCollabLive = isCollabLive \|\| null;/.test(cr)
     && /const live = !!this\._isCollabLive\?\.\(msg\);/.test(cr));
   check('liveness = the LAST message, and only while the turn streams', /_liveCollabId\(\) \{\s*\n\s*if \(!this\._typingSince \|\| this\._disposed\) return null;[\s\S]{0,220}return \(last\?\.collab && !last\.collab\.report\) \? last\.id : null;/.test(cv));
   check('the ticker is only armed when something is live (a claude session never carries an interval) and paints once immediately',
@@ -229,22 +239,53 @@ console.log('— ④ wiring pins (a pure composer with an unstaged call site is 
     && !/if \(msg\.label\) this\._showTyping\(msg\.label, msg\.kind \|\| null\);/.test(cv));
   check('turn end FREEZES every surface (a ticking age on a finished turn reads as progress)',
     /_hideTyping\(\) \{[\s\S]{0,320}this\._freezeCollab\(\);/.test(cv) && /_freezeCollab\(\) \{\s*\n\s*this\._stopCollabTick\(\);/.test(cv));
-  check('ChatInput.showTyping is a NO-OP for an unchanged label (a per-second rewrite would throw away the compaction ARM)',
-    /if \(this\._isStreaming && this\._typingLabel === label && this\._typingKind === kind/.test(ci)
-    && /this\._streamStatus\.querySelector\('\.chat-interrupt-btn'\)\) \{ this\._pendingLine = false; return; \}/.test(ci)
+  // r2 (verifier MAJOR): the freeze walked only the card the TICKER had
+  // painted, so a burst that ran entirely while the window was hidden — the
+  // ticker is a no-op then — never froze at all.
+  check('the freeze walks the SET of live-painted heads, never "the card the ticker last painted"',
+    /_freezeCollab\(\) \{[\s\S]{0,260}this\._freezeStaleHeads\(null, now\);/.test(cv)
+    && /_freezeStaleHeads\(liveId, now\) \{[\s\S]{0,220}for \(const id of \[\.\.\.this\._liveHeadIds\]\)/.test(cv)
+    && /this\._liveHeadIds = new Set\(\);/.test(cv)
+    && !/_tickedCollabId/.test(cv));
+  check('…and the tick uses the same sweep (a card that stops being live is frozen once, whoever painted it)',
+    /_tickCollab\(\) \{[\s\S]{0,700}this\._freezeStaleHeads\(liveId, now\);\s*\n\s*if \(liveId\) this\._paintCollabHead\(liveId, true, now\);/.test(cv));
+  // chat-view.js is DOM-free at import and its resume guards are unit-tested on
+  // PROTOTYPE-ONLY views whose constructor never ran (test-chat-trim-guard) —
+  // setSuspended(false) runs a tick on those, so every new constructor field
+  // the tick path touches must be optional there (caught by that suite: a bare
+  // `this._liveHeadIds.size` threw and took the whole resume suite down).
+  check('the live-head set is lazily created and read optionally (a prototype-only view still ticks)',
+    /const ids = \(this\._liveHeadIds \|\|= new Set\(\)\);/.test(cv)
+    && /if \(!this\._liveHeadIds\?\.size\) return;/.test(cv)
+    && /this\._liveHeadIds\?\.delete\(msgId\); return;/.test(cv));
+  // r2 (verifier BLOCKER): the label CHANGES on every tick (the age), so a
+  // memo keyed on the label text could never protect anything — the button was
+  // rebuilt once a second and trusted Stop clicks were swallowed. A text
+  // change must be a textContent write into the label's own element.
+  check('ChatInput.showTyping writes the label TEXT and never rebuilds the Stop button while the kind is unchanged',
+    /const liveBtn = this\._isStreaming \? this\._streamStatus\.querySelector\('\.chat-interrupt-btn'\) : null;/.test(ci)
+    && /const labelEl = liveBtn && this\._typingKind === kind \? this\._streamStatus\.querySelector\('\.chat-stream-label'\) : null;/.test(ci)
+    && /if \(labelEl\) \{\s*\n\s*if \(this\._typingLabel !== label\) \{ labelEl\.textContent = label; this\._typingLabel = label; \}/.test(ci)
+    && /<span class="chat-stream-label">\$\{escHtml\(label\)\}<\/span>/.test(ci)
     && /this\._typingLabel = null;[\s\S]{0,80}this\._typingKind = null;/.test(ci));
-  check('…and the button-less pending line invalidates that memo', /this\._typingLabel = null; \/\/ this line has no Stop button/.test(ci));
+  check('…and the button-less pending line still falls through to a FULL render (it has no .chat-interrupt-btn)',
+    /this\._typingLabel = null; \/\/ this line has no Stop button/.test(ci));
+  check('the read-only stream line carries the same label element (a ticking age is a text write there too)',
+    /<span class="chat-spinner"><\/span> <span class="chat-stream-label">\$\{escHtml\(label\)\}<\/span>/.test(cv)
+    && /if \(roLabel && !this\._streamStatus\.classList\.contains\('hidden'\)\) \{/.test(cv));
   check('the run label takes a PRE-COMPOSED collab segment — chat-run-summary still imports nothing',
     /collabPart: collabRunPart\(collabStats, \{ now, live, t \}\)/.test(cv) && /collabPart = ''/.test(rs) && !/^\s*import /m.test(rs));
   check('the run record carries the label recipe so the ticker never builds a second kind table',
     /const rec = \{ header, members, inline, footer: null, label, open: false, mkLabel, collabStats/.test(cv)
     && /run\.mkLabel\(\{ now, live \}\)/.test(cv));
+  check('the run header keeps a separator before the clickable chips (r2: "2 sub-agent events water_research" read as one phrase)',
+    /\$\{label \? ' · ' : ' '\}<span class="chat-run-agents">/.test(cv));
   check('the ticker repaints header, footer AND the floating bar (three views of ONE label)',
     /const footLabel = run\.footer\?\.querySelector\('\.chat-run-label'\);/.test(cv) && /if \(this\._runBarRun === run\) this\._scheduleRunBar\(\);/.test(cv));
   check('chat.css styles the head with theme vars only (§17)', /\.chat-collab-head \{ color: var\(--text\); font-variant-numeric: tabular-nums; \}/.test(read('public/chat.css')));
   for (const f of ['src/lib/i18n-zh.js', 'src/lib/i18n-ja.js']) {
     const d = read(f);
-    const keys = ['"Sub-agent traffic":', '"{n} message":', '"{n} agent":', '"{n} sub-agent":', '"last {age} ago":', '"over {span}":', '"{n}s":', '"{m} min {s} s":', '"{s} s":', '"Sub-agents working — {msgs}":', '"Sub-agents working — {msgs}, last {age} ago":', '"record timestamp":', '"arrival time":'];
+    const keys = ['"Sub-agent traffic":', '"{n} message":', '"{n} agent":', '"{n} sub-agent":', '"last {age} ago":', '"over {span}":', '"{n}s":', '"{m} min {s} s":', '"{s} s":', '"Sub-agents working — {msgs} this turn":', '"Sub-agents working — {msgs} this turn, last {age} ago":', '"record timestamp":', '"arrival time":'];
     check(`${path.basename(f)} carries every new key`, keys.every((k) => d.includes(k)), keys.filter((k) => !d.includes(k)).join(' '));
   }
 }
@@ -326,12 +367,31 @@ process.stdin.on('data', (d) => {
     if (m.method === 'thread/queue/list') { send({ id: m.id, result: { data: [], nextCursor: null } }); continue; }
     if (m.method === 'turn/start') {
       const tid = 'turn-' + (++turns);
+      // KEYED ON THE INPUT TEXT, never on a turn counter: the wrapper may open
+      // a turn WE did not ask for (the stop-nudge bookkeeping turn fires at
+      // every turn end), and a counter-keyed stub then plays the wrong script
+      // into the wrong turn — which is exactly how the first version of leg ⑨
+      // sampled a burst it had not started.
+      const text = (m.params?.input || []).map((i) => (i && i.text) || '').join(' ');
       send({ id: m.id, result: { turn: { id: tid } } });
       note('turn/started', { turn: { id: tid } });
-      if (turns > 1) { setTimeout(() => note('turn/completed', { turn: { id: tid }, status: 'completed' }), 200); continue; }
-      // THE BURST: three phases the browser half samples between.
       const item = (o) => note('item/completed', { threadId: TID, turnId: tid, item: o });
       const mail = (id, who) => item({ type: 'agentMessage', id, text: BLOBLESS_ENV('/root/' + who) });
+      if (/second orchestration/.test(text)) {
+        // THE HIDDEN-WINDOW BURST (leg ⑨): THREE agents, so its head
+        // ("4 messages · 3 agents") can never be confused with turn 1's cards.
+        setTimeout(() => mail('bm-1', 'water_research'), 300);
+        setTimeout(() => mail('bm-2', 'energy_research'), 900);
+        setTimeout(() => mail('bm-3', 'solar_research'), 1500);
+        setTimeout(() => mail('bm-4', 'water_research'), 2100);
+        setTimeout(() => note('turn/completed', { turn: { id: tid }, status: 'completed' }), 3000);
+        continue;
+      }
+      if (!/orchestrate the research/.test(text)) {   // any other turn (a nudge): end it at once, script nothing
+        setTimeout(() => note('turn/completed', { turn: { id: tid }, status: 'completed' }), 200);
+        continue;
+      }
+      // THE BURST: three phases the browser half samples between.
       setTimeout(() => item({ type: 'subAgentActivity', id: 'sa-1', kind: 'started', agentThreadId: CHILD, agentPath: '/root/water_research' }), 300);
       setTimeout(() => mail('am-1', 'water_research'), 700);
       setTimeout(() => mail('am-2', 'energy_research'), 1100);
@@ -347,7 +407,9 @@ process.stdin.on('data', (d) => {
       }, 7000);
       // …and back to collab traffic
       setTimeout(() => mail('am-4', 'energy_research'), 9000);
-      setTimeout(() => note('turn/completed', { turn: { id: tid }, status: 'completed' }), 15000);
+      // …and the turn stays open long enough for the Stop-button legs to watch
+      // the label tick for several seconds (r2 BLOCKER) before the freeze legs.
+      setTimeout(() => note('turn/completed', { turn: { id: tid }, status: 'completed' }), 36000);
       continue;
     }
     send({ id: m.id, result: {} });
@@ -432,6 +494,8 @@ console.log('— ⑤ a stopped transcript shows FROZEN totals (read-only reload)
     opened?.head === 'Sub-agent traffic · 5 sub-agent events · 2 agents · over 4 min 12 s', opened?.head);
   check('the run header carries the same traffic (this is what a folded reader sees) and NO live age',
     /2 sub-agents · 5 sub-agent events/.test(opened?.header || '') && !/last \d+[sm] ago/.test(opened?.header || ''), opened?.header);
+  check('…and the clickable agent chips are a SEPARATE segment, not glued to the count (r2)',
+    /sub-agent events · water_research/.test(opened?.header || ''), opened?.header);
   const after = await (async () => { await sleep(2600); return evaljs(`window.__frozen.querySelector('.chat-collab-head').textContent`); })();
   check('…and NOTHING ticks on a stopped transcript (same text 2.6s later)', after === opened?.head, `${opened?.head} → ${after}`);
   const blobHit = await evaljs(`(() => { const h = document.body.innerHTML; return h.indexOf(${JSON.stringify(BLOB)}); })()`);
@@ -499,7 +563,7 @@ console.log('— ⑥ a LIVE turn: the head grows, the age ticks, the label switc
   const p1 = await probe();
   check('the head names the traffic with a LIVE age while the turn streams', /^Sub-agent traffic · 4 sub-agent events · 2 agents · last \d+s ago$/.test(p1.head || ''), p1.head);
   check('the run header carries the same live traffic (what a folded reader sees)', /2 sub-agents · 4 sub-agent events · last \d+s ago/.test(p1.header || ''), p1.header);
-  check('the spinner line switched to the sub-agents form', /^Sub-agents working — 4 sub-agent events, last \d+s ago$/.test(p1.label || ''), p1.label);
+  check('the spinner line switched to the sub-agents form (naming its TURN scope)', /^Sub-agents working — 4 sub-agent events this turn, last \d+s ago$/.test(p1.label || ''), p1.label);
   check('one ticker is running for this view', p1.ticking === true && !!p1.liveId);
 
   // ── the AGE ticks with no new rows ──
@@ -547,11 +611,61 @@ console.log('— ⑥ a LIVE turn: the head grows, the age ticks, the label switc
     if (/Sub-agents working/.test(p.label || '')) { back = p; break; }
     await sleep(300);
   }
-  check('…and switches BACK when the next collab record lands', !!back && /Sub-agents working — 5 sub-agent events/.test(back.label || ''), JSON.stringify(back));
+  check('…and switches BACK when the next collab record lands', !!back && /Sub-agents working — 5 sub-agent events this turn/.test(back.label || ''), JSON.stringify(back));
+
+  // ── ⑧ r2 BLOCKER: the Stop button must SURVIVE the ticking label ─────────
+  // The label changes every second (the age), so the old "unchanged label"
+  // memo could never fire: showTyping rewrote .chat-stream-status innerHTML and
+  // rebuilt `.chat-interrupt-btn` once a second. A mousedown whose target is
+  // removed before mouseup fires `click` on the common ancestor — which has no
+  // handler — so the interrupt is lost with no toast and no log (measured 6/10
+  // trusted clicks delivered), and keyboard focus on Stop died within 1.4s.
+  // This is the exact moment the readout exists for: the user believes the turn
+  // is wedged and reaches for Stop.
+  console.log('— ⑧ the Stop button survives the ticking label (node identity + ten TRUSTED clicks)');
+  const btnWatch = await evaljs(`(async () => {
+    const v = window.__live;
+    const status = v._container.querySelector('.chat-stream-status');
+    const btn0 = status.querySelector('.chat-interrupt-btn');
+    if (!btn0) return { ok: false, why: 'no Stop button on the line', html: status.innerHTML.slice(0, 200) };
+    btn0.__r2 = 'mark';
+    btn0.focus();
+    const same = [], labels = [];
+    for (let i = 0; i < 4; i++) {
+      await new Promise((r) => setTimeout(r, 1100));
+      const b = status.querySelector('.chat-interrupt-btn');
+      same.push(!!b && b === btn0 && b.__r2 === 'mark');
+      // read the WHOLE line minus the button, so this leg measures the age on
+      // either shape (a suite that can only read the fixed DOM proves nothing)
+      labels.push((status.textContent || '').replace(/\\s*■\\s*Stop\\s*$/, '').trim());
+    }
+    return { ok: true, same, labels, focused: document.activeElement === btn0 };
+  })()`);
+  check('the age advanced across the sampled ticks (the label really is being repainted)',
+    !!btnWatch?.ok && /Sub-agents working/.test(btnWatch.labels[0] || '') && btnWatch.labels[0] !== btnWatch.labels[btnWatch.labels.length - 1],
+    JSON.stringify(btnWatch));
+  check('…and the .chat-interrupt-btn NODE is unchanged across every tick (a text change never rebuilds the button)',
+    !!btnWatch?.ok && btnWatch.same.length === 4 && btnWatch.same.every(Boolean), JSON.stringify(btnWatch?.same));
+  check('…so keyboard focus on Stop survives the ticks (it used to be destroyed once a second)',
+    btnWatch?.focused === true, JSON.stringify(btnWatch?.focused));
+  await evaljs(`(() => { window.__stops = 0; window.__live._chatInput._onInterrupt = () => { window.__stops++; }; return true; })()`);
+  for (let i = 0; i < 10; i++) {
+    // re-read the rect every time: the button sits AFTER the label, so it
+    // shifts a few px as the age grows — a cached centre would start missing it
+    const r = await evaljs(`(() => { const b = window.__live._container.querySelector('.chat-stream-status .chat-interrupt-btn'); if (!b) return null; const q = b.getBoundingClientRect(); return { x: Math.round(q.left + q.width / 2), y: Math.round(q.top + q.height / 2) }; })()`);
+    if (!r) break;
+    await cdp('Input.dispatchMouseEvent', { type: 'mousePressed', x: r.x, y: r.y, button: 'left', buttons: 1, clickCount: 1 });
+    await sleep(280);
+    await cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', x: r.x, y: r.y, button: 'left', buttons: 0, clickCount: 1 });
+    await sleep(120);
+  }
+  const stops = await evaljs('window.__stops');
+  check('all ten TRUSTED Stop clicks reached the handler while the label ticked (a swallowed interrupt is a silent failure)',
+    stops === 10, `${stops}/10 delivered`);
 
   // ── turn end: everything FREEZES to the absolute span ──
   let frozen = null;
-  for (let i = 0; i < 80; i++) {
+  for (let i = 0; i < 160; i++) {
     const p = await probe();
     if (p.label === null && p.head && /over /.test(p.head)) { frozen = p; break; }
     await sleep(300);
@@ -565,6 +679,65 @@ console.log('— ⑥ a LIVE turn: the head grows, the age ticks, the label switc
   check('…and the run header froze with it (no live age left anywhere)', !!frozen && !/last \d+[sm] ago/.test(frozen.header || ''), frozen?.header);
   const still = await (async () => { await sleep(2600); return probe(); })();
   check('…and nothing moves afterwards (a finished turn must not read as progress)', still.head === frozen?.head, `${frozen?.head} → ${still.head}`);
+
+
+  // ── ⑨ r2 MAJOR: a burst that starts AND ends while the window is HIDDEN ──
+  // (the owner's own workflow: start an orchestration, switch desktop, come
+  // back). _tickCollab is a no-op while suspended, so the ticker never paints —
+  // but the RENDERER still paints every coalescing edit live. A freeze that
+  // depended on the ticker having painted left the card reading "last 0s ago"
+  // on a turn that ended minutes ago, contradicting the run header next to it.
+  console.log('— ⑨ a burst that runs entirely on a hidden window still freezes');
+  // Wait for a genuinely IDLE session first — the wrapper opens a bookkeeping
+  // nudge turn of its own at every turn end, and firing into it would have this
+  // leg sampling someone else's turn.
+  for (let i = 0; i < 60; i++) { if (await evaljs('!window.__live._typingSince') === true) break; await sleep(300); }
+  // The sampler is installed BEFORE the turn is fired: a loop started after the
+  // send races the burst (the first version of this leg did exactly that and
+  // read only the finished state — a negative control that proved nothing).
+  await evaljs(`(() => {
+    const v = window.__live, list = window.__liveList;
+    v.setSuspended(true);
+    window.__trail = []; window.__sawLive = false; window.__t0 = Date.now();
+    window.__sampler = setInterval(() => {
+      const h = [...list.querySelectorAll('.chat-collab-head')];
+      const own = h.filter((e) => /3 agents/.test(e.textContent));      // THIS leg's card (the burst has three agents)
+      const txt = own.length ? own[own.length - 1].textContent : '';
+      if (/last \\d+[sm] ago/.test(txt)) window.__sawLive = true;
+      const stamp = txt + ' |ts=' + (!!v._typingSince) + '|+' + (Date.now() - window.__t0) + 'ms';
+      if (window.__trail[window.__trail.length - 1] !== stamp) window.__trail.push(stamp);
+    }, 120);
+    return v._suspended;
+  })()`);
+  liveWs.send(JSON.stringify({ type: 'chat-input', sessionId: sid, text: 'second orchestration', msgId: 'live-m2' }));
+  let hidden = null;
+  for (let i = 0; i < 100; i++) {
+    hidden = await evaljs(`(() => {
+      const v = window.__live, list = window.__liveList;
+      const own = [...list.querySelectorAll('.chat-collab-head')].filter((e) => /3 agents/.test(e.textContent));
+      return {
+        suspended: v._suspended, found: own.length, streaming: !!v._typingSince, ticked: !!v._collabTimer,
+        sawLive: window.__sawLive, trail: window.__trail.slice(0, 3).concat(window.__trail.slice(-2)),
+        last: own.length ? own[own.length - 1].textContent : null,
+      };
+    })()`);
+    if (hidden?.found && hidden.streaming === false && hidden.sawLive) break;
+    await sleep(250);
+  }
+  await evaljs('clearInterval(window.__sampler), 1');
+  check('the second burst ran and its turn ENDED while the window was hidden, and the card WAS painted live meanwhile (the ticker never ran)',
+    hidden?.suspended === true && hidden?.found === 1 && hidden?.streaming === false && hidden?.sawLive === true && hidden?.ticked === false,
+    JSON.stringify(hidden));
+  check('…and it FROZE anyway: the absolute span, never a live age left on a finished turn',
+    /^Sub-agent traffic · 4 messages · 3 agents · over \d+ s$/.test(hidden?.last || ''), JSON.stringify(hidden?.last));
+  const resumed = await evaljs(`(async () => {
+    window.__live.setSuspended(false);
+    await new Promise((r) => setTimeout(r, 1400));
+    const own = [...window.__liveList.querySelectorAll('.chat-collab-head')].filter((e) => /3 agents/.test(e.textContent));
+    return { last: own.length ? own[own.length - 1].textContent : null, ticking: !!window.__live._collabTimer };
+  })()`);
+  check('…and it is still frozen after the desktop comes back (no ticker re-armed on a finished turn)',
+    /over \d+ s$/.test(resumed?.last || '') && resumed?.ticking === false, JSON.stringify(resumed));
 
   liveWs.send(JSON.stringify({ type: 'kill', sessionId: sid }));
   await sleep(500);

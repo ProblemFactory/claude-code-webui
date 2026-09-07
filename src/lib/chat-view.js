@@ -104,6 +104,11 @@ class ChatView {
     this._canPaginate = !sessionId.startsWith('sub-');
     this._messages = []; // normalized message objects
     this._elements = new Map(); // msg.id → DOM element
+    // Cards whose head was PAINTED with a live age (2026-09-07 r2). The ticker
+    // alone cannot know them: a burst that runs while the window is hidden
+    // never ticks, yet the renderer still paints each coalescing edit live —
+    // so the SET is what gets frozen at turn end, not the ticker's last card.
+    this._liveHeadIds = new Set();
     this._pinned = true; // auto-scroll to bottom
     this._renderedMsgIds = new Set(); // dedup by msgId
     // Desktop-resume settle window (inc-mtq5bpjt-0o0n): while a just-shown
@@ -300,7 +305,7 @@ class ChatView {
       getQueueCaps: () => this._queueCaps(),
       // live sub-agent traffic (2026-09-07): only the view knows whether a
       // collab card is still the one the next row lands in on a live turn
-      isCollabLive: (msg) => this._liveCollabId() === msg?.id,
+      isCollabLive: (msg) => this._noteCollabHeadPainted(msg?.id, this._liveCollabId() === msg?.id),
     });
 
     // Position indicator (shows when not at bottom, e.g. "120-170 / 3000")
@@ -2863,16 +2868,13 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
     if (this._suspended) return;
     const liveId = this._liveCollabId();
     const now = Date.now();
-    // (a) the card that stopped being live must be FROZEN once — it keeps its
-    // last age forever otherwise, which reads as "still going"
-    if (this._tickedCollabId && this._tickedCollabId !== liveId) {
-      this._paintCollabHead(this._tickedCollabId, false, now);
-      this._tickedCollabId = null;
-    }
-    if (liveId) {
-      this._tickedCollabId = liveId;
-      this._paintCollabHead(liveId, true, now);
-    }
+    // (a) EVERY card that stopped being live must be FROZEN once — it keeps
+    // its last age forever otherwise, which reads as "still going". The set is
+    // the authority (not "the card this ticker last painted"): rows that
+    // landed while the window was hidden were painted live by the renderer
+    // with no tick in between.
+    this._freezeStaleHeads(liveId, now);
+    if (liveId) this._paintCollabHead(liveId, true, now);
     // (b) the run header / footer / floating bar segment
     this._paintRunCollab(liveId, now);
     // (c) the spinner line
@@ -2880,15 +2882,46 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
     if (!liveId) this._stopCollabTick();
   }
 
+  /**
+   * Remember whether a card's head was rendered with a LIVE age. Called from
+   * the renderer's `isCollabLive` hook (it returns the answer through) and
+   * from every paint below, so the set always names exactly the cards that
+   * still owe a freeze — including the ones no tick ever touched.
+   *
+   * The set is created LAZILY here and read optionally below because this
+   * class is deliberately DOM-free at import and its guards are unit-tested on
+   * prototype-only views (`Object.create(ChatView.prototype)`, test-chat-trim-
+   * guard) whose constructor never ran: setSuspended(false) → _tickCollab on
+   * such a view must not throw, or the whole resume suite dies at import time.
+   */
+  _noteCollabHeadPainted(id, live) {
+    if (id) {
+      const ids = (this._liveHeadIds ||= new Set());
+      if (live) ids.add(id); else ids.delete(id);
+    }
+    return live;
+  }
+
+  /**
+   * Freeze every head that was painted live and is not the live card any more.
+   * A card trimmed out of the render window simply leaves the set — there is
+   * no element left to freeze, and the next render composes the frozen form
+   * from the rows anyway.
+   */
+  _freezeStaleHeads(liveId, now) {
+    if (!this._liveHeadIds?.size) return;
+    for (const id of [...this._liveHeadIds]) if (id !== liveId) this._paintCollabHead(id, false, now);
+  }
+
   /** Rewrite one card's `.chat-collab-head` text (live age or frozen span). */
   _paintCollabHead(msgId, live, now) {
     const el = this._elements.get(msgId);
     const head = el?.querySelector?.('.chat-collab-head');
-    if (!head) return;
-    const msg = this._messages.find((m) => m.id === msgId);
-    if (!msg?.collab) return;
+    const msg = head ? this._messages.find((m) => m.id === msgId) : null;
+    if (!msg?.collab) { this._liveHeadIds?.delete(msgId); return; }
     const text = collabHeadText(collabTrafficStats(msg.collab), { now, live, t });
     if (head.textContent !== text) head.textContent = text;
+    this._noteCollabHeadPainted(msgId, live);
   }
 
   /**
@@ -2922,12 +2955,17 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
   _showTyping(label = t('thinking...'), kind = null) {
     this._typingSince = this._typingSince || Date.now(); // watchdog arm
     if (this._chatInput) { this._chatInput.showTyping(label, kind); return; }
-    // readOnly fallback — same "unchanged label is a no-op" rule ChatInput
-    // applies, so a per-second repaint cannot churn the DOM
+    // readOnly fallback — same shape as ChatInput's line (label in its own
+    // `.chat-stream-label`), so a ticking age is a textContent write and not a
+    // rebuild of the whole line once a second
     if (!this._streamStatus) return;
-    if (this._roTypingLabel === label && !this._streamStatus.classList.contains('hidden')) return;
+    const roLabel = this._streamStatus.querySelector('.chat-stream-label');
+    if (roLabel && !this._streamStatus.classList.contains('hidden')) {
+      if (this._roTypingLabel !== label) { roLabel.textContent = label; this._roTypingLabel = label; }
+      return;
+    }
     this._roTypingLabel = label;
-    this._streamStatus.innerHTML = `<span class="chat-spinner"></span> ${escHtml(label)}`;
+    this._streamStatus.innerHTML = `<span class="chat-spinner"></span> <span class="chat-stream-label">${escHtml(label)}</span>`;
     this._streamStatus.classList.remove('hidden');
   }
 
@@ -2945,13 +2983,25 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
     this._streamStatus.innerHTML = '';
   }
 
-  /** Stop ticking and repaint every live surface in its frozen form. */
+  /**
+   * Stop ticking and repaint every live surface in its frozen form.
+   *
+   * EVERY head that was painted live — never just the one the ticker happened
+   * to touch (2026-09-07 r2, reproduced 2/2): a burst that started AND ended
+   * while the window was hidden (desktop switch — start an orchestration,
+   * switch desktop, come back) never ran a single tick, because _tickCollab is
+   * a no-op while suspended; the renderer had still painted each coalescing
+   * edit with `live: true`, so the card sat on "last 0s ago" forever on a turn
+   * that ended minutes ago, contradicting the run header (whose liveness IS
+   * captured in the fold pass, which runs while hidden). A freeze that depends
+   * on the ticker having painted is not a freeze.
+   */
   _freezeCollab() {
     this._stopCollabTick();
     this._lastRecordCollab = false;
     this._collabLabelShown = false;
     const now = Date.now();
-    if (this._tickedCollabId) { this._paintCollabHead(this._tickedCollabId, false, now); this._tickedCollabId = null; }
+    this._freezeStaleHeads(null, now);
     this._paintRunCollab(null, now);
   }
 
@@ -4096,8 +4146,12 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
           // the label, so the floating run bar and the footer carry it too;
           // what stays here is the part a label cannot hold — the clickable
           // chips. Saying "3 sub-agents" twice on one line was the alternative.
+          // ` · ` before the chips (2026-09-07 r2): moving the count into the
+          // label dropped the colon that used to introduce the names, and the
+          // header read "2 sub-agent events water_research" as one phrase.
+          // The chips are a separate segment and must LOOK like one.
           const agentsHtml = agents.length
-            ? ` <span class="chat-run-agents">${agents.slice(0, 4).map((a) => `<span class="chat-collab-name" role="link" tabindex="0" data-agent-path="${escHtml(a.path)}"${a.threadId ? ` data-thread-id="${escHtml(a.threadId)}"` : ''}>${escHtml(a.name)}</span>`).join(', ')}${agents.length > 4 ? `, +${agents.length - 4}` : ''}</span>`
+            ? `${label ? ' · ' : ' '}<span class="chat-run-agents">${agents.slice(0, 4).map((a) => `<span class="chat-collab-name" role="link" tabindex="0" data-agent-path="${escHtml(a.path)}"${a.threadId ? ` data-thread-id="${escHtml(a.threadId)}"` : ''}>${escHtml(a.name)}</span>`).join(', ')}${agents.length > 4 ? `, +${agents.length - 4}` : ''}</span>`
             : '';
           header.innerHTML = `<span class="chat-run-arrow">▸</span><span class="chat-run-label">${escHtml(label)}</span>${agentsHtml}`;
           for (const nameEl of header.querySelectorAll('.chat-collab-name')) {
