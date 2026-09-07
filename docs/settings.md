@@ -147,9 +147,9 @@ Everything VibeSpace adds *into* your agent sessions lives here — and all of i
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `claude.defaultModel` | combobox | `''` | Default Claude model — dropdown aliases + "Custom..." for specific model IDs (e.g. claude-opus-4-6-20250414). Populated from `/api/available-models` (Claude `/v1/models`). |
+| `claude.defaultModel` | combobox | `''` | Default Claude model — dropdown aliases + "Custom..." for specific model IDs (e.g. claude-opus-4-6-20250414). Populated from `/api/available-models` (Claude `/v1/models`). **NEW sessions only (B-6b6d): a resumed conversation keeps its own value** — codex reads it back from the rollout’s last `turn_context`, claude from the transcript’s last assistant record; a per-session override (card → Session parameters) still wins. |
 | `claude.defaultPermissionMode` | enum | `''` | Default Claude permission mode for new or resumed Claude sessions |
-| `claude.defaultEffort` | enum | `''` | Default Claude effort for new or resumed Claude sessions |
+| `claude.defaultEffort` | enum | `''` | Default Claude effort for NEW Claude sessions. Nothing claude writes records the effort a turn ran at, so a resume with no per-session pick commands **no** effort at all and the CLI's own config decides (B-6b6d) |
 | `claude.defaultExtraArgs` | text | `''` | Extra Claude CLI args appended when starting a Claude session |
 | `claude.disableModelFallback` | boolean | `false` | When safeguards flag a message, pause the turn instead of automatically switching models (CLI `switchModelsOnFlag:false` at spawn + `apply_flag_settings` to running chat sessions; `CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK=1` covers subagents of newly started sessions). A stopped turn shows a notice — rephrase and resend |
 | `claude.tuiRenderer` | enum | `''` (Auto) | TUI renderer for terminal-mode Claude sessions: Auto (CLI `/tui` preference), Fullscreen (flicker-free alt-screen, `CLAUDE_CODE_NO_FLICKER=1`), Classic (main screen) |
@@ -158,9 +158,9 @@ Everything VibeSpace adds *into* your agent sessions lives here — and all of i
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `codex.defaultModel` | combobox | `''` | Default Codex model — dropdown + "Custom..." for specific model IDs. Populated from ~/.codex/models_cache.json. |
+| `codex.defaultModel` | combobox | `''` | Default Codex model — dropdown + "Custom..." for specific model IDs. Populated from ~/.codex/models_cache.json. **NEW sessions only (B-6b6d): a resumed conversation keeps its own value** — codex reads it back from the rollout’s last `turn_context`, claude from the transcript’s last assistant record; a per-session override (card → Session parameters) still wins. |
 | `codex.defaultPermissionMode` | enum | `''` | Default Codex permission mode for new or resumed Codex sessions |
-| `codex.defaultEffort` | enum | `''` | Default Codex reasoning effort for new or resumed Codex sessions |
+| `codex.defaultEffort` | enum | `''` | Default Codex reasoning effort for NEW Codex sessions — a resumed thread keeps the effort its own last `turn_context` ran at (B-6b6d) |
 | `codex.defaultExtraArgs` | text | `''` | Extra Codex CLI args appended when starting a Codex session |
 
 ### Sidebar

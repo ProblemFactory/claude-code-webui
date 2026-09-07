@@ -49,7 +49,11 @@ const PURE = new Set(['src/plugin-manifest.js', 'src/account-pool-auto.js', 'src
   // login-session lifetime (2026-09-07): the claude harness descriptor reads the
   // credential file, this decides what the numbers MEAN; pool decisions + accounts
   // + the watcher all consume it, so it must stay dependency-free
-  'src/login-expiry.js']);
+  'src/login-expiry.js',
+  // THE RESUME LADDER (B-6b6d): "the conversation's own value wins on a resume,
+  // the instance default is a NEW-session default" — ONE decision for the spawn
+  // (ws-create) and for what the client is allowed to send (session-lifecycle).
+  'src/resume-continuity.js']);
 const SHARED = new Set(['src/discovery-facts.js', 'src/sysinfo.js', 'src/machine-probes.js', 'src/usage-walker.js',
   'src/transcript-service.js', 'src/ctx-sync.js', 'src/writer-sweep.js', 'src/remote-shell.js', 'src/account-material.js',
   // THE agent-CLI process identity, one rule in two spellings (B-3185 r3): the JS twin

@@ -74,6 +74,8 @@ const SESSION_FIELDS = {
   _apiKeySource:       { owner: 'stdout', persisted: 'meta',    note: "CLI's own init apiKeySource (billing truth)" },
   _effort:             { owner: 'ws',     persisted: 'meta',    note: 'effort the NEXT turn will run at; ws on a client pick, and (2.369.62) the codex stdout consumer from wrapper_meta.effortNext — a `/effort` typed into the chat used to leave this stale for the next resume' },
   _permissionMode:     { owner: 'ws',     persisted: 'meta',    note: 'launch/set permission mode (not in JSONL)' },
+  _modelOrigin:        { owner: 'ws',     persisted: 'meta',    note: "WHICH FACT the spawn's model came from (B-6b6d): 'chosen' (a pick for this session) | 'conversation' (its own last turn — codex turn_context / claude's last assistant record) | 'instance' (<prefix>.defaultModel) | 'harness' (nothing sent). Not derivable downstream: the conversation's own value and the instance default are frequently the same string" },
+  _effortOrigin:       { owner: 'ws',     persisted: 'meta',    note: "the effort twin of _modelOrigin (B-6b6d). claude has NO conversation source for effort, so a claude resume with no pick is 'harness' — the instance default is a NEW-session default. RE-AUTHORED after the spawn: ws set-effort ⇒ 'chosen'; the codex stdout consumer ⇒ 'conversation' when the wrapper reports a value we never commanded (it adopted the thread's), 'chosen' when it moves away from one we did" },
 
   // resume / fork
   _forkRequested:      { owner: 'ws',     persisted: null,      note: 'one-shot fork flag gating id adoption (2.156.1)' },

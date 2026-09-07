@@ -585,7 +585,7 @@ const SETTINGS_SCHEMA = {
       { value: 'haiku', label: 'haiku (latest)' },
     ], // dynamically updated from /api/available-models; Custom... allows typing full model IDs
     label: t('Default model'),
-    description: t('Select an alias or choose "Custom..." to type a specific model ID (e.g. claude-opus-4-6-20250414).'),
+    description: t('Select an alias or choose "Custom..." to type a specific model ID (e.g. claude-opus-4-6-20250414). Applies to NEW sessions: a resumed conversation keeps its own value (set one for a specific conversation under Session parameters on its card).'),
     category: t('Claude'), liveApply: true,
   },
   'claude.defaultPermissionMode': {
@@ -611,7 +611,7 @@ const SETTINGS_SCHEMA = {
       { value: 'max', label: t('Max') },
     ], // dynamically updated from claude --help; Custom... allows typing values like xhigh
     label: t('Default effort level'),
-    description: t('Select a level or choose "Custom..." to type any value (e.g. xhigh).'),
+    description: t('Select a level or choose "Custom..." to type any value (e.g. xhigh). Applies to NEW sessions: a resumed conversation keeps its own value (set one for a specific conversation under Session parameters on its card).'),
     category: t('Claude'), liveApply: true,
   },
   'claude.defaultExtraArgs': {
@@ -646,7 +646,7 @@ const SETTINGS_SCHEMA = {
       { value: 'gpt-6-astra', label: 'gpt-6-astra' },
     ],
     label: t('Default model'),
-    description: t('Select a known model or choose "Custom..." to type a specific model ID.'),
+    description: t('Select a known model or choose "Custom..." to type a specific model ID. Applies to NEW sessions: a resumed conversation keeps its own value (set one for a specific conversation under Session parameters on its card).'),
     category: t('Codex'), liveApply: true,
   },
   'codex.defaultPermissionMode': {
@@ -672,7 +672,7 @@ const SETTINGS_SCHEMA = {
       { value: 'xhigh', label: t('XHigh') },
     ],
     label: t('Default effort level'),
-    description: t('Default Codex reasoning effort for new or resumed Codex sessions.'),
+    description: t('Default Codex reasoning effort for NEW Codex sessions. A resumed conversation keeps the effort its own last turn ran at; set one for a specific conversation under Session parameters on its card.'),
     category: t('Codex'), liveApply: true,
   },
   'codex.defaultExtraArgs': {

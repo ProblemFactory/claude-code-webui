@@ -31,7 +31,15 @@ const CX = require(path.join(REPO, 'src/adapters/codex.js'));
 ok(CX.lastCodexTurnModel(TID) === 'gpt-6-astra', 'lastCodexTurnModel = the LAST turn_context model (prose mentions of other models are ignored)');
 ok(CX.lastCodexTurnModel('00000000-0000-4000-8000-000000000000') === null, 'unknown thread → null (resume falls back to the default)');
 const wc = read('src/ws-create.js');
-ok(/if \(!sessionSpec\.env\.CODEX_WEBUI_MODEL\) \{ try \{ const lm = lastCodexTurnModel\(data\.resumeId\); if \(lm\) sessionSpec\.env\.CODEX_WEBUI_MODEL = lm; \} catch \{ \} \}/.test(wc) && /findCodexSessionJsonlPath, lastCodexTurnModel/.test(wc), 'ws-create: a codex resume without an explicit model carries the last-run model (client choice still wins when sent)');
+// B-6b6d: the continuity fallback is no longer a codex-only env post-fill — it
+// is the shared ladder in src/resume-continuity.js reading the harness
+// descriptor's own store hook, which runs BEFORE buildSessionArgs (the claude
+// twin needed the same rung, and the post-fill was unreachable while the client
+// still filled the instance default into every resume).
+ok(require(path.join(REPO, 'src/harnesses/codex.js')).store.lastTurnModel(TID) === 'gpt-6-astra',
+  'the codex descriptor exposes the thread\'s own last model to the resume ladder');
+ok(/await pickKnob\(data\.model, hstore\.lastTurnModel, 'defaultModel'\)/.test(wc) && /require\('\.\/resume-continuity'\)/.test(wc),
+  'ws-create: a codex resume without an explicit model carries the last-run model (client choice still wins when sent)');
 const w = read('data/bin/codex-chat-wrapper.js');
 ok(/meta\.model = meta\.modelPinned \? \(meta\.model \|\| resp\?\.model \|\| thread\.model \|\| ''\) : \(resp\?\.model \|\| thread\.model \|\| meta\.model\);/.test(w) && /meta\.modelPinned = !!msg\.model;/.test(w) && /modelPinned: !!model,/.test(w), 'wrapper: a chosen model is pinned — thread/resume or thread/name/set responses never revert it to the thread START model');
 

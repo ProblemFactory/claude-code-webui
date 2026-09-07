@@ -1,0 +1,83 @@
+'use strict';
+// PURE resume-continuity ladder (B-6b6d, owner ruling 2026-09-07 on the known
+// residue of 2.369.62 "THE EFFORT A TURN RAN AT").
+//
+// THE RULE: **a conversation's OWN value wins on resume / fork / restart; the
+// instance default (`<prefix>.defaultModel` / `.defaultEffort`) is a NEW-session
+// default.** An explicit per-session pick (the card ⚙, Session Properties, the
+// New Session dialog's own pickers) still beats both.
+//
+// Why this exists as a module instead of two `||` chains at the spawn: before
+// it, the CLIENT filled the instance default into every create — including
+// resumes that carried no pick — so ws-create's continuity fallback
+// (`lastCodexTurnEffort`, the whole point of B-21e4 item 4) could never fire,
+// and a conversation the owner had set to `ultra` resumed at `xhigh`, with the
+// wrapper then synthesizing a `turn_context` that stated the wrong value on
+// every message of the session.
+//
+// TWO FACTS DECIDE, AND THEY ARE ASKED SEPARATELY:
+//   `resume`     — is this create a continuation at all (a resumeId rides it:
+//                  resume, fork, restart-in-place)?
+//   `hasSource`  — can THIS harness recover the knob from the conversation
+//                  itself? It is NOT declared twice: the caller derives it from
+//                  the harness descriptor's `store.lastTurn<Knob>` hook, so a
+//                  harness either ships the reader or it does not
+//                  (src/harnesses/*.js). codex has both (its rollout writes a
+//                  `turn_context` per turn); claude has the MODEL only (its
+//                  transcript names the model that SERVED each assistant
+//                  message, and nothing anywhere records the effort a claude
+//                  turn ran at — the CLI never reports it back).
+//
+// THE ASYMMETRY THAT FALLS OUT OF `hasSource`, stated because it looks like an
+// omission: on a knob with NO conversation source, a resume sends NOTHING
+// rather than the instance default. Falling back there would mean "the instance
+// default applies to every resume", which is the defect itself wearing a
+// fallback's clothes. With a source that came up EMPTY (a thread resumed before
+// its first turn) the instance default is honest — and the caller logs it.
+//
+// '' AND undefined BOTH MEAN "NO EXPLICIT CHOICE". They have to: the wire
+// carries `model: sessionModel || undefined`, so an explicitly-picked "Auto
+// (model default)" and an absent field are the same bytes by the time the
+// server sees them — and the per-session config store has always written ''
+// for "no override" (session-card.js). A pick of Auto on a resumed conversation
+// therefore restores the conversation's own value; the only way to command
+// "auto" for real is to change it inside the session.
+
+/** The vocabulary BOTH tiers speak (the client labels these strings in
+ *  src/lib/agent-meta.js; nothing else may invent one). */
+const SPAWN_ORIGINS = Object.freeze(['chosen', 'conversation', 'instance', 'harness']);
+
+/**
+ * Decide ONE spawn knob (model or effort) for ONE create.
+ * @param {object} a
+ * @param {string} [a.explicit]         the value the client sent for THIS session ('' / undefined = no pick)
+ * @param {string} [a.conversation]     the value read out of the conversation's own records ('' = none recorded)
+ * @param {string} [a.instanceDefault]  `<prefix>.default<Knob>` ('' = the setting is unset)
+ * @param {boolean} [a.resume]          this create continues an existing conversation (resume/fork/restart)
+ * @param {boolean} [a.hasSource]       this harness can read the knob back off the conversation
+ * @returns {{value: string, origin: 'chosen'|'conversation'|'instance'|'harness'}}
+ *          `value` '' = send nothing (the agent's own config decides).
+ */
+function resumeSpawnPick({ explicit, conversation, instanceDefault, resume, hasSource } = {}) {
+  const s = (v) => (v === undefined || v === null ? '' : String(v).trim());
+  const e = s(explicit), c = s(conversation), d = s(instanceDefault);
+  if (e) return { value: e, origin: 'chosen' };
+  if (!resume) return d ? { value: d, origin: 'instance' } : { value: '', origin: 'harness' };
+  if (c) return { value: c, origin: 'conversation' };
+  // A resume on a knob this harness cannot read back: the instance default is
+  // NOT a fallback here (see the asymmetry note above) — say nothing.
+  if (!hasSource) return { value: '', origin: 'harness' };
+  return d ? { value: d, origin: 'instance' } : { value: '', origin: 'harness' };
+}
+
+/** One line for the spawn log — a resume that quietly took the instance default
+ *  because the conversation recorded nothing must be READABLE afterwards (the
+ *  "no silent failures" rule applied to a decision rather than an error). */
+function continuityLogLine(backend, resumeId, picks) {
+  const bits = Object.entries(picks || {})
+    .map(([knob, p]) => `${knob}=${p && p.value ? p.value : '∅'}(${(p && p.origin) || '?'})`)
+    .join(' ');
+  return `[session] resume continuity ${backend} ${String(resumeId || '').slice(0, 8)}: ${bits}`;
+}
+
+module.exports = { resumeSpawnPick, continuityLogLine, SPAWN_ORIGINS };

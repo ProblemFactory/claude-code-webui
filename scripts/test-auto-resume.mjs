@@ -237,9 +237,11 @@ const T0 = Date.now();   // the module refuses waits >26h out, so the clock must
   // the attach path copied the payload into meta KEY BY KEY, a hand list that
   // silently lacked outputStyle/autoResume (the whitelist-drift class, fifth
   // strike): both attach-shaped call sites must pass the payload WHOLESALE.
-  ok("'created' carries the live style + auto-resume state (always, null = default)", /type: 'created'[\s\S]{0,1800}outputStyle: session\._outputStyle \|\| null[\s\S]{0,200}autoResume: autoResume\?\.statusFor\?\.\(id\) \|\| null/.test(read('src/ws-create.js')));
+  ok("'created' carries the live style + auto-resume state (always, null = default)", /type: 'created'[\s\S]{0,1800}outputStyle: session\._outputStyle \|\| null[\s\S]{0,900}autoResume: autoResume\?\.statusFor\?\.\(id\) \|\| null/.test(read('src/ws-create.js')));
+  ok("…and (B-6b6d) the effort this spawn RESOLVED to plus WHICH FACT it came from — on a resume the client sends none", /type: 'created'[\s\S]{0,2400}effort: session\._effort \|\| null,[\s\S]{0,200}spawnOrigin: \{ model: session\._modelOrigin/.test(read('src/ws-create.js')));
   const sl2 = read('src/lib/session-lifecycle.js');
-  ok('the created handler APPLIES it (HTTP history load has no meta)', /if \(sessionEffort\) chatView\.applyStatus[\s\S]{0,600}chatView\._applyLiveMeta\?\.\(msg\)/.test(sl2));
+  ok('the created handler APPLIES it (HTTP history load has no meta)', /if \(spawnedEffort\) chatView\.applyStatus[\s\S]{0,600}chatView\._applyLiveMeta\?\.\(msg\)/.test(sl2)
+    && /const spawnedEffort = \(msg\.effort !== undefined && msg\.effort !== null\) \? msg\.effort : sessionEffort;/.test(sl2));
   ok('the attach path passes the payload WHOLESALE, not a hand-copied key list', /chatView\.loadHistory\(msg\.messages, msg\.totalCount, msg\.isStreaming, msg\)/.test(sl2) && !/loadHistory\(msg\.messages, msg\.totalCount, msg\.isStreaming, { chatStatus: msg\.chatStatus, taskState/.test(sl2));
   ok('…and a zero-message attach still applies live state', /else {\s*\n\s*chatView\._applyLiveMeta\?\.\(msg\);/.test(sl2));
   ok('_fullViewReset passes the payload wholesale too', /this\.loadHistory\(msg\.messages \|\| \[\], msg\.totalCount \|\| 0, msg\.isStreaming, msg\)/.test(cv2));

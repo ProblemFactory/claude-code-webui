@@ -1,6 +1,6 @@
 import { escHtml, copyText, showConfirmDialog, taskGroupColor } from './utils.js';
 import { SESSION_STATE_META, SESSION_URGENCY_META } from './sidebar-tasks.js';
-import { getBackendMeta, getAgentKindMeta, getAgentRoleLabel, responseStyleCaps, responseStyleOrigin, composerSendModes, notificationDeliveryFor } from './agent-meta.js';
+import { getBackendMeta, getAgentKindMeta, getAgentRoleLabel, responseStyleCaps, responseStyleOrigin, spawnValueOrigin, effortDisplay, composerSendModes, notificationDeliveryFor } from './agent-meta.js';
 import { t } from './i18n.js';
 import { registerOpenAction } from './window-types.js';
 
@@ -55,13 +55,15 @@ export function openSessionProps(app, sessionRef, { syncId } = {}) {
       root.appendChild(el);
       return el;
     };
-    const row = (parent, label, valueHtml, { copy } = {}) => {
+    const row = (parent, label, valueHtml, { copy, wrap } = {}) => {
       const r = document.createElement('div');
       r.className = 'session-detail-row';
       r.innerHTML = `<span class="session-detail-label">${escHtml(label)}</span>`;
       const v = document.createElement('span');
       v.className = 'session-detail-value';
-      v.style.cssText = 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+      v.style.cssText = wrap
+        ? 'flex:1;min-width:0;white-space:normal;overflow-wrap:anywhere'
+        : 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
       v.innerHTML = valueHtml;
       if (copy) {
         v.classList.add('session-detail-copyable');
@@ -249,6 +251,44 @@ export function openSessionProps(app, sessionRef, { syncId } = {}) {
     const cfgSection = () => { if (!cfgSecMemo) cfgSecMemo = section(t('Config overrides')); return cfgSecMemo; };
     if (cfgSecMemo) row(cfgSecMemo, t('Saved'), escHtml(cfgBits.join(' · ')));
 
+    // ── Model + effort: the EFFECTIVE value and WHICH FACT it is (B-6b6d) ──
+    // The owner ruling: a resumed conversation keeps its OWN model/effort, and
+    // the instance default only applies to a NEW session. That makes "where did
+    // this value come from" a real question with four answers, and one the
+    // panel cannot work out for itself — the conversation's own value and the
+    // instance default are frequently the same string. So the SERVER states the
+    // origin at spawn (src/resume-continuity.js) and it rides the session
+    // record; `spawnValueOrigin` only decides how to show it, and still flips to
+    // 'spawn' when a pick saved afterwards disagrees with the live value, so the
+    // origin can never contradict the "(saved: …)" note next to it.
+    const ORIGIN_LABEL = {
+      chosen: () => t('your choice for this session'),
+      conversation: () => t('this conversation\u2019s own value'),
+      instance: () => t('instance default'),
+      spawn: () => t('what this session started with'),
+      saved: () => t('saved \u2014 applies on the next resume'),
+      harness: () => t('harness default \u2014 the agent\u2019s own config decides'),
+    };
+    {
+      const originRow = (label, live, picked, stated, render) => {
+        const shown = live || (picked || '');
+        if (!shown) return;   // nothing commanded and nothing picked: no row rather than an empty claim
+        const origin = ORIGIN_LABEL[spawnValueOrigin(stated, live, picked)]();
+        const pendBit = (live && picked !== undefined && (picked || '') !== live)
+          ? ` <span class="chat-status-dim">${escHtml(t('(saved: {v} \u2014 applies on the next resume)', { v: picked || t('agent default') }))}</span>` : '';
+        row(cfgSection(), label,
+          `${escHtml(render ? render(shown) : shown)} <span class="chat-status-dim">${escHtml('(' + origin + ')')}</span>${pendBit}`,
+          // an origin row states TWO facts; the second must not be the one the
+          // ellipsis eats (375x667: it is the last thing on the line)
+          { wrap: true });
+      };
+      originRow(t('Model'), s.spawnModel || '', cfg.model, s.modelOrigin);
+      if (getBackendMeta(s.backend || 'claude')?.caps?.effort !== false) {
+        originRow(t('Effort'), s.effort || '', cfg.effort, s.effortOrigin,
+          (v) => effortDisplay(s.backend || 'claude', v, { model: s.spawnModel || '' }));
+      }
+    }
+
     // ── Response style, EFFECTIVE + its ORIGIN (2.369.58) ──
     // Two different facts, and the panel says which is which: `s.outputStyle`
     // is what the LIVE session actually runs with (server truth, null = no key
@@ -266,18 +306,14 @@ export function openSessionProps(app, sessionRef, { syncId } = {}) {
       // (2.369.58): with a live 'Explanatory' and a saved 'Concise' the old
       // rule called the live value "your choice for this session" while the
       // note beside it said the choice had not landed yet.
-      const ORIGIN_LABEL = {
-        chosen: () => t('your choice for this session'),
-        instance: () => t('instance default'),
-        spawn: () => t('what this session started with'),
-        saved: () => t('saved \u2014 applies on the next resume'),
-        harness: () => t('harness default \u2014 the agent\u2019s own config decides'),
-      };
+      // ONE label map for all three rows (above) — a second copy is how the
+      // same fact starts being worded two ways in one panel.
       const origin = ORIGIN_LABEL[responseStyleOrigin(live, picked)]();
       const pendBit = (live && picked !== undefined && (picked || '') !== live)
         ? ` <span class="chat-status-dim">${escHtml(t('(saved: {v} \u2014 applies on the next resume)', { v: picked || t('agent default') }))}</span>` : '';
       row(cfgSection(), t('Response style'),
-        `${escHtml(shown || t('agent default'))} <span class="chat-status-dim">${escHtml('(' + origin + ')')}</span>${pendBit}`);
+        `${escHtml(shown || t('agent default'))} <span class="chat-status-dim">${escHtml('(' + origin + ')')}</span>${pendBit}`,
+        { wrap: true });   // same family, same reason
     }
 
     // ── What a send DURING a running turn does here (2026-09-07) ──

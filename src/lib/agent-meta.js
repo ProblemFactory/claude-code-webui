@@ -274,6 +274,30 @@ export function responseStyleOrigin(live, picked) {
   return p ? 'saved' : 'harness';
 }
 
+/** PURE: WHICH FACT is the model/effort a panel is showing? Same question as
+ *  responseStyleOrigin, one rung more honest — for these two knobs the answer
+ *  cannot be DERIVED from the values at all: a conversation's own last value
+ *  and the instance default are frequently the same string, and only the server
+ *  ever read the conversation's records. So the SERVER states it at spawn (the
+ *  ladder in src/resume-continuity.js) and rides it on the session record /
+ *  'created' reply as 'chosen' | 'conversation' | 'instance' | 'harness'
+ *  (B-6b6d), and this helper only decides how to SHOW it:
+ *    · a pick saved AFTER the spawn that differs from the live value is
+ *      'spawn' — the same rule responseStyleOrigin's r2 review imposed, so the
+ *      origin and the "(saved: X — applies on the next resume)" note beside it
+ *      can never contradict each other;
+ *    · a session that predates the field (`stated` null/undefined — every
+ *      session restored from an older session-meta) falls back to
+ *      responseStyleOrigin's COMPARISON rather than claiming a fact we do not
+ *      have. */
+export function spawnValueOrigin(stated, live, picked) {
+  const l = live || '';
+  const p = picked === undefined ? undefined : (picked || '');
+  if (l && p !== undefined && p && p !== l) return 'spawn';
+  if (stated === 'chosen' || stated === 'conversation' || stated === 'instance' || stated === 'harness') return stated;
+  return responseStyleOrigin(live, picked);
+}
+
 export function settingsPrefixFor(backend) {
   const b = backend || 'claude';
   return BACKEND_META[b]?.settingsPrefix ?? b;

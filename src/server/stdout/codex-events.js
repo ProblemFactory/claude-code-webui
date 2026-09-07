@@ -78,6 +78,15 @@ function create({ engine, deliverRef }) {
           if (msg.type === 'wrapper_meta' && payload.effortNext !== undefined) {
             const nextEffort = payload.effortNext || null;
             if ((session._effort || null) !== nextEffort) {
+              // WHICH FACT this new value is (B-6b6d): if we had commanded
+              // nothing, the wrapper is reporting what the THREAD itself runs
+              // at (it adopted it on resume) — that is the conversation's own
+              // value. If it moves away from a value we DID command, someone
+              // changed it inside the session (`/effort` in the chat, another
+              // client's picker) — that is a choice for this session. The panel
+              // must never keep calling a hand-changed value "the conversation's
+              // own" (the contradiction 2.369.58's r2 review removed).
+              session._effortOrigin = (session._effort || null) === null ? 'conversation' : 'chosen';
               session._effort = nextEffort;
               changed = true;
             }

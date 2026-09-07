@@ -2,7 +2,7 @@
 // Codex harness descriptor (S1).
 const { BACKEND_CAPS } = require('../backend-caps');
 const { CodexAdapter } = require('../adapters/codex');
-const { findCodexSessionJsonlPath, extractCodexThreadMeta } = require('../adapters/codex');
+const { findCodexSessionJsonlPath, extractCodexThreadMeta, lastCodexTurnModel, lastCodexTurnEffort } = require('../adapters/codex');
 const { CodexMessageManager } = require('../codex-message-manager');
 const codexStore = require('../codex-session-store');
 const codexThreadRead = require('../codex-thread-read');
@@ -58,6 +58,15 @@ module.exports = {
     Reader: codexStore.CodexSessionMessages,
     createReader: (session, sessionId, opts) => new codexStore.CodexSessionMessages(session, sessionId, opts || {}),
     forkChain: (id) => { const p = findCodexSessionJsonlPath(id); return p ? (extractCodexThreadMeta(p).forkedFrom || []) : []; },
+    // RESUME CONTINUITY (B-6b6d): what this CONVERSATION last ran at, for a
+    // resume/fork carrying no explicit pick (src/resume-continuity.js states
+    // the ladder; the hook's PRESENCE is the declaration that this harness can
+    // answer, so there is no second boolean to drift). codex writes a
+    // `turn_context` per turn, so BOTH knobs are recoverable — the B-21e4
+    // continuity fallback, moved out of ws-create's codex branch and onto the
+    // descriptor where the claude twin could join it.
+    lastTurnModel: (id) => lastCodexTurnModel(id),
+    lastTurnEffort: (id) => lastCodexTurnEffort(id),
     // (id, wrapperChain) → [{ id, untilOrdinal|null }] oldest→newest: the wrapper
     // chain ∪ codex's own 0.153 fork parents cut at their boundary ordinal —
     // what the read-only view prepends (codex-session-store.resolveCodexForkAncestry)

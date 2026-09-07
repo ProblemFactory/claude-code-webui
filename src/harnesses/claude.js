@@ -63,6 +63,15 @@ module.exports = {
   store: {
     discover: store.discoverClaudeSessions,        // async ({activeSessions, webuiPids, devSnap}) → session entries
     locate: (id, cwd) => store.findSessionJsonlPath(id, cwd), // (sessionId, cwd) → path|null
+    // RESUME CONTINUITY (B-6b6d): the value this CONVERSATION last ran at, for
+    // a resume/fork that carries no explicit pick (src/resume-continuity.js).
+    // The hook's PRESENCE is the declaration that this harness can answer —
+    // there is deliberately no second `resumeContinuity` boolean to drift.
+    // MODEL only: every assistant record names the model that served it, while
+    // NOTHING claude writes records the effort a turn ran at (no lastTurnEffort
+    // here ⇒ a claude resume with no pick commands no effort at all and the
+    // CLI's own config decides — never the instance default).
+    lastTurnModel: (id, cwd) => store.lastClaudeTurnModel(id, cwd),
     locateTranscript: store.findSessionJsonlPath,   // (sessionId, cwd) → path|null (S1 alias)
     warmTranscript: store.warmSessionJsonlAsync,   // worker-side parse cache
     Reader: store.SessionMessages,

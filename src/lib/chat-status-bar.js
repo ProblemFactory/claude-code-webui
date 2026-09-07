@@ -166,6 +166,16 @@ export class ChatStatusBar {
     this.render();
   }
 
+  /** WHICH FACT the spawn's model/effort came from (B-6b6d) — server-stated at
+   *  create/attach ({model, effort} of 'chosen'|'conversation'|'instance'|
+   *  'harness'), never derived here. Carries-the-key guarded like every other
+   *  live-meta setter: a payload that says nothing must not erase what we knew. */
+  setSpawnOrigin(o) {
+    if (!o || typeof o !== 'object') return;
+    this._spawnOrigin = { model: o.model || null, effort: o.effort || null };
+    this.render();
+  }
+
   updateTask(taskInfo, toolCallId, content) {
     if (!this._activeTasks) this._activeTasks = new Map();
     if (taskInfo.status !== 'running') {
@@ -386,8 +396,18 @@ export class ChatStatusBar {
       // not a turn is running (this bar has no streaming flag): a pick applies
       // from the NEXT turn, so the previous value stays in effect until one
       // starts — that is the same sentence in both states.
+      // WHERE the value came from (B-6b6d), stated by the server at spawn —
+      // 'conversation' is the whole point of the resume ladder and is invisible
+      // otherwise (the conversation's own value and the instance default are
+      // frequently the same string, so the chip alone cannot tell you).
+      const eOriginLine = {
+        conversation: () => t('Carried over from this conversation\u2019s last turn (the instance default applies to new sessions only)'),
+        instance: () => t('From the instance default \u2014 this conversation had no recorded value'),
+        harness: () => t('Not set by VibeSpace \u2014 the agent\u2019s own config decides'),
+      }[(this._spawnOrigin && this._spawnOrigin.effort) || ''];
       const eFull = (eShown && eShown !== this._statusEffort ? eShown + ' · ' : '') + eTitle
-        + (eLive ? '\n' + t('{effort} is still in effect until the next turn starts', { effort: eLive }) : '');
+        + (eLive ? '\n' + t('{effort} is still in effect until the next turn starts', { effort: eLive }) : '')
+        + (eOriginLine ? '\n' + eOriginLine() : '');
       parts.push(`<span class="chat-status-effort chat-status-clickable${eKnown ? '' : ' chat-status-dim'}" title="${escHtml(eFull)}">${eKnown ? escHtml(this._statusEffort) : t('effort: ?')}</span>`);
     }
 
@@ -1033,6 +1053,11 @@ export class ChatStatusBar {
         // Optimistic — claude never reports effort back (apply_flag_settings is
         // success-blind); codex confirms via turn_context on the next turn.
         this._statusEffort = effort || '';
+        // …and the ORIGIN is now this pick (B-6b6d). The server re-authors it
+        // too (ws set-effort), but the tooltip must not keep saying "carried
+        // over from this conversation's last turn" about a value the user just
+        // changed by hand — the same client/server pair as the chip value.
+        this._spawnOrigin = { ...(this._spawnOrigin || {}), effort: 'chosen' };
         this.render();
       };
       const addItems = (levels) => {

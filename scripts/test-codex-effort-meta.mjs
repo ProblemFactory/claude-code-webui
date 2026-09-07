@@ -467,11 +467,17 @@ console.log('— ⑦ the WRITER: the wrapper\'s effort reaches session-meta, so 
   handlers.data(J({ type: 'wrapper_meta', payload: { threadId: 'th-w', model: 'gpt-6-astra', permissionMode: 'yolo', effort: 'ultra', effortNext: 'ultra' } }));
   const metaOnDisk = () => { try { return JSON.parse(fs.readFileSync(path.join(META_DIR, 'cw-eff.json'), 'utf8')); } catch { return null; } };
   ok(sess._effort === 'ultra', 'the wrapper\'s own effort moves session._effort (it used to move only on a CLIENT click)', String(sess._effort));
+  // B-6b6d: WHICH FACT that value is. We commanded nothing (no CODEX_WEBUI_EFFORT
+  // on this bench), so the wrapper is reporting what the THREAD itself runs at.
+  ok(sess._effortOrigin === 'conversation',
+    '…and with nothing commanded, the value the wrapper adopted from the thread is stated as the CONVERSATION\'s own', String(sess._effortOrigin));
   ok(metaOnDisk()?.effort === 'ultra', '…and is PERSISTED to session-meta — the value a resume spawns with', JSON.stringify(metaOnDisk()?.effort));
   // an effort typed as `/effort` inside the chat takes the same road
   handlers.data(J({ type: 'wrapper_meta', payload: { threadId: 'th-w', model: 'gpt-6-astra', permissionMode: 'yolo', effort: 'ultra', effortNext: 'high' } }));
   ok(sess._effort === 'high' && metaOnDisk()?.effort === 'high',
     'a later pending pick (a `/effort` typed into the chat) follows the same road', JSON.stringify({ s: sess._effort, d: metaOnDisk()?.effort }));
+  ok(sess._effortOrigin === 'chosen',
+    '…and moving AWAY from a value we already knew is a choice made inside the session, not the conversation\'s own (B-6b6d)', String(sess._effortOrigin));
   // ── r2 review: `effortNext: null` is a STATEMENT, not a gap ──
   // Picking "Auto (model default)" clears the pick: the wrapper sends
   // thread/settings/update {effort:null}, the thread's effort goes away, and it
@@ -504,7 +510,11 @@ console.log('— ⑧ spawn / restore wiring pins (the saved effort must REACH th
   const wsCreate = fs.readFileSync(path.join(REPO, 'src/ws-create.js'), 'utf8');
   ok(/buildSessionArgs\(\{[\s\S]{0,900}?effort: data\.effort,/.test(wsCreate),
     'ws-create hands the session\'s effort to buildSessionArgs on EVERY create (resume included)');
-  ok(/if \(!sessionSpec\.env\.CODEX_WEBUI_EFFORT\).*lastCodexTurnEffort\(data\.resumeId\)/.test(wsCreate),
+  // B-6b6d: with none supplied the fallback still runs — as the shared ladder
+  // one step earlier (leg ⑪ measures it end to end), not as a codex-only env
+  // post-fill whose `env is empty` test the client had made unreachable.
+  ok(/await pickKnob\(data\.effort, hstore\.lastTurnEffort, 'defaultEffort'\)/.test(wsCreate)
+    && /const conversation = e \? '' : await fromConversation\(hook\);/.test(wsCreate),
     'and with none supplied, the resume falls back to the thread\'s OWN last turn effort (B-21e4 continuity)');
   const adapter = fs.readFileSync(path.join(REPO, 'src/adapters/codex.js'), 'utf8');
   ok(/CODEX_WEBUI_EFFORT/.test(adapter), 'the codex adapter is what turns that into the wrapper\'s env');
@@ -616,40 +626,291 @@ console.log('— ⑩ version marker');
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// ⑪ THE DISCLOSED GAP HAS AN OWNER, AND ITS TWIN CANNOT DRIFT.
-// Task item (3) — "the conversation's saved effort must reach the wrapper on a
-// resume" — is only HALF done, and deliberately so: ws-create's B-21e4
-// continuity fallback exists, but the client sends the INSTANCE DEFAULT as
-// `data.effort` whenever a resume path supplies nothing, which suppresses it.
-// Flipping that priority is a product-default decision (owner gate), so what
-// this suite does is make the gap immovable-in-silence: both twins pinned (a
-// fix that touches effort but not model fails), and the kb paragraph must name
-// the backlog id that carries the decision.
-console.log('— ⑪ the resume-vs-instance-default gap is PINNED to a backlog id (owner gate)');
+// ⑪ THE RESUME LADDER: A CONVERSATION KEEPS ITS OWN EFFORT/MODEL (B-6b6d).
+// This leg used to PIN the gap (the client filled `codex.defaultEffort` into
+// every resume, which suppressed ws-create's B-21e4 continuity fallback and
+// resumed an `ultra` conversation at `xhigh`). The owner ruled on 2026-09-07:
+// the instance default is a NEW-session default; a resume/fork/restart takes
+// the conversation's OWN value; an explicit per-session pick still wins. The
+// leg now measures the fixed ladder end to end — rollout → harness descriptor
+// → the PURE ladder → the adapter's env → the REAL wrapper's first
+// turn_context → the REAL normalizer's per-message meta.
+console.log('— ⑪ the resume ladder (B-6b6d): the conversation\'s own value wins, the instance default is for NEW sessions');
+const { resumeSpawnPick } = require(path.join(REPO, 'src/resume-continuity.js'));
+{
+  const pick = (a) => { const r = resumeSpawnPick(a); return r.value + '/' + r.origin; };
+  ok(pick({ explicit: 'xhigh', conversation: 'ultra', instanceDefault: 'medium', resume: true, hasSource: true }) === 'xhigh/chosen',
+    'an explicit per-session pick beats the conversation AND the default (the card ⚙ keeps working)', pick({ explicit: 'xhigh', conversation: 'ultra', instanceDefault: 'medium', resume: true, hasSource: true }));
+  ok(pick({ conversation: 'ultra', instanceDefault: 'xhigh', resume: true, hasSource: true }) === 'ultra/conversation',
+    'THE FIX: a resume that supplies nothing takes the conversation\'s own value, not codex.defaultEffort');
+  ok(pick({ conversation: '', instanceDefault: 'xhigh', resume: true, hasSource: true }) === 'xhigh/instance',
+    'a conversation with NOTHING recorded yet falls back to the instance default — honestly, and the caller logs it');
+  ok(pick({ instanceDefault: 'xhigh', resume: true, hasSource: false }) === '/harness',
+    'a knob this harness cannot read back (claude effort) sends NOTHING on a resume — an unconditional default there IS the defect');
+  ok(pick({ instanceDefault: 'xhigh', resume: false, hasSource: false }) === 'xhigh/instance'
+    && pick({ instanceDefault: 'xhigh', resume: false, hasSource: true }) === 'xhigh/instance',
+    'a NEW session still gets the instance default, source or no source');
+  ok(pick({ resume: false }) === '/harness' && pick({ resume: true, hasSource: true }) === '/harness',
+    'nothing anywhere = nothing sent (the agent\'s own config decides)');
+  ok(pick({ explicit: '', conversation: 'ultra', instanceDefault: 'xhigh', resume: true, hasSource: true }) === 'ultra/conversation',
+    "'' and undefined are the SAME no-pick: the wire carries `model || undefined`, so an explicit \"Auto\" and an absent field are identical bytes");
+}
+
+console.log('— ⑪b end-to-end: a rollout at ultra → descriptor → ladder → adapter env → the REAL wrapper');
+const _homeBefore = process.env.HOME, _codexHomeBefore = process.env.CODEX_HOME;
+{
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-b6b6d-home-'));
+  process.env.HOME = home; process.env.CODEX_HOME = path.join(home, '.codex');
+  const rdir = path.join(REPO, 'data', 'remote-jsonl', 'b6b6d-fixture', 'codex');
+  fs.mkdirSync(rdir, { recursive: true });
+  const TID = '01a072a3-0d70-78c3-9a90-a69a61e14466';
+  const rec = (o) => JSON.stringify(o) + '\n';
+  fs.writeFileSync(path.join(rdir, `${TID}.jsonl`), [
+    rec({ timestamp: '2026-09-06T20:33:00.000Z', type: 'session_meta', payload: { id: TID, cwd: '/w', originator: 'claude-code-webui' } }),
+    // the conversation ran at xhigh, then the owner set it to ultra
+    rec({ timestamp: '2026-09-06T20:33:10.000Z', type: 'turn_context', payload: { cwd: '/w', model: 'gpt-5.6-sol', effort: 'xhigh' } }),
+    rec({ timestamp: '2026-09-06T20:40:00.000Z', type: 'turn_context', payload: { cwd: '/w', model: 'gpt-6-astra', effort: 'ultra' } }),
+  ].join(''));
+
+  const hx = require(path.join(REPO, 'src/harnesses/codex.js'));
+  ok(hx.store.lastTurnEffort(TID) === 'ultra' && hx.store.lastTurnModel(TID) === 'gpt-6-astra',
+    'the codex DESCRIPTOR answers "what did this conversation last run at" (its presence IS the declaration — no second caps boolean to drift)',
+    JSON.stringify([hx.store.lastTurnEffort(TID), hx.store.lastTurnModel(TID)]));
+  ok(typeof hx.store.lastTurnModel === 'function' && typeof hx.store.lastTurnEffort === 'function',
+    'codex declares BOTH knobs (its rollout writes a turn_context per turn)');
+
+  // THE LADDER, exactly as ws-create composes it: no explicit value, resume,
+  // the instance default that caused the incident.
+  const ePick = resumeSpawnPick({ explicit: undefined, conversation: hx.store.lastTurnEffort(TID), instanceDefault: 'xhigh', resume: true, hasSource: true });
+  const mPick = resumeSpawnPick({ explicit: undefined, conversation: hx.store.lastTurnModel(TID), instanceDefault: 'gpt-5.6-sol', resume: true, hasSource: true });
+  ok(ePick.value === 'ultra' && ePick.origin === 'conversation' && mPick.value === 'gpt-6-astra',
+    'the ladder resolves BOTH twins off the rollout (STANDING SWEEP: effort and model move together)', JSON.stringify([ePick, mPick]));
+
+  const { CodexAdapter } = require(path.join(REPO, 'src/adapters/codex.js'));
+  const spec = new CodexAdapter().buildSessionArgs({ cwd: '/w', resumeId: TID, effort: ePick.value, model: mPick.value, mode: 'chat' });
+  ok(spec.env.CODEX_WEBUI_EFFORT === 'ultra' && spec.env.CODEX_WEBUI_MODEL === 'gpt-6-astra',
+    'the adapter turns the ladder\'s answer into the wrapper\'s env — the value that REACHES the agent', JSON.stringify([spec.env.CODEX_WEBUI_EFFORT, spec.env.CODEX_WEBUI_MODEL]));
+
+  // NEGATIVE CONTROL: master's client rule, replayed. It filled the instance
+  // default whenever a resume path supplied nothing, so the ladder never saw
+  // "nothing" and the conversation's own value could not win.
+  const preFixClient = (explicit, dflt) => (explicit !== undefined ? explicit : dflt);
+  const preFix = resumeSpawnPick({ explicit: preFixClient(undefined, 'xhigh'), conversation: 'ultra', instanceDefault: 'xhigh', resume: true, hasSource: true });
+  ok(preFix.value === 'xhigh' && preFix.origin === 'chosen',
+    'negative control: the PRE-FIX client sends xhigh, which the ladder can only read as an explicit choice — the incident, in one line', JSON.stringify(preFix));
+  ok(new CodexAdapter().buildSessionArgs({ cwd: '/w', resumeId: TID, effort: preFix.value, mode: 'chat' }).env.CODEX_WEBUI_EFFORT === 'xhigh',
+    '…and that is the env leg ② spawned the real wrapper with, whose FIRST turn_context said xhigh (the owner\'s report)');
+
+  // …and the REAL wrapper, spawned with the env the LADDER produced.
+  const d11 = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-cxeff-lad-'));
+  const buf11 = path.join(d11, 'sess-l.buf'), meta11 = path.join(d11, 'sess-l.json'), rpc11 = path.join(d11, 'rpc.jsonl');
+  const STUB11 = STUB.split(JSON.stringify(rpcLog)).join(JSON.stringify(rpc11)).split(JSON.stringify(dir)).join(JSON.stringify(d11));
+  const w11 = spawn(process.execPath, [path.join(REPO, 'data/bin/codex-chat-wrapper.js'), buf11, meta11, process.execPath, '-e', STUB11], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: {
+      ...process.env, CODEX_WEBUI_CWD: d11, VIBESPACE_API: '', VIBESPACE_SESSION_TOKEN: '', VIBESPACE_SKIP_AGENT_HOOKS: '1',
+      CODEX_WEBUI_RESUME_ID: 'th-eff',
+      // ← NOT hand-written: this is spec.env from the ladder above
+      CODEX_WEBUI_EFFORT: spec.env.CODEX_WEBUI_EFFORT, CODEX_WEBUI_MODEL: spec.env.CODEX_WEBUI_MODEL,
+    },
+  });
+  let out11 = ''; w11.stdout.on('data', (d) => { out11 += d; });
+  const ev11 = () => out11.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+  const meta11Read = () => { try { return JSON.parse(fs.readFileSync(meta11, 'utf8')); } catch { return null; } };
+  const wait11 = async (pred, ms = 8000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { if (pred()) return true; await sleep(60); } return pred(); };
+  ok(await wait11(() => meta11Read()?.threadId === 'th-eff'), 'the ladder-env bench resumed');
+  ok(await wait11(() => ev11().some((r) => r.type === 'turn_context')), 'it produced a turn_context');
+  const tcs11 = ev11().filter((r) => r.type === 'turn_context');
+  ok(tcs11[0]?.payload?.effort === 'ultra',
+    'THE FIX, end to end: the FIRST (provisional) turn_context already says ultra — there is no window in which a reader sees xhigh',
+    JSON.stringify(tcs11.map((r) => r.payload.effort)));
+  ok(tcs11.every((r) => r.payload.effort === 'ultra'), 'and every copy of it agrees', JSON.stringify(tcs11.map((r) => r.payload.effort)));
+  // through the REAL normalizer, fed ONLY up to that first record (the owner's
+  // 1137-line buffer had exactly one turn_context — that is the shape that must
+  // now be right, not just the corrected restatement)
+  {
+    const upToFirst = ev11().slice(0, ev11().findIndex((r) => r.type === 'turn_context') + 1);
+    const mm = new CodexMessageManager('b6b6d-1');
+    for (const r of [...upToFirst,
+      { type: 'response_item', payload: { type: 'message', item_id: 'it-l', role: 'assistant', content: [{ type: 'output_text', text: 'reply' }] } },
+      { type: 'event_msg', payload: { type: 'token_count', info: { last_token_usage: { totalTokens: 10, inputTokens: 8, cachedInputTokens: 0, outputTokens: 2 }, total_token_usage: { totalTokens: 110, inputTokens: 80, cachedInputTokens: 0, outputTokens: 20 }, model_context_window: 272000 } } },
+    ]) mm.processLive(r);
+    ok(mm.status().effort === 'ultra' && mm.messages.find((m) => m.role === 'assistant')?.meta?.effort === 'ultra',
+      'a buffer with ONE turn_context (the owner\'s shape) now stamps every message ultra', JSON.stringify([mm.status().effort, mm.messages.find((m) => m.role === 'assistant')?.meta?.effort]));
+  }
+  try { w11.stdin.end(); w11.kill(); } catch { }
+
+  // ── THE CLAUDE TWIN (task item 3): model from the transcript, effort NOWHERE
+  const store = require(path.join(REPO, 'src/session-store.js'));
+  const cdir = path.join(home, '.claude', 'projects', '-w'); fs.mkdirSync(cdir, { recursive: true });
+  const CID = '9f000000-0000-4000-8000-00000000abcd';
+  fs.writeFileSync(path.join(cdir, CID + '.jsonl'), [
+    rec({ type: 'assistant', uuid: 'a1', message: { model: 'claude-fable-5-20260101', content: [] } }),
+    rec({ type: 'assistant', uuid: 'a2', message: { model: 'claude-opus-5-20260514', content: [] } }),
+    // a SUBAGENT reply is usually the LAST record of a turn and may run another
+    // model — the main thread's model is what a resume continues
+    rec({ type: 'assistant', uuid: 'a3', isSidechain: true, parent_tool_use_id: 'toolu_1', message: { model: 'claude-haiku-4-5-20251001', content: [] } }),
+    // and the CLI's own "nothing served this" placeholder
+    rec({ type: 'assistant', uuid: 'a4', message: { model: '<synthetic>', content: [] } }),
+    rec({ type: 'user', uuid: 'u1', message: { role: 'user', content: 'hi' } }),
+  ].join(''));
+  const claudeModel = await store.lastClaudeTurnModel(CID, '/w');
+  ok(claudeModel === 'claude-opus-5-20260514',
+    'claude twin: the conversation\'s own last MAIN-THREAD served model, from a typed field (subagent + <synthetic> records skipped)', JSON.stringify(claudeModel));
+  ok(await store.lastClaudeTurnModel('00000000-0000-4000-8000-000000000000', '/w') === null,
+    'unknown conversation → null (the ladder then falls back to the instance default, logged)');
+  // A SAFETY-CLASSIFIER FALLBACK IS NOT A MODEL CHOICE: the CLI retries the
+  // flagged message on another model and says later messages go back. A
+  // conversation that ENDED on that retry must not be resumed pinned to the
+  // fallback — that would be a silent downgrade performed by the fix that
+  // exists to stop silent changes.
+  const FID = '9f000000-0000-4000-8000-00000000fbfb';
+  fs.writeFileSync(path.join(cdir, FID + '.jsonl'), [
+    rec({ type: 'assistant', uuid: 'b1', message: { model: 'claude-opus-5-20260514', content: [] } }),
+    rec({ type: 'user', uuid: 'b2', message: { role: 'user', content: 'something the classifier flags' } }),
+    // camelCase = the JSONL spelling of the same record (2.227.6 key-casing trap)
+    rec({ type: 'system', subtype: 'model_refusal_fallback', uuid: 'b3', originalModel: 'claude-opus-5-20260514', fallbackModel: 'claude-sonnet-5-20260101' }),
+    rec({ type: 'assistant', uuid: 'b4', message: { model: 'claude-sonnet-5-20260101', content: [] } }),
+  ].join(''));
+  ok(await store.lastClaudeTurnModel(FID, '/w') === 'claude-opus-5-20260514',
+    'a conversation that ended ON a classifier retry resumes on the model it switched FROM, not the fallback',
+    JSON.stringify(await store.lastClaudeTurnModel(FID, '/w')));
+  const SID2 = '9f000000-0000-4000-8000-00000000fbfc';
+  fs.writeFileSync(path.join(cdir, SID2 + '.jsonl'), [
+    rec({ type: 'system', subtype: 'model_refusal_fallback', uuid: 'c1', original_model: 'claude-opus-5-20260514', fallback_model: 'claude-sonnet-5-20260101' }),
+    rec({ type: 'assistant', uuid: 'c2', message: { model: 'claude-sonnet-5-20260101', content: [] } }),
+  ].join(''));
+  ok(await store.lastClaudeTurnModel(SID2, '/w') === 'claude-opus-5-20260514',
+    '…and the snake_case spelling of that record is read too (stdout vs JSONL)');
+  const SID3 = '9f000000-0000-4000-8000-00000000fbfd';
+  fs.writeFileSync(path.join(cdir, SID3 + '.jsonl'), [
+    // a fallback that names a DIFFERENT target must not rewrite this answer
+    rec({ type: 'system', subtype: 'model_refusal_fallback', uuid: 'd1', originalModel: 'claude-opus-5-20260514', fallbackModel: 'claude-haiku-4-5-20251001' }),
+    rec({ type: 'assistant', uuid: 'd2', message: { model: 'claude-sonnet-5-20260101', content: [] } }),
+  ].join(''));
+  ok(await store.lastClaudeTurnModel(SID3, '/w') === 'claude-sonnet-5-20260101',
+    'negative control: a fallback record about ANOTHER model leaves the served model alone');
+  const hc = require(path.join(REPO, 'src/harnesses/claude.js'));
+  ok(typeof hc.store.lastTurnModel === 'function' && await hc.store.lastTurnModel(CID, '/w') === 'claude-opus-5-20260514',
+    'the claude DESCRIPTOR exposes it — same hook name, so ws-create has no backend branch');
+  ok(hc.store.lastTurnEffort === undefined,
+    'THE ASYMMETRY: claude declares NO effort reader, because nothing claude writes records the effort a turn ran at');
+  ok(resumeSpawnPick({ conversation: '', instanceDefault: 'high', resume: true, hasSource: typeof hc.store.lastTurnEffort === 'function' }).value === '',
+    '…so a claude resume with no pick commands NO effort and the CLI\'s own config decides — never claude.defaultEffort');
+  ok(resumeSpawnPick({ instanceDefault: 'high', resume: false, hasSource: false }).value === 'high',
+    '…while a NEW claude session still gets claude.defaultEffort');
+  const { ClaudeCodeAdapter } = require(path.join(REPO, 'src/adapters/claude-code.js'));
+  const cArgs = new ClaudeCodeAdapter({}).buildSessionArgs({ cwd: '/w', resumeId: CID, model: claudeModel, mode: 'chat' });
+  ok(cArgs.args.join(' ').includes('--model claude-opus-5-20260514') && !cArgs.args.includes('--effort'),
+    'and the claude adapter passes the conversation\'s model explicitly, with no effort flag', JSON.stringify(cArgs.args));
+  try { fs.rmSync(path.join(REPO, 'data', 'remote-jsonl', 'b6b6d-fixture'), { recursive: true, force: true }); } catch { }
+}
+process.env.HOME = _homeBefore; if (_codexHomeBefore === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = _codexHomeBefore;
+
+console.log('— ⑪c WIRING: every resume/fork/restart entry point, and where the origin is stated');
 {
   const read = (f) => fs.readFileSync(path.join(REPO, f), 'utf8');
   const sl = read('src/lib/session-lifecycle.js');
-  ok(/const sessionEffort = effort !== undefined \? effort : defaults\.effort;/.test(sl),
-    'the gap is HERE: a resume that supplies nothing gets the instance default as its effort');
-  ok(/const sessionModel = model !== undefined \? model : defaults\.model;/.test(sl),
-    'STANDING SWEEP: the MODEL twin is the same line — a fix must move both or neither');
-  ok(/effort: effort !== undefined \? effort : savedCfg\.effort,/.test(sl) && /model: model !== undefined \? model : savedCfg\.model,/.test(sl),
-    'the per-session override path (session card gear) DOES carry the conversation\'s own values — the gap is only "supplied nothing"');
-  const wsCreate = read('src/ws-create.js');
-  ok(/if \(!sessionSpec\.env\.CODEX_WEBUI_MODEL\).*lastCodexTurnModel\(data\.resumeId\)/.test(wsCreate),
-    'and both continuity fallbacks are gated the same way (model twin of the ⑧ pin)');
-  // FUNCTIONAL negative control: the fallback is reachable exactly when the
-  // client sends no value, and dead exactly when it sends one. That is the
-  // whole mechanism, measured on the real adapter rather than asserted in prose.
-  const { CodexAdapter } = require(path.join(REPO, 'src/adapters/codex.js'));
-  const envFor = (effort) => new CodexAdapter().buildSessionArgs({ cwd: '/w', resumeId: 'th-z', effort, mode: 'chat' }).env.CODEX_WEBUI_EFFORT;
-  ok(!envFor('') && !envFor(undefined), 'no value ⇒ empty CODEX_WEBUI_EFFORT ⇒ ws-create\'s continuity fallback RUNS', JSON.stringify([envFor(''), envFor(undefined)]));
-  ok(envFor('xhigh') === 'xhigh', 'a value (incl. the instance default) ⇒ the fallback is skipped — the gap, reproduced in one line', JSON.stringify(envFor('xhigh')));
-  // the decision is filed, not just narrated
+  // (1) the client half is the SAME pure rule, and it can no longer fill a default on a continuation
+  ok(/import \{ resumeSpawnPick \} from '\.\.\/resume-continuity\.js';/.test(sl),
+    'the client spawns by the same PURE ladder as the server (one law, two callers)');
+  ok(/const continuesConversation = !!resumeId;/.test(sl)
+    && /const sessionModel = pickHere\(model, defaults\.model\);/.test(sl)
+    && /const sessionEffort = pickHere\(effort, defaults\.effort\);/.test(sl)
+    && /resume: continuesConversation, hasSource: false/.test(sl),
+    'createSession: BOTH twins go through it, and the client declares it cannot read the conversation (hasSource:false)');
+  ok(!/const sessionEffort = effort !== undefined \? effort : defaults\.effort;/.test(sl)
+    && !/const sessionModel = model !== undefined \? model : defaults\.model;/.test(sl),
+    'the pre-fix expression is GONE from both twins (this is the line the owner\'s incident traced to)');
+  // (2) every entry point that continues a conversation funnels through it
+  ok(/resumeSession\(sessionId, cwd, sessionName, \{ mode, model, effort/.test(sl)
+    && /effort: effort !== undefined \? effort : savedCfg\.effort,/.test(sl)
+    && /model: model !== undefined \? model : savedCfg\.model,/.test(sl),
+    'resumeSession still forwards an EXPLICIT pick (caller > the card ⚙ override) — the "chosen" rung',
+    'resumeSession');
+  ok(/_doForkSession[\s\S]{0,2000}?resumeId,[\s\S]{0,400}?fork: true,/.test(sl),
+    'a FORK carries resumeId → it is a continuation, so it inherits the parent conversation\'s values');
+  ok(/restartConversationInPlace[\s\S]{0,1200}?this\.resumeSession\(cid,/.test(sl),
+    'restartConversationInPlace goes through resumeSession (no second spawn path to keep in sync)');
+  ok(/const retry = \(\) => this\.createSession\(\{\n\s*cwd, name: sessionName, resumeId, mode: sessionMode, model, permission, effort,/.test(sl),
+    'the failed-resume retries re-send the caller\'s ORIGINAL explicitness (never the resolved sessionModel/sessionEffort)');
+  const cv = read('src/lib/chat-view.js');
+  ok(/this\.app\.resumeSession\(backendSessionId, cwd, name, \{\n\s*mode: 'chat',\n\s*backend,/.test(cv),
+    'the chat RESUME BAR sends no model/effort at all — the path the owner hit');
+  const lay = read('src/lib/layout.js');
+  ok(/this\.app\.resumeSession\(d\.sessionId, d\.cwd, d\.name, d\.opts\)/.test(lay),
+    'resume-all replays the window\'s own opts and invents nothing');
+  // (3) the server states WHICH FACT it used, everywhere a client can read it
+  const wc = read('src/ws-create.js');
+  ok(wc.indexOf('resumeSpawnPick({') < wc.indexOf('adapter.buildSessionArgs({'),
+    'the ladder runs BEFORE the spawn spec, so every downstream reader (pool chooser, _spawnModel, the lock target) sees the value the session really starts with');
+  ok(/data\._modelOrigin = picks\.model\.origin;/.test(wc) && /data\._effortOrigin = picks\.effort\.origin;/.test(wc)
+    && /continuityLogLine\(backend, data\.resumeId, picks\)/.test(wc),
+    'it records the ORIGIN and logs the decision (a resume that quietly took the default must be readable afterwards)');
+  ok(!/lastCodexTurnEffort\(data\.resumeId\)/.test(wc) && !/lastCodexTurnModel\(data\.resumeId\)/.test(wc),
+    'the codex-only env post-fill is GONE — one ladder, per-harness readers, no backend branch');
+  ok(/spawnOrigin: \{ model: session\._modelOrigin \|\| null, effort: session\._effortOrigin \|\| null \}/.test(wc),
+    "the 'created' reply carries it (the creator never gets an 'attached' — 2.368.4)");
+  ok(/effort: session\._effort \|\| null,\n\s*spawnModel: session\._spawnModel \|\| null,/.test(wc),
+    "…along with the effort the spawn resolved to, since on a resume the CLIENT deliberately sent none");
+  ok(/modelOrigin: session\._modelOrigin \|\| null,/.test(wc) && /effortOrigin: session\._effortOrigin \|\| null,/.test(wc),
+    'and session-meta persists it, so a server restart does not turn an honest row into a guess');
+  const wsh = read('src/ws-handler.js');
+  ok(/spawnOrigin: \{ model: session\._modelOrigin \|\| null, effort: session\._effortOrigin \|\| null \}/.test(wsh),
+    'the ATTACH payload carries it too (a second client opening the window learns the same fact)');
+  ok(/session\._effortOrigin = 'chosen';/.test(wsh) && /if \(data\.model\) s2\._modelOrigin = 'chosen';/.test(wsh),
+    'a pick made INSIDE the session RE-AUTHORS the origin — the panel must not keep calling a hand-changed value "the conversation\'s own"');
+  ok(/effortOrigin: session\._effortOrigin/.test(wsh) && /modelOrigin: s2\._modelOrigin \|\| null/.test(wsh),
+    '…and that re-authoring is persisted with the value it describes');
+  const sbar = read('src/lib/chat-status-bar.js');
+  ok(/this\._spawnOrigin = \{ \.\.\.\(this\._spawnOrigin \|\| \{\}\), effort: 'chosen' \};/.test(sbar),
+    '…on the CLIENT too, next to the optimistic chip value (one pick, one pair of writes)');
+  const boot = read('src/server/boot-restore.js');
+  ok((boot.match(/_modelOrigin: meta\.modelOrigin \|\| null/g) || []).length >= 3,
+    'every boot-restore path restores it (all three, like _effort)');
+  const srv = read('server.js');
+  ok(/modelOrigin: s\._modelOrigin \|\| null, effortOrigin: s\._effortOrigin \|\| null,/.test(srv),
+    'the active-sessions payload carries value + origin for Session Properties');
+  const sb = read('src/lib/sidebar.js');
+  ok((sb.match(/modelOrigin: (wm\?\.|ws\.)modelOrigin \|\| null/g) || []).length === 2,
+    'BOTH merge branches carry it onto the session record (the 2.369.58 outputStyle row reached neither — fixed here with them)');
+  ok((sb.match(/outputStyle: (wm\?\.|ws\.)outputStyle \|\| null/g) || []).length === 2,
+    '…including that outputStyle twin, whose "live" value the panel had been reading as always-empty');
+  const sp = read('src/lib/session-props.js');
+  ok(/originRow\(t\('Model'\), s\.spawnModel \|\| '', cfg\.model, s\.modelOrigin\)/.test(sp)
+    && /originRow\(t\('Effort'\), s\.effort \|\| '', cfg\.effort, s\.effortOrigin,/.test(sp),
+    'Session Properties shows value + origin for both twins');
+  ok((sp.match(/const ORIGIN_LABEL = \{/g) || []).length === 1,
+    'ONE label map for all three origin rows (a second copy is how one fact starts being worded two ways in one panel)');
+  ok(/wrap: true/.test(sp) && /white-space:normal;overflow-wrap:anywhere/.test(sp),
+    'an origin row WRAPS instead of ellipsizing (375×667: the origin is the last thing on the line — measured, see scripts/dbg-session-props-mobile.mjs)');
+  // (4) the decision is DOCUMENTED where the next reader looks, under its id
   const kb = read('docs/kb-bugfix-invariants.md');
-  ok(/B-6b6d/.test(kb), 'the kb entry names the backlog id that carries the owner decision (a paragraph nobody re-reads is not an owner)');
+  ok(/B-6b6d/.test(kb) && /is a NEW-session default/i.test(kb) && /conversation's OWN value wins on resume\/fork\/restart/i.test(kb),
+    'the kb states the RULE under the backlog id that carries the owner decision');
   ok(/chat resume bar|resume-all/.test(kb) && /session-lifecycle\.js/.test(kb),
-    'and it states the PRECISE scope (which resume paths, which line) instead of "every resume"');
+    '…with the precise scope it came from (which resume paths, which line)');
+  ok(/hasSource/.test(kb) && /nothing claude writes records the effort/i.test(kb),
+    '…and the ASYMMETRY, which reads like an omission unless it is written down');
+  ok(/NEW sessions only \(B-6b6d\)|NEW Codex sessions/.test(read('docs/settings.md'))
+    && /Applies to NEW sessions/.test(read('src/lib/settings-schema.js')),
+    'the SETTING itself no longer claims "new or resumed" — the description a user reads is part of the fix');
+}
+
+console.log('— ⑪d the ORIGIN a panel shows (PURE, agent-meta)');
+{
+  const { spawnValueOrigin, responseStyleOrigin } = await import(path.join(REPO, 'src/lib/agent-meta.js'));
+  ok(spawnValueOrigin('conversation', 'ultra', undefined) === 'conversation', "the server's word is shown as-is when nothing contradicts it");
+  ok(spawnValueOrigin('instance', 'xhigh', undefined) === 'instance', 'instance default, stated');
+  ok(spawnValueOrigin('chosen', 'xhigh', 'xhigh') === 'chosen', 'a pick that MATCHES the live value is the choice');
+  ok(spawnValueOrigin('conversation', 'ultra', 'xhigh') === 'spawn',
+    'a pick saved AFTER the spawn makes the live value "what this session started with" — so the row can never contradict the "(saved: …)" note beside it');
+  ok(spawnValueOrigin('chosen', 'ultra', 'xhigh') === 'spawn', '…whatever the server said at the time');
+  ok(spawnValueOrigin(null, 'ultra', undefined) === responseStyleOrigin('ultra', undefined)
+    && spawnValueOrigin(undefined, '', 'high') === responseStyleOrigin('', 'high'),
+    'a session that predates the field falls back to the existing COMPARISON helper (undefined ≠ "harness")');
+  ok(spawnValueOrigin('nonsense', 'ultra', undefined) === responseStyleOrigin('ultra', undefined),
+    'an unknown origin string is not trusted either');
 }
 
 console.log(fail ? `\nFAILED (${fail} of ${pass + fail})` : `\nALL PASS (${pass})`);

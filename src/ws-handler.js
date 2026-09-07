@@ -320,7 +320,7 @@ function registerWsHandler(wss, ctx) {
         }
 
         case 'set-model': {
-          { const s2 = activeSessions.get(data.sessionId); if (s2) { s2._pickedModel = data.model || null; s2._pickedModelAt = Date.now(); try { writeSessionMeta(s2.sockName, { ...readSessionMeta(s2.sockName), pickedModel: s2._pickedModel, pickedModelAt: s2._pickedModelAt }); } catch { } } }
+          { const s2 = activeSessions.get(data.sessionId); if (s2) { s2._pickedModel = data.model || null; s2._pickedModelAt = Date.now(); if (data.model) s2._modelOrigin = 'chosen'; try { writeSessionMeta(s2.sockName, { ...readSessionMeta(s2.sockName), pickedModel: s2._pickedModel, pickedModelAt: s2._pickedModelAt, modelOrigin: s2._modelOrigin || null }); } catch { } } }
           const session = activeSessions.get(data.sessionId);
           if (session?.pty && session.mode === 'chat' && (data.model || 'lock' in data)) {
             const adapter = adapterRegistry.get(session.backend);
@@ -358,9 +358,14 @@ function registerWsHandler(wss, ctx) {
                 // back (claude), so the last COMMANDED value is what we show.
                 // Persisted in session meta so it survives server restarts.
                 session._effort = data.effort || null;
+                // B-6b6d: a pick made INSIDE the session re-authors the origin —
+                // otherwise the panel keeps calling a hand-changed value "this
+                // conversation's own value" (the contradiction 2.369.58's r2
+                // review removed from the response-style row).
+                session._effortOrigin = 'chosen';
                 if (session.sockName) {
                   const m = readSessionMeta(session.sockName);
-                  writeSessionMeta(session.sockName, { ...m, effort: session._effort });
+                  writeSessionMeta(session.sockName, { ...m, effort: session._effort, effortOrigin: session._effortOrigin });
                 }
               } catch {}
             }
@@ -1088,7 +1093,7 @@ function registerWsHandler(wss, ctx) {
               // (no avoidable sync work here).
               const wcapsAttach = wrapperCaps(BUFFERS_DIR, data.sessionId, session.socketPath);
               ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, mode: 'chat',
-                messages, totalCount, chatStatus, isStreaming, streamingLabel, streamingKind: isStreaming ? (session._streamingKind || null) : null, autoResume: autoResume?.statusFor?.(data.sessionId) || null, outputStyle: session._outputStyle || null, taskState: sm.taskState(), turnMap, pendingPermissions: pendingPerms,
+                messages, totalCount, chatStatus, isStreaming, streamingLabel, streamingKind: isStreaming ? (session._streamingKind || null) : null, autoResume: autoResume?.statusFor?.(data.sessionId) || null, outputStyle: session._outputStyle || null, spawnOrigin: { model: session._modelOrigin || null, effort: session._effortOrigin || null }, taskState: sm.taskState(), turnMap, pendingPermissions: pendingPerms,
                 // The input queue as the normalizer knows it (the wrapper's
                 // queue_changed replays through the buffer on a rebuild) —
                 // ALWAYS present so a reconnecting client can clear a stale

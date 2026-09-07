@@ -12,12 +12,13 @@ const { capsOf } = require('./backend-caps');
 const { get: harnessOf } = require('./harnesses'); // S9: store-side fork (opencode serve) before the spawn
 const { createMessageManager } = require('./normalizers');
 const { listCodexThreads } = require('./codex-session-store');
-const { findCodexSessionJsonlPath, lastCodexTurnModel, lastCodexTurnEffort, extractCodexThreadMeta } = require('./adapters/codex');
+const { findCodexSessionJsonlPath, extractCodexThreadMeta } = require('./adapters/codex'); // the per-turn model/effort readers reach ws-create through the harness descriptor's store hooks (B-6b6d)
 const { cwdToProjectDir, findSessionJsonlPath, warmSessionJsonlAsync } = require('./session-store');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
 const { REMOTE_PRELUDE, buildRemoteExec, nodeFinder } = require('./remote-shell');
 const { sweepWriters } = require('./writer-sweep');
+const { resumeSpawnPick, continuityLogLine } = require('./resume-continuity');
 
 function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
   execFileAsync, pickCodexThreadCandidate, getSessionKey, normalizeComparablePath }) {
@@ -323,6 +324,58 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
             data.forkedFromId = data.resumeId;
             data.resumeId = forked.id;
           }
+          // ── RESUME CONTINUITY LADDER (B-6b6d, owner ruling 2026-09-07) ──
+          // explicit pick > the CONVERSATION's own last value > instance
+          // default (logged). The rule and the reason it is not two `||`
+          // chains live in src/resume-continuity.js; the per-harness READER is
+          // the descriptor's `store.lastTurn<Knob>` hook, whose presence IS the
+          // "this harness can answer" declaration (codex: model+effort from its
+          // rollout's turn_context; claude: model from the transcript's last
+          // assistant record, and NO effort source at all — nothing claude
+          // writes records it, so a claude resume with no pick commands none).
+          // The client stopped filling the instance default on resumes in the
+          // same change: it is a NEW-session default, and filling it there is
+          // what suppressed this ladder and resumed an `ultra` conversation at
+          // `xhigh` (2.369.62's known residue).
+          {
+            const isResume = !!(data.resume && data.resumeId);
+            const hstore = (() => { try { return harnessOf(backend).store || {}; } catch { return {}; } })();
+            const prefix = (() => { try { return harnessOf(backend)?.settingsPrefix || backend; } catch { return backend; } })();
+            const instDefault = (key) => { try { return serverSetting(`${prefix}.${key}`) || ''; } catch { return ''; } };
+            const fromConversation = async (hook) => {
+              if (!isResume || typeof hook !== 'function') return '';
+              // A conversation whose records cannot be read is a MISSING FACT,
+              // never a silent zero: it degrades to the instance default one
+              // rung down, and the reason is logged verbatim (the swallowed-
+              // degrade lesson).
+              try { return (await hook(data.resumeId, cwd)) || ''; }
+              catch (e) { console.warn(`[session] resume continuity: could not read ${backend} ${String(data.resumeId).slice(0, 8)} — ${e.message}`); return ''; }
+            };
+            // An explicit pick wins inside the ladder anyway, so do not pay for
+            // a transcript read whose answer cannot be used (claude's locator
+            // is a sync scan of ~/.claude/projects, on the spawn path).
+            const pickKnob = async (explicit, hook, key) => {
+              const e = (explicit === undefined || explicit === null) ? '' : String(explicit).trim();
+              const conversation = e ? '' : await fromConversation(hook);
+              return resumeSpawnPick({
+                explicit: e, conversation, instanceDefault: instDefault(key),
+                resume: isResume, hasSource: typeof hook === 'function',
+              });
+            };
+            const picks = {
+              model: await pickKnob(data.model, hstore.lastTurnModel, 'defaultModel'),
+              effort: await pickKnob(data.effort, hstore.lastTurnEffort, 'defaultEffort'),
+            };
+            // Every downstream reader (the spawn, the pool chooser's declared
+            // model, _spawnModel, the lock's implicit target, session._effort)
+            // must see the value this session ACTUALLY starts with — one
+            // resolved fact, not the request's intent.
+            data.model = picks.model.value || undefined;
+            data.effort = picks.effort.value || undefined;
+            data._modelOrigin = picks.model.origin;
+            data._effortOrigin = picks.effort.origin;
+            if (isResume) console.log(continuityLogLine(backend, data.resumeId, picks));
+          }
           const sessionSpec = adapter.buildSessionArgs({
             cwd,
             model: data.model,
@@ -385,19 +438,15 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
               } catch { return null; }
             })(),
           });
-          // For codex resume: inherit forkedFrom chain from old session's JSONL
+          // For codex resume: inherit forkedFrom chain from old session's JSONL.
+          // MODEL CONTINUITY (2.369.32) and EFFORT CONTINUITY (B-21e4 item 4)
+          // used to sit HERE, as two `if (!sessionSpec.env.CODEX_WEBUI_*)`
+          // post-fills. They now run BEFORE the spawn spec, for every harness,
+          // through the resume-continuity ladder above — the post-fill could
+          // only ever fire when the client sent nothing, and the client sent
+          // the instance default on every resume (B-6b6d), so the fallback the
+          // env test was guarding was unreachable exactly when it was needed.
           if (backend === 'codex' && data.resumeId && sessionSpec.env) {
-            // MODEL CONTINUITY (2.369.32): a resume without an explicit model keeps
-            // the model the thread LAST ran on (last turn_context), never the
-            // app-server's thread.model (= the START model) — a mid-conversation
-            // switch to gpt-6 survived neither restart nor rename before this.
-            if (!sessionSpec.env.CODEX_WEBUI_MODEL) { try { const lm = lastCodexTurnModel(data.resumeId); if (lm) sessionSpec.env.CODEX_WEBUI_MODEL = lm; } catch { } }
-            // EFFORT CONTINUITY (B-21e4 item 4, the effort twin): a resume without an
-            // explicit effort carries the effort the thread LAST ran on (last
-            // turn_context.effort) — the wrapper then passes it on EVERY turn/start, so
-            // the app-server's per-thread default (LOW for the 0.153.4 default model)
-            // can never flip a conversation that was running at high/ultra.
-            if (!sessionSpec.env.CODEX_WEBUI_EFFORT) { try { const le = lastCodexTurnEffort(data.resumeId); if (le) sessionSpec.env.CODEX_WEBUI_EFFORT = le; } catch { } }
             const oldPath = findCodexSessionJsonlPath(data.resumeId);
             const oldChain = oldPath ? (extractCodexThreadMeta(oldPath).forkedFrom || []) : [];
             if (!oldChain.includes(data.resumeId)) oldChain.push(data.resumeId);
@@ -628,6 +677,15 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
             // Effort is never reported back by claude — remember the commanded
             // value (spawn flag now, set-effort later) for the status bar
             _effort: data.effort || null,
+            // WHICH FACT the spawn's model/effort came from (B-6b6d):
+            // 'chosen' (a pick for this session) / 'conversation' (its own last
+            // turn) / 'instance' (the <prefix>.default* setting) / 'harness'
+            // (nothing sent — the agent's own config decides). Session
+            // Properties SAYS this instead of guessing it from the value, which
+            // cannot be done: a conversation's own value and the instance
+            // default are frequently the same string.
+            _modelOrigin: data._modelOrigin || null,
+            _effortOrigin: data._effortOrigin || null,
             _modelLocked: !!data.modelLock,  // #6 lock v2: re-pin the target model after any fallback (turn-end)
             // EXPLICIT target only (review-caught): inferring it from data.model
             // re-targeted the lock to claude.defaultModel on any resume whose
@@ -1680,6 +1738,8 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
             parentThreadId: session.parentThreadId,
             permissionMode: session._permissionMode || null,
             effort: session._effort || null,
+            modelOrigin: session._modelOrigin || null, // B-6b6d: which fact the spawn's model/effort came from — a restart must not turn an honest
+            effortOrigin: session._effortOrigin || null, // "this conversation's own value" row into a guess
             outputStyle: session._outputStyle || null, // 2.369.58: the EFFECTIVE response style survives a server restart (the chip otherwise reported "default" for a session really running one)
             modelLocked: session._modelLocked || undefined, // #6: survive server restart (else a resumed lock's badge silently reverts — review-caught)
             lockedModel: session._lockedModel || undefined,
@@ -1783,6 +1843,8 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
                   forkedFrom: session.forkedFrom || null,
                   permissionMode: session._permissionMode || null,
                   effort: session._effort || null,
+                  modelOrigin: session._modelOrigin || null,
+                  effortOrigin: session._effortOrigin || null,
                   outputStyle: session._outputStyle || null,
                   createdAt: session.createdAt,
                   webuiSessionId: id,
@@ -1818,6 +1880,14 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
             // built for). Always present (null = CLI default) so the client's
             // carries-the-key guard fires.
             outputStyle: session._outputStyle || null,
+            // …and so must the effort this spawn RESOLVED to (B-6b6d). The
+            // creator's chip used to show the value the CLIENT sent, which on a
+            // resume is now deliberately nothing — the server is the only party
+            // that read the conversation's own last turn. `spawnOrigin` names
+            // WHICH fact it is, for the same reason Session Properties needs it.
+            effort: session._effort || null,
+            spawnModel: session._spawnModel || null,
+            spawnOrigin: { model: session._modelOrigin || null, effort: session._effortOrigin || null },
             autoResume: autoResume?.statusFor?.(id) || null,
             // A freshly spawned/resumed wrapper always starts with an EMPTY
             // input queue — stated explicitly (not omitted) so the creator's

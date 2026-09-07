@@ -1422,6 +1422,11 @@ class ChatView {
     // row is about the PROTOCOL, this is about the process that is running.
     if ('responseStyleLive' in meta) this._statusBar?.setResponseStyleLive?.(meta.responseStyleLive);
     if ('autoResume' in meta) this._statusBar?.setAutoResume?.(meta.autoResume || null);
+    // WHERE this spawn's model/effort came from (B-6b6d) — the resume ladder's
+    // verdict, so the effort tooltip can say "carried over from this
+    // conversation's last turn" instead of leaving it indistinguishable from
+    // the instance default.
+    if ('spawnOrigin' in meta) this._statusBar?.setSpawnOrigin?.(meta.spawnOrigin);
     if ('outputStyle' in meta) {
       this._statusBar?.setOutputStyle?.(meta.outputStyle || '');
       try { // saved pick ≠ live value ⇒ show it as pending on the chip

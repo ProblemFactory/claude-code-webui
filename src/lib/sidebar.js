@@ -753,6 +753,17 @@ class Sidebar {
         accountTail: wm?.accountTail || null,
         auth: wm?.auth || null, // billing identity (subscription/api-console/api-key/unknown)
         todo: wm?.todo || null, // agent's own TodoWrite/plan summary (board pill)
+        // WHAT THIS SESSION IS ACTUALLY RUNNING WITH, from the server's own
+        // record — Session Properties reports these as facts and must never
+        // re-derive them from the saved PICK. `outputStyle` was added to the
+        // active-sessions payload in 2.369.58 but never to this merge, so the
+        // panel's "live" value was silently always empty and every session read
+        // as 'saved'; the B-6b6d rows land here WITH it, one wiring, one bug.
+        outputStyle: wm?.outputStyle || null,
+        spawnModel: wm?.spawnModel || null,
+        effort: wm?.effort || null,
+        modelOrigin: wm?.modelOrigin || null,   // 'chosen' | 'conversation' | 'instance' | 'harness'
+        effortOrigin: wm?.effortOrigin || null,
       };
     });
 
@@ -791,6 +802,11 @@ class Sidebar {
           accountTail: ws.accountTail || null,
           auth: ws.auth || null,
           todo: ws.todo || null,
+          outputStyle: ws.outputStyle || null,
+          spawnModel: ws.spawnModel || null,
+          effort: ws.effort || null,
+          modelOrigin: ws.modelOrigin || null,
+          effortOrigin: ws.effortOrigin || null,
         });
       }
     }

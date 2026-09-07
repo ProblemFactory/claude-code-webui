@@ -334,6 +334,76 @@ function findSessionJsonlPath(claudeSessionId, cwd) {
   return null;
 }
 
+// ── THE MODEL THIS CONVERSATION LAST RAN ON (B-6b6d; the claude twin of
+//    codex's lastCodexTurnModel) ──────────────────────────────────────────
+// A resume that carries no explicit pick must run on the conversation's OWN
+// model, not the instance default (src/resume-continuity.js states the rule).
+// claude never reports a "session model" anywhere, but every assistant record
+// NAMES the model that served it — a TYPED field, never prose. Read from the
+// tail in growing windows so a 500MB transcript costs one 128KB pread in the
+// normal case, and never a full parse on a spawn path.
+// SUBAGENT records are skipped: a Task subagent may run a different model
+// (its records are the LAST ones in the file whenever a turn ended on one),
+// and the main thread's model is what a resume continues.
+// '<synthetic>' (and any other <marker>) is the CLI's own "nothing served
+// this" placeholder — the same exclusion noteModelSeen makes.
+// A SAFETY-CLASSIFIER FALLBACK IS NOT A MODEL CHOICE (2.227.4's record, read
+// backwards): when the classifier flags a message the CLI retries it on another
+// model and records `system/model_refusal_fallback {originalModel, fallbackModel}`
+// — and, in its own words, later messages go back to the original. A
+// conversation that ENDED on such a retry would otherwise be resumed pinned to
+// the fallback model, i.e. a silent downgrade performed by the fix that exists
+// to stop silent changes. So when the candidate is exactly what a nearby
+// fallback record says it switched TO, the conversation's model is the one it
+// switched FROM. Bounded look-back (the record sits just before its retry) and
+// BOTH key casings (the same record is snake_case on stdout, camelCase in the
+// JSONL — the 2.227.6 trap).
+const FALLBACK_LOOKBACK = 20;
+function _unfallback(lines, at, model) {
+  for (let i = at - 1, n = 0; i >= 0 && n < FALLBACK_LOOKBACK; i--, n++) {
+    const l = lines[i];
+    if (l.indexOf('model_refusal_fallback') < 0) continue;
+    try {
+      const r = JSON.parse(l);
+      if (r.subtype !== 'model_refusal_fallback') continue;
+      const to = r.fallbackModel || r.fallback_model || '';
+      const from = r.originalModel || r.original_model || '';
+      if (to === model && from) return from;
+    } catch { }
+  }
+  return model;
+}
+const CLAUDE_MODEL_TAIL_WINDOWS = [128 * 1024, 2 * 1024 * 1024, 16 * 1024 * 1024];
+async function lastClaudeTurnModel(claudeSessionId, cwd) {
+  const fp = findSessionJsonlPath(claudeSessionId, cwd);
+  if (!fp) return null;
+  let fh = null;
+  try {
+    fh = await fs.promises.open(fp, 'r');
+    const size = (await fh.stat()).size;
+    if (!size) return null;
+    for (const win of CLAUDE_MODEL_TAIL_WINDOWS) {
+      const len = Math.min(win, size);
+      const buf = Buffer.alloc(len);
+      await fh.read(buf, 0, len, size - len);
+      let text = buf.toString('utf-8');
+      if (len < size) { const nl = text.indexOf('\n'); if (nl >= 0) text = text.slice(nl + 1); } // drop the cut-off first line
+      const lines = text.split('\n');
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const l = lines[i];
+        if (l.indexOf('"model"') < 0 || l.indexOf('"assistant"') < 0) continue;
+        let rec = null;
+        try { rec = JSON.parse(l); } catch { continue; }
+        if (!rec || rec.type !== 'assistant' || isSubagentMessage(rec)) continue;
+        const m = rec.message && rec.message.model;
+        if (typeof m === 'string' && m && !m.startsWith('<')) return _unfallback(lines, i, m);
+      }
+      if (len >= size) break; // the whole file was in this window — nothing to grow into
+    }
+  } catch { return null; } finally { if (fh) { try { await fh.close(); } catch { } } }
+  return null;
+}
+
 // JSONL parse cache — stores ALL non-subagent messages (unfiltered).
 // LRU-bounded: it retains the FULL parsed history of each session, so an
 // uncapped map slowly pins every session ever viewed in memory.
@@ -1186,6 +1256,7 @@ module.exports = {
   readJsonlTailIds,
   claimJsonls,
   findSessionJsonlPath,
+  lastClaudeTurnModel,
   parseSessionJsonl,
   extractSessionMeta,
   getSubagentMetas,

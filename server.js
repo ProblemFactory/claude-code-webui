@@ -1796,7 +1796,7 @@ function activeSessionsPayload() {
       todo: s._todos || null, // {done, total, current} — the agent's own TodoWrite/plan
       auth: sessionAuth(s), // billing identity (subscription / api-console / api-key / unknown)
       mode: s.mode || 'terminal',
-      outputStyle: s._outputStyle || null, // EFFECTIVE response style (2.369.58; null = the agent's own config decides) — Session Properties names the value AND its origin, which the saved PICK alone cannot
+      outputStyle: s._outputStyle || null, spawnModel: s._spawnModel || null, effort: s._effort || null, modelOrigin: s._modelOrigin || null, effortOrigin: s._effortOrigin || null, // EFFECTIVE response style (2.369.58) + the model/effort this session was SPAWNED with and WHICH FACT each came from (B-6b6d: 'chosen'|'conversation'|'instance'|'harness'). null = the agent's own config decides / a session that predates the field. Session Properties names value AND origin, which neither the saved PICK nor the value itself can give it — a conversation's own value and the instance default are frequently the same string, and only the server ever read the conversation's records
     });
   }
   return activeList;

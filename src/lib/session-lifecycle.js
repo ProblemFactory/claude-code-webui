@@ -6,6 +6,11 @@ import { t } from './i18n.js';
 import { registerWindowType, replayOpenSpec as replayOpenSpecViaRegistry, svgIcon16 } from './window-types.js';
 import { TerminalSession } from './terminal.js';
 import { api, escHtml, estDisplayPair, fetchJson, hostStateChip, showConfirmDialog, showContextMenu, showToast, stripCwdHostLabel } from './utils.js';
+// THE RESUME LADDER, the client's half (B-6b6d) — the same PURE rule the server
+// spawns by (a CJS module pulled into the bundle, like task-color-seq /
+// collab-row), so "the instance default is a NEW-session default" is ONE law
+// with two callers instead of two `||` chains that drift.
+import { resumeSpawnPick } from '../resume-continuity.js';
 
 export function installSessionLifecycle(App, ctx = {}) {
   Object.assign(App.prototype, {
@@ -37,9 +42,34 @@ export function installSessionLifecycle(App, ctx = {}) {
     this._hideWelcome();
     const defaults = this._getBackendSessionDefaults(backend);
     const sessionMode = mode || this.settings.get('session.defaultMode') || 'chat';
-    const sessionModel = model !== undefined ? model : defaults.model;
+    // ── THE INSTANCE DEFAULT IS A **NEW-SESSION** DEFAULT (B-6b6d, owner
+    // ruling 2026-09-07) ────────────────────────────────────────────────────
+    // A create that carries a resumeId CONTINUES a conversation (resume bar,
+    // resume-all, a card with no ⚙ override, restartConversationInPlace, fork,
+    // the failed-resume retries below) and the conversation's OWN model/effort
+    // must win. Only the SERVER can read that value (the codex rollout's
+    // turn_context / the claude transcript's last assistant record), so the
+    // client's job here is to send NOTHING unless the user explicitly chose for
+    // THIS session — an explicit pick still beats everything, on both paths.
+    // Filling `defaults` in here is precisely what suppressed ws-create's
+    // continuity ladder and resumed an `ultra` conversation at `xhigh`
+    // (2.369.62's known residue): the server's fallback is gated on "the client
+    // sent nothing", and the client always sent something.
+    // permission/extraArgs deliberately keep the old behaviour: the owner
+    // ruling covers model+effort, and neither of those two has a conversation
+    // source to prefer over the default (a permission mode IS in the claude
+    // transcript's init record, but changing that default is its own product
+    // decision ⇒ owner gate).
+    // `hasSource: false` is the honest client-side fact: only the SERVER can
+    // read a conversation's own last model/effort, so on a continuation this
+    // resolves to '' (send nothing) and the server's ladder — same function,
+    // with the harness's reader wired in — decides.
+    const continuesConversation = !!resumeId;
+    const pickHere = (explicit, instanceDefault) =>
+      resumeSpawnPick({ explicit, instanceDefault, resume: continuesConversation, hasSource: false }).value;
+    const sessionModel = pickHere(model, defaults.model);
     const sessionPermission = permission !== undefined ? permission : defaults.permission;
-    const sessionEffort = effort !== undefined ? effort : defaults.effort;
+    const sessionEffort = pickHere(effort, defaults.effort);
     const sessionExtraArgs = extraArgs !== undefined ? extraArgs : defaults.extraArgs;
     const sessionName = name || (resumeId ? t('Resume {id}', { id: resumeId.substring(0,8) }) : t('Session {n}', { n: this.wm.windowCounter+1 }));
     const sessionKey = backendSessionId || resumeId ? `${backend}:${backendSessionId || resumeId}` : '';
@@ -302,8 +332,13 @@ export function installSessionLifecycle(App, ctx = {}) {
           this.sessions.set(winInfo.id, chatView);
           // Commanded-at-spawn effort (the CLI never reports effort back, so
           // the commanded value is the display source — same as the server's
-          // attach-time merge)
-          if (sessionEffort) chatView.applyStatus({ effort: sessionEffort });
+          // attach-time merge). On a RESUME the client deliberately commands
+          // nothing, so the server's resolved value (the conversation's own
+          // last turn) rides the 'created' reply and wins here — the creator
+          // never gets an 'attached' payload (2.368.4), and without this the
+          // chip on a resumed window stayed empty (B-6b6d).
+          const spawnedEffort = (msg.effort !== undefined && msg.effort !== null) ? msg.effort : sessionEffort;
+          if (spawnedEffort) chatView.applyStatus({ effort: spawnedEffort });
           // The creator NEVER receives an 'attached' payload, so the live
           // output style / auto-resume state rides the 'created' reply — the
           // HTTP history load below carries no meta, and without this a
