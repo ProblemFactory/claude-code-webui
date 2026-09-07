@@ -50,6 +50,77 @@ const FIRE_MAX_IMMEDIATE = 3;                 // per session per window; the TIM
 const FIRE_QUARANTINE_MS = 10 * 60 * 1000;    // an identity that just rejected this session is off the table
 const FIRE_PENDING_MS = 10 * 60 * 1000;       // a fire we never heard back about stops blocking after this
 const REFUSE_LOG_MS = 5 * 60 * 1000;          // one journal line per (reason, identity) — never one per cycle
+const NO_TARGET_FRESH_MS = 10 * 60 * 1000;    // how long the pool's "nowhere to go" verdict may be quoted for
+
+// ── WHAT THE CONVERSATION IS TOLD, AND WHEN (round 2 of the same incident) ──
+// Round 1 gave the breaker ONE in-chat line for every refusal, and it told the
+// SAME story whatever the reason: "the pool switched to X, X was rejected too,
+// there is no usable member left, retrying has stopped". For `backoff`,
+// `hourly-cap` and `fire-pending` every clause of that is false — X is often a
+// member we never fired at (so it rejected nothing), the other members are
+// healthy, and the session is STILL ARMED and does continue seconds later. It
+// also spent the once-per-window budget, so the genuine "nothing can serve you"
+// line was suppressed for the rest of the hour.
+// The rule now: a refusal may only claim what its OWN reason knows.
+//   same-identity  the identity a continue would land on just rejected THIS
+//                  conversation — the only reason that may say "it refused us
+//                  too". The extra clause "and there is nowhere else to go"
+//                  needs a SECOND fact, the pool's own no-target verdict
+//                  (noteNoPoolTarget), never an assumption.
+//   hourly-cap     N immediate continues this window and the session still is
+//                  not working — say exactly that, nothing more.
+//   backoff /      a sub-minute pacing limit on a session whose promise is
+//   fire-pending   INTACT (still armed, continues by itself). Journal-only:
+//                  no-silent-failures is about a BROKEN promise, not about the
+//                  pacing of one we are still keeping — and a card that says
+//                  "stopped retrying" seconds before retrying is a lie the
+//                  user then has to un-learn.
+// Each class carries its own once-per-window budget, so the cap line can never
+// eat the exhaustion line's.
+/** PURE. The in-chat line a refused continue deserves — null = journal-only. */
+function refusalNoticeFor({ reason, label, armedResetsAt = 0, noTargetAt = 0, now = Date.now(), maxImmediate = FIRE_MAX_IMMEDIATE }) {
+  const who = label || '当前账号';
+  const resets = Number(armedResetsAt) || 0;
+  // "we will continue at T" is only sayable when the arm is anchored on a real
+  // reset; the +45s near-arm is a retry pacer, not a promise about a time
+  const farReset = resets > now + 5 * 60000 ? `将在 ${new Date(resets).toLocaleString()} 重置后自动继续。` : '';
+  const noTarget = !!noTargetAt && now - noTargetAt < NO_TARGET_FRESH_MS;
+  if (reason === 'same-identity') {
+    return {
+      cls: 'exhausted',
+      text: noTarget
+        ? `账号 ${who} 刚刚拒绝了这个会话的自动续跑，账号池里暂时没有其它可用成员，已暂停立即重试 — 可以添加成员、把这个会话切到别的账号，或等待配额重置。`
+        : `账号 ${who} 刚刚拒绝了这个会话的自动续跑，已暂停立即重试。` + (farReset || '账号池恢复可用时会自动继续。'),
+    };
+  }
+  if (reason === 'hourly-cap') {
+    // what we KNOW is the count and that no recovery signal ever arrived —
+    // "it did not work" would be a claim about the CLI we cannot make
+    return { cls: 'cap', text: `自动续跑在一小时内已连续尝试 ${maxImmediate} 次仍未见这个会话恢复，暂停立即重试。` + (farReset || '配额恢复后会自动继续。') };
+  }
+  return null;
+}
+/** PURE. The line that FOLLOWS a delivered continue. The wording comes from
+ *  what actually unblocked us, and there are three ways to know:
+ *   · kind 'now'   — the immediate path only ever runs from a pool switch
+ *   · the ARM      — the +45s near-arm the pool switch creates. Since the wall
+ *                    signals re-point the link BEFORE the session is armed
+ *                    (measured: the real producers never reach fireNow), this
+ *                    is now the COMMON pool-switch recovery, and it is
+ *                    delivered by the timed path — where round 1 said
+ *                    "用量上限已重置", i.e. told the user the quota had reset
+ *                    when the pool had swapped accounts.
+ *   · `moved`      — the pre-fire gate re-pointed the link under us (the
+ *                    identity the continue lands on is not the one we
+ *                    resolved before the gate): a switch by any other name.
+ *  Only with none of the three is "the limit reset" the reason we continued. */
+function continueNoticeFor({ kind, armReason, label, moved = false }) {
+  const who = label || '可用账号';
+  const r = String(armReason || '');
+  if (kind === 'now' || moved || /^switched to a usable account/.test(r)) return { cls: 'switched', text: `账号池已切换到 ${who}，已自动继续这个任务。` };
+  if (/^account usable again/.test(r)) return { cls: 'switched', text: `账号 ${who} 已恢复可用，已自动继续这个任务。` };
+  return { cls: 'reset', text: '用量上限已重置，已自动继续这个任务。' };
+}
 
 /** Pick what to WAIT FOR when a session hits the wall (PURE). Two field
  *  corrections shaped this contract:
@@ -226,10 +297,11 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
   }
   const fireRec = (id, now) => {
     let r = fires.get(id);
-    if (!r) { r = { n: 0, windowStart: now, fails: [], last: null, lastFireAt: 0, notified: {}, noticeAt: 0, refuse: null }; fires.set(id, r); }
-    if (now - (r.windowStart || 0) > FIRE_WINDOW_MS) { r.n = 0; r.windowStart = now; r.notified = {}; r.noticeAt = 0; }
+    if (!r) { r = { n: 0, windowStart: now, fails: [], last: null, lastFireAt: 0, notified: {}, notices: {}, refuse: null, noTargetAt: 0 }; fires.set(id, r); }
+    if (now - (r.windowStart || 0) > FIRE_WINDOW_MS) { r.n = 0; r.windowStart = now; r.notified = {}; r.notices = {}; }
     r.fails = (r.fails || []).filter((f) => f && now - (f.at || 0) < FIRE_QUARANTINE_MS);
     if (!r.notified || typeof r.notified !== 'object') r.notified = {}; // a truncated/older record must never throw inside deliver()
+    if (!r.notices || typeof r.notices !== 'object') r.notices = {};    // per-NOTICE-CLASS budget (an older record has none)
     if (r.last && now - (r.last.at || 0) > FIRE_PENDING_MS) r.last = null; // never heard back — stop blocking on it
     return r;
   };
@@ -282,6 +354,21 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
     if (!r) return [];
     return (r.fails || []).filter((f) => f && now - (f.at || 0) < FIRE_QUARANTINE_MS).map((f) => f.key).filter(Boolean);
   }
+  /** The engine's per-session pass found NO target for this conversation (its
+   *  own `all-rejected` / `no-members` / `stuck` verdict). The ONLY source for
+   *  the "there is nowhere else to go" clause — the breaker itself cannot know
+   *  it, and round 1 asserted it from a refusal reason that does not imply it.
+   *  Recorded only for a session the breaker already tracks (armed or fired):
+   *  nothing else ever reads it, so a stuck pool must not mint records. */
+  function noteNoPoolTarget(id, n = 0, why = null) {
+    if (!id || (!armed.has(id) && !fires.has(id))) return false;
+    const now = Date.now();
+    const r = fireRec(id, now);
+    const prev = r.noTargetAt || 0;
+    r.noTargetAt = now; r.noTargetN = Number(n) || 0; r.noTargetWhy = why || null;
+    if (now - prev > 60000) save();   // the pool re-evaluates every 10s; the FACT is fresh, the disk write is not
+    return true;
+  }
   function logRefusal(id, session, key, label, chk, kind) {
     const now = Date.now();
     const r = fireRec(id, now);
@@ -289,27 +376,29 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
     if (!r.refuse || r.refuse.sig !== sig || now - (r.refuse.at || 0) > REFUSE_LOG_MS) {
       r.refuse = { sig, at: now };
       const until = chk.retryAt ? `, not before ${new Date(chk.retryAt).toISOString()}` : '';
-      log(`[auto-resume] ${id}: refused a ${kind === 'now' ? 'immediate' : 'timed'} continue onto ${label || key || 'this account'} (${chk.reason}${until})`);
+      log(`[auto-resume] ${id}: refused ${kind === 'now' ? 'an immediate' : 'a timed'} continue onto ${label || key || 'this account'} (${chk.reason}${until})`);
       save();
     }
-    breakerNotice(id, session, label || key, kind);
+    breakerNotice(id, session, label || key, kind, chk);
   }
-  /** ONE honest line in the conversation when the breaker trips — once per
-   *  session per window, never per cycle. The user is the only one who can
-   *  act on "nothing in the pool can serve this". */
-  function breakerNotice(id, session, label, kind) {
+  /** The in-chat line a refused continue deserves — the TEXT is chosen by the
+   *  refusal's reason (refusalNoticeFor, PURE), each class once per session per
+   *  window. Reasons that do not break the promise say nothing here; the
+   *  journal above has every one of them. */
+  function breakerNotice(id, session, label, kind, chk) {
     if (!notify || !session || kind !== 'now') return;
     const now = Date.now();
     const r = fireRec(id, now);
-    if (r.noticeAt && now - r.noticeAt < FIRE_WINDOW_MS) return;
-    r.noticeAt = now; save();
     const a = armed.get(id);
-    const resets = a && !a.fired ? Number(a.resetsAt) || 0 : 0;
-    const who = label ? `${label}` : '新的账号';
-    const text = resets > now + 5 * 60000
-      ? `账号池已切换到 ${who}，但它同样被用量上限拒绝，已停止反复重试。将在 ${new Date(resets).toLocaleString()} 重置后自动继续。`
-      : `账号池已切换到 ${who}，但它同样被用量上限拒绝，且暂时没有可用的成员。已停止反复重试 — 可以添加成员、把这个会话切到别的账号，或等待配额重置。`;
-    try { notify(id, session, text); } catch { }
+    const n = refusalNoticeFor({
+      reason: chk && chk.reason, label,
+      armedResetsAt: a && !a.fired ? a.resetsAt : 0,
+      noTargetAt: r.noTargetAt || 0, now,
+    });
+    if (!n) return;                                                    // journal-only: never speaks, never spends a budget
+    if (r.notices[n.cls] && now - r.notices[n.cls] < FIRE_WINDOW_MS) return;
+    r.notices[n.cls] = now; save();
+    try { notify(id, session, n.text); } catch { }
   }
 
   function due(now) {
@@ -340,16 +429,43 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
       const a2 = armed.get(id);
       if (!a2 || a2.fired || a2.resetsAt !== a.resetsAt) return false;   // re-armed/disarmed while gating
       if (session._isStreaming) return false;                            // it started working while we gated
+      // THE IDENTITY IS RE-RESOLVED HERE, after the gate (round 2). The gate
+      // is `beforeAutoResumeFire`, which runs maybePoolAutoSwitch and can
+      // RE-POINT this session's credential link — so the identity resolved
+      // before it is the account we were ABOUT to fire at, not the one the
+      // continue lands on. Round 1 keyed noteFired/announce to the stale one,
+      // which broke the invariant stated above identityFor() in exactly the
+      // case the comment warns about: a rejection would quarantine the
+      // account we had already left, leave the real rejector fireable, and
+      // journal the wrong name. Re-check the breaker too — a gate that moves
+      // us onto an identity we already burned this window must not spend.
+      const now2 = Date.now();
+      const ident2 = identityFor(id, session) || ident;
+      const key2 = ident2 ? ident2.key : null;
+      const label2 = ident2 ? ident2.name : null;
+      // MOVED requires BOTH identities to be known: null → X is the wiring
+      // finding its voice, not the pool switching accounts, and it must not
+      // be reported as one
+      const moved = !!key && !!key2 && key2 !== key;
+      const chk2 = canFire(id, key2, kind, now2);
+      if (!chk2.ok) {
+        if (moved) log(`[auto-resume] ${id}: the gate moved this session onto ${label2 || key2} — re-checking before spending`);
+        logRefusal(id, session, key2, label2, chk2, kind);
+        return false;
+      }
+      // WHAT UNBLOCKED US decides both the journal line and the card, from the
+      // ARMED RECORD (one source, one wording) — see continueNoticeFor
+      const note = continueNoticeFor({ kind, armReason: a2.reason, label: label2, moved });
       const ok = sendToSession(id, session, CONTINUE_PROMPT);
       if (!ok) { log(`[auto-resume] ${id}: could not deliver the continue prompt (will retry)`); return false; }
       armed.delete(id);
-      noteFired(id, key, kind, Date.now());
+      noteFired(id, key2, kind, Date.now());
       save();
       _cancelArmNotify(id);
       log(kind === 'now'
-        ? `[auto-resume] ${id}: ${why} — continued immediately`
-        : `[auto-resume] ${id}: usage limit reset — continued automatically`);
-      announce(id, session, key, label, kind, why);
+        ? `[auto-resume] ${id}: ${why}${moved ? ` (landed on ${label2 || key2})` : ''} — continued immediately`
+        : `[auto-resume] ${id}: ${note.cls === 'switched' ? `pool switched to ${label2 || '?'}` : 'usage limit reset'} — continued automatically`);
+      announce(id, session, key2, kind, note);
       emit(id);
       return true;
     };
@@ -374,21 +490,29 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
     return done;
   }
 
-  /** The in-chat line that follows a delivered continue. The immediate one
-   *  names the account the pool moved to and goes out at most ONCE per
-   *  distinct target per session per window — the incident wrote ~150
-   *  identical "已切换到 X，已自动继续" cards into one transcript; a repeat is
-   *  journal-only. */
-  function announce(id, session, key, label, kind, why) {
-    if (!notify) return;
-    if (kind !== 'now') { try { notify(id, session, '用量上限已重置，已自动继续这个任务。'); } catch { } return; }
+  /** The in-chat line that follows a delivered continue (`note` = the PURE
+   *  continueNoticeFor verdict, computed from the arm that produced this fire
+   *  and the identity it actually landed on).
+   *  The POOL-SWITCH class goes out at most ONCE per distinct target per
+   *  session per window — the incident wrote ~150 identical "已切换到 X，已自动
+   *  继续" cards into one transcript; a repeat is journal-only. The RESET class
+   *  is never deduped: a continue after a real reset happens once per reset,
+   *  and silence there would be an unexplained billed turn.
+   *  Round 2: the dedup applies to BOTH fire paths, because the near-arm the
+   *  pool switch creates is now delivered by the TIMED path (the link moves
+   *  before the session is armed — measured), so the incident's card class can
+   *  arrive through either one. */
+  function announce(id, session, key, kind, note) {
+    if (!notify || !note) return;
     const now = Date.now();
-    const r = fireRec(id, now);
-    const k = key || '*';
-    const seen = r.notified[k] || 0;
-    if (seen && now - seen < FIRE_WINDOW_MS) return;   // same target, same window: the journal already has it
-    r.notified[k] = now; save();
-    try { notify(id, session, (why || `账号池已切换到 ${label || '可用账号'}`) + '，已自动继续这个任务。'); } catch { }
+    if (note.cls === 'switched') {
+      const r = fireRec(id, now);
+      const k = key || '*';
+      const seen = r.notified[k] || 0;
+      if (seen && now - seen < FIRE_WINDOW_MS) return;   // same target, same window: the journal already has it
+      r.notified[k] = now; save();
+    }
+    try { notify(id, session, note.text); } catch { }
   }
 
   /** One tick: fire everything due whose session is alive and idle. */
@@ -432,9 +556,13 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
 
   return {
     armIfEnabled, noteRecovered, forget, setEnabled, statusFor, enabledFor, fireNow, tick, start, stop, CONTINUE_PROMPT,
-    noteFireOutcome, recentFireFailures, canFire, // the loop breaker's seams (engine: walled turn ⇒ ok:false; per-session switch ⇒ exclude)
+    noteFireOutcome, recentFireFailures, canFire, noteNoPoolTarget, // the loop breaker's seams (engine: walled turn ⇒ ok:false; per-session switch ⇒ exclude + its own no-target verdict)
     _armed: armed, _fires: fires,
   };
 }
 
-module.exports = { create, CONTINUE_PROMPT, TICK_MS, GRACE_MS, MAX_WAIT_MS, FIRE_WINDOW_MS, FIRE_BACKOFF_MS, FIRE_MAX_IMMEDIATE, FIRE_QUARANTINE_MS };
+module.exports = {
+  create, CONTINUE_PROMPT, TICK_MS, GRACE_MS, MAX_WAIT_MS,
+  FIRE_WINDOW_MS, FIRE_BACKOFF_MS, FIRE_MAX_IMMEDIATE, FIRE_QUARANTINE_MS, NO_TARGET_FRESH_MS,
+  refusalNoticeFor, continueNoticeFor, // PURE: what the conversation is told, and when
+};

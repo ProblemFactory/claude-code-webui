@@ -1523,10 +1523,13 @@ function maybePoolAutoSwitchForPool(poolId) {
       const rejected = [...sessionWalledMembers(sid, now)];
       const ds = decidePoolSwitch({ currentId: curFor, members, readCache: projected, nowSec: now / 1000, proactive: hot, hot, pessimism: darkTaintedAccounts(), exclude: rejected, explain: true });
       if (!ds || !ds.to) {
-        // "every candidate already said no to this conversation" is the state
-        // only the USER can fix — say it once per session per 10min instead of
-        // silently continuing (the breaker's in-chat notice covers the user
-        // side; this is the operator's line)
+        // "there is nowhere for this conversation to go" is the state only the
+        // USER can fix. The FACT is handed to auto-resume every time (it is
+        // the ONLY source for the breaker's "no usable member left" clause —
+        // a refusal reason does not imply it, and round 1 said it anyway);
+        // the operator's line below stays throttled to once per 10min.
+        const noWay = ds && (ds.reason === 'all-rejected' || ds.reason === 'no-members' || ds.reason === 'stuck');
+        if (noWay) try { getAutoResume()?.noteNoPoolTarget?.(sid, rejected.length, ds.reason); } catch { }
         if (ds && ds.reason === 'all-rejected' && now - (_noTargetLogAt.get(sid) || 0) > 10 * 60e3) {
           _noTargetLogAt.set(sid, now);
           console.log(`[pool] per-session ${poolId}/${sid}: nowhere to go — ${rejected.length} member(s) already rejected this conversation`);
@@ -1687,6 +1690,7 @@ function maybeStopOnFallback(session, id, from, to) {
     probeQuotaForKey, quotaSourceFor, quotaBackendFor, // S4 caps-routed quota probe + the per-harness QuotaSignalSource lookup (functional seams for test-quota-source)
     observedMemberFor, sessionReadingMember, sessionBillingMember, wallKeyFor, fireIdentityFor, demoteWalledAccount, wallCount, sessionWalledMembers,
     _wallRing, _sessionWalls, OBSERVED_ORG_RECENT_MS, WALL_RING_MS, SESSION_WALL_MS, // wall-ground-truth + token-slot + session-wall seams (test-auto-resume §11, test-auto-resume-loop)
+    _poolAutoLast, _poolSwitchAt, // the eval gate (10s) + dwell belt (180s) are WALL-CLOCK: a suite winds them back instead of sleeping through them
     sessionModelFor, sweepUsageAnchors, usageCacheKeyFor,
     usageIdentityAccountIds, usageIdentityGroups, usageIdentityGroupsCached,
     writeUsageCacheForKey, clearSealedOrders, pushSealedOrders,

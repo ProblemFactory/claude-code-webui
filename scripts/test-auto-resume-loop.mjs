@@ -203,27 +203,95 @@ if (!probe) {
   }
 }
 
-// ── §2 THE IMMEDIATE PATH (the incident's own path: a hot pool switch calls
-//    fireNow while the session sits armed) ──────────────────────────────────
+// ── §2 THE RECOVERY PATH THE INCIDENT ACTUALLY TAKES, and the immediate one ─
+// Round 2 (the r1 verifier's finding): this section used to INJECT the wall
+// signal, which skips the early `maybePoolAutoSwitch` that BOTH real producers
+// run — and that early switch is what decides the outcome. Measured on this
+// same world, only the producer changed:
+//   injected noteWallSignal   → 1 immediate continue (fireNow)
+//   real recordRateLimitEvent → 0 immediate continues. The link is re-pointed
+//                               to the healthy member BEFORE onWalledTurn arms
+//                               the session, so the `finally` pass has nothing
+//                               left to switch and fireNow is never called;
+//                               the session is armed at +45s and continued by
+//                               the TICK (45s arm + 15s grace on a 30s tick ⇒
+//                               ~60-90s, not "immediately")
+//   real markLimitBanner      → same as the rejection
+// So the legs below pin the REAL flows, and the injected one is kept only as
+// the labelled artificial control. The immediate path still exists for the
+// case it was built for (c1206711) — a switch that lands LATER, onto a session
+// that is already armed — and (d) drives that through the real pool seam.
 {
+  // (a) THE INCIDENT'S OWN FLOW, through the producer the CLI actually feeds
   const w = mkWorld(); const cap = capture();
-  // inject the wall the way §11 does (no early pool eval), so the switch lands
-  // in onWalledTurn's `finally` with the session already ARMED — exactly the
-  // sequence the frozen journal shows, cycle after cycle
-  const wall = () => { w.eng.noteWallSignal(w.session, { resetsAtMs: w.R5 * 1000, bucket: 'fiveHour', key: w.linkNow(), slot: true }); w.eng.noteTurnEnd(w.session); };
-  wall();
-  await new Promise((r) => setTimeout(r, 30));
-  const first = w.fired.length;
-  ok('a hot per-session switch onto a healthy member still continues the armed session immediately (the c1206711 rule is intact)', first === 1 && w.linkNow() === w.SPARE, JSON.stringify({ first, link: w.nameOf(w.linkNow()) }));
-  ok('…and it announced itself in the conversation exactly once', w.notes.filter((t) => /账号池已切换到 B-Stack Max/.test(t)).length === 1, JSON.stringify(w.notes));
-  // the CLI rejects that continue too
-  wall();
-  await new Promise((r) => setTimeout(r, 30));
+  w.eng.recordRateLimitEvent(w.session, { type: 'rate_limit_event', rate_limit_info: { status: 'rejected', rateLimitType: 'five_hour', resetsAt: w.R5 } });
+  w.eng.noteTurnEnd(w.session);
+  await new Promise((r) => setTimeout(r, 40));
+  ok('REAL rate_limit_event: the pool re-points the link BEFORE the session is armed, so NOTHING is continued immediately (the injected signal reaches fireNow; the producer does not)', w.fired.length === 0 && w.linkNow() === w.SPARE, JSON.stringify({ fires: w.fired.length, link: w.nameOf(w.linkNow()) }));
+  const st = w.ar.statusFor(w.SID);
+  ok('…the session is armed on the +45s NEAR-arm the switch created, naming the member it moved to', st.armed === true && /^switched to a usable account \(B-Stack Max\)/.test(String(st.reason)) && st.resetsAt <= Date.now() + 46000, JSON.stringify(st));
+  ok('…and nothing was said in the conversation yet (a switch that self-heals in 45s must not narrate itself)', w.notes.length === 0, JSON.stringify(w.notes));
+  // the tick, ~60s later in production (the arm is back-dated instead of slept)
+  const did = await w.tickFire();
+  ok('…the TICK is what continues it — one continue, delivered onto the member the pool moved to', did === true && w.fired.length === 1 && w.fired[0].text === CONTINUE_PROMPT, JSON.stringify({ fires: w.fired.length }));
+  ok('…and the card says the POOL SWITCHED, not that the limit reset (round 1 said 用量上限已重置 on exactly this, now the dominant, path)', w.notes.length === 1 && w.notes[0] === '账号池已切换到 B-Stack Max，已自动继续这个任务。', JSON.stringify(w.notes));
+  ok('…NEGATIVE CONTROL: the reset wording still exists for an arm anchored on a real reset (the fix is a branch, not a rename)', arMod.continueNoticeFor({ kind: 'timed', armReason: '5h 0% < 10%', label: 'B-Stack Max' }).text === '用量上限已重置，已自动继续这个任务。');
+  const rec = w.ar._fires.get(w.SID);
+  ok('…the breaker recorded the fire against the member the continue LANDED on', rec && rec.last && rec.last.key === w.SPARE, JSON.stringify(rec && rec.last));
+  // the CLI rejects that continue too — through the real producer again
+  w.reject({});
+  await new Promise((r) => setTimeout(r, 40));
   const lines = cap.done();
-  ok('the second wall does NOT produce a second immediate continue — every member has now refused this conversation', w.fired.length === 1, JSON.stringify({ fires: w.fired.length }));
-  ok('…the pool refuses to hand it a member that already rejected it', lines.some((l) => /nowhere to go — \d+ member\(s\) already rejected this conversation/.test(l)) || !lines.some((l) => /per-session switch .*→ .*\(re-point, same target\)/.test(l)), lines.filter((l) => /per-session|nowhere/.test(l)).join(' | '));
-  ok('…and the session is left waiting for a reset, not spinning', w.ar.statusFor(w.SID).armed === true && w.ar.statusFor(w.SID).resetsAt > Date.now() + 60000, JSON.stringify(w.ar.statusFor(w.SID)));
-  ok('…the whole episode cost 2 turns of journal, not 130 of transcript', w.fired.length === 1 && w.notes.length <= 2, JSON.stringify({ fired: w.fired.length, notes: w.notes }));
+  ok('the rejection of that continue does not start a cycle: no second continue', w.fired.length === 1, JSON.stringify({ fires: w.fired.length }));
+  ok('…the member that rejected us is quarantined BY NAME (the one we fired at, not the one we came from)', w.ar.recentFireFailures(w.SID).join(',') === w.SPARE, JSON.stringify(w.ar.recentFireFailures(w.SID).map(w.nameOf)));
+  ok('…and the session waits instead of spinning', w.ar.statusFor(w.SID).armed === true, JSON.stringify(w.ar.statusFor(w.SID)));
+  ok('…the whole episode: one continue and one card, versus 130 and ~150', w.fired.length === 1 && w.notes.length === 1, JSON.stringify({ fired: w.fired.length, notes: w.notes }));
+  ok('…journaled as the switch it was, not as a reset', lines.some((l) => /pool switched to B-Stack Max — continued automatically/.test(l)) && !lines.some((l) => /usage limit reset — continued automatically/.test(l)), lines.filter((l) => /continued/.test(l)).join(' | '));
+}
+{
+  // (b) the OTHER real producer: a limit BANNER on stdout
+  const w = mkWorld();
+  w.eng.markLimitBanner(w.session, "Claude usage limit reached. You've hit your session limit · resets 6am");
+  w.eng.noteTurnEnd(w.session);
+  await new Promise((r) => setTimeout(r, 40));
+  ok('REAL limit banner: same ordering — link moved first, no immediate continue, armed on the near-arm', w.fired.length === 0 && w.linkNow() === w.SPARE && /^switched to a usable account/.test(String(w.ar.statusFor(w.SID).reason)), JSON.stringify({ fires: w.fired.length, link: w.nameOf(w.linkNow()), st: w.ar.statusFor(w.SID) }));
+  ok('…and the tick then continues it exactly once, with the switch wording', (await w.tickFire()) === true && w.fired.length === 1 && w.notes.length === 1 && /账号池已切换到 B-Stack Max/.test(w.notes[0]), JSON.stringify(w.notes));
+}
+{
+  // (c) ARTIFICIAL CONTROL, kept and labelled: injecting the signal skips the
+  // early switch, which is the ONLY way this world reaches fireNow — the
+  // measurement that made (a) and (b) necessary
+  const w = mkWorld();
+  w.eng.noteWallSignal(w.session, { resetsAtMs: w.R5 * 1000, bucket: 'fiveHour', key: w.linkNow(), slot: true });
+  w.eng.noteTurnEnd(w.session);
+  await new Promise((r) => setTimeout(r, 40));
+  ok('CONTROL (injected signal, no early pool eval): the switch lands with the session already armed and fireNow DOES continue it immediately', w.fired.length === 1 && w.linkNow() === w.SPARE, JSON.stringify({ fires: w.fired.length, link: w.nameOf(w.linkNow()) }));
+  ok('…which is why (a)/(b) cannot be written this way: the same world, the same wall, a different producer, a different outcome', true);
+}
+{
+  // (d) THE IMMEDIATE PATH'S REAL JOB (c1206711): the pool has nowhere to go
+  // when the wall lands, the session waits on a real reset, and a member frees
+  // up LATER. A hot re-point does not move an idle session by itself, so
+  // fireNow must continue it — driven here through maybePoolAutoSwitchForPool,
+  // the engine's own seam, not through auto-resume.
+  const w = mkWorld(); const cap = capture();
+  const dead = { fetchedAt: Date.now() - 60000, source: 'cli-usage', fiveHour: { utilization: 1, status: 'limited', resetsAt: w.R5 }, sevenDay: { utilization: 0.4, resetsAt: w.R7 } };
+  w.writeCache(w.LINK, dead); w.writeCache(w.SPARE, dead);
+  w.eng.recordRateLimitEvent(w.session, { type: 'rate_limit_event', rate_limit_info: { status: 'rejected', rateLimitType: 'five_hour', resetsAt: w.R5 } });
+  w.eng.noteTurnEnd(w.session);
+  await new Promise((r) => setTimeout(r, 40));
+  const st0 = w.ar.statusFor(w.SID);
+  ok('a wall with nowhere to go arms on the REAL reset and continues nothing', w.fired.length === 0 && st0.armed === true && st0.resetsAt > Date.now() + 60 * 60000, JSON.stringify(st0));
+  // …and now B-Stack Max frees up. Wind back the eval gate (10s) and the
+  // per-session dwell belt (180s) instead of sleeping through them.
+  w.writeCache(w.SPARE, { fetchedAt: Date.now(), source: 'cli-usage', fiveHour: { utilization: 0.05, resetsAt: w.R5 }, sevenDay: { utilization: 0.2, resetsAt: w.R7 } });
+  w.eng._poolAutoLast.delete(w.P);
+  w.eng._poolSwitchAt.delete(w.P + ':' + w.SID);
+  w.eng.maybePoolAutoSwitchForPool(w.P);
+  await new Promise((r) => setTimeout(r, 60));
+  const lines = cap.done();
+  ok('a LATER pool switch onto a healthy member continues the armed session IMMEDIATELY (the c1206711 rule, through the real pool seam)', w.fired.length === 1 && w.linkNow() === w.SPARE, JSON.stringify({ fires: w.fired.length, link: w.nameOf(w.linkNow()) }));
+  ok('…journaled as an immediate continue, and announced once, naming the member', lines.some((l) => /continued immediately/.test(l)) && w.notes.filter((t) => /账号池已切换到 B-Stack Max/.test(t)).length === 1, JSON.stringify({ notes: w.notes, j: lines.filter((l) => /continued/.test(l)) }));
 }
 
 // ── §3 THE BREAKER'S RULES (unit level, on the real module) ────────────────
@@ -247,7 +315,7 @@ if (!probe) {
   ar.noteFireOutcome('s1', false, 'limit rejection');
   arm(); ok('…and once the first came back REJECTED, the same identity is refused outright', ar.fireNow('s1', '账号池已切换到 Account A') === false && sent.length === 1);
   ok("…the refusal is journaled once, with its reason and when it may retry", journal.filter((l) => /refused an? immediate continue onto Account A \(same-identity, not before /.test(l)).length === 1, journal.join(' | '));
-  ok('…and the conversation gets ONE honest line naming the account and the wait', notes.filter((t) => /账号池已切换到 Account A，但它同样被用量上限拒绝/.test(t)).length === 1, JSON.stringify(notes));
+  ok('…and the conversation gets ONE honest line: it names the identity that refused US and claims nothing about the rest of the pool (nobody has told us)', notes.filter((t) => /^账号 Account A 刚刚拒绝了这个会话的自动续跑，已暂停立即重试。/.test(t)).length === 1 && !notes.some((t) => /没有其它可用成员/.test(t)), JSON.stringify(notes));
   const nBefore = notes.length;
   arm(); ar.fireNow('s1', '账号池已切换到 Account A');
   arm(); ar.fireNow('s1', '账号池已切换到 Account A');
@@ -309,6 +377,130 @@ if (!probe) {
   }
 }
 
+// ── §3b WHAT A REFUSAL IS ALLOWED TO CLAIM (round 2, verifier finding #1) ──
+// Round 1 gave every refusal the same card: "the pool switched to X, X was
+// rejected too, there is no usable member, retrying has stopped." For the
+// PACING reasons all four clauses are false — X is a member we never fired at,
+// the pool is healthy, and the session is still armed and continues seconds
+// later — and the card also spent the once-per-window budget, so the genuine
+// exhaustion line was suppressed for the rest of the hour.
+{
+  const mk = (name) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-arnote-' + name + '-')); cleanup.push(dir);
+    const sessions = new Map(); const sent = [], notes = [], journal = [];
+    const st = { ident: { key: 'sub-a', name: 'Account A' } };
+    const ar = create({
+      dataDir: dir, activeSessions: sessions, serverSetting: () => true, log: (...a) => journal.push(a.join(' ')),
+      sendToSession: (id, s, t) => { sent.push(t); return true; }, notify: (id, s, t) => notes.push(t),
+      fireIdentity: () => st.ident,
+    });
+    const s = { mode: 'chat', backend: 'claude', pty: {}, _isStreaming: false, _autoResume: true };
+    sessions.set('s1', s);
+    return { ar, sent, notes, journal, st, arm: (ms = 60000) => ar.armIfEnabled('s1', s, Date.now() + ms, 'usage limit') };
+  };
+
+  // (i) a PACING refusal — the pool moved us onto a member nobody has asked yet
+  {
+    const w = mk('pace');
+    w.arm(); w.ar.fireNow('s1', '账号池已切换到 Account A');
+    w.st.ident = { key: 'sub-b', name: 'Account B' };   // the pool re-points onto a HEALTHY member
+    w.arm(); const second = w.ar.fireNow('s1', '账号池已切换到 Account B');
+    ok('a fire-pending refusal is JOURNAL-ONLY: Account B never rejected anything, and the promise is intact', second === false && w.journal.some((l) => /refused an immediate continue onto Account B \(fire-pending/.test(l)) && w.notes.length === 1 && w.notes[0] === '账号池已切换到 Account A，已自动继续这个任务。', JSON.stringify({ notes: w.notes, j: w.journal.filter((l) => /refused/.test(l)) }));
+    ok('…and the session it just told nothing to is STILL ARMED (round 1 told it "已停止反复重试" here)', w.ar.statusFor('s1').armed === true, JSON.stringify(w.ar.statusFor('s1')));
+    ok('…the once-per-window budget was NOT spent: the genuine exhaustion line still goes out', (() => {
+      w.ar.noteFireOutcome('s1', false, 'limit rejection');           // the CLI answers OUR fire (Account A) with a limit
+      w.st.ident = { key: 'sub-a', name: 'Account A' };               // the pool puts us back on the rejector
+      w.arm(); w.ar.fireNow('s1', '账号池已切换到 Account A');        // same identity ⇒ the real thing
+      return w.notes.length === 2 && /^账号 Account A 刚刚拒绝了这个会话的自动续跑/.test(w.notes[1]);
+    })(), JSON.stringify(w.notes));
+    ok('…a BACKOFF refusal is journal-only for the same reason (a 60s pacer on a live promise)', (() => {
+      const before = w.notes.length;
+      w.st.ident = { key: 'sub-c', name: 'Account C' };
+      w.arm(); const r = w.ar.fireNow('s1', '账号池已切换到 Account C');
+      return r === false && /backoff/.test(w.journal.filter((l) => /refused/.test(l)).pop() || '') && w.notes.length === before;
+    })(), JSON.stringify({ notes: w.notes, j: w.journal.filter((l) => /refused/.test(l)).pop() }));
+  }
+
+  // (ii) the HOURLY CAP says what is true, and has its OWN budget
+  {
+    const w = mk('cap');
+    for (const [key, name] of [['sub-a', 'Account A'], ['sub-b', 'Account B'], ['sub-c', 'Account C']]) {
+      w.st.ident = { key, name };
+      const r = w.ar._fires.get('s1'); if (r) r.lastFireAt = Date.now() - 400000;   // past the back-off rungs
+      w.arm(); w.ar.fireNow('s1', '账号池已切换到 ' + name);
+      w.ar.noteFireOutcome('s1', false, 'limit rejection');
+    }
+    ok(`${FIRE_MAX_IMMEDIATE} continues went out, each announced once`, w.sent.length === FIRE_MAX_IMMEDIATE && w.notes.length === FIRE_MAX_IMMEDIATE, JSON.stringify(w.notes));
+    w.st.ident = { key: 'sub-d', name: 'Account D' };
+    w.ar._fires.get('s1').lastFireAt = Date.now() - 400000;
+    w.arm(); w.ar.fireNow('s1', '账号池已切换到 Account D');
+    const capLine = w.notes[w.notes.length - 1];
+    ok('the cap speaks ONE true line — the count and the pause, never "Account D refused us"', /^自动续跑在一小时内已连续尝试 3 次仍未见这个会话恢复，暂停立即重试。/.test(capLine) && !/Account D/.test(capLine) && !/没有其它可用成员/.test(capLine), JSON.stringify(capLine));
+    ok('…and it did NOT eat the exhaustion budget: a same-identity refusal still speaks in the same window', (() => {
+      const before = w.notes.length;
+      w.st.ident = { key: 'sub-a', name: 'Account A' };   // in `fails` ⇒ same-identity, which outranks the cap
+      w.arm(); w.ar.fireNow('s1', '账号池已切换到 Account A');
+      return w.notes.length === before + 1 && /^账号 Account A 刚刚拒绝了这个会话的自动续跑/.test(w.notes[before]);
+    })(), JSON.stringify(w.notes));
+    ok('…NEGATIVE CONTROL: with round 1\'s SINGLE budget (both classes sharing one stamp) that line is suppressed — the split is what carries it', (() => {
+      const r = w.ar._fires.get('s1');
+      r.notices = { exhausted: Date.now(), cap: Date.now() };   // one shared stamp, the r1 shape
+      const before = w.notes.length;
+      w.arm(); w.ar.fireNow('s1', '账号池已切换到 Account A');
+      return w.notes.length === before;
+    })());
+  }
+
+  // (iii) the "nowhere else to go" clause is a SECOND fact, from the pool
+  {
+    const w = mk('notarget');
+    w.arm(); w.ar.fireNow('s1', '账号池已切换到 Account A');
+    w.ar.noteFireOutcome('s1', false, 'limit rejection');
+    ok('the ENGINE is the only source of "no usable member left" — noteNoPoolTarget records it for a tracked session', w.ar.noteNoPoolTarget('s1', 2, 'all-rejected') === true && (w.ar._fires.get('s1').noTargetAt || 0) > 0);
+    ok('…and refuses to mint a record for a session the breaker does not track (a stuck pool must not grow the store)', w.ar.noteNoPoolTarget('never-armed', 3, 'all-rejected') === false && !w.ar._fires.has('never-armed'));
+    w.arm(); w.ar.fireNow('s1', '账号池已切换到 Account A');
+    ok('…with that fact in hand the same refusal names the state only the USER can fix', /没有其它可用成员/.test(w.notes[w.notes.length - 1] || '') && /可以添加成员/.test(w.notes[w.notes.length - 1] || ''), JSON.stringify(w.notes));
+  }
+}
+
+// ── §3c THE TWO NOTICE RULES, PURE (truth tables) ──────────────────────────
+{
+  const { refusalNoticeFor, continueNoticeFor, NO_TARGET_FRESH_MS } = arMod;
+  const now = 1788780000000;
+  const far = now + 3 * 3600000, near = now + 45000;
+  const R = (o) => refusalNoticeFor({ now, ...o });
+  ok('PURE refusal: backoff and fire-pending say NOTHING (they do not break the promise)', R({ reason: 'backoff', label: 'A', armedResetsAt: near }) === null && R({ reason: 'fire-pending', label: 'A', armedResetsAt: far }) === null);
+  ok('PURE refusal: an unknown reason says nothing either (a new refusal must opt IN to speaking)', R({ reason: 'something-new', label: 'A', armedResetsAt: far }) === null);
+  ok('PURE refusal: same-identity names the account and, with a far reset, promises the time it will retry', (() => {
+    const n = R({ reason: 'same-identity', label: 'A', armedResetsAt: far });
+    return n.cls === 'exhausted' && /^账号 A 刚刚拒绝了/.test(n.text) && n.text.includes(new Date(far).toLocaleString()) && !/没有其它可用成员/.test(n.text);
+  })(), JSON.stringify(R({ reason: 'same-identity', label: 'A', armedResetsAt: far })));
+  ok('PURE refusal: same-identity on a NEAR arm promises no time (a +45s pacer is not a reset)', (() => {
+    const n = R({ reason: 'same-identity', label: 'A', armedResetsAt: near });
+    return n.cls === 'exhausted' && /账号池恢复可用时会自动继续/.test(n.text) && !/重置后自动继续/.test(n.text);
+  })(), JSON.stringify(R({ reason: 'same-identity', label: 'A', armedResetsAt: near })));
+  ok('PURE refusal: the "nowhere else to go" clause needs the pool\'s FRESH verdict', (() => {
+    const fresh = R({ reason: 'same-identity', label: 'A', armedResetsAt: near, noTargetAt: now - 1000 });
+    const stale = R({ reason: 'same-identity', label: 'A', armedResetsAt: near, noTargetAt: now - NO_TARGET_FRESH_MS - 1 });
+    return /没有其它可用成员/.test(fresh.text) && !/没有其它可用成员/.test(stale.text);
+  })());
+  ok('PURE refusal: hourly-cap is its own class and never claims an account refused us', (() => {
+    const n = R({ reason: 'hourly-cap', label: 'A', armedResetsAt: far, maxImmediate: 3 });
+    return n.cls === 'cap' && /连续尝试 3 次/.test(n.text) && !/A /.test(n.text) && !/拒绝/.test(n.text);
+  })(), JSON.stringify(R({ reason: 'hourly-cap', label: 'A', armedResetsAt: far })));
+  const C = continueNoticeFor;
+  ok('PURE continue: the immediate path is always a pool switch', C({ kind: 'now', armReason: '5h 0% < 10%', label: 'X' }).cls === 'switched');
+  ok('PURE continue: a TIMED fire off the near-arm says the pool switched (round 1 said the limit had reset)', C({ kind: 'timed', armReason: 'switched to a usable account (X)', label: 'X' }).text === '账号池已切换到 X，已自动继续这个任务。');
+  ok('PURE continue: a TIMED fire whose identity MOVED during the gate says the same', C({ kind: 'timed', armReason: 'usage limit', label: 'X', moved: true }).cls === 'switched');
+  ok('PURE continue: an account that came back by itself is not a pool switch', C({ kind: 'timed', armReason: 'account usable again', label: 'X' }).text === '账号 X 已恢复可用，已自动继续这个任务。');
+  ok('PURE continue: a real reset anchor keeps the reset wording', C({ kind: 'timed', armReason: '5h 0% < 10% · 7d 2% < 5%', label: 'X' }).cls === 'reset');
+  ok('PURE continue: a missing label degrades, never throws', C({ kind: 'now', armReason: null, label: null }).text === '账号池已切换到 可用账号，已自动继续这个任务。');
+  // DRIFT GUARD: the arm reasons above are ENGINE strings — if the engine
+  // renames one, the timed pool-switch card silently reverts to "限额已重置"
+  const engSrc = read('src/server/usage-pool-engine.js');
+  ok('DRIFT: the two near-arm reasons the wording keys on are the ones the engine writes', /armIfEnabled\(id, session, Date\.now\(\) \+ 45000, `switched to a usable account \(/.test(engSrc) && /armIfEnabled\?\.\(id, session, Date\.now\(\) \+ 45000, 'account usable again'\)/.test(engSrc));
+}
+
 // ── §4 THE PRE-FIRE GATE IS NO LONGER BYPASSED BY THE IMMEDIATE PATH ───────
 {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-argate-'));
@@ -363,7 +555,11 @@ if (!probe) {
   w.eng.noteWallSignal(w.session, { resetsAtMs: w.R5 * 1000, bucket: 'fiveHour', key: w.LINK, slot: false });
   w.eng.noteTurnEnd(w.session);
   const lines = cap.done();
-  ok('…a single wall on it is HELD (never demote on a guess — the 2.368.34 ladder is the degrade path, not a silent skip)', (w.readCache(w.LINK) || {}).source === 'cli-usage' && lines.some((l) => /holding the demotion/.test(l)), lines.filter((l) => /wall/.test(l)).join(' | '));
+  // NOTE (round 2): assert the LADDER's own output, not "the cache is
+  // untouched" — that only held because the signal was injected. A real
+  // rejection writes its own reading through captureRateLimitEvent before the
+  // ladder ever runs; the leg below drives exactly that.
+  ok('…a single wall on it is HELD (never demote on a guess — the 2.368.34 ladder is the degrade path, not a silent skip)', (w.readCache(w.LINK) || {}).source !== 'wall' && lines.some((l) => /holding the demotion/.test(l)), lines.filter((l) => /wall/.test(l)).join(' | '));
   ok('…and the journal names the failing leg, not a wrong claim about which account it is', lines.some((l) => /this session's slot, but unvalidated: slot-not-a-member/.test(l)), lines.filter((l) => /single wall/.test(l)).join(' | '));
   ok('…every named failure reason is reachable (an unsatisfiable leg is deleted functionality wearing a check\'s clothes)', (() => {
     const w2 = mkWorld();
@@ -378,6 +574,111 @@ if (!probe) {
     const solo = { backend: 'claude', mode: 'chat', host: null, _webuiId: 'solo', claudeSessionId: 'cid-solo', _accountId: w.SPARE, pty: { write() { } } };
     return w.eng.wallKeyFor(solo) === w.SPARE && w.eng.fireIdentityFor(solo).key === w.SPARE;
   })());
+}
+
+// ── §4b2 …and what the REAL producer writes while that hold stands ─────────
+{
+  const w = mkWorld(); const cap = capture();
+  fs.rmSync(path.join(w.am.subDir(w.LINK), '.credentials.json'), { force: true });   // slot no longer validates
+  w.eng._wallRing.clear(); w.eng._sessionWalls.clear();
+  w.eng.recordRateLimitEvent(w.session, { type: 'rate_limit_event', rate_limit_info: { status: 'rejected', rateLimitType: 'five_hour', resetsAt: w.R5 } });
+  w.eng.noteTurnEnd(w.session);
+  await new Promise((r) => setTimeout(r, 40));
+  const lines = cap.done();
+  const c = w.readCache(w.LINK);
+  ok('a REAL rejection writes its OWN reading on the slot key (rate-limit-event, utilization 1) — so "the cache is untouched" was an artefact of injecting the signal', c && c.source === 'rate-limit-event' && c.fiveHour.utilization === 1, JSON.stringify(c));
+  ok('…and the wall machine still demotes NOTHING on an unvalidated slot — two writers, and only the ground-truth one is gated', !lines.some((l) => /\[wall\] demoted/.test(l)) && c.source !== 'wall', lines.filter((l) => /wall/.test(l)).join(' | '));
+  ok('…the ladder says WHY by name: with its credentials gone the link is not a pool member at all (the other unvalidated shape, §4b, is the held one)', (() => {
+    const d = w.eng.demoteWalledAccount(w.session, [{ at: Date.now(), key: w.LINK, slot: false, bucket: 'fiveHour', resetsAtMs: w.R5 * 1000 }]);
+    return d && d.demoted === false && (d.reason === 'not-a-member' || d.reason === 'unverified');
+  })(), 'the ladder demoted an account it could not verify');
+}
+
+// ── §4c THE GATE CAN MOVE US: the fire is keyed to where it LANDED ─────────
+// The pre-fire gate is `beforeAutoResumeFire`, which runs maybePoolAutoSwitch
+// and can re-point the session's credential link. Round 1 resolved the
+// identity BEFORE the gate and kept it: the breaker then quarantined the
+// account we had already left, left the real rejector fireable, journaled the
+// wrong name, and deduped the card under the wrong key.
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-argate3-')); cleanup.push(dir);
+  const sessions = new Map(); const sent = [], notes = [], journal = [];
+  const st = { ident: { key: 'sub-a', name: 'Account A' }, move: false };
+  const ar = create({
+    dataDir: dir, activeSessions: sessions, serverSetting: () => true, log: (...a) => journal.push(a.join(' ')),
+    sendToSession: (id, s, t) => { sent.push(t); return true; }, notify: (id, s, t) => notes.push(t),
+    fireIdentity: () => st.ident,
+    beforeFire: async () => { if (st.move) st.ident = { key: 'sub-b', name: 'Account B' }; return true; },
+  });
+  const s = { mode: 'chat', backend: 'claude', pty: {}, _isStreaming: false, _autoResume: true };
+  sessions.set('s1', s);
+  const arm = () => ar.armIfEnabled('s1', s, Date.now() + 60000, 'usage limit');
+  // NEGATIVE CONTROL first: a gate that moves nothing must key the fire where it always did
+  arm(); ar.fireNow('s1', '账号池已切换到 Account A');
+  await new Promise((r) => setTimeout(r, 20));
+  ok('CONTROL: a gate that does not move the link keys the fire to the identity we resolved', sent.length === 1 && ar._fires.get('s1').last.key === 'sub-a', JSON.stringify(ar._fires.get('s1').last));
+  ar.noteRecovered('s1', 'turn completed normally');   // clean slate
+  st.move = true;
+  arm(); ar.fireNow('s1', '账号池已切换到 Account A');
+  await new Promise((r) => setTimeout(r, 20));
+  ok('a gate that RE-POINTS the link keys the fire to the account the continue landed on', sent.length === 2 && ar._fires.get('s1').last.key === 'sub-b', JSON.stringify(ar._fires.get('s1').last));
+  ok('…and says so in the journal (the name in the line is the account that was billed)', journal.some((l) => /the gate moved this session onto Account B/.test(l)) || journal.some((l) => /\(landed on Account B\) — continued immediately/.test(l)), journal.join(' | '));
+  ok('…so the rejection quarantines the REAL rejector, not the account we came from', (() => {
+    ar.noteFireOutcome('s1', false, 'limit rejection');
+    return ar.recentFireFailures('s1').join(',') === 'sub-b' && journal.some((l) => /the continue onto sub-b was rejected again/.test(l));
+  })(), JSON.stringify(ar.recentFireFailures('s1')));
+  const dedupBefore = notes.length;
+  st.move = false; st.ident = { key: 'sub-b', name: 'Account B' };
+  ar._fires.get('s1').fails = []; ar._fires.get('s1').lastFireAt = Date.now() - 400000;
+  arm(); ar.fireNow('s1', '账号池已切换到 Account B');
+  await new Promise((r) => setTimeout(r, 20));
+  ok('…and the card was deduped under that key too (a second continue onto B in the same window is journal-only)', sent.length === 3 && notes.length === dedupBefore, JSON.stringify({ sent: sent.length, notes }));
+  ar.noteFireOutcome('s1', false, 'limit rejection');                 // sub-b is quarantined
+  st.ident = { key: 'sub-a', name: 'Account A' }; st.move = true;     // …and the gate moves us right back onto it
+  ar._fires.get('s1').lastFireAt = Date.now() - 400000;
+  const burnBefore = sent.length;
+  arm(); ar.fireNow('s1', 'switched');
+  await new Promise((r) => setTimeout(r, 20));
+  ok('a gate that moves us onto an identity we already BURNED this window aborts the spend', sent.length === burnBefore, JSON.stringify({ sent: sent.length, burnBefore }));
+  ok('…the abort is journaled with the post-gate identity, and the session stays armed', journal.some((l) => /refused an immediate continue onto Account B \(same-identity/.test(l)) && ar.statusFor('s1').armed === true, journal.filter((l) => /refused/.test(l)).join(' | '));
+}
+{
+  // null → X is the WIRING finding its voice, not the pool switching accounts:
+  // the fire is still keyed to what we learned, but nothing claims a switch
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-argate4-')); cleanup.push(dir);
+  const sessions = new Map(); const sent = [], notes = [];
+  let calls = 0;
+  const ar = create({
+    dataDir: dir, activeSessions: sessions, serverSetting: () => true, log: () => { },
+    sendToSession: (id, s, t) => { sent.push(t); return true; }, notify: (id, s, t) => notes.push(t),
+    fireIdentity: () => (++calls === 1 ? null : { key: 'sub-x', name: 'Account X' }),
+    beforeFire: async () => true,
+  });
+  const s = { mode: 'chat', backend: 'claude', pty: {}, _isStreaming: false, _autoResume: true };
+  sessions.set('s1', s);
+  ar.armIfEnabled('s1', s, Date.now() + 60000, 'usage limit');
+  ar.fireNow('s1', 'switched');
+  await new Promise((r) => setTimeout(r, 20));
+  ok('an identity we could not resolve BEFORE the gate is not reported as a switch — but the fire is still keyed to what we learned', sent.length === 1 && ar._fires.get('s1').last.key === 'sub-x', JSON.stringify({ sent: sent.length, last: ar._fires.get('s1').last }));
+}
+{
+  // …and the same thing through the REAL engine gate (the r1 verifier's repro):
+  // the link sits on a dead member, the gate re-points it, the continue lands
+  // on the healthy one.
+  const w = mkWorld();
+  w.writeCache(w.LINK, { fetchedAt: Date.now() - 60000, source: 'cli-usage', fiveHour: { utilization: 1, status: 'limited', resetsAt: w.R5 }, sevenDay: { utilization: 0.4, resetsAt: w.R7 } });
+  w.ar.armIfEnabled(w.SID, w.session, Date.now() + 60000, 'usage limit');
+  const did = await w.tickFire();
+  ok('REAL gate: the pre-fire pool evaluation re-points the link and the continue is keyed to the member it landed on', did === true && w.linkNow() === w.SPARE && w.ar._fires.get(w.SID).last.key === w.SPARE, JSON.stringify({ link: w.nameOf(w.linkNow()), last: w.ar._fires.get(w.SID).last }));
+  ok('…and the card names that member instead of claiming the limit reset', w.notes.length === 1 && w.notes[0] === '账号池已切换到 B-Stack Max，已自动继续这个任务。', JSON.stringify(w.notes));
+}
+{
+  // NEGATIVE CONTROL for the wording at integration level: nothing moved, the
+  // wait simply ended ⇒ the reset wording is still what the user gets.
+  const w = mkWorld();
+  w.ar.armIfEnabled(w.SID, w.session, Date.now() + 60000, '5h 0% < 10%');
+  const did = await w.tickFire();
+  ok('CONTROL: an arm that simply came due on a healthy link says the limit reset (and fires onto the same account)', did === true && w.linkNow() === w.LINK && w.notes.length === 1 && w.notes[0] === '用量上限已重置，已自动继续这个任务。', JSON.stringify({ link: w.nameOf(w.linkNow()), notes: w.notes }));
 }
 
 // ── §5 WIRING PINS (2.355.0 law: a fix nobody calls is not a fix) ──────────
@@ -396,7 +697,15 @@ if (!probe) {
   ok('WIRING: decidePoolSwitch takes the exclusion as a NAMED input and reports it (never a silent empty candidate list)', /exclude = null, explain = false \}\)/.test(read('src/account-pool-auto.js')) && /excludedN \? 'all-rejected' : 'no-members'/.test(read('src/account-pool-auto.js')));
   ok('WIRING: session-schema documents the slot flag on the wall signals', /_turnWallSigs:[^\n]*\{at, resetsAtMs, bucket, scopedName, key, slot\}/.test(read('src/session-schema.js')), read('src/session-schema.js').split('\n').find((l) => /_turnWallSigs/.test(l)));
   ok('the engine INSTANCE exports the new seams (functional call check, never a source grep — the 2.369.4 lesson)', ['fireIdentityFor', 'sessionBillingMember', 'sessionReadingMember', 'wallKeyFor', 'sessionWalledMembers'].every((k) => typeof probe.eng[k] === 'function'));
-  ok('the auto-resume INSTANCE exports the breaker seams', ['noteFireOutcome', 'recentFireFailures', 'canFire'].every((k) => typeof probe.ar[k] === 'function'));
+  ok('the auto-resume INSTANCE exports the breaker seams', ['noteFireOutcome', 'recentFireFailures', 'canFire', 'noteNoPoolTarget'].every((k) => typeof probe.ar[k] === 'function'));
+  // ── round 2 ──
+  const ar2src = read('src/server/auto-resume.js');
+  ok('WIRING: the refusal notice is chosen by the REASON (the call site passes the check through; round 1 computed `chk` and dropped it)', /breakerNotice\(id, session, label \|\| key, kind, chk\)/.test(ar2src) && /function breakerNotice\(id, session, label, kind, chk\) \{[\s\S]{0,700}refusalNoticeFor\(\{[\s\S]{0,200}reason: chk && chk\.reason/.test(ar2src));
+  ok('WIRING: a journal-only refusal spends no notice budget (the return is ABOVE the stamp)', /if \(!n\) return;[\s\S]{0,220}r\.notices\[n\.cls\] = now; save\(\);/.test(ar2src));
+  ok('WIRING: the identity is re-resolved INSIDE deliver (after the gate) and re-checked before spending', /const deliver = \(\) => \{[\s\S]{0,1400}const ident2 = identityFor\(id, session\) \|\| ident;[\s\S]{0,400}const chk2 = canFire\(id, key2, kind, now2\);[\s\S]{0,200}if \(!chk2\.ok\)/.test(ar2src) && /noteFired\(id, key2, kind, Date\.now\(\)\)/.test(ar2src) && /announce\(id, session, key2, kind, note\)/.test(ar2src));
+  ok('WIRING: the continue card is chosen from the ARM + whether the gate moved us, in one place', /const moved = !!key && !!key2 && key2 !== key;[\s\S]{0,600}const note = continueNoticeFor\(\{ kind, armReason: a2\.reason, label: label2, moved \}\);/.test(ar2src));
+  ok('WIRING: the pool hands its own no-target verdict to the breaker (the ONLY source of "no usable member left")', /const noWay = ds && \(ds\.reason === 'all-rejected' \|\| ds\.reason === 'no-members' \|\| ds\.reason === 'stuck'\);\s*\n\s*if \(noWay\) try \{ getAutoResume\(\)\?\.noteNoPoolTarget\?\.\(sid, rejected\.length, ds\.reason\); \}/.test(eng));
+  ok('the module exports the two PURE notice rules (functional check)', typeof arMod.refusalNoticeFor === 'function' && typeof arMod.continueNoticeFor === 'function' && arMod.NO_TARGET_FRESH_MS > 0);
   ok("WIRING: the verdict's SCOPE for an unpooled session is its own credential slot too (routing the verdict to the spawn-time org asks a different account whether this session may spend)", /function _wallScope\(session\) \{[\s\S]{0,220}return wallKeyFor\(session\);/.test(eng) && !/orgVerifiedKey\(session, usageCacheKeyFor\(session\), 'wall/.test(eng));
   ok('WIRING: the immediate path cannot turn the pre-fire probe into a spawn per pool switch (60s floor per target; the RE-VERDICT always runs)', /_preFireProbeAt/.test(eng) && /Date\.now\(\) - probedAt > 60e3/.test(eng));
 }
