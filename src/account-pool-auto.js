@@ -29,7 +29,7 @@
 // every decision below then behaves EXACTLY as it did before this input
 // existed. That is deliberate: a harness that cannot read a login deadline
 // must not have its members quietly demoted.
-const { loginUsable, loginSwitchTarget, loginRank, loginBucketLabel } = require('./login-expiry.js');
+const { loginUsable, loginSwitchTarget, loginRank, loginWallPhrase, loginBlockedText } = require('./login-expiry.js');
 
 const SWITCH_THRESHOLD_PCT = 5;
 // PER-BUCKET-KIND thresholds (2.268.2, user-designed: what matters is
@@ -181,12 +181,21 @@ function decidePoolSwitch({ currentId, members, readCache, nowSec, proactive = f
   // existing caller and test, while letting the engine ask WHY nothing
   // happened — a pool sitting on a dead account must not be silent.
   const none = (why, extra) => (explain ? { to: null, reason: why, ...extra } : null);
-  // Which buckets are actually holding this decision back, by name.
+  // Which buckets are actually holding this decision back, by name — plus, as
+  // a SEPARATE named output, the current member's own dead LOGIN.
+  //
+  // ROUND-3 VERIFIER: round 1 prepended the login label into `deadBuckets`,
+  // and the engine renders that array as "spent: <list>" followed by the quota
+  // remedy ("until a window resets, you add a member, …"). So the one wall the
+  // user can actually clear in 30 seconds was reported as a spent quota bucket
+  // and the word "re-login" never appeared — the mirror of the round-2 defect
+  // where `all-logins-expired` could only ever describe the OTHER members
+  // (loginBlocked skips the current one BY CONSTRUCTION). A login is not a
+  // bucket: it does not heal on a timer and it has a different fix, so it gets
+  // its own field and `deadBuckets`/`liveBuckets` stay a pure QUOTA sentence.
   const bucketDetail = (brs) => ({
-    deadBuckets: [
-      ...(readLogin && !loginUsable(login(currentId)) ? [loginBucketLabel(login(currentId))] : []),
-      ...brs.filter((b) => b.remaining < THRESH[b.kind].hard).map((b) => `${b.label} ${Math.round(b.remaining)}%`),
-    ],
+    ...(readLogin && !loginUsable(login(currentId)) ? { fromLogin: loginWallPhrase(login(currentId)) } : {}),
+    deadBuckets: brs.filter((b) => b.remaining < THRESH[b.kind].hard).map((b) => `${b.label} ${Math.round(b.remaining)}%`),
     liveBuckets: brs.filter((b) => b.remaining >= THRESH[b.kind].hard).map((b) => `${b.label} ${Math.round(b.remaining)}%`),
   });
   // Login facts, asked at most once per member per decision. `login(id)` is
@@ -333,6 +342,67 @@ function decidePoolSwitch({ currentId, members, readCache, nowSec, proactive = f
   return none('hold', { fromRemaining: cur.known ? cur.remaining : null });
 }
 
+/**
+ * poolBlockedNotice(d, {poolName, currentName}) — THE sentence the hourly
+ * "this pool is stuck" server-notice says. PURE, so the suite can assert the
+ * STRING a user reads instead of only the decision object behind it.
+ *
+ * ROUND-3 VERIFIER, and the reason this is a function at all: the engine
+ * composed this inline, so the only thing any test ever pinned was
+ * `decidePoolSwitch`'s return value — and the branch where the wall is the
+ * CURRENT member's dead login rendered it as a spent quota bucket ("spent:
+ * login signed out") followed by the quota remedy ("until a window resets, you
+ * add a member, or you move them off the pool"). The word "re-login" never
+ * appeared, and the one account the user had to act on was the only one the
+ * notice could not name. That notice repeats once per hour, per pool, forever,
+ * because a dead login — unlike a quota wall — does not heal on a timer.
+ *
+ * THREE WALLS, and they can co-occur; each one may only claim what it knows:
+ *   d.fromLogin            the CURRENT member's own login is dead (the account
+ *                          the user must act on; NEVER in `loginBlocked`,
+ *                          which skips the current member by construction)
+ *   'all-logins-expired'   the login gate is the ONLY thing that emptied the
+ *                          candidate list (round-2 rule)
+ *   deadBuckets/liveBuckets  the QUOTA sentence — buckets only, never a login
+ */
+function poolBlockedNotice(d, { poolName = '', currentName = 'the current member' } = {}) {
+  const dead = (d?.deadBuckets || []).join(', ');
+  const live = (d?.liveBuckets || []).join(', ');
+  const what = dead ? `spent: ${dead}` : 'out of quota';
+  const rest = live ? ` (still available: ${live})` : '';
+  const loginNames = loginBlockedText(d?.loginBlocked);
+  const loginWall = d?.reason === 'all-logins-expired'; // the OTHER members
+  const curLoginWall = !!d?.fromLogin;                  // the CURRENT member
+  // Quota facts are about the CURRENT member, so under a login wall they are a
+  // side note ("its quota is also spent") and are dropped entirely when its
+  // quota is fine — "out of quota" would be a plain lie about a 90% member.
+  const alsoQuota = curLoginWall && dead ? ` (its quota is also spent: ${dead})` : '';
+  const why = curLoginWall
+    ? `${currentName}'s ${d.fromLogin} — no member can take over${alsoQuota}`
+    : loginWall
+    ? `no member can take it — ${loginNames}`
+    : d?.reason === 'no-members'
+    ? `no member can serve it — ${what}${rest}`
+    : `nowhere better to go — ${what}${rest}`;
+  // Only meaningful for the quota walls: "the best other member is at N%" is
+  // not a reason to keep waiting when the wall is an expired login.
+  const alt = !loginWall && !curLoginWall && d?.bestRemaining != null ? ` The best other member is at ${Math.round(d.bestRemaining)}%.` : '';
+  // MIXED wall: the members that ALSO need a re-login, whenever `why` has not
+  // already listed them (round 2 — one login-blocked member used to claim the
+  // whole refusal and the bucket sentence was dropped). `why` lists them ONLY
+  // in the pure-'all-logins-expired' shape; when the current member's own
+  // login also died, `why` is about the current member, so the others still
+  // have to be named here or they vanish from the only notice about them.
+  const namedInWhy = loginWall && !curLoginWall;
+  const also = !namedInWhy && loginNames ? ` Also needing a re-login: ${loginNames}.` : '';
+  const fix = curLoginWall
+    ? ` Re-login ${currentName} in Manage Agents.`
+    : loginWall
+    ? ' Re-login those accounts in Manage Agents.'
+    : ' Conversations on it will hit a limit until a window resets, you add a member, or you move them off the pool.';
+  return `Pool "${poolName}": ${why}.${alt}${also}${fix}`;
+}
+
 
 // ── auto-cli quota refresh decision (2.329.0, owner-approved 2026-08-12 after
 // the ToS explicit-permit argument; cadence made BURN-AWARE per the owner's
@@ -420,4 +490,4 @@ function quotaVerdict(cache, nowSec, { tier = 'hot' } = {}) {
 
 module.exports = {
   quotaVerdict,
-  classifyAuthFailure, decideCliRefresh, SWITCH_THRESHOLD_PCT, THRESH, rankPoolMembers, UNKNOWN_REMAINING_PCT, PROACTIVE_MARGIN_SEC, MIN_GAIN_PCT, bucketRemaining, bucketRems, accountRemaining, weeklyDeadline, decidePoolSwitch };
+  classifyAuthFailure, decideCliRefresh, SWITCH_THRESHOLD_PCT, THRESH, rankPoolMembers, UNKNOWN_REMAINING_PCT, PROACTIVE_MARGIN_SEC, MIN_GAIN_PCT, bucketRemaining, bucketRems, accountRemaining, weeklyDeadline, decidePoolSwitch, poolBlockedNotice };

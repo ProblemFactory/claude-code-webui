@@ -154,6 +154,20 @@ function loginBlockedText(list) {
   return (list || []).map((m) => `${m?.name || m?.id || 'a member'} (${loginBlockedPhrase(m)})`).join(', ');
 }
 
+/** How to say the CURRENT member's OWN dead login inside a sentence that has
+ *  already named the account ("Fish Max's <phrase> — no member can take
+ *  over"). Round-3 verifier: the current member's dead login used to be
+ *  smuggled into `deadBuckets`, where the notice rendered it as a SPENT QUOTA
+ *  BUCKET ("spent: login signed out") and prescribed the quota remedy — the
+ *  word "re-login" never appeared, and the one account the user had to act on
+ *  was the only one the notice could not name. loginBucketLabel is a LIST-ITEM
+ *  label; this one is a CLAUSE, so it reads with the possessive. */
+function loginWallPhrase(info) {
+  if (info?.state === 'logged-out') return 'login is signed out';
+  if (info?.state === 'expired') return 'login session expired';
+  return 'login session is unusable'; // never reached through loginUsable(), but never silent either
+}
+
 /** The most urgent warning rung this login currently qualifies for, or null. */
 function warnStageFor(info) {
   if (!loginUsable(info)) return 'expired';
@@ -218,6 +232,6 @@ function reviewWarnings(info, entry, now = Date.now(), opts = {}) {
 module.exports = {
   EXPIRING_MS, NEAR_MS, WARN_STAGES, STAGE_MS, DEAD_STATES, STALE_GRACE_MS,
   loginState, loginUsable, loginSwitchTarget, loginRank, loginBlockReason,
-  loginAgeText, loginBucketLabel, loginBlockedPhrase, loginBlockedText,
+  loginAgeText, loginBucketLabel, loginBlockedPhrase, loginBlockedText, loginWallPhrase,
   warnStageFor, reviewWarnings,
 };

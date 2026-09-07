@@ -109,7 +109,7 @@ console.log('— §2 harness descriptor');
 // ── §3 pool decisions ────────────────────────────────────────────────────
 console.log('— §3 pool decisions');
 {
-  const { decidePoolSwitch, rankPoolMembers } = R('src/account-pool-auto.js');
+  const { decidePoolSwitch, rankPoolMembers, poolBlockedNotice } = R('src/account-pool-auto.js');
   const S = 1788000000; // unix SECONDS clock for the pool module
   const D = 86400;
   const healthy = { fiveHour: { utilization: 0.1, resetsAt: S + 1800 }, sevenDay: { utilization: 0.1, resetsAt: S + 5 * D }, scopedWeekly: [] };
@@ -181,7 +181,11 @@ console.log('— §3 pool decisions');
   ck('...even with NO quota data at all for it: a dead login is a fact, not ignorance (the no-data hold does not apply)', d5.to && d5.reason === 'login-expired');
   ck('NEGATIVE CONTROL: no-data + a HEALTHY login still holds (unchanged)', dec({ a: null, b: healthy, c: healthy }, { a: L.ok, b: L.ok, c: L.ok }).reason === 'no-data');
   const d6 = dec({ a: healthy, b: healthy, c: healthy }, { a: L.expired, b: L.expired, c: L.out });
-  ck('current dead + every other dead ⇒ named, never a silent null', d6.to === null && d6.reason === 'all-logins-expired' && (d6.deadBuckets || []).includes('login expired'));
+  // ROUND 3: the current member's dead login is its OWN named output. It used
+  // to ride in `deadBuckets`, where the notice rendered it as a spent quota
+  // bucket — see §3d, which asserts the sentence itself.
+  ck('current dead + every other dead ⇒ named, never a silent null', d6.to === null && d6.reason === 'all-logins-expired' && d6.fromLogin === 'login session expired');
+  ck("...and the QUOTA arrays stay a quota sentence (a login is not a spent bucket)", (d6.deadBuckets || []).every((b) => !/login/i.test(b)));
 
   // ── ROUND 2 (adversarial verifier): the login gate may not claim a wall it
   // did not build, and it may not pin a conversation to a member that is
@@ -244,6 +248,73 @@ console.log('— §3 pool decisions');
     ck('NEGATIVE CONTROL: a NEAR member that is ALSO quota-dead is not a scrap (quota is a real wall of its own)',
       dec4({ a: spent5, q1: spent5, q2: spent5, x: spent5 }, { a: L.ok, q1: L.ok, q2: L.ok, x: L.near }).to === null);
     ck('NEGATIVE CONTROL: with no readLogin the scraps machinery cannot exist (no toLoginNear on any old decision)', shipped.toLoginNear === undefined);
+  }
+
+  // ── §3d ROUND 3: the SENTENCE, not just the decision object ─────────────
+  // The hourly "this pool is stuck" notice was composed inline in the engine,
+  // so every test ever written asserted the decision behind it and none the
+  // string a user reads. In the branch where the wall is the CURRENT member's
+  // dead login (never in `loginBlocked` — that list skips the current member
+  // BY CONSTRUCTION) the login was smuggled through `deadBuckets`, so the
+  // notice said "spent: login signed out … until a window resets, you add a
+  // member, or you move them off the pool": a quota remedy for a wall that
+  // does not heal on a timer, and the one account the user had to act on was
+  // the only one the notice could not name. Repeats once per hour, per pool.
+  console.log('— §3d round 3: the notice a stuck pool actually prints');
+  {
+    const say = (d, currentName = 'Cur') => poolBlockedNotice(d, { poolName: 'P', currentName });
+    const m2 = [{ id: 'a', name: 'Cur' }, { id: 'q1', name: 'Quota1' }];
+    const dec2 = (caches, logins, ms = m2) => decidePoolSwitch({
+      currentId: 'a', members: ms, nowSec: S, explain: true,
+      readCache: (id) => caches[id] ?? null,
+      ...(logins ? { readLogin: (id) => logins[id] ?? L.unknown } : {}),
+    });
+    // (a) the verifier's first reproduction: current login expired, the other
+    // member quota-dead. The current member's own quota is PERFECT.
+    const a1 = dec2({ a: healthy, q1: spent5 }, { a: L.expired, q1: L.ok });
+    const s1 = say(a1);
+    ck('(a) current login expired + a quota-dead sibling ⇒ still a blocked notice', a1.to === null && s1.startsWith('Pool "P": '));
+    ck('...it NAMES the account the user must act on', s1.includes('Cur') && /Re-login Cur in Manage Agents\./.test(s1));
+    ck('...it says the LOGIN died, not that a quota bucket is spent', s1.includes("Cur's login session expired") && !/spent: login/.test(s1));
+    ck('...and it never prescribes the quota remedy for a wall that no window can clear', !/until a window resets/.test(s1) && !/out of quota/.test(s1));
+    ck('...nor claims a quota fact about a member sitting at 90% (the buckets are simply not the wall)', !/still available/.test(s1));
+    // (b) the wiped shape with no usage cache at all
+    const s2 = say(dec2({ a: null, q1: spent5 }, { a: L.out, q1: L.ok }));
+    ck('(b) a SIGNED-OUT current member with no usage data says signed out + re-login', s2.includes("Cur's login is signed out") && /Re-login Cur in Manage Agents\./.test(s2) && !/window resets/.test(s2));
+    // (c) the pool has no other member at all
+    const s3 = say(dec2({ a: healthy }, { a: L.expired }, [{ id: 'a', name: 'Cur' }]));
+    ck('(c) a one-member pool whose login died gets the same honest sentence', s3.includes("Cur's login session expired") && /Re-login Cur in Manage Agents\./.test(s3) && !/spent: login/.test(s3));
+    // (d) BOTH walls on the current member: the quota fact is a side note, and
+    // it is only said when it is true.
+    const s4 = say(dec2({ a: spent5, q1: spent5 }, { a: L.expired, q1: L.ok }));
+    ck('(d) when the current member is ALSO out of quota, the login leads and the quota rides along', /login session expired/.test(s4) && /its quota is also spent: 5h 0%/.test(s4));
+    // (e) MIXED: the current login died AND another member needs a re-login —
+    // `why` is about the current member here, so the others must still be
+    // named or the only notice that mentions them drops them.
+    const s5 = say(dec2({ a: healthy, q1: healthy }, { a: L.expired, q1: L.out }));
+    ck('(e) a sibling that ALSO needs a re-login is still named when the current login is the headline', /Also needing a re-login: Quota1 \(signed out\)\./.test(s5) && /Cur's login session expired/.test(s5));
+
+    // NEGATIVE CONTROLS — every sentence that was already right stays right.
+    const quotaOnly = say(dec2({ a: spent5, q1: spent5 }, null));
+    ck('NEGATIVE CONTROL: a pure QUOTA wall keeps the shipped sentence verbatim',
+      quotaOnly === 'Pool "P": no member can serve it — spent: 5h 0% (still available: 7d 90%). Conversations on it will hit a limit until a window resets, you add a member, or you move them off the pool.');
+    const otherLogins = say(dec2({ a: spent5, q1: healthy }, { a: L.ok, q1: L.expired }));
+    ck("NEGATIVE CONTROL: 'all-logins-expired' with a HEALTHY current login is unchanged (round 2's sentence)",
+      otherLogins === 'Pool "P": no member can take it — Quota1 (login expired). Re-login those accounts in Manage Agents.');
+    ck('NEGATIVE CONTROL: ...and it does not drag the current member into a wall it is not part of', !/Cur/.test(otherLogins));
+    const m3 = [...m2, { id: 'x', name: 'X' }];
+    const mixedQuota = say(dec2({ a: spent5, q1: spent5, x: healthy }, { a: L.ok, q1: L.ok, x: L.expired }, m3));
+    ck("NEGATIVE CONTROL: the round-2 MIXED wall (quota emptied the list, one login also dead) still says both halves",
+      /spent: 5h 0%/.test(mixedQuota) && /Also needing a re-login: X \(login expired\)\./.test(mixedQuota) && /until a window resets/.test(mixedQuota));
+    ck('NEGATIVE CONTROL: a current member with a HEALTHY login never gets the fromLogin clause',
+      dec2({ a: spent5, q1: spent5 }, { a: L.ok, q1: L.ok }).fromLogin === undefined);
+    ck('NEGATIVE CONTROL: with no readLogin at all the field cannot exist (old behaviour is byte-identical)',
+      dec2({ a: spent5, q1: spent5 }, null).fromLogin === undefined);
+    // 'stuck' keeps its "the best other member is at N%" clause — that number
+    // is an argument for waiting, which is meaningless under a login wall.
+    const stuck = { reason: 'stuck', to: null, fromRemaining: 0, bestRemaining: 3, deadBuckets: ['5h 0%'], liveBuckets: [] };
+    ck("NEGATIVE CONTROL: a 'stuck' quota notice still quotes the best other member", / The best other member is at 3%\./.test(say(stuck)));
+    ck('...and that clause is suppressed under a login wall, where waiting is not the fix', !/best other member/.test(say({ ...stuck, fromLogin: 'login session expired' })));
   }
 }
 
@@ -483,6 +554,64 @@ console.log('— §4 warning ladder (fake clock, persisted ledger)');
     for (const d of [dir4, dir5, dir6]) fs.rmSync(d, { recursive: true, force: true });
   }
 
+  // ── ROUND 3 (adversarial verifier): the item text branched on the RUNG, and
+  // `warnStageFor` maps BOTH 'expired' and 'logged-out' onto the terminal
+  // 'expired' rung. A wiped file is produced by ANY unrecoverable refresh (a
+  // revoked or rotated session, an explicit logout in an isolated dir), not
+  // only by the deadline passing, and the CLI KEEPS refreshTokenExpiresAt when
+  // it blanks the tokens — so the deadline can still be in the FUTURE. The
+  // inbox then said the login "expired" at a date weeks out, at urgency
+  // `urgent`, while the chip on the same row said "signed out". Two surfaces,
+  // one record, opposite claims. (Every wiped dir on the instance this was
+  // built on happens to have a PAST deadline, which is why §4/§4b never hit
+  // it — the fixtures inherited the local sample, not the shape.)
+  console.log('— §4c round 3: a wiped credential file whose deadline has not passed yet');
+  {
+    const wiped = (exp) => creds({ accessToken: '', refreshToken: '', expiresAt: 0, refreshTokenExpiresAt: exp, scopes: ['user:inference'] });
+    const future = loginState(wiped(NOW + 20 * 24 * H), NOW);
+    ck('the reading itself is honest: signed out, with a POSITIVE msLeft', future.state === 'logged-out' && future.msLeft === 20 * 24 * H);
+    ck('...and it is still the terminal RUNG (the tokens are gone: every turn fails right now)', warnStageFor(future) === 'expired');
+    const txt = watch.itemTextFor('expired', 'Fish Max', future);
+    ck('the inbox item never says "expired" about a timestamp in the future', !/expired/.test(txt));
+    ck('...it says what actually happened — the CLI cleared the tokens — and asks for the re-login', /is signed out/.test(txt) && /the CLI cleared its tokens/.test(txt) && /re-login it in Manage Agents/.test(txt));
+    ck('...and it does not quote a "session ended" date that has not happened', !/session ended/.test(txt));
+    ck('the two surfaces now agree: the chip for the SAME record also says signed out', (() => {
+      const ma = fs.readFileSync(path.join(REPO, 'src/lib/manage-agents.js'), 'utf8');
+      return /ls\.state === 'logged-out' \? t\('login signed out — re-login'\)/.test(ma) && /is signed out/.test(txt);
+    })());
+    // NEGATIVE CONTROLS — the two shapes that were already right.
+    const past = loginState(wiped(NOW - 30 * H), NOW);
+    const txtPast = watch.itemTextFor('expired', 'Old Max', past);
+    ck('...and the date is NOT dropped for the common shape (deadline already passed): it moves into the clause', /is signed out/.test(txtPast) && /its login session ended 2026-/.test(txtPast));
+    const expired = loginState(creds({ ...LIVE, refreshTokenExpiresAt: NOW - H }), NOW);
+    ck('NEGATIVE CONTROL: a plainly EXPIRED login (tokens still on disk) keeps the shipped "expired <when>" wording',
+      expired.state === 'expired' && /^Claude login for "X" expired 2026-.* — re-login it in Manage Agents$/.test(watch.itemTextFor('expired', 'X', expired)));
+    ck('NEGATIVE CONTROL: the FUTURE rungs are untouched (they were never about the wiped shape)',
+      /^Claude login for "X" expires in 20 h \(2026-.*\) — re-login it in Manage Agents$/.test(watch.itemTextFor('24h', 'X', loginState(creds({ ...LIVE, refreshTokenExpiresAt: NOW + 20 * H }), NOW))));
+    // The sweep files it as one urgent item, once — nothing about the wording
+    // change may weaken the ledger.
+    const dir7 = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-lew7-'));
+    const filed7 = [];
+    const w9 = watch.create({
+      accounts: { list: () => ({ accounts: [{ id: 'sub-wiped', name: 'Fish Max', type: 'subscription', backend: 'claude' }] }), loginStateOf: (id, t) => loginState(wiped(NOW + 20 * 24 * H), t) },
+      userTodos: { add: (k, i) => filed7.push(i) }, dataDir: dir7, now: () => NOW, log: () => {},
+    });
+    w9.sweep(); w9.sweep();
+    ck('the sweep files exactly one URGENT item for it and the ledger stops there', filed7.length === 1 && filed7[0].urgency === 'urgent');
+    ck('...the future deadline lives in the DETAIL, in the future tense, beside the state', /Login session ends: 2026-/.test(filed7[0].detail) && /State: logged-out/.test(filed7[0].detail));
+    ck('...and a PAST deadline reads "ended" there (the same tense rule as the text)', (() => {
+      const dir8 = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-lew8-'));
+      const f8 = [];
+      watch.create({
+        accounts: { list: () => ({ accounts: [{ id: 'sub-p', name: 'P', type: 'subscription', backend: 'claude' }] }), loginStateOf: (id, t) => loginState(wiped(NOW - 20 * MIN), t) },
+        userTodos: { add: (k, i) => f8.push(i) }, dataDir: dir8, now: () => NOW, log: () => {},
+      }).sweep();
+      fs.rmSync(dir8, { recursive: true, force: true });
+      return f8.length === 1 && /Login session ended: 2026-/.test(f8[0].detail);
+    })());
+    fs.rmSync(dir7, { recursive: true, force: true });
+  }
+
   for (const d of [dataDir, dataDir2, dataDir3]) fs.rmSync(d, { recursive: true, force: true });
 }
 
@@ -510,15 +639,26 @@ console.log('— §5 wiring');
   ck(`every rankPoolMembers call in the engine passes readLogin (${ranks.length} call sites)`, ranks.length >= 2 && ranks.every((c) => /readLogin/.test(c)));
   ck('quotaVerdictFor cannot answer "usable" through a dead login', /loginUsable\(li\)/.test(eng) && /re-login needed/.test(eng));
   ck('the auth-failure notice says WHY when the refresh token expired (keeping the old wording otherwise)', /login session expired \(refresh token expired at/.test(eng) && /is failing authentication/.test(eng));
-  ck('the "nowhere to go" notice speaks the login wall as its own sentence', /all-logins-expired/.test(eng) && /Re-login those accounts in Manage Agents/.test(eng));
-  // ROUND 2 notice wiring: per-member phrasing, the MIXED clause, and the
-  // scraps sentence — each was a wrong claim in round 1.
-  ck('...naming each blocked member with ITS OWN state (never one "expired or is about to" over the whole list)', /loginBlockedText\(d\.loginBlocked\)/.test(eng) && !/login session has expired or is about to/.test(eng));
-  ck('...and a MIXED wall (quota emptied the list AND someone needs a re-login) says both halves', /Also needing a re-login: \$\{loginNames\}/.test(eng) && /const also = !loginWall && loginNames/.test(eng));
+  ck('the "nowhere to go" notice reaches the pool-blocked branch for the login wall too', /d\.reason === 'all-logins-expired'\) \{/.test(eng));
+  // ROUND 3: the sentence itself moved into the PURE module so §3d can assert
+  // the STRING (it was composed inline here, so no test ever read it — and it
+  // rendered the current member's dead login as a spent quota bucket). The
+  // engine must CALL it and must not have grown a second copy.
+  ck('the engine composes the blocked notice through the PURE poolBlockedNotice', /poolBlockedNotice\(d, \{ poolName: a\.name, currentName: nameOf\(currentId\) \}\)/.test(eng)
+    && /poolBlockedNotice,? .*= require\('\.\.\/account-pool-auto\.js'\)/.test(eng));
+  ck('...and no longer carries an inline twin of it', !/spent: \$\{dead\}/.test(eng) && !/Also needing a re-login/.test(eng) && !/until a window resets/.test(eng));
   ck('...while a switch onto a NEAR-expiry scrap tells the user the reprieve is short', /d\.toLoginNear/.test(eng) && /re-login it in Manage Agents now/.test(eng));
   ck('...on BOTH switch surfaces — the per-session re-point (plan C) fires far more often than the pool-level one', /ds\.toLoginNear/.test(eng) && (eng.match(/re-login it in Manage Agents now/g) || []).length === 2);
   const apa = fs.readFileSync(path.join(REPO, 'src/account-pool-auto.js'), 'utf8');
   ck("the pure decision only claims 'all-logins-expired' when the login gate was the ONLY wall", /loginBlocked\.length && !quotaBlockedN\) \? 'all-logins-expired'/.test(apa) && /quotaBlockedN\+\+/.test(apa));
+  // ROUND 2 phrasing + ROUND 3 placement, now both in the pure module.
+  ck('each blocked member states its OWN state in the notice (never one "expired or is about to" over the whole list)', /loginBlockedText\(d\?\.loginBlocked\)/.test(apa) && !/login session has expired or is about to/.test(apa));
+  ck('a MIXED wall (quota emptied the list AND someone needs a re-login) says both halves', /Also needing a re-login: \$\{loginNames\}/.test(apa) && /const also = !namedInWhy && loginNames/.test(apa));
+  // ROUND 3: the current member's dead login is a named FIELD, and the quota
+  // arrays never carry a login label again.
+  ck("the current member's dead login is its own output, never an entry in deadBuckets", /fromLogin: loginWallPhrase\(login\(currentId\)\)/.test(apa)
+    && !/deadBuckets: \[\s*\.\.\.\(readLogin/.test(apa));
+  ck('...and the notice gives it the re-login remedy instead of the quota one', /Re-login \$\{currentName\} in Manage Agents\./.test(apa) && /const curLoginWall = !!d\?\.fromLogin/.test(apa));
   ck('...and a hard-dead current member may fall back to the NEAR list (the escape is not a voluntary move)', /const usingScraps = !ranked\.length && hardDead && nearRanked\.length > 0/.test(apa));
 
   ck('a login-expired escape is exempt from the 180s dwell belt (dead login = hard death, and its fromRemaining is null)',
@@ -534,6 +674,11 @@ console.log('— §5 wiring');
   ck('the chip SVG is explicitly sized (an unsized inline SVG swallows the row — 2.369.13)', /\.acct-login-chip svg \{[^}]*width: 10px[^}]*height: 10px/.test(css));
   const panel = fs.readFileSync(path.join(REPO, 'src/lib/user-todos-panel.js'), 'utf8');
   ck("the inbox item's click lands on Manage Agents instead of a dead end", /key === 'accounts'/.test(panel) && /_showAgentsDialog/.test(panel));
+  // ROUND 3: the item text asks the STATE what happened, not the rung how
+  // urgent it is — warnStageFor collapses 'logged-out' onto 'expired'.
+  const lew = fs.readFileSync(path.join(REPO, 'src/server/login-expiry-watch.js'), 'utf8');
+  ck("the inbox item branches on the login STATE, so a wiped file is never reported as 'expired'", /if \(info\?\.state === 'logged-out'\)/.test(lew)
+    && lew.indexOf("info?.state === 'logged-out'") < lew.indexOf("if (stage === 'expired'"));
 
   // i18n: every user-visible string in the chip has zh + ja
   const zh = fs.readFileSync(path.join(REPO, 'src/lib/i18n-zh.js'), 'utf8');

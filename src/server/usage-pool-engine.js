@@ -37,7 +37,7 @@ function create({ app, rootDir, USAGE_CACHE_DIR, activeSessions, wss, WS_OPEN, g
 // hot=off → also ask ONE connected client to cold-restart the affected
 // conversations (headless instances degrade to hot behavior until a client
 // appears — the switch itself never waits on a browser).
-const { decidePoolSwitch, rankPoolMembers, SWITCH_THRESHOLD_PCT: POOL_HARD_PCT } = require('../account-pool-auto.js');
+const { decidePoolSwitch, rankPoolMembers, poolBlockedNotice, SWITCH_THRESHOLD_PCT: POOL_HARD_PCT } = require('../account-pool-auto.js');
 const { captureRateLimitEvent } = require('../rate-limit-capture.js'); // was a FREE IDENTIFIER since extraction #5 — passive rate_limit_event capture silently dead for 3 days (5th lost binding; the try/catch swallowed the ReferenceError into a log line). The PARSE now reaches the engine through the claude harness's quota.signalFromStream (S4) — one classifier per harness.
 // ── THE harness registry (S4, docs/design-harness-plugins.md §2.4): each
 // harness declares its QuotaSignalSource = normalize / signalFromStream /
@@ -134,7 +134,7 @@ function quotaBackendFor(key, session) {
   return 'claude';
 }
 const { quotaVerdict } = require('../account-pool-auto.js'); // THE account-usability verdict (2.369.0, owner-designed)
-const { loginUsable, loginBucketLabel, loginBlockedText, loginAgeText } = require('../login-expiry.js'); // PURE: is this member's LOGIN SESSION still alive (2026-09-07)
+const { loginUsable, loginBucketLabel, loginAgeText } = require('../login-expiry.js'); // PURE: is this member's LOGIN SESSION still alive (2026-09-07)
 const { UsageEstimator, overlayCache: estOverlayCache, predictCalib, CLAUDE_MAX_PRIOR_FULL_USD } = require('../usage-estimator.js');
 const usageAnchors = new UsageAnchors({ dataDir: path.join(rootDir, 'data') });
 // Which caches map to which identity (org-merge aware) — shared by the sweep
@@ -1706,37 +1706,17 @@ function maybePoolAutoSwitchForPool(poolId) {
       // different branch. `_sentNotices` is a per-BOOT permanent Set, so the
       // key must carry an hour bucket or a recurrence is never reported again.
       if (d.reason === 'stuck' || d.reason === 'no-members' || d.reason === 'no-settleable' || d.reason === 'all-logins-expired') {
-        // Say WHICH buckets are dead. "Every member is out of quota" is wrong
-        // under the nested model and points at the wrong action (pay/wait a
-        // week) when the truth is usually "one model's weekly cap is spent
-        // while the 7-day budget still has 40% left".
-        const dead = (d.deadBuckets || []).join(', ');
-        const live = (d.liveBuckets || []).join(', ');
-        const what = dead ? `spent: ${dead}` : 'out of quota';
-        const rest = live ? ` (still available: ${live})` : '';
-        const alt = d.bestRemaining != null ? ` The best other member is at ${Math.round(d.bestRemaining)}%.` : '';
-        // A login wall is a DIFFERENT sentence from a quota wall: the fix is a
-        // re-login, not waiting for a window (2.313.0 named-bucket rule). Each
-        // member states its OWN fact — round 1 said "expired or is about to"
-        // over the whole list, so a member with 20 min of login left was
-        // reported as expired (round-2 verifier).
-        const loginNames = loginBlockedText(d.loginBlocked);
-        const loginWall = d.reason === 'all-logins-expired';
-        const why = loginWall
-          ? `no member can take it — ${loginNames}`
-          : d.reason === 'no-members'
-          ? `no member can serve it — ${what}${rest}`
-          : `nowhere better to go — ${what}${rest}`;
-        // MIXED wall: QUOTA emptied the candidate list and a member ALSO needs
-        // a re-login. Both halves get said — round 1 let one login-blocked
-        // member claim the whole refusal and dropped the bucket sentence, so
-        // the user was sent to re-login accounts whose logins were fine.
-        const also = !loginWall && loginNames ? ` Also needing a re-login: ${loginNames}.` : '';
-        const fix = loginWall
-          ? ' Re-login those accounts in Manage Agents.'
-          : ' Conversations on it will hit a limit until a window resets, you add a member, or you move them off the pool.';
+        // The sentence itself is PURE (poolBlockedNotice in account-pool-auto):
+        // it names WHICH buckets are dead ("every member is out of quota" is
+        // wrong under the nested model and points at pay/wait-a-week when the
+        // truth is "one model's weekly cap is spent while the 7-day budget
+        // still has 40% left"), keeps each login-blocked member stating its
+        // OWN fact, and — round-3 verifier — gives the CURRENT member's dead
+        // login its own clause + the re-login remedy instead of rendering it
+        // as a spent quota bucket with "wait for a window to reset".
+        // It lives there, not here, so the suite can assert the STRING.
         serverNotice(`pool-blocked-${poolId}-${d.reason}-${Math.floor(now / 3600000)}`,
-          `Pool "${a.name}": ${why}.${loginWall ? '' : alt}${also}${fix}`, { level: 'warn' });
+          poolBlockedNotice(d, { poolName: a.name, currentName: nameOf(currentId) }), { level: 'warn' });
       }
       return;
     }

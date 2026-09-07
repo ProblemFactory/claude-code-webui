@@ -48,10 +48,27 @@ function fmtWhen(ms) {
  *  UserTodoManager.add is idempotent BY TEXT — a stable text means a re-file
  *  can never mint a second item, and the ledger means it is never re-filed
  *  anyway. Text carries the absolute time, not "in 24h", for the same reason:
- *  an item read tomorrow must not lie about when it was written. */
+ *  an item read tomorrow must not lie about when it was written.
+ *
+ *  BRANCH ON THE STATE, NOT THE RUNG (round-3 verifier). `warnStageFor` maps
+ *  BOTH 'expired' and 'logged-out' onto the terminal 'expired' rung — the rung
+ *  answers "how urgent", the state answers "what happened". A wiped credential
+ *  file is produced by ANY unrecoverable refresh (a revoked or rotated session,
+ *  an explicit logout in an isolated dir), not only by the deadline passing,
+ *  and the CLI KEEPS refreshTokenExpiresAt when it blanks the tokens — so that
+ *  deadline can still be in the FUTURE. Round 1 then filed an `urgent` item
+ *  saying the login "expired" at a date weeks out, while the chip on the very
+ *  same account row (loginExpiryChipHtml, which does branch on the state)
+ *  correctly said "login signed out". Two surfaces, one record, opposite
+ *  claims. The deadline is not dropped — it rides in `detail`, next to the
+ *  state — and it is still quoted here when it is genuinely in the past. */
 function itemTextFor(stage, name, info) {
   const when = fmtWhen(info.refreshExpiresAt);
-  if (stage === 'expired') return `Claude login for "${name}" expired ${when} — re-login it in Manage Agents`;
+  if (info?.state === 'logged-out') {
+    const ended = typeof info.msLeft === 'number' && info.msLeft <= 0 ? ` (its login session ended ${when})` : '';
+    return `Claude login for "${name}" is signed out — the CLI cleared its tokens${ended}; re-login it in Manage Agents`;
+  }
+  if (stage === 'expired' || info?.state === 'expired') return `Claude login for "${name}" expired ${when} — re-login it in Manage Agents`;
   const left = loginAgeText(info.msLeft);
   return `Claude login for "${name}" expires in ${left} (${when}) — re-login it in Manage Agents`;
 }
@@ -124,7 +141,9 @@ function create({ accounts, userTodos, dataDir, log = () => {}, now = () => Date
           urgency: URGENCY[emit] || 'normal',
           by: 'agent',
           sessionName: 'Manage Agents',
-          detail: `Account: ${a.name || a.id}\nLogin session ends: ${fmtWhen(info.refreshExpiresAt)}\nState: ${info.state}\n\n`
+          // Same tense rule as the text: a deadline in the past "ended", one
+          // in the future "ends" — a wiped record can carry either.
+          detail: `Account: ${a.name || a.id}\nLogin session ${typeof info.msLeft === 'number' && info.msLeft <= 0 ? 'ended' : 'ends'}: ${fmtWhen(info.refreshExpiresAt)}\nState: ${info.state}\n\n`
             + 'A Claude subscription login has its own absolute lifetime — refreshing the access token does NOT extend it. '
             + 'When it runs out the CLI cannot refresh, every turn on this account fails, and VibeSpace can only route around it '
             + '(pooled sessions) or stop (everything else). Re-login from Manage Agents → the account\'s ⋯ menu → Re-login on this machine.',
