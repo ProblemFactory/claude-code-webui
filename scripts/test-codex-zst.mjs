@@ -568,6 +568,25 @@ console.log('— ⑥ ONE remote cache slot, MANY remote files (codex .jsonl ⇄ 
     ok(fs.readFileSync(c8).equals(big) && reads.length === 0, 'a CLEAN over-cap slot still adopts after the whole-file scan (no false positive, no refetch)', reads);
     const m8 = metaOf(c8);
     ok(m8.remotePath === sl.remotePath && m8.compressed === false && m8.adopted === true, 'the adoption is WRITTEN BACK (provenance + an `adopted` marker) — the deep scan is paid once, not per poll', m8);
+    // ROUND 3: …and the delta that GROWS that slot must not erase it. Both
+    // rungs stamped a FRESH meta object, so the very next byte of growth
+    // dropped `adopted` (and `slab`) and the slot became indistinguishable
+    // from one this code had pulled whole — the opposite of the durable
+    // provenance the adoption note promises.
+    const grown8 = Buffer.concat([big, Buffer.from(tick)]);
+    remote.data = grown8; remote.mtime = 13001;
+    reads.length = 0;
+    const c8b = await hm.fetchTranscript('hz', 'codex', sl.tid, { maxBytes: big.length - 1 });
+    const m8b = metaOf(c8b);
+    ok(fs.readFileSync(c8b).equals(grown8) && reads.length === 1 && reads[0][1] === big.length, 'the adopted over-cap slot grows by an append-only delta', reads);
+    ok(m8b.adopted === true && m8b.slab === true && m8b.size === grown8.length, 'a DELTA carries the prior meta forward — `adopted` (these bytes were VERIFIED, never fetched) and the lane marker survive the growth', m8b);
+    // …and a WHOLE refetch legitimately drops it: every byte is now ours
+    remote.data = big; remote.mtime = 13002;                               // the remote rotated smaller ⇒ no prefix ⇒ whole
+    reads.length = 0;
+    const c8c = await hm.fetchTranscript('hz', 'codex', sl.tid);
+    const m8c = metaOf(c8c);
+    ok(fs.readFileSync(c8c).equals(big) && reads.length === 1 && reads[0][1] === 0 && m8c.adopted === undefined && m8c.slab === true,
+      'NEGATIVE CONTROL: a WHOLE refetch clears `adopted` — it describes bytes that are no longer in the slot (the lane marker is re-stamped by the writer that fetched them)', m8c);
   }
 
   {   // (2) the ssh rung — no data plane at all — must stamp the adoption too,
@@ -607,6 +626,7 @@ console.log('— ⑥ ONE remote cache slot, MANY remote files (codex .jsonl ⇄ 
     ok(cats.length === 0 && tails.length === 1 && tails[0] === body.length + 1, `…by an append-only tail delta off the cached prefix, never a whole cat (${JSON.stringify({ cats: cats.length, tails })})`);
     const m9b = JSON.parse(fs.readFileSync(sl.cache + '.meta', 'utf8'));
     ok(m9b.size === grown.length && m9b.mtime === 15000 && m9b.v >= 2, '…and the meta follows the growth (schema marker carried by every writer)', m9b);
+    ok(m9b.adopted === true, 'ROUND 3: the ssh delta keeps the adoption marker too — this rung\'s meta writer spreads the prior meta instead of rebuilding it (the twin of the slab-rung leg above)', m9b);
     // a LIVE transcript overtakes the stat between probe and read: the extra
     // tail bytes ARE the file's next bytes (append-only), so they are kept and
     // the meta stamps what the cache actually holds — the stump check compares
@@ -656,6 +676,131 @@ console.log('— ⑥ ONE remote cache slot, MANY remote files (codex .jsonl ⇄ 
     reads.length = 0;
     const ct3 = await hm.fetchTranscript('hz', 'codex', sl3.tid);
     ok(reads.length === 1 && fs.readFileSync(ct3).equals(zbody), 'NEGATIVE CONTROL: a 2-byte cache under a COMPRESSED remote is never called verified (a zstd frame is never shorter than its magic)', reads);
+  }
+
+  // ── ⑥d BOTH SIDES COMPRESSED — the growth leg the compression clause
+  // exists for (round 3 of the verify). A host RE-compresses a finished
+  // rollout: the remote keeps its path, the cache already holds .zst bytes,
+  // and every OTHER delta precondition holds — same remote file, verified
+  // bytes (for a compressed slot the magic IS the evidence), cached archive
+  // shorter than the remote. `!isZstPath(remotePath) && !cacheIsCompressed()`
+  // is the ONLY thing between that poll and a spliced archive, and deleting it
+  // left this suite ALL PASS on BOTH rungs. Both copies now carry a leg.
+  console.log('— ⑥d a re-compressed .zst remote over a .zst cache is refetched WHOLE (both rungs)');
+  // the legality test with its compression clause DELETED — i.e. what BOTH
+  // rungs reduce to under that mutation; it calls the growth below legal
+  const deltaLegalMinusCompressionClause = (usable, localSize, size) => !!usable && localSize > 0 && localSize <= size;
+  const plainOf = (b) => { try { return DF.zstdDecompressFrames(b).toString(); } catch { return '\u0000undecompressable'; } };
+  {   // the slab (device data-plane) rung
+    const sl = slotOf('cccccccc-dddd-4eee-8fff-00000000000f');
+    const zt1 = rollout(sl.tid, '/work/zgrow', 'compressed on both sides', 200);
+    const zc1 = zlib.zstdCompressSync(Buffer.from(zt1));
+    remote.path = sl.remotePath + '.zst'; remote.data = zc1; remote.mtime = 21000;
+    reads.length = 0;
+    const z1 = await hm.fetchTranscript('hz', 'codex', sl.tid);
+    ok(fs.readFileSync(z1).equals(zc1) && metaOf(z1).compressed === true && reads.length === 1 && reads[0][1] === 0, 'the compressed remote is cached whole (the slot now holds .zst bytes)', reads);
+    const zt2 = zt1 + tick.repeat(60);
+    const zc2 = zlib.zstdCompressSync(Buffer.from(zt2));                    // the SAME path, re-compressed after more turns
+    ok(zc2.length > zc1.length && !zc2.subarray(0, zc1.length).equals(zc1), `fixture: the re-compressed archive is larger and is NOT an append onto the old one (${zc1.length}→${zc2.length}B)`);
+    ok(deltaLegalMinusCompressionClause(true, zc1.length, zc2.length) && metaOf(z1).remotePath === remote.path && DF.isZstBuffer(fs.readFileSync(sl.cache)),
+      'NEGATIVE CONTROL: every OTHER delta precondition holds — same remote path, a verified (magic-checked) cache, a cached prefix shorter than the remote');
+    const spliced = Buffer.concat([zc1, zc2.subarray(zc1.length)]);         // what the guard-less delta would write
+    ok(!spliced.equals(zc2) && plainOf(spliced) !== zt2, 'NEGATIVE CONTROL: that delta would weld a foreign frame tail onto the old frames — the slot decompresses to the OLD transcript and the growth is silently lost', plainOf(spliced).length);
+    remote.data = zc2; remote.mtime = 22000;
+    reads.length = 0;
+    const z2 = await hm.fetchTranscript('hz', 'codex', sl.tid);
+    ok(fs.readFileSync(z2).equals(zc2), 'a RE-COMPRESSED remote over a compressed cache is refetched WHOLE — never delta-appended (re-compression rewrites the archive, it does not append)');
+    ok(reads.length === 1 && reads[0][1] === 0 && reads[0][2] === zc2.length, `…by one whole read from offset 0, not a tail off the cached archive's length (${JSON.stringify(reads)})`);
+    ok(plainOf(fs.readFileSync(z2)) === zt2 && metaOf(z2).compressed === true, '…and the cache decompresses to the whole re-compressed transcript');
+  }
+  {   // …and the SAME leg on the legacy ssh rung: the two legality tests are
+      // twins, and a guard only one copy carries is the drift this batch keeps
+      // paying for (a one-sided edit must fail a suite).
+    const sshHm2 = new HostManager({ dataDir });
+    sshHm2._state.hosts.push({ id: 'hz2', name: 'S2' });                    // no transport ⇒ legacy ssh rung
+    const tid = 'cccccccc-dddd-4eee-8fff-000000000010';
+    const rpath = `/home/u/.codex/sessions/2026/09/05/rollout-2026-09-05T00-00-00-${tid}.jsonl.zst`;
+    const zt1 = rollout(tid, '/work/zgrow-ssh', 'compressed on both sides, ssh rung', 200);
+    const zc1 = zlib.zstdCompressSync(Buffer.from(zt1));
+    const zt2 = zt1 + tick.repeat(60);
+    const zc2 = zlib.zstdCompressSync(Buffer.from(zt2));
+    const cats = [], tails = [];
+    const rem = { bytes: zc1, mtime: 23000 };
+    sshHm2._ssh = async (h, cmd) => {
+      if (/^cat /.test(cmd)) { cats.push(cmd); return rem.bytes; }
+      const m = /^tail -c \+(\d+) /.exec(cmd);
+      if (m) { tails.push(Number(m[1])); return rem.bytes.subarray(Number(m[1]) - 1); }
+      return Buffer.from(`${rem.bytes.length} ${rem.mtime}\n${rpath}\n`);
+    };
+    const p1 = await sshHm2.fetchTranscript('hz2', 'codex', tid);
+    ok(fs.readFileSync(p1).equals(zc1) && cats.length === 1 && tails.length === 0, 'ssh rung: the compressed remote is cached whole');
+    rem.bytes = zc2; rem.mtime = 24000;
+    ok(deltaLegalMinusCompressionClause(true, zc1.length, zc2.length), 'NEGATIVE CONTROL: the ssh legality test minus its compression clause calls this growth a legal delta too');
+    const p2 = await sshHm2.fetchTranscript('hz2', 'codex', tid);
+    ok(fs.readFileSync(p2).equals(zc2) && cats.length === 2 && tails.length === 0, `ssh rung: a re-compressed remote is whole-cat'ed, never tail-appended (${JSON.stringify({ cats: cats.length, tails })})`);
+    ok(plainOf(fs.readFileSync(p2)) === zt2, '…and the cached archive decompresses to the whole transcript (a spliced one would stop at the old text)');
+  }
+
+  // ── ⑥e THE DELTA IS AN OPTIMISATION, NOT THE ONLY ROAD (round 3). Round 2
+  // replaced the whole `cat` on the LAST rung with the delta and left nothing
+  // under it: a `tail` that fails — the remote truncated/rotated between the
+  // stat and the read, or a host whose `tail` has no `-c +N` — hard-failed a
+  // fetch the pre-delta code completed. Under the cap the whole file is still
+  // fetchable; over it the delta really was the only road, so THERE the
+  // failure stays a failure.
+  console.log('— ⑥e a failed ssh tail delta falls back to the whole cat (under the cap only)');
+  {
+    const sshHm3 = new HostManager({ dataDir });
+    sshHm3._state.hosts.push({ id: 'hz3', name: 'S3' });
+    const tid = 'cccccccc-dddd-4eee-8fff-000000000011';
+    const rpath = `/home/u/.codex/sessions/2026/09/05/rollout-2026-09-05T00-00-00-${tid}.jsonl`;
+    const cache = path.join(dataDir, 'remote-jsonl', 'hz3', 'codex', `${tid}.jsonl`);
+    const body = Buffer.from(rollout(tid, '/work/ssh-fallback', 'the delta is not the only road', 40));
+    const grown = Buffer.concat([body, Buffer.from(tick)]);
+    const cats = [], tails = [];
+    let tailMode = 'ok';
+    const rem = { bytes: grown, size: grown.length, mtime: 26000 };
+    sshHm3._ssh = async (h, cmd) => {
+      if (/^cat /.test(cmd)) { cats.push(cmd); return rem.bytes; }
+      const m = /^tail -c \+(\d+) /.exec(cmd);
+      if (m) {
+        tails.push(Number(m[1]));
+        if (tailMode === 'throw') throw new Error('tail: illegal option -- c');                       // a host whose tail has no -c +N
+        if (tailMode === 'short') return rem.bytes.subarray(Number(m[1]) - 1, Number(m[1]) + 2);      // rotated between the stat and the read
+        return rem.bytes.subarray(Number(m[1]) - 1);
+      }
+      return Buffer.from(`${rem.size} ${rem.mtime}\n${rpath}\n`);
+    };
+    const metaAt = () => JSON.parse(fs.readFileSync(cache + '.meta', 'utf8'));
+    const seedFallback = () => {
+      fs.mkdirSync(path.dirname(cache), { recursive: true });
+      fs.writeFileSync(cache, body);
+      fs.writeFileSync(cache + '.meta', JSON.stringify({ size: body.length, mtime: 25000, fetchedAt: Date.now(), remotePath: rpath, compressed: false, v: 2, adopted: true }));
+      cats.length = 0; tails.length = 0;
+    };
+
+    seedFallback(); tailMode = 'throw';
+    let fbErr = null, f1 = null;
+    try { f1 = await sshHm3.fetchTranscript('hz3', 'codex', tid); } catch (e) { fbErr = String(e && e.message || e); }
+    ok(!fbErr && f1 && fs.readFileSync(f1).equals(grown) && tails.length === 1 && cats.length === 1,
+      `a \`tail\` the host cannot run falls back to the whole cat — the fetch COMPLETES instead of hard-failing what the pre-delta code did (${fbErr || JSON.stringify({ cats: cats.length, tails })})`);
+    ok(metaAt().size === grown.length && metaAt().mtime === 26000, '…and stamps the bytes the fallback actually fetched', metaAt());
+    ok(metaAt().adopted === undefined, '…while the WHOLE refetch drops the `adopted` marker (it described bytes no longer in the slot)', metaAt());
+
+    seedFallback(); tailMode = 'short';
+    let shortFbErr = null, f2 = null;
+    try { f2 = await sshHm3.fetchTranscript('hz3', 'codex', tid); } catch (e) { shortFbErr = String(e && e.message || e); }
+    ok(!shortFbErr && f2 && fs.readFileSync(f2).equals(grown) && cats.length === 1,
+      `a SHORT tail (the remote rotated between the stat and the read) falls back too — truncated bytes are never appended, the whole file is (${shortFbErr || JSON.stringify({ cats: cats.length, tails })})`);
+
+    // NEGATIVE CONTROL: over the cap a whole cat is impossible by construction
+    // (it is how the slot got there), so the delta failure stays a failure and
+    // no `cat` is attempted — the fallback must not become a cap bypass.
+    seedFallback(); tailMode = 'throw';
+    let overErr = null;
+    try { await sshHm3.fetchTranscript('hz3', 'codex', tid, { maxBytes: body.length - 1 }); } catch (e) { overErr = String(e && e.message || e); }
+    ok(/illegal option/.test(overErr || '') && cats.length === 0, 'NEGATIVE CONTROL: over the cap the delta failure is still a hard failure and never a whole cat (which could not fit anyway)', { overErr, cats: cats.length });
+    ok(fs.readFileSync(cache).equals(body) && metaAt().size === body.length && metaAt().adopted === true, '…and the refused poll leaves the cache and its meta exactly as they were', metaAt());
   }
 }
 try { fs.rmSync(home, { recursive: true, force: true }); } catch {}

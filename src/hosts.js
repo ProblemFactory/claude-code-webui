@@ -1240,6 +1240,20 @@ class HostManager {
         fs.writeFileSync(metaPath, JSON.stringify(meta));
       } catch { }
     };
+    // PROVENANCE IS DURABLE — SO THE META WRITERS MUST NOT REBUILD IT (review
+    // round 3). Both rungs stamped a FRESH object at the end of a fetch, so a
+    // delta that grew an ADOPTED over-cap slot erased the one marker saying
+    // "these bytes were VERIFIED, never fetched" (and the `slab` lane marker
+    // with it) — exactly the durability the adoption note above claims. The
+    // prior meta is spread and this fetch overwrites only what it just
+    // learned. A WHOLE refetch is the single case that legitimately drops
+    // those two: they describe bytes that are no longer in the slot, while a
+    // delta keeps the prefix they were stamped for.
+    const nextMeta = (fields, { whole }) => {
+      const m = { ...(meta || {}) };
+      if (whole) { delete m.adopted; delete m.slab; }
+      return { ...m, ...fields, fetchedAt: Date.now(), compressed: isZstPath(fields.remotePath), v: META_V };
+    };
     // …and when a whole refetch is BOTH impossible (over the cap) and the only
     // way out (the cache did not verify), say so — including that there is no
     // remedy on this side. "remote transcript too large" alone sends the reader
@@ -1278,14 +1292,20 @@ class HostManager {
         try { localSize = fs.statSync(cachePath).size; } catch { }
         // append-only delta is legal ONLY when the same, uncompressed remote
         // file grew: a different remote path (or either side compressed) means
-        // the cached prefix is not a prefix of what we are fetching
+        // the cached prefix is not a prefix of what we are fetching. The
+        // both-compressed case looks the most innocent and is the worst: same
+        // path, verified bytes (a .zst slot's magic IS its evidence), cached
+        // archive shorter than the remote — yet re-compression REWRITES the
+        // archive, so the "delta" would weld a foreign frame tail onto the old
+        // frames. Negative-controlled in test-codex-zst ⑥d on BOTH rungs.
         const canDelta = usable && !isZstPath(remotePath) && !cacheIsCompressed();
         // the cap guards what we FETCH — with a warm prefix that's just the
         // delta, so a transcript growing past maxBytes keeps incrementing
         // instead of suddenly erroring (a 45MB real session was on track)
-        const fetchBytes = (canDelta && localSize > 0 && localSize <= size && meta) ? size - localSize : size;
+        const deltaSlab = canDelta && localSize > 0 && localSize <= size && !!meta;
+        const fetchBytes = deltaSlab ? size - localSize : size;
         if (fetchBytes > maxBytes) throw tooLarge(fetchBytes, usable);
-        if (canDelta && localSize > 0 && localSize <= size && meta) {
+        if (deltaSlab) {
           // append-only delta — the slab win
           if (size > localSize) {
             const delta = await dm.fsReadRange(remotePath, localSize, size - localSize);
@@ -1303,7 +1323,7 @@ class HostManager {
           fs.writeFileSync(tmp2, whole.data);
           fs.renameSync(tmp2, cachePath);
         }
-        fs.writeFileSync(metaPath, JSON.stringify({ size, mtime, fetchedAt: Date.now(), slab: true, remotePath, compressed: isZstPath(remotePath), v: META_V }));
+        fs.writeFileSync(metaPath, JSON.stringify(nextMeta({ size, mtime, slab: true, remotePath }, { whole: !deltaSlab })));
         return cachePath;
       } catch (e2) { /* legacy fallback below */ }
     }
@@ -1335,7 +1355,8 @@ class HostManager {
     // off/failing for — hard-failed "too large" on its very next byte of
     // growth: a >maxBytes transcript that opened yesterday is an error today,
     // with no fallback to the verified cache. Same legality test as the slab
-    // rung (same remote file, uncompressed on both sides, cached prefix no
+    // rung (same remote file, uncompressed on both sides — a re-compressed
+    // .zst remote over a .zst cache is a whole refetch, ⑥d — cached prefix no
     // longer than the remote), same never-stamp-bytes-we-didn't-get rule;
     // `tail -c +N` is 1-based on both GNU and BSD.
     const canDeltaSsh = usableSsh && !isZstPath(remotePath) && !cacheIsCompressed() && localSizeSsh > 0 && localSizeSsh <= size && !!meta;
@@ -1343,25 +1364,43 @@ class HostManager {
     if (fetchBytesSsh > maxBytes) throw tooLarge(fetchBytesSsh, usableSsh);
     fs.mkdirSync(dir, { recursive: true });
     let stampSize = size;
+    let grewSsh = false;
     if (canDeltaSsh) {
-      if (size > localSizeSsh) {
-        const delta = await this._ssh(h, `tail -c +${localSizeSsh + 1} ${JSON.stringify(remotePath)}`, { timeoutMs: 120000, maxBuffer: maxBytes + 1024, encoding: 'buffer' });
-        // fewer bytes than the stat promised = a truncated read: never stamp
-        // those (the 2.187.0 stump rule). MORE is normal on a live transcript —
-        // it grew between the stat and the read, and an append-only file's
-        // extra tail bytes are genuinely its next bytes — so keep them and
-        // stamp what the file ACTUALLY holds (the stump check compares the two).
-        if (delta.length < size - localSizeSsh) throw new Error(`short tail read: ${delta.length} of ${size - localSizeSsh}`);
-        fs.appendFileSync(cachePath, delta);
-        stampSize = localSizeSsh + delta.length;
+      try {
+        if (size > localSizeSsh) {
+          const delta = await this._ssh(h, `tail -c +${localSizeSsh + 1} ${JSON.stringify(remotePath)}`, { timeoutMs: 120000, maxBuffer: maxBytes + 1024, encoding: 'buffer' });
+          // fewer bytes than the stat promised = a truncated read: never stamp
+          // those (the 2.187.0 stump rule). MORE is normal on a live transcript —
+          // it grew between the stat and the read, and an append-only file's
+          // extra tail bytes are genuinely its next bytes — so keep them and
+          // stamp what the file ACTUALLY holds (the stump check compares the two).
+          if (delta.length < size - localSizeSsh) throw new Error(`short tail read: ${delta.length} of ${size - localSizeSsh}`);
+          fs.appendFileSync(cachePath, delta);
+          stampSize = localSizeSsh + delta.length;
+        }
+        grewSsh = true;
+      } catch (eDelta) {
+        // THE DELTA IS AN OPTIMISATION, NOT THE ONLY ROAD (round 3). Round 2
+        // REPLACED the whole `cat` on the LAST rung with the delta, so a `tail`
+        // that fails — the remote truncated/rotated between the stat and the
+        // read, or a host whose `tail` has no `-c +N` — now hard-fails a fetch
+        // the pre-delta code completed, and this rung has nothing below it to
+        // fall through to. Under the cap the whole file is still fetchable, so
+        // fetch it; the hard error is kept for the ONE case where a whole
+        // re-pull is impossible by construction (over the cap — where the
+        // delta was not an optimisation but the only road).
+        if (size > maxBytes) throw eDelta;
+        console.warn(`[hosts] ${id}: tail delta failed (${eDelta && eDelta.message || eDelta}) — falling back to a whole fetch`);
+        stampSize = size;
       }
-    } else {
+    }
+    if (!grewSsh) {
       const buf = await this._ssh(h, `cat ${JSON.stringify(remotePath)}`, { timeoutMs: 120000, maxBuffer: maxBytes + 1024, encoding: 'buffer' });
       const tmp = cachePath + '.tmp';
       fs.writeFileSync(tmp, buf);
       fs.renameSync(tmp, cachePath);
     }
-    fs.writeFileSync(metaPath, JSON.stringify({ size: stampSize, mtime, fetchedAt: Date.now(), remotePath, compressed: isZstPath(remotePath), v: META_V }));
+    fs.writeFileSync(metaPath, JSON.stringify(nextMeta({ size: stampSize, mtime, remotePath }, { whole: !grewSsh })));
     return cachePath;
   }
 
