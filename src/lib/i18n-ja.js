@@ -2995,4 +2995,8 @@ export default {
   'Sleeping': 'スリープ中',
   'remaining': '残り',
   'Slept': 'スリープしました',
+  'Response style “{v}” is saved for this conversation — the agent is still on {cur}; pick it again to apply it now': '応答スタイル「{v}」をこの会話に保存しました — agent は現在 {cur} のままです。もう一度選ぶとすぐ適用されます',
+  'This session’s agent started before live style switching — restart it to apply a change.': 'このセッションの agent はライブ変更対応前に起動しています — 適用には再起動が必要です。',
+  'what this session started with': 'このセッションの起動時の値',
+  'saved — applies on the next resume': '保存済み — 次回の resume で有効',
 };

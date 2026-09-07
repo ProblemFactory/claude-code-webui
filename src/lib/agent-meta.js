@@ -151,6 +151,38 @@ export function responseStyleCaps(backend) {
   return backendFeatureCaps(backend).responseStyle || NO_FEATURE_CAPS.responseStyle;
 }
 
+/** PURE (DOM-free, suite-tested): can a style change land on THIS session
+ *  without a restart? TWO independent facts — and forgetting the second one is
+ *  a shipped class of bug (2.361.1 / 2.364.1, and here in r2 review):
+ *    ① the HARNESS caps row says the protocol supports it at all;
+ *    ② the RUNNING WRAPPER's own advert says this process serves the verb —
+ *       a codex session spawned before the live-switch release does not, and
+ *       the server refuses it (`code:'style-wrapper-old'`, which is what
+ *       flips this flag; `style-not-live` is the transient/other refusal).
+ *  `wrapperLive === undefined` = "not told yet" (the creator payload cannot
+ *  know: the sidecar is not written at spawn time) ⇒ TRY it; a refusal flips
+ *  the flag to false and the restart row appears in the same menu. */
+export function styleAppliesLive(caps, wrapperLive) {
+  return !!(caps && caps.live) && wrapperLive !== false;
+}
+
+/** PURE: WHICH FACT is the response style a panel is showing? `live` = what the
+ *  running session was started/updated with (server truth, '' = no key was ever
+ *  sent), `picked` = the pick saved for this conversation (undefined = never
+ *  picked here). Keying only on "does a pick exist" called the value the user's
+ *  choice while the panel's own pending note said the pick had not landed yet
+ *  (r2 review) — the two must agree, so they read the same comparison. */
+export function responseStyleOrigin(live, picked) {
+  const l = live || '';
+  const p = picked === undefined ? undefined : (picked || '');
+  if (l) {
+    if (p === undefined) return 'instance';  // no pick here ⇒ the spawn read the instance default
+    if (p === l) return 'chosen';
+    return 'spawn';                          // a DIFFERENT pick is saved; the live value dates from the spawn
+  }
+  return p ? 'saved' : 'harness';
+}
+
 export function settingsPrefixFor(backend) {
   const b = backend || 'claude';
   return BACKEND_META[b]?.settingsPrefix ?? b;

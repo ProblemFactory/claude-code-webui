@@ -345,7 +345,7 @@ function registerWsHandler(wss, ctx) {
           break;
         }
 
-        // LIVE RESPONSE STYLE (2.369.54). The per-session `outputStyle` slot is
+        // LIVE RESPONSE STYLE (2.369.57). The per-session `outputStyle` slot is
         // harness-neutral; WHEN it can be applied is not, and that verdict lives
         // in the caps row, never in a backend id:
         //   · responseStyle.live === false (claude) ⇒ REFUSED here with the
@@ -358,7 +358,14 @@ function registerWsHandler(wss, ctx) {
         // Persisted to session meta + broadcast so every client's chip agrees.
         case 'set-response-style': {
           const session = activeSessions.get(data.sessionId);
-          const refuse = (message) => { try { ws.send(JSON.stringify({ type: 'error', code: 'style-not-live', scope: 'action', sessionId: data.sessionId, error: message, message })); } catch { } };
+          // TWO refusal codes, because they mean different things to the UI
+          // (2.369.57 r2 — the 2.363.1 law: one error type with several meanings
+          // must split by code): 'style-wrapper-old' = THIS session's wrapper
+          // will never serve the verb ⇒ the client stops offering the live
+          // switch and shows "Restart now to apply"; 'style-not-live' = every
+          // other reason (dead session, spawn-only harness, unknown value, a
+          // sidecar not written YET) ⇒ the client changes no capability belief.
+          const refuse = (message, code = 'style-not-live') => { try { ws.send(JSON.stringify({ type: 'error', code, scope: 'action', sessionId: data.sessionId, error: message, message })); } catch { } };
           if (!session?.pty || session.mode !== 'chat') { refuse('This action needs a live chat session.'); break; }
           let label = session.backend;
           try { label = harnessOf(session.backend).label || label; } catch { }
@@ -373,7 +380,8 @@ function registerWsHandler(wss, ctx) {
             const started = wcaps.startedAt ? new Date(wcaps.startedAt).toISOString().replace('T', ' ').slice(0, 16) + ' UTC' : 'unknown time';
             refuse(wcaps.reason === 'no-sidecar'
               ? 'This session\'s agent has not reported its capabilities yet (still starting up?) — try again in a moment.'
-              : `This session's agent (started ${started}) predates the live style switch. Terminate + Resume the session to change it.`);
+              : `This session's agent (started ${started}) predates the live style switch. Terminate + Resume the session to change it.`,
+              wcaps.reason === 'no-sidecar' ? 'style-not-live' : 'style-wrapper-old');
             console.log(`[${data.sessionId}] set-response-style REFUSED: wrapper caps ${wcaps.reason} (pid ${wcaps.pid}, started ${wcaps.startedAt})`);
             break;
           }
@@ -994,6 +1002,11 @@ function registerWsHandler(wss, ctx) {
               // reconnecting second client showing LOCKED forever after an unlock
               chatStatus.modelLocked = !!session._modelLocked;
               chatStatus.lockedModel = session._lockedModel || null;
+              // ONE sidecar read for BOTH wrapper adverts below: resolveWrapperFiles
+              // walks /proc when the sidecar is missing (collision sessions), and
+              // doing that twice inside the ws attach handler is the 2.369.16 law
+              // (no avoidable sync work here).
+              const wcapsAttach = wrapperCaps(BUFFERS_DIR, data.sessionId, session.socketPath);
               ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, mode: 'chat',
                 messages, totalCount, chatStatus, isStreaming, streamingLabel, streamingKind: isStreaming ? (session._streamingKind || null) : null, autoResume: autoResume?.statusFor?.(data.sessionId) || null, outputStyle: session._outputStyle || null, taskState: sm.taskState(), turnMap, pendingPermissions: pendingPerms,
                 // The input queue as the normalizer knows it (the wrapper's
@@ -1006,7 +1019,18 @@ function registerWsHandler(wss, ctx) {
                 // gate on this AS WELL AS the harness caps row: a session
                 // spawned before the queue/steer release would otherwise wear
                 // controls whose frames its wrapper drops (2.361.1/2.364.1).
-                queueSupported: wrapperCaps(BUFFERS_DIR, data.sessionId, session.socketPath).inputQueue || !!session._normalizer?.queuePublished?.(),
+                queueSupported: wcapsAttach.inputQueue || !!session._normalizer?.queuePublished?.(),
+                // …and whether that same running wrapper serves the LIVE style
+                // verb. The client needs BOTH facts (2.369.57): with only the
+                // harness caps row, a session spawned before the live-switch
+                // release lost the "Restart now to apply" row, kept an
+                // invisible saved pick, and got an optimistic toast the
+                // server's refusal then contradicted.
+                // TRI-STATE: null = the wrapper has not written its sidecar yet
+                // (a session spawned seconds ago), which is NOT the same as "it
+                // cannot" — the client keeps its "try it" state instead of
+                // wearing a restart row it does not need.
+                responseStyleLive: wcapsAttach.reason === 'no-sidecar' ? null : !!wcapsAttach.responseStyle,
                 normEpoch: session._normEpoch || 0,
                 remoteState: session._remoteState || (session._bareRemote ? { state: 'unprotected' } : null),
                 goal: session._goal || null, goalElapsed: session._goalElapsed || 0, goalStatus: session._goalStatus || null }));

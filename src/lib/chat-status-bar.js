@@ -1,6 +1,6 @@
 import { escHtml, showInputDialog, uiScale, showToast, fetchJson, copyText, absUrl } from './utils.js';
 import { UI_ICONS } from './icons.js';
-import { BACKEND_META, getBackendMeta, backendFeatureCaps, effortLabel, responseStyleLabel, responseStyleCaps } from './agent-meta.js';
+import { BACKEND_META, getBackendMeta, backendFeatureCaps, effortLabel, responseStyleLabel, responseStyleCaps, styleAppliesLive } from './agent-meta.js';
 import { t } from './i18n.js';
 
 /**
@@ -21,7 +21,11 @@ export class ChatStatusBar {
   constructor(ws, sessionId, { backend = 'claude', allowReview = false, getToolMsg, openSubagentViewer, openInTempEditor, startReview, onConfigChange, onOpenWorkflow, getWorkflowIds, onDesignRequest = null, onRestartSession = null }) {
     this._ws = ws;
     this._onDesignRequest = onDesignRequest; // 2.366.0 design chip (null = view-only window: no chip)
-    this._outputStyle = '';        // CLI output style (Concise/…) — spawn-only, so this reflects what the LIVE session was started with
+    this._outputStyle = '';        // CLI output style (Concise/…) — what the LIVE session is running with
+    // Does the RUNNING WRAPPER serve the live style verb? undefined = not told
+    // yet (the 'created' payload cannot know), false = it refused / its sidecar
+    // says no. Harness caps alone are not enough — see styleAppliesLive.
+    this._responseStyleLive = undefined;
     this._autoResume = null;       // {enabled, explicit, globalDefault, armed, resetsAt} from the server
     this._pages = []; // pages published from this session (server truth via /api/pages + page-published)
     this._sessionId = sessionId;
@@ -305,6 +309,9 @@ export class ChatStatusBar {
    *  so the choice is VISIBLY saved — 2.368.0 dropped it silently and the
    *  inert chip was the only symptom the owner had. */
   setOutputStylePending(v) { this._outputStylePending = v === undefined ? undefined : (v || ''); this.render(); }
+  /** The RUNNING wrapper's own advert (attach payload) or the server's refusal
+   *  — the second half of "can this session be re-styled live". */
+  setResponseStyleLive(v) { this._responseStyleLive = (v === undefined || v === null) ? undefined : !!v; this.render(); }
   setAutoResume(st) { this._autoResume = st || null; this.render(); }
 
   setReviewEnabled(enabled) {
@@ -366,7 +373,7 @@ export class ChatStatusBar {
       parts.push(`<span class="chat-status-goal chat-status-goal-empty chat-status-clickable" title="${escHtml(t('Set a goal \u2014 the agent keeps working until the condition is met'))}">${UI_ICONS.goal}</span>`);
     }
 
-    // Response style (2.368.0 outputStyle, generalized 2.369.54): the chip is
+    // Response style (2.368.0 outputStyle, generalized 2.369.57): the chip is
     // drawn for any harness whose caps row lists style VALUES, and the tooltip
     // tells the truth about WHEN a change lands — `live` harnesses (codex
     // personality via thread/settings/update) apply from the next turn, the
@@ -377,10 +384,16 @@ export class ChatStatusBar {
     if (rsCaps.values.length) {
       const os = this._outputStyle;
       const pend = this._outputStylePending;
-      const hasPend = !rsCaps.live && pend !== undefined && (pend || '') !== (os || '');
+      // A pick that has not landed is PENDING for every harness — including a
+      // live-capable one whose running wrapper refused the verb (r2 review: the
+      // saved pick was then invisible AND unappliable).
+      const liveNow = styleAppliesLive(rsCaps, this._responseStyleLive);
+      const hasPend = pend !== undefined && (pend || '') !== (os || '');
       const label = hasPend ? escHtml(pend || t('agent default')) + ' ' + UI_ICONS.hourglass : escHtml(os || t('style: default'));
       const tip = hasPend
-        ? t('Response style \u201c{v}\u201d is saved and applies on the next resume (now running: {cur})', { v: pend || t('agent default'), cur: os || t('agent default') })
+        ? (liveNow
+          ? t('Response style \u201c{v}\u201d is saved for this conversation \u2014 the agent is still on {cur}; pick it again to apply it now', { v: pend || t('agent default'), cur: os || t('agent default') })
+          : t('Response style \u201c{v}\u201d is saved and applies on the next resume (now running: {cur})', { v: pend || t('agent default'), cur: os || t('agent default') }))
         : rsCaps.live
           ? (os ? t('Response style: {v} \u2014 click to change it right now (applies from the next turn)', { v: os })
                : t('Response style: whatever this agent\u2019s own config says \u2014 click to pick one (applies from the next turn)'))
@@ -918,9 +931,12 @@ export class ChatStatusBar {
       const renderStyleRows = () => {
         dropdown.innerHTML = '';
         const pending = this._outputStylePending;
-        // The restart row exists ONLY for harnesses that cannot switch live —
-        // gated on the caps row, never on a backend id (2.369.54).
-        if (!caps.live && this._onRestartSession && pending !== undefined && (pending || '') !== (this._outputStyle || '')) {
+        // The restart row exists whenever THIS SESSION cannot take the change
+        // live — the harness caps row AND the running wrapper's advert, never a
+        // backend id (2.369.57: gating on caps alone left every codex session
+        // that predates the live switch with a refusal, no restart row, and an
+        // invisible saved pick).
+        if (!styleAppliesLive(caps, this._responseStyleLive) && this._onRestartSession && pending !== undefined && (pending || '') !== (this._outputStyle || '')) {
           const go = document.createElement('div');
           go.className = 'chat-status-dropdown-item chat-status-restart-row';
           go.textContent = '\u27F3 ' + t('Restart now to apply (Terminate + Resume)');
@@ -934,13 +950,14 @@ export class ChatStatusBar {
           item.onclick = (ev) => {
             ev.stopPropagation();
             this._onConfigChange?.({ outputStyle: s.v || null });   // survives the next resume either way
-            if (caps.live) {
-              // LIVE: the running agent takes it now. The chip's own value only
-              // moves when the SERVER confirms ('response-style-updated') — a
-              // refused switch must not leave a lie on the bar.
+            if (styleAppliesLive(caps, this._responseStyleLive)) {
+              // LIVE: ASK the running agent. Nothing is claimed yet — the chip
+              // wears the pending pick and the SUCCESS TOAST fires on the
+              // server's `response-style-updated` echo (chat-view), because the
+              // switch can still be refused ('style-wrapper-old') and the old cut
+              // toasted success right on top of that refusal (r2 review).
               this._ws?.send({ type: 'set-response-style', sessionId: this._sessionId, style: s.v || '' });
-              this._outputStylePending = undefined;
-              showToast(s.v ? t('Response style \u201c{v}\u201d applies from the next turn', { v: s.v }) : t('Response style cleared \u2014 the agent\u2019s own config applies again'));
+              this._outputStylePending = s.v || '';
             } else {
               this._outputStylePending = s.v || '';                 // the chip shows the saved-but-not-yet-live pick
               showToast(s.v ? t('Response style \u201c{v}\u201d applies on the next resume', { v: s.v }) : t('Response style cleared \u2014 applies on the next resume'));
@@ -952,9 +969,11 @@ export class ChatStatusBar {
         }
         const note = document.createElement('div');
         note.className = 'chat-status-dropdown-note';
-        note.textContent = caps.live
+        note.textContent = styleAppliesLive(caps, this._responseStyleLive)
           ? t('This agent applies a style change to the running session, from its next turn.')
-          : t('A running session cannot change style \u2014 the CLI only reads it at startup.');
+          : caps.live
+            ? t('This session\u2019s agent started before live style switching \u2014 restart it to apply a change.')
+            : t('A running session cannot change style \u2014 the CLI only reads it at startup.');
         dropdown.appendChild(note);
       };
       renderStyleRows();

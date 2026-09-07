@@ -2995,4 +2995,8 @@ export default {
   'Sleeping': '休眠中',
   'remaining': '剩余',
   'Slept': '已休眠',
+  'Response style “{v}” is saved for this conversation — the agent is still on {cur}; pick it again to apply it now': '回复风格「{v}」已为本对话保存——agent 当前仍是 {cur}；再点一次即可立刻应用',
+  'This session’s agent started before live style switching — restart it to apply a change.': '本会话的 agent 在“实时改风格”上线前就启动了——重启会话才能应用改动。',
+  'what this session started with': '本会话启动时的值',
+  'saved — applies on the next resume': '已保存——下次 resume 生效',
 };

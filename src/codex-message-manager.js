@@ -294,7 +294,7 @@ function normalizeUserInputAnswers(rawAnswers) {
   return Object.keys(normalized).length ? normalized : null;
 }
 
-// The wrapper's one-word label for the reply it SENT. Since 2.369.54 the five
+// The wrapper's one-word label for the reply it SENT. Since 2.369.57 the five
 // ServerRequest methods answer in their own vocabularies, so the allow set
 // spans all of them: the exec/patch v1 enum (approved…), the item approval enum
 // (accept…), the elicitation action, and the permissions GRANT.
@@ -1487,7 +1487,7 @@ class CodexMessageManager {
     this._finalizeToolCall(toolCallId, { output: `viewed ${path || 'image'}`, isError: false, extraInput: { path }, rawName: 'view_image' }, emit);
   }
 
-  // ── THE IMAGE-GENERATION card path (2.369.54) ──
+  // ── THE IMAGE-GENERATION card path (2.369.57) ──
   // Every carrier of "the agent generated an image" funnels through here, so
   // the LIVE stream, the ROLLOUT and the thread/read fallback land on ONE card
   // shape (scripts/test-harness-honesty.mjs pins all three producers):
@@ -1510,7 +1510,7 @@ class CodexMessageManager {
     this._finalizeToolCall(toolCallId, { output, isError: !!failure, extraInput: { prompt, path }, rawName: 'image_gen' }, emit);
   }
 
-  // ── THE SLEEP card path (2.369.54) ──
+  // ── THE SLEEP card path (2.369.57) ──
   // `clock.sleep` is the agent deliberately WAITING. It had no branch on the
   // live side at all, so a 20-minute sleep looked exactly like a hang (and on
   // the history side it was dropped as "not conversation content"). Pending =
@@ -1685,7 +1685,7 @@ class CodexMessageManager {
         return;
       }
       if (it.kind === 'image_gen.generation') {
-        // ONE card path (2.369.54) — see _processImageGenEvent. `savedPath` is
+        // ONE card path (2.369.57) — see _processImageGenEvent. `savedPath` is
         // what the card names; `result` (3 MB of base64) never leaves here.
         const failure = it.failure && typeof it.failure === 'object' ? (it.failure.message || JSON.stringify(it.failure)) : (typeof it.failure === 'string' ? it.failure : '');
         this._processImageGenEvent({
@@ -2100,7 +2100,7 @@ class CodexMessageManager {
       return;
     }
 
-    // A ServerRequest the wrapper answered with a JSON-RPC error (2.369.54):
+    // A ServerRequest the wrapper answered with a JSON-RPC error (2.369.57):
     // codex asked this client for something only a client that OWNS the value
     // can produce (a dynamic tool call, an attestation token, a ChatGPT token
     // refresh) or for a method we have no branch for. The turn FAILS CLEANLY,
@@ -2173,7 +2173,7 @@ class CodexMessageManager {
       permission.kind = 'user_input';
       permission.questions = asArray(params.questions);
     } else if (method === 'mcpServer/elicitation/request') {
-      // MCP ELICITATION (2.369.54) — an MCP server asking the human for
+      // MCP ELICITATION (2.369.57) — an MCP server asking the human for
       // structured input. It renders as the SAME question-card family as
       // AskUserQuestion / requestUserInput; the rows come from the WRAPPER
       // (`payload.questions`, derived from the requestedSchema by the same

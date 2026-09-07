@@ -133,7 +133,7 @@ console.log('— ③ the ws case gates on the caps row AND the running wrapper')
   ok('client: an attach failure still takes the view-only rescue path', /if \(!this\._tryViewOnlyRescue\(\)\)/.test(cv));
   // the queue rides EVERY window-birth payload (the 2.368.4 rule)
   ok("attach carries the queue from the normalizer", /queue: session\._normalizer\?\.queueState\?\.\(\) \|\| \[\]/.test(read('src/ws-handler.js')));
-  ok("…and the wrapper's queue advert rides the SAME payload (the client cannot read a sidecar)", /queueSupported: wrapperCaps\(BUFFERS_DIR, data\.sessionId, session\.socketPath\)\.inputQueue/.test(read('src/ws-handler.js')));
+  ok("…and the wrapper's queue advert rides the SAME payload (the client cannot read a sidecar)", /const wcapsAttach = wrapperCaps\(BUFFERS_DIR, data\.sessionId, session\.socketPath\);[\s\S]{0,2000}queueSupported: wcapsAttach\.inputQueue/.test(read('src/ws-handler.js')));
   { const wsc = read('src/ws-create.js');
     ok("…'created' carries both, and says the fresh wrapper has reported NOTHING yet", /queue: \[\],/.test(wsc) && /queueSupported: false,/.test(wsc)); }
   ok('the client applies both through the carries-the-key guard, advert FIRST', /if \('queueSupported' in meta\) this\._setQueueSupported\(meta\.queueSupported\);\s*\n\s*if \('queue' in meta\) this\._setQueue\(meta\.queue\);/.test(cv));

@@ -780,7 +780,7 @@ class ChatView {
     // Telemetry fingerprint `chat-stall-reattach` records each firing with
     // the silence length — the instrument that convicts the real seam on the
     // next occurrence. Fires at most once per 5min per view.
-    // SLEEP COUNTDOWN (2.369.54): a live `clock.sleep` card renders its own
+    // SLEEP COUNTDOWN (2.369.57): a live `clock.sleep` card renders its own
     // deadline into `data-sleep-until`; ONE interval per view rewrites the text
     // so a 20-minute wait visibly counts down instead of sitting behind a
     // spinner. It touches nothing when no such card exists (the usual case),
@@ -824,11 +824,17 @@ class ChatView {
       } else if (msg.type === 'auto-resume' && msg.sessionId === sessionId) {
         this._statusBar?.setAutoResume?.(msg.status || null);
       } else if (msg.type === 'response-style-updated' && msg.sessionId === sessionId) {
-        // LIVE style switch CONFIRMED by the server (2.369.54). The chip only
+        // LIVE style switch CONFIRMED by the server (2.369.57). The chip only
         // moves on this echo — a refused switch answers `{type:'error',
         // code:'style-not-live'}` instead and the bar keeps the truth.
+        // The SUCCESS TOAST lives here too (2.369.57): firing it at click time
+        // announced a switch the server was about to refuse.
         this._statusBar?.setOutputStyle?.(msg.outputStyle || '');
         this._statusBar?.setOutputStylePending?.(undefined);
+        this._statusBar?.setResponseStyleLive?.(true);
+        if (msg.live) showToast(msg.outputStyle
+          ? t('Response style \u201c{v}\u201d applies from the next turn', { v: msg.outputStyle })
+          : t('Response style cleared \u2014 the agent\u2019s own config applies again'));
       } else if (msg.type === 'page-published' && msg.sessionId === sessionId) {
         // ONE notify point server-side (dialog + agent publishes): the status
         // bar's design chip is the live list; the agent's reply carries the link
@@ -1217,6 +1223,10 @@ class ChatView {
     // FIRST: it decides which controls the items are rendered with.
     if ('queueSupported' in meta) this._setQueueSupported(meta.queueSupported);
     if ('queue' in meta) this._setQueue(meta.queue);
+    // Does the RUNNING wrapper serve the live style verb? Same shape as
+    // queueSupported and the same reason (2.361.1/2.364.1): the harness caps
+    // row is about the PROTOCOL, this is about the process that is running.
+    if ('responseStyleLive' in meta) this._statusBar?.setResponseStyleLive?.(meta.responseStyleLive);
     if ('autoResume' in meta) this._statusBar?.setAutoResume?.(meta.autoResume || null);
     if ('outputStyle' in meta) {
       this._statusBar?.setOutputStyle?.(meta.outputStyle || '');
@@ -3641,6 +3651,13 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
     // never read, so the user saw a dead-looking window with no reason).
     if (isScopedRefusal(msg)) {
       this._hideTyping();
+      // A refused LIVE style switch can be a FACT about this session: only
+      // 'style-wrapper-old' means THIS wrapper will never serve the verb, so
+      // only it flips the flag — the chip's menu then offers the restart row
+      // and keeps the saved pick visible as pending instead of swallowing the
+      // choice (2.369.57). 'style-not-live' covers transient/other reasons (a
+      // sidecar not written yet, a dead session) and must change no belief.
+      if (msg.code === 'style-wrapper-old') this._statusBar?.setResponseStyleLive?.(false);
       this._renderers.appendSystem('✗ ' + (msg.message || msg.error || t('Message rejected.')));
       try { track('event', msg.code === 'input-rejected' ? 'chat-input-rejected' : 'chat-action-refused', this._telemDetail(`${msg.code || 'action'}: ${msg.message || msg.error || ''}`)); } catch {}
       return;

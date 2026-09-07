@@ -49,7 +49,7 @@ const metaSrc = read('src/lib/agent-meta.js');
 const { BACKEND_META } = await import(path.join(REPO, 'src/lib/agent-meta.js'));
 {
   const c = BACKEND_META.codex.caps;
-  // 2.369.54: the `outputStyle` BOOLEAN is gone — codex CAN be styled, it just
+  // 2.369.57: the `outputStyle` BOOLEAN is gone — codex CAN be styled, it just
   // speaks a different vocabulary, so the caps row carries {live, values} and
   // the chip/menu gate on those (never on a backend id).
   ok(c.fork === true && c.effort === true && c.review === true && c.autoResume === true && c.accounts === true && BACKEND_META.codex.caps.quotaRefresh === 'session-rpc'
@@ -58,7 +58,7 @@ const { BACKEND_META } = await import(path.join(REPO, 'src/lib/agent-meta.js'));
 }
 ok(/permissionModes: \['default', 'read-only', 'safe-yolo', 'yolo'\]/.test(metaSrc) && /permissionModes: \['default', 'acceptEdits', 'bypassPermissions', 'plan', 'auto'\]/.test(metaSrc), 'client META carries a permission-mode seed per backend');
 const sb = read('src/lib/chat-status-bar.js');
-ok(/BACKEND_META\[backend\]\?\.permissionModes/.test(sb) && /import \{ BACKEND_META, getBackendMeta, backendFeatureCaps, effortLabel, responseStyleLabel, responseStyleCaps \} from '\.\/agent-meta\.js'/.test(sb), 'the status bar seeds its permission dropdown from META (never claude modes on a codex chat before the first status)');
+ok(/BACKEND_META\[backend\]\?\.permissionModes/.test(sb) && /import \{ BACKEND_META, getBackendMeta, backendFeatureCaps, effortLabel, responseStyleLabel, responseStyleCaps, styleAppliesLive \} from '\.\/agent-meta\.js'/.test(sb), 'the status bar seeds its permission dropdown from META (never claude modes on a codex chat before the first status)');
 const sf = read('src/lib/setup-flows.js');
 ok(/const named = b\.namedLoggedIn \|\| 0;/.test(sf) && !/key === 'claude' \? \(b\.namedLoggedIn/.test(sf) && /const acctBtn = b\.installed\n/.test(sf), 'onboarding counts named accounts and offers the accounts door for every installed backend');
 const sv = read('server.js');

@@ -537,7 +537,7 @@ class AcpMessageManager {
         if (u.title) this._status.agentSessionTitle = String(u.title);
         return;
       }
-      // UNKNOWN (2.369.54): a bare `default: return` is how a new upstream
+      // UNKNOWN (2.369.57): a bare `default: return` is how a new upstream
       // update kind becomes an invisible product gap — the same class as
       // claude's `cli-unknown-system-subtype` and codex's `codex-unknown-record`
       // (three 0.153.4 rollouts rendered ZERO search cards under one). Name-only

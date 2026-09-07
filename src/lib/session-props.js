@@ -1,6 +1,6 @@
 import { escHtml, copyText, showConfirmDialog, taskGroupColor } from './utils.js';
 import { SESSION_STATE_META, SESSION_URGENCY_META } from './sidebar-tasks.js';
-import { getBackendMeta, getAgentKindMeta, getAgentRoleLabel, responseStyleCaps } from './agent-meta.js';
+import { getBackendMeta, getAgentKindMeta, getAgentRoleLabel, responseStyleCaps, responseStyleOrigin } from './agent-meta.js';
 import { t } from './i18n.js';
 import { registerOpenAction } from './window-types.js';
 
@@ -241,7 +241,7 @@ export function openSessionProps(app, sessionRef, { syncId } = {}) {
     const cfgSec = cfgBits.length ? section(t('Config overrides')) : null;
     if (cfgSec) row(cfgSec, t('Saved'), escHtml(cfgBits.join(' · ')));
 
-    // ── Response style, EFFECTIVE + its ORIGIN (2.369.54) ──
+    // ── Response style, EFFECTIVE + its ORIGIN (2.369.57) ──
     // Two different facts, and the panel says which is which: `s.outputStyle`
     // is what the LIVE session actually runs with (server truth, null = no key
     // was ever sent), `cfg.outputStyle` is the pick saved for this conversation.
@@ -254,10 +254,18 @@ export function openSessionProps(app, sessionRef, { syncId } = {}) {
       // Three different facts, said apart. A STOPPED session has no live value
       // at all, so a saved pick must not be reported as "the harness default".
       const shown = live || (picked || '');
-      const origin = live
-        ? (picked ? t('your choice for this session') : t('instance default'))
-        : (picked ? t('saved \u2014 applies on the next resume')
-          : t('harness default \u2014 the agent\u2019s own config decides'));
+      // The origin is decided by COMPARING the two, not by "does a pick exist"
+      // (2.369.57): with a live 'Explanatory' and a saved 'Concise' the old
+      // rule called the live value "your choice for this session" while the
+      // note beside it said the choice had not landed yet.
+      const ORIGIN_LABEL = {
+        chosen: () => t('your choice for this session'),
+        instance: () => t('instance default'),
+        spawn: () => t('what this session started with'),
+        saved: () => t('saved \u2014 applies on the next resume'),
+        harness: () => t('harness default \u2014 the agent\u2019s own config decides'),
+      };
+      const origin = ORIGIN_LABEL[responseStyleOrigin(live, picked)]();
       const pendBit = (live && picked !== undefined && (picked || '') !== live)
         ? ` <span class="chat-status-dim">${escHtml(t('(saved: {v} \u2014 applies on the next resume)', { v: picked || t('agent default') }))}</span>` : '';
       row(cfgSec || section(t('Config overrides')), t('Response style'),

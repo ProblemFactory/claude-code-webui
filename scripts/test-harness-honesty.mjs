@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// HARNESS HONESTY (2.369.54) — the four production defects the 2026-09-07
+// HARNESS HONESTY (2.369.57) — the four production defects the 2026-09-07
 // harness survey found, each with its own reproduction:
 //
 //  ① codex PERSONALITY. The wrapper hardcoded `personality:'pragmatic'` into
@@ -52,6 +52,72 @@ const { CodexMessageManager } = require(path.join(REPO, 'src/codex-message-manag
 const { threadToRecords } = require(path.join(REPO, 'src/codex-thread-read.js'));
 const { AcpMessageManager } = require(path.join(REPO, 'src/acp-message-manager.js'));
 
+// ═════════ the REAL schema, not a hand-written expectation ═════════
+// r2 review: the first cut of this suite asserted, byte for byte, a reply that
+// the app-server CANNOT deserialize (`execpolicy_amendment` is `string[]`; the
+// code sent `[{kind}]`) — a green gate certifying the exact hung-turn class the
+// change exists to kill. The cure is to stop hand-writing the expectation:
+// every reply is validated against codex's OWN dumped result schema
+// (scripts/fixtures/codex-server-request-responses.json, verbatim from
+// `codex app-server generate-json-schema --experimental`).
+const RESP_SCHEMAS = JSON.parse(read('scripts/fixtures/codex-server-request-responses.json'));
+/** draft-07 SUBSET validator — exactly the keywords those dumps use ($ref /
+ *  type / enum / const / allOf / anyOf / oneOf / properties / required /
+ *  additionalProperties / items). Cross-checked against python jsonschema on a
+ *  31-case battery (both directions) while it was written. Returns error
+ *  strings; empty = valid. */
+function schemaErrors(schema, value, root = schema, at = '$', errs = []) {
+  if (schema === true || schema === undefined || schema === null) return errs;
+  if (schema === false) { errs.push(`${at}: schema is false`); return errs; }
+  if (schema.$ref) {
+    const m = /^#\/definitions\/(.+)$/.exec(schema.$ref);
+    const target = m ? (root.definitions || {})[m[1]] : null;
+    if (!target) { errs.push(`${at}: unresolvable $ref ${schema.$ref}`); return errs; }
+    return schemaErrors(target, value, root, at, errs);
+  }
+  const kind = Array.isArray(value) ? 'array' : value === null ? 'null'
+    : typeof value === 'number' ? (Number.isInteger(value) ? 'integer' : 'number') : typeof value;
+  if (schema.type !== undefined) {
+    const want = Array.isArray(schema.type) ? schema.type : [schema.type];
+    if (!want.some((t) => t === kind || (t === 'number' && kind === 'integer'))) {
+      errs.push(`${at}: type ${kind} not in ${JSON.stringify(want)}`);
+      return errs;
+    }
+  }
+  if (schema.enum !== undefined && !schema.enum.some((e) => JSON.stringify(e) === JSON.stringify(value))) {
+    errs.push(`${at}: ${JSON.stringify(value)} not in enum ${JSON.stringify(schema.enum)}`);
+  }
+  if (schema.const !== undefined && JSON.stringify(schema.const) !== JSON.stringify(value)) {
+    errs.push(`${at}: ${JSON.stringify(value)} !== const`);
+  }
+  for (const sub of (schema.allOf || [])) schemaErrors(sub, value, root, at, errs);
+  if (schema.anyOf && !schema.anyOf.some((sub) => schemaErrors(sub, value, root, at, []).length === 0)) {
+    errs.push(`${at}: matched none of anyOf`);
+  }
+  if (schema.oneOf) {
+    const per = schema.oneOf.map((sub) => schemaErrors(sub, value, root, at, []));
+    const n = per.filter((e) => e.length === 0).length;
+    // A failing oneOf must NAME the field that broke (the whole point here is
+    // that `execpolicy_amendment` wants strings) — "matched 0 of oneOf" alone
+    // sends the next reader back to the schema by hand.
+    if (n === 0) errs.push(`${at}: matched none of oneOf — ${per.map((e, i) => `#${i}: ${e.join('; ')}`).join(' | ').slice(0, 500)}`);
+    else if (n > 1) errs.push(`${at}: matched ${n} of oneOf (must be exactly 1)`);
+  }
+  if (kind === 'object') {
+    for (const req of (schema.required || [])) {
+      if (!Object.prototype.hasOwnProperty.call(value, req)) errs.push(`${at}: missing required "${req}"`);
+    }
+    const props = schema.properties || {};
+    for (const [k, v] of Object.entries(value)) {
+      if (Object.prototype.hasOwnProperty.call(props, k)) schemaErrors(props[k], v, root, `${at}.${k}`, errs);
+      else if (schema.additionalProperties === false) errs.push(`${at}: additional property "${k}" not allowed`);
+      else if (schema.additionalProperties && typeof schema.additionalProperties === 'object') schemaErrors(schema.additionalProperties, v, root, `${at}.${k}`, errs);
+    }
+  }
+  if (kind === 'array' && schema.items) value.forEach((v, i) => schemaErrors(schema.items, v, root, `${at}[${i}]`, errs));
+  return errs;
+}
+
 // ═════════ Part 0 — the caps row is the ONE vocabulary ═════════
 console.log('— caps row');
 {
@@ -90,14 +156,61 @@ console.log('— caps row');
   ok(BM.responseStyleLabel('codex', 'friendly').startsWith('friendly — '), 'a picker label is the PROTOCOL value + its hint (the value itself is never translated)', BM.responseStyleLabel('codex', 'friendly'));
   ok(BM.responseStyleLabel('codex', 'made-up') === 'made-up', 'a value with no hint labels as itself');
   const sb = read('src/lib/chat-status-bar.js');
-  ok(/if \(!caps\.live && this\._onRestartSession/.test(sb), 'the "Restart now to apply" row is gated on caps.live — never on a backend id');
+  // r2: the row is gated on the HARNESS caps row AND the RUNNING WRAPPER's own
+  // advert — with caps alone, every codex session spawned before the live
+  // switch got a refusal, no restart row and an invisible saved pick.
+  ok(/if \(!styleAppliesLive\(caps, this\._responseStyleLive\) && this\._onRestartSession/.test(sb),
+    'the "Restart now to apply" row is gated on styleAppliesLive(caps, wrapper advert) — never on a backend id');
+  ok(/if \(styleAppliesLive\(caps, this\._responseStyleLive\)\) \{/.test(sb), '…and so is the choice between "send the live verb" and "save it for the next resume"');
+  ok(!/showToast\(s\.v \? t\('Response style .{0,40}applies from the next turn/.test(sb),
+    'the live-switch SUCCESS toast is NOT fired at click time (it announced a switch the server was about to refuse)');
+  {
+    const cv = read('src/lib/chat-view.js');
+    ok(/if \(msg\.live\) showToast\(msg\.outputStyle/.test(cv), '…it fires on the server\u2019s response-style-updated ECHO instead');
+    ok(/if \('responseStyleLive' in meta\) this\._statusBar\?\.setResponseStyleLive\?\.\(meta\.responseStyleLive\)/.test(cv),
+      'the client learns the wrapper advert from the attach payload (carries-the-key guard, like queueSupported)');
+    ok(/if \(msg\.code === 'style-wrapper-old'\) this\._statusBar\?\.setResponseStyleLive\?\.\(false\)/.test(cv),
+      "only the 'style-wrapper-old' refusal flips the flag (self-heal, no reload) — a transient/other refusal changes no belief");
+    ok(!/if \(msg\.code === 'style-not-live'\) this\._statusBar/.test(cv),
+      "…and 'style-not-live' does NOT: it also covers a sidecar not written yet and a session that just died (the 2.363.1 one-code-many-meanings law)");
+    ok(/setResponseStyleLive\(v\) \{ this\._responseStyleLive = \(v === undefined \|\| v === null\) \? undefined/.test(sb),
+      'null on the wire (server: "the wrapper has not reported yet") is UNKNOWN on the client, never false');
+    ok(/responseStyleLive: wcapsAttach\./.test(read('src/ws-handler.js')) && /const wcapsAttach = wrapperCaps\(/.test(read('src/ws-handler.js')),
+      'the server publishes that advert on attach, from the SAME sidecar read as queueSupported (resolveWrapperFiles walks /proc when the sidecar is missing)');
+    ok(/NO `responseStyleLive` here, deliberately/.test(read('src/ws-create.js')), 'the created payload states WHY it cannot know yet (undefined = try it)');
+  }
+  // the PURE predicate itself (a DOM-free client rule needs a functional test)
+  {
+    const LIVE = { live: true, closed: true, values: ['none'] }, SPAWN = { live: false, closed: false, values: ['Concise'] };
+    ok(BM.styleAppliesLive(LIVE, undefined) === true, 'styleAppliesLive: live harness, wrapper not yet known ⇒ TRY it');
+    ok(BM.styleAppliesLive(LIVE, true) === true, 'styleAppliesLive: live harness + a wrapper that adverts it ⇒ live');
+    ok(BM.styleAppliesLive(LIVE, false) === false, 'styleAppliesLive: live harness but an OLD wrapper ⇒ needs a restart');
+    ok(BM.styleAppliesLive(SPAWN, true) === false, 'styleAppliesLive: a spawn-only harness is never live, whatever the wrapper says');
+    ok(BM.styleAppliesLive(null, true) === false, 'styleAppliesLive: no caps row ⇒ never live');
+  }
+  // …and the ORIGIN label rule (r2: it called the instance default "your
+  // choice" whenever ANY pick existed, contradicting the note beside it)
+  {
+    ok(BM.responseStyleOrigin('Concise', 'Concise') === 'chosen', 'origin: live === picked ⇒ the user\u2019s choice');
+    ok(BM.responseStyleOrigin('Explanatory', 'Concise') === 'spawn', 'origin: a DIFFERENT pick is saved ⇒ the live value is what the session started with (never "your choice")');
+    ok(BM.responseStyleOrigin('Explanatory', undefined) === 'instance', 'origin: no pick here ⇒ the instance default');
+    ok(BM.responseStyleOrigin('Explanatory', null) === 'spawn', 'origin: a CLEARED pick still differs from the live value');
+    ok(BM.responseStyleOrigin('', 'Concise') === 'saved', 'origin: stopped session + a pick ⇒ saved for the next resume');
+    ok(BM.responseStyleOrigin('', undefined) === 'harness', 'origin: nothing anywhere ⇒ the harness default');
+    ok(/const origin = ORIGIN_LABEL\[responseStyleOrigin\(live, picked\)\]\(\)/.test(read('src/lib/session-props.js')),
+      'Session Properties uses that ONE rule (wiring pin — a pure fix with no call site is dead code)');
+  }
   ok(!/=== 'codex'|=== 'claude'/.test(sb.slice(sb.indexOf('const styleEl'), sb.indexOf('const effortEl'))), 'the style menu contains no backend-id branch');
   ok(/const STYLES = \[\{ v: '', label: t\('agent default'\) \}, \.\.\.caps\.values\.map/.test(sb), 'the menu rows ARE the caps values (no hardcoded list)');
   const wh = read('src/ws-handler.js');
-  ok(/case 'set-response-style'/.test(wh) && /capsOf\(session\.backend\)\.responseStyle/.test(wh) && /code: 'style-not-live'/.test(wh),
+  ok(/case 'set-response-style'/.test(wh) && /capsOf\(session\.backend\)\.responseStyle/.test(wh) && /code = 'style-not-live'/.test(wh) && /scope: 'action'/.test(wh),
     "ws 'set-response-style' gates on the caps row and refuses with a coded, scope:'action' error");
   ok(/const wcaps = wrapperCaps\(BUFFERS_DIR, data\.sessionId, session\.socketPath\);\s*\n\s*if \(!wcaps\.responseStyle\)/.test(wh),
     '…and on the RUNNING wrapper\u2019s own advert too (a session spawned before this release drops the verb silently)');
+  ok(/wcaps\.reason === 'no-sidecar' \? 'style-not-live' : 'style-wrapper-old'/.test(wh),
+    '…and the two refusals carry DIFFERENT codes: "restart to change it" vs "not reported yet, try again"');
+  ok(/responseStyleLive: wcapsAttach\.reason === 'no-sidecar' \? null : !!wcapsAttach\.responseStyle/.test(wh),
+    'the attach advert is TRI-STATE: a sidecar not written yet is null (unknown), never a false that would wear a restart row');
   ok(/responseStyle: !!\(caps && caps\.responseStyle\)/.test(read('src/server/wrapper-files.js')), 'wrapperCaps reads that advert from the sidecar the WRAPPER writes (never session-meta \u2014 the 2.364.1 lesson)');
   // RESTART SURVIVAL: a live style must not evaporate when the server restarts
   // (the chip would report "default" for a session really running one).
@@ -115,11 +228,12 @@ const SID = 'sess-h-1700000000009';
 const buf = path.join(dir, SID + '.buf'), metaFile = path.join(dir, SID + '.json'), rpcLog = path.join(dir, 'rpc.jsonl'), repliesLog = path.join(dir, 'replies.jsonl');
 // The stub logs every REQUEST we send it AND every REPLY we send to ITS
 // requests — the reply shapes are the whole point of ②.
-const STUB = `
-const fs = require('fs');
-let b = ''; let turns = 0;
-const send = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
-const REQS = [
+// EVERY ServerRequest method in one table — lifted OUT of the stub source so
+// the schema-validation pass below can map a reply id back to its METHOD from
+// the same literal the stub sends (r2: a hand-copied map is the twin that
+// drifts). 900-906/912-914 are human-answerable, 907 is auto-answered and
+// 908-911 must be refused.
+const SERVER_REQS = [
   { id: 900, method: 'item/commandExecution/requestApproval', params: { threadId: 'th-h', turnId: 't1', itemId: 'i900', command: ['rm', '-rf', '/tmp/x'], cwd: '/tmp', proposedExecpolicyAmendment: ['allow rm'] } },
   { id: 901, method: 'item/fileChange/requestApproval', params: { threadId: 'th-h', turnId: 't1', itemId: 'i901', reason: 'edit', changes: {} } },
   { id: 902, method: 'item/permissions/requestApproval', params: { threadId: 'th-h', turnId: 't1', itemId: 'i902', cwd: '/tmp', startedAtMs: 1, permissions: { fileSystem: { read: ['/tmp'] }, network: { enabled: true } } } },
@@ -129,7 +243,22 @@ const REQS = [
   { id: 906, method: 'execCommandApproval', params: { conversation_id: 'c', call_id: 'i906', command: ['ls'], cwd: '/tmp' } },
   { id: 912, method: 'mcpServer/elicitation/request', params: { threadId: 'th-h', serverName: 'auth', mode: 'url', elicitationId: 'e1', message: 'Finish signing in', url: 'https://example.org/login' } },
   { id: 913, method: 'item/permissions/requestApproval', params: { threadId: 'th-h', turnId: 't1', itemId: 'i913', cwd: '/tmp', startedAtMs: 1, permissions: { fileSystem: { write: ['/etc'] } } } },
+  // a SECOND command approval — answered below with a frame the REAL ADAPTER
+  // built, i.e. the only shape production can actually produce (r2 review).
+  { id: 914, method: 'item/commandExecution/requestApproval', params: { threadId: 'th-h', turnId: 't1', itemId: 'i914', command: 'rm -rf /tmp/y', cwd: '/tmp', startedAtMs: 1, proposedExecpolicyAmendment: ['allow rm'] } },
+  // answered WITHOUT a human: a fact we simply know
+  { id: 907, method: 'currentTime/read', params: {} },
+  // refused: values only a client that OWNS them can produce
+  { id: 908, method: 'attestation/generate', params: {} },
+  { id: 909, method: 'item/tool/call', params: { toolName: 'x' } },
+  { id: 910, method: 'account/chatgptAuthTokens/refresh', params: {} },
+  { id: 911, method: 'totally/unknown/method', params: {} },
 ];
+const STUB = `
+const fs = require('fs');
+let b = ''; let turns = 0;
+const send = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+const REQS = ${JSON.stringify(SERVER_REQS)};
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (d) => {
   b += d; let i;
@@ -152,11 +281,6 @@ process.stdin.on('data', (d) => {
         send({ method: 'item/completed', params: { threadId: 'th-h', turnId: tid, item: { type: 'sleep', id: 'call_s1', durationMs: 30000 } } });
         // ② every ServerRequest method, in one burst
         for (const r of REQS) send(r);
-        send({ id: 907, method: 'currentTime/read', params: {} });
-        send({ id: 908, method: 'attestation/generate', params: {} });
-        send({ id: 909, method: 'item/tool/call', params: { toolName: 'x' } });
-        send({ id: 910, method: 'account/chatgptAuthTokens/refresh', params: {} });
-        send({ id: 911, method: 'totally/unknown/method', params: {} });
       }
       continue;
     }
@@ -230,13 +354,18 @@ for (const [id, name] of [[908, 'attestation/generate'], [909, 'item/tool/call']
 }
 ok(await waitFor(() => events().filter((e) => e.payload?.type === 'client_request_unsupported').length >= 4), 'each refusal also leaves a VISIBLE record (client_request_unsupported)');
 ok(!Object.keys(readMeta()?.pendingRequests || {}).some((k) => ['907', '908', '909', '910', '911'].includes(k)), 'none of them ever became a pending card', JSON.stringify(Object.keys(readMeta()?.pendingRequests || {})));
-ok(await waitFor(() => ['900', '901', '902', '903', '904', '905', '906', '912', '913'].every((k) => readMeta()?.pendingRequests?.[k])), 'the nine human-answerable requests ARE pending cards', JSON.stringify(Object.keys(readMeta()?.pendingRequests || {})));
+ok(await waitFor(() => ['900', '901', '902', '903', '904', '905', '906', '912', '913', '914'].every((k) => readMeta()?.pendingRequests?.[k])), 'the ten human-answerable requests ARE pending cards', JSON.stringify(Object.keys(readMeta()?.pendingRequests || {})));
 
 // each one answered through the SAME client frame the UI sends
 sendLine({ type: 'permission-response', requestId: 900, approved: true, permissionUpdates: [{ kind: 'allow' }], toolInput: {} });
 ok(await waitFor(() => replyFor(900)), 'commandExecution approval answered');
-ok(JSON.stringify(replyFor(900).result) === JSON.stringify({ decision: { acceptWithExecpolicyAmendment: { execpolicy_amendment: [{ kind: 'allow' }] } } }),
-  'commandExecution + an execpolicy amendment → {decision:{acceptWithExecpolicyAmendment}}', JSON.stringify(replyFor(900).result));
+// r2 REGRESSION — the one branch that did not validate was the one the first
+// cut of this gate certified: `execpolicy_amendment` is `string[]` in the
+// dumped schema (execpolicy RULE LINES) while the client's `permissionUpdates`
+// is `[{kind}]`, so the wrapper must never build an amendment out of it. A
+// plain accept is what the button promised, and it deserializes.
+ok(JSON.stringify(replyFor(900).result) === JSON.stringify({ decision: 'accept' }),
+  'commandExecution: the client’s option objects NEVER become an execpolicy amendment (the schema says string[]) — a plain accept', JSON.stringify(replyFor(900).result));
 sendLine({ type: 'permission-response', requestId: 901, approved: true, alwaysAllow: true, permissionUpdates: [{ kind: 'allow' }] });
 ok(await waitFor(() => replyFor(901)), 'fileChange approval answered');
 ok(JSON.stringify(replyFor(901).result) === JSON.stringify({ decision: 'acceptForSession' }),
@@ -278,6 +407,75 @@ ok(events().some((e) => e.type === 'server_request_resolved' && e.payload.id ===
   && events().some((e) => e.type === 'server_request_resolved' && e.payload.id === 902 && e.payload.decision === 'granted'),
   'the resolved record labels a GRANT and a DENY apart (both are `{permissions}` on the wire)',
   JSON.stringify(events().filter((e) => e.type === 'server_request_resolved').map((e) => [e.payload.id, e.payload.decision])));
+
+// ② r2 — the ADAPTER-BUILT frame, i.e. the only permission-response shape
+// production can actually produce (src/ws-handler.js 'permission-response' →
+// adapter.formatPermissionResponse). The first cut only ever wrote hand-made
+// frames to stdin, so a branch that no product path could reach was "covered".
+{
+  const { CodexAdapter } = require(path.join(REPO, 'src/adapters/codex.js'));
+  const ad = new CodexAdapter({ codexCmd: 'codex', chatWrapper: '/w' });
+  const frame = ad.formatPermissionResponse({ requestId: 914, approved: true, toolInput: {}, permissionUpdates: [{ kind: 'allow_always' }] });
+  ok(!/permissionUpdates/.test(frame), 'the adapter does NOT forward the client\u2019s permissionUpdates \u2014 it carries only the alwaysAllow BOOLEAN', frame.slice(0, 200));
+  w.stdin.write(frame + '\n');
+  ok(await waitFor(() => replyFor(914)), 'an ADAPTER-built "Always Allow" is answered');
+  ok(JSON.stringify(replyFor(914).result) === JSON.stringify({ decision: 'acceptForSession' }),
+    '\u2026with acceptForSession \u2014 a SESSION-scoped promise, never a persistent execpolicy amendment the user never asked for', JSON.stringify(replyFor(914).result));
+}
+
+// ② r2 — EVERY reply validated against codex's OWN result schema. This is the
+// assert that would have failed the shipped `[{kind}]` amendment; the per-method
+// expectations above stay because they pin the DECISION, this one pins that the
+// decision is even deserializable.
+{
+  const methodOf = new Map(SERVER_REQS.map((r) => [r.id, r.method]));
+  const answered = replies().filter((r) => 'result' in r);
+  ok(answered.length >= 11, 'every request got a reply to validate', String(answered.length));
+  for (const r of answered) {
+    const method = methodOf.get(r.id);
+    const sch = RESP_SCHEMAS.byMethod[method];
+    if (!sch) { ok(false, `no vendored schema for ${method} \u2014 a new answerable method needs its dump in the fixture`); continue; }
+    const errs = schemaErrors(sch, r.result);
+    ok(errs.length === 0, `reply to ${method} validates against ${RESP_SCHEMAS.fileByMethod[method]} (codex ${RESP_SCHEMAS.codexVersion})`, errs.join(' | ') + ' :: ' + JSON.stringify(r.result).slice(0, 200));
+  }
+  // NEGATIVE CONTROL: the validator is not vacuous — the exact payload this
+  // suite used to certify is rejected, naming the field.
+  const bad = schemaErrors(RESP_SCHEMAS.byMethod['item/commandExecution/requestApproval'],
+    { decision: { acceptWithExecpolicyAmendment: { execpolicy_amendment: [{ kind: 'allow' }] } } });
+  ok(bad.length > 0 && /execpolicy_amendment/.test(bad.join(' ')), 'negative control: the OLD amendment payload (option objects) FAILS the real schema', bad.join(' | '));
+  const bad2 = schemaErrors(RESP_SCHEMAS.byMethod['item/tool/requestUserInput'], { decision: 'accept' });
+  ok(bad2.length > 0, 'negative control: `{decision}` is not a requestUserInput answer (the pre-2.369.57 one-shape-fits-all)', bad2.join(' | '));
+  const good = schemaErrors(RESP_SCHEMAS.byMethod['item/commandExecution/requestApproval'],
+    { decision: { acceptWithExecpolicyAmendment: { execpolicy_amendment: ['allow rm'] } } });
+  ok(good.length === 0, 'positive control: the amendment IS legal when it carries the server\u2019s own rule STRINGS (a future UI may send it)', good.join(' | '));
+}
+
+// ② r2 — the vendored schema is a COPY of an upstream file: when the codex
+// binary is here, re-dump and diff it, so an upstream shape change fails loudly
+// instead of rotting in the fixture. No binary = an explicit SKIP with evidence.
+{
+  let cx = '';
+  try { cx = execSync('command -v codex', { encoding: 'utf8' }).trim(); } catch { }
+  if (!cx) {
+    console.log('  SKIP: no `codex` on PATH — the fixture-vs-live schema diff did not run (the fixture still gates every reply)');
+  } else {
+    const dumpDir = path.join(dir, 'schema-dump');
+    fs.mkdirSync(dumpDir, { recursive: true });
+    let dumped = true;
+    try { execSync(`codex app-server generate-json-schema --experimental --out ${dumpDir}`, { env: { ...process.env, CODEX_HOME: path.join(dir, 'no-such-home') }, stdio: 'ignore' }); }
+    catch { dumped = false; }
+    if (!dumped) console.log('  SKIP: `codex app-server generate-json-schema` failed here — fixture diff skipped');
+    else {
+      let ver = '?';
+      try { ver = execSync('codex --version', { encoding: 'utf8' }).trim(); } catch { }
+      for (const [method, file] of Object.entries(RESP_SCHEMAS.fileByMethod)) {
+        const live = JSON.parse(fs.readFileSync(path.join(dumpDir, file + '.json'), 'utf8'));
+        ok(JSON.stringify(live) === JSON.stringify(RESP_SCHEMAS.byMethod[method]),
+          `fixture matches the INSTALLED codex (${ver}) for ${method}`, 'the dump changed upstream — re-vendor the fixture and re-check every reply builder');
+      }
+    }
+  }
+}
 
 // the elicitation CARD: rows travel with the record, and the normalizer renders
 // them through the AskUserQuestion family
@@ -444,6 +642,36 @@ console.log('— image_gen + sleep: three producers, one card');
   const { formatSleepRemaining } = await import(path.join(REPO, 'src/lib/chat-renderers.js'));
   ok(formatSleepRemaining(760000) === '12:40' && formatSleepRemaining(-5) === '0:00' && formatSleepRemaining(3665000) === '1:01:05',
     'the countdown formats mm:ss (h:mm:ss past an hour) and never goes negative', [formatSleepRemaining(760000), formatSleepRemaining(-5), formatSleepRemaining(3665000)].join(' / '));
+}
+
+// ═════════ the version marker names THIS change ═════════
+// r2 review: the first cut stamped "2.369.54" into 21 files while master had
+// already SHIPPED 2.369.54 as an unrelated fix — every kb entry and code
+// comment then pointed a reader at somebody else's release. A marker is a
+// cross-reference; it has to resolve.
+console.log('— version marker');
+{
+  const MARK = '2.369.57';   // renumber HERE and everywhere else in one sed
+  const SITES = ['src/backend-caps.js', 'data/bin/codex-chat-wrapper.js', 'src/acp-message-manager.js',
+    'src/codex-thread-read.js', 'src/lib/chat-status-bar.js', 'src/lib/session-props.js',
+    'src/ws-handler.js', 'docs/kb-file-structure.md', 'docs/kb-features.md', 'docs/kb-api.md'];
+  for (const f of SITES) ok(read(f).includes(MARK), `${f} carries the marker ${MARK} (all sites name ONE version)`);
+  const changelog = read('CHANGELOG.md');
+  // The section for that number, header line to the next `## ` (plain slicing:
+  // a lazy regex with a multiline `$` lookahead stops at the end of the HEADER
+  // and reads the body as empty, which passes any content check vacuously).
+  const head = new RegExp(`^## ${MARK.replace(/\./g, '\\.')}(?![\\d.])`, 'm').exec(changelog);
+  let entry = null;
+  if (head) {
+    const from = head.index;
+    const next = changelog.indexOf('\n## ', from + 1);
+    entry = changelog.slice(from, next < 0 ? changelog.length : next);
+  }
+  // Unreleased = no entry yet (fine). Released = the entry under this number
+  // must be THIS change, not a squatter that shipped first.
+  ok(!entry || /personality|response style|ServerRequest|elicitation/i.test(entry),
+    `CHANGELOG ${MARK} is either unwritten or describes THIS change (a number another release already used = renumber)`,
+    (entry ? entry.slice(0, 160) : 'no entry yet'));
 }
 
 // ═════════ docs ═════════
