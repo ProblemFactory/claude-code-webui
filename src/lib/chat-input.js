@@ -533,7 +533,15 @@ export class ChatInput {
     this._stopPendingTimer = null;
     if (!this._stopPending) return;
     this._stopPending = false;
-    if (this._isStreaming) this.showTyping(this._typingLabel ?? t('thinking...'), this._typingKind ?? null);
+    if (this._isStreaming) {
+      // The 2.369.57 label-only repaint keeps an EXISTING button untouched —
+      // which here is the disabled "Stopping…" one. Drop it first so showTyping
+      // takes its full-render path and hands back a live Stop (the 8 s fallback
+      // and a turn boundary both come through here; a dead button after either
+      // is the exact wedge this state promised never to produce).
+      this._streamStatus?.querySelector('.chat-interrupt-btn')?.remove();
+      this.showTyping(this._typingLabel ?? t('thinking...'), this._typingKind ?? null);
+    }
   }
 
   /** The label currently on the stream-status line (null = not streaming). */

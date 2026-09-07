@@ -2941,6 +2941,7 @@ export default {
   "Activity": "アクティビティ",
   "Thread": "スレッド",
   "payload encrypted upstream": "ペイロードは上流で暗号化されています",
+  "Encrypted by OpenAI server-side (multi-agent v2, PR #26210): the key never reaches this machine, and the official Codex TUI cannot show it either — see openai/codex#28058": "OpenAI サーバー側で暗号化（マルチエージェント v2、PR #26210）：鍵はこのマシンに届かず、公式 Codex TUI でも表示できません — openai/codex#28058 参照",
   "{n} sub-agent events": "{n} 件のサブエージェントイベント",
   "sub-agent": "サブエージェント",
   "sub-agent report": "サブエージェント報告",

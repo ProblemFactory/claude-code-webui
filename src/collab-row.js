@@ -269,7 +269,7 @@ function collabRowTitle(row, t = T) {
   if (r.kind) bits.push(`${t('Activity')}: ${r.kind}`);
   if (r.threadId) bits.push(`${t('Thread')}: ${r.threadId}`);
   if (r.detail) bits.push(String(r.detail).slice(0, 300));
-  if (r.encrypted) bits.push(t('payload encrypted upstream'));
+  if (r.encrypted) bits.push(`${t('payload encrypted upstream')} — ${t('Encrypted by OpenAI server-side (multi-agent v2, PR #26210): the key never reaches this machine, and the official Codex TUI cannot show it either — see openai/codex#28058')}`);
   return bits.join('\n');
 }
 
@@ -296,7 +296,7 @@ function collabRowHtml(row, { esc, t = T, icons = {} } = {}) {
   const p = collabRowParts(r, t);
   const icon = icons[r.dir] || icons.activity || '';
   const nameHtml = p.name ? collabNameHtml(r, { esc, name: p.name }) : '';
-  const lock = r.encrypted ? `<span class="chat-collab-enc" title="${esc(t('payload encrypted upstream'))}">${icons.lock || ''}</span>` : '';
+  const lock = r.encrypted ? `<span class="chat-collab-enc" title="${esc(`${t('payload encrypted upstream')} — ${t('Encrypted by OpenAI server-side (multi-agent v2, PR #26210): the key never reaches this machine, and the official Codex TUI cannot show it either — see openai/codex#28058')}`)}">${icons.lock || ''}</span>` : '';
   return `<span class="chat-collab-row" title="${esc(collabRowTitle(r, t))}"><span class="chat-collab-icon" aria-hidden="true">${icon}</span>${esc(p.pre)}${nameHtml}${esc(p.post)}${lock}</span>`;
 }
 

@@ -2941,6 +2941,7 @@ export default {
   "Activity": "活动",
   "Thread": "线程",
   "payload encrypted upstream": "载荷由上游加密，未提供明文",
+  "Encrypted by OpenAI server-side (multi-agent v2, PR #26210): the key never reaches this machine, and the official Codex TUI cannot show it either — see openai/codex#28058": "由 OpenAI 服务端加密（多 agent v2，PR #26210）：密钥从不下发到本机，官方 Codex TUI 同样看不到——见 openai/codex#28058",
   "{n} sub-agent events": "{n} 条子代理事件",
   "sub-agent": "子代理",
   "sub-agent report": "子代理汇报",

@@ -422,10 +422,12 @@ fs.writeFileSync(stubPath, STUB, { mode: 0o755 });
 
 try { execSync(`git worktree remove --force ${wt}`, { cwd: REPO, stdio: 'ignore' }); } catch { }
 execSync(`git worktree add --detach ${wt} HEAD`, { cwd: REPO, stdio: 'ignore' });
-for (const f of ['src', 'public', 'server.js', 'package.json', 'data']) execSync(`rm -rf ${wt}/${f} && cp -r ${REPO}/${f} ${wt}/${f}`);
+for (const f of ['src', 'public', 'server.js', 'package.json']) execSync(`rm -rf ${wt}/${f} && cp -r ${REPO}/${f} ${wt}/${f}`);
+// data/ = ONLY the tracked agent tools. The repo's data/ is PRODUCTION (~600 MB of
+// buffers, telemetry, ledgers): copying it made this suite take >9 min and put
+// live-session artifacts under /tmp (2.369.57 gate timeout).
+execSync(`rm -rf ${wt}/data && mkdir -p ${wt}/data && cp -r ${REPO}/data/bin ${wt}/data/bin`);
 fs.symlinkSync(path.join(REPO, 'node_modules'), path.join(wt, 'node_modules'));
-// the copied data/ is the repo's TRACKED bin only — wipe every live-session artifact
-for (const d of ['sockets', 'session-buffers', 'session-meta']) { try { fs.rmSync(path.join(wt, 'data', d), { recursive: true, force: true }); } catch { } }
 
 const srv = spawn(process.execPath, ['server.js'], {
   cwd: wt,
@@ -649,7 +651,16 @@ console.log('— ⑥ a LIVE turn: the head grows, the age ticks, the label switc
   check('…so keyboard focus on Stop survives the ticks (it used to be destroyed once a second)',
     btnWatch?.focused === true, JSON.stringify(btnWatch?.focused));
   await evaljs(`(() => { window.__stops = 0; window.__live._chatInput._onInterrupt = () => { window.__stops++; }; return true; })()`);
+  // 2.369.55 made Stop single-flight: the first click disables the button
+  // ("Stopping…") until the turn ends or the 8 s fallback. That is correct and
+  // is pinned by test-queue-steer; THIS leg measures a different thing — that
+  // the ticking label never destroys the button between two legitimate clicks
+  // — so each iteration first ends the pending state the way a turn boundary
+  // would (_endStopPending repaints the SAME live line), then clicks again.
+  let pendingAfterFirst = null;
   for (let i = 0; i < 10; i++) {
+    if (i === 1) pendingAfterFirst = await evaljs(`(() => { const b = window.__live._container.querySelector('.chat-stream-status .chat-interrupt-btn'); return b ? { disabled: b.disabled, text: b.textContent } : null; })()`);
+    if (i > 0) await evaljs(`(() => { window.__live._chatInput._endStopPending?.(); return true; })()`);
     // re-read the rect every time: the button sits AFTER the label, so it
     // shifts a few px as the age grows — a cached centre would start missing it
     const r = await evaljs(`(() => { const b = window.__live._container.querySelector('.chat-stream-status .chat-interrupt-btn'); if (!b) return null; const q = b.getBoundingClientRect(); return { x: Math.round(q.left + q.width / 2), y: Math.round(q.top + q.height / 2) }; })()`);
@@ -662,6 +673,8 @@ console.log('— ⑥ a LIVE turn: the head grows, the age ticks, the label switc
   const stops = await evaljs('window.__stops');
   check('all ten TRUSTED Stop clicks reached the handler while the label ticked (a swallowed interrupt is a silent failure)',
     stops === 10, `${stops}/10 delivered`);
+  check('…and the first click left the button in the 2.369.55 pending state (disabled, "Stopping…") — single-flight, not a rebuilt button',
+    pendingAfterFirst?.disabled === true && /Stopping/.test(pendingAfterFirst?.text || ''), JSON.stringify(pendingAfterFirst));
 
   // ── turn end: everything FREEZES to the absolute span ──
   let frozen = null;
