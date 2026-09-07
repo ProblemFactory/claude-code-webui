@@ -174,6 +174,15 @@ never a backend id; the ws layer, the strip and the chip all gate on that row:
   the OLD system card — otherwise that bubble wears a `Queued` chip that can
   never clear and never be acted on. Same law as the frame-file bypass
   (2.361.1/2.364.1): capability = what the RUNNING PROCESS says it can do.
+- **The chip is re-applied when the capability flips.** `_queueSupported` starts
+  false and both of its sources arrive AFTER the bubbles are on screen (the
+  attach payload is applied at the END of `loadHistory`; a live wrapper's
+  baseline `queue_changed` lands a few frames after the first messages). A chip
+  built in that window would be `disabled` forever, so `_setQueueSupported` —
+  the one writer — schedules a single rAF-coalesced pass over the rendered
+  elements and re-runs the chip renderer for every message carrying a queue
+  state. It runs in BOTH directions: losing the capability makes the chips inert
+  again rather than leaving a control that cannot work.
 - **The chip joins on `webuiMsgId`, stamped on the message.** The normalizer's
   `userMessageIds` map is server-side only; the bubble carries the id itself so
   the client can match it to a queue row (without it every chip click answered

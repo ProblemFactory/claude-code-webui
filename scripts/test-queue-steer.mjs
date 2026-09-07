@@ -136,7 +136,14 @@ console.log('— ③ the ws case gates on the caps row AND the running wrapper')
   ok("…and the wrapper's queue advert rides the SAME payload (the client cannot read a sidecar)", /queueSupported: wrapperCaps\(BUFFERS_DIR, data\.sessionId, session\.socketPath\)\.inputQueue/.test(read('src/ws-handler.js')));
   { const wsc = read('src/ws-create.js');
     ok("…'created' carries both, and says the fresh wrapper has reported NOTHING yet", /queue: \[\],/.test(wsc) && /queueSupported: false,/.test(wsc)); }
-  ok('the client applies both through the carries-the-key guard, advert FIRST', /if \('queueSupported' in meta\) this\._queueSupported = !!meta\.queueSupported;\s*\n\s*if \('queue' in meta\) this\._setQueue\(meta\.queue\);/.test(cv));
+  ok('the client applies both through the carries-the-key guard, advert FIRST', /if \('queueSupported' in meta\) this\._setQueueSupported\(meta\.queueSupported\);\s*\n\s*if \('queue' in meta\) this\._setQueue\(meta\.queue\);/.test(cv));
+  // ONE WRITER for the capability, because a FLIP has a consequence (the
+  // rendered chips must be re-applied — round-2's MAJOR). A bare assignment
+  // anywhere else silently skips it.
+  ok('`_queueSupported` has exactly ONE writer besides its initialiser (_setQueueSupported), so every flip is observable',
+    (cv.match(/this\._queueSupported = /g) || []).length === 2 && /_setQueueSupported\(next\) \{[\s\S]{0,200}this\._queueSupported = val;\s*\n\s*this\._refreshQueueChips\(\);/.test(cv),
+    (cv.match(/this\._queueSupported = [^\n]*/g) || []));
+  ok("…and the live meta path uses it too (a wrapper's baseline queue_changed also arrives after the bubbles)", /if \(op\.supported\) this\._setQueueSupported\(true\);/.test(cv));
   ok('wiring pin: the strip and the chip send the SAME ws message through one method', /this\.ws\.send\(\{ type: 'queue-op', sessionId: this\.sessionId, op, id: id \|\| null \}\)/.test(cv) && (cv.match(/type: 'queue-op'/g) || []).length === 1);
   // NO DEAD CONTROLS: the chip is clickable only where the VIEW says steer
   // (harness row ∧ running wrapper — ONE definition), and every queue action
@@ -264,12 +271,24 @@ console.log('— ⑦ FUNCTIONAL client: a normalizer-produced bubble → a real 
   // same property), so the decisions run here for real instead of by grep.
   // A minimal document stub only exists for showToast, whose text is captured.
   const created = [];
+  // The stub carries just enough tree for applyQueueChip to be IDEMPOTENT the
+  // way the real DOM makes it: ':scope > .chat-queue-chip' finds the previous
+  // chip and prev.remove() detaches it (a no-op remove() would let the chips
+  // double and hide exactly the bug this leg exists for).
   const mkEl = () => {
     const e = {
-      className: '', id: '', textContent: '', style: {}, dataset: {}, children: [],
+      className: '', id: '', textContent: '', style: {}, dataset: {}, children: [], _parent: null,
       classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
-      setAttribute() {}, append() {}, appendChild(c) { this.children.push(c); return c; }, remove() {},
-      addEventListener() {}, removeEventListener() {}, querySelector: () => null, querySelectorAll: () => [],
+      setAttribute() {}, append() {},
+      appendChild(c) { this.children.push(c); if (c && typeof c === 'object') c._parent = this; return c; },
+      remove() { const p = this._parent; if (!p) return; const i = p.children.indexOf(this); if (i >= 0) p.children.splice(i, 1); this._parent = null; },
+      addEventListener() {}, removeEventListener() {},
+      querySelector(sel) {
+        const m = /^:scope > \.([\w-]+)$/.exec(String(sel || ''));
+        if (!m) return null;
+        return this.children.find((c) => String(c?.className || '').split(/\s+/).includes(m[1])) || null;
+      },
+      querySelectorAll: () => [],
       getBoundingClientRect: () => ({ top: 0, bottom: 0, left: 0, right: 0 }), offsetParent: null,
       get firstChild() { return this.children[0] || null; },
     };
@@ -342,6 +361,71 @@ console.log('— ⑦ FUNCTIONAL client: a normalizer-produced bubble → a real 
   notices = []; rescued = 0; readOnlyed = 0;
   ChatView.prototype._onSessionError.call(mkView({ _tryViewOnlyRescue: () => false }), { type: 'error', sessionId: 'sess-9', code: 'ended-during-attach', message: 'gone' });
   ok('…and when even the rescue cannot work, the window says so and goes read-only', readOnlyed === 1 && notices.some((n) => /gone/.test(n)));
+
+  // ── THE MAJOR round 2 found: THE CHIP IS RENDERED BEFORE THE CAPABILITY
+  // ARRIVES. `_queueSupported` starts false; loadHistory renders EVERY message
+  // and only then calls `_applyLiveMeta` (which carries the attach payload's
+  // `queueSupported`), and on a live session the wrapper's baseline
+  // `queue_changed` lands after the first bubbles too. A chip built in that
+  // window got onSteer=null ⇒ permanently `disabled`, and nothing re-rendered
+  // it — so after ANY history load the 'Queued' chip was dead and its click
+  // sent nothing. Drive the REAL renderer + REAL view methods.
+  const { ChatRenderers } = await import(path.join(REPO, 'src/lib/chat-renderers.js'));
+  const chipsOf = (el) => (el?.children || []).filter((c) => /\bchat-queue-chip\b/.test(String(c?.className || '')));
+  const chipOf = (el) => chipsOf(el)[0] || null;
+  const flush = () => new Promise((r) => setTimeout(r, 40));   // the rAF coalescing window
+  // A dead chip must FAIL the assert below, not crash the suite on `undefined()`
+  const clickChip = (el) => { const c = chipOf(el); if (typeof c?.onclick === 'function') c.onclick({ stopPropagation() {} }); };
+  const mkQueuedView = () => {
+    const out = [];
+    const view = Object.assign(Object.create(ChatView.prototype), {
+      sessionId: 'sess-q', ws: { send: (m) => out.push(m) },
+      _readOnly: false, _disconnected: false, _chatInput: null, _disposed: false, _statusBar: null,
+      _messages: [], _elements: new Map(), _queue: [], _queueSupported: false, _queueChipRaf: 0,
+      _getSessionIds: () => ({ backend: 'codex' }), winInfo: { backend: 'codex' },
+    });
+    // The REAL renderer, wired to the view exactly as ChatView wires it.
+    view._renderers = new ChatRenderers({
+      ws: view.ws, sessionId: view.sessionId, app: null, backend: 'codex', compact: false,
+      messageList: mkEl(), onQueueChipClick: (m) => view._steerQueuedMessage(m),
+      getQueueCaps: () => view._queueCaps(),
+    });
+    // …and a bubble rendered while the capability is still the constructor
+    // default — the loadHistory ordering, reproduced.
+    const el = view._renderers.renderUserMsg(bubble);
+    view._messages.push(bubble); view._elements.set(bubble.id, el);
+    view._queue = mm.queueState();
+    return { view, el, out };
+  };
+
+  {
+    const { view, el, out } = mkQueuedView();
+    ok('a bubble rendered BEFORE the capability lands still SHOWS its queued chip', chipOf(el)?.dataset?.queueState === 'queued', chipsOf(el).map((c) => c.className));
+    ok('…and THAT chip is inert — the exact state the bug shipped in', chipOf(el).disabled === true && typeof chipOf(el).onclick !== 'function');
+    // THE ATTACH PATH: `attached.queueSupported` arrives after loadHistory
+    ChatView.prototype._applyLiveMeta.call(view, { queueSupported: true, queue: mm.queueState() });
+    await flush();
+    ok('THE FIX (attach path): the capability flipping false→true re-applies the rendered chips', !!chipOf(el) && !chipOf(el).disabled && typeof chipOf(el).onclick === 'function', { disabled: chipOf(el)?.disabled });
+    ok('…and exactly ONE chip is on the bubble (a re-application replaces, it never doubles)', chipsOf(el).length === 1, chipsOf(el).length);
+    clickChip(el);
+    ok('…and clicking it sends the REAL steer for THAT queue item', out.length === 1 && out[0].type === 'queue-op' && out[0].op === 'steer' && out[0].id === 'q7' && out[0].sessionId === 'sess-q', out);
+    // …and the reverse flip must make it inert again: a control that cannot
+    // work must never look live (the wrapper advert can go away on re-attach).
+    ChatView.prototype._applyLiveMeta.call(view, { queueSupported: false });
+    await flush();
+    ok('a flip true→false makes the chips inert again (no control that would send a frame nobody serves)', chipOf(el).disabled === true && chipsOf(el).length === 1);
+  }
+  {
+    // THE LIVE PATH: same ordering, different messenger — the wrapper's own
+    // baseline `queue_changed` (op meta subtype 'queue', supported:true).
+    const { view, el, out } = mkQueuedView();
+    ok('LIVE ordering: a chip rendered before the wrapper published its queue is inert too', chipOf(el).disabled === true);
+    ChatView.prototype._onMeta.call(view, { op: 'meta', subtype: 'queue', supported: true, items: mm.queueState() });
+    await flush();
+    ok("THE FIX (live path): the wrapper's baseline queue_changed re-applies the chips", !chipOf(el).disabled && typeof chipOf(el).onclick === 'function');
+    clickChip(el);
+    ok('…and that chip steers for real as well', out.length === 1 && out[0].op === 'steer' && out[0].id === 'q7', out);
+  }
 }
 
 console.log('— wiring + docs pins');

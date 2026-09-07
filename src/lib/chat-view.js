@@ -132,6 +132,7 @@ class ChatView {
     // baseline `queue_changed` — both arrive long before anything can queue.
     this._queue = [];
     this._queueSupported = false;
+    this._queueChipRaf = 0;   // pending re-application of the chips (see _setQueueSupported)
 
     // Build DOM
     const container = document.createElement('div');
@@ -1073,6 +1074,50 @@ class ChatView {
     this._chatInput?.setQueue(this._queue, this._queueCaps());
   }
 
+  /** THE ONE WRITER of `_queueSupported` — and the reason it exists: the
+   *  capability arrives AFTER the bubbles are on screen. loadHistory renders
+   *  every message first and calls `_applyLiveMeta` (which carries the attach
+   *  payload's `queueSupported`) at the END, and live sessions get the
+   *  wrapper's baseline `queue_changed` some frames after the first bubbles.
+   *  A chip rendered in between was built with `onSteer = null` ⇒ permanently
+   *  `disabled`, and nothing re-rendered it: after ANY history load the
+   *  'Queued' chip was dead (round-2 verifier's MAJOR). So a FLIP — in either
+   *  direction — re-applies the chips of every rendered message that has a
+   *  queueState. The strip has no such problem (it re-renders from
+   *  `_setQueue`); the chips live inside bubbles nobody rebuilds. */
+  _setQueueSupported(next) {
+    const val = !!next;
+    if (val === this._queueSupported) return;
+    this._queueSupported = val;
+    this._refreshQueueChips();
+  }
+
+  /** rAF-coalesced (a flip can arrive together with a queue update and, on
+   *  reconnect, once per re-attach): ONE pass over the rendered elements. */
+  _refreshQueueChips() {
+    if (this._queueChipRaf || this._disposed) return;
+    const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (f) => setTimeout(f, 0);
+    this._queueChipRaf = raf(() => {
+      this._queueChipRaf = 0;
+      if (!this._disposed) this._applyQueueChipsNow();
+    }) || -1;
+  }
+
+  /** Re-run the chip renderer for every rendered message that HAS a queue
+   *  state, with the handler the current capability allows (null ⇒ the chip
+   *  renders inert, which is what a harness that cannot steer must show). */
+  _applyQueueChipsNow() {
+    if (!this._elements?.size) return;
+    const queued = new Map();
+    for (const m of this._messages || []) if (m?.queueState) queued.set(m.id, m);
+    if (!queued.size) return;   // nothing on screen claims a queue state
+    const onSteer = this._queueCaps().steer ? (m) => this._steerQueuedMessage(m) : null;
+    for (const [id, el] of this._elements) {
+      const msg = queued.get(id);
+      if (msg && el) ChatRenderers.applyQueueChip(el, msg, onSteer);
+    }
+  }
+
   /** THE choke point for every queue action (strip buttons, row Enter, bubble
    *  chip). A dead/disconnected window SPEAKS instead of swallowing the click
    *  (no-silent-failures); the strip is dimmed by .chat-input-disconnected so
@@ -1122,7 +1167,7 @@ class ChatView {
     // Attach/create replay of the input queue — carries-the-key guard, so a
     // partial-meta path never clears a live strip. The wrapper advert is read
     // FIRST: it decides which controls the items are rendered with.
-    if ('queueSupported' in meta) this._queueSupported = !!meta.queueSupported;
+    if ('queueSupported' in meta) this._setQueueSupported(meta.queueSupported);
     if ('queue' in meta) this._setQueue(meta.queue);
     if ('autoResume' in meta) this._statusBar?.setAutoResume?.(meta.autoResume || null);
     if ('outputStyle' in meta) {
@@ -2564,7 +2609,7 @@ class ChatView {
     // A published queue IS the wrapper's in-band "I serve queue ops" advert
     // (every current wrapper emits a baseline one at boot), so a window created
     // before its sidecar existed turns its controls on here.
-    if (op.subtype === 'queue') { if (op.supported) this._queueSupported = true; this._setQueue(op.items); return; }
+    if (op.subtype === 'queue') { if (op.supported) this._setQueueSupported(true); this._setQueue(op.items); return; }
     if (op.subtype === 'served-model') {
       this._statusBar.setServedModel(op.data?.model || null);
       return;
@@ -4026,6 +4071,7 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
     if (this._searchBarObserver) { this._searchBarObserver.disconnect(); this._searchBarObserver = null; }
     if (this._runsTimer) { clearTimeout(this._runsTimer); this._runsTimer = null; }
     if (this._runBarRaf) { cancelAnimationFrame(this._runBarRaf); this._runBarRaf = null; }
+    if (this._queueChipRaf && this._queueChipRaf !== -1) { try { cancelAnimationFrame(this._queueChipRaf); } catch { } this._queueChipRaf = 0; }
     this._clearResumeRetail();
     if (this._endPointerPress) {
       // belt and braces: winInfo._listenerCtl aborts these on window close, but
