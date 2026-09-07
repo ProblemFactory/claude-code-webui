@@ -58,6 +58,7 @@ const USER_CHANNEL_TOOLS = Object.freeze({
 const MAX_MESSAGE_CHARS = 20000;   // a card, not a transcript viewer
 const MAX_FILES = 20;              // one call may name many; the card lists at most this many
 const MAX_CAPTION_CHARS = 500;
+const MAX_ERROR_CHARS = 400;       // the CLI's own failure text, on the card
 
 /**
  * Which user-channel tool this is — the ONE classifier every surface uses.
@@ -154,10 +155,38 @@ function mergeEntries(fromInput, fromOutput) {
 }
 
 /**
+ * WHAT THE CALL ITSELF DID (round-3 verifier, MEDIUM) — 'ok' | 'error' |
+ * 'pending'.
+ *
+ * The per-file `upload_error` says a FILE did not arrive; this says the tool
+ * CALL did not run. They are different failures and only the first was ever
+ * honoured, so a SendUserFile the CLI rejected outright (and an interrupted
+ * SendUserMessage) rendered as an ordinary, successful highlighted card — the
+ * user was told "File for you: report.md" about a file that was never
+ * delivered, which is the precise silent failure this module exists to
+ * prevent. Both producers matter and they disagree in shape:
+ *   · a tool_result with `is_error` — message-manager sets `toolStatus:'error'`
+ *     AND `status:'error'` on the message and `status:'error'` on the block;
+ *   · an INTERRUPTED call that never got a result — the block is still a
+ *     `tool_call` with no status at all, and only the MESSAGE says 'error'.
+ * So the message-level fact is read first and the block is the fallback.
+ * @param {{toolStatus?:string, status?:string}} m
+ */
+function userChannelOutcome(m) {
+  const o = m || {};
+  if (o.toolStatus === 'error' || o.status === 'error') return 'error';
+  if (o.status === 'pending') return 'pending';
+  return 'ok';
+}
+
+/**
  * The typed record a user-channel card renders from. NEVER parses prose —
  * every field comes from a named key of the dumped schemas above.
- * @param {{toolName:string, input:object, output:object|string|null}} block
- * @returns {null | {kind:'message'|'file', status, message, caption, display, files:Array, truncatedFiles:number}}
+ * `status`/`toolStatus` are the CALL's outcome (see userChannelOutcome); when
+ * it failed, a non-JSON `output` is the CLI's own failure text and rides the
+ * record as `error` so the card can say what went wrong instead of nothing.
+ * @param {{toolName:string, input:object, output:object|string|null, status?:string, toolStatus?:string}} block
+ * @returns {null | {kind:'message'|'file', status, outcome, error, message, caption, display, files:Array, truncatedFiles:number}}
  */
 function userChannelRecord(block) {
   const kind = userChannelKind(block && block.toolName);
@@ -172,6 +201,13 @@ function userChannelRecord(block) {
     try { output = JSON.parse(block.output); } catch { output = null; }
   }
   const outAtt = Array.isArray(output && output.attachments) ? output.attachments.map(attachmentEntry).filter(Boolean) : [];
+  const outcome = userChannelOutcome(block);
+  // A failed call's body is the CLI's error TEXT, not the structured output —
+  // which is exactly why `output` above parsed to null. Keep it (clipped) so
+  // the card can name the reason; an interrupted call has no body at all and
+  // the card falls back to saying only that it did not complete.
+  const error = outcome === 'error' && !output && typeof (block && block.output) === 'string'
+    ? clip(block.output.trim(), MAX_ERROR_CHARS) : '';
 
   if (kind === 'message') {
     const inAtt = Array.isArray(input.attachments) ? input.attachments.map(inputAttachmentEntry).filter(Boolean) : [];
@@ -180,6 +216,8 @@ function userChannelRecord(block) {
     return {
       kind: 'message',
       status: channelStatus(input.status),
+      outcome,
+      error,
       message: clip(text, MAX_MESSAGE_CHARS),
       truncated: String(text || '').length > MAX_MESSAGE_CHARS,
       caption: '',
@@ -199,6 +237,8 @@ function userChannelRecord(block) {
   return {
     kind: 'file',
     status: channelStatus(input.status),
+    outcome,
+    error,
     message: '',
     truncated: false,
     caption: clip(typeof input.caption === 'string' ? input.caption : (typeof (output && output.caption) === 'string' ? output.caption : ''), MAX_CAPTION_CHARS),
@@ -272,6 +312,23 @@ function formatBytes(n) {
   return `${(b / 1024 / 1024).toFixed(1)} MB`;
 }
 
+/**
+ * THE CALL FAILED — say so, on the card (round-3 verifier, MEDIUM).
+ * A user-channel card is not a generic tool card: it has no ✓/✗ column at all
+ * (the caller passes the channel ICON as the wrap label), so a rejected call
+ * is INVISIBLE unless the card says it. `rec.error` is the CLI's own text when
+ * there was one; an interrupted call has none and gets the bare statement.
+ * `pending` is deliberately silent: this card is meant to be read the moment
+ * the agent writes it, and a spinner on "Message for you" would be noise.
+ */
+function failureHtml(rec, { esc, t }) {
+  if (!rec || rec.outcome !== 'error') return '';
+  const why = rec.error
+    ? t('the agent\u2019s tool call failed: {why}', { why: rec.error })
+    : t('the agent\u2019s tool call did not complete \u2014 this was not delivered');
+  return `<div class="chat-userchan-failed">${esc(why)}</div>`;
+}
+
 /** `status:'proactive'` = the agent INITIATED this (a finished background
  *  task, a blocker) rather than replying — the CLI's describe says downstream
  *  routing uses it, so it is worth showing. The chip text is the PROTOCOL
@@ -289,24 +346,28 @@ function proactiveChip(rec, { esc, t }) {
  * never carry a sanitizer), or null to fall back to escaped plain text.
  */
 function userMessageCardHtml(rec, { esc, t, icons = {}, body = null }) {
+  const failed = rec.outcome === 'error';
   const head = `<span class="chat-userchan-label">${icons.mail || ''} ${esc(t('Message for you'))}${proactiveChip(rec, { esc, t })}</span>`;
   const text = body != null ? body : `<div class="chat-userchan-text">${esc(rec.message)}</div>`;
   const trunc = rec.truncated ? `<div class="chat-userfile-meta">${esc(t('(message truncated for display)'))}</div>` : '';
-  return `<div class="chat-userchan chat-userchan-message">${head}${text}${trunc}${fileRowsHtml(rec, { esc, t })}</div>`;
+  return `<div class="chat-userchan chat-userchan-message${failed ? ' chat-userchan-error' : ''}">${head}${failureHtml(rec, { esc, t })}${text}${trunc}${fileRowsHtml(rec, { esc, t })}</div>`;
 }
 
 /** The "file for you" card. */
 function userFileCardHtml(rec, { esc, t, icons = {}, link = () => '', note = '' }) {
   const n = rec.files.length;
+  const failed = rec.outcome === 'error';
   const title = n === 1 ? t('File for you') : t('{n} files for you', { n });
   const head = `<span class="chat-userchan-label">${icons.upload || ''} ${esc(title)}${proactiveChip(rec, { esc, t })}</span>`;
   const cap = rec.caption ? `<div class="chat-userchan-text">${esc(rec.caption)}</div>` : '';
-  const noteHtml = note ? `<div class="chat-userfile-meta">${esc(note)}</div>` : '';
-  return `<div class="chat-userchan chat-userchan-file">${head}${cap}${fileRowsHtml(rec, { esc, t, link })}${noteHtml}</div>`;
+  // A call that failed has no link to draw and nothing to say about a note
+  // that assumes delivery — the failure row above the list is the honest head.
+  const noteHtml = note && !failed ? `<div class="chat-userfile-meta">${esc(note)}</div>` : '';
+  return `<div class="chat-userchan chat-userchan-file${failed ? ' chat-userchan-error' : ''}">${head}${failureHtml(rec, { esc, t })}${cap}${fileRowsHtml(rec, { esc, t, link })}${noteHtml}</div>`;
 }
 
 module.exports = {
   USER_CHANNEL_TOOLS, MAX_FILES,
-  userChannelKind, userChannelRecord, userFilePaths,
+  userChannelKind, userChannelOutcome, userChannelRecord, userFilePaths,
   userMessageCardHtml, userFileCardHtml, formatBytes,
 };

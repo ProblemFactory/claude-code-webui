@@ -3157,6 +3157,8 @@ export default {
   "(message truncated for display)": "(消息过长, 显示已截断)",
   "image": "图片",
   "not delivered: {why}": "未送达: {why}",
+  "the agent\u2019s tool call failed: {why}": "agent 的工具调用失败: {why}",
+  "the agent\u2019s tool call did not complete \u2014 this was not delivered": "agent 的工具调用没有完成 \u2014 这条没有送达",
   "and {n} more": "还有 {n} 个",
   "Files sent from a remote session are not published here — open them on that machine.": "远程会话发来的文件不会发布到本实例 —— 请在那台机器上打开。",
   "Run in a git worktree": "在独立的 git worktree 中运行",

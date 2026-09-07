@@ -1165,9 +1165,131 @@ console.log('— agent→user channel (SendUserMessage / SendUserFile)');
   ok('…a binary file is stored with its own media type (never served as a document), a text one as plain text',
     stored.find((p) => p.name === 'chart.png')?.mediaType === 'image/png' && stored.find((p) => p.name === 'notes.md')?.mediaType === 'text/plain', JSON.stringify(stored.map((p) => [p.name, p.mediaType])));
 
+  // (d2) THE CHANNEL'S OWN KEY NAMESPACE (round-3 verifier, MAJOR). `srcKey`
+  // is published-pages' UPSERT IDENTITY. Until this fix the channel published
+  // under `local:<abs>` — the SAME key the user's own `publish()` mints and the
+  // one `vibespace-page publish` uses — with an EXPLICIT `makePublic:false`, so
+  // a file the agent sent TOOK OVER a page the user had published from that
+  // path: same id, agent's bytes, re-attributed to this conversation, and a
+  // page they had deliberately shared flipped back to private (its link then
+  // redirects to /login). The asserts below are the fix; the NEGATIVE CONTROL
+  // reproduces the collision through the very same module.
+  {
+    const userSrc = path.join(filesDir, 'shared.html');
+    fs.writeFileSync(userSrc, '<h1>the user OWN page</h1>');
+    const mine = pages.publish({ srcPath: userSrc, name: 'my shared page', makePublic: true });
+    const s4b = mkSession('claude', 'w-userfile-key'); s4b.cwd = filesDir; s4b.backendSessionId = 'conv-A';
+    const p4b = fakePty(); so2.setupSessionPty(s4b, 'w-userfile-key', p4b);
+    p4b.data(J({ type: 'assistant', session_id: 'sid-uf-key', uuid: 'u-uf-key', message: { id: 'msg_uf_key', model: 'claude-fable-5', role: 'assistant', content: [
+      { type: 'tool_use', id: 'toolu_ufk', name: 'SendUserFile', input: { files: ['shared.html'], status: 'normal' } },
+    ] } }));
+    await new Promise((r) => setTimeout(r, 250));
+    const after = pages.list({}).find((x) => x.id === mine.page.id);
+    const chanRow = (calls.broadcasts.filter((b) => b.id === 'w-userfile-key' && b.type === 'user-file-published').slice(-1)[0]?.files || [])[0];
+    const chanRec = pages.list({}).find((x) => x.id === chanRow?.pageId);
+    ok("a SendUserFile publish NEVER touches the user's own page for the same path: separate record, and the shared one keeps its id, its visibility and its bytes",
+      !!chanRec && chanRec.id !== mine.page.id && after?.public === true && after?.name === 'my shared page'
+      && fs.readFileSync(path.join(pagesDir, 'published-pages', mine.page.id + '.html'), 'utf8').includes('OWN page'),
+      JSON.stringify({ mine: mine.page.id, chan: chanRec && chanRec.id, publicNow: after?.public }));
+    ok("...and the channel record is still session-owned + private by default (a freshly minted page IS private -- the flag is simply never re-asserted over the user's choice)",
+      chanRec?.public === false && chanRec?.sessionId === 'w-userfile-key' && chanRec?.conversationId === 'conv-A' && chanRec?.srcPath === userSrc,
+      JSON.stringify(chanRec));
+
+    // TWO CONVERSATIONS, ONE STABLE PATH — what agents actually write
+    // (report.md, /tmp/out.png). They used to collapse into ONE record, so the
+    // older conversation's card lost its link (list({conversationId}) stopped
+    // matching it) and its bytes were overwritten.
+    const s4c = mkSession('claude', 'w-userfile-key2'); s4c.cwd = filesDir; s4c.backendSessionId = 'conv-B';
+    const p4c = fakePty(); so2.setupSessionPty(s4c, 'w-userfile-key2', p4c);
+    p4c.data(J({ type: 'assistant', session_id: 'sid-uf-key2', uuid: 'u-uf-key2', message: { id: 'msg_uf_key2', model: 'claude-fable-5', role: 'assistant', content: [
+      { type: 'tool_use', id: 'toolu_ufk2', name: 'SendUserFile', input: { files: ['shared.html'], status: 'normal' } },
+    ] } }));
+    await new Promise((r) => setTimeout(r, 250));
+    const rowB = (calls.broadcasts.filter((b) => b.id === 'w-userfile-key2' && b.type === 'user-file-published').slice(-1)[0]?.files || [])[0];
+    ok('...two conversations naming the SAME absolute path get their OWN pages, so neither card loses its link when the other sends',
+      !!rowB?.pageId && rowB.pageId !== chanRow.pageId
+      && pages.list({ conversationId: 'conv-A' }).some((x) => x.id === chanRow.pageId)
+      && pages.list({ conversationId: 'conv-B' }).some((x) => x.id === rowB.pageId),
+      JSON.stringify({ a: chanRow.pageId, b: rowB.pageId }));
+
+    // ...and the SAME conversation re-sending the SAME file keeps ONE stable
+    // URL (the card link must not churn across resumes).
+    p4b.data(J({ type: 'assistant', session_id: 'sid-uf-key', uuid: 'u-uf-key3', message: { id: 'msg_uf_key3', model: 'claude-fable-5', role: 'assistant', content: [
+      { type: 'tool_use', id: 'toolu_ufk3', name: 'SendUserFile', input: { files: ['shared.html'], status: 'normal' } },
+    ] } }));
+    await new Promise((r) => setTimeout(r, 250));
+    const rowA2 = (calls.broadcasts.filter((b) => b.id === 'w-userfile-key' && b.type === 'user-file-published').slice(-1)[0]?.files || [])[0];
+    ok('...while a re-send inside the SAME conversation upserts (one stable /p/<id>, no page churn)', rowA2?.pageId === chanRow.pageId, JSON.stringify({ first: chanRow.pageId, again: rowA2?.pageId }));
+
+    // NEGATIVE CONTROL: the pre-fix call, verbatim, against the same module —
+    // it must reproduce BOTH halves of the damage on the user's own page.
+    const negSrc = path.join(filesDir, 'neg.html');
+    fs.writeFileSync(negSrc, '<h1>mine</h1>');
+    const negMine = pages.publish({ srcPath: negSrc, name: 'neg', makePublic: true });
+    const negChan = pages.publishContent({ html: Buffer.from('<h1>agent</h1>'), name: 'neg.html', srcKey: 'local:' + negSrc, makePublic: false, sessionId: 'w-neg', conversationId: 'conv-N', mediaType: '' });
+    const negAfter = pages.list({}).find((x) => x.id === negMine.page.id);
+    ok("NEGATIVE CONTROL: the pre-fix `srcKey: local:<abs>` + `makePublic:false` DOES take over the user's page and flip it private -- the asserts above measure the fix",
+      negChan.page.id === negMine.page.id && negAfter.public === false && negAfter.conversationId === 'conv-N',
+      JSON.stringify({ same: negChan.page.id === negMine.page.id, publicNow: negAfter.public }));
+    // ...and the shipped consumer must not spell that key any more
+    const csj = read('src/server/stdout/claude-stream-json.js');
+    ok('...and the shipped SendUserFile publish namespaces its key and passes NO visibility flag',
+      /srcKey: `userfile:\$\{session\.backendSessionId \|\| session\.claudeSessionId \|\| id\}:\$\{abs\}`/.test(csj)
+      && !/makePublic:\s*false/.test(csj) && !/srcKey: 'local:' \+ abs/.test(csj), 'claude-stream-json srcKey/makePublic');
+  }
+
+  // (h) THE CALL ITSELF FAILED (round-3 verifier, MEDIUM). A user-channel card
+  // has no ok/failed column at all — the wrap label is the channel icon — so a
+  // rejected SendUserFile rendered as an ordinary "File for you" about a file
+  // that was never delivered. `userChannelOutcome` is the PURE rule; both
+  // producers of the fact are covered, because they disagree in shape.
+  {
+    const { userChannelOutcome: O, userMessageCardHtml, userFileCardHtml } = require(path.join(REPO, 'src/user-channel.js'));
+    const table = [
+      [{ status: 'pending' }, 'pending'],
+      [{ status: 'complete', toolStatus: 'ok' }, 'ok'],
+      [{ status: 'error', toolStatus: 'error' }, 'error'],   // is_error tool_result
+      [{ status: 'error' }, 'error'],                        // interrupted: only the MESSAGE says so
+      [{ toolStatus: 'error' }, 'error'],
+      [{}, 'ok'], [null, 'ok'],
+    ];
+    ok('userChannelOutcome: pending / ok / error, and an INTERRUPTED call (message says error, block does not) is an error too',
+      table.every(([m, want]) => O(m) === want), JSON.stringify(table.map(([m]) => O(m))));
+
+    const esc = (x) => String(x).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const tt = (x, prm) => String(x).replace(/\{(\w+)\}/g, (_, k) => (prm && k in prm ? prm[k] : `{${k}}`));
+    const failRec = userChannelRecord({ toolName: 'SendUserFile', input: { files: ['/tmp/report.md'], status: 'normal' }, output: 'Error: /tmp/report.md is outside the allowed workspace', status: 'error' });
+    const failHtml = userFileCardHtml(failRec, { esc, t: tt, icons: { upload: '<svg></svg>' }, link: () => '', note: 'remote note' });
+    ok("a REJECTED SendUserFile says so on the card, with the CLI's own reason, and drops the delivery note",
+      failRec.outcome === 'error' && /outside the allowed workspace/.test(failRec.error)
+      && /chat-userchan-error/.test(failHtml) && /chat-userchan-failed/.test(failHtml)
+      && /outside the allowed workspace/.test(failHtml) && !/remote note/.test(failHtml), failHtml.slice(0, 200));
+    const intRec = userChannelRecord({ toolName: 'SendUserMessage', input: { message: 'all done' }, output: null, toolStatus: 'error' });
+    const intHtml = userMessageCardHtml(intRec, { esc, t: tt, icons: { mail: '<svg></svg>' } });
+    ok('...and an INTERRUPTED SendUserMessage (no result body at all) still says it did not complete rather than reading as the reply',
+      intRec.outcome === 'error' && intRec.error === '' && /did not complete/.test(intHtml) && /chat-userchan-error/.test(intHtml), intHtml.slice(0, 200));
+    const errText = '<img src=x onerror=alert(1)>';
+    ok("...the failure text is ESCAPED like every other interpolation (it is the CLI's string, and it reaches innerHTML)",
+      !userFileCardHtml(userChannelRecord({ toolName: 'SendUserFile', input: { files: ['a.md'] }, output: errText, status: 'error' }), { esc, t: tt }).includes('<img src=x'));
+    // NEGATIVE CONTROLS: a healthy call and a PENDING one must stay quiet —
+    // a card that cried failure on every send would be worse than silence.
+    const okRec = userChannelRecord({ toolName: 'SendUserFile', input: { files: ['/tmp/a.md'] }, output: JSON.stringify({ attachments: [{ path: '/tmp/a.md', size: 4 }] }), status: 'complete', toolStatus: 'ok' });
+    const pendRec = userChannelRecord({ toolName: 'SendUserMessage', input: { message: 'hi' }, output: null, status: 'pending' });
+    ok('NEGATIVE CONTROL: a successful call and a still-PENDING one draw no failure row (the card is meant to be read the moment the agent writes it)',
+      okRec.outcome === 'ok' && pendRec.outcome === 'pending'
+      && !/chat-userchan-failed/.test(userFileCardHtml(okRec, { esc, t: tt }))
+      && !/chat-userchan-failed/.test(userMessageCardHtml(pendRec, { esc, t: tt })));
+    // WIRING PIN: the pure rule is useless if the renderer never feeds it the
+    // outcome (the 2.355.0 unstaged-wiring class).
+    const cr = read('src/lib/chat-renderers.js');
+    ok('...and chat-renderers really HANDS the outcome to the record (a pure rule with no call site is a fix that never ships)',
+      /userChannelRecord\(\{\s*\n\s*toolName: block\.toolName, input: block\.input, output: block\.output,\s*\n\s*status: msg\.status \|\| block\.status, toolStatus: msg\.toolStatus,/.test(cr), 'chat-renderers _renderUserChannelMsg');
+  }
+
   // (e) NEGATIVE CONTROL: an unrelated tool in the SAME shape publishes
   // nothing and is not a user message.
   const before = calls.broadcasts.length;
+  const pagesBefore = pages.list({}).length; // "nothing NEW was published" — never a magic total
   p4.data(J({ type: 'assistant', session_id: 'sid-uf', uuid: 'u-uf2', message: { id: 'msg_uf2', model: 'claude-fable-5', role: 'assistant', content: [
     { type: 'tool_use', id: 'toolu_bash1', name: 'Bash', input: { command: 'cat chart.png', files: ['chart.png'], status: 'proactive' } },
   ] } }));
@@ -1175,10 +1297,11 @@ console.log('— agent→user channel (SendUserMessage / SendUserFile)');
   ok('NEGATIVE CONTROL: an unrelated tool carrying the SAME field names is never treated as a user message — nothing published, nothing broadcast',
     !calls.broadcasts.slice(before).some((b) => b.type === 'user-file-published')
     && userChannelKind('Bash') === null && userChannelRecord({ toolName: 'Bash', input: { files: ['chart.png'], status: 'proactive' }, output: null }) === null
-    && pages.list({}).length === 2, JSON.stringify(pages.list({}).map((p) => p.name)));
+    && pages.list({}).length === pagesBefore, JSON.stringify(pages.list({}).map((p) => p.name)));
 
   // (f) the REMOTE rule: a session whose files live on another machine
   // publishes nothing here (we cannot read them, and a guess would be worse).
+  const pagesBeforeRemote = pages.list({}).length;
   const s5 = mkSession('claude', 'w-userfile-remote'); s5.cwd = filesDir; s5.host = 'h1';
   const p5 = fakePty(); so2.setupSessionPty(s5, 'w-userfile-remote', p5);
   p5.data(J({ type: 'assistant', session_id: 'sid-uf3', uuid: 'u-uf3', message: { id: 'msg_uf3', model: 'claude-fable-5', role: 'assistant', content: [
@@ -1186,7 +1309,7 @@ console.log('— agent→user channel (SendUserMessage / SendUserFile)');
   ] } }));
   await new Promise((r) => setTimeout(r, 200));
   ok('a REMOTE session publishes nothing (its files are on another machine — an honest absence, not a guessed link)',
-    !calls.broadcasts.some((b) => b.id === 'w-userfile-remote' && b.type === 'user-file-published') && pages.list({}).length === 2);
+    !calls.broadcasts.some((b) => b.id === 'w-userfile-remote' && b.type === 'user-file-published') && pages.list({}).length === pagesBeforeRemote);
 
   // (g) the WORKTREE PATH the CLI itself announced (owner ruling 9) — the init
   // frame's own `cwd`, a typed record, recorded ONLY for a session that asked.

@@ -3156,6 +3156,8 @@ export default {
   "(message truncated for display)": "(表示のためメッセージを切り詰めました)",
   "image": "画像",
   "not delivered: {why}": "未配信: {why}",
+  "the agent\u2019s tool call failed: {why}": "エージェントのツール呼び出しが失敗しました: {why}",
+  "the agent\u2019s tool call did not complete \u2014 this was not delivered": "エージェントのツール呼び出しが完了しませんでした \u2014 配信されていません",
   "and {n} more": "ほか {n} 件",
   "Files sent from a remote session are not published here — open them on that machine.": "リモートセッションから送られたファイルはこのインスタンスには公開されません —— そのマシン上で開いてください。",
   "Run in a git worktree": "専用の git worktree で実行する",

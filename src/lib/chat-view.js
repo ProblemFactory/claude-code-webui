@@ -1538,7 +1538,18 @@ class ChatView {
       || allSess.find(s => (s.backendSessionId || s.sessionId) === backendSessionId);
     const webuiName = match?.webuiName || match?.name || this.winInfo?._openSpec?.name || 'Session';
     // host rides along — a remote session's fork must spawn ON its host
-    this.app.forkFromMessage({ backend, backendSessionId, cwd, host, webuiName, webuiMode: 'chat' }, uuid);
+    // PER-SESSION GIT WORKTREE (owner ruling 9; round-3 verifier): the fork
+    // resolver reads `sessionInfo.worktree` as the LIVE half of worktreePick,
+    // and this hand-built handle carried no such key — so a fork started from
+    // the chat button answered `live: undefined` even for a run the CLI had
+    // just announced as isolated, and the branch ran in the user's real
+    // working tree. This view's own `_worktree` is that session's process
+    // talking; the merged sidebar row is the same fact off `active-sessions`
+    // and covers a view that has not seen an init frame yet.
+    this.app.forkFromMessage({
+      backend, backendSessionId, cwd, host, webuiName, webuiMode: 'chat',
+      worktree: this._worktree ?? match?.worktree ?? undefined,
+    }, uuid);
   }
 
   // Get session identifiers for API calls

@@ -126,6 +126,74 @@ console.log('— _swapMessageEl bookkeeping');
     (cvSrc.match(/this\._swapMessageEl\(/g) || []).length === 3 && !/if \(next\) el\.replaceWith\(next\);/.test(cvSrc));
 }
 
+// ── 1c. NODE leg: the payload → _merge() whitelist (round-3 verifier, BLOCKER) ──
+// `_merge()` REBUILDS the session row rather than spreading it (the webui half
+// is renamed into webuiId/webuiName/webuiMode, `cwd` becomes the composed
+// display/grouping key, `status` is derived), so any live fact it does not
+// name is DROPPED — and `/api/sessions` discovery carries none of them, so the
+// `...s` spread cannot supply them either. Three were dead when this guard was
+// written: worktree/worktreePath (the badge, the Session Properties path, and
+// the fork's `live` half), outputStyle (2.369.58) and remoteState (2.219.1).
+// The drift guard re-derives the payload's OWN key set from server.js so the
+// SEVENTH strike of this class fails here instead of shipping.
+console.log('— active-sessions payload → _merge() (whitelist drift)');
+{
+  const srv = fs.readFileSync(path.join(repo, 'server.js'), 'utf8');
+  const pushed = srv.split('function activeSessionsPayload()')[1].split('\n  return activeList;')[0].split('activeList.push({')[1];
+  const payloadKeys = new Set();
+  let depth = 0;
+  for (const raw of pushed.split('\n')) {
+    const line = raw.replace(/\/\/.*$/, '');
+    if (/^\s*\}\);/.test(line)) break;
+    if (depth === 0) for (const m of line.matchAll(/(?:^|[,{])\s*([A-Za-z_$][\w$]*)\s*:/g)) payloadKeys.add(m[1]);
+    depth += (line.match(/[{[(]/g) || []).length - (line.match(/[}\])]/g) || []).length;
+  }
+  ok('the active-sessions payload parsed (the guard has something to compare against)', payloadKeys.size >= 20, [...payloadKeys].join(','));
+
+  const sb = fs.readFileSync(path.join(repo, 'src/lib/sidebar.js'), 'utf8');
+  const listSrc = sb.split('const LIVE_SESSION_FACTS = Object.freeze([')[1].split(']);')[0];
+  const facts = [...listSrc.matchAll(/'([^']+)'/g)].map((m) => m[1]);
+  // Keys _merge() handles by NAME (renamed, derived, or composed) — everything
+  // else in the payload must ride LIVE_SESSION_FACTS.
+  const HANDLED = new Set(['id', 'name', 'cwd', 'host', 'hostName', 'createdAt', 'backend', 'backendSessionId',
+    'sessionKey', 'claudeSessionId', 'sourceKind', 'agentKind', 'agentRole', 'agentNickname', 'parentThreadId', 'mode']);
+  const missing = [...payloadKeys].filter((k) => !HANDLED.has(k) && !facts.includes(k));
+  const dead = facts.filter((k) => !payloadKeys.has(k));
+  ok('EVERY live fact the server publishes is either renamed/derived by name or carried by LIVE_SESSION_FACTS — a new payload key fails HERE, not silently in production',
+    missing.length === 0, 'not carried: ' + JSON.stringify(missing));
+  ok('…and no dead entries (a fact the payload stopped sending must leave the list)', dead.length === 0, 'dead: ' + JSON.stringify(dead));
+  ok('…the facts this round found dead are on it', ['worktree', 'worktreePath', 'outputStyle', 'remoteState'].every((k) => facts.includes(k)), facts.join(','));
+  // NEGATIVE CONTROL: the guard must actually be able to fail.
+  const negFacts = facts.filter((k) => k !== 'worktree');
+  ok('NEGATIVE CONTROL: with `worktree` removed from the list the guard names it as uncarried (the check is not vacuous)',
+    [...payloadKeys].filter((k) => !HANDLED.has(k) && !negFacts.includes(k)).join(',') === 'worktree');
+  // …and BOTH branches of _merge must spread it (the matched one and the
+  // webui-only unshift): a fix applied to one branch is half a fix.
+  ok('both _merge branches carry the list (matched system session AND the webui-only unshift)',
+    (sb.match(/\.\.\.liveSessionFacts\(/g) || []).length === 2
+    && /\.\.\.liveSessionFacts\(wm\)/.test(sb) && /\.\.\.liveSessionFacts\(ws\)/.test(sb));
+}
+
+// ── 1d. NODE leg: §17 on the CSS this branch ADDED ──
+// The branch's own summary called out a literal colour it removed from
+// chat.css; its twin shipped in style.css, outside every scanning suite.
+console.log('— §17: no literal colours in the new CSS');
+{
+  const cssBlocks = [
+    ['public/style.css', '.badge-worktree {', '.acct-type-icon {'],
+    ['public/chat.css', '.chat-userchan {', '[data-role-indicator] .chat-msg.chat-msg-userchan'],
+  ];
+  for (const [file, from, to] of cssBlocks) {
+    const css = fs.readFileSync(path.join(repo, file), 'utf8');
+    const seg = css.split(from)[1].split(to)[0];
+    ok(`${file}: the block this branch added carries theme vars only — no literal colours, not even as a var() fallback (§17)`,
+      !/#[0-9a-fA-F]{3,8}\b/.test(seg) && !/\brgba?\(/.test(seg), (seg.match(/#[0-9a-fA-F]{3,8}\b|rgba?\(/g) || []).join(' '));
+  }
+  // NEGATIVE CONTROL: the scan really does catch the shape that was there.
+  ok('NEGATIVE CONTROL: the same scan flags the removed `var(--green, #3fb950)` fallback — it is not a vacuous regex',
+    /#[0-9a-fA-F]{3,8}\b/.test('color: var(--green, #3fb950);'));
+}
+
 // ── 2. BROWSER leg ──
 const CHROME = ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser'].find((p) => fs.existsSync(p));
 if (!CHROME) { console.log('SKIP: no chrome/chromium — the 375×667 measurement did not run'); console.log(fail ? `FAIL (${fail})` : `ALL PASS (${pass})`); process.exit(fail ? 1 : 0); }
@@ -309,6 +377,48 @@ console.log('— B. the SendUserMessage / SendUserFile cards at 375×667');
 
   // NEGATIVE CONTROL: the same measurement, with the card CSS neutralised —
   // it must go RED, or the asserts above are measuring nothing.
+  // The FAILURE row (round-3 verifier) is new chrome, so it carries its own
+  // ≤768px measurement: the CLI's reason is an arbitrary-length string and it
+  // sits in the same 375px column as everything else.
+  const f = await ev(`(() => {
+    const host = document.getElementById('vs-card-probe');
+    const list = host.querySelector('.chat-messages');
+    const el = document.createElement('div');
+    el.className = 'chat-msg chat-msg-assistant chat-msg-tool-result chat-msg-userchan';
+    el.innerHTML = ${JSON.stringify(userFileCardHtml(
+      userChannelRecord({
+        toolName: 'SendUserFile',
+        input: { files: ['/home/u/workspace/proj/out/2026-09-07T11-42-08_run-report_final-candidate-v3.png'], status: 'normal' },
+        output: 'Error: EACCES /home/u/workspace/proj/out/2026-09-07T11-42-08_run-report_final-candidate-v3.png is outside the workspace the sandbox allows this session to read',
+        status: 'error',
+      }),
+      { esc: escHtml, t, icons: { upload: '<svg viewBox="0 0 16 16" width="12" height="12"></svg>' }, link: () => '', note: 'Files sent from a remote session are not published here.' },
+    ))};
+    list.appendChild(el);
+    const card = el.querySelector('.chat-userchan');
+    const row = el.querySelector('.chat-userchan-failed');
+    const r = (e) => { const b = e.getBoundingClientRect(); return { l: b.left, r: b.right, w: b.width, h: b.height }; };
+    return {
+      hasRow: !!row, card: r(card), row: row ? r(row) : null,
+      rowColor: row ? getComputedStyle(row).color : '',
+      cardRule: getComputedStyle(card).borderLeftColor,
+      labelColor: getComputedStyle(el.querySelector('.chat-userchan-label')).color,
+      listW: list.clientWidth, listSW: list.scrollWidth,
+      docSW: document.documentElement.scrollWidth, docCW: document.documentElement.clientWidth,
+      text: (row?.textContent || '').trim(),
+      note: !!el.querySelector('.chat-userfile-meta'),
+    };
+  })()`);
+  ok('a FAILED user-channel card draws its reason row and wraps it inside the 375px column (no new scrollbar, on the list or the page)',
+    f.hasRow && f.row.h > 0 && f.row.r <= f.listW + 0.5 && f.listSW <= f.listW + 1 && f.docSW <= f.docCW + 1,
+    JSON.stringify(f));
+  ok('…it reads as a failure, not a delivery: the red rule + red label + the CLI’s own reason, and no "sent from a remote session" note',
+    f.rowColor === f.cardRule && f.rowColor === f.labelColor && /outside the workspace/.test(f.text) && f.note === false,
+    JSON.stringify({ rowColor: f.rowColor, rule: f.cardRule, label: f.labelColor, note: f.note }));
+  const themeRed = await ev(`(() => { const p = document.createElement('span'); p.style.color = 'var(--red)'; document.body.appendChild(p); const c = getComputedStyle(p).color; p.remove(); return c; })()`);
+  ok('…and that colour IS the theme variable resolved, not a literal baked into the markup (§17 — the card carries classes, the theme carries colour)',
+    f.rowColor === themeRed && /^rgba?\(/.test(themeRed), JSON.stringify({ row: f.rowColor, themeRed }));
+
   const neg = await ev(`(() => {
     const st = document.createElement('style'); st.id = 'vs-card-probe-neg';
     st.textContent = '.chat-userfile-link{word-break:normal !important;white-space:nowrap !important} .chat-messages{overflow-x:visible !important}';
@@ -502,6 +612,93 @@ console.log('— D. the worktree-path frame RECORDS the pick (round-2 verifier, 
     run.preFixSaved === null && run.preFixLive === true, JSON.stringify(run));
 
   await ev(`(() => { const id = window.__wtLatch?.winId; if (id) window.app.wm.closeWindow(id); delete window.__wtLatch; return true; })()`);
+}
+
+console.log('— E. the active-sessions payload really reaches the surfaces that read it');
+{
+  // The BLOCKER this round: `_merge()` never copied `worktree`/`worktreePath`,
+  // so the badge, Session Properties and the FORK's `live` half were all dead
+  // against a real payload. This drives the REAL `sidebar._merge()` with the
+  // shape server.js broadcasts, then asks the REAL renderer / properties
+  // window / fork call site what they see — the payload→merge→surface hop,
+  // not a hand-built object handed straight to a renderer.
+  const WT = '/tmp/wt-probe-repo/.claude/worktrees/worktree-swift-owl';
+  const merged = await ev(`(() => {
+    const sb = window.app.sidebar;
+    window.__mergeProbe = { sysBak: sb._systemSessions, webBak: sb._webuiSessions, allBak: sb._allSessions };
+    // exactly the row activeSessionsPayload() builds for a live isolated session
+    sb._systemSessions = [];
+    sb._webuiSessions = [{
+      id: 'sess-9', name: 'probe', cwd: '/tmp/wt-probe-repo', host: null, hostName: null,
+      remoteState: null, createdAt: Date.now(), backend: 'claude', backendSessionId: 'conv-9',
+      sessionKey: 'claude:conv-9', claudeSessionId: 'conv-9', sourceKind: null, agentKind: 'primary',
+      agentRole: '', agentNickname: '', parentThreadId: null, accountId: null, accountName: null,
+      accountTail: null, todo: null, auth: null, mode: 'chat',
+      outputStyle: 'Concise', worktree: true, worktreePath: ${JSON.stringify(WT)},
+    }];
+    sb._merge();
+    const m = sb._allSessions.find((x) => x.webuiId === 'sess-9');
+    return { keys: Object.keys(m || {}), worktree: m?.worktree, worktreePath: m?.worktreePath, outputStyle: m?.outputStyle, has: !!m };
+  })()`);
+  ok('the merged row carries the payload’s worktree facts (they used to be dropped by the hand-picked key list)',
+    merged.has && merged.worktree === true && merged.worktreePath === WT, JSON.stringify(merged));
+  ok('…and its TWIN from the same payload (outputStyle, 2.369.58 — the standing-sweep sibling)', merged.outputStyle === 'Concise', JSON.stringify(merged.keys));
+
+  const card = await ev(`(() => {
+    const sb = window.app.sidebar;
+    const m = sb._allSessions.find((x) => x.webuiId === 'sess-9');
+    const badgeOf = (row) => { const b = sb._buildSessionCard(row, {}).querySelector('.badge-worktree'); return b ? (b.getAttribute('data-tip') || 'yes') : ''; };
+    const stripped = { ...m }; delete stripped.worktree; delete stripped.worktreePath;
+    return { tip: badgeOf(m), preFix: badgeOf(stripped) };
+  })()`);
+  ok('the session card draws the worktree badge from the merged row, and its tooltip names the CLI-announced path',
+    card.tip.includes(WT), JSON.stringify(card));
+  ok('NEGATIVE CONTROL: strip those two keys back out of the same row and the badge disappears — the pre-fix merge, reproduced on the real renderer',
+    card.preFix === '', JSON.stringify(card));
+
+  // THE FORK CALL SITE, for real: _doForkSession resolves the pick and hands it
+  // to createSession. Stub only createSession (nothing is ever spawned).
+  const fork = await ev(`(async () => {
+    const app = window.app;
+    const sb = app.sidebar;
+    const m = sb._allSessions.find((x) => x.webuiId === 'sess-9');
+    const cfg = sb.getSessionConfig(m) || {}; delete cfg.worktree; sb.setSessionConfig(m, { ...cfg });
+    const orig = app.createSession; const seen = [];
+    app.createSession = (spec) => { seen.push(spec); return null; };
+    try {
+      await app._doForkSession(m, 'hello');
+      const stripped = { ...m }; delete stripped.worktree; delete stripped.worktreePath;
+      await app._doForkSession(stripped, 'hello');
+    } finally { app.createSession = orig; }
+    return { withFacts: seen[0]?.worktree ?? null, withoutFacts: seen[1]?.worktree ?? null, forkFlag: seen[0]?.fork, n: seen.length };
+  })()`);
+  ok('a FORK of this conversation with NO saved pick asks for a worktree — the live half of worktreePick finally has a producer at the real call site',
+    fork.n === 2 && fork.forkFlag === true && fork.withFacts === true, JSON.stringify(fork));
+  ok('NEGATIVE CONTROL: the same fork over a row missing those keys asks for nothing (the pre-fix merge would have run in the user’s real working tree)',
+    fork.withoutFacts === null, JSON.stringify(fork));
+
+  // Session Properties, opened on the merged row through the real window.
+  const props = await ev(`(() => {
+    const sb = window.app.sidebar;
+    const m = sb._allSessions.find((x) => x.webuiId === 'sess-9');
+    sb.setSessionConfig(m, { ...(sb.getSessionConfig(m) || {}), worktree: true });
+    const win = window.app.openSessionProps(m);
+    const root = win.content.querySelector('.session-props');
+    const txt = root.textContent || '';
+    window.__mergeProbe.propWin = win.id;
+    return { showsPath: txt.includes(${JSON.stringify(WT)}), saysNotIsolated: /not isolated in this run/i.test(txt), style: /Concise/.test(txt) };
+  })()`);
+  ok('Session Properties shows the announced worktree path instead of claiming the session is not isolated',
+    props.showsPath === true && props.saysNotIsolated === false, JSON.stringify(props));
+  ok('…and the response-style row finally has a live value to show (the sibling fact from the same payload)', props.style === true, JSON.stringify(props));
+
+  await ev(`(() => {
+    const p = window.__mergeProbe;
+    if (p.propWin) window.app.wm.closeWindow(p.propWin);
+    const sb = window.app.sidebar;
+    sb._systemSessions = p.sysBak; sb._webuiSessions = p.webBak; sb._allSessions = p.allBak;
+    delete window.__mergeProbe; return true;
+  })()`);
 }
 
 ws.close();

@@ -171,8 +171,13 @@ function create({ dataDir, requestAuthed = () => true, publicUrl = () => null, l
 
   /** Content upload publish (agent CLI / remote hosts, 2.366.0): the HTML
    *  arrives in the request — the source file may live on another machine.
-   *  Upserts by srcKey; attributes the page to the publishing session. */
-  function publishContent({ html, name, srcKey, makePublic, sessionId = null, conversationId = null, req = null, mediaType = '' }) {
+   *  Upserts by srcKey; attributes the page to the publishing session.
+   *  `srcPath` is optional and purely DESCRIPTIVE: a caller whose srcKey is a
+   *  namespaced identity rather than `<host>:<path>` (the SendUserFile channel
+   *  scopes its key by conversation, so two conversations naming the same file
+   *  stay two pages) says what the source file actually was, instead of
+   *  letting the prefix-strip below invent `<conv>:/abs/path`. */
+  function publishContent({ html, name, srcKey, srcPath = '', makePublic, sessionId = null, conversationId = null, req = null, mediaType = '' }) {
     const buf = Buffer.isBuffer(html) ? html : Buffer.from(String(html || ''), 'utf8');
     if (!buf.length) return { error: 'empty page body' };
     if (buf.length > MAX_BYTES) return { error: `page too large (${Math.round(buf.length / 1024 / 1024)}MB > ${MAX_BYTES / 1024 / 1024}MB)` };
@@ -181,7 +186,7 @@ function create({ dataDir, requestAuthed = () => true, publicUrl = () => null, l
     const mt = normalizeMediaType(mediaType);
     let rec = store.pages.find((p) => p.srcKey === key);
     const replaced = !!rec;
-    const draft = rec || { id: mintId(), srcKey: key, srcPath: key.replace(/^[^:]*:/, ''), public: false, createdAt: Date.now() };
+    const draft = rec || { id: mintId(), srcKey: key, srcPath: String(srcPath || '') || key.replace(/^[^:]*:/, ''), public: false, createdAt: Date.now() };
     try {
       fs.mkdirSync(pagesDir, { recursive: true });
       // A re-publish that CHANGES kind (html ⇄ binary) must not leave the old

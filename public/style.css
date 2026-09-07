@@ -315,7 +315,7 @@ html, body {
    session works in its own checkout, so it can never touch the folder you are
    editing. Icon-only — the path lives in the tooltip and Session Properties. */
 .badge-worktree {
-  background: color-mix(in srgb, var(--green, #3fb950) 16%, transparent); color: var(--green, #3fb950);
+  background: color-mix(in srgb, var(--green) 16%, transparent); color: var(--green);
   display: inline-flex; align-items: center; padding: 1px 3px;
 }
 .badge-worktree svg { width: 10px; height: 10px; flex-shrink: 0; }

@@ -15,6 +15,53 @@ import { installSidebarTasks } from './sidebar-tasks.js';
 // enough that a real outage never renders a silently stale list.
 const SESSION_POLL_STALE_AFTER = 3;
 
+/**
+ * THE per-session LIVE FACTS the `active-sessions` payload publishes under the
+ * names every client surface reads them by — carried through `_merge()` as ONE
+ * list instead of one hand-copied line each.
+ *
+ * WHY A LIST AND NOT MORE LINES (round-3 verifier, BLOCKER). `_merge()` does
+ * not spread the live row: it REBUILDS it (the webui half is renamed into
+ * webuiId/webuiName/webuiMode, `cwd` becomes the composed display/grouping
+ * key, `status` is derived), so a fact that is not named here is DROPPED — and
+ * `/api/sessions` discovery does not carry any of these, so the `...s` spread
+ * cannot supply them either. That is the whitelist-drift class this project
+ * has now been bitten by six times (2.368.4 named it at the fifth), and three
+ * facts were dead RIGHT HERE when this list was written:
+ *   · `worktree`/`worktreePath` (owner ruling 9) — the card badge never drew,
+ *     Session Properties said "not isolated in this run" about a session the
+ *     server had just reported isolated WITH a path, and the fork's
+ *     `worktreePick({saved, live: sessionInfo.worktree})` always got
+ *     `live: undefined` — so a fork of an isolated conversation ran in the
+ *     user's real working tree;
+ *   · `outputStyle` (2.369.58) — Session Properties' response-style row read
+ *     `s.outputStyle` and never saw a live value, so a session running a style
+ *     reported the harness default;
+ *   · `remoteState` (2.219.1) — the "host unreachable" chip could not draw, so
+ *     a session whose machine was gone still read as conversable.
+ * Adding a key to the server payload and NOT to this list fails the drift
+ * guard in scripts/test-worktree-userchan-ui.mjs, which re-derives the payload's
+ * own key set from server.js.
+ */
+const LIVE_SESSION_FACTS = Object.freeze([
+  'remoteState',
+  'accountId', 'accountName', 'accountTail', 'auth',
+  'todo',
+  // …and the SPAWN knobs with the origin each one came from (B-6b6d). They
+  // reached this merge as four hand-copied lines in the same release that
+  // discovered `outputStyle` had never been copied at all — which is the whole
+  // argument for the list: Session Properties reports these as FACTS and must
+  // never re-derive them from the saved pick.
+  'outputStyle', 'spawnModel', 'effort', 'modelOrigin', 'effortOrigin',
+  'worktree', 'worktreePath',
+]);
+/** Carry the live facts verbatim; an absent live row states nothing (null). */
+const liveSessionFacts = (src) => {
+  const out = {};
+  for (const k of LIVE_SESSION_FACTS) out[k] = src ? (src[k] ?? null) : null;
+  return out;
+};
+
 class Sidebar {
   constructor(app) {
     this.app = app; this.el = document.getElementById('sidebar');
@@ -748,22 +795,10 @@ class Sidebar {
         webuiId: wm?.id || null,
         webuiName: wm?.name || null,
         webuiMode: wm ? (wm.mode || 'terminal') : null,
-        accountId: wm?.accountId || null, // billing account id (title-badge switcher's "current")
-        accountName: wm?.accountName || null, // billing identity badge (API key sessions)
-        accountTail: wm?.accountTail || null,
-        auth: wm?.auth || null, // billing identity (subscription/api-console/api-key/unknown)
-        todo: wm?.todo || null, // agent's own TodoWrite/plan summary (board pill)
-        // WHAT THIS SESSION IS ACTUALLY RUNNING WITH, from the server's own
-        // record — Session Properties reports these as facts and must never
-        // re-derive them from the saved PICK. `outputStyle` was added to the
-        // active-sessions payload in 2.369.58 but never to this merge, so the
-        // panel's "live" value was silently always empty and every session read
-        // as 'saved'; the B-6b6d rows land here WITH it, one wiring, one bug.
-        outputStyle: wm?.outputStyle || null,
-        spawnModel: wm?.spawnModel || null,
-        effort: wm?.effort || null,
-        modelOrigin: wm?.modelOrigin || null,   // 'chosen' | 'conversation' | 'instance' | 'harness'
-        effortOrigin: wm?.effortOrigin || null,
+        // Every remaining live fact, by the server's own name (see
+        // LIVE_SESSION_FACTS): billing identity, the agent's TodoWrite pill,
+        // the transport chip, the response style and the worktree badge/path.
+        ...liveSessionFacts(wm),
       };
     });
 
@@ -797,16 +832,7 @@ class Sidebar {
           webuiName: ws.name,
           name: ws.name || '',
           webuiMode: ws.mode || 'terminal',
-          accountId: ws.accountId || null,
-          accountName: ws.accountName || null,
-          accountTail: ws.accountTail || null,
-          auth: ws.auth || null,
-          todo: ws.todo || null,
-          outputStyle: ws.outputStyle || null,
-          spawnModel: ws.spawnModel || null,
-          effort: ws.effort || null,
-          modelOrigin: ws.modelOrigin || null,
-          effortOrigin: ws.effortOrigin || null,
+          ...liveSessionFacts(ws), // the SAME list as the matched branch above
         });
       }
     }

@@ -637,7 +637,17 @@ class ChatRenderers {
    * back to the ordinary tool card rather than drawing an empty highlight.
    */
   _renderUserChannelMsg(el, block, msg) {
-    const rec = userChannelRecord({ toolName: block.toolName, input: block.input, output: block.output });
+    // The CALL's own outcome rides the record (round-3 verifier): this card has
+    // no ✓/✗ column at all — the wrap label is the channel icon — so a
+    // SendUserFile the CLI rejected, or a SendUserMessage the turn interrupted,
+    // rendered as an ordinary successful "File for you". The message-level
+    // fields are the complete source (an INTERRUPTED call keeps its tool_call
+    // block and only the message says 'error'); the block's own status is the
+    // tool_result twin and is passed for the record to prefer whichever exists.
+    const rec = userChannelRecord({
+      toolName: block.toolName, input: block.input, output: block.output,
+      status: msg.status || block.status, toolStatus: msg.toolStatus,
+    });
     if (!rec) return null;
     if (rec.kind === 'message') {
       if (!rec.message && !rec.files.length) return null;

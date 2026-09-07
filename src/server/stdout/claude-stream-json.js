@@ -83,10 +83,32 @@ function create({ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes,
         const pages = pagesRef;
         if (!pages || typeof pages.publishContent !== 'function') { out.push({ path: abs, name, error: 'publishing is unavailable on this instance' }); continue; }
         const r = pages.publishContent({
-          html: buf, name, srcKey: 'local:' + abs,
-          // PRIVATE by default — a VibeSpace login is the gate. The user can
-          // flip a single page public from the Pages surface, deliberately.
-          makePublic: false,
+          html: buf, name,
+          // THE CHANNEL'S OWN KEY NAMESPACE (round-3 verifier, MAJOR).
+          // `srcKey` is the UPSERT IDENTITY of a published page, and
+          // `local:<abs>` is the key the user's OWN publishes use
+          // (published-pages `publish()`) and the one the agent CLI's
+          // `vibespace-page publish` mints (`<host|local>:<path>`). Sharing it
+          // meant a file this channel delivered SILENTLY TOOK OVER the page a
+          // user had published from the same path — overwriting its bytes,
+          // re-attributing it to this conversation, and (with the explicit
+          // flag below) flipping a page they had deliberately shared back to
+          // private, so the link they had handed out started redirecting to
+          // /login. It also collapsed two conversations that name the same
+          // stable path (`report.md`, `/tmp/out.png` — what agents actually
+          // write) into ONE record, so the older conversation's card lost its
+          // link entirely (`list({conversationId})` no longer matched it).
+          // Scoped to the CONVERSATION, not the run: the same file re-sent in
+          // the same conversation still keeps one stable URL across resumes,
+          // while a different conversation gets its own page.
+          srcKey: `userfile:${session.backendSessionId || session.claudeSessionId || id}:${abs}`,
+          srcPath: abs, // descriptive only — the key above is the identity
+          // NO visibility flag. A freshly minted record is already private
+          // (published-pages mints `public:false`), so private-by-default is
+          // preserved — while an EXPLICIT `false` would re-assert privacy on
+          // every re-send and overwrite a visibility the user chose in the
+          // Pages popover. Same rule the agent publish route already follows:
+          // only an explicit request changes what the user set.
           sessionId: id, conversationId: session.backendSessionId || session.claudeSessionId || null,
           mediaType: mediaType === 'text/html' ? '' : mediaType, // '' ⇒ the existing HTML page path, prelude and all
         });

@@ -352,6 +352,15 @@
 .chat-userfile-name { color: var(--text); word-break: break-all; }
 .chat-userfile-meta { font-size: 11px; color: var(--text-dim); }
 .chat-userfile-error { font-size: 11px; color: var(--red); }
+/* THE CALL ITSELF FAILED (round-3 verifier). This card has no ✓/✗ column —
+   the wrap label is the channel icon — so a rejected SendUserMessage/
+   SendUserFile has to say so inside the card, or it renders as an ordinary
+   success. The whole card takes the red rule (it is not a delivery any more)
+   and the reason sits directly under the head, above the file list. Theme vars
+   only (§17): no literal colours, no fallbacks. */
+.chat-userchan.chat-userchan-error { border-left-color: var(--red); background: color-mix(in srgb, var(--red) 8%, transparent); }
+.chat-userchan-error .chat-userchan-label { color: var(--red); }
+.chat-userchan-failed { font-size: 11px; color: var(--red); margin-bottom: 4px; word-break: break-word; }
 /* Same reason as .chat-agent-report below: the role-indicator bar paints every
    .chat-msg-tool-result GREEN like ordinary assistant output, which is exactly
    the confusion this card exists to remove. Same selector shape (attribute +
