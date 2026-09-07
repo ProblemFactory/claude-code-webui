@@ -2958,10 +2958,26 @@ async function handleInput(msg) {
       // them OTHER people's project paths: an agent-visible journal is the
       // wrong place for that).
       const outConfig = {}, outOrigins = {};
+      const permKeys = new Set(PERMISSION_CONFIG_KEYS);
       for (const k of PERMISSION_CONFIG_KEYS) {
         if (!(k in cfg)) continue;
         outConfig[k] = cfg[k];
         if (origins[k]) outOrigins[k] = origins[k];
+      }
+      // codex keys `origins` by LEAF PATH for a TABLE-valued key (measured on
+      // 0.153.4: `sandbox_workspace_write` itself is NEVER in `origins`, its
+      // members are — and a `-c sandbox_workspace_write.network_access=true`
+      // session flag shows up as `sessionFlags` on the LEAF). Forward the
+      // leaves of the keys we already forward: without them the reader cannot
+      // tell "this session's own flag set it" from "no layer set it", which is
+      // the entire question this view exists to answer. The head test keeps
+      // `projects.*` (and every non-permission key) out exactly as before.
+      for (const ok of Object.keys(origins)) {
+        const dot = ok.indexOf('.');
+        if (dot === -1) continue;                       // top level: handled above
+        const head = ok.slice(0, dot);
+        if (!permKeys.has(head) || !(head in outConfig)) continue;
+        outOrigins[ok] = origins[ok];
       }
       if (cwd && cfg.projects && typeof cfg.projects === 'object' && cfg.projects[cwd] && typeof cfg.projects[cwd] === 'object') {
         const tl = cfg.projects[cwd].trust_level;
@@ -2977,8 +2993,26 @@ async function handleInput(msg) {
         name: l && l.name, version: l && l.version ? String(l.version) : '', disabledReason: (l && l.disabledReason) || null,
       }));
       let payload = { ok: true, requestId, cwd, source: 'config/read', config: outConfig, origins: outOrigins, layers, truncated: false };
-      if (Buffer.byteLength(JSON.stringify(payload), 'utf8') > PERMISSION_RULES_MAX_BYTES) {
-        payload = { ...payload, origins: {}, truncated: true };
+      let bytes = Buffer.byteLength(JSON.stringify(payload), 'utf8');
+      if (bytes > PERMISSION_RULES_MAX_BYTES) {
+        // Dropping `origins` throws away the PROVENANCE this whole answer
+        // exists to carry — so SAY it (`originsDropped`), never let the reader
+        // conclude "no layer set this" from a map we deleted. The reader files
+        // those rules under an explicit unknown-source layer.
+        payload = { ...payload, origins: {}, originsDropped: true, truncated: true };
+        bytes = Buffer.byteLength(JSON.stringify(payload), 'utf8');
+      }
+      if (bytes > PERMISSION_RULES_MAX_BYTES) {
+        // A cap is a CAP. MEASURED against a real 0.153.4 with 700
+        // `writable_roots`: 186780 bytes full, and still 33719 AFTER the
+        // origin map is dropped — the old ladder emitted it anyway, which made
+        // the limit decorative and put an oversized line into the very
+        // agent-visible journal the cap exists to protect.
+        emitTaskEvent('permission_rules', {
+          ok: false, requestId, reason: 'read-failed',
+          detail: `this session's permission config is ${bytes} bytes, over the ${PERMISSION_RULES_MAX_BYTES}-byte answer cap`,
+        });
+        return;
       }
       emitTaskEvent('permission_rules', payload);
     } catch (e) {

@@ -213,17 +213,29 @@ function claudeRulesRecord(reads, { cwd = null, host = null, scope = 'session', 
   return { backend: 'claude', scope, cwd, host, ok: true, reason: null, detail: null, layers, truncated };
 }
 
+/** The note a rule carries when NO layer — top level or leaf — claims it. */
+const CODEX_DEFAULT_NOTE = 'not set in any layer — the packaged default';
+/** …and the note when we THREW THE ORIGIN MAP AWAY to fit the answer. Those
+ *  are different facts and must never share a sentence (a degrade path that
+ *  asserts the provenance it just discarded is the worst kind of lie: it
+ *  reads exactly like the honest answer). */
+const CODEX_CAPPED_NOTE = 'origin unknown — the answer was capped';
+
 /**
  * codex: a `config/read {cwd, includeLayers:true}` response → the typed
  * record. PURE. `origins` (key → the layer that WON) is the whole point of
  * this view; `layers` gives each layer its file and version.
  * The session's OWN directory trust level is the only `projects.*` key shown —
  * a real store had 378 origin keys, most of them unrelated project paths.
+ *
+ * `resp.originsDropped` = the producer HAD an origin map and dropped it to fit
+ * a byte cap. Honoured explicitly; see CODEX_CAPPED_NOTE.
  */
 function codexRulesRecord(resp, { cwd = null, host = null, scope = 'session', maxRules = 200 } = {}) {
   const config = isObj(resp) && isObj(resp.config) ? resp.config : null;
   if (!config) return unavailable('codex', 'no-config', 'codex returned no config', { cwd, host, scope });
   const origins = isObj(resp.origins) ? resp.origins : {};
+  const originsDropped = isObj(resp) && resp.originsDropped === true;
   const layerList = asArray(resp.layers);
   // key → layer id (the layer that WON that key)
   const layerIdOf = (name) => {
@@ -232,13 +244,14 @@ function codexRulesRecord(resp, { cwd = null, host = null, scope = 'session', ma
     return t + prof;
   };
   const buckets = new Map();     // layerId → {id,label,file,version,rules[]}
+  const rawBucket = (id, fields) => {
+    if (!buckets.has(id)) buckets.set(id, { id, label: '', short: '', scope: '', file: null, present: true, note: null, rules: [], ...fields });
+    return buckets.get(id);
+  };
   const bucket = (name) => {
     const id = layerIdOf(name);
-    if (!buckets.has(id)) {
-      const { label, file } = codexLayerLabel(name);
-      buckets.set(id, { id: id || 'unknown', label, short: label, scope: '', file: file || null, present: true, note: null, rules: [] });
-    }
-    return buckets.get(id);
+    const { label, file } = codexLayerLabel(name);
+    return rawBucket(id || 'unknown', { label, short: label, file: file || null });
   };
   // seed the buckets from `layers` so a layer that contributes NOTHING still
   // shows up (an empty /etc/codex/config.toml is a real, useful fact)
@@ -248,12 +261,98 @@ function codexRulesRecord(resp, { cwd = null, host = null, scope = 'session', ma
     if (l.version) b.version = String(l.version);
     if (l.disabledReason) b.note = String(l.disabledReason);
   }
+  /** "nobody set this". `packagedDefaults` is one of codex's OWN layer
+   *  variants and its schema REQUIRES a `file`, so we only ever speak in
+   *  codex's name when codex itself listed that layer. Measured on 0.153.4:
+   *  it does NOT (layers = sessionFlags/user/system), and the synthesised
+   *  `{type:'packagedDefaults'}` rendered "no file — this layer is not stored
+   *  on disk" about a layer that is, by its own schema, a file. */
+  const defaultsBucket = () => {
+    const real = layerList.find((l) => isObj(l) && isObj(l.name) && l.name.type === 'packagedDefaults');
+    if (real) return bucket(real.name);
+    return rawBucket('builtinDefaults', {
+      label: 'codex built-in defaults', short: 'Defaults',
+      fileNote: 'no path — codex reported no packaged-defaults layer',
+      note: 'no config layer sets these — they are codex’s own defaults',
+    });
+  };
+  /** …and "we do not KNOW who set this", which is not the same sentence. */
+  const unknownBucket = () => rawBucket('originUnknown', {
+    label: 'unknown source', short: 'Unknown',
+    fileNote: 'no path — the origin map was dropped to fit the answer',
+    note: 'the answer was capped before the origin map travelled — which layer set these is unknown',
+  });
   let truncated = false;
-  const push = (key, value, kind) => {
-    const origin = origins[key];
-    const b = bucket(origin ? origin.name : { type: 'packagedDefaults' });
+  const add = (b, rule) => {
     if (b.rules.length >= maxRules) { truncated = true; return; }
-    b.rules.push({ kind, key, value, note: origin ? null : 'not set in any layer — the packaged default' });
+    b.rules.push(rule);
+  };
+  /** The value at one of codex's origin LEAF paths
+   *  (`sandbox_workspace_write.writable_roots.0` → config[key].writable_roots[0]).
+   *  `undefined` when the trimmed config does not carry it. */
+  const leafValue = (key, path) => {
+    let cur = config[key];
+    for (const seg of path.slice(key.length + 1).split('.')) {
+      if (cur == null) return undefined;
+      if (Array.isArray(cur)) {
+        const i = Number(seg);
+        if (!Number.isInteger(i) || i < 0) return undefined;
+        cur = cur[i];
+      } else if (isObj(cur)) cur = cur[seg];
+      else return undefined;
+    }
+    return cur;
+  };
+  /**
+   * codex keys `origins` by LEAF PATH for a TABLE-valued key. MEASURED against
+   * a real `codex app-server` 0.153.4 (empty HOME, initialize→initialized→
+   * config/read{includeLayers:true}): with a `[sandbox_workspace_write]` table
+   * in config.toml the origin keys are
+   *   sandbox_workspace_write.writable_roots.0 / .network_access / .exclude_tmpdir_env_var
+   * and `'sandbox_workspace_write' in origins` is FALSE. A session flag
+   * (`-c sandbox_workspace_write.network_access=true`, the exact form
+   * src/adapters/codex.js spawns with) lands on that LEAF as `sessionFlags`.
+   * So "no TOP-LEVEL origin" does NOT mean "no layer set it" — asking only the
+   * top level filed the user's own config under a fabricated "packaged
+   * defaults" layer with the note that says the opposite, and left the
+   * `sessionFlags` layer (the stated reason the codex SESSION rung exists at
+   * all) empty.
+   */
+  const push = (key, value, kind) => {
+    if (originsDropped) { add(unknownBucket(), { kind, key, value, note: CODEX_CAPPED_NOTE }); return; }
+    const origin = origins[key];
+    if (origin) { add(bucket(origin.name), { kind, key, value, note: null }); return; }
+    const leaves = Object.keys(origins).filter((k) => k.startsWith(key + '.'));
+    if (!leaves.length) { add(defaultsBucket(), { kind, key, value, note: CODEX_DEFAULT_NOTE }); return; }
+    // Group an array's per-index leaves (`writable_roots.0`, `.1`, …) under
+    // their parent path: when every element agrees on a layer, one rule for
+    // the array is honest AND readable (a real config had 700 roots = 701
+    // leaf origins; one rule per element would have blown the whole view).
+    const groups = new Map();                 // display path → {ids:Set, leaves:[]}
+    for (const leaf of leaves) {
+      const disp = leaf.replace(/\.\d+$/, '');
+      let g = groups.get(disp);
+      if (!g) groups.set(disp, (g = { ids: new Set(), leaves: [] }));
+      g.ids.add(layerIdOf(origins[leaf] && origins[leaf].name));
+      g.leaves.push(leaf);
+    }
+    const allIds = new Set();
+    for (const g of groups.values()) for (const id of g.ids) allIds.add(id);
+    if (allIds.size === 1) {                  // one layer won every member ⇒ it owns the key
+      add(bucket(origins[leaves[0]].name), { kind, key, value, note: null });
+      return;
+    }
+    // SPLIT across layers ⇒ ONE RULE PER LEAF, each under the layer that won
+    // it. That is codex's own model, and the only shape that can say "this
+    // session's -c flag set network_access, the file set the rest".
+    for (const [disp, g] of groups) {
+      const paths = g.ids.size === 1 ? [disp] : g.leaves;
+      for (const p of paths) {
+        const src = origins[g.ids.size === 1 ? g.leaves[0] : p];
+        const v = leafValue(key, p);
+        add(bucket(src && src.name), { kind, key: p, value: stringifyValue(v), note: v === undefined ? 'value not carried in the answer' : null });
+      }
+    }
   };
   for (const key of CODEX_PERMISSION_KEYS) {
     if (!(key in config)) continue;
@@ -385,9 +484,13 @@ function renderRuleTree(record, { esc, t, icons = {} } = {}) {
       `<span class="perm-layer-count">${e(rules.length ? tr('{n} rule(s)', { n: rules.length }) : tr('no rules'))}</span>`,
       `</div>`,
     ].join('');
+    // A layer with no file is not automatically a layer that HAS no file:
+    // codex's `sessionFlags` genuinely lives nowhere on disk, while a bucket
+    // we had to synthesise simply has no path to show. `fileNote` lets the
+    // model say which — it is model text like `note`, so it is not translated.
     const path = l.file
       ? `<button type="button" class="perm-layer-path" data-copy="${e(l.file)}" title="${e(tr('Copy path'))}">${icons.copy || ''}<span>${e(l.file)}</span></button>`
-      : `<div class="perm-layer-path perm-layer-path-none">${e(tr('no file — this layer is not stored on disk'))}</div>`;
+      : `<div class="perm-layer-path perm-layer-path-none">${e(l.fileNote || tr('no file — this layer is not stored on disk'))}</div>`;
     const note = l.note ? `<div class="perm-layer-note">${e(l.note)}</div>` : '';
     const body = rules.length
       ? `<ul class="perm-rule-list">${rules.map((r) => renderRule(r, e, tr)).join('')}</ul>`
@@ -433,6 +536,7 @@ function ruleTreeSummary(record, { t } = {}) {
 module.exports = {
   RULE_KINDS, CLAUDE_LAYERS, CLAUDE_MANAGED_DIR, CLAUDE_MANAGED_DROPIN,
   CLAUDE_PERMISSION_LISTS, CLAUDE_PERMISSION_VALUES, CODEX_PERMISSION_KEYS,
+  CODEX_DEFAULT_NOTE, CODEX_CAPPED_NOTE,
   PERMISSION_RULE_SOURCES, UNAVAILABLE_REASONS,
   joinPath, claudeSettingsPaths, claudeRulesFromSettings, claudeRulesRecord,
   codexLayerLabel, codexRulesRecord, opencodeRulesRecord,

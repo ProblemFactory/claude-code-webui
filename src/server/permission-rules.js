@@ -256,7 +256,14 @@ function create({ activeSessions, adapterRegistry, accounts, agentEnv, buffersDi
       return rec;
     }
     if (backend === 'codex') {
-      const rec = PR.codexRulesRecord({ config: ans.config || {}, origins: ans.origins || {}, layers: ans.layers || [] }, { cwd, scope: 'session' });
+      // `originsDropped` travels: the wrapper dropping the origin map to fit
+      // its byte cap is a DIFFERENT fact from "no layer set this key", and the
+      // record has to be able to say which (the note the reader emits, and the
+      // layer it files those rules under, both hang off this flag).
+      const rec = PR.codexRulesRecord({
+        config: ans.config || {}, origins: ans.origins || {}, layers: ans.layers || [],
+        originsDropped: ans.originsDropped === true,
+      }, { cwd, scope: 'session' });
       if (ans.truncated) rec.truncated = true;
       return rec;
     }

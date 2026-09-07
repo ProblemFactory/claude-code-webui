@@ -86,21 +86,39 @@ console.log('— Part 1: the PURE model + renderer');
 }
 
 // ── codex: config/read layers + origins (fixture from a REAL 0.153.4 response) ──
+// MEASURED 2026-09-07 against `codex app-server` 0.153.4 (codex-cli 0.153.4)
+// driven initialize→initialized→config/read{includeLayers:true} under an empty
+// HOME with `[sandbox_workspace_write]` in config.toml and the session spawned
+// `-c sandbox_workspace_write.network_access=true` (the exact form
+// src/adapters/codex.js uses, and the form any user `codex.extraArgs` takes):
+//   • `'sandbox_workspace_write' in origins` is FALSE — a TABLE-valued key is
+//     keyed by its LEAVES (`.writable_roots.0` / `.network_access` / …)
+//   • the session flag lands on the LEAF as `sessionFlags`
+//   • `layers` = [sessionFlags, user, system] — there is NO packagedDefaults
+//     layer in the answer, so one may never be synthesised in codex's name
+//     (its schema REQUIRES a `file`).
+// The whole codex SESSION rung exists to show the sessionFlags layer; asking
+// only the top level left it EMPTY and filed the user's own config under a
+// forged "packaged defaults" layer noted "not set in any layer".
 const CODEX_FIXTURE = {
   config: {
     approval_policy: 'never', approvals_reviewer: 'user', sandbox_mode: 'danger-full-access',
-    sandbox_workspace_write: null, permissions: null, default_permissions: null, include_permissions_instructions: true,
+    sandbox_workspace_write: { writable_roots: ['/tmp/a'], network_access: true, exclude_tmpdir_env_var: true, exclude_slash_tmp: false },
+    permissions: null, default_permissions: null, include_permissions_instructions: true,
     projects: { '/w/proj': { trust_level: 'trusted' }, '/somebody/else': { trust_level: 'trusted' } },
   },
   origins: {
     approval_policy: { name: { type: 'user', file: '/h/.codex/config.toml', profile: null }, version: 'sha256:aa' },
     approvals_reviewer: { name: { type: 'user', file: '/h/.codex/config.toml', profile: null }, version: 'sha256:aa' },
     sandbox_mode: { name: { type: 'sessionFlags' }, version: '' },
-    include_permissions_instructions: { name: { type: 'system', file: '/etc/codex/config.toml' }, version: 'sha256:bb' },
+    'sandbox_workspace_write.writable_roots.0': { name: { type: 'user', file: '/h/.codex/config.toml', profile: null }, version: 'sha256:aa' },
+    'sandbox_workspace_write.exclude_tmpdir_env_var': { name: { type: 'user', file: '/h/.codex/config.toml', profile: null }, version: 'sha256:aa' },
+    'sandbox_workspace_write.network_access': { name: { type: 'sessionFlags' }, version: '' },
     'projects./w/proj.trust_level': { name: { type: 'user', file: '/h/.codex/config.toml', profile: null }, version: 'sha256:aa' },
     'projects./somebody/else.trust_level': { name: { type: 'user', file: '/h/.codex/config.toml', profile: null }, version: 'sha256:aa' },
   },
   layers: [
+    { name: { type: 'sessionFlags' }, version: 'sha256:00' },
     { name: { type: 'user', file: '/h/.codex/config.toml', profile: null }, version: 'sha256:aa' },
     { name: { type: 'system', file: '/etc/codex/config.toml' }, version: 'sha256:bb' },
   ],
@@ -117,7 +135,66 @@ const CODEX_FIXTURE = {
     rec.layers.flatMap((l) => l.rules).filter((r) => /^projects\./.test(r.key)).length === 1
     && rec.layers.flatMap((l) => l.rules).some((r) => r.key === 'projects./w/proj.trust_level' && r.value === 'trusted'));
   check('codex: a null config value is NOT reported as a rule ("not set" is the layer\'s business)',
-    !rec.layers.flatMap((l) => l.rules).some((r) => r.key === 'sandbox_workspace_write'));
+    !rec.layers.flatMap((l) => l.rules).some((r) => r.key === 'permissions' || r.key === 'default_permissions'));
+
+  // ── the LEAF-KEYED TABLE (round 4, MEASURED against a real 0.153.4) ──
+  // Not "is the code reached" but "does the view say the true thing": the
+  // session's OWN -c flag must show up as the sessionFlags layer's rule, with
+  // its value, and nothing may be attributed to a layer that did not set it.
+  {
+    const all = rec.layers.flatMap((l) => l.rules.map((r) => ({ ...r, layer: l.id })));
+    const net = all.find((r) => r.key === 'sandbox_workspace_write.network_access');
+    check('codex TABLE key: the session\'s own `-c sandbox_workspace_write.network_access=true` is attributed to sessionFlags WITH ITS VALUE — `sandbox_workspace_write` itself is never in `origins` (measured)',
+      !!net && net.layer === 'sessionFlags' && net.value === 'true' && net.note === null, JSON.stringify(net));
+    check('codex TABLE key: the leaves the FILE won stay with the file — a split table is one rule per leaf, codex\'s own model',
+      all.some((r) => r.key === 'sandbox_workspace_write.exclude_tmpdir_env_var' && r.layer === 'user' && r.value === 'true')
+      && all.some((r) => r.key === 'sandbox_workspace_write.writable_roots' && r.layer === 'user' && r.value === '["/tmp/a"]'),
+      JSON.stringify(all.filter((r) => r.key.startsWith('sandbox_workspace_write'))));
+    check('codex TABLE key: array-index leaves that agree on a layer collapse to their parent path (a real config had 700 writable_roots = 701 leaf origins)',
+      !all.some((r) => /\.writable_roots\.\d+$/.test(r.key)));
+    check('THE FINDING, measured on the consequence: a key the user\'s own layers set is NEVER filed as "the packaged default", and the sessionFlags layer is NOT empty',
+      !all.some((r) => r.key.startsWith('sandbox_workspace_write') && r.note === PR.CODEX_DEFAULT_NOTE)
+      && by.sessionFlags.rules.length >= 2, JSON.stringify(all.map((r) => [r.layer, r.key, r.note])));
+    // NEGATIVE CONTROL: a key with NO origin at all — neither top-level nor
+    // leaf — must still read "the packaged default". (Measured: 0.153.4 gives
+    // `include_permissions_instructions` no origin entry of any kind.)
+    const inc = all.find((r) => r.key === 'include_permissions_instructions');
+    check('NEGATIVE CONTROL: a key with no origin AT ALL (no top level, no leaf) still reads "not set in any layer — the packaged default"',
+      !!inc && inc.note === PR.CODEX_DEFAULT_NOTE, JSON.stringify(inc));
+    // …and the bucket it lands in must not IMPERSONATE codex's own layer
+    // variant: PackagedDefaultsConfigLayerSource REQUIRES a `file` per the
+    // 0.153.4 schema, and 0.153.4 lists no such layer at all (measured).
+    check('the "nobody set it" bucket does not forge codex\'s packagedDefaults variant (whose schema REQUIRES a file) when codex listed no such layer',
+      inc.layer === 'builtinDefaults' && !rec.layers.some((l) => l.id === 'packagedDefaults'));
+    const html = PR.renderRuleTree(rec, { esc: (s) => String(s == null ? '' : s), t: (s) => s });
+    check('…and it never renders "no file — this layer is not stored on disk" about a layer that, by its own schema, IS a file',
+      !/codex built-in defaults[\s\S]{0,300}not stored on disk/.test(html));
+    // When codex DOES report a packagedDefaults layer, we speak in its name —
+    // with the file it named.
+    const withPkg = PR.codexRulesRecord({
+      config: { approval_policy: 'on-request' }, origins: {},
+      layers: [{ name: { type: 'packagedDefaults', file: '/opt/codex/defaults.toml' }, version: 'sha256:cc' }],
+    }, {});
+    const pkg = withPkg.layers.find((l) => l.id === 'packagedDefaults');
+    check('when codex DOES list a packagedDefaults layer the rules go there, with the FILE codex named (never a file-less forgery)',
+      !!pkg && pkg.file === '/opt/codex/defaults.toml' && pkg.rules.some((r) => r.key === 'approval_policy'), JSON.stringify(pkg));
+  }
+
+  // ── the >32KiB degrade path: "we dropped the origin map" ≠ "no layer set it" ──
+  {
+    const capped = PR.codexRulesRecord({ ...CODEX_FIXTURE, origins: {}, originsDropped: true }, { cwd: '/w/proj' });
+    const cr = capped.layers.flatMap((l) => l.rules.map((r) => ({ ...r, layer: l.id })));
+    check('THE FINDING (degrade path): when the producer dropped `origins` to fit its cap, NO rule claims "the packaged default" — they are filed under an explicit unknown-source layer that says the origin map never travelled',
+      cr.length > 0 && cr.every((r) => r.layer === 'originUnknown' && r.note === PR.CODEX_CAPPED_NOTE)
+      && /capped/.test(capped.layers.find((l) => l.id === 'originUnknown').note), JSON.stringify(cr.map((r) => [r.layer, r.note])));
+    // NEGATIVE CONTROL: the SAME empty origin map WITHOUT the flag is the
+    // honest "no layer set any of this" answer and must keep saying so.
+    const noFlag = PR.codexRulesRecord({ ...CODEX_FIXTURE, origins: {} }, { cwd: '/w/proj' });
+    const nr = noFlag.layers.flatMap((l) => l.rules.map((r) => ({ ...r, layer: l.id })));
+    check('NEGATIVE CONTROL: the same empty origin map WITHOUT `originsDropped` still reads "the packaged default" (the two facts must not collapse into one sentence)',
+      nr.length > 0 && nr.every((r) => r.note === PR.CODEX_DEFAULT_NOTE) && !noFlag.layers.some((l) => l.id === 'originUnknown'));
+    check('the two notes are distinct strings (a degrade path may never borrow the honest answer\'s words)', PR.CODEX_CAPPED_NOTE !== PR.CODEX_DEFAULT_NOTE);
+  }
   const noCwd = PR.codexRulesRecord(CODEX_FIXTURE, { cwd: null, scope: 'instance' });
   check('codex instance scope reports no per-directory trust level at all', !noCwd.layers.flatMap((l) => l.rules).some((r) => /^projects\./.test(r.key)));
   const unknown = PR.codexRulesRecord({ config: { approval_policy: 'on-request' }, origins: { approval_policy: { name: { type: 'quantumLayer' } } }, layers: [] }, {});
@@ -187,8 +264,13 @@ const CODEX_FIXTURE = {
     !/<input|<select|<textarea|contenteditable|data-edit/i.test(real));
 }
 {
+  // 3 contributing sources (user / sessionFlags / built-in defaults) × 8 rules:
+  // approval_policy, approvals_reviewer, sandbox_mode, the three
+  // sandbox_workspace_write leaves (two collapsed under `user`, network_access
+  // under sessionFlags), include_permissions_instructions, and THIS project's
+  // trust_level. `system` contributed nothing and is not counted.
   check('ruleTreeSummary: counts the sources that CONTRIBUTED and every rule',
-    PR.ruleTreeSummary(PR.codexRulesRecord(CODEX_FIXTURE, { cwd: '/w/proj' }), { t: (s, p) => s.replace('{layers}', p.layers).replace('{rules}', p.rules) }) === '3 source(s) · 5 rule(s)',
+    PR.ruleTreeSummary(PR.codexRulesRecord(CODEX_FIXTURE, { cwd: '/w/proj' }), { t: (s, p) => s.replace('{layers}', p.layers).replace('{rules}', p.rules) }) === '3 source(s) · 8 rule(s)',
     PR.ruleTreeSummary(PR.codexRulesRecord(CODEX_FIXTURE, { cwd: '/w/proj' }), { t: (s, p) => s.replace('{layers}', p.layers).replace('{rules}', p.rules) }));
   check('ruleTreeSummary on an unavailable record shows the DETAIL, not a count', PR.ruleTreeSummary(PR.unavailable('claude', 'remote-session', 'lives on h1'), {}) === 'lives on h1');
 }
@@ -341,6 +423,33 @@ const mod = mkModule();
   const rec = await p;
   check('the wrapper answer is SHAPED server-side into the shared record (the wrapper ships as a single file and forwards codex\'s own fields)',
     rec.ok === true && rec.backend === 'codex' && rec.layers.some((l) => l.id === 'sessionFlags'));
+  check('…and the SESSION rung really shows the session\'s own -c flag as such (leaf-keyed table origins survive the whole seam)',
+    rec.layers.find((l) => l.id === 'sessionFlags')?.rules.some((r) => r.key === 'sandbox_workspace_write.network_access' && r.value === 'true'),
+    JSON.stringify(rec.layers.map((l) => [l.id, l.rules.map((r) => r.key)])));
+
+  // WIRING PIN (the 2.355.0 unstaged-wiring law): `originsDropped` is only a
+  // fact if the SERVER hands it to the pure reader. Driven through the real
+  // readViaSession seam, and MEASURED on the consequence (the layer the rules
+  // land in), never grepped.
+  written.length = 0;
+  {
+    const pd = mod.readViaSession(SID, { timeoutMs: 4000 });
+    await sleep(60);
+    mod.onWrapperRecord(SID, { type: 'permission_rules', ok: true, requestId: JSON.parse(written[0]).requestId, cwd: PROJ, config: CODEX_FIXTURE.config, origins: {}, originsDropped: true, truncated: true });
+    const recD = await pd;
+    const rulesD = recD.layers.flatMap((l) => l.rules.map((r) => ({ ...r, layer: l.id })));
+    check('WIRING PIN: a capped wrapper answer (`originsDropped`) reaches the reader — every rule lands under the explicit unknown-source layer, none claims "the packaged default"',
+      recD.truncated === true && rulesD.length > 0 && rulesD.every((r) => r.layer === 'originUnknown' && r.note === PR.CODEX_CAPPED_NOTE),
+      JSON.stringify(rulesD.map((r) => [r.layer, r.note])));
+    written.length = 0;
+    const pn = mod.readViaSession(SID, { timeoutMs: 4000 });
+    await sleep(60);
+    mod.onWrapperRecord(SID, { type: 'permission_rules', ok: true, requestId: JSON.parse(written[0]).requestId, cwd: PROJ, config: CODEX_FIXTURE.config, origins: {}, truncated: true });
+    const recN = await pn;
+    check('NEGATIVE CONTROL through the same seam: without the flag an empty origin map is still the honest "the packaged default" answer',
+      !recN.layers.some((l) => l.id === 'originUnknown')
+      && recN.layers.flatMap((l) => l.rules).every((r) => r.note === PR.CODEX_DEFAULT_NOTE));
+  }
 
   written.length = 0;
   const p2 = mod.readViaSession(SID, { timeoutMs: 300 });
@@ -891,6 +1000,78 @@ if (!CHROME) {
       !props.error && props.treeScrollW <= props.treeClientW + 1 && props.docScrollW <= props.inner + 1, JSON.stringify(props));
     check('a SHELL session gets no section at all, and an OPENCODE one says machine-wide (the caps row gates the chrome, not a backend id)',
       !props.error && props.shellHasSection === false && props.ocHasSection === true && /machine-wide/.test(props.ocHint || ''), JSON.stringify(props));
+
+    // ── 375×667: the SHAPES round 4 introduced, in the REAL DOM ──
+    // A leaf-split table produces the longest keys this view can carry
+    // (`sandbox_workspace_write.exclude_tmpdir_env_var`), and the capped
+    // answer introduces a file-less layer whose path line is a SENTENCE
+    // ("no path — the origin map was dropped to fit the answer") rather than
+    // the short stock one. Both are rendered through the real view, off the
+    // server's own record, and measured for overflow on the phone viewport.
+    const leafRec = PR.codexRulesRecord(CODEX_FIXTURE, { cwd: '/w/proj', scope: 'session' });
+    const cappedRec = PR.codexRulesRecord({ ...CODEX_FIXTURE, origins: {}, originsDropped: true }, { cwd: '/w/proj', scope: 'session' });
+    const shapes = await evaljs(`(async () => {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      document.querySelectorAll('.modal-overlay, #perm-rules-dialog, #local-oracle-dialog').forEach((e) => e.remove());
+      const RECS = { leaf: ${JSON.stringify(leafRec)}, capped: ${JSON.stringify(cappedRec)} };
+      const out = { made: [] };
+      const realFetch = window.fetch;
+      let which = 'leaf';
+      window.fetch = function (u) {
+        if (String(u).includes('/api/permission-rules')) return Promise.resolve(new Response(JSON.stringify(RECS[which]), { headers: { 'content-type': 'application/json' } }));
+        return realFetch.apply(this, arguments);
+      };
+      try {
+        for (const key of ['leaf', 'capped']) {
+          which = key;
+          const s = { sessionId: 'pr-shape-' + key, webuiId: 'pr-shape-' + key, backend: 'codex', mode: 'chat', cwd: '/w/proj', name: 'shape ' + key, status: 'live' };
+          const w = window.app.openSessionProps(s);
+          if (!w) { out[key] = { error: 'no window' }; continue; }
+          out.made.push(w.id);
+          const btn = [...w.content.querySelectorAll('button')].find((b) => /Show rules/.test(b.textContent));
+          if (!btn) { out[key] = { error: 'no Show rules button on a codex session' }; continue; }
+          btn.click();
+          for (let i = 0; i < 80; i++) { if (w.content.querySelector('.perm-rules .perm-layer')) break; await sleep(150); }
+          const root = w.content.querySelector('.perm-rules');
+          if (!root) { out[key] = { error: 'tree never rendered' }; continue; }
+          const keys = [...root.querySelectorAll('.perm-rule-key')].map((e) => e.textContent);
+          const longest = keys.slice().sort((a, b) => b.length - a.length)[0] || '';
+          const boxes = [...root.querySelectorAll('.perm-rule, .perm-layer-path, .perm-layer-head, .perm-layer-note')];
+          const overflowing = boxes.filter((e) => Math.round(e.getBoundingClientRect().right) > Math.round(root.getBoundingClientRect().right) + 1).length;
+          out[key] = {
+            measured: boxes.length,
+            layers: root.querySelectorAll('.perm-layer').length,
+            keys, longest,
+            noteTexts: [...root.querySelectorAll('.perm-rule-note')].map((e) => e.textContent),
+            pathNone: [...root.querySelectorAll('.perm-layer-path-none')].map((e) => e.textContent),
+            scrollW: root.scrollWidth, clientW: root.clientWidth,
+            docScrollW: document.documentElement.scrollWidth, inner: window.innerWidth,
+            overflowing,
+          };
+        }
+      } finally {
+        window.fetch = realFetch;
+        for (const id of out.made) { try { window.app.wm.closeWindow(id); } catch (e) { } }
+      }
+      return out;
+    })()`);
+    check('375×667: a LEAF-SPLIT codex table renders through the real view — the session\'s own -c flag appears as its own rule under its own layer',
+      !shapes.error && shapes.leaf && !shapes.leaf.error && shapes.leaf.keys.includes('sandbox_workspace_write.network_access'),
+      JSON.stringify(shapes.leaf));
+    check('375×667: …and the longest key it can produce still does not overflow (no element right of the tree, no sideways page scroll)',
+      !shapes.leaf.error && shapes.leaf.longest.length >= 40 && shapes.leaf.measured >= 8 && shapes.leaf.overflowing === 0
+      && shapes.leaf.scrollW <= shapes.leaf.clientW + 1 && shapes.leaf.docScrollW <= shapes.leaf.inner + 1,
+      JSON.stringify(shapes.leaf));
+    check('375×667: the CAPPED answer renders its own layer saying the origin map is gone, while the layer that genuinely has no file keeps the stock line — two different sentences on one screen, never "the packaged default"',
+      !shapes.capped.error
+      && shapes.capped.noteTexts.length > 0 && shapes.capped.noteTexts.every((t) => t === PR.CODEX_CAPPED_NOTE)
+      && shapes.capped.pathNone.some((t) => /origin map was dropped/.test(t))
+      && shapes.capped.pathNone.some((t) => /not stored on disk/.test(t)),
+      JSON.stringify(shapes.capped));
+    check('375×667: …and that sentence-length path line wraps instead of scrolling the phone sideways',
+      !shapes.capped.error && shapes.capped.measured >= 8 && shapes.capped.overflowing === 0
+      && shapes.capped.scrollW <= shapes.capped.clientW + 1 && shapes.capped.docScrollW <= shapes.capped.inner + 1,
+      JSON.stringify(shapes.capped));
 
     // ── WIRING PIN: a REMOTE session, through the REAL door (round 2) ──
     // The server's `remote-session` guard was already correct and its own test
