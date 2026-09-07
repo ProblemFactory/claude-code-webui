@@ -507,18 +507,36 @@ function create({ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes,
             } else if (msg.type === 'compact_progress' && msg.event && typeof msg.event === 'object') {
               // COMPACTION PROGRESS (§2.11) — the 2.284.2 api_retry channel
               // exactly: the spinner LABEL, deliberately card-less (three
-              // records per compaction would be three cards). Shapes are the
-              // CLI's own discriminated union (2.1.257 zod dump):
+              // records per compaction would be three cards).
+              //
+              // TWO SPELLINGS, and the schema is NOT the one on the wire.
+              // The 2.1.257 zod declaration (offset 179096059) says
               //   hooks_start  {hook_type: pre_compact|post_compact|session_start}
               //   compact_start{hint_text?: string|null}
               //   compact_end
-              // Until one of these arrives the client shows the old hardcoded
-              // "takes 1–2 minutes" apology; from here on it shows the STAGE.
+              // but every EMITTER in the same binary builds the camelCase
+              // object — `{type:"compact_progress",event:{type:"hooks_start",
+              // hookType:"pre_compact"}}` (183979983), `{type:"compact_start",
+              // hintText:F}` (183980713), and 185190125/185193937/185195701/
+              // 185198872/185209427/192261073 — which `onCompactEvent:(k)=>
+              // r.enqueue(k)` (182861070) forwards VERBATIM to stdout. The
+              // CLI's own consumer reads camelCase too (189086200:
+              // `t.hookType==="pre_compact"`, `u(!0,t.hintText??null)`), and
+              // `grep -aob 'hint_text:'` finds exactly ONE hit in the whole
+              // binary: the schema literal. Reading only the schema spelling
+              // meant "running hook hooks…" and a null hint on every real
+              // compaction, which is §2.11's entire point.
+              // Read BOTH at this one point (schema shape first — if a later
+              // CLI ever makes the emitters match their own declaration, that
+              // is the spelling to prefer), and never downstream: the
+              // broadcast below publishes ONE normalized shape.
               const ev = msg.event;
+              const hookT = ev.hook_type ?? ev.hookType;
+              const hintT = ev.hint_text ?? ev.hintText;
               session._streamingKind = ev.type === 'compact_end' ? null : 'compacting';
-              if (ev.type === 'hooks_start') newLabel = `Compacting: running ${String(ev.hook_type || 'hook').replace(/_/g, ' ')} hooks…`;
+              if (ev.type === 'hooks_start') newLabel = `Compacting: running ${String(hookT || 'hook').replace(/_/g, ' ')} hooks…`;
               else if (ev.type === 'compact_start') {
-                const hint = ev.hint_text ? String(ev.hint_text).slice(0, 160) : '';
+                const hint = hintT ? String(hintT).slice(0, 160) : '';
                 newLabel = hint ? `Compacting: ${hint}` : 'Compacting the conversation…';
               } else if (ev.type === 'compact_end') newLabel = 'thinking...';
               // The card-less record still has to reach the client that draws
@@ -526,7 +544,7 @@ function create({ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes,
               // progress lane exists (the fallback text stops being shown).
               broadcastToSession(session, id, {
                 type: 'compact-progress', sessionId: id, event: ev.type || '',
-                hookType: ev.hook_type || null, hint: ev.hint_text ? String(ev.hint_text).slice(0, 160) : null,
+                hookType: hookT || null, hint: hintT ? String(hintT).slice(0, 160) : null,
               });
             }
             if (newLabel !== null && session._streamingLabel !== newLabel) {

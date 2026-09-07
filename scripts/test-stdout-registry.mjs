@@ -190,6 +190,68 @@ const inflight = (id) => calls.broadcasts.filter((b) => b.id === id && b.type ==
   ok('…and it is card-less too: no compaction message was normalized', !s._ops.some((o) => o.op === 'create' && JSON.stringify(o.message?.content || '').includes('Compacting')));
 }
 {
+  // ⓑ THE SPELLING THAT IS ACTUALLY ON THE WIRE. The legs above feed the
+  //    2.1.257 zod SCHEMA's snake_case shape — and nothing emits it. Every
+  //    producer in the same binary builds camelCase, and `onCompactEvent:
+  //    (k)=>r.enqueue(k)` (182861070) forwards the object VERBATIM:
+  //      183979983  {type:"compact_progress",event:{type:"hooks_start",hookType:"pre_compact"}}
+  //      183980713  {type:"compact_start",hintText:F}
+  //      185190125 / 185193937 / 185195701 / 185198872 / 185209427 / 192261073
+  //      189086200  the CLI's OWN consumer: t.hookType==="pre_compact" / t.hintText??null
+  //    `grep -aob 'hint_text:'` over the binary finds exactly ONE hit — the
+  //    schema literal. Reading only the schema spelling produced "running hook
+  //    hooks…" and a null hint on every real compaction, while the snake_case
+  //    fixture above kept this suite green. Both spellings, ONE read point.
+  const s2 = mkSession('claude', 'w-b3-cc'); const p2 = fakePty();
+  so.setupSessionPty(s2, 'w-b3-cc', p2);
+  const ccB = () => calls.broadcasts.filter((b) => b.id === 'w-b3-cc' && b.type === 'compact-progress');
+  const ccL = () => labels('w-b3-cc').slice(-1)[0];
+  p2.data(J({ type: 'compact_progress', event: { type: 'hooks_start', hookType: 'pre_compact' }, uuid: 'u-cc-1', session_id: 'sid-cc' }));
+  ok("EMITTED shape: camelCase hookType names the hook phase in the label (not the generic 'hook')", ccL() === 'Compacting: running pre compact hooks\u2026', ccL());
+  ok('…and it reaches the client broadcast, which is what the card reads', ccB().slice(-1)[0]?.hookType === 'pre_compact', JSON.stringify(ccB().slice(-1)[0]));
+  p2.data(J({ type: 'compact_progress', event: { type: 'compact_start', hintText: 'summarizing 812 messages' }, uuid: 'u-cc-2', session_id: 'sid-cc' }));
+  ok("EMITTED shape: camelCase hintText carries the CLI's own hint into the label", ccL() === 'Compacting: summarizing 812 messages', ccL());
+  ok('…and into the broadcast (§2.11 exists to show exactly this string)', ccB().slice(-1)[0]?.hint === 'summarizing 812 messages', JSON.stringify(ccB().slice(-1)[0]));
+  p2.data(J({ type: 'compact_progress', event: { type: 'compact_start', hint_text: 'schema wins', hintText: 'emitter loses' }, uuid: 'u-cc-3', session_id: 'sid-cc' }));
+  ok('both spellings present ⇒ the DECLARED one wins (the schema is the contract; camelCase is the compatibility rung)', ccL() === 'Compacting: schema wins', ccL());
+  // NEGATIVE CONTROLS — an absent value is still absent under the wider read
+  p2.data(J({ type: 'compact_progress', event: { type: 'compact_start' }, uuid: 'u-cc-4', session_id: 'sid-cc' }));
+  ok('NEGATIVE CONTROL: no hint in either spelling ⇒ the generic sentence and hint:null (nothing is invented)', ccL() === 'Compacting the conversation\u2026' && ccB().slice(-1)[0]?.hint === null, JSON.stringify([ccL(), ccB().slice(-1)[0]?.hint]));
+  p2.data(J({ type: 'compact_progress', event: { type: 'hooks_start' }, uuid: 'u-cc-5', session_id: 'sid-cc' }));
+  ok('NEGATIVE CONTROL: a hooks_start with no hook name falls back to the generic word, it never guesses a phase', ccL() === 'Compacting: running hook hooks\u2026' && ccB().slice(-1)[0]?.hookType === null, ccL());
+  // DRIFT GUARD (the 2.331.0 lesson): the fix is ONE `??` pair at ONE read
+  // point — a later "clean-up to the documented schema" silently restores the
+  // production bug, and only the camelCase legs above would catch it.
+  const csj = read('src/server/stdout/claude-stream-json.js');
+  ok('the read point still accepts BOTH spellings (drift guard)', /ev\.hook_type \?\? ev\.hookType/.test(csj) && /ev\.hint_text \?\? ev\.hintText/.test(csj), 'claude-stream-json.js stopped reading both compact_progress spellings');
+  const strays = csj.replace(/ev\.hook_type \?\? ev\.hookType/g, '').replace(/ev\.hint_text \?\? ev\.hintText/g, '');
+  ok('…and nothing downstream re-reads the raw event (one read, one normalized broadcast)', !/ev\.hook_type|ev\.hint_text|ev\.hookType|ev\.hintText/.test(strays));
+}
+{
+  // ⓒ THE FIXTURE vs THE BINARY (facts law: dump, never remember). The legs
+  //    above are hand-written record shapes, and a hand-written fixture is
+  //    exactly how the snake_case bug stayed green for a release. When a claude
+  //    CLI is installed, ASK IT which spelling it emits; when it is not,
+  //    SKIP LOUDLY with the reason (an environment-capability assert must carry
+  //    evidence, never quietly pass).
+  let bin = null;
+  try { bin = fs.realpathSync(require('child_process').execFileSync('sh', ['-c', 'command -v claude'], { encoding: 'utf8' }).trim()); } catch { }
+  if (!bin || !fs.existsSync(bin)) {
+    console.log('  SKIP: no claude CLI on PATH — the emitted-vs-declared spelling was not re-dumped (the fixtures above still run)');
+  } else {
+    const hits = (needle) => { try { return Number(require('child_process').execFileSync('grep', ['-c', '-a', '-F', needle, bin], { encoding: 'utf8' }).trim()) || 0; } catch { return 0; } };
+    const camelHooks = hits('type:"hooks_start",hookType:');
+    const camelHint = hits('type:"compact_start",hintText:');
+    const snakeHooksEmit = hits('type:"hooks_start",hook_type:');
+    const snakeHintEmit = hits('type:"compact_start",hint_text:');
+    const schemaDecl = hits('hook_type:ee(["pre_compact"');
+    const ver = (() => { try { return require('child_process').execFileSync(bin, ['--version'], { encoding: 'utf8' }).trim(); } catch { return '?'; } })();
+    ok(`${ver}: the installed CLI EMITS camelCase compact_progress (hookType ${camelHooks} sites, hintText ${camelHint} sites) — the compatibility rung is load-bearing, not defensive`, camelHooks > 0 && camelHint > 0, `hookType=${camelHooks} hintText=${camelHint}`);
+    ok('…and it DECLARES snake_case in the same binary (both rungs are justified; the schema is not fiction)', schemaDecl > 0, `hook_type:ee([...]) sites=${schemaDecl}`);
+    ok('…and no emitter uses the declared spelling yet — the day one does, the schema-first read still wins (leg ⓑ pins that)', snakeHooksEmit === 0 && snakeHintEmit === 0, `snake emitters hooks=${snakeHooksEmit} hint=${snakeHintEmit}`);
+  }
+}
+{
   // ⑨ RETRACTION on the live stream: a tombstone for a message we rendered
   const s = mkSession('claude', 'w-b3-tomb'); const p = fakePty();
   so.setupSessionPty(s, 'w-b3-tomb', p);

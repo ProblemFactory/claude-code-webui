@@ -2676,10 +2676,12 @@ class ChatView {
     if (!el) return;
     el.dataset.msgId = msg.id;
     if (msg.ts) el.dataset.ts = msg.ts; // for time-coordinate minimap positioning
-    // Retraction survives a REBUILD (§2.10): the normalizer marks the message
-    // in record order, so a reload of the transcript shows the same rewound
-    // history the live stream did — one code path for both.
-    if (msg.rewound) this._markRewoundEl(el, msg.rewound);
+    // Every per-element mark the VIEW owns (retraction §2.10, the executing-tool
+    // dot §2.5) — re-derived here and at both replacement sites, never carried
+    // by the element. Retraction survives a REBUILD because the normalizer
+    // marks the message in record order, so a reload of the transcript shows
+    // the same rewound history the live stream did — one code path for both.
+    this._applyElementMarks(el, msg);
     this._elements.set(msg.id, el);
     this._messageList.appendChild(el);
     this._renderers.addWrapToggles(el);
@@ -2773,6 +2775,7 @@ class ChatView {
           // result landed).
           if (this._runExpanded?.has(oldEl)) this._runExpanded.add(newEl);
           if (this._runStickyOpen?.has(oldEl)) this._runStickyOpen.add(newEl); // the user's deliberate-open mark rides the swap too (verifier: a full re-render otherwise let the pinned auto-refold snap it shut)
+          this._applyElementMarks(newEl, msg);
           oldEl.replaceWith(newEl);
           this._elements.set(id, newEl);
           this._renderers.addWrapToggles(newEl);
@@ -3017,6 +3020,44 @@ class ChatView {
     // turn map, and the only authority for one is the server normalizer (which
     // already drops rewound turns). Fabricating a client-side map to blank the
     // ghost markers would be a second source of truth for turn positions.
+  }
+
+  /** EVERY per-element mark this view owns, re-derived from the view's own
+   *  state onto a freshly built element.
+   *
+   *  The bug this closes (round-2 verifier, reproduced at 375×667): a mark
+   *  written STRAIGHT TO THE DOM at its origin — `_applyRewound`'s
+   *  strike-through, `_onToolsInProgress`'s executing dot — dies at the next
+   *  element REPLACEMENT, and there are three places that build an element for
+   *  a message (`_onCreateMessage`, the status-transition re-render in
+   *  `_onEditMessage`, `_rerenderVisible`). The claude tombstone case always
+   *  gets one: the message it retracts is a STREAMING partial, and
+   *  `MessageManager._finalizeStreaming` emits `{op:'edit',
+   *  fields:{status:'complete'}}` for exactly that message at the next
+   *  `result` — so a retracted answer came back on screen one record later,
+   *  while an attach/rebuild (which reads `msg.rewound` from the normalizer)
+   *  still hid it. That divergence is what the create path's comment claims
+   *  cannot happen.
+   *
+   *  So: never re-apply marks one at a time at each replacement site (that is
+   *  the same miss with more copies). One function, called at every place an
+   *  element enters `_elements`, that asks the VIEW STATE what this element
+   *  should be wearing. A new mark is added here and is correct everywhere.
+   *  Idempotent — it only ever restates what the state already says. */
+  _applyElementMarks(el, msg) {
+    if (!el) return;
+    // ① retraction (§2.10) — the message model carries it (live op + rebuild)
+    if (msg?.rewound) this._markRewoundEl(el, msg.rewound);
+    // ② the tool the harness says is EXECUTING (§2.5, set_in_progress_tool_use_ids).
+    //    `_inFlightTools` is the resolved set, and for a long-running tool the
+    //    next delta may never come — re-deriving is the only way the dot
+    //    survives a re-render or a page-out/page-in.
+    const inflight = this._inFlightTools;
+    if (inflight?.size) {
+      const mark = (node) => { const tid = node?.dataset?.toolId; if (tid) node.classList.toggle('chat-tool-inflight', inflight.has(tid)); };
+      mark(el);
+      if (el.querySelectorAll) for (const n of el.querySelectorAll('[data-tool-id]')) mark(n);
+    }
   }
 
   /** ONE place that turns the mark into DOM (create-path and live op share it,
@@ -4337,6 +4378,7 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
       if (oldEl.dataset.line) newEl.dataset.line = oldEl.dataset.line;
       if (this._runExpanded?.has(oldEl)) this._runExpanded.add(newEl);
           if (this._runStickyOpen?.has(oldEl)) this._runStickyOpen.add(newEl); // the user's deliberate-open mark rides the swap too (verifier: a full re-render otherwise let the pinned auto-refold snap it shut)
+      this._applyElementMarks(newEl, msg);
       oldEl.replaceWith(newEl);
       this._elements.set(id, newEl);
       this._renderers.addWrapToggles(newEl);

@@ -13,6 +13,11 @@
 //   ③ retraction: a claude tombstone is REMOVED (its own instruction), a codex
 //      rollback is STRUCK IN PLACE (hiding it would rewrite what someone read)
 //   ④ the tool-granular run set marks the executing card, not every pending one
+//   ⑤ and BOTH of those per-element marks survive every rebuild — the three
+//      paths that build an element for a message (create/_renderDetached,
+//      the status re-render in _onEditMessage, _rerenderVisible). Round-2
+//      finding: they were written straight to the DOM and dropped on the
+//      first replacement, and the tombstone's own case ALWAYS gets one.
 //
 // SKIPs (exit 0) without chrome, like every other browser suite here.
 import fs from 'node:fs';
@@ -230,7 +235,10 @@ if (!opened?.ok) { console.error(pageErrors.join('\n')); done(); }
   check('…wearing a "rewound" tag that says why', !!m?.tagText, m?.tagText);
   check('a claude TOMBSTONE is REMOVED instead — the CLI\'s own instruction for a superseded partial', m?.supDisplay === 'none', m?.supDisplay);
   check('the op is idempotent: a replayed op does not stack a second tag', m?.tagCount === 1, String(m?.tagCount));
-  check('…and the client message model carries the mark too (so a re-render keeps it)', m?.modelRewound === 'rollback', String(m?.modelRewound));
+  // The model field is a PRECONDITION for leg ⑤, not evidence — "so a
+  // re-render keeps it" was the claim the round-2 verifier falsified (the
+  // replacement paths dropped the DOM mark while this field stayed set).
+  check('…and the client message model carries the mark too (the precondition leg ⑤ then MEASURES)', m?.modelRewound === 'rollback', String(m?.modelRewound));
   check(`the struck message still fits the 375px viewport (h=${m?.rbH})`, m?.rbInViewport === true, m);
 }
 
@@ -253,6 +261,80 @@ if (!opened?.ok) { console.error(pageErrors.join('\n')); done(); }
   check(`the fixture has two pending tool cards (${m?.n})`, m?.n === 2, m);
   check('only the tool the harness says is EXECUTING is marked — a pending card is not a running one (it may be sitting on a permission prompt)', JSON.stringify(m?.marked) === '[true,false]', m);
   check('…and the resolved set is authoritative: an empty set clears every mark (a delta record, a resolved view)', JSON.stringify(m?.cleared) === '[false,false]', m);
+}
+
+// ── ⑤ EVERY per-element mark survives EVERY rebuild ─────────────────────────
+//    Round-2 finding, reproduced here before the fix: a mark written straight
+//    to the DOM at its origin (`_applyRewound`, `_onToolsInProgress`) died at
+//    the next element REPLACEMENT, and three code paths build an element for a
+//    message. The claude tombstone case ALWAYS gets one — the message it
+//    retracts is a streaming partial, and MessageManager._finalizeStreaming
+//    emits `{op:'edit', fields:{status:'complete'}}` for exactly that message
+//    at the next `result`. Measured as COMPUTED STYLE (the no-global-.hidden
+//    law: never by the class being present), at 375×667, with two negative
+//    controls that must stay unmarked through all of it.
+{
+  const m = await evaljs(`(async () => {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const v = window.__v;
+    const assts = v._messages.filter((x) => x.role === 'assistant');
+    const users = v._messages.filter((x) => x.role === 'user');
+    const supId = assts[assts.length - 1].id;   // marked 'superseded' in leg ③
+    const rbId = users[users.length - 1].id;    // marked 'rollback' in leg ③
+    const ctrlId = assts[0].id;                 // NEGATIVE CONTROL: never retracted
+    const cards = [...v._messageList.querySelectorAll('[data-tool-id]')];
+    const msgA = cards[0].dataset.msgId, msgB = cards[1].dataset.msgId;
+    v._onToolsInProgress([cards[0].dataset.toolId]); // A executes, B only pends
+    await sleep(80);
+    const styleOf = (id) => {
+      const el = v._elements.get(id); if (!el) return { gone: true };
+      const cs = getComputedStyle(el);
+      return { display: cs.display, opacity: Number(cs.opacity), tags: el.querySelectorAll('.chat-rewound-tag').length };
+    };
+    const dotOf = (id) => {
+      const el = v._elements.get(id); if (!el) return { gone: true };
+      const lab = el.querySelector('.chat-tool-label');
+      const af = lab ? getComputedStyle(lab, '::after') : null;
+      return { cls: el.classList.contains('chat-tool-inflight'), content: af ? af.content : '(no label)', w: af ? af.width : '(no label)' };
+    };
+    const shot = () => ({ sup: styleOf(supId), rb: styleOf(rbId), ctrl: styleOf(ctrlId), toolA: dotOf(msgA), toolB: dotOf(msgB) });
+    const s0 = shot();
+    // ① the status-transition re-render inside _onEditMessage
+    for (const id of [supId, rbId, ctrlId, msgA, msgB]) v._onOp({ op: 'edit', id, fields: { status: 'complete' } });
+    await sleep(160);
+    const s1 = shot();
+    // ② _rerenderVisible — the full rebuild a compact-mode toggle runs
+    v._rerenderVisible();
+    await sleep(160);
+    const s2 = shot();
+    // ③ the CREATE path — page out and back in, exactly what a trim followed
+    //    by _extendTop does (_renderDetached → _onCreateMessage)
+    v._loadingHistory = true;
+    for (const id of [supId, rbId, ctrlId, msgA, msgB]) {
+      const el = v._elements.get(id), msg = v._messages.find((x) => x.id === id);
+      const anchor = el.nextSibling;
+      v._renderedMsgIds.delete(id); v._elements.delete(id); el.remove();
+      const fresh = v._renderDetached(msg);
+      if (fresh) v._messageList.insertBefore(fresh, anchor);
+    }
+    v._loadingHistory = false;
+    await sleep(160);
+    const s3 = shot();
+    return { s0, s1, s2, s3, inflightStillHeld: !!(v._inFlightTools && v._inFlightTools.has(cards[0].dataset.toolId)) };
+  })()`);
+  const stages = m ? [m.s0, m.s1, m.s2, m.s3] : [];
+  const names = ['before any rebuild', 'after the _onEditMessage status re-render', 'after _rerenderVisible', 'after a page-out/page-in (create path)'];
+  const supHidden = stages.map((s) => s?.sup?.display);
+  check(`the tombstoned partial stays REMOVED through all three rebuilds (computed display: ${JSON.stringify(supHidden)}) — an edit op used to bring a retracted answer back on screen`, supHidden.length === 4 && supHidden.every((d) => d === 'none'), JSON.stringify(m?.s1?.sup));
+  const rbOk = stages.map((s) => s?.rb).every((r) => r && r.display !== 'none' && r.opacity > 0 && r.opacity < 1 && r.tags === 1);
+  check(`…and the rollback stays struck: dimmed, exactly one tag, at every stage (${JSON.stringify(stages.map((s) => [s?.rb?.opacity, s?.rb?.tags]))})`, rbOk, JSON.stringify(stages.map((s) => s?.rb)));
+  const dotOk = stages.map((s) => s?.toolA).every((d) => d && d.cls === true && d.w === '6px');
+  check(`the EXECUTING tool keeps its dot through all three rebuilds (computed ::after width: ${JSON.stringify(stages.map((s) => s?.toolA?.w))}) — for a long-running tool no second delta ever comes`, dotOk, JSON.stringify(stages.map((s) => s?.toolA)));
+  check('…and the view still holds the id, so the dot is re-derived from state, not remembered by an element', m?.inflightStillHeld === true, JSON.stringify(m?.inflightStillHeld));
+  const ctrlOk = stages.map((s) => s?.ctrl).every((c) => c && c.display !== 'none' && c.opacity === 1 && c.tags === 0);
+  check(`NEGATIVE CONTROL: a message that was never retracted is untouched by every rebuild (${JSON.stringify(stages.map((s) => [s?.ctrl?.display, s?.ctrl?.opacity, s?.ctrl?.tags]))})`, ctrlOk, JSON.stringify(stages.map((s) => s?.ctrl)));
+  const ctrlDotOk = stages.map((s) => s?.toolB).every((d) => d && d.cls === false && d.w !== '6px');
+  check(`NEGATIVE CONTROL: the PENDING-but-not-executing tool never gains a dot on a rebuild (${JSON.stringify(stages.map((s) => s?.toolB?.w))}) — re-deriving must not mark everything`, ctrlDotOk, JSON.stringify(stages.map((s) => s?.toolB)));
 }
 
 check('no uncaught page exceptions during the measurement', pageErrors.length === 0, pageErrors.slice(0, 3).join(' | '));
