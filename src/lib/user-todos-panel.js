@@ -43,6 +43,12 @@ export function installUserTodos(app) {
     // still the job's form, which focusJobsPanel lands on in the sidebar)
     if (item?.jobId) { popup.classList.add('hidden'); app.openJobInteract?.(item.jobId); return; }
     if (key === 'jobs') { popup.classList.add('hidden'); app.openJobs?.(); return; }
+    // Account-level items (login-session expiry, 2026-09-07) belong to the
+    // INSTANCE, not a session — the actionable surface is Manage Agents, the
+    // same shape the 'jobs' bucket uses. Without this branch the click fell
+    // through to "Session not found in the list yet", i.e. a dead end on an
+    // item whose whole point is that the user must act.
+    if (key === 'accounts') { popup.classList.add('hidden'); app._showAgentsDialog?.(); return; }
     const s = sessionFor(key);
     if (!s) { showToast(t('Session not found in the list yet — try from the sidebar'), { type: 'error' }); return; }
     popup.classList.add('hidden');

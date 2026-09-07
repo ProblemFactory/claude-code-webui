@@ -21,6 +21,16 @@
 // is strictly sooner (hot re-points are free — no restart; cold pools stay
 // exhaustion-only because each switch restarts conversations).
 
+// LOGIN LIFETIME (2026-09-07, src/login-expiry.js — PURE→PURE): quota is not
+// the only way a member becomes unusable. A subscription's OAuth login session
+// has its own ABSOLUTE deadline (refreshTokenExpiresAt); past it the CLI's
+// refresh fails and every turn on that member dies. `readLogin(id)` is an
+// OPTIONAL input here — absent (or answering 'unknown') means "no claim", and
+// every decision below then behaves EXACTLY as it did before this input
+// existed. That is deliberate: a harness that cannot read a login deadline
+// must not have its members quietly demoted.
+const { loginUsable, loginSwitchTarget, loginRank, loginBucketLabel } = require('./login-expiry.js');
+
 const SWITCH_THRESHOLD_PCT = 5;
 // PER-BUCKET-KIND thresholds (2.268.2, user-designed: what matters is
 // ABSOLUTE headroom, not relative — 1% of a 7d window ≈ $17 vs 1% of a 5h
@@ -125,33 +135,47 @@ function bucketRems(cache, nowSec) {
 // EDF comparator — ONE implementation for the live decision AND the
 // sealed-orders ranked snapshot the daemon holds (design §Pool management).
 function edfCompare(a, b) {
+  // LAST tiebreak only (2026-09-07): between two members the quota ranking
+  // calls EQUAL, prefer the healthier LOGIN — an 'expiring' member ranks below
+  // an equal 'ok' one. It can never reorder members the quota rules separate,
+  // and with no login input every `loginPenalty` is 0, so the comparator is
+  // byte-for-byte the old one (stable sort keeps the member-list order).
+  const login = () => (a.loginPenalty || 0) - (b.loginPenalty || 0);
   if (a.deadline != null && b.deadline != null) {
     if (Math.abs(a.deadline - b.deadline) > 60) return a.deadline - b.deadline;
-    return b.eff - a.eff;
+    return (b.eff - a.eff) || login();
   }
   if (a.deadline != null) return -1;
   if (b.deadline != null) return 1;
-  return b.eff - a.eff;
+  return (b.eff - a.eff) || login();
 }
 
 /** The ranked member snapshot pushed to the holding device (sealed orders):
  *  usable members in EDF order — the device executes a LOCAL fallback switch
  *  down this list only when it both sees a hard limit banner AND cannot
  *  reach the orchestrator. */
-function rankPoolMembers({ members, readCache, nowSec }) {
+function rankPoolMembers({ members, readCache, nowSec, readLogin = null }) {
   const out = [];
   for (const m of members) {
+    // A ranked snapshot is a list of FUTURE switch targets (the live evict
+    // path picks ranked[0]; the daemon's sealed-orders reflex walks it while
+    // this server is unreachable, possibly hours later) — so the NEAR window
+    // applies here too: never hand anyone a login that is about to die.
+    if (readLogin && !loginSwitchTarget(readLogin(m.id))) continue;
     const c = readCache(m.id);
     const r = accountRemaining(c, nowSec);
     const br = bucketRems(c, nowSec);
     if (r.known && br.some((b) => b.remaining < THRESH[b.kind].hard)) continue;
-    out.push({ id: m.id, name: m.name, eff: r.known ? r.remaining : UNKNOWN_REMAINING_PCT, deadline: weeklyDeadline(c, nowSec) });
+    out.push({ id: m.id, name: m.name, eff: r.known ? r.remaining : UNKNOWN_REMAINING_PCT, deadline: weeklyDeadline(c, nowSec), loginPenalty: readLogin ? loginRank(readLogin(m.id)) : 0 });
   }
   out.sort(edfCompare);
   return out;
 }
 
-function decidePoolSwitch({ currentId, members, readCache, nowSec, proactive = false, hot = proactive, pessimism = {}, exclude = null, explain = false }) {
+// readLogin = (accountId) => loginState info (src/login-expiry.js) or null.
+// OPTIONAL: omit it and every rule below is inert — this function decides
+// exactly as it did before logins were readable.
+function decidePoolSwitch({ currentId, members, readCache, nowSec, proactive = false, hot = proactive, pessimism = {}, exclude = null, readLogin = null, explain = false }) {
   const excluded = exclude && exclude.length ? new Set(exclude) : null;
   // `explain` keeps the historical contract (null = no switch) for every
   // existing caller and test, while letting the engine ask WHY nothing
@@ -159,9 +183,15 @@ function decidePoolSwitch({ currentId, members, readCache, nowSec, proactive = f
   const none = (why, extra) => (explain ? { to: null, reason: why, ...extra } : null);
   // Which buckets are actually holding this decision back, by name.
   const bucketDetail = (brs) => ({
-    deadBuckets: brs.filter((b) => b.remaining < THRESH[b.kind].hard).map((b) => `${b.label} ${Math.round(b.remaining)}%`),
+    deadBuckets: [
+      ...(readLogin && !loginUsable(login(currentId)) ? [loginBucketLabel(login(currentId))] : []),
+      ...brs.filter((b) => b.remaining < THRESH[b.kind].hard).map((b) => `${b.label} ${Math.round(b.remaining)}%`),
+    ],
     liveBuckets: brs.filter((b) => b.remaining >= THRESH[b.kind].hard).map((b) => `${b.label} ${Math.round(b.remaining)}%`),
   });
+  // Login facts, asked at most once per member per decision. `login(id)` is
+  // always a real info object so downstream predicates never branch on null.
+  const login = (id) => (readLogin ? (readLogin(id) || { state: 'unknown' }) : { state: 'unknown' });
   const dock = (id, brs) => brs.map((b) => ({ ...b, remaining: Math.max(0, b.remaining - (pessimism[id] || 0)) }));
   const dockRem = (id, r) => (r.known ? { ...r, remaining: Math.max(0, r.remaining - (pessimism[id] || 0)) } : r);
   const curCache = readCache(currentId);
@@ -170,14 +200,24 @@ function decidePoolSwitch({ currentId, members, readCache, nowSec, proactive = f
   const curBr = dock(currentId, bucketRems(curCache, nowSec));
   const soft = (b) => b.remaining < (hot ? THRESH[b.kind].hot : THRESH[b.kind].hard);
   const dead = (b) => b.remaining < THRESH[b.kind].hard;
+  // The CURRENT member's login is dead ⇒ it cannot serve another turn no
+  // matter what its quota cache says (the quota reading was true and is now
+  // irrelevant). Treated exactly like hard exhaustion: escape now, take
+  // scraps if that is all there is — and SPEAK the login as a named bucket,
+  // because "out of quota" would send the user to wait for a reset when the
+  // fix is a 30-second re-login.
+  const curLogin = login(currentId);
+  const curLoginDead = !loginUsable(curLogin);
   // Per-KIND thresholds (user-designed): what matters is ABSOLUTE headroom —
   // a weekly bucket at 88% still holds ~$200, a 5h bucket at 90% one long
   // turn. exhausted = ANY bucket under its kind's (hot-raised) threshold.
-  const exhausted = cur.known && curBr.some(soft);
-  const hardDead = cur.known && curBr.some(dead);
+  const exhausted = curLoginDead || (cur.known && curBr.some(soft));
+  const hardDead = curLoginDead || (cur.known && curBr.some(dead));
   // No data on the current target → we cannot judge exhaustion; staying put is
   // safer than flapping on ignorance (the ledger will teach us eventually).
-  if (!cur.known && !proactive) return none('no-data');
+  // A DEAD LOGIN is not ignorance, so it overrides the no-data hold: the file
+  // says this member cannot authenticate, which is a fact, not a gap.
+  if (!cur.known && !proactive && !curLoginDead) return none('no-data');
   if (!exhausted && !proactive) return none('healthy', { fromRemaining: cur.known ? cur.remaining : null });
 
   // Rank candidates by EDF: known weekly deadline ascending; same deadline
@@ -187,9 +227,17 @@ function decidePoolSwitch({ currentId, members, readCache, nowSec, proactive = f
   // by effective remaining (unknown = 50, the v2 rule).
   const ranked = [];
   let excludedN = 0;
+  const loginBlocked = []; // [{id, name, state}] — named, never a silently short list
   for (const m of members) {
     if (m.id === currentId) continue;
     if (excluded && excluded.has(m.id)) { excludedN++; continue; } // just rejected this session — not a candidate
+    // LOGIN GATE (2026-09-07). Two different refusals, one predicate:
+    //   dead login  — it cannot serve anything, for anyone
+    //   near expiry — it can serve its OWN conversations fine, but moving a
+    //                 conversation ONTO a login with <30min left just buys a
+    //                 second outage. `loginSwitchTarget` covers both.
+    const li = login(m.id);
+    if (readLogin && !loginSwitchTarget(li)) { loginBlocked.push({ id: m.id, name: m.name, state: li.state }); continue; }
     const c = readCache(m.id);
     const r = dockRem(m.id, accountRemaining(c, nowSec));
     const br = dock(m.id, bucketRems(c, nowSec));
@@ -199,10 +247,16 @@ function decidePoolSwitch({ currentId, members, readCache, nowSec, proactive = f
     // voluntary move must land somewhere that won't itself soft-exhaust
     // (the 2.266.1 oscillation guard, now per-kind)
     const settleOk = r.known && br.length > 0 && br.every((b) => b.remaining >= THRESH[b.kind].hot + MIN_GAIN_PCT);
-    ranked.push({ id: m.id, name: m.name, eff, known: r.known, settleOk, remaining: r.known ? r.remaining : null, deadline: weeklyDeadline(c, nowSec) });
+    ranked.push({ id: m.id, name: m.name, eff, known: r.known, settleOk, remaining: r.known ? r.remaining : null, deadline: weeklyDeadline(c, nowSec), loginPenalty: loginRank(li) });
   }
   ranked.sort(edfCompare);
-  if (!ranked.length) return none(excludedN ? 'all-rejected' : 'no-members', { fromRemaining: cur.known ? cur.remaining : null, excluded: excludedN || undefined, ...bucketDetail(curBr) });
+  if (!ranked.length) {
+    // SPEAK which wall we hit. 'all-logins-expired' is its own reason because
+    // it points at a completely different action from 'no-members' (re-login
+    // now vs wait for a quota window) — the 2.313.0 named-bucket rule.
+    const why = excludedN ? 'all-rejected' : loginBlocked.length ? 'all-logins-expired' : 'no-members';
+    return none(why, { fromRemaining: cur.known ? cur.remaining : null, excluded: excludedN || undefined, loginBlocked: loginBlocked.length ? loginBlocked : undefined, ...bucketDetail(curBr) });
+  }
 
   const bestSettle = ranked.find((r) => r.settleOk) || null;
   if (exhausted) {
@@ -226,13 +280,18 @@ function decidePoolSwitch({ currentId, members, readCache, nowSec, proactive = f
       // account" into "jump onto ignorance" (caught by the anti-flap test).
       const knownRanked = ranked.filter((r) => r.known);
       const best = bestSettle || (knownRanked.length ? knownRanked.reduce((x, y) => (y.eff > x.eff ? y : x)) : ranked[0]);
-      if (best.eff <= cur.remaining + MIN_GAIN_PCT) return none('stuck', { fromRemaining: cur.remaining, bestRemaining: best.remaining, bestName: best.name || best.id, ...bucketDetail(curBr) });
-      return { to: best.id, toName: best.name, fromRemaining: cur.remaining, toRemaining: best.remaining, reason: 'exhausted' };
+      // The anti-flap floor compares REMAINING QUOTA, which is meaningless
+      // when the reason we must leave is a dead LOGIN (and `cur.remaining` is
+      // null when that member has no cache at all — `null + 3` is 3, so the
+      // old expression would have silently blocked every escape from an
+      // unread member). A dead login always leaves.
+      if (!curLoginDead && best.eff <= cur.remaining + MIN_GAIN_PCT) return none('stuck', { fromRemaining: cur.remaining, bestRemaining: best.remaining, bestName: best.name || best.id, ...bucketDetail(curBr) });
+      return { to: best.id, toName: best.name, fromRemaining: cur.known ? cur.remaining : null, toRemaining: best.remaining, reason: curLoginDead ? 'login-expired' : 'exhausted' };
     }
     // soft-exhausted (only a hot-raised threshold tripped): still usable,
     // so only move somewhere that can actually SETTLE
-    if (!bestSettle) return none('no-settleable', { fromRemaining: cur.remaining, ...bucketDetail(curBr) });
-    return { to: bestSettle.id, toName: bestSettle.name, fromRemaining: cur.remaining, toRemaining: bestSettle.remaining, reason: 'exhausted' };
+    if (!bestSettle) return none('no-settleable', { fromRemaining: cur.known ? cur.remaining : null, ...bucketDetail(curBr) });
+    return { to: bestSettle.id, toName: bestSettle.name, fromRemaining: cur.known ? cur.remaining : null, toRemaining: bestSettle.remaining, reason: 'exhausted' };
   }
   // Proactive tier (hot pools): jump to a strictly-sooner KNOWN deadline —
   // drain the soonest-expiring quota while the current target's keeps. Never

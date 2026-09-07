@@ -45,7 +45,11 @@ const resolveRel = (from, spec) => {
 // ── Tier membership (path-based; NEW files inherit their directory's tier) ──
 const PURE = new Set(['src/plugin-manifest.js', 'src/account-pool-auto.js', 'src/model-family.js', 'src/task-color-seq.js', 'src/ssh-key-format.js', 'src/session-schema.js', 'src/otel-truth.js', 'src/msg-acl.js', 'src/backend-caps.js',
   'src/search-card.js', // web-search card renderer + title query + twin key — shared server (codex normalizer) + browser (chat-renderers)
-  'src/collab-row.js']); // codex multi-agent collab row labels/HTML — esc/t/icons injected, so the XSS rule is unit-provable
+  'src/collab-row.js', // codex multi-agent collab row labels/HTML — esc/t/icons injected, so the XSS rule is unit-provable
+  // login-session lifetime (2026-09-07): the claude harness descriptor reads the
+  // credential file, this decides what the numbers MEAN; pool decisions + accounts
+  // + the watcher all consume it, so it must stay dependency-free
+  'src/login-expiry.js']);
 const SHARED = new Set(['src/discovery-facts.js', 'src/sysinfo.js', 'src/machine-probes.js', 'src/usage-walker.js',
   'src/transcript-service.js', 'src/ctx-sync.js', 'src/writer-sweep.js', 'src/remote-shell.js', 'src/account-material.js',
   // THE agent-CLI process identity, one rule in two spellings (B-3185 r3): the JS twin

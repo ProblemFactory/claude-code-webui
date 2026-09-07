@@ -448,6 +448,14 @@ html, body {
 /* provenance/note line under the account identity (2.202.0 — inline tags
    squeezed the tail into an ellipsis mush; flex-basis:100% wraps the flex row) */
 .acct-key-extra { flex-basis: 100%; font-size: 10px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Login-session expiry chip (2026-09-07). It IS the re-login button, so it
+   reads as clickable. The SVG carries an EXPLICIT size: an unsized inline SVG
+   in a flex row scales to its viewBox and swallows the line (the 2.369.13
+   mobile-icon incident) — never omit these three properties. */
+.acct-login-chip { cursor: pointer; display: inline-flex; align-items: center; gap: 3px; vertical-align: -2px; border-radius: var(--radius-sm); padding: 0 3px; }
+.acct-login-chip:hover { background: var(--bg-hover, rgba(127,127,127,0.15)); }
+.acct-login-chip:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+.acct-login-chip svg { width: 10px; height: 10px; flex-shrink: 0; }
 .acct-master-hint { color: var(--text-dim); font-size: 9px; white-space: nowrap; }
 /* When a usage readout is present the actions no longer push right (usage takes
    the auto margin) — give the actions their own small gap. */

@@ -134,6 +134,7 @@ function quotaBackendFor(key, session) {
   return 'claude';
 }
 const { quotaVerdict } = require('../account-pool-auto.js'); // THE account-usability verdict (2.369.0, owner-designed)
+const { loginUsable, loginBucketLabel } = require('../login-expiry.js'); // PURE: is this member's LOGIN SESSION still alive (2026-09-07)
 const { UsageEstimator, overlayCache: estOverlayCache, predictCalib, CLAUDE_MAX_PRIOR_FULL_USD } = require('../usage-estimator.js');
 const usageAnchors = new UsageAnchors({ dataDir: path.join(rootDir, 'data') });
 // Which caches map to which identity (org-merge aware) — shared by the sweep
@@ -268,6 +269,11 @@ async function pushSealedOrders(poolId) {
     members,
     readCache: (id) => { try { return JSON.parse(fs.readFileSync(path.join(USAGE_CACHE_DIR, id + '.json'), 'utf-8')); } catch { return null; } },
     nowSec: Date.now() / 1000,
+    // A sealed order is executed by the DEVICE, possibly hours after we push
+    // it and while this server is unreachable — a login that dies in the
+    // meantime would be an unreachable fallback. Members near/past their
+    // login deadline never enter the snapshot.
+    readLogin: poolReadLogin(),
   }).map((m) => ({ id: m.id, dir: accounts.subDir(m.id), creds: accounts.subCredsPath(m.id) }));
   const orders = { poolId, linkPath: accounts.subDir(poolId), ranked, currentId: accounts.poolCurrent(poolId) || null,
     // Plan C: per-session links are additional MATCH+ACT targets — the daemon
@@ -379,6 +385,17 @@ function poolReadCache(poolId) {
     try { return estOverlayCache(raw, usageEstimator.estimateFor(id, raw, now)); } catch { return raw; }
   };
 }
+// THE engine's login reader (2026-09-07). ONE memoized read per tick per
+// member: loginStateOf hits the credential file, and a single pool decision
+// asks about the same member several times. §ban-safety: file reads only —
+// this whole feature never touches the network.
+function poolReadLogin() {
+  const memo = new Map();
+  return (id) => {
+    if (!memo.has(id)) { try { memo.set(id, accounts.loginStateOf(id)); } catch { memo.set(id, null); } }
+    return memo.get(id);
+  };
+}
 function poolChooserForModel(poolId, { model } = {}) {
   try {
     const a = accounts.get(poolId);
@@ -392,7 +409,7 @@ function poolChooserForModel(poolId, { model } = {}) {
     // the default serves this family, stay (fewest distinct billing dirs);
     // if it doesn't, the switch verdict IS the placement.
     const { decidePoolSwitch } = require('../account-pool-auto.js');
-    const d = decidePoolSwitch({ currentId: cur, members: healthyPoolMembers(poolId), readCache, nowSec: Date.now() / 1000, hot: true });
+    const d = decidePoolSwitch({ currentId: cur, members: healthyPoolMembers(poolId), readCache, nowSec: Date.now() / 1000, hot: true, readLogin: poolReadLogin() });
     return (d && d.to) || cur;
   } catch (e) { console.warn('[pool] chooser failed (falling back to default target):', e.message); return null; }
 }
@@ -731,9 +748,17 @@ function quotaVerdictFor(scope, { model, session = null } = {}) {
     // dead-until-reset for this session's verdicts, whatever its cache says
     // (2026-09-07: the loop's every cycle re-read a "healthy" member that had
     // just rejected us). Its own blockedUntil still counts toward the wait.
+    // A member whose LOGIN SESSION is over cannot serve a turn however much
+    // quota its cache shows — and unlike a quota wall this one does NOT heal
+    // on a timer, so it contributes NO blockedUntil: only the user's re-login
+    // unblocks it (2026-09-07 login expiry). Judged before the wall override
+    // because it is the more fundamental refusal AND the actionable one.
+    const readLogin = poolReadLogin();
     const walled = session ? sessionWalledMembers(session._webuiId) : new Set();
     const verdicts = ordered.map((m) => {
       const v = quotaVerdict(proj(read(m.id)), nowSec);
+      const li = readLogin(m.id);
+      if (!loginUsable(li)) return { id: m.id, name: m.name || m.id, v: { ...v, usable: false, blockedUntil: 0, reason: `${loginBucketLabel(li)} — re-login needed` } };
       if (walled.has(m.id) && v.usable !== false) {
         return { id: m.id, name: m.name || m.id, v: { ...v, usable: false, reason: `rejected this conversation (${v.reason})` } };
       }
@@ -1482,7 +1507,17 @@ function notePoolAuthFailure(session, sid, info = {}) {
     const tkey = memberId + ':' + sid;
     if (now - (_authNoteAt.get(tkey) || 0) < 60000) return;
     _authNoteAt.set(tkey, now);
-    const why = info.message ? String(info.message).slice(0, 120) : `HTTP ${info.status}`;
+    // WHY it failed, in the words that name the user's actual fix. When the
+    // member's refresh token expired we KNOW the cause (the file says so) and
+    // the CLI's own message ("OAuth session expired and could not be
+    // refreshed") is about an unrecoverable login, not a transient API error —
+    // saying "failing authentication" there sends the user to check the
+    // network. Any other shape keeps today's wording verbatim.
+    const li = (() => { try { return accounts.loginStateOf(memberId); } catch { return null; } })();
+    const loginDead = li && !loginUsable(li);
+    const why = loginDead
+      ? `login session expired (refresh token expired at ${li.refreshExpiresAt ? new Date(li.refreshExpiresAt).toISOString() : 'an unknown time'}) — re-login needed`
+      : info.message ? String(info.message).slice(0, 120) : `HTTP ${info.status}`;
     if (!memberAuthFailed(memberId)) {
       _memberAuthFail.set(memberId, { at: now, reason: why, tok: credsTokenSig(memberId) });
       try { global.__vsEvent?.('pool-member-auth-failed', { detail: `${memberId}: ${why}` }); } catch { }
@@ -1491,10 +1526,10 @@ function notePoolAuthFailure(session, sid, info = {}) {
     const alive = accounts.poolMembers(poolId).filter((m) => m.id !== memberId && !memberAuthFailed(m.id));
     if (!alive.length) {
       serverNotice(`pool-authfail-stuck-${memberId}-${Math.floor(now / 3600000)}`,
-        `Pool "${a.name}": account ${memberName} is failing authentication (${why}) and no other member can take over — re-login or replace it in Manage Agents.`, { level: 'warn' });
+        `Pool "${a.name}": account ${memberName} ${loginDead ? why : `is failing authentication (${why})`} and no other member can take over — re-login or replace it in Manage Agents.`, { level: 'warn' });
       return;
     }
-    const ranked = rankPoolMembers({ members: alive, readCache: poolReadCache(poolId), nowSec: now / 1000 });
+    const ranked = rankPoolMembers({ members: alive, readCache: poolReadCache(poolId), nowSec: now / 1000, readLogin: poolReadLogin() });
     const to = (ranked[0] && ranked[0].id) || alive[0].id;
     const toName = accounts.get(to)?.name || to;
     const hasOwnLink = (() => { try { fs.lstatSync(accounts.sessionPoolLinkPath(poolId, sid)); return true; } catch { return false; } })();
@@ -1506,7 +1541,7 @@ function notePoolAuthFailure(session, sid, info = {}) {
     if (now - (_authNoticeAt.get(memberId) || 0) > 60000) {
       _authNoticeAt.set(memberId, now);
       serverNotice(`pool-authfail-${memberId}-${now}`,
-        `Pool "${a.name}": account ${memberName} is failing authentication (${why}) — switched to ${toName}.${a.hot ? '' : ' Restarting the conversation to apply it.'}`, { level: 'warn' });
+        `Pool "${a.name}": account ${memberName} ${loginDead ? why : `is failing authentication (${why})`} — switched to ${toName}.${a.hot ? '' : ' Restarting the conversation to apply it.'}`, { level: 'warn' });
     }
     console.log(`[pool] auth-failure evict ${poolId}/${sid}: ${memberId} → ${to} (${why})`);
     if (!a.hot) {
@@ -1583,6 +1618,7 @@ function maybePoolAutoSwitchForPool(poolId) {
     // spent cap never evicts a fable session, and vice versa. Sessions whose
     // family is unknown project nothing (full view = legacy semantics).
     const members = healthyPoolMembers(poolId); // auth-failed members are not candidates (2.335.0)
+    const readLogin = poolReadLogin(); // ONE login read per member for this whole tick (per-session pass + pool decision)
     for (const [sid, s2] of activeSessions) {
       if (!poolCaps.planC) break; // plan-C per-session links need the backend's material path
       if ((s2.backend || 'claude') === 'codex') continue;
@@ -1604,14 +1640,14 @@ function maybePoolAutoSwitchForPool(poolId) {
       // never pick a member that just answered THIS session with a limit
       // rejection (verdict-level twin of the same fact)
       const rejected = [...sessionWalledMembers(sid, now)];
-      const ds = decidePoolSwitch({ currentId: curFor, members, readCache: projected, nowSec: now / 1000, proactive: hot, hot, pessimism: darkTaintedAccounts(), exclude: rejected, explain: true });
+      const ds = decidePoolSwitch({ currentId: curFor, members, readCache: projected, nowSec: now / 1000, proactive: hot, hot, pessimism: darkTaintedAccounts(), exclude: rejected, readLogin, explain: true });
       if (!ds || !ds.to) {
         // "there is nowhere for this conversation to go" is the state only the
         // USER can fix. The FACT is handed to auto-resume every time (it is
         // the ONLY source for the breaker's "no usable member left" clause —
         // a refusal reason does not imply it, and round 1 said it anyway);
         // the operator's line below stays throttled to once per 10min.
-        const noWay = ds && (ds.reason === 'all-rejected' || ds.reason === 'no-members' || ds.reason === 'stuck');
+        const noWay = ds && (ds.reason === 'all-rejected' || ds.reason === 'no-members' || ds.reason === 'stuck' || ds.reason === 'all-logins-expired');
         if (noWay) try { getAutoResume()?.noteNoPoolTarget?.(sid, rejected.length, ds.reason); } catch { }
         if (ds && ds.reason === 'all-rejected' && now - (_noTargetLogAt.get(sid) || 0) > 10 * 60e3) {
           _noTargetLogAt.set(sid, now);
@@ -1622,7 +1658,11 @@ function maybePoolAutoSwitchForPool(poolId) {
       }
       const dwellKey = poolId + ':' + sid;
       const lastS = _poolSwitchAt.get(dwellKey) || 0;
-      if (now - lastS < 180000 && !(ds.fromRemaining != null && ds.fromRemaining < POOL_HARD_PCT)) continue;
+      // A DEAD LOGIN is hard death, so it is exempt from the dwell belt exactly
+      // like a hard-exhausted target: every turn on that member fails, and the
+      // belt exists to stop voluntary oscillation, not to delay an escape.
+      // (Its `fromRemaining` is often null — quota says nothing about a login.)
+      if (now - lastS < 180000 && ds.reason !== 'login-expired' && !(ds.fromRemaining != null && ds.fromRemaining < POOL_HARD_PCT)) continue;
       _poolSwitchAt.set(dwellKey, now);
       try {
         accounts.ensureSessionPoolLink(poolId, sid, ds.to);
@@ -1644,7 +1684,7 @@ function maybePoolAutoSwitchForPool(poolId) {
         }
       } catch (e) { console.warn('[pool] per-session re-point failed:', e.message); }
     }
-    const d = decidePoolSwitch({ currentId, members, readCache, nowSec: now / 1000, proactive: hot, hot, pessimism: darkTaintedAccounts(), explain: true });
+    const d = decidePoolSwitch({ currentId, members, readCache, nowSec: now / 1000, proactive: hot, hot, pessimism: darkTaintedAccounts(), readLogin, explain: true });
     if (!d) return;
     if (!d.to) {
       // A pool sitting on a DEAD account with nowhere to go used to be
@@ -1658,7 +1698,7 @@ function maybePoolAutoSwitchForPool(poolId) {
       // account while the user finds out by hitting a limit" incident down a
       // different branch. `_sentNotices` is a per-BOOT permanent Set, so the
       // key must carry an hour bucket or a recurrence is never reported again.
-      if (d.reason === 'stuck' || d.reason === 'no-members' || d.reason === 'no-settleable') {
+      if (d.reason === 'stuck' || d.reason === 'no-members' || d.reason === 'no-settleable' || d.reason === 'all-logins-expired') {
         // Say WHICH buckets are dead. "Every member is out of quota" is wrong
         // under the nested model and points at the wrong action (pay/wait a
         // week) when the truth is usually "one model's weekly cap is spent
@@ -1668,11 +1708,19 @@ function maybePoolAutoSwitchForPool(poolId) {
         const what = dead ? `spent: ${dead}` : 'out of quota';
         const rest = live ? ` (still available: ${live})` : '';
         const alt = d.bestRemaining != null ? ` The best other member is at ${Math.round(d.bestRemaining)}%.` : '';
-        const why = d.reason === 'no-members'
+        // A login wall is a DIFFERENT sentence from a quota wall: the fix is a
+        // re-login, not waiting for a window (2.313.0 named-bucket rule).
+        const loginNames = (d.loginBlocked || []).map((m) => `${m.name || m.id} (${m.state})`).join(', ');
+        const why = d.reason === 'all-logins-expired'
+          ? `every other member's login session has expired or is about to — ${loginNames}`
+          : d.reason === 'no-members'
           ? `no member can serve it — ${what}${rest}`
           : `nowhere better to go — ${what}${rest}`;
+        const fix = d.reason === 'all-logins-expired'
+          ? ' Re-login those accounts in Manage Agents.'
+          : ' Conversations on it will hit a limit until a window resets, you add a member, or you move them off the pool.';
         serverNotice(`pool-blocked-${poolId}-${d.reason}-${Math.floor(now / 3600000)}`,
-          `Pool "${a.name}": ${why}.${alt} Conversations on it will hit a limit until a window resets, you add a member, or you move them off the pool.`, { level: 'warn' });
+          `Pool "${a.name}": ${why}.${d.reason === 'all-logins-expired' ? '' : alt}${fix}`, { level: 'warn' });
       }
       return;
     }
@@ -1683,7 +1731,7 @@ function maybePoolAutoSwitchForPool(poolId) {
     // than idling on a dead account). The settle-bar in decidePoolSwitch is
     // the primary anti-oscillation; this is the belt.
     const lastSwitch = _poolSwitchAt.get(poolId) || 0;
-    if (now - lastSwitch < 180000 && !(d.fromRemaining != null && d.fromRemaining < POOL_HARD_PCT)) return;
+    if (now - lastSwitch < 180000 && d.reason !== 'login-expired' && !(d.fromRemaining != null && d.fromRemaining < POOL_HARD_PCT)) return; // dead login = hard death, same exemption
     _poolSwitchAt.set(poolId, now);
     _poolAutoLast.set(poolId, now);
     accounts.setPoolTarget(poolId, d.to);
@@ -1702,6 +1750,8 @@ function maybePoolAutoSwitchForPool(poolId) {
     const fromPct = d.fromRemaining != null ? Math.round(d.fromRemaining) : null;
     serverNotice(`pool-auto-${poolId}-${now}`, d.reason === 'edf'
       ? `Pool "${a.name}" switched to ${d.toName} — draining the member whose weekly quota resets soonest (use-it-or-lose-it)`
+      : d.reason === 'login-expired'
+      ? `Pool "${a.name}" switched to ${d.toName} — ${nameOf(currentId)}'s login session expired; re-login it in Manage Agents${hot ? '' : ' (restarting its conversations)'}`
       : `Pool "${a.name}" auto-switched to ${d.toName} (previous account down to ${fromPct}% remaining)${hot ? '' : ' — restarting its conversations'}`);
     console.log(`[pool] auto-switch ${poolId}: ${currentId} → ${d.to} (${d.reason}, from ${fromPct}% left, hot=${hot}, affected=${affected.length})`);
     if (!hot && affected.length) {

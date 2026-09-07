@@ -3068,4 +3068,13 @@ export default {
   "This harness has no steer verb, so a notification arriving mid-turn waits in the input queue and runs as its own turn afterwards — like a message from another agent.": "このハーネスには steer 動詞がないため、ターン中に届いた通知は入力キューで待ち、その後に自分のターンとして実行されます —— 他のエージェントからのメッセージと同じです。",
   "Delivery goes through the CLI’s own inbox: it queues a mid-turn notification itself and opens a turn when the session is idle. Same for messages from other agents.": "配信は CLI 自身の受信箱を通ります。ターン中の通知は CLI がキューし、セッションがアイドルならターンを開始します。他のエージェントからのメッセージも同様です。",
   "This harness has no live delivery lane, so notifications and agent messages are stashed and injected at the session’s next turn.": "このハーネスにはライブ配信レーンがないため、通知もエージェントのメッセージも保留され、そのセッションの次のターンで注入されます。",
+  "{n} min": "{n} 分",
+  "{n} h": "{n} 時間",
+  "{n} d": "{n} 日",
+  "login signed out — re-login": "ログイン切れ — 再ログイン",
+  "login expired {when} — re-login": "ログインは {when} に失効 — 再ログイン",
+  "login expires in {left}": "ログインはあと {left} で失効",
+  "This account’s login session ran out and the CLI cleared its tokens — every session on it fails until you sign in again. Click to re-login.": "このアカウントのログインセッションが切れ、CLI がトークンを消去しました — 再ログインするまでこのアカウントのセッションはすべて失敗します。クリックで再ログイン。",
+  "This account’s login session ended {when}. Refreshing the access token does NOT extend it, so the CLI can no longer authenticate — every session on this account fails. Click to re-login.": "このアカウントのログインセッションは {when} に終了しました。アクセストークンを更新しても延長されないため、CLI は認証できません — このアカウントのセッションはすべて失敗します。クリックで再ログイン。",
+  "This account’s login session ends {when} — that deadline does NOT move when the access token refreshes. Re-login before then or sessions on it will start failing. Click to re-login.": "このアカウントのログインセッションは {when} に終了します — アクセストークンを更新してもこの期限は動きません。それまでに再ログインしないと、このアカウントのセッションは失敗し始めます。クリックで再ログイン。",
 };

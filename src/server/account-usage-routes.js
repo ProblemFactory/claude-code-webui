@@ -385,6 +385,11 @@ app.post('/api/accounts/:id/relogin-finalize', (req, res) => {
   try {
     const r = accounts.reloginResolve(req.params.id);
     try {
+      // SAME-SPELLING WARNING (2026-09-07): this `loginState` is a STRING
+      // ('error') describing how the login TERMINAL run went. The account ROW
+      // in accounts.list() also carries `loginState` — an OBJECT describing
+      // the login SESSION's lifetime (src/login-expiry.js). Different objects,
+      // different types; never join or compare them.
       const ls = accounts._subscriptionLoginStatus?.(req.params.id);
       if (ls) { r.loginAttempt = ls.attempt || null; r.loginState = ls.state || null; }
     } catch { }

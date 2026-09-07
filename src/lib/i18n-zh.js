@@ -3069,4 +3069,13 @@ export default {
   "This harness has no steer verb, so a notification arriving mid-turn waits in the input queue and runs as its own turn afterwards — like a message from another agent.": "这个 harness 没有 steer 动词, 所以轮次进行中到达的通知会在输入队列里等待, 之后作为自己的一轮运行 —— 与其他 agent 发来的消息一样。",
   "Delivery goes through the CLI’s own inbox: it queues a mid-turn notification itself and opens a turn when the session is idle. Same for messages from other agents.": "投递走 CLI 自己的收件箱: 轮次进行中的通知由它自己排队, 会话空闲时它会开启一轮。其他 agent 的消息同理。",
   "This harness has no live delivery lane, so notifications and agent messages are stashed and injected at the session’s next turn.": "这个 harness 没有活投递通道, 所以通知与 agent 消息都会被暂存, 在该会话的下一轮注入。",
+  "{n} min": "{n} 分钟",
+  "{n} h": "{n} 小时",
+  "{n} d": "{n} 天",
+  "login signed out — re-login": "登录已失效 — 重新登录",
+  "login expired {when} — re-login": "登录已于 {when} 过期 — 重新登录",
+  "login expires in {left}": "登录将在 {left} 后过期",
+  "This account’s login session ran out and the CLI cleared its tokens — every session on it fails until you sign in again. Click to re-login.": "该账号的登录会话已到期, CLI 已清空它的令牌 — 在你重新登录之前, 使用该账号的所有会话都会失败。点击可重新登录。",
+  "This account’s login session ended {when}. Refreshing the access token does NOT extend it, so the CLI can no longer authenticate — every session on this account fails. Click to re-login.": "该账号的登录会话已于 {when} 结束。刷新访问令牌并不会延长它, 因此 CLI 无法再完成认证 — 使用该账号的所有会话都会失败。点击可重新登录。",
+  "This account’s login session ends {when} — that deadline does NOT move when the access token refreshes. Re-login before then or sessions on it will start failing. Click to re-login.": "该账号的登录会话将在 {when} 结束 — 刷新访问令牌不会推迟这个期限。请在此之前重新登录, 否则使用该账号的会话会开始失败。点击可重新登录。",
 };

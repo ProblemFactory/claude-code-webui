@@ -6,6 +6,7 @@ const { ClaudeCodeAdapter } = require('../adapters/claude-code');
 const { MessageManager } = require('../message-manager');
 const store = require('../session-store');
 const { writerSweepScript } = require('../writer-sweep');
+const { loginState } = require('../login-expiry'); // PURE: refreshTokenExpiresAt -> ok/expiring/expired/logged-out/unknown
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -31,6 +32,19 @@ function parseClaudeAuth(dir) {
     }
     return { loggedIn: true, subscriptionType: o.subscriptionType || null, email, org, accessToken: valid ? o.accessToken : null, expiresAt: o.expiresAt || null };
   } catch { return { loggedIn: false }; }
+}
+
+/** LOGIN LIFETIME of an account dir (2026-09-07). The SAME file parseAuth
+ *  already reads, asked a different question: not "is there a token" but "when
+ *  does this LOGIN SESSION end". Read-only, never refreshes. A dir with no
+ *  readable credentials answers 'unknown' — NO CLAIM, which every consumer
+ *  treats as "do not block". Only harnesses whose credential format carries a
+ *  login deadline declare this; the others simply do not, and accounts.js
+ *  answers 'unknown' for them rather than inventing a verdict. */
+function claudeLoginState(dir, now = Date.now()) {
+  let raw = null;
+  try { raw = JSON.parse(fs.readFileSync(path.join(dir, '.credentials.json'), 'utf-8')); } catch { return loginState(null, now); }
+  return loginState(raw, now);
 }
 
 module.exports = {
@@ -83,6 +97,10 @@ module.exports = {
       try { fs.writeFileSync(path.join(dir, '.claude.json'), JSON.stringify(seed), { mode: 0o600 }); } catch { }
     },
     authFile: '.credentials.json',
+    // OPTIONAL (2026-09-07): the login-session deadline this credential format
+    // carries. Declared only where the format has one — an absent key is the
+    // honest "this harness makes no claim".
+    loginState: claudeLoginState,
     spawnEnvVar: 'CLAUDE_SECURESTORAGE_CONFIG_DIR',
     loginLabel: 'Claude',
     defaultIdField: 'defaultAccountId',

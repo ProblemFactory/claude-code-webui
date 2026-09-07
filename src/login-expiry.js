@@ -1,0 +1,184 @@
+'use strict';
+/**
+ * LOGIN EXPIRY — PURE (imports NOTHING; safe in any process, incl. the browser
+ * bundle and the device daemon).
+ *
+ * THE FACT (measured on a live instance, 2026-09-07): a Claude subscription's
+ * `.credentials.json` carries `claudeAiOauth.refreshTokenExpiresAt` — the
+ * ABSOLUTE end of the LOGIN SESSION. It does NOT move when the access token is
+ * refreshed (a member refreshed 30 min ago still showed an expiry 17 h out
+ * while siblings showed 5 and 16 days), so it is a real deadline the user can
+ * see coming. When the access token expires past that point the CLI's refresh
+ * gets `invalid_grant`, prints "Failed to authenticate: OAuth session expired
+ * and could not be refreshed", and BLANKS accessToken/refreshToken/expiresAt
+ * in the file while KEEPING refreshTokenExpiresAt + scopes — that wiped shape
+ * is what "logged out" looks like on disk.
+ *
+ * Before this module VibeSpace only reacted AFTER a failed turn (the pool's
+ * auth-failure eviction): the user saw a dead turn, then it "worked again" on
+ * another member, and nobody was ever told to re-login. Everything here is
+ * derived from the file's own numbers — there is no probe, no vendor call and
+ * no timer in this module (§ban-safety: the whole feature is passive by
+ * construction).
+ *
+ * VOCABULARY (the five states are exhaustive; 'unknown' means NO CLAIM and
+ * every consumer must treat it as "do not block on this"):
+ *   ok          a refresh-token deadline exists and is comfortably ahead
+ *   expiring    < EXPIRING_MS away — still works, say so while there is time
+ *   expired     the deadline has passed; the CLI's next refresh will fail
+ *   logged-out  the CLI already wiped the tokens (the shape above)
+ *   unknown     no deadline readable — never 'ok', never a reason to block
+ */
+
+// The chip / first inbox warning: a login with less than a day left is worth
+// interrupting the user for (re-login is a browser round-trip they must plan).
+const EXPIRING_MS = 24 * 3600e3;
+// A conversation must never be MOVED onto a login that is about to die: a
+// switch buys the session a fresh account, and 30 min of remaining login is
+// not a fresh account. Deliberately much shorter than EXPIRING_MS — a member
+// with 20 h left still serves its own conversation fine (that is why
+// loginUsable and loginSwitchTarget are two different questions).
+const NEAR_MS = 30 * 60e3;
+// Warning ladder, most-lenient first. 'expired' is the terminal rung (it
+// fires once, when the login actually dies).
+const WARN_STAGES = Object.freeze(['24h', '1h', 'expired']);
+const STAGE_MS = Object.freeze({ '24h': EXPIRING_MS, '1h': 3600e3 });
+const DEAD_STATES = Object.freeze(['expired', 'logged-out']);
+
+/** The oauth record inside a parsed `.credentials.json` — callers holding
+ *  either the whole file object or the inner object both work. Anything else
+ *  (null, a string, `{}` — the shape a Console /login wipe leaves) yields
+ *  null, i.e. NO CLAIM. */
+function oauthOf(creds) {
+  if (!creds || typeof creds !== 'object' || Array.isArray(creds)) return null;
+  const inner = creds.claudeAiOauth;
+  if (inner && typeof inner === 'object' && !Array.isArray(inner)) return inner;
+  for (const k of ['accessToken', 'refreshToken', 'refreshTokenExpiresAt', 'expiresAt', 'scopes', 'subscriptionType']) {
+    if (Object.prototype.hasOwnProperty.call(creds, k)) return creds;
+  }
+  return null;
+}
+
+const finite = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+const UNKNOWN = Object.freeze({ state: 'unknown', refreshExpiresAt: null, accessExpiresAt: null, msLeft: null });
+
+/**
+ * loginState(creds, now) → { state, refreshExpiresAt, accessExpiresAt, msLeft }
+ * The ONE reading of a credential file's login lifetime. Never throws.
+ */
+function loginState(creds, now = Date.now()) {
+  const o = oauthOf(creds);
+  if (!o) return { ...UNKNOWN };
+  const refreshExpiresAt = finite(o.refreshTokenExpiresAt);
+  const accessExpiresAt = finite(o.expiresAt);
+  const hasTokens = !!(o.accessToken || o.refreshToken);
+  if (!hasTokens) {
+    // The wiped shape: tokens blanked, refreshTokenExpiresAt + scopes kept.
+    // A file with NOTHING left in it (no deadline, no scopes) is not evidence
+    // of a wipe — it is no evidence at all.
+    const residue = refreshExpiresAt != null || (Array.isArray(o.scopes) && o.scopes.length > 0);
+    if (!residue) return { ...UNKNOWN };
+    return { state: 'logged-out', refreshExpiresAt, accessExpiresAt, msLeft: refreshExpiresAt == null ? null : refreshExpiresAt - now };
+  }
+  // Tokens present but no deadline in the file: we know nothing about the
+  // login session's end. 'unknown', NEVER 'ok' — claiming health we cannot
+  // read is exactly how the old behaviour surprised people.
+  if (refreshExpiresAt == null) return { ...UNKNOWN, accessExpiresAt };
+  const msLeft = refreshExpiresAt - now;
+  if (msLeft <= 0) return { state: 'expired', refreshExpiresAt, accessExpiresAt, msLeft };
+  return { state: msLeft < EXPIRING_MS ? 'expiring' : 'ok', refreshExpiresAt, accessExpiresAt, msLeft };
+}
+
+/** Can this login serve AT ALL? 'unknown' says yes — no claim never blocks. */
+function loginUsable(info) { return !DEAD_STATES.includes(info?.state); }
+
+/** May a conversation be MOVED onto this login? Dead => no; inside the NEAR
+ *  window => no (a switch target must outlive the switch). */
+function loginSwitchTarget(info) {
+  if (!loginUsable(info)) return false;
+  const ms = info?.msLeft;
+  return !(typeof ms === 'number' && ms < NEAR_MS);
+}
+
+/** Ranking penalty: 0 ok/unknown, 1 expiring, 2 near-expiry, 3 dead. Used as
+ *  the LAST tiebreak, so an 'expiring' member ranks below an EQUAL 'ok' one
+ *  and nothing else about the ordering changes. */
+function loginRank(info) {
+  if (!loginUsable(info)) return 3;
+  if (!loginSwitchTarget(info)) return 2;
+  return info?.state === 'expiring' ? 1 : 0;
+}
+
+/** The named bucket a blocked decision must SPEAK (null when nothing to say). */
+function loginBlockReason(info) {
+  if (info?.state === 'expired') return 'login-expired';
+  if (info?.state === 'logged-out') return 'login-signed-out';
+  if (!loginSwitchTarget(info)) return 'login-near-expiry';
+  return null;
+}
+
+/** Compact English duration for server-side notices/labels ("17 h", "42 min",
+ *  "5 days"). The CLIENT formats its own translated copy — this is for the
+ *  notice/journal strings that are English everywhere else in the engine. */
+function loginAgeText(ms) {
+  const v = Math.abs(Number(ms) || 0);
+  if (v < 90 * 1000) return `${Math.max(1, Math.round(v / 1000))} s`;
+  if (v < 90 * 60e3) return `${Math.round(v / 60e3)} min`;
+  if (v < 36 * 3600e3) return `${Math.round(v / 3600e3)} h`;
+  return `${Math.round(v / 86400e3)} days`;
+}
+
+/** One-line bucket label for the SPEAK rule (deadBuckets et al). */
+function loginBucketLabel(info) {
+  switch (info?.state) {
+    case 'expired': return 'login expired';
+    case 'logged-out': return 'login signed out';
+    case 'expiring': return `login expires in ${loginAgeText(info.msLeft)}`;
+    default: return 'login';
+  }
+}
+
+/** The most urgent warning rung this login currently qualifies for, or null. */
+function warnStageFor(info) {
+  if (!loginUsable(info)) return 'expired';
+  const ms = info?.msLeft;
+  if (typeof ms !== 'number') return null;
+  if (ms < STAGE_MS['1h']) return '1h';
+  if (ms < STAGE_MS['24h']) return '24h';
+  return null;
+}
+
+/**
+ * reviewWarnings(info, entry, now) -> { emit, entry }
+ *
+ * The ONCE-PER-MEMBER-PER-THRESHOLD ledger, as a pure transition. `entry` is
+ * the persisted record for this member ({ exp, sent[] }) or null.
+ *
+ *  · A DIFFERENT refreshTokenExpiresAt than the one the ledger recorded is a
+ *    RE-LOGIN: the ledger for the old deadline is dropped, so a member that
+ *    was re-logged-in goes silent (and a re-login that only bought a few
+ *    hours legitimately warns again, about the NEW deadline).
+ *  · Skipping a rung (server was off across the 24 h mark) does not fire a
+ *    stale "expires in 24 h" — the most urgent qualifying rung fires and the
+ *    ones below it are marked as done. Warning about a threshold that is
+ *    already history is worse than not warning.
+ *  · `emit` is null on every other tick, so a restart replays nothing: the
+ *    caller persists `entry` and hands it back next sweep.
+ */
+function reviewWarnings(info, entry, now = Date.now()) {
+  const exp = info?.refreshExpiresAt ?? null;
+  const sameLedger = !!entry && (entry.exp ?? null) === exp;
+  const sent = sameLedger && Array.isArray(entry.sent) ? entry.sent.filter((s) => WARN_STAGES.includes(s)) : [];
+  const stage = warnStageFor(info, now);
+  if (!stage) return { emit: null, entry: sent.length ? { exp, sent } : null };
+  if (sent.includes(stage)) return { emit: null, entry: { exp, sent } };
+  const idx = WARN_STAGES.indexOf(stage);
+  const nextSent = [...new Set([...sent, ...WARN_STAGES.slice(0, idx + 1)])];
+  return { emit: stage, entry: { exp, sent: nextSent } };
+}
+
+module.exports = {
+  EXPIRING_MS, NEAR_MS, WARN_STAGES, STAGE_MS, DEAD_STATES,
+  loginState, loginUsable, loginSwitchTarget, loginRank, loginBlockReason,
+  loginAgeText, loginBucketLabel, warnStageFor, reviewWarnings,
+};

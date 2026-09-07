@@ -20,6 +20,10 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const { capsOf } = require('./backend-caps.js'); // PURE registry: per-backend hot-switch verdict rides list() so the UI never offers a dead toggle
+const { loginRank } = require('./login-expiry.js'); // PURE: which login is the WORST of a pool's members
+// "no claim" — the shape every non-declaring harness / non-subscription record
+// answers with. Never 'ok': an unreadable deadline is ignorance, not health.
+const LOGIN_UNKNOWN = () => ({ state: 'unknown', refreshExpiresAt: null, accessExpiresAt: null, msLeft: null });
 
 class AccountManager {
   constructor({ dataDir, onChange, platform = process.platform }) {
@@ -62,6 +66,55 @@ class AccountManager {
   _credsOf(be) { return harnessOf(be || 'claude').creds; }
   _acctDir(be, id) { return path.join(this._dataDir, this._credsOf(be).subsDirName, id); }
   _readAuthFor(be, id) { return this._credsOf(be).parseAuth(this._acctDir(be, id)); }
+  /** LOGIN LIFETIME of an account (2026-09-07, src/login-expiry.js): when does
+   *  the LOGIN SESSION itself end, as opposed to "is there a token right now".
+   *  The verdict comes from the harness descriptor's optional creds.loginState
+   *  — a harness whose credential format carries no deadline simply does not
+   *  declare it and gets 'unknown', i.e. NO CLAIM (never 'ok': claiming health
+   *  we cannot read is what made the old behaviour surprise people). */
+  loginStateOf(id, now = Date.now()) {
+    try {
+      const a = this.get(id);
+      if (!a) return LOGIN_UNKNOWN(now);
+      const be = this._acctBackend(a);
+      const type = this._acctType(a);
+      // A pool has no login of its own — it is exactly its members' worst.
+      if (type === 'pooled') return this.poolLoginState(id, now);
+      if (type !== 'subscription') return LOGIN_UNKNOWN(now); // API keys / oat records have no OAuth login session
+      const fn = this._credsOf(be)?.loginState;
+      if (typeof fn !== 'function') return LOGIN_UNKNOWN(now);
+      return fn(this._acctDir(be, id), now);
+    } catch { return LOGIN_UNKNOWN(now); }
+  }
+  /** A pool's row summarises its MEMBERS: the worst state among the candidate
+   *  members (the accounts it can actually route to), plus the member that
+   *  earned it — one dead login inside a pool is the user-actionable fact even
+   *  while the pool as a whole still works. */
+  poolLoginState(poolId, now = Date.now()) {
+    const out = { ...LOGIN_UNKNOWN(now), members: [] };
+    let members = [];
+    try { members = this._poolLoginCandidates(poolId); } catch { return out; }
+    if (!members.length) return out;
+    let worst = null;
+    for (const m of members) {
+      const st = this.loginStateOf(m.id, now);
+      out.members.push({ id: m.id, name: m.name, state: st.state, refreshExpiresAt: st.refreshExpiresAt, msLeft: st.msLeft });
+      if (!worst || loginRank(st) > loginRank(worst.st) || (loginRank(st) === loginRank(worst.st) && (st.msLeft ?? Infinity) < (worst.st.msLeft ?? Infinity))) worst = { m, st };
+    }
+    if (!worst) return out;
+    return { ...worst.st, worstId: worst.m.id, worstName: worst.m.name, members: out.members };
+  }
+  /** Pool members for the LOGIN summary: the explicit list when narrowed, else
+   *  every same-backend subscription. Deliberately NOT poolMembers() — that one
+   *  filters to still-logged-in accounts, which would hide the exact members
+   *  this feature exists to report (a signed-out member is the finding). */
+  _poolLoginCandidates(poolId) {
+    const a = this.get(poolId);
+    const be = this._acctBackend(a);
+    const all = this._state.accounts.filter((x) => this._acctBackend(x) === be && this._acctType(x) === 'subscription');
+    const wanted = Array.isArray(a?.members) && a.members.length ? all.filter((x) => a.members.includes(x.id)) : all;
+    return wanted.map((x) => ({ id: x.id, name: x.name }));
+  }
   /** remoteCreds for resolveForSpawn — the ONE shape ws-create ships to a host
    *  (tar of `files` from srcDir → $HOME/.vibespace/<dirName>, env var pointed
    *  at it, shared subdirs symlinked, poison-heal probe); every field is the
@@ -146,7 +199,10 @@ class AccountManager {
           const cur = this.poolCurrent(a.id);
           const info = this._readAuthFor(backend, a.id); // resolves through the symlink
           const curAcct = cur ? this.get(cur) : null;
-          return { ...base, pooled: true, loggedIn: !!info.loggedIn, email: info.email || null, subscriptionType: info.subscriptionType || null, current: cur, currentName: curAcct?.name || null, members: a.members || null, memberOptions: this.poolMembers(a.id), auto: !!a.auto, hot: !!a.hot, hotSupported: capsOf(backend).hotSwitch === 'verified', supported: backend === 'codex' || this.poolSupported() };
+          // loginState on a pool = its MEMBERS' worst (a pool has no login of
+          // its own); the row names the member that earned it so the user can
+          // act without opening the pool's Members dialog.
+          return { ...base, pooled: true, loggedIn: !!info.loggedIn, email: info.email || null, subscriptionType: info.subscriptionType || null, current: cur, currentName: curAcct?.name || null, members: a.members || null, memberOptions: this.poolMembers(a.id), auto: !!a.auto, hot: !!a.hot, hotSupported: capsOf(backend).hotSwitch === 'verified', supported: backend === 'codex' || this.poolSupported(), loginState: this.poolLoginState(a.id) };
         }
         if (type === 'subscription') {
           // ONE branch for every harness (S2): the descriptor's parseAuth reads
@@ -155,7 +211,10 @@ class AccountManager {
           // a.email = manual backfill (setEmail) for dirs whose login never
           // wrote the identity file; the dir's own identity wins when present.
           const info = this._readAuthFor(backend, a.id);
-          return { ...base, loggedIn: info.loggedIn, email: info.email || a.email || null, emailDeclared: !info.email && !!a.email, subscriptionType: info.subscriptionType, ...(info.authMode !== undefined ? { authMode: info.authMode } : {}), ...(this._credsOf(backend).longLivedToken ? this._oatMeta(a) : {}) };
+          // loginState (2026-09-07): the LOGIN SESSION's own deadline, so every
+          // surface can warn BEFORE the refresh fails instead of after a dead
+          // turn. 'unknown' where the harness declares no reader.
+          return { ...base, loggedIn: info.loggedIn, email: info.email || a.email || null, emailDeclared: !info.email && !!a.email, subscriptionType: info.subscriptionType, loginState: this.loginStateOf(a.id), ...(info.authMode !== undefined ? { authMode: info.authMode } : {}), ...(this._credsOf(backend).longLivedToken ? this._oatMeta(a) : {}) };
         }
         return { ...base, tail: a.tail };
       }),
@@ -1027,6 +1086,13 @@ class AccountManager {
         if (!alive.length) {
           throw new Error(`every member of pool "${a.name}" is signed out — re-login one in Manage Agents (the pool cannot route around a fully signed-out member set)`);
         }
+        // Prefer a member whose LOGIN SESSION is not already dead (2026-09-07):
+        // an 'expired' member still parses as loggedIn (the tokens are only
+        // blanked at the CLI's next failed refresh), so without this the
+        // self-heal happily re-points onto a login that fails the first turn.
+        // A STABLE ordering, never a filter — every member being expired must
+        // still start the session (and then say so) rather than throw here.
+        alive.sort((x, y) => loginRank(this.loginStateOf(x)) - loginRank(this.loginStateOf(y)));
         let pick = null;
         try { const c = opts.chooseMember?.(); if (alive.includes(c)) pick = c; } catch { }
         pick = pick || alive[0];

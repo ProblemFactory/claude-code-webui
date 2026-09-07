@@ -24,7 +24,54 @@ export const ROSTER_ICONS = Object.freeze({
   STAR_F: rosterSvg('<path d="M8 1.8l1.9 3.9 4.3.6-3.1 3 .8 4.3L8 11.6 4.1 13.6l.8-4.3-3.1-3 4.3-.6z" fill="currentColor"/>'),
   STAR_O: rosterSvg('<path d="M8 1.8l1.9 3.9 4.3.6-3.1 3 .8 4.3L8 11.6 4.1 13.6l.8-4.3-3.1-3 4.3-.6z"/>'),
   DOTS: rosterSvg('<circle cx="3" cy="8" r="1.3" fill="currentColor" stroke="none"/><circle cx="8" cy="8" r="1.3" fill="currentColor" stroke="none"/><circle cx="13" cy="8" r="1.3" fill="currentColor" stroke="none"/>'),
+  // Login-session expiry (2026-09-07): a clock, because the fact is a
+  // DEADLINE, not a permission problem (SVG only — never emoji).
+  CLOCK: rosterSvg('<circle cx="8" cy="8" r="6"/><path d="M8 4.6V8l2.4 1.6"/>'),
 });
+
+// ── Login-session expiry chip (2026-09-07) ───────────────────────────────
+// The server hands every subscription row `loginState` = the PURE reading of
+// its credential file (src/login-expiry.js): {state, refreshExpiresAt,
+// msLeft}. NOTE the same-spelling trap: the /relogin(-finalize) routes return
+// a STRING `loginState` meaning "how the login TERMINAL went" ('error') —
+// this one is an OBJECT about the login's LIFETIME. Different objects,
+// different types; never join them.
+// A pool's row carries its members' WORST state plus `worstName`/`worstId`,
+// because a pool has no login of its own.
+const loginLeftText = (ms) => {
+  const v = Math.max(0, Number(ms) || 0);
+  if (v < 90 * 60e3) return t('{n} min', { n: Math.max(1, Math.round(v / 60e3)) });
+  if (v < 36 * 3600e3) return t('{n} h', { n: Math.round(v / 3600e3) });
+  return t('{n} d', { n: Math.round(v / 86400e3) });
+};
+// Short date + short time (no seconds): the chip sits on the row's one extras
+// line, and a second-precision timestamp is noise for a deadline the user acts
+// on in hours. Locale-formatted — the device decides, like every other time here.
+const loginWhenText = (ms) => { try { return new Date(ms).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' }); } catch { try { return new Date(ms).toLocaleString(); } catch { return ''; } } };
+/** The chip, or '' when there is nothing worth saying (ok / unknown — an
+ *  unreadable deadline is ignorance and must never be dressed as a warning).
+ *  `local` = the "This machine" roster; a host section only ever shows the
+ *  DEAD state (the same rule oatTag uses: an expiry warning about this
+ *  machine's creds dir would be noise while looking at a host). */
+export function loginExpiryChipHtml(a, { local = true } = {}) {
+  const ls = a && a.loginState;
+  if (!ls || typeof ls !== 'object') return '';
+  const dead = ls.state === 'expired' || ls.state === 'logged-out';
+  if (!dead && !(local && ls.state === 'expiring')) return '';
+  const target = ls.worstId || a.id;           // pool ⇒ the member that earned the state
+  const who = ls.worstName ? escHtml(ls.worstName) + ': ' : '';
+  const when = loginWhenText(ls.refreshExpiresAt);
+  const label = ls.state === 'logged-out' ? t('login signed out — re-login')
+    : ls.state === 'expired' ? t('login expired {when} — re-login', { when: escHtml(when) })
+    : t('login expires in {left}', { left: escHtml(loginLeftText(ls.msLeft)) });
+  const title = ls.state === 'logged-out'
+    ? t('This account’s login session ran out and the CLI cleared its tokens — every session on it fails until you sign in again. Click to re-login.')
+    : ls.state === 'expired'
+    ? t('This account’s login session ended {when}. Refreshing the access token does NOT extend it, so the CLI can no longer authenticate — every session on this account fails. Click to re-login.', { when: escHtml(when) })
+    : t('This account’s login session ends {when} — that deadline does NOT move when the access token refreshes. Re-login before then or sessions on it will start failing. Click to re-login.', { when: escHtml(when) });
+  return ` <span class="acct-blocked-hint acct-login-chip" role="button" tabindex="0" data-relogin="${escHtml(target)}"`
+    + `${dead ? ' style="color:var(--red,#e55)"' : ''} title="${title}">${ROSTER_ICONS.CLOCK}${who}${label}</span>`;
+}
 
 function remoteClaudeSubscriptionLoginCommand(id) {
   if (!/^sub-[a-f0-9]+$/.test(id)) throw new Error('invalid subscription id');
@@ -1784,6 +1831,9 @@ export function installManageAgents(App, ctx = {}) {
           ? ` <span class="acct-blocked-hint" title="${t('Long-lived token (used for remote machines) expires in {n} days — re-mint it in ⋯ → Long-lived token.', { n: a.oatDaysLeft })}">${t('· long-lived token · {n}d left', { n: a.oatDaysLeft })}</span>`
           : ` <span class="acct-linked-hint" title="${t('Has a long-lived token: usable on any machine (incl. paired devices) without shipping the login. Renews in {n} days.', { n: a.oatDaysLeft })}">${t('· long-lived token')}</span>`)
         : '';
+      // LOGIN-SESSION expiry (2026-09-07): the chip that makes a dying login
+      // visible BEFORE a turn dies on it. Pools show their members' worst.
+      const loginTag = (isSub || a.pooled) ? loginExpiryChipHtml(a, { local: !selectedHost }) : '';
       const isPool = !!a.pooled;
       const iconTitle = isPool ? t('Pooled account — one billing identity auto-switching across your subscriptions')
         : isSub ? t('Subscription (Pro/Max) — runs on this machine (or a host you log into)') : t('API key — stored in VibeSpace, runs on any machine');
@@ -1792,7 +1842,7 @@ export function installManageAgents(App, ctx = {}) {
       // modal AND panel; real screenshot report). Star stays direct: most-used.
       return `<div class="acct-key-row${isDef ? ' is-default' : ''}${blocked ? ' acct-row-blocked' : ''}" data-id="${escHtml(a.id)}" data-sub="${isSub ? '1' : ''}"${blocked ? ' data-blocked="1"' : ''}${hostSub ? ' data-hostsub="1"' : ''}${linked ? ' data-linked="1"' : ''}>
         <span class="acct-type-icon" title="${iconTitle}">${isPool ? POOL : isSub ? CROWN : KEY}</span>
-        <span class="acct-key-main"><span class="acct-key-name">${escHtml(a.name)}</span><span class="acct-key-tail">${ident}${hint}</span>${(provTag || noteTag || oatTag) ? `<span class="acct-key-extra">${provTag}${noteTag}${oatTag}</span>` : ''}</span>
+        <span class="acct-key-main"><span class="acct-key-name">${escHtml(a.name)}</span><span class="acct-key-tail">${ident}${hint}</span>${(provTag || noteTag || oatTag || loginTag) ? `<span class="acct-key-extra">${provTag}${noteTag}${oatTag}${loginTag}</span>` : ''}</span>
         <span class="acct-usage-cell">${(() => {
           // Usage source follows the VERDICT's how (2.245.0): a linked account
           // runs on the host's own login (its quota IS the host quota); a
@@ -1920,6 +1970,8 @@ export function installManageAgents(App, ctx = {}) {
     row.append(head, left);
     body.appendChild(row);
     // Per-key row actions (event delegation on the section)
+    // The login chip is role=button: Enter/Space must do what a click does.
+    left.onkeydown = (e) => { const c = (e.key === 'Enter' || e.key === ' ') && e.target.closest?.('.acct-login-chip'); if (c) { e.preventDefault(); c.click(); } };
     left.onclick = async (e) => {
       const keyRow = e.target.closest?.('.acct-key-row');
       if (!keyRow) return;
@@ -2094,6 +2146,16 @@ export function installManageAgents(App, ctx = {}) {
           refresh();
         }
       };
+      // The chip IS the re-login button (no new flow — it runs exactly what
+      // the ⋯ menu's "Re-login on this machine…" runs). A pool's chip carries
+      // the MEMBER id, so it re-logs in the account that is actually dying.
+      const chip = e.target.closest?.('.acct-login-chip');
+      if (chip) {
+        const target = chip.dataset.relogin || id;
+        const targetAcct = (accts.accounts || []).find((x) => x.id === target) || a;
+        this._reloginSubscription(target, targetAcct, refresh);
+        return;
+      }
       if (e.target.closest('.acct-def')) {
         const isDef = accts.defaultAccountId === id;
         // Default is GLOBAL — starring a "this machine only" subscription

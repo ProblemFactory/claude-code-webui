@@ -1228,6 +1228,7 @@ const userTodos = new UserTodoManager({
     wss.clients.forEach(c => { if (c.readyState === WS_OPEN) { try { c.send(json); } catch {} } });
   },
 });
+require('./src/server/login-expiry-watch.js').create({ accounts, userTodos, dataDir: path.join(__dirname, 'data'), log: (...a) => console.log(...a) }).start(); // PASSIVE (file reads only, §ban-safety): warns the inbox at 24h/1h/expired before a subscription's LOGIN SESSION dies — see src/login-expiry.js
 app.get('/api/user-todos', (req, res) => res.json({ todos: userTodos.snapshot() }));
 // User actions from the panel: done / dismissed / open (reopen)
 app.post('/api/user-todos/:id', (req, res) => {
@@ -1966,7 +1967,6 @@ if (METRICS_PORT > 0) {
     mres.end(L.join('\n') + '\n');
   }).listen(METRICS_PORT, () => console.log(`  metrics exporter on :${METRICS_PORT}`));
 }
-
 
 server.listen(PORT, HOST, () => {
   const ver = require('./package.json').version;
