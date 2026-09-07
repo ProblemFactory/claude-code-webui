@@ -22,6 +22,7 @@
 const SESSION_FIELDS = {
   // identity / lifecycle
   _webuiId:            { owner: 'brain',  persisted: null,      note: 'webui id stamped for device-feed side effects' },
+  _opencodePtyId:      { owner: 'ws',     persisted: null,      note: 'S9 remainder (c): the OpenCode serve pty this terminal session bridges (pty_… on the serve, not a local process)' },
   _normalizer:         { owner: 'stdout', persisted: null,      note: 'MessageManager instance for the live stream' },
   _normEpoch:          { owner: 'stdout', persisted: null,      note: 'normalizer identity epoch — client full-reset discriminator (2.89.x)' },
   _subNormalizers:     { owner: 'stdout', persisted: null,      note: 'per-subagent normalizers map' },

@@ -241,7 +241,7 @@ class DeviceManager {
             mux.onWritable = (chan) => { sessions.get(chan)?.onWritable?.(); };
             const prevControl = mux.onControl;
             mux.onControl = (m) => {
-              if (m.op === 'fs-result' || m.op === 'discovery-result' || m.op === 'discovery-watching' || m.op === 'usage-events-watching' || m.op === 'session-events-watching' || m.op === 'cmd-result' || m.op === 'probe-result' || m.op === 'secret-result' || m.op === 'quota-result' || m.op === 'sysinfo-result' || m.op === 'proc-list-result' || m.op === 'peer-post-result' || m.op === 'pool-orders-ok' || m.op === 'tcp-open' || m.op === 'listen-open' || m.op === 'serve-folder-result' || m.op === 'serve-socks-result') {
+              if (m.op === 'fs-result' || m.op === 'discovery-result' || m.op === 'discovery-watching' || m.op === 'usage-events-watching' || m.op === 'session-events-watching' || m.op === 'cmd-result' || m.op === 'probe-result' || m.op === 'secret-result' || m.op === 'quota-result' || m.op === 'sysinfo-result' || m.op === 'proc-list-result' || m.op === 'opencode-serve-result' || m.op === 'peer-post-result' || m.op === 'pool-orders-ok' || m.op === 'tcp-open' || m.op === 'listen-open' || m.op === 'serve-folder-result' || m.op === 'serve-socks-result') {
                 const r = pending.get(m.id); if (r) { pending.delete(m.id); r(m); }
                 if (m.op === 'tcp-open' && !m.error) return; // channel stays live
                 return;
@@ -625,6 +625,19 @@ class DeviceManager {
     if (r.error) throw new Error(r.error);
     const { id, op, ...rest } = r;
     return rest;
+  }
+
+  /** One OpenCode-serve op on THIS device (S9 remainder piece (e), B-eac2).
+   *  The op names and shapes come from the SHARED table src/opencode-remote.js
+   *  -- the daemon runs the very same runOpencodeOp() against its own facts,
+   *  so `hostId` really is only a transport choice. Capability-gated: an old
+   *  daemon that does not know the op would HANG (the 2.300.0 rule). */
+  async opencodeServe(action, params = {}, { timeoutMs = 20000 } = {}) {
+    const conn = await this.connect();
+    if (!conn.info?.capabilities?.includes?.('opencode-serve')) throw new Error('daemon lacks opencode-serve (capabilities gate) -- upgrade the agent on this machine');
+    const r = await this._request({ op: 'opencode-serve', action, params, timeoutMs });
+    if (r.error) throw new Error(r.error);
+    return r.result || {};
   }
 
   /** Full process table (System panel process manager, 2.354.0). */

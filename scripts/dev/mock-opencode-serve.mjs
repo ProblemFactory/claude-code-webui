@@ -9,6 +9,7 @@
 // state.withFork (advertise + serve the fork endpoint), state.delayMs.
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 
 export const SESSIONS = () => ([
   { id: 'ses_a1', slug: 'sunny-falcon', projectID: 'proj_a', directory: '/work/alpha', path: '', title: 'New session - 2026-09-05T10:00:00.000Z', agent: 'build', model: { id: 'big-pickle', providerID: 'opencode' }, version: '1.18.29', time: { created: 1788600000000, updated: 1788600500000 }, cost: 0, tokens: { input: 10, output: 20, reasoning: 0, cache: { read: 0, write: 0 } } },
@@ -65,10 +66,30 @@ export function openapiDoc({ withFork = true } = {}) {
   return { openapi: '3.1.1', info: { title: 'opencode', version: withFork ? '1.18.29' : '1.10.0' }, paths, components: { schemas: {} } };
 }
 
+/** A `question` tool part exactly as a real 1.18.29 turn records it: the input
+ *  carries the questions, and once answered `state.metadata.answers` carries
+ *  ONE array of labels per question, in order (captured live). */
+export const QUESTION_PART = (answered) => ({
+  id: 'prt_q1', sessionID: 'ses_a2', messageID: 'msg_bq', type: 'tool', callID: 'call_question_1', tool: 'question',
+  state: answered
+    ? { status: 'completed', input: { questions: [{ question: 'Do you prefer red or blue?', header: 'Color preference', options: [{ label: 'Red', description: 'The color red' }, { label: 'Blue', description: 'The color blue' }] }] }, output: 'User has answered your questions: "Do you prefer red or blue?"="Blue".', title: 'Asked 1 question', metadata: { answers: [['Blue']] }, time: { start: 1788601100000, end: 1788601110000 } }
+    : { status: 'running', input: { questions: [{ question: 'Do you prefer red or blue?', header: 'Color preference', options: [{ label: 'Red', description: 'The color red' }, { label: 'Blue', description: 'The color blue' }] }] }, title: 'Asking 1 question', metadata: {}, time: { start: 1788601100000 } },
+});
+
 export function createMockState(opts = {}) {
   return {
     hang: false, fail: false, withFork: opts.withFork !== false, sessions: SESSIONS(),
     messages: JSON.parse(JSON.stringify(MESSAGES)), requests: [], forks: 0, delayMs: 0,
+    // ── S9 remainder (B-eac2) ──
+    questions: [],            // pending QuestionRequest[] (GET /question)
+    todos: { ses_a1: [{ content: 'fix the typo', status: 'completed', priority: 'high' }] },
+    answered: [],             // {requestID, answers} / {requestID, rejected}
+    ptys: new Map(),          // ptyID → Pty
+    ptySeq: 0,
+    ptyTicketsAllowed: opts.ptyTicketsAllowed === true,  // an UNSECURED 1.18.29 serve refuses to mint one
+    statuses: {},             // GET /session/status
+    sse: new Set(),           // open /global/event responses
+    paths: opts.paths || { home: '/home/mock', state: '/home/mock/.local/state/opencode', config: '/home/mock/.config/opencode', worktree: '/work/alpha', directory: '/work/alpha' },
     // the serve's OWN project (GET /project/current) — what the 2.369.42
     // self-heal probes on a recorded instance; '/' = the leftover shape
     currentWorktree: opts.currentWorktree || '/work/alpha',
@@ -80,11 +101,32 @@ export function createMockState(opts = {}) {
   };
 }
 
+/** Push one `/global/event` frame to every open subscriber. Frame shape is
+ *  the REAL one, captured on the wire: {directory, project, payload:{id,type,properties}}. */
+export function emit(state, frame) {
+  const line = `data: ${JSON.stringify({ project: 'proj_a', ...frame })}\n\n`;
+  for (const res of state.sse) { try { res.write(line); } catch { } }
+}
+
+function readBody(req, cb) {
+  let raw = '';
+  req.on('data', (c) => { raw += c; });
+  req.on('end', () => { let j = null; try { j = raw ? JSON.parse(raw) : null; } catch { } cb(j); });
+}
+
 export function makeHandler(state) {
   const json = (res, code, body) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
   return (req, res) => {
     const url = new URL(req.url, 'http://127.0.0.1');
     state.requests.push(`${req.method} ${url.pathname}${url.search}`);
+    if (req.method === 'GET' && url.pathname === '/global/event') {
+      // NO instance boot (measured on the real serve) and no `directory` query
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
+      res.write('data: ' + JSON.stringify({ payload: { id: 'evt_c', type: 'server.connected', properties: {} } }) + '\n\n');
+      state.sse.add(res);
+      req.on('close', () => state.sse.delete(res));
+      return;
+    }
     if (state.hang) return; // never answers — the client's timeout is the only way out
     if (state.fail) return json(res, 500, { name: 'InternalError', data: { message: 'mock failure' } });
     const run = () => {
@@ -113,6 +155,8 @@ export function makeHandler(state) {
         return json(res, 200, list);
       }
       let m;
+      if (req.method === 'GET' && p === '/session/status') return json(res, 200, state.statuses || {});
+      if (req.method === 'GET' && p === '/path') return json(res, 200, state.paths);
       if ((m = p.match(/^\/session\/([^/]+)$/)) && req.method === 'GET') {
         const s = state.sessions.find((x) => x.id === decodeURIComponent(m[1]));
         return s ? json(res, 200, s) : json(res, 404, { name: 'NotFoundError', data: { message: `Session not found: ${m[1]}` } });
@@ -141,6 +185,11 @@ export function makeHandler(state) {
           : { id: x.info.id, type: 'assistant', time: x.info.time, agent: x.info.agent, model: { providerID: x.info.providerID, modelID: x.info.modelID }, content: [] });
         return json(res, 200, { data, cursor: { previous: null, next: null } });
       }
+      if ((m = p.match(/^\/session\/([^/]+)\/todo$/)) && req.method === 'GET') {
+        const id = decodeURIComponent(m[1]);
+        if (!state.sessions.some((x) => x.id === id)) return json(res, 404, { name: 'NotFoundError', data: { message: 'Session not found' } });
+        return json(res, 200, state.todos?.[id] || []);
+      }
       if ((m = p.match(/^\/session\/([^/]+)\/children$/)) && req.method === 'GET') return json(res, 200, state.sessions.filter((s) => s.parentID === decodeURIComponent(m[1])));
       if ((m = p.match(/^\/session\/([^/]+)\/fork$/)) && req.method === 'POST') {
         if (!state.withFork) return json(res, 404, { name: 'NotFoundError', data: { message: 'Not Found' } });
@@ -153,19 +202,125 @@ export function makeHandler(state) {
         state.messages[forked.id] = JSON.parse(JSON.stringify(state.messages[src.id] || []));
         return json(res, 200, forked);
       }
-      if (req.method === 'GET' && p === '/session/status') return json(res, 200, {});
+      // ── REVERT (v1: boots NO instance — measured on the real serve) ──
+      if ((m = p.match(/^\/session\/([^/]+)\/revert$/)) && req.method === 'POST') {
+        const s0 = state.sessions.find((x) => x.id === decodeURIComponent(m[1]));
+        if (!s0) return json(res, 404, { name: 'NotFoundError', data: { message: 'Session not found' } });
+        return readBody(req, (body) => {
+          if (!body || !body.messageID) return json(res, 400, { name: 'BadRequest', data: { message: 'messageID required' } });
+          s0.revert = { messageID: body.messageID, ...(body.partID ? { partID: body.partID } : {}), snapshot: 'deadbeef', diff: 'diff --git a/hello.txt b/hello.txt\ndeleted file mode 100644\n', files: [{ path: 'hello.txt', added: 0, removed: 1 }] };
+          s0.time = { ...s0.time, updated: Date.now() };
+          emit(state, { directory: s0.directory, payload: { id: 'evt_r', type: 'session.updated', properties: { sessionID: s0.id, info: s0 } } });
+          return json(res, 200, s0);
+        });
+      }
+      if ((m = p.match(/^\/session\/([^/]+)\/unrevert$/)) && req.method === 'POST') {
+        const s0 = state.sessions.find((x) => x.id === decodeURIComponent(m[1]));
+        if (!s0) return json(res, 404, { name: 'NotFoundError', data: { message: 'Session not found' } });
+        delete s0.revert;
+        s0.time = { ...s0.time, updated: Date.now() };
+        emit(state, { directory: s0.directory, payload: { id: 'evt_u', type: 'session.updated', properties: { sessionID: s0.id, info: s0 } } });
+        return json(res, 200, s0);
+      }
+      // the v2 revert family — modelled ONLY so the suite can prove we never
+      // call it: like every /api/session/:id/… route it boots an instance
+      if ((m = p.match(/^\/api\/session\/([^/]+)\/revert\//)) && req.method === 'POST') {
+        const s0 = state.sessions.find((x) => x.id === decodeURIComponent(m[1]));
+        if (s0 && s0.directory) state.instances.add(s0.directory);
+        return json(res, 200, { data: { messageID: 'msg_u1' } });
+      }
+
+      // ── QUESTION ──
+      if (req.method === 'GET' && p === '/question') return json(res, 200, state.questions);
+      if ((m = p.match(/^\/question\/([^/]+)\/reply$/)) && req.method === 'POST') {
+        const rid = decodeURIComponent(m[1]);
+        const q = state.questions.find((x) => x.id === rid);
+        if (!q) return json(res, 404, { name: 'QuestionNotFoundError', data: { message: 'Question not found' } });
+        return readBody(req, (body) => {
+          if (!body || !Array.isArray(body.answers)) return json(res, 400, { name: 'BadRequest', data: { message: 'answers required' } });
+          state.answered.push({ requestID: rid, answers: body.answers });
+          state.questions = state.questions.filter((x) => x.id !== rid);
+          emit(state, { payload: { id: 'evt_qr', type: 'question.replied', properties: { sessionID: q.sessionID, requestID: rid, answers: body.answers } } });
+          return json(res, 200, true);
+        });
+      }
+      if ((m = p.match(/^\/question\/([^/]+)\/reject$/)) && req.method === 'POST') {
+        const rid = decodeURIComponent(m[1]);
+        const q = state.questions.find((x) => x.id === rid);
+        if (!q) return json(res, 404, { name: 'QuestionNotFoundError', data: { message: 'Question not found' } });
+        state.answered.push({ requestID: rid, rejected: true });
+        state.questions = state.questions.filter((x) => x.id !== rid);
+        emit(state, { payload: { id: 'evt_qj', type: 'question.rejected', properties: { sessionID: q.sessionID, requestID: rid } } });
+        return json(res, 200, true);
+      }
+
+      // ── PTY ── (GET /pty boots the DEFAULT-directory instance — measured)
+      if (req.method === 'GET' && p === '/pty') { state.instances.add(url.searchParams.get('directory') || state.paths.worktree); return json(res, 200, [...state.ptys.values()]); }
+      if (req.method === 'POST' && p === '/pty') {
+        return readBody(req, (body) => {
+          const id = `pty_mock${++state.ptySeq}`;
+          const pty = { id, title: (body && body.title) || 'shell', command: (body && body.command) || '/bin/bash', args: [], cwd: (body && body.cwd) || state.paths.worktree, status: 'running', pid: 4242 + state.ptySeq };
+          state.ptys.set(id, pty);
+          if (pty.cwd) state.instances.add(pty.cwd);
+          emit(state, { directory: pty.cwd, payload: { id: 'evt_pc', type: 'pty.created', properties: { info: pty } } });
+          return json(res, 200, pty);
+        });
+      }
+      if ((m = p.match(/^\/pty\/([^/]+)$/)) && req.method === 'GET') { const t = state.ptys.get(decodeURIComponent(m[1])); return t ? json(res, 200, t) : json(res, 404, { name: 'PtyNotFoundError', data: { message: 'not found' } }); }
+      if ((m = p.match(/^\/pty\/([^/]+)$/)) && req.method === 'PUT') {
+        const t = state.ptys.get(decodeURIComponent(m[1]));
+        if (!t) return json(res, 404, { name: 'PtyNotFoundError', data: { message: 'not found' } });
+        return readBody(req, (body) => { if (body && body.size) t.size = body.size; if (body && body.title) t.title = body.title; return json(res, 200, t); });
+      }
+      if ((m = p.match(/^\/pty\/([^/]+)$/)) && req.method === 'DELETE') {
+        const id = decodeURIComponent(m[1]);
+        const t = state.ptys.get(id);
+        state.ptys.delete(id);
+        if (t) emit(state, { directory: t.cwd, payload: { id: 'evt_pd', type: 'pty.deleted', properties: { id } } });
+        return json(res, 200, !!t);
+      }
+      if ((m = p.match(/^\/pty\/([^/]+)\/connect-token$/)) && req.method === 'POST') {
+        // a real UNSECURED 1.18.29 serve refuses this (PtyForbiddenError) while
+        // the ws upgrade itself needs no ticket — the bridge must cope
+        if (!state.ptyTicketsAllowed) return json(res, 403, { name: 'PtyForbiddenError', data: { message: 'Invalid PTY connect token request' } });
+        return json(res, 200, { ticket: 'tkt_' + decodeURIComponent(m[1]), expires_in: 60 });
+      }
       return json(res, 404, { name: 'NotFoundError', data: { message: 'Not Found' } });
     };
     if (state.delayMs) setTimeout(run, state.delayMs); else run();
   };
 }
 
-export function startMockServe({ port = 0, state = null } = {}) {
+export function startMockServe({ port = 0, state = null, pty = false } = {}) {
   const st = state || createMockState();
   const server = http.createServer(makeHandler(st));
+  let wss = null;
+  if (pty) {
+    // GET /pty/:id/connect upgrades to a websocket. Verified on the real
+    // 1.18.29 serve: TEXT frames are terminal output, BINARY frames are
+    // \0-prefixed control json, and frames written IN reach the shell.
+    const { WebSocketServer } = createRequire(import.meta.url)('ws');
+    wss = new WebSocketServer({ noServer: true });
+    st.ptySockets = st.ptySockets || [];
+    server.on('upgrade', (req, socket, head) => {
+      const u = new URL(req.url, 'http://127.0.0.1');
+      const m = u.pathname.match(/^\/pty\/([^/]+)\/connect$/);
+      if (!m) { socket.destroy(); return; }
+      st.requests.push(`WS ${u.pathname}${u.search}`);
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        const id = decodeURIComponent(m[1]);
+        st.ptySockets.push({ id, ws, ticket: u.searchParams.get('ticket'), auth: req.headers.authorization || null, input: [] });
+        ws.on('message', (d, isBin) => { st.ptySockets.find((x) => x.ws === ws)?.input.push(isBin ? d.toString('utf8') : d.toString('utf8')); });
+        // greet exactly like the real serve: a text banner, then a binary
+        // \0-json control frame the bridge must NOT render
+        ws.send('mock-shell$ ');
+        ws.send(Buffer.concat([Buffer.from([0]), Buffer.from(JSON.stringify({ cursor: 12 }))]), { binary: true });
+      });
+    });
+  }
   return new Promise((resolve, reject) => {
     server.once('error', reject);
-    server.listen(port, '127.0.0.1', () => resolve({ state: st, server, port: server.address().port, url: `http://127.0.0.1:${server.address().port}`, close: () => new Promise((r) => { server.closeAllConnections?.(); server.close(() => r()); }) }));
+    server.listen(port, '127.0.0.1', () => resolve({ state: st, server, wss, port: server.address().port, url: `http://127.0.0.1:${server.address().port}`, close: () => new Promise((r) => { try { wss?.close(); } catch { } server.closeAllConnections?.(); server.close(() => r()); }) }));
   });
 }
 

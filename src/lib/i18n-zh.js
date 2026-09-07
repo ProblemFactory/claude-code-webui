@@ -3,6 +3,19 @@
 // Generated after each i18n sweep; hand-edited for quality. Missing entries
 // fall back to English automatically.
 export default {
+  "A question in this conversation was answered.": "这个对话里的一个提问已被回答。",
+  "A question in this conversation was dismissed.": "这个对话里的一个提问已被驳回。",
+  "Open terminal in this session": "在这个会话里打开终端",
+  "OpenCode will restore the files to the snapshot taken before this message and stage every later message for removal. Sending a new prompt makes it permanent; \"Restore rolled-back messages\" undoes it.": "OpenCode 会把文件恢复到这条消息之前的快照，并把之后的所有消息标记为待删除。再发一条新提示就会永久生效；“恢复被回滚的消息”可以撤销。",
+  "Restore rolled-back messages": "恢复被回滚的消息",
+  "Restored": "已恢复",
+  "Roll back": "回滚",
+  "Roll back this conversation?": "要回滚这个对话吗？",
+  "Roll back to before this message": "回滚到这条消息之前",
+  "Roll-back undone — the messages below are live again.": "回滚已撤销——下面的消息重新生效。",
+  "Rolled back": "已回滚",
+  "Rolled back — everything below is staged for removal and the files were restored. The next prompt makes it permanent.": "已回滚——下面的内容全部标记为待删除，文件已恢复。下一条提示会让它永久生效。",
+  "This question is no longer waiting for an answer": "这个提问已经不在等待回答",
   "Sessions": "会话",
   "Presets": "预设",
   "New Session": "新建会话",

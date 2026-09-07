@@ -69,7 +69,14 @@ const ROUTES = ['/api/version', '/api/home', '/api/agent-hooks', '/api/accounts'
   '/api/bookmarks', '/api/layouts', '/api/plugins', '/api/machine-mounts',
   '/api/mounts', '/api/port-forwards', '/api/exits', '/api/incidents',
   '/api/session-options', '/api/available-models', '/api/custom-themes',
-  '/api/sysinfo/procs'];
+  '/api/sysinfo/procs',
+  // S9 remainder (B-eac2): the OpenCode action routes are wired from a
+  // src/server module — a factory used but never exported throws only when a
+  // route RUNS (the third lost-export incident). /state answers on every
+  // instance (the serve being OFF is a fact, not a failure); the ACTING routes
+  // legitimately answer 503 when the service is off, so they are not battery
+  // material.
+  '/api/opencode/state'];
 for (const r of ROUTES) {
   try {
     const resp = await fetch(`http://127.0.0.1:${PORT}${r}`);

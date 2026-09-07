@@ -943,7 +943,23 @@ class ChatRenderers {
     section.className = 'chat-permission-inline';
     section.dataset.requestId = msg.permission.requestId;
 
-    if (msg.permission.kind === 'user_input' && !msg.permission.resolved) {
+    if (msg.permission.kind === 'user_input' && !msg.permission.resolved && msg.permission.stale) {
+      // an ask with no live request behind it: render the questions, never a
+      // Submit button whose only possible outcome is an error toast
+      const prompt = document.createElement('div');
+      prompt.className = 'chat-permission-prompt';
+      const head = document.createElement('div');
+      head.className = 'chat-permission-resolved';
+      head.textContent = t('This question is no longer waiting for an answer');
+      prompt.appendChild(head);
+      for (const q of msg.permission.questions || []) {
+        const row = document.createElement('div');
+        row.className = 'chat-permission-question';
+        row.textContent = q.question;
+        prompt.appendChild(row);
+      }
+      section.appendChild(prompt);
+    } else if (msg.permission.kind === 'user_input' && !msg.permission.resolved) {
       const questions = msg.permission.questions || [];
       section.innerHTML = '';
       const prompt = document.createElement('div');
@@ -1042,6 +1058,11 @@ class ChatRenderers {
           type: 'permission-response', sessionId: this.sessionId,
           requestId: msg.permission.requestId, approved: true,
           toolInput: { ...origInput, answers },
+          // WHICH LANE answers this card. Harness-neutral: the card forwards
+          // what the record that created it declared (S9: 'opencode-serve'
+          // asks are answered on the serve's own route, on `host`'s machine),
+          // so this renderer never learns a backend.
+          ...(msg.permission.via ? { via: msg.permission.via, host: msg.permission.host || null } : {}),
         });
         msg.permission.resolved = 'allowed';
         msg.permission.selectedAnswers = answers;
@@ -1055,6 +1076,7 @@ class ChatRenderers {
         this.ws.send({
           type: 'permission-response', sessionId: this.sessionId,
           requestId: msg.permission.requestId, approved: false,
+          ...(msg.permission.via ? { via: msg.permission.via, host: msg.permission.host || null } : {}),
         });
         msg.permission.resolved = 'denied';
         this.renderPermissionOverlay(el, msg);

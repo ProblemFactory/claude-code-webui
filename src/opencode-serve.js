@@ -108,6 +108,11 @@ const { AcpSessionMessages } = require('./acp-message-manager');
 
 const DEFAULT_TIMEOUT_MS = 1500;   // the poll budget: a hung serve costs at most this per discovery
 const READ_TIMEOUT_MS = 8000;      // user actions (open a stopped conversation, fork): LOUD when exceeded
+/** Opening a pty BOOTS the OpenCode instance for that directory (measured:
+ *  +19 indexer threads, a full-tree index) — on a cold directory, or a loaded
+ *  machine, that is well past the 8s read budget. It is an explicit user
+ *  action with a spinner, so it gets a spawn-sized one. */
+const PTY_TIMEOUT_MS = 45000;
 const LIST_CACHE_MS = 10000;
 const NEGATIVE_CACHE_MS = 10000;
 const NAME_RETRY_MS = 60000;       // a session with no user message yet is re-checked at most this often
@@ -115,6 +120,16 @@ const BOOT_TIMEOUT_MS = 20000;     // opencode 1.18.29 answers /global/health in
 const MAX_CRASHES = 5;
 const HEALTHY_UPTIME_RESET_MS = 60000; // a serve that stayed up this long resets the crash counter
 const NAME_BATCH = 6;
+/** How long POSITIVE evidence that ANOTHER process touched a conversation
+ *  keeps it labelled 'external' (piece (f)). Short on purpose: the label must
+ *  decay back to 'stopped' on its own -- we never claim a running agent we
+ *  cannot see, and we never keep claiming one after the evidence went stale. */
+const EXTERNAL_WINDOW_MS = 90000;
+/** Floor between two event-driven list refreshes. The single-flight promise
+ *  already coalesces CONCURRENT discovers; this coalesces SERIAL ones (five
+ *  browser tabs each poll /api/sessions, and a busy turn dirties the store
+ *  every few hundred ms), so "no timer" never becomes "a list per request". */
+const MIN_REFRESH_MS = 1000;
 const LIST_LIMIT = 500;
 const TITLE_PLACEHOLDER_RE = /^New session - /;
 const FORK_PATH = '/session/{sessionID}/fork';
@@ -393,8 +408,94 @@ class OpencodeServeClient {
     return this.request('POST', `/session/${encodeURIComponent(id)}/fork`, { query: { directory }, body: messageID ? { messageID } : {}, timeoutMs });
   }
   children(id, opts) { return this.request('GET', `/session/${encodeURIComponent(id)}/children`, opts); }
+  /** GET /session/status → {sessionID: SessionStatus} for the sessions THIS
+   *  serve is running (idle|busy|retry). MEASURED on 1.18.29: no `directory`
+   *  needed and it boots NO instance (16 threads / 0 indexer threads before
+   *  and after). It is an IN-PROCESS view — a session another opencode
+   *  process is driving is absent from it, which is why 'external' liveness
+   *  is derived from the list's own `time.updated` instead (see deriveStatus). */
   sessionStatus(opts) { return this.request('GET', '/session/status', opts); }
   todo(id, opts) { return this.request('GET', `/session/${encodeURIComponent(id)}/todo`, opts); }
+  /** The store's own paths (home/state/config/worktree). Used to locate the
+   *  sqlite store for the fs.watch lane on the machine the serve runs on —
+   *  hostId is a parameter, so this must come from the SERVE, not from our
+   *  own os.homedir(), whenever the serve is somewhere else. */
+  paths(opts) { return this.request('GET', '/path', opts); }
+
+  // ── REVERT (S9 remainder, B-eac2) ──────────────────────────────────────
+  /** POST /session/:id/revert {messageID, partID?} → the updated Session,
+   *  whose `revert` field is {messageID, partID?, snapshot, diff, files?}.
+   *  MEASURED on a real 1.18.29 serve: the v1 route restores the working tree
+   *  AND boots NO instance (16 threads / 0 fff threads before and after) —
+   *  unlike every `/api/session/{id}/revert/*` v2 route (measured: 16→37
+   *  threads, 0→19 indexer threads, +165 MB on a single `revert/clear`), which
+   *  is why the v2 stage/clear/commit trio is deliberately NOT wired. */
+  revert(id, { messageID, partID = null, directory = null, timeoutMs = READ_TIMEOUT_MS } = {}) {
+    return this.request('POST', `/session/${encodeURIComponent(id)}/revert`, { query: { directory }, body: partID ? { messageID, partID } : { messageID }, timeoutMs });
+  }
+  /** POST /session/:id/unrevert → the updated Session with `revert` gone and
+   *  the files back. This is OpenCode's own "clear the staged revert". */
+  unrevert(id, { directory = null, timeoutMs = READ_TIMEOUT_MS } = {}) {
+    return this.request('POST', `/session/${encodeURIComponent(id)}/unrevert`, { query: { directory }, timeoutMs });
+  }
+
+  // ── QUESTION (the `question` tool's pending requests) ──────────────────
+  /** GET /question → [{id, sessionID, questions:[{question, header, options,
+   *  multiple?, custom?}], tool:{messageID, callID}}]. Boots no instance
+   *  (measured). PER-PROCESS: only questions raised by turns THIS serve is
+   *  running are listed — see the reachability note in the module header. */
+  questions(opts) { return this.request('GET', '/question', opts); }
+  /** POST /question/:requestID/reply {answers} — answers[i] is the array of
+   *  selected labels for questions[i], IN ORDER (verified live: a real
+   *  `question` tool call answered with [["Blue"]] completed the turn). */
+  questionReply(requestId, answers, { timeoutMs = READ_TIMEOUT_MS } = {}) {
+    return this.request('POST', `/question/${encodeURIComponent(requestId)}/reply`, { body: { answers }, timeoutMs });
+  }
+  questionReject(requestId, { timeoutMs = READ_TIMEOUT_MS } = {}) {
+    return this.request('POST', `/question/${encodeURIComponent(requestId)}/reject`, { timeoutMs });
+  }
+
+  // ── PTY (a shell the SERVE owns, on the serve's machine) ───────────────
+  /** MEASURED: `GET /pty` alone boots the instance for the serve's DEFAULT
+   *  directory (16→38 threads, 0→19 indexer threads) — the serve's cwd is our
+   *  own empty throwaway repo, so that is cheap here, but a `directory=` query
+   *  boots (and recursively watches) THAT tree. Every pty call therefore takes
+   *  an explicit directory only when the user asked for a terminal there. */
+  ptyList({ directory = null, timeoutMs = null } = {}) { return this.request('GET', '/pty', { query: { directory }, timeoutMs }); }
+  ptyCreate({ command = null, args = null, cwd = null, title = null, env = null, directory = null, timeoutMs = PTY_TIMEOUT_MS } = {}) {
+    const body = {};
+    if (command) body.command = command;
+    if (Array.isArray(args)) body.args = args;
+    if (cwd) body.cwd = cwd;
+    if (title) body.title = title;
+    if (env && typeof env === 'object') body.env = env;
+    return this.request('POST', '/pty', { query: { directory }, body, timeoutMs });
+  }
+  ptyGet(ptyId, { directory = null, timeoutMs = null } = {}) { return this.request('GET', `/pty/${encodeURIComponent(ptyId)}`, { query: { directory }, timeoutMs }); }
+  ptyResize(ptyId, { rows, cols, directory = null, timeoutMs = null } = {}) {
+    return this.request('PUT', `/pty/${encodeURIComponent(ptyId)}`, { query: { directory }, body: { size: { rows, cols } }, timeoutMs });
+  }
+  ptyRemove(ptyId, { directory = null, timeoutMs = READ_TIMEOUT_MS } = {}) { return this.request('DELETE', `/pty/${encodeURIComponent(ptyId)}`, { query: { directory }, timeoutMs }); }
+  /** POST /pty/:id/connect-token → {ticket, expires_in}. On an UNSECURED
+   *  loopback serve 1.18.29 answers PtyForbiddenError ("Invalid PTY connect
+   *  token request") and the ws upgrade needs no ticket at all — verified on
+   *  the wire. So the caller mints a ticket when it can and connects without
+   *  one when it cannot; the ticket NEVER reaches a browser either way. */
+  ptyTicket(ptyId, { directory = null, timeoutMs = READ_TIMEOUT_MS } = {}) {
+    return this.request('POST', `/pty/${encodeURIComponent(ptyId)}/connect-token`, { query: { directory }, timeoutMs });
+  }
+  /** The ws URL for a pty stream (SERVER-SIDE ONLY — the browser never learns
+   *  the serve's port; ws-create bridges it into the normal terminal path). */
+  ptyConnectUrl(ptyId, { ticket = null, cursor = null, directory = null } = {}) {
+    const u = new URL(this.baseUrl + `/pty/${encodeURIComponent(ptyId)}/connect`);
+    if (ticket) u.searchParams.set('ticket', ticket);
+    if (cursor) u.searchParams.set('cursor', String(cursor));
+    if (directory) u.searchParams.set('directory', directory);
+    u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
+    return u.toString();
+  }
+  /** The Basic header the pty ws needs when the serve is password-protected. */
+  authHeader() { return this._auth; }
 }
 
 // ── the record synthesis (pure) ──
@@ -428,11 +529,70 @@ function stopReasonOf(info) {
 }
 function fileLine(part) { return `[file: ${part.filename || part.url || part.mime || 'attachment'}]`; }
 
-/** OpenCode v1 messages ([{info, parts}]) + the Session → 'acp-events' records. */
+/** QuestionInfo[] → the shape the harness-neutral ASK card renders
+ *  ({question, header, options:[{label, description}], multiSelect}). PURE. */
+function normalizeAskQuestions(list) {
+  return (Array.isArray(list) ? list : []).map((q) => ({
+    question: String(q?.question || ''),
+    header: String(q?.header || ''),
+    multiSelect: !!q?.multiple,
+    allowCustom: !!q?.custom,
+    options: (Array.isArray(q?.options) ? q.options : []).map((o) => ({ label: String(o?.label ?? ''), description: String(o?.description ?? '') })).filter((o) => o.label),
+  })).filter((q) => q.question);
+}
+/** OpenCode's positional answers ([["Blue"],["a","b"]]) → the card's
+ *  question-text-keyed map, which is what the resolved card renders. PURE. */
+function askAnswerMap(questions, answers) {
+  const out = {};
+  (Array.isArray(questions) ? questions : []).forEach((q, i) => {
+    const a = Array.isArray(answers) ? answers[i] : null;
+    if (a == null) return;
+    out[q.question] = (Array.isArray(a) ? a : [a]).map(String).join(', ');
+  });
+  return out;
+}
+/** The card's map back to OpenCode's POSITIONAL answers, in question order.
+ *  A custom typed answer is one label; a multi-select is the comma-joined
+ *  string the card produced, split back apart. PURE (the reply route's
+ *  contract lives here, not in the ws handler). */
+function askAnswersToPositional(questions, answerMap) {
+  return (Array.isArray(questions) ? questions : []).map((q) => {
+    const raw = answerMap && Object.prototype.hasOwnProperty.call(answerMap, q.question) ? answerMap[q.question] : '';
+    if (raw == null || raw === '') return [];
+    if (Array.isArray(raw)) return raw.map(String);
+    const s = String(raw);
+    // only split when every piece is a known option label — a free-text answer
+    // that happens to contain ", " must survive intact
+    const labels = new Set((q.options || []).map((o) => o.label));
+    const parts = s.split(', ');
+    return parts.length > 1 && parts.every((p) => labels.has(p)) ? parts : [s];
+  });
+}
+/** The one sentence a staged revert says wherever a conversation is rendered. */
+function revertNoticeText(session) {
+  const files = Array.isArray(session?.revert?.files) ? session.revert.files.length : 0;
+  const diff = typeof session?.revert?.diff === 'string' && session.revert.diff ? session.revert.diff : '';
+  const changed = files || (diff ? (diff.match(/^diff --git /gm) || []).length : 0);
+  return `Reverted to here — everything below is staged for removal${changed ? ` and ${changed} file${changed === 1 ? '' : 's'} were restored` : ''}. "Restore reverted messages" undoes it; the next prompt makes it permanent.`;
+}
+
+/** OpenCode v1 messages ([{info, parts}]) + the Session → 'acp-events' records.
+ *  Two S9-remainder additions (B-eac2):
+ *   • a `question` tool part becomes the harness-neutral ASK card
+ *     (permission_request kind 'user_input') instead of a generic "other"
+ *     tool — answered ones carry their answers, an unanswered one stays
+ *     open so the card can be answered from the reader after a page reload.
+ *   • the session's staged `revert` becomes a notice at the boundary, so a
+ *     reverted conversation SAYS it is reverted wherever it is rendered.
+ */
 function messagesToAcpRecords(messages, session = {}) {
   const sessionId = session?.id || messages?.[0]?.info?.sessionID || '';
   const out = [];
   const push = (rec) => { out.push(rec); return rec; };
+  // the staged revert boundary: everything from this message on is "staged for
+  // removal" until unrevert (v1) or the next prompt commits it
+  const revertAt = typeof session?.revert?.messageID === 'string' ? session.revert.messageID : '';
+  let revertAnnounced = false;
   let curModel = modelLabel(session?.model?.providerID, session?.model?.id);
   let curMode = session?.agent ? String(session.agent) : '';
   push({ ts: isoOf(session?.time?.created), type: 'acp', kind: 'session', sessionId, cwd: session?.directory || '', how: 'serve', model: curModel, mode: curMode, agentInfo: { name: 'opencode', version: session?.version || null }, replay: true });
@@ -441,6 +601,10 @@ function messagesToAcpRecords(messages, session = {}) {
     const info = m?.info || {};
     const parts = Array.isArray(m?.parts) ? m.parts : [];
     const ts = isoOf(info?.time?.created);
+    if (revertAt && !revertAnnounced && String(info.id || '') === revertAt) {
+      revertAnnounced = true;
+      push({ ts, type: 'acp', kind: 'notice', level: 'warn', noticeKind: 'revert', text: revertNoticeText(session) });
+    }
     if (info.role === 'user') {
       const texts = parts.filter((p) => p && p.type === 'text' && p.text && !p.ignored);
       const visible = texts.filter((p) => !p.synthetic);
@@ -468,6 +632,29 @@ function messagesToAcpRecords(messages, session = {}) {
       } else if (p.type === 'reasoning') {
         if (!p.text) continue;
         upd(pts, { sessionUpdate: 'agent_thought_chunk', messageId: p.id || undefined, content: { type: 'text', text: String(p.text) } });
+      } else if (p.type === 'tool' && p.tool === 'question') {
+        // THE ASK CARD. Verified shape on a real 1.18.29 turn: the `question`
+        // tool's part carries state.input.questions ([{question, header,
+        // options:[{label, description}], multiple?, custom?}]) and, once
+        // answered, state.metadata.answers ([["Blue"]] — one array of labels
+        // per question, in order). The request id is NOT in the part (it is
+        // `que_…`, minted per ask), so an UNANSWERED one is matched back to
+        // the live `GET /question` list by (sessionID, tool.callID).
+        const st = p.state || {};
+        const input = st.input && typeof st.input === 'object' ? st.input : {};
+        const callId = String(p.callID || p.id || '');
+        const qs = normalizeAskQuestions(input.questions);
+        const answers = Array.isArray(st.metadata?.answers) ? st.metadata.answers : null;
+        const resolved = st.status === 'completed' ? (answers ? 'allowed' : 'denied') : (st.status === 'error' ? 'denied' : null);
+        push({
+          ts: pts, type: 'acp', kind: 'permission_request', sessionId,
+          requestId: callId,               // the stable id inside a transcript; the live que_… id is carried by the pending list
+          via: 'opencode-serve',           // which lane answers it (the card forwards this back)
+          questions: qs, ask: true,
+          answers: answers ? askAnswerMap(qs, answers) : null,
+          resolved,
+          toolCall: { toolCallId: callId, title: String(st.title || 'Question'), kind: 'other', status: resolved ? 'completed' : 'pending', rawInput: { tool: 'question', questions: qs } },
+        });
       } else if (p.type === 'tool') {
         const st = p.state || {};
         const input = st.input && typeof st.input === 'object' ? st.input : {};
@@ -769,12 +956,21 @@ function createServeLocator({
 }
 
 // ── the store facts ──
-function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCacheMs = LIST_CACHE_MS, negativeCacheMs = NEGATIVE_CACHE_MS } = {}) {
-  const cache = { list: null, at: 0, negativeUntil: 0, lastError: null, skippedWorktrees: [] };
+function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCacheMs = LIST_CACHE_MS, negativeCacheMs = NEGATIVE_CACHE_MS,
+  externalWindowMs = EXTERNAL_WINDOW_MS, onChange = null, log = console } = {}) {
+  const cache = { list: null, at: 0, negativeUntil: 0, lastError: null, skippedWorktrees: [], dirty: true };
   const names = new Map();      // id → { name, at }
   const naming = new Set();
   const convo = new Map();      // id → { at, session, messages, records }
   let listing = null;
+  // ── THE LIVE LANE (S9 remainder, B-eac2) — see armLive() ──
+  const live = {
+    lane: null,                 // the createLiveLane() handle, once armed
+    statuses: new Map(),        // opencode session id → SessionStatus (this serve's own turns)
+    questions: new Map(),       // que_id → {id, sessionID, questions, tool, at}
+    lastUpdated: new Map(),     // opencode session id → the last `time.updated` we saw in a list
+    activeElsewhere: new Map(), // opencode session id → ts of the last observed CHANGE we did not make
+  };
 
   function reasonUnavailable() {
     const st = locator.state();
@@ -788,6 +984,48 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
       : 'the OpenCode background service is off — enable the "OpenCode background service" plugin (⚙ → Plugins) to list, open, resume and fork STOPPED OpenCode conversations';
     return `OpenCode serve is unreachable (${st.lastError || 'still starting'})`;
   }
+  /** THE HONEST LIVENESS VERDICT (piece (f) of B-eac2).
+   *   • 'live'     — one of OUR live sessions holds this conversation id.
+   *   • 'external' — POSITIVE evidence that something else is driving it:
+   *       (a) this serve's own `/session/status` says busy/retry (an event or
+   *           a client of this serve is running the turn — in-process truth), or
+   *       (b) the row's `time.updated` moved while we were not the ones moving
+   *           it, within externalWindowMs (a TUI or another opencode process
+   *           writing the SAME sqlite — MEASURED: its events never reach our
+   *           serve's event bus, but the store row it writes does reach our
+   *           list, and the store-watch lane makes us re-read it in ~0.4s).
+   *   • 'stopped'  — no evidence of anyone driving it. NEVER a fake 'running'.
+   *  When we have NO live lane at all we cannot see (b) — the fact is reported
+   *  in state().liveLane so the panel can say "liveness unknown" rather than
+   *  every row lying; the rows themselves stay honest at 'stopped'. */
+  function deriveStatus(s, active) {
+    if (active) return 'live';
+    const st = live.statuses.get(s.id);
+    if (st && st.type && st.type !== 'idle') return 'external';
+    const seen = live.activeElsewhere.get(s.id) || 0;
+    if (seen && now() - seen < externalWindowMs) return 'external';
+    return 'stopped';
+  }
+  function pendingQuestionsFor(sessionId) {
+    const out = [];
+    for (const q of live.questions.values()) if (q.sessionID === sessionId) out.push(q);
+    return out;
+  }
+  /** Fold a fresh listing into the external-activity ledger: a row whose
+   *  `time.updated` MOVED since the previous listing changed under someone —
+   *  us or another process. `ownIds` are the conversation ids our own live
+   *  sessions hold, so our own writes never masquerade as "external". */
+  function noteListing(list, ownIds) {
+    const t = now();
+    for (const s of Array.isArray(list) ? list : []) {
+      const u = s?.time?.updated || s?.time?.created || 0;
+      const prev = live.lastUpdated.get(s.id);
+      live.lastUpdated.set(s.id, u);
+      if (prev === undefined) continue;                 // first sighting proves nothing
+      if (u > prev && !(ownIds && ownIds.has(s.id))) live.activeElsewhere.set(s.id, t);
+    }
+    if (live.lastUpdated.size > 4000) live.lastUpdated.clear();
+  }
   function assemble(list, activeSessions) {
     const activeById = new Map();
     for (const [id, s] of activeSessions || []) {
@@ -795,6 +1033,10 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
       const sid = s.backendSessionId || null;
       if (sid && !activeById.has(sid)) activeById.set(sid, { id, session: s });
     }
+    // fold the listing into the external-activity ledger BEFORE deriving
+    // statuses (a row that just moved under a TUI must read 'external' on the
+    // very tick that noticed it, not the next one)
+    noteListing(list, new Set(activeById.keys()));
     const entries = (list || []).map((s) => {
       const active = activeById.get(s.id) || null;
       const named = names.get(s.id);
@@ -806,14 +1048,23 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
         cwd: s.directory || '',
         startedAt: s.time?.updated || s.time?.created || now(),
         createdAt: s.time?.created || null,
-        status: active ? 'live' : 'stopped',
+        status: deriveStatus(s, active),
         name: (named && named.name) || sessionTitle(s),
         agentKind: s.parentID ? 'subagent' : 'primary',
         parentThreadId: s.parentID || null,
         webuiId: active?.id || null,
         webuiName: active?.session?.name || null,
         webuiMode: active?.session?.mode || null,
-        opencode: { slug: s.slug || null, agent: s.agent || null, model: modelLabel(s.model?.providerID, s.model?.id) || null, projectID: s.projectID || null },
+        opencode: {
+          slug: s.slug || null, agent: s.agent || null,
+          model: modelLabel(s.model?.providerID, s.model?.id) || null,
+          projectID: s.projectID || null,
+          // the staged revert (chat action state) and the pending ask, so the
+          // sidebar/chat never has to ask a second route for either
+          revert: s.revert ? { messageID: s.revert.messageID || '', files: Array.isArray(s.revert.files) ? s.revert.files.length : 0 } : null,
+          questions: pendingQuestionsFor(s.id).length || 0,
+          busy: live.statuses.get(s.id)?.type || null,
+        },
       };
     });
     entries.sort((a, b) => b.startedAt - a.startedAt);
@@ -848,18 +1099,36 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
     const client = await locator.client({ budgetMs });
     if (!client) throw new OpencodeServeError(reasonUnavailable(), { code: 'unavailable' });
     const list = await withTimeout(client.listAllSessions({ timeoutMs: budgetMs }), budgetMs, 'session listing');
-    cache.list = list; cache.at = now(); cache.lastError = null;
+    cache.list = list; cache.at = now(); cache.lastError = null; cache.dirty = false;
     cache.skippedWorktrees = client.skippedWorktrees || [];
     nameSome(client, list).catch(() => { });
     return list;
   }
+  /** Is a live event lane actually carrying signal right now? While it is, the
+   *  list is refreshed ONLY when an event says it changed — the 10s timer is
+   *  GONE, not slowed (piece (d) of B-eac2). A lane that is down (serve
+   *  restarting, SSE broken, the store dir unwatchable) falls back to the
+   *  timer STRUCTURALLY: a broken lane must not freeze the sidebar forever. */
+  function laneHealthy() {
+    const st = live.lane?.state?.();
+    return !!(st && st.sse?.connected && st.watch?.active);
+  }
+  function markDirty(reason) {
+    cache.dirty = true;
+    cache.negativeUntil = 0;                 // a real change retires the negative cache
+    try { onChange?.({ reason }); } catch { }
+  }
   /** The v1 session list, cache-first and bounded. NEVER throws and NEVER waits
    *  past the budget: cache → negative cache → one shared bounded refresh. Both
    *  readers below are built on it, so neither can invent a second route (the
-   *  v2 per-session routes boot an OpenCode instance per directory — 2.369.50). */
+   *  v2 per-session routes boot an OpenCode instance per directory — 2.369.50).
+   *  FRESHNESS is the lane's answer when the lane is up (B-eac2 piece (d)): only
+   *  an event marks the list dirty, so the 10s timer is GONE — and a lane that
+   *  is down falls back to it STRUCTURALLY. */
   async function listNow(budgetMs) {
     const t = now();
-    if (cache.list && t - cache.at < listCacheMs) return cache.list;
+    const fresh = laneHealthy() ? (!cache.dirty || t - cache.at < MIN_REFRESH_MS) : (t - cache.at < listCacheMs);
+    if (cache.list && fresh) return cache.list;
     if (t < cache.negativeUntil) return cache.list || [];
     if (!listing) listing = refreshList(budgetMs).finally(() => { listing = null; });
     try { await listing; }
@@ -902,7 +1171,24 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
       if (isConnErr(e)) locator.invalidate(e.message);
       throw new OpencodeServeError(`OpenCode conversation ${id} could not be read: ${e.message}`, { status: e.status, code: e.code, cause: e });
     }
-    const entry = { at: now(), session, messages: Array.isArray(messages) ? messages : [], records: messagesToAcpRecords(Array.isArray(messages) ? messages : [], session) };
+    const records = messagesToAcpRecords(Array.isArray(messages) ? messages : [], session);
+    // A PENDING ask survives a page reload only if the card can be answered:
+    // the transcript knows the tool CALL id, the live route wants the `que_…`
+    // REQUEST id. Join them here, at the one place that has both.
+    const open = records.filter((r) => r.kind === 'permission_request' && !r.resolved);
+    if (open.length) {
+      // the live lane keeps this map warm, but a server that just restarted
+      // has an empty one — re-read the authoritative list ONCE rather than
+      // rendering a card whose Submit could only fail
+      let pend = pendingQuestionsFor(id);
+      if (!pend.length) { try { pend = await pendingQuestions({ sessionId: id, refresh: true }); } catch { pend = []; } }
+      for (const r of open) {
+        const q = pend.find((x) => x?.tool?.callID && x.tool.callID === r.requestId);
+        if (q) r.requestId = String(q.id);
+        else r.stale = true;              // no live request behind it: the reader shows it, the card cannot answer it
+      }
+    }
+    const entry = { at: now(), session, messages: Array.isArray(messages) ? messages : [], records };
     convo.set(id, entry);
     if (convo.size > 64) convo.delete(convo.keys().next().value);
     return entry;
@@ -923,9 +1209,183 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
     invalidate();
     return forked;
   }
-  function invalidate() { cache.at = 0; cache.negativeUntil = 0; convo.clear(); }
-  function stateOf() { return { ...locator.state(), cachedSessions: cache.list ? cache.list.length : null, cacheAgeMs: cache.at ? now() - cache.at : null, negativeUntil: cache.negativeUntil, lastError: cache.lastError || locator.state().lastError, namesKnown: names.size, skippedWorktrees: cache.skippedWorktrees || [] }; }
-  return { discover, sessionModel, readConversation, forkSession, invalidate, state: stateOf, reasonUnavailable, locator, _names: names };
+  function invalidate() { cache.at = 0; cache.dirty = true; cache.negativeUntil = 0; convo.clear(); }
+
+  // -- USER ACTIONS over the serve (LOUD by contract: every failure names the
+  //    cause; a silent no-op here is the "no silent failures" law broken) --
+  async function userClient(timeoutMs) {
+    const client = await locator.client({ budgetMs: timeoutMs });
+    if (!client) throw new OpencodeServeError(reasonUnavailable(), { code: 'unavailable' });
+    return client;
+  }
+  /** Roll a conversation back to a message (piece (a)). The v1 route ONLY --
+   *  measured to restore the tree without booting an instance, unlike v2's
+   *  stage/clear/commit trio. Returns the updated Session (its `revert` field
+   *  is the state the reader then renders). */
+  async function revertTo(id, { messageID, partID = null, cwd = null, timeoutMs = READ_TIMEOUT_MS } = {}) {
+    if (!messageID) throw new OpencodeServeError('revert needs the message to roll back to', { code: 'bad-request' });
+    const client = await userClient(timeoutMs);
+    let session;
+    try { session = await client.revert(id, { messageID, partID, directory: cwd || null, timeoutMs }); }
+    catch (e) { if (isConnErr(e)) locator.invalidate(e.message); throw new OpencodeServeError(`OpenCode could not roll back ${id}: ${e.message}`, { status: e.status, code: e.code, cause: e }); }
+    convo.delete(id); markDirty('revert');
+    return session;
+  }
+  /** Undo a staged rollback (OpenCode's own `unrevert` = the v1 "clear"). */
+  async function unrevert(id, { cwd = null, timeoutMs = READ_TIMEOUT_MS } = {}) {
+    const client = await userClient(timeoutMs);
+    let session;
+    try { session = await client.unrevert(id, { directory: cwd || null, timeoutMs }); }
+    catch (e) { if (isConnErr(e)) locator.invalidate(e.message); throw new OpencodeServeError(`OpenCode could not restore the rolled-back messages of ${id}: ${e.message}`, { status: e.status, code: e.code, cause: e }); }
+    convo.delete(id); markDirty('unrevert');
+    return session;
+  }
+
+  /** The pending asks (piece (b)). The live lane keeps this map warm from
+   *  `question.asked/replied/rejected`; a caller with `refresh` re-reads the
+   *  authoritative list (an attach after a page reload does exactly that, so
+   *  a pending card survives the reload). */
+  async function pendingQuestions({ sessionId = null, refresh = false, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+    if (refresh) {
+      const client = await userClient(timeoutMs);
+      const list = await client.questions({ timeoutMs });
+      live.questions.clear();
+      for (const q of Array.isArray(list) ? list : []) if (q && q.id) live.questions.set(String(q.id), { ...q, at: now() });
+    }
+    const all = [...live.questions.values()];
+    return sessionId ? all.filter((q) => q.sessionID === sessionId) : all;
+  }
+  /** Answer an ask through the REAL route. `answers` is either OpenCode's own
+   *  positional array-of-arrays, or the card's question-text map (converted
+   *  here -- the conversion is PURE and lives with the shape it belongs to). */
+  async function answerQuestion(requestId, answers, { timeoutMs = READ_TIMEOUT_MS } = {}) {
+    let q = live.questions.get(String(requestId)) || null;
+    // THE CARD'S MAP IS KEYED BY QUESTION TEXT, so converting it back to
+    // OpenCode's positional form NEEDS the question list. A server that
+    // restarted between rendering the card and the user pressing Submit has an
+    // empty warm map, and converting against nothing produced `[]` → "no
+    // answers", i.e. a dead Submit on a perfectly answerable ask. Re-read the
+    // authoritative list once instead (positional answers need no lookup).
+    if (!q && !Array.isArray(answers)) {
+      try { await pendingQuestions({ refresh: true, timeoutMs }); q = live.questions.get(String(requestId)) || null; } catch { }
+    }
+    const positional = Array.isArray(answers)
+      ? answers.map((a) => (Array.isArray(a) ? a.map(String) : [String(a)]))
+      : askAnswersToPositional(normalizeAskQuestions(q?.questions), answers || {});
+    if (!positional.length) throw new OpencodeServeError(`no answers for question ${requestId}`, { code: 'bad-request' });
+    const client = await userClient(timeoutMs);
+    try { await client.questionReply(requestId, positional, { timeoutMs }); }
+    catch (e) { if (isConnErr(e)) locator.invalidate(e.message); throw new OpencodeServeError(`OpenCode refused the answer to ${requestId}: ${e.message}`, { status: e.status, code: e.code, cause: e }); }
+    live.questions.delete(String(requestId));
+    if (q?.sessionID) convo.delete(q.sessionID);
+    markDirty('question-replied');
+    return { ok: true, sessionID: q?.sessionID || null, answers: positional };
+  }
+  async function rejectQuestion(requestId, { timeoutMs = READ_TIMEOUT_MS } = {}) {
+    const q = live.questions.get(String(requestId)) || null;
+    const client = await userClient(timeoutMs);
+    try { await client.questionReject(requestId, { timeoutMs }); }
+    catch (e) { if (isConnErr(e)) locator.invalidate(e.message); throw new OpencodeServeError(`OpenCode refused the rejection of ${requestId}: ${e.message}`, { status: e.status, code: e.code, cause: e }); }
+    live.questions.delete(String(requestId));
+    if (q?.sessionID) convo.delete(q.sessionID);
+    markDirty('question-rejected');
+    return { ok: true, sessionID: q?.sessionID || null };
+  }
+
+  /** A shell the SERVE owns, on the serve's machine (piece (c)). Returns
+   *  everything the caller needs to bridge it onto the normal ws terminal
+   *  path -- INCLUDING the ws url + auth header, which is why this value
+   *  never leaves the server process. A `cwd` boots an OpenCode instance for
+   *  that tree (measured); it is the user's own explicit "open a terminal
+   *  HERE", never something a poll does. */
+  async function openPty({ cwd = null, command = null, args = null, title = null, env = null, timeoutMs = PTY_TIMEOUT_MS } = {}) {
+    const client = await userClient(timeoutMs);
+    let pty;
+    try { pty = await client.ptyCreate({ cwd, command, args, title, env, directory: cwd || null, timeoutMs }); }
+    catch (e) { if (isConnErr(e)) locator.invalidate(e.message); throw new OpencodeServeError(`OpenCode could not open a terminal${cwd ? ' in ' + cwd : ''}: ${e.message}`, { status: e.status, code: e.code, cause: e }); }
+    if (!pty || typeof pty.id !== 'string') throw new OpencodeServeError('OpenCode returned no pty id', { code: 'protocol' });
+    // A ticket is only mintable on a SECURED serve (1.18.29 answers
+    // PtyForbiddenError on an unsecured one and the ws needs none) -- try, and
+    // connect without it when the serve says no. The ticket never leaves here.
+    let ticket = null;
+    try { ticket = (await client.ptyTicket(pty.id, { directory: cwd || null, timeoutMs: READ_TIMEOUT_MS }))?.ticket || null; } catch { ticket = null; }
+    return { pty, url: client.ptyConnectUrl(pty.id, { ticket, directory: cwd || null }), auth: client.authHeader(), ticketed: !!ticket };
+  }
+  async function closePty(ptyId, { cwd = null, timeoutMs = READ_TIMEOUT_MS } = {}) {
+    const client = await userClient(timeoutMs);
+    try { await client.ptyRemove(ptyId, { directory: cwd || null, timeoutMs }); } catch (e) { throw new OpencodeServeError(`OpenCode could not close terminal ${ptyId}: ${e.message}`, { status: e.status, code: e.code, cause: e }); }
+    return { ok: true };
+  }
+  async function resizePty(ptyId, { rows, cols, cwd = null, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+    const client = await locator.client({ budgetMs: timeoutMs });
+    if (!client) return { ok: false };                 // a resize is not worth an error dialog
+    try { await client.ptyResize(ptyId, { rows, cols, directory: cwd || null, timeoutMs }); return { ok: true }; }
+    catch { return { ok: false }; }
+  }
+  /** The agent's own todo list for a conversation (cheap v1 route). */
+  async function todos(id, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+    const client = await userClient(timeoutMs);
+    return client.todo(id, { timeoutMs });
+  }
+  /** This serve's in-process busy map (piece (f) rung 1). */
+  async function statusMap({ timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+    const client = await userClient(timeoutMs);
+    const map = await client.sessionStatus({ timeoutMs });
+    live.statuses.clear();
+    for (const [k, v] of Object.entries(map || {})) live.statuses.set(String(k), v);
+    return map || {};
+  }
+
+  /** ARM THE LIVE LANE (piece (d)). `makeLane` is injected so these facts
+   *  never hard-depend on the event module's IO inside a unit test. */
+  function armLive(makeLane) {
+    if (live.lane) return live.lane;
+    live.lane = makeLane({
+      locator,
+      onEvent: (info) => {
+        // A (RE)CONNECT IS THE ONLY MOMENT WE KNOW WE MISSED EVENTS. The busy
+        // map is fed by `session.status` frames, so a serve that was already
+        // running a turn when the stream came up would read 'stopped' until
+        // its NEXT status change — the honest-liveness rung 1 silently blind
+        // for the length of a turn. `/session/status` is the authoritative
+        // answer, needs no directory and boots no instance (measured), so the
+        // reconnect pays for one cheap read.
+        if (info.kind === 'connected') { statusMap().catch(() => { }); }
+        if (info.kind === 'status' && info.sessionId) {
+          if (info.status && info.status.type && info.status.type !== 'idle') live.statuses.set(info.sessionId, info.status);
+          else live.statuses.delete(info.sessionId);
+          markDirty('status');
+          return;
+        }
+        if (info.kind === 'question') {
+          if (info.question) live.questions.set(String(info.questionId), { ...info.question, at: now() });
+          else live.questions.delete(String(info.questionId));
+          if (info.sessionId) convo.delete(info.sessionId);
+          markDirty('question');
+          return;
+        }
+        if (info.dirty?.conversation) convo.delete(info.dirty.conversation);
+        if (info.dirty?.sessions || info.dirty?.conversation) markDirty(info.kind);
+      },
+      // the STORE-WATCH lane: another opencode process (a TUI) wrote the
+      // sqlite. We do not know WHAT changed -- only that the list must be
+      // re-read, which is exactly what dirty means.
+      onExternal: (reason) => { convo.clear(); markDirty(reason || 'store'); },
+      onState: () => { try { onChange?.({ reason: 'lane' }); } catch { } },
+      log,
+    });
+    return live.lane;
+  }
+  function stopLive() { try { live.lane?.stop?.(); } catch { } live.lane = null; }
+
+  function stateOf() {
+    const laneSt = live.lane?.state?.() || null;
+    return { ...locator.state(), cachedSessions: cache.list ? cache.list.length : null, cacheAgeMs: cache.at ? now() - cache.at : null, negativeUntil: cache.negativeUntil, lastError: cache.lastError || locator.state().lastError, namesKnown: names.size, skippedWorktrees: cache.skippedWorktrees || [],
+      liveLane: laneSt, liveLaneHealthy: laneHealthy(), pendingQuestions: live.questions.size, busySessions: live.statuses.size, dirty: !!cache.dirty };
+  }
+  return { discover, sessionModel, readConversation, forkSession, invalidate, state: stateOf, reasonUnavailable, locator, _names: names,
+    revertTo, unrevert, pendingQuestions, answerQuestion, rejectQuestion, openPty, closePty, resizePty, todos, statusMap,
+    armLive, stopLive, _live: live };
 }
 
 // ── the serve-backed reader ──
@@ -960,15 +1420,65 @@ const NULL_FACTS = Object.freeze({
   readConversation: async (id) => { throw new OpencodeServeError(`OpenCode serve is not configured on this instance (conversation ${id})`, { code: 'unconfigured' }); },
   forkSession: async () => { throw new OpencodeServeError('OpenCode serve is not configured on this instance', { code: 'unconfigured' }); },
   invalidate: () => { },
-  state: () => ({ installed: false, ready: false, parked: false, caps: null, configured: false, autostart: false, envForced: null, stopped: true }),
+  state: () => ({ installed: false, ready: false, parked: false, caps: null, configured: false, autostart: false, envForced: null, stopped: true, liveLane: null, liveLaneHealthy: false, pendingQuestions: 0, busySessions: 0 }),
   reasonUnavailable: () => 'OpenCode serve is not configured on this instance',
   locator: null,
+  // the S9-remainder action surface: UNCONFIGURED must say so, never no-op
+  // (the "no silent failures" law -- a user action that quietly does nothing
+  // is the worst possible answer)
+  revertTo: async () => { throw new OpencodeServeError('OpenCode serve is not configured on this instance', { code: 'unconfigured' }); },
+  unrevert: async () => { throw new OpencodeServeError('OpenCode serve is not configured on this instance', { code: 'unconfigured' }); },
+  pendingQuestions: async () => [],
+  answerQuestion: async () => { throw new OpencodeServeError('OpenCode serve is not configured on this instance', { code: 'unconfigured' }); },
+  rejectQuestion: async () => { throw new OpencodeServeError('OpenCode serve is not configured on this instance', { code: 'unconfigured' }); },
+  openPty: async () => { throw new OpencodeServeError('OpenCode serve is not configured on this instance', { code: 'unconfigured' }); },
+  closePty: async () => ({ ok: false }),
+  resizePty: async () => ({ ok: false }),
+  todos: async () => [],
+  statusMap: async () => ({}),
+  armLive: () => null,
+  stopLive: () => { },
 });
 /** Wire the locator + facts for this process. Called ONCE by cli-env (ORCH);
  *  tests call it with a mock spawn/fetch. Returns the facts. */
 function install(opts) {
-  const locator = opts.locator || createServeLocator(opts);
+  // FOLLOW THE SERVE (see the lane block below): the locator's own state
+  // callback is the only place that knows "a serve is now reachable on port
+  // N". Wrapping it HERE — before the locator exists — is what makes the hook
+  // real; the caller's onState still runs first and unchanged.
+  const laneRef = { lane: null, lastPort: null };
+  const locatorOpts = opts.locator ? opts : {
+    ...opts,
+    onState: (st) => {
+      try { opts.onState?.(st); } catch (e) { (opts.log || console).warn?.(`[opencode-serve] onState failed: ${e.message}`); }
+      const port = st && st.ready ? (st.port || null) : null;
+      if (!port) { laneRef.lastPort = null; return; }
+      if (port === laneRef.lastPort) return;      // NOT every notify(): the guard samples one a minute
+      laneRef.lastPort = port;
+      try { laneRef.lane?.kick(); } catch { }
+    },
+  };
+  const locator = opts.locator || createServeLocator(locatorOpts);
   installed = createFacts(locator, opts);
+  // THE LIVE LANE replaces the 10s list poll (piece (d) of B-eac2). It is armed
+  // here, not lazily at the first discovery, because its whole job is to notice
+  // changes NOBODY asked about; `makeLane` is injectable so a unit test can arm
+  // a fake one, and `false` disables it entirely (the timer fallback returns).
+  if (opts.live !== false) {
+    const makeLane = opts.makeLane || ((deps) => require('./opencode-events').createLiveLane({ ...deps, storeDirs: opts.storeDirs }));
+    try {
+      const lane = installed.armLive(makeLane);
+      lane.start();
+      // FOLLOW THE SERVE. The stream backs off to 30s while there is nothing
+      // to connect to (the service is off, the keeper is respawning), so
+      // "enable the plugin" or "the serve came back on a NEW port" would
+      // otherwise take up to half a minute to become live again. The locator
+      // already tells us: kick on the READY EDGE (and on a port change) —
+      // never on every notify(), which fires each guard sample and would
+      // re-open the socket once a minute for nothing.
+      laneRef.lane = lane;
+    } catch (e) { (opts.log || console).warn?.(`[opencode-serve] live lane could not start: ${e.message} -- falling back to the timed list refresh`); }
+  }
   // …and enforce the ops kill switch AT BOOT rather than at the first
   // discovery: with VIBESPACE_OPENCODE_SERVE=0 a serve that outlived a restart
   // must be STOPPED, and an instance nobody is polling (no client connected)
@@ -983,13 +1493,14 @@ function install(opts) {
   return installed;
 }
 function facts() { return installed || NULL_FACTS; }
-function uninstall() { const f = installed; installed = null; try { f?.locator?.stop?.(); } catch { } }
+function uninstall() { const f = installed; installed = null; try { f?.stopLive?.(); } catch { } try { f?.locator?.stop?.(); } catch { } }
 
 module.exports = {
   OpencodeServeClient, OpencodeServeError, createServeLocator, createFacts, OpencodeServeSessionMessages,
   messagesToAcpRecords, acpKindOfTool, acpStatusOfState, sessionTitle, install, facts, uninstall,
   bootstrappableWorktree, unsafeWorktreeReason, ensureServeCwd, serveCwdPath, readProcUsage,
+  normalizeAskQuestions, askAnswerMap, askAnswersToPositional, revertNoticeText, EXTERNAL_WINDOW_MS,
   serveEnvOverride, decideAutostart, SERVICE_PLUGIN_ID: 'opencode-serve',
   DEFAULT_TIMEOUT_MS, READ_TIMEOUT_MS, LIST_CACHE_MS, NEGATIVE_CACHE_MS, MAX_CRASHES, FORK_PATH,
-  NAME_MAX_BYTES, GUARD_CPU_PCT, GUARD_RSS_BYTES, GUARD_SAMPLE_MS, RUNAWAY_COOLDOWN_MS,
+  NAME_MAX_BYTES, GUARD_CPU_PCT, GUARD_RSS_BYTES, GUARD_SAMPLE_MS, RUNAWAY_COOLDOWN_MS, MIN_REFRESH_MS, PTY_TIMEOUT_MS,
 };

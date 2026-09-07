@@ -1493,6 +1493,77 @@ class ChatView {
   // Per-message metadata popup (left-strip right-click): everything the
   // normalizer knows about the record — serving model, token usage, request
   // identity, transcript position — plus a Copy-JSON escape hatch.
+  /** The OpenCode roll-back rows on the message-metadata popup. Offered on a
+   *  USER message only: OpenCode's revert takes a `messageID` and means
+   *  "restore the tree to before this message", which is exactly the prompt
+   *  boundary a reader points at. `Restore` appears only while a roll-back is
+   *  actually staged (the session row's own `opencode.revert`), never as a
+   *  button whose only outcome could be "nothing happened". */
+  _addOpencodeRevertActions(pop, msg) {
+    const ids = this._getSessionIds?.() || {};
+    if ((ids.backend || 'claude') !== 'opencode' || !ids.backendSessionId) return;
+    const row = this.app?.sidebar?._allSessions?.find((s) => (s.backend || 'claude') === 'opencode'
+      && (s.backendSessionId || s.sessionId) === ids.backendSessionId);
+    const staged = row?.opencode?.revert || null;
+    const msgId = msg.role === 'user' ? (msg.webuiMsgId || null) : null;
+    if (!msgId && !staged) return;
+    const mk = (label, fn) => {
+      const b = document.createElement('button');
+      // …-action marks it as NOT the "Copy as JSON" button: the popup's own
+      // click handler keys on `.msg-meta-copy` (the shared button style), and
+      // without the marker every roll-back click ALSO copied the metadata and
+      // toasted "Copied" over the real result (caught by the browser leg)
+      b.className = 'msg-meta-copy msg-meta-action';
+      b.textContent = label;
+      b.onclick = async () => {
+        b.disabled = true;
+        try { await fn(); } finally { pop.remove(); }
+      };
+      pop.appendChild(b);
+      return b;
+    };
+    const post = async (url, body, okMsg) => {
+      const r = await fetchJson(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, host: ids.host || null }) });
+      if (r?.error) { showToast(r.error, { type: 'error' }); return false; }
+      showToast(okMsg);
+      // the broadcast echo re-renders the sidebar and adds the in-line line
+      // for EVERY client including this one — never chain UI on the echo
+      // (multi-client law), so the toast above is this client's own receipt
+      return true;
+    };
+    if (msgId && !staged) {
+      mk(t('Roll back to before this message'), async () => {
+        const ok = await showConfirmDialog({
+          title: t('Roll back this conversation?'),
+          message: t('OpenCode will restore the files to the snapshot taken before this message and stage every later message for removal. Sending a new prompt makes it permanent; "Restore rolled-back messages" undoes it.'),
+          confirmText: t('Roll back'),
+          danger: true,
+        });
+        if (!ok) return;
+        await post('/api/opencode/revert', { id: ids.backendSessionId, messageID: msgId, cwd: ids.cwd || null }, t('Rolled back'));
+      });
+    }
+    if (staged) {
+      mk(t('Restore rolled-back messages'), () => post('/api/opencode/unrevert', { id: ids.backendSessionId, cwd: ids.cwd || null }, t('Restored')));
+    }
+  }
+  /** The store changed under an open window (this client or another one).
+   *  The MESSAGES do not change on a roll-back — OpenCode stages them for
+   *  removal, it does not delete them — so re-attaching the whole window would
+   *  be churn for nothing: what changed is the session's roll-back state, and
+   *  that is exactly what the line says. A fresh open renders the same
+   *  sentence from the store (revertNoticeText in src/opencode-serve.js). */
+  noteOpencodeChange(msg) {
+    const ids = this._getSessionIds?.() || {};
+    if ((ids.backend || 'claude') !== 'opencode') return;
+    if (msg.sessionId && ids.backendSessionId && msg.sessionId !== ids.backendSessionId) return;
+    const text = msg.kind === 'revert' ? t('Rolled back — everything below is staged for removal and the files were restored. The next prompt makes it permanent.')
+      : msg.kind === 'unrevert' ? t('Roll-back undone — the messages below are live again.')
+        : msg.kind === 'question-replied' ? t('A question in this conversation was answered.')
+          : msg.kind === 'question-rejected' ? t('A question in this conversation was dismissed.') : null;
+    if (text) this._renderers.appendSystem(text);
+  }
+
   _showMsgMeta(msg, x, y) {
     document.querySelectorAll('.msg-meta-pop').forEach(p => p.remove());
     const meta = msg.meta || {};
@@ -1543,11 +1614,19 @@ class ChatView {
     pop.style.top = Math.min(y, window.innerHeight - pop.offsetHeight - 8) + 'px';
     pop.addEventListener('click', (e) => {
       if (e.target.classList.contains('copyable')) { copyText(e.target.textContent); showToast(t('Copied')); }
-      else if (e.target.classList.contains('msg-meta-copy')) {
+      else if (e.target.classList.contains('msg-meta-copy') && !e.target.classList.contains('msg-meta-action')) {
         copyText(JSON.stringify({ role: msg.role, ts: msg.ts, uuid: msg.uuid, srcLine: msg.srcLine, toolName: msg.toolName, ...meta }, null, 2));
         showToast(t('Copied')); pop.remove();
       }
     });
+    // OPENCODE ROLL-BACK (S9 remainder piece (a), B-eac2): OpenCode can restore
+    // the working tree to the snapshot taken before a message and stage
+    // everything after it for removal. It is a real filesystem change on the
+    // machine the conversation lives on, so it asks first and reports what
+    // happened; the state it produces comes back through the store (the
+    // conversation re-reads with a "rolled back to here" notice) and the
+    // `opencode-updated` broadcast tells every other client.
+    this._addOpencodeRevertActions(pop, msg);
     const close = (e) => { if (!pop.contains(e.target)) { pop.remove(); document.removeEventListener('mousedown', close, true); } };
     document.addEventListener('mousedown', close, true);
     // Billing-account row (2.266.1, user request): resolved async from the

@@ -354,6 +354,19 @@ class App {
       if (msg.reason && msg.reason !== prev) showToast(`${BACKEND_META[msg.backend].label || msg.backend}: ${msg.reason}`, { type: 'error' });
       try { this.sidebar?._render?.(); } catch {}
     });
+    // S9 remainder (B-eac2): a conversation was rolled back / restored, or an
+    // ask was answered, on THIS or another client. Persistent state changed →
+    // every browser must see it without a refresh (multi-client law): the
+    // session list carries the new roll-back state, and any open window on
+    // that conversation says what happened in-line.
+    this.ws.onGlobal((msg) => {
+      if (msg.type !== 'opencode-updated') return;
+      try { this.sidebar?._poll?.(); } catch {}
+      for (const view of this.sessions?.values?.() || []) {
+        if (!view?.noteOpencodeChange) continue;
+        try { view.noteOpencodeChange(msg); } catch {}
+      }
+    });
     // A harness's background service is controlled by a built-in PLUGIN
     // (opencode → 'opencode-serve'): enable/disable/"asked once" are instance
     // state, so every client learns them from the same broadcast (multi-client

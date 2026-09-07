@@ -199,6 +199,13 @@ const opencodeServeAutostart = () => opencodeServeModule.decideAutostart({
   pluginWantsUp: (() => { try { return !!getPlugins()?.wantsServiceUp?.(opencodeServeModule.SERVICE_PLUGIN_ID); } catch { return false; } })(),
 });
 let _opencodeStoreReason = null;
+/** THE FLOOR between two "the OpenCode store changed" pushes (see onChange).
+ *  Deliberately not as small as it could be: each push makes every open client
+ *  re-run the /api/sessions discovery sweep, and OUR OWN opencode turns write
+ *  the same sqlite the watch lane fires on — a 1s floor turned every live turn
+ *  into a 5x poll rate for every browser. 2s still beats the client's own 5s
+ *  poll (which is what "live" is measured against) at a bounded cost. */
+const OPENCODE_CHANGE_COALESCE_MS = 2000;
 const opencodeServe = opencodeServeModule.install({
   dataDir: path.join(rootDir, 'data'),
   command: () => ACP_COMMANDS.opencode || null,
@@ -207,6 +214,31 @@ const opencodeServe = opencodeServeModule.install({
   stopOnExit: true,
   autostart: opencodeServeAutostart,
   telemetry: (ev) => { try { getTelemetry()?.record({ kind: 'event', ...ev }); } catch { } },
+  // THE LIVE LANE'S DIRTY SIGNAL IS A CACHE INVALIDATION A CLIENT ALSO CACHES
+  // (S9 remainder piece (d), B-eac2): the sidebar holds the merged session
+  // list, so "the OpenCode store changed" must NOTIFY — the law, and the only
+  // way a conversation another process (a TUI) just touched appears without
+  // waiting for that browser's own 5s poll. COALESCED on purpose: a
+  // serve-driven turn dirties the cache on every streamed part, and the
+  // recomputation itself is single-flight + floored inside the facts, so N
+  // clients reacting to one signal still cost ONE listing.
+  onChange: (() => {
+    let timer = null, pendingReason = null;
+    return ({ reason } = {}) => {
+      // 'lane' is the SSE/watch connection state changing, not the store;
+      // 'messages' is a streamed part of a turn — it moves no row the sidebar
+      // shows that the client's own 5s poll will not pick up, and pushing one
+      // per delta would make every browser re-run /api/sessions at stream rate
+      if (reason === 'lane' || reason === 'messages') return;
+      pendingReason = reason || 'store';
+      if (timer) return;
+      timer = setTimeout(() => {
+        const r = pendingReason; timer = null; pendingReason = null;
+        try { broadcast?.({ type: 'opencode-updated', kind: 'store', reason: r }); } catch { }
+      }, OPENCODE_CHANGE_COALESCE_MS);
+      timer.unref?.();
+    };
+  })(),
   onCaps: (caps) => {
     setVerifiedCap('opencode', 'fork', !!caps.fork);
     try { broadcast?.({ type: 'harness-caps-updated', backend: 'opencode', caps: { fork: !!caps.fork } }); } catch { }

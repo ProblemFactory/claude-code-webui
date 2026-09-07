@@ -25,7 +25,22 @@ export function installSessionLifecycle(App, ctx = {}) {
     });
   },
 
-  createSession({ cwd, name, model, permission, extraArgs, resumeId, mode, syncId, effort, outputStyle, autoResume, fork, hostId, keeperSid, backend = 'claude', backendSessionId, agentKind, agentRole, agentNickname, sourceKind, parentThreadId, initialMessage, initialCommand, forkAtUuid, forkTitle, taskId, accountId, modelLock, lockModel, ephemeral = false, winBounds, recreateCwd = false, ignoreNoConvo = false, onCreateResult }) {
+  /** "Open terminal in this session" (S9 remainder piece (c), B-eac2): a shell
+   *  the OpenCode SERVE owns, in the conversation's own directory, opened as a
+   *  normal VibeSpace terminal window. It runs on the machine the serve runs
+   *  on — which is why it is offered only where that machine is this one (the
+   *  serve's pty websocket is loopback-only; the server says so if asked). */
+  openOpencodeTerminal(session) {
+    const cwd = stripCwdHostLabel(session?.cwd || '') || undefined;
+    this.createSession({
+      backend: 'shell', mode: 'terminal', cwd,
+      name: session?.name ? `${session.name} — terminal` : 'OpenCode terminal',
+      model: null, permission: null, effort: null, extraArgs: '',
+      opencodePty: true,
+    });
+  },
+
+  createSession({ cwd, name, model, permission, extraArgs, resumeId, mode, syncId, effort, outputStyle, autoResume, fork, hostId, keeperSid, backend = 'claude', backendSessionId, agentKind, agentRole, agentNickname, sourceKind, parentThreadId, initialMessage, initialCommand, forkAtUuid, forkTitle, taskId, accountId, modelLock, lockModel, ephemeral = false, winBounds, recreateCwd = false, ignoreNoConvo = false, opencodePty = false, onCreateResult }) {
     try { track('event', `session-create:${backend || 'claude'}:${mode || 'default'}`); } catch {}
     // FIRST USE of a harness whose history lives behind an opt-in background
     // service (opencode → the 'opencode-serve' plugin, default OFF since
@@ -152,6 +167,10 @@ export function installSessionLifecycle(App, ctx = {}) {
       lockModel: lockModel || undefined, // explicit lock TARGET (review-caught: inferring from the spawn model re-targeted to claude.defaultModel)
       recreateCwd: recreateCwd || undefined, // B-7812: user danger-confirmed rebuilding a missing cwd
       ignoreNoConvo: ignoreNoConvo || undefined, // 2.227.3: user chose to retry past the no-transcript breaker
+      // S9 remainder (c): this terminal is a pty the OpenCode SERVE owns, not
+      // a local shell. The server bridges its websocket onto the normal
+      // terminal path; the serve's port never reaches this browser.
+      opencodePty: opencodePty || undefined,
     };
 
     // Request/reply via ws.request (2026-07-03 review structural fix):

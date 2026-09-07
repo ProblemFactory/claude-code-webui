@@ -1,0 +1,203 @@
+#!/usr/bin/env node
+'use strict';
+/**
+ * REMOTE-side OpenCode-serve op runner — the FALLBACK RUNG for checkout-less
+ * ssh hosts (S9 remainder piece (e), B-eac2). STATIC tracked file, shipped to
+ * ~/.vibespace/bin like vibespace-usage-scan, and PARITY-GUARDED against the
+ * shared implementation by scripts/test-opencode-remote.mjs: an ssh host has
+ * no VibeSpace checkout, so it cannot `require('../src/opencode-serve.js')` —
+ * this file is the documented single-file exception, and the suite fails the
+ * moment its op names, required params or result keys drift from
+ * src/opencode-remote.js's table.
+ *
+ * PREFERRED RUNGS FIRST: this machine's own facts (hostId falsy) and the
+ * `opencode-serve` agentd op on a PAIRED device both run the REAL shared
+ * module. This script exists only for an ssh host with no daemon.
+ *
+ * USAGE:  echo '{"op":"discover","params":{}}' | node vibespace-opencode-op
+ *         → one JSON object on stdout: {ok:true, result:{…}} | {ok:false, error:"…"}
+ *
+ * RESOURCE DISCIPLINE (the 2.369.42 runaway, in full force on someone else's
+ * machine): the serve is started from its own EMPTY throwaway git repo
+ * (~/.vibespace/opencode-serve-cwd) so OpenCode's upward git-worktree walk
+ * cannot make the host's home directory a project; ONLY v1 routes are used
+ * (every /api/session/{id}/… v2 route boots an instance that recursively
+ * indexes + inotify-watches that tree — measured); the directory-less session
+ * listing is the only listing; and a serve we started is left running for the
+ * next op with its port recorded, never re-spawned per call.
+ */
+const fs = require('fs');
+const os = require('os');
+const net = require('net');
+const path = require('path');
+const http = require('http');
+const { spawn, execFile } = require('child_process');
+
+const HOME = process.env.HOME || os.homedir();
+const BASE = path.join(HOME, '.vibespace');
+const RECORD = path.join(BASE, 'opencode-serve.json');
+const CWD = path.join(BASE, 'opencode-serve-cwd');
+const CMD = process.env.OPENCODE_CMD || 'opencode';
+const BOOT_TIMEOUT_MS = 20000;
+const DEFAULT_TIMEOUT_MS = 8000;
+const LIST_LIMIT = 500;
+const NAME_MAX_BYTES = 1 << 20;
+
+function out(obj) { process.stdout.write(JSON.stringify(obj) + '\n'); }
+function fail(msg) { out({ ok: false, error: String(msg && msg.message ? msg.message : msg) }); process.exit(0); }
+
+function req(port, method, route, { body = null, timeoutMs = DEFAULT_TIMEOUT_MS, maxBytes = 0 } = {}) {
+  return new Promise((resolve, reject) => {
+    const payload = body != null ? Buffer.from(JSON.stringify(body)) : null;
+    const r = http.request({ host: '127.0.0.1', port, method, path: route, timeout: timeoutMs,
+      headers: Object.assign({ accept: 'application/json' }, payload ? { 'content-type': 'application/json', 'content-length': payload.length } : {}) },
+      (res) => {
+        const chunks = []; let n = 0; let over = false;
+        res.on('data', (c) => { n += c.length; if (maxBytes && n > maxBytes) { over = true; res.destroy(); return; } chunks.push(c); });
+        res.on('end', () => {
+          if (over) return reject(new Error(`${method} ${route} response exceeded ${maxBytes} bytes`));
+          const text = Buffer.concat(chunks).toString('utf8');
+          let json = null; try { json = text ? JSON.parse(text) : null; } catch { }
+          if (res.statusCode >= 400) return reject(new Error(`${method} ${route} -> HTTP ${res.statusCode}${json && json.data && json.data.message ? ': ' + json.data.message : ''}`));
+          resolve(json);
+        });
+        res.on('error', reject);
+      });
+    r.on('timeout', () => { r.destroy(new Error(`${method} ${route} timed out after ${timeoutMs}ms`)); });
+    r.on('error', reject);
+    if (payload) r.write(payload);
+    r.end();
+  });
+}
+const q = (obj) => {
+  const parts = [];
+  for (const k of Object.keys(obj || {})) { const v = obj[k]; if (v === undefined || v === null || v === '') continue; parts.push(`${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`); }
+  return parts.length ? '?' + parts.join('&') : '';
+};
+const enc = encodeURIComponent;
+
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.once('error', reject);
+    srv.listen(0, '127.0.0.1', () => { const p = srv.address().port; srv.close(() => resolve(p)); });
+  });
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function readRecord() { try { const r = JSON.parse(fs.readFileSync(RECORD, 'utf8')); return r && r.port > 0 ? r : null; } catch { return null; } }
+function writeRecord(r) {
+  try {
+    fs.mkdirSync(BASE, { recursive: true });
+    const tmp = RECORD + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(r));
+    fs.renameSync(tmp, RECORD);         // atomic, like every VibeSpace json write
+  } catch { }
+}
+async function healthy(port) { try { const h = await req(port, 'GET', '/global/health', { timeoutMs: 2500 }); return !!h && h.healthy !== false; } catch { return false; } }
+
+function ensureCwd() {
+  fs.mkdirSync(CWD, { recursive: true });
+  try { fs.writeFileSync(path.join(CWD, 'README'), 'VibeSpace runs `opencode serve` from this empty repo so OpenCode never adopts your home directory as a project.\n'); } catch { }
+  if (fs.existsSync(path.join(CWD, '.git'))) return Promise.resolve();
+  return new Promise((resolve) => execFile('git', ['init', '-q', CWD], { timeout: 10000 }, () => resolve()));
+}
+
+/** Reuse the recorded serve when it still answers, else start one. */
+async function locate() {
+  const rec = readRecord();
+  if (rec && await healthy(rec.port)) return rec.port;
+  await ensureCwd();
+  const port = await freePort();
+  const child = spawn(CMD, ['serve', '--port', String(port), '--hostname', '127.0.0.1', '--log-level', 'WARN'],
+    { cwd: CWD, env: process.env, detached: true, stdio: 'ignore' });
+  child.unref();
+  const until = Date.now() + BOOT_TIMEOUT_MS;
+  while (Date.now() < until) {
+    await sleep(300);
+    if (await healthy(port)) { writeRecord({ port, pid: child.pid || null, startedAt: Date.now(), cwd: CWD }); return port; }
+  }
+  try { process.kill(child.pid, 'SIGTERM'); } catch { }
+  throw new Error(`opencode serve did not answer on 127.0.0.1:${port} within ${BOOT_TIMEOUT_MS}ms (is \`${CMD}\` installed on this host?)`);
+}
+
+// ── the op table MIRROR (parity-pinned; keep the names/params/result keys
+//    byte-compatible with src/opencode-remote.js) ────────────────────────────
+const OPS = {
+  async state(port) {
+    let version = null, caps = null;
+    try { version = (await req(port, 'GET', '/global/health'))?.version || null; } catch { }
+    try { const doc = await req(port, 'GET', '/doc', { timeoutMs: 15000 }); caps = { fork: !!(doc && doc.paths && doc.paths['/session/{sessionID}/fork']) }; } catch { }
+    return { installed: true, ready: true, parked: false, parkedKind: null, version, port, caps, liveLaneHealthy: false, pendingQuestions: 0, busySessions: 0, lastError: null };
+  },
+  async discover(port) {
+    // RUNG 1 = the directory-less listing (boots no instance). RUNG 2 (a
+    // per-project scope query) is deliberately NOT taken here: an ssh host's
+    // project rows are not ours to bootstrap.
+    const list = await req(port, 'GET', '/session' + q({ limit: LIST_LIMIT }), { timeoutMs: 15000, maxBytes: 8 << 20 }) || [];
+    const sessions = [];
+    for (const s of list) {
+      if (!s || typeof s.id !== 'string') continue;
+      let name = typeof s.title === 'string' && !/^New session - /.test(s.title) ? s.title.trim() : '';
+      sessions.push({
+        backend: 'opencode', backendSessionId: s.id, sessionId: s.id, sessionKey: 'opencode:' + s.id,
+        cwd: s.directory || '', startedAt: (s.time && (s.time.updated || s.time.created)) || Date.now(),
+        createdAt: (s.time && s.time.created) || null, status: 'stopped', name,
+        agentKind: s.parentID ? 'subagent' : 'primary', parentThreadId: s.parentID || null,
+        webuiId: null, webuiName: null, webuiMode: null,
+        opencode: { slug: s.slug || null, agent: s.agent || null, model: s.model ? `${s.model.providerID}/${s.model.id}` : null, projectID: s.projectID || null, revert: s.revert ? { messageID: s.revert.messageID || '', files: Array.isArray(s.revert.files) ? s.revert.files.length : 0 } : null, questions: 0, busy: null },
+      });
+    }
+    sessions.sort((a, b) => b.startedAt - a.startedAt);
+    return { sessions };
+  },
+  async read(port, p) {
+    const [session, messages] = await Promise.all([
+      req(port, 'GET', `/session/${enc(p.id)}`, { timeoutMs: 15000 }),
+      req(port, 'GET', `/session/${enc(p.id)}/message`, { timeoutMs: 30000, maxBytes: 64 << 20 }),
+    ]);
+    // the ssh rung ships the RAW v1 payload; the hub turns it into
+    // 'acp-events' records with the shared messagesToAcpRecords(), so the
+    // synthesis has exactly one implementation
+    return { session: session || null, messages: Array.isArray(messages) ? messages : [], records: null };
+  },
+  async revert(port, p) { return { session: await req(port, 'POST', `/session/${enc(p.id)}/revert` + q({ directory: p.cwd }), { body: p.partID ? { messageID: p.messageID, partID: p.partID } : { messageID: p.messageID }, timeoutMs: 20000 }) }; },
+  async unrevert(port, p) { return { session: await req(port, 'POST', `/session/${enc(p.id)}/unrevert` + q({ directory: p.cwd }), { timeoutMs: 20000 }) }; },
+  async questions(port, p) {
+    const list = await req(port, 'GET', '/question', { timeoutMs: 10000 }) || [];
+    const all = Array.isArray(list) ? list : [];
+    return { questions: p && p.sessionId ? all.filter((x) => x && x.sessionID === p.sessionId) : all };
+  },
+  async answer(port, p) {
+    const answers = Array.isArray(p.answers) ? p.answers.map((a) => (Array.isArray(a) ? a.map(String) : [String(a)])) : null;
+    if (!answers || !answers.length) throw new Error('the ssh rung needs POSITIONAL answers (the hub converts the card map)');
+    await req(port, 'POST', `/question/${enc(p.requestId)}/reply`, { body: { answers }, timeoutMs: 20000 });
+    return { ok: true, sessionID: null, answers };
+  },
+  async reject(port, p) { await req(port, 'POST', `/question/${enc(p.requestId)}/reject`, { timeoutMs: 20000 }); return { ok: true, sessionID: null }; },
+  async status(port) { return { statuses: await req(port, 'GET', '/session/status', { timeoutMs: 10000 }) || {} }; },
+  async todos(port, p) { return { todos: await req(port, 'GET', `/session/${enc(p.id)}/todo`, { timeoutMs: 10000 }) || [] }; },
+  // pty ops need a ws the HUB can reach; over ssh the serve's socket is not
+  // reachable from there. Refuse LOUDLY and name the reason — a rung that
+  // silently returned "ok" would leave a terminal window that never opens.
+  'pty-open': async () => { throw new Error('the OpenCode serve terminal is not available over the ssh rung (its websocket is loopback-only on that host) — pair the machine as a device, or open a normal remote terminal'); },
+  'pty-close': async () => { throw new Error('the OpenCode serve terminal is not available over the ssh rung'); },
+  'pty-resize': async () => { throw new Error('the OpenCode serve terminal is not available over the ssh rung'); },
+};
+
+async function main() {
+  let raw = '';
+  for await (const chunk of process.stdin) raw += chunk;
+  let msg;
+  try { msg = JSON.parse(raw || '{}'); } catch (e) { return fail('bad request json: ' + e.message); }
+  const op = String(msg.op || '');
+  const params = msg.params && typeof msg.params === 'object' ? msg.params : {};
+  const fn = OPS[op];
+  if (!fn) return fail(`unknown opencode op '${op}' (known: ${Object.keys(OPS).join(', ')})`);
+  try {
+    const port = await locate();
+    const result = await fn(port, params);
+    out({ ok: true, result });
+  } catch (e) { return fail(e); }
+  process.exit(0);
+}
+main().catch((e) => fail(e));

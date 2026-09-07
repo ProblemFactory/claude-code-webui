@@ -1122,6 +1122,10 @@ function serveSocks(mux, msg) {
 try { fs.unlinkSync(SOCK); } catch { }
 // One connection handler for EVERY transport: local unix socket accepts AND
 // outbound dial-out websockets (Transport B) — the stream shape is identical.
+/** THE daemon's OpenCode facts (S9 remainder piece (e)) — one per PROCESS.
+ *  See the `opencode-serve` op handler for why this may not live on `this`. */
+let ocFacts = null;
+
 function serveConnection(sock) {
   let authed = false;
   let upgrade = null;
@@ -1150,7 +1154,7 @@ function serveConnection(sock) {
           // per-op capability gating (three-tier design): consumers check the
           // capability, NEVER parse daemonVersion — unknown ops on an old
           // daemon get no reply and hang the request until its timeout
-          capabilities: ['probe', 'transcript-op', 'usage-scan', 'discovery-claims', 'place-secret', 'quota-refresh', 'usage-events', 'pool-orders', 'sysinfo', 'session-events', 'proc-list', 'peer-post'],
+          capabilities: ['probe', 'transcript-op', 'usage-scan', 'discovery-claims', 'place-secret', 'quota-refresh', 'usage-events', 'pool-orders', 'sysinfo', 'session-events', 'proc-list', 'peer-post', 'opencode-serve'],
         });
         return;
       }
@@ -1598,6 +1602,43 @@ function serveConnection(sock) {
             const r = await pm.postToPeer(peer, String(msg.text || ''));
             mux.control({ op: 'peer-post-result', id: msg.id, ok: !!r.ok, reason: r.reason || null, peerName: peer.name || null });
           } catch (e) { mux.control({ op: 'peer-post-result', id: msg.id, error: String(e.message || e) }); }
+        })();
+        return;
+      }
+      if (msg.op === 'opencode-serve') {
+        // The OpenCode serve on THIS machine (S9 remainder piece (e), B-eac2).
+        // The daemon bundles src/opencode-serve.js, so the serve is located /
+        // started and every op runs WHERE THE STORE IS -- the hub only names
+        // the machine and the op.
+        // ONE facts singleton PER DAEMON PROCESS, held in a module-level
+        // variable (`ocFacts`) and NOT on `this`: inside a Mux control handler
+        // `this` is the MUX — i.e. the CONNECTION — so a per-`this` cache is
+        // re-created on every reconnect, and each new install() arms another
+        // live lane (an SSE subscription + fs.watch handles) while the old one
+        // keeps running. A dial-out device reconnects on every link blip; the
+        // leak is silent and unbounded. The keeper, caches and event lane must
+        // live as long as the daemon, exactly as they do on the hub.
+        (async () => {
+          try {
+            const oc = require('./../opencode-serve.js');
+            const { runOpencodeOp } = require('./../opencode-remote.js');
+            if (!ocFacts) {
+              ocFacts = oc.install({
+                dataDir: path.join(process.env.HOME || require('os').homedir(), '.vibespace'),
+                command: () => process.env.OPENCODE_CMD || 'opencode',
+                env: () => process.env,
+                log: { warn: (m) => log(String(m)), error: (m) => log(String(m)) },
+                stopOnExit: true,
+                // a device's serve is wanted exactly when the hub asks for it:
+                // there is no plugin panel here, and an op that could never
+                // start the serve would make every remote action a dead end
+                autostart: true,
+              });
+            }
+            const r = await runOpencodeOp(ocFacts, String(msg.action || ''), msg.params || {});
+            // op REQUIRED on the reply (the 2.300.0 three-touch rule)
+            mux.control({ op: 'opencode-serve-result', id: msg.id, result: r });
+          } catch (e) { mux.control({ op: 'opencode-serve-result', id: msg.id, error: String(e.message || e) }); }
         })();
         return;
       }

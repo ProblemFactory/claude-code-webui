@@ -3,6 +3,19 @@
 // Generated after each i18n sweep; hand-edited for quality. Missing entries
 // fall back to English automatically.
 export default {
+  "A question in this conversation was answered.": "この会話の質問に回答がありました。",
+  "A question in this conversation was dismissed.": "この会話の質問は却下されました。",
+  "Open terminal in this session": "このセッションでターミナルを開く",
+  "OpenCode will restore the files to the snapshot taken before this message and stage every later message for removal. Sending a new prompt makes it permanent; \"Restore rolled-back messages\" undoes it.": "OpenCode はこのメッセージの直前のスナップショットにファイルを戻し、それ以降のメッセージをすべて削除予定にします。次のプロンプトを送ると確定します。「ロールバックしたメッセージを復元」で取り消せます。",
+  "Restore rolled-back messages": "ロールバックしたメッセージを復元",
+  "Restored": "復元しました",
+  "Roll back": "ロールバック",
+  "Roll back this conversation?": "この会話をロールバックしますか？",
+  "Roll back to before this message": "このメッセージの直前までロールバック",
+  "Roll-back undone — the messages below are live again.": "ロールバックを取り消しました。以下のメッセージは再び有効です。",
+  "Rolled back": "ロールバックしました",
+  "Rolled back — everything below is staged for removal and the files were restored. The next prompt makes it permanent.": "ロールバックしました。以下はすべて削除予定になり、ファイルは復元されました。次のプロンプトで確定します。",
+  "This question is no longer waiting for an answer": "この質問はもう回答を待っていません",
   "Sessions": "セッション",
   "Presets": "プリセット",
   "New Session": "新規セッション",

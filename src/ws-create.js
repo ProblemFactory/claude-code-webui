@@ -19,6 +19,7 @@ const { execFile } = require('child_process');
 const { REMOTE_PRELUDE, buildRemoteExec, nodeFinder } = require('./remote-shell');
 const { sweepWriters } = require('./writer-sweep');
 const { resumeSpawnPick, applyOriginHint, continuityLogLine } = require('./resume-continuity');
+const { openOpencodePty } = require('./server/opencode-pty-bridge'); // S9 remainder (c): a serve-owned pty as a normal terminal session
 
 function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
   execFileAsync, pickCodexThreadCandidate, getSessionKey, normalizeComparablePath }) {
@@ -1585,6 +1586,35 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
           let r6Handle = null;
           const r6Wanted = !session.host && sessionMode === 'chat' && backend === 'claude'
             && serverSetting?.('agentd.localPipeSessions') === true;
+          // OPENCODE SERVE TERMINAL (S9 remainder piece (c), B-eac2): a shell
+          // the OpenCode SERVE owns, bridged onto the normal ws terminal path.
+          // `data.opencodePty` = "open a terminal in this OpenCode session" —
+          // the serve creates the pty on ITS machine and streams it over a
+          // loopback websocket that NEVER reaches the browser: we connect to
+          // it here and hand setupSessionPty the same {onData,onExit,write,
+          // resize,kill,pid} shape the daemon pipe shim uses, so xterm, input,
+          // resize, the buffer file and every window action work unchanged.
+          let ocPty = null;
+          if (data.opencodePty) {
+            // LOCAL ONLY, said out loud. The serve streams its ptys over a
+            // loopback websocket, so a remote machine's shell is not reachable
+            // from here (the access layer refuses the op for a hostId too);
+            // the sidebar only offers the row locally, but a ws message is not
+            // a promise — refusing with the reason beats a window that never
+            // fills.
+            if (data.hostId || session.host) {
+              ws.send(JSON.stringify({ type: 'error', code: 'opencode-pty-remote', reqId, message: `The OpenCode terminal only works on this machine — the serve streams its terminals over a loopback socket that ${session.host || data.hostId} does not share. Open a normal terminal on that machine instead.` }));
+              return;
+            }
+            try {
+              ocPty = await openOpencodePty({ cwd: spawnCwd, title: data.name || null });
+            } catch (e) {
+              // reqId is what un-hangs the client's `ws.request` — an error
+              // without it leaves the window spinning with nothing to read
+              ws.send(JSON.stringify({ type: 'error', code: 'opencode-pty-failed', reqId, message: `Could not open an OpenCode terminal: ${e.message}` }));
+              return;
+            }
+          }
           let createPty;
           try {
             const r6Argv = [
@@ -1673,14 +1703,22 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
                 session.agentdSession = true; session.keeperSid = id;
               } catch (e) { console.warn('[r6] device session.open failed — dtach fallback:', e.message); r6Handle = null; }
             }
-            if (!r6Handle) createPty = pty.spawn(DTACH_CMD, ['-c', socketPath, '-E', '-r', 'none', ...r6Argv], {
+            if (!r6Handle && !ocPty) createPty = pty.spawn(DTACH_CMD, ['-c', socketPath, '-E', '-r', 'none', ...r6Argv], {
               name: 'xterm-256color', cols: data.cols || 120, rows: data.rows || 30, cwd: spawnCwd, env: r6Env,
             });
           } catch (err) {
             ws.send(JSON.stringify({ type: 'error', message: `Failed to spawn session: ${err.message}\ndtach=${DTACH_CMD} node=${NODE_CMD} env=${ENV_CMD} cwd=${cwd}` }));
             return;
           }
-          if (r6Handle) {
+          if (ocPty) {
+            session._opencodePtyId = ocPty.ptyId;
+            // no dtach socket exists for this one — the pty lives in the SERVE.
+            // Leaving a socketPath on it would point every dtach-shaped path
+            // (boot restore, the broken-stdin re-attach) at a file that never
+            // existed; the pty's persistence story is the serve's, not ours.
+            session.socketPath = null;
+            setupSessionPty(session, id, ocPty.shim);
+          } else if (r6Handle) {
             // pipe → pty-shaped shim: setupSessionPty consumes onData(string)/
             // onExit({exitCode})/write/kill/pid; resize is a chat no-op.
             const h = r6Handle;

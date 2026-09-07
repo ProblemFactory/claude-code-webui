@@ -730,6 +730,31 @@ function registerWsHandler(wss, ctx) {
         }
 
         case 'permission-response': {
+          // ASK cards raised by the OpenCode SERVE are answered on the serve's
+          // OWN route (S9 remainder piece (b), B-eac2) — not on a session's
+          // stdin, because the conversation may have no live process here at
+          // all (a stopped conversation opened read-only still shows a pending
+          // ask). The card forwards the `via` the record that created it
+          // carried, so this layer never guesses a backend, and `host` makes
+          // the answer land on the machine the serve runs on.
+          if (data.via === 'opencode-serve') {
+            const { access } = require('./server/opencode-access');
+            const answers = (data.toolInput && data.toolInput.answers) || {};
+            const act = data.approved
+              ? access().call(data.host || null, 'answer', { requestId: data.requestId, answers })
+              : access().call(data.host || null, 'reject', { requestId: data.requestId });
+            act.catch((e) => {
+              // a refused answer MUST reach the user: the card already flipped
+              // itself to "answered" optimistically, so silence would be a lie.
+              // `scope:'action'` is LOAD-BEARING (2.363.1, inc-mt2arppw): a
+              // session-scoped `error` frame without it is read as "attach
+              // failed" and flips the LIVE window into the read-only Resume
+              // bar — an OpenCode question we could not answer must refuse ONE
+              // ACTION, never condemn the conversation.
+              try { ws.send(JSON.stringify({ type: 'error', scope: 'action', code: 'opencode-question', sessionId: data.sessionId, requestId: data.requestId, error: `OpenCode did not accept the answer: ${e.message}`, message: `OpenCode did not accept the answer: ${e.message}` })); } catch { }
+            });
+            break;
+          }
           const session = activeSessions.get(data.sessionId);
           if (session?.pty && session.mode === 'chat') {
             const adapter = adapterRegistry.get(session.backend);
@@ -1224,6 +1249,14 @@ function registerWsHandler(wss, ctx) {
               cwd: data.cwd || '',
               buffer: '',
             });
+            // THE FOURTH READER SITE (found by the S9-remainder browser leg,
+            // B-eac2): a store-backed reader has no bytes until `prepare()` has
+            // run — transcript-service awaits it at its three sites, and this
+            // one did not, so EVERY stopped OpenCode conversation opened from
+            // "View History" said "No messages in this session's transcript
+            // yet." while the serve had them. A reader that is not prepared is
+            // EMPTY, never wrong, which is exactly why it was silent.
+            if (typeof sm.prepare === 'function') { try { await sm.prepare(); } catch (e) { console.warn(`[view] ${data.backend || 'claude'} reader prepare failed for ${backendSessionId}: ${e.message}`); } }
             const mm = createMessageManager(data.backend || 'claude', data.sessionId || 'view', { threadId: backendSessionId }); // the rendered conversation's id (codex ledger key)
             await mm.convertHistoryAsync(sm.raw()); // view-only replay of a dead session — same loop-friendly slicing (boot replay opens N of these at once)
             ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: data.name || '', cwd: data.cwd || '', mode: 'chat',
