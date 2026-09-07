@@ -241,6 +241,12 @@ inputModes: {
 
 **接缝**：`HANDLED_SYSTEM_SUBTYPES`（message-manager.js:19）加 `session_state_changed`；claude-stream-json 消费者直驱 `_isStreaming`，attach 时对账；`requires_action` 是我们没有的第三态（今天靠「有没有权限卡」反推）。`set_in_progress_tool_use_ids` 走 §2.2 修好的顶层 default 之后新增的分支，喂工具卡的转圈状态。归 §3.5 `turnState`。**门**：test-stdout-registry + test-attach-rebuild（含 env 缺席时的降级路径：老 CLI / 未开开关 ⇒ 回到推断，不许崩）。**尺寸 S。**
 
+> **落地修订（round 4，2026-09-07；上线的一半与死掉的一半）**
+> **① `session_state_changed` 成立**：spawn env 打开后，在 chat-wrapper 的精确 flag 形状里实测到 `running` → `idle`（scripts/probe-claude-stdout.mjs，2.1.257）。§3.5 的 `turnState:'authoritative'` 名副其实。
+> **② `set_in_progress_tool_use_ids` 不成立——它根本不到我们的 stdout**。CLI 把它交给**宿主回调**后就 `return`：`if(e.type==="set_in_progress_tool_use_ids"){ n.onInProgressToolUseIDs?.(e.op); return }`（offset 186333979），而 `add` 那半连这个分发器都不进（tool dispatch 处直接 `U({…action:"add"…})`，184806515）；只有**子代理**流水线读它、且只读 `remove`（191771649），fork-skill 流水线显式 `continue`（192802652）。实测：wrapper 形状下 6 个 tool_use / 6 个 tool_result，**0 条**该记录，而同一份 stdout 上 `session_state_changed` 正常到达（正控）；24 份生产 buffer 里 212 个 tool_use 块、**0 条**。
+> 处置：`caps.inProgressTools` 全线 **false**（服务器 + 客户端镜像），消费分支/广播/attach 字段/`.chat-tool-inflight` 全部保留为**休眠代码**并在注释里点名那个吞掉它的回调；kb 与本节都按「没有任何用户看得见这个点」的口径写。翻牌条件不是读到新 schema，而是 test-stdout-registry 的**上线可达性腿**（每次运行都用装好的 CLI 真跑一个只读工具）观测到 ≥1 条 —— 那条腿在**两个方向**上断言 caps 与线路一致，所以它红的时候就是该翻牌的时候。
+> **教训（记进 §8.1）**：一个记录「在 schema 里 / 有 describe / 有发射点」都不等于**到达我们**；自己合成 fixture 的套件永远分不清「解析对了」与「从没来过」。能力位是**对某个界面的承诺**，没有线路证据就不许为真。
+
 ### 2.6 claude init 帧加宽 + `commands_changed` 后续推送 —— M
 
 **现状**：`_processSystem` 的 init 分支只取三个字段（message-manager.js:398：`raw.model` / `raw.permissionMode` / `raw.slash_commands`）。整帧还有 `tools` / `mcp_servers[{name,status}]` / `agents` / `skills` / `plugins[{name,path,source,version}]` / `plugin_errors[{plugin,type,message}]` / `terminal_slash_commands` / `output_style` / `memory_paths{auto,team}` / `betas` / `claude_code_version`。逐个 grep：全 0。
@@ -304,11 +310,23 @@ inputModes: {
 
 **接缝**：§2.2 修好的顶层 default 之后新增分支 → normalizer 的 `remove` op（已有 create/edit，删除是第三个）→ ChatView 的虚拟滚动要能处理「窗口内一条消失」（与既有 trim 路径共用，不许触发 §2.369.x 那批分页事故）。**门**：test-attach-rebuild（撤回后重建历史不再出现该消息）+ test-chat-trim-guard 的现成守卫。**尺寸 S。**
 
+> **落地修订（round 4）：claude 那一半是 UNVERIFIED，撤回通道今天实际上只有 codex。**
+> `tombstone` 在我们的线路上一次都没出现过：24 份生产 buffer 0 条、上线可达性探针 0 条，而且 `grep -rl '"type":"tombstone"' ~/.claude/projects/` = **0 个文件**，所以重建/gap 那条持久化路径也不可能产出它。
+> 但它与上面两条**不同类**，不能一并降级：它是**被 `yield` 到查询流上**的（`for(let eu of Bu) yield{type:"tombstone",message:eu}`，185068785 / 185075330），不是交给回调的 —— 也就是「没观测到」而非「结构上到不了」。它也**不可廉价触发**：两个发射点都挂在**服务端 refusal-fallback** 路径上（`ks.type==="refusal_no_fallback"`、以及带 `server_fallback` / `api_refusal_category` 的那支），即安全分类器中途拒答后换模型；没有不去**故意诱发一次拒答**就能确定性复现的探针，那不是测试套件该做的事。
+> 处置：`_processTombstone` 与 `superseded`（隐藏）渲染**原样保留为休眠代码**并按 rebuild/gap 三条路钉住行为；kb-features / kb-file-structure / 本节一律写明「今天生效的撤回通道是 codex `thread_rolled_back`（3 份真实 rollout 验证过），claude 那半未在线路上观测到」。真发生一次 refusal fallback 时它就已经是对的。
+
 ### 2.11 `compact_progress`：压缩进度 —— S
 
 **现状**：全仓 0。今天 chat-renderers.js:1203 是一句硬编码致歉：「Compacting a large conversation takes 1–2 minutes — do not press Stop」；kb 里还记着一次「/compact 卡在 thinking」事故。上游有 `{type:'compact_progress', event: hooks_start{hook_type} | compact_start{hint_text} | compact_end}`，describe：「Emitted while compaction is running… Distinct from system/compact_boundary」。
 
 **接缝**：顶层新分支 → 现有的流式标签（与 2.284.2 `api_retry` 同一条通道，deliberately card-less）→ 压缩期间显示真实阶段与 `hint_text`，`compact_end` 收尾。硬编码文案降级为「收不到进度时」的兜底。**门**：test-stdout-registry。**尺寸 S。**
+
+> **落地修订（round 4）：`compact_progress` 也不到我们的 stdout；真正在线上的是 `system/status`。**
+> 这是**同一个生产者内部的对照实验**：手动压缩函数隔一行发出一对孪生 —— `onCompactEvent?.({type:"compact_progress",…})`（185190125）与紧随其后的 `onCompactEvent?.({type:"sdk_status",status:"compacting"})`。宿主的 `onCompactEvent` 把前者**就地消费**掉（`case"compact_progress":P.main.applyCompactProgress(x.event);return`，201341255 —— 一个 TUI spinner store），只把后者经 `HRt`（198800990）送进 SDK sink，映射成 `{type:"system",subtype:"status",status,compact_result?,compact_error?}`（190037796）。整个二进制里 `sdk_status` 的 15 个发射点只有两种取值：`"compacting"` 与 `null`；还有一个 `"requesting"` 被转发函数自己滤掉（`function wJt(e){return e!=="requesting"&&k5()}`，198800730）。
+> **生产实证**（data/session-buffers/sess-5-1788332329337.buf 第 57–62 行，一次 **AUTO** 压缩，pre_tokens 997587 → post_tokens 11159，duration_ms **174751**）：
+> `system/status{status:"compacting"}` → `system/hook_started SessionStart:compact` → `hook_response` → `system/status{status:null,compact_result:"success"}` → `system/compact_boundary{trigger:"auto"}`，**0 条 `compact_progress`**。24 份 buffer 合计：1 条 compact_boundary、0 条 compact_progress。
+> 处置：§2.11 改由 `system/status` 驱动 —— `_streamingKind`、spinner label、以及「Compact now」卡片的阶段/结局全部来自它，并顺带覆盖 **AUTO 压缩**（用户从没打过 `/compact`，ws-handler 的发送点结构上看不见它，而这正是长会话唯一会遇到的那种）；压缩进行中的 `hook_started` 是这条通道**唯一**的中间阶段，严格门控在 `_streamingKind==='compacting'` 内（普通 turn 里 hook_started 极常见）。`'status'` 进 `HANDLED_SYSTEM_SUBTYPES`（card-less，理由与 api_retry/session_state_changed 同）；同一 subtype 还承载 CLI 的**权限模式回声**（`{status:null,permissionMode}`，199038328），必须不被读成「压缩结束」—— 判据是有没有结局字段。`compact_progress` 分支保留为**形状对等**，注释写明没有任何 VibeSpace 拉起的 CLI 发出过它，test-stdout-registry 的那条腿标题也从「线路上的真拼写」改成形状对等说明。
+> 收尾还有一条诚实性：`compact_end` **不再**回落到那句「要 1–2 分钟，别按 Stop」——它描述的事情已经结束了；卡片改说真实结局（`compact_result` / `compact_error`）。
 
 ### 2.12 claude 的两个用户通道工具 SendUserMessage / SendUserFile —— S/M（决策 8）
 
@@ -527,3 +545,13 @@ r2 稿经独立核查后逐条订正，已在正文就地改写的不再重复�
 11. SendUserMessage/SendUserFile 会以通用工具卡渲染，缺的是语义不是卡片。
 12. `inputModes` 消费方五处，daemon bundle 不含；test-queue-steer 精确比对两侧。
 13-15. 行号漂移：available_commands_update :503、usage_update :509、queueStripHtml :741、thread_rolled_back :252。
+
+### 8.1 第三次核查（round 4，2026-09-07）——「声明存在」≠「到达我们」，三条
+
+前两次核查读的都是**二进制里的声明**（zod schema + describe）。这一轮是第一次去**线路上**看，结论推翻了 §2.5 与 §2.11 的一半，也给 §2.10 打上了「未验证」而非「已上线」：
+
+16. **`set_in_progress_tool_use_ids` 从不到达我们的 stdout。** CLI 把它交给宿主回调 `onInProgressToolUseIDs` 后 `return`（186333979），`add` 那半更是在 tool dispatch 处直接进回调（184806515）；只有子代理流水线读它、且只读 `remove`。实测（chat-wrapper 精确 flag 形状、2.1.257）：6 tool_use / 6 tool_result / **0 条**；24 份生产 buffer：212 tool_use 块 / **0 条**。⇒ `caps.inProgressTools` 全线 false，`.chat-tool-inflight` 今天没有任何用户看得见；消费者保留为休眠代码。
+17. **`compact_progress` 同样从不到达；真实通道是 `system/status`。** 同一生产者内的孪生对照（`compact_progress` 被 `onCompactEvent` 消费，`sdk_status` 经 `HRt` 转发成 `system/status`），加上一次真实 **AUTO** 压缩的逐行捕获。⇒ §2.11 改由 `system/status{status:'compacting'|null, compact_result|compact_error}` 驱动，顺带第一次覆盖 AUTO 压缩；`'status'` 列入 HANDLED（card-less），并要与同 subtype 的**权限模式回声**区分开。
+18. **`tombstone` 是 UNVERIFIED，不是 DISPROVEN。** 它被 `yield` 到查询流（不是回调），但 24 份 buffer、探针、以及 7450 份 `~/.claude/projects/*.jsonl` 里都 0 命中；两个发射点都在**服务端 refusal-fallback** 路径上，没有不诱发拒答就能确定性触发的探针。⇒ 撤回通道今天**实际上只有 codex**（`thread_rolled_back`，3 份真实 rollout 验证）；claude 那半保留为休眠代码并在 kb 里如实标注。
+
+**为什么前两轮都没抓到**：三条的回归都是套件**自己合成**的记录 —— 那种腿只能证明「我们解析对了」，永远证不了「它来过」。**修法是机制而不是措辞**：test-stdout-registry 现在有一条**上线可达性腿**（scripts/probe-claude-stdout.mjs：用装好的 CLI、wrapper 的精确 flag 形状、跑一个只读工具、最便宜的模型，无 CLI/没跑起工具/超时一律**响亮 SKIP**——测不了就绝不当成不存在的证据），它在**两个方向**上断言 caps 与线路一致：今天 0 条 ⇒ 能力位必须为 false；哪天真到了 ⇒ 这条腿变红并直接写明去哪两个文件把它翻成 true。

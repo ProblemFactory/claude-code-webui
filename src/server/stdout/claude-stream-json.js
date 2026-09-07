@@ -406,10 +406,34 @@ function create({ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes,
           // describe: "Emitted when tool execution adds/removes tool_use ids
           // from the mid-execution set (after permission grant, before
           // result). Surfaces use this to show which tools are running."
-          // Card-less like the two above — it drives the tool cards' spinner,
-          // not the transcript, so it is consumed HERE and never normalized
-          // (the normalizer has no case for it; a rebuild replays it into a
-          // no-op, which is correct: a run set is live-only by nature).
+          // Card-less by design — it would drive the tool cards' spinner, not
+          // the transcript, so it is consumed HERE and never normalized (the
+          // normalizer has no case for it; a rebuild replays it into a no-op,
+          // which is correct: a run set is live-only by nature).
+          //
+          // DORMANT ON 2.1.257 — THE RECORD DOES NOT REACH US (round-4
+          // verifier, reproduced on the WIRE). The CLI routes it into a HOST
+          // CALLBACK and returns without re-yielding it:
+          //   `if(e.type==="set_in_progress_tool_use_ids"){
+          //      n.onInProgressToolUseIDs?.(e.op); return }`   (offset 186333979)
+          // and the "add" side never even enters that dispatcher — it is handed
+          // straight to a callback at tool dispatch
+          // (`U({type:"set_in_progress_tool_use_ids",op:{action:"add",ids:[n]}})`,
+          // offset 184806515). Only the SUBAGENT pipeline reads one, and only
+          // 'remove' (offset 191771649); the forked-skill pipeline `continue`s
+          // past it entirely (192802652).
+          // MEASURED, not inferred: a probe in chat-wrapper.js's exact spawn
+          // shape (--output-format stream-json --input-format stream-json
+          // --verbose --permission-prompt-tool stdio, piped) ran three parallel
+          // Reads plus three Bashes → 6 tool_use + 6 tool_result records and
+          // ZERO of these, while `system/session_state_changed` running/idle
+          // DID arrive on the same stdout (the positive control that the reader
+          // works). 24 production buffers: 212 tool_use blocks, 0 of these.
+          // So `caps.inProgressTools` is FALSE and no surface claims the dot.
+          // The branch stays because the day the CLI forwards the record this
+          // is the whole feature — scripts/test-stdout-registry.mjs's wire leg
+          // re-measures it on every run and goes RED (with the instruction to
+          // flip the cap) the moment one arrives.
           if (msg.type === 'set_in_progress_tool_use_ids' && msg.op && Array.isArray(msg.op.ids)) {
             const set = (session._inProgressTools ||= new Set());
             const ids = msg.op.ids.filter((x) => typeof x === 'string' && x).slice(0, 200);
@@ -504,10 +528,80 @@ function create({ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes,
               // AUTH-class failure (2.335.0): a pooled session must route
               // AROUND a banned/expired member, not retry into it forever
               try { notePoolAuthFailure?.(session, id, { status: msg.error_status, message: msg.error, attempt: msg.attempt }); } catch { }
+            } else if (msg.type === 'system' && msg.subtype === 'status') {
+              // ── THE COMPACTION LANE THAT IS ACTUALLY ON OUR WIRE (§2.11) ──
+              // A REAL compaction, captured verbatim in a production buffer
+              // (data/session-buffers/sess-5-*.buf, an AUTO compaction with
+              // pre_tokens 997587 → post_tokens 11159, duration_ms 174751):
+              //   system/status      {status:"compacting"}
+              //   system/hook_started/hook_response  SessionStart:compact
+              //   system/status      {status:null, compact_result:"success"}
+              //   system/compact_boundary {compact_metadata:{trigger:"auto",…}}
+              // …and ZERO `compact_progress` records. That is a controlled A/B
+              // inside ONE producer: the manual-compact function emits the two
+              // twins one line apart, `onCompactEvent?.({type:"compact_progress",
+              // …})` (185190125) and `onCompactEvent?.({type:"sdk_status",
+              // status:"compacting"})` right after — and only the second one
+              // reaches us, because the host's onCompactEvent CONSUMES the
+              // first (`case"compact_progress":P.main.applyCompactProgress(
+              // x.event);return`, 201341255 — a TUI spinner store) while the
+              // second is forwarded through `HRt` (198800990) to the SDK sink
+              // as this record (`Oe.type==="sdk_status"` ⇒ `{type:"system",
+              // subtype:"status",status,compact_result?,compact_error?}`,
+              // 190037796).
+              // The whole channel carries exactly two values — 15 `sdk_status`
+              // emitters in 2.1.257, all of them "compacting" or null — plus a
+              // "requesting" that the forwarder itself filters out
+              // (`function wJt(e){return e!=="requesting"&&k5()}`, 198800730).
+              // So this branch, NOT compact_progress, is §2.11 in production.
+              // It also covers AUTO compaction — the case the user never typed
+              // /compact for, which the ws-handler send-site label can never
+              // see (it is the only compaction most long sessions ever hit).
+              // Card-less, exactly like api_retry above.
+              const st = msg.status;
+              const cres = typeof msg.compact_result === 'string' ? msg.compact_result : null;
+              const cerr = msg.compact_error ? String(msg.compact_error).slice(0, 200) : null;
+              const compacting = session._streamingKind === 'compacting';
+              if (st === 'compacting') {
+                session._streamingKind = 'compacting';
+                newLabel = 'Compacting the conversation…';
+                broadcastToSession(session, id, { type: 'compact-progress', sessionId: id, event: 'compact_start', hookType: null, hint: null, result: null, error: null });
+              } else if ((st === null || st === undefined) && (cres || cerr || compacting)
+                         // A bare `status:null` is ALSO the permission-mode echo
+                         // (`_r(p,P)` = {status:null,permissionMode,…}, 199038328).
+                         // One of those mid-compaction must not be read as "the
+                         // compaction finished" — an outcome field, or the
+                         // absence of permissionMode, is what makes it ours.
+                         && !(msg.permissionMode !== undefined && !cres && !cerr)) {
+                session._streamingKind = null;
+                newLabel = 'thinking...';
+                broadcastToSession(session, id, { type: 'compact-progress', sessionId: id, event: 'compact_end', hookType: null, hint: null, result: cres || (cerr ? 'error' : null), error: cerr });
+              }
+              // Any other status value (or a permission-mode echo outside a
+              // compaction) changes NOTHING — we never invent a stage.
+            } else if (msg.type === 'system' && msg.subtype === 'hook_started' && session._streamingKind === 'compacting') {
+              // The ONE intermediate stage this lane really has: the same
+              // production capture shows `SessionStart:compact` hooks running
+              // between the two status records. Gated on an IN-FLIGHT
+              // compaction — hook_started fires for every hook in every normal
+              // turn (13 of 24 production buffers), and outside a compaction it
+              // is none of this branch's business.
+              const hn = String(msg.hook_name || msg.hook_event || '').slice(0, 60);
+              newLabel = hn ? `Compacting: running ${hn} hooks…` : 'Compacting the conversation…';
+              broadcastToSession(session, id, { type: 'compact-progress', sessionId: id, event: 'hooks_start', hookType: hn || null, hint: null, result: null, error: null });
             } else if (msg.type === 'compact_progress' && msg.event && typeof msg.event === 'object') {
-              // COMPACTION PROGRESS (§2.11) — the 2.284.2 api_retry channel
-              // exactly: the spinner LABEL, deliberately card-less (three
-              // records per compaction would be three cards).
+              // COMPACTION PROGRESS, the DECLARED lane (§2.11) — kept for
+              // SHAPE PARITY, not because it has ever arrived.
+              //
+              // NO VIBESPACE-SPAWNED CLI HAS EVER EMITTED ONE OF THESE: 24
+              // production buffers contain 0 (including the file with a real
+              // 2.9-minute auto-compaction, which produced the system/status
+              // pair above instead), and the host callback that swallows it is
+              // named in the branch above. The branch stays because it costs
+              // nothing and the record is declared in the CLI's own schema — if
+              // a later version starts forwarding it, this is already the
+              // richer lane (hooks phase + the CLI's own hint text). It is NOT
+              // what §2.11 runs on today.
               //
               // TWO SPELLINGS, and the schema is NOT the one on the wire.
               // The 2.1.257 zod declaration (offset 179096059) says
@@ -545,6 +639,10 @@ function create({ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes,
               broadcastToSession(session, id, {
                 type: 'compact-progress', sessionId: id, event: ev.type || '',
                 hookType: hookT || null, hint: hintT ? String(hintT).slice(0, 160) : null,
+                // ONE frame shape for both lanes: the declared record carries no
+                // outcome, and the client must never have to know which lane it
+                // came from (that is how a second consumer gets written).
+                result: null, error: null,
               });
             }
             if (newLabel !== null && session._streamingLabel !== newLabel) {

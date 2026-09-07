@@ -3116,6 +3116,8 @@ export default {
   "Compacting: {hint}": "圧縮中: {hint}",
   "Compacting the conversation…": "会話を圧縮しています…",
   "Compaction finished.": "圧縮が完了しました。",
+  "Compaction failed: {error}": "圧縮に失敗しました: {error}",
+  "Compaction ended: {result}": "圧縮が終了しました: {result}",
   "↶ Rolled back {found} of the {n} turns the agent dropped — the rest were already outside this view.": "↶ エージェントが破棄した {n} ターンのうち {found} ターンをここで巻き戻しました — 残りは元からこの表示範囲外でした。",
   "↶ Rolled back {n} turn(s) — they are no longer part of the conversation the agent can see.": "↶ {n} ターンを巻き戻しました — エージェントが見る会話にはもう含まれません。",
 };

@@ -41,7 +41,10 @@ export const BACKEND_META = {
     // status bar's third state and the tool-card spinner set gate on THESE,
     // never on a backend id. 'authoritative' is what the PROTOCOL can do — the
     // per-session fact rides the attach payload / the live turn-state push.
-    caps: { fork: true, effort: true, review: false, autoResume: true, accounts: true, peerDelivery: 'cli-inbox', inputModes: deriveInputModes({ queue: true, queueVerbs: [] }), turnState: 'authoritative', inProgressTools: true, responseStyle: { live: false, closed: false, values: ['Concise', 'Explanatory', 'Learning', 'Proactive'] } },
+    // inProgressTools is FALSE on every harness today: claude's record for it
+    // never leaves the CLI's own host callback (backend-caps.js carries the
+    // dump + the wire measurement), so nothing may draw an "executing" dot.
+    caps: { fork: true, effort: true, review: false, autoResume: true, accounts: true, peerDelivery: 'cli-inbox', inputModes: deriveInputModes({ queue: true, queueVerbs: [] }), turnState: 'authoritative', inProgressTools: false, responseStyle: { live: false, closed: false, values: ['Concise', 'Explanatory', 'Learning', 'Proactive'] } },
     // One-line hint per response-style VALUE (same contract as effortHints:
     // English key, t() at render — the VALUE itself is protocol and is never
     // translated).

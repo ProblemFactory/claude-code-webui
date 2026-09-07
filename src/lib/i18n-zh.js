@@ -3117,6 +3117,8 @@ export default {
   "Compacting: {hint}": "压缩中: {hint}",
   "Compacting the conversation…": "正在压缩对话…",
   "Compaction finished.": "压缩已完成。",
+  "Compaction failed: {error}": "压缩失败: {error}",
+  "Compaction ended: {result}": "压缩结束: {result}",
   "↶ Rolled back {found} of the {n} turns the agent dropped — the rest were already outside this view.": "↶ agent 丢弃了 {n} 个回合, 其中 {found} 个在此处回退 — 其余的本来就不在当前视图里。",
   "↶ Rolled back {n} turn(s) — they are no longer part of the conversation the agent can see.": "↶ 已回退 {n} 个回合 — 它们已不在 agent 能看到的对话里。",
 };

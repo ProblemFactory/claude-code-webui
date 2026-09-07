@@ -3435,15 +3435,26 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
     }
   }
 
-  /** Compaction stage from the CLI's own `compact_progress` record. Held on the
-   *  view so a card rendered LATER (or re-rendered) still shows the live stage
-   *  instead of the generic apology. */
+  /** Compaction stage from the harness's own records. Held on the view so a
+   *  card rendered LATER (or re-rendered) still shows the live stage instead of
+   *  the generic apology.
+   *
+   *  ONE frame shape, two producers (§2.11): on 2.1.257 the frames come from
+   *  `system/status` ({status:'compacting'} → compact_start, {status:null,
+   *  compact_result} → compact_end), which is also the ONLY lane that sees an
+   *  AUTO compaction — the one the user never typed /compact for. The declared
+   *  `compact_progress` record feeds the same frames if a CLI ever emits one.
+   *
+   *  A compact_end is KEPT, not dropped: "how it ended" is the last true thing
+   *  we know, and a card still on screen would otherwise silently fall back to
+   *  the 1–2-minute apology the moment the compaction succeeded. */
   _onCompactProgress(msg) {
-    const done = msg.event === 'compact_end';
-    this._compactStage = done ? null : {
+    this._compactStage = {
       event: msg.event || '',
       hookType: msg.hookType || null,
       hint: msg.hint || null,
+      result: msg.result || null,
+      error: msg.error || null,
     };
     this._renderers?.setCompactStage?.(this._compactStage);
   }

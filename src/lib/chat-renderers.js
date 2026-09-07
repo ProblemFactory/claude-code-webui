@@ -1273,15 +1273,20 @@ class ChatRenderers {
 
   /** THE sentence under the "Compact now" button. Before 2026-09 this was a
    *  hardcoded apology — the only thing we could say, because the CLI's
-   *  compaction was a black box. `compact_progress` opened it, so the apology
-   *  is now the FALLBACK: shown only while no progress record has arrived (an
-   *  old CLI, or the seconds before the first one). Once one has, the card
-   *  states the real stage. */
+   *  compaction was a black box. The `system/status` lane opened it (§2.11), so
+   *  the apology is now the FALLBACK: shown only while no stage record has
+   *  arrived (an old CLI, or the seconds before the first one). Once one has,
+   *  the card states the real stage — and, at the end, the real OUTCOME: the
+   *  wire carries `compact_result` ("success") / `compact_error`, and a card
+   *  that reverted to the apology after a successful compaction would be
+   *  telling the user to keep waiting for something that already finished. */
   compactHintText() {
     const s = this._compactStage;
     if (!s) return t('Compacting a large conversation takes 1–2 minutes — do not press Stop. If it answers “Conversation too long”, rewind a few messages in terminal mode (Esc Esc) and compact again.');
     if (s.event === 'hooks_start') return t('Compacting: running {hook} hooks…', { hook: String(s.hookType || 'hook').replace(/_/g, ' ') });
     if (s.event === 'compact_start') return s.hint ? t('Compacting: {hint}', { hint: s.hint }) : t('Compacting the conversation…');
+    if (s.error) return t('Compaction failed: {error}', { error: String(s.error).slice(0, 160) });
+    if (s.result && s.result !== 'success') return t('Compaction ended: {result}', { result: String(s.result).slice(0, 60) });
     return t('Compaction finished.');
   }
 

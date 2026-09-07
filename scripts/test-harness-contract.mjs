@@ -119,8 +119,15 @@ console.log('— turnState');
     ok([null, 'authoritative', 'derived'].includes(row.turnState) && typeof row.inProgressTools === 'boolean',
       `${id}: declares turnState + inProgressTools (${row.turnState} / ${row.inProgressTools})`);
   }
-  ok(capsOf('claude').turnState === 'authoritative' && capsOf('claude').inProgressTools === true,
-    "claude publishes BOTH: system/session_state_changed (idle|running|requires_action) and set_in_progress_tool_use_ids — the only harness with a tool-granular run set");
+  ok(capsOf('claude').turnState === 'authoritative' && capsOf('claude').inProgressTools === false,
+    "claude publishes system/session_state_changed (idle|running|requires_action) — VERIFIED on our stdout; inProgressTools stays FALSE because set_in_progress_tool_use_ids never leaves the CLI's own host callback (test-stdout-registry re-measures the wire)");
+  // NO harness may claim a tool-granular run set today. This is the assert that
+  // FAILS if someone flips a row back on the strength of a record existing in a
+  // schema — the wire leg in test-stdout-registry is the only thing that may
+  // justify flipping it, and it says so in its own failure message.
+  ok(Object.values(BACKEND_CAPS).every((r) => r.inProgressTools === false),
+    'no harness claims inProgressTools — a cap is a promise to a surface, and no surface can currently draw an "executing" dot from any harness',
+    JSON.stringify(Object.fromEntries(Object.entries(BACKEND_CAPS).map(([k, v]) => [k, v.inProgressTools]))));
   ok(capsOf('codex').turnState === 'authoritative' && capsOf('codex').inProgressTools === false,
     'codex: turn/started + turn/completed are its own turn boundaries; no run-set record exists');
   ok(capsOf('opencode').turnState === 'authoritative' && capsOf('opencode').inProgressTools === false,

@@ -190,18 +190,23 @@ const inflight = (id) => calls.broadcasts.filter((b) => b.id === id && b.type ==
   ok('…and it is card-less too: no compaction message was normalized', !s._ops.some((o) => o.op === 'create' && JSON.stringify(o.message?.content || '').includes('Compacting')));
 }
 {
-  // ⓑ THE SPELLING THAT IS ACTUALLY ON THE WIRE. The legs above feed the
-  //    2.1.257 zod SCHEMA's snake_case shape — and nothing emits it. Every
-  //    producer in the same binary builds camelCase, and `onCompactEvent:
-  //    (k)=>r.enqueue(k)` (182861070) forwards the object VERBATIM:
+  // ⓑ SHAPE PARITY INSIDE A LANE THAT NEVER REACHES US. Round 4 corrected the
+  //    header this leg used to carry ("the spelling that is actually on the
+  //    wire"): `compact_progress` is not on OUR wire in ANY spelling — the host
+  //    callback `onCompactEvent` consumes it (`case"compact_progress":
+  //    P.main.applyCompactProgress(x.event);return`, 201341255) and only its
+  //    `sdk_status` twin is forwarded to us, as `system/status` (leg ⓓ, the one
+  //    §2.11 actually runs on). What these legs still pin is REAL and worth
+  //    keeping: IF a CLI ever forwards the record, the reader must survive the
+  //    two spellings — because inside the CLI the emitters and the schema
+  //    already disagree. Every producer builds camelCase, and `onCompactEvent:
+  //    (k)=>r.enqueue(k)` (182861070) would forward the object VERBATIM:
   //      183979983  {type:"compact_progress",event:{type:"hooks_start",hookType:"pre_compact"}}
   //      183980713  {type:"compact_start",hintText:F}
   //      185190125 / 185193937 / 185195701 / 185198872 / 185209427 / 192261073
   //      189086200  the CLI's OWN consumer: t.hookType==="pre_compact" / t.hintText??null
   //    `grep -aob 'hint_text:'` over the binary finds exactly ONE hit — the
-  //    schema literal. Reading only the schema spelling produced "running hook
-  //    hooks…" and a null hint on every real compaction, while the snake_case
-  //    fixture above kept this suite green. Both spellings, ONE read point.
+  //    schema literal. Both spellings, ONE read point.
   const s2 = mkSession('claude', 'w-b3-cc'); const p2 = fakePty();
   so.setupSessionPty(s2, 'w-b3-cc', p2);
   const ccB = () => calls.broadcasts.filter((b) => b.id === 'w-b3-cc' && b.type === 'compact-progress');
@@ -252,7 +257,133 @@ const inflight = (id) => calls.broadcasts.filter((b) => b.id === id && b.type ==
   }
 }
 {
-  // ⑨ RETRACTION on the live stream: a tombstone for a message we rendered
+  // ⓓ THE COMPACTION LANE THAT IS ACTUALLY ON OUR WIRE (§2.11, round 4).
+  //    Records copied VERBATIM out of a production buffer — a REAL AUTO
+  //    compaction (data/session-buffers/sess-5-1788332329337.buf lines 57-62,
+  //    pre_tokens 997587 → post_tokens 11159, duration_ms 174751):
+  //      system/status {status:"compacting"}
+  //      system/hook_started SessionStart:compact  → hook_response
+  //      system/status {status:null, compact_result:"success"}
+  //      system/compact_boundary {compact_metadata:{trigger:"auto",…}}
+  //    Zero `compact_progress` records appeared in that file, or in any of the
+  //    24 buffers on this machine (212 tool_use blocks between them). AUTO is
+  //    the case ws-handler's /compact send-site label structurally cannot see.
+  const s3 = mkSession('claude', 'w-b3-st'); const p3 = fakePty();
+  so.setupSessionPty(s3, 'w-b3-st', p3);
+  const stB = () => calls.broadcasts.filter((b) => b.id === 'w-b3-st' && b.type === 'compact-progress');
+  const stL = () => labels('w-b3-st').slice(-1)[0];
+  p3.data(J({ type: 'system', subtype: 'status', status: 'compacting', session_id: 'sid-st', uuid: 'u-st-a' }));
+  ok("system/status 'compacting' → the compacting KIND (the Stop two-step guard) + a real label", s3._streamingKind === 'compacting' && stL() === 'Compacting the conversation…', `${s3._streamingKind} / ${stL()}`);
+  ok('…and a compact_start frame reaches the card (ONE frame shape, whichever lane produced it)', stB().slice(-1)[0]?.event === 'compact_start' && stB().slice(-1)[0]?.result === null, JSON.stringify(stB().slice(-1)[0]));
+  p3.data(J({ type: 'system', subtype: 'hook_started', hook_id: 'h1', hook_name: 'SessionStart:compact', hook_event: 'SessionStart', session_id: 'sid-st', uuid: 'u-st-b' }));
+  ok('the hooks phase INSIDE a compaction names itself (the one intermediate stage this lane really has)', stL() === 'Compacting: running SessionStart:compact hooks…' && stB().slice(-1)[0]?.event === 'hooks_start', stL());
+  p3.data(J({ type: 'system', subtype: 'status', status: null, compact_result: 'success', session_id: 'sid-st', uuid: 'u-st-c' }));
+  ok('status:null + compact_result ENDS the compaction (kind cleared, turn continues) and reports the OUTCOME', s3._streamingKind === null && stL() === 'thinking...' && stB().slice(-1)[0]?.event === 'compact_end' && stB().slice(-1)[0]?.result === 'success', JSON.stringify([s3._streamingKind, stL(), stB().slice(-1)[0]]));
+  {
+    const before = stB().length;
+    p3.data(J({ type: 'system', subtype: 'compact_boundary', uuid: 'u-st-d', session_id: 'sid-st', compact_metadata: { trigger: 'auto', pre_tokens: 997587, post_tokens: 11159, duration_ms: 174751 } }));
+    ok('NEGATIVE CONTROL: the compact_boundary that FOLLOWS it (real order, line 62) adds no second compact_end frame', stB().length === before, `${before} → ${stB().length}`);
+  }
+  // NEGATIVE CONTROLS — the same subtype carries the CLI's permission-mode echo
+  // (`_r(p,P)` = {status:null, permissionMode, …}, offset 199038328). One of
+  // those must never be read as "the compaction finished", and one arriving
+  // outside a compaction must not invent a stage at all.
+  {
+    const before = stB().length, lbefore = labels('w-b3-st').length;
+    p3.data(J({ type: 'system', subtype: 'status', status: null, permissionMode: 'acceptEdits', session_id: 'sid-st', uuid: 'u-st-e' }));
+    ok('NEGATIVE CONTROL: a permission-mode echo (status:null, no outcome) outside a compaction changes NOTHING', stB().length === before && labels('w-b3-st').length === lbefore && s3._streamingKind === null);
+  }
+  {
+    p3.data(J({ type: 'system', subtype: 'status', status: 'compacting', session_id: 'sid-st', uuid: 'u-st-f' }));
+    const before = stB().length, kindBefore = s3._streamingKind;
+    p3.data(J({ type: 'system', subtype: 'status', status: null, permissionMode: 'default', session_id: 'sid-st', uuid: 'u-st-g' }));
+    // Stated as "the echo changed nothing", not as "we are compacting" — a
+    // negative control must stay green when the FEATURE is neutered, or it is
+    // measuring the feature instead of the failure mode.
+    ok('NEGATIVE CONTROL: a permission-mode echo DURING a compaction does not end it (the outcome field, or its absence, is what makes the record ours)', s3._streamingKind === kindBefore && stB().length === before, `${kindBefore}→${s3._streamingKind} ${before}→${stB().length}`);
+    p3.data(J({ type: 'system', subtype: 'status', status: null, compact_error: 'ran out of context', session_id: 'sid-st', uuid: 'u-st-h' }));
+    ok('a compact_error ends it and SAYS the failure (silently reverting to the 1-2-minute apology would be a lie)', s3._streamingKind === null && stB().slice(-1)[0]?.event === 'compact_end' && stB().slice(-1)[0]?.error === 'ran out of context' && stB().slice(-1)[0]?.result === 'error', JSON.stringify(stB().slice(-1)[0]));
+  }
+  {
+    // hook_started is the CLI's most common system record (13 of 24 production
+    // buffers) — outside a compaction this branch must be invisible.
+    const s4 = mkSession('claude', 'w-b3-hook'); const p4 = fakePty();
+    so.setupSessionPty(s4, 'w-b3-hook', p4);
+    p4.data(J({ type: 'system', subtype: 'hook_started', hook_id: 'h9', hook_name: 'PreToolUse:Bash', hook_event: 'PreToolUse', session_id: 'sid-h', uuid: 'u-h-1' }));
+    ok('NEGATIVE CONTROL: hook_started in a NORMAL turn produces no compaction stage and no label', !calls.broadcasts.some((b) => b.id === 'w-b3-hook' && b.type === 'compact-progress') && !labels('w-b3-hook').length && !s4._streamingKind);
+  }
+  ok("'status' is listed as HANDLED so the unknown-subtype breadcrumb stops firing for the record that marks every real compaction",
+    /'status',/.test(read('src/message-manager.js').slice(0, read('src/message-manager.js').indexOf('])'))));
+}
+{
+  // ⓔ ASK THE BINARY why leg ⓓ exists and leg ⓑ is dormant (facts law: dump,
+  //    never remember). SKIP LOUDLY without a CLI.
+  let bin = null;
+  try { bin = fs.realpathSync(require('child_process').execFileSync('sh', ['-c', 'command -v claude'], { encoding: 'utf8' }).trim()); } catch { }
+  if (!bin || !fs.existsSync(bin)) {
+    console.log('  SKIP: no claude CLI on PATH — the sdk_status↔compact_progress fork was not re-dumped (leg ⓓ still runs on the production-buffer fixtures)');
+  } else {
+    const hits = (needle) => { try { return Number(require('child_process').execFileSync('grep', ['-c', '-a', '-F', needle, bin], { encoding: 'utf8' }).trim()) || 0; } catch { return 0; } };
+    ok('the SDK sink MAPS sdk_status → system/status with compact_result (this is where §2.11 gets its facts)',
+      hits('type:"system",subtype:"status",status:Oe.status') > 0 || hits('subtype:"status",status:Oe.status') > 0, 'sdk_status→system/status mapper not found');
+    ok('…while compact_progress is CONSUMED by a host callback and never forwarded (the swallowing callback, named)',
+      hits('case"compact_progress":') > 0, 'the onCompactEvent compact_progress case is gone — re-measure whether the record now reaches stdout');
+    ok('…and set_in_progress_tool_use_ids goes to onInProgressToolUseIDs, not to the stream (why caps.inProgressTools is false)',
+      hits('n.onInProgressToolUseIDs?.(e.op)') > 0 || hits('onInProgressToolUseIDs?.(e.op)') > 0, 'the swallowing callback is gone — re-run the wire probe, the cap may be flippable');
+  }
+}
+{
+  // ⓕ THE WIRE. Everything above feeds records WE wrote. This leg spawns the
+  //    installed CLI in chat-wrapper.js's exact flag shape, runs read-only
+  //    tools, and censuses what actually lands on stdout — the ONE leg that can
+  //    tell "we parse it right" from "it never arrives" (scripts/
+  //    probe-claude-stdout.mjs; one turn, cheapest model, ~10s).
+  //    It FAILS only on a real contradiction: the wire and the caps row
+  //    disagreeing. Anything that makes the measurement impossible (no CLI, no
+  //    tool ran, a timeout) SKIPS LOUDLY — a probe that could not measure is
+  //    never evidence of absence.
+  let res = null, why = '';
+  try {
+    const raw = require('child_process').execFileSync(process.execPath, [path.join(REPO, 'scripts/probe-claude-stdout.mjs')], { encoding: 'utf8', timeout: 180000, stdio: ['ignore', 'pipe', 'ignore'] });
+    res = JSON.parse(String(raw).trim().split('\n').filter(Boolean).pop() || '{}');
+  } catch (e) { why = e.message; }
+  if (!res || res.skip || !res.ok) console.log(`  SKIP: wire probe did not run (${res?.skip || why || 'unknown'}) — the caps rows were not re-measured against a live CLI`);
+  else if (!res.toolUses) console.log(`  SKIP: wire probe ran ${res.version} but no tool executed (${JSON.stringify(res.types)}) — nothing to measure the run-set record against`);
+  else {
+    const n = (t) => res.types[t] || 0;
+    ok(`${res.version} wire probe: ${res.toolUses} tool_use / ${res.toolResults} tool_result really executed in the wrapper's flag shape`, res.toolResults > 0, JSON.stringify(res.types));
+    // POSITIVE CONTROL — without this the absence below proves nothing about
+    // the CLI, only about our reader.
+    ok('…POSITIVE CONTROL: system/session_state_changed DID arrive on the same stdout (the reader works, and the spawn env is real)', n('system/session_state_changed') > 0, JSON.stringify(res.types));
+    // THE MEASUREMENT, in BOTH directions. Today: 0 records ⇒ the cap must be
+    // false. The day a CLI forwards one, this goes RED and the fix is to flip
+    // src/backend-caps.js + src/lib/agent-meta.js to true (the consumer, the
+    // broadcast, the attach field and the CSS dot are already written).
+    ok(`caps.inProgressTools agrees with the wire (${n('set_in_progress_tool_use_ids')} set_in_progress_tool_use_ids records observed for ${res.toolUses} tool_use blocks)`,
+      (n('set_in_progress_tool_use_ids') > 0) === capsOf('claude').inProgressTools,
+      n('set_in_progress_tool_use_ids') > 0
+        ? 'THE RECORD NOW ARRIVES — flip inProgressTools to true in src/backend-caps.js AND src/lib/agent-meta.js; the consumer is already written'
+        : 'caps says the CLI reports a run set, but none arrived — demote the row, no surface may claim the executing dot');
+    ok(`compact_progress is still absent from our stdout (${n('compact_progress')}) — §2.11 runs on system/status, and leg ⓑ is shape parity only`, n('compact_progress') === 0, JSON.stringify(res.types));
+  }
+}
+{
+  // ⑨ RETRACTION on the live stream: a tombstone for a message we rendered.
+  //    UNVERIFIED ON OUR WIRE, deliberately (round 4, and said in the docs the
+  //    same way): 0 in 24 production buffers, 0 in the wire probe above, and
+  //    `grep -rl '"type":"tombstone"' ~/.claude/projects/` → 0 files, so the
+  //    persisted path cannot produce one either. Unlike the two records this
+  //    round demoted, it is NOT disproven — it is *yielded* on the query
+  //    stream (`for(let eu of Bu) yield{type:"tombstone",message:eu}`, offsets
+  //    185068785 / 185075330), not handed to a callback. It is also not cheaply
+  //    triggerable: BOTH emitters sit on the server REFUSAL-FALLBACK path
+  //    (`ks.type==="refusal_no_fallback"` and the `server_fallback` /
+  //    `api_refusal_category` branch), i.e. the safety classifier refusing
+  //    mid-stream — no deterministic probe exists that does not amount to
+  //    deliberately provoking a refusal, which is not something a test suite
+  //    should do. So the claude half of §2.10 stays as DORMANT code with the
+  //    behaviour pinned here, and the shipped retraction lane is codex's
+  //    `thread_rolled_back` (verified in 3 real local rollouts).
   const s = mkSession('claude', 'w-b3-tomb'); const p = fakePty();
   so.setupSessionPty(s, 'w-b3-tomb', p);
   p.data(J({ type: 'assistant', session_id: 'sid-t', uuid: 'u-partial', message: { id: 'msg_partial', model: 'claude-fable-5', role: 'assistant', content: [{ type: 'text', text: 'half a sentence' }] } }));

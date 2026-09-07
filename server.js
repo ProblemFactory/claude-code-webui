@@ -407,7 +407,7 @@ const CLAUDE_STREAM_TYPES = new Set([
   'assistant', 'user', 'system', 'result', 'attachment', 'control_request',
   'control_response', 'tool_progress', 'stream_event', 'summary',
   'rate_limit_event', // handled since 2.289.0 — the set lagged the handler, so the breadcrumb cried 'unhandled' for a handled type (misled the inc-msozeyw2 read)
-  'set_in_progress_tool_use_ids', 'compact_progress', 'tombstone', '_stdin_ack', '_remote_state', '_remote_exit', // B3 §2.5/§2.10/§2.11: the run set + compaction stage are consumed in claude-stream-json.js, tombstone by the normalizer — listed here or the breadcrumb cries 'unhandled' for handled records (the 2.289.0 mistake)
+  'set_in_progress_tool_use_ids', 'compact_progress', 'tombstone', '_stdin_ack', '_remote_state', '_remote_exit', // B3 §2.5/§2.10/§2.11: the run set + compaction stage have readers in claude-stream-json.js, tombstone in the normalizer — listed here or the breadcrumb cries 'unhandled' for handled records (the 2.289.0 mistake). Round 4: the first two have never been observed on our stdout (host callbacks swallow them; the live compaction lane is system/status) and tombstone is unverified — the rows stay because the READER exists, which is what this set is about
 ]);
 const _seenStreamTypes = new Set();
 

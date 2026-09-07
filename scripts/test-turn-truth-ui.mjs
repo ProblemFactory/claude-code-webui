@@ -9,10 +9,17 @@
 // unreachable:
 //   ① the status bar's THIRD state ('requires_action') — the value we never had
 //   ② the compaction card's hint: the hardcoded 1–2-minute apology BEFORE any
-//      progress record, the CLI's real stage after one
+//      stage record, the CLI's real stage after one — driven by the frames the
+//      server builds from `system/status`, the lane a REAL compaction (incl.
+//      the AUTO one nobody typed /compact for) actually uses on 2.1.257
+//      (round 4: `compact_progress` never reaches our stdout at all)
 //   ③ retraction: a claude tombstone is REMOVED (its own instruction), a codex
 //      rollback is STRUCK IN PLACE (hiding it would rewrite what someone read)
 //   ④ the tool-granular run set marks the executing card, not every pending one
+//      — DORMANT since round 4: `set_in_progress_tool_use_ids` never reaches
+//      our stdout (the CLI hands it to a host callback), so caps.inProgressTools
+//      is false everywhere and NO user sees this dot today. The legs stay as a
+//      pin on the code, and say so.
 //   ⑤ and BOTH of those per-element marks survive every rebuild — three of the
 //      FOUR paths that build an element for a message (create/_renderDetached,
 //      the status re-render in _onEditMessage, _rerenderVisible). Round-2
@@ -230,7 +237,12 @@ if (!opened?.ok) { console.error(pageErrors.join('\n')); done(); }
   check('…and it goes away again when the harness says idle (the chip is a live state, not a sticky banner)', back === 0, String(back));
 }
 
-// ── ② the compaction card: apology → real stage ─────────────────────────────
+// ── ② the compaction card: apology → real stage → real OUTCOME ──────────────
+// The frames below are EXACTLY what src/server/stdout/claude-stream-json.js
+// broadcasts for the real production sequence captured in a session buffer
+// (system/status compacting → hook_started SessionStart:compact → system/status
+// {status:null, compact_result:'success'}), plus one failure frame. The node
+// suite pins that the server builds these; this one pins what the user reads.
 {
   const m = await evaljs(`(async () => {
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -239,23 +251,39 @@ if (!opened?.ok) { console.error(pageErrors.join('\n')); done(); }
     await sleep(80);
     const hintEl = () => v._messageList.querySelector('.chat-ctx-full-hint');
     const fallback = hintEl().textContent.trim();
-    v._onCompactProgress({ event: 'hooks_start', hookType: 'pre_compact', hint: null });
+    v._onCompactProgress({ event: 'compact_start', hookType: null, hint: null, result: null, error: null });
+    await sleep(60);
+    const started = hintEl().textContent.trim();
+    v._onCompactProgress({ event: 'hooks_start', hookType: 'SessionStart:compact', hint: null, result: null, error: null });
     await sleep(60);
     const stage1 = hintEl().textContent.trim();
-    v._onCompactProgress({ event: 'compact_start', hookType: null, hint: 'summarizing 812 messages' });
+    // the richer (declared) lane's hint still lands if a CLI ever forwards one
+    v._onCompactProgress({ event: 'compact_start', hookType: null, hint: 'summarizing 812 messages', result: null, error: null });
     await sleep(60);
     const stage2 = hintEl().textContent.trim();
     const r = hintEl().getBoundingClientRect();
-    v._onCompactProgress({ event: 'compact_end', hookType: null, hint: null });
+    v._onCompactProgress({ event: 'compact_end', hookType: null, hint: null, result: 'success', error: null });
     await sleep(60);
     const ended = hintEl().textContent.trim();
-    return { fallback, stage1, stage2, ended, w: Math.round(r.width), inViewport: r.left >= -1 && r.right <= innerWidth + 1 };
+    const rEnd = hintEl().getBoundingClientRect();
+    v._onCompactProgress({ event: 'compact_end', hookType: null, hint: null, result: 'error', error: 'ran out of context' });
+    await sleep(60);
+    const failedTxt = hintEl().textContent.trim();
+    return { fallback, started, stage1, stage2, ended, failedTxt,
+             w: Math.round(r.width), inViewport: r.left >= -1 && r.right <= innerWidth + 1,
+             wEnd: Math.round(rEnd.width), endInViewport: rEnd.left >= -1 && rEnd.right <= innerWidth + 1 };
   })()`);
-  check('before any progress record the card shows the hardcoded 1–2-minute apology (the FALLBACK, unchanged)', /1.2 minutes|1–2|1〜2|do not press Stop|不要按 Stop|Stop を押さないで/.test(m?.fallback || ''), m?.fallback);
-  check('a hooks_start record replaces it with the REAL stage (the hook phase, named)', /pre compact|pre_compact|hooks|フック|hooks…/.test(m?.stage1 || '') && m.stage1 !== m.fallback, m?.stage1);
-  check("a compact_start carries the CLI's own hint_text into the card", /summarizing 812 messages/.test(m?.stage2 || ''), m?.stage2);
-  check('compact_end returns the card to the fallback (there is no longer a stage to report)', m?.ended === m?.fallback, JSON.stringify([m?.ended, m?.fallback]));
+  check('before any stage record the card shows the hardcoded 1–2-minute apology (the FALLBACK, unchanged)', /1.2 minutes|1–2|1〜2|do not press Stop|不要按 Stop|Stop を押さないで/.test(m?.fallback || ''), m?.fallback);
+  check("the wire's own compaction START (system/status 'compacting') replaces the apology with a live sentence", m?.started && m.started !== m.fallback && /Compact|压缩|圧縮/.test(m.started), m?.started);
+  check('a hooks_start record names the hook phase (the one intermediate stage this lane has)', /SessionStart:compact/.test(m?.stage1 || '') && m.stage1 !== m.fallback, m?.stage1);
+  check("a compact_start carries the CLI's own hint text into the card", /summarizing 812 messages/.test(m?.stage2 || ''), m?.stage2);
+  // THE ROUND-4 BEHAVIOUR CHANGE, measured: the end of a compaction must not
+  // silently revert to "this takes 1–2 minutes, do not press Stop" — the thing
+  // it is describing already finished.
+  check('compact_end reports the real OUTCOME and never falls back to the apology', m?.ended && m.ended !== m.fallback && /finish|完成|完了/.test(m.ended), JSON.stringify([m?.ended, m?.fallback]));
+  check('…and a FAILED compaction says so, with the CLI’s own reason', /ran out of context/.test(m?.failedTxt || '') && m.failedTxt !== m.fallback, m?.failedTxt);
   check(`the hint fits the 375px viewport (${m?.w}px, no horizontal overflow)`, m?.inViewport === true && m?.w > 0 && m.w <= 375, m);
+  check(`…and so does the outcome sentence (${m?.wEnd}px)`, m?.endInViewport === true && m?.wEnd > 0 && m.wEnd <= 375, m);
 }
 
 // ── ③ retraction: two kinds, two treatments ─────────────────────────────────
@@ -297,8 +325,22 @@ if (!opened?.ok) { console.error(pageErrors.join('\n')); done(); }
   check(`the struck message still fits the 375px viewport (h=${m?.rbH})`, m?.rbInViewport === true, m);
 }
 
-// ── ④ the tool-granular run set ─────────────────────────────────────────────
+// ── ④ the tool-granular run set — DORMANT, and pinned as dormant ────────────
+// Round 4: no harness reports one today (caps.inProgressTools is false
+// everywhere — claude's record never leaves the CLI's host callback, measured
+// on the wire by test-stdout-registry's leg ⓕ). These legs therefore describe
+// CODE, not a shipped user-visible behaviour: they keep the rendering honest
+// for the day a harness does report a run set, and the caps row is what stops
+// any surface from claiming the dot in the meantime. The first assert below is
+// the honesty pin — if a caps row ever turns true, this leg's framing must be
+// revisited together with it.
 {
+  {
+    const { capsOf, BACKEND_CAPS } = require(path.join(repo, 'src/backend-caps.js'));
+    check('this leg exercises DORMANT code: no harness declares inProgressTools, so no user sees a dot today',
+      Object.values(BACKEND_CAPS).every((r) => r.inProgressTools === false) && capsOf('claude').inProgressTools === false,
+      'a harness now claims a run set — re-read this leg: it is written as "the code is ready", not "the user sees this"');
+  }
   const m = await evaljs(`(async () => {
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const v = window.__v;

@@ -51,6 +51,15 @@ const read = (f) => fs.readFileSync(path.join(REPO, f), 'utf8');
   // S5: the parse pipelines live in src/server/stdout/<protocol>.js
   const so = ['claude-stream-json', 'codex-events', 'acp-events'].map((m) => read(`src/server/stdout/${m}.js`)).join('\n');
   ok(so.includes('session._streamingKind = null;'), 'turn end resets the kind with the label');
+  // AUTO compaction (round 4): the /compact SEND SITE above can only label a
+  // compaction the user typed. The one that actually happens to a long session
+  // — trigger:"auto" in the real production capture — is announced only by the
+  // CLI's own `system/status`, so the Stop two-step guard now has a second,
+  // send-site-independent source. Behavioural coverage + negative controls live
+  // in test-stdout-registry leg ⓓ; this is the wiring pin.
+  const csj = read('src/server/stdout/claude-stream-json.js');
+  ok(/msg\.subtype === 'status'/.test(csj) && /st === 'compacting'/.test(csj) && /session\._streamingKind = 'compacting';/.test(csj),
+    "the AUTO compaction the user never typed /compact for also arms the guard (system/status 'compacting')");
   ok((so.match(/kind: session\._streamingKind \|\| null/g) || []).length >= 2, 'every streaming-label broadcast carries the kind (API-retry relabels do not drop the guard)');
   ok(read('src/session-schema.js').includes('_streamingKind:'), '_streamingKind registered in the session schema');
   const ci = read('src/lib/chat-input.js');

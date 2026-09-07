@@ -35,6 +35,16 @@ const HANDLED_SYSTEM_SUBTYPES = new Set([
   // firing for a record we handle (the 2.289.0 rate_limit_event lesson: the
   // set lagging the handler made the breadcrumb lie).
   'session_state_changed',
+  // status is card-less for the same reason and is the CLI's REAL compaction
+  // channel on our stdout (§2.11): {status:'compacting'} … {status:null,
+  // compact_result} — verified in a production buffer's 2.9-minute AUTO
+  // compaction, where `compact_progress` never appeared. The server consumer
+  // (src/server/stdout/claude-stream-json.js) turns it into the spinner label,
+  // _streamingKind and the Compact-now card's stage; a card per status flip
+  // would be two per compaction. The same subtype also carries the CLI's
+  // permission-mode echo ({status:null, permissionMode}) — also card-less, and
+  // the consumer deliberately ignores that one.
+  'status',
 ]);
 
 
@@ -410,7 +420,18 @@ class MessageManager {
    *  The record's `message` is the CLI's internal Message; we resolve it by the
    *  identities our own ids are minted from (record uuid, API message.id).
    *  A tombstone for a message we never rendered emits NOTHING — a no-op op
-   *  would tell the view to strike a message it does not have. */
+   *  would tell the view to strike a message it does not have.
+   *
+   *  UNVERIFIED ON OUR WIRE (round 4, honest status): no VibeSpace-spawned CLI
+   *  has been observed emitting one — 0 in 24 production buffers, 0 in the wire
+   *  probe, and 0 files under ~/.claude/projects/ contain the type, so a
+   *  transcript rebuild cannot produce it either. It is not DISPROVEN like
+   *  set_in_progress_tool_use_ids and compact_progress (those go to host
+   *  callbacks; this one is `yield`ed on the query stream) — it just needs a
+   *  server REFUSAL-FALLBACK, which is not deterministically triggerable and
+   *  which we will not provoke. In practice today the retraction lane of §2.10
+   *  is CODEX-ONLY (`thread_rolled_back`, verified in real rollouts); this stays
+   *  as working code for the day a refusal fallback happens in front of a user. */
   _processTombstone(raw, emit) {
     const tomb = raw && raw.message;
     if (!tomb || typeof tomb !== 'object') return;

@@ -95,10 +95,21 @@
 //                     the value exists so a future one can say so honestly).
 //   null            — no turn concept at all (shell).
 // inProgressTools names the TOOL-GRANULAR truth: whether the harness reports
-// which tool_use ids are executing right now (claude's
-// set_in_progress_tool_use_ids: "Surfaces use this to show which tools are
-// running"). false everywhere else — codex/ACP report per-item lifecycle, and
-// a card's spinner is derived from its own item there.
+// which tool_use ids are executing right now. FALSE ON EVERY HARNESS TODAY —
+// including claude, whose `set_in_progress_tool_use_ids` record exists and is
+// even documented ("Surfaces use this to show which tools are running") but
+// NEVER REACHES A STREAM-JSON CONSUMER: 2.1.257 hands it to a host callback
+// (`n.onInProgressToolUseIDs?.(e.op); return`, offset 186333979) and the 'add'
+// side goes to a callback at tool dispatch without entering that dispatcher at
+// all. Measured, not inferred — a probe in chat-wrapper.js's exact spawn shape
+// ran 6 tools and saw 0 of these while session_state_changed arrived on the
+// same stdout, and 24 production buffers hold 212 tool_use blocks and 0 of
+// these. A cap is a PROMISE TO A SURFACE: claiming true here painted a
+// "currently executing" dot no user could ever see. The consumer stays (dormant
+// with the callback named) and scripts/test-stdout-registry.mjs re-measures the
+// wire on every run — the day a CLI forwards the record, that leg goes red and
+// says to flip this row. codex/ACP report per-item lifecycle instead, and a
+// card's spinner is derived from its own item there.
 // CLAUDE'S SPAWN PREREQUISITE (owner decision 8(c), design §5.1): the CLI only
 // emits session_state_changed when CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS is in
 // its environment — src/adapters/claude-code.js sets it on every claude spawn.
@@ -170,10 +181,12 @@ const BACKEND_CAPS = {
     // The CLI queues stdin messages itself and reports nothing about it —
     // an HONEST EMPTY verb table, not a missing feature.
     inputModes: { queue: true, queueVerbs: [] },
-    // system/session_state_changed (env-gated at spawn) + the tool-granular
-    // set_in_progress_tool_use_ids — the only harness that publishes both.
+    // system/session_state_changed (env-gated at spawn) — VERIFIED on our
+    // stdout in the wrapper's spawn shape (running → idle around a real turn).
+    // inProgressTools is false because the record it would need is swallowed by
+    // a host callback and never reaches us (see the row's essay above).
     turnState: 'authoritative',
-    inProgressTools: true,
+    inProgressTools: false,
     // --settings outputStyle, read once at spawn (stream-json has no
     // /output-style verb) ⇒ a change needs a restart.
     responseStyle: { live: false, closed: false, values: ['Concise', 'Explanatory', 'Learning', 'Proactive'] },
