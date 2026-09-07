@@ -472,12 +472,19 @@ console.log('— ⑦ the WRITER: the wrapper\'s effort reaches session-meta, so 
   ok(sess._effortOrigin === 'conversation',
     '…and with nothing commanded, the value the wrapper adopted from the thread is stated as the CONVERSATION\'s own', String(sess._effortOrigin));
   ok(metaOnDisk()?.effort === 'ultra', '…and is PERSISTED to session-meta — the value a resume spawns with', JSON.stringify(metaOnDisk()?.effort));
+  // r3 (adversarial verifier, medium): the ORIGIN is persisted WITH the value
+  // it describes. Without this the disk kept the spawn's origin while memory
+  // moved on, and boot-restore rebuilt the stale one.
+  ok(metaOnDisk()?.effortOrigin === 'conversation',
+    'r3: …and so is WHICH FACT it is — the writer that re-authors the origin must write it', JSON.stringify(metaOnDisk()?.effortOrigin));
   // an effort typed as `/effort` inside the chat takes the same road
   handlers.data(J({ type: 'wrapper_meta', payload: { threadId: 'th-w', model: 'gpt-6-astra', permissionMode: 'yolo', effort: 'ultra', effortNext: 'high' } }));
   ok(sess._effort === 'high' && metaOnDisk()?.effort === 'high',
     'a later pending pick (a `/effort` typed into the chat) follows the same road', JSON.stringify({ s: sess._effort, d: metaOnDisk()?.effort }));
   ok(sess._effortOrigin === 'chosen',
     '…and moving AWAY from a value we already knew is a choice made inside the session, not the conversation\'s own (B-6b6d)', String(sess._effortOrigin));
+  ok(metaOnDisk()?.effortOrigin === 'chosen',
+    'r3: …on disk too, so a server restart cannot rebuild a hand-changed value as "the conversation\'s own"', JSON.stringify(metaOnDisk()?.effortOrigin));
   // ── r2 review: `effortNext: null` is a STATEMENT, not a gap ──
   // Picking "Auto (model default)" clears the pick: the wrapper sends
   // thread/settings/update {effort:null}, the thread's effort goes away, and it
@@ -497,10 +504,68 @@ console.log('— ⑦ the WRITER: the wrapper\'s effort reaches session-meta, so 
   // and the live value alone is never mistaken for the pending one
   handlers.data(J({ type: 'wrapper_meta', payload: { threadId: 'th-w', model: 'gpt-6-astra', permissionMode: 'yolo', effort: 'max' } }));
   ok(sess._effort === 'ultra', 'negative control: `effort` WITHOUT `effortNext` is the last turn\'s level and is ignored here', JSON.stringify(sess._effort));
+  // ── r3 ①: THE SPAWN'S OWN STATE, then a `/effort` typed inside it ───────
+  // The bench above starts from nothing; the defect the verifier reproduced
+  // needs the state ws-create really persists for a codex resume whose rollout
+  // said ultra ({effort:'ultra', effortOrigin:'conversation', modelOrigin:
+  // 'conversation'} — verified on disk in a live-server probe). Memory then
+  // moved to high/chosen while the DISK kept 'conversation', and boot-restore
+  // reads meta.effortOrigin ⇒ after a restart the panel called a value the
+  // user had just changed by hand "this conversation's own value".
+  {
+    const spawnMeta = {
+      name: 'van', cwd: tmp, backend: 'codex', backendSessionId: 'th-w2', mode: 'chat', webuiSessionId: 'w-eff2',
+      effort: 'ultra', effortOrigin: 'conversation', modelOrigin: 'conversation',
+    };
+    fs.writeFileSync(path.join(META_DIR, 'cw-eff2.json'), JSON.stringify(spawnMeta));
+    const s2 = {
+      backend: 'codex', mode: 'chat', name: 'van', cwd: tmp, sockName: 'cw-eff2', createdAt: Date.now(),
+      backendSessionId: 'th-w2', _effort: 'ultra', _effortOrigin: 'conversation', _fed: [],
+      // …and NO `_modelOrigin` on the session object: this writer never
+      // authors it, so the disk key must survive through the spread.
+    };
+    s2.normalizer = { processLive(m) { s2._fed.push(m); }, onOp() { }, status: () => ({}) };
+    activeSessions.set('w-eff2', s2);
+    const h2 = {};
+    so.setupSessionPty(s2, 'w-eff2', { onData: (f) => { h2.data = f; }, onExit: () => { }, write() { }, pid: 2 });
+    const disk2 = () => { try { return JSON.parse(fs.readFileSync(path.join(META_DIR, 'cw-eff2.json'), 'utf8')); } catch { return null; } };
+    h2.data(J({ type: 'wrapper_meta', payload: { threadId: 'th-w2', effort: 'ultra', effortNext: 'high' } }));
+    ok(s2._effort === 'high' && s2._effortOrigin === 'chosen',
+      'r3 ① the scenario: `/effort high` inside a resumed ultra conversation ⇒ memory says high / chosen',
+      JSON.stringify({ e: s2._effort, o: s2._effortOrigin }));
+    ok(disk2()?.effort === 'high' && disk2()?.effortOrigin === 'chosen',
+      'r3 ① THE FIX: the disk says the same — before it kept "conversation" and boot-restore rebuilt that',
+      JSON.stringify({ e: disk2()?.effort, o: disk2()?.effortOrigin }));
+    // …and what the panel would claim after a restart, through the REAL rule
+    const { spawnValueOrigin } = await import(path.join(REPO, 'src/lib/agent-meta.js'));
+    ok(spawnValueOrigin(disk2()?.effortOrigin, disk2()?.effort, undefined) === spawnValueOrigin(s2._effortOrigin, s2._effort, undefined),
+      'r3 ①: a restarted session and the live one make the SAME claim (the contradiction the origin exists to remove)',
+      JSON.stringify([spawnValueOrigin(disk2()?.effortOrigin, disk2()?.effort, undefined), spawnValueOrigin(s2._effortOrigin, s2._effort, undefined)]));
+    // NEGATIVE CONTROL ①: the key this writer does NOT author survives it.
+    // Re-listing `modelOrigin` here would stamp null over a real disk value
+    // (the session object above deliberately carries none) — the spread is
+    // what carries it, and that has to be measured, not assumed.
+    ok(disk2()?.modelOrigin === 'conversation',
+      'r3 ① negative control: `modelOrigin` — which this consumer never authors — survives the write untouched',
+      JSON.stringify(disk2()?.modelOrigin));
+    // NEGATIVE CONTROL ②: a wrapper that says nothing about effort changes
+    // NEITHER the value nor the origin, on disk or in memory (version skew).
+    const before2 = JSON.stringify(disk2());
+    h2.data(J({ type: 'wrapper_meta', payload: { threadId: 'th-w2', model: 'gpt-6-astra' } }));
+    ok(s2._effortOrigin === 'chosen' && JSON.stringify(disk2()) === before2,
+      'r3 ① negative control: an OLD wrapper (no effort fields) re-authors nothing and rewrites nothing',
+      JSON.stringify({ o: s2._effortOrigin, changed: JSON.stringify(disk2()) !== before2 }));
+    // …and boot-restore really is the reader that makes this matter.
+    const bootSrc = fs.readFileSync(path.join(REPO, 'src/server/boot-restore.js'), 'utf8');
+    ok((bootSrc.match(/_effortOrigin: meta\.effortOrigin \|\| null/g) || []).length >= 3,
+      'r3 ①: …and boot-restore is what reads that key back (all three restore paths)');
+  }
   const ev = require(path.join(REPO, 'src/server/stdout/codex-events.js'));
   const src = fs.readFileSync(path.join(REPO, 'src/server/stdout/codex-events.js'), 'utf8');
   ok(/payload\.effortNext !== undefined/.test(src) && !/payload\.effortNext \|\| payload\.effort/.test(src),
     'wiring pin: the writer reads effortNext ONLY (the `|| payload.effort` fallback is the defect, not a belt)');
+  ok(/effortOrigin: session\._effortOrigin \|\| null,/.test(src) && !/modelOrigin: session\._modelOrigin/.test(src),
+    'r3 ① wiring pin: the meta write lists the key it AUTHORS (effortOrigin) and not the one it does not (modelOrigin — the spread carries that)');
   void ev;
 }
 
@@ -940,10 +1005,15 @@ console.log('— ⑪c WIRING: every resume/fork/restart entry point, and where t
   ok(/import \{ resumeSpawnPick \} from '\.\.\/resume-continuity\.js';/.test(sl),
     'the client spawns by the same PURE ladder as the server (one law, two callers)');
   ok(/const continuesConversation = !!resumeId;/.test(sl)
-    && /const sessionModel = pickHere\(model, defaults\.model\);/.test(sl)
-    && /const sessionEffort = pickHere\(effort, defaults\.effort\);/.test(sl)
+    && /const modelPick = pickHere\(model, defaults\.model\);/.test(sl)
+    && /const effortPick = pickHere\(effort, defaults\.effort\);/.test(sl)
+    && /const sessionModel = modelPick\.value;/.test(sl) && /const sessionEffort = effortPick\.value;/.test(sl)
     && /resume: continuesConversation, hasSource: false/.test(sl),
     'createSession: BOTH twins go through it, and the client declares it cannot read the conversation (hasSource:false)');
+  // r3: the client keeps the whole pick — its ORIGIN is the fact the wire
+  // could not otherwise carry (leg ⑬ measures it end to end).
+  ok(/spawnOriginHint: \{ model: modelPick\.origin, effort: effortPick\.origin \},/.test(sl),
+    'r3: …and states WHICH FACT each resolved value is, for both twins');
   ok(!/const sessionEffort = effort !== undefined \? effort : defaults\.effort;/.test(sl)
     && !/const sessionModel = model !== undefined \? model : defaults\.model;/.test(sl),
     'the pre-fix expression is GONE from both twins (this is the line the owner\'s incident traced to)');
@@ -1132,6 +1202,201 @@ console.log('— ⑪e r2: OPENCODE CAN ANSWER, SO IT DOES (and a harness that ca
   const generic = acpHarness({ id: 'demo-agent', command: 'demo-agent', caps: { ...require(path.join(REPO, 'src/harnesses/acp.js')).ACP_DEFAULT_CAPS } });
   ok(generic.store.lastTurnModel === undefined && generic.store.lastTurnEffort === undefined,
     'negative control: a GENERIC ACP harness still declares neither — the hook is per-harness evidence, never a default');
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// ⑫ r3 (adversarial verifier, medium): A NEW SESSION COULD ONLY EVER RECORD
+// 'chosen'. The client resolves `<prefix>.default*` for a NEW create (it needs
+// the value for its own chip, and it owns the legacy `session.defaultEffort`
+// key + `settings.isModified`, which the server has no access to) and sends it
+// VERBATIM so a stated "Auto (model default)" survives as ''. The server then
+// sees a bare string it can only read as a pick ⇒ every create path that shows
+// NO picker (openShellTerminal, the toolbar, setup-flows, manage-agents)
+// labelled the instance default "your choice for this session", 'instance' was
+// unreachable on a new session, and so was 'harness'.
+console.log('— ⑫ r3: the wire can now carry "the client resolved this, the user did not state it"');
+const { applyOriginHint } = require(path.join(REPO, 'src/resume-continuity.js'));
+{
+  // (a) the PURE rule: it may only DOWNGRADE our own 'chosen'.
+  ok(applyOriginHint('chosen', 'instance') === 'instance' && applyOriginHint('chosen', 'harness') === 'harness',
+    'a hint that says "the user did not state this" is believed');
+  ok(applyOriginHint('conversation', 'instance') === 'conversation'
+    && applyOriginHint('instance', 'harness') === 'instance'
+    && applyOriginHint('harness', 'instance') === 'harness',
+    'negative control: every OTHER rung was decided by the server from facts the client never had — a hint may not touch it');
+  ok(applyOriginHint('chosen', 'conversation') === 'chosen' && applyOriginHint('chosen', 'chosen') === 'chosen',
+    "negative control: 'conversation' is a fact only the server holds and 'chosen' agrees — neither is believed as a hint");
+  ok(applyOriginHint('chosen', undefined) === 'chosen' && applyOriginHint('chosen', null) === 'chosen'
+    && applyOriginHint('chosen', 'wat') === 'chosen' && applyOriginHint('chosen', 42) === 'chosen',
+    'negative control: an OLDER client sends no hint (and garbage is not a hint) — master\'s answer stands');
+
+  // (b) the real composition, client → JSON wire → server ladder → origin.
+  //     Both halves are the product's own lines; ⑫c pins each against source.
+  const clientCreate = (explicit, dflt, resumeId) => {
+    const cont = !!resumeId;
+    const p = resumeSpawnPick({ explicit, instanceDefault: dflt, resume: cont, hasSource: false });
+    const wireKnob = (v) => (cont ? (v || undefined) : v);
+    return JSON.parse(JSON.stringify({                      // ← the actual JSON round trip
+      resumeId: resumeId || undefined, model: wireKnob(p.value), spawnOriginHint: { model: p.origin },
+    }));
+  };
+  const serverPick = (msg, conversation, dflt, hasSource) => {
+    const explicit = msg.model;
+    const stated = explicit !== undefined && explicit !== null && String(explicit).trim() !== '';
+    const p = resumeSpawnPick({ explicit, conversation: stated ? '' : conversation, instanceDefault: dflt, resume: !!msg.resumeId, hasSource });
+    return { value: p.value, origin: applyOriginHint(p.origin, (msg.spawnOriginHint || {}).model) };
+  };
+  const run = (explicit, dflt, resumeId, conversation = '') => serverPick(clientCreate(explicit, dflt, resumeId), conversation, dflt, true);
+  ok(run(undefined, 'gpt-5.6-sol', null).origin === 'instance' && run(undefined, 'gpt-5.6-sol', null).value === 'gpt-5.6-sol',
+    'r3 THE FIX: a create from a path with NO picker records the INSTANCE DEFAULT — and the value is unchanged',
+    JSON.stringify(run(undefined, 'gpt-5.6-sol', null)));
+  ok(run(null, 'gpt-5.6-sol', null).origin === 'instance',
+    '…including the callers that pass an explicit null (openShellTerminal)', JSON.stringify(run(null, 'gpt-5.6-sol', null)));
+  ok(run(undefined, '', null).origin === 'harness' && run(undefined, '', null).value === '',
+    '…and with no instance default either it is the HARNESS rung, not a phantom choice of ""',
+    JSON.stringify(run(undefined, '', null)));
+  ok(run('gpt-5.6-sol', 'gpt-5.6-sol', null).origin === 'chosen',
+    'negative control: SUBMITTING the pre-filled default in the New Session dialog is still a choice (same string, different act)');
+  ok(run('gpt-6-astra', 'gpt-5.6-sol', null).origin === 'chosen', 'negative control: picking something else is a choice');
+  ok(run('', 'gpt-5.6-sol', null).origin === 'chosen' && run('', 'gpt-5.6-sol', null).value === '',
+    'negative control: the dialog\'s explicit "Auto (model default)" stays a CHOICE (r2\'s fix is untouched)');
+  ok(run(undefined, 'gpt-5.6-sol', 'th-x', 'gpt-6-astra').origin === 'conversation'
+    && run(undefined, 'gpt-5.6-sol', 'th-x', 'gpt-6-astra').value === 'gpt-6-astra',
+    'negative control: a RESUME still takes the conversation\'s own value — the client sends nothing there, so no hint can apply',
+    JSON.stringify(run(undefined, 'gpt-5.6-sol', 'th-x', 'gpt-6-astra')));
+  ok(serverPick({ resumeId: 't', spawnOriginHint: { model: 'instance' } }, 'gpt-6-astra', 'gpt-5.6-sol', true).origin === 'conversation',
+    'negative control: a hint cannot re-point a fact only the server holds, even when a client insists');
+  // (c) the DEFECT, replayed through the same composition with the hint removed
+  const preFix = (explicit, dflt) => {
+    const msg = clientCreate(explicit, dflt, null); delete msg.spawnOriginHint;
+    return serverPick(msg, '', dflt, true).origin;
+  };
+  ok(preFix(undefined, 'gpt-5.6-sol') === 'chosen' && preFix(null, 'gpt-5.6-sol') === 'chosen' && preFix(undefined, '') === 'chosen',
+    'r3 REPRODUCED (negative control): without the hint EVERY new create reads as a pick — "instance" and "harness" are unreachable',
+    JSON.stringify([preFix(undefined, 'gpt-5.6-sol'), preFix(undefined, '')]));
+  // …and what the panel then said, through the REAL label rule
+  const { spawnValueOrigin } = await import(path.join(REPO, 'src/lib/agent-meta.js'));
+  ok(spawnValueOrigin('chosen', 'gpt-5.6-sol', undefined) === 'chosen'
+    && spawnValueOrigin('instance', 'gpt-5.6-sol', undefined) === 'instance',
+    '…and the panel repeats whichever it is told (which is why the wire had to be able to say it)');
+}
+
+console.log('— ⑫c r3 WIRING: both halves, and the placement hint that is never a command');
+{
+  const read = (f) => fs.readFileSync(path.join(REPO, f), 'utf8');
+  const sl = read('src/lib/session-lifecycle.js'), wc = read('src/ws-create.js');
+  ok(/const pickHere = \(explicit, instanceDefault\) =>\n\s*resumeSpawnPick\(\{ explicit, instanceDefault, resume: continuesConversation, hasSource: false \}\);/.test(sl),
+    'the client keeps the WHOLE pick (its origin is the fact the wire could not carry)');
+  ok(/spawnOriginHint: \{ model: modelPick\.origin, effort: effortPick\.origin \},/.test(sl),
+    '…and sends it for BOTH twins');
+  ok(/const hint = data\.spawnOriginHint \|\| \{\};/.test(wc)
+    && /picks\.model\.origin = applyOriginHint\(picks\.model\.origin, hint\.model\);/.test(wc)
+    && /picks\.effort\.origin = applyOriginHint\(picks\.effort\.origin, hint\.effort\);/.test(wc),
+    'ws-create reconciles it through the PURE rule, for both twins');
+  // ORDER, stated so it cannot pass vacuously: `indexOf` answers -1 for text
+  // that is not there, and -1 is less than everything — an ordering pin that
+  // does not first assert BOTH sites exist goes green when the fix is deleted
+  // (measured: this exact assert survived the mutation run).
+  const iHint = wc.indexOf('applyOriginHint(picks.model.origin'), iRec = wc.indexOf('data._modelOrigin = picks.model.origin;');
+  ok(iHint > 0 && iRec > 0 && iHint < iRec,
+    '…BEFORE the origin is handed to the session (else the recorded value is the un-reconciled one)',
+    JSON.stringify({ iHint, iRec }));
+  ok(/const \{ resumeSpawnPick, applyOriginHint, continuityLogLine \} = require\('\.\/resume-continuity'\);/.test(wc),
+    'and it comes from the ONE pure module (no second copy of the rule)');
+  // r3 ③: the placement hint is a FAMILY guess for the pool chooser, never a command
+  ok(/data\._placementModelHint = data\.model \|\| instDefault\('defaultModel'\) \|\| null;/.test(wc),
+    'r3 ③: the pooled-spawn chooser gets a placement hint when the ladder commands nothing');
+  ok(/chooseMember: \(\) => poolChooser\?\.\([^)]*\{ model: data\.model \|\| data\._placementModelHint \|\| null \}\)/.test(wc),
+    '…at the chooser call site, and nowhere else');
+  ok(!/model: data\._placementModelHint/.test(wc.replace(/chooseMember[\s\S]{0,200}?\n/, ''))
+    && !/CODEX_WEBUI_MODEL = data\._placementModelHint/.test(wc)
+    && !/data\.model = data\._placementModelHint/.test(wc),
+    'r3 ③ negative control: it never reaches data.model, the spawn spec or the env — placement is not commanding');
+  ok(/session\._spawnModel = data\.model \|\| null;/.test(wc),
+    'r3 ③: `_spawnModel` records what the spawn COMMANDED and stays null here — the hint must never leak into session-meta / the attach payload / sessionModelFor\'s floor');
+  // …and "placement only" is a COUNTABLE claim, not a promise: exactly two
+  // non-comment sites exist — where it is set, and the one chooser that reads it.
+  const hintSites = wc.split('\n').filter((l) => l.includes('_placementModelHint') && !l.trim().startsWith('//'));
+  ok(hintSites.length === 2,
+    'r3 ③: exactly TWO non-comment sites — the assignment beside the ladder, and the chooser',
+    JSON.stringify(hintSites.map((l) => l.trim().slice(0, 60))));
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// ⑬ r3 (adversarial verifier, low): A CLAUDE RESUME LOST ITS POOL PLACEMENT.
+// r2 deleted the claude model source, so `data.model` is undefined on a claude
+// resume — and the pooled-spawn chooser short-circuits on `familyOfModel(null)`
+// BEFORE decidePoolSwitch, placing the session on the pool's current target
+// with no evaluation at all (the 2.305.0 class: 5h/7d fine, the model-scoped
+// weekly cap spent). Master got a family because the client filled
+// `claude.defaultModel` into every resume. REAL engine, REAL AccountManager
+// pool, REAL caches — the short-circuit is not something a stub can show.
+console.log('— ⑬ r3: a claude resume commands no model, and still gets a pool placement');
+{
+  const { AccountManager } = require(path.join(REPO, 'src/accounts.js'));
+  const { familyOfModel } = require(path.join(REPO, 'src/model-family.js'));
+  const engMod = require(path.join(REPO, 'src/server/usage-pool-engine.js'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-b6b6d-pool-'));
+  const dataDir = path.join(root, 'data');
+  const am = new AccountManager({ dataDir });
+  if (!am.poolSupported()) console.log('  ~ SKIP: pooled accounts are unsupported on this platform (symlink hot-swap)');
+  else {
+    const login = (id) => fs.writeFileSync(path.join(am.subDir(id), '.credentials.json'),
+      JSON.stringify({ claudeAiOauth: { accessToken: 't', refreshToken: 'r', expiresAt: Date.now() + 36e5, subscriptionType: 'max' } }), { mode: 0o600 });
+    const CUR = am.createSubscription({ name: 'Spent-on-Opus' }).id; login(CUR);
+    const SPARE = am.createSubscription({ name: 'Healthy' }).id; login(SPARE);
+    const P = am.createPool({ name: 'pool' }).id;
+    am.setPoolTarget(P, CUR); am.updatePool(P, { auto: true, hot: true });
+    const cacheDir = path.join(dataDir, 'usage-cache'); fs.mkdirSync(cacheDir, { recursive: true });
+    const nowS = Math.floor(Date.now() / 1000), R5 = nowS + 7200, R7 = nowS + 3 * 86400;
+    // the 2.305.0 shape: the current target's 5h/7d are fine, its OPUS weekly cap is spent
+    fs.writeFileSync(path.join(cacheDir, CUR + '.json'), JSON.stringify({ fetchedAt: Date.now() - 6e4, source: 'cli-usage',
+      fiveHour: { utilization: 0.1, resetsAt: R5 }, sevenDay: { utilization: 0.2, resetsAt: R7 }, scopedWeekly: [{ name: 'Opus', utilization: 0.999, resetsAt: R7 }] }));
+    fs.writeFileSync(path.join(cacheDir, SPARE + '.json'), JSON.stringify({ fetchedAt: Date.now() - 6e4, source: 'cli-usage',
+      fiveHour: { utilization: 0.1, resetsAt: R5 }, sevenDay: { utilization: 0.15, resetsAt: R7 }, scopedWeekly: [{ name: 'Opus', utilization: 0.1, resetsAt: R7 }] }));
+    const eng = engMod.create({ app: { get() { }, post() { }, put() { }, delete() { }, use() { }, locals: {} },
+      rootDir: root, USAGE_CACHE_DIR: cacheDir, activeSessions: new Map(), wss: { clients: new Set() }, WS_OPEN: 1,
+      broadcastToSession() { }, serverNotice() { }, serverSetting: () => undefined, getAccounts: () => am, getHosts: () => null,
+      getUsageHistory: () => null, recordUsageAttribution() { }, adapterRegistry: { get() { return null; } },
+      getAutoResume: () => null, getOtelIngest: () => null, getQuotaProbe: () => null });
+    const hclaude = require(path.join(REPO, 'src/harnesses/claude.js'));
+    const SETTING = 'claude-opus-5';
+    // ws-create's ladder for a CLAUDE resume with no pick, then its chooser arg
+    const pick = resumeSpawnPick({ explicit: undefined, conversation: '', instanceDefault: SETTING,
+      resume: true, hasSource: typeof hclaude.store.lastTurnModel === 'function' });
+    const data = { model: pick.value || undefined };
+    data._placementModelHint = data.model || SETTING || null;
+    const place = (d) => eng.poolChooserForModel(P, { model: d.model || d._placementModelHint || null });
+
+    ok(pick.value === '' && pick.origin === 'harness' && data.model === undefined,
+      'the ladder still commands NOTHING for a claude resume (r2\'s rule is untouched)', JSON.stringify(pick));
+    ok(familyOfModel(null) === null && familyOfModel(SETTING) === 'opus',
+      'the chooser projects by model FAMILY, and null means "no projection" — which is where it short-circuits');
+    ok(place(data) === SPARE,
+      'r3 ③ THE FIX: the spawn is placed on the member whose Opus weekly cap is NOT spent',
+      JSON.stringify({ placed: place(data), spare: SPARE, cur: CUR }));
+    // NEGATIVE CONTROL ①: the defect, in one line — the pre-fix chooser arg
+    ok(eng.poolChooserForModel(P, { model: data.model || null }) === CUR && am.poolCurrent(P) === CUR,
+      'r3 ③ REPRODUCED (negative control): without the hint it lands on the pool\'s current target, unevaluated',
+      JSON.stringify({ placed: eng.poolChooserForModel(P, { model: data.model || null }), cur: CUR }));
+    // NEGATIVE CONTROL ②: master's input produced the SAME answer the fix does
+    ok(eng.poolChooserForModel(P, { model: SETTING }) === SPARE,
+      'negative control: this is exactly the placement master got (the client used to fill claude.defaultModel)');
+    // NEGATIVE CONTROL ③: with the setting unset there is no hint and nothing changes
+    const bare = { model: undefined, _placementModelHint: (undefined || '' || null) };
+    ok(place(bare) === CUR,
+      'negative control: `claude.defaultModel` unset ⇒ no hint ⇒ master\'s behaviour when it was unset (the default target)');
+    // NEGATIVE CONTROL ④: an explicit per-session pick still wins over the hint
+    const picked = { model: 'claude-fable-5', _placementModelHint: SETTING };
+    ok(place(picked) === eng.poolChooserForModel(P, { model: 'claude-fable-5' }),
+      'negative control: an explicit pick is what the chooser sees — the hint only fills a void');
+    // …and the hint NEVER becomes a command: the real adapter, the real argv
+    const { ClaudeCodeAdapter } = require(path.join(REPO, 'src/adapters/claude-code.js'));
+    const spec = new ClaudeCodeAdapter({}).buildSessionArgs({ cwd: '/w', resumeId: 'abcdabcd', model: data.model, mode: 'chat' });
+    ok(!spec.args.includes('--model') && !spec.args.join(' ').includes(SETTING),
+      'r3 ③: the resume spawns with NO --model — the placement hint reached the chooser and nothing else', JSON.stringify(spec.args));
+    try { fs.rmSync(root, { recursive: true, force: true }); } catch { }
+  }
 }
 
 console.log(fail ? `\nFAILED (${fail} of ${pass + fail})` : `\nALL PASS (${pass})`);

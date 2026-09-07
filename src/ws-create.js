@@ -18,7 +18,7 @@ const crypto = require('crypto');
 const { execFile } = require('child_process');
 const { REMOTE_PRELUDE, buildRemoteExec, nodeFinder } = require('./remote-shell');
 const { sweepWriters } = require('./writer-sweep');
-const { resumeSpawnPick, continuityLogLine } = require('./resume-continuity');
+const { resumeSpawnPick, applyOriginHint, continuityLogLine } = require('./resume-continuity');
 
 function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
   execFileAsync, pickCodexThreadCandidate, getSessionKey, normalizeComparablePath }) {
@@ -370,6 +370,15 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
               model: await pickKnob(data.model, hstore.lastTurnModel, 'defaultModel'),
               effort: await pickKnob(data.effort, hstore.lastTurnEffort, 'defaultEffort'),
             };
+            // …and on a NEW session the client already ran the same ladder to
+            // fill its own chip, so a resolved `<prefix>.default*` arrives here
+            // as a bare string indistinguishable from a pick. `spawnOriginHint`
+            // is the client saying which it was; applyOriginHint may only turn
+            // OUR 'chosen' into 'instance'/'harness' and never touches the value
+            // (round 3 — src/resume-continuity.js carries the whole argument).
+            const hint = data.spawnOriginHint || {};
+            picks.model.origin = applyOriginHint(picks.model.origin, hint.model);
+            picks.effort.origin = applyOriginHint(picks.effort.origin, hint.effort);
             // Every downstream reader (the spawn, the pool chooser's declared
             // model, _spawnModel, the lock's implicit target, session._effort)
             // must see the value this session ACTUALLY starts with — one
@@ -378,6 +387,27 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
             data.effort = picks.effort.value || undefined;
             data._modelOrigin = picks.model.origin;
             data._effortOrigin = picks.effort.origin;
+            // PLACEMENT IS NOT COMMANDING (round 3). The pooled-spawn chooser
+            // downstream wants a model FAMILY ('fable'/'opus'/'sonnet' —
+            // src/model-family.js, coarse by construction: no point release, no
+            // `[1m]` variant) to project each member's model-scoped weekly cap.
+            // A claude resume now deliberately commands NOTHING, so `data.model`
+            // is undefined there, `familyOfModel(null)` is null and the chooser
+            // short-circuits BEFORE decidePoolSwitch — the session lands on the
+            // pool's current target with no placement evaluation at all, even
+            // when that member's scoped weekly bucket is spent (the 2.305.0
+            // class), and a claude pool switch does not reach a running CLI for
+            // ~25min (2.361.0) so the spawn-time placement is the one that
+            // counts. This restores exactly the input master had (the client
+            // used to fill `claude.defaultModel` into every resume) as a
+            // PLACEMENT-ONLY hint: it never reaches data.model, the spawn spec,
+            // the argv or session._spawnModel — that field records what the
+            // spawn COMMANDED, and this spawn commanded nothing, so putting the
+            // hint there would leak a value we never sent into session-meta,
+            // the attach payload, the restart chip and sessionModelFor's floor.
+            // Unset setting ⇒ null ⇒ master's behaviour when it was unset (the
+            // chooser's default target).
+            data._placementModelHint = data.model || instDefault('defaultModel') || null;
             if (isResume) console.log(continuityLogLine(backend, data.resumeId, picks));
           }
           const sessionSpec = adapter.buildSessionArgs({
@@ -494,9 +524,14 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
               // the usage caches with the estimator overlay — the store never
               // does). Remote pools stay refused upstream; non-pool accounts
               // ignore the opts entirely.
+              // The model here is a FAMILY hint for placement, NOT the spawn's
+              // command — a claude resume commands nothing (B-6b6d) and
+              // `familyOfModel(null)` skips the whole evaluation, so
+              // `_placementModelHint` (set with the ladder above) carries the
+              // instance default in as the family guess master used to get.
               spawnAccount = accounts.resolveForSpawn(data.accountId, backend, data.hostId ? {} : {
                 sessionKey: id,
-                chooseMember: () => poolChooser?.(data.accountId || accounts?._state?.defaultAccountId, { model: data.model || null }),
+                chooseMember: () => poolChooser?.(data.accountId || accounts?._state?.defaultAccountId, { model: data.model || data._placementModelHint || null }),
               });
             }
             catch (e) {

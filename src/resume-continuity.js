@@ -83,6 +83,43 @@ function resumeSpawnPick({ explicit, conversation, instanceDefault, resume, hasS
   return d ? { value: d, origin: 'instance' } : { value: '', origin: 'harness' };
 }
 
+/**
+ * THE WIRE CANNOT TELL A PICK FROM A CLIENT-RESOLVED DEFAULT — SO THE CLIENT
+ * SAYS WHICH IT IS (B-6b6d round 3, adversarial verifier).
+ *
+ * On a NEW session the CLIENT runs the ladder first (`session-lifecycle.js`
+ * needs the resolved value for its own status chip, and it owns two facts the
+ * server does not: the legacy `session.defaultEffort` key, honoured only while
+ * `<prefix>.defaultEffort` is UNMODIFIED, and `settings.isModified` itself).
+ * It then sends the resolved value VERBATIM so a stated "Auto (model default)"
+ * survives as `''`. Both are right — but they leave the server looking at a
+ * bare string it can only read as an explicit pick, so `_modelOrigin` /
+ * `_effortOrigin` were ALWAYS 'chosen' for a new session, 'instance' was
+ * unreachable there, and Session Properties labelled `<prefix>.defaultModel`
+ * "your choice for this session" on every create path that shows no picker at
+ * all (openShellTerminal, the toolbar, setup-flows, manage-agents).
+ *
+ * The fix is not to guess: the client already computed the origin and threw it
+ * away, so it now sends it as `spawnOriginHint` and this function reconciles.
+ * It may only DOWNGRADE a 'chosen' to a fact the user did not state, never
+ * upgrade or re-point anything — the value itself is untouched, and the only
+ * party that could lie here is the same client that made the pick it would be
+ * lying about. An absent/older client sends no hint and keeps master's answer.
+ *
+ * @param {string} origin  what the server's own ladder decided for this knob
+ * @param {*} hint         the client's `spawnOriginHint.<knob>` (untrusted)
+ */
+function applyOriginHint(origin, hint) {
+  // Only a 'chosen' can be a client-resolved default wearing a pick's clothes:
+  // every other rung was decided by the SERVER from facts the client never had
+  // (the conversation's own records, serverSetting) and no hint may touch it.
+  if (origin !== 'chosen') return origin;
+  // …and the hint is only believed when it says "the user did NOT state this".
+  // 'chosen'/'conversation' would add nothing (the first agrees, the second is
+  // a fact only the server can hold), so they are ignored rather than trusted.
+  return (hint === 'instance' || hint === 'harness') ? hint : origin;
+}
+
 /** One line for the spawn log — a resume that quietly took the instance default
  *  because the conversation recorded nothing must be READABLE afterwards (the
  *  "no silent failures" rule applied to a decision rather than an error). */
@@ -93,4 +130,4 @@ function continuityLogLine(backend, resumeId, picks) {
   return `[session] resume continuity ${backend} ${String(resumeId || '').slice(0, 8)}: ${bits}`;
 }
 
-module.exports = { resumeSpawnPick, continuityLogLine, SPAWN_ORIGINS };
+module.exports = { resumeSpawnPick, applyOriginHint, continuityLogLine, SPAWN_ORIGINS };

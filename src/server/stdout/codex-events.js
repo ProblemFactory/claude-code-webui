@@ -147,6 +147,20 @@ function create({ engine, deliverRef }) {
               forkedFrom: session.forkedFrom || null,
               permissionMode: session._permissionMode || null,
               effort: session._effort || null,
+              // …AND WHICH FACT IT IS (B-6b6d round 3). This consumer AUTHORS
+              // `_effortOrigin` a few lines up, so it must write it with the
+              // value it describes: without this the disk kept the SPAWN's
+              // origin while memory moved on, and after a restart
+              // boot-restore rebuilt `_effortOrigin` from that stale key —
+              // Session Properties then called a value the user had just
+              // changed by hand inside the session "this conversation's own
+              // value", the exact contradiction the origin exists to remove.
+              // `modelOrigin` is deliberately NOT listed: nothing here
+              // authors it, and the spread above already carries it through.
+              // Re-listing a key this writer does not own would stamp `null`
+              // over a real disk value for any session object that lacks the
+              // field (leg ⑦'s negative control pins that it survives).
+              effortOrigin: session._effortOrigin || null,
               createdAt: session.createdAt,
               webuiSessionId: id,
               mode: session.mode,

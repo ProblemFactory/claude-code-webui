@@ -64,12 +64,19 @@ export function installSessionLifecycle(App, ctx = {}) {
     // read a conversation's own last model/effort, so on a continuation this
     // resolves to '' (send nothing) and the server's ladder — same function,
     // with the harness's reader wired in — decides.
+    // The WHOLE pick is kept, not just its value (round 3): on a NEW session
+    // this is the only place that knows whether the string about to go on the
+    // wire is something the USER stated or something the client resolved out
+    // of `<prefix>.default*`, and the server cannot tell them apart. It rides
+    // along as `spawnOriginHint` below.
     const continuesConversation = !!resumeId;
     const pickHere = (explicit, instanceDefault) =>
-      resumeSpawnPick({ explicit, instanceDefault, resume: continuesConversation, hasSource: false }).value;
-    const sessionModel = pickHere(model, defaults.model);
+      resumeSpawnPick({ explicit, instanceDefault, resume: continuesConversation, hasSource: false });
+    const modelPick = pickHere(model, defaults.model);
+    const effortPick = pickHere(effort, defaults.effort);
+    const sessionModel = modelPick.value;
     const sessionPermission = permission !== undefined ? permission : defaults.permission;
-    const sessionEffort = pickHere(effort, defaults.effort);
+    const sessionEffort = effortPick.value;
     const sessionExtraArgs = extraArgs !== undefined ? extraArgs : defaults.extraArgs;
     const sessionName = name || (resumeId ? t('Resume {id}', { id: resumeId.substring(0,8) }) : t('Session {n}', { n: this.wm.windowCounter+1 }));
     const sessionKey = backendSessionId || resumeId ? `${backend}:${backendSessionId || resumeId}` : '';
@@ -123,6 +130,16 @@ export function installSessionLifecycle(App, ctx = {}) {
       tuiRenderer: (backend === 'claude' && sessionMode === 'terminal' ? this.settings.get('claude.tuiRenderer') : '') || undefined,
       agentKind: agentKind || undefined, agentRole: agentRole || undefined, agentNickname: agentNickname || undefined,
       sourceKind: sourceKind || undefined, parentThreadId: parentThreadId || undefined,
+      // WHICH FACT each of those two strings is (B-6b6d round 3). The value is
+      // sent VERBATIM (above), so a resolved `<prefix>.defaultModel` and a
+      // deliberate pick are the same bytes by the time the server sees them —
+      // and every create path that shows NO picker (openShellTerminal, the
+      // toolbar, setup-flows, manage-agents) went out labelled "your choice
+      // for this session". The server may only use this to DOWNGRADE its own
+      // 'chosen' verdict (src/resume-continuity.js applyOriginHint); it never
+      // changes the value, and an older client that omits it keeps the old
+      // answer.
+      spawnOriginHint: { model: modelPick.origin, effort: effortPick.origin },
       // initialCommand reaches the SERVER too (2.196.0): the shell adapter
       // arms DISABLE_UPDATE_PROMPT for auto-typed shells — without this field
       // the guard was dead code and oh-my-zsh's [Y/n] ate the first typed

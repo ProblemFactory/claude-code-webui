@@ -7,6 +7,10 @@
 // (modelOrigin/effortOrigin null, no saved pick) must show the VALUE with NO
 // parenthetical at all rather than asserting "(instance default)" — measured
 // here as "the row is shorter and carries no '(' ", on the same phone.
+// ROUND 3 adds the third: 'instance' was UNREACHABLE for a new session (the
+// client resolved `<prefix>.default*` and the wire could not say so), so
+// "(instance default)" had never been rendered on a phone at all — plus the
+// wire leg now measures the `spawnOriginHint` the real createSession emits.
 // Run: node scripts/dbg-session-props-mobile.mjs
 // Throwaway worktree server + headless chrome, exactly the test-ui-scale idiom.
 import { execSync, spawn } from 'node:child_process';
@@ -187,11 +191,14 @@ try {
       app.createSession({ backend: 'codex', cwd: '/tmp', mode: 'chat', name: 'wire-auto', model: '', effort: '' });
       app.createSession({ backend: 'codex', cwd: '/tmp', mode: 'chat', name: 'wire-none' });
       app.createSession({ backend: 'codex', cwd: '/tmp', mode: 'chat', name: 'wire-resume', resumeId: 'th-wire', model: '', effort: '' });
+      // r3: the same "no picker" create with NO instance default either
+      app._getBackendSessionDefaults = () => ({ model: '', permission: '', effort: '', extraArgs: '' });
+      app.createSession({ backend: 'codex', cwd: '/tmp', mode: 'chat', name: 'wire-bare' });
     } catch (e) { err = String(e && e.message || e); }
     app.ws.send = realSend; app._getBackendSessionDefaults = realDefaults;
     for (const id of [...app.wm.windows.keys()]) if (!before.has(id)) { try { app.wm.closeWindow(id); } catch {} }
     const creates = sent.filter((m) => m && m.type === 'create');
-    return { err, creates: creates.map((m) => ({ name: m.sessionName, hasModel: 'model' in m, model: m.model, hasEffort: 'effort' in m, effort: m.effort, resumeId: m.resumeId })) };
+    return { err, creates: creates.map((m) => ({ name: m.sessionName, hasModel: 'model' in m, model: m.model, hasEffort: 'effort' in m, effort: m.effort, resumeId: m.resumeId, hint: m.spawnOriginHint })) };
   })()`);
   console.log(JSON.stringify(wire, null, 2));
   const byName = (n) => (wire.creates || []).find((c) => c.name === n);
@@ -205,6 +212,75 @@ try {
   check('r2 wire: a CONTINUATION still sends neither key (the server ladder reads the conversation)',
     !!byName('wire-resume') && byName('wire-resume').model === undefined && byName('wire-resume').effort === undefined,
     JSON.stringify(byName('wire-resume')));
+  // ── ROUND 3: …and it now SAYS which fact each of those strings is ────────
+  // The line above is the defect the r3 verifier reproduced: `wire-none`
+  // carries the instance default as a bare string, indistinguishable on the
+  // wire from a pick, so the server could only record 'chosen'. The value is
+  // deliberately unchanged (the client owns the legacy `session.defaultEffort`
+  // key and `settings.isModified`); what changed is that the origin rides
+  // along. Measured through the REAL createSession, not a restatement.
+  check('r3 wire: a create with NO picker states that its value is the INSTANCE DEFAULT',
+    byName('wire-none')?.hint?.model === 'instance' && byName('wire-none')?.hint?.effort === 'instance',
+    JSON.stringify(byName('wire-none')));
+  check('r3 wire: an explicit "Auto (model default)" is still stated as a CHOICE',
+    byName('wire-auto')?.hint?.model === 'chosen' && byName('wire-auto')?.hint?.effort === 'chosen',
+    JSON.stringify(byName('wire-auto')));
+  check('r3 wire: a create with no picker AND no instance default is the HARNESS rung',
+    byName('wire-bare')?.hint?.model === 'harness' && byName('wire-bare')?.hint?.effort === 'harness'
+    && byName('wire-bare')?.model === '' && byName('wire-bare')?.effort === '',
+    JSON.stringify(byName('wire-bare')));
+  check('r3 wire: a CONTINUATION carries the hint too, and it says nothing was commanded here',
+    byName('wire-resume')?.hint?.model === 'harness' && byName('wire-resume')?.hint?.effort === 'harness',
+    JSON.stringify(byName('wire-resume')));
+
+  // ── ROUND 3: the row the fix makes reachable, at 375x667 ────────────────
+  // 'instance' was UNREACHABLE for a new session before this change, so the
+  // "(instance default)" parenthetical had never been rendered on a phone.
+  const res3 = await evalJs(`(async () => {
+    const s = {
+      backend: 'codex', sessionId: 'th-b6b6d-inst', backendSessionId: 'th-b6b6d-inst', sessionKey: 'codex:th-b6b6d-inst',
+      cwd: '/w', name: 'a session started from the toolbar', status: 'live', webuiId: 'sess-inst', webuiMode: 'chat',
+      startedAt: Date.now() - 60000,
+      spawnModel: 'gpt-5.6-sol', effort: 'xhigh', modelOrigin: 'instance', effortOrigin: 'instance',
+    };
+    app.sidebar._allSessions = [...(app.sidebar._allSessions || []), s];
+    const key = app.sidebar._getSessionStateKey(s);
+    app.replayOpenSpec({ action: 'openSessionProps', sessionKey: key, cwd: s.cwd, name: s.name });
+    await new Promise((r) => setTimeout(r, 800));
+    const wins = [...app.wm.windows.values()].filter((w) => w._sessionPropsKey);
+    const win = wins[wins.length - 1];
+    if (!win) return { error: 'no props window' };
+    const root = win.content.querySelector('.session-props');
+    const rows = [...root.querySelectorAll('.session-detail-row')].map((el) => {
+      const v = el.querySelector('.session-detail-value');
+      return {
+        label: el.querySelector('.session-detail-label')?.textContent || '',
+        text: el.textContent.replace(/\\s+/g, ' ').trim(),
+        h: Math.round(el.getBoundingClientRect().height),
+        scrollW: el.scrollWidth, clientW: el.clientWidth,
+        valClipped: v ? (v.scrollWidth > v.clientWidth + 1) : null,
+        dimSpans: [...el.querySelectorAll('.chat-status-dim')].map((x) => x.textContent),
+      };
+    });
+    return {
+      contentOverflowX: root.scrollWidth - root.clientWidth,
+      docOverflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      rows: rows.filter((r) => /Model|Effort/.test(r.label)),
+    };
+  })()`);
+  console.log(JSON.stringify(res3, null, 2));
+  const iM = (res3.rows || []).find((r) => /Model/.test(r.label));
+  const iE = (res3.rows || []).find((r) => /Effort/.test(r.label));
+  check('r3 375x667: the newly-reachable "(instance default)" row renders on both twins',
+    !!iM && /instance default/.test(iM.text) && !!iE && /instance default/.test(iE.text),
+    JSON.stringify((res3.rows || []).map((r) => [r.label, r.text])));
+  check('r3 375x667: …unclipped, and no horizontal overflow',
+    (res3.rows || []).every((r) => !r.valClipped && r.scrollW <= r.clientW + 1)
+    && res3.contentOverflowX <= 0 && res3.docOverflowX <= 0,
+    JSON.stringify({ rows: (res3.rows || []).map((r) => [r.label, r.valClipped, r.h]), c: res3.contentOverflowX, d: res3.docOverflowX }));
+  const png3 = await cdp('Page.captureScreenshot', {});
+  fs.writeFileSync(path.join(SHOTS, 'session-props-375x667-instance.png'), Buffer.from(png3.data, 'base64'));
+  console.log('screenshot: ' + path.join(SHOTS, 'session-props-375x667-instance.png'));
 } catch (e) {
   failed++; console.error('measurement failed: ' + e.message);
 }
