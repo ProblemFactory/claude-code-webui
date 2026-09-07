@@ -27,6 +27,8 @@ const { BACKEND_CAPS, capsOf } = require(path.join(REPO, 'src/backend-caps.js'))
 const { HARNESSES, chatHarnessIds } = require(path.join(REPO, 'src/harnesses/index.js'));
 const { createMessageManager } = require(path.join(REPO, 'src/normalizers.js'));
 const { reconcileAttachStreaming, turnStateEffect } = require(path.join(REPO, 'src/turn-state.js'));
+// the PURE client rules the init frame feeds (composer completion + health strip)
+const { slashCompletionList, initHealthIssues } = await import(path.join(REPO, 'src/lib/agent-meta.js'));
 
 // ── 1. registry shape ──
 console.log('— registry');
@@ -1035,6 +1037,43 @@ setTimeout(() => process.exit(0), 60000);
     && turnStateEffect('requires_action', { hasLabel: true }).label === null
     && turnStateEffect('requires_action', { hasLabel: false }).label === null
     && turnStateEffect('wedged') === null);
+// ── 3a-bis. the WIDENED init frame + commands_changed over the same consumer ──
+// (design-harness-features §2.6). The frame is the fixture the schema pin in
+// scripts/test-init-frame.mjs re-greps out of the installed 2.1.257 binary;
+// here it travels the REAL pty→consumer→normalizer path a live session uses.
+console.log('— stream-json: init frame widening + commands_changed');
+{
+  const FRAME = JSON.parse(fs.readFileSync(path.join(REPO, 'scripts/fixtures/claude-init-frame.json'), 'utf8'));
+  const s = mkSession('claude', 'w-init'); const p = fakePty();
+  so.setupSessionPty(s, 'w-init', p);
+  p.data(J({ ...FRAME, session_id: 'sid-init-1' }));
+  const initMsg = s._ops.find((o) => o.op === 'create')?.message;
+  const frame = initMsg?.content?.[0]?.initData?.frame;
+  ok('the init record still adopts the session id (unchanged side effects)', s.backendSessionId === 'sid-init-1' && s._permissionMode === 'default');
+  ok('…and the WHOLE frame reaches the client through initData: a FAILED mcp server, the demoted plugin, skills, output style, memory dirs, terminal-bound commands',
+    !!frame && frame.mcpServers.some((m) => m.status === 'failed') && frame.pluginErrors[0].plugin === 'old-helper'
+    && frame.skills.length === 3 && frame.outputStyle === 'Explanatory' && !!frame.memoryPaths.auto
+    && frame.terminalSlashCommands.join(',') === 'doctor,color', JSON.stringify(frame).slice(0, 300));
+  const cmdOps = () => s._ops.filter((o) => o.op === 'meta' && o.subtype === 'slash-commands');
+  ok('…the command list rides ONE meta op carrying the terminal-bound subset (what the composer must hide)',
+    cmdOps().length === 1 && cmdOps()[0].data.commands.includes('doctor') && cmdOps()[0].data.terminal.join(',') === 'doctor,color');
+  p.data(J({ type: 'system', subtype: 'commands_changed', session_id: 'sid-init-1', uuid: 'u-cc', commands: [{ name: 'compact', description: 'x', argumentHint: '' }, { name: 'brand-new', description: 'y', argumentHint: '' }] }));
+  ok('a mid-session commands_changed REPLACES the list wholesale (the CLI\'s own contract) — the new command is in, the dropped ones are gone',
+    cmdOps().length === 2 && cmdOps()[1].data.commands.join(',') === 'compact,brand-new' && !cmdOps()[1].data.commands.includes('model'), JSON.stringify(cmdOps()[1]?.data));
+  ok('…and the completion the composer builds from it hides nothing that is gone upstream, everything else keeps its slash',
+    slashCompletionList(cmdOps()[1].data.commands, cmdOps()[1].data.terminal).join(',') === '/compact,/brand-new');
+  ok('the composer completion from the INIT push hides the terminal-bound commands (/doctor, /color) and keeps the rest',
+    (() => { const l = slashCompletionList(cmdOps()[0].data.commands, cmdOps()[0].data.terminal); return !l.includes('/doctor') && !l.includes('/color') && l.includes('/compact'); })());
+  ok('the health strip has something to say for this frame (a failed + a needs-auth server, a skipped config, a demoted plugin)…',
+    initHealthIssues(frame).length === 4, JSON.stringify(initHealthIssues(frame)));
+  ok('…NEGATIVE CONTROL: an OLD CLI\'s three-field init frame carries no widened facts at all (absent ≠ empty) and reports no health issues, so nothing renders',
+    (() => {
+      const s2 = mkSession('claude', 'w-init-old'); const p2 = fakePty();
+      so.setupSessionPty(s2, 'w-init-old', p2);
+      p2.data(J({ type: 'system', subtype: 'init', session_id: 'sid-old', model: 'claude-opus-4', permissionMode: 'default', slash_commands: ['compact'], uuid: 'u-old' }));
+      const f2 = s2._ops.find((o) => o.op === 'create')?.message?.content?.[0]?.initData?.frame;
+      return f2 && Object.keys(f2).join(',') === 'slashCommands' && initHealthIssues(f2).length === 0;
+    })());
 }
 
 // ── 3b. codex-events consumer ──

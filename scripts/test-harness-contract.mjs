@@ -156,6 +156,51 @@ console.log('— turnState');
   const sb = fs.readFileSync(path.join(REPO, 'src/lib/chat-status-bar.js'), 'utf8');
   ok(!/_backend === 'claude'[^\n]*turnState|turnState[^\n]*_backend === 'claude'/.test(sb),
     'the status bar never asks "is this claude?" to decide whether to draw the turn state');
+// ── §2.13 caps收口: server↔client DEEP COMPARE + no backend-id gate left ──
+// The drift this exists to stop is REAL: the client carried `caps.review` for
+// releases while src/backend-caps.js had no such row at all, so the mirror had
+// nothing to be checked against and four call sites kept gating on a backend
+// id instead. Two assertions: (a) every client caps key is either the server
+// row's value (deep) or a named chrome-only flag, (b) the four call sites read
+// caps — proven by a checker that is itself proven on a planted gate.
+console.log('— caps mirror (§2.13)');
+const deepEq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+// Client-only FEATURE flags: pure chrome with no server behaviour behind them.
+// A NEW client-only key fails here — that is the law ("a client-only row is
+// forbidden"), with today's four grandfathered BY NAME.
+const CLIENT_ONLY_OK = new Set(['effort', 'autoResume', 'accounts', 'quotaRefresh']);
+for (const id of chatHarnessIds()) {
+  const srv = capsOf(id), cli = BACKEND_META[id].caps || {};
+  const drift = Object.keys(cli).filter((k) => (k in srv ? !deepEq(srv[k], cli[k]) : !CLIENT_ONLY_OK.has(k)));
+  ok(drift.length === 0, `${id}: client caps mirror the server row (or are named chrome-only flags)`, drift.map((k) => `${k}: server=${JSON.stringify(srv[k])} client=${JSON.stringify(cli[k])}`).join(' | '));
+  ok(['review', 'renameWriteback', 'forkAtMessage'].every((k) => typeof srv[k] === 'boolean' && typeof cli[k] === 'boolean'),
+    `${id}: review / renameWriteback / forkAtMessage exist on BOTH sides (review=${srv.review} renameWriteback=${srv.renameWriteback} forkAtMessage=${srv.forkAtMessage})`);
+}
+ok(capsOf('claude').forkAtMessage === true && capsOf('claude').fork === true && capsOf('codex').forkAtMessage === false && capsOf('codex').fork === true,
+  'forkAtMessage is NOT fork: claude can fork at a message (--resume-session-at <uuid> --fork-session), codex forks the whole thread only');
+ok(capsOf('codex').review === true && capsOf('claude').review === false && capsOf('codex').renameWriteback === true && capsOf('claude').renameWriteback === false,
+  'review + renameWriteback are codex-side today (the values the four call sites used to hardcode)');
+
+// The checker: a backend-id gate anywhere in a named block. Proven on a
+// PLANTED gate before it is trusted to report a clean tree (a grep pin that
+// can only ever pass is not a pin).
+const hasBackendIdGate = (text) => /backend\s*[!=]==\s*'(?:codex|claude|opencode|shell)'/.test(text);
+const blockOf = (src, marker, lines) => {
+  const i = src.indexOf(marker);
+  return i < 0 ? null : src.slice(i).split('\n').slice(0, lines).join('\n');
+};
+const SITES = [
+  ['src/ws-handler.js', "case 'review-start': {", 12, 'ws review-start'],
+  ['src/ws-handler.js', 'if (trimmedName) session.name = trimmedName;', 8, 'ws rename writeback'],
+  ['src/lib/chat-view.js', '_syncReviewAvailability() {', 8, 'client review availability'],
+  ['src/lib/chat-view.js', '_startReadOnlyPolling() {', 8, 'client detached-review poll'],
+  ['src/lib/chat-renderers.js', 'addForkBtn(el, msg) {', 8, 'per-message fork button'],
+];
+for (const [file, marker, lines, label] of SITES) {
+  const block = blockOf(fs.readFileSync(path.join(REPO, file), 'utf8'), marker, lines);
+  ok(block !== null, `${label}: the call site is still where the pin looks (${file} :: ${marker})`);
+  ok(block !== null && !hasBackendIdGate(block), `${label}: gated on caps, no backend-id branch left`, block ? block.split('\n').filter((l) => hasBackendIdGate(l)).join(' / ') : 'marker gone');
+  ok(hasBackendIdGate(`${block}\n  if (backend !== 'claude') return;`), `${label}: NEGATIVE CONTROL — the checker DOES catch a planted backend-id gate`);
 }
 
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);

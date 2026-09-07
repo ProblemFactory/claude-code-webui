@@ -1,0 +1,41 @@
+{
+  "_note": "A claude 2.1.257 `system`/`init` stream-json frame. Every KEY is verbatim from the CLI binary's own zod schema (dumped with `strings`, never guessed — scripts/test-init-frame.mjs re-greps the installed binary for each one and SKIPs with evidence when no binary is present). Values are synthetic: shapes and counts follow real frames observed in this instance (66 slash commands, 2 terminal-bound, 26 skills, 5 plugins, mcp statuses connected|failed|needs-auth), never anyone's content.",
+  "type": "system",
+  "subtype": "init",
+  "cwd": "/w/proj",
+  "session_id": "11111111-2222-4333-8444-555555555555",
+  "uuid": "99999999-8888-4777-8666-555555555555",
+  "apiKeySource": "none",
+  "claude_code_version": "2.1.257",
+  "model": "claude-fable-5",
+  "permissionMode": "default",
+  "output_style": "Explanatory",
+  "betas": ["context-1m"],
+  "tools": ["Bash", "Read", "Edit", "Write", "Grep", "Glob", "WebSearch", "Task"],
+  "agents": ["Explore", "Plan", "general-purpose"],
+  "skills": ["dataviz", "frontend-design", "web-access"],
+  "slash_commands": ["compact", "model", "usage", "doctor", "color", "context"],
+  "terminal_slash_commands": ["doctor", "color"],
+  "mcp_servers": [
+    { "name": "chrome-devtools", "status": "connected" },
+    { "name": "github", "status": "failed" },
+    { "name": "drive", "status": "needs-auth" }
+  ],
+  "mcp_server_errors": [
+    { "name": "notes", "type": "url_missing_type", "message": "a `url` entry with no `type`" }
+  ],
+  "plugins": [
+    { "name": "commit-commands", "path": "/w/plugins/commit-commands", "source": "commit-commands@builtin", "version": "1.2.0" },
+    { "name": "code-review", "path": "/w/plugins/code-review", "source": "code-review@inline" }
+  ],
+  "plugin_errors": [
+    { "plugin": "old-helper", "type": "unsatisfied_dependency", "message": "requires vibespace >= 3.0.0" }
+  ],
+  "plugin_warnings": [
+    { "plugin": "commit-commands", "type": "shadowed_folder", "message": "default folder shadowed by a manifest key" }
+  ],
+  "memory_paths": { "auto": "/w/home/.claude/projects/-w-proj/memory", "team": "/w/proj/.claude/team-memory" },
+  "capabilities": ["interrupt_receipt_v1"],
+  "analytics_disabled": false,
+  "product_feedback_disabled": false
+}

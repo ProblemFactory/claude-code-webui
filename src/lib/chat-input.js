@@ -1,6 +1,6 @@
 import { escHtml, saveDraft, loadDraft, clearDraft, getStateSync, showContextMenu, showToast, uploadFilesBatched, showImageOverlay } from './utils.js';
 import { UI_ICONS } from './icons.js';
-import { composerSendModes } from './agent-meta.js';
+import { composerSendModes, slashCompletionList } from './agent-meta.js';
 import { t } from './i18n.js';
 
 /**
@@ -847,8 +847,15 @@ export class ChatInput {
     this._updateTodoDisplay();
   }
 
-  setSlashCommands(cmds) {
-    this._slashCommands = cmds;
+  /** REPLACE the completion list (never append): the harness pushes the WHOLE
+   *  list every time it changes (claude `commands_changed`, ACP
+   *  `available_commands_update`), and a command that disappeared upstream
+   *  must disappear here. `terminal` is the terminal-BOUND subset to hide
+   *  (§2.6) — absent on old CLIs and on harnesses with no such split, which
+   *  filters nothing. Callers may pass names with or without a leading slash;
+   *  slashCompletionList (PURE, agent-meta.js) is the ONE place that decides. */
+  setSlashCommands(cmds, { terminal = null } = {}) {
+    this._slashCommands = slashCompletionList(cmds, terminal);
   }
 
   setReadOnly() {

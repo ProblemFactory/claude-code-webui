@@ -326,6 +326,38 @@
 .chat-hook-output { max-height: 420px; overflow: auto; } /* wrap via the standard chat-pre-wrapped toggle */
 .chat-hook-summary .chat-hook-edit { margin-left: 8px; font-size: 10px; }
 [data-role-indicator="border"] .chat-system-notification { border-left-color: var(--text-dim); }
+/* ── Session-start (init frame) card, §2.6 ──
+   ONE quiet collapsed line per init frame. Two-class selector so
+   .chat-msg-system's flex centering never wins (the .chat-peer-message
+   lesson). The summary WRAPS: on a 375px viewport the head, the chips and the
+   health strip stack instead of overflowing, and the body's long verbatim
+   lists (skill names, MCP server ids) break on any character rather than
+   pushing the transcript sideways. */
+.chat-msg.chat-msg-init { display: block; padding: 2px 0; margin: 2px 0; font-size: 11px; color: var(--text-dim); }
+.chat-init-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; cursor: pointer; list-style: none; padding: 1px 4px; }
+.chat-init-summary::-webkit-details-marker { display: none; }
+.chat-init-summary::before { content: '\25B8'; opacity: 0.7; }
+.chat-init-details[open] > .chat-init-summary::before { content: '\25BE'; }
+.chat-init-head { color: var(--text-secondary); }
+.chat-init-chip { opacity: 0.8; }
+.chat-init-chip::before { content: '\00B7'; margin-right: 6px; opacity: 0.6; }
+/* The health strip: the ONE part that must be legible without expanding —
+   a failed MCP server is otherwise indistinguishable from an absent one. */
+.chat-init-warn { display: inline-flex; align-items: center; gap: 4px; color: var(--yellow); background: color-mix(in srgb, var(--yellow) 12%, transparent); border-radius: var(--radius-sm); padding: 0 6px; max-width: 100%; }
+.chat-init-warn svg { flex: none; }
+.chat-init-body { padding: 4px 4px 4px 18px; display: flex; flex-direction: column; gap: 3px; }
+/* A closed <details> hides its content through the UA slot, and setting
+   `display` on the child OVERRIDES that (measured in headless chrome: the
+   collapsed card was still 202px tall). Say it explicitly. */
+.chat-init-details:not([open]) > .chat-init-body { display: none; }
+.chat-init-issues { display: flex; flex-direction: column; gap: 2px; margin-bottom: 2px; }
+.chat-init-issue { display: flex; align-items: flex-start; gap: 4px; color: var(--yellow); word-break: break-word; }
+.chat-init-issue svg { flex: none; margin-top: 1px; }
+.chat-init-sect { display: flex; flex-wrap: wrap; gap: 6px; word-break: break-word; }
+.chat-init-sect-h { color: var(--text-secondary); flex: none; }
+.chat-init-sect-b { opacity: 0.85; min-width: 0; overflow-wrap: anywhere; }
+[data-role-indicator="border"] .chat-msg.chat-msg-init { border-left-color: var(--text-dim); }
+
 
 
 

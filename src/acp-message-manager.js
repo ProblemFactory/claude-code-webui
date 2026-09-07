@@ -537,6 +537,12 @@ class AcpMessageManager {
         this._status.slashCommands = asArray(u.availableCommands).map((c) => String(c?.name || '')).filter(Boolean).slice(0, 64);
         this._status.commandDescriptions = Object.fromEntries(asArray(u.availableCommands).filter((c) => c?.name).map((c) => [String(c.name), String(c.description || '')]));
         this._patchInit(emit);
+        // …and the ONE command-list op the claude normalizer also emits
+        // (§2.6): patching the init card alone never reaches the composer —
+        // an `edit` on a COMPLETE system card is not re-rendered, so its side
+        // effects never re-run. ACP declares no terminal-bound subset, so
+        // nothing is filtered; the shape stays identical across harnesses.
+        if (emit) this._emit({ op: 'meta', subtype: 'slash-commands', data: { commands: this._status.slashCommands, terminal: [] } });
         return;
       }
       case 'usage_update': {

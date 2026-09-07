@@ -9,7 +9,7 @@ import { ChatInput } from './chat-input.js';
 import { ChatStatusBar } from './chat-status-bar.js';
 import { UI_ICONS } from './icons.js';
 import { t } from './i18n.js';
-import { agentMemoryPathRes, effortDisplay, getBackendMeta } from './agent-meta.js';
+import { isAgentMemoryPath, effortDisplay, getBackendMeta, backendFeatureCaps, noteMemoryPaths } from './agent-meta.js';
 import { registerCommand, registerKeybinding, runCommand, hasCommand } from './contributions.js';
 // The verb list a wrapper that publishes a queue WITHOUT naming verbs serves —
 // the SAME array the server maps a verb-less sidecar onto (src/server/
@@ -19,12 +19,11 @@ import { LEGACY_QUEUE_VERBS } from '../backend-caps.js';
 import { mcpParts, messageKind, foldToggleFor, countKinds, runSummaryLabel } from './chat-run-summary.js';
 import { collabTrafficStats, collabHeadText, collabRunPart, subAgentStreamLabel } from '../collab-row.js';
 
-// Agent-memory path patterns, PER BACKEND from BACKEND_META (agent-meta.js —
-// claude only today; codex has no memory feature; a new backend adds one
-// memoryPathRe entry there). Unioned: the PATH identifies memory content
-// regardless of which session's file op touches it.
-const MEMORY_PATH_RES = agentMemoryPathRes();
-const isMemoryPath = (fp) => MEMORY_PATH_RES.some((re) => re.test(fp));
+// Agent-memory paths: the claude init frame's own `memory_paths` when the
+// session declared them, the per-backend BACKEND_META regexes otherwise
+// (agent-meta.js owns both halves — see isAgentMemoryPath). The PATH
+// identifies memory content regardless of which session's file op touches it.
+const isMemoryPath = (fp) => isAgentMemoryPath(fp);
 
 // ── THE STEER CHORD (2026-09-07 owner ask: "顺便加入一个queue的快捷键,
 //    不支持queue的就不显示") ───────────────────────────────────────────────
@@ -2668,7 +2667,8 @@ class ChatView {
           const se = result.sideEffect;
           if (se.model) this._statusBar.setModel(se.model);
           if (se.permMode) this._statusBar.setPermMode(se.permMode);
-          if (se.slashCommands && this._chatInput) this._chatInput.setSlashCommands(se.slashCommands);
+          if (se.slashCommands && this._chatInput) this._chatInput.setSlashCommands(se.slashCommands, { terminal: se.terminalSlashCommands || null });
+          if (se.memoryPaths) noteMemoryPaths(se.memoryPaths);
           this._statusBar.render();
         }
         el = result?.el || null;
@@ -2977,6 +2977,15 @@ class ChatView {
     // slice(offset,limit) and `total`, and re-indexing them under a reader is
     // where three paging incidents came from.
     if (op.subtype === 'rewound') { this._applyRewound(op.data); return; }
+    // THE command list changed mid-session (claude `commands_changed`, ACP
+    // `available_commands_update`): REPLACE, never append. An `edit` op on the
+    // init card cannot carry this — a complete system card is not re-rendered,
+    // so its side effects never re-run and the composer would keep the boot
+    // list for the whole session.
+    if (op.subtype === 'slash-commands') {
+      if (this._chatInput) this._chatInput.setSlashCommands(op.data?.commands || [], { terminal: op.data?.terminal || null });
+      return;
+    }
     if (op.subtype === 'usage') {
       this._statusBar.updateUsage(op.data);
     } else if (op.subtype === 'todos') {
@@ -3768,15 +3777,17 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
 
   _syncReviewAvailability() {
     const { backend } = this._getSessionIds();
-    if (backend !== 'codex') return;
+    if (!backendFeatureCaps(backend).review) return;
     const ready = this._messages.some((msg) => msg.role === 'assistant' && msg.status === 'complete');
     this._statusBar.setReviewEnabled(ready);
   }
 
   _startReadOnlyPolling() {
     if (!this._readOnly || !this.sessionId.startsWith('view-') || this._readOnlyPollTimer) return;
+    // A detached review lands in a read-only view that grows while the review
+    // runs — only a harness that CAN review produces one (caps, never an id).
     const { backend } = this._getSessionIds();
-    if (backend !== 'codex') return;
+    if (!backendFeatureCaps(backend).review) return;
     const tick = async () => {
       if (this._disposed) return;
       // Hidden tab: 2s polling of a read-only view is pure waste — heartbeat
@@ -3844,8 +3855,13 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
   applyStatus(status) {
     if (!status) return;
     this._statusBar.applyStatus(status);
+    // The ATTACH/HTTP twin of the live 'slash-commands' meta op: the same two
+    // facts (the current list + the terminal-bound subset), from the same
+    // init frame, so a window that opens after a mid-session push agrees with
+    // one that watched it happen (session-store chatStatus).
+    if (status.initFrame?.memoryPaths) noteMemoryPaths(status.initFrame.memoryPaths);
     if (status.slashCommands && this._chatInput) {
-      this._chatInput.setSlashCommands(status.slashCommands.map(c => c.startsWith('/') ? c : '/' + c));
+      this._chatInput.setSlashCommands(status.slashCommands, { terminal: status.initFrame?.terminalSlashCommands || null });
     }
   }
 

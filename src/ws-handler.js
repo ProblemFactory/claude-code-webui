@@ -10,7 +10,7 @@ const { listCodexThreads } = require('./codex-session-store');
 const { findCodexSessionJsonlPath, extractCodexThreadMeta } = require('./adapters/codex');
 const { cwdToProjectDir, findSessionJsonlPath } = require('./session-store');
 const { get: harnessOf } = require('./harnesses'); // S3: store.warmTranscript per harness (claude parse-cache warm / codex thread/read fallback)
-const { capsOf } = require('./backend-caps');      // inputModes.queueVerbs gate for the 'queue-op' case (never a backend-id branch)
+const { capsOf } = require('./backend-caps');      // inputModes.queueVerbs / review / renameWriteback gates (never a backend-id branch)
 const { reconcileAttachStreaming } = require('./turn-state'); // §2.5: ONE attach-time streaming decision, shared with the live consumer
 
 /** The sentence a harness-level verb refusal carries. Every branch says what
@@ -714,9 +714,12 @@ function registerWsHandler(wss, ctx) {
           break;
         }
 
+        // Start a code review (§2.13). Gated on the HARNESS caps row, never on
+        // a backend id — the client's own button already reads the mirror of
+        // this row, and a server that disagreed would silently drop the frame.
         case 'review-start': {
           const session = activeSessions.get(data.sessionId);
-          if (session?.pty && session.mode === 'chat' && session.backend === 'codex' && data.target) {
+          if (session?.pty && session.mode === 'chat' && capsOf(session.backend).review && data.target) {
             session.pty.write(JSON.stringify({
               type: 'review-start',
               target: data.target,
@@ -806,7 +809,10 @@ function registerWsHandler(wss, ctx) {
           if (!session) break;
 
           if (trimmedName) session.name = trimmedName;
-          if (session.backend === 'codex' && session.mode === 'chat' && session.pty && trimmedName) {
+          // Write the new name back into the AGENT's own store when the
+          // harness has somewhere to write it (caps.renameWriteback — codex's
+          // thread name; claude's JSONL has no title field). Never a backend id.
+          if (capsOf(session.backend).renameWriteback && session.mode === 'chat' && session.pty && trimmedName) {
             session.pty.write(JSON.stringify({ type: 'set-thread-name', name: trimmedName }) + '\n');
           }
           if (session.sockName) {

@@ -10,7 +10,7 @@ import { escHtml, copyText, showContextMenu, showToast, absUrl } from './utils.j
 import { track } from './telemetry-client.js';
 import { renderCodeBlock, rehighlightCodeBlock, stripAnsi, getHljsLanguages } from './highlight.js';
 import { UI_ICONS } from './icons.js';
-import { agentMemoryPathRes } from './agent-meta.js';
+import { isAgentMemoryPath, backendFeatureCaps, initHealthIssues } from './agent-meta.js';
 import { createBackendIconHtml, getBackendMeta } from './agent-meta.js';
 import { t } from './i18n.js';
 import { searchQueryOf } from '../search-card.js'; // shared with the server (CJS pulled into the bundle, like task-color-seq.js)
@@ -24,9 +24,8 @@ import { collabRowsHtml, collabReportHeadText, collabRowTitle } from '../collab-
 // is a different concern than a project write — render "记忆更新 <name>"
 // instead of a Write card with a long dotfile path). Full path stays on the
 // link's data-path (copy/Ctrl+click unchanged).
-const MEMORY_RES = agentMemoryPathRes();
 function memoryBase(fp) {
-  return fp && MEMORY_RES.some((re) => re.test(fp)) ? fp.split('/').pop() : null;
+  return fp && isAgentMemoryPath(fp) ? fp.split('/').pop() : null;
 }
 
 // MCP tool ids (mcp__<server>__<tool>) split into their parts — ONE
@@ -881,14 +880,20 @@ class ChatRenderers {
       el.innerHTML = `<span class="chat-system-text">${escHtml(line)}</span>`;
       return { el, sideEffect: null };
     }
-    // system.init — extract metadata, don't render
+    // system.init — metadata side effects, plus (since §2.6) a compact card
+    // for the facts the frame carries that have NO other home. The card is
+    // rendered ONLY when the frame widened: a codex/ACP init record, or a
+    // claude CLI predating the fields, keeps today's invisible behaviour.
     if (msg.content?.[0]?.initData) {
       const d = msg.content[0].initData;
+      const f = d.frame || null;
       const sideEffect = {};
       if (d.model) sideEffect.model = d.model.replace(/\[.*$/, '');
       if (d.permissionMode) sideEffect.permMode = d.permissionMode;
-      if (d.slashCommands) sideEffect.slashCommands = d.slashCommands.map(c => c.startsWith('/') ? c : '/' + c);
-      return { el: null, sideEffect };
+      if (d.slashCommands) sideEffect.slashCommands = d.slashCommands;
+      if (f?.terminalSlashCommands) sideEffect.terminalSlashCommands = f.terminalSlashCommands;
+      if (f?.memoryPaths) sideEffect.memoryPaths = f.memoryPaths;
+      return { el: this.buildInitCard(f), sideEffect };
     }
     // Hook events — compact collapsible
     if (msg.content?.[0]?.hookData) {
@@ -1252,6 +1257,52 @@ class ChatRenderers {
       wrap.appendChild(table);
     }
     return tpl.innerHTML;
+  }
+
+  /** THE SESSION-START CARD (§2.6). Renders only for a frame that actually
+   *  carries the widened fields — every other init record (codex, ACP, a
+   *  claude CLI older than the fields) returns null and stays invisible, which
+   *  is exactly today's behaviour.
+   *  Shape: one quiet collapsed line. What is WRONG (a non-connected MCP
+   *  server, a demoted plugin, a skipped --mcp-config entry) sits in the
+   *  ALWAYS-VISIBLE summary — a health strip behind a click would not fix the
+   *  invisibility it exists for — while the inventory (skills, plugins, MCP
+   *  servers, tools, betas, version) is one <details> away.
+   *  Strings are chrome ⇒ t(); every value from the frame is escaped and shown
+   *  verbatim (statuses/plugin ids are protocol text, never translated). */
+  buildInitCard(frame) {
+    if (!frame) return null;
+    const skills = frame.skills || [], plugins = frame.plugins || [], servers = frame.mcpServers || [], tools = frame.tools || [], agents = frame.agents || [];
+    const issues = initHealthIssues(frame);
+    const hasInventory = skills.length || plugins.length || servers.length || tools.length || agents.length || frame.outputStyle || frame.version;
+    if (!issues.length && !hasInventory) return null;
+    const el = document.createElement('div');
+    el.className = 'chat-msg chat-msg-system chat-msg-init';
+    const chips = [];
+    if (skills.length) chips.push(t('{n} skills', { n: skills.length }));
+    if (frame.outputStyle) chips.push(t('output style: {style}', { style: frame.outputStyle }));
+    const issueLabel = (i) => (i.kind === 'plugin' ? t('plugin {name}', { name: i.name }) : t('MCP {name}', { name: i.name })) + (i.detail ? ' — ' + i.detail : '');
+    const warn = issues.length
+      ? `<span class="chat-init-warn" title="${escHtml(issues.map(issueLabel).join('\n'))}">${UI_ICONS.alert} ${escHtml(t('{n} not working', { n: issues.length }))}</span>`
+      : '';
+    const sect = (label, body) => (body ? `<div class="chat-init-sect"><span class="chat-init-sect-h">${escHtml(label)}</span><span class="chat-init-sect-b">${body}</span></div>` : '');
+    const list = (arr) => escHtml(arr.join(', '));
+    const body = [
+      issues.length ? `<div class="chat-init-issues">${issues.map((i) => `<div class="chat-init-issue">${UI_ICONS.alert} ${escHtml(issueLabel(i))}</div>`).join('')}</div>` : '',
+      sect(t('Skills'), skills.length ? list(skills) : ''),
+      sect(t('Plugins'), plugins.length ? escHtml(plugins.map((p) => p.name + (p.version ? ' ' + p.version : '')).join(', ')) : ''),
+      sect(t('MCP servers'), servers.length ? escHtml(servers.map((m) => `${m.name} (${m.status})`).join(', ')) : ''),
+      sect(t('Subagents'), agents.length ? list(agents) : ''),
+      sect(t('Tools'), tools.length ? String(tools.length) : ''),
+      sect(t('Output style'), frame.outputStyle ? escHtml(frame.outputStyle) : ''),
+      sect(t('CLI version'), frame.version ? escHtml(frame.version) + (frame.betas?.length ? ' (' + escHtml(frame.betas.join(', ')) + ')' : '') : ''),
+    ].filter(Boolean).join('');
+    el.innerHTML = `<details class="chat-init-details"><summary class="chat-init-summary">`
+      + `<span class="chat-init-head">${escHtml(t('Session start'))}</span>`
+      + chips.map((c) => `<span class="chat-init-chip">${escHtml(c)}</span>`).join('')
+      + warn
+      + `</summary><div class="chat-init-body">${body}</div></details>`;
+    return el;
   }
 
   appendSystem(text) {
@@ -1657,12 +1708,14 @@ class ChatRenderers {
 
   // "Fork from here" — branches a NEW session containing the conversation up to
   // and including this assistant message (claude --resume-session-at <uuid>
-  // --fork-session). Claude-only (the flag is claude-specific), assistant
-  // messages only (that's the truncation boundary the CLI accepts), and never
-  // in subagent viewers. Sits next to the open-in-editor button.
+  // --fork-session). Gated on caps.forkAtMessage, NOT on caps.fork: codex's
+  // thread/fork branches the whole thread with no message boundary, so this
+  // button on a codex card would be a control that cannot do what it says
+  // (§2.13 — two capabilities, two rows). Assistant messages only (that is the
+  // truncation boundary the CLI accepts) and never in subagent viewers.
   addForkBtn(el, msg) {
     if (!this._onFork) return;
-    if (this.backend !== 'claude') return;
+    if (!backendFeatureCaps(this.backend).forkAtMessage) return;
     if (msg.role !== 'assistant' || !msg.uuid) return;
     if (typeof this.sessionId === 'string' && this.sessionId.startsWith('sub-')) return;
     const btn = document.createElement('button');

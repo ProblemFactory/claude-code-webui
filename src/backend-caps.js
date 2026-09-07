@@ -142,6 +142,25 @@
 // choice" and the key is then NEVER sent — the agent keeps whatever its own
 // config file says. codex's 'none' is a real, DIFFERENT value ("no
 // personality"), so it can only arrive from an explicit pick.
+// review / renameWriteback / forkAtMessage (§2.13 of
+// docs/design-harness-features.md) — three capabilities that were ALREADY
+// shipped and gated on a backend id at four call sites, so the client's
+// `caps.review` had nothing on the server to be checked against:
+//   review           — the harness can start a code review of a target
+//                      (codex `review/start` through the wrapper: working
+//                      tree / base branch / commit / custom, inline or
+//                      detached). The ws 'review-start' gate and the client's
+//                      button-availability + read-only poll read THIS.
+//   renameWriteback  — renaming the session here also renames it in the
+//                      AGENT's own store (codex `set-thread-name` →
+//                      thread/setName). claude's transcript has no title
+//                      field to write, so a rename stays ours.
+//   forkAtMessage    — fork from ONE MESSAGE (claude
+//                      `--resume-session-at <uuid> --fork-session`), which is
+//                      NOT `fork` above: codex's thread/fork branches the
+//                      WHOLE thread and has no per-message boundary, so a
+//                      per-message fork button gated on `fork` would be a
+//                      button that cannot work. Two capabilities, two rows.
 const QUEUE_VERBS = Object.freeze(['remove', 'steer', 'steer-all', 'reorder', 'edit', 'run-now', 'run-all']);
 
 /** What a wrapper that advertises a queue but NAMES NO VERBS is taken to
@@ -176,6 +195,9 @@ const BACKEND_CAPS = {
     resetCredit: false,   // no such product concept
     quotaProbe: 'cli-usage',      // `claude -p /usage` auto-cli rung
     fork: true,                   // --fork-session (+ --resume-session-at for a mid-conversation fork)
+    forkAtMessage: true,          // --resume-session-at <uuid> --fork-session (the per-message boundary the CLI accepts)
+    review: false,                // no review verb on the stream-json control protocol
+    renameWriteback: false,       // the JSONL transcript has no title to write back
     streamProtocol: 'stream-json',
     peerDelivery: 'cli-inbox',
     // The CLI queues stdin messages itself and reports nothing about it —
@@ -199,6 +221,9 @@ const BACKEND_CAPS = {
     resetCredit: true,    // account/rateLimitResetCredit/consume (stored resets)
     quotaProbe: 'rpc-rate-limits', // account/rateLimits/read on a live app-server
     fork: true,                   // thread/fork (whole-thread fork; the wrapper sends it when CODEX_WEBUI_FORK=1)
+    forkAtMessage: false,         // thread/fork takes no message boundary — a per-message button here would be a dead control
+    review: true,                 // review/start: working tree / base branch / commit / custom, inline or detached
+    renameWriteback: true,        // set-thread-name → the thread's own name in codex's store
     streamProtocol: 'codex-events',
     peerDelivery: 'rpc-queue',
     // thread/queue/{add,list,delete,update,reorder,start} + turn/steer — every
@@ -218,6 +243,7 @@ const BACKEND_CAPS = {
   },
   shell: {
     pool: false, hotSwitch: 'unverified', planC: false, sealedOrders: false, resetCredit: false, quotaProbe: null, fork: false,
+    forkAtMessage: false, review: false, renameWriteback: false,
     streamProtocol: null, // terminal-only: no chat parse pipeline
     peerDelivery: 'stash-only',
     inputModes: { queue: false, queueVerbs: [] },
@@ -229,8 +255,11 @@ const BACKEND_CAPS = {
   // switching; 'acp-events' is the wrapper journal (data/bin/acp-wrapper.js);
   // fork/list/load are read from the agent's initialize reply at spawn, never
   // declared here. peerDelivery stays stash-only until a live lane is proven.
+  // ACP v1 has no review verb and no rename-back, and per-message fork is a
+  // claude flag — so review/renameWriteback/forkAtMessage stay false until a
+  // PROBE proves otherwise (setVerifiedCap is how `fork` flips), never guessed.
   opencode: {
-    pool: false, hotSwitch: 'unverified', planC: false, sealedOrders: false, resetCredit: false, quotaProbe: null, fork: false,
+    pool: false, hotSwitch: 'unverified', planC: false, sealedOrders: false, resetCredit: false, quotaProbe: null, fork: false, forkAtMessage: false, review: false, renameWriteback: false,
     streamProtocol: 'acp-events',
     peerDelivery: 'stash-only',
     frameFile: true,
@@ -256,7 +285,7 @@ const BACKEND_CAPS = {
 // row whose `steer` disagrees with its `queueVerbs`.
 for (const row of Object.values(BACKEND_CAPS)) row.inputModes = deriveInputModes(row.inputModes);
 
-const NO_CAPS = Object.freeze({ pool: false, hotSwitch: 'unverified', planC: false, sealedOrders: false, resetCredit: false, quotaProbe: null, fork: false, streamProtocol: null, peerDelivery: 'stash-only', inputModes: deriveInputModes({ queue: false, queueVerbs: [] }), turnState: null, inProgressTools: false, responseStyle: Object.freeze({ live: false, closed: true, values: Object.freeze([]) }) });
+const NO_CAPS = Object.freeze({ pool: false, hotSwitch: 'unverified', planC: false, sealedOrders: false, resetCredit: false, quotaProbe: null, fork: false, forkAtMessage: false, review: false, renameWriteback: false, streamProtocol: null, peerDelivery: 'stash-only', inputModes: deriveInputModes({ queue: false, queueVerbs: [] }), turnState: null, inProgressTools: false, responseStyle: Object.freeze({ live: false, closed: true, values: Object.freeze([]) }) });
 
 function capsOf(backend) {
   return BACKEND_CAPS[backend || 'claude'] || NO_CAPS;

@@ -45,7 +45,85 @@ const HANDLED_SYSTEM_SUBTYPES = new Set([
   // permission-mode echo ({status:null, permissionMode}) — also card-less, and
   // the consumer deliberately ignores that one.
   'status',
+  // Fire-and-forget full command-list push (2.1.257). Card-less by design:
+  // it re-points the composer's completion list, it is not an event.
+  'commands_changed',
 ]);
+
+// ── THE claude INIT FRAME (2.1.257 `system`/`init`) ─────────────────────────
+// Every field below is VERBATIM from the binary's own zod schema (dumped, per
+// the facts law — `strings` over the 2.1.257 binary, the `xie` schema object),
+// and every one is optional on the wire: an older CLI omits it, and a consumer
+// that finds nothing must fall back to what it does today. We used to keep
+// three of them (model / permissionMode / slash_commands) and drop the rest,
+// so a FAILED MCP server — a real, present condition in this instance's own
+// sessions — was invisible: its tools simply did not exist.
+//   mcp_servers        [{name, status}]            status is an OPEN string set
+//                                                  ('connected' | 'failed' |
+//                                                  'needs-auth' observed here);
+//                                                  anything not 'connected' is
+//                                                  reported, never enumerated.
+//   plugin_errors      [{plugin, type, message}]   demoted plugins (absent when
+//                                                  none — and ALSO absent on
+//                                                  frame-persisting lanes, so
+//                                                  an absent key never means
+//                                                  "clean load", which is why
+//                                                  nothing here ever renders a
+//                                                  green "all fine" claim)
+//   mcp_server_errors  [{name, type, message}]     --mcp-config entries skipped
+//   plugin_warnings    [{plugin, type, message}]   advisory
+//   memory_paths       {auto?, team?}              "Lets SDK renderers classify
+//                                                  Read/Write/Edit tool calls
+//                                                  on these paths as memory
+//                                                  operations without
+//                                                  re-implementing CLI path
+//                                                  detection" (upstream's own
+//                                                  words for why it exists)
+//   terminal_slash_commands  string[]              "Subset of slash_commands
+//                                                  whose UX is bound to the
+//                                                  local terminal… Phone/remote
+//                                                  UIs should hide these"
+const strList = (v, cap) => (Array.isArray(v) ? v.map((x) => String(x)).filter(Boolean).slice(0, cap) : null);
+const objList = (v, keys, cap) => (Array.isArray(v)
+  ? v.filter((x) => x && typeof x === 'object').slice(0, cap).map((x) => Object.fromEntries(keys.map((k) => [k, x[k] == null ? '' : String(x[k]).slice(0, 400)])))
+  : null);
+
+/** The facts of a claude init frame, in CLIENT spelling. Null-valued keys are
+ *  dropped so "the CLI said nothing" and "the CLI said empty" stay different
+ *  answers (an old CLI must never look like a session with zero skills). */
+function initFrameFacts(raw) {
+  const out = {};
+  const put = (k, v) => { if (v != null) out[k] = v; };
+  put('tools', strList(raw.tools, 200));
+  put('agents', strList(raw.agents, 100));
+  put('skills', strList(raw.skills, 200));
+  put('betas', strList(raw.betas, 40));
+  put('slashCommands', strList(raw.slash_commands, 200));
+  put('terminalSlashCommands', strList(raw.terminal_slash_commands, 100));
+  put('mcpServers', objList(raw.mcp_servers, ['name', 'status'], 60));
+  put('mcpServerErrors', objList(raw.mcp_server_errors, ['name', 'type', 'message'], 40));
+  put('plugins', objList(raw.plugins, ['name', 'path', 'source', 'version'], 60));
+  put('pluginErrors', objList(raw.plugin_errors, ['plugin', 'type', 'message'], 40));
+  put('pluginWarnings', objList(raw.plugin_warnings, ['plugin', 'type', 'message'], 40));
+  if (raw.output_style != null) out.outputStyle = String(raw.output_style).slice(0, 80);
+  if (raw.claude_code_version != null) out.version = String(raw.claude_code_version).slice(0, 40);
+  if (raw.memory_paths && typeof raw.memory_paths === 'object') {
+    const mp = {};
+    for (const k of ['auto', 'team']) if (raw.memory_paths[k]) mp[k] = String(raw.memory_paths[k]).slice(0, 400);
+    if (Object.keys(mp).length) out.memoryPaths = mp;
+  }
+  return out;
+}
+
+/** Names out of a `commands_changed` payload. The rows are RICH objects
+ *  ({name, description, argumentHint, aliases?} — the same schema `/help`
+ *  reads), never bare strings like init's `slash_commands`; a producer that
+ *  ever sends strings is still read correctly. Returns null when the record
+ *  carries no array at all (⇒ do nothing; an empty array is a real answer). */
+function commandNames(commands) {
+  if (!Array.isArray(commands)) return null;
+  return commands.map((c) => String((c && typeof c === 'object' ? c.name : c) || '')).filter(Boolean).slice(0, 200);
+}
 
 
 // Cross-session peer display name (2.361.6, owner report: the card showed the
@@ -445,11 +523,63 @@ class MessageManager {
   _processSystem(raw, emit) {
     // (see the unhandled-subtype breadcrumb at the tail of this method)
     if (raw.subtype === 'init') {
+      const frame = initFrameFacts(raw);
+      this._initFrame = frame;
       const msg = this._create({
         role: 'system', status: 'complete',
-        content: [{ type: 'system_info', text: `Model: ${raw.model || 'unknown'}`, initData: { model: raw.model, permissionMode: raw.permissionMode, slashCommands: raw.slash_commands } }],
+        content: [{
+          type: 'system_info', text: `Model: ${raw.model || 'unknown'}`,
+          initData: {
+            model: raw.model, permissionMode: raw.permissionMode, slashCommands: raw.slash_commands,
+            // The WIDENED frame (§2.6): the same record already carried these
+            // and we dropped every one of them. Field names are verbatim from
+            // the 2.1.257 zod schema (`system`/`init` variant) — dumped, not
+            // guessed — and every one is OPTIONAL here: an older CLI simply
+            // has no key and every consumer degrades to today's behaviour.
+            frame,
+          },
+        }],
       });
+      this._initMsgId = msg.id;
       if (emit) this._emit({ op: 'create', message: msg });
+      // The FIRST authority on the completion list, and the one that also says
+      // which of those commands are terminal-bound. Sent as the same meta op a
+      // mid-session `commands_changed` push uses, so the client has ONE code
+      // path for "here is the command list now" (the ACP twin joins it too).
+      if (emit) this._emitSlashCommands(raw.slash_commands, frame.terminalSlashCommands);
+    }
+
+    // MID-SESSION COMMAND-LIST PUSH (2.1.257 `system`/`commands_changed`,
+    // describe: "Fire-and-forget push of the full slash-command list after a
+    // mid-session change (e.g. skills discovered dynamically as the agent
+    // works in a subdirectory). Clients should REPLACE their cached command
+    // list with this payload"). Shape differs from init's `slash_commands`
+    // (string[]): `commands` is the RICH row {name, description,
+    // argumentHint, aliases?} — so the names are read out, never assumed.
+    // REPLACE is the whole contract: a command that disappeared upstream must
+    // disappear here, which an append would never do.
+    if (raw.subtype === 'commands_changed') {
+      const names = commandNames(raw.commands);
+      if (names) {
+        // The terminal subset is NOT re-sent by this push, so the init frame's
+        // stays authoritative — intersected with the new list so a command
+        // that vanished upstream does not linger as a "terminal" name.
+        const terminal = (this._initFrame?.terminalSlashCommands || []).filter((c) => names.includes(c));
+        if (this._initFrame) this._initFrame.slashCommands = names;
+        // Patch the init card in place (the codex/ACP pattern) so a client
+        // that rebuilds history from the buffer sees the CURRENT list…
+        const init = this._initMsgId ? this.messageIndex.get(this._initMsgId) : null;
+        const d = init?.content?.[0]?.initData;
+        if (d) {
+          d.slashCommands = names;
+          if (d.frame) d.frame.slashCommands = names;
+          if (emit) this._emit({ op: 'edit', id: init.id, fields: { content: init.content } });
+        }
+        // …and tell live clients through the ONE meta op (an `edit` on a
+        // complete system card does not re-run the renderer's side effects —
+        // the composer would never hear about it).
+        if (emit) this._emitSlashCommands(names, terminal);
+      }
     }
 
     if (raw.subtype === 'hook_response') {
@@ -590,6 +720,18 @@ class MessageManager {
         }
       }
     }
+  }
+
+  /** THE command-list op — one shape for the init frame and for every
+   *  mid-session push, mirrored by the ACP normalizer's
+   *  `available_commands_update` so the client has ONE path (the design's
+   *  "no local/remote twin"). `terminal` is the terminal-BOUND subset the
+   *  composer must hide; an empty array means "the CLI named none", which is
+   *  as true an answer as a populated one. */
+  _emitSlashCommands(commands, terminal) {
+    const names = strList(commands, 200);
+    if (!names) return;
+    this._emit({ op: 'meta', subtype: 'slash-commands', data: { commands: names, terminal: strList(terminal, 100) || [] } });
   }
 
   /** Close the task a <task-notification> payload names (status + summary).
@@ -1237,4 +1379,4 @@ function parseBackgroundLaunch(toolName, input, resultText) {
 // peerDisplayName is shared with the codex normalizer (design-harness-plugins
 // §1 P1): the server frames it parses are backend-neutral text, and a codex
 // rollout copy of a peer message carries ONLY that text.
-module.exports = { splitToolResultContent, MessageManager, classifyResultError, parseBackgroundLaunch, peerDisplayName };
+module.exports = { splitToolResultContent, MessageManager, classifyResultError, parseBackgroundLaunch, peerDisplayName, initFrameFacts, commandNames };

@@ -918,6 +918,11 @@ class CodexMessageManager {
         initData.slashCommands = this._status.slashCommands;
         if (emit) this._emit({ op: 'edit', id: init.id, fields: { content: init.content } });
       }
+      // The ONE command-list op (§2.6), same shape as the claude and ACP
+      // normalizers: the `edit` above updates a REBUILT history, but a
+      // complete system card is not re-rendered live, so on its own it never
+      // reaches the composer. codex declares no terminal-bound subset.
+      if (emit) this._emit({ op: 'meta', subtype: 'slash-commands', data: { commands: this._status.slashCommands, terminal: [] } });
     }
     if (payload.model) this._status.model = payload.model;
     if (payload.permissionMode) this._status.permissionMode = payload.permissionMode;

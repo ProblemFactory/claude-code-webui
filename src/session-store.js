@@ -300,7 +300,7 @@ function claimJsonls(locks, jsonls, tailIdsFor) {
 
 // ── JSONL helpers ──
 
-const { parseBackgroundLaunch } = require('./message-manager.js');
+const { parseBackgroundLaunch, initFrameFacts, commandNames } = require('./message-manager.js');
 
 function isSubagentMessage(msg) { return !!(msg.parent_tool_use_id || msg.isSidechain); }
 
@@ -748,6 +748,30 @@ class SessionMessages {
         break;
       }
     }
+    // The WIDENED init facts + the CURRENT command list (§2.6). A session
+    // re-inits (resume, wrapper restart) and pushes `commands_changed`
+    // mid-run, so the FIRST init is the wrong authority for anything live:
+    // upstream's own rule is "re-emitted inits carry the current value — the
+    // newest frame wins", and a commands_changed push REPLACES the list. This
+    // is the attach/HTTP twin of the live meta op, so a window that opens
+    // after the push (or whose init card sits outside the loaded tail) still
+    // gets the same answer. Bounded tail scan, like the usage one above.
+    let initFrame = null, pushedCommands = null;
+    for (let i = msgs.length - 1; i >= Math.max(0, msgs.length - 2000); i--) {
+      const m = msgs[i];
+      if (!pushedCommands && m.type === 'system' && m.subtype === 'commands_changed') pushedCommands = commandNames(m.commands);
+      if (!initFrame && m.type === 'system' && m.subtype === 'init') initFrame = initFrameFacts(m);
+      if (initFrame && pushedCommands) break;
+    }
+    if (initFrame) {
+      if (pushedCommands) initFrame.slashCommands = pushedCommands;
+      if (initFrame.slashCommands) slashCommands = initFrame.slashCommands;
+      if (initFrame.terminalSlashCommands && initFrame.slashCommands) {
+        initFrame.terminalSlashCommands = initFrame.terminalSlashCommands.filter((c) => initFrame.slashCommands.includes(c));
+      }
+    } else if (pushedCommands) {
+      slashCommands = pushedCommands;
+    }
     // contextWindow comes from result.modelUsage (stdout-only). When restoring
     // from JSONL the only sound DEDUCTION is: observed usage beyond the 200k
     // window proves the 1M beta. Anything else stays 0 = unknown — the UI shows
@@ -761,6 +785,7 @@ class SessionMessages {
     if (!lastUsage && !model) return null;
     return {
       model, lastUsage, contextWindow, total_cost_usd: totalCost, slashCommands, permissionMode,
+      initFrame, // the widened claude init facts (§2.6): terminal-bound commands, memory dirs, health — null on every other harness / older CLI
       permissionModes: this._permissionModes,
       subagentMetas: getSubagentMetas(getHistorySessionId(this._session), this._session.cwd),
     };

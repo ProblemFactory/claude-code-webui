@@ -44,7 +44,7 @@ export const BACKEND_META = {
     // inProgressTools is FALSE on every harness today: claude's record for it
     // never leaves the CLI's own host callback (backend-caps.js carries the
     // dump + the wire measurement), so nothing may draw an "executing" dot.
-    caps: { fork: true, effort: true, review: false, autoResume: true, accounts: true, peerDelivery: 'cli-inbox', inputModes: deriveInputModes({ queue: true, queueVerbs: [] }), turnState: 'authoritative', inProgressTools: false, responseStyle: { live: false, closed: false, values: ['Concise', 'Explanatory', 'Learning', 'Proactive'] } },
+    caps: { fork: true, forkAtMessage: true, review: false, renameWriteback: false, effort: true, autoResume: true, accounts: true, peerDelivery: 'cli-inbox', inputModes: deriveInputModes({ queue: true, queueVerbs: [] }), turnState: 'authoritative', inProgressTools: false, responseStyle: { live: false, closed: false, values: ['Concise', 'Explanatory', 'Learning', 'Proactive'] } },
     // One-line hint per response-style VALUE (same contract as effortHints:
     // English key, t() at render — the VALUE itself is protocol and is never
     // translated).
@@ -96,7 +96,7 @@ export const BACKEND_META = {
     // fork: the thread-fork RPC exists but is unwired (flips when wired).
     // fork: true since 2.369.21 — thread/fork is wired end to end (wrapper
     // CODEX_WEBUI_FORK → thread/fork; server _forkRequested per caps).
-    caps: { fork: true, effort: true, review: true, autoResume: true, quotaRefresh: 'session-rpc', accounts: true, peerDelivery: 'rpc-queue', inputModes: deriveInputModes({ queue: true, queueVerbs: ['remove', 'steer', 'steer-all', 'reorder', 'edit', 'run-now', 'run-all'] }), turnState: 'authoritative', inProgressTools: false, responseStyle: { live: true, closed: true, values: ['none', 'friendly', 'pragmatic'] } },
+    caps: { fork: true, forkAtMessage: false, review: true, renameWriteback: true, effort: true, autoResume: true, quotaRefresh: 'session-rpc', accounts: true, peerDelivery: 'rpc-queue', inputModes: deriveInputModes({ queue: true, queueVerbs: ['remove', 'steer', 'steer-all', 'reorder', 'edit', 'run-now', 'run-all'] }), turnState: 'authoritative', inProgressTools: false, responseStyle: { live: true, closed: true, values: ['none', 'friendly', 'pragmatic'] } },
     // codex Personality values (0.153.4 schema): protocol strings, hinted here.
     responseStyleHints: {
       none: 'no persona — the model\u2019s plain voice',
@@ -137,7 +137,7 @@ export const BACKEND_META = {
     brandColor: '#4ade80',
     fallbackModels: [],
     modelsFromAgent: true,
-    caps: { fork: false, effort: false, review: false, autoResume: false, accounts: false, peerDelivery: 'stash-only', inputModes: deriveInputModes({ queue: true, queueVerbs: ['remove', 'reorder', 'edit'] }), turnState: 'authoritative', inProgressTools: false, responseStyle: { live: false, closed: true, values: [] } },
+    caps: { fork: false, forkAtMessage: false, review: false, renameWriteback: false, effort: false, autoResume: false, accounts: false, peerDelivery: 'stash-only', inputModes: deriveInputModes({ queue: true, queueVerbs: ['remove', 'reorder', 'edit'] }), turnState: 'authoritative', inProgressTools: false, responseStyle: { live: false, closed: true, values: [] } },
     settingsPrefix: 'opencode',
     permissionModes: ['build', 'plan'],
     // The STORE (stopped conversations: list/open/resume/fork) runs behind a
@@ -326,7 +326,7 @@ export function settingsPrefixFor(backend) {
 }
 
 /** Feature caps for a backend (all-false for unknown/shell — chrome shows nothing it can't do). */
-const NO_FEATURE_CAPS = Object.freeze({ fork: false, effort: false, review: false, autoResume: false, responseStyle: Object.freeze({ live: false, closed: true, values: Object.freeze([]) }) });
+const NO_FEATURE_CAPS = Object.freeze({ fork: false, forkAtMessage: false, review: false, renameWriteback: false, effort: false, autoResume: false, responseStyle: Object.freeze({ live: false, closed: true, values: Object.freeze([]) }) });
 export function backendFeatureCaps(backend) {
   return BACKEND_META[backend]?.caps || NO_FEATURE_CAPS;
 }
@@ -345,6 +345,88 @@ export function notificationDeliveryFor(backend) {
 /** Every backend's agent-memory path pattern (see BACKEND_META.claude). */
 export function agentMemoryPathRes() {
   return Object.values(BACKEND_META).map((m) => m.memoryPathRe).filter(Boolean);
+}
+
+// ── AGENT MEMORY: THE FRAME FIRST, THE REGEX AS FALLBACK (§2.6) ────────────
+// The claude init frame carries `memory_paths {auto?, team?}` and upstream's
+// own reason for the field is exactly our use of it: "Lets SDK renderers
+// classify Read/Write/Edit tool calls on these paths as memory operations
+// without re-implementing CLI path detection." Our `memoryPathRe` IS that
+// re-implementation, and it goes quietly wrong the moment a user points the
+// store somewhere else — a memory write then renders as an ordinary Write card
+// on a long dotfile path. So: a directory the CLI NAMED wins; the regexes stay
+// for old CLIs, codex (no init frame at all) and any path outside the declared
+// dirs. Declared dirs accumulate (several sessions, several stores) and are
+// matched as PREFIXES on a normalised path — a directory named `…/memoryfoo`
+// must not match `…/memory`, so the prefix always ends in '/'.
+const MEMORY_DIRS = new Set();
+const MEMORY_RES = agentMemoryPathRes();
+
+/** Record the memory directories an init frame declared ({auto?, team?}). */
+export function noteMemoryPaths(paths) {
+  if (!paths || typeof paths !== 'object') return;
+  for (const key of ['auto', 'team']) {
+    const p = paths[key];
+    if (typeof p === 'string' && p) MEMORY_DIRS.add(p.endsWith('/') ? p : p + '/');
+  }
+}
+
+/** PURE: is this file path an agent-memory file? Frame-declared dirs first
+ *  (authoritative), the per-backend regexes second (the degrade path). */
+export function isAgentMemoryPath(fp) {
+  if (!fp) return false;
+  const p = String(fp);
+  for (const dir of MEMORY_DIRS) if (p.startsWith(dir)) return true;
+  return MEMORY_RES.some((re) => re.test(p));
+}
+
+/** Test seam ONLY (the module keeps process-lifetime state on purpose: a
+ *  memory dir named by ANY session identifies memory content in every view). */
+export function _resetMemoryPaths() { MEMORY_DIRS.clear(); }
+
+/** PURE: what an init frame says is WRONG right now — the facts behind the
+ *  init card's health strip (§2.6). Today a claude session with a failed MCP
+ *  server looks exactly like one with no such server configured: its tools
+ *  simply do not exist and nothing anywhere says why (this instance's own
+ *  live sessions carry `status:'failed'` servers).
+ *  Rows are {kind, name, detail}; kind ∈ mcp-server | mcp-config | plugin.
+ *  The status vocabulary is an OPEN string set on the wire ('connected',
+ *  'failed', 'needs-auth' observed) — so anything that is not exactly
+ *  'connected' is reported and the status is shown VERBATIM, never mapped
+ *  through a table that a new value would fall out of.
+ *  The inverse is deliberately NOT computed: an ABSENT plugin_errors /
+ *  mcp_server_errors key does not mean "clean" (upstream omits both on
+ *  frame-persisting lanes), so this never renders an "all healthy" claim. */
+export function initHealthIssues(frame) {
+  if (!frame || typeof frame !== 'object') return [];
+  const out = [];
+  for (const s of frame.mcpServers || []) {
+    if (s && s.status && s.status !== 'connected') out.push({ kind: 'mcp-server', name: s.name || '', detail: s.status });
+  }
+  for (const e of frame.mcpServerErrors || []) out.push({ kind: 'mcp-config', name: e.name || '', detail: [e.type, e.message].filter(Boolean).join(': ') });
+  for (const e of frame.pluginErrors || []) out.push({ kind: 'plugin', name: e.plugin || '', detail: [e.type, e.message].filter(Boolean).join(': ') });
+  return out;
+}
+
+/** PURE: the composer's slash-command completion list. TWO rules, both from
+ *  the init frame (§2.6):
+ *    ① `terminal_slash_commands` is upstream's own "Subset of slash_commands
+ *       whose UX is bound to the local terminal (e.g. exit, statusline).
+ *       Phone/remote UIs should hide these from command menus" — a chat
+ *       composer is such a UI, and offering /exit there is a control that
+ *       does nothing when clicked;
+ *    ② every entry is shown with its leading slash.
+ *  An absent or empty terminal list (old CLI, codex, ACP) filters nothing. */
+export function slashCompletionList(commands, terminal) {
+  if (!Array.isArray(commands)) return [];
+  const hide = new Set((Array.isArray(terminal) ? terminal : []).map((c) => String(c).replace(/^\//, '')));
+  const out = [];
+  for (const raw of commands) {
+    const name = String(raw || '').replace(/^\//, '');
+    if (!name || hide.has(name)) continue;
+    out.push('/' + name);
+  }
+  return out;
 }
 
 export function getBackendMeta(backend) {
