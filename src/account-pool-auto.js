@@ -226,39 +226,64 @@ function decidePoolSwitch({ currentId, members, readCache, nowSec, proactive = f
   // no-deadline candidates (unknown / reset-passed-fresh) rank last, ordered
   // by effective remaining (unknown = 50, the v2 rule).
   const ranked = [];
+  // NEAR-window candidates, kept SEPARATE (round-2 verifier): they are barred
+  // from every voluntary move, but a member with 20 min of login beats a
+  // member with zero, so a HARD-DEAD current target may still fall back here.
+  const nearRanked = [];
   let excludedN = 0;
-  const loginBlocked = []; // [{id, name, state}] — named, never a silently short list
+  let quotaBlockedN = 0;   // dropped by the QUOTA gate — a different wall, a different sentence
+  const loginBlocked = []; // [{id, name, state, msLeft}] — named, never a silently short list
   for (const m of members) {
     if (m.id === currentId) continue;
     if (excluded && excluded.has(m.id)) { excludedN++; continue; } // just rejected this session — not a candidate
-    // LOGIN GATE (2026-09-07). Two different refusals, one predicate:
-    //   dead login  — it cannot serve anything, for anyone
-    //   near expiry — it can serve its OWN conversations fine, but moving a
+    // LOGIN GATE (2026-09-07). Two different refusals, ORDERED so each member
+    // is attributed to the wall that actually stops it:
+    //   dead login  — it cannot serve anything, for anyone: out, now
+    //   quota dead  — a real wall of its own, even with a perfect login
+    //   near expiry — it serves its OWN conversations fine; moving a
     //                 conversation ONTO a login with <30min left just buys a
-    //                 second outage. `loginSwitchTarget` covers both.
+    //                 second outage, so it is a LAST-RESORT target only.
     const li = login(m.id);
-    if (readLogin && !loginSwitchTarget(li)) { loginBlocked.push({ id: m.id, name: m.name, state: li.state }); continue; }
+    if (readLogin && !loginUsable(li)) { loginBlocked.push({ id: m.id, name: m.name, state: li.state, msLeft: li.msLeft ?? null }); continue; }
     const c = readCache(m.id);
     const r = dockRem(m.id, accountRemaining(c, nowSec));
     const br = dock(m.id, bucketRems(c, nowSec));
     const eff = r.known ? r.remaining : UNKNOWN_REMAINING_PCT;
-    if (r.known && br.some(dead)) continue; // gated: some bucket below its hard floor — can't serve
+    if (r.known && br.some(dead)) { quotaBlockedN++; continue; } // gated: some bucket below its hard floor — can't serve
     // settleOk: every bucket clears its kind's HOT threshold + margin — a
     // voluntary move must land somewhere that won't itself soft-exhaust
     // (the 2.266.1 oscillation guard, now per-kind)
     const settleOk = r.known && br.length > 0 && br.every((b) => b.remaining >= THRESH[b.kind].hot + MIN_GAIN_PCT);
-    ranked.push({ id: m.id, name: m.name, eff, known: r.known, settleOk, remaining: r.known ? r.remaining : null, deadline: weeklyDeadline(c, nowSec), loginPenalty: loginRank(li) });
+    const row = { id: m.id, name: m.name, eff, known: r.known, settleOk, remaining: r.known ? r.remaining : null, deadline: weeklyDeadline(c, nowSec), loginPenalty: loginRank(li) };
+    if (readLogin && !loginSwitchTarget(li)) { loginBlocked.push({ id: m.id, name: m.name, state: li.state, msLeft: li.msLeft ?? null }); nearRanked.push(row); continue; }
+    ranked.push(row);
   }
   ranked.sort(edfCompare);
-  if (!ranked.length) {
+  nearRanked.sort(edfCompare);
+  // ESCAPE SCRAPS (round-2 verifier, reproduced: current hard-dead on 5h, the
+  // only quota-healthy member 20 min from its login deadline ⇒ round 1 refused
+  // to move AT ALL, a strict availability regression vs the shipped code). The
+  // NEAR window is a rule about VOLUNTARY moves; it must never pin a
+  // conversation to a member that is ALREADY dead. Only when the current
+  // target is hard-dead and nothing else is left.
+  const usingScraps = !ranked.length && hardDead && nearRanked.length > 0;
+  const pool = usingScraps ? nearRanked : ranked;
+  if (!pool.length) {
     // SPEAK which wall we hit. 'all-logins-expired' is its own reason because
     // it points at a completely different action from 'no-members' (re-login
-    // now vs wait for a quota window) — the 2.313.0 named-bucket rule.
-    const why = excludedN ? 'all-rejected' : loginBlocked.length ? 'all-logins-expired' : 'no-members';
+    // now vs wait for a quota window) — the 2.313.0 named-bucket rule. It may
+    // only be claimed when the login gate is the ONLY thing that emptied the
+    // list: round 1 let ONE login-blocked member outrank any number of
+    // quota-dead ones and then sent the user to re-login accounts whose
+    // logins were fine (round-2 verifier).
+    const why = excludedN ? 'all-rejected' : (loginBlocked.length && !quotaBlockedN) ? 'all-logins-expired' : 'no-members';
     return none(why, { fromRemaining: cur.known ? cur.remaining : null, excluded: excludedN || undefined, loginBlocked: loginBlocked.length ? loginBlocked : undefined, ...bucketDetail(curBr) });
   }
 
-  const bestSettle = ranked.find((r) => r.settleOk) || null;
+  // What we are moving ONTO, when the only thing left was a dying login — the
+  // move happens, and the notice has to say the login still needs renewing.
+  const scrapsInfo = (pick) => (usingScraps ? { toLoginNear: { id: pick.id, name: pick.name, ...(loginBlocked.find((b) => b.id === pick.id) || {}) } } : {});
+  const bestSettle = pool.find((r) => r.settleOk) || null;
   if (exhausted) {
     if (hardDead) {
       // genuinely unusable — any meaningfully-better member beats staying,
@@ -278,19 +303,23 @@ function decidePoolSwitch({ currentId, members, readCache, nowSec, proactive = f
       // an unknown member carries the fabricated UNKNOWN_REMAINING_PCT, which
       // would otherwise beat every real reading and turn "escape the dead
       // account" into "jump onto ignorance" (caught by the anti-flap test).
-      const knownRanked = ranked.filter((r) => r.known);
-      const best = bestSettle || (knownRanked.length ? knownRanked.reduce((x, y) => (y.eff > x.eff ? y : x)) : ranked[0]);
+      const knownRanked = pool.filter((r) => r.known);
+      const best = bestSettle || (knownRanked.length ? knownRanked.reduce((x, y) => (y.eff > x.eff ? y : x)) : pool[0]);
       // The anti-flap floor compares REMAINING QUOTA, which is meaningless
       // when the reason we must leave is a dead LOGIN (and `cur.remaining` is
       // null when that member has no cache at all — `null + 3` is 3, so the
       // old expression would have silently blocked every escape from an
       // unread member). A dead login always leaves.
-      if (!curLoginDead && best.eff <= cur.remaining + MIN_GAIN_PCT) return none('stuck', { fromRemaining: cur.remaining, bestRemaining: best.remaining, bestName: best.name || best.id, ...bucketDetail(curBr) });
-      return { to: best.id, toName: best.name, fromRemaining: cur.known ? cur.remaining : null, toRemaining: best.remaining, reason: curLoginDead ? 'login-expired' : 'exhausted' };
+      if (!curLoginDead && best.eff <= cur.remaining + MIN_GAIN_PCT) return none('stuck', { fromRemaining: cur.remaining, bestRemaining: best.remaining, bestName: best.name || best.id, loginBlocked: loginBlocked.length ? loginBlocked : undefined, ...bucketDetail(curBr) });
+      // `reason` says why we LEFT (it gates the dwell-belt exemption and the
+      // notice); `toLoginNear` says what we could get. Collapsing the two into
+      // one string would have made a login-expired escape onto a scrap lose
+      // its 180s-belt exemption.
+      return { to: best.id, toName: best.name, fromRemaining: cur.known ? cur.remaining : null, toRemaining: best.remaining, reason: curLoginDead ? 'login-expired' : 'exhausted', ...scrapsInfo(best) };
     }
     // soft-exhausted (only a hot-raised threshold tripped): still usable,
     // so only move somewhere that can actually SETTLE
-    if (!bestSettle) return none('no-settleable', { fromRemaining: cur.known ? cur.remaining : null, ...bucketDetail(curBr) });
+    if (!bestSettle) return none('no-settleable', { fromRemaining: cur.known ? cur.remaining : null, loginBlocked: loginBlocked.length ? loginBlocked : undefined, ...bucketDetail(curBr) });
     return { to: bestSettle.id, toName: bestSettle.name, fromRemaining: cur.known ? cur.remaining : null, toRemaining: bestSettle.remaining, reason: 'exhausted' };
   }
   // Proactive tier (hot pools): jump to a strictly-sooner KNOWN deadline —

@@ -134,7 +134,7 @@ function quotaBackendFor(key, session) {
   return 'claude';
 }
 const { quotaVerdict } = require('../account-pool-auto.js'); // THE account-usability verdict (2.369.0, owner-designed)
-const { loginUsable, loginBucketLabel } = require('../login-expiry.js'); // PURE: is this member's LOGIN SESSION still alive (2026-09-07)
+const { loginUsable, loginBucketLabel, loginBlockedText, loginAgeText } = require('../login-expiry.js'); // PURE: is this member's LOGIN SESSION still alive (2026-09-07)
 const { UsageEstimator, overlayCache: estOverlayCache, predictCalib, CLAUDE_MAX_PRIOR_FULL_USD } = require('../usage-estimator.js');
 const usageAnchors = new UsageAnchors({ dataDir: path.join(rootDir, 'data') });
 // Which caches map to which identity (org-merge aware) — shared by the sweep
@@ -1671,7 +1671,14 @@ function maybePoolAutoSwitchForPool(poolId) {
         // a same-target re-point (observed ≠ linked, the link was already on
         // the chosen member) is not a user-visible switch: journal + the
         // creds-mtime bump that makes the CLI re-read the link, no notice
-        if (ds.to !== linkCur) serverNotice(`pool-sess-${sid}-${now}`, `Pool "${a.name}": conversation "${s2.name || sid}" moved to ${toName}${cm.divergent ? ` (it was still running on ${nameOf(curFor)})` : ''}${fam ? ` (its ${fam} quota${ds.fromRemaining != null ? ` was at ${Math.round(ds.fromRemaining)}%` : ''})` : ''}${a.hot ? '' : ' — restarting it'}`);
+        // SCRAPS (round-2 verifier): this conversation had nowhere else to go
+        // and landed on a member whose OWN login dies in minutes. The move is
+        // right (zero minutes was the alternative) but silence about it would
+        // read as "it recovered", and it dies again shortly after.
+        const sScraps = ds.toLoginNear
+          ? ` — but ${toName}'s own login ${typeof ds.toLoginNear.msLeft === 'number' && ds.toLoginNear.msLeft > 0 ? `expires in ${loginAgeText(ds.toLoginNear.msLeft)}` : 'expires imminently'}; re-login it in Manage Agents now`
+          : '';
+        if (ds.to !== linkCur) serverNotice(`pool-sess-${sid}-${now}`, `Pool "${a.name}": conversation "${s2.name || sid}" moved to ${toName}${cm.divergent ? ` (it was still running on ${nameOf(curFor)})` : ''}${fam ? ` (its ${fam} quota${ds.fromRemaining != null ? ` was at ${Math.round(ds.fromRemaining)}%` : ''})` : ''}${a.hot ? '' : ' — restarting it'}${sScraps}`);
         console.log(`[pool] per-session switch ${poolId}/${sid}: ${curFor}${cm.divergent ? ` (observed; linked ${linkCur})` : ''} → ${ds.to}${ds.to === linkCur ? ' (re-point, same target)' : ''} (fam=${fam || '?'}, from ${ds.fromRemaining}%)`);
         // a hot re-point does not move an idle limit-blocked session by itself
         // (c1206711: the pool switched back and the session stayed dead) —
@@ -1709,18 +1716,27 @@ function maybePoolAutoSwitchForPool(poolId) {
         const rest = live ? ` (still available: ${live})` : '';
         const alt = d.bestRemaining != null ? ` The best other member is at ${Math.round(d.bestRemaining)}%.` : '';
         // A login wall is a DIFFERENT sentence from a quota wall: the fix is a
-        // re-login, not waiting for a window (2.313.0 named-bucket rule).
-        const loginNames = (d.loginBlocked || []).map((m) => `${m.name || m.id} (${m.state})`).join(', ');
-        const why = d.reason === 'all-logins-expired'
-          ? `every other member's login session has expired or is about to — ${loginNames}`
+        // re-login, not waiting for a window (2.313.0 named-bucket rule). Each
+        // member states its OWN fact — round 1 said "expired or is about to"
+        // over the whole list, so a member with 20 min of login left was
+        // reported as expired (round-2 verifier).
+        const loginNames = loginBlockedText(d.loginBlocked);
+        const loginWall = d.reason === 'all-logins-expired';
+        const why = loginWall
+          ? `no member can take it — ${loginNames}`
           : d.reason === 'no-members'
           ? `no member can serve it — ${what}${rest}`
           : `nowhere better to go — ${what}${rest}`;
-        const fix = d.reason === 'all-logins-expired'
+        // MIXED wall: QUOTA emptied the candidate list and a member ALSO needs
+        // a re-login. Both halves get said — round 1 let one login-blocked
+        // member claim the whole refusal and dropped the bucket sentence, so
+        // the user was sent to re-login accounts whose logins were fine.
+        const also = !loginWall && loginNames ? ` Also needing a re-login: ${loginNames}.` : '';
+        const fix = loginWall
           ? ' Re-login those accounts in Manage Agents.'
           : ' Conversations on it will hit a limit until a window resets, you add a member, or you move them off the pool.';
         serverNotice(`pool-blocked-${poolId}-${d.reason}-${Math.floor(now / 3600000)}`,
-          `Pool "${a.name}": ${why}.${d.reason === 'all-logins-expired' ? '' : alt}${fix}`, { level: 'warn' });
+          `Pool "${a.name}": ${why}.${loginWall ? '' : alt}${also}${fix}`, { level: 'warn' });
       }
       return;
     }
@@ -1748,11 +1764,18 @@ function maybePoolAutoSwitchForPool(poolId) {
       affected.push({ serverId: sid, backend: s.backend || 'claude', backendSessionId: s.claudeSessionId || s.backendSessionId || null, cwd: s.cwd || null, name: s.name || null, host: s.host || null });
     }
     const fromPct = d.fromRemaining != null ? Math.round(d.fromRemaining) : null;
+    // SCRAPS (round-2 verifier): the only member left was itself minutes from
+    // its login deadline. Moving beats staying on a dead member, but the user
+    // has to hear that the reprieve is short — otherwise the pool "recovers"
+    // and dies again with no explanation.
+    const scraps = d.toLoginNear
+      ? ` — but ${d.toName}'s own login ${typeof d.toLoginNear.msLeft === 'number' && d.toLoginNear.msLeft > 0 ? `expires in ${loginAgeText(d.toLoginNear.msLeft)}` : 'expires imminently'}; re-login it in Manage Agents now`
+      : '';
     serverNotice(`pool-auto-${poolId}-${now}`, d.reason === 'edf'
       ? `Pool "${a.name}" switched to ${d.toName} — draining the member whose weekly quota resets soonest (use-it-or-lose-it)`
       : d.reason === 'login-expired'
-      ? `Pool "${a.name}" switched to ${d.toName} — ${nameOf(currentId)}'s login session expired; re-login it in Manage Agents${hot ? '' : ' (restarting its conversations)'}`
-      : `Pool "${a.name}" auto-switched to ${d.toName} (previous account down to ${fromPct}% remaining)${hot ? '' : ' — restarting its conversations'}`);
+      ? `Pool "${a.name}" switched to ${d.toName} — ${nameOf(currentId)}'s login session expired; re-login it in Manage Agents${hot ? '' : ' (restarting its conversations)'}${scraps}`
+      : `Pool "${a.name}" auto-switched to ${d.toName} (previous account down to ${fromPct}% remaining)${hot ? '' : ' — restarting its conversations'}${scraps}`);
     console.log(`[pool] auto-switch ${poolId}: ${currentId} → ${d.to} (${d.reason}, from ${fromPct}% left, hot=${hot}, affected=${affected.length})`);
     if (!hot && affected.length) {
       // ONE client only — every client acting would race duplicate restarts.

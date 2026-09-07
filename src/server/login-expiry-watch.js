@@ -67,10 +67,20 @@ function itemTextFor(stage, name, info) {
 function create({ accounts, userTodos, dataDir, log = () => {}, now = () => Date.now(), sweepMs = SWEEP_MS } = {}) {
   const file = path.join(dataDir, 'login-expiry.json');
   let ledger = {};       // accountId → { exp, sent: [...] }
+  // WHEN THIS LEDGER STARTED WATCHING (round-2 verifier). A login that died
+  // BEFORE this instant, and is no longer recent, is a PRE-EXISTING CONDITION
+  // — its surface is the permanent red chip in Manage Agents, not an event
+  // inbox. Without it the first sweep after the upgrade filed an `urgent` item
+  // for every login that had ever died: three on the instance this was built
+  // on, dead 15 h, 116 h and 700 h, none of them a routing member. Persisted,
+  // so the grace is spent exactly once per install and a real death two
+  // minutes before the upgrade still speaks.
+  let since = null;
   let timer = null;
   try {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf-8'));
     if (parsed && typeof parsed === 'object' && parsed.members && typeof parsed.members === 'object') ledger = parsed.members;
+    if (parsed && Number.isFinite(parsed.since)) since = parsed.since;
   } catch { /* fresh install */ }
 
   function save() {
@@ -79,7 +89,7 @@ function create({ accounts, userTodos, dataDir, log = () => {}, now = () => Date
     // to prevent.
     try {
       const tmp = file + '.tmp';
-      fs.writeFileSync(tmp, JSON.stringify({ version: 1, members: ledger }, null, 2), { mode: 0o600 });
+      fs.writeFileSync(tmp, JSON.stringify({ version: 1, since, members: ledger }, null, 2), { mode: 0o600 });
       fs.renameSync(tmp, file);
     } catch (e) { log('[login-expiry] ledger write failed:', e.message); }
   }
@@ -91,6 +101,7 @@ function create({ accounts, userTodos, dataDir, log = () => {}, now = () => Date
     let rows = [];
     try { rows = accounts.list().accounts || []; } catch (e) { log('[login-expiry] roster read failed:', e.message); return emitted; }
     const t = now();
+    if (since == null) since = t; // first sweep of a fresh install — everything already dead predates us
     const alive = new Set();
     for (const a of rows) {
       // Subscriptions only: an API key / oat record has no OAuth login
@@ -102,8 +113,9 @@ function create({ accounts, userTodos, dataDir, log = () => {}, now = () => Date
       try { info = accounts.loginStateOf(a.id, t); } catch { info = null; }
       if (!info) continue;
       const prev = ledger[a.id] || null;
-      const { emit, entry } = reviewWarnings(info, prev, t);
+      const { emit, entry, suppressed } = reviewWarnings(info, prev, t, { watchingSince: since });
       if (entry) ledger[a.id] = entry; else delete ledger[a.id];
+      if (suppressed) log(`[login-expiry] ${a.name || a.id}: login already dead before this ledger existed (ended ${fmtWhen(info.refreshExpiresAt)}) — recorded, not filed`);
       if (!emit) continue;
       const text = itemTextFor(emit, a.name || a.id, info);
       try {
@@ -145,7 +157,7 @@ function create({ accounts, userTodos, dataDir, log = () => {}, now = () => Date
   }
   function stop() { if (timer) { clearTimeout(timer); timer = null; } }
 
-  return { sweep, start, stop, ledger: () => JSON.parse(JSON.stringify(ledger)), INBOX_KEY, WARN_STAGES };
+  return { sweep, start, stop, ledger: () => JSON.parse(JSON.stringify(ledger)), watchingSince: () => since, INBOX_KEY, WARN_STAGES };
 }
 
 module.exports = { create, itemTextFor, INBOX_KEY, SWEEP_MS };

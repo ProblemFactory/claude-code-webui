@@ -104,16 +104,43 @@ class AccountManager {
     if (!worst) return out;
     return { ...worst.st, worstId: worst.m.id, worstName: worst.m.name, members: out.members };
   }
-  /** Pool members for the LOGIN summary: the explicit list when narrowed, else
-   *  every same-backend subscription. Deliberately NOT poolMembers() — that one
-   *  filters to still-logged-in accounts, which would hide the exact members
-   *  this feature exists to report (a signed-out member is the finding). */
+  /** Pool members for the LOGIN summary — MEMBERSHIP IS NOT ONE QUESTION
+   *  (round-2 verifier, reproduced against this instance's own store):
+   *
+   *  · EXPLICIT list (`members: [...]`): the user NAMED these accounts, so a
+   *    signed-out one IS the pool's finding — it is a member the pool was told
+   *    to route to and cannot. Include it, exactly as round 1 did.
+   *  · IMPLICIT pool (`members: null` — the default, and the shape of the only
+   *    pool on the measured instance): membership is DEFINED as "every
+   *    logged-in same-backend subscription" (poolMembers). An account that is
+   *    signed out was therefore never a member, and summarising the pool over
+   *    it made a fully healthy pool read `logged-out` forever, offered to
+   *    re-login an account the pool never routes to, and — because worst-of
+   *    ranks 'logged-out' above 'expiring' — MASKED the one warning that
+   *    matters: the CURRENT target's login dying in 16 h.
+   *
+   *  The current link target is always in the set even if it has since died:
+   *  the pool is pointed AT it, so its login is the pool's problem no matter
+   *  which definition of membership brought it there. */
   _poolLoginCandidates(poolId) {
     const a = this.get(poolId);
-    const be = this._acctBackend(a);
-    const all = this._state.accounts.filter((x) => this._acctBackend(x) === be && this._acctType(x) === 'subscription');
-    const wanted = Array.isArray(a?.members) && a.members.length ? all.filter((x) => a.members.includes(x.id)) : all;
-    return wanted.map((x) => ({ id: x.id, name: x.name }));
+    const explicit = Array.isArray(a?.members) && a.members.length ? a.members : null;
+    const out = new Map();
+    if (explicit) {
+      const be = this._acctBackend(a);
+      for (const x of this._state.accounts) {
+        if (this._acctBackend(x) !== be || this._acctType(x) !== 'subscription') continue;
+        if (explicit.includes(x.id)) out.set(x.id, { id: x.id, name: x.name });
+      }
+    } else {
+      for (const m of this.poolMembers(poolId)) out.set(m.id, { id: m.id, name: m.name });
+    }
+    const cur = this.poolCurrent(poolId);
+    if (cur && !out.has(cur)) {
+      const c = this.get(cur);
+      if (c && this._acctType(c) === 'subscription') out.set(cur, { id: cur, name: c.name });
+    }
+    return [...out.values()];
   }
   /** remoteCreds for resolveForSpawn — the ONE shape ws-create ships to a host
    *  (tar of `files` from srcDir → $HOME/.vibespace/<dirName>, env var pointed

@@ -182,6 +182,158 @@ console.log('— §3 pool decisions');
   ck('NEGATIVE CONTROL: no-data + a HEALTHY login still holds (unchanged)', dec({ a: null, b: healthy, c: healthy }, { a: L.ok, b: L.ok, c: L.ok }).reason === 'no-data');
   const d6 = dec({ a: healthy, b: healthy, c: healthy }, { a: L.expired, b: L.expired, c: L.out });
   ck('current dead + every other dead ⇒ named, never a silent null', d6.to === null && d6.reason === 'all-logins-expired' && (d6.deadBuckets || []).includes('login expired'));
+
+  // ── ROUND 2 (adversarial verifier): the login gate may not claim a wall it
+  // did not build, and it may not pin a conversation to a member that is
+  // ALREADY dead. Both were reproduced against the pure function first.
+  console.log('— §3b round 2: which wall, and the escape scraps');
+  const spent5 = { fiveHour: { utilization: 0.999, resetsAt: S + 3600 }, sevenDay: { utilization: 0.1, resetsAt: S + 5 * D }, scopedWeekly: [] };
+  const soft5 = { fiveHour: { utilization: 0.93, resetsAt: S + 1800 }, sevenDay: { utilization: 0.1, resetsAt: S + 5 * D }, scopedWeekly: [] };
+  const m4 = [{ id: 'a', name: 'Cur' }, { id: 'q1', name: 'Quota1' }, { id: 'q2', name: 'Quota2' }, { id: 'x', name: 'X' }];
+  const dec4 = (caches, logins, opts = {}) => decidePoolSwitch({
+    currentId: 'a', members: m4, nowSec: S, explain: true,
+    readCache: (id) => caches[id] ?? null,
+    ...(logins ? { readLogin: (id) => logins[id] ?? L.unknown } : {}),
+    ...opts,
+  });
+
+  // FINDING 2: one login-blocked member used to outrank any number of
+  // quota-dead ones, so the engine asserted "every other member's login has
+  // expired" and dropped the bucket sentence — sending the user to re-login
+  // accounts whose logins were fine.
+  {
+    const mixed = dec4({ a: spent5, q1: spent5, q2: spent5, x: healthy }, { a: L.ok, q1: L.ok, q2: L.ok, x: L.expired });
+    ck("QUOTA emptied the list + ONE dead login ⇒ 'no-members', not 'all-logins-expired' (the wall is quota)", mixed.to === null && mixed.reason === 'no-members');
+    ck('...and the quota buckets are still named (round 1 suppressed them under the login branch)', (mixed.deadBuckets || []).includes('5h 0%') && (mixed.liveBuckets || []).includes('7d 90%'));
+    ck('...while the login-blocked member is STILL carried, so the notice can say both halves', (mixed.loginBlocked || []).map((m) => `${m.name}:${m.state}`).join() === 'X:expired');
+    const pure = dec4({ a: spent5, q1: healthy, q2: healthy, x: healthy }, { a: L.ok, q1: L.expired, q2: L.out, x: L.out });
+    ck("NEGATIVE CONTROL: when the login gate is the ONLY thing that emptied the list it still says 'all-logins-expired'", pure.to === null && pure.reason === 'all-logins-expired' && (pure.loginBlocked || []).length === 3);
+    const none4 = dec4({ a: spent5, q1: spent5, q2: spent5, x: spent5 }, { a: L.ok, q1: L.ok, q2: L.ok, x: L.ok });
+    ck("NEGATIVE CONTROL: no login blocked at all ⇒ the old 'no-members' with no loginBlocked field", none4.reason === 'no-members' && none4.loginBlocked === undefined);
+    // The per-member phrasing the notice uses: round 1 said "expired or is
+    // about to" over a list that mixes three different facts.
+    const { loginBlockedText } = LE;
+    ck('each blocked member states its OWN fact (expired / signed out / expires in <t>), never one sentence over all three)',
+      loginBlockedText([{ name: 'A', state: 'expired', msLeft: -H }, { name: 'B', state: 'logged-out', msLeft: null }, { name: 'C', state: 'expiring', msLeft: 20 * MIN }])
+      === 'A (login expired), B (signed out), C (login expires in 20 min)');
+  }
+
+  // FINDING 3: the NEAR window is a rule about VOLUNTARY moves. Round 1 made
+  // it a hard filter on the ESCAPE path too, so a hard-dead current member
+  // with one quota-perfect (but 20-min-login) candidate refused to move at
+  // all — strictly worse than the shipped behaviour.
+  {
+    const caches = { a: spent5, q1: spent5, q2: spent5, x: healthy };
+    const shipped = dec4(caches, null);
+    ck('SHIPPED BEHAVIOUR (no readLogin): a hard-dead current member escapes onto the only healthy candidate', shipped.to === 'x' && shipped.reason === 'exhausted');
+    const scraps = dec4(caches, { a: L.ok, q1: L.ok, q2: L.ok, x: L.near });
+    ck('hard-dead current + only a NEAR candidate ⇒ STILL MOVES (20 min of login beats zero)', scraps.to === 'x' && scraps.toRemaining === shipped.toRemaining);
+    ck('...and says what it landed on, so the notice can demand the re-login', scraps.toLoginNear && scraps.toLoginNear.id === 'x' && scraps.toLoginNear.msLeft === 10 * MIN);
+    ck('...keeping the reason that says why we LEFT (it gates the dwell-belt exemption)', scraps.reason === 'exhausted');
+    const deadCur = dec4({ a: null, q1: spent5, q2: spent5, x: healthy }, { a: L.expired, q1: L.ok, q2: L.ok, x: L.near });
+    ck("...and a login-expired escape onto a scrap keeps reason 'login-expired' (a new reason string would have lost its 180s exemption)", deadCur.to === 'x' && deadCur.reason === 'login-expired' && !!deadCur.toLoginNear);
+    // NEGATIVE CONTROLS — the NEAR bar is intact everywhere it was designed for
+    ck('NEGATIVE CONTROL: a healthy candidate always beats the NEAR one (scraps are LAST resort, never a preference)',
+      dec4({ a: spent5, q1: spent5, q2: healthy, x: healthy }, { a: L.ok, q1: L.ok, q2: L.ok, x: L.near }).to === 'q2');
+    const softOnly = dec4({ a: soft5, q1: spent5, q2: spent5, x: healthy }, { a: L.ok, q1: L.ok, q2: L.ok, x: L.near }, { hot: true });
+    ck('NEGATIVE CONTROL: a merely SOFT-exhausted current member never takes a scrap (that move is voluntary)', softOnly.to === null);
+    ck('NEGATIVE CONTROL: a proactive/EDF move never takes a scrap either',
+      dec4({ a: healthy, q1: spent5, q2: spent5, x: { ...healthy, sevenDay: { utilization: 0.1, resetsAt: S + 1 * D } } }, { a: L.ok, q1: L.ok, q2: L.ok, x: L.near }, { proactive: true, hot: true }).to === null);
+    ck('NEGATIVE CONTROL: sealed orders (the DEVICE executes them hours later) still carry no NEAR member',
+      rankPoolMembers({ members: m4, readCache: () => healthy, nowSec: S, readLogin: (id) => (id === 'x' ? L.near : L.ok) }).every((r) => r.id !== 'x'));
+    ck('NEGATIVE CONTROL: a NEAR member that is ALSO quota-dead is not a scrap (quota is a real wall of its own)',
+      dec4({ a: spent5, q1: spent5, q2: spent5, x: spent5 }, { a: L.ok, q1: L.ok, q2: L.ok, x: L.near }).to === null);
+    ck('NEGATIVE CONTROL: with no readLogin the scraps machinery cannot exist (no toLoginNear on any old decision)', shipped.toLoginNear === undefined);
+  }
+}
+
+// ── §3c a POOL ROW's login summary — over the members it can actually route
+// to (round-2 verifier, measured against this instance's own store shape) ──
+console.log('— §3c the pool row summarises the pool');
+{
+  const { AccountManager } = R('src/accounts.js');
+  // accounts.list() reads the WALL CLOCK (no injectable now on that path), so
+  // these fixtures are anchored to real time, not the suite's frozen NOW.
+  const RNOW = Date.now();
+  const LIVE_S = { accessToken: 'a', refreshToken: 'r', expiresAt: RNOW + H, scopes: ['user:inference'], subscriptionType: 'max' };
+  const WIPED_S = { accessToken: '', refreshToken: '', expiresAt: 0, scopes: ['user:inference'], subscriptionType: 'max' };
+  // subs: [id, name, refreshTokenExpiresAt, wiped?]
+  const buildStore = (subs, { members = null, current }) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-poolrow-'));
+    fs.mkdirSync(path.join(dir, 'subs'), { recursive: true });
+    const accounts = [];
+    for (const [id, name, exp, wiped] of subs) {
+      const d = path.join(dir, 'subs', id); fs.mkdirSync(d, { recursive: true });
+      fs.writeFileSync(path.join(d, '.credentials.json'), JSON.stringify({ claudeAiOauth: { ...(wiped ? WIPED_S : LIVE_S), refreshTokenExpiresAt: exp } }));
+      accounts.push({ id, name, type: 'subscription', backend: 'claude' });
+    }
+    accounts.push({ id: 'pool-1', name: 'Pool', type: 'pooled', backend: 'claude', members, auto: true, hot: true });
+    fs.writeFileSync(path.join(dir, 'accounts.json'), JSON.stringify({ version: 1, accounts }));
+    fs.symlinkSync(path.join(dir, 'subs', current), path.join(dir, 'subs', 'pool-1'));
+    const am = new AccountManager({ dataDir: dir, platform: 'linux' });
+    return { am, dir, row: () => am.list().accounts.find((a) => a.id === 'pool-1') };
+  };
+  const cleanup = [];
+  // THE MEASURED SHAPE: this instance's only pool is implicit (members:null)
+  // with three signed-out subscriptions sitting in the store and the CURRENT
+  // target 16 h from its own login deadline. Round 1 read the pool as
+  // 'logged-out', named an account dead 700 h that the pool never routes to,
+  // offered to re-login it, and MASKED the one warning that mattered.
+  {
+    const s = buildStore([
+      ['sub-fish', 'Fish Max', RNOW - 15 * H, true],
+      ['sub-nat', 'Natural Max', RNOW - 700 * H, true],
+      ['sub-pf', 'ProblemFactory Max', RNOW + 9 * 24 * H],
+      ['sub-pers', 'Personal Max', RNOW - 116 * H, true],
+      ['sub-bs', 'B-Stack Max', RNOW + 16 * H],
+      ['sub-pandy', 'PandyMax', RNOW + 12 * 24 * H],
+    ], { members: null, current: 'sub-bs' });
+    cleanup.push(s.dir);
+    const ls = s.row().loginState;
+    ck('IMPLICIT pool: three signed-out non-members + one expiring CURRENT target ⇒ the row reads EXPIRING', ls.state === 'expiring');
+    ck('...and names the member that earned it — the one the pool actually routes to', ls.worstId === 'sub-bs' && ls.worstName === 'B-Stack Max');
+    ck('...over exactly the routing candidates, no signed-out passengers', ls.members.map((m) => m.name).sort().join() === 'B-Stack Max,PandyMax,ProblemFactory Max');
+    ck('...which is exactly poolMembers() (membership for an implicit pool has ONE definition)',
+      ls.members.map((m) => m.id).sort().join() === s.am.poolMembers('pool-1').map((m) => m.id).sort().join());
+  }
+  // The current link target counts even after ITS login dies — the pool is
+  // pointed at it, so it is the pool's problem however it got there.
+  {
+    const s = buildStore([
+      ['sub-out', 'Wiped Max', RNOW - 700 * H, true],
+      ['sub-ok', 'Good Max', RNOW + 9 * 24 * H],
+    ], { members: null, current: 'sub-out' });
+    cleanup.push(s.dir);
+    const ls = s.row().loginState;
+    ck("the CURRENT target's dead login is always the pool's finding, member list or not", ls.state === 'logged-out' && ls.worstId === 'sub-out');
+    ck('...and it does not evict the healthy members from the summary', ls.members.some((m) => m.id === 'sub-ok'));
+  }
+  // NEGATIVE CONTROL: an EXPLICIT list is a different question — the user
+  // NAMED those accounts, so a signed-out one IS the pool's finding.
+  {
+    const s = buildStore([
+      ['sub-out', 'Wiped Max', RNOW - 700 * H, true],
+      ['sub-ok', 'Good Max', RNOW + 9 * 24 * H],
+      ['sub-other', 'Not A Member', RNOW - 700 * H, true],
+    ], { members: ['sub-out', 'sub-ok'], current: 'sub-ok' });
+    cleanup.push(s.dir);
+    const ls = s.row().loginState;
+    ck('NEGATIVE CONTROL: an EXPLICIT member list still reports its signed-out member (the user named it)', ls.state === 'logged-out' && ls.worstId === 'sub-out');
+    ck('...and still only over the declared list, never every subscription in the store', !ls.members.some((m) => m.id === 'sub-other'));
+  }
+  // NEGATIVE CONTROL: a fully healthy implicit pool says nothing at all.
+  {
+    const s = buildStore([
+      ['sub-a', 'A', RNOW + 9 * 24 * H],
+      ['sub-b', 'B', RNOW + 12 * 24 * H],
+      ['sub-dead', 'Long Gone', RNOW - 700 * H, true],
+    ], { members: null, current: 'sub-a' });
+    cleanup.push(s.dir);
+    const ls = s.row().loginState;
+    ck('NEGATIVE CONTROL: a healthy implicit pool draws NO chip, whatever else is signed out in the store', ls.state === 'ok');
+    ck('...(round 1 read this exact store as logged-out — the permanent red chip on a working pool)', ls.worstName === 'A' || ls.worstName === 'B');
+  }
+  for (const d of cleanup) fs.rmSync(d, { recursive: true, force: true });
 }
 
 // ── §4 the warning ladder, on a fake clock ───────────────────────────────
@@ -263,6 +415,74 @@ console.log('— §4 warning ladder (fake clock, persisted ledger)');
   ck('reviewWarnings: the same ledger under a DIFFERENT deadline is a re-login ⇒ it starts fresh', reviewWarnings(stFor(20 * H), { exp: NOW + 999 * H, sent: ['24h', '1h', 'expired'] }, NOW).emit === '24h');
   ck('warnStageFor: ok ⇒ null, <24h ⇒ 24h, <1h ⇒ 1h, dead ⇒ expired', warnStageFor(stFor(9 * 24 * H)) === null && warnStageFor(stFor(20 * H)) === '24h' && warnStageFor(stFor(30 * MIN)) === '1h' && warnStageFor(stFor(-H)) === 'expired');
 
+  // ── ROUND 2 (adversarial verifier): PRE-EXISTING DEATHS. The terminal rung
+  // had no staleness gate, so the first sweep after the upgrade filed an
+  // `urgent` item for every login that had ever died. Reproduced on the
+  // instance this feature was measured on: three of them, dead 15 h, 116 h and
+  // 700 h, none of them a routing member — the "For you" badge would open red
+  // and blinking about accounts abandoned weeks ago.
+  console.log('— §4b round 2: a login that died before we were watching');
+  {
+    const wiped = (exp) => creds({ accessToken: '', refreshToken: '', expiresAt: 0, refreshTokenExpiresAt: exp, scopes: ['user:inference'] });
+    const deaths = { 'sub-fresh': NOW - 15 * H, 'sub-old': NOW - 116 * H, 'sub-ancient': NOW - 700 * H };
+    const rows = Object.keys(deaths).map((id) => ({ id, name: id, type: 'subscription', backend: 'claude' }));
+    const acct = { list: () => ({ accounts: rows }), loginStateOf: (id, t) => loginState(wiped(deaths[id]), t) };
+    const dir4 = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-lew4-'));
+    const filed4 = [];
+    const w6 = watch.create({ accounts: acct, userTodos: { add: (k, i) => filed4.push({ k, ...i }) }, dataDir: dir4, now: () => NOW, log: () => {} });
+    w6.sweep();
+    ck('FIRST SWEEP of a fresh ledger: only the RECENT death speaks (round 1 filed all three as urgent)', filed4.length === 1 && /sub-fresh/.test(filed4[0].text));
+    ck('...and it is still urgent — the gate is about age, not about caring less', filed4[0].urgency === 'urgent');
+    ck('...the pre-existing ones are RECORDED as done, so they never surface later either', ['sub-old', 'sub-ancient'].every((id) => (w6.ledger()[id]?.sent || []).includes('expired')));
+    w6.sweep(); w6.sweep();
+    ck('...and further sweeps stay silent', filed4.length === 1);
+    ck("the ledger's birth is persisted, so the grace is spent exactly ONCE per install", Number.isFinite(JSON.parse(fs.readFileSync(path.join(dir4, 'login-expiry.json'), 'utf-8')).since));
+
+    // NEGATIVE CONTROL 1: a login that dies AFTER we started watching is one
+    // WE missed (server was off) — reporting that is the whole promise.
+    const later = { 'sub-later': NOW + 40 * H };
+    const dir5 = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-lew5-'));
+    const filed5 = [];
+    let clock5 = NOW;
+    const w7 = watch.create({
+      accounts: { list: () => ({ accounts: [{ id: 'sub-later', name: 'Later', type: 'subscription', backend: 'claude' }] }), loginStateOf: (id, t) => loginState(wiped(later[id]), t) },
+      userTodos: { add: (k, i) => filed5.push(i) }, dataDir: dir5, now: () => clock5, log: () => {},
+    });
+    w7.sweep();                                  // ledger born here, deadline 40 h out
+    clock5 = later['sub-later'] + 200 * H;       // server was off for the whole ladder AND 200 h past the death
+    w7.sweep();
+    ck('NEGATIVE CONTROL: a death AFTER the ledger was born still speaks, however long the server was off', filed5.length === 1 && filed5[0].urgency === 'urgent');
+
+    // NEGATIVE CONTROL 2: a death just before a fresh install is still news.
+    const dir6 = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-lew6-'));
+    const filed6 = [];
+    const w8 = watch.create({
+      accounts: { list: () => ({ accounts: [{ id: 'sub-just', name: 'Just', type: 'subscription', backend: 'claude' }] }), loginStateOf: (id, t) => loginState(wiped(NOW - 20 * MIN), t) },
+      userTodos: { add: (k, i) => filed6.push(i) }, dataDir: dir6, now: () => NOW, log: () => {},
+    });
+    w8.sweep();
+    ck('NEGATIVE CONTROL: a login that died 20 min before the very first sweep IS filed (the grace is a day, not "anything past")', filed6.length === 1);
+
+    // The pure transition, directly — including the control that the gate is
+    // OPT-IN: without watchingSince the old behaviour is byte-identical.
+    const ancient = loginState(wiped(NOW - 700 * H), NOW);
+    ck('reviewWarnings: NO watchingSince ⇒ the ancient death still emits (the gate is an added input, never a silent default)', reviewWarnings(ancient, null, NOW).emit === 'expired');
+    ck('reviewWarnings: with watchingSince it is suppressed and marked done, with a NAMED reason', (() => {
+      const r = reviewWarnings(ancient, null, NOW, { watchingSince: NOW });
+      return r.emit === null && r.suppressed === 'pre-existing' && r.entry.sent.length === LE.WARN_STAGES.length;
+    })());
+    ck('reviewWarnings: BOTH clauses are load-bearing — inside the grace, or after we started watching, it still emits', [
+      reviewWarnings(loginState(wiped(NOW - 20 * MIN), NOW), null, NOW, { watchingSince: NOW }).emit === 'expired',
+      reviewWarnings(ancient, null, NOW, { watchingSince: NOW - 900 * H }).emit === 'expired',
+    ].every(Boolean));
+    ck('reviewWarnings: a logged-out record with NO readable deadline cannot be dated ⇒ never suppressed (firing is the fail-safe direction)',
+      reviewWarnings(loginState(creds({ accessToken: '', refreshToken: '', scopes: ['user:inference'] }), NOW), null, NOW, { watchingSince: NOW }).emit === 'expired');
+    ck('reviewWarnings: the FUTURE rungs are untouched by the gate (a 24 h warning is always news)',
+      reviewWarnings(stFor(20 * H), null, NOW, { watchingSince: NOW }).emit === '24h');
+
+    for (const d of [dir4, dir5, dir6]) fs.rmSync(d, { recursive: true, force: true });
+  }
+
   for (const d of [dataDir, dataDir2, dataDir3]) fs.rmSync(d, { recursive: true, force: true });
 }
 
@@ -273,7 +493,15 @@ console.log('— §5 wiring');
   ck('accounts.js exposes loginStateOf through the DESCRIPTOR (never a backend-id branch)', /creds\.loginState|_credsOf\(be\)\?\.loginState/.test(acc) && !/backend === 'claude' \? loginState/.test(acc));
   ck('every subscription row in list() carries loginState', /loginState: this\.loginStateOf\(a\.id\)/.test(acc));
   ck("a pool's row carries its MEMBERS' worst", /loginState: this\.poolLoginState\(a\.id\)/.test(acc));
-  ck("the pool's login summary does NOT reuse poolMembers (that filter hides the very members this reports)", /_poolLoginCandidates\(poolId\)/.test(acc));
+  // ROUND 2: membership is TWO questions. An explicit list is what the user
+  // NAMED (a signed-out member of it IS the finding); an implicit pool's
+  // membership is DEFINED as poolMembers(), so an account that is signed out
+  // was never a member at all. Round 1 used one over-broad set for both and
+  // put a permanent red chip on a healthy pool. §3c is the functional half.
+  ck("the pool's login summary asks the EXPLICIT-list question and the IMPLICIT one separately", /_poolLoginCandidates\(poolId\)/.test(acc)
+    && /const explicit = Array\.isArray\(a\?\.members\)/.test(acc)
+    && /for \(const m of this\.poolMembers\(poolId\)\)/.test(acc));
+  ck('...and the CURRENT link target is always in the set, whichever question was asked', /const cur = this\.poolCurrent\(poolId\);[\s\S]{0,240}out\.set\(cur,/.test(acc));
 
   const eng = fs.readFileSync(path.join(REPO, 'src/server/usage-pool-engine.js'), 'utf8');
   const decides = eng.match(/decidePoolSwitch\(\{[^}]*\}\)/g) || [];
@@ -283,6 +511,15 @@ console.log('— §5 wiring');
   ck('quotaVerdictFor cannot answer "usable" through a dead login', /loginUsable\(li\)/.test(eng) && /re-login needed/.test(eng));
   ck('the auth-failure notice says WHY when the refresh token expired (keeping the old wording otherwise)', /login session expired \(refresh token expired at/.test(eng) && /is failing authentication/.test(eng));
   ck('the "nowhere to go" notice speaks the login wall as its own sentence', /all-logins-expired/.test(eng) && /Re-login those accounts in Manage Agents/.test(eng));
+  // ROUND 2 notice wiring: per-member phrasing, the MIXED clause, and the
+  // scraps sentence — each was a wrong claim in round 1.
+  ck('...naming each blocked member with ITS OWN state (never one "expired or is about to" over the whole list)', /loginBlockedText\(d\.loginBlocked\)/.test(eng) && !/login session has expired or is about to/.test(eng));
+  ck('...and a MIXED wall (quota emptied the list AND someone needs a re-login) says both halves', /Also needing a re-login: \$\{loginNames\}/.test(eng) && /const also = !loginWall && loginNames/.test(eng));
+  ck('...while a switch onto a NEAR-expiry scrap tells the user the reprieve is short', /d\.toLoginNear/.test(eng) && /re-login it in Manage Agents now/.test(eng));
+  ck('...on BOTH switch surfaces — the per-session re-point (plan C) fires far more often than the pool-level one', /ds\.toLoginNear/.test(eng) && (eng.match(/re-login it in Manage Agents now/g) || []).length === 2);
+  const apa = fs.readFileSync(path.join(REPO, 'src/account-pool-auto.js'), 'utf8');
+  ck("the pure decision only claims 'all-logins-expired' when the login gate was the ONLY wall", /loginBlocked\.length && !quotaBlockedN\) \? 'all-logins-expired'/.test(apa) && /quotaBlockedN\+\+/.test(apa));
+  ck('...and a hard-dead current member may fall back to the NEAR list (the escape is not a voluntary move)', /const usingScraps = !ranked\.length && hardDead && nearRanked\.length > 0/.test(apa));
 
   ck('a login-expired escape is exempt from the 180s dwell belt (dead login = hard death, and its fromRemaining is null)',
     (eng.match(/ds\.reason !== 'login-expired' && !\(ds\.fromRemaining/g) || []).length === 1 && (eng.match(/d\.reason !== 'login-expired' && !\(d\.fromRemaining/g) || []).length === 1);

@@ -138,6 +138,22 @@ function loginBucketLabel(info) {
   }
 }
 
+/** How to SAY one login-blocked member in a notice. Round 1 wrote ONE sentence
+ *  ("their login session has expired or is about to") over a list that mixes
+ *  three different facts, so a member with 20 min of login left was reported as
+ *  expired. Each member states its OWN fact; the caller only joins them. */
+function loginBlockedPhrase(m) {
+  if (m?.state === 'expired') return 'login expired';
+  if (m?.state === 'logged-out') return 'signed out';
+  const ms = m?.msLeft;
+  if (typeof ms === 'number' && ms > 0) return `login expires in ${loginAgeText(ms)}`;
+  return 'login expiring';
+}
+/** "Fish Max (signed out), B-Stack Max (login expires in 20 min)" */
+function loginBlockedText(list) {
+  return (list || []).map((m) => `${m?.name || m?.id || 'a member'} (${loginBlockedPhrase(m)})`).join(', ');
+}
+
 /** The most urgent warning rung this login currently qualifies for, or null. */
 function warnStageFor(info) {
   if (!loginUsable(info)) return 'expired';
@@ -164,21 +180,44 @@ function warnStageFor(info) {
  *    already history is worse than not warning.
  *  · `emit` is null on every other tick, so a restart replays nothing: the
  *    caller persists `entry` and hands it back next sweep.
+ *  · PRE-EXISTING DEATHS (round-2 verifier, measured on the instance this was
+ *    built on): the terminal rung had no staleness gate, so the FIRST sweep
+ *    after the upgrade filed an `urgent` item for every login that had died
+ *    long before the feature existed — three of them here, dead 15 h, 116 h
+ *    and 700 h, none of them a routing member. `opts.watchingSince` is when
+ *    this ledger started watching; a death that happened BEFORE we were
+ *    watching AND is no longer recent is a PRE-EXISTING CONDITION, whose
+ *    surface is the permanent red chip in Manage Agents, not an event inbox.
+ *    It is recorded as done and never spoken. Both clauses are load-bearing:
+ *    a death inside STALE_GRACE_MS is still news on a fresh install, and a
+ *    death AFTER watchingSince is one WE missed (server was off) — reporting
+ *    that is the whole promise. Omit `watchingSince` and this gate is inert.
+ *    A logged-out record with NO readable deadline cannot be dated, so it is
+ *    never suppressed — firing is the fail-safe direction.
  */
-function reviewWarnings(info, entry, now = Date.now()) {
+// "Before we were watching" is not enough on its own: a fresh install that
+// boots 20 minutes after a login died must still say so. One day is the same
+// horizon EXPIRING_MS already uses for "worth interrupting the user".
+const STALE_GRACE_MS = EXPIRING_MS;
+function reviewWarnings(info, entry, now = Date.now(), opts = {}) {
   const exp = info?.refreshExpiresAt ?? null;
   const sameLedger = !!entry && (entry.exp ?? null) === exp;
   const sent = sameLedger && Array.isArray(entry.sent) ? entry.sent.filter((s) => WARN_STAGES.includes(s)) : [];
   const stage = warnStageFor(info, now);
   if (!stage) return { emit: null, entry: sent.length ? { exp, sent } : null };
   if (sent.includes(stage)) return { emit: null, entry: { exp, sent } };
+  const watchingSince = typeof opts.watchingSince === 'number' && Number.isFinite(opts.watchingSince) ? opts.watchingSince : null;
+  if (stage === 'expired' && watchingSince != null && exp != null && exp < watchingSince && now - exp > STALE_GRACE_MS) {
+    return { emit: null, entry: { exp, sent: [...WARN_STAGES] }, suppressed: 'pre-existing' };
+  }
   const idx = WARN_STAGES.indexOf(stage);
   const nextSent = [...new Set([...sent, ...WARN_STAGES.slice(0, idx + 1)])];
   return { emit: stage, entry: { exp, sent: nextSent } };
 }
 
 module.exports = {
-  EXPIRING_MS, NEAR_MS, WARN_STAGES, STAGE_MS, DEAD_STATES,
+  EXPIRING_MS, NEAR_MS, WARN_STAGES, STAGE_MS, DEAD_STATES, STALE_GRACE_MS,
   loginState, loginUsable, loginSwitchTarget, loginRank, loginBlockReason,
-  loginAgeText, loginBucketLabel, warnStageFor, reviewWarnings,
+  loginAgeText, loginBucketLabel, loginBlockedPhrase, loginBlockedText,
+  warnStageFor, reviewWarnings,
 };
