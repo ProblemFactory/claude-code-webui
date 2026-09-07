@@ -1749,7 +1749,10 @@ if (fs.existsSync('/proc/self')) {
   // i18n dictionaries and the process-manager UI match on the WORD `SIGSTOP`,
   // the adapters on `SIGINT`. A false positive only widens where the rule is
   // enforced; a false NEGATIVE is the entire bug this leg exists for.
-  const KILL_MARKERS = /kill\s+-(?:TERM|KILL|HUP|INT|QUIT|STOP|CONT|USR1|USR2|9|0)\b|\bSIG(?:TERM|KILL|HUP|INT|QUIT|STOP|CONT)\b|\bpkill\b|process\.kill\s*\(|\bkillRemotePid\b|\bsignalProc\b|\bvs_alive\b/;
+  // (r7 verify: the alternation also has to name the OTHER spellings a kill
+  // takes — `kill -s TERM`, numeric `kill -15`, bare `kill "$pid"` and node's
+  // `handle.kill()` — or six real terminators stay outside the swept set.)
+  const KILL_MARKERS = /kill\s+-(?:TERM|KILL|HUP|INT|QUIT|STOP|CONT|USR1|USR2|9|0)\b|kill\s+-s\s|kill\s+-\d+\b|kill\s+[\"'$]|\.kill\s*\(|\bSIG(?:TERM|KILL|HUP|INT|QUIT|STOP|CONT)\b|\bpkill\b|process\.kill\s*\(|\bkillRemotePid\b|\bsignalProc\b|\bvs_alive\b/;
   const SWEEP_ROOTS = ['src', 'data/bin', 'scripts'];
   const CODE_EXT = /\.(?:js|mjs|cjs|sh)$/;
   const PS_P_ALLOWED = [
@@ -1933,6 +1936,13 @@ if (fs.existsSync('/proc/self')) {
   //    deliberately untracked) — the shebang rung is what reaches them now.
   fs.writeFileSync(path.join(ncRoot, 'data', 'bin', 'vibespace-newtool'),
     '#!/bin/sh\nkill -TERM "$1" 2>/dev/null\nif ps -p "$1" >/dev/null 2>&1; then echo ALIVE; fi\n');
+  // ⑨⑩ the OTHER spellings of a kill (r7 verify): `kill -s TERM` / numeric
+  //    `kill -15` / bare `kill "$pid"` in shell, and node's `handle.kill()` —
+  //    each next to the retired probe, each must be swept AND caught.
+  fs.writeFileSync(path.join(ncRoot, 'src', 'kill-dash-s.sh'),
+    '#!/bin/sh\nkill -s TERM "$1" 2>/dev/null || kill -15 "$1" || kill "$1"\nif ps -p "$1" >/dev/null 2>&1; then echo ALIVE; fi\n');
+  fs.writeFileSync(path.join(ncRoot, 'src', 'handle-kill.js'),
+    'function stop(h, pid) { h.kill(); return `ps -p ${pid} >/dev/null 2>&1`; }\n');
   const nc = sweepKillPaths(ncRoot, PS_P_ALLOWED);
   const ncStray = (f) => nc.stray.some((s) => s.startsWith(f + ':'));
   ok(ncStray('src/server/new-kill-path.js'),
@@ -1948,6 +1958,10 @@ if (fs.existsSync('/proc/self')) {
     '…and the suites are excluded, which is the only reason THIS file may write the retired shape down as a control');
   ok(nc.files.includes('data/bin/vibespace-newtool') && ncStray('data/bin/vibespace-newtool'),
     'the extension-less agent CLIs are reached by their SHEBANG — a GENERATED (untracked) tool on every host\'s PATH was outside r6\'s `git ls-files data/bin` sweep');
+  ok(nc.files.includes('src/kill-dash-s.sh') && ncStray('src/kill-dash-s.sh'),
+    'NEGATIVE CONTROL (r7 verify): `kill -s TERM` / `kill -15` / bare `kill "$pid"` are kill paths too — swept by the widened markers and their retired probe is caught');
+  ok(nc.files.includes('src/handle-kill.js') && ncStray('src/handle-kill.js'),
+    'NEGATIVE CONTROL (r7 verify): node `handle.kill()` is a kill path — swept, and its retired probe is caught');
   // ⑦⑧ THE GENERATED BUCKET, both ways. ⑦ a bundle that only COPIES an
   //     authored probe passes (this is the daemon bundle's real shape, and the
   //     reason a clean `npm run build` must not redden the sweep); ⑧ the same
