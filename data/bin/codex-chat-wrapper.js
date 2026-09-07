@@ -1284,6 +1284,10 @@ const completedTurns = new Set();
 const queueMeta = new Map();   // clientUserMessageId → {kind:'user'|'peer', msgId, ts, from}
 let queueFingerprint = null;
 let queueRefreshInFlight = false, queueRefreshAgain = false;
+// Stop is emptying the queue: hold every OTHER publish until the sweep has
+// emitted its per-item removal results (see clearQueueForStop — a republish
+// that overtakes a result tells the user the message RAN).
+let queueSweepActive = false;
 
 function noteQueued(clientUserMessageId, info) {
   if (!clientUserMessageId) return;
@@ -1336,6 +1340,10 @@ function publishQueue(items, { force = false } = {}) {
  *  fires thread/queue/changed per mutation and a steer-all makes several. */
 async function refreshQueue() {
   if (!meta.threadId) return;
+  // The deletes a Stop sweep makes each fire thread/queue/changed; letting them
+  // publish mid-sweep would race the sweep's own removal results. The sweep
+  // always ends with its own refresh, so nothing is lost by dropping these.
+  if (queueSweepActive) return;
   if (queueRefreshInFlight) { queueRefreshAgain = true; return; }
   queueRefreshInFlight = true;
   try {
@@ -1394,6 +1402,64 @@ async function steerOne(item) {
   }
   queueMeta.delete(cid);
   return { ...base, ok: true };
+}
+
+/** STOP CLEARS THE QUEUE (owner decision 2026-09-07 — every harness now, the
+ *  ACP wrapper already did). The app-server DRAINS its own queue when a turn
+ *  ends, including a turn ended by turn/interrupt (measured: the drained item
+ *  starts a turn with no turn/start from us), so a Stop used to be followed
+ *  instantly by whatever was queued behind it. Two orderings are load-bearing:
+ *   (a) the deletes run BEFORE turn/interrupt, or the drain wins the race;
+ *   (b) each removal result is emitted BEFORE the emptied republish, because
+ *       the normalizer clears the chip of anything that left the queue with no
+ *       explicit result (= "it ran") — a bare empty queue_changed would tell
+ *       the user their message RAN when Stop threw it away (the ACP round-1
+ *       review lesson, same frame, same reason).
+ *  Nothing here is silent: a failed delete reports queue_op_result ok:false
+ *  (the item is still queued and WILL run) and lands in the wrapper journal.
+ *  @returns {Promise<number>} how many items left the queue. */
+async function clearQueueForStop() {
+  if (!meta.threadId) return 0;
+  let data = [];
+  try {
+    const resp = await request('thread/queue/list', { threadId: meta.threadId }, 15000);
+    data = asArray(resp?.data || resp?.items);
+  } catch (e) {
+    // The degrade path logs the message VERBATIM (2.284.2) and SPEAKS: an
+    // unreadable queue means Stop could not clear it, which the user must know.
+    log('interrupt: thread/queue/list failed: ' + e.message + ' — the queue was NOT cleared');
+    emitTaskEvent('queue_op_result', { op: 'remove', id: '', ok: false, reason: 'error', detail: e.message });
+    return 0;
+  }
+  if (!data.length) return 0;
+  queueSweepActive = true;
+  let removed = 0;
+  try {
+    for (const q of data) {
+      const id = asString(q?.id);
+      const cid = asString(q?.clientUserMessageId);
+      const known = queueMeta.get(cid) || null;
+      try {
+        await request('thread/queue/delete', { threadId: meta.threadId, queuedSubmissionId: id }, 15000);
+      } catch (e) {
+        log(`interrupt: thread/queue/delete failed for ${id} (${e.message}) — it stays queued and will run`);
+        emitTaskEvent('queue_op_result', { op: 'remove', id, ok: false, reason: 'error', detail: e.message, msg_id: known?.msgId || '' });
+        continue;
+      }
+      queueMeta.delete(cid);
+      removed++;
+      emitTaskEvent('queue_op_result', { op: 'remove', id, ok: true, msg_id: known?.msgId || '', reason: 'stopped' });
+      // A queued PEER/job message was already reported delivered (peer_message_result
+      // ok:'queued'), so dropping it silently would lose a promised message —
+      // ok:false hands the text back to the delivery ladder, which re-stashes it
+      // for next-turn injection (the explicit `remove` path's rule, verbatim).
+      if (known?.kind === 'peer' && known.text) emitTaskEvent('peer_message_result', { ok: false, reason: 'dropped by Stop before it was delivered', text: known.text, fromName: known.from || null });
+    }
+  } finally { queueSweepActive = false; }
+  // The republish comes AFTER every result above — the truth, not an assumed
+  // empty: an item whose delete failed is still there and must still be listed.
+  await refreshQueue();
+  return removed;
 }
 
 async function handleQueueOp(msg) {
@@ -1576,13 +1642,15 @@ async function handleInput(msg) {
     return;
   }
   if (msg.type === 'interrupt') {
-    if (meta.threadId && meta.activeTurnId) {
-      await request('turn/interrupt', { threadId: meta.threadId, turnId: meta.activeTurnId }, 30000).catch(() => {});
-      // The app-server drains its own queue when the turn ends (measured) —
-      // re-read so the strip states what is really left rather than what was
-      // queued a moment ago. Stop does NOT clear the codex queue (the ACP
-      // wrapper, whose queue is OURS, does clear it) — a semantic difference
-      // the strip's Remove button now lets the user resolve.
+    if (meta.threadId) {
+      // STOP MEANS STOP — on every harness (owner decision 2026-09-07; the ACP
+      // wrapper, whose queue is its own, always did this). The app-server
+      // DRAINS its queue when the turn ends, so clearing it AFTER the interrupt
+      // would lose the race: delete first, interrupt second.
+      await clearQueueForStop();
+      if (meta.activeTurnId) await request('turn/interrupt', { threadId: meta.threadId, turnId: meta.activeTurnId }, 30000).catch(() => {});
+      // Re-read once more: the interrupt itself is a queue-mutating event on
+      // the server side, and an unreadable/undeletable item must still be shown.
       refreshQueue();
     }
     return;

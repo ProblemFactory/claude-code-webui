@@ -159,10 +159,15 @@ console.log('— ③ the ws case gates on the caps row AND the running wrapper')
   // defaulted the turn kind to "review" (so a compact turn was named wrong).
   ok('a refused steer-all prints ONE card (the per-item result, which carries the real reason AND kind); the batch abort is journal-only', /log\(`steer-all aborted after/.test(cw2) && !/emitTaskEvent\('queue_op_result', \{ op: 'steer-all', ok: false/.test(cw2));
   ok('…and its SUCCESS summary is still emitted (bookkeeping, card-less by normalizer construction)', /emitTaskEvent\('queue_op_result', \{ op: 'steer-all', ok: true, done \}\)/.test(cw2));
-  // Stop drops the ACP queue — the bubbles must say 'removed', not clear as if
-  // they had RUN (the normalizer clears a chip that left with no result).
+  // STOP CLEARS THE QUEUE ON EVERY HARNESS (owner decision 2026-09-07 — the
+  // 2026-09-06 divergence is closed). The bubbles must say 'removed', not clear
+  // as if they had RUN (the normalizer clears a chip that left with no result).
   const aw2 = read('data/bin/acp-wrapper.js');
   ok("ACP Stop reports each dropped entry as a removal BEFORE the republish (a cleared chip means 'it ran')", /for \(const q of dropped\) record\('queue_op_result', \{ op: 'remove', id: q\.id, ok: true, msg_id: q\.opts\?\.msgId \|\| '', reason: 'stopped' \}\);\s*\n\s*if \(dropped\.length\) publishQueue\(\);/.test(aw2));
+  ok('codex Stop clears the app-server queue too — the deletes go out BEFORE turn/interrupt, or the app-server drains them when the turn ends', /await clearQueueForStop\(\);\s*\n\s*if \(meta\.activeTurnId\) await request\('turn\/interrupt'/.test(cw2));
+  ok("…reporting each dropped item as a removal with reason 'stopped' (the SAME frame the ACP wrapper emits, so one client path renders both)", /emitTaskEvent\('queue_op_result', \{ op: 'remove', id, ok: true, msg_id: known\?\.msgId \|\| '', reason: 'stopped' \}\);/.test(cw2));
+  ok('…and a delete that FAILS is reported (ok:false) + journalled, never a silent "cleared" queue', /emitTaskEvent\('queue_op_result', \{ op: 'remove', id, ok: false, reason: 'error', detail: e\.message, msg_id: known\?\.msgId \|\| '' \}\);/.test(cw2) && /log\(`interrupt: thread\/queue\/delete failed for/.test(cw2));
+  ok('…and a queued PEER message Stop drops goes back to the delivery ladder (same rule as the explicit remove)', /if \(known\?\.kind === 'peer' && known\.text\) emitTaskEvent\('peer_message_result', \{ ok: false, reason: 'dropped by Stop before it was delivered'/.test(cw2));
 }
 
 console.log('— ④ the normalizer: session state + chips + multi-queue semantics');

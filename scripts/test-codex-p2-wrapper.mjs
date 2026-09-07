@@ -26,6 +26,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-cxp2-'));
 const SID = 'sess-9-1700000000009';
 const buf = path.join(dir, SID + '.buf'), meta = path.join(dir, SID + '.json'), rpcLog = path.join(dir, 'rpc.jsonl');
+// Touch this file and the stub app-server ends its active turn NATURALLY (status
+// 'completed') and drains one queued item — the path where a queued message really
+// RUNS, as opposed to a turn ended by Stop.
+const endTurnFile = path.join(dir, 'end-turn');
 // Stub app-server: thread/start → id; turn/start → turn id + a turn/started
 // notification and (on the FIRST turn) an MCP item pair + a web search item
 // (the turn never completes = stays active); thread/queue/add → {};
@@ -34,6 +38,15 @@ const STUB = `
 const fs = require('fs');
 let b = ''; let turns = 0; let queue = []; let qseq = 0; let reviewTurn = false; let activeTurn = null;
 const send = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+// The app-server owns the queue and drains it itself when a turn ends: one item
+// leaves and starts a turn with NO turn/start from the client.
+const drain = () => {
+  if (!queue.length) return;
+  queue.shift();
+  send({ method: 'thread/queue/changed', params: { threadId: 'th-p2' } });
+  const tid = 'turn-' + (++turns); activeTurn = tid;
+  send({ method: 'turn/started', params: { turn: { id: tid } } });
+};
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (d) => {
   b += d; let i;
@@ -118,20 +131,28 @@ process.stdin.on('data', (d) => {
       send({ id: m.id, result: {} });
       const ended = activeTurn; activeTurn = null;
       send({ method: 'turn/completed', params: { turn: { id: ended }, status: 'interrupted' } });
-      // …and the app-server drains the queue on its own (no turn/start from us)
-      if (queue.length) {
-        queue.shift();
-        send({ method: 'thread/queue/changed', params: { threadId: 'th-p2' } });
-        const tid = 'turn-' + (++turns); activeTurn = tid;
-        send({ method: 'turn/started', params: { turn: { id: tid } } });
-      }
+      // …and the app-server drains the queue on its own, EVEN when the turn was
+      // ended by an interrupt (measured on 0.153.4). This is deliberately left
+      // in: it is exactly the race the wrapper's Stop has to win by deleting
+      // the queue BEFORE it interrupts — a stub that stopped draining here
+      // would pass the Stop assertions for the wrong reason.
+      drain();
       continue;
     }
     if (m.method === 'thread/compact/start') { send({ id: m.id, result: {} }); send({ method: 'item/completed', params: { item: { type: 'contextCompaction', id: 'cc-1' } } }); continue; }
     send({ id: m.id, result: {} });
   }
 });
-setInterval(() => {}, 1e3);
+// A turn that ends on its own (harness-driven, so the timing is deterministic):
+// turn/completed 'completed' + the same drain. This is the ONLY natural end in
+// the stub; every other end goes through turn/interrupt.
+setInterval(() => {
+  try { fs.unlinkSync(${JSON.stringify(endTurnFile)}); } catch { return; }
+  if (!activeTurn) return;
+  const ended = activeTurn; activeTurn = null;
+  send({ method: 'turn/completed', params: { turn: { id: ended }, status: 'completed' } });
+  drain();
+}, 40);
 `;
 const w = spawn(process.execPath, [path.join(REPO, 'data/bin/codex-chat-wrapper.js'), buf, meta, process.execPath, '-e', STUB], {
   stdio: ['pipe', 'pipe', 'pipe'],
@@ -259,9 +280,52 @@ ok(lastQueue().length === 1 && lastQueue()[0].msgId === 'm10', 'the refused item
   sendLine({ type: 'queue-op', op: 'remove', id: lastQueue()[1].id });
   ok(await waitFor(() => lastQueue().length === 1 && lastQueue()[0].msgId === 'm10'), 'the extra probe message is removed again', JSON.stringify(lastQueue()));
 }
-// turn end → the APP-SERVER drains the queue itself; the wrapper republishes
-sendLine({ type: 'interrupt' });
-ok(await waitFor(() => lastQueue().length === 0), 'when the turn ends the queued message runs (the app-server drains) and the published queue empties');
+// a turn that ends ON ITS OWN → the APP-SERVER drains the queue itself and the
+// wrapper republishes; the drained bubble's chip clears because it RAN.
+fs.writeFileSync(endTurnFile, '1');
+ok(await waitFor(() => lastQueue().length === 0), 'when the turn ends on its own the queued message runs (the app-server drains) and the published queue empties');
+ok(await waitFor(() => readMeta()?.activeTurnId === 'turn-2'), 'the drained item is running as the app-server\'s own turn (no turn/start from us)', JSON.stringify(readMeta()?.activeTurnId));
+
+// ②c STOP CLEARS THE QUEUE (owner decision 2026-09-07 — codex now matches ACP).
+// The app-server drains its queue when the turn ends INCLUDING a turn ended by
+// Stop, so the messages queued behind it used to run the instant Stop landed.
+{
+  sendLine({ type: 'chat-input', text: 'stop me', msgId: 'm12' });
+  ok(await waitFor(() => lastQueue().length === 1 && lastQueue()[0].msgId === 'm12'), 'a typed message queues behind the running turn', JSON.stringify(lastQueue()));
+  sendLine({ type: 'peer-message', text: 'ping from C', fromName: 'session C' });
+  ok(await waitFor(() => lastQueue().length === 2 && lastQueue().some((i) => i.kind === 'peer')), 'and an agent-to-agent message queues on the same lane', JSON.stringify(lastQueue()));
+  const queuedIds = lastQueue().map((i) => i.id);
+  const rpcBefore = rpc().length;
+  const startsBefore = rpc().filter((m) => m.method === 'turn/start').length;
+  const opsBefore = opResults().length;
+  const peersBefore = events().filter((e) => e.payload?.type === 'peer_message_result').length;
+  sendLine({ type: 'interrupt' });
+  ok(await waitFor(() => lastQueue().length === 0), 'Stop empties the queue (the strip clears)', JSON.stringify(lastQueue()));
+  const win = rpc().slice(rpcBefore);
+  const dels = win.filter((m) => m.method === 'thread/queue/delete');
+  ok(dels.length === 2 && dels.map((m) => m.params.queuedSubmissionId).sort().join(',') === queuedIds.slice().sort().join(','), `exactly one thread/queue/delete per queued item (${JSON.stringify(dels.map((m) => m.params?.queuedSubmissionId))})`);
+  ok(win.filter((m) => m.method === 'turn/interrupt').length === 1, 'and exactly one turn/interrupt', JSON.stringify(win.map((m) => m.method)));
+  // ORDER IS THE FIX: deleting AFTER the interrupt loses the race with the
+  // app-server's own drain (the stub still drains on interrupt, deliberately).
+  ok(win.findIndex((m) => m.method === 'turn/interrupt') > win.map((m) => m.method).lastIndexOf('thread/queue/delete'), 'every delete goes out BEFORE turn/interrupt — the app-server drains what is left when the turn ends', JSON.stringify(win.map((m) => m.method)));
+  const rms = opResults().slice(opsBefore).filter((r) => r.op === 'remove');
+  ok(rms.length === 2 && rms.every((r) => r.ok === true && r.reason === 'stopped'), `each dropped item is reported as a removal with reason 'stopped' (${JSON.stringify(rms)})`);
+  ok(rms.some((r) => r.msg_id === 'm12'), 'the typed message\'s removal names its bubble', JSON.stringify(rms));
+  // the chips must be stamped BEFORE the emptied republish: a bubble that
+  // leaves the queue with no result reads as "it RAN" (the ACP round-1 lesson)
+  const evAll = events().filter((e) => e.type === 'event_msg');
+  const lastRemoveIdx = evAll.map((e) => e.payload?.type === 'queue_op_result' && e.payload.reason === 'stopped').lastIndexOf(true);
+  const emptyIdx = evAll.findIndex((e, i) => i > lastRemoveIdx && e.payload?.type === 'queue_changed' && (e.payload.items || []).length === 0);
+  ok(lastRemoveIdx >= 0 && emptyIdx > lastRemoveIdx, 'the removal results are emitted BEFORE the emptied queue_changed (a bare empty republish would claim the messages RAN)');
+  const peers = events().filter((e) => e.payload?.type === 'peer_message_result').slice(peersBefore).map((e) => e.payload);
+  ok(peers.some((r) => r.ok === false && r.text === 'ping from C' && r.fromName === 'session C'), 'the queued agent-to-agent message goes back to the delivery ladder (ok:false with its text + label ⇒ the consumer re-stashes it)', JSON.stringify(peers));
+  // NOTHING RUNS AFTER THE TURN: the queue was empty when the turn ended, so
+  // the app-server had nothing to drain and started no turn of its own.
+  await sleep(400);
+  ok(rpc().filter((m) => m.method === 'turn/start').length === startsBefore, 'no turn/start after the Stop', String(rpc().filter((m) => m.method === 'turn/start').length - startsBefore));
+  ok(!readMeta()?.activeTurnId && readMeta()?.streaming === false, 'and the app-server drained NOTHING — the session is idle after Stop', JSON.stringify({ t: readMeta()?.activeTurnId, s: readMeta()?.streaming }));
+  ok(lastQueue().length === 0, 'the published queue stays empty', JSON.stringify(lastQueue()));
+}
 
 // ③ slash commands
 sendLine({ type: 'chat-input', text: '/compact', msgId: 'm3' });
@@ -348,6 +412,9 @@ const userMsg = (needle) => mm.messages.find((m) => m.role === 'user' && JSON.st
 ok(!sys.some((t) => /Queued — runs after the current turn/.test(t)), 'the queued SYSTEM CARD is gone — the state is a chip on the bubble', sys.join(' | '));
 ok(userMsg('third')?.queueState === 'steered', `the steered message's bubble wears a 'steered' chip (${userMsg('third')?.queueState})`);
 ok(userMsg('second')?.queueState === 'removed', `the removed message's bubble wears a 'removed' chip (${userMsg('second')?.queueState})`);
+// Stop-dropped bubbles read 'Removed' through the REAL normalizer — never a
+// cleared chip, which the client renders as "it ran".
+ok(userMsg('stop me')?.queueState === 'removed', `a message Stop dropped from the queue wears the 'removed' chip (${userMsg('stop me')?.queueState})`);
 { // the QUEUED→ran lifecycle, replayed record by record: the chip appears while
   // it waits and CLEARS when the app-server drains it (it left the queue with no
   // steer and no remove ⇒ it RAN — a bubble must never claim to be queued forever)
@@ -396,6 +463,8 @@ ok(/if \(meta\.threadId && meta\.activeTurnId\) \{[\s\S]{0,600}?await request\('
 ok(/noteQueued\(cid, \{ kind: 'user', msgId: msg\.msgId \|\| '' \}\);\s*\n\s*await request\('thread\/queue\/add'/.test(wsrc), "wrapper pin: the item's identity is registered BEFORE the add (the queue/changed refresh can beat the reply)");
 ok(!/request\('thread\/queue\/remove'/.test(wsrc) && /thread\/queue\/delete', \{ threadId: meta\.threadId, queuedSubmissionId/.test(wsrc), 'wrapper pin: removal is thread/queue/DELETE with queuedSubmissionId — 0.153.4 has no thread/queue/remove');
 ok(/await request\('turn\/steer'[\s\S]{0,300}expectedTurnId: meta\.activeTurnId/.test(wsrc), 'wrapper pin: every steer carries the ACTIVE turn id as its precondition');
+ok(/await clearQueueForStop\(\);\s*\n\s*if \(meta\.activeTurnId\) await request\('turn\/interrupt'/.test(wsrc), 'wrapper pin: Stop clears the queue BEFORE turn/interrupt (the app-server drains what is left when the turn ends)');
+ok(/emitTaskEvent\('queue_op_result', \{ op: 'remove', id, ok: true, msg_id: known\?\.msgId \|\| '', reason: 'stopped' \}\);/.test(wsrc) && /await refreshQueue\(\);\s*\n\s*return removed;/.test(wsrc), "wrapper pin: every dropped item is reported as a removal BEFORE the republish (a cleared chip reads as 'it ran')");
 ok(/if \(method === 'thread\/queue\/changed'\) \{ refreshQueue\(\); return; \}/.test(wsrc), 'wrapper pin: the app-server\'s queue/changed drives a re-LIST (the notification carries no items)');
 ok(/thread\/compact\/start/.test(wsrc) && /applySlashCommand\(text\)/.test(wsrc), 'wrapper pin: slash commands + real compact');
 ok(/const foreign = foreignThreadOf\(params\);/.test(wsrc) && /!THREAD_ID_NOT_SCOPE\.has\(method\)/.test(wsrc) && !/THREAD_SCOPED_METHODS/.test(wsrc), 'wrapper pin: the gate is INVERTED — a notification NAMING another thread is foreign unless allowlisted (a method whitelist goes stale: error / thread/compacted / thread/queue/changed / turn/diff/updated were all missing)');

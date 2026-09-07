@@ -195,18 +195,28 @@ never a backend id; the ws layer, the strip and the chip all gate on that row:
   already reported delivered, so `remove` re-reports `peer_message_result
   ok:false` with the text and sender and the delivery ladder re-stashes it for
   next-turn injection — the same rule the ACP wrapper's Stop already obeyed.
-- **KNOWN DIVERGENCE — what Stop does to the queue.** On ACP the queue is ours,
-  so Stop DROPS it (loudly: "Stop also dropped N queued messages"). On codex the
-  queue belongs to the app-server, which DRAINS it when the turn ends — including
-  a turn ended by Stop — so a Stop there does not cancel what was queued behind
-  it; the wrapper only re-reads the queue so the strip states the truth. This is
-  the upstream client's behaviour, not a choice we made, and the strip's Remove
-  button is now the way to act on it. Changing codex's Stop to clear the queue
-  would be a product-default change and is deliberately NOT done here. On the
-  ACP side the drop reports a `queue_op_result {op:'remove', ok:true}` per
-  dropped entry BEFORE it republishes the emptied queue, so those bubbles read
-  `Removed`; a bare empty republish would have cleared their chips, which the
-  client reads as "it ran" — the exact opposite of what Stop did.
+- **STOP CLEARS THE QUEUE ON EVERY HARNESS (owner decision 2026-09-07 — the
+  2026-09-06 divergence is closed).** Stop means stop: whatever was queued
+  behind the running turn is dropped, and each dropped entry's bubble reads
+  `Removed`. On ACP the queue is ours, so the wrapper simply drops it (plus the
+  loud "Stop also dropped N queued messages" notice). On codex the queue belongs
+  to the app-server, which DRAINS it when the turn ends — including a turn
+  ended by Stop — so the wrapper `thread/queue/delete`s every item **before**
+  it sends `turn/interrupt`; clearing afterwards loses that race and the queued
+  message runs the instant Stop lands (that was the old behaviour, and the codex
+  suite's negative control reproduces it). **Both wrappers emit the SAME frame,
+  a `queue_op_result {op:'remove', ok:true, reason:'stopped'}` per dropped entry,
+  BEFORE they republish the emptied queue** — a bare empty republish would clear
+  those chips, which the client reads as "it ran", the exact opposite of what
+  Stop did. Nothing is silent on either side: a codex `thread/queue/delete` that
+  fails reports `ok:false` (the item is still queued and WILL run) and lands in
+  the wrapper journal, and a dropped agent-to-agent/job message goes back to the
+  delivery ladder (`peer_message_result ok:false` / `peer_result ok:false`) so it
+  is re-stashed for next-turn injection. A message queued and then *drained by a
+  turn ending on its own* is a different thing and still clears its chip — it
+  ran. (codex-side difference kept deliberately: no extra "send it again" notice
+  — every dropped codex item has its own bubble whose chip flips to `Removed`,
+  while ACP's notice also covers entries with no bubble.)
 - Measured facts behind the codex implementation (0.153.4, live app-server):
   the removal verb is `thread/queue/delete {threadId, queuedSubmissionId}` —
   **there is no `thread/queue/remove`**; `thread/queue/changed` carries only
