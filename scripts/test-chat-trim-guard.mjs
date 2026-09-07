@@ -149,11 +149,13 @@ ok('…and it asserts off the pin SNAPSHOT taken when the window was HIDDEN (a t
 // scrollbar-drag stamp between the programmatic return and the settle (the
 // drag must be able to end the very settle it starts inside). Budgets per
 // segment: suspend→runBar ≤400 (was one 700 hop to the settle),
-// runBar→programmatic ≤200, programmatic→drag ≤600, drag→settle ≤1400 (the
-// comment block that explains why the readout comes first), settle→atBottom
-// ≤2400.
+// runBar→programmatic ≤200, programmatic→drag ≤700 (round 4 explains the
+// gutter re-key there), drag→settle ≤1400 (the comment block that explains why
+// the readout comes first), settle→atBottom ≤2400. The budgets bound DISTANCE,
+// not prose — raise one when a comment legitimately grows; what is pinned is
+// the ORDER.
 ok('the scroll handler updates the run-bar READOUT first, stamps a scrollbar DRAG, then no-ops for the settle BEFORE it touches the pin (transitional geometry must not unpin)',
-  /this\._suspended\) return;[\s\S]{0,400}this\._updateRunBar\(scrollTop\);[\s\S]{0,200}this\._programmaticScroll\) return;[\s\S]{0,600}this\._pointerDragScroll\(scrollTop\)\)[\s\S]{0,1400}Date\.now\(\) < \(this\._resumeSettleUntil \|\| 0\)\) return;[\s\S]{0,2400}const atBottom =/.test(cv));
+  /this\._suspended\) return;[\s\S]{0,400}this\._updateRunBar\(scrollTop\);[\s\S]{0,200}this\._programmaticScroll\) return;[\s\S]{0,700}this\._pointerDragScroll\(scrollTop\)\)[\s\S]{0,1400}Date\.now\(\) < \(this\._resumeSettleUntil \|\| 0\)\) return;[\s\S]{0,2400}const atBottom =/.test(cv));
 ok('…and the UNPIN itself is gated on positive evidence for the rest of the horizon (the settle alone was a one-shot cliff)',
   /if \(this\._pinned && this\._resumeDisplacement\(\)\) \{[\s\S]{0,260}_scrollToBottom\(\);\s*return;\s*\}[\s\S]{0,200}this\._pinned = false;/.test(cv)
   && /_resumeDisplacement\(\) \{/.test(cv));
@@ -175,13 +177,34 @@ ok('a bare CLICK / non-navigation key only stamps input and ends the settle WIND
 ok('…and the message-list listeners route by GRADE: wheel/touchmove/navigation keys position, pointerdown and other keys merely input',
   /addEventListener\('wheel', \(e\) => \{[\s\S]{0,400}this\._notePositioning\('wheel'\);/.test(cv)
   && /addEventListener\('touchmove', \(\) => this\._notePositioning\('touch'\)/.test(cv)
-  && /addEventListener\('pointerdown', \(\) => \{\s*this\._noteUserInput\(\);\s*this\._pointerDownAt = Date\.now\(\);\s*this\._pointerDownScrollTop = this\._messageList\.scrollTop;/.test(cv)
+  && /addEventListener\('pointerdown', \(e\) => \{\s*this\._noteUserInput\(\);\s*this\._pointerDownOnScrollbar = this\._pointerOnScrollbar\(e\);\s*this\._pointerDownScrollTop = this\._messageList\.scrollTop;/.test(cv)
   && /if \(NAV_KEYS\.includes\(e\.key\)\) this\._notePositioning\('key'\);\s*else this\._noteUserInput\(\);/.test(cv)
   && /const NAV_KEYS = \['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'PageDown', 'PageUp', 'Home', 'End', ' '\];/.test(cv));
-ok('…and a SCROLLBAR DRAG (pointerdown then a scroll that really moved the view) is positioning after all — the one positioning act with no event of its own',
-  /_pointerDragScroll\(scrollTop\) \{[\s\S]{0,400}Date\.now\(\) - at > POINTER_DRAG_MS\) return false;[\s\S]{0,200}> POINTER_DRAG_PX;/.test(cv)
-  && /const POINTER_DRAG_MS = 400;/.test(cv)
-  && /this\._pointerDragScroll\(scrollTop\)\) \{ this\._pointerDownAt = 0; this\._notePositioning\('scrollbar-drag'\); \}/.test(cv));
+// ── ROUND 4: the drag signature is WHERE the press landed, never WHEN a
+// scroll follows it. The 400ms window had two MAJORs: the resume's OWN
+// input-less displacement (the incident's re-measure bounces at +366…+602ms)
+// landing inside a plain content click's window was read as a drag — the click
+// then disarmed the snapshot + series and the incident reproduced behind it —
+// and a real drag whose first move came later than the window was never
+// positioning at all, so the re-tail series yanked that reader back (a NEW harm
+// vs master). The press now carries a gutter FLAG for its whole lifetime.
+ok('…and a SCROLLBAR DRAG is keyed on the GUTTER the press landed in (position), not on a time window after any pointerdown',
+  /_pointerDragScroll\(scrollTop\) \{\s*if \(!this\._pointerDownOnScrollbar\) return false;\s*return Math\.abs\(scrollTop - \(this\._pointerDownScrollTop \|\| 0\)\) > POINTER_DRAG_PX;/.test(cv)
+  && /_pointerOnScrollbar\(e\) \{/.test(cv)
+  && /this\._pointerDragScroll\(scrollTop\)\) this\._notePositioning\('scrollbar-drag'\);/.test(cv));
+ok('…the time-window signature is GONE (POINTER_DRAG_MS / _pointerDownAt cannot come back by accident)',
+  !/POINTER_DRAG_MS/.test(cv) && !/_pointerDownAt/.test(cv));
+ok('…the gutter hit-test measures the strip the CONTENT box does not reach, in LAYOUT px (uiScale zoom scales the rect, not clientWidth — the 2.369.5 VNC-pointer class), and handles RTL + a horizontal gutter',
+  /const scale = list\.offsetWidth \? \(r\.width \/ list\.offsetWidth\) : 1;/.test(cv)
+  && /const vGutter = list\.offsetWidth - list\.clientWidth - bl - br;/.test(cv)
+  && /const hGutter = list\.offsetHeight - list\.clientHeight - bt - bb;/.test(cv)
+  && /rtl = cs\.direction === 'rtl';/.test(cv));
+ok('…and the press is CLEARED on pointerup/pointercancel, window-scoped on the winInfo AbortController (a drag routinely releases outside the list) and removed on dispose',
+  /window\.addEventListener\('pointerup', this\._endPointerPress, \{ passive: true, signal: pressSignal \}\);/.test(cv)
+  && /window\.addEventListener\('pointercancel', this\._endPointerPress, \{ passive: true, signal: pressSignal \}\);/.test(cv)
+  && /const pressSignal = winInfo\?\._listenerCtl\?\.signal;/.test(cv)
+  && /this\._endPointerPress = \(\) => \{ this\._pointerDownOnScrollbar = false; \};/.test(cv)
+  && /window\.removeEventListener\('pointerup', this\._endPointerPress\);/.test(cv.slice(cv.indexOf('\n  dispose() {'))));
 
 // ── ROUND 2, THE MAJOR: only the four message-list listeners ended the settle,
 // so a reader who navigated through a surface that is NOT the list — the
@@ -350,16 +373,66 @@ if (typeof globalThis.requestAnimationFrame !== 'function') globalThis.requestAn
   ok('unit: past the horizon the gate is off — a normal unpin must always be possible', disp({ _resumeAt: Date.now() - 4000 }) === false);
   ok('unit: a view that never resumed is unaffected (the gate is scoped to the resume)', disp({ _resumeAt: 0 }) === false);
 
-  // ROUND 3 (b): the scrollbar-drag predicate — the only way a drag can be
-  // told from a click, and the reason a click can stay non-positioning.
+  // ROUND 3 (b) / ROUND 4: the scrollbar-drag predicate — the only way a drag
+  // can be told from a click, and the reason a click can stay non-positioning.
+  // Round 4 re-keyed it from WHEN (a 400ms window after any pointerdown, which
+  // the resume's own displacement walked straight through) to WHERE the press
+  // landed, held for the whole press.
   const drag = (over, st) => ChatView.prototype._pointerDragScroll.call(Object.assign(
     Object.create(ChatView.prototype),
-    { _pointerDownAt: Date.now() - 50, _pointerDownScrollTop: 900 }, over), st);
-  ok('unit: a scroll right after a pointerdown that MOVED the view is a drag', drag({}, 400) === true);
+    { _pointerDownOnScrollbar: true, _pointerDownScrollTop: 900 }, over), st);
+  ok('unit: a scroll while a GUTTER press is held, that MOVED the view, is a drag', drag({}, 400) === true);
   ok('unit: …in either direction', drag({}, 1400) === true);
-  ok('unit: a pointerdown with no displacement is a CLICK, not a drag', drag({}, 901) === false);
-  ok('unit: a displacement long AFTER the pointerdown is the resume re-measuring, not a drag', drag({ _pointerDownAt: Date.now() - 1100 }, 0) === false);
-  ok('unit: …and with no pointerdown at all it is never a drag', drag({ _pointerDownAt: 0 }, 0) === false);
+  ok('unit: …and however LATE it comes — the press is held, so it is still the reader dragging (round-4 MAJOR ②: the 400ms window dropped this reader and the re-tail yanked them back)',
+    drag({}, 1400) === true && drag({}, 400) === true);
+  ok('unit: a gutter press with no displacement positions nothing', drag({}, 901) === false);
+  ok('unit: a press in the CONTENT area is never a drag, however large the displacement that follows (round-4 MAJOR ①: the resume\'s own re-measure behind a click)',
+    drag({ _pointerDownOnScrollbar: false }, 0) === false);
+  ok('unit: …and with no press at all it is never a drag', drag({ _pointerDownOnScrollbar: undefined }, 0) === false);
+
+  // ROUND 4: the gutter hit-test itself. DOM-free (injected geometry), so the
+  // SHIPPED predicate runs right here — content click false, gutter press true.
+  const mkList = (over = {}) => ({
+    offsetWidth: 800, clientWidth: 785, offsetHeight: 600, clientHeight: 600,
+    getBoundingClientRect: () => ({ left: 100, top: 50, width: 800, height: 600 }),
+    ...over,
+  });
+  const onSb = (x, y, list) => ChatView.prototype._pointerOnScrollbar.call(
+    Object.assign(Object.create(ChatView.prototype), { _messageList: list || mkList() }), { clientX: x, clientY: y });
+  ok('unit: a click in the CONTENT area is not on the scrollbar', onSb(400, 300) === false);
+  ok('unit: …not even at the last content pixel before the gutter', onSb(884, 300) === false);
+  ok('unit: a press in the vertical GUTTER is (x = rect.left + clientWidth …+ gutter)', onSb(893, 300) === true);
+  ok('unit: a list with NO scrollbar (the semantic minimap sets scrollbar-width:none) has no gutter to press',
+    onSb(899, 300, mkList({ clientWidth: 800 })) === false);
+  // uiScale body zoom 1.5×: the rect and clientX are scaled, clientWidth is
+  // not. A CONTENT press at layout x=600 reads (clientX - left) = 900 in
+  // viewport px — which the un-converted comparison would call a gutter press
+  // (900 >= 785). The 2.369.5 VNC-pointer class, in miniature.
+  {
+    const zoomed = () => mkList({ getBoundingClientRect: () => ({ left: 100, top: 50, width: 1200, height: 900 }) });
+    ok('unit: under uiScale zoom the rect is scaled and clientWidth is not — the hit-test converts to layout px first (2.369.5 class)',
+      onSb(100 + 793 * 1.5, 300, zoomed()) === true
+      && onSb(100 + 600 * 1.5, 300, zoomed()) === false);
+  }
+  ok('unit: a HORIZONTAL gutter along the bottom counts too', onSb(400, 50 + 595, mkList({ clientHeight: 585 })) === true);
+  ok('unit: a detached / unmeasurable list answers false rather than throwing',
+    onSb(400, 300, mkList({ getBoundingClientRect: () => ({ left: 0, top: 0, width: 0, height: 0 }) })) === false);
+  // …and with a computed style available (the browser case): RTL puts the
+  // vertical gutter on the LEFT, and a border is part of neither box.
+  {
+    const prev = globalThis.getComputedStyle;
+    globalThis.getComputedStyle = (el) => ({
+      direction: el.__dir || 'ltr', borderLeftWidth: (el.__b || 0) + 'px', borderRightWidth: (el.__b || 0) + 'px',
+      borderTopWidth: (el.__b || 0) + 'px', borderBottomWidth: (el.__b || 0) + 'px',
+    });
+    try {
+      const rtl = mkList({ __dir: 'rtl' });
+      ok('unit: RTL — the vertical gutter is on the LEFT', onSb(103, 300, rtl) === true && onSb(893, 300, rtl) === false);
+      // 4px borders: gutter = offsetWidth - clientWidth - 8 = 7px, at [789, 796)
+      const bordered = mkList({ clientWidth: 785, __b: 4 });
+      ok('unit: a BORDER is not a scrollbar — the gutter is measured inside it', onSb(100 + 792, 300, bordered) === true && onSb(100 + 700, 300, bordered) === false);
+    } finally { globalThis.getComputedStyle = prev; }
+  }
 }
 
 // ── WIRING PIN: the desktop show/hide path must keep flowing the flag (a new

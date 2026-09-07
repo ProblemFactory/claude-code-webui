@@ -40,6 +40,16 @@
 // stranded window. Input.dispatchMouseEvent is also the only way to touch a
 // native scrollbar, which has no DOM node to dispatch to.
 //
+// ROUND 4 adds two more, against the round-3 drag SIGNATURE ("a scroll within
+// 400ms of a pointerdown that moved the view"): ① a click at +300ms with the
+// resume's own input-less displacement at +450ms — inside that window, so the
+// click's displacement was read as a "drag", disarmed the repair and
+// reproduced the incident (the round-3 leg passed only because it injected at
+// +1400ms); ② a scrollbar drag whose first move comes 900ms after the press —
+// outside the window, so it was never positioning and the re-tail yanked that
+// reader back (a NEW harm vs master). The drag is now keyed on WHERE the press
+// landed (the scrollbar gutter), held for the whole press.
+//
 // IN THE RELEASE GATE (scripts/ci.mjs) despite being heavy — two chrome runs
 // and two bundle builds, ~3.5 min here after round 3: this is the only place
 // the whole path is exercised end to end, and its negative controls are what
@@ -372,10 +382,28 @@ const SCENARIO = `(async () => {
     finish: async (ms) => { await sleep(ms); return { ...snap(), sinceResume: sinceResume(),
       traces: (view._traceRing || []).map((e) => e.tag + (e.via ? '/' + e.via : '') + (e.why ? '/' + e.why : '')) }; },
     hit: (x, y) => { const el = document.elementFromPoint(x, y); return el ? (el.className || el.tagName) + '' : 'none'; },
+    // ROUND 4 control: the PRE-FIX drag signature, restored on the instance —
+    // "a scroll within 400ms of ANY pointerdown that moved the view is a drag".
+    // It needs its own pointerdown stamp, since the shipped code no longer
+    // keeps one.
+    oldDragSignature: () => {
+      window.__pdAt = 0;
+      window.__pdListener = () => { window.__pdAt = Date.now(); };
+      list.addEventListener('pointerdown', window.__pdListener, { passive: true });
+      view._pointerDragScroll = function (st) {
+        const at = window.__pdAt || 0;
+        if (!at || Date.now() - at > 400) return false;
+        return Math.abs(st - (this._pointerDownScrollTop || 0)) > 2;
+      };
+    },
+    restoreDragSignature: () => {
+      list.removeEventListener('pointerdown', window.__pdListener);
+      delete view._pointerDragScroll;
+    },
     // The semantic MINIMAP hides the native scrollbar
     // (.chat-minimap-active { scrollbar-width: none }), so a native scrollbar
     // drag is only reachable with the minimap off — which is exactly the
-    // configuration where _pointerDragScroll is the ONLY signal that a drag
+    // configuration where the gutter hit-test is the ONLY signal that a drag
     // happened (with the minimap ON the reader drags the minimap, and that
     // stamps through _noteUserNav('minimap') instead).
     bareScrollbar: () => {
@@ -502,6 +530,29 @@ if (good?.ok) {
   trusted.injectAt = await evaljs('window.__vs.inject(1400)');
   trusted.click = await evaljs('window.__vs.finish(1600)');
 
+  // (i-b) ROUND 4, MAJOR ①: the SAME click, with the resume's OWN input-less
+  //     displacement landing at +450ms — INSIDE the 400ms window the round-3
+  //     drag signature opened behind every pointerdown (the incident's
+  //     re-measure bounces run +366…+602ms after the switch, so this is the
+  //     real timing, not a contrived one). Pre-fix that scroll was read as a
+  //     "scrollbar drag", which ran _endResumeSettle() — snapshot AND series —
+  //     and the window was stranded behind the click. The round-3 leg above
+  //     only passed because its displacement was at +1400ms, far outside the
+  //     window.
+  const clickThenDisplace = async (off) => {
+    const a = await armAt(300);
+    await mouse('mousePressed', a.rect.left + a.rect.w / 2, a.rect.top + a.rect.h / 2, { button: 'left', clickCount: 1, buttons: 1 });
+    const onSb = await evaljs('window.__vs.view._pointerDownOnScrollbar');   // a CONTENT press is never a gutter press
+    await mouse('mouseReleased', a.rect.left + a.rect.w / 2, a.rect.top + a.rect.h / 2, { button: 'left', clickCount: 1, buttons: 0 });
+    const afterUp = await evaljs('window.__vs.view._pointerDownOnScrollbar'); // …and the press is over
+    const injectAt = await evaljs(`window.__vs.inject(${off})`);
+    return { onSb, afterUp, injectAt, ...await evaljs('window.__vs.finish(2600)') };
+  };
+  trusted.near = await clickThenDisplace(450);
+  await evaljs('window.__vs.oldDragSignature()');
+  trusted.nearControl = await clickThenDisplace(450);
+  await evaljs('window.__vs.restoreDragSignature()');
+
   // (i-control) the SAME leg with the split neutered on the instance: the
   //     click ends the whole repair again (the pre-fix listener body), so the
   //     +1400ms displacement must strand the window. Without this the leg
@@ -538,20 +589,35 @@ if (good?.ok) {
   //      produces a pointerdown and then plain scroll events, so it is
   //      positioning only through _pointerDragScroll — and it must END the
   //      repair: the re-tail may not drag this reader back to the tail.
-  const dragLeg = async () => {
+  //      `hold` = how long the press sits still before the first move: round 4
+  //      keys the drag on WHERE the press landed, so a slow reader is a
+  //      positioning act just as much as a fast one.
+  const dragLeg = async (hold = 40) => {
     await evaljs('window.__vs.bareScrollbar()');            // …before the desktop switch, so the resume measures the real geometry
     await armAt(300);
     const g = await evaljs('window.__vs.bareScrollbar()');  // …and again in case a minimap render re-added the class
     const sx = g.right - Math.max(2, g.sbw / 2);
     await mouse('mousePressed', sx, g.bottom - 25, { button: 'left', clickCount: 1, buttons: 1 });
-    await sleep(40);
-    const pointerDown = await evaljs('!!window.__vs.view._pointerDownAt');   // did the press reach the list at all?
+    await sleep(hold);
+    const onScrollbar = await evaljs('window.__vs.view._pointerDownOnScrollbar');  // did the press land in the GUTTER?
+    const heldFor = hold;
     for (let i = 1; i <= 6; i++) { await mouse('mouseMoved', sx, g.bottom - 25 - i * (g.h / 9), { button: 'left', buttons: 1 }); await sleep(30); }
     await mouse('mouseReleased', sx, g.top + 60, { button: 'left', clickCount: 1, buttons: 0 });
     const moved = await evaljs('Math.round(window.__vs.list.scrollTop)');
-    return { sbw: g.sbw, pointerDown, from: g.st, moved, ...await evaljs('window.__vs.finish(2600)') };   // past BOTH re-tail rungs
+    const afterUp = await evaljs('window.__vs.view._pointerDownOnScrollbar');      // …and the press is over on release
+    return { sbw: g.sbw, onScrollbar, heldFor, afterUp, from: g.st, moved, ...await evaljs('window.__vs.finish(2600)') };   // past BOTH re-tail rungs
   };
   trusted.drag = await dragLeg();
+  // (iii-b) ROUND 4, MAJOR ②: the same drag, but the reader holds the thumb for
+  //      900ms before moving — outside the deleted 400ms window, so pre-fix
+  //      this drag was never positioning at all and the re-tail series
+  //      (1240/2000ms) yanked the reader back to the live tail. A NEW harm the
+  //      round-3 signature introduced vs master, which is why it gets its own
+  //      leg AND its own control.
+  trusted.holdDrag = await dragLeg(900);
+  await evaljs('window.__vs.view._pointerOnScrollbar = function () { return false; };');
+  trusted.holdDragControl = await dragLeg(900);
+  await evaljs('delete window.__vs.view._pointerOnScrollbar;');
   // (iii-control) with the drag predicate neutered the drag is just a click
   //      followed by displacement — the re-tail then drags the reader back to
   //      the live tail, which is the whole reason the predicate exists.
@@ -577,6 +643,21 @@ if (good?.ok) {
   // drag stamp decides is WHERE the reader ends up.
   check('…and its control proves the leg touches the path: with _pointerDragScroll neutered the SAME drag is dragged back to the live tail by the re-tail',
     trusted.dragControl.fromBottom <= 8, JSON.stringify(trusted.dragControl).slice(0, 700));
+  // ── ROUND 4 ──
+  check('THE GUTTER HIT-TEST, under trusted input: a press in the CONTENT area is not a scrollbar press, and the flag is cleared on release',
+    trusted.near.onSb === false && trusted.near.afterUp === false && trusted.drag.onScrollbar === true && trusted.drag.afterUp === false,
+    JSON.stringify({ contentPress: { on: trusted.near.onSb, afterUp: trusted.near.afterUp }, gutterPress: { on: trusted.drag.onScrollbar, afterUp: trusted.drag.afterUp, sbw: trusted.drag.sbw } }));
+  check('ROUND 4 ①: a real left-click at resume+300ms followed by the resume\'s OWN input-less displacement at +450ms (inside the deleted 400ms drag window) still ends PINNED at the tail',
+    trusted.near.pinned === true && trusted.near.fromBottom <= 8,
+    JSON.stringify(trusted.near).slice(0, 600));
+  check('…and its control proves the leg touches the path: with the pre-fix time-window signature restored, that same +450ms displacement is read as a "drag", disarms the repair and strands the window',
+    trusted.nearControl.pinned === false || trusted.nearControl.fromBottom > 8,
+    JSON.stringify(trusted.nearControl).slice(0, 600));
+  check('ROUND 4 ②: a scrollbar drag whose first move comes 900ms after the press is STILL positioning — the reader is left where they dragged to (userPos/scrollbar-drag)',
+    trusted.holdDrag.onScrollbar === true && trusted.holdDrag.traces.some((x) => x === 'userPos/scrollbar-drag') && trusted.holdDrag.fromBottom > 8,
+    JSON.stringify(trusted.holdDrag).slice(0, 700));
+  check('…and its control proves the leg touches the path: with the press not recognised as a gutter press (the pre-fix outcome for a late move) the SAME drag is yanked back to the live tail',
+    trusted.holdDragControl.fromBottom <= 8, JSON.stringify(trusted.holdDragControl).slice(0, 700));
 }
 
 // ── 5. NEGATIVE CONTROL: patch the gates out at SOURCE and rebuild ──

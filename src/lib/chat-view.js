@@ -47,10 +47,18 @@ const RESUME_DISPLACEMENT_MS = 2800;
 // _notePositioning vs _noteUserInput (round-3 verifier's MAJOR).
 const NAV_KEYS = ['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'PageDown', 'PageUp', 'Home', 'End', ' '];
 // A scrollbar drag is the one positioning act with NO event of its own: it
-// produces a pointerdown and then plain scroll events. So a scroll that
-// follows a pointerdown this recently, and actually MOVED the view, IS the
-// drag — while a click that is followed by nothing never becomes positioning.
-const POINTER_DRAG_MS = 400;
+// produces a pointerdown and then plain scroll events. It is identified by
+// WHERE THE PRESS LANDED — the list's own scrollbar gutter — and stays a drag
+// for as long as that press is held (round-4 verifier's two MAJORs against the
+// old "a scroll within 400ms of ANY pointerdown that moved the view" signature:
+// ① the resume's own input-LESS displacement (the incident's re-measure bounces
+// at +366…+602ms) landing within the window of a plain content click was read
+// as a drag, so the click disarmed the pin snapshot + re-tail series and the
+// incident reproduced behind it; ② a drag whose first move came later than the
+// window was never positioning at all, and the re-tail series yanked that
+// reader back to the tail — a NEW harm vs master). A press in the CONTENT area
+// is a click no matter how close in time a displacement lands; a
+// press-and-hold-then-drag is positioning for the whole press.
 const POINTER_DRAG_PX = 2;
 
 /**
@@ -92,7 +100,10 @@ class ChatView {
     // `_lastPositionAt` answers "did the reader MOVE it" — only the second may
     // cancel the resume repair (round-3 verifier's MAJOR).
     this._lastPositionAt = 0;
-    this._pointerDownAt = 0;
+    // Did the live press land on the list's own SCROLLBAR GUTTER? While it is
+    // held, a scroll is the reader dragging the view — WHERE the press landed,
+    // never WHEN a later scroll happens to arrive (round-4 verifier's MAJORs).
+    this._pointerDownOnScrollbar = false;
     this._pointerDownScrollTop = 0;
     this._resumeRetailTimers = [];
 
@@ -328,13 +339,24 @@ class ChatView {
     // pointerdown says the reader is HERE, not that they moved the view, so it
     // stamps input and may end the settle WINDOW — but it keeps the pin
     // snapshot and the re-tail series, or the resume's own input-less
-    // displacement reproduces the incident behind the click. A scrollbar drag
-    // becomes positioning on the SCROLL that follows it (_pointerDragScroll).
-    this._messageList.addEventListener('pointerdown', () => {
+    // displacement reproduces the incident behind the click. A press ON THE
+    // SCROLLBAR GUTTER is the exception: it is a drag in progress, and every
+    // scroll it produces is positioning (round-4 verifier's MAJORs — the drag
+    // is keyed on WHERE the press landed, not on how soon a scroll follows).
+    this._messageList.addEventListener('pointerdown', (e) => {
       this._noteUserInput();
-      this._pointerDownAt = Date.now();
+      this._pointerDownOnScrollbar = this._pointerOnScrollbar(e);
       this._pointerDownScrollTop = this._messageList.scrollTop;
     }, { passive: true });
+    // …and the press ends wherever the pointer is RELEASED — a scrollbar drag
+    // routinely leaves the element, so this listens on the window, bound to the
+    // window's AbortController like every other document-level listener here
+    // (listener-lifecycle law). Views whose winInfo has no controller (subagent
+    // viewers) are covered by the removeEventListener in dispose().
+    this._endPointerPress = () => { this._pointerDownOnScrollbar = false; };
+    const pressSignal = winInfo?._listenerCtl?.signal;
+    window.addEventListener('pointerup', this._endPointerPress, { passive: true, signal: pressSignal });
+    window.addEventListener('pointercancel', this._endPointerPress, { passive: true, signal: pressSignal });
     this._messageList.addEventListener('keydown', (e) => {
       // NAVIGATION keys move the view — everything else is mere input.
       if (NAV_KEYS.includes(e.key)) this._notePositioning('key');
@@ -389,11 +411,13 @@ class ChatView {
         // floating run bar (2.369.37): same frame, same layout pass, no decisions
         this._updateRunBar(scrollTop);
         if (this._programmaticScroll) return; // don't interfere with programmatic scrolls
-        // SCROLLBAR DRAG (round-3 MAJOR): the one positioning act with no
-        // event of its own — a scroll right after a pointerdown that really
-        // moved the view. Stamped HERE, above the settle return, because the
-        // drag must be able to end the very settle it starts inside.
-        if (this._pointerDragScroll(scrollTop)) { this._pointerDownAt = 0; this._notePositioning('scrollbar-drag'); }
+        // SCROLLBAR DRAG (round-3 MAJOR, re-keyed in round 4): the one
+        // positioning act with no event of its own — a scroll produced while a
+        // press on the scrollbar GUTTER is held. Stamped HERE, above the settle
+        // return, because the drag must be able to end the very settle it
+        // starts inside; a press in the content area never gets here, so the
+        // resume's own displacement can no longer masquerade as a drag.
+        if (this._pointerDragScroll(scrollTop)) this._notePositioning('scrollbar-drag');
         // RESUME SETTLE (inc-mtq5bpjt-0o0n): a window that was JUST un-hidden
         // is still re-measuring — the capture shows scrollTop transiting
         // 1967→0→1976→3297→1950 in 240ms with zero user input. Decide nothing
@@ -1492,14 +1516,53 @@ class ChatView {
     this._endResumeSettle();
   }
 
-  /** Is THIS scroll event a scrollbar drag? The drag is the only positioning
-   *  act that produces no wheel/touch/key event — its signature is a scroll
-   *  that follows a pointerdown within POINTER_DRAG_MS and actually displaced
-   *  the view. A click followed by nothing (or by the resume's own re-measure,
-   *  which lands far later) never qualifies. */
+  /** Did this press land on the list's own SCROLLBAR GUTTER? That is the whole
+   *  signature of a scrollbar drag — the position of the press, not the timing
+   *  of what follows (round-4 verifier's MAJORs; see POINTER_DRAG_PX above).
+   *  The gutter is the strip of the border box the CONTENT box does not reach:
+   *  `offsetWidth - clientWidth` minus the borders, on the right in LTR and on
+   *  the LEFT in RTL; a horizontal scrollbar is the same story along the
+   *  bottom. Coordinates are converted viewport→LAYOUT px first: the UI-scale
+   *  body `zoom` scales getBoundingClientRect and clientX but NOT clientWidth,
+   *  and mixing those two spaces is exactly the 2.369.5 VNC-pointer bug. The
+   *  semantic minimap hides the native scrollbar (`scrollbar-width: none`), so
+   *  there the gutter is 0 wide and nothing can land in it — correct: with the
+   *  minimap on the reader drags the minimap, which is _noteUserNav('minimap').
+   *  DOM-free by construction (it reads injected geometry), so it is unit
+   *  tested in plain node. */
+  _pointerOnScrollbar(e) {
+    const list = this._messageList;
+    if (!list || !e || typeof e.clientX !== 'number') return false;
+    const r = list.getBoundingClientRect?.();
+    if (!r || !r.width || !r.height) return false;
+    // viewport px → layout px (body zoom / uiScale)
+    const scale = list.offsetWidth ? (r.width / list.offsetWidth) : 1;
+    const x = (e.clientX - r.left) / (scale || 1);
+    const y = (e.clientY - r.top) / (scale || 1);
+    let bl = 0, br = 0, bt = 0, bb = 0, rtl = false;
+    try {
+      const cs = getComputedStyle(list);
+      rtl = cs.direction === 'rtl';
+      bl = parseFloat(cs.borderLeftWidth) || 0; br = parseFloat(cs.borderRightWidth) || 0;
+      bt = parseFloat(cs.borderTopWidth) || 0; bb = parseFloat(cs.borderBottomWidth) || 0;
+    } catch { /* node/unit context: no borders to account for */ }
+    const vGutter = list.offsetWidth - list.clientWidth - bl - br;
+    const hGutter = list.offsetHeight - list.clientHeight - bt - bb;
+    if (vGutter > 0 && (rtl
+      ? (x >= bl && x < bl + vGutter)
+      : (x >= bl + list.clientWidth && x <= list.offsetWidth - br))) return true;
+    if (hGutter > 0 && y >= bt + list.clientHeight && y <= list.offsetHeight - bb) return true;
+    return false;
+  }
+
+  /** Is THIS scroll event a scrollbar drag? Only while a press that landed in
+   *  the gutter is still held — and only once it has actually displaced the
+   *  view (a bare track press that changed nothing positioned nothing). The
+   *  flag is cleared on pointerup/pointercancel, so a press-and-hold followed
+   *  by a move minutes later is still the reader dragging, and a click in the
+   *  content area is never a drag however close a displacement lands. */
   _pointerDragScroll(scrollTop) {
-    const at = this._pointerDownAt || 0;
-    if (!at || Date.now() - at > POINTER_DRAG_MS) return false;
+    if (!this._pointerDownOnScrollbar) return false;
     return Math.abs(scrollTop - (this._pointerDownScrollTop || 0)) > POINTER_DRAG_PX;
   }
 
@@ -3849,6 +3912,14 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
     if (this._runsTimer) { clearTimeout(this._runsTimer); this._runsTimer = null; }
     if (this._runBarRaf) { cancelAnimationFrame(this._runBarRaf); this._runBarRaf = null; }
     this._clearResumeRetail();
+    if (this._endPointerPress) {
+      // belt and braces: winInfo._listenerCtl aborts these on window close, but
+      // a view can also be disposed while its window lives on (tab swap, view
+      // replacement) and these are WINDOW-scoped listeners holding the view.
+      window.removeEventListener('pointerup', this._endPointerPress);
+      window.removeEventListener('pointercancel', this._endPointerPress);
+      this._endPointerPress = null;
+    }
     if (this._traceWatchTimer) { clearInterval(this._traceWatchTimer); this._traceWatchTimer = null; }
     if (this._stallWatch) { clearInterval(this._stallWatch); this._stallWatch = null; }
     if (this._readOnlyPollTimer) clearTimeout(this._readOnlyPollTimer);
