@@ -226,7 +226,7 @@ console.log('— ③ the ws case gates on the caps row AND the running wrapper')
   ok("…and the wrapper's queue advert — SUPPORTED **and the verb list** — rides the SAME payload (the client cannot read a sidecar), and it is computed from the ONE sidecar read the attach handler already made (2.369.16: no second /proc walk here)", /const wcapsAttach = wrapperCaps\(BUFFERS_DIR, data\.sessionId, session\.socketPath\);[\s\S]{0,3000}const wc = wcapsAttach;[\s\S]{0,700}return \{ queueSupported: !!served, queueVerbs: served \|\| null \};/.test(read('src/ws-handler.js')));
   { const wsc = read('src/ws-create.js');
     ok("…'created' carries all three, and says the fresh wrapper has reported NOTHING yet", /queue: \[\],/.test(wsc) && /queueSupported: false,[\s\S]{0,400}queueVerbs: null,/.test(wsc)); }
-  ok('the client applies both through the carries-the-key guard, advert (and its verb list) FIRST', /if \('queueSupported' in meta\) this\._setQueueSupported\(meta\.queueSupported, meta\.queueVerbs\);\s*\n\s*if \('queue' in meta\) this\._setQueue\(meta\.queue\);/.test(cv));
+  ok('the client applies both through the carries-the-key guard, advert (and its verb list) FIRST', /if \('queueSupported' in meta\) this\._setQueueSupported\(meta\.queueSupported, \('queueVerbs' in meta\) \? meta\.queueVerbs : undefined\);\s*\n\s*if \('queue' in meta\) this\._setQueue\(meta\.queue\);/.test(cv));
   // ONE WRITER for the capability, because a FLIP has a consequence (the
   // rendered chips must be re-applied — round-2's MAJOR). A bare assignment
   // anywhere else silently skips it.

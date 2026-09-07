@@ -1413,7 +1413,9 @@ class ChatView {
     // Attach/create replay of the input queue — carries-the-key guard, so a
     // partial-meta path never clears a live strip. The wrapper advert is read
     // FIRST: it decides which controls the items are rendered with.
-    if ('queueSupported' in meta) this._setQueueSupported(meta.queueSupported, meta.queueVerbs);
+    // carries-the-key guarded (2.368.3 law): a partial meta without queueVerbs
+    // keeps the served verb list (undefined = keep, see _setQueueSupported).
+    if ('queueSupported' in meta) this._setQueueSupported(meta.queueSupported, ('queueVerbs' in meta) ? meta.queueVerbs : undefined);
     if ('queue' in meta) this._setQueue(meta.queue);
     // Does the RUNNING wrapper serve the live style verb? Same shape as
     // queueSupported and the same reason (2.361.1/2.364.1): the harness caps
