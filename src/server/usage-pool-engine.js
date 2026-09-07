@@ -109,6 +109,14 @@ const { ClaudeCodeAdapter } = require('../adapters/claude-code.js');
 // email > account id, so a sub's history SURVIVES remove + re-add (user
 // requirement — a re-add mints a fresh sub-<hex> id). Zero API calls.
 const { UsageAnchors, identityKeyFor, costBetweenMulti } = require('../usage-anchors.js');
+// ── THE SLOT-TRANSITION LEDGER (2026-09-07) ────────────────────────────────
+// A symlink has no history, so anything that arrives LATE (a reading whose
+// fetchedAt is minutes old, a ledger bake, a migration) could not ask "which
+// member was this conversation on THEN" and fell back to the spawn-time org.
+// Every re-point now appends {sessionId, from, to, at, why} here, so the past
+// is a lookup. Bounded + archive-never-destroy: src/slot-transitions.js.
+const { SlotTransitions } = require('../slot-transitions.js');
+const { loginState } = require('../login-state.js'); // THE credential-state reader (shared with the panels + the migration)
 const { capsOf } = require('../backend-caps.js'); // per-backend switching capabilities (P4 slice) — replaces backend-id special cases
 // Which QuotaSignalSource speaks for a backend. A FALSY backend is the
 // legacy-record case (accounts._acctBackend / boot-restore's `m.backend ||
@@ -137,6 +145,12 @@ const { quotaVerdict } = require('../account-pool-auto.js'); // THE account-usab
 const { loginUsable, loginBucketLabel, loginAgeText, loginWallPhrase } = require('../login-expiry.js'); // PURE: is this member's LOGIN SESSION still alive (2026-09-07)
 const { UsageEstimator, overlayCache: estOverlayCache, predictCalib, CLAUDE_MAX_PRIOR_FULL_USD } = require('../usage-estimator.js');
 const usageAnchors = new UsageAnchors({ dataDir: path.join(rootDir, 'data') });
+// READ-ONLY view of the transition ledger. The single WRITER is accounts.js
+// (every re-point goes through ensureSessionPoolLink / setPoolTarget — spawn,
+// engine, manual route, signed-out self-heal, account removal), so no caller
+// here can create a hole by forgetting to record one.
+const slotTransitions = new SlotTransitions({ dataDir: path.join(rootDir, 'data') });
+app.locals.slotTransitions = slotTransitions;
 // Which caches map to which identity (org-merge aware) — shared by the sweep
 // and the estimator's per-account resolution. Reads roster + cache files only.
 function usageIdentityGroups() {
@@ -428,15 +442,25 @@ function resolveUsageKey(session) {
   let acct = session._accountId || null;
   try {
     if (acct && accounts.get(acct)?.type === 'pooled') {
-      // VALUES follow the observation (B-b3cd): a utilization number
-      // describes whatever token produced it, so the live odometer, probe
-      // matching and every cache key derived here take the observed member.
-      // No observation ⇒ the link. BLOCKING decisions deliberately do NOT
-      // come through here — they read sessionBillingMember (2026-09-07).
-      acct = sessionReadingMember(session, acct).id || acct;
+      // THE CREDENTIAL SLOT, for VALUES too (2026-09-07 — the second half of
+      // the same correction that moved rejections off the observation).
+      // A utilization number does describe whatever token produced it; the
+      // refuted step was believing OTel's organization.id NAMES that token.
+      // It names the identity the CLI cached at SPAWN, while the credential
+      // file it re-reads (mtime-gated, 2.1.257 rpe()) is the link's — so
+      // "follow the observation" filed every hot-switched session's readings
+      // under the account it started on. The link, slot-validated, is the
+      // only identity we can actually prove is being read.
+      acct = sessionBillingMember(session, acct).id || acct;
     }
   } catch {}
-  return acct || '__global__';
+  // The two CLIs' machine logins are DIFFERENT identities and always were —
+  // the ledger has keyed them apart since P1 (`ev.be === 'codex' ?
+  // '__global_codex__' : '__global__'`). A bare '__global__' here sent an
+  // account-less codex session's readings into the CLAUDE global identity;
+  // it only stayed invisible because the codex producers carried their own
+  // key resolver. Now that ONE reading resolver serves both, it must know.
+  return acct || (session?.backend === 'codex' ? '__global_codex__' : '__global__');
 }
 function writeUsageCacheForKey(key, parsed) {
   try {
@@ -515,30 +539,43 @@ function usageCacheKeyFor(session) {
 // Passive quota capture from the CLI's own rate_limit_event records (B-e5c9,
 // 2.289.0) — ONE shared implementation (src/rate-limit-capture.js) for local
 // AND remote chat sessions; the caller resolves key/identity as parameters.
-// ORG VERIFICATION (B-b3cd, the odometer-flap fix): a hot-switched pool
-// session keeps its old token for ≥25min, so its quota signals (rate_limit_
-// event readings, limit banners) describe the OLD org's buckets — written
-// under the newly-linked account they flapped a half-empty account's 7d
-// odometer 48↔95 (34% of this source's anchors jumped >10pt vs a <1h-old
-// panel reading; magnitude alone can't gate this — parallel workflows really
-// can move >10pt/h, owner-confirmed). The OTel truth stream names the org
-// each session's requests actually bill: when it names a DIFFERENT identity
-// than the link, the reading/mark belongs to the observed org's account —
-// re-attribute the cache key. No observation (OTel absent/remote) or an
-// observed-but-unmapped org ⇒ attribute by link, exactly the old behavior.
-function orgVerifiedKey(session, key, what) {
+// ── THE OBSERVATION IS CORROBORATION, NEVER THE KEY (2026-09-07) ───────────
+// REFUTED AND REMOVED: `orgVerifiedKey(session, key, what)`. B-b3cd's premise
+// was "a hot-switched pool session keeps its old token for ≥25min, so its
+// quota signals describe the OLD org's buckets" — and its fix re-attributed
+// every reading to the OTel-observed org. The owner's post-mortem killed the
+// premise for BLOCKING on 2026-09-07 (2.369.66) and for VALUES with the same
+// evidence: `organization.id` is the identity the CLI cached in its config
+// dir at SPAWN, and the credential file IS re-read on an mtime bump, which is
+// precisely what the pool's re-point does. So the rule filed a session's
+// readings under the account it was SPAWNED on for the rest of its life. On
+// this instance that meant a member whose login had been WIPED on 09-02 kept
+// receiving limit-banners and Fable-bucket readings until 09-07, and — the
+// silent half — a Fish-billed session spawned under B-Stack filed Fish's
+// numbers under B-Stack, poisoning both panels, both anchor streams and the
+// learned rates.
+// What replaces it: readingSlotFor() (the validated credential slot, pinned
+// for the turn). What survives: this — the divergence is LOGGED and
+// telemetered, so a disagreement is still visible and still investigable; it
+// simply never decides where a number lands.
+function corroborateReading(session, key, what) {
   try {
-    const obs = getOtelIngest()?.observedOrgFor?.(session.claudeSessionId);
-    if (obs && obs.acct && Date.now() - (obs.ts || 0) < 30 * 60e3) {
-      const members = usageIdentityAccountIds(key) || [];
-      if (!members.includes(obs.acct)) {
-        global.__vsEvent?.('usage-reading-reattributed', `${what}:${key}→${obs.acct}`);
-        return obs.acct;
-      }
+    const obs = getOtelIngest()?.observedOrgFor?.(session?.claudeSessionId);
+    if (!obs || !obs.acct || Date.now() - (obs.ts || 0) >= OBSERVED_ORG_RECENT_MS) return null;
+    const members = usageIdentityAccountIds(key) || [];
+    if (members.includes(obs.acct)) return { agree: true, observed: obs.acct };
+    // one line per session per 10min (the same floor noteDivergence uses)
+    const sid = session?._webuiId || session?.claudeSessionId || '?';
+    const now = Date.now();
+    if (now - (_readingDivergeAt.get(sid) || 0) > 10 * 60e3) {
+      _readingDivergeAt.set(sid, now);
+      console.log(`[usage] ${what}: filed on the credential slot ${nameOf(key)} while OTel last observed ${nameOf(obs.acct)} (spawn-time identity — corroboration only)`);
     }
-  } catch { }
-  return key;
+    global.__vsEvent?.('usage-reading-observation-diverged', `${what}:${key}≠${obs.acct}`);
+    return { agree: false, observed: obs.acct };
+  } catch { return null; }
 }
+const _readingDivergeAt = new Map(); // sid → last corroboration log
 const nameOf = (id) => { try { return (id && accounts.get(id)?.name) || id || '?'; } catch { return id || '?'; } };
 /** The pool member the OTel truth stream last SAW this session's requests on
  *  — i.e. the identity the CLI cached at spawn, not necessarily the one whose
@@ -570,18 +607,14 @@ function noteDivergence(session, observedId, linkedId) {
   }
   return true;
 }
-/** Where a pooled session's quota READINGS belong: the observed member when
- *  the OTel truth names one, else its link. VALUES only (resolveUsageKey →
- *  the live odometer, probe-session matching, derived cache keys) — B-b3cd's
- *  odometer-flap defence. It deliberately does NOT decide anything about
- *  BLOCKING any more; that is sessionBillingMember. */
-function sessionReadingMember(session, poolId) {
-  let linkedId = null;
-  try { linkedId = accounts.poolCurrentFor(poolId, session?._webuiId || null) || null; } catch { }
-  const observedId = observedMemberFor(session, poolId);
-  const divergent = noteDivergence(session, observedId, linkedId);
-  return { id: observedId || linkedId, linkedId, observedId, divergent };
-}
+// REFUTED AND REMOVED (2026-09-07): `sessionReadingMember` — "the observed
+// member when the OTel truth names one, else its link". There is no longer a
+// reading member DIFFERENT from the billing member: both questions have the
+// same answer, the validated credential slot, because that is the only
+// identity we can prove the process is reading. Keeping two functions was the
+// bug's home — one of them had to be wrong, and the one that was wrong owned
+// every VALUE on the instance. `sessionBillingMember` is now THE resolver;
+// `observedMemberFor` survives as corroboration.
 /** TOKEN-SLOT VALIDATION: is the credential slot this session's CLI reads
  *  really `linkedId`'s? The slot is the per-session symlink (or the pool's
  *  default link for a session that has none) — `poolCurrentFor` resolves the
@@ -593,13 +626,49 @@ function sessionReadingMember(session, poolId) {
 function validateBillingSlot(poolId, linkedId) {
   if (!linkedId) return { ok: false, reason: 'no-slot' };            // no link, or it resolves to no known account (poolCurrentFor readlinks it)
   try {
-    // poolMembers() is the ONE authority here and it already filters by
-    // loggedIn — a separate credentials leg would be an unsatisfiable guard
-    // (it can only disagree with itself), i.e. deleted functionality wearing
-    // a check's clothes.
+    // poolMembers() filters by `loggedIn`, which is a BOOLEAN over four
+    // different credential states — 2.369.66 read that as "a separate
+    // credentials leg is unsatisfiable". It is not: `loggedIn` is TRUE for a
+    // login whose access token AND refresh token have both expired
+    // (parseClaudeAuth only nulls the accessToken field), so that member stays
+    // a candidate and a slot pointing at it validates. That is a satisfiable
+    // gap and it is the one that lets dead-account readings look authorised —
+    // hence the explicit state leg below, ONE implementation shared with the
+    // panels and the migration (src/login-state.js).
     if (!(accounts.poolMembers(poolId) || []).some((m) => m.id === linkedId)) return { ok: false, reason: 'slot-not-a-member' };
+    const st = memberLoginState(linkedId);
+    if (st && !st.usable) return { ok: false, reason: 'slot-' + st.state }; // slot-wiped / slot-expired / slot-missing / slot-unreadable
   } catch { return { ok: false, reason: 'slot-unreadable' }; }
   return { ok: true, reason: null };
+}
+/** The credential state of one CLAUDE account key (src/login-state.js — the
+ *  shared reader; also what the panels and the migration read, one
+ *  implementation). null = "no opinion": a pseudo key ('__global__', 'host-…'),
+ *  a codex account (its slot machinery does not exist — capsOf('codex')
+ *  .hotSwitch is 'impossible', so there is no re-point to be wrong about), or
+ *  an unreadable roster.
+ *  MEMOIZED ON THE FILE, NOT ON A CLOCK: per-record producers must not re-read
+ *  and re-parse on every reading, but a TIME box would keep answering "signed
+ *  out" for N seconds after a re-login — and this answer gates switch targets
+ *  and the panel's warning. The stat is the cheap half; keying on mtime+size
+ *  makes a credential change visible on the very next call. */
+const _loginStateMemo = new Map();
+function memberLoginState(id) {
+  if (!id || typeof id !== 'string' || !/^sub-/.test(id)) return null;
+  let fp = null;
+  try {
+    if ((accounts.get(id)?.backend || 'claude') !== 'claude') return null;
+    fp = accounts.subCredsPath(id);
+  } catch { return null; }
+  let sig = 'none';
+  try { const st = fs.statSync(fp); sig = `${st.mtimeMs}:${st.size}`; } catch { }
+  const hit = _loginStateMemo.get(id);
+  if (hit && hit.sig === sig) return hit.st;
+  let st = null;
+  try { st = loginState(fp, { backend: 'claude' }); } catch { st = null; }
+  _loginStateMemo.set(id, { sig, st });
+  if (_loginStateMemo.size > 256) _loginStateMemo.delete(_loginStateMemo.keys().next().value);
+  return st;
 }
 /** THE member a pooled session's requests are BILLED to: its link, validated
  *  against the credential slot. Every blocking decision uses this — the wall's
@@ -668,6 +737,51 @@ function rejectionSlotFor(session) {
     if (first) return { key: first.key, slotOk: !!first.slot, slotReason: 'turn-pinned' };
   } catch { }
   return wallSlotFor(session);
+}
+/** THE identity a quota READING is attributed to — ONE function for every
+ *  value producer (rate_limit_event readings, limit-banner marks, the codex
+ *  rate_limits_updated snapshot, and any future one). It is `wallSlotFor`'s
+ *  twin and deliberately shares its body: a reading and a rejection are facts
+ *  about the SAME thing, the credential slot the CLI is reading, and the
+ *  entire 2026-09-07 incident is what happens when the two are resolved
+ *  differently (the rejection landed on the slot while the numbers landed on
+ *  the spawn-time org, so the account that was actually being burned looked
+ *  healthy forever and a member wiped five days earlier kept "reporting").
+ *
+ *  PINNED FOR THE TURN, refreshed at the turn boundary, for the same reason
+ *  rejectionSlotFor is: every producer calls maybePoolAutoSwitch the moment it
+ *  writes, so one turn's ~20 readings would otherwise be split across the
+ *  members our own re-points moved to WHILE they were arriving — numbers
+ *  credited to an account that had not served a single request of that turn.
+ *  A re-point reaches the running CLI on its NEXT request (mtime-gated
+ *  re-read), never the reading already in flight; noteTurnEnd clears the pin,
+ *  so a switch is honoured exactly one turn later, which is when it is true.
+ *
+ *  `slotOk` rides along (same meaning as on a rejection: the link resolved to
+ *  a validated, credential-holding member of this pool AT THIS MOMENT). It is
+ *  never a veto here — a reading with an unvalidated slot is still filed on
+ *  the slot, because the alternative is filing it somewhere we can prove is
+ *  wrong; it is carried so the panels can say how sure we are.
+ *
+ *  SHARED DEPENDENCY, stated so nobody has to rediscover it: both pins live
+ *  exactly as long as `noteTurnEnd` says a turn does (claude `result` /
+ *  codex task_complete|task_failed / the ACP turn end — one call site per
+ *  stdout consumer). A turn whose end record never arrives holds its pin, and
+ *  a reading pin held that way keeps filing on a member the pool may have
+ *  left. That is the SAME degradation the rejection pin already accepts, and
+ *  it is deliberately not bounded differently: giving the twins different
+ *  lifetimes would re-create the two-answers-one-question shape this change
+ *  exists to remove, and a time box would be a cliff (2.369.63's lesson). If
+ *  this ever needs a belt, it belongs on noteTurnEnd — one bound, both pins. */
+function readingSlotFor(session, at = Date.now()) {
+  try {
+    const pin = session && session._turnReadingSlot;
+    if (pin && pin.key) return { key: pin.key, slotOk: !!pin.slotOk, slotReason: 'turn-pinned', at: pin.at };
+  } catch { }
+  const fresh = wallSlotFor(session);
+  const out = { key: fresh.key, slotOk: !!fresh.slotOk, slotReason: fresh.slotReason, at };
+  try { if (session && out.key) session._turnReadingSlot = { key: out.key, slotOk: out.slotOk, at }; } catch { }
+  return out;
 }
 /** The identity + label a CONTINUE fired into this session would land on —
  *  auto-resume's `fireIdentity` dep. Deliberately wallKeyFor: the breaker's
@@ -819,6 +933,10 @@ function noteTurnEnd(session) {
   const sigs = session._turnWallSigs || [];
   const workAfter = session._turnWorkAfterSig || 0;
   session._turnWallSigs = []; session._turnWorkAfterSig = 0;
+  // the READING pin dies with the turn for exactly the reason the rejection
+  // pin does: a re-point reaches the running CLI on its next request, so the
+  // next turn is the first one it can be true for (readingSlotFor)
+  session._turnReadingSlot = null;
   if (sigs.length && workAfter <= 1) {
     // BLOCKED entry owns this turn's pool evaluation (B-2c9b): it runs AFTER
     // the demotion + the arm, so the link moves in the same tick and a hot
@@ -1137,20 +1255,17 @@ function recordRateLimitEvent(session, msg) {
     // Session-scoped actions below (pool switch, auto-resume) stay on THIS
     // session regardless of re-attribution: it is genuinely blocked no
     // matter whose bucket filled.
-    // A REJECTION is a fact about the credential SLOT the CLI reads (the
-    // validated link) — a READING is a fact about whatever token produced its
-    // numbers, which is where orgVerifiedKey's observed-org routing belongs
-    // (B-b3cd odometer flap, unchanged). Mixing the two put every rejection on
-    // the spawn-time org and left the linked member reading "healthy"
-    // forever — the 2026-09-07 fire loop.
-    // rejectionSlotFor, not wallSlotFor: a rejection's OTHER records (the
-    // banner, the workflow-agent banner) arrive after this one has already
-    // moved the link — the slot is pinned for the turn (r3).
-    const slot = ev.status === 'rejected' ? rejectionSlotFor(session) : null;
-    const key = slot && slot.key
-      ? slot.key
-      : orgVerifiedKey(session, usageCacheKeyFor(session), 'rate-limit-event:' + ev.kind);
-    const r = captureRateLimitEvent({ cacheDir: USAGE_CACHE_DIR, key, identityIds: usageIdentityAccountIds(key), ev });
+    // BOTH halves are facts about the credential SLOT the CLI reads (the
+    // validated link): a REJECTION through rejectionSlotFor, a READING through
+    // readingSlotFor — turn-pinned twins, because a rejection's other records
+    // and a turn's other readings both arrive after the first one has already
+    // moved the link. The observation only corroborates (it names the identity
+    // cached at SPAWN, so keying on it filed a hot-switched session's numbers
+    // under the account it started on — the 2026-09-07 root cause).
+    const slot = ev.status === 'rejected' ? rejectionSlotFor(session) : readingSlotFor(session);
+    const key = (slot && slot.key) || usageCacheKeyFor(session);
+    const corr = corroborateReading(session, key, 'rate-limit-event:' + ev.kind);
+    const r = captureRateLimitEvent({ cacheDir: USAGE_CACHE_DIR, key, identityIds: usageIdentityAccountIds(key), ev, corroborated: corr ? corr.agree : undefined });
     if (r.unknownType) { global.__vsEvent?.('rate-limit-event-unknown-type', r.unknownType); return; }
     global.__vsEvent?.('rate-limit-event', `${key}:${ev.kind}:${ev.status}${r.wroteReading ? ':reading' : ''}`);
     // a reading busts the estimator memo via fetchedAt and becomes an anchor
@@ -1185,14 +1300,18 @@ function recordCodexQuotaSignal(session, payload) {
     const sig = quotaSourceFor(session.backend).signalFromStream({ type: 'event_msg', payload });
     const writeSnap = (snap) => {
       if (!snap) return null;
-      let key = session._accountId || '__global_codex__';
-      // a pool wrapper never owns quota — the reading belongs to the CURRENT member
-      try { const a = accounts.get(key); if (a && a.type === 'pooled') key = accounts.poolCurrentFor(key, session._webuiId) || accounts.poolCurrent(key) || key; } catch { }
+      // ONE attribution function for readings (2026-09-07): the codex snapshot
+      // is a VALUE like every other, so it goes through the same turn-pinned
+      // validated slot instead of re-deriving "the pool's current member" per
+      // record. codexQuotaKeyFor is the un-pinned twin (probe matching).
+      const key = readingSlotFor(session).key || codexQuotaKeyFor(session);
       try {
         fs.mkdirSync(USAGE_CACHE_DIR, { recursive: true });
         const f = path.join(USAGE_CACHE_DIR, String(key).replace(/[^\w.-]/g, '_') + '.json');
         let cur = null; try { cur = JSON.parse(fs.readFileSync(f, 'utf-8')); } catch { }
         if (!cur || (Number(cur.fetchedAt) || 0) < (Number(snap.fetchedAt) || 0)) {
+          // codex has no OTel channel, so there is nothing to corroborate WITH:
+          // the label is deliberately absent rather than a fabricated `true`
           fs.writeFileSync(f + '.tmp', JSON.stringify(snap)); fs.renameSync(f + '.tmp', f);
         }
       } catch { }
@@ -1307,7 +1426,8 @@ function markLimitBanner(session, text) {
     // whose first record already re-pointed the link, so asking for the slot
     // fresh here marked the member the pool had just moved TO.
     const slot = rejectionSlotFor(session);
-    const key = slot.key || orgVerifiedKey(session, usageCacheKeyFor(session), 'limit-banner');
+    const key = slot.key || readingSlotFor(session).key || usageCacheKeyFor(session);
+    const corr = corroborateReading(session, key, 'limit-banner');
     const nowSec = Math.floor(Date.now() / 1000);
     const bump = (b, fallbackResetSec) => ({
       ...(b || {}),
@@ -1344,6 +1464,7 @@ function markLimitBanner(session, text) {
     }
     const cache = applyHit(base ? { ...base } : {});
     cache.fetchedAt = Date.now(); cache.source = 'limit-banner';
+    if (corr) cache.corroborated = !!corr.agree; else delete cache.corroborated;
     fs.mkdirSync(USAGE_CACHE_DIR, { recursive: true });
     const f = fileFor(key);
     fs.writeFileSync(f + '.tmp', JSON.stringify(cache)); fs.renameSync(f + '.tmp', f);
@@ -1479,10 +1600,22 @@ function memberAuthFailed(id) {
   if (credsTokenSig(id) !== m.tok) { _memberAuthFail.delete(id); return false; } // token CHANGED = re-login/refresh — give it another chance
   return true;
 }
+/** Switch CANDIDATES. Two filters with deliberately different escape hatches:
+ *  · CREDENTIAL STATE is a HARD exclusion (2026-09-07) — `poolMembers()` keeps
+ *    a member whose access AND refresh tokens have both expired, because
+ *    `parseAuth` reports loggedIn:true for it (it only nulls the accessToken),
+ *    and `ensureSessionPoolLink` would happily point a conversation at it.
+ *    Moving a session onto credentials that cannot authorize a request is not
+ *    "routing around a dead account", it IS the dead account — so there is no
+ *    fallback here: an all-unusable pool returns EMPTY and decidePoolSwitch's
+ *    `no-members` says so loudly, which is the state only the user can fix.
+ *  · an auth-FAILURE mark is a live inference (10min TTL, cleared by a token
+ *    change), so it keeps its 2.335.0 escape: every member marked means the
+ *    marks are wrong more likely than the pool is dead — let quota speak. */
 function healthyPoolMembers(poolId) {
-  const all = accounts.poolMembers(poolId);
-  const ok = all.filter((m) => !memberAuthFailed(m.id));
-  return ok.length ? ok : all; // every member marked = marks are wrong or the pool is truly dead; let quota logic speak
+  const usable = (accounts.poolMembers(poolId) || []).filter((m) => { const st = memberLoginState(m.id); return !st || st.usable; });
+  const ok = usable.filter((m) => !memberAuthFailed(m.id));
+  return ok.length ? ok : usable;
 }
 
 // A running session's CLI reported an AUTH-class API failure (401×2+/403/ban/
@@ -1526,7 +1659,9 @@ function notePoolAuthFailure(session, sid, info = {}) {
       try { global.__vsEvent?.('pool-member-auth-failed', { detail: `${memberId}: ${why}` }); } catch { }
     }
     const memberName = accounts.get(memberId)?.name || memberId;
-    const alive = accounts.poolMembers(poolId).filter((m) => m.id !== memberId && !memberAuthFailed(m.id));
+    // same rule as healthyPoolMembers: an evicted session may not be moved onto
+    // credentials that cannot authorize a request (2026-09-07)
+    const alive = healthyPoolMembers(poolId).filter((m) => m.id !== memberId);
     if (!alive.length) {
       serverNotice(`pool-authfail-stuck-${memberId}-${Math.floor(now / 3600000)}`,
         `Pool "${a.name}": account ${memberName} ${loginDead ? why : `is failing authentication (${why})`} and no other member can take over — re-login or replace it in Manage Agents.`, { level: 'warn' });
@@ -1536,9 +1671,9 @@ function notePoolAuthFailure(session, sid, info = {}) {
     const to = (ranked[0] && ranked[0].id) || alive[0].id;
     const toName = accounts.get(to)?.name || to;
     const hasOwnLink = (() => { try { fs.lstatSync(accounts.sessionPoolLinkPath(poolId, sid)); return true; } catch { return false; } })();
-    if (hasOwnLink) accounts.ensureSessionPoolLink(poolId, sid, to);
+    if (hasOwnLink) accounts.ensureSessionPoolLink(poolId, sid, to, { why: 'auth-failure' });
     const defaultMoved = accounts.poolCurrent(poolId) === memberId;
-    if (defaultMoved) accounts.setPoolTarget(poolId, to);
+    if (defaultMoved) accounts.setPoolTarget(poolId, to, { why: 'auth-failure' });
     _poolSwitchAt.set(poolId + ':' + sid, now); // keep the quota pass's dwell belt consistent with this move
     try { recordUsageAttribution({ claudeSessionId: session.claudeSessionId || session.backendSessionId, accountId: poolId }); } catch { }
     if (now - (_authNoticeAt.get(memberId) || 0) > 60000) {
@@ -1668,7 +1803,7 @@ function maybePoolAutoSwitchForPool(poolId) {
       if (now - lastS < 180000 && ds.reason !== 'login-expired' && !(ds.fromRemaining != null && ds.fromRemaining < POOL_HARD_PCT)) continue;
       _poolSwitchAt.set(dwellKey, now);
       try {
-        accounts.ensureSessionPoolLink(poolId, sid, ds.to);
+        accounts.ensureSessionPoolLink(poolId, sid, ds.to, { why: 'per-session-switch' });
         try { recordUsageAttribution({ claudeSessionId: s2.claudeSessionId || s2.backendSessionId, accountId: poolId }); } catch { }
         const toName = accounts.get(ds.to)?.name || ds.to;
         // a same-target re-point (observed ≠ linked, the link was already on
@@ -1733,7 +1868,7 @@ function maybePoolAutoSwitchForPool(poolId) {
     if (now - lastSwitch < 180000 && d.reason !== 'login-expired' && !(d.fromRemaining != null && d.fromRemaining < POOL_HARD_PCT)) return; // dead login = hard death, same exemption
     _poolSwitchAt.set(poolId, now);
     _poolAutoLast.set(poolId, now);
-    accounts.setPoolTarget(poolId, d.to);
+    accounts.setPoolTarget(poolId, d.to, { why: 'pool-switch' });
     // Re-attribute every live session on this pool from this moment — the
     // ledger's by-time attribution resolves pool → current target at record
     // time, so a fresh record moves subsequent requests to the new account.
@@ -1827,7 +1962,7 @@ function maybeStopOnFallback(session, id, from, to) {
     poolChooserForModel, poolReadCache, probeUsageForAccountKey,
     noteSessionProduced, noteTurnEnd, noteWallSignal, beforeAutoResumeFire, quotaVerdictFor, probeUsageViaSession, recordRateLimitEvent, recordCodexQuotaSignal, resolveUsageKey,
     probeQuotaForKey, quotaSourceFor, quotaBackendFor, // S4 caps-routed quota probe + the per-harness QuotaSignalSource lookup (functional seams for test-quota-source)
-    observedMemberFor, sessionReadingMember, sessionBillingMember, wallKeyFor, rejectionSlotFor, nearArmVeto, fireIdentityFor, demoteWalledAccount, wallCount, sessionWalledMembers,
+    observedMemberFor, sessionBillingMember, wallKeyFor, rejectionSlotFor, readingSlotFor, corroborateReading, memberLoginState, healthyPoolMembers, slotTransitions, nearArmVeto, fireIdentityFor, demoteWalledAccount, wallCount, sessionWalledMembers,
     _wallRing, _sessionWalls, OBSERVED_ORG_RECENT_MS, WALL_RING_MS, SESSION_WALL_MS, // wall-ground-truth + token-slot + session-wall seams (test-auto-resume §11, test-auto-resume-loop)
     _poolAutoLast, _poolSwitchAt, // the eval gate (10s) + dwell belt (180s) are WALL-CLOCK: a suite winds them back instead of sleeping through them
     sessionModelFor, sweepUsageAnchors, usageCacheKeyFor,

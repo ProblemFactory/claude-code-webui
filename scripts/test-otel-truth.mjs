@@ -3,12 +3,12 @@
 // 1. PARSER — OTLP JSON logs → truth records (fixture shape captured from a
 //    REAL 2.1.235 payload, identities sanitized; encoding tolerances pinned).
 // 2. INGEST — real express + real HTTP: loopback+token gate, stash append,
-//    dedup, corrective attribution on mismatch (incl. org flip re-write),
+//    dedup, DISAGREEMENT counting on mismatch (the corrective-attribution
 //    unknown-org honesty, envFor on/off.
 // 3. BAKE — a REAL UsageHistory scan over a fake $HOME transcript: the
-//    truthLookup override lands the OBSERVED acct in the persisted shard.
+//    seam is deliberately unwired — see the 2026-09-07 block below).
 // 4. WIRING PINS — the 2.331.0 dead-fix lesson: injection gate in ws-create,
-//    contract key, auth exemption, server routes + setTruthLookup all grepped.
+//    contract key, auth exemption, server routes grepped.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -104,55 +104,65 @@ const PAYLOAD = (recs) => ({
   ok((await post(PAYLOAD([REC()]), 'WRONG')).status === 403, 'bad token → 403 (the only gate — cookie middleware exempts /otel/)');
   const r1 = await post(PAYLOAD([REC()]));
   ok(r1.status === 200, 'valid ingest → 200', r1.body);
-  ok(ingest.truthLookup('req_011TESTTRUTH000000000001') === 'sub-true', 'truth map: rid → resolved account');
-  ok(ingest.truthLookup('req_unknown') === undefined, 'no truth → undefined (bake falls back to attribution walk)');
-  ok(attribCalls.length === 1 && attribCalls[0].acct === 'sub-true' && attribCalls[0].sid && attribCalls[0].pool === 'pool-1', 'mismatch → ONE corrective attribution record (pool tag preserved)', JSON.stringify(attribCalls));
+  ok(ingest.observedOrgForRid('req_011TESTTRUTH000000000001') === 'sub-true', 'rid → resolved observed org (DIAGNOSTIC since 2026-09-07 — the map is kept, it just decides nothing)');
+  ok(ingest.observedOrgForRid('req_unknown') === undefined, 'no observation → undefined');
+  ok(attribCalls.length === 0, 'REFUTED AND REMOVED: a mismatch writes NO corrective attribution record — organization.id is the identity the CLI cached at SPAWN, so the correction booked a hot-switched session\'s spend to the account it started on forever', JSON.stringify(attribCalls));
+  ok(JSON.parse(fs.readFileSync(path.join(dir, 'usage-history', 'otel-truth.ndjson'), 'utf-8').trim().split('\n')[0]).agreed === false, 'the stash row RECORDS the disagreement (offline-forever evidence) instead of acting on it');
   await post(PAYLOAD([REC()]));
-  ok(attribCalls.length === 1, 'duplicate rid → no second correction, no re-append');
+  ok(attribCalls.length === 0, 'duplicate rid → still nothing written, no re-append');
   const stash = fs.readFileSync(path.join(dir, 'usage-history', 'otel-truth.ndjson'), 'utf-8').trim().split('\n');
-  ok(stash.length === 1 && JSON.parse(stash[0]).acct === 'sub-true', 'stash has ONE truth line with resolved acct');
+  ok(stash.length === 1 && JSON.parse(stash[0]).acct === 'sub-true', 'stash has ONE observation line with resolved acct');
   // org flips back to the configured one → correction must RE-write
   groups.set('org:aaaaaaaa-0000-0000-0000-000000000000', { accountIds: ['sub-configured'], accountId: 'sub-configured' });
   await post(PAYLOAD([REC({ 'organization.id': { stringValue: 'aaaaaaaa-0000-0000-0000-000000000000' }, request_id: { stringValue: 'req_flip2' } })]));
-  ok(attribCalls.length === 1 && ingest.truthLookup('req_flip2') === 'sub-configured', 'truth agreeing with current attribution → NO corrective write');
+  ok(attribCalls.length === 0 && ingest.observedOrgForRid('req_flip2') === 'sub-configured', 'observation agreeing with the attribution walk → nothing to report');
   // unknown org: stashed as unknown, no truth entry, no correction
   await post(PAYLOAD([REC({ 'organization.id': { stringValue: 'ffffffff-9999-9999-9999-999999999999' }, 'user.email': { stringValue: 'nobody@nowhere.io' }, request_id: { stringValue: 'req_unknownorg' } })]));
-  ok(ingest.truthLookup('req_unknownorg') === undefined && attribCalls.length === 1, 'UNKNOWN org → no truth override, no correction');
+  ok(ingest.observedOrgForRid('req_unknownorg') === undefined && attribCalls.length === 0, 'UNKNOWN org → no map entry, nothing written');
   ok(JSON.parse(fs.readFileSync(path.join(dir, 'usage-history', 'otel-truth.ndjson'), 'utf-8').trim().split('\n').pop()).acctKnown === false, 'unknown org still stashed (acctKnown:false — offline re-derivable)');
   // email fallback
   await post(PAYLOAD([REC({ 'organization.id': { stringValue: 'bbbbbbbb-0000-0000-0000-000000000000' }, 'user.email': { stringValue: 'Mail@Example.com' }, request_id: { stringValue: 'req_mail' } })]));
-  ok(ingest.truthLookup('req_mail') === 'sub-mail', 'org unknown but roster email matches → email-fallback resolution');
+  ok(ingest.observedOrgForRid('req_mail') === 'sub-mail', 'org unknown but roster email matches → email-fallback resolution');
   // ── review-caught cases (adversarial pass, 2.361.0) ──
   // ① '__global__' is a TRUTHY pseudo-id and may come FIRST in the group
   //    (live production shape on this machine) — resolveOrg must skip it.
   groups.set('org:cccccccc-0000-0000-0000-000000000000', { accountIds: ['__global__', 'sub-named'], accountId: null });
   await post(PAYLOAD([REC({ 'organization.id': { stringValue: 'cccccccc-0000-0000-0000-000000000000' }, request_id: { stringValue: 'req_gmix' } })]));
-  ok(ingest.truthLookup('req_gmix') === 'sub-named', "'__global__'-first group resolves to the NAMED sub, never the pseudo-id");
+  ok(ingest.observedOrgForRid('req_gmix') === 'sub-named', "'__global__'-first group resolves to the NAMED sub, never the pseudo-id");
   // ② global-ONLY org → truth null; a global session (walk null) must get NO
-  //    bogus corrective record.
+  //    bogus record of any kind.
   groups.set('org:dddddddd-0000-0000-0000-000000000000', { accountIds: ['__global__'], accountId: null });
   const before2 = attribCalls.length;
   curAcct = null;
   await post(PAYLOAD([REC({ 'organization.id': { stringValue: 'dddddddd-0000-0000-0000-000000000000' }, request_id: { stringValue: 'req_gonly' } })]));
-  ok(ingest.truthLookup('req_gonly') === null && attribCalls.length === before2, 'global-only org → truth null, NO corrective write for a global session');
-  // ③ the CANONICAL sequence: agree → pool hot-switch → stale CLI. The
-  //    agreement phase must NOT arm the dedup into suppressing the correction.
+  ok(ingest.observedOrgForRid('req_gonly') === null && attribCalls.length === before2, 'global-only org → resolves to null, still nothing written');
+  // ③ THE CANONICAL SEQUENCE, AND WHAT IT MEANS NOW (2026-09-07). agree →
+  //    pool hot-switch → the CLI keeps REPORTING the old org. Until this date
+  //    the third step wrote a corrective attribution record; the owner's
+  //    post-mortem refuted the premise (organization.id = the identity cached
+  //    at SPAWN, while the credential file IS re-read on the re-point's mtime
+  //    bump), so the sequence now produces a COUNTED, LOGGED disagreement and
+  //    zero writes. The scenario is kept verbatim — it is the record of a
+  //    refuted rule, not dead weight.
   const orgT = 'eeeeeeee-0000-0000-0000-000000000000';
   groups.set('org:' + orgT, { accountIds: ['sub-A'], accountId: 'sub-A' });
-  curAcct = 'sub-A'; // walk agrees with truth — steady state, no write
+  curAcct = 'sub-A'; // walk agrees with the observation — steady state
   await post(PAYLOAD([REC({ 'organization.id': { stringValue: orgT }, request_id: { stringValue: 'req_agree1' } })]));
   const afterAgree = attribCalls.length;
   ok(afterAgree === before2, 'agreement phase writes nothing');
-  curAcct = 'sub-B'; // pool hot-switch: link-intent now says B, CLI still bills A
-  curLastTs = Date.parse('2026-08-20T01:20:36.189Z') + 60000; // switch entry NEWER than the event ts
+  const disagreedBefore = ingest.stats().disagreed;
+  curAcct = 'sub-B'; // pool hot-switch: the link (and the credentials) are B now
+  curLastTs = Date.parse('2026-08-20T01:20:36.189Z') + 60000;
   await post(PAYLOAD([REC({ 'organization.id': { stringValue: orgT }, request_id: { stringValue: 'req_stale1' } })]));
-  ok(attribCalls.length === afterAgree + 1 && attribCalls.at(-1).acct === 'sub-A', 'stale-token mismatch AFTER agreement still writes the correction (the headline scenario)');
-  ok(attribCalls.at(-1).ts === curLastTs + 1, 'corrective ts bumped past the newest attribution entry (late flush still dominates the walk)');
-  curAcct = 'sub-C'; // second switch while STILL stale on A: new (truth→walk) pair must re-write
+  ok(attribCalls.length === afterAgree, 'the headline scenario writes NOTHING — the walk (credential link) keeps the attribution');
+  ok(ingest.stats().disagreed === disagreedBefore + 1, '…and the divergence is COUNTED (visible, investigable, never authoritative)');
+  const lastStash = () => JSON.parse(fs.readFileSync(path.join(dir, 'usage-history', 'otel-truth.ndjson'), 'utf-8').trim().split('\n').pop());
+  ok(lastStash().attributed === 'sub-B' && lastStash().agreed === false, 'the stash row carries BOTH identities so the refutation stays analyzable offline', JSON.stringify(lastStash()));
+  curAcct = 'sub-C'; // second switch while the CLI still reports A
   await post(PAYLOAD([REC({ 'organization.id': { stringValue: orgT }, request_id: { stringValue: 'req_stale2' } })]));
-  ok(attribCalls.length === afterAgree + 2 && attribCalls.at(-1).acct === 'sub-A', 'a SECOND hot-switch during the same stale window re-writes (pair-keyed dedup)');
+  ok(attribCalls.length === afterAgree && ingest.stats().disagreed === disagreedBefore + 2, 'a SECOND switch reports a NEW pair (pair-keyed dedup kept: an acct-only marker would hide the next switch)');
   await post(PAYLOAD([REC({ 'organization.id': { stringValue: orgT }, request_id: { stringValue: 'req_stale3' } })]));
-  ok(attribCalls.length === afterAgree + 2, 'same (truth→walk) pair repeats → deduped');
+  ok(ingest.stats().disagreed === disagreedBefore + 2, 'the same (observed→attributed) pair repeating is one fact, logged once');
   curAcct = 'sub-configured'; curLastTs = 0;
   // ④ observedOrgFor (B-b3cd): rate_limit_event capture verifies a reading's
   // org against the session's OBSERVED billing org before writing it into an
@@ -172,12 +182,16 @@ const PAYLOAD = (recs) => ({
   settingVal = undefined;
   // boot replay: a fresh instance over the same dataDir re-learns the truth map
   const ingest2 = require(REPO + '/src/server/otel-ingest.js').create({ dataDir: dir, PORT: 0, getUsageHistory: () => fakeUH, identityGroups: () => groups, listAccounts: () => [], serverSetting: () => undefined });
-  ok(ingest2.truthLookup('req_011TESTTRUTH000000000001') === 'sub-true', 'boot replay: stash → truth map survives restarts');
+  ok(ingest2.observedOrgForRid('req_011TESTTRUTH000000000001') === 'sub-true', 'boot replay: stash → observation map survives restarts');
   ok(ingest2.envFor().OTEL_EXPORTER_OTLP_HEADERS === ingest.envFor().OTEL_EXPORTER_OTLP_HEADERS, 'token PERSISTED across boots (surviving sessions keep a valid truth stream)');
   srv.close();
 }
 
-// ── 3. bake path: real UsageHistory scan with a truth override ──
+// ── 3. bake path: the seam still WORKS, but nothing is wired into it ──
+// The override mechanism is exercised here with a synthetic lookup so the seam
+// stays proven for a future per-request identity channel; the wiring pin in §4
+// asserts that server.js hands it NOTHING (2026-09-07 — the only source we
+// ever had names the SPAWN-time identity).
 {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-otel-home-'));
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-otel-data-'));
@@ -204,8 +218,11 @@ const PAYLOAD = (recs) => ({
   const evs = shards.flatMap((f) => fs.readFileSync(path.join(dataDir, 'usage-history', f), 'utf-8').trim().split('\n').map((l) => JSON.parse(l)));
   const ev = evs.find((e) => e.rid === 'req_bake1');
   ok(!!ev, 'scan baked the transcript event', JSON.stringify(shards));
-  ok(ev && ev.acct === 'sub-true' && ev.atype === 'subscription', 'OBSERVED truth overrode link-intent attribution at bake time', JSON.stringify(ev));
-  ok(uh.attribAt(sid, Date.now()).acct === 'sub-configured', 'attribAt exposes the walk (the mismatch the ingest corrects)');
+  ok(ev && ev.acct === 'sub-true' && ev.atype === 'subscription', 'the setTruthLookup seam still overrides the walk at bake time when something IS wired into it', JSON.stringify(ev));
+  ok(uh.attribAt(sid, Date.now()).acct === 'sub-configured', 'attribAt exposes the walk — and with NOTHING wired (production since 2026-09-07) the walk is what bakes');
+  // negative control for the unwiring: same instance, no lookup ⇒ the walk wins
+  const uh2 = new UsageHistory({ dataDir, homeDir: home, resolveAccount: () => null });
+  ok(uh2._truthLookup == null, 'a fresh UsageHistory has NO override until someone wires one (the production shape)');
 }
 
 // ── 4. wiring pins (the 2.331.0 unstaged-wiring class) ──
@@ -216,7 +233,15 @@ const PAYLOAD = (recs) => ({
   ok(read('src/ws-handler.js').includes("'otelEnv',"), 'ws contract carries otelEnv');
   ok(/p\.startsWith\('\/otel\/'\)/.test(read('src/auth.js')), 'auth middleware exempts /otel/ (module gate is the only door)');
   const sv = read('server.js');
-  ok(sv.includes('otelIngest.registerRoutes(app)') && sv.includes('usageHistory.setTruthLookup(otelIngest.truthLookup)') && sv.includes('otelEnv: otelIngest.envFor'), 'server.js wires routes + truthLookup + spawn env');
+  const oi0 = read('src/server/otel-ingest.js');
+  ok(sv.includes('otelIngest.registerRoutes(app)') && sv.includes('otelEnv: otelIngest.envFor'), 'server.js wires routes + spawn env');
+  // THE SOURCE PIN (2026-09-07): the observation may never key an attribution
+  // again. A re-wire has to defeat this line on purpose.
+  // Comments are ALLOWED to name the refuted wiring (the record must survive);
+  // only executable lines are pinned, so strip line comments first.
+  const code = (f) => read(f).split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+  ok(!/setTruthLookup\s*\(/.test(code('server.js')), 'server.js EXECUTES no setTruthLookup call at all — the OTel map may never key an attribution again (it names the SPAWN-time identity)');
+  ok(!/\btruthLookup\b/.test(code('src/server/otel-ingest.js')) && /observedOrgForRid\(rid\)/.test(oi0), 'the ingest exports the map under a name that says what it is (observedOrgForRid), so a re-wire cannot be a copy-paste');
   const oi = read('src/server/otel-ingest.js');
   ok(/registerRoutes\(app\)\s*\{[\s\S]*?\/otel\/v1\/logs[\s\S]*?\/otel\/v1\/metrics[\s\S]*?\/otel\/v1\/traces/.test(oi), 'the module registers all three OTLP signals itself');
   // arrival counters (2.367.1): "the CLI exported nothing" and "we dropped what
@@ -225,7 +250,7 @@ const PAYLOAD = (recs) => ({
   ok(oi.includes('arrivals.posts++') && oi.includes('arrivals.rejected++') && /stats\(\)\s*\{ return \{[^}]*\.\.\.arrivals/.test(oi), 'ingest counts posts/rejects/kept separately from truth rids');
   ok(oi.includes('arrivals.noRid++') && oi.includes('arrivals.noOrg++') && oi.includes('arrivals.stashed++'), 'and counts WHY a parsed record was dropped (a quiet truth channel was undiagnosable)');
   ok(oi.includes("app.get('/api/otel-stats'"), 'stats are readable over HTTP (the CI gate reads them to classify a miss)');
-  ok(/this\._truthLookup \? this\._truthLookup\(ev\.rid\)/.test(read('src/usage-history.js')), 'usage-history scan consults truthLookup at bake time');
+  ok(/this\._truthLookup \? this\._truthLookup\(ev\.rid\)/.test(read('src/usage-history.js')), 'the bake-time seam survives in usage-history (unwired, not deleted — a real per-request identity channel would be strictly better than the walk)');
 }
 
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);

@@ -24,6 +24,15 @@ const { loginRank } = require('./login-expiry.js'); // PURE: which login is the 
 // "no claim" — the shape every non-declaring harness / non-subscription record
 // answers with. Never 'ok': an unreadable deadline is ignorance, not health.
 const LOGIN_UNKNOWN = () => ({ state: 'unknown', refreshExpiresAt: null, accessExpiresAt: null, msLeft: null });
+// THE SLOT-TRANSITION LEDGER (2026-09-07). A symlink has no history, so nothing
+// that arrives LATE could ask "which member was this conversation on THEN" —
+// and every late consumer (readings, ledger bakes, the repair migration) filled
+// that gap with the org the CLI cached at SPAWN, which is the misattribution
+// this records away. THIS FILE IS THE SINGLE WRITER: `ensureSessionPoolLink`
+// and `setPoolTarget` are the only two functions that move a credential link
+// (spawn, engine, manual route, signed-out self-heal, account removal all go
+// through them), so no caller can create a hole by forgetting to record one.
+const { SlotTransitions } = require('./slot-transitions.js');
 
 class AccountManager {
   constructor({ dataDir, onChange, platform = process.platform }) {
@@ -47,6 +56,7 @@ class AccountManager {
     // codex 0.142.5 (symlinks survive a run; rollout written to shared dir).
     this._codexSubsDir = path.join(dataDir, 'codex-subs');
     this._onChange = onChange || (() => {});
+    this.slotTransitions = new SlotTransitions({ dataDir });
     this._state = { version: 1, defaultAccountId: null, defaultCodexAccountId: null, accounts: [] };
     this._load();
     // Console-login scratch dirs (con-*) are transient; drop any abandoned by a
@@ -715,7 +725,10 @@ class AccountManager {
         for (const l of this.sessionPoolLinks(pool.id)) {
           if (readTarget(l.path) !== removedId) continue;
           const target = this.poolCurrent(pool.id);
-          if (target) require('./account-material.js').repointPoolSymlink(l.path, this.subDir(target), this.subCredsPath(target));
+          if (target) {
+            require('./account-material.js').repointPoolSymlink(l.path, this.subDir(target), this.subCredsPath(target));
+            this._noteSlot({ sessionId: l.sessKey, poolId: pool.id, from: removedId, to: target, why: 'member-removed' });
+          }
           else { try { fs.unlinkSync(l.path); } catch { } }
         }
       } catch (e) { console.warn(`[pool] hygiene after removing ${removedId} failed for ${pool.id}:`, e.message); }
@@ -974,14 +987,23 @@ class AccountManager {
   // reconciled at boot (a link whose session is gone is unlinked).
   poolLinksDir(poolId) { return path.join(this.dataDir, 'pool-links', String(poolId).replace(/[^\w-]/g, '')); }
   sessionPoolLinkPath(poolId, sessKey) { return path.join(this.poolLinksDir(poolId), String(sessKey).replace(/[^\w.-]/g, '')); }
-  ensureSessionPoolLink(poolId, sessKey, memberId) {
+  ensureSessionPoolLink(poolId, sessKey, memberId, { why = 'session-link' } = {}) {
     const target = this.get(memberId);
     if (!target || this._acctType(target) !== 'subscription') throw new Error('not a subscription: ' + memberId);
     if (!this.readSubCreds(memberId).loggedIn) throw new Error('pool member not logged in: ' + target.name);
     const link = this.sessionPoolLinkPath(poolId, sessKey);
+    const from = this.poolCurrentFor(poolId, sessKey); // read BEFORE the re-point — the ledger records a transition, not a state
     fs.mkdirSync(path.dirname(link), { recursive: true });
     require('./account-material.js').repointPoolSymlink(link, this.subDir(memberId), this.subCredsPath(memberId));
+    this._noteSlot({ sessionId: sessKey, poolId, from, to: memberId, why });
     return link;
+  }
+  /** Append one credential re-point to the transition ledger. Never throws —
+   *  a missing record degrades a later attribution to "unknown", it must never
+   *  fail the re-point itself (routing around a dead account is the pool's
+   *  whole job). */
+  _noteSlot({ sessionId = null, poolId = null, from = null, to = null, why = null } = {}) {
+    try { this.slotTransitions.record({ sessionId, poolId, from, to, at: Date.now(), why }); } catch { }
   }
   /** The real account THIS session bills to: its own link's target, else the
    *  pool default. The link IS the state at both granularities. */
@@ -1022,7 +1044,7 @@ class AccountManager {
   // concurrent spawn either sees the old target or the new one, never a gap.
   // The target's creds mtime is bumped because the CLI's credential cache is
   // mtime-gated and two accounts could otherwise share an mtimeMs.
-  setPoolTarget(id, subId, { sweepSessionLinks = false } = {}) {
+  setPoolTarget(id, subId, { sweepSessionLinks = false, why = 'pool-target' } = {}) {
     const a = this.get(id);
     if (!a || this._acctType(a) !== 'pooled') throw new Error('not a pooled account');
     const be = this._acctBackend(a) || 'claude';
@@ -1036,7 +1058,11 @@ class AccountManager {
     // claude cred-cache detail (null for codex — auth.json needs no bump).
     const mat = require('./account-material.js');
     const bump = this._credsOf(be).bumpFile;
+    const fromDefault = this.poolCurrent(id); // BEFORE the re-point
     mat.repointPoolSymlink(this._poolLinkDir(a), this._poolMemberDir(a, subId), bump ? path.join(this._acctDir(be, subId), bump) : null);
+    // sessionId null = the POOL DEFAULT moved; it decides for every session
+    // that has no link of its own, so the ledger's slotAt() falls back to it.
+    this._noteSlot({ sessionId: null, poolId: id, from: fromDefault, to: subId, why });
     // sweepSessionLinks (2.355.0, userW's inc-msz495u6 — "热切换死了"):
     // plan C (2.315.0) gave every live session its OWN link and
     // poolCurrentFor prefers it, which silently DEMOTED the manual target
@@ -1048,8 +1074,9 @@ class AccountManager {
     // model-family projections a blanket sweep would clobber.
     let swept = 0;
     if (sweepSessionLinks) {
-      for (const { path: lp } of this.sessionPoolLinks(id)) {
-        try { mat.repointPoolSymlink(lp, this.subDir(subId), null); swept++; } catch { }
+      for (const { sessKey, path: lp } of this.sessionPoolLinks(id)) {
+        const fromLink = this.poolCurrentFor(id, sessKey);
+        try { mat.repointPoolSymlink(lp, this.subDir(subId), null); swept++; this._noteSlot({ sessionId: sessKey, poolId: id, from: fromLink, to: subId, why: why + '-sweep' }); } catch { }
       }
       if (swept) console.log(`[pool] manual target → ${target.name}: repointed ${swept} live session link(s)`);
     }
@@ -1149,10 +1176,14 @@ class AccountManager {
           member = null;
         }
         member = member || cur;
-        const link = this.ensureSessionPoolLink(id, opts.sessionKey, member);
-        return { id: a.id, name: a.name, kind: 'subscription', pooled: true, poolTarget: member, sessionLink: true, localEnv: { [this._credsOf('claude').spawnEnvVar]: link }, secret: null };
+        const link = this.ensureSessionPoolLink(id, opts.sessionKey, member, { why: 'spawn' });
+        // `linkPath` NAMES the credential symlink (2026-09-07 readings-by-slot):
+        // it is the SLOT, and a consumer that needs it (the statusline's
+        // per-write resolution) must not have to guess which localEnv key holds
+        // it. poolTarget is only where the link points RIGHT NOW.
+        return { id: a.id, name: a.name, kind: 'subscription', pooled: true, poolTarget: member, sessionLink: true, linkPath: link, localEnv: { [this._credsOf('claude').spawnEnvVar]: link }, secret: null };
       }
-      return { id: a.id, name: a.name, kind: 'subscription', pooled: true, poolTarget: cur, localEnv: { [this._credsOf('claude').spawnEnvVar]: this._acctDir('claude', id) }, secret: null };
+      return { id: a.id, name: a.name, kind: 'subscription', pooled: true, poolTarget: cur, linkPath: this._acctDir('claude', id), localEnv: { [this._credsOf('claude').spawnEnvVar]: this._acctDir('claude', id) }, secret: null };
     }
     if (this._acctType(a) === 'subscription') {
       const info = this.readSubCreds(id);

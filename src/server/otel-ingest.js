@@ -7,24 +7,38 @@
 // request_id (the ledger's rid) + tokens + cost. Zero vendor calls: the CLI
 // pushes to us over loopback (§ban-safety compatible by construction).
 //
-// Why: pool hot-switches do NOT take effect in a RUNNING CLI (mtime-gated
-// credential cache re-reads only on new process/expiry — forensically ≥25min
-// stale; 558 mid-session switches / $7.9k post-switch burn in 12 days), so
-// link-intent attribution mis-books storm spend in both directions, poisoning
-// per-org odometers AND the dead-reckoning learning set (the -30~-49% burst
-// under-estimate). This module turns observation into attribution:
-//   ① truthLookup(rid) — consumed by UsageHistory.scan at BAKE time, so
-//      ledger events get the OBSERVED org, not the configured one;
-//   ② corrective attribution records — when the observed org differs from
-//      the session's current attribution, recordAttribution({sid, trueAcct})
-//      lands so every non-rid consumer (statusline cache routing, billing
-//      badges, anchors) converges within one entry;
+// The original "why" (kept as the record of a refuted claim, per the
+// never-delete-the-record rule): "pool hot-switches do NOT take effect in a
+// RUNNING CLI (mtime-gated credential cache re-reads only on new process/
+// expiry — forensically ≥25min stale)". That forensic was itself made WITH
+// this channel: the ≥25min staleness is how long the CLI keeps REPORTING its
+// spawn-time org, not how long it keeps BILLING it. What this module does
+// now:
+// ── 2026-09-07: THE OBSERVATION IS CORROBORATION, NEVER ATTRIBUTION ────────
+// The module's founding premise was "organization.id names the org that
+// AUTHORIZED this request". The owner's post-mortem refuted it twice: it is
+// the identity the CLI cached in its config dir at SPAWN, and the credential
+// file IS re-read on an mtime bump — which is exactly what a pool re-point
+// does. 2.369.66 moved BLOCKING off it; this change moves VALUES off it too,
+// so the module no longer attributes ANYTHING:
+//   ① truthLookup(rid) — REFUTED AND UNWIRED. It overrode the by-time
+//      attribution walk at ledger BAKE time with the spawn-time org, so a
+//      hot-switched session's spend was booked to the account it started on
+//      for the rest of its life. The rid map is kept as a read-only
+//      diagnostic (observedOrgForRid) and the seam it fed is deliberately
+//      left unwired in server.js; the walk (which reads the slot-transition
+//      trail through recordAttribution) is the attribution again.
+//   ② corrective attribution records — REFUTED AND REMOVED. They wrote the
+//      observed org into attribution.ndjson, i.e. taught every non-rid
+//      consumer the same wrong answer permanently. Now the disagreement is
+//      COUNTED and LOGGED (noteDisagreement) and nothing else.
 //   ③ raw append-only stash (data/usage-history/otel-truth.ndjson) — models
 //      re-derivable offline forever, same principle as the anchors store.
-//   ④ observedOrgFor(sid) — rate_limit_event capture verifies a reading's
-//      org BEFORE writing it into an account's usage cache (B-b3cd: the
-//      hot-switch stale-token session flapped a sibling account's 7d
-//      odometer 48↔95 with the OLD org's readings).
+//      UNCHANGED: the observation is still worth keeping, it is simply not
+//      the key. Each row now records whether it AGREED with the walk.
+//   ④ observedOrgFor(sid) — the corroboration query. usage-pool-engine's
+//      corroborateReading() logs when a reading's credential slot and this
+//      observation disagree; it never changes where the reading lands.
 // Auth: loopback remoteAddress + persisted token header (x-vibespace-otel,
 // threaded to sessions via OTEL_EXPORTER_OTLP_HEADERS on the PROCESS-ENV
 // channel — never argv). The auth.js cookie middleware exempts /otel/* and
@@ -62,7 +76,7 @@ function create({ dataDir, PORT, getUsageHistory, identityGroups, listAccounts, 
   // apart — the chat E2E's OTel assertion failed on every GitHub Actions push
   // from 2.361.0 on, and with only a kept-count there was no way to know
   // whether the runner's CLI exported nothing or our parser dropped it.
-  const arrivals = { posts: 0, rejected: 0, records: 0, kept: 0, stashed: 0, noRid: 0, noOrg: 0, events: {} };
+  const arrivals = { posts: 0, rejected: 0, records: 0, kept: 0, stashed: 0, noRid: 0, noOrg: 0, disagreed: 0, events: {} };
 
   // Boot replay: the stash IS the persistence — bake-time overrides must
   // survive restarts or a reboot mid-race re-bakes with link-intent again.
@@ -120,7 +134,7 @@ function create({ dataDir, PORT, getUsageHistory, identityGroups, listAccounts, 
 
   function ingest(payload) {
     const { records, seen } = parseOtlpLogs(payload);
-    let corrections = 0;
+    let disagreements = 0;
     for (const rec of records) {
       // A parsed api_request that carries no request id or no organization.id
       // cannot join the ledger, so it is dropped — but SILENTLY dropping it
@@ -146,47 +160,52 @@ function create({ dataDir, PORT, getUsageHistory, identityGroups, listAccounts, 
       } else if (!dup) {
         remember(rec.rid, acct);
       }
-      if (!dup) {
-        try {
-          fs.mkdirSync(path.dirname(file), { recursive: true });
-          fs.appendFileSync(file, JSON.stringify({ ...rec, acct: known ? acct : undefined, acctKnown: known }) + '\n');
-          arrivals.stashed++;
-        } catch { }
-        global.__vsMetric?.('otel-truth-req', 1);
-      }
-      // Corrective attribution: observed org ≠ the session's current
-      // attribution → append a truth-driven record so the by-time join
-      // (_acctAt) routes everything AFTER this instant correctly. The entry
-      // ts is bumped past the sid's newest attribution entry so a late-
-      // flushed observation still DOMINATES the walk going forward (an older
-      // ts would sit behind the hot-switch link-intent entry and change
-      // nothing). The marker is set ONLY on a real write (review-caught:
-      // arming it on agreement suppressed the canonical agree→hot-switch→
-      // stale sequence — the exact incident this module exists for); after a
-      // write the walk itself agrees, so the marker only dedups late
-      // out-of-order re-observations of the same acct.
+      // CORROBORATION (2026-09-07). This block used to WRITE a corrective
+      // attribution record whenever the observation disagreed with the walk —
+      // i.e. it permanently taught the ledger the spawn-time org. It now only
+      // COUNTS and LOGS the disagreement: the walk's answer comes from
+      // recordAttribution, which resolves the credential link (and whose
+      // re-points are recorded in data/slot-transitions.jsonl), and that is
+      // the identity whose credentials the process actually reads.
+      // Computed BEFORE the stash write so the row can carry the comparison —
+      // the raw stash stays the offline-forever record, and "did the
+      // observation agree with the credential slot" is the one field a future
+      // analysis of this refutation will want.
+      let attributed; // undefined = we could not ask (no ledger / no sid)
       if (known && rec.sid) {
         try {
           const uh = getUsageHistory?.();
           if (uh) {
             const now = rec.ts || Date.now();
             const cur = uh.attribAt(rec.sid, now);
-            // Dedup key = the (truth→walk) TRANSITION pair, not the truth acct
-            // alone — an acct-only marker re-suppresses the next hot-switch
-            // (truth B written against walk A, later switch to C leaves the
-            // stale CLI on B: pair B→C must still write).
+            attributed = cur.acct || null;
             const pair = (acct || '') + '→' + (cur.acct || '');
-            if ((cur.acct || null) !== (acct || null) && lastTruthAcct.get(rec.sid) !== pair) {
-              uh.recordAttribution({ sid: rec.sid, acct, pool: cur.pool || null, ts: Math.max(now, (cur.lastTs || 0) + 1) });
-              lastTruthAcct.set(rec.sid, pair);
-              corrections++;
-              global.__vsMetric?.('otel-truth-correction', 1);
+            if ((cur.acct || null) !== (acct || null)) {
+              disagreements++;
+              // one line per (sid, transition) — the pair key is kept from the
+              // corrective-record era for exactly the reason it was chosen
+              // there: an acct-only marker hides the NEXT switch.
+              if (lastTruthAcct.get(rec.sid) !== pair) {
+                lastTruthAcct.set(rec.sid, pair);
+                arrivals.disagreed++;
+                console.log(`[otel] ${rec.sid}: observed org ${acct || '(global)'} ≠ attributed ${cur.acct || '(global)'} — spawn-time identity, attribution unchanged`);
+                global.__vsMetric?.('otel-org-disagreement', 1);
+              }
             }
           }
         } catch { }
       }
+      if (!dup) {
+        try {
+          fs.mkdirSync(path.dirname(file), { recursive: true });
+          fs.appendFileSync(file, JSON.stringify({ ...rec, acct: known ? acct : undefined, acctKnown: known,
+            ...(attributed !== undefined ? { attributed, agreed: attributed === (acct || null) } : {}) }) + '\n');
+          arrivals.stashed++;
+        } catch { }
+        global.__vsMetric?.('otel-truth-req', 1);
+      }
     }
-    return { kept: records.length, corrections, seen };
+    return { kept: records.length, disagreements, seen };
   }
 
   // The ONLY gate for /otel/* (cookie middleware exempts the prefix): the
@@ -213,7 +232,6 @@ function create({ dataDir, PORT, getUsageHistory, identityGroups, listAccounts, 
         arrivals.kept += out.kept || 0;
         for (const [k, n] of Object.entries(out.seen || {})) arrivals.events[k] = (arrivals.events[k] || 0) + n;
         res.json({ partialSuccess: {} });
-        if (out.corrections) console.log(`[otel] ${out.corrections} attribution correction(s) from truth stream`);
       } catch (e) { res.status(400).json({ error: e.message }); }
     },
     // Metrics/traces are not consumed (exporter set to 'none'), but a tolerant
@@ -237,9 +255,14 @@ function create({ dataDir, PORT, getUsageHistory, identityGroups, listAccounts, 
         OTEL_LOGS_EXPORT_INTERVAL: '5000',
       };
     },
-    // rid → accountId|null; undefined = no truth (bake falls back to the
-    // attribution walk). Consumed by UsageHistory.scan at bake time.
-    truthLookup(rid) { return rid && truth.has(rid) ? truth.get(rid) : undefined; },
+    /** rid → the OBSERVED (spawn-time) org, or undefined. DIAGNOSTIC ONLY
+     *  since 2026-09-07 — deliberately NOT wired into UsageHistory's
+     *  setTruthLookup any more (it overrode the by-time attribution walk with
+     *  the identity the CLI cached at spawn). Renamed from `truthLookup` so
+     *  that a caller re-introducing the old wiring has to say the new name,
+     *  and so the source pin in scripts/test-readings-attribution.mjs can
+     *  assert nobody passes it to a bake path. */
+    observedOrgForRid(rid) { return rid && truth.has(rid) ? truth.get(rid) : undefined; },
     /** Latest OBSERVED billing org for a claude session (or null): the org-
      *  verification source for rate_limit_event capture — see ④ in the header. */
     observedOrgFor(sid) { return (sid && lastSidOrg.get(sid)) || null; },

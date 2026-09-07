@@ -3,6 +3,11 @@ import { createBackendIconHtml } from './agent-meta.js';
 import { t, tc } from './i18n.js';
 import { anchorFixedPopup, escHtml, estDisplayPair, fetchJson, showConfirmDialog, showToast } from './utils.js';
 import { backendFeatureCaps } from './agent-meta.js';
+// PURE reading-provenance rules (2026-09-07 readings-by-slot): who produced the
+// panel's latest number, and — for a member that can no longer produce one at
+// all — how old the last REAL reading is. DOM-free so scripts/test-readings-
+// attribution.mjs pins it in node.
+import { corroborationNote, readingSource, stampText, staleSince } from './usage-source.js';
 
 export function installUsageMeter(App, ctx = {}) {
   Object.assign(App.prototype, {
@@ -79,6 +84,7 @@ export function installUsageMeter(App, ctx = {}) {
     this._hostOwnUsage = this._hostUsage; // canonical alias the Agents machine sections read
     this._hostAccountUsage = data?.hostAccounts || {}; // host-HELD account quota ('<hostId>:<acctId>', 2.245.0)
     this._usageEstimates = data?.estimates || {}; // dead-reckoned CURRENT utilization per account key (B-fcff v2)
+    this._usageLogins = data?.logins || {}; // per-account credential state {state, usable, since} (src/login-state.js)
   },
 
   // Resolve the Claude account the pies/popup currently DISPLAY (same rules as
@@ -256,6 +262,31 @@ export function installUsageMeter(App, ctx = {}) {
       return;
     }
 
+    // THE PROVENANCE LINE (2026-09-07). "Updated 3min ago" alone is what let a
+    // member whose login was wiped five days earlier look freshly-read: the
+    // readings were real, they were just produced by sessions that had been
+    // re-pointed to another account. So the line names the PRODUCER, adds the
+    // corroboration verdict when one exists, and — when the account cannot
+    // produce a reading at all — dates the last real one instead of implying
+    // it is current. Pure rules live in usage-source.js.
+    const sourceLine = (snap, acctId) => {
+      if (!snap) return '';
+      const src = readingSource(snap.source, { t });
+      const corr = corroborationNote(snap.corroborated, { t });
+      const login = acctId ? (this._usageLogins || {})[acctId] : null;
+      const stale = staleSince(login, snap.fetchedAt, { t });
+      const parts = [escHtml(t('Updated {ago}', { ago: agoText(snap.fetchedAt) }))];
+      parts.push(`<span class="usage-src" title="${escHtml(src.tip)}">${escHtml(t('via {source}', { source: src.label }))}</span>`);
+      if (corr) parts.push(`<span class="usage-src">${escHtml(corr)}</span>`);
+      let warn = '';
+      if (stale) {
+        const stampedFrom = stale.since ? stampText(stale.since) : t('unknown');
+        warn = stale.suspect
+          ? `<div class="usage-warn">${escHtml(t('This account has been {what} since {when} — readings newer than that were produced by sessions billing another member and are NOT this account\u2019s. Its last own reading is older.', { what: stale.what, when: stampedFrom }))}</div>`
+          : `<div class="usage-note">${escHtml(t('{what} since {when} — showing its last real reading; nothing refreshes it.', { what: stale.what, when: stampedFrom }))}</div>`;
+      }
+      return `${warn}<div class="usage-updated">${parts.join(' · ')}</div>`;
+    };
     const usageColor = (pct) => (pct > 80 ? 'var(--red)' : pct > 50 ? 'var(--yellow)' : 'var(--green)');
     // Donut with the window label in the hole — 5h vs 7d distinguishable at a
     // glance instead of two identical pies. With a dead-reckoning pair the
@@ -415,7 +446,7 @@ export function installUsageMeter(App, ctx = {}) {
         : t('⚠ The machine’s own CLI login has no valid token (it sat idle until its refresh token expired — named/pooled accounts handle the sessions, so nothing refreshes it). This is NORMAL under pooling and needs no action; named accounts are unaffected. Do NOT run /logout to “clean it up” — on a multi-copy account that revokes the login everywhere. Run /login in a terminal only if you actually use the bare CLI login.')}</div>` : ''}
       ${showingGlobal && gl.accountId && sel === gl.accountId ? `<div class="usage-note">${t('The machine’s global CLI login is this same subscription — its quota is shown merged here.')}</div>` : ''}
       ${gl.identityMismatch && showingGlobal ? `<div class="usage-note">${t('The CLI config file records {cfg} — residue of the most recent account login (relocated logins still write their identity into the global config). The active token belongs to {actual}, whose quota is shown. No action needed.', { cfg: gl.email || '?', actual: gl.actualEmail || '?' })}</div>` : ''}
-      <div class="usage-updated">${t('Updated {ago}', { ago: agoText(rl.fetchedAt) })}</div>`;
+      ${sourceLine(rl, sel === 'auto' ? claudeDefId : (sel === '__global__' ? gl.accountId : sel))}`;
       const odMode = this.settings.get('accounts.onDemandQuotaRefresh') || 'manual';
       const refreshBtn = odMode === 'off' ? '' : `<button class="usage-refresh-btn" title="${escHtml(t('Refresh from Anthropic now (also fetches model-scoped limits like Fable) — user-initiated, min 60s apart'))}"><span class="uref-glyph">⟳</span></button>`;
       sections.push(`${renderSectionTitle('claude', escHtml(claudeUsageLabel), refreshBtn)}${switcher}
@@ -469,7 +500,7 @@ export function installUsageMeter(App, ctx = {}) {
           ${codex.resetCredits ? `<span class="usage-stat" title="${escHtml(t('Stored rate-limit reset credits — one can be consumed when a limit is hit (Settings → Codex, or automatically when enabled)'))}"><span class="usage-stat-label">${escHtml(t('Reset credits'))}</span> ${Number(codex.resetCredits.availableCount) || 0}</span>` : ''}
         </div>
       </div>
-      <div class="usage-updated">${t('Updated {ago}', { ago: agoText(codex.fetchedAt) })}</div>`;
+      ${sourceLine(codex, null)}`;
       const cxRefreshBtn = backendFeatureCaps('codex').quotaRefresh === 'session-rpc'
         ? `<button class="usage-refresh-btn usage-refresh-codex-btn" title="${escHtml(t('Read current limits + stored reset credits from a running Codex session (its own app-server makes the call)'))}"><span class="uref-glyph">⟳</span></button>` : '';
       sections.push(`${renderSectionTitle('codex', escHtml(codexLabel), cxRefreshBtn)}${cSwitcher}

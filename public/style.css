@@ -1199,6 +1199,10 @@ html, body {
 }
 .usage-warn { font-size: 10px; color: var(--yellow, #e5c07b); white-space: normal; line-height: 1.45; margin-top: 6px; }
 .usage-updated { font-size: 10px; color: var(--text-dim); margin: 4px 0 10px; }
+/* Reading PROVENANCE (2026-09-07): who produced the panel's latest number.
+   Dotted underline = "there is a tip explaining this", same affordance as the
+   estimate chip; never a colour, so it reads the same on every theme. */
+.usage-src { border-bottom: 1px dotted var(--border); }
 /* Door to the Agents machine-sectioned account+quota overview (2.245.0) */
 .usage-overview-row { display: flex; justify-content: flex-end; margin-top: 8px; }
 .usage-popup.hidden { display: none; }

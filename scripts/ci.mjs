@@ -67,6 +67,9 @@ const SUITES = [
   'test-login-expiry', // a subscription's LOGIN SESSION has its own absolute deadline: pure reading (incl. the CLI-wiped shape), pool gates (dead ⇒ never usable, near ⇒ never a switch target), the once-per-threshold inbox ladder on a fake clock (restart-survival + re-login reset), the STRING every blocked/inbox surface prints (a login is never a spent quota bucket; a wiped file is never "expired" at a future date), wiring pins
   'test-pool-signed-out', 'test-account-relogin', 'test-auto-cli-refresh',
   'test-cli-usage-parse', 'test-rate-limit-capture', 'test-agentd-upgrade-loop', 'test-vendor-whitelist', 'test-wrapper-files',
+  'test-usage-anchors',  // the anchors store: was OUTSIDE the gate although every quota decision reads what it records (same silent-stale class as test-usage-estimator)
+  'test-auto-resume-loop', // 2.369.66's 186-assert loop-breaker suite shipped OUTSIDE the gate the day before this branch touched the same machinery
+  'test-readings-attribution', // readings are keyed to the CREDENTIAL SLOT, never the OTel-observed (spawn-time) org: every producer × before/after a hot switch/after logout, the turn pin, the transition ledger, login-state, the repair migration, the panel provenance line, and the source pins that keep the refuted routing out
   'test-usage-ledger-perf', // inc-mtox23xw: the estimator's per-pair ledger walk is O(log n + k) + interval-memoized (it blocked the loop 10-59s); parity vs brute force + timing pins
   'test-usage-estimator', // dead-reckoning core; was OUTSIDE the gate (silent-stale class) until the 2.368.13 delta-relative calib change touched it
   'test-task-wakeup-card', // background-task lifecycle closure incl. the real record order (tool_result BEFORE the completion notification); also joined the gate late (same class)

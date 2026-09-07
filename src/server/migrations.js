@@ -29,6 +29,44 @@ function create({ rootDir, serverNotice }) {
       },
     },
     {
+      id: '2026-09-reattribute-readings-by-slot',
+      note: 'quota readings were keyed by the OTel-observed org = the identity the CLI cached at SPAWN, so after any pool hot switch a session\'s readings were filed under the account it started on. Re-attributes or archives (never silently keeps) the provably-foreign entries in usage-cache / usage-anchors / attribution.ndjson, and drops the learned rates so the estimator re-learns from the cleaned anchors.',
+      run() {
+        const { repairReadings, findJournal } = require('../reading-repair.js');
+        const { SlotTransitions } = require('../slot-transitions.js');
+        // The members whose credential files can date their own death. Read
+        // straight off disk: this runs BEFORE restoreSessions and must not
+        // depend on a booted AccountManager (a migration that needs the app
+        // running is a migration that cannot repair a broken app).
+        const subsDir = path.join(dataDir, 'subs');
+        const members = [];
+        let names = [];
+        try { names = fs.readdirSync(subsDir); } catch { return; }
+        for (const d of names) {
+          if (!/^sub-[\w-]+$/.test(d)) continue;                  // pools are symlinks, con-* are login scratch
+          try { if (fs.lstatSync(path.join(subsDir, d)).isSymbolicLink()) continue; } catch { continue; }
+          members.push({ id: d, backend: 'claude', credsPath: path.join(subsDir, d, '.credentials.json') });
+        }
+        const transitions = new SlotTransitions({ dataDir });
+        let journalText = null;
+        const jf = findJournal(dataDir);
+        if (jf) { try { journalText = fs.readFileSync(jf, 'utf-8'); } catch { } }
+        const rep = repairReadings({ dataDir, members, transitions, id: '2026-09-reattribute-readings-by-slot', journalText });
+        const touched = (rep.caches?.foreign || 0) + (rep.anchors?.dropped || 0) + (rep.attribution?.foreign || 0);
+        // Say what happened even when it is nothing — a repair nobody can see
+        // ran is a repair nobody can verify ran.
+        console.log('[migrate] readings-by-slot:', JSON.stringify({
+          members: rep.markers.length, journal: rep.journal,
+          caches: rep.caches, anchors: rep.anchors, attribution: rep.attribution,
+        }));
+        if (touched) {
+          try {
+            serverNotice?.('readings-repaired', `Quota bookkeeping repaired: ${touched} reading(s) that belonged to another account were archived to data/archive/ (a pool hot switch had filed them under the account each session started on). Panels and the usage estimator re-derive from the cleaned data.`, { level: 'info' });
+          } catch { }
+        }
+      },
+    },
+    {
       id: '2026-08-archive-dormant-task-plans',
       note: 'dormant checklist plan arrays (feature removed 2.121.0) → data/archive/',
       run() {

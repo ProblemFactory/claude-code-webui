@@ -149,12 +149,16 @@ class UsageHistory {
       lastTs: list && list.length ? list[list.length - 1].ts : 0,
     };
   }
-  // OBSERVED-truth override for the bake (2.361.0, B-345b): fn(rid) →
-  // accountId|null (null = machine global login) | undefined (no truth →
-  // fall back to the attribution walk). Wired to otel-ingest.truthLookup —
-  // the CLI's own api_request telemetry names the org that ACTUALLY billed a
-  // request, which the link-intent attribution gets wrong for up to a token
-  // lifetime after a pool hot-switch (the stale-token forensics).
+  // Per-request identity override for the bake (2.361.0, B-345b): fn(rid) →
+  // accountId|null (null = machine global login) | undefined (no answer →
+  // fall back to the attribution walk).
+  // NOTHING IS WIRED HERE since 2026-09-07 (server.js says why at the former
+  // call site): the only source we ever had — OTel `organization.id` — names
+  // the identity the CLI cached at SPAWN, not the token that authorized the
+  // request, so the override booked a hot-switched session's spend to the
+  // account it started on forever. The seam survives because a real
+  // per-request identity channel would be strictly better than the walk; it
+  // must arrive with evidence that it names the AUTHORIZING identity.
   setTruthLookup(fn) { this._truthLookup = typeof fn === 'function' ? fn : null; }
 
   _loadJson(f, fallback) { try { return JSON.parse(fs.readFileSync(f, 'utf-8')); } catch { return fallback; } }
@@ -291,10 +295,11 @@ class UsageHistory {
         cursors: this._cursors,
         onEvent: (ev) => {
           const minfo = meta[ev.sid] || {};
-          // OBSERVED truth wins over link-intent (2.361.0, B-345b): the OTel
-          // api_request stream names the org that actually billed this rid —
-          // during hot-switch stale-token windows the attribution walk is
-          // wrong for up to a token lifetime. undefined = no truth → walk.
+          // A per-request identity override, when one is wired (see
+          // setTruthLookup — nothing is, since 2026-09-07). The WALK is the
+          // attribution: it resolves the credential link at record time and
+          // every re-point of that link is recorded in
+          // data/slot-transitions.jsonl. undefined = no override → walk.
           const tr = this._truthLookup ? this._truthLookup(ev.rid) : undefined;
           const acct = tr !== undefined ? tr : this._acctAt(ev.sid, ev.ts, attrib, minfo.acct);
           const pool = this._poolAt(ev.sid, ev.ts, attrib);

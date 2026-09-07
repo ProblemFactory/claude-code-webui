@@ -7,6 +7,7 @@
  * See CLAUDE.md §9 + accounts.js §ban-safety before changing ANY cadence here.
  */
 const fs = require('fs');
+const { loginState } = require('./login-state.js'); // THE credential-state reader (shared with the pool engine + the repair migration)
 const path = require('path');
 const os = require('os');
 const { execFileSync } = require('child_process');
@@ -424,6 +425,15 @@ app.post('/api/usage-stats/harvest-hosts', async (req, res) => {
 // (2.329.0). One spawn = one first-party `/usage` fetch by the official
 // binary; writes the same per-account cache the statusline hook uses. Returns
 // true when a parseable panel landed.
+//
+// ATTRIBUTION (2026-09-07, the readings-by-slot rule for a SESSION-LESS
+// reading): this reading has no session, so there is no credential slot to
+// resolve — its identity IS the config dir the spawn was given. `key` and
+// `CLAUDE_SECURESTORAGE_CONFIG_DIR` are therefore ONE decision, made once into
+// `credsDir` below and used for both the spawn and the write-back, rather than
+// derived twice and compared (a check that cannot fail is not protection —
+// making it structurally impossible is). Every other producer now follows the
+// same rule the hard way (readingSlotFor); this one gets it for free.
 async function refreshViaCliPanel(key) {
   const isGlobal = key === '__global__';
   let acctMeta = null;
@@ -438,7 +448,9 @@ async function refreshViaCliPanel(key) {
       delete env.ANTHROPIC_API_KEY; delete env.CLAUDE_CODE_OAUTH_TOKEN; delete env.CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR;
       // ONLY the secret store relocates (session-spawn parity): the token IS
       // the identity the panel reports; projects/settings stay shared.
-      if (!isGlobal) env.CLAUDE_SECURESTORAGE_CONFIG_DIR = accounts.subDir(key);
+      // credsDir = the identity this reading WILL be keyed by (see above).
+      const credsDir = isGlobal ? null : accounts.subDir(key);
+      if (credsDir) env.CLAUDE_SECURESTORAGE_CONFIG_DIR = credsDir;
       const bin = CLAUDE_CMD || 'claude';
       execFile(bin, ['-p', '/usage'], { env, cwd: os.tmpdir(), timeout: 60000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
         if (err) return resolve(null);
@@ -928,6 +940,23 @@ app.get('/api/usage', (req, res) => {
         // identities learned prior-less; keys match `codexAccounts`
         for (const [key, snap] of Object.entries(codexRl.byAccount || {})) {
           try { const est = e.estimateFor(key, snap, now); if (est) out[key] = est; } catch {}
+        }
+        return out;
+      } catch { return {}; }
+    })(),
+    // CREDENTIAL STATE per named claude account (2026-09-07, panel honesty):
+    // live / expired / wiped / missing, with `since` = the instant the login
+    // stopped being able to produce a reading (src/login-state.js — the SAME
+    // predicate the pool's slot validation and the repair migration use). The
+    // panel shows a signed-out member's LAST REAL reading with "stale since",
+    // instead of presenting five-day-old foreign numbers as current.
+    logins: (() => {
+      try {
+        const out = {};
+        for (const a of (accounts.list().accounts || [])) {
+          if ((a.backend || 'claude') !== 'claude' || a.type !== 'subscription') continue;
+          const st = loginState(accounts.subCredsPath(a.id), { backend: 'claude' });
+          out[a.id] = { state: st.state, usable: st.usable, since: st.since || null };
         }
         return out;
       } catch { return {}; }

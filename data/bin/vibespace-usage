@@ -59,10 +59,35 @@ function win(w) {
   };
 }
 
+// WHICH ACCOUNT DOES THIS READING BELONG TO (2026-09-07 — the readings-by-slot
+// root cause, statusline half). VIBESPACE_ACCOUNT_KEY is fixed at SPAWN, and a
+// POOLED session's credentials get re-pointed under the running CLI (the pool's
+// hot switch bumps the credential file's mtime and the CLI re-reads it). So a
+// spawn-time key filed every later reading under the member the session STARTED
+// on — the same defect the server-side producers had. The pool's credential
+// slot IS a symlink we can read, so resolve it HERE, at the moment the reading
+// is produced, by the process that produced it:
+//   VIBESPACE_ACCOUNT_LINK = the per-session pool link (data/pool-links/<pool>/
+//   <sid>) or the pool's default link (data/subs/<poolId>) — basename of its
+//   target is the member id.
+// Absent (non-pooled session), unreadable, or not a symlink ⇒ the spawn key,
+// which for those sessions IS fixed for the process's lifetime.
+function accountKey() {
+  const link = process.env.VIBESPACE_ACCOUNT_LINK;
+  if (link) {
+    try {
+      const t = fs.readlinkSync(link);
+      const id = path.basename(t);
+      if (/^sub-[\w-]+$/.test(id)) return id;
+    } catch {}
+  }
+  return String(process.env.VIBESPACE_ACCOUNT_KEY || '__global__');
+}
+
 function writeUsage(p) {
   const rl = p && p.rate_limits;
   if (!rl) return; // absent for API-key sessions / before the first API response
-  const key = String(process.env.VIBESPACE_ACCOUNT_KEY || '__global__').replace(/[^\w.-]/g, '_');
+  const key = accountKey().replace(/[^\w.-]/g, '_');
   const f = path.join(CACHE_DIR, key + '.json');
   // Throttle: the statusline re-renders often; one write / 25s per account is
   // plenty (usage windows move slowly) and keeps disk churn negligible.

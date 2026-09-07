@@ -1108,19 +1108,18 @@ const usageHistory = new UsageHistory({
     return { type: a.backend === 'codex' ? 'codex-subscription' : a.type, name: a.name, tail: a.tail };
   },
 });
-// OTel TRUTH receiver (2.361.0, B-345b): local claude sessions push their own
-// api_request telemetry (organization.id + request_id) here — the observed
-// billing org overrides link-intent attribution at ledger bake time and
-// writes corrective attribution records (hot-switch stale-token class).
-// Routes are cookie-exempt (auth.js); the module's loopback+token gate is the
-// only door. Zero vendor calls — the CLI pushes to us.
+// OTel receiver (2.361.0, B-345b; DEMOTED TO CORROBORATION 2026-09-07 — the
+// observed org is the identity the CLI cached at SPAWN, not the token that
+// authorized the request, so it attributes nothing now). Routes are
+// cookie-exempt (auth.js); the loopback+token gate is the only door.
 const otelIngest = require('./src/server/otel-ingest.js').create({
   dataDir: path.join(__dirname, 'data'), PORT, serverSetting,
   getUsageHistory: () => usageHistory, identityGroups: () => usageIdentityGroupsCached(),
   listAccounts: () => accounts.list().accounts || [],
 });
 otelIngest.registerRoutes(app);
-usageHistory.setTruthLookup(otelIngest.truthLookup);
+// `usageHistory.setTruthLookup(otelIngest.…)` is DELIBERATELY UNWIRED since
+// 2026-09-07 — reasoning at the seam (usage-history.js) + otel-ingest's header.
 // Attribution log: dedup'd per (sid,acct) so a resume under a DIFFERENT account
 // is captured with its timestamp (per-request-by-time attribution). Called from
 // writeSessionMeta whenever a session has both a claudeSessionId and account.

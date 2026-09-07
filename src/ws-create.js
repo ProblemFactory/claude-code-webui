@@ -683,6 +683,11 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
               settingsObj.statusLine = { type: 'command', command: '"$HOME"/.vibespace/bin/vibespace-usage', padding: 0 };
               const sjson = JSON.stringify(settingsObj);
               if (si >= 0) spawnArgs[si + 1] = sjson; else spawnArgs = [...spawnArgs, '--settings', sjson];
+              // Spawn-fixed BY CONSTRUCTION on a remote host (no VIBESPACE_
+              // ACCOUNT_LINK twin, unlike the local branch below): a host gets
+              // the credentials TARRED to it at spawn and the engine's
+              // re-points skip host sessions (`s2.host` ⇒ continue), so there
+              // is no later switch for this key to be wrong about.
               const acctKey = spawnAccount?.poolTarget || spawnAccount?.id || '__global__';
               spawnEnvPairs.push(`VIBESPACE_ACCOUNT_KEY=${acctKey}`);
               // NO cache-dir env: env pairs are shq-quoted (a $HOME inside
@@ -1417,13 +1422,24 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
               const sjson = JSON.stringify(settingsObj);
               if (si >= 0) spawnArgs[si + 1] = sjson; else spawnArgs = [...spawnArgs, '--settings', sjson];
               // A POOLED spawn attributes usage to the real TARGET account, not
-              // the pool: the statusline cache + quota popup are per-account,
-              // and the target is fixed for this process's lifetime anyway
-              // (a cold swap re-resolves at resume; a hot re-point is a known
-              // attribution seam handled by the ledger's time-based records).
+              // the pool: the statusline cache + quota popup are per-account.
+              // The old comment here claimed "the target is fixed for this
+              // process's lifetime anyway (a hot re-point is a known
+              // attribution seam handled by the ledger's time-based records)".
+              // It was wrong on both halves (2026-09-07): the CLI re-reads the
+              // credential file on the re-point's mtime bump, and the STATUSLINE
+              // cache is not the ledger — nothing re-attributed it by time, so
+              // every later reading of a hot-switched terminal session landed on
+              // the member it started on. The link itself is the slot, so ship
+              // its PATH and let the statusline resolve it per write.
               const acctKey = spawnAccount?.poolTarget || spawnAccount?.id || '__global__';
               const orig = (userStatuslineCmd && userStatuslineCmd()) || '';
               usageEnvPairs.push(`VIBESPACE_ACCOUNT_KEY=${acctKey}`);
+              // resolveForSpawn NAMES the credential symlink (`linkPath`) — the
+              // per-session plan-C link, else the pool default. Not derived
+              // from localEnv here: the consumer must not guess which key of a
+              // spawn env happens to hold the slot.
+              if (spawnAccount?.pooled && spawnAccount.linkPath) usageEnvPairs.push(`VIBESPACE_ACCOUNT_LINK=${spawnAccount.linkPath}`);
               if (orig) usageEnvPairs.push(`VIBESPACE_ORIG_STATUSLINE=${orig}`);
             } catch {}
           }

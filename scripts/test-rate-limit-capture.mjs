@@ -120,21 +120,25 @@ fs.rmSync(dir, { recursive: true, force: true });
   fs.rmSync(dir, { recursive: true, force: true }); fs.rmSync(dir2, { recursive: true, force: true });
 }
 
-// ── ⑥ org verification wiring (B-b3cd, the odometer-flap fix) ──
-// A hot-switched pool session keeps its old token ≥25min: its quota events
-// describe the OLD org and, written under the linked account, flapped a
-// half-empty account's 7d odometer 48↔95 (22 of 65 rate-limit-event anchors
-// in one week jumped >10pt vs a <1h-old panel reading). Magnitude can't gate
-// this — parallel workflows really can burn >10pt/h (owner-confirmed) — so
-// the gate is IDENTITY: the OTel-observed org must match the link, else the
-// reading is re-attributed to the org actually billed.
+// ── ⑥ reading attribution wiring ──
+// B-b3cd's rule ("the OTel-observed org must match the link, else re-attribute
+// the reading to the observed org") was REFUTED on 2026-09-07: organization.id
+// is the identity the CLI cached in its config dir at SPAWN, and the credential
+// file IS re-read on a re-point's mtime bump — so the rule filed a hot-switched
+// session's readings under the account it STARTED on, permanently. A member
+// whose login had been wiped on 09-02 kept "reporting" until 09-07.
+// Now: a READING is keyed to the same thing a REJECTION is — the validated
+// credential slot, resolved ONCE per turn (readingSlotFor / rejectionSlotFor);
+// the observation only corroborates.
 {
   const fs2 = await import('node:fs');
   const eng = fs2.readFileSync(new URL('../src/server/usage-pool-engine.js', import.meta.url), 'utf8');
-  ok(/function orgVerifiedKey\(session, key, what\)[\s\S]{0,600}observedOrgFor\?\.\(session\.claudeSessionId\)/.test(eng), '⑥ orgVerifiedKey consults the OTel-observed org');
-  ok(/obs && obs\.acct && Date\.now\(\) - \(obs\.ts \|\| 0\) < 30 \* 60e3/.test(eng), '⑥ …only a FRESH observation with a RESOLVED account re-attributes (unmapped org / no OTel ⇒ link attribution, old behavior)');
-  ok(/orgVerifiedKey\(session, usageCacheKeyFor\(session\), 'rate-limit-event:/.test(eng), '⑥ rate_limit_event capture goes through it');
-  ok(/orgVerifiedKey\(session, usageCacheKeyFor\(session\), 'limit-banner'\)/.test(eng), '⑥ limit-banner marks go through it too (same stale-token physics)');
+  const engCode = eng.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+  ok(!/\borgVerifiedKey\b/.test(engCode), '⑥ REFUTED AND REMOVED: no executable line calls orgVerifiedKey — nothing may key a reading on the observed org (the comments keep the record)');
+  ok(/function corroborateReading\(session, key, what\)[\s\S]{0,800}observedOrgFor\?\.\(session\?\.claudeSessionId\)/.test(eng), '⑥ the observation survives as CORROBORATION: same query, logs + telemetry, no return into the key');
+  ok(/const slot = ev\.status === 'rejected' \? rejectionSlotFor\(session\) : readingSlotFor\(session\);/.test(eng), '⑥ rate_limit_event: rejection AND reading both resolve a credential slot (turn-pinned twins)');
+  ok(/const key = slot\.key \|\| readingSlotFor\(session\)\.key \|\| usageCacheKeyFor\(session\)/.test(eng), '⑥ limit-banner marks land on the slot too (same physics, same resolver)');
+  ok(/function resolveUsageKey\(session\)[\s\S]{0,900}sessionBillingMember\(session, acct\)\.id/.test(eng), '⑥ VALUES follow the credential slot as well — there is no longer a "reading member" different from the billing member');
   ok(/\(prev\.source \|\| 'unknown'\) === \(g\.cache\.source \|\| 'unknown'\)/.test(eng), '⑥ calib pairs are same-source (cross-source offset is attribution, not prediction error — mirrors extractPairs 2.340.0)');
   const sv = fs2.readFileSync(new URL('../server.js', import.meta.url), 'utf8');
   ok(/getOtelIngest: \(\) => \{ try \{ return otelIngest; \}/.test(sv), '⑥ server.js hands the engine a lazy otelIngest (TDZ: created later in the file)');

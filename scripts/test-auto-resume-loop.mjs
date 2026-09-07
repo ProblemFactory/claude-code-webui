@@ -973,13 +973,25 @@ if (!probe) {
 {
   const eng = read('src/server/usage-pool-engine.js');
   const srv = read('server.js');
+  // executable lines only — a refuted mechanism must stay NAMED in comments
+  const engCode = eng.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
   ok('WIRING: a walled turn tells the breaker the fire failed, BEFORE anything re-arms or re-switches', /function onWalledTurn\(session, sigs\) \{[\s\S]{0,600}noteFireOutcome\?\.\(id, false, 'limit rejection'\)[\s\S]{0,900}demoteWalledAccount\(session, sigs\)/.test(eng));
   ok('WIRING: server.js gives auto-resume its identity from the engine (the SAME fact the wall demotes)', /fireIdentity: \(id, s\) => \{ try \{ return fireIdentityFor\(s\); \}/.test(srv) && /fireIdentityFor,/.test(srv));
   ok('WIRING: fireIdentityFor IS wallKeyFor (no second opinion about which account a fire lands on)', /function fireIdentityFor\(session\) \{[\s\S]{0,200}const key = wallKeyFor\(session\);/.test(eng));
-  ok('WIRING: a REJECTION is keyed to the credential slot, TURN-PINNED; a READING keeps the observed-org routing', /const slot = ev\.status === 'rejected' \? rejectionSlotFor\(session\) : null;[\s\S]{0,400}orgVerifiedKey\(session, usageCacheKeyFor\(session\), 'rate-limit-event:' \+ ev\.kind\)/.test(eng) && /const slot = rejectionSlotFor\(session\);\s*\n\s*const key = slot\.key \|\| orgVerifiedKey\(session, usageCacheKeyFor\(session\), 'limit-banner'\)/.test(eng));
-  ok('WIRING: NOTHING resolves the slot per RECORD any more — wallSlotFor has exactly two readers (wallKeyFor, and the pin\'s own no-signal fallback), so a new producer that asks fresh goes red here', (eng.match(/wallSlotFor\(session\)/g) || []).length === 3 && /function wallKeyFor\(session\) \{ return wallSlotFor\(session\)\.key; \}/.test(eng) && /if \(first\) return \{ key: first\.key, slotOk: !!first\.slot, slotReason: 'turn-pinned' \};[\s\S]{0,60}return wallSlotFor\(session\);/.test(eng), 'wallSlotFor(session) refs: ' + (eng.match(/wallSlotFor\(session\)/g) || []).length);
+  // 2026-09-07 (the VALUE half of the same incident): a READING is keyed to the
+  // credential slot too — turn-pinned by its own resolver. Keeping the two
+  // halves on different keys is exactly what let a wiped member "report" for
+  // five days. The refuted routing (orgVerifiedKey) may not survive in code.
+  ok('WIRING: BOTH a rejection and a reading are keyed to the credential slot, each turn-pinned', /const slot = ev\.status === 'rejected' \? rejectionSlotFor\(session\) : readingSlotFor\(session\);[\s\S]{0,300}const key = \(slot && slot\.key\) \|\| usageCacheKeyFor\(session\);/.test(eng) && /const slot = rejectionSlotFor\(session\);\s*\n\s*const key = slot\.key \|\| readingSlotFor\(session\)\.key \|\| usageCacheKeyFor\(session\)/.test(eng));
+  ok('WIRING: the refuted resolver is GONE from executable code (comments keep the record)', !/\borgVerifiedKey\b/.test(engCode) && /REFUTED AND REMOVED: `orgVerifiedKey/.test(eng));
+  // wallSlotFor is the FRESH reading; it now has exactly THREE readers —
+  // wallKeyFor, the rejection pin's no-signal fallback, and the reading pin's
+  // (readingSlotFor, added 2026-09-07). A new producer that asks fresh, per
+  // record, goes red here.
+  ok('WIRING: NOTHING resolves the slot per RECORD any more — wallSlotFor has exactly three readers (wallKeyFor + the two turn pins\' fallbacks)', (eng.match(/wallSlotFor\(session\)/g) || []).length === 4 && /function wallKeyFor\(session\) \{ return wallSlotFor\(session\)\.key; \}/.test(eng) && /if \(first\) return \{ key: first\.key, slotOk: !!first\.slot, slotReason: 'turn-pinned' \};[\s\S]{0,60}return wallSlotFor\(session\);/.test(eng) && /const fresh = wallSlotFor\(session\);/.test(eng), 'wallSlotFor(session) refs: ' + (eng.match(/wallSlotFor\(session\)/g) || []).length);
+  ok('WIRING: the READING pin dies with the turn, exactly like the rejection pin', /session\._turnWallSigs = \[\]; session\._turnWorkAfterSig = 0;[\s\S]{0,400}session\._turnReadingSlot = null;/.test(eng));
   ok('WIRING: both wall signals carry the slot verdict taken AT REJECTION TIME (the link moves before the turn ends)', (eng.match(/noteWallSignal\(session, \{[^}]*slot: !!slot/g) || []).length === 2 && /sigs\.some\(\(x\) => x && x\.slot && \(!x\.key \|\| ids\.has\(x\.key\)\)\)/.test(eng));
-  ok('WIRING: every blocking decision reads sessionBillingMember; only resolveUsageKey (VALUES) reads the observation', (eng.match(/sessionBillingMember\(/g) || []).length >= 5 && /acct = sessionReadingMember\(session, acct\)\.id \|\| acct;/.test(eng) && !/sessionCurrentMember/.test(eng));
+  ok('WIRING: EVERY decision — blocking and value — reads sessionBillingMember; the observation routes nothing', (eng.match(/sessionBillingMember\(/g) || []).length >= 6 && /acct = sessionBillingMember\(session, acct\)\.id \|\| acct;/.test(eng) && !/sessionReadingMember/.test(engCode) && !/sessionCurrentMember/.test(eng));
   ok('WIRING: the per-session switch excludes members that already rejected this conversation', /const rejected = \[\.\.\.sessionWalledMembers\(sid, now\)\];[\s\S]{0,400}exclude: rejected/.test(eng));
   ok('WIRING: the verdict cannot answer `usable` through a member that rejected this session', /const walled = session \? sessionWalledMembers\(session\._webuiId\) : new Set\(\);[\s\S]{0,600}walled\.has\(m\.id\) && v\.usable !== false/.test(eng));
   ok('WIRING: the near-arm ASSERTION re-reads the same store the verdict read (round 2 compared viaId to demoted.key — unreachable, and pinned as if it were the defence)', /const veto = nearArmVeto\(v\.viaId, sessionWalledMembers\(id\)\);/.test(eng) && !/v\.viaId === demoted/.test(eng) && /wall-usable-is-rejector/.test(eng));
@@ -990,7 +1002,7 @@ if (!probe) {
   // now tolerates siblings while still forbidding a silent empty list.
   ok('WIRING: decidePoolSwitch takes the exclusion as a NAMED input and reports it (never a silent empty candidate list)', /exclude = null,[^)]*explain = false \}\)/.test(read('src/account-pool-auto.js')) && /excludedN \? 'all-rejected' :[\s\S]{0,120}'no-members'/.test(read('src/account-pool-auto.js')));
   ok('WIRING: session-schema documents the slot flag on the wall signals', /_turnWallSigs:[^\n]*\{at, resetsAtMs, bucket, scopedName, key, slot\}/.test(read('src/session-schema.js')), read('src/session-schema.js').split('\n').find((l) => /_turnWallSigs/.test(l)));
-  ok('the engine INSTANCE exports the new seams (functional call check, never a source grep — the 2.369.4 lesson)', ['fireIdentityFor', 'sessionBillingMember', 'sessionReadingMember', 'wallKeyFor', 'sessionWalledMembers'].every((k) => typeof probe.eng[k] === 'function'));
+  ok('the engine INSTANCE exports the new seams (functional call check, never a source grep — the 2.369.4 lesson)', ['fireIdentityFor', 'sessionBillingMember', 'readingSlotFor', 'corroborateReading', 'wallKeyFor', 'sessionWalledMembers'].every((k) => typeof probe.eng[k] === 'function') && typeof probe.eng.sessionReadingMember === 'undefined');
   ok('the auto-resume INSTANCE exports the breaker seams', ['noteFireOutcome', 'recentFireFailures', 'canFire', 'noteNoPoolTarget'].every((k) => typeof probe.ar[k] === 'function'));
   // ── round 2 ──
   const ar2src = read('src/server/auto-resume.js');

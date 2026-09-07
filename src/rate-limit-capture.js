@@ -87,11 +87,14 @@ function parseRateLimitEvent(msg) {
  * `source` (default 'rate-limit-event') labels the reading write — the wall
  * machine's ground-truth demotion (B-2c9b) rides this SAME path with source
  * 'wall' so anchors/estimator/verdicts see one write discipline, never a twin.
+ * `corroborated` (optional) records whether the OTel observation agreed with
+ * the credential slot this reading was filed on (2026-09-07). A LABEL only —
+ * the key comes from readingSlotFor and nothing else.
  *
  * @returns {ok, dead, wroteReading} — dead=true when the bucket is exhausted
  *   (caller should treat it like a limit banner: immediate pool evaluation).
  */
-function captureRateLimitEvent({ cacheDir, key, identityIds, ev, now = Date.now(), source = 'rate-limit-event' }) {
+function captureRateLimitEvent({ cacheDir, key, identityIds, ev, now = Date.now(), source = 'rate-limit-event', corroborated = undefined }) {
   if (!ev || (ev.kind !== 'fiveHour' && ev.kind !== 'sevenDay' && ev.kind !== 'scoped')) {
     // unknown bucket types: surface, never silently drop (the api_retry lesson)
     return { ok: false, dead: false, wroteReading: false, unknownType: ev?.rawType || null };
@@ -136,7 +139,16 @@ function captureRateLimitEvent({ cacheDir, key, identityIds, ev, now = Date.now(
       try { const c = JSON.parse(fs.readFileSync(fileFor(id), 'utf-8')) || {}; if ((Number(c.fetchedAt) || 0) > baseAt) { baseAt = Number(c.fetchedAt) || 0; base = c; } } catch { }
     }
     const cache = applyTo(base ? { ...base } : {});
-    if (reading) { cache.fetchedAt = now; cache.source = source || 'rate-limit-event'; }
+    if (reading) {
+      cache.fetchedAt = now; cache.source = source || 'rate-limit-event';
+      // PROVENANCE (2026-09-07): did the OTel observation for the session that
+      // produced this reading AGREE with the credential slot it was filed on?
+      // true = corroborated, false = the observation named a different (=
+      // spawn-time) org, undefined = nothing to compare. It is a LABEL for the
+      // panel and for forensics — it never moved this write anywhere, which is
+      // the whole point of the refutation it records.
+      if (corroborated === undefined) delete cache.corroborated; else cache.corroborated = !!corroborated;
+    }
     fs.mkdirSync(cacheDir, { recursive: true });
     const f = fileFor(key);
     fs.writeFileSync(f + '.tmp', JSON.stringify(cache)); fs.renameSync(f + '.tmp', f);
