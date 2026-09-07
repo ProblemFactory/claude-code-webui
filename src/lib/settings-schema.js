@@ -585,7 +585,7 @@ const SETTINGS_SCHEMA = {
       { value: 'haiku', label: 'haiku (latest)' },
     ], // dynamically updated from /api/available-models; Custom... allows typing full model IDs
     label: t('Default model'),
-    description: t('Select an alias or choose "Custom..." to type a specific model ID (e.g. claude-opus-4-6-20250414). Applies to NEW sessions: a resumed conversation keeps its own value (set one for a specific conversation under Session parameters on its card).'),
+    description: t('Select an alias or choose "Custom..." to type a specific model ID (e.g. claude-opus-4-6-20250414). Applies to NEW sessions: a resumed conversation keeps the model the Claude CLI recorded for it (a transcript names the model that served a turn but never its 1M-context variant, so VibeSpace commands none) — set one for a specific conversation under Session parameters on its card.'),
     category: t('Claude'), liveApply: true,
   },
   'claude.defaultPermissionMode': {
@@ -611,7 +611,7 @@ const SETTINGS_SCHEMA = {
       { value: 'max', label: t('Max') },
     ], // dynamically updated from claude --help; Custom... allows typing values like xhigh
     label: t('Default effort level'),
-    description: t('Select a level or choose "Custom..." to type any value (e.g. xhigh). Applies to NEW sessions: a resumed conversation keeps its own value (set one for a specific conversation under Session parameters on its card).'),
+    description: t('Select a level or choose "Custom..." to type any value (e.g. xhigh). Applies to NEW sessions: nothing Claude writes records the effort a turn ran at, so a resume commands none and the CLI’s own config decides — set one for a specific conversation under Session parameters on its card.'),
     category: t('Claude'), liveApply: true,
   },
   'claude.defaultExtraArgs': {
@@ -689,7 +689,7 @@ const SETTINGS_SCHEMA = {
       { value: '', label: t('Default') },
     ],
     label: t('Default model'),
-    description: t('A model id the agent offers (provider/model, e.g. opencode/big-pickle) — the list fills from the agent once a session has started; empty keeps the agent default.'),
+    description: t('A model id the agent offers (provider/model, e.g. opencode/big-pickle) — the list fills from the agent once a session has started; empty keeps the agent default. Applies to NEW sessions: a resumed conversation keeps the model OpenCode’s own session record names (that needs the OpenCode background service; without it the default applies and the server log says which rung it used).'),
     category: t('OpenCode'), liveApply: true,
   },
   'opencode.defaultPermissionMode': {

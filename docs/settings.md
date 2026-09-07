@@ -147,7 +147,7 @@ Everything VibeSpace adds *into* your agent sessions lives here — and all of i
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `claude.defaultModel` | combobox | `''` | Default Claude model — dropdown aliases + "Custom..." for specific model IDs (e.g. claude-opus-4-6-20250414). Populated from `/api/available-models` (Claude `/v1/models`). **NEW sessions only (B-6b6d): a resumed conversation keeps its own value** — codex reads it back from the rollout’s last `turn_context`, claude from the transcript’s last assistant record; a per-session override (card → Session parameters) still wins. |
+| `claude.defaultModel` | combobox | `''` | Default Claude model — dropdown aliases + "Custom..." for specific model IDs (e.g. claude-opus-4-6-20250414). Populated from `/api/available-models` (Claude `/v1/models`). **NEW sessions only (B-6b6d): a resumed conversation keeps its own model** — for claude that is whatever the CLI recorded, because VibeSpace commands nothing (a transcript names the model that served a turn but never its 1M-context variant, so passing the served id back would silently drop `[1m]`); a per-session override (card → Session parameters) still wins. |
 | `claude.defaultPermissionMode` | enum | `''` | Default Claude permission mode for new or resumed Claude sessions |
 | `claude.defaultEffort` | enum | `''` | Default Claude effort for NEW Claude sessions. Nothing claude writes records the effort a turn ran at, so a resume with no per-session pick commands **no** effort at all and the CLI's own config decides (B-6b6d) |
 | `claude.defaultExtraArgs` | text | `''` | Extra Claude CLI args appended when starting a Claude session |
@@ -158,7 +158,7 @@ Everything VibeSpace adds *into* your agent sessions lives here — and all of i
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `codex.defaultModel` | combobox | `''` | Default Codex model — dropdown + "Custom..." for specific model IDs. Populated from ~/.codex/models_cache.json. **NEW sessions only (B-6b6d): a resumed conversation keeps its own value** — codex reads it back from the rollout’s last `turn_context`, claude from the transcript’s last assistant record; a per-session override (card → Session parameters) still wins. |
+| `codex.defaultModel` | combobox | `''` | Default Codex model — dropdown + "Custom..." for specific model IDs. Populated from ~/.codex/models_cache.json. **NEW sessions only (B-6b6d): a resumed thread keeps its own model**, read back from the rollout’s last `turn_context`; a per-session override (card → Session parameters) still wins. |
 | `codex.defaultPermissionMode` | enum | `''` | Default Codex permission mode for new or resumed Codex sessions |
 | `codex.defaultEffort` | enum | `''` | Default Codex reasoning effort for NEW Codex sessions — a resumed thread keeps the effort its own last `turn_context` ran at (B-6b6d) |
 | `codex.defaultExtraArgs` | text | `''` | Extra Codex CLI args appended when starting a Codex session |

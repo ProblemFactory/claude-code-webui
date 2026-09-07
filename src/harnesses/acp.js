@@ -53,6 +53,14 @@ function acpHarness({ id, label, command, args = ['acp'], env = {}, store = {}, 
       locateTranscript: typeof store.locate === 'function' ? store.locate : () => null, // S1 alias
       transcriptDirs: Array.isArray(store.transcriptDirs) ? store.transcriptDirs : [],
       conversationIdField: 'backendSessionId',
+      // RESUME CONTINUITY (B-6b6d): deliberately NO `lastTurnModel`/
+      // `lastTurnEffort` here. ACP itself exposes no way to ask an agent what a
+      // stopped conversation was running, and the hook's PRESENCE is the whole
+      // declaration (src/resume-continuity.js) — so a generic ACP harness sends
+      // NOTHING on a resume and the agent's own record decides, rather than
+      // having `<id>.defaultModel` (a NEW-session default) applied to a
+      // continuation. A harness whose agent DOES name it adds the hook to its
+      // own store: src/harnesses/opencode.js reads it off `opencode serve`.
       SessionMessages: AcpSessionMessages,
     },
     quota: NULL_QUOTA,            // no quota concept over ACP (usage_update is context size, not a subscription window)

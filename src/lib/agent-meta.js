@@ -287,14 +287,29 @@ export function responseStyleOrigin(live, picked) {
  *      origin and the "(saved: X — applies on the next resume)" note beside it
  *      can never contradict each other;
  *    · a session that predates the field (`stated` null/undefined — every
- *      session restored from an older session-meta) falls back to
- *      responseStyleOrigin's COMPARISON rather than claiming a fact we do not
- *      have. */
+ *      session restored from an older session-meta) may only claim what the two
+ *      VALUES prove, and for these knobs that is just the pick: a DIFFERENT
+ *      saved pick means the live value dates from the spawn, a pick with no
+ *      live value is what the panel is showing, a pick that MATCHES the live
+ *      value did apply, and a pick with a live value that is EMPTY is what
+ *      the row is showing whatever the spawn's origin was. With no pick at all nothing is provable — the instance
+ *      default and the conversation's own value are the same string too often —
+ *      so the answer is 'unknown' and the caller shows NO origin (r2 review:
+ *      borrowing responseStyleOrigin here asserted "instance default" as a fact
+ *      about every session that predates the field, including ones whose model
+ *      came from the New Session dialog). */
 export function spawnValueOrigin(stated, live, picked) {
   const l = live || '';
   const p = picked === undefined ? undefined : (picked || '');
   if (l && p !== undefined && p && p !== l) return 'spawn';
+  // Nothing was COMMANDED but a pick is saved ⇒ the row is showing the PICK,
+  // whatever the spawn's own origin was. This is now the common shape on a
+  // claude resume (round 2: claude commands neither knob, so `stated` is
+  // 'harness' and the live value is empty) — labelling the user's saved pick
+  // "harness default" would describe the spawn while showing something else.
+  if (!l && p) return 'saved';
   if (stated === 'chosen' || stated === 'conversation' || stated === 'instance' || stated === 'harness') return stated;
+  if (l && p === undefined) return 'unknown';   // nothing to compare ⇒ say nothing
   return responseStyleOrigin(live, picked);
 }
 

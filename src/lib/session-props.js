@@ -273,11 +273,18 @@ export function openSessionProps(app, sessionRef, { syncId } = {}) {
       const originRow = (label, live, picked, stated, render) => {
         const shown = live || (picked || '');
         if (!shown) return;   // nothing commanded and nothing picked: no row rather than an empty claim
-        const origin = ORIGIN_LABEL[spawnValueOrigin(stated, live, picked)]();
+        // 'unknown' = a session that predates the stated origin and offers
+        // nothing to compare (r2 review). It gets the VALUE and no
+        // parenthetical \u2014 an origin we do not have must not be invented, and
+        // "(instance default)" was wrong for every session whose model came
+        // from the New Session dialog.
+        const originKey = spawnValueOrigin(stated, live, picked);
+        const originBit = ORIGIN_LABEL[originKey]
+          ? ` <span class="chat-status-dim">${escHtml('(' + ORIGIN_LABEL[originKey]() + ')')}</span>` : '';
         const pendBit = (live && picked !== undefined && (picked || '') !== live)
           ? ` <span class="chat-status-dim">${escHtml(t('(saved: {v} \u2014 applies on the next resume)', { v: picked || t('agent default') }))}</span>` : '';
         row(cfgSection(), label,
-          `${escHtml(render ? render(shown) : shown)} <span class="chat-status-dim">${escHtml('(' + origin + ')')}</span>${pendBit}`,
+          `${escHtml(render ? render(shown) : shown)}${originBit}${pendBit}`,
           // an origin row states TWO facts; the second must not be the one the
           // ellipsis eats (375x667: it is the last thing on the line)
           { wrap: true });

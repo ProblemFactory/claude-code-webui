@@ -334,75 +334,42 @@ function findSessionJsonlPath(claudeSessionId, cwd) {
   return null;
 }
 
-// ── THE MODEL THIS CONVERSATION LAST RAN ON (B-6b6d; the claude twin of
-//    codex's lastCodexTurnModel) ──────────────────────────────────────────
-// A resume that carries no explicit pick must run on the conversation's OWN
-// model, not the instance default (src/resume-continuity.js states the rule).
-// claude never reports a "session model" anywhere, but every assistant record
-// NAMES the model that served it — a TYPED field, never prose. Read from the
-// tail in growing windows so a 500MB transcript costs one 128KB pread in the
-// normal case, and never a full parse on a spawn path.
-// SUBAGENT records are skipped: a Task subagent may run a different model
-// (its records are the LAST ones in the file whenever a turn ended on one),
-// and the main thread's model is what a resume continues.
-// '<synthetic>' (and any other <marker>) is the CLI's own "nothing served
-// this" placeholder — the same exclusion noteModelSeen makes.
-// A SAFETY-CLASSIFIER FALLBACK IS NOT A MODEL CHOICE (2.227.4's record, read
-// backwards): when the classifier flags a message the CLI retries it on another
-// model and records `system/model_refusal_fallback {originalModel, fallbackModel}`
-// — and, in its own words, later messages go back to the original. A
-// conversation that ENDED on such a retry would otherwise be resumed pinned to
-// the fallback model, i.e. a silent downgrade performed by the fix that exists
-// to stop silent changes. So when the candidate is exactly what a nearby
-// fallback record says it switched TO, the conversation's model is the one it
-// switched FROM. Bounded look-back (the record sits just before its retry) and
-// BOTH key casings (the same record is snake_case on stdout, camelCase in the
-// JSONL — the 2.227.6 trap).
-const FALLBACK_LOOKBACK = 20;
-function _unfallback(lines, at, model) {
-  for (let i = at - 1, n = 0; i >= 0 && n < FALLBACK_LOOKBACK; i--, n++) {
-    const l = lines[i];
-    if (l.indexOf('model_refusal_fallback') < 0) continue;
-    try {
-      const r = JSON.parse(l);
-      if (r.subtype !== 'model_refusal_fallback') continue;
-      const to = r.fallbackModel || r.fallback_model || '';
-      const from = r.originalModel || r.original_model || '';
-      if (to === model && from) return from;
-    } catch { }
-  }
-  return model;
-}
-const CLAUDE_MODEL_TAIL_WINDOWS = [128 * 1024, 2 * 1024 * 1024, 16 * 1024 * 1024];
-async function lastClaudeTurnModel(claudeSessionId, cwd) {
-  const fp = findSessionJsonlPath(claudeSessionId, cwd);
-  if (!fp) return null;
-  let fh = null;
-  try {
-    fh = await fs.promises.open(fp, 'r');
-    const size = (await fh.stat()).size;
-    if (!size) return null;
-    for (const win of CLAUDE_MODEL_TAIL_WINDOWS) {
-      const len = Math.min(win, size);
-      const buf = Buffer.alloc(len);
-      await fh.read(buf, 0, len, size - len);
-      let text = buf.toString('utf-8');
-      if (len < size) { const nl = text.indexOf('\n'); if (nl >= 0) text = text.slice(nl + 1); } // drop the cut-off first line
-      const lines = text.split('\n');
-      for (let i = lines.length - 1; i >= 0; i--) {
-        const l = lines[i];
-        if (l.indexOf('"model"') < 0 || l.indexOf('"assistant"') < 0) continue;
-        let rec = null;
-        try { rec = JSON.parse(l); } catch { continue; }
-        if (!rec || rec.type !== 'assistant' || isSubagentMessage(rec)) continue;
-        const m = rec.message && rec.message.model;
-        if (typeof m === 'string' && m && !m.startsWith('<')) return _unfallback(lines, i, m);
-      }
-      if (len >= size) break; // the whole file was in this window — nothing to grow into
-    }
-  } catch { return null; } finally { if (fh) { try { await fh.close(); } catch { } } }
-  return null;
-}
+// ── WHY THERE IS NO CLAUDE MODEL READER HERE (B-6b6d round 2) ─────────────
+// Round 1 shipped `lastClaudeTurnModel`: a tail scan for the last MAIN-THREAD
+// assistant record's `message.model`, handed to the resume ladder as "the
+// conversation's own model". It is removed, not repaired, because the field it
+// read CANNOT ANSWER THE QUESTION THE LADDER ASKS.
+//
+// The ladder asks "what should this resume COMMAND". `message.model` answers
+// "which model SERVED that turn", and it answers it in a form that cannot
+// express the CONTEXT-WINDOW VARIANT the conversation was started with.
+// Measured over the whole local corpus (2650 transcripts / 3.5 GB under
+// ~/.claude/projects): ZERO `"model":"…"` values carry a `[…]` suffix, while
+// the CLI's own `system/model_refusal_fallback` records prove conversations
+// running `claude-fable-5[1m]` (5 sightings). So every id this reader could
+// produce is a LOSSY rendering, and `--model claude-fable-5` on the resume of a
+// `claude-fable-5[1m]` conversation silently turns 1M of context into 200k —
+// on a path where master commanded nothing at all.
+//
+// It was also wrong about the model itself. A safety-classifier reroute is
+// recorded as an ASSISTANT record whose `message.model` is ALREADY the fallback
+// target and which carries a `{type:'fallback',from,to}` content block; the
+// `system/model_refusal_fallback` record the round-1 guard looked for is
+// written 2-10 lines AFTER it, so a ≤20-line BACKWARD look-back matched 1 of
+// 139 reroutes in the owner's transcript, and 13,694 of 81,707 main-thread
+// assistant records (16.8%) sit inside such a reroute run (median 87 records,
+// max 1647) — i.e. ~1 in 6 interruption points resumed pinned to the fallback.
+//
+// A guard that can never produce a commandable answer must not be shipped as
+// the capability (2.369.66). So the SOURCE goes: claude records NEITHER knob in
+// a form a spawn can command (no effort anywhere, no variant on the model), a
+// claude resume therefore commands NEITHER, and the CLI's own session record —
+// which is variant-exact — decides. That is not a fallback to the instance
+// default: the client stopped sending `claude.defaultModel` on a continuation
+// in the same change, which is the bug B-6b6d was opened for.
+// If a future CLI writes the commanded model (variant included) as a typed
+// record, add the reader back as `store.lastTurnModel` in src/harnesses/claude.js
+// — its PRESENCE is the whole declaration (src/resume-continuity.js).
 
 // JSONL parse cache — stores ALL non-subagent messages (unfiltered).
 // LRU-bounded: it retains the FULL parsed history of each session, so an
@@ -1256,7 +1223,6 @@ module.exports = {
   readJsonlTailIds,
   claimJsonls,
   findSessionJsonlPath,
-  lastClaudeTurnModel,
   parseSessionJsonl,
   extractSessionMeta,
   getSubagentMetas,

@@ -63,15 +63,24 @@ module.exports = {
   store: {
     discover: store.discoverClaudeSessions,        // async ({activeSessions, webuiPids, devSnap}) → session entries
     locate: (id, cwd) => store.findSessionJsonlPath(id, cwd), // (sessionId, cwd) → path|null
-    // RESUME CONTINUITY (B-6b6d): the value this CONVERSATION last ran at, for
-    // a resume/fork that carries no explicit pick (src/resume-continuity.js).
-    // The hook's PRESENCE is the declaration that this harness can answer —
-    // there is deliberately no second `resumeContinuity` boolean to drift.
-    // MODEL only: every assistant record names the model that served it, while
-    // NOTHING claude writes records the effort a turn ran at (no lastTurnEffort
-    // here ⇒ a claude resume with no pick commands no effort at all and the
-    // CLI's own config decides — never the instance default).
-    lastTurnModel: (id, cwd) => store.lastClaudeTurnModel(id, cwd),
+    // RESUME CONTINUITY (B-6b6d, round 2): claude declares NEITHER
+    // `lastTurnModel` NOR `lastTurnEffort`, and the ABSENCE is the whole
+    // declaration (src/resume-continuity.js: a knob with no source sends
+    // NOTHING on a resume, never the instance default). Both knobs are absent
+    // for the SAME reason — nothing claude writes records them in a form a
+    // spawn can command:
+    //   · EFFORT: nothing anywhere records the effort a turn ran at.
+    //   · MODEL: every assistant record names the model that SERVED it, but
+    //     never its context-window variant — measured over 2650 local
+    //     transcripts, ZERO `message.model` values carry a `[…]` suffix while
+    //     the CLI's own model_refusal_fallback records prove conversations on
+    //     `claude-fable-5[1m]`. Commanding the served id would turn a 1M
+    //     conversation into a 200k one on every resume. The reader round 1
+    //     shipped for this is gone; the long-form reasoning (and the classifier
+    //     -reroute measurement that also broke it) is in session-store.js.
+    // So a claude resume commands neither knob and the CLI's own session
+    // record — variant-exact — decides. Adding a hook back here is all it takes
+    // if a future CLI records the commanded value.
     locateTranscript: store.findSessionJsonlPath,   // (sessionId, cwd) → path|null (S1 alias)
     warmTranscript: store.warmSessionJsonlAsync,   // worker-side parse cache
     Reader: store.SessionMessages,

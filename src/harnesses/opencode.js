@@ -55,6 +55,17 @@ Object.assign(harness.store, {
   // (not installed / parked / unreachable / no fork endpoint / 404)
   forkSession: (id, opts) => serve.facts().forkSession(id, opts || {}),
   forkChain: () => [],
+  // RESUME CONTINUITY (B-6b6d round 2): OpenCode's OWN session record names the
+  // model, so this harness CAN answer "what is this conversation on" and the
+  // hook's PRESENCE says so (src/resume-continuity.js — a knob with no source
+  // sends nothing on a resume, which for opencode would have quietly dropped
+  // `opencode.defaultModel` with nothing taking its place and nothing saying
+  // so). v1 list only, shared cache, bounded, never throws: '' when the serve
+  // is off (it is opt-in, default OFF) or the session is gone, and the ladder
+  // then takes the instance default and LOGS that it did.
+  // The generic acpHarness ships no reader — an ACP agent that can name its
+  // conversation's model adds one here, exactly like this.
+  lastTurnModel: (id) => serve.facts().sessionModel(id),
   /** Why the store is unavailable right now (user-action error text). */
   unavailableReason: () => serve.facts().reasonUnavailable(),
   serveState: () => serve.facts().state(),

@@ -514,7 +514,7 @@ console.log('— ⑧ spawn / restore wiring pins (the saved effort must REACH th
   // one step earlier (leg ⑪ measures it end to end), not as a codex-only env
   // post-fill whose `env is empty` test the client had made unreachable.
   ok(/await pickKnob\(data\.effort, hstore\.lastTurnEffort, 'defaultEffort'\)/.test(wsCreate)
-    && /const conversation = e \? '' : await fromConversation\(hook\);/.test(wsCreate),
+    && /const conversation = stated \? '' : await fromConversation\(hook\);/.test(wsCreate),
     'and with none supplied, the resume falls back to the thread\'s OWN last turn effort (B-21e4 continuity)');
   const adapter = fs.readFileSync(path.join(REPO, 'src/adapters/codex.js'), 'utf8');
   ok(/CODEX_WEBUI_EFFORT/.test(adapter), 'the codex adapter is what turns that into the wrapper\'s env');
@@ -653,7 +653,79 @@ const { resumeSpawnPick } = require(path.join(REPO, 'src/resume-continuity.js'))
   ok(pick({ resume: false }) === '/harness' && pick({ resume: true, hasSource: true }) === '/harness',
     'nothing anywhere = nothing sent (the agent\'s own config decides)');
   ok(pick({ explicit: '', conversation: 'ultra', instanceDefault: 'xhigh', resume: true, hasSource: true }) === 'ultra/conversation',
-    "'' and undefined are the SAME no-pick: the wire carries `model || undefined`, so an explicit \"Auto\" and an absent field are identical bytes");
+    "on a CONTINUATION '' and undefined are the same no-pick: that path sends `model || undefined`, so an explicit \"Auto\" and an absent field are identical bytes");
+  // r2 (adversarial verifier, medium): the New Session dialog ALWAYS sends a
+  // defined string and its FIRST option is '' ("Auto (model default)" /
+  // "Default"). Collapsing that into "no pick" made an explicit Auto resolve to
+  // the instance default — the user asked the agent to decide and got xhigh.
+  ok(pick({ explicit: '', instanceDefault: 'xhigh', resume: false, hasSource: false }) === '/chosen'
+    && pick({ explicit: '', instanceDefault: 'xhigh', resume: false, hasSource: true }) === '/chosen'
+    && pick({ explicit: '   ', instanceDefault: 'xhigh', resume: false }) === '/chosen',
+    'r2 THE FIX: a NEW session with an explicit "Auto (model default)" commands NOTHING — a STATED empty is a choice, not silence',
+    pick({ explicit: '', instanceDefault: 'xhigh', resume: false, hasSource: false }));
+  ok(pick({ instanceDefault: 'xhigh', resume: false }) === 'xhigh/instance'
+    && pick({ explicit: undefined, instanceDefault: 'xhigh', resume: false }) === 'xhigh/instance'
+    && pick({ explicit: null, instanceDefault: 'xhigh', resume: false }) === 'xhigh/instance',
+    'negative control: a NEW session that supplied NOTHING still gets the instance default (only a DEFINED empty is a choice)');
+  ok(pick({ explicit: '', conversation: '', instanceDefault: 'xhigh', resume: true, hasSource: true }) === 'xhigh/instance',
+    "…and the stated empty is NOT honoured on a continuation, where the wire cannot carry it (the rule is scoped, not global)");
+}
+
+console.log('— ⑪a2 r2: dialog → client → THE WIRE → server ladder → adapter env (an explicit "Auto" must survive all four)');
+{
+  // Both halves are the product's own composition, and ⑪c pins each of these
+  // three lines VERBATIM against the source files — so this leg measures the
+  // real chain rather than a paraphrase of it.
+  const clientPick = (explicit, instanceDefault, continuesConversation) =>
+    resumeSpawnPick({ explicit, instanceDefault, resume: continuesConversation, hasSource: false }).value;
+  const wireKnob = (v, continuesConversation) => (continuesConversation ? (v || undefined) : v);
+  const createMsg = (dialogEffort, dflt, resumeId) => {
+    const continuesConversation = !!resumeId;
+    const msg = { type: 'create', backend: 'codex', resumeId: resumeId || undefined, effort: wireKnob(clientPick(dialogEffort, dflt, continuesConversation), continuesConversation) };
+    return JSON.parse(JSON.stringify(msg));   // ← the actual JSON round trip
+  };
+  // the SERVER half, as ws-create composes it (⑪c pins the two lines)
+  const serverPick = (data, conversation, dflt, hasSource) => {
+    const stated = data.effort !== undefined && data.effort !== null && String(data.effort).trim() !== '';
+    return resumeSpawnPick({ explicit: data.effort, conversation: stated ? '' : conversation, instanceDefault: dflt, resume: !!data.resumeId, hasSource });
+  };
+  const { CodexAdapter } = require(path.join(REPO, 'src/adapters/codex.js'));
+  const envOf = (p2, resumeId) => new CodexAdapter().buildSessionArgs({ cwd: '/w', resumeId, effort: p2.value || undefined, mode: 'chat' }).env.CODEX_WEBUI_EFFORT;
+
+  // (a) the dialog's FIRST option, on a NEW session, with the instance default set
+  const autoMsg = createMsg('', 'xhigh', null);
+  ok(Object.prototype.hasOwnProperty.call(autoMsg, 'effort') && autoMsg.effort === '',
+    'r2: an explicit "Auto (model default)" survives the JSON wire as a STATED empty on a NEW create',
+    JSON.stringify(autoMsg));
+  const autoPick = serverPick(autoMsg, '', 'xhigh', true);
+  ok(autoPick.value === '' && autoPick.origin === 'chosen' && !envOf(autoPick, null),
+    'r2 THE FIX end to end: the server reads it as the user’s choice and the adapter spawns with NO effort — what master did',
+    JSON.stringify([autoPick, envOf(autoPick, null)]));
+  // (b) the dialog untouched: it is PRE-FILLED with the instance default, so the
+  //     user submits that string and it is honoured (unchanged behaviour)
+  const dfltMsg = createMsg('xhigh', 'xhigh', null);
+  ok(dfltMsg.effort === 'xhigh' && envOf(serverPick(dfltMsg, '', 'xhigh', true), null) === 'xhigh',
+    'negative control: submitting the pre-filled instance default still spawns with it');
+  // (c) a create from a path that supplies nothing at all
+  const bareMsg = createMsg(undefined, 'xhigh', null);
+  ok(bareMsg.effort === 'xhigh' && envOf(serverPick(bareMsg, '', 'xhigh', true), null) === 'xhigh',
+    'negative control: a NEW session that supplied NOTHING still gets the instance default');
+  // (d) the PRE-FIX client, replayed: `''` collapsed to no-pick, then the
+  //     ladder answered the instance default — the defect, in one line
+  const preFixClient = (explicit, dflt) => resumeSpawnPick({ explicit: explicit || undefined, instanceDefault: dflt, resume: false, hasSource: false }).value;
+  const preFixMsg = JSON.parse(JSON.stringify({ effort: preFixClient('', 'xhigh') || undefined }));
+  ok(preFixMsg.effort === 'xhigh' && envOf(serverPick(preFixMsg, '', 'xhigh', true), null) === 'xhigh',
+    'r2 REPRODUCED (negative control): the ROUND-1 client turned the dialog’s explicit Auto into codex.defaultEffort, all the way to the spawn env',
+    JSON.stringify(preFixMsg));
+  // (e) …and the rule is SCOPED: on a continuation the wire cannot carry the
+  //     distinction, and there '' still means "take the conversation's own"
+  const resumeMsg = createMsg('', 'xhigh', 'th-x');
+  ok(resumeMsg.effort === undefined,
+    'on a RESUME the client still sends nothing (the create message drops the empty there — one rule, two transports)',
+    JSON.stringify(resumeMsg));
+  const resumePick = serverPick(resumeMsg, 'ultra', 'xhigh', true);
+  ok(resumePick.value === 'ultra' && resumePick.origin === 'conversation' && envOf(resumePick, 'th-x') === 'ultra',
+    '…and the conversation’s own value still wins there (the owner’s incident stays fixed)');
 }
 
 console.log('— ⑪b end-to-end: a rollout at ultra → descriptor → ladder → adapter env → the REAL wrapper');
@@ -740,70 +812,123 @@ const _homeBefore = process.env.HOME, _codexHomeBefore = process.env.CODEX_HOME;
   }
   try { w11.stdin.end(); w11.kill(); } catch { }
 
-  // ── THE CLAUDE TWIN (task item 3): model from the transcript, effort NOWHERE
+  // ── THE CLAUDE TWIN, ROUND 2: NEITHER KNOB HAS A COMMANDABLE SOURCE ──────
+  // Round 1 read the transcript's last MAIN-THREAD assistant `message.model`
+  // and commanded it on every claude resume. The adversarial verifier
+  // reproduced two defects on the owner's real 231k-line transcript, and BOTH
+  // are properties of the FIELD rather than of the guard around it, so the
+  // SOURCE is gone rather than repaired (a rung that can never produce a
+  // commandable answer must not ship as the capability — 2.369.66).
+  // These legs pin the DATA facts that decided it, in the record order the CLI
+  // really writes, plus the behaviour that follows.
   const store = require(path.join(REPO, 'src/session-store.js'));
   const cdir = path.join(home, '.claude', 'projects', '-w'); fs.mkdirSync(cdir, { recursive: true });
-  const CID = '9f000000-0000-4000-8000-00000000abcd';
-  fs.writeFileSync(path.join(cdir, CID + '.jsonl'), [
-    rec({ type: 'assistant', uuid: 'a1', message: { model: 'claude-fable-5-20260101', content: [] } }),
-    rec({ type: 'assistant', uuid: 'a2', message: { model: 'claude-opus-5-20260514', content: [] } }),
-    // a SUBAGENT reply is usually the LAST record of a turn and may run another
-    // model — the main thread's model is what a resume continues
-    rec({ type: 'assistant', uuid: 'a3', isSidechain: true, parent_tool_use_id: 'toolu_1', message: { model: 'claude-haiku-4-5-20251001', content: [] } }),
-    // and the CLI's own "nothing served this" placeholder
-    rec({ type: 'assistant', uuid: 'a4', message: { model: '<synthetic>', content: [] } }),
-    rec({ type: 'user', uuid: 'u1', message: { role: 'user', content: 'hi' } }),
-  ].join(''));
-  const claudeModel = await store.lastClaudeTurnModel(CID, '/w');
-  ok(claudeModel === 'claude-opus-5-20260514',
-    'claude twin: the conversation\'s own last MAIN-THREAD served model, from a typed field (subagent + <synthetic> records skipped)', JSON.stringify(claudeModel));
-  ok(await store.lastClaudeTurnModel('00000000-0000-4000-8000-000000000000', '/w') === null,
-    'unknown conversation → null (the ladder then falls back to the instance default, logged)');
-  // A SAFETY-CLASSIFIER FALLBACK IS NOT A MODEL CHOICE: the CLI retries the
-  // flagged message on another model and says later messages go back. A
-  // conversation that ENDED on that retry must not be resumed pinned to the
-  // fallback — that would be a silent downgrade performed by the fix that
-  // exists to stop silent changes.
+  // (a) THE REAL RECORD ORDER of a safety-classifier reroute. Measured on the
+  //     owner's transcript: 139 reroutes, each an ASSISTANT record whose
+  //     message.model is ALREADY the fallback target and which carries a
+  //     {type:'fallback',from,to} content block; the
+  //     system/model_refusal_fallback record lands 2-10 lines AFTER it, so a
+  //     ≤20-line BACKWARD look-back matched 1 of 139. Round 1's fixture wrote
+  //     the system record BEFORE the assistant record it describes, which is
+  //     why its suite stayed green.
   const FID = '9f000000-0000-4000-8000-00000000fbfb';
-  fs.writeFileSync(path.join(cdir, FID + '.jsonl'), [
-    rec({ type: 'assistant', uuid: 'b1', message: { model: 'claude-opus-5-20260514', content: [] } }),
+  const rerouteLines = [
+    rec({ type: 'assistant', uuid: 'b1', message: { model: 'claude-fable-5', content: [{ type: 'text', text: 'before' }] } }),
     rec({ type: 'user', uuid: 'b2', message: { role: 'user', content: 'something the classifier flags' } }),
-    // camelCase = the JSONL spelling of the same record (2.227.6 key-casing trap)
-    rec({ type: 'system', subtype: 'model_refusal_fallback', uuid: 'b3', originalModel: 'claude-opus-5-20260514', fallbackModel: 'claude-sonnet-5-20260101' }),
-    rec({ type: 'assistant', uuid: 'b4', message: { model: 'claude-sonnet-5-20260101', content: [] } }),
-  ].join(''));
-  ok(await store.lastClaudeTurnModel(FID, '/w') === 'claude-opus-5-20260514',
-    'a conversation that ended ON a classifier retry resumes on the model it switched FROM, not the fallback',
-    JSON.stringify(await store.lastClaudeTurnModel(FID, '/w')));
-  const SID2 = '9f000000-0000-4000-8000-00000000fbfc';
-  fs.writeFileSync(path.join(cdir, SID2 + '.jsonl'), [
-    rec({ type: 'system', subtype: 'model_refusal_fallback', uuid: 'c1', original_model: 'claude-opus-5-20260514', fallback_model: 'claude-sonnet-5-20260101' }),
-    rec({ type: 'assistant', uuid: 'c2', message: { model: 'claude-sonnet-5-20260101', content: [] } }),
-  ].join(''));
-  ok(await store.lastClaudeTurnModel(SID2, '/w') === 'claude-opus-5-20260514',
-    '…and the snake_case spelling of that record is read too (stdout vs JSONL)');
-  const SID3 = '9f000000-0000-4000-8000-00000000fbfd';
-  fs.writeFileSync(path.join(cdir, SID3 + '.jsonl'), [
-    // a fallback that names a DIFFERENT target must not rewrite this answer
-    rec({ type: 'system', subtype: 'model_refusal_fallback', uuid: 'd1', originalModel: 'claude-opus-5-20260514', fallbackModel: 'claude-haiku-4-5-20251001' }),
-    rec({ type: 'assistant', uuid: 'd2', message: { model: 'claude-sonnet-5-20260101', content: [] } }),
-  ].join(''));
-  ok(await store.lastClaudeTurnModel(SID3, '/w') === 'claude-sonnet-5-20260101',
-    'negative control: a fallback record about ANOTHER model leaves the served model alone');
+    rec({ type: 'assistant', uuid: 'b3', message: { model: 'claude-opus-4-8', content: [{ type: 'fallback', from: { model: 'claude-fable-5' }, to: { model: 'claude-opus-4-8' } }] } }),
+    rec({ type: 'assistant', uuid: 'b4', message: { model: 'claude-opus-4-8', content: [{ type: 'text', text: 'retried' }] } }),
+    rec({ type: 'system', subtype: 'model_refusal_fallback', uuid: 'b5', originalModel: 'claude-fable-5[1m]', fallbackModel: 'claude-opus-4-8' }),
+  ];
+  fs.writeFileSync(path.join(cdir, FID + '.jsonl'), rerouteLines.join(''));
+  // The reader round 1 shipped, restated here so the DATA can be measured
+  // without the deleted code: "last main-thread assistant message.model", plus
+  // round 1's ≤20-line BACKWARD look-back for the system record.
+  const r1Reader = (lines) => {
+    for (let k = lines.length - 1; k >= 0; k--) {
+      let r = null; try { r = JSON.parse(lines[k]); } catch { continue; }
+      if (!r || r.type !== 'assistant' || r.isSidechain || r.parent_tool_use_id) continue;
+      const m = r.message && r.message.model;
+      if (typeof m !== 'string' || !m || m.startsWith('<')) continue;
+      for (let q = k - 1, n = 0; q >= 0 && n < 20; q--, n++) {
+        let f = null; try { f = JSON.parse(lines[q]); } catch { continue; }
+        if (f && f.subtype === 'model_refusal_fallback' && (f.fallbackModel || f.fallback_model) === m) return f.originalModel || f.original_model;
+      }
+      return m;
+    }
+    return null;
+  };
+  const realOrder = rerouteLines.map((l) => l.trim()).filter(Boolean);
+  ok(r1Reader(realOrder) === 'claude-opus-4-8',
+    'r2 ①a REPRODUCED: in the order the CLI really writes them, round 1’s reader answers the FALLBACK model — the silent downgrade its guard existed to prevent',
+    JSON.stringify(r1Reader(realOrder)));
+  const r1Order = [realOrder[0], realOrder[1], realOrder[4], realOrder[2], realOrder[3]];
+  ok(r1Reader(r1Order) === 'claude-fable-5[1m]' && r1Reader(r1Order) !== r1Reader(realOrder),
+    '…and NEGATIVE CONTROL: with round 1’s fixture order (system record BEFORE the assistant) the guard DOES fire — that ordering is what kept the suite green, and note it then commands `claude-fable-5[1m]`, a spelling round 1 never anticipated',
+    JSON.stringify([r1Reader(r1Order), r1Reader(realOrder)]));
+  // (b) THE VARIANT. `message.model` names the model that SERVED a turn and
+  //     never its context-window variant, while the CLI's own reroute record
+  //     does — so every id the reader could produce is a lossy rendering and
+  //     `--model claude-fable-5` on a `claude-fable-5[1m]` conversation turns
+  //     1M of context into 200k.
+  const rerouteRecs = realOrder.map((l) => JSON.parse(l));
+  ok(rerouteRecs.filter((r) => r.type === 'assistant').every((r) => !/\[/.test(r.message.model))
+    && /\[1m\]$/.test(rerouteRecs.find((r) => r.subtype === 'model_refusal_fallback').originalModel),
+    'r2 ①b: the served model is BARE while the CLI’s own record proves the conversation ran a [1m] variant — the field cannot express what a resume must command');
+  // …and the same measurement against the REAL corpus when there is one (this
+  // is what makes (b) a fact about the format rather than about a fixture).
+  // Bounded and SKIPPED with a reason when the machine has no transcripts.
+  {
+    // the REAL home — `process.env.HOME` is the throwaway fixture home for the
+    // rest of this block, and pointing the corpus measurement at it would have
+    // measured the fixture I just wrote (counts only; no transcript content is
+    // read into an assertion message)
+    const projRoot = path.join(_homeBefore || os.homedir(), '.claude', 'projects');
+    let files = [];
+    try { for (const d of fs.readdirSync(projRoot)) { for (const f of fs.readdirSync(path.join(projRoot, d))) if (f.endsWith('.jsonl')) files.push(path.join(projRoot, d, f)); if (files.length > 60) break; } } catch { }
+    files = files.slice(0, 60);
+    if (!files.length) console.log('  ~ SKIP corpus measurement: no ~/.claude/projects transcripts on this machine');
+    else {
+      let served = 0, bracketed = 0, scanned = 0;
+      for (const fp of files) {
+        let txt = '';
+        try {
+          const fd = fs.openSync(fp, 'r'); const sz = fs.fstatSync(fd).size;
+          const len = Math.min(256 * 1024, sz); const buf = Buffer.alloc(len);
+          fs.readSync(fd, buf, 0, len, sz - len); fs.closeSync(fd); txt = buf.toString('utf-8');
+        } catch { continue; }
+        scanned++;
+        for (const m of txt.matchAll(/"model":"([^"]*)"/g)) { served++; if (m[1].includes('[')) bracketed++; }
+      }
+      ok(served > 0 && bracketed === 0,
+        `r2 ①b on the REAL corpus: ${served} \`"model":"…"\` values over ${scanned} transcripts, ${bracketed} of them carrying a […] context variant`,
+        JSON.stringify({ served, bracketed, scanned }));
+    }
+  }
+  // (c) THE BEHAVIOUR THAT FOLLOWS: claude declares NEITHER hook, so both knobs
+  //     take the no-source rung on a resume and the CLI's own session record
+  //     (variant-exact) decides.
   const hc = require(path.join(REPO, 'src/harnesses/claude.js'));
-  ok(typeof hc.store.lastTurnModel === 'function' && await hc.store.lastTurnModel(CID, '/w') === 'claude-opus-5-20260514',
-    'the claude DESCRIPTOR exposes it — same hook name, so ws-create has no backend branch');
-  ok(hc.store.lastTurnEffort === undefined,
-    'THE ASYMMETRY: claude declares NO effort reader, because nothing claude writes records the effort a turn ran at');
-  ok(resumeSpawnPick({ conversation: '', instanceDefault: 'high', resume: true, hasSource: typeof hc.store.lastTurnEffort === 'function' }).value === '',
-    '…so a claude resume with no pick commands NO effort and the CLI\'s own config decides — never claude.defaultEffort');
-  ok(resumeSpawnPick({ instanceDefault: 'high', resume: false, hasSource: false }).value === 'high',
-    '…while a NEW claude session still gets claude.defaultEffort');
+  ok(hc.store.lastTurnModel === undefined && hc.store.lastTurnEffort === undefined,
+    'r2 ①c THE ASYMMETRY IS NOW UNIFORM: claude declares NEITHER reader — it records no effort at all, and the model it records cannot express the variant',
+    JSON.stringify([typeof hc.store.lastTurnModel, typeof hc.store.lastTurnEffort]));
+  ok(store.lastClaudeTurnModel === undefined,
+    '…and the reader itself is gone from session-store (a source nobody may wire back by accident)');
+  const claudeResume = (knob) => resumeSpawnPick({ instanceDefault: knob, resume: true, hasSource: typeof hc.store.lastTurnModel === 'function' });
+  ok(claudeResume('opus[1m]').value === '' && claudeResume('opus[1m]').origin === 'harness'
+    && resumeSpawnPick({ instanceDefault: 'high', resume: true, hasSource: typeof hc.store.lastTurnEffort === 'function' }).value === '',
+    'a claude resume with no pick commands NEITHER model nor effort — never claude.defaultModel / claude.defaultEffort',
+    JSON.stringify(claudeResume('opus[1m]')));
+  ok(resumeSpawnPick({ instanceDefault: 'opus[1m]', resume: false }).value === 'opus[1m]'
+    && resumeSpawnPick({ instanceDefault: 'high', resume: false }).value === 'high',
+    'negative control: a NEW claude session still gets both instance defaults (this is a resume rule, not a deletion)');
   const { ClaudeCodeAdapter } = require(path.join(REPO, 'src/adapters/claude-code.js'));
-  const cArgs = new ClaudeCodeAdapter({}).buildSessionArgs({ cwd: '/w', resumeId: CID, model: claudeModel, mode: 'chat' });
-  ok(cArgs.args.join(' ').includes('--model claude-opus-5-20260514') && !cArgs.args.includes('--effort'),
-    'and the claude adapter passes the conversation\'s model explicitly, with no effort flag', JSON.stringify(cArgs.args));
-  try { fs.rmSync(path.join(REPO, 'data', 'remote-jsonl', 'b6b6d-fixture'), { recursive: true, force: true }); } catch { }
+  const cArgs = new ClaudeCodeAdapter({}).buildSessionArgs({ cwd: '/w', resumeId: FID, model: claudeResume('opus[1m]').value, mode: 'chat' });
+  ok(!cArgs.args.includes('--model') && !cArgs.args.includes('--effort'),
+    'and the claude adapter spawns the resume with NO model and NO effort flag', JSON.stringify(cArgs.args));
+  const harmArgs = new ClaudeCodeAdapter({}).buildSessionArgs({ cwd: '/w', resumeId: FID, model: 'claude-fable-5', mode: 'chat' });
+  ok(harmArgs.args.join(' ').includes('--model claude-fable-5'),
+    'negative control: the served id WOULD have been commanded verbatim — which is the [1m] downgrade, in one argv');
+    try { fs.rmSync(path.join(REPO, 'data', 'remote-jsonl', 'b6b6d-fixture'), { recursive: true, force: true }); } catch { }
 }
 process.env.HOME = _homeBefore; if (_codexHomeBefore === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = _codexHomeBefore;
 
@@ -822,6 +947,13 @@ console.log('— ⑪c WIRING: every resume/fork/restart entry point, and where t
   ok(!/const sessionEffort = effort !== undefined \? effort : defaults\.effort;/.test(sl)
     && !/const sessionModel = model !== undefined \? model : defaults\.model;/.test(sl),
     'the pre-fix expression is GONE from both twins (this is the line the owner\'s incident traced to)');
+  // r2: a NEW session sends the resolved value VERBATIM so an explicit
+  // "Auto (model default)" ('') survives the wire as a choice; a continuation
+  // keeps `|| undefined`, where '' means the same thing as silence.
+  ok(/const wireKnob = \(v\) => \(continuesConversation \? \(v \|\| undefined\) : v\);/.test(sl)
+    && /model: wireKnob\(sessionModel\)/.test(sl) && /effort: wireKnob\(sessionEffort\)/.test(sl)
+    && !/model: sessionModel\|\|undefined/.test(sl) && !/effort: sessionEffort\|\|undefined/.test(sl),
+    'r2: BOTH twins reach the wire through the same continuation-aware helper (a stated empty must survive on a NEW create)');
   // (2) every entry point that continues a conversation funnels through it
   ok(/resumeSession\(sessionId, cwd, sessionName, \{ mode, model, effort/.test(sl)
     && /effort: effort !== undefined \? effort : savedCfg\.effort,/.test(sl)
@@ -849,6 +981,29 @@ console.log('— ⑪c WIRING: every resume/fork/restart entry point, and where t
     'it records the ORIGIN and logs the decision (a resume that quietly took the default must be readable afterwards)');
   ok(!/lastCodexTurnEffort\(data\.resumeId\)/.test(wc) && !/lastCodexTurnModel\(data\.resumeId\)/.test(wc),
     'the codex-only env post-fill is GONE — one ladder, per-harness readers, no backend branch');
+  // r2: only the LADDER may decide what '' means. Normalising `explicit` here
+  // is how the dialog's explicit Auto became codex.defaultEffort.
+  ok(/resumeSpawnPick\(\{\n\s*explicit, conversation, instanceDefault: instDefault\(key\),/.test(wc)
+    && !/const e = \(explicit === undefined \|\| explicit === null\) \? '' : String\(explicit\)\.trim\(\);/.test(wc),
+    'r2: ws-create forwards `explicit` UNTOUCHED into the ladder (the pre-fix normalisation is gone)');
+  // r2: the claude source is deleted, not repaired — both the descriptor hook
+  // and the reader it called must be absent, and the reason must be readable.
+  const chz = read('src/harnesses/claude.js'), ssz = read('src/session-store.js');
+  // the DEFINITION and the EXPORT, not the prose: the tombstone comment names
+  // the deleted reader on purpose, so a bare name match would be a red herring.
+  ok(!/lastTurnModel:/.test(chz) && !/lastTurnEffort:/.test(chz)
+    && !/function lastClaudeTurnModel/.test(ssz) && !/^\s*lastClaudeTurnModel,\s*$/m.test(ssz)
+    && !/function _unfallback/.test(ssz),
+    'r2: no claude reader anywhere — no descriptor hook, no session-store definition, no export, and the dead fallback guard is gone with it');
+  ok(/WHY THERE IS NO CLAUDE MODEL READER HERE/.test(ssz) && /\[1m\]/.test(ssz) && /2650 transcripts/.test(ssz),
+    '…and session-store carries the measured reason where the reader used to be (the next person who wants one reads it first)');
+  ok(/RESUME CONTINUITY \(B-6b6d/.test(chz) && /context-window variant/.test(chz),
+    '…restated on the descriptor, which is the place a future hook would be added');
+  const ocz = read('src/harnesses/opencode.js'), acz = read('src/harnesses/acp.js');
+  ok(/lastTurnModel: \(id\) => serve\.facts\(\)\.sessionModel\(id\)/.test(ocz),
+    'r2: opencode DOES declare the model reader (its own session record names it)');
+  ok(/deliberately NO `lastTurnModel`/.test(acz),
+    '…and the GENERIC ACP harness says in place why it declares none (⑫: a silent behaviour change per harness must be written down where that harness lives)');
   ok(/spawnOrigin: \{ model: session\._modelOrigin \|\| null, effort: session\._effortOrigin \|\| null \}/.test(wc),
     "the 'created' reply carries it (the creator never gets an 'attached' — 2.368.4)");
   ok(/effort: session\._effort \|\| null,\n\s*spawnModel: session\._spawnModel \|\| null,/.test(wc),
@@ -882,6 +1037,8 @@ console.log('— ⑪c WIRING: every resume/fork/restart entry point, and where t
     'Session Properties shows value + origin for both twins');
   ok((sp.match(/const ORIGIN_LABEL = \{/g) || []).length === 1,
     'ONE label map for all three origin rows (a second copy is how one fact starts being worded two ways in one panel)');
+  ok(/const originBit = ORIGIN_LABEL\[originKey\]/.test(sp) && !/ORIGIN_LABEL\[spawnValueOrigin\(stated, live, picked\)\]\(\)/.test(sp),
+    "r2: the row only prints a parenthetical for an origin the label map HAS — 'unknown' shows the value alone rather than a fact we do not hold");
   ok(/wrap: true/.test(sp) && /white-space:normal;overflow-wrap:anywhere/.test(sp),
     'an origin row WRAPS instead of ellipsizing (375×667: the origin is the last thing on the line — measured, see scripts/dbg-session-props-mobile.mjs)');
   // (4) the decision is DOCUMENTED where the next reader looks, under its id
@@ -906,11 +1063,75 @@ console.log('— ⑪d the ORIGIN a panel shows (PURE, agent-meta)');
   ok(spawnValueOrigin('conversation', 'ultra', 'xhigh') === 'spawn',
     'a pick saved AFTER the spawn makes the live value "what this session started with" — so the row can never contradict the "(saved: …)" note beside it');
   ok(spawnValueOrigin('chosen', 'ultra', 'xhigh') === 'spawn', '…whatever the server said at the time');
-  ok(spawnValueOrigin(null, 'ultra', undefined) === responseStyleOrigin('ultra', undefined)
-    && spawnValueOrigin(undefined, '', 'high') === responseStyleOrigin('', 'high'),
-    'a session that predates the field falls back to the existing COMPARISON helper (undefined ≠ "harness")');
-  ok(spawnValueOrigin('nonsense', 'ultra', undefined) === responseStyleOrigin('ultra', undefined),
-    'an unknown origin string is not trusted either');
+  // r2 (adversarial verifier, low): with no STATED origin the helper may only
+  // claim what the PICK proves. responseStyleOrigin answers 'instance' for any
+  // live value with no saved pick, so every session restored from an older
+  // session-meta asserted "(instance default)" as fact — including ones whose
+  // model came from the New Session dialog.
+  ok(spawnValueOrigin(null, 'ultra', undefined) === 'unknown'
+    && spawnValueOrigin(undefined, 'claude-fable-5', undefined) === 'unknown',
+    'r2 THE FIX: a session that predates the field and offers nothing to compare says NOTHING (not "instance default")',
+    JSON.stringify(spawnValueOrigin(null, 'ultra', undefined)));
+  ok(responseStyleOrigin('ultra', undefined) === 'instance',
+    'negative control: the response-style ladder still answers "instance" there — this change is scoped to the two spawn knobs');
+  ok(spawnValueOrigin(null, '', 'high') === 'saved' && spawnValueOrigin(null, 'ultra', 'ultra') === 'chosen'
+    && spawnValueOrigin(null, 'ultra', 'xhigh') === 'spawn',
+    '…while the three answers the PICK really proves survive with no stated origin (saved / chosen / spawn)');
+  ok(spawnValueOrigin('instance', 'ultra', undefined) === 'instance' && spawnValueOrigin('conversation', 'ultra', undefined) === 'conversation',
+    'negative control: a STATED origin is still shown — the row goes quiet only when nobody stated one');
+  ok(spawnValueOrigin('nonsense', 'ultra', undefined) === 'unknown',
+    'an unknown origin string is not trusted either (and now says so instead of borrowing a guess)');
+  // r2, surfaced by the claude change: with no source the spawn commands
+  // NOTHING, so `stated` is 'harness' and the live value is empty — a pick
+  // saved afterwards is what the row is actually showing.
+  ok(spawnValueOrigin('harness', '', 'opus[1m]') === 'saved' && spawnValueOrigin('chosen', '', 'opus[1m]') === 'saved',
+    'r2: when nothing was COMMANDED but a pick is saved, the row says "saved — applies on the next resume" rather than describing the spawn',
+    JSON.stringify(spawnValueOrigin('harness', '', 'opus[1m]')));
+  ok(spawnValueOrigin('harness', 'ultra', undefined) === 'harness' && spawnValueOrigin('harness', '', undefined) === 'harness',
+    'negative control: a stated harness origin WITH a live value (or with nothing saved) is still reported as stated');
+}
+
+console.log('— ⑪e r2: OPENCODE CAN ANSWER, SO IT DOES (and a harness that cannot says so in place)');
+{
+  const { createFacts } = require(path.join(REPO, 'src/opencode-serve.js'));
+  const SESSIONS = [
+    { id: 'oc-1', directory: '/w', model: { providerID: 'anthropic', id: 'claude-opus-5' }, time: { updated: 2 } },
+    { id: 'oc-2', directory: '/w', model: { providerID: 'opencode', id: 'big-pickle' }, time: { updated: 1 } },
+  ];
+  let listCalls = 0;
+  const upClient = { skippedWorktrees: [], listAllSessions: async () => { listCalls++; return SESSIONS; }, firstUserMessage: async () => null };
+  const upLocator = { client: async () => upClient, state: () => ({ installed: true, ready: true, parked: false, autostart: true }), invalidate: () => { } };
+  const up = createFacts(upLocator);
+  ok(await up.sessionModel('oc-1') === 'anthropic/claude-opus-5' && await up.sessionModel('oc-2') === 'opencode/big-pickle',
+    'r2 ③: the opencode store answers "what model is this conversation on" from OpenCode\u2019s OWN session record',
+    JSON.stringify([await up.sessionModel('oc-1'), await up.sessionModel('oc-2')]));
+  const callsBefore = listCalls;
+  await up.discover({ activeSessions: new Map() });
+  ok(listCalls === callsBefore,
+    '…through the SAME cached v1 listing the sidebar poll already uses — a resume adds no route (the 2.369.50 rule: v2 per-session routes boot an instance per directory)',
+    JSON.stringify({ callsBefore, listCalls }));
+  ok(await up.sessionModel('oc-gone') === '' && await up.sessionModel('') === '',
+    'an unknown / empty id is \'\' rather than a throw on the spawn path');
+  const offLocator = { client: async () => null, state: () => ({ installed: true, ready: false, parked: false, autostart: false }), invalidate: () => { } };
+  const off = createFacts(offLocator);
+  ok(await off.sessionModel('oc-1') === '',
+    'the background service is OPT-IN and default OFF, so an unreachable serve answers \'\' — never a throw',
+    JSON.stringify(await off.sessionModel('oc-1')));
+  const hoc = require(path.join(REPO, 'src/harnesses/opencode.js'));
+  ok(typeof hoc.store.lastTurnModel === 'function' && await hoc.store.lastTurnModel('oc-1') === '' ,
+    'the DESCRIPTOR exposes it under the shared hook name, and with the singleton unwired it degrades to \'\' (NULL_FACTS), never a spawn-path throw');
+  ok(hoc.store.lastTurnEffort === undefined,
+    'opencode declares no effort reader (its caps row has no effort knob at all)');
+  // the ladder, both ways round
+  ok(resumeSpawnPick({ conversation: 'anthropic/claude-opus-5', instanceDefault: 'opencode/big-pickle', resume: true, hasSource: true }).value === 'anthropic/claude-opus-5',
+    'r2 ③ THE FIX: an OpenCode resume keeps the conversation\u2019s own model, not opencode.defaultModel');
+  ok(resumeSpawnPick({ conversation: '', instanceDefault: 'opencode/big-pickle', resume: true, hasSource: true }).origin === 'instance'
+    && resumeSpawnPick({ instanceDefault: 'opencode/big-pickle', resume: true, hasSource: false }).origin === 'harness',
+    '…and with the service off the instance default applies WITH an origin the log names — the state master had, now said out loud (hasSource:false would have sent nothing and said nothing)');
+  const { acpHarness } = require(path.join(REPO, 'src/harnesses/acp.js'));
+  const generic = acpHarness({ id: 'demo-agent', command: 'demo-agent', caps: { ...require(path.join(REPO, 'src/harnesses/acp.js')).ACP_DEFAULT_CAPS } });
+  ok(generic.store.lastTurnModel === undefined && generic.store.lastTurnEffort === undefined,
+    'negative control: a GENERIC ACP harness still declares neither — the hook is per-harness evidence, never a default');
 }
 
 console.log(fail ? `\nFAILED (${fail} of ${pass + fail})` : `\nALL PASS (${pass})`);

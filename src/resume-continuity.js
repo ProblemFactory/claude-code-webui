@@ -35,11 +35,19 @@
 // fallback's clothes. With a source that came up EMPTY (a thread resumed before
 // its first turn) the instance default is honest — and the caller logs it.
 //
-// '' AND undefined BOTH MEAN "NO EXPLICIT CHOICE". They have to: the wire
-// carries `model: sessionModel || undefined`, so an explicitly-picked "Auto
-// (model default)" and an absent field are the same bytes by the time the
-// server sees them — and the per-session config store has always written ''
-// for "no override" (session-card.js). A pick of Auto on a resumed conversation
+// '' IS A STATED CHOICE, undefined IS SILENCE — AND THE DIFFERENCE ONLY
+// SURVIVES ON A NEW SESSION (r2 review). The New Session dialog's first option
+// IS `''` ("Auto (model default)" / "Default", src/lib/app.js) and it always
+// sends a defined string, so collapsing `''` into "no pick" made an explicit
+// Auto resolve to the instance default — the user picked "let the agent
+// decide" and got `codex.defaultEffort`. On a NEW session `''` therefore wins
+// as `{value:'', origin:'chosen'}`, and the client sends the resolved value
+// VERBATIM there so the empty string survives the wire.
+// On a CONTINUATION the distinction is not available and must not be faked: the
+// create message carries `model: sessionModel || undefined` on that path, so an
+// explicit Auto and an absent field are the same bytes by the time the server
+// sees them — and the per-session config store has always written '' for "no
+// override" (session-card.js). A pick of Auto on a resumed conversation
 // therefore restores the conversation's own value; the only way to command
 // "auto" for real is to change it inside the session.
 
@@ -50,7 +58,8 @@ const SPAWN_ORIGINS = Object.freeze(['chosen', 'conversation', 'instance', 'harn
 /**
  * Decide ONE spawn knob (model or effort) for ONE create.
  * @param {object} a
- * @param {string} [a.explicit]         the value the client sent for THIS session ('' / undefined = no pick)
+ * @param {string} [a.explicit]         the value the client sent for THIS session (undefined/null = silence;
+ *                                      '' = a STATED "Auto (model default)", honoured on a NEW session only)
  * @param {string} [a.conversation]     the value read out of the conversation's own records ('' = none recorded)
  * @param {string} [a.instanceDefault]  `<prefix>.default<Knob>` ('' = the setting is unset)
  * @param {boolean} [a.resume]          this create continues an existing conversation (resume/fork/restart)
@@ -62,6 +71,10 @@ function resumeSpawnPick({ explicit, conversation, instanceDefault, resume, hasS
   const s = (v) => (v === undefined || v === null ? '' : String(v).trim());
   const e = s(explicit), c = s(conversation), d = s(instanceDefault);
   if (e) return { value: e, origin: 'chosen' };
+  // A STATED empty ("Auto (model default)") is a choice, not silence — but only
+  // where the wire can still tell the two apart, i.e. on a NEW session.
+  const statedAuto = explicit !== undefined && explicit !== null && e === '';
+  if (!resume && statedAuto) return { value: '', origin: 'chosen' };
   if (!resume) return d ? { value: d, origin: 'instance' } : { value: '', origin: 'harness' };
   if (c) return { value: c, origin: 'conversation' };
   // A resume on a knob this harness cannot read back: the instance default is

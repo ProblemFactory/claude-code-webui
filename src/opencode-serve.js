@@ -853,12 +853,14 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
     nameSome(client, list).catch(() => { });
     return list;
   }
-  /** Session entries for the sidebar (the S3 discover member). NEVER throws,
-   *  NEVER waits past the budget: cache → negative cache → bounded refresh. */
-  async function discover({ activeSessions = new Map(), budgetMs = DEFAULT_TIMEOUT_MS } = {}) {
+  /** The v1 session list, cache-first and bounded. NEVER throws and NEVER waits
+   *  past the budget: cache → negative cache → one shared bounded refresh. Both
+   *  readers below are built on it, so neither can invent a second route (the
+   *  v2 per-session routes boot an OpenCode instance per directory — 2.369.50). */
+  async function listNow(budgetMs) {
     const t = now();
-    if (cache.list && t - cache.at < listCacheMs) return assemble(cache.list, activeSessions);
-    if (t < cache.negativeUntil) return assemble(cache.list || [], activeSessions);
+    if (cache.list && t - cache.at < listCacheMs) return cache.list;
+    if (t < cache.negativeUntil) return cache.list || [];
     if (!listing) listing = refreshList(budgetMs).finally(() => { listing = null; });
     try { await listing; }
     catch (e) {
@@ -866,7 +868,26 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
       cache.lastError = e.message;
       if (isConnErr(e)) locator.invalidate(e.message);
     }
-    return assemble(cache.list || [], activeSessions);
+    return cache.list || [];
+  }
+  /** Session entries for the sidebar (the S3 discover member). */
+  async function discover({ activeSessions = new Map(), budgetMs = DEFAULT_TIMEOUT_MS } = {}) {
+    return assemble(await listNow(budgetMs), activeSessions);
+  }
+  /** RESUME CONTINUITY (B-6b6d r2): the model THIS conversation is on, as
+   *  `provider/model` — the store hook behind opencode's `lastTurnModel`, so an
+   *  OpenCode resume keeps its own model instead of taking
+   *  `opencode.defaultModel` (which is a NEW-session default). OpenCode's own
+   *  session record names it, so unlike claude this harness CAN answer.
+   *  '' = we could not read it (serve off — it is opt-in and default OFF —
+   *  parked, unreachable, or the session is gone); the ladder then falls back to
+   *  the instance default and ws-create LOGS which rung it used. Never throws;
+   *  v1 list only, shared cache, so a resume adds no route the sidebar poll
+   *  does not already use. */
+  async function sessionModel(id, { budgetMs = DEFAULT_TIMEOUT_MS } = {}) {
+    if (!id) return '';
+    const s = (await listNow(budgetMs)).find((x) => x && x.id === id);
+    return s ? (modelLabel(s.model?.providerID, s.model?.id) || '') : '';
   }
   /** The whole conversation for the serve-backed reader (user action: LOUD). */
   async function readConversation(id, { timeoutMs = READ_TIMEOUT_MS } = {}) {
@@ -904,7 +925,7 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
   }
   function invalidate() { cache.at = 0; cache.negativeUntil = 0; convo.clear(); }
   function stateOf() { return { ...locator.state(), cachedSessions: cache.list ? cache.list.length : null, cacheAgeMs: cache.at ? now() - cache.at : null, negativeUntil: cache.negativeUntil, lastError: cache.lastError || locator.state().lastError, namesKnown: names.size, skippedWorktrees: cache.skippedWorktrees || [] }; }
-  return { discover, readConversation, forkSession, invalidate, state: stateOf, reasonUnavailable, locator, _names: names };
+  return { discover, sessionModel, readConversation, forkSession, invalidate, state: stateOf, reasonUnavailable, locator, _names: names };
 }
 
 // ── the serve-backed reader ──
@@ -935,6 +956,7 @@ class OpencodeServeSessionMessages extends AcpSessionMessages {
 let installed = null;
 const NULL_FACTS = Object.freeze({
   discover: async () => [],
+  sessionModel: async () => '',   // no serve ⇒ no answer; the ladder logs the fall back to the instance default
   readConversation: async (id) => { throw new OpencodeServeError(`OpenCode serve is not configured on this instance (conversation ${id})`, { code: 'unconfigured' }); },
   forkSession: async () => { throw new OpencodeServeError('OpenCode serve is not configured on this instance', { code: 'unconfigured' }); },
   invalidate: () => { },

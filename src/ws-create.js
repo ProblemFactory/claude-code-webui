@@ -352,13 +352,17 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
               catch (e) { console.warn(`[session] resume continuity: could not read ${backend} ${String(data.resumeId).slice(0, 8)} — ${e.message}`); return ''; }
             };
             // An explicit pick wins inside the ladder anyway, so do not pay for
-            // a transcript read whose answer cannot be used (claude's locator
-            // is a sync scan of ~/.claude/projects, on the spawn path).
+            // a store read whose answer cannot be used (an opencode read talks
+            // to the serve; a transcript read hits the disk, on the spawn path).
+            // `explicit` is forwarded UNTOUCHED: only the ladder may decide what
+            // `''` means, and on a NEW session it means a STATED "Auto (model
+            // default)" rather than silence (r2 review — normalising it here is
+            // how the dialog's explicit Auto became `codex.defaultEffort`).
             const pickKnob = async (explicit, hook, key) => {
-              const e = (explicit === undefined || explicit === null) ? '' : String(explicit).trim();
-              const conversation = e ? '' : await fromConversation(hook);
+              const stated = explicit !== undefined && explicit !== null && String(explicit).trim() !== '';
+              const conversation = stated ? '' : await fromConversation(hook);
               return resumeSpawnPick({
-                explicit: e, conversation, instanceDefault: instDefault(key),
+                explicit, conversation, instanceDefault: instDefault(key),
                 resume: isResume, hasSource: typeof hook === 'function',
               });
             };

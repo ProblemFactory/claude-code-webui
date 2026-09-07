@@ -110,9 +110,16 @@ export function installSessionLifecycle(App, ctx = {}) {
       ? t('Starting the session on {host}… (installing tools / checking the conversation)', { host: createHostName })
       : (resumeId ? t('Resuming the conversation…') : t('Starting the session…')));
 
+    // A NEW session sends model/effort VERBATIM so a STATED "Auto (model
+    // default)" (the dialog's first option, value '') survives the wire as a
+    // choice instead of arriving as silence and being answered with the
+    // instance default (r2 review). A CONTINUATION keeps `|| undefined`: there
+    // '' means the same thing as silence and the server's ladder reads the
+    // conversation's own value (src/resume-continuity.js says why).
+    const wireKnob = (v) => (continuesConversation ? (v || undefined) : v);
     const createMsg = {
-      type:'create', backend, hostId: hostId||undefined, keeperSid: keeperSid||undefined, mode: sessionMode, cwd: cwd||undefined, sessionName: name||undefined, model: sessionModel||undefined,
-      permissionMode: sessionPermission||undefined, effort: sessionEffort||undefined, outputStyle: outputStyle||undefined, autoResume, extraArgs: sessionExtraArgs||undefined,
+      type:'create', backend, hostId: hostId||undefined, keeperSid: keeperSid||undefined, mode: sessionMode, cwd: cwd||undefined, sessionName: name||undefined, model: wireKnob(sessionModel),
+      permissionMode: sessionPermission||undefined, effort: wireKnob(sessionEffort), outputStyle: outputStyle||undefined, autoResume, extraArgs: sessionExtraArgs||undefined,
       tuiRenderer: (backend === 'claude' && sessionMode === 'terminal' ? this.settings.get('claude.tuiRenderer') : '') || undefined,
       agentKind: agentKind || undefined, agentRole: agentRole || undefined, agentNickname: agentNickname || undefined,
       sourceKind: sourceKind || undefined, parentThreadId: parentThreadId || undefined,
