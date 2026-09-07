@@ -249,43 +249,136 @@ for (const [edge] of EXCEPTIONS) {
 //     (tarball / git-archive / npm pack) ⇒ the source list is unknowable ⇒
 //     SKIP with a reason: a census may decline to run, but it must never fail
 //     a build over files it was never meant to read.
+//
+//     ROUND 6 — THE CENSUS'S OWN GIT INHERITED THE AMBIENT ENVIRONMENT. Round
+//     5 answered "what is SOURCE" with git, and then ran git — read AND write
+//     — with `process.env`. But git's whole repository-location layer lives in
+//     the environment: GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE / GIT_COMMON_DIR
+//     / GIT_OBJECT_DIRECTORY / GIT_CONFIG_PARAMETERS … each one silently
+//     re-points a `git -C <tmpdir> …` at a DIFFERENT repository, and this
+//     suite runs inside `npm run build`, which runs inside the release gate
+//     and the in-app "Update VibeSpace…" — i.e. inside hook processes that
+//     export exactly those names (measured on git 2.51: a pre-commit hook is
+//     handed GIT_INDEX_FILE and GIT_PREFIX; GIT_DIR is normal for any tool
+//     driving a worktree). Reproduced three ways, in throwaway repos:
+//     (a) GIT_DIR at a linked worktree's gitdir ⇒ the control's `git init`
+//     REINITIALISED that repo and flipped core.bare=false→true in the SHARED
+//     config, after which `git status` in the main checkout dies "this
+//     operation must be run in a work tree" — which breaks scripts/update.sh's
+//     `git pull --ff-only`, ci.mjs's green marker, and (see the SKIP note
+//     below) makes the census itself SKIP green forever; this happened to the
+//     production checkout and was repaired by hand. (b) GIT_INDEX_FILE at
+//     another repo's index ⇒ the REPO census read the FOREIGN listing (432
+//     files → 1) so the suite went RED describing a tree that is not ours,
+//     while `git add -f` staged the raw-NUL fixture into that repo and
+//     replaced its .gitignore entry. (c) plain repo + GIT_DIR ⇒ the fixture is
+//     staged there too. The fix is ONE sanitized environment used by EVERY git
+//     this suite spawns; the explicit --git-dir/--work-tree on the write side
+//     is belt-and-braces only, because it is NOT sufficient: measured,
+//     `git --git-dir=A --work-tree=A add` under GIT_INDEX_FILE=B/.git/index
+//     still writes B's index. A test that has to run inside someone else's
+//     process must NAME the environment it runs its own tools in.
+//
+//     ROUND 6b — A SKIP MUST QUOTE THE FAILURE, NOT GUESS THE CAUSE. The skip
+//     line asserted "no readable git index (export/tarball)" without ever
+//     checking that. A checkout whose core.bare was flipped TRUE prints the
+//     same green line even though `git ls-files` there answers perfectly (only
+//     `rev-parse --show-toplevel` dies, because bare means "no work tree") —
+//     so the accident above disabled the census AND told everyone the tree was
+//     a tarball. Now: --show-toplevel failing falls back to `rev-parse
+//     --git-dir` (ownership = <base>/.git is itself a repository entry, so a
+//     tmpdir merely sitting INSIDE another repo still cannot borrow that
+//     index), and every skip carries git's own failing command + its stderr.
 {
   // A legitimately binary FIXTURE is not source; everything else in these
   // trees is text by construction (the census at the time: .js .mjs .sh .json
   // .jsonl .ps1 plus the extension-less agent CLIs in data/bin).
   const BINARY_EXT = new Set(['.zst', '.gz', '.png', '.jpg', '.jpeg', '.gif', '.ico', '.woff', '.woff2', '.wasm', '.pdf', '.zip', '.tar']);
   const CENSUS_ROOTS = ['src', 'data/bin', 'scripts'];
-  // The tracked-source listing for a tree, or null when git cannot answer FOR
-  // THAT TREE (no git binary, no metadata, or `base` is not itself the work
-  // tree root — a tmpdir that happens to sit inside some other repo must not
-  // borrow that repo's index).
-  const trackedSource = (base) => {
-    try {
-      const top = spawnSync('git', ['-C', base, 'rev-parse', '--show-toplevel'], { encoding: 'utf-8' });
-      if (top.error || top.status !== 0) return null;
-      if (fs.realpathSync(top.stdout.trim()) !== fs.realpathSync(base)) return null;
-    } catch { return null; }
-    const ls = spawnSync('git', ['-C', base, 'ls-files', '-z', '--', ...CENSUS_ROOTS], { maxBuffer: 64 * 1024 * 1024 });
-    if (ls.error || ls.status !== 0 || !ls.stdout) return null;
-    return ls.stdout.toString('utf-8').split('\0').filter(Boolean);
+
+  // ── THE ONE SANITIZED GIT ENVIRONMENT (round 6) ──────────────────────────
+  // Audited against git 2.51's own documented GIT_* list (git(1) "ENVIRONMENT
+  // VARIABLES", gitrepository-layout(5), git-config(1)). We DELETE every name
+  // that can re-point git at another repository, index, object store or config
+  // — the config channels included, because `core.bare` / `core.worktree` /
+  // `safe.directory` injected through them reach the same place indirectly.
+  // We deliberately KEEP: PATH and the rest of the process env (we want the
+  // machine's real git and its real ~/.gitconfig — the controls pass `-f` so a
+  // global core.excludesFile still cannot shrink them); GIT_CONFIG_NOSYSTEM
+  // and GIT_ATTR_NOSYSTEM (they only REMOVE ambient system files — strictly
+  // more isolation, never less); GIT_EXEC_PATH (it belongs to the git on PATH);
+  // GIT_AUTHOR_*/GIT_COMMITTER_*/GIT_EDITOR/GIT_PAGER/GIT_TERMINAL_PROMPT and
+  // the GIT_TRACE* diagnostics (this suite never commits, never opens an
+  // editor and never touches a network, so none of them can steer it).
+  const GIT_REDIRECTORS = [
+    // which repository / work tree / index
+    'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_INDEX_VERSION', 'GIT_COMMON_DIR',
+    'GIT_NAMESPACE', 'GIT_CEILING_DIRECTORIES', 'GIT_DISCOVERY_ACROSS_FILESYSTEM', 'GIT_PREFIX',
+    // which objects
+    'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_SHALLOW_FILE',
+    'GIT_GRAFT_FILE', 'GIT_REPLACE_REF_BASE', 'GIT_NO_REPLACE_OBJECTS',
+    // which config (and therefore, indirectly, all of the above)
+    'GIT_CONFIG', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_COUNT',
+    // how OUR pathspecs are read, and what `git init` installs into the fixture
+    'GIT_LITERAL_PATHSPECS', 'GIT_GLOB_PATHSPECS', 'GIT_NOGLOB_PATHSPECS', 'GIT_ICASE_PATHSPECS',
+    'GIT_TEMPLATE_DIR',
+  ];
+  const gitEnvFrom = (raw) => {
+    const e = { ...raw };
+    for (const k of GIT_REDIRECTORS) delete e[k];
+    // GIT_CONFIG_COUNT's numbered pairs are separate names — drop them too.
+    for (const k of Object.keys(e)) if (/^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(k)) delete e[k];
+    return e;
   };
-  const census = (base) => {
-    const files = trackedSource(base);
-    if (!files) return null; // the caller SKIPS — never fails
+  const GIT_ENV = gitEnvFrom(process.env);
+  // EVERY git in this block goes through these, read side and write side.
+  const gitIn = (base, args, env = GIT_ENV, opts = {}) =>
+    spawnSync('git', ['-C', base, ...args], { encoding: 'utf-8', env, ...opts });
+  const gitWhy = (r) => (!r ? '(not run)' : r.error
+    ? `spawn failed: ${r.error.code || r.error.message}`
+    : `exit ${r.status}: ${String(r.stderr || '').trim().replace(/\s+/g, ' ').slice(0, 160) || '(no stderr)'}`);
+  const samePath = (a, b) => { try { return fs.realpathSync(a) === fs.realpathSync(b); } catch { return false; } };
+
+  // The tracked-source listing for a tree: { files } when git can answer FOR
+  // THAT TREE, else { skip: <git's own failing command + stderr> }. Ownership
+  // matters because a tmpdir that happens to sit inside some other repo must
+  // never borrow that repo's index.
+  const trackedSource = (base, env = GIT_ENV) => {
+    let owns = false, why = '';
+    const top = gitIn(base, ['rev-parse', '--show-toplevel'], env);
+    if (!top.error && top.status === 0) {
+      owns = samePath(top.stdout.trim(), base);
+      if (!owns) why = `git -C <base> rev-parse --show-toplevel → ${JSON.stringify(top.stdout.trim())}, which is not <base> (a tmpdir inside someone else's repo may not borrow its index)`;
+    } else {
+      // core.bare=true kills --show-toplevel ("must be run in a work tree")
+      // while leaving the index perfectly readable. Ask for the git dir.
+      const gd = gitIn(base, ['rev-parse', '--git-dir'], env);
+      let entry = false; try { entry = fs.existsSync(path.join(base, '.git')); } catch {}
+      if (!gd.error && gd.status === 0 && entry) owns = true;
+      else why = `git -C <base> rev-parse --show-toplevel: ${gitWhy(top)}; --git-dir: ${gitWhy(gd)}${entry ? '' : '; and <base>/.git is not a repository entry'}`;
+    }
+    if (!owns) return { skip: why };
+    const ls = gitIn(base, ['ls-files', '-z', '--', ...CENSUS_ROOTS], env, { encoding: null, maxBuffer: 64 * 1024 * 1024 });
+    if (ls.error || ls.status !== 0) return { skip: `git -C <base> ls-files: ${gitWhy(ls)}` };
+    return { files: (ls.stdout ? ls.stdout.toString('utf-8') : '').split('\0').filter(Boolean) };
+  };
+  const census = (base, env = GIT_ENV) => {
+    const t = trackedSource(base, env);
+    if (t.skip) return t; // the caller SKIPS — never fails
     const offenders = [];
-    for (const f of files) {
+    for (const f of t.files) {
       if (BINARY_EXT.has(path.extname(f).toLowerCase())) continue;
       let buf;
       try { buf = fs.readFileSync(path.join(base, f)); } catch { continue; } // tracked but absent from the work tree
       const at = buf.indexOf(0);
       if (at !== -1) offenders.push(`${f} (byte ${at}, line ${buf.slice(0, at).toString('utf-8').split('\n').length})`);
     }
-    return { files, offenders };
+    return { files: t.files, offenders };
   };
 
   const c42 = census(REPO);
-  if (!c42) {
-    ok(true, 'NUL-byte census SKIPPED: this tree has no readable git index (export/tarball) — the source list is unknowable, and a census never fails a build over files it cannot scope');
+  if (c42.skip) {
+    ok(true, `NUL-byte census SKIPPED — the tracked-source listing is genuinely unobtainable here, and a census must never fail a build over files it cannot scope; git's own words: ${c42.skip}`);
   } else {
     ok(!c42.offenders.length,
       `no source file carries a NUL byte — one makes the WHOLE file invisible to grep/rg (${c42.files.length} tracked files; ${c42.offenders.slice(0, 3).join('; ') || 'clean'})`);
@@ -298,40 +391,156 @@ for (const [edge] of EXCEPTIONS) {
       `census scope really covers src + scripts + data/bin (a vacuous listing cannot pass; ${c42.files.length} files)`);
   }
 
-  // CONTROLS, in a throwaway repo — "source" is now defined by the INDEX, so
-  // the fixture has to have one. Planted-but-untracked is the rclone class and
-  // must be structurally invisible; that is the whole point of the round-5 fix.
-  const tmp42 = fs.mkdtempSync(path.join(os.tmpdir(), 'arch-nul-'));
-  try {
-    fs.mkdirSync(path.join(tmp42, 'src'));
-    fs.mkdirSync(path.join(tmp42, 'data', 'bin'), { recursive: true });
-    fs.writeFileSync(path.join(tmp42, 'src/clean.js'), 'const k = `a\\u0000b`; // the escape, not the byte\n');
-    fs.writeFileSync(path.join(tmp42, 'src/dirty.js'), Buffer.concat([Buffer.from('const k = `a'), Buffer.from([0]), Buffer.from('b`;\n')]));
-    fs.writeFileSync(path.join(tmp42, 'src/rollout.zst'), Buffer.from([0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x01]));
+  // ── CONTROLS, in throwaway repos ─────────────────────────────────────────
+  // "Source" is defined by the INDEX, so the fixture has to have one.
+  // Planted-but-untracked is the rclone class and must be structurally
+  // invisible; that is the whole point of the round-5 fix.
+  const plantFixture = (dir) => {
+    fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+    fs.mkdirSync(path.join(dir, 'data', 'bin'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'src/clean.js'), 'const k = `a\\u0000b`; // the escape, not the byte\n');
+    fs.writeFileSync(path.join(dir, 'src/dirty.js'), Buffer.concat([Buffer.from('const k = `a'), Buffer.from([0]), Buffer.from('b`;\n')]));
+    fs.writeFileSync(path.join(dir, 'src/rollout.zst'), Buffer.from([0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x01]));
     // the rclone class: an extension-less binary the PRODUCT installs into a
     // scanned root, gitignored exactly like the real one.
-    fs.writeFileSync(path.join(tmp42, '.gitignore'), 'data/bin/rclone\n');
-    fs.writeFileSync(path.join(tmp42, 'data/bin/rclone'), Buffer.concat([Buffer.from('\x7fELF'), Buffer.alloc(2048)]));
+    fs.writeFileSync(path.join(dir, '.gitignore'), 'data/bin/rclone\n');
+    fs.writeFileSync(path.join(dir, 'data/bin/rclone'), Buffer.concat([Buffer.from('\x7fELF'), Buffer.alloc(2048)]));
     // ...and an untracked source file, to prove the gate is the INDEX and not .gitignore.
-    fs.writeFileSync(path.join(tmp42, 'src/untracked.js'), Buffer.concat([Buffer.from('x'), Buffer.from([0]), Buffer.from('\n')]));
+    fs.writeFileSync(path.join(dir, 'src/untracked.js'), Buffer.concat([Buffer.from('x'), Buffer.from([0]), Buffer.from('\n')]));
+  };
+  // WRITE SIDE: the target repo is named on the command line (positional dir
+  // for init, --git-dir/--work-tree for add/config) AND cwd is that repo AND
+  // the env is sanitized. Only the last of the three defeats GIT_INDEX_FILE.
+  const initRepo = (repo, env = GIT_ENV) =>
+    spawnSync('git', ['init', '-q', repo], { cwd: repo, encoding: 'utf-8', env });
+  // -f so a developer's global core.excludesFile (e.g. a blanket *.zst) can
+  // never quietly shrink the control — we still never add data/bin/rclone.
+  const addFixture = (repo, env = GIT_ENV) =>
+    spawnSync('git', ['--git-dir', path.join(repo, '.git'), '--work-tree', repo,
+      'add', '-f', '--', 'src/clean.js', 'src/dirty.js', 'src/rollout.zst', '.gitignore'],
+    { cwd: repo, encoding: 'utf-8', env });
+  const setBare = (repo, v, env = GIT_ENV) =>
+    spawnSync('git', ['--git-dir', path.join(repo, '.git'), 'config', 'core.bare', v],
+      { cwd: repo, encoding: 'utf-8', env });
+  // A repo's on-disk identity, byte-exact: anything a redirected git touches
+  // shows up here.
+  const repoStamp = (repo) => JSON.stringify(['config', 'index', 'HEAD'].map((f) => {
+    try { return fs.readFileSync(path.join(repo, '.git', f)).toString('base64'); } catch (e) { return `absent:${e.code}`; }
+  }));
+  const tmpDirs = [];
+  const mkTmp = (tag) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), `arch-nul-${tag}-`)); tmpDirs.push(d); return d; };
 
-    ok(census(tmp42) === null,
-      'CONTROL: a tree with no git metadata SKIPS (unknowable source list is not a build failure — the tarball/export case)');
+  const tmp42 = mkTmp('ctl');
+  try {
+    plantFixture(tmp42);
 
-    const init = spawnSync('git', ['-C', tmp42, 'init', '-q'], { encoding: 'utf-8' });
-    // -f so a developer's global core.excludesFile (e.g. a blanket *.zst) can
-    // never quietly shrink the control — we still never add data/bin/rclone.
-    const add = spawnSync('git', ['-C', tmp42, 'add', '-f', '--', 'src/clean.js', 'src/dirty.js', 'src/rollout.zst', '.gitignore'], { encoding: 'utf-8' });
-    if (init.error || init.status !== 0 || add.status !== 0) {
-      ok(true, `CONTROLS SKIPPED: git init/add unavailable here (${(init.stderr || add.stderr || init.error?.message || '').trim().slice(0, 80)})`);
+    const noMeta = census(tmp42);
+    ok(!!noMeta.skip && /rev-parse/.test(noMeta.skip),
+      `CONTROL: a tree with no git metadata SKIPS, and the skip QUOTES git instead of guessing a cause (${JSON.stringify(String(noMeta.skip).slice(0, 110))})`);
+
+    const init = initRepo(tmp42);
+    const add = (!init.error && init.status === 0) ? addFixture(tmp42) : null;
+    if (init.error || init.status !== 0 || !add || add.status !== 0) {
+      ok(true, `CONTROLS SKIPPED: git init/add unavailable here (${gitWhy(add && add.status !== 0 ? add : init)})`);
     } else {
       const found = census(tmp42);
-      ok(!!found && found.offenders.length === 1 && found.offenders[0].startsWith('src/dirty.js (byte 12, line 1)'),
-        `CONTROL: a TRACKED NUL is found, while the \\u0000 escape and a binary fixture are not (${JSON.stringify(found && found.offenders)})`);
-      ok(!!found && !found.files.some((f) => f === 'data/bin/rclone' || f === 'src/untracked.js'),
-        `CONTROL: files the product installs/generates at runtime are OUT OF SCOPE — untracked never reaches the census, however big or binary (${JSON.stringify(found && found.files)})`);
+      ok(!found.skip && found.offenders.length === 1 && found.offenders[0].startsWith('src/dirty.js (byte 12, line 1)'),
+        `CONTROL: a TRACKED NUL is found, while the \\u0000 escape and a binary fixture are not (${JSON.stringify(found.offenders || found.skip)})`);
+      ok(!found.skip && !found.files.some((f) => f === 'data/bin/rclone' || f === 'src/untracked.js'),
+        `CONTROL: files the product installs/generates at runtime are OUT OF SCOPE — untracked never reaches the census, however big or binary (${JSON.stringify(found.files || found.skip)})`);
+
+      // ROUND 6b: the state the accident LEFT BEHIND. core.bare=true makes
+      // --show-toplevel die while ls-files still answers; before the --git-dir
+      // fallback this printed the same green "export/tarball" SKIP forever.
+      const flip = setBare(tmp42, 'true');
+      const topWhileBare = gitIn(tmp42, ['rev-parse', '--show-toplevel']);
+      const bared = flip.status === 0 ? census(tmp42) : null;
+      const unflip = flip.status === 0 ? setBare(tmp42, 'false') : null;
+      ok(flip.status === 0 && topWhileBare.status !== 0 && !!bared && !bared.skip && bared.offenders.length === 1
+        && !!unflip && unflip.status === 0 && !census(tmp42).skip,
+        `CONTROL: a core.bare=true checkout has no work tree (--show-toplevel: ${gitWhy(topWhileBare)}) yet a perfectly readable index, so the census RUNS instead of skipping green (${JSON.stringify(bared && (bared.offenders || bared.skip))})`);
+
+      // OWNERSHIP PIN for that fallback: `--git-dir` answers from ANY depth,
+      // so the relaxation must not let a directory borrow an ancestor repo's
+      // index — with the work tree alive (--show-toplevel names the ancestor)
+      // and with it flagged bare (only <base>/.git can say "the repo is here").
+      const inner = path.join(tmp42, 'src');
+      const innerLive = census(inner);
+      const flip2 = setBare(tmp42, 'true');
+      const innerBare = flip2.status === 0 ? census(inner) : null;
+      if (flip2.status === 0) setBare(tmp42, 'false');
+      ok(!!innerLive.skip && !!innerBare && !!innerBare.skip,
+        `CONTROL: a directory INSIDE another repo never borrows that repo's index — bare or not (live: ${JSON.stringify(String(innerLive.skip).slice(0, 70))}; bare: ${JSON.stringify(String(innerBare && innerBare.skip).slice(0, 70))})`);
+
+      // ── ROUND 6a: THE AMBIENT-ENVIRONMENT NEGATIVE CONTROL ───────────────
+      // Two decoy repos, one hostile environment. Through the sanitizer the
+      // decoy must be BYTE-IDENTICAL afterwards; raw, it must change — the
+      // second half is what proves the first is the sanitizer's doing and not
+      // the controls quietly failing to run at all.
+      const makeDecoy = (tag) => {
+        const d = mkTmp(tag);
+        fs.mkdirSync(path.join(d, 'src'), { recursive: true });
+        fs.writeFileSync(path.join(d, 'src/decoy.js'), 'const decoy = 1;\n');
+        fs.writeFileSync(path.join(d, '.gitignore'), 'decoy-ignores-nothing\n');
+        if (initRepo(d).status !== 0) return null;
+        const a = spawnSync('git', ['--git-dir', path.join(d, '.git'), '--work-tree', d, 'add', '-A'],
+          { cwd: d, encoding: 'utf-8', env: GIT_ENV });
+        return a.status === 0 ? d : null;
+      };
+      const hostileFor = (decoy) => ({
+        ...process.env,
+        GIT_DIR: path.join(decoy, '.git'),
+        GIT_WORK_TREE: decoy,
+        GIT_INDEX_FILE: path.join(decoy, '.git', 'index'),
+        GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.bare', GIT_CONFIG_VALUE_0: 'true',
+        GIT_CONFIG_PARAMETERS: "'core.bare'='true'",
+        GIT_PREFIX: 'src/', GIT_NAMESPACE: 'decoy', GIT_CEILING_DIRECTORIES: decoy,
+        GIT_OBJECT_DIRECTORY: path.join(decoy, '.git', 'objects'),
+        GIT_ALTERNATE_OBJECT_DIRECTORIES: path.join(decoy, '.git', 'objects'),
+        GIT_COMMON_DIR: path.join(decoy, '.git'), GIT_TEMPLATE_DIR: decoy,
+        GIT_LITERAL_PATHSPECS: '1', GIT_INDEX_VERSION: '4', GIT_CONFIG_NOSYSTEM: '1',
+      });
+      const guarded = makeDecoy('decoy-guarded');
+      const exposed = makeDecoy('decoy-exposed');
+      if (!guarded || !exposed) {
+        ok(true, 'CONTROLS SKIPPED: could not build the ambient-environment decoy repos');
+      } else {
+        const hostile = hostileFor(guarded);
+        const cleaned = gitEnvFrom(hostile);
+        ok(GIT_REDIRECTORS.every((k) => !(k in cleaned)) && !('GIT_CONFIG_KEY_0' in cleaned) && !('GIT_CONFIG_VALUE_0' in cleaned)
+          && cleaned.PATH === hostile.PATH && cleaned.GIT_CONFIG_NOSYSTEM === '1',
+          `CONTROL: the sanitizer drops every repo/index/object/config REDIRECTOR incl. the numbered GIT_CONFIG_KEY_n/VALUE_n pairs, and keeps PATH + the strictly-more-isolating GIT_CONFIG_NOSYSTEM (${GIT_REDIRECTORS.length} names audited)`);
+
+        // (a) SANITIZED: run the whole control sequence (skip-probe + init +
+        //     add + census) in a fresh fixture while the hostile names point
+        //     at `guarded`. Nothing outside the fixture may move.
+        const under = mkTmp('ctl-guarded');
+        plantFixture(under);
+        const beforeG = repoStamp(guarded);
+        const preSkip = census(under, gitEnvFrom(hostile));
+        const gi = initRepo(under, gitEnvFrom(hostile));
+        const ga = gi.status === 0 ? addFixture(under, gitEnvFrom(hostile)) : { status: 1 };
+        const gc = census(under, gitEnvFrom(hostile));
+        ok(repoStamp(guarded) === beforeG,
+          'CONTROL (the round-6 finding itself): with the sanitized environment, a hostile GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE/GIT_CONFIG_* leaves the OTHER repo byte-identical — config, index and HEAD all unchanged');
+        ok(!!preSkip.skip && gi.status === 0 && ga.status === 0 && !gc.skip && gc.offenders.length === 1 && gc.offenders[0].startsWith('src/dirty.js'),
+          `CONTROL: ...and the controls still did their real work in the throwaway repo, so the assert above is not vacuous (${JSON.stringify(gc.offenders || gc.skip)})`);
+
+        // (b) RAW: the fixture repo really exists (created sanitized), and only
+        //     the `add` runs with the hostile environment unsanitized. It must
+        //     reach `exposed` — measured: --git-dir/--work-tree do NOT override
+        //     GIT_INDEX_FILE, which is exactly why the env is the fix.
+        const overExposed = mkTmp('ctl-exposed');
+        plantFixture(overExposed);
+        const rawEnv = { ...process.env, GIT_DIR: path.join(exposed, '.git'), GIT_WORK_TREE: exposed, GIT_INDEX_FILE: path.join(exposed, '.git', 'index') };
+        const beforeE = repoStamp(exposed);
+        const ei = initRepo(overExposed);
+        const ea = ei.status === 0 ? addFixture(overExposed, rawEnv) : { status: 1 };
+        ok(ei.status === 0 && ea.status === 0 && repoStamp(exposed) !== beforeE,
+          `NEGATIVE CONTROL: the same write control run with the RAW ambient environment DOES reach the other repo (${gitWhy(ea)}) — the guarded assert above is the sanitizer working, not the controls failing to run`);
+      }
     }
-  } finally { try { fs.rmSync(tmp42, { recursive: true, force: true }); } catch {} }
+  } finally { for (const d of tmpDirs) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} } }
 }
 
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);
