@@ -4,7 +4,7 @@ import { metric, track } from './telemetry-client.js';
 import { stripAnsi } from './highlight.js';
 import { ChatMinimap } from './chat-minimap.js';
 import { ChatSearch } from './chat-search.js';
-import { ChatRenderers, toolDisplayName } from './chat-renderers.js';
+import { ChatRenderers, toolDisplayName, formatSleepRemaining } from './chat-renderers.js';
 import { ChatInput } from './chat-input.js';
 import { ChatStatusBar } from './chat-status-bar.js';
 import { UI_ICONS } from './icons.js';
@@ -780,6 +780,21 @@ class ChatView {
     // Telemetry fingerprint `chat-stall-reattach` records each firing with
     // the silence length — the instrument that convicts the real seam on the
     // next occurrence. Fires at most once per 5min per view.
+    // SLEEP COUNTDOWN (2.369.54): a live `clock.sleep` card renders its own
+    // deadline into `data-sleep-until`; ONE interval per view rewrites the text
+    // so a 20-minute wait visibly counts down instead of sitting behind a
+    // spinner. It touches nothing when no such card exists (the usual case),
+    // and a COMPLETED sleep card has no such element at all — the row freezes
+    // by construction, not by clearing a timer.
+    this._sleepTicker = setInterval(() => {
+      try {
+        const els = this._container?.querySelectorAll?.('.chat-sleep-remaining[data-sleep-until]');
+        if (!els || !els.length) return;
+        const now = Date.now();
+        for (const el of els) el.textContent = formatSleepRemaining((Number(el.dataset.sleepUntil) || 0) - now);
+      } catch { }
+    }, 1000);
+
     this._stallWatch = setInterval(() => {
       try {
         if (this._readOnly || !this._typingSince) return;
@@ -808,6 +823,12 @@ class ChatView {
         this._onServerStreamLabel(msg.label, msg.kind || null);
       } else if (msg.type === 'auto-resume' && msg.sessionId === sessionId) {
         this._statusBar?.setAutoResume?.(msg.status || null);
+      } else if (msg.type === 'response-style-updated' && msg.sessionId === sessionId) {
+        // LIVE style switch CONFIRMED by the server (2.369.54). The chip only
+        // moves on this echo — a refused switch answers `{type:'error',
+        // code:'style-not-live'}` instead and the bar keeps the truth.
+        this._statusBar?.setOutputStyle?.(msg.outputStyle || '');
+        this._statusBar?.setOutputStylePending?.(undefined);
       } else if (msg.type === 'page-published' && msg.sessionId === sessionId) {
         // ONE notify point server-side (dialog + agent publishes): the status
         // bar's design chip is the live list; the agent's reply carries the link
@@ -4432,6 +4453,7 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
     }
     if (this._traceWatchTimer) { clearInterval(this._traceWatchTimer); this._traceWatchTimer = null; }
     if (this._stallWatch) { clearInterval(this._stallWatch); this._stallWatch = null; }
+    if (this._sleepTicker) { clearInterval(this._sleepTicker); this._sleepTicker = null; }
     if (this._readOnlyPollTimer) clearTimeout(this._readOnlyPollTimer);
     this.ws.offGlobal(this._handler);
     this.ws.offStateChange(this._stateHandler);

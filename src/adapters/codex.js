@@ -13,6 +13,7 @@ const crypto = require('crypto');
 // S3: the codex naming rule + zstd rollout readers live in discovery-facts
 // (the tiny module the daemon bundle and every discovery collector share)
 const { deriveCodexSessionName, ZSTD_SUPPORTED, isZstPath, isZstBuffer, zstdDecompressFrames, readHeadText, CODEX_ROLLOUT_RE } = require('../discovery-facts');
+const { capsOf } = require('../backend-caps');   // responseStyle enum — the ONE list, never a second copy here
 
 const CODEX_SESSIONS_DIR = path.join(os.homedir(), '.codex', 'sessions');
 
@@ -966,6 +967,12 @@ class CodexAdapter extends BackendAdapter {
           CODEX_WEBUI_SANDBOX: resolvedPermission.sandbox,
           CODEX_WEBUI_CWD: cwd || os.homedir(),
           CODEX_WEBUI_SESSION_NAME: options.sessionName || '',
+          // RESPONSE STYLE (2.369.54): the per-session `outputStyle` slot,
+          // spelled in codex's own vocabulary (Personality: none | friendly |
+          // pragmatic). '' = the user chose nothing ⇒ the wrapper omits the
+          // key entirely and ~/.codex/config.toml decides. An out-of-enum
+          // value never reaches the app-server.
+          CODEX_WEBUI_PERSONALITY: capsOf('codex').responseStyle.values.includes(options.outputStyle || '') ? options.outputStyle : '', // codex's enum is CLOSED — an unknown value is dropped, never forwarded
         },
         permission: resolvedPermission,
       };
@@ -1042,6 +1049,14 @@ class CodexAdapter extends BackendAdapter {
   // passed on every turn/start — takes effect from the next turn.
   formatSetModel(model) {
     return JSON.stringify({ type: 'set-model', model });
+  }
+
+  // Mid-session RESPONSE STYLE switch — LIVE, unlike claude's spawn-only
+  // outputStyle: the wrapper turns this into `thread/settings/update
+  // {threadId, personality}` on the SAME thread (0.153.4 schema). '' clears the
+  // thread override and hands the choice back to ~/.codex/config.toml.
+  formatSetResponseStyle(style) {
+    return JSON.stringify({ type: 'set-response-style', style: style || '' });
   }
 
   // Mid-session effort switch: wrapper stores it and passes it on the next

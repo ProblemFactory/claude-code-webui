@@ -52,6 +52,33 @@
 //               false for claude: the CLI owns the queue, publishes no list
 //               and takes no removal — offering a control we cannot honour is
 //               the accept-and-ignore failure the 2.361.4 lesson names.
+// responseStyle names the harness's "how should the agent talk" knob and,
+// crucially, WHEN it can be set (2.369.54 — the chip's "restart to apply" row
+// gates on `live`, never on a backend id):
+//   values    — the harness's OWN accepted vocabulary. PROTOCOL VALUES, never
+//               translated, never guessed: claude's four settings-file output
+//               styles; codex's Personality enum, read out of
+//               `codex app-server generate-json-schema` on 0.153.4
+//               (none | friendly | pragmatic). An empty list = the harness has
+//               no such knob and the chip is not drawn at all.
+//   closed    — `true` when `values` is the WHOLE accepted vocabulary and the
+//               harness REJECTS anything else (codex: a Personality outside the
+//               enum fails the RPC), so an out-of-enum value is dropped before
+//               it can reach a spawn. `false` when the harness accepts
+//               user-defined values too (claude: `~/.claude/output-styles/*.md`
+//               are real custom output styles — `values` is only what the
+//               PICKER offers, and validating against it would silently eat a
+//               user's own style).
+//   live      — `true` when a RUNNING session can be re-styled
+//               (codex: `thread/settings/update {threadId, personality}`
+//               applies from the next turn on the SAME thread);
+//               `false` when the value is only read at spawn (claude: it is a
+//               --settings key and stream-json has no /output-style, so the
+//               menu offers "Restart now to apply").
+// THE UNSET RULE (both harnesses): the empty string means "the user made NO
+// choice" and the key is then NEVER sent — the agent keeps whatever its own
+// config file says. codex's 'none' is a real, DIFFERENT value ("no
+// personality"), so it can only arrive from an explicit pick.
 const BACKEND_CAPS = {
   claude: {
     pool: true,
@@ -65,6 +92,9 @@ const BACKEND_CAPS = {
     peerDelivery: 'cli-inbox',
     // The CLI queues stdin messages itself and reports nothing about it.
     inputModes: { queue: true, steer: false, queueOps: false },
+    // --settings outputStyle, read once at spawn (stream-json has no
+    // /output-style verb) ⇒ a change needs a restart.
+    responseStyle: { live: false, closed: false, values: ['Concise', 'Explanatory', 'Learning', 'Proactive'] },
   },
   codex: {
     pool: true,
@@ -80,12 +110,17 @@ const BACKEND_CAPS = {
     // a live 0.153.4 app-server (the removal verb is `delete` with
     // `queuedSubmissionId`; there is NO `thread/queue/remove`).
     inputModes: { queue: true, steer: true, queueOps: true },
+    // Personality enum + thread/settings/update, both from the 0.153.4 schema
+    // dump. LIVE: the running thread takes the new personality for its next
+    // turn — no restart, no new conversation.
+    responseStyle: { live: true, closed: true, values: ['none', 'friendly', 'pragmatic'] },
   },
   shell: {
     pool: false, hotSwitch: 'unverified', planC: false, sealedOrders: false, resetCredit: false, quotaProbe: null, fork: false,
     streamProtocol: null, // terminal-only: no chat parse pipeline
     peerDelivery: 'stash-only',
     inputModes: { queue: false, steer: false, queueOps: false },
+    responseStyle: { live: false, closed: true, values: [] }, // terminal-only: no agent to style
   },
   // ACP v1 harnesses (S8, design-harness-plugins §2.3): the agent holds its
   // own login/provider config — no pool, no quota probe, no credential
@@ -101,10 +136,12 @@ const BACKEND_CAPS = {
     // it can list and remove, but it cannot inject into a running prompt
     // (session/prompt is one-at-a-time; there is no steer in the protocol).
     inputModes: { queue: true, steer: false, queueOps: true },
+    // ACP v1 has no response-style/persona verb; the agent's own config owns it.
+    responseStyle: { live: false, closed: true, values: [] },
   },
 };
 
-const NO_CAPS = Object.freeze({ pool: false, hotSwitch: 'unverified', planC: false, sealedOrders: false, resetCredit: false, quotaProbe: null, fork: false, streamProtocol: null, peerDelivery: 'stash-only', inputModes: Object.freeze({ queue: false, steer: false, queueOps: false }) });
+const NO_CAPS = Object.freeze({ pool: false, hotSwitch: 'unverified', planC: false, sealedOrders: false, resetCredit: false, quotaProbe: null, fork: false, streamProtocol: null, peerDelivery: 'stash-only', inputModes: Object.freeze({ queue: false, steer: false, queueOps: false }), responseStyle: Object.freeze({ live: false, closed: true, values: Object.freeze([]) }) });
 
 function capsOf(backend) {
   return BACKEND_CAPS[backend || 'claude'] || NO_CAPS;

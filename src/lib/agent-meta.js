@@ -26,7 +26,19 @@ export const BACKEND_META = {
     // on backend ids — a new backend declares its features here once.
     // inputModes MIRRORS the server's backend-caps row (test-harness-contract
     // deep-equals them): what a message sent DURING a turn can do here.
-    caps: { fork: true, effort: true, review: false, outputStyle: true, autoResume: true, accounts: true, inputModes: { queue: true, steer: false, queueOps: false } },
+    // responseStyle MIRRORS the server's backend-caps row too (values + live);
+    // the chip is drawn when `values` is non-empty and the "Restart now to
+    // apply" row appears only when `live` is false.
+    caps: { fork: true, effort: true, review: false, autoResume: true, accounts: true, inputModes: { queue: true, steer: false, queueOps: false }, responseStyle: { live: false, closed: false, values: ['Concise', 'Explanatory', 'Learning', 'Proactive'] } },
+    // One-line hint per response-style VALUE (same contract as effortHints:
+    // English key, t() at render — the VALUE itself is protocol and is never
+    // translated).
+    responseStyleHints: {
+      Concise: 'lead with results, skip preamble',
+      Explanatory: 'explain choices and patterns',
+      Learning: 'teach while doing',
+      Proactive: 'act first, minimize interruptions',
+    },
     settingsPrefix: 'claude', // settings-schema key family (<prefix>.defaultModel/.defaultEffort/…)
     // Offline seed for the permission-mode dropdown before the first status
     // (the live list comes from the session's chatStatus.permissionModes).
@@ -69,7 +81,13 @@ export const BACKEND_META = {
     // fork: the thread-fork RPC exists but is unwired (flips when wired).
     // fork: true since 2.369.21 — thread/fork is wired end to end (wrapper
     // CODEX_WEBUI_FORK → thread/fork; server _forkRequested per caps).
-    caps: { fork: true, effort: true, review: true, outputStyle: false, autoResume: true, quotaRefresh: 'session-rpc', accounts: true, inputModes: { queue: true, steer: true, queueOps: true } },
+    caps: { fork: true, effort: true, review: true, autoResume: true, quotaRefresh: 'session-rpc', accounts: true, inputModes: { queue: true, steer: true, queueOps: true }, responseStyle: { live: true, closed: true, values: ['none', 'friendly', 'pragmatic'] } },
+    // codex Personality values (0.153.4 schema): protocol strings, hinted here.
+    responseStyleHints: {
+      none: 'no persona — the model\u2019s plain voice',
+      friendly: 'warmer, more conversational',
+      pragmatic: 'terse and task-focused',
+    },
     settingsPrefix: 'codex',
     permissionModes: ['default', 'read-only', 'safe-yolo', 'yolo'],
     // Effort rows that deserve a one-line hint (B-21e4 item 3): 'ultra' is
@@ -97,7 +115,7 @@ export const BACKEND_META = {
     brandColor: '#4ade80',
     fallbackModels: [],
     modelsFromAgent: true,
-    caps: { fork: false, effort: false, review: false, outputStyle: false, autoResume: false, accounts: false, inputModes: { queue: true, steer: false, queueOps: true } },
+    caps: { fork: false, effort: false, review: false, autoResume: false, accounts: false, inputModes: { queue: true, steer: false, queueOps: true }, responseStyle: { live: false, closed: true, values: [] } },
     settingsPrefix: 'opencode',
     permissionModes: ['build', 'plan'],
   },
@@ -118,13 +136,28 @@ export function effortLabel(backend, value, { capitalize = false } = {}) {
   return hint ? `${base} — ${t(hint)}` : base;
 }
 
+/** Picker label for a response-style VALUE: the harness's own protocol string
+ *  plus its META `responseStyleHints` one-liner ("Concise \u2014 lead with results\u2026").
+ *  The empty string is the UNSET row and is labelled by the caller. */
+export function responseStyleLabel(backend, value) {
+  const v = String(value || '');
+  const hint = BACKEND_META[backend]?.responseStyleHints?.[v];
+  return hint ? `${v} \u2014 ${t(hint)}` : v;
+}
+
+/** The harness's response-style capability row ({live, values}) — mirrors the
+ *  server's backend-caps entry; unknown backend = the no-knob row. */
+export function responseStyleCaps(backend) {
+  return backendFeatureCaps(backend).responseStyle || NO_FEATURE_CAPS.responseStyle;
+}
+
 export function settingsPrefixFor(backend) {
   const b = backend || 'claude';
   return BACKEND_META[b]?.settingsPrefix ?? b;
 }
 
 /** Feature caps for a backend (all-false for unknown/shell — chrome shows nothing it can't do). */
-const NO_FEATURE_CAPS = Object.freeze({ fork: false, effort: false, review: false, outputStyle: false, autoResume: false });
+const NO_FEATURE_CAPS = Object.freeze({ fork: false, effort: false, review: false, autoResume: false, responseStyle: Object.freeze({ live: false, closed: true, values: Object.freeze([]) }) });
 export function backendFeatureCaps(backend) {
   return BACKEND_META[backend]?.caps || NO_FEATURE_CAPS;
 }

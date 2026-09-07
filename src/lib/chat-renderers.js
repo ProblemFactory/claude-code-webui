@@ -147,6 +147,20 @@ export function imageMediaHtml({ path = '', host = null, mediaType = '', bytes =
   return `<details class="chat-diff chat-media"${open ? ' open' : ''}><summary class="chat-diff-summary">${UI_ICONS.image} ${escHtml(label)}${metaHtml}</summary><div class="chat-media-body"><img class="chat-img chat-tool-img" loading="lazy" src="${escHtml(src)}" alt="${escHtml(label)}"><span class="chat-media-missing">${escHtml(t('Image not available on this machine'))}</span></div></details>`;
 }
 
+// Time REMAINING on a live `sleep` card, mm:ss (h:mm:ss past an hour) — the
+// countdown ChatView's one-second ticker rewrites in place. Deliberately NOT
+// the same function as the normalizer's `slept 30s`: that one formats a TOTAL
+// on the server and rides the card as its output text, so there is exactly one
+// producer of each string.
+export function formatSleepRemaining(ms) {
+  const left = Math.max(0, Math.round((Number(ms) || 0) / 1000));
+  const h = Math.floor(left / 3600);
+  const m = Math.floor((left % 3600) / 60);
+  const sec = left % 60;
+  const pad = (n) => String(n).padStart(2, '0');
+  return h ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`;
+}
+
 function normalizeUserInputAnswers(rawAnswers) {
   if (!rawAnswers || typeof rawAnswers !== 'object') return {};
   const result = {};
@@ -624,6 +638,18 @@ class ChatRenderers {
       const fp = block.input?.file_path || '';
       const isFileOp = ['Edit', 'Write', 'Read'].includes(block.toolName);
       const isPending = msg.status === 'pending';
+      // A RUNNING `clock.sleep` (2.369.54): a deliberate wait, shown as what it
+      // is. Without this the agent went silent for up to 20 minutes behind a
+      // generic spinner and read as a hang. The row carries its own deadline
+      // (this card's ts + the item's duration) in a data attribute; ChatView's
+      // one-second ticker rewrites the text and NOTHING re-renders the card.
+      if (isPending && String(block.toolName || '').toLowerCase() === 'sleep') {
+        const ms = Number(block.input?.durationMs) || 0;
+        const until = (Number(msg.ts) || Date.now()) + ms;
+        html = `<div class="chat-tool-pending"><span class="chat-tool-label">${UI_ICONS.hourglass} ${escHtml(t('Sleeping'))} <span class="chat-sleep-remaining" data-sleep-until="${escHtml(String(until))}">${escHtml(formatSleepRemaining(until - Date.now()))}</span> ${escHtml(t('remaining'))}</span><span class="chat-spinner"></span></div>`;
+        this.wrapMsg(el, 'tool', UI_ICONS.hourglass, html);
+        return el;
+      }
       if (isPending && isFileOp) {
         // localized VERB, matching the completed cards (Edit completes as
         // t('Update'), Write as t('Write') — a raw English toolName next to
@@ -703,21 +729,36 @@ class ChatRenderers {
       const mbW = memoryBase(fp);
       return `<div class="chat-tool-use"><span class="chat-tool-label">${UI_ICONS.memo} ${mbW ? t('Memory update') : t('Write')} ${this.clickablePath(fp, mbW)}</span><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${t('{n} lines, {size}', { n: lineCount, size: sizeStr })}</summary>${codeBlock}</details></div>`;
     }
+    // A finished `clock.sleep` (2.369.54): the countdown is over, so the card
+    // FREEZES into the one line the normalizer already wrote ("slept 30s").
+    // No ticking element survives, by construction.
+    const lowerTool = String(block.toolName || '').toLowerCase();
+    if (lowerTool === 'sleep') {
+      return `<div class="chat-tool-use"><span class="chat-tool-label">${UI_ICONS.hourglass} ${escHtml(resultText || t('Slept'))}</span></div>`;
+    }
     // An image the agent LOOKED AT (claude Read of a png/jpg — the exact case
     // 2.369.35 lifted the bytes out of, whose card then showed only the
     // "[image …]" marker because this branch returned before the generic
-    // thumbnail splice; codex view_image {path}) → the media card. For a Read
-    // the LIFTED BLOCKS decide, never the extension: a .svg/.ico Read returns
-    // numbered TEXT (a by-extension branch dropped that source silently).
+    // thumbnail splice; codex view_image {path}) or GENERATED (codex
+    // image_gen, 2.369.54 — it used to render as a bare "status: completed"
+    // line with the file named in text and never shown) → the media card. For a
+    // Read the LIFTED BLOCKS decide, never the extension: a .svg/.ico Read
+    // returns numbered TEXT (a by-extension branch dropped that source
+    // silently).
+    const generatesImage = lowerTool === 'image_gen';
     const viewsImage = block.toolName === 'Read' ? images.length > 0
-      : String(block.toolName || '').toLowerCase() === 'view_image';
+      : (lowerTool === 'view_image' || generatesImage);
     if (viewsImage) {
       const imgPath = fp || block.input?.path || '';
       const im = images[0] || {};
-      const verb = block.toolName === 'Read' ? t('Read') : t('View image');
+      const verb = block.toolName === 'Read' ? t('Read') : generatesImage ? t('Generated image') : t('View image');
+      // the revised prompt is the agent's own words for what it drew — worth
+      // keeping, but folded (they run to 2 KB in real records)
+      const prompt = generatesImage ? String(block.input?.prompt || '') : '';
+      const promptHtml = prompt ? `<details class="chat-diff"><summary class="chat-diff-summary">${t('Prompt')}</summary><pre>${this.linkifyText(stripAnsi(prompt))}</pre></details>` : '';
       // a format the browser cannot decode (tiff/heic) gets the type/size chip,
       // never an <img> that can only break
-      return `<div class="chat-tool-use"><span class="chat-tool-label">${UI_ICONS.image} ${escHtml(verb)} ${this.clickablePath(imgPath)}</span>${imageMediaHtml({ path: isImagePath(imgPath) ? imgPath : '', host: mediaHost, mediaType: im.mediaType || '', bytes: im.bytes || 0 })}</div>`;
+      return `<div class="chat-tool-use"><span class="chat-tool-label">${UI_ICONS.image} ${escHtml(verb)} ${this.clickablePath(imgPath)}</span>${imageMediaHtml({ path: isImagePath(imgPath) ? imgPath : '', host: mediaHost, mediaType: im.mediaType || '', bytes: im.bytes || 0 })}${promptHtml}</div>`;
     }
     if (block.toolName === 'Read') {
       const lineCount = resultText.split('\n').length;

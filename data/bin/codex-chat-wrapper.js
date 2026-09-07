@@ -99,25 +99,67 @@ function loadFrameFile(msg) {
   return payload;
 }
 
-function normalizeNestedAnswers(value) {
+// {<question id>: {answers: [string]}} — the ToolRequestUserInputResponse shape
+// (and the source of an elicitation's typed content). TWO things it must do
+// that the 2.369.53 version did not, both of which silently ATE the answer:
+//   · the unified AskUserQuestion UI sends ONE PLAIN STRING per question (the
+//     chosen label / the typed text). A non-array, non-{answers} value used to
+//     be skipped, the map came out EMPTY and the caller then reported "the user
+//     answered nothing" — an answered question vanished.
+//   · that UI keys its map by the question TEXT (it never sees the id), while
+//     codex routes by question ID. `questions` (the request's own params) is
+//     the dictionary back.
+function normalizeNestedAnswers(value, questions = []) {
   const source = value && typeof value === 'object' ? value : {};
+  const byKey = new Map();
+  for (const q of Array.isArray(questions) ? questions : []) {
+    if (!q || typeof q !== 'object') continue;
+    const id = String(q.id ?? q.question ?? '');
+    if (!id) continue;
+    if (q.question) byKey.set(String(q.question), id);
+    byKey.set(id, id);
+  }
   const answers = {};
   for (const [key, entry] of Object.entries(source)) {
-    if (Array.isArray(entry)) {
-      answers[key] = { answers: entry.map((item) => String(item)) };
-      continue;
-    }
-    if (entry && typeof entry === 'object' && Array.isArray(entry.answers)) {
-      answers[key] = { answers: entry.answers.map((item) => String(item)) };
-    }
+    const id = byKey.get(String(key)) || String(key);
+    let list = null;
+    if (Array.isArray(entry)) list = entry;
+    else if (entry && typeof entry === 'object' && Array.isArray(entry.answers)) list = entry.answers;
+    else if (typeof entry === 'string' || typeof entry === 'number' || typeof entry === 'boolean') list = [entry];
+    if (!list) continue;
+    const vals = list.map((item) => String(item)).filter((item) => item !== '');
+    if (vals.length) answers[id] = { answers: vals };
   }
   return answers;
 }
 
-function describeServerRequestDecision(decision) {
+// A one-word label for the RESULT we actually sent — per method, because the
+// five reply schemas do not share a field, let alone a vocabulary. Purely for
+// the transcript record + the resolved card ("Allowed"/"Denied"); the wire
+// value is the untouched result object.
+function describeServerRequestDecision(result) {
+  if (!result || typeof result !== 'object') return 'decline';
+  if ('action' in result) return String(result.action || 'decline');          // elicitation
+  if ('permissions' in result) {
+    // The DENY reply is the one we build with both keys explicitly null; every
+    // other grant (including one that echoes an empty requested profile) is an
+    // approval. Sniffing "does it look non-empty" reported an approved empty
+    // profile as Denied.
+    const p = result.permissions || {};
+    const denied = 'fileSystem' in p && 'network' in p && p.fileSystem === null && p.network === null;
+    return denied ? 'decline' : 'granted';
+  }
+  if ('answers' in result && !('decision' in result)) {                       // requestUserInput
+    return Object.keys(result.answers || {}).length ? 'accept' : 'cancel';
+  }
+  const decision = result.decision;
   if (typeof decision === 'string') return decision;
   if (decision && typeof decision === 'object') {
     if (decision.acceptWithExecpolicyAmendment) return 'acceptWithExecpolicyAmendment';
+    if (decision.applyNetworkPolicyAmendment) return 'applyNetworkPolicyAmendment';
+    if (decision.approved_execpolicy_amendment) return 'approved_execpolicy_amendment';
+    if (decision.network_policy_amendment) return 'network_policy_amendment';
+    if (decision.denied) return 'denied';
   }
   return 'decline';
 }
@@ -235,6 +277,19 @@ const model = process.env.CODEX_WEBUI_MODEL || '';
 // meta.modelPinned (2.369.32): set when the spawn carried a model or set-model ran — see updateMetaFromThread
 let effort = process.env.CODEX_WEBUI_EFFORT || ''; // mutable: set-effort updates it mid-session
 const backendPermissionMode = process.env.CODEX_WEBUI_PERMISSION_MODE || 'default';
+// ── RESPONSE STYLE / PERSONALITY (2.369.54) ──
+// codex's `Personality` enum, read out of `codex app-server
+// generate-json-schema --experimental` on 0.153.4: exactly none | friendly |
+// pragmatic. THE UNSET RULE: an EMPTY value means the user made no choice and
+// the key is then NEVER put on thread/start | thread/resume | turn/start — the
+// agent keeps whatever ~/.codex/config.toml says. (Until 2.369.54 the wrapper
+// hardcoded 'pragmatic' into both calls and silently overrode every user's own
+// config; 'none' is a REAL codex value meaning "no persona", so it can only
+// ever arrive from an explicit pick.) Mutable: `set-response-style` applies it
+// LIVE through thread/settings/update.
+const PERSONALITY_VALUES = ['none', 'friendly', 'pragmatic'];
+let personality = PERSONALITY_VALUES.includes(process.env.CODEX_WEBUI_PERSONALITY || '')
+  ? process.env.CODEX_WEBUI_PERSONALITY : '';
 const isFork = process.env.CODEX_WEBUI_FORK === '1';
 const forkedFromEnv = process.env.CODEX_WEBUI_FORKED_FROM || '';
 const forkedFrom = forkedFromEnv ? forkedFromEnv.split(',').filter(Boolean) : [];
@@ -300,7 +355,15 @@ const meta = {
   // (steer / remove / steer-all). backend-caps `inputModes` is what the ws
   // layer gates on; this advert is the per-PROCESS truth for a long-lived
   // wrapper that predates the feature (the 2.361.1/2.364.1 law).
-  caps: { peerMessage: true, frameFile: true, threadScoped: true, inputQueue: true },
+  // responseStyle: this wrapper serves `set-response-style` and applies it
+  // LIVE (thread/settings/update). backend-caps `responseStyle.live` is what
+  // the ws layer + the chip gate on; this advert is the per-PROCESS truth for
+  // a wrapper spawned before the feature existed.
+  caps: { peerMessage: true, frameFile: true, threadScoped: true, inputQueue: true, responseStyle: true },
+  // The response style (codex Personality) this session actually runs with.
+  // '' = the user made no choice ⇒ the key is never sent and ~/.codex/config.toml
+  // decides. Reported so Session Properties can name the EFFECTIVE value.
+  personality,
   // The queue as last read from thread/queue/list (sidecar mirror; the live
   // consumer is the queue_changed event).
   queue: [],
@@ -721,6 +784,19 @@ function handleItemStarted(item, itemId) {
     recordItem({ type: 'function_call', name: 'web_search', arguments: JSON.stringify({ query: item.query || '', action: item.action || null }), call_id: itemId });
     return;
   }
+  // MEDIA + SLEEP (2.369.54): a generated image was INVISIBLE while streaming
+  // (it only appeared after a re-attach merged the rollout) and a `sleep` had no
+  // branch anywhere — a 20-minute deliberate wait read as a hang. Both open a
+  // PENDING card here with the same input keys their completion carries, so the
+  // live card and a rollout-only rebuild are the same object.
+  if (type === 'imageGeneration') {
+    recordItem({ type: 'function_call', name: 'image_gen', arguments: JSON.stringify({ prompt: asString(item.revisedPrompt), path: asString(item.savedPath) }), call_id: itemId });
+    return;
+  }
+  if (type === 'sleep') {
+    recordItem({ type: 'function_call', name: 'sleep', arguments: JSON.stringify({ durationMs: Number(item.durationMs) || 0 }), call_id: itemId });
+    return;
+  }
   if (type === 'enteredReviewMode') {
     emitTaskEvent('entered_review_mode', { item_id: itemId });
     return;
@@ -771,6 +847,19 @@ function _handleItemCompletedInner(item, itemId) {
     const p = String(item.path || '').replace(/^file:\/\//, '');
     recordItem({ type: 'function_call', name: 'view_image', arguments: JSON.stringify({ path: p }), call_id: itemId });
     recordItem({ type: 'function_call_output', call_id: itemId, output: `viewed ${p || 'image'}`, is_error: false });
+    return;
+  }
+  if (type === 'imageGeneration' || type === 'sleep') {
+    // Recorded in codex's OWN rollout spelling (`item_completed` with an
+    // `Extension` item) — the same record the rollout persists and the same one
+    // codex-thread-read synthesizes, so all three producers hit ONE card path
+    // and the live copy converges with the rollout copy on the item id.
+    // `item.result` — the 3 MB base64 PNG — is deliberately NOT carried: the
+    // card names savedPath and the browser draws the file (2.369.35 law).
+    const payload = type === 'imageGeneration'
+      ? { type: 'Extension', kind: 'image_gen.generation', id: itemId, status: asString(item.status), revisedPrompt: asString(item.revisedPrompt), savedPath: asString(item.savedPath), failure: item.failure ?? null }
+      : { type: 'Extension', kind: 'clock.sleep', id: itemId, durationMs: Number(item.durationMs) || 0 };
+    record('event_msg', { type: 'item_completed', item: payload });
     return;
   }
   if (type === 'contextCompaction') {
@@ -1111,8 +1200,11 @@ async function startThread() {
     cwd: baseCwd,
     approvalPolicy: currentPermission.approvalPolicy,
     sandbox: currentPermission.sandbox,
-    personality: 'pragmatic',
   };
+  // ONLY when the user chose one (see PERSONALITY_VALUES above). thread/fork
+  // has no `personality` field at all in the 0.153.4 schema — the fork
+  // inherits its parent's, and a live `set-response-style` re-points it.
+  if (personality && !(resumeId && isFork)) params.personality = personality;
   if (model) params.model = model;
   if (sessionName) params.config = { 'thread.name': sessionName };
   const method = resumeId ? (isFork ? 'thread/fork' : 'thread/resume') : 'thread/start';
@@ -1241,7 +1333,9 @@ async function startTurn(text, attachments = []) {
     sandboxPolicy: currentPermission.sandboxPolicy,
     model: meta.model || undefined,
     effort: effort || undefined,
-    personality: 'pragmatic',
+    // unset ⇒ absent (never `null`: a null CLEARS the thread's personality,
+    // which is not the same as "leave the agent's own config alone")
+    ...(personality ? { personality } : {}),
   }, 120000);
   const startedId = resp?.turn?.id || currentTurnId;
   // The turn/completed notification can be processed BEFORE this reply's
@@ -1675,42 +1769,209 @@ async function handleQueueOp(msg) {
   emitTaskEvent('queue_op_result', { op, id, ok: false, reason: 'unknown-op' });
 }
 
+// ── SERVER REQUESTS: ONE EXPLICIT BRANCH PER METHOD (2.369.54) ──
+// The app-server is also a CLIENT of ours: it sends JSON-RPC *requests* and
+// BLOCKS until we answer. Every method has its OWN result schema (dumped with
+// `codex app-server generate-json-schema --experimental` on 0.153.4) and they
+// share no vocabulary:
+//   item/commandExecution/requestApproval → {decision: accept|acceptForSession|
+//        {acceptWithExecpolicyAmendment}|{applyNetworkPolicyAmendment}|decline|cancel}
+//   item/fileChange/requestApproval       → {decision: accept|acceptForSession|decline|cancel}
+//   item/permissions/requestApproval      → {permissions: GrantedPermissionProfile, scope?, strictAutoReview?}
+//   item/tool/requestUserInput            → {answers: {<question id>: {answers: [string]}}}   (NO decision field)
+//   mcpServer/elicitation/request         → {action: accept|decline|cancel, content?}
+//   applyPatchApproval / execCommandApproval (v1) → {decision: ReviewDecision}
+//        = approved | approved_for_session | {denied:{rejection}} | abort | …
+//   currentTime/read                      → {currentTimeAt: <unix seconds>}
+//   item/tool/call / attestation/generate / account/chatgptAuthTokens/refresh
+//        → values only a client that OWNS them can produce; we own none.
+// Until 2.369.54 exactly ONE method was matched by name and everything else got
+// `{decision: 'decline'}` — a result the server cannot deserialize for four of
+// them, i.e. a hung turn nobody could explain, plus a bogus "Permission" card
+// for requests no human should ever see.
+// THE RULE: every method in the ServerRequest union has an explicit branch. One
+// we cannot answer is refused with a JSON-RPC ERROR (the ACP wrapper's
+// precedent — the call FAILS CLEANLY) plus a VISIBLE system line; never a
+// silent wrong-shaped result, never a hang.
+const approvedOf = (msg) => msg?.approved === true || msg?.responseData?.decision === 'accept';
+const abortOf = (msg) => !!msg?.abort || msg?.responseData?.decision === 'cancel';
+const alwaysOf = (msg) => !!msg?.alwaysAllow;
+const rejectionOf = (msg) => asString(msg?.reason) || asString(msg?.responseData?.reason) || 'Denied by the user in VibeSpace.';
+const answersOf = (msg) => (msg?.responseData && msg.responseData.answers) || (msg?.toolInput && msg.toolInput.answers) || {};
+
+const SERVER_REQUEST_SPEC = {
+  'item/commandExecution/requestApproval': { kind: 'ask', reply: (msg, orig) => {
+    if (!approvedOf(msg)) return { decision: abortOf(msg) ? 'cancel' : 'decline' };
+    if (Array.isArray(msg.permissionUpdates) && msg.permissionUpdates.length > 0 && orig.params?.proposedExecpolicyAmendment) {
+      return { decision: { acceptWithExecpolicyAmendment: { execpolicy_amendment: msg.permissionUpdates } } };
+    }
+    return { decision: alwaysOf(msg) ? 'acceptForSession' : 'accept' };
+  } },
+  // FileChangeApprovalDecision has NO execpolicy/network amendment variants —
+  // sending one here would be a deserialization failure, not a nicer answer.
+  'item/fileChange/requestApproval': { kind: 'ask', reply: (msg) => (approvedOf(msg)
+    ? { decision: alwaysOf(msg) ? 'acceptForSession' : 'accept' }
+    : { decision: abortOf(msg) ? 'cancel' : 'decline' }) },
+  // A GRANT, not a decision: GrantedPermissionProfile has the same shape as the
+  // RequestPermissionProfile in the params, so approving = handing back exactly
+  // what was asked for and denying = granting nothing.
+  'item/permissions/requestApproval': { kind: 'ask', reply: (msg, orig) => {
+    const asked = orig.params && orig.params.permissions && typeof orig.params.permissions === 'object' ? orig.params.permissions : {};
+    if (!approvedOf(msg)) return { permissions: { fileSystem: null, network: null }, scope: 'turn' };
+    return { permissions: asked, scope: alwaysOf(msg) ? 'session' : 'turn' };
+  } },
+  'item/tool/requestUserInput': { kind: 'ask', reply: (msg, orig) => (approvedOf(msg)
+    ? { answers: normalizeNestedAnswers(answersOf(msg), asArray(orig.params?.questions)) }
+    // The schema has no decline variant: an EMPTY map is the only well-formed
+    // way to say "the user answered nothing".
+    : { answers: {} }) },
+  'mcpServer/elicitation/request': { kind: 'ask', reply: (msg, orig) => {
+    if (!approvedOf(msg)) return { action: abortOf(msg) ? 'cancel' : 'decline' };
+    const content = elicitationContent(orig.params || {}, msg);
+    // `content` is nullable in the schema (decline/cancel carry none) and a
+    // url-mode accept has nothing to send — omit rather than post an empty {}.
+    return Object.keys(content).length ? { action: 'accept', content } : { action: 'accept' };
+  } },
+  // v1 legacy pair — a DIFFERENT enum (ReviewDecision), which is exactly why
+  // one shared `{decision:'accept'}` was wrong.
+  'applyPatchApproval': { kind: 'ask', reply: replyReviewDecision },
+  'execCommandApproval': { kind: 'ask', reply: replyReviewDecision },
+  // A fact we simply KNOW — answered instantly, never a card. Leaving it to a
+  // human would hang the turn behind a question nobody can answer.
+  'currentTime/read': { kind: 'auto', reply: () => ({ currentTimeAt: Math.floor(Date.now() / 1000) }) },
+  'item/tool/call': { kind: 'unsupported', why: 'this client declares no dynamic tools (thread/start sends no dynamicTools)' },
+  'account/chatgptAuthTokens/refresh': { kind: 'unsupported', why: 'codex reads its own auth.json under CODEX_HOME; VibeSpace holds no ChatGPT refresh flow' },
+  'attestation/generate': { kind: 'unsupported', why: 'VibeSpace cannot mint client attestation tokens' },
+};
+
+function replyReviewDecision(msg) {
+  if (approvedOf(msg)) return { decision: alwaysOf(msg) ? 'approved_for_session' : 'approved' };
+  if (abortOf(msg)) return { decision: 'abort' };
+  return { decision: { denied: { rejection: rejectionOf(msg) } } };
+}
+
+// An MCP elicitation's requestedSchema → the SAME question rows the
+// AskUserQuestion card family already renders. ONE derivation, used both when
+// the request is RECORDED (so the card has rows) and when the reply is BUILT
+// (so an answer maps back onto the right property) — a second copy in the
+// normalizer would be a twin that drifts.
+function elicitationQuestions(params) {
+  const mode = asString(params?.mode);
+  const message = asString(params?.message) || 'The MCP server is asking for input.';
+  const header = asString(params?.serverName) || 'MCP';
+  if (mode === 'url') {
+    return [{ id: 'url', header, question: `${message}\n${asString(params?.url)}`, options: null }];
+  }
+  const schema = params && typeof params.requestedSchema === 'object' && params.requestedSchema ? params.requestedSchema : null;
+  const props = schema && schema.properties && typeof schema.properties === 'object' ? schema.properties : null;
+  if (!props) return [{ id: 'response', header, question: message, options: null }];
+  const required = Array.isArray(schema.required) ? schema.required.map(String) : [];
+  const out = [];
+  for (const [name, specRaw] of Object.entries(props)) {
+    const spec = specRaw && typeof specRaw === 'object' ? specRaw : {};
+    const label = asString(spec.title) || asString(spec.description) || name;
+    let options = null;
+    if (Array.isArray(spec.enum) && spec.enum.length) {
+      const names = Array.isArray(spec.enumNames) ? spec.enumNames : [];
+      options = spec.enum.map((v, i) => ({ label: String(v), description: asString(names[i]) }));
+    } else if (Array.isArray(spec.oneOf) && spec.oneOf.length && spec.oneOf.every((o) => o && o.const !== undefined)) {
+      options = spec.oneOf.map((o) => ({ label: String(o.const), description: asString(o.title) }));
+    } else if (String(spec.type || '') === 'boolean') {
+      options = [{ label: 'true', description: '' }, { label: 'false', description: '' }];
+    }
+    out.push({ id: name, header: `${header}${required.includes(name) ? ' *' : ''}`, question: `${message} — ${label}`, options, isSecret: !!spec.secret });
+  }
+  return out;
+}
+
+// The accepted elicitation's `content`, typed per the requestedSchema (the MCP
+// contract: a boolean property must arrive as a JSON boolean, not "true").
+function elicitationContent(params, msg) {
+  const schema = params && typeof params.requestedSchema === 'object' && params.requestedSchema ? params.requestedSchema : null;
+  const props = schema && schema.properties && typeof schema.properties === 'object' ? schema.properties : null;
+  const answers = normalizeNestedAnswers(answersOf(msg), elicitationQuestions(params));
+  if (!props) {
+    const only = answers.response || answers.url || null;
+    return only ? { response: only.answers[0] } : {};
+  }
+  const content = {};
+  for (const [name, specRaw] of Object.entries(props)) {
+    const got = answers[name];
+    if (!got || !got.answers.length) continue;
+    const spec = specRaw && typeof specRaw === 'object' ? specRaw : {};
+    const type = String(spec.type || 'string');
+    const first = got.answers[0];
+    if (type === 'boolean') content[name] = /^(true|yes|on|1)$/i.test(first);
+    else if (type === 'number' || type === 'integer') { const n = Number(first); if (Number.isFinite(n)) content[name] = n; }
+    else if (type === 'array') content[name] = got.answers.slice();
+    else content[name] = first;
+  }
+  return content;
+}
+
+// The arrival side of the same table: classify BEFORE a card is ever created.
+function handleServerRequest(msg) {
+  const method = asString(msg.method);
+  const spec = SERVER_REQUEST_SPEC[method] || null;
+  if (spec && spec.kind === 'auto') {
+    let result = null;
+    try { result = spec.reply(msg); } catch (e) { log(`server request ${method} auto-reply failed: ${e.message}`); }
+    if (result) { send({ id: msg.id, result }); log(`server request ${method} answered automatically`); return; }
+  }
+  if (!spec || spec.kind !== 'ask') {
+    const why = spec ? (spec.why || `VibeSpace could not produce the ${method} value it owes`) : 'VibeSpace implements no branch for this app-server request';
+    send({ id: msg.id, error: { code: -32601, message: `Method not supported by the VibeSpace client: ${method} — ${why}` } });
+    // LOUD, not silent: the user sees a system line, Diagnostics gets the
+    // once-per-method breadcrumb (the normalizer fires it), the journal keeps
+    // the detail. An upstream method we have never seen shows up HERE.
+    record('event_msg', { type: 'client_request_unsupported', method, reason: why, request_id: msg.id ?? null });
+    log(`server request ${method} REFUSED with a JSON-RPC error (${why})`);
+    return;
+  }
+  pendingServerRequests.set(String(msg.id), msg);
+  meta.pendingRequests[String(msg.id)] = { id: msg.id, method, params: msg.params || {} };
+  const rec = { id: msg.id, method, params: msg.params || {} };
+  // The elicitation rows travel WITH the record so the card and the reply
+  // mapping come from the same derivation.
+  if (method === 'mcpServer/elicitation/request') rec.questions = elicitationQuestions(msg.params || {});
+  record('server_request', rec);
+  scheduleMeta();
+}
+
 async function respondToServerRequest(msg) {
   const requestId = msg.requestId;
   const original = pendingServerRequests.get(String(requestId));
   if (!original) return;
-  const method = original.method;
-  let result = { decision: 'decline' };
-
-  if (method === 'item/tool/requestUserInput') {
-    if (msg.responseData?.decision === 'accept') {
-      const answers = normalizeNestedAnswers(msg.responseData.answers || {});
-      result = Object.keys(answers).length > 0
-        ? { decision: 'accept', answers }
-        : { decision: 'cancel' };
-    } else {
-      result = { decision: msg.abort ? 'cancel' : 'decline' };
-    }
-  } else if (msg.approved) {
-    if (Array.isArray(msg.permissionUpdates) && msg.permissionUpdates.length > 0 && original.params?.proposedExecpolicyAmendment) {
-      result = {
-        decision: {
-          acceptWithExecpolicyAmendment: {
-            execpolicy_amendment: msg.permissionUpdates,
-          },
-        },
-      };
-    } else {
-      result = { decision: msg.alwaysAllow ? 'acceptForSession' : 'accept' };
+  const method = asString(original.method);
+  const spec = SERVER_REQUEST_SPEC[method] || null;
+  let result;
+  if (spec && spec.kind === 'ask') {
+    try { result = spec.reply(msg, original); }
+    catch (e) {
+      log(`server request ${method} reply builder failed: ${e.message}`);
+      send({ id: requestId, error: { code: -32603, message: `VibeSpace could not build a reply for ${method}: ${e.message}` } });
+      record('event_msg', { type: 'client_request_unsupported', method, reason: `reply builder failed: ${e.message}`, request_id: requestId });
+      delete meta.pendingRequests[String(requestId)];
+      pendingServerRequests.delete(String(requestId));
+      scheduleMeta();
+      return;
     }
   } else {
-    result = { decision: msg.abort ? 'cancel' : 'decline' };
+    // Belt and braces: a card can only exist for an 'ask' method, but a pending
+    // entry that survived a wrapper upgrade must not be answered in some other
+    // method's vocabulary.
+    send({ id: requestId, error: { code: -32601, message: `Method not supported by the VibeSpace client: ${method}` } });
+    delete meta.pendingRequests[String(requestId)];
+    pendingServerRequests.delete(String(requestId));
+    scheduleMeta();
+    return;
   }
 
   send({ id: requestId, result });
   record('server_request_resolved', {
     id: requestId,
-    decision: describeServerRequestDecision(result.decision),
+    method,
+    decision: describeServerRequestDecision(result),
     answers: result.answers || null,
   });
   delete meta.pendingRequests[String(requestId)];
@@ -1948,6 +2209,30 @@ async function handleInput(msg) {
     log('Model set for next turn: ' + (msg.model || '(default)'));
     return;
   }
+  if (msg.type === 'set-response-style') {
+    // LIVE style switch (codex `thread/settings/update`, 0.153.4 schema:
+    // {threadId, personality} — "Override the personality for subsequent
+    // turns"). Unlike claude's spawn-only --settings outputStyle this needs no
+    // restart. An unknown value is REFUSED LOUDLY, never sent (the enum is
+    // closed; a bad value would make the whole update fail server-side and the
+    // user would see nothing).
+    const want = typeof msg.style === 'string' ? msg.style.trim() : '';
+    if (want && !PERSONALITY_VALUES.includes(want)) {
+      emitTaskEvent('task_failed', { error: `Unknown response style "${want}" — codex accepts ${PERSONALITY_VALUES.join(' / ')} (or none of them, which keeps your config.toml setting).` });
+      return;
+    }
+    if (!meta.threadId) throw new Error('No threadId available for thread/settings/update');
+    // Clearing is a REAL update (`personality: null` = drop the thread
+    // override) — that is the only way back to the config-file default on a
+    // thread we already styled.
+    await request('thread/settings/update', { threadId: meta.threadId, personality: want || null }, 30000);
+    personality = want;
+    meta.personality = want;
+    scheduleMeta();
+    emitTaskEvent('command_applied', { command: 'style', value: want || '(config default)' });
+    log('Response style set live: ' + (want || '(config default)'));
+    return;
+  }
   if (msg.type === 'set-thread-name') {
     if (!meta.threadId) throw new Error('No threadId available for thread/name/set');
     const name = typeof msg.name === 'string' ? msg.name.trim() : '';
@@ -1978,10 +2263,7 @@ function handleStdoutLine(line) {
   }
 
   if (Object.prototype.hasOwnProperty.call(msg, 'id') && msg.method) {
-    pendingServerRequests.set(String(msg.id), msg);
-    meta.pendingRequests[String(msg.id)] = { id: msg.id, method: msg.method, params: msg.params || {} };
-    record('server_request', { id: msg.id, method: msg.method, params: msg.params || {} });
-    scheduleMeta();
+    handleServerRequest(msg);   // classify FIRST (auto / unsupported / ask) — 2.369.54
     return;
   }
 

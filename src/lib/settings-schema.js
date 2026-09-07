@@ -423,6 +423,20 @@ const SETTINGS_SCHEMA = {
     description: t('The CLI output style new chat sessions start with. "Concise" makes Claude lead with results and skip preamble. Blank = the CLI\'s own default. A stream-json session cannot switch style mid-conversation, so a change takes effect on the next resume; the chat status bar sets it per session.'),
     category: t('Claude'), liveApply: true,
   },
+  'codex.outputStyle': {
+    // codex's own vocabulary (Personality: none | friendly | pragmatic — the
+    // 0.153.4 schema enum), NOT claude's output styles. The `<prefix>.outputStyle`
+    // read in ws-create is per-harness for exactly this reason.
+    type: 'enum', default: '', options: [
+      { value: '', label: t('agent default') },
+      { value: 'none', label: 'none' },
+      { value: 'friendly', label: 'friendly' },
+      { value: 'pragmatic', label: 'pragmatic' },
+    ],
+    label: t('Default response style (Codex)'),
+    description: t('The personality new Codex chat sessions start with. Blank = leave it to your own ~/.codex/config.toml (this is the default; VibeSpace used to force "pragmatic" on every session). Unlike Claude, a running Codex session CAN be re-styled from the chat status bar — it applies from the next turn.'),
+    category: t('Codex'), liveApply: true,
+  },
   'claude.autoResumeOnLimit': {
     type: 'boolean', default: false,
     label: t('Continue automatically when a usage limit resets'),

@@ -1,6 +1,6 @@
 import { escHtml, showInputDialog, uiScale, showToast, fetchJson, copyText, absUrl } from './utils.js';
 import { UI_ICONS } from './icons.js';
-import { BACKEND_META, getBackendMeta, backendFeatureCaps, effortLabel } from './agent-meta.js';
+import { BACKEND_META, getBackendMeta, backendFeatureCaps, effortLabel, responseStyleLabel, responseStyleCaps } from './agent-meta.js';
 import { t } from './i18n.js';
 
 /**
@@ -366,19 +366,26 @@ export class ChatStatusBar {
       parts.push(`<span class="chat-status-goal chat-status-goal-empty chat-status-clickable" title="${escHtml(t('Set a goal \u2014 the agent keeps working until the condition is met'))}">${UI_ICONS.goal}</span>`);
     }
 
-    // Output style (2.368.0): the CLI's Concise/Explanatory/… styles are a
-    // SETTINGS key and stream-json never gets /output-style, so this chip is
-    // spawn-scoped — it says so in the tooltip rather than pretending.
+    // Response style (2.368.0 outputStyle, generalized 2.369.54): the chip is
+    // drawn for any harness whose caps row lists style VALUES, and the tooltip
+    // tells the truth about WHEN a change lands — `live` harnesses (codex
+    // personality via thread/settings/update) apply from the next turn, the
+    // spawn-only ones (claude --settings outputStyle) need a restart. Never a
+    // backend id.
     const feats = backendFeatureCaps(this._backend);
-    if (feats.outputStyle) {
+    const rsCaps = responseStyleCaps(this._backend);
+    if (rsCaps.values.length) {
       const os = this._outputStyle;
       const pend = this._outputStylePending;
-      const hasPend = pend !== undefined && (pend || '') !== (os || '');
-      const label = hasPend ? escHtml(pend || t('CLI default')) + ' ' + UI_ICONS.hourglass : escHtml(os || t('style: default'));
+      const hasPend = !rsCaps.live && pend !== undefined && (pend || '') !== (os || '');
+      const label = hasPend ? escHtml(pend || t('agent default')) + ' ' + UI_ICONS.hourglass : escHtml(os || t('style: default'));
       const tip = hasPend
-        ? t('Output style “{v}” is saved and applies on the next resume (now running: {cur})', { v: pend || t('CLI default'), cur: os || t('CLI default') })
-        : (os ? t('Output style: {v} — set at spawn; a change applies on the next resume', { v: os })
-             : t('Output style: the CLI default — click to pick (applies on the next resume)'));
+        ? t('Response style \u201c{v}\u201d is saved and applies on the next resume (now running: {cur})', { v: pend || t('agent default'), cur: os || t('agent default') })
+        : rsCaps.live
+          ? (os ? t('Response style: {v} \u2014 click to change it right now (applies from the next turn)', { v: os })
+               : t('Response style: whatever this agent\u2019s own config says \u2014 click to pick one (applies from the next turn)'))
+          : (os ? t('Response style: {v} \u2014 set at spawn; a change applies on the next resume', { v: os })
+               : t('Response style: the agent default \u2014 click to pick (applies on the next resume)'));
       parts.push(`<span class="chat-status-style chat-status-clickable${(os || hasPend) ? '' : ' chat-status-dim'}" title="${escHtml(tip)}">${label}</span>`);
     }
 
@@ -900,19 +907,20 @@ export class ChatStatusBar {
       e.stopPropagation();
       const dropdown = showDropdown(styleEl);
       if (!dropdown) return;
-      const STYLES = [
-        { v: '', label: t('CLI default') },
-        { v: 'Concise', label: t('Concise — lead with results, skip preamble') },
-        { v: 'Explanatory', label: t('Explanatory — explain choices and patterns') },
-        { v: 'Learning', label: t('Learning — teach while doing') },
-        { v: 'Proactive', label: t('Proactive — act first, minimize interruptions') },
-      ];
+      // The rows ARE the harness's own vocabulary (backend-caps mirror) — the
+      // menu never carries a hardcoded list, so a harness that adds a value
+      // gets it here for free. The empty row is "no choice": the key is not
+      // sent at all and the agent's own config decides.
+      const caps = responseStyleCaps(this._backend);
+      const STYLES = [{ v: '', label: t('agent default') }, ...caps.values.map((v) => ({ v, label: responseStyleLabel(this._backend, v) }))];
       // rebuildable so a pick can surface the restart row IN PLACE (owner UX
       // 2.369.8: "切换了style还没重启, 在菜单里给个重启按钮")
       const renderStyleRows = () => {
         dropdown.innerHTML = '';
         const pending = this._outputStylePending;
-        if (this._onRestartSession && pending !== undefined && (pending || '') !== (this._outputStyle || '')) {
+        // The restart row exists ONLY for harnesses that cannot switch live —
+        // gated on the caps row, never on a backend id (2.369.54).
+        if (!caps.live && this._onRestartSession && pending !== undefined && (pending || '') !== (this._outputStyle || '')) {
           const go = document.createElement('div');
           go.className = 'chat-status-dropdown-item chat-status-restart-row';
           go.textContent = '\u27F3 ' + t('Restart now to apply (Terminate + Resume)');
@@ -925,9 +933,18 @@ export class ChatStatusBar {
           item.textContent = s.label;
           item.onclick = (ev) => {
             ev.stopPropagation();
-            this._onConfigChange?.({ outputStyle: s.v || null });   // spawn-scoped: the next resume carries it
-            this._outputStylePending = s.v || '';                   // the chip shows the saved-but-not-yet-live pick
-            showToast(s.v ? t('Output style “{v}” applies on the next resume', { v: s.v }) : t('Output style cleared — applies on the next resume'));
+            this._onConfigChange?.({ outputStyle: s.v || null });   // survives the next resume either way
+            if (caps.live) {
+              // LIVE: the running agent takes it now. The chip's own value only
+              // moves when the SERVER confirms ('response-style-updated') — a
+              // refused switch must not leave a lie on the bar.
+              this._ws?.send({ type: 'set-response-style', sessionId: this._sessionId, style: s.v || '' });
+              this._outputStylePending = undefined;
+              showToast(s.v ? t('Response style \u201c{v}\u201d applies from the next turn', { v: s.v }) : t('Response style cleared \u2014 the agent\u2019s own config applies again'));
+            } else {
+              this._outputStylePending = s.v || '';                 // the chip shows the saved-but-not-yet-live pick
+              showToast(s.v ? t('Response style \u201c{v}\u201d applies on the next resume', { v: s.v }) : t('Response style cleared \u2014 applies on the next resume'));
+            }
             renderStyleRows();                                      // keep the menu open — the restart row just appeared
             this.render();
           };
@@ -935,7 +952,9 @@ export class ChatStatusBar {
         }
         const note = document.createElement('div');
         note.className = 'chat-status-dropdown-note';
-        note.textContent = t('A running session cannot change style — the CLI only reads it at startup.');
+        note.textContent = caps.live
+          ? t('This agent applies a style change to the running session, from its next turn.')
+          : t('A running session cannot change style \u2014 the CLI only reads it at startup.');
         dropdown.appendChild(note);
       };
       renderStyleRows();

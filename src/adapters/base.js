@@ -34,6 +34,14 @@ BackendAdapter.prototype.formatSetEffort = function(effort) { throw new Error('n
  * never format a frame its wrapper would silently drop.
  */
 BackendAdapter.prototype.formatQueueOp = function(op) { throw new Error('this backend has no input-queue operations'); };
+/**
+ * LIVE RESPONSE-STYLE SWITCH → the wrapper stdin frame. Only harnesses whose
+ * `responseStyle.live` caps row is true implement it; ws-handler checks the
+ * caps row BEFORE calling and answers a coded error otherwise, so a spawn-only
+ * harness (claude: --settings outputStyle, read once) refuses here rather than
+ * writing a frame its wrapper would drop on the floor.
+ */
+BackendAdapter.prototype.formatSetResponseStyle = function(style) { throw new Error('this backend applies its response style at spawn only'); };
 /** Extra actions after sending interrupt (e.g. delayed SIGINT fallback) */
 BackendAdapter.prototype.postInterrupt = function(session, sessionId) {};
 

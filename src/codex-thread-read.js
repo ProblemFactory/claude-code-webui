@@ -99,8 +99,16 @@ function itemToRecords(item, ts) {
       return callPair(ts, id, 'web_search', { query: item.query || '', action: item.action || null }, { output: '' });
     case 'imageView':
       return callPair(ts, id, 'view_image', { path: item.path || '' }, { output: `viewed ${item.path || 'image'}` });
+    // MEDIA + SLEEP (2.369.54): emitted in the ROLLOUT's own spelling, not as a
+    // hand-rolled callPair — that made this the third, DIFFERENT producer of the
+    // same fact (it read `item.prompt`, which the v2 ImageGeneration item does
+    // not even have; the prompt is `revisedPrompt` and the file is `savedPath`).
+    // One shape ⇒ one card path (_processImageGenEvent / _processSleepEvent),
+    // pinned across all three producers by scripts/test-harness-honesty.mjs.
     case 'imageGeneration':
-      return callPair(ts, id, 'image_gen', { prompt: item.prompt || '' }, { output: item.status ? `status: ${item.status}` : '' });
+      return [{ timestamp: ts, type: 'event_msg', payload: { type: 'item_completed', item: { type: 'Extension', kind: 'image_gen.generation', id, status: typeof item.status === 'string' ? item.status : '', revisedPrompt: typeof item.revisedPrompt === 'string' ? item.revisedPrompt : '', savedPath: typeof item.savedPath === 'string' ? item.savedPath : '', failure: item.failure ?? null } } }];
+    case 'sleep':
+      return [{ timestamp: ts, type: 'event_msg', payload: { type: 'item_completed', item: { type: 'Extension', kind: 'clock.sleep', id, durationMs: Number(item.durationMs) || 0 } } }];
     case 'plan':
       return callPair(ts, id, 'update_plan', { text: item.text || '' }, { output: '' });
     case 'functionCallOutput':
@@ -112,7 +120,7 @@ function itemToRecords(item, ts) {
     case 'exitedReviewMode':
       return [{ timestamp: ts, type: 'event_msg', payload: { type: 'exited_review_mode', item_id: id } }];
     default:
-      return []; // hookPrompt, sleep, future kinds: not conversation content
+      return []; // hookPrompt, future kinds: not conversation content
   }
 }
 

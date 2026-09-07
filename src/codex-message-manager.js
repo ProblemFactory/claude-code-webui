@@ -158,6 +158,18 @@ function formatToolName(name) {
   return String(name);
 }
 
+// A finished sleep's total, as the card's own output text. The ONE place a
+// duration becomes words on the server side — the renderer's countdown formats
+// a different thing (time REMAINING) and never re-derives this.
+function formatSleptMs(ms) {
+  const total = Math.max(0, Math.round(Number(ms) || 0) / 1000);
+  if (total < 60) return `${Math.round(total)}s`;
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const sec = Math.round(total % 60);
+  return h ? `${h}h ${m}m` : `${m}m ${sec}s`;
+}
+
 // 0.153.4 ImageView items carry the file as a `file:///…` URL (percent-encoded);
 // cards and the renderer's /api/file/raw thumbnail want the plain path. Only
 // the local forms (empty or `localhost` authority) are understood — anything
@@ -206,8 +218,10 @@ function collapseKindOf(rawName) {
   if (/^(spawn_agent|wait_agent|send_input|resume_agent|close_agent|list_agents|send_message|interrupt_agent|followup_task)$/.test(n) || n.startsWith('agent')) return 'agent';
   if (n === 'web_search' || n === 'web_fetch') return 'search'; // web research folds with claude's WebSearch (2.369.33, owner report)
   if (n === 'view_image') return 'image'; // image views fold as their own kind (2.369.34, owner ask)
-  // deliberately VISIBLE work (plans, generated images)
-  if (n === 'update_plan' || n === 'image_gen' || !n) return null;
+  // deliberately VISIBLE work (plans, generated images, and a `clock.sleep` —
+  // a 20-minute wait folded into an "N tool calls" summary is exactly how a
+  // deliberate pause reads as a hang)
+  if (n === 'update_plan' || n === 'image_gen' || n === 'sleep' || !n) return null;
   // everything else = an external/dynamic tool (codex plugins, browser tools,
   // MCP-class) — same semantic bucket as claude's MCP kind. Unknown names used
   // to return null and BREAK the surrounding fold (owner: 乱七八糟的卡片).
@@ -280,14 +294,22 @@ function normalizeUserInputAnswers(rawAnswers) {
   return Object.keys(normalized).length ? normalized : null;
 }
 
+// The wrapper's one-word label for the reply it SENT. Since 2.369.54 the five
+// ServerRequest methods answer in their own vocabularies, so the allow set
+// spans all of them: the exec/patch v1 enum (approved…), the item approval enum
+// (accept…), the elicitation action, and the permissions GRANT.
 function isAllowedServerDecision(decision) {
   if (!decision) return false;
   if (typeof decision === 'string') {
     return decision === 'approved'
       || decision === 'approved_for_session'
+      || decision === 'approved_execpolicy_amendment'
       || decision === 'accept'
       || decision === 'acceptForSession'
-      || decision === 'acceptWithExecpolicyAmendment';
+      || decision === 'acceptWithExecpolicyAmendment'
+      || decision === 'applyNetworkPolicyAmendment'
+      || decision === 'network_policy_amendment'
+      || decision === 'granted';
   }
   return !!(decision && typeof decision === 'object' && decision.acceptWithExecpolicyAmendment);
 }
@@ -891,7 +913,7 @@ class CodexMessageManager {
     if (type === 'tool_search_call') return this._processCustomToolCall({ ...item, name: 'tool_search', input: item.arguments ?? item.input ?? '' }, emit);
     if (type === 'tool_search_output') return this._processFunctionCallOutput({ ...item, output: item.output ?? (Array.isArray(item.tools) ? item.tools.map((t) => t?.name || '').filter(Boolean).join(', ') : '') }, emit);
     if (type === 'local_shell_call') return this._processCustomToolCall({ ...item, name: 'local_shell', input: item.action ?? {} }, emit);
-    if (type === 'image_generation_call') return this._finalizeToolCall(item.call_id || item.id || this._nextId(), { output: item.status ? `status: ${item.status}` : '', isError: false, extraInput: { prompt: item.prompt || '' }, rawName: 'image_gen' }, emit);
+    if (type === 'image_generation_call') return this._processImageGenEvent({ call_id: item.call_id || item.id || this._nextId(), prompt: item.prompt || item.revised_prompt || '', path: item.saved_path || item.savedPath || '', status: item.status || '' }, emit);
     if (SKIPPED_RESPONSE_ITEM_TYPES.has(type)) return;
     this._noteUnknown('response_item', type);
   }
@@ -1465,6 +1487,43 @@ class CodexMessageManager {
     this._finalizeToolCall(toolCallId, { output: `viewed ${path || 'image'}`, isError: false, extraInput: { path }, rawName: 'view_image' }, emit);
   }
 
+  // ── THE IMAGE-GENERATION card path (2.369.54) ──
+  // Every carrier of "the agent generated an image" funnels through here, so
+  // the LIVE stream, the ROLLOUT and the thread/read fallback land on ONE card
+  // shape (scripts/test-harness-honesty.mjs pins all three producers):
+  //   · `event_msg item_completed {item:{type:'Extension', kind:'image_gen.generation', …}}`
+  //     — the 0.153.4 rollout's own spelling, which the wrapper now MIRRORS for
+  //     the live copy and codex-thread-read emits for a rollout-less thread.
+  //     Same item id on every route ⇒ one card, whichever arrives first.
+  //   · `response_item image_generation_call` — the ≤0.130 Responses-API shape.
+  // The item's `result` (a 3 MB base64 PNG in the real records) NEVER reaches a
+  // card: the card names savedPath and the renderer draws the file from disk
+  // (the 2.369.35 binary-never-enters-a-card law).
+  _processImageGenEvent(event, emit) {
+    const toolCallId = event.call_id || event.callId;
+    if (!toolCallId) return;
+    const path = fileUrlToPath(typeof event.path === 'string' ? event.path : '');
+    const prompt = typeof event.prompt === 'string' ? event.prompt : '';
+    const failure = typeof event.error === 'string' ? event.error : '';
+    const status = typeof event.status === 'string' ? event.status : '';
+    const output = failure || [status ? `status: ${status}` : '', path ? `saved ${path}` : ''].filter(Boolean).join('\n');
+    this._finalizeToolCall(toolCallId, { output, isError: !!failure, extraInput: { prompt, path }, rawName: 'image_gen' }, emit);
+  }
+
+  // ── THE SLEEP card path (2.369.54) ──
+  // `clock.sleep` is the agent deliberately WAITING. It had no branch on the
+  // live side at all, so a 20-minute sleep looked exactly like a hang (and on
+  // the history side it was dropped as "not conversation content"). Pending =
+  // a live countdown row the renderer ticks off this card's own ts + duration;
+  // completed = the frozen total.
+  _processSleepEvent(event, emit) {
+    const toolCallId = event.call_id || event.callId;
+    if (!toolCallId) return;
+    const raw = Number(event.duration_ms ?? event.durationMs);
+    const durationMs = Number.isFinite(raw) && raw > 0 ? Math.round(raw) : 0;
+    this._finalizeToolCall(toolCallId, { output: `slept ${formatSleptMs(durationMs)}`, isError: false, extraInput: { durationMs }, rawName: 'sleep' }, emit);
+  }
+
   // ── web search (2.369.43, owner: every codex web_search card read
   // {"query":"","action":null} / "(empty)"; refuted + re-cut on real data
   // 2026-09-06) ──
@@ -1626,13 +1685,22 @@ class CodexMessageManager {
         return;
       }
       if (it.kind === 'image_gen.generation') {
-        // the image_generation_call card path (rawName 'image_gen', visible —
-        // never folds); `result` is the base64 image (3 MB in the real record)
-        // and NEVER reaches the card — savedPath names the file instead
-        const savedPath = typeof it.savedPath === 'string' ? it.savedPath : '';
+        // ONE card path (2.369.54) — see _processImageGenEvent. `savedPath` is
+        // what the card names; `result` (3 MB of base64) never leaves here.
         const failure = it.failure && typeof it.failure === 'object' ? (it.failure.message || JSON.stringify(it.failure)) : (typeof it.failure === 'string' ? it.failure : '');
-        const output = failure || [it.status ? `status: ${it.status}` : '', savedPath ? `saved ${savedPath}` : ''].filter(Boolean).join('\n');
-        this._finalizeToolCall(it.id || this._nextId(), { output, isError: !!failure, extraInput: { prompt: typeof it.revisedPrompt === 'string' ? it.revisedPrompt : '' }, rawName: 'image_gen' }, emit);
+        this._processImageGenEvent({
+          call_id: it.id || this._nextId(),
+          prompt: typeof it.revisedPrompt === 'string' ? it.revisedPrompt : '',
+          path: typeof it.savedPath === 'string' ? it.savedPath : '',
+          status: typeof it.status === 'string' ? it.status : '',
+          error: failure,
+        }, emit);
+        return;
+      }
+      if (it.kind === 'clock.sleep') {
+        // The rollout's spelling for the v2 `sleep` ThreadItem (0.153.4: the
+        // item is `Extension`/`clock.sleep` with a bare durationMs).
+        this._processSleepEvent({ call_id: it.id || this._nextId(), duration_ms: it.durationMs }, emit);
         return;
       }
       this._noteUnknown('event_msg', 'item_completed:Extension:' + (it.kind || '(unkinded)'));
@@ -2032,6 +2100,23 @@ class CodexMessageManager {
       return;
     }
 
+    // A ServerRequest the wrapper answered with a JSON-RPC error (2.369.54):
+    // codex asked this client for something only a client that OWNS the value
+    // can produce (a dynamic tool call, an attestation token, a ChatGPT token
+    // refresh) or for a method we have no branch for. The turn FAILS CLEANLY,
+    // and it says so here instead of hanging behind an unanswerable card.
+    if (type === 'client_request_unsupported') {
+      const method = String(event.method || '(unnamed)');
+      this._noteUnknown('server_request', 'unsupported:' + method);
+      const msg = this._create({
+        role: 'system',
+        status: 'error',
+        content: [{ type: 'system_info', text: `Codex asked VibeSpace for "${method}", which this client cannot answer${event.reason ? ` (${event.reason})` : ''} — the request was declined.` }],
+      });
+      if (emit) this._emit({ op: 'create', message: msg });
+      return;
+    }
+
     if (type === 'entered_review_mode' || type === 'exited_review_mode') {
       const text = type === 'entered_review_mode' ? 'Entered review mode' : 'Exited review mode';
       const msg = this._create({ role: 'system', content: [{ type: 'system_info', text }] });
@@ -2087,6 +2172,22 @@ class CodexMessageManager {
       permission.toolName = 'User Input';
       permission.kind = 'user_input';
       permission.questions = asArray(params.questions);
+    } else if (method === 'mcpServer/elicitation/request') {
+      // MCP ELICITATION (2.369.54) — an MCP server asking the human for
+      // structured input. It renders as the SAME question-card family as
+      // AskUserQuestion / requestUserInput; the rows come from the WRAPPER
+      // (`payload.questions`, derived from the requestedSchema by the same
+      // function that maps the answer back onto the right property), so the
+      // card and the reply can never disagree.
+      // `mode:'url'` carries no schema — it is "open this link and confirm",
+      // i.e. the plain approve/deny card, and the reply is {action:'accept'}.
+      permission.toolName = params.serverName ? `MCP: ${params.serverName}` : 'MCP';
+      permission.input = { message: params.message || '', mode: params.mode || 'form', ...(params.url ? { url: params.url } : {}) };
+      const rows = asArray(payload.questions);
+      if (rows.length && params.mode !== 'url') {
+        permission.kind = 'user_input';
+        permission.questions = rows;
+      }
     }
 
     const requestKey = String(requestId);

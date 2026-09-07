@@ -526,8 +526,37 @@ class AcpMessageManager {
         this._patchInit(emit);
         return;
       }
-      default: return;
+      // KNOWN, deliberately card-less: the agent renaming its own session
+      // ({title, updatedAt} — the 11th and last sessionUpdate variant in the
+      // installed opencode's zod union). It is session METADATA, not
+      // conversation content, and VibeSpace's session name is the user's (or
+      // the sidebar's derived) name — an agent-driven rename is a product
+      // decision, not a normalizer one. Kept on _status so a future surface has
+      // the fact, named HERE so it never reads as an unknown kind.
+      case 'session_info_update': {
+        if (u.title) this._status.agentSessionTitle = String(u.title);
+        return;
+      }
+      // UNKNOWN (2.369.54): a bare `default: return` is how a new upstream
+      // update kind becomes an invisible product gap — the same class as
+      // claude's `cli-unknown-system-subtype` and codex's `codex-unknown-record`
+      // (three 0.153.4 rollouts rendered ZERO search cards under one). Name-only
+      // telemetry, deduped per process, plus ONE console line per kind so a
+      // developer tailing the log sees it too. Add the case, it stops firing.
+      default: return this._noteUnknownUpdate(u.sessionUpdate);
     }
+  }
+
+  /** Once-per-process breadcrumb for an ACP sessionUpdate kind this normalizer
+   *  does not know. Mirrors MessageManager._seenUnknownSubtypes and
+   *  CodexMessageManager._noteUnknown — name only, never payload (an update
+   *  body can carry user content). */
+  _noteUnknownUpdate(kind) {
+    const key = String(kind || '(untyped)').slice(0, 48);
+    if (AcpMessageManager._seenUnknownUpdates.has(key)) return;
+    AcpMessageManager._seenUnknownUpdates.add(key);
+    try { global.__vsEvent?.('acp-unknown-update:' + key, 'session/update'); } catch { }
+    try { console.warn(`[acp] unhandled sessionUpdate kind "${key}" — dropped (no card). Add a case in acp-message-manager._processUpdate.`); } catch { }
   }
 
   _chunk(kind, u, emit) {
@@ -711,5 +740,7 @@ class AcpSessionMessages {
     return { tasks: {}, todos };
   }
 }
+
+AcpMessageManager._seenUnknownUpdates = new Set();
 
 module.exports = { AcpMessageManager, AcpSessionMessages, parseAcpBufferRecords, collapseKindOf, toolNameOf };

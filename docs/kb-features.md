@@ -113,6 +113,16 @@ Moved VERBATIM out of CLAUDE.md (tier-2 pass).
 - Scroll minimap: semantic turn-based navigation, user message markers, compact markers, drag-to-jump, two-line floating preview label (time + 60-char preview), hovered marker lights up, and an outline (TOC) button at the top of the track — filterable list of all user messages, click to jump, works in both index and time coordinate modes
 - Pin-to-bottom: iterative scroll convergence (10 rAF frames) for content-visibility compatibility
 
+#### Response style (status-bar chip; 2.368.0 claude, generalized to every harness 2.369.54)
+The chip left of the auto-continue icon sets **how the agent should talk**, and it is drawn for any harness whose `backend-caps` `responseStyle` row lists values — claude's four output styles (Concise / Explanatory / Learning / Proactive) or codex's `Personality` enum (none / friendly / pragmatic, read from the app-server's own JSON schema). The menu rows ARE those values; nothing is hardcoded per backend.
+- **The empty row ("agent default") means the key is never sent**, so the agent keeps whatever its own config file says. Codex's `none` is a different thing — an explicit "no persona". Before 2.369.54 VibeSpace wrote `personality:'pragmatic'` into every codex turn and silently overrode `~/.codex/config.toml`.
+- **WHEN a change lands depends on the harness, and the UI says so.** codex applies it to the RUNNING session (`thread/settings/update`, effective from the next turn) — pick and it takes; claude only reads its style at startup, so the pick is saved for the next resume and the menu grows a "⟳ Restart now to apply" row. That row is gated on `responseStyle.live`, never on a backend id.
+- **Session Properties** names the EFFECTIVE value and its ORIGIN — *your choice for this session* / *instance default* / *harness default — the agent's own config decides* — plus the saved-but-not-yet-live pick where one exists. Instance defaults are `claude.outputStyle` and `codex.outputStyle` (both blank by default).
+- A refused live switch (spawn-only harness, unknown value, or a wrapper too old to serve the verb) answers a scoped in-chat error naming the reason; the chip only moves on the server's confirmation.
+
+#### Codex generated images and sleeps are visible work (2.369.54)
+A codex `image_gen` result renders as the same media card a `view_image` does — thumbnail drawn from disk through `/api/file/raw`, click to zoom, the revised prompt folded underneath — instead of a bare "status: completed" line naming a file nobody could see. A `clock.sleep` renders as a live countdown row ("Sleeping 12:40 remaining", ticked once a second by the view) that freezes into "slept 30s" when it completes. Both are deliberately unfoldable: a 20-minute deliberate wait folded into an "N tool calls" summary is exactly how a pause reads as a hang. The live stream, the rollout and the `thread/read` history fallback all produce the same card (three producers, one shape, pinned by scripts/test-harness-honesty.mjs).
+
 #### Sending during a turn: QUEUED vs STEERED (2026-09-06, owner ask)
 A message typed while the agent is mid-turn does not interrupt it. What happens
 next is a **capability**, `backend-caps` `inputModes {queue, steer, queueOps}` —

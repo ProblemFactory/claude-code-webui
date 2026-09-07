@@ -178,7 +178,14 @@ const T0 = Date.now();   // the module refuses waits >26h out, so the clock must
   ok('MERGED with the other settings keys, never a second --settings flag', both.filter((a) => a === '--settings').length === 1 && settingsOf(both).outputStyle === 'Concise' && settingsOf(both).ultracode === true);
   ok('there is no --output-style flag to pass (the CLI has none)', !argsOf({ outputStyle: 'Concise' }).includes('--output-style'));
   const wc = read('src/ws-create.js');
-  ok('every create path gets the instance default unless the client picked one', wc.includes("data.outputStyle || (() => { try { return serverSetting('claude.outputStyle')"));
+  // 2.369.54: the instance default is read from the HARNESS's own settings
+  // family (`<prefix>.outputStyle`), not the hardcoded claude key — a codex
+  // spawn was otherwise handed "Concise". The value is also enum-checked
+  // against the harness caps row so it can never reach a spawn.
+  ok('every create path gets the instance default unless the client picked one, from ITS OWN settings family',
+    wc.includes("const want = data.outputStyle || (() => { try { return serverSetting(`${prefix}.outputStyle`) || ''; } catch { return ''; } })();")
+    && wc.includes("const rs = capsOf(backend).responseStyle || { closed: true, values: [] };")
+    && wc.includes("return (!rs.closed || rs.values.includes(want)) ? want : '';"));
   ok('the session records what it was spawned with (the EFFECTIVE style)', wc.includes('session._outputStyle = data._effOutputStyle'));
   ok('a resume carries the saved style + auto-resume choice', read('src/lib/session-lifecycle.js').includes('outputStyle: savedCfg.outputStyle') && read('src/lib/session-lifecycle.js').includes('autoResume: savedCfg.autoResume'));
   const sb = read('src/lib/chat-status-bar.js');

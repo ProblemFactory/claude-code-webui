@@ -345,6 +345,49 @@ function registerWsHandler(wss, ctx) {
           break;
         }
 
+        // LIVE RESPONSE STYLE (2.369.54). The per-session `outputStyle` slot is
+        // harness-neutral; WHEN it can be applied is not, and that verdict lives
+        // in the caps row, never in a backend id:
+        //   · responseStyle.live === false (claude) ⇒ REFUSED here with the
+        //     reason; the chip's menu shows "Restart now to apply" instead.
+        //   · a value outside the harness's own vocabulary ⇒ REFUSED (the enum
+        //     is closed upstream; sending it would fail server-side silently).
+        //   · the RUNNING wrapper must advert it too (the 2.361.1/2.364.1 skew
+        //     rule): a codex session spawned before this release drops the
+        //     unknown stdin verb without a word.
+        // Persisted to session meta + broadcast so every client's chip agrees.
+        case 'set-response-style': {
+          const session = activeSessions.get(data.sessionId);
+          const refuse = (message) => { try { ws.send(JSON.stringify({ type: 'error', code: 'style-not-live', scope: 'action', sessionId: data.sessionId, error: message, message })); } catch { } };
+          if (!session?.pty || session.mode !== 'chat') { refuse('This action needs a live chat session.'); break; }
+          let label = session.backend;
+          try { label = harnessOf(session.backend).label || label; } catch { }
+          const rs = capsOf(session.backend).responseStyle || { live: false, closed: true, values: [] };
+          if (!rs.live) { refuse(`${label} only reads its response style at startup — restart the session to apply a change.`); break; }
+          const style = typeof data.style === 'string' ? data.style.trim() : '';
+          // Only a CLOSED vocabulary may reject: an open one (user-defined
+          // styles) would eat a value the harness understands perfectly well.
+          if (style && rs.closed && !rs.values.includes(style)) { refuse(`${label} does not accept the response style "${style}" (it knows: ${rs.values.join(', ')}).`); break; }
+          const wcaps = wrapperCaps(BUFFERS_DIR, data.sessionId, session.socketPath);
+          if (!wcaps.responseStyle) {
+            const started = wcaps.startedAt ? new Date(wcaps.startedAt).toISOString().replace('T', ' ').slice(0, 16) + ' UTC' : 'unknown time';
+            refuse(wcaps.reason === 'no-sidecar'
+              ? 'This session\'s agent has not reported its capabilities yet (still starting up?) — try again in a moment.'
+              : `This session's agent (started ${started}) predates the live style switch. Terminate + Resume the session to change it.`);
+            console.log(`[${data.sessionId}] set-response-style REFUSED: wrapper caps ${wcaps.reason} (pid ${wcaps.pid}, started ${wcaps.startedAt})`);
+            break;
+          }
+          const adapter = adapterRegistry.get(session.backend);
+          let payload;
+          try { payload = adapter.formatSetResponseStyle(style); }
+          catch (e) { refuse(e.message); break; }
+          session.pty.write(payload + '\n');
+          session._outputStyle = style || null;
+          if (session.sockName) { try { const m = readSessionMeta(session.sockName); writeSessionMeta(session.sockName, { ...m, outputStyle: session._outputStyle }); } catch { } }
+          broadcastToSession(session, data.sessionId, { type: 'response-style-updated', sessionId: data.sessionId, outputStyle: session._outputStyle, live: true });
+          break;
+        }
+
         case 'input': {
           const session = activeSessions.get(data.sessionId);
           if (!session?.pty) break;

@@ -1,6 +1,6 @@
 import { escHtml, copyText, showConfirmDialog, taskGroupColor } from './utils.js';
 import { SESSION_STATE_META, SESSION_URGENCY_META } from './sidebar-tasks.js';
-import { getBackendMeta, getAgentKindMeta, getAgentRoleLabel } from './agent-meta.js';
+import { getBackendMeta, getAgentKindMeta, getAgentRoleLabel, responseStyleCaps } from './agent-meta.js';
 import { t } from './i18n.js';
 import { registerOpenAction } from './window-types.js';
 
@@ -238,7 +238,31 @@ export function openSessionProps(app, sessionRef, { syncId } = {}) {
     // ── Config overrides (summary; edit via the card ⚙) ──
     const cfg = sidebar.getSessionConfig?.(s) || {};
     const cfgBits = ['model', 'effort', 'permission'].filter(k => cfg[k]).map(k => `${k}: ${cfg[k]}`);
-    if (cfgBits.length) row(section(t('Config overrides')), t('Saved'), escHtml(cfgBits.join(' · ')));
+    const cfgSec = cfgBits.length ? section(t('Config overrides')) : null;
+    if (cfgSec) row(cfgSec, t('Saved'), escHtml(cfgBits.join(' · ')));
+
+    // ── Response style, EFFECTIVE + its ORIGIN (2.369.54) ──
+    // Two different facts, and the panel says which is which: `s.outputStyle`
+    // is what the LIVE session actually runs with (server truth, null = no key
+    // was ever sent), `cfg.outputStyle` is the pick saved for this conversation.
+    // Before this, a codex session silently ran a hardcoded 'pragmatic' while
+    // the panel showed nothing at all.
+    const rsCaps = responseStyleCaps(s.backend || 'claude');
+    if (rsCaps.values.length) {
+      const live = s.outputStyle || '';           // server truth for a LIVE session ('' = no key was ever sent)
+      const picked = cfg.outputStyle;             // undefined = never picked here
+      // Three different facts, said apart. A STOPPED session has no live value
+      // at all, so a saved pick must not be reported as "the harness default".
+      const shown = live || (picked || '');
+      const origin = live
+        ? (picked ? t('your choice for this session') : t('instance default'))
+        : (picked ? t('saved \u2014 applies on the next resume')
+          : t('harness default \u2014 the agent\u2019s own config decides'));
+      const pendBit = (live && picked !== undefined && (picked || '') !== live)
+        ? ` <span class="chat-status-dim">${escHtml(t('(saved: {v} \u2014 applies on the next resume)', { v: picked || t('agent default') }))}</span>` : '';
+      row(cfgSec || section(t('Config overrides')), t('Response style'),
+        `${escHtml(shown || t('agent default'))} <span class="chat-status-dim">${escHtml('(' + origin + ')')}</span>${pendBit}`);
+    }
 
     // ── Task Groups (explicit toggles; folder-derived shown, not toggleable) ──
     const tgSec = section(t('Task Groups'));

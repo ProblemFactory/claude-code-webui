@@ -333,7 +333,23 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
             effort: data.effort,
             // client value wins; else the instance default (covers every create
             // path uniformly — resume, layout restore, billing switch)
-            outputStyle: (data._effOutputStyle = data.outputStyle || (() => { try { return serverSetting('claude.outputStyle') || ''; } catch { return ''; } })()),
+            // RESPONSE STYLE (2.369.54): client value wins; else the
+            // instance default for THIS harness's settings family
+            // (`<prefix>.outputStyle` — never the hardcoded claude key, which
+            // would have handed a codex spawn "Concise"). A value outside the
+            // harness's own vocabulary is dropped here so it never reaches a
+            // spawn: the caps row is the ONE enum.
+            outputStyle: (data._effOutputStyle = (() => {
+              const rs = capsOf(backend).responseStyle || { closed: true, values: [] };
+              let prefix = backend; try { prefix = harnessOf(backend)?.settingsPrefix || backend; } catch { /* unknown id: caps are empty anyway */ }
+              const want = data.outputStyle || (() => { try { return serverSetting(`${prefix}.outputStyle`) || ''; } catch { return ''; } })();
+              // A CLOSED vocabulary (codex Personality) is validated here so an
+              // out-of-enum value can never reach a spawn; an OPEN one (claude,
+              // whose ~/.claude/output-styles/*.md are real user-defined styles)
+              // passes through — `values` there is only what the picker offers,
+              // and filtering on it would silently eat the user's own style.
+              return (!rs.closed || rs.values.includes(want)) ? want : '';
+            })()),
             extraArgs,
             initialPrompt: data.initialPrompt || '',
             mode: sessionMode,
@@ -1648,6 +1664,7 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
             parentThreadId: session.parentThreadId,
             permissionMode: session._permissionMode || null,
             effort: session._effort || null,
+            outputStyle: session._outputStyle || null, // 2.369.54: the EFFECTIVE response style survives a server restart (the chip otherwise reported "default" for a session really running one)
             modelLocked: session._modelLocked || undefined, // #6: survive server restart (else a resumed lock's badge silently reverts — review-caught)
             lockedModel: session._lockedModel || undefined,
             agentToken: session.agentToken || null,
@@ -1750,6 +1767,7 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
                   forkedFrom: session.forkedFrom || null,
                   permissionMode: session._permissionMode || null,
                   effort: session._effort || null,
+                  outputStyle: session._outputStyle || null,
                   createdAt: session.createdAt,
                   webuiSessionId: id,
                   mode: sessionMode,

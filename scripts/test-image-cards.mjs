@@ -296,11 +296,15 @@ const IMAGEVIEW_0153_JSONL = `
     && !/_processItemEvent/.test(cmm)
     && cmm.indexOf("this._processItemCompleted(event, emit)") < cmm.indexOf('if (SKIPPED_EVENT_TYPES.has(type)) return;'), 'router shape');
   ok("…and its ImageView case routes into the SHARED image-view card path (no second card builder)", /if \(type === 'ImageView'\) \{[\s\S]{0,600}this\._processViewImageEvent\(\{ call_id: it\.id \|\| this\._nextId\(\), path: it\.path \}, emit\);/.test(cmm));
-  // ONE DECODER: fileUrlToPath is defined once and applied once — inside
-  // _processViewImageEvent, which every image-view carrier funnels through.
-  ok('fileUrlToPath is declared ONCE and called from exactly ONE site', (cmm.match(/function fileUrlToPath\(/g) || []).length === 1
-    && (cmm.match(/fileUrlToPath\(/g) || []).length === 2
+  // ONE DECODER: fileUrlToPath is defined once and applied ONLY inside the card
+  // paths every carrier of an image funnels through — _processViewImageEvent
+  // (viewed) and, since 2.369.54, _processImageGenEvent (generated). Never an
+  // inline `replace(/^file:\/\//)` at a call site: that is how a second,
+  // subtly-different decoder gets born.
+  ok('fileUrlToPath is declared ONCE and called only from the image CARD PATHS', (cmm.match(/function fileUrlToPath\(/g) || []).length === 1
+    && (cmm.match(/fileUrlToPath\(/g) || []).length === 3
     && /_processViewImageEvent\(event, emit\) \{[\s\S]{0,300}const path = fileUrlToPath\(/.test(cmm)
+    && /_processImageGenEvent\(event, emit\) \{[\s\S]{0,300}const path = fileUrlToPath\(/.test(cmm)
     && !/replace\(\/\^file:\\\/\\\/\//.test(cmm), 'decoder sites: ' + (cmm.match(/fileUrlToPath\(/g) || []).length);
   ok('item_started/item_completed stay in SKIPPED_EVENT_TYPES (the router runs first, the set is the fallback)', CodexMessageManager.SKIPPED_EVENT_TYPES.has('item_completed') && CodexMessageManager.SKIPPED_EVENT_TYPES.has('item_started'));
   ok('view_image_tool_call is routed out of the skip set and shares that same path', !CodexMessageManager.SKIPPED_EVENT_TYPES.has('view_image_tool_call') && /if \(type === 'view_image_tool_call'\) return this\._processViewImageEvent\(event, emit\);/.test(cmm));
