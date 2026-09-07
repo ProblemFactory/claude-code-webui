@@ -109,3 +109,20 @@ console.log('release gate: build + ' + SUITES.length + ' suites');
 run('npm run build', 'npm', ['run', 'build']);
 for (const s of SUITES) run(s, process.execPath, [path.join(repo, 'scripts', s + '.mjs')]);
 console.log(`\nALL GREEN — release gate passed in ${Math.round((Date.now() - t0) / 1000)}s`);
+// GREEN MARKER (2.369.51): the gate now takes ~9.5 min, longer than GitHub's SSH
+// idle timeout — three green gates ended with "Connection to github.com closed by
+// remote host" and no transfer. The pre-push hook therefore accepts a fresh
+// marker for the EXACT tree instead of re-running the gate inside the SSH
+// session: run `npm run ci` first (as a background job), then `git push`.
+// Only a CLEAN tree earns the marker (the sha must describe what was tested).
+try {
+  const { execSync } = await import('node:child_process');
+  const fs = (await import('node:fs')).default;
+  const dirty = execSync('git status --porcelain', { cwd: repo, encoding: 'utf8' }).trim();
+  if (!dirty) {
+    const sha = execSync('git rev-parse HEAD', { cwd: repo, encoding: 'utf8' }).trim();
+    const gitDir = execSync('git rev-parse --git-dir', { cwd: repo, encoding: 'utf8' }).trim();
+    fs.writeFileSync(path.join(repo, gitDir, 'ci-green'), `${sha} ${Date.now()}\n`);
+    console.log(`[ci] green marker written for ${sha.slice(0, 8)} — a push of this exact tree within 60 min skips the in-hook gate`);
+  } else console.log('[ci] tree is dirty — no green marker (commit first, then re-run the gate)');
+} catch (e) { console.log('[ci] green marker not written: ' + e.message); }

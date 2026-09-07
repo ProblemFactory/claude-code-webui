@@ -40,5 +40,17 @@ if [ "$only_docs" = "1" ] && [ "${#REFS[@]}" -gt 0 ]; then
   exit 0
 fi
 
+# GREEN MARKER (2.369.51): scripts/ci.mjs writes .git/ci-green = "<sha> <epoch-ms>"
+# after a green run on a CLEAN tree. If it names HEAD and is < 60 min old the gate
+# already passed on this exact tree — do not re-run it inside the SSH session
+# (GitHub closes an idle connection before a ~9.5 min gate finishes).
+marker="$(git rev-parse --git-dir)/ci-green"
+if [ -f "$marker" ]; then
+  m_sha=$(awk '{print $1}' "$marker"); m_ts=$(awk '{print $2}' "$marker"); now_ms=$(( $(date +%s) * 1000 ))
+  if [ "$m_sha" = "$(git rev-parse HEAD)" ] && [ -z "$(git status --porcelain)" ] && [ $(( now_ms - ${m_ts:-0} )) -lt 3600000 ]; then
+    echo "[ci] gate already GREEN on this exact tree ($(echo "$m_sha" | cut -c1-8), $(( (now_ms - m_ts) / 60000 )) min ago) — skipping the in-hook run" >&2
+    exit 0
+  fi
+fi
 echo "[ci] release gate (VIBESPACE_SKIP_CI=1 to bypass in an emergency)…" >&2
 node scripts/ci.mjs || { echo "[ci] GATE RED — push blocked" >&2; exit 1; }

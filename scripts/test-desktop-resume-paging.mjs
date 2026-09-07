@@ -61,13 +61,19 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import net from 'node:net';
+const freePort = () => new Promise((res, rej) => { const srv = net.createServer(); srv.once('error', rej); srv.listen(0, '127.0.0.1', () => { const p = srv.address().port; srv.close(() => res(p)); }); });
 const require = createRequire(import.meta.url);
 
 const repo = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CHROME = ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser'].find((p) => fs.existsSync(p));
 if (!CHROME) { console.log('SKIP: no chrome/chromium'); process.exit(0); }
 
-const PORT = 3989, CDP_PORT = 9339;
+// FREE ports (2.369.51): two copies of this suite (a parallel agent's gate + the
+// release gate) collided on 3989/9339 — the loser's server never bound, its chrome
+// talked to the OTHER copy's server, and the source-level negative control probed an
+// unpatched bundle → 4 phantom reds on a green commit.
+const PORT = await freePort(), CDP_PORT = await freePort();
 const wt = `/tmp/vs-deskresume-${process.pid}`;
 const fakeHome = `/tmp/vs-deskresume-home-${process.pid}`;
 const chromeDir = `/tmp/vs-deskresume-chrome-${process.pid}`;
@@ -141,6 +147,7 @@ const cleanup = () => {
   for (const d of [chromeDir, fakeHome, CWD]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} }
 };
 process.on('exit', cleanup);
+for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => { cleanup(); process.exit(143); });
 
 for (let i = 0; i < 80; i++) { try { await fetch(`http://127.0.0.1:${PORT}/api/home`); break; } catch { await sleep(250); } }
 
