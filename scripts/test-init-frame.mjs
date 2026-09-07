@@ -533,6 +533,28 @@ console.log('— wiring pins');
     /backendFeatureCaps\(backend\)\.forkAtMessage/.test(forkHandler) && !/backend !== 'claude'/.test(forkHandler), forkHandler.split('\n').slice(0, 6).join(' / '));
   ok('…and a click that cannot proceed SPEAKS (no-silent-failures) instead of returning silently', /showToast\(t\('Session id not known yet/.test(forkHandler));
   ok('…NEGATIVE CONTROL: the checker catches a planted backend-id gate', /backend !== 'claude'/.test(forkHandler + "\n if (backend !== 'claude') return;"));
+
+  // ROUND 5 r2 — THE CLAMP IS SINGLE, STRUCTURALLY. showDropdown owns width
+  // AND placement, because it decides them from the same two numbers; a caller
+  // that widens the panel afterwards is invisible to the clamp that already
+  // ran (design/goal/set-a-goal did exactly that and landed 162/142/102px off
+  // a 375px screen). So the rule is not "remember not to" — the only writes to
+  // a dropdown's min/max width in the whole file must live inside showDropdown,
+  // and a caller says what it wants as an ARGUMENT.
+  const csb = read('src/lib/chat-status-bar.js');
+  const sdStart = csb.indexOf('const showDropdown = (anchor,');
+  const sdEnd = csb.indexOf('\n    };', sdStart);
+  const inShow = (i) => i > sdStart && i < sdEnd && sdStart > 0;
+  const widthWrites = [...csb.matchAll(/\.style\.(?:min|max)Width\s*=/g)].map((m) => m.index);
+  ok(`showDropdown takes the width INTENT as an argument and is the ONLY writer of a dropdown's min/max width (${widthWrites.length} write(s), all inside it)`,
+    sdStart > 0 && sdEnd > sdStart && widthWrites.length > 0 && widthWrites.every(inShow),
+    widthWrites.map((i) => csb.slice(csb.lastIndexOf('\n', i) + 1, csb.indexOf('\n', i)).trim()).join(' | '));
+  ok('…and the three panels that need a width state it at the CALL (an option, not a style write after the fact)',
+    /showDropdown\(designEl, DESIGN_PANEL_W\)/.test(csb) && /showDropdown\(goalEl, GOAL_PANEL_W\)/.test(csb) && /showDropdown\(goalEl, GOAL_SET_PANEL_W\)/.test(csb)
+    && /const DESIGN_PANEL_W = \{ minWidth: 300, maxWidth: 440 \}/.test(csb));
+  ok('…NEGATIVE CONTROL: the checker catches a planted post-hoc write (the exact pre-fix line)',
+    (() => { const planted = csb.slice(0, sdEnd + 200) + "\n      dropdown.style.minWidth = '300px';\n" + csb.slice(sdEnd + 200);
+      return [...planted.matchAll(/\.style\.(?:min|max)Width\s*=/g)].map((m) => m.index).some((i) => !(i > sdStart && i < sdEnd)); })());
 }
 
 // ── 5b. ROUND 4: the HEALTH facts need the same attach twin the command
@@ -1142,20 +1164,161 @@ if (!CHROME) {
       !!ddH.after && ddH.after.fits && ddH.after.right <= ddH.vw - 7.5 && ddH.docScrollW === ddH.docClientW, ddH.after);
     ok(`NEGATIVE CONTROL: restoring the WHOLE pre-fix state (raw anchor offset + the nowrap the cascade computed) puts the same panel at right ${ddH.preFix && ddH.preFix.right} — ${ddH.preFix && Math.round(ddH.preFix.right - ddH.vw)}px off a ${ddH.vw}px screen, unreachable. The two halves are not independent: with wrapping restored but the clamp removed the panel lands exactly ON the edge (right ${ddH.unclamped && ddH.unclamped.right}), which is why the fix is BOTH the cascade and the placement`,
       !!ddH.preFix && ddH.preFix.right > ddH.vw + 5 && !!ddH.unclamped && ddH.unclamped.right >= ddH.vw - 0.5, { preFix: ddH.preFix, unclamped: ddH.unclamped });
-    // The clamp is a BELT for every status-bar dropdown, not a health special
-    // case — and it must not squeeze the pre-existing ones below their own
-    // CSS min-width.
-    for (const [sel, name] of [['.chat-status-effort', 'effort'], ['.chat-status-perm', 'permission mode']]) {
-      const d = await ddProbe(sel, name);
-      ok(`375×667: the pre-existing ${name} dropdown also fits (left ${d.after && d.after.left} → right ${d.after && d.after.right} ≤ ${d.vw}) and keeps its full 130px min-width (${d.after && d.after.width}px, no row clipped) — the clamp is a belt for every status-bar panel, not a health-chip special case${d.unclamped && d.unclamped.right > d.vw ? `; and it is LOAD-BEARING here: without it this one lands at right ${d.unclamped.right}, ${Math.round(d.unclamped.right - d.vw)}px off screen (its own chip is already past the edge of the swipeable bar)` : ''}`,
-        !!d.after && d.after.fits && d.after.width >= 130 && d.after.worstOverflow <= 1, d);
-      if (name === 'permission mode') {
-        ok(`NEGATIVE CONTROL (placement alone, no CSS involved): the ${name} panel's rows are plain nowrap items, and with the clamp removed it lands at right ${d.unclamped && d.unclamped.right} vs a ${d.vw}px screen — so the clamp is measured on a panel this branch did not restyle`,
-          !!d.unclamped && d.unclamped.right > d.vw, d.unclamped);
-      }
+    // ── ROUND 5 r2: THE CENSUS. "The clamp is a belt for EVERY status-bar
+    // panel" was a claim about two panels — and the three that state a width
+    // INTENT were exactly the ones the belt did not reach, because they wrote
+    // `dropdown.style.minWidth/maxWidth` AFTER showDropdown had already
+    // clamped against the 130px CSS min-width. Reproduced at 375×667 before
+    // the fix: design right 537 (162px off), set-a-goal 517 (142px), the
+    // active-goal panel 477 (102px) — on a page whose documentElement
+    // scrollWidth === clientWidth === 375. So every chip that opens a panel is
+    // enumerated here, opened, and measured; the loop is the assert.
+    // The state each chip needs to EXIST is part of the case — a chip that
+    // does not render is a FAILED census entry, not a skipped one, because
+    // that is how a panel drops out of a "we measured everything" claim.
+    const mkBarFull = (extra = '') => `(() => {
+      const host = document.getElementById('host');
+      host.style.width = '';
+      document.querySelectorAll('.chat-status-dropdown').forEach((d) => d.remove());
+      const b = document.getElementById('bar'); b.innerHTML = '';
+      const bar = new VS.ChatStatusBar({ send(){}, on(){}, onGlobal(){} }, 'sess-dd', { backend: 'claude', allowReview: false,
+        getToolMsg: () => null, openSubagentViewer(){}, openInTempEditor(){}, getWorkflowIds: () => ({}), onDesignRequest: () => {} });
+      b.appendChild(bar.element);
+      bar.popupContainer = host;
+      bar.setInitHealth(VS.AM.initHealthIssues(${frameJson}));
+      bar.setModel('claude-fable-5');
+      bar.setPermMode('default');
+      ${extra}
+      bar.render();
+      window.__bar = bar;
+      return true;
+    })()`;
+    // `neuter` = the pre-fix behaviour of ONE mechanism, restored on the live
+    // panel so the assert above it is measured against its own absence.
+    const censusProbe = async (sel, extra, neuter = '') => evaljs(`(() => {
+      ${mkBarFull(extra)};
+      const anchor = document.querySelector(${JSON.stringify(sel)});
+      if (!anchor) return { missing: true };
+      anchor.click();
+      const dd = document.querySelector('.chat-status-dropdown');
+      if (!dd) return { noDropdown: true };
+      ${neuter}
+      const rows = [...dd.querySelectorAll('.chat-status-dropdown-item')];
+      const r = dd.getBoundingClientRect();
+      const worst = rows.map((x) => ({ t: x.textContent.replace(/\\s+/g, ' ').trim().slice(0, 48), o: x.scrollWidth - x.clientWidth }))
+        .sort((a, b) => b.o - a.o)[0] || null;
+      // The three width-intent panels carry no .chat-status-dropdown-item
+      // rows at all (they are a brief/textarea/buttons box), so a rows-only
+      // clip measure is VACUOUS for exactly the panels this round is about --
+      // the panel's own content box answers for them. (No backticks in here:
+      // this comment lives INSIDE a template literal, where one would end the
+      // string and hand the rest of it to the parser as code.)
+      const panelOverflow = dd.scrollWidth - dd.clientWidth;
+      return { vw: innerWidth, docScrollW: document.documentElement.scrollWidth, docClientW: document.documentElement.clientWidth,
+        left: +r.left.toFixed(2), right: +r.right.toFixed(2), width: +r.width.toFixed(2), rows: rows.length, panelOverflow,
+        styleMinW: dd.style.minWidth, styleMaxW: dd.style.maxWidth, overflow: getComputedStyle(dd).overflow, worst,
+        fits: r.right <= innerWidth - 8 + 0.5 && r.left >= -0.5 };
+    })()`);
+    // model/effort/permission/style/health need no extra state; the other four
+    // chips only exist once the bar has been told something.
+    const CENSUS = [
+      ['.chat-status-model', 'model', ''],
+      ['.chat-status-effort', 'effort', "bar.setEffort('xhigh', 'xhigh');"],
+      ['.chat-status-perm', 'permission mode', ''],
+      ['.chat-status-style', 'response style', ''],
+      ['.chat-status-health', 'session health', ''],
+      ['.chat-status-design', 'design', ''],
+      ['.chat-status-goal', 'set-a-goal', ''],
+      ['.chat-status-goal', 'active goal', "bar.setGoal('ship the release when every test in scripts/ passes', 5000); bar.setGoalStatus('active');"],
+      ['.chat-status-tasks', 'background tasks', "bar.setTasks({ t1: { status: 'running', description: 'a background task with a fairly long description' } });"],
+      ['.chat-status-wf-multi', 'workflows', "bar.trackWorkflow('wf_a', 'alpha'); bar.trackWorkflow('wf_b', 'beta');"],
+    ];
+    const census = [];
+    for (const [sel, name, extra] of CENSUS) {
+      const d = await censusProbe(sel, extra);
+      census.push([name, d]);
+      ok(`375×667 CENSUS — the ${name} panel opens and lands fully on screen (left ${d.left} → right ${d.right} ≤ ${d.vw} − 8, ${d.width}px wide over ${d.rows} row(s))`,
+        !d.missing && !d.noDropdown && d.fits && d.docScrollW === d.docClientW, { sel, ...d });
+      ok(`375×667 CENSUS — …and nothing in the ${name} panel is CLIPPED by the squeeze (worst row ${d.worst ? d.worst.o : 0}px over ${d.rows} row(s), panel content ${d.panelOverflow}px, inside an ${d.overflow} box${d.worst ? `, longest "${d.worst.t}"` : ''}) — the panel has no scroller of its own, so anything wider than it is content nobody can read`,
+        !d.missing && !d.noDropdown && (!d.worst || d.worst.o <= 1) && d.panelOverflow <= 1, { sel, worst: d.worst, panelOverflow: d.panelOverflow, width: d.width });
     }
+    ok(`the census covered every chip that opens a panel (${census.length}) — the three that state a width INTENT (design / active goal / set-a-goal) are IN it, which is the whole point: they are exactly the ones the old two-entry belt loop could not have caught`,
+      census.length === CENSUS.length && census.every(([, d]) => !d.missing && !d.noDropdown),
+      census.map(([n, d]) => `${n}:${d.right}`).join(' '));
+
+    // NEGATIVE CONTROL ① — the DEFECT, replayed whole. The pre-fix path is
+    // TWO steps, and only both together are the bug: showDropdown placed the
+    // panel using the 130px CSS min-width (all it could see), and the caller
+    // then widened it. Re-applying only the caller's write to a panel this
+    // branch has already placed 170px further left proves nothing — it lands
+    // at 372.95, i.e. the FIX carrying the old write. So the control restores
+    // the old offset math verbatim first, and then the caller's write.
+    const PRE_FIX = (minW, maxW) => `
+      const host = document.getElementById('host').getBoundingClientRect();
+      const aRect = anchor.getBoundingClientRect();
+      dd.style.minWidth = '';                       // back to the CSS 130px
+      const preMin = parseFloat(getComputedStyle(dd).minWidth) || 0;
+      const preLeft = Math.max(0, Math.min(aRect.left - host.left, host.width - preMin - 8));
+      dd.style.left = preLeft + 'px';
+      dd.style.maxWidth = Math.max(preMin, host.width - preLeft - 8) + 'px';
+      dd.style.minWidth = '${minW}'; dd.style.maxWidth = '${maxW}';   // …then the caller, after the fact
+      void preMin;`;
+    for (const [sel, name, extra, minW, maxW] of [
+      ['.chat-status-design', 'design', '', '300px', '440px'],
+      ['.chat-status-goal', 'set-a-goal', '', '280px', '420px'],
+      ['.chat-status-goal', 'active goal', "bar.setGoal('ship the release when every test in scripts/ passes', 5000); bar.setGoalStatus('active');", '240px', '400px'],
+    ]) {
+      const d = await censusProbe(sel, extra, PRE_FIX(minW, maxW));
+      ok(`NEGATIVE CONTROL: the PRE-FIX path replayed whole for the ${name} panel (place against the 130px CSS min-width, then the caller writes minWidth ${minW} / maxWidth ${maxW}) puts it back at left ${d.left} → right ${d.right} — ${Math.round(d.right - d.vw)}px past a ${d.vw}px screen that does not scroll sideways. A clamp cannot see a width its caller has not stated yet`,
+        !!d && !d.missing && d.right > d.vw + 5, { sel, ...d });
+    }
+    // The INTENT itself is honoured where it fits — otherwise "clamped" would
+    // be indistinguishable from "ignored", and the panels would silently lose
+    // the width they ask for on every desktop too.
+    const dsn = census.find(([n]) => n === 'design')[1];
+    ok(`…and the intent is not merely swallowed: on this 375px container the design panel still got its full 300px (min-width ${dsn.styleMinW}, max-width ${dsn.styleMaxW}) — the clamp spent the intent by moving the panel LEFT (${dsn.left}px, its chip sits at the right end of the bar), which is what the caller actually asked for`,
+      parseFloat(dsn.styleMinW) === 300 && dsn.width >= 300 - 0.5 && dsn.left < 237, dsn);
+
+    // A container with NO measurable width is the one place a clamp can do
+    // more harm than the thing it prevents: bounds computed off a zero rect
+    // would size the panel to 0 and hide it outright, where the pre-clamp code
+    // merely fell back to the CSS min-width. Bounds only bind when they exist.
+    const degenerate = await evaljs(`(() => {
+      ${mkBarFull('')};
+      const host = document.getElementById('host');
+      host.style.width = '0px';
+      document.querySelector('.chat-status-design').click();
+      const dd = document.querySelector('.chat-status-dropdown');
+      const r = dd.getBoundingClientRect();
+      const out = { width: +r.width.toFixed(2), styleMinW: dd.style.minWidth, styleMaxW: dd.style.maxWidth, display: getComputedStyle(dd).display };
+      host.style.width = '';
+      return out;
+    })()`);
+    ok(`a container with NO measurable width does not get clamped into invisibility: the design panel keeps its ${degenerate.styleMinW} intent (${degenerate.width}px, display ${degenerate.display}) instead of being sized to 0 — a clamp against bounds that do not exist is not a safety net, it is a delete`,
+      degenerate.width > 0 && parseFloat(degenerate.styleMinW) === 300, degenerate);
+    // NEGATIVE CONTROL ② — an intent BIGGER than the container. A min-width
+    // nobody can see is not a minimum, it is a hidden panel: the clamp caps
+    // the min-width itself, so the panel narrows instead of hanging off.
+    const narrow = await evaljs(`(() => {
+      ${mkBarFull('')};
+      const host = document.getElementById('host');
+      host.style.width = '200px';   // the design panel asks for 300 — 100px more than exists
+      document.querySelector('.chat-status-design').click();
+      const dd = document.querySelector('.chat-status-dropdown');
+      const containerW = +host.getBoundingClientRect().width.toFixed(2);
+      const clamped = dd.getBoundingClientRect();
+      const kept = { left: +clamped.left.toFixed(2), right: +clamped.right.toFixed(2), width: +clamped.width.toFixed(2), styleMinW: dd.style.minWidth };
+      // …and the same panel with ONLY that cap removed (the intent written raw)
+      dd.style.minWidth = '300px';
+      const raw = dd.getBoundingClientRect();
+      host.style.width = '';
+      return { containerW, kept, rawRight: +raw.right.toFixed(2), rawWidth: +raw.width.toFixed(2) };
+    })()`);
+    ok(`NEGATIVE CONTROL: a width intent BIGGER than the container (design asks 300px inside a ${narrow.containerW}px chat view — a narrow tiled window, or a phone once the bar has more chips) narrows the panel to min-width ${narrow.kept.styleMinW} and keeps it inside (right ${narrow.kept.right} ≤ ${narrow.containerW} − 8); with only that cap removed the SAME panel is ${narrow.rawWidth}px wide and reaches ${narrow.rawRight} — outside the view it lives in`,
+      parseFloat(narrow.kept.styleMinW) <= narrow.containerW - 8 + 0.5 && narrow.kept.right <= narrow.containerW - 8 + 0.5
+      && narrow.rawRight > narrow.containerW, narrow);
   } catch (e) {
-    ok('the chrome leg ran', false, String(e).slice(0, 400));
+    ok('the chrome leg ran', false, String(e.stack || e).slice(0, 900));
   } finally {
     try { ws?.close(); } catch { }
     try { chrome.kill('SIGKILL'); } catch { }

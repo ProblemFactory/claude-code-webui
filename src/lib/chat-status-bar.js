@@ -8,6 +8,14 @@ import { t } from './i18n.js';
  *  scroller, so whatever lands past the edge is unreachable, not merely ugly. */
 const DROPDOWN_EDGE_PAD = 8;
 
+/** Width INTENT of the three panels that are more than a list of rows (layout
+ *  px). They are arguments to showDropdown — never inline styles written after
+ *  it returns, which is what defeated the clamp for two releases: showDropdown
+ *  owns width AND placement, so the two are decided from the same numbers. */
+const DESIGN_PANEL_W = { minWidth: 300, maxWidth: 440 };
+const GOAL_PANEL_W = { minWidth: 240, maxWidth: 400 };
+const GOAL_SET_PANEL_W = { minWidth: 280, maxWidth: 420 };
+
 /**
  * ChatStatusBar — status bar for chat mode sessions.
  * Shows model, permission mode, background tasks, context usage, cache ratio, cost.
@@ -679,8 +687,6 @@ export class ChatStatusBar {
    *  then the pages published from this session (Open / Copy link / visibility).
    *  DOM built with textContent — page names are agent-chosen strings. */
   _renderDesignPopover(dropdown) {
-    dropdown.style.minWidth = '300px';
-    dropdown.style.maxWidth = '440px';
     const box = document.createElement('div');
     box.style.cssText = 'display:flex;flex-direction:column;gap:8px;padding:4px';
     const kitLine = document.createElement('div');
@@ -799,7 +805,16 @@ export class ChatStatusBar {
       return;
     }
     const container = this._popupContainer || this._element.parentElement;
-    const showDropdown = (anchor) => {
+    // THE ONE PLACE A STATUS-BAR PANEL GETS ITS WIDTH AND ITS PLACE (round 5
+    // r2). A caller states its width INTENT — `showDropdown(el, {minWidth,
+    // maxWidth})` — and never touches `dropdown.style` afterwards: three call
+    // sites used to (design 300/440, goal 240/400, set-a-goal 280/420) and each
+    // one silently un-did the clamp below, because the clamp had already run
+    // against the panel's pre-content 130px CSS min-width. Measured at 375×667:
+    // design landed at right 537 and set-a-goal at 517 on a page whose
+    // documentElement.scrollWidth === clientWidth === 375 — 162px / 142px of a
+    // panel that no gesture can reach. Widths are LAYOUT px (see below).
+    const showDropdown = (anchor, { minWidth = 0, maxWidth = Infinity } = {}) => {
       const existing = container.querySelector('.chat-status-dropdown');
       if (existing) { existing.remove(); return null; }
       // The bottom/left math is relative to the container — which is only what
@@ -825,14 +840,29 @@ export class ChatStatusBar {
       // is `overflow: hidden`, so a row that cannot fit must WRAP, never clip.
       // Both numbers are LAYOUT px — offsetWidth/min-width are unzoomed while
       // getBoundingClientRect is not (the 2.369.5 uiScale class) — and the cap
-      // never goes below the panel's own CSS min-width, which would win anyway.
+      // never goes below the panel's own min-width, which would win anyway.
+      // That min-width is the WIDER of the CSS one and the caller's intent, so
+      // the offset is chosen for the width the panel is actually going to
+      // reach; and it is itself capped at what fits, so an intent bigger than
+      // the container (a phone, a narrow tiled window) narrows the panel
+      // instead of hanging it off the edge — a min-width nobody can see is not
+      // a minimum, it is a hidden panel.
       const scale = uiScale();
       const containerW = containerRect.width / scale;
-      const minW = parseFloat(getComputedStyle(dropdown).minWidth) || 0;
+      const cssMinW = parseFloat(getComputedStyle(dropdown).minWidth) || 0;
+      const wantMinW = Math.max(minWidth, cssMinW);
       const wantLeft = (rect.left - containerRect.left) / scale;
-      const left = Math.max(0, Math.min(wantLeft, containerW - minW - DROPDOWN_EDGE_PAD));
+      // A container with no measurable width can only yield garbage bounds —
+      // clamping there would size the panel to 0 and hide it, which is a worse
+      // answer than the caller's own intent. Bounds only bind when they exist.
+      const room = containerW - DROPDOWN_EDGE_PAD;
+      const bounded = room > 0;
+      const minW = bounded ? Math.min(wantMinW, room) : wantMinW;
+      if (minW) dropdown.style.minWidth = minW + 'px';
+      const left = bounded ? Math.max(0, Math.min(wantLeft, containerW - minW - DROPDOWN_EDGE_PAD)) : Math.max(0, wantLeft);
       dropdown.style.left = left + 'px';
-      dropdown.style.maxWidth = Math.max(minW, containerW - left - DROPDOWN_EDGE_PAD) + 'px';
+      const cap = bounded ? Math.min(maxWidth, Math.max(minW, containerW - left - DROPDOWN_EDGE_PAD)) : maxWidth;
+      if (Number.isFinite(cap)) dropdown.style.maxWidth = cap + 'px';
       const close = (ev) => {
         if (!dropdown.contains(ev.target) && ev.target !== anchor) {
           dropdown.remove();
@@ -940,7 +970,7 @@ export class ChatStatusBar {
     const designEl = e.target.closest('.chat-status-design');
     if (designEl && this._onDesignRequest) {
       e.stopPropagation();
-      const dropdown = showDropdown(designEl);
+      const dropdown = showDropdown(designEl, DESIGN_PANEL_W);
       if (!dropdown) return;
       this._renderDesignPopover(dropdown);
       return;
@@ -950,10 +980,8 @@ export class ChatStatusBar {
     const goalEl = e.target.closest('.chat-status-goal');
     if (goalEl && this._goal) {
       e.stopPropagation();
-      const dropdown = showDropdown(goalEl);
+      const dropdown = showDropdown(goalEl, GOAL_PANEL_W);
       if (!dropdown) return;
-      dropdown.style.minWidth = '240px';
-      dropdown.style.maxWidth = '400px';
       const content = document.createElement('div');
       content.style.cssText = 'display:flex;flex-direction:column;gap:8px;padding:4px';
       const text = document.createElement('div');
@@ -989,10 +1017,8 @@ export class ChatStatusBar {
     // No active goal → set-a-goal popup (the only entry point besides typing /goal)
     if (goalEl && !this._goal) {
       e.stopPropagation();
-      const dropdown = showDropdown(goalEl);
+      const dropdown = showDropdown(goalEl, GOAL_SET_PANEL_W);
       if (!dropdown) return;
-      dropdown.style.minWidth = '280px';
-      dropdown.style.maxWidth = '420px';
       const content = document.createElement('div');
       content.style.cssText = 'display:flex;flex-direction:column;gap:8px;padding:4px';
       const hint = document.createElement('div');

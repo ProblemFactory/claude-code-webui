@@ -98,8 +98,18 @@
   background: var(--bg-panel, var(--bg-dialog)); border: 1px solid var(--border); border-radius: var(--radius);
   box-shadow: 0 8px 24px rgba(0,0,0,0.35); z-index: 200; min-width: 130px; overflow: hidden;
 }
+/* WRAP, NEVER CLIP (round 5 r2 — the health rows learned this in round 4, and
+   the measurement that generalised the clamp found the same harm on the rows
+   nobody had restyled). The panel is `overflow: hidden` and the clamp above
+   caps its width at what fits, so on a 375px screen a panel anchored at the
+   right end of the bar is squeezed to its 130px min-width; with `nowrap` the
+   text simply vanished (measured: the response-style row lost 111px, a
+   background task's description 143px, with no scroller anywhere to reach it).
+   On a desktop-width container nothing changes: an absolutely positioned box
+   is shrink-to-fit, so it still sizes to the longest row and never wraps —
+   wrapping only happens once the cap actually bites. */
 .chat-status-dropdown-item {
-  padding: 5px 12px; font-size: 11px; cursor: pointer; color: var(--text); white-space: nowrap;
+  padding: 5px 12px; font-size: 11px; cursor: pointer; color: var(--text); white-space: normal; overflow-wrap: anywhere;
 }
 .chat-status-dropdown-item:hover { background: var(--bg-hover); }
 .chat-status-dropdown-item.active { color: var(--accent); font-weight: 600; }
