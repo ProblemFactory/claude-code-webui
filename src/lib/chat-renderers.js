@@ -10,7 +10,7 @@ import { escHtml, copyText, showContextMenu, showToast, absUrl } from './utils.j
 import { track } from './telemetry-client.js';
 import { renderCodeBlock, rehighlightCodeBlock, stripAnsi, getHljsLanguages } from './highlight.js';
 import { UI_ICONS } from './icons.js';
-import { isAgentMemoryPath, backendFeatureCaps, initHealthIssues, initHealthLabel } from './agent-meta.js';
+import { isAgentMemoryPath, backendFeatureCaps, initHealthIssues, initHealthLabel, initFrameOf } from './agent-meta.js';
 import { createBackendIconHtml, getBackendMeta } from './agent-meta.js';
 import { t } from './i18n.js';
 import { searchQueryOf } from '../search-card.js'; // shared with the server (CJS pulled into the bundle, like task-color-seq.js)
@@ -887,17 +887,20 @@ class ChatRenderers {
     // side effects still apply — see buildInitCard for both rules.
     if (msg.content?.[0]?.initData) {
       const d = msg.content[0].initData;
-      const f = d.frame || null;
+      const f = initFrameOf(msg); // the ONE reader of where the frame lives (agent-meta)
       const sideEffect = {};
       if (d.model) sideEffect.model = d.model.replace(/\[.*$/, '');
       if (d.permissionMode) sideEffect.permMode = d.permissionMode;
       if (d.slashCommands) sideEffect.slashCommands = d.slashCommands;
       if (f?.terminalSlashCommands) sideEffect.terminalSlashCommands = f.terminalSlashCommands;
       if (f?.memoryPaths) sideEffect.memoryPaths = f.memoryPaths;
-      // The health facts ride the SIDE EFFECT, not the card (§2.6 round 4):
-      // they must reach the pinned status-bar chip even when this record
-      // draws nothing (`frameRepeat`), which is the majority of inits.
-      if (f) sideEffect.initFrame = f;
+      // The health facts do NOT ride this side effect (round 5). Rendering is
+      // where a record LANDS; the chip is about what the session IS, and the
+      // renderer runs for every replayed record — so feeding the chip from
+      // here made the readout depend on where the transcript is scrolled
+      // (paging up past an older spawn's init silently rewrote a present-tense
+      // warning). ChatView applies the frame ONCE, above the deferral, through
+      // the same PURE initFrameOf reader.
       return { el: this.buildInitCard(f, { repeat: !!d.frameRepeat }), sideEffect };
     }
     // Hook events — compact collapsible

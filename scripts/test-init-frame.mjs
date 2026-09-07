@@ -622,16 +622,118 @@ console.log('— health facts on the attach path (round 4)');
   const cvSrc = fs.readFileSync(path.join(REPO, 'src/lib/chat-view.js'), 'utf8');
   const crSrc = fs.readFileSync(path.join(REPO, 'src/lib/chat-renderers.js'), 'utf8');
   const sbSrc = fs.readFileSync(path.join(REPO, 'src/lib/chat-status-bar.js'), 'utf8');
-  ok('WIRING: the renderer puts the frame on the SIDE EFFECT (which runs for a repeat, when the card does not)', /if \(f\) sideEffect\.initFrame = f;/.test(crSrc));
-  ok('WIRING: ChatView feeds the chip from BOTH paths through ONE method — the live side effect and applyStatus\'s attach frame',
-    /if \(se\.initFrame\) this\._applyInitHealth\(se\.initFrame\);/.test(cvSrc) && /this\._applyInitHealth\(status\.initFrame\);/.test(cvSrc));
-  ok('WIRING: that ONE method is the only caller of setInitHealth, and it returns on a falsy frame (ABSENT ≠ CLEAN, enforced at the call site not just in the doc)',
-    /_applyInitHealth\(frame\) \{\s*\n\s*if \(!frame\) return;\s*\n\s*this\._statusBar\.setInitHealth\(initHealthIssues\(frame\)\);/.test(cvSrc)
+  // ROUND 5 — the FEEDER, not the method. Round 4 pinned the method body for
+  // slab independence and then fed it from the RENDER path, which runs for
+  // every replayed record; the value therefore did depend on where the reader
+  // had scrolled (reproduced below). These pins now name the ONE reader, the
+  // ONE application point, and its position relative to the deferral.
+  ok('WIRING: where the frame lives on a record is ONE pure reader (agent-meta initFrameOf), used by the renderer AND by ChatView — never two spellings of content[0].initData.frame',
+    /export function initFrameOf\(msg\)/.test(fs.readFileSync(path.join(REPO, 'src/lib/agent-meta.js'), 'utf8'))
+    && /const f = initFrameOf\(msg\);/.test(crSrc) && /initFrameOf\(msg\)/.test(cvSrc)
+    && !/initData\.frame/.test(cvSrc) && !/d\.frame \|\| null/.test(crSrc));
+  ok('WIRING: the render path no longer feeds the chip (a renderer runs for replays; that WAS the bug) — sideEffect.initFrame is gone from both sides',
+    !/sideEffect\.initFrame/.test(crSrc) && !/se\.initFrame/.test(cvSrc));
+  {
+    const applyAt = cvSrc.indexOf('this._applyInitHealth(initFrameOf(msg), { replay: this._loadingHistory });');
+    const deferAt = cvSrc.indexOf("if (!this._loadingHistory && (this._teleported || (!this._pinned && this._windowEnd < this._total)))");
+    ok('WIRING: ChatView applies it ONCE per record and ABOVE the "viewing history" deferral — below it, a mid-session respawn\'s frame is dropped outright for a reader who happens to be scrolled back',
+      applyAt > 0 && deferAt > 0 && applyAt < deferAt && (cvSrc.match(/_applyInitHealth\(/g) || []).length === 3, { applyAt, deferAt });
+  }
+  ok('WIRING: the ONE method is the only caller of setInitHealth, and it refuses BOTH a falsy frame (ABSENT ≠ CLEAN) and a REPLAY (a replayed record is not news) — enforced at the call site, not just in the doc',
+    /_applyInitHealth\(frame, \{ replay = false \} = \{\}\) \{\s*\n\s*if \(!frame \|\| replay\) return;\s*\n\s*this\._statusBar\.setInitHealth\(initHealthIssues\(frame\)\);/.test(cvSrc)
     && (cvSrc.match(/setInitHealth\(/g) || []).length === 1);
+  ok('WIRING: applyStatus stays the AUTHORITY for replayed records (it carries the server\'s newest-init pick over the whole record list) and passes no replay flag',
+    /this\._applyInitHealth\(status\.initFrame\);/.test(cvSrc));
+  ok('WIRING: the same-epoch reconnect applies the attach payload\'s chatStatus — the only attach path that dropped it, which is why its catch-up REPLAY used to be the chip\'s only writer there',
+    /if \(msg\.chatStatus\) this\.applyStatus\(msg\.chatStatus\);\s*\n\s*\/\/ Sync streaming label from server/.test(cvSrc));
   ok('WIRING: the card and the chip import the SAME label (no second literal left in chat-renderers)',
     /initHealthLabel/.test(crSrc) && /initHealthLabel/.test(sbSrc) && !/t\('MCP \{name\}', \{ name: i\.name \}\)/.test(crSrc));
-  ok('WIRING: the chip is NOT gated on what is in the slab — a guard that depends on where the transcript is scrolled fails while paging',
-    !/_windowStart|_messages\.some/.test(cvSrc.slice(cvSrc.indexOf('_applyInitHealth(frame) {'), cvSrc.indexOf('_applyInitHealth(frame) {') + 220)));
+  ok('WIRING: the chip is NOT gated on what is in the slab — a guard that depends on where the transcript is scrolled fails while paging (`replay` is the caller\'s provenance claim, not a window bound)',
+    !/_windowStart|_messages\.some|_windowEnd/.test(cvSrc.slice(cvSrc.indexOf('_applyInitHealth(frame, {'), cvSrc.indexOf('_applyInitHealth(frame, {') + 220)));
+
+  // ── ROUND 5 FUNCTIONAL: the real ChatView feeder, both directions ─────────
+  // Driven through the REAL ChatView.prototype._onCreateMessage against REAL
+  // normalizer output (chat-view.js is DOM-free at import — the test-chat-
+  // trim-guard idiom): a hand-rewritten copy of the branch would have agreed
+  // with itself no matter which way the wiring went.
+  const { ChatView } = await import(path.join(REPO, 'src/lib/chat-view.js'));
+  const initRec = (status, uuid) => ({ type: 'system', subtype: 'init', uuid, session_id: 's', model: 'claude-fable-5',
+    permissionMode: 'default', slash_commands: ['compact'], mcp_servers: [{ name: 'plugin:github:github', status }] });
+  const normOne = (r, tag) => new MessageManager('sess-' + tag).convertHistory([r])[0];
+  const mkView = () => {
+    const calls = [];
+    const st = Object.assign(Object.create(ChatView.prototype), {
+      _renderedMsgIds: new Set(), _messages: [], _loadingHistory: false, _teleported: false,
+      _pinned: true, _windowEnd: 0, _total: 0, _elements: new Map(), _syncReviewAvailability() {},
+      _messageList: { appendChild() {} }, _chatInput: null,
+      _scrollBtn: { innerHTML: '', classList: { remove() {}, add() {} } },
+      _statusBar: { setInitHealth: (rows) => calls.push(rows), render() {}, setModel() {}, setPermMode() {}, applyStatus() {} },
+      _renderers: { renderSystemMsg: () => ({ el: null, sideEffect: {} }), addWrapToggles() {}, addOpenInEditorBtn() {} },
+    });
+    st.__chip = () => (calls.length ? (calls.at(-1).length ? `${calls.at(-1).length} not working` : 'no chip') : 'never told');
+    return st;
+  };
+  const feedLive = (st, m) => { st._loadingHistory = false; ChatView.prototype._onCreateMessage.call(st, m); };
+  const feedReplay = (st, m) => { st._loadingHistory = true; ChatView.prototype._onCreateMessage.call(st, m); st._loadingHistory = false; };
+  const attach = (st, frame) => ChatView.prototype.applyStatus.call(st, { initFrame: frame });
+  const brokenMsg = normOne(initRec('failed', 'u-broken'), 'br');
+  const healthyMsg = normOne(initRec('connected', 'u-healthy'), 'hl');
+  const brokenFrame = initFrameFacts(initRec('failed', 'u-broken'));
+  const healthyFrame = initFrameFacts(initRec('connected', 'u-healthy'));
+  {
+    // THE DIRECTION THAT MATTERS: a session with a dead MCP server must not go
+    // silent again because the reader scrolled up past an older, healthy spawn.
+    const v = mkView();
+    attach(v, brokenFrame);
+    const afterAttach = v.__chip();
+    feedReplay(v, healthyMsg);
+    const afterPageUp = v.__chip();
+    ok(`a page-up past an OLDER spawn's init does not rewrite the present-tense readout (attach "${afterAttach}" → page-up "${afterPageUp}") — the pre-fix pair was "1 not working" → "no chip", i.e. the dead MCP server went invisible again, which is the whole reason §2.6 exists`,
+      afterAttach === '1 not working' && afterPageUp === '1 not working', { afterAttach, afterPageUp });
+  }
+  {
+    // …and the inverse: a replay must not INVENT a warning either.
+    const v = mkView();
+    attach(v, healthyFrame);
+    const afterAttach = v.__chip();
+    feedReplay(v, brokenMsg);
+    const afterPageUp = v.__chip();
+    ok(`…and the inverse holds: paging up past an older BROKEN spawn does not invent a present-tense warning (attach "${afterAttach}" → page-up "${afterPageUp}"; pre-fix "no chip" → "1 not working")`,
+      afterAttach === 'no chip' && afterPageUp === 'no chip', { afterAttach, afterPageUp });
+  }
+  {
+    // NEGATIVE CONTROL: the round-4 wiring, expressed as the same feed. It
+    // disagrees with itself across the two directions — i.e. it measured the
+    // reader's scroll position, so re-introducing it re-reds this suite.
+    const initFrameOfRef = (m) => m?.content?.[0]?.initData?.frame || null;
+    const oldFeeder = (st, m) => { const f = initFrameOfRef(m); if (f) st._statusBar.setInitHealth(AM.initHealthIssues(f)); };
+    const v1 = mkView(); attach(v1, brokenFrame); oldFeeder(v1, healthyMsg);
+    const v2 = mkView(); attach(v2, healthyFrame); oldFeeder(v2, brokenMsg);
+    ok('NEGATIVE CONTROL: the round-4 feeder (apply from the rendered record, unconditionally) flips the chip in BOTH directions on the same replay — the defect, reproduced against the same fixtures',
+      v1.__chip() === 'no chip' && v2.__chip() === '1 not working', { v1: v1.__chip(), v2: v2.__chip() });
+  }
+  {
+    // The live half must still work — including for a reader who is scrolled
+    // back, where the record never reaches the renderer at all.
+    const pinned = mkView(); attach(pinned, healthyFrame); feedLive(pinned, brokenMsg);
+    const back = mkView(); attach(back, healthyFrame);
+    back._pinned = false; back._total = 5; back._windowEnd = 0; // reader in history
+    feedLive(back, brokenMsg);
+    ok(`a LIVE mid-session respawn still speaks — while pinned ("${pinned.__chip()}") AND while the reader is scrolled back ("${back.__chip()}"), where the record is deferred and never reaches the renderer at all (pre-fix: dropped)`,
+      pinned.__chip() === '1 not working' && back.__chip() === '1 not working');
+    ok('…and the deferral itself still ran for that record (it was counted, not rendered) — the health application must not have turned the branch into a render',
+      back._total === 6 && !back._renderedMsgIds.has(brokenMsg.id), { total: back._total, rendered: back._renderedMsgIds.size });
+  }
+  {
+    // ABSENT ≠ CLEAN survives the new guard: a frame-less record (codex / ACP /
+    // older CLI) says nothing, live or replayed.
+    const { CodexMessageManager: CxMM } = require(path.join(REPO, 'src/codex-message-manager.js'));
+    const cxOps = []; const cx = new CxMM('cx-guard'); cx.onOp((o) => cxOps.push(o));
+    cx.processLive({ timestamp: '2026-09-07T00:00:00.000Z', type: 'session_meta', payload: { id: '01a07386-3386-7203-adfb-7c4ba193e24d', cwd: '/w', model: 'gpt-6-astra', cli_version: '0.153.4' } });
+    const cxInit = cxOps.find((o) => o.op === 'create' && o.message.content?.[0]?.initData)?.message;
+    const v = mkView(); attach(v, brokenFrame); feedLive(v, cxInit);
+    ok('a REAL frame-less producer (codex session_meta) fed live leaves the chip untouched — ABSENT ≠ CLEAN survives the round-5 rewiring', v.__chip() === '1 not working', v.__chip());
+  }
 }
 
 // ── 6. the card in a REAL browser + the 375×667 measurement ────────────────
@@ -839,6 +941,10 @@ if (!CHROME) {
     const mkBar = `(() => {
       const host = document.getElementById('bar');
       host.innerHTML = '';
+      // showDropdown TOGGLES on a panel already in the container — a probe that
+      // leaves one open makes the NEXT probe's click a close, and the next
+      // probe then reads null geometry (cost me an hour; the real UI is fine).
+      document.querySelectorAll('.chat-status-dropdown').forEach((d) => d.remove());
       const bar = new VS.ChatStatusBar({ send(){}, on(){}, onGlobal(){} }, 'sess-chrome-health', { backend: 'claude', getToolMsg: () => null, openSubagentViewer(){}, openInTempEditor(){}, getWorkflowIds: () => ({}) });
       host.appendChild(bar.element);
       window.__bar = bar;
@@ -849,11 +955,11 @@ if (!CHROME) {
       list.innerHTML = '';
       const r = new VS.ChatRenderers({ sessionId: 'view-x', backend: 'claude', messageList: list });
       // render the ATTACHED slab exactly as loadHistory does
-      let sideFrames = 0;
+      let recordFrames = 0;
       for (const m of ${repeatSlabJson}) {
         if (m.role !== 'system') continue;
         const out = r.renderSystemMsg(m);
-        if (out?.sideEffect?.initFrame) sideFrames++;
+        if (VS.AM.initFrameOf(m)) recordFrames++;   // the ONE reader — the card is suppressed, the FACTS are not
         if (out?.el) list.appendChild(out.el);
       }
       ${mkBar};
@@ -867,7 +973,7 @@ if (!CHROME) {
       return {
         cards: list.querySelectorAll('.chat-msg-init').length,
         initRecordsInSlab: ${repeatSlabJson}.filter((m) => m.content && m.content[0] && m.content[0].initData).length,
-        sideFrames,
+        recordFrames,
         chip: !!chip,
         chipText: chip ? chip.textContent.replace(/\s+/g, ' ').trim() : '',
         chipTitle: chip ? chip.getAttribute('title') : '',
@@ -882,7 +988,8 @@ if (!CHROME) {
     const hBroken = await chipProbe(frameJson);
     ok(`the attached slab draws ZERO init cards (${hBroken.cards}) even though ${hBroken.initRecordsInSlab} init record(s) are in it — the pre-fix window, reproduced in a real document`,
       hBroken.cards === 0 && hBroken.initRecordsInSlab >= 1, hBroken);
-    ok('…and the side effect of those card-less records still carries the frame, so the facts reach the chip', hBroken.sideFrames >= 1, hBroken.sideFrames);
+    ok('…and those card-less RECORDS still carry the frame — initFrameOf reads it straight off the record, so the facts survive a suppressed card (round 5: the renderer is no longer in this path at all, because it also runs for replays)',
+      hBroken.recordFrames >= 1, hBroken.recordFrames);
     ok(`THE FIX, measured: the same window shows a VISIBLE "${hBroken.chipText}" chip in warning colour (computed ${hBroken.chipColor}, bar text ${hBroken.barColor}) with an inline SVG (never an emoji)`,
       hBroken.chip && hBroken.chipVisible && /4/.test(hBroken.chipText) && hBroken.chipColor !== hBroken.barColor && hBroken.chipSvg
       && !/[\u{1F300}-\u{1FAFF}]/u.test(hBroken.chipHtml), hBroken);
@@ -972,6 +1079,81 @@ if (!CHROME) {
       !!m.chip && m.chip.index >= 0 && m.chip.index <= 2, m.chip);
     ok(`375×667 expanded: the inventory wraps too — long verbatim lists break instead of pushing the transcript sideways (body right ${Math.round(m.after.bodyRight)} ≤ ${m.vw}, scrollWidth ${m.after.listScrollW} ≤ ${m.after.listClientW}, body ${Math.round(m.after.bodyH)}px tall)`,
       m.after.bodyRight <= m.vw + 1 && m.after.listScrollW <= m.after.listClientW + 1 && m.after.bodyH > 0, m.after);
+
+    // ── ROUND 5, 375×667: THE DROPDOWN ────────────────────────────────────
+    // The panel is the affordance added BECAUSE touch has no hover, and it is
+    // the one surface round 4 never measured on a phone: its click leg ran at
+    // 1280×800 and its two 375 legs inspected the CHIP only. Both halves of it
+    // were broken there:
+    //   ① `.chat-status-health-row { white-space: normal }` was DEAD — the row
+    //      carries `.chat-status-dropdown-item` too, declared LATER at the same
+    //      0,1,0 specificity with `white-space: nowrap` — so an unbounded
+    //      upstream `message` (2.1.257 zod: plugin_errors[].message is free
+    //      text) hard-clipped inside the panel's `overflow: hidden`
+    //      (measured 610 vs 320 at BOTH viewports);
+    //   ② the 322px panel landed at right 443.7 on a 375px viewport whose
+    //      documentElement.scrollWidth === clientWidth === 375, i.e. the 68.7px
+    //      hanging off it could not be scrolled to by any gesture.
+    // Both are measured here as CONSEQUENCES (computed style + geometry), each
+    // with a same-run negative control that puts the pre-fix value back.
+    const ddProbe = async (sel, label) => evaljs(`(() => {
+      const frame = ${frameJson};
+      ${mkBar};
+      window.__bar.setInitHealth(VS.AM.initHealthIssues(frame));
+      window.__bar.setModel('claude-fable-5');
+      window.__bar.render();
+      const anchor = document.querySelector(${JSON.stringify(sel)});
+      if (!anchor) return { missing: true };
+      anchor.click();
+      const dd = document.querySelector('.chat-status-dropdown');
+      if (!dd) return { noDropdown: true };
+      const rows = [...dd.querySelectorAll('.chat-status-dropdown-item')];
+      const measure = () => {
+        const r = dd.getBoundingClientRect();
+        return { left: +r.left.toFixed(2), right: +r.right.toFixed(2), width: +r.width.toFixed(2),
+          fits: r.right <= innerWidth + 0.5 && r.left >= -0.5,
+          worstOverflow: Math.max(0, ...rows.map((x) => x.scrollWidth - x.clientWidth)) };
+      };
+      const after = measure();
+      const wsAll = [...new Set(rows.map((x) => getComputedStyle(x).whiteSpace))];
+      const longest = rows.map((x) => ({ t: x.textContent.replace(/\s+/g, ' ').trim(), sw: x.scrollWidth, cw: x.clientWidth }))
+        .sort((a, b) => b.t.length - a.t.length)[0];
+      // NEGATIVE CONTROL A — the PLACEMENT half alone: raw anchor offset, no
+      // width cap, rows still wrapping.
+      const containerRect = document.getElementById('host').getBoundingClientRect();
+      const aRect = anchor.getBoundingClientRect();
+      dd.style.maxWidth = '';
+      dd.style.left = (aRect.left - containerRect.left) + 'px';
+      const unclamped = measure();
+      // NEGATIVE CONTROL B — the WHOLE pre-fix state: raw offset AND the value
+      // the cascade actually computed for these rows before the fix.
+      for (const x of rows) x.style.whiteSpace = 'nowrap';
+      const preFix = measure();
+      return { vw: innerWidth, docScrollW: document.documentElement.scrollWidth, docClientW: document.documentElement.clientWidth,
+        overflow: getComputedStyle(dd).overflow, nRows: rows.length, wsAll, longest, after, unclamped, preFix, label: ${JSON.stringify(label)} };
+    })()`);
+
+    const ddH = await ddProbe('.chat-status-health', 'health');
+    ok(`375×667: every health row computes white-space NORMAL and none of them clips (worst overflow ${ddH.after && ddH.after.worstOverflow}px over ${ddH.nRows} rows; longest "${ddH.longest && ddH.longest.t.slice(0, 60)}…" ${ddH.longest && ddH.longest.sw}/${ddH.longest && ddH.longest.cw}) — the panel is overflow:hidden, so a row that cannot fit must WRAP, never clip`,
+      !!ddH.after && ddH.wsAll.length === 1 && ddH.wsAll[0] === 'normal' && ddH.after.worstOverflow <= 1, ddH);
+    ok(`NEGATIVE CONTROL: forcing the rows back to the cascade's PRE-FIX value (white-space: nowrap) clips them again by ${ddH.preFix && ddH.preFix.worstOverflow}px inside the same overflow:hidden panel — so the assert above measures the cascade, not the text`,
+      !!ddH.preFix && ddH.preFix.worstOverflow > 20, ddH.preFix);
+    ok(`375×667: the panel stays fully ON SCREEN with the clamp's own 8px gap (left ${ddH.after && ddH.after.left} → right ${ddH.after && ddH.after.right} ≤ ${ddH.vw} − 8) — and it has to, because the page itself does not scroll sideways (documentElement scrollWidth ${ddH.docScrollW} === clientWidth ${ddH.docClientW}), so anything past the edge is UNREACHABLE, not merely ugly. The gap is asserted, not just "fits": with wrapping restored the pre-fix placement lands EXACTLY on the edge, so a leg that only checked \u2264 innerWidth would stay green with the clamp deleted`,
+      !!ddH.after && ddH.after.fits && ddH.after.right <= ddH.vw - 7.5 && ddH.docScrollW === ddH.docClientW, ddH.after);
+    ok(`NEGATIVE CONTROL: restoring the WHOLE pre-fix state (raw anchor offset + the nowrap the cascade computed) puts the same panel at right ${ddH.preFix && ddH.preFix.right} — ${ddH.preFix && Math.round(ddH.preFix.right - ddH.vw)}px off a ${ddH.vw}px screen, unreachable. The two halves are not independent: with wrapping restored but the clamp removed the panel lands exactly ON the edge (right ${ddH.unclamped && ddH.unclamped.right}), which is why the fix is BOTH the cascade and the placement`,
+      !!ddH.preFix && ddH.preFix.right > ddH.vw + 5 && !!ddH.unclamped && ddH.unclamped.right >= ddH.vw - 0.5, { preFix: ddH.preFix, unclamped: ddH.unclamped });
+    // The clamp is a BELT for every status-bar dropdown, not a health special
+    // case — and it must not squeeze the pre-existing ones below their own
+    // CSS min-width.
+    for (const [sel, name] of [['.chat-status-effort', 'effort'], ['.chat-status-perm', 'permission mode']]) {
+      const d = await ddProbe(sel, name);
+      ok(`375×667: the pre-existing ${name} dropdown also fits (left ${d.after && d.after.left} → right ${d.after && d.after.right} ≤ ${d.vw}) and keeps its full 130px min-width (${d.after && d.after.width}px, no row clipped) — the clamp is a belt for every status-bar panel, not a health-chip special case${d.unclamped && d.unclamped.right > d.vw ? `; and it is LOAD-BEARING here: without it this one lands at right ${d.unclamped.right}, ${Math.round(d.unclamped.right - d.vw)}px off screen (its own chip is already past the edge of the swipeable bar)` : ''}`,
+        !!d.after && d.after.fits && d.after.width >= 130 && d.after.worstOverflow <= 1, d);
+      if (name === 'permission mode') {
+        ok(`NEGATIVE CONTROL (placement alone, no CSS involved): the ${name} panel's rows are plain nowrap items, and with the clamp removed it lands at right ${d.unclamped && d.unclamped.right} vs a ${d.vw}px screen — so the clamp is measured on a panel this branch did not restyle`,
+          !!d.unclamped && d.unclamped.right > d.vw, d.unclamped);
+      }
+    }
   } catch (e) {
     ok('the chrome leg ran', false, String(e).slice(0, 400));
   } finally {

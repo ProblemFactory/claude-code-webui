@@ -9,7 +9,7 @@ import { ChatInput } from './chat-input.js';
 import { ChatStatusBar } from './chat-status-bar.js';
 import { UI_ICONS } from './icons.js';
 import { t } from './i18n.js';
-import { isAgentMemoryPath, effortDisplay, getBackendMeta, backendFeatureCaps, noteMemoryPaths, initHealthIssues } from './agent-meta.js';
+import { isAgentMemoryPath, effortDisplay, getBackendMeta, backendFeatureCaps, noteMemoryPaths, initHealthIssues, initFrameOf } from './agent-meta.js';
 import { registerCommand, registerKeybinding, runCommand, hasCommand } from './contributions.js';
 // The verb list a wrapper that publishes a queue WITHOUT naming verbs serves —
 // the SAME array the server maps a verb-less sidecar onto (src/server/
@@ -2651,6 +2651,25 @@ class ChatView {
       }
     }
 
+    // THE ONE LIVE APPLICATION POINT for the init frame's health facts (§2.6,
+    // round 5) — ABOVE the "viewing history" deferral below, because what the
+    // session IS does not depend on where its reader is standing. Two bugs
+    // live at this boundary and both are fixed by the position:
+    //   ① below it, a mid-session respawn's frame was dropped OUTRIGHT for a
+    //      reader who happened to be scrolled back (the record never reaches
+    //      the renderer at all — no card, no side effect, no chip);
+    //   ② the old feeder sat in the render switch, which also runs for every
+    //      record REPLAYED out of history, so paging up past an older spawn's
+    //      init silently rewrote a present-tense warning (reproduced both
+    //      directions: broken→silent and silent→broken).
+    // `replay` is the record's own provenance, NOT a slab bound: every batch
+    // path (loadHistory / _extendTop / _extendBottom / teleport / jump-to-
+    // bottom rebuild / read-only poll / reconnect catch-up) sets
+    // _loadingHistory, and for those the authority is applyStatus's frame —
+    // the server picks the NEWEST init over the whole record list, which a
+    // page-up never can.
+    this._applyInitHealth(initFrameOf(msg), { replay: this._loadingHistory });
+
     // Live message while viewing history: don't render, just track count.
     // Teleport mode is always "viewing history" \u2014 its window accounting is
     // stale, so gate on the flag directly (else live messages leak into the
@@ -2686,9 +2705,8 @@ class ChatView {
           if (se.permMode) this._statusBar.setPermMode(se.permMode);
           if (se.slashCommands && this._chatInput) this._chatInput.setSlashCommands(se.slashCommands, { terminal: se.terminalSlashCommands || null });
           if (se.memoryPaths) noteMemoryPaths(se.memoryPaths);
-          // The LIVE half of the health twin — a mid-session respawn's init
-          // re-states them, and a repeat frame still applies its side effects.
-          if (se.initFrame) this._applyInitHealth(se.initFrame);
+          // (the init frame's health facts are applied ABOVE the deferral, not
+          // here — a renderer runs for replays too; see round 5)
           this._statusBar.render();
         }
         el = result?.el || null;
@@ -3887,8 +3905,8 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
   }
 
   /** THE ONE application point for the init frame's health facts (§2.6,
-   *  round 4) — fed by the live init record's side effect AND by
-   *  chatStatus.initFrame on attach/HTTP, because the two must AGREE.
+   *  round 4) — fed by a LIVE init record AND by chatStatus.initFrame on
+   *  attach/HTTP, because the two must AGREE.
    *  Why it cannot live in the init card alone: the card is suppressed for a
    *  `frameRepeat`, and on an attach the init record usually sits hundreds of
    *  records before the tail-50 the window loads. Measured on this instance's
@@ -3896,13 +3914,22 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
    *  (the two largest — i.e. exactly the long-running ones that accumulate MCP
    *  failures) the rendered tail contains an init record and ZERO drawable
    *  cards, so a "{n} not working" strip that a live watcher saw was simply
-   *  absent for a window opened later. The chip is not gated on the slab: a
-   *  guard that depends on where the transcript is scrolled is a guard that
-   *  fails while paging (the class this file has been bitten by repeatedly).
+   *  absent for a window opened later.
+   *  ROUND 5 — A REPLAYED RECORD IS NOT NEWS. Round 4 wrote "the chip is not
+   *  gated on the slab" and then fed it from the RENDER path, which is exactly
+   *  a slab: every batch replay (page-up, teleport, jump-to-bottom rebuild,
+   *  reconnect catch-up) re-runs it, so scrolling up past a previous spawn's
+   *  init rewrote the present-tense readout — measured both directions, and in
+   *  the one that matters a session with a dead MCP server went silent again.
+   *  `replay` is the CALLER's statement about the record's provenance (not a
+   *  window bound and not a global read), so the rule survives a new feeder:
+   *  a replay may not speak, because for replayed records the authority is
+   *  applyStatus — the server picks the newest init across the WHOLE record
+   *  list, which no page-up can.
    *  ABSENT ≠ CLEAN: no frame ⇒ say nothing (initHealthIssues' own law); a
    *  frame reporting everything connected ⇒ [] ⇒ the chip clears. */
-  _applyInitHealth(frame) {
-    if (!frame) return;
+  _applyInitHealth(frame, { replay = false } = {}) {
+    if (!frame || replay) return;
     this._statusBar.setInitHealth(initHealthIssues(frame));
   }
 
@@ -4045,6 +4072,17 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
         setTimeout(() => { if (!this._disposed) this._fullViewReset(msg); }, Math.random() * 500);
         return;
       }
+      // The attach payload's AUTHORITATIVE snapshot (§2.6 round 5). Every
+      // other attach path applies it — loadHistory's rebuild, its
+      // identical-skip branch, the read-only poll — and this one, the
+      // same-epoch reconnect, silently dropped it, so the only way a
+      // respawn's init reached the status bar here was the catch-up batch
+      // REPLAYING the record. A replay is not an authority (a page-up would
+      // then be one too), so the authority has to be applied where it
+      // arrives: chatStatus is computed from the whole record list at attach
+      // time, i.e. it already covers everything the catch-up is about to
+      // render.
+      if (msg.chatStatus) this.applyStatus(msg.chatStatus);
       // Sync streaming label from server
       if (msg.isStreaming) this._onServerStreamLabel(msg.streamingLabel || t('thinking...'), msg.streamingKind || null);
       else this._hideTyping();

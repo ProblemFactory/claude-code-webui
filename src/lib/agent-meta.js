@@ -408,6 +408,19 @@ export function initHealthIssues(frame) {
   return out;
 }
 
+/** PURE: the init frame a NORMALIZED record carries, or null (§2.6, round 5).
+ *  THE ONE READER of where the frame lives. Two consumers need it — the
+ *  renderer (which draws the card) and ChatView (which applies the health
+ *  facts to the pinned chip BEFORE the "viewing history" deferral, so a
+ *  mid-session respawn's frame is not lost when the reader happens to be
+ *  scrolled back) — and two spellings of `content[0].initData.frame` is the
+ *  drift this file exists to prevent. Frame-less producers (codex, ACP /
+ *  OpenCode, a pre-2.1.2xx claude) return null, which every consumer reads as
+ *  "never told" — ABSENT ≠ CLEAN. */
+export function initFrameOf(msg) {
+  return (msg && msg.content && msg.content[0] && msg.content[0].initData && msg.content[0].initData.frame) || null;
+}
+
 /** PURE: the one human label for an initHealthIssues() row (§2.6, round 4).
  *  TWO surfaces now show these rows — the init card's warn strip/detail list
  *  (chat-renderers) and the pinned status-bar chip that gives the same facts

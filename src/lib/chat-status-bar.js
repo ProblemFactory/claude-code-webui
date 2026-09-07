@@ -3,6 +3,11 @@ import { UI_ICONS } from './icons.js';
 import { BACKEND_META, getBackendMeta, backendFeatureCaps, effortDisplay, effortLabel, noteModelCatalog, responseStyleLabel, responseStyleCaps, styleAppliesLive, initHealthLabel } from './agent-meta.js';
 import { t } from './i18n.js';
 
+/** Gap kept between a status-bar dropdown and the right edge of the chat view
+ *  (layout px). The panel is positioned OUT of the ≤768px bar's horizontal
+ *  scroller, so whatever lands past the edge is unreachable, not merely ugly. */
+const DROPDOWN_EDGE_PAD = 8;
+
 /**
  * ChatStatusBar — status bar for chat mode sessions.
  * Shows model, permission mode, background tasks, context usage, cache ratio, cost.
@@ -809,8 +814,25 @@ export class ChatStatusBar {
       const containerRect = container.getBoundingClientRect();
       dropdown.style.position = 'absolute';
       dropdown.style.bottom = ((containerRect.bottom - rect.top + 4) / uiScale()) + 'px';
-      dropdown.style.left = ((rect.left - containerRect.left) / uiScale()) + 'px';
       container.appendChild(dropdown);
+      // KEEP THE PANEL INSIDE THE CONTAINER. The ≤768px status bar is a
+      // single swipeable nowrap row, but the panel is absolutely positioned
+      // OUT of that scroller — anything past the viewport is unreachable
+      // (measured at 375×667: the health panel landed at right 443.7 with
+      // documentElement.scrollWidth === clientWidth === 375, i.e. 68.7px of
+      // it could not be scrolled to by any gesture). So clamp the offset to
+      // what still fits, and CAP THE WIDTH rather than the content: the panel
+      // is `overflow: hidden`, so a row that cannot fit must WRAP, never clip.
+      // Both numbers are LAYOUT px — offsetWidth/min-width are unzoomed while
+      // getBoundingClientRect is not (the 2.369.5 uiScale class) — and the cap
+      // never goes below the panel's own CSS min-width, which would win anyway.
+      const scale = uiScale();
+      const containerW = containerRect.width / scale;
+      const minW = parseFloat(getComputedStyle(dropdown).minWidth) || 0;
+      const wantLeft = (rect.left - containerRect.left) / scale;
+      const left = Math.max(0, Math.min(wantLeft, containerW - minW - DROPDOWN_EDGE_PAD));
+      dropdown.style.left = left + 'px';
+      dropdown.style.maxWidth = Math.max(minW, containerW - left - DROPDOWN_EDGE_PAD) + 'px';
       const close = (ev) => {
         if (!dropdown.contains(ev.target) && ev.target !== anchor) {
           dropdown.remove();
