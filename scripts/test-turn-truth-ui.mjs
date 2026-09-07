@@ -13,11 +13,14 @@
 //   ③ retraction: a claude tombstone is REMOVED (its own instruction), a codex
 //      rollback is STRUCK IN PLACE (hiding it would rewrite what someone read)
 //   ④ the tool-granular run set marks the executing card, not every pending one
-//   ⑤ and BOTH of those per-element marks survive every rebuild — the three
-//      paths that build an element for a message (create/_renderDetached,
+//   ⑤ and BOTH of those per-element marks survive every rebuild — three of the
+//      FOUR paths that build an element for a message (create/_renderDetached,
 //      the status re-render in _onEditMessage, _rerenderVisible). Round-2
 //      finding: they were written straight to the DOM and dropped on the
 //      first replacement, and the tombstone's own case ALWAYS gets one.
+//   ⑥ the FOURTH one — `_renderGapMsg`, the huge-session seek renderer, whose
+//      elements deliberately never enter `_elements` and so were skipped by a
+//      hook keyed to that map (round-3 finding). Guarded structurally by ⓪.
 //
 // SKIPs (exit 0) without chrome, like every other browser suite here.
 import fs from 'node:fs';
@@ -33,6 +36,58 @@ const check = (name, cond, extra) => {
   else { failed++; console.error('  ✗ ' + name + (extra ? ' — ' + (typeof extra === 'string' ? extra : JSON.stringify(extra)) : '')); }
 };
 const done = () => { console.log(failed ? `\n${failed} FAILED (${passed} passed)` : `\nALL PASS (${passed})`); process.exit(failed ? 1 : 0); };
+
+// ── ⓪ SOURCE DRIFT GUARD — runs with or WITHOUT chrome ─────────────────────
+//    Round-2's fix rests on one sentence: "ONE `_applyElementMarks`, called at
+//    every place an element is built for a message". Round 3's verifier found
+//    the ENUMERATION was wrong, not the mechanism — the huge-session seek
+//    renderer `_renderGapMsg` (chat-view-seek.js) is a FOURTH builder and had
+//    no marks at all, so a retracted turn reached through a gap slab rendered
+//    as ordinary live history. A count in a comment cannot fail; this guard
+//    COUNTS the builders in the source and demands a mark call inside each one,
+//    so a fifth path added without marks goes red here even on a machine with
+//    no browser. (`renderAssistantMsg` is the per-role switch's fingerprint:
+//    every builder has exactly one, and nothing else calls it.)
+{
+  const BUILDER = /\.renderAssistantMsg\(/g;   // a CALL — chat-renderers' definition has no leading dot
+  const MARK = /this\._applyElementMarks\(/g;
+  // 2000 chars: the known sites sit 636–1165 chars from their mark call and the
+  // two nearest builders are 5191 apart, so the window can never borrow the
+  // NEXT builder's call and pass a site that has none of its own.
+  const WIN = 2000;
+  const scan = (src) => {
+    const out = { builders: 0, marks: (src.match(MARK) || []).length, unmarked: [] };
+    for (const b of src.matchAll(BUILDER)) {
+      out.builders++;
+      if (!/this\._applyElementMarks\(/.test(src.slice(b.index, b.index + WIN))) {
+        out.unmarked.push(src.slice(0, b.index).split('\n').length);
+      }
+    }
+    return out;
+  };
+  // The whole client tree, not a hardcoded pair: a fifth builder is as likely
+  // to land in a new mixin file as in these two (chat-view-seek itself was
+  // split out of chat-view, and that split is how this defect got in).
+  const files = fs.readdirSync(path.join(repo, 'src/lib')).filter((f) => f.endsWith('.js')).map((f) => 'src/lib/' + f);
+  let builders = 0, marks = 0;
+  const unmarked = [];
+  for (const f of files) {
+    const r = scan(fs.readFileSync(path.join(repo, f), 'utf8'));
+    builders += r.builders; marks += r.marks;
+    for (const line of r.unmarked) unmarked.push(`${f}:${line}`);
+  }
+  check(`every path that BUILDS an element for a message re-derives its marks (${builders} builders, ${marks} call sites)`,
+    builders >= 4 && marks === builders && unmarked.length === 0,
+    unmarked.length ? 'unmarked builders: ' + unmarked.join(', ') : `builders=${builders} marks=${marks}`);
+  // NEGATIVE CONTROL for the guard itself — a matcher that can only ever say
+  // "clean" is not a guard. The exact shape round 3 found (a builder switch
+  // with no mark call) must be REPORTED, and the fixed shape must not be.
+  const bad = scan("switch(m.role){case 'assistant': el = this._renderers.renderAssistantMsg(m); break;}\nel.classList.add('chat-gap-msg');\nreturn el;");
+  const good = scan("switch(m.role){case 'assistant': el = this._renderers.renderAssistantMsg(m); break;}\nthis._applyElementMarks(el, m);\nreturn el;");
+  check('NEGATIVE CONTROL: the guard actually detects an unmarked builder (and passes the marked twin)',
+    bad.builders === 1 && bad.unmarked.length === 1 && good.builders === 1 && good.unmarked.length === 0,
+    JSON.stringify([bad, good]));
+}
 
 const CHROME = ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser'].find((p) => fs.existsSync(p));
 if (!CHROME) { console.log('  SKIP: no chrome/chromium — the browser measurement did not run'); done(); }
@@ -335,6 +390,74 @@ if (!opened?.ok) { console.error(pageErrors.join('\n')); done(); }
   check(`NEGATIVE CONTROL: a message that was never retracted is untouched by every rebuild (${JSON.stringify(stages.map((s) => [s?.ctrl?.display, s?.ctrl?.opacity, s?.ctrl?.tags]))})`, ctrlOk, JSON.stringify(stages.map((s) => s?.ctrl)));
   const ctrlDotOk = stages.map((s) => s?.toolB).every((d) => d && d.cls === false && d.w !== '6px');
   check(`NEGATIVE CONTROL: the PENDING-but-not-executing tool never gains a dot on a rebuild (${JSON.stringify(stages.map((s) => s?.toolB?.w))}) — re-deriving must not mark everything`, ctrlDotOk, JSON.stringify(stages.map((s) => s?.toolB)));
+}
+
+// ── ⑥ the FOURTH builder: the huge-session gap/seek renderer ───────────────
+//    Round-3 finding, reproduced here before the fix. `_renderGapMsg`
+//    (chat-view-seek.js) builds a message element for every record of a seek
+//    slab and applied NONE of the per-element marks — it carries only
+//    `.chat-gap-msg`, `dataset.line` and `dataset.ts`, and its elements never
+//    enter `this._elements`, which is the set leg ⑤'s hook is keyed to.
+//    REACHABILITY IS REAL, and it is exactly the case §2.10 exists for: codex
+//    carries `thread_rolled_back` in the ROLLOUT (verified on the owner's two
+//    real rollouts), the server's `gapSlab` normalizes the slab through the
+//    same message manager, so a slab genuinely arrives with `rewound` set —
+//    and past 34MB (JSONL_HEAD_BYTES + JSONL_TAIL_BYTES) the seek path is the
+//    ONLY way to read that history. The reader could not tell the agent had
+//    taken those turns back.
+//    Measured the way leg ⑤ is: COMPUTED STYLE off a gap element that is IN
+//    the document (a detached element has no computed style), with the same
+//    two negative controls.
+{
+  const m = await evaljs(`(async () => {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const v = window.__v;
+    const assts = v._messages.filter((x) => x.role === 'assistant');
+    const users = v._messages.filter((x) => x.role === 'user');
+    const supMsg = assts[assts.length - 1];  // 'superseded' (marked in leg ③)
+    const rbMsg = users[users.length - 1];   // 'rollback'   (marked in leg ③)
+    const ctrlMsg = assts[0];                // NEGATIVE CONTROL: never retracted
+    const cards = [...v._messageList.querySelectorAll('[data-tool-id]')].filter((c) => !c.classList.contains('chat-gap-msg'));
+    const toolA = v._messages.find((x) => x.id === cards[0].dataset.msgId);
+    const toolB = v._messages.find((x) => x.id === cards[1].dataset.msgId);
+    v._onToolsInProgress([cards[0].dataset.toolId]); // A executes, B only pends
+    await sleep(80);
+    // Render each through the GAP path and put it in the document, exactly as
+    // _loadEarlierGap does (it inserts before the sentinel; the parent is the
+    // same message list either way).
+    const built = [];
+    const gap = (msg) => { const el = v._renderGapMsg(msg); if (el) { v._messageList.appendChild(el); built.push(el); } return el; };
+    const supEl = gap(supMsg), rbEl = gap(rbMsg), ctrlEl = gap(ctrlMsg), aEl = gap(toolA), bEl = gap(toolB);
+    await sleep(140);
+    const styleOf = (el) => { if (!el) return { gone: true }; const cs = getComputedStyle(el); return { display: cs.display, opacity: Number(cs.opacity), tags: el.querySelectorAll('.chat-rewound-tag').length }; };
+    const dotOf = (el) => { if (!el) return { gone: true }; const lab = el.querySelector('.chat-tool-label'); const af = lab ? getComputedStyle(lab, '::after') : null; return { cls: el.classList.contains('chat-tool-inflight'), w: af ? af.width : '(no label)' }; };
+    const out = {
+      n: built.length,
+      gapClass: built.every((e) => e.classList.contains('chat-gap-msg')),
+      notInElements: built.every((e) => ![...v._elements.values()].includes(e)),
+      sup: styleOf(supEl), rb: styleOf(rbEl), ctrl: styleOf(ctrlEl),
+      toolA: dotOf(aEl), toolB: dotOf(bEl),
+      rbRect: rbEl ? (() => { const r = rbEl.getBoundingClientRect(); return { w: Math.round(r.width), inViewport: r.left >= -1 && r.right <= innerWidth + 1 }; })() : null,
+      modelMarks: [supMsg.rewound || null, rbMsg.rewound || null, ctrlMsg.rewound || null],
+    };
+    for (const e of built) e.remove();  // leave the live view exactly as found
+    return out;
+  })()`);
+  check(`the gap renderer built all five elements and they are gap elements OUTSIDE _elements (${JSON.stringify([m?.n, m?.gapClass, m?.notInElements])})`,
+    m?.n === 5 && m?.gapClass === true && m?.notInElements === true, m);
+  check(`a tombstoned partial reached through a GAP SLAB is REMOVED, like everywhere else (computed display: ${m?.sup?.display})`,
+    m?.sup?.display === 'none', JSON.stringify(m?.sup));
+  check(`…a codex ROLLBACK reached through a gap slab is struck in place: dimmed, exactly one tag (${JSON.stringify([m?.rb?.display, m?.rb?.opacity, m?.rb?.tags])})`,
+    m?.rb && m.rb.display !== 'none' && m.rb.opacity > 0 && m.rb.opacity < 1 && m.rb.tags === 1, JSON.stringify(m?.rb));
+  check(`…and the EXECUTING tool card keeps its dot on the gap path too (computed ::after width: ${m?.toolA?.w})`,
+    m?.toolA?.cls === true && m?.toolA?.w === '6px', JSON.stringify(m?.toolA));
+  check(`NEGATIVE CONTROL: a never-retracted message renders through the gap path untouched (${JSON.stringify([m?.ctrl?.display, m?.ctrl?.opacity, m?.ctrl?.tags])})`,
+    m?.ctrl && m.ctrl.display !== 'none' && m.ctrl.opacity === 1 && m.ctrl.tags === 0, JSON.stringify(m?.ctrl));
+  check(`NEGATIVE CONTROL: the PENDING-but-not-executing tool gains no dot on the gap path (${m?.toolB?.w})`,
+    m?.toolB?.cls === false && m?.toolB?.w !== '6px', JSON.stringify(m?.toolB));
+  check(`the struck gap message still fits the 375px viewport (w=${m?.rbRect?.w})`, m?.rbRect?.inViewport === true, JSON.stringify(m?.rbRect));
+  check('…and the model marks are unchanged by the gap render (it READS view state, it must never write it)',
+    JSON.stringify(m?.modelMarks) === '["superseded","rollback",null]', JSON.stringify(m?.modelMarks));
 }
 
 check('no uncaught page exceptions during the measurement', pageErrors.length === 0, pageErrors.slice(0, 3).join(' | '));

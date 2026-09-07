@@ -2677,8 +2677,9 @@ class ChatView {
     el.dataset.msgId = msg.id;
     if (msg.ts) el.dataset.ts = msg.ts; // for time-coordinate minimap positioning
     // Every per-element mark the VIEW owns (retraction §2.10, the executing-tool
-    // dot §2.5) — re-derived here and at both replacement sites, never carried
-    // by the element. Retraction survives a REBUILD because the normalizer
+    // dot §2.5) — re-derived here, at both replacement sites AND in the gap
+    // renderer (chat-view-seek `_renderGapMsg`), never carried by the
+    // element. Retraction survives a REBUILD because the normalizer
     // marks the message in record order, so a reload of the transcript shows
     // the same rewound history the live stream did — one code path for both.
     this._applyElementMarks(el, msg);
@@ -3028,11 +3029,12 @@ class ChatView {
    *  The bug this closes (round-2 verifier, reproduced at 375×667): a mark
    *  written STRAIGHT TO THE DOM at its origin — `_applyRewound`'s
    *  strike-through, `_onToolsInProgress`'s executing dot — dies at the next
-   *  element REPLACEMENT, and there are three places that build an element for
+   *  element REPLACEMENT, and there are FOUR places that build an element for
    *  a message (`_onCreateMessage`, the status-transition re-render in
-   *  `_onEditMessage`, `_rerenderVisible`). The claude tombstone case always
-   *  gets one: the message it retracts is a STREAMING partial, and
-   *  `MessageManager._finalizeStreaming` emits `{op:'edit',
+   *  `_onEditMessage`, `_rerenderVisible`, and — round 3 — `_renderGapMsg`,
+   *  the huge-session seek renderer in chat-view-seek.js). The claude
+   *  tombstone case always gets one: the message it retracts is a STREAMING
+   *  partial, and `MessageManager._finalizeStreaming` emits `{op:'edit',
    *  fields:{status:'complete'}}` for exactly that message at the next
    *  `result` — so a retracted answer came back on screen one record later,
    *  while an attach/rebuild (which reads `msg.rewound` from the normalizer)
@@ -3041,9 +3043,17 @@ class ChatView {
    *
    *  So: never re-apply marks one at a time at each replacement site (that is
    *  the same miss with more copies). One function, called at every place an
-   *  element enters `_elements`, that asks the VIEW STATE what this element
-   *  should be wearing. A new mark is added here and is correct everywhere.
-   *  Idempotent — it only ever restates what the state already says. */
+   *  element is BUILT FOR A MESSAGE, that asks the VIEW STATE what this
+   *  element should be wearing. A new mark is added here and is correct
+   *  everywhere. Idempotent — it only ever restates what the state says.
+   *
+   *  The rule is "built for a message", NOT "enters `_elements`": round 3's
+   *  finding was exactly that narrower phrasing — gap-slab elements are
+   *  deliberately kept out of `_elements` (they sit outside the virtual
+   *  window's accounting), so a hook keyed to that map skipped the one path
+   *  that renders a >34MB conversation's earlier history. scripts/
+   *  test-turn-truth-ui's source drift guard COUNTS the builders and demands a
+   *  mark call inside each one, so a fifth path cannot be added silently. */
   _applyElementMarks(el, msg) {
     if (!el) return;
     // ① retraction (§2.10) — the message model carries it (live op + rebuild)
