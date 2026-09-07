@@ -467,7 +467,11 @@ ok(/if \(meta\.threadId && meta\.activeTurnId\) \{[\s\S]{0,600}?await request\('
 ok(/noteQueued\(cid, \{ kind: 'user', msgId: msg\.msgId \|\| '' \}\);\s*\n\s*await request\('thread\/queue\/add'/.test(wsrc), "wrapper pin: the item's identity is registered BEFORE the add (the queue/changed refresh can beat the reply)");
 ok(!/request\('thread\/queue\/remove'/.test(wsrc) && /thread\/queue\/delete', \{ threadId: meta\.threadId, queuedSubmissionId/.test(wsrc), 'wrapper pin: removal is thread/queue/DELETE with queuedSubmissionId — 0.153.4 has no thread/queue/remove');
 ok(/await request\('turn\/steer'[\s\S]{0,300}expectedTurnId: meta\.activeTurnId/.test(wsrc), 'wrapper pin: every steer carries the ACTIVE turn id as its precondition');
-ok(/await clearQueueForStop\(\);\s*\n\s*if \(meta\.activeTurnId\) await request\('turn\/interrupt'/.test(wsrc), 'wrapper pin: Stop clears the queue BEFORE turn/interrupt (the app-server drains what is left when the turn ends)');
+ok(/try \{ await clearQueueForStop\(\); \}[\s\S]{0,600}?if \(stopTurnId\) await interruptTurn\(stopTurnId\);/.test(wsrc) && /entry\.promise = request\('turn\/interrupt'/.test(wsrc), 'wrapper pin: Stop clears the queue BEFORE turn/interrupt (the app-server drains what is left when the turn ends), and a sweep that throws may not eat the interrupt');
+// round-3 pins: BOTH halves of Stop are single-flight (stdin dispatches
+// handleInput without awaiting it, so two frames really do overlap)
+ok(/let stopSweepInFlight = null;\s*\nasync function clearQueueForStop\(\) \{\s*\n\s*if \(stopSweepInFlight\) return stopSweepInFlight;/.test(wsrc) && /async function _clearQueueForStop\(\) \{/.test(wsrc), 'wrapper pin: the Stop sweep is SINGLE-FLIGHT — a second Stop rides the running one instead of re-listing the queue it is deleting');
+ok(/if \(interruptInFlight && interruptInFlight\.turnId === turnId\)/.test(wsrc), 'wrapper pin: turn/interrupt coalesces per TURN + a live RPC (never a time window — an answered RPC with the turn still running is a real retry)');
 ok(/emitTaskEvent\('queue_op_result', \{ op: 'remove', id, ok: true, msg_id: known\?\.msgId \|\| '', reason: 'stopped' \}\);/.test(wsrc) && /await refreshQueue\(\{ timeoutMs: rpcBudget\(\) \}\);\s*\n\s*return removed;/.test(wsrc), "wrapper pin: every dropped item is reported as a removal BEFORE the republish (a cleared chip reads as 'it ran'), and that republish is BUDGETED like the rest of the sweep");
 // round-2 pins: the three defects, in the source
 ok(/if \(queueSweepActive\) return;\n\s*const fp = JSON\.stringify/.test(wsrc), 'wrapper pin: the sweep latch sits on publishQueue — the ONE choke point (turn/started republishes the CACHED list with no RPC at all)');
@@ -506,6 +510,7 @@ const spawnStub = (tag, stubBody) => {
     rpc: () => { try { return fs.readFileSync(rl, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } },
     meta: () => { try { return JSON.parse(fs.readFileSync(mt, 'utf8')); } catch { return null; } },
     send: (x) => proc.stdin.write(JSON.stringify(x) + '\n'),
+    journal: () => { try { return fs.readFileSync(path.join(d, 'codex-chat-wrapper.log'), 'utf8'); } catch { return ''; } },
     stop: () => { try { proc.kill('SIGTERM'); } catch {} try { fs.rmSync(d, { recursive: true, force: true }); } catch {} },
   };
 };
@@ -665,6 +670,138 @@ process.stdin.on('data', (d) => {
   ok(rms.some((r) => r.reason === 'timeout' && /did not answer/.test(r.detail || '')), 'the items the expired cap never even reached are reported as timeouts — reporting what was NOT cleared is the point', JSON.stringify(rms.map((r) => r.reason)));
   ok(C.lastQueue().length === 4, `…and the strip still lists them: they are still queued and will run (${C.lastQueue().length})`);
   C.stop();
+}
+
+// ── ②e STOP, ROUND 3: the SECOND Stop frame (double-click, or a second
+// attached client). stdin dispatches handleInput WITHOUT awaiting it, so two
+// `interrupt` frames 50ms apart really do run concurrently — and against a
+// SLOW app-server the second sweep used to enumerate the queue the first was
+// still deleting and then report those items `gone` ("it already ran"), the
+// exact falsehood this round exists to remove (and on that verdict a queued
+// peer message is deliberately NOT re-stashed, so the duplicate also lost a
+// promised message). The stub answers list/delete on a delay — the ONLY way
+// to hold the two sweeps open at the same time — and reports {deleted:false}
+// for an id that is already gone, exactly like the 0.153.4 app-server.
+console.log('— ②e Stop, round 3: two interrupt frames = ONE sweep, ONE interrupt');
+const STUB_SLOW = `
+const fs = require('fs');
+let b = ''; let turns = 0; let queue = []; let qseq = 0; let activeTurn = null;
+const D = 250;   // every queue RPC answers this late: the two sweeps overlap
+const send = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+const note = (o) => fs.appendFileSync(__RPCLOG__, JSON.stringify(o) + '\\n');
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (d) => {
+  b += d; let i;
+  while ((i = b.indexOf('\\n')) !== -1) {
+    const line = b.slice(0, i); b = b.slice(i + 1);
+    if (!line.trim()) continue;
+    let m; try { m = JSON.parse(line); } catch { continue; }
+    if (m.id === undefined || !m.method) continue;
+    fs.appendFileSync(__RPCLOG__, line + '\\n');
+    if (m.method === 'thread/start') { send({ id: m.id, result: { thread: { id: 'th-slow' } } }); continue; }
+    if (m.method === 'turn/start') { turns++; const tid = 'turn-' + turns; activeTurn = tid; send({ id: m.id, result: { turn: { id: tid } } }); send({ method: 'turn/started', params: { turn: { id: tid } } }); continue; }
+    if (m.method === 'thread/queue/add') { const q = { id: 'q' + (++qseq), input: m.params.input, clientUserMessageId: m.params.clientUserMessageId }; queue.push(q); send({ id: m.id, result: { queuedSubmission: q } }); send({ method: 'thread/queue/changed', params: { threadId: 'th-slow' } }); continue; }
+    if (m.method === 'thread/queue/list') {
+      // The answer is what the queue looks like WHEN WE ANSWER, and the count
+      // is logged: "how many enumerations saw a non-empty queue" is how the
+      // test sees a second sweep without guessing at timings.
+      const id = m.id;
+      setTimeout(() => { note({ method: '__list_result__', n: queue.length }); send({ id, result: { data: queue.slice(), nextCursor: null } }); }, D);
+      continue;
+    }
+    if (m.method === 'thread/queue/delete') {
+      const id = m.id, qid = m.params.queuedSubmissionId;
+      setTimeout(() => {
+        const at = queue.findIndex((q) => q.id === qid);
+        // Already gone = the 0.153.4 verdict for "something else got it first"
+        if (at < 0) { note({ method: '__delete_result__', id: qid, deleted: false }); send({ id, result: { deleted: false } }); return; }
+        queue.splice(at, 1);
+        note({ method: '__delete_result__', id: qid, deleted: true });
+        send({ id, result: { deleted: true } });
+        send({ method: 'thread/queue/changed', params: { threadId: 'th-slow' } });
+      }, D);
+      continue;
+    }
+    if (m.method === 'turn/interrupt') { send({ id: m.id, result: {} }); const e = activeTurn; activeTurn = null; send({ method: 'turn/completed', params: { turn: { id: e }, status: 'interrupted' } }); continue; }
+    send({ id: m.id, result: {} });
+  }
+});
+`;
+{
+  const D = spawnStub('slow', STUB_SLOW);
+  ok(await waitFor(() => D.meta()?.threadId === 'th-slow'), 'slow stub: the wrapper has a thread');
+  D.send({ type: 'chat-input', text: 'go', msgId: 'd0' });
+  ok(await waitFor(() => D.meta()?.activeTurnId === 'turn-1'), 'slow stub: a turn is running');
+  D.send({ type: 'chat-input', text: 'queued one', msgId: 'd1' });
+  D.send({ type: 'peer-message', text: 'ping from E', fromName: 'session E' });
+  ok(await waitFor(() => D.lastQueue().length === 2), `slow stub: two messages queued behind the turn (${JSON.stringify(D.lastQueue().map((i) => i.preview))})`);
+  const queuedIds = D.lastQueue().map((i) => i.id);
+  // Let the adds' own queue/changed refreshes finish answering (D=250ms) —
+  // a list REQUESTED before the mark answers after it, and its enumeration is
+  // not the sweep's. Marking a quiet wire is what makes the count below mean
+  // "the sweep listed once".
+  await sleep(700);
+  const mark = D.rpc().length;
+  const after = () => D.rpc().slice(mark);
+  // THE DOUBLE CLICK. 50ms is a real double-click gap and far inside the
+  // sweep (250ms per RPC × 3 here); a second attached client's Stop is the
+  // same two frames on the same stdin.
+  D.send({ type: 'interrupt' });
+  await sleep(50);
+  D.send({ type: 'interrupt' });
+  ok(await waitFor(() => after().some((m) => m.method === 'turn/interrupt'), 15000), 'the Stop reaches turn/interrupt');
+  await sleep(900);   // let a SECOND sweep, if there were one, finish and speak
+  const enumerations = after().filter((m) => m.method === '__list_result__' && m.n > 0);
+  ok(enumerations.length === 1, `exactly ONE enumeration saw the queue — the second Stop rode the running sweep instead of listing it again (${enumerations.length})`, JSON.stringify(after().filter((m) => m.method === '__list_result__')));
+  const deletes = after().filter((m) => m.method === 'thread/queue/delete').map((m) => m.params.queuedSubmissionId);
+  ok(deletes.length === 2 && new Set(deletes).size === 2 && queuedIds.every((id) => deletes.includes(id)), `ONE thread/queue/delete per queued item, no duplicates (${JSON.stringify(deletes)})`);
+  const interrupts = after().filter((m) => m.method === 'turn/interrupt');
+  ok(interrupts.length === 1, `exactly ONE turn/interrupt for the two frames — the duplicate is coalesced on the turn it names (${interrupts.length})`, JSON.stringify(interrupts.map((m) => m.params)));
+  const rms = D.ops().filter((r) => r.op === 'remove');
+  ok(rms.length === 2 && rms.every((r) => r.ok === true && r.reason === 'stopped'), `every Stop-removed item is reported ONCE and as 'stopped' (${JSON.stringify(rms.map((r) => [r.id, r.ok, r.reason]))})`);
+  ok(!rms.some((r) => r.reason === 'gone'), "…and NOTHING is reported 'gone' — no item Stop removed may be described as having already run", JSON.stringify(rms.map((r) => r.reason)));
+  ok(!after().some((m) => m.method === '__delete_result__' && m.deleted === false), 'the app-server never had to refuse a delete: no item was deleted twice', JSON.stringify(after().filter((m) => m.method === '__delete_result__')));
+  ok(after().findIndex((m) => m.method === 'turn/interrupt') > after().map((m) => m.method).lastIndexOf('thread/queue/delete'), 'the ordering still holds under the double Stop: every delete precedes the interrupt', JSON.stringify(after().map((m) => m.method)));
+  ok(/already in flight — this Stop rides it/.test(D.journal()), 'the wrapper journal RECORDS the coalescing decision (a silent no-op would be indistinguishable from a lost frame)', D.journal().split('\n').filter((l) => /interrupt/.test(l)).slice(-3).join(' | '));
+  ok(D.lastQueue().length === 0, `the queue really is empty afterwards (${JSON.stringify(D.lastQueue())})`);
+  // the peer entry Stop dropped goes back to the delivery ladder EXACTLY once
+  const back = D.msgs().filter((p) => p.type === 'peer_message_result' && p.ok === false);
+  ok(back.length === 1 && /ping from E/.test(back[0].text || ''), `the dropped peer message is handed back to the ladder once, not twice (${JSON.stringify(back.map((b) => b.reason))})`);
+  D.stop();
+}
+
+// ── ②f a STEER whose delete is REFUSED: `{deleted:false}` after a landed steer
+// means the app-server drained the item, i.e. it now runs twice (injected into
+// the current turn AND as its own). r2 read that verdict in the Stop sweep but
+// not here, and returned a bare ok:true — the silent half of the very failure
+// `steered-not-dequeued` exists to announce.
+console.log('— ②f the steer whose queued copy could not be removed');
+{
+  const E = spawnStub('steer-drained', STUB_RACE);
+  ok(await waitFor(() => E.meta()?.threadId === 'th-race'), 'drained-steer stub: the wrapper has a thread');
+  E.send({ type: 'chat-input', text: 'go', msgId: 'e0' });
+  ok(await waitFor(() => E.meta()?.activeTurnId === 'turn-1'), 'drained-steer stub: a turn is running');
+  E.send({ type: 'chat-input', text: '[ran] steer me', msgId: 'e1' });
+  ok(await waitFor(() => E.lastQueue().length === 1), `drained-steer stub: one message queued (${E.lastQueue().length})`);
+  const qid = E.lastQueue()[0].id;
+  E.send({ type: 'queue-op', op: 'steer', id: qid });
+  ok(await waitFor(() => E.ops().some((r) => r.op === 'steer')), 'the steer answers');
+  const r = E.ops().find((x) => x.op === 'steer');
+  ok(r?.ok === true && r.reason === 'steered-not-dequeued' && /already left the queue/.test(r.detail || ''), `a landed steer whose delete is REFUSED warns about the second run (${JSON.stringify(r)})`);
+  ok(r?.msg_id === 'e1', 'the warning is joined to the bubble it is about', JSON.stringify(r));
+  // through the REAL normalizer: the chip still flips to 'steered' (it WAS
+  // steered) and the possible double run is a visible notice, never silence
+  {
+    const nm = new CodexMessageManager('drained');
+    const now = new Date().toISOString();
+    nm.processLive({ timestamp: now, type: 'response_item', payload: { type: 'message', role: 'user', webui_msg_id: 'e1', content: [{ type: 'input_text', text: 'steer me' }] } });
+    nm.processLive({ timestamp: now, type: 'event_msg', payload: { type: 'queue_op_result', ...r } });
+    const bubble = nm.messages.find((m) => m.role === 'user');
+    const notice = nm.messages.filter((m) => m.role === 'system').map((m) => m.content?.[0]?.text || '');
+    ok(bubble?.queueState === 'steered', `the bubble reads 'steered' — it was (${bubble?.queueState})`);
+    ok(notice.some((t) => /may run a second time/.test(t)), 'and the possible double run is SAID', notice.join(' | '));
+  }
+  E.stop();
 }
 
 try { w.kill('SIGTERM'); } catch {}

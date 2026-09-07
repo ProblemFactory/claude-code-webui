@@ -1423,12 +1423,23 @@ async function steerOne(item) {
     return { ...base, ok: false, detail: e.message, ...classifySteerFailure(e.message) };
   }
   // The steer landed: the message is now IN the turn, so the queued copy must
-  // go or it runs a second time (measured: steer never dequeues).
+  // go or it runs a second time (measured: steer never dequeues). The delete's
+  // VERDICT is read here exactly as the Stop sweep reads it (round-3 review):
+  // `{deleted:false}` is not an error, it means the app-server had already
+  // DRAINED the item — so it is running as its own turn AND it was just
+  // injected into the current one, i.e. the double run this delete exists to
+  // prevent already happened. Returning a bare ok:true there was the silent
+  // half of the very failure `steered-not-dequeued` was invented to announce.
+  let dequeued;
   try {
-    await request('thread/queue/delete', { threadId: meta.threadId, queuedSubmissionId: base.id }, 15000);
+    dequeued = await deleteQueuedItem(base.id);
   } catch (e) {
     log(`steered ${base.id} but thread/queue/delete failed (${e.message}) — it may run a SECOND time`);
     return { ...base, ok: true, reason: 'steered-not-dequeued', detail: e.message };
+  }
+  if (!dequeued) {
+    log(`steered ${base.id} but the app-server had already drained it (deleted:false) — it may run a SECOND time`);
+    return { ...base, ok: true, reason: 'steered-not-dequeued', detail: 'it had already left the queue (it may run a second time)' };
   }
   queueMeta.delete(cid);
   return { ...base, ok: true };
@@ -1468,8 +1479,27 @@ async function deleteQueuedItem(id, timeoutMs = 15000) {
  *       queued is REPORTED instead of the button hanging (round-2 review).
  *  Nothing here is silent: a failed delete reports queue_op_result ok:false
  *  (the item is still queued and WILL run) and lands in the wrapper journal.
+ *
+ *  SINGLE-FLIGHT (round-3 review), because a second Stop is NORMAL: stdin
+ *  dispatches `handleInput` WITHOUT awaiting it, so a double-click — or a
+ *  second attached client's Stop, which nothing on this machine coordinates —
+ *  used to start a second sweep on top of the running one. The second sweep
+ *  listed the queue the first was still deleting and then reported those very
+ *  items `gone` ("it already ran"), which is the exact falsehood this round
+ *  exists to delete, and on that verdict a queued peer entry is deliberately
+ *  NOT re-stashed — so the duplicate sweep also lost a promised message.
+ *  A second Stop therefore RIDES the running sweep. What it clears is what
+ *  that sweep LISTED; anything queued after that list is not silently
+ *  swallowed — the sweep's closing publish still lists it, truthfully.
  *  @returns {Promise<number>} how many items left the queue. */
+let stopSweepInFlight = null;
 async function clearQueueForStop() {
+  if (stopSweepInFlight) return stopSweepInFlight;
+  stopSweepInFlight = _clearQueueForStop();
+  try { return await stopSweepInFlight; } finally { stopSweepInFlight = null; }
+}
+
+async function _clearQueueForStop() {
   if (!meta.threadId) return 0;
   // THE BUDGET (round-2 review): Stop is a safety control. Every RPC below is
   // short-fused and the whole sweep is capped, so a wedged app-server costs
@@ -1542,6 +1572,28 @@ async function clearQueueForStop() {
   // next statement and must not wait on this list.
   await refreshQueue({ timeoutMs: rpcBudget() });
   return removed;
+}
+
+/** `turn/interrupt`, at most ONE in flight per turn (round-3 review, the twin
+ *  of the sweep's single-flight). A duplicate Stop frame that arrives while the
+ *  interrupt RPC is still unanswered is the SAME stop, so it rides that call.
+ *  The key is the TURN plus a live RPC — never a time window (the "identify an
+ *  action by what defines it" rule): once the RPC has answered and the turn is
+ *  somehow STILL running, a further Stop is a genuine retry and goes out. A
+ *  duplicate that slips through anyway is harmless — the app-server rejects an
+ *  interrupt for a finished turn and the rejection is logged, not surfaced. */
+let interruptInFlight = null;   // {turnId, promise}
+function interruptTurn(turnId) {
+  if (interruptInFlight && interruptInFlight.turnId === turnId) {
+    log(`interrupt: a turn/interrupt for ${turnId} is already in flight — this Stop rides it`);
+    return interruptInFlight.promise;
+  }
+  const entry = { turnId, promise: null };
+  entry.promise = request('turn/interrupt', { threadId: meta.threadId, turnId }, 30000)
+    .catch((e) => { log(`turn/interrupt failed for ${turnId}: ${e.message}`); })
+    .then(() => { if (interruptInFlight === entry) interruptInFlight = null; });
+  interruptInFlight = entry;
+  return entry.promise;
 }
 
 async function handleQueueOp(msg) {
@@ -1737,9 +1789,17 @@ async function handleInput(msg) {
       // STOP MEANS STOP — on every harness (owner decision 2026-09-07; the ACP
       // wrapper, whose queue is its own, always did this). The app-server
       // DRAINS its queue when the turn ends, so clearing it AFTER the interrupt
-      // would lose the race: delete first, interrupt second.
-      await clearQueueForStop();
-      if (meta.activeTurnId) await request('turn/interrupt', { threadId: meta.threadId, turnId: meta.activeTurnId }, 30000).catch(() => {});
+      // would lose the race: delete first, interrupt second. Both halves are
+      // single-flight (a second Stop frame rides them); the sweep's own throw
+      // may never eat the interrupt — Stop is a safety control, so the failure
+      // is logged VERBATIM and the turn is interrupted anyway.
+      try { await clearQueueForStop(); } catch (e) { log(`interrupt: the queue sweep threw: ${e.message} — interrupting anyway`); }
+      // The turn to interrupt is the one running AFTER the sweep (an item the
+      // app-server drained mid-sweep opened its own turn, and Stop means that
+      // one stops too), captured ONCE so the coalescing key and the RPC name
+      // the same turn.
+      const stopTurnId = meta.activeTurnId;
+      if (stopTurnId) await interruptTurn(stopTurnId);
       // Re-read once more: the interrupt itself is a queue-mutating event on
       // the server side, and an unreadable/undeletable item must still be shown.
       refreshQueue();

@@ -233,6 +233,33 @@ never a backend id; the ws layer, the strip and the chip all gate on that row:
   immediately while everything still queued is reported `ok:false` ("it stays
   queued and will run"). A wedged app-server used to hold the Stop button for
   15s per RPC per queued item.
+- **A SECOND Stop is normal, and it is the SAME Stop (round-3 review).** A
+  double-click — or a second attached client's Stop, which nothing coordinates
+  — used to start a second sweep on top of the running one: it listed the queue
+  the first was still deleting and then reported those very items "no longer
+  queued — it already ran", the exact falsehood the round above exists to
+  remove (and on that verdict a queued agent-to-agent message is deliberately
+  NOT handed back to the delivery ladder, so the duplicate also lost a promised
+  message). Both halves of Stop are now single-flight: a second frame RIDES the
+  running sweep, and `turn/interrupt` coalesces per TURN while its RPC is
+  unanswered — keyed on the turn plus a live call, never on a time window, so
+  an answered interrupt whose turn is somehow still running still accepts a
+  genuine retry. What a riding Stop clears is what that sweep listed; anything
+  queued after the list is not swallowed, the sweep's closing publish still
+  lists it. **The button says so too:** clicking Stop disables it and it reads
+  "Stopping…" until the turn ends or an 8s fallback (deliberately longer than
+  the 6s sweep budget) re-arms it — a Stop that can stay dead would be worse
+  than a duplicate frame. A label repaint no longer hands the live button back
+  mid-flight (that was the actual DOM bug: the streaming status line re-renders
+  on every label change).
+- **A steer whose delete is REFUSED says so (round-3).** `turn/steer` never
+  dequeues, so the wrapper deletes the queued copy — and if that delete answers
+  `{deleted:false}` the app-server had already drained the item, i.e. the
+  double run the delete exists to prevent has just happened. It is reported
+  `ok:true, reason:'steered-not-dequeued'` (the same verdict the failed-delete
+  path uses): the chip still reads `Steered` — it was — and a notice warns that
+  it may run a second time. r2 read this verdict in the Stop sweep but not
+  here, and answered a bare success.
 - Measured facts behind the codex implementation (0.153.4, live app-server):
   the removal verb is `thread/queue/delete {threadId, queuedSubmissionId}` —
   **there is no `thread/queue/remove`**; `thread/queue/changed` carries only

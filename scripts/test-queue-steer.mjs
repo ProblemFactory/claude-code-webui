@@ -164,7 +164,12 @@ console.log('— ③ the ws case gates on the caps row AND the running wrapper')
   // as if they had RUN (the normalizer clears a chip that left with no result).
   const aw2 = read('data/bin/acp-wrapper.js');
   ok("ACP Stop reports each dropped entry as a removal BEFORE the republish (a cleared chip means 'it ran')", /for \(const q of dropped\) record\('queue_op_result', \{ op: 'remove', id: q\.id, ok: true, msg_id: q\.opts\?\.msgId \|\| '', reason: 'stopped' \}\);\s*\n\s*if \(dropped\.length\) publishQueue\(\);/.test(aw2));
-  ok('codex Stop clears the app-server queue too — the deletes go out BEFORE turn/interrupt, or the app-server drains them when the turn ends', /await clearQueueForStop\(\);\s*\n\s*if \(meta\.activeTurnId\) await request\('turn\/interrupt'/.test(cw2));
+  ok('codex Stop clears the app-server queue too — the deletes go out BEFORE turn/interrupt, or the app-server drains them when the turn ends', /try \{ await clearQueueForStop\(\); \}[\s\S]{0,600}?if \(stopTurnId\) await interruptTurn\(stopTurnId\);/.test(cw2));
+  // round-3: BOTH halves single-flight — a double-click (or a second attached
+  // client) is ONE sweep and ONE interrupt, never a second sweep reporting the
+  // first one's removals as "it already ran" (test-codex-p2-wrapper §②e drives it)
+  ok('codex Stop is single-flight on both halves: a second Stop rides the running sweep and the in-flight turn/interrupt', /if \(stopSweepInFlight\) return stopSweepInFlight;/.test(cw2) && /if \(interruptInFlight && interruptInFlight\.turnId === turnId\)/.test(cw2));
+  ok("codex steer reads the delete's verdict too: a drained item warns about the second run instead of a bare ok", /if \(!dequeued\) \{[\s\S]{0,400}?reason: 'steered-not-dequeued', detail: 'it had already left the queue \(it may run a second time\)'/.test(cw2));
   ok("…reporting each dropped item as a removal with reason 'stopped' (the SAME frame the ACP wrapper emits, so one client path renders both)", /emitTaskEvent\('queue_op_result', \{ op: 'remove', id, ok: true, msg_id: known\?\.msgId \|\| '', reason: 'stopped' \}\);/.test(cw2));
   ok('…and a delete that FAILS is reported (ok:false) + journalled, never a silent "cleared" queue', /emitTaskEvent\('queue_op_result', \{ op: 'remove', id, ok: false, reason: 'error', detail: e\.message, msg_id: known\?\.msgId \|\| '' \}\);/.test(cw2) && /log\(`interrupt: thread\/queue\/delete failed for/.test(cw2));
   ok('…and a queued PEER message Stop drops goes back to the delivery ladder (same rule as the explicit remove)', /if \(known\?\.kind === 'peer' && known\.text\) emitTaskEvent\('peer_message_result', \{ ok: false, reason: 'dropped by Stop before it was delivered'/.test(cw2));
@@ -500,6 +505,149 @@ console.log('— ⑥ the REAL wrapper against the REAL `codex app-server` (evide
       await sleep(400);
     }
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+  }
+}
+
+// ⑧ THE STOP BUTTON, ONE SHOT (round-3 review). Stop is not instantaneous: the
+// codex wrapper empties the app-server queue BEFORE it interrupts and that
+// sweep is capped at ~6s against a wedged app-server (and claude's §11
+// delayed-fallback SIGINT trails the protocol interrupt by 2s). A second click
+// in that window is a second `interrupt` frame. The wrapper coalesces them
+// now, but the button must also stop inviting the click — and it must not be
+// possible to WEDGE it: the pending state ends on the turn ending or on its own
+// fallback timer. Driven in a REAL browser because the failure was a DOM one:
+// showTyping re-renders the whole status line on every label change, which
+// handed back a fresh, clickable Stop mid-flight.
+console.log('— ⑧ the Stop button is one-shot while an interrupt is in flight');
+{
+  const cinput = read('src/lib/chat-input.js');
+  ok('every Stop entry point goes through _fireInterrupt (plain click AND the armed compaction confirm)',
+    (cinput.match(/this\._fireInterrupt\(\)/g) || []).length === 2 && !/btn\.onclick = \(\) => this\._onInterrupt\(\)/.test(cinput), cinput.match(/_(fire|on)Interrupt\(\)/g));
+  ok('the pending state is re-applied by showTyping itself (the label repaint is what used to hand the button back)', /if \(this\._stopPending\) \{ this\._applyStopPending\(btn\);/.test(cinput));
+  ok('it ends on the turn ending (hideTyping) AND on a bounded fallback timer — a Stop button that stays dead is the one failure this control may not have',
+    /hideTyping\(\) \{[\s\S]{0,400}this\._endStopPending\(\);/.test(cinput) && /setTimeout\(\(\) => \{[\s\S]{0,300}this\._endStopPending\(\);\s*\n\s*\}, ChatInput\.STOP_PENDING_MS\)/.test(cinput));
+  ok('dispose clears the timer (no orphaned callback into a closed window)', /if \(this\._stopPendingTimer\) \{ clearTimeout\(this\._stopPendingTimer\); this\._stopPendingTimer = null; \}/.test(cinput));
+  // the window must OUTLAST the wrapper's own Stop budget, or it re-arms while
+  // the sweep it is waiting for is still running
+  const pendingMs = Number(/static get STOP_PENDING_MS\(\) \{ return (\d+); \}/.exec(cinput)?.[1]);
+  const sweepMs = Number(/const STOP_SWEEP_TOTAL_MS = (\d+);/.exec(read('data/bin/codex-chat-wrapper.js'))?.[1]);
+  ok(`the pending window (${pendingMs}ms) outlasts the codex wrapper's whole Stop sweep budget (${sweepMs}ms)`, pendingMs > sweepMs, { pendingMs, sweepMs });
+  const zh = read('src/lib/i18n-zh.js'), ja = read('src/lib/i18n-ja.js');
+  ok('the new strings are translated (zh + ja)', ["'Stopping…':", "'Stopping the current turn…':"].every((k) => zh.includes(k) && ja.includes(k)));
+  ok('the pending look is a CLASS in the stylesheet, theme vars only (§17)', /\.chat-interrupt-btn\.chat-interrupt-pending/.test(read('public/chat.css')) && !/chat-interrupt-pending[^}]*#[0-9a-f]{3,6}/i.test(read('public/chat.css')));
+
+  const CHROME = ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser'].find((p) => fs.existsSync(p));
+  if (!CHROME) {
+    console.log('  SKIP: no chrome/chromium on this box — the DOM half of ⑧ did not run');
+  } else {
+    const http = await import('node:http');
+    const net = await import('node:net');
+    const { spawn } = await import('node:child_process');
+    const esbuild = require(path.join(REPO, 'node_modules/esbuild'));
+    const WebSocket = require('ws');
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const freePort = () => new Promise((res, rej) => { const s = net.createServer(); s.on('error', rej); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); }); });
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `vs-stopbtn-${process.pid}-`));
+    const bundle = path.join(tmp, 'chat-input.iife.js');
+    const stub = { name: 'stub-build-version', setup(b) { b.onResolve({ filter: /build-version\.js$/ }, () => ({ path: 'build-version', namespace: 'bv' })); b.onLoad({ filter: /.*/, namespace: 'bv' }, () => ({ contents: "export const BUILD_VERSION = 'test';", loader: 'js' })); } };
+    await esbuild.build({ entryPoints: [path.join(REPO, 'src/lib/chat-input.js')], bundle: true, format: 'iife', globalName: 'VS', platform: 'browser', target: 'es2022', outfile: bundle, logLevel: 'silent', loader: { '.css': 'text' }, plugins: [stub] });
+    const js = fs.readFileSync(bundle, 'utf8').replace(/<\/script/gi, '<\\/script');
+    const css = fs.readFileSync(path.join(REPO, 'public/chat.css'), 'utf8').replace(/<\/style/gi, '<\\/style');
+    const html = `<!doctype html><meta charset="utf-8"><title>stop</title><style>${css}</style><body></body><script>${js}</script>`;
+    const port = await freePort(), cdpPort = await freePort();
+    const srv = http.createServer((_q, r) => { r.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); r.end(html); }).listen(port, '127.0.0.1');
+    const chrome = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${cdpPort}`, '--no-first-run', '--no-sandbox', '--disable-gpu',
+      '--disable-dev-shm-usage', '--disable-background-timer-throttling', `--user-data-dir=${tmp}/chrome`, 'about:blank'], { stdio: 'ignore' });
+    let ws = null;
+    try {
+      let target = null;
+      for (let i = 0; i < 120 && !target; i++) {
+        try { target = (await (await fetch(`http://127.0.0.1:${cdpPort}/json`)).json()).find((x) => x.type === 'page'); } catch {}
+        if (!target) await sleep(250);
+      }
+      if (!target) throw new Error('chrome never exposed a CDP page target');
+      ws = new WebSocket(target.webSocketDebuggerUrl, { maxPayload: 64 * 1024 * 1024 });
+      await new Promise((r, j) => { ws.on('open', r); ws.on('error', j); });
+      let seq = 0; const pend = new Map();
+      ws.on('message', (d) => { const m = JSON.parse(d); if (m.id && pend.has(m.id)) { pend.get(m.id)(m); pend.delete(m.id); } });
+      const cdp = (method, params = {}) => new Promise((res) => { const id = ++seq; pend.set(id, res); ws.send(JSON.stringify({ id, method, params })); });
+      const evaljs = async (expr) => {
+        const r = await cdp('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true });
+        if (r.result?.exceptionDetails) throw new Error(JSON.stringify(r.result.exceptionDetails).slice(0, 500));
+        return r.result?.result?.value;
+      };
+      await cdp('Runtime.enable'); await cdp('Page.enable');
+      await cdp('Page.navigate', { url: `http://127.0.0.1:${port}/` });
+      for (let i = 0; i < 80; i++) { if (await evaljs('!!(window.VS && window.VS.ChatInput)').catch(() => false)) break; await sleep(150); }
+      // A REAL ChatInput in a REAL document: the bug lived in innerHTML +
+      // querySelector, which no element stub reproduces.
+      const built = await evaljs(`(() => {
+        window.__n = 0;
+        const ci = new VS.ChatInput({ send(){} }, 'sess-stop', { onSend(){}, onInterrupt: () => { window.__n++; } });
+        document.body.appendChild(ci.element);
+        window.__ci = ci;
+        return !!ci.element.querySelector('.chat-stream-status');
+      })()`);
+      ok('a real ChatInput mounts in a real document', built === true);
+      const state = () => evaljs(`(() => {
+        const b = document.querySelector('.chat-interrupt-btn');
+        return b ? { text: b.textContent, disabled: !!b.disabled, pending: b.classList.contains('chat-interrupt-pending'), n: window.__n, cursor: getComputedStyle(b).cursor } : { none: true, n: window.__n };
+      })()`);
+      // a TRUSTED click through the browser's own hit test — a disabled button
+      // must not even receive it (btn.click() would bypass that question)
+      const clickStop = async () => {
+        const r = await evaljs(`(() => { const b = document.querySelector('.chat-interrupt-btn'); const q = b.getBoundingClientRect(); return { x: q.left + q.width / 2, y: q.top + q.height / 2 }; })()`);
+        for (const type of ['mousePressed', 'mouseReleased']) await cdp('Input.dispatchMouseEvent', { type, x: r.x, y: r.y, button: 'left', clickCount: 1 });
+        await sleep(80);
+      };
+      await evaljs(`window.__ci.showTyping('thinking...'); true`);
+      let s = await state();
+      ok('the live Stop button is enabled and says Stop', s.text.includes('Stop') && !s.disabled && !s.pending, s);
+      await clickStop();
+      s = await state();
+      ok('clicking it sends ONE interrupt and the button goes pending: disabled + "Stopping…"', s.n === 1 && s.disabled === true && s.pending === true && /Stopping/.test(s.text), s);
+      await clickStop();
+      s = await state();
+      ok('a SECOND click inside the window sends nothing — the ~6s wedged-server window cannot produce a duplicate interrupt frame', s.n === 1, s);
+      // THE REGRESSION: the status line repaints on every label change
+      await evaljs(`window.__ci.showTyping('still thinking…'); true`);
+      s = await state();
+      ok('a label repaint does NOT hand the button back (showTyping re-applies the pending state)', s.disabled === true && /Stopping/.test(s.text) && s.n === 1, s);
+      await clickStop();
+      ok('…and the button under that repaint is still inert', (await state()).n === 1);
+      // TURN END re-arms it
+      await evaljs(`window.__ci.hideTyping(); window.__ci.showTyping('thinking...'); true`);
+      s = await state();
+      ok('the turn ending gives the live button back (enabled, labelled Stop)', !s.disabled && !s.pending && s.text.includes('Stop'), s);
+      await clickStop();
+      ok('…and it can stop the NEXT turn', (await state()).n === 2);
+      // THE FALLBACK TIMER: shortened here, its real value is pinned above
+      await evaljs(`window.__ci.hideTyping();
+        Object.defineProperty(VS.ChatInput, 'STOP_PENDING_MS', { get: () => 400, configurable: true });
+        window.__ci.showTyping('thinking...'); true`);
+      await clickStop();
+      ok('pending again', (await state()).disabled === true);
+      await sleep(700);
+      s = await state();
+      ok('the fallback timer re-arms a Stop whose turn never ended — the button can never stay dead', !s.disabled && !s.pending && s.text.includes('Stop'), s);
+      await clickStop();
+      ok('…and that re-armed button really works', (await state()).n === 4);
+      // the two-step compaction Stop keeps its confirm AND gets the pending state
+      await evaljs(`window.__ci.hideTyping(); window.__ci.showTyping('Compacting context…', 'compacting'); true`);
+      await clickStop();
+      s = await state();
+      ok('a compaction Stop still ARMS first (no interrupt on the first click)', s.n === 4 && /Cancel compaction/.test(s.text) && !s.disabled, s);
+      await clickStop();
+      s = await state();
+      ok('…and the confirming click both interrupts and goes pending', s.n === 5 && s.disabled === true && /Stopping/.test(s.text), s);
+    } catch (e) {
+      ok('the browser leg ran', false, String(e.message || e).slice(0, 300));
+    } finally {
+      try { ws?.close(); } catch {}
+      try { chrome.kill('SIGKILL'); } catch {}
+      try { srv.close(); } catch {}
+      try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+    }
   }
 }
 

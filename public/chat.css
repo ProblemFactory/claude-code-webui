@@ -533,6 +533,12 @@
 }
 .chat-interrupt-btn:hover { background: var(--red); color: var(--accent-fg); }
 .chat-interrupt-btn.chat-interrupt-armed { background: var(--red); color: var(--accent-fg); }
+/* Stop already in flight (round-3): quiet + inert, never a red button that
+   looks clickable while the interrupt is on the wire. */
+.chat-interrupt-btn.chat-interrupt-pending,
+.chat-interrupt-btn.chat-interrupt-pending:hover {
+  background: transparent; border-color: var(--border); color: var(--text-dim); cursor: default;
+}
 /* "Prompt is too long" guidance card (2.365.0) */
 .chat-ctx-full { display: flex; flex-direction: column; gap: 6px; max-width: 640px; }
 .chat-ctx-full-title { color: var(--red); font-weight: 600; }

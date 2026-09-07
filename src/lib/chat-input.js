@@ -403,8 +403,16 @@ export class ChatInput {
   showTyping(label = t('thinking...'), kind = null) {
     if (!this._streamStatus) return;
     this._pendingLine = false; // a real turn owns the line now (see _clearPending)
+    // Remembered so the button can be re-rendered in place when the pending
+    // Stop state ends (the label keeps changing under it while the turn runs).
+    this._typingLabel = label; this._typingKind = kind;
     this._streamStatus.innerHTML = `<span class="chat-spinner"></span> ${escHtml(label)}<button class="chat-interrupt-btn" title="${escHtml(t('Interrupt'))}">\u25A0 ${escHtml(t('Stop'))}</button>`;
     const btn = this._streamStatus.querySelector('.chat-interrupt-btn');
+    // A STOP ALREADY IN FLIGHT OWNS THE BUTTON (round-3 review). showTyping is
+    // re-run on every label change, so re-applying the pending state HERE is
+    // what makes it stick: without it the next "thinking\u2026" repaint handed back
+    // a fresh, clickable Stop in the middle of the very window it guards.
+    if (this._stopPending) { this._applyStopPending(btn); this._streamStatus.classList.remove('hidden'); this._isStreaming = true; return; }
     if (kind === 'compacting') {
       // Two-step Stop while a compaction runs (2.365.0): the CLI's only
       // "Compaction canceled." path is an abort signal, and a large
@@ -412,7 +420,7 @@ export class ChatInput {
       // whole attempt away (the userN incident). Arm, then confirm.
       btn.title = t('Click again to cancel the running compaction');
       btn.onclick = () => {
-        if (btn.dataset.armed) { this._onInterrupt(); return; }
+        if (btn.dataset.armed) { this._fireInterrupt(); return; }
         btn.dataset.armed = '1';
         btn.classList.add('chat-interrupt-armed');
         btn.textContent = t('Cancel compaction?');
@@ -424,7 +432,7 @@ export class ChatInput {
         }, 4000);
       };
     } else {
-      btn.onclick = () => this._onInterrupt();
+      btn.onclick = () => this._fireInterrupt();
     }
     this._streamStatus.classList.remove('hidden');
     this._isStreaming = true;
@@ -440,9 +448,64 @@ export class ChatInput {
 
   hideTyping() {
     if (!this._streamStatus) return;
+    // The turn ended — whatever the Stop was waiting for has happened. Clear
+    // the streaming flag FIRST: _endStopPending repaints a live status line,
+    // and this one is on its way out.
+    this._isStreaming = false;
+    this._endStopPending();
     this._streamStatus.classList.add('hidden');
     this._streamStatus.innerHTML = '';
-    this._isStreaming = false;
+  }
+
+  // ── Stop, once (round-3 review) ─────────────────────────────────────────
+  // Between the click and the turn actually ending there is a REAL window: the
+  // codex wrapper empties the app-server queue first and that sweep is capped
+  // at ~6s against a wedged app-server (and the claude lane's own §11
+  // delayed-fallback SIGINT is 2s behind the protocol interrupt). A second
+  // click inside it is a second `interrupt` frame — the wrapper now coalesces
+  // duplicates, but the honest fix is for the button to SAY it is working
+  // instead of inviting the click. Bounded by construction: the state is
+  // cleared by the turn ending (hideTyping, which every end — result,
+  // task_failed, interrupted — reaches) OR by the fallback timer, so it can
+  // never wedge the only control that stops a running agent.
+  // A second attached client's Stop is unaffected: it is a different browser,
+  // and the wrapper's single-flight is what makes those two frames one sweep.
+  static get STOP_PENDING_MS() { return 8000; }
+
+  _fireInterrupt() {
+    if (this._stopPending) return;
+    this._stopPending = true;
+    this._applyStopPending();
+    clearTimeout(this._stopPendingTimer);
+    this._stopPendingTimer = setTimeout(() => {
+      this._stopPendingTimer = null;
+      // The turn outlived the whole interrupt budget: hand the control back
+      // rather than leave a dead button (it may be the retry that lands).
+      this._endStopPending();
+    }, ChatInput.STOP_PENDING_MS);
+    this._onInterrupt?.();
+  }
+
+  /** Paint the in-flight Stop: disabled, and saying what it is doing. */
+  _applyStopPending(btn) {
+    const el = btn || this._streamStatus?.querySelector('.chat-interrupt-btn');
+    if (!el) return;
+    el.disabled = true;
+    el.onclick = null;
+    delete el.dataset.armed;
+    el.classList.remove('chat-interrupt-armed');
+    el.classList.add('chat-interrupt-pending');
+    el.textContent = t('Stopping…');
+    el.title = t('Stopping the current turn…');
+  }
+
+  /** Leave the pending state and give the live button back (same label). */
+  _endStopPending() {
+    clearTimeout(this._stopPendingTimer);
+    this._stopPendingTimer = null;
+    if (!this._stopPending) return;
+    this._stopPending = false;
+    if (this._isStreaming) this.showTyping(this._typingLabel ?? t('thinking...'), this._typingKind ?? null);
   }
 
   updateTodos(todos) {
@@ -565,6 +628,7 @@ export class ChatInput {
 
   dispose() {
     if (this._goalTimer) { clearTimeout(this._goalTimer); this._goalTimer = null; }
+    if (this._stopPendingTimer) { clearTimeout(this._stopPendingTimer); this._stopPendingTimer = null; }
     if (this._draftSyncHandler) {
       const sync = getStateSync();
       if (sync) sync.off('drafts', 'chat:' + this._sessionId, this._draftSyncHandler);

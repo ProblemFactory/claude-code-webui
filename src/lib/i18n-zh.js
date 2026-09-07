@@ -2744,6 +2744,8 @@ export default {
   'Compacting context… (a large conversation takes 1–2 minutes — Stop cancels it)': '正在压缩上下文…（大对话需 1–2 分钟，按 Stop 会取消）',
   'Click again to cancel the running compaction': '再点一次取消正在进行的压缩',
   'Cancel compaction?': '取消压缩？',
+  'Stopping…': '正在停止…',
+  'Stopping the current turn…': '正在停止当前回合…',
   'Compact now': '立即压缩',
   'The conversation no longer fits the model’s context window — every new message will fail the same way until it is compacted.': '对话已超出模型上下文窗口——在压缩之前，每条新消息都会同样失败。',
   'Compacting a large conversation takes 1–2 minutes — do not press Stop. If it answers “Conversation too long”, rewind a few messages in terminal mode (Esc Esc) and compact again.': '压缩大对话需要 1–2 分钟——不要按 Stop。如果它回答“Conversation too long”，请在 terminal 模式下（Esc Esc）回退几条消息再压缩。',
