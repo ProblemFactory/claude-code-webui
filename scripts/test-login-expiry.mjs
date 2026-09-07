@@ -638,7 +638,9 @@ console.log('— §5 wiring');
   const ranks = eng.match(/rankPoolMembers\(\{[\s\S]*?\n?\s*\}\)/g) || [];
   ck(`every rankPoolMembers call in the engine passes readLogin (${ranks.length} call sites)`, ranks.length >= 2 && ranks.every((c) => /readLogin/.test(c)));
   ck('quotaVerdictFor cannot answer "usable" through a dead login', /loginUsable\(li\)/.test(eng) && /re-login needed/.test(eng));
-  ck('the auth-failure notice says WHY when the refresh token expired (keeping the old wording otherwise)', /login session expired \(refresh token expired at/.test(eng) && /is failing authentication/.test(eng));
+  ck('the auth-failure notice branches on the login STATE (loginWallPhrase) and quotes the deadline only once it has passed (keeping the old wording otherwise)', /\$\{loginWallPhrase\(li\)\}/.test(eng) && /li\.msLeft <= 0 && li\.refreshExpiresAt\)/.test(eng) && /is failing authentication/.test(eng));
+  ck('NEGATIVE CONTROL: the rung-branched sentence that narrated a future deadline as a past expiry is gone from the engine', !/login session expired \(refresh token expired at/.test(eng));
+  ck('the switch notice names the current member\'s login STATE too (a signed-out login is not "expired")', /\$\{nameOf\(currentId\)\}'s \$\{\(\(\) => \{ try \{ const l = accounts\.loginStateOf\(currentId\); return l \? loginWallPhrase\(l\)/.test(eng));
   ck('the "nowhere to go" notice reaches the pool-blocked branch for the login wall too', /d\.reason === 'all-logins-expired'\) \{/.test(eng));
   // ROUND 3: the sentence itself moved into the PURE module so §3d can assert
   // the STRING (it was composed inline here, so no test ever read it — and it

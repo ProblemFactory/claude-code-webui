@@ -134,7 +134,7 @@ function quotaBackendFor(key, session) {
   return 'claude';
 }
 const { quotaVerdict } = require('../account-pool-auto.js'); // THE account-usability verdict (2.369.0, owner-designed)
-const { loginUsable, loginBucketLabel, loginAgeText } = require('../login-expiry.js'); // PURE: is this member's LOGIN SESSION still alive (2026-09-07)
+const { loginUsable, loginBucketLabel, loginAgeText, loginWallPhrase } = require('../login-expiry.js'); // PURE: is this member's LOGIN SESSION still alive (2026-09-07)
 const { UsageEstimator, overlayCache: estOverlayCache, predictCalib, CLAUDE_MAX_PRIOR_FULL_USD } = require('../usage-estimator.js');
 const usageAnchors = new UsageAnchors({ dataDir: path.join(rootDir, 'data') });
 // Which caches map to which identity (org-merge aware) — shared by the sweep
@@ -1515,8 +1515,11 @@ function notePoolAuthFailure(session, sid, info = {}) {
     // network. Any other shape keeps today's wording verbatim.
     const li = (() => { try { return accounts.loginStateOf(memberId); } catch { return null; } })();
     const loginDead = li && !loginUsable(li);
+    // STATE-branched (round-3 verifier's last low): a wiped ('logged-out') file
+    // whose deadline is still ahead must not be narrated as an expiry in the
+    // past — the deadline is quoted only once it has really passed.
     const why = loginDead
-      ? `login session expired (refresh token expired at ${li.refreshExpiresAt ? new Date(li.refreshExpiresAt).toISOString() : 'an unknown time'}) — re-login needed`
+      ? `${loginWallPhrase(li)}${(typeof li.msLeft === 'number' && li.msLeft <= 0 && li.refreshExpiresAt) ? ` (login session ended ${new Date(li.refreshExpiresAt).toISOString()})` : ''} — re-login needed`
       : info.message ? String(info.message).slice(0, 120) : `HTTP ${info.status}`;
     if (!memberAuthFailed(memberId)) {
       _memberAuthFail.set(memberId, { at: now, reason: why, tok: credsTokenSig(memberId) });
@@ -1754,7 +1757,7 @@ function maybePoolAutoSwitchForPool(poolId) {
     serverNotice(`pool-auto-${poolId}-${now}`, d.reason === 'edf'
       ? `Pool "${a.name}" switched to ${d.toName} — draining the member whose weekly quota resets soonest (use-it-or-lose-it)`
       : d.reason === 'login-expired'
-      ? `Pool "${a.name}" switched to ${d.toName} — ${nameOf(currentId)}'s login session expired; re-login it in Manage Agents${hot ? '' : ' (restarting its conversations)'}${scraps}`
+      ? `Pool "${a.name}" switched to ${d.toName} — ${nameOf(currentId)}'s ${(() => { try { const l = accounts.loginStateOf(currentId); return l ? loginWallPhrase(l) : 'login session expired'; } catch { return 'login session expired'; } })()}; re-login it in Manage Agents${hot ? '' : ' (restarting its conversations)'}${scraps}`
       : `Pool "${a.name}" auto-switched to ${d.toName} (previous account down to ${fromPct}% remaining)${hot ? '' : ' — restarting its conversations'}${scraps}`);
     console.log(`[pool] auto-switch ${poolId}: ${currentId} → ${d.to} (${d.reason}, from ${fromPct}% left, hot=${hot}, affected=${affected.length})`);
     if (!hot && affected.length) {
