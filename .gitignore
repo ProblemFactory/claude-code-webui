@@ -1,4 +1,5 @@
 node_modules/
+node_modules
 public/bundle.js
 public/novnc.js
 # ── ALL of data/ is runtime state — NEVER track — EXCEPT data/bin/ (the static
