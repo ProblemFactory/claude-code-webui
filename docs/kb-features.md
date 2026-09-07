@@ -230,6 +230,16 @@ impossible rather than a review promise.
   mid-drag (a peer message arrives, another client removes an item) re-renders
   the rows under your pointer; the drop still lands where you dropped it, and a
   row that left the queue during the drag simply does not move anything.
+  **That includes the strip's own bound** (2026-09-07): past 8 items the strip
+  normally starts collapsed to its header, but a queue that grows past 8 while
+  you are dragging a row — or while a queued message is open for editing —
+  does NOT collapse the rows away underneath you. The rows are where the drop
+  target and the edit's ✕ live, and that collapse needs no action from you (the
+  9th item can be a Background Work notification arriving on its own), so it
+  waits until you are done. The chevron is still yours to click at any time: a
+  strip you collapse yourself while editing keeps the cancel control on the
+  "Editing a queued message" line, so the edit is always finishable without
+  hunting for the row.
 - **SYSTEM NOTIFICATIONS STEER, PEOPLE QUEUE (2026-09-07, owner decision).** The
   rule in one line: *a VibeSpace notification joins the running turn; a message
   from another agent waits for its own turn; a steer carries only itself.* It

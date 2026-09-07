@@ -1598,7 +1598,31 @@ export class ChatInput {
     // window — no scrolling, no messages, no input box). The rows live in a
     // scrollable body capped by CSS; past QUEUE_COLLAPSE_AT the strip starts
     // COLLAPSED to its header and a chevron toggles it (per-view memory only).
-    const collapsed = this._queueCollapsed ?? (items.length > ChatInput.QUEUE_COLLAPSE_AT);
+    //
+    // …BUT NEVER OUT FROM UNDER A LIVE MODE (the merge's own defect — neither
+    // side had it alone: master had no drag/edit, the branch never collapsed).
+    // The ROWS are where a drag's hit-test geometry and an edit's ✕ live, and
+    // the AUTO collapse needs no user action at all — the 9th queued job
+    // notification arriving mid-drag emitted zero `.chat-queue-item` nodes, the
+    // live drag's repaint then hit-tested an EMPTY row list, and its
+    // `afterId = null` — which in this protocol MEANS the front of the queue,
+    // not "no answer" — was dispatched as a reorder to the FRONT. The same
+    // republish during an open edit deleted the only control that ends the
+    // edit (✕) and the row's `data-queue-editing` marker while
+    // `_editingQueueId` stayed set and Send silently still meant "save".
+    // An EXPLICIT chevron collapse is deliberately left alone: it is a user
+    // action, it is visibly undoable (the chevron stays in the header) and the
+    // `.chat-queue-editing` hint lives OUTSIDE the body, so the mode still
+    // announces itself. Only the collapse nobody asked for is suppressed.
+    // …and the predicate is deliberately NARROW: an in-flight save
+    // (`_pendingEdit`, whose mode `_send` already closed) owns no control the
+    // user has to reach — it answers by itself, and the refusal that hands the
+    // rewrite back re-opens `_editingQueueId`, which re-expands the strip. So
+    // it is not in here: holding the strip open for the 20 s of a save would
+    // be the same "layout changed by an arrival" surprise, pointing the other
+    // way.
+    const transientMode = !!(this._queueDrag || this._editingQueueId);
+    const collapsed = this._queueCollapsed ?? (!transientMode && items.length > ChatInput.QUEUE_COLLAPSE_AT);
     strip.classList.toggle('chat-queue-collapsed', collapsed);
     strip.innerHTML = ChatInput.queueStripHtml(items, this._queueCaps, this._queueRowState, this._editingQueueId, { collapsed });
     const toggle = strip.querySelector('.chat-queue-toggle');
@@ -1666,6 +1690,15 @@ export class ChatInput {
           // above the pointer. null = the front of the queue.
           let afterId = null;
           const rows = liveRows();
+          // A ROWLESS RENDER IS NOT AN ANSWER (belt for the same defect as the
+          // collapse guard in `_renderQueue`, and for any other future render
+          // that emits no rows): with nothing to hit-test, `afterId` would
+          // stay at its initial `null` — the value that MEANS the front of the
+          // queue — and `finish()` would dispatch a reorder the user never
+          // aimed. Leaving `drag.afterId` at its last REAL value keeps the
+          // landing the user is looking at, and at `undefined` (never any
+          // answer at all) `finish()` already refuses to send.
+          if (!rows.length) return;
           for (const row of rows) {
             if (row.dataset.queueId === id) continue;
             const r = row.getBoundingClientRect();
@@ -1733,6 +1766,12 @@ export class ChatInput {
     const has = (v) => verbs.includes(v);
     const stateOf = (id) => (rowState && typeof rowState.get === 'function' ? rowState.get(String(id)) : (rowState ? rowState[String(id)] : null)) || null;
     const editKey = editingId === null || editingId === undefined ? null : String(editingId);
+    // EDIT is offered only for a message that is (a) YOURS — rewriting another
+    // agent's words would misattribute them, and the wrapper refuses it too —
+    // and (b) carried in FULL by the wrapper; the preview is truncated and
+    // saving it back would cut the message down. ONE predicate, because the
+    // row's control and the collapsed strip's fallback control must not drift.
+    const canEdit = (it) => has('edit') && it.kind !== 'peer' && typeof it.text === 'string';
     const btn = (op, id, icon, label, cls = '') => `<button type="button" class="chat-queue-btn${cls ? ' ' + cls : ''}" data-queue-op="${op}"${id ? ` data-queue-id="${escHtml(String(id))}"` : ''} title="${escHtml(label)}" aria-label="${escHtml(label)}">${icon}</button>`;
     const toggle = items.length > ChatInput.QUEUE_COLLAPSE_AT || collapsed
       ? `<button type="button" class="chat-queue-toggle" aria-expanded="${collapsed ? 'false' : 'true'}" title="${escHtml(collapsed ? t('Show the queued messages') : t('Hide the queued messages'))}">${collapsed ? UI_ICONS.chevronDown : UI_ICONS.chevronUp}</button>`
@@ -1755,12 +1794,8 @@ export class ChatInput {
       const grip = has('reorder')
         ? `<span class="chat-queue-grip" data-queue-drag="${id}" title="${escHtml(t('Drag to reorder (Alt+Up / Alt+Down)'))}" aria-hidden="true">${UI_ICONS.grip}</span>`
         : '';
-      // EDIT is offered only for a message that is (a) YOURS — rewriting
-      // another agent's words would misattribute them, and the wrapper
-      // refuses it too — and (b) carried in FULL by the wrapper; the preview
-      // is truncated and saving it back would cut the message down.
       const isEditing = editKey !== null && String(it.id || '') === editKey;
-      const edit = has('edit') && it.kind !== 'peer' && typeof it.text === 'string'
+      const edit = canEdit(it)
         ? (isEditing
           ? btn('edit-cancel', it.id, UI_ICONS.close, t('Cancel editing'), 'chat-queue-btn-editing')
           : btn('edit', it.id, UI_ICONS.pencil, t('Edit this queued message')))
@@ -1776,8 +1811,17 @@ export class ChatInput {
       const stateTitle = st?.title ? ` title="${escHtml(String(st.title))}"` : '';
       return `<div class="chat-queue-item" tabindex="0" data-queue-id="${id}"${stateAttr}${editAttr}${stateTitle}>${grip}${from}<span class="chat-queue-preview">${escHtml(String(it.preview || ''))}</span>${edit}${runNow}${steer}${remove}</div>`;
     }).join('');
-    const editing = editKey !== null && items.some((it) => String(it.id || '') === editKey)
-      ? `<div class="chat-queue-editing">${escHtml(t('Editing a queued message — send to save, Esc to cancel'))}</div>`
+    // THE EDIT'S ✕ LIVES ON THE ROW, and a COLLAPSED strip has no rows — so
+    // the hint line (which is outside the body and therefore always drawn)
+    // carries the cancel when the body is gone. `_renderQueue` suppresses the
+    // AUTO collapse while an edit is open, so the only way to get here is the
+    // user's own chevron; even then the mode must stay finishable by pointer,
+    // never by "Esc, if the textarea happens to be focused" alone.
+    const editingItem = editKey === null ? null : items.find((it) => String(it.id || '') === editKey) || null;
+    const editing = editingItem
+      ? `<div class="chat-queue-editing">${escHtml(t('Editing a queued message — send to save, Esc to cancel'))}${
+        collapsed && canEdit(editingItem) ? btn('edit-cancel', editingItem.id, UI_ICONS.close, t('Cancel editing'), 'chat-queue-btn-editing') : ''
+      }</div>`
       : '';
     // The body is the ONLY thing that scrolls; a collapsed strip omits it.
     return head + (collapsed ? '' : `<div class="chat-queue-body">${rows}</div>`) + editing;

@@ -454,6 +454,31 @@ console.log('— ⑤ the client strip (DOM-free render of the REAL ChatInput)');
     ok('…a REFUSED edit that is open again shows the reason AND the editing marker', /data-queue-state="refused" data-queue-editing="1" title="The agent could not be reached\."/.test(refusedEditing) && /data-queue-op="edit-cancel"/.test(refusedEditing), refusedEditing.slice(0, 400));
     ok('negative control: no editingId ⇒ no editing marker, no cancel control, no hint, whatever the op state says', !/data-queue-editing/.test(ChatInput.queueStripHtml(items, CODEX_CAPS, new Map([['q1', { state: 'editing', title: '' }]]))) && !/edit-cancel/.test(ChatInput.queueStripHtml(items, CODEX_CAPS, new Map([['q1', { state: 'editing', title: '' }]]))) && !/class="chat-queue-editing"/.test(ChatInput.queueStripHtml(items, CODEX_CAPS, new Map([['q1', { state: 'editing', title: '' }]]))));
     ok('negative control: an editingId naming a row that is NOT in the queue paints nothing (a stale id is not a hint)', !/data-queue-editing/.test(ChatInput.queueStripHtml(items, CODEX_CAPS, null, 'q404')) && !/class="chat-queue-editing"/.test(ChatInput.queueStripHtml(items, CODEX_CAPS, null, 'q404')));
+    // MERGE DEFECT (r2 verifier, finding 2): master's collapse (2.369.60) omits
+    // the whole `.chat-queue-body`, and the edit's ✕ lives on a ROW — so a
+    // collapsed strip used to leave the user in a mode whose row is invisible,
+    // whose cancel is gone and whose Send silently still means "save". The
+    // AUTO collapse is suppressed while editing (pinned on the live object
+    // below), and the collapse the user DID ask for keeps the mode finishable
+    // by putting the cancel on the always-drawn hint line.
+    const collapsedEditing = ChatInput.queueStripHtml(items, CODEX_CAPS, null, 'q1', { collapsed: true });
+    ok('a COLLAPSED strip with an open edit still says an edit is open', /class="chat-queue-editing"/.test(collapsedEditing) && /send to save/.test(collapsedEditing), collapsedEditing.slice(0, 400));
+    ok('…and the cancel control is still REACHABLE, naming the row being edited (the body — and every row control in it — is gone)', !/chat-queue-body/.test(collapsedEditing) && !/class="chat-queue-item"/.test(collapsedEditing) && /data-queue-op="edit-cancel" data-queue-id="q1"/.test(collapsedEditing), collapsedEditing.slice(0, 600));
+    ok('negative control: an EXPANDED strip puts the cancel on the row and does NOT duplicate it onto the hint line (one edit, one way out)', (ChatInput.queueStripHtml(items, CODEX_CAPS, null, 'q1').match(/data-queue-op="edit-cancel"/g) || []).length === 1);
+    ok('negative control: a collapsed strip with NO edit open carries no cancel at all', !/edit-cancel/.test(ChatInput.queueStripHtml(items, CODEX_CAPS, null, null, { collapsed: true })));
+    // …and the fallback obeys the SAME editability predicate as the row it
+    // stands in for: a PEER row is never editable (rewriting another agent's
+    // words misattributes them), so a stale editingId naming one must not
+    // conjure a control the expanded strip would never have drawn.
+    ok('negative control: a collapsed strip whose editingId names a PEER row draws the hint but NO cancel (the row would not have offered one either)',
+      /class="chat-queue-editing"/.test(ChatInput.queueStripHtml(items, CODEX_CAPS, null, 'q2', { collapsed: true }))
+      && !/edit-cancel/.test(ChatInput.queueStripHtml(items, CODEX_CAPS, null, 'q2', { collapsed: true }))
+      && !/edit-cancel/.test(ChatInput.queueStripHtml(items, CODEX_CAPS, null, 'q2')));
+    ok('negative control: a harness without the `edit` verb gets no cancel in a collapsed strip either',
+      !/edit-cancel/.test(ChatInput.queueStripHtml(items, derive({ queue: true, queueVerbs: ['remove', 'reorder'] }), null, 'q1', { collapsed: true })));
+    // …and the collapsed markup that made the defect possible is otherwise
+    // unchanged (master's own contract: header + chevron, no rows).
+    ok('the collapsed strip is header-only with a chevron that says it is collapsed', /class="chat-queue-toggle" aria-expanded="false"/.test(collapsedEditing));
   }
   {
     // EVERY op's outcome has to REACH the strip, including the BATCH verbs
@@ -504,9 +529,23 @@ console.log('— ⑤ the client strip (DOM-free render of the REAL ChatInput)');
     let sends = 0, handed = null;
     const ci = mkCI({ _queueCaps: cxCaps, _isStreaming: true, _send: () => { sends++; return 'm-42'; }, _onSteerSend: (id) => { handed = id; } });
     ok('THE CHORD SENDS ON THE ORDINARY PATH and hands its msgId on (no second wire shape)', ci.steerNow() === true && sends === 1 && handed === 'm-42');
-    const empty = mkCI({ _queueCaps: cxCaps, _isStreaming: true, _send: () => null, _onSteerSend: () => { handed = 'NO'; } });
+    // THE TWO NON-STRING ANSWERS, each with the value the MERGED `_send` can
+    // actually produce (r2 verifier: this leg stubbed `null`, a value the
+    // three-valued contract can never return, so `true` — the one state the
+    // merge INVENTED — was unpinned and the assert passed only because
+    // `typeof null !== 'string'`).
+    const empty = mkCI({ _queueCaps: cxCaps, _isStreaming: true, _send: () => false, _onSteerSend: () => { handed = 'NO'; } });
     handed = null;
-    ok('an empty composer / disconnected socket / a /goal (all `_send() === null`) reports NO steerable send — a pending steer that can only time out is a lie', empty.steerNow() === false && handed === null);
+    ok('an empty composer / a disconnected socket / an attachment-less bail (all `_send() === false`) reports NO steerable send — a pending steer that can only time out is a lie', empty.steerNow() === false && handed === null);
+    const tookBox = mkCI({ _queueCaps: cxCaps, _isStreaming: true, _send: () => true, _onSteerSend: () => { handed = 'NO'; } });
+    handed = null;
+    ok('`_send() === true` (a /goal or a queued-message edit TOOK the box without producing a queueable message) reports NO steerable send and hands no id', tookBox.steerNow() === false && handed === null);
+    // NEGATIVE CONTROL for both: the ONLY answer that steers is a string id —
+    // a `typeof r === 'string'` that decayed to a truthiness test would steer
+    // the `true` above (naming no item) and pass every assert around it.
+    let handedId = null;
+    const real = mkCI({ _queueCaps: cxCaps, _isStreaming: true, _send: () => 'm-99', _onSteerSend: (id) => { handedId = id; } });
+    ok('…and the positive control still steers on a STRING id (the guard is `typeof`, not truthiness)', real.steerNow() === true && handedId === 'm-99');
     const cant = mkCI({ _queueCaps: srvCaps('claude').inputModes, _isStreaming: true, _send: () => { sends++; return 'x'; } });
     ok('steerNow() on a harness that cannot steer sends NOTHING at all', cant.steerNow() === false && sends === 1);
   }
@@ -517,6 +556,11 @@ console.log('— ⑤ the client strip (DOM-free render of the REAL ChatInput)');
     const src = read('src/lib/chat-input.js');
     ok('_send returns the msgId for a real message, `true` when it took the box without one (/goal, an edit), and `false` on every bail — the chord reads the id, sendText reads the bail',
       /return msgId;/.test(src) && (src.match(/return false;/g) || []).length >= 3 && /const msgId = typeof r === 'string' \? r : null;/.test(src), (src.match(/return (false|true|msgId);[^\n]*/g) || []));
+    // …and the value it can NEVER answer with (r2 verifier): the pre-merge
+    // contract's `null` is gone, so a stub that returns it tests nothing.
+    const sendBody = src.slice(src.indexOf('\n  _send() {'), src.indexOf('\n  _addImageAttachment('));
+    ok('the merged _send has no `return null` path left — the third value is `true`, and a test stubbing `null` would pin a state the product cannot reach',
+      sendBody.length > 500 && !/\breturn null\b/.test(sendBody), sendBody.length);
   }
 }
 
@@ -1876,6 +1920,198 @@ console.log('— ⑪ drag-reorder / edit / run-all in a REAL browser (trusted po
         await sleep(120);
         ok('…and a row that LEFT the queue mid-drag sends no reorder at all', (await ops()).length === 0);
         await evaljs('window.__ci.setQueue(window.__items, ' + CODEX_VERBS + ');');
+      }
+      // ── THE MERGE'S OWN DEFECT (r2 verifier, finding 1): master's AUTO
+      // COLLAPSE (2.369.60) firing MID-DRAG. Neither side has this alone —
+      // master had no drag, the branch never collapsed. Crossing
+      // QUEUE_COLLAPSE_AT while a pointer drag runs emitted ZERO
+      // `.chat-queue-item` nodes; the live drag's repaint then hit-tested an
+      // EMPTY row list, so its `let afterId = null` survived untouched — and
+      // `null` is not "no answer" in this protocol, it MEANS the front of the
+      // queue — and the release dispatched `reorder <id> afterId:null`. The
+      // trigger is the exact scenario the collapse feature was built for (the
+      // owner's 25 queued Background Work notifications).
+      {
+        const mk8 = `(() => {
+          window.__ops = [];
+          window.__items8 = Array.from({ length: 8 }, (_, i) => ({ id: 'q' + (i + 1),  msgId: 'm' + (i + 1),  preview: 'item ' + (i + 1), text: 'item ' + (i + 1), kind: 'user' }));
+          window.__items9 = [...window.__items8, { id: 'q9',  msgId: '',  preview: 'a job notification',  kind: 'peer',  from: 'jobs' }];
+          window.__ci._queueCollapsed = undefined;
+          window.__ci.setQueue(window.__items8, ${CODEX_VERBS});
+          return { rows: document.querySelectorAll('.chat-queue-item').length, collapsed: document.querySelector('.chat-queue-strip').classList.contains('chat-queue-collapsed') };
+        })()`;
+        const start8 = await evaljs(mk8);
+        ok(`AT the threshold the strip is still open (${JSON.stringify(start8)})`, start8.rows === 8 && start8.collapsed === false);
+        // …and the feature itself still works when nothing is in flight: the
+        // 9th item collapses the strip with no user action. (POSITIVE CONTROL
+        // for master's 2.369.60 — the fix suppresses the auto collapse ONLY
+        // while a live mode owns the rows.)
+        const auto9 = await evaljs(`(() => {
+          window.__ci.setQueue(window.__items9, ${CODEX_VERBS});
+          const out = { rows: document.querySelectorAll('.chat-queue-item').length, collapsed: document.querySelector('.chat-queue-strip').classList.contains('chat-queue-collapsed') };
+          window.__ci._queueCollapsed = undefined;
+          window.__ci.setQueue(window.__items8, ${CODEX_VERBS});
+          return out;
+        })()`);
+        ok(`past it, with NOTHING in flight, the 9th item still auto-collapses the strip (master's feature, unbroken): ${JSON.stringify(auto9)}`, auto9.rows === 0 && auto9.collapsed === true);
+
+        // THE DEFECT'S SCENARIO: drag q3 past q5's midpoint, then a 9th item
+        // arrives (a job notification — no user action at all).
+        const dragAcross = async (mutate) => {
+          await evaljs(`(() => { window.__ops = []; window.__ci._queueCollapsed = undefined; window.__ci.setQueue(window.__items8, ${CODEX_VERBS}); })()`);
+          const grip = await evaljs(`(() => { const g = document.querySelectorAll('.chat-queue-grip')[2]; const r = g.getBoundingClientRect(); return { x: r.left + r.width/2, y: r.top + r.height/2 }; })()`);
+          const row5 = await rowBox(4);
+          await cdp('Input.dispatchMouseEvent',  { type: 'mousePressed',  x: grip.x, y: grip.y, button: 'left',  clickCount: 1, pointerType: 'mouse' });
+          await cdp('Input.dispatchMouseEvent',  { type: 'mouseMoved',  x: grip.x, y: row5.mid + 3, button: 'left',  pointerType: 'mouse' });
+          await sleep(120);
+          const painted = await evaljs(`(() => ({ after: document.querySelector('.chat-queue-drop-after')?.dataset.queueId || null, dragging: !!document.querySelector('.chat-queue-dragging') }))()`);
+          const during = mutate ? await evaljs(mutate) : null;
+          await cdp('Input.dispatchMouseEvent',  { type: 'mouseReleased',  x: grip.x, y: row5.mid + 3, button: 'left',  clickCount: 1, pointerType: 'mouse' });
+          await sleep(120);
+          const sent = await ops();
+          await evaljs(`(() => { window.__ci._queueDrag = null; window.__ci._queueCollapsed = undefined; window.__ci.setQueue(window.__items8, ${CODEX_VERBS}); })()`);
+          return { painted, during, sent };
+        };
+        const republish9 = `(() => {
+          window.__ci.setQueue(window.__items9, ${CODEX_VERBS});
+          return { rows: document.querySelectorAll('.chat-queue-item').length, collapsed: document.querySelector('.chat-queue-strip').classList.contains('chat-queue-collapsed'), after: document.querySelector('.chat-queue-drop-after')?.dataset.queueId || null, dragAfter: (window.__ci._queueDrag ? String(window.__ci._queueDrag.afterId) : 'NO-DRAG') };
+        })()`;
+        const crossed = await dragAcross(republish9);
+        ok(`the drag paints where it would land before the republish (${JSON.stringify(crossed.painted)})`, crossed.painted.dragging === true && crossed.painted.after === 'q5');
+        ok(`finding 1: crossing QUEUE_COLLAPSE_AT mid-drag does NOT collapse the rows out from under the drag (${JSON.stringify(crossed.during)})`,
+          crossed.during.rows === 9 && crossed.during.collapsed === false);
+        ok('…the drop indicator is still on the row it will land behind, and the drag still holds that anchor', crossed.during.after === 'q5' && crossed.during.dragAfter === 'q5');
+        ok(`…and the release sends the landing the user aimed at, not the FRONT (${JSON.stringify(crossed.sent)})`,
+          crossed.sent.length === 1 && crossed.sent[0].op === 'reorder' && crossed.sent[0].id === 'q3' && crossed.sent[0].extra?.afterId === 'q5');
+
+        // NEGATIVE CONTROL A: the identical drag whose mid-drag republish does
+        // NOT cross the threshold — the value that must not depend on it.
+        const notCrossed = await dragAcross(`(() => { window.__ci.setQueue([...window.__items8], ${CODEX_VERBS}); return { rows: document.querySelectorAll('.chat-queue-item').length, collapsed: document.querySelector('.chat-queue-strip').classList.contains('chat-queue-collapsed'), after: document.querySelector('.chat-queue-drop-after')?.dataset.queueId || null, dragAfter: (window.__ci._queueDrag ? String(window.__ci._queueDrag.afterId) : 'NO-DRAG') }; })()`);
+        ok(`negative control: an 8→8 republish mid-drag lands identically (${JSON.stringify(notCrossed.sent)})`,
+          notCrossed.during.rows === 8 && notCrossed.during.collapsed === false && notCrossed.sent.length === 1 && notCrossed.sent[0].extra?.afterId === 'q5');
+
+        // THE BELT, on the ONE collapse the guard deliberately leaves alone:
+        // the user's OWN chevron. That render really is rowless, and the drag
+        // must keep the last REAL answer instead of falling back to `null`.
+        const explicit = await dragAcross(`(() => {
+          window.__ci._queueCollapsed = true;
+          window.__ci.setQueue(window.__items9, ${CODEX_VERBS});
+          return { rows: document.querySelectorAll('.chat-queue-item').length, collapsed: document.querySelector('.chat-queue-strip').classList.contains('chat-queue-collapsed'), after: document.querySelector('.chat-queue-drop-after')?.dataset.queueId || null, dragAfter: (window.__ci._queueDrag ? String(window.__ci._queueDrag.afterId) : 'NO-DRAG') };
+        })()`);
+        ok(`an EXPLICIT collapse mid-drag really does empty the rows (${JSON.stringify(explicit.during)})`, explicit.during.rows === 0 && explicit.during.collapsed === true);
+        ok('…and the belt keeps the drag on its last REAL anchor instead of answering `null`', explicit.during.dragAfter === 'q5');
+        ok(`…so the drop still lands where it was aimed (${JSON.stringify(explicit.sent)})`, explicit.sent.length === 1 && explicit.sent[0].extra?.afterId === 'q5');
+
+        // NEGATIVE CONTROL B — THE DEFECT ITSELF, REPRODUCED through the real
+        // `finish()`, the real landing math and the real dispatch: the ONLY
+        // thing neutered is the belt (the drag's repaint is swapped for a
+        // verbatim copy of the pre-fix body, which hit-tests whatever
+        // `liveRows()` returns and stores the result unconditionally).
+        const unbelted = await dragAcross(`(() => {
+          const strip = document.querySelector('.chat-queue-strip');
+          window.__ci._queueDrag.apply = () => {                 // the PRE-FIX body, verbatim
+            const d = window.__ci._queueDrag; d.raf = 0;
+            let afterId = null;
+            const rows = [...strip.querySelectorAll('.chat-queue-item')];
+            for (const row of rows) {
+              if (row.dataset.queueId === d.id) continue;
+              const r = row.getBoundingClientRect();
+              if (d.y > r.top + r.height / 2) afterId = row.dataset.queueId;
+            }
+            d.afterId = afterId;
+          };
+          window.__ci._queueCollapsed = true;                    // …and the guard, off
+          window.__ci.setQueue(window.__items9, ${CODEX_VERBS});
+          return { rows: document.querySelectorAll('.chat-queue-item').length, dragAfter: (window.__ci._queueDrag ? String(window.__ci._queueDrag.afterId) : 'NO-DRAG') };
+        })()`);
+        ok(`negative control: with the belt neutered and the guard off, the rowless render answers \`null\` (${JSON.stringify(unbelted.during)})`, unbelted.during.rows === 0 && unbelted.during.dragAfter === 'null');
+        ok(`…and THAT is a silent "move to the FRONT of the queue" — the defect, reproduced (${JSON.stringify(unbelted.sent)})`,
+          unbelted.sent.length === 1 && unbelted.sent[0].op === 'reorder' && unbelted.sent[0].id === 'q3' && unbelted.sent[0].extra?.afterId === null);
+      }
+      // ── r2 verifier, finding 2: THE SAME AUTO COLLAPSE WHILE A QUEUED
+      // MESSAGE IS OPEN FOR EDITING. It deletes the ✕ that ends the edit and
+      // the row's `data-queue-editing` marker while `_editingQueueId` stays
+      // set and Send silently still means "save the edit" — with no user
+      // action at all (an ordinary job notification / peer message).
+      {
+        const opened = await evaljs(`(() => {
+          window.__ops = [];
+          window.__ci._queueCollapsed = undefined;
+          window.__ci.setQueue(window.__items8, ${CODEX_VERBS});
+          document.querySelector('textarea').value = 'a draft I was typing';
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q2"]').click();
+          const row = document.querySelector('[data-queue-id="q2"]');
+          return { editing: window.__ci._editingQueueId, cancel: !!document.querySelector('[data-queue-op="edit-cancel"]'), marker: row?.dataset.queueEditing || null, box: document.querySelector('textarea').value };
+        })()`);
+        ok(`an edit is open on a row of an 8-item queue (${JSON.stringify(opened)})`, opened.editing === 'q2' && opened.cancel === true && opened.marker === '1' && opened.box === 'item 2');
+        const arrived = await evaljs(`(() => {
+          window.__ci.setQueue(window.__items9, ${CODEX_VERBS});
+          const row = document.querySelector('[data-queue-id="q2"]');
+          return { collapsed: document.querySelector('.chat-queue-strip').classList.contains('chat-queue-collapsed'), rows: document.querySelectorAll('.chat-queue-item').length, editing: window.__ci._editingQueueId, cancel: !!document.querySelector('[data-queue-op="edit-cancel"]'), marker: row?.dataset.queueEditing || null, hint: !!document.querySelector('.chat-queue-editing'), box: document.querySelector('textarea').value };
+        })()`);
+        ok(`finding 2: a 9th item arriving during an open edit does NOT collapse the mode's own controls away (${JSON.stringify(arrived)})`,
+          arrived.collapsed === false && arrived.rows === 9 && arrived.marker === '1' && arrived.cancel === true && arrived.hint === true && arrived.editing === 'q2' && arrived.box === 'item 2');
+        // THE ONE COLLAPSE THE GUARD LEAVES ALONE — the user's own chevron —
+        // must still leave the mode finishable BY POINTER: the ✕ moves onto
+        // the always-drawn hint line, and clicking it really ends the edit.
+        const chevron = await evaljs(`(() => {
+          document.querySelector('.chat-queue-toggle').click();
+          const cancel = document.querySelector('[data-queue-op="edit-cancel"]');
+          return { collapsed: document.querySelector('.chat-queue-strip').classList.contains('chat-queue-collapsed'), rows: document.querySelectorAll('.chat-queue-item').length, hint: !!document.querySelector('.chat-queue-editing'), cancelInHint: !!document.querySelector('.chat-queue-editing [data-queue-op="edit-cancel"]'), cancelId: cancel?.dataset.queueId || null, editing: window.__ci._editingQueueId };
+        })()`);
+        ok(`the user's own chevron still collapses the strip while editing (${JSON.stringify(chevron)})`, chevron.collapsed === true && chevron.rows === 0 && chevron.editing === 'q2');
+        ok('…and the ✕ that ends the edit rides the hint line, naming the row being edited', chevron.hint === true && chevron.cancelInHint === true && chevron.cancelId === 'q2');
+        const ended = await evaljs(`(() => {
+          document.querySelector('.chat-queue-editing [data-queue-op="edit-cancel"]').click();
+          const out = { editing: window.__ci._editingQueueId, box: document.querySelector('textarea').value, ops: window.__ops.length, hint: !!document.querySelector('.chat-queue-editing') };
+          window.__ci._queueCollapsed = undefined;
+          document.querySelector('textarea').value = '';
+          window.__ci.setQueue(window.__items, ${CODEX_VERBS});
+          return out;
+        })()`);
+        ok(`…and it really ends the edit, restoring the borrowed draft and sending no frame (${JSON.stringify(ended)})`, ended.editing === null && ended.box === 'a draft I was typing' && ended.ops === 0 && ended.hint === false);
+
+        // THE GUARD'S SCOPE, pinned from BOTH sides. It is deliberately
+        // `_queueDrag || _editingQueueId` and NOT "anything edit-shaped": a
+        // save already IN FLIGHT (`_pendingEdit` — `_send` closed the mode when
+        // it dispatched) owns no control the user has to reach, it answers by
+        // itself, so master's auto collapse still fires there; and when the
+        // answer is the NORMAL refusal the row goes back INTO edit mode, whose
+        // render re-expands the strip — so the narrow guard strands nobody,
+        // while widening it would hold the strip open for up to 20 s on an
+        // arrival the user never caused.
+        const inFlight = await evaljs(`(() => {
+          window.__ops = [];
+          window.__ci._queueCollapsed = undefined;
+          window.__ci.setDisconnected(false);
+          window.__ci.setQueue(window.__items8, ${CODEX_VERBS});
+          const ta = document.querySelector('textarea');
+          ta.value = 'a draft I was typing';
+          VS.saveDraft('chat', 'sess-verbs', 'a draft I was typing');
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q2"]').click();
+          ta.value = 'item 2, rewritten';
+          window.__ci._send();                                     // the MODE closes here; the save is on the wire
+          const armed = { editing: window.__ci._editingQueueId, pending: !!window.__ci._pendingEdit, state: document.querySelector('[data-queue-id="q2"]')?.dataset.queueState || null };
+          window.__ci.setQueue(window.__items9, ${CODEX_VERBS});   // …and the 9th item arrives, with no user action
+          return { armed, ops: window.__ops.map((f) => f.op), collapsed: document.querySelector('.chat-queue-strip').classList.contains('chat-queue-collapsed'), rows: document.querySelectorAll('.chat-queue-item').length, box: ta.value };
+        })()`);
+        ok(`a saved edit is IN FLIGHT and its MODE is already closed (${JSON.stringify(inFlight.armed)}, ops ${JSON.stringify(inFlight.ops)})`,
+          inFlight.armed.editing === null && inFlight.armed.pending === true && inFlight.armed.state === 'pending' && inFlight.ops.join() === 'edit');
+        ok(`negative control for the guard's SCOPE: there the 9th item still auto-collapses — only the collapse a LIVE mode would lose its controls to is suppressed (${JSON.stringify({ collapsed: inFlight.collapsed, rows: inFlight.rows })})`,
+          inFlight.collapsed === true && inFlight.rows === 0 && inFlight.box === 'item 2, rewritten');
+        const answered = await evaljs(`(() => {
+          window.__ci.setQueueOpResult('q2', false, 'The agent could not be reached.');
+          const row = document.querySelector('[data-queue-id="q2"]');
+          const out = { collapsed: document.querySelector('.chat-queue-strip').classList.contains('chat-queue-collapsed'), rows: document.querySelectorAll('.chat-queue-item').length, editing: window.__ci._editingQueueId, cancel: !!document.querySelector('[data-queue-op="edit-cancel"]'), marker: row?.dataset.queueEditing || null, state: row?.dataset.queueState || null, box: document.querySelector('textarea').value };
+          document.querySelector('[data-queue-op="edit-cancel"]')?.click();
+          window.__ci._queueCollapsed = undefined;
+          document.querySelector('textarea').value = '';
+          VS.saveDraft('chat', 'sess-verbs', '');
+          window.__ci.setQueue(window.__items, ${CODEX_VERBS});
+          return out;
+        })()`);
+        ok(`…and the refusal that hands the rewrite back re-OPENS the mode, which re-expands the strip: nobody is stranded by the narrow guard (${JSON.stringify(answered)})`,
+          answered.editing === 'q2' && answered.collapsed === false && answered.rows === 9 && answered.cancel === true && answered.marker === '1' && answered.state === 'refused' && answered.box === 'item 2, rewritten');
       }
       // A PRESS THAT DOES NOT MOVE IS NOT A DRAG (a no-op reorder still costs
       // an RPC, a republish and a pending flash).
@@ -3456,6 +3692,60 @@ console.log('— ⑪ drag-reorder / edit / run-all in a REAL browser (trusted po
       try { chrome.kill('SIGKILL'); } catch { }
       try { srv.close(); } catch { }
       try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { }
+    }
+  }
+}
+
+// ⑫ HISTORY HYGIENE (r2 verifier, finding 4). This feature reached master as a
+// cherry-pick chain, and one intermediate pick commit shipped LITERAL CONFLICT
+// MARKERS in docs/kb-file-structure.md: the final tree was clean, so every
+// suite here was green, but `git bisect` / `git show` landing on that commit
+// saw an unresolved file and any per-commit marker scan flagged the branch.
+// A tree-only check cannot see it — the assertion has to ask GIT.
+console.log('— ⑫ no commit on this branch carries conflict markers (a clean final tree hides an unbisectable middle)');
+{
+  const { execFileSync } = await import('node:child_process');
+  const git = (args) => execFileSync('git', args, { cwd: REPO, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
+  // THE DETECTOR, and its negative control FIRST: a scan that cannot see a
+  // marker would pass this section vacuously on any history at all.
+  const MARKER = /^(<<<<<<< |>>>>>>> )/m;   // `=======` alone is ordinary prose (CHANGELOG rules, setext headings)
+  ok('the detector fires on a conflicted buffer (negative control — without this the whole section is vacuous)',
+    MARKER.test('a\n<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> other\nb\n') && !MARKER.test('a\n=======\nb\n'));
+
+  let baseRef = null;
+  for (const r of ['origin/master', 'master']) {
+    try { git(['rev-parse', '--verify', '--quiet', r + '^{commit}']); baseRef = r; break; } catch { }
+  }
+  if (!baseRef) {
+    console.log('  SKIP: neither origin/master nor master resolves in this checkout — there is no branch range to scan');
+  } else {
+    const head = git(['rev-parse', 'HEAD']).trim();
+    const commits = git(['rev-list', `${baseRef}..HEAD`]).trim().split('\n').filter(Boolean);
+    if (!commits.length) {
+      console.log(`  SKIP: HEAD (${head.slice(0, 8)}) is an ancestor of ${baseRef} — this checkout carries no branch commits to scan`);
+    } else {
+      const dirty = [];
+      for (const c of commits) {
+        // `git grep -I` = text files only; a match at all is a failure, so the
+        // exit status is the whole answer (1 = clean, 0 = markers found).
+        let hits = '';
+        try { hits = git(['grep', '-I', '-l', '-E', '^(<<<<<<< |>>>>>>> )', c, '--', '.']); } catch { hits = ''; }
+        const files = hits.split('\n').filter(Boolean).map((l) => l.slice(l.indexOf(':') + 1)).filter((f) => !/^CHANGELOG\.md$/.test(f));
+        if (files.length) dirty.push(`${c.slice(0, 8)} → ${files.join(', ')}`);
+      }
+      ok(`every one of the ${commits.length} commit(s) in ${baseRef}..HEAD is marker-free, so the chain bisects${dirty.length ? '' : ''}`, dirty.length === 0, dirty);
+      // …and the SAME scan against the commit the reviewer named, when this
+      // checkout still has it: the defect, reproduced by the shipped detector.
+      let known = null;
+      try { known = git(['rev-parse', '--verify', '--quiet', '817550d4^{commit}']).trim(); } catch { }
+      if (!known) {
+        console.log('  SKIP: 817550d4 (the pre-repair pick commit) is not in this object store — the historical positive control cannot run here');
+      } else {
+        let hits = '';
+        try { hits = git(['grep', '-I', '-l', '-E', '^(<<<<<<< |>>>>>>> )', known, '--', 'docs/kb-file-structure.md']); } catch { hits = ''; }
+        ok('positive control: the ORIGINAL pick commit 817550d4 does trip this scan (docs/kb-file-structure.md) — the check is the one that would have caught it',
+          /kb-file-structure\.md/.test(hits), hits.slice(0, 200));
+      }
     }
   }
 }
