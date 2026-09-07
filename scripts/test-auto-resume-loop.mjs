@@ -1033,7 +1033,15 @@ if (!probe) {
       while (i < txt.length && depth > 0) { const c = txt[i]; if (c === '(') depth++; else if (c === ')') depth--; i++; }
       const args = txt.slice(m.index + m[0].length, i - 1);
       const why = (args.match(/'([^']*)'/) || [])[1];
-      if (why === undefined) continue;                       // the definition / the export line, not a call
+      if (why === undefined) {
+        // the DEFINITION is the only legitimate non-literal match; a CALL whose `why`
+        // is not a single-quoted literal is recorded as such and fails the table
+        // below as unlisted (round-4 verifier: silently skipping it handed an
+        // unclassified caller the dangerous `worked = true` default)
+        if (/function\s+noteRecovered\s*\($/.test(txt.slice(0, m.index + m[0].length))) continue;
+        callSites.push({ file: f, why: '<non-literal>', worked: !/worked:\s*false/.test(args) });
+        continue;
+      }
       callSites.push({ file: f, why, worked: !/worked:\s*false/.test(args) });
     }
   }
