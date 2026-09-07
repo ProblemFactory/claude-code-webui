@@ -45,6 +45,10 @@ const PURE = new Set(['src/plugin-manifest.js', 'src/account-pool-auto.js', 'src
   'src/collab-row.js']); // codex multi-agent collab row labels/HTML — esc/t/icons injected, so the XSS rule is unit-provable
 const SHARED = new Set(['src/discovery-facts.js', 'src/sysinfo.js', 'src/machine-probes.js', 'src/usage-walker.js',
   'src/transcript-service.js', 'src/ctx-sync.js', 'src/writer-sweep.js', 'src/remote-shell.js', 'src/account-material.js',
+  // THE agent-CLI process identity, one rule in two spellings (B-3185 r3): the JS twin
+  // (discovery-facts, so the daemon bundles it) beside the shell text the sweep and the
+  // ssh discovery CO leg embed verbatim. node builtins only.
+  'src/cli-identity.js',
   'src/session-store.js', 'src/codex-session-store.js', 'src/normalizers.js', 'src/message-manager.js',
   'src/codex-message-manager.js', 'src/adapters/base.js', 'src/adapters/claude-code.js', 'src/adapters/codex.js',
   'src/adapters/shell.js', 'src/adapters/index.js', 'src/usage-estimator.js', 'src/usage-anchors.js', 'src/safe-fs.js',

@@ -74,96 +74,22 @@ vs_fd_scan() {
 vs_fd_pids() { vs_fd_scan "$1" | cut -f1 | sort -u; }`;
 }
 
-/** Is pid $1 the `$2` CLI (claude | codex)? — the sweep's SECONDARY guard.
+/** THE CLI identity test (`vs_is_cli <pid> <name>`) is NOT defined here — it
+ *  lives in src/cli-identity.js together with its JS twin, and is re-exported
+ *  so every existing call site keeps its import.
  *
- *  The fd evidence is the primary signal (this process holds THIS
- *  conversation's transcript open); this decides whether the holder is the
- *  agent CLI (a writer) or a reader that must be left alone.
+ *  WHY IT MOVED (B-3185 r3): the same question — "is pid N the agent CLI?" — is
+ *  asked by this sweep (who gets a SIGTERM), by the ssh discovery CO leg (which
+ *  codex threads are RUNNING) and by src/discovery-facts.js in JavaScript (the
+ *  local listing + the device snapshot's lock scan). r1/r2 fixed the shell
+ *  spelling and RECORDED the JS one as a deliberate twin; a rule with two
+ *  spellings has two behaviours the moment either is touched, so both now sit
+ *  in one file with a parity suite that drives the SAME live pids through both.
  *
- *  It used to be a substring test over the WHOLE `ps -o args=` line, so every
- *  process whose command line merely MENTIONED a path under ~/.claude read as
- *  the CLI and was SIGTERMed: `tail -f ~/.claude/projects/<id>.jsonl`, an
- *  editor with the transcript open, and — the incident that put the workaround
- *  in the suite — a test process running from a git worktree under
- *  ~/.claude/worktrees/, which matched its own guard and killed itself.
- *
- *  Decide by the EXECUTABLE instead, in three rungs, because the CLI ships in
- *  three shapes: a native binary (argv[0] basename `claude`, exe
- *  ~/.local/share/<name>/versions/<ver>), an npm bin shim run through a
- *  shebang (`node <prefix>/bin/claude …`), and a direct entry-point run
- *  (`node …/@anthropic-ai/claude-code/cli.js`, `node …/@openai/codex/bin/codex.js`).
- *  Only argv[0] and the interpreter's first NON-FLAG operand are ever
- *  consulted — never a later argument, which is what made the old rule fire on
- *  a path that happened to be an argument.
- *
- *  RUNG 3 IS NARROWED BY THE PRESENTATION (r2). The native install's image IS
- *  the version FILE (`~/.local/share/claude/versions/2.1.257`), so its basename
- *  is a version number and the rung has to accept the install DIRECTORY — but
- *  the CLI RE-EXECS THAT SAME IMAGE as its bundled helper tools. Measured live
- *  on this box, twice, minutes apart: 18–19 processes have an exe under
- *  `…/.local/share/claude/versions/<ver>`, and 2–3 of them at any moment are
- *  `ugrep -G --ignore-files …` whose argv[0] is a bare `ugrep`. "Runs the CLI's
- *  binary image" is therefore NOT "is the CLI", and r1's rung ("anything under
- *  versions/") answered YES for those helpers — a WIDENING smuggled into a
- *  narrowing fix, so a search helper that inherited its parent's transcript fd
- *  was a SIGTERM target. The rung now also asks how the process PRESENTS
- *  itself, and takes either honest answer:
- *    · argv[0] basename starts with `<name>` — a shim/launcher that names the
- *      CLI (the exact-basename case never gets here; rung 1 has it), and
- *    · argv[0] basename EQUALS the exe basename — nothing was renamed, i.e. a
- *      wrapper that `exec`s the image itself (`exec "$IMG" "$@"`), which is the
- *      shape that keeps this rung from being unreachable in the first place.
- *  A re-exec'd helper fails both: it renames itself to the tool it is running
- *  (argv[0] `ugrep`, exe `…/versions/2.1.238`). The measured real CLI never
- *  needs this rung at all — its argv[0] is `~/.local/bin/claude`, so rung 1
- *  answers — which is exactly why widening it was pure downside. A narrowing
- *  fix must not widen anything. */
-function cliIdentityShellFns() {
-  return `vs_argv() {
-  if [ -r "/proc/$1/cmdline" ]; then
-    # the redirect itself fails LOUDLY (shell-level) when the pid exits between
-    # the test and the open — routine in a machine-wide scan, so the whole
-    # compound, not just tr, is silenced
-    { tr '\\0' '\\n' < "/proc/$1/cmdline" | sed -n "$(($2 + 1))p"; } 2>/dev/null
-  else
-    ps -p "$1" -o args= 2>/dev/null | awk -v i="$(($2 + 1))" '{ print $i }'
-  fi
-}
-vs_is_cli() {
-  vs_c_a0=$(vs_argv "$1" 0)
-  case "\${vs_c_a0##*/}" in "$2"|"$2".exe) return 0;; esac
-  case "\${vs_c_a0##*/}" in
-    node|nodejs|node.exe|bun|deno)
-      vs_c_i=1
-      while [ "$vs_c_i" -le 6 ]; do
-        vs_c_a=$(vs_argv "$1" "$vs_c_i")
-        [ -n "$vs_c_a" ] || return 1
-        case "$vs_c_a" in -*) vs_c_i=$((vs_c_i + 1)); continue;; esac
-        vs_c_d=\${vs_c_a%/*}
-        case "\${vs_c_a##*/}" in
-          "$2"|"$2".js|"$2".mjs|"$2".cjs) return 0;;
-          cli.js|cli.mjs|cli.cjs) case "\${vs_c_d##*/}" in *"$2"*) return 0;; esac;;
-        esac
-        return 1
-      done
-      return 1
-      ;;
-  esac
-  vs_c_e=$(readlink "/proc/$1/exe" 2>/dev/null)
-  [ -n "$vs_c_e" ] || return 1
-  case "\${vs_c_e##*/}" in "$2"|"$2".exe) return 0;; esac
-  case "$vs_c_e" in
-    */"$2"/versions/*)
-      # it PRESENTS as the CLI (a shim/launcher argv[0])…
-      case "\${vs_c_a0##*/}" in "$2"*) return 0;; esac
-      # …or it renamed nothing at all (argv[0] IS the image: a wrapper's
-      # \`exec "\$IMG" "\$@"\`). A re-exec'd helper always renames itself.
-      [ -n "$vs_c_a0" ] && [ "\${vs_c_a0##*/}" = "\${vs_c_e##*/}" ] && return 0
-      ;;
-  esac
-  return 1
-}`;
-}
+ *  The fd evidence stays the sweep's PRIMARY signal (this process holds THIS
+ *  conversation's transcript open); the identity test only decides whether the
+ *  holder is the agent CLI (a writer) or a reader that must be left alone. */
+const { cliIdentityShellFns } = require('./cli-identity');
 
 /** POSIX sweep script. Every kill leg echoes `SWEPT:<pid>` so the caller can
  *  TELL THE USER what was stopped instead of silently killing their terminal

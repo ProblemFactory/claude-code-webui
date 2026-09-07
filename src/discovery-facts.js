@@ -20,15 +20,22 @@
  *    device produced a phantom "running" session, the exact hole the local
  *    sweep closed years ago ("verify process is actually claude").
  *
- * This module is deliberately tiny (fs/child_process only) so the daemon
- * bundle can carry it: the agentd bundle is built by esbuild from src/, so —
- * unlike the ssh one-file scanner — it CAN share code. Every rule below has
- * exactly one home.
+ * This module is deliberately tiny (node builtins + the equally tiny
+ * src/cli-identity.js) so the daemon bundle can carry it: the agentd bundle is
+ * built by esbuild from src/, so — unlike the ssh one-file scanner — it CAN
+ * share code. Every rule below has exactly one home; "is this pid the agent
+ * CLI" is NOT one of them any more, because the writer sweep asks the same
+ * question in shell (B-3185 r3 — src/cli-identity.js holds both spellings and
+ * scripts/test-writer-sweep.mjs drives the same live pids through both).
  */
 const fs = require('fs');
-const { execFileSync } = require('child_process');
+const { spawnSync } = require('child_process');
 const path = require('path');
 const zlib = require('zlib');
+// THE agent-CLI process identity — the same rule the writer sweep and the ssh
+// discovery CO leg run in shell (src/cli-identity.js holds both spellings).
+// Node builtins only, so the daemon bundle still carries this module.
+const { isCliProcess } = require('./cli-identity');
 
 const NAME_MAX = 80;
 
@@ -293,9 +300,7 @@ function listOpenCodexRolloutPaths({ sessionsDir } = {}) {
     for (const entry of procEntries) {
       if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
       const pid = entry.name;
-      let cmdline = '';
-      try { cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf-8'); } catch { continue; }
-      if (!isCodexCommandLine(cmdline)) continue;
+      if (!isCliProcess(pid, 'codex')) continue;
       let fds = [];
       try { fds = fs.readdirSync(`/proc/${pid}/fd`); } catch { continue; }
       for (const fd of fds) {
@@ -307,31 +312,60 @@ function listOpenCodexRolloutPaths({ sessionsDir } = {}) {
     }
     return [...out];
   }
+  return listOpenRolloutPathsViaLsof(root);
+}
+
+/** The no-/proc rung of listOpenCodexRolloutPaths (macOS/BSD ssh hosts), NAMED
+ *  and exported so it can be DRIVEN on Linux too, where lsof also exists.
+ *
+ *  IT IS THE SAME IDENTITY RULE (B-3185 r3). Being unreachable in every test,
+ *  this branch quietly kept the loose spelling after the /proc branch was
+ *  fixed: it asked lsof's COMMAND field (`/codex/.test(cmd)`), i.e. the
+ *  process's `comm` — truncated to a handful of characters, prctl-settable by
+ *  the process itself, and matched as a SUBSTRING, so `codex-wrapper`,
+ *  `codexd` and a dtach master renamed after the thread all answered YES. The
+ *  shell twin's lsof branch never did that: it takes `lsof -t` and runs
+ *  `vs_is_cli "$pid" codex` on each pid. lsof already tells us the pid (`p`
+ *  lines), so this asks the shared predicate for it — one verdict per pid,
+ *  memoised, because on a no-/proc machine each call costs a `ps`.
+ *
+ *  AND LSOF'S EXIT STATUS IS NOT AN ERROR SIGNAL (r3, found by finally being
+ *  able to RUN this branch). `+D <dir>` walks the tree and lsof "returns a one
+ *  (1) if any error was detected, including the failure to LOCATE … files" —
+ *  i.e. it exits 1 whenever any file under the directory has no open instance,
+ *  which is the normal case. Measured here: on the real ~/.codex/sessions and
+ *  on a one-holder fixture, lsof printed the correct `p`/`n` lines, wrote
+ *  NOTHING to stderr, and exited 1. `execFileSync` turns that into a throw, the
+ *  catch turned it into `[]`, and `[]` means "no codex thread is running" — so
+ *  the macOS/BSD liveness fact was a degradation path that could only ever
+ *  degrade (B-3185's "a path that always fails is a path that was never
+ *  written"). The shell twin never had this bug because a shell consumes
+ *  `lsof …`'s STDOUT and ignores its status. Read the output; treat only a
+ *  spawn-level failure (no lsof, timeout, buffer overflow) as "cannot tell". */
+function listOpenRolloutPathsViaLsof(root) {
+  const out = new Set();
   try {
-    const output = execFileSync('lsof', ['-Fpcn', '+D', root], {
+    const r = spawnSync('lsof', ['-Fpn', '+D', root], {
       encoding: 'utf-8', timeout: 4000, maxBuffer: 8 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'],
     });
-    let cmd = '';
+    if (r.error) return [...out];
+    const output = String(r.stdout || '');
+    const verdicts = new Map();
+    let isCli = false;
     for (const line of output.split('\n')) {
-      if (line.startsWith('c')) { cmd = line.slice(1); continue; }
-      if (!line.startsWith('n')) continue;
+      if (line.startsWith('p')) {
+        const pid = line.slice(1).trim();
+        if (!verdicts.has(pid)) verdicts.set(pid, isCliProcess(pid, 'codex'));
+        isCli = verdicts.get(pid);
+        continue;
+      }
+      if (!isCli || !line.startsWith('n')) continue;
       const fp = line.slice(1).trim();
-      if (!/codex/.test(cmd) || !CODEX_ROLLOUT_RE.test(path.basename(fp))) continue;
+      if (!CODEX_ROLLOUT_RE.test(path.basename(fp))) continue;
       out.add(fp);
     }
   } catch { }
   return [...out];
-}
-
-/** "does this cmdline belong to the codex CLI" — moved from
- *  codex-session-store (one rule for liveness everywhere). */
-function isCodexCommandLine(cmdline = '') {
-  const value = String(cmdline || '');
-  return (
-    /(^|\0|[\/\s])codex(\0|\s|$)/.test(value)
-    || value.includes('/@openai/codex/')
-    || value.includes('/codex-linux-')
-  );
 }
 
 /** rollout-<ts>-<threadId>.jsonl[.zst] — the ONE thread-id-from-filename rule. */
@@ -339,22 +373,20 @@ const CODEX_TID_RE = /rollout-.*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4
 const CODEX_ROLLOUT_RE = /^rollout-.*\.jsonl(?:\.zst)?$/i;
 const codexThreadIdOf = (fp) => { const m = CODEX_TID_RE.exec(String(fp || '')); return m ? m[1] : null; };
 
-/** Portable "is this pid actually claude" — /proc on Linux (zero fork),
- *  `ps -o comm=` elsewhere. The verification the local sweep has had since
- *  the PID-reuse fix and the daemon snapshot never had. */
+/** "is this pid actually claude" — the PID-reuse verification the local sweep
+ *  has had for years and the daemon snapshot's lock scan never had.
+ *
+ *  IT IS THE SWEEP'S RULE (B-3185 r3, the STANDING-SWEEP twin). This used to be
+ *  `comm.includes('claude') || cmdline.includes('claude')` — the substring rule
+ *  B-3185 retired on the kill side and left standing here because "it only
+ *  labels a card RUNNING". That is a real difference in blast radius and not a
+ *  reason for two spellings: a lock file whose pid had been recycled by ANY
+ *  process that merely names a path under ~/.claude (an editor, a `tail -f`, an
+ *  agent worktree checkout) answered YES and produced the phantom "running"
+ *  session this function exists to prevent. One predicate now, in
+ *  src/cli-identity.js, with the shell twin beside it. */
 function pidLooksClaude(pid) {
-  try {
-    const comm = fs.readFileSync(`/proc/${pid}/comm`, 'utf-8').trim();
-    if (comm) return comm.includes('claude') || cmdlineLooksClaude(pid);
-  } catch { }
-  try {
-    const cmd = execFileSync('ps', ['-p', String(pid), '-o', 'comm='], { encoding: 'utf-8', timeout: 2000 }).trim();
-    return cmd === 'claude' || cmd.includes('claude');
-  } catch { return false; }
-}
-
-function cmdlineLooksClaude(pid) {
-  try { return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf-8').includes('claude'); } catch { return false; }
+  return isCliProcess(pid, 'claude');
 }
 
 
@@ -567,6 +599,6 @@ function synthesizeDiscoveryLines(snap) {
 module.exports = {
   extractTailIds, nameFromUserRecord, nameFromUserLine, nameFromText, pidLooksClaude, interpretDiscoveryLines, synthesizeDiscoveryLines, NAME_MAX,
   // S3 (codex facts + zstd rollouts)
-  deriveCodexSessionName, nameFromCodexUserLine, listOpenCodexRolloutPaths, isCodexCommandLine, CODEX_TID_RE, CODEX_ROLLOUT_RE, codexThreadIdOf,
+  deriveCodexSessionName, nameFromCodexUserLine, listOpenCodexRolloutPaths, listOpenRolloutPathsViaLsof, isCliProcess, CODEX_TID_RE, CODEX_ROLLOUT_RE, codexThreadIdOf,
   ZSTD_SUPPORTED, ZSTD_MAGIC, isZstPath, isZstBuffer, zstdDecompressFrames, zstdDecompressHead, readHeadText,
 };

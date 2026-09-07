@@ -28,13 +28,28 @@ fs.mkdirSync(projA, { recursive: true }); fs.mkdirSync(projB, { recursive: true 
 fs.writeFileSync(path.join(projA, SID1 + '.jsonl'), rec(SID1, 'alpha conversation one'));
 fs.writeFileSync(path.join(projA, SID2 + '.jsonl'), rec(SID2, 'alpha conversation two'));
 fs.writeFileSync(path.join(projB, SID3 + '.jsonl'), rec(SID3, 'beta conversation'));
-// a live lock claiming SID1 — use THIS process's pid; pidLooksClaude checks
-// the comm/cmdline, so name the lock's pid a real node process and patch the
-// guard via a claude-named child instead: spawn a sleeper argv0-named claude
+// A live lock claiming SID1. THE FIXTURE MUST BE A REAL BINARY NAMED `claude`
+// (B-3185 r3): this suite's whole point is that the DEVICE snapshot and the
+// LOCAL sweep answer identically, and the two ask "is this pid claude?" through
+// different rungs — the local sweep reads `ps -o comm=` (session-store
+// isProcessClaude: the name of the file that was EXEC'd) while the device path
+// runs the shared executable predicate (discovery-facts pidLooksClaude →
+// src/cli-identity.js isCliProcess: argv[0] / interpreter operand / /proc/exe).
+// On real processes those agree exactly — measured on the dev box, 16 of 4277
+// processes, both rules, the same 16 — and THIS ASSERTION IS THAT TWIN'S PARITY
+// GATE, so the fixture has to be a shape that occurs in production. The old
+// fixture (`#!/bin/sh` script named claude) was not: the kernel gives the sh
+// process argv[0] `/bin/sh` while `comm` stays `claude`, so it passed the local
+// rung and failed the executable one — an artifact pinning a disagreement that
+// no real install produces (and a wrapper script's lock file names the CHILD's
+// pid anyway). A COPY of /bin/sh named `claude` gives comm `claude` AND argv[0]
+// `<home>/claude`; a symlink would not (node renames its own comm to
+// `MainThread`, and /bin/sleep can be a uutils multi-call binary that dispatches
+// on argv[0]). It blocks on an empty stdin pipe, so it needs no child.
 const { execFileSync, spawn } = require('child_process');
 const fakeClaude = path.join(home, 'claude');
-fs.writeFileSync(fakeClaude, '#!/bin/sh\nsleep 60\n'); fs.chmodSync(fakeClaude, 0o755);
-const child = spawn(fakeClaude, [], { detached: false });
+fs.copyFileSync(fs.realpathSync('/bin/sh'), fakeClaude); fs.chmodSync(fakeClaude, 0o755);
+const child = spawn(fakeClaude, ['-c', 'read x'], { detached: false, stdio: ['pipe', 'ignore', 'ignore'] });
 fs.mkdirSync(path.join(home, '.claude', 'sessions'), { recursive: true });
 fs.writeFileSync(path.join(home, '.claude', 'sessions', child.pid + '.json'),
   JSON.stringify({ pid: child.pid, sessionId: SID1, cwd: '/work/alpha', startedAt: new Date().toISOString() }));

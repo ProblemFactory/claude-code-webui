@@ -2180,7 +2180,17 @@ ${codexOpenRolloutsShell()}
  *
  *  `read -r copid cot` relies on default IFS: the pid is the first field and
  *  the REST of the line (the fd target, spaces included) lands in `cot`.
- *  The lsof branch is unchanged — macOS/BSD hosts have no /proc.
+ *
+ *  THE lsof BRANCH IS THE SAME RULE TOO (r3). It was left "unchanged" through
+ *  r1/r2 because macOS/BSD hosts have no /proc — but "no /proc" only changes
+ *  how you ENUMERATE holders, not how you decide whether a holder is the CLI,
+ *  and it was still asking lsof's COMMAND field (`c ~ /codex/`): comm, matched
+ *  as a SUBSTRING, so `codex-keeper`, `codexd` or a dtach master renamed after
+ *  the thread marked a dead thread RUNNING on every mac host. It now emits
+ *  `p`+`n` (pid + name) and runs the SAME `vs_is_cli`, so the identity rule is
+ *  one rule on both rungs of both branches. The function definitions therefore
+ *  moved ABOVE the `if`: emitted inside the `then` block they did not exist in
+ *  the `else` branch at all.
  *
  *  THE TRAILING `:` IS LOAD-BEARING. This leg is the LAST thing in the ssh
  *  discovery script, so its status IS the script's status — and `_ssh` REJECTS
@@ -2193,15 +2203,17 @@ ${codexOpenRolloutsShell()}
  *  against a fixture HOME. Never let a scan's FINDINGS decide a script's exit
  *  status. */
 function codexOpenRolloutsShell() {
-  return `        if [ -d /proc/self ]; then
-${fdScanShellFns()}
+  return `${fdScanShellFns()}
 ${cliIdentityShellFns()}
+        if [ -d /proc/self ]; then
           vs_fd_scan "/rollout-[^/]*[.]jsonl" | while read -r copid cot; do
             case "$cot" in "$HOME"/.codex/sessions/*rollout-*.jsonl|"$HOME"/.codex/sessions/*rollout-*.jsonl.zst) ;; *) continue;; esac
             vs_is_cli "$copid" codex && echo "CO $cot"
           done
         else
-          lsof -Fcn +D "$HOME"/.codex/sessions 2>/dev/null | awk '/^c/{c=substr($0,2)} /^n/ && c ~ /codex/ && $0 ~ /rollout-.*\\.jsonl(\\.zst)?$/ {print "CO " substr($0,2)}'
+          lsof -Fpn +D "$HOME"/.codex/sessions 2>/dev/null | awk '/^p/{p=substr($0,2)} /^n/ && $0 ~ /rollout-.*\\.jsonl(\\.zst)?$/ {print p "\\t" substr($0,2)}' | while read -r copid cot; do
+            vs_is_cli "$copid" codex && echo "CO $cot"
+          done
         fi
         : # what this leg FOUND must never become the discovery script's exit status`;
 }
