@@ -21,7 +21,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { startMockServe, createMockState, QUESTION_PART, emit } from './dev/mock-opencode-serve.mjs';
 
 const require = createRequire(import.meta.url);
@@ -434,6 +434,135 @@ console.log('\n— ROUND 2 (findings from the review of this branch) —');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// The THIRD pass over this branch. Three defects, each reproduced (against a
+// real serve / a real ws upgrade) BEFORE the fix; each assert below is the
+// mechanism, with the negative control that proves it did not just switch the
+// feature off.
+console.log('\n— ROUND 3 (findings from the second review of this branch) —');
+{
+  // ① OUR OWN WRITE MUST NOT LOOK LIKE SOMEONE ELSE'S TURN.
+  //    Clicking "Roll back to before this message" moves the row's
+  //    `time.updated` exactly like a TUI would, and rung 2 attributed it to a
+  //    stranger for 90s: the card dimmed to opacity .7, its title read
+  //    "Running in unsupported terminal (PID ?)", the Fork… row disappeared
+  //    from its menu, and a sidebar filtered to exclude 'external' lost the
+  //    conversation entirely — all from the user's OWN click.
+  const mock = await startMockServe({ state: createMockState() });
+  const facts = serve.createFacts(fixedLocator(mock.url), { log: { warn() { } } });
+  const statusOf = async (id) => (await facts.discover({})).find((r) => r.backendSessionId === id)?.status;
+  ok('precondition: the row is SIGHTED first (a first sighting proves nothing, so the defect needs a prior listing — as production always has, the sidebar polls every 5s)', (await statusOf('ses_a1')) === 'stopped');
+  await facts.revertTo('ses_a1', { messageID: 'msg_u2' });
+  facts.invalidate();
+  ok('OUR OWN roll-back leaves the row STOPPED — never "someone else is driving it"', (await statusOf('ses_a1')) === 'stopped', await statusOf('ses_a1'));
+  await facts.unrevert('ses_a1');
+  facts.invalidate();
+  ok('…and so does our own restore', (await statusOf('ses_a1')) === 'stopped', await statusOf('ses_a1'));
+  // POSITIVE CONTROL: the exemption is by VALUE, so the very next move past
+  // our own write is somebody else's and says so immediately.
+  const a1 = mock.state.sessions.find((s) => s.id === 'ses_a1');
+  a1.time = { ...a1.time, updated: Date.now() + 5000 };
+  facts.invalidate();
+  ok('…while a move PAST our own write still reads external (the fix cannot swallow a real TUI)', (await statusOf('ses_a1')) === 'external', await statusOf('ses_a1'));
+
+  // an ANSWERED ASK returns no Session, so it uses the windowed form of the
+  // ledger — and the mock moves the row on reply, the way resuming the turn does
+  mock.state.questions = [{ id: 'que_own', sessionID: 'ses_g1', questions: QUESTION_PART(false).state.input.questions, tool: { messageID: 'msg_bq', callID: 'call_question_1' } }];
+  await facts.discover({});
+  ok('precondition: the warm question map is COLD (positional answers used to skip the read entirely)', facts._live.questions.size === 0);
+  const ans = await facts.answerQuestion('que_own', [['Blue']]);
+  ok('…so a POSITIONAL answer re-reads /question too, and therefore knows which conversation it just moved', ans?.sessionID === 'ses_g1', ans);
+  facts.invalidate();
+  ok('answering an ask on a STOPPED conversation does not make it external either', (await statusOf('ses_g1')) === 'stopped', await statusOf('ses_g1'));
+
+  // NEGATIVE CONTROL for the windowed form: with the window closed, the very
+  // same answer reads external — i.e. the ledger, not a broken rung, is what
+  // keeps the row honest above.
+  const mockW = await startMockServe({ state: createMockState() });
+  const factsW = serve.createFacts(fixedLocator(mockW.url), { ownWriteWindowMs: 1, log: { warn() { } } });
+  mockW.state.questions = [{ id: 'que_w', sessionID: 'ses_g1', questions: QUESTION_PART(false).state.input.questions, tool: { messageID: 'msg_bq', callID: 'call_question_1' } }];
+  await factsW.discover({});
+  await factsW.answerQuestion('que_w', [['Blue']]);
+  factsW.invalidate();
+  ok('negative control: with the own-write window closed, that same answer DOES read external (the rung still works)',
+    (await factsW.discover({})).find((r) => r.backendSessionId === 'ses_g1')?.status === 'external');
+  await mockW.close();
+  await mock.close();
+}
+{
+  // ② KICK MUST WAKE THE BACKOFF SLEEP. The lane's reconnect loop sleeps in a
+  //    setTimeout; `kick()` aborted the fetch controller, and during the sleep
+  //    there is no fetch to abort — so enabling the plugin (the service ships
+  //    OFF, so this IS the first-use path) waited out the remaining backoff.
+  //    MEASURED before the fix: 11.0s to the next connect attempt in this very
+  //    leg's shape, 25.1s end to end against a real serve.
+  const tries = [];
+  const locator = { client: async () => { tries.push(Date.now()); return null; }, state: () => ({ lastError: 'nothing to connect to' }) };
+  const stream = events.createEventStream({ locator, log: { warn() { } }, backoffBaseMs: 200, maxBackoffMs: 30000 });
+  stream.start();
+  // let it climb: 200·2^(n-1) — by attempt 6 the next sleep is 6.4s, so a
+  // sub-second reconnect cannot be an accident of a short timer
+  for (let i = 0; i < 100 && stream.state().attempts < 6; i++) await sleep(50);
+  const attempts = stream.state().attempts;
+  const pendingWait = Math.min(30000, 200 * 2 ** Math.min(attempts - 1, 10));
+  tries.length = 0;
+  const t0 = Date.now();
+  stream.kick();
+  for (let i = 0; i < 60 && !tries.length; i++) await sleep(25);
+  const woke = tries.length ? tries[0] - t0 : -1;
+  ok('kick() WAKES the backoff sleep — a serve that just became reachable is picked up at once, not after the remaining backoff',
+    woke >= 0 && woke < 500 && pendingWait >= 3000, { attempts, pendingWaitItSkipped: pendingWait, wokeInMs: woke });
+  stream.stop();
+  await sleep(50);
+  ok('…and stop() wakes it too, so the loop actually ends instead of leaving a pending promise', stream.state().stopped === true);
+}
+{
+  // ③ A PTY THE SERVE NO LONGER HAS IS AN EXIT, NOT A DROPPED SOCKET. The
+  //    bridge burned all five reconnect rungs (~12s) against an upgrade that
+  //    answers HTTP 404, logging five bogus warnings, before the terminal
+  //    admitted the shell was gone. Measured on the real serve: after `exit`,
+  //    `GET /pty/<id>` is PtyNotFoundError and the upgrade is a plain 404.
+  const bridgeMod = require(path.join(REPO, 'src/server/opencode-pty-bridge.js'));
+  ok('ptyGone(): a 404/410 upgrade is terminal, a transport failure is not', (() => {
+    const t = ['Unexpected server response: 404', 'Unexpected server response: 410'].every((m) => bridgeMod.ptyGone(m));
+    const f = ['Unexpected server response: 502', 'Unexpected server response: 503', 'connect ECONNREFUSED 127.0.0.1:1', 'socket hang up', 'read ECONNRESET', '', null].every((m) => !bridgeMod.ptyGone(m));
+    return t && f;
+  })());
+
+  const mock = await startMockServe({ state: createMockState(), pty: true });
+  const facts = serve.createFacts(fixedLocator(mock.url), { log: { warn() { } } });
+  const accessMod = require(path.join(REPO, 'src/server/opencode-access.js'));
+  accessMod.create({ facts, hosts: null });
+  const warns = [];
+  const bridge = await bridgeMod.openOpencodePty({ cwd: '/work/alpha', title: 'gone-leg', log: { warn: (m) => warns.push(m) } });
+  let exited = null;
+  bridge.shim.onData(() => { });
+  bridge.shim.onExit((e) => { exited = e; });
+  await sleep(300);
+  // THE SHELL EXITS: the serve deletes the pty and drops the socket. The bridge
+  // cannot know that from the close alone — it learns it from the 404 on the
+  // one reconnect it is entitled to.
+  mock.state.ptys.delete(bridge.ptyId);
+  try { mock.state.ptySockets.find((x) => x.id === bridge.ptyId)?.ws.close(); } catch { }
+  const t0 = Date.now();
+  for (let i = 0; i < 120 && !exited; i++) await sleep(50);
+  const took = Date.now() - t0;
+  ok('a serve-side pty that vanished ends the terminal on the FIRST 404 instead of retrying it five times (~12s)', !!exited && took < 3000, { took, exited });
+  const attempts404 = mock.state.requests.filter((r) => r.startsWith('WS404 ')).length;
+  ok('…and exactly ONE upgrade was attempted against the gone pty', attempts404 === 1, mock.state.requests.filter((r) => r.startsWith('WS')));
+  ok('…and it did not print five "socket error" warnings (one honest line names the verdict)',
+    warns.filter((w) => /socket error/.test(w)).length === 0 && warns.filter((w) => /is gone on the serve/.test(w)).length === 1, warns);
+  await mock.close();
+}
+{
+  // the three mechanisms are written down where the next person will look
+  const kfs = read('docs/kb-file-structure.md');
+  ok('docs: the own-write ledger, the woken sleep and the terminal 404 are in the kb essays + the incident file',
+    /noteOwnWrite/.test(kfs) && /ownWriteVerdict/.test(kfs) && /wakes it|wake it|wake the sleep|WAKES/i.test(kfs) && /ptyGone/.test(kfs)
+    && /OUR OWN CLICK REPORTED AS SOMEONE ELSE'S TURN/.test(read('docs/kb-bugfix-invariants.md'))
+    && /S9 REMAINDER ROUND 3/.test(read('CLAUDE.md')));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 console.log('\n— REAL BINARY (skips WITH EVIDENCE when opencode is absent) —');
 {
   let version = null;
@@ -480,8 +609,32 @@ console.log('\n— REAL BINARY (skips WITH EVIDENCE when opencode is absent) —
       const rRows = await facts.discover({});
       const rRow = rRows.find((r) => r.backendSessionId === sess.id);
       ok('…the sidebar entry carries the staged roll-back', rRow?.opencode?.revert?.messageID === msg.info.id, rRow?.opencode);
-      // …and, on the SAME real store, a change WE did not make reads external
-      ok('…and that row now reads external — a real change we did not drive (piece (f), rung 2)', rRow?.status === 'external', rRow?.status);
+      // NEGATIVE CONTROL on a REAL store (round 3): the roll-back we just made
+      // is the USER's own action — the row must stay stopped. MEASURED before
+      // the fix: 'stopped' → 'external' within 6s, three runs out of three,
+      // through the real product routes.
+      ok('…and the row we ourselves rolled back stays STOPPED (our own click never fakes another process)', rRow?.status === 'stopped', rRow?.status);
+      // POSITIVE CONTROL on the same real store: a SECOND opencode process
+      // writing the SAME sqlite is what 'external' exists for. Its events never
+      // reach our serve's bus (measured, see src/opencode-events.js) — only the
+      // store row does, which is exactly the rung under test.
+      const before2 = (await facts.discover({})).find((r) => r.backendSessionId === sess.id)?.status;
+      const second = spawn(process.env.OPENCODE_CMD || 'opencode', ['serve', '--port', '0', '--hostname', '127.0.0.1'], { env, cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+      let secondBase = null, secondOut = '';
+      const scan = (d) => { secondOut += d; const mm = secondOut.match(/https?:\/\/127\.0\.0\.1:\d+/); if (mm && !secondBase) secondBase = mm[0]; };
+      second.stdout.on('data', scan); second.stderr.on('data', scan);
+      for (let i = 0; i < 300 && !secondBase; i++) await sleep(100);
+      if (!secondBase) {
+        skip('…while a SECOND opencode process on the same store DOES read external', `a second serve would not boot here: ${secondOut.slice(-160) || 'no listen line'}`);
+      } else {
+        await fetch(`${secondBase}/session/${sess.id}/message`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ noReply: true, parts: [{ type: 'text', text: 'written by another opencode process' }] }) }).catch(() => { });
+        await sleep(400);
+        facts.invalidate();
+        const xRow = (await facts.discover({})).find((r) => r.backendSessionId === sess.id);
+        ok('…while a SECOND opencode process writing the same store DOES read external (the rung is alive, not switched off)', xRow?.status === 'external', { before2, after: xRow?.status });
+      }
+      try { second.kill('SIGTERM'); } catch { }
+      await sleep(300);
       const restored = await facts.unrevert(sess.id, { cwd });
       ok('…a REAL restore clears it', !restored?.revert);
       const rConv2 = await facts.readConversation(sess.id);

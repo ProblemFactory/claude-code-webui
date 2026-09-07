@@ -125,6 +125,15 @@ const NAME_BATCH = 6;
  *  decay back to 'stopped' on its own -- we never claim a running agent we
  *  cannot see, and we never keep claiming one after the evidence went stale. */
 const EXTERNAL_WINDOW_MS = 90000;
+/** How long a mutation WE made stays exempt from that rung when the action
+ *  gave us NO new `time.updated` to match on (an answered/rejected ask).
+ *  MEASURED on a real 1.18.29 serve: `revert`/`unrevert` return the row's
+ *  FINAL `time.updated` and the serve never bumps it again afterwards
+ *  (0ms delta at +250ms…+8s), so those writes are recognised EXACTLY — by
+ *  value, not by clock — and this window only has to cover a listing that was
+ *  already in flight while we wrote. Short on purpose: a blind window is how
+ *  a real TUI change would be missed. */
+const OWN_WRITE_WINDOW_MS = 10000;
 /** Floor between two event-driven list refreshes. The single-flight promise
  *  already coalesces CONCURRENT discovers; this coalesces SERIAL ones (five
  *  browser tabs each poll /api/sessions, and a busy turn dirties the store
@@ -957,7 +966,7 @@ function createServeLocator({
 
 // ── the store facts ──
 function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCacheMs = LIST_CACHE_MS, negativeCacheMs = NEGATIVE_CACHE_MS,
-  externalWindowMs = EXTERNAL_WINDOW_MS, onChange = null, log = console } = {}) {
+  externalWindowMs = EXTERNAL_WINDOW_MS, ownWriteWindowMs = OWN_WRITE_WINDOW_MS, onChange = null, log = console } = {}) {
   const cache = { list: null, at: 0, negativeUntil: 0, lastError: null, skippedWorktrees: [], dirty: true };
   const names = new Map();      // id → { name, at }
   const naming = new Set();
@@ -970,6 +979,7 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
     questions: new Map(),       // que_id → {id, sessionID, questions, tool, at}
     lastUpdated: new Map(),     // opencode session id → the last `time.updated` we saw in a list
     activeElsewhere: new Map(), // opencode session id → ts of the last observed CHANGE we did not make
+    ownWrites: new Map(),       // opencode session id → { at, updated } of a mutation WE made (see noteOwnWrite)
   };
 
   function reasonUnavailable() {
@@ -990,8 +1000,10 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
    *       (a) this serve's own `/session/status` says busy/retry (an event or
    *           a client of this serve is running the turn — in-process truth), or
    *       (b) the row's `time.updated` moved while we were not the ones moving
-   *           it, within externalWindowMs (a TUI or another opencode process
-   *           writing the SAME sqlite — MEASURED: its events never reach our
+   *           it — "we" meaning BOTH a live session of ours and a user action
+   *           taken through our own serve routes (noteOwnWrite; a roll-back is
+   *           the user, not a stranger) — within externalWindowMs (a TUI or
+   *           another opencode process writing the SAME sqlite — MEASURED: its events never reach our
    *           serve's event bus, but the store row it writes does reach our
    *           list, and the store-watch lane makes us re-read it in ~0.4s).
    *   • 'stopped'  — no evidence of anyone driving it. NEVER a fake 'running'.
@@ -1011,20 +1023,61 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
     for (const q of live.questions.values()) if (q.sessionID === sessionId) out.push(q);
     return out;
   }
+  /** REMEMBER A MUTATION WE MADE (round 3 of the review: clicking "Roll back to
+   *  before this message" made the row claim ANOTHER process was driving the
+   *  conversation for 90s — dimmed card, "Running in unsupported terminal",
+   *  no Fork… row, and gone entirely from a sidebar filtered to exclude
+   *  'external'). Our own write through the serve moves `time.updated` exactly
+   *  like a TUI's does; the only difference is that we know we did it, so we
+   *  have to write it down.
+   *
+   *  `session` is the action's own response when it carries one. MEASURED on a
+   *  real 1.18.29 serve: `revert`/`unrevert` return the row's FINAL
+   *  `time.updated` and nothing bumps it afterwards, so we match by VALUE —
+   *  the listing that reports exactly what we wrote is ours no matter how long
+   *  it takes to arrive, and the very next move past it is somebody else's.
+   *  An action with no Session (an answered ask) falls back to a short clock
+   *  window, which is the only blind spot and is bounded by design. */
+  function noteOwnWrite(id, session = null) {
+    if (!id) return;
+    const updated = Number(session?.time?.updated || session?.time?.created || 0) || 0;
+    live.ownWrites.set(String(id), { at: now(), updated });
+  }
+  /** Does this listing row's `time.updated` describe a write of OURS?
+   *  Consumes/expires the ledger entry so it can never linger. */
+  function ownWriteVerdict(id, u, t) {
+    const own = live.ownWrites.get(id);
+    if (!own) return false;
+    if (own.updated) {
+      if (u === own.updated) { live.ownWrites.delete(id); return true; }        // confirmed: this row IS our write
+      if (u < own.updated && t - own.at < ownWriteWindowMs) return true;        // a listing that was already in flight while we wrote
+      live.ownWrites.delete(id);                                               // moved PAST our write ⇒ whoever did that, it was not us
+      return false;
+    }
+    if (t - own.at < ownWriteWindowMs) return true;                            // no stamp (an answered ask): the short window
+    live.ownWrites.delete(id);
+    return false;
+  }
   /** Fold a fresh listing into the external-activity ledger: a row whose
    *  `time.updated` MOVED since the previous listing changed under someone —
    *  us or another process. `ownIds` are the conversation ids our own live
-   *  sessions hold, so our own writes never masquerade as "external". */
+   *  sessions hold, and `live.ownWrites` is the same fact for a conversation
+   *  with NO live session that the user acted on through our own routes, so
+   *  neither kind of own write ever masquerades as "external". */
   function noteListing(list, ownIds) {
     const t = now();
     for (const s of Array.isArray(list) ? list : []) {
       const u = s?.time?.updated || s?.time?.created || 0;
       const prev = live.lastUpdated.get(s.id);
       live.lastUpdated.set(s.id, u);
+      const ours = ownWriteVerdict(s.id, u, t);
       if (prev === undefined) continue;                 // first sighting proves nothing
-      if (u > prev && !(ownIds && ownIds.has(s.id))) live.activeElsewhere.set(s.id, t);
+      if (u > prev && !ours && !(ownIds && ownIds.has(s.id))) live.activeElsewhere.set(s.id, t);
     }
     if (live.lastUpdated.size > 4000) live.lastUpdated.clear();
+    // a write on a conversation that then vanished from the store would never
+    // be consumed above: sweep by age so the ledger stays bounded
+    if (live.ownWrites.size > 256) for (const [k, v] of live.ownWrites) if (t - v.at > ownWriteWindowMs) live.ownWrites.delete(k);
   }
   function assemble(list, activeSessions) {
     const activeById = new Map();
@@ -1206,6 +1259,10 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
     // session lives in sqlite and stays readable, verified 1.18.29)
     const dir = cwd || forked.directory || null;
     if (dir) await client.disposeInstance(dir, { timeoutMs: DEFAULT_TIMEOUT_MS }).catch(() => { });
+    // no noteOwnWrite here, and that is MEASURED rather than assumed: forking
+    // does not move the SOURCE row's `time.updated` on 1.18.29 (before ===
+    // after), and the fork's own row is a first sighting, which proves nothing
+    // by construction. An unmeasured entry would only add a blind window.
     invalidate();
     return forked;
   }
@@ -1228,6 +1285,7 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
     let session;
     try { session = await client.revert(id, { messageID, partID, directory: cwd || null, timeoutMs }); }
     catch (e) { if (isConnErr(e)) locator.invalidate(e.message); throw new OpencodeServeError(`OpenCode could not roll back ${id}: ${e.message}`, { status: e.status, code: e.code, cause: e }); }
+    noteOwnWrite(id, session);          // OUR write — never "someone else is driving it" (see noteOwnWrite)
     convo.delete(id); markDirty('revert');
     return session;
   }
@@ -1237,6 +1295,7 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
     let session;
     try { session = await client.unrevert(id, { directory: cwd || null, timeoutMs }); }
     catch (e) { if (isConnErr(e)) locator.invalidate(e.message); throw new OpencodeServeError(`OpenCode could not restore the rolled-back messages of ${id}: ${e.message}`, { status: e.status, code: e.code, cause: e }); }
+    noteOwnWrite(id, session);
     convo.delete(id); markDirty('unrevert');
     return session;
   }
@@ -1265,8 +1324,13 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
     // restarted between rendering the card and the user pressing Submit has an
     // empty warm map, and converting against nothing produced `[]` → "no
     // answers", i.e. a dead Submit on a perfectly answerable ask. Re-read the
-    // authoritative list once instead (positional answers need no lookup).
-    if (!q && !Array.isArray(answers)) {
+    // authoritative list once instead.
+    // POSITIONAL answers need no conversion, but they DO need the same read:
+    // the question is the only thing that names the conversation, and without
+    // it we can neither invalidate that conversation's cache, nor tell the
+    // clients WHICH row changed, nor write down that the move it is about to
+    // make was OURS (round 3). `/question` boots no instance — measured.
+    if (!q) {
       try { await pendingQuestions({ refresh: true, timeoutMs }); q = live.questions.get(String(requestId)) || null; } catch { }
     }
     const positional = Array.isArray(answers)
@@ -1277,17 +1341,22 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
     try { await client.questionReply(requestId, positional, { timeoutMs }); }
     catch (e) { if (isConnErr(e)) locator.invalidate(e.message); throw new OpencodeServeError(`OpenCode refused the answer to ${requestId}: ${e.message}`, { status: e.status, code: e.code, cause: e }); }
     live.questions.delete(String(requestId));
-    if (q?.sessionID) convo.delete(q.sessionID);
+    // an answer moves the row (and starts a turn): the move is OURS. No Session
+    // comes back here, so this is the windowed form of the ledger entry.
+    if (q?.sessionID) { noteOwnWrite(q.sessionID); convo.delete(q.sessionID); }
     markDirty('question-replied');
     return { ok: true, sessionID: q?.sessionID || null, answers: positional };
   }
   async function rejectQuestion(requestId, { timeoutMs = READ_TIMEOUT_MS } = {}) {
-    const q = live.questions.get(String(requestId)) || null;
+    let q = live.questions.get(String(requestId)) || null;
+    // same cold-map read as the reply path, for the same reason: a rejection
+    // moves the row too, and only the question names the conversation
+    if (!q) { try { await pendingQuestions({ refresh: true, timeoutMs }); q = live.questions.get(String(requestId)) || null; } catch { } }
     const client = await userClient(timeoutMs);
     try { await client.questionReject(requestId, { timeoutMs }); }
     catch (e) { if (isConnErr(e)) locator.invalidate(e.message); throw new OpencodeServeError(`OpenCode refused the rejection of ${requestId}: ${e.message}`, { status: e.status, code: e.code, cause: e }); }
     live.questions.delete(String(requestId));
-    if (q?.sessionID) convo.delete(q.sessionID);
+    if (q?.sessionID) { noteOwnWrite(q.sessionID); convo.delete(q.sessionID); }
     markDirty('question-rejected');
     return { ok: true, sessionID: q?.sessionID || null };
   }
@@ -1499,7 +1568,7 @@ module.exports = {
   OpencodeServeClient, OpencodeServeError, createServeLocator, createFacts, OpencodeServeSessionMessages,
   messagesToAcpRecords, acpKindOfTool, acpStatusOfState, sessionTitle, install, facts, uninstall,
   bootstrappableWorktree, unsafeWorktreeReason, ensureServeCwd, serveCwdPath, readProcUsage,
-  normalizeAskQuestions, askAnswerMap, askAnswersToPositional, revertNoticeText, EXTERNAL_WINDOW_MS,
+  normalizeAskQuestions, askAnswerMap, askAnswersToPositional, revertNoticeText, EXTERNAL_WINDOW_MS, OWN_WRITE_WINDOW_MS,
   serveEnvOverride, decideAutostart, SERVICE_PLUGIN_ID: 'opencode-serve',
   DEFAULT_TIMEOUT_MS, READ_TIMEOUT_MS, LIST_CACHE_MS, NEGATIVE_CACHE_MS, MAX_CRASHES, FORK_PATH,
   NAME_MAX_BYTES, GUARD_CPU_PCT, GUARD_RSS_BYTES, GUARD_SAMPLE_MS, RUNAWAY_COOLDOWN_MS, MIN_REFRESH_MS, PTY_TIMEOUT_MS,

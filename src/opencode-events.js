@@ -125,6 +125,14 @@ function createEventStream({
   const doFetch = fetchImpl || ((...a) => globalThis.fetch(...a));
   const state = { connected: false, attempts: 0, lastFrameAt: 0, lastError: null, stopped: false, connectedAt: null, frames: 0 };
   let ctl = null, timer = null, idleTimer = null, running = false;
+  /** The resolver of the backoff sleep, while the loop is IN it. THE SLEEP IS
+   *  PART OF THE SOCKET: `kick()` used to abort the fetch controller only, and
+   *  during a backoff there is no fetch to abort — so a lane that had backed
+   *  off to 30s (the service ships OFF, so "nothing to connect to" is the
+   *  NORMAL state before first use) took up to that long to notice the serve,
+   *  measured at 25s end to end. Waking the sleep is what makes the kick real. */
+  let wake = null;
+  function wakeSleep() { clearTimeout(timer); timer = null; const w = wake; wake = null; if (w) { try { w(); } catch { } } }
 
   const notify = () => { try { onState?.(snapshot()); } catch { } };
   function snapshot() {
@@ -188,16 +196,20 @@ function createEventStream({
         // the serve may be respawning (crash backoff, runaway cooldown): the
         // stream backs off the same way and re-asks the locator each time
         const wait = Math.min(maxBackoffMs, backoffBaseMs * 2 ** Math.min(state.attempts - 1, 10));
-        await new Promise((r) => { timer = setTimeout(r, wait); if (timer.unref) timer.unref(); });
+        await new Promise((r) => { wake = r; timer = setTimeout(r, wait); if (timer.unref) timer.unref(); });
+        wake = null;
       }
     } finally { running = false; }
   }
   return {
     start() { if (state.stopped) return; loop().catch(() => { }); return snapshot(); },
     /** A locator restart (new port) invalidates the socket: drop it so the
-     *  loop reconnects to the NEW base url instead of a dead one. */
-    kick() { state.attempts = 0; state.lastError = null; try { ctl?.abort(); } catch { } if (!running) loop().catch(() => { }); },
-    stop() { state.stopped = true; clearTimeout(timer); clearTimeout(idleTimer); try { ctl?.abort(); } catch { } notify(); },
+     *  loop reconnects to the NEW base url instead of a dead one. Both states
+     *  the loop can be in are ended — an OPEN socket by aborting the fetch, a
+     *  SLEEPING backoff by waking it (see `wake`); resetting `attempts` alone
+     *  only shortens the NEXT wait, never the one already running. */
+    kick() { state.attempts = 0; state.lastError = null; wakeSleep(); try { ctl?.abort(); } catch { } if (!running) loop().catch(() => { }); },
+    stop() { state.stopped = true; clearTimeout(idleTimer); wakeSleep(); try { ctl?.abort(); } catch { } notify(); },
     state: snapshot,
   };
 }

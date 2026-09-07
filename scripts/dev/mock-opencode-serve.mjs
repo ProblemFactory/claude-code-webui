@@ -108,6 +108,14 @@ export function emit(state, frame) {
   for (const res of state.sse) { try { res.write(line); } catch { } }
 }
 
+/** Move a conversation's `time.updated`, the way any write to it does on the
+ *  real serve — the ONE fact the honest-liveness rung 2 reads. */
+export function touch(state, sessionID, at = Date.now()) {
+  const s0 = state.sessions.find((x) => x.id === sessionID);
+  if (s0) s0.time = { ...s0.time, updated: at };
+  return s0 || null;
+}
+
 function readBody(req, cb) {
   let raw = '';
   req.on('data', (c) => { raw += c; });
@@ -240,6 +248,10 @@ export function makeHandler(state) {
           if (!body || !Array.isArray(body.answers)) return json(res, 400, { name: 'BadRequest', data: { message: 'answers required' } });
           state.answered.push({ requestID: rid, answers: body.answers });
           state.questions = state.questions.filter((x) => x.id !== rid);
+          // answering resumes the turn, so the conversation MOVES — the reply
+          // route itself returns no Session, which is exactly why the own-write
+          // ledger needs its windowed form for this action
+          touch(state, q.sessionID);
           emit(state, { payload: { id: 'evt_qr', type: 'question.replied', properties: { sessionID: q.sessionID, requestID: rid, answers: body.answers } } });
           return json(res, 200, true);
         });
@@ -250,6 +262,7 @@ export function makeHandler(state) {
         if (!q) return json(res, 404, { name: 'QuestionNotFoundError', data: { message: 'Question not found' } });
         state.answered.push({ requestID: rid, rejected: true });
         state.questions = state.questions.filter((x) => x.id !== rid);
+        touch(state, q.sessionID);
         emit(state, { payload: { id: 'evt_qj', type: 'question.rejected', properties: { sessionID: q.sessionID, requestID: rid } } });
         return json(res, 200, true);
       }
@@ -306,6 +319,18 @@ export function startMockServe({ port = 0, state = null, pty = false } = {}) {
       const u = new URL(req.url, 'http://127.0.0.1');
       const m = u.pathname.match(/^\/pty\/([^/]+)\/connect$/);
       if (!m) { socket.destroy(); return; }
+      // A PTY THE SERVE NO LONGER HAS answers the UPGRADE with a plain HTTP
+      // 404 — measured on the real 1.18.29 serve after a shell `exit`
+      // (`GET /pty/<id>` → PtyNotFoundError, the upgrade → 404, which the ws
+      // client surfaces as `Unexpected server response: 404`). Modelled here
+      // because the bridge's reconnect rule depends on telling that verdict
+      // apart from a dropped transport.
+      if (!st.ptys.has(decodeURIComponent(m[1]))) {
+        st.requests.push(`WS404 ${u.pathname}${u.search}`);
+        const body = JSON.stringify({ _tag: 'PtyNotFoundError', message: 'PTY session not found' });
+        socket.end(`HTTP/1.1 404 Not Found\r\ncontent-type: application/json\r\ncontent-length: ${Buffer.byteLength(body)}\r\nconnection: close\r\n\r\n${body}`);
+        return;
+      }
       st.requests.push(`WS ${u.pathname}${u.search}`);
       wss.handleUpgrade(req, socket, head, (ws) => {
         const id = decodeURIComponent(m[1]);

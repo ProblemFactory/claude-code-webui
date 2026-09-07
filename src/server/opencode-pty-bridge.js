@@ -34,6 +34,20 @@ const { access } = require('./opencode-access');
 const RECONNECT_MS = 800;
 const MAX_RECONNECTS = 5;
 
+/** IS THIS UPGRADE FAILURE PERMANENT? A dropped transport deserves the bounded
+ *  reconnect above; "the serve does not have this pty" does not. MEASURED on a
+ *  real 1.18.29 serve: after the shell exits, `GET /pty/<id>` answers
+ *  `PtyNotFoundError` and the websocket upgrade is a plain HTTP 404, which the
+ *  `ws` client reports as `error: Unexpected server response: 404` followed by
+ *  `close` (verified on the wire — with no 'unexpected-response' listener
+ *  registered, that pair is exactly what ws emits). Retrying it burned all five
+ *  rungs — 800+1600+2400+3200+4000 ≈ 12s of a dead-but-open terminal plus five
+ *  bogus warnings — before the window admitted the shell was gone. PURE so the
+ *  gate can pin the truth table instead of the incident. */
+function ptyGone(message) {
+  return /Unexpected server response:\s*(404|410)\b/.test(String(message || ''));
+}
+
 /** Open a serve-owned pty and return {ptyId, shim}. Throws LOUDLY (the caller
  *  turns it into a user-visible refusal). */
 async function openOpencodePty({ cwd = null, title = null, command = null, args = null, log = console } = {}) {
@@ -42,7 +56,7 @@ async function openOpencodePty({ cwd = null, title = null, command = null, args 
   const ptyId = bridge.pty.id;
 
   let onData = null, onExit = null;
-  let sock = null, closed = false, reconnects = 0;
+  let sock = null, closed = false, reconnects = 0, gone = false;
   const pending = [];                       // input typed before the socket is up
   // …and the mirror problem, which cost a blank terminal until the browser leg
   // caught it: the serve greets the socket with the shell's banner/prompt the
@@ -62,12 +76,21 @@ async function openOpencodePty({ cwd = null, title = null, command = null, args 
       if (!onData) { if (preData.length < 500) preData.push(text); return; }   // bounded: a consumer that never arrives must not grow memory
       try { onData(text); } catch { }
     });
-    sock.on('error', (e) => { log?.warn?.(`[opencode-pty] ${ptyId} socket error: ${e.message}`); });
+    sock.on('error', (e) => {
+      // the serve ANSWERING "no such pty" is not a transport failure — it is
+      // the shell's exit reaching us through the only channel that carries it
+      if (ptyGone(e?.message)) { gone = true; return; }
+      log?.warn?.(`[opencode-pty] ${ptyId} socket error: ${e.message}`);
+    });
     sock.on('close', () => {
       if (closed) return;
       // the pty lives in the serve: a dropped socket is OUR problem, not the
       // shell's. Reconnect a bounded number of times, then end the session
       // honestly rather than showing a dead-but-open terminal.
+      // …unless the serve says the pty is GONE (HTTP 404/410): that is a
+      // verdict, not a hiccup, so the session ends NOW instead of retrying a
+      // shell that has already exited.
+      if (gone) { closed = true; log?.warn?.(`[opencode-pty] ${ptyId} is gone on the serve (HTTP 404) — the shell exited`); try { onExit?.({ exitCode: 0 }); } catch { } return; }
       if (reconnects++ >= MAX_RECONNECTS) { closed = true; try { onExit?.({ exitCode: 0 }); } catch { } return; }
       setTimeout(() => { if (!closed) connect(); }, RECONNECT_MS * reconnects).unref?.();
     });
@@ -102,4 +125,4 @@ async function openOpencodePty({ cwd = null, title = null, command = null, args 
   return { ptyId, shim, pty: bridge.pty };
 }
 
-module.exports = { openOpencodePty };
+module.exports = { openOpencodePty, ptyGone, RECONNECT_MS, MAX_RECONNECTS };
