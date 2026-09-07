@@ -53,7 +53,7 @@
 //               and takes no removal — offering a control we cannot honour is
 //               the accept-and-ignore failure the 2.361.4 lesson names.
 // responseStyle names the harness's "how should the agent talk" knob and,
-// crucially, WHEN it can be set (2.369.57 — the chip's "restart to apply" row
+// crucially, WHEN it can be set (2.369.58 — the chip's "restart to apply" row
 // gates on `live`, never on a backend id):
 //   values    — the harness's OWN accepted vocabulary. PROTOCOL VALUES, never
 //               translated, never guessed: claude's four settings-file output

@@ -267,7 +267,7 @@ function restoreSessions() {
       // stdout-only) — restore what the session was launched with
       _permissionMode: meta.permissionMode || null,
       _effort: meta.effort || null,
-      _outputStyle: meta.outputStyle || null, // 2.369.57: the chip must not report "default" for a session really running a style
+      _outputStyle: meta.outputStyle || null, // 2.369.58: the chip must not report "default" for a session really running a style
       _modelLocked: !!meta.modelLocked,
       _lockedModel: meta.lockedModel || null,
       agentToken: meta.agentToken || null, // vibespace-status auth survives restarts
@@ -561,7 +561,7 @@ async function readoptOrphanKeeperSessions() {
       _authAtSpawn: meta.authAtSpawn || null,
       _permissionMode: meta.permissionMode || null,
       _effort: meta.effort || null,
-      _outputStyle: meta.outputStyle || null, // 2.369.57: the chip must not report "default" for a session really running a style
+      _outputStyle: meta.outputStyle || null, // 2.369.58: the chip must not report "default" for a session really running a style
       _modelLocked: !!meta.modelLocked,
       _lockedModel: meta.lockedModel || null,
       _initialGroupId: meta.taskId || null,

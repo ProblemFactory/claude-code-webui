@@ -1132,6 +1132,6 @@ body.hide-empty-thinking .chat-compact .chat-msg.chat-empty-thinking { display: 
 .chat-media.chat-media-broken .chat-tool-img { display: none; }
 .chat-media.chat-media-broken .chat-media-missing { display: inline; }
 .chat-tool-image-chip { font-size: 11px; color: var(--text-dim); border: 1px dashed var(--border); border-radius: var(--radius-sm); padding: 2px 6px; }
-/* Live `clock.sleep` countdown (2.369.57) — tabular figures so a ticking
+/* Live `clock.sleep` countdown (2.369.58) — tabular figures so a ticking
    mm:ss does not jiggle the row every second. */
 .chat-sleep-remaining { font-variant-numeric: tabular-nums; font-family: var(--font-mono, monospace); color: var(--text); }

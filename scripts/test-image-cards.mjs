@@ -298,7 +298,7 @@ const IMAGEVIEW_0153_JSONL = `
   ok("…and its ImageView case routes into the SHARED image-view card path (no second card builder)", /if \(type === 'ImageView'\) \{[\s\S]{0,600}this\._processViewImageEvent\(\{ call_id: it\.id \|\| this\._nextId\(\), path: it\.path \}, emit\);/.test(cmm));
   // ONE DECODER: fileUrlToPath is defined once and applied ONLY inside the card
   // paths every carrier of an image funnels through — _processViewImageEvent
-  // (viewed) and, since 2.369.57, _processImageGenEvent (generated). Never an
+  // (viewed) and, since 2.369.58, _processImageGenEvent (generated). Never an
   // inline `replace(/^file:\/\//)` at a call site: that is how a second,
   // subtly-different decoder gets born.
   ok('fileUrlToPath is declared ONCE and called only from the image CARD PATHS', (cmm.match(/function fileUrlToPath\(/g) || []).length === 1

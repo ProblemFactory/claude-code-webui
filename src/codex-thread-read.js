@@ -99,7 +99,7 @@ function itemToRecords(item, ts) {
       return callPair(ts, id, 'web_search', { query: item.query || '', action: item.action || null }, { output: '' });
     case 'imageView':
       return callPair(ts, id, 'view_image', { path: item.path || '' }, { output: `viewed ${item.path || 'image'}` });
-    // MEDIA + SLEEP (2.369.57): emitted in the ROLLOUT's own spelling, not as a
+    // MEDIA + SLEEP (2.369.58): emitted in the ROLLOUT's own spelling, not as a
     // hand-rolled callPair — that made this the third, DIFFERENT producer of the
     // same fact (it read `item.prompt`, which the v2 ImageGeneration item does
     // not even have; the prompt is `revisedPrompt` and the file is `savedPath`).

@@ -967,7 +967,7 @@ class CodexAdapter extends BackendAdapter {
           CODEX_WEBUI_SANDBOX: resolvedPermission.sandbox,
           CODEX_WEBUI_CWD: cwd || os.homedir(),
           CODEX_WEBUI_SESSION_NAME: options.sessionName || '',
-          // RESPONSE STYLE (2.369.57): the per-session `outputStyle` slot,
+          // RESPONSE STYLE (2.369.58): the per-session `outputStyle` slot,
           // spelled in codex's own vocabulary (Personality: none | friendly |
           // pragmatic). '' = the user chose nothing ⇒ the wrapper omits the
           // key entirely and ~/.codex/config.toml decides. An out-of-enum

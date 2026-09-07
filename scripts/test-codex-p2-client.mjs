@@ -49,7 +49,7 @@ const metaSrc = read('src/lib/agent-meta.js');
 const { BACKEND_META } = await import(path.join(REPO, 'src/lib/agent-meta.js'));
 {
   const c = BACKEND_META.codex.caps;
-  // 2.369.57: the `outputStyle` BOOLEAN is gone — codex CAN be styled, it just
+  // 2.369.58: the `outputStyle` BOOLEAN is gone — codex CAN be styled, it just
   // speaks a different vocabulary, so the caps row carries {live, values} and
   // the chip/menu gate on those (never on a backend id).
   ok(c.fork === true && c.effort === true && c.review === true && c.autoResume === true && c.accounts === true && BACKEND_META.codex.caps.quotaRefresh === 'session-rpc'

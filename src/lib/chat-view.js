@@ -780,7 +780,7 @@ class ChatView {
     // Telemetry fingerprint `chat-stall-reattach` records each firing with
     // the silence length — the instrument that convicts the real seam on the
     // next occurrence. Fires at most once per 5min per view.
-    // SLEEP COUNTDOWN (2.369.57): a live `clock.sleep` card renders its own
+    // SLEEP COUNTDOWN (2.369.58): a live `clock.sleep` card renders its own
     // deadline into `data-sleep-until`; ONE interval per view rewrites the text
     // so a 20-minute wait visibly counts down instead of sitting behind a
     // spinner. It touches nothing when no such card exists (the usual case),
@@ -824,10 +824,10 @@ class ChatView {
       } else if (msg.type === 'auto-resume' && msg.sessionId === sessionId) {
         this._statusBar?.setAutoResume?.(msg.status || null);
       } else if (msg.type === 'response-style-updated' && msg.sessionId === sessionId) {
-        // LIVE style switch CONFIRMED by the server (2.369.57). The chip only
+        // LIVE style switch CONFIRMED by the server (2.369.58). The chip only
         // moves on this echo — a refused switch answers `{type:'error',
         // code:'style-not-live'}` instead and the bar keeps the truth.
-        // The SUCCESS TOAST lives here too (2.369.57): firing it at click time
+        // The SUCCESS TOAST lives here too (2.369.58): firing it at click time
         // announced a switch the server was about to refuse.
         this._statusBar?.setOutputStyle?.(msg.outputStyle || '');
         this._statusBar?.setOutputStylePending?.(undefined);
@@ -3655,7 +3655,7 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
       // 'style-wrapper-old' means THIS wrapper will never serve the verb, so
       // only it flips the flag — the chip's menu then offers the restart row
       // and keeps the saved pick visible as pending instead of swallowing the
-      // choice (2.369.57). 'style-not-live' covers transient/other reasons (a
+      // choice (2.369.58). 'style-not-live' covers transient/other reasons (a
       // sidecar not written yet, a dead session) and must change no belief.
       if (msg.code === 'style-wrapper-old') this._statusBar?.setResponseStyleLive?.(false);
       this._renderers.appendSystem('✗ ' + (msg.message || msg.error || t('Message rejected.')));

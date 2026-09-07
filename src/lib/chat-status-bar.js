@@ -373,7 +373,7 @@ export class ChatStatusBar {
       parts.push(`<span class="chat-status-goal chat-status-goal-empty chat-status-clickable" title="${escHtml(t('Set a goal \u2014 the agent keeps working until the condition is met'))}">${UI_ICONS.goal}</span>`);
     }
 
-    // Response style (2.368.0 outputStyle, generalized 2.369.57): the chip is
+    // Response style (2.368.0 outputStyle, generalized 2.369.58): the chip is
     // drawn for any harness whose caps row lists style VALUES, and the tooltip
     // tells the truth about WHEN a change lands — `live` harnesses (codex
     // personality via thread/settings/update) apply from the next turn, the
@@ -933,7 +933,7 @@ export class ChatStatusBar {
         const pending = this._outputStylePending;
         // The restart row exists whenever THIS SESSION cannot take the change
         // live — the harness caps row AND the running wrapper's advert, never a
-        // backend id (2.369.57: gating on caps alone left every codex session
+        // backend id (2.369.58: gating on caps alone left every codex session
         // that predates the live switch with a refusal, no restart row, and an
         // invisible saved pick).
         if (!styleAppliesLive(caps, this._responseStyleLive) && this._onRestartSession && pending !== undefined && (pending || '') !== (this._outputStyle || '')) {

@@ -1,5 +1,5 @@
 {
- "_note": "The RESULT schema of every answerable codex ServerRequest method, dumped VERBATIM from the installed CLI with `CODEX_HOME=/tmp/x codex app-server generate-json-schema --experimental --out DIR`. scripts/test-harness-honesty.mjs validates every reply the wrapper sends against these \u2014 the hand-written expectation that shipped a `[{kind}]` where the schema says string[] is exactly what a real schema catches (2.369.57 r2). When the codex binary is present the suite also re-dumps and DIFFS this fixture, so an upstream shape change fails loudly instead of rotting here.",
+ "_note": "The RESULT schema of every answerable codex ServerRequest method, dumped VERBATIM from the installed CLI with `CODEX_HOME=/tmp/x codex app-server generate-json-schema --experimental --out DIR`. scripts/test-harness-honesty.mjs validates every reply the wrapper sends against these \u2014 the hand-written expectation that shipped a `[{kind}]` where the schema says string[] is exactly what a real schema catches (2.369.58 r2). When the codex binary is present the suite also re-dumps and DIFFS this fixture, so an upstream shape change fails loudly instead of rotting here.",
  "codexVersion": "0.153.4",
  "dumpCommand": "CODEX_HOME=/tmp/x codex app-server generate-json-schema --experimental --out DIR",
  "fileByMethod": {

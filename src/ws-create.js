@@ -333,7 +333,7 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
             effort: data.effort,
             // client value wins; else the instance default (covers every create
             // path uniformly — resume, layout restore, billing switch)
-            // RESPONSE STYLE (2.369.57): client value wins; else the
+            // RESPONSE STYLE (2.369.58): client value wins; else the
             // instance default for THIS harness's settings family
             // (`<prefix>.outputStyle` — never the hardcoded claude key, which
             // would have handed a codex spawn "Concise"). A value outside the
@@ -1664,7 +1664,7 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
             parentThreadId: session.parentThreadId,
             permissionMode: session._permissionMode || null,
             effort: session._effort || null,
-            outputStyle: session._outputStyle || null, // 2.369.57: the EFFECTIVE response style survives a server restart (the chip otherwise reported "default" for a session really running one)
+            outputStyle: session._outputStyle || null, // 2.369.58: the EFFECTIVE response style survives a server restart (the chip otherwise reported "default" for a session really running one)
             modelLocked: session._modelLocked || undefined, // #6: survive server restart (else a resumed lock's badge silently reverts — review-caught)
             lockedModel: session._lockedModel || undefined,
             agentToken: session.agentToken || null,
@@ -1817,7 +1817,7 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
             // adverts it is written seconds later, and the client's third
             // state (undefined = "not told yet") is the honest one — it TRIES
             // the live verb and a refusal flips it to false with the restart
-            // row in the same menu (2.369.57). Guessing either way is the
+            // row in the same menu (2.369.58). Guessing either way is the
             // capability-skew bug in miniature.
             warning: session._resumeWarning || undefined, // 2.271.0 T1-2: sweep-skipped-under-lag double-write risk
             // A sweep is DESTRUCTIVE by design (it SIGTERMs another claude that

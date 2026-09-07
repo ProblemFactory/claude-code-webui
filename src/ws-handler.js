@@ -345,7 +345,7 @@ function registerWsHandler(wss, ctx) {
           break;
         }
 
-        // LIVE RESPONSE STYLE (2.369.57). The per-session `outputStyle` slot is
+        // LIVE RESPONSE STYLE (2.369.58). The per-session `outputStyle` slot is
         // harness-neutral; WHEN it can be applied is not, and that verdict lives
         // in the caps row, never in a backend id:
         //   · responseStyle.live === false (claude) ⇒ REFUSED here with the
@@ -359,7 +359,7 @@ function registerWsHandler(wss, ctx) {
         case 'set-response-style': {
           const session = activeSessions.get(data.sessionId);
           // TWO refusal codes, because they mean different things to the UI
-          // (2.369.57 r2 — the 2.363.1 law: one error type with several meanings
+          // (2.369.58 r2 — the 2.363.1 law: one error type with several meanings
           // must split by code): 'style-wrapper-old' = THIS session's wrapper
           // will never serve the verb ⇒ the client stops offering the live
           // switch and shows "Restart now to apply"; 'style-not-live' = every
@@ -1021,7 +1021,7 @@ function registerWsHandler(wss, ctx) {
                 // controls whose frames its wrapper drops (2.361.1/2.364.1).
                 queueSupported: wcapsAttach.inputQueue || !!session._normalizer?.queuePublished?.(),
                 // …and whether that same running wrapper serves the LIVE style
-                // verb. The client needs BOTH facts (2.369.57): with only the
+                // verb. The client needs BOTH facts (2.369.58): with only the
                 // harness caps row, a session spawned before the live-switch
                 // release lost the "Restart now to apply" row, kept an
                 // invisible saved pick, and got an optimistic toast the

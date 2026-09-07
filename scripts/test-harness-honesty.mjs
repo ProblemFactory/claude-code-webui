@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// HARNESS HONESTY (2.369.57) — the four production defects the 2026-09-07
+// HARNESS HONESTY (2.369.58) — the four production defects the 2026-09-07
 // harness survey found, each with its own reproduction:
 //
 //  ① codex PERSONALITY. The wrapper hardcoded `personality:'pragmatic'` into
@@ -444,7 +444,7 @@ ok(events().some((e) => e.type === 'server_request_resolved' && e.payload.id ===
     { decision: { acceptWithExecpolicyAmendment: { execpolicy_amendment: [{ kind: 'allow' }] } } });
   ok(bad.length > 0 && /execpolicy_amendment/.test(bad.join(' ')), 'negative control: the OLD amendment payload (option objects) FAILS the real schema', bad.join(' | '));
   const bad2 = schemaErrors(RESP_SCHEMAS.byMethod['item/tool/requestUserInput'], { decision: 'accept' });
-  ok(bad2.length > 0, 'negative control: `{decision}` is not a requestUserInput answer (the pre-2.369.57 one-shape-fits-all)', bad2.join(' | '));
+  ok(bad2.length > 0, 'negative control: `{decision}` is not a requestUserInput answer (the pre-2.369.58 one-shape-fits-all)', bad2.join(' | '));
   const good = schemaErrors(RESP_SCHEMAS.byMethod['item/commandExecution/requestApproval'],
     { decision: { acceptWithExecpolicyAmendment: { execpolicy_amendment: ['allow rm'] } } });
   ok(good.length === 0, 'positive control: the amendment IS legal when it carries the server\u2019s own rule STRINGS (a future UI may send it)', good.join(' | '));
@@ -651,7 +651,7 @@ console.log('— image_gen + sleep: three producers, one card');
 // cross-reference; it has to resolve.
 console.log('— version marker');
 {
-  const MARK = '2.369.57';   // renumber HERE and everywhere else in one sed
+  const MARK = '2.369.58';   // renumber HERE and everywhere else in one sed
   const SITES = ['src/backend-caps.js', 'data/bin/codex-chat-wrapper.js', 'src/acp-message-manager.js',
     'src/codex-thread-read.js', 'src/lib/chat-status-bar.js', 'src/lib/session-props.js',
     'src/ws-handler.js', 'docs/kb-file-structure.md', 'docs/kb-features.md', 'docs/kb-api.md'];

@@ -178,7 +178,7 @@ const T0 = Date.now();   // the module refuses waits >26h out, so the clock must
   ok('MERGED with the other settings keys, never a second --settings flag', both.filter((a) => a === '--settings').length === 1 && settingsOf(both).outputStyle === 'Concise' && settingsOf(both).ultracode === true);
   ok('there is no --output-style flag to pass (the CLI has none)', !argsOf({ outputStyle: 'Concise' }).includes('--output-style'));
   const wc = read('src/ws-create.js');
-  // 2.369.57: the instance default is read from the HARNESS's own settings
+  // 2.369.58: the instance default is read from the HARNESS's own settings
   // family (`<prefix>.outputStyle`), not the hardcoded claude key — a codex
   // spawn was otherwise handed "Concise". The value is also enum-checked
   // against the harness caps row so it can never reach a spawn.

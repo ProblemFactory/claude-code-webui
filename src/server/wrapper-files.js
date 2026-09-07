@@ -45,7 +45,7 @@ function resolveWrapperFiles(BUFFERS_DIR, id, sockPath) {
  *  nothing). STATELESS by design — callers must not cache a negative verdict
  *  (a wrapper resuming a huge transcript may not have written its sidecar yet).
  *  Returns { frameFile, peerMessage, inputQueue, responseStyle, caps, reason: 'ok'|'no-caps'|'no-sidecar', startedAt, pid }.
- *  responseStyle (2.369.57): the RUNNING wrapper serves the `set-response-style`
+ *  responseStyle (2.369.58): the RUNNING wrapper serves the `set-response-style`
  *  stdin verb (codex: thread/settings/update). Same two-gate rule as inputQueue —
  *  the harness caps row says the KIND of agent can do it live, this says THIS
  *  process can.

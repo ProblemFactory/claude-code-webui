@@ -1,1 +1,1 @@
-module.exports = { VERSION: "2.369.57" };
+module.exports = { VERSION: "2.369.58" };

@@ -277,12 +277,12 @@ const model = process.env.CODEX_WEBUI_MODEL || '';
 // meta.modelPinned (2.369.32): set when the spawn carried a model or set-model ran — see updateMetaFromThread
 let effort = process.env.CODEX_WEBUI_EFFORT || ''; // mutable: set-effort updates it mid-session
 const backendPermissionMode = process.env.CODEX_WEBUI_PERMISSION_MODE || 'default';
-// ── RESPONSE STYLE / PERSONALITY (2.369.57) ──
+// ── RESPONSE STYLE / PERSONALITY (2.369.58) ──
 // codex's `Personality` enum, read out of `codex app-server
 // generate-json-schema --experimental` on 0.153.4: exactly none | friendly |
 // pragmatic. THE UNSET RULE: an EMPTY value means the user made no choice and
 // the key is then NEVER put on thread/start | thread/resume | turn/start — the
-// agent keeps whatever ~/.codex/config.toml says. (Until 2.369.57 the wrapper
+// agent keeps whatever ~/.codex/config.toml says. (Until 2.369.58 the wrapper
 // hardcoded 'pragmatic' into both calls and silently overrode every user's own
 // config; 'none' is a REAL codex value meaning "no persona", so it can only
 // ever arrive from an explicit pick.) Mutable: `set-response-style` applies it
@@ -784,7 +784,7 @@ function handleItemStarted(item, itemId) {
     recordItem({ type: 'function_call', name: 'web_search', arguments: JSON.stringify({ query: item.query || '', action: item.action || null }), call_id: itemId });
     return;
   }
-  // MEDIA + SLEEP (2.369.57): a generated image was INVISIBLE while streaming
+  // MEDIA + SLEEP (2.369.58): a generated image was INVISIBLE while streaming
   // (it only appeared after a re-attach merged the rollout) and a `sleep` had no
   // branch anywhere — a 20-minute deliberate wait read as a hang. Both open a
   // PENDING card here with the same input keys their completion carries, so the
@@ -1769,7 +1769,7 @@ async function handleQueueOp(msg) {
   emitTaskEvent('queue_op_result', { op, id, ok: false, reason: 'unknown-op' });
 }
 
-// ── SERVER REQUESTS: ONE EXPLICIT BRANCH PER METHOD (2.369.57) ──
+// ── SERVER REQUESTS: ONE EXPLICIT BRANCH PER METHOD (2.369.58) ──
 // The app-server is also a CLIENT of ours: it sends JSON-RPC *requests* and
 // BLOCKS until we answer. Every method has its OWN result schema (dumped with
 // `codex app-server generate-json-schema --experimental` on 0.153.4) and they
@@ -1786,7 +1786,7 @@ async function handleQueueOp(msg) {
 //   currentTime/read                      → {currentTimeAt: <unix seconds>}
 //   item/tool/call / attestation/generate / account/chatgptAuthTokens/refresh
 //        → values only a client that OWNS them can produce; we own none.
-// Until 2.369.57 exactly ONE method was matched by name and everything else got
+// Until 2.369.58 exactly ONE method was matched by name and everything else got
 // `{decision: 'decline'}` — a result the server cannot deserialize for four of
 // them, i.e. a hung turn nobody could explain, plus a bogus "Permission" card
 // for requests no human should ever see.
@@ -2277,7 +2277,7 @@ function handleStdoutLine(line) {
   }
 
   if (Object.prototype.hasOwnProperty.call(msg, 'id') && msg.method) {
-    handleServerRequest(msg);   // classify FIRST (auto / unsupported / ask) — 2.369.57
+    handleServerRequest(msg);   // classify FIRST (auto / unsupported / ask) — 2.369.58
     return;
   }
 

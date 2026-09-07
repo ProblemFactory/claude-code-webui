@@ -241,7 +241,7 @@ export function openSessionProps(app, sessionRef, { syncId } = {}) {
     const cfgSec = cfgBits.length ? section(t('Config overrides')) : null;
     if (cfgSec) row(cfgSec, t('Saved'), escHtml(cfgBits.join(' · ')));
 
-    // ── Response style, EFFECTIVE + its ORIGIN (2.369.57) ──
+    // ── Response style, EFFECTIVE + its ORIGIN (2.369.58) ──
     // Two different facts, and the panel says which is which: `s.outputStyle`
     // is what the LIVE session actually runs with (server truth, null = no key
     // was ever sent), `cfg.outputStyle` is the pick saved for this conversation.
@@ -255,7 +255,7 @@ export function openSessionProps(app, sessionRef, { syncId } = {}) {
       // at all, so a saved pick must not be reported as "the harness default".
       const shown = live || (picked || '');
       // The origin is decided by COMPARING the two, not by "does a pick exist"
-      // (2.369.57): with a live 'Explanatory' and a saved 'Concise' the old
+      // (2.369.58): with a live 'Explanatory' and a saved 'Concise' the old
       // rule called the live value "your choice for this session" while the
       // note beside it said the choice had not landed yet.
       const ORIGIN_LABEL = {

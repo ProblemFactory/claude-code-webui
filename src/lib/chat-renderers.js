@@ -638,7 +638,7 @@ class ChatRenderers {
       const fp = block.input?.file_path || '';
       const isFileOp = ['Edit', 'Write', 'Read'].includes(block.toolName);
       const isPending = msg.status === 'pending';
-      // A RUNNING `clock.sleep` (2.369.57): a deliberate wait, shown as what it
+      // A RUNNING `clock.sleep` (2.369.58): a deliberate wait, shown as what it
       // is. Without this the agent went silent for up to 20 minutes behind a
       // generic spinner and read as a hang. The row carries its own deadline
       // (this card's ts + the item's duration) in a data attribute; ChatView's
@@ -729,7 +729,7 @@ class ChatRenderers {
       const mbW = memoryBase(fp);
       return `<div class="chat-tool-use"><span class="chat-tool-label">${UI_ICONS.memo} ${mbW ? t('Memory update') : t('Write')} ${this.clickablePath(fp, mbW)}</span><details class="chat-diff"><summary class="chat-diff-summary">\u2713 ${t('{n} lines, {size}', { n: lineCount, size: sizeStr })}</summary>${codeBlock}</details></div>`;
     }
-    // A finished `clock.sleep` (2.369.57): the countdown is over, so the card
+    // A finished `clock.sleep` (2.369.58): the countdown is over, so the card
     // FREEZES into the one line the normalizer already wrote ("slept 30s").
     // No ticking element survives, by construction.
     const lowerTool = String(block.toolName || '').toLowerCase();
@@ -740,7 +740,7 @@ class ChatRenderers {
     // 2.369.35 lifted the bytes out of, whose card then showed only the
     // "[image …]" marker because this branch returned before the generic
     // thumbnail splice; codex view_image {path}) or GENERATED (codex
-    // image_gen, 2.369.57 — it used to render as a bare "status: completed"
+    // image_gen, 2.369.58 — it used to render as a bare "status: completed"
     // line with the file named in text and never shown) → the media card. For a
     // Read the LIFTED BLOCKS decide, never the extension: a .svg/.ico Read
     // returns numbered TEXT (a by-extension branch dropped that source
