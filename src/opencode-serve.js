@@ -41,7 +41,7 @@
  *                          /api/sessions poll), readConversation(id) for the
  *                          serve-backed reader (8s, LOUD), forkSession(id).
  *
- * WHERE IT RUNS AND WHAT IT MAY TOUCH (2.369.45, the 2.369.42 runaway):
+ * WHERE IT RUNS AND WHAT IT MAY TOUCH (2.369.50, the 2.369.42 runaway):
  * OpenCode boots an "instance" per DIRECTORY and each instance recursively
  * indexes + inotify-watches that tree (`fff-*` + `notify-rs` threads).
  * Measured with /proc against a real 1.18.29 serve:
@@ -114,7 +114,7 @@ const LIST_LIMIT = 500;
 const TITLE_PLACEHOLDER_RE = /^New session - /;
 const FORK_PATH = '/session/{sessionID}/fork';
 const NAME_MAX_BYTES = 1 << 20;    // the naming read is the WHOLE v1 message list — refuse a conversation bigger than this (it has a real title anyway)
-// ── the RUNAWAY guard (2.369.45, the 2.369.42 incident) ──
+// ── the RUNAWAY guard (2.369.50, the 2.369.42 incident) ──
 const GUARD_SAMPLE_MS = 60000;                     // /proc sample cadence
 const GUARD_CPU_PCT = 150;                         // sustained CPU% (100% = one core) that counts as hot
 const GUARD_CPU_SUSTAIN_MS = 5 * 60 * 1000;        // …for this long ⇒ runaway
@@ -183,7 +183,12 @@ async function ensureServeCwd(dataDir, { execImpl = execFile, log = null } = {})
   const dir = serveCwdPath(dataDir);
   fs.mkdirSync(dir, { recursive: true });
   try { fs.writeFileSync(path.join(dataDir, 'opencode-serve', 'README.txt'), SERVE_CWD_README); } catch { }
-  if (fs.existsSync(path.join(dir, '.git'))) return { dir, isolated: true };
+  // a bare `.git` ENTRY is not a repo: OpenCode's upward walk ignores it and
+  // resolves the whole checkout (verifier reproduced it after a died git init /
+  // a backup that dropped .git contents) — require HEAD, else re-init
+  const gitDir = path.join(dir, '.git');
+  if (fs.existsSync(path.join(gitDir, 'HEAD'))) return { dir, isolated: true };
+  if (fs.existsSync(gitDir)) { try { fs.rmSync(gitDir, { recursive: true, force: true }); } catch { } }
   const ok = await new Promise((resolve) => {
     try { execImpl('git', ['init', '-q', '.'], { cwd: dir, timeout: 10000 }, (err) => resolve(!err)); }
     catch { resolve(false); }
@@ -484,7 +489,7 @@ function createServeLocator({
   fetchImpl = null, spawnImpl = spawn, execImpl = execFile, bootTimeoutMs = BOOT_TIMEOUT_MS, backoffBaseMs = 1000,
   maxCrashes = MAX_CRASHES, stopOnExit = false, onCaps = null, onState = null,
   autostart = true, // false (or a function returning false) = REUSE ONLY (smoke harnesses: a SIGKILLed test server must not leave a serve behind)
-  // ── the runaway guard (2.369.45) ──
+  // ── the runaway guard (2.369.50) ──
   readProc = readProcUsage, killPid = (pid, sig) => process.kill(pid, sig),
   telemetry = null, now = Date.now, guardSampleMs = GUARD_SAMPLE_MS,
   guardCpuPct = GUARD_CPU_PCT, guardCpuSustainMs = GUARD_CPU_SUSTAIN_MS, guardRssBytes = GUARD_RSS_BYTES,
@@ -525,7 +530,7 @@ function createServeLocator({
     notify();
     return state.client;
   }
-  // ── the RUNAWAY guard (2.369.45) ──────────────────────────────────────────
+  // ── the RUNAWAY guard (2.369.50) ──────────────────────────────────────────
   // A serve is not "hung", it BURNS: 2.369.42's instance sat at 157-169% CPU
   // and 5.0 GB RSS for two hours while its file watcher crawled /tmp, and
   // nothing in the product noticed. Sample the child's own /proc every minute;
@@ -603,7 +608,9 @@ function createServeLocator({
    *  manual step. A record written by THIS code (rec.cwd = our isolated dir)
    *  skips the probe; a probe that fails NEVER churns (unknown ≠ unsafe). */
   async function unsafeReuseReason(probe, rec) {
-    if (state.cwd && rec.cwd && path.resolve(rec.cwd) === path.resolve(state.cwd)) return null;
+    // the cwd shortcut is only proof when OUR cwd is a verified repo — a
+    // degraded (bare .git) cwd resolves the whole checkout, so probe instead
+    if (state.cwdIsolated === true && state.cwd && rec.cwd && path.resolve(rec.cwd) === path.resolve(state.cwd)) return null;
     let cur = null;
     try { cur = await probe.currentProject({ timeoutMs: DEFAULT_TIMEOUT_MS }); } catch { return null; }
     const why = unsafeWorktreeReason(cur && cur.worktree);
@@ -752,7 +759,7 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
     for (const s of list) {
       if (naming.has(s.id)) continue;
       const n = names.get(s.id);
-      if (n && (n.name || t - n.at < NAME_RETRY_MS)) continue;
+      if (n && (n.name || n.permanent || t - n.at < NAME_RETRY_MS)) continue; // permanent: a deterministic refusal (too-large / 404) is never re-asked
       todo.push(s.id);
       if (todo.length >= nameBatch) break;
     }
@@ -762,7 +769,11 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
         const first = await client.firstUserMessage(id, { timeoutMs: DEFAULT_TIMEOUT_MS });
         names.set(id, { name: first ? (nameFromText(first.text) || '') : '', at: now() });
       } catch (e) {
-        names.set(id, { name: '', at: now() });
+        // a conversation over the naming cap (or a vanished session) will not shrink:
+        // mark it PERMANENT so the 60s retry never re-serialises it (verifier: 4 full
+        // 3 MiB fetches in 200s on a cheaper route — the forever-poke pattern again)
+        const permanent = e && (e.code === 'too-large' || e.status === 404 || e.code === 'NotFoundError');
+        names.set(id, { name: '', at: now(), permanent });
         if (isConnErr(e)) locator.invalidate(e.message);
       } finally { naming.delete(id); }
     }));

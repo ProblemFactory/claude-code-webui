@@ -339,7 +339,7 @@ class App {
       Object.assign(BACKEND_META[msg.backend].caps, msg.caps);
       try { this.sidebar?._render?.(); } catch {}
     });
-    // S9 (2.369.45): a harness STORE that broke — the opencode serve parked
+    // S9 (2.369.50): a harness STORE that broke — the opencode serve parked
     // after crashes or stopped as a runaway — must reach the user, not just
     // the journal. The reason rides BACKEND_META (user actions quote it) and
     // a NEW park toasts once.
@@ -373,7 +373,15 @@ class App {
         if (opt) opt.hidden = !h.installed;
         // S9: runtime-verified caps (opencode fork = the serve OpenAPI evidence) replace the shipped guess
         if (h.caps && BACKEND_META[h.id]?.caps) Object.assign(BACKEND_META[h.id].caps, h.caps);
-        if (BACKEND_META[h.id]) BACKEND_META[h.id].storeReason = h.storeReason || null; // a parked/runaway store carries WHY (2.369.45)
+        if (BACKEND_META[h.id]) {
+          BACKEND_META[h.id].storeReason = h.storeReason || null; // a parked/runaway store carries WHY (2.369.50)
+          // passive surface: a park that happened while no client was connected
+          // must still be seen on the next page load (one toast per reason)
+          if (h.storeReason && !(this._storeReasonShown ||= new Set()).has(h.id + ':' + h.storeReason)) {
+            this._storeReasonShown.add(h.id + ':' + h.storeReason);
+            showToast(`${BACKEND_META[h.id].label || h.id}: ${h.storeReason}`, { type: 'error' });
+          }
+        }
       }
     }).catch(()=>{});
 

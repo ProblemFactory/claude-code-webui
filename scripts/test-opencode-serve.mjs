@@ -252,7 +252,7 @@ console.log('— ④ locator / keeper');
   children.add(leftover.pid);
   const leftoverUrl = await new Promise((r) => { let b = ''; leftover.stdout.on('data', (d) => { b += d; const m = /listening on (\S+)/.exec(b); if (m) r(m[1]); }); });
   const leftoverPort = Number(new URL(leftoverUrl).port);
-  fs.writeFileSync(path.join(dir6, 'opencode-serve.json'), JSON.stringify({ port: leftoverPort, pid: leftover.pid, startedAt: Date.now(), command: 'opencode' })); // pre-2.369.45 record: no cwd
+  fs.writeFileSync(path.join(dir6, 'opencode-serve.json'), JSON.stringify({ port: leftoverPort, pid: leftover.pid, startedAt: Date.now(), command: 'opencode' })); // pre-2.369.50 record: no cwd
   const warned6 = [];
   const loc6 = serve.createServeLocator({ dataDir: dir6, command: 'opencode', log: { warn: (m) => warned6.push(m), error: (m) => warned6.push(m), log() { } }, spawnImpl: spawnMock, env: () => ({}), bootTimeoutMs: 15000 });
   const c6 = await loc6.ensure();
@@ -387,5 +387,33 @@ console.log('— ⑦ wiring pins');
   ok('the manual live script exists', fs.existsSync(path.join(REPO, 'scripts/dev/opencode-serve-live.mjs')));
 }
 
+
+// ── ⑨ verifier round on the runaway fix (2.369.50 follow-ups) ──
+{
+  // (a) a deterministic naming refusal (too-large / 404) is PERMANENT — never re-asked every 60s
+  let calls = 0; let t9 = 5_000_000; const clock9 = () => t9;
+  const c9 = {
+    async listAllSessions() { return [{ id: 'ses_big', title: 'Big one', time: { created: 1, updated: 2 }, directory: '/w/big', version: '1.18.29' }]; },
+    async firstUserMessage() { calls++; throw new serve.OpencodeServeError('GET /session/ses_big/message response exceeded 1048576 bytes', { code: 'too-large' }); },
+    async listMessages() { return []; },
+  };
+  const loc9 = { client: async () => c9, ensure: async () => c9, state: () => ({ installed: true, ready: true, parked: false, autostart: true, caps: { fork: false } }), invalidate() { }, stop() { }, command: () => '/x/opencode' };
+  const f9 = serve.createFacts(loc9, { now: clock9 });
+  await f9.discover({ activeSessions: new Map() }); await new Promise((r) => setTimeout(r, 30));
+  const c1 = calls;
+  t9 += serve.LIST_CACHE_MS + 61_000; await f9.discover({ activeSessions: new Map() }); await new Promise((r) => setTimeout(r, 30));
+  t9 += serve.LIST_CACHE_MS + 61_000; await f9.discover({ activeSessions: new Map() }); await new Promise((r) => setTimeout(r, 30));
+  ok('a too-large naming refusal is terminal: ONE firstUserMessage call, never re-requested after NAME_RETRY_MS (the forever-poke pattern on a cheaper route)', c1 === 1 && calls === 1, { c1, calls });
+  // (b) ensureServeCwd trusts a REPO, not a bare .git entry (a died git init / a backup without .git contents)
+  const dd = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-oc-cwd-'));
+  const cwd9 = serve.serveCwdPath(dd); fs.mkdirSync(cwd9, { recursive: true }); fs.mkdirSync(path.join(cwd9, '.git'));
+  const r9 = await serve.ensureServeCwd(dd, {});
+  ok('a bare .git entry is re-initialised into a real repo (HEAD exists) so OpenCode\'s upward walk stops there', r9.isolated === true && fs.existsSync(path.join(cwd9, '.git', 'HEAD')), r9);
+  fs.rmSync(dd, { recursive: true, force: true });
+  const src9 = fs.readFileSync(path.join(REPO, 'src/opencode-serve.js'), 'utf8');
+  ok('the reuse-safety cwd shortcut only applies when OUR cwd is a VERIFIED repo (state.cwdIsolated === true)', /state\.cwdIsolated === true && state\.cwd && rec\.cwd/.test(src9));
+  const ce9 = fs.readFileSync(path.join(REPO, 'src/server/cli-env.js'), 'utf8');
+  ok('harnessAvailability reports a store reason only when the store is actually unavailable (parked, or not ready with autostart off) — a reused healthy serve is never called "not running"', /st\.parked \|\| \(!st\.ready && st\.autostart === false\)/.test(ce9));
+}
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);
 process.exit(fail ? 1 : 0);

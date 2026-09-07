@@ -9,7 +9,7 @@
 //                                             [--measure [seconds]] [--measure-home]
 // --fork creates a REAL session copy in the user's store ("<title> (fork #n)").
 // --keep leaves the serve running (record printed) instead of stopping it.
-// --measure = the 2.369.45 RUNAWAY measurement (the reason this file grew a mode):
+// --measure = the 2.369.50 RUNAWAY measurement (the reason this file grew a mode):
 //   run the REAL discovery loop against the REAL store for N seconds (default 60)
 //   and sample the serve's own /proc — CPU%, VmRSS, thread count, `fff-*` /
 //   `notify-rs` indexer threads and inotify watch count. A healthy serve reads
@@ -50,7 +50,7 @@ if (target) {
   console.log(`  normalized: ${msgs.length} messages (${msgs.filter((m) => m.role === 'user').length} user, ${msgs.filter((m) => m.role === 'assistant').length} assistant, ${msgs.filter((m) => m.role === 'tool').length} tool); status`, mm.status());
   for (const m of msgs.slice(0, 12)) console.log('   -', m.role.padEnd(9), m.status.padEnd(9), (m.toolName || m.content[0]?.type || '').padEnd(10), JSON.stringify(m.content[0]?.text || m.content[0]?.input || '').slice(0, 100));
 }
-// ── --measure: what the serve COSTS while the discovery loop runs (2.369.45) ──
+// ── --measure: what the serve COSTS while the discovery loop runs (2.369.50) ──
 if (argv.includes('--measure')) {
   const secs = Number(arg('--measure')) > 0 ? Number(arg('--measure')) : 60;
   const pid = facts.locator.state().pid;

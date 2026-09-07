@@ -141,7 +141,7 @@ function harnessAvailability() {
     // A harness whose STORE is broken must say so where the user looks (the
     // 2.369.42 runaway burned for two hours in silence): parked/runaway =>
     // the reason travels with /api/home and the harness-store-updated push.
-    try { const st = h.store?.serveState?.(); if (st && (st.parked || st.autostart === false) && h.store.unavailableReason) row.storeReason = String(h.store.unavailableReason()); } catch { }
+    try { const st = h.store?.serveState?.(); if (st && (st.parked || (!st.ready && st.autostart === false)) && h.store.unavailableReason) row.storeReason = String(h.store.unavailableReason()); } catch { }
     return row;
   });
 }
@@ -152,7 +152,7 @@ function harnessAvailability() {
 // keeper (backoff, parked after 5 crashes, stopped on exit). The fork verdict
 // from its OpenAPI flips capsOf('opencode').fork and is BROADCAST so open
 // clients learn it without a reload (the cache-invalidation-must-notify law).
-// Autostart, in precedence order (2.369.45 — the env switch AND the setting are
+// Autostart, in precedence order (2.369.50 — the env switch AND the setting are
 // both honoured): VIBESPACE_OPENCODE_SERVE=0/1 (explicit, wins over everything)
 // > the test-harness belt VIBESPACE_SKIP_AGENT_HOOKS=1 forces OFF (every
 // worktree smoke sets it and SIGKILLs its server — a spawned serve would
