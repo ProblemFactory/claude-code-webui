@@ -239,6 +239,80 @@ ok('…and re-asserts the tail after the prepend (the anchor restore fails under
   /if \(this\._pinned\) \{ this\._trace\('pinnedRetail'[\s\S]{0,80}this\._scrollToBottom\(\); \}/.test(cv));
 ok('the incident is named at the fix (future readers find the bundle)', /inc-mtq5bpjt-0o0n/.test(cv) && /inc-mtq5bpjt-0o0n/.test(sk));
 
+// ── B-9702 (round 5): OUR OWN SCROLL CHAIN IS AUTOMATIC REPOSITIONING ───────
+// `_forceScrollToBottom` writes `scrollTop = scrollHeight` for up to 10 frames
+// (~166ms). Round 2 cancelled the re-tail TIMERS on a positioning act and left
+// that chain running, so a rung armed at resume+1240ms was still writing when
+// the reader wheeled up at +1400ms: one of its frames landed 3ms AFTER the
+// reader's own scroll, the pin re-engaged off that position (trace `repin
+// st:1760 sh:2468 ch:708 … posAgo:3` — ordinary geometry, sh-ch = 2.5
+// viewports, no collapsedGeomSkip) and `_extendTop`'s pinned-tail invariant
+// re-asserted the bottom. Measured 5/20 on the pre-fix build, 0/20 after.
+// The end-to-end reproduction + its per-mechanism control live in
+// test-desktop-resume-paging.mjs; these are the DOM-free semantics, which is
+// where the two ways of getting this wrong (a cancel that kills auto-follow
+// for good, a mute that lifts before its own last write is delivered) are
+// cheap to pin.
+ok('a POSITIONING act and an off-list NAVIGATION both cancel the chain — a bare CLICK does not (it moved nothing)',
+  /_notePositioning\(via\) \{[\s\S]{0,600}this\._cancelForcedScroll\(via\);/.test(cv)
+  && /_noteUserNav\(via\) \{[\s\S]{0,300}this\._cancelForcedScroll\(via\);/.test(cv)
+  && !/_noteUserInput\(\) \{[\s\S]{0,200}_cancelForcedScroll/.test(cv));
+{
+  const realRaf = globalThis.requestAnimationFrame;
+  let frames = [];
+  globalThis.requestAnimationFrame = (cb) => { frames.push(cb); return frames.length; };
+  const drain = (n) => { for (let i = 0; i < n && frames.length; i++) frames.shift()(); };
+  const mkList = () => ({ scrollTop: 0, scrollHeight: 5000, clientHeight: 700 });
+  const mkView = (list) => Object.assign(Object.create(ChatView.prototype), {
+    _messageList: list, _disposed: false, _trace: () => {},
+  });
+  try {
+    // ① the chain writes and mutes
+    let list = mkList(), v = mkView(list);
+    v._forceScrollToBottom();
+    drain(3);
+    ok('unit: the force-scroll chain writes scrollTop each frame and mutes the boundary decision while it runs',
+      list.scrollTop === 5000 && v._programmaticScroll === true && v._fsbActive === true);
+    // ② a reader cancels it: no further write, mute released, flag down
+    v._cancelForcedScroll?.('wheel');
+    list.scrollTop = 123;                       // the reader's own position
+    drain(20);
+    ok('unit: a cancelled chain writes NOTHING more — the reader\'s position stands (the queued frames find themselves orphaned)',
+      list.scrollTop === 123 && v._fsbActive === false && v._programmaticScroll === false);
+    // ③ …and auto-follow is not dead afterwards (the regression an epoch-less
+    //    cancel would cause: a pinned view that never follows the stream again)
+    v._forceScrollToBottom();
+    drain(3);
+    ok('unit: auto-follow still works after a cancel — the next _forceScrollToBottom starts a fresh chain',
+      list.scrollTop === 5000 && v._fsbActive === true);
+    // ④ the mute outlives the LAST write by one frame (a scroll event is
+    //    delivered after the callback that wrote scrollTop)
+    list = mkList(); v = mkView(list); frames = [];
+    v._forceScrollToBottom();
+    drain(10);                                   // all ten writes
+    ok('unit: after the final write the chain is over but the mute is STILL up — its own scroll event has not been delivered yet',
+      v._fsbActive === false && v._programmaticScroll === true && frames.length === 1);
+    drain(1);
+    ok('unit: …and one frame later the mute lifts (no permanent mute, ever)', v._programmaticScroll === false);
+    // ⑤ a chain restarted inside that trailing frame keeps ITS mute
+    list = mkList(); v = mkView(list); frames = [];
+    v._forceScrollToBottom();
+    drain(10);
+    v._forceScrollToBottom();                    // a live append while pinned, in the gap
+    drain(2);
+    ok('unit: a chain restarted in that trailing frame keeps its own mute (the release is guarded on _fsbActive)',
+      v._programmaticScroll === true && v._fsbActive === true);
+    // ⑥ cancelling when no chain of OURS is running touches nothing: a jump
+    //    landing (_scrollElStable / _landOnHeader) owns _programmaticScroll
+    v = mkView(mkList()); v._programmaticScroll = true;   // a jump landing's mute
+    v._cancelForcedScroll?.('wheel');
+    ok('unit: with no chain of ours running the cancel touches nothing — a jump landing keeps its own mute',
+      v._programmaticScroll === true);
+  } finally {
+    globalThis.requestAnimationFrame = realRaf;
+  }
+}
+
 // ── DOM-free UNIT: the decision table itself. The method reads only `this`
 // fields and `window`, so the SHIPPED source is lifted out and exercised
 // directly — no jsdom, no bundle, and a rewrite that changes the ORDER of the

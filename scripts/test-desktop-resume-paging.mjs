@@ -50,6 +50,18 @@
 // reader back (a NEW harm vs master). The drag is now keyed on WHERE the press
 // landed (the scrollbar gutter), held for the whole press.
 //
+// ROUND 5 (B-9702) tightens the round-2 "a REAL wheel-up at +1400ms still
+// pages" leg and adds the mechanism it was blind to. That leg asserted only
+// that SOMETHING paged, on the stated reasoning that the final pin state was
+// "not this gate's to decide" — and run 20x it ended with the reader dragged
+// back to the live tail 5 times: the +1240ms re-tail rung's own
+// _forceScrollToBottom chain was still writing scrollTop = scrollHeight and one
+// of its frames landed 3ms AFTER the reader's wheel, so the pin re-engaged off
+// OUR OWN write. It now asserts the READER'S OUTCOME on a settled snapshot,
+// and a second leg arms that chain by hand (deterministic) with the cancel
+// neutered on the instance as its control. An assert that will not name the
+// user-visible outcome is where a residue hides.
+//
 // IN THE RELEASE GATE (scripts/ci.mjs) despite being heavy — two chrome runs
 // and two bundle builds, ~3.5 min here after round 3: this is the only place
 // the whole path is exercised end to end, and its negative controls are what
@@ -312,21 +324,47 @@ const SCENARIO = `(async () => {
   }
 
   // ── …and a REAL reader INSIDE that same horizon still unpins and pages: the
-  //    unpin gate must refuse displacement, never a reader.
-  await toTail();
-  await dm.switchTo(deskA); await sleep(1200);
-  await dm.switchTo(deskB);
-  await waitTo(1400);
-  view._traceRing = [];                    // own ring: the 400-entry cap must not shift a mark
-  let rwTraces = [];
-  for (let i = 0; i < 6; i++) {
-    list.scrollTop = 0;
-    list.dispatchEvent(new WheelEvent('wheel', { deltaY: -300, bubbles: true }));
-    await sleep(700);
-    rwTraces = (view._traceRing || []).map((e) => e.tag);
-    if (rwTraces.includes('extendTop:done')) break;
-  }
-  const resumeWheel = { traces: rwTraces, ...snap() };
+  //    unpin gate must refuse displacement, never a reader — AND THE PAGE-UP
+  //    MUST SURVIVE (B-9702, round 5). The pre-B-9702 leg asserted only that
+  //    something paged; measured 20x on that build, 5 of those readers were
+  //    silently dragged back to the live tail: the +1240ms re-tail rung's own
+  //    _forceScrollToBottom chain was still writing scrollTop = scrollHeight
+  //    and one of its frames landed 3ms AFTER the wheel, so the pin re-engaged
+  //    off OUR OWN write (trace 'repin st:1760 … posAgo:3', with fsb:-1
+  //    because the chain clears its flag in the frame of its final write) and
+  //    _extendTop's pinned-tail invariant re-asserted the bottom.
+  //    So the leg now asserts the READER'S OUTCOME, on a settled snapshot.
+  const wheelLeg = async (off, { armChain = false } = {}) => {
+    await toTail();
+    await dm.switchTo(deskA); await sleep(1200);
+    await dm.switchTo(deskB);
+    await waitTo(off);
+    view._traceRing = [];                  // own ring: the 400-entry cap must not shift a mark
+    const pre = snap();
+    // armChain = the DETERMINISTIC form of the race the +1400ms leg only wins
+    // 15/20 times by luck: a re-tail rung landing immediately before the
+    // reader, i.e. a chain with all 10 frames still ahead of it.
+    if (armChain) view._scrollToBottom();
+    let traces = [];
+    for (let i = 0; i < 6; i++) {
+      list.scrollTop = 0;
+      list.dispatchEvent(new WheelEvent('wheel', { deltaY: -300, bubbles: true }));
+      await sleep(700);
+      traces = (view._traceRing || []).map((e) => e.tag);
+      if (traces.includes('extendTop:done')) break;
+    }
+    const now = snap();
+    await sleep(1500);                     // …and it must STILL be there once every rung has fired
+    return { pre, now, settled: snap(), traces };
+  };
+  const resumeWheel = { ...await wheelLeg(1400) };
+  //    …and the same gesture with the chain armed by hand — the mechanism
+  //    itself, with a per-mechanism control (the cancel neutered on the
+  //    instance) that must bring the pre-fix outcome back.
+  const chainWheel = await wheelLeg(1400, { armChain: true });
+  view._cancelForcedScroll = function () {};
+  const chainWheelControl = await wheelLeg(1400, { armChain: true });
+  delete view._cancelForcedScroll;
 
   // ── PER-MECHANISM NEGATIVE CONTROLS, on the FIXED build. The source-level
   //    control below (§5) rebuilds with RESUME_SETTLE_MS = 0, which cannot
@@ -421,7 +459,7 @@ const SCENARIO = `(async () => {
   };
 
   return { ok: true, before, after, samples, traces, probeTraces, retail, wheelTraces, wheelState,
-    nav, sweep, resumeWheel, navControl, cliffControl };
+    nav, sweep, resumeWheel, chainWheel, chainWheelControl, navControl, cliffControl };
 })()`;
 
 const run = async (label) => {
@@ -489,16 +527,37 @@ if (good?.ok) {
   check('…and past every OLDER guard (1900/2400ms — beyond the 1500ms collapsed-geometry settling window) the sweep is carried by the unpin gate itself: unpinSkipResume',
     good.sweep.filter((s) => s.off >= 1900).every((s) => s.traces.includes('unpinSkipResume')),
     JSON.stringify(good.sweep.map((s) => ({ off: s.off, traces: s.traces }))).slice(0, 600));
-  // A real reader inside the horizon: the CLAIM is that the gate never fires
-  // against them and their page-up happens. The final pin state is NOT the
-  // gate's to decide — under collapsed geometry the scroll handler makes no
-  // decision at all and _extendTop's own pinned-tail invariant re-asserts the
-  // bottom (observed once across two runs: collapsedGeomSkip ×2 then
-  // extendTop:done, ending pinned). Asserting `pinned === false` here would be
-  // pinning someone else's mechanism.
+  // A real reader inside the horizon: the gate never fires against them, their
+  // page-up happens — AND THEY KEEP IT (B-9702, round 5). The pre-B-9702
+  // version of this leg deliberately did NOT assert the final pin state,
+  // reasoning that "under collapsed geometry the scroll handler makes no
+  // decision and _extendTop's pinned-tail invariant owns the outcome". That
+  // reasoning was REFUTED by measurement: run 20× on that build the leg ended
+  // pinned at the tail 5 times, and the trace shows ordinary geometry (sh-ch =
+  // 2.5 viewports, no collapsedGeomSkip) with `repin st:1760 … posAgo:3` — our
+  // OWN re-tail scroll chain writing the view back to the tail milliseconds
+  // after the reader moved it. The reader's outcome IS this suite's business.
   check('…while a REAL wheel-up at resume+1400ms (inside the same horizon) still pages, and the unpin gate NEVER fires against a reader',
     good.resumeWheel.traces.includes('extendTop:done') && !good.resumeWheel.traces.includes('unpinSkipResume'),
     JSON.stringify(good.resumeWheel).slice(0, 400));
+  check('…and THE READER KEEPS THAT PAGE-UP: unpinned, away from the live tail, window moved up, and never re-pinned off an automatic write (B-9702)',
+    good.resumeWheel.settled.pinned === false && good.resumeWheel.settled.fromBottom > 8
+    && good.resumeWheel.settled.ws < good.resumeWheel.pre.ws && !good.resumeWheel.traces.includes('repin'),
+    JSON.stringify(good.resumeWheel).slice(0, 600));
+  // THE MECHANISM, deterministically: a re-tail rung's `_scrollToBottom()`
+  // chain armed immediately before the wheel (all 10 frames still ahead of it)
+  // is exactly the race the +1400ms leg wins only by timing luck.
+  check('B-9702: a wheel-up while our OWN scroll chain is mid-flight cancels the chain (fsbCancel) and the reader keeps their page-up',
+    good.chainWheel.traces.includes('extendTop:done') && good.chainWheel.traces.includes('fsbCancel')
+    && good.chainWheel.settled.pinned === false && good.chainWheel.settled.fromBottom > 8
+    && good.chainWheel.settled.ws < good.chainWheel.pre.ws,
+    JSON.stringify(good.chainWheel).slice(0, 600));
+  // POSITION, not the pin flag (same reading as the drag control): with the
+  // cancel neutered the chain drags the reader back to the live tail whether
+  // or not the mute lets the pin re-engage on the way.
+  check('…and its control proves the leg touches the path: with _cancelForcedScroll neutered the SAME wheel-up is dragged back to the live tail',
+    good.chainWheelControl.settled.fromBottom <= 8,
+    JSON.stringify(good.chainWheelControl).slice(0, 600));
 }
 
 // ── 4b. ROUND 3, THE MAJOR — TRUSTED INPUT. Everything above dispatches

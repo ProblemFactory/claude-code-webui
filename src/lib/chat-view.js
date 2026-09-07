@@ -504,6 +504,9 @@ class ChatView {
         }
         const atBottom = scrollHeight - scrollTop - clientHeight < 50;
         if (atBottom && !this._pinned) {
+          this._trace('repin', { st: Math.round(scrollTop), sh: scrollHeight, ch: clientHeight,
+            structAge: Date.now() - (this._lastStructuralAt || 0), n: this._messageList.childElementCount,
+            fsb: this._fsbActive ? (this._fsbFrames || 0) : -1, posAgo: this._lastPositionAt ? Date.now() - this._lastPositionAt : -1 });
           this._pinned = true;
           this._newMsgCount = 0;
           this._scrollBtn.classList.add('hidden');
@@ -1642,6 +1645,7 @@ class ChatView {
     // keeps its last 200 entries — a per-wheel-event trace would evict exactly
     // the history that diagnosed this incident.
     if (via && (this._resumeSettleUntil || this._pinnedAtSuspend)) this._trace?.('userPos', { via });
+    this._cancelForcedScroll(via);   // our own 10-frame scroll chain loses to the reader (B-9702)
     this._endResumeSettle();
   }
 
@@ -1704,6 +1708,7 @@ class ChatView {
   _noteUserNav(via) {
     this._lastNavAt = Date.now();
     this._trace?.('userNav', { via });
+    this._cancelForcedScroll(via);   // …and so does an off-list navigation (B-9702)
     this._endResumeSettle();
   }
 
@@ -2256,17 +2261,55 @@ class ChatView {
     this._fsbFrames = 0;
     if (this._fsbActive) return;
     this._fsbActive = true;
+    // …and the chain carries an EPOCH (B-9702): it is AUTOMATIC repositioning,
+    // so a reader who positions the view CANCELS it (_cancelForcedScroll bumps
+    // the epoch) and every frame already queued must find itself orphaned
+    // instead of writing scrollTop one more time.
+    const epoch = this._fsbEpoch = (this._fsbEpoch || 0) + 1;
     const list = this._messageList;
     const step = () => {
-      if (this._disposed) { this._fsbActive = false; return; }
+      if (this._disposed) { this._fsbActive = false; this._programmaticScroll = false; return; }
+      if (epoch !== this._fsbEpoch) return;   // cancelled/superseded — the flags belong to whoever holds the epoch now
       list.scrollTop = list.scrollHeight;
       // Each frame scrolling reveals off-screen elements, browser computes
       // their real heights (replacing content-visibility estimates), scrollHeight
       // grows — repeat until converged or max 10 frames (~166ms)
       if (++this._fsbFrames < 10) requestAnimationFrame(step);
-      else { this._fsbActive = false; this._programmaticScroll = false; }
+      // THE MUTE OUTLIVES THE LAST WRITE BY ONE FRAME (B-9702, the same
+      // capture): a scroll event is delivered AFTER the callback that wrote
+      // scrollTop, so clearing `_programmaticScroll` in the frame of the final
+      // write handed OUR OWN displacement to the boundary decision as if a
+      // reader had produced it — the guard exists to reject exactly that.
+      // Guarded by `_fsbActive` so a chain restarted in between keeps its mute.
+      else { this._fsbActive = false; requestAnimationFrame(() => { if (!this._fsbActive) this._programmaticScroll = false; }); }
     };
     requestAnimationFrame(step);
+  }
+
+  /** THE READER TOOK OVER — stop our own bottom-scroll chain (B-9702, measured
+   *  in headless chrome: 5/20 real wheel-ups at resume+1400ms were UNDONE).
+   *  `_forceScrollToBottom` keeps writing `scrollTop = scrollHeight` for up to
+   *  10 frames (~166ms). That is AUTOMATIC repositioning and it must lose to a
+   *  positioning act exactly like the resume re-tail SERIES, which
+   *  `_endResumeSettle` already cancels — the round-2 series fix cancelled the
+   *  TIMERS and left the frame chain, the other automatic writer, running. The
+   *  capture: the +1240ms re-tail rung's chain wrote the view back to the live
+   *  tail 3ms AFTER the reader's wheel-up (trace `repin st:1760 … posAgo:3`,
+   *  with `fsb:-1` because the chain clears its own flag in the frame of its
+   *  final write), the pin re-engaged off that position, and `_extendTop`'s
+   *  pinned-tail invariant then re-asserted the bottom — the reader's page-up
+   *  silently undone. Geometry was NOT collapsed there (sh-ch = 2.5 viewports):
+   *  the hypothesis that the 2.301.0 collapsed-geometry window carried this was
+   *  refuted by the measurement.
+   *  It only ever cancels a chain of OURS: with `_fsbActive` false a jump
+   *  landing (`_scrollElStable` / `_landOnHeader`) owns `_programmaticScroll`
+   *  and must keep it. */
+  _cancelForcedScroll(via) {
+    if (!this._fsbActive) return;
+    this._trace('fsbCancel', { via: via || '', frames: this._fsbFrames || 0 });
+    this._fsbEpoch = (this._fsbEpoch || 0) + 1;   // orphan every queued frame of the running chain
+    this._fsbActive = false;
+    this._programmaticScroll = false;
   }
 
   // Render a message into elements (append to list, then detach for insertion elsewhere)
