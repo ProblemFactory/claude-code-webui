@@ -131,6 +131,8 @@ class AcpMessageManager {
     this.messages = [];
     this.messageIndex = new Map();
     this.userMessageIds = new Map();      // webui msgId → message id
+    this._queue = [];                     // the wrapper's promptQueue, as published
+    this._queuedMsgIds = new Set();       // bubbles currently wearing a 'queued' chip
     this.toolCards = new Map();           // toolCallId → message id
     this.pendingApprovals = new Map();    // requestId → {msgId, permission}
     this.streams = new Map();             // `${kind}:${messageId}` → message id (open agent/thought streams)
@@ -174,6 +176,7 @@ class AcpMessageManager {
   slice(offset, limit) { return this.messages.slice(offset, offset + limit); }
   status() { return { ...this._status }; }
   goalState() { return this._goalState; }      // ACP has no goal loop (stub — the status bar shows nothing)
+  queueState() { return this._queue || []; }   // the input queue (attach payload)
   taskState() {
     return { tasks: {}, todos: Array.isArray(this._todos) ? this._todos : [] };
   }
@@ -315,9 +318,51 @@ class AcpMessageManager {
       case 'update': return this._processUpdate(record.update || {}, emit, !!record.replay);
       case 'permission_request': return this._processPermissionRequest(record, emit);
       case 'permission_resolved': return this._resolvePermission(String(record.requestId), record.outcome === 'selected' && /^allow/.test(record.optionKind || '') ? 'allowed' : 'denied', emit, record.optionId || null);
+      case 'queued_input': {
+        // The chip on the bubble IS the notice (codex parity); the card is the
+        // fallback for a queued entry with no bubble of its own.
+        if (this._stampQueueChip(record.msg_id || record.msgId, 'queued', emit)) return;
+        const msg = this._create({ role: 'system', content: [{ type: 'system_info', text: 'Queued — runs after the current turn' }], noticeKind: 'notice' });
+        if (emit) this._emit({ op: 'create', message: msg });
+        return;
+      }
+      case 'queue_changed': return this._processQueueChanged(record, emit);
+      case 'queue_op_result': return this._processQueueOpResult(record, emit);
       case 'notice': return this._processNotice(record, emit);
       default: return; // client_request / notification / peer_result: journal-only
     }
+  }
+
+  /** Stamp the queue chip on the bubble a queued message belongs to; false
+   *  when there is no such bubble (a peer/nudge entry carries no msgId). */
+  _stampQueueChip(msgId, state, emit) {
+    if (!msgId) return false;
+    const id = this.userMessageIds.get(String(msgId));
+    const msg = id ? this.messageIndex.get(id) : null;
+    if (!msg) return false;
+    if (msg.queueState === state) return true;
+    msg.queueState = state;
+    if (state === 'queued') this._queuedMsgIds.add(String(msgId)); else this._queuedMsgIds.delete(String(msgId));
+    if (emit) this._emit({ op: 'edit', id: msg.id, fields: { queueState: state } });
+    return true;
+  }
+
+  _processQueueChanged(rec, emit) {
+    const items = Array.isArray(rec.items) ? rec.items : [];
+    this._queue = items;
+    const live = new Set(items.map((it) => String(it.msgId || '')).filter(Boolean));
+    for (const it of items) this._stampQueueChip(it.msgId, 'queued', emit);
+    for (const msgId of [...this._queuedMsgIds]) if (!live.has(msgId)) this._stampQueueChip(msgId, null, emit);
+    if (emit) this._emit({ op: 'meta', subtype: 'queue', items });
+  }
+
+  _processQueueOpResult(rec, emit) {
+    if (rec.ok !== false) { this._stampQueueChip(rec.msg_id || rec.msgId, rec.op === 'remove' ? 'removed' : 'steered', emit); return; }
+    const text = rec.reason === 'gone' ? 'That message is no longer queued — it already ran.'
+      : rec.reason === 'not-steerable' ? 'This agent cannot steer a running turn — the message runs when this turn ends.'
+      : `Could not ${rec.op === 'remove' ? 'remove' : 'steer'} the queued message${rec.detail ? `: ${rec.detail}` : ''}.`;
+    const msg = this._create({ role: 'system', content: [{ type: 'system_info', text }], noticeKind: 'notice' });
+    if (emit) this._emit({ op: 'create', message: msg });
   }
 
   _ensureInit(emit, source) {

@@ -203,7 +203,12 @@ const T0 = Date.now();   // the module refuses waits >26h out, so the clock must
   ok('…and the session ops ride the window-title menu + the sidebar card menu (registry since Ph1: both menus contribute the session.restart command, whose run() is restartConversationInPlace)', /id: 'window\/restart-session', command: 'session\.restart'/.test(read('src/lib/taskbar.js')) && /id: 'session\.restart'[^\n]*restartConversationInPlace/.test(read('src/lib/session-card.js')) && /command: 'session\.restart'/.test(read('src/lib/session-card.js')));
   ok('locate-in-sidebar exists (folders panel, expand, scroll, flash)', /locateSessionInSidebar\(backendSessionId\)/.test(sl9) && /locate-flash/.test(sl9));
   const cv2 = read('src/lib/chat-view.js');
-  ok('partial-meta refreshes do NOT reset the live style (2.368.3: wiping os to \'\' re-lit the hourglass on a running Concise session)', /_applyLiveMeta\(meta\)\s*{\s*if \(!meta\) return;[\s\S]{0,200}'outputStyle' in meta/.test(cv2) && cv2.includes("'autoResume' in meta"));
+  {
+    const body = /_applyLiveMeta\(meta\) \{([\s\S]*?)\n  \}/.exec(cv2)?.[1] || '';
+    const applied = [...body.matchAll(/\bmeta\.([A-Za-z_$][\w$]*)/g)].map((m) => m[1]);
+    const unguarded = [...new Set(applied)].filter((k) => !body.includes(`'${k}' in meta`));
+    ok('partial-meta refreshes do NOT reset the live style (2.368.3: wiping os to \'\' re-lit the hourglass on a running Concise session) — EVERY key _applyLiveMeta reads is carries-the-key guarded', body.startsWith('\n    if (!meta) return;') && applied.length >= 3 && unguarded.length === 0, unguarded.join(','));
+  }
   // ── 2.368.4 (owner-caught on the very resume the feature was built for):
   // the CREATOR never receives an 'attached' payload — its history loads over
   // HTTP with NO meta — so the live style must ride the 'created' reply. And

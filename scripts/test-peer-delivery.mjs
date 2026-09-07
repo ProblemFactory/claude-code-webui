@@ -79,7 +79,7 @@ ok('the stash rung is intact (queued + drained once)', deliver.drainStash(CID).l
 // ── wrapper contract pins ──
 const w = read('data/bin/codex-chat-wrapper.js');
 ok('the codex wrapper adverts caps.peerMessage in its sidecar meta', /caps: \{ peerMessage: true(, [a-zA-Z]+: true)* \}/.test(w));
-ok("…serves the 'peer-message' verb: busy ⇒ thread/queue/add, idle ⇒ turn/start", /msg\.type === 'peer-message'/.test(w) && /meta\.activeTurnId\) \{\s*\n\s*await request\('thread\/queue\/add'/.test(w) && /await startTurn\(text\);/.test(w));
+ok("…serves the 'peer-message' verb: busy ⇒ thread/queue/add, idle ⇒ turn/start", /msg\.type === 'peer-message'/.test(w) && /meta\.activeTurnId\) \{[\s\S]{0,600}?await request\('thread\/queue\/add'/.test(w) && /noteQueued\(cid, \{ kind: 'peer', msgId: '', from: fromName, text \}\)/.test(w) && /await startTurn\(text\);/.test(w));
 ok('…records the peer user message itself (item notifications never carry userMessage) — with the webui_peer marker, on both the queued and the turn path', /const recordPeerMessage = \(\) => record\('response_item', \{ type: 'message', role: 'user', content: \[\{ type: 'input_text', text \}\], webui_peer: \{ name: fromName, body: cardText \} \}\)/.test(w) && /thread\/queue\/add[\s\S]{0,400}recordPeerMessage\(\);/.test(w) && /await startTurn\(text\);\s*\n\s*recordPeerMessage\(\);/.test(w));
 ok('…reports peer_message_result BOTH ways, echoing text + fromName on failure so the server can re-stash with its label', /peer_message_result', \{ ok: true, mode: 'queued' \}/.test(w) && /peer_message_result', \{ ok: true, mode: 'turn' \}/.test(w) && /peer_message_result', \{ ok: false, reason: e\.message, text, fromName \}/.test(w));
 

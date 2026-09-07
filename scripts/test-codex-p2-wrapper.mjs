@@ -32,7 +32,7 @@ const buf = path.join(dir, SID + '.buf'), meta = path.join(dir, SID + '.json'), 
 // thread/compact/start → {} + a contextCompaction item; everything logged.
 const STUB = `
 const fs = require('fs');
-let b = ''; let turns = 0;
+let b = ''; let turns = 0; let queue = []; let qseq = 0; let reviewTurn = false; let activeTurn = null;
 const send = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (d) => {
@@ -45,7 +45,7 @@ process.stdin.on('data', (d) => {
     fs.appendFileSync(${JSON.stringify(rpcLog)}, line + '\\n');
     if (m.method === 'thread/start') { send({ id: m.id, result: { thread: { id: 'th-p2' } } }); continue; }
     if (m.method === 'turn/start') {
-      turns++; const tid = 'turn-' + turns;
+      turns++; const tid = 'turn-' + turns; activeTurn = tid;
       send({ id: m.id, result: { turn: { id: tid } } });
       send({ method: 'turn/started', params: { turn: { id: tid } } });
       if (turns === 1) {
@@ -84,7 +84,49 @@ process.stdin.on('data', (d) => {
       }
       continue;
     }
-    if (m.method === 'thread/queue/add') { send({ id: m.id, result: {} }); continue; }
+    // ── THE QUEUE, as measured against a live 0.153.4 app-server ──
+    //   add → {queuedSubmission:{id,input,clientUserMessageId}} + thread/queue/changed
+    //   list → {data:[…], nextCursor}
+    //   delete → {deleted:true} (queuedSubmissionId; there is NO 'remove' verb)
+    //   steer → {turnId}, or -32600 with the server's own message text
+    //   turn end → the APP-SERVER drains the queue itself (an add on an idle
+    //   thread starts a turn with no turn/start from us — measured)
+    if (m.method === 'thread/queue/add') {
+      const q = { id: 'q' + (++qseq), input: m.params.input, clientUserMessageId: m.params.clientUserMessageId };
+      queue.push(q);
+      send({ id: m.id, result: { queuedSubmission: q } });
+      send({ method: 'thread/queue/changed', params: { threadId: 'th-p2' } });
+      continue;
+    }
+    if (m.method === 'thread/queue/list') { send({ id: m.id, result: { data: queue.slice(), nextCursor: null } }); continue; }
+    if (m.method === 'thread/queue/delete') {
+      const i = queue.findIndex((q) => q.id === m.params.queuedSubmissionId);
+      if (i < 0) { send({ id: m.id, error: { code: -32600, message: 'queued submission not found' } }); continue; }
+      queue.splice(i, 1);
+      send({ id: m.id, result: { deleted: true } });
+      send({ method: 'thread/queue/changed', params: { threadId: 'th-p2' } });
+      continue;
+    }
+    if (m.method === 'turn/steer') {
+      if (m.params.expectedTurnId !== activeTurn) { send({ id: m.id, error: { code: -32600, message: 'expected active turn id \`' + m.params.expectedTurnId + '\` but found \`' + activeTurn + '\`' } }); continue; }
+      if (reviewTurn) { send({ id: m.id, error: { code: -32600, message: 'cannot steer a review turn' } }); continue; }
+      send({ id: m.id, result: { turnId: activeTurn } });
+      continue;
+    }
+    if (m.method === 'review/start') { reviewTurn = true; send({ id: m.id, result: { reviewThreadId: 'th-review' } }); continue; }
+    if (m.method === 'turn/interrupt') {
+      send({ id: m.id, result: {} });
+      const ended = activeTurn; activeTurn = null;
+      send({ method: 'turn/completed', params: { turn: { id: ended }, status: 'interrupted' } });
+      // …and the app-server drains the queue on its own (no turn/start from us)
+      if (queue.length) {
+        queue.shift();
+        send({ method: 'thread/queue/changed', params: { threadId: 'th-p2' } });
+        const tid = 'turn-' + (++turns); activeTurn = tid;
+        send({ method: 'turn/started', params: { turn: { id: tid } } });
+      }
+      continue;
+    }
     if (m.method === 'thread/compact/start') { send({ id: m.id, result: {} }); send({ method: 'item/completed', params: { item: { type: 'contextCompaction', id: 'cc-1' } } }); continue; }
     send({ id: m.id, result: {} });
   }
@@ -135,6 +177,71 @@ ok(qa && qa.params.threadId === 'th-p2' && JSON.stringify(qa.params.input).inclu
 ok(rpc().filter((m) => m.method === 'turn/start').length === 1, 'no second turn/start (the old path steered/rejected)');
 ok(await waitFor(() => events().some((e) => e.type === 'event_msg' && e.payload?.type === 'queued_input' && e.payload.msg_id === 'm2')), 'a queued_input event tells the client the message is queued');
 { const users = bufRecords().filter((r) => r.type === 'response_item' && r.payload?.role === 'user').map((r) => JSON.stringify(r.payload.content)); ok(users.some((u) => /first/.test(u)) && users.some((u) => /second/.test(u)), 'both user messages are recorded (the bubble renders either way)'); }
+
+// ②b QUEUE + STEER (owner ask 2026-09-06: codex has two send modes)
+const qEvents = () => events().filter((e) => e.type === 'event_msg' && e.payload?.type === 'queue_changed').map((e) => e.payload);
+const lastQueue = () => (qEvents().slice(-1)[0]?.items) || [];
+const opResults = () => events().filter((e) => e.type === 'event_msg' && e.payload?.type === 'queue_op_result').map((e) => e.payload);
+ok(await waitFor(() => lastQueue().length === 1 && lastQueue()[0].msgId === 'm2'), `queue_changed publishes the WHOLE queue on every change (${JSON.stringify(lastQueue())})`);
+ok(lastQueue()[0].preview === 'second' && lastQueue()[0].kind === 'user' && !!lastQueue()[0].id, 'each item carries {id, msgId, preview, ts, kind} — the preview is what will actually be sent', JSON.stringify(lastQueue()[0]));
+sendLine({ type: 'chat-input', text: 'third', msgId: 'm7' });
+ok(await waitFor(() => lastQueue().length === 2 && lastQueue().map((i) => i.msgId).join(',') === 'm2,m7'), `two queued, in order (${lastQueue().map((i) => i.msgId).join(',')})`);
+// steer the SECOND one: only IT is injected, #1 keeps its place
+const second = lastQueue()[1];
+sendLine({ type: 'queue-op', op: 'steer', id: second.id });
+ok(await waitFor(() => rpc().some((m) => m.method === 'turn/steer')), 'a steer sends turn/steer');
+{
+  const st = rpc().filter((m) => m.method === 'turn/steer');
+  ok(st.length === 1 && st[0].params.expectedTurnId === 'turn-1' && JSON.stringify(st[0].params.input).includes('third') && !JSON.stringify(st[0].params.input).includes('second') && st[0].params.clientUserMessageId === 'm7',
+    `…with the ACTIVE turn id as the precondition and ONLY that item's input (${JSON.stringify(st[0]?.params)})`);
+}
+ok(await waitFor(() => rpc().some((m) => m.method === 'thread/queue/delete' && m.params.queuedSubmissionId === second.id)), 'a steered item is DELETED from the queue (a steer does not dequeue — measured) so it never runs twice');
+ok(await waitFor(() => lastQueue().length === 1 && lastQueue()[0].msgId === 'm2'), `…and the other item keeps its place in the queue (${JSON.stringify(lastQueue())})`);
+ok(opResults().some((r) => r.op === 'steer' && r.ok === true && r.msg_id === 'm7'), 'queue_op_result names the bubble that was steered', JSON.stringify(opResults().slice(-1)));
+// remove
+const first = lastQueue()[0];
+sendLine({ type: 'queue-op', op: 'remove', id: first.id });
+ok(await waitFor(() => lastQueue().length === 0), 'remove empties the queue');
+ok(opResults().some((r) => r.op === 'remove' && r.ok === true && r.msg_id === 'm2'), 'queue_op_result names the removed bubble');
+// steer-all: sequential steers IN ORDER (measured: several steers per turn are accepted)
+sendLine({ type: 'chat-input', text: 'alpha', msgId: 'm8' });
+sendLine({ type: 'chat-input', text: 'beta', msgId: 'm9' });
+ok(await waitFor(() => lastQueue().length === 2), 'two more queued for steer-all');
+const steersBefore = rpc().filter((m) => m.method === 'turn/steer').length;
+sendLine({ type: 'queue-op', op: 'steer-all' });
+ok(await waitFor(() => rpc().filter((m) => m.method === 'turn/steer').length === steersBefore + 2), 'steer-all is one turn/steer PER ITEM (the app-server accepts several per turn), not one concatenated blob');
+{
+  const st = rpc().filter((m) => m.method === 'turn/steer').slice(steersBefore);
+  ok(JSON.stringify(st[0].params.input).includes('alpha') && JSON.stringify(st[1].params.input).includes('beta'), 'steer-all preserves queue ORDER', st.map((m) => JSON.stringify(m.params.input)).join(' | '));
+}
+ok(await waitFor(() => lastQueue().length === 0), 'steer-all empties the queue');
+ok(opResults().some((r) => r.op === 'steer-all' && r.ok === true && r.done === 2), 'steer-all reports how many landed', JSON.stringify(opResults().slice(-1)));
+// a queued PEER message is listed + labelled, and REMOVING it hands the text
+// back to the delivery ladder (it was already reported delivered — a silent
+// loss here is a promised message gone)
+sendLine({ type: 'peer-message', text: 'ping from B', fromName: 'session B' });
+ok(await waitFor(() => lastQueue().some((i) => i.kind === 'peer')), 'an agent-to-agent message queued on the same lane is LISTED and labelled', JSON.stringify(lastQueue()));
+{
+  const peer = lastQueue().find((i) => i.kind === 'peer');
+  ok(peer.from === 'session B' && peer.preview === 'ping from B', 'the peer row carries its sender + preview', JSON.stringify(peer));
+  sendLine({ type: 'queue-op', op: 'remove', id: peer.id });
+  ok(await waitFor(() => events().some((e) => e.payload?.type === 'peer_message_result' && e.payload.ok === false && e.payload.text === 'ping from B' && e.payload.fromName === 'session B')),
+    'removing it re-reports peer_message_result ok:false with the text + label (the consumer re-stashes for next-turn injection)', JSON.stringify(events().filter((e) => e.payload?.type === 'peer_message_result').map((e) => e.payload)));
+  ok(await waitFor(() => !lastQueue().some((i) => i.kind === 'peer')), 'and it leaves the queue');
+}
+
+// a turn that CANNOT be steered (review/compact → ActiveTurnNotSteerable): the
+// item STAYS queued and the client is told why
+sendLine({ type: 'review-start', target: { type: 'uncommittedChanges' } });
+ok(await waitFor(() => rpc().some((m) => m.method === 'review/start')), 'a review turn is running');
+sendLine({ type: 'chat-input', text: 'during review', msgId: 'm10' });
+ok(await waitFor(() => lastQueue().length === 1 && lastQueue()[0].msgId === 'm10'), 'a message sent during the review turn queues');
+sendLine({ type: 'queue-op', op: 'steer', id: lastQueue()[0].id });
+ok(await waitFor(() => opResults().some((r) => r.op === 'steer' && r.ok === false && r.reason === 'not-steerable' && r.kind === 'review')), `a review turn refuses the steer, CLASSIFIED (${JSON.stringify(opResults().slice(-1))})`);
+ok(lastQueue().length === 1 && lastQueue()[0].msgId === 'm10', 'the refused item STAYS queued (it still runs when the turn ends)', JSON.stringify(lastQueue()));
+// turn end → the APP-SERVER drains the queue itself; the wrapper republishes
+sendLine({ type: 'interrupt' });
+ok(await waitFor(() => lastQueue().length === 0), 'when the turn ends the queued message runs (the app-server drains) and the published queue empties');
 
 // ③ slash commands
 sendLine({ type: 'chat-input', text: '/compact', msgId: 'm3' });
@@ -213,7 +320,35 @@ ok(!mm.messages.some((m) => m.role === 'system' && /error|failed/i.test(m.conten
 ok(mm.messages.some((m) => m.collab?.report && m.collab.agentName === 'water_research') && mm.messages.some((m) => m.collab?.report && m.collab.agentName === 'usecases_v4'), 'both attributed messages render as sub-agent REPORTS with their author', mm.messages.filter((m) => m.collab?.report).map((m) => m.collab.agentName));
 ok(collabRows.some((r) => r.dir === 'activity' && r.threadId === 'th-child'), 'the lifecycle row carries the child thread id', collabRows.filter((r) => r.dir === 'activity'));
 const sys = mm.messages.filter((m) => m.role === 'system').map((m) => m.content?.[0]?.text || '');
-ok(sys.some((t) => /Queued — runs after the current turn/.test(t)), 'the queued notice renders as a system card');
+// The queue state lives ON the bubble (a chip) + in the strip above the input —
+// the old "Queued — runs after the current turn" SYSTEM CARD said the same
+// thing a third time and is gone (the card survives only as the fallback for a
+// queued entry with no bubble of its own, e.g. a peer message).
+const userMsg = (needle) => mm.messages.find((m) => m.role === 'user' && JSON.stringify(m.content).includes(needle));
+ok(!sys.some((t) => /Queued — runs after the current turn/.test(t)), 'the queued SYSTEM CARD is gone — the state is a chip on the bubble', sys.join(' | '));
+ok(userMsg('third')?.queueState === 'steered', `the steered message's bubble wears a 'steered' chip (${userMsg('third')?.queueState})`);
+ok(userMsg('second')?.queueState === 'removed', `the removed message's bubble wears a 'removed' chip (${userMsg('second')?.queueState})`);
+{ // the QUEUED→ran lifecycle, replayed record by record: the chip appears while
+  // it waits and CLEARS when the app-server drains it (it left the queue with no
+  // steer and no remove ⇒ it RAN — a bubble must never claim to be queued forever)
+  const inc = new CodexMessageManager('p2-inc'); const seen = [];
+  for (const r of bufRecords()) {
+    inc.processLive(r);
+    const m = inc.messages.find((x) => x.role === 'user' && JSON.stringify(x.content).includes('during review'));
+    if (m) seen.push(m.queueState || 'none');
+  }
+  ok(seen.includes('queued') && seen[seen.length - 1] === 'none', `a waiting message wears 'queued', and the chip clears when it RUNS (${[...new Set(seen)].join('→')})`);
+}
+ok(sys.some((t) => /Cannot steer during a review turn/.test(t)), 'the refused steer is a VISIBLE notice naming the reason', sys.join(' | '));
+{ // the meta op is SESSION STATE, never a transcript message
+  const liveQ = new CodexMessageManager('p2-q'); const qops = [];
+  liveQ.onOp((o) => qops.push(o));
+  for (const r of bufRecords()) liveQ.processLive(r);
+  const metaOps = qops.filter((o) => o.op === 'meta' && o.subtype === 'queue');
+  ok(metaOps.length >= 4 && Array.isArray(metaOps[0].items), `queue_changed becomes a {op:'meta', subtype:'queue'} op (${metaOps.length} of them)`);
+  ok(liveQ.queueState().length === 0 && !liveQ.messages.some((m) => JSON.stringify(m.content || '').includes('queue_changed')), 'queueState() is the attach payload; no queue message ever enters the transcript');
+  ok(qops.some((o) => o.op === 'edit' && o.fields?.queueState === 'queued') && qops.some((o) => o.op === 'edit' && o.fields?.queueState === 'steered'), 'chips ride the normal edit op (live windows update in place)');
+}
 ok(sys.some((t) => /Compacting context/.test(t)) && sys.some((t) => /Context compacted/.test(t)), 'compaction start + compacted render as system cards');
 ok(mm.turnMap().some((t) => t.isCompact), 'turnMap marks the compaction (minimap red marker parity with claude)');
 ok(sys.some((t) => /\/model → gpt-6-astra/.test(t)), 'command_applied renders what was set');
@@ -237,7 +372,11 @@ ok(ops.some((o) => o.op === 'edit' && o.id === mcpCard?.id && o.fields?.meta?.re
 
 // pins
 const wsrc = fs.readFileSync(path.join(REPO, 'data/bin/codex-chat-wrapper.js'), 'utf8');
-ok(/if \(meta\.threadId && meta\.activeTurnId\) \{\s*await request\('thread\/queue\/add'/.test(wsrc), 'wrapper pin: chat-input queues on an active turn');
+ok(/if \(meta\.threadId && meta\.activeTurnId\) \{[\s\S]{0,600}?await request\('thread\/queue\/add'/.test(wsrc), 'wrapper pin: chat-input queues on an active turn');
+ok(/noteQueued\(cid, \{ kind: 'user', msgId: msg\.msgId \|\| '' \}\);\s*\n\s*await request\('thread\/queue\/add'/.test(wsrc), "wrapper pin: the item's identity is registered BEFORE the add (the queue/changed refresh can beat the reply)");
+ok(!/request\('thread\/queue\/remove'/.test(wsrc) && /thread\/queue\/delete', \{ threadId: meta\.threadId, queuedSubmissionId/.test(wsrc), 'wrapper pin: removal is thread/queue/DELETE with queuedSubmissionId — 0.153.4 has no thread/queue/remove');
+ok(/await request\('turn\/steer'[\s\S]{0,300}expectedTurnId: meta\.activeTurnId/.test(wsrc), 'wrapper pin: every steer carries the ACTIVE turn id as its precondition');
+ok(/if \(method === 'thread\/queue\/changed'\) \{ refreshQueue\(\); return; \}/.test(wsrc), 'wrapper pin: the app-server\'s queue/changed drives a re-LIST (the notification carries no items)');
 ok(/thread\/compact\/start/.test(wsrc) && /applySlashCommand\(text\)/.test(wsrc), 'wrapper pin: slash commands + real compact');
 ok(/const foreign = foreignThreadOf\(params\);/.test(wsrc) && /!THREAD_ID_NOT_SCOPE\.has\(method\)/.test(wsrc) && !/THREAD_SCOPED_METHODS/.test(wsrc), 'wrapper pin: the gate is INVERTED — a notification NAMING another thread is foreign unless allowlisted (a method whitelist goes stale: error / thread/compacted / thread/queue/changed / turn/diff/updated were all missing)');
 ok(/if \(replyAgentPath\) meta\.agentPath = replyAgentPath;/.test(wsrc), 'wrapper pin: meta.agentPath is ASSIGNED from the thread reply (it used to be read-only, so every fallback was dead)');

@@ -2944,4 +2944,16 @@ export default {
   "{n} sub-agent messages": "{n} 件のサブエージェントメッセージ",
   "{n} sub-agents": "{n} 個のサブエージェント",
   "This sub-agent’s conversation is not on this machine.": "このサブエージェントの会話はこのマシンにはありません。",
+  // input queue / steer (codex thread/queue + turn/steer; ACP promptQueue)
+  "This session is not live — reconnect to steer queued messages.": "このセッションはライブではありません —— 再接続するとキュー内のメッセージを投入できます。",
+  "Queued": "キュー待ち",
+  "Steered": "現ターンに投入済み",
+  "Steer all": "すべて投入",
+  "Steer now — the agent sees it at its next reply": "今すぐ投入 —— エージェントは次の返信時に読みます",
+  "Inject every queued message into the running turn, in order": "キュー内のすべてのメッセージを順番に現在のターンへ投入します",
+  "{n} queued — runs after this turn": "{n} 件キュー待ち —— このターンの後に実行",
+  "Waiting behind the running turn — steering it injects it now, at the agent’s next reply": "実行中のターンの後ろで待機中 —— 投入するとエージェントは次の返信時に読みます",
+  "Injected into the running turn": "実行中のターンに投入済み",
+  "Removed from the queue — it will not run": "キューから削除 —— 実行されません",
+  "That message is no longer queued — it already ran.": "そのメッセージはもうキューにありません —— すでに実行されました。",
 };

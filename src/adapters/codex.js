@@ -1050,6 +1050,18 @@ class CodexAdapter extends BackendAdapter {
     return JSON.stringify({ type: 'set-effort', effort });
   }
 
+  // QUEUE OPS (inputModes {queue,steer,queueOps} all true for codex): the
+  // wrapper owns the queue THROUGH the app-server (thread/queue/list is the
+  // truth) and executes the op — 'steer' = turn/steer into the RUNNING turn
+  // then thread/queue/delete the copy (measured: a steer does NOT dequeue),
+  // 'remove' = thread/queue/delete, 'steer-all' = the same, per item, in queue
+  // order (measured: several steers in one turn are accepted).
+  formatQueueOp({ op, id } = {}) {
+    if (op !== 'steer' && op !== 'remove' && op !== 'steer-all') throw new Error(`unknown queue op "${op}"`);
+    if (op !== 'steer-all' && !id) throw new Error(`queue op "${op}" needs an item id`);
+    return JSON.stringify({ type: 'queue-op', op, id: id || null });
+  }
+
   /** Build a preview user message for buffer before JSONL arrives */
   static _buildUserPreview(rawText, msgId) {
     let text = typeof rawText === 'string' ? rawText : '';

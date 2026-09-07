@@ -224,7 +224,9 @@ console.log('— Stop means stop (the cancel race + the local queue)');
     w.send({ type: 'chat-input', text: 'slow run it', msgId: 'q1' });     // the mock holds this turn 3s
     await w.waitFor(() => w.find('prompt_start'), 5000, 'prompt_start');
     w.send({ type: 'chat-input', text: 'please read the file', msgId: 'q2' });
-    await w.waitFor(() => w.find('notice', (r) => r.noticeKind === 'queued'), 3000, 'queued notice');
+    // the queued state is a `queued_input` record (→ a chip on the bubble),
+    // not a system card — codex parity, one client path for both harnesses
+    await w.waitFor(() => w.find('queued_input', (r) => r.msg_id === 'q2'), 3000, 'queued_input');
     w.send({ type: 'peer-message', text: 'ping from B', fromName: 'B' });  // queues too (silently)
     await w.waitFor(() => w.find('peer_result', (r) => r.mode === 'queued'), 3000, 'queued peer_result');
     w.send({ type: 'interrupt' });
@@ -236,6 +238,47 @@ console.log('— Stop means stop (the cancel race + the local queue)');
     const pr = w.findAll('peer_result');
     ok('…a dropped PEER message goes back to the delivery ladder (peer_result ok:false with its text — the consumer re-stashes it)', pr.length === 2 && pr[1].ok === false && pr[1].text === 'ping from B' && pr[1].fromName === 'B' && /Stop/.test(pr[1].reason || ''), pr);
     ok('…and the session stays usable: streaming cleared, no pending permission left', w.metaJson()?.streaming === false && Object.keys(w.metaJson()?.pendingRequests || {}).length === 0, w.metaJson());
+  } finally { await w.stop(); }
+}
+
+console.log('— the input queue: published, removable, order-preserving (no steer in ACP v1)');
+{
+  const w = startWrapper();
+  try {
+    await w.waitFor(() => w.find('session'), 10000, 'session record');
+    w.send({ type: 'chat-input', text: 'slow run it', msgId: 'qa' });     // the mock holds this turn 3s
+    await w.waitFor(() => w.find('prompt_start'), 5000, 'prompt_start');
+    w.send({ type: 'chat-input', text: 'first queued', msgId: 'qb' });
+    w.send({ type: 'chat-input', text: 'second queued', msgId: 'qc' });
+    const last = () => w.findAll('queue_changed').slice(-1)[0];
+    await w.waitFor(() => last()?.items?.length === 2, 4000, 'two queued');
+    ok('the ACP wrapper PUBLISHES its promptQueue the way codex publishes the app-server\'s (one client path, a capability row apart)',
+      last().items.map((i) => i.msgId).join(',') === 'qb,qc' && last().items[0].preview === 'first queued' && last().items.every((i) => i.id && i.kind === 'user'), last().items);
+    // steer is denied by the CAPS row before it leaves the browser; a frame that
+    // reaches the wrapper anyway is REFUSED with a reason, never silently dropped
+    w.send({ type: 'queue-op', op: 'steer', id: last().items[0].id });
+    const refused = await w.waitFor(() => w.find('queue_op_result', (r) => r.op === 'steer'), 3000, 'steer refusal');
+    ok('a steer that reaches an ACP wrapper is refused with reason not-steerable (ACP v1 has no steer)', refused.ok === false && refused.reason === 'not-steerable', refused);
+    ok('…and the queue is untouched by the refusal', last().items.length === 2, last().items);
+    // remove the FIRST: the second keeps its relative order and is what runs
+    const firstId = last().items[0].id;
+    w.send({ type: 'queue-op', op: 'remove', id: firstId });
+    const rm = await w.waitFor(() => w.find('queue_op_result', (r) => r.op === 'remove'), 3000, 'remove result');
+    ok('remove takes the named entry out and names the bubble it belonged to', rm.ok === true && rm.msg_id === 'qb', rm);
+    await w.waitFor(() => last().items.length === 1 && last().items[0].msgId === 'qc', 3000, 'one left');
+    // removing a GONE id is reported honestly, never a fake success
+    w.send({ type: 'queue-op', op: 'remove', id: firstId });
+    const gone = await w.waitFor(() => w.findAll('queue_op_result', (r) => r.op === 'remove').slice(-1)[0]?.ok === false ? w.findAll('queue_op_result', (r) => r.op === 'remove').slice(-1)[0] : null, 3000, 'gone result');
+    ok('removing an entry that is already gone says so (no fake success)', gone.reason === 'gone', gone);
+    // the turn ends → the survivor drains, in order (the mock asks permission
+    // before finishing every prompt; answering it is what ENDS the turn)
+    const perm = await w.waitFor(() => w.find('permission_request'), 6000, 'permission_request');
+    w.send({ type: 'permission-response', requestId: perm.requestId, approved: true, optionId: 'once' });
+    await w.waitFor(() => w.findAll('prompt_start').length === 2, 8000, 'the queued prompt ran');
+    const wire = JSON.stringify(w.mockCalls().filter((c) => c.method === 'session/prompt'));
+    ok('drain order: the removed entry NEVER reaches the agent, the survivor does', wire.includes('second queued') && !wire.includes('first queued'), wire.slice(0, 200));
+    await w.waitFor(() => last().items.length === 0, 3000, 'queue empty');
+    ok('…and the emptied queue is published (the strip clears)', last().items.length === 0);
   } finally { await w.stop(); }
 }
 
@@ -259,7 +302,7 @@ console.log('— the stop-time bookkeeping nudge survives a Stop that drops it f
   await new Promise((r) => api.listen(0, '127.0.0.1', r));
   const ENV = { VIBESPACE_API: `http://127.0.0.1:${api.address().port}`, VIBESPACE_SESSION_TOKEN: 'vsst_test' };
   const reminders = (w) => w.mockCalls().filter((c) => c.method === 'session/prompt' && JSON.stringify(c.params?.prompt || []).includes('vibespace-reminder'));
-  const queued = (w) => w.findAll('notice', (r) => r.noticeKind === 'queued');
+  const queued = (w) => w.findAll('queued_input');
   // bounded wait that never throws: a regression must read as a FAILED ASSERT
   // (with its counters), not as an exception that kills the rest of the suite.
   const settle = async (pred, ms = 6000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { if (pred()) return true; await sleep(20); } return false; };

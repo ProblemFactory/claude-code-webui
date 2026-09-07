@@ -412,6 +412,67 @@
   display: flex; align-items: center; gap: 6px;
 }
 .chat-stream-status.hidden { display: none; }
+
+/* ── INPUT QUEUE STRIP (messages sent during the running turn) ────────────
+   Sits ABOVE everything in the input area: it is about what was already sent,
+   not about what is being typed. Rendered only when the harness reports a
+   queue it lets us change (backend-caps inputModes.queueOps). */
+.chat-queue-strip {
+  width: 100%; display: flex; flex-direction: column; gap: 3px;
+  padding: 6px 8px; margin-bottom: 6px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--bg-input);
+}
+.chat-queue-strip.hidden { display: none; }
+.chat-queue-head {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 11px; color: var(--text-dim);
+}
+.chat-queue-head svg { width: 12px; height: 12px; flex-shrink: 0; }
+.chat-queue-all {
+  margin-left: auto; display: inline-flex; align-items: center; gap: 4px;
+  background: none; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--text-secondary); font: inherit; font-size: 11px;
+  padding: 1px 6px; cursor: pointer;
+}
+.chat-queue-all:hover { background: var(--bg-hover); color: var(--text); }
+.chat-queue-all svg { width: 11px; height: 11px; }
+.chat-queue-item {
+  display: flex; align-items: center; gap: 6px; min-width: 0;
+  padding: 2px 4px; border-radius: var(--radius-sm); font-size: 12px;
+}
+.chat-queue-item:hover, .chat-queue-item:focus-visible { background: var(--bg-hover); outline: none; }
+.chat-queue-item:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); }
+.chat-queue-from { color: var(--text-dim); font-size: 11px; flex-shrink: 0; }
+.chat-queue-preview {
+  flex: 1; min-width: 0; color: var(--text-secondary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.chat-queue-btn {
+  background: none; border: none; color: var(--text-dim); cursor: pointer;
+  padding: 2px; border-radius: var(--radius-sm); flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.chat-queue-btn:hover { background: var(--bg-hover); color: var(--text); }
+.chat-queue-btn-remove:hover { color: var(--red); }
+.chat-queue-btn svg { width: 13px; height: 13px; display: block; }
+
+/* Queue chip on the user bubble the queued message belongs to */
+.chat-queue-chip {
+  /* a flex ITEM of .chat-msg-user (display:flex; justify-content:flex-end) —
+     align-self keeps it hugging the bubble's LAST line instead of stretching
+     to the height of a multi-line message */
+  display: inline-flex; align-items: center; align-self: flex-end; gap: 4px;
+  margin: 0 0 2px 6px; flex-shrink: 0;
+  font-size: 10px; line-height: 1.8; padding: 0 6px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: none; color: var(--text-dim); font-family: inherit; cursor: default;
+}
+.chat-queue-chip svg { width: 10px; height: 10px; }
+.chat-queue-chip-queued { cursor: pointer; }
+.chat-queue-chip-queued:hover { background: var(--bg-hover); color: var(--text); }
+.chat-queue-chip-steered { color: var(--accent); border-color: var(--accent); }
+.chat-queue-chip-removed { text-decoration: line-through; }
 .chat-input-wrap { flex: 1; position: relative; min-width: 0; display: flex; align-items: flex-end; gap: 6px; }
 .chat-attach-btn {
   display: none; background: none; border: none; color: var(--text-dim);

@@ -9,7 +9,7 @@ import { ChatInput } from './chat-input.js';
 import { ChatStatusBar } from './chat-status-bar.js';
 import { UI_ICONS } from './icons.js';
 import { t } from './i18n.js';
-import { agentMemoryPathRes } from './agent-meta.js';
+import { agentMemoryPathRes, getBackendMeta } from './agent-meta.js';
 import { mcpParts, messageKind, foldToggleFor, countKinds, runSummaryLabel } from './chat-run-summary.js';
 
 // Agent-memory path patterns, PER BACKEND from BACKEND_META (agent-meta.js —
@@ -257,6 +257,9 @@ class ChatView {
       messageList: this._messageList,
       onPermissionResolve: () => { this._hideTyping(); this._updateRuns(); },
       onFork: (uuid, msg) => this._forkFromMessage(uuid, msg),
+      // A 'queued' chip on a bubble is a second entry point for the same op as
+      // the strip's Steer button — one path, one ws message.
+      onQueueChipClick: (msg) => this._steerQueuedMessage(msg),
     });
 
     // Position indicator (shows when not at bottom, e.g. "120-170 / 3000")
@@ -634,6 +637,7 @@ class ChatView {
       // restores enter-to-send for those who prefer it.
       isTouch: () => !!this.app?.isTouch,
       getTouchEnterSends: () => !!this.app?.settings?.get('chat.touchEnterSends'),
+      onQueueOp: (op, id) => this._sendQueueOp(op, id),
     });
     this._chatInput.popupContainer = container;
     this._setupChatDrop(container);
@@ -799,10 +803,15 @@ class ChatView {
         // never broken, and the refusal text rode msg.error which this branch
         // never read, so the user saw a dead-looking window with no reason).
         // A coded input rejection renders in-chat and leaves the view alone.
-        if (msg.code === 'input-rejected') {
+        // GENERALIZED (2026-09-06, the queue-op case): a per-session error that
+        // carries a `code` is a SCOPED refusal of one action — render it in
+        // chat and leave the window alone. Only a code-LESS error is the
+        // "attach failed" it used to be read as. ('not-codex-chat' had the same
+        // bug as input-rejected before this and read-only'd a live window.)
+        if (msg.code) {
           this._hideTyping();
           this._renderers.appendSystem('✗ ' + (msg.message || msg.error || t('Message rejected.')));
-          try { track('event', 'chat-input-rejected', this._telemDetail(msg.message || msg.error)); } catch {}
+          try { track('event', msg.code === 'input-rejected' ? 'chat-input-rejected' : 'chat-action-refused', this._telemDetail(`${msg.code}: ${msg.message || msg.error || ''}`)); } catch {}
           return;
         }
         // Attach failed (e.g. stale serverId replayed from a saved layout).
@@ -1040,6 +1049,41 @@ class ChatView {
     this._autoFillT1 = setTimeout(() => tryAutoFill(2), 700);
   }
 
+  // ── THE INPUT QUEUE (messages sent DURING a turn) ────────────────────────
+  /** What THIS harness lets the user do with its queue (backend-caps
+   *  `inputModes`, projected onto the client through BACKEND_META). */
+  _queueCaps() {
+    const backend = this._getSessionIds()?.backend || this.winInfo?.backend || 'claude';
+    return getBackendMeta(backend)?.caps?.inputModes || { queue: false, steer: false, queueOps: false };
+  }
+
+  _setQueue(items) {
+    this._queue = Array.isArray(items) ? items : [];
+    this._chatInput?.setQueue(this._queue, this._queueCaps());
+  }
+
+  _sendQueueOp(op, id) {
+    if (this._readOnly || this._disconnected) return;
+    this.ws.send({ type: 'queue-op', sessionId: this.sessionId, op, id: id || null });
+  }
+
+  /** Steer the queued message a bubble belongs to (the chip entry point): the
+   *  bubble knows its own webui msgId, the queue row knows the app-server id —
+   *  join on msgId, and say so when the item has already left the queue. */
+  _steerQueuedMessage(msg) {
+    if (!this._queueCaps().steer) return;
+    if (this._readOnly || this._disconnected) { showToast(t('This session is not live — reconnect to steer queued messages.')); return; }
+    const mine = (this._queue || []).find((it) => it.msgId && this._msgIdOf(msg) === it.msgId);
+    if (!mine) { this._renderers.appendSystem(t('That message is no longer queued — it already ran.')); return; }
+    this._sendQueueOp('steer', mine.id);
+  }
+
+  /** The webui msgId a rendered user bubble was created from (the normalizer's
+   *  userMessageIds key). Kept as a helper so the join has ONE definition. */
+  _msgIdOf(msg) {
+    return String(msg?.webuiMsgId || msg?.msgId || '');
+  }
+
   // Live per-session state (output style, auto-resume) from a server payload.
   // Update ONLY when the payload CARRIES the key: this also runs on partial-
   // meta refresh paths (subagent viewer, dead-session view), and resetting the
@@ -1050,6 +1094,9 @@ class ChatView {
   // showed "default" while the session verifiably ran Concise; 2.368.4).
   _applyLiveMeta(meta) {
     if (!meta) return;
+    // Attach/create replay of the input queue — carries-the-key guard, so a
+    // partial-meta path never clears a live strip.
+    if ('queue' in meta) this._setQueue(meta.queue);
     if ('autoResume' in meta) this._statusBar?.setAutoResume?.(meta.autoResume || null);
     if ('outputStyle' in meta) {
       this._statusBar?.setOutputStyle?.(meta.outputStyle || '');
@@ -2292,6 +2339,13 @@ class ChatView {
     }
     this._syncReviewAvailability();
 
+    // Queue chip: a cheap in-place swap. A full re-render here would rebuild
+    // the whole bubble (markdown, images, fold state) for a one-word badge.
+    if ('queueState' in fields) {
+      const el = this._elements.get(id);
+      if (el) ChatRenderers.applyQueueChip(el, msg, this._queueCaps().steer ? (m) => this._steerQueuedMessage(m) : null);
+    }
+
     // Status transitions
     if (fields.status === 'complete' || fields.status === 'error' || fields.status === 'interrupted') {
       // Re-render completed messages in case content changed while pending/local.
@@ -2480,6 +2534,7 @@ class ChatView {
   }
 
   _onMeta(op) {
+    if (op.subtype === 'queue') { this._setQueue(op.items); return; }
     if (op.subtype === 'served-model') {
       this._statusBar.setServedModel(op.data?.model || null);
       return;

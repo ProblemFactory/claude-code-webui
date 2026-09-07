@@ -25,6 +25,15 @@ BackendAdapter.prototype.formatPermissionResponse = function(data) { throw new E
 BackendAdapter.prototype.formatSetPermissionMode = function(mode) { throw new Error('not implemented'); };
 BackendAdapter.prototype.formatSetModel = function(model) { throw new Error('not implemented'); };
 BackendAdapter.prototype.formatSetEffort = function(effort) { throw new Error('not implemented'); };
+/**
+ * QUEUE OPERATION → the wrapper stdin frame ({op:'steer'|'remove'|'steer-all', id}).
+ * The harness's `inputModes` caps row (src/backend-caps.js) decides whether the
+ * op is offered at all — ws-handler validates against it BEFORE calling this,
+ * with a coded error the user can read. This throw is the second line of
+ * defense: an adapter whose harness denies the op must REFUSE it with a reason,
+ * never format a frame its wrapper would silently drop.
+ */
+BackendAdapter.prototype.formatQueueOp = function(op) { throw new Error('this backend has no input-queue operations'); };
 /** Extra actions after sending interrupt (e.g. delayed SIGINT fallback) */
 BackendAdapter.prototype.postInterrupt = function(session, sessionId) {};
 

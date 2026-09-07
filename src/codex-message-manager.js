@@ -315,6 +315,12 @@ class CodexMessageManager {
     this.messages = [];
     this.messageIndex = new Map();
     this.userMessageIds = new Map();
+    // THE INPUT QUEUE (session state, never a transcript message): the wrapper
+    // publishes the WHOLE queue on every change; `_queuedMsgIds` is the set of
+    // bubbles currently wearing a 'queued' chip, so one that leaves the queue
+    // without an explicit steer/remove can have its chip cleared — it RAN.
+    this._queue = [];
+    this._queuedMsgIds = new Set();
     this.pendingToolCalls = new Map();
     this.toolCallMessageIds = new Map();
     this.pendingApprovals = new Map();
@@ -1033,6 +1039,25 @@ class CodexMessageManager {
 
   goalState() { return this._goalState || null; }
 
+  /** The input queue as last published by the wrapper (attach payload). */
+  queueState() { return this._queue || []; }
+
+  /** Stamp the queue chip on the user bubble a queued message belongs to.
+   *  Returns false when there is no such bubble (peer messages carry no
+   *  webui_msg_id) — the caller then falls back to a visible system notice, so
+   *  a queued message is never silent. */
+  _stampQueueChip(msgId, state, emit) {
+    if (!msgId) return false;
+    const id = this.userMessageIds.get(String(msgId));
+    const msg = id ? this.messageIndex.get(id) : null;
+    if (!msg) return false;
+    if (msg.queueState === state) return true;
+    msg.queueState = state;
+    if (state === 'queued') this._queuedMsgIds.add(String(msgId)); else this._queuedMsgIds.delete(String(msgId));
+    if (emit) this._emit({ op: 'edit', id: msg.id, fields: { queueState: state } });
+    return true;
+  }
+
   _processResponseMessage(item, emit) {
     const role = item.role;
     // Detect Codex thread goal auto-continue messages (role=developer or user with goal context)
@@ -1674,6 +1699,62 @@ class CodexMessageManager {
     }, emit);
   }
 
+  /** queue_changed = the WHOLE queue, authoritative. Session state (a `meta`
+   *  op), never a transcript message. */
+  _processQueueChanged(event, emit) {
+    const items = Array.isArray(event.items) ? event.items : [];
+    this._queue = items;
+    const live = new Set(items.map((it) => String(it.msgId || '')).filter(Boolean));
+    for (const it of items) this._stampQueueChip(it.msgId, 'queued', emit);
+    // Left the queue with no explicit steer/remove ⇒ it RAN: drop the chip
+    // rather than leave a bubble claiming to be queued forever.
+    for (const msgId of [...this._queuedMsgIds]) if (!live.has(msgId)) this._stampQueueChip(msgId, null, emit);
+    if (emit) this._emit({ op: 'meta', subtype: 'queue', items });
+  }
+
+  /** The outcome of one queue op. Success = a chip transition; failure = a
+   *  VISIBLE notice naming the reason (no silent failures). */
+  _processQueueOpResult(event, emit) {
+    const op = event.op, ok = event.ok !== false;
+    if (ok && (op === 'steer' || op === 'remove')) {
+      const state = op === 'steer' ? 'steered' : 'removed';
+      this._stampQueueChip(event.msg_id || event.msgId, state, emit);
+      if (op === 'steer' && event.reason === 'steered-not-dequeued') {
+        const msg = this._create({ role: 'system', status: 'error', content: [{ type: 'system_info', text: 'Steered, but the queued copy could not be removed — it may run a second time.' }], noticeKind: 'notice' });
+        if (emit) this._emit({ op: 'create', message: msg });
+      }
+      return;
+    }
+    if (ok) return;   // steer-all's own ok:true summary needs no card
+    const text = CodexMessageManager.queueOpFailureText(event);
+    if (!text) return;
+    const msg = this._create({ role: 'system', status: 'complete', content: [{ type: 'system_info', text }], noticeKind: 'notice' });
+    if (emit) this._emit({ op: 'create', message: msg });
+  }
+
+  /** PURE: the user-facing sentence for a failed queue op. Every branch says
+   *  what happens to the message NOW — "it will simply run next" is the whole
+   *  point of the turn-ended case. */
+  static queueOpFailureText(event) {
+    const op = event.op === 'steer-all' ? 'steer-all' : event.op;
+    const what = op === 'remove' ? 'remove' : 'steer';
+    switch (event.reason) {
+      case 'not-steerable':
+        return `Cannot steer during a ${event.kind || 'review'} turn — the message stays queued and runs when this turn ends.`;
+      case 'turn-mismatch':
+      case 'no-active-turn':
+        return 'The turn ended before the message could be steered — it stays queued and will simply run next.';
+      case 'gone':
+        return what === 'remove' ? 'That message is no longer queued — it already ran.' : 'That message is no longer queued — it already ran.';
+      case 'no-thread':
+        return 'The session has no thread yet — the queue is not available.';
+      case 'unknown-op':
+        return `Unsupported queue action "${event.op}".`;
+      default:
+        return `Could not ${what} the queued message${event.detail ? `: ${event.detail}` : ''}.`;
+    }
+  }
+
   _processEvent(event, emit) {
     const type = event.type;
     if (!type) return;
@@ -1698,6 +1779,13 @@ class CodexMessageManager {
 
     // P2 notices the wrapper emits around the codex turn loop (2.369.20):
     // queued input, real compaction, slash commands applied for the next turn.
+    // The queue lives ON the bubble (a chip that becomes 'steered'/'removed')
+    // and in the strip above the input — the old system card said the same
+    // thing a third time and pushed the conversation down. The card survives
+    // ONLY as the fallback for a queued message with no bubble of its own.
+    if (type === 'queued_input' && this._stampQueueChip(event.msg_id || event.msgId, 'queued', emit)) return;
+    if (type === 'queue_changed') return this._processQueueChanged(event, emit);
+    if (type === 'queue_op_result') return this._processQueueOpResult(event, emit);
     if (type === 'queued_input' || type === 'compact_started' || type === 'context_compacted' || type === 'command_applied') {
       const text = type === 'queued_input' ? 'Queued — runs after the current turn'
         : type === 'compact_started' ? 'Compacting context…'

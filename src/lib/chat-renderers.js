@@ -227,8 +227,9 @@ class ChatRenderers {
    * @param {HTMLElement} opts.messageList - Message list DOM element
    * @param {Function} [opts.onPermissionResolve] - Called when a permission is resolved (allow/deny)
    */
-  constructor({ ws, sessionId, app, backend = 'claude', compact, messageList, onPermissionResolve, onFork, getSessionCtx, onSendText }) {
+  constructor({ ws, sessionId, app, backend = 'claude', compact, messageList, onPermissionResolve, onFork, getSessionCtx, onSendText, onQueueChipClick }) {
     this._onSendText = onSendText || null; // in-chat action buttons send through the live input (null = view-only)
+    this._onQueueChipClick = onQueueChipClick || null; // clicking a 'queued' chip steers that message (live windows only)
     this.ws = ws;
     this.sessionId = sessionId;
     this.app = app;
@@ -347,7 +348,45 @@ class ChatRenderers {
       : parts;
 
     this.wrapMsg(el, 'user', t('You'), textHtml);
+    ChatRenderers.applyQueueChip(el, msg, this._canSteerQueue() ? this._onQueueChipClick : null);
     return el;
+  }
+
+  /** Can THIS session's harness inject a queued message into the running turn?
+   *  (backend-caps `inputModes.steer`, projected onto the client via META.) */
+  _canSteerQueue() { return !!getBackendMeta(this.backend)?.caps?.inputModes?.steer; }
+
+  /** THE QUEUE CHIP on a user bubble — 'queued' (waiting behind the running
+   *  turn, clickable to steer where the harness allows it), 'steered' (injected
+   *  into the running turn) or 'removed'. Idempotent: called on first render
+   *  AND on the queueState edit op, so the chip never doubles.
+   *  STATIC + injected click handler: the DOM-free render test drives it
+   *  without a ChatRenderers instance, and the chip text is the ONE place the
+   *  three states are worded. */
+  static applyQueueChip(el, msg, onSteer) {
+    if (!el) return null;
+    const prev = el.querySelector(':scope > .chat-queue-chip');
+    if (prev) prev.remove();
+    const state = msg?.queueState;
+    if (state !== 'queued' && state !== 'steered' && state !== 'removed') return null;
+    const chip = document.createElement('button');
+    chip.className = `chat-queue-chip chat-queue-chip-${state}`;
+    chip.type = 'button';
+    chip.dataset.queueState = state;
+    const icon = state === 'queued' ? UI_ICONS.clock : state === 'steered' ? UI_ICONS.bolt : UI_ICONS.close;
+    const label = state === 'queued' ? t('Queued') : state === 'steered' ? t('Steered') : t('Removed');
+    chip.innerHTML = `${icon}<span>${escHtml(label)}</span>`;
+    chip.title = state === 'queued'
+      ? t('Waiting behind the running turn — steering it injects it now, at the agent’s next reply')
+      : state === 'steered' ? t('Injected into the running turn')
+        : t('Removed from the queue — it will not run');
+    if (state === 'queued' && typeof onSteer === 'function') {
+      chip.onclick = (e) => { e.stopPropagation(); onSteer(msg); };
+    } else {
+      chip.disabled = true;
+    }
+    el.appendChild(chip);
+    return chip;
   }
 
   // Resolve a peer session NAME to the sidebar's live session record. Names

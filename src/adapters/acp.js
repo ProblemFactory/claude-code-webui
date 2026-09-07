@@ -77,6 +77,18 @@ class AcpAdapter extends BackendAdapter {
   formatSetPermissionMode(mode) { return JSON.stringify({ type: 'set-mode', mode }); }
   formatSetModel(model) { return JSON.stringify({ type: 'set-model', model }); }
   formatSetEffort(effort) { return JSON.stringify({ type: 'set-effort', effort }); }
+  // QUEUE OPS: ACP v1 has no queue verb, so the WRAPPER's promptQueue is the
+  // queue — it can be listed and an entry removed, but a running session/prompt
+  // cannot be steered (no such method in the protocol). The caps row
+  // (inputModes.steer=false) already stops ws-handler; refusing here WITH THE
+  // REASON is the second line of defense — never format a frame the wrapper
+  // would answer with "unknown stdin verb".
+  formatQueueOp({ op, id } = {}) {
+    if (op === 'steer' || op === 'steer-all') throw new Error('ACP v1 has no steer: a running prompt cannot be interrupted with new input — the message runs after this turn, or you can remove it');
+    if (op !== 'remove') throw new Error(`unknown queue op "${op}"`);
+    if (!id) throw new Error('queue op "remove" needs an item id');
+    return JSON.stringify({ type: 'queue-op', op: 'remove', id });
+  }
 
   /** Preview user record (acp-events `user` shape) so the bubble renders
    *  before the wrapper's own record lands; the two dedup on msgId. */

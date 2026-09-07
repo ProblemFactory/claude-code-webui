@@ -37,6 +37,21 @@
 //                  sidecar caps.peerMessage and serves the 'peer-message'
 //                  stdin verb, reporting peer_message_result honestly.
 //   'stash-only' — no live lane; messages queue for next-turn injection.
+// inputModes names what a SEND DURING A TURN can do on this harness — the
+// queue/steer surface (ws 'queue-op', the client's queue strip and the bubble
+// chip all gate on THIS, never on a backend id):
+//   queue     — a message sent mid-turn is HELD and runs after the turn, and
+//               the harness REPORTS that state back to us (a CLI that queues
+//               silently still counts: claude's own stdin queue is real, it
+//               just has no readable state — see queueOps).
+//   steer     — a held message can be INJECTED into the running turn so the
+//               agent sees it at its next reply (codex `turn/steer`; measured
+//               on 0.153.4: several steers per turn are accepted, and a steer
+//               does NOT remove the queued copy — the wrapper deletes it).
+//   queueOps  — we can enumerate and MUTATE the queue (remove/steer an item).
+//               false for claude: the CLI owns the queue, publishes no list
+//               and takes no removal — offering a control we cannot honour is
+//               the accept-and-ignore failure the 2.361.4 lesson names.
 const BACKEND_CAPS = {
   claude: {
     pool: true,
@@ -48,6 +63,8 @@ const BACKEND_CAPS = {
     fork: true,                   // --fork-session (+ --resume-session-at for a mid-conversation fork)
     streamProtocol: 'stream-json',
     peerDelivery: 'cli-inbox',
+    // The CLI queues stdin messages itself and reports nothing about it.
+    inputModes: { queue: true, steer: false, queueOps: false },
   },
   codex: {
     pool: true,
@@ -59,11 +76,16 @@ const BACKEND_CAPS = {
     fork: true,                   // thread/fork (whole-thread fork; the wrapper sends it when CODEX_WEBUI_FORK=1)
     streamProtocol: 'codex-events',
     peerDelivery: 'rpc-queue',
+    // thread/queue/{add,list,delete} + turn/steer — all four measured against
+    // a live 0.153.4 app-server (the removal verb is `delete` with
+    // `queuedSubmissionId`; there is NO `thread/queue/remove`).
+    inputModes: { queue: true, steer: true, queueOps: true },
   },
   shell: {
     pool: false, hotSwitch: 'unverified', planC: false, sealedOrders: false, resetCredit: false, quotaProbe: null, fork: false,
     streamProtocol: null, // terminal-only: no chat parse pipeline
     peerDelivery: 'stash-only',
+    inputModes: { queue: false, steer: false, queueOps: false },
   },
   // ACP v1 harnesses (S8, design-harness-plugins §2.3): the agent holds its
   // own login/provider config — no pool, no quota probe, no credential
@@ -75,10 +97,14 @@ const BACKEND_CAPS = {
     streamProtocol: 'acp-events',
     peerDelivery: 'stash-only',
     frameFile: true,
+    // ACP v1 has no queue verb, so the WRAPPER owns the queue (promptQueue) —
+    // it can list and remove, but it cannot inject into a running prompt
+    // (session/prompt is one-at-a-time; there is no steer in the protocol).
+    inputModes: { queue: true, steer: false, queueOps: true },
   },
 };
 
-const NO_CAPS = Object.freeze({ pool: false, hotSwitch: 'unverified', planC: false, sealedOrders: false, resetCredit: false, quotaProbe: null, fork: false, streamProtocol: null, peerDelivery: 'stash-only' });
+const NO_CAPS = Object.freeze({ pool: false, hotSwitch: 'unverified', planC: false, sealedOrders: false, resetCredit: false, quotaProbe: null, fork: false, streamProtocol: null, peerDelivery: 'stash-only', inputModes: Object.freeze({ queue: false, steer: false, queueOps: false }) });
 
 function capsOf(backend) {
   return BACKEND_CAPS[backend || 'claude'] || NO_CAPS;

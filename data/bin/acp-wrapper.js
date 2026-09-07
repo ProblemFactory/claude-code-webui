@@ -33,10 +33,17 @@
 //   notification        {method, params}                                         — non-update notifications
 //   notice              {level:'info'|'error', text, noticeKind}                 — loud wrapper-side outcomes
 //   peer_result         {ok, mode, reason, text, fromName}                        — peer-message honesty
+//   queued_input        {msg_id, turn_id}                                        — a send landed in the queue
+//   queue_changed       {items:[{id,msgId,preview,ts,kind,from}], turn_id}       — the WHOLE queue, on every change
+//   queue_op_result     {op, id, ok, reason, detail, msg_id}                     — queue-op honesty
 //   plus the bare {type:'_stdin_ack', timestamp} line per stdin line (server broken-pty detector).
 //
 // STDIN VERBS: chat-input → session/prompt (queued while a prompt runs — ACP has
-// no queue verb); interrupt → session/cancel (+ every pending request_permission
+// no queue verb, so the queue is OURS: published as queue_changed, mutable
+// through queue-op 'remove'; there is no steer, and backend-caps
+// inputModes.steer=false stops one before it reaches this file);
+// queue-op → remove a queued entry (a queued peer message goes back to the
+// delivery ladder, exactly as Stop does); interrupt → session/cancel (+ every pending request_permission
 // answered 'cancelled', per spec) AND the local queue is always dropped (a
 // queued peer message goes back to the delivery ladder as peer_result ok:false);
 // a prompt cancelled while it was still awaiting its context prefix is never
@@ -113,7 +120,13 @@ const meta = {
   // peerMessage: false — the server's live lane stays 'stash-only' for ACP
   // harnesses (backend-caps peerDelivery); the verb below exists for direct
   // callers/tests and flips this advert when the lane is switched on.
-  caps: { frameFile: true, peerMessage: false },
+  // inputQueue: ACP v1 has NO queue verb, so this wrapper's promptQueue IS the
+  // queue — it publishes `queue_changed` and serves the `queue-op` stdin verb
+  // for 'remove' only (backend-caps inputModes.steer=false: a running
+  // session/prompt cannot be injected into, and pretending otherwise is the
+  // accept-and-ignore failure).
+  caps: { frameFile: true, peerMessage: false, inputQueue: true },
+  queue: [],
 };
 
 let buffer = '';
@@ -285,10 +298,61 @@ async function maybeStopNudge() {
   } catch (e) { nudgeTurnActive = false; log('stop nudge skipped: ' + e.message); }
 }
 
+// ── THE INPUT QUEUE (queue + remove; no steer in ACP v1) ──
+// promptQueue is the queue, so the wrapper is also its PUBLISHER: the client's
+// queue strip and the bubble chips read `queue_changed`, exactly as they do for
+// codex — the difference between the harnesses is a capability row, never a
+// different client path.
+let queueSeq = 0;
+function acpQueuePreview(blocks) {
+  const parts = [];
+  for (const b of asArray(blocks)) {
+    if (b?.type === 'text' && b.text) parts.push(String(b.text));
+    else if (b?.type === 'image') parts.push('[image]');
+  }
+  const text = String(parts.join(' ')).replace(/\s+/g, ' ').trim();
+  return text.length > 120 ? text.slice(0, 119) + '…' : text;
+}
+function publishQueue() {
+  const items = promptQueue.map((q) => ({
+    id: q.id,
+    msgId: q.opts?.msgId || '',
+    preview: acpQueuePreview(q.blocks),
+    ts: q.ts || null,
+    kind: q.opts?.peer ? 'peer' : q.opts?.nudge ? 'system' : 'user',
+    from: q.opts?.peerFrom || null,
+  }));
+  meta.queue = items;
+  scheduleMeta();
+  record('queue_changed', { items, turn_id: meta.activePromptId || null });
+}
+
 function drainPromptQueue() {
   if (activePrompt || !promptQueue.length) return;
   const next = promptQueue.shift();
+  publishQueue();
   runPrompt(next.blocks, next.opts).catch((e) => log('queued prompt failed: ' + e.message));
+}
+
+/** queue-op stdin verb. 'remove' only — the caps row denies steer at the ws
+ *  layer and the adapter refuses it with a reason; this arm exists so a frame
+ *  that somehow reaches us is REPORTED, never silently dropped. */
+function handleQueueOp(msg) {
+  const op = String(msg?.op || '');
+  const id = String(msg?.id || '');
+  if (op !== 'remove') {
+    record('queue_op_result', { op, id, ok: false, reason: op === 'steer' || op === 'steer-all' ? 'not-steerable' : 'unknown-op' });
+    return;
+  }
+  const idx = promptQueue.findIndex((q) => q.id === id);
+  if (idx < 0) { record('queue_op_result', { op, id, ok: false, reason: 'gone' }); publishQueue(); return; }
+  const [dropped] = promptQueue.splice(idx, 1);
+  // A queued PEER message was already reported delivered — removing it must
+  // hand the text back to the delivery ladder (the Stop-drop rule).
+  if (dropped.opts?.peer && dropped.opts.peerText) record('peer_result', { ok: false, reason: 'removed from the queue before it was delivered', text: dropped.opts.peerText, fromName: dropped.opts.peerFrom || null });
+  if (dropped.opts?.nudge) nudgeTurnActive = false;
+  record('queue_op_result', { op, id, ok: true, msg_id: dropped.opts?.msgId || '' });
+  publishQueue();
 }
 
 function endPrompt(mine, stopReason, error, opts) {
@@ -302,7 +366,12 @@ function endPrompt(mine, stopReason, error, opts) {
 
 async function runPrompt(blocks, opts = {}) {
   if (!meta.sessionId) throw new Error('no ACP session yet');
-  if (activePrompt) { promptQueue.push({ blocks, opts }); if (!opts.silentQueue) notice('info', 'Queued — runs after the current turn', 'queued'); return; }
+  if (activePrompt) {
+    promptQueue.push({ id: `q${++queueSeq}-${process.pid}`, ts: Date.now(), blocks, opts });
+    publishQueue();
+    if (!opts.silentQueue) record('queued_input', { msg_id: opts.msgId || '', turn_id: meta.activePromptId || null });
+    return;
+  }
   const promptId = `p${++promptSeq}-${process.pid}`;
   const mine = { id: promptId, cancelled: false, dispatched: false };
   activePrompt = mine;
@@ -429,7 +498,9 @@ async function handleInput(msg) {
       record('user', { msgId: msg.msgId || '', content, peer: null });
       const blocks = promptBlocksFor(norm);
       if (!blocks.length) return;
-      await runPrompt(blocks);
+      // msgId rides the opts so a QUEUED entry can name the bubble it belongs
+      // to (the chip join, same as codex's clientUserMessageId).
+      await runPrompt(blocks, { msgId: msg.msgId || '' });
       return;
     }
     case 'interrupt': {
@@ -439,6 +510,7 @@ async function handleInput(msg) {
       // drainPromptQueue() dispatched the queued prompt the instant Stop
       // landed, i.e. the agent kept working after Stop.
       const dropped = promptQueue.splice(0, promptQueue.length);
+      if (dropped.length) publishQueue();
       if (activePrompt) {
         activePrompt.cancelled = true;
         // Only cancel a turn the agent KNOWS about: a session/cancel for a
@@ -477,6 +549,7 @@ async function handleInput(msg) {
       log(`interrupt: active=${!!activePrompt} dropped=${dropped.length} (nudges=${droppedNudges})`);
       return;
     }
+    case 'queue-op': handleQueueOp(msg); return;
     case 'permission-response': resolvePermission(msg); return;
     case 'set-model': await applyModel(msg.model); return;
     case 'set-effort': await applyEffort(msg.effort); return;
@@ -501,7 +574,7 @@ async function handleInput(msg) {
       return;
     }
     default:
-      notice('error', `Unknown stdin verb "${msg.type}" — ignored (ACP wrapper serves chat-input/interrupt/permission-response/set-model/set-effort/set-mode/set-permission-mode/peer-message/_frame_file).`, 'unknown-verb');
+      notice('error', `Unknown stdin verb "${msg.type}" — ignored (ACP wrapper serves chat-input/interrupt/queue-op/permission-response/set-model/set-effort/set-mode/set-permission-mode/peer-message/_frame_file).`, 'unknown-verb');
   }
 }
 
@@ -657,6 +730,9 @@ async function setupSession() {
   scheduleMeta();
   if (initialModel) await applyModel(initialModel);
   if (initialMode) await applyMode(initialMode);
+  // State the (empty) queue once, so a client attaching later starts from a
+  // fact instead of from nothing — parity with the codex wrapper's baseline.
+  publishQueue();
 }
 
 async function boot() {

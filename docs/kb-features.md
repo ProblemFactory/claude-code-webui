@@ -112,6 +112,74 @@ Moved VERBATIM out of CLAUDE.md (tier-2 pass).
 - Scroll minimap: semantic turn-based navigation, user message markers, compact markers, drag-to-jump, two-line floating preview label (time + 60-char preview), hovered marker lights up, and an outline (TOC) button at the top of the track — filterable list of all user messages, click to jump, works in both index and time coordinate modes
 - Pin-to-bottom: iterative scroll convergence (10 rAF frames) for content-visibility compatibility
 
+#### Sending during a turn: QUEUED vs STEERED (2026-09-06, owner ask)
+A message typed while the agent is mid-turn does not interrupt it. What happens
+next is a **capability**, `backend-caps` `inputModes {queue, steer, queueOps}` —
+never a backend id; the ws layer, the strip and the chip all gate on that row:
+
+| harness | queue | steer | queueOps | what the user sees |
+|---|---|---|---|---|
+| **codex** | ✓ | ✓ | ✓ | the strip + per-item Steer/Remove + Steer all |
+| **opencode** (ACP v1) | ✓ | — | ✓ (remove only) | the strip + per-item Remove |
+| **claude** | ✓ | — | — | nothing: the CLI queues stdin itself and publishes no queue |
+| **shell** | — | — | — | n/a (terminal) |
+
+- **Queued** — the message is held and runs when the current turn ends. Its own
+  user bubble wears a `Queued` chip (there is no separate system card any more;
+  the card survives only as the fallback for a queued entry with no bubble, e.g.
+  an agent-to-agent message).
+- **Steered** — "inject it into the RUNNING turn, so the agent reads it at its
+  next reply". Codex: `turn/steer {threadId, input, expectedTurnId,
+  clientUserMessageId}`. The item leaves the queue (the wrapper deletes it, see
+  below) and its bubble's chip becomes `Steered`.
+- **The strip** sits directly above the input box: one row per queued item
+  (≤120-char preview; an agent-to-agent message is listed and labelled with its
+  sender — hiding it would misstate what runs next), `Steer now` (only when the
+  harness can steer) and `Remove`, plus `Steer all` when more than one is
+  queued. Focus a row and press Enter to steer it. The `Queued` chip on the
+  bubble is a second entry point for the same action.
+- **MULTI-QUEUE SEMANTICS (the rule to remember):** steering item N injects
+  **only N**. The others keep their relative order and still run after the turn.
+  A steered item is removed from the queue, so it never runs twice. `Steer all`
+  is sequential steers **in queue order** (each keeps its own input, so images
+  and per-message ids survive) — verified against the app-server, which accepts
+  several steers inside one turn; it stops at the first refusal, because a
+  refusal is a property of the TURN and would just repeat N times.
+- **Refusals are visible and say what happens now.** A review or compact turn
+  answers `ActiveTurnNotSteerable` ("Cannot steer during a review turn — the
+  message stays queued and runs when this turn ends"); if the turn ended between
+  the click and the RPC, the precondition (`expectedTurnId`) fails and the
+  notice says "it stays queued and will simply run next". In every failure the
+  item **stays queued** — that is why the wrapper steers first and deletes only
+  on success. A `Remove` of something already drained says "it already ran"
+  rather than reporting a fake success.
+- **A chip clears when its message RUNS.** An item that leaves the queue without
+  an explicit steer/remove was drained by the turn ending, so the bubble drops
+  its chip instead of claiming to be queued forever.
+- **Live + attach parity.** The wrapper publishes the WHOLE queue on every
+  change (and at boot, and at each turn start); that record replays through the
+  buffer, so a reconnecting client's strip is rebuilt. `attached` and `created`
+  both carry `queue`.
+- **Removing a queued agent-to-agent / job message gives it back.** It was
+  already reported delivered, so `remove` re-reports `peer_message_result
+  ok:false` with the text and sender and the delivery ladder re-stashes it for
+  next-turn injection — the same rule the ACP wrapper's Stop already obeyed.
+- **KNOWN DIVERGENCE — what Stop does to the queue.** On ACP the queue is ours,
+  so Stop DROPS it (loudly: "Stop also dropped N queued messages"). On codex the
+  queue belongs to the app-server, which DRAINS it when the turn ends — including
+  a turn ended by Stop — so a Stop there does not cancel what was queued behind
+  it; the wrapper only re-reads the queue so the strip states the truth. This is
+  the upstream client's behaviour, not a choice we made, and the strip's Remove
+  button is now the way to act on it. Changing codex's Stop to clear the queue
+  would be a product-default change and is deliberately NOT done here.
+- Measured facts behind the codex implementation (0.153.4, live app-server):
+  the removal verb is `thread/queue/delete {threadId, queuedSubmissionId}` —
+  **there is no `thread/queue/remove`**; `thread/queue/changed` carries only
+  `{threadId}`, so every change drives a re-`list`; `turn/steer` does **not**
+  dequeue the item even when it carries the same `clientUserMessageId`; and an
+  `add` on an idle thread starts a turn by itself (the app-server drains its own
+  queue, we never call `turn/start` for it).
+
 ### Window Manager
 - Floating windows with drag/resize
 - Edge snap zones (Magnet-like)

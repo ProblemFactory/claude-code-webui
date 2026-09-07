@@ -290,6 +290,15 @@ class ClaudeCodeAdapter extends BackendAdapter {
     });
   }
 
+  // QUEUE OPS: the CLI queues stdin messages ITSELF and publishes no queue
+  // state — there is nothing to enumerate, remove or steer (inputModes
+  // {queue:true, steer:false, queueOps:false}). Refuse WITH THE REASON rather
+  // than invent a control_request the CLI would ignore (accept-and-ignore is
+  // the 2.361.4 failure).
+  formatQueueOp() {
+    throw new Error('Claude Code owns its own input queue: a message sent mid-turn runs after it, but the CLI reports no queue and takes no queue commands');
+  }
+
   // B-7edc: ask the CLI ITSELF for usage over the control channel (subtype
   // 'get_usage', verified present in the 2.1.222 control-request dispatch).
   // Its reply carries the FULL rate_limits object incl. `model_scoped` (the

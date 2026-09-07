@@ -16,7 +16,7 @@ export class ChatInput {
    * @param {function} opts.getStateSync - returns StateSync instance
    * @param {function} opts.onInterrupt - called when user clicks Stop
    */
-  constructor(ws, sessionId, { onSend, onInterrupt, getCwd, getHost, getUploadDir, isTouch, getTouchEnterSends }) {
+  constructor(ws, sessionId, { onSend, onInterrupt, getCwd, getHost, getUploadDir, isTouch, getTouchEnterSends, onQueueOp }) {
     this._ws = ws;
     this._sessionId = sessionId;
     this._onSend = onSend;
@@ -26,6 +26,9 @@ export class ChatInput {
     this._getUploadDir = getUploadDir || (() => '');
     this._isTouch = isTouch || (() => false);
     this._getTouchEnterSends = getTouchEnterSends || (() => false);
+    this._onQueueOp = onQueueOp || null;   // (op, id) → ws 'queue-op'
+    this._queue = [];
+    this._queueCaps = { steer: false, queueOps: false };
 
     // Attachment state
     this._attachments = [];
@@ -291,7 +294,13 @@ export class ChatInput {
     this._streamStatus = document.createElement('div');
     this._streamStatus.className = 'chat-stream-status hidden';
 
-    inputArea.append(this._attachArea, this._todoDisplay, this._streamStatus, inputWrap, sendCol);
+    // QUEUE STRIP: what the user sent DURING the running turn and has not run
+    // yet. Above everything else in the input area — it is about the messages
+    // already sent, not about the one being typed.
+    this._queueStrip = document.createElement('div');
+    this._queueStrip.className = 'chat-queue-strip hidden';
+
+    inputArea.append(this._queueStrip, this._attachArea, this._todoDisplay, this._streamStatus, inputWrap, sendCol);
   }
 
   /** The .chat-input-area wrapper element */
@@ -693,6 +702,57 @@ export class ChatInput {
       item.appendChild(removeBtn);
       this._attachArea.appendChild(item);
     }
+  }
+
+  /** The input queue + what this harness lets the user DO with it.
+   *  caps = backend-caps `inputModes` projected onto the client (agent-meta). */
+  setQueue(items, caps) {
+    this._queue = Array.isArray(items) ? items : [];
+    if (caps) this._queueCaps = { steer: !!caps.steer, queueOps: !!caps.queueOps };
+    this._renderQueue();
+  }
+
+  _renderQueue() {
+    const strip = this._queueStrip;
+    if (!strip) return;
+    const items = this._queueCaps.queueOps ? this._queue : [];
+    if (!items.length) { strip.classList.add('hidden'); strip.innerHTML = ''; return; }
+    strip.classList.remove('hidden');
+    strip.innerHTML = ChatInput.queueStripHtml(items, this._queueCaps);
+    strip.querySelectorAll('[data-queue-op]').forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        this._onQueueOp?.(btn.dataset.queueOp, btn.dataset.queueId || null);
+      };
+    });
+    // Enter on a focused row steers it (the row itself is the target — the
+    // buttons handle their own Enter as ordinary button activation).
+    strip.querySelectorAll('.chat-queue-item').forEach((row) => {
+      row.onkeydown = (e) => {
+        if (e.key !== 'Enter' || e.target !== row) return;
+        e.preventDefault();
+        if (this._queueCaps.steer) this._onQueueOp?.('steer', row.dataset.queueId || null);
+      };
+    });
+  }
+
+  /** PURE markup for the strip (DOM-free testable; every interpolation escaped
+   *  — a queue preview is message text and syncs to every client). */
+  static queueStripHtml(items, caps = {}) {
+    const head = `<div class="chat-queue-head">${UI_ICONS.queue}<span>${escHtml(t('{n} queued — runs after this turn', { n: items.length }))}</span>${
+      caps.steer && items.length > 1
+        ? `<button type="button" class="chat-queue-all" data-queue-op="steer-all" title="${escHtml(t('Inject every queued message into the running turn, in order'))}">${UI_ICONS.bolt}<span>${escHtml(t('Steer all'))}</span></button>`
+        : ''
+    }</div>`;
+    const rows = items.map((it) => {
+      const id = escHtml(String(it.id || ''));
+      const from = it.kind === 'peer' && it.from ? `<span class="chat-queue-from">${escHtml(String(it.from))}</span>` : '';
+      const steer = caps.steer
+        ? `<button type="button" class="chat-queue-btn" data-queue-op="steer" data-queue-id="${id}" title="${escHtml(t('Steer now — the agent sees it at its next reply'))}" aria-label="${escHtml(t('Steer now — the agent sees it at its next reply'))}">${UI_ICONS.bolt}</button>`
+        : '';
+      return `<div class="chat-queue-item" tabindex="0" data-queue-id="${id}">${from}<span class="chat-queue-preview">${escHtml(String(it.preview || ''))}</span>${steer}<button type="button" class="chat-queue-btn chat-queue-btn-remove" data-queue-op="remove" data-queue-id="${id}" title="${escHtml(t('Remove'))}" aria-label="${escHtml(t('Remove'))}">${UI_ICONS.close}</button></div>`;
+    }).join('');
+    return head + rows;
   }
 
   _updateTodoDisplay() {

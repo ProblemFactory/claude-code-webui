@@ -1785,6 +1785,10 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
             // carries-the-key guard fires.
             outputStyle: session._outputStyle || null,
             autoResume: autoResume?.statusFor?.(id) || null,
+            // A freshly spawned/resumed wrapper always starts with an EMPTY
+            // input queue — stated explicitly (not omitted) so the creator's
+            // carries-the-key guard clears any strip a recycled window kept.
+            queue: [],
             warning: session._resumeWarning || undefined, // 2.271.0 T1-2: sweep-skipped-under-lag double-write risk
             // A sweep is DESTRUCTIVE by design (it SIGTERMs another claude that
             // held this transcript). Never do that silently — 2.276.0.

@@ -709,6 +709,14 @@ class MessageManager {
 
   goalState() { return this._goalState || null; }
 
+  /** The input queue (harness contract). ALWAYS EMPTY for claude: the CLI
+   *  queues stdin messages itself and publishes no queue state — backend-caps
+   *  inputModes {queue:true, steer:false, queueOps:false} says so, and the
+   *  client's strip renders nothing. Present so every chat normalizer answers
+   *  the same question (test-harness-contract pins it) instead of the caller
+   *  learning which ones have the method. */
+  queueState() { return []; }
+
   _processUser(raw, emit) {
     this._finalizeStreaming(emit);
     const content = raw.message?.content;

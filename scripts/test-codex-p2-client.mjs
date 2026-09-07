@@ -45,9 +45,14 @@ const caps = require(path.join(REPO, 'src/backend-caps.js'));
 ok(caps.capsOf('claude').fork === true && caps.capsOf('codex').fork === true && caps.capsOf('shell').fork === false && caps.capsOf('nope').fork === false, 'backend-caps carries fork per harness (claude/codex yes, shell/unknown no)');
 const wsc = read('src/ws-create.js');
 ok(/_forkRequested: !!data\.fork && !!capsOf\(backend\)\.fork/.test(wsc) && /require\('\.\/backend-caps'\)/.test(wsc), 'ws-create honours a fork request per harness caps (no claude-only branch)');
-const meta = read('src/lib/agent-meta.js');
-ok(/caps: \{ fork: true, effort: true, review: true, outputStyle: false, autoResume: true, quotaRefresh: 'session-rpc', accounts: true \}/.test(meta), 'client META: codex caps.fork is true (the fork button/menu shows)');
-ok(/permissionModes: \['default', 'read-only', 'safe-yolo', 'yolo'\]/.test(meta) && /permissionModes: \['default', 'acceptEdits', 'bypassPermissions', 'plan', 'auto'\]/.test(meta), 'client META carries a permission-mode seed per backend');
+const metaSrc = read('src/lib/agent-meta.js');
+const { BACKEND_META } = await import(path.join(REPO, 'src/lib/agent-meta.js'));
+{
+  const c = BACKEND_META.codex.caps;
+  ok(c.fork === true && c.effort === true && c.review === true && c.outputStyle === false && c.autoResume === true && c.accounts === true && BACKEND_META.codex.caps.quotaRefresh === 'session-rpc',
+    'client META: codex caps.fork is true (the fork button/menu shows)', JSON.stringify(c));
+}
+ok(/permissionModes: \['default', 'read-only', 'safe-yolo', 'yolo'\]/.test(metaSrc) && /permissionModes: \['default', 'acceptEdits', 'bypassPermissions', 'plan', 'auto'\]/.test(metaSrc), 'client META carries a permission-mode seed per backend');
 const sb = read('src/lib/chat-status-bar.js');
 ok(/BACKEND_META\[backend\]\?\.permissionModes/.test(sb) && /import \{ BACKEND_META, getBackendMeta, backendFeatureCaps, effortLabel \} from '\.\/agent-meta\.js'/.test(sb), 'the status bar seeds its permission dropdown from META (never claude modes on a codex chat before the first status)');
 const sf = read('src/lib/setup-flows.js');

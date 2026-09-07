@@ -295,7 +295,15 @@ const meta = {
   // be shredded exactly like the 79928a2b claude poisoning, silently).
   // threadScoped: every recorded item carries thread_id/turn_id and foreign
   // threads never become root messages (B-7473).
-  caps: { peerMessage: true, frameFile: true, threadScoped: true },
+  // inputQueue: this wrapper OWNS the app-server's input queue — it publishes
+  // `queue_changed` on every change and serves the `queue-op` stdin verb
+  // (steer / remove / steer-all). backend-caps `inputModes` is what the ws
+  // layer gates on; this advert is the per-PROCESS truth for a long-lived
+  // wrapper that predates the feature (the 2.361.1/2.364.1 law).
+  caps: { peerMessage: true, frameFile: true, threadScoped: true, inputQueue: true },
+  // The queue as last read from thread/queue/list (sidecar mirror; the live
+  // consumer is the queue_changed event).
+  queue: [],
 };
 
 let buffer = '';
@@ -900,6 +908,10 @@ function handleNotification(method, params) {
     if (foreign) { handleForeignThreadNotification(method, params, foreign); return; }
   }
   if (method === 'thread/status/changed') return;
+  // The app-server's own queue-mutation signal (add / delete / drain at turn
+  // end). It carries NO items — the list call is the truth (0.153.4:
+  // ThreadQueueChangedNotification = {threadId}).
+  if (method === 'thread/queue/changed') { refreshQueue(); return; }
   if (method === 'thread/goal/updated') {
     const goal = params?.goal;
     meta.goal = goal?.objective || null;
@@ -972,6 +984,10 @@ function handleNotification(method, params) {
     meta.streaming = true;
     record('turn_context', buildTurnContext(currentTurnId));
     emitTaskEvent('task_started', { turn_id: currentTurnId, model_context_window: meta.contextWindow || 0 });
+    // Re-publish the queue with the NEW turn id: a client attaching mid-turn
+    // replays the buffer, and the last queue_changed may have scrolled out of
+    // it during a long turn. Cheap (no RPC) and self-correcting.
+    if (meta.queue?.length) publishQueue(meta.queue, { force: true });
     scheduleMeta();
     return;
   }
@@ -1240,6 +1256,205 @@ async function startTurn(text, attachments = []) {
 }
 const completedTurns = new Set();
 
+// ── THE INPUT QUEUE (queue + steer, design-harness-plugins §1 P2 follow-up) ──
+// The app-server OWNS the queue; we do not keep a shadow copy of it. Measured
+// against a live 0.153.4 `codex app-server` (scripts/test-codex-p2-wrapper
+// mirrors every shape):
+//   thread/queue/add    {threadId, input, clientUserMessageId}
+//                       → {queuedSubmission:{id, input, clientUserMessageId}}
+//   thread/queue/list   {threadId} → {data:[QueuedSubmission], nextCursor}
+//   thread/queue/delete {threadId, queuedSubmissionId} → {deleted:true}
+//   turn/steer          {threadId, input, expectedTurnId, clientUserMessageId?}
+//                       → {turnId}
+// There is NO `thread/queue/remove` on 0.153.4 — the removal verb is
+// `delete` and its field is `queuedSubmissionId` (the full ClientRequest
+// variant list, printed by the server's own unknown-method error, also carries
+// update/reorder/start, which we do not use yet).
+// Two measured facts drive the steer implementation:
+//   (1) turn/steer does NOT dequeue the item, not even when the steer carries
+//      the queued item's own clientUserMessageId => we delete it ourselves, or
+//      the message runs twice.
+//   (2) several turn/steer calls inside ONE turn are accepted => "steer all" is
+//      sequential steers in queue order, each keeping its own input (images and
+//      per-message ids survive), not one concatenated blob.
+// ORDER: steer FIRST, delete on success. A steer failing is a DESIGNED path
+// (review/compact turns answer ActiveTurnNotSteerable, and a turn can end
+// between the click and the RPC), and on that path the item must simply stay
+// queued in its original position — which delete-first could not restore.
+const queueMeta = new Map();   // clientUserMessageId → {kind:'user'|'peer', msgId, ts, from}
+let queueFingerprint = null;
+let queueRefreshInFlight = false, queueRefreshAgain = false;
+
+function noteQueued(clientUserMessageId, info) {
+  if (!clientUserMessageId) return;
+  queueMeta.set(String(clientUserMessageId), { kind: 'user', msgId: '', ts: Date.now(), from: null, ...info });
+  if (queueMeta.size > 200) queueMeta.delete(queueMeta.keys().next().value);
+}
+
+/** <=120 chars of what this queued submission will actually send. */
+function queuePreview(input) {
+  const parts = [];
+  for (const item of asArray(input)) {
+    if (item?.type === 'text' && item.text) parts.push(String(item.text));
+    else if (item?.type === 'image' || item?.type === 'localImage') parts.push('[image]');
+    else if (item?.type === 'skill' && item.name) parts.push(`[skill ${item.name}]`);
+    else if (item?.type === 'mention' && item.name) parts.push(`[@${item.name}]`);
+  }
+  const text = oneLine(parts.join(' '));
+  return text.length > 120 ? text.slice(0, 119) + '…' : text;
+}
+
+function queueItemsFrom(data) {
+  return asArray(data).map((q) => {
+    const cid = asString(q?.clientUserMessageId);
+    const known = queueMeta.get(cid) || null;
+    return {
+      id: asString(q?.id),
+      msgId: known?.msgId || '',
+      preview: queuePreview(q?.input),
+      ts: known?.ts || null,
+      // 'user' = typed here; 'peer' = an agent-to-agent / job message riding
+      // the SAME lane (peerDelivery 'rpc-queue'). Hiding peers would make the
+      // strip lie about what runs next, so they are listed and labelled.
+      kind: known?.kind || 'user',
+      from: known?.from || null,
+    };
+  }).filter((it) => it.id);
+}
+
+/** Publish the queue to every consumer (client strip, attach replay, sidecar). */
+function publishQueue(items, { force = false } = {}) {
+  const fp = JSON.stringify(items.map((it) => [it.id, it.msgId, it.kind]));
+  if (!force && fp === queueFingerprint) return;
+  queueFingerprint = fp;
+  meta.queue = items;
+  scheduleMeta();
+  emitTaskEvent('queue_changed', { items, turn_id: meta.activeTurnId || null });
+}
+
+/** Re-read the authoritative queue. Single-flight + coalescing: the app-server
+ *  fires thread/queue/changed per mutation and a steer-all makes several. */
+async function refreshQueue() {
+  if (!meta.threadId) return;
+  if (queueRefreshInFlight) { queueRefreshAgain = true; return; }
+  queueRefreshInFlight = true;
+  try {
+    do {
+      queueRefreshAgain = false;
+      const resp = await request('thread/queue/list', { threadId: meta.threadId }, 15000);
+      const rows = asArray(resp?.data || resp?.items);
+      const items = queueItemsFrom(rows);
+      const live = new Set(rows.map((q) => asString(q?.clientUserMessageId)));
+      for (const cid of [...queueMeta.keys()]) if (!live.has(cid)) queueMeta.delete(cid);
+      publishQueue(items);
+    } while (queueRefreshAgain);
+  } catch (e) {
+    // A degrade path that logs the message VERBATIM (the 2.284.2 lesson):
+    // an unreadable queue must never masquerade as an empty one.
+    log('thread/queue/list failed: ' + e.message);
+  } finally { queueRefreshInFlight = false; }
+}
+
+/** Classify a turn/steer rejection into something the USER can act on. The
+ *  0.153.4 wire carries only {code:-32600, message} — the typed CodexErrorInfo
+ *  variants (NoActiveTurn / ExpectedTurnMismatch / ActiveTurnNotSteerable) never
+ *  reach the client — so the message text is the only discriminator we have. */
+function classifySteerFailure(message) {
+  const m = String(message || '');
+  if (/cannot steer a (review|compact) turn/i.test(m)) return { reason: 'not-steerable', kind: /review/i.test(m) ? 'review' : 'compact' };
+  if (/expected active turn id/i.test(m)) return { reason: 'turn-mismatch' };
+  if (/no active turn to steer/i.test(m)) return { reason: 'no-active-turn' };
+  if (/only user input can steer/i.test(m)) return { reason: 'not-steerable' };
+  return { reason: 'error' };
+}
+
+async function steerOne(item) {
+  const cid = asString(item?.clientUserMessageId);
+  const known = queueMeta.get(cid) || null;
+  const base = { op: 'steer', id: asString(item?.id), msg_id: known?.msgId || '' };
+  if (!meta.activeTurnId) return { ...base, ok: false, reason: 'no-active-turn' };
+  try {
+    await request('turn/steer', {
+      threadId: meta.threadId,
+      input: item.input,
+      expectedTurnId: meta.activeTurnId,
+      clientUserMessageId: cid || undefined,
+    }, 30000);
+  } catch (e) {
+    log(`turn/steer rejected for ${base.id}: ${e.message}`);
+    return { ...base, ok: false, detail: e.message, ...classifySteerFailure(e.message) };
+  }
+  // The steer landed: the message is now IN the turn, so the queued copy must
+  // go or it runs a second time (measured: steer never dequeues).
+  try {
+    await request('thread/queue/delete', { threadId: meta.threadId, queuedSubmissionId: base.id }, 15000);
+  } catch (e) {
+    log(`steered ${base.id} but thread/queue/delete failed (${e.message}) — it may run a SECOND time`);
+    return { ...base, ok: true, reason: 'steered-not-dequeued', detail: e.message };
+  }
+  queueMeta.delete(cid);
+  return { ...base, ok: true };
+}
+
+async function handleQueueOp(msg) {
+  const op = asString(msg?.op);
+  const id = asString(msg?.id);
+  if (!meta.threadId) { emitTaskEvent('queue_op_result', { op, id, ok: false, reason: 'no-thread' }); return; }
+  let data = [];
+  try {
+    const resp = await request('thread/queue/list', { threadId: meta.threadId }, 15000);
+    data = asArray(resp?.data || resp?.items);
+  } catch (e) {
+    log(`queue-op ${op}: thread/queue/list failed: ${e.message}`);
+    emitTaskEvent('queue_op_result', { op, id, ok: false, reason: 'error', detail: e.message });
+    return;
+  }
+  if (op === 'remove') {
+    const item = data.find((q) => asString(q?.id) === id);
+    // Gone = it already ran; say so instead of reporting a fake success.
+    if (!item) { emitTaskEvent('queue_op_result', { op, id, ok: false, reason: 'gone' }); await refreshQueue(); return; }
+    const known = queueMeta.get(asString(item.clientUserMessageId)) || null;
+    try {
+      await request('thread/queue/delete', { threadId: meta.threadId, queuedSubmissionId: id }, 15000);
+      queueMeta.delete(asString(item.clientUserMessageId));
+      // A queued PEER/job message was already reported delivered (peer_message_result
+      // ok:'queued') — removing it must give the text back to the ladder, which
+      // re-stashes it for next-turn injection. Never a silent loss.
+      if (known?.kind === 'peer' && known.text) emitTaskEvent('peer_message_result', { ok: false, reason: 'removed from the queue before it was delivered', text: known.text, fromName: known.from || null });
+      emitTaskEvent('queue_op_result', { op, id, ok: true, msg_id: known?.msgId || '' });
+    } catch (e) {
+      log(`thread/queue/delete failed for ${id}: ${e.message}`);
+      emitTaskEvent('queue_op_result', { op, id, ok: false, reason: 'error', detail: e.message, msg_id: known?.msgId || '' });
+    }
+    await refreshQueue();
+    return;
+  }
+  if (op === 'steer') {
+    const item = data.find((q) => asString(q?.id) === id);
+    if (!item) { emitTaskEvent('queue_op_result', { op, id, ok: false, reason: 'gone' }); await refreshQueue(); return; }
+    emitTaskEvent('queue_op_result', await steerOne(item));
+    await refreshQueue();
+    return;
+  }
+  if (op === 'steer-all') {
+    // IN QUEUE ORDER, one steer per item: the ones that land leave the queue,
+    // the rest keep their relative order and still run after the turn. Stops at
+    // the first failure — a review turn refuses ALL of them, and pushing on
+    // would just print the same refusal N times.
+    let done = 0;
+    for (const item of data) {
+      const r = await steerOne(item);
+      emitTaskEvent('queue_op_result', { ...r, op: 'steer', batch: 'steer-all' });
+      if (!r.ok) { emitTaskEvent('queue_op_result', { op: 'steer-all', ok: false, reason: r.reason, detail: r.detail || null, done, remaining: data.length - done }); await refreshQueue(); return; }
+      done++;
+    }
+    emitTaskEvent('queue_op_result', { op: 'steer-all', ok: true, done });
+    await refreshQueue();
+    return;
+  }
+  emitTaskEvent('queue_op_result', { op, id, ok: false, reason: 'unknown-op' });
+}
+
 async function respondToServerRequest(msg) {
   const requestId = msg.requestId;
   const original = pendingServerRequests.get(String(requestId));
@@ -1330,13 +1545,20 @@ async function handleInput(msg) {
     // was lost. The user record above already renders the bubble; the
     // queued_input event renders a "queued" notice under it.
     if (meta.threadId && meta.activeTurnId) {
+      const cid = msg.msgId || `queued-${process.pid}-${nextId++}`;
+      // Register the identity BEFORE the RPC: the app-server answers the add
+      // with a thread/queue/changed notification, and the refresh it triggers
+      // can win the race with this call's own reply — an item whose msgId we
+      // learn late renders with no bubble chip.
+      noteQueued(cid, { kind: 'user', msgId: msg.msgId || '' });
       await request('thread/queue/add', {
         threadId: meta.threadId,
         input: encodeUserInput(text, attachments),
-        clientUserMessageId: msg.msgId || `queued-${process.pid}-${nextId++}`,
+        clientUserMessageId: cid,
       }, 30000);
       emitTaskEvent('queued_input', { msg_id: msg.msgId || '', turn_id: meta.activeTurnId });
       log('chat-input queued (turn active; runs after the current turn)');
+      refreshQueue();
       return;
     }
     await startTurn(text, attachments);
@@ -1345,7 +1567,17 @@ async function handleInput(msg) {
   if (msg.type === 'interrupt') {
     if (meta.threadId && meta.activeTurnId) {
       await request('turn/interrupt', { threadId: meta.threadId, turnId: meta.activeTurnId }, 30000).catch(() => {});
+      // The app-server drains its own queue when the turn ends (measured) —
+      // re-read so the strip states what is really left rather than what was
+      // queued a moment ago. Stop does NOT clear the codex queue (the ACP
+      // wrapper, whose queue is OURS, does clear it) — a semantic difference
+      // the strip's Remove button now lets the user resolve.
+      refreshQueue();
     }
+    return;
+  }
+  if (msg.type === 'queue-op') {
+    await handleQueueOp(msg);
     return;
   }
   if (msg.type === 'permission-response') {
@@ -1381,10 +1613,15 @@ async function handleInput(msg) {
     const recordPeerMessage = () => record('response_item', { type: 'message', role: 'user', content: [{ type: 'input_text', text }], webui_peer: { name: fromName, body: cardText } });
     try {
       if (meta.activeTurnId) {
+        const cid = `peer-${process.pid}-${nextId++}`;
+        // `text` rides the entry so a REMOVE can hand the message back to the
+        // delivery ladder instead of losing something we already reported
+        // delivered (the ACP wrapper's Stop-drop rule, same reason).
+        noteQueued(cid, { kind: 'peer', msgId: '', from: fromName, text });
         await request('thread/queue/add', {
           threadId: meta.threadId,
           input: encodeUserInput(text, []),
-          clientUserMessageId: `peer-${process.pid}-${nextId++}`,
+          clientUserMessageId: cid,
         }, 30000);
         recordPeerMessage();
         emitTaskEvent('peer_message_result', { ok: true, mode: 'queued' });
@@ -1673,6 +1910,10 @@ async function boot() {
   notify('initialized');
   await startThread();
   readAccountLimits(false); // surface reset-credit count without user action (fire-and-forget)
+  // Baseline queue publish: a RESUMED thread can come back with items already
+  // queued, and an empty queue still has to be stated once so a reconnecting
+  // client's strip starts from a fact rather than from nothing.
+  refreshQueue().then(() => publishQueue(meta.queue || [], { force: true }));
   markReady?.();
 }
 

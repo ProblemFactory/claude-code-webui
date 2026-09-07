@@ -2944,4 +2944,16 @@ export default {
   "{n} sub-agent messages": "{n} 条子代理消息",
   "{n} sub-agents": "{n} 个子代理",
   "This sub-agent’s conversation is not on this machine.": "该子代理的对话不在本机。",
+  // input queue / steer (codex thread/queue + turn/steer; ACP promptQueue)
+  "This session is not live — reconnect to steer queued messages.": "该会话当前不是活的 —— 重新连接后才能插入队列中的消息。",
+  "Queued": "排队中",
+  "Steered": "已插入本轮",
+  "Steer all": "全部插入",
+  "Steer now — the agent sees it at its next reply": "立即插入 —— agent 在下一次回复时就会看到",
+  "Inject every queued message into the running turn, in order": "按顺序把队列中的每条消息插入正在进行的这一轮",
+  "{n} queued — runs after this turn": "{n} 条排队中 —— 本轮结束后运行",
+  "Waiting behind the running turn — steering it injects it now, at the agent’s next reply": "正在等待当前这一轮结束 —— 插入后 agent 在下一次回复时就会看到",
+  "Injected into the running turn": "已插入正在进行的这一轮",
+  "Removed from the queue — it will not run": "已从队列移除 —— 不会运行",
+  "That message is no longer queued — it already ran.": "这条消息已不在队列中 —— 它已经运行了。",
 };

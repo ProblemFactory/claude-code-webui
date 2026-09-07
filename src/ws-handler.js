@@ -10,6 +10,7 @@ const { listCodexThreads } = require('./codex-session-store');
 const { findCodexSessionJsonlPath, extractCodexThreadMeta } = require('./adapters/codex');
 const { cwdToProjectDir, findSessionJsonlPath } = require('./session-store');
 const { get: harnessOf } = require('./harnesses'); // S3: store.warmTranscript per harness (claude parse-cache warm / codex thread/read fallback)
+const { capsOf } = require('./backend-caps');      // inputModes gate for the 'queue-op' case (never a backend-id branch)
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -534,6 +535,32 @@ function registerWsHandler(wss, ctx) {
           break;
         }
 
+        // QUEUE OPS on a message the user sent mid-turn (steer / remove /
+        // steer-all). Validated against the harness's `inputModes` caps row —
+        // never against a backend id — so a harness without the capability gets
+        // a NAMED refusal instead of a frame its wrapper would drop silently.
+        // The reply is a CODED error: the client renders it in-chat and leaves
+        // the live window alone (the inc-mt2arppw rule).
+        case 'queue-op': {
+          const session = activeSessions.get(data.sessionId);
+          const refuse = (message) => { try { ws.send(JSON.stringify({ type: 'error', code: 'queue-op-unsupported', sessionId: data.sessionId, error: message, message })); } catch { } };
+          if (!session?.pty || session.mode !== 'chat') { refuse('This action needs a live chat session.'); break; }
+          const adapter = adapterRegistry.get(session.backend);
+          if (!adapter) { refuse(`No adapter for backend "${session.backend}".`); break; }
+          const modes = capsOf(session.backend).inputModes || {};
+          // harnessOf THROWS on an unknown id by design — the label is chrome,
+          // so it degrades to the id rather than taking the socket down.
+          let label = session.backend;
+          try { label = harnessOf(session.backend).label || label; } catch { }
+          if (!modes.queueOps) { refuse(`${label} owns its own input queue — VibeSpace cannot list or change it.`); break; }
+          if ((data.op === 'steer' || data.op === 'steer-all') && !modes.steer) { refuse(`${label} cannot steer: a message sent during a turn runs after it. You can remove it instead.`); break; }
+          let payload;
+          try { payload = adapter.formatQueueOp({ op: data.op, id: data.id || null }); }
+          catch (e) { refuse(e.message); break; }
+          session.pty.write(payload + '\n');
+          break;
+        }
+
         case 'review-start': {
           const session = activeSessions.get(data.sessionId);
           if (session?.pty && session.mode === 'chat' && session.backend === 'codex' && data.target) {
@@ -905,6 +932,11 @@ function registerWsHandler(wss, ctx) {
               chatStatus.lockedModel = session._lockedModel || null;
               ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, mode: 'chat',
                 messages, totalCount, chatStatus, isStreaming, streamingLabel, streamingKind: isStreaming ? (session._streamingKind || null) : null, autoResume: autoResume?.statusFor?.(data.sessionId) || null, outputStyle: session._outputStyle || null, taskState: sm.taskState(), turnMap, pendingPermissions: pendingPerms,
+                // The input queue as the normalizer knows it (the wrapper's
+                // queue_changed replays through the buffer on a rebuild) —
+                // ALWAYS present so a reconnecting client can clear a stale
+                // strip; harnesses without a queue report [].
+                queue: session._normalizer?.queueState?.() || [],
                 normEpoch: session._normEpoch || 0,
                 remoteState: session._remoteState || (session._bareRemote ? { state: 'unprotected' } : null),
                 goal: session._goal || null, goalElapsed: session._goalElapsed || 0, goalStatus: session._goalStatus || null }));

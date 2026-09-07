@@ -70,6 +70,10 @@ export const UI_ICONS = {
   coin:      _s('<circle cx="8" cy="8" r="6"/><circle cx="8" cy="8" r="2.5"/>'),
   circle:    _s('<circle cx="8" cy="8" r="6"/>'),
   bolt:      _s('<path d="M9 1.2L3.8 9.2H7l-0.9 5.6L12.4 6.6H8.6z"/>', { fill: true }),
+  // close/dismiss (§17: an SVG glyph, not the ✕ character) — queue strip rows
+  close:     _s('<path d="M4 4l8 8M12 4l-8 8"/>'),
+  // the input queue: messages waiting behind the running turn
+  queue:     _s('<path d="M2.5 4h11M2.5 8h11M2.5 12h7"/>'),
   // Codex multi-agent collab rows (B-7473): direction is an ICON, never a
   // glyph/emoji (§17) — inbound report, outbound message, spawn, lifecycle dot
   agentIn:   _s('<path d="M14 8H4"/><path d="M8 4L4 8l4 4"/><path d="M2 2v12"/>'),
