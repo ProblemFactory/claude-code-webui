@@ -1543,23 +1543,231 @@ fi`;
   const okReply = await callKill5('VS_OK\n');
   ok(goneReply.ok?.success === true && goneReply.ok?.gone === true && okReply.ok?.success === true && okReply.ok?.gone === false,
     '…and the two outcomes that MAY return still do (VS_GONE ⇒ gone:true, VS_OK ⇒ gone:false) — the new branch did not swallow them', { goneReply, okReply });
-  // STRUCTURAL: the busybox-unsafe probe must not come back, and the enumerated
-  // SIBLING (sysinfo-wiring's signalProc) is named with its reason — its
-  // `ps -p` sits on the FAILURE branch of a kill that was already ATTEMPTED, so
-  // it can only mislabel an outcome, never manufacture one.
+  // STRUCTURAL: the busybox-unsafe probe must not come back, and the ladder is
+  // now the SHARED text — r6 killed the enumerated sibling instead of reasoning
+  // about it (§17).
   const kpsText = kps(4242);
   ok(/kill -0 "\$1" 2>\/dev\/null && return 0/.test(kpsText) && !/^C=\$\(ps -p \d+ -o args=/m.test(kpsText),
     'WIRING PIN: the shipped kill script probes existence with `kill -0` and carries no `C=$(ps -p N -o args=)` existence capture');
   ok(/^C=\$\(ps -p \d+ -o args=/m.test(preR5Kill(4242)),
     'NEGATIVE CONTROL: that pin names a shape that really exists — it FIRES on the verbatim pre-r5 script');
-  const sysSrc = fs.readFileSync(new URL('../src/server/sysinfo-wiring.js', import.meta.url), 'utf8');
-  const sigScript = (sysSrc.match(/const script = `[\s\S]*?`;/) || [''])[0];
-  ok(sigScript.includes('if kill -') && sigScript.indexOf('if kill -') < sigScript.indexOf('ps -p'),
-    'ENUMERATED SIBLING: signalProc still ATTEMPTS the kill before any `ps -p` runs, so its busybox-blind probe can only mislabel EPERM as ESRCH — it can never report a kill that did not happen as a success',
-    { sigScript: sigScript.slice(0, 200) });
+  ok(kpsText.includes(cliIdentity.pidAliveShellFn()),
+    'WIRING PIN: killPidShell embeds the SHARED `vs_alive` text verbatim — the ladder has one author (B-3185 r6)');
   for (const p of bprocs) { try { p.kill('SIGKILL'); } catch { } }
   fs.rmSync(bdir, { recursive: true, force: true });
 } else { console.log('  · /proc absent — skipping the busybox kill-path legs'); }
+
+// ── 17. THE SIGNAL VERDICT UNDER BUSYBOX (r6, found by review). §16 fixed the
+// existence probe on ONE kill path and ENUMERATED the other —
+// `src/server/sysinfo-wiring.js signalProc`, the sidebar process manager's
+// Terminate — leaving its `ps -p` alive on a hand-written reason: "there it
+// sits on the FAILURE branch of a kill that was already ATTEMPTED, so it can
+// only mislabel EPERM as ESRCH, never manufacture a success."
+//
+// That script has TWO `ps -p` calls and the reason was only true of the
+// second. The FIRST is the post-signal aliveness check on the SUCCESS branch,
+// and there a busybox-blind probe manufactures exactly the outcome §16 exists
+// to stop: `kill -TERM` succeeds, `ps -p` cannot answer, so the script says
+// OK-GONE and signalProc returns `{ok:true, gone:true}` — the row flips to
+// gone while the process runs on. Measured below on a live process with
+// `trap "" TERM`, plus the failure branch's mislabel on a real foreign pid.
+//
+// THE FIX IS NOT A SECOND CORRECT REASON, IT IS ONE PROBE: `vs_alive` moved to
+// src/cli-identity.js and BOTH scripts embed it, so there is no per-site
+// judgement left to make — and §17f sweeps the tree so a THIRD site cannot
+// quietly grow one.
+if (fs.existsSync('/proc/self')) {
+  const { spawn, spawnSync } = await import('node:child_process');
+  const { signalVerdictScript } = require('../src/server/sysinfo-wiring.js');
+  const bbPath = ['/usr/bin/busybox', '/bin/busybox'].find((p) => fs.existsSync(p));
+  const sdir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-sigv-'));
+  const spids = [];
+  // TWO fixture shapes, because the two verdicts differ only in what the
+  // process does with the signal: one IGNORES SIGTERM (must read OK-ALIVE),
+  // one accepts it (must read OK-GONE). The bug is invisible against the
+  // second — which is why "it reported gone" always looked right.
+  //
+  // THE FIXTURES ARE DOUBLE-FORKED ORPHANS, and that is not tidiness. A
+  // process whose parent has not reaped it is a ZOMBIE, and a zombie reads
+  // ALIVE to every existence probe there is — `kill -0`, `/proc/<pid>`, procps
+  // `ps -p`, and the local branch's own `process.kill(pid, 0)` (asserted
+  // below, because a divergence there would be a REAL behaviour change). A
+  // node-parented fixture is guaranteed to be one here: `spawnSync` blocks the
+  // event loop for the whole verdict, so node cannot reap while the script
+  // runs. Orphaning hands the reap to init/the user subreaper, which is also
+  // the real shape — the processes this route signals are never our children.
+  const orphan = (body, tag) => {
+    const pf = path.join(sdir, 'pid-' + tag);
+    spawnSync('/bin/sh', ['-c', `setsid /bin/sh -c 'echo $$ > ${pf}; ${body}' </dev/null >/dev/null 2>&1 &`], { cwd: os.tmpdir() });
+    // WAIT FOR A PARSEABLE pid, NOT FOR THE FILE: `echo $$ >` creates it empty
+    // first, so an existsSync spin reads '' ⇒ pid 0 ⇒ the builder's own
+    // validation throws and ABORTS the suite mid-section (observed once, and
+    // it is exactly why the count of red asserts in a revert run is itself
+    // evidence: the first revert check reported "1 RED" because the run died
+    // here rather than because the fix was untested).
+    const t = Date.now();
+    let n = 0;
+    while (Date.now() - t < 10000) {
+      try { n = Number(String(fs.readFileSync(pf, 'utf8')).trim()); } catch { n = 0; }
+      if (Number.isInteger(n) && n > 1) break;
+      spawnSync('/bin/true'); // yield without needing the (blocked) event loop
+    }
+    if (!(Number.isInteger(n) && n > 1)) throw new Error(`orphan fixture ${tag} never published a pid`);
+    spids.push(n);
+    return n;
+  };
+  const sIgnore = orphan('trap "" TERM; sleep 60', 'i');    // survives a TERM
+  const sIgnoreCtl = orphan('trap "" TERM; sleep 60', 'c');  // the same, for the pre-r6 control
+  const sDies = orphan('exec sleep 60', 'd');                // dies on a TERM
+  await new Promise((r) => setTimeout(r, 400));
+  const sAlive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  const pState = (pid) => { try { return String(fs.readFileSync(`/proc/${pid}/stat`, 'utf8')).split(') ')[1].split(' ')[0]; } catch { return 'ABSENT'; } };
+  ok(spids.every((p) => sAlive(p) && pState(p) !== 'Z'),
+    'every signal-verdict fixture is live (and NOT a zombie) before any verdict is taken', { states: spids.map(pState) });
+  // THE ZOMBIE EDGE, pinned so the ladder cannot be blamed for it later: a
+  // reaped-pending process answers ALIVE to all four probes — the shipped
+  // ladder, this box's procps `ps -p`, and the LOCAL branch's `process.kill`.
+  // The ladder changed nothing here; it is the kernel's answer, and it is the
+  // same one the pre-r6 spelling gave on a non-busybox host.
+  {
+    const z = spawn('/bin/sh', ['-c', 'exec sleep 60'], { stdio: 'ignore', cwd: os.tmpdir() });
+    await new Promise((r) => setTimeout(r, 250));
+    try { process.kill(z.pid, 'SIGKILL'); } catch { }
+    const t0 = Date.now();
+    while (pState(z.pid) !== 'Z' && Date.now() - t0 < 3000) spawnSync('/bin/true'); // block the loop so node cannot reap
+    const zZombie = pState(z.pid) === 'Z';
+    const zLadder = String((spawnSync('/bin/sh', ['-c', `${cliIdentity.pidAliveShellFn()}\nif vs_alive ${z.pid}; then echo ALIVE; else echo GONE; fi`], { encoding: 'utf8' }).stdout) || '').trim();
+    const zPs = spawnSync('ps', ['-p', String(z.pid)], { stdio: 'ignore' }).status === 0;
+    ok(!zZombie || (zLadder === 'ALIVE' && zPs && sAlive(z.pid)),
+      'HONEST EDGE: a ZOMBIE reads ALIVE to the shared ladder, to procps `ps -p` and to the local branch\'s `process.kill(pid,0)` alike — the ladder introduced no divergence, and it is why the fixtures above are orphans',
+      { zZombie, zLadder, zPs });
+    if (!zZombie) console.log('  · could not produce a zombie in 3s — the zombie-edge leg asserted vacuously');
+  }
+  const runIn2 = (argv, script) => String((spawnSync(argv[0], [...argv.slice(1), '-c', script], { encoding: 'utf8', timeout: 20000 }).stdout) || '').trim();
+  const bbArgv2 = bbPath ? [bbPath, 'sh'] : null;
+  if (!bbPath) console.log('  · busybox absent — the §17 busybox legs are SKIPPED (install busybox to run them)');
+  // (a) THE CAPABILITY THE PRE-r6 PROBE ASSUMED — asserted, not inherited from
+  // §16 (that leg measured `ps -p N -o args=`; this one measures the QUIET
+  // form the signal script actually used).
+  const bbQuiet = bbPath ? spawnSync(bbPath, ['sh', '-c', `if ps -p ${sIgnore} >/dev/null 2>&1; then echo ALIVE; else echo GONE; fi`], { encoding: 'utf8' }) : null;
+  ok(!bbPath || (String(bbQuiet.stdout || '').trim() === 'GONE' && sAlive(sIgnore)),
+    'MEASURED: under busybox `ps -p N >/dev/null 2>&1` answers NON-ZERO for a LIVE pid — the quiet existence form the signal script used is blind there too',
+    { out: bbQuiet && String(bbQuiet.stdout || '').trim() });
+  // git cf20753a:src/server/sysinfo-wiring.js — the verbatim pre-r6 script.
+  const preR6Sig = (pid, sig) => `if kill -${sig} ${pid} 2>/dev/null; then `
+    + (sig === 'STOP' || sig === 'CONT' ? 'echo OK; '
+      : `sleep 0.5; if ps -p ${pid} >/dev/null 2>&1; then echo OK-ALIVE; else echo OK-GONE; fi; `)
+    + `else if ps -p ${pid} >/dev/null 2>&1; then echo EPERM; else echo ESRCH; fi; fi`;
+  // (b) NEGATIVE CONTROL: the pre-r6 script manufactures the false success.
+  const ctlOut = bbPath ? runIn2(bbArgv2, preR6Sig(sIgnoreCtl, 'TERM')) : null;
+  ok(!bbPath || (ctlOut === 'OK-GONE' && sAlive(sIgnoreCtl)),
+    'NEGATIVE CONTROL: under busybox the pre-r6 script answers OK-GONE for a LIVE process that ignored the SIGTERM — signalProc would have returned {ok:true, gone:true} and the row would read "gone" while the process kept running',
+    { out: ctlOut, stillAlive: sAlive(sIgnoreCtl) });
+  // (c) the SHIPPED builder, same machine shape, same fixture shape.
+  const shipAlive = bbPath ? runIn2(bbArgv2, signalVerdictScript(sIgnore, 'TERM')) : null;
+  ok(!bbPath || (shipAlive === 'OK-ALIVE' && sAlive(sIgnore)),
+    'the SHIPPED script under busybox says OK-ALIVE for that same process — and it is still alive', { out: shipAlive });
+  // (d) POSITIVE CONTROL: the ladder is not simply stuck on "alive".
+  const shipGone = bbPath ? runIn2(bbArgv2, signalVerdictScript(sDies, 'TERM')) : null;
+  await new Promise((r) => setTimeout(r, 250));
+  ok(!bbPath || (shipGone === 'OK-GONE' && pState(sDies) === 'ABSENT'),
+    'POSITIVE CONTROL: a process that DOES die from the TERM still reads OK-GONE under busybox — the ladder answers "gone" when the pid is really gone (and /proc agrees: fully reaped, not a zombie)',
+    { out: shipGone, state: pState(sDies) });
+  const deadPid = Number(fs.readFileSync('/proc/sys/kernel/pid_max', 'utf8').trim()) + 1;
+  ok(!bbPath || runIn2(bbArgv2, signalVerdictScript(deadPid, 'TERM')) === 'ESRCH',
+    '…and a pid that was never there reads ESRCH (the kill itself failed, and no rung can see it)');
+  // (e) THE FAILURE BRANCH'S OWN LIE, on a REAL EPERM (no simulation: a live
+  // process this uid may not signal). Skipped rather than faked where the
+  // environment cannot produce one (running as root, or a lone-uid container).
+  let foreignPid = null;
+  for (const d of fs.readdirSync('/proc')) {
+    if (!/^\d+$/.test(d)) continue;
+    const n = Number(d);
+    if (n <= 1) continue;
+    try { process.kill(n, 0); } catch (e) { if (e.code === 'EPERM') { foreignPid = n; break; } }
+  }
+  if (!foreignPid) console.log('  · no live pid this uid may not signal — the §17 EPERM legs are SKIPPED (running as root?)');
+  ok(!bbPath || !foreignPid || runIn2(bbArgv2, signalVerdictScript(foreignPid, 'TERM')) === 'EPERM',
+    'the SHIPPED script under busybox explains a permission-denied kill as EPERM — the /proc rung sees a process we may not signal', { foreignPid });
+  ok(!bbPath || !foreignPid || runIn2(bbArgv2, preR6Sig(foreignPid, 'TERM')) === 'ESRCH',
+    'NEGATIVE CONTROL: the pre-r6 script called that same live process ESRCH — "no such process (already gone)", the r4 objection the busybox-blind probe re-created', { foreignPid });
+  // (f) THE CALLER must map each verdict honestly — the pure text above is only
+  // half the fix if signalProc reads it wrong.
+  const { create: createSysWiring } = require('../src/server/sysinfo-wiring.js');
+  const sigReply = async (text) => {
+    const stubHosts = {
+      get: () => ({ id: 'h6', transport: 'dial' }),
+      deviceBounded: async () => ({ async runCmd() { return { stdout: text }; } }),
+    };
+    const { signalProc } = createSysWiring({ getHosts: () => stubHosts });
+    try { return { ok: await signalProc('h6', 4242, 'TERM') }; } catch (e) { return { err: e.message }; }
+  };
+  const rAlive = await sigReply('OK-ALIVE\n');
+  const rGone = await sigReply('OK-GONE\n');
+  const rEperm = await sigReply('EPERM\n');
+  const rEsrch = await sigReply('ESRCH\n');
+  ok(rAlive.ok?.gone === false && rGone.ok?.gone === true
+    && /permission denied/.test(rEperm.err || '') && /no such process/.test(rEsrch.err || ''),
+    'signalProc maps the four verdicts honestly (OK-ALIVE ⇒ gone:false, OK-GONE ⇒ gone:true, EPERM/ESRCH ⇒ explained throws)',
+    { rAlive, rGone, rEperm, rEsrch });
+  // (g) STRUCTURAL: one probe, one author, and the kill still comes FIRST.
+  const sigText = signalVerdictScript(4242, 'TERM');
+  ok(sigText.includes(cliIdentity.pidAliveShellFn()) && !/ps -p 4242/.test(sigText),
+    'WIRING PIN: the signal script embeds the SHARED `vs_alive` text verbatim and carries no bare `ps -p <pid>` existence test');
+  ok(/ps -p \d+/.test(preR6Sig(4242, 'TERM')),
+    'NEGATIVE CONTROL: that pin names a shape that really existed — it FIRES on the verbatim pre-r6 script');
+  ok(sigText.indexOf('if kill -TERM 4242') < sigText.indexOf('vs_alive 4242'),
+    'the kill is still ATTEMPTED before any existence probe runs — the probe explains an outcome, it never gates one (no probe-then-kill TOCTOU)');
+  const badPids = [1, 0, -5, 1.5, NaN, '4242; rm -rf /'];
+  ok(badPids.every((p) => { try { signalVerdictScript(p, 'TERM'); return false; } catch { return true; } })
+    && (() => { try { signalVerdictScript(4242, 'USR1'); return false; } catch { return true; } })(),
+    'the builder validates pid and signal ITSELF — a hostile pid never reaches the shell text, whatever the caller checked');
+  // (h) THE STANDING SWEEP (the point of (g) in the B-3185 essay, applied to
+  // the probe rather than the identity): NO `ps -p` may serve as an EXISTENCE
+  // test on any kill/signal path. Every surviving occurrence is listed here
+  // WITH its reason, and a dead entry fails too — an allowlist nobody prunes
+  // is how the last one survived.
+  const KILL_PATH_FILES = ['src/cli-identity.js', 'src/writer-sweep.js', 'src/hosts.js',
+    'src/server/sysinfo-wiring.js', 'src/session-store.js', 'src/routes/sessions.js',
+    'scripts/vibespace-agentd-install.sh',
+    ...String(spawnSync('git', ['ls-files', 'data/bin'], { encoding: 'utf8', cwd: new URL('..', import.meta.url).pathname }).stdout || '').split('\n').filter(Boolean)];
+  const PS_P_ALLOWED = [
+    { file: 'src/cli-identity.js', needle: `ps -p "$1" -o args= 2>/dev/null | tr`,
+      why: 'ARGV READ (vs_argv, the no-/proc rung). It asks for a VALUE, never for existence: a `ps` that cannot answer yields an empty word, and an empty argv word already means "no evidence" to vs_is_cli / vs_known.' },
+    { file: 'src/cli-identity.js', needle: 'ps -p "$1" >/dev/null 2>&1',
+      why: 'THE no-/proc rung of `vs_alive` itself — the one existence `ps -p` in the tree, and the LAST rung of a positive-evidence ladder (kill -0, then [ -d /proc/N ]), so a busybox `ps` that cannot answer merely declines to add evidence instead of deciding.' },
+    { file: 'src/writer-sweep.js', needle: `ps -p "$1" -o args= 2>/dev/null | tr ' '`,
+      why: 'ARGV READ (vs_sid_of: the PROTECT session id out of argv). Existence is the caller\'s open-fd evidence, not this line.' },
+    { file: 'src/writer-sweep.js', needle: `ps -p "$1" -E -o command=`,
+      why: 'ENVIRON READ (vs_sid_of\'s BSD rung, same value, same non-decision).' },
+    { file: 'scripts/vibespace-agentd-install.sh', needle: `OLDCMD=$(ps -p "$OLDPID" -o command=`,
+      why: 'ARGV READ; existence was already decided one line above by `kill -0 "$OLDPID"`, and an unreadable answer falls through to NOT killing.' },
+    { file: 'scripts/vibespace-agentd-install.sh', needle: `case "$(ps -p "$P" -o command=`,
+      why: 'ARGV READ gated by `kill -0 "$P" || return 1`, and daemon_up explicitly ACCEPTS the empty answer (`""` is a matching case) — a `ps` that cannot answer never reports a healthy daemon as down.' },
+  ];
+  const isComment = (l) => /^\s*(\/\/|\*|\/\*|#)/.test(l);
+  const stray = [];
+  const hitNeedles = new Set();
+  for (const f of KILL_PATH_FILES) {
+    let src = '';
+    try { src = fs.readFileSync(new URL('../' + f, import.meta.url), 'utf8'); } catch { continue; }
+    src.split('\n').forEach((line, i) => {
+      if (isComment(line) || !line.includes('ps -p')) return;
+      const hit = PS_P_ALLOWED.find((a) => a.file === f && line.includes(a.needle));
+      if (hit) hitNeedles.add(a2key(hit)); else stray.push(`${f}:${i + 1}: ${line.trim().slice(0, 90)}`);
+    });
+  }
+  ok(!stray.length,
+    'STANDING SWEEP: no `ps -p` on any kill/signal path outside the allowlist — a new one must be added there WITH its reason (existence tests are not allowed at all)',
+    { stray });
+  const deadEntries = PS_P_ALLOWED.filter((a) => !hitNeedles.has(a2key(a))).map((a) => `${a.file}: ${a.needle}`);
+  ok(!deadEntries.length,
+    '…and every allowlist entry still names a line that EXISTS — a stale exemption is how the last busybox-blind probe survived a round of review',
+    { deadEntries });
+  for (const p of spids) { try { process.kill(p, 'SIGKILL'); } catch { } }
+  fs.rmSync(sdir, { recursive: true, force: true });
+} else { console.log('  · /proc absent — skipping the signal-verdict legs'); }
+function a2key(a) { return a.file + ' ' + a.needle; }
 
 // ── 13. THE KB ADVERTISES A NUMBER (r2, defect 7). It said 66 while the suite
 // ran 68 — a small lie, but the kb is the operating manual and the number is

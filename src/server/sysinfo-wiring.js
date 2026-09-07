@@ -3,6 +3,56 @@
 // device op first, ssh script fallback. Extracted verbatim; `hosts` arrives
 // lazily (created later in boot order). ORCH tier.
 const sysinfo = require('../sysinfo');
+const { pidAliveShellFn } = require('../cli-identity');
+
+// Signal a process — the ONE user-facing kill path for every machine. sig is
+// enum-whitelisted and pid integer-validated BEFORE any shell string is built.
+const PROC_SIGS = new Set(['TERM', 'KILL', 'INT', 'HUP', 'STOP', 'CONT']);
+
+/** THE remote signal verdict: signal → settle → report, one script for both
+ *  remote rungs. Module-level and EXPORTED so the suite drives the shipped
+ *  bytes rather than a copy (the (p) lesson: a control that cannot reach the
+ *  code it guards is not a control).
+ *
+ *  EXISTENCE IS `vs_alive`, NEVER `ps -p` (B-3185 r6, found by review).
+ *  Both questions this script asks — "is it still there after the signal
+ *  landed?" and "why did the signal fail?" — used to be spelled
+ *  `ps -p N >/dev/null 2>&1`, and busybox `ps` has NO `-p` (measured here,
+ *  busybox 1.37.0: `ps: invalid option -- 'p'` + usage to stderr, exit 1,
+ *  stdout empty). On a host whose shell lives in busybox that made BOTH
+ *  answers wrong, and the first one is not a mislabel but a manufactured
+ *  outcome:
+ *    · SUCCESS branch — a live process that ignores SIGTERM (`trap "" TERM`,
+ *      measured) reported `OK-GONE` ⇒ `{ok:true, gone:true}`: the process
+ *      table flipped the row to gone while the process kept running.
+ *    · FAILURE branch — a pid we may not signal reported `ESRCH` ⇒ "no such
+ *      process (already gone)" instead of "permission denied" (measured).
+ *  r5 enumerated this file as a sibling of `hosts.js killPidShell` and left
+ *  the probe alone on the reason that its `ps -p` "sits on the FAILURE branch
+ *  of a kill that was already attempted" — true of the SECOND call, and the
+ *  script has two. The ladder is now shared text (src/cli-identity.js), so
+ *  there is no per-site reason left to get wrong.
+ *
+ *  `kill -0` alone would NOT do: it fails EPERM exactly as the real kill did,
+ *  so on the failure branch every permission-denied kill would read "no such
+ *  process". That was r4's objection and it stands — which is why `vs_alive`
+ *  hands a `kill -0` FAILURE down to `[ -d /proc/N ]` and `ps -p N` instead of
+ *  believing it, and only a silent ladder means "gone".
+ *
+ *  Exit status: every branch ends in an `echo`, so the script exits 0 and
+ *  `_ssh` (which rejects a non-zero exit) never sees a verdict as a failure. */
+function signalVerdictScript(pid, sig) {
+  const p = Number(pid);
+  // validated HERE, at the one place that builds the shell text — never
+  // "the caller checked it".
+  if (!Number.isInteger(p) || p <= 1) throw new Error('invalid pid');
+  if (!PROC_SIGS.has(sig)) throw new Error('unsupported signal');
+  return `${pidAliveShellFn()}
+if kill -${sig} ${p} 2>/dev/null; then `
+    + (sig === 'STOP' || sig === 'CONT' ? 'echo OK; '
+      : `sleep 0.5; if vs_alive ${p}; then echo OK-ALIVE; else echo OK-GONE; fi; `)
+    + `else if vs_alive ${p}; then echo EPERM; else echo ESRCH; fi; fi`;
+}
 
 function create({ getHosts }) {
   const hostsProxy = new Proxy({}, { get: (_, k) => { const h = getHosts(); return typeof h[k] === 'function' ? h[k].bind(h) : h[k]; } });
@@ -82,9 +132,9 @@ async function remoteProcs(hostId) {
   return { host: hostId, procs: sysinfo.capProcs(all), total: all.length, sampled: false };
 }
 
-// Signal a process — the ONE user-facing kill path for every machine. sig is
-// enum-whitelisted and pid integer-validated BEFORE any shell string is built.
-const PROC_SIGS = new Set(['TERM', 'KILL', 'INT', 'HUP', 'STOP', 'CONT']);
+// The ONE user-facing kill path for every machine — `hostId` is a parameter.
+// The shell text it sends is built by signalVerdictScript (module level, so
+// the suite can drive the shipped bytes).
 async function signalProc(hostId, pidRaw, sigRaw) {
   const sig = String(sigRaw || 'TERM').toUpperCase().replace(/^SIG/, '');
   const pid = parseInt(pidRaw, 10);
@@ -105,16 +155,7 @@ async function signalProc(hostId, pidRaw, sigRaw) {
   }
   const h = hosts.get(hostId);
   if (!h) throw new Error('unknown machine');
-  // one verdict script for both remote rungs: signal → settle → report.
-  // EXISTENCE is probed with `ps -p`, NEVER `kill -0` (review-confirmed:
-  // kill(2) with sig 0 performs the SAME permission check as a real signal,
-  // so on a failed kill it fails EPERM exactly like the kill did and every
-  // permission-denied kill would read "no such process" — a false explanation
-  // while the process keeps running; verified against live pid 1).
-  const script = `if kill -${sig} ${pid} 2>/dev/null; then `
-    + (sig === 'STOP' || sig === 'CONT' ? 'echo OK; '
-      : `sleep 0.5; if ps -p ${pid} >/dev/null 2>&1; then echo OK-ALIVE; else echo OK-GONE; fi; `)
-    + `else if ps -p ${pid} >/dev/null 2>&1; then echo EPERM; else echo ESRCH; fi; fi`;
+  const script = signalVerdictScript(pid, sig);
   let out = '';
   // rung choice happens at CONNECT time only: once a device link exists, a
   // runCmd failure must NOT fall through to ssh — the signal may already have
@@ -135,4 +176,4 @@ async function signalProc(hostId, pidRaw, sigRaw) {
 
   return { sysinfo, remoteSysinfo, remoteProcs, signalProc };
 }
-module.exports = { create };
+module.exports = { create, signalVerdictScript, PROC_SIGS };

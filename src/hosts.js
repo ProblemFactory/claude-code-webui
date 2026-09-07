@@ -22,6 +22,10 @@ const { claimJsonls, cwdToProjectDir } = require('./session-store');
 const { nameFromUserLine, interpretDiscoveryLines, synthesizeDiscoveryLines, isZstPath, isZstBuffer, ZSTD_MAGIC } = require('./discovery-facts');
 const { classifyPrivateKey } = require('./ssh-key-format');
 const { fdScanShellFns, cliIdentityShellFns } = require('./writer-sweep');
+// the existence probe in front of every kill, from its ONE home (B-3185 r6):
+// sysinfo-wiring's signalProc embeds the same text, so there is no per-site
+// reason left to get wrong.
+const { pidAliveShellFn } = require('./cli-identity');
 
 const SSH_BASE_OPTS = [
   '-o', 'BatchMode=yes',
@@ -2204,21 +2208,21 @@ ${codexOpenRolloutsShell()}
  *  and the CLI kept running and kept writing. A capability the probe does not
  *  have must never read as a FACT about the pid.
  *
- *  EXISTENCE IS NOW A LADDER, AND EVERY RUNG IS POSITIVE EVIDENCE (`vs_alive`).
- *  `kill -0` is POSIX and a SHELL BUILTIN everywhere (dash/bash/busybox/zsh/
- *  ksh — no fork, no `ps` dialect), and when it SUCCEEDS the pid exists, full
- *  stop. r4's objection was only ever about its FAILURE: kill(2) with signal 0
- *  runs the same permission check as a real signal, so EPERM (another user's
- *  live process) and ESRCH (gone) are one exit status — which is why a failure
- *  is not the verdict here, it is the question handed to the next rung:
- *  `[ -d /proc/N ]` (Linux, incl. every busybox host, world-visible for
- *  processes we may not signal) and then `ps -p N` (the no-/proc rung: BSD and
- *  macOS `ps` do have `-p`). Only when all three say nothing do we say
- *  `VS_GONE`. The sibling probe in src/server/sysinfo-wiring.js keeps its
- *  `ps -p` because there it sits on the FAILURE branch of a `kill` that was
- *  already attempted — it explains an outcome, it can never manufacture one.
- *  (Honest edge: under `hidepid=2` a foreign process is invisible to both
- *  /proc rungs and to `ps`, and reads as gone — exactly as it did before.)
+ *  EXISTENCE IS NOW A LADDER, AND EVERY RUNG IS POSITIVE EVIDENCE (`vs_alive`,
+ *  whose text and full rationale live in src/cli-identity.js — ONE definition
+ *  since r6, embedded here and by sysinfo-wiring's `signalProc`). `kill -0`
+ *  succeeding is proof; its FAILURE is ambiguous (EPERM and ESRCH share an
+ *  exit status) so it is handed to `[ -d /proc/N ]` and then `ps -p N` rather
+ *  than believed. Only when all three say nothing do we say `VS_GONE`.
+ *
+ *  r5 ENUMERATED THE SIBLING AND LET IT KEEP ITS OWN `ps -p` ON A REASON — and
+ *  the reason was wrong (r6, found by review): `signalProc`'s script has TWO
+ *  `ps -p` calls, and "it sits on the FAILURE branch of a kill that already
+ *  happened" was only true of the second. The first is the post-signal
+ *  aliveness check on the SUCCESS branch, where a busybox-blind probe
+ *  manufactures a false `{ok:true, gone:true}` (measured). Both sites now
+ *  embed this ladder, and the suite's standing sweep refuses any `ps -p` used
+ *  as an existence test on a kill/signal path.
  *
  *  …AND "I COULD NOT LOOK" IS NOT "IT IS NOT AN AGENT" (r5). Once the pid is
  *  known to exist, `vs_is_cli` returning false has two very different causes:
@@ -2239,16 +2243,7 @@ function killPidShell(pid) {
   // one place that builds the text — never "the caller validated it".
   if (!Number.isInteger(p) || p <= 1) throw new Error('bad pid');
   return `${cliIdentityShellFns()}
-vs_alive() {
-  # POSITIVE EVIDENCE ONLY, and never from one dialect of ps. \`kill -0\` is a
-  # builtin in every shell that can interpret this text; its SUCCESS is proof.
-  # Its failure is ambiguous (EPERM vs ESRCH share an exit status), so it is
-  # handed on rather than believed: \`[ -d /proc/N ]\` covers Linux (busybox
-  # included) and \`ps -p N\` the no-/proc rung (BSD/macOS ps has -p).
-  kill -0 "$1" 2>/dev/null && return 0
-  [ -d "/proc/$1" ] && return 0
-  ps -p "$1" >/dev/null 2>&1
-}
+${pidAliveShellFn()}
 vs_known() {
   # Did we manage to READ anything about this pid? The same two sources
   # vs_is_cli uses, in the same order, through the same capture — so

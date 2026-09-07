@@ -88,11 +88,26 @@ ok(sysinfo.capProcs(live, 100).some((p) => p.pid === 8), 'capProcs ranks by live
 ok(sysinfo.capProcs(many, -5).length > 0 && sysinfo.capProcs(many, 3.7).length >= 20, 'capProcs clamps a hostile max');
 const siSrc = fs.readFileSync(path.join(REPO, 'src/sysinfo.js'), 'utf-8');
 ok(siSrc.indexOf('sampleProcCpu(all)') !== -1 && siSrc.indexOf('sampleProcCpu(all)') < siSrc.indexOf('capProcs(all, max)'), 'listProcs samples the WHOLE table before capping (cap-by-flatlined-pcpu bug)');
-// the signal verdict must probe existence with ps -p, NEVER kill -0: the
-// kill builtin performs the SAME permission check as the signal, so every
-// remote permission-denied kill read as "no such process" (review-confirmed)
-ok(!/else if kill -0/.test(srv), 'signal verdict never uses kill -0 for the EPERM/ESRCH split');
-ok(/ps -p \$\{pid\}/.test(srv), 'signal verdict probes existence via ps -p');
+// THE SIGNAL VERDICT'S EXISTENCE PROBE (B-3185 r6). It used to be spelled
+// `ps -p ${pid}` at BOTH sites, pinned here as "never kill -0" — and that pin
+// was half a truth: a BARE `kill -0` really would report every
+// permission-denied kill as "no such process" (kill(2) with sig 0 runs the
+// same permission check), but `ps -p` has no `-p` under busybox at all, so on
+// such a host the post-signal aliveness check answered OK-GONE for a LIVE
+// process and signalProc returned `{ok:true, gone:true}` — a manufactured
+// success, not a mislabel. Both sites now call the SHARED `vs_alive` ladder
+// (src/cli-identity.js), in which a `kill -0` FAILURE is handed to
+// `[ -d /proc/N ]` and then `ps -p N` rather than believed. The functional
+// legs (busybox, live pids, negative controls) are test-writer-sweep §17;
+// these are the structural pins that keep this file's copy honest.
+const { signalVerdictScript } = require(REPO + '/src/server/sysinfo-wiring.js');
+const sigText = signalVerdictScript(4242, 'TERM');
+ok(!/else if kill -0 \d/.test(sigText) && !/if kill -0 \d/.test(sigText),
+  'signal verdict never uses a BARE kill -0 as the EPERM/ESRCH split (its failure is ambiguous)');
+ok(!/ps -p \d+/.test(sigText) && !/ps -p \$\{pid\}/.test(srv),
+  'signal verdict carries no bare `ps -p <pid>` existence test (busybox `ps` has no -p)');
+ok(sigText.includes(require(REPO + '/src/cli-identity.js').pidAliveShellFn()),
+  'signal verdict embeds the SHARED vs_alive ladder verbatim — one probe, one author, no per-site reason to get wrong');
 
 try { await dm.stop?.(); } catch { }
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);

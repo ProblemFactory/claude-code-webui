@@ -285,4 +285,62 @@ vs_is_cli() {
 }`;
 }
 
-module.exports = { isCliProcess, cliIdentityShellFns, procArgv, procExe, INTERPRETERS, MAX_INTERP_FLAGS };
+/** `vs_alive <pid>` — DOES THIS PID EXIST, in ONE spelling for every shell that
+ *  kills or signals (B-3185 r6). Emitted beside `cliIdentityShellFns()` because
+ *  it answers the question that comes BEFORE identity and it runs on the same
+ *  three transports, under the same floor: `sh -c` on the device rung, and the
+ *  REMOTE USER'S LOGIN SHELL on both ssh rungs (the (q) lesson) — so busybox
+ *  `ash` is a real floor, not a hypothetical.
+ *
+ *  EVERY RUNG IS POSITIVE EVIDENCE. `kill -0` is POSIX and a BUILTIN in every
+ *  shell that can interpret this text (dash/bash/busybox/zsh/ksh — no fork, no
+ *  `ps` dialect), and when it SUCCEEDS the pid exists, full stop. Its FAILURE
+ *  is the ambiguous half: kill(2) with signal 0 runs the same permission check
+ *  as a real signal, so EPERM (another user's LIVE process) and ESRCH (gone)
+ *  share one exit status — which is why a failure is not the verdict here, it
+ *  is the question handed to the next rung: `[ -d /proc/N ]` (Linux, incl.
+ *  every busybox host, world-visible for processes we may not signal) and then
+ *  `ps -p N` (the no-/proc rung: BSD and macOS `ps` do have `-p`). Only when
+ *  all three say nothing does the caller get to say "gone".
+ *  (Honest edge: under `hidepid=2` a foreign process is invisible to both
+ *  /proc rungs and to `ps`, and reads as gone — as it always did.)
+ *
+ *  IT LIVES HERE BECAUSE THE PREVIOUS ROUND PROVED A PER-SITE REASON IS NOT A
+ *  GUARD (r6). r5 fixed `hosts.js killPidShell` and ENUMERATED the sibling —
+ *  `src/server/sysinfo-wiring.js signalProc` — then let it keep its own
+ *  `ps -p` on a hand-written reason: "there it sits on the FAILURE branch of a
+ *  kill that was already attempted, so it can only mislabel an outcome, never
+ *  manufacture one". The reason described a script that has TWO `ps -p` calls
+ *  and was only true of the second. The FIRST is the post-signal aliveness
+ *  check on the SUCCESS branch, and there a busybox-blind probe manufactures
+ *  exactly the outcome r5 was hunting: measured on this box (busybox 1.37.0,
+ *  a live process with `trap "" TERM`), the pre-r6 script answers `OK-GONE`
+ *  ⇒ `signalProc` returns `{ok:true, gone:true}` — the table flips the row to
+ *  gone, the user believes the process died, and it is still running. (The
+ *  failure branch's mislabel is real too, and also measured: a pid we may not
+ *  signal answered `ESRCH` = "no such process (already gone)" instead of
+ *  EPERM.) So the probe is not reasoned about per site any more — there is ONE
+ *  definition and both scripts embed it, and the suite's STANDING SWEEP fails
+ *  any `ps -p` used as an existence test anywhere on a kill/signal path.
+ *  **A twin kept alive by a comment is a twin; the comment is only as good as
+ *  its author's count of the call sites.**
+ *
+ *  NO JS TWIN ON PURPOSE. The local branches of the same routes call
+ *  `process.kill(pid, 0)` and read `e.code` — node distinguishes EPERM from
+ *  ESRCH directly, which is the very thing a shell cannot do and the only
+ *  reason this ladder exists. A JS `vs_alive` would be a strictly worse copy
+ *  of an errno the local path already has. */
+function pidAliveShellFn() {
+  return `vs_alive() {
+  # POSITIVE EVIDENCE ONLY, and never from one dialect of ps. \`kill -0\` is a
+  # builtin in every shell that can interpret this text; its SUCCESS is proof.
+  # Its failure is ambiguous (EPERM vs ESRCH share an exit status), so it is
+  # handed on rather than believed: \`[ -d /proc/N ]\` covers Linux (busybox
+  # included) and \`ps -p N\` the no-/proc rung (BSD/macOS ps has -p).
+  kill -0 "$1" 2>/dev/null && return 0
+  [ -d "/proc/$1" ] && return 0
+  ps -p "$1" >/dev/null 2>&1
+}`;
+}
+
+module.exports = { isCliProcess, cliIdentityShellFns, pidAliveShellFn, procArgv, procExe, INTERPRETERS, MAX_INTERP_FLAGS };
