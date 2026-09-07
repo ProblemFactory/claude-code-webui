@@ -227,7 +227,13 @@ class ChatRenderers {
    * @param {HTMLElement} opts.messageList - Message list DOM element
    * @param {Function} [opts.onPermissionResolve] - Called when a permission is resolved (allow/deny)
    */
-  constructor({ ws, sessionId, app, backend = 'claude', compact, messageList, onPermissionResolve, onFork, getSessionCtx, onSendText, onQueueChipClick, getQueueCaps }) {
+  constructor({ ws, sessionId, app, backend = 'claude', compact, messageList, onPermissionResolve, onFork, getSessionCtx, onSendText, onQueueChipClick, getQueueCaps, isCollabLive }) {
+    // Is THIS collab card the one the next row would coalesce into, on a turn
+    // that is still streaming? Only the VIEW knows (it owns the streaming flag
+    // and the message list), and the answer decides live age vs frozen span.
+    // Absent (view-only, sub-agent viewers) ⇒ always frozen, which is the
+    // truth for a stopped transcript.
+    this._isCollabLive = isCollabLive || null;
     this._onSendText = onSendText || null; // in-chat action buttons send through the live input (null = view-only)
     this._onQueueChipClick = onQueueChipClick || null; // clicking a 'queued' chip steers that message (live windows only)
     this._getQueueCaps = getQueueCaps || null; // the VIEW's queue capability (harness row ∧ running wrapper); absent = view-only ⇒ inert chip
@@ -590,7 +596,14 @@ class ChatRenderers {
         + `<div class="chat-text chat-agent-report-body">${this.renderMarkdown(stripAnsi(body))}</div>`;
       return el;
     }
-    el.innerHTML = `<div class="chat-collab-line">${collabRowsHtml(collab, { esc: escHtml, t, icons: COLLAB_ICONS })}</div>`;
+    // LIVE PROGRESS (2026-09-07): a coalesced card on a streaming turn renders
+    // the head with a relative age ("last 4s ago"); the view's ONE ticker
+    // rewrites just that `.chat-collab-head` element every second. Anything
+    // else — a finished turn, a card the traffic has moved past, a read-only
+    // reload — renders the FROZEN form (the absolute span), which is also what
+    // the stored plain-text output says.
+    const live = !!this._isCollabLive?.(msg);
+    el.innerHTML = `<div class="chat-collab-line">${collabRowsHtml(collab, { esc: escHtml, t, icons: COLLAB_ICONS, live, now: Date.now() })}</div>`;
     return el;
   }
 

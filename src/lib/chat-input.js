@@ -402,6 +402,16 @@ export class ChatInput {
 
   showTyping(label = t('thinking...'), kind = null) {
     if (!this._streamStatus) return;
+    // UNCHANGED LABEL = NO-OP (2026-09-07, the live sub-agent counter): the
+    // view re-asserts this line every second while collab traffic ticks, and
+    // a blind innerHTML rewrite would rebuild the Stop button each time —
+    // throwing away the two-step compaction ARM mid-confirmation and churning
+    // the DOM for nothing. The guard requires the button to still be there, so
+    // a repaint after _showPending's button-less line still renders.
+    if (this._isStreaming && this._typingLabel === label && this._typingKind === kind
+        && this._streamStatus.querySelector('.chat-interrupt-btn')) { this._pendingLine = false; return; }
+    this._typingLabel = label;
+    this._typingKind = kind;
     this._pendingLine = false; // a real turn owns the line now (see _clearPending)
     // Remembered so the button can be re-rendered in place when the pending
     // Stop state ends (the label keeps changing under it while the turn runs).
@@ -455,6 +465,8 @@ export class ChatInput {
     this._endStopPending();
     this._streamStatus.classList.add('hidden');
     this._streamStatus.innerHTML = '';
+    this._typingLabel = null;
+    this._typingKind = null;
   }
 
   // ── Stop, once (round-3 review) ─────────────────────────────────────────
@@ -507,6 +519,9 @@ export class ChatInput {
     this._stopPending = false;
     if (this._isStreaming) this.showTyping(this._typingLabel ?? t('thinking...'), this._typingKind ?? null);
   }
+
+  /** The label currently on the stream-status line (null = not streaming). */
+  get typingLabel() { return this._isStreaming ? this._typingLabel : null; }
 
   updateTodos(todos) {
     this._todos = todos;
@@ -607,6 +622,7 @@ export class ChatInput {
   // WITHOUT the interrupt button showTyping renders — there is no turn to stop.
   _showPending(label) {
     if (!this._streamStatus) return;
+    this._typingLabel = null; // this line has no Stop button — the showTyping memo must not match it
     this._pendingLine = true;
     this._streamStatus.innerHTML = `<span class="chat-spinner"></span> ${escHtml(label)}`;
     this._streamStatus.classList.remove('hidden');

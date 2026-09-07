@@ -147,12 +147,19 @@ export function runSummaryParts(byKind, mcpServers, t) {
 }
 
 /**
- * Full header label: kind parts · touched files · errors · running.
- * @param {{byKind:object, mcpServers?:Iterable<string>, files?:string[], nErr?:number, running?:boolean}} run
+ * Full header label: kind parts · sub-agent traffic · touched files · errors · running.
+ * `collabPart` is a PRE-COMPOSED segment (src/collab-row.js `collabRunPart` —
+ * "3 sub-agents · 47 messages · last 4s ago"): its WORDS belong to the collab
+ * module, its POSITION belongs to this one composer, so the header, the
+ * floating run bar and the run footer can never read different orders. This
+ * module stays import-free by taking the string, not the module.
+ * @param {{byKind:object, mcpServers?:Iterable<string>, files?:string[], nErr?:number, running?:boolean, collabPart?:string}} run
  *   files = display names in render order (writes already prefixed '✎ '), deduped by the caller
  */
-export function runSummaryLabel({ byKind, mcpServers, files = [], nErr = 0, running = false }, t) {
-  let label = runSummaryParts(byKind, mcpServers, t).join(' · ');
+export function runSummaryLabel({ byKind, mcpServers, files = [], nErr = 0, running = false, collabPart = '' }, t) {
+  const kindParts = runSummaryParts(byKind, mcpServers, t);
+  if (collabPart) kindParts.push(collabPart);
+  let label = kindParts.join(' · ');
   // touched files (user ask: don't lose the paths), capped at 4 + "+N"
   if (files.length) {
     const shown = files.slice(0, 4);

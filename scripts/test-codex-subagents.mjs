@@ -41,8 +41,8 @@ console.log('— ① the PURE row builder (labels, coalescing, escaping)');
   ok(CR.collabRowLabel(SPAWN) === 'spawn water_research' && CR.collabRowLabel(WAIT) === 'waiting for sub-agent replies · cell 3 · ≤1s' && CR.collabRowLabel(ACT) === 'water_research started', 'spawn / wait / lifecycle labels', [CR.collabRowLabel(SPAWN), CR.collabRowLabel(WAIT), CR.collabRowLabel(ACT)].join(' | '));
   ok(CR.agentName('/root/water_research') === 'water_research' && CR.agentName('') === '' && CR.agentName('th-1') === 'th-1', 'agentName is the last path segment, thread ids pass through');
   const many = { rows: [IN, { ...IN, agentPath: '/root/energy_research', agentName: 'energy_research', msgType: 'MESSAGE' }, { ...IN, agentPath: '/root/interior_research', agentName: 'interior_research', msgType: 'MESSAGE' }] };
-  ok(CR.collabSummaryText(many) === '3 messages · water_research (FINAL_ANSWER), energy_research (MESSAGE), interior_research (MESSAGE)', 'coalesced summary counts and names (the {n} param is substituted even without a client t())', CR.collabSummaryText(many));
-  ok(/^4 sub-agent events · /.test(CR.collabSummaryText({ rows: [IN, OUT, SPAWN, ACT] })), 'a MIXED coalesced set reads as sub-agent events', CR.collabSummaryText({ rows: [IN, OUT, SPAWN, ACT] }));
+  ok(CR.collabSummaryText(many) === 'Sub-agent traffic · 3 messages · 3 agents · water_research (FINAL_ANSWER), energy_research (MESSAGE), interior_research (MESSAGE)', 'coalesced summary counts and names (the {n} param is substituted even without a client t())', CR.collabSummaryText(many));
+  ok(/^Sub-agent traffic · 4 sub-agent events · 2 agents · /.test(CR.collabSummaryText({ rows: [IN, OUT, SPAWN, ACT] })), 'a MIXED coalesced set reads as sub-agent events (never "messages") and counts DISTINCT agents', CR.collabSummaryText({ rows: [IN, OUT, SPAWN, ACT] }));
   ok(CR.collabReportHeadText({ rows: [IN] }) === 'water_research · FINAL_ANSWER', 'the report attribution header is "<agent> · <TYPE>"', CR.collabReportHeadText({ rows: [IN] }));
   const title = CR.collabRowTitle(OUT);
   ok(/Sender: \/root\/interior_research/.test(title) && /Message type: message/.test(title) && /payload encrypted upstream/.test(title), 'the hover title carries the envelope + the honest encryption note', title);
@@ -83,7 +83,7 @@ console.log('— ② renderer + chat-view wiring');
 {
   const cr = read('src/lib/chat-renderers.js');
   ok(/renderToolMsg\(msg\) \{\s*\n\s*if \(msg\.collab\) return this\._renderCollabMsg\(msg\);/.test(cr), 'renderToolMsg dispatches a collab message BEFORE the tool-card path');
-  ok(/collabRowsHtml\(collab, \{ esc: escHtml, t, icons: COLLAB_ICONS \}\)/.test(cr), 'the renderer injects the REAL escHtml + t + the SVG icon set');
+  ok(/collabRowsHtml\(collab, \{ esc: escHtml, t, icons: COLLAB_ICONS, live, now: Date\.now\(\) \}\)/.test(cr), 'the renderer injects the REAL escHtml + t + the SVG icon set (+ the view\'s liveness answer)');
   ok(/chat-agent-report-head[\s\S]{0,400}collabReportHeadText|escHtml\(collab\.agentName/.test(cr) && /chat-agent-report-body[^]{0,80}this\.renderMarkdown\(stripAnsi\(body\)\)/.test(cr), 'a sub-agent report renders an attributed head + its body as MARKDOWN (same sanitizer as assistant text)');
   ok(/renderMarkdown\(html\) \{[\s\S]{0,400}DOMPurify\.sanitize/.test(cr) || /DOMPurify\.sanitize\(marked\.parse/.test(cr), '…and renderMarkdown is the DOMPurify path (the XSS law)');
   ok(/COLLAB_ICONS = \{[\s\S]{0,220}lock: UI_ICONS\.lock,/.test(cr) && /agentIn:/.test(read('src/lib/icons.js')), 'the direction icons come from the central SVG library');
@@ -102,7 +102,8 @@ console.log('— ② renderer + chat-view wiring');
     && RS.runSummaryParts({ ...RS.countKinds(['agent', 'agent']), subAgentIn: 5 }, new Set(), tt).join(' · ') === '5 sub-agent messages · 2 agent ops'
     && RS.runSummaryParts(RS.countKinds(['agent']), new Set(), tt).join(' · ') === '1 agent ops',
   "the fold summary counts codex INBOUND messages as '{n} sub-agent messages' (before 'agent ops'; absent when there are none)");
-  ok(/chat-run-agents[\s\S]{0,200}\{n\} sub-agents[\s\S]{0,400}chat-collab-name/.test(cv), '…and lists the run\'s sub-agents as click-through chips');
+  ok(/chat-run-agents[\s\S]{0,200}chat-collab-name/.test(cv) && /collabPart: collabRunPart\(collabStats, \{ now, live, t \}\)/.test(cv),
+    '…and lists the run\'s sub-agents as click-through chips, while the COUNT ("{n} sub-agents · {n} messages") rides the label so the floating bar and the footer carry it too');
   ok(/for \(const nameEl of header\.querySelectorAll\('\.chat-collab-name'\)\) \{[\s\S]{0,220}ev\.stopPropagation\(\);/.test(cv), 'a chip click does NOT toggle the run (stopPropagation on the header\'s own handler)');
   const css = read('public/chat.css');
   ok(/\.chat-msg\.chat-agent-report \{[^}]*border-left: 2px solid var\(--magenta/.test(css) && /\.chat-collab-name \{/.test(css) && /\.chat-collab-line \{/.test(css), 'the report card has the tinted left strip and the rows have their compact styles (theme vars only)');

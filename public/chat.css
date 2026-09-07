@@ -282,6 +282,11 @@
 .chat-collab-name { color: var(--text); text-decoration: underline dotted; cursor: pointer; }
 .chat-collab-name:hover { text-decoration: underline; color: var(--accent); }
 .chat-collab-names { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+/* The coalesced card's live head ("Sub-agent traffic · 47 messages · 3 agents ·
+   last 4s ago", 2026-09-07). Slightly brighter than the row text — it is the
+   one line that answers "is this turn still moving"; the ChatView's single
+   ticker rewrites ONLY this element's text (theme vars only, §17). */
+.chat-collab-head { color: var(--text); font-variant-numeric: tabular-nums; }
 .chat-msg.chat-agent-report { display: block; border: 1px solid var(--border); border-left: 2px solid var(--magenta, var(--accent)); background: color-mix(in srgb, var(--magenta, var(--accent)) 7%, transparent); border-radius: var(--radius-sm); padding: 8px 12px; margin: 4px 0; }
 .chat-agent-report-head { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--magenta, var(--accent)); font-weight: 600; margin-bottom: 4px; }
 .chat-agent-report-head .chat-collab-name { color: inherit; }

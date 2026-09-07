@@ -21,6 +21,17 @@
  * NEVER put an `encrypted_content` blob into a row: the payload upstream
  * withheld is not ours to show, and a 3KB base64 string in a one-line row is
  * exactly how the "no encrypted blob in any rendered string" invariant fails.
+ *
+ * LIVE PROGRESS READOUT (2026-09-07, the owner's "这种互聊如果连续发生是不是应该
+ * 界面里展示下连续数量, 这样我好知道对话没卡住"): dozens of encrypted one-line
+ * rows over minutes, with no assistant text between them, are indistinguishable
+ * from a wedged turn. Every number the UI shows is DERIVED from the rows the
+ * normalizer already stamped — `collabTrafficStats` counts, `collabHeadText`
+ * composes, `collabRunPart` is the run-summary segment and
+ * `subAgentStreamLabel` the spinner line. Nothing here keeps state, nothing
+ * here is stored server-side, and the only difference between the LIVE and the
+ * FROZEN form is the last segment: a ticking relative age while the turn runs,
+ * the absolute span of the traffic once it stops.
  */
 
 // Default translator: the ENGLISH key with {param} substitution — the server
@@ -63,11 +74,117 @@ function collabRowLabel(row, t = T) {
   return `${p.pre}${p.name}${p.post}`;
 }
 
-/** Coalesced summary text: "3 messages · water_research (FINAL_ANSWER), …". */
-function collabSummaryText(collab, t = T) {
+// ── LIVE PROGRESS (2026-09-07) ────────────────────────────────────────────
+// All of it derived from the rows; none of it stored.
+
+/**
+ * Traffic facts of a coalesced card / a run's rows: how many events, how many
+ * distinct agents, and the first/last RECORD timestamps (`row.ts`, stamped by
+ * the normalizer from the rollout/app-server record when it has one).
+ * Rows without a usable ts simply do not contribute to the span — a missing
+ * clock must never invent one.
+ */
+function collabTrafficStats(collab) {
   const rows = rowsOf(collab);
-  if (!rows.length) return '';
-  if (rows.length === 1) return collabRowLabel(rows[0], t);
+  let firstTs = null, lastTs = null;
+  const agents = new Set();
+  let allSameDir = rows.length > 0;
+  for (const r of rows) {
+    const p = r.agentPath || r.target || '';
+    if (p) agents.add(p);
+    const ts = Number(r.ts);
+    if (Number.isFinite(ts) && ts > 0) {
+      if (firstTs == null || ts < firstTs) firstTs = ts;
+      if (lastTs == null || ts > lastTs) lastTs = ts;
+    }
+    if (r.dir !== rows[0].dir) allSameDir = false;
+  }
+  return {
+    count: rows.length,
+    agents: agents.size,
+    firstTs,
+    lastTs,
+    // "messages" only when every row really is mail; a mixed set (spawn, wait,
+    // lifecycle) says "sub-agent events" — the 2.369.x honesty rule
+    messagesOnly: allSameDir && (rows[0]?.dir === 'in' || rows[0]?.dir === 'out'),
+  };
+}
+
+/**
+ * Relative age of the last event: 1s granularity under a minute, then whole
+ * minutes. The owner's question is "is it still moving", not "how many
+ * milliseconds" — a seconds counter that ticks is the whole signal.
+ */
+function collabAgeText(ms, t = T) {
+  const secs = Math.max(0, Math.floor((Number(ms) || 0) / 1000));
+  if (secs < 60) return t('{n}s', { n: secs });
+  return t('{n}m', { n: Math.floor(secs / 60) });
+}
+
+/** Absolute span of a finished burst: "4 min 12 s" (or "12 s" under a minute). */
+function collabSpanText(ms, t = T) {
+  const secs = Math.max(0, Math.floor((Number(ms) || 0) / 1000));
+  const m = Math.floor(secs / 60), s = secs % 60;
+  return m ? t('{m} min {s} s', { m, s }) : t('{s} s', { s });
+}
+
+/** ["47 messages", "3 agents"] — singular forms are real keys, not "1 messages". */
+function collabCountParts(stats, t = T) {
+  const parts = [];
+  const n = stats?.count || 0;
+  if (stats?.messagesOnly) parts.push(n === 1 ? t('{n} message', { n }) : t('{n} messages', { n }));
+  else parts.push(t('{n} sub-agent events', { n }));
+  const a = stats?.agents || 0;
+  if (a) parts.push(a === 1 ? t('{n} agent', { n: a }) : t('{n} agents', { n: a }));
+  return parts;
+}
+
+/**
+ * The card's head line.
+ *   live   → "Sub-agent traffic · 47 messages · 3 agents · last 4s ago"
+ *   frozen → "Sub-agent traffic · 47 messages · 3 agents · over 4 min 12 s"
+ * The frozen span needs two DIFFERENT timestamps (one event has no span), and
+ * the live age needs a last timestamp — either absent, the segment is dropped
+ * rather than faked.
+ */
+function collabHeadText(stats, { now = Date.now(), live = false, t = T } = {}) {
+  const parts = [t('Sub-agent traffic'), ...collabCountParts(stats, t)];
+  if (live) {
+    if (stats?.lastTs) parts.push(t('last {age} ago', { age: collabAgeText(now - stats.lastTs, t) }));
+  } else if (stats?.firstTs != null && stats?.lastTs != null && stats.lastTs > stats.firstTs) {
+    parts.push(t('over {span}', { span: collabSpanText(stats.lastTs - stats.firstTs, t) }));
+  }
+  return parts.join(' · ');
+}
+
+/**
+ * The run-summary segment ("3 sub-agents · 47 messages" + the live age), placed
+ * in the label by the ONE composer in chat-run-summary.js so the floating run
+ * bar and the run footer read exactly what the header reads.
+ */
+function collabRunPart(stats, { now = Date.now(), live = false, t = T } = {}) {
+  if (!stats || !stats.count) return '';
+  const parts = [];
+  const a = stats.agents || 0;
+  if (a) parts.push(a === 1 ? t('{n} sub-agent', { n: a }) : t('{n} sub-agents', { n: a }));
+  parts.push(...collabCountParts(stats, t).slice(0, 1));
+  if (live && stats.lastTs) parts.push(t('last {age} ago', { age: collabAgeText(now - stats.lastTs, t) }));
+  return parts.join(' · ');
+}
+
+/**
+ * The streaming status line while the newest typed record is collab traffic:
+ * "Sub-agents working — 47 messages, last 4s ago". It says the turn is ALIVE,
+ * which the generic "thinking…" cannot.
+ */
+function subAgentStreamLabel(stats, { now = Date.now(), t = T } = {}) {
+  const msgs = collabCountParts(stats, t)[0];
+  if (!stats?.lastTs) return t('Sub-agents working — {msgs}', { msgs });
+  return t('Sub-agents working — {msgs}, last {age} ago', { msgs, age: collabAgeText(now - stats.lastTs, t) });
+}
+
+/** The distinct "name (TYPE)" labels of a coalesced card, in row order. */
+function collabNamedLabels(rows) {
   const named = [];
   for (const r of rows) {
     const name = r.agentName || agentName(r.agentPath || r.target);
@@ -76,11 +193,23 @@ function collabSummaryText(collab, t = T) {
     const label = type ? `${name} (${type})` : name;
     if (!named.includes(label)) named.push(label);
   }
+  return named;
+}
+
+/**
+ * Coalesced summary text — the PLAIN-TEXT twin of what the card renders
+ * (it lands in the message's tool_result output, so search previews, fold
+ * summaries and the minimap read the same words as the screen). Always the
+ * FROZEN form: a stored string cannot tick, and the only live-only segment is
+ * the relative age.
+ */
+function collabSummaryText(collab, t = T) {
+  const rows = rowsOf(collab);
+  if (!rows.length) return '';
+  if (rows.length === 1) return collabRowLabel(rows[0], t);
+  const named = collabNamedLabels(rows);
   const shown = named.slice(0, 3).join(', ') + (named.length > 3 ? '…' : '');
-  const allSameDir = rows.every((r) => r.dir === rows[0].dir);
-  const head = (allSameDir && (rows[0].dir === 'in' || rows[0].dir === 'out'))
-    ? t('{n} messages', { n: rows.length })
-    : t('{n} sub-agent events', { n: rows.length });
+  const head = collabHeadText(collabTrafficStats({ rows }), { live: false, t });
   return shown ? `${head} · ${shown}` : head;
 }
 
@@ -102,10 +231,21 @@ function collabReportHeadText(collab, t = T) {
   return r.msgType ? `${name} · ${r.msgType}` : name;
 }
 
-/** Hover title: the envelope as codex wrote it + the honest encryption note. */
+/**
+ * Hover title: the envelope as codex wrote it + the honest encryption note +
+ * WHEN, and where the clock came from. `tsKind 'record'` = the rollout /
+ * app-server record carried its own timestamp; anything else = the moment
+ * VibeSpace saw the line. Saying which is the point: a burst replayed from a
+ * rebuild would otherwise look like it happened just now.
+ */
 function collabRowTitle(row, t = T) {
   const r = row || {};
   const bits = [];
+  if (Number(r.ts) > 0) {
+    let clock = '';
+    try { clock = new Date(Number(r.ts)).toLocaleTimeString(); } catch { clock = String(r.ts); }
+    bits.push(`${t('Time')}: ${clock} (${r.tsKind === 'record' ? t('record timestamp') : t('arrival time')})`);
+  }
   if (r.agentPath) bits.push(`${t('Sender')}: ${r.agentPath}`);
   if (r.target && r.target !== r.agentPath) bits.push(`${t('Target')}: ${r.target}`);
   if (r.msgType) bits.push(`${t('Message type')}: ${r.msgType}`);
@@ -144,12 +284,23 @@ function collabRowHtml(row, { esc, t = T, icons = {} } = {}) {
   return `<span class="chat-collab-row" title="${esc(collabRowTitle(r, t))}"><span class="chat-collab-icon" aria-hidden="true">${icon}</span>${esc(p.pre)}${nameHtml}${esc(p.post)}${lock}</span>`;
 }
 
-/** The whole one-line message: a single row, or the coalesced summary + names. */
-function collabRowsHtml(collab, { esc, t = T, icons = {} } = {}) {
+/**
+ * The whole one-line message: a single row, or the coalesced HEAD + names.
+ *
+ * The head text lives in its OWN `.chat-collab-head` element so the view's one
+ * ticker can rewrite it (relative age) without re-rendering the card — the age
+ * is the only thing that changes between rows, and re-rendering a card the user
+ * may have expanded is exactly the churn the fold machinery hates.
+ */
+function collabRowsHtml(collab, { esc, t = T, icons = {}, live = false, now = Date.now() } = {}) {
   const rows = rowsOf(collab);
   if (!rows.length) return '';
+  // A LONE row keeps its full label (agent · TYPE): the head is a summary, and
+  // summarising one event would lose information for no gain. The owner's ask
+  // is about CONTINUOUS chatter, which is the coalesced shape by construction.
   if (rows.length === 1) return collabRowHtml(rows[0], { esc, t, icons });
-  const head = collabSummaryText({ rows }, t);
+  const stats = collabTrafficStats({ rows });
+  const head = collabHeadText(stats, { live, now, t });
   const icon = icons[rows[0].dir] || icons.activity || '';
   const names = [];
   const seen = new Set();
@@ -160,8 +311,11 @@ function collabRowsHtml(collab, { esc, t = T, icons = {} } = {}) {
     const h = collabNameHtml(r, { esc });
     if (h) names.push(h);
   }
-  const titles = rows.map((r) => collabRowTitle(r, t)).filter(Boolean).join('\n──\n');
-  return `<span class="chat-collab-row chat-collab-multi" title="${esc(titles)}"><span class="chat-collab-icon" aria-hidden="true">${icon}</span>${esc(head)}${names.length ? ` <span class="chat-collab-names">${names.join(', ')}</span>` : ''}</span>`;
+  const labels = collabNamedLabels(rows);
+  const titles = [labels.join(', '), ...rows.map((r) => collabRowTitle(r, t))].filter(Boolean).join('\n──\n');
+  return `<span class="chat-collab-row chat-collab-multi" title="${esc(titles)}"><span class="chat-collab-icon" aria-hidden="true">${icon}</span>`
+    + `<span class="chat-collab-head">${esc(head)}</span>`
+    + `${names.length ? ` <span class="chat-collab-names">${names.join(', ')}</span>` : ''}</span>`;
 }
 
 module.exports = {
@@ -170,9 +324,18 @@ module.exports = {
   collabRowParts,
   collabRowLabel,
   collabSummaryText,
+  collabNamedLabels,
   collabReportHeadText,
   collabRowTitle,
   collabNameHtml,
   collabRowHtml,
   collabRowsHtml,
+  // live progress readout (2026-09-07)
+  collabTrafficStats,
+  collabAgeText,
+  collabSpanText,
+  collabCountParts,
+  collabHeadText,
+  collabRunPart,
+  subAgentStreamLabel,
 };

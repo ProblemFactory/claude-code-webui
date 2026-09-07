@@ -127,6 +127,16 @@ function toTs(value) {
   return Number.isFinite(t) ? t : Date.now();
 }
 
+// The RECORD's own clock, or null when it has none / it is unparseable. toTs()
+// silently substitutes Date.now(), which is right for a message's `ts` but
+// wrong for a collab row's provenance: "when did this happen" and "when did we
+// see it" are different answers and the row title says which (2026-09-07).
+function recordTs(value) {
+  if (!value) return null;
+  const t = typeof value === 'number' ? value : Date.parse(value);
+  return Number.isFinite(t) ? t : null;
+}
+
 function asArray(value) {
   return Array.isArray(value) ? value : [];
 }
@@ -336,6 +346,7 @@ class CodexMessageManager {
     this.turnIndex = 0;
     this._currentTurnId = null;
     this._currentTs = Date.now();
+    this._currentTsKind = 'arrival'; // provenance of _currentTs (see recordTs)
     // Per-message meta state (see _threadUsageMeta): the codex thread id (the
     // ledger's `cx:<thread>:<cumulative>` request key needs it — see
     // _adoptThreadId for the precedence), the 0.153 token_usage_record awaiting
@@ -573,7 +584,9 @@ class CodexMessageManager {
   _processRecord(record, emit) {
     this._currentRk = CodexMessageManager.recordKey(record);
     if (!record || typeof record !== 'object') return;
-    this._currentTs = toTs(record.timestamp);
+    const exactTs = recordTs(record.timestamp);
+    this._currentTs = exactTs != null ? exactTs : Date.now();
+    this._currentTsKind = exactTs != null ? 'record' : 'arrival';
     this._currentLine = Number.isFinite(record.__line) ? record.__line : null; // source file line (gap loads only)
     this._recordThreadId = typeof record.__threadId === 'string' && record.__threadId ? record.__threadId : null; // FILE provenance (a merged read tags each record with the rollout it came from)
     if (record.type === 'turn_context') {
@@ -966,6 +979,7 @@ class CodexMessageManager {
    * but ships UNCHECKED — a user who wants the quiet view can tick it.
    */
   _createCollabReport(row, body, emit) {
+    this._stampRowTime(row);
     const toolCallId = `collab:${row.agentPath || 'agent'}:${this.messages.length}`;
     const msg = this._create({
       role: 'tool',
@@ -982,11 +996,26 @@ class CodexMessageManager {
   }
 
   /**
+   * Every collab row carries WHEN it happened and where that clock came from —
+   * the live progress readout (head "last 4s ago", the frozen span, the run
+   * label) is derived from these and nothing else. ONE stamper for all four row
+   * producers (agent_message in/out, spawn/send/wait calls, SubAgentActivity):
+   * a row built without a time would silently drop out of every span.
+   */
+  _stampRowTime(row) {
+    if (!row || Number(row.ts) > 0) return row;
+    row.ts = this._currentTs || Date.now();
+    row.tsKind = this._currentTsKind || 'arrival';
+    return row;
+  }
+
+  /**
    * A one-line collab row. CONSECUTIVE rows coalesce into ONE message (the
    * orchestration of a dozen sub-agents otherwise buries the conversation):
    * the last message is edited in place, live and on rebuild alike.
    */
   _pushCollabRow(row, emit) {
+    this._stampRowTime(row);
     const last = this.messages[this.messages.length - 1];
     if (last && last.collab && !last.collab.report && last.turnIndex === this.turnIndex) {
       last.collab.rows.push(row);

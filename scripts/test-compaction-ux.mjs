@@ -57,7 +57,12 @@ const read = (f) => fs.readFileSync(path.join(REPO, f), 'utf8');
   ok(ci.includes("kind === 'compacting'") && ci.includes('btn.dataset.armed') && ci.includes("t('Cancel compaction?')"), 'chat-input: Stop is a two-step confirm while compacting');
   ok(ci.includes('sendText(text)') && /\^\\\/compact\\b/.test(ci), 'chat-input: programmatic sendText + immediate compacting label on a /compact send');
   const cv = read('src/lib/chat-view.js');
-  ok(cv.includes('this._showTyping(msg.label, msg.kind || null)') && cv.includes('meta?.streamingKind || null') && cv.includes('msg.streamingKind || null'), 'chat-view passes the kind through live label, attach meta and chat-status paths');
+  // (2026-09-07) the three call sites now go through _onServerStreamLabel — the
+  // ONE place that remembers the server's label so the live sub-agent counter
+  // can yield back to it; the KIND must still ride every one of them.
+  ok(cv.includes('this._onServerStreamLabel(msg.label, msg.kind || null)') && cv.includes('meta?.streamingKind || null') && cv.includes('msg.streamingKind || null')
+    && /_onServerStreamLabel\(label, kind\) \{[\s\S]{0,420}this\._showTyping\(label, kind \|\| null\);/.test(cv),
+  'chat-view passes the kind through live label, attach meta and chat-status paths (all via the ONE _onServerStreamLabel)');
   ok(cv.includes("onSendText: (txt) => this._chatInput?.sendText(txt)"), 'chat-view hands renderers a null-safe onSendText');
   const cr = read('src/lib/chat-renderers.js');
   ok(cr.includes("msg.errorKind === 'prompt-too-long'") && cr.includes('appendContextFullCard') && cr.includes("this._onSendText('/compact')"), 'renderer: prompt-too-long → guidance card whose Compact-now sends /compact');

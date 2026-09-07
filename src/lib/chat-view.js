@@ -11,6 +11,7 @@ import { UI_ICONS } from './icons.js';
 import { t } from './i18n.js';
 import { agentMemoryPathRes, getBackendMeta } from './agent-meta.js';
 import { mcpParts, messageKind, foldToggleFor, countKinds, runSummaryLabel } from './chat-run-summary.js';
+import { collabTrafficStats, collabHeadText, collabRunPart, subAgentStreamLabel } from '../collab-row.js';
 
 // Agent-memory path patterns, PER BACKEND from BACKEND_META (agent-meta.js —
 // claude only today; codex has no memory feature; a new backend adds one
@@ -297,6 +298,9 @@ class ChatView {
       // there is exactly one definition of "can steer".
       onQueueChipClick: (msg) => this._steerQueuedMessage(msg),
       getQueueCaps: () => this._queueCaps(),
+      // live sub-agent traffic (2026-09-07): only the view knows whether a
+      // collab card is still the one the next row lands in on a live turn
+      isCollabLive: (msg) => this._liveCollabId() === msg?.id,
     });
 
     // Position indicator (shows when not at bottom, e.g. "120-170 / 3000")
@@ -397,6 +401,12 @@ class ChatView {
     const pressSignal = winInfo?._listenerCtl?.signal;
     window.addEventListener('pointerup', this._endPointerPress, { passive: true, signal: pressSignal });
     window.addEventListener('pointercancel', this._endPointerPress, { passive: true, signal: pressSignal });
+    // ONE collab-age ticker per ChatView (2026-09-07), owned by the window's
+    // AbortController like every other window-scoped listener: a per-message
+    // interval over a burst of fifty coalescing rows is fifty timers nobody
+    // ever cancels. dispose() clears it too (a view can die while its window
+    // lives on — tab swap, view replacement).
+    if (pressSignal) pressSignal.addEventListener('abort', () => this._stopCollabTick(), { once: true });
     this._messageList.addEventListener('keydown', (e) => {
       // NAVIGATION keys move the view — everything else is mere input.
       if (NAV_KEYS.includes(e.key)) this._notePositioning('key');
@@ -790,8 +800,7 @@ class ChatView {
         this._chatInput?.confirmDelivery?.();
         this._onOp(msg);
       } else if (msg.type === 'streaming-label' && msg.sessionId === sessionId) {
-        if (msg.label) this._showTyping(msg.label, msg.kind || null);
-        else this._hideTyping();
+        this._onServerStreamLabel(msg.label, msg.kind || null);
       } else if (msg.type === 'auto-resume' && msg.sessionId === sessionId) {
         this._statusBar?.setAutoResume?.(msg.status || null);
       } else if (msg.type === 'page-published' && msg.sessionId === sessionId) {
@@ -912,7 +921,7 @@ class ChatView {
           if (meta.goal != null) { this._onGoalUpdated(meta.goal, meta.goalElapsed); if (meta.goalStatus) this._statusBar.setGoalStatus(meta.goalStatus); }
           this._applyLiveMeta?.(meta);
         }
-        if (isStreaming) this._showTyping(meta?.streamingLabel || t('thinking...'), meta?.streamingKind || null);
+        if (isStreaming) this._onServerStreamLabel(meta?.streamingLabel || t('thinking...'), meta?.streamingKind || null);
         else this._hideTyping?.();
         return;
       }
@@ -982,7 +991,7 @@ class ChatView {
     if (this._total > 50 && this._canPaginate) this._initGapMinimap();
 
     this._applyLiveMeta(meta);
-    if (isStreaming) this._showTyping(meta?.streamingLabel || t('thinking...'), meta?.streamingKind || null);
+    if (isStreaming) this._onServerStreamLabel(meta?.streamingLabel || t('thinking...'), meta?.streamingKind || null);
     this._scrollToBottom();
     metric('history-render-ms', performance.now() - _t0);
     if (this._chatInput) this._loadPages(); // design chip count/list (live windows only)
@@ -1549,6 +1558,7 @@ class ChatView {
     if (!on) {
       this._lastStructuralAt = Date.now();
       this._scheduleRunBar();
+      this._tickCollab(); // the ages went stale while hidden — repaint on the first frame back
       // The settle carries the re-tail timer's slack (see reTail below): the
       // scroll handler must not be free to decide in the gap BETWEEN the
       // window expiring and the re-tail running.
@@ -2325,8 +2335,11 @@ class ChatView {
   _onOp(op) {
     if (op.op === 'create') {
       this._onCreateMessage(op.message);
+      this._noteRecordKind(op.message);
     } else if (op.op === 'edit') {
       this._onEditMessage(op.id, op.fields);
+      // AFTER the assign: a coalescing collab edit carries the grown rows
+      this._noteRecordKind(this._messages.find((m) => m.id === op.id));
     } else if (op.op === 'meta') {
       this._onMeta(op);
     }
@@ -2726,23 +2739,220 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
     this._chatInput.sendText(msg);
   }
 
+  // ── LIVE SUB-AGENT TRAFFIC (2026-09-07, owner: "这种互聊如果连续发生是不是应该
+  // 界面里展示下连续数量, 这样我好知道对话没卡住") ────────────────────────────
+  // Dozens of ENCRYPTED one-line collab rows over minutes, with no assistant
+  // text in between, are indistinguishable from a wedged turn. Three surfaces
+  // read the SAME derived numbers (src/collab-row.js, PURE): the coalesced
+  // card's head, the run header/footer/floating bar, and the spinner line.
+  // Everything is derived from the rows the normalizer already stamped —
+  // nothing is counted into a field, nothing is stored server-side, so a
+  // second client renders identical numbers off the same message state.
+
+  /**
+   * The id of the card the NEXT collab row would coalesce into — i.e. the one
+   * whose age is still meaningful. That is the LAST message, and only while
+   * the turn streams: once anything else arrives (assistant text, a tool card,
+   * a sub-agent report) the burst is over and the card freezes to its span.
+   */
+  _liveCollabId() {
+    if (!this._typingSince || this._disposed) return null;
+    const last = this._messages[this._messages.length - 1];
+    return (last?.collab && !last.collab.report) ? last.id : null;
+  }
+
+  /**
+   * Traffic stats of the CURRENT turn's collab rows (the spinner line's
+   * counter): a report card lands between two coalesced cards, so a per-card
+   * count would restart at 1 in the middle of one burst. Bounded backward scan
+   * — the turn boundary is a change of turnIndex.
+   */
+  _liveCollabStats() {
+    const msgs = this._messages;
+    if (!msgs.length) return null;
+    const turn = msgs[msgs.length - 1].turnIndex;
+    let start = msgs.length - 1;
+    for (let seen = 0; start > 0 && seen < 400 && msgs[start - 1].turnIndex === turn; seen++) start--;
+    const rows = [];
+    // push, never `unshift(...rows)` — a several-hundred-row burst spread as
+    // arguments is an argument-count hazard for no gain
+    for (let i = start; i < msgs.length; i++) for (const r of (msgs[i].collab?.rows || [])) rows.push(r);
+    return rows.length ? collabTrafficStats({ rows }) : null;
+  }
+
+  /** Note what KIND of record just landed — collab traffic, or anything else. */
+  _noteRecordKind(msg) {
+    if (this._loadingHistory || this._disposed) return;
+    const isCollab = !!msg?.collab;
+    this._lastRecordCollab = isCollab;
+    if (isCollab) this._startCollabTick();
+    this._applyStreamLabel();
+  }
+
+  /**
+   * The spinner label. While a turn streams AND the newest typed record was
+   * collab traffic, it names the traffic; the moment ANY other record arrives
+   * (a tool call, assistant text, an api_retry notice — all of which either
+   * broadcast their own streaming-label or land as a non-collab message) it
+   * yields back to the server's label. The server stays the authority on what
+   * the harness is doing; this only re-labels the gap the harness is silent in.
+   */
+  _applyStreamLabel() {
+    if (!this._typingSince || this._disposed) return;
+    const stats = this._lastRecordCollab ? this._liveCollabStats() : null;
+    if (stats?.count) {
+      this._collabLabelShown = true;
+      this._showTyping(subAgentStreamLabel(stats, { now: Date.now(), t }), 'subagents');
+      return;
+    }
+    // Yield ONLY what we took. Re-asserting the remembered server label on
+    // every op would fight the label chat-input sets locally on send (a stale
+    // "running Bash" from the previous turn would win) — the server stays the
+    // only writer except across our own override.
+    if (this._collabLabelShown) {
+      this._collabLabelShown = false;
+      this._showTyping(this._serverStreamLabel || t('thinking...'), this._serverStreamKind || null);
+    }
+  }
+
+  /** The server's own activity label — remembered so the collab label can yield back to it. */
+  _onServerStreamLabel(label, kind) {
+    this._serverStreamLabel = label || '';
+    this._serverStreamKind = kind || null;
+    this._collabLabelShown = false; // the server is writing the line itself now
+    // a streaming-label broadcast IS a different record (task_started, a
+    // function_call, an assistant message): the collab claim is stale
+    this._lastRecordCollab = false;
+    if (label) {
+      this._showTyping(label, kind || null);
+      // …and only NOW is _typingSince set, so a mid-burst attach/reattach can
+      // finally answer "is this card live" — arm the ticker off the same event
+      this._startCollabTick();
+    } else this._hideTyping();
+  }
+
+  /**
+   * Arm the ticker — and paint once immediately, so a window ATTACHED in the
+   * middle of a burst does not sit on the frozen span for a second (attaching
+   * to a STALLED turn is exactly the case this readout exists for). Gated on
+   * something actually being live: a claude session has no collab cards and
+   * must not carry an interval at all.
+   */
+  _startCollabTick() {
+    if (this._collabTimer || this._disposed || !this._liveCollabId()) return;
+    this._collabTimer = setInterval(() => this._tickCollab(), 1000);
+    this._tickCollab();
+  }
+
+  _stopCollabTick() {
+    if (this._collabTimer) { clearInterval(this._collabTimer); this._collabTimer = null; }
+  }
+
+  /**
+   * One tick: re-write the ages that already exist on screen. It NEVER
+   * re-renders a card (a rebuild would drop the fold state the user opened)
+   * and never touches scroll/pin/paging — it writes textContent into three
+   * places and stops itself when there is nothing live left.
+   *
+   * A hidden window (desktop switch, setSuspended) is a NO-OP: its geometry is
+   * meaningless and nobody is reading it; resume runs one tick immediately so
+   * the age is right on the first frame back.
+   */
+  _tickCollab() {
+    if (this._disposed) return;
+    if (this._suspended) return;
+    const liveId = this._liveCollabId();
+    const now = Date.now();
+    // (a) the card that stopped being live must be FROZEN once — it keeps its
+    // last age forever otherwise, which reads as "still going"
+    if (this._tickedCollabId && this._tickedCollabId !== liveId) {
+      this._paintCollabHead(this._tickedCollabId, false, now);
+      this._tickedCollabId = null;
+    }
+    if (liveId) {
+      this._tickedCollabId = liveId;
+      this._paintCollabHead(liveId, true, now);
+    }
+    // (b) the run header / footer / floating bar segment
+    this._paintRunCollab(liveId, now);
+    // (c) the spinner line
+    if (liveId) this._applyStreamLabel();
+    if (!liveId) this._stopCollabTick();
+  }
+
+  /** Rewrite one card's `.chat-collab-head` text (live age or frozen span). */
+  _paintCollabHead(msgId, live, now) {
+    const el = this._elements.get(msgId);
+    const head = el?.querySelector?.('.chat-collab-head');
+    if (!head) return;
+    const msg = this._messages.find((m) => m.id === msgId);
+    if (!msg?.collab) return;
+    const text = collabHeadText(collabTrafficStats(msg.collab), { now, live, t });
+    if (head.textContent !== text) head.textContent = text;
+  }
+
+  /**
+   * Re-compose the label of the run holding the live card and write it to its
+   * header, its footer and the floating bar. `run.mkLabel` is captured in the
+   * fold pass with that run's own counts, so this never rebuilds a second kind
+   * table (the 2.369.34 class) — it only re-asks the ONE composer for a fresh
+   * `now`.
+   */
+  _paintRunCollab(liveId, now) {
+    const runs = this._runs;
+    if (!runs?.length) return;
+    const liveEl = liveId ? this._elements.get(liveId) : null;
+    for (const run of runs) {
+      if (!run.mkLabel || !run.collabStats?.count) continue;
+      const live = !!liveEl && run.members.includes(liveEl);
+      if (!live && !run._collabWasLive) continue; // frozen run: its label never changes
+      run._collabWasLive = live;
+      const label = run.mkLabel({ now, live });
+      if (label === run.label) continue;
+      run.label = label;
+      const headLabel = run.header?.querySelector('.chat-run-label');
+      if (headLabel) headLabel.textContent = label;
+      const footLabel = run.footer?.querySelector('.chat-run-label');
+      if (footLabel) footLabel.textContent = `${t('Collapse')} · ${label}`;
+      if (this._runBarRun === run) this._scheduleRunBar();
+    }
+  }
+
   // _showTyping / _hideTyping delegate to ChatInput (normal) or readOnly _streamStatus
   _showTyping(label = t('thinking...'), kind = null) {
     this._typingSince = this._typingSince || Date.now(); // watchdog arm
     if (this._chatInput) { this._chatInput.showTyping(label, kind); return; }
-    // readOnly fallback
+    // readOnly fallback — same "unchanged label is a no-op" rule ChatInput
+    // applies, so a per-second repaint cannot churn the DOM
     if (!this._streamStatus) return;
+    if (this._roTypingLabel === label && !this._streamStatus.classList.contains('hidden')) return;
+    this._roTypingLabel = label;
     this._streamStatus.innerHTML = `<span class="chat-spinner"></span> ${escHtml(label)}`;
     this._streamStatus.classList.remove('hidden');
   }
 
   _hideTyping() {
     this._typingSince = null; // watchdog disarm
+    this._roTypingLabel = null;
+    // The turn ended: the traffic can no longer grow, so every live age
+    // FREEZES to its absolute span (a ticking "last 3s ago" on a finished turn
+    // is a lie the user would read as progress).
+    this._freezeCollab();
     if (this._chatInput) { this._chatInput.hideTyping(); return; }
     // readOnly fallback
     if (!this._streamStatus) return;
     this._streamStatus.classList.add('hidden');
     this._streamStatus.innerHTML = '';
+  }
+
+  /** Stop ticking and repaint every live surface in its frozen form. */
+  _freezeCollab() {
+    this._stopCollabTick();
+    this._lastRecordCollab = false;
+    this._collabLabelShown = false;
+    const now = Date.now();
+    if (this._tickedCollabId) { this._paintCollabHead(this._tickedCollabId, false, now); this._tickedCollabId = null; }
+    this._paintRunCollab(null, now);
   }
 
   _onGoalUpdated(goal, elapsed) {
@@ -3243,7 +3453,7 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
         return;
       }
       // Sync streaming label from server
-      if (msg.isStreaming) this._showTyping(msg.streamingLabel || t('thinking...'), msg.streamingKind || null);
+      if (msg.isStreaming) this._onServerStreamLabel(msg.streamingLabel || t('thinking...'), msg.streamingKind || null);
       else this._hideTyping();
       this._reattachCatchUp();
     };
@@ -3856,7 +4066,20 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
           }
           const nErr = members.filter((el) => el._rawMsg?.toolStatus === 'error').length;
           const running = members.some((el) => el._rawMsg?.status === 'pending' || el._rawMsg?.status === 'streaming');
-          const label = runSummaryLabel({ byKind, mcpServers, files, nErr, running }, t);
+          // LIVE SUB-AGENT TRAFFIC (2026-09-07): the run's whole traffic — how
+          // many agents, how many events, and while the burst is still growing
+          // how long ago the last one arrived. Composed by the PURE collab
+          // module, POSITIONED by the ONE summary composer, and captured as a
+          // closure so the per-second ticker can re-ask for a fresh `now`
+          // without a second count anywhere.
+          const collabStats = collabTrafficStats({ rows: collabRows });
+          const liveCollabEl = this._elements.get(this._liveCollabId());
+          const mkLabel = ({ now = Date.now(), live = false } = {}) => runSummaryLabel({
+            byKind, mcpServers, files, nErr, running,
+            collabPart: collabRunPart(collabStats, { now, live, t }),
+          }, t);
+          const collabLive = !!liveCollabEl && members.includes(liveCollabEl);
+          const label = mkLabel({ live: collabLive });
           // "3 sub-agents: water_research, interior_research" (B-7473) — the same
           // click-through as the rows themselves (the header's own onclick
           // toggles the run, so each name stops propagation). Identity = the
@@ -3869,8 +4092,12 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
             if (!p || agents.some((a) => a.path === p)) continue;
             agents.push({ path: p, name: r.agentName || p.split('/').filter(Boolean).pop() || p, threadId: r.threadId || '' });
           }
+          // The COUNT ("3 sub-agents · 47 messages · last 4s ago") now lives in
+          // the label, so the floating run bar and the footer carry it too;
+          // what stays here is the part a label cannot hold — the clickable
+          // chips. Saying "3 sub-agents" twice on one line was the alternative.
           const agentsHtml = agents.length
-            ? ` <span class="chat-run-agents">${escHtml(t('{n} sub-agents', { n: agents.length }))}: ${agents.slice(0, 4).map((a) => `<span class="chat-collab-name" role="link" tabindex="0" data-agent-path="${escHtml(a.path)}"${a.threadId ? ` data-thread-id="${escHtml(a.threadId)}"` : ''}>${escHtml(a.name)}</span>`).join(', ')}${agents.length > 4 ? `, +${agents.length - 4}` : ''}</span>`
+            ? ` <span class="chat-run-agents">${agents.slice(0, 4).map((a) => `<span class="chat-collab-name" role="link" tabindex="0" data-agent-path="${escHtml(a.path)}"${a.threadId ? ` data-thread-id="${escHtml(a.threadId)}"` : ''}>${escHtml(a.name)}</span>`).join(', ')}${agents.length > 4 ? `, +${agents.length - 4}` : ''}</span>`
             : '';
           header.innerHTML = `<span class="chat-run-arrow">▸</span><span class="chat-run-label">${escHtml(label)}</span>${agentsHtml}`;
           for (const nameEl of header.querySelectorAll('.chat-collab-name')) {
@@ -3879,7 +4106,7 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
               this._openCollabAgent({ agentPath: nameEl.dataset.agentPath || '', threadId: nameEl.dataset.threadId || '' });
             };
           }
-          const rec = { header, members, inline, footer: null, label, open: false };
+          const rec = { header, members, inline, footer: null, label, open: false, mkLabel, collabStats, _collabWasLive: collabLive };
           // Rebuilds happen on every list mutation — remember runs the user
           // opened so a new message doesn't re-collapse what they're reading.
           // Keyed by ANY member, not just the first: scroll-up pagination
@@ -4138,6 +4365,7 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
     if (this._searchBarObserver) { this._searchBarObserver.disconnect(); this._searchBarObserver = null; }
     if (this._runsTimer) { clearTimeout(this._runsTimer); this._runsTimer = null; }
     if (this._runBarRaf) { cancelAnimationFrame(this._runBarRaf); this._runBarRaf = null; }
+    this._stopCollabTick();
     if (this._queueChipRaf && this._queueChipRaf !== -1) { try { cancelAnimationFrame(this._queueChipRaf); } catch { } this._queueChipRaf = 0; }
     this._clearResumeRetail();
     if (this._endPointerPress) {
