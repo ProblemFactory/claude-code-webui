@@ -238,8 +238,16 @@ export function openSessionProps(app, sessionRef, { syncId } = {}) {
     // ── Config overrides (summary; edit via the card ⚙) ──
     const cfg = sidebar.getSessionConfig?.(s) || {};
     const cfgBits = ['model', 'effort', 'permission'].filter(k => cfg[k]).map(k => `${k}: ${cfg[k]}`);
-    const cfgSec = cfgBits.length ? section(t('Config overrides')) : null;
-    if (cfgSec) row(cfgSec, t('Saved'), escHtml(cfgBits.join(' · ')));
+    // ONE header, however many of the rows below exist. `section()` APPENDS a
+    // new header every time it is called, so the `cfgSec || section(...)`
+    // idiom below was only ever correct while exactly ONE lazy row could
+    // follow it; the moment a second one did (the 'Sending during a turn' row)
+    // a codex session with no saved override — the common case — printed the
+    // 'Config overrides' header TWICE (round-2 verifier's minor). The header
+    // is now created at most once, on first demand.
+    let cfgSecMemo = cfgBits.length ? section(t('Config overrides')) : null;
+    const cfgSection = () => { if (!cfgSecMemo) cfgSecMemo = section(t('Config overrides')); return cfgSecMemo; };
+    if (cfgSecMemo) row(cfgSecMemo, t('Saved'), escHtml(cfgBits.join(' · ')));
 
     // ── Response style, EFFECTIVE + its ORIGIN (2.369.58) ──
     // Two different facts, and the panel says which is which: `s.outputStyle`
@@ -268,7 +276,7 @@ export function openSessionProps(app, sessionRef, { syncId } = {}) {
       const origin = ORIGIN_LABEL[responseStyleOrigin(live, picked)]();
       const pendBit = (live && picked !== undefined && (picked || '') !== live)
         ? ` <span class="chat-status-dim">${escHtml(t('(saved: {v} \u2014 applies on the next resume)', { v: picked || t('agent default') }))}</span>` : '';
-      row(cfgSec || section(t('Config overrides')), t('Response style'),
+      row(cfgSection(), t('Response style'),
         `${escHtml(shown || t('agent default'))} <span class="chat-status-dim">${escHtml('(' + origin + ')')}</span>${pendBit}`);
     }
 
@@ -284,7 +292,7 @@ export function openSessionProps(app, sessionRef, { syncId } = {}) {
         const bits = [];
         if (sm.queueSegment) bits.push(t('Enter queues it — it runs after this turn'));
         if (sm.steerSegment) bits.push(t('Alt+Enter injects it into the running turn (the agent sees it at its next reply)'));
-        row(cfgSec || section(t('Config overrides')), t('Sending during a turn'), escHtml(bits.join(' \u00b7 ')));
+        row(cfgSection(), t('Sending during a turn'), escHtml(bits.join(' \u00b7 ')));
       }
     }
 

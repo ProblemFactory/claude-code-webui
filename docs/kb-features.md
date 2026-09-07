@@ -219,10 +219,24 @@ never a backend id; the ws layer, the strip and the chip all gate on that row:
   harness reports back, with the SAME `queue-op` frame the strip button and the
   chip send: no second wire shape. `_steerAfterSend(msgId)` parks the msgId in a
   MAP (two quick chords must both land) and `_setQueue` drains it; an 8s timeout
-  that expires **while the turn is still running** says so in chat rather than
-  letting the user believe an injection happened — and says nothing when the
-  turn ended meanwhile, because the message then runs next, immediately, which
-  is what "now" asked for.
+  that expires **while the turn we sent into is still running** says so in chat
+  rather than letting the user believe an injection happened — and says nothing
+  once that turn has ended, because the message then runs next, immediately,
+  which is what "now" asked for.
+  **WHICH turn, never "a turn" (round-2 verifier's MAJOR).** The silence guard
+  first tested `_typingSince` for truthiness, and that flag is RE-ARMED by the
+  NEXT turn. The only way the timer survives to fire is that the msgId never
+  appeared in the published queue — which is exactly what a NOT-busy wrapper
+  does: it runs the message as its own `turn/start` (it only
+  `thread/queue/add`s while a turn is active). That new turn re-armed the flag,
+  so the guard was false precisely in the case it existed for and the window
+  apologised for a message the agent was visibly running. `_showTyping` now
+  stamps `_turnEpoch` on the same null→armed transition that sets
+  `_typingSince` (a TIME is not an IDENTITY — the turn that ends and the one
+  that starts next can arm in the same millisecond), `_steerAfterSend` captures
+  it, and the timer stays silent unless the SAME epoch is still running. The
+  epoch advances only where the flag arms, so a relabelled turn ("running
+  Bash") is still the same turn and still gets the honest apology.
 - **It is a CONTRIBUTED command, `chat.steerNow`** (contributions.js Ph1), so a
   plugin can see it, rebind it and run it. The command is registered ONCE for
   the app (`registerCommand` rejects a duplicate id by design — a per-view
@@ -262,7 +276,15 @@ never a backend id; the ws layer, the strip and the chip all gate on that row:
 - **Session Properties carries the same sentence, gated the same way** ("Sending
   during a turn"), from the HARNESS row rather than the live intersection — a
   properties panel describes what this KIND of agent does and is opened on
-  stopped sessions too.
+  stopped sessions too. It shares the panel's **"Config overrides"** section
+  with the response-style row, and that header is created **at most once, on
+  first demand** (`cfgSection()`): the panel's old `cfgSec || section(...)`
+  idiom appended a NEW header per lazy row, which was invisible while exactly
+  one such row existed and printed the header TWICE the moment this one joined
+  it — a codex session with no saved override, i.e. the common case (round-2
+  verifier's minor). Pinned by the real-browser leg ⑨f of test-queue-steer,
+  which counts headers for codex / opencode / claude / shell (2 lazy rows / 1 /
+  1 / 0) and proves its own probe can see a duplicate.
 - **Removing a queued agent-to-agent / job message gives it back.** It was
   already reported delivered, so `remove` re-reports `peer_message_result
   ok:false` with the text and sender and the delivery ladder re-stashes it for

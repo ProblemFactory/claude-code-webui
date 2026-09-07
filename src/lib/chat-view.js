@@ -1217,16 +1217,29 @@ class ChatView {
    *  back, with the SAME 'queue-op' frame the strip button and the bubble chip
    *  send. Bounded: if the item never appears we SAY so rather than leave the
    *  user believing an injection happened (no-silent-failures) — unless the
-   *  turn ended meanwhile, which needs no apology (the message runs next,
-   *  immediately, which is what "now" asked for). */
+   *  turn we sent into ended meanwhile, which needs no apology (the message
+   *  runs next, immediately, which is what "now" asked for).
+   *
+   *  ROUND-2 VERIFIER'S MAJOR — WHICH turn, not "a turn". The silence guard
+   *  used to test `this._typingSince` for TRUTHINESS, and that flag is
+   *  RE-ARMED by the next turn. The only way this timer survives to fire is
+   *  that the msgId never appeared in the published queue — which is exactly
+   *  what happens when the wrapper was NOT busy and ran the message as its
+   *  own `turn/start` (it only `thread/queue/add`s while a turn is active).
+   *  That new turn re-arms the flag, so the truthiness guard was FALSE
+   *  precisely in the case it existed for and the window apologised for a
+   *  message the agent was visibly running (the 恒假守卫 class, mirrored).
+   *  So capture the turn's IDENTITY at arm time and COMPARE. */
   _steerAfterSend(msgId) {
     const id = String(msgId || '');
     if (!id || !this._queueCaps().steer || this._disposed) return;
     if (this._pendingSteers.has(id)) return;
+    const turnAtSend = this._turnEpoch || 0;   // the turn this message was sent INTO
     this._pendingSteers.set(id, setTimeout(() => {
       this._pendingSteers.delete(id);
       if (this._disposed) return;
-      if (!this._typingSince) return;   // the turn ended: it simply runs next
+      if (!this._typingSince) return;                     // nothing is running: it runs next
+      if ((this._turnEpoch || 0) !== turnAtSend) return;   // a DIFFERENT turn is running — ours ended, so the message ran or IS running
       this._renderers?.appendSystem?.(t('Sent — but it could not be injected into the running turn; it will run when the turn ends.'));
     }, ChatView.STEER_CHORD_WAIT_MS));
     // A queue_changed can land BEFORE the send resolves here — check now too.
@@ -3114,7 +3127,17 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
 
   // _showTyping / _hideTyping delegate to ChatInput (normal) or readOnly _streamStatus
   _showTyping(label = t('thinking...'), kind = null) {
-    this._typingSince = this._typingSince || Date.now(); // watchdog arm
+    // ARM (once per turn) — and stamp THE TURN'S IDENTITY at the same instant.
+    // `_typingSince` is a TIME, and a time is not an identity: the turn that
+    // ends and the turn that starts next can arm in the SAME millisecond (a
+    // queued message becomes its own turn the moment the previous one ends),
+    // so anything asking "is the turn I was in still the one running?" must
+    // compare `_turnEpoch` and never the timestamp — the 2.302.0
+    // capture-the-counter rule, applied to the flag itself.
+    if (!this._typingSince) {
+      this._typingSince = Date.now();               // watchdog arm
+      this._turnEpoch = (this._turnEpoch || 0) + 1; // …and this turn's id
+    }
     if (this._chatInput) { this._chatInput.showTyping(label, kind); return; }
     // readOnly fallback — same shape as ChatInput's line (label in its own
     // `.chat-stream-label`), so a ticking age is a textContent write and not a

@@ -521,10 +521,15 @@ console.log('— ⑦ FUNCTIONAL client: a normalizer-produced bubble → a real 
       const view = Object.assign(Object.create(ChatView.prototype), {
         sessionId: 'sess-chord', ws: { send: (m) => out.push(m) },
         _readOnly: false, _disconnected: false, _disposed: false, _chatInput: null,
-        _queue: [], _queueSupported: true, _pendingSteers: new Map(), _typingSince: Date.now(),
+        _queue: [], _queueSupported: true, _pendingSteers: new Map(),
         _getSessionIds: () => ({ backend: 'codex' }), winInfo: { backend: 'codex' },
         _renderers: { appendSystem: (txt) => notes.push(txt) },
       }, over);
+      // THE TURN IS ARMED THROUGH THE REAL METHOD, never by a hand-set flag
+      // (round-2 verifier): what the silence guard compares is the turn's
+      // IDENTITY, and a fixture that assigns `_typingSince` itself cannot
+      // produce one — nor can it produce the sequence that actually happens.
+      ChatView.prototype._showTyping.call(view, 'thinking...');
       return { view, out, notes };
     };
     {
@@ -570,15 +575,43 @@ console.log('— ⑦ FUNCTIONAL client: a normalizer-produced bubble → a real 
       const realWait = Object.getOwnPropertyDescriptor(ChatView, 'STEER_CHORD_WAIT_MS');
       Object.defineProperty(ChatView, 'STEER_CHORD_WAIT_MS', { get: () => 30, configurable: true });
       const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-      const still = mkSteerView();                       // the turn is STILL running
-      const ended = mkSteerView({ _typingSince: null }); // it ended meanwhile
+      const still = mkSteerView();                 // the turn is STILL running
+      const ended = mkSteerView();                 // it ended and nothing followed
+      const ranOwn = mkSteerView();                // it ended and THE MESSAGE became the next turn
       const gone = mkSteerView({ _disposed: true });
-      for (const v of [still, ended, gone]) ChatView.prototype._steerAfterSend.call(v.view, 'm-lost');
+      const epochAtSend = ranOwn.view._turnEpoch;
+      for (const v of [still, ended, ranOwn, gone]) ChatView.prototype._steerAfterSend.call(v.view, 'm-lost');
+      // the turn simply ends (real method, not a hand-set flag)
+      ChatView.prototype._hideTyping.call(ended.view);
+      // …and THE ROUND-2 MAJOR's sequence: the wrapper was idle, so it ran the
+      // message as its OWN turn — which is the ONLY way this timer survives to
+      // fire at all (a busy wrapper queues, and a queued item drains the
+      // pending entry). The turn ends, the next one starts.
+      ChatView.prototype._hideTyping.call(ranOwn.view);
+      ChatView.prototype._showTyping.call(ranOwn.view, 'thinking...');
       await wait(150);
       ok('THE HONEST TIMEOUT: the id never came and the turn is STILL running ⇒ the window SAYS the injection did not happen (never a user believing it did)', still.notes.length === 1 && /could not be injected into the running turn/.test(still.notes[0]), still.notes);
       ok('…and NOT when the turn ended meanwhile — the message then runs next, immediately, which is what "now" asked for (a false alarm is its own failure)', ended.notes.length === 0, ended.notes);
+      ok('THE ROUND-2 MAJOR: the turn ended and THE MESSAGE ITSELF became the next turn (the only shape that lets this timer fire) ⇒ still silent — the window may not apologise for a message the agent is visibly running', ranOwn.notes.length === 0, ranOwn.notes);
+      ok('NEGATIVE CONTROL: on that very view the OLD guard (`_typingSince` truthiness) HELD at fire time, so the shipped code would have posted the false notice — what saves it is that the TURN IDENTITY changed', !!ranOwn.view._typingSince === true && (ranOwn.view._turnEpoch || 0) !== epochAtSend, { typingSince: !!ranOwn.view._typingSince, epochAtSend, now: ranOwn.view._turnEpoch });
       ok('…and a disposed view says nothing into a closed window', gone.notes.length === 0);
-      ok('…and nothing was sent on the wire in any of the three (a steer with no id is not a frame)', still.out.length === 0 && ended.out.length === 0 && gone.out.length === 0);
+      ok('…and nothing was sent on the wire in any of the four (a steer with no id is not a frame)', still.out.length === 0 && ended.out.length === 0 && ranOwn.out.length === 0 && gone.out.length === 0);
+      // THE OTHER HALF of the same guard: a turn does not "change" because the
+      // harness relabelled it. If the epoch advanced on every stream label the
+      // honest apology would be silenced by a single "running Bash".
+      {
+        const repaint = mkSteerView();
+        const e0 = repaint.view._turnEpoch;
+        ChatView.prototype._steerAfterSend.call(repaint.view, 'm-lost');
+        ChatView.prototype._showTyping.call(repaint.view, 'running Bash');
+        ChatView.prototype._showTyping.call(repaint.view, 'thinking...');
+        ok('a LABEL REPAINT is not a new turn (the epoch advances only where the flag arms)', repaint.view._turnEpoch === e0 && e0 >= 1, { e0, now: repaint.view._turnEpoch });
+        await wait(150);
+        ok('…so the still-running apology survives a relabelled turn (the fix silences the NEXT turn, never this one)', repaint.notes.length === 1 && /could not be injected/.test(repaint.notes[0]), repaint.notes);
+        ChatView.prototype._hideTyping.call(repaint.view);
+        ChatView.prototype._showTyping.call(repaint.view, 'thinking...');
+        ok('…and a REAL turn boundary does advance it (hide → show = a new identity)', repaint.view._turnEpoch === e0 + 1, repaint.view._turnEpoch);
+      }
       ok('the sentence is translated (zh + ja)', read('src/lib/i18n-zh.js').includes('Sent — but it could not be injected into the running turn') && read('src/lib/i18n-ja.js').includes('Sent — but it could not be injected into the running turn'));
       // …and a CONVERSION inside the window cancels the timer: no apology for
       // something that worked (the pending entry is the timer's own guard)
@@ -668,12 +701,32 @@ console.log('— wiring + docs pins');
   { const zh2 = read('src/lib/i18n-zh.js'), ja2 = read('src/lib/i18n-ja.js');
     ok('every new chord string is translated (zh + ja)', ['"Enter queues"', '"Alt+Enter injects now"', '"Send now — inject into the running turn"', '"Sending during a turn"', '"Enter queues it — it runs after this turn"'].every((k) => zh2.includes(k) && ja2.includes(k))); }
   ok('Session Properties documents it, gated by the SAME predicate (and shows nothing where there is no queue surface)', /composerSendModes\(getBackendMeta\(s\.backend \|\| 'claude'\)\?\.caps\?\.inputModes\)/.test(read('src/lib/session-props.js')) && /if \(sm\.showHint\)/.test(read('src/lib/session-props.js')));
+  // ROUND-2 MINOR, at the source too: `section()` APPENDS, so no lazy row may
+  // call it directly — the header is memoised behind ONE factory (⑨f proves
+  // the behaviour in a real document; this is the drift guard).
+  { const sp = read('src/lib/session-props.js');
+    ok('…and its section header is created at most ONCE (no `cfgSec || section(...)` per lazy row — that idiom printed the header twice)',
+      /const cfgSection = \(\) => \{ if \(!cfgSecMemo\) cfgSecMemo = section\(t\('Config overrides'\)\); return cfgSecMemo; \};/.test(sp)
+      && !/row\(cfgSec \|\| section\(/.test(sp)
+      && (sp.match(/section\(t\('Config overrides'\)\)/g) || []).length === 2, (sp.match(/section\(t\('Config overrides'\)\)/g) || []).length); }
+  // ROUND-2 MAJOR, at the source: the timeout's silence is a TURN IDENTITY
+  // comparison, never the truthiness of a flag the next turn re-arms.
+  { const cv3 = read('src/lib/chat-view.js');
+    ok('the steer timeout compares the TURN it was armed in (a re-armed flag is not the same turn)',
+      /const turnAtSend = this\._turnEpoch \|\| 0;/.test(cv3) && /if \(\(this\._turnEpoch \|\| 0\) !== turnAtSend\) return;/.test(cv3));
+    ok('…and the epoch is stamped on the SAME null→armed transition as _typingSince (a label repaint is not a new turn)',
+      /if \(!this\._typingSince\) \{\s*\n\s*this\._typingSince = Date\.now\(\);[\s\S]{0,120}this\._turnEpoch = \(this\._turnEpoch \|\| 0\) \+ 1;/.test(cv3)
+      && (cv3.match(/this\._turnEpoch = /g) || []).length === 1); }
   { const kbd = read('docs/keyboard-shortcuts.md');
     ok('docs/keyboard-shortcuts.md carries the chord, the per-harness table and the ≤768px behaviour', /\*\*Alt\+Enter\*\*/.test(kbd) && /Sending while a turn is running/.test(kbd) && /chat\.steerNow/.test(kbd) && /Touch \/ ≤768px/.test(kbd)); }
   { const kbf = read('docs/kb-features.md');
-    ok('kb-features QUEUED vs STEERED gains the chord, the hint gate and the touch face', /THE CHORD: `Alt\+Enter` = steer/.test(kbf) && /not `queue`\*\*/.test(kbf) && /≤768px: no chords, a BUTTON/.test(kbf)); }
+    ok('kb-features QUEUED vs STEERED gains the chord, the hint gate and the touch face', /THE CHORD: `Alt\+Enter` = steer/.test(kbf) && /not `queue`\*\*/.test(kbf) && /≤768px: no chords, a BUTTON/.test(kbf));
+    ok('…and the round-2 invariants: WHICH turn the timeout is about, and the once-only Config-overrides header', /\*\*WHICH turn, never "a turn"/.test(kbf) && /at most once, on\s*\n\s*first demand\*\* \(`cfgSection\(\)`\)/.test(kbf)); }
   { const kbfs2 = read('docs/kb-file-structure.md');
-    ok('kb-file-structure: the chord essays live under chat-input.js AND contributions.js', /THE Alt\+Enter STEER CHORD/.test(kbfs2) && /THE FIRST CORE `registerKeybinding` CHORD/.test(kbfs2)); }
+    ok('kb-file-structure: the chord essays live under chat-input.js AND contributions.js', /THE Alt\+Enter STEER CHORD/.test(kbfs2) && /THE FIRST CORE `registerKeybinding` CHORD/.test(kbfs2));
+    ok("…and chat-view.js carries the chord's view half incl. the turn-identity guard", /THE STEER CHORD'S VIEW HALF/.test(kbfs2) && /`_turnEpoch`/.test(kbfs2)); }
+  { const kbd2 = read('docs/keyboard-shortcuts.md');
+    ok('docs say what happens when the turn ends first (silence, not an apology)', /\*\*If the turn ends first,\*\*/.test(kbd2)); }
   ok('CLAUDE.md indexes the new PURE predicate', /composerSendModes/.test(read('CLAUDE.md')));
 }
 
@@ -887,9 +940,13 @@ console.log('— ⑨e the chord in a REAL browser (trusted keystrokes) + the 375
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const freePort = () => new Promise((res, rej) => { const sv = net.createServer(); sv.on('error', rej); sv.listen(0, '127.0.0.1', () => { const pt = sv.address().port; sv.close(() => res(pt)); }); });
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `vs-chord-${process.pid}-`));
-    const bundle = path.join(tmp, 'chat-input.iife.js');
+    const bundle = path.join(tmp, 'chord.iife.js');
     const stub = { name: 'stub-build-version', setup(b) { b.onResolve({ filter: /build-version\.js$/ }, () => ({ path: 'build-version', namespace: 'bv' })); b.onLoad({ filter: /.*/, namespace: 'bv' }, () => ({ contents: "export const BUILD_VERSION = 'test';", loader: 'js' })); } };
-    await esbuild.build({ entryPoints: [path.join(REPO, 'src/lib/chat-input.js')], bundle: true, format: 'iife', globalName: 'VS', platform: 'browser', target: 'es2022', outfile: bundle, logLevel: 'silent', loader: { '.css': 'text' }, plugins: [stub] });
+    // TWO surfaces of the SAME capability in ONE page (and one chrome): the
+    // composer (⑨e) and the Session Properties row that documents it (⑨f).
+    const entry = path.join(tmp, 'entry.js');
+    fs.writeFileSync(entry, `export { ChatInput } from ${JSON.stringify(path.join(REPO, 'src/lib/chat-input.js'))};\nexport { openSessionProps } from ${JSON.stringify(path.join(REPO, 'src/lib/session-props.js'))};\n`);
+    await esbuild.build({ entryPoints: [entry], bundle: true, format: 'iife', globalName: 'VS', platform: 'browser', target: 'es2022', outfile: bundle, logLevel: 'silent', loader: { '.css': 'text' }, plugins: [stub] });
     const js = fs.readFileSync(bundle, 'utf8').replace(/<\/script/gi, '<\\/script');
     const css = fs.readFileSync(path.join(REPO, 'public/chat.css'), 'utf8').replace(/<\/style/gi, '<\\/style');
     const base = fs.readFileSync(path.join(REPO, 'public/style.css'), 'utf8').replace(/<\/style/gi, '<\\/style');
@@ -1041,6 +1098,92 @@ console.log('— ⑨e the chord in a REAL browser (trusted keystrokes) + the 375
       // …and it disappears with the turn
       await evaljs(`window.__ci.hideTyping(); true`);
       ok('…and it disappears when the turn ends', (await evaljs(`getComputedStyle(document.querySelector('.chat-steer-btn')).display`)) === 'none');
+
+      // ── ⑨f SESSION PROPERTIES: ONE 'Config overrides' header, however many
+      //    of its rows are LAZY (round-2 verifier's minor). `section()`
+      //    APPENDS a header every time it is called, and the panel's
+      //    `cfgSec || section(...)` idiom called it once PER LAZY ROW — which
+      //    was invisible while exactly one such row existed and printed the
+      //    header TWICE the moment the send-modes row joined it (codex with
+      //    no saved override = the common case). Driven through the REAL
+      //    openSessionProps in the REAL document: nothing here is a
+      //    transcription of the lines under test.
+      await setViewport(1280, 800);
+      const props = async (backend, cfg) => evaljs(`(() => {
+        document.querySelectorAll('.props-host').forEach((e) => e.remove());
+        const s = { sessionId: 'sp-' + ${JSON.stringify(backend)}, backend: ${JSON.stringify(backend)}, cwd: '/w', name: 'N', status: 'live', webuiMode: 'chat' };
+        const cfg = ${JSON.stringify(cfg || {})};
+        const host = document.createElement('div');
+        host.className = 'props-host';
+        document.body.appendChild(host);
+        const win = { id: 'w-props', content: host, onClose: null };
+        const app = {
+          wm: { windows: new Map(), createWindow: () => win, focusWindow() {}, setTitle() {} },
+          ws: { onGlobal() {}, offGlobal() {} },
+          settings: { get: () => false },
+          _accounts: { accounts: [] },
+          sidebar: {
+            _allSessions: [s], _tasks: [], _hostsData: { hosts: [] },
+            _getSessionStateKey: (x) => x.sessionId,
+            getCustomName: () => '', getSessionStatus: () => null,
+            getSessionConfig: () => cfg, setSessionConfig() {},
+            _getSessionTasks: () => [], _getSessionTaskGroups: () => [],
+          },
+        };
+        VS.openSessionProps(app, s, {});
+        window.__propsHost = host;
+        return window.__readProps();
+      })()`);
+      // ONE probe, used by every row below AND by its own sensitivity check.
+      await evaljs(`window.__readProps = () => {
+        const host = window.__propsHost;
+        const secs = [...host.querySelectorAll('.task-detail-section')];
+        const cfgSecs = secs.filter((x) => (x.querySelector('.task-detail-label') || {}).textContent === 'Config overrides');
+        return {
+          headers: cfgSecs.length,
+          rows: cfgSecs.map((x) => [...x.querySelectorAll('.session-detail-label')].map((e) => e.textContent)),
+          allSections: secs.map((x) => (x.querySelector('.task-detail-label') || {}).textContent),
+        };
+      }; true`);
+
+      let sp = await props('codex', {});
+      ok('THE ROUND-2 MINOR: a codex session with NO saved override renders exactly ONE "Config overrides" header', sp.headers === 1, sp);
+      ok('…and BOTH lazy rows live inside that one section (a second header would have split them)', sp.headers === 1 && sp.rows[0].includes('Response style') && sp.rows[0].includes('Sending during a turn'), sp.rows);
+      // NEGATIVE CONTROL for the PROBE itself: it must be able to SEE two.
+      const dup = await evaljs(`(() => {
+        const host = window.__propsHost;
+        const first = [...host.querySelectorAll('.task-detail-section')].find((x) => (x.querySelector('.task-detail-label') || {}).textContent === 'Config overrides');
+        const clone = first.cloneNode(true); host.appendChild(clone);
+        const seen = window.__readProps().headers; clone.remove();
+        return { seen, after: window.__readProps().headers };
+      })()`);
+      ok('NEGATIVE CONTROL: the probe counts headers — inject a duplicate section and it reports 2 (the assert above is not vacuous)', dup.seen === 2 && dup.after === 1, dup);
+
+      sp = await props('codex', { model: 'opus' });
+      ok('…and with a saved override the EAGER header is REUSED, never re-created: one section, all three rows', sp.headers === 1 && ['Saved', 'Response style', 'Sending during a turn'].every((r) => sp.rows[0].includes(r)), sp);
+
+      sp = await props('opencode', {});
+      ok('opencode: only the send-modes row is lazy here, and it still gets exactly one header', sp.headers === 1 && sp.rows[0].includes('Sending during a turn') && !sp.rows[0].includes('Response style'), sp);
+
+      sp = await props('claude', {});
+      ok('claude: one header for the response style — and NO "Sending during a turn" row (the owner\'s rule, 不支持queue的就不显示)', sp.headers === 1 && sp.rows[0].includes('Response style') && !sp.rows[0].includes('Sending during a turn'), sp);
+
+      sp = await props('shell', {});
+      ok('shell: no row wants it ⇒ the section is never created at all (the lazy header stays lazy)', sp.headers === 0 && !sp.allSections.includes('Config overrides'), sp);
+
+      // ≤768px (the owner's standing rule for any UI change): the panel is the
+      // same window on a phone — one header, both rows, no sideways overflow.
+      await setViewport(375, 667);
+      await sleep(120);
+      sp = await props('codex', {});
+      ok('375×667: still ONE header with both rows (the duplicate was a phone bug too — twice the vertical cost on the smallest screen)', sp.headers === 1 && sp.rows[0].includes('Response style') && sp.rows[0].includes('Sending during a turn'), sp);
+      const pm = await evaljs(`(() => {
+        const root = window.__propsHost.querySelector('.session-props');
+        const sec = [...root.querySelectorAll('.task-detail-section')].find((x) => (x.querySelector('.task-detail-label') || {}).textContent === 'Config overrides');
+        const r = (el) => { const q = el.getBoundingClientRect(); return { w: Math.round(q.width), h: Math.round(q.height), right: Math.round(q.right) }; };
+        return { vw: innerWidth, root: r(root), sec: r(sec), rootScrollW: root.scrollWidth, rootClientW: root.clientWidth, secScrollW: sec.scrollWidth, secClientW: sec.clientWidth };
+      })()`);
+      ok(`…and nothing overflows sideways at 375px (root ${pm.rootScrollW} ≤ ${pm.rootClientW}, section ${pm.secScrollW} ≤ ${pm.secClientW}, right edge ${pm.sec.right} ≤ ${pm.vw})`, pm.rootScrollW <= pm.rootClientW + 1 && pm.secScrollW <= pm.secClientW + 1 && pm.sec.right <= pm.vw + 1, pm);
     } catch (e) {
       ok('the browser leg ran', false, String(e.message || e).slice(0, 400));
     } finally {

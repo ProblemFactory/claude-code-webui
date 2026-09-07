@@ -47,6 +47,11 @@ plugin can rebind it or run it.
 **Touch / ≤768px:** no chords — a bolt button appears beside **Send** while a
 turn runs on a steer-capable session and does the same thing.
 
+**If the turn ends first,** the message simply runs next — immediately, which
+is what "now" asked for — and the window says nothing. It only tells you the
+injection did not happen when *that* turn was still running and the agent never
+picked the message up.
+
 ## Virtual Desktop Shortcuts
 
 | Shortcut | Action |
