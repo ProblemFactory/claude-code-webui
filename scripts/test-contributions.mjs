@@ -588,6 +588,20 @@ console.log('contributions — D. wiring pins');
   const cm = read('src/lib/command-mode.js');
   ok(/\}, true\); \/\/ capture phase/.test(cm) && /toggle\(\) \{ if \(this\._cmdMode\) this\.exit\(\); else this\.enter\(\); \}/.test(cm) && /^registerCommandModeCommands\(\);/m.test(cm), 'command-mode keeps its capture-phase prefix dispatch (listener order is load-bearing) and exposes toggle()');
   ok(!/registerKeybinding\(/.test(cm) && !/registerKeybinding\(/.test(pal), 'core key chords are NOT registerKeybinding chords (modifier-lenient checks + capture order would change behaviour) — commands only');
+  // …but a NEW core chord does use the registry, and chat-view.js is the first
+  // (2026-09-07, the Alt+Enter steer chord). It is the pattern a future one
+  // copies: ONE module-scope command behind hasCommand() (registerCommand
+  // THROWS on a duplicate id, so a per-instance registration dies on the second
+  // window) + a PER-INSTANCE keybinding carrying that instance's signal and a
+  // `when` that scopes the chord — which is also what makes N simultaneous
+  // registrations of one chord legal.
+  const cvv = read('src/lib/chat-view.js');
+  ok(/registerKeybinding\(\{\s*\n\s*key: 'alt\+enter',\s*\n\s*command: STEER_NOW_COMMAND,/.test(cvv) && /if \(!hasCommand\(STEER_NOW_COMMAND\)\) \{/.test(cvv) && /signal: winInfo\?\._listenerCtl\?\.signal,/.test(cvv) && /when: \(ctx\) => steerTargetView\(ctx\) === this/.test(cvv),
+    "chat-view registers the FIRST core registry chord: command once at module scope, keybinding per view (signal + when)");
+  ok(/export const STEER_NOW_COMMAND = 'chat\.steerNow';/.test(cvv) && /onSteerChord: \(\) => runCommand\(STEER_NOW_COMMAND, \{ view: this \}\)/.test(cvv),
+    "…and its in-app caller routes through runCommand with the same id (keyboard, button and plugin run ONE verb)");
+  ok(/### contributions\.js/.test(read('docs/kb-file-structure.md')) && /THE FIRST CORE `registerKeybinding` CHORD/.test(read('docs/kb-file-structure.md')),
+    'the kb essay records that pattern where the next author will look for it');
   const wsh = read('src/ws-handler.js');
   const defIdx = wsh.indexOf('        default: {');
   const def = wsh.slice(defIdx, defIdx + 1600);

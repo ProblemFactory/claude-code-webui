@@ -505,6 +505,30 @@
 .chat-queue-chip:disabled { cursor: default; }
 .chat-queue-chip-steered { color: var(--accent); border-color: var(--accent); }
 .chat-queue-chip-removed { text-decoration: line-through; }
+/* ── SEND MODES WHILE A TURN RUNS (the Alt+Enter chord, 2026-09-07) ───────
+   TWO faces of ONE capability, split by VIEWPORT so they can never both show:
+   the hint line is the keyboard face (desktop), the bolt button beside Send is
+   the touch face (≤768px — a phone has no Alt key). JS owns only WHETHER this
+   session can steer (the `.hidden` class); CSS owns WHERE each face appears,
+   the same shape `.chat-attach-btn` has used for the mobile upload button. */
+.chat-send-hint {
+  width: 100%; font-size: 11px; color: var(--text-dim);
+  padding: 3px 2px 0; display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+}
+.chat-send-hint.hidden { display: none; }
+.chat-send-hint-sep { color: var(--border); }
+@media (max-width: 768px) { .chat-send-hint { display: none; } }
+.chat-steer-btn {
+  display: none; background: none; border: 1px solid var(--border);
+  color: var(--text-dim); cursor: pointer; flex-shrink: 0;
+  border-radius: var(--radius-sm); min-width: 36px; min-height: 36px;
+  align-items: center; justify-content: center; margin-bottom: 0;
+}
+.chat-steer-btn.hidden { display: none; }
+.chat-steer-btn:active { background: var(--bg-hover); color: var(--text); }
+.chat-steer-btn svg { width: 16px; height: 16px; display: block; }
+@media (max-width: 768px) { .chat-steer-btn:not(.hidden) { display: inline-flex; } }
+
 .chat-input-wrap { flex: 1; position: relative; min-width: 0; display: flex; align-items: flex-end; gap: 6px; }
 .chat-attach-btn {
   display: none; background: none; border: none; color: var(--text-dim);

@@ -2967,6 +2967,15 @@ export default {
   "Injected into the running turn": "已插入正在进行的这一轮",
   "Removed from the queue — it will not run": "已从队列移除 —— 不会运行",
   "That message is no longer queued — it already ran.": "这条消息已不在队列中 —— 它已经运行了。",
+  // the Alt+Enter chord (2026-09-07): the OTHER send mode by keyboard, plus
+  // its composer hint and the ≤768px button that stands in for the chord
+  "Enter queues": "Enter 排队",
+  "Alt+Enter injects now": "Alt+Enter 立即注入",
+  "Send now — inject into the running turn": "立即发送 —— 注入正在进行的这一轮",
+  "Sending during a turn": "本轮进行中发送",
+  "Enter queues it — it runs after this turn": "Enter 排队 —— 本轮结束后运行",
+  "Alt+Enter injects it into the running turn (the agent sees it at its next reply)": "Alt+Enter 注入正在进行的这一轮（agent 在下一次回复时就会看到）",
+  "Sent — but it could not be injected into the running turn; it will run when the turn ends.": "已发送 —— 但没能注入正在进行的这一轮；它会在本轮结束后运行。",
   'agent default': 'agent 默认',
   'Response style': '回复风格',
   'Response style: {v} — set at spawn; a change applies on the next resume': '回复风格：{v}——启动时设定，改动在下次 resume 生效',

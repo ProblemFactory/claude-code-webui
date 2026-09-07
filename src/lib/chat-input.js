@@ -1,5 +1,6 @@
 import { escHtml, saveDraft, loadDraft, clearDraft, getStateSync, showContextMenu, showToast, uploadFilesBatched, showImageOverlay } from './utils.js';
 import { UI_ICONS } from './icons.js';
+import { composerSendModes } from './agent-meta.js';
 import { t } from './i18n.js';
 
 /**
@@ -16,7 +17,7 @@ export class ChatInput {
    * @param {function} opts.getStateSync - returns StateSync instance
    * @param {function} opts.onInterrupt - called when user clicks Stop
    */
-  constructor(ws, sessionId, { onSend, onInterrupt, getCwd, getHost, getUploadDir, isTouch, getTouchEnterSends, onQueueOp }) {
+  constructor(ws, sessionId, { onSend, onInterrupt, getCwd, getHost, getUploadDir, isTouch, getTouchEnterSends, onQueueOp, onSteerChord, onSteerSend }) {
     this._ws = ws;
     this._sessionId = sessionId;
     this._onSend = onSend;
@@ -27,8 +28,17 @@ export class ChatInput {
     this._isTouch = isTouch || (() => false);
     this._getTouchEnterSends = getTouchEnterSends || (() => false);
     this._onQueueOp = onQueueOp || null;   // (op, id) → ws 'queue-op'
+    // THE CHORD (2026-09-07 owner ask). `onSteerChord` routes the composer's
+    // Alt+Enter through the SAME command the registered keybinding runs
+    // ('chat.steerNow' — one verb, one place a plugin can rebind); without a
+    // host (standalone ChatInput) it falls back to acting directly.
+    this._onSteerChord = onSteerChord || null;
+    // …and `onSteerSend` is the other half: a steer names a QUEUED ITEM, so the
+    // chord SENDS on the ordinary path and hands the msgId to the view, which
+    // converts it the moment the harness reports it queued.
+    this._onSteerSend = onSteerSend || null;
     this._queue = [];
-    this._queueCaps = { steer: false, queueOps: false };
+    this._queueCaps = { queue: false, steer: false, queueOps: false };
 
     // Attachment state
     this._attachments = [];
@@ -167,6 +177,23 @@ export class ChatInput {
         return;
       }
       if (this._historyIdx != null && e.key !== 'ArrowUp' && e.key !== 'ArrowDown') this._historyIdx = null;
+      // ── ALT+ENTER = STEER (2026-09-07 owner ask) ────────────────────────
+      // While a turn runs, Enter already sends as QUEUED — our default, the
+      // one the web/desktop Codex apps use (the TUI's Enter=steer/Tab=queue is
+      // a terminal keymap we deliberately do not copy). What was missing is
+      // the OTHER mode by keyboard, so: Alt+Enter, and Alt+Enter ONLY. Tab is
+      // the slash-command completion (above) and Ctrl/Cmd+Enter keeps meaning
+      // send/queue — both would have been silent redefinitions of a key the
+      // user already relies on. It must be checked BEFORE the plain-Enter
+      // branch below, which tests `!e.shiftKey` and would otherwise swallow
+      // Alt+Enter as an ordinary send. GATED ON THE HARNESS CAPS, never on a
+      // backend id: where steer is impossible this is not a chord at all and
+      // the key does what it always did.
+      if (e.key === 'Enter' && e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && this.steerChordAllowed) {
+        e.preventDefault();
+        if (this._onSteerChord) this._onSteerChord(); else this.steerNow();
+        return;
+      }
       if (this._expanded) {
         if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); this._send(); }
       } else {
@@ -272,6 +299,19 @@ export class ChatInput {
 
     inputWrap.append(attachBtn, attachInput, uploadBtn, fileInput, dirInput, this._textarea, expandBtn, this._slashDropdown);
 
+    // TOUCH FACE OF THE CHORD (≤768px): a phone has no Alt key, so the same
+    // verb gets a button beside Send. Visibility is split in two: JS owns the
+    // CAPABILITY (`.hidden` — can this session steer right now), CSS owns the
+    // VIEWPORT (`.chat-attach-btn`'s shape: display:none, shown only under the
+    // 768px media query), so neither surface can contradict the other.
+    this._steerBtn = document.createElement('button');
+    this._steerBtn.className = 'chat-steer-btn hidden';
+    this._steerBtn.type = 'button';
+    this._steerBtn.title = t('Send now — inject into the running turn');
+    this._steerBtn.setAttribute('aria-label', t('Send now — inject into the running turn'));
+    this._steerBtn.innerHTML = UI_ICONS.bolt;
+    this._steerBtn.onclick = () => { if (this._onSteerChord) this._onSteerChord(); else this.steerNow(); };
+
     const sendCol = document.createElement('div');
     sendCol.className = 'chat-send-col';
     const sendBtn = document.createElement('button');
@@ -300,7 +340,13 @@ export class ChatInput {
     this._queueStrip = document.createElement('div');
     this._queueStrip.className = 'chat-queue-strip hidden';
 
-    inputArea.append(this._queueStrip, this._attachArea, this._todoDisplay, this._streamStatus, inputWrap, sendCol);
+    // SEND-MODE HINT: one line UNDER the textarea while a turn runs, saying
+    // what the two send keys do on THIS harness. Last child + width:100% ⇒ the
+    // input area's flex-wrap puts it on its own row below the box.
+    this._sendHint = document.createElement('div');
+    this._sendHint.className = 'chat-send-hint hidden';
+
+    inputArea.append(this._queueStrip, this._attachArea, this._todoDisplay, this._streamStatus, inputWrap, this._steerBtn, sendCol, this._sendHint);
   }
 
   /** The .chat-input-area wrapper element */
@@ -395,6 +441,57 @@ export class ChatInput {
   /** Whether currently streaming */
   get isStreaming() { return this._isStreaming; }
 
+  // ── SEND MODES WHILE A TURN RUNS (the Alt+Enter chord + its hint) ────────
+  /** The PURE caps→surfaces answer for this session's live queue caps. */
+  _sendModes() { return composerSendModes(this._queueCaps); }
+
+  /** May Alt+Enter (and the ≤768px bolt button) act right now? A CAPABILITY
+   *  answer only — deliberately not "is there text": the hint and the `when`
+   *  predicate must not flicker per keystroke, and an empty composer is
+   *  handled by `steerNow()` no-opping exactly like `_send()` does. */
+  get steerChordAllowed() { return !!(this._isStreaming && this._sendModes().allowSteerChord); }
+
+  /** THE CHORD'S ACTION. A steer names a QUEUED ITEM (codex's `turn/steer`
+   *  takes the app-server's queued-submission id — there is no "send this text
+   *  as a steer" verb anywhere), so this sends on the ONE ordinary send path
+   *  (draft keep, history ring, dead-socket defenses) and hands the msgId to
+   *  the host, which converts it with the SAME 'queue-op' frame the strip
+   *  button and the bubble chip use. No second wire shape.
+   *  @returns {boolean} whether a message actually went out */
+  steerNow() {
+    if (!this.steerChordAllowed) return false;
+    const msgId = this._send();
+    if (!msgId) return false;   // empty composer / disconnected — _send already spoke
+    this._onSteerSend?.(msgId);
+    return true;
+  }
+
+  /** Repaint both faces of the chord. Called wherever either input changes:
+   *  the streaming flag (showTyping/hideTyping) and the caps (setQueue). */
+  _updateSendModes() {
+    const modes = this._sendModes();
+    const live = !!this._isStreaming;
+    if (this._steerBtn) this._steerBtn.classList.toggle('hidden', !(live && modes.allowSteerChord));
+    if (!this._sendHint) return;
+    const show = live && modes.showHint;
+    this._sendHint.classList.toggle('hidden', !show);
+    if (!show) { this._sendHint.innerHTML = ''; return; }
+    const html = ChatInput.sendHintHtml(modes);
+    if (this._sendHintHtml !== html) { this._sendHint.innerHTML = html; this._sendHintHtml = html; }
+  }
+
+  /** PURE markup for the hint (DOM-free testable). Each segment is drawn ONLY
+   *  where the harness backs it, so the line never teaches a key that does
+   *  nothing here. The KEY NAME lives inside the translated phrase (a physical
+   *  key is not translated, but "Enter queues" as a sentence is — the owner's
+   *  own wording is "Enter 排队 · Alt+Enter 立即注入"). */
+  static sendHintHtml(modes = {}) {
+    const parts = [];
+    if (modes.queueSegment) parts.push(`<span class="chat-send-hint-part">${escHtml(t('Enter queues'))}</span>`);
+    if (modes.steerSegment) parts.push(`<span class="chat-send-hint-part">${escHtml(t('Alt+Enter injects now'))}</span>`);
+    return parts.join('<span class="chat-send-hint-sep">·</span>');
+  }
+
   /** Set the container element for popup positioning (the .chat-view) */
   set popupContainer(el) { this._todoContainer = el; }
 
@@ -438,7 +535,7 @@ export class ChatInput {
     // re-run on every label change, so re-applying the pending state HERE is
     // what makes it stick: without it the next "thinking\u2026" repaint handed back
     // a fresh, clickable Stop in the middle of the very window it guards.
-    if (this._stopPending) { this._applyStopPending(btn); this._streamStatus.classList.remove('hidden'); this._isStreaming = true; return; }
+    if (this._stopPending) { this._applyStopPending(btn); this._streamStatus.classList.remove('hidden'); this._isStreaming = true; this._updateSendModes(); return; }
     if (kind === 'compacting') {
       // Two-step Stop while a compaction runs (2.365.0): the CLI's only
       // "Compaction canceled." path is an abort signal, and a large
@@ -462,6 +559,7 @@ export class ChatInput {
     }
     this._streamStatus.classList.remove('hidden');
     this._isStreaming = true;
+    this._updateSendModes();   // the chord and its hint exist only while a turn runs
   }
 
   /** Programmatic send through the FULL _send path (draft keep, history ring,
@@ -478,6 +576,7 @@ export class ChatInput {
     // the streaming flag FIRST: _endStopPending repaints a live status line,
     // and this one is on its way out.
     this._isStreaming = false;
+    this._updateSendModes();
     this._endStopPending();
     this._streamStatus.classList.add('hidden');
     this._streamStatus.innerHTML = '';
@@ -677,13 +776,16 @@ export class ChatInput {
 
   // ── Private ──
 
+  /** @returns {string|null} the msgId that went out, or null when nothing did
+   *  (empty composer / disconnected / a /goal command, which is not a message).
+   *  `steerNow()` needs it to name the queued item it must convert. */
   _send() {
     const text = this._textarea.value.trim();
     const hasAttachments = this._attachments.length > 0;
-    if (!text && !hasAttachments) return;
+    if (!text && !hasAttachments) return null;
     if (this._disconnected) {
       showToast(t('Disconnected — reconnecting… your draft is kept'), { type: 'error' });
-      return;
+      return null;
     }
 
     // Intercept /goal command — handled by wrapper, not sent as chat message
@@ -708,7 +810,7 @@ export class ChatInput {
       // broadcast (confirmGoal) proves it landed; a 10s silence restores the
       // text and says so. Same shape as the _pendingSend defense below.
       this._markGoalPending(text);
-      return;
+      return null;   // a /goal is a control frame, never a queueable message
     }
 
     const msgId = Date.now() + '-' + Math.random().toString(36).slice(2, 8);
@@ -767,6 +869,7 @@ export class ChatInput {
     // "thinking…" with an unguarded Stop.
     if (/^\/compact\b/.test(text)) this.showTyping(t('Compacting context… (a large conversation takes 1–2 minutes — Stop cancels it)'), 'compacting');
     else this.showTyping(t('thinking...'));
+    return msgId;
   }
 
   _addImageAttachment(file) {
@@ -812,8 +915,14 @@ export class ChatInput {
    *  caps = backend-caps `inputModes` projected onto the client (agent-meta). */
   setQueue(items, caps) {
     this._queue = Array.isArray(items) ? items : [];
-    if (caps) this._queueCaps = { steer: !!caps.steer, queueOps: !!caps.queueOps };
+    if (caps) this._queueCaps = { queue: !!caps.queue, steer: !!caps.steer, queueOps: !!caps.queueOps };
     this._renderQueue();
+    // The caps are the OTHER input to the chord and its hint, and they arrive
+    // AFTER the composer is on screen (attach payload / the wrapper's baseline
+    // queue_changed) — the same late-capability ordering that once shipped a
+    // permanently dead bubble chip. Repaint here, so a flip in either
+    // direction reaches both faces.
+    this._updateSendModes();
   }
 
   _renderQueue() {

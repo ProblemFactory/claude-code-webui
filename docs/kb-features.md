@@ -204,6 +204,65 @@ never a backend id; the ws layer, the strip and the chip all gate on that row:
   liveness check that toasts ("This session is not live — reconnect…") instead
   of swallowing the click, and the strip is dimmed under
   `.chat-input-disconnected` so the state is visible before the click.
+- **THE CHORD: `Alt+Enter` = steer (2026-09-07, owner "顺便加入一个 queue 的快捷键,
+  不支持queue的就不显示").** `Enter` already sends as QUEUED while a turn runs —
+  our default, and the one the web/desktop Codex apps use (the TUI's
+  `Enter`=steer / `Tab`=queue is a terminal keymap we deliberately do not copy).
+  What was missing was the OTHER mode by keyboard, so: **`Alt+Enter`, and
+  `Alt+Enter` only** — `Tab` is the slash-command completion and `Ctrl/Cmd+Enter`
+  keeps meaning send/queue; both would have been silent redefinitions of a key
+  the user already relies on. It must be tested BEFORE the plain-Enter branch,
+  which checks only `!e.shiftKey` and would otherwise swallow it as an ordinary
+  send. **A steer NAMES A QUEUED ITEM** (`turn/steer` takes the app-server's
+  queued-submission id — there is no "send this text as a steer" verb anywhere),
+  so the chord SENDS on the one ordinary send path and converts the item the
+  harness reports back, with the SAME `queue-op` frame the strip button and the
+  chip send: no second wire shape. `_steerAfterSend(msgId)` parks the msgId in a
+  MAP (two quick chords must both land) and `_setQueue` drains it; an 8s timeout
+  that expires **while the turn is still running** says so in chat rather than
+  letting the user believe an injection happened — and says nothing when the
+  turn ended meanwhile, because the message then runs next, immediately, which
+  is what "now" asked for.
+- **It is a CONTRIBUTED command, `chat.steerNow`** (contributions.js Ph1), so a
+  plugin can see it, rebind it and run it. The command is registered ONCE for
+  the app (`registerCommand` rejects a duplicate id by design — a per-view
+  registration would throw on the second chat window); the per-view part is the
+  KEYBINDING, carrying the view's AbortSignal and a `when` that scopes the chord
+  to the window the keystroke happened in (`steerTargetView` resolves the target
+  from an explicit `ctx.view` — the composer route hands itself in — or from the
+  mounted view whose container holds the event target). The composer's own
+  `Alt+Enter` routes through the SAME id, so there is exactly one definition of
+  what the chord does. It is the FIRST core `registerKeybinding` chord (the
+  palette / command-mode chords stay where they are: their modifier-lenient
+  capture-phase checks are load-bearing).
+- **THE HINT, and what gates it.** While a turn runs the composer carries a
+  one-line hint under the box — `Enter queues · Alt+Enter injects now` — each
+  segment drawn only where the harness backs it. The PURE
+  `composerSendModes(caps)` (agent-meta.js) is the ONE decision:
+  `allowSteerChord` = `steer`, and the queue segment is gated on **`queueOps`,
+  not `queue`** — claude's CLI really does hold a mid-turn message, but it
+  publishes no queue and takes no operation on it, so there is no strip, no live
+  chip and nothing to act on; a line announcing "it is queued" with nothing on
+  screen to show it is a promise we cannot keep. Hence: codex = both segments +
+  the chord, opencode = the queue segment only, **claude and shell = no hint and
+  no chord at all** (the owner's rule, verbatim). The caps it reads are the live
+  intersection (`_queueCaps()` = harness row ∧ the RUNNING wrapper's advert),
+  the very object the strip's Steer buttons read, so the chord, the hint and the
+  strip can never disagree — including the late-capability ordering that once
+  shipped a permanently dead chip (`setQueue` repaints both faces).
+- **≤768px: no chords, a BUTTON.** A phone has no Alt key, so the same verb gets
+  a small bolt button beside **Send**, shown while a turn runs on a
+  steer-capable session. The split is deliberate: **JS owns only the capability**
+  (the `.hidden` class on both surfaces), **CSS owns the viewport** — the hint is
+  `display:none` under the 768px media query and the button is `display:none`
+  above it (the shape `.chat-attach-btn` has used for the mobile upload button
+  since 2.234.0), so the two faces can never both appear and neither can
+  contradict the capability. Measured at 375×667: the button sits beside Send,
+  the textarea keeps ≥2 rows visible and nothing overflows the input area.
+- **Session Properties carries the same sentence, gated the same way** ("Sending
+  during a turn"), from the HARNESS row rather than the live intersection — a
+  properties panel describes what this KIND of agent does and is opened on
+  stopped sessions too.
 - **Removing a queued agent-to-agent / job message gives it back.** It was
   already reported delivered, so `remove` re-reports `peer_message_result
   ok:false` with the text and sender and the delivery ladder re-stashes it for

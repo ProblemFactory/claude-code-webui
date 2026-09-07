@@ -1,6 +1,6 @@
 import { escHtml, copyText, showConfirmDialog, taskGroupColor } from './utils.js';
 import { SESSION_STATE_META, SESSION_URGENCY_META } from './sidebar-tasks.js';
-import { getBackendMeta, getAgentKindMeta, getAgentRoleLabel, responseStyleCaps, responseStyleOrigin } from './agent-meta.js';
+import { getBackendMeta, getAgentKindMeta, getAgentRoleLabel, responseStyleCaps, responseStyleOrigin, composerSendModes } from './agent-meta.js';
 import { t } from './i18n.js';
 import { registerOpenAction } from './window-types.js';
 
@@ -270,6 +270,22 @@ export function openSessionProps(app, sessionRef, { syncId } = {}) {
         ? ` <span class="chat-status-dim">${escHtml(t('(saved: {v} \u2014 applies on the next resume)', { v: picked || t('agent default') }))}</span>` : '';
       row(cfgSec || section(t('Config overrides')), t('Response style'),
         `${escHtml(shown || t('agent default'))} <span class="chat-status-dim">${escHtml('(' + origin + ')')}</span>${pendBit}`);
+    }
+
+    // ── What a send DURING a running turn does here (2026-09-07) ──
+    // The HARNESS row, not the live intersection: a properties panel describes
+    // what this KIND of agent does, and it is opened on stopped sessions too.
+    // A harness with no queue surface (claude's CLI holds the message and
+    // publishes nothing; shell has no turn) gets NO row — the owner's rule for
+    // the chord is the same one here: 不支持queue的就不显示.
+    {
+      const sm = composerSendModes(getBackendMeta(s.backend || 'claude')?.caps?.inputModes);
+      if (sm.showHint) {
+        const bits = [];
+        if (sm.queueSegment) bits.push(t('Enter queues it — it runs after this turn'));
+        if (sm.steerSegment) bits.push(t('Alt+Enter injects it into the running turn (the agent sees it at its next reply)'));
+        row(cfgSec || section(t('Config overrides')), t('Sending during a turn'), escHtml(bits.join(' \u00b7 ')));
+      }
     }
 
     // ── Task Groups (explicit toggles; folder-derived shown, not toggleable) ──

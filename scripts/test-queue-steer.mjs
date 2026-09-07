@@ -239,6 +239,32 @@ console.log('— ④ the normalizer: session state + chips + multi-queue semanti
   ok('every CHAT normalizer answers queuePublished() (the same question everywhere, claude says never)', [mm, am].every((n) => typeof n.queuePublished === 'function') && require(path.join(REPO, 'src/message-manager.js')).MessageManager.prototype.queuePublished() === false);
 }
 
+// ⑨ THE Alt+Enter STEER CHORD (2026-09-07 owner ask: "顺便加入一个queue的快捷键,
+// 不支持queue的就不显示"). The PURE caps→surfaces decision first: it is the
+// ONE thing the chord, the hint, the ≤768px button and Session Properties all
+// read, so a wrong answer here is wrong on four surfaces at once.
+console.log('— ⑨a the PURE send-mode predicate (caps → {showHint, allowSteerChord})');
+{
+  const { composerSendModes } = await import(path.join(REPO, 'src/lib/agent-meta.js'));
+  const { capsOf } = require(path.join(REPO, 'src/backend-caps.js'));
+  const m = (id) => composerSendModes(capsOf(id).inputModes);
+  const cx = m('codex');
+  ok('codex (queue+steer+queueOps): both segments AND the chord', cx.showHint === true && cx.queueSegment === true && cx.steerSegment === true && cx.allowSteerChord === true, cx);
+  const oc = m('opencode');
+  ok('opencode (queue+queueOps, NO steer): the hint mentions Enter only, and Alt+Enter is not a chord', oc.showHint === true && oc.queueSegment === true && oc.steerSegment === false && oc.allowSteerChord === false, oc);
+  const cl = m('claude');
+  ok('claude (queues but publishes NO queue): NO hint and NO chord — the owner\'s rule, and there is nothing on screen a "it is queued" line could point at', cl.showHint === false && cl.queueSegment === false && cl.allowSteerChord === false, cl);
+  const sh = m('shell');
+  ok('shell (no input queue at all): nothing', sh.showHint === false && sh.allowSteerChord === false, sh);
+  ok('an unknown backend / missing caps object is the all-false row (never codex\'s by accident)', [composerSendModes(undefined), composerSendModes(null), composerSendModes({}), m('gemini')].every((r) => r.showHint === false && r.allowSteerChord === false));
+  // the chord is the SAME fact as the steer segment: a chord that silently
+  // degraded to a plain send would be worse than no chord at all
+  ok('allowSteerChord === steerSegment on every declared harness (one fact, never two)', Object.keys(require(path.join(REPO, 'src/backend-caps.js')).BACKEND_CAPS).every((id) => m(id).allowSteerChord === m(id).steerSegment));
+  ok('…and the chord is never offered without the harness row saying steer', Object.keys(require(path.join(REPO, 'src/backend-caps.js')).BACKEND_CAPS).every((id) => m(id).allowSteerChord === capsOf(id).inputModes.steer));
+  // it reads the LIVE intersection, so no wrapper advert ⇒ nothing offered
+  ok('the all-false intersection chat-view returns without a wrapper advert yields no hint and no chord', composerSendModes({ queue: false, steer: false, queueOps: false }).showHint === false);
+}
+
 console.log('— ⑤ the client strip (DOM-free render of the REAL ChatInput)');
 {
   const esbuild = require(path.join(REPO, 'node_modules/esbuild'));
@@ -246,6 +272,12 @@ console.log('— ⑤ the client strip (DOM-free render of the REAL ChatInput)');
   const stubBuildVersion = { name: 'stub-build-version', setup(b) { b.onResolve({ filter: /build-version\.js$/ }, () => ({ path: 'build-version', namespace: 'stub' })); b.onLoad({ filter: /.*/, namespace: 'stub' }, () => ({ contents: "export const BUILD_VERSION = 'test';", loader: 'js' })); } };
   await esbuild.build({ entryPoints: [path.join(REPO, 'src/lib/chat-input.js')], bundle: true, format: 'esm', platform: 'node', target: 'es2022', outfile: out, logLevel: 'silent', loader: { '.css': 'text' }, plugins: [stubBuildVersion] });
   const noop = () => {};
+  // chat-input now imports agent-meta (the PURE composerSendModes lives with
+  // the other caps helpers), and agent-meta installs a backend-icon
+  // MutationObserver at import when `window` exists — the browser-emulating
+  // stub below owes it the constructor (the test-search-card-title idiom).
+  class NoopObserver { observe() {} unobserve() {} disconnect() {} takeRecords() { return []; } }
+  for (const k of ['MutationObserver', 'ResizeObserver', 'IntersectionObserver']) { try { Object.defineProperty(globalThis, k, { value: NoopObserver, configurable: true, writable: true }); } catch {} }
   const mkEl = () => ({ className: '', dataset: {}, _html: '', classList: { add() {}, remove() {}, contains() { return false; }, toggle() {} }, set innerHTML(v) { this._html = v; }, get innerHTML() { return this._html; }, appendChild() {}, append() {}, querySelector() { return null; }, querySelectorAll() { return []; }, addEventListener() {}, setAttribute() {}, getAttribute() { return null; }, focus() {} });
   for (const [k, v] of Object.entries({ addEventListener: noop, removeEventListener: noop, matchMedia: () => ({ matches: false, addEventListener: noop, addListener: noop }), requestAnimationFrame: (f) => setTimeout(f, 0), cancelAnimationFrame: noop, getComputedStyle: () => ({ getPropertyValue: () => '' }), innerWidth: 1024, innerHeight: 768, location: { origin: 'http://test', href: 'http://test/', hostname: 'test', protocol: 'http:' } })) {
     try { Object.defineProperty(globalThis, k, { value: v, configurable: true, writable: true }); } catch {}
@@ -273,6 +305,46 @@ console.log('— ⑤ the client strip (DOM-free render of the REAL ChatInput)');
   const evil = '<img src=x onerror=alert(1)>" onmouseover="y';
   const xss = ChatInput.queueStripHtml([{ id: evil, msgId: '', preview: evil, kind: 'peer', from: evil }], { steer: true, queueOps: true });
   ok('XSS: preview, sender and id are escaped everywhere they land (text + attributes)', !xss.includes('<img src=x') && !/onmouseover="y/.test(xss) && xss.includes('&lt;img') && (xss.match(/&quot;/g) || []).length >= 2, xss.slice(0, 300));
+
+  // ⑨b THE HINT LINE, from the REAL ChatInput's own PURE composer.
+  const { composerSendModes: modesOf } = await import(path.join(REPO, 'src/lib/agent-meta.js'));
+  const { capsOf: srvCaps } = require(path.join(REPO, 'src/backend-caps.js'));
+  const hint = (id) => ChatInput.sendHintHtml(modesOf(srvCaps(id).inputModes));
+  ok('codex: BOTH segments, separated', /Enter queues/.test(hint('codex')) && /Alt\+Enter injects now/.test(hint('codex')) && /chat-send-hint-sep/.test(hint('codex')), hint('codex'));
+  ok('opencode: the queue segment only — the line never teaches a key that does nothing here', /Enter queues/.test(hint('opencode')) && !/Alt\+Enter/.test(hint('opencode')) && !/chat-send-hint-sep/.test(hint('opencode')), hint('opencode'));
+  ok('claude / shell: the hint is EMPTY markup (and _updateSendModes never unhides it)', hint('claude') === '' && hint('shell') === '');
+  ok('the hint carries no raw glyph icon and every phrase is a t() key (zh+ja pinned below)', !/[⚡✕]/.test(hint('codex')));
+
+  // …and the capability plumbing, on the REAL prototype (chat-view's own
+  // DOM-free idiom): the chord is a CAPABILITY answer — never "is there text",
+  // which would make the hint and the `when` flicker per keystroke — and it
+  // needs a RUNNING TURN.
+  const mkCI = (over = {}) => Object.assign(Object.create(ChatInput.prototype), { _isStreaming: false, _queueCaps: { queue: false, steer: false, queueOps: false } }, over);
+  const cxCaps = srvCaps('codex').inputModes;
+  ok('IDLE codex session: no turn ⇒ no chord (Enter is an ordinary send)', mkCI({ _queueCaps: cxCaps }).steerChordAllowed === false);
+  ok('…and mid-turn the chord is live', mkCI({ _queueCaps: cxCaps, _isStreaming: true }).steerChordAllowed === true);
+  ok('opencode mid-turn: queue but no steer ⇒ still no chord', mkCI({ _queueCaps: srvCaps('opencode').inputModes, _isStreaming: true }).steerChordAllowed === false);
+  ok('claude mid-turn: no chord', mkCI({ _queueCaps: srvCaps('claude').inputModes, _isStreaming: true }).steerChordAllowed === false);
+  ok('a session whose caps have not arrived yet (the late-capability ordering) offers no chord', mkCI({ _isStreaming: true }).steerChordAllowed === false);
+  ok('the chord answer NEVER consults the textarea (it must not flicker per keystroke)', !/steerChordAllowed[\s\S]{0,200}_textarea/.test(read('src/lib/chat-input.js')));
+
+  // steerNow: the ONE send path, then the msgId handed on. Drive the REAL
+  // method with _send stubbed to the contract it now has (msgId | null).
+  {
+    let sends = 0, handed = null;
+    const ci = mkCI({ _queueCaps: cxCaps, _isStreaming: true, _send: () => { sends++; return 'm-42'; }, _onSteerSend: (id) => { handed = id; } });
+    ok('THE CHORD SENDS ON THE ORDINARY PATH and hands its msgId on (no second wire shape)', ci.steerNow() === true && sends === 1 && handed === 'm-42');
+    const empty = mkCI({ _queueCaps: cxCaps, _isStreaming: true, _send: () => null, _onSteerSend: () => { handed = 'NO'; } });
+    handed = null;
+    ok('an empty composer / disconnected socket / a /goal (all `_send() === null`) reports NO steerable send — a pending steer that can only time out is a lie', empty.steerNow() === false && handed === null);
+    const cant = mkCI({ _queueCaps: srvCaps('claude').inputModes, _isStreaming: true, _send: () => { sends++; return 'x'; } });
+    ok('steerNow() on a harness that cannot steer sends NOTHING at all', cant.steerNow() === false && sends === 1);
+  }
+  // _send's new contract, at the source: three null returns and one msgId
+  {
+    const src = read('src/lib/chat-input.js');
+    ok('_send returns the msgId (and null on every non-send path: empty, disconnected, /goal)', /return msgId;/.test(src) && (src.match(/return null;/g) || []).length >= 3, (src.match(/return null;[^\n]*/g) || []));
+  }
 }
 
 console.log('— ⑦ FUNCTIONAL client: a normalizer-produced bubble → a real queue-op, and the error split');
@@ -436,6 +508,121 @@ console.log('— ⑦ FUNCTIONAL client: a normalizer-produced bubble → a real 
     clickChip(el);
     ok('…and that chip steers for real as well', out.length === 1 && out[0].op === 'steer' && out[0].id === 'q7', out);
   }
+
+  // ── ⑨c THE CHORD'S SECOND HALF, functionally: send → queued → steer.
+  // A steer NAMES A QUEUED ITEM (there is no "send this text as a steer" verb
+  // anywhere), so the conversion has to survive the round trip through the
+  // harness — and the one thing the user may never be lied about is "we never
+  // got the id back".
+  {
+    const mkSteerView = (over = {}) => {
+      const out = [];
+      const notes = [];
+      const view = Object.assign(Object.create(ChatView.prototype), {
+        sessionId: 'sess-chord', ws: { send: (m) => out.push(m) },
+        _readOnly: false, _disconnected: false, _disposed: false, _chatInput: null,
+        _queue: [], _queueSupported: true, _pendingSteers: new Map(), _typingSince: Date.now(),
+        _getSessionIds: () => ({ backend: 'codex' }), winInfo: { backend: 'codex' },
+        _renderers: { appendSystem: (txt) => notes.push(txt) },
+      }, over);
+      return { view, out, notes };
+    };
+    {
+      const { view, out } = mkSteerView();
+      ChatView.prototype._steerAfterSend.call(view, 'm-99');
+      ok('the chord parks the msgId and sends NOTHING yet (the item has no id until the harness publishes it)', out.length === 0 && view._pendingSteers.has('m-99'));
+      ChatView.prototype._setQueue.call(view, [{ id: 'q99', msgId: 'm-99', preview: 'do it now', kind: 'user' }]);
+      ok('THE CONVERSION: the queue_changed carrying that msgId fires the ORDINARY queue-op steer for its id (no second wire shape)', out.length === 1 && out[0].type === 'queue-op' && out[0].op === 'steer' && out[0].id === 'q99', out);
+      ok('…and the pending entry is cleared, so a later queue update can never steer it twice', view._pendingSteers.size === 0);
+      ChatView.prototype._setQueue.call(view, [{ id: 'q99', msgId: 'm-99', preview: 'do it now', kind: 'user' }]);
+      ok('…proven: a repeat of the same queue publishes nothing more', out.length === 1, out);
+    }
+    {
+      const { view, out } = mkSteerView();
+      ChatView.prototype._steerAfterSend.call(view, 'm-1');
+      ChatView.prototype._steerAfterSend.call(view, 'm-2');
+      ok('two chords in a row park BOTH msgIds (a single pending slot would silently drop the first)', view._pendingSteers.size === 2);
+      ChatView.prototype._setQueue.call(view, [{ id: 'qa', msgId: 'm-1' }, { id: 'qb', msgId: 'm-2' }]);
+      ok('…and both are converted, in queue order', out.length === 2 && out[0].id === 'qa' && out[1].id === 'qb', out);
+    }
+    {
+      const { view, out } = mkSteerView({ _queue: [{ id: 'qz', msgId: 'm-z' }] });
+      ChatView.prototype._steerAfterSend.call(view, 'm-z');
+      ok('a queue update that LANDED FIRST is converted immediately (the chord re-checks on arrival)', out.length === 1 && out[0].id === 'qz', out);
+    }
+    {
+      const { view, out } = mkSteerView({ _queueSupported: false });
+      ChatView.prototype._steerAfterSend.call(view, 'm-x');
+      ok('a session that cannot steer parks nothing at all', view._pendingSteers.size === 0 && out.length === 0);
+    }
+    {
+      const { view } = mkSteerView();
+      ChatView.prototype._steerAfterSend.call(view, 'm-lost');
+      ok('the wait is BOUNDED (a timer, not a leak)', !!view._pendingSteers.get('m-lost'));
+      ChatView.prototype._clearPendingSteers.call(view);
+      ok('…and _clearPendingSteers empties it (dispose calls it — no orphaned callback into a closed window)', view._pendingSteers.size === 0);
+      ok('the wait outlasts a wrapper round trip', ChatView.STEER_CHORD_WAIT_MS >= 5000);
+    }
+    // NO SILENT FAILURE, and no false alarm either: the timeout speaks ONLY
+    // while the turn is still running. Driven for REAL with the wait shrunk
+    // (the ⑧ idiom — the shipped value is pinned above).
+    {
+      const realWait = Object.getOwnPropertyDescriptor(ChatView, 'STEER_CHORD_WAIT_MS');
+      Object.defineProperty(ChatView, 'STEER_CHORD_WAIT_MS', { get: () => 30, configurable: true });
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      const still = mkSteerView();                       // the turn is STILL running
+      const ended = mkSteerView({ _typingSince: null }); // it ended meanwhile
+      const gone = mkSteerView({ _disposed: true });
+      for (const v of [still, ended, gone]) ChatView.prototype._steerAfterSend.call(v.view, 'm-lost');
+      await wait(150);
+      ok('THE HONEST TIMEOUT: the id never came and the turn is STILL running ⇒ the window SAYS the injection did not happen (never a user believing it did)', still.notes.length === 1 && /could not be injected into the running turn/.test(still.notes[0]), still.notes);
+      ok('…and NOT when the turn ended meanwhile — the message then runs next, immediately, which is what "now" asked for (a false alarm is its own failure)', ended.notes.length === 0, ended.notes);
+      ok('…and a disposed view says nothing into a closed window', gone.notes.length === 0);
+      ok('…and nothing was sent on the wire in any of the three (a steer with no id is not a frame)', still.out.length === 0 && ended.out.length === 0 && gone.out.length === 0);
+      ok('the sentence is translated (zh + ja)', read('src/lib/i18n-zh.js').includes('Sent — but it could not be injected into the running turn') && read('src/lib/i18n-ja.js').includes('Sent — but it could not be injected into the running turn'));
+      // …and a CONVERSION inside the window cancels the timer: no apology for
+      // something that worked (the pending entry is the timer's own guard)
+      const won = mkSteerView();
+      ChatView.prototype._steerAfterSend.call(won.view, 'm-ok');
+      ChatView.prototype._setQueue.call(won.view, [{ id: 'qok', msgId: 'm-ok' }]);
+      await wait(150);
+      ok('a steer that DID land never apologises afterwards (the timer is cleared with the pending entry)', won.out.length === 1 && won.out[0].op === 'steer' && won.notes.length === 0, { out: won.out, notes: won.notes });
+      if (realWait) Object.defineProperty(ChatView, 'STEER_CHORD_WAIT_MS', realWait);
+    }
+  }
+
+  // ── ⑨d THE CONTRIBUTED COMMAND + ITS PER-VIEW KEYBINDING ──
+  {
+    const C = await import(path.join(REPO, 'src/lib/contributions.js'));
+    const { STEER_NOW_COMMAND } = await import(path.join(REPO, 'src/lib/chat-view.js'));
+    const cv = read('src/lib/chat-view.js');
+    ok("the chord is a CONTRIBUTED command with a stable id ('chat.steerNow') — a plugin can see it, rebind it and run it", STEER_NOW_COMMAND === 'chat.steerNow' && C.hasCommand('chat.steerNow'));
+    ok('…registered ONCE at module scope (registerCommand rejects a duplicate id BY DESIGN — a per-view registration would throw on the second chat window)', /if \(!hasCommand\(STEER_NOW_COMMAND\)\) \{\s*\n\s*registerCommand\(/.test(cv));
+    ok('it carries a title and an SVG icon (a menu or palette can render it)', !!C.commandTitle('chat.steerNow', {}) && /<svg/i.test(C.getCommand('chat.steerNow').icon || ''));
+    ok("the command's `when` is false when nothing resolves (a chord pressed outside every chat window does nothing)", C.getCommand('chat.steerNow').when({}) === false && C.getCommand('chat.steerNow').when({ event: {} }) === false);
+    const fakeView = { steerComposerText: () => 'RAN', _canSteerComposer: () => true };
+    const deadView = { steerComposerText: () => false, _canSteerComposer: () => false };
+    ok('…and true for a ctx.view that says it can steer', C.getCommand('chat.steerNow').when({ view: fakeView }) === true);
+    ok('…and FALSE for one that cannot (the surface disappears, it does not misfire)', C.getCommand('chat.steerNow').when({ view: deadView }) === false);
+    ok('runCommand routes to THAT view — one verb for keyboard, button and plugin alike', C.runCommand('chat.steerNow', { view: fakeView }) === 'RAN');
+    ok('…and a view that cannot steer answers honestly instead of throwing (runCommand never consults `when`, VS Code semantics)', C.runCommand('chat.steerNow', { view: deadView }) === false);
+    ok("the KEYBINDING is 'alt+enter' → that command, per view, carrying the WINDOW's signal", /registerKeybinding\(\{\s*\n\s*key: 'alt\+enter',\s*\n\s*command: STEER_NOW_COMMAND,/.test(cv) && /signal: winInfo\?\._listenerCtl\?\.signal,/.test(cv));
+    ok('…with a `when` that scopes the chord to THIS view (which is also what makes N simultaneous registrations of one chord legal)', /when: \(ctx\) => steerTargetView\(ctx\) === this && this\._canSteerComposer\(\)/.test(cv));
+    ok('…and dispose() unregisters BOTH the binding and the view (a view can be replaced while its window lives on)', /this\._steerKeyDispose\?\.\(\);/.test(cv) && /LIVE_CHAT_VIEWS\.delete\(this\);/.test(cv));
+    ok('the composer keydown routes through the SAME command, never a private handler', /onSteerChord: \(\) => runCommand\(STEER_NOW_COMMAND, \{ view: this \}\)/.test(cv) && /if \(this\._onSteerChord\) this\._onSteerChord\(\); else this\.steerNow\(\);/.test(read('src/lib/chat-input.js')));
+    // …and it really binds: a synthetic Alt+Enter resolves to it through the
+    // REAL matcher, while the two send keys it must not touch do not.
+    const kb = C.registerKeybinding({ key: 'alt+enter', command: 'chat.steerNow', when: (ctx) => !!ctx.view });
+    const ev = { key: 'Enter', altKey: true, ctrlKey: false, metaKey: false, shiftKey: false, target: {} };
+    ok('a synthetic Alt+Enter resolves to the command through the real matcher', C.resolveKeybinding(ev, { view: fakeView })?.command === 'chat.steerNow');
+    ok('…and plain Enter / Ctrl+Enter / Cmd+Enter / Alt+Shift+Enter do NOT — every existing send key keeps its meaning',
+      !C.resolveKeybinding({ ...ev, altKey: false }, { view: fakeView })
+      && !C.resolveKeybinding({ ...ev, altKey: false, ctrlKey: true }, { view: fakeView })
+      && !C.resolveKeybinding({ ...ev, altKey: false, metaKey: true }, { view: fakeView })
+      && !C.resolveKeybinding({ ...ev, shiftKey: true }, { view: fakeView }));
+    ok('…and a ctx whose view cannot steer resolves to nothing (the `when` chain, both halves)', !C.resolveKeybinding(ev, { view: deadView }));
+    kb();
+  }
 }
 
 console.log('— wiring + docs pins');
@@ -458,6 +645,36 @@ console.log('— wiring + docs pins');
   { const kbfs = read('docs/kb-file-structure.md');
     ok('kb-file-structure carries the wrapper/normalizer/ws essays (the measured app-server facts live there)',
       /THE INPUT QUEUE — QUEUED vs STEERED/.test(kbfs) && /QUEUE STATE IS SESSION STATE, NEVER A MESSAGE/.test(kbfs) && /the ONE new case for QUEUED vs STEERED/.test(kbfs) && /no `remove`/.test(kbfs)); }
+
+  // ── ⑨ THE CHORD: wiring + i18n + docs ──
+  const cinput2 = read('src/lib/chat-input.js');
+  const cv2 = read('src/lib/chat-view.js');
+  ok('the chord is checked BEFORE the plain-Enter branch (that branch tests only !shiftKey and would swallow Alt+Enter as an ordinary send — the bug this ordering exists to prevent)',
+    cinput2.indexOf("e.key === 'Enter' && e.altKey") < cinput2.indexOf("if (e.key === 'Enter' && !e.shiftKey)"));
+  ok('…and it is the ONLY new chord: Tab stays the slash completion, Ctrl/Cmd+Enter stays plain send',
+    /if \(e\.key === 'Tab' \|\| e\.key === 'Enter'\)/.test(cinput2) && /if \(e\.key === 'Enter' && \(e\.ctrlKey \|\| e\.metaKey\)\) \{ e\.preventDefault\(\); this\._send\(\); \}/.test(cinput2)
+    && (cinput2.match(/e\.key === 'Enter' && e\.altKey/g) || []).length === 1);
+  ok('the chord condition excludes every other modifier (Alt+Shift/Alt+Ctrl+Enter are not it)', /e\.key === 'Enter' && e\.altKey && !e\.ctrlKey && !e\.metaKey && !e\.shiftKey && this\.steerChordAllowed/.test(cinput2));
+  ok('BOTH surfaces gate on the ONE capability answer, never on a backend id', /this\._steerBtn\.classList\.toggle\('hidden', !\(live && modes\.allowSteerChord\)\)/.test(cinput2) && !/=== 'codex'|=== 'claude'|=== 'opencode'/.test(cinput2));
+  ok('…which comes from the PURE composerSendModes over the LIVE queue caps (the same object the strip reads)', /_sendModes\(\) \{ return composerSendModes\(this\._queueCaps\); \}/.test(cinput2) && /_canSteerComposer\(\) \{ return !!this\._chatInput\?\.steerChordAllowed; \}/.test(cv2));
+  ok('both faces repaint on BOTH inputs: the streaming flag AND the late-arriving caps (the dead-chip ordering)', /_updateSendModes\(\);\s*\n\s*\}/.test(cinput2) && /this\._renderQueue\(\);[\s\S]{0,400}this\._updateSendModes\(\);/.test(cinput2) && (cinput2.match(/this\._updateSendModes\(\)/g) || []).length >= 4, (cinput2.match(/this\._updateSendModes\(\)/g) || []).length);
+  ok('the send→steer conversion reuses the ONE queue-op sender (no second wire shape anywhere)', /this\._sendQueueOp\('steer', it\.id\);/.test(cv2) && (cv2.match(/type: 'queue-op'/g) || []).length === 1);
+  ok('the ≤768px button carries an SVG icon and an aria-label, never a glyph (§17)', /this\._steerBtn\.innerHTML = UI_ICONS\.bolt;/.test(cinput2) && /setAttribute\('aria-label'/.test(cinput2));
+  ok('the two surfaces are split by VIEWPORT in CSS, theme vars only (§17)',
+    /@media \(max-width: 768px\) \{ \.chat-send-hint \{ display: none; \} \}/.test(read('public/chat.css'))
+    && /@media \(max-width: 768px\) \{ \.chat-steer-btn:not\(\.hidden\) \{ display: inline-flex; \} \}/.test(read('public/chat.css'))
+    && /\.chat-steer-btn\.hidden \{ display: none; \}/.test(read('public/chat.css'))
+    && !/chat-(send-hint|steer-btn)[^}]*#[0-9a-f]{3,6}/i.test(read('public/chat.css')));
+  { const zh2 = read('src/lib/i18n-zh.js'), ja2 = read('src/lib/i18n-ja.js');
+    ok('every new chord string is translated (zh + ja)', ['"Enter queues"', '"Alt+Enter injects now"', '"Send now — inject into the running turn"', '"Sending during a turn"', '"Enter queues it — it runs after this turn"'].every((k) => zh2.includes(k) && ja2.includes(k))); }
+  ok('Session Properties documents it, gated by the SAME predicate (and shows nothing where there is no queue surface)', /composerSendModes\(getBackendMeta\(s\.backend \|\| 'claude'\)\?\.caps\?\.inputModes\)/.test(read('src/lib/session-props.js')) && /if \(sm\.showHint\)/.test(read('src/lib/session-props.js')));
+  { const kbd = read('docs/keyboard-shortcuts.md');
+    ok('docs/keyboard-shortcuts.md carries the chord, the per-harness table and the ≤768px behaviour', /\*\*Alt\+Enter\*\*/.test(kbd) && /Sending while a turn is running/.test(kbd) && /chat\.steerNow/.test(kbd) && /Touch \/ ≤768px/.test(kbd)); }
+  { const kbf = read('docs/kb-features.md');
+    ok('kb-features QUEUED vs STEERED gains the chord, the hint gate and the touch face', /THE CHORD: `Alt\+Enter` = steer/.test(kbf) && /not `queue`\*\*/.test(kbf) && /≤768px: no chords, a BUTTON/.test(kbf)); }
+  { const kbfs2 = read('docs/kb-file-structure.md');
+    ok('kb-file-structure: the chord essays live under chat-input.js AND contributions.js', /THE Alt\+Enter STEER CHORD/.test(kbfs2) && /THE FIRST CORE `registerKeybinding` CHORD/.test(kbfs2)); }
+  ok('CLAUDE.md indexes the new PURE predicate', /composerSendModes/.test(read('CLAUDE.md')));
 }
 
 console.log('— ⑥ the REAL wrapper against the REAL `codex app-server` (evidence-SKIP without the binary)');
@@ -647,6 +864,190 @@ console.log('— ⑧ the Stop button is one-shot while an interrupt is in flight
       try { chrome.kill('SIGKILL'); } catch {}
       try { srv.close(); } catch {}
       try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+    }
+  }
+}
+
+// ⑨e THE CHORD IN A REAL BROWSER. Everything above decides; this proves the
+// keystroke ARRIVES. The failure it exists to catch is a DOM one: the
+// plain-Enter branch tests only `!e.shiftKey`, so before this change Alt+Enter
+// WAS a send — a chord that quietly did the other thing. And the ≤768px
+// measurement is the owner's standing rule for any UI change (2026-09-07).
+console.log('— ⑨e the chord in a REAL browser (trusted keystrokes) + the 375×667 measurement');
+{
+  const CHROME = ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser'].find((p2) => fs.existsSync(p2));
+  if (!CHROME) {
+    console.log('  SKIP: no chrome/chromium on this box — the DOM half of ⑨ did not run');
+  } else {
+    const http = await import('node:http');
+    const net = await import('node:net');
+    const { spawn } = await import('node:child_process');
+    const esbuild = require(path.join(REPO, 'node_modules/esbuild'));
+    const WebSocket = require('ws');
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const freePort = () => new Promise((res, rej) => { const sv = net.createServer(); sv.on('error', rej); sv.listen(0, '127.0.0.1', () => { const pt = sv.address().port; sv.close(() => res(pt)); }); });
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `vs-chord-${process.pid}-`));
+    const bundle = path.join(tmp, 'chat-input.iife.js');
+    const stub = { name: 'stub-build-version', setup(b) { b.onResolve({ filter: /build-version\.js$/ }, () => ({ path: 'build-version', namespace: 'bv' })); b.onLoad({ filter: /.*/, namespace: 'bv' }, () => ({ contents: "export const BUILD_VERSION = 'test';", loader: 'js' })); } };
+    await esbuild.build({ entryPoints: [path.join(REPO, 'src/lib/chat-input.js')], bundle: true, format: 'iife', globalName: 'VS', platform: 'browser', target: 'es2022', outfile: bundle, logLevel: 'silent', loader: { '.css': 'text' }, plugins: [stub] });
+    const js = fs.readFileSync(bundle, 'utf8').replace(/<\/script/gi, '<\\/script');
+    const css = fs.readFileSync(path.join(REPO, 'public/chat.css'), 'utf8').replace(/<\/style/gi, '<\\/style');
+    const base = fs.readFileSync(path.join(REPO, 'public/style.css'), 'utf8').replace(/<\/style/gi, '<\\/style');
+    // A chat window shell so the input area is laid out the way it ships:
+    // a column flex box, the composer at the bottom.
+    const html = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>chord</title>` +
+      `<style>${base}</style><style>${css}</style>` +
+      `<style>html,body{margin:0;height:100%}#host{position:fixed;inset:0;display:flex;flex-direction:column}#list{flex:1;min-height:0}</style>` +
+      `<body><div id="host" class="chat-view"><div id="list"></div></div><script>${js}</script>`;
+    const port = await freePort(), cdpPort = await freePort();
+    const srv = http.createServer((_q, r) => { r.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); r.end(html); }).listen(port, '127.0.0.1');
+    const chrome = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${cdpPort}`, '--no-first-run', '--no-sandbox', '--disable-gpu',
+      '--disable-dev-shm-usage', '--disable-background-timer-throttling', `--user-data-dir=${tmp}/chrome`, 'about:blank'], { stdio: 'ignore' });
+    let ws = null;
+    try {
+      let target = null;
+      for (let i = 0; i < 120 && !target; i++) {
+        try { target = (await (await fetch(`http://127.0.0.1:${cdpPort}/json`)).json()).find((x) => x.type === 'page'); } catch { }
+        if (!target) await sleep(250);
+      }
+      if (!target) throw new Error('chrome never exposed a CDP page target');
+      ws = new WebSocket(target.webSocketDebuggerUrl, { maxPayload: 64 * 1024 * 1024 });
+      await new Promise((r, j) => { ws.on('open', r); ws.on('error', j); });
+      let seq = 0; const pend = new Map();
+      ws.on('message', (d) => { const m = JSON.parse(d); if (m.id && pend.has(m.id)) { pend.get(m.id)(m); pend.delete(m.id); } });
+      const cdp = (method, params = {}) => new Promise((res) => { const id = ++seq; pend.set(id, res); ws.send(JSON.stringify({ id, method, params })); });
+      const evaljs = async (expr) => {
+        const r = await cdp('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true });
+        if (r.result?.exceptionDetails) throw new Error(JSON.stringify(r.result.exceptionDetails).slice(0, 500));
+        return r.result?.result?.value;
+      };
+      await cdp('Runtime.enable'); await cdp('Page.enable');
+      const setViewport = (width, height) => cdp('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: width <= 768 });
+      await setViewport(1280, 800);
+      await cdp('Page.navigate', { url: `http://127.0.0.1:${port}/` });
+      for (let i = 0; i < 80; i++) { if (await evaljs('!!(window.VS && window.VS.ChatInput)').catch(() => false)) break; await sleep(150); }
+
+      // A REAL ChatInput in a REAL document, wired the way ChatView wires it:
+      // onSteerChord stands in for runCommand('chat.steerNow') (the routing
+      // itself is pinned in ⑨d) and onSteerSend for _steerAfterSend.
+      const mount = async (caps) => evaljs(`(() => {
+        document.querySelectorAll('.chat-input-area').forEach((e) => e.remove());
+        window.__sent = []; window.__chord = 0; window.__steerSends = [];
+        const ci = new VS.ChatInput({ send: (m) => window.__sent.push(m) }, 'sess-chord', {
+          onSend(){}, onInterrupt(){},
+          onSteerChord: () => { window.__chord++; ci.steerNow(); },
+          onSteerSend: (id) => window.__steerSends.push(id),
+        });
+        document.getElementById('host').appendChild(ci.element);
+        ci.setQueue([], ${JSON.stringify(caps)});
+        window.__ci = ci;
+        return !!document.querySelector('.chat-input-area');
+      })()`);
+      const type = async (text) => evaljs(`(() => { const ta = document.querySelector('.chat-input'); ta.focus(); ta.value = ${JSON.stringify(text)}; ta.dispatchEvent(new Event('input', { bubbles: true })); return ta.value; })()`);
+      // TRUSTED keystrokes through the browser's own pipeline — a synthetic
+      // KeyboardEvent would bypass exactly the branch order under test.
+      const key = async (mods = 0) => {
+        const common = { windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, key: 'Enter', code: 'Enter', text: '\r', unmodifiedText: '\r', modifiers: mods };
+        await cdp('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...common });
+        await cdp('Input.dispatchKeyEvent', { type: 'char', ...common });
+        await cdp('Input.dispatchKeyEvent', { type: 'keyUp', ...common });
+        await sleep(60);
+      };
+      const ALT = 1, CTRL = 2;
+      const state = () => evaljs(`(() => {
+        const hint = document.querySelector('.chat-send-hint');
+        const btn = document.querySelector('.chat-steer-btn');
+        const cs = (el) => el ? getComputedStyle(el).display : null;
+        return { sent: window.__sent.length, chord: window.__chord, steers: window.__steerSends.slice(),
+                 text: document.querySelector('.chat-input').value,
+                 hintDisplay: cs(hint), hintText: hint ? hint.textContent : null,
+                 btnDisplay: cs(btn) };
+      })()`);
+
+      const codexCaps = require(path.join(REPO, 'src/backend-caps.js')).capsOf('codex').inputModes;
+      const claudeCaps = require(path.join(REPO, 'src/backend-caps.js')).capsOf('claude').inputModes;
+
+      // ── DESKTOP, a codex session mid-turn ──
+      ok('a real ChatInput mounts with codex caps', (await mount(codexCaps)) === true);
+      let st = await state();
+      ok('IDLE: no hint (the chord only exists while a turn runs)', st.hintDisplay === 'none' && st.chord === 0, st);
+      await evaljs(`window.__ci.showTyping('thinking...'); true`);
+      st = await state();
+      ok('MID-TURN: the hint is VISIBLE and names both keys', st.hintDisplay !== 'none' && /Enter queues/.test(st.hintText) && /Alt\+Enter injects now/.test(st.hintText), st);
+      ok('…and the ≤768px bolt button is NOT shown on a desktop viewport (CSS owns WHERE, JS owns WHETHER)', st.btnDisplay === 'none', st);
+
+      await type('steer me');
+      await key(ALT);
+      st = await state();
+      ok('THE CHORD: a trusted Alt+Enter runs the steer verb and sends the composer text ONCE', st.chord === 1 && st.sent === 1 && st.steers.length === 1, st);
+      const frames = await evaljs('JSON.stringify(window.__sent)');
+      ok('…as the ORDINARY chat-input frame (no invented "steer" wire shape) carrying the text', /"type":"chat-input"/.test(frames) && /steer me/.test(frames) && !/"type":"steer"/.test(frames), frames.slice(0, 200));
+      ok('…and the msgId handed to the host is the frame\'s own (the id that will name the queued item)', st.steers[0] === JSON.parse(frames)[0].msgId, { steers: st.steers, frames: frames.slice(0, 160) });
+      ok('…and the composer is cleared, exactly like an ordinary send', st.text === '', st);
+
+      // plain Enter still QUEUES (an ordinary send), Ctrl+Enter still sends
+      await type('plain enter');
+      await key(0);
+      st = await state();
+      ok('PLAIN ENTER still sends (queued) and is NOT a steer', st.sent === 2 && st.chord === 1 && st.steers.length === 1, st);
+      await evaljs(`window.__ci._expanded = true; true`);
+      await type('ctrl enter');
+      await key(CTRL);
+      st = await state();
+      ok('CTRL+ENTER still means send/queue — the chord did not redefine it', st.sent === 3 && st.chord === 1 && st.steers.length === 1, st);
+      await evaljs(`window.__ci._expanded = false; true`);
+
+      // ── DESKTOP, a claude session mid-turn: no hint, and Alt+Enter is a PLAIN send ──
+      ok('a real ChatInput mounts with claude caps', (await mount(claudeCaps)) === true);
+      await evaljs(`window.__ci.showTyping('thinking...'); true`);
+      st = await state();
+      ok('CLAUDE: no hint at all (the owner\'s rule: 不支持queue的就不显示)', st.hintDisplay === 'none' && st.btnDisplay === 'none', st);
+      await type('alt on claude');
+      await key(ALT);
+      st = await state();
+      ok('CLAUDE: Alt+Enter is NOT a chord — it falls through to the ordinary send, and nothing claims a steer', st.chord === 0 && st.steers.length === 0 && st.sent === 1, st);
+
+      // ── ≤768px MEASUREMENT (375×667), the owner's standing rule ──
+      await setViewport(375, 667);
+      await sleep(120);
+      ok('a real ChatInput mounts with codex caps at 375×667', (await mount(codexCaps)) === true);
+      await evaljs(`window.__ci.showTyping('thinking...'); true`);
+      await type('phone steer');
+      await sleep(80);
+      const m = await evaljs(`(() => {
+        const area = document.querySelector('.chat-input-area');
+        const btn = document.querySelector('.chat-steer-btn');
+        const send = document.querySelector('.chat-send-btn');
+        const ta = document.querySelector('.chat-input');
+        const hint = document.querySelector('.chat-send-hint');
+        const r = (el) => { const q = el.getBoundingClientRect(); return { x: Math.round(q.left), y: Math.round(q.top), w: Math.round(q.width), h: Math.round(q.height), right: Math.round(q.right), bottom: Math.round(q.bottom) }; };
+        const lh = parseFloat(getComputedStyle(ta).lineHeight) || 18;
+        return { vw: innerWidth, vh: innerHeight, area: r(area), btn: r(btn), send: r(send), ta: r(ta),
+                 btnDisplay: getComputedStyle(btn).display, hintDisplay: getComputedStyle(hint).display,
+                 rows: +(r(ta).h / lh).toFixed(2), lh,
+                 areaScrollW: area.scrollWidth, areaClientW: area.clientWidth,
+                 docScrollW: document.documentElement.scrollWidth };
+      })()`);
+      ok(`375×667: the bolt button IS shown (${m.btnDisplay}) and the keyboard hint is not (${m.hintDisplay}) — a phone has no Alt key`, m.btnDisplay !== 'none' && m.hintDisplay === 'none', m);
+      ok(`…and it sits BESIDE Send, on the same row (btn ${m.btn.x}..${m.btn.right} @y${m.btn.y}, send @${m.send.x} y${m.send.y})`, m.btn.right <= m.send.x + 2 && Math.abs(m.btn.bottom - m.send.bottom) <= 24, m);
+      ok(`…the button is a real touch target (${m.btn.w}×${m.btn.h} ≥ 32×32)`, m.btn.w >= 32 && m.btn.h >= 32, m.btn);
+      ok(`…the textarea still shows ≥2 rows (${m.rows} rows, ${m.ta.h}px at line-height ${m.lh})`, m.ta.h >= 2 * m.lh - 1, m);
+      ok(`…and NOTHING overflows: the input area does not scroll sideways (${m.areaScrollW} ≤ ${m.areaClientW}) and neither does the page (${m.docScrollW} ≤ ${m.vw})`, m.areaScrollW <= m.areaClientW + 1 && m.docScrollW <= m.vw + 1, m);
+      ok(`…everything stays inside the viewport (send right edge ${m.send.right} ≤ ${m.vw})`, m.send.right <= m.vw && m.btn.x >= 0 && m.area.bottom <= m.vh + 1, m);
+      // the button runs the SAME verb
+      await evaljs(`document.querySelector('.chat-steer-btn').click(); true`);
+      st = await state();
+      ok('the touch button runs the SAME verb as the chord (one command, two faces)', st.chord === 1 && st.steers.length === 1 && st.sent === 1, st);
+      // …and it disappears with the turn
+      await evaljs(`window.__ci.hideTyping(); true`);
+      ok('…and it disappears when the turn ends', (await evaljs(`getComputedStyle(document.querySelector('.chat-steer-btn')).display`)) === 'none');
+    } catch (e) {
+      ok('the browser leg ran', false, String(e.message || e).slice(0, 400));
+    } finally {
+      try { ws?.close(); } catch { }
+      try { chrome.kill('SIGKILL'); } catch { }
+      try { srv.close(); } catch { }
+      try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { }
     }
   }
 }

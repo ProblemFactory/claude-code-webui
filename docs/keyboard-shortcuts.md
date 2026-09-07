@@ -23,6 +23,29 @@
 | **Tab** / **Enter** (in autocomplete) | Accept selected slash command |
 | **Arrow Up/Down** (in autocomplete) | Navigate slash command list |
 | **Ctrl+V** | Paste image as attachment |
+| **Alt+Enter** | *(while a turn is running, harnesses that support steering)* Send **now** — inject into the running turn instead of queueing it |
+
+### Sending while a turn is running
+
+`Enter` always sends. What the agent does with a message sent **during** a turn
+depends on the harness, and the composer says so in a one-line hint under the
+box while the turn runs:
+
+| Harness | `Enter` | `Alt+Enter` | Hint shown |
+|---------|---------|-------------|------------|
+| Codex | queued — runs after this turn | **injects it into the running turn** (the agent sees it at its next reply) | `Enter queues · Alt+Enter injects now` |
+| OpenCode (ACP) | queued — runs after this turn | *(nothing special — plain send)* | `Enter queues` |
+| Claude Code | the CLI holds it; no queue state is published | *(nothing special — plain send)* | none |
+| Terminal | n/a | n/a | none |
+
+The chord is gated on the harness's capability row (`inputModes.steer`) **and**
+on the running wrapper advertising the queue — never on a backend name — so it
+is simply not a chord where it could not work, and `Ctrl/Cmd+Enter` keeps
+meaning "send" everywhere. It is a contributed command (`chat.steerNow`), so a
+plugin can rebind it or run it.
+
+**Touch / ≤768px:** no chords — a bolt button appears beside **Send** while a
+turn runs on a steer-capable session and does the same thing.
 
 ## Virtual Desktop Shortcuts
 

@@ -173,6 +173,33 @@ export function styleAppliesLive(caps, wrapperLive) {
   return !!(caps && caps.live) && wrapperLive !== false;
 }
 
+/** PURE (DOM-free, suite-tested): what the COMPOSER may do while a turn is
+ *  running, from ONE `inputModes` row. The caller passes the caps it has
+ *  already intersected with the RUNNING wrapper's advert (chat-view's
+ *  `_queueCaps()` — the very object the queue strip's Steer buttons read), so
+ *  the chord, the hint and the strip can never disagree about this session.
+ *    steerSegment / allowSteerChord — Alt+Enter injects into the running turn
+ *      (`steer`). A chord that would silently degrade to a plain send is worse
+ *      than no chord, so the two are the SAME fact.
+ *    queueSegment — say that Enter queues. Gated on `queueOps`, not on `queue`:
+ *      claude's CLI really does hold a mid-turn message, but it publishes no
+ *      queue and takes no operation on it, so there is no strip, no live chip
+ *      and nothing to act on — a line announcing "it is queued" with nothing on
+ *      screen to show it is a promise we cannot keep (the 2.361.4
+ *      accept-and-ignore lesson, in text form).
+ *    showHint — draw the line at all. `false` ⇒ no hint AND no chord (claude,
+ *      shell, and any unknown backend).
+ *  WHERE the two surfaces appear is CSS's business, not this predicate's: the
+ *  hint is the desktop face and the bolt button beside Send is the ≤768px one
+ *  (chat.css, same shape as `.chat-attach-btn`). */
+export function composerSendModes(caps) {
+  const queue = !!(caps && caps.queue);
+  const steer = !!(caps && caps.steer);
+  const queueOps = !!(caps && caps.queueOps);
+  const queueSegment = queue && queueOps;
+  return { queueSegment, steerSegment: steer, allowSteerChord: steer, showHint: queueSegment || steer };
+}
+
 /** PURE: WHICH FACT is the response style a panel is showing? `live` = what the
  *  running session was started/updated with (server truth, '' = no key was ever
  *  sent), `picked` = the pick saved for this conversation (undefined = never

@@ -10,6 +10,7 @@ import { ChatStatusBar } from './chat-status-bar.js';
 import { UI_ICONS } from './icons.js';
 import { t } from './i18n.js';
 import { agentMemoryPathRes, getBackendMeta } from './agent-meta.js';
+import { registerCommand, registerKeybinding, runCommand, hasCommand } from './contributions.js';
 import { mcpParts, messageKind, foldToggleFor, countKinds, runSummaryLabel } from './chat-run-summary.js';
 import { collabTrafficStats, collabHeadText, collabRunPart, subAgentStreamLabel } from '../collab-row.js';
 
@@ -19,6 +20,51 @@ import { collabTrafficStats, collabHeadText, collabRunPart, subAgentStreamLabel 
 // regardless of which session's file op touches it.
 const MEMORY_PATH_RES = agentMemoryPathRes();
 const isMemoryPath = (fp) => MEMORY_PATH_RES.some((re) => re.test(fp));
+
+// ── THE STEER CHORD (2026-09-07 owner ask: "顺便加入一个queue的快捷键,
+//    不支持queue的就不显示") ───────────────────────────────────────────────
+// A CONTRIBUTED command, not a private handler: plugins can see it, rebind it
+// and run it (contributions.js §Ph1), and the composer's own Alt+Enter routes
+// through the SAME id, so there is exactly ONE definition of what the chord
+// does. The command is registered ONCE for the app — registerCommand rejects a
+// duplicate id BY DESIGN, so a per-view registration would throw on the second
+// chat window; the per-view part is the KEYBINDING, which carries the view's
+// AbortSignal and a `when` that scopes the chord to the window the keystroke
+// happened in.
+export const STEER_NOW_COMMAND = 'chat.steerNow';
+// Every MOUNTED ChatView, so a document-level keystroke can find the view it
+// belongs to (the dispatcher's ctx is app-wide: `{ app, event }`). Entries are
+// added at construction and removed in dispose() — a Set of live views, never
+// a "last focused" guess.
+const LIVE_CHAT_VIEWS = new Set();
+
+/** The view a command invocation is about: an explicit `ctx.view` (the
+ *  composer route hands itself in) or the mounted view whose container
+ *  contains the keystroke's target. Null when neither answers — a chord
+ *  pressed outside every chat window does nothing, loudly to nobody. */
+function steerTargetView(ctx) {
+  if (typeof ctx?.view?.steerComposerText === 'function') return ctx.view;
+  const target = ctx?.event?.target;
+  if (!target) return null;
+  for (const v of LIVE_CHAT_VIEWS) {
+    if (v._disposed) continue;
+    try { if (v._container?.contains?.(target)) return v; } catch { }
+  }
+  return null;
+}
+
+if (!hasCommand(STEER_NOW_COMMAND)) {
+  registerCommand({
+    id: STEER_NOW_COMMAND,
+    title: () => t('Send now — inject into the running turn'),
+    icon: UI_ICONS.bolt,
+    // `when` gates SURFACES (the keybinding); runCommand never consults it, so
+    // a plugin calling it on a harness that cannot steer gets the same honest
+    // no-op the composer would give.
+    when: (ctx) => !!steerTargetView(ctx)?._canSteerComposer(),
+    run: (ctx) => steerTargetView(ctx)?.steerComposerText() ?? false,
+  });
+}
 
 // How long a just-un-hidden (desktop-resumed) chat window is treated as
 // "still re-measuring": every AUTOMATIC paging trigger no-ops and the pinned
@@ -151,6 +197,16 @@ class ChatView {
     const container = document.createElement('div');
     container.className = 'chat-view';
     this._container = container;
+    // Mounted: a document-level chord can now resolve to this view by its
+    // container (see steerTargetView). Registered BEFORE the read-only early
+    // return so a view-only window answers the chord honestly (it has no
+    // composer ⇒ `_canSteerComposer()` is false) instead of being invisible
+    // and letting the chord land on some other window.
+    LIVE_CHAT_VIEWS.add(this);
+    // msgId → the timer waiting for that message to appear in the harness's
+    // queue so it can be converted to a steer (see _steerAfterSend). A MAP,
+    // not one slot: two quick chords must both land.
+    this._pendingSteers = new Map();
 
     // Settings listeners are tracked and removed in dispose() — the
     // SettingsManager keeps them in a permanent Set, so untracked listeners
@@ -693,8 +749,24 @@ class ChatView {
       isTouch: () => !!this.app?.isTouch,
       getTouchEnterSends: () => !!this.app?.settings?.get('chat.touchEnterSends'),
       onQueueOp: (op, id) => this._sendQueueOp(op, id),
+      // Alt+Enter in the composer runs the SAME contributed command the
+      // registered keybinding does (owner: one verb, rebindable by plugins).
+      onSteerChord: () => runCommand(STEER_NOW_COMMAND, { view: this }),
+      onSteerSend: (msgId) => this._steerAfterSend(msgId),
     });
     this._chatInput.popupContainer = container;
+
+    // THE CHORD'S KEYBINDING. Per view (its `when` scopes it to this window,
+    // and the binding leaves with the view), bound to the window's
+    // AbortController AND disposed explicitly — a view can be replaced while
+    // its window lives on. Registering the same chord from several open chat
+    // windows is legal precisely because each carries a `when`.
+    this._steerKeyDispose = registerKeybinding({
+      key: 'alt+enter',
+      command: STEER_NOW_COMMAND,
+      when: (ctx) => steerTargetView(ctx) === this && this._canSteerComposer(),
+      signal: winInfo?._listenerCtl?.signal,
+    });
     this._setupChatDrop(container);
 
     // Search (extracted to ChatSearch)
@@ -1123,6 +1195,64 @@ class ChatView {
   _setQueue(items) {
     this._queue = Array.isArray(items) ? items : [];
     this._chatInput?.setQueue(this._queue, this._queueCaps());
+    // A queue update is the ONLY event that can tell us the id of a message
+    // the chord just sent (see _steerAfterSend).
+    this._drainPendingSteers();
+  }
+
+  // ── THE Alt+Enter CHORD, VIEW SIDE ──────────────────────────────────────
+  /** Can the composer steer right now? ONE definition, shared by the command's
+   *  `when`, the keybinding's `when` and both composer surfaces — it asks the
+   *  ChatInput, which asks the PURE `composerSendModes` over the SAME
+   *  `_queueCaps()` intersection the strip's Steer buttons use. */
+  _canSteerComposer() { return !!this._chatInput?.steerChordAllowed; }
+
+  /** Run the chord. @returns {boolean} whether a message went out. */
+  steerComposerText() { return !!this._chatInput?.steerNow(); }
+
+  /** THE CHORD'S SECOND HALF. A steer NAMES A QUEUED ITEM — codex's
+   *  `turn/steer` takes the app-server's queued-submission id and there is no
+   *  "send this text as a steer" verb anywhere in the protocol — so the chord
+   *  sends on the ordinary path and we convert the item the harness reports
+   *  back, with the SAME 'queue-op' frame the strip button and the bubble chip
+   *  send. Bounded: if the item never appears we SAY so rather than leave the
+   *  user believing an injection happened (no-silent-failures) — unless the
+   *  turn ended meanwhile, which needs no apology (the message runs next,
+   *  immediately, which is what "now" asked for). */
+  _steerAfterSend(msgId) {
+    const id = String(msgId || '');
+    if (!id || !this._queueCaps().steer || this._disposed) return;
+    if (this._pendingSteers.has(id)) return;
+    this._pendingSteers.set(id, setTimeout(() => {
+      this._pendingSteers.delete(id);
+      if (this._disposed) return;
+      if (!this._typingSince) return;   // the turn ended: it simply runs next
+      this._renderers?.appendSystem?.(t('Sent — but it could not be injected into the running turn; it will run when the turn ends.'));
+    }, ChatView.STEER_CHORD_WAIT_MS));
+    // A queue_changed can land BEFORE the send resolves here — check now too.
+    this._drainPendingSteers();
+  }
+
+  /** How long the chord waits for its message to show up in the harness's
+   *  published queue before it admits the injection did not happen. Sized
+   *  above a round-trip through the wrapper's `thread/queue/list` republish. */
+  static get STEER_CHORD_WAIT_MS() { return 8000; }
+
+  _drainPendingSteers() {
+    if (!this._pendingSteers?.size) return;
+    for (const it of this._queue || []) {
+      const mid = String(it?.msgId || '');
+      if (!mid || !this._pendingSteers.has(mid)) continue;
+      clearTimeout(this._pendingSteers.get(mid));
+      this._pendingSteers.delete(mid);
+      this._sendQueueOp('steer', it.id);
+    }
+  }
+
+  _clearPendingSteers() {
+    if (!this._pendingSteers) return;
+    for (const timer of this._pendingSteers.values()) clearTimeout(timer);
+    this._pendingSteers.clear();
   }
 
   /** THE ONE WRITER of `_queueSupported` — and the reason it exists: the
@@ -4450,6 +4580,13 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
   dispose() {
     this._statusBar?.dispose?.();
     this._disposed = true;
+    LIVE_CHAT_VIEWS.delete(this);
+    // The keybinding is signal-bound to the WINDOW, but a view can be replaced
+    // while its window lives on — an orphaned binding would keep answering the
+    // chord for a disposed view.
+    try { this._steerKeyDispose?.(); } catch { }
+    this._steerKeyDispose = null;
+    this._clearPendingSteers();
     if (this._blankProbe) { clearTimeout(this._blankProbe); this._blankProbe = null; }
     if (this._autoFillT1) { clearTimeout(this._autoFillT1); this._autoFillT1 = null; }
     if (this._autoFillT2) { clearTimeout(this._autoFillT2); this._autoFillT2 = null; }
