@@ -960,6 +960,7 @@ class ChatView {
         this._onCompactProgress(msg);
       } else if (msg.type === 'exited' && msg.sessionId === sessionId) {
         this._hideTyping();
+        this._retireCompactionStage();
         if (msg.reason === 'not_logged_in') {
           this._renderers.appendSystem(t('Not logged in — please log in to continue.'));
           this._setReadOnly();
@@ -3465,6 +3466,27 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
       error: msg.error || null,
     };
     this._renderers?.setCompactStage?.(this._compactStage);
+  }
+
+  /** A CLAIM ABOUT *RIGHT NOW* DIES WITH ITS PRODUCER (§2.11, round 7). The
+   *  session is over, so a stage that says a compaction is RUNNING is a live
+   *  claim about a process that is gone: `compactInFlight()` stays true and
+   *  every "Prompt is too long" card built in this view afterwards opens on
+   *  "Compacting: running <hook> hooks…" instead of the rewind-and-retry
+   *  guidance the card exists to give. The server retires it at its own
+   *  teardown too, but a server that CRASHED sends no frame at all — and
+   *  'exited' is the one thing this view always learns.
+   *
+   *  Same shape the server would have sent: ENDED, never "finished" (round 5 —
+   *  nothing told us it worked), and ONLY when one was actually in flight, so
+   *  a session that never compacted is never made to claim that it did. Named
+   *  (not inlined at the exit) so the call site is greppable: this is the
+   *  client twin of the server's `retireCompaction`, and the same law applies —
+   *  a THIRD place learning the session is over must call THIS. */
+  _retireCompactionStage() {
+    if (!this._renderers?.compactInFlight?.()) return false;
+    this._onCompactProgress({ event: 'compact_end', hookType: null, hint: null, result: null, error: null });
+    return true;
   }
 
   /** Replace a finished agent card's live activity with its终态 (2.233.1).

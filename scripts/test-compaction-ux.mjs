@@ -50,7 +50,16 @@ const read = (f) => fs.readFileSync(path.join(REPO, f), 'utf8');
   ok(ws.includes('streamingKind: isStreaming ? (session._streamingKind || null) : null'), 'attach meta carries streamingKind (reconnect mid-compaction keeps the guard)');
   // S5: the parse pipelines live in src/server/stdout/<protocol>.js
   const so = ['claude-stream-json', 'codex-events', 'acp-events'].map((m) => read(`src/server/stdout/${m}.js`)).join('\n');
-  ok(so.includes('session._streamingKind = null;'), 'turn end resets the kind with the label');
+  // ROUND 7: the turn-end exits no longer write the field — they call the ONE
+  // named retirement, which clears it AND broadcasts (a clear that does not
+  // speak left the client stuck on "running <hook> hooks…"). This pin is the
+  // twin of test-stdout-registry's CENSUS: that suite counts the writes, this
+  // one checks the exits still go through the function. Both, or a refactor
+  // moves the guarantee out from under one of them.
+  ok(/retireCompaction\(session, id\); \/\/ says so if one was in flight/.test(so)
+    && /if \(!eff\.streaming\) \{ session\._fallbackStopFired = false; retireCompaction\(session, id\); \}/.test(so)
+    && /const endCompaction = \(sess, sid/.test(so),
+    'turn end resets the kind THROUGH the named retirement (which also broadcasts) — both lifecycle exits, one writer');
   // AUTO compaction (round 4): the /compact SEND SITE above can only label a
   // compaction the user typed. The one that actually happens to a long session
   // — trigger:"auto" in the real production capture — is announced only by the

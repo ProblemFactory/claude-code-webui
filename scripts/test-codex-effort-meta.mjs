@@ -671,8 +671,39 @@ console.log('— ⑩ version markers resolve; this branch squats nothing');
   ok(staleLines.length === 0, 'no site still names the number master took as a live cross-reference', JSON.stringify(staleLines).slice(0, 300));
 
   const { execFileSync } = await import('node:child_process');
-  const git = (...a) => execFileSync('git', ['-C', REPO, ...a], { maxBuffer: 64 * 1024 * 1024, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  // maxBuffer, EXPLICITLY (round 7): this helper's biggest read is
+  // `git show <ref>:CHANGELOG.md`, and that file passed node's DEFAULT 1 MiB
+  // stdout buffer in 2026-09 (1,052,996 bytes on origin/master). Over the
+  // default, execFileSync does not return a truncated string — it THROWS
+  // `spawnSync git ENOBUFS`, which killed this suite (exit 1) after 97 green
+  // asserts and made the mandatory pre-push gate unpassable for every push,
+  // for a reason that names neither git nor the CHANGELOG. A helper that reads
+  // a file which only ever grows states its own bound.
+  const GIT_MAXBUF = 64 * 1024 * 1024;
+  const git = (...a) => execFileSync('git', ['-C', REPO, ...a], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: GIT_MAXBUF });
   const REF = ['origin/master', 'master'].find((r) => { try { git('rev-parse', '--verify', r); return true; } catch { return false; } });
+  // REGRESSION (round 7): the helper must SURVIVE the biggest read it makes.
+  // Measured as the consequence — the read either returns the whole file or
+  // this leg says so; before the explicit maxBuffer it threw and the process
+  // died, so nothing below here ever ran.
+  let refChangelog = null, refErr = null;
+  if (REF) { try { refChangelog = git('show', `${REF}:CHANGELOG.md`); } catch (e) { refErr = e; } }
+  if (REF) {
+    ok(`the integration branch's CHANGELOG reads through the git helper (${refChangelog ? refChangelog.length : 0} bytes) — a suite that CRASHES here reports nothing at all`,
+      typeof refChangelog === 'string' && refChangelog.length > 0, `${refErr?.code || refErr?.message || 'empty'}`);
+    if (refChangelog && refChangelog.length > 1024 * 1024) {
+      // NEGATIVE CONTROL: the file really is over the default, and the default
+      // really does fail — so the explicit bound above is load-bearing, not
+      // decoration. (SKIPs loudly if the CHANGELOG ever shrinks back under
+      // 1 MiB: the control would then be measuring nothing.)
+      let defErr = null;
+      try { execFileSync('git', ['-C', REPO, 'show', `${REF}:CHANGELOG.md`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }); } catch (e) { defErr = e; }
+      ok(`NEGATIVE CONTROL: the SAME read with node's DEFAULT maxBuffer fails with ENOBUFS (${refChangelog.length} bytes > 1 MiB) — the explicit bound is what keeps this suite runnable`,
+        defErr?.code === 'ENOBUFS', `${defErr?.code || 'no error at all'}`);
+    } else {
+      console.log(`  SKIP: ${REF}:CHANGELOG.md is ${refChangelog ? refChangelog.length : 0} bytes — under node's 1 MiB default, so the ENOBUFS control would measure nothing`);
+    }
+  }
   /** Everything on the INTEGRATION BRANCH that already claims this number:
    *  release commit subjects (`<n>: …`) and CHANGELOG headings (`## <n> — …`).
    *  A branch's own commit is not on that branch yet, so this is exactly "did

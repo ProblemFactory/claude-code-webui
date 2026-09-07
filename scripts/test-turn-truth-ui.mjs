@@ -96,6 +96,30 @@ const done = () => { console.log(failed ? `\n${failed} FAILED (${passed} passed)
     JSON.stringify([bad, good]));
 }
 
+// ── ⓪ b THE THIRD EXIT OF THE COMPACTION STAGE — also chrome-free ───────
+//    Round 6 closed the two exits the SERVER can see. Session death is the
+//    third one and it is client-side: the wrapper dies mid-compaction, no
+//    record ever arrives, and the view keeps `_compactStage` on the last
+//    mid-compaction frame — `compactInFlight()` stays true forever, so every
+//    later "Prompt is too long" card opens on "Compacting: running <hook>
+//    hooks…" for a process that is gone. The behaviour is measured in chrome
+//    below; this guard pins the WIRING, because a named retirement nobody
+//    calls is the 2.331.0 lesson verbatim.
+{
+  const cv = fs.readFileSync(path.join(repo, 'src/lib/chat-view.js'), 'utf8');
+  const exitedAt = cv.indexOf("msg.type === 'exited'");
+  const branch = exitedAt >= 0 ? cv.slice(exitedAt, exitedAt + 900) : '';
+  check('the client retirement is ONE named method (the twin of the server’s retireCompaction)',
+    /_retireCompactionStage\(\)\s*\{/.test(cv) && /compactInFlight\?\.\(\)/.test(cv), 'no _retireCompactionStage in chat-view.js');
+  check("…and the 'exited' branch CALLS it (a retirement nobody calls is the 2.331.0 unstaged-wiring class)",
+    exitedAt >= 0 && /this\._retireCompactionStage\(\)/.test(branch), `exitedAt=${exitedAt}`);
+  // NEGATIVE CONTROL for this guard: the round-6 shape (the same branch with
+  // no call) must be REPORTED, or the guard is decoration.
+  const bad = "} else if (msg.type === 'exited' && msg.sessionId === sessionId) {\n  this._hideTyping();\n  this._renderers.appendSystem('Session ended.');\n  this._setReadOnly();\n}";
+  check('NEGATIVE CONTROL: the guard detects the round-6 branch (hideTyping + system line + read-only, and no retirement)',
+    !/this\._retireCompactionStage\(\)/.test(bad));
+}
+
 const CHROME = ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser'].find((p) => fs.existsSync(p));
 if (!CHROME) { console.log('  SKIP: no chrome/chromium — the browser measurement did not run'); done(); }
 
@@ -459,6 +483,59 @@ if (!opened?.ok) { console.error(pageErrors.join('\n')); done(); }
   check('…compactInFlight() is false again, so a card built AFTERWARDS opens on the rewind-and-retry guidance the user actually needs',
     m?.endInFlight === false && APOLOGY.test(m?.laterTxt || '') && !/hooks/i.test(m?.laterTxt || ''), JSON.stringify([m?.endInFlight, m?.laterTxt]));
   check(`…and that sentence still fits the 375px viewport (${m?.w}px)`, m?.inViewport === true && m?.w > 0 && m.w <= 375, m);
+}
+
+// ── ②d SESSION DEATH IS THE THIRD EXIT (round 7) ──────────────────────
+// The wrapper dies mid-compaction: no outcome record, no turn end, nothing —
+// the producer is gone, so no frame can ever arrive. Before this the view kept
+// the last mid-compaction frame forever (compactInFlight() true), and every
+// later guidance card opened on "Compacting: running <hook> hooks…" for a
+// process that no longer exists. Measured on the real client at 375×667.
+{
+  const m = await evaljs(`(async () => {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const v = window.__v;
+    for (const el of [...v._messageList.querySelectorAll('.chat-ctx-full')]) el.closest('.chat-msg').remove();
+    v._compactStage = null; v._renderers.setCompactStage(null);
+    // mid-compaction, exactly the shape the server broadcasts
+    v._onCompactProgress({ event: 'compact_start', hookType: null, hint: null, result: null, error: null });
+    v._onCompactProgress({ event: 'hooks_start', hookType: 'PreCompact:guard', hint: null, result: null, error: null });
+    const watching = v._renderers.appendContextFullCard('Prompt is too long');
+    await sleep(60);
+    const midTxt = watching.querySelector('.chat-ctx-full-hint').textContent.trim();
+    const midInFlight = v._renderers.compactInFlight();
+    // …and now the session dies. THE call the 'exited' branch makes.
+    const retired = v._retireCompactionStage();
+    await sleep(60);
+    const watchedTxt = watching.querySelector('.chat-ctx-full-hint').textContent.trim();
+    const endInFlight = v._renderers.compactInFlight();
+    const later = v._renderers.appendContextFullCard('Prompt is too long');
+    await sleep(60);
+    const laterTxt = later.querySelector('.chat-ctx-full-hint').textContent.trim();
+    // NEGATIVE CONTROL: a view that never compacted must not be made to claim
+    // one ended. Fresh state, same call.
+    v._compactStage = null; v._renderers.setCompactStage(null);
+    const retiredAgain = v._retireCompactionStage();
+    const virgin = v._renderers.appendContextFullCard('Prompt is too long');
+    await sleep(60);
+    const virginTxt = virgin.querySelector('.chat-ctx-full-hint').textContent.trim();
+    const r = later.querySelector('.chat-ctx-full-hint').getBoundingClientRect();
+    for (const el of [watching, later, virgin]) el.remove();
+    return { midTxt, midInFlight, retired, watchedTxt, endInFlight, laterTxt, retiredAgain, virginTxt,
+             stage: JSON.stringify(v._compactStage), w: Math.round(r.width), inViewport: r.left >= -1 && r.right <= innerWidth + 1 };
+  })()`);
+  const APOLOGY2 = /1.2 minutes|1–2|1〜2|do not press Stop|不要按 Stop|Stop を押さないで/;
+  check('CONTROL: mid-compaction the card really is holding a LIVE stage (the failure needs something to get stuck on)',
+    m?.midInFlight === true && /PreCompact:guard/.test(m?.midTxt || ''), JSON.stringify([m?.midInFlight, m?.midTxt]));
+  check('session death RETIRES the stage: the watching card stops claiming a compaction is running',
+    m?.retired === true && m?.endInFlight === false && !/hooks/i.test(m?.watchedTxt || ''), JSON.stringify([m?.retired, m?.endInFlight, m?.watchedTxt]));
+  check('…and it says ENDED, never FINISHED — nothing told us the compaction worked (round 5’s law at the third exit)',
+    /ended|结束|終了/i.test(m?.watchedTxt || '') && !/finished|完成了|完了しました/.test(m?.watchedTxt || ''), m?.watchedTxt);
+  check('…so a card built after the session died opens on the rewind-and-retry guidance again',
+    APOLOGY2.test(m?.laterTxt || '') && !/hooks/i.test(m?.laterTxt || ''), m?.laterTxt);
+  check('NEGATIVE CONTROL: a view that never compacted is NOT made to claim one ended (the retirement is guarded, not unconditional)',
+    m?.retiredAgain === false && APOLOGY2.test(m?.virginTxt || '') && !/ended|结束|終了/i.test(m?.virginTxt || ''), JSON.stringify([m?.retiredAgain, m?.virginTxt]));
+  check(`…and the restored guidance still fits the 375px viewport (${m?.w}px)`, m?.inViewport === true && m?.w > 0 && m.w <= 375, m);
 }
 
 // ── ③ retraction: two kinds, two treatments ─────────────────────────────────

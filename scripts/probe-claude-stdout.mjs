@@ -40,12 +40,16 @@
 //
 // Output (stdout, one line): {"ok":true, version, args, cwd, toolUses,
 //   toolResults, types:{<type>:<count>}, raw, rawSkip, cleaned} | {"skip":"<reason>"}
-//   `cleaned` = {cwd, swept, spared:[{name,ageMs}], staleMs} — the sweep's own
-//   rule, REPORTED: `swept` is what it removed, `spared` is what it deliberately
-//   left (a concurrently running probe's cwd), `staleMs` the threshold that
-//   decides between them. A reader that asserts absolute absence instead of
-//   asking for this rule goes red on exactly the case the sweep exists to
-//   spare — and blames the sweep for it (round 6).
+//   `cleaned` = {cwd, swept, spared:[{name,ageMs}], staleMs, sweptAt} — the
+//   sweep's own VERDICT, REPORTED: `swept` is what it removed, `spared` is what
+//   it deliberately left (a concurrently running probe's cwd) with the age as
+//   measured AT SWEEP TIME, `staleMs` the threshold that decided between them
+//   and `sweptAt` the clock it decided on. A reader that asserts absolute
+//   absence instead of asking for this rule goes red on exactly the case the
+//   sweep exists to spare — and blames the sweep for it (round 6); a reader
+//   that re-derives staleness on its OWN, later clock does the same thing to
+//   any leftover that crosses the threshold during the probe's own runtime
+//   (round 7) — exclude `spared` by NAME, it is a decision, not a measurement.
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -87,10 +91,30 @@ const RAW_DIR = path.join(os.tmpdir(), `${PREFIX}raw-${process.getuid?.() ?? 0}`
 // ── SWEEP of everything earlier versions of this probe left behind. Runs
 //    BEFORE the CLI check, so even a machine with no claude cleans up.
 //    STALE ONLY (>10min): a concurrently running probe's cwd must survive.
+//
+//    THE SWEEP REPORTS ITS OWN VERDICT, MEASURED ON ITS OWN CLOCK (round 7).
+//    Round 6 exported the THRESHOLD (`staleMs`) but not the CLOCK: the sweep
+//    decided at probe START and `spared` was rebuilt at probe END, so a
+//    leftover aged between `STALE_MS - <probe runtime>` and `STALE_MS` was
+//    spared here and then reported as older than the threshold — and both
+//    readers in test-stdout-registry, re-deriving staleness at ASSERTION time,
+//    flagged the very leftover the sweep had deliberately kept. That is the
+//    same defect class round 6 fixed (a reader inventing its own rule), one
+//    layer down. So: ONE `SWEPT_AT` timestamp, `spared` built from the SAME
+//    pass that decided (name + the age as measured THEN), and `sweptAt` in the
+//    report so a reader can use the sweep's clock instead of its own.
 const STALE_MS = 10 * 60 * 1000;
-const ageOf = (p) => { try { return Date.now() - fs.statSync(p).mtimeMs; } catch { return -1; } };
+const SWEPT_AT = Date.now();
+const ageOf = (p, now = SWEPT_AT) => { try { return now - fs.statSync(p).mtimeMs; } catch { return -1; } };
 const stale = (p) => ageOf(p) > STALE_MS;
 let swept = 0;
+/** What the sweep DELIBERATELY LEFT: probe project dirs younger than the
+ *  threshold at the moment it looked, i.e. a probe running right now (this
+ *  suite's own leg runs on every non-docs push, and two worktrees pushing
+ *  minutes apart really do overlap). This is the sweep's DECISION LIST, not a
+ *  re-measurement: a reader excludes these by NAME and never asks the clock
+ *  again about them. */
+const spared = [];
 for (const d of (() => { try { return fs.readdirSync(os.tmpdir(), { withFileTypes: true }); } catch { return []; } })()) {
   const p = path.join(os.tmpdir(), d.name);
   if (p === RAW_DIR) continue;
@@ -98,7 +122,10 @@ for (const d of (() => { try { return fs.readdirSync(os.tmpdir(), { withFileType
 }
 for (const d of (() => { try { return fs.readdirSync(PROJECTS, { withFileTypes: true }); } catch { return []; } })()) {
   const p = path.join(PROJECTS, d.name);
-  if (d.isDirectory() && d.name.startsWith(PROJ_PREFIX) && stale(p)) swept += purgeProject(p);
+  if (!d.isDirectory() || !d.name.startsWith(PROJ_PREFIX)) continue;
+  const ageMs = ageOf(p);
+  if (ageMs > STALE_MS) swept += purgeProject(p);
+  else spared.push({ name: d.name, ageMs });
 }
 // Round 5 put the raw capture at `<tmp>/vs-wire-probe.last.jsonl` — a name the
 // sweep above cannot match (a FILE, and `vs-wire-probe.` ≠ `vs-wire-probe-`).
@@ -107,19 +134,6 @@ for (const d of (() => { try { return fs.readdirSync(PROJECTS, { withFileTypes: 
 // symlink→directory raises EISDIR) — and we no longer write there either way.
 try { fs.rmSync(path.join(os.tmpdir(), 'vs-wire-probe.last.jsonl'), { force: true }); } catch { }
 
-/** What the sweep DELIBERATELY LEFT: probe project dirs younger than the
- *  threshold, i.e. a probe running right now (this suite's own leg runs on
- *  every non-docs push, and two worktrees pushing minutes apart really do
- *  overlap). Reported so a reader can apply the sweep's RULE instead of
- *  asserting absolute absence. */
-const sparedProjects = () => {
-  const out = [];
-  for (const d of (() => { try { return fs.readdirSync(PROJECTS, { withFileTypes: true }); } catch { return []; } })()) {
-    if (!d.isDirectory() || !d.name.startsWith(PROJ_PREFIX)) continue;
-    out.push({ name: d.name, ageMs: ageOf(path.join(PROJECTS, d.name)) });
-  }
-  return out;
-};
 
 let cwd = null;
 const sessionIds = new Set();
@@ -132,7 +146,7 @@ function cleanupRun() {
     purgeProject(path.join(PROJECTS, encode(cwd)), [...sessionIds]);
     if (path.dirname(cwd) === os.tmpdir() && path.basename(cwd).startsWith(PREFIX)) rmDir(cwd);
   }
-  cleaned = { cwd, swept, spared: sparedProjects(), staleMs: STALE_MS };
+  cleaned = { cwd, swept, spared, staleMs: STALE_MS, sweptAt: SWEPT_AT };
 }
 const out = (o) => { cleanupRun(); process.stdout.write(JSON.stringify({ ...o, cleaned }) + '\n'); process.exit(0); };
 
@@ -183,9 +197,15 @@ try { child = spawn(bin, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] }); }
 // non-docs push. (Reproduced: the victim file's contents were replaced.) So the
 // capture keeps its one fixed path but inside a dir this uid owns, created 0700,
 // re-checked with lstat (a dir SYMLINK planted under that name would redirect
-// the write just as well), and opened O_NOFOLLOW|O_CREAT|O_TRUNC — the final
-// component cannot be a symlink either. Anything unexpected SKIPS the capture
-// with a reason instead of writing somewhere it was not asked to.
+// the write just as well), and opened O_NOFOLLOW|O_CREAT — the final component
+// cannot be a symlink either — then FSTAT-VERIFIED (regular file, our uid) and
+// only then ftruncate'd. NO O_TRUNC (round 7: this header used to say there
+// was one, and the code 20 lines down deliberately omits it): truncating in
+// the open would empty somebody else's plain file BEFORE we learned whose it
+// is, which is the hole this whole block exists to close — a reader who
+// "restored" the flag from this comment would silently reopen it. Anything
+// unexpected SKIPS the capture with a reason instead of writing somewhere it
+// was not asked to.
 const rawPath = path.join(RAW_DIR, 'last.jsonl');
 let rawSkip = null;
 function openRaw() {

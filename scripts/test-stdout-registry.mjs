@@ -361,15 +361,136 @@ const inflight = (id) => calls.broadcasts.filter((b) => b.id === id && b.type ==
       ok('NEGATIVE CONTROL: an ordinary turn (no compaction) ends with NO compact-progress frame at either exit',
         !calls.broadcasts.some((b) => b.id === 'w-b3-unterm3' && b.type === 'compact-progress'));
     }
-    // ONE implementation for both exits (the 2.331.0 lesson): a third exit added
-    // later must call it, and this is what makes that visible.
+    // ── THE EXIT WITH NO RECORD AT ALL: the wrapper dies (round 7) ─────────
+    //    `result` and the idle turn state are the exits the consumer can SEE.
+    //    Teardown is the one it cannot: the process is gone, nothing will ever
+    //    arrive, and before this the server left `_streamingKind` set — every
+    //    attached client kept "Compacting: running <hook> hooks…" for a
+    //    compaction whose producer no longer exists. Driven on the REAL engine
+    //    through the real onExit path.
+    {
+      const s8 = mkSession('claude', 'w-b3-death'); const p8 = fakePty();
+      so.setupSessionPty(s8, 'w-b3-death', p8);
+      const dB = () => calls.broadcasts.filter((b) => b.id === 'w-b3-death' && b.type === 'compact-progress');
+      s8._streamingKind = 'compacting';
+      p8.data(J({ type: 'system', subtype: 'hook_started', hook_id: 'h9', hook_name: 'PreCompact:guard', session_id: 'sid-death', uuid: 'u-death-1' }));
+      p8.exit({ exitCode: 1 });
+      ok('THE WRAPPER DYING retires the compaction too — the exit no record can announce, announced by the one that knows (session-stdout → session._retireCompaction)',
+        s8._streamingKind === null && dB().slice(-1)[0]?.event === 'compact_end' && dB().slice(-1)[0]?.result === null,
+        JSON.stringify([s8._streamingKind, dB().map((b) => b.event)]));
+      ok('…and the retirement frame goes out BEFORE the `exited` broadcast (a client that has already read "the session is over" cannot act on a later stage frame)',
+        (() => { const list = calls.broadcasts.filter((b) => b.id === 'w-b3-death'); const e = list.findIndex((b) => b.type === 'exited'); const c = list.findIndex((b) => b.type === 'compact-progress' && b.event === 'compact_end'); return c >= 0 && e >= 0 && c < e; })(),
+        JSON.stringify(calls.broadcasts.filter((b) => b.id === 'w-b3-death').map((b) => b.type + (b.event ? '/' + b.event : ''))));
+    }
+    {
+      // NEGATIVE CONTROL: a session that was NOT compacting dies silently — the
+      // frame reports a retirement, it is not an obituary.
+      const s9 = mkSession('claude', 'w-b3-death2'); const p9 = fakePty();
+      so.setupSessionPty(s9, 'w-b3-death2', p9);
+      p9.data(J({ type: 'result', subtype: 'success', session_id: 'sid-death2', duration_ms: 1 }));
+      p9.exit({ exitCode: 0 });
+      ok('NEGATIVE CONTROL: a session that never compacted dies with NO compact-progress frame at all',
+        !calls.broadcasts.some((b) => b.id === 'w-b3-death2' && b.type === 'compact-progress')
+        && calls.broadcasts.some((b) => b.id === 'w-b3-death2' && b.type === 'exited'),
+        JSON.stringify(calls.broadcasts.filter((b) => b.id === 'w-b3-death2').map((b) => b.type)));
+    }
+    // ── THE PIN HAS TO SEE A *SILENT* EXIT (round 7) ───────────────────────
+    //    Round 6 counted CALL SITES (`retires === 2`), which detects a deleted
+    //    call and is blind to the defect it was written for: a FOURTH exit that
+    //    clears the kind on its own. REPRODUCED on this suite — inserting
+    //      if (msg.type === 'system' && msg.subtype === 'vs_fake_silent_exit')
+    //        { session._streamingKind = null; }
+    //    into the consumer left ALL 168 asserts green, pin included. So the pin
+    //    is now on the ASSIGNMENTS: `endCompaction` is the ONE WRITER of the
+    //    cleared kind (it broadcasts, and `retireCompaction` is the guarded
+    //    wrapper both turn-lifecycle exits call), and a fifth exit is a NEW
+    //    write, which this census makes red by construction.
     const csj2 = read('src/server/stdout/claude-stream-json.js');
-    const retires = csj2.match(/retireCompaction\(session, id\)/g)?.length || 0;
-    ok(`WIRING PIN: both turn-lifecycle exits retire through the ONE named function (${retires} call sites), which is the only thing that makes a THIRD exit's silence visible`,
-      /const retireCompaction = \(sess, sid\)/.test(csj2) && retires === 2
-      && /retireCompaction\(session, id\); \/\/ says so if one was in flight/.test(csj2)
-      && /if \(!eff\.streaming\) \{ session\._fallbackStopFired = false; retireCompaction\(session, id\);/.test(csj2),
-      `retireCompaction call sites=${retires}`);
+    // Comment lines are prose ABOUT the rule (this file's own essay quotes the
+    // assignment) — the census is about code.
+    const codeLines = (src) => src.split('\n').filter((l) => !/^\s*(\*|\/\/|\/\*)/.test(l));
+    const clearsIn = (src) => codeLines(src)
+      .map((l) => ({ l }))
+      .filter(({ l }) => /_streamingKind\s*(=[^=]|\]\s*=[^=])/.test(l) && /=\s*null/.test(l));
+    const clears = clearsIn(csj2);
+    ok(`CENSUS: exactly ONE line in the consumer clears _streamingKind, and it is inside endCompaction (${clears.length} found)`,
+      clears.length === 1 && /sess\._streamingKind = null;/.test(clears[0].l)   // `sess` is endCompaction's own parameter name
+      && /const endCompaction = \(sess, sid, \{ result = null, error = null, announce = true \}/.test(csj2)
+      && /const retireCompaction = \(sess, sid\) => \(sess\._streamingKind === 'compacting' \? endCompaction\(sess, sid\) : false\);/.test(csj2),
+      JSON.stringify(clears.map((c) => c.l.trim())));
+    ok('…and that one writer BROADCASTS the retirement (a clear that does not speak is the whole defect)',
+      /sess\._streamingKind = null;[^]{0,500}?if \(announce\) broadcastToSession\(sess, sid, \{ type: 'compact-progress'[^]{0,120}?event: 'compact_end'/.test(csj2),
+      'endCompaction no longer broadcasts compact_end next to the clear');
+    // The ONE announce-suppressed caller is the dormant compact_progress lane,
+    // which publishes its own frame for the same transition a few lines down.
+    const suppressed = [...csj2.matchAll(/announce: false/g)].length;
+    ok(`…and exactly ONE caller suppresses the announcement (${suppressed}) — the dormant compact_progress lane, which broadcasts its own frame for the same end`,
+      suppressed === 1 && /if \(ev\.type === 'compact_end'\) endCompaction\(session, id, \{ announce: false \}\);/.test(csj2));
+    // NEGATIVE CONTROL: the census must SEE the injected exit that fooled the
+    // round-6 pin. Run it over the same source with that line put back.
+    const injected = csj2.replace('const authoritative = session._turnStateSeen === true;',
+      "const authoritative = session._turnStateSeen === true;\n            if (msg.type === 'system' && msg.subtype === 'vs_fake_silent_exit') { session._streamingKind = null; }");
+    ok('NEGATIVE CONTROL: the census FLAGS the exact fourth silent exit that left round 6\'s call-site pin green',
+      clearsIn(injected).length === clears.length + 1, JSON.stringify(clearsIn(injected).map((c) => c.l.trim())));
+    // …and no OTHER module may clear it either (the teardown path retires
+    // through the consumer's own bound function — session-schema row).
+    const otherClearers = ['src/ws-handler.js', 'src/server/session-stdout.js', 'src/server/stdout/codex-events.js', 'src/server/stdout/acp-events.js']
+      .filter((f) => clearsIn(read(f)).length > 0);
+    ok('…and no other module clears the claim behind the consumer\'s back (the teardown exit calls session._retireCompaction)',
+      otherClearers.length === 0 && /session\._retireCompaction\?\.\(\)/.test(read('src/server/session-stdout.js'))
+      && /_retireCompaction:/.test(read('src/session-schema.js')), JSON.stringify(otherClearers));
+  }
+  {
+    // ── THE LAW, MEASURED: a clear that does not SPEAK is a defect ──────────
+    //    The census above is source-shaped; this one is behavioural, and it
+    //    reads the consumer's OWN vocabulary so a record shape added later is
+    //    swept automatically: every literal the file compares `msg.type` /
+    //    `msg.subtype` against is fed to the REAL consumer with the kind armed,
+    //    and the law is "either the claim survives, or a compact_end frame went
+    //    out in the same record". (The fake `vs_fake_silent_exit` branch of the
+    //    reproduction is caught here too — its subtype is in the vocabulary.)
+    const csj3 = read('src/server/stdout/claude-stream-json.js');
+    const subtypes = [...new Set([...csj3.matchAll(/msg\.subtype === '([a-z_0-9]+)'/g)].map((m) => m[1]))];
+    const types = [...new Set([...csj3.matchAll(/msg\.type === '([a-z_0-9]+)'/g)].map((m) => m[1]))];
+    const shapes = [
+      ...subtypes.map((st) => ({ name: `system/${st}`, rec: { type: 'system', subtype: st, state: 'idle', session_id: 'sid-law', uuid: `u-law-${st}` } })),
+      ...types.filter((t) => t !== 'system').map((t) => ({ name: t, rec: { type: t, session_id: 'sid-law', uuid: `u-law-${t}` } })),
+    ];
+    const violations = [], undrivable = [];
+    let n = 0;
+    for (const { name, rec } of shapes) {
+      const wid = `w-b3-law-${n++}`;
+      let sess, pty;
+      try {
+        sess = mkSession('claude', wid); pty = fakePty();
+        so.setupSessionPty(sess, wid, pty);
+        sess._streamingKind = 'compacting';
+        const before = calls.broadcasts.length;
+        pty.data(J(rec));
+        const spoke = calls.broadcasts.slice(before).some((b) => b.id === wid && b.type === 'compact-progress' && b.event === 'compact_end');
+        if (sess._streamingKind !== 'compacting' && !spoke) violations.push(name);
+      } catch (e) { undrivable.push(`${name}: ${e.message}`); }
+    }
+    ok(`THE LAW over the consumer's own vocabulary (${shapes.length} record shapes): nothing clears an in-flight compaction WITHOUT broadcasting compact_end`,
+      violations.length === 0, `silent exits: ${JSON.stringify(violations)}`);
+    ok('…and every shape was really driven (a sweep that quietly failed to run measures nothing)',
+      undrivable.length === 0 && shapes.length >= 8, JSON.stringify({ undrivable, shapes: shapes.length }));
+    // POSITIVE CONTROL: the sweep really does exercise the exits it exists for.
+    ok('POSITIVE CONTROL: the vocabulary contains both turn-lifecycle exits and the outcome record (the sweep is not scanning an empty set)',
+      types.includes('result') && subtypes.includes('session_state_changed') && subtypes.includes('status'),
+      JSON.stringify({ types, subtypes }));
+    // NEGATIVE CONTROL: the detector itself. A clear with no frame must be seen.
+    {
+      const wid = 'w-b3-law-neg';
+      const sess = mkSession('claude', wid); const pty = fakePty();
+      so.setupSessionPty(sess, wid, pty);
+      sess._streamingKind = 'compacting';
+      const before = calls.broadcasts.length;
+      sess._streamingKind = null; // exactly what a fifth silent exit does
+      const spoke = calls.broadcasts.slice(before).some((b) => b.id === wid && b.type === 'compact-progress' && b.event === 'compact_end');
+      ok('NEGATIVE CONTROL: a clear with no frame IS a violation by this detector (it is not vacuously green)',
+        sess._streamingKind !== 'compacting' && !spoke);
+    }
   }
   ok("'status' is listed as HANDLED so the unknown-subtype breadcrumb stops firing for the record that marks every real compaction",
     /'status',/.test(read('src/message-manager.js').slice(0, read('src/message-manager.js').indexOf('])'))));
@@ -454,20 +575,33 @@ const inflight = (id) => calls.broadcasts.filter((b) => b.id === id && b.type ==
     const PROJ_PREFIX = cwdToProjectDir(path.join(os.tmpdir(), 'vs-wire-probe-'));
     const projDir = path.join(PROJECTS, cwdToProjectDir(res.cwd));
     const staleMs = res.cleaned?.staleMs;
-    // THE TWO READERS, as pure functions of (facts, threshold) so the controls
-    // below can drive them in both directions.
-    const staleLeftovers = (root, ms, now = Date.now()) => {
+    const sweptAt = res.cleaned?.sweptAt;
+    // THE SWEEP'S DECISION LIST, by name. Round 6 had the readers re-derive
+    // staleness from the reported THRESHOLD — but on their own, LATER clock,
+    // so a leftover the sweep spared at 9m58s was reported and then flagged at
+    // 10m01s (round 7; reproduced deterministically with the fake CLI below).
+    // A spared name is a VERDICT, not a measurement: never ask the clock about
+    // it again.
+    const sparedNames = new Set((res.cleaned?.spared || []).map((x) => x.name));
+    // THE TWO READERS, as pure functions of (facts, threshold, clock) so the
+    // controls below can drive them in both directions. The default clock is
+    // the SWEEP'S, not `Date.now()`.
+    const staleLeftovers = (root, ms, now = sweptAt) => {
       let names = []; try { names = fs.readdirSync(root); } catch { return []; }
-      return names.filter((d) => d.startsWith(PROJ_PREFIX)).filter((d) => {
+      return names.filter((d) => d.startsWith(PROJ_PREFIX) && !sparedNames.has(d)).filter((d) => {
         try { return now - fs.statSync(path.join(root, d)).mtimeMs > ms; } catch { return false; }
       });
     };
-    const staleJunk = (list, ms, now = Date.now()) =>
-      list.filter((s) => /vs-wire-probe-/.test(s.cwd || '') && now - (s.startedAt || 0) > ms);
+    const staleJunk = (list, ms, now = sweptAt) =>
+      list.filter((s) => /vs-wire-probe-/.test(s.cwd || '')
+        && !sparedNames.has(cwdToProjectDir(s.cwd || ''))
+        && now - (s.startedAt || 0) > ms);
 
     ok(`the probe REPORTS the sweep rule it used (staleMs=${staleMs}, spared ${res.cleaned?.spared?.length}) — a cleanup assert applies the rule instead of guessing one`,
       Number.isFinite(staleMs) && staleMs > 0 && Array.isArray(res.cleaned?.spared), JSON.stringify(res.cleaned));
-    ok('…and everything it SPARED really is younger than that threshold (it never calls a stale leftover "concurrent")',
+    ok(`…and it reports the CLOCK it decided on (sweptAt=${sweptAt}), not just the threshold — a reader on its own, later clock re-judges what the sweep already judged`,
+      Number.isFinite(sweptAt) && sweptAt > 0 && sweptAt <= Date.now(), JSON.stringify(res.cleaned));
+    ok('…and everything it SPARED really is younger than that threshold ON THAT CLOCK (it never calls a stale leftover "concurrent")',
       (res.cleaned?.spared || []).every((s) => s.ageMs >= 0 && s.ageMs <= staleMs), JSON.stringify(res.cleaned?.spared));
     ok(`the probe removed its own temp cwd (${res.cwd})`, !fs.existsSync(res.cwd), 'the throwaway cwd survived — it becomes a junk folder group in the sidebar');
     ok('…and the transcript the CLI wrote for it (no junk session in the user’s sidebar)', !fs.existsSync(projDir), projDir);
@@ -520,6 +654,16 @@ const inflight = (id) => calls.broadcasts.filter((b) => b.id === id && b.type ==
   //    end against a FAKE claude on PATH, in an isolated HOME + TMPDIR: zero
   //    vendor cost, no real-$HOME side effects, and every branch driven on
   //    purpose instead of waited for.
+  //
+  //    ROUND 7 — A HARNESS THAT CANNOT RUN MUST SAY SO, NOT CRASH. The whole
+  //    leg lives in a labelled block: if the probe cannot be driven at all
+  //    (a broken fake CLI, a PATH without the interpreter, a probe that
+  //    exits early) ONE assert goes red naming the reason and the leg bails,
+  //    so the ~65 asserts AFTER it still run. Round 6 read `r1.raw` before
+  //    checking `r1.ok`, and an early `skip` therefore killed the process with
+  //    a TypeError that named nothing — the mandatory pre-push gate went red
+  //    for the wrong reason, which is the exact class this batch keeps fixing.
+  FAKE_CLI: {
   const tdir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-probe-contract-'));
   // A suite that measures "the probe leaves nothing behind" does not get to
   // leak its own scratch tree when an assertion throws — and this name is
@@ -531,7 +675,21 @@ const inflight = (id) => calls.broadcasts.filter((b) => b.id === id && b.type ==
   // — AND leaves the same footprint the real one does: a transcript under the
   // encoded cwd and a per-session env dir. Without those the "left nothing
   // behind" assertions would be vacuously true.
-  fs.writeFileSync(path.join(bin, 'claude'), `#!/usr/bin/env node
+  // THE SHEBANG NAMES THE INTERPRETER RUNNING THIS SUITE (round 7). `#!/usr/bin/
+  // env node` looks harmless and is a landmine: the probe below is handed a
+  // PATH built for the FAKE cli, so `env node` resolves against THAT PATH, and
+  // a machine whose node is not in it (nvm-only dev box, the project's own
+  // node:22-bookworm-slim image at /usr/local/bin/node, a GitHub runner using
+  // actions/setup-node) makes the fake CLI unrunnable — the probe reports
+  // `claude --version failed: env: 'node': No such file or directory`, three
+  // asserts go red and the leg used to die on `path.dirname(undefined)`. It
+  // passed HERE only by luck (Debian's apt nodejs also left a v20 at
+  // /usr/bin/node). `process.execPath` is the one interpreter we KNOW exists.
+  const NODE_DIR = path.dirname(process.execPath);
+  // A path with whitespace cannot be a shebang argument on Linux; fall back to
+  // the PATH lookup, which works because NODE_DIR is on the PATH we hand over.
+  const SHEBANG = /\s/.test(process.execPath) ? '#!/usr/bin/env node' : `#!${process.execPath}`;
+  fs.writeFileSync(path.join(bin, 'claude'), `${SHEBANG}
 const fs = require('fs'), path = require('path'), os = require('os');
 if (process.argv.includes('--version')) { process.stdout.write('0.0.0-fake (probe contract harness)\\n'); process.exit(0); }
 const sid = '11111111-2222-4333-8444-' + String(process.pid).padStart(12, '0').slice(-12);
@@ -556,9 +714,12 @@ setTimeout(() => {
 setTimeout(() => process.exit(0), 60000);
 `);
   fs.chmodSync(path.join(bin, 'claude'), 0o755);
-  const runProbe = () => {
+  // The fake bin FIRST (so `command -v claude` finds it even if a real claude
+  // sits next to node), then the interpreter's own directory.
+  const PROBE_PATH = `${bin}:${NODE_DIR}:/usr/bin:/bin`;
+  const runProbe = (over = {}) => {
     const raw = require('child_process').execFileSync(process.execPath, [path.join(REPO, 'scripts/probe-claude-stdout.mjs')],
-      { encoding: 'utf8', timeout: 120000, stdio: ['ignore', 'pipe', 'ignore'], env: { ...process.env, PATH: `${bin}:/usr/bin:/bin`, HOME: fhome, TMPDIR: ftmp } });
+      { encoding: 'utf8', timeout: 120000, stdio: ['ignore', 'pipe', 'ignore'], env: { ...process.env, PATH: PROBE_PATH, HOME: fhome, TMPDIR: ftmp, ...over } });
     return JSON.parse(String(raw).trim().split('\n').filter(Boolean).pop() || '{}');
   };
   const { cwdToProjectDir } = require(path.join(REPO, 'src/session-store.js'));
@@ -576,6 +737,15 @@ setTimeout(() => process.exit(0), 60000);
   const liveOne = mkLeftover('LIVE', 5 * 1000);       // a probe running right now
   const r1 = runProbe();
   ok(`the probe runs end-to-end against a fake CLI (${r1.version}) — the cleanup contracts are measurable with no vendor call`, r1.ok === true && r1.toolUses === 1, JSON.stringify(r1).slice(0, 300));
+  // EVERYTHING BELOW READS r1's REPORT. A probe that could not run has no
+  // report, and reading it anyway is how round 6 turned a red assert into a
+  // process-killing TypeError. One loud line, then bail — never SKIP silently:
+  // this harness is entirely ours, so "it did not run" is a failure, not an
+  // absence of evidence.
+  if (r1.ok !== true) {
+    ok(`the fake-CLI harness produced a report — otherwise every probe CONTRACT below is UNMEASURED (${r1.skip || 'no skip reason'})`, false, JSON.stringify(r1).slice(0, 300));
+    break FAKE_CLI;
+  }
   const footprints = () => (() => { try { return fs.readFileSync(path.join(fhome, 'fake-cli-footprint.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } })();
   const fp1 = footprints();
   ok('POSITIVE CONTROL: the fake CLI left the real one\'s footprint (a transcript under the encoded cwd + a per-session env dir) — "left nothing behind" is not vacuous',
@@ -641,7 +811,82 @@ setTimeout(() => process.exit(0), 60000);
       (fs.statSync(rawDir).mode & 0o777) === 0o700 && r5.raw && fs.existsSync(r5.raw) && r5.rawSkip == null,
       `mode=${(fs.statSync(rawDir).mode & 0o777).toString(8)} rawSkip=${r5.rawSkip}`);
   }
+  {
+    // ── THE HARNESS MUST NOT ASSUME WHERE node LIVES (round 7) ──────────────
+    //    Reproduced by running this leg verbatim with `/usr/bin:/bin` swapped
+    //    for a node-less directory: the fake CLI (`#!/usr/bin/env node`) could
+    //    not start, the probe reported `claude --version failed: /usr/bin/env:
+    //    'node': No such file or directory`, three asserts went red and the
+    //    process then DIED on `path.dirname(undefined)`, taking ~65 later
+    //    asserts with it. Measured as the consequence: the probe is driven with
+    //    a PATH that has NO node anywhere except through the fake CLI's own
+    //    shebang, which is what an nvm-only box / the node:22-slim image / an
+    //    actions/setup-node runner all look like.
+    const nodeless = path.join(tdir, 'nodeless');
+    fs.mkdirSync(nodeless, { recursive: true });
+    // `sh` only — the probe resolves `sh -c 'command -v claude'` through PATH.
+    try { fs.symlinkSync(fs.realpathSync('/bin/sh'), path.join(nodeless, 'sh')); } catch { }
+    const noNode = `${bin}:${nodeless}`;
+    const rNo = runProbe({ PATH: noNode });
+    ok(`REGRESSION: the fake CLI starts with NO node on the probe's PATH (${rNo.version || rNo.skip}) — the harness names the interpreter running this suite, it does not assume /usr/bin/node`,
+      rNo.ok === true && rNo.toolUses === 1, JSON.stringify(rNo).slice(0, 220));
+    // NEGATIVE CONTROL: the round-6 spelling, same PATH. If this went green the
+    // leg above would be measuring nothing (it would mean node IS reachable).
+    const bin6 = path.join(tdir, 'bin-round6');
+    fs.mkdirSync(bin6, { recursive: true });
+    fs.writeFileSync(path.join(bin6, 'claude'), fs.readFileSync(path.join(bin, 'claude'), 'utf8').replace(/^#![^\n]*/, '#!/usr/bin/env node'));
+    fs.chmodSync(path.join(bin6, 'claude'), 0o755);
+    const rOld = runProbe({ PATH: `${bin6}:${nodeless}` });
+    ok('NEGATIVE CONTROL: the SAME fake CLI with round 6\'s `#!/usr/bin/env node` cannot start on that PATH, and the probe SAYS so (a skip, not a crash)',
+      rOld.ok !== true && /--version failed|no claude CLI/.test(String(rOld.skip)), JSON.stringify(rOld).slice(0, 220));
+    // …and the report is still a report: the gate above reads `ok` FIRST, so a
+    // skip like that one can never reach `path.dirname(r.raw)`.
+    ok('…and a skipped probe still reports the sweep it ran before the CLI check (the contract asserts have something to read, or bail loudly)',
+      rOld.cleaned && Number.isFinite(rOld.cleaned.staleMs) && Number.isFinite(rOld.cleaned.sweptAt), JSON.stringify(rOld.cleaned));
+  }
+  {
+    // ── THE SWEEP'S CLOCK, not the reader's (round 7) ───────────────────────
+    //    Round 6 exported the THRESHOLD and the reader re-derived staleness at
+    //    ASSERTION time. A leftover younger than the threshold when the sweep
+    //    looked, but older by the time the probe reports (the window is the
+    //    probe's own runtime: ~2s here, 5-40s with a real haiku turn, up to
+    //    BUDGET_MS), was spared AND THEN FLAGGED — the mandatory gate going red
+    //    on precisely the case the sweep exists to spare, blaming the sweep.
+    //    Driven deterministically: EDGE is planted 1.5s under the threshold and
+    //    the probe's own post-result beat (2s) carries it over.
+    const staleMs = r1.cleaned.staleMs;
+    const edge = mkLeftover('EDGE', staleMs - 1500);
+    const rE = runProbe();
+    const edgeName = path.basename(edge.d);
+    const sparedE = (rE.cleaned?.spared || []).find((x) => x.name === edgeName);
+    ok('the sweep SPARED the edge leftover and reported its age ON ITS OWN CLOCK (under the threshold), not on the reader\'s later one',
+      !!sparedE && sparedE.ageMs <= staleMs && fs.existsSync(edge.d), JSON.stringify({ spared: rE.cleaned?.spared, exists: fs.existsSync(edge.d) }));
+    // The consequence, on BOTH readers, exactly as leg ⓕ′ builds them.
+    const sparedNames = new Set((rE.cleaned?.spared || []).map((x) => x.name));
+    const reader = (now) => fs.readdirSync(fProjects)
+      .filter((d) => d.startsWith(cwdToProjectDir(path.join(ftmp, 'vs-wire-probe-'))) && !sparedNames.has(d))
+      .filter((d) => { try { return now - fs.statSync(path.join(fProjects, d)).mtimeMs > staleMs; } catch { return false; } });
+    ok('…so the round-7 reader (sweep clock + the spared DECISION LIST) flags nothing',
+      reader(rE.cleaned.sweptAt).length === 0, JSON.stringify(reader(rE.cleaned.sweptAt)));
+    // NEGATIVE CONTROL: the round-6 reader — its own clock, no decision list —
+    // flags the very directory the sweep deliberately kept. Wait for the
+    // threshold to be crossed (bounded) so the control cannot pass by accident.
+    const deadline = Date.now() + 5000;
+    const r6reader = () => fs.readdirSync(fProjects)
+      .filter((d) => d.startsWith(cwdToProjectDir(path.join(ftmp, 'vs-wire-probe-'))))
+      .filter((d) => { try { return Date.now() - fs.statSync(path.join(fProjects, d)).mtimeMs > staleMs; } catch { return false; } });
+    const sleepSync = (ms) => { try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { } };
+    while (r6reader().length === 0 && Date.now() < deadline) sleepSync(200);
+    ok('NEGATIVE CONTROL: the round-6 reader (its OWN, later clock, no decision list) flags that spared leftover — which is the failure, reproduced',
+      r6reader().includes(edgeName), JSON.stringify({ r6: r6reader(), edgeName, ageMs: Date.now() - fs.statSync(edge.d).mtimeMs }));
+    // …and the NEXT run really does collect it: sparing is a deferral, not an
+    // exemption (or the sweep would leak one dir per overlapping run forever).
+    const rF = runProbe();
+    ok('…and the NEXT probe run sweeps it (sparing defers, it does not exempt)',
+      !fs.existsSync(edge.d) && !fs.existsSync(edge.c) && rF.cleaned.swept >= 1, JSON.stringify(rF.cleaned));
+  }
   fs.rmSync(tdir, { recursive: true, force: true });
+  }
 }
 {
   // ⑨ RETRACTION on the live stream: a tombstone for a message we rendered.

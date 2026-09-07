@@ -183,6 +183,17 @@ function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {})
     if (session._normalizer) { session._normalizer.listeners.length = 0; }
     if (session._interruptTimer) { clearTimeout(session._interruptTimer); session._interruptTimer = null; }
     session._isStreaming = false;
+    // THE THIRD EXIT OF THE COMPACTION CLAIM (§2.11, round 7). `_streamingKind
+    // === 'compacting'` is a statement about a process that is now gone, and
+    // this path clears `_isStreaming` but used to leave the kind set — so a
+    // wrapper that died mid-compaction left every attached client holding
+    // "Compacting: running <hook> hooks…" and every later "Prompt is too long"
+    // card without the rewind-and-retry sentence it exists to give. Retire it
+    // through the consumer's OWN named function (bound at attach), BEFORE the
+    // `exited` broadcast, so the frame arrives while the client still has a
+    // live view — never by clearing the field from here, which would be
+    // exactly the silent exit the consumer's census forbids.
+    try { session._retireCompaction?.(); } catch { }
     // Child exit code from the wrapper's final meta (2.207.0 — wrappers keep
     // it instead of unlinking; a crash-looping claude previously left zero
     // process-level evidence).

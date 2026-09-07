@@ -142,13 +142,35 @@ function create({ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes,
      *  `result:null` on purpose — "ended" is not "succeeded" (round 5): only the
      *  CLI's own `compact_result:"success"` may be reported as finished. And the
      *  kind is cleared HERE, so the normal path (outcome record → its own
-     *  compact_end → kind null) never produces a second frame. */
-    const retireCompaction = (sess, sid) => {
-      if (sess._streamingKind !== 'compacting') return false;
+     *  compact_end → kind null) never produces a second frame.
+     *
+     *  ROUND 7 — THE PIN HAS TO SEE A *SILENT* EXIT, AND COUNTING CALL SITES
+     *  CANNOT. Round 6 asserted "retireCompaction is called twice", which goes
+     *  red when a call is deleted and stays green when a FOURTH exit clears the
+     *  kind on its own (reproduced: a fake `system/vs_fake_silent_exit` branch
+     *  writing `session._streamingKind = null` left all 168 asserts green).
+     *  What the guard has to be able to say is "nothing clears this claim
+     *  without speaking", so `endCompaction` is now the ONE WRITER of the
+     *  cleared kind — every other exit calls it or `retireCompaction` — and the
+     *  suite pins the CENSUS of `_streamingKind = null` writes in this file at
+     *  exactly one. A fifth exit is then a new write, and it goes red by
+     *  construction instead of by a comment nobody re-counts. */
+    const endCompaction = (sess, sid, { result = null, error = null, announce = true } = {}) => {
+      const was = sess._streamingKind === 'compacting';
       sess._streamingKind = null;
-      broadcastToSession(sess, sid, { type: 'compact-progress', sessionId: sid, event: 'compact_end', hookType: null, hint: null, result: null, error: null });
-      return true;
+      // `announce:false` is for the ONE caller that publishes its own frame for
+      // this same transition (the dormant `compact_progress` lane below) — two
+      // frames for one end would make the client draw the outcome twice.
+      if (announce) broadcastToSession(sess, sid, { type: 'compact-progress', sessionId: sid, event: 'compact_end', hookType: null, hint: null, result, error });
+      return was;
     };
+    const retireCompaction = (sess, sid) => (sess._streamingKind === 'compacting' ? endCompaction(sess, sid) : false);
+    // The teardown path (src/server/session-stdout.js) is the exit this
+    // consumer cannot see: the wrapper dies and no record ever arrives. It is
+    // still a turn-lifecycle exit of the same claim, so it retires through the
+    // SAME named function rather than reaching in and clearing the field
+    // (session-schema row `_retireCompaction`).
+    session._retireCompaction = () => retireCompaction(session, id);
 
     ptyProcess.onData((output) => {
       if (session._reattachAttempts) session._reattachAttempts = 0;
@@ -483,8 +505,7 @@ function create({ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes,
             if (msg.type === 'result' || (msg.type === 'system' && msg.subtype === 'compact_boundary')) {
               if (!authoritative) session._isStreaming = false;
               session._fallbackStopFired = false; // one auto-stop per turn (claude.disableModelFallback belt)
-              retireCompaction(session, id); // says so if one was in flight (§2.11)
-              session._streamingKind = null;
+              retireCompaction(session, id); // says so if one was in flight (§2.11) — and it is the ONLY writer of the cleared kind
               newLabel = '';
             } else if (msg.type === 'system' && msg.subtype === 'session_state_changed' && isTurnState(msg.state)) {
               // The CLI's own turn state. describe: "'idle' fires after
@@ -502,7 +523,7 @@ function create({ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes,
               const changed = session._turnState !== st;
               session._turnState = st;
               session._isStreaming = eff.streaming;
-              if (!eff.streaming) { session._fallbackStopFired = false; retireCompaction(session, id); session._streamingKind = null; }
+              if (!eff.streaming) { session._fallbackStopFired = false; retireCompaction(session, id); }
               if (eff.label !== null) newLabel = eff.label;
               // Only on a CHANGE (the CLI can restate the same state) — and NOT
               // through broadcastActiveSessions: the session-card payload
@@ -599,9 +620,13 @@ function create({ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes,
                          // compaction finished" — an outcome field, or the
                          // absence of permissionMode, is what makes it ours.
                          && !(msg.permissionMode !== undefined && !cres && !cerr)) {
-                session._streamingKind = null;
+                // Through the ONE writer, with the CLI's own outcome — the only
+                // exit that has one. Unlike `retireCompaction` this announces
+                // even when we never saw the `compacting` start (the branch's
+                // own condition already required an outcome field): losing the
+                // CLI's verdict there would be worse than an extra frame.
+                endCompaction(session, id, { result: cres || (cerr ? 'error' : null), error: cerr });
                 newLabel = 'thinking...';
-                broadcastToSession(session, id, { type: 'compact-progress', sessionId: id, event: 'compact_end', hookType: null, hint: null, result: cres || (cerr ? 'error' : null), error: cerr });
               }
               // Any other status value (or a permission-mode echo outside a
               // compaction) changes NOTHING — we never invent a stage.
@@ -653,7 +678,11 @@ function create({ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes,
               const ev = msg.event;
               const hookT = ev.hook_type ?? ev.hookType;
               const hintT = ev.hint_text ?? ev.hintText;
-              session._streamingKind = ev.type === 'compact_end' ? null : 'compacting';
+              // This lane publishes its own frame for EVERY event type a few
+              // lines below, so the end goes through the one writer with the
+              // announcement suppressed (see endCompaction's `announce`).
+              if (ev.type === 'compact_end') endCompaction(session, id, { announce: false });
+              else session._streamingKind = 'compacting';
               if (ev.type === 'hooks_start') newLabel = `Compacting: running ${String(hookT || 'hook').replace(/_/g, ' ')} hooks…`;
               else if (ev.type === 'compact_start') {
                 const hint = hintT ? String(hintT).slice(0, 160) : '';

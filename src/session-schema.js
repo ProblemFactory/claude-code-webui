@@ -32,6 +32,7 @@ const SESSION_FIELDS = {
   _jobsEventsSeenTs:   { owner: 'agent-routes', persisted: null, note: 'Background Work event delivery marker (2.342.0) — restart = full redelivery, mirroring group-snap semantics' },
   _csiAccepted:        { owner: 'jobs-wiring', persisted: null,  note: 'crossSessionInbound=accept pushed to this pre-2.344.0 live chat session via apply_flag_settings (2.344.1 catch-up; restart = harmless re-push)' },
   _startSubagentWatcher: { owner: 'stdout', persisted: null,    note: 'bound helper for restart re-arm of agent watchers' },
+  _retireCompaction:   { owner: 'stdout', persisted: null,      note: "bound `retireCompaction(session, id)` from the claude stdout consumer (§2.11, round 7): the TEARDOWN path is a turn-lifecycle exit this consumer never sees a record for, and it must retire the 'compacting' claim through the SAME named function (broadcast + clear) instead of reaching in and clearing _streamingKind silently" },
 
   // streaming / turn state
   _isStreaming:        { owner: 'stdout', persisted: 'wrapper', note: 'explicit protocol-signal streaming flag (never heuristic)' },
