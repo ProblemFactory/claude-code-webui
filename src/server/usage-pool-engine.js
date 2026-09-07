@@ -802,7 +802,10 @@ function noteTurnEnd(session) {
     return;
   }
   maybePoolAutoSwitch(session); // the per-turn pool evaluation this boundary always ran
-  // a normally-completed turn is sufficient proof the session is not blocked
+  // a normally-completed turn is sufficient proof the session is not blocked —
+  // and it is WORK (the default classification), so it is one of the only two
+  // signals allowed to clear the loop breaker (round 4); a continue that
+  // actually landed reaches this same line as its own turn's result
   try { getAutoResume()?.noteRecovered?.(session._webuiId, 'turn completed normally'); } catch { }
 }
 
@@ -1134,7 +1137,11 @@ function recordRateLimitEvent(session, msg) {
       // enters BLOCKED; a genuinely walled turn arms off quotaVerdict).
       try { noteWallSignal(session, { resetsAtMs: (Number(ev.resetsAt) || 0) * 1000, bucket: ev.kind, scopedName: ev.scopedName, key, slot: !!slot?.slotOk }); } catch { }
     } else if (r.wroteReading) {
-      try { if (ev.status && ev.status !== 'rejected') getAutoResume()?.noteRecovered?.(session._webuiId, 'fresh non-rejected reading'); } catch { }
+      // worked:false — a PASSIVE reading (the CLI emits one whenever quota
+      // info changes, ~20× per rejection here) says a bucket has room; it is
+      // no evidence this conversation produced anything, so it drops the
+      // timed wait but must NOT clear the loop breaker (round 4)
+      try { if (ev.status && ev.status !== 'rejected') getAutoResume()?.noteRecovered?.(session._webuiId, 'fresh non-rejected reading', { worked: false }); } catch { }
       kickPoolEval();
     }
   } catch (e) { console.warn('[usage] rate_limit_event capture failed:', e.message); }
@@ -1189,7 +1196,15 @@ function recordCodexQuotaSignal(session, payload) {
       const out = payload.outcome || payload.result?.outcome || null;
       if (out === 'reset') {
         serverNotice(`codex-reset-ok-${session._webuiId}-${Date.now()}`, `Codex reset credit consumed — the limit was reset, continuing on the same account.`);
-        try { getAutoResume()?.noteRecovered?.(session._webuiId, 'codex reset credit consumed'); } catch { }
+        // worked:false — codex says the LIMIT was reset on this identity; the
+        // conversation itself has produced nothing yet. Nothing on this path
+        // fires a continue either (this very call disarms first, so the
+        // kickPoolEval below finds an unarmed session), so the classification
+        // only decides whether a still-live failed fire keeps its quarantine —
+        // and a redeemed credit is not a reason to re-open the hour's budget:
+        // that quarantine self-expires in 10min, the same floor
+        // tryResetCredit itself paces on.
+        try { getAutoResume()?.noteRecovered?.(session._webuiId, 'codex reset credit consumed', { worked: false }); } catch { }
         kickPoolEval();
       } else {
         // credit didn't land (nothingToReset / alreadyRedeemed / cooldown /
@@ -1217,7 +1232,8 @@ function recordCodexQuotaSignal(session, payload) {
         maybePoolAutoSwitch(session); // another ChatGPT account = seconds, not hours
         try { noteWallSignal(session, { resetsAtMs: (Number(tripped?.resetsAt) || 0) * 1000, bucket: tripped && tripped === w.snap.fiveHour ? 'fiveHour' : 'sevenDay', key: w.key }); } catch { }
       } else {
-        try { getAutoResume()?.noteRecovered?.(session._webuiId, 'fresh non-limited codex reading'); } catch { }
+        // worked:false — the codex twin of the passive claude reading above
+        try { getAutoResume()?.noteRecovered?.(session._webuiId, 'fresh non-limited codex reading', { worked: false }); } catch { }
         kickPoolEval();
       }
       return;

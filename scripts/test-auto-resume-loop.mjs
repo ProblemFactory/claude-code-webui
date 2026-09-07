@@ -52,8 +52,13 @@ const cleanup = [];
 process.on('exit', () => { for (const d of cleanup) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { } } });
 
 /** A real pool of three logged-in subscriptions, a real engine, a real
- *  auto-resume, a fake OTel source, and a scripted CLI that rejects. */
-function mkWorld({ dir = null, healthy = true } = {}) {
+ *  auto-resume, a fake OTel source, and a scripted CLI that rejects.
+ *  `ignoreWorkedFlag` re-creates the ROUND-3 module through a public seam: the
+ *  engine's producers reach auto-resume through `getAutoResume()`, so handing
+ *  the engine a wrapper that drops `noteRecovered`'s third argument is exactly
+ *  the pre-round-4 call (`noteRecovered(id, why)` — no classification) with
+ *  everything else, including both real producers, unchanged. */
+function mkWorld({ dir = null, healthy = true, ignoreWorkedFlag = false } = {}) {
   const root = dir || fs.mkdtempSync(path.join(os.tmpdir(), 'vs-arloop-'));
   if (!dir) cleanup.push(root);
   const dataDir = path.join(root, 'data');
@@ -86,12 +91,17 @@ function mkWorld({ dir = null, healthy = true } = {}) {
     fireIdentity: (id, s2) => { try { return eng.fireIdentityFor(s2); } catch { return null; } },
   });
   const app = { get() { }, post() { }, put() { }, delete() { }, use() { }, locals: {} };
+  // the pre-round-4 auto-resume, seen from the engine: same module, but the
+  // classification the producer passes never arrives
+  const arSeenByEngine = ignoreWorkedFlag
+    ? new Proxy(ar, { get: (t, p) => (p === 'noteRecovered' ? ((id, why) => t.noteRecovered(id, why)) : t[p]) })
+    : ar;
   const eng = engMod.create({
     app, rootDir: root, USAGE_CACHE_DIR: cacheDir, activeSessions: sessions,
     wss: { clients: new Set() }, WS_OPEN: 1, broadcastToSession() { }, serverNotice: (k, t) => notices.push(t),
     serverSetting: () => undefined, getAccounts: () => am, getHosts: () => null, getUsageHistory: () => null,
     recordUsageAttribution() { }, adapterRegistry: { get() { return null; } },
-    getAutoResume: () => ar, getOtelIngest: () => ({ observedOrgFor: (cid) => obs.get(cid) || null }), getQuotaProbe: () => null,
+    getAutoResume: () => arSeenByEngine, getOtelIngest: () => ({ observedOrgFor: (cid) => obs.get(cid) || null }), getQuotaProbe: () => null,
   });
   const SID = 'sess-4-1788764794641', CID = 'cid-4';
   const session = { backend: 'claude', mode: 'chat', host: null, _webuiId: SID, claudeSessionId: CID, _accountId: P, _autoResume: true, _servedModel: 'claude-fable-5', _servedModelAt: Date.now(), pty: { write() { } }, name: 'work' };
@@ -116,6 +126,19 @@ function mkWorld({ dir = null, healthy = true } = {}) {
     }
     eng.noteTurnEnd(session);
   };
+  // the PASSIVE reading: the same record type, status "allowed" — the event
+  // this instance sees ~20× per rejection. It lands on the WEEKLY bucket at
+  // half full deliberately: a reading is not supposed to change any verdict
+  // here, so the leg measures the breaker and nothing else.
+  w.passiveReading = (info = {}) => w.eng.recordRateLimitEvent(session, {
+    type: 'rate_limit_event',
+    rate_limit_info: { status: 'allowed', rateLimitType: 'seven_day', utilization: 0.5, resetsAt: w.R7, ...info },
+  });
+  // …and its codex twin: a rate_limits_updated push with nothing exhausted
+  w.codexReading = (s2) => w.eng.recordCodexQuotaSignal(s2, {
+    type: 'rate_limits_updated',
+    rateLimits: { primary: { used_percent: 20, window_minutes: 300, resets_at: w.R5 }, secondary: { used_percent: 30, window_minutes: 10080, resets_at: w.R7 } },
+  });
   // the timed path: back-date the arm so the tick considers it due
   w.tickFire = async () => {
     const a = ar._armed.get(SID);
@@ -788,6 +811,164 @@ if (!probe) {
   ok('CONTROL: an arm that simply came due on a healthy link says the limit reset (and fires onto the same account)', did === true && w.linkNow() === w.LINK && w.notes.length === 1 && w.notes[0] === '用量上限已重置，已自动继续这个任务。', JSON.stringify({ link: w.nameOf(w.linkNow()), notes: w.notes }));
 }
 
+// ── §4f WHAT MAY CLEAR THE BREAKER (round 4, the r3 verifier's finding) ────
+// Round 1 cleared the ENTIRE loop-breaker record inside noteRecovered, for
+// every caller — and `noteRecovered` is not one signal. Its loudest caller is
+// a PASSIVE reading: a `rate_limit_event` with status "allowed", which the CLI
+// emits whenever quota info changes (this instance sees it ~20× per
+// rejection). That reading says a bucket has room; it says nothing about
+// whether this conversation produced a token. Deleting the record on it threw
+// away the failed-fire quarantine, the 3-per-hour immediate counter AND both
+// once-per-window notice budgets — so in production neither budget the spec
+// requires was ever enforced, and the identity that had just rejected our
+// continue was immediately fireable again.
+// The rule now: only proof of WORK clears the memory of a failed fire. Every
+// caller classifies its own evidence (`{worked}`); the disarm is unchanged for
+// all of them, because a fire onto a session that no longer waits is the
+// wasted billed turn noteRecovered has always existed to prevent.
+{
+  // (a) THE CLAUDE PRODUCER, through the real engine and a real pool
+  const w = mkWorld();
+  w.eng.recordRateLimitEvent(w.session, { type: 'rate_limit_event', rate_limit_info: { status: 'rejected', rateLimitType: 'five_hour', resetsAt: w.R5 } });
+  w.eng.noteTurnEnd(w.session);
+  await new Promise((r) => setTimeout(r, 40));
+  await w.tickFire();                                  // the continue goes out onto B-Stack Max
+  w.reject({});                                        // …and the CLI answers it with another limit rejection
+  await new Promise((r) => setTimeout(r, 40));
+  w.ar.fireNow(w.SID, 'pool switched');                // refused (same-identity) — this spends the ONE exhaustion notice
+  await new Promise((r) => setTimeout(r, 20));
+  const before = JSON.parse(JSON.stringify(w.ar._fires.get(w.SID) || null));
+  const notesBefore = w.notes.length;
+  ok('setup: a fire was delivered, rejected, and the identity is quarantined with its notice budget spent', !!before && before.fails.length === 1 && before.fails[0].key === w.SPARE && !!before.notices.exhausted && !!before.notified[w.SPARE], JSON.stringify(before));
+  ok('…and the session is armed, waiting', w.ar.statusFor(w.SID).armed === true);
+
+  w.passiveReading();                                  // the ~20×-more-common event arrives
+  const after = w.ar._fires.get(w.SID) || null;
+  ok('a PASSIVE non-rejected reading leaves the breaker record untouched — quarantine, counter and BOTH notice budgets survive it', JSON.stringify(after) === JSON.stringify(before), JSON.stringify({ before, after }));
+  ok('…so the next immediate continue onto the identity that rejected us is still refused, by name', w.ar.canFire(w.SID, w.SPARE, 'now', Date.now()).reason === 'same-identity', JSON.stringify(w.ar.canFire(w.SID, w.SPARE, 'now', Date.now())));
+  ok('…and it is still on DISK (a reading must not hand a restart a fresh budget either)', (() => {
+    const raw = JSON.parse(fs.readFileSync(path.join(w.dataDir, 'auto-resume.json'), 'utf8'));
+    return !!raw.fires?.[w.SID] && (raw.fires[w.SID].fails || []).some((f) => f.key === w.SPARE);
+  })(), fs.readFileSync(path.join(w.dataDir, 'auto-resume.json'), 'utf8').slice(0, 400));
+  ok('…while the DISARM is unchanged: the timed wait is dropped exactly as before (a fire onto a session that is not waiting is the wasted turn this call has always prevented)', w.ar.statusFor(w.SID).armed === false, JSON.stringify(w.ar.statusFor(w.SID)));
+  ok('…and the reading said nothing in the conversation', w.notes.length === notesBefore, JSON.stringify(w.notes.slice(notesBefore)));
+
+  // RESTART, state 1: the quarantine is still refused by a fresh module
+  {
+    const sessions2 = new Map(); const sent2 = [];
+    const ar2 = create({
+      dataDir: w.dataDir, activeSessions: sessions2, serverSetting: () => true, log: () => { },
+      sendToSession: (id, s2, t) => { sent2.push(t); return true; }, fireIdentity: () => ({ key: w.SPARE, name: 'B-Stack Max' }),
+    });
+    const s2 = { mode: 'chat', backend: 'claude', pty: {}, _isStreaming: false, _autoResume: true };
+    sessions2.set(w.SID, s2);
+    ar2.armIfEnabled(w.SID, s2, Date.now() + 60000, 'usage limit');
+    ok('RESTART after a passive reading: a fresh module still refuses that identity', ar2.fireNow(w.SID, 'pool switched') === false && sent2.length === 0);
+  }
+
+  // POSITIVE CONTROL: work clears it — the completed turn, through the engine
+  w.eng.noteTurnEnd(w.session);                        // no wall signals on this turn ⇒ 'turn completed normally'
+  ok('POSITIVE CONTROL: a turn that completed normally DOES clear the whole memory', !w.ar._fires.has(w.SID) && w.ar.recentFireFailures(w.SID).length === 0);
+  // RESTART, state 2: …and the cleared record does not come back from disk
+  {
+    const sessions3 = new Map(); const sent3 = [];
+    const ar3 = create({
+      dataDir: w.dataDir, activeSessions: sessions3, serverSetting: () => true, log: () => { },
+      sendToSession: (id, s3, t) => { sent3.push(t); return true; }, fireIdentity: () => ({ key: w.SPARE, name: 'B-Stack Max' }),
+    });
+    const s3 = { mode: 'chat', backend: 'claude', pty: {}, _isStreaming: false, _autoResume: true };
+    sessions3.set(w.SID, s3);
+    ar3.armIfEnabled(w.SID, s3, Date.now() + 60000, 'usage limit');
+    ok('RESTART after the work: the fresh module has no quarantine to reload and the continue goes through', ar3.fireNow(w.SID, 'pool switched') === true && sent3.length === 1);
+  }
+}
+{
+  // (b) THE OTHER human-scale proof of work: the user typed. (ws-handler's own
+  // call, replayed verbatim — §5 pins that the call site looks like this.)
+  const w = mkWorld();
+  w.ar.armIfEnabled(w.SID, w.session, Date.now() + 60000, 'usage limit');
+  w.ar.fireNow(w.SID, 'pool switched');
+  await new Promise((r) => setTimeout(r, 30));
+  w.ar.noteFireOutcome(w.SID, false, 'limit rejection');
+  ok('setup: a failed fire is remembered', w.ar.recentFireFailures(w.SID).length === 1);
+  w.ar.noteRecovered(w.SID, 'user sent a prompt');
+  ok("POSITIVE CONTROL: the user's own prompt clears it (a human at the keyboard is who the budget was protecting)", !w.ar._fires.has(w.SID));
+}
+{
+  // (c) THE CODEX TWIN PRODUCER — same defect, same shape, the other harness
+  const w = mkWorld();
+  const SID2 = w.SID + '-cx';
+  const cx = { backend: 'codex', mode: 'chat', host: null, _webuiId: SID2, _accountId: w.P, _autoResume: true, pty: { write() { } }, name: 'cx' };
+  w.sessions.set(SID2, cx);
+  w.ar.armIfEnabled(SID2, cx, Date.now() + 60000, 'usage limit');
+  w.ar.fireNow(SID2, 'pool switched');
+  await new Promise((r) => setTimeout(r, 30));
+  w.ar.noteFireOutcome(SID2, false, 'limit rejection');
+  const beforeCx = JSON.parse(JSON.stringify(w.ar._fires.get(SID2) || null));
+  ok('setup (codex): the failed fire is remembered', !!beforeCx && beforeCx.fails.length === 1 && beforeCx.n === 1);
+  w.codexReading(cx);                                  // rate_limits_updated, nothing exhausted
+  ok('a fresh NON-LIMITED codex reading leaves the breaker record untouched too (the twin producer, not just the claude one)', JSON.stringify(w.ar._fires.get(SID2) || null) === JSON.stringify(beforeCx), JSON.stringify({ beforeCx, after: w.ar._fires.get(SID2) }));
+  ok('…and it disarmed the wait exactly as before', w.ar.statusFor(SID2).armed === false);
+  w.eng.recordCodexQuotaSignal(cx, { type: 'reset_credit_result', outcome: 'reset' });
+  ok('a consumed codex RESET CREDIT is the same class: the limit moved, this conversation still produced nothing, so the quarantine stands (it self-expires in 10min, the same floor the credit itself paces on)', JSON.stringify(w.ar._fires.get(SID2) || null) === JSON.stringify(beforeCx), JSON.stringify(w.ar._fires.get(SID2)));
+}
+{
+  // (d) THE LOOP RE-OPENS WITH THE FLAG IGNORED — the matrix control, driven
+  // through the REAL producers. This is §1(c)'s world (attribution defect
+  // still present, so the breaker is the only protection) with one addition:
+  // a passive reading between every cycle, exactly as production sees them.
+  async function driveWithReadings(w, cycles = 25) {
+    w.reject({ oldAttribution: true });                 // the user's own prompt hit the wall
+    let rounds = 0;
+    for (let i = 0; i < cycles; i++) {
+      const did = await w.tickFire();
+      if (!did) break;
+      rounds++;
+      w.passiveReading();                              // a fresh non-rejected reading lands…
+      w.reject({ oldAttribution: true });              // …and the CLI answers the continue with another rejection
+    }
+    return rounds;
+  }
+  const bad = mkWorld({ ignoreWorkedFlag: true });
+  const nBad = await driveWithReadings(bad);
+  ok('NEGATIVE CONTROL: with the classification dropped (the round-3 call), one reading per cycle wipes the breaker and the session re-fires without bound (≥10 billed continues)', nBad >= 10, 'fires=' + nBad);
+  ok('…and the record is simply gone every time — nothing is left to refuse with', !bad.ar._fires.has(bad.SID) || (bad.ar._fires.get(bad.SID).fails || []).length === 0, JSON.stringify(bad.ar._fires.get(bad.SID)));
+  const good = mkWorld();
+  const nGood = await driveWithReadings(good);
+  ok(`SHIPPED: the same world, the same readings, the classification honoured — at most ${FIRE_MAX_IMMEDIATE} continues and then the quarantine holds`, nGood >= 1 && nGood <= FIRE_MAX_IMMEDIATE, 'fires=' + nGood);
+  ok('…because the identity that rejected our continue is still quarantined after every reading', good.ar.recentFireFailures(good.SID).length >= 1, JSON.stringify(good.ar.recentFireFailures(good.SID)));
+}
+{
+  // (e) MUTATION CONTROL on the guard itself: the same module with `if (worked)`
+  // removed must fail the leg above (a guard nobody can delete and turn red is
+  // not a guard — the B-3185 rule).
+  const src = read('src/server/auto-resume.js');
+  const mutated = src.replace('if (worked) noteFireOutcome(id, true, why);', 'noteFireOutcome(id, true, why);');
+  ok('MUTATION CONTROL: the guard is one identifiable line', mutated !== src);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-armut-')); cleanup.push(dir);
+  const modPath = path.join(dir, 'auto-resume-mutated.cjs');
+  fs.writeFileSync(modPath, mutated);
+  const mut = require(modPath);
+  const run = (mod) => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-armut-run-')); cleanup.push(d);
+    const sessions = new Map(); const sent = [];
+    const ar = mod.create({
+      dataDir: d, activeSessions: sessions, serverSetting: () => true, log: () => { },
+      sendToSession: (id, s, t) => { sent.push(t); return true; }, fireIdentity: () => ({ key: 'sub-a', name: 'Account A' }),
+    });
+    const s = { mode: 'chat', backend: 'claude', pty: {}, _isStreaming: false, _autoResume: true };
+    sessions.set('s1', s);
+    ar.armIfEnabled('s1', s, Date.now() + 60000, 'usage limit');
+    ar.fireNow('s1', 'pool switched');
+    ar.noteFireOutcome('s1', false, 'limit rejection');
+    ar.noteRecovered('s1', 'fresh non-rejected reading', { worked: false });
+    return { kept: ar._fires.has('s1'), quarantined: ar.recentFireFailures('s1') };
+  };
+  const shipped = run(arMod), broken = run(mut);
+  ok('…and with it removed a worked:false call wipes the record again (the pre-fix behaviour, reproduced from the product source)', broken.kept === false && broken.quarantined.length === 0, JSON.stringify(broken));
+  ok('…while the shipped module keeps it (same call, same inputs)', shipped.kept === true && shipped.quarantined.length === 1, JSON.stringify(shipped));
+}
+
 // ── §5 WIRING PINS (2.355.0 law: a fix nobody calls is not a fix) ──────────
 {
   const eng = read('src/server/usage-pool-engine.js');
@@ -817,6 +998,53 @@ if (!probe) {
   ok('the module exports the two PURE notice rules (functional check)', typeof arMod.refusalNoticeFor === 'function' && typeof arMod.continueNoticeFor === 'function' && arMod.NO_TARGET_FRESH_MS > 0);
   ok("WIRING: the verdict's SCOPE for an unpooled session is its own credential slot too (routing the verdict to the spawn-time org asks a different account whether this session may spend)", /function _wallScope\(session\) \{[\s\S]{0,220}return wallKeyFor\(session\);/.test(eng) && !/orgVerifiedKey\(session, usageCacheKeyFor\(session\), 'wall/.test(eng));
   ok('WIRING: the immediate path cannot turn the pre-fire probe into a spawn per pool switch (60s floor per target; the RE-VERDICT always runs)', /_preFireProbeAt/.test(eng) && /Date\.now\(\) - probedAt > 60e3/.test(eng));
+  // ── round 4: the classification table IS the audit ──────────────────────
+  // The kb essay carries this table in prose; here it is executable. The file
+  // set is DERIVED (walk src/, keep whatever mentions noteRecovered) rather
+  // than hand-listed — a hand-written inventory is the tool this codebase has
+  // watched fail four times (B-3185 r7). A new call site that does not say
+  // which kind of evidence it has fails HERE, before it can silently re-open
+  // the loop; a dead row fails too.
+  const AUDIT = [
+    // file                              why                               worked  because
+    ['src/server/usage-pool-engine.js', 'turn completed normally', true],   //  the turn ended with real output: WORK
+    ['src/ws-handler.js', 'user sent a prompt', true],                      //  a human took the conversation over: WORK
+    ['src/server/usage-pool-engine.js', 'fresh non-rejected reading', false], // a bucket has room — says nothing about this session
+    ['src/server/usage-pool-engine.js', 'fresh non-limited codex reading', false], // …its codex twin
+    ['src/server/usage-pool-engine.js', 'codex reset credit consumed', false], // the LIMIT moved; the conversation produced nothing
+    ['src/server/auto-resume.js', 'disabled', false],                       //  the feature was switched off under a live arm
+  ];
+  const walk = (d, out = []) => {
+    for (const e of fs.readdirSync(path.join(REPO, d), { withFileTypes: true })) {
+      const rel = d + '/' + e.name;
+      if (e.isDirectory()) walk(rel, out);
+      else if (e.name.endsWith('.js') && read(rel).includes('noteRecovered')) out.push(rel);
+    }
+    return out;
+  };
+  /** Every noteRecovered CALL in the product, with the classification it passes. */
+  const callSites = [];
+  for (const f of walk('src')) {
+    const txt = read(f);
+    const re = /noteRecovered(?:\?\.)?\(/g;
+    let m;
+    while ((m = re.exec(txt))) {
+      let i = m.index + m[0].length, depth = 1;
+      while (i < txt.length && depth > 0) { const c = txt[i]; if (c === '(') depth++; else if (c === ')') depth--; i++; }
+      const args = txt.slice(m.index + m[0].length, i - 1);
+      const why = (args.match(/'([^']*)'/) || [])[1];
+      if (why === undefined) continue;                       // the definition / the export line, not a call
+      callSites.push({ file: f, why, worked: !/worked:\s*false/.test(args) });
+    }
+  }
+  const keyOf = (c) => `${c.file}|${c.why}|${c.worked}`;
+  const derived = new Set(callSites.map(keyOf));
+  const table = new Set(AUDIT.map(([f, why, worked]) => `${f}|${why}|${worked}`));
+  ok('AUDIT: every noteRecovered call site in src/ is classified in the table (an unclassified new caller fails here, not in production)', [...derived].every((k) => table.has(k)), 'unlisted: ' + [...derived].filter((k) => !table.has(k)).join(' ; '));
+  ok('AUDIT: …and every row of the table is a real call site (no dead rows)', [...table].every((k) => derived.has(k)), 'dead rows: ' + [...table].filter((k) => !derived.has(k)).join(' ; '));
+  ok('AUDIT: the derivation actually found them all — 2 that claim WORK, 4 that do not', callSites.length === AUDIT.length && callSites.filter((c) => c.worked).length === 2, JSON.stringify(callSites));
+  ok('AUDIT: the two callers the loop breaker trusts are a completed TURN and the USER — nothing else may clear it', callSites.filter((c) => c.worked).map((c) => c.why).sort().join(' / ') === 'turn completed normally / user sent a prompt', JSON.stringify(callSites.filter((c) => c.worked)));
+  ok('WIRING: the breaker is cleared ONLY under the classification, and the disarm below stays unconditional', /function noteRecovered\(id, why, \{ worked = true \} = \{\}\) \{[\s\S]{0,400}if \(worked\) noteFireOutcome\(id, true, why\);\s*\n\s*const a = armed\.get\(id\);/.test(ar2src) && !/^\s*noteFireOutcome\(id, true, why\);/m.test(ar2src));
 }
 
 // ── §6 THE FROZEN JOURNAL'S SHAPE (2/s arm→switch→fire→reject) ─────────────

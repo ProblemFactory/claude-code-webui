@@ -95,6 +95,18 @@ const T0 = Date.now();   // the module refuses waits >26h out, so the clock must
     a.ar.noteRecovered('s1', why);
     ok(`disarmed by: ${why}`, a.ar.statusFor('s1').armed === false && a.ar.tick(resets + 600000) === 0 && a.sent.length === 0);
   }
+  {
+    // …and the round-4 classification changes NOTHING about the disarm: a
+    // caller that has no proof of work still drops the wait (a fire onto a
+    // session that is no longer waiting is the wasted billed turn this call
+    // has always existed to prevent). Only the loop breaker reads `worked`.
+    const a = mk({ dflt: true });
+    a.sessions.set('s1', sess());
+    const resets = T0 + 60000;
+    a.ar.armIfEnabled('s1', a.sessions.get('s1'), resets, '5h');
+    a.ar.noteRecovered('s1', 'fresh non-rejected reading', { worked: false });
+    ok('disarmed by: a caller that classifies itself as NOT work (worked:false)', a.ar.statusFor('s1').armed === false && a.ar.tick(resets + 600000) === 0 && a.sent.length === 0);
+  }
   const a = mk({ dflt: true });
   a.sessions.set('s1', sess());
   a.ar.armIfEnabled('s1', a.sessions.get('s1'), T0 + 60000, '5h');
@@ -140,7 +152,10 @@ const T0 = Date.now();   // the module refuses waits >26h out, so the clock must
 {
   const eng = read('src/server/usage-pool-engine.js');
   ok('exhaustion arms it — AFTER trying the pool switch (seconds beat hours)', /maybePoolAutoSwitch\(session\);[\s\S]{0,400}getAutoResume\(\)\?\.armIfEnabled/.test(eng));
-  ok('a fresh non-rejected reading disarms it', eng.includes("getAutoResume()?.noteRecovered?.(session._webuiId, 'fresh non-rejected reading')"));
+  // round 4: it disarms, and it says it is NOT proof of work — a passive
+  // reading may not clear the loop breaker (the full classification table for
+  // every noteRecovered caller is pinned in test-auto-resume-loop §5)
+  ok('a fresh non-rejected reading disarms it, classified as NOT work', eng.includes("getAutoResume()?.noteRecovered?.(session._webuiId, 'fresh non-rejected reading', { worked: false })"));
   const wsh = read('src/ws-handler.js');
   ok('a user prompt disarms it', wsh.includes("autoResume?.noteRecovered?.(data.sessionId, 'user sent a prompt')"));
   ok('the live toggle is a ws case', wsh.includes("case 'auto-resume'") && wsh.includes('autoResume?.setEnabled'));

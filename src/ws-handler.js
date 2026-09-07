@@ -528,6 +528,10 @@ function registerWsHandler(wss, ctx) {
               }
             }
             session._isStreaming = true;
+            // WORK (the default classification, round 4): the user took the
+            // conversation over by hand — the one non-turn signal allowed to
+            // clear the loop breaker, because a human at the keyboard is
+            // exactly who the budget was protecting
             try { autoResume?.noteRecovered?.(data.sessionId, 'user sent a prompt'); } catch { }
             // /compact turn (2.365.0, the userN "Compaction canceled." case):
             // a large conversation compacts for 1–2 minutes behind a bare

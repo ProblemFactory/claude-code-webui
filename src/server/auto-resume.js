@@ -261,15 +261,35 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
     return rec;
   }
 
-  /** Anything that proves the session is working again disarms the wait: a
-   *  pool switch that took over, the user's own prompt, a fresh non-rejected
-   *  reading. A fire that lands on an already-recovered session is a wasted
-   *  (billed) turn. */
-  function noteRecovered(id, why) {
-    // The breaker clears FIRST and unconditionally: after a fire there is no
-    // armed record left, so anything gated behind it (the early return below)
-    // would never see the proof that the fire actually worked.
-    noteFireOutcome(id, true, why);
+  /** Anything that proves the session is NOT waiting on a wall any more
+   *  disarms the wait: a pool switch that took over, the user's own prompt, a
+   *  fresh non-rejected reading. A fire that lands on an already-recovered
+   *  session is a wasted (billed) turn, so the DISARM is generous — every
+   *  caller gets it.
+   *
+   *  THE BREAKER IS NOT (round 4, the verifier's finding). Round 1 cleared the
+   *  loop-breaker record here unconditionally, which handed the quarantine,
+   *  the 3-per-hour immediate counter and BOTH once-per-window notice budgets
+   *  to any caller — and the callers are not equal. A `rate_limit_event` with
+   *  status "allowed" is a PASSIVE reading the CLI emits whenever quota info
+   *  changes (this instance sees it ~20× per rejection); it says something
+   *  about a bucket's numbers and NOTHING about whether this conversation
+   *  produced a single token. With the record deleted on every one of them,
+   *  the next immediate fire onto the identity that just rejected us was
+   *  allowed again and the hour's budget was never enforced in production —
+   *  the loop the breaker exists to break, one reading later.
+   *  So: `worked` is the caller's CLASSIFICATION of its own evidence, and only
+   *  proof of WORK (a turn that completed, the user's own prompt) may clear
+   *  the memory of a failed fire. Every call site is enumerated with its
+   *  classification in the kb essay, and scripts/test-auto-resume-loop.mjs
+   *  pins that table against the real call sites — a new caller that does not
+   *  say which kind it is fails the suite rather than silently re-opening the
+   *  loop. */
+  function noteRecovered(id, why, { worked = true } = {}) {
+    // On proof of work the breaker clears FIRST and unconditionally: after a
+    // fire there is no armed record left, so anything gated behind it (the
+    // early return below) would never see the proof that the fire worked.
+    if (worked) noteFireOutcome(id, true, why);
     const a = armed.get(id);
     if (!a || a.fired) return;
     armed.delete(id); save();
@@ -521,7 +541,10 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
     for (const [id, a] of due(now)) {
       const session = activeSessions.get(id);
       if (!session) { armed.delete(id); save(); continue; }          // gone: nothing to continue
-      if (!enabledFor(session)) { noteRecovered(id, 'disabled'); continue; }
+      // the feature was turned off under a live arm: drop the wait, KEEP the
+      // breaker (worked:false) — nothing was produced, and a toggle off/on
+      // must not hand the loop a fresh budget any more than a deploy may
+      if (!enabledFor(session)) { noteRecovered(id, 'disabled', { worked: false }); continue; }
       if (session._isStreaming) { continue; }                        // it is already working — try next tick
       if (attemptFire(id, session, a, 'timed', null)) fired++;
     }

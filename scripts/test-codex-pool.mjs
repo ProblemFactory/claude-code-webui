@@ -66,7 +66,11 @@ ok('a signed-out target self-heals to a live member at spawn', r2 && am.poolCurr
   // ── reset-credit escape ladder (owner ask: reset vs switch choice) ──
   ok('exhaustion ladder: ① reset credit (opt-in) → ② pool switch → ③ auto-resume', /if \(tryResetCredit\(tripped\?\.resetsAt\)\) return;[\s\S]{0,200}maybePoolAutoSwitch\(session\)/.test(eng) && /if \(tryResetCredit\(resets\)\) return;[\s\S]{0,120}maybePoolAutoSwitch\(session\)/.test(eng));
   ok("…auto-consume is OPT-IN (codex.limitResetCredit 'auto', default off) with a 10min retry floor", /serverSetting\('codex\.limitResetCredit'\) !== 'auto'\) return false;/.test(eng) && /_codexResetTriedAt && now - session\._codexResetTriedAt < 10 \* 60e3\) return false;/.test(eng));
-  ok('a successful reset recovers in place; a failed one falls through the ladder', /out === 'reset'[\s\S]{0,400}noteRecovered[\s\S]{0,800}codex-reset-credit-failed[\s\S]{0,200}maybePoolAutoSwitch\(session\)/.test(eng));
+  // round 4: the recovery call also CLASSIFIES itself — a redeemed credit
+  // moved the LIMIT, it is not proof this conversation produced anything, so
+  // it disarms the wait without clearing the loop breaker (the full table of
+  // noteRecovered callers is derived + enforced in test-auto-resume-loop §5)
+  ok('a successful reset recovers in place (disarm yes, breaker no); a failed one falls through the ladder', /out === 'reset'[\s\S]{0,1200}noteRecovered\?\.\(session\._webuiId, 'codex reset credit consumed', \{ worked: false \}\)[\s\S]{0,800}codex-reset-credit-failed[\s\S]{0,200}maybePoolAutoSwitch\(session\)/.test(eng));
   ok('the setting exists in the Codex group', /'codex\.limitResetCredit'/.test(read('src/lib/settings-schema.js')));
   ok('session-schema registers the throttle fields', /_codexResetTriedAt/.test(read('src/session-schema.js')) && /_codexLastResetsAt/.test(read('src/session-schema.js')));
   const wsrc = read('src/ws-handler.js');
@@ -80,7 +84,7 @@ ok('a signed-out target self-heals to a live member at spawn', r2 && am.poolCurr
   const um2 = read('src/lib/usage-meter.js');
   ok('the popup shows the stored reset-credit count', /Reset credits'\)\)\}<\/span> \$\{Number\(codex\.resetCredits\.availableCount\)/.test(um2));
   ok("…and the codex ⟳ is CAPABILITY-gated (quotaRefresh 'session-rpc'), riding a live session's app-server", /backendFeatureCaps\('codex'\)\.quotaRefresh === 'session-rpc'/.test(um2) && /_refreshCodexQuota\(btn\)/.test(um2) && /codex-read-limits', sessionId: live\.webuiId/.test(um2));
-  ok('recordCodexQuotaSignal exists: readings write the member cache, exhaustion switches then feeds the WALL MACHINE (2.369.0)', /function recordCodexQuotaSignal[\s\S]{0,3000}maybePoolAutoSwitch\(session\);[\s\S]{0,500}noteWallSignal/.test(eng));
+  ok('recordCodexQuotaSignal exists: readings write the member cache, exhaustion switches then feeds the WALL MACHINE (2.369.0)', /function recordCodexQuotaSignal[\s\S]{0,6000}maybePoolAutoSwitch\(session\); \/\/ another ChatGPT account[\s\S]{0,500}noteWallSignal/.test(eng));
   ok('…typed exhaustion enum covers the workspace variants (owned by the codex harness since S4)', /usage_limit_reached\|quota_exceeded\|usage_not_included\|workspace_owner_usage_limit_reached\|workspace_member_usage_limit_reached\|workspace_member_credits_depleted/.test(read('src/harnesses/codex-quota.js')) && !/CODEX_EXHAUSTION_RE/.test(eng));
   ok('…a pool-billed reading lands on the CURRENT MEMBER, never the pool wrapper', /a\.type === 'pooled'\) key = accounts\.poolCurrentFor\(key, session\._webuiId\)/.test(eng));
   const ss = read('src/server/stdout/codex-events.js'); // S5: the codex-events consumer module
