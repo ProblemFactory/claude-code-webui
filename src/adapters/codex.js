@@ -1105,7 +1105,16 @@ class CodexAdapter extends BackendAdapter {
     return JSON.stringify({ type: 'queue-op', op, id });
   }
 
-  /** Build a preview user message for buffer before JSONL arrives */
+  /** Build a preview user message for buffer before JSONL arrives.
+   *  ITS CONTENT MUST BE SPELLED EXACTLY AS THE WRAPPER SPELLS ITS OWN COPY
+   *  (round 3, 2026-09-07): both carry the same `webui_msg_id`, so the merge
+   *  keeps whichever lands FIRST — this one — and the ours↔codex twin claim is
+   *  then made under THIS record's content key. Codex persists what
+   *  `encodeUserInput` sent, i.e. the TEXT first and attachments after it
+   *  (measured: 0 of 5489 user records in the local rollout corpus begin with
+   *  an `input_image`), so an attachments-first preview meant every message
+   *  with an image rendered twice after a reload no matter what the wrapper
+   *  wrote. test-codex-p2-wrapper ⑦ compares the two producers byte for byte. */
   static _buildUserPreview(rawText, msgId) {
     let text = typeof rawText === 'string' ? rawText : '';
     const attachments = [];
@@ -1122,8 +1131,8 @@ class CodexAdapter extends BackendAdapter {
       }
     } catch {}
     const content = [
-      ...attachments.map(a => ({ type: 'input_image', image_url: a.image_url })),
       ...(text ? [{ type: 'input_text', text }] : []),
+      ...attachments.map(a => ({ type: 'input_image', image_url: a.image_url })),
     ];
     if (!content.length) return null;
     return { timestamp: new Date().toISOString(), type: 'response_item', _fromWebui: true, payload: { type: 'message', role: 'user', webui_msg_id: msgId || '', content } };

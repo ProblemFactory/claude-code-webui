@@ -274,6 +274,11 @@ const SKIPPED_EVENT_TYPES = new Set([
   'collab_agent_spawn_begin', 'collab_agent_spawn_end', 'collab_agent_interaction_begin', 'collab_agent_interaction_end',
   // wrapper / engine side channels consumed elsewhere (pool engine, goal sync, usage meter, delivery ladder)
   'rate_limits_updated', 'goal_updated', 'goal_cleared', 'thread_goal_updated', 'thread_queue_changed', '_remote_state', 'peer_message_result', 'reset_credit_result',
+  // webui_user_retracted = the wrapper telling the READER that a user record it
+  // already wrote will never be committed by the app-server (round 3). It is a
+  // merge-time fact about the claim ledger (mergeCodexRecords), never a card:
+  // the bubble it names STAYS — the user really did send that text.
+  'webui_user_retracted',
   'error', 'warning', 'stream_error', 'deprecation_notice', 'mcp_startup_update', 'mcp_startup_complete', 'session_configured', 'hook_started', 'hook_completed', 'thread_rolled_back', 'shutdown_complete',
 ]);
 
@@ -442,7 +447,7 @@ class CodexMessageManager {
     // thread_id/turn_id are the wrapper's B-7473 item context: only the LIVE
     // copy carries them, so leaving them in would make every buffer record a
     // stranger to its rollout twin (double cards on every attach).
-    const { item_id, itemId, id, internal_chat_message_metadata_passthrough, webui_peer, webui_queue_id, webuiQueueId, webui_queue_via, webuiQueueVia, webui_after_commit, webuiAfterCommit, thread_id, turn_id, ...stable } = payload;
+    const { item_id, itemId, id, internal_chat_message_metadata_passthrough, webui_peer, webui_queue_id, webuiQueueId, webui_queue_via, webuiQueueVia, webui_after_commit, webuiAfterCommit, webui_no_commit, webuiNoCommit, thread_id, turn_id, ...stable } = payload;
     let str;
     try { str = (record?.type || '') + ':' + JSON.stringify(stable); } catch { str = String(record?.type || ''); }
     let h = 0x811c9dc5;

@@ -1486,9 +1486,19 @@ async function maybeStopNudge() {
 }
 
 const SLASH_COMMANDS = ['compact', 'review', 'model', 'effort'];
+const SLASH_COMMAND_RE = /^\/(compact|review|model|effort)(?:\s+(.*))?$/s;
+/** Does this text end HERE — answered by the wrapper, never sent to the
+ *  app-server as a user message? ONE definition, shared by applySlashCommand
+ *  (which acts on it) and the chat-input record (which must declare
+ *  `webui_no_commit` for exactly the same texts): a second spelling of this
+ *  rule would drift, and a record that claims a twin it will never get deletes
+ *  an unrelated message later (round 3). */
+function isWrapperSlashCommand(text) {
+  return SLASH_COMMAND_RE.test(String(text || '').trim());
+}
 /** Wrapper-served slash commands (see chat-input). Returns true when consumed. */
 async function applySlashCommand(text) {
-  const m = /^\/(compact|review|model|effort)(?:\s+(.*))?$/s.exec(String(text || '').trim());
+  const m = SLASH_COMMAND_RE.exec(String(text || '').trim());
   if (!m) return false;
   const [, cmd, argRaw] = m;
   const arg = (argRaw || '').trim();
@@ -1650,6 +1660,30 @@ function noteRecordedUserCid(cid) {
   if (recordedUserCids.size > 500) recordedUserCids.delete(recordedUserCids.keys().next().value);
 }
 
+/** A user record we ALREADY wrote will never be committed by the app-server.
+ *  Our copy is written before the submission is accepted (the bubble has to
+ *  appear when the user presses Enter, not when an RPC returns), so this is
+ *  learned AFTER the fact: the send threw, or the queued item was removed by
+ *  Stop / by the user before it ran. The record STAYS — the user really did
+ *  send that text and the bubble is the truth — but the reader must not let it
+ *  CLAIM a codex twin, because no twin will ever come and a leaked claim
+ *  deletes an unrelated codex-only record of the same text later (round-2
+ *  finding ④'s second back door).
+ *  It names the record by IDENTITY, never by content: an attachment's data URL
+ *  can be megabytes, and re-deriving the reader's content key here would be a
+ *  second copy of that algorithm, free to drift. A record with no identity
+ *  (`webui_msg_id: ''` — a client frame that carried no msgId) cannot be
+ *  retracted; it also never keys by id, so it is the one shape this cannot
+ *  cover. Sibling of `webui_no_commit`, which says the same thing at write
+ *  time for the cases the wrapper knows in advance (its slash commands). */
+function retractUserRecord(id, reason) {
+  const msgId = asString(id);
+  if (!msgId || !recordedUserCids.has(msgId)) return false;
+  record('event_msg', { type: 'webui_user_retracted', msg_id: msgId, reason: String(reason || '') });
+  log(`retracted the user record for ${msgId}: ${reason} — it never reached the app-server, so it claims no twin`);
+  return true;
+}
+
 /** `UserInput[]` (the wire shape queue rows and steers carry) → the
  *  `response_item` content blocks a user record uses. The exact inverse of
  *  encodeUserInput, and — for text and data-URL images — BYTE-IDENTICAL to
@@ -1658,8 +1692,14 @@ function noteRecordedUserCid(cid) {
  *  collapse into one bubble on rebuild (mergeCodexRecords).
  *  A localImage/skill/mention block has no faithful rollout spelling, so it is
  *  rendered as the same bracketed marker the queue strip shows rather than
- *  guessed at (such a message can double after a reload; it can only occur for
- *  an INHERITED queue, since our own sends already have their bubble). */
+ *  guessed at — such a message can still double after a reload.
+ *  SINCE ROUND 3 THIS IS ALSO THE CHAT-INPUT PRODUCER's spelling: handleInput
+ *  used to hand-roll `[...attachments, text]`, which reversed codex's own
+ *  order (measured: 0 of 5489 user records in the local corpus begin with an
+ *  `input_image`) and so could never collapse. One function, one order, both
+ *  producers — and the SERVER's preview record (CodexAdapter._buildUserPreview,
+ *  which wins the fingerprint because it is written first) matches it too;
+ *  test-codex-p2-wrapper ⑦ compares those two byte for byte. */
 function userInputToContent(input) {
   const content = [];
   for (const item of asArray(input)) {
@@ -2097,6 +2137,7 @@ async function _clearQueueForStop() {
         continue;
       }
       removed++;
+      retractUserRecord(cid, 'dropped by Stop before it ran');   // same rule as the explicit remove above
       emitTaskEvent('queue_op_result', { op: 'remove', id, ok: true, msg_id: known?.msgId || '', reason: 'stopped' });
       // A queued PEER/job message was already reported delivered (peer_message_result
       // ok:'queued'), so dropping it silently would lose a promised message —
@@ -2213,6 +2254,10 @@ async function handleQueueOp(msg) {
       // ok:'queued') — removing it must give the text back to the ladder, which
       // re-stashes it for next-turn injection. Never a silent loss.
       if (known?.kind === 'peer' && known.text) emitTaskEvent('peer_message_result', { ok: false, reason: 'removed from the queue before it was delivered', text: known.text, fromName: known.from || null });
+      // It left the queue WITHOUT running, so the app-server will never commit
+      // its own copy: whatever bubble we wrote for it claims a twin that can
+      // no longer arrive (round 3).
+      retractUserRecord(item.clientUserMessageId, 'removed from the queue before it ran');
       emitTaskEvent('queue_op_result', { op, id, ok: true, msg_id: known?.msgId || '' });
     } catch (e) {
       log(`thread/queue/delete failed for ${id}: ${e.message}`);
@@ -2601,14 +2646,26 @@ async function handleInput(msg) {
     const normalized = normalizeChatInput(msg.text || '');
     const attachments = [...normalized.attachments, ...(msg.attachments || [])];
     const text = normalized.text || '';
+    const noCommit = !attachments.length && isWrapperSlashCommand(text);
+    // ONE SPELLING FOR BOTH PRODUCERS (round 3). What codex persists is what
+    // `encodeUserInput` SENT, so our copy is that same array mapped back
+    // through userInputToContent — never a hand-rolled second ordering. The
+    // hand-rolled one put attachments FIRST while codex writes the text first
+    // (measured: 0 of 5489 user records in the local corpus start with an
+    // image), so the twin could never collapse and every message with an
+    // attachment rendered TWICE after a reload. It also spelled a
+    // local_image/skill/mention attachment as `{type:'input_image'}` with no
+    // url — a broken block; userInputToContent renders the same bracketed
+    // marker the queue strip shows.
     record('response_item', {
       type: 'message',
       role: 'user',
       webui_msg_id: msg.msgId || '',
-      content: [
-        ...attachments.map((item) => ({ type: 'input_image', image_url: item.image_url })),
-        ...(text ? [{ type: 'input_text', text }] : []),
-      ],
+      content: userInputToContent(encodeUserInput(text, attachments)),
+      // A wrapper-served slash command is answered HERE: the text never becomes
+      // a user message on the app-server, so this record has no twin to retire
+      // its claim against and must not make one (round 3).
+      ...(noCommit ? { webui_no_commit: true } : {}),
     });
     // THIS bubble exists now, so whatever the app-server later reports about
     // the same submission (its own item/completed `userMessage`, or a steer we
@@ -2634,17 +2691,31 @@ async function handleInput(msg) {
       // learn late renders with no bubble chip.
       noteQueued(cid, { kind: 'user', msgId: msg.msgId || '' });
       noteRecordedUserCid(cid);   // the generated `queued-…` id when the client sent no msgId
-      await request('thread/queue/add', {
-        threadId: meta.threadId,
-        input: encodeUserInput(text, attachments),
-        clientUserMessageId: cid,
-      }, 30000);
+      try {
+        await request('thread/queue/add', {
+          threadId: meta.threadId,
+          input: encodeUserInput(text, attachments),
+          clientUserMessageId: cid,
+        }, 30000);
+      } catch (e) {
+        // The bubble above is already written and STAYS (the user sent it, and
+        // the task_failed the stdin loop raises is the report) — but the
+        // app-server never took the submission, so the record must stop
+        // claiming a twin that will never exist.
+        retractUserRecord(msg.msgId || cid, 'thread/queue/add failed: ' + e.message);
+        throw e;
+      }
       emitTaskEvent('queued_input', { msg_id: msg.msgId || '', turn_id: meta.activeTurnId });
       log('chat-input queued (turn active; runs after the current turn)');
       refreshQueue();
       return;
     }
-    await startTurn(text, attachments);
+    try {
+      await startTurn(text, attachments);
+    } catch (e) {
+      retractUserRecord(msg.msgId, 'turn/start failed: ' + e.message);
+      throw e;
+    }
     return;
   }
   if (msg.type === 'interrupt') {
@@ -2722,9 +2793,19 @@ async function handleInput(msg) {
     // rebuild instead of doubling the card. On the queued path nothing is
     // committed yet (the copy appears when the queue drains), so ours is first
     // and claims the content as usual.
-    const recordPeerMessage = (afterCommit) => record('response_item', {
+    // `queueCid` (round 3): on the QUEUED path the submission already has an
+    // app-server clientUserMessageId, so the record carries it as the same
+    // SECOND-CLASS identity an inherited bubble uses — `webui_queue_id` joins
+    // the strip row and does NOT suppress the peer card (a `webui_msg_id`
+    // would turn it into an anonymous "You" bubble). Two consequences, both
+    // the round-2 rule applied to this producer: a Stop/remove that drops the
+    // item can RETRACT this record by name, and two peer messages with the
+    // SAME text inside one turn stop colliding on the content key (the
+    // round-1 major, still open for the one producer that minted no id).
+    const recordPeerMessage = (afterCommit, queueCid) => record('response_item', {
       type: 'message', role: 'user', content: [{ type: 'input_text', text }],
       webui_peer: { name: fromName, body: cardText },
+      ...(queueCid ? { webui_queue_id: queueCid } : {}),
       ...(afterCommit ? { webui_after_commit: true } : {}),
     });
     try {
@@ -2734,9 +2815,15 @@ async function handleInput(msg) {
       // SAY SO in the result, so the delivery journal shows what happened.
       let steerFailed = null;
       if (peerKind === 'notification' && meta.activeTurnId) {
-        const st = await steerInput(encodeUserInput(text, []), `notif-${process.pid}-${nextId++}`);
+        const notifCid = `notif-${process.pid}-${nextId++}`;
+        const st = await steerInput(encodeUserInput(text, []), notifCid);
         if (st.ok) {
-          recordPeerMessage(false);   // steered: the commit twin lands at the next turn boundary — ours is first
+          // the app-server knows this submission by `notifCid`, and its
+          // item/completed twin arrives at the next turn boundary: record the
+          // id FIRST so that twin adds nothing, and carry it on the card the
+          // way the queued path does (join + retract by name).
+          noteRecordedUserCid(notifCid);
+          recordPeerMessage(false, notifCid);   // steered: the commit twin lands at the next turn boundary — ours is first
           emitTaskEvent('peer_message_result', { ok: true, mode: 'steered' });
           log('notification STEERED into the running turn (it carries only itself; the queue is untouched)');
           return;
@@ -2757,12 +2844,12 @@ async function handleInput(msg) {
           input: encodeUserInput(text, []),
           clientUserMessageId: cid,
         }, 30000);
-        recordPeerMessage(false);   // queued: codex commits its copy when the queue drains — ours is first
+        recordPeerMessage(false, cid);   // queued: codex commits its copy when the queue drains — ours is first
         emitTaskEvent('peer_message_result', { ok: true, mode: 'queued', ...fell });
         log('peer message queued (turn active; runs after the current turn)');
       } else {
         await startTurn(text);
-        recordPeerMessage(true);    // idle: turn/start already persisted codex's copy — ours is the late twin
+        recordPeerMessage(true, '');    // idle: turn/start already persisted codex's copy — ours is the late twin
         emitTaskEvent('peer_message_result', { ok: true, mode: 'turn', ...fell });
       }
     } catch (e) {

@@ -337,7 +337,7 @@ function recordFingerprint(record, turnId) {
     // must never be the difference between our copy and codex's, wherever it
     // rides.
     const { item_id, itemId, id, internal_chat_message_metadata_passthrough, webui_peer, webui_queue_id, webuiQueueId, webui_queue_via, webui_after_commit, webuiAfterCommit,
-      webui_msg_id, webuiMsgId, client_msg_id, clientMsgId, thread_id, turn_id, ...stablePayload } = payload;
+      webui_no_commit, webuiNoCommit, webui_msg_id, webuiMsgId, client_msg_id, clientMsgId, thread_id, turn_id, ...stablePayload } = payload;
     return `${turnId}:response_item:${payload.type}:${key}:${JSON.stringify(stablePayload)}`;
   }
   if (record.type === 'event_msg') {
@@ -402,13 +402,29 @@ function settingsSignature(record) {
 // unconsumed codex copy of the same content IN THE SAME TURN (a submission's
 // two copies are always in the turn that committed it) by dropping ITSELF.
 // Nothing earlier is ever deleted, and a steered/typed record never yields.
-const WEBUI_USER_MARKERS = ['webui_msg_id', 'webuiMsgId', 'client_msg_id', 'clientMsgId', 'webui_queue_id', 'webuiQueueId', 'webui_queue_via', 'webui_after_commit', 'webuiAfterCommit', 'webui_origin', 'webui_peer'];
+const WEBUI_USER_MARKERS = ['webui_msg_id', 'webuiMsgId', 'client_msg_id', 'clientMsgId', 'webui_queue_id', 'webuiQueueId', 'webui_queue_via', 'webui_after_commit', 'webuiAfterCommit', 'webui_no_commit', 'webuiNoCommit', 'webui_origin', 'webui_peer'];
 const TWIN_VOLATILE_FIELDS = ['id', 'item_id', 'itemId', 'internal_chat_message_metadata_passthrough', 'thread_id', 'turn_id'];
+// The event the wrapper writes when it learns that a user record it ALREADY
+// wrote will never reach the app-server — see USER_RETRACTION_EVENT below.
+const USER_RETRACTION_EVENT = 'webui_user_retracted';
 
 /** Does this user payload come from US? Any webui marker at all — so only a
  *  record with none can be codex's own. */
 function userRecordIsOurs(payload) {
   return WEBUI_USER_MARKERS.some((k) => payload[k] !== undefined);
+}
+
+/** A content block as the TWIN compares it. An `input_image` is compared on
+ *  {type, image_url} ONLY: codex stamps its own `detail` onto the block it
+ *  persists (34 of the 40 image blocks in the local rollout corpus carry it,
+ *  including 2026-08 files; every `input_text` block is exactly {type,text}),
+ *  and a field only ONE producer writes must never be the difference between
+ *  two copies of one message — the record-level rule of TWIN_VOLATILE_FIELDS,
+ *  applied inside the content array. */
+function normalizeUserContentBlock(block) {
+  if (!block || typeof block !== 'object') return block;
+  if (block.type === 'input_image') return { type: 'input_image', image_url: block.image_url };
+  return block;
 }
 
 /** The content of a user message, with every marker and volatile field of both
@@ -418,6 +434,7 @@ function userRecordIsOurs(payload) {
 function userContentKey(payload) {
   const bare = { ...payload };
   for (const k of [...WEBUI_USER_MARKERS, ...TWIN_VOLATILE_FIELDS]) delete bare[k];
+  if (Array.isArray(bare.content)) bare.content = bare.content.map(normalizeUserContentBlock);
   try { return 'user:' + JSON.stringify(bare); } catch { return null; }
 }
 
@@ -448,11 +465,36 @@ function userTwinKeys(record) {
   // ALREADY emitted in the same turn, which cannot exist yet. Retire the rung
   // when no pre-marker buffers survive.
   const marked = payload.webui_after_commit === true || payload.webuiAfterCommit === true;
+  // A SUBMISSION THAT NEVER REACHED THE APP-SERVER has no twin to retire the
+  // pair against, so it must not claim (round 3): our copy is written BEFORE
+  // the submission is accepted, and a wrapper-served slash command (/compact,
+  // /review, /model, /effort) is answered by the wrapper itself — the text
+  // never becomes a user message. Such a record SAYS so, and a leaked claim
+  // would delete an unrelated codex-only record of the same text later, which
+  // is round-2 finding ④ through a second back door. Learned-later cases (a
+  // send whose RPC threw, an item removed from the queue before it ran) say
+  // the same thing out of line, with the retraction event below.
+  const noCommit = payload.webui_no_commit === true || payload.webuiNoCommit === true;
   return {
     ours,
-    late: ours && (marked || payload.webui_peer !== undefined),
+    claims: ours && !noCommit,
+    late: ours && !noCommit && (marked || payload.webui_peer !== undefined),
     contentKey,
   };
+}
+
+/** The submission id a `webui_user_retracted` event names, or ''. The wrapper
+ *  emits it when it learns — after the fact — that a user record it already
+ *  wrote will never be committed by the app-server (the RPC threw, or the
+ *  queued item was removed by Stop / by the user before it ran). It names the
+ *  record by IDENTITY, never by content: the text can be megabytes of data URL,
+ *  and re-deriving a content key inside the wrapper would be a second copy of
+ *  userContentKey's algorithm, free to drift from this one. */
+function retractionIdOf(record) {
+  if (!record || record.type !== 'event_msg') return '';
+  const payload = record.payload || {};
+  if (payload.type !== USER_RETRACTION_EVENT) return '';
+  return String(payload.msg_id || payload.msgId || '');
 }
 
 function mergeCodexRecords(historyRecords, liveRecords) {
@@ -468,6 +510,7 @@ function mergeCodexRecords(historyRecords, liveRecords) {
   let lastSettings = null; // { record, sig, turnId }
   const userClaims = new Map();   // content key → copies of OURS no codex twin has consumed yet (forward, turn-independent)
   const codexUserOut = new Map(); // `<turn> <content key>` → codex copies emitted in THIS turn no late twin of ours has consumed
+  const oursByIdentity = new Map(); // submission id → the content key the copy of OURS carrying that id claimed under (what a retraction names)
   let currentTurnId = 'prelude';
   for (const record of sortRecords([...(historyRecords || []), ...(liveRecords || [])])) {
     if (record.type === 'turn_context') {
@@ -524,6 +567,22 @@ function mergeCodexRecords(historyRecords, liveRecords) {
       }
       continue;
     }
+    // A RETRACTION (round 3): the wrapper writes our copy BEFORE the submission
+    // is accepted, so it can only learn afterwards that the app-server will
+    // never commit it — an RPC that threw, an item Stop or the user removed
+    // from the queue before it ran. The claim standing for that record is
+    // withdrawn here, in stream order (the retraction is always written after
+    // the record it names, so the mapping exists by now unless the buffer has
+    // rotated the record away, where there is no claim to withdraw either).
+    // The RECORD stays: the user typed it, and the bubble is the truth. Only
+    // the claim goes — a claim no twin will ever consume is the thing that
+    // deletes an unrelated message later.
+    const retractedId = retractionIdOf(record);
+    if (retractedId) {
+      const key = oursByIdentity.get(retractedId);
+      const claimed = key ? (userClaims.get(key) || 0) : 0;
+      if (claimed > 0) userClaims.set(key, claimed - 1);
+    }
     const twin = userTwinKeys(record);
     if (twin) {
       const turnKey = `${currentTurnId} ${twin.contentKey}`;
@@ -534,7 +593,11 @@ function mergeCodexRecords(historyRecords, liveRecords) {
           if (fp) seen.add(fp);
           continue;
         }
-        userClaims.set(twin.contentKey, (userClaims.get(twin.contentKey) || 0) + 1);
+        if (twin.claims) {
+          userClaims.set(twin.contentKey, (userClaims.get(twin.contentKey) || 0) + 1);
+          const identity = userRecordIdentity(record.payload || {});
+          if (identity) oursByIdentity.set(identity, twin.contentKey);
+        }
       } else {
         const claimed = userClaims.get(twin.contentKey) || 0;
         if (claimed > 0) {   // codex's copy of a bubble we already have
@@ -761,6 +824,9 @@ module.exports = {
   userTwinKeys,
   userRecordIdentity,
   codexRecordIdentity,
+  userContentKey,
+  retractionIdOf,
+  USER_RETRACTION_EVENT,
   parseCodexSessionJsonl,
   resolveCodexForkAncestry,
   cutRecordsAtOrdinal,

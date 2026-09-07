@@ -1473,6 +1473,204 @@ ok(/async function steerInput\(input, clientUserMessageId\) \{[\s\S]{0,400}?awai
 ok(!/steerInput[\s\S]{0,300}queue\/list/.test(wsrc) && /input,\n\s*expectedTurnId: meta\.activeTurnId,/.test(wsrc), "wrapper pin: steerInput sends the caller's input and nothing else — it never reads or writes the queue");
 ok(/mode: 'steered'/.test(wsrc) && /steerFailed: steerFailed\.reason/.test(wsrc), 'wrapper pin: the result reports the lane, and a fallback names the refused steer');
 
+// ── ⑦ ROUND 3: THE TWO WAYS OUR OWN COPY CAN DISAGREE WITH CODEX'S ──────────
+// (a) It can SPELL the message differently. What codex persists is what
+//     `encodeUserInput` SENT — text first — while handleInput hand-rolled
+//     `[...attachments, text]`, so every message with an image rendered TWICE
+//     after a reload (0 of 5489 user records in the local corpus start with an
+//     image; 34 of 40 image blocks carry a `detail` only codex writes).
+// (b) It can exist for a submission the app-server NEVER RECEIVES: a
+//     wrapper-served slash command, a send whose RPC threw, a queued item
+//     removed before it ran. Such a record must not CLAIM a twin — a claim no
+//     twin can consume deletes an unrelated codex-only record of the same text
+//     later. The wrapper says so at write time (`webui_no_commit`) when it
+//     knows, and out of line (`webui_user_retracted`) when it learns.
+// Driven against the REAL wrapper, so the assertions are about what it WRITES.
+console.log('— ⑦ our copy: one spelling, and a submission that never landed claims nothing');
+const STUB_R3 = `
+const fs = require('fs');
+let b = ''; let turns = 0; let queue = []; let qseq = 0; let activeTurn = null;
+const send = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (d) => {
+  b += d; let i;
+  while ((i = b.indexOf('\\n')) !== -1) {
+    const line = b.slice(0, i); b = b.slice(i + 1);
+    if (!line.trim()) continue;
+    let m; try { m = JSON.parse(line); } catch { continue; }
+    if (m.id === undefined || !m.method) continue;
+    fs.appendFileSync(__RPCLOG__, line + '\\n');
+    if (m.method === 'thread/start') { send({ id: m.id, result: { thread: { id: 'th-r3' } } }); continue; }
+    if (m.method === 'turn/start') {
+      // a turn/start the app-server REFUSES: the text never entered the thread
+      if (JSON.stringify(m.params.input || []).includes('boom now')) { send({ id: m.id, error: { code: -32000, message: 'turn refused by the app-server' } }); continue; }
+      turns++; const tid = 'turn-' + turns; activeTurn = tid;
+      send({ id: m.id, result: { turn: { id: tid } } });
+      send({ method: 'turn/started', params: { turn: { id: tid } } });
+      continue;
+    }
+    if (m.method === 'thread/queue/add') {
+      if (JSON.stringify(m.params.input || []).includes('qboom')) { send({ id: m.id, error: { code: -32000, message: 'queue add refused' } }); continue; }
+      const q = { id: 'q' + (++qseq), input: m.params.input, clientUserMessageId: m.params.clientUserMessageId };
+      queue.push(q); send({ id: m.id, result: { queuedSubmission: q } }); send({ method: 'thread/queue/changed', params: { threadId: 'th-r3' } }); continue;
+    }
+    if (m.method === 'thread/queue/list') { send({ id: m.id, result: { data: queue.slice(), nextCursor: null } }); continue; }
+    if (m.method === 'thread/queue/delete') {
+      const at = queue.findIndex((q) => q.id === m.params.queuedSubmissionId);
+      if (at < 0) { send({ id: m.id, error: { code: -32600, message: 'queued submission not found' } }); continue; }
+      queue.splice(at, 1); send({ id: m.id, result: { deleted: true } }); send({ method: 'thread/queue/changed', params: { threadId: 'th-r3' } }); continue;
+    }
+    if (m.method === 'turn/interrupt') { send({ id: m.id, result: {} }); const e = activeTurn; activeTurn = null; send({ method: 'turn/completed', params: { turn: { id: e }, status: 'interrupted' } }); continue; }
+    send({ id: m.id, result: {} });
+  }
+});
+`;
+{
+  const R = spawnStub('r3', STUB_R3);
+  const userRecs = () => R.events().filter((e) => e.type === 'response_item' && e.payload?.type === 'message' && e.payload.role === 'user');
+  const recOf = (id) => userRecs().find((r) => r.payload.webui_msg_id === id || r.payload.webui_queue_id === id) || null;
+  const retractions = () => R.events().filter((e) => e.type === 'event_msg' && e.payload?.type === 'webui_user_retracted').map((e) => e.payload);
+  const rpcOf = (method) => R.rpc().filter((m) => m.method === method);
+  ok(await waitFor(() => R.meta()?.threadId === 'th-r3'), 'r3 stub: the wrapper has a thread');
+
+  // (b1) A SEND THE APP-SERVER REFUSES, while idle → turn/start throws.
+  R.send({ type: 'chat-input', text: 'boom now', msgId: 'b-1' });
+  ok(await waitFor(() => !!recOf('b-1')), 'a refused send still gets its bubble — the user did type it');
+  ok(await waitFor(() => retractions().some((r) => r.msg_id === 'b-1')), 'and the wrapper RETRACTS it: turn/start threw, so the app-server has no copy to twin with', JSON.stringify(retractions()));
+  ok(/turn\/start failed/.test(retractions().find((r) => r.msg_id === 'b-1')?.reason || ''), 'the retraction says which RPC refused it', JSON.stringify(retractions()));
+  ok(await waitFor(() => R.msgs().some((m) => m.type === 'task_failed')), 'and the failure is still REPORTED (a retraction is about the merge, never a way to go quiet)');
+  ok(!R.meta()?.activeTurnId, 'no turn is running after a refused turn/start');
+
+  // (a) THE IMAGE MESSAGE: our copy must be the exact inverse of what we SENT.
+  const IMG = 'data:image/png;base64,iVBORw0KGgo=';
+  R.send({ type: 'chat-input', text: 'look at this', msgId: 'img-1', attachments: [{ type: 'input_image', image_url: IMG }] });
+  ok(await waitFor(() => !!recOf('img-1')), 'the image message has its bubble');
+  ok(await waitFor(() => rpcOf('turn/start').some((m) => JSON.stringify(m.params.input || []).includes('look at this')), 5000), 'and it reached the app-server');
+  const sent = rpcOf('turn/start').find((m) => JSON.stringify(m.params.input || []).includes('look at this'))?.params?.input || [];
+  ok(JSON.stringify(sent) === JSON.stringify([{ type: 'text', text: 'look at this' }, { type: 'image', url: IMG }]),
+    'what we SEND is text first, then the attachment (encodeUserInput)', JSON.stringify(sent));
+  ok(JSON.stringify(recOf('img-1').payload.content) === JSON.stringify([{ type: 'input_text', text: 'look at this' }, { type: 'input_image', image_url: IMG }]),
+    'THE FIX: our record is that same array mapped back — text first, image second, exactly the order codex persists (0 of 5489 corpus records start with an image)',
+    JSON.stringify(recOf('img-1').payload.content));
+
+  // (a2) THE THIRD PRODUCER OF OUR OWN COPY — the SERVER's preview record
+  // (CodexAdapter._buildUserPreview, appended to session.buffer by ws-handler
+  // so the bubble exists before the wrapper's own line lands). It carries the
+  // SAME webui_msg_id, so the merge keeps whichever is FIRST — the preview —
+  // and the twin claim is made under ITS content key. A fix that only
+  // straightened the wrapper's spelling would therefore have changed nothing
+  // in production. The two are compared BYTE FOR BYTE here, through the same
+  // client frame, because that is the only thing that keeps them from drifting
+  // apart again.
+  {
+    const { CodexAdapter } = require(path.join(REPO, 'src/adapters/codex.js'));
+    const frame = JSON.stringify({ type: 'user', message: { content: [{ type: 'text', text: 'twin check' }, { type: 'image', source: { media_type: 'image/png', data: 'iVBORw0KGgo=' } }] } });
+    R.send({ type: 'chat-input', text: frame, msgId: 'img-2' });
+    ok(await waitFor(() => !!recOf('img-2')), 'the same frame, sent as the client really sends it (a JSON user envelope), reaches the wrapper');
+    const server = CodexAdapter._buildUserPreview(frame, 'img-2');
+    ok(JSON.stringify(server.payload.content) === JSON.stringify(recOf('img-2').payload.content),
+      'PARITY: the server\'s preview record and the wrapper\'s own record spell one message identically — same order, same blocks',
+      JSON.stringify([server.payload.content, recOf('img-2').payload.content]));
+    ok(server.payload.content[0].type === 'input_text' && server.payload.content[1].type === 'input_image',
+      '…and both spell it the way codex persists it: text first', JSON.stringify(server.payload.content));
+    // The merge must therefore see ONE message whichever copy wins.
+    {
+      const { mergeCodexRecords } = require(path.join(REPO, 'src/codex-session-store.js'));
+      const t0 = Date.parse(recOf('img-2').timestamp);
+      const prev = { ...server, timestamp: new Date(t0 - 20).toISOString() };
+      const theirCopy = { timestamp: new Date(t0 + 40000).toISOString(), type: 'response_item', payload: { type: 'message', id: 'msg_twin', role: 'user', content: [{ type: 'input_text', text: 'twin check' }, { type: 'input_image', image_url: 'data:image/png;base64,iVBORw0KGgo=', detail: 'auto' }], internal_chat_message_metadata_passthrough: { turn_id: 'turn-1' } } };
+      const merged = mergeCodexRecords([{ timestamp: new Date(t0 - 60000).toISOString(), type: 'turn_context', payload: { turn_id: 'turn-1' } }, theirCopy], [prev, recOf('img-2')]);
+      const mm = new CodexMessageManager('r3-twin');
+      for (const r of merged) mm.processLive(r);
+      const twins = mm.messages.filter((m) => m.role === 'user' && (m.content || []).some((c) => (c.text || '') === 'twin check'));
+      ok(twins.length === 1, `THREE records for one image message (server preview + wrapper + codex) → ONE bubble (${twins.length})`, JSON.stringify(twins.map((m) => (m.content || []).map((c) => c.type))));
+      // NEGATIVE CONTROL: the preview as it was spelled before this round.
+      const oldPrev = { ...prev, payload: { ...prev.payload, content: [prev.payload.content[1], prev.payload.content[0]] } };
+      const mm2 = new CodexMessageManager('r3-twin-ctl');
+      for (const r of mergeCodexRecords([{ timestamp: new Date(t0 - 60000).toISOString(), type: 'turn_context', payload: { turn_id: 'turn-1' } }, theirCopy], [oldPrev, recOf('img-2')])) mm2.processLive(r);
+      ok(mm2.messages.filter((m) => m.role === 'user' && (m.content || []).some((c) => (c.text || '') === 'twin check')).length === 2,
+        'NEGATIVE CONTROL: with the attachments-first preview the pair never collapses — two bubbles, and the wrapper\'s own spelling cannot save it (the preview wins the fingerprint)');
+    }
+  }
+
+  // (b2) A WRAPPER-SERVED SLASH COMMAND: answered here, never sent.
+  R.send({ type: 'chat-input', text: '/compact', msgId: 'sl-1' });
+  ok(await waitFor(() => !!recOf('sl-1')), '/compact renders as the user bubble it is');
+  ok(recOf('sl-1').payload.webui_no_commit === true, 'and DECLARES that it never becomes a user message on the app-server', JSON.stringify(recOf('sl-1').payload));
+  ok(await waitFor(() => rpcOf('thread/compact/start').length === 1), '…because the wrapper answered it itself (thread/compact/start, no queue add)');
+  ok(!rpcOf('thread/queue/add').some((m) => JSON.stringify(m.params.input || []).includes('/compact')), 'the text was never queued either');
+
+  // (b3) A QUEUED SEND THE APP-SERVER REFUSES.
+  R.send({ type: 'chat-input', text: 'qboom please', msgId: 'q-1' });
+  ok(await waitFor(() => !!recOf('q-1')), 'a queued send that throws still has its bubble');
+  ok(await waitFor(() => retractions().some((r) => r.msg_id === 'q-1' && /queue\/add failed/.test(r.reason || ''))), '…and is retracted, naming thread/queue/add', JSON.stringify(retractions()));
+
+  // (b4) A QUEUED ITEM THE USER REMOVES before it runs.
+  R.send({ type: 'chat-input', text: 'to be removed', msgId: 'rm-1' });
+  ok(await waitFor(() => R.lastQueue().some((it) => it.msgId === 'rm-1')), 'the removable message is queued');
+  ok(recOf('rm-1') && recOf('rm-1').payload.webui_no_commit === undefined, 'a NORMAL send declares nothing — it is expected to commit', JSON.stringify(recOf('rm-1')?.payload));
+  const rmRow = R.lastQueue().find((it) => it.msgId === 'rm-1');
+  R.send({ type: 'queue-op', op: 'remove', id: rmRow.id });
+  ok(await waitFor(() => R.ops().some((o) => o.op === 'remove' && o.id === rmRow.id && o.ok)), 'the remove lands');
+  ok(await waitFor(() => retractions().some((r) => r.msg_id === 'rm-1' && /removed from the queue/.test(r.reason || ''))), '…and the bubble it wrote is retracted: it left the queue without running', JSON.stringify(retractions()));
+
+  // (b5) STOP: the sweep drops what is queued, so the same rule applies there.
+  R.send({ type: 'chat-input', text: 'stop me', msgId: 'st-1' });
+  ok(await waitFor(() => R.lastQueue().some((it) => it.msgId === 'st-1')), 'one more message is queued');
+  R.send({ type: 'interrupt' });
+  ok(await waitFor(() => retractions().some((r) => r.msg_id === 'st-1' && /Stop/.test(r.reason || ''))), 'Stop clears the queue → that bubble is retracted too', JSON.stringify(retractions()));
+  // FIVE, not four: the parity frame in (a2) was queued behind the running
+  // turn, so Stop swept it too — the same rule, arrived at from a leg that was
+  // not written to test it.
+  ok(retractions().length === 5 && new Set(retractions().map((r) => r.msg_id)).size === 5
+    && ['b-1', 'q-1', 'rm-1', 'img-2', 'st-1'].every((id) => retractions().some((r) => r.msg_id === id)),
+    `exactly one retraction per submission that never landed, five of them (${retractions().length})`, JSON.stringify(retractions().map((r) => r.msg_id)));
+  ok(!retractions().some((r) => r.msg_id === 'img-1' || r.msg_id === 'sl-1'),
+    'and NONE for the message that did land, nor for the slash command (which declared itself on the record instead)', JSON.stringify(retractions().map((r) => r.msg_id)));
+
+  // THE REBUILD — the wrapper's REAL records, merged with the rollout a codex
+  // that behaved this way would have written: ONE copy, for the one submission
+  // that actually committed. Every retracted text then arrives again as a
+  // codex-only record in a much later turn (another client, or the same words
+  // after the buffer rotated) — and must survive.
+  {
+    const { mergeCodexRecords } = require(path.join(REPO, 'src/codex-session-store.js'));
+    const ours = R.events().filter((e) => e.type === 'response_item' || (e.type === 'event_msg' && e.payload?.type === 'webui_user_retracted'));
+    const base = Date.parse(userRecs()[0].timestamp);
+    const tc = (id, ms) => ({ timestamp: new Date(base + ms).toISOString(), type: 'turn_context', payload: { turn_id: id } });
+    const theirs = (id, text, ms, tid) => ({ timestamp: new Date(base + ms).toISOString(), type: 'response_item', payload: { type: 'message', id, role: 'user', content: [{ type: 'input_text', text }, ...(text === 'look at this' ? [{ type: 'input_image', image_url: IMG, detail: 'auto' }] : [])], internal_chat_message_metadata_passthrough: { turn_id: tid } } });
+    const rollout = [
+      tc('turn-1', -1000),
+      theirs('msg_img', 'look at this', 60000, 'turn-1'),      // the one that COMMITTED
+      tc('turn-9', 600000),
+      theirs('msg_x1', 'boom now', 610000, 'turn-9'),           // …and the same words, later, from elsewhere
+      theirs('msg_x2', '/compact', 610100, 'turn-9'),
+      theirs('msg_x3', 'qboom please', 610200, 'turn-9'),
+      theirs('msg_x4', 'to be removed', 610300, 'turn-9'),
+      theirs('msg_x5', 'stop me', 610400, 'turn-9'),
+    ];
+    const render = (records) => { const mm = new CodexMessageManager('r3-rb'); for (const r of records) mm.processLive(r); return mm.messages.filter((m) => m.role === 'user').map((m) => (m.content || []).map((c) => c.text || '').join('') || '(image)'); };
+    const rb = render(mergeCodexRecords(rollout, ours));
+    ok(rb.length === 12, `REBUILD: 7 messages of ours + 5 unrelated codex records = 12 bubbles, none deleted, none doubled (${rb.length})`, JSON.stringify(rb));
+    ok(rb.filter((t) => t === 'twin check').length === 1, 'the parity message (three records of ours for it, no codex copy) is ONE bubble', JSON.stringify(rb));
+    ok(rb.filter((t) => t === 'look at this').length === 1, 'the image message — the only one that committed — collapses to ONE bubble', JSON.stringify(rb));
+    for (const t of ['boom now', '/compact', 'qboom please', 'to be removed', 'stop me']) {
+      ok(rb.filter((x) => x === t).length === 2, `"${t}": ours AND the unrelated later record both survive`, JSON.stringify(rb));
+    }
+    // NEGATIVE CONTROL — the same run with the wrapper's declarations stripped:
+    // a wrapper that stays silent about the submissions that never landed
+    // deletes five real messages from the rebuild.
+    const silent = ours.filter((e) => !(e.type === 'event_msg')).map((e) => {
+      if (e.payload?.webui_no_commit === undefined) return e;
+      const { webui_no_commit, ...rest } = e.payload;
+      return { ...e, payload: rest };
+    });
+    const ctlRb = render(mergeCodexRecords(rollout, silent));
+    ok(ctlRb.length === 7, `NEGATIVE CONTROL: strip the retractions + the no-commit marker and five codex-only messages are deleted (${ctlRb.length} of 12)`, JSON.stringify(ctlRb));
+  }
+  R.stop();
+}
+
 try { w.kill('SIGTERM'); } catch {}
 await sleep(300);
 try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}

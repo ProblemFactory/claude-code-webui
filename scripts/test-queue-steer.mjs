@@ -3763,7 +3763,7 @@ console.log('— ⑫ no commit on this branch carries conflict markers (a clean 
 console.log('— ⑨ steered messages: one bubble each, live and after a reload');
 {
   const { CodexMessageManager } = require(path.join(REPO, 'src/codex-message-manager.js'));
-  const { mergeCodexRecords, recordFingerprint, userTwinKeys, userRecordIdentity, codexRecordIdentity } = require(path.join(REPO, 'src/codex-session-store.js'));
+  const { mergeCodexRecords, recordFingerprint, userTwinKeys, userRecordIdentity, codexRecordIdentity, userContentKey, retractionIdOf } = require(path.join(REPO, 'src/codex-session-store.js'));
   const rollout = fs.readFileSync(path.join(REPO, 'scripts/fixtures/codex-steer-all-rollout.jsonl'), 'utf8')
     .split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l));
   const userRecs = rollout.filter((r) => r.type === 'response_item' && r.payload.type === 'message' && r.payload.role === 'user');
@@ -4258,6 +4258,207 @@ console.log('— ⑨ steered messages: one bubble each, live and after a reload'
       const producers = cw.match(/record\('response_item',[\s\S]{0,300}?role: 'user'/g) || [];
       ok(producers.length === 3, `every wrapper producer of a user record is accounted for: chat-input (early), the inherited-queue bubble (steer early / drain late), the peer copy (queued early / idle late) — found ${producers.length}`, producers.length);
       ok(/webui_after_commit/.test(cw) && (cw.match(/webui_after_commit: true/g) || []).length === 2, 'and exactly the two LATE ones declare it', (cw.match(/webui_after_commit: true/g) || []).length);
+    }
+
+    // (j8) ROUND 3 — THE TWIN THAT COULD NEVER COLLAPSE: an ATTACHMENT. The
+    // two producers of our own user record spelled the content differently —
+    // handleInput hand-rolled `[...attachments, text]` while what codex
+    // PERSISTS is what `encodeUserInput` SENT, i.e. text first — so every
+    // message with an image rendered TWICE after a reload, in the one branch
+    // round 2's comment claimed was "BYTE-IDENTICAL to codex's own rollout
+    // copy". MEASURED on the local corpus (97 rollout files, 5489 user
+    // records): 0 records start with an `input_image`, every `input_text`
+    // block is exactly {type,text}, and 34 of the 40 `input_image` blocks
+    // carry a third key `detail` that only codex writes.
+    {
+      const IMG = 'data:image/png;base64,iVBORw0KGgo=';
+      const IMG2 = 'data:image/png;base64,ZZZBORw0KGgo=';
+      const imgOurs = (id, text, url, ms, order = 'codex') => ({
+        timestamp: new Date(T + ms).toISOString(), type: 'response_item',
+        payload: { type: 'message', role: 'user', webui_msg_id: id,
+          content: order === 'codex'
+            ? [{ type: 'input_text', text }, { type: 'input_image', image_url: url }]
+            : [{ type: 'input_image', image_url: url }, { type: 'input_text', text }] },
+      });
+      const imgTheirs = (id, text, url, ms, extra = {}) => ({
+        timestamp: new Date(T + ms).toISOString(), type: 'response_item',
+        payload: { type: 'message', id, role: 'user',
+          content: [{ type: 'input_text', text }, { type: 'input_image', image_url: url, ...extra }],
+          internal_chat_message_metadata_passthrough: { turn_id: 'turn-A' } },
+      });
+      const roll = [turn('turn-A', 0), imgTheirs('msg_i1', 'look at this', IMG, 5000, { detail: 'auto' })];
+      ok('an IMAGE + text message is ONE bubble after a reload (both producers now spell the content the same way, and codex\'s own `detail` is out of the key)',
+        bubbles(mergeCodexRecords(roll, [imgOurs('m-i1', 'look at this', IMG, 1000)])).length === 1,
+        bubbles(mergeCodexRecords(roll, [imgOurs('m-i1', 'look at this', IMG, 1000)])));
+      ok('the text-only control on the identical scaffold is unchanged', bubbles(mergeCodexRecords([turn('turn-A', 0), theirs('msg_i0', 'look at this', 5000)], [mine({ webui_msg_id: 'm-i0' }, 'look at this', 1000)])).length === 1);
+      // NEGATIVE CONTROL ① — the ORDER: the hand-rolled attachments-first
+      // spelling the wrapper used before this round, against the same codex
+      // copy. Two bubbles: this is the defect, reproduced.
+      ok('NEGATIVE CONTROL: our copy written attachments-FIRST (the old spelling) never collapses — two bubbles for one message',
+        bubbles(mergeCodexRecords(roll, [imgOurs('m-i1', 'look at this', IMG, 1000, 'ours')])).length === 2);
+      // NEGATIVE CONTROL ② — `detail`: the same records through a store whose
+      // block normalisation is patched out.
+      const ctl8 = loadPatched('src/codex-session-store.js', [[
+        '  if (Array.isArray(bare.content)) bare.content = bare.content.map(normalizeUserContentBlock);\n', '',
+      ]]);
+      ok('NEGATIVE CONTROL: without normalising the image block, codex\'s own `detail` alone splits the pair',
+        bubbles(ctl8.mergeCodexRecords(roll, [imgOurs('m-i1', 'look at this', IMG, 1000)])).length === 2);
+      // …and the normalisation must not COLLAPSE two different images: only
+      // the fields codex adds are dropped, never the ones that identify it.
+      ok('two sends of the same caption with DIFFERENT images stay two bubbles',
+        bubbles(mergeCodexRecords([turn('turn-A', 0), imgTheirs('msg_i2', 'same caption', IMG, 5000, { detail: 'auto' }), imgTheirs('msg_i3', 'same caption', IMG2, 5100, { detail: 'auto' })],
+          [imgOurs('m-i2', 'same caption', IMG, 1000), imgOurs('m-i3', 'same caption', IMG2, 1100)])).length === 2);
+      ok('userContentKey: an image block is compared on {type,image_url}, and a different url is a different key',
+        userContentKey({ type: 'message', role: 'user', content: [{ type: 'input_image', image_url: IMG, detail: 'auto' }] })
+          === userContentKey({ type: 'message', role: 'user', content: [{ type: 'input_image', image_url: IMG }] })
+        && userContentKey({ type: 'message', role: 'user', content: [{ type: 'input_image', image_url: IMG }] })
+          !== userContentKey({ type: 'message', role: 'user', content: [{ type: 'input_image', image_url: IMG2 }] }));
+      // THE WIRING PIN (2.355.0 lesson): the reader half above is only half the
+      // fix — our copy has to be SPELLED by the same function that encodes the
+      // submission, or the two drift again the next time either is touched.
+      const cw8 = read('data/bin/codex-chat-wrapper.js');
+      ok('WIRING PIN: handleInput writes the content through userInputToContent(encodeUserInput(…)) — ONE spelling, never a second hand-rolled array',
+        /content: userInputToContent\(encodeUserInput\(text, attachments\)\),/.test(cw8)
+        && !/attachments\.map\(\(item\) => \(\{ type: 'input_image', image_url: item\.image_url \}\)\)/.test(cw8));
+      // …and the THIRD producer of our copy: the SERVER's preview record
+      // (CodexAdapter._buildUserPreview → session.buffer, ws-handler). It
+      // carries the same webui_msg_id, so it WINS the fingerprint and its
+      // content key is the one that claims — a wrapper-only fix changes
+      // nothing in production. test-codex-p2-wrapper ⑦(a2) compares the two
+      // byte for byte through one client frame; this is the cheap tripwire.
+      ok('WIRING PIN: the server-side preview record spells the content the same way — text first, attachments after',
+        /const content = \[\n\s*\.\.\.\(text \? \[\{ type: 'input_text', text \}\] : \[\]\),\n\s*\.\.\.attachments\.map\(a => \(\{ type: 'input_image', image_url: a\.image_url \}\)\),\n\s*\];/.test(read('src/adapters/codex.js')));
+    }
+
+    // (j9) ROUND 3 — A CLAIM WHOSE TWIN NEVER ARRIVES. Our copy is written
+    // BEFORE the submission reaches the app-server, so there are sends that
+    // never become a user message at all: a wrapper-served slash command
+    // (/compact, /review, /model, /effort — answered by the wrapper itself), an
+    // RPC that throws, and a queued item Stop or the user removes before it
+    // runs. Round 2 retired a claim only when a DUPLICATE codex record was
+    // short-circuited by `seen`; a claim whose twin never existed leaked, and
+    // the leaked claim later DELETED a legitimate codex-only record of the same
+    // text — round-2 finding ④ through a second back door.
+    // THE RULE: a producer that KNOWS says so on the record (`webui_no_commit`);
+    // a producer that LEARNS it afterwards says so out of line (the
+    // `webui_user_retracted` event, which names the record by identity — the
+    // text can be megabytes of data URL). Both feed one predicate: does this
+    // copy of ours claim?
+    {
+      const noCommit = (id, text, ms) => mine({ webui_msg_id: id, webui_no_commit: true }, text, ms);
+      const retract = (id, ms, reason = 'thread/queue/add failed: boom') => ({ timestamp: new Date(T + ms).toISOString(), type: 'event_msg', payload: { type: 'webui_user_retracted', msg_id: id, reason } });
+      // ① the slash command: ours in turn A, a codex-only 'continue' of the
+      // same text in turn B (another client, or the same words typed after the
+      // buffer rotated). Both must render.
+      const slashRoll = [turn('turn-A', 0), turn('turn-B', 60000), theirs('msg_s1', '/compact', 91000, 'turn-B')];
+      ok('a wrapper-served /compact never reaches the app-server, so it claims nothing — a later codex-only record of the same text survives',
+        bubbles(mergeCodexRecords(slashRoll, [noCommit('m-s1', '/compact', 1000)])).length === 2,
+        bubbles(mergeCodexRecords(slashRoll, [noCommit('m-s1', '/compact', 1000)])));
+      const ctl9a = loadPatched('src/codex-session-store.js', [['    claims: ours && !noCommit,\n', '    claims: ours,\n']]);
+      ok('NEGATIVE CONTROL: let it claim anyway and the turn-B message is deleted',
+        ctl9a.mergeCodexRecords(slashRoll, [noCommit('m-s1', '/compact', 1000)]).filter((r) => r.payload?.role === 'user').length === 1);
+      // ② the send whose RPC threw, retracted out of line — the SAME scenario
+      // an arbitrarily long time later (turn A → turn Z), because the claim
+      // ledger is turn-independent by design.
+      const farRoll = [turn('turn-A', 0), turn('turn-Z', 600000), theirs('msg_z1', 'continue', 900000, 'turn-Z')];
+      const failed = [mine({ webui_msg_id: 'm-f1' }, 'continue', 1000), retract('m-f1', 1500)];
+      ok('a send whose RPC threw is RETRACTED, so the codex-only "continue" in a much later turn survives',
+        bubbles(mergeCodexRecords(farRoll, failed)).length === 2, bubbles(mergeCodexRecords(farRoll, failed)));
+      ok('NEGATIVE CONTROL (data): the same records WITHOUT the retraction event — the leaked claim eats the turn-Z message',
+        bubbles(mergeCodexRecords(farRoll, [failed[0]])).length === 1);
+      const ctl9b = loadPatched('src/codex-session-store.js', [[
+        '    const retractedId = retractionIdOf(record);\n    if (retractedId) {\n      const key = oursByIdentity.get(retractedId);\n      const claimed = key ? (userClaims.get(key) || 0) : 0;\n      if (claimed > 0) userClaims.set(key, claimed - 1);\n    }\n', '',
+      ]]);
+      ok('NEGATIVE CONTROL (code): a store that ignores the retraction event deletes it too',
+        ctl9b.mergeCodexRecords(farRoll, failed).filter((r) => r.payload?.role === 'user').length === 1);
+      // ③ THE RETRACTION IS NOT A BLANKET OFF-SWITCH. It withdraws ONE claim,
+      // by identity; everything else about the pair rule stands.
+      ok('a normal send still collapses with codex\'s commit copy (the retraction only touches the record it names)',
+        bubbles(mergeCodexRecords([turn('turn-A', 0), theirs('msg_n1', 'ship it', 5000), theirs('msg_n2', 'other', 5100)],
+          [mine({ webui_msg_id: 'm-n1' }, 'ship it', 1000), mine({ webui_msg_id: 'm-n2' }, 'other', 1100), retract('m-n2', 1200)])).length === 3);
+      ok('…a retraction naming an id we never emitted is a no-op',
+        bubbles(mergeCodexRecords([turn('turn-A', 0), theirs('msg_u1', 'unrelated', 5000)], [mine({ webui_msg_id: 'm-u1' }, 'unrelated', 1000), retract('nobody', 1500)])).length === 1);
+      // …and the ledger may not go NEGATIVE: two DIFFERENT retractions naming
+      // one record (a remove that raced the Stop sweep, say — same id, two
+      // reasons, so `seen` cannot fold them) must withdraw ONE claim, leaving
+      // the next legitimate send's claim intact. (An identical retraction from
+      // two sources is folded by the fingerprint before it is ever counted.)
+      ok('…and two retractions of one record never go negative — the next send\'s twin still collapses',
+        bubbles(mergeCodexRecords([turn('turn-A', 0), theirs('msg_d2', 'twice', 30000)],
+          [mine({ webui_msg_id: 'm-d1' }, 'twice', 1000), retract('m-d1', 1100, 'removed from the queue before it ran'), retract('m-d1', 1200, 'dropped by Stop before it ran'), mine({ webui_msg_id: 'm-d2' }, 'twice', 2000)])).length === 2,
+        bubbles(mergeCodexRecords([turn('turn-A', 0), theirs('msg_d2', 'twice', 30000)],
+          [mine({ webui_msg_id: 'm-d1' }, 'twice', 1000), retract('m-d1', 1100, 'removed from the queue before it ran'), retract('m-d1', 1200, 'dropped by Stop before it ran'), mine({ webui_msg_id: 'm-d2' }, 'twice', 2000)])));
+      ok('…and the SAME retraction arriving from two sources is folded by the fingerprint, not counted twice',
+        bubbles(mergeCodexRecords([turn('turn-A', 0), theirs('msg_e2', 'echo', 30000)],
+          [mine({ webui_msg_id: 'm-e1' }, 'echo', 1000), retract('m-e1', 1100), retract('m-e1', 1100), mine({ webui_msg_id: 'm-e2' }, 'echo', 2000)])).length === 2);
+      // ④ THE BUBBLE STAYS. A retraction is a fact about the CLAIM ledger, not
+      // about the message: the user really did send that text, and the
+      // task_failed notice is what reports the failure.
+      ok('the retracted message keeps its own bubble (the record is never dropped)',
+        bubbles(mergeCodexRecords([turn('turn-A', 0)], [mine({ webui_msg_id: 'm-b1' }, 'never landed', 1000), retract('m-b1', 1500)])).join('') === 'never landed');
+      ok('…and the retraction event itself renders NOTHING — a NAMED skip, never an unknown record',
+        CodexMessageManager.SKIPPED_EVENT_TYPES.has('webui_user_retracted')
+        && ![...CodexMessageManager._seenUnknownRecords].some((k) => /webui_user_retracted/.test(k)),
+        JSON.stringify([...CodexMessageManager._seenUnknownRecords]));
+      // ⑤ THE PURE FUNCTIONS.
+      ok('userTwinKeys: `claims` is false exactly for a record that says it will never be committed, and such a record never yields either',
+        userTwinKeys(mine({ webui_msg_id: 'm' }, 'x', 0)).claims === true
+        && userTwinKeys(noCommit('m', 'x', 0)).claims === false
+        && userTwinKeys(noCommit('m', 'x', 0)).ours === true
+        && userTwinKeys(noCommit('m', 'x', 0)).late === false
+        && userTwinKeys({ type: 'response_item', payload: { type: 'message', role: 'user', content: [], webui_peer: { name: 'b' }, webui_no_commit: true } }).late === false
+        && userTwinKeys(theirs('msg_x', 'x', 0)).claims === false);
+      ok('retractionIdOf names the event and nothing else',
+        retractionIdOf(retract('m-1', 0)) === 'm-1' && retractionIdOf({ type: 'event_msg', payload: { type: 'queue_op_result' } }) === ''
+        && retractionIdOf(mine({ webui_msg_id: 'm' }, 'x', 0)) === '' && retractionIdOf(null) === '');
+      ok('…and the marker is stripped from the merge fingerprint AND the normalizer\'s record key, so the same message keys the same with or without it',
+        recordFingerprint(noCommit('m-k', 'x', 0), 't') === recordFingerprint(mine({ webui_msg_id: 'm-k' }, 'x', 0), 't')
+        && CodexMessageManager.recordKey(noCommit('m-k', 'x', 0)) === CodexMessageManager.recordKey(mine({ webui_msg_id: 'm-k' }, 'x', 0)));
+      // ⑥ WIRING PINS — the reader's rule is dead unless the wrapper speaks it.
+      const cw9 = read('data/bin/codex-chat-wrapper.js');
+      ok('WIRING PIN: the no-commit declaration uses the SAME predicate applySlashCommand acts on (one regex, no second spelling to drift)',
+        /const noCommit = !attachments\.length && isWrapperSlashCommand\(text\);/.test(cw9)
+        && /\.\.\.\(noCommit \? \{ webui_no_commit: true \} : \{\}\),/.test(cw9)
+        && /if \(!attachments\.length && await applySlashCommand\(text\)\) return;/.test(cw9)
+        // ONE regex object, used by the predicate AND by the executor: a second
+        // literal listing the commands is what would drift the two apart.
+        && /^const SLASH_COMMAND_RE = /m.test(cw9)
+        && /function isWrapperSlashCommand\(text\) \{\n\s*return SLASH_COMMAND_RE\.test/.test(cw9)
+        && /const m = SLASH_COMMAND_RE\.exec\(String\(text \|\| ''\)\.trim\(\)\);/.test(cw9)
+        && (cw9.match(/\/\^\\\/\(compact\|review\|model\|effort\)/g) || []).length === 1);
+      ok('WIRING PIN: every path that learns the submission never landed retracts — turn/start, thread/queue/add, an explicit remove, the Stop sweep',
+        (cw9.match(/retractUserRecord\(/g) || []).length === 5
+        && /retractUserRecord\(msg\.msgId \|\| cid, 'thread\/queue\/add failed: '/.test(cw9)
+        && /retractUserRecord\(msg\.msgId, 'turn\/start failed: '/.test(cw9)
+        && /retractUserRecord\(item\.clientUserMessageId, 'removed from the queue before it ran'\)/.test(cw9)
+        && /retractUserRecord\(cid, 'dropped by Stop before it ran'\)/.test(cw9));
+      ok('…and a retraction is only ever emitted for a record we actually wrote', /if \(!msgId \|\| !recordedUserCids\.has\(msgId\)\) return false;/.test(cw9));
+    }
+
+    // (j10) ROUND 3, THE SAME RULE FOR THE ONE PRODUCER THAT MINTED NO ID: the
+    // QUEUED peer copy. Round 2's major — "two same-text submissions in one
+    // turn collapse into one bubble" — was fixed for the steered/typed
+    // producers by keying on the id, but the peer record carried none, so two
+    // identical agent-to-agent notices inside one turn still lost one on
+    // reload. It has an id available all along: the app-server cid it was
+    // queued under, carried as the same SECOND-CLASS `webui_queue_id` (it must
+    // not be `webui_msg_id`, which suppresses the peer card).
+    {
+      const peerRec = (cid, body, ms) => ({
+        timestamp: new Date(T + ms).toISOString(), type: 'response_item',
+        payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: `Message from session "beta" (via vibespace-msg) — ${body}` }], webui_peer: { name: 'beta', body }, ...(cid ? { webui_queue_id: cid } : {}) },
+      });
+      const two = mergeCodexRecords([turn('turn-A', 0)], [peerRec('peer-1', 'done', 1000), peerRec('peer-2', 'done', 1100)]);
+      ok('two peer messages with the SAME text inside one turn stay two labelled cards',
+        bubbles(two).length === 2 && (() => { const mm = new CodexMessageManager('pr'); for (const r of two) mm.processLive(r); return mm.messages.filter((m) => m.originKind === 'peer-message').length === 2; })(),
+        bubbles(two));
+      ok('NEGATIVE CONTROL: the same two records with no submission id (the shipped peer shape) collapse to one — the round-1 major, still open for that producer',
+        bubbles(mergeCodexRecords([turn('turn-A', 0)], [peerRec('', 'done', 1000), peerRec('', 'done', 1100)])).length === 1);
+      ok('…and the queued peer copy still collapses with codex\'s own commit copy of it',
+        bubbles(mergeCodexRecords([turn('turn-A', 0), theirs('msg_p1', 'Message from session "beta" (via vibespace-msg) — done', 30000)], [peerRec('peer-1', 'done', 1000)])).length === 1);
+      ok('…and a Stop that drops it retracts by that id, so a later codex-only copy of the same text survives',
+        bubbles(mergeCodexRecords([turn('turn-A', 0), turn('turn-B', 60000), theirs('msg_p2', 'Message from session "beta" (via vibespace-msg) — done', 90000, 'turn-B')],
+          [peerRec('peer-1', 'done', 1000), { timestamp: new Date(T + 1500).toISOString(), type: 'event_msg', payload: { type: 'webui_user_retracted', msg_id: 'peer-1', reason: 'dropped by Stop before it ran' } }])).length === 2);
     }
 
     // (j7) THE ROUTING PIN stays: neither reader may go back to dropping the

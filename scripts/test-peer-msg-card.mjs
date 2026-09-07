@@ -254,15 +254,34 @@ const userRec = (n, text, extra = {}) => ({ timestamp: T(n), type: 'response_ite
   const w = read('data/bin/codex-chat-wrapper.js');
   // THREE paths since 2026-09-07 (notifications steer): steered / queued /
   // own turn. Every one of them must write the SAME record, or a notification
-  // that took the steer lane would render as an anonymous "You" bubble.
-  check('wrapper records the peer user message WITH the webui_peer marker (name + body) on ALL THREE delivery paths', /webui_peer: \{ name: fromName, body: cardText \}/.test(w) && (w.match(/recordPeerMessage\((true|false)\);/g) || []).length === 3);
+  // that took the steer lane would render as an anonymous "You" bubble — and
+  // each one names the submission (round 3), so the steered card and the
+  // app-server's own commit twin cannot become two bubbles.
+  check('wrapper records the peer user message WITH the webui_peer marker (name + body) on ALL THREE delivery paths', /webui_peer: \{ name: fromName, body: cardText \}/.test(w) && (w.match(/recordPeerMessage\((true|false), /g) || []).length === 3);
   // WHICH SIDE OF CODEX'S OWN COPY this record lands on is the rebuild's whole
   // question (2026-09-07 round 2): on the IDLE path `turn/start` has already
   // persisted codex's copy when we get here, so ours is the LATE twin and says
   // so; on the queued path nothing is committed yet and ours claims first, and
   // a STEERED notification's commit twin only lands at the next turn boundary.
   check('…and each path declares whether the app-server had already committed the message (idle=true after turn/start, queued=false)',
-    /await startTurn\(text\);\n\s*recordPeerMessage\(true\);/.test(w) && /clientUserMessageId: cid,\n\s*\}, 30000\);\n\s*recordPeerMessage\(false\);/.test(w));
+    /await startTurn\(text\);\n\s*recordPeerMessage\(true, ''\);/.test(w) && /clientUserMessageId: cid,\n\s*\}, 30000\);\n\s*recordPeerMessage\(false, cid\);/.test(w));
+  // ROUND 3: the QUEUED copy also carries the submission id the app-server
+  // already minted for it (`webui_queue_id`, the second-class identity an
+  // inherited bubble uses — it joins the strip row and does NOT suppress the
+  // peer card). Two things ride on it: a Stop/remove that drops the item can
+  // RETRACT that record's twin claim by name, and two peer messages with the
+  // SAME text inside one turn stop colliding on the content key. The IDLE path
+  // has no cid to carry (turn/start mints none), which is also why it can never
+  // be retracted — it was committed the moment it was sent.
+  check('…and the QUEUED peer copy carries the app-server cid as its identity, the idle one carries none',
+    /\.\.\.\(queueCid \? \{ webui_queue_id: queueCid \} : \{\}\),/.test(w) && /recordPeerMessage\(false, cid\);/.test(w) && /recordPeerMessage\(true, ''\);/.test(w));
+  {
+    const users = new CodexMessageManager('cx-r3').convertHistory([
+      { timestamp: T(1), type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: BW_FRAME }], webui_peer: { name: 'beta', body: 'done' }, webui_queue_id: 'peer-1' } },
+    ]).filter((m) => m.role === 'user');
+    check('…and that identity keeps the labelled peer card (a webui_msg_id here would make it an anonymous "You" bubble)',
+      users.length === 1 && users[0].originKind === 'peer-message' && users[0].webuiMsgId === 'peer-1', JSON.stringify(users.map((m) => [m.originKind, m.webuiMsgId])));
+  }
   check('…through the ONE reader-facing marker for that fact', /\.\.\.\(afterCommit \? \{ webui_after_commit: true \} : \{\}\)/.test(w));
   check('…and echoes fromName on failure so the re-stash keeps its label', /peer_message_result', \{ ok: false, reason: e\.message, text, fromName \}/.test(w));
   check('stdout/codex-events re-stash carries the echoed fromName (S5 consumer module)', /fromName: msg\.payload\.fromName \|\| null, text: String\(msg\.payload\.text\)/.test(read('src/server/stdout/codex-events.js')));

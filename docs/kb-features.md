@@ -331,6 +331,34 @@ impossible rather than a review promise.
   `webui_after_commit`, and such a record yields to the copy already on screen
   instead of doubling the message. A new producer of a user record answers that
   one question before it ships (the census is a test).
+- **Our copy has ONE spelling, and there are THREE producers of it** (round 3):
+  the server-side preview (`CodexAdapter._buildUserPreview`, appended to
+  `session.buffer` by ws-handler so the bubble exists before the wrapper's line
+  lands), the wrapper's own chat-input record, and the inherited-queue bubble.
+  All three now spell the content the way codex persists it — the TEXT first,
+  attachments after (measured: 0 of 5489 user records in the local rollout
+  corpus begin with an `input_image`), through `userInputToContent(encodeUserInput(…))`.
+  Two of them used to hand-roll `[...attachments, text]`, so every message with
+  an image rendered TWICE after a reload; and the preview WINS the fingerprint
+  (same `webui_msg_id`, written first), so fixing only the wrapper would have
+  changed nothing. Codex's own `detail` on an image block is normalised out of
+  the twin key: a field only one producer writes may never split the pair.
+- **A submission that never reaches the app-server claims NOTHING.** Our copy is
+  written before the send is accepted, so a record can exist for text that never
+  becomes a user message: a wrapper-served slash command (`/compact`, `/review`,
+  `/model`, `/effort`), a send whose RPC threw, a queued item Stop or the user
+  removed before it ran. Such a claim is never consumed and later DELETES an
+  unrelated codex-only record of the same text. A producer that KNOWS says so on
+  the record (`webui_no_commit`, decided by the same predicate `applySlashCommand`
+  acts on); a producer that LEARNS it afterwards says so out of line — the
+  `webui_user_retracted` event, which names the record by IDENTITY (a data URL
+  can be megabytes, and a second copy of the reader's content-key algorithm
+  would drift). Either way the BUBBLE stays — the user really sent that text,
+  and `task_failed` is what reports the failure; only the claim goes. An item
+  the app-server had already DRAINED (`{deleted:false}` = it ran) is never
+  retracted. The queued PEER copy now carries its app-server cid as the same
+  second-class `webui_queue_id`, so Stop can retract it by name and two peer
+  messages with the same text in one turn stop colliding.
 - **Live + attach parity.** The wrapper publishes the WHOLE queue on every
   change (and at boot, and at each turn start); that record replays through the
   buffer, so a reconnecting client's strip is rebuilt. `attached` and `created`
