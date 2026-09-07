@@ -272,7 +272,17 @@ console.log('— ④ a REAL server: fresh = nothing spawned; enable/replay/disab
     p.stderr.on('data', (d) => { out += d; });
     setTimeout(() => rej(new Error('boot timeout\n' + out.slice(-2000))), 30000);
   });
-  const api = async (p, init) => { const r = await fetch(`http://127.0.0.1:${PORT}${p}`, init); return { status: r.status, body: await r.json().catch(() => null) }; };
+  // A transient socket error (ECONNRESET/ECONNREFUSED — the worktree server is
+  // mid-restart for a replay leg, or the box is under a load-20 gate) is not a
+  // finding: retry briefly. A wrong STATUS is still reported verbatim.
+  const api = async (p, init) => {
+    let last = null;
+    for (let i = 0; i < 40; i++) {
+      try { const r = await fetch(`http://127.0.0.1:${PORT}${p}`, init); return { status: r.status, body: await r.json().catch(() => null) }; }
+      catch (e) { last = e; await sleep(250); }
+    }
+    throw last;
+  };
   const post = (p, body) => api(p, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) });
   const svcRow = async () => (await api('/api/plugins/opencode-serve/status')).body;
   const recordPath = path.join(wt, 'data', 'opencode-serve.json');
