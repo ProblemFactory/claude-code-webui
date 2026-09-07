@@ -1090,6 +1090,9 @@ class ChatView {
     if (val === this._queueSupported) return;
     this._queueSupported = val;
     this._refreshQueueChips();
+    // both faces of the flag are owned by its ONE writer (round-3 verifier): the
+    // strip used to stay correct only by caller ordering
+    try { this._chatInput?.setQueue(this._queue, this._queueCaps()); } catch { }
   }
 
   /** rAF-coalesced (a flip can arrive together with a queue update and, on
