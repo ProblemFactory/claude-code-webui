@@ -3056,4 +3056,7 @@ export default {
   "Connection lost — the edit may not have been saved.": "接続が切れました —— この編集は保存されていない可能性があります。",
   "Upload finished while a queued message was open for editing — the paths went to your draft, not into the edit": "キュー内メッセージの編集中にアップロードが完了しました —— パスは編集ではなく下書きに追加しました",
   "Connection lost — your last message may not have been sent (the input already had text, so it was left alone)": "接続が切れました —— 直前のメッセージは送信されていない可能性があります（入力欄に既にテキストがあったため、そのままにしています）",
+  "Connection lost — your last message may not have been sent": "接続が切れました —— 直前のメッセージは送信されていない可能性があります",
+  "Connection lost before the goal was set — the input already had text, so your command was left alone": "目標を設定する前に接続が切れました —— 入力欄に既にテキストがあったため、コマンドはそのままにしています",
+  "Goal not confirmed — the session may be unresponsive. The input already had text, so your command was left alone.": "目標が確認されませんでした —— セッションが応答していない可能性があります。入力欄に既にテキストがあったため、コマンドはそのままにしています。",
 };

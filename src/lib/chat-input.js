@@ -682,7 +682,13 @@ export class ChatInput {
     }
     const keptText = this._textarea.value;
     const keptAttachments = this._attachments;
+    // WHAT THE ACTION IS ABOUT TO DISPLACE, captured BEFORE `_send` runs: the
+    // slot (`_send` overwrites `_pendingSend`) and the draft store (`_send`
+    // PINS it to the action's own text). Both belong to the user and both are
+    // put back below — unconditionally, because "the box was empty" is the
+    // ordinary state of an action button, not a case with nothing to restore.
     const prevPendingSend = this._pendingSend;
+    const prevDraft = loadDraft('chat', this._sessionId);
     if (keptAttachments.length) { this._attachments = []; this._renderAttachments(); }
     this._textarea.value = String(text || '');
     const sent = this._send() !== false;
@@ -696,25 +702,35 @@ export class ChatInput {
     // it got there. Writing `keptText` back is a no-op when `_send` took the
     // box (it already emptied it), so one line answers both halves.
     this._textarea.value = keptText;
+    // THE DRAFT SLOT GOES BACK UNCONDITIONALLY TOO (round-7 verifier). `_send`
+    // pinned the store to the action's own text and armed `_pendingSend` so a
+    // dead socket could restore it — an ACTION is not a user message and owns
+    // neither. Leaving the slot armed did two different kinds of damage, and
+    // the round-6 fix sat INSIDE `if (keptText.trim())`, so neither was fixed
+    // for the ordinary case: an action button clicked over an EMPTY box.
+    //   · with an older unconfirmed send, `_send` had OVERWRITTEN its slot, so
+    //     a message the USER sent seconds ago lost its dead-socket protection
+    //     and its pinned draft — it would vanish with the socket instead of
+    //     coming back with its "may not have been sent" notice;
+    //   · with NO older send, the action armed the slot for ITSELF, so a later
+    //     disconnect typed `/compact` into the user's empty input under a
+    //     toast telling them their message had been restored.
+    // Handing the previous slot back is exactly the old `= null` when there
+    // was none.
+    this._pendingSend = prevPendingSend || null;
     if (keptText.trim()) {
       this._autoSize?.();
-      // THE DRAFT SLOT GOES WITH THE TEXT THAT CAME BACK. `_send` pinned the
-      // store to the action's own text and armed `_pendingSend` so a dead
-      // socket could restore it — and `confirmDelivery()` clears the store on
-      // the first inbound frame. Leaving that armed would have deleted the
-      // user's prompt from the store milliseconds later (the box would be the
-      // only copy again, which is the whole failure class). The action is a
-      // button click away, so its slot is released and the store is written
-      // HERE rather than left to the 300 ms debounce.
-      // AND AN OLDER UNCONFIRMED SEND GETS ITS SLOT BACK (round-6 verifier):
-      // `_send` OVERWROTE `_pendingSend` with the action's own slot, so
-      // nulling it here dropped the dead-socket protection of a message the
-      // USER sent seconds ago — that prompt would then vanish with the socket
-      // instead of being restored with its "may not have been sent" notice.
-      // Hand the previous slot back rather than clearing the field; when
-      // there was none this is exactly the old `= null`.
-      this._pendingSend = prevPendingSend || null;
+      // The store is written HERE rather than left to the 300 ms debounce
+      // (`_send` cancelled the pending autosave and pinned the store to its
+      // own text), so the prompt that came back to the box is durable again.
       saveDraft('chat', this._sessionId, keptText);
+    } else {
+      // Nothing of the user's was in the box — but the action still pinned the
+      // store to its own text, which would come back as this session's draft
+      // on the next window open (and, with the slot released, is never cleared
+      // by the delivery echo either). Put back what was actually there;
+      // `loadDraft` answers '' for "nothing", which is what `clearDraft` writes.
+      saveDraft('chat', this._sessionId, prevDraft);
     }
     return sent;
   }
@@ -812,6 +828,38 @@ export class ChatInput {
     this._element.style.display = 'none';
   }
 
+  /** ONE answer to "the text we were holding for you may never have gone out"
+   *  — shared by the three places that hold text for an unanswered frame (an
+   *  unconfirmed send, and the two `/goal` twins: a dead socket and the 10 s
+   *  silence). Each of them independently grew the same shape and then drifted
+   *  apart: all three guard the restore on a FREE box (the user keeps drafting
+   *  while a frame is out, and those keystrokes are theirs), but two of them
+   *  still announced "your command was restored to the input" unconditionally
+   *  — a report of a rescue that did not happen, which the user reads as "my
+   *  text is safe in the box" and acts on (round-7 verifier).
+   *
+   *  The sentence is chosen by WHAT ACTUALLY HAPPENED, which is three states,
+   *  not two: nothing to restore (`noneMsg` — an attachments-only send carries
+   *  text `''`), restored into a free box (`restoredMsg`), or the box was
+   *  occupied and left alone (`keptMsg`). `noneMsg` is required of any caller
+   *  whose text can be empty; the goal twins pass the `/goal …` command the
+   *  regex matched, which is never empty, and say so at the call site.
+   *  Answers the outcome so a caller (and a test) can assert on it. */
+  _announceUnsent(text, { restoredMsg, keptMsg, noneMsg }) {
+    if (!text) {
+      showToast(noneMsg || keptMsg, { type: 'error' });
+      return 'none';
+    }
+    if (this._textarea && !this._textarea.value.trim()) {
+      this._textarea.value = text;
+      this._textarea.dispatchEvent(new Event('input', { bubbles: true })); // resize + draft save
+      showToast(restoredMsg, { type: 'error' });
+      return 'restored';
+    }
+    showToast(keptMsg, { type: 'error' });
+    return 'kept';
+  }
+
   setDisconnected(disconnected) {
     // Keep the textarea fully editable — the user must be able to select/copy
     // (a disabled textarea blocks selection) and keep drafting; only SENDING
@@ -826,22 +874,19 @@ export class ChatInput {
       // the prompt vanished with zero trace.
       const { text } = this._pendingSend;
       this._pendingSend = null;
+      this.hideTyping();
       // …into a box that may already hold the NEXT thing the user typed (they
       // keep drafting while a send is in flight, and `sendText` hands this
       // slot back over a half-typed prompt) — that text is theirs and is not
-      // overwritten. THE SENTENCE THEN HAS TO CHANGE WITH IT (round-6): one
-      // that says "the text was restored to the input" while the input holds
-      // something else is a report of a rescue that did not happen, and the
-      // user reads it as "my message is safe in the box".
-      const restored = !!text && !this._textarea.value.trim();
-      if (restored) {
-        this._textarea.value = text;
-        this._textarea.dispatchEvent(new Event('input', { bubbles: true })); // resize + draft save
-      }
-      this.hideTyping();
-      showToast(restored
-        ? t('Connection lost — your message may not have been sent; the text was restored to the input')
-        : t('Connection lost — your last message may not have been sent (the input already had text, so it was left alone)'), { type: 'error' });
+      // overwritten. THE SENTENCE CHANGES WITH IT (round-6), and the THIRD
+      // state is real (round-7): an attachments-only send carries text `''`,
+      // so "the input already had text, so it was left alone" was told to
+      // users whose input was empty and whose send had no text to restore.
+      this._announceUnsent(text, {
+        restoredMsg: t('Connection lost — your message may not have been sent; the text was restored to the input'),
+        keptMsg: t('Connection lost — your last message may not have been sent (the input already had text, so it was left alone)'),
+        noneMsg: t('Connection lost — your last message may not have been sent'),
+      });
     }
     if (disconnected && this._pendingEdit) {
       // Same class: the edit frame may never have reached the server, and its
@@ -859,11 +904,13 @@ export class ChatInput {
       const { text } = this._pendingGoal;
       this._pendingGoal = null;
       this._clearPending();
-      if (text && !this._textarea.value.trim()) {
-        this._textarea.value = text;
-        this._textarea.dispatchEvent(new Event('input', { bubbles: true }));
-      }
-      showToast(t('Connection lost before the goal was set — your command was restored to the input'), { type: 'error' });
+      // Same three-state announcement as the send above — the restore was
+      // already guarded on a free box here, only the sentence was not.
+      // (`text` is the `/goal …` command the regex matched, never empty.)
+      this._announceUnsent(text, {
+        restoredMsg: t('Connection lost before the goal was set — your command was restored to the input'),
+        keptMsg: t('Connection lost before the goal was set — the input already had text, so your command was left alone'),
+      });
     }
   }
 
@@ -884,8 +931,12 @@ export class ChatInput {
     // with them again — the exact failure this whole family exists to
     // prevent. Clear only what this send put there; an empty store has
     // nothing to lose either way.
+    // …and what it may clear is BOTH of those: the pin it wrote itself, and
+    // the value it found there and never overwrote (a send with no text of its
+    // own — attachments only — pins nothing, so comparing against `text`
+    // alone made its clear a permanent no-op).
     const stored = loadDraft('chat', this._sessionId);
-    if (stored && stored !== pending.text) return;
+    if (stored && stored !== pending.text && stored !== pending.storeBefore) return;
     clearDraft('chat', this._sessionId);
   }
 
@@ -904,11 +955,13 @@ export class ChatInput {
       this._goalTimer = null;
       this._clearPending();
       if (!pending) return;
-      if (!this._textarea.value.trim()) {
-        this._textarea.value = pending.text;
-        this._textarea.dispatchEvent(new Event('input', { bubbles: true }));
-      }
-      showToast(t('Goal not confirmed — the session may be unresponsive. Your command was restored to the input.'), { type: 'error' });
+      // Third caller of the same shape (round-7): restore only into a free box,
+      // and say which of the two it was. (`pending.text` is the matched
+      // `/goal …` command, never empty.)
+      this._announceUnsent(pending.text, {
+        restoredMsg: t('Goal not confirmed — the session may be unresponsive. Your command was restored to the input.'),
+        keptMsg: t('Goal not confirmed — the session may be unresponsive. The input already had text, so your command was left alone.'),
+      });
     }, 10000);
   }
 
@@ -992,8 +1045,11 @@ export class ChatInput {
   //     `_unstashedEditText` both answer null for it), so it can destroy
   //     nothing; what it puts there is visible and becomes the rewrite.
   //   · the unconfirmed-send / unconfirmed-goal restores (dead socket, 10s
-  //     goal timeout) — they write ONLY a box whose trimmed value is empty
-  //     (same reasoning), they dispatch nothing, and they announce themselves.
+  //     goal timeout) — all three go through the ONE `_announceUnsent`
+  //     helper: it writes ONLY a box whose trimmed value is empty (same
+  //     reasoning), dispatches nothing, and announces WHICH of the three
+  //     things it did (restored / left your text alone / had nothing to
+  //     restore) rather than one sentence for all of them (round-7).
   //   · attachments — never touch the textarea, and `_send` REFUSES an edit
   //     that carries them rather than dropping them silently.
   //   · `_send` / `_resolvePendingEdit` / `_beginQueueEdit` / `_cancelQueueEdit`
@@ -1140,8 +1196,17 @@ export class ChatInput {
     // kept draft — cancel it and pin the draft to exactly what was sent (the
     // debounced autosave can lag behind fast typing).
     clearTimeout(this._draftTimer);
+    // WHAT THIS SEND DISPLACED IN THE STORE, so the deferred clear below can
+    // tell "my own pin is still there" from "the user has since typed
+    // something else" WITHOUT assuming the pin exists: an attachments-only
+    // send has no text, pins nothing, and would otherwise never be able to
+    // clear anything again (round-7 verifier — text deleted inside the 300 ms
+    // debounce window survives in the store as a permanent zombie draft,
+    // because `clearTimeout` above cancelled the autosave that would have
+    // written the deletion).
+    const storeBefore = loadDraft('chat', this._sessionId);
     if (text) saveDraft('chat', this._sessionId, text);
-    this._pendingSend = { text };
+    this._pendingSend = { text, storeBefore };
     if (this._expanded) {
       this._expanded = false;
       this._textarea.classList.remove('chat-input-expanded');
