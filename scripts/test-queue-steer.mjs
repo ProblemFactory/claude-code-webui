@@ -441,7 +441,19 @@ console.log('— ⑤ the client strip (DOM-free render of the REAL ChatInput)');
     const html = ChatInput.queueStripHtml(items, CODEX_CAPS, st);
     ok('a row with an op in flight is marked pending', /data-queue-id="q1" data-queue-state="pending"/.test(html), html.slice(0, 400));
     ok('a refused row is marked AND carries its reason', /data-queue-state="refused" title="A turn is already running\."/.test(html));
-    ok('an editing row says so, and its edit control becomes a cancel', /data-queue-state="editing"/.test(ChatInput.queueStripHtml(items, CODEX_CAPS, new Map([['q1', { state: 'editing', title: '' }]]))) && /data-queue-op="edit-cancel"/.test(ChatInput.queueStripHtml(items, CODEX_CAPS, new Map([['q1', { state: 'editing', title: '' }]]))));
+    // ROUND-4 VERIFIER, finding 1: EDIT MODE IS ITS OWN ARGUMENT. It used to
+    // be a third `rowState` value — the state every dispatch and every
+    // refusal overwrites — so the ONE on-screen signal that an edit is open
+    // was erased by any op touching that row (a batch verb marks EVERY row).
+    const editingHtml = ChatInput.queueStripHtml(items, CODEX_CAPS, null, 'q1');
+    ok('an editing row says so, and its edit control becomes a cancel', /data-queue-editing="1"/.test(editingHtml) && /data-queue-op="edit-cancel"/.test(editingHtml), editingHtml.slice(0, 400));
+    ok('…and the hint under the strip comes from the SAME fact', /class="chat-queue-editing"/.test(editingHtml) && /send to save/.test(editingHtml));
+    const bothHtml = ChatInput.queueStripHtml(items, CODEX_CAPS, new Map([['q1', { state: 'pending', title: 'x' }]]), 'q1');
+    ok('finding 1: a row carries BOTH its op state and its edit mode — neither renders through the other', /data-queue-state="pending" data-queue-editing="1"/.test(bothHtml) && /data-queue-op="edit-cancel"/.test(bothHtml) && /class="chat-queue-editing"/.test(bothHtml), bothHtml.slice(0, 400));
+    const refusedEditing = ChatInput.queueStripHtml(items, CODEX_CAPS, new Map([['q1', { state: 'refused', title: 'The agent could not be reached.' }]]), 'q1');
+    ok('…a REFUSED edit that is open again shows the reason AND the editing marker', /data-queue-state="refused" data-queue-editing="1" title="The agent could not be reached\."/.test(refusedEditing) && /data-queue-op="edit-cancel"/.test(refusedEditing), refusedEditing.slice(0, 400));
+    ok('negative control: no editingId ⇒ no editing marker, no cancel control, no hint, whatever the op state says', !/data-queue-editing/.test(ChatInput.queueStripHtml(items, CODEX_CAPS, new Map([['q1', { state: 'editing', title: '' }]]))) && !/edit-cancel/.test(ChatInput.queueStripHtml(items, CODEX_CAPS, new Map([['q1', { state: 'editing', title: '' }]]))) && !/class="chat-queue-editing"/.test(ChatInput.queueStripHtml(items, CODEX_CAPS, new Map([['q1', { state: 'editing', title: '' }]]))));
+    ok('negative control: an editingId naming a row that is NOT in the queue paints nothing (a stale id is not a hint)', !/data-queue-editing/.test(ChatInput.queueStripHtml(items, CODEX_CAPS, null, 'q404')) && !/class="chat-queue-editing"/.test(ChatInput.queueStripHtml(items, CODEX_CAPS, null, 'q404')));
   }
   {
     // EVERY op's outcome has to REACH the strip, including the BATCH verbs
@@ -1785,12 +1797,19 @@ console.log('— ⑪ drag-reorder / edit / run-all in a REAL browser (trusted po
           window.__ops = [];
           window.__ci.setQueue(window.__items, ${CODEX_VERBS});
           document.querySelector('.chat-input-area textarea, textarea').value = 'a draft I was typing';
+          const wasState = document.querySelector('[data-queue-id="q2"]')?.dataset.queueState || null;
           document.querySelector('[data-queue-op="edit"][data-queue-id="q2"]').click();
           const ta = document.querySelector('textarea');
-          return { text: ta.value, ops: window.__ops.length, state: document.querySelector('[data-queue-id="q2"]')?.dataset.queueState, hint: !!document.querySelector('.chat-queue-editing') };
+          const row = document.querySelector('[data-queue-id="q2"]');
+          return { text: ta.value, ops: window.__ops.length, wasState, state: row?.dataset.queueState || null, mark: row?.dataset.queueEditing || null, cancel: !!document.querySelector('[data-queue-op="edit-cancel"][data-queue-id="q2"]'), hint: !!document.querySelector('.chat-queue-editing') };
         })()`);
         ok(`the edit control OPENS the queued text (no frame yet — editing is a local mode): ${JSON.stringify(opened)}`, opened.text === 'second' && opened.ops === 0);
-        ok('the row says it is being edited, and the strip says how to finish', opened.state === 'editing' && opened.hint === true);
+        // …and edit mode is its OWN mark (round-4): opening an editor is not an
+        // op, so the marker/cancel/hint appear WITHOUT the row's op state
+        // moving at all — here it still carries the mark the reorder above
+        // left on it, and the two coexist.
+        ok('the row says it is being edited, and the strip says how to finish', opened.mark === '1' && opened.cancel === true && opened.hint === true);
+        ok(`…and opening it left the row's OP state exactly as it was (${JSON.stringify({ was: opened.wasState, now: opened.state })})`, opened.state === opened.wasState);
         const saved = await evaljs(`(() => {
           const ta = document.querySelector('textarea');
           ta.value = 'second, rewritten';
@@ -1820,10 +1839,10 @@ console.log('— ⑪ drag-reorder / edit / run-all in a REAL browser (trusted po
           window.__ci._send();
           window.__ci.setQueueOpResult('q1',  false, 'The agent could not be reached.');
           const row = document.querySelector('[data-queue-id="q1"]');
-          return { text: ta.value, state: row?.dataset.queueState, title: row?.getAttribute('title'), editing: window.__ci._editingQueueId };
+          return { text: ta.value, state: row?.dataset.queueState, mark: row?.dataset.queueEditing || null, title: row?.getAttribute('title'), editing: window.__ci._editingQueueId };
         })()`);
         ok(`A REFUSED EDIT KEEPS THE REWRITE (${JSON.stringify(refusedLive)})`, refusedLive.text === 'first, rewritten');
-        ok('…and, the row still being queued, puts the user back in edit mode with the reason on it', refusedLive.state === 'editing' && refusedLive.editing === 'q1' && /could not be reached/.test(refusedLive.title || ''));
+        ok('…and, the row still being queued, puts the user back in edit mode with the reason on it', refusedLive.mark === '1' && refusedLive.state === 'refused' && refusedLive.editing === 'q1' && /could not be reached/.test(refusedLive.title || ''));
         await evaljs(`(() => { document.querySelector('textarea').dispatchEvent(new KeyboardEvent('keydown',  { key: 'Escape',  bubbles: true })); })()`);
         // …and THE NORMAL RACE: the item ran while you were typing, so the row
         // is GONE. The republish is the answer, the text becomes the draft, and
@@ -1911,11 +1930,11 @@ console.log('— ⑪ drag-reorder / edit / run-all in a REAL browser (trusted po
           window.__ci._onQueueOp = () => false;
           window.__ci._send();
           window.__ci._onQueueOp = prev;
-          const out = { text: ta.value, editing: window.__ci._editingQueueId, pending: !!window.__ci._pendingEdit, state: document.querySelector('[data-queue-id="q1"]')?.dataset.queueState || null };
+          const out = { text: ta.value, editing: window.__ci._editingQueueId, pending: !!window.__ci._pendingEdit, state: document.querySelector('[data-queue-id="q1"]')?.dataset.queueState || null, mark: !!document.querySelector('[data-queue-id="q1"][data-queue-editing]') };
           ta.dispatchEvent(new KeyboardEvent('keydown',  { key: 'Escape',  bubbles: true }));
           return out;
         })()`);
-        ok(`…and an edit that never left the client puts the user straight back in edit mode with the text (${JSON.stringify(editUndone)})`, editUndone.text === 'never left the client' && editUndone.editing === 'q1' && editUndone.pending === false && editUndone.state === 'editing');
+        ok(`…and an edit that never left the client puts the user straight back in edit mode with the text (${JSON.stringify(editUndone)})`, editUndone.text === 'never left the client' && editUndone.editing === 'q1' && editUndone.pending === false && editUndone.state === null && editUndone.mark === true);
       }
       // ── ROUND-2 VERIFIER, finding 5: EDIT MODE BORROWS THE TEXTAREA, NOT THE
       // DRAFT CHANNEL. Typing a rewrite used to persist the QUEUED MESSAGE as
@@ -2007,11 +2026,12 @@ console.log('— ⑪ drag-reorder / edit / run-all in a REAL browser (trusted po
           ta.value = 'rewrite trailing space ';
           window.__ci._send();
           window.__ci.setQueueOpResult('q1', false, 'The agent could not be reached.');
-          const out = { box: ta.value, editing: window.__ci._editingQueueId, state: ` + rowState('q1') + `, title: document.querySelector('[data-queue-id="q1"]')?.getAttribute('title') || '' };
+          const out = { box: ta.value, editing: window.__ci._editingQueueId, state: ` + rowState('q1') + `, title: document.querySelector('[data-queue-id="q1"]')?.getAttribute('title') || '', mark: !!document.querySelector('[data-queue-id="q1"][data-queue-editing]'), hint: !!document.querySelector('.chat-queue-editing') };
           ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
           return out;
         })()`);
-        ok(`finding 1(b): a refusal of a rewrite ending in a SPACE still hands it back into edit mode (${JSON.stringify(refusedWs)})`, refusedWs.box === 'rewrite trailing space ' && refusedWs.editing === 'q1' && refusedWs.state === 'editing' && /could not be reached/.test(refusedWs.title));
+        ok(`finding 1(b): a refusal of a rewrite ending in a SPACE still hands it back into edit mode (${JSON.stringify(refusedWs)})`, refusedWs.box === 'rewrite trailing space ' && refusedWs.editing === 'q1' && /could not be reached/.test(refusedWs.title));
+        ok(`…and the row shows BOTH facts — the refusal AND that the edit is open again (round-4) (${JSON.stringify({ state: refusedWs.state, mark: refusedWs.mark, hint: refusedWs.hint })})`, refusedWs.state === 'refused' && refusedWs.mark === true && refusedWs.hint === true);
 
         // (c) THE ROW IS GONE ⇒ draft + toast. Without the fix the rewrite
         // lived only in a volatile textarea: closing the window lost it.
@@ -2188,9 +2208,9 @@ console.log('— ⑪ drag-reorder / edit / run-all in a REAL browser (trusted po
             ci.element.querySelector('[data-queue-op="edit"][data-queue-id="d1"]').click();
             ci.dispose(); ci.element.remove();
             out.untouched = VS.loadDraft('chat', 'sess-dispose-b'); }
-          // NEGATIVE CONTROL 2: the frame is already OUT ⇒ the text is on its
-          // way into the queued message; stashing a copy would leave the user
-          // their own queue item as a draft.
+          // NEGATIVE CONTROL 2: the frame is already OUT and the box still holds
+          // exactly it ⇒ the text is on its way into the queued message;
+          // stashing a copy would leave the user their own queue item as a draft.
           { const { ci, ta } = mk('sess-dispose-c');
             ci.element.querySelector('[data-queue-op="edit"][data-queue-id="d1"]').click();
             ta.value = 'a rewrite already on the wire';
@@ -2198,11 +2218,193 @@ console.log('— ⑪ drag-reorder / edit / run-all in a REAL browser (trusted po
             out.sentPending = !!ci._pendingEdit;
             ci.dispose(); ci.element.remove();
             out.sent = VS.loadDraft('chat', 'sess-dispose-c'); }
+          // ── ROUND-4 VERIFIER, finding 2: THE IN-FLIGHT WINDOW IS THE SAME
+          // UNPROTECTED WINDOW. The input listener disarms the autosave for
+          // _editingQueueId OR _pendingEdit, so keystrokes typed AFTER Send —
+          // for as long as the result takes, up to the 20s fallback — also
+          // live only in the textarea; dispose looked at _editingQueueId
+          // alone and let them die with the window.
+          { const { ci, ta } = mk('sess-dispose-d');
+            ci.element.querySelector('[data-queue-op="edit"][data-queue-id="d1"]').click();
+            ta.value = 'a rewrite already on the wire';
+            ci._send();
+            ta.value = 'and the words I kept typing while it saved';
+            ta.dispatchEvent(new Event('input', { bubbles: true }));
+            out.armedWhilePending = ci._draftTimer;      // the premise: still disarmed
+            ci.dispose(); ci.element.remove();
+            out.inFlight = VS.loadDraft('chat', 'sess-dispose-d'); }
+          // NEGATIVE CONTROL (instance-level neuter): the PRE-FIX rule —
+          // "stash only while _editingQueueId is set" — loses exactly that text.
+          { const { ci, ta } = mk('sess-dispose-e');
+            ci.element.querySelector('[data-queue-op="edit"][data-queue-id="d1"]').click();
+            ta.value = 'a rewrite already on the wire';
+            ci._send();
+            ta.value = 'and the words I kept typing while it saved';
+            ci._unstashedEditText = function () {
+              if (this._editingQueueId && this._textarea) {
+                const typed = this._textarea.value;
+                if (typed.trim() && typed !== this._editOriginalText) return typed;
+              }
+              return null;
+            };
+            ci.dispose(); ci.element.remove();
+            out.neuteredInFlight = VS.loadDraft('chat', 'sess-dispose-e'); }
           return out;
         })()`);
         ok(`a view torn down mid-edit keeps the UNSENT rewrite (edit mode holds the autosave off, so nothing else would have) (${JSON.stringify(disposeCase.typed)})`, disposeCase.typed === 'a rewrite the closing window must not eat');
         ok(`negative control: an untouched editor leaves the real draft in the store (${JSON.stringify(disposeCase.untouched)})`, disposeCase.untouched === 'the draft I had');
         ok(`negative control: a rewrite already ON THE WIRE is not stashed as the draft (${JSON.stringify({ pending: disposeCase.sentPending, draft: disposeCase.sent })})`, disposeCase.sentPending === true && disposeCase.sent === 'the draft I had');
+        ok(`finding 2 (premise): the debounced autosave stays DISARMED while a save is in flight, so those keystrokes are nowhere but the box (${JSON.stringify(disposeCase.armedWhilePending)})`, disposeCase.armedWhilePending === null);
+        ok(`finding 2: a view torn down DURING the in-flight window keeps what the box holds beyond the sent payload (${JSON.stringify(disposeCase.inFlight)})`, disposeCase.inFlight === 'and the words I kept typing while it saved');
+        ok(`negative control: the PRE-FIX dispose rule ("only while _editingQueueId is set") loses exactly that text (${JSON.stringify(disposeCase.neuteredInFlight)})`, disposeCase.neuteredInFlight === 'the draft I had');
+
+        // ── ROUND-4 VERIFIER, finding 1: THE EDITING INDICATOR LIVED IN THE
+        // TRANSIENT OP STATE. The edit→cancel control, the row's marker and
+        // the "send to save, Esc to cancel" hint were all derived from
+        // `_queueRowState`, which every dispatch and every result overwrites:
+        // a BATCH verb marks EVERY row pending (including the one being
+        // edited) and a refusal on that row marks it refused, so the only
+        // on-screen sign that the textarea holds a queued message vanished
+        // while the rewrite was still in it — and the pencil came back over a
+        // live edit. Edit mode is now `_editingQueueId`, rendered
+        // independently; a row shows BOTH facts.
+        const editMarks = `({
+          marker: !!document.querySelector('[data-queue-id="q1"][data-queue-editing]'),
+          cancel: !!document.querySelector('[data-queue-op="edit-cancel"][data-queue-id="q1"]'),
+          pencil: !!document.querySelector('[data-queue-op="edit"][data-queue-id="q1"]'),
+          hint: !!document.querySelector('.chat-queue-editing'),
+          state: document.querySelector('[data-queue-id="q1"]')?.dataset.queueState || null,
+        })`;
+        await evaljs(setup('my real draft'));
+        const marks = await evaljs(`(() => {
+          const snap = () => (${editMarks});
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q1"]').click();
+          const ta = document.querySelector('textarea');
+          ta.value = 'a rewrite that must stay visible as an edit';
+          const opened = snap();
+          window.__ci.setQueueOpResult('q2', false, 'That message is not yours to rewrite.');
+          const otherRefused = snap();
+          const otherMarked = document.querySelector('[data-queue-id="q2"]')?.dataset.queueState || null;
+          document.querySelector('[data-queue-op="run-all"]').click();      // marks EVERY row
+          const batch = snap();
+          window.__ci.setQueueOpResult('', false, 'A turn is already running.');
+          const batchDone = snap();
+          window.__ci.setQueueOpResult('q1', false, 'A turn is already running.');
+          const ownRefused = snap();
+          const out = { opened, otherRefused, otherMarked, batch, batchDone, ownRefused, box: ta.value, editing: window.__ci._editingQueueId };
+          document.querySelector('[data-queue-op="edit-cancel"][data-queue-id="q1"]').click();
+          out.afterCancel = { box: ta.value, editing: window.__ci._editingQueueId, marker: !!document.querySelector('[data-queue-editing]'), hint: !!document.querySelector('.chat-queue-editing') };
+          window.__ci.setQueue(window.__items, ${CODEX_VERBS});
+          return out;
+        })()`);
+        const shows = (m) => m && m.marker === true && m.cancel === true && m.pencil === false && m.hint === true;
+        ok(`finding 1: a refusal on ANOTHER row leaves the editing marker, the cancel control and the hint alone (${JSON.stringify(marks.otherRefused)})`, shows(marks.otherRefused) && marks.otherRefused.state === null && marks.otherMarked === 'refused');
+        ok(`…a BATCH verb marks every row pending WITHOUT erasing the edit — the row carries both (${JSON.stringify(marks.batch)})`, shows(marks.batch) && marks.batch.state === 'pending');
+        ok(`…and so does its result, and a refusal on the EDITED row itself (${JSON.stringify({ batchDone: marks.batchDone, ownRefused: marks.ownRefused })})`, shows(marks.batchDone) && marks.batchDone.state === null && shows(marks.ownRefused) && marks.ownRefused.state === 'refused');
+        ok(`…with the rewrite untouched in the box the whole way through (${JSON.stringify({ box: marks.box, editing: marks.editing })})`, marks.box === 'a rewrite that must stay visible as an edit' && marks.editing === 'q1');
+        ok(`…and the control the user CAN see still ends the edit (${JSON.stringify(marks.afterCancel)})`, marks.afterCancel.box === 'my real draft' && marks.afterCancel.editing === null && marks.afterCancel.marker === false && marks.afterCancel.hint === false);
+
+        // NEGATIVE CONTROL (instance-level neuter): put the PRE-FIX derivation
+        // back — edit mode readable only out of the op state — and the same
+        // sequence reproduces the defect, including its damage: the pencil
+        // returns and one click replaces the rewrite with the queued message.
+        await evaljs(setup('my real draft'));
+        const neutered = await evaljs(`(() => {
+          const snap = () => (${editMarks});
+          const orig = VS.ChatInput.queueStripHtml;
+          VS.ChatInput.queueStripHtml = (items, caps, rowState) => {
+            let derived = null;
+            if (rowState && typeof rowState.forEach === 'function') rowState.forEach((v, k) => { if (v?.state === 'editing') derived = k; });
+            return orig(items, caps, rowState, derived);
+          };
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q1"]').click();
+          window.__ci._queueRowState.set('q1', { state: 'editing', title: '' });   // what _beginQueueEdit used to write
+          const ta = document.querySelector('textarea');
+          ta.value = 'a rewrite that must stay visible as an edit';
+          window.__ci._renderQueue();
+          const opened = snap();
+          document.querySelector('[data-queue-op="run-all"]').click();
+          const batch = snap();
+          if (batch.pencil) document.querySelector('[data-queue-op="edit"][data-queue-id="q1"]').click();
+          const damage = ta.value;
+          VS.ChatInput.queueStripHtml = orig;
+          window.__ci._queueRowState.clear();
+          ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          window.__ci.setQueue(window.__items, ${CODEX_VERBS});
+          return { opened, batch, damage };
+        })()`);
+        ok(`negative control: the pre-fix derivation renders the same marker while nothing has touched the row (${JSON.stringify(neutered.opened)})`, shows(neutered.opened));
+        ok(`…and LOSES it the moment a batch verb marks the row — the defect, reproduced (${JSON.stringify(neutered.batch)})`, neutered.batch.marker === false && neutered.batch.hint === false && neutered.batch.cancel === false && neutered.batch.pencil === true);
+        ok(`…and the pencil it brings back replaces the live rewrite with the queued message (${JSON.stringify(neutered.damage)})`, neutered.damage === 'first');
+
+        // ── ROUND-4 VERIFIER, finding 3: OPENING A SECOND ROW'S EDITOR. The
+        // guard called `_cancelQueueEdit({silent:true})`, which restores the
+        // pre-edit draft OVER the textarea — the same unrecoverable loss as
+        // finding 2 of round 3, through a control the user clicks on purpose.
+        await evaljs(setup('my real draft'));
+        const switched = await evaljs(`(() => {
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q1"]').click();
+          const ta = document.querySelector('textarea');
+          ta.value = 'the rewrite of the FIRST row';
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q2"]').click();
+          const after = { box: ta.value, editing: window.__ci._editingQueueId, draft: VS.loadDraft('chat', 'sess-verbs'), toast: document.getElementById('global-toasts')?.textContent || '', marker: document.querySelector('[data-queue-editing]')?.dataset.queueId || null };
+          ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          const afterEsc = ta.value;
+          window.__ci.setQueue(window.__items, ${CODEX_VERBS});
+          return { after, afterEsc };
+        })()`);
+        ok(`finding 3: switching to another row's editor opens it (${JSON.stringify({ box: switched.after.box, editing: switched.after.editing, marker: switched.after.marker })})`, switched.after.box === 'second' && switched.after.editing === 'q2' && switched.after.marker === 'q2');
+        ok(`…and the abandoned rewrite is kept as the draft, out loud (${JSON.stringify({ draft: switched.after.draft, toast: switched.after.toast.slice(0, 80) })})`, switched.after.draft === 'the rewrite of the FIRST row' && /kept as this session/.test(switched.after.toast));
+        ok(`…so cancelling the new edit hands it straight back (${JSON.stringify(switched.afterEsc)})`, switched.afterEsc === 'the rewrite of the FIRST row');
+
+        // NEGATIVE CONTROL 1: an UNTOUCHED editor is not a rewrite — switching
+        // rows there is the plain silent restore it always was.
+        await evaljs(setup('my real draft'));
+        const switchClean = await evaljs(`(() => {
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q1"]').click();
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q2"]').click();
+          const ta = document.querySelector('textarea');
+          const after = { box: ta.value, editing: window.__ci._editingQueueId, draft: VS.loadDraft('chat', 'sess-verbs'), toast: document.getElementById('global-toasts')?.textContent || '' };
+          ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          const afterEsc = ta.value;
+          window.__ci.setQueue(window.__items, ${CODEX_VERBS});
+          return { after, afterEsc };
+        })()`);
+        ok(`negative control: switching out of an UNTOUCHED editor is silent and keeps the real draft (${JSON.stringify(switchClean)})`, switchClean.after.box === 'second' && switchClean.after.draft === 'my real draft' && switchClean.after.toast === '' && switchClean.afterEsc === 'my real draft');
+
+        // NEGATIVE CONTROL 2 (instance-level neuter): the pre-fix rule was
+        // "always cancel", i.e. `_rewriteInBox()` answering null for everything.
+        await evaljs(setup('my real draft'));
+        const switchNeutered = await evaljs(`(() => {
+          const orig = window.__ci._rewriteInBox;
+          window.__ci._rewriteInBox = () => null;
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q1"]').click();
+          const ta = document.querySelector('textarea');
+          ta.value = 'the rewrite of the FIRST row';
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q2"]').click();
+          const out = { box: ta.value, draft: VS.loadDraft('chat', 'sess-verbs'), toast: document.getElementById('global-toasts')?.textContent || '' };
+          window.__ci._rewriteInBox = orig;
+          ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          window.__ci.setQueue(window.__items, ${CODEX_VERBS});
+          return out;
+        })()`);
+        ok(`negative control: the pre-fix "always cancel" destroys the rewrite silently — the defect, reproduced (${JSON.stringify(switchNeutered)})`, switchNeutered.box === 'second' && switchNeutered.draft === 'my real draft' && switchNeutered.toast === '');
+
+        // …and the SIBLING guard is unchanged: while a save is in flight the
+        // box is not free, so a second editor is REFUSED (never silently).
+        await evaljs(setup('my real draft'));
+        const whilePending = await evaljs(`(() => {
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q1"]').click();
+          const ta = document.querySelector('textarea');
+          ta.value = 'a rewrite on the wire';
+          window.__ci._send();
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q2"]').click();
+          const out = { box: ta.value, editing: window.__ci._editingQueueId, pending: !!window.__ci._pendingEdit, toast: document.getElementById('global-toasts')?.textContent || '' };
+          window.__ci.setQueueOpResult('q1', true, '');
+          window.__ci.setQueue(window.__items, ${CODEX_VERBS});
+          return out;
+        })()`);
+        ok(`…and a second editor DURING a save is refused out loud, box untouched (${JSON.stringify(whilePending)})`, whilePending.box === 'a rewrite on the wire' && whilePending.editing === null && whilePending.pending === true && /still saving/.test(whilePending.toast));
         await evaljs(`(() => { window.__ci.setQueue(window.__items, ${CODEX_VERBS}); document.querySelector('textarea').value = ''; window.__ci._pendingSend = null; document.getElementById('global-toasts')?.replaceChildren(); })()`);
       }
       // THE HEADER CONTROL is per harness, from the verb table — codex has

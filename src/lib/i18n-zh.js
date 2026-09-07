@@ -3051,6 +3051,7 @@ export default {
   "Attachments cannot be added while editing a queued message — cancel the edit first.": "编辑排队中的消息时不能添加附件 —— 请先取消编辑。",
   "That queued message could not be edited — your rewritten text was kept in the input.": "这条排队消息没能改成 —— 你重写的文字已保留在输入框里。",
   "The previous edit is still saving — one moment.": "上一次编辑还在保存中 —— 请稍候。",
+  "Your unsaved rewrite was kept as this session’s draft — cancel this edit to get it back.": "未保存的改写已存为本会话的草稿 —— 取消这次编辑即可取回。",
   "The edit was not confirmed — the session may be unresponsive.": "编辑没有得到确认 —— 该会话可能没有响应。",
   "Connection lost — the edit may not have been saved.": "连接已断开 —— 这次编辑可能没有保存。",
 };

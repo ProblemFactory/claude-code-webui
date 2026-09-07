@@ -39,12 +39,27 @@ export class ChatInput {
     this._onSteerSend = onSteerSend || null;
     this._queue = [];
     this._queueCaps = { queue: false, steer: false, queueOps: false, queueVerbs: [] };
-    // Per-ROW transient state, keyed by the app-server's queue id:
-    // 'pending' (an op is in flight), 'refused' (its result said no, with the
-    // sentence in `title`), 'editing' (this row's text is in the textarea).
-    // A row that leaves the queue loses its state — see setQueue.
+    // Per-ROW TRANSIENT OP state, keyed by the app-server's queue id:
+    // 'pending' (an op is in flight) or 'refused' (its result said no, with
+    // the sentence in `title`). A row that leaves the queue loses its state —
+    // see setQueue.
+    // EDIT MODE IS NOT ONE OF THESE VALUES (round-4 verifier). It used to be
+    // a third one, which made the ONLY on-screen signal that an edit is open
+    // — the edit→cancel control and the "send to save" hint — derived from
+    // the state every dispatch and every refusal OVERWRITES: a batch verb
+    // (run-all / steer-all) marks EVERY row pending, a refusal on the edited
+    // row marks it refused, and the indicator silently vanished while the
+    // textarea still held the rewrite. The pencil then came back over a live
+    // edit, and clicking it replaced the user's words with the queued
+    // message's own text (law ②: the box is the only place that rewrite
+    // lives). The two are now orthogonal and a row renders BOTH.
     this._queueRowState = new Map();
-    this._editingQueueId = null;     // the row being edited, if any
+    // THE EDIT-MODE STATE — its own field, never a row-state value: the row
+    // whose text the textarea currently holds. Every on-screen edit signal is
+    // derived from THIS (see queueStripHtml's `editingId`), and only
+    // _beginQueueEdit / _cancelQueueEdit / _send / _resolvePendingEdit /
+    // _abandonEditOfDroppedRow may move it.
+    this._editingQueueId = null;
     this._editDraftBefore = null;    // what was in the textarea before editing began
     // The queued message's OWN text as the editor opened it. It is what tells
     // "the user rewrote this" from "the box still holds the original", which
@@ -811,18 +826,13 @@ export class ChatInput {
   }
 
   dispose() {
-    // AN UNSENT REWRITE MUST NOT DIE WITH THE VIEW. Ordinary typed text is
+    // AN UNSTASHED REWRITE MUST NOT DIE WITH THE VIEW. Ordinary typed text is
     // already in the store when a window closes (the 300ms autosave), but edit
     // mode deliberately keeps that autosave OFF (law ②) — so a view torn down
     // mid-edit was the one path where the user's words existed nowhere but a
-    // textarea about to be destroyed. Only the UNSENT case: once the frame is
-    // out the text is on its way into the queued message itself, and stashing
-    // a copy of an edit that LANDED would leave the user's own queue item
-    // sitting in the input as a draft.
-    if (this._editingQueueId && this._textarea) {
-      const typed = this._textarea.value;
-      if (typed.trim() && typed !== this._editOriginalText) saveDraft('chat', this._sessionId, typed);
-    }
+    // textarea about to be destroyed.
+    const unstashed = this._unstashedEditText();
+    if (unstashed !== null) saveDraft('chat', this._sessionId, unstashed);
     if (this._goalTimer) { clearTimeout(this._goalTimer); this._goalTimer = null; }
     if (this._editTimer) { clearTimeout(this._editTimer); this._editTimer = null; }
     // A reorder drag in flight owns window-level listeners — a closed window
@@ -836,6 +846,32 @@ export class ChatInput {
   }
 
   // ── Private ──
+
+  /** What the textarea holds that exists NOWHERE ELSE, or null. Edit mode
+   *  keeps the debounced autosave off for the WHOLE flight — `_editingQueueId`
+   *  OR `_pendingEdit` disarms it (the `input` listener) — so the in-flight
+   *  window is just as unprotected as the pre-send one, and it lasts until the
+   *  result lands or the 20s fallback fires (round-4 verifier: dispose used to
+   *  look at `_editingQueueId` alone, so a window closed while a save was
+   *  unanswered took every keystroke typed since Send with it).
+   *  Null when the box holds something already safe: an untouched editor (the
+   *  queued message's own text), the payload that is already on the wire (the
+   *  text is on its way INTO the queued message — stashing a copy would leave
+   *  the user their own queue item as a draft), or nothing at all. */
+  _unstashedEditText() {
+    if (!this._textarea) return null;
+    if (!this._editingQueueId && !this._pendingEdit) return null;
+    const typed = this._textarea.value;
+    if (!typed.trim()) return null;
+    // The baseline is WHAT IS ALREADY SOMEWHERE ELSE: the sent frame's own raw
+    // box content while a save is in flight (never the trimmed wire payload —
+    // the round-3 skew), the queued message's text before Send.
+    const p = this._pendingEdit;
+    const baseline = p
+      ? (typeof p.raw === 'string' ? p.raw : p.text)
+      : this._editOriginalText;
+    return typed === baseline ? null : typed;
+  }
 
   /** @returns {string|null} the msgId that went out, or null when nothing did
    *  (empty composer / disconnected / a /goal command, which is not a message).
@@ -1060,7 +1096,10 @@ export class ChatInput {
       this._renderQueue();
       return;
     }
-    if (ok) { if (this._queueRowState.get(key)?.state !== 'editing') this._queueRowState.delete(key); }
+    // The OP state ends either way — it never carries edit mode any more
+    // (round-4), so an ok result can simply clear it without erasing the
+    // marker of an edit that is still open on this very row.
+    if (ok) this._queueRowState.delete(key);
     else this._queueRowState.set(key, { state: 'refused', title: text || '' });
     // THE EDIT'S OWN ANSWER: ok puts the pre-edit draft back, a refusal hands
     // the rewrite back to the user (never the moment it is thrown away).
@@ -1077,21 +1116,32 @@ export class ChatInput {
    *  here would silently delete words the user never chose to throw away.
    *  A rewrite is kept exactly the way the post-Send twin keeps it (draft +
    *  toast); an untouched editor is just closed. `_cancelQueueEdit` stays for
-   *  the paths where the USER abandoned the edit (Esc, switching rows). */
+   *  the paths where the USER threw the edit away — Esc, and the untouched
+   *  editor of a row switch (a switch that CARRIES a rewrite keeps it, see
+   *  _beginQueueEdit, round-4). */
   _abandonEditOfDroppedRow() {
-    const id = this._editingQueueId;
-    const typed = this._textarea ? this._textarea.value : '';
-    const original = typeof this._editOriginalText === 'string' ? this._editOriginalText : '';
+    const typed = this._rewriteInBox();
     // Untouched (or emptied) editor ⇒ there is nothing of the user's in the
     // box; the pre-edit draft is what belongs there.
-    if (typed === original || !typed.trim()) { this._cancelQueueEdit({ silent: true }); return; }
+    if (typed === null) { this._cancelQueueEdit({ silent: true }); return; }
     this._editingQueueId = null;
     this._editOriginalText = null;
     this._editDraftBefore = null;          // the rewrite IS this session's draft now
-    if (id && this._queueRowState.get(id)?.state === 'editing') this._queueRowState.delete(id);
     saveDraft('chat', this._sessionId, typed);
     this._renderQueue();
     showToast(t('That queued message could not be edited — your rewritten text was kept in the input.'), { type: 'error' });
+  }
+
+  /** THE ONE DISCRIMINATOR every "this edit is ending for a reason the user
+   *  did not choose" path shares: the rewrite currently in the box, or null
+   *  when nothing of the user's is in there (an untouched — or emptied —
+   *  editor still holds the queued message's own text, and restoring the
+   *  pre-edit draft over THAT loses nothing). */
+  _rewriteInBox() {
+    const typed = this._textarea ? this._textarea.value : '';
+    const original = typeof this._editOriginalText === 'string' ? this._editOriginalText : '';
+    if (!typed.trim() || typed === original) return null;
+    return typed;
   }
 
   /** The outcome of an edit whose frame is already OUT (`_pendingEdit`).
@@ -1145,7 +1195,12 @@ export class ChatInput {
       this._editDraftBefore = typeof p.draftBefore === 'string' ? p.draftBefore : '';
       this._editOriginalText = typeof p.original === 'string' ? p.original
         : (this._queue.find((it) => String(it.id || '') === p.id)?.text ?? null);
-      this._queueRowState.set(p.id, { state: 'editing', title: reasonText || this._queueRowState.get(p.id)?.title || '' });
+      // The REASON is the op's outcome, and it belongs to the op state —
+      // being back in edit mode is rendered from `_editingQueueId` (round-4),
+      // so the row now shows both marks instead of one hiding the other.
+      // setQueueOpResult has usually written this already; the callers that
+      // write no row state at all (dead socket, 20s fallback) have not.
+      if (reasonText) this._queueRowState.set(p.id, { state: 'refused', title: reasonText });
       this._renderQueue();
       return;
     }
@@ -1197,7 +1252,25 @@ export class ChatInput {
     // rewrite with nowhere to be handed back to. Sub-second in practice, and
     // the 20s fallback guarantees the block ends.
     if (this._pendingEdit) { showToast(t('The previous edit is still saving — one moment.')); return; }
-    if (this._editingQueueId && this._editingQueueId !== String(id)) this._cancelQueueEdit({ silent: true });
+    // SWITCHING TO ANOTHER ROW MUST NOT EAT THE REWRITE (round-4 verifier).
+    // The plain cancel restores the pre-edit draft OVER the textarea, and an
+    // UNSENT rewrite lives nowhere else (law ② keeps the autosave off for the
+    // whole edit) — clicking a second pencil silently deleted whatever had
+    // been typed into the first. Same answer as the twins for a row that
+    // vanished (draft + toast), with one difference: the box is about to hold
+    // ANOTHER message, so the rewrite must also become what an Esc on the new
+    // edit restores. An untouched editor is not a rewrite and still just closes.
+    if (this._editingQueueId && this._editingQueueId !== String(id)) {
+      const carried = this._rewriteInBox();
+      if (carried === null) this._cancelQueueEdit({ silent: true });
+      else {
+        this._editingQueueId = null;
+        this._editOriginalText = null;
+        this._editDraftBefore = carried;     // Esc on the new edit hands it back
+        saveDraft('chat', this._sessionId, carried);
+        showToast(t('Your unsaved rewrite was kept as this session’s draft — cancel this edit to get it back.'));
+      }
+    }
     if (this._editDraftBefore === null) this._editDraftBefore = this._textarea.value;
     // PIN THE DRAFT AND DISARM THE PENDING AUTOSAVE (the same door as the
     // guard on the `input` listener, from the other side): a debounce armed by
@@ -1212,7 +1285,6 @@ export class ChatInput {
     // What the editor OPENED with — the discriminator setQueue needs when the
     // row disappears mid-typing (a box still holding this is not a rewrite).
     this._editOriginalText = item.text;
-    this._queueRowState.set(String(id), { state: 'editing', title: '' });
     this._textarea.value = item.text;
     this._autoSize?.();
     this._renderQueue();
@@ -1221,9 +1293,11 @@ export class ChatInput {
   }
 
   _cancelQueueEdit({ silent = false } = {}) {
-    const id = this._editingQueueId;
     this._editingQueueId = null;
-    if (id && this._queueRowState.get(id)?.state === 'editing') this._queueRowState.delete(id);
+    // The OP state is NOT ours to clear (round-4): a refusal that is on this
+    // row describes the op that was refused, and it outlives the edit exactly
+    // like every other verb's refusal — until the row leaves the queue or its
+    // next op succeeds.
     if (this._editDraftBefore !== null) { this._textarea.value = this._editDraftBefore; this._autoSize?.(); }
     this._editDraftBefore = null;
     this._editOriginalText = null;
@@ -1259,7 +1333,7 @@ export class ChatInput {
     // COLLAPSED to its header and a chevron toggles it (per-view memory only).
     const collapsed = this._queueCollapsed ?? (items.length > ChatInput.QUEUE_COLLAPSE_AT);
     strip.classList.toggle('chat-queue-collapsed', collapsed);
-    strip.innerHTML = ChatInput.queueStripHtml(items, this._queueCaps, this._queueRowState, { collapsed });
+    strip.innerHTML = ChatInput.queueStripHtml(items, this._queueCaps, this._queueRowState, this._editingQueueId, { collapsed });
     const toggle = strip.querySelector('.chat-queue-toggle');
     if (toggle) toggle.onclick = (e) => { e.stopPropagation(); this._queueCollapsed = !collapsed; this._renderQueue(); };
     strip.querySelectorAll('[data-queue-op]').forEach((btn) => {
@@ -1378,15 +1452,20 @@ export class ChatInput {
    *  — a queue preview is message text and syncs to every client). Controls
    *  come from `caps.queueVerbs`, the harness's verb table INTERSECTED with
    *  what the running wrapper serves: a control that is rendered is a control
-   *  the server will honour. `rowState` (id → {state, title}) paints
-   *  pending / refused / editing. */
+   *  the server will honour. `rowState` (id → {state, title}) paints the
+   *  TRANSIENT OP state (pending / refused); `editingId` — a SEPARATE
+   *  argument, because the two are separate facts (round-4 verifier) — paints
+   *  edit mode. A row can carry both: an edit that was refused is still open,
+   *  and rendering one of the two facts through the other made whichever
+   *  arrived last erase the other. */
   /** More queued items than this ⇒ the strip starts collapsed to its header. */
   static get QUEUE_COLLAPSE_AT() { return 8; }
 
-  static queueStripHtml(items, caps = {}, rowState = null, { collapsed = false } = {}) {
+  static queueStripHtml(items, caps = {}, rowState = null, editingId = null, { collapsed = false } = {}) {
     const verbs = caps.queueVerbs || [];
     const has = (v) => verbs.includes(v);
     const stateOf = (id) => (rowState && typeof rowState.get === 'function' ? rowState.get(String(id)) : (rowState ? rowState[String(id)] : null)) || null;
+    const editKey = editingId === null || editingId === undefined ? null : String(editingId);
     const btn = (op, id, icon, label, cls = '') => `<button type="button" class="chat-queue-btn${cls ? ' ' + cls : ''}" data-queue-op="${op}"${id ? ` data-queue-id="${escHtml(String(id))}"` : ''} title="${escHtml(label)}" aria-label="${escHtml(label)}">${icon}</button>`;
     const toggle = items.length > ChatInput.QUEUE_COLLAPSE_AT || collapsed
       ? `<button type="button" class="chat-queue-toggle" aria-expanded="${collapsed ? 'false' : 'true'}" title="${escHtml(collapsed ? t('Show the queued messages') : t('Hide the queued messages'))}">${collapsed ? UI_ICONS.chevronDown : UI_ICONS.chevronUp}</button>`
@@ -1413,8 +1492,9 @@ export class ChatInput {
       // another agent's words would misattribute them, and the wrapper
       // refuses it too — and (b) carried in FULL by the wrapper; the preview
       // is truncated and saving it back would cut the message down.
+      const isEditing = editKey !== null && String(it.id || '') === editKey;
       const edit = has('edit') && it.kind !== 'peer' && typeof it.text === 'string'
-        ? (st?.state === 'editing'
+        ? (isEditing
           ? btn('edit-cancel', it.id, UI_ICONS.close, t('Cancel editing'), 'chat-queue-btn-editing')
           : btn('edit', it.id, UI_ICONS.pencil, t('Edit this queued message')))
         : '';
@@ -1422,10 +1502,14 @@ export class ChatInput {
       const steer = has('steer') ? btn('steer', it.id, UI_ICONS.bolt, t('Steer now — the agent sees it at its next reply')) : '';
       const remove = has('remove') ? btn('remove', it.id, UI_ICONS.close, t('Remove'), 'chat-queue-btn-remove') : '';
       const stateAttr = st?.state ? ` data-queue-state="${escHtml(st.state)}"` : '';
+      // Its own attribute, never a value of `data-queue-state`: an op in
+      // flight on the row being edited (a batch verb marks every row) must
+      // not repaint the row as "not being edited".
+      const editAttr = isEditing ? ' data-queue-editing="1"' : '';
       const stateTitle = st?.title ? ` title="${escHtml(String(st.title))}"` : '';
-      return `<div class="chat-queue-item" tabindex="0" data-queue-id="${id}"${stateAttr}${stateTitle}>${grip}${from}<span class="chat-queue-preview">${escHtml(String(it.preview || ''))}</span>${edit}${runNow}${steer}${remove}</div>`;
+      return `<div class="chat-queue-item" tabindex="0" data-queue-id="${id}"${stateAttr}${editAttr}${stateTitle}>${grip}${from}<span class="chat-queue-preview">${escHtml(String(it.preview || ''))}</span>${edit}${runNow}${steer}${remove}</div>`;
     }).join('');
-    const editing = items.some((it) => stateOf(it.id)?.state === 'editing')
+    const editing = editKey !== null && items.some((it) => String(it.id || '') === editKey)
       ? `<div class="chat-queue-editing">${escHtml(t('Editing a queued message — send to save, Esc to cancel'))}</div>`
       : '';
     // The body is the ONLY thing that scrolls; a collapsed strip omits it.

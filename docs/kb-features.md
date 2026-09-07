@@ -189,11 +189,17 @@ impossible rather than a review promise.
   window BEFORE you press Send: if the message you are rewriting runs (or is
   removed) while you are still typing, your words are kept in the input, saved
   as the draft and explained by a toast — they are never replaced by the draft
-  the editor borrowed the box from. An editor you never typed into just closes,
+  the editor borrowed the box from. **Opening a DIFFERENT row's pencil while a
+  rewrite is unsent does the same thing** (2026-09-07): the abandoned rewrite
+  becomes this session's draft with a toast that says so, and cancelling the new
+  edit hands it straight back — switching rows used to overwrite it with the
+  pre-edit draft, silently. An editor you never typed into just closes,
   silently, and Esc still restores your draft exactly as before. Closing the
-  window (or swapping the tab) mid-rewrite keeps the unsent text as the draft
-  too — the one thing that never happens is your words existing only in a box
-  that is about to disappear.
+  window (or swapping the tab) keeps whatever the box holds beyond what was
+  already sent — an unsent rewrite, and also anything typed DURING a save that
+  has not been answered yet (the draft autosave is off for that whole window) —
+  so the one thing that never happens is your words existing only in a box that
+  is about to disappear.
 - **Run now / Run all now (2026-09-07)** — `thread/queue/start` with and without
   an id. While a turn is running BOTH are refused out loud ("a turn is already
   running — the queue runs as soon as it ends") rather than being queued behind
@@ -201,9 +207,13 @@ impossible rather than a review promise.
   comes back idle with messages still queued. They are separate controls on
   purpose: an id-less start drains the WHOLE queue, so a lost id must never
   degrade into "run everything".
-- **A row shows what it is doing.** An op in flight dims its row; a refusal
-  marks it and keeps the reason on the row (the system card scrolls away, the
-  row does not); a row being edited says so, and the strip says how to finish.
+- **A row shows what it is doing — and can be doing two things at once.** An op
+  in flight dims its row; a refusal marks it and keeps the reason on the row
+  (the system card scrolls away, the row does not); a row being edited says so,
+  and the strip says how to finish. The editing mark is INDEPENDENT of the op
+  mark (2026-09-07): "Run all now" marks every row pending and a refusal marks
+  the row red without either of them erasing the sign that your rewrite is in
+  the box — a row that was refused and is open for editing again shows both.
   A row NEVER spins forever: if the window is disconnected/read-only the click
   sends nothing and the mark is undone with a toast, and a refusal from the
   server names the row it refused so the spinner ends there too.
