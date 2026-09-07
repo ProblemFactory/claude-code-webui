@@ -21,6 +21,7 @@ const { execFile } = require('child_process');
 const { claimJsonls, cwdToProjectDir } = require('./session-store');
 const { nameFromUserLine, interpretDiscoveryLines, synthesizeDiscoveryLines, isZstPath, isZstBuffer, ZSTD_MAGIC } = require('./discovery-facts');
 const { classifyPrivateKey } = require('./ssh-key-format');
+const { fdScanShellFns, cliIdentityShellFns } = require('./writer-sweep');
 
 const SSH_BASE_OPTS = [
   '-o', 'BatchMode=yes',
@@ -2092,14 +2093,7 @@ class HostManager {
           printf 'HC %s\\t' "$f"; printf '%s' "$HD" | grep -o '"cwd":"[^"]*"' | head -n 1; echo
           printf '%s' "$HD" | grep -m3 '"role":"user"' | while IFS= read -r u; do printf 'NC %s\\t' "$f"; printf '%s' "$u" | head -c 2000; printf '\\n'; done
         done
-        if [ -d /proc/self ]; then
-          for p in /proc/[0-9]*; do
-            tr '\\0' ' ' < "$p/cmdline" 2>/dev/null | grep -qE '(^|[/ ])codex( |$)|/@openai/codex/|/codex-linux-' || continue
-            for l in "$p"/fd/*; do t=$(readlink "$l" 2>/dev/null) || continue; case "$t" in "$HOME"/.codex/sessions/*rollout-*.jsonl|"$HOME"/.codex/sessions/*rollout-*.jsonl.zst) echo "CO $t";; esac; done
-          done
-        else
-          lsof -Fcn +D "$HOME"/.codex/sessions 2>/dev/null | awk '/^c/{c=substr($0,2)} /^n/ && c ~ /codex/ && $0 ~ /rollout-.*\\.jsonl(\\.zst)?$/ {print "CO " substr($0,2)}'
-        fi
+${codexOpenRolloutsShell()}
       fi
     `.trim();
     let out;
@@ -2169,6 +2163,47 @@ class HostManager {
     this._persistDiscovery(id, sessions);
     return sessions;
   }
+}
+
+/** CO leg of the ssh discovery script: rollout files held OPEN by a codex
+ *  process = RUNNING threads (codex has no lock files). THE STANDING-SWEEP TWIN
+ *  OF B-3185 (r2): this leg used to carry all three shapes that fix retired —
+ *  a `tr` + `grep` fork PAIR per process over `/proc/[0-9]*` (7356 forks on a
+ *  3700-process host, inside a 20s discovery budget that runs per host, per
+ *  sweep), a `readlink` fork PER FD under every match, and an identity test
+ *  that regex-matched the WHOLE argv (so a VibeSpace wrapper or dtach master
+ *  carrying `…/bin/codex resume <tid>` as ARGUMENTS answered "codex" and its
+ *  inherited rollout fd marked a dead thread RUNNING). It now runs the SHARED
+ *  shell functions from src/writer-sweep.js — one batched `ls -l` per 400 fd
+ *  directories plus the executable identity test — so the sweep and discovery
+ *  agree on "is this process the codex CLI" by construction.
+ *
+ *  `read -r copid cot` relies on default IFS: the pid is the first field and
+ *  the REST of the line (the fd target, spaces included) lands in `cot`.
+ *  The lsof branch is unchanged — macOS/BSD hosts have no /proc.
+ *
+ *  THE TRAILING `:` IS LOAD-BEARING. This leg is the LAST thing in the ssh
+ *  discovery script, so its status IS the script's status — and `_ssh` REJECTS
+ *  a non-zero exit, which sends the whole host's discovery into the
+ *  serve-stale-cache catch. A `while read` loop exits with its LAST iteration's
+ *  status, so this leg would exit 1 whenever the last matching fd under $HOME
+ *  belonged to a process that is not the codex CLI (a reader, a wrapper, a
+ *  dtach master) — data-dependent, invisible in a run that happens to end on a
+ *  real app-server, and caught only because the suite runs the leg for real
+ *  against a fixture HOME. Never let a scan's FINDINGS decide a script's exit
+ *  status. */
+function codexOpenRolloutsShell() {
+  return `        if [ -d /proc/self ]; then
+${fdScanShellFns()}
+${cliIdentityShellFns()}
+          vs_fd_scan "/rollout-[^/]*[.]jsonl" | while read -r copid cot; do
+            case "$cot" in "$HOME"/.codex/sessions/*rollout-*.jsonl|"$HOME"/.codex/sessions/*rollout-*.jsonl.zst) ;; *) continue;; esac
+            vs_is_cli "$copid" codex && echo "CO $cot"
+          done
+        else
+          lsof -Fcn +D "$HOME"/.codex/sessions 2>/dev/null | awk '/^c/{c=substr($0,2)} /^n/ && c ~ /codex/ && $0 ~ /rollout-.*\\.jsonl(\\.zst)?$/ {print "CO " substr($0,2)}'
+        fi
+        : # what this leg FOUND must never become the discovery script's exit status`;
 }
 
 // ── Bootstrap ──
@@ -2283,4 +2318,4 @@ HostManager.prototype.bootstrap = function (id, onEvent) {
   });
 };
 
-module.exports = { HostManager };
+module.exports = { HostManager, codexOpenRolloutsShell };

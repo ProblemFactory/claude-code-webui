@@ -102,9 +102,12 @@ function restoreSessions() {
   //
   // B-3185: this used to fork a `readlink` PER FD — 405,735 of them on the dev
   // box, ~6.4 minutes — so it ALWAYS blew its own 6s timeout, and the catch
-  // turned that into a silent empty set. (Its `/proc/[0-9]*/fd/*` glob also
-  // overflows ARG_MAX at that size.) It now runs THE batched fd scan the writer
-  // sweep uses — 3.0s at 3678 processes — and a failure SAYS SO.
+  // turned that into a silent empty set. (The forks were the ONLY problem: its
+  // fd-level glob fed a SHELL for-loop, which expands in the shell's own memory
+  // and never reaches execve, so ARG_MAX never applied — r1 said it did, which
+  // was wrong. ARG_MAX bounds the batched scan's `ls` argv instead, which is
+  // why THAT is chunked.) It now runs THE batched fd scan the writer sweep uses
+  // — 3.0s at 3678 processes — and a failure SAYS SO.
   //
   // HONEST LIMIT, measured on the installed CLI (2.1.226, native binary): a
   // live claude does NOT keep its transcript open — it appends and closes, and

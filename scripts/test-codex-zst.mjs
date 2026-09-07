@@ -282,7 +282,16 @@ console.log('— ⑤ descriptor store contract + wiring pins');
   ok(/function localTranscriptPath\(r\)/.test(ts) && /h\.store\.locate\(r\.sessionId, r\.cwd\)/.test(ts) && /hosts\.fetchTranscript\(r\.host, r\.backend \|\| 'claude', r\.sessionId\)/.test(ts) && !/r\.backend === 'codex' \? findCodexSessionJsonlPath/.test(ts), 'transcript-service locates + fetches through the descriptor store (no codex ternaries)');
   const hs = read('src/hosts.js');
   ok(/async fetchTranscript\(id, backend, sessionId/.test(hs) && /h\.store\.remoteFind\(sessionId\)/.test(hs) && /return this\.fetchTranscript\(id, 'codex', threadId, opts\)/.test(hs) && /return this\.fetchTranscript\(id, 'claude', sessionId, opts\)/.test(hs), 'hosts.fetchTranscript is THE remote fetch; the two legacy methods are shims');
-  ok(/-name 'rollout-\*\.jsonl' -o -name 'rollout-\*\.jsonl\.zst'/.test(hs) && /printf 'NC %s\\\\t'/.test(hs) && /echo "CO \$t"/.test(hs) && /zstd -dc -- "\$f"/.test(hs), 'the ssh discovery script lists .zst rollouts, emits NC name lines (zstd(1) for compressed heads) and CO open-rollout lines');
+  // B-3185 r2 moved the CO leg into `codexOpenRolloutsShell()` (it now runs the
+  // SAME batched fd scan + executable identity as the writer sweep), so the
+  // emitter's loop variable is no longer `$t`. Pin the EMISSION, not the
+  // variable name — and pin it on the composed script, which is what ships.
+  ok(/-name 'rollout-\*\.jsonl' -o -name 'rollout-\*\.jsonl\.zst'/.test(hs) && /printf 'NC %s\\\\t'/.test(hs) && /echo "CO \$\w+"/.test(hs) && /zstd -dc -- "\$f"/.test(hs), 'the ssh discovery script lists .zst rollouts, emits NC name lines (zstd(1) for compressed heads) and CO open-rollout lines');
+  {
+    const { codexOpenRolloutsShell } = require(path.join(REPO, 'src/hosts.js'));
+    const co = codexOpenRolloutsShell();
+    ok(/echo "CO \$\w+"/.test(co) && co.includes('.jsonl.zst'), 'the CO leg itself still emits CO lines and still matches compressed rollouts (B-3185 r2 port)');
+  }
   const ag = read('src/agentd/agentd.js');
   ok(/rollout-\.\*\\\.jsonl\(\?:\\\.zst\)\?\$/.test(ag) && /r\.userLines = head\.split/.test(ag) && /listOpenCodexRolloutPaths\(\{ sessionsDir: croot \}\)/.test(ag) && /codexOpen: snap\.codexOpen \|\| \[\]/.test(ag), 'the daemon snapshot carries .zst rollouts, userLines and codexOpen (one implementation via discovery-facts)');
   const tw = read('src/transcript-worker.js');
