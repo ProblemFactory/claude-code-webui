@@ -594,6 +594,113 @@ if (!probe) {
   })(), 'the ladder demoted an account it could not verify');
 }
 
+// ── §4d TWO RECORDS, ONE REJECTION (r3, the round-2 verifier's finding) ────
+// ONE rejection reaches us as SEVERAL records — the CLI's `rate_limit_event`,
+// the assistant limit banner, and a banner inside a task_notification (three
+// producers in claude-stream-json.js; noteWallSignal's own comment says a
+// banner + its rejected event are ONE wall). Every one of them calls
+// maybePoolAutoSwitch the moment it marks the cache, so the FIRST record
+// re-points the link BY ITSELF — and round 2 resolved the credential slot per
+// RECORD. The second record therefore keyed to the member the pool had just
+// moved TO, and the branch's own slot rung demoted that HEALTHY member with
+// `credential slot` authority and recorded it as having rejected this
+// conversation: the misattribution the whole change exists to remove.
+// The legs below drive BOTH real producers in ONE turn, in both orders (plus
+// the two-events shape), and the NEGATIVE CONTROL re-creates the un-pinned
+// resolution through the same public seam.
+{
+  const BANNER = "Claude usage limit reached. You've hit your session limit · resets 6am";
+  const rejEvent = (w, kind = 'five_hour', resetsAt = null) => ({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected', rateLimitType: kind, resetsAt: resetsAt || w.R5 } });
+  const dead = (w) => ({ fetchedAt: Date.now() - 60000, source: 'cli-usage', fiveHour: { utilization: 1, status: 'limited', resetsAt: w.R5 }, sevenDay: { utilization: 0.4, resetsAt: w.R7 } });
+  /** ONE turn, the REAL producers, in the CLI's own order.
+   *  `unpinned` wipes the turn's signal list BETWEEN the records — which is
+   *  exactly what the per-record resolution saw before the pin existed. */
+  async function oneRejection(steps, { unpinned = false } = {}) {
+    const w = mkWorld(); const cap = capture();
+    const fire = {
+      event: () => w.eng.recordRateLimitEvent(w.session, rejEvent(w)),
+      banner: () => w.eng.markLimitBanner(w.session, BANNER),
+      sevenDay: () => w.eng.recordRateLimitEvent(w.session, rejEvent(w, 'seven_day', w.R7)),
+    };
+    steps.forEach((step, i) => { fire[step](); if (unpinned && i < steps.length - 1) w.session._turnWallSigs = []; });
+    w.eng.noteTurnEnd(w.session);
+    await new Promise((r) => setTimeout(r, 40));
+    return { w, lines: cap.done() };
+  }
+  const healthyNow = (w, id) => w.writeCache(id, { fetchedAt: Date.now(), source: 'cli-usage', fiveHour: { utilization: 0.05, resetsAt: w.R5 }, sevenDay: { utilization: 0.2, resetsAt: w.R7 } });
+
+  for (const steps of [['event', 'banner'], ['banner', 'event'], ['event', 'sevenDay']]) {
+    const label = steps.join('→');
+    const { w, lines } = await oneRejection(steps);
+    const spare = w.readCache(w.SPARE);
+    ok(`ONE turn, both producers (${label}): only the member that was the slot when the rejection ARRIVED is demoted`, lines.some((l) => /\[wall\] demoted PandyMax (5h|7d) until \S+ \(1 walls \/ credential slot\)/.test(l)) && !lines.some((l) => /demoted B-Stack Max/.test(l)), lines.filter((l) => /demoted/.test(l)).join(' | '));
+    ok(`…and the member the pool MOVED TO is untouched — its cache still the reading it had (${label})`, spare && spare.source === 'cli-usage' && spare.fiveHour.utilization === 0.2 && spare.sevenDay.utilization === 0.35, JSON.stringify(spare));
+    ok(`…it is not recorded as having rejected this conversation either (${label})`, [...w.eng.sessionWalledMembers(w.SID)].join(',') === w.LINK, JSON.stringify([...w.eng.sessionWalledMembers(w.SID)].map(w.nameOf)));
+    const st = w.ar.statusFor(w.SID);
+    ok(`…so the session near-arms onto it instead of waiting out a reset (${label})`, w.fired.length === 0 && st.armed === true && /^switched to a usable account \(B-Stack Max\)/.test(String(st.reason)) && st.resetsAt <= Date.now() + 46000, JSON.stringify(st));
+    healthyNow(w, w.SPARE);
+    const v = w.eng.quotaVerdictFor(w.P, { model: 'claude-fable-5', session: w.session });
+    ok(`…and a fresh ground-truth reading on it answers usable (${label}) — the misattribution's harm was a multi-hour wait with a healthy member sitting in the pool`, v.usable === true && v.viaId === w.SPARE, JSON.stringify({ usable: v.usable, via: v.via, blockedUntil: v.blockedUntil }));
+    ok(`…the TICK then continues it, once, onto that member (${label})`, (await w.tickFire()) === true && w.fired.length === 1 && w.ar._fires.get(w.SID).last.key === w.SPARE, JSON.stringify({ fires: w.fired.length, last: w.ar._fires.get(w.SID).last }));
+  }
+
+  // NEGATIVE CONTROL: the same world, the same two producers, the pin's INPUT
+  // wiped between them = the per-record resolution round 2 shipped.
+  {
+    const { w, lines } = await oneRejection(['event', 'banner'], { unpinned: true });
+    const spare = w.readCache(w.SPARE);
+    ok('NEGATIVE CONTROL (slot resolved per RECORD): the healthy member the pool just moved TO is demoted with `credential slot` authority', lines.some((l) => /\[wall\] demoted B-Stack Max 5h until \S+ \(1 walls \/ credential slot\)/.test(l)) && spare.source === 'wall' && spare.fiveHour.utilization === 1, JSON.stringify({ spare, j: lines.filter((l) => /demoted/.test(l)) }));
+    ok('…and it is marked as having rejected this conversation, while the account that actually refused us is not', [...w.eng.sessionWalledMembers(w.SID)].join(',') === w.SPARE, JSON.stringify([...w.eng.sessionWalledMembers(w.SID)].map(w.nameOf)));
+    healthyNow(w, w.SPARE);
+    const v = w.eng.quotaVerdictFor(w.P, { model: 'claude-fable-5', session: w.session });
+    ok('…so even a FRESH ground-truth reading showing it healthy cannot unblock the session — it waits on a reset instead of continuing in ~60s', v.usable === false && /B-Stack Max: rejected this conversation/.test(String(v.reason)) && v.blockedUntil > Date.now() + 30 * 60000, JSON.stringify({ usable: v.usable, reason: v.reason, blockedUntil: v.blockedUntil && new Date(v.blockedUntil).toISOString() }));
+    ok('…(and the 7d variant of the same control stamps a reset THREE DAYS out on that healthy member)', await (async () => {
+      const r = await oneRejection(['event', 'sevenDay'], { unpinned: true });
+      const c = r.w.readCache(r.w.SPARE);
+      return !!c && c.sevenDay.utilization === 1 && c.sevenDay.status === 'limited';
+    })());
+  }
+
+  // the pin itself, on the engine's own seam
+  {
+    const w = mkWorld();
+    ok('rejectionSlotFor: with no signals on the turn it resolves the slot FRESH', w.eng.rejectionSlotFor(w.session).key === w.LINK && w.eng.rejectionSlotFor(w.session).slotReason !== 'turn-pinned', JSON.stringify(w.eng.rejectionSlotFor(w.session)));
+    w.eng.noteWallSignal(w.session, { key: w.LINK, slot: true, bucket: 'fiveHour' });
+    w.am.ensureSessionPoolLink(w.P, w.SID, w.SPARE);   // …and now the link moves, exactly as the first record's own pool switch moves it
+    const pinned = w.eng.rejectionSlotFor(w.session);
+    ok('…once the turn has a keyed signal it PINS to it, link movement notwithstanding (a re-point does not reach a running CLI — 2.361.0)', pinned.key === w.LINK && pinned.slotOk === true && pinned.slotReason === 'turn-pinned', JSON.stringify(pinned));
+    ok('…while "where would a CONTINUE land" still reads the link fresh: two different questions, two different functions', w.eng.wallKeyFor(w.session) === w.SPARE && w.eng.fireIdentityFor(w.session).key === w.SPARE, JSON.stringify({ wallKey: w.nameOf(w.eng.wallKeyFor(w.session)), fire: w.eng.fireIdentityFor(w.session) }));
+    w.eng.noteTurnEnd(w.session);
+    await new Promise((r) => setTimeout(r, 40));
+    ok('…and the pin dies with the turn (noteTurnEnd clears the signals — it is exactly one turn wide)', w.eng.rejectionSlotFor(w.session).key === w.linkNow() && w.eng.rejectionSlotFor(w.session).slotReason !== 'turn-pinned', JSON.stringify({ slot: w.eng.rejectionSlotFor(w.session), link: w.nameOf(w.linkNow()) }));
+  }
+}
+
+// ── §4e THE NEAR-ARM: what protects it, and what merely asserts it ─────────
+// Round 2 guarded the near-arm with `v.viaId === demoted.key`, which cannot be
+// true: demoteWalledAccount records noteSessionWall(member) on EVERY path that
+// resolves a member (held demotions included) and quotaVerdictFor forces
+// usable:false for that set, so `viaId` is never the rejector; the only
+// `demoted.key` that skips the session wall is `not-a-member`, whose key by
+// construction matches no member. The suite pinned it by source grep, so the
+// branch never executed while reading like the defence (恒假守卫). Now: the
+// PROTECTION is executed below, and the assertion is a PURE function with a
+// truth table that says out loud what it is.
+{
+  const w = mkWorld();
+  w.writeCache(w.LINK, { fetchedAt: Date.now() - 60000, source: 'cli-usage', fiveHour: { utilization: 1, status: 'limited', resetsAt: w.R5 }, sevenDay: { utilization: 0.4, resetsAt: w.R7 } });
+  const before = w.eng.quotaVerdictFor(w.P, { model: 'claude-fable-5', session: w.session });
+  ok('CONTROL: with nothing walled, the verdict answers `usable via` the healthy member', before.usable === true && before.viaId === w.SPARE, JSON.stringify({ usable: before.usable, via: before.via }));
+  const d = w.eng.demoteWalledAccount(w.session, [{ at: Date.now(), key: w.SPARE, slot: false, bucket: 'fiveHour', resetsAtMs: w.R5 * 1000 }]);
+  const after = w.eng.quotaVerdictFor(w.P, { model: 'claude-fable-5', session: w.session });
+  ok('THE REAL PROTECTION, executed: a member that answered this conversation with a wall can never be the verdict\'s way out — even with the demotion HELD and its cache still reading healthy', d && d.demoted === false && d.reason === 'unverified' && w.eng.sessionWalledMembers(w.SID).has(w.SPARE) && after.usable !== true && /B-Stack Max: rejected this conversation/.test(String(after.reason)), JSON.stringify({ d, reason: after.reason }));
+  ok('…which is why the near-arm assertion cannot fire — so it is PURE, tested, and labelled an assertion instead of pinned as the defence', typeof probe.eng.nearArmVeto === 'function');
+  ok('nearArmVeto: a viaId in the walled set IS a violation (the branch the call site takes)', typeof probe.eng.nearArmVeto(w.SPARE, new Set([w.SPARE])) === 'string' && /rejected this conversation/.test(probe.eng.nearArmVeto(w.SPARE, new Set([w.SPARE]))));
+  ok('…NEGATIVE CONTROL: a viaId that is not in the set says nothing (the assertion is not a blanket refusal to near-arm)', probe.eng.nearArmVeto(w.SPARE, new Set([w.LINK])) === null && probe.eng.nearArmVeto(w.SPARE, new Set()) === null);
+  ok('…a missing viaId or a missing set says nothing either (never a veto on an unknown)', probe.eng.nearArmVeto(null, new Set([w.SPARE])) === null && probe.eng.nearArmVeto(w.SPARE, null) === null);
+  ok('…and it reads an ARRAY the same way (the rule is membership, not a Set trick)', typeof probe.eng.nearArmVeto('m1', ['m1']) === 'string' && probe.eng.nearArmVeto('m1', []) === null);
+}
+
 // ── §4c THE GATE CAN MOVE US: the fire is keyed to where it LANDED ─────────
 // The pre-fire gate is `beforeAutoResumeFire`, which runs maybePoolAutoSwitch
 // and can re-point the session's credential link. Round 1 resolved the
@@ -688,12 +795,14 @@ if (!probe) {
   ok('WIRING: a walled turn tells the breaker the fire failed, BEFORE anything re-arms or re-switches', /function onWalledTurn\(session, sigs\) \{[\s\S]{0,600}noteFireOutcome\?\.\(id, false, 'limit rejection'\)[\s\S]{0,900}demoteWalledAccount\(session, sigs\)/.test(eng));
   ok('WIRING: server.js gives auto-resume its identity from the engine (the SAME fact the wall demotes)', /fireIdentity: \(id, s\) => \{ try \{ return fireIdentityFor\(s\); \}/.test(srv) && /fireIdentityFor,/.test(srv));
   ok('WIRING: fireIdentityFor IS wallKeyFor (no second opinion about which account a fire lands on)', /function fireIdentityFor\(session\) \{[\s\S]{0,200}const key = wallKeyFor\(session\);/.test(eng));
-  ok('WIRING: a REJECTION is keyed to the credential slot; a READING keeps the observed-org routing', /const slot = ev\.status === 'rejected' \? wallSlotFor\(session\) : null;[\s\S]{0,400}orgVerifiedKey\(session, usageCacheKeyFor\(session\), 'rate-limit-event:' \+ ev\.kind\)/.test(eng) && /const slot = wallSlotFor\(session\);\s*\n\s*const key = slot\.key \|\| orgVerifiedKey\(session, usageCacheKeyFor\(session\), 'limit-banner'\)/.test(eng));
+  ok('WIRING: a REJECTION is keyed to the credential slot, TURN-PINNED; a READING keeps the observed-org routing', /const slot = ev\.status === 'rejected' \? rejectionSlotFor\(session\) : null;[\s\S]{0,400}orgVerifiedKey\(session, usageCacheKeyFor\(session\), 'rate-limit-event:' \+ ev\.kind\)/.test(eng) && /const slot = rejectionSlotFor\(session\);\s*\n\s*const key = slot\.key \|\| orgVerifiedKey\(session, usageCacheKeyFor\(session\), 'limit-banner'\)/.test(eng));
+  ok('WIRING: NOTHING resolves the slot per RECORD any more — wallSlotFor has exactly two readers (wallKeyFor, and the pin\'s own no-signal fallback), so a new producer that asks fresh goes red here', (eng.match(/wallSlotFor\(session\)/g) || []).length === 3 && /function wallKeyFor\(session\) \{ return wallSlotFor\(session\)\.key; \}/.test(eng) && /if \(first\) return \{ key: first\.key, slotOk: !!first\.slot, slotReason: 'turn-pinned' \};[\s\S]{0,60}return wallSlotFor\(session\);/.test(eng), 'wallSlotFor(session) refs: ' + (eng.match(/wallSlotFor\(session\)/g) || []).length);
   ok('WIRING: both wall signals carry the slot verdict taken AT REJECTION TIME (the link moves before the turn ends)', (eng.match(/noteWallSignal\(session, \{[^}]*slot: !!slot/g) || []).length === 2 && /sigs\.some\(\(x\) => x && x\.slot && \(!x\.key \|\| ids\.has\(x\.key\)\)\)/.test(eng));
   ok('WIRING: every blocking decision reads sessionBillingMember; only resolveUsageKey (VALUES) reads the observation', (eng.match(/sessionBillingMember\(/g) || []).length >= 5 && /acct = sessionReadingMember\(session, acct\)\.id \|\| acct;/.test(eng) && !/sessionCurrentMember/.test(eng));
   ok('WIRING: the per-session switch excludes members that already rejected this conversation', /const rejected = \[\.\.\.sessionWalledMembers\(sid, now\)\];[\s\S]{0,400}exclude: rejected/.test(eng));
   ok('WIRING: the verdict cannot answer `usable` through a member that rejected this session', /const walled = session \? sessionWalledMembers\(session\._webuiId\) : new Set\(\);[\s\S]{0,600}walled\.has\(m\.id\) && v\.usable !== false/.test(eng));
-  ok('WIRING: the near-arm refuses to name the rejecting identity as the way out', /if \(v\.viaId && demoted\?\.key && v\.viaId === demoted\.key\)/.test(eng) && /wall-usable-is-rejector/.test(eng));
+  ok('WIRING: the near-arm ASSERTION re-reads the same store the verdict read (round 2 compared viaId to demoted.key — unreachable, and pinned as if it were the defence)', /const veto = nearArmVeto\(v\.viaId, sessionWalledMembers\(id\)\);/.test(eng) && !/v\.viaId === demoted/.test(eng) && /wall-usable-is-rejector/.test(eng));
+  ok('…and it SAYS it is an assertion, next to the mechanism that actually protects (a branch that cannot fire must never read like a guard)', /ASSERTION, NOT PROTECTION/.test(eng) && /INVARIANT ASSERTION — deliberately NOT its protection/.test(eng) && /INVARIANT VIOLATED/.test(eng));
   ok('WIRING: decidePoolSwitch takes the exclusion as a NAMED input and reports it (never a silent empty candidate list)', /exclude = null, explain = false \}\)/.test(read('src/account-pool-auto.js')) && /excludedN \? 'all-rejected' : 'no-members'/.test(read('src/account-pool-auto.js')));
   ok('WIRING: session-schema documents the slot flag on the wall signals', /_turnWallSigs:[^\n]*\{at, resetsAtMs, bucket, scopedName, key, slot\}/.test(read('src/session-schema.js')), read('src/session-schema.js').split('\n').find((l) => /_turnWallSigs/.test(l)));
   ok('the engine INSTANCE exports the new seams (functional call check, never a source grep — the 2.369.4 lesson)', ['fireIdentityFor', 'sessionBillingMember', 'sessionReadingMember', 'wallKeyFor', 'sessionWalledMembers'].every((k) => typeof probe.eng[k] === 'function'));

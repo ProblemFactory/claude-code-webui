@@ -597,13 +597,16 @@ function sessionBillingMember(session, poolId) {
   const slot = validateBillingSlot(poolId, linkedId);
   return { id: linkedId, linkedId, observedId, divergent, slotOk: slot.ok, slotReason: slot.reason };
 }
-/** THE identity a REJECTION belongs to: the credential slot this session's
- *  CLI reads, and whether that slot VALIDATED. Pooled ⇒ the validated link
- *  member; otherwise the session's own account/host key (fixed at spawn, so
- *  trivially its own slot). Deliberately NOT orgVerifiedKey — see the header
+/** THE identity a REJECTION belongs to, resolved NOW: the credential slot this
+ *  session's CLI reads, and whether that slot VALIDATED. Pooled ⇒ the validated
+ *  link member; otherwise the session's own account/host key (fixed at spawn,
+ *  so trivially its own slot). Deliberately NOT orgVerifiedKey — see the header
  *  note. `slotOk` travels ON THE SIGNAL because it is only true AT THE MOMENT
  *  THE REJECTION ARRIVES: by the time the turn ends the pool has usually
- *  re-pointed the link off the account that just refused us. */
+ *  re-pointed the link off the account that just refused us.
+ *  A rejection RECORD does not call this directly — it calls rejectionSlotFor
+ *  (turn-pinned) below; this stays the fresh reading for "where would a fire
+ *  land right now" (fireIdentityFor) and for the demotion's fallback. */
 function wallSlotFor(session) {
   try {
     const poolId = session?._accountId || null;
@@ -617,6 +620,38 @@ function wallSlotFor(session) {
   return { key, slotOk: !!key, slotReason: null }; // no pool = one fixed creds dir for the whole session
 }
 function wallKeyFor(session) { return wallSlotFor(session).key; }
+/** THE identity a rejection RECORD is attributed to — `wallSlotFor` PINNED FOR
+ *  THE TURN (2026-09-07 r3; reproduced on the real engine before it was
+ *  fixed).
+ *  ONE rejection reaches us as SEVERAL records: the CLI's `rate_limit_event`,
+ *  the assistant limit banner, and a banner inside a task_notification (three
+ *  independent producers — src/server/stdout/claude-stream-json.js :323/:328/
+ *  :563 — and noteWallSignal's own comment already says a banner + its rejected
+ *  event are ONE wall). The FIRST of them re-points the link BY ITSELF: every
+ *  producer calls maybePoolAutoSwitch the moment it marks the cache. Resolving
+ *  the slot per RECORD therefore keyed the second one to the member the pool
+ *  had just moved TO — and the wall machine then demoted that healthy member
+ *  with `credential slot` authority and recorded it as having rejected this
+ *  conversation: the exact misattribution this whole change exists to remove
+ *  (measured, both producer orders: after a fresh reading showing the moved-to
+ *  member 95% healthy the session waited ~2h instead of continuing in ~60s).
+ *  The pin is THE TURN, not a time window, because that is what defines it: a
+ *  pool re-point does not reach a RUNNING CLI (2.361.0 — a process kept billing
+ *  its original org for 35 minutes across four switches), so every rejection
+ *  inside one turn came from the credentials the slot named when that turn's
+ *  first rejection arrived. `_turnWallSigs` is cleared by noteTurnEnd, so the
+ *  pin is exactly one turn wide; a turn whose end record never arrives degrades
+ *  exactly the way the wall machine already does (the next turn's real work
+ *  classifies it NORMAL and clears the signals).
+ *  `slotOk` rides the pin for the same reason it rides the signal: it is only
+ *  true AT THE MOMENT THE REJECTION ARRIVED. */
+function rejectionSlotFor(session) {
+  try {
+    const first = ((session && session._turnWallSigs) || []).find((s) => s && s.key);
+    if (first) return { key: first.key, slotOk: !!first.slot, slotReason: 'turn-pinned' };
+  } catch { }
+  return wallSlotFor(session);
+}
 /** The identity + label a CONTINUE fired into this session would land on —
  *  auto-resume's `fireIdentity` dep. Deliberately wallKeyFor: the breaker's
  *  "the fire onto X failed" and the wall machine's "X rejected this session"
@@ -800,7 +835,8 @@ function demoteWalledAccount(session, sigs) {
   const slot = sessionBillingMember(session, poolId);
   const member = (accounts.poolMembers(poolId) || []).find((m) => ids.has(m.id)) || (slot.id && ids.has(slot.id) ? { id: slot.id, name: nameOf(slot.id) } : null);
   // "was this key the session's credential slot when the rejection arrived" —
-  // asked of the SIGNAL, because the link may have moved since (see wallSlotFor)
+  // asked of the SIGNAL, because the link may have moved since (the signal
+  // carries the turn-pinned answer; see rejectionSlotFor)
   const slotSignal = sigs.some((x) => x && x.slot && (!x.key || ids.has(x.key)));
   if (!member) return { demoted: false, reason: 'not-a-member', key: wallKey };
   const now = Date.now();
@@ -852,6 +888,27 @@ function demoteWalledAccount(session, sigs) {
   return { demoted: done.length > 0, reason: done.length ? 'demoted' : 'no-bucket', key: member.id, walls, observedMatch, slotMatch, buckets: done };
 }
 
+/** PURE. The near-arm's INVARIANT ASSERTION — deliberately NOT its protection
+ *  (r3, the round-2 verifier's finding). What keeps a near-arm off the identity
+ *  that just rejected us is two mechanisms that run BEFORE it:
+ *  demoteWalledAccount calls noteSessionWall(member) on every path that
+ *  resolves a member (held demotions included), and quotaVerdictFor forces
+ *  `usable:false` for every member in that set — so the verdict's `viaId`
+ *  cannot BE the rejector. Round 2 wrote the guard as `viaId === demoted.key`,
+ *  which is unreachable for a second reason (the only `demoted.key` that skips
+ *  noteSessionWall is `not-a-member`, and by construction no member id matches
+ *  it) and read like the defence while never executing — the repo's 恒假守卫
+ *  lesson. This one re-reads the SAME store the verdict read: if the two ever
+ *  disagree, one of them is broken, so the caller says so LOUDLY and refuses
+ *  the spend instead of re-firing at an identity that just refused us.
+ *  Returns the violation's text, or null when there is nothing to say. */
+function nearArmVeto(viaId, walledIds) {
+  if (!viaId || !walledIds) return null;
+  const has = typeof walledIds.has === 'function' ? walledIds.has(viaId)
+    : Array.isArray(walledIds) ? walledIds.includes(viaId) : false;
+  return has ? 'the verdict named a member that rejected this conversation as the way out' : null;
+}
+
 function onWalledTurn(session, sigs) {
   const id = session._webuiId;
   const model = sessionModelFor(session);
@@ -875,12 +932,16 @@ function onWalledTurn(session, sigs) {
       // (pre-fire gate re-verifies; the delayed announcement outlives this,
       // so a quick success stays silent). The pool eval in `finally` runs
       // with the session ARMED, so a hot switch's fireNow() continues it now.
-      // The target must DIFFER from the identity that just rejected us —
-      // quotaVerdictFor cannot answer `usable` through a walled member, so
-      // reaching here with viaId === the wall's member would mean the two
-      // disagree about identity; say so instead of arming (2026-09-07).
-      if (v.viaId && demoted?.key && v.viaId === demoted.key) {
-        console.log(`[wall] ${id}: the only usable member IS the one that just rejected this conversation (${nameOf(v.viaId)}) — not re-firing`);
+      // ASSERTION, NOT PROTECTION (r3 — see nearArmVeto). The near-arm is kept
+      // off the rejector by noteSessionWall + the verdict's walled override,
+      // both of which have already run; this re-reads that same store so a
+      // disagreement between them is LOUD instead of silently spending a turn.
+      // It cannot fire today, and that is the point of saying so here rather
+      // than dressing it up as the defence (round 2 compared `viaId` to
+      // `demoted.key`, which is unreachable for an unrelated reason).
+      const veto = nearArmVeto(v.viaId, sessionWalledMembers(id));
+      if (veto) {
+        console.warn(`[wall] ${id}: INVARIANT VIOLATED — ${veto} (${nameOf(v.viaId)}) — not re-firing`);
         global.__vsEvent?.('wall-usable-is-rejector', String(v.viaId));
       } else {
         ar.armIfEnabled(id, session, Date.now() + 45000, `switched to a usable account (${v.via || '?'})`);
@@ -1054,7 +1115,10 @@ function recordRateLimitEvent(session, msg) {
     // (B-b3cd odometer flap, unchanged). Mixing the two put every rejection on
     // the spawn-time org and left the linked member reading "healthy"
     // forever — the 2026-09-07 fire loop.
-    const slot = ev.status === 'rejected' ? wallSlotFor(session) : null;
+    // rejectionSlotFor, not wallSlotFor: a rejection's OTHER records (the
+    // banner, the workflow-agent banner) arrive after this one has already
+    // moved the link — the slot is pinned for the turn (r3).
+    const slot = ev.status === 'rejected' ? rejectionSlotFor(session) : null;
     const key = slot && slot.key
       ? slot.key
       : orgVerifiedKey(session, usageCacheKeyFor(session), 'rate-limit-event:' + ev.kind);
@@ -1198,7 +1262,10 @@ function markLimitBanner(session, text) {
     // turn), so since 2026-09-07 it marks the session's credential SLOT, the
     // same identity the wall machine demotes — not the OTel-observed org
     // (that names the identity cached at spawn; see the header note).
-    const slot = wallSlotFor(session);
+    // TURN-PINNED (r3): the banner is usually the SECOND record of a rejection
+    // whose first record already re-pointed the link, so asking for the slot
+    // fresh here marked the member the pool had just moved TO.
+    const slot = rejectionSlotFor(session);
     const key = slot.key || orgVerifiedKey(session, usageCacheKeyFor(session), 'limit-banner');
     const nowSec = Math.floor(Date.now() / 1000);
     const bump = (b, fallbackResetSec) => ({
@@ -1688,7 +1755,7 @@ function maybeStopOnFallback(session, id, from, to) {
     poolChooserForModel, poolReadCache, probeUsageForAccountKey,
     noteSessionProduced, noteTurnEnd, noteWallSignal, beforeAutoResumeFire, quotaVerdictFor, probeUsageViaSession, recordRateLimitEvent, recordCodexQuotaSignal, resolveUsageKey,
     probeQuotaForKey, quotaSourceFor, quotaBackendFor, // S4 caps-routed quota probe + the per-harness QuotaSignalSource lookup (functional seams for test-quota-source)
-    observedMemberFor, sessionReadingMember, sessionBillingMember, wallKeyFor, fireIdentityFor, demoteWalledAccount, wallCount, sessionWalledMembers,
+    observedMemberFor, sessionReadingMember, sessionBillingMember, wallKeyFor, rejectionSlotFor, nearArmVeto, fireIdentityFor, demoteWalledAccount, wallCount, sessionWalledMembers,
     _wallRing, _sessionWalls, OBSERVED_ORG_RECENT_MS, WALL_RING_MS, SESSION_WALL_MS, // wall-ground-truth + token-slot + session-wall seams (test-auto-resume §11, test-auto-resume-loop)
     _poolAutoLast, _poolSwitchAt, // the eval gate (10s) + dwell belt (180s) are WALL-CLOCK: a suite winds them back instead of sleeping through them
     sessionModelFor, sweepUsageAnchors, usageCacheKeyFor,
