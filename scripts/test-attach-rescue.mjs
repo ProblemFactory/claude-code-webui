@@ -24,8 +24,11 @@ const repo = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CHROME = ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium'].find((p) => fs.existsSync(p));
 if (!CHROME) { console.log('SKIP: no chrome/chromium'); process.exit(0); }
 
-const PORT = 3989, CDP_PORT = 9339;
-const wt = '/tmp/vs-attach-rescue';
+// Free ports + per-pid dirs (2.369.53): hard-coded ports collide with a
+// parallel agent's copy of this suite (the 2.369.51 negative-control class).
+const freePort = () => new Promise((res) => { const s = require('net').createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); }); });
+const PORT = await freePort(), CDP_PORT = await freePort();
+const wt = `/tmp/vs-attach-rescue-${process.pid}`;
 const fakeHome = '/tmp/vs-attach-rescue-home';
 let failed = 0;
 const check = (n, c, e) => { if (c) console.log(`  ✓ ${n}`); else { failed++; console.error(`  ✗ ${n}${e ? '\n    ' + e : ''}`); } };
@@ -61,13 +64,13 @@ fs.writeFileSync(path.join(cacheDir, `${SID_CACHED}.jsonl`), transcript(SID_CACH
 
 const srv = spawn(process.execPath, ['server.js'], { cwd: wt, env: { ...process.env, PORT: String(PORT), HOME: fakeHome, VIBESPACE_SKIP_AGENT_HOOKS: '1' }, stdio: 'ignore' });
 const chrome = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${CDP_PORT}`, '--no-first-run', '--disable-gpu',
-  '--disable-background-timer-throttling', '--user-data-dir=/tmp/vs-attach-rescue-chrome', 'about:blank'], { stdio: 'ignore' });
+  '--disable-background-timer-throttling', `--user-data-dir=/tmp/vs-attach-rescue-chrome-${process.pid}`, 'about:blank'], { stdio: 'ignore' });
 
 const cleanup = () => {
   try { chrome.kill('SIGKILL'); } catch {}
   try { srv.kill('SIGKILL'); } catch {}
   try { execSync(`git worktree remove --force ${wt}`, { cwd: repo, stdio: 'ignore' }); } catch {}
-  try { fs.rmSync('/tmp/vs-attach-rescue-chrome', { recursive: true, force: true }); } catch {}
+  try { fs.rmSync(`/tmp/vs-attach-rescue-chrome-${process.pid}`, { recursive: true, force: true }); } catch {}
   try { fs.rmSync(fakeHome, { recursive: true, force: true }); } catch {}
 };
 process.on('exit', cleanup);
@@ -106,6 +109,8 @@ const winState = (winId) => evalJs(`(() => {
     msgs: el.querySelectorAll('.chat-msg').length,
     text: (el.querySelector('.chat-messages') || el).textContent.slice(0, 4000),
     resumeBar: !!el.querySelector('.chat-resume-bar'),
+    resumeBtn: !!el.querySelector('.chat-resume-btn'),
+    subNote: !!el.querySelector('.chat-subagent-note'),
   };
 })()`);
 let deadSeq = 990;
@@ -149,6 +154,31 @@ try {
   await sleep(2500);
   const stC = await winState(wC);
   check('C: no-transcript window degrades to read-only notice', stC.resumeBar && !/RESCUE-MARKER/.test(stC.text) && /No messages/.test(stC.text), JSON.stringify(stC).slice(0, 200));
+  check('C: Resume BUTTON offered on a primary view', stC.resumeBtn);
+
+  // D: a sub-agent's own conversation opened from its parent (codex collab
+  // child / claude Task viewer path through viewSession with agentKind
+  // 'subagent'): history renders, NO 'Resume this session' button — a note
+  // explains it ran inside the parent (owner report 2026-09-07).
+  const wD = await evalJs(`(() => {
+    const before = new Set(app.wm.windows.keys());
+    app.viewSession(${JSON.stringify(SID_LOCAL)}, ${JSON.stringify(cwd)}, 'sub-view', { backend: 'claude', backendSessionId: ${JSON.stringify(SID_LOCAL)}, agentKind: 'subagent', sourceKind: 'subagent' });
+    return [...app.wm.windows.keys()].find((id) => !before.has(id)) || null;
+  })()`);
+  await sleep(2500);
+  const stD = await winState(wD);
+  check('D: sub-agent view renders history', stD.msgs >= 4, `msgs=${stD.msgs}`);
+  check('D: sub-agent view has NO Resume button', !stD.resumeBtn, JSON.stringify(stD).slice(0, 200));
+  check('D: sub-agent view explains read-only', stD.subNote && /Sub-agent conversation/.test(stD.text));
+  // E (negative control): the same transcript viewed as a PRIMARY session keeps its Resume button.
+  const wE = await evalJs(`(() => {
+    const before = new Set(app.wm.windows.keys());
+    app.viewSession(${JSON.stringify(SID_CACHED)}, ${JSON.stringify(cwd)}, 'primary-view', { backend: 'claude', backendSessionId: ${JSON.stringify(SID_CACHED)} });
+    return [...app.wm.windows.keys()].find((id) => !before.has(id)) || null;
+  })()`);
+  await sleep(2500);
+  const stE = await winState(wE);
+  check('E: primary view keeps the Resume button', stE.resumeBtn && !stE.subNote, JSON.stringify(stE).slice(0, 200));
 } catch (e) {
   failed++;
   console.error('  ✗ harness error: ' + e.message);

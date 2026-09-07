@@ -592,6 +592,7 @@ export default {
   "Resume previous": "前のゴールを再開",
   "Resume the session and continue chatting": "セッションを再開してチャットを続ける",
   "Resume this session": "このセッションを再開",
+  "Sub-agent conversation — read-only. It ran inside its parent session; resume the parent to continue.": "サブエージェントの会話 — 読み取り専用。親セッション内で実行されたものです。続けるには親セッションを再開してください。",
   "Resume {id}": "{id} を再開",
   "Retry": "再試行",
   "Review": "レビュー",

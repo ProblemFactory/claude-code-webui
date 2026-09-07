@@ -86,12 +86,19 @@ function isScopedRefusal(msg) {
  * Input goes to the same PTY session via WebSocket.
  */
 class ChatView {
-  constructor(winInfo, wsManager, sessionId, app, { readOnly = false } = {}) {
+  constructor(winInfo, wsManager, sessionId, app, { readOnly = false, subagentView = false } = {}) {
     this.winInfo = winInfo;
     this.ws = wsManager;
     this.sessionId = sessionId;
     this.app = app;
     this._readOnly = readOnly;
+    // A sub-agent's own conversation opened from its parent (codex collab
+    // child thread via viewSession, agentKind 'subagent'): read-only by
+    // nature — resuming it would spawn a standalone session on a thread that
+    // only ever ran inside its parent's turn. Owner report 2026-09-07: the
+    // codex child opened through the generic view path and showed the dead-
+    // session 'Resume this session' bar.
+    this._subagentView = !!subagentView;
     // Subagent viewers (sub-*) can't paginate; view-only history (view-*) and normal sessions can
     this._canPaginate = !sessionId.startsWith('sub-');
     this._messages = []; // normalized message objects
@@ -3382,6 +3389,20 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
     if (this._resumeBar || this.sessionId.startsWith('sub-')) return;
     const container = this._container;
     if (!container) return;
+    if (this._subagentView) {
+      // Say WHY there is no input instead of offering a Resume that would be
+      // wrong (no-silent-state rule) — a note, no button.
+      const bar = document.createElement('div');
+      bar.className = 'chat-resume-bar chat-subagent-note';
+      const note = document.createElement('div');
+      note.className = 'chat-resume-note';
+      note.textContent = t('Sub-agent conversation — read-only. It ran inside its parent session; resume the parent to continue.');
+      bar.append(note);
+      if (this._statusBar?.element && this._statusBar.element.parentNode === container) container.insertBefore(bar, this._statusBar.element);
+      else container.appendChild(bar);
+      this._resumeBar = bar;
+      return;
+    }
 
     const bar = document.createElement('div');
     bar.className = 'chat-resume-bar';

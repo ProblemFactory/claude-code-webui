@@ -1316,7 +1316,10 @@ export function installSessionLifecycle(App, ctx = {}) {
       openSpec,
       titleMeta: this._buildTitleMeta(openSpec),
     });
-    this._viewIntoWindow(winInfo, { backend, backendSessionId: resolvedSessionId, cwd, name: sessionName, hostId });
+    this._viewIntoWindow(winInfo, { backend, backendSessionId: resolvedSessionId, cwd, name: sessionName, hostId,
+      // A sub-agent's own conversation (claude Task viewer, codex collab child
+      // thread) is read-only by NATURE, not by death — no Resume bar.
+      subagentView: (agentKind || 'primary') === 'subagent' || sourceKind === 'subagent' });
     return winInfo;
   },
 
@@ -1327,9 +1330,9 @@ export function installSessionLifecycle(App, ctx = {}) {
   // 'attached'. Shared by viewSession and attachSession's dead-session rescue
   // (the blank-window class: a stale serverId replayed after the server lost
   // its sessions used to leave a bare shell with no ChatView at all).
-  _viewIntoWindow(winInfo, { backend = 'claude', backendSessionId, cwd, name, hostId } = {}) {
+  _viewIntoWindow(winInfo, { backend = 'claude', backendSessionId, cwd, name, hostId, subagentView = false } = {}) {
     const viewId = backend === 'claude' ? `view-${backendSessionId}` : `view-${backend}-${backendSessionId}`;
-    const chatView = new ChatView(winInfo, this.ws, viewId, this, { readOnly: true });
+    const chatView = new ChatView(winInfo, this.ws, viewId, this, { readOnly: true, subagentView });
     this.sessions.set(winInfo.id, chatView);
     const hostName = this._hostLabel(hostId);
     // For a REMOTE session the server first pulls the transcript over ssh

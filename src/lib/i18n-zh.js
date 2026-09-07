@@ -593,6 +593,7 @@ export default {
   "Resume previous": "恢复上一个",
   "Resume the session and continue chatting": "恢复会话并继续聊天",
   "Resume this session": "恢复此会话",
+  "Sub-agent conversation — read-only. It ran inside its parent session; resume the parent to continue.": "子agent对话——只读。它是在父会话内部运行的；要继续请恢复父会话。",
   "Resume {id}": "恢复 {id}",
   "Retry": "重试",
   "Review": "审查",

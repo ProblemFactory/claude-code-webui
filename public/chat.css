@@ -398,6 +398,8 @@
 }
 .chat-resume-btn:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
 .chat-resume-btn svg { width: 14px; height: 14px; }
+/* Sub-agent view (2.369.53): a note only — no Resume button, the child ran inside its parent. */
+.chat-subagent-note { justify-content: flex-start; }
 .chat-login-bar { flex-wrap: wrap; gap: 8px; }
 .chat-login-bar .chat-resume-note { width: 100%; }
 
