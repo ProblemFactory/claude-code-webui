@@ -257,10 +257,14 @@ impossible rather than a review promise.
   (`backend-caps` `notificationDelivery({peerDelivery, inputModes})` →
   `steer | queue | cli-inbox | stash`), never a backend id: **claude** stays on
   its CLI's own inbox (the CLI queues a mid-turn delivery itself — that lane is
-  the CLI's, and we do not write its stdin), **opencode/ACP v1** has no steer
-  method at all (`session/prompt` is one-at-a-time) so a mid-prompt notification
-  queues and says `steer:'unsupported'`, and a harness with no live lane stashes
-  for the next turn. Session Properties → Background Work shows the effective
+  the CLI's, and we do not write its stdin), and **opencode/ACP v1** derives
+  `stash` — NOT `queue`: its row says `peerDelivery:'stash-only'` (no live
+  rung has been proven for ACP), so a notification waits and rides the next
+  turn's injection. Its wrapper is honest about the OTHER half anyway: ACP v1
+  has no steer METHOD either (`session/prompt` is one-at-a-time), so a
+  notification that does reach a busy ACP wrapper queues and answers
+  `steer:'unsupported'` instead of accepting and ignoring it. Any harness with
+  no live lane stashes for the next turn the same way. Session Properties → Background Work shows the effective
   answer for the session you are looking at.
 - **MULTI-QUEUE SEMANTICS (the rule to remember):** steering item N injects
   **only N**. The others keep their relative order and still run after the turn.
