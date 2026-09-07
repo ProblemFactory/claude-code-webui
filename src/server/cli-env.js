@@ -12,6 +12,34 @@ const { execFile, execFileSync } = require('child_process');
 const { createAdapterRegistry } = require('../adapters');
 const { capsOf, setVerifiedCap } = require('../backend-caps');
 
+/** THE predicate "this harness's STORE is broken", or null. Module scope on
+ *  purpose: /api/home (harnessAvailability) and the live harness-store-updated
+ *  push must answer it the SAME way, and they used to be twins that disagreed.
+ *
+ *  A store that is deliberately OFF is NOT broken. The old /api/home half also
+ *  fired on "not ready AND the keeper's autostart flag is off" — only ever true
+ *  for the ops kill switch while autostart defaulted ON. The moment the OpenCode
+ *  background service became an opt-in PLUGIN (DEFAULT OFF, 2026-09-07), that
+ *  became the NORMAL shipped state reporting a store FAILURE, and the client's
+ *  "a park must never be silent" handler popped a RED ERROR TOAST on every
+ *  single page load: on a fresh instance, after the user answered "Not now",
+ *  and on instances that never had OpenCode at all. Exactly the every-boot nag
+ *  the passive sidebar row exists to avoid.
+ *
+ *  So only a PARK — the crash loop or the 2.369.50 runaway kill — is a
+ *  failure. "Off because nobody turned it on" (and "off because ops set
+ *  VIBESPACE_OPENCODE_SERVE=0") travels as `row.service`, and is shown
+ *  passively by the sidebar's hidden-history row and the ⚙ → Plugins card.
+ *  @param st optional snapshot the caller already has (the push has one). */
+function storeFailureReason(h, st = null) {
+  try {
+    const s = st || h?.store?.serveState?.();
+    if (!s || !s.parked) return null;
+    const why = h?.store?.unavailableReason ? String(h.store.unavailableReason()) : '';
+    return why || s.lastError || null;
+  } catch { return null; }
+}
+
 function create({ rootDir, CLAUDE_CMD_RAW, CODEX_CMD_RAW, resolveCmd,
   getOAuthToken, usagePollingEnabled, refreshCodexModels, broadcast = null,
   getTelemetry = () => null, getPlugins = () => null }) {
@@ -138,10 +166,11 @@ const adapterRegistry = createAdapterRegistry({
 function harnessAvailability() {
   return listHarnesses().map((h) => {
     const row = { id: h.id, label: h.label, kind: h.kind, installed: h.acp ? !!ACP_COMMANDS[h.id] : true, ...(h.acp ? { caps: { fork: !!capsOf(h.id).fork } } : {}) };
-    // A harness whose STORE is broken must say so where the user looks (the
-    // 2.369.42 runaway burned for two hours in silence): parked/runaway =>
-    // the reason travels with /api/home and the harness-store-updated push.
-    try { const st = h.store?.serveState?.(); if (st && (st.parked || (!st.ready && st.autostart === false)) && h.store.unavailableReason) row.storeReason = String(h.store.unavailableReason()); } catch { }
+    // A harness whose STORE is BROKEN must say so where the user looks (the
+    // 2.369.42 runaway burned for two hours in silence) — the ONE predicate,
+    // shared with the live push below (see storeFailureReason).
+    const failed = storeFailureReason(h);
+    if (failed) row.storeReason = failed;
     // A harness whose store runs behind a CONTROL PLUGIN declares it
     // (store.servicePlugin); the client needs enabled/prompted to decide
     // whether to show the first-use prompt and the "history is hidden" row.
@@ -185,7 +214,7 @@ const opencodeServe = opencodeServeModule.install({
   // the runaway/park state is a USER-VISIBLE fact, not just telemetry: push it
   // the moment it changes so open clients show it without a reload
   onState: (st) => {
-    const reason = st.parked ? (harnessOf('opencode')?.store?.unavailableReason?.() || st.lastError || null) : null;
+    const reason = storeFailureReason(harnessOf('opencode'), st);
     // the READINESS transition matters too (the first-use prompt waits for
     // "starting → running"), so the dedupe key carries it — a bare reason
     // compare would swallow every state change that has no error text
@@ -341,4 +370,4 @@ function refreshAvailableModels() {
     EFFORT_LEVELS, CLAUDE_MODEL_ALIASES, CLAUDE_KNOWN_MODELS, AVAILABLE_MODELS,
     noteModelSeen, refreshAvailableModels, ACP_COMMANDS, harnessAvailability, noteHarnessModels, opencodeServe };
 }
-module.exports = { create };
+module.exports = { create, storeFailureReason };

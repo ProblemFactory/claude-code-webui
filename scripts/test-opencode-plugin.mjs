@@ -91,6 +91,28 @@ console.log('— ① the built-in plugin def + its state');
   ok('the flag can be cleared (a re-offer is possible; nothing is one-way)', pm.status(OPENCODE_SERVE_ID).prompted === false);
 }
 
+console.log('— ①b the /api/home "broken store" predicate (a deliberately-off service is NOT broken)');
+{
+  // REGRESSION (the every-page-load red toast): /api/home used to flag the
+  // store as FAILED whenever `!ready && autostart === false`. That condition
+  // only ever meant "ops set VIBESPACE_OPENCODE_SERVE=0" while autostart
+  // defaulted ON — the moment the service became an opt-in plugin (DEFAULT
+  // OFF) it became the NORMAL shipped state, and app.js toasts a red error
+  // for every reason /api/home carries: one per page load, on a fresh
+  // instance, after "Not now", and on instances that never had OpenCode.
+  const { storeFailureReason } = require(path.join(REPO, 'src/server/cli-env.js'));
+  const mk = (st, why = 'because') => ({ id: 'opencode', store: { serveState: () => st, unavailableReason: () => why } });
+  ok('DEFAULT OFF (the shipped state) is NOT a store failure ⇒ no storeReason ⇒ no red toast on every load', storeFailureReason(mk({ ready: false, parked: false, autostart: false, envForced: null, installed: true })) === null);
+  ok('…nor after the user answered "Not now", nor where the CLI is absent (same state)', storeFailureReason(mk({ ready: false, parked: false, autostart: false, envForced: null, installed: false })) === null);
+  ok('…nor when OPS forced it off — that is a deliberate choice the ⚙ card and the sidebar row explain, not an error', storeFailureReason(mk({ ready: false, parked: false, autostart: false, envForced: false })) === null);
+  ok('a CRASH park still speaks — that is what this channel is for (2.369.42 burned two hours in silence)', storeFailureReason(mk({ parked: true, parkedKind: 'crash' }, 'parked after 5 crashes')) === 'parked after 5 crashes');
+  ok('…and a RUNAWAY park speaks with the guard sentence', storeFailureReason(mk({ parked: true, parkedKind: 'runaway' }, 'stopped as a RUNAWAY — 190% CPU')) === 'stopped as a RUNAWAY — 190% CPU');
+  ok('a park whose harness has no reason text falls back to lastError, never to an empty string', storeFailureReason({ store: { serveState: () => ({ parked: true, lastError: 'boom' }) } }) === 'boom');
+  ok('a harness with no store (claude/codex/shell) is never flagged, and a THROWING store never breaks /api/home', storeFailureReason({ id: 'claude' }) === null && storeFailureReason({ store: { serveState: () => { throw new Error('x'); } } }) === null);
+  const ce = read('src/server/cli-env.js');
+  ok('ONE predicate: /api/home AND the live harness-store-updated push both call it (they were twins that disagreed — and the loud half was /api/home)', /const failed = storeFailureReason\(h\);/.test(ce) && /const reason = storeFailureReason\(harnessOf\('opencode'\), st\);/.test(ce) && !/autostart === false/.test(ce));
+}
+
 console.log('— ② decideAutostart: the ONE decision');
 {
   ok('DEFAULT OFF: no env, plugin not enabled ⇒ false', serve.decideAutostart({ env: {}, pluginWantsUp: false }) === false);
@@ -182,6 +204,46 @@ console.log('— ③ a REAL keeper driven by the plugin record');
   ok('a disable with the serve module UNWIRED never throws (NULL_FACTS has no locator)', pm3.wantsServiceUp(OPENCODE_SERVE_ID) === false);
 }
 
+console.log('— ③b the ops kill switch is authoritative over ADOPTION, not just over spawning');
+{
+  // REGRESSION: locate() reuses a recorded serve at step 1, BEFORE the
+  // autostart gate — so a serve that outlived a restart kept running (and
+  // indexing) under VIBESPACE_OPENCODE_SERVE=0, while the panel disabled every
+  // control BECAUSE it is forced off. "Off" must mean the process is gone.
+  const dir = mkTmp();
+  const recPath = path.join(dir, 'opencode-serve.json');
+  // a serve nobody owns: started by hand + a record, exactly the shape a
+  // SIGKILLed server hands over (no keeper attached, so nothing respawns it)
+  const startOrphan = async () => {
+    const port = await freePort();
+    const child = spawn(STUB, ['serve', '--port', String(port), '--hostname', '127.0.0.1', '--log-level', 'WARN'], { cwd: dir, env: { ...process.env }, stdio: 'ignore', detached: true });
+    strays.add(child.pid); child.unref();
+    for (let i = 0; i < 60; i++) { try { const r = await fetch(`http://127.0.0.1:${port}/global/health`); if (r.ok) break; } catch { } await sleep(200); }
+    fs.writeFileSync(recPath, JSON.stringify({ port, pid: child.pid, startedAt: Date.now(), command: STUB, cwd: null }));
+    return { port, pid: child.pid };
+  };
+  const orphan = await startOrphan();
+  // NEGATIVE CONTROL first: without the switch this very fixture IS adopted,
+  // so the assert below is about the kill switch, not a broken fixture.
+  delete process.env.VIBESPACE_OPENCODE_SERVE;
+  const fA = serve.install({ dataDir: dir, command: () => STUB, env: () => ({ ...process.env }), log: null, spawnImpl: () => { throw new Error('must not spawn — this leg only adopts'); }, autostart: () => serve.decideAutostart({ pluginWantsUp: true }) });
+  await fA.discover({});
+  ok('(negative control) with no ops switch the recorded serve is ADOPTED, so the fixture is genuinely adoptable', fA.state().ready === true && fA.state().source === 'reused' && fA.state().pid === orphan.pid, fA.state());
+  serve.uninstall();                       // leaves an ADOPTED serve alone (the next boot reuses it)
+  ok('(setup) uninstall leaves the adopted process and its record alone', alive(orphan.pid) && fs.existsSync(recPath));
+
+  process.env.VIBESPACE_OPENCODE_SERVE = '0';
+  const fB = serve.install({ dataDir: dir, command: () => STUB, env: () => ({ ...process.env }), log: null, spawnImpl: () => { throw new Error('must not spawn under the ops switch'); }, autostart: () => serve.decideAutostart({ pluginWantsUp: true }) });
+  for (let i = 0; i < 60 && alive(orphan.pid); i++) await sleep(200);   // install() runs the ladder once — no discovery needed
+  ok('VIBESPACE_OPENCODE_SERVE=0 STOPS the serve it inherited instead of adopting it, and clears the record', !alive(orphan.pid) && !fs.existsSync(recPath) && fB.state().ready === false, fB.state());
+  ok('…so nothing is left running that the (correctly) locked panel could not stop', fB.state().pid === null && fB.state().source === null);
+  ok('…and the reason names the env switch', /VIBESPACE_OPENCODE_SERVE=0/.test(fB.reasonUnavailable()), fB.reasonUnavailable());
+  await fB.discover({});
+  ok('…a later discovery still adopts nothing and spawns nothing', fB.state().ready === false);
+  delete process.env.VIBESPACE_OPENCODE_SERVE;
+  serve.uninstall();
+}
+
 console.log('— ④ a REAL server: fresh = nothing spawned; enable/replay/disable over HTTP');
 {
   const wt = `/tmp/vs-ocp-server-${process.pid}`;
@@ -222,6 +284,16 @@ console.log('— ④ a REAL server: fresh = nothing spawned; enable/replay/disab
   // poll the session list a few times: discovery is what used to start it
   for (let i = 0; i < 3; i++) { await api('/api/sessions'); await sleep(300); }
   ok('A FRESH INSTANCE STARTS NOTHING: three session-list polls, no serve record, no `opencode serve` process', !fs.existsSync(recordPath));
+  ok('…and creates nothing either — not even the isolated serve cwd (a service nobody turned on touches no disk)', !fs.existsSync(path.join(wt, 'data', 'opencode-serve')));
+  // REGRESSION (the every-page-load red toast): a DEFAULT-OFF service is not a
+  // BROKEN store. app.js pops a red error toast for every storeReason it finds
+  // on /api/home, so one here = one error per page load forever.
+  ok('a default-off service carries NO storeReason on /api/home (the client turns any reason into a RED error toast, once per load)', ocRow && ocRow.storeReason === undefined, ocRow);
+  await post('/api/plugins/opencode-serve/prompted', { prompted: true });
+  const homeAsked = (await api('/api/home')).body;
+  const ocAsked = (homeAsked.harnesses || []).find((h) => h.id === 'opencode');
+  ok('…and STILL none after the user answered "Not now" (the answer is remembered, never escalated to an error)', ocAsked && ocAsked.storeReason === undefined && ocAsked.service?.prompted === true, ocAsked);
+  await post('/api/plugins/opencode-serve/prompted', { prompted: false });
   const listRow = (await api('/api/plugins')).body.plugins.find((p) => p.id === 'opencode-serve');
   ok('⚙ → Plugins shows it off but INSTALLED (the stub CLI resolves) with a reason that names the plugin', listRow.enabled === false && listRow.installed === true && /background service is off/.test(listRow.reason || ''), listRow);
 
@@ -251,13 +323,23 @@ console.log('— ④ a REAL server: fresh = nothing spawned; enable/replay/disab
   // the prompted flag round-trips over HTTP and rides the plugins-updated broadcast
   ok('POST /prompted records "we already asked" for the whole instance', (await post('/api/plugins/opencode-serve/prompted', { prompted: true })).body?.prompted === true && (await svcRow()).prompted === true);
 
-  // ENV OVERRIDE: forced off beats an enabled plugin, and the panel says why
+  // ENV OVERRIDE: forced off beats an enabled plugin — INCLUDING a serve that
+  // outlived the restart. REGRESSION: adoption runs before the autostart gate,
+  // so the ops kill switch used to leave an inherited daemon running while the
+  // panel disabled every control BECAUSE it is forced off.
   await post('/api/plugins/opencode-serve/enabled', { enabled: true });
-  srv.kill('SIGKILL'); await sleep(600);
+  let pidB = null;
+  for (let i = 0; i < 60 && !pidB; i++) { await sleep(400); const s = await svcRow(); if (s?.running) pidB = s.pid; }
+  ok('(setup) the service is up again before the ops switch is flipped', !!pidB && alive(pidB), pidB);
+  srv.kill('SIGKILL'); await sleep(800);
+  ok('(setup) it outlived the SIGKILLed server, with its record on disk — the adoption handover', alive(pidB) && fs.existsSync(recordPath));
   srv = boot({ VIBESPACE_OPENCODE_SERVE: '0' }); await waitReady(srv);
-  await sleep(1200);
+  for (let i = 0; i < 60 && alive(pidB); i++) await sleep(250);
+  ok('VIBESPACE_OPENCODE_SERVE=0 STOPS the inherited serve instead of adopting it, and clears the record', !alive(pidB) && !fs.existsSync(recordPath));
   const forced = await svcRow();
-  ok('VIBESPACE_OPENCODE_SERVE=0 forces it off even with the plugin enabled, and the panel reports envForced', forced.envForced === false && forced.running === false && !fs.existsSync(recordPath), forced);
+  ok('…the panel reports envForced with nothing running, so no daemon is left without a control surface', forced.envForced === false && forced.running === false && !forced.pid, forced);
+  const forcedRow = ((await api('/api/home')).body.harnesses || []).find((h) => h.id === 'opencode');
+  ok('…and an ops-off service is not a "broken store" either (no storeReason ⇒ no red toast per page load)', forcedRow && forcedRow.storeReason === undefined, forcedRow);
   const refused = await post('/api/plugins/opencode-serve/start');
   ok('…and Start refuses with the env named (never a silent no-op)', refused.status === 400 && /VIBESPACE_OPENCODE_SERVE=0/.test(refused.body?.error || ''), refused.body);
   srv.kill('SIGKILL'); await sleep(400);
@@ -309,6 +391,23 @@ console.log('— ⑤ the first-use dialog in a real browser');
       let ready = false;
       for (let i = 0; i < 80 && !ready; i++) { await sleep(500); ready = await evaluate('try { await window.app?.ready; return !!window.app; } catch { return false; }').catch(() => false); }
       ok('the app booted in headless chrome', !!ready);
+
+      // LEG 0 (REGRESSION): a default-off service must not NAG. Every
+      // storeReason /api/home carries becomes a RED error toast on load, and
+      // "the plugin is off" used to be one — on a fresh instance, after "Not
+      // now", and on instances that never had OpenCode.
+      const toastsOf = () => evaluate(`
+        return { err: [...document.querySelectorAll('#global-toasts .global-toast-error')].map(e => e.textContent.slice(0, 200)) };
+      `);
+      const t0 = await toastsOf();
+      ok('a FRESH default-off instance shows no error toast at all after boot', !!ready && Array.isArray(t0?.err) && t0.err.length === 0, t0);
+      await evaluate(`await fetch('/api/plugins/opencode-serve/prompted', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompted: true }) }); return 1;`);
+      await send('Page.navigate', { url: `http://127.0.0.1:${PORT}/?r=2` });
+      let ready2 = false;
+      for (let i = 0; i < 80 && !ready2; i++) { await sleep(500); ready2 = await evaluate('try { await window.app?.ready; return !!window.app; } catch { return false; }').catch(() => false); }
+      const t1 = await toastsOf();
+      ok('…and a SECOND load after the user answered "Not now" shows none either (this was one red error per page load, forever)', ready2 === true && Array.isArray(t1?.err) && t1.err.length === 0, t1);
+      await evaluate(`await fetch('/api/plugins/opencode-serve/prompted', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompted: false }) }); return 1;`);
 
       // LEG 1: a REAL call site (opening a stopped OpenCode conversation) pops
       // exactly ONE dialog, and it explains what the service does.
@@ -390,10 +489,14 @@ console.log('— ⑥ wiring pins');
   ok('app.js fills BACKEND_META.service from /api/home AND keeps it live from plugins-updated + harness-store-updated (multi-client law)', /BACKEND_META\[h\.id\]\.service = h\.service \|\| null;/.test(app) && /msg\.type !== 'plugins-updated' \|\| !msg\.services/.test(app) && /if \(msg\.service !== undefined\) BACKEND_META\[msg\.backend\]\.service = msg\.service \|\| null;/.test(app));
   ok('agent-meta declares the control plugin for opencode (the client mirror of store.servicePlugin)', /servicePlugin: 'opencode-serve'/.test(read('src/lib/agent-meta.js')));
   const sb = read('src/lib/sidebar.js');
-  ok('the sidebar hint row is generic over BACKEND_META.servicePlugin (never a backend id) and only shows once the user has met the harness', /_renderServiceHintRows\(sessions\) \{/.test(sb) && /const svc = meta\.servicePlugin \? meta\.service : null;/.test(sb) && /svc\.prompted \|\| \(sessions \|\| \[\]\)\.some/.test(sb) && /svc\.envForced === false\) continue;/.test(sb));
+  ok('the sidebar hint row is generic over BACKEND_META.servicePlugin (never a backend id) and only shows once the user has met the harness', /_renderServiceHintRows\(sessions\) \{/.test(sb) && /const svc = meta\.servicePlugin \? meta\.service : null;/.test(sb) && /svc\.prompted \|\| \(sessions \|\| \[\]\)\.some/.test(sb));
+  ok('…and an OPS-forced-off service gets the same EXPLANATION with no Enable button (nothing the user clicks there could work) — it is the only in-product word left now that "off" is not an error toast', /if \(svc\.envForced !== false\) \{[\s\S]{0,400}sidebar-service-enable[\s\S]{0,300}row\.append\(enable\);/.test(sb) && !/svc\.envForced === false\) continue;/.test(sb));
   ok('…and it is rendered by the WORKBENCH, the one builder that owns the sessions list on desktop AND mobile (it wipes listEl, so a row added in _renderInner would be silently thrown away — how this shipped broken once)', /this\._renderServiceHintRows\?\.\(sessions\);/.test(read('src/lib/sidebar-workbench.js')) && !/_renderServiceHintRows\?\.\(/.test(sb));
   const mw = read('src/server/mounts-plugins-wiring.js');
   ok('POST /api/plugins/:id/prompted exists next to the other plugin routes', /app\.post\('\/api\/plugins\/:id\/prompted'/.test(mw));
+  const os_ = read('src/opencode-serve.js');
+  ok('the ops kill switch is checked INSIDE the adoption rung (before the reuse is taken), not only at the spawn gate below it', /serveEnvOverride\(\) === false\s*\n?\s*\? 'VIBESPACE_OPENCODE_SERVE=0 is set on this instance/.test(os_) && /const bad = serveEnvOverride\(\) === false/.test(os_));
+  ok('…and install() runs the ladder ONCE under the switch, so an instance nobody polls does not leave an inherited daemon indexing', /if \(serveEnvOverride\(\) === false && locator\?\.ensure\)/.test(os_) && /setImmediate\(\(\) => \{ Promise\.resolve\(locator\.ensure\(\)\)/.test(os_));
   const pl = read('src/plugins.js');
   ok('plugins.js is the CONTROL SURFACE only: it holds no keeper, no spawn of `opencode serve`, and reads every fact from the shared module', /this\._serve = opencodeServe \|\| require\('\.\/opencode-serve'\)/.test(pl) && !/spawn\([^)]*serve/.test(pl) && /_ocServeState\(\)/.test(pl) && /_ocLocator\(\)\?\.stop\?\.\(\{ killRecorded: true \}\)/.test(pl));
   ok('cli-env puts the control plugin\'s state on the harness row (declaration-driven, not an id list)', /if \(h\.store\?\.servicePlugin\) \{ try \{ row\.service = getPlugins\(\)\?\.serviceState\?\.\(h\.store\.servicePlugin\)/.test(read('src/server/cli-env.js')));

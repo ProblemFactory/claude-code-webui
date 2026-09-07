@@ -654,18 +654,30 @@ function createServeLocator({
     }
     if (Date.now() < state.backoffUntil) return null;
     const cmd = commandOf();
+    // 1) reuse a recorded instance (a previous VibeSpace's child that outlived a SIGKILL restart)
+    const rec = readRecord();
     // the serve's OWN empty directory (see ensureServeCwd): resolved before the
-    // reuse probe so a recorded instance can be compared against it
-    if (cmd && !state.cwd) {
+    // reuse probe so a recorded instance can be compared against it — but only
+    // when it can be USED (a record to compare, or a spawn we are allowed to
+    // make). A service nobody turned on creates nothing, not even a throwaway
+    // git repo under data/.
+    if (cmd && !state.cwd && (rec || autostartOn())) {
       try { const r = await ensureServeCwd(dataDir, { execImpl, log }); state.cwd = r.dir; state.cwdIsolated = r.isolated; }
       catch (e) { log?.warn?.(`[opencode-serve] isolated cwd unavailable (${e.message})`); }
     }
-    // 1) reuse a recorded instance (a previous VibeSpace's child that outlived a SIGKILL restart)
-    const rec = readRecord();
     if (rec) {
       const probe = mkClient(rec.port);
       if (await healthy(probe, DEFAULT_TIMEOUT_MS)) {
-        const bad = await unsafeReuseReason(probe, rec);
+        // THE OPS KILL SWITCH IS AUTHORITATIVE OVER ADOPTION, not just over
+        // spawning (2026-09-07 follow-up): this rung runs BEFORE the autostart
+        // gate below, so VIBESPACE_OPENCODE_SERVE=0 used to stop us STARTING a
+        // serve while happily adopting the one that outlived the last restart
+        // — a third-party daemon indexing under an instance whose panel says
+        // "forced OFF" and whose controls are disabled BECAUSE it is forced
+        // off (no way left to stop it). "Off" means the process is gone.
+        const bad = serveEnvOverride() === false
+          ? 'VIBESPACE_OPENCODE_SERVE=0 is set on this instance — the ops kill switch stops an adopted serve too'
+          : await unsafeReuseReason(probe, rec);
         if (!bad) return adopt(rec.port, rec.pid || null, 'reused');
         log?.warn?.(`[opencode-serve] replacing the recorded serve (pid ${rec.pid}, port ${rec.port}): ${bad}`);
         // never signal ourselves: a record can name this very process (a stale
@@ -935,6 +947,17 @@ const NULL_FACTS = Object.freeze({
 function install(opts) {
   const locator = opts.locator || createServeLocator(opts);
   installed = createFacts(locator, opts);
+  // …and enforce the ops kill switch AT BOOT rather than at the first
+  // discovery: with VIBESPACE_OPENCODE_SERVE=0 a serve that outlived a restart
+  // must be STOPPED, and an instance nobody is polling (no client connected)
+  // would otherwise leave it indexing for as long as the server runs. This is
+  // ONE run of the SAME ladder — locate() drops a recorded instance under the
+  // override and refuses to spawn — never a second implementation. Off the
+  // boot path (setImmediate + unref) so a hung serve cannot delay startup.
+  if (serveEnvOverride() === false && locator?.ensure) {
+    const t = setImmediate(() => { Promise.resolve(locator.ensure()).catch(() => { }); });
+    t.unref?.();
+  }
   return installed;
 }
 function facts() { return installed || NULL_FACTS; }

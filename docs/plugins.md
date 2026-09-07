@@ -37,7 +37,13 @@ switch is deliberate:
   numbers) if it runs away; it will not restart it for an hour.
 - `VIBESPACE_OPENCODE_SERVE=1` / `=0` is an ops override that wins over the
   switch; the card then says it is forced by the environment and disables the
-  controls.
+  controls. `=0` also stops a serve this instance inherited from a previous
+  (SIGKILLed) server instead of adopting it — a locked card never describes a
+  daemon that is still running. On such an instance the session-list row still
+  explains the hidden history, without an Enable button.
+- A service that is simply OFF is never reported as an error. Only a service
+  that BROKE — parked after repeated crashes, or stopped by the runaway guard —
+  raises the red "OpenCode: …" toast.
 
 ## Manifest (`vibespace-plugin.json`)
 

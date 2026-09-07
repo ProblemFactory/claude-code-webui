@@ -862,18 +862,25 @@ class Sidebar {
     for (const meta of Object.values(BACKEND_META)) {
       const svc = meta.servicePlugin ? meta.service : null;
       if (!svc || !svc.installed || svc.enabled || svc.running) continue;
-      if (svc.envForced === false) continue;   // ops turned it off — not the user's to fix here
       const met = svc.prompted || (sessions || []).some((x) => (x.backend || 'claude') === meta.id);
       if (!met) continue;                      // never nag someone who has not used this harness here
       const row = document.createElement('div');
       row.className = 'empty-hint sidebar-service-hint';
       const label = document.createElement('span');
       label.textContent = tr('Stopped {name} conversations are hidden — its background service is off.', { name: meta.label || meta.id }) + ' ';
-      const enable = document.createElement('button');
-      enable.className = 'mounts-btn sidebar-service-enable';
-      enable.textContent = tr('Enable…');
-      enable.onclick = () => { this.app.enableHarnessService?.(meta.id); };
-      row.append(label, enable);
+      row.append(label);
+      // Ops forced it off (VIBESPACE_OPENCODE_SERVE=0): this row still EXPLAINS
+      // the incomplete list — silently short lists read as a bug — but carries
+      // no button, because nothing the user can click here would work. (It is
+      // also the only in-product word about it now that a deliberately-off
+      // service no longer counts as a broken store, i.e. no error toast.)
+      if (svc.envForced !== false) {
+        const enable = document.createElement('button');
+        enable.className = 'mounts-btn sidebar-service-enable';
+        enable.textContent = tr('Enable…');
+        enable.onclick = () => { this.app.enableHarnessService?.(meta.id); };
+        row.append(enable);
+      }
       this.listEl.appendChild(row);
     }
   }
