@@ -1191,6 +1191,76 @@ process.stdin.on('data', (d) => {
     ok(await waitFor(() => (V.lastQueue().find((i) => i.id === 'mixed-1')?.preview || '').startsWith('rewritten')), 'and the republished strip shows the NEW words (the visible confirmation of an edit)', JSON.stringify(V.lastQueue().find((i) => i.id === 'mixed-1')));
     ok((V.lastQueue().find((i) => i.id === 'mixed-1')?.text || '') === 'rewritten', '…and the FULL text rides the item, so a second edit opens the real message and not a 120-char preview', JSON.stringify(V.lastQueue().find((i) => i.id === 'mixed-1')?.text));
   }
+  // ⑦r THE EDIT'S RETRACTION (merge review, 2026-09-07). The `edit` verb is the
+  // SIXTH path where a submission will not be committed AS WRITTEN, and it was
+  // the only one that did not withdraw its claim: our bubble (and the SERVER's
+  // preview twin under the same id, which is the copy that actually claims)
+  // says the PRE-EDIT text, codex commits the NEW text, so nothing will ever
+  // retire that claim — and a leaked claim DELETES an unrelated codex-only
+  // record of the same words later (round-2 finding ④'s back door).
+  // Every other retraction path is proved in ⑨ of this file; this is the one
+  // where the submission really does RUN, only with different words.
+  {
+    const retractions = () => V.events().filter((e) => e.type === 'event_msg' && e.payload?.type === 'webui_user_retracted').map((e) => e.payload);
+    // (a) AN INHERITED ROW retracts NOTHING: `mixed-1` was injected behind the
+    // wrapper's back, so no record of ours ever claimed it. Its bubble is
+    // written from the EDITED content when it enters the turn, and claims
+    // correctly then — retracting here would be a no-op at best.
+    ok(!retractions().some((r) => r.msg_id === 'mixed-1'), 'an INHERITED row\'s edit retracts nothing — the wrapper never wrote a record for it', JSON.stringify(retractions()));
+    // (b) OUR OWN queued message, rewritten: the claim is withdrawn, by id.
+    V.send({ type: 'chat-input', text: 'ping', msgId: 'v-edit' });
+    ok(await waitFor(() => V.lastQueue().some((i) => i.msgId === 'v-edit')), 'a typed message is queued while the turn runs (the bubble is already written)');
+    const mine = V.lastQueue().find((i) => i.msgId === 'v-edit');
+    const beforeEdit = rpcOf('thread/queue/update').length;
+    V.send({ type: 'queue-op', op: 'edit', id: mine.id, text: 'ping harder' });
+    ok(await waitFor(() => lastOp('edit')?.ok === true && rpcOf('thread/queue/update').length > beforeEdit), 'the rewrite lands');
+    ok(await waitFor(() => retractions().some((r) => r.msg_id === 'v-edit' && r.reason === 'edited before it ran')),
+      'THE FIX: rewriting a queued message of OURS withdraws its claim — the words that will run are not the words the bubble claims', JSON.stringify(retractions()));
+    // …and the bubble STAYS: a retraction is a fact about the CLAIM, never
+    // about the message (the client's law for this verb is that edit leaves
+    // the bubble's meaning untouched).
+    ok(V.events().some((e) => e.type === 'response_item' && e.payload?.webui_msg_id === 'v-edit'),
+      '…and the pre-edit bubble is still in the buffer (only the claim goes)');
+    // (c) NEGATIVE CONTROL, IN THE PRODUCT: a save that rewrites NOTHING (open
+    // the pencil, press Enter — the client has no no-op guard) still commits
+    // the submission as written, so its claim is still good and withdrawing it
+    // would manufacture a duplicate for nothing.
+    V.send({ type: 'chat-input', text: 'pong', msgId: 'v-noop' });
+    ok(await waitFor(() => V.lastQueue().some((i) => i.msgId === 'v-noop')), 'a second typed message is queued');
+    const same = V.lastQueue().find((i) => i.msgId === 'v-noop');
+    const beforeNoop = rpcOf('thread/queue/update').length;
+    V.send({ type: 'queue-op', op: 'edit', id: same.id, text: 'pong' });
+    ok(await waitFor(() => rpcOf('thread/queue/update').length > beforeNoop && lastOp('edit')?.ok === true), 'a no-op save still goes out as an update RPC (the verb is honoured either way)');
+    await sleep(300);
+    ok(!retractions().some((r) => r.msg_id === 'v-noop'), 'NEGATIVE CONTROL: an edit that changes NOTHING keeps the claim — the twin still collapses', JSON.stringify(retractions()));
+    // (d) THE REBUILD, from the wrapper's REAL records: the server preview
+    // (built by the REAL adapter from the same frame ws-handler saw) + the
+    // wrapper's copy + the retraction, merged with the rollout a codex that
+    // behaved this way would have written — its commit of the EDITED text, and
+    // the same PRE-EDIT words arriving again much later as a codex-only record
+    // (another client, or the same words after the buffer rotated).
+    const { mergeCodexRecords } = require(path.join(REPO, 'src/codex-session-store.js'));
+    const { CodexAdapter } = require(path.join(REPO, 'src/adapters/codex.js'));
+    const wrapperCopy = V.events().find((e) => e.type === 'response_item' && e.payload?.webui_msg_id === 'v-edit');
+    const retraction = V.events().find((e) => e.type === 'event_msg' && e.payload?.type === 'webui_user_retracted' && e.payload?.msg_id === 'v-edit');
+    const T0 = Date.parse(wrapperCopy.timestamp);
+    const at = (ms) => new Date(T0 + ms).toISOString();
+    const preview = { ...CodexAdapter._buildUserPreview('ping', 'v-edit'), timestamp: at(-20) };
+    const tc = (id, ms) => ({ timestamp: at(ms), type: 'turn_context', payload: { turn_id: id } });
+    const theirs = (id, text, ms, tid) => ({ timestamp: at(ms), type: 'response_item', payload: { type: 'message', id, role: 'user', content: [{ type: 'input_text', text }], internal_chat_message_metadata_passthrough: { turn_id: tid } } });
+    const rollout = [tc('turn-1', -1000), theirs('msg_edited', 'ping harder', 60000, 'turn-1'), tc('turn-9', 600000), theirs('msg_other', 'ping', 610000, 'turn-9')];
+    const bubbles = (records) => { const mm = new CodexMessageManager('edit-rb'); for (const r of records) mm.processLive(r); return mm.messages.filter((m) => m.role === 'user').map((m) => (m.content || []).map((c) => c.text || '').join('')); };
+    // …and a wrapper that says nothing simply contributes nothing here — the
+    // leg must go RED on the merged bubbles, never crash on an absent record
+    // (a crash is not a negative control, it is a broken one).
+    const ours = [preview, wrapperCopy, ...(retraction ? [retraction] : [])];
+    const rb = bubbles(mergeCodexRecords(rollout, JSON.parse(JSON.stringify(ours))));
+    ok(JSON.stringify(rb) === JSON.stringify(['ping', 'ping harder', 'ping']),
+      'REBUILD: what you typed, what actually ran, AND the unrelated later record — none deleted', JSON.stringify(rb));
+    const ctl = bubbles(mergeCodexRecords(rollout, JSON.parse(JSON.stringify([preview, wrapperCopy]))));
+    ok(ctl.length === 2 && !ctl.slice(1).includes('ping'),
+      `NEGATIVE CONTROL (data): strip the wrapper's retraction and the leaked claim DELETES the unrelated codex-only message (${ctl.length} of 3)`, JSON.stringify(ctl));
+  }
   // A PEER item is not editable — rewriting another agent's words would put
   // text in its mouth. The client hides the control; this is the gate that
   // MEANS it.

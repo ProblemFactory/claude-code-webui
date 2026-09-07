@@ -1660,11 +1660,13 @@ function noteRecordedUserCid(cid) {
   if (recordedUserCids.size > 500) recordedUserCids.delete(recordedUserCids.keys().next().value);
 }
 
-/** A user record we ALREADY wrote will never be committed by the app-server.
- *  Our copy is written before the submission is accepted (the bubble has to
- *  appear when the user presses Enter, not when an RPC returns), so this is
- *  usually learned AFTER the fact: the send threw, or the queued item was
- *  removed by Stop / by the user before it ran. It is ALSO how the one case we
+/** A user record we ALREADY wrote will never be committed by the app-server
+ *  AS WRITTEN. Our copy is written before the submission is accepted (the
+ *  bubble has to appear when the user presses Enter, not when an RPC returns),
+ *  so this is usually learned AFTER the fact: the send threw, the queued item
+ *  was removed by Stop / by the user before it ran, or its TEXT was rewritten
+ *  while it waited (the `edit` verb — the submission still runs, but not with
+ *  the words our record claims). It is ALSO how the one case we
  *  know in advance speaks (a wrapper-served slash command, round 4) — because
  *  the record itself is not ours alone: the SERVER writes a preview copy of the
  *  same submission under the same id and it lands FIRST, so a marker on OUR
@@ -2357,8 +2359,36 @@ async function handleQueueOp(msg) {
     }
     const text = typeof msg?.text === 'string' ? msg.text : '';
     if (!text.trim()) { emitTaskEvent('queue_op_result', { op, id, ok: false, reason: 'empty-text', detail: 'an edited message needs some text — remove it instead', msg_id: known?.msgId || '' }); return; }
+    // THE TEXT THAT WILL RUN vs THE TEXT OUR BUBBLE CLAIMS. Everything else in
+    // the input survives by exclusion, so this one comparison is the whole
+    // question — and it is asked against the FRESH queue row (`data`), i.e.
+    // what the app-server will commit if this update changes nothing.
+    const rewritten = queuedFullText(item.input) !== text;
     try {
       await request('thread/queue/update', { threadId: meta.threadId, queuedSubmissionId: id, input: replaceQueuedText(item.input, text) }, 15000);
+      // THE SIXTH RETRACTION PATH (merge review). Our copy of this submission
+      // — and the SERVER's preview twin under the same id, which is the copy
+      // that actually claims — was written when the user pressed Enter and
+      // says the PRE-EDIT text. codex will commit the NEW text, so it can
+      // never retire that claim, and a claim no twin consumes deletes an
+      // unrelated codex-only record of the same words later (round-2 finding
+      // ④, the same back door the Stop sweep / remove / slash-command /
+      // add-failed / start-failed paths above all close).
+      // THE BUBBLE STAYS AND KEEPS ITS PRE-EDIT TEXT — that is the client's
+      // law for this verb ('reorder / edit / run-now / run-all leave the
+      // bubble's MEANING untouched', _processQueueOpResult) — only the claim
+      // goes. Re-recording the edited content instead would be the other fix;
+      // it costs a second live bubble for a message that ran once, and the
+      // chain's stated preference is a possible duplicate over a guaranteed
+      // deletion. A rebuild therefore shows what you typed AND what ran.
+      // ONLY WHEN THE TEXT REALLY CHANGED: a save that rewrites nothing (open
+      // the pencil, press Enter — the client sends it, it has no no-op guard)
+      // still commits the submission AS-WRITTEN, so its claim is still good
+      // and withdrawing it would manufacture the duplicate for nothing.
+      // An INHERITED row (queued by the wrapper this one replaced) has no
+      // record of ours yet, so this is a no-op for it — its bubble is written
+      // from the EDITED content when it enters the turn, and claims correctly.
+      if (rewritten) retractUserRecord(cid, 'edited before it ran');
       emitTaskEvent('queue_op_result', { op, id, ok: true, msg_id: known?.msgId || '' });
     } catch (e) {
       log(`thread/queue/update failed for ${id}: ${e.message}`);

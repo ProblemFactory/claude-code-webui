@@ -494,8 +494,11 @@ function userTwinKeys(record) {
 
 /** The submission id a `webui_user_retracted` event names, or ''. The wrapper
  *  emits it when a user record it already wrote will never be committed by the
- *  app-server — learned after the fact (the RPC threw, or the queued item was
- *  removed by Stop / by the user before it ran) or known at once (a
+ *  app-server AS WRITTEN — learned after the fact (the RPC threw, the queued
+ *  item was removed by Stop / by the user before it ran, or its text was
+ *  REWRITTEN by the `edit` verb while it waited: that submission does run, but
+ *  the words codex commits are no longer the words the record claims, so the
+ *  claim can never be retired) or known at once (a
  *  wrapper-served slash command). It names the
  *  record by IDENTITY, never by content: the text can be megabytes of data URL,
  *  and re-deriving a content key inside the wrapper would be a second copy of
@@ -579,8 +582,9 @@ function mergeCodexRecords(historyRecords, liveRecords) {
     }
     // A RETRACTION (round 3): the wrapper writes our copy BEFORE the submission
     // is accepted, so it can only learn afterwards that the app-server will
-    // never commit it — an RPC that threw, an item Stop or the user removed
-    // from the queue before it ran. The claim standing for that record is
+    // never commit it AS WRITTEN — an RPC that threw, an item Stop or the user
+    // removed from the queue before it ran, an item whose text the `edit` verb
+    // replaced while it waited. The claim standing for that record is
     // withdrawn here, in stream order (the retraction is always written after
     // the record it names, so the mapping exists by now unless the buffer has
     // rotated the record away, where there is no claim to withdraw either).

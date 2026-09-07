@@ -4481,14 +4481,68 @@ console.log('— ⑨ steered messages: one bubble each, live and after a reload'
       // minutes, and a wrapper killed inside that window would otherwise leave
       // a claim standing over a message it never sent.
       ok('WIRING PIN: the retraction precedes the await, not the return', cw9.indexOf("retractUserRecord(msg.msgId, 'served by the wrapper as a slash command')") < cw9.indexOf('await applySlashCommand(text);'));
-      ok('WIRING PIN: every path where the submission never lands retracts — turn/start, thread/queue/add, an explicit remove, the Stop sweep, a wrapper-served slash command',
-        (cw9.match(/retractUserRecord\(/g) || []).length === 6
+      ok('WIRING PIN: every path where the submission never lands AS WRITTEN retracts — turn/start, thread/queue/add, an explicit remove, the Stop sweep, a wrapper-served slash command, an EDIT',
+        (cw9.match(/retractUserRecord\(/g) || []).length === 7
         && /retractUserRecord\(msg\.msgId \|\| cid, 'thread\/queue\/add failed: '/.test(cw9)
         && /retractUserRecord\(msg\.msgId, 'turn\/start failed: '/.test(cw9)
         && /retractUserRecord\(item\.clientUserMessageId, 'removed from the queue before it ran'\)/.test(cw9)
         && /retractUserRecord\(cid, 'dropped by Stop before it ran'\)/.test(cw9)
-        && /retractUserRecord\(msg\.msgId, 'served by the wrapper as a slash command'\)/.test(cw9));
+        && /retractUserRecord\(msg\.msgId, 'served by the wrapper as a slash command'\)/.test(cw9)
+        && /retractUserRecord\(cid, 'edited before it ran'\)/.test(cw9),
+        (cw9.match(/retractUserRecord\([^)]*\)/g) || []).join(' | '));
       ok('…and a retraction is only ever emitted for a record we actually wrote', /if \(!msgId \|\| !recordedUserCids\.has\(msgId\)\) return false;/.test(cw9));
+    }
+
+    // (j9b) ROUND 5 / MERGE REVIEW — THE SIXTH PATH: the `edit` verb. Master
+    // brought `thread/queue/update` (rewrite a queued message's text); the
+    // chain brought the claim ledger. Neither half is wrong alone, and the
+    // merge of the two deletes messages: our bubble — and the SERVER's preview
+    // twin under the same id, which is the copy that CLAIMS — was written when
+    // the user pressed Enter and says the PRE-EDIT text, codex commits the NEW
+    // text, so nothing can ever retire that claim, and a claim no twin
+    // consumes deletes an unrelated codex-only record of the same words later.
+    // THE DIFFERENCE FROM THE OTHER FIVE: this submission really does RUN. It
+    // just runs with different words, which is the same fact for the ledger.
+    {
+      const { CodexAdapter } = require(path.join(REPO, 'src/adapters/codex.js'));
+      const preview = (id, text, ms) => ({ ...CodexAdapter._buildUserPreview(text, id), timestamp: new Date(T + ms).toISOString() });
+      const retract = (id, ms, reason) => ({ timestamp: new Date(T + ms).toISOString(), type: 'event_msg', payload: { type: 'webui_user_retracted', msg_id: id, reason } });
+      // turn-A: we type 'ping', it queues, we rewrite it to 'ping harder', and
+      // codex commits the REWRITTEN text. turn-B: the same PRE-EDIT words
+      // arrive again as a codex-only record (another client, or the same words
+      // after the buffer rotated). All three must render.
+      const roll = [turn('turn-A', 0), theirs('msg_edited', 'ping harder', 30000, 'turn-A'), turn('turn-B', 60000), theirs('msg_other', 'ping', 90000, 'turn-B')];
+      const oursEdited = [preview('m-e', 'ping', 900), mine({ webui_msg_id: 'm-e' }, 'ping', 1000), retract('m-e', 1100, 'edited before it ran')];
+      ok('an EDITED queued message withdraws its claim — the rebuild shows what you typed, what actually ran, and the unrelated later record',
+        JSON.stringify(bubbles(mergeCodexRecords(roll, oursEdited))) === JSON.stringify(['ping', 'ping harder', 'ping']),
+        JSON.stringify(bubbles(mergeCodexRecords(roll, oursEdited))));
+      ok('NEGATIVE CONTROL (data): drop the edit\'s retraction and the leaked claim DELETES the turn-B message',
+        bubbles(mergeCodexRecords(roll, oursEdited.slice(0, 2))).length === 2,
+        JSON.stringify(bubbles(mergeCodexRecords(roll, oursEdited.slice(0, 2)))));
+      // …and the wrapper only speaks when the text really CHANGED: a save that
+      // rewrites nothing still commits the submission as written, so its claim
+      // is good and withdrawing it would manufacture a duplicate for nothing.
+      const rollSame = [turn('turn-A', 0), theirs('msg_same', 'ping', 30000, 'turn-A')];
+      ok('a NO-OP save keeps the claim, so our copy and codex\'s commit are still ONE bubble',
+        bubbles(mergeCodexRecords(rollSame, [preview('m-n', 'ping', 900), mine({ webui_msg_id: 'm-n' }, 'ping', 1000)])).length === 1);
+      ok('NEGATIVE CONTROL (data): retract a no-op save anyway and the same conversation renders the message TWICE',
+        bubbles(mergeCodexRecords(rollSame, [preview('m-n', 'ping', 900), mine({ webui_msg_id: 'm-n' }, 'ping', 1000), retract('m-n', 1100, 'edited before it ran')])).length === 2);
+      // ⑥ WIRING PINS — the gate, its placement, and the fact it compares.
+      const cwE = read('data/bin/codex-chat-wrapper.js');
+      const editBlock = /\/\/ ── EDIT \(text only[\s\S]*?\n  \}\n/.exec(cwE)?.[0] || '';
+      ok('WIRING PIN: the edit branch retracts by the item\'s OWN cid, on the SUCCESS path only',
+        /retractUserRecord\(cid, 'edited before it ran'\)/.test(editBlock)
+        && editBlock.indexOf("await request('thread/queue/update'") < editBlock.indexOf("retractUserRecord(cid, 'edited before it ran')")
+        && editBlock.indexOf("retractUserRecord(cid, 'edited before it ran')") < editBlock.indexOf("emitTaskEvent('queue_op_result', { op, id, ok: true"),
+        editBlock.slice(0, 200));
+      ok('…and it is GATED on the text having really changed, measured against the FRESH queue row',
+        /const rewritten = queuedFullText\(item\.input\) !== text;/.test(editBlock)
+        && /if \(rewritten\) retractUserRecord\(cid, 'edited before it ran'\);/.test(editBlock)
+        // the gate is computed BEFORE the RPC — `item.input` is the row we read,
+        // and the update overwrites the server's copy
+        && editBlock.indexOf('const rewritten =') < editBlock.indexOf("await request('thread/queue/update'"));
+      ok('…and a FAILED update retracts nothing (the queued text is untouched, so the claim still holds)',
+        !/catch \(e\) \{[\s\S]*?retractUserRecord/.test(editBlock), editBlock.slice(editBlock.indexOf('} catch')).slice(0, 200));
     }
 
     // (j10) ROUND 3, THE SAME RULE FOR THE ONE PRODUCER THAT MINTED NO ID: the
