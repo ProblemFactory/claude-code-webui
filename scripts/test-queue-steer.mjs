@@ -918,9 +918,35 @@ console.log('— wiring + docs pins');
     /_send\(\) \{\n\s*const text = this\._textarea\.value\.trim\(\);\n\s*const hasAttachments = this\._attachments\.length > 0;\n\s*if \(!text && !hasAttachments\) return false;/.test(cinput)
     && /const sent = this\._send\(\) !== false;/.test(cinput) && /\n    return sent;\n  \}/.test(cinput));
   ok('…and the draft SLOT is handed back with the text (confirmDelivery would clear the store out from under it)',
-    /if \(this\._pendingSend && this\._pendingSend !== prevPendingSend\) this\._pendingSend = null;/.test(cinput));
+    /this\._pendingSend = prevPendingSend \|\| null;/.test(cinput));
+  // ROUND-6: the three follow-ups of the same audit.
+  ok('round-6: an OLDER unconfirmed send keeps its slot rather than being cleared by the action that overwrote it',
+    /this\._pendingSend = prevPendingSend \|\| null;/.test(cinput)
+    && !/this\._pendingSend && this\._pendingSend !== prevPendingSend/.test(cinput));
+  ok('round-6: the delivery echo only clears what THAT send put in the store (a restored prompt is not its to delete)',
+    /const stored = loadDraft\('chat', this\._sessionId\);\n\s*if \(stored && stored !== pending\.text\) return;\n\s*clearDraft\('chat', this\._sessionId\);/.test(cinput));
+  ok('round-6: sendText puts the box back UNCONDITIONALLY (an empty box must not keep the action\'s own text after a bail-out)',
+    /const sent = this\._send\(\) !== false;[\s\S]{0,900}?\n    this\._textarea\.value = keptText;\n    if \(keptText\.trim\(\)\) \{/.test(cinput));
+  ok('round-6: the LATE writer (uploaded paths) lands on the edit\'s stash, never on the editor\'s box',
+    /if \(this\._pendingEdit \|\| this\._editingQueueId\) \{ this\._stashUploadedPaths\(text\); return; \}/.test(cinput)
+    && /_stashUploadedPaths\(text\) \{/.test(cinput)
+    && /if \(this\._pendingEdit\) this\._pendingEdit\.draftBefore = append\(this\._pendingEdit\.draftBefore\);/.test(cinput));
+  ok('round-6: …and the dead-socket notice cannot claim a restore it did not perform',
+    /const restored = !!text && !this\._textarea\.value\.trim\(\);/.test(cinput)
+    && /showToast\(restored\n\s*\? t\('Connection lost — your message may not have been sent; the text was restored to the input'\)/.test(cinput));
   ok('…and every OTHER programmatic writer of the textarea is audited where they live (guard or reason, one list)',
-    /EVERY PROGRAMMATIC WRITER OF THE TEXTAREA/.test(cinput) && /input-history recall \(ArrowUp\/ArrowDown\)/.test(cinput));
+    /EVERY PROGRAMMATIC WRITER OF THE TEXTAREA/.test(cinput) && /input-history recall \(ArrowUp\/ArrowDown\)/.test(cinput)
+    && /`_insertUploadedPaths` \(upload button, folder picker, ChatView's/.test(cinput));
+  // THE AUDIT'S OWN BLIND SPOT (round-6): the writer it missed writes through a
+  // LOCAL alias, so grepping the field name cannot find it. Every alias of the
+  // textarea must therefore be enumerated here, not just `this._textarea`.
+  {
+    const writes = [...cinput.matchAll(/\n\s+ta\.value = /g)].length;
+    const guard = cinput.indexOf('this._stashUploadedPaths(text); return; }');
+    const alias = cinput.indexOf("const ta = this._textarea;\n    const start");
+    ok(`exactly ONE aliased writer of the box, and the editor guard stands above it (writes=${writes}, guard@${guard}, alias@${alias})`,
+      writes === 1 && guard > 0 && alias > guard);
+  }
   // A refusal that leaves the control dead is the offered action disappearing
   // right after its own toast said to come back — both callers must survive it,
   // and the design brief lives ONLY in that dropdown's textarea.
@@ -2559,19 +2585,59 @@ console.log('— ⑪ drag-reorder / edit / run-all in a REAL browser (trusted po
         ok(`…and the action releases the draft slot, so the delivery echo cannot clear the user's prompt out of the store (${JSON.stringify(actionSlot)})`,
           actionSlot.armed === false && actionSlot.draft === 'a half-typed prompt' && actionSlot.box === 'a half-typed prompt');
 
-        // NEGATIVE CONTROL: leave the slot armed (the pre-fix state) and the
-        // very same echo takes the draft with it.
+        // NEGATIVE CONTROL: leave the slot armed (the pre-fix state) AND put
+        // the pre-fix UNCONDITIONAL clear back — since round-6 it takes both
+        // neuters to reproduce the loss, which is exactly what the second
+        // defence is for.
         await evaljs(setup('a half-typed prompt'));
         const slotNeutered = await evaljs(`(() => {
+          window.__ci.confirmDelivery = function () {         // the pre-fix body
+            if (!this._pendingSend) return;
+            this._pendingSend = null;
+            VS.saveDraft('chat', this._sessionId, '');
+          };
           window.__ci.sendText('/compact');
           window.__ci._pendingSend = { text: '/compact' };   // as _send left it
           window.__ci.confirmDelivery();
           const out = { draft: VS.loadDraft('chat', 'sess-verbs'), box: document.querySelector('textarea').value };
+          delete window.__ci.confirmDelivery;
           window.__ci.hideTyping(); window.__ci._pendingSend = null;
           return out;
         })()`);
-        ok(`negative control: with the slot still armed the delivery echo clears the store — the box is the only copy again (${JSON.stringify(slotNeutered)})`,
+        ok(`negative control: with the slot still armed AND the pre-fix unconditional clear, the delivery echo takes the draft — the box is the only copy again (${JSON.stringify(slotNeutered)})`,
           slotNeutered.draft === '' && slotNeutered.box === 'a half-typed prompt');
+
+        // …and with only ONE of the two neutered the prompt survives: the
+        // text-aware clear is the belt for a slot that legitimately STAYS
+        // armed, which is now the normal case (round-6 hands OLDER slots back).
+        await evaljs(setup('a half-typed prompt'));
+        const slotArmedAware = await evaljs(`(() => {
+          window.__ci.sendText('/compact');
+          window.__ci._pendingSend = { text: '/compact' };   // as _send left it
+          window.__ci.confirmDelivery();                     // …the REAL one
+          const out = { draft: VS.loadDraft('chat', 'sess-verbs'), box: document.querySelector('textarea').value };
+          window.__ci.hideTyping(); window.__ci._pendingSend = null;
+          return out;
+        })()`);
+        ok(`round-6: an armed slot whose text the store no longer holds cannot clear it (${JSON.stringify(slotArmedAware)})`,
+          slotArmedAware.draft === 'a half-typed prompt' && slotArmedAware.box === 'a half-typed prompt');
+
+        // POSITIVE CONTROL for the same guard: the deferred clear must still
+        // DO its job — an ordinary send whose text the store still holds is
+        // cleared by the echo, which is the whole reason the slot exists.
+        await evaljs(setup(''));
+        const plainClear = await evaljs(`(() => {
+          const ta = document.querySelector('textarea');
+          ta.value = 'an ordinary message';
+          window.__ci._send();
+          const before = VS.loadDraft('chat', 'sess-verbs');
+          window.__ci.confirmDelivery();
+          const out = { before, after: VS.loadDraft('chat', 'sess-verbs'), slot: window.__ci._pendingSend };
+          window.__ci.hideTyping(); window.__ci._pendingSend = null;
+          return out;
+        })()`);
+        ok(`positive control: the deferred draft clear still fires for an ordinary send (${JSON.stringify(plainClear)})`,
+          plainClear.before === 'an ordinary message' && plainClear.after === '' && plainClear.slot === null);
 
         // …and the user's pending ATTACHMENTS are not folded into the action's
         // frame (`_send` builds an image message whenever any are pending).
@@ -2590,6 +2656,255 @@ console.log('— ⑪ drag-reorder / edit / run-all in a REAL browser (trusted po
           actionAttachments.sent.length === 1 && actionAttachments.sent[0] === '/compact');
         ok(`…and they are still pending afterwards, chip and all (${JSON.stringify({ kept: actionAttachments.kept, chips: actionAttachments.chips })})`,
           actionAttachments.kept === 1 && actionAttachments.chips === 1);
+
+        // ── ROUND-6 VERIFIER (MAJOR): THE WRITER THAT LANDS LATE. The round-5
+        // audit enumerated everyone who writes the textarea — and missed the
+        // one that does it through a LOCAL alias AFTER an await. An upload
+        // started BEFORE the pencil was clicked finishes DURING the edit, and
+        // its paths were inserted into the box the queued message owns: Send
+        // then saved a rewrite the user never typed. `_stashUploadedPaths`
+        // now lands them where that message's own draft lives.
+        await evaljs(setup('my real draft'));
+        const uploadDuringEdit = await evaljs(`(() => {
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q1"]').click();
+          const ta = document.querySelector('textarea');
+          ta.value = 'the rewrite I am still typing';
+          window.__ci._insertUploadedPaths('/home/u/proj', [{ name: 'shot.png' }]);   // the upload lands NOW
+          const out = { box: ta.value, editing: window.__ci._editingQueueId, stash: window.__ci._editDraftBefore,
+            draft: VS.loadDraft('chat', 'sess-verbs'), toast: document.getElementById('global-toasts')?.textContent || '' };
+          ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          out.afterEsc = ta.value;
+          clearTimeout(window.__ci._draftTimer); window.__ci._draftTimer = null;
+          return out;
+        })()`);
+        ok(`round-6: an upload landing during an OPEN edit leaves the rewrite alone (${JSON.stringify({ box: uploadDuringEdit.box, editing: uploadDuringEdit.editing })})`,
+          uploadDuringEdit.box === 'the rewrite I am still typing' && uploadDuringEdit.editing === 'q1');
+        ok(`…the paths go to the stash AND the store, and the toast says so (${JSON.stringify({ stash: uploadDuringEdit.stash, draft: uploadDuringEdit.draft, toast: uploadDuringEdit.toast.slice(0, 60) })})`,
+          uploadDuringEdit.stash === 'my real draft /home/u/proj/shot.png ' && uploadDuringEdit.draft === 'my real draft /home/u/proj/shot.png '
+          && /went to your draft/.test(uploadDuringEdit.toast));
+        ok(`…so cancelling the edit hands the box back WITH them (${JSON.stringify(uploadDuringEdit.afterEsc)})`,
+          uploadDuringEdit.afterEsc === 'my real draft /home/u/proj/shot.png ');
+
+        // NEGATIVE CONTROL (instance-level neuter): the pre-fix body writes the
+        // box, so the paths end up inside the queued message the next Send
+        // saves — the user's rewrite silently gains text they typed nowhere.
+        await evaljs(setup('my real draft'));
+        const uploadNeutered = await evaljs(`(() => {
+          window.__ci._insertUploadedPaths = function (cwd, uploaded) {   // the pre-fix body
+            const tops = new Set();
+            for (const f of uploaded) { const first = (f.name || '').split('/')[0]; if (first) tops.add(first); }
+            const text = [...tops].map((n) => cwd + '/' + n).join(' ');
+            const ta = this._textarea;
+            const before = ta.value;
+            ta.value = before + (before ? ' ' : '') + text + ' ';
+            ta.dispatchEvent(new Event('input', { bubbles: true }));
+          };
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q1"]').click();
+          const ta = document.querySelector('textarea');
+          ta.value = 'the rewrite I am still typing';
+          window.__ci._insertUploadedPaths('/home/u/proj', [{ name: 'shot.png' }]);
+          const box = ta.value;
+          window.__ci._send();                       // Send SAVES the box as the edit
+          const out = { box, op: window.__ops[0]?.extra?.text ?? null, toast: document.getElementById('global-toasts')?.textContent || '' };
+          delete window.__ci._insertUploadedPaths;
+          window.__ci.setQueueOpResult('q1', true, '');
+          window.__ci.setQueue(window.__items, ${CODEX_VERBS});
+          clearTimeout(window.__ci._draftTimer); window.__ci._draftTimer = null;
+          return out;
+        })()`);
+        ok(`negative control: the pre-fix writer puts the uploaded path INTO the queued message, silently (${JSON.stringify(uploadNeutered)})`,
+          uploadNeutered.box === 'the rewrite I am still typing /home/u/proj/shot.png '
+          && uploadNeutered.op === 'the rewrite I am still typing /home/u/proj/shot.png' && uploadNeutered.toast === '');
+
+        // …and the OTHER half, which is worse: the save is already on the wire.
+        // `_resolvePendingEdit` compares the box against the frame's `raw` and
+        // reads any difference as "the user typed something else" — so an
+        // upload landing here disarmed EVERY outcome (round-3's whole family):
+        // the ok result never put the draft back, a refusal never re-opened
+        // the editor, a gone row never handed the rewrite over.
+        await evaljs(setup('my real draft'));
+        const uploadDuringSave = await evaljs(`(() => {
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q1"]').click();
+          const ta = document.querySelector('textarea');
+          ta.value = 'a rewrite on the wire';
+          window.__ci._send();
+          window.__ci._insertUploadedPaths('/home/u/proj', [{ name: 'shot.png' }]);   // …lands mid-flight
+          const mid = { box: ta.value, stash: window.__ci._pendingEdit?.draftBefore ?? null,
+            draft: VS.loadDraft('chat', 'sess-verbs'), toast: document.getElementById('global-toasts')?.textContent || '' };
+          window.__ci.setQueueOpResult('q1', true, '');       // the save landed
+          const after = { box: ta.value, pending: !!window.__ci._pendingEdit };
+          window.__ci.setQueue(window.__items, ${CODEX_VERBS});
+          clearTimeout(window.__ci._draftTimer); window.__ci._draftTimer = null;
+          return { mid, after };
+        })()`);
+        ok(`round-6: an upload landing DURING the save does not touch the box the frame is being compared against (${JSON.stringify(uploadDuringSave.mid)})`,
+          uploadDuringSave.mid.box === 'a rewrite on the wire' && uploadDuringSave.mid.stash === 'my real draft /home/u/proj/shot.png '
+          && uploadDuringSave.mid.draft === 'my real draft /home/u/proj/shot.png ');
+        ok(`…so the ok result still puts the pre-edit draft back, now carrying the paths (${JSON.stringify(uploadDuringSave.after)})`,
+          uploadDuringSave.after.box === 'my real draft /home/u/proj/shot.png ' && uploadDuringSave.after.pending === false);
+
+        // NEGATIVE CONTROL: same moment, pre-fix writer — the box no longer
+        // matches `raw`, so the ok outcome silently does nothing and the
+        // pre-edit draft is gone.
+        await evaljs(setup('my real draft'));
+        const saveNeutered = await evaljs(`(() => {
+          window.__ci._insertUploadedPaths = function (cwd, uploaded) {   // the pre-fix body
+            const ta = this._textarea;
+            ta.value = ta.value + ' ' + cwd + '/' + uploaded[0].name + ' ';
+            ta.dispatchEvent(new Event('input', { bubbles: true }));
+          };
+          document.querySelector('[data-queue-op="edit"][data-queue-id="q1"]').click();
+          const ta = document.querySelector('textarea');
+          ta.value = 'a rewrite on the wire';
+          window.__ci._send();
+          window.__ci._insertUploadedPaths('/home/u/proj', [{ name: 'shot.png' }]);
+          window.__ci.setQueueOpResult('q1', true, '');
+          const out = { box: ta.value, draft: VS.loadDraft('chat', 'sess-verbs') };
+          delete window.__ci._insertUploadedPaths;
+          window.__ci.setQueue(window.__items, ${CODEX_VERBS});
+          clearTimeout(window.__ci._draftTimer); window.__ci._draftTimer = null;
+          return out;
+        })()`);
+        ok(`negative control: with the box changed under it the ok result takes the bail-out — the pre-edit draft never comes back (${JSON.stringify(saveNeutered)})`,
+          saveNeutered.box === 'a rewrite on the wire /home/u/proj/shot.png ' && saveNeutered.draft === 'a rewrite on the wire /home/u/proj/shot.png ');
+
+        // ── ROUND-6 (MINOR): AN OLDER UNCONFIRMED SEND SURVIVES THE ACTION.
+        // `_send` OVERWRITES `_pendingSend`, so releasing "this call's slot"
+        // by nulling the field threw away the dead-socket protection of a
+        // message the USER had sent seconds earlier.
+        await evaljs(setup(''));
+        const olderSlot = await evaljs(`(() => {
+          const ta = document.querySelector('textarea');
+          ta.value = 'a message the user just sent';
+          window.__ci._send();                          // the USER's send — unconfirmed
+          const armedUser = window.__ci._pendingSend?.text ?? null;
+          ta.value = 'a half-typed prompt';             // …and they keep typing
+          const answer = window.__ci.sendText('/compact');
+          const mid = { answer, armedUser, slot: window.__ci._pendingSend?.text ?? null,
+            box: ta.value, draft: VS.loadDraft('chat', 'sess-verbs'), sent: window.__sent.map((f) => f.text) };
+          window.__ci.confirmDelivery();                // the server answers on the socket
+          mid.afterEcho = { slot: window.__ci._pendingSend?.text ?? null, draft: VS.loadDraft('chat', 'sess-verbs'), box: ta.value };
+          window.__ci.hideTyping(); window.__ci._pendingSend = null;
+          clearTimeout(window.__ci._draftTimer); window.__ci._draftTimer = null;
+          return mid;
+        })()`);
+        ok(`round-6: the action releases ITS slot back to the older unconfirmed send, not to nothing (${JSON.stringify({ armedUser: olderSlot.armedUser, slot: olderSlot.slot, sent: olderSlot.sent })})`,
+          olderSlot.answer === true && olderSlot.armedUser === 'a message the user just sent'
+          && olderSlot.slot === 'a message the user just sent' && olderSlot.sent.length === 2);
+        ok(`…and the delivery echo does not clear a store that now holds the user's restored prompt (${JSON.stringify(olderSlot.afterEcho)})`,
+          olderSlot.afterEcho.slot === null && olderSlot.afterEcho.draft === 'a half-typed prompt' && olderSlot.afterEcho.box === 'a half-typed prompt');
+
+        // …and the protection it kept is REAL: with the box free, the dead
+        // socket hands the user's own message back and says so.
+        await evaljs(setup(''));
+        const olderSlotDead = await evaljs(`(() => {
+          const ta = document.querySelector('textarea');
+          ta.value = 'a message the user just sent';
+          window.__ci._send();
+          ta.value = 'a half-typed prompt';
+          window.__ci.sendText('/compact');
+          ta.value = '';                                // the user sends/clears the box
+          window.__ci.setDisconnected(true);            // …then the socket dies
+          const out = { box: ta.value, toast: document.getElementById('global-toasts')?.textContent || '' };
+          window.__ci.setDisconnected(false);
+          window.__ci.hideTyping(); window.__ci._pendingSend = null;
+          clearTimeout(window.__ci._draftTimer); window.__ci._draftTimer = null;
+          return out;
+        })()`);
+        ok(`…a dead socket restores the USER's unconfirmed message, not the action's (${JSON.stringify(olderSlotDead)})`,
+          olderSlotDead.box === 'a message the user just sent' && /restored to the input/.test(olderSlotDead.toast));
+
+        // …and when the box is NOT free the notice has to change with it: a
+        // sentence that says "the text was restored to the input" over an
+        // input holding something else reports a rescue that did not happen,
+        // and the user reads it as "my message is safe in the box" (round-6).
+        await evaljs(setup(''));
+        const deadBoxBusy = await evaljs(`(() => {
+          const ta = document.querySelector('textarea');
+          ta.value = 'a message the user just sent';
+          window.__ci._send();
+          ta.value = 'the next thing I am typing';       // they kept drafting
+          window.__ci.setDisconnected(true);
+          const out = { box: ta.value, toast: document.getElementById('global-toasts')?.textContent || '' };
+          window.__ci.setDisconnected(false);
+          window.__ci.hideTyping(); window.__ci._pendingSend = null;
+          clearTimeout(window.__ci._draftTimer); window.__ci._draftTimer = null;
+          return out;
+        })()`);
+        ok(`round-6: an occupied box is left alone AND the notice says so, instead of claiming a restore (${JSON.stringify(deadBoxBusy)})`,
+          deadBoxBusy.box === 'the next thing I am typing' && /may not have been sent/.test(deadBoxBusy.toast)
+          && /the input already had text/.test(deadBoxBusy.toast) && !/was restored to the input/.test(deadBoxBusy.toast));
+
+        // NEGATIVE CONTROL: the pre-fix release (null) — the same dead socket
+        // now has nothing to hand back, and says nothing at all.
+        await evaljs(setup(''));
+        const olderSlotNeutered = await evaljs(`(() => {
+          const ta = document.querySelector('textarea');
+          ta.value = 'a message the user just sent';
+          window.__ci._send();
+          ta.value = 'a half-typed prompt';
+          window.__ci.sendText('/compact');
+          window.__ci._pendingSend = null;              // as the pre-fix release left it
+          ta.value = '';
+          window.__ci.setDisconnected(true);
+          const out = { box: ta.value, toast: document.getElementById('global-toasts')?.textContent || '' };
+          window.__ci.setDisconnected(false);
+          window.__ci.hideTyping(); window.__ci._pendingSend = null;
+          clearTimeout(window.__ci._draftTimer); window.__ci._draftTimer = null;
+          return out;
+        })()`);
+        ok(`negative control: with the slot cleared the user's unconfirmed message vanishes with the socket, silently (${JSON.stringify(olderSlotNeutered)})`,
+          olderSlotNeutered.box === '' && !/may not have been sent/.test(olderSlotNeutered.toast));
+
+        // ── ROUND-6 (MINOR): THE BAIL-OUT FROM AN EMPTY BOX. `_send` refuses a
+        // dead socket before it clears anything, so the ACTION's own text was
+        // left sitting in the input whenever there was no typed prompt to
+        // restore over it — one Enter away from being posted as a message.
+        await evaljs(setup(''));
+        const emptyBail = await evaljs(`(() => {
+          const ta = document.querySelector('textarea');
+          ta.value = '';
+          window.__ci.setDisconnected(true);
+          const answer = window.__ci.sendText('/compact');
+          const out = { answer, box: ta.value, sent: window.__sent.map((f) => f.text),
+            toast: document.getElementById('global-toasts')?.textContent || '' };
+          window.__ci.setDisconnected(false);
+          window.__ci._pendingSend = null;
+          return out;
+        })()`);
+        ok(`round-6: a dead-socket bail-out from an EMPTY box leaves the box empty, not holding the action (${JSON.stringify(emptyBail)})`,
+          emptyBail.answer === false && emptyBail.box === '' && emptyBail.sent.length === 0 && /Disconnected/.test(emptyBail.toast));
+
+        // NEGATIVE CONTROL: the pre-fix restore, gated on `keptText.trim()`.
+        await evaljs(setup(''));
+        const emptyBailNeutered = await evaljs(`(() => {
+          window.__ci.sendText = function (text) {           // the pre-fix body
+            if (!this._textarea) return false;
+            if (this._editingQueueId || this._pendingEdit) return false;
+            const keptText = this._textarea.value;
+            const prevPendingSend = this._pendingSend;
+            this._textarea.value = String(text || '');
+            const sent = this._send() !== false;
+            if (keptText.trim()) {
+              this._textarea.value = keptText;
+              if (this._pendingSend && this._pendingSend !== prevPendingSend) this._pendingSend = null;
+              VS.saveDraft('chat', this._sessionId, keptText);
+            }
+            return sent;
+          };
+          const ta = document.querySelector('textarea');
+          ta.value = '';
+          window.__ci.setDisconnected(true);
+          const answer = window.__ci.sendText('/compact');
+          const out = { answer, box: ta.value };
+          delete window.__ci.sendText;
+          window.__ci.setDisconnected(false);
+          window.__ci._pendingSend = null;
+          return out;
+        })()`);
+        ok(`negative control: the gated restore leaves the action's own text in the user's input (${JSON.stringify(emptyBailNeutered)})`,
+          emptyBailNeutered.answer === false && emptyBailNeutered.box === '/compact');
+
         await evaljs(`(() => { window.__ci.setQueue(window.__items, ${CODEX_VERBS}); document.querySelector('textarea').value = ''; window.__ci._pendingSend = null; document.getElementById('global-toasts')?.replaceChildren(); })()`);
       }
       // THE HEADER CONTROL is per harness, from the verb table — codex has

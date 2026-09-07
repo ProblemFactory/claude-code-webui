@@ -3055,4 +3055,6 @@ export default {
   "Your unsaved rewrite was kept as this session’s draft — cancel this edit to get it back.": "未保存的改写已存为本会话的草稿 —— 取消这次编辑即可取回。",
   "The edit was not confirmed — the session may be unresponsive.": "编辑没有得到确认 —— 该会话可能没有响应。",
   "Connection lost — the edit may not have been saved.": "连接已断开 —— 这次编辑可能没有保存。",
+  "Upload finished while a queued message was open for editing — the paths went to your draft, not into the edit": "上传完成时你正在编辑排队消息 —— 路径已放进你的草稿，而不是写进这次编辑",
+  "Connection lost — your last message may not have been sent (the input already had text, so it was left alone)": "连接已断开 —— 你的上一条消息可能没有发出（输入框里已有内容，所以没有动它）",
 };

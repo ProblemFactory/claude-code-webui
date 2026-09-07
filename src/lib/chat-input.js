@@ -460,6 +460,18 @@ export class ChatInput {
     if (!tops.size) return;
     const quote = (p) => /[\s'"$`\\()]/.test(p) ? `'${p.replace(/'/g, "'\\''")}'` : p;
     const text = [...tops].map((t) => quote(base + '/' + t)).join(' ');
+    // THE EDITOR OWNS THE BOX, AND THIS WRITER LANDS LATE (round-6 verifier).
+    // Every other programmatic writer runs on the click that caused it; an
+    // upload writes the box only after a network round-trip, so an editor
+    // opened DURING the upload owns the textarea by the time the paths
+    // arrive. Inserting them there put the paths INSIDE the queued message
+    // (Send then saved a rewrite the user never typed) and, while a save was
+    // in flight, changed the box out from under `_resolvePendingEdit`'s `raw`
+    // compare — which reads a changed box as "the user typed something else"
+    // and takes the bail-out, so the ok/refused/gone outcomes all silently
+    // did nothing. The paths belong to the message being COMPOSED, so they go
+    // where that message's text already lives: the stash the edit restores.
+    if (this._pendingEdit || this._editingQueueId) { this._stashUploadedPaths(text); return; }
     const ta = this._textarea;
     const start = ta.selectionStart ?? ta.value.length;
     const end = ta.selectionEnd ?? ta.value.length;
@@ -472,6 +484,26 @@ export class ChatInput {
     ta.focus();
     try { ta.setSelectionRange(pos, pos); } catch {}
     ta.dispatchEvent(new Event('input', { bubbles: true })); // resize + draft save
+  }
+
+  /** Where uploaded paths go when a queued message owns the textarea. Same
+   *  landing zone as another client's draft sync (law ②): the stash the edit
+   *  will hand back — `_pendingEdit.draftBefore` while a save is in flight,
+   *  `_editDraftBefore` while the editor is open — and the draft STORE with
+   *  it, because that stash is memory-only and the store is what survives the
+   *  window closing (law ② keeps the BOX out of the store for the whole edit,
+   *  never the stash: `_beginQueueEdit` pins the store to exactly this value).
+   *  The toast names where they went: paths that appear in neither the box nor
+   *  the edit are the silent failure with a whole upload behind it. */
+  _stashUploadedPaths(text) {
+    const append = (prev) => {
+      const s = typeof prev === 'string' ? prev : '';
+      return (s && !/\s$/.test(s) ? s + ' ' : s) + text + ' ';
+    };
+    if (this._pendingEdit) this._pendingEdit.draftBefore = append(this._pendingEdit.draftBefore);
+    else this._editDraftBefore = append(this._editDraftBefore);
+    saveDraft('chat', this._sessionId, this._pendingEdit ? this._pendingEdit.draftBefore : this._editDraftBefore);
+    showToast(t('Upload finished while a queued message was open for editing — the paths went to your draft, not into the edit'));
   }
 
   _uploadToast(msg, isError) {
@@ -655,11 +687,16 @@ export class ChatInput {
     this._textarea.value = String(text || '');
     const sent = this._send() !== false;
     if (keptAttachments.length) { this._attachments = keptAttachments; this._renderAttachments(); }
+    // THE BOX COMES BACK UNCONDITIONALLY (round-6 verifier). Gating the
+    // restore on `keptText.trim()` covered only the case where there was
+    // something to give back — but the ACTION's own text is in the box on
+    // every bail-out (`_send` refuses a dead socket before it clears
+    // anything), so an EMPTY box was left holding `/compact`, one Enter away
+    // from being posted as a chat message, with nothing on screen saying how
+    // it got there. Writing `keptText` back is a no-op when `_send` took the
+    // box (it already emptied it), so one line answers both halves.
+    this._textarea.value = keptText;
     if (keptText.trim()) {
-      // Also on the REFUSED path (`_send` bails on a dead socket leaving the
-      // action text in the box): the action is a button click away, the typed
-      // prompt is not.
-      this._textarea.value = keptText;
       this._autoSize?.();
       // THE DRAFT SLOT GOES WITH THE TEXT THAT CAME BACK. `_send` pinned the
       // store to the action's own text and armed `_pendingSend` so a dead
@@ -667,10 +704,16 @@ export class ChatInput {
       // the first inbound frame. Leaving that armed would have deleted the
       // user's prompt from the store milliseconds later (the box would be the
       // only copy again, which is the whole failure class). The action is a
-      // button click away, so this call's slot is released and the store is
-      // written HERE rather than left to the 300 ms debounce. An OLDER
-      // unconfirmed send keeps its own slot (identity compare).
-      if (this._pendingSend && this._pendingSend !== prevPendingSend) this._pendingSend = null;
+      // button click away, so its slot is released and the store is written
+      // HERE rather than left to the 300 ms debounce.
+      // AND AN OLDER UNCONFIRMED SEND GETS ITS SLOT BACK (round-6 verifier):
+      // `_send` OVERWROTE `_pendingSend` with the action's own slot, so
+      // nulling it here dropped the dead-socket protection of a message the
+      // USER sent seconds ago — that prompt would then vanish with the socket
+      // instead of being restored with its "may not have been sent" notice.
+      // Hand the previous slot back rather than clearing the field; when
+      // there was none this is exactly the old `= null`.
+      this._pendingSend = prevPendingSend || null;
       saveDraft('chat', this._sessionId, keptText);
     }
     return sent;
@@ -783,12 +826,22 @@ export class ChatInput {
       // the prompt vanished with zero trace.
       const { text } = this._pendingSend;
       this._pendingSend = null;
-      if (text && !this._textarea.value.trim()) {
+      // …into a box that may already hold the NEXT thing the user typed (they
+      // keep drafting while a send is in flight, and `sendText` hands this
+      // slot back over a half-typed prompt) — that text is theirs and is not
+      // overwritten. THE SENTENCE THEN HAS TO CHANGE WITH IT (round-6): one
+      // that says "the text was restored to the input" while the input holds
+      // something else is a report of a rescue that did not happen, and the
+      // user reads it as "my message is safe in the box".
+      const restored = !!text && !this._textarea.value.trim();
+      if (restored) {
         this._textarea.value = text;
         this._textarea.dispatchEvent(new Event('input', { bubbles: true })); // resize + draft save
       }
       this.hideTyping();
-      showToast(t('Connection lost — your message may not have been sent; the text was restored to the input'), { type: 'error' });
+      showToast(restored
+        ? t('Connection lost — your message may not have been sent; the text was restored to the input')
+        : t('Connection lost — your last message may not have been sent (the input already had text, so it was left alone)'), { type: 'error' });
     }
     if (disconnected && this._pendingEdit) {
       // Same class: the edit frame may never have reached the server, and its
@@ -818,8 +871,21 @@ export class ChatInput {
   // that preceded it demonstrably reached the server, so the deferred draft
   // clear can finalize.
   confirmDelivery() {
-    if (!this._pendingSend) return;
+    const pending = this._pendingSend;
+    if (!pending) return;
     this._pendingSend = null;
+    // THE CLEAR IS TEXT-AWARE (round-6 verifier). This deferred clear exists
+    // to remove THE SENT TEXT from the store once delivery is proven — it is
+    // not a licence to empty the draft channel. Since `sendText` hands an
+    // OLDER unconfirmed send's slot back, the slot that survives an action
+    // can be armed while the store already holds a half-typed prompt that was
+    // never sent (the action put it back there); clearing then deletes the
+    // user's words from their only durable copy, leaving the textarea alone
+    // with them again — the exact failure this whole family exists to
+    // prevent. Clear only what this send put there; an empty store has
+    // nothing to lose either way.
+    const stored = loadDraft('chat', this._sessionId);
+    if (stored && stored !== pending.text) return;
     clearDraft('chat', this._sessionId);
   }
 
@@ -910,6 +976,13 @@ export class ChatInput {
   //     no editor can be open.
   //   · another client's draft sync — lands on the STASH (`_editDraftBefore` /
   //     `_pendingEdit.draftBefore`), never on the live box (round-2 finding 5).
+  //   · `_insertUploadedPaths` (upload button, folder picker, ChatView's
+  //     drag-drop) — the writer that lands LATE (round-6 verifier): it runs
+  //     after an await, so the editor it must respect may have been opened
+  //     AFTER the upload started, and this audit missed it because it writes
+  //     through a local `ta`, not `this._textarea`. Same answer as the draft
+  //     sync: `_stashUploadedPaths` puts the paths on the stash (and the
+  //     store) with a toast naming where they went.
   //   · the slash-command dropdown (Tab/Enter/click) — a USER action ON the
   //     box, offered only because the user typed `/…` INTO it; it replaces
   //     text they are looking at, exactly as it does for a draft, and Esc

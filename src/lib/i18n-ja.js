@@ -3054,4 +3054,6 @@ export default {
   "Your unsaved rewrite was kept as this session’s draft — cancel this edit to get it back.": "未保存の書き直しはこのセッションの下書きとして保存しました —— この編集をキャンセルすれば戻せます。",
   "The edit was not confirmed — the session may be unresponsive.": "編集が確認できませんでした —— セッションが応答していない可能性があります。",
   "Connection lost — the edit may not have been saved.": "接続が切れました —— この編集は保存されていない可能性があります。",
+  "Upload finished while a queued message was open for editing — the paths went to your draft, not into the edit": "キュー内メッセージの編集中にアップロードが完了しました —— パスは編集ではなく下書きに追加しました",
+  "Connection lost — your last message may not have been sent (the input already had text, so it was left alone)": "接続が切れました —— 直前のメッセージは送信されていない可能性があります（入力欄に既にテキストがあったため、そのままにしています）",
 };
