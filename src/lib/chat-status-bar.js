@@ -1,6 +1,6 @@
 import { escHtml, showInputDialog, uiScale, showToast, fetchJson, copyText, absUrl } from './utils.js';
 import { UI_ICONS } from './icons.js';
-import { BACKEND_META, getBackendMeta, backendFeatureCaps, effortLabel, responseStyleLabel, responseStyleCaps, styleAppliesLive } from './agent-meta.js';
+import { BACKEND_META, getBackendMeta, backendFeatureCaps, effortDisplay, effortLabel, noteModelCatalog, responseStyleLabel, responseStyleCaps, styleAppliesLive } from './agent-meta.js';
 import { t } from './i18n.js';
 
 /**
@@ -49,6 +49,8 @@ export class ChatStatusBar {
     this._statusCost = 0;
     this._statusContextWindow = 0;
     this._statusPermMode = '';
+    this._statusEffort = '';      // applies from the NEXT turn (what the chip shows)
+    this._statusEffortLive = '';  // what the running / last turn actually ran at
     // seeded per backend (BACKEND_META.permissionModes) so an early click never
     // offers claude modes on a codex chat; the live list overrides on status
     this._permissionModes = BACKEND_META[backend]?.permissionModes ? [...BACKEND_META[backend].permissionModes] : null;
@@ -123,7 +125,13 @@ export class ChatStatusBar {
     if (status.total_cost_usd) this._statusCost = status.total_cost_usd;
     if (status.permissionMode) this._statusPermMode = status.permissionMode;
     if (status.permissionModes) this._permissionModes = status.permissionModes;
-    if (status.effort) this._statusEffort = status.effort;
+    // TWO effort facts (2.369.61): the chip shows what applies GOING FORWARD
+    // (`effortNext` — which is also what the optimistic click below sets), the
+    // tooltip names the running turn's own value when it differs. A store that
+    // only knows one of them (claude: the last COMMANDED value) still sets both.
+    if (status.effort) this._statusEffortLive = status.effort;
+    if (status.effortNext !== undefined && status.effortNext !== null) this._statusEffort = status.effortNext || '';
+    else if (status.effort) this._statusEffort = status.effort;
     if (status.modelLocked != null) this._modelLocked = !!status.modelLocked;
     // 'in' not truthy: the server always sends lockedModel (null after an
     // unlock) — a truthy guard left other clients showing the stale target
@@ -142,6 +150,19 @@ export class ChatStatusBar {
     // this a freshly-created session showed "123k/?" until the next re-attach
     // (2.368.15, owner: "context length为啥无法获取到").
     if (u.contextWindow) this._statusContextWindow = u.contextWindow;
+    this.render();
+  }
+
+  /** LIVE effort update (2.369.61) — the normalizer's `meta/effort` op, fired
+   *  by every carrier of the two facts (a turn's own turn_context, the
+   *  wrapper's status record, codex's thread_settings_applied). Without this
+   *  the chip only moved on the clicking client's optimistic write, and a
+   *  `/effort` typed into the chat (or another attached client's pick) needed
+   *  a re-attach to show. `live` null = this record says nothing about the
+   *  running turn; leave what we knew. */
+  setEffort(live, next) {
+    if (live) this._statusEffortLive = String(live);
+    if (next !== undefined) this._statusEffort = next ? String(next) : (live ? String(live) : '');
     this.render();
   }
 
@@ -347,12 +368,27 @@ export class ChatStatusBar {
         : (mismatch ? `\u26a0 ${escHtml(this._servedModel)}` : (known ? escHtml(this._statusModel) : t('model: ?')));
       parts.push(`<span class="chat-status-model chat-status-clickable${known ? '' : ' chat-status-dim'}${mismatch ? ' chat-status-model-fallback' : ''}${locked ? ' chat-status-model-locked' : ''}" title="${escHtml(title)}${escHtml(lockTip)}">${label}</span>`);
       const eKnown = !!this._statusEffort;
+      // The DELEGATION mode reads as a downgrade unless the tooltip names the
+      // level the model really reasons at (2.369.61 — codex 'ultra' runs the
+      // model at the catalog's multi_agent_reasoning_effort, and every other
+      // readout honestly says that level). The chip keeps the picked word.
+      const eShown = effortDisplay(this._backend, this._statusEffort, { model: this._servedModel || this._statusModel });
+      const eLive = this._statusEffortLive && this._statusEffortLive !== this._statusEffort
+        ? effortDisplay(this._backend, this._statusEffortLive, { model: this._servedModel || this._statusModel })
+        : '';
       const eTitle = eKnown
         ? (this._backend === 'codex'
           ? t('Reasoning effort (as reported per turn) — click to change (applies from the next turn)')
           : t('Reasoning effort (as last commanded — the CLI does not report it back) — click to change'))
         : t('Reasoning effort not set/reported — click to change');
-      parts.push(`<span class="chat-status-effort chat-status-clickable${eKnown ? '' : ' chat-status-dim'}" title="${escHtml(eTitle)}">${eKnown ? escHtml(this._statusEffort) : t('effort: ?')}</span>`);
+      // Two lines, never one blended sentence: what the chip's value MEANS,
+      // then what is actually in effect. The wording must be true whether or
+      // not a turn is running (this bar has no streaming flag): a pick applies
+      // from the NEXT turn, so the previous value stays in effect until one
+      // starts — that is the same sentence in both states.
+      const eFull = (eShown && eShown !== this._statusEffort ? eShown + ' · ' : '') + eTitle
+        + (eLive ? '\n' + t('{effort} is still in effect until the next turn starts', { effort: eLive }) : '');
+      parts.push(`<span class="chat-status-effort chat-status-clickable${eKnown ? '' : ' chat-status-dim'}" title="${escHtml(eFull)}">${eKnown ? escHtml(this._statusEffort) : t('effort: ?')}</span>`);
     }
 
     // Goal indicator — always rendered so there's a discoverable entry point
@@ -1019,6 +1055,7 @@ export class ChatStatusBar {
           if (!dropdown.isConnected) return;
           loading.remove();
           const models = (data?.codex || []).filter(m => m.id);
+          noteModelCatalog('codex', models); // per-model multiAgentEffort for the effort tooltip (2.369.61)
           const rank = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
           const cur = models.find(m => m.id === this._statusModel);
           let levels = (cur?.efforts?.length ? cur.efforts : [...new Set(models.flatMap(m => m.efforts || []))])

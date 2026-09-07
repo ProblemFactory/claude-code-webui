@@ -45,7 +45,7 @@ import { registerWindowType, svgIcon16 } from './window-types.js';
 import { CustomizeMode, applyArrangement } from './customize-mode.js';
 import { installSessionPalette } from './session-palette.js';
 import { installUserTodos } from './user-todos-panel.js';
-import { BACKEND_META, createBackendIconHtml, getSessionKey, pickAgentIdentity, settingsPrefixFor, effortLabel } from './agent-meta.js';
+import { BACKEND_META, createBackendIconHtml, getSessionKey, pickAgentIdentity, settingsPrefixFor, effortLabel, noteModelCatalog } from './agent-meta.js';
 
 const BACKEND_SESSION_OPTIONS = {
   claude: {
@@ -111,6 +111,9 @@ fetchJson('/api/available-models').then(data => {
     BACKEND_SESSION_OPTIONS.claude.models = data.claude;
     SETTINGS_SCHEMA['claude.defaultModel'].options = toSchemaOptions(data.claude);
   }
+  // Per-model facts that are not pickable options (multiAgentEffort) — the
+  // metadata popup and the status-bar tooltip read them from here (2.369.61).
+  for (const be of Object.keys(data)) noteModelCatalog(be, data[be]);
   if (data.codex?.length) {
     BACKEND_SESSION_OPTIONS.codex.models = data.codex;
     SETTINGS_SCHEMA['codex.defaultModel'].options = toSchemaOptions(data.codex);

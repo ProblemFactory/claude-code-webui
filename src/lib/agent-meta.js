@@ -96,6 +96,13 @@ export const BACKEND_META = {
     // catalog entry reports it (supported_reasoning_levels); English key,
     // t() at render (effortLabel below).
     effortHints: { ultra: 'delegates to sub-agents (multi-agent), extra usage' },
+    // The effort value that is NOT a reasoning level but a delegation MODE
+    // (2.369.61): under codex 'ultra' the model still reasons at the served
+    // model's catalog `multi_agent_reasoning_effort` (gpt-6-astra: xhigh), so
+    // a user who picked ultra and reads "xhigh" in the metadata popup is
+    // seeing a TRUE fact stated as if it were their own pick. Surfaces gate on
+    // THIS row, never on a backend id (2.369.58 law).
+    multiAgentEffort: 'ultra',
   },
   // OpenCode over ACP v1 (S8, design-harness-plugins §2.3). No accounts
   // roster (the agent holds its own provider login), no effort/fork/review
@@ -141,6 +148,48 @@ export function effortLabel(backend, value, { capitalize = false } = {}) {
   const base = capitalize ? v.charAt(0).toUpperCase() + v.slice(1) : v;
   const hint = BACKEND_META[backend]?.effortHints?.[v];
   return hint ? `${base} — ${t(hint)}` : base;
+}
+
+// ── MODEL CATALOG (2.369.61) ──
+// The per-model facts /api/available-models carries that are NOT pickable
+// options — today only `multiAgentEffort` (the catalog's own
+// multi_agent_reasoning_effort). Kept HERE rather than in app.js because the
+// consumers are chat surfaces and agent-meta may not import app.js (app.js
+// imports this module). Every fetcher of /api/available-models feeds it; an
+// unknown backend/model simply answers ''.
+const MODEL_CATALOG = new Map(); // `${backend}:${modelId}` → { multiAgentEffort }
+
+/** Record what the server's model catalog says about a backend's models. */
+export function noteModelCatalog(backend, models) {
+  if (!backend || !Array.isArray(models)) return;
+  for (const m of models) {
+    if (!m || !m.id) continue;
+    MODEL_CATALOG.set(`${backend}:${m.id}`, { multiAgentEffort: m.multiAgentEffort || '' });
+  }
+}
+
+/** The reasoning level a DELEGATING effort actually runs the model at, per the
+ *  catalog. '' when the model is unknown or the catalog names none — callers
+ *  must then say nothing rather than guess (the level is per-model and moves
+ *  with every codex release; hardcoding it is how a label goes quietly stale). */
+export function multiAgentReasoningFor(backend, model) {
+  if (!backend || !model) return '';
+  return MODEL_CATALOG.get(`${backend}:${model}`)?.multiAgentEffort || '';
+}
+
+/** How an effort VALUE is shown to a human (metadata popup, status-bar
+ *  tooltip). Almost always the value itself — the exception is a harness whose
+ *  META names a `multiAgentEffort`: codex's 'ultra' is a delegation mode, and
+ *  the reasoning level the model actually runs at is a DIFFERENT string from
+ *  the catalog. Saying just "xhigh" there (what the ledger and turn_context
+ *  legitimately record for such a turn) reads as "your ultra was ignored";
+ *  saying just "ultra" hides why every other readout says xhigh. So we say
+ *  both, and only when the catalog knows the level. PURE. */
+export function effortDisplay(backend, value, { model = '' } = {}) {
+  const v = String(value || '');
+  if (!v || BACKEND_META[backend]?.multiAgentEffort !== v) return v;
+  const level = multiAgentReasoningFor(backend, model);
+  return level ? t('{effort} (multi-agent · reasoning {level})', { effort: v, level }) : v;
 }
 
 /** Picker label for a response-style VALUE: the harness's own protocol string

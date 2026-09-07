@@ -567,6 +567,8 @@ export default {
   "Reason": "理由",
   "Reasoning effort (as last commanded — the CLI does not report it back) — click to change": "推論強度（最後に指定した値——CLI は報告し返しません）— クリックで変更",
   "Reasoning effort (as reported per turn) — click to change (applies from the next turn)": "推論強度（ターンごとに報告される値）— クリックで変更（次のターンから適用）",
+  "{effort} (multi-agent \u00b7 reasoning {level})": "{effort}（マルチエージェント \u00b7 推論強度 {level}）",
+  "{effort} is still in effect until the next turn starts": "次のターンが始まるまでは {effort} が有効です",
   "Reasoning effort not set/reported — click to change": "推論強度は未設定/未報告 — クリックで変更",
   "Recent": "最近",
   "Reconnected": "再接続しました",

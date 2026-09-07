@@ -568,6 +568,8 @@ export default {
   "Reason": "原因",
   "Reasoning effort (as last commanded — the CLI does not report it back) — click to change": "推理强度（按最后一次下达的命令 — CLI 不会回报）— 点击修改",
   "Reasoning effort (as reported per turn) — click to change (applies from the next turn)": "推理强度（按每轮报告的）— 点击修改（从下一轮起生效）",
+  "{effort} (multi-agent \u00b7 reasoning {level})": "{effort}（多智能体 \u00b7 推理强度 {level}）",
+  "{effort} is still in effect until the next turn starts": "下一轮开始前仍以 {effort} 生效",
   "Reasoning effort not set/reported — click to change": "推理强度未设置/未报告 — 点击修改",
   "Recent": "最近",
   "Reconnected": "已重新连接",

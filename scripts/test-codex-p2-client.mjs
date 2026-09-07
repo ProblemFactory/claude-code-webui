@@ -58,7 +58,11 @@ const { BACKEND_META } = await import(path.join(REPO, 'src/lib/agent-meta.js'));
 }
 ok(/permissionModes: \['default', 'read-only', 'safe-yolo', 'yolo'\]/.test(metaSrc) && /permissionModes: \['default', 'acceptEdits', 'bypassPermissions', 'plan', 'auto'\]/.test(metaSrc), 'client META carries a permission-mode seed per backend');
 const sb = read('src/lib/chat-status-bar.js');
-ok(/BACKEND_META\[backend\]\?\.permissionModes/.test(sb) && /import \{ BACKEND_META, getBackendMeta, backendFeatureCaps, effortLabel, responseStyleLabel, responseStyleCaps, styleAppliesLive \} from '\.\/agent-meta\.js'/.test(sb), 'the status bar seeds its permission dropdown from META (never claude modes on a codex chat before the first status)');
+// The SUBSTANCE is the seed expression + the fact that the names come from
+// agent-meta. Pinning the whole import list verbatim made every new helper a
+// false failure (2.369.61: effortDisplay/noteModelCatalog), so name only what
+// this assertion is actually about.
+ok(/BACKEND_META\[backend\]\?\.permissionModes/.test(sb) && /import \{[^}]*\bBACKEND_META\b[^}]*\} from '\.\/agent-meta\.js'/.test(sb), 'the status bar seeds its permission dropdown from META (never claude modes on a codex chat before the first status)');
 const sf = read('src/lib/setup-flows.js');
 ok(/const named = b\.namedLoggedIn \|\| 0;/.test(sf) && !/key === 'claude' \? \(b\.namedLoggedIn/.test(sf) && /const acctBtn = b\.installed\n/.test(sf), 'onboarding counts named accounts and offers the accounts door for every installed backend');
 const sv = read('server.js');

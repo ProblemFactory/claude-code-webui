@@ -71,7 +71,7 @@ const SESSION_FIELDS = {
   _lockedModel:        { owner: 'pool',   persisted: 'meta',    note: 'lock target (full id upgraded from the CLI echo)' },
   _fallbackStopFired:  { owner: 'pool',   persisted: null,      note: 'once-per-turn stop-on-fallback belt latch' },
   _apiKeySource:       { owner: 'stdout', persisted: 'meta',    note: "CLI's own init apiKeySource (billing truth)" },
-  _effort:             { owner: 'ws',     persisted: 'meta',    note: 'last COMMANDED effort (CLI never reports it back)' },
+  _effort:             { owner: 'ws',     persisted: 'meta',    note: 'effort the NEXT turn will run at; ws on a client pick, and (2.369.61) the codex stdout consumer from wrapper_meta.effortNext — a `/effort` typed into the chat used to leave this stale for the next resume' },
   _permissionMode:     { owner: 'ws',     persisted: 'meta',    note: 'launch/set permission mode (not in JSONL)' },
 
   // resume / fork

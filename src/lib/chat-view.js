@@ -9,7 +9,7 @@ import { ChatInput } from './chat-input.js';
 import { ChatStatusBar } from './chat-status-bar.js';
 import { UI_ICONS } from './icons.js';
 import { t } from './i18n.js';
-import { agentMemoryPathRes, getBackendMeta } from './agent-meta.js';
+import { agentMemoryPathRes, effortDisplay, getBackendMeta } from './agent-meta.js';
 import { registerCommand, registerKeybinding, runCommand, hasCommand } from './contributions.js';
 import { mcpParts, messageKind, foldToggleFor, countKinds, runSummaryLabel } from './chat-run-summary.js';
 import { collabTrafficStats, collabHeadText, collabRunPart, subAgentStreamLabel } from '../collab-row.js';
@@ -1188,8 +1188,15 @@ class ChatView {
    *      (the 2.361.1/2.364.1 skew class). */
   _queueCaps() {
     if (!this._queueSupported) return { queue: false, steer: false, queueOps: false };
-    const backend = this._getSessionIds()?.backend || this.winInfo?.backend || 'claude';
-    return getBackendMeta(backend)?.caps?.inputModes || { queue: false, steer: false, queueOps: false };
+    return getBackendMeta(this._backendId())?.caps?.inputModes || { queue: false, steer: false, queueOps: false };
+  }
+
+  /** This view's harness id — the ONE resolution order (live session record,
+   *  then the window's own spec, then the default). Surfaces that need a
+   *  harness FACT look it up through BACKEND_META with this, never by
+   *  comparing ids themselves. */
+  _backendId() {
+    return this._getSessionIds()?.backend || this.winInfo?.backend || 'claude';
   }
 
   _setQueue(items) {
@@ -1422,7 +1429,12 @@ class ChatView {
       if (u.reasoning_output_tokens != null) add(t('Reasoning tokens'), fmt(u.reasoning_output_tokens)); // codex: the reasoning share of output_tokens
       if (u.service_tier) add(t('Service tier'), u.service_tier);
     }
-    if (meta.effort) add(t('Effort'), meta.effort); // codex: the turn's reasoning effort (turn_context)
+    // THE TURN'S reasoning effort (turn_context / the wrapper's live twin).
+    // 'ultra' is a delegation MODE, not a level — effortDisplay names the
+    // level the served model really reasons at (catalog
+    // multi_agent_reasoning_effort), so a user who picked ultra does not read
+    // a bare 'xhigh' here and conclude their pick was dropped (2.369.61).
+    if (meta.effort) add(t('Effort'), effortDisplay(this._backendId(), meta.effort, { model: meta.model }));
     add(t('Stop reason'), meta.stopReason);
     // Codex has no vendor request id: its requestId is the LEDGER's synthetic
     // key (cx:<thread>:<cumulative total>, the join every scanned rollout has)
@@ -1529,7 +1541,7 @@ class ChatView {
         // never duplicated over the sync rows above
         if (r?.found) {
           if (!meta.model && r.model) addAsyncRow(t('Model'), r.model);
-          if (!meta.effort && r.effort) addAsyncRow(t('Effort'), r.effort);
+          if (!meta.effort && r.effort) addAsyncRow(t('Effort'), effortDisplay(this._backendId(), r.effort, { model: r.model || meta.model }));
         }
       }).catch(() => { });
     } else {
@@ -2857,6 +2869,14 @@ class ChatView {
     if (op.subtype === 'queue') { if (op.supported) this._setQueueSupported(true); this._setQueue(op.items); return; }
     if (op.subtype === 'served-model') {
       this._statusBar.setServedModel(op.data?.model || null);
+      return;
+    }
+    // Live effort (2.369.61): the running turn's value AND the pending pick.
+    // Fired by turn_context / wrapper_meta / thread_settings_applied alike, so
+    // a `/effort` typed into the chat or another client's pick lands here with
+    // no re-attach and no rollout re-read.
+    if (op.subtype === 'effort') {
+      this._statusBar.setEffort(op.data?.effort || null, op.data?.effortNext ?? null);
       return;
     }
     if (op.subtype === 'usage') {

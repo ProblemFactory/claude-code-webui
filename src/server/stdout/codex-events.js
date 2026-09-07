@@ -57,6 +57,20 @@ function create({ engine, deliverRef }) {
             : null;
           const sourceMeta = payload.source ? normalizeCodexSource(payload.source) : null;
           let changed = false;
+          // THE SESSION'S EFFORT, from the process that owns it (2.369.61):
+          // `session._effort` used to move only when a CLIENT clicked the
+          // status-bar picker, so an effort the wrapper adopted from the thread
+          // (spawn env empty) or a `/effort` typed into the chat never reached
+          // session-meta — and the next resume spawned with a stale value that
+          // then labelled every turn. wrapper_meta.effortNext = what the next
+          // turn will run at = exactly what a resume must carry.
+          if (msg.type === 'wrapper_meta') {
+            const nextEffort = payload.effortNext || payload.effort || null;
+            if (nextEffort && (session._effort || null) !== nextEffort) {
+              session._effort = nextEffort;
+              changed = true;
+            }
+          }
           // A mid-life thread id change (thread/fork, a resume that minted a
           // new id) re-points the session here AND the normalizer's ledger-key
           // default: the SAME wrapper_meta record reaches it through feedLive

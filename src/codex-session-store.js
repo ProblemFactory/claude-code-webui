@@ -296,17 +296,49 @@ function recordFingerprint(record, turnId) {
   return null;
 }
 
+/** A turn_context the WRAPPER synthesized, as opposed to codex's own rollout
+ *  copy: ours has always carried `modelPinned` (2.369.32) and now says so
+ *  outright. The distinction decides which copy wins the fold below. */
+function isWrapperTurnContext(record) {
+  const p = record?.payload || {};
+  return p.wrapper === true || p.modelPinned !== undefined;
+}
+
 function mergeCodexRecords(historyRecords, liveRecords) {
   const merged = [];
   const seen = new Set();
+  const keptTurnContexts = new Map(); // fingerprint → the copy that made it into `merged`
   let currentTurnId = 'prelude';
   for (const record of sortRecords([...(historyRecords || []), ...(liveRecords || [])])) {
     if (record.type === 'turn_context') {
       currentTurnId = record.payload?.turn_id || record.payload?.turnId || currentTurnId;
     }
     const fp = recordFingerprint(record, currentTurnId);
-    if (fp && seen.has(fp)) continue;
+    if (fp && seen.has(fp)) {
+      // TURN_CONTEXT TWINS (2.369.61, the effort incident): the wrapper
+      // synthesizes one the moment `turn/started` arrives (live visibility) and
+      // codex writes its own when the turn really begins — same turn id, same
+      // fingerprint, and OURS is always the earlier of the two, so first-wins
+      // silently suppressed codex's authoritative copy for the whole life of
+      // the conversation (a turn codex recorded as 'ultra' stayed 'xhigh'
+      // forever). A repeat is a REFRESH of one turn, never a second turn:
+      // position from the first copy, per-turn VALUES from the better one —
+      // codex's own always wins, a later wrapper copy only overrides an earlier
+      // wrapper copy (that is the wrapper's own late correction).
+      const kept = record.type === 'turn_context' ? keptTurnContexts.get(fp) : null;
+      if (kept && kept.payload && record.payload && isWrapperTurnContext(kept)) {
+        // never mutate the parsed record in place — a cached rollout parse is
+        // shared between reads; `kept` is sortRecords' own shallow copy
+        const folded = { ...kept.payload };
+        if (record.payload.effort) folded.effort = record.payload.effort;
+        if (record.payload.model) folded.model = record.payload.model;
+        if (!isWrapperTurnContext(record)) delete folded.effort_next; // codex's copy settles it: nothing pending in a rebuilt history
+        kept.payload = folded;
+      }
+      continue;
+    }
     if (fp) seen.add(fp);
+    if (fp && record.type === 'turn_context') keptTurnContexts.set(fp, record);
     delete record.__idx;
     delete record.__ts;
     merged.push(record);
@@ -381,7 +413,11 @@ class CodexSessionMessages {
       permissionMode: '',
       permissionModes: ['default', 'read-only', 'safe-yolo', 'yolo'],
       subagentMetas: [],
+      // effort = what the LAST turn ran at; effortNext = the pick that applies
+      // from the next one (2.369.61 — one field could not say both, and the
+      // popup baked the wrong one onto every message of a turn)
       effort: null,
+      effortNext: null,
       sandbox: null,
       totalUsage: null,
     };
@@ -391,6 +427,11 @@ class CodexSessionMessages {
     if (meta?.contextWindow) status.contextWindow = meta.contextWindow;
     if (meta?.subagentMetas) status.subagentMetas = meta.subagentMetas;
     if (meta?.sandbox) status.sandbox = meta.sandbox;
+    // the wrapper's live pair (2.369.61) — records below still override the
+    // live-turn value, but a session attached before its first turn_context
+    // (or one whose pick has not started a turn yet) is honest right away
+    if (meta?.effort) status.effort = meta.effort;
+    if (meta?.effortNext || meta?.effortOverride) status.effortNext = meta.effortNext || meta.effortOverride;
     if (meta?.totalTokenUsage) {
       const t = meta.totalTokenUsage;
       status.totalUsage = {
@@ -410,8 +451,21 @@ class CodexSessionMessages {
         if (record.payload?.permissionMode) status.permissionMode = record.payload.permissionMode;
         if (record.payload?.approval_policy && !status.permissionMode) status.permissionMode = record.payload.approval_policy;
         if (record.payload?.model_context_window) status.contextWindow = record.payload.model_context_window;
-        if (record.payload?.effort) status.effort = record.payload.effort;
+        if (record.payload?.effort) {
+          status.effort = record.payload.effort;
+          // a turn_context that names an effort also settles the pending
+          // question: effort_next present = a re-pick waiting for the next turn
+          status.effortNext = record.payload.effort_next || record.payload.effortNext || null;
+        }
         if (record.payload?.sandbox_policy && !status.sandbox) status.sandbox = record.payload.sandbox_policy;
+      } else if (record.type === 'wrapper_meta') {
+        // the wrapper restates its pair on every change (set-effort included)
+        if (record.payload?.effort) status.effort = record.payload.effort;
+        if (record.payload?.effortNext !== undefined) status.effortNext = record.payload.effortNext || null;
+      } else if (record.type === 'event_msg' && record.payload?.type === 'thread_settings_applied') {
+        // codex's own settings record = the THREAD's effort = the NEXT turn's
+        const level = record.payload.thread_settings?.reasoning_effort;
+        if (level) { status.effortNext = level; if (!status.effort) status.effort = level; }
       } else if (record.type === 'event_msg' && record.payload?.type === 'token_count') {
         const info = record.payload.info || {};
         const last = info.last_token_usage || info.lastTokenUsage || info.total_token_usage || null;

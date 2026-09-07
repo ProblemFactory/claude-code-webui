@@ -275,7 +275,30 @@ const sessionName = process.env.CODEX_WEBUI_SESSION_NAME || '';
 const resumeId = process.env.CODEX_WEBUI_RESUME_ID || '';
 const model = process.env.CODEX_WEBUI_MODEL || '';
 // meta.modelPinned (2.369.32): set when the spawn carried a model or set-model ran — see updateMetaFromThread
-let effort = process.env.CODEX_WEBUI_EFFORT || ''; // mutable: set-effort updates it mid-session
+let effort = process.env.CODEX_WEBUI_EFFORT || ''; // mutable: set-effort updates it mid-session — the COMMANDED effort for the NEXT turn, never a statement about the running one
+// ── THE EFFORT A TURN IS RUNNING AT (2.369.61, owner's "调成了 ultra 但 metadata 显示 xhigh") ──
+// turn_context is the record every reader takes a turn's reasoning effort from
+// (the message-meta popup bakes it onto each message of the turn). OURS is
+// SYNTHESIZED at `turn/started`, and the 0.153.4 schema settles where the value
+// can come from: TurnStartedNotification = {threadId, turn:{id,status,startedAt,
+// items,…}} — no effort, no model. So it can only come from our own bookkeeping,
+// and the two turn origins have DIFFERENT answers:
+//   • a turn WE start runs at the effort we put on turn/start (TurnStartParams.
+//     effort, documented "Override the reasoning effort for this turn and
+//     SUBSEQUENT turns" ⇒ commanding one also re-points the thread);
+//   • a turn the APP-SERVER starts — a queue drain, a resume auto-continue, a
+//     goal continuation — runs at the THREAD's effort and never sees our
+//     pending value. Printing `effort` there is how a conversation codex ran at
+//     'ultra' (its own rollout turn_context, 21/21) got labelled 'xhigh' from a
+//     stale spawn env, permanently: the merge fingerprint is `turn_context:<turn
+//     id>` and ours is the EARLIER of the twins, so it also suppressed codex's.
+// `threadEffort` = the app-server's own word for this thread (thread/start |
+// resume | fork reply `reasoningEffort`, `thread/settings/updated`, and our own
+// accepted commands). `turnEffort` = what the ACTIVE turn is running at.
+let threadEffort = '';
+let turnEffort = '';
+let turnStartsInFlight = 0; // our own turn/start calls awaiting a reply (= the next turn/started is OURS)
+let activeTurnOwned = false;
 const backendPermissionMode = process.env.CODEX_WEBUI_PERMISSION_MODE || 'default';
 // ── RESPONSE STYLE / PERSONALITY (2.369.58) ──
 // codex's `Personality` enum, read out of `codex app-server
@@ -327,7 +350,14 @@ const meta = {
   permissionMode,
   approvalPolicy: currentPermission.approvalPolicy,
   sandbox: currentPermission.sandbox,
+  // THREE effort facts, never one (2.369.61): `effort` = the LIVE turn's (what
+  // the popup must show for its messages), `effortNext` = the commanded value
+  // the next turn will use, `threadEffort` = the app-server's own word for the
+  // thread. They differ exactly when a user re-picks mid-turn — which is the
+  // moment the old single field lied.
   effort: effort || '',
+  effortNext: effort || '',
+  threadEffort: '',
   tasks: {},
   pendingRequests: {},
   subagentMetas: [],
@@ -489,7 +519,13 @@ function updateMetaFromThread(resp) {
   const replyAgentPath = asString(resp?.agentPath || resp?.agent_path || thread.agentPath || thread.agent_path);
   if (replyAgentPath) meta.agentPath = replyAgentPath;
   meta.permissionMode = permissionMode;
-  if (resp?.reasoningEffort) meta.effort = resp.reasoningEffort;
+  // THE APP-SERVER'S OWN WORD for this thread's effort (Thread.reasoningEffort /
+  // ThreadResumeResponse.reasoningEffort, 0.153.4). It is the effort every turn
+  // the APP-SERVER starts will run at — not necessarily the one we would send.
+  if (typeof resp?.reasoningEffort === 'string' && resp.reasoningEffort) {
+    threadEffort = resp.reasoningEffort;
+    meta.threadEffort = threadEffort;
+  }
   // EXPLICIT EFFORT ON EVERY TURN (B-21e4 item 4, the effort twin of the
   // modelPinned rule): with no COMMANDED effort (spawn env / set-effort) adopt
   // the thread's own current effort from the start/resume/fork response
@@ -499,6 +535,18 @@ function updateMetaFromThread(resp) {
   // config.toml names no model). A later set-effort still wins (it rewrites
   // `effort`); a set-effort back to '' deliberately hands the choice back.
   if (!effort && typeof resp?.reasoningEffort === 'string' && resp.reasoningEffort) { effort = resp.reasoningEffort; meta.effortAdopted = effort; }
+  meta.effortNext = effort || threadEffort || '';
+  // LIVE-TWIN CORRECTION (2.369.61): the resume reply can land AFTER the
+  // app-server has already pushed `turn/started` for a turn it auto-continued —
+  // that is the incident's exact stdout order (goal_cleared, turn/started, then
+  // the thread/resume reply, all inside one millisecond). The turn_context we
+  // synthesized a moment ago could only quote the spawn env; now we know what
+  // the thread actually runs at, so re-state THIS turn's context. Same turn id
+  // ⇒ no new turn for any reader (the normalizer bumps turnIndex on a CHANGED
+  // id, the merge folds a repeat into the first copy).
+  if (threadEffort && meta.activeTurnId && !activeTurnOwned && turnEffort !== threadEffort) {
+    noteTurnEffort(threadEffort, 'thread-reply');
+  }
   record('session_meta', {
     id: threadId,
     timestamp: now(),
@@ -528,6 +576,24 @@ function updateMetaFromThread(resp) {
     // inbound message to outbound)
     agent_path: meta.agentPath || undefined,
   });
+  recordWrapperMeta();
+  scheduleMeta();
+}
+
+/** The wrapper's own status record — emitted on every thread reply AND whenever
+ *  a per-session knob changes (set-effort / set-model), because it is the only
+ *  live carrier of facts the app-server never repeats. `activeTurnId` rides it
+ *  deliberately: the merge fingerprint is `wrapper_meta:<thread>:<activeTurnId>`,
+ *  so a per-turn refresh survives a history rebuild instead of collapsing onto
+ *  the boot copy. */
+function recordWrapperMeta() {
+  // The SIDECAR's `effort` is read as "what this session is running at"
+  // (codex-session-store.chatStatus) — keep it on the same one definition as
+  // the record below, or a resumed session with no turn yet reports the spawn
+  // env forever (updateMetaFromThread used to assign the thread's own
+  // reasoningEffort straight into meta.effort; that assignment now lives here,
+  // where `threadEffort` is one of the three ranked facts).
+  meta.effort = liveTurnEffort();
   record('wrapper_meta', {
     threadId: meta.threadId,
     threadName: meta.threadName,
@@ -536,9 +602,20 @@ function updateMetaFromThread(resp) {
     approvalPolicy: meta.approvalPolicy,
     sandbox: meta.sandbox,
     contextWindow: meta.contextWindow || 0,
+    activeTurnId: meta.activeTurnId || null,
     slashCommands: SLASH_COMMANDS, // the wrapper-served commands (chat-input autocomplete)
+    // TWO honest effort facts (2.369.61): what the live turn RUNS at, and what
+    // the next one WILL run at. A client attaching mid-turn reads both from
+    // this record — no rollout re-read, no waiting for the next turn_context.
+    effort: liveTurnEffort() || null,
+    effortNext: effort || threadEffort || null,
   });
-  scheduleMeta();
+}
+
+/** The effort the ACTIVE (or most recent) turn is running at — the value the
+ *  message-meta popup must show for that turn's messages. */
+function liveTurnEffort() {
+  return turnEffort || threadEffort || effort || '';
 }
 
 function buildTurnContext(turnId) {
@@ -549,9 +626,28 @@ function buildTurnContext(turnId) {
     sandbox_policy: currentPermission.sandboxPolicy,
     model: meta.model || model || '',
     modelPinned: !!model,
-    effort: effort || null,
+    wrapper: true, // this copy is SYNTHESIZED — codex's own turn_context outranks it (merge fold)
+    // THIS TURN's effort, never the pending one (2.369.61). `effort_next` is
+    // stated only when a re-pick is waiting for the next turn — a reader that
+    // sees both can say "running at X, switching to Y" instead of guessing.
+    effort: liveTurnEffort() || null,
+    ...(effort && effort !== liveTurnEffort() ? { effort_next: effort } : {}),
     summary: 'none',
   };
+}
+
+/** Restate the ACTIVE turn's context because we learned its real effort late
+ *  (the resume-reply race) — same turn id, so no reader sees a new turn. */
+function noteTurnEffort(next, why) {
+  const value = String(next || '');
+  if (!meta.activeTurnId || value === turnEffort) return;
+  const prev = turnEffort;
+  turnEffort = value;
+  meta.effort = turnEffort;
+  record('turn_context', buildTurnContext(meta.activeTurnId));
+  recordWrapperMeta();
+  scheduleMeta();
+  log(`turn ${meta.activeTurnId} effort corrected ${prev || '(none)'} → ${turnEffort} (${why})`);
 }
 
 function emitTaskEvent(type, payload = {}) {
@@ -1019,6 +1115,33 @@ function handleNotification(method, params) {
     record('event_msg', { type: 'goal_cleared', threadId: params?.threadId });
     return;
   }
+  if (method === 'thread/settings/updated') {
+    // The app-server's OWN confirmation of the thread's settings
+    // (ThreadSettingsUpdatedNotification = {threadId, threadSettings}, 0.153.4).
+    // It is the authority for what a turn the APP-SERVER starts will run at —
+    // including changes made outside this wrapper (the codex TUI, another
+    // client). Recorded in codex's OWN rollout shape (`thread_settings_applied`
+    // with snake_case `reasoning_effort`) so the live twin and the rebuilt
+    // history feed the normalizer the same record.
+    const s = params?.threadSettings || params?.thread_settings || {};
+    if (typeof s.effort === 'string' && s.effort) { threadEffort = s.effort; meta.threadEffort = threadEffort; }
+    else if (s.effort === null) { threadEffort = ''; meta.threadEffort = ''; }
+    if (typeof s.personality === 'string' || s.personality === null) { personality = s.personality || ''; meta.personality = personality; }
+    if (!effort) meta.effortNext = threadEffort || '';
+    record('event_msg', {
+      type: 'thread_settings_applied',
+      thread_id: params?.threadId || meta.threadId,
+      thread_settings: {
+        model: s.model || meta.model || '',
+        approval_policy: s.approvalPolicy || meta.approvalPolicy || '',
+        cwd: s.cwd || meta.cwd || '',
+        reasoning_effort: (typeof s.effort === 'string' && s.effort) ? s.effort : null,
+        personality: (typeof s.personality === 'string' && s.personality) ? s.personality : null,
+      },
+    });
+    scheduleMeta();
+    return;
+  }
   if (method === 'thread/name/updated') {
     updateMetaFromThread({ thread: { id: params?.threadId || meta.threadId, name: resolveThreadName(params) } });
     return;
@@ -1071,6 +1194,14 @@ function handleNotification(method, params) {
     currentTurnId = params?.turn?.id || params?.turnId || params?.id || currentTurnId;
     meta.activeTurnId = currentTurnId;
     meta.streaming = true;
+    // WHOSE turn is this, and what does it run at (2.369.61)? A turn/start of
+    // ours is in flight ⇒ ours, at the effort we just sent (which also became
+    // the thread's). Otherwise the app-server started it (drain / auto-continue)
+    // ⇒ the THREAD's effort. `effort` is only the last-resort guess, and the
+    // resume race that made it wrong is repaired by noteTurnEffort().
+    activeTurnOwned = turnStartsInFlight > 0;
+    turnEffort = threadEffort || effort || '';
+    meta.effort = turnEffort;
     record('turn_context', buildTurnContext(currentTurnId));
     emitTaskEvent('task_started', { turn_id: currentTurnId, model_context_window: meta.contextWindow || 0 });
     // Re-publish the queue with the NEW turn id: a client attaching mid-turn
@@ -1086,6 +1217,7 @@ function handleNotification(method, params) {
     const normalEnd = status === 'completed' || status === 'success' || !status;
     meta.activeTurnId = null;
     meta.streaming = false;
+    activeTurnOwned = false; // the next turn/started decides its own ownership
     if (status === 'interrupted' || status === 'cancelled' || status === 'canceled') emitTaskEvent('turn_aborted', { turn_id: currentTurnId });
     else if (status === 'failed' || status === 'error') emitTaskEvent('task_failed', { turn_id: currentTurnId, error: params?.error || params?.message || '' });
     else emitTaskEvent('task_complete', { turn_id: currentTurnId, last_agent_message: '' });
@@ -1325,18 +1457,36 @@ async function startTurn(text, attachments = []) {
   const input = encodeUserInput(text, attachments);
   if (!input.length) return;
   await injectTaskContextForTurn(); // deliver task context/updates before the turn
-  const resp = await request('turn/start', {
-    threadId: meta.threadId,
-    input,
-    cwd: meta.cwd,
-    approvalPolicy: currentPermission.approvalPolicy,
-    sandboxPolicy: currentPermission.sandboxPolicy,
-    model: meta.model || undefined,
-    effort: effort || undefined,
-    // unset ⇒ absent (never `null`: a null CLEARS the thread's personality,
-    // which is not the same as "leave the agent's own config alone")
-    ...(personality ? { personality } : {}),
-  }, 120000);
+  // COMMANDING an effort re-points the THREAD too (TurnStartParams.effort:
+  // "Override the reasoning effort for this turn and subsequent turns",
+  // 0.153.4) — so our belief about the thread moves the moment we send it, and
+  // the turn_context synthesized when `turn/started` comes back (usually BEFORE
+  // this reply resolves) quotes the value this turn really runs at. Reverted if
+  // the call is refused, so a rejected command never relabels a later turn.
+  const priorThreadEffort = threadEffort;
+  if (effort) { threadEffort = effort; meta.threadEffort = threadEffort; }
+  turnStartsInFlight++;
+  let resp;
+  try {
+    resp = await request('turn/start', {
+      threadId: meta.threadId,
+      input,
+      cwd: meta.cwd,
+      approvalPolicy: currentPermission.approvalPolicy,
+      sandboxPolicy: currentPermission.sandboxPolicy,
+      model: meta.model || undefined,
+      effort: effort || undefined,
+      // unset ⇒ absent (never `null`: a null CLEARS the thread's personality,
+      // which is not the same as "leave the agent's own config alone")
+      ...(personality ? { personality } : {}),
+    }, 120000);
+  } catch (e) {
+    threadEffort = priorThreadEffort;
+    meta.threadEffort = threadEffort;
+    throw e;
+  } finally {
+    turnStartsInFlight--;
+  }
   const startedId = resp?.turn?.id || currentTurnId;
   // The turn/completed notification can be processed BEFORE this reply's
   // promise resolves (same stdout chunk; notifications are handled
@@ -2207,9 +2357,46 @@ async function handleInput(msg) {
     return;
   }
   if (msg.type === 'set-effort') {
-    // Applied on the NEXT turn/start (effort is a per-turn param).
+    // Applied on the NEXT turn — effort is a per-turn param and the RUNNING
+    // turn keeps the one it started with (that is what the popup shows for its
+    // messages).
     effort = msg.effort || '';
     meta.effortOverride = effort;
+    meta.effortNext = effort || threadEffort || '';
+    // …and tell the APP-SERVER, not just ourselves (2.369.61): only turn/start
+    // carries our value, so before this a turn the app-server starts on its own
+    // (queue drain, resume auto-continue, goal continuation) still ran at the
+    // OLD effort while our UI claimed the new one. ThreadSettingsUpdateParams
+    // .effort is documented "Override the reasoning effort for subsequent
+    // turns" (0.153.4) — exactly this verb. Our belief moves only if it is
+    // ACCEPTED; a refusal leaves the per-turn path (turn/start) as the fallback
+    // it always was.
+    if (meta.threadId) {
+      try {
+        await request('thread/settings/update', { threadId: meta.threadId, effort: effort || null }, 30000);
+        threadEffort = effort;
+        meta.threadEffort = threadEffort;
+      } catch (e) {
+        log('thread/settings/update (effort) refused, per-turn effort still applies: ' + e.message);
+      }
+    }
+    // The pending pick reaches every OTHER client and any mid-turn attach
+    // through these two records — no rollout re-read, no waiting for the next
+    // turn to start. `thread_settings_applied` is codex's own rollout shape and
+    // its fingerprint carries the VALUE, so a rebuild keeps each change (a
+    // second wrapper_meta for the same turn would fold into the first).
+    record('event_msg', {
+      type: 'thread_settings_applied',
+      thread_id: meta.threadId,
+      thread_settings: {
+        model: meta.model || '',
+        approval_policy: meta.approvalPolicy || '',
+        cwd: meta.cwd || '',
+        reasoning_effort: (effort || threadEffort) || null,
+        personality: personality || null,
+      },
+    });
+    recordWrapperMeta();
     scheduleMeta();
     log('Effort set for next turn: ' + (effort || '(default)'));
     return;

@@ -998,6 +998,11 @@ function registerWsHandler(wss, ctx) {
               const chatStatus = sm.chatStatus() || {};
               if (!chatStatus.permissionMode && session._permissionMode) chatStatus.permissionMode = session._permissionMode;
               if (!chatStatus.effort && session._effort) chatStatus.effort = session._effort;
+              // …and the PENDING pick separately (2.369.61): `effort` is what
+              // the running/last turn is at, `effortNext` what the next one
+              // will be. Collapsing them is how a turn codex ran at 'ultra'
+              // reported 'xhigh' on every message of that turn.
+              if (!chatStatus.effortNext && session._effort) chatStatus.effortNext = session._effort;
               // ALWAYS present (review-caught): omitting the false case left a
               // reconnecting second client showing LOCKED forever after an unlock
               chatStatus.modelLocked = !!session._modelLocked;

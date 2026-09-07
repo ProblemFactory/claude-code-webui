@@ -397,6 +397,12 @@ class CodexMessageManager {
       contextWindow: 0,
       lastUsage: null,
       total_cost_usd: 0,
+      // TWO effort facts (2.369.61): `effort` = what the CURRENT (or last) turn
+      // is running at — the value baked onto that turn's message meta — and
+      // `effortNext` = the pick that applies from the next turn. Conflating them
+      // is how a turn codex ran at 'ultra' reported 'xhigh' per message.
+      effort: null,
+      effortNext: null,
       subagentMetas: [],
       // B-7473: agentPath → agentThreadId, learned from SubAgentActivity
       // (0.153.4's only carrier of a child's thread id). The client uses it to
@@ -818,6 +824,21 @@ class CodexMessageManager {
     }
   }
 
+  /** The ONE writer of the two effort facts — so every carrier (turn_context,
+   *  the wrapper's status record, codex's thread_settings_applied) lands the
+   *  same way and a LIVE client is told, instead of finding out on re-attach.
+   *  `next === null` means "nothing pending"; `undefined` means "this record
+   *  says nothing about the pending value" and leaves it alone. */
+  _noteEffort(live, next, emit) {
+    const before = `${this._status.effort || ''}|${this._status.effortNext || ''}`;
+    if (live) this._status.effort = String(live);
+    if (next !== undefined) this._status.effortNext = next ? String(next) : null;
+    const after = `${this._status.effort || ''}|${this._status.effortNext || ''}`;
+    if (emit && after !== before) {
+      this._emit({ op: 'meta', subtype: 'effort', data: { effort: this._status.effort || null, effortNext: this._status.effortNext || null } });
+    }
+  }
+
   _processTurnContext(record, emit) {
     const payload = record.payload || {};
     const turnId = payload.turn_id || payload.turnId || null;
@@ -826,7 +847,14 @@ class CodexMessageManager {
       this.turnIndex++;
     }
     if (payload.model) this._status.model = payload.model;
-    if (payload.effort) this._status.effort = String(payload.effort); // codex reports effort per turn (turn_context.effort, 0.149+)
+    // THE TURN'S effort (turn_context.effort, codex 0.149+ and the wrapper's
+    // live twin). A record that names one also settles the pending question:
+    // `effort_next` present = a re-pick is waiting for the next turn, absent =
+    // nothing is (2.369.61 — the wrapper states both).
+    if (payload.effort) {
+      const next = payload.effort_next || payload.effortNext || null;
+      this._noteEffort(String(payload.effort), next ? String(next) : null, emit);
+    }
     if (payload.approval_policy || payload.approvalPolicy || payload.permissionMode) {
       this._status.permissionMode = payload.permissionMode || payload.approval_policy || payload.approvalPolicy;
     }
@@ -870,6 +898,14 @@ class CodexMessageManager {
     if (payload.model) this._status.model = payload.model;
     if (payload.permissionMode) this._status.permissionMode = payload.permissionMode;
     if (payload.contextWindow) this._status.contextWindow = payload.contextWindow;
+    // The wrapper's own effort pair — the FALLBACK that makes a mid-turn attach
+    // honest (2.369.61): the buffer may hold no turn_context yet (a session
+    // attached between boot and the first turn), and after a re-pick this is
+    // the record that carries the pending value.
+    if (payload.effort || payload.effortNext !== undefined) {
+      this._noteEffort(payload.effort ? String(payload.effort) : null,
+        payload.effortNext === undefined ? undefined : (payload.effortNext || null), emit);
+    }
     if (emit && !this._seenInit && (payload.model || payload.permissionMode)) {
       this._seenInit = true;
       const msg = this._create({
@@ -1969,7 +2005,15 @@ class CodexMessageManager {
       // for the status bar; never a card.
       const s = event.thread_settings && typeof event.thread_settings === 'object' ? event.thread_settings : {};
       if (s.model) this._status.model = String(s.model);
-      if (s.reasoning_effort) this._status.effort = String(s.reasoning_effort);
+      // The THREAD's effort = what the next turn will run at (2.369.61: it is
+      // NOT a statement about the turn in flight, which keeps the value its own
+      // turn_context named — a set-effort mid-turn must not relabel the
+      // messages already produced). Before any turn has named one it is also
+      // the best answer for "now".
+      if (s.reasoning_effort) {
+        const level = String(s.reasoning_effort);
+        this._noteEffort(this._status.effort ? null : level, level, emit);
+      }
       return;
     }
 
