@@ -39,7 +39,13 @@
 // that is overwritten each run instead of accumulating.
 //
 // Output (stdout, one line): {"ok":true, version, args, cwd, toolUses,
-//   toolResults, types:{<type>:<count>}, raw, cleaned} | {"skip":"<reason>"}
+//   toolResults, types:{<type>:<count>}, raw, rawSkip, cleaned} | {"skip":"<reason>"}
+//   `cleaned` = {cwd, swept, spared:[{name,ageMs}], staleMs} — the sweep's own
+//   rule, REPORTED: `swept` is what it removed, `spared` is what it deliberately
+//   left (a concurrently running probe's cwd), `staleMs` the threshold that
+//   decides between them. A reader that asserts absolute absence instead of
+//   asking for this rule goes red on exactly the case the sweep exists to
+//   spare — and blames the sweep for it (round 6).
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -74,20 +80,46 @@ function purgeProject(projDir, ids = []) {
   return 1;
 }
 
+// The raw capture lives in a dir of THIS uid's own, never in the shared /tmp
+// namespace (see the openRaw essay below) — and the sweep must not delete it.
+const RAW_DIR = path.join(os.tmpdir(), `${PREFIX}raw-${process.getuid?.() ?? 0}`);
+
 // ── SWEEP of everything earlier versions of this probe left behind. Runs
 //    BEFORE the CLI check, so even a machine with no claude cleans up.
 //    STALE ONLY (>10min): a concurrently running probe's cwd must survive.
 const STALE_MS = 10 * 60 * 1000;
-const stale = (p) => { try { return Date.now() - fs.statSync(p).mtimeMs > STALE_MS; } catch { return false; } };
+const ageOf = (p) => { try { return Date.now() - fs.statSync(p).mtimeMs; } catch { return -1; } };
+const stale = (p) => ageOf(p) > STALE_MS;
 let swept = 0;
 for (const d of (() => { try { return fs.readdirSync(os.tmpdir(), { withFileTypes: true }); } catch { return []; } })()) {
   const p = path.join(os.tmpdir(), d.name);
+  if (p === RAW_DIR) continue;
   if (d.isDirectory() && d.name.startsWith(PREFIX) && stale(p)) { rmDir(p); swept++; }
 }
 for (const d of (() => { try { return fs.readdirSync(PROJECTS, { withFileTypes: true }); } catch { return []; } })()) {
   const p = path.join(PROJECTS, d.name);
   if (d.isDirectory() && d.name.startsWith(PROJ_PREFIX) && stale(p)) swept += purgeProject(p);
 }
+// Round 5 put the raw capture at `<tmp>/vs-wire-probe.last.jsonl` — a name the
+// sweep above cannot match (a FILE, and `vs-wire-probe.` ≠ `vs-wire-probe-`).
+// Retire it. Whatever is at that name, the TARGET of a symlink is never
+// touched: rm either unlinks the link or refuses (node resolves the path, so a
+// symlink→directory raises EISDIR) — and we no longer write there either way.
+try { fs.rmSync(path.join(os.tmpdir(), 'vs-wire-probe.last.jsonl'), { force: true }); } catch { }
+
+/** What the sweep DELIBERATELY LEFT: probe project dirs younger than the
+ *  threshold, i.e. a probe running right now (this suite's own leg runs on
+ *  every non-docs push, and two worktrees pushing minutes apart really do
+ *  overlap). Reported so a reader can apply the sweep's RULE instead of
+ *  asserting absolute absence. */
+const sparedProjects = () => {
+  const out = [];
+  for (const d of (() => { try { return fs.readdirSync(PROJECTS, { withFileTypes: true }); } catch { return []; } })()) {
+    if (!d.isDirectory() || !d.name.startsWith(PROJ_PREFIX)) continue;
+    out.push({ name: d.name, ageMs: ageOf(path.join(PROJECTS, d.name)) });
+  }
+  return out;
+};
 
 let cwd = null;
 const sessionIds = new Set();
@@ -95,10 +127,12 @@ let cleaned = null;
 /** Idempotent, and safe before the temp dir exists (every early `skip` path
  *  goes through `out` too). */
 function cleanupRun() {
-  if (!cwd || cleaned) return;
-  purgeProject(path.join(PROJECTS, encode(cwd)), [...sessionIds]);
-  if (path.dirname(cwd) === os.tmpdir() && path.basename(cwd).startsWith(PREFIX)) rmDir(cwd);
-  cleaned = { cwd, swept };
+  if (cleaned) return;
+  if (cwd) {
+    purgeProject(path.join(PROJECTS, encode(cwd)), [...sessionIds]);
+    if (path.dirname(cwd) === os.tmpdir() && path.basename(cwd).startsWith(PREFIX)) rmDir(cwd);
+  }
+  cleaned = { cwd, swept, spared: sparedProjects(), staleMs: STALE_MS };
 }
 const out = (o) => { cleanupRun(); process.stdout.write(JSON.stringify({ ...o, cleaned }) + '\n'); process.exit(0); };
 
@@ -139,7 +173,44 @@ try { child = spawn(bin, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] }); }
 // exactly the accumulation this probe stopped doing. Buffered and written
 // synchronously at the end — `out` exits the process, which would truncate a
 // write stream anyway. Capped so a runaway CLI cannot eat memory.
-const rawPath = path.join(os.tmpdir(), 'vs-wire-probe.last.jsonl');
+//
+// FIXED, BUT NOT IN A SHARED NAMESPACE (round 6). Round 5 moved the capture out
+// of the 0700 mkdtemp dir to a PREDICTABLE name directly in /tmp, and
+// `fs.writeFileSync` follows symlinks: /tmp's sticky bit stops another local
+// user deleting our file, it does NOT stop them CREATING that name first. A
+// planted `/tmp/vs-wire-probe.last.jsonl -> ~/.bashrc` was therefore truncated
+// and rewritten with CLI stdout under the developer's own uid, on every
+// non-docs push. (Reproduced: the victim file's contents were replaced.) So the
+// capture keeps its one fixed path but inside a dir this uid owns, created 0700,
+// re-checked with lstat (a dir SYMLINK planted under that name would redirect
+// the write just as well), and opened O_NOFOLLOW|O_CREAT|O_TRUNC — the final
+// component cannot be a symlink either. Anything unexpected SKIPS the capture
+// with a reason instead of writing somewhere it was not asked to.
+const rawPath = path.join(RAW_DIR, 'last.jsonl');
+let rawSkip = null;
+function openRaw() {
+  try { fs.mkdirSync(RAW_DIR, { mode: 0o700 }); } catch (e) { if (e.code !== 'EEXIST') { rawSkip = `mkdir ${e.code || e.message}`; return null; } }
+  let st = null;
+  try { st = fs.lstatSync(RAW_DIR); } catch (e) { rawSkip = `lstat ${e.code || e.message}`; return null; }
+  if (!st.isDirectory()) { rawSkip = `${RAW_DIR} is not a directory (${st.isSymbolicLink() ? 'a symlink' : 'a file'}) — capture skipped`; return null; }
+  const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+  if (uid !== null && st.uid !== uid) { rawSkip = `${RAW_DIR} is owned by uid ${st.uid} — capture skipped`; return null; }
+  // Our own dir, but an older/edited version may have left it group- or
+  // other-writable, which puts us right back in a shared namespace. We own it,
+  // so close it rather than complain.
+  if ((st.mode & 0o077) !== 0) { try { fs.chmodSync(RAW_DIR, 0o700); } catch (e) { rawSkip = `chmod ${e.code || e.message}`; return null; } }
+  let fd = null;
+  try {
+    // NO O_TRUNC here: truncation must not happen before we know whose file it
+    // is. O_NOFOLLOW already refuses a symlink; this refuses a plain file
+    // somebody else left behind, and only then do we empty it.
+    fd = fs.openSync(rawPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW, 0o600);
+    const fst = fs.fstatSync(fd);
+    if (!fst.isFile() || (uid !== null && fst.uid !== uid)) { fs.closeSync(fd); rawSkip = `${rawPath} is not this uid's regular file (uid ${fst.uid}) — capture skipped`; return null; }
+    fs.ftruncateSync(fd, 0);
+    return fd;
+  } catch (e) { if (fd !== null) { try { fs.closeSync(fd); } catch { } } rawSkip = `open ${e.code || e.message}`; return null; }
+}
 const RAW_CAP = 8 * 1024 * 1024;
 const rawChunks = []; let rawBytes = 0;
 const types = {}; let toolUses = 0, toolResults = 0, buf = '', stderr = '';
@@ -148,8 +219,12 @@ let done = false;
 const finish = (extra) => {
   if (done) return; done = true;
   clearTimeout(timer);
-  try { fs.writeFileSync(rawPath, Buffer.concat(rawChunks)); } catch { }
-  out({ ok: true, version, bin, args, cwd, raw: rawPath, toolUses, toolResults, types, stderr: stderr.slice(-400), ...extra });
+  const fd = openRaw();
+  if (fd !== null) {
+    try { fs.writeSync(fd, Buffer.concat(rawChunks)); } catch (e) { rawSkip = `write ${e.code || e.message}`; }
+    try { fs.closeSync(fd); } catch { }
+  }
+  out({ ok: true, version, bin, args, cwd, raw: rawSkip ? null : rawPath, rawSkip, toolUses, toolResults, types, stderr: stderr.slice(-400), ...extra });
 };
 
 child.stdout.on('data', (d) => {

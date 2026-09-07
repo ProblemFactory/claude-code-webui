@@ -379,6 +379,88 @@ if (!opened?.ok) { console.error(pageErrors.join('\n')); done(); }
     /finish|完成|完了/.test(m?.success || '') && m.success !== m.blocked, JSON.stringify([m?.success, m?.blocked]));
 }
 
+// ── ②d A COMPACTION THAT ENDS WITHOUT AN OUTCOME RECORD (round 6) ───────────
+// The three legs above feed the client frames written BY HAND, which can only
+// prove "we render them right". This one asks the REAL server consumer
+// (src/server/stdout/claude-stream-json.js, over a fake pty) what it actually
+// broadcasts for a compaction that ends the way a hook-blocked one does — no
+// `status:null` outcome record, just the turn finishing — and replays THOSE
+// frames into the real client. Before round 6 the producer said nothing at
+// that exit: the client kept `hooks_start` forever, `compactInFlight()` stayed
+// true, and every later "Prompt is too long" card lost the rewind-and-retry
+// sentence it exists to give (reproduced on this engine: frames
+// ["hooks_start"], _streamingKind null, no compact_end).
+{
+  const frames = (() => {
+    const out = [];
+    const stub = () => { };
+    const consumer = require(path.join(repo, 'src/server/stdout/claude-stream-json.js')).create({
+      activeSessions: new Map(), CLAUDE_STREAM_TYPES: new Set(['system', 'assistant', 'user', 'result']),
+      _seenStreamTypes: new Set(), USAGE_SCANNER_PATH: '/nonexistent', checkClaudeGoalStatus: stub,
+      noteModelSeen: stub, sbSeenFirst: () => true, hosts: null, usageHistory: null,
+      engine: {
+        _vsuPending: new Map(), armWorkflowUsageWatcher: stub, kickPoolEval: stub, markLimitBanner: stub,
+        maybeRepinLockedModel: stub, maybeStopOnFallback: stub, notePoolAuthFailure: stub, modelsMatch: () => false,
+        noteSessionProduced: stub, noteTurnEnd: stub, recordRateLimitEvent: stub, resolveUsageKey: () => '__g__',
+        usageEstimator: { noteLive: stub },
+      },
+    });
+    const pty = { data: null, onData(cb) { pty.data = cb; }, onExit: stub };
+    const session = { mode: 'chat', backend: 'claude', cwd: '/tmp', sockName: 'cw-ui-compact', buffer: '', createdAt: Date.now(), _normalizer: { processLive: stub, listeners: [] } };
+    consumer.attach(session, 'ui-compact', pty, {
+      feedLive: stub, broadcastActiveSessions: stub, readSessionMeta: () => ({}), writeSessionMeta: stub,
+      updateSessionTodos: stub, applyTaskToolUpdate: stub, emitTaskListTodos: stub,
+      broadcastToSession: (s, id, msg) => { if (msg.type === 'compact-progress') out.push(msg); },
+    });
+    // ws-handler.js's `/compact` send site, then a PreCompact hook, then the
+    // turn simply ends — the shape a BLOCKED compaction leaves on the wire.
+    session._streamingKind = 'compacting';
+    pty.data(JSON.stringify({ type: 'system', subtype: 'hook_started', hook_name: 'PreCompact:guard', session_id: 'sid-ui' }) + '\n');
+    pty.data(JSON.stringify({ type: 'result', subtype: 'success', session_id: 'sid-ui', duration_ms: 1 }) + '\n');
+    return out.map(({ event, hookType, hint, result, error }) => ({ event, hookType, hint, result, error }));
+  })();
+  check(`the REAL producer terminates the compaction it opened (frames ${JSON.stringify(frames.map((f) => f.event))})`,
+    frames.length === 2 && frames[0].event === 'hooks_start' && frames[1].event === 'compact_end' && frames[1].result === null,
+    JSON.stringify(frames));
+  const m = await evaljs(`(async () => {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const v = window.__v;
+    for (const el of [...v._messageList.querySelectorAll('.chat-ctx-full')]) el.closest('.chat-msg').remove();
+    v._compactStage = null; v._renderers.setCompactStage(null);
+    const frames = ${JSON.stringify(frames)};
+    const card = v._renderers.appendContextFullCard('Prompt is too long');
+    await sleep(60);
+    // CONTROL: mid-compaction (only the frames produced so far) the card really
+    // is on the live stage — the terminal frame is what changes, not the lane.
+    v._onCompactProgress(frames[0]);
+    await sleep(60);
+    const mid = card.querySelector('.chat-ctx-full-hint').textContent.trim();
+    const midInFlight = v._renderers.compactInFlight();
+    const midCard = v._renderers.appendContextFullCard('Prompt is too long');
+    await sleep(40);
+    const midLater = midCard.querySelector('.chat-ctx-full-hint').textContent.trim();
+    for (const f of frames.slice(1)) v._onCompactProgress(f);
+    await sleep(60);
+    const watched = card.querySelector('.chat-ctx-full-hint').textContent.trim();
+    const endInFlight = v._renderers.compactInFlight();
+    const later = v._renderers.appendContextFullCard('Prompt is too long');
+    await sleep(60);
+    const laterTxt = later.querySelector('.chat-ctx-full-hint').textContent.trim();
+    const r = later.querySelector('.chat-ctx-full-hint').getBoundingClientRect();
+    for (const el of [card, midCard, later]) el.remove();
+    return { mid, midInFlight, midLater, watched, endInFlight, laterTxt,
+             w: Math.round(r.width), inViewport: r.left >= -1 && r.right <= innerWidth + 1 };
+  })()`);
+  const APOLOGY = /1.2 minutes|1–2|1〜2|do not press Stop|不要按 Stop|Stop を押さないで/;
+  check('CONTROL: while the hook stage is the last frame the compaction IS in flight — the card names the hook, and a card built then joins it',
+    m?.midInFlight === true && /PreCompact:guard/.test(m?.mid || '') && /PreCompact:guard/.test(m?.midLater || ''), JSON.stringify([m?.mid, m?.midLater]));
+  check('the producer’s terminal frame ends it: the watching card says the compaction ENDED (never still "running … hooks")',
+    !/hooks/i.test(m?.watched || '') && /ended|结束|終了/i.test(m?.watched || '') && !/finished|完成了|完了しました/.test(m?.watched || ''), m?.watched);
+  check('…compactInFlight() is false again, so a card built AFTERWARDS opens on the rewind-and-retry guidance the user actually needs',
+    m?.endInFlight === false && APOLOGY.test(m?.laterTxt || '') && !/hooks/i.test(m?.laterTxt || ''), JSON.stringify([m?.endInFlight, m?.laterTxt]));
+  check(`…and that sentence still fits the 375px viewport (${m?.w}px)`, m?.inViewport === true && m?.w > 0 && m.w <= 375, m);
+}
+
 // ── ③ retraction: two kinds, two treatments ─────────────────────────────────
 {
   const m = await evaljs(`(async () => {

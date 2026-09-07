@@ -312,6 +312,65 @@ const inflight = (id) => calls.broadcasts.filter((b) => b.id === id && b.type ==
     p4.data(J({ type: 'system', subtype: 'hook_started', hook_id: 'h9', hook_name: 'PreToolUse:Bash', hook_event: 'PreToolUse', session_id: 'sid-h', uuid: 'u-h-1' }));
     ok('NEGATIVE CONTROL: hook_started in a NORMAL turn produces no compaction stage and no label', !calls.broadcasts.some((b) => b.id === 'w-b3-hook' && b.type === 'compact-progress') && !labels('w-b3-hook').length && !s4._streamingKind);
   }
+  {
+    // ⓓ' A COMPACTION THAT ENDS WITHOUT AN OUTCOME RECORD (round 6).
+    //    `_streamingKind === 'compacting'` is a claim about RIGHT NOW, and the
+    //    client mirrors it as a held `_compactStage` whose `compactInFlight()`
+    //    gates the ENTIRE "Prompt is too long" guidance card. Only the
+    //    `status:null` outcome record retired that claim out loud; the other two
+    //    exits cleared it SILENTLY, so a compaction that produced no outcome
+    //    record left the client saying "Compacting: running <hook> hooks…"
+    //    forever and every later card lost its rewind-and-retry sentence.
+    //    REPRODUCED on this engine: frames ["hooks_start"], _streamingKind null,
+    //    no compact_end. Both exits are real: a PreCompact hook that BLOCKS the
+    //    compaction makes the CLI emit a bare `sdk_status status:null` with no
+    //    metadata (which this branch correctly refuses to read as an outcome),
+    //    and ws-handler sets the kind on a `/compact` SEND, before the CLI has
+    //    said anything at all.
+    const s5 = mkSession('claude', 'w-b3-unterm'); const p5 = fakePty();
+    so.setupSessionPty(s5, 'w-b3-unterm', p5);
+    const uB = () => calls.broadcasts.filter((b) => b.id === 'w-b3-unterm' && b.type === 'compact-progress');
+    s5._streamingLabel = 'Compacting context…'; s5._streamingKind = 'compacting'; // ws-handler.js's /compact send site
+    p5.data(J({ type: 'system', subtype: 'hook_started', hook_id: 'h1', hook_name: 'UserPromptSubmit:vibespace', session_id: 'sid-un', uuid: 'u-un-1' }));
+    ok('a hook_started inside the send-site compaction still names the stage (unchanged)', uB().slice(-1)[0]?.event === 'hooks_start', JSON.stringify(uB().map((b) => b.event)));
+    p5.data(J({ type: 'result', subtype: 'success', session_id: 'sid-un', duration_ms: 1 }));
+    ok('THE TURN ENDING retires the compaction OUT LOUD — the client can never be left holding "running hooks…" for a compaction the server already retired',
+      s5._streamingKind === null && uB().slice(-1)[0]?.event === 'compact_end', JSON.stringify([s5._streamingKind, uB().map((b) => b.event)]));
+    ok('…and it says ENDED, not SUCCEEDED (result:null) — nothing told us it worked (round 5\'s law, on the new exit)',
+      uB().slice(-1)[0]?.result === null && uB().slice(-1)[0]?.error === null, JSON.stringify(uB().slice(-1)[0]));
+    {
+      const before = uB().length;
+      p5.data(J({ type: 'result', subtype: 'success', session_id: 'sid-un', duration_ms: 1 }));
+      ok('NEGATIVE CONTROL: a SECOND turn end with no compaction in flight broadcasts nothing (the frame reports a retirement, it is not a turn heartbeat)', uB().length === before, `${before} → ${uB().length}`);
+    }
+    // The CLI's OWN turn state is the other silent exit — a session whose
+    // harness publishes session_state_changed never reaches the `result` branch
+    // above for its streaming flag, and cleared the kind there instead.
+    const s6 = mkSession('claude', 'w-b3-unterm2'); const p6 = fakePty();
+    so.setupSessionPty(s6, 'w-b3-unterm2', p6);
+    const u2B = () => calls.broadcasts.filter((b) => b.id === 'w-b3-unterm2' && b.type === 'compact-progress');
+    s6._streamingKind = 'compacting';
+    p6.data(J({ type: 'system', subtype: 'session_state_changed', state: 'idle', session_id: 'sid-un2', uuid: 'u-un2-1' }));
+    ok("…and so does the harness's OWN idle turn state (the authoritative exit, §2.5) — both silent clears now speak",
+      s6._streamingKind === null && u2B().slice(-1)[0]?.event === 'compact_end' && u2B().slice(-1)[0]?.result === null, JSON.stringify([s6._streamingKind, u2B().map((b) => b.event)]));
+    {
+      const s7 = mkSession('claude', 'w-b3-unterm3'); const p7 = fakePty();
+      so.setupSessionPty(s7, 'w-b3-unterm3', p7);
+      p7.data(J({ type: 'system', subtype: 'session_state_changed', state: 'running', session_id: 'sid-un3', uuid: 'u-un3-1' }));
+      p7.data(J({ type: 'system', subtype: 'session_state_changed', state: 'idle', session_id: 'sid-un3', uuid: 'u-un3-2' }));
+      ok('NEGATIVE CONTROL: an ordinary turn (no compaction) ends with NO compact-progress frame at either exit',
+        !calls.broadcasts.some((b) => b.id === 'w-b3-unterm3' && b.type === 'compact-progress'));
+    }
+    // ONE implementation for both exits (the 2.331.0 lesson): a third exit added
+    // later must call it, and this is what makes that visible.
+    const csj2 = read('src/server/stdout/claude-stream-json.js');
+    const retires = csj2.match(/retireCompaction\(session, id\)/g)?.length || 0;
+    ok(`WIRING PIN: both turn-lifecycle exits retire through the ONE named function (${retires} call sites), which is the only thing that makes a THIRD exit's silence visible`,
+      /const retireCompaction = \(sess, sid\)/.test(csj2) && retires === 2
+      && /retireCompaction\(session, id\); \/\/ says so if one was in flight/.test(csj2)
+      && /if \(!eff\.streaming\) \{ session\._fallbackStopFired = false; retireCompaction\(session, id\);/.test(csj2),
+      `retireCompaction call sites=${retires}`);
+  }
   ok("'status' is listed as HANDLED so the unknown-subtype breadcrumb stops firing for the record that marks every real compaction",
     /'status',/.test(read('src/message-manager.js').slice(0, read('src/message-manager.js').indexOf('])'))));
 }
@@ -374,26 +433,215 @@ const inflight = (id) => calls.broadcasts.filter((b) => b.id === id && b.type ==
   //    "stopped" sessions (and 12 junk cwd folder groups) had accumulated in
   //    the sidebar, one per push. Measured as the CONSEQUENCE — asked of
   //    session-store, not of the filesystem.
+  //
+  //    ROUND 6 — A CLEANUP ASSERT MUST APPLY THE SWEEP'S RULE, NOT ITS OWN.
+  //    The sweep removes probe leftovers only when they are STALE (>10min):
+  //    a probe running RIGHT NOW owns a fresh cwd + transcript and must
+  //    survive, and two worktrees pushing minutes apart really do overlap (the
+  //    2 leftovers the first round-5 run swept were two other verifier
+  //    worktrees' probes, dated the same minute). Round 5 asserted ABSOLUTE
+  //    ABSENCE, so a concurrent probe — the exact case the sweep exists to
+  //    spare — turned the mandatory pre-push gate red and blamed the sweep for
+  //    it. REPRODUCED: a fresh `-tmp-vs-wire-probe-*` dir with a transcript in
+  //    the real $HOME failed BOTH readers here (the readdir one AND the
+  //    discovery one). So the probe now REPORTS its rule (`cleaned.staleMs`,
+  //    `cleaned.spared`) and both readers below filter by it, with the
+  //    consequence measured in both directions on the SAME directory.
   if (res?.ok) {
     const { cwdToProjectDir, discoverClaudeSessions } = require(path.join(REPO, 'src/session-store.js'));
     const home = process.env.HOME || os.homedir();
-    const projDir = path.join(home, '.claude', 'projects', cwdToProjectDir(res.cwd));
+    const PROJECTS = path.join(home, '.claude', 'projects');
+    const PROJ_PREFIX = cwdToProjectDir(path.join(os.tmpdir(), 'vs-wire-probe-'));
+    const projDir = path.join(PROJECTS, cwdToProjectDir(res.cwd));
+    const staleMs = res.cleaned?.staleMs;
+    // THE TWO READERS, as pure functions of (facts, threshold) so the controls
+    // below can drive them in both directions.
+    const staleLeftovers = (root, ms, now = Date.now()) => {
+      let names = []; try { names = fs.readdirSync(root); } catch { return []; }
+      return names.filter((d) => d.startsWith(PROJ_PREFIX)).filter((d) => {
+        try { return now - fs.statSync(path.join(root, d)).mtimeMs > ms; } catch { return false; }
+      });
+    };
+    const staleJunk = (list, ms, now = Date.now()) =>
+      list.filter((s) => /vs-wire-probe-/.test(s.cwd || '') && now - (s.startedAt || 0) > ms);
+
+    ok(`the probe REPORTS the sweep rule it used (staleMs=${staleMs}, spared ${res.cleaned?.spared?.length}) — a cleanup assert applies the rule instead of guessing one`,
+      Number.isFinite(staleMs) && staleMs > 0 && Array.isArray(res.cleaned?.spared), JSON.stringify(res.cleaned));
+    ok('…and everything it SPARED really is younger than that threshold (it never calls a stale leftover "concurrent")',
+      (res.cleaned?.spared || []).every((s) => s.ageMs >= 0 && s.ageMs <= staleMs), JSON.stringify(res.cleaned?.spared));
     ok(`the probe removed its own temp cwd (${res.cwd})`, !fs.existsSync(res.cwd), 'the throwaway cwd survived — it becomes a junk folder group in the sidebar');
     ok('…and the transcript the CLI wrote for it (no junk session in the user’s sidebar)', !fs.existsSync(projDir), projDir);
-    const projs = (() => { try { return fs.readdirSync(path.join(home, '.claude', 'projects')); } catch { return []; } })();
-    ok('…and it swept the leftovers of every earlier run (none of this probe’s project dirs remain)',
-      !projs.some((d) => d.startsWith(cwdToProjectDir(path.join(os.tmpdir(), 'vs-wire-probe-')))),
-      'older probe transcripts are still there — the sweep did not run');
+    ok('…and no STALE leftover of an earlier run survived the sweep',
+      staleLeftovers(PROJECTS, staleMs).length === 0,
+      `a STALE probe leftover survived the sweep: ${JSON.stringify(staleLeftovers(PROJECTS, staleMs).slice(0, 3))}`);
     // NEGATIVE CONTROL: the raw capture is deliberately KEPT, at ONE fixed path
     // outside the deleted cwd — cleanup must not mean "lost the evidence".
     ok('NEGATIVE CONTROL: the raw stdout capture survives at one fixed, overwritten path (a failure is still debuggable)',
-      typeof res.raw === 'string' && !res.raw.startsWith(res.cwd) && fs.existsSync(res.raw), res.raw);
-    // THE CONSEQUENCE, asked of the product: discovery must not see one.
-    const list = await discoverClaudeSessions({ activeSessions: new Map() });
-    const junk = list.filter((s) => /vs-wire-probe-/.test(s.cwd || ''));
-    ok(`the product’s own session discovery lists ZERO probe sessions (${list.length} sessions scanned)`, junk.length === 0,
-      JSON.stringify(junk.slice(0, 3).map((s) => ({ cwd: s.cwd, status: s.status }))));
+      typeof res.raw === 'string' && !res.raw.startsWith(res.cwd) && fs.existsSync(res.raw), `raw=${res.raw} rawSkip=${res.rawSkip}`);
+
+    // THE CONSEQUENCE, asked of the product: discovery must not see a leftover
+    // one — and must not be fooled into calling a LIVE probe one either. The
+    // control dir below is byte-for-byte what a concurrently running probe
+    // leaves behind, and it is measured at BOTH ages.
+    const ctlCwd = path.join(os.tmpdir(), `vs-wire-probe-CONCURRENT-CONTROL-${process.pid}`);
+    const ctlDir = path.join(PROJECTS, cwdToProjectDir(ctlCwd));
+    const ctlSid = 'c07c0000-0000-4000-8000-' + String(process.pid).padStart(12, '0').slice(-12);
+    const ctlJsonl = path.join(ctlDir, `${ctlSid}.jsonl`);
+    const rmCtl = () => { try { fs.rmSync(ctlDir, { recursive: true, force: true }); } catch { } };
+    process.on('exit', rmCtl); // a SIGKILL'd suite leaves a FRESH dir the next probe sweeps in 10min
+    try {
+      fs.mkdirSync(ctlDir, { recursive: true });
+      fs.writeFileSync(ctlJsonl, JSON.stringify({ type: 'user', cwd: ctlCwd, sessionId: ctlSid, message: { role: 'user', content: 'concurrent probe' } }) + '\n');
+      const listLive = await discoverClaudeSessions({ activeSessions: new Map() });
+      const junkLive = staleJunk(listLive, staleMs);
+      ok(`the product’s own session discovery lists ZERO STALE probe sessions (${listLive.length} sessions scanned)`, junkLive.length === 0,
+        JSON.stringify(junkLive.slice(0, 3).map((s) => ({ cwd: s.cwd, status: s.status, ageMs: Date.now() - (s.startedAt || 0) }))));
+      ok('REGRESSION: a probe running CONCURRENTLY (fresh cwd + transcript — what the sweep deliberately spares) fails NEITHER reader',
+        staleLeftovers(PROJECTS, staleMs).length === 0 && junkLive.length === 0
+          && listLive.some((s) => s.cwd === ctlCwd), // it IS visible — the filters skip it on AGE, not by failing to see it
+        JSON.stringify({ leftovers: staleLeftovers(PROJECTS, staleMs).slice(0, 3), junk: junkLive.length, seen: listLive.some((s) => s.cwd === ctlCwd) }));
+      // NEGATIVE CONTROL: the SAME directory, backdated past the threshold, is
+      // a real leftover — both readers must flag it, or they are vacuous.
+      const old = (Date.now() - staleMs - 60000) / 1000;
+      fs.utimesSync(ctlJsonl, old, old); fs.utimesSync(ctlDir, old, old);
+      const listOld = await discoverClaudeSessions({ activeSessions: new Map() });
+      ok('NEGATIVE CONTROL: the SAME dir backdated past the threshold IS flagged by both readers (they filter on age, they are not blind to the name)',
+        staleLeftovers(PROJECTS, staleMs).includes(path.basename(ctlDir)) && staleJunk(listOld, staleMs).some((s) => s.cwd === ctlCwd),
+        JSON.stringify({ leftovers: staleLeftovers(PROJECTS, staleMs), junk: staleJunk(listOld, staleMs).map((s) => s.cwd) }));
+    } finally { rmCtl(); }
   }
+}
+{
+  // ── ⓕ″ THE PROBE'S OWN CONTRACTS, measured deterministically ──────────────
+  //    Everything above depends on a real CLI turn, so it SKIPs on a machine
+  //    without one — and the two contracts round 6 fixed (the sweep's staleness
+  //    rule, and where the raw capture is allowed to write) are exactly the
+  //    kind that must not depend on that. These legs run the REAL probe end to
+  //    end against a FAKE claude on PATH, in an isolated HOME + TMPDIR: zero
+  //    vendor cost, no real-$HOME side effects, and every branch driven on
+  //    purpose instead of waited for.
+  const tdir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-probe-contract-'));
+  // A suite that measures "the probe leaves nothing behind" does not get to
+  // leak its own scratch tree when an assertion throws — and this name is
+  // outside the probe's sweep prefix, so nothing else would ever collect it.
+  process.on('exit', () => { try { fs.rmSync(tdir, { recursive: true, force: true }); } catch { } });
+  const bin = path.join(tdir, 'bin'), fhome = path.join(tdir, 'home'), ftmp = path.join(tdir, 'tmp');
+  for (const d of [bin, ftmp, path.join(fhome, '.claude', 'projects')]) fs.mkdirSync(d, { recursive: true });
+  // A fake `claude` that speaks just enough stream-json for the probe to finish
+  // — AND leaves the same footprint the real one does: a transcript under the
+  // encoded cwd and a per-session env dir. Without those the "left nothing
+  // behind" assertions would be vacuously true.
+  fs.writeFileSync(path.join(bin, 'claude'), `#!/usr/bin/env node
+const fs = require('fs'), path = require('path'), os = require('os');
+if (process.argv.includes('--version')) { process.stdout.write('0.0.0-fake (probe contract harness)\\n'); process.exit(0); }
+const sid = '11111111-2222-4333-8444-' + String(process.pid).padStart(12, '0').slice(-12);
+const home = process.env.HOME || os.homedir();
+const proj = path.join(home, '.claude', 'projects', process.cwd().replace(/[/._]/g, '-'));
+fs.mkdirSync(proj, { recursive: true });
+fs.writeFileSync(path.join(proj, sid + '.jsonl'), JSON.stringify({ type: 'user', cwd: process.cwd(), sessionId: sid, message: { role: 'user', content: 'probe' } }) + '\\n');
+const senv = path.join(home, '.claude', 'session-env', sid);
+fs.mkdirSync(senv, { recursive: true });
+// A LEDGER of what this run really created, outside everything the probe
+// sweeps — so the suite can assert "these exact paths existed, and are gone"
+// instead of asserting the absence of something that may never have been made.
+fs.appendFileSync(path.join(home, 'fake-cli-footprint.jsonl'), JSON.stringify({ cwd: process.cwd(), sid, proj: path.join(proj, sid + '.jsonl'), senv }) + '\\n');
+const e = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+process.stdin.on('data', () => {});
+setTimeout(() => {
+  e({ type: 'system', subtype: 'session_state_changed', state: 'running', session_id: sid });
+  e({ type: 'assistant', session_id: sid, message: { id: 'm', role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Read', input: {} }] } });
+  e({ type: 'user', session_id: sid, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'x' }] } });
+  e({ type: 'result', session_id: sid, subtype: 'success' });
+}, 30);
+setTimeout(() => process.exit(0), 60000);
+`);
+  fs.chmodSync(path.join(bin, 'claude'), 0o755);
+  const runProbe = () => {
+    const raw = require('child_process').execFileSync(process.execPath, [path.join(REPO, 'scripts/probe-claude-stdout.mjs')],
+      { encoding: 'utf8', timeout: 120000, stdio: ['ignore', 'pipe', 'ignore'], env: { ...process.env, PATH: `${bin}:/usr/bin:/bin`, HOME: fhome, TMPDIR: ftmp } });
+    return JSON.parse(String(raw).trim().split('\n').filter(Boolean).pop() || '{}');
+  };
+  const { cwdToProjectDir } = require(path.join(REPO, 'src/session-store.js'));
+  const fProjects = path.join(fhome, '.claude', 'projects');
+  const mkLeftover = (name, ageMs) => {
+    const c = path.join(ftmp, `vs-wire-probe-${name}`);
+    const d = path.join(fProjects, cwdToProjectDir(c));
+    fs.mkdirSync(d, { recursive: true }); fs.mkdirSync(c, { recursive: true });
+    fs.writeFileSync(path.join(d, '00000000-0000-4000-8000-00000000000a.jsonl'), JSON.stringify({ type: 'user', cwd: c }) + '\n');
+    const t = (Date.now() - ageMs) / 1000;
+    for (const p of [d, c]) fs.utimesSync(p, t, t);
+    return { c, d };
+  };
+  const oldOne = mkLeftover('OLD', 30 * 60 * 1000);   // a real leftover
+  const liveOne = mkLeftover('LIVE', 5 * 1000);       // a probe running right now
+  const r1 = runProbe();
+  ok(`the probe runs end-to-end against a fake CLI (${r1.version}) — the cleanup contracts are measurable with no vendor call`, r1.ok === true && r1.toolUses === 1, JSON.stringify(r1).slice(0, 300));
+  const footprints = () => (() => { try { return fs.readFileSync(path.join(fhome, 'fake-cli-footprint.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } })();
+  const fp1 = footprints();
+  ok('POSITIVE CONTROL: the fake CLI left the real one\'s footprint (a transcript under the encoded cwd + a per-session env dir) — "left nothing behind" is not vacuous',
+    fp1.length === 1 && fp1[0].cwd === r1.cwd && /vs-wire-probe-/.test(fp1[0].proj) && /session-env/.test(fp1[0].senv), JSON.stringify(fp1));
+  ok('THE SWEEP: a STALE leftover (30min) is removed — cwd AND the transcript the CLI wrote for it',
+    !fs.existsSync(oldOne.c) && !fs.existsSync(oldOne.d), JSON.stringify({ cwd: fs.existsSync(oldOne.c), proj: fs.existsSync(oldOne.d) }));
+  ok('…and a CONCURRENT one (5s) SURVIVES — killing a running probe\'s cwd out from under it is the failure this threshold exists to prevent',
+    fs.existsSync(liveOne.c) && fs.existsSync(liveOne.d));
+  ok('…and the report NAMES the spared one, with its age (the rule a reader must apply)',
+    (r1.cleaned?.spared || []).some((s) => s.name === path.basename(liveOne.d) && s.ageMs < r1.cleaned.staleMs) && r1.cleaned.swept >= 1,
+    JSON.stringify(r1.cleaned));
+  ok('…and the probe removed its OWN footprint — the exact transcript and session-env dir the CLI just created, and the temp cwd',
+    !fs.existsSync(r1.cwd) && fp1.every((f) => !fs.existsSync(f.proj) && !fs.existsSync(f.senv) && !fs.existsSync(path.dirname(f.proj))),
+    JSON.stringify({ cwd: fs.existsSync(r1.cwd), fp: fp1.map((f) => [fs.existsSync(f.proj), fs.existsSync(f.senv)]) }));
+  // THE RAW CAPTURE. Round 5 wrote it to a predictable name directly in the
+  // shared /tmp with `fs.writeFileSync`, which FOLLOWS symlinks: /tmp's sticky
+  // bit stops another local user deleting our file, not creating that name
+  // first. REPRODUCED on the round-5 script: a planted
+  // `/tmp/vs-wire-probe.last.jsonl -> victim` had the victim's contents
+  // replaced by CLI stdout, under the developer's own uid, on every push.
+  ok('POSITIVE CONTROL: the raw capture IS written, at one fixed path, in a dir this uid owns (0700)',
+    typeof r1.raw === 'string' && fs.existsSync(r1.raw) && /session_state_changed/.test(fs.readFileSync(r1.raw, 'utf8'))
+    && (fs.statSync(path.dirname(r1.raw)).mode & 0o777) === 0o700, `raw=${r1.raw} rawSkip=${r1.rawSkip}`);
+  ok('…and it is NOT a bare predictable name in the shared /tmp root (the shape that made it a symlink target)',
+    path.dirname(r1.raw) !== ftmp && path.dirname(path.dirname(r1.raw)) === ftmp, r1.raw);
+  const victim = path.join(tdir, 'victim.txt'), VICTIM = 'IMPORTANT USER FILE\n';
+  // Removing a PLANT is not `fs.rmSync(p, {force:true})`: node resolves the
+  // path first, so that throws ERR_FS_EISDIR on a symlink→directory (verified
+  // on node v24) and would never touch the link. Unlink the link itself.
+  const unplant = (p) => {
+    try { if (fs.lstatSync(p).isSymbolicLink()) { fs.unlinkSync(p); return; } } catch { return; }
+    fs.rmSync(p, { recursive: true, force: true });
+  };
+  {
+    // ATTACK A: the final component is a planted symlink.
+    fs.writeFileSync(victim, VICTIM);
+    unplant(r1.raw); fs.symlinkSync(victim, r1.raw);
+    const r2 = runProbe();
+    ok('ATTACK: a symlink planted at the capture path is NOT followed — the victim file is untouched and the probe SAYS why',
+      fs.readFileSync(victim, 'utf8') === VICTIM && r2.raw === null && /ELOOP|not a directory|open /.test(String(r2.rawSkip)), `rawSkip=${r2.rawSkip} victim=${JSON.stringify(fs.readFileSync(victim, 'utf8').slice(0, 40))}`);
+    ok('…and the probe still MEASURED the wire (a refused capture degrades the evidence, it does not fail the run)', r2.ok === true && r2.toolUses === 1, JSON.stringify(r2).slice(0, 200));
+    ok('…and the plant is still a SYMLINK afterwards — the probe never replaced it with a file of its own', fs.lstatSync(r1.raw).isSymbolicLink());
+    unplant(r1.raw);
+  }
+  {
+    // ATTACK B: the capture DIR itself is a planted symlink (the write would
+    // land wherever it points, with the final component still a fresh name).
+    const vdir = path.join(tdir, 'victimdir'); fs.mkdirSync(vdir, { recursive: true });
+    const rawDir = path.dirname(r1.raw);
+    unplant(rawDir); fs.symlinkSync(vdir, rawDir);
+    const r3 = runProbe();
+    ok('ATTACK: a symlink planted at the capture DIR is refused by name+owner check — nothing is written through it',
+      fs.readdirSync(vdir).length === 0 && r3.raw === null && /not a directory/.test(String(r3.rawSkip)), `rawSkip=${r3.rawSkip} dir=${JSON.stringify(fs.readdirSync(vdir))}`);
+    unplant(rawDir);
+    const r4 = runProbe();
+    ok('NEGATIVE CONTROL: with the plant removed the capture works again (the guard refuses an attack, it does not disable the feature)',
+      r4.raw && fs.existsSync(r4.raw) && r4.rawSkip == null, `raw=${r4.raw} rawSkip=${r4.rawSkip}`);
+    // A dir we OWN but that is group/other-writable is a shared namespace
+    // again — the whole point of moving out of /tmp. We own it, so close it.
+    fs.chmodSync(rawDir, 0o777);
+    const r5 = runProbe();
+    ok('…and a capture dir left world-writable is CLOSED before use (owning it is not enough — it has to stay ours alone)',
+      (fs.statSync(rawDir).mode & 0o777) === 0o700 && r5.raw && fs.existsSync(r5.raw) && r5.rawSkip == null,
+      `mode=${(fs.statSync(rawDir).mode & 0o777).toString(8)} rawSkip=${r5.rawSkip}`);
+  }
+  fs.rmSync(tdir, { recursive: true, force: true });
 }
 {
   // ⑨ RETRACTION on the live stream: a tombstone for a message we rendered.

@@ -125,6 +125,31 @@ function create({ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes,
     // 10-min inactivity sweep bounds any stale entry it re-creates
     session._startSubagentWatcher = startSubagentWatcher;
 
+    /** RETIRE AN IN-FLIGHT COMPACTION (§2.11, round 6). `_streamingKind ===
+     *  'compacting'` is a claim about RIGHT NOW, and the client mirrors it as a
+     *  held `_compactStage` whose `compactInFlight()` gates the whole "Prompt is
+     *  too long" guidance card. Every place the server retires that claim must
+     *  therefore SAY SO — before round 6 only the `status:null` outcome record
+     *  did, and the other two exits (`result`/`compact_boundary`, and the CLI's
+     *  own idle turn state) cleared it silently. A compaction that ends without
+     *  an outcome record is a REAL wire shape, not a theoretical one: a
+     *  PreCompact hook that BLOCKS it makes the CLI emit a bare `sdk_status
+     *  status:null` with no metadata, and the ws-handler send-site sets the kind
+     *  on `/compact` before the CLI has said anything at all. In those cases the
+     *  client kept "Compacting: running <hook> hooks…" forever and every later
+     *  card lost the rewind-and-retry sentence it exists to give.
+     *
+     *  `result:null` on purpose — "ended" is not "succeeded" (round 5): only the
+     *  CLI's own `compact_result:"success"` may be reported as finished. And the
+     *  kind is cleared HERE, so the normal path (outcome record → its own
+     *  compact_end → kind null) never produces a second frame. */
+    const retireCompaction = (sess, sid) => {
+      if (sess._streamingKind !== 'compacting') return false;
+      sess._streamingKind = null;
+      broadcastToSession(sess, sid, { type: 'compact-progress', sessionId: sid, event: 'compact_end', hookType: null, hint: null, result: null, error: null });
+      return true;
+    };
+
     ptyProcess.onData((output) => {
       if (session._reattachAttempts) session._reattachAttempts = 0;
       session.buffer += output;
@@ -458,6 +483,7 @@ function create({ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes,
             if (msg.type === 'result' || (msg.type === 'system' && msg.subtype === 'compact_boundary')) {
               if (!authoritative) session._isStreaming = false;
               session._fallbackStopFired = false; // one auto-stop per turn (claude.disableModelFallback belt)
+              retireCompaction(session, id); // says so if one was in flight (§2.11)
               session._streamingKind = null;
               newLabel = '';
             } else if (msg.type === 'system' && msg.subtype === 'session_state_changed' && isTurnState(msg.state)) {
@@ -476,7 +502,7 @@ function create({ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes,
               const changed = session._turnState !== st;
               session._turnState = st;
               session._isStreaming = eff.streaming;
-              if (!eff.streaming) { session._fallbackStopFired = false; session._streamingKind = null; }
+              if (!eff.streaming) { session._fallbackStopFired = false; retireCompaction(session, id); session._streamingKind = null; }
               if (eff.label !== null) newLabel = eff.label;
               // Only on a CHANGE (the CLI can restate the same state) — and NOT
               // through broadcastActiveSessions: the session-card payload
