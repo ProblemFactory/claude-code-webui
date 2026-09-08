@@ -84,7 +84,7 @@ function create({ rootDir, serverNotice }) {
     },
     {
       id: '2026-09-refile-readings-by-window',
-      note: "the readings-by-slot repair could only act where a member's own credential file DATED its death — one member on this instance — so every reading mis-filed BETWEEN TWO LOGGED-IN accounts survived it (its own header calls that the silent half). A weekly reset is an account fingerprint, so those entries can be proven foreign and re-filed by their window: re-attributes or archives-with-a-reason the anchors whose weekly phase is not their stream's, rescues a cache snapshot carrying another account's window, drops the learned rates, and SEEDS each account's own window so the live window guard is armed on this boot instead of on the next panel refresh. Since r4 it moves PER BUCKET — an anchor is a snapshot of a usage-cache FILE and that file has two writers, so a mis-keyed reading leaves a record that is itself a MIX (another account's 7d on top of this stream's own model-scoped bucket); measured on a copy of this instance, 444 of the 476 re-files were that shape, and moving them whole wrote another member's Fable bucket into the target's cache, which is what accountRemaining / weeklyDeadline / bucketRems read.",
+      note: "the readings-by-slot repair could only act where a member's own credential file DATED its death — one member on this instance — so every reading mis-filed BETWEEN TWO LOGGED-IN accounts survived it (its own header calls that the silent half). A weekly reset is an account fingerprint, so those entries can be proven foreign and re-filed by their window: re-attributes or archives-with-a-reason the anchors whose weekly phase is not their stream's, rescues a cache snapshot carrying another account's window, drops the learned rates, and SEEDS each account's own window so the live window guard is armed on this boot instead of on the next panel refresh. Since r4 it moves PER BUCKET — an anchor is a snapshot of a usage-cache FILE and that file has two writers, so a mis-keyed reading leaves a record that is itself a MIX (another account's 7d on top of this stream's own model-scoped bucket); measured on a copy of this instance, 444 of the 476 re-files were that shape, and moving them whole wrote another member's Fable bucket into the target's cache, which is what accountRemaining / weeklyDeadline / bucketRems read. Since r6 it also judges the machine login's SECOND snapshot, data/usage-cache.json — the boot seed of _rateLimitCache, which is not in the usage-cache directory the repair walks and, because a rebuild rewinds fetchedAt, is guaranteed to win ingestPassiveUsage's newest-wins merge for both the machine-login row and the named subscription of the same quota.",
       run() {
         const { repairByWindow } = require('../reading-repair.js');
         // Candidates to RECEIVE a re-filed reading are the CURRENT roster: a
@@ -109,12 +109,17 @@ function create({ rootDir, serverNotice }) {
         console.log('[migrate] readings-by-window:', JSON.stringify({
           identities: rep.identities.length, receivers: rep.identities.filter((x) => x.canReceive).length,
           anchors: a, caches: c,
+          // the machine login's SECOND snapshot (data/usage-cache.json, the
+          // boot seed of _rateLimitCache) — not in the usage-cache directory,
+          // and newer than anything the repair rebuilds there, so a foreign
+          // window left in it wins the newest-wins merge for BOTH panel rows
+          globalFile: rep.globalFile, globalFileWhy: rep.globalFileWhy,
         }));
         // A dropped BUCKET is its own repaired thing: 443 of this instance's 444
         // partial moves carry no whole-record action at all, so counting only
         // records would report "nothing happened" about the half of the repair
         // that touches the model caps the pool decides on.
-        const touched = (a?.refiled || 0) + (a?.archived || 0) + (a?.stripped || 0) + (c?.foreign || 0) + (c?.scopedStripped || 0);
+        const touched = (a?.refiled || 0) + (a?.archived || 0) + (a?.stripped || 0) + (c?.foreign || 0) + (c?.scopedStripped || 0) + (rep.globalFile === 'archived' ? 1 : 0);
         if (touched) {
           try {
             serverNotice?.('readings-window-repaired', `Quota bookkeeping repaired: ${touched} reading(s) whose usage window belongs to a different account were re-filed, split or archived to data/archive/ (a pool switch had filed them on the account a session was pointed at, not the one whose credentials answered). Panels and the usage estimator re-derive from the cleaned data.`, { level: 'info' });

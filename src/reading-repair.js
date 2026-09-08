@@ -991,6 +991,107 @@ function repairCachesByWindow({ cacheDir, archiveDir, windows, accounts = null, 
   return res;
 }
 
+/** THE `__global__` KEY HAS A SECOND SNAPSHOT, AND IT IS NOT IN THE DIRECTORY
+ *  (r6, reproduced end to end on a copy of this instance's stores with the real
+ *  `setupUsage()` and the real `/api/usage` route).
+ *
+ *  `repairCachesByWindow` walks the usage-cache DIRECTORY. But the machine
+ *  login's snapshot is persisted TWICE: `usage-cache/__global__.json` (written
+ *  by the statusline hook and the on-demand refresh) and `data/usage-cache.json`
+ *  — the boot seed of `_rateLimitCache`, whose `.claude` payload is the SAME
+ *  `__global__` slot (`USAGE_CACHE_FILE`; `readUsageCache` at the top of
+ *  usage-routes reads it, `writeUsageCache` is its only writer, and the
+ *  same-account merge at usage-routes ~:310-316 writes the NAMED sub's snapshot
+ *  into it whenever the two are one quota). r5 never touched that file, and
+ *  because the repair REWINDS `fetchedAt` when it rebuilds a snapshot from an
+ *  anchor, the untouched copy is GUARANTEED to win the newest-wins merge that
+ *  reads it:
+ *
+ *      if (key === '__global__') {
+ *        if (!_rateLimitCache || (u.fetchedAt > (_rateLimitCache.fetchedAt||0)))
+ *          { _rateLimitCache = u; writeUsageCache(); }
+ *
+ *  Measured on a copy of this instance's stores, one frozen snapshot, only the
+ *  repair changed: after the r5 migration `usage-cache/__global__.json` and the
+ *  named sub are clean (0.53 @ phase 1789142340) while `data/usage-cache.json`
+ *  still carries the stranger's 0.93 @ 1789491600 with the newest `fetchedAt`,
+ *  and the REAL `/api/usage` then serves 0.93 on BOTH rows — the machine login
+ *  from `_rateLimitCache`, and the named subscription because the same-account
+ *  merge hands the freshest of the pair to both. The migration is one-shot and
+ *  ledger-gated, so nothing runs again to notice.
+ *
+ *  RESOLVED WITH THE DIRECTORY HALF'S OWN ANSWER. This file is not an identity
+ *  of its own; it is a cached copy of the `__global__` KEY, so it is judged by
+ *  whatever `identityCacheKeys` said about `__global__` — asking
+ *  `identityKeyFor` again over this payload would be a second, weaker spelling
+ *  of the map r5 exists to make single. When `__global__` is unresolvable (or
+ *  the directory holds no `__global__.json` at all, so the map never names it)
+ *  the file is LEFT ALONE and said, exactly as the directory half leaves an
+ *  unresolvable key alone: a copy we cannot attribute is not a copy we may
+ *  delete.
+ *
+ *  ARCHIVE, THEN UNLINK — NOT MIRROR. The archive line goes to the same
+ *  `readings-window-usage-cache.ndjson` under `store: 'usage-cache.json'`, so
+ *  nothing is destroyed; then the file is REMOVED rather than overwritten with
+ *  the repaired directory snapshot. Removing is the smaller claim and it is
+ *  self-healing on the product's own paths: `readUsageCache()` catches and
+ *  returns null, so `_rateLimitCache` starts null and `ingestPassiveUsage`'s
+ *  `!_rateLimitCache` branch re-seeds it from the repaired
+ *  `usage-cache/__global__.json` on the first tick — which runs synchronously
+ *  inside `setupUsage`, so there is no window in which a panel is missing a row
+ *  — and if that file was emptied (no surviving own-window reading to rebuild
+ *  from) the same-account merge re-seeds it from the named sub of the same
+ *  quota. Mirroring instead would make this migration a SECOND WRITER of a
+ *  reading snapshot, owing the window filter, the identity fields and the
+ *  scoped preserve-merge that `_cacheFromAnchor` carries — a second spelling of
+ *  the file we have just written. And whatever re-seeds it afterwards comes
+ *  FROM the repaired directory, so its `fetchedAt` can never outrank it again.
+ *
+ *  ANY contradicting bucket unlinks, not just the 7-day one. The directory half
+ *  splits the two shapes (a foreign 7d is rebuilt, a foreign scoped bucket is
+ *  stripped in place) because those files hold numbers nothing else has; this
+ *  one is a COPY of a file that has just been repaired in both shapes, so the
+ *  honest repair for either is to drop the copy and let it be re-seeded. */
+function repairGlobalFile({ dataDir, cacheDir, archiveDir, windows, accounts = null, id, now = Date.now() }) {
+  const f = path.join(dataDir, 'usage-cache.json');
+  const doc = _readJson(f);
+  const cur = doc && doc.claude;
+  // no file, unreadable, or a shape whose `.claude` payload we do not
+  // recognise: nothing to judge, and nothing we may delete. (`writeUsageCache`
+  // writes exactly `{claude: _rateLimitCache}` — pinned — so archiving that
+  // payload archives the whole file.)
+  if (!cur || typeof cur !== 'object') {
+    return { state: 'absent', why: doc ? 'data/usage-cache.json exists but states no `.claude` payload — nothing to judge, and nothing we may delete' : null };
+  }
+  // the SAME answer the directory half used for this key — never a second map
+  const k = identityCacheKeys(cacheDir, windows, { accounts }).find((x) => x.key === '__global__');
+  if (!k || !k.ident) {
+    return { state: 'unresolvable', why: k ? k.why : "usage-cache/__global__.json is absent, so the directory half never resolved the '__global__' key this file is a copy of" };
+  }
+  const w = windows.get(k.ident);
+  const snap = windowOf(cur);
+  const bad = [];
+  if (snap.sevenDay && weeklyNear(snap.sevenDay, w.window.sevenDay) === false) bad.push(`7d@${weeklyPhase(snap.sevenDay)}`);
+  for (const [nm, v] of Object.entries(snap.scoped || {})) {
+    const own = w.window.scoped[nm];
+    if (own != null && weeklyNear(v, own) === false) bad.push(`${nm}@${weeklyPhase(v)}`);
+  }
+  if (!bad.length) return { state: 'clean', why: null };
+  const why = `the machine login's second snapshot (data/usage-cache.json, the boot seed of _rateLimitCache) carries ${bad.join(', ')} — not this identity's window (${windowFingerprint(w.window)}); it is newer than the repaired usage-cache/__global__.json and would win ingestPassiveUsage's newest-wins merge for BOTH the machine-login row and the named subscription of the same quota`;
+  _appendArchive(archiveDir, 'readings-window-usage-cache.ndjson', [{
+    migration: id, at: now, store: 'usage-cache.json', key: '__global__', action: 'unlinked',
+    reason: why, entry: cur,
+  }]);
+  // NOT swallowed: 'archived' claims the copy is gone, and a copy that is
+  // archived but still on disk is still the answer `/api/usage` serves. A
+  // throw is the honest outcome — the migration runner logs it VERBATIM and
+  // leaves the ledger row unwritten, so it retries on the next boot (every
+  // half of this repair is idempotent), instead of a report that says the
+  // panels were fixed while they still show the stranger.
+  fs.rmSync(f);
+  return { state: 'archived', why };
+}
+
 /** THE window repair. Same contract as repairReadings: archive-never-destroy,
  *  every archived row carries a reason, idempotent, atomic. */
 function repairByWindow({ dataDir, roster = null, accounts = null, id = 'readings-by-window', now = Date.now() }) {
@@ -1007,8 +1108,16 @@ function repairByWindow({ dataDir, roster = null, accounts = null, id = 'reading
     anchors: repairAnchorsByWindow({ anchorsDir, archiveDir, anchorFiles, windows, id, now }),
     caches: null,
   };
-  report.caches = repairCachesByWindow({ cacheDir: path.join(dataDir, 'usage-cache'), archiveDir, windows, accounts, id, now });
+  const cacheDir = path.join(dataDir, 'usage-cache');
+  report.caches = repairCachesByWindow({ cacheDir, archiveDir, windows, accounts, id, now });
+  // …and the SECOND snapshot of the `__global__` key, which is not in that
+  // directory at all (r6). Runs AFTER the directory half on purpose: it is
+  // judged by that half's own answer for `__global__`, and removing it is only
+  // self-healing once the file it will be re-seeded from has been repaired.
+  const gf = repairGlobalFile({ dataDir, cacheDir, archiveDir, windows, accounts, id, now });
+  report.globalFile = gf.state;      // 'clean' | 'archived' | 'unresolvable' | 'absent'
+  report.globalFileWhy = gf.why;     // the sentence, so the one-shot log says what happened
   return report;
 }
 
-module.exports = { repairReadings, deathMarkers, isForeign, backfillFromJournal, findJournal, repairUsageCaches, repairAnchors, repairAttribution, sessionKeysFor, _sessionKeyMap, repairByWindow, establishedWindows, identityCacheKeys, repairAnchorsByWindow, repairCachesByWindow, _cacheFromAnchor, _recordAgreesWholly, _primaryDrops, MIN_OWN_READINGS, OWN_DOMINANCE };
+module.exports = { repairReadings, deathMarkers, isForeign, backfillFromJournal, findJournal, repairUsageCaches, repairAnchors, repairAttribution, sessionKeysFor, _sessionKeyMap, repairByWindow, establishedWindows, identityCacheKeys, repairAnchorsByWindow, repairCachesByWindow, repairGlobalFile, _cacheFromAnchor, _recordAgreesWholly, _primaryDrops, MIN_OWN_READINGS, OWN_DOMINANCE };
