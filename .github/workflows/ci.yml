@@ -1,14 +1,22 @@
 # Release gate mirror (2.336.0): the same battery the pre-push hook enforces
-# locally (scripts/ci.mjs — build + gate suites + worktree boot smoke), run on
-# every push/PR so a bypassed or missing local hook still gets caught in
-# minutes. Self-hosters see the badge state before pulling an update.
+# locally, run on every push/PR so a bypassed or missing local hook still gets
+# caught in minutes. Self-hosters see the badge state before pulling an update.
+#
+# TWO JOBS since the fast/heavy split (2026-09-07): `fast` is the one whose red
+# X must arrive quickly (build + every sub-10s suite + the real haiku turn,
+# ~2 min), `heavy` is everything that needs headless chrome, a real worktree
+# server, a real agent CLI or the real opencode binary (~10 min). They run in
+# PARALLEL — heavy is not a consequence of fast, it is the other half of the
+# same battery, and making it `needs: fast` would only delay the slow signal.
+# The census (`--census`, also asserted inside `npm run build`) is what
+# guarantees the two jobs together cover every scripts/test-*.mjs.
 name: ci
 on:
   push:
     branches: [master]
   pull_request:
 jobs:
-  gate:
+  fast:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -25,4 +33,22 @@ jobs:
       - run: node scripts/ci.mjs
         env:
           # claude setup-token secret; absent on fork PRs → chat E2E SKIPs
+          VIBESPACE_CI_OAT: ${{ secrets.VIBESPACE_CI_OAT }}
+  heavy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dtach (session persistence layer the boot smokes need)
+        run: sudo apt-get update && sudo apt-get install -y dtach
+      - name: Install claude CLI
+        run: npm i -g @anthropic-ai/claude-code
+      - run: npm ci
+      # Runner images ship Chrome; the chrome suites SKIP with a reason if a
+      # future image drops it, so this never becomes a silent pass.
+      - run: node scripts/ci.mjs --heavy
+        env:
           VIBESPACE_CI_OAT: ${{ secrets.VIBESPACE_CI_OAT }}

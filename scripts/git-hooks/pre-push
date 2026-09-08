@@ -1,9 +1,19 @@
 #!/usr/bin/env bash
-# MANDATORY release gate (2.336.0, owner directive): every push runs the core
-# CI battery (scripts/ci.mjs — build + 22 gate suites + worktree boot smoke,
-# ~90s). The global repo-guard pre-push (secret scan) CHAINS to this hook, so
-# both always run. Installed into .git/hooks by scripts/install-git-hooks.mjs
-# (npm postinstall). Escape hatches:
+# MANDATORY release gate (2.336.0, owner directive) — SPLIT INTO TWO TIERS
+# (2026-09-07, B-4c5a): the single battery had grown to 11.5 min, which is
+# longer than a person will wait and longer than GitHub's SSH idle timeout, so
+# it was being skipped. Now:
+#
+#   BEFORE the push   `node scripts/ci.mjs`        build + the FAST tier + the
+#                                                  one real haiku turn (~2 min)
+#   AFTER  the push   `node scripts/ci.mjs --heavy` DETACHED, in its own
+#                                                  worktree at the pushed sha
+#   NEXT   push       blocked if a heavy run went RED anywhere in this branch's
+#                     history and no newer green has cleared it
+#
+# The global repo-guard pre-push (secret scan) CHAINS to this hook, so both
+# always run. Installed into .git/hooks by scripts/install-git-hooks.mjs (npm
+# postinstall). Escape hatches:
 #   docs-only pushes (every changed path is *.md or docs/**) skip automatically
 #   VIBESPACE_SKIP_CI=1 git push       — emergency bypass, use sparingly
 set -uo pipefail
@@ -16,11 +26,13 @@ mapfile -t REFS || true
 
 # docs-only fast path: diff every pushed range; if no code path changed, skip
 only_docs=1
+PUSHED_SHAS=()
 for line in "${REFS[@]:-}"; do
   [ -z "$line" ] && continue
   local_sha=$(echo "$line" | awk '{print $2}')
   remote_sha=$(echo "$line" | awk '{print $4}')
   [ "$local_sha" = "0000000000000000000000000000000000000000" ] && continue  # deletion
+  PUSHED_SHAS+=("$local_sha")
   if [ "$remote_sha" = "0000000000000000000000000000000000000000" ]; then
     range="$local_sha"  # new branch: inspect the tip commit only (cheap approximation)
     files=$(git show --name-only --format= "$range" 2>/dev/null)
@@ -40,17 +52,46 @@ if [ "$only_docs" = "1" ] && [ "${#REFS[@]}" -gt 0 ]; then
   exit 0
 fi
 
+# ── HEAVY-TIER VERDICT FIRST (2026-09-07) ─────────────────────────────────
+# A heavy run that went RED on a commit that is an ANCESTOR of what we are
+# about to push means the last push shipped a regression the fast tier cannot
+# see. Blocking here — before spending two minutes on the fast tier — is the
+# whole point of letting the heavy tier run after the push: the failure is
+# still reported, and it is reported before more code rides on top of it.
+# `--check-heavy` names the red sha and its failing suites, and exits 0 when a
+# newer green run has cleared it.
+if ! node scripts/ci.mjs --check-heavy >&2; then
+  exit 1
+fi
+
 # GREEN MARKER (2.369.51): scripts/ci.mjs writes .git/ci-green = "<sha> <epoch-ms>"
 # after a green run on a CLEAN tree. If it names HEAD and is < 60 min old the gate
 # already passed on this exact tree — do not re-run it inside the SSH session
-# (GitHub closes an idle connection before a ~9.5 min gate finishes).
+# (GitHub closes an idle connection before a long gate finishes).
+skip_fast=0
 marker="$(git rev-parse --git-dir)/ci-green"
 if [ -f "$marker" ]; then
   m_sha=$(awk '{print $1}' "$marker"); m_ts=$(awk '{print $2}' "$marker"); now_ms=$(( $(date +%s) * 1000 ))
   if [ "$m_sha" = "$(git rev-parse HEAD)" ] && [ -z "$(git status --porcelain)" ] && [ $(( now_ms - ${m_ts:-0} )) -lt 3600000 ]; then
-    echo "[ci] gate already GREEN on this exact tree ($(echo "$m_sha" | cut -c1-8), $(( (now_ms - m_ts) / 60000 )) min ago) — skipping the in-hook run" >&2
-    exit 0
+    echo "[ci] fast gate already GREEN on this exact tree ($(echo "$m_sha" | cut -c1-8), $(( (now_ms - m_ts) / 60000 )) min ago) — skipping the in-hook run" >&2
+    skip_fast=1
   fi
 fi
-echo "[ci] release gate (VIBESPACE_SKIP_CI=1 to bypass in an emergency)…" >&2
-node scripts/ci.mjs || { echo "[ci] GATE RED — push blocked" >&2; exit 1; }
+if [ "$skip_fast" = "0" ]; then
+  echo "[ci] release gate — fast tier (VIBESPACE_SKIP_CI=1 to bypass in an emergency)…" >&2
+  node scripts/ci.mjs || { echo "[ci] GATE RED — push blocked" >&2; exit 1; }
+fi
+
+# ── LAUNCH THE HEAVY TIER, DETACHED ───────────────────────────────────────
+# The fast tier is green, so the push is going ahead; everything the fast tier
+# cannot afford runs now, in the background, against the sha being pushed (its
+# own git worktree — the working tree keeps moving under a 10-minute run, and a
+# marker must describe the commit it names). `--heavy-launch` does the
+# detaching itself (no setsid/nohup dependency) and, crucially, hands the child
+# a SANITIZED git environment: this hook process exports GIT_DIR/GIT_INDEX_FILE
+# and the heavy suites run `git worktree add`.
+for sha in "${PUSHED_SHAS[@]:-}"; do
+  [ -z "$sha" ] && continue
+  node scripts/ci.mjs --heavy-launch "$sha" >&2 || true
+done
+exit 0

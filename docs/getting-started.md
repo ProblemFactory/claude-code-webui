@@ -108,6 +108,25 @@ npm run build
 
 Or re-run the one-line install command.
 
+## Contributing: the release gate
+
+`git push` is gated by a tracked pre-push hook (installed by `npm install`). Since 2026-09-07 the gate has **two tiers**, because one 11.5-minute battery is a gate people learn to skip:
+
+| | command | what it runs | when |
+|---|---|---|---|
+| **Fast** | `npm run ci` | build + every suite under ~10 s + one real chat turn | **before** the push — a red here blocks it |
+| **Heavy** | `npm run ci:heavy` | headless-chrome UI suites, real worktree servers, real agent CLIs, the real `opencode` binary | **after** the push, launched detached by the hook in its own worktree at the pushed commit |
+
+The heavy tier writes `data/ci-heavy/<sha>.green` or `.red` (gitignored). **A red result blocks your *next* push** — with the failing suite names and the log path — until a green heavy run exists for a newer commit. So the feedback stays out of your critical path, but nothing gets stacked on top of a commit that is known to be broken.
+
+```bash
+npm run ci          # the fast gate (what the hook runs)
+npm run ci:heavy    # the heavy tier, here and now
+npm run ci:status   # last heavy result per commit + is HEAD blocked?
+```
+
+The same rows appear in ⚙ → **Diagnostics report…** under *Release gate — heavy tier*. Docs-only pushes skip the gate entirely; `VIBESPACE_SKIP_CI=1 git push` is the emergency bypass. Every suite under `scripts/test-*.mjs` is in exactly one tier or in `scripts/ci.mjs`'s `EXCLUDED` list with a stated reason — `npm run build` fails if a new suite is in neither.
+
 ## Next steps
 
 - [Chat Mode](chat-mode.md) — Structured messages, tool visualization, permissions, subagents
