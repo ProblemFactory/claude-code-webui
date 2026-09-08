@@ -84,7 +84,8 @@ function accountKey() {
   return String(process.env.VIBESPACE_ACCOUNT_KEY || '__global__');
 }
 
-// THE READING IS ONE REQUEST OLDER THAN THE LINK (2026-09-07 r3, reproduced).
+// THE READING IS ONE REQUEST OLDER THAN THE LINK (2026-09-07 r3, reproduced;
+// generalised 2026-09-08 by inc-mts8a8mr-ulmm).
 //
 // `accountKey()` resolves the credential slot at WRITE time, but `rate_limits`
 // is the CLI's LAST API RESPONSE — made with the credentials the link pointed
@@ -94,22 +95,170 @@ function accountKey() {
 // into an anchor for an account that had produced none of it — the B-b3cd
 // odometer-flap class, on the write path.
 //
-// The server side already has this rule: `readingSlotFor` pins the slot for
-// the turn because "a re-point reaches the running CLI on its NEXT request,
-// never the reading already in flight". The statusline has no turn boundary to
-// pin against, so it uses the only evidence it has — the NUMBERS. While the
-// link has moved but the payload still carries the readings we already saw
-// under the previous target, the reading is that target's and is not re-filed.
-// The first DIFFERING payload is the first one the new credentials produced.
+// r3 answered it with the only evidence it had — the NUMBERS: while the link
+// has moved but the payload still carries readings we already saw under the
+// previous target, they are that target's. That clause is intact below, but it
+// is now the LAST rung of ONE rule shared with the server, because the payload
+// carries better evidence about itself: the WINDOW its numbers are counted in.
+// A weekly reset phase is an account fingerprint (measured across this
+// instance's whole anchor corpus), so a payload whose window is the previous
+// slot's is the previous slot's EVEN WHEN THE NUMBERS MOVED — which is exactly
+// the shape r3 could not see, and exactly the shape that cost two false pool
+// switches in 98 seconds on 2026-09-08.
+//
+// ONE RULE, TWO SPELLINGS. This file ships as a SINGLE FILE to checkout-less
+// hosts (~/.vibespace/bin) and cannot require src/, so the block below is a
+// VERBATIM mirror of src/reading-lag.js between its own sentinels — pinned
+// byte-for-byte AND functionally by scripts/test-readings-attribution.mjs §13.
+// Editing one spelling without the other is what that pin exists to catch.
 //
 // State lives beside the cache as `.slot-<id>` (no `.json`, so every
 // usage-cache scanner keeps ignoring it) and only for POOLED sessions — a
 // session with no link cannot switch under itself, so it pays nothing.
 const SLOT_STATE_MAX = 200;
+/** "the numbers", the r3 evidence: utilizations AND resets, both windows. */
 function rlFingerprint(rl) {
   const w = (x) => (x && typeof x === 'object') ? `${x.used_percentage}/${x.resets_at}` : '-';
   return `${w(rl.five_hour)}|${w(rl.seven_day)}`;
 }
+/** The account's ESTABLISHED window, as the server stamps it: only the panel
+ *  refresh (`claude -p /usage`, whose key and credential dir are one decision)
+ *  writes `ownWindow`. Absent ⇒ no established window ⇒ no evidence, and the
+ *  rule falls through to the r3 fingerprint clause exactly as before. */
+function ownWindowOf(key) {
+  try {
+    const c = JSON.parse(fs.readFileSync(path.join(CACHE_DIR, String(key).replace(/[^\w.-]/g, '_') + '.json'), 'utf-8'));
+    return (c && c.ownWindow) || null;
+  } catch { return null; }
+}
+
+// >>> reading-lag mirror (src/reading-lag.js) — keep byte-identical
+const WEEK_SEC = 604800;      // a weekly window's period; a roll is exactly this
+const JITTER_SEC = 120;       // the panel and the event stream spell one window ±60 s apart
+const SHADOW_MS = 10 * 60e3;  // a re-point stops explaining anything after this
+
+/** A weekly window's ACCOUNT-STABLE half: which instant of the week it resets
+ *  at. A roll adds exactly WEEK_SEC, so this does not move. */
+function weeklyPhase(resetsAt) {
+  const n = Number(resetsAt);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return ((n % WEEK_SEC) + WEEK_SEC) % WEEK_SEC;
+}
+/** Circular distance on the week, so 1 s past the boundary is not half a week
+ *  away from 1 s before it. */
+function weeklyNear(a, b, jitterSec = JITTER_SEC) {
+  const p = weeklyPhase(a), q = weeklyPhase(b);
+  if (p == null || q == null) return null;
+  const d = Math.abs(p - q) % WEEK_SEC;
+  return Math.min(d, WEEK_SEC - d) <= jitterSec;
+}
+function absNear(a, b, jitterSec = JITTER_SEC) {
+  const p = Number(a), q = Number(b);
+  if (!Number.isFinite(p) || !Number.isFinite(q) || p <= 0 || q <= 0) return null;
+  return Math.abs(p - q) <= jitterSec;
+}
+
+/** The window fingerprint of ANY of the shapes this codebase carries readings
+ *  in — a usage-cache snapshot, an anchor's `buckets`, the statusline's
+ *  `rate_limits`, or one parsed rate_limit_event (which names ONE bucket).
+ *  Returns {sevenDay, fiveHour, scoped:{name:resetsAt}}; absent = null, never
+ *  0, because "no window stated" and "a window at the epoch" are different
+ *  facts and only one of them is evidence. */
+function windowOf(x) {
+  const out = { sevenDay: null, fiveHour: null, scoped: {} };
+  if (!x || typeof x !== 'object') return out;
+  const pos = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : null; };
+  // one parsed rate_limit_event: {kind:'sevenDay'|'fiveHour'|'scoped', scopedName, resetsAt}
+  if (typeof x.kind === 'string' && ('resetsAt' in x) && !x.sevenDay && !x.fiveHour && !x.seven_day) {
+    const r = pos(x.resetsAt);
+    if (x.kind === 'sevenDay') out.sevenDay = r;
+    else if (x.kind === 'fiveHour') out.fiveHour = r;
+    else if (x.kind === 'scoped' && x.scopedName && r) out.scoped[String(x.scopedName).toLowerCase()] = r;
+    return out;
+  }
+  const b7 = x.sevenDay || x.seven_day;
+  const b5 = x.fiveHour || x.five_hour;
+  out.sevenDay = pos(b7 && typeof b7 === 'object' ? (b7.resetsAt ?? b7.resets_at) : b7);
+  out.fiveHour = pos(b5 && typeof b5 === 'object' ? (b5.resetsAt ?? b5.resets_at) : b5);
+  const sw = Array.isArray(x.scopedWeekly) ? x.scopedWeekly : [];
+  for (const s of sw) {
+    if (!s || !s.name) continue;
+    const r = pos(s.resetsAt ?? s.resets_at);
+    if (r) out.scoped[String(s.name).toLowerCase()] = r;
+  }
+  return out;
+}
+
+/** A stable string for "are these the same numbers" (the r3 clause). Windows
+ *  only — utilizations belong to `readingFingerprint` callers that have them. */
+function windowFingerprint(win) {
+  const w = win && win.scoped ? win : windowOf(win);
+  const sc = Object.keys(w.scoped).sort().map((k) => `${k}=${w.scoped[k]}`).join(',');
+  return `7d:${w.sevenDay || '-'}|5h:${w.fiveHour || '-'}|sc:${sc}`;
+}
+
+/** Does a reading's window say it came from `memberWindow`'s credentials?
+ *  'agree' | 'differ' | 'unknown' — three states, because "we cannot tell" must
+ *  never be spelled the same way as "yes".
+ *
+ *  WEEKLY OUTRANKS FIVE-HOUR. A weekly reset is an account property that holds
+ *  for weeks; a 5-hour window opens at the account's first request in it, so it
+ *  is only evidence while it has not yet rolled — past `nowSec` it says nothing
+ *  and a fresh 5h window on the same account is expected, not foreign. */
+function compareWindows(readingWin, memberWin, { nowSec = Math.floor(Date.now() / 1000), jitterSec = JITTER_SEC } = {}) {
+  const a = readingWin && readingWin.scoped ? readingWin : windowOf(readingWin);
+  const b = memberWin && memberWin.scoped ? memberWin : windowOf(memberWin);
+  let weekly = null;
+  const wk = weeklyNear(a.sevenDay, b.sevenDay, jitterSec);
+  if (wk !== null) weekly = wk;
+  for (const name of Object.keys(a.scoped)) {
+    const r = weeklyNear(a.scoped[name], b.scoped[name], jitterSec);
+    if (r === null) continue;
+    if (r === false) weekly = false;         // one disagreeing scoped bucket is a disagreement
+    else if (weekly === null) weekly = true;
+  }
+  if (weekly === true) return 'agree';
+  if (weekly === false) return 'differ';
+  // 5h: evidence only while the member's known window has not expired
+  if (a.fiveHour && b.fiveHour && b.fiveHour > nowSec) {
+    const r = absNear(a.fiveHour, b.fiveHour, jitterSec);
+    if (r === true) return 'agree';
+    if (r === false) return 'differ';
+  }
+  return 'unknown';
+}
+
+/** ① THE LAG SHADOW. A reading that arrives after the link moved was produced
+ *  by whichever credentials the request carried, and a re-point reaches the CLI
+ *  on its NEXT request — never the response already in flight.
+ *
+ *  Evidence order, strongest first:
+ *    · the window matches the slot we LEFT and not the one we moved to ⇒ the
+ *      previous slot (the 05:27 incident, verbatim);
+ *    · the window matches the one we moved to and not the one we left ⇒ the new
+ *      slot (the shadow is over — this is what ends it);
+ *    · neither is decidable (unknown windows, or two members that genuinely
+ *      share a weekly phase) ⇒ the r3 statusline clause: numbers identical to
+ *      the last ones seen under the previous slot are still those numbers.
+ *  BOUNDED: past `shadowMs` a re-point explains nothing, so a session that
+ *  never speaks again can never pin a slot forever. */
+function decideLagShadow({
+  prevKey = null, prevWindow = null, newKey = null, newWindow = null,
+  readingWindow = null, readingFingerprint = null, prevFingerprint = null,
+  repointAgeMs = 0, shadowMs = SHADOW_MS, nowSec = Math.floor(Date.now() / 1000), jitterSec = JITTER_SEC,
+} = {}) {
+  if (!prevKey || !newKey || prevKey === newKey) return { key: newKey, shadowed: false, why: 'no-repoint' };
+  if (!(Number(repointAgeMs) >= 0) || Number(repointAgeMs) > shadowMs) return { key: newKey, shadowed: false, why: 'shadow-expired' };
+  const cmpPrev = prevWindow ? compareWindows(readingWindow, prevWindow, { nowSec, jitterSec }) : 'unknown';
+  const cmpNew = newWindow ? compareWindows(readingWindow, newWindow, { nowSec, jitterSec }) : 'unknown';
+  if (cmpPrev === 'agree' && cmpNew === 'differ') return { key: prevKey, shadowed: true, why: 'window-of-previous-slot', cmpPrev, cmpNew };
+  if (cmpNew === 'agree' && cmpPrev === 'differ') return { key: newKey, shadowed: false, why: 'window-of-new-slot', cmpPrev, cmpNew };
+  if (readingFingerprint && prevFingerprint && readingFingerprint === prevFingerprint) {
+    return { key: prevKey, shadowed: true, why: 'identical-payload', cmpPrev, cmpNew };
+  }
+  return { key: newKey, shadowed: false, why: 'no-evidence', cmpPrev, cmpNew };
+}
+// <<< reading-lag mirror
 function slotStateFile(p) {
   const id = String((p && p.session_id) || path.basename(process.env.VIBESPACE_ACCOUNT_LINK || '')).replace(/[^\w.-]/g, '_');
   return id ? path.join(CACHE_DIR, '.slot-' + id.slice(0, 80)) : null;
@@ -141,16 +290,31 @@ function writeUsage(p) {
     const sf = slotStateFile(p);
     if (sf) {
       const fp = rlFingerprint(rl);
+      const win = windowOf(rl);
       const st = readSlotState(sf);
       // The state is updated on every OBSERVATION, not only on every write:
       // the throttle below skips most renders, and a payload seen (but not
       // written) under the old target is still evidence about which
       // credentials produced the numbers we are looking at now.
-      if (st && st.key && st.key !== key && st.fp === fp) {
-        writeSlotState(sf, { key: st.key, fp }, false);
-        return; // these numbers are the PREVIOUS slot's — leave them there
+      if (st && st.key && st.key !== key) {
+        const d = decideLagShadow({
+          prevKey: st.key, prevWindow: ownWindowOf(st.key) || st.win || null,
+          newKey: key, newWindow: ownWindowOf(key),
+          readingWindow: win, readingFingerprint: fp, prevFingerprint: st.fp || null,
+          // the age of the RE-POINT is unknown here — what we know is when we
+          // last saw this conversation under the old slot, which is never
+          // earlier, so it is the honest upper bound; a conversation that has
+          // been silent all night can no longer pin anything. A state file
+          // written before this field existed reads as age 0, i.e. exactly the
+          // r3 behaviour, rather than losing its protection on the upgrade.
+          repointAgeMs: Date.now() - (Number(st.at) || Date.now()),
+        });
+        if (d.shadowed) {
+          writeSlotState(sf, { key: st.key, fp, win, at: Number(st.at) || Date.now() }, false);
+          return; // these numbers are the PREVIOUS slot's — leave them there
+        }
       }
-      writeSlotState(sf, { key, fp }, !st);
+      writeSlotState(sf, { key, fp, win, at: Date.now() }, !st);
     }
   }
   const f = path.join(CACHE_DIR, key + '.json');

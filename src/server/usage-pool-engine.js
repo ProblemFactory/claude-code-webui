@@ -151,6 +151,16 @@ const usageAnchors = new UsageAnchors({ dataDir: path.join(rootDir, 'data') });
 // here can create a hole by forgetting to record one.
 const slotTransitions = new SlotTransitions({ dataDir: path.join(rootDir, 'data') });
 app.locals.slotTransitions = slotTransitions;
+// ── WHOSE NUMBERS ARE THESE (inc-mts8a8mr-ulmm, 2026-09-08) ────────────────
+// The slot rule of 2.369.68 is right and stays; what it could not know is that
+// the link moves while requests are IN FLIGHT. The response itself names the
+// WINDOW its numbers are counted in, and a weekly reset phase is an account
+// fingerprint (measured: one stable phase per identity across this instance's
+// whole 30-day corpus, all seven distinct). So the reading is asked which
+// credentials produced it, and that answer outranks our bookkeeping.
+// PURE rule + the statusline's verbatim mirror: src/reading-lag.js.
+const readingLag = require('../reading-lag.js');
+const READING_ARCHIVE = path.join(rootDir, 'data', 'archive', 'readings-window-mismatch.ndjson');
 // Which caches map to which identity (org-merge aware) — shared by the sweep
 // and the estimator's per-account resolution. Reads roster + cache files only.
 function usageIdentityGroups() {
@@ -572,13 +582,111 @@ function probeUsageForAccountKey(key) {
     if (s.backend !== 'claude' || s.mode !== 'chat' || s.host || !s.pty) continue;
     if (!ids.has(resolveUsageKey(s))) continue;
     return probeUsageViaSession(s).then((parsed) => {
-      if (parsed) writeUsageCacheForKey(key, parsed);
+      // the ANSWER comes from a live session's CLI, so it is the credentials
+      // that session holds that produced it — the ⟳ target is only who we
+      // ASKED about (guard ② decides who it is written for)
+      if (parsed) {
+        const target = guardReadingTarget(key, readingLag.windowOf(parsed), { session: s, what: 'control:get_usage', entry: parsed });
+        if (target) writeUsageCacheForKey(target, parsed);
+      }
       return parsed;
     });
   }
   return Promise.resolve(null);
 }
 app.locals.usageIdentityAccountIds = usageIdentityAccountIds;
+
+// ── THE ESTABLISHED WINDOW of every account we could file a reading on ──────
+// `ownWindow` is STAMPED AT THE WRITE by the ONE producer whose key and whose
+// credential dir are the SAME decision — refreshViaCliPanel's `claude -p
+// /usage` (usage-routes.js says so in its own header). It is deliberately NOT
+// inferred from whatever the last write left in `sevenDay.resetsAt`: that
+// field is exactly what a mis-filed reading overwrites, so reading the window
+// back out of it would let one bad write redefine the account and immunise
+// every later one. A member with no `ownWindow` yet simply has no established
+// window and the guard stays inert for it — no evidence, no refusal.
+// Memoised for one tick of the producers (a turn writes ~20 readings and each
+// would otherwise re-read every cache file).
+const OWN_WINDOW_TTL_MS = 5000;
+let _ownWinAt = 0, _ownWin = null;
+function establishedWindows() {
+  const now = Date.now();
+  if (_ownWin && now - _ownWinAt < OWN_WINDOW_TTL_MS) return _ownWin;
+  const out = {};
+  let files = [];
+  try { files = fs.readdirSync(USAGE_CACHE_DIR).filter((f) => f.endsWith('.json') && !f.startsWith('__models__')); } catch { }
+  for (const fn of files) {
+    try {
+      const c = JSON.parse(fs.readFileSync(path.join(USAGE_CACHE_DIR, fn), 'utf-8'));
+      if (c && c.ownWindow) out[fn.slice(0, -5)] = c.ownWindow;
+    } catch { }
+  }
+  _ownWin = out; _ownWinAt = now;
+  return out;
+}
+/** The identity GROUP a cache key belongs to, as ONE representative — an
+ *  org-merged login spans '__global__' + the named sub and must never read as
+ *  two different accounts matching one window. */
+function windowGroupOf(id) { try { return usageIdentityAccountIds(id).slice().sort()[0] || id; } catch { return id; } }
+
+/** ② THE WINDOW IDENTITY GUARD, the ONE place every value producer asks
+ *  "may this reading be written for this member". Returns the key to write on,
+ *  or null when the reading is archived instead.
+ *
+ *  DELIBERATELY NOT ON THE WALL / BANNER MARKS: those carry no window of their
+ *  own (the banner is a BOOLEAN by owner ruling — never parse text for times —
+ *  and the wall's `resetsAt` is often a bounded GUESS, `nowSec + 24h`). A guess
+ *  compared against a real window is 'differ' every time, so guarding them
+ *  would archive every exhaustion mark on the instance. Their identity has its
+ *  own protection: the turn-pinned rejection slot plus `slotOk`. */
+function guardReadingTarget(key, readingWindow, { session = null, what = 'reading', entry = null } = {}) {
+  let d;
+  try {
+    d = readingLag.decideReadingTarget({ key, readingWindow, windows: establishedWindows(), groupOf: windowGroupOf });
+  } catch (e) { console.warn('[usage] window guard failed (writing as asked):', e.message); return key; }
+  if (d.action === 'write') return key;
+  const sid = session?._webuiId || session?.claudeSessionId || '-';
+  if (d.action === 'refile') {
+    noteWindowVerdict(sid, key, d.key, () => console.log(`[usage] ${what}: window says these numbers are ${nameOf(d.key)}'s, not ${nameOf(key)}'s — re-filed (${d.reason})`));
+    global.__vsEvent?.('usage-reading-window-refiled', `${key}→${d.key}:${what}`);
+    return d.key;
+  }
+  noteWindowVerdict(sid, key, 'archive', () => console.log(`[usage] ${what}: refusing to write ${nameOf(key)} a reading from another window — archived (${d.reason})`));
+  global.__vsEvent?.('usage-reading-window-archived', `${key}:${what}`);
+  try {
+    fs.mkdirSync(path.dirname(READING_ARCHIVE), { recursive: true });
+    // BOUNDED, and the roll is APPENDED under a per-DAY name: an account whose
+    // weekly window genuinely moved keeps producing mismatches until its next
+    // panel refresh re-establishes it, ~20 readings a turn. A Date.now()-named
+    // shard would let two rolls inside one millisecond overwrite each other —
+    // the slot-transition ledger's own lesson (an archive that loses what it
+    // exists to preserve is worse than no archive).
+    try {
+      if (fs.statSync(READING_ARCHIVE).size > 5 * 1024 * 1024) {
+        const day = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+        fs.appendFileSync(READING_ARCHIVE.replace(/\.ndjson$/, `-${day}.ndjson`), fs.readFileSync(READING_ARCHIVE));
+        fs.writeFileSync(READING_ARCHIVE, '');
+      }
+    } catch { }
+    // the TARGET'S established window rides along with its own age: a reading
+    // archived because the account's window genuinely moved (a plan change) is
+    // told apart from a mis-filed one by how stale `ownWindow.at` is, and that
+    // is the whole diagnosis a human needs from the archive line
+    fs.appendFileSync(READING_ARCHIVE, JSON.stringify({ at: Date.now(), store: 'usage-cache', key, sid, what, reason: d.reason, matched: d.matched, ownWindow: establishedWindows()[key] || null, entry }) + '\n');
+  } catch { }
+  return null;
+}
+// one line per session per (target → verdict) transition: a switching pool
+// re-decides every few seconds and a per-record line would be the log
+const _windowVerdictAt = new Map();
+function noteWindowVerdict(sid, from, to, say) {
+  const k = `${sid}:${from}:${to}`;
+  if (_windowVerdictAt.get(sid) === k) return;
+  _windowVerdictAt.set(sid, k);
+  if (_windowVerdictAt.size > 512) _windowVerdictAt.delete(_windowVerdictAt.keys().next().value);
+  try { say(); } catch { }
+}
+
 // Chat-mode PASSIVE exhaustion signal (zero API calls): the CLI's own
 // "You've reached your … limit" banner marks the bucket dead in the cache and
 // immediately re-evaluates the pool — this is what makes auto-switch work for
@@ -858,15 +966,82 @@ function rejectionSlotFor(session) {
  *  lifetimes would re-create the two-answers-one-question shape this change
  *  exists to remove, and a time box would be a cliff (2.369.63's lesson). If
  *  this ever needs a belt, it belongs on noteTurnEnd — one bound, both pins. */
-function readingSlotFor(session, at = Date.now()) {
+function readingSlotFor(session, at = Date.now(), opts = {}) {
   try {
     const pin = session && session._turnReadingSlot;
     if (pin && pin.key) return { key: pin.key, slotOk: !!pin.slotOk, slotReason: 'turn-pinned', at: pin.at };
   } catch { }
   const fresh = wallSlotFor(session);
-  const out = { key: fresh.key, slotOk: !!fresh.slotOk, slotReason: fresh.slotReason, at };
+  let key = fresh.key, slotOk = !!fresh.slotOk, slotReason = fresh.slotReason, shadow = null;
+  // ① THE LAG SHADOW composes with the pin, and it is applied BEFORE the pin is
+  // set, so a pin created by a shadowed reading pins the PREVIOUS slot — the
+  // whole turn then bills where its requests actually went.
+  if (opts.window && key) {
+    shadow = lagShadowFor(session, key, opts.window, opts.fingerprint || null, at);
+    if (shadow && shadow.shadowed) {
+      key = shadow.key;
+      slotReason = 'lag-shadow:' + shadow.why;
+      try { slotOk = !!validateBillingSlot(session?._accountId || null, key).ok; } catch { slotOk = false; }
+    }
+  }
+  const out = { key, slotOk, slotReason, at, ...(shadow && shadow.shadowed ? { shadowed: true } : {}) };
   try { if (session && out.key) session._turnReadingSlot = { key: out.key, slotOk: out.slotOk, at }; } catch { }
   return out;
+}
+/** The evidence `decideLagShadow` needs, gathered from the two stores that
+ *  hold it: the transition ledger (which slot did this conversation LEAVE, and
+ *  how long ago) and the established windows. `_lastReadingFp` is the server's
+ *  twin of the statusline's `.slot-<id>` sidecar — the last window fingerprint
+ *  we saw under a given key, which is the only evidence left when two members
+ *  share a weekly phase or neither window is known. */
+function lagShadowFor(session, freshKey, readingWindow, readingFingerprint, at) {
+  try {
+    const poolId = session?._accountId || null;
+    if (!poolId || accounts.get(poolId)?.type !== 'pooled') return null;
+    const sid = session?._webuiId || null;
+    // WHICH ROWS DECIDE FOR THIS CONVERSATION — the ledger's own contract: a
+    // session that has its own link is decided by its OWN rows and the pool
+    // default is irrelevant to it; one without a link is decided by the
+    // default. Deciding on "whichever row is newest" would let another
+    // session's pool-wide move explain a reading it had nothing to do with.
+    const hasOwnLink = (() => { try { fs.lstatSync(accounts.sessionPoolLinkPath(poolId, sid)); return true; } catch { return false; } })();
+    // BOUNDED SCAN: rows are ascending, so walking back and stopping at the
+    // shadow horizon is O(the last 10 minutes), not O(the whole 20k ledger) on
+    // every reading — and a row older than the horizon could not shadow anyway.
+    const rows = slotTransitions.all();
+    let row = null;
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const r = rows[i];
+      if (r.at > at) continue;
+      if (at - r.at > readingLag.SHADOW_MS) break;
+      if (poolId && r.poolId && r.poolId !== poolId) continue;
+      if (hasOwnLink ? (sid && r.sessionId === sid) : !r.sessionId) { row = r; break; }
+    }
+    if (!row || !row.from || row.from === row.to) return null;
+    const windows = establishedWindows();
+    const last = session._lastReadingFp && session._lastReadingFp.key === row.from ? session._lastReadingFp.fp : null;
+    const d = readingLag.decideLagShadow({
+      prevKey: row.from, prevWindow: windows[row.from] || null,
+      newKey: freshKey, newWindow: windows[freshKey] || null,
+      readingWindow, readingFingerprint, prevFingerprint: last,
+      repointAgeMs: at - row.at,
+    });
+    // THE FIRST READING WHOSE FINGERPRINT DIFFERS ENDS THE SHADOW, and it stays
+    // ended: once the new credentials have demonstrably answered once, a later
+    // in-flight straggler is not evidence that they have not.
+    if (session._readingShadowEndedAt === row.at) return { key: freshKey, shadowed: false, why: 'shadow-ended' };
+    if (!d.shadowed) session._readingShadowEndedAt = row.at;
+    // A SHADOW MOVES MONEY, SO IT SAYS SO. One line per session per (target →
+    // verdict) transition, the same floor the guard uses: the incident's whole
+    // diagnosis was "which account did this number go to, and why", and the
+    // journal had nothing to say about the write that caused it.
+    if (d.shadowed) {
+      noteWindowVerdict(sid || '-', freshKey, 'shadow:' + row.from, () => console.log(
+        `[usage] reading arrived ${Math.round((at - row.at) / 1000)}s after the link moved to ${nameOf(freshKey)}, carrying ${nameOf(row.from)}'s window — filed on ${nameOf(row.from)} (${d.why})`));
+      global.__vsEvent?.('usage-reading-lag-shadow', `${freshKey}→${row.from}:${d.why}`);
+    }
+    return d;
+  } catch (e) { console.warn('[usage] lag-shadow check failed (keeping the slot):', e.message); return null; }
 }
 /** The identity + label a CONTINUE fired into this session would land on —
  *  auto-resume's `fireIdentity` dep. Deliberately wallKeyFor: the breaker's
@@ -1347,8 +1522,37 @@ function recordRateLimitEvent(session, msg) {
     // moved the link. The observation only corroborates (it names the identity
     // cached at SPAWN, so keying on it filed a hot-switched session's numbers
     // under the account it started on — the 2026-09-07 root cause).
-    const slot = ev.status === 'rejected' ? rejectionSlotFor(session) : readingSlotFor(session);
-    const key = (slot && slot.key) || usageCacheKeyFor(session);
+    // THE RECORD ITSELF NAMES ITS WINDOW (inc-mts8a8mr-ulmm). A reading event
+    // carries the reset of the bucket it reports, and a weekly reset phase is
+    // an account fingerprint — so the response can be asked which credentials
+    // produced it, which is strictly better evidence than any bookkeeping of
+    // ours about what the process is reading. A REJECTION deliberately keeps
+    // the turn-pinned rejection slot untouched (its resetsAt is frequently
+    // absent or a bounded guess, and its identity has its own r3 pin).
+    const win = ev.status === 'rejected' ? null : readingLag.windowOf(ev);
+    // THE FINGERPRINT IS "THE NUMBERS", not "the window" (caught by the shared-
+    // phase leg of test-readings-attribution §14). The r3 clause says *the link
+    // moved but the numbers did not*, and a window alone almost never moves —
+    // fingerprinting only the window would shadow nearly every reading that
+    // follows a re-point between two members sharing a weekly phase. The
+    // statusline's `rlFingerprint` has always carried used_percentage for both
+    // buckets; this is the same fact in this producer's own shape.
+    const fp = win ? `${readingLag.windowFingerprint(win)}|k:${ev.kind}|u:${ev.utilization ?? '-'}` : null;
+    const slot = ev.status === 'rejected' ? rejectionSlotFor(session) : readingSlotFor(session, Date.now(), { window: win, fingerprint: fp });
+    let key = (slot && slot.key) || usageCacheKeyFor(session);
+    if (win) {
+      const target = guardReadingTarget(key, win, { session, what: 'rate-limit-event:' + ev.kind, entry: { ev, slot } });
+      if (!target) return;                       // archived with a reason — never written where it provably does not belong
+      if (target !== key) {
+        key = target;
+        // the window is better evidence than the pin that produced the wrong
+        // answer, so the REST of the turn follows it too (the 06:10:46Z shape:
+        // a pin held from before three re-points filed one member's fresh
+        // numbers on another for the whole turn)
+        try { session._turnReadingSlot = { key, slotOk: !!validateBillingSlot(session?._accountId || null, key).ok, at: Date.now() }; } catch { }
+      }
+      try { session._lastReadingFp = { key, fp }; } catch { }
+    }
     const corr = corroborateReading(session, key, 'rate-limit-event:' + ev.kind);
     const r = captureRateLimitEvent({ cacheDir: USAGE_CACHE_DIR, key, identityIds: usageIdentityAccountIds(key), ev, corroborated: corr ? corr.agree : undefined });
     if (r.unknownType) { global.__vsEvent?.('rate-limit-event-unknown-type', r.unknownType); return; }
@@ -1392,7 +1596,17 @@ function recordCodexQuotaSignal(session, payload) {
       // is a VALUE like every other, so it goes through the same turn-pinned
       // validated slot instead of re-deriving "the pool's current member" per
       // record. codexQuotaKeyFor is the un-pinned twin (probe matching).
-      const key = readingSlotFor(session).key || codexQuotaKeyFor(session);
+      // …and through the same window guard: `capsOf('codex').hotSwitch` is
+      // 'impossible', so codex has no re-point to lag behind — but the guard is
+      // about WHOSE numbers these are, and a key that is wrong for any other
+      // reason is wrong the same way. The synthesized spent-bucket snapshot on
+      // `task_failed` states no reset it did not receive, so it is inert there.
+      const _k0 = readingSlotFor(session).key || codexQuotaKeyFor(session);
+      const key = guardReadingTarget(_k0, readingLag.windowOf(snap), { session, what: 'codex:' + source, entry: snap });
+      // an ARCHIVED reading is not an unparseable one — the waiter must be told
+      // which of the two happened (a probe that says "unparseable" about a
+      // perfectly good payload sends the next reader hunting the wrong bug)
+      if (!key) return { key: null, snap, archived: true };
       // STAMP THE PRODUCER AT THE WRITE (2026-09-07 r3, reproduced): the
       // provenance line reads `snap.source`, and `normalizeCodexRateLimit` is
       // a PURE payload mapper that cannot know which channel carried it — so
@@ -1462,8 +1676,9 @@ function recordCodexQuotaSignal(session, payload) {
       const w = writeSnap(snap0, 'codex-rate-limits');
       // an rpc-rate-limits probe waiting on this session settles AFTER the
       // cache write — its next quotaVerdictFor already reads the fresh file
-      settleCodexLimitsWaiters(session, w ? { ok: true } : { ok: false, reason: 'unparseable rateLimits' });
-      if (!w) return;
+      settleCodexLimitsWaiters(session, w && w.key ? { ok: true }
+        : { ok: false, reason: w && w.archived ? 'the reading\'s window is not this account\'s (archived)' : 'unparseable rateLimits' });
+      if (!w || !w.key) return;
       global.__vsEvent?.('codex-rate-limits', `${w.key}${w.snap.rateLimitReachedType ? ':reached-' + w.snap.rateLimitReachedType : ''}`);
       if (sig.kind === 'exhausted') {
         const tripped = sig.tripped; // the window rate_limit_reached_type named
@@ -1563,6 +1778,13 @@ function markLimitBanner(session, text) {
       try { const c = JSON.parse(fs.readFileSync(fileFor(id), 'utf-8')) || {}; if ((Number(c.fetchedAt) || 0) > baseAt) { baseAt = Number(c.fetchedAt) || 0; base = c; } } catch {}
     }
     const cache = applyHit(base ? { ...base } : {});
+    // `ownWindow` belongs to the FILE, not to the freshest sibling this write
+    // is based on (same rule as captureRateLimitEvent — carrying a sibling's
+    // through, or dropping this key's, disarms the window guard silently)
+    try {
+      const own = JSON.parse(fs.readFileSync(fileFor(key), 'utf-8'));
+      if (own && own.ownWindow) cache.ownWindow = own.ownWindow; else delete cache.ownWindow;
+    } catch { delete cache.ownWindow; }
     cache.fetchedAt = Date.now(); cache.source = 'limit-banner';
     if (corr) cache.corroborated = !!corr.agree; else delete cache.corroborated;
     fs.mkdirSync(USAGE_CACHE_DIR, { recursive: true });

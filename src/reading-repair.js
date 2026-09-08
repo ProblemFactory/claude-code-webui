@@ -121,7 +121,11 @@ function backfillFromJournal(text, transitions) {
 }
 
 // ── ② usage-cache repair ────────────────────────────────────────────────────
-const IDENTITY_FIELDS = ['orgUuid', 'orgName', 'orgEmail', 'email', 'name'];
+// `ownWindow` rides with the identity fields on purpose: the window an
+// account's buckets are counted in is a fact about WHO the account is, not a
+// reading, and dropping it while rebuilding a cache would silently disarm the
+// window guard for that member until its next panel refresh.
+const IDENTITY_FIELDS = ['orgUuid', 'orgName', 'orgEmail', 'email', 'name', 'ownWindow'];
 /** Rebuild a cache snapshot from a surviving anchor (a REAL past reading of
  *  this account, correctly dated) — identity fields are carried over because
  *  they are facts about WHO the account is, not readings. */
@@ -427,4 +431,206 @@ function findJournal(dataDir) {
   return null;
 }
 
-module.exports = { repairReadings, deathMarkers, isForeign, backfillFromJournal, findJournal, repairUsageCaches, repairAnchors, repairAttribution, sessionKeysFor, _sessionKeyMap };
+// ── ④ THE WINDOW REPAIR (inc-mts8a8mr-ulmm, 2026-09-08) ─────────────────────
+// The 2026-09-07 repair could only act where a member's own credential file
+// DATED its death — on this instance that was ONE member (`members:1` in the
+// migration's own log), so every entry mis-filed BETWEEN TWO LOGGED-IN members
+// survived it, invisible by construction: that is the "silent half" its own
+// header names.
+//
+// The reading itself carries the evidence that repair lacked. A weekly reset is
+// an account property — measured over this instance's whole corpus (6 634
+// anchors, 30 days, 7 live subscriptions) each identity has exactly ONE weekly
+// reset phase, stable across the period, and the seven are all distinct; a roll
+// moves `resetsAt` by exactly one week, so the PHASE survives it. An entry
+// whose weekly phase is not its stream's is therefore provably not that
+// account's, whatever the account's login was doing at the time.
+//
+// STRICTLY EVIDENCE-LED, like ②: an identity establishes its window only from
+// its OWN on-demand (panel) readings — the producer whose key and credential
+// dir are one decision — and only with enough of them to be a fact rather than
+// a coincidence. Candidates for RE-FILING are further restricted to identities
+// whose account is still on the roster: a removed subscription cannot receive
+// readings, and on this instance one removed account shares PandyMax's weekly
+// phase, which would make every genuinely re-filable entry ambiguous.
+const MIN_OWN_READINGS = 5;   // fewer than this is a coincidence, not a window
+const OWN_DOMINANCE = 0.9;    // a stream whose own panel readings disagree with themselves establishes nothing
+const { weeklyNear, weeklyPhase, windowOf, windowFingerprint, decideReadingTarget } = require('./reading-lag.js');
+
+/** identityKey → {window, accountId, phase, n, total} from that stream's OWN
+ *  on-demand readings. `roster` (account ids) decides who may RECEIVE a
+ *  re-filed entry; every stream is still a SUBJECT of the check. */
+function establishedWindows(anchorFiles, { roster = null } = {}) {
+  const out = new Map();
+  for (const f of anchorFiles) {
+    const buckets = new Map();  // representative phase → {n, resetsAt, at}
+    const accts = new Map();
+    for (const r of f.rows) {
+      if (!r) continue;
+      accts.set(r.accountId || '__global__', (accts.get(r.accountId || '__global__') || 0) + 1);
+      if (r.source !== 'on-demand') continue;
+      const ra = r.buckets?.sevenDay?.resetsAt;
+      if (!ra) continue;
+      let hit = null;
+      for (const p of buckets.keys()) if (weeklyNear(p, ra)) { hit = p; break; }
+      const k = hit == null ? weeklyPhase(ra) : hit;
+      const cur = buckets.get(k) || { n: 0, resetsAt: ra, at: 0 };
+      cur.n++;
+      if ((r.fetchedAt || 0) >= cur.at) { cur.at = r.fetchedAt || 0; cur.resetsAt = ra; }
+      buckets.set(k, cur);
+    }
+    const total = [...buckets.values()].reduce((a, b) => a + b.n, 0);
+    if (!total) continue;
+    const [phase, top] = [...buckets.entries()].sort((a, b) => b[1].n - a[1].n)[0];
+    if (top.n < MIN_OWN_READINGS || top.n / total < OWN_DOMINANCE) continue;
+    const accountId = [...accts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+    out.set(f.name.replace(/^anchors-|\.ndjson$/g, ''), {
+      file: f, phase, n: top.n, total, accountId,
+      window: { sevenDay: top.resetsAt, fiveHour: null, scoped: {} },
+      canReceive: !roster || roster.includes(accountId),
+    });
+  }
+  return out;
+}
+
+/** Re-file or archive every anchor whose window is not its stream's, then
+ *  re-chain what that broke. A moved record is INSERTED IN TIME ORDER into the
+ *  owning stream with `prevFetchedAt`/`costSince` voided: its Δu is real for
+ *  that account but the cost interval it was measured over is not, and
+ *  `extractPairs` pairs on the explicit chain, so an unchained record teaches
+ *  nothing and breaks nothing (it is data, kept, never a forged pair). */
+function repairAnchorsByWindow({ anchorsDir, archiveDir, anchorFiles, windows, id, now = Date.now() }) {
+  const res = { streams: 0, refiled: 0, archived: 0, voided: 0, ratesReset: false, byTarget: {} };
+  const receivers = [...windows.entries()].filter(([, w]) => w.canReceive);
+  const winMap = {}; for (const [k, w] of receivers) winMap[k] = w.window;
+  const moves = new Map();  // target identityKey → [rows]
+  const archived = [];
+  const touched = new Set();
+  for (const [ident, info] of windows) {
+    const f = info.file;
+    const keep = [], gone = [];
+    for (const r of f.rows) {
+      const win = windowOf(r.buckets || {});
+      if (!win.sevenDay) { keep.push(r); continue; }
+      const d = decideReadingTarget({ key: ident, readingWindow: win, windows: { ...winMap, [ident]: info.window } });
+      if (d.action === 'write') { keep.push(r); continue; }
+      gone.push(r);
+      if (d.action === 'refile') {
+        const tgt = windows.get(d.key);
+        const row = {
+          ...r, accountId: tgt.accountId === '__global__' ? null : tgt.accountId, identityKey: d.key,
+          prevFetchedAt: null, elapsedSec: null, costSince: null, calib: undefined, accountIds: undefined,
+          repairedBy: id, refiledFrom: ident, refiledReason: d.reason,
+        };
+        delete row.calib; delete row.accountIds;
+        (moves.get(d.key) || moves.set(d.key, []).get(d.key)).push(row);
+        archived.push({ migration: id, at: now, store: 'usage-anchors', file: f.name, action: 'refiled', to: d.key, reason: d.reason, entry: r });
+        res.refiled++;
+        res.byTarget[d.key] = (res.byTarget[d.key] || 0) + 1;
+      } else {
+        archived.push({ migration: id, at: now, store: 'usage-anchors', file: f.name, action: 'archived', reason: d.reason, entry: r });
+        res.archived++;
+      }
+    }
+    if (!gone.length) continue;
+    res.streams++;
+    keep.sort((a, b) => (a.fetchedAt || 0) - (b.fetchedAt || 0));
+    const dropped = new Set(gone.map((r) => r.fetchedAt));
+    for (let i = 0; i < keep.length; i++) {
+      const r = keep[i];
+      if (r.prevFetchedAt == null || !dropped.has(r.prevFetchedAt)) continue;
+      const prev = i > 0 ? keep[i - 1] : null;
+      r.prevFetchedAt = prev ? prev.fetchedAt : null;
+      r.elapsedSec = prev ? Math.round((r.fetchedAt - prev.fetchedAt) / 1000) : null;
+      r.costSince = null;
+      r.repairedBy = id;
+      res.voided++;
+    }
+    f.rows = keep;
+    touched.add(ident);
+  }
+  for (const [ident, rows] of moves) {
+    const tgt = windows.get(ident);
+    if (!tgt) continue;
+    tgt.file.rows = [...tgt.file.rows, ...rows].sort((a, b) => (a.fetchedAt || 0) - (b.fetchedAt || 0));
+    touched.add(ident);
+  }
+  if (!touched.size) return res;
+  _appendArchive(archiveDir, 'readings-window-anchors.ndjson', archived);
+  for (const ident of touched) {
+    const f = windows.get(ident).file;
+    _writeAtomic(f.file, f.rows.map((r) => JSON.stringify(r)).join('\n') + (f.rows.length ? '\n' : ''));
+  }
+  const rates = path.join(anchorsDir, 'rates.json');
+  const cur = _readJson(rates);
+  if (cur) {
+    _appendArchive(archiveDir, 'readings-window-rates.ndjson', [{ migration: id, at: now, store: 'usage-anchors/rates.json', reason: 'learned from pairs that included readings of another account — re-learned from the cleaned set', entry: cur }]);
+    try { fs.unlinkSync(rates); } catch { }
+    res.ratesReset = true;
+  }
+  return res;
+}
+
+/** Seed `ownWindow` into every roster account's cache, and rescue a cache whose
+ *  CURRENT snapshot is another account's window.
+ *  The seed is what ARMS the live guard on the upgrade: `ownWindow` is stamped
+ *  only by the panel refresh, so without it the guard would stay inert on every
+ *  account until its next `claude -p /usage` — up to the refresher's whole
+ *  wandering 30-60 min idle interval, on exactly the machine we have just
+ *  proven has the bug. */
+function repairCachesByWindow({ cacheDir, archiveDir, windows, id, now = Date.now() }) {
+  const res = { seeded: 0, foreign: 0, restored: 0 };
+  const byAcct = new Map();
+  for (const [ident, w] of windows) if (w.canReceive && w.accountId) byAcct.set(w.accountId, { ident, ...w });
+  for (const [acct, w] of byAcct) {
+    const fp = path.join(cacheDir, String(acct).replace(/[^\w.-]/g, '_') + '.json');
+    const cur = _readJson(fp);
+    if (!cur) continue;
+    const snap = windowOf(cur);
+    let next = cur;
+    if (snap.sevenDay && weeklyNear(snap.sevenDay, w.window.sevenDay) === false) {
+      res.foreign++;
+      _appendArchive(archiveDir, 'readings-window-usage-cache.ndjson', [{
+        migration: id, at: now, store: 'usage-cache', key: acct,
+        reason: `snapshot window ${windowFingerprint(snap)} is not this account's (${windowFingerprint(w.window)})`,
+        entry: cur,
+      }]);
+      // the newest reading of this account that is ITS OWN window
+      let best = null;
+      for (const r of w.file.rows) {
+        const rw = windowOf(r.buckets || {});
+        if (!rw.sevenDay || weeklyNear(rw.sevenDay, w.window.sevenDay) !== true) continue;
+        if (!best || (r.fetchedAt || 0) > (best.fetchedAt || 0)) best = r;
+      }
+      if (best) { next = _cacheFromAnchor(best, cur); res.restored++; }
+      else {
+        next = {};
+        for (const k of IDENTITY_FIELDS) if (cur[k] !== undefined) next[k] = cur[k];
+        next.repairedBy = id;
+      }
+    }
+    next.ownWindow = { ...w.window, at: now, source: 'on-demand', seededBy: id };
+    res.seeded++;
+    _writeAtomic(fp, JSON.stringify(next));
+  }
+  return res;
+}
+
+/** THE window repair. Same contract as repairReadings: archive-never-destroy,
+ *  every archived row carries a reason, idempotent, atomic. */
+function repairByWindow({ dataDir, roster = null, id = 'readings-by-window', now = Date.now() }) {
+  const archiveDir = path.join(dataDir, 'archive');
+  const anchorsDir = path.join(dataDir, 'usage-anchors');
+  const anchorFiles = _readAnchorFiles(anchorsDir);
+  const windows = establishedWindows(anchorFiles, { roster });
+  const report = {
+    id, at: now,
+    identities: [...windows.entries()].map(([k, w]) => ({ key: k, accountId: w.accountId, phase: w.phase, own: w.n, of: w.total, canReceive: w.canReceive })),
+    anchors: repairAnchorsByWindow({ anchorsDir, archiveDir, anchorFiles, windows, id, now }),
+    caches: null,
+  };
+  report.caches = repairCachesByWindow({ cacheDir: path.join(dataDir, 'usage-cache'), archiveDir, windows, id, now });
+  return report;
+}
+
+module.exports = { repairReadings, deathMarkers, isForeign, backfillFromJournal, findJournal, repairUsageCaches, repairAnchors, repairAttribution, sessionKeysFor, _sessionKeyMap, repairByWindow, establishedWindows, repairAnchorsByWindow, repairCachesByWindow, MIN_OWN_READINGS, OWN_DOMINANCE };

@@ -83,6 +83,35 @@ function create({ rootDir, serverNotice }) {
       },
     },
     {
+      id: '2026-09-refile-readings-by-window',
+      note: "the readings-by-slot repair could only act where a member's own credential file DATED its death — one member on this instance — so every reading mis-filed BETWEEN TWO LOGGED-IN accounts survived it (its own header calls that the silent half). A weekly reset is an account fingerprint, so those entries can be proven foreign and re-filed by their window: re-attributes or archives-with-a-reason the anchors whose weekly phase is not their stream's, rescues a cache snapshot carrying another account's window, drops the learned rates, and SEEDS each account's `ownWindow` so the live window guard is armed on this boot instead of on the next panel refresh.",
+      run() {
+        const { repairByWindow } = require('../reading-repair.js');
+        // Candidates to RECEIVE a re-filed reading are the CURRENT roster: a
+        // removed subscription cannot hold readings, and on this instance a
+        // removed account shares a live one's weekly phase — counting it would
+        // make every genuinely re-filable entry ambiguous. Read straight off
+        // disk (this runs before any AccountManager exists).
+        let roster = null;
+        try {
+          const st = JSON.parse(fs.readFileSync(path.join(dataDir, 'accounts.json'), 'utf-8'));
+          roster = (st?.accounts || []).filter((a) => a && a.id && a.type === 'subscription').map((a) => a.id);
+        } catch { }
+        const rep = repairByWindow({ dataDir, roster, id: '2026-09-refile-readings-by-window' });
+        const a = rep.anchors, c = rep.caches;
+        console.log('[migrate] readings-by-window:', JSON.stringify({
+          identities: rep.identities.length, receivers: rep.identities.filter((x) => x.canReceive).length,
+          anchors: a, caches: c,
+        }));
+        const touched = (a?.refiled || 0) + (a?.archived || 0) + (c?.foreign || 0);
+        if (touched) {
+          try {
+            serverNotice?.('readings-window-repaired', `Quota bookkeeping repaired: ${touched} reading(s) whose usage window belongs to a different account were re-filed or archived to data/archive/ (a pool switch had filed them on the account a session was pointed at, not the one whose credentials answered). Panels and the usage estimator re-derive from the cleaned data.`, { level: 'info' });
+          } catch { }
+        }
+      },
+    },
+    {
       id: '2026-08-archive-dormant-task-plans',
       note: 'dormant checklist plan arrays (feature removed 2.121.0) → data/archive/',
       run() {
