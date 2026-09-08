@@ -1760,23 +1760,54 @@ if (fs.existsSync('/proc/self')) {
       why: 'ARGV READ (vs_argv, the no-/proc rung). It asks for a VALUE, never for existence: a `ps` that cannot answer yields an empty word, and an empty argv word already means "no evidence" to vs_is_cli / vs_known.' },
     { file: 'src/cli-identity.js', needle: 'ps -p "$1" >/dev/null 2>&1',
       why: 'THE no-/proc rung of `vs_alive` itself — the one existence `ps -p` in the tree, and the LAST rung of a positive-evidence ladder (kill -0, then [ -d /proc/N ]), so a busybox `ps` that cannot answer merely declines to add evidence instead of deciding.' },
+    { file: 'src/cli-identity.js', needle: `execImpl('ps', ['-p', String(pid), '-o', 'uid=,args=']`,
+      why: 'ARGV+UID READ (readPsIdentity, the no-/proc rung of the {uid, argv} ladder every signalling caller shares since B-eac2 residual (c) — opencode-serve\'s keeper and the shipped ssh op were its other spellings). It asks for a VALUE: an unanswerable `ps` yields `null`, which the callers read as "no evidence", never as "gone". Existence is `kill -0` (pidAlive / pidAliveShellFn), and classifyRecordedPid turns this null into the verdicts that REFUSE to signal, never into a licence to.' },
+    { file: 'data/bin/vibespace-opencode-op', needle: `execImpl('ps', ['-p', String(pid), '-o', 'uid=,args=']`,
+      why: 'The SHIPPED PARITY TWIN of the row above — a checkout-less ssh host cannot require src/cli-identity.js, which is the documented exception the usage scanner also lives under. Same ladder, same value-not-existence rule, driven against the local rung by scripts/test-opencode-remote.mjs.' },
     { file: 'src/writer-sweep.js', needle: `ps -p "$1" -o args= 2>/dev/null | tr ' '`,
       why: 'ARGV READ (vs_sid_of: the PROTECT session id out of argv). Existence is the caller\'s open-fd evidence, not this line.' },
     { file: 'src/writer-sweep.js', needle: `ps -p "$1" -E -o command=`,
       why: 'ENVIRON READ (vs_sid_of\'s BSD rung, same value, same non-decision).' },
+    // ── the JS spelling (`execFileSync('ps', ['-p', …])`), invisible to this
+    //    sweep until B-eac2 residual (c) taught `namesPsP` about it. Every one
+    //    of these existed before that and every one of them is a VALUE read;
+    //    what was missing was the REASON, which is the thing the sweep is for.
+    { file: 'src/cli-identity.js', needle: `execFileSync('ps', ['-p', String(pid), '-o', 'args=']`,
+      why: 'ARGV READ — the JS twin of vs_argv\'s allowlisted `ps -p "$1" -o args=` rung, same non-decision: an unanswerable `ps` yields the empty word that already means "no evidence" to isCliProcess.' },
+    { file: 'src/agentd/agentd.js', needle: `spawnSync('ps', ['-p', String(pid), '-o', 'lstart=']`,
+      why: 'START-TIME READ (the no-/proc rung of the pid-identity stamp): it makes a recycled pid DISTINGUISHABLE from the original. An unanswerable `ps` returns \'\' = "no stamp", which is compared as a non-match and therefore never credits a stranger with being ours.' },
+    { file: 'src/agentd/agentd.js', needle: `execFileSync('ps', ['-p', String(pid), '-o', 'command=']`,
+      why: 'ARGV READ inside the single-instance lock check, and existence is decided on the NEXT line by `process.kill(pid, 0)`. The empty answer is deliberately treated as "could be ours" (it BLOCKS a second daemon) — the conservative direction, the opposite of a false all-clear.' },
+    { file: 'src/session-store.js', needle: `execFileSync('ps', ['-p', String(pid), '-o', 'ppid=']`,
+      why: 'PARENT READ (tmux pane lookup, sync twin): the answer names a pane or does not. It signals nothing and decides no liveness.' },
+    { file: 'src/session-store.js', needle: `execFileP('ps', ['-p', String(pid), '-o', 'ppid=']`,
+      why: 'PARENT READ (the async twin of the line above, on the discovery sweep path).' },
+    { file: 'src/session-store.js', needle: `execFileP('ps', ['-p', String(pid), '-o', 'comm=']`,
+      why: 'NAME READ — `isProcessClaudeAsync`, the documented B-3185 r4 twin: its ONE caller is isLockClaude, it decides whether a CARD READS RUNNING, and it is on no kill path (the /api/kill-pid gate asks src/cli-identity.js instead). Kept because the path that reaches it is macOS-per-lock, where the shared predicate is synchronous — a per-lock blocking fork is the 2.242.0 stall.' },
     { file: 'scripts/vibespace-agentd-install.sh', needle: `OLDCMD=$(ps -p "$OLDPID" -o command=`,
       why: 'ARGV READ; existence was already decided one line above by `kill -0 "$OLDPID"`, and an unreadable answer falls through to NOT killing.' },
     { file: 'scripts/vibespace-agentd-install.sh', needle: `case "$(ps -p "$P" -o command=`,
       why: 'ARGV READ gated by `kill -0 "$P" || return 1`, and daemon_up explicitly ACCEPTS the empty answer (`""` is a matching case) — a `ps` that cannot answer never reports a healthy daemon as down.' },
   ];
   const isComment = (l) => /^\s*(\/\/|\*|\/\*|#)/.test(l);
+  // `ps -p` HAS TWO SPELLINGS AND ONLY ONE OF THEM IS A STRING (B-eac2 residual
+  // (c)). Shell text says `ps -p "$1"`; JS says
+  // `execFileSync('ps', ['-p', String(pid), …])`, where the flag and the
+  // program never touch. The sweep's whole claim is "no `ps -p` on a
+  // kill/signal path outside the allowlist", and until this pattern existed the
+  // claim silently excluded every JS caller — including src/opencode-serve.js,
+  // which killPid()s, and which carried an unlisted uid+argv read for three
+  // rounds while this suite stayed green. Both spellings are the same probe and
+  // owe the same reason.
+  const PS_ARGV_JS = /['"`]ps['"`]\s*,\s*\[\s*['"`]-p['"`]/;
+  const namesPsP = (line) => line.includes('ps -p') || PS_ARGV_JS.test(line);
   // The line scanner, used against BOTH files on disk and the shell text a
   // builder composes at RUNTIME (leg (k) — a source scan cannot see a probe
   // assembled from pieces).
   const scanPsP = (label, text, allow) => {
     const stray = [], hit = new Set();
     String(text).split('\n').forEach((line, i) => {
-      if (isComment(line) || !line.includes('ps -p')) return;
+      if (isComment(line) || !namesPsP(line)) return;
       const a = allow.find((x) => (x.file === label || x.file === '*') && line.includes(x.needle));
       if (a) hit.add(a2key(a)); else stray.push(`${label}:${i + 1}: ${line.trim().slice(0, 90)}`);
     });
@@ -1943,6 +1974,28 @@ if (fs.existsSync('/proc/self')) {
     '#!/bin/sh\nkill -s TERM "$1" 2>/dev/null || kill -15 "$1" || kill "$1"\nif ps -p "$1" >/dev/null 2>&1; then echo ALIVE; fi\n');
   fs.writeFileSync(path.join(ncRoot, 'src', 'handle-kill.js'),
     'function stop(h, pid) { h.kill(); return `ps -p ${pid} >/dev/null 2>&1`; }\n');
+  // ⑪ THE JS SPELLING (B-eac2 residual (c)): `execFileSync('ps', ['-p', …])`
+  //    is the same probe with the flag in an argv array, so the string `ps -p`
+  //    never appears. Until `namesPsP` learned it, EVERY JS caller was outside
+  //    the sweep's claim — six of them were live in this tree, one of them in a
+  //    module that killPid()s. Both the stray and the allowlisted forms are
+  //    controlled here so the pattern cannot rot into "matches nothing".
+  fs.writeFileSync(path.join(ncRoot, 'src', 'js-ps-probe.js'),
+    'const { execFileSync } = require("child_process");\n'
+    + 'function stop(pid) {\n'
+    + '  process.kill(pid, "SIGTERM");\n'
+    + '  try { execFileSync("ps", ["-p", String(pid)], { encoding: "utf8" }); return "ALIVE"; } catch { return "GONE"; }\n'
+    + '}\n');
+  //    …and the pattern must not fire on a DIFFERENT program that merely takes
+  //    a `-p` flag: over-inclusion in the FILE set is harmless (it only widens
+  //    enforcement), but a needle that flagged `psql` would force reasons to be
+  //    written for lines that are not this probe at all.
+  fs.writeFileSync(path.join(ncRoot, 'src', 'js-not-ps.js'),
+    'const { execFileSync } = require("child_process");\n'
+    + 'function dump(pid) {\n'
+    + '  process.kill(pid, "SIGTERM");\n'
+    + '  return execFileSync("psql", ["-p", "5432", "-c", "select 1"], { encoding: "utf8" });\n'
+    + '}\n');
   const nc = sweepKillPaths(ncRoot, PS_P_ALLOWED);
   const ncStray = (f) => nc.stray.some((s) => s.startsWith(f + ':'));
   ok(ncStray('src/server/new-kill-path.js'),
@@ -1952,6 +2005,11 @@ if (fs.existsSync('/proc/self')) {
     'NEGATIVE CONTROL: an ALLOWLISTED line copied into a different file is still stray — the exemption is per file, it does not travel with the text');
   ok(nc.files.includes('src/clean-kill-path.js') && !ncStray('src/clean-kill-path.js'),
     'POSITIVE CONTROL: a kill path with no `ps -p` at all is swept and stays green — the sweep is not simply stuck on "stray"');
+  ok(ncStray('src/js-ps-probe.js'),
+    "NEGATIVE CONTROL (residual (c)): a JS `execFileSync('ps', ['-p', …])` next to a kill IS caught — the argv spelling is the same probe, and it was invisible to this sweep while six real ones lived in the tree",
+    { stray: nc.stray });
+  ok(nc.files.includes('src/js-not-ps.js') && !ncStray('src/js-not-ps.js'),
+    'POSITIVE CONTROL (residual (c)): `execFileSync("psql", ["-p", …])` on a kill path is NOT flagged — the pattern names the `ps` PROGRAM, so it does not make every -p flag owe a reason');
   ok(!nc.files.includes('src/not-a-kill-path.js'),
     'SCOPE, measured not assumed: a `ps -p` in a file that signals nothing is NOT swept — the rule is about the probe in front of a kill');
   ok(!nc.files.includes('scripts/test-something.mjs') && nc.skipped.includes('scripts/test-something.mjs'),

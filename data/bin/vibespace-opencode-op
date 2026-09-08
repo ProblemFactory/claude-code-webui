@@ -136,33 +136,55 @@ function pidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
 }
-let psMemo = null;
-function readPsIdentity(pid) {
+// PARITY TWIN of src/cli-identity.js `readPsIdentity` (B-eac2 residual (c)
+// collapsed the four spellings into that module — this is the ONE copy that
+// cannot require it, because a checkout-less ssh host is the whole point).
+// Same ladder, same 2s budget, same shape, and a VALUE read never an existence
+// probe: `pidAlive`'s kill -0 is the only thing that decides "is it there".
+// scripts/test-opencode-remote.mjs drives both over the same inputs.
+const PS_IDENTITY_TTL_MS = 1000;
+let psIdentityMemo = null;
+function readPsIdentity(pid, { execImpl = execFileSync, now = Date.now } = {}) {
   if (!Number.isInteger(pid) || pid <= 0) return null;
-  if (psMemo && psMemo.pid === pid) return psMemo.val;
+  const t = now();
+  if (psIdentityMemo && psIdentityMemo.pid === pid && t - psIdentityMemo.at < PS_IDENTITY_TTL_MS) return psIdentityMemo.val;
   let val = null;
   try {
-    const out2 = execFileSync('ps', ['-p', String(pid), '-o', 'uid=,args='], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] });
-    const line = String(out2 || '').split('\n').map((l) => l.trim()).find((l) => /^\d+\s+\S/.test(l));
+    const out = execImpl('ps', ['-p', String(pid), '-o', 'uid=,args='], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] });
+    const line = String(out || '').split('\n').map((l) => l.trim()).find((l) => /^\d+\s+\S/.test(l));
     const m = line ? /^(\d+)\s+(.*)$/.exec(line) : null;
-    if (m) { const argv = m[2].split(/\s+/).filter((s) => s !== ''); val = { uid: Number(m[1]), argv: argv.length ? argv : null }; }
+    if (m) {
+      const argv = m[2].split(/\s+/).filter((x) => x !== '');
+      val = { uid: Number(m[1]), argv: argv.length ? argv : null };
+    }
   } catch { val = null; }
-  psMemo = { pid, val };
+  psIdentityMemo = { pid, at: t, val };
   return val;
 }
-function readProcCmdline(pid) {
-  try { const a = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter((s) => s !== ''); if (a.length) return a; } catch { }
-  const ps = readPsIdentity(pid);
+function readProcCmdline(pid, opts) {
+  try {
+    const a = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter((x) => x !== '');
+    if (a.length) return a;
+  } catch { /* no /proc, hidepid, or it went away — fall through to `ps` */ }
+  const ps = readPsIdentity(pid, opts);
   return ps && ps.argv ? ps.argv : null;
 }
-function readProcUid(pid) {
-  try { return fs.statSync(`/proc/${pid}`).uid; } catch { }
-  const ps = readPsIdentity(pid);
+function readProcUid(pid, opts) {
+  try { return fs.statSync(`/proc/${pid}`).uid; } catch { /* fall through to `ps` */ }
+  const ps = readPsIdentity(pid, opts);
   return ps && Number.isFinite(ps.uid) ? ps.uid : null;
 }
+// PARITY TWIN of src/opencode-serve.js hostCanIdentify — memoise the YES only
+// (S9 residual (b)): "this platform has a readable process table" never changes
+// back, but a single failed probe is about the MOMENT (EMFILE/ENOMEM, a `ps`
+// fork lost to a load spike, /proc still being mounted). Caching the NO turns a
+// transient miss into a permanent 'blind' verdict — the one verdict that lets a
+// live recorded pid be spawned over unidentified.
 let hostReadable = null;
 function hostCanIdentify() {
-  if (hostReadable === null) { const own = readProcCmdline(process.pid); hostReadable = Array.isArray(own) && own.length > 0; }
+  if (hostReadable === true) return true;
+  const own = readProcCmdline(process.pid);
+  hostReadable = Array.isArray(own) && own.length > 0;
   return hostReadable;
 }
 // PARITY TWIN of src/opencode-serve.js classifyRecordedPid — same verdicts for

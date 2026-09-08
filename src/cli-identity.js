@@ -133,6 +133,70 @@ function procArgv(pid, i) {
   } catch { return ''; }
 }
 
+/** THE PORTABLE {uid, argv} VALUE READ — one ladder, one memo (B-eac2 residual
+ *  (c), which collapsed the fourth spelling of it into this module).
+ *
+ *  `procArgv` above answers ONE word; this answers the two facts a caller needs
+ *  when it is about to decide whether a live pid is a process WE started: its
+ *  uid and its whole argv. /proc first (zero fork), `ps -p <pid> -o uid=,args=`
+ *  where there is no /proc — macOS is "full support" in the README and has no
+ *  procfs at all, so a procfs-only reader answers `null` for EVERY pid there,
+ *  and a caller that reads `null` as "nothing is running under that number"
+ *  will spawn over a live process.
+ *
+ *  IT IS A VALUE READ, NEVER AN EXISTENCE PROBE (the §17 standing sweep's
+ *  rule). `kill -0` — `pidAliveShellFn` / `process.kill(pid, 0)` — is the only
+ *  thing allowed to decide whether a process is there; a `ps` that cannot
+ *  answer yields `null` HERE, which means "no evidence", never "gone".
+ *
+ *  `ps` renders argv as ONE blob (an embedded newline becomes a space, an
+ *  argument containing spaces is indistinguishable from two words), so a caller
+ *  may ask this answer questions like "does it contain `serve`" but may never
+ *  reconstruct a command line from it.
+ *
+ *  Memoised for PS_IDENTITY_TTL_MS because callers ask the two questions about
+ *  the same pid back to back; the memo is per-pid, so a different pid is always
+ *  a fresh read rather than a stale answer. */
+const PS_IDENTITY_TTL_MS = 1000;
+let psIdentityMemo = null;         // { pid, at, val }
+function readPsIdentity(pid, { execImpl = execFileSync, now = Date.now } = {}) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  const t = now();
+  if (psIdentityMemo && psIdentityMemo.pid === pid && t - psIdentityMemo.at < PS_IDENTITY_TTL_MS) return psIdentityMemo.val;
+  let val = null;
+  try {
+    const out = execImpl('ps', ['-p', String(pid), '-o', 'uid=,args='], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] });
+    // one line per process; `ps` may also print a header on dialects that
+    // ignore the `=` suffix, and a leading blank is normal for a padded uid
+    const line = String(out || '').split('\n').map((l) => l.trim()).find((l) => /^\d+\s+\S/.test(l));
+    const m = line ? /^(\d+)\s+(.*)$/.exec(line) : null;
+    if (m) {
+      const argv = m[2].split(/\s+/).filter((x) => x !== '');
+      val = { uid: Number(m[1]), argv: argv.length ? argv : null };
+    }
+  } catch { val = null; }
+  psIdentityMemo = { pid, at: t, val };
+  return val;
+}
+
+/** The whole argv of a live pid, or null when NOTHING on this host can say (no
+ *  /proc AND no usable `ps`, hidepid, or the process vanished between reads). */
+function procCmdline(pid, opts) {
+  try {
+    const a = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter((x) => x !== '');
+    if (a.length) return a;
+  } catch { /* no /proc, hidepid, or it went away — fall through to `ps` */ }
+  const ps = readPsIdentity(pid, opts);
+  return ps && ps.argv ? ps.argv : null;
+}
+
+/** The uid a live pid runs as, or null on the same terms. */
+function procUid(pid, opts) {
+  try { return fs.statSync(`/proc/${pid}`).uid; } catch { /* fall through to `ps` */ }
+  const ps = readPsIdentity(pid, opts);
+  return ps && Number.isFinite(ps.uid) ? ps.uid : null;
+}
+
 /** `readlink /proc/<pid>/exe` with the kernel's ` (deleted)` marker stripped.
  *  '' when there is no /proc, no permission, or no such process. */
 function procExe(pid) {
@@ -343,4 +407,4 @@ function pidAliveShellFn() {
 }`;
 }
 
-module.exports = { isCliProcess, cliIdentityShellFns, pidAliveShellFn, procArgv, procExe, INTERPRETERS, MAX_INTERP_FLAGS };
+module.exports = { isCliProcess, cliIdentityShellFns, pidAliveShellFn, procArgv, procExe, readPsIdentity, procCmdline, procUid, PS_IDENTITY_TTL_MS, INTERPRETERS, MAX_INTERP_FLAGS };

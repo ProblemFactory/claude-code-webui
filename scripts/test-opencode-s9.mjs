@@ -2088,6 +2088,15 @@ const R11_STOP_NEUTER = [
     "      const decided = decideRecordedKill(rec, talking ? livePid : null);\n      if (decided.pid) { try { if (decided.pid !== process.pid) killPid(decided.pid, 'SIGTERM'); } catch { } }\n      else if (decided.why) { state.lastError = decided.why; log?.warn?.(`[opencode-serve] ${decided.why}`); }",
     "      const target = livePid || rec?.pid || null;\n      try { if (target && target !== process.pid) killPid(target, 'SIGTERM'); } catch { }", 1],
 ];
+/** RESIDUAL (a) — the PRE-FIX stop(): a Disable that leaves the blocked/runaway
+ *  park standing, so the store keeps reporting itself broken after the user
+ *  switched the service OFF. Deleting the clear is the whole difference. */
+const RES_A_NEUTER = [
+  ['stop() clears a blocked/runaway park',
+    "      if (state.parked && (state.parkedKind === 'blocked' || state.parkedKind === 'runaway')) {\n        state.parked = false; state.parkedKind = null; state.retryAfter = 0;\n      }\n",
+    '', 1],
+];
+const resACtl = buildNeutered('res-a-keeppark', RES_A_NEUTER);
 const r11Ctl = buildNeutered('r11-noblind', R11_NEUTER);
 const r11StopCtl = buildNeutered('r11-stopkill', R11_STOP_NEUTER);
 ok('(the controls themselves) a PRE-FIX copy can be built for each of the two round-11 mechanisms', !!r11Ctl.mod && !!r11StopCtl.mod, [r11Ctl.why, r11StopCtl.why]);
@@ -2188,6 +2197,8 @@ ok('(the controls themselves) a PRE-FIX copy can be built for each of the two ro
     stillBlocks.parked === true && stillBlocks.parkedKind === 'blocked' && stillBlocks.spawns === 0, stillBlocks);
 }
 
+const { storeFailureReason: storeFailureReasonS9 } = require(path.join(REPO, 'src/server/cli-env.js'));
+
 /** ④ THE BUTTON THE PARK LEAVES ENABLED. In a blocked park every OpenCode
  *  control is dark except Disable, and Disable is `stop({killRecorded:true})`
  *  — which used to signal `rec.pid` on nothing but a self-pid guard. */
@@ -2203,6 +2214,24 @@ ok('(the controls themselves) a PRE-FIX copy can be built for each of the two ro
     const ctl = await r10Run(r11StopCtl.mod, { socket: 'hung', recorded: 'ours', readCmdline: (pid) => (pid === process.pid ? serve.readProcCmdline(pid) : null), stopAfter: true });
     ok('NEGATIVE CONTROL: with stop() back on `state.pid || rec.pid`, Disable SIGTERMs exactly the pid the blocked park had just refused to touch',
       ctl.killsAfterStop.length === 1 && ctl.killsAfterStop[0][0] === ctl.recordedPid && ctl.killsAfterStop[0][1] === 'SIGTERM', ctl.killsAfterStop);
+  }
+  // RESIDUAL (a): A DELIBERATELY-OFF SERVICE IS NOT A BROKEN STORE.
+  // `storeFailureReason` reads `parked` and nothing else, so the park this very
+  // scenario raised — a live recorded serve we can neither identify nor stop —
+  // survived the Disable and kept /api/home red plus a toast on every page load,
+  // for a service the user had just switched off. The park is a RETRY schedule
+  // for a record; the record is gone and the answer is "off".
+  ok('DISABLE also RETIRES the blocked park — the store is OFF, not broken (the record it was about is gone and the user asked for off)',
+    blocked.parked === false && blocked.parkedKind === null && blocked.snap.stopped === true, blocked.snap);
+  ok('…and /api/home agrees through the SAME predicate: no storeReason, no red toast — while lastError SURVIVES as history for the ⚙ card',
+    storeFailureReasonS9({ id: 'opencode', store: { serveState: () => blocked.snap, unavailableReason: () => blocked.reason } }) === null
+    && /could not be identified/.test(blocked.lastError || ''), [blocked.lastError, blocked.reason]);
+  if (!resACtl.mod) skip('NEGATIVE CONTROL: the park outlives the Disable and the store still calls itself broken', resACtl.why);
+  else {
+    const kept = await r10Run(resACtl.mod, { socket: 'hung', recorded: 'ours', readCmdline: (pid) => (pid === process.pid ? serve.readProcCmdline(pid) : null), stopAfter: true });
+    ok('NEGATIVE CONTROL: without the clear, a service the user just turned OFF still reports parkedKind blocked, and storeFailureReason still hands /api/home a red reason',
+      kept.parked === true && kept.parkedKind === 'blocked'
+      && storeFailureReasonS9({ id: 'opencode', store: { serveState: () => kept.snap, unavailableReason: () => kept.reason } }) !== null, kept.snap);
   }
   // POSITIVE CONTROL: the 2026-09-07 law — "off means the process is gone" —
   // must still hold for a serve we ADOPTED and are talking to.

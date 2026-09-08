@@ -254,6 +254,65 @@ console.log('\n— THE RECORDED-SERVE SETTLEMENT IS ONE DECISION ON EVERY MACHIN
     { ssh: ['RECORD_CONFIRM_TIMEOUT_MS', 'RECORD_KILL_WAIT_MS', 'RECORD_KILL_POLL_MS'].map(num), local: [serve.RECORD_CONFIRM_TIMEOUT_MS, serve.RECORD_KILL_WAIT_MS, serve.RECORD_KILL_POLL_MS] });
   ok('…and the script names the two ways out in its refusal, exactly like the local park does (stop that process, or delete the record)',
     /Refusing to start a second serve over it: stop that process, or delete/.test(SCRIPT));
+
+  // ── THE HOST-READABLE PROBE IS THE SAME RULE ON BOTH RUNGS (residual (b)) ──
+  // `hostCanIdentify()` decides whether a silent pid means "hidepid / it just
+  // vanished" (verdict 'unknown' — refuse) or "there is no reader on this
+  // machine at all" (verdict 'blind' — clear the record and spawn over it). A
+  // NO is therefore a licence to spawn over a live pid, and it must never be
+  // reached from ONE failed probe: the reader can miss for reasons that are
+  // about the MOMENT (EMFILE/ENOMEM, a `ps` fork lost to a load spike, /proc
+  // still being mounted at boot). So the YES is memoised and the NO is not —
+  // on both rungs, because a checkout-less host runs the OTHER copy.
+  const liftFn = (src, name, params) => {
+    const i = src.indexOf(`function ${name}(`);
+    if (i < 0) return null;
+    // the `let hostReadable = null;` this closure owns sits directly above it
+    const declAt = src.lastIndexOf('let hostReadable = null;', i);
+    if (declAt < 0) return null;
+    let depth = 0, end = -1;
+    for (let k = src.indexOf('{', i); k < src.length; k++) {
+      if (src[k] === '{') depth++;
+      else if (src[k] === '}' && --depth === 0) { end = k; break; }
+    }
+    if (end < 0) return null;
+    const body = src.slice(declAt, end + 1);
+    try { return new Function(...params, `${body}; return ${name};`); } catch { return null; }
+  };
+  const localHostFactory = liftFn(read('src/opencode-serve.js'), 'hostCanIdentify', ['readCmdline', 'log', 'process']);
+  const sshHostFactory = liftFn(SCRIPT, 'hostCanIdentify', ['readProcCmdline', 'process']);
+  ok('both rungs carry their own hostCanIdentify and it is extractable — so "the memoisation rule agrees" is testable at all',
+    typeof localHostFactory === 'function' && typeof sshHostFactory === 'function');
+  if (localHostFactory && sshHostFactory) {
+    // a reader that misses ONCE and then works, exactly like a transient probe
+    const flaky = () => { let n = 0; return () => (++n === 1 ? null : ['node', 'server.js']); };
+    const proc = { pid: 4242 };
+    const rungs = {
+      local: localHostFactory(flaky(), { warn: () => { } }, proc),
+      ssh: sshHostFactory(flaky(), proc),
+    };
+    const seq = Object.fromEntries(Object.entries(rungs).map(([k, f]) => [k, [f(), f(), f()]]));
+    ok('a transient miss is NOT memoised: the next probe re-asks and the host is readable again — on BOTH rungs',
+      seq.local.join(',') === 'false,true,true' && seq.ssh.join(',') === 'false,true,true', seq);
+    // …and the YES still costs one probe for the life of the process
+    const counted = () => { let n = 0; const f = () => { n++; return ['node', 'server.js']; }; f.count = () => n; return f; };
+    const cl = counted(), cs = counted();
+    const yl = localHostFactory(cl, { warn: () => { } }, proc), ys = sshHostFactory(cs, proc);
+    yl(); yl(); yl(); ys(); ys(); ys();
+    ok('…while a YES is still memoised for the process (it is a property of the platform): one probe, three answers, both rungs',
+      cl.count() === 1 && cs.count() === 1, { local: cl.count(), ssh: cs.count() });
+    // NEGATIVE CONTROL: the pre-fix `if (hostReadable === null)` shape, driven
+    // by the same flaky reader, latches the transient NO forever.
+    const preFix = new Function('readProcCmdline', 'process', `
+      let hostReadable = null;
+      function hostCanIdentify() {
+        if (hostReadable === null) { const own = readProcCmdline(process.pid); hostReadable = Array.isArray(own) && own.length > 0; }
+        return hostReadable;
+      }
+      return hostCanIdentify;`)(flaky(), proc);
+    ok('NEGATIVE CONTROL: the pre-fix shape latches the transient NO — every later verdict is "blind", the one that spawns over a live unidentified pid',
+      [preFix(), preFix(), preFix()].join(',') === 'false,false,false');
+  }
 }
 
 /** …AND NOW THE REAL SCRIPT, against a real silent socket and real processes.

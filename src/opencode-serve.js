@@ -110,7 +110,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const net = require('net');
-const { spawn, execFile, execFileSync } = require('child_process');
+const { spawn, execFile } = require('child_process');
+const cliIdentity = require('./cli-identity');   // THE process-identity ladder (residual (c)): one definition for every caller that signals
 const { nameFromText } = require('./discovery-facts');
 const { AcpSessionMessages } = require('./acp-message-manager');
 
@@ -306,65 +307,23 @@ function readProcUsage(pid) {
   } catch { return null; }
 }
 
-/** THE PORTABLE IDENTITY RUNG (round 11). PROCFS IS NOT A GIVEN: macOS is
- *  "full support" in the README and has NO /proc at all, so a procfs-only
- *  reader answers `null` for EVERY pid there — and round 10 turns exactly that
- *  answer into a permanent BLOCKED park (see classifyRecordedPid's 'blind').
- *  So the ladder is the one this codebase already uses for the agent CLIs
- *  (src/discovery-facts.js `pidLooksClaude`, same shape, same 2s budget):
- *  /proc first (zero fork), `ps` where there is no /proc (BSD/macOS `ps` has
- *  -p; both `uid=` and `args=` are POSIX output keywords). ONE call carries
- *  both facts, briefly memoised because the two readers below always ask about
- *  the same pid back to back. (When the shared JS+shell identity module
- *  src/cli-identity.js lands from B-3185, this is its fourth caller and should
- *  collapse into it rather than keep a fourth spelling.)
- *
- *  IT IS A VALUE READ, NEVER AN EXISTENCE PROBE. `pidAlive` (kill -0) is the
- *  only thing that decides whether a process is there; a `ps` that cannot
- *  answer yields `null` here, which means "no evidence", never "gone". That
- *  distinction is the standing rule for every path that SIGNALs — and this
- *  module signals (killPid), so it is one. */
-const PS_IDENTITY_TTL_MS = 1000;
-let psIdentityMemo = null;         // { pid, at, val }
-function readPsIdentity(pid, { execImpl = execFileSync, now = Date.now } = {}) {
-  if (!Number.isInteger(pid) || pid <= 0) return null;
-  const t = now();
-  if (psIdentityMemo && psIdentityMemo.pid === pid && t - psIdentityMemo.at < PS_IDENTITY_TTL_MS) return psIdentityMemo.val;
-  let val = null;
-  try {
-    const out = execImpl('ps', ['-p', String(pid), '-o', 'uid=,args='], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] });
-    // one line per process; `ps` may also print a header on dialects that
-    // ignore the `=` suffix, and a leading blank is normal for a padded uid
-    const line = String(out || '').split('\n').map((l) => l.trim()).find((l) => /^\d+\s+\S/.test(l));
-    const m = line ? /^(\d+)\s+(.*)$/.exec(line) : null;
-    if (m) {
-      // `ps` renders argv as ONE blob (an embedded newline becomes a space, an
-      // argument with spaces is indistinguishable from two) — good enough for
-      // the two questions asked of it here, `serve` and `--port <n>`, and the
-      // caller never reconstructs a command from it.
-      const argv = m[2].split(/\s+/).filter((s) => s !== '');
-      val = { uid: Number(m[1]), argv: argv.length ? argv : null };
-    }
-  } catch { val = null; }
-  psIdentityMemo = { pid, at: t, val };
-  return val;
-}
-/** The argv of a live pid, or null when NOTHING on this host can say (no /proc
- *  AND no usable `ps`, hidepid, or the process vanished between the reads). */
-function readProcCmdline(pid) {
-  try {
-    const a = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter((s) => s !== '');
-    if (a.length) return a;
-  } catch { /* no /proc, hidepid, or it went away — fall through to `ps` */ }
-  const ps = readPsIdentity(pid);
-  return ps && ps.argv ? ps.argv : null;
-}
-/** The uid a live pid runs as, or null. */
-function readProcUid(pid) {
-  try { return fs.statSync(`/proc/${pid}`).uid; } catch { /* fall through to `ps` */ }
-  const ps = readPsIdentity(pid);
-  return ps && Number.isFinite(ps.uid) ? ps.uid : null;
-}
+/** THE PORTABLE IDENTITY RUNG (round 11; ONE definition since B-eac2 residual
+ *  (c)). PROCFS IS NOT A GIVEN: macOS is "full support" in the README and has
+ *  NO /proc at all, so a procfs-only reader answers `null` for EVERY pid there
+ *  — and round 10 turns exactly that answer into a permanent BLOCKED park (see
+ *  classifyRecordedPid's 'blind'). The ladder (/proc first, `ps -p` where there
+ *  is no /proc, ONE call carrying uid AND argv, briefly memoised because the
+ *  two readers always ask about the same pid back to back) is NOT this module's
+ *  to own: it is the same question src/cli-identity.js already answers for the
+ *  writer sweep and discovery, and this module was its fourth spelling. It now
+ *  imports it — the standing sweep's law ("a VALUE read, never an existence
+ *  probe": `pidAlive`'s kill -0 is the only thing that decides whether a
+ *  process is there) is stated once, where the rule lives, for every caller
+ *  that signals. The names below stay so this module's readers, its exports and
+ *  the ssh-side parity twin keep reading the same. */
+const readPsIdentity = cliIdentity.readPsIdentity;
+const readProcCmdline = cliIdentity.procCmdline;
+const readProcUid = cliIdentity.procUid;
 /** IS THIS ALIVE PID REALLY THE SERVE THE RECORD NAMES? (round 10 — PURE, the
  *  procfs reads are the caller's.) `pidAlive` answers "something is running
  *  under that number", which is NOT the same claim: pids are recycled, and the
@@ -1057,15 +1016,25 @@ function createServeLocator({
    *  probe goes through the INJECTED reader on purpose, so a stub that blinds
    *  the host blinds it for our pid too (and a stub that blinds only the
    *  RECORDED pid still reads as a host that answers — the two cases the fix
-   *  is about are told apart by exactly this call). Memoised for the process:
-   *  the answer is a property of the platform, not of the moment. */
+   *  is about are told apart by exactly this call). Memoised POSITIVELY only
+   *  (see below): a yes is a property of the platform, a no is one probe. */
+  //  MEMOISE THE *YES* ONLY (S9 residual (b)). "This platform has a readable
+  //  process table" is a property of the platform and never changes back, so
+  //  caching `true` is free. `false` is NOT that fact: it is one reading of one
+  //  probe, and the probe can fail for reasons that are about the MOMENT — an
+  //  EMFILE/ENOMEM burst, a `ps` fork that lost the race with a load spike, a
+  //  container whose /proc was still being mounted at boot. Caching that answer
+  //  turns a transient miss into a permanent capability downgrade: every later
+  //  verdict becomes 'blind', which is the verdict that clears a live recorded
+  //  pid's record and spawns over it without ever identifying it. So a NO is
+  //  re-probed — at most once per settlement/stop, which is where the callers
+  //  already are.
   let hostReadable = null;
   function hostCanIdentify() {
-    if (hostReadable === null) {
-      const own = readCmdline(process.pid);
-      hostReadable = Array.isArray(own) && own.length > 0;
-      if (!hostReadable) log?.warn?.('[opencode-serve] this host cannot read its own process command line (no /proc, no usable `ps`) — a recorded pid can never be identified here, so a stale record is cleared rather than blocking the service');
-    }
+    if (hostReadable === true) return true;
+    const own = readCmdline(process.pid);
+    hostReadable = Array.isArray(own) && own.length > 0;
+    if (!hostReadable) log?.warn?.('[opencode-serve] this host cannot read its own process command line (no /proc, no usable `ps`) — a recorded pid can never be identified here, so a stale record is cleared rather than blocking the service');
     return hostReadable;
   }
   /** The ONE identity verdict this keeper acts on — the settlement below and
@@ -1417,6 +1386,25 @@ function createServeLocator({
       if (decided.pid) { try { if (decided.pid !== process.pid) killPid(decided.pid, 'SIGTERM'); } catch { } }
       else if (decided.why) { state.lastError = decided.why; log?.warn?.(`[opencode-serve] ${decided.why}`); }
       clearRecord();
+      // A DELIBERATELY-OFF SERVICE IS NOT A BROKEN STORE (S9 residual (a)).
+      // `blocked` and `runaway` are the two parks that say "something is wrong
+      // with the store", and `storeFailureReason` reads exactly `parked` — so a
+      // user who answers a blocked park by turning the plugin OFF got the panel
+      // it was complaining about replaced by a red /api/home + a toast on every
+      // page load, for a service they had just switched off. The park's whole
+      // job (a deadline-driven retry of a serve we could not reach) is over the
+      // moment the record it was about is gone and the user has asked for OFF.
+      //
+      // A `crash` park is deliberately NOT cleared here: it is terminal until an
+      // explicit start(), and start() already clears every park — clearing it on
+      // stop() would make Disable→Enable quietly forget a crash loop.
+      //
+      // `lastError` STAYS: it is the history of what happened, and the ⚙ card
+      // reads it for the "last error" line. What must go is the CLAIM that the
+      // store is broken RIGHT NOW.
+      if (state.parked && (state.parkedKind === 'blocked' || state.parkedKind === 'runaway')) {
+        state.parked = false; state.parkedKind = null; state.retryAfter = 0;
+      }
     }
     state.pid = null; state.source = null;
     notify();
