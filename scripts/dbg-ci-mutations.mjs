@@ -7,7 +7,8 @@
 // the census never sees it; run it by hand after touching ci.mjs or the hook:
 //
 //     node scripts/dbg-ci-mutations.mjs        # exits 1 if any guard is unheld
-//     node scripts/dbg-ci-mutations.mjs --reap-only   # just clear the litter
+//     node scripts/dbg-ci-mutations.mjs '--only=round 4' # just those mutations
+//     node scripts/dbg-ci-mutations.mjs --reap-only      # just clear the litter
 //
 // IT EDITS THE PRODUCT, SO IT OBEYS INVARIANT ⑳. Signal handlers are NOT
 // enough and it is worth being precise about why: this script spends ~all of
@@ -42,6 +43,10 @@ const REPO = ARGS.find((a) => !a.startsWith('--')) || path.resolve(path.dirname(
 // `--reap-only` does the cleanup below and stops — the battery itself takes
 // minutes, and the litter is worth being able to clear on its own.
 const REAP_ONLY = ARGS.includes('--reap-only');
+// `--only=<substring>` runs just the mutations whose NAME matches — the full
+// battery takes ~20 minutes, and after touching one guard the question is
+// usually about that guard. The count in the closing line says what ran.
+const ONLY = ((ARGS.find((a) => a.startsWith('--only=')) || '').slice(7) || '').toLowerCase();
 const GIT_ENV = gitEnvFrom(process.env);
 const CI = path.join(REPO, 'scripts', 'ci.mjs');
 const HOOK = path.join(REPO, 'scripts', 'git-hooks', 'pre-push');
@@ -61,8 +66,21 @@ const MUTANTS = [
   { name: 'abandoned run stamps a verdict again', file: CI, suite: 'test-ci-heavy-launch',
     from: "    if (abandonedWhy || (abandonedWhy = abandoned())) noVerdict = abandonedWhy;", to: '    if (false) { }' },
   { name: 'killed-from-outside evidence removed', file: CI, suite: 'test-ci-heavy-launch',
-    from: "export const killedFromOutside = (r) => !!(r && r.signal && !(r.error && r.error.code === 'ETIMEDOUT'));",
+    from: "export const killedFromOutside = (r) => !!(r && r.signal && OUTSIDE_SIGNALS.includes(r.signal) && !(r.error && r.error.code === 'ETIMEDOUT'));",
     to: 'export const killedFromOutside = (r) => false;' },
+  // ROUND 4 — the two guards that keep a CRASH from reading as a supersession.
+  { name: 'outside-signal allowlist widened back to "any signal" (round 4)', file: CI, suite: 'test-ci-heavy-launch',
+    from: "export const killedFromOutside = (r) => !!(r && r.signal && OUTSIDE_SIGNALS.includes(r.signal) && !(r.error && r.error.code === 'ETIMEDOUT'));",
+    to: "export const killedFromOutside = (r) => !!(r && r.signal && !(r.error && r.error.code === 'ETIMEDOUT'));" },
+  { name: 'an ABORTED tier exits 0 again (round 4)', file: CI, suite: 'test-ci-heavy-launch',
+    from: '    if (abandonedWhy) return 4;\n', to: '' },
+  { name: 'the green marker unlocks a push of some OTHER branch (round 4)', file: HOOK, suite: 'test-ci-gate',
+    from: ' && [ "$pushed_all_marked" = "1" ]', to: '' },
+  { name: 'a new branch is judged by its TIP commit only (round 4)', file: HOOK, suite: 'test-ci-gate',
+    from: 'range_cmd=(git log --name-only --format= "$local_sha" --not --remotes)',
+    to: 'range_cmd=(git show --name-only --format= "$local_sha")' },
+  { name: 'a range git cannot read counts as "nothing changed" (round 4)', file: HOOK, suite: 'test-ci-gate',
+    from: '  if [ "$rc" != "0" ]; then', to: '  if false; then' },
   { name: 'pid-file abort removed (supersede no longer stops the run)', file: CI, suite: 'test-ci-heavy-launch',
     from: "    if (pidFile && !fs.existsSync(pidFile)) return 'superseded by a newer push (our pid file was removed)';", to: '' },
   { name: 'a marker kind reaches the CLI but not the route', file: OPS, suite: 'test-ci-gate',
@@ -79,7 +97,22 @@ const MUTANTS = [
     to: '  node scripts/ci.mjs --check-heavy >&2 || exit 1' },
   { name: 'superseded run retries the suite it was killed in (round 3)', file: CI, suite: 'test-ci-heavy-launch',
     from: '          abandonedWhy = abandoned();\n          if (abandonedWhy) { console.log(`\\n[ci:heavy] stopping: ${abandonedWhy}`); break; }\n', to: '' },
+  // A mutation may need SEVERAL edits when the guard is an ORDERING rather than
+  // a condition: moving the docs-only exit back above the heavy verdict is a
+  // deletion plus an insertion, and approximating it with one edit would test
+  // a different hook than the one that shipped before round 4.
+  { name: 'docs-only exits BEFORE the heavy verdict is asked (round 4)', file: HOOK, suite: 'test-ci-gate',
+    edits: [
+      ['if [ "$only_docs" = "1" ] && [ "${#REFS[@]}" -gt 0 ]; then\n  echo "[ci] docs-only push — fast tier skipped" >&2\n  exit 0\nfi\n', ''],
+      ['# ── HEAVY-TIER VERDICT FIRST (2026-09-07) ─',
+        'if [ "$only_docs" = "1" ] && [ "${#REFS[@]}" -gt 0 ]; then\n  echo "[ci] docs-only push — fast tier skipped" >&2\n  exit 0\nfi\n\n# ── HEAVY-TIER VERDICT FIRST (2026-09-07) ─'],
+    ] },
 ];
+
+// A mutation is one or more edits; `from`/`to` is the one-edit shorthand.
+const editsOf = (m) => m.edits || [[m.from, m.to]];
+const anchorsHold = (src, m) => editsOf(m).every(([from]) => src.includes(from));
+const mutate = (src, m) => editsOf(m).reduce((s, [from, to]) => s.replace(from, to), src);
 
 // SELF-HEAL FIRST (see the header): a previous run may have been killed before
 // it could restore. The sidecar holds that run's pre-mutation bytes, so the
@@ -93,7 +126,7 @@ const BACKUP = path.join(os.tmpdir(), `vs-ci-mutations-backup-${typeof process.g
     let cur;
     try { cur = fs.readFileSync(f, 'utf-8'); } catch { continue; }
     if (cur === was) continue;
-    const stranded = MUTANTS.find((m) => m.file === f && was.includes(m.from) && was.replace(m.from, m.to) === cur);
+    const stranded = MUTANTS.find((m) => m.file === f && anchorsHold(was, m) && mutate(was, m) === cur);
     if (!stranded) {
       console.log(`  · ${path.relative(REPO, f)} differs from the last run's backup but is not one of its mutations — left alone (that is your edit, not our damage)`);
       continue;
@@ -173,9 +206,10 @@ for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.once(sig, () => { res
 
 let bad = 0;
 for (const m of MUTANTS) {
+  if (ONLY && !m.name.toLowerCase().includes(ONLY)) continue;
   const src = orig[m.file];
-  if (!src.includes(m.from)) { console.log(`  ?? ${m.name}: PATCH DID NOT APPLY (the anchor moved — this mutation proved nothing)`); bad++; continue; }
-  fs.writeFileSync(m.file, src.replace(m.from, m.to));
+  if (!anchorsHold(src, m)) { console.log(`  ?? ${m.name}: PATCH DID NOT APPLY (the anchor moved — this mutation proved nothing)`); bad++; continue; }
+  fs.writeFileSync(m.file, mutate(src, m));
   const r = spawnSync(process.execPath, [path.join(REPO, 'scripts', m.suite + '.mjs')], { cwd: REPO, encoding: 'utf-8', timeout: 600000 });
   restore();
   const out = (r.stdout || '') + (r.stderr || '');
@@ -187,5 +221,6 @@ for (const m of MUTANTS) {
 }
 restore();
 try { fs.unlinkSync(BACKUP); } catch { }   // finished cleanly: nothing left to heal
-console.log(bad ? `\n${bad} mutation(s) did not go red` : `\nevery guard has an assert that dies with it (${MUTANTS.length} mutations)`);
+const ran = MUTANTS.filter((m) => !ONLY || m.name.toLowerCase().includes(ONLY)).length;
+console.log(bad ? `\n${bad} mutation(s) did not go red` : `\nevery guard has an assert that dies with it (${ran} of ${MUTANTS.length} mutations${ONLY ? `, --only=${ONLY}` : ''})`);
 process.exit(bad ? 1 : 0);

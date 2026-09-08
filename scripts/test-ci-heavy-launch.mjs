@@ -8,8 +8,9 @@
 //
 // WHY IT IS IN THE FAST TIER even though it costs a real worktree + build +
 // suite (measured: 5.5 s when written, 11.6 s after round 2's concurrency
-// legs, 16.2 s with round 3's supersede A/B and its retry control — it drives
-// five real heavy runs against stub repositories): the launcher is a
+// legs, 16.2 s with round 3's supersede A/B and its retry control, 21.5 s with
+// round 4's crash-verdict and abort-exit-code A/Bs — it drives eight real
+// heavy runs against stub repositories): the launcher is a
 // SILENT-FAILURE path. If
 // detaching breaks, nothing throws and nobody waits — the heavy tier simply
 // never runs again and the only symptom is `npm run ci:status` staying empty,
@@ -60,6 +61,31 @@ const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-ci-heavy-e2e-'));
 // suite fails loudly instead of hanging.
 const LOCK = path.join(dir, 'lock');
 const lockArgs = ['--lock=' + LOCK, '--lock-wait-ms=5000'];
+
+// A throwaway REPOSITORY whose scripts/ci.mjs is the real module — or a copy of
+// it with one guard reverted — and whose "heavy suites" are stubs we control.
+// It is the only honest way to drive a tier whose suites sleep, crash or flake
+// on demand: the real heavy suites cannot be asked to do any of those, and a
+// control arm has to be the REAL module with exactly one thing changed.
+const GIT_ID = { GIT_AUTHOR_NAME: 'x', GIT_AUTHOR_EMAIL: 'x@x', GIT_COMMITTER_NAME: 'x', GIT_COMMITTER_EMAIL: 'x@x' };
+function stubGateRepo(tag, { ciSource, suites, commits = 1 }) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), `vs-ci-${tag}-`));
+  fs.mkdirSync(path.join(root, 'scripts'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'scripts', 'ci.mjs'), ciSource);
+  fs.copyFileSync(path.join(REPO, 'scripts', 'git-env.mjs'), path.join(root, 'scripts', 'git-env.mjs'));
+  fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'x', version: '0.0.0', private: true, scripts: { build: 'node -e "0"' } }) + '\n');
+  for (const [name, src] of Object.entries(suites)) fs.writeFileSync(path.join(root, 'scripts', name + '.mjs'), src);
+  const genv = { ...GIT_ENV, ...GIT_ID };
+  spawnSync('git', ['init', '-q', root], { env: GIT_ENV });
+  const shas = [];
+  for (let i = 0; i < commits; i++) {
+    if (i) fs.writeFileSync(path.join(root, 'commit-' + i), String(i));
+    spawnSync('git', ['-C', root, 'add', '-A'], { env: genv });
+    spawnSync('git', ['-C', root, 'commit', '-q', '-m', 'c' + i], { env: genv });
+    shas.push((spawnSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf-8', env: genv }).stdout || '').trim());
+  }
+  return { root, shas, sha: shas[0], lock: path.join(root, 'lock'), markers: () => { try { return fs.readdirSync(path.join(root, 'data', 'ci-heavy')); } catch { return []; } } };
+}
 const worktreesBefore = spawnSync('git', ['-C', REPO, 'worktree', 'list'], { encoding: 'utf-8', env: GIT_ENV }).stdout || '';
 
 try {
@@ -99,7 +125,23 @@ try {
     const log = fs.readFileSync(path.join(dir, `${SHA}.log`), 'utf-8');
     ok(log.includes('HEAVY tier') && log.includes(SLICE), 'the log records what ran');
   }
-  ok(!fs.existsSync(pidFile), 'the pid file is removed when the run ends (a dead pid must never read as "in flight")');
+  // "THE RUN FINISHED" AND "THE RUN HAS TIDIED UP" ARE TWO MOMENTS (round 4).
+  // The marker is written inside heavyGate's `try` and `cleanup()` is its
+  // `finally`, so between the marker appearing and the pid file / worktree
+  // going away there is a window — and the window contains a `git worktree
+  // remove --force` plus a `git worktree prune` against a repository this box
+  // shares with ~160 checkouts. Reading the end state ONCE, immediately after
+  // the marker, made these asserts a coin toss under load: measured failing
+  // inside a full `npm run ci` run and passing in isolation seconds later,
+  // which is a FALSE RED that blocks a push — the exact thing this whole split
+  // exists to remove. So wait for the state being asserted, bounded, and say
+  // how long it took (a cleanup that suddenly needs 25 s is a real finding).
+  const waitFor = async (pred, ms = 30000) => {
+    const t = Date.now();
+    for (;;) { if (pred()) return Date.now() - t; if (Date.now() - t >= ms) return null; await sleep(50); }
+  };
+  const pidGoneMs = await waitFor(() => !fs.existsSync(pidFile));
+  ok(pidGoneMs !== null, `the pid file is removed when the run ends (a dead pid must never read as "in flight"; ${pidGoneMs === null ? '>30000' : pidGoneMs}ms after the marker)`);
 
   // OUR worktree is gone. Deliberately NOT "no vs-ci-heavy- registration
   // exists" and NOT a line count: `git worktree list` is shared by every
@@ -108,10 +150,13 @@ try {
   // fail this assert for reasons that have nothing to do with the launcher.
   // The child names its worktree after its own sha and pid, so we can ask
   // about exactly the one we caused.
-  const worktreesAfter = spawnSync('git', ['-C', REPO, 'worktree', 'list'], { encoding: 'utf-8', env: GIT_ENV }).stdout || '';
   const ourWt = `vs-ci-heavy-${SHA.slice(0, 8)}-${pidRec.pid}`;
-  ok(!worktreesAfter.includes(ourWt) && !fs.existsSync(path.join(os.tmpdir(), ourWt)),
-    `the isolated worktree is cleaned up (${ourWt}: no registration, no directory)`);
+  const wtGoneMs = await waitFor(() => {
+    const listed = spawnSync('git', ['-C', REPO, 'worktree', 'list'], { encoding: 'utf-8', env: GIT_ENV }).stdout || '';
+    return !listed.includes(ourWt) && !fs.existsSync(path.join(os.tmpdir(), ourWt));
+  });
+  ok(wtGoneMs !== null,
+    `the isolated worktree is cleaned up (${ourWt}: no registration, no directory; ${wtGoneMs === null ? '>30000' : wtGoneMs}ms after the marker)`);
   ok(worktreesBefore.includes(REPO) || worktreesBefore.length > 0, 'the before/after worktree listing was readable (the assert above is non-vacuous)');
 
   // A second launch for a sha that is already running must not start a twin.
@@ -311,24 +356,13 @@ try {
         `the ask-before-retry guard is present and the control's patch applies (slow slice: ${SLOW})`);
 
       const stubRepo = (ciSource) => {
-        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-ci-supersede-'));
-        fs.mkdirSync(path.join(root, 'scripts'), { recursive: true });
-        fs.writeFileSync(path.join(root, 'scripts', 'ci.mjs'), ciSource);
-        fs.copyFileSync(path.join(REPO, 'scripts', 'git-env.mjs'), path.join(root, 'scripts', 'git-env.mjs'));
-        fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'x', version: '0.0.0', private: true, scripts: { build: 'node -e "0"' } }) + '\n');
         // The sleeping suite announces itself so the supersede lands while it
         // is really running, instead of at a guessed moment.
-        fs.writeFileSync(path.join(root, 'scripts', SLOW + '.mjs'),
-          `import fs from 'node:fs';\nfs.writeFileSync(process.env.VS_SUPERSEDE_SENTINEL, String(process.pid));\nsetTimeout(() => console.log('ALL PASS (1)'), 10000);\n`);
-        fs.writeFileSync(path.join(root, 'scripts', SLICE + '.mjs'), "console.log('ALL PASS (1)');\n");
-        const git = (...a) => spawnSync('git', ['-C', root, ...a], { encoding: 'utf-8', env: { ...GIT_ENV, GIT_AUTHOR_NAME: 'x', GIT_AUTHOR_EMAIL: 'x@x', GIT_COMMITTER_NAME: 'x', GIT_COMMITTER_EMAIL: 'x@x' } });
-        spawnSync('git', ['init', '-q', root], { env: GIT_ENV });
-        git('add', '-A'); git('commit', '-q', '-m', 'a');
-        const A = (git('rev-parse', 'HEAD').stdout || '').trim();
-        fs.writeFileSync(path.join(root, 'x'), 'b');
-        git('add', '-A'); git('commit', '-q', '-m', 'b');
-        const B = (git('rev-parse', 'HEAD').stdout || '').trim();
-        return { root, A, B, lock: path.join(root, 'lock'), sentinel: path.join(root, 'started') };
+        const r = stubGateRepo('supersede', { ciSource, commits: 2, suites: {
+          [SLOW]: `import fs from 'node:fs';\nfs.writeFileSync(process.env.VS_SUPERSEDE_SENTINEL, String(process.pid));\nsetTimeout(() => console.log('ALL PASS (1)'), 10000);\n`,
+          [SLICE]: "console.log('ALL PASS (1)');\n",
+        } });
+        return { root: r.root, A: r.shas[0], B: r.shas[1], lock: r.lock, sentinel: path.join(r.root, 'started') };
       };
 
       // ONE arm, used for the product and for the pre-fix control: launch a run
@@ -398,20 +432,12 @@ try {
     //      supersede, no kill), with a suite that fails once and then passes.
     {
       const SLOW = (SUITES.find((x) => x.tier === 'heavy' && x.name !== SLICE) || {}).name;
-      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-ci-retry-'));
-      fs.mkdirSync(path.join(root, 'scripts'), { recursive: true });
-      fs.copyFileSync(path.join(REPO, 'scripts', 'ci.mjs'), path.join(root, 'scripts', 'ci.mjs'));
-      fs.copyFileSync(path.join(REPO, 'scripts', 'git-env.mjs'), path.join(root, 'scripts', 'git-env.mjs'));
-      fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'x', version: '0.0.0', private: true, scripts: { build: 'node -e "0"' } }) + '\n');
       // The marker lives OUTSIDE the checkout: --isolate runs the suite in a
       // fresh worktree, so anything written inside it is invisible to the retry.
-      fs.writeFileSync(path.join(root, 'scripts', SLOW + '.mjs'),
-        `import fs from 'node:fs';\nconst m = process.env.VS_FLAKY_MARKER;\nif (fs.existsSync(m)) { console.log('ALL PASS (1)'); } else { fs.writeFileSync(m, '1'); console.log('1 FAILED (0 passed)'); process.exit(1); }\n`);
-      const genv = { ...GIT_ENV, GIT_AUTHOR_NAME: 'x', GIT_AUTHOR_EMAIL: 'x@x', GIT_COMMITTER_NAME: 'x', GIT_COMMITTER_EMAIL: 'x@x' };
-      spawnSync('git', ['init', '-q', root], { env: GIT_ENV });
-      spawnSync('git', ['-C', root, 'add', '-A'], { env: genv });
-      spawnSync('git', ['-C', root, 'commit', '-q', '-m', 'a'], { env: genv });
-      const sha = (spawnSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf-8', env: genv }).stdout || '').trim();
+      const { root, sha } = stubGateRepo('retry', {
+        ciSource: fs.readFileSync(path.join(REPO, 'scripts', 'ci.mjs'), 'utf-8'),
+        suites: { [SLOW]: `import fs from 'node:fs';\nconst m = process.env.VS_FLAKY_MARKER;\nif (fs.existsSync(m)) { console.log('ALL PASS (1)'); } else { fs.writeFileSync(m, '1'); console.log('1 FAILED (0 passed)'); process.exit(1); }\n` },
+      });
       const r = spawnSync(process.execPath, [path.join(root, 'scripts', 'ci.mjs'), '--heavy', '--sha=' + sha, '--isolate',
         '--only=' + SLOW, '--lock=' + path.join(root, 'lock'), '--lock-wait-ms=20000'],
         { cwd: root, encoding: 'utf-8', env: { ...GIT_ENV, VS_FLAKY_MARKER: path.join(root, 'flaky-marker') }, timeout: 120000 });
@@ -421,6 +447,91 @@ try {
       ok(!!marker && r.status === 0, `…and a pass on the second try is a GREEN verdict, not a red (exit ${r.status})`);
       ok(!!marker && (marker.flaky || []).includes(SLOW), `…recorded as FLAKY, never laundered into a plain green (${marker && JSON.stringify(marker.flaky)})`);
       try { fs.rmSync(root, { recursive: true, force: true }); } catch { }
+    }
+
+    // (1f) A SUITE THAT CRASHES IS A VERDICT, NOT A SUPERSESSION (round 4).
+    //      `killedFromOutside` read ANY signal except our own ETIMEDOUT as
+    //      "somebody terminated this run", so a suite dying of a V8 heap-limit
+    //      OOM (measured on this box: {status:null, signal:'SIGABRT'}), a
+    //      native crash (SIGSEGV) or the kernel OOM killer ({signal:'SIGKILL'})
+    //      abandoned the tier AT that suite: every later suite skipped, NO
+    //      marker written, and — because `failed` is empty for an abandoned run
+    //      — exit 0. The Actions heavy job's only signal IS the exit code
+    //      (`--heavy --dirty-ok`, the runner is thrown away), so it showed a
+    //      GREEN tick for a tier that crashed and ran nothing after; locally
+    //      nothing blocked the next push either.
+    //      Driven on a stub REPOSITORY because no real heavy suite can be asked
+    //      to abort, and the control arm is the REAL module with exactly the two
+    //      guards this round added reverted.
+    {
+      const heavyNames = SUITES.filter((s) => s.tier === 'heavy' && s.name !== SLICE).map((s) => s.name);
+      const [OOM, RED] = heavyNames;
+      const CI_SRC = fs.readFileSync(path.join(REPO, 'scripts', 'ci.mjs'), 'utf-8');
+      const NARROW = "export const killedFromOutside = (r) => !!(r && r.signal && OUTSIDE_SIGNALS.includes(r.signal) && !(r.error && r.error.code === 'ETIMEDOUT'));";
+      const WIDE = "export const killedFromOutside = (r) => !!(r && r.signal && !(r.error && r.error.code === 'ETIMEDOUT'));";
+      const ABORT_EXIT = '    if (abandonedWhy) return 4;\n';
+      const preFix = CI_SRC.replace(NARROW, WIDE).replace(ABORT_EXIT, '');
+      ok(!!OOM && !!RED && CI_SRC.includes(NARROW) && CI_SRC.includes(ABORT_EXIT)
+        && preFix !== CI_SRC && !preFix.includes(NARROW) && !preFix.includes(ABORT_EXIT),
+        `both round-4 guards are present and the pre-fix control's patch applies (crashing slice: ${OOM}, red slice: ${RED})`);
+
+      // `--only` preserves the ORDER GIVEN, so the crash really is first and
+      // "the second suite ran" is a statement about not abandoning the tier.
+      const suites = {
+        // A V8 heap-limit OOM aborts the process; process.abort() raises the
+        // same signal in 3 ms instead of minutes and gigabytes.
+        [OOM]: 'process.abort();\n',
+        [RED]: "console.log('1 FAILED (0 passed)');\nprocess.exit(1);\n",
+      };
+      const crashArm = (ciSource) => {
+        const s = stubGateRepo('crash', { ciSource, suites });
+        const r = spawnSync(process.execPath, [path.join(s.root, 'scripts', 'ci.mjs'), '--heavy', '--sha=' + s.sha, '--isolate',
+          '--only=' + OOM + ',' + RED, '--lock=' + s.lock, '--lock-wait-ms=20000'],
+          { cwd: s.root, encoding: 'utf-8', env: GIT_ENV, timeout: 180000 });
+        const out = (r.stdout || '') + (r.stderr || '');
+        const red = s.markers().find((f) => f === `${s.sha}.red`);
+        return { status: r.status, out, markers: s.markers(), root: s.root,
+          rec: red ? JSON.parse(fs.readFileSync(path.join(s.root, 'data', 'ci-heavy', red), 'utf-8')) : null };
+      };
+
+      const crash = crashArm(CI_SRC);
+      ok(/SIGABRT/.test(crash.out), `the crashing suite really died on a signal (${(crash.out.match(/✗ [^\n]*SIG[^\n]*/) || ['NO SIGNAL — this leg is vacuous'])[0].trim()})`);
+      ok(!!crash.rec, 'a CRASHED suite is a fact about the code under test: the tier writes a RED marker');
+      ok(!!crash.rec && crash.rec.failed.includes(OOM) && crash.rec.failed.includes(RED),
+        `…naming BOTH — the crash no longer abandons the tier before the next suite runs (${JSON.stringify((crash.rec || {}).failed)})`);
+      ok(crash.status === 1, `…and the run exits 1 = RED (got ${crash.status})`);
+      try { fs.rmSync(crash.root, { recursive: true, force: true }); } catch { }
+
+      const preCrash = crashArm(preFix);
+      ok(!preCrash.markers.some((f) => /\.(green|red)$/.test(f)),
+        `NEG: reading ANY signal as "outside" abandons the tier at the crash and writes no verdict (${preCrash.markers.join(' ') || 'no markers'})`);
+      ok(/stopping: this run was terminated from outside/.test(preCrash.out) && /ABORTED/.test(preCrash.out),
+        'NEG: …it calls a crash a termination and stops there');
+      ok(!new RegExp(`✓ ${RED}|✗ ${RED} FAILED`).test(preCrash.out), `NEG: …so ${RED} never runs at all`);
+      ok(preCrash.status === 0,
+        'NEG: …and it EXITS 0 — the green Actions tick for a tier that crashed and ran nothing (the defect, end to end)');
+      try { fs.rmSync(preCrash.root, { recursive: true, force: true }); } catch { }
+
+      // …AND AN ABORTED TIER NEVER EXITS 0, whatever abandoned it. A missing
+      // pid file is the supersede signal the launcher sends (it unlinks ours),
+      // so pointing --pid-file at a path that does not exist is the production
+      // abort with no 16-minute wait attached.
+      const abortArm = (ciSource) => {
+        const s = stubGateRepo('abort', { ciSource, suites: { [SLICE]: "console.log('ALL PASS (1)');\n" } });
+        const r = spawnSync(process.execPath, [path.join(s.root, 'scripts', 'ci.mjs'), '--heavy', '--sha=' + s.sha, '--isolate',
+          '--only=' + SLICE, '--lock=' + s.lock, '--lock-wait-ms=20000', '--pid-file=' + path.join(s.root, 'never-written.pid')],
+          { cwd: s.root, encoding: 'utf-8', env: GIT_ENV, timeout: 180000 });
+        const out = (r.stdout || '') + (r.stderr || '');
+        try { fs.rmSync(s.root, { recursive: true, force: true }); } catch { }
+        return { status: r.status, out, markers: s.markers() };
+      };
+      const aborted = abortArm(CI_SRC);
+      ok(/HEAVY TIER ABORTED/.test(aborted.out) && !aborted.markers.some((f) => /\.(green|red)$/.test(f)),
+        'a superseded run stops, says ABORTED and writes no verdict');
+      ok(aborted.status === 4, `…and exits 4 = ABORTED, never 0 (got ${aborted.status}) — Actions cannot show a green tick for it`);
+      const preAborted = abortArm(CI_SRC.replace(ABORT_EXIT, ''));
+      ok(preAborted.status === 0,
+        'NEG: without that one line the same abandoned run exits 0, i.e. reports success for a tier that ran nothing');
     }
 
     // (2) THE MACHINE LOCK: a second heavy run does not start while another

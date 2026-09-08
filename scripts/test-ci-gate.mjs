@@ -23,7 +23,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { SUITES, EXCLUDED, censusFindings, listSuiteFiles, heavyBlocker, machineGlobalFixtures, defaultLockPath, killedFromOutside } from './ci.mjs';
+import { SUITES, EXCLUDED, censusFindings, listSuiteFiles, heavyBlocker, machineGlobalFixtures, defaultLockPath, killedFromOutside, OUTSIDE_SIGNALS } from './ci.mjs';
 import { GIT_REDIRECTORS, gitEnvFrom } from './git-env.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -213,13 +213,40 @@ process.exit(fs.existsSync(path.join(repo, 'FAST_RED')) ? 1 : 0);
   fs.chmodSync(path.join(repo, 'pre-push'), 0o755);
   const ZERO = '0'.repeat(40);
   const calls = () => { try { return fs.readFileSync(path.join(repo, 'calls.ndjson'), 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
-  const runHookRefs = (stdin, env = {}) => {
+  // `hook` is a parameter so a PRE-FIX COPY of the real hook can be driven
+  // through the exact same fixture: every round-4 leg below states the answer
+  // the shipped hook gives AND the answer the defect gave, or it proves nothing.
+  const runHookRefs = (stdin, env = {}, hook = path.join(repo, 'pre-push')) => {
     try { fs.unlinkSync(path.join(repo, 'calls.ndjson')); } catch {}
-    const r = spawnSync('bash', [path.join(repo, 'pre-push'), 'origin', 'git@example.invalid:x/y.git'], {
+    const r = spawnSync('bash', [hook, 'origin', 'git@example.invalid:x/y.git'], {
       cwd: repo, input: stdin, encoding: 'utf-8', env: { ...GIT_ENV, ...env },
     });
     return { status: r.status, out: (r.stdout || '') + (r.stderr || ''), calls: calls() };
   };
+  // A copy of the REAL hook with one guard reverted to the shape that caused
+  // the finding. An anchor that no longer matches is a RED assert (not a
+  // throw): a control that quietly becomes "the same hook twice" proves
+  // nothing, and the suite still has to report the behavioural asserts around
+  // it — that is what the mutation battery reads.
+  const hookSrc = fs.readFileSync(path.join(REPO, 'scripts', 'git-hooks', 'pre-push'), 'utf-8');
+  const preFixHook = (tag, ...edits) => {
+    let patched = hookSrc;
+    for (const [from, to] of edits) {
+      const next = patched.replace(from, to);
+      if (next === patched) {
+        ok(false, `pre-fix control "${tag}": the anchor ${JSON.stringify(String(from).slice(0, 50))} is not in the shipped hook — the control would be a second copy of it, so its NEG leg proves nothing`);
+        return null;
+      }
+      patched = next;
+    }
+    const p = path.join(repo, `pre-push.prefix-${tag}`);
+    fs.writeFileSync(p, patched); fs.chmodSync(p, 0o755);
+    return p;
+  };
+  // The docs-only block, verbatim, so the "it used to exit before asking"
+  // control can put it back where it was instead of approximating it.
+  const DOCS_ONLY_BLOCK = 'if [ "$only_docs" = "1" ] && [ "${#REFS[@]}" -gt 0 ]; then\n  echo "[ci] docs-only push — fast tier skipped" >&2\n  exit 0\nfi\n';
+  const HEAVY_FIRST_ANCHOR = '# ── HEAVY-TIER VERDICT FIRST (2026-09-07) ─';
   const runHook = (localSha, remoteSha = ZERO, env = {}) =>
     runHookRefs(`refs/heads/main ${localSha} refs/heads/main ${remoteSha}\n`, env);
 
@@ -257,7 +284,10 @@ process.exit(fs.existsSync(path.join(repo, 'FAST_RED')) ? 1 : 0);
   // The two documented escape hatches still behave.
   const D = commit(repo, 'docs/x.md', '# x\n', 'docs only');
   const r5 = runHook(D, C);
-  ok(r5.status === 0 && !r5.calls.length, 'a docs-only push skips the gate entirely');
+  ok(r5.status === 0 && !r5.calls.some((c) => c.mode === 'fast') && !r5.calls.some((c) => c.mode === 'heavy-launch'),
+    'a docs-only push skips the fast tier (and launches nothing new to test)');
+  ok(r5.calls.some((c) => c.mode === 'check-heavy' && c.head === D),
+    '…but the heavy VERDICT is still asked about it (round 4: a red ancestor is red whether or not this push carries code)');
   const E = commit(repo, 'src/e.js', '//e\n', 'E');
   writeMarker(path.join(repo, 'data', 'ci-heavy'), E, 'red', ['boom']);
   const r6 = runHook(E, D, { VIBESPACE_SKIP_CI: '1' });
@@ -291,6 +321,126 @@ process.exit(fs.existsSync(path.join(repo, 'FAST_RED')) ? 1 : 0);
   const r8 = runHookRefs(`refs/heads/clean-branch ${SIDE} refs/heads/clean-branch ${ZERO}\nrefs/heads/shipping ${RIDER} refs/heads/shipping ${R}\n`);
   ok(r8.status === 1 && r8.calls.filter((c) => c.mode === 'check-heavy').length >= 2,
     'a multi-ref push asks about EVERY ref (a clean one first does not excuse the red one)');
+
+  // ── ROUND 4 (a): A DOCS-ONLY PUSH IS STILL SUBJECT TO A RED ANCESTOR ───
+  // The docs-only skip used to be the hook's FIRST decision, so a red heavy
+  // verdict on an ancestor was never even asked about. The block exists to
+  // stop more work being stacked on a known-broken commit, and a docs commit
+  // is more work.
+  {
+    git(repo, ['checkout', '-q', '-b', 'docsred', SIDE]);
+    const DR = commit(repo, 'src/dr.js', '//code that will go red\n', 'DR');
+    const DRDOCS = commit(repo, 'docs/dr.md', '# notes\n', 'docs on top of the red commit');
+    writeMarker(path.join(repo, 'data', 'ci-heavy'), DR, 'red', ['test-fold-ux']);
+    const r9 = runHookRefs(`refs/heads/docsred ${DRDOCS} refs/heads/docsred ${DR}\n`);
+    ok(r9.status === 1 && /PUSH BLOCKED/.test(r9.out),
+      'a DOCS-ONLY push riding on a heavy-red ancestor is blocked (the verdict is asked before the docs-only exit)');
+    ok(!r9.calls.some((c) => c.mode === 'fast'), '…and still without spending the fast tier');
+    // The control is the hook with the docs-only exit MOVED BACK above the
+    // verdict — the literal pre-round-4 file, not an approximation of it.
+    const preSkip = preFixHook('docsfirst',
+      [DOCS_ONLY_BLOCK, ''],
+      [HEAVY_FIRST_ANCHOR, DOCS_ONLY_BLOCK + '\n' + HEAVY_FIRST_ANCHOR]);
+    if (preSkip) {
+      const r9n = runHookRefs(`refs/heads/docsred ${DRDOCS} refs/heads/docsred ${DR}\n`, {}, preSkip);
+      ok(r9n.status === 0 && !r9n.calls.length,
+        'NEG: a hook that exits on docs-only BEFORE asking ships the same commit on top of the same red, silently');
+    }
+    try { fs.unlinkSync(path.join(repo, 'data', 'ci-heavy', `${DR}.red`)); } catch {}
+  }
+
+  // ── ROUND 4 (b): A NEW BRANCH PUBLISHES ITS WHOLE RANGE ────────────────
+  // `remote_sha` is zeros for a new branch and the hook inspected only the TIP
+  // commit, so [code commit][docs commit] pushed as a new branch printed
+  // "docs-only push — gate skipped" with ZERO gate calls. This branch's own
+  // history has that shape.
+  {
+    // A remote-tracking ref, so "the range being published" is really the two
+    // new commits and not the whole history — otherwise this leg would pass
+    // for the wrong reason (any repo without remotes lists everything).
+    git(repo, ['update-ref', 'refs/remotes/origin/main', SIDE]);
+    git(repo, ['checkout', '-q', '-b', 'newbranch', SIDE]);
+    commit(repo, 'src/nb.js', '//code — the commit the tip-only look could not see\n', 'NB code');
+    const NBTIP = commit(repo, 'docs/nb.md', '# docs\n', 'NB docs (the tip)');
+    const published = git(repo, ['log', '--name-only', '--format=', NBTIP, '--not', '--remotes']).split('\n').filter(Boolean).sort();
+    ok(published.join(',') === 'docs/nb.md,src/nb.js',
+      `the published range is exactly the two new commits' paths (${published.join(', ') || 'EMPTY'}) — not the whole history, and not just the tip`);
+    const refs = `refs/heads/newbranch ${NBTIP} refs/heads/newbranch ${ZERO}\n`;
+    const r10 = runHookRefs(refs);
+    ok(r10.calls.some((c) => c.mode === 'fast'),
+      'a NEW BRANCH whose TIP is docs but whose RANGE carries code runs the fast tier');
+    ok(r10.status === 0 && r10.calls.some((c) => c.mode === 'heavy-launch'), '…and its heavy run is launched');
+    const preTip = preFixHook('tiponly',
+      ['range_cmd=(git log --name-only --format= "$local_sha" --not --remotes)',
+        'range_cmd=(git show --name-only --format= "$local_sha")']);
+    if (preTip) {
+      const r10n = runHookRefs(refs, {}, preTip);
+      ok(!r10n.calls.some((c) => c.mode === 'fast') && /docs-only/.test(r10n.out),
+        'NEG: the tip-only approximation calls exactly that push docs-only and runs nothing');
+    }
+
+    // ── ROUND 4 (c): "WE COULD NOT TELL" IS NOT "NOTHING CHANGED" ────────
+    // An unresolvable range (a remote sha this checkout never fetched) makes
+    // git exit non-zero with an EMPTY list, which the pre-fix hook read as
+    // "no code path changed".
+    const UNFETCHED = 'f'.repeat(39) + '1';
+    const badRefs = `refs/heads/newbranch ${NBTIP} refs/heads/newbranch ${UNFETCHED}\n`;
+    ok(spawnSync('git', ['-C', repo, 'diff', '--name-only', `${UNFETCHED}..${NBTIP}`], { encoding: 'utf-8', env: GIT_ENV }).status !== 0,
+      'the unfetched-remote-sha range really does fail (the leg below is non-vacuous)');
+    const r11 = runHookRefs(badRefs);
+    ok(r11.calls.some((c) => c.mode === 'fast'), 'a range git CANNOT read is never treated as docs-only');
+    ok(/could not list the paths/.test(r11.out), '…and it says so out loud (§no-silent-failures), naming the command and git\'s own message');
+    const preQuiet = preFixHook('quietfail', ['  if [ "$rc" != "0" ]; then', '  if false; then']);
+    if (preQuiet) {
+      const r11n = runHookRefs(badRefs, {}, preQuiet);
+      ok(!r11n.calls.some((c) => c.mode === 'fast') && /docs-only/.test(r11n.out),
+        'NEG: without the exit-status check the same push is "docs-only", silently');
+    }
+  }
+
+  // ── ROUND 4 (d): THE .git/ci-green SHORTCUT IS ABOUT THE PUSHED REFS ───
+  // Keyed to HEAD alone, `git push origin <other-branch>` skipped the WHOLE
+  // fast tier for a never-gated commit — and said "fast gate already GREEN on
+  // this exact tree" while doing it. Today NO test drives the marker branch at
+  // all, which is how it survived round 2 (which fixed exactly this defect for
+  // `--check-heavy --head`).
+  {
+    // The shortcut also requires a CLEAN tree, so git is told to ignore the
+    // files this fixture itself writes into the throwaway checkout.
+    fs.writeFileSync(path.join(repo, '.git', 'info', 'exclude'),
+      ['calls.ndjson', 'FAST_RED', 'scripts/', 'data/', 'pre-push', 'pre-push.prefix-*', ''].join('\n'));
+    git(repo, ['checkout', '-q', '-b', 'marked', SIDE]);
+    const G = commit(repo, 'src/g.js', '//gated\n', 'G — the commit the green marker names');
+    git(repo, ['checkout', '-q', '-b', 'ungated', G]);
+    const F = commit(repo, 'src/broken.js', '//never gated by anything\n', 'F — pushed from another branch');
+    git(repo, ['checkout', '-q', 'marked']);
+    ok(git(repo, ['status', '--porcelain']) === '' && git(repo, ['rev-parse', 'HEAD']) === G,
+      'the fixture is in the shape the shortcut needs: clean tree, HEAD = the marker\'s sha');
+    fs.writeFileSync(path.join(repo, '.git', 'ci-green'), `${G} ${Date.now()}\n`);
+
+    const r12 = runHookRefs(`refs/heads/marked ${G} refs/heads/marked ${SIDE}\n`);
+    ok(r12.status === 0 && /already GREEN/.test(r12.out) && !r12.calls.some((c) => c.mode === 'fast'),
+      'a fresh green marker naming EVERY pushed sha skips the in-hook fast run (the marker branch, exercised at last)');
+    ok(r12.calls.some((c) => c.mode === 'heavy-launch'), '…and the heavy tier is still launched for it');
+
+    const otherRefs = `refs/heads/ungated ${F} refs/heads/ungated ${ZERO}\n`;
+    const r13 = runHookRefs(otherRefs);
+    ok(r13.calls.some((c) => c.mode === 'fast'),
+      'NEG-by-behaviour: pushing a DIFFERENT branch\'s tip runs the fast tier — the marker says nothing about that commit');
+    ok(!/already GREEN/.test(r13.out), '…and never claims the tree it did not gate is already green');
+    const preHeadOnly = preFixHook('markerhead', [' && [ "$pushed_all_marked" = "1" ]', '']);
+    if (preHeadOnly) {
+      const r13n = runHookRefs(otherRefs, {}, preHeadOnly);
+      ok(!r13n.calls.some((c) => c.mode === 'fast') && /already GREEN/.test(r13n.out),
+        'NEG: keyed to HEAD alone, the same push skips the whole fast tier for a never-gated commit');
+    }
+
+    // A marker for a commit nobody is pushing must not unlock anything either.
+    fs.writeFileSync(path.join(repo, '.git', 'ci-green'), `${F} ${Date.now()}\n`);
+    const r14 = runHookRefs(`refs/heads/marked ${G} refs/heads/marked ${SIDE}\n`);
+    ok(r14.calls.some((c) => c.mode === 'fast'), '…and a marker naming some OTHER commit does not skip this push either');
+    try { fs.unlinkSync(path.join(repo, '.git', 'ci-green')); } catch {}
+  }
 }
 
 // ── §5 THE GIT ENVIRONMENT THE DETACHED CHILD MUST NOT INHERIT ───────────
@@ -405,18 +555,41 @@ console.log('\n§6 machine-global fixtures + no-verdict honesty');
   ok(!clean.ports.length && !clean.paths.length,
     `NEG: the replacement shapes (freePort, mkdtemp, per-pid paths) AND the two that must never be flagged (a /tmp fixture VALUE, a lowercase port: config field) are all quiet (${[...clean.ports, ...clean.paths].join(' ') || 'clean'})`);
 
-  // "KILLED FROM OUTSIDE" MUST NOT LAUNDER A HANG. A heavy run refuses to
-  // write a verdict when a child died on a signal it did not send — that is
-  // how a superseded or Ctrl-C'd run stops stamping a RED built from its own
-  // interruption. But a suite that HANGS is killed by our own budget, with the
-  // same SIGTERM, and that one IS a red. spawnSync tells them apart by
-  // reporting ETIMEDOUT for its own kill, and this is the whole distinction.
-  ok(killedFromOutside({ signal: 'SIGTERM' }) === true, 'a child killed by SIGTERM with no error of ours reads as killed from OUTSIDE');
-  ok(killedFromOutside({ signal: 'SIGKILL' }) === true, '…SIGKILL too');
+  // "KILLED FROM OUTSIDE" MUST NOT LAUNDER A HANG — OR A CRASH (round 4).
+  // A heavy run refuses to write a verdict when a child died on a signal it
+  // did not send: that is how a superseded or Ctrl-C'd run stops stamping a
+  // RED built from its own interruption. Two things must not get in under
+  // that rule:
+  //   · a suite that HANGS is killed by our own budget with the same SIGTERM,
+  //     and that one IS a red — spawnSync reports ETIMEDOUT for its own kill;
+  //   · a suite that CRASHES dies on a signal nobody sent it, and that is the
+  //     most literal possible fact about the code under test. Measured on this
+  //     box (scripts/ci.mjs quotes the numbers): a V8 heap-limit OOM exits
+  //     {status:null, signal:'SIGABRT'} and an external-memory OOM is taken by
+  //     the kernel as {status:null, signal:'SIGKILL'}. Reading either as
+  //     supersession abandoned the tier at that suite and exited 0.
+  // So OUTSIDE is an ALLOWLIST of the signals a supersede or an operator
+  // sends, and everything else is a verdict about the suite.
+  ok(killedFromOutside({ signal: 'SIGTERM' }) === true, 'a child killed by SIGTERM with no error of ours reads as killed from OUTSIDE (this is what supersession sends)');
+  ok(killedFromOutside({ signal: 'SIGINT' }) === true && killedFromOutside({ signal: 'SIGHUP' }) === true,
+    '…SIGINT (Ctrl-C) and SIGHUP (the terminal went away) too');
+  ok(killedFromOutside({ signal: 'SIGABRT' }) === false,
+    'NEG: SIGABRT does NOT — that is how a V8 heap-limit OOM dies, i.e. a fact about the code under test (measured: {status:null, signal:"SIGABRT"})');
+  ok(killedFromOutside({ signal: 'SIGKILL' }) === false,
+    'NEG: nor SIGKILL — the kernel OOM killer\'s signal; an operator\'s kill -9 is indistinguishable from here, and a wrong RED costs one re-run while a wrong "abandoned" is a silent green');
+  ok(['SIGSEGV', 'SIGBUS', 'SIGILL', 'SIGFPE'].every((s) => killedFromOutside({ signal: s }) === false),
+    'NEG: nor any native crash signal (SIGSEGV/SIGBUS/SIGILL/SIGFPE)');
   ok(killedFromOutside({ signal: 'SIGTERM', error: { code: 'ETIMEDOUT' } }) === false,
     'NEG: our OWN budget kill (ETIMEDOUT) does NOT — a hung suite is a red, never a "no verdict"');
   ok(killedFromOutside({ status: 1 }) === false && killedFromOutside({ status: 0 }) === false && killedFromOutside(null) === false,
     'NEG: an ordinary failure, an ordinary pass and a missing result are not signals');
+  // The allowlist is the thing under test, so it is READ from the module
+  // rather than re-spelled here: a signal added to it tomorrow has to be one
+  // of the three a supersede/operator sends, and this states that out loud.
+  ok(OUTSIDE_SIGNALS.join(',') === 'SIGTERM,SIGINT,SIGHUP',
+    `the OUTSIDE set is exactly the signals somebody SENDS this run (${OUTSIDE_SIGNALS.join(', ')})`);
+  ok(OUTSIDE_SIGNALS.every((s) => killedFromOutside({ signal: s }) === true),
+    '…and every member of it really reads as outside (the list is not decorative)');
 
   // (b) THE DIRTY-TREE PATH, FOR REAL. A probe file makes this checkout dirty
   //     for the length of two runs; `finally` removes it.

@@ -38,7 +38,9 @@
 //     being pushed is killed, because the newer commit subsumes it and its
 //     half-finished verdict is worthless. A run for the same sha is refused;
 //     anything else is launched and queues (below).
-//   · the RUN takes an exclusive MACHINE lock (os.tmpdir(), per uid) for its
+//   · the RUN takes an exclusive MACHINE lock (literal `/tmp`, per uid —
+//     NEVER os.tmpdir(), which follows TMPDIR and would name a process
+//     environment rather than a machine; see defaultLockPath) for its
 //     whole duration and waits — bounded — for its turn. Timing out writes NO
 //     verdict and says so (a run that never happened must not look like one),
 //     and a stale lock whose holder is gone is stolen.
@@ -72,7 +74,10 @@
 // --lock=<file> + --lock-wait-ms=<n> (the machine lock — a test drives its own
 // so it never contends with, or waits for, a real heavy run).
 // Exit codes: 0 green · 1 red · 2 refused (dirty tree / bad --only) · 3 the
-// tier did not run (never got the machine lock) — no verdict either way.
+// tier did not run (never got the machine lock) · 4 ABORTED (superseded, the
+// lock taken, or terminated from outside — it stopped mid-tier). 0 and 1 are
+// the only VERDICTS; 2/3/4 all mean "no verdict was written", and none of them
+// may ever be 0, because the Actions heavy job's only signal is the exit code.
 // Mirrored in .github/workflows/ci.yml (fast and heavy as separate jobs).
 // Gate for this file: scripts/test-ci-gate.mjs.
 import { spawn, spawnSync } from 'node:child_process';
@@ -417,12 +422,36 @@ const budgetFor = (s) => (s.tier === 'fast' ? 300000 : /chrome/.test(s.why || ''
 // worktree at the pushed sha for a hook-launched heavy run (suites resolve
 // their own repo root from their file location, so the WORKTREE's copy of the
 // suite is what must be executed).
-// A child that died on a SIGNAL we did not schedule was killed from OUTSIDE —
-// the operator, a supervisor, or the launcher superseding this whole run's
-// process group. That is not a fact about the code under test, and heavyGate
-// uses it to refuse a verdict. Our own timeout kill is excluded by name:
-// spawnSync reports ETIMEDOUT for that one, and a hung suite IS a red.
-export const killedFromOutside = (r) => !!(r && r.signal && !(r.error && r.error.code === 'ETIMEDOUT'));
+// A child that died on a SIGNAL somebody SENT to this run was killed from
+// OUTSIDE — the launcher superseding our whole process group, an operator, or
+// a supervisor shutting us down. That is not a fact about the code under test,
+// and heavyGate uses it to refuse a verdict.
+//
+// SO THE SIGNAL LIST IS AN ALLOWLIST, NOT "ANY SIGNAL" (round 4 finding). A
+// crash signal is a FACT ABOUT THE CODE UNDER TEST and must be RED — measured
+// on this box, both of the ways a suite dies of memory look like a signal:
+//   · a V8 heap-limit OOM   ⇒ {status:null, signal:'SIGABRT'}  (FATAL ERROR:
+//     Reached heap limit — V8 calls abort() itself)
+//   · the kernel OOM killer ⇒ {status:null, signal:'SIGKILL'}  (external
+//     memory: RSS grows outside the heap cap and the kernel takes it)
+//   · a native crash        ⇒ SIGSEGV / SIGBUS / SIGILL / SIGFPE
+// Reading any of those as "somebody superseded us" made the tier ABANDON at
+// that suite, skip every suite after it, write NO marker and exit 0 — so the
+// Actions heavy job (whose signal IS the exit code, `--heavy --dirty-ok`)
+// showed a GREEN tick for a tier that crashed and ran nothing else, and
+// locally nothing blocked the next push. SIGKILL is deliberately on the RED
+// side even though an operator's `kill -9` lands there too: the two are
+// indistinguishable from here, and the costs are not symmetrical — a wrong RED
+// blocks one push and is cleared by re-running `npm run ci:heavy`, a wrong
+// "abandoned" is a silent green for a tier that never ran.
+//
+// Supersession sends SIGTERM (`process.kill(-pid, 'SIGTERM')` in heavyLaunch),
+// Ctrl-C sends SIGINT and a lost terminal sends SIGHUP; those three are the
+// whole outside set. Our OWN budget kill is excluded by name inside it:
+// spawnSync reports ETIMEDOUT for that one (measured: {signal:'SIGTERM',
+// error:{code:'ETIMEDOUT'}}), and a hung suite IS a red.
+export const OUTSIDE_SIGNALS = ['SIGTERM', 'SIGINT', 'SIGHUP'];
+export const killedFromOutside = (r) => !!(r && r.signal && OUTSIDE_SIGNALS.includes(r.signal) && !(r.error && r.error.code === 'ETIMEDOUT'));
 
 function runSuite(s, { root = repo } = {}) {
   const t = Date.now();
@@ -852,6 +881,15 @@ function heavyGate({ sha: wantSha, isolate, dir, only, dirtyOk, lock, lockWaitMs
         : `HEAVY ${noVerdict ? 'TIER' : 'GATE'} GREEN for ${shortSha(sha)} in ${Math.round(rec.ms / 1000)}s (${heavy.length} suites)`;
     console.log('\n' + verdict + (noVerdict ? ` — NO VERDICT WRITTEN (${noVerdict})` : ''));
     if (flaky.length) console.log(`[ci:heavy] FLAKY (failed, passed on retry — not blocking, but they did fail once): ${flaky.join(', ')}`);
+    // AN ABORTED TIER MUST NEVER EXIT 0 (round 4 finding). `failed` is empty
+    // for an abandoned run by construction — it stopped instead of judging —
+    // so `failed.length ? 1 : 0` handed it the success code, and the Actions
+    // heavy job (whose only signal is the exit code) showed a green tick for a
+    // tier that ran zero suites. Exit 4 = ABORTED: the run did not finish and
+    // wrote no verdict, which is neither green (0), red (1), refused (2) nor
+    // "never got the machine lock" (3). Every one of those non-zero codes means
+    // "do not read this as a pass"; only 0 and 1 are verdicts.
+    if (abandonedWhy) return 4;
     return failed.length ? 1 : 0;
   } finally {
     cleanup();

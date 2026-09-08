@@ -14,7 +14,9 @@
 # The global repo-guard pre-push (secret scan) CHAINS to this hook, so both
 # always run. Installed into .git/hooks by scripts/install-git-hooks.mjs (npm
 # postinstall). Escape hatches:
-#   docs-only pushes (every changed path is *.md or docs/**) skip automatically
+#   docs-only pushes (every PUBLISHED path is *.md or docs/**) skip the FAST
+#     tier — the heavy verdict is still asked, because a red ancestor is red
+#     whether or not this push carries code
 #   VIBESPACE_SKIP_CI=1 git push       — emergency bypass, use sparingly
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
@@ -24,7 +26,24 @@ cd "$(git rev-parse --show-toplevel)"
 # read ref updates (also keeps stdin drained for chained callers)
 mapfile -t REFS || true
 
-# docs-only fast path: diff every pushed range; if no code path changed, skip
+# docs-only fast path: list every path this push PUBLISHES; if none of them is
+# a code path, skip the fast tier.
+#
+# "NOTHING CHANGED" AND "WE COULD NOT TELL" ARE NOT THE SAME ANSWER (round 4).
+# only_docs was inferred from an EMPTY file list, and two different things
+# produce one:
+#   (a) A NEW BRANCH (remote sha = zeros) was approximated by its TIP COMMIT
+#       only, so [code commit][docs commit] pushed as a new branch printed
+#       "docs-only push — gate skipped" with ZERO gate calls. This branch's own
+#       history has exactly that shape, so it is not a hypothetical. A new
+#       branch publishes its whole unpublished range, so that is what we ask
+#       about: every commit reachable from the tip that no remote-tracking ref
+#       already has.
+#   (b) `git diff` / `git log` FAILING — an unresolvable range (a remote sha we
+#       never fetched), a broken repository — also yields an empty list. A
+#       gate that reads its own inability to answer as "no code changed" is the
+#       §no-silent-failures rule in its purest form, so a non-zero git status
+#       means NOT docs-only, said out loud.
 only_docs=1
 PUSHED_SHAS=()
 for line in "${REFS[@]:-}"; do
@@ -34,10 +53,15 @@ for line in "${REFS[@]:-}"; do
   [ "$local_sha" = "0000000000000000000000000000000000000000" ] && continue  # deletion
   PUSHED_SHAS+=("$local_sha")
   if [ "$remote_sha" = "0000000000000000000000000000000000000000" ]; then
-    range="$local_sha"  # new branch: inspect the tip commit only (cheap approximation)
-    files=$(git show --name-only --format= "$range" 2>/dev/null)
+    range_cmd=(git log --name-only --format= "$local_sha" --not --remotes)   # new branch: the WHOLE unpublished range
   else
-    files=$(git diff --name-only "$remote_sha..$local_sha" 2>/dev/null)
+    range_cmd=(git diff --name-only "$remote_sha..$local_sha")
+  fi
+  files=$("${range_cmd[@]}" 2>/dev/null); rc=$?
+  if [ "$rc" != "0" ]; then
+    echo "[ci] could not list the paths this push publishes (\`${range_cmd[*]}\` exited $rc: $("${range_cmd[@]}" 2>&1 >/dev/null | head -1)) — NOT treating it as docs-only" >&2
+    only_docs=0
+    files=""
   fi
   while IFS= read -r f; do
     [ -z "$f" ] && continue
@@ -47,10 +71,6 @@ for line in "${REFS[@]:-}"; do
     esac
   done <<< "$files"
 done
-if [ "$only_docs" = "1" ] && [ "${#REFS[@]}" -gt 0 ]; then
-  echo "[ci] docs-only push — gate skipped" >&2
-  exit 0
-fi
 
 # ── HEAVY-TIER VERDICT FIRST (2026-09-07) ─────────────────────────────────
 # A heavy run that went RED on a commit that is an ANCESTOR of what we are
@@ -78,15 +98,41 @@ if [ "$checked_any" = "0" ]; then
   node scripts/ci.mjs --check-heavy >&2 || exit 1
 fi
 
+# DOCS-ONLY EXITS *HERE*, NOT ABOVE (round 4). A red heavy ancestor is red
+# whether or not this particular push carries code, and the block is the thing
+# that stops more work being stacked on a known-broken commit — so the verdict
+# is asked first and only the FAST tier (and the heavy launch, which has
+# nothing new to test) is what a docs-only push saves.
+if [ "$only_docs" = "1" ] && [ "${#REFS[@]}" -gt 0 ]; then
+  echo "[ci] docs-only push — fast tier skipped" >&2
+  exit 0
+fi
+
 # GREEN MARKER (2.369.51): scripts/ci.mjs writes .git/ci-green = "<sha> <epoch-ms>"
 # after a green run on a CLEAN tree. If it names HEAD and is < 60 min old the gate
 # already passed on this exact tree — do not re-run it inside the SSH session
 # (GitHub closes an idle connection before a long gate finishes).
+#
+# THE SHORTCUT IS ABOUT THE COMMITS BEING PUBLISHED, NOT THE ONE CHECKED OUT
+# (round 4 — the same defect round 2 fixed for `--check-heavy --head`). Keyed
+# to HEAD alone, `git push origin some-other-branch` skipped the WHOLE fast
+# tier for a never-gated commit and printed "fast gate already GREEN on this
+# exact tree" while doing it. Reproduced: standing on main with a fresh marker,
+# pushing refs/heads/feature whose tip adds src/broken.js ⇒ no fast run at all.
+# So every pushed sha must BE the marker's sha, and an empty PUSHED_SHAS never
+# takes the shortcut (nothing was proven about a list we do not have).
 skip_fast=0
 marker="$(git rev-parse --git-dir)/ci-green"
 if [ -f "$marker" ]; then
   m_sha=$(awk '{print $1}' "$marker"); m_ts=$(awk '{print $2}' "$marker"); now_ms=$(( $(date +%s) * 1000 ))
-  if [ "$m_sha" = "$(git rev-parse HEAD)" ] && [ -z "$(git status --porcelain)" ] && [ $(( now_ms - ${m_ts:-0} )) -lt 3600000 ]; then
+  pushed_all_marked=1; pushed_n=0
+  for sha in "${PUSHED_SHAS[@]:-}"; do
+    [ -z "$sha" ] && continue
+    pushed_n=$((pushed_n + 1))
+    [ "$sha" = "$m_sha" ] || pushed_all_marked=0
+  done
+  [ "$pushed_n" = "0" ] && pushed_all_marked=0
+  if [ "$m_sha" = "$(git rev-parse HEAD)" ] && [ "$pushed_all_marked" = "1" ] && [ -z "$(git status --porcelain)" ] && [ $(( now_ms - ${m_ts:-0} )) -lt 3600000 ]; then
     echo "[ci] fast gate already GREEN on this exact tree ($(echo "$m_sha" | cut -c1-8), $(( (now_ms - m_ts) / 60000 )) min ago) — skipping the in-hook run" >&2
     skip_fast=1
   fi

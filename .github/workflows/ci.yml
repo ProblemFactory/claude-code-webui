@@ -56,6 +56,13 @@ jobs:
       # stops a developer spending 16 minutes to be told the run could not
       # produce the verdict they were told to produce); in Actions it would
       # only turn "some step touched a tracked file" into a red gate.
+      #
+      # BECAUSE THE EXIT CODE IS THE SIGNAL, no "no verdict" path may return 0
+      # (round 4): 0 green · 1 red · 2 refused · 3 never got the machine lock ·
+      # 4 ABORTED. A suite that CRASHES (a V8 heap-limit OOM is SIGABRT, the
+      # kernel OOM killer is SIGKILL) is a RED here, not a supersession — that
+      # confusion is what once showed this job a green tick for a tier that
+      # crashed and then ran nothing.
       - run: node scripts/ci.mjs --heavy --dirty-ok
         env:
           VIBESPACE_CI_OAT: ${{ secrets.VIBESPACE_CI_OAT }}
