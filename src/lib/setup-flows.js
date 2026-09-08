@@ -459,9 +459,10 @@ export function installSetupFlows(App) {
   },
 
     async _openDiagnostics() {
-    const [d, c] = await Promise.all([
+    const [d, c, ci] = await Promise.all([
       fetchJson('/api/telemetry/summary?days=14'),
       fetchJson('/api/telemetry/central-summary?days=14'),
+      fetchJson('/api/ci-heavy'),
     ]);
     if (!d) { showToast(t('Could not load diagnostics'), { type: 'error' }); return; }
     const esc = escHtml;
@@ -495,6 +496,36 @@ export function installSetupFlows(App) {
     <h2>${esc(t('Events per day'))}</h2><div class="chart">${bars || `<span class="dim">${esc(t('No data'))}</span>`}</div>
     <h2>${esc(t('By event'))}</h2><table>${kv(d.byName)}</table>
     <h2>${esc(t('By version'))}</h2><table>${kv(d.byVersion)}</table>
+    ${(() => {
+      // Heavy release-gate tier (2026-09-07): `npm run ci` gates the push with
+      // the fast tier and the pre-push hook launches the heavy tier DETACHED,
+      // so its verdict lands minutes later with nobody watching. This is where
+      // a human finds it without knowing data/ci-heavy/ exists. Absent on a
+      // deployment that never pushes — no runs, no section.
+      const runs = (ci && ci.runs) || [], running = (ci && ci.running) || [];
+      if (!runs.length && !running.length) return '';
+      const dur = (ms) => (ms >= 60000 ? `${Math.floor(ms / 60000)}m${String(Math.round((ms % 60000) / 1000)).padStart(2, '0')}s` : `${Math.round(ms / 1000)}s`);
+      const rows = [
+        // GREEN / RED / RUNNING stay untranslated: they are the gate's own
+        // vocabulary (the marker files are literally <sha>.green / .red) and
+        // `npm run ci:status` prints the same words at the terminal.
+        ...running.map((r) => `<tr><td>${esc(r.sha.slice(0, 8))}</td><td>RUNNING</td><td class="n">—</td><td class="dim">${new Date(r.startedAt).toLocaleString()}</td><td class="dim">pid ${r.pid}</td></tr>`),
+        // A suite that failed and passed on the retry does not block a push,
+        // but it DID fail — the row says so rather than laundering it green.
+        // SKIP is neither: the tier never ran (it never got the machine lock),
+        // so the row states the absence rather than leaving the commit looking
+        // like one nobody pushed. Like GREEN/RED it is the gate's own
+        // vocabulary, and the reason is the record's own words.
+        // A run is ISOLATED at a sha, and this gate's table can name suites that
+        // sha never contained (round 6) — those were not run and not judged, so
+        // the green row says how many of its `suites` they were instead of
+        // printing a total the record itself contradicts.
+        ...runs.map((r) => `<tr><td>${esc(r.sha.slice(0, 8))}</td><td><b>${r.result === 'green' ? 'GREEN' : r.result === 'skipped' ? 'SKIP' : 'RED'}</b></td><td class="n">${esc(dur(r.ms))}</td><td class="dim">${new Date(r.endedAt).toLocaleString()}</td><td class="dim">${r.result === 'skipped' ? esc(t('no verdict')) + (r.reason ? ' — ' + esc(r.reason) : '') : r.result === 'green' ? esc(t('{n} suites', { n: r.suites })) : esc(r.failed.join(', '))}${r.absent ? ` <span class="dim">· ${esc(t('{n} not present at that commit', { n: r.absent }))}</span>` : ''}${(r.flaky || []).length ? ` <span class="dim">· ${esc(t('flaky'))}: ${esc(r.flaky.join(', '))}</span>` : ''}${r.unlocked ? ` <span class="dim">· ${esc(t('ran without the machine lock'))}</span>` : ''}</td></tr>`),
+      ].join('');
+      return `<h2>${esc(t('Release gate — heavy tier'))}</h2>
+      <p class="dim">${esc(t('Suites too slow for the pre-push gate (headless chrome, real servers, real CLIs). A RED run blocks the next push until a newer green run clears it — run npm run ci:status for the ancestry verdict.'))}</p>
+      <table><tr><td class="dim">${esc(t('commit'))}</td><td class="dim">${esc(t('result'))}</td><td class="n dim">${esc(t('duration'))}</td><td class="dim">${esc(t('finished'))}</td><td class="dim">${esc(t('detail'))}</td></tr>${rows}</table>`;
+    })()}
     ${(() => {
       // Fleet section: only on a collector instance that has received batches.
       if (!c || !c.collector || !Object.keys(c.instances || {}).length) return '';

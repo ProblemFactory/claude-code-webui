@@ -111,23 +111,23 @@ async function memInfoAsync() {
   return memInfo();
 }
 
-/** THE BOUND IS ON A THING THAT ONLY GROWS (2026-09-07). `ps aux` prints one
- *  line per process INCLUDING its whole command line, so the size of this read
- *  is set by how busy the machine is — and node's `maxBuffer` overflow is an
- *  ERROR, not a truncation: the call yields ERR_CHILD_PROCESS_STDIO_MAXBUFFER,
- *  this function reads that as "no --sort, must be BSD ps", the fallback
- *  overflows on the very same bytes, and it resolves `[]`. A machine with
- *  enough processes therefore reported NO processes at all — silently, because
- *  an empty list is also what a machine with nothing running would send.
- *  MEASURED here: 2574 processes = 4.64 MB, over the old 4 MiB cap; the daemon
- *  op's assert ("top procs with pid+rss") is what caught it.
- *  `PS_MAX_BUFFER` is shared with `listProcs` below — the two reads are the
- *  same table through two column sets, so one of them being able to answer
- *  while the other cannot is a difference with no meaning. */
-const PS_MAX_BUFFER = 32 * 1024 * 1024;
+// THE BUFFER IS SIZED FOR A BUSY MACHINE, AND A FAILURE IS NEVER SILENT
+// (2026-09-07, found by the release gate going red on this dev box). `ps aux`
+// output is ~1.8 KB per process once command lines are long: measured here at
+// **4,258,412 bytes for 2,404 processes**, i.e. PAST the old 4 MiB maxBuffer.
+// Over that line execFile kills `ps`, both legs error, and the old code
+// `resolve([])`d — so `read().procs` was EMPTY on exactly the machines whose
+// process list matters, with no log, no error field and no way to tell "this
+// box has no processes" from "we threw the answer away". That fed the System
+// panel's top-process list AND the memory-pressure alert's "top: …" line,
+// which is printed *because* the machine is under pressure. 64 MiB covers
+// ~36k processes; past that the failure now SAYS SO (the degrade-gracefully
+// lesson: a catch that logs the message verbatim is the only reason these are
+// ever found). The full-table twin listProcs() below carries the same size.
+const PS_MAX_BUFFER = 64 * 1024 * 1024;
 function topProcs(n = 8) {
   return new Promise((resolve) => {
-    execFile('ps', ['aux', '--sort=-rss'], { timeout: 5000, maxBuffer: PS_MAX_BUFFER }, (err, out) => {
+    execFile('ps', ['aux', '--sort=-rss'], { timeout: 8000, maxBuffer: PS_MAX_BUFFER }, (err, out) => {
       const parse = (text) => text.split('\n').slice(1).filter(Boolean).map((ln) => {
         const f = ln.trim().split(/\s+/);
         // USER PID %CPU %MEM VSZ RSS TTY STAT START TIME CMD…
@@ -135,8 +135,11 @@ function topProcs(n = 8) {
       }).filter((p) => p.pid);
       if (!err) return resolve(parse(out).slice(0, n));
       // BSD ps (no --sort): sort ourselves
-      execFile('ps', ['aux'], { timeout: 5000, maxBuffer: PS_MAX_BUFFER }, (e2, out2) => {
-        if (e2) return resolve([]);
+      execFile('ps', ['aux'], { timeout: 8000, maxBuffer: PS_MAX_BUFFER }, (e2, out2) => {
+        if (e2) {
+          console.warn(`[sysinfo] topProcs: both ps legs failed — process list will be EMPTY (${String(e2.message || e2).slice(0, 200)}; first leg: ${String(err.message || err).slice(0, 120)})`);
+          return resolve([]);
+        }
         resolve(parse(out2).sort((a, b) => b.rss - a.rss).slice(0, n));
       });
     });
@@ -234,8 +237,14 @@ function sampleProcCpu(rows) {
  *  Returns { procs, total, sampled } — `sampled` says pcpuNow is live. */
 function listProcs({ max = 350 } = {}) {
   return new Promise((resolve) => {
+    // Same sizing story as topProcs above — measured 4,244,406 bytes for 2,404
+    // processes here, which is half of the old 8 MiB: the cap is applied AFTER
+    // parsing the whole table, so the WHOLE table has to fit.
     execFile('ps', ['axo', PS_COLUMNS], { timeout: 8000, maxBuffer: PS_MAX_BUFFER }, (err, out) => {
-      if (err) return resolve({ procs: [], total: 0, sampled: false, error: String(err.message || err).slice(0, 200) });
+      if (err) {
+        console.warn(`[sysinfo] listProcs: ps failed — process table will be EMPTY (${String(err.message || err).slice(0, 200)})`);
+        return resolve({ procs: [], total: 0, sampled: false, error: String(err.message || err).slice(0, 200) });
+      }
       const all = parsePsProcs(out);
       // sample the WHOLE table BEFORE capping (review-confirmed ordering bug:
       // capping first meant both cap membership and sampling were chosen by

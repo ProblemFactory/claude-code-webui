@@ -1,14 +1,22 @@
 # Release gate mirror (2.336.0): the same battery the pre-push hook enforces
-# locally (scripts/ci.mjs — build + gate suites + worktree boot smoke), run on
-# every push/PR so a bypassed or missing local hook still gets caught in
-# minutes. Self-hosters see the badge state before pulling an update.
+# locally, run on every push/PR so a bypassed or missing local hook still gets
+# caught in minutes. Self-hosters see the badge state before pulling an update.
+#
+# TWO JOBS since the fast/heavy split (2026-09-07): `fast` is the one whose red
+# X must arrive quickly (build + every sub-10s suite + the real haiku turn,
+# ~2 min), `heavy` is everything that needs headless chrome, a real worktree
+# server, a real agent CLI or the real opencode binary (~10 min). They run in
+# PARALLEL — heavy is not a consequence of fast, it is the other half of the
+# same battery, and making it `needs: fast` would only delay the slow signal.
+# The census (`--census`, also asserted inside `npm run build`) is what
+# guarantees the two jobs together cover every scripts/test-*.mjs.
 name: ci
 on:
   push:
     branches: [master]
   pull_request:
 jobs:
-  gate:
+  fast:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -25,4 +33,36 @@ jobs:
       - run: node scripts/ci.mjs
         env:
           # claude setup-token secret; absent on fork PRs → chat E2E SKIPs
+          VIBESPACE_CI_OAT: ${{ secrets.VIBESPACE_CI_OAT }}
+  heavy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dtach (session persistence layer the boot smokes need)
+        run: sudo apt-get update && sudo apt-get install -y dtach
+      - name: Install claude CLI
+        run: npm i -g @anthropic-ai/claude-code
+      - run: npm ci
+      # Runner images ship Chrome; the chrome suites SKIP with a reason if a
+      # future image drops it, so this never becomes a silent pass.
+      #
+      # --dirty-ok (round 2): here the EXIT CODE is the signal — the runner is
+      # thrown away, so the `data/ci-heavy/<sha>` marker nobody will ever read
+      # is not what this job is for. Locally that refusal is the point (it
+      # stops a developer spending 16 minutes to be told the run could not
+      # produce the verdict they were told to produce); in Actions it would
+      # only turn "some step touched a tracked file" into a red gate.
+      #
+      # BECAUSE THE EXIT CODE IS THE SIGNAL, no "no verdict" path may return 0
+      # (round 4): 0 green · 1 red · 2 refused · 3 never got the machine lock ·
+      # 4 ABORTED. A suite that CRASHES (a V8 heap-limit OOM is SIGABRT, the
+      # kernel OOM killer is SIGKILL) is a RED here, not a supersession — that
+      # confusion is what once showed this job a green tick for a tier that
+      # crashed and then ran nothing.
+      - run: node scripts/ci.mjs --heavy --dirty-ok
+        env:
           VIBESPACE_CI_OAT: ${{ secrets.VIBESPACE_CI_OAT }}

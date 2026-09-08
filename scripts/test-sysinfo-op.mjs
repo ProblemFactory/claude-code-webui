@@ -10,6 +10,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const REPO = path.resolve(new URL('..', import.meta.url).pathname);
@@ -139,6 +140,55 @@ ok(!/ps -p \d+/.test(sigText) && !/ps -p \$\{pid\}/.test(srv),
   'signal verdict carries no bare `ps -p <pid>` existence test (busybox `ps` has no -p)');
 ok(sigText.includes(require(REPO + '/src/cli-identity.js').pidAliveShellFn()),
   'signal verdict embeds the SHARED vs_alive ladder verbatim — one probe, one author, no per-site reason to get wrong');
+
+// ── A BUSY MACHINE MUST NOT PRODUCE AN EMPTY PROCESS LIST (2026-09-07) ────
+// Found by this very suite going red on the dev box: `ps aux` output is ~1.8 KB
+// per process once command lines are long, and at 2,404 processes it measured
+// 4,258,412 bytes — past topProcs()'s old 4 MiB maxBuffer. execFile then kills
+// `ps`, both legs error, and the old code `resolve([])`d SILENTLY, so
+// `read().procs` was empty exactly on the machines whose process list matters
+// (it also feeds the memory-pressure alert's "top: …" line, which is printed
+// *because* the box is under pressure). Proven here with a fake `ps` on PATH
+// that emits more than the old buffer, in a child process so PATH never leaks
+// into the rest of the suite — plus the pre-fix buffer as the NEGATIVE
+// CONTROL, because an assert that cannot fail is not an assert.
+{
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-fakeps-'));
+  // ~6 MiB of plausible `ps aux` / `ps axo` output: over the old 4 MiB
+  // topProcs cap, under the new 64 MiB one.
+  fs.writeFileSync(path.join(bin, 'ps'), `#!/usr/bin/env node
+const n = 3000, pad = 'x'.repeat(2000);
+const rows = [];
+for (let i = 0; i < n; i++) rows.push(\`me \${1000 + i} 0.1 0.2 123456 \${5000 + i} ?  Sl  09:00 0:01 /usr/bin/thing-\${i} --flag \${pad}\`);
+process.stdout.write('USER PID %CPU %MEM VSZ RSS TTY STAT START TIME COMMAND\\n' + rows.join('\\n') + '\\n');
+`);
+  fs.chmodSync(path.join(bin, 'ps'), 0o755);
+  const probe = path.join(bin, 'probe.mjs');
+  fs.writeFileSync(probe, `import { createRequire } from 'node:module';
+const require = createRequire(${JSON.stringify(REPO + '/x.js')});
+const s = require(${JSON.stringify(REPO + '/src/sysinfo.js')});
+const r = await s.read(process.cwd());
+console.log(JSON.stringify({ procs: (r.procs || []).length, ok: (r.procs || []).every((p) => p.pid && Number.isFinite(p.rss)) }));
+`);
+  const run = (env) => {
+    const r = spawnSync(process.execPath, [probe], { encoding: 'utf-8', timeout: 60000, env });
+    try { return JSON.parse((r.stdout || '').trim().split('\n').pop()); } catch { return { procs: -1, ok: false, raw: (r.stdout || '') + (r.stderr || '') }; }
+  };
+  const withFake = { ...process.env, PATH: bin + ':' + process.env.PATH };
+  const got = run(withFake);
+  ok(got.procs > 0 && got.ok, `a ps table BIGGER than the pre-fix 4 MiB buffer still yields processes (${got.procs} rows)`);
+  // NEGATIVE CONTROL: the same fake `ps` against a copy of sysinfo.js with the
+  // pre-fix buffer spliced back in must produce the empty list this fixes.
+  const patched = path.join(bin, 'sysinfo-prefix.js');
+  const src = fs.readFileSync(path.join(REPO, 'src/sysinfo.js'), 'utf-8');
+  const before = src.replace(/const PS_MAX_BUFFER = [^;]+;/, 'const PS_MAX_BUFFER = 4 * 1024 * 1024;');
+  ok(before !== src, 'NEGATIVE CONTROL patch applied (the buffer constant is where the fix lives)');
+  fs.writeFileSync(patched, before);
+  fs.writeFileSync(probe, fs.readFileSync(probe, 'utf-8').replace(JSON.stringify(REPO + '/src/sysinfo.js'), JSON.stringify(patched)));
+  const ctl = run(withFake);
+  ok(ctl.procs === 0, `NEGATIVE CONTROL: with the pre-fix 4 MiB buffer the SAME table yields an EMPTY list (${ctl.procs} rows) — silently, which is what this fixes`);
+  try { fs.rmSync(bin, { recursive: true, force: true }); } catch {}
+}
 
 try { await dm.stop?.(); } catch { }
 // ── 2.369.68: `ps` output past 4 MiB must not empty the top-procs list ──

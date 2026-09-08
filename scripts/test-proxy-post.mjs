@@ -13,6 +13,7 @@
 // the round trip; a wiring pin holds server.js to the pattern.
 import http from 'http';
 import fs from 'fs';
+import net from 'net';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
@@ -24,7 +25,13 @@ const Unblocker = require(path.join(REPO, 'node_modules/unblocker'));
 let pass = 0, fail = 0;
 const ok = (name, cond, extra) => { if (cond) { pass++; console.log(`  ✓ ${name}`); } else { fail++; console.error(`  ✗ ${name}${extra ? ' — ' + extra : ''}`); } };
 
-const TARGET_PORT = 18941, PROXY_PORT = 18942;
+// FREE ports (2026-09-07 round 2): a fixed pair is a claim on a name the whole
+// BOX shares, and the fast tier that runs this suite is fail-fast with no
+// retry — one squatter from any of this machine's ~160 checkouts of this repo
+// turns an unrelated push red. Nothing outside this process needs the numbers.
+const freePort = () => new Promise((res, rej) => { const s = net.createServer(); s.once('error', rej); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); }); });
+const TARGET_PORT = await freePort();
+const PROXY_PORT = await freePort();
 
 // target: GET ping + POST echo (reports how many body bytes actually arrived)
 const target = http.createServer((req, res) => {

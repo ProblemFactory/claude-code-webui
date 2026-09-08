@@ -17,6 +17,11 @@ data/bin/vibespace-status
 # file is the dirty-tree-blocks-git-pull class). Boot reinstalls it when missing.
 data/bin/rclone
 data/bin/rclone-dl.zip
+# heavy-tier release-gate results (scripts/ci.mjs --heavy): <sha>.{green,red,pid,log}
+# — local run records, never history. Already covered by data/* above; spelled
+# out because a reader looking for "where does the push-blocking marker live"
+# should find it named.
+data/ci-heavy/
 *.nfs*
 .agent-context/
 data/.agent-hooks-optout

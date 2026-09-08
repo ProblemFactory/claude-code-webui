@@ -20,6 +20,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { GIT_REDIRECTORS, gitEnvFrom } from './git-env.mjs';
 
 const REPO = path.resolve(new URL('..', import.meta.url).pathname);
 let pass = 0, fail = 0;
@@ -388,26 +389,13 @@ for (const [edge] of EXCEPTIONS) {
   // GIT_AUTHOR_*/GIT_COMMITTER_*/GIT_EDITOR/GIT_PAGER/GIT_TERMINAL_PROMPT and
   // the GIT_TRACE* diagnostics (this suite never commits, never opens an
   // editor and never touches a network, so none of them can steer it).
-  const GIT_REDIRECTORS = [
-    // which repository / work tree / index
-    'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_INDEX_VERSION', 'GIT_COMMON_DIR',
-    'GIT_NAMESPACE', 'GIT_CEILING_DIRECTORIES', 'GIT_DISCOVERY_ACROSS_FILESYSTEM', 'GIT_PREFIX',
-    // which objects
-    'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_SHALLOW_FILE',
-    'GIT_GRAFT_FILE', 'GIT_REPLACE_REF_BASE', 'GIT_NO_REPLACE_OBJECTS',
-    // which config (and therefore, indirectly, all of the above)
-    'GIT_CONFIG', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_COUNT',
-    // how OUR pathspecs are read, and what `git init` installs into the fixture
-    'GIT_LITERAL_PATHSPECS', 'GIT_GLOB_PATHSPECS', 'GIT_NOGLOB_PATHSPECS', 'GIT_ICASE_PATHSPECS',
-    'GIT_TEMPLATE_DIR',
-  ];
-  const gitEnvFrom = (raw) => {
-    const e = { ...raw };
-    for (const k of GIT_REDIRECTORS) delete e[k];
-    // GIT_CONFIG_COUNT's numbered pairs are separate names — drop them too.
-    for (const k of Object.keys(e)) if (/^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(k)) delete e[k];
-    return e;
-  };
+  //
+  // THE LIST AND THE FILTER NOW LIVE IN scripts/git-env.mjs (the fast/heavy
+  // gate split, 2026-09-07): the pre-push hook DETACHES a heavy gate run, and
+  // that child inherits the hook's git environment exactly like this suite
+  // does — two spellings of "which names re-point git" would be two behaviours
+  // the moment either is touched. This block's controls below still prove the
+  // shared filter on real repositories, so the import is covered, not assumed.
 
   // ── ROUND 7: THIS BLOCK REALLY RUNS IN A HOSTILE ENVIRONMENT ─────────────
   // The suite cannot re-exec itself, so it exports the two redirectors that
@@ -732,6 +720,57 @@ for (const [edge] of EXCEPTIONS) {
     restoreAmbient();
     for (const d of tmpDirs) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} }
   }
+}
+
+// 43. THE GATE CENSUS (2026-09-07, B-4c5a — the fast/heavy split). A test
+//     suite that is in no runner is not a test: before the split, 99 of the
+//     184 files matching scripts/test-*.mjs were in NO list at all — not in
+//     the gate, not written down as skipped, invisible to everyone including
+//     the people who wrote them (test-usage-estimator and test-task-wakeup-
+//     card each spent months in that hole and joined the gate only after an
+//     incident). So the tier table is now a CENSUS: every scripts/test-*.mjs
+//     is either 'fast', 'heavy' (with a stated reason: chrome / server / cli /
+//     binary / slow) or in EXCLUDED with the reason it cannot be gated. This
+//     assert lives here so it runs inside `npm run build` — i.e. inside BOTH
+//     tiers and the in-app "Update VibeSpace…" — and not only in the gate that
+//     the new suite might not be in yet.
+//
+//     SCOPE: readdir, not `git ls-files`. §42 round 5 reads the source list
+//     from git because the PRODUCT writes runtime products into the working
+//     tree (data/bin/rclone) — nothing writes scripts/test-*.mjs, and the case
+//     this census exists for is precisely a suite you just wrote and have not
+//     committed. Reading the index would let exactly that one fall through.
+{
+  const ci = await import('./ci.mjs');
+  const disk = ci.listSuiteFiles(REPO);
+  const f = ci.censusFindings(disk);
+  ok(disk.length > 100, `census scope is non-vacuous (${disk.length} scripts/test-*.mjs on disk)`);
+  ok(!f.unclassified.length, `every scripts/test-*.mjs is in a tier or EXCLUDED (${f.unclassified.slice(0, 6).join(', ') || 'none missing'})`);
+  ok(!f.inBoth.length, `no suite is both tiered and excluded (${f.inBoth.join(', ') || 'clean'})`);
+  ok(!f.duplicated.length, `no suite is listed twice (${f.duplicated.join(', ') || 'clean'})`);
+  ok(!f.ghosts.length, `every listed suite has a scripts/<name>.mjs (${f.ghosts.join(', ') || 'clean'})`);
+  ok(!f.badTier.length, `every tier is 'fast' or 'heavy' (${f.badTier.join(', ') || 'clean'})`);
+  ok(!f.reasonless.length, `every heavy/excluded entry states WHY (${f.reasonless.slice(0, 6).join(', ') || 'clean'})`);
+  ok(f.counted.fast > 0 && f.counted.heavy > 0,
+    `both tiers are populated (${f.counted.fast} fast + ${f.counted.heavy} heavy + ${f.counted.excluded} excluded = ${f.counted.fast + f.counted.heavy + f.counted.excluded} of ${f.counted.disk})`);
+  // NEGATIVE CONTROL: the census must actually be able to go red. Feed it a
+  // disk listing containing a suite nobody classified and a table naming a
+  // file that does not exist — an assert that cannot fail is not an assert.
+  const nc = ci.censusFindings([...disk, 'test-not-in-any-tier'],
+    [{ name: 'test-ghost-suite', tier: 'heavy', why: 'chrome' }, { name: 'test-ghost-suite', tier: 'fast' }, ...ci.SUITES],
+    ci.EXCLUDED);
+  ok(nc.unclassified.includes('test-not-in-any-tier') && nc.ghosts.includes('test-ghost-suite') && nc.duplicated.includes('test-ghost-suite'),
+    'NEGATIVE CONTROL: the census reports an unclassified suite, a ghost entry and a duplicate (it can go red)');
+  // THE WIRING PINS (hook ⇄ workflow ⇄ package.json) LIVE IN
+  // scripts/test-ci-gate.mjs, NOT HERE, and that is a rule with a scar: this
+  // block runs inside `npm run build`, and several browser suites build a
+  // PARTIAL COPY of the tree in a throwaway worktree (test-window-menu copies
+  // src+public+server.js+scripts onto a HEAD checkout). A build-time assert
+  // that compares files OUTSIDE the copied set fails in every one of those
+  // worktrees for reasons that have nothing to do with the code under test —
+  // measured: the package.json pin turned test-window-menu into a 300 s
+  // timeout and then a bare "Command failed: npm run build". A build-time
+  // check may only read what a build reads; cross-file wiring is a suite's job.
 }
 
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);

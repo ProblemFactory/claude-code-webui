@@ -118,6 +118,41 @@ app.post('/api/maintenance', (req, res) => {
   res.json({ success: true, maintenance: maintState() });
 });
 
+// ── HEAVY RELEASE-GATE RESULTS (2026-09-07, the fast/heavy gate split) ──
+// The pre-push hook runs the FAST tier and then launches the HEAVY tier
+// detached (scripts/ci.mjs --heavy), which writes data/ci-heavy/<sha>.{green,
+// red}. That verdict lands minutes after the developer walked away, so it
+// needs a place a human can find it without knowing the file layout: the
+// ⚙ → Diagnostics report reads this route (and `npm run ci:status` prints the
+// same records at the terminal). Read-only, tiny local JSON files, no git —
+// "is HEAD blocked?" is an ancestry question and belongs to the CLI.
+const CI_HEAVY_DIR = path.join(rootDir, 'data', 'ci-heavy');
+app.get('/api/ci-heavy', (req, res) => {
+  const runs = [], running = [];
+  try {
+    for (const f of fs.readdirSync(CI_HEAVY_DIR)) {
+      // `skipped` is not a verdict, it is the ABSENCE of one, recorded out
+      // loud (2026-09-07 round 2): a commit whose heavy run never got the
+      // machine lock has no green and no red, and without this row that is
+      // indistinguishable from "nobody has pushed lately".
+      const m = /^([0-9a-f]{7,40})\.(green|red|pid|skipped)$/.exec(f);
+      if (!m) continue;
+      let rec = {};
+      try { rec = JSON.parse(fs.readFileSync(path.join(CI_HEAVY_DIR, f), 'utf-8')); } catch {}
+      // `absent` (2026-09-07 round 6) is how many of those `suites` the gated
+      // COMMIT does not contain — a heavy run is isolated at a sha, and this
+      // gate's table can name suites that sha never had (measured: 42 of 97 at
+      // master~300). Without it "97 suites" is a number the record itself
+      // contradicts, which is the marker-kind lesson one field smaller.
+      const row = { sha: rec.sha || m[1], result: m[2] === 'pid' ? 'running' : m[2], startedAt: rec.startedAt || 0, endedAt: rec.endedAt || 0, ms: rec.ms || 0, suites: rec.suites || 0, absent: Array.isArray(rec.absent) ? rec.absent.length : 0, failed: Array.isArray(rec.failed) ? rec.failed.slice(0, 20) : [], flaky: Array.isArray(rec.flaky) ? rec.flaky.slice(0, 20) : [], pid: rec.pid || 0, reason: typeof rec.reason === 'string' ? rec.reason.slice(0, 200) : '', unlocked: !!rec.unlocked };
+      if (m[2] === 'pid') { let live = false; try { process.kill(row.pid, 0); live = true; } catch {} if (live) running.push(row); }
+      else runs.push(row);
+    }
+  } catch { /* no directory yet = no runs; not an error */ }
+  runs.sort((a, b) => (b.endedAt || 0) - (a.endedAt || 0));
+  res.json({ runs: runs.slice(0, 12), running });
+});
+
 app.get('/api/version', async (req, res) => {
   if (versionInfo.commit === null) {
     try { versionInfo.commit = execFileSync('git', ['-C', rootDir, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf-8', timeout: 3000 }).trim(); }
