@@ -59,8 +59,12 @@ const MUTANTS = [
     from: '    if (!looksLikeHeavyRun(old.pid)) {', to: '    if (false) {' },
   { name: 'machine lock never taken', file: CI, suite: 'test-ci-heavy-launch',
     from: '  const held = acquireMachineLock(lockPath, {', to: '  const held = ((x) => ({ ok: true, release() {} }))({' },
+  // heavyGate's handler loop. The two-space `) {` spelling is what makes this
+  // anchor unique: fastGate's twin (round 5) is `if (isolate) for (const sig of
+  // OUTSIDE_SIGNALS) process.on(…)` — one signal SET, two call sites, two
+  // anchors.
   { name: 'SIGTERM cleanup handlers removed', file: CI, suite: 'test-ci-heavy-launch',
-    from: "  for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) {", to: '  for (const sig of []) {' },
+    from: '  for (const sig of OUTSIDE_SIGNALS) {', to: '  for (const sig of []) {' },
   { name: 'aborted run calls itself GREEN again', file: CI, suite: 'test-ci-heavy-launch',
     from: '    const verdict = abandonedWhy', to: '    const verdict = false' },
   { name: 'abandoned run stamps a verdict again', file: CI, suite: 'test-ci-heavy-launch',
@@ -97,6 +101,12 @@ const MUTANTS = [
     to: '  node scripts/ci.mjs --check-heavy >&2 || exit 1' },
   { name: 'superseded run retries the suite it was killed in (round 3)', file: CI, suite: 'test-ci-heavy-launch',
     from: '          abandonedWhy = abandoned();\n          if (abandonedWhy) { console.log(`\\n[ci:heavy] stopping: ${abandonedWhy}`); break; }\n', to: '' },
+  // ROUND 5 — the two halves of "what the fast tier is a verdict ABOUT".
+  { name: 'the fast tier gates the WORKING TREE again, not the pushed sha (round 5)', file: HOOK, suite: 'test-ci-gate',
+    from: '    if [ "$sha" = "$head_sha" ]; then', to: '    if true; then' },
+  { name: 'ci.mjs ignores --isolate on the fast tier (round 5)', file: CI, suite: 'test-ci-heavy-launch',
+    from: "    if (isolate) { wt = addScratchWorktree(sha, 'fast'); runRoot = wt; }",
+    to: "    if (false) { wt = addScratchWorktree(sha, 'fast'); runRoot = wt; }" },
   // A mutation may need SEVERAL edits when the guard is an ORDERING rather than
   // a condition: moving the docs-only exit back above the heavy verdict is a
   // deletion plus an insertion, and approximating it with one edit would test
@@ -106,6 +116,13 @@ const MUTANTS = [
       ['if [ "$only_docs" = "1" ] && [ "${#REFS[@]}" -gt 0 ]; then\n  echo "[ci] docs-only push — fast tier skipped" >&2\n  exit 0\nfi\n', ''],
       ['# ── HEAVY-TIER VERDICT FIRST (2026-09-07) ─',
         'if [ "$only_docs" = "1" ] && [ "${#REFS[@]}" -gt 0 ]; then\n  echo "[ci] docs-only push — fast tier skipped" >&2\n  exit 0\nfi\n\n# ── HEAVY-TIER VERDICT FIRST (2026-09-07) ─'],
+    ] },
+  // …and the other half of round 5: the "not code" set was a statement about
+  // how a path LOOKS. Dropping both gate-input arms is the pre-round-5 hook.
+  { name: 'a .md path the gate READS counts as documentation again (round 5)', file: HOOK, suite: 'test-ci-gate',
+    edits: [
+      ['    CLAUDE.md|CHANGELOG.md|docs/kb-*.md|docs/design-*.md|docs/agent/*|docs/examples/*) return 0 ;;\n', ''],
+      ['    docs/README.md|docs/plugins.md|docs/settings.md|docs/keyboard-shortcuts.md) return 0 ;;\n', ''],
     ] },
 ];
 
@@ -142,9 +159,11 @@ const BACKUP = path.join(os.tmpdir(), `vs-ci-mutations-backup-${typeof process.g
 // dies without running its `finally` leaves a full checkout in TMPDIR *and* a
 // `git worktree list` registration that `worktree prune` can never remove —
 // the directory still exists (round 2's own note). Measured on this box after
-// a few rounds of this battery: 196 MB across 18 registrations. heavyGate
-// names each scratch worktree `vs-ci-heavy-<sha8>-<pid>`, so the pid in the
-// name is the identity: reap only OUR shape, and only when that pid is gone.
+// a few rounds of this battery: 196 MB across 18 registrations. Both tiers
+// name their scratch worktree `vs-ci-<tier>-<sha8>-<pid>` (addScratchWorktree,
+// round 5 — the fast tier gets one when a pushed ref's tip is not HEAD), so the
+// pid in the name is the identity: reap only OUR shape, and only when that pid
+// is gone.
 // EPERM means alive (somebody else's process on a recycled number) — the one
 // answer a reaper must not get wrong.
 const pidGone = (pid) => { try { process.kill(pid, 0); return false; } catch (e) { return e.code !== 'EPERM'; } };
@@ -154,7 +173,7 @@ const reapAbandoned = () => {
   try { names = fs.readdirSync(tmp); } catch { return 0; }
   let n = 0;
   for (const name of names) {
-    const m = /^vs-ci-heavy-[0-9a-f]{8}-(\d+)$/.exec(name);
+    const m = /^vs-ci-(?:heavy|fast)-[0-9a-f]{8}-(\d+)$/.exec(name);
     if (!m || !pidGone(Number(m[1]))) continue;
     const dir = path.join(tmp, name);
     spawnSync('git', ['-C', REPO, 'worktree', 'remove', '--force', dir], { env: GIT_ENV });
@@ -178,7 +197,7 @@ const reapAbandoned = () => {
     if (line.startsWith('worktree ')) { wt = line.slice(9); continue; }
     if (!wt || !line.startsWith('locked')) continue;
     const reason = line.slice(6).trim();
-    const m = /^vs-ci-heavy-[0-9a-f]{8}-(\d+)$/.exec(path.basename(wt));
+    const m = /^vs-ci-(?:heavy|fast)-[0-9a-f]{8}-(\d+)$/.exec(path.basename(wt));
     if (reason === 'initializing' && m && pidGone(Number(m[1])) && !fs.existsSync(wt)) {
       spawnSync('git', ['-C', REPO, 'worktree', 'unlock', wt], { env: GIT_ENV });
       unlocked++;

@@ -563,6 +563,64 @@ try {
     fs.rmSync(waitDir, { recursive: true, force: true });
   }
 
+  // ── (3) THE FAST TIER ALSO GATES A COMMIT, NOT JUST "THIS TREE" (round 5)
+  //     The hook now runs `ci.mjs --isolate --sha=<x>` when a pushed ref's tip
+  //     is not HEAD; test-ci-gate proves the hook ASKS for that, against a stub
+  //     ci.mjs. Nothing proved ci.mjs HONOURS it — so this drives the REAL
+  //     fastGate on a stub repository and reads which TREE the suites saw.
+  //     Two commits: the base, and a HEAD that adds `marker-b`. Isolated at the
+  //     base, the probe suite must NOT see marker-b; run in place it must.
+  {
+    const fastNames = SUITES.filter((s) => s.tier === 'fast').map((s) => s.name);
+    const PROBE = fastNames[0];
+    const suites = {};
+    for (const n of fastNames) suites[n] = "console.log('ALL PASS (1)');\n";
+    suites[PROBE] = "import fs from 'node:fs';\nfs.appendFileSync(process.env.VS_FAST_PROBE, JSON.stringify({ cwd: process.cwd(), sawMarkerB: fs.existsSync('marker-b') }) + '\\n');\nconsole.log('ALL PASS (1)');\n";
+    const CI_SRC_F = fs.readFileSync(path.join(REPO, 'scripts', 'ci.mjs'), 'utf-8');
+    const fastArm = (ciSource, args) => {
+      const s = stubGateRepo('fastiso', { ciSource, suites, commits: 1 });
+      fs.writeFileSync(path.join(s.root, 'marker-b'), 'b\n');
+      spawnSync('git', ['-C', s.root, 'add', '-A'], { env: { ...GIT_ENV, ...GIT_ID } });
+      spawnSync('git', ['-C', s.root, 'commit', '-q', '-m', 'adds marker-b'], { env: { ...GIT_ENV, ...GIT_ID } });
+      // OUTSIDE the checkout, like (1e)'s flaky marker: a file written into the
+      // repo makes the tree DIRTY, and a dirty tree earns no green marker — the
+      // in-place control below asserts it does earn one.
+      const probeFile = path.join(dir, `fast-probe-${path.basename(s.root)}.ndjson`);
+      const r = spawnSync(process.execPath, [path.join(s.root, 'scripts', 'ci.mjs'), ...args.map((a) => a.replace('%SHA%', s.sha))],
+        { cwd: s.root, encoding: 'utf-8', env: { ...GIT_ENV, VS_FAST_PROBE: probeFile }, timeout: 300000 });
+      let probe = null;
+      try { probe = JSON.parse(fs.readFileSync(probeFile, 'utf-8').trim().split('\n')[0]); } catch { }
+      const marked = fs.existsSync(path.join(s.root, '.git', 'ci-green'));
+      const out = (r.stdout || '') + (r.stderr || '');
+      try { spawnSync('git', ['-C', s.root, 'worktree', 'prune'], { env: GIT_ENV }); } catch { }
+      try { fs.rmSync(s.root, { recursive: true, force: true }); } catch { }
+      return { status: r.status, out, probe, marked, root: s.root, base: s.sha };
+    };
+    const iso = fastArm(CI_SRC_F, ['--isolate', '--sha=%SHA%']);
+    ok(iso.status === 0 && !!iso.probe, `the fast tier runs with --isolate --sha (exit ${iso.status})`);
+    ok(!!iso.probe && iso.probe.sawMarkerB === false && iso.probe.cwd !== iso.root,
+      `…in a scratch worktree AT that commit: the suites ran in ${iso.probe ? path.basename(iso.probe.cwd) : '?'} and did NOT see the file HEAD adds`);
+    ok(/ALL GREEN[^\n]*isolated worktree at the commit being pushed/.test(iso.out),
+      '…and the closing line NAMES its subject, so "ALL GREEN" is never about a tree nobody is publishing');
+    ok(!iso.marked && /green marker not written/.test(iso.out),
+      '…and it writes NO .git/ci-green: it did not gate the tree the marker would let the next push skip');
+    // The in-place run is the control: same module, same repo, no --isolate.
+    const inplace = fastArm(CI_SRC_F, []);
+    ok(inplace.status === 0 && !!inplace.probe && inplace.probe.sawMarkerB === true && inplace.probe.cwd === inplace.root,
+      'CONTROL: without --isolate the same module runs in the working tree (it sees the file HEAD adds)');
+    ok(inplace.marked && /ALL GREEN[^\n]*\(this working tree\)/.test(inplace.out),
+      '…names THAT subject instead, and earns the green marker');
+    // NEGATIVE CONTROL: the real module with the one line that isolates removed
+    // — the hook would still pass --isolate --sha and the tier would still gate
+    // the working tree, silently.
+    const NEUTER = ["    if (isolate) { wt = addScratchWorktree(sha, 'fast'); runRoot = wt; }",
+      "    if (false) { wt = addScratchWorktree(sha, 'fast'); runRoot = wt; }"];
+    ok(CI_SRC_F.includes(NEUTER[0]), 'the pre-fix control patches a line that is really in ci.mjs (otherwise it proves nothing)');
+    const neutered = fastArm(CI_SRC_F.replace(...NEUTER), ['--isolate', '--sha=%SHA%']);
+    ok(!!neutered.probe && neutered.probe.sawMarkerB === true,
+      'NEG: with that one line removed, --isolate --sha runs the tier against the WORKING TREE again (the defect)');
+  }
+
   // An unknown commit is refused rather than stamped.
   const bogus = spawnSync(process.execPath, [path.join(REPO, 'scripts', 'ci.mjs'), '--heavy-launch', 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef', '--markers=' + dir],
     { cwd: REPO, encoding: 'utf-8', env: GIT_ENV, timeout: 60000 });

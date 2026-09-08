@@ -55,6 +55,11 @@
 //
 // Modes:
 //   node scripts/ci.mjs                  the FAST gate (+ .git/ci-green marker)
+//   node scripts/ci.mjs --isolate --sha=<x>  the FAST gate in a scratch
+//                                        worktree AT <x> — what the hook runs
+//                                        when a pushed ref's tip is not the
+//                                        commit you have checked out (no
+//                                        marker: it did not gate your tree)
 //   node scripts/ci.mjs --heavy --isolate   the HEAVY tier at HEAD, in its own
 //                                        worktree (this is `npm run ci:heavy`,
 //                                        the command a blocked push is told to
@@ -645,17 +650,67 @@ function pruneMarkers(dir, keep = 30) {
   }
 }
 
+// ── the scratch worktree, ONE implementation for both tiers ──────────────
+// The working tree keeps moving under a run, and a verdict that NAMES a sha
+// has to have tested that sha. The heavy tier has always run this way; the
+// fast tier does it when a pushed ref's tip is not the commit you have checked
+// out (round 5). Also keeps the #127 law: never run server.js against the
+// repo's PRODUCTION data/. The name carries the pid, so `scripts/dbg-ci-
+// mutations.mjs --reap-only` can tell a live run's scratch from litter, and a
+// previous run that was SIGKILLed leaves a registration behind — prune before
+// adding so `git worktree list` stays honest.
+function addScratchWorktree(sha, tag) {
+  spawnSync('git', ['-C', repo, 'worktree', 'prune'], { env: GIT_ENV });
+  const wt = path.join(os.tmpdir(), `vs-ci-${tag}-${shortSha(sha)}-${process.pid}`);
+  const add = spawnSync('git', ['-C', repo, 'worktree', 'add', '--detach', wt, sha], { encoding: 'utf-8', env: GIT_ENV });
+  if (add.status !== 0) throw new Error(`git worktree add failed: ${(add.stderr || '').trim()}`);
+  try { fs.symlinkSync(path.join(repo, 'node_modules'), path.join(wt, 'node_modules')); } catch {}
+  return wt;
+}
+function removeScratchWorktree(wt) {
+  try { spawnSync('git', ['-C', repo, 'worktree', 'remove', '--force', wt], { env: GIT_ENV }); } catch {}
+  try { fs.rmSync(wt, { recursive: true, force: true }); } catch {}
+  try { spawnSync('git', ['-C', repo, 'worktree', 'prune'], { env: GIT_ENV }); } catch {}
+}
+
 // ── modes ────────────────────────────────────────────────────────────────
-function fastGate() {
+/**
+ * THE FAST TIER. `isolate` runs it in a scratch worktree at `sha` instead of
+ * against this working tree — INVARIANT ⑭ ("the verdict is about the refs
+ * being PUSHED") reaching the last place in the hook that had not heard it.
+ * Reproduced before the fix: standing on `main` and pushing a branch whose tip
+ * adds src/broken.js, the tier ran in a tree that did not contain that file
+ * and printed ALL GREEN. The closing line now NAMES its subject either way, so
+ * "ALL GREEN" can never again be a sentence about a tree nobody is publishing.
+ */
+function fastGate({ sha: wantSha, isolate } = {}) {
   const t0 = Date.now();
   const fast = SUITES.filter((s) => s.tier === 'fast');
-  console.log(`release gate — FAST tier: build + ${fast.length} suites (heavy tier: ${SUITES.filter((s) => s.tier === 'heavy').length} suites, runs after the push)`);
-  if (!runBuild().ok) { console.error('\n✗ build FAILED — release gate is RED, do not push\n'); process.exit(1); }
-  for (const s of fast) {
-    if (!runSuite(s).ok) { console.error(`\n✗ ${s.name} — release gate is RED, do not push\n`); process.exit(1); }
-  }
-  console.log(`\nALL GREEN — fast gate passed in ${Math.round((Date.now() - t0) / 1000)}s`);
-  writeGreenMarker();
+  const sha = wantSha || gitOut(['rev-parse', 'HEAD']);
+  let runRoot = repo, wt = null, cleaned = false;
+  const cleanup = () => { if (cleaned || !wt) return; cleaned = true; removeScratchWorktree(wt); };
+  // A killed run must not leave a checkout in /tmp and a registration `git
+  // worktree prune` can never remove (⑯). `finally` covers the ordinary exits
+  // below; these cover the Ctrl-C a person aims at a push. Deliberately NOT
+  // heavyGate's `for (const sig of ['SIGTERM', …]) {` spelling — one set, one
+  // name (OUTSIDE_SIGNALS), and the two mutation anchors stay distinct.
+  if (isolate) for (const sig of OUTSIDE_SIGNALS) process.on(sig, () => { console.error(`\n[ci] ${sig} — cleaning up the scratch worktree for ${shortSha(sha)}`); cleanup(); process.exit(143); });
+  try {
+    if (isolate) { wt = addScratchWorktree(sha, 'fast'); runRoot = wt; }
+    console.log(`release gate — FAST tier: build + ${fast.length} suites (heavy tier: ${SUITES.filter((s) => s.tier === 'heavy').length} suites, runs after the push)${isolate ? ` — ISOLATED worktree at ${shortSha(sha)}` : ''}`);
+    if (!runBuild({ cwd: runRoot }).ok) { console.error('\n✗ build FAILED — release gate is RED, do not push\n'); return 1; }
+    for (const s of fast) {
+      if (!runSuite(s, { root: runRoot }).ok) { console.error(`\n✗ ${s.name} — release gate is RED, do not push\n`); return 1; }
+    }
+    const subject = isolate ? `for ${shortSha(sha)} (isolated worktree at the commit being pushed)` : '(this working tree)';
+    console.log(`\nALL GREEN — fast gate passed in ${Math.round((Date.now() - t0) / 1000)}s ${subject}`);
+    // The marker's contract is "HEAD, clean, passed", so an isolated run at
+    // some other commit must not write one — it proves nothing about the tree
+    // the next push would skip the tier for (⑫: say so, do not go quiet).
+    if (isolate) console.log(`[ci] green marker not written: this run gated ${shortSha(sha)} in a scratch worktree, not the tree you have checked out`);
+    else writeGreenMarker();
+    return 0;
+  } finally { cleanup(); }
 }
 
 // GREEN MARKER (2.369.51): the pre-push hook accepts a fresh marker for the
@@ -769,28 +824,17 @@ function heavyGate({ sha: wantSha, isolate, dir, only, dirtyOk, lock, lockWaitMs
     if (cleaned) return; cleaned = true;
     if (held.ok) held.release();
     try { fs.unlinkSync(pidFile || path.join(d, `${sha}.pid`)); } catch {}
-    if (wt) {
-      try { spawnSync('git', ['-C', repo, 'worktree', 'remove', '--force', wt], { env: GIT_ENV }); } catch {}
-      try { fs.rmSync(wt, { recursive: true, force: true }); } catch {}
-      try { spawnSync('git', ['-C', repo, 'worktree', 'prune'], { env: GIT_ENV }); } catch {}
-    }
+    if (wt) removeScratchWorktree(wt);
   };
-  for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
+  for (const sig of OUTSIDE_SIGNALS) {
     process.on(sig, () => { console.error(`\n[ci:heavy] ${sig} — superseded or cancelled; cleaning up and writing NO verdict for ${shortSha(sha)}`); cleanup(); process.exit(143); });
   }
   try {
     if (isolate) {
       // The working tree keeps moving while a ten-minute run is in flight, so
-      // a marker that NAMES a sha has to have tested that sha. A detached
-      // worktree at the pushed commit is the honest subject (and keeps the
-      // #127 law: never run server.js against the repo's PRODUCTION data/).
-      // A previous run that was killed (reboot, SIGKILL) leaves a registration
-      // behind; prune before adding so `git worktree list` stays honest.
-      spawnSync('git', ['-C', repo, 'worktree', 'prune'], { env: GIT_ENV });
-      wt = path.join(os.tmpdir(), `vs-ci-heavy-${shortSha(sha)}-${process.pid}`);
-      const add = spawnSync('git', ['-C', repo, 'worktree', 'add', '--detach', wt, sha], { encoding: 'utf-8', env: GIT_ENV });
-      if (add.status !== 0) throw new Error(`git worktree add failed: ${(add.stderr || '').trim()}`);
-      try { fs.symlinkSync(path.join(repo, 'node_modules'), path.join(wt, 'node_modules')); } catch {}
+      // a marker that NAMES a sha has to have tested that sha (see
+      // addScratchWorktree — ONE implementation, shared with the fast tier).
+      wt = addScratchWorktree(sha, 'heavy');
       runRoot = wt;
     }
     const build = noteChildResult(runBuild({ cwd: runRoot }));
@@ -1055,7 +1099,9 @@ function main(argv) {
   if (arg('check-heavy')) process.exit(checkHeavy({ dir, head }));
   if (arg('heavy-launch') !== undefined) process.exit(heavyLaunch(str('heavy-launch') || argv[argv.indexOf('--heavy-launch') + 1], { dir, only, lock, lockWaitMs }));
   if (arg('heavy')) process.exit(heavyGate({ sha: str('sha'), isolate: !!arg('isolate'), dir, only, dirtyOk: !!arg('dirty-ok'), lock, lockWaitMs, pidFile: str('pid-file') || undefined }));
-  fastGate();
+  // `--isolate [--sha=<x>]` gates the COMMIT rather than this working tree —
+  // the hook uses it when a pushed ref's tip is not HEAD.
+  process.exit(fastGate({ sha: str('sha'), isolate: !!arg('isolate') }));
 }
 
 // Only run when EXECUTED — test-architecture imports the tier table.

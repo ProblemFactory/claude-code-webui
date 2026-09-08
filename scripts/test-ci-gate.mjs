@@ -206,7 +206,7 @@ if (argv.includes('--check-heavy')) {
 }
 const li = argv.indexOf('--heavy-launch');
 if (li >= 0) { note({ mode: 'heavy-launch', sha: argv[li + 1] }); process.exit(0); }
-note({ mode: 'fast' });
+note({ mode: 'fast', isolate: argv.includes('--isolate'), sha: (argv.find((a) => a.startsWith('--sha=')) || '').slice(6) || null });
 process.exit(fs.existsSync(path.join(repo, 'FAST_RED')) ? 1 : 0);
 `);
   fs.copyFileSync(path.join(REPO, 'scripts', 'git-hooks', 'pre-push'), path.join(repo, 'pre-push'));
@@ -440,6 +440,203 @@ process.exit(fs.existsSync(path.join(repo, 'FAST_RED')) ? 1 : 0);
     const r14 = runHookRefs(`refs/heads/marked ${G} refs/heads/marked ${SIDE}\n`);
     ok(r14.calls.some((c) => c.mode === 'fast'), '…and a marker naming some OTHER commit does not skip this push either');
     try { fs.unlinkSync(path.join(repo, '.git', 'ci-green')); } catch {}
+  }
+
+  // ── ROUND 5 (a): A .md PATH THE GATE READS IS A CODE PATH ─────────────
+  // The docs-only classifier said "not code" for `docs/*|*.md`, which is a
+  // statement about how a path LOOKS. Several such paths are GATE INPUTS, so
+  // a "docs-only" push shipped a tree the gate would have refused — and THIS
+  // BRANCH'S OWN TIP (docs/kb-file-structure.md alone) is that shape.
+  // The list in the hook is not trusted: it is DERIVED here from the tier
+  // table's own suite sources plus src/agent-routes.js's AGENT_DOC_TOPICS, and
+  // classified by running the hook's OWN `is_code_path` — no re-spelling of
+  // the pattern, so drift in either direction is caught.
+  {
+    const scratch = mktmp('classify');
+    /** The `name() { … }` function, verbatim, out of the tracked hook. */
+    const hookFn = (name, src) => {
+      const start = src.indexOf(`${name}() {`);
+      if (start < 0) return null;
+      const end = src.indexOf('\n}\n', start);
+      return end < 0 ? null : src.slice(start, end + 2);
+    };
+    /** Run a bash classifier over paths → ['CODE'|'DOCS', …]. */
+    const classifyWith = (fnSrc, paths) => {
+      const f = path.join(scratch, 'classify-' + crypto.randomBytes(4).toString('hex') + '.sh');
+      fs.writeFileSync(f, `${fnSrc}\nfor p in "$@"; do if is_code_path "$p"; then echo CODE; else echo DOCS; fi; done\n`);
+      const r = spawnSync('bash', [f, ...paths], { encoding: 'utf-8' });
+      return (r.stdout || '').trim().split('\n').filter(Boolean);
+    };
+    // THE DERIVATION. Every gated suite's source is scanned for repo-relative
+    // `docs/…` / `*.md` literals. The literal must be the WHOLE string (a
+    // `${x}:` / `${x}/` prefix allowed — the version pin reads
+    // `${REF}:CHANGELOG.md`), because a path that merely appears INSIDE a
+    // sentence or a fixture VALUE is not a path this repo reads: '/w/README.md'
+    // and 'please read README.md and fix the typo' are fixture data in
+    // test-image-cards / test-opencode-serve, and pulling the root README.md
+    // into the code set would kill the escape hatch entirely (measured: the
+    // loose version derived it, the anchored one does not). A bare name with
+    // no directory component additionally has to sit on a line that reads
+    // something — that is what separates `read('CLAUDE.md')` from
+    // `readCall.title === 'README.md'`.
+    // BOTH TIERS, on purpose: a docs-only push exits before the heavy LAUNCH
+    // too, so a heavy suite's doc input is exactly as unguarded.
+    const LIT = /(['"`])((?:\\.|(?!\1)[^\\])*)\1/g;
+    const WHOLE = /^(?:\$\{[^}]*\}[:/])?((?:docs\/[A-Za-z0-9._/-]+)|(?:[A-Za-z0-9][A-Za-z0-9._-]*\.md))$/;
+    const READ_CTX = /readFileSync|readdirSync|createReadStream|copyFileSync|cpSync|existsSync|statSync|path\.join|\bread\s*\(|\bgit\s*\(/;
+    const gateInputs = new Map();   // repo-relative path → suites that read it
+    const noteInput = (p, who) => { if (!gateInputs.has(p)) gateInputs.set(p, new Set()); gateInputs.get(p).add(who); };
+    const docLiterals = (src) => {
+      const out = [];
+      const code = src.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').map((l) => l.replace(/(^|\s)\/\/.*$/, '$1'));
+      for (const line of code) {
+        for (const m of line.matchAll(LIT)) {
+          const w = WHOLE.exec(m[2]);
+          if (!w) continue;
+          if (!fs.existsSync(path.join(REPO, w[1]))) continue;
+          out.push({ p: w[1], line, reads: READ_CTX.test(line) });
+        }
+      }
+      return out;
+    };
+    // THIS suite is the one file that TALKS about doc paths without reading
+    // them — its own controls below hand `docs/getting-started.md` and friends
+    // to the classifier, and scanning itself made the derivation demand that
+    // the hook call them code, which would have emptied the escape hatch.
+    // The exclusion is MEASURED, not assumed: if test-ci-gate ever really
+    // reads a doc, the assert right here says so.
+    const selfReads = docLiterals(fs.readFileSync(path.join(REPO, 'scripts', 'test-ci-gate.mjs'), 'utf-8')).filter((h) => h.reads);
+    ok(!selfReads.length, `test-ci-gate itself reads no documentation, so excluding it from the scan is a measurement${selfReads.length ? ' — it reads ' + selfReads.map((h) => h.p).join(', ') : ''}`);
+    // THE SCAN SET IS "EVERY SCRIPT THE GATE RUNS", and the FAST tier is
+    // `build + suites` — so the scripts `npm run build` chains are gate inputs
+    // exactly like a suite is, even though they are in ci.mjs's EXCLUDED list
+    // (`chained by npm run build`) and therefore not in SUITES. They read no
+    // documentation TODAY (measured: 0 of the five), which is a fact that can
+    // change with one commit, and the derivation is the thing that would
+    // notice.
+    const buildCmd = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf-8')).scripts.build || '';
+    const buildScripts = [...new Set([...String(buildCmd).matchAll(/scripts\/([A-Za-z0-9._-]+)\.mjs/g)].map((m) => m[1]))];
+    ok(buildScripts.length >= 4 && buildScripts.includes('test-architecture'),
+      `\`npm run build\`'s own chained scripts are in the scan set (${buildScripts.length}: ${buildScripts.join(', ')}) — the fast tier is build + suites`);
+    for (const name of [...SUITES.map((s) => s.name), ...buildScripts]) {
+      if (name === 'test-ci-gate') continue;
+      let src; try { src = fs.readFileSync(path.join(REPO, 'scripts', name + '.mjs'), 'utf-8'); } catch { continue; }
+      for (const h of docLiterals(src)) {
+        if (!h.p.includes('/') && !h.reads) continue;
+        noteInput(h.p, name);
+      }
+    }
+    // …plus the agent manuals, which are RUNTIME PRODUCT DATA: src/agent-routes.js
+    // serves them from the running checkout (`GET /api/agent/docs/:topic`).
+    const routes = fs.readFileSync(path.join(REPO, 'src', 'agent-routes.js'), 'utf-8');
+    const topics = /const AGENT_DOC_TOPICS = \{([^}]*)\}/.exec(routes);
+    const manuals = topics ? [...topics[1].matchAll(/'([^']+\.md)'/g)].map((m) => 'docs/agent/' + m[1]) : [];
+    for (const p of manuals) if (fs.existsSync(path.join(REPO, p))) noteInput(p, 'src/agent-routes.js AGENT_DOC_TOPICS');
+    ok(manuals.length >= 5 && manuals.includes('docs/agent/msg-manual.md'),
+      `AGENT_DOC_TOPICS parsed out of src/agent-routes.js (${manuals.length} manuals — the parse is non-vacuous)`);
+
+    const derived = [...gateInputs.keys()].sort();
+    console.log(`     derived gate inputs (${derived.length}): ${derived.join(' ')}`);
+    // NON-VACUITY: the derivation really did find the paths the incident named,
+    // attributed to the suites that read them. A derivation that quietly stops
+    // finding anything would make every assert below pass.
+    const namedBy = (p, suite) => gateInputs.has(p) && gateInputs.get(p).has(suite);
+    ok(namedBy('docs/kb-file-structure.md', 'test-codex-effort-meta')
+      && namedBy('CLAUDE.md', 'test-opencode-serve')
+      && namedBy('CHANGELOG.md', 'test-codex-effort-meta')
+      && namedBy('docs/examples/hello-plugin', 'test-plugin-loader')
+      && namedBy('docs/agent/msg-manual.md', 'test-agent-msg'),
+      'the derivation finds the incident\'s own paths, attributed to the suites that read them');
+    ok(!gateInputs.has('README.md'),
+      'and it does NOT drag in the root README.md (a fixture VALUE in test-image-cards / test-opencode-serve, not a path they read) — the escape hatch has to keep meaning something');
+
+    const shipped = hookFn('is_code_path', hookSrc);
+    ok(!!shipped, 'the tracked hook defines is_code_path (the classifier is extractable, so this leg runs the hook\'s OWN pattern)');
+    if (shipped) {
+      const verdicts = classifyWith(shipped, derived);
+      const stillDocs = derived.filter((p, i) => verdicts[i] !== 'CODE');
+      ok(verdicts.length === derived.length && !stillDocs.length,
+        `every derived gate input is a CODE path to the shipped hook (${derived.length} paths)${stillDocs.length ? ' — STILL DOCS: ' + stillDocs.join(', ') + ' (add it to is_code_path)' : ''}`);
+      // …and ordinary documentation still skips, or the escape hatch is gone.
+      const docs = ['README.md', 'docs/getting-started.md', 'docs/terminal.md', 'docs/screenshots/overview.png', 'docs/window-manager.md'];
+      const dv = classifyWith(shipped, docs);
+      ok(dv.every((v) => v === 'DOCS'), `real documentation is still documentation (${docs.join(', ')})`);
+      ok(classifyWith(shipped, ['src/a.js', 'server.js', 'package.json']).every((v) => v === 'CODE'), 'and code is still code');
+      // NEGATIVE CONTROL — the pre-round-5 classifier, verbatim: every one of
+      // those gate inputs was documentation to it, which is the defect.
+      const preFix = 'is_code_path() {\n  case "$1" in\n    docs/*|*.md) return 1 ;;\n  esac\n  return 0\n}\n';
+      const pv = classifyWith(preFix, derived);
+      const missed = derived.filter((p, i) => pv[i] !== 'CODE');
+      ok(missed.length === derived.length,
+        `NEG: the pre-round-5 pattern called ALL ${derived.length} of them documentation (so a push touching only one skipped both tiers)`);
+    }
+  }
+
+  // ── ROUND 5 (b): A GATE-INPUT DOC PUSH RUNS THE TIER, END TO END ──────
+  {
+    git(repo, ['checkout', '-q', '-b', 'docsinput', SIDE]);
+    const BASE5 = commit(repo, 'src/base5.js', '//base\n', 'the commit the docs legs below sit on');
+    const KB = commit(repo, 'docs/kb-file-structure.md', '# kb\n', 'kb only — this branch\'s own tip shape');
+    const rKB = runHookRefs(`refs/heads/docsinput ${KB} refs/heads/docsinput ${BASE5}\n`);
+    ok(rKB.calls.some((c) => c.mode === 'fast'),
+      'a push touching ONLY docs/kb-file-structure.md runs the FAST tier (it is source-pinned by test-codex-effort-meta)');
+    ok(rKB.calls.some((c) => c.mode === 'heavy-launch'), '…and its heavy run is launched too');
+    const MAN = commit(repo, 'docs/agent/msg-manual.md', '# manual\n', 'an agent manual — runtime product data');
+    ok(runHookRefs(`refs/heads/docsinput ${MAN} refs/heads/docsinput ${KB}\n`).calls.some((c) => c.mode === 'fast'),
+      'a push touching ONLY docs/agent/msg-manual.md runs the FAST tier (the server serves that file)');
+    const EX = commit(repo, 'docs/examples/hello-plugin/vibespace-plugin.json', '{}\n', 'the shipped example plugin');
+    ok(runHookRefs(`refs/heads/docsinput ${EX} refs/heads/docsinput ${MAN}\n`).calls.some((c) => c.mode === 'fast'),
+      'a push touching ONLY docs/examples/hello-plugin/** runs the FAST tier (three plugin suites cpSync it)');
+    // …and a REAL docs-only push still skips, or the escape hatch is gone.
+    const RM = commit(repo, 'README.md', '# readme\n', 'genuinely docs-only');
+    const rRM = runHookRefs(`refs/heads/docsinput ${RM} refs/heads/docsinput ${EX}\n`);
+    ok(rRM.status === 0 && !rRM.calls.some((c) => c.mode === 'fast') && /docs-only/.test(rRM.out),
+      'a genuinely docs-only push (README.md) still skips the fast tier');
+    const preDocs = preFixHook('gateinputs',
+      ['    CLAUDE.md|CHANGELOG.md|docs/kb-*.md|docs/design-*.md|docs/agent/*|docs/examples/*) return 0 ;;\n', ''],
+      ['    docs/README.md|docs/plugins.md|docs/settings.md|docs/keyboard-shortcuts.md) return 0 ;;\n', '']);
+    if (preDocs) {
+      const n = runHookRefs(`refs/heads/docsinput ${KB} refs/heads/docsinput ${BASE5}\n`, {}, preDocs);
+      ok(!n.calls.some((c) => c.mode === 'fast') && /docs-only/.test(n.out),
+        'NEG: without the gate-input arm the same kb-only push skips BOTH tiers (the shape this branch\'s own tip has)');
+    }
+  }
+
+  // ── ROUND 5 (c): THE FAST TIER GATES THE COMMIT BEING PUSHED ──────────
+  // Invariant ⑭ in the last place it had not reached. Round 2 fixed the heavy
+  // VERDICT and round 4 the marker SHORTCUT; the fast RUN still executed in
+  // the working tree. Reproduced: standing on `marked`, pushing `ungated`
+  // (tip F adds src/broken.js) ⇒ the tier ran in a tree without that file and
+  // said ALL GREEN. r13 above proved a fast run HAPPENED — never its SUBJECT.
+  {
+    git(repo, ['checkout', '-q', '-b', 'elsewhere5', SIDE]);
+    const STANDING = commit(repo, 'src/standing.js', '//the tree we have checked out\n', 'STANDING — where the developer is');
+    git(repo, ['checkout', '-q', '-b', 'ungated5', SIDE]);
+    const UNGATED = commit(repo, 'src/broken5.js', '//never gated by anything\n', 'UNGATED — the tip being pushed');
+    git(repo, ['checkout', '-q', 'elsewhere5']);
+    ok(git(repo, ['rev-parse', 'HEAD']) === STANDING && !fs.existsSync(path.join(repo, 'src', 'broken5.js')),
+      'the fixture is the incident\'s shape: HEAD is STANDING and the working tree does NOT contain the pushed commit\'s file');
+    const rIso = runHookRefs(`refs/heads/ungated5 ${UNGATED} refs/heads/ungated5 ${ZERO}\n`);
+    const fastCall = rIso.calls.find((c) => c.mode === 'fast');
+    ok(!!fastCall && fastCall.isolate === true && fastCall.sha === UNGATED,
+      `pushing a ref whose tip is NOT HEAD gates THAT COMMIT (--isolate --sha=${UNGATED.slice(0, 8)}), not the tree you have checked out`);
+    ok(/is NOT the commit you have checked out/.test(rIso.out), '…and says so, naming the ref and the sha (§no-silent-failures)');
+    // The ordinary push is untouched — this must not cost every push a worktree.
+    const rPlain = runHookRefs(`refs/heads/elsewhere5 ${STANDING} refs/heads/elsewhere5 ${SIDE}\n`);
+    const plainCall = rPlain.calls.find((c) => c.mode === 'fast');
+    ok(!!plainCall && !plainCall.isolate,
+      'the ordinary push (every pushed sha IS HEAD) still runs in place — the ≤2 min budget is untouched');
+    // Two refs at the SAME sha are one run, not two.
+    git(repo, ['branch', '-f', 'twin5', UNGATED]);
+    const rTwin = runHookRefs(`refs/heads/ungated5 ${UNGATED} refs/heads/ungated5 ${ZERO}\nrefs/heads/twin5 ${UNGATED} refs/heads/twin5 ${ZERO}\n`);
+    ok(rTwin.calls.filter((c) => c.mode === 'fast').length === 1, 'two refs pointing at ONE commit run the fast tier once');
+    const preSubject = preFixHook('fastsubject', ['    if [ "$sha" = "$head_sha" ]; then', '    if true; then']);
+    if (preSubject) {
+      const n = runHookRefs(`refs/heads/ungated5 ${UNGATED} refs/heads/ungated5 ${ZERO}\n`, {}, preSubject);
+      const nf = n.calls.find((c) => c.mode === 'fast');
+      ok(!!nf && !nf.isolate && !nf.sha,
+        'NEG: before the fix the same push ran the tier against the WORKING TREE and said ALL GREEN about it');
+    }
   }
 }
 

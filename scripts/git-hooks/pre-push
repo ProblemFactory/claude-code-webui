@@ -14,9 +14,9 @@
 # The global repo-guard pre-push (secret scan) CHAINS to this hook, so both
 # always run. Installed into .git/hooks by scripts/install-git-hooks.mjs (npm
 # postinstall). Escape hatches:
-#   docs-only pushes (every PUBLISHED path is *.md or docs/**) skip the FAST
-#     tier — the heavy verdict is still asked, because a red ancestor is red
-#     whether or not this push carries code
+#   docs-only pushes (every PUBLISHED path is documentation the gate does not
+#     READ — see is_code_path) skip the FAST tier; the heavy verdict is still
+#     asked, because a red ancestor is red whether or not this push carries code
 #   VIBESPACE_SKIP_CI=1 git push       — emergency bypass, use sparingly
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
@@ -44,14 +44,57 @@ mapfile -t REFS || true
 #       gate that reads its own inability to answer as "no code changed" is the
 #       §no-silent-failures rule in its purest form, so a non-zero git status
 #       means NOT docs-only, said out loud.
+
+# ── IS THIS PATH A CODE PATH? ─────────────────────────────────────────────
+# A .md / docs/** PATH THAT THE GATE READS IS A CODE PATH (round 5). The "not
+# code" set used to be hand-written as `docs/*|*.md`, which is a statement
+# about how a path LOOKS — and several of the paths that look like
+# documentation are GATE INPUTS that a suite in the tier table reads and
+# asserts on, so a "docs-only" push could ship a tree the gate would have
+# refused. Measured, all three shapes reproduced end to end:
+#   · scripts/test-codex-effort-meta.mjs (FAST) source-pins CLAUDE.md,
+#     docs/kb-file-structure.md, docs/kb-features.md, docs/kb-bugfix-invariants.md
+#     and CHANGELOG.md — editing ONLY docs/kb-file-structure.md gave
+#     "FAILED (2 of 108)" (renumbering its version marker: the site loses the
+#     mark AND names the number master already took), and THIS BRANCH'S OWN
+#     TIP is exactly that push shape;
+#   · test-plugin-loader / -trust / -security (FAST) cpSync + parse
+#     docs/examples/hello-plugin — an unparseable version there gave
+#     test-plugin-loader "16 FAILED (32 passed)" and made test-plugin-trust
+#     THROW (test-plugin-security reads the same tree and survived that one
+#     edit — "reads it" is the rule, not "this edit broke it");
+#   · docs/agent/*-manual.md is RUNTIME PRODUCT DATA — src/agent-routes.js
+#     serves it to every agent CLI (`GET /api/agent/docs/:topic`,
+#     AGENT_DOC_TOPICS) out of the running checkout, and test-agent-msg pins
+#     it: deleting docs/agent/msg-manual.md gave "1 FAILED (40 passed)".
+# So the list below is NOT trusted: scripts/test-ci-gate.mjs §4 DERIVES the
+# real set from the tier table's own suite sources (+ AGENT_DOC_TOPICS), runs
+# THIS function over it, and goes red naming any path it still calls
+# documentation — with the pre-round-5 pattern as the negative control. Add a
+# doc read to a gated suite and the gate tells you to add it here.
+# Ordinary documentation still skips: README.md, docs/getting-started.md,
+# docs/terminal.md, docs/screenshots/**, … nothing in the tier table reads them.
+is_code_path() {
+  case "$1" in
+    # (a) GATE INPUTS that merely LOOK like documentation.
+    CLAUDE.md|CHANGELOG.md|docs/kb-*.md|docs/design-*.md|docs/agent/*|docs/examples/*) return 0 ;;
+    docs/README.md|docs/plugins.md|docs/settings.md|docs/keyboard-shortcuts.md) return 0 ;;
+    # (b) documentation: nothing the gate reads.
+    docs/*|*.md) return 1 ;;
+  esac
+  return 0
+}
+
 only_docs=1
 PUSHED_SHAS=()
+PUSHED_REFS=()
 for line in "${REFS[@]:-}"; do
   [ -z "$line" ] && continue
   local_sha=$(echo "$line" | awk '{print $2}')
   remote_sha=$(echo "$line" | awk '{print $4}')
   [ "$local_sha" = "0000000000000000000000000000000000000000" ] && continue  # deletion
   PUSHED_SHAS+=("$local_sha")
+  PUSHED_REFS+=("$(echo "$line" | awk '{print $1}')")
   if [ "$remote_sha" = "0000000000000000000000000000000000000000" ]; then
     range_cmd=(git log --name-only --format= "$local_sha" --not --remotes)   # new branch: the WHOLE unpublished range
   else
@@ -65,10 +108,7 @@ for line in "${REFS[@]:-}"; do
   fi
   while IFS= read -r f; do
     [ -z "$f" ] && continue
-    case "$f" in
-      docs/*|*.md) ;;
-      *) only_docs=0 ;;
-    esac
+    if is_code_path "$f"; then only_docs=0; fi
   done <<< "$files"
 done
 
@@ -137,9 +177,54 @@ if [ -f "$marker" ]; then
     skip_fast=1
   fi
 fi
+# ── AND IT GATES THE COMMITS BEING PUBLISHED, NOT WHATEVER IS CHECKED OUT ──
+# INVARIANT ⑭ AGAIN, IN THE ONE PLACE IT HAD NOT REACHED (round 5). Round 2
+# fixed the heavy VERDICT (`--check-heavy --head=<sha>`) and round 4 fixed the
+# green-marker SHORTCUT; the fast RUN itself still executed `node
+# scripts/ci.mjs` in the working tree with no idea what PUSHED_SHAS held.
+# Reproduced through the real hook: standing on `main`, pushing
+# refs/heads/feature whose tip adds src/broken.js ⇒ the fast tier ran in a tree
+# that did NOT contain src/broken.js (`sawBroken=false`), printed ALL GREEN and
+# let the push through — an ungated commit shipped under a green sentence about
+# a tree nobody is publishing.
+#
+# WE RUN IT AT THE SHA INSTEAD OF REFUSING THE SHAPE. Refusing would be cheaper
+# and is the other honest answer, but `git push origin <branch>` from somewhere
+# else works today, and the only bypass we ship is VIBESPACE_SKIP_CI=1 — which
+# skips the heavy VERDICT too. Turning a working push into "use the total
+# bypass" is exactly the "a gate people route around is not a gate" failure the
+# split exists to remove. So: the ordinary push (every pushed sha IS HEAD) runs
+# in place and costs exactly what it costs today — 86-122 s measured, the whole
+# ≤2 min budget untouched — and only the rare mismatch pays for an isolated
+# worktree at the commit it is actually publishing (~+3 s of `git worktree
+# add`, then the same tier). Distinct shas only, so a multi-ref push of one
+# commit still runs once.
+head_sha="$(git rev-parse HEAD 2>/dev/null || true)"
 if [ "$skip_fast" = "0" ]; then
-  echo "[ci] release gate — fast tier (VIBESPACE_SKIP_CI=1 to bypass in an emergency)…" >&2
-  node scripts/ci.mjs || { echo "[ci] GATE RED — push blocked" >&2; exit 1; }
+  ran_fast=0
+  done_shas=""
+  i=0
+  for sha in "${PUSHED_SHAS[@]:-}"; do
+    ref="${PUSHED_REFS[$i]:-a ref}"; i=$((i + 1))
+    [ -z "$sha" ] && continue
+    case " $done_shas " in *" $sha "*) continue ;; esac
+    done_shas="$done_shas $sha"
+    if [ "$sha" = "$head_sha" ]; then
+      echo "[ci] release gate — fast tier (VIBESPACE_SKIP_CI=1 to bypass in an emergency)…" >&2
+      node scripts/ci.mjs || { echo "[ci] GATE RED — push blocked" >&2; exit 1; }
+    else
+      echo "[ci] $ref tips at $(echo "$sha" | cut -c1-8), which is NOT the commit you have checked out — the fast tier runs in an ISOLATED worktree at that commit (a verdict about the tree you have is not a verdict about the tree you are publishing)…" >&2
+      node scripts/ci.mjs --isolate --sha="$sha" || { echo "[ci] GATE RED — push blocked" >&2; exit 1; }
+    fi
+    ran_fast=1
+  done
+  # No pushed shas at all (a deletion-only push, or a caller that fed us
+  # nothing): gate the tree we have, exactly as before. Nothing is claimed
+  # about a list we do not have.
+  if [ "$ran_fast" = "0" ]; then
+    echo "[ci] release gate — fast tier (VIBESPACE_SKIP_CI=1 to bypass in an emergency)…" >&2
+    node scripts/ci.mjs || { echo "[ci] GATE RED — push blocked" >&2; exit 1; }
+  fi
 fi
 
 # ── LAUNCH THE HEAVY TIER, DETACHED ───────────────────────────────────────
