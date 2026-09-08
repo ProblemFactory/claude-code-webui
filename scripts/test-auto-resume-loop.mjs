@@ -1013,7 +1013,10 @@ if (!probe) {
   ok('WIRING: the refusal notice is chosen by the REASON (the call site passes the check through; round 1 computed `chk` and dropped it)', /breakerNotice\(id, session, label \|\| key, kind, chk\)/.test(ar2src) && /function breakerNotice\(id, session, label, kind, chk\) \{[\s\S]{0,700}refusalNoticeFor\(\{[\s\S]{0,200}reason: chk && chk\.reason/.test(ar2src));
   ok('WIRING: a journal-only refusal spends no notice budget (the return is ABOVE the stamp)', /if \(!n\) return;[\s\S]{0,220}r\.notices\[n\.cls\] = now; save\(\);/.test(ar2src));
   ok('WIRING: the identity is re-resolved INSIDE deliver (after the gate) and re-checked before spending', /const deliver = \(\) => \{[\s\S]{0,1400}const ident2 = identityFor\(id, session\) \|\| ident;[\s\S]{0,400}const chk2 = canFire\(id, key2, kind, now2\);[\s\S]{0,200}if \(!chk2\.ok\)/.test(ar2src) && /noteFired\(id, key2, kind, Date\.now\(\)\)/.test(ar2src) && /announce\(id, session, key2, kind, note\)/.test(ar2src));
-  ok('WIRING: the continue card is chosen from the ARM + whether the gate moved us, in one place', /const moved = !!key && !!key2 && key2 !== key;[\s\S]{0,600}const note = continueNoticeFor\(\{ kind, armReason: a2\.reason, label: label2, moved \}\);/.test(ar2src));
+  // 2026-09-08: `cause` joined the inputs — the immediate path has a second
+  // caller now (the new-member wake), and `kind:'now'` can no longer stand in
+  // for "a pool switch". Pinned here so the card keeps naming what unblocked it.
+  ok('WIRING: the continue card is chosen from the ARM + whether the gate moved us + the caller\'s named CAUSE, in one place', /const moved = !!key && !!key2 && key2 !== key;[\s\S]{0,600}const note = continueNoticeFor\(\{ kind, armReason: a2\.reason, label: label2, moved, cause \}\);/.test(ar2src));
   // 'all-logins-expired' (2026-09-07) is the same class of fact — nowhere for
   // this conversation to go — so the breaker must hear it too, or it re-fires
   // into a pool whose every other member needs a re-login.

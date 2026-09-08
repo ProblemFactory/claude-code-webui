@@ -2,6 +2,79 @@
 
 Moved VERBATIM out of CLAUDE.md (tier-2 pass).
 
+## A MEMBER BECAME USABLE AND NOBODY NOTICED (2026-09-08 02:00–02:31, from this instance's own journal)
+
+**THE SHAPE.** Pool "全部" hit 0 % on every member. The owner added a subscription in the middle of it. Eight fable conversations were parked on the newcomer **while it had no usage reading at all**, re-armed for a reset **eight hours away**, and released only when the owner typed a prompt into one of them seven minutes later.
+
+**THE JOURNAL, VERBATIM** (`journalctl --user -u vibespace`, account ids resolved from `data/accounts.json`; the newcomer `sub-080ce98c7dca` was named "39AI Max" that night and is "UCI Max" now):
+
+```
+02:00:02 [notice] Pool "全部": no member can serve it — spent: 5h 0%
+                  (still available: 7d 62%, Fable 34%)…
+02:03:29 data/accounts.json: the record is created
+02:18:27 data/subs/<new>/.vibespace-login-status.json: {"state":"success"}
+02:18:33 [pool] per-session switch <pool>/<sid>: <old> → <new> (fam=fable, from 0%)   ×8
+02:18:33 [notice] Pool "全部": conversation "<name>" moved to 39AI Max
+                  (its fable quota was at 0%)                                          ×8
+02:18:37 [auto-resume] sess-5-…: armed for 2026-09-08T10:20:00.000Z
+           (re-armed at fire: 39AI Max: no usage data | Fish Max: 5h 0% < 10% |
+            ProblemFactory Max: Fable 0% < 5% | Personal Max: 5h 0% < 10% |
+            B-Stack Max: 7d 1% < 5% | PandyMax: 7d 0% < 5%)
+02:18:40 [auto-cli] quota refresh <new>: failed (drift 0pt)
+02:22:10 [auto-resume] <opus sid>: pool switched to UCI Max — continued automatically
+02:25:01 [auto-resume] sess-5-…: disarmed (user sent a prompt)
+02:31:43 [auto-cli] quota refresh <new>: ok (drift 4pt)
+```
+
+The opus conversations at 02:22:10 are **not** the feature working: one of their turns ended, and a turn end is the one event that already re-evaluates the pool. The fable ones had nothing to end.
+
+**THE POOL NEVER GOT TO DECIDE.** It re-evaluates on turn ends, on streamed usage records, and on a 30 s timer for auto pools. A conversation that is ARMED on exhaustion produces neither of the first two, and the timer only re-ranks the pool — it never re-examines who is waiting. So "a member became usable" reached nothing:
+
+* **(A) A LOGIN SUCCEEDING IS ALSO A QUOTA EVENT, and nothing treated it as one.** Nothing read the newcomer's usage when its login landed. The auto-cli loop is the only other reader, and its one attempt at 02:18:40 failed, which doubled its backoff from 5 to 10 minutes — the next read was 02:31:43, thirteen minutes later, exactly as `5*60e3 * 2^1` predicts.
+* **(B) A MANUAL REFRESH THAT REVEALS A USABLE MEMBER TOLD THE POOL NOTHING.** `/api/usage/refresh` writes the reading and answers `{success:true}`. It re-runs no pool decision and does not touch the conversations armed on exhaustion. The owner clicked it, watched the number change, and the conversations kept waiting for 10:20Z.
+* …and at 02:31:43, when the auto-cli read finally succeeded, **that changed nothing either** — a cache write is not an event anybody subscribes to.
+
+**THE FIX IS ONE EDGE, because a third producer of a fresh reading would otherwise forget it too** — and in this incident the third producer *had* forgotten it. `engine.onMemberReadingFresh(memberId, why)` (src/server/usage-pool-engine.js) does exactly two things:
+
+1. **RE-DECIDE the pools this member belongs to** — `maybePoolAutoSwitchForPool(id, {force:true})`. `force` drops that pool's 10 s event-KICK gate for this one call: the gate throttles per-RECORD kicks, and a member's first reading is not a kick, it is the fact the whole decision was missing. The 180 s dwell belt is untouched, so this can no more oscillate than any other evaluation.
+2. **RE-EXAMINE the conversations that are WAITING** — every armed session on this member, or on one of its pools, goes through auto-resume's own `fireNow`.
+
+**Each half is load-bearing for a DIFFERENT shape, and finding that out took mutation testing.** The first spelling of the regression armed the conversations in both legs — and half ① then looked decorative, because deleting it changed nothing: the PRE-FIRE GATE (`beforeAutoResumeFire`) runs `maybePoolAutoSwitch` itself, so half ② was doing half ①'s work as a side effect of the spending machinery. The honest split is:
+
+* **half ② is the incident's own shape**: the conversations were ALREADY parked on the newcomer since 02:18:33, so the pool re-decide moves nobody — the per-session pass `continue`s long before it reaches its own `fireNow`, and a switch-driven nudge is structurally unreachable.
+* **half ① is the shape where nobody is armed**: two live conversations on a spent member that have not hit the wall yet. Nothing fires, so the gate never runs, and only half ① can move them.
+
+`engine.onMemberLoginSuccess(memberId, why)` is the login half: ONE read through the EXISTING caps-routed rung (`probeQuotaForKey` → claude's `refreshViaCliPanel`, i.e. `claude -p /usage` with the official binary making the fetch; codex's app-server twin), then the same edge. **No new vendor surface**, and it is the human's own login action that triggers it — the same class as the ⟳ button, not a timer.
+
+**IT DOES NOT SPEND BY ITSELF.** Every release goes through `fireNow → attemptFire`, i.e. the 2026-09-07 loop breaker (same-identity quarantine, 3/hour cap, backoff) AND the pre-fire gate that re-verdicts the target and vetoes the turn if it is still blocked. There is no bypass, by construction: this module only says "look again".
+
+**THE PRODUCERS, all three.** `src/server/account-usage-routes.js` hangs the login half on the SAME transition detection the expiry sweep already uses — `loginFingerprint` read off THE ANSWER THE ROUTE ALREADY HOLDS, never a second credential reader — because all three finalize routes are polled every 3 s for up to 5 minutes and a side effect hung on the raw answer would spawn ~100 CLI panels per login. It gets its OWN latch (`lastWakeFingerprint`), deliberately not the sweep's: two of those routes call `sweepLoginExpiry` UNCONDITIONALLY for a documented reason, so sharing one map would couple "we already swept" to "we already read the usage" and disabling either would silently disable the other. All five login-success exits wake **the record the login LANDED in** (`'moved'` ⇒ `movedTo`; the auto-merge exit ⇒ the SURVIVOR, since waking the throwaway spawns a panel read for a record about to stop existing and leaves the one the pool holds unread). The call is fire-and-forget: a login must never wait on, or fail because of, a quota read. `src/usage-routes.js` takes the edge on all three LOCAL rungs of `/api/usage/refresh` (session / cli-panel / bare token); the `host` branch takes none of them — a remote machine's pool is not ours to decide for. And the auto-cli loop in server.js takes it on a successful refresh, which is what makes "a third producer cannot forget it" a true sentence rather than an aspiration. The edge is deliberately NOT buried inside `refreshViaCliPanel`: the pre-fire SPEND GATE calls that function too, and a gate that releases conversations as a side effect of asking a question is not a gate.
+
+**COMPOSITION, NOT A TWIN.** `readingForeignForWake()` asks the window-fingerprint work that landed in 2.369.73 (inc-mts8a8mr-ulmm) whether the stored snapshot is really this member's. That work ships TWO rules and this asks the SECOND on purpose: ① the LAG SHADOW is about a reading ARRIVING on a session after that session's link moved — it needs a session, a re-point and an age, and the producers already applied it before the snapshot reached disk; ② the WINDOW IDENTITY GUARD (`decideReadingTarget`) is the question a wake actually has. It is reached through the same `establishedWindows()` + `windowGroupOf` the write-time guard uses, so there is ONE predicate — and it is deliberately not called "shadowed", because that word already names rule ①. READ-ONLY: `guardReadingTarget` is the WRITE path and it archives; a wake may only decline to act. A brand-new member has no established window for anything to contradict, so the incident's own case still acts.
+
+**"NO READING" IS A REFUSAL TO ACT, NEVER A VERDICT OF 0 %.** The edge names its refusals: `no-reading`, `stale-reading` (older than 10 min), `foreign-reading`, `member-not-usable`, `wake-floor`. It is idempotent and rate-floored per member (20 s), and **the floor is stamped only when the wake ACTED** — a declined wake costs one file read, and stamping it would let a producer that called a millisecond before its own cache write eat the wake the real one needed.
+
+**NOT READY IS NOT FAILED.** The auto-cli loop skipped on the roster's `loggedIn`, which is `parseAuth`'s boolean: TRUE the moment an accessToken *string* exists, whatever its expiry. A credential file whose access AND refresh tokens have both expired therefore reads as "logged in", the panel spawn cannot possibly answer, and every failure doubles a backoff that never had a chance — the satisfiable gap `src/login-state.js` exists to close. The loop now asks `autoCliReady`, which is `memberLoginState`, the credential-FILE reader the pool's slot validation already uses. The FILE reader is the right one and not the account-level `accountLoginState`: this rung is `refreshViaCliPanel`, which DELETES `CLAUDE_CODE_OAUTH_TOKEN` from the child's env and points `CLAUDE_SECURESTORAGE_CONFIG_DIR` at the account's own dir, so a long-lived token cannot serve it. Finally, the login-edge read counts as one of the loop's OWN attempts (`lastMemberReadAt`), because both schedulers spawn the SAME panel through the SAME rung and two attempt clocks race.
+
+**HONEST BOUNDARIES — what this fix is NOT claimed to explain.**
+* The brief for this work said the newcomer's `.credentials.json` was written at 02:24, six minutes AFTER the auto-cli failure. **That is not verifiable today and the available evidence points the other way.** The file's mtime is now 12:19 (the pool re-mints that symlink and utimes-bumps the target on every re-point — which is exactly why `credsTokenSig` exists instead of an mtime check), and the loop's own `!a.loggedIn` gate means an accessToken string must already have been on disk at 02:18:40 or no attempt would have been made at all. The sibling files agree: `.claude.json` and `.vibespace-login-status.json` are both stamped 02:18:27.
+* So `autoCliReady` is **not** claimed to be what would have prevented that particular failure count. It closes an adjacent, reachable hole (the doubly-expired file), and the "member has no credentials yet" half was already covered — `parseAuth` answers `loggedIn:false` with no file, and the journal shows no auto-cli attempt for the newcomer before its login landed. Both halves are measured in the suite so the distinction cannot rot into a claim.
+* What IS reproducible, and what the regression actually replays, is the load-bearing half: **after the reading existed, nothing re-drove the pool and nothing looked at the conversations that were waiting.**
+
+**INVARIANTS.**
+* **A member becoming usable is an EVENT, not a state someone will eventually poll.** The pool re-evaluates on turn ends and streamed records; a conversation that is armed produces neither, so it can wait out a reset that stopped being relevant hours ago.
+* **Every producer of a fresh reading takes the SAME edge** — and "a third producer cannot forget it" is only true if you go and wire the third producer that already exists.
+* **A wake has two halves and each needs its own control, in the shape where only it can answer.** If a control survives deleting the mechanism it names, the mechanism was being done by something else and the assertion was decorative.
+* **A polled route may not carry an unbounded side effect** — gate on the credential fingerprint of the answer the route already has, never on a second read of the file; and give a second side effect its own latch, or disabling one silently disables the other.
+* **Two belts get two controls.** A leg that leaves the second belt standing proves nothing about the first (the fingerprint gate looked protected until the engine's own 5-minute floor was wound back).
+* **When two schedulers spawn the same child through the same rung they must share ONE attempt clock.**
+* **A boolean that is TRUE for a state it was never asked about is a gate that spends money** (`parseAuth.loggedIn` vs `loginState.usable`).
+* **"No reading" is a refusal to act, never a verdict of 0 %** — and a refusal names itself.
+* **A rate floor is stamped when you ACT, not when you are asked.**
+* **Do not reuse an established word for a different rule.** Rule ① is the shadow; rule ② is the guard. One name for two things is how this subsystem grows twins.
+
+**GATE.** `scripts/test-new-member-wake.mjs` (69, fast tier) — the incident replayed on the REAL engine + REAL AccountManager pool with real per-session symlinks + REAL auto-resume + the real rejection producer, and the REAL `account-usage-routes` factory for the login exits. §1a pins the shape (parked on an unread member, so nothing can switch); §1b is master reproduced (three ticks pass, still waiting for the far reset — then one call to the edge continues both); §1c switches each half off in the shape where only it can answer; §2 refuses no/stale/foreign readings and a member that is itself spent; §3 pins both floors and the polled-route fingerprint gate *with the engine floor wound back*; §4 measures the `loggedIn` gap against the real `parseAuth`; §5 proves the quarantine and the 3/hour cap still hold against readings that keep arriving; §6 drives all five login exits through the real route factory plus the auto-cli producer; §7 pins §ban-safety. Sixteen mutations of the product source were run against it — every one goes red, and the three that survived the first draft are why §1c and §3 are written the way they are.
+
 ## A LOW-USAGE ACCOUNT SUDDENLY JUMPED TO 93 % (inc-mts8a8mr-ulmm, 2026-09-08 05:27Z — the reading was one request older than the link)
 
 **THE REPORT.** Owner: *"a low-usage account suddenly jumped to 93% 7d"*. The account (Personal Max) had been at 11–13 % all day, on its own `/usage` panel readings, before and after.

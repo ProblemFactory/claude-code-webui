@@ -424,7 +424,7 @@ const {
   _vsuPending, usageAnchors, usageEstimator,
   armWorkflowUsageWatcher, darkSources, darkTaintedAccounts, kickPoolEval,
   markLimitBanner, maybePoolAutoSwitch, maybePoolAutoSwitchForPool, notePoolAuthFailure,
-  maybeRepinLockedModel, maybeStopOnFallback, modelsMatch,
+  maybeRepinLockedModel, maybeStopOnFallback, modelsMatch, onMemberReadingFresh, autoCliReady, lastMemberReadAt, // …+ the new-member wake (2026-09-08)
   poolChooserForModel, poolReadCache, probeUsageForAccountKey,
   noteSessionProduced, noteTurnEnd, noteWallSignal, beforeAutoResumeFire, fireIdentityFor, probeUsageViaSession, recordCodexQuotaSignal, recordRateLimitEvent, resolveUsageKey,
   sessionModelFor, sweepUsageAnchors, usageCacheKeyFor,
@@ -1613,7 +1613,7 @@ app.use(sessionsRouter);
 // refreshed every ~5 min. See _fetchOAuthUsage below for the why.
 // ── Usage / Rate Limit ── (extracted to src/usage-routes.js in the 2.92.0 split)
 const { setupUsage } = require('./src/usage-routes');
-const usage = setupUsage({ app, accounts, hosts, usageHistory, activeSessions, serverSetting, ensureDir, USAGE_CACHE_FILE, USAGE_CACHE_DIR, CODEX_SESSIONS_DIR, META_DIR, AVAILABLE_MODELS, BUFFERS_DIR, probeUsageForAccountKey, CLAUDE_CMD });
+const usage = setupUsage({ app, accounts, hosts, usageHistory, activeSessions, serverSetting, ensureDir, USAGE_CACHE_FILE, USAGE_CACHE_DIR, CODEX_SESSIONS_DIR, META_DIR, AVAILABLE_MODELS, BUFFERS_DIR, probeUsageForAccountKey, onMemberReadingFresh, CLAUDE_CMD });
 
 const { decideCliRefresh } = require('./src/account-pool-auto.js');
 // ── auto-cli quota refresh loop (2.329.0, owner-approved after the ToS
@@ -1640,7 +1640,7 @@ const { decideCliRefresh } = require('./src/account-pool-auto.js');
       const now = Date.now();
       const list = [];
       for (const a of (accounts.list().accounts || [])) {
-        if (a.type !== 'subscription' || !a.loggedIn || a.pooled || (a.backend || 'claude') !== 'claude') continue; // auto-cli spawns `claude -p /usage` — claude accounts only
+        if (a.type !== 'subscription' || !a.loggedIn || a.pooled || (a.backend || 'claude') !== 'claude' || !autoCliReady(a.id)) continue; // auto-cli spawns `claude -p /usage` — claude accounts only, and NOT READY IS NOT FAILED (autoCliReady, 2026-09-08)
         let raw = null;
         try { raw = JSON.parse(fs.readFileSync(path.join(USAGE_CACHE_DIR, a.id + '.json'), 'utf-8')); } catch { }
         try {
@@ -1657,7 +1657,7 @@ const { decideCliRefresh } = require('./src/account-pool-auto.js');
         const cmp = (e, r) => { if (e && r && typeof e.utilization === 'number' && typeof r.utilization === 'number') { const d = Math.abs(e.utilization - r.utilization) * 100; drift = Math.max(drift, d); if (d > 0.2) moved = true; } };
         cmp(est?.fiveHour, raw?.fiveHour); cmp(est?.sevenDay, raw?.sevenDay);
         for (const s of est?.scopedWeekly || []) cmp(s, (raw?.scopedWeekly || []).find((x) => x.name === s.name));
-        list.push({ key: a.id, fetchedAt: raw?.fetchedAt || 0, lastAttemptAt: attempts.get(a.id) || 0, estDriftPct: drift, activeBurn: moved });
+        list.push({ key: a.id, fetchedAt: raw?.fetchedAt || 0, lastAttemptAt: Math.max(attempts.get(a.id) || 0, lastMemberReadAt(a.id)), estDriftPct: drift, activeBurn: moved }); // ONE attempt clock for both schedulers (lastMemberReadAt, 2026-09-08)
       }
       // idle threshold re-rolls EVERY tick inside the owner's 30–60min band —
       // a wandering threshold, not a fixed cadence
@@ -1666,7 +1666,7 @@ const { decideCliRefresh } = require('./src/account-pool-auto.js');
       for (const key of picks) {
         attempts.set(key, now);
         const ok = await usage.refreshViaCliPanel(key).catch(() => false);
-        fails.set(key, ok ? 0 : (fails.get(key) || 0) + 1);
+        fails.set(key, ok ? 0 : (fails.get(key) || 0) + 1); if (ok) onMemberReadingFresh(key, 'auto-cli refresh'); // the THIRD producer of a fresh reading takes the SAME edge (2026-09-08: its 02:31:43 success changed nothing)
         console.log(`[auto-cli] quota refresh ${key}: ${ok ? 'ok' : 'failed'} (drift ${Math.round(list.find((x) => x.key === key)?.estDriftPct || 0)}pt)`);
         global.__vsMetric?.('auto-cli-refresh-ms', 0);
       }

@@ -74,6 +74,56 @@ const sweepOnLoginTransition = (id, r, why) => {
   sweepLoginExpiry(why);
   return true;
 };
+// A LOGIN SUCCEEDING IS ALSO A QUOTA EVENT (2026-09-08, the new-member
+// incident). The member that just logged in has NO usage reading, and "no
+// usage data" is precisely what the pool and auto-resume saw for the fresh
+// subscription the owner added in the middle of a full-pool exhaustion: the
+// pool parked eight conversations on it, auto-resume re-armed them for a reset
+// EIGHT HOURS out, the auto-cli panel read failed and backed off, and nothing
+// ever looked again — the owner released them by typing. So the ONE read of
+// that member's usage and the pool re-evaluation that follows it hang HERE,
+// on the login edges the finalize routes already detect.
+//
+// SAME TRANSITION DETECTION, ITS OWN LATCH. The predicate is the existing
+// `loginFingerprint` — the fields that can only change when the file the login
+// writes changes, read off THE ANSWER THE ROUTE ALREADY HOLDS (never a second
+// credential reader). `/relogin-finalize` is polled every 3 s for up to 5 min,
+// and the Add-subscription and codex device-auth finalizes are polled the same
+// way, so a side effect hung on the raw answer would run ~100× per login and
+// spawn ~100 CLI panels. The latch is separate from the expiry sweep's on
+// purpose: those two routes call `sweepLoginExpiry` UNCONDITIONALLY (there is a
+// documented reason — the pre-merge sweep is the only one on every non-merge
+// exit), so sharing one map would silently couple "we already swept" to "we
+// already read the usage" and disabling either would disable the other.
+//
+// WAKE THE RECORD THE LOGIN LANDED IN, not the record that was asked about:
+// 'moved' relocated the credentials into ANOTHER record, and the auto-merge
+// exit keeps the SURVIVOR. Waking the throwaway would spawn a panel read for a
+// record about to stop existing and leave the one the pool actually holds
+// unread.
+//
+// FIRE-AND-FORGET: a login must never wait on, or fail because of, a quota
+// read. The promise is returned only so a test can await the edge.
+const lastWakeFingerprint = new Map(); // accountId → fingerprint of the last answer we woke on
+const wakeOnLoginSuccess = (id, r, why, memberId = null) => {
+  try {
+    const target = memberId || id;
+    if (!target) return null;
+    const fp = loginFingerprint(r);
+    if (lastWakeFingerprint.get(id) === fp) return null;
+    if (lastWakeFingerprint.size >= FINGERPRINT_CAP) lastWakeFingerprint.clear();
+    lastWakeFingerprint.set(id, fp);
+    const p = Promise.resolve(engine.onMemberLoginSuccess?.(target, why))
+      .catch((e) => { console.log('[pool] login wake failed:', e.message); return null; });
+    // OBSERVABILITY SEAM, not a control path: nothing in production reads this.
+    // A fire-and-forget side effect is exactly the shape a regression can pass
+    // vacuously against ("it did not fire" is indistinguishable from "we looked
+    // too early"), so the promise is parked where the suite — and a human in a
+    // REPL — can await the edge before asserting about it.
+    app.locals._lastLoginWake = p;
+    return p;
+  } catch (e) { console.log('[pool] login wake failed:', e.message); return null; }
+};
 // ── Central collector (team deployments): other instances POST their batches
 // here (telemetry.forwardUrl → https://<collector>/api/telemetry/ingest).
 // Enabled ONLY when VIBESPACE_TELEMETRY_INGEST_TOKEN is set — the shared
@@ -447,7 +497,11 @@ app.post('/api/accounts/:id/relogin-finalize', (req, res) => {
     //                                ledger row is the one to retract, and
     //                                there is no `account` here at all
     const captured = !!r?.account?.loggedIn || r?.outcome === 'moved';
-    if (captured) sweepOnLoginTransition(req.params.id, r, 're-login');
+    if (captured) {
+      sweepOnLoginTransition(req.params.id, r, 're-login');
+      // the record the login LANDED in: 'moved' relocated it into another one
+      wakeOnLoginSuccess(req.params.id, r, 're-login', r?.movedTo?.id || r?.account?.id || req.params.id);
+    }
     try {
       // SAME-SPELLING WARNING (2026-09-07): this `loginState` is a STRING
       // ('error') describing how the login TERMINAL run went. The account ROW
@@ -465,6 +519,12 @@ app.post('/api/accounts/subscription/:id/finalize', (req, res) => {
   try {
     const fin = accounts.finalizeSubscription(req.params.id);
     if (fin?.loggedIn) sweepLoginExpiry('subscription login'); // ONCE, above BOTH res.json paths (the merge branch returns early)
+    // The wake is FINGERPRINT-GATED where the sweep is not: this route is
+    // polled every 3 s for 5 minutes and the sweep is local file reads while
+    // the wake spawns a CLI panel. The merge branch below re-wakes the
+    // SURVIVOR — the fingerprint differs there (a different record id), so
+    // both calls land.
+    if (fin?.loggedIn) wakeOnLoginSuccess(req.params.id, fin, 'subscription login');
     // attempt identity for the re-login watcher (2.332.0): which helper RUN
     // produced the current state — lets the client ignore a pre-existing login
     try {
@@ -498,6 +558,10 @@ app.post('/api/accounts/subscription/:id/finalize', (req, res) => {
           // the pre-merge one stays: it is the only sweep on every non-merge
           // exit.
           sweepLoginExpiry('subscription login merge');
+          // THE SURVIVOR is the record the pool holds and the one the fresh
+          // credentials now live in; the throwaway above is about to stop
+          // existing.
+          wakeOnLoginSuccess(dup.id, merged, 'subscription login merge', merged?.id || dup.id);
           return res.json({ success: true, ...fin, merged: true, account: merged });
         } catch (me) {
           if (me.code !== 'merge-account-live') throw me;
@@ -552,6 +616,7 @@ app.post('/api/accounts/codex-subscription/:id/finalize', (req, res) => {
     // (it walks every subscription), and "a login just finished" is the one
     // event we have that says the roster's login facts moved.
     if (fin?.loggedIn) sweepLoginExpiry('codex device-auth');
+    if (fin?.loggedIn) wakeOnLoginSuccess(req.params.id, fin, 'codex device-auth');
     res.json({ success: true, ...fin });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });

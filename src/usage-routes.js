@@ -22,7 +22,7 @@ const claudeQuota = harnesses.get('claude').quota;
 const parseCliUsageText = claudeQuota.parseCliUsageText;      // `claude -p /usage` panel text
 const normalizeCodexRateLimit = harnesses.get('codex').quota.normalize; // codex rate_limits (rollout / live push / rateLimits/read)
 
-function setupUsage({ app, accounts, hosts, usageHistory, activeSessions, serverSetting, ensureDir, USAGE_CACHE_FILE, USAGE_CACHE_DIR, CODEX_SESSIONS_DIR, META_DIR, AVAILABLE_MODELS, BUFFERS_DIR, probeUsageForAccountKey, CLAUDE_CMD }) {
+function setupUsage({ app, accounts, hosts, usageHistory, activeSessions, serverSetting, ensureDir, USAGE_CACHE_FILE, USAGE_CACHE_DIR, CODEX_SESSIONS_DIR, META_DIR, AVAILABLE_MODELS, BUFFERS_DIR, probeUsageForAccountKey, onMemberReadingFresh, CLAUDE_CMD }) {
 const https = require('https');
 function readUsageCache() {
   try {
@@ -524,6 +524,34 @@ async function refreshViaCliPanel(key) {
   return true;
 }
 
+// A HUMAN ⟳ THAT REVEALS A USABLE MEMBER MUST RE-DRIVE THE POOL (2026-09-08,
+// the new-member incident). This route used to write the reading and answer
+// {success:true}: it re-ran no pool decision and it did not touch the
+// conversations ARMED on exhaustion, so the owner clicked refresh, watched the
+// number change, and eight conversations kept waiting for a reset eight hours
+// out. Every LOCAL rung below therefore takes the ONE edge — session,
+// cli-panel and the bare-token ladder — because a third rung would otherwise
+// be the one that forgets.
+//
+// LOCAL ONLY, DELIBERATELY. The `host` branch above returns long before this:
+// a remote machine's pool is decided by the instance that owns it, and the
+// conversations armed there are not ours to continue. (Its readings still land
+// in the host-<id> caches for the panels, exactly as before.)
+//
+// The edge is idempotent, rate-floored per member, and refuses a reading that
+// is missing, stale, or whose weekly window says it is another member's — see
+// onMemberReadingFresh. Failure is swallowed: a refresh must not fail because
+// a follow-up pool evaluation did.
+//
+// '__global__' is skipped as a COST saving, not a rule: the machine login is
+// not a `sub-` record, so it can never be a pool member (poolMembers filters
+// subscriptions) and a session billed to it carries no `_accountId` to match —
+// the edge would do a cache read and a roster walk to reach the same answer.
+const wakePool = (key, why) => {
+  try { if (key && key !== '__global__' && onMemberReadingFresh) onMemberReadingFresh(key, why); }
+  catch (e) { console.warn('[usage] pool wake after refresh failed:', e.message); }
+};
+
 app.post('/api/usage/refresh', async (req, res) => {
   // User-facing kill switch (accounts.onDemandQuotaRefresh = 'off'): never
   // contact Anthropic, even if a stale client asks.
@@ -677,6 +705,7 @@ app.post('/api/usage/refresh', async (req, res) => {
       const viaSession = await probeUsageForAccountKey(key);
       if (viaSession) {
         _onDemandUsageAt[key] = Date.now();
+        wakePool(key, 'manual refresh (session)');
         return res.json({ success: true, via: 'session' });
       }
     } catch { /* fall through to the bare call */ }
@@ -696,7 +725,7 @@ app.post('/api/usage/refresh', async (req, res) => {
   // token ladder below. Ambient key/oat env is stripped so the CLI reads the
   // subscription login, not an inherited API key.
   const cliOk = await refreshViaCliPanel(key);
-  if (cliOk) return res.json({ success: true, via: 'cli-panel' });
+  if (cliOk) { wakePool(key, 'manual refresh (cli-panel)'); return res.json({ success: true, via: 'cli-panel' }); }
   let token = isGlobal ? getOAuthToken() : accounts.usageToken(key);
   // Same-account fallback (2.181.0, real report): a named subscription's dir
   // token is only refreshed while a session RUNS on that dir — but when the
@@ -752,6 +781,7 @@ app.post('/api/usage/refresh', async (req, res) => {
       if (isGlobal) { _rateLimitCache = u; writeUsageCache(); }
       else _accountUsage[key] = { ...u, name: acctMeta.name, email: acctMeta.email };
       try { ingestPassiveUsage(); } catch {} // re-run the global↔named same-account merge
+      wakePool(key, 'manual refresh (token)');
       res.json({ success: true });
     });
   });

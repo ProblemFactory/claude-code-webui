@@ -1831,6 +1831,236 @@ function markLimitBanner(session, text) {
 function maybePoolAutoSwitch(session) {
   try { if (session._accountId) maybePoolAutoSwitchForPool(session._accountId); } catch { }
 }
+
+// ── A MEMBER BECAME USABLE, AND NOBODY NOTICED (2026-09-08, from the
+// production journal) ──────────────────────────────────────────────────────
+// Every member of pool "全部" was spent ("no member can serve it", 02:00:02).
+// The owner added a subscription; at 02:18:33 the pool moved EIGHT fable
+// conversations onto it ("from 0%") while it had NO reading at all, and four
+// seconds later auto-resume RE-ARMED them for the far reset 10:20Z with the
+// reason "<new member>: no usage data". The auto-cli panel read of that member
+// FAILED at 02:18:40 (which doubled its backoff: the next read was 02:31:43),
+// the owner refreshed by hand in between — and that route wrote a reading and
+// told the pool NOTHING. The conversations sat armed for a reset eight hours
+// away and were released at 02:25:01 only because the owner typed a prompt.
+// (The opus conversations woke at 02:22:10 for an unrelated reason: one of
+// their turns ended, and a turn end is the one event that already
+// re-evaluates.)
+//
+// So the gap was never "the pool decided wrong" — THE POOL NEVER GOT TO
+// DECIDE. It re-evaluates on turn ends and on streamed usage records, and a
+// conversation that is ARMED produces neither. Two things make a member's
+// first usable reading exist, and neither re-drove anything:
+//   · a LOGIN succeeding (the finalize routes)
+//   · a HUMAN ⟳ refresh (/api/usage/refresh)
+// ONE function serves both, so a third producer cannot forget it.
+//
+// IT DOES NOT SPEND BY ITSELF. Releasing an armed conversation goes through
+// auto-resume's own fireNow → attemptFire, i.e. the 2026-09-07 loop breaker
+// (same-identity quarantine, 3/hour cap, backoff) AND the pre-fire gate that
+// re-verdicts the target and vetoes the turn if it is still blocked. There is
+// no bypass here, by construction: this module only says "look again".
+const MEMBER_WAKE_FLOOR_MS = 20e3;         // two refreshes landing together are ONE wake
+const MEMBER_READING_FRESH_MS = 10 * 60e3; // a wake acts on a reading taken NOW, never on a stale file
+const LOGIN_READ_FLOOR_MS = 5 * 60e3;      // one usage read per login EDGE — a re-polled finalize must not spawn a second CLI
+const _memberWakeAt = new Map();           // memberId → last wake that ACTED
+const _loginReadAt = new Map();            // memberId → last login-edge usage read (shared with the auto-cli loop's attempt clock)
+
+/** The pools this member can serve, as the pool machinery itself sees them
+ *  (`poolMembers` is the same resolver the roster and the chooser use, so a
+ *  pool with `members:null` — "every subscription" — is included by the one
+ *  rule instead of a second interpretation of that null). */
+function memberPoolsOf(memberId) {
+  const out = [];
+  try {
+    for (const a of accounts.list().accounts || []) {
+      if (a.type !== 'pooled') continue;
+      let ms = [];
+      try { ms = accounts.poolMembers(a.id) || []; } catch { }
+      if (ms.some((m) => (m && m.id ? m.id : m) === memberId)) out.push(a);
+    }
+  } catch { }
+  return out;
+}
+
+/** IS THIS STORED READING ACTUALLY THIS MEMBER'S? Composition with the
+ *  window-fingerprint work (inc-mts8a8mr-ulmm, landed 2.369.73) — NOT a second
+ *  copy of it.
+ *
+ *  That work ships TWO rules and this asks the SECOND one on purpose. ① the
+ *  LAG SHADOW (`decideLagShadow`) is about a reading ARRIVING on a session
+ *  after that session's link moved; it needs a session, a re-point and an age,
+ *  and the producers already applied it before this snapshot reached the disk.
+ *  ② the WINDOW IDENTITY GUARD (`decideReadingTarget`) is the question a wake
+ *  actually has: a reading whose weekly window contradicts this member's own
+ *  established window was produced on somebody else's credentials, so it may
+ *  not drive a decision here either. Reached through the same
+ *  `establishedWindows()` + `windowGroupOf` the write-time guard uses, so there
+ *  is ONE predicate ("two functions answering one question" is the exact
+ *  family of bug this area keeps producing) — and deliberately NOT called
+ *  "shadowed", because that word already names rule ①.
+ *
+ *  READ-ONLY: `guardReadingTarget` is the WRITE path and it ARCHIVES. A wake
+ *  must never move or delete anybody's data; it may only decline to act.
+ *  Returns null when the reading is this member's — or when there is no
+ *  evidence either way, which is the honest default AND the incident's own
+ *  case: a brand-new member has no established window of its own for anything
+ *  to contradict. */
+function readingForeignForWake(memberId, snap) {
+  try {
+    const d = readingLag.decideReadingTarget({
+      key: memberId,
+      readingWindow: readingLag.windowOf(snap),
+      windows: establishedWindows(),
+      groupOf: windowGroupOf,
+    });
+    if (!d || d.action === 'write') return null;
+    return d.action === 'refile' ? `these numbers are ${nameOf(d.key)}'s — ${d.reason}` : d.reason;
+  } catch (e) {
+    // A guard that cannot decide must not block — the same rule
+    // guardReadingTarget states at its own catch ("writing as asked").
+    console.warn('[usage] wake window check failed (acting anyway):', e.message);
+    return null;
+  }
+}
+
+/** THE ONE EDGE. Whatever produced a fresh reading for `memberId` calls this,
+ *  and the two halves live HERE so a third producer cannot forget either:
+ *
+ *   ① RE-DECIDE the pools this member belongs to. `force` drops that pool's
+ *      10 s event-KICK gate for this one call — the gate throttles per-record
+ *      kicks, and a member's first reading is not a kick, it is the fact the
+ *      whole decision was missing. The 180 s dwell belt is untouched, so this
+ *      can no more oscillate than any other evaluation. DO NOT DELETE THIS AS
+ *      REDUNDANT because half ② appears to cover it: it only looks that way
+ *      when something is ARMED, since the pre-fire gate runs
+ *      maybePoolAutoSwitch itself. With NOBODY armed — a live conversation on
+ *      a spent member that has not hit the wall yet — half ① is the only
+ *      thing that moves it (mutation-tested; test-new-member-wake §1c).
+ *   ② RE-EXAMINE the conversations that are WAITING. Half ② is the incident's
+ *      own shape: the conversations had ALREADY been parked on the newcomer
+ *      since 02:18:33, so nothing switches — the per-session pass `continue`s
+ *      long before it reaches its own fireNow — and a switch-driven nudge is
+ *      therefore structurally unreachable. It fires only when the reading says
+ *      the member can actually serve; "the pool moved somebody else" is half
+ *      ①'s business and that path already nudges.
+ *
+ *  "No reading" is a REFUSAL TO ACT, never a verdict of 0%. */
+function onMemberReadingFresh(memberId, why = 'reading', { at = Date.now() } = {}) {
+  const out = { member: memberId || null, why, acted: false, reason: null, detail: null, pools: [], fired: [] };
+  try {
+    if (!memberId || typeof memberId !== 'string') { out.reason = 'no-member'; return out; }
+    let snap = null;
+    try { snap = JSON.parse(fs.readFileSync(path.join(USAGE_CACHE_DIR, memberId.replace(/[^\w.-]/g, '_') + '.json'), 'utf-8')); } catch { }
+    if (!snap) { out.reason = 'no-reading'; return out; }
+    const age = at - (Number(snap.fetchedAt) || 0);
+    if (!(age >= 0) || age > MEMBER_READING_FRESH_MS) { out.reason = 'stale-reading'; return out; }
+    const foreign = readingForeignForWake(memberId, snap);
+    if (foreign) { out.reason = 'foreign-reading'; out.detail = foreign; return out; }
+    // THE FLOOR IS STAMPED ONLY WHEN WE ACT. A declined wake costs one file
+    // read; stamping it would let a producer that called a millisecond before
+    // its own cache write eat the wake the real one needed.
+    const last = _memberWakeAt.get(memberId) || 0;
+    if (at - last < MEMBER_WAKE_FLOOR_MS) { out.reason = 'wake-floor'; return out; }
+    _memberWakeAt.set(memberId, at);
+    if (_memberWakeAt.size > 512) _memberWakeAt.delete(_memberWakeAt.keys().next().value);
+    out.acted = true;
+
+    const pools = memberPoolsOf(memberId);
+    for (const p of pools) {
+      out.pools.push(p.id);
+      try { maybePoolAutoSwitchForPool(p.id, { force: true }); } catch (e) { console.warn(`[pool] wake re-decide ${p.id} failed:`, e.message); }
+    }
+
+    let usable = null;
+    try { usable = quotaVerdict(poolReadCache()(memberId), at / 1000, { tier: 'hot' }).usable; } catch { }
+    if (usable !== true) { out.reason = 'member-not-usable'; return out; }
+    const ar = getAutoResume();
+    if (!ar || !ar.fireNow || !ar.armedIds) { out.reason = 'no-auto-resume'; return out; }
+    const poolIds = new Set(pools.map((p) => p.id));
+    let ids = [];
+    try { ids = ar.armedIds() || []; } catch { }
+    for (const id of ids) {
+      const s = activeSessions.get(id);
+      if (!s) continue;
+      const acct = s._accountId || null;
+      if (acct !== memberId && !poolIds.has(acct)) continue;
+      try {
+        if (ar.fireNow(id, `${nameOf(memberId)} 已恢复可用`, { cause: 'member-usable' })) out.fired.push(id);
+      } catch (e) { console.warn('[auto-resume] wake fire failed:', e.message); }
+    }
+    if (out.pools.length || out.fired.length) {
+      console.log(`[pool] member wake ${nameOf(memberId)} (${why}): re-decided ${out.pools.length} pool(s), continued ${out.fired.length} waiting conversation(s)`);
+    }
+    global.__vsEvent?.('member-wake', `${memberId}:${why}:${out.fired.length}`);
+    return out;
+  } catch (e) {
+    console.warn('[pool] member wake failed:', e.message);
+    out.reason = 'error';
+    return out;
+  }
+}
+
+/** THE LOGIN HALF. A login succeeding is also a QUOTA EVENT: the member that
+ *  just logged in has no reading, and "no usage data" is exactly what the pool
+ *  and auto-resume saw for the subscription the owner added mid-exhaustion.
+ *
+ *  §ban-safety: ONE read through the EXISTING caps-routed rung
+ *  (probeQuotaForKey → claude's `refreshViaCliPanel`, i.e. `claude -p /usage`
+ *  with the official binary making the fetch; codex's app-server twin). No new
+ *  vendor surface, and it is the HUMAN'S OWN LOGIN ACTION that triggers it —
+ *  the same class as the ⟳ button, not a timer. Bounded twice over: the
+ *  finalize routes gate on the credential FINGERPRINT of the answer they
+ *  already hold (a polled route may not carry an unbounded side effect), and
+ *  this floor is the belt.
+ *
+ *  The wake runs even when the read did NOT answer: a login landing is itself
+ *  new information about the roster, and half ① costs local file reads. */
+async function onMemberLoginSuccess(memberId, why = 'login success') {
+  if (!memberId || typeof memberId !== 'string') return { ok: false, reason: 'no-member', wake: null };
+  const now = Date.now();
+  if (now - (_loginReadAt.get(memberId) || 0) < LOGIN_READ_FLOOR_MS) return { ok: false, reason: 'login-read-floor', wake: null };
+  _loginReadAt.set(memberId, now);
+  if (_loginReadAt.size > 512) _loginReadAt.delete(_loginReadAt.keys().next().value);
+  let probe = null;
+  try { probe = await probeQuotaForKey(memberId); } catch (e) { probe = { ok: false, reason: e.message }; }
+  if (!probe || !probe.ok) console.log(`[pool] ${nameOf(memberId)}: login succeeded but the usage read did not answer (${probe?.reason || 'unknown'}) — re-examining the pool anyway`);
+  const wake = onMemberReadingFresh(memberId, why, {});
+  return { ok: !!(probe && probe.ok), probe, wake };
+}
+
+/** THE SHARED ATTEMPT CLOCK. The auto-cli loop and the login edge spawn the
+ *  SAME `claude -p /usage` through the SAME rung, so two attempt clocks race:
+ *  the loop would spawn a second panel seconds after the login edge already
+ *  did. The loop folds this into its own `lastAttemptAt`. */
+function lastMemberReadAt(id) { return _loginReadAt.get(id) || 0; }
+
+/** NOT READY IS NOT FAILED. The auto-cli loop skipped on the roster's
+ *  `loggedIn`, which is `parseAuth`'s boolean: TRUE the moment an accessToken
+ *  string exists in the file, whatever its expiry — so a credential file whose
+ *  access AND refresh tokens have both expired reads as "logged in", the panel
+ *  spawn cannot possibly answer, and every failure doubles a backoff that never
+ *  had a chance. That is the satisfiable gap `src/login-state.js` exists to
+ *  close, asked here through the same credential-FILE reader the pool's slot
+ *  validation already uses.
+ *
+ *  THE FILE READER IS THE RIGHT ONE (not `accountLoginState`): this rung is
+ *  `refreshViaCliPanel`, which DELETES CLAUDE_CODE_OAUTH_TOKEN from the child's
+ *  env and points CLAUDE_SECURESTORAGE_CONFIG_DIR at the account's own dir, so
+ *  a long-lived token cannot serve it — the credential file is literally the
+ *  only thing that can.
+ *
+ *  MEASURED BOUNDARY: the "member has no credentials at all" half was ALREADY
+ *  covered (parseAuth answers loggedIn:false when the file is absent, and the
+ *  journal shows no auto-cli attempt for the new member before its login
+ *  landed), and the incident's 02:18:40 failure happened with `loggedIn` TRUE —
+ *  the loop's own gate let it through — so this guard is NOT claimed to be what
+ *  would have prevented that particular failure count. It closes the adjacent,
+ *  reachable hole. */
+function autoCliReady(id) {
+  const st = memberLoginState(id);
+  return !st || st.usable !== false; // null = not a claude sub / unreadable roster ⇒ never block
+}
 // EVENT-DRIVEN pool evaluation (user-designed after exhaustion #2, 2026-08-09):
 // every streamed usage record kicks a (5s-throttled) re-evaluation instead of
 // waiting for the timer — combined with the estimator's live odometer, burst
@@ -2055,13 +2285,18 @@ function notePoolAuthFailure(session, sid, info = {}) {
   } catch (e) { console.warn('[pool] auth-failure evict failed:', e.message); }
 }
 
-function maybePoolAutoSwitchForPool(poolId) {
+function maybePoolAutoSwitchForPool(poolId, { force = false } = {}) {
   try {
     if (!poolId) return;
     const a = accounts.get(poolId);
     if (!a || a.type !== 'pooled' || !a.auto) return;
     const now = Date.now();
-    if ((now - (_poolAutoLast.get(poolId) || 0)) < 10000) return; // event-driven kicks need a tight gate; anti-flap = MIN_GAIN, not cadence
+    // `force` is the new-member wake (onMemberReadingFresh) and NOTHING else:
+    // this gate throttles per-RECORD kicks, and a member's first reading is not
+    // a kick — it is the fact the whole decision was missing. The 180s dwell
+    // belt below is deliberately NOT forced, so an evaluation forced here can
+    // no more oscillate than any other one.
+    if (!force && (now - (_poolAutoLast.get(poolId) || 0)) < 10000) return; // event-driven kicks need a tight gate; anti-flap = MIN_GAIN, not cadence
     const currentId = accounts.poolCurrent(poolId);
     if (!currentId) return;
     // Capability-gated (P4 slice, src/backend-caps.js): hot only where a
@@ -2315,6 +2550,8 @@ function maybeStopOnFallback(session, id, from, to) {
     _vsuPending, usageAnchors, usageEstimator,
     armWorkflowUsageWatcher, darkSources, darkTaintedAccounts, kickPoolEval,
     markLimitBanner, maybePoolAutoSwitch, maybePoolAutoSwitchForPool, notePoolAuthFailure,
+    onMemberReadingFresh, onMemberLoginSuccess, readingForeignForWake, memberPoolsOf, autoCliReady, lastMemberReadAt, // THE NEW-MEMBER WAKE (2026-09-08): the one edge every producer of a fresh reading takes, its login half, and the two facts the auto-cli loop asks before it spends a spawn
+    _memberWakeAt, _loginReadAt, MEMBER_WAKE_FLOOR_MS, MEMBER_READING_FRESH_MS, LOGIN_READ_FLOOR_MS, // the wake's floors are WALL-CLOCK: a suite winds them back instead of sleeping through them (same seam as _poolAutoLast)
     maybeRepinLockedModel, maybeStopOnFallback, modelsMatch,
     poolChooserForModel, poolReadCache, probeUsageForAccountKey,
     noteSessionProduced, noteTurnEnd, noteWallSignal, beforeAutoResumeFire, quotaVerdictFor, probeUsageViaSession, recordRateLimitEvent, recordCodexQuotaSignal, resolveUsageKey,

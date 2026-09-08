@@ -47,7 +47,11 @@ const { normalizeCodexRateLimit } = require(path.join(REPO, 'src/usage-routes.js
   ok('codex identity keys are backend-prefixed (email collision with a claude login must never merge quotas)', /isCodex \? 'codex:' : ''\) \+ identityKeyFor/.test(eng));
   ok("'__global_codex__' is a pseudo id, not a deleted account", /__global_codex__\.json'\) \? null/.test(eng));
   ok('codex identities learn WITHOUT the claude Max priors', /priorsFor: \(identityKey\) => String\(identityKey \|\| ''\)\.startsWith\('codex:'\) \? null : CLAUDE_MAX_PRIOR_FULL_USD/.test(eng));
-  ok('auto-cli refresh loop skips codex accounts (claude -p /usage is claude-only)', /a\.backend \|\| 'claude'\) !== 'claude'\) continue; \/\/ auto-cli/.test(read('server.js')));
+  // (the gate grew a sibling clause in 2026-09-08 — autoCliReady — so the
+  // adjacency is bounded to the same line rather than literal; what is pinned
+  // is unchanged: the backend test is one of the conditions that `continue`s
+  // BEFORE the spawn.)
+  ok('auto-cli refresh loop skips codex accounts (claude -p /usage is claude-only)', /a\.backend \|\| 'claude'\) !== 'claude'[^\n]*\) continue; \/\/ auto-cli/.test(read('server.js')));
   const um = read('src/lib/usage-meter.js');
   ok('the popup codex section renders est pairs like the claude one', /estDisplayPair\(codex\?\.fiveHour, cEstSel\?\.fiveHour\)/.test(um) && /estBar\(cp5\)/.test(um) && /estStat\(cp7\)/.test(um));
   ok('cache-efficiency bar drops the fake cache-write segment for codex-only views', /codexOnly \? \[\] : \[\{ k: t\('Cache writes'\)/.test(read('src/lib/usage-window.js')));
