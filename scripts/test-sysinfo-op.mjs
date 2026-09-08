@@ -141,5 +141,33 @@ ok(sigText.includes(require(REPO + '/src/cli-identity.js').pidAliveShellFn()),
   'signal verdict embeds the SHARED vs_alive ladder verbatim — one probe, one author, no per-site reason to get wrong');
 
 try { await dm.stop?.(); } catch { }
+// ── 2.369.68: `ps` output past 4 MiB must not empty the top-procs list ──
+{
+  const os = await import('node:os'); const fs = await import('node:fs'); const path = await import('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-fatps-'));
+  const fake = path.join(dir, 'ps');
+  // a fake `ps` printing 5.5 MB: 25k rows of ~220 chars in `ps aux` shape
+  fs.writeFileSync(fake, `#!/usr/bin/env node
+const hdr = 'USER PID %CPU %MEM VSZ RSS TTY STAT START TIME COMMAND';
+const rows = [hdr];
+for (let i = 1; i <= 25000; i++) rows.push('u ' + i + ' 0.1 0.2 100000 ' + (900000 - i) + ' ? S 18:00 0:00 /bin/proc-' + i + ' ' + 'x'.repeat(180));
+process.stdout.write(rows.join('\\n') + '\\n');
+`, { mode: 0o755 });
+  const src = fs.readFileSync(new URL('../src/sysinfo.js', import.meta.url), 'utf8');
+  ok(/PS_MAX_BUFFER = 32 \* 1024 \* 1024/.test(src) && !/maxBuffer: [48] \* 1024 \* 1024/.test(src), 'every ps call carries the 32 MiB bound (the 4/8 MiB literals are gone)');
+  const { execFileSync } = await import('node:child_process');
+  const run = (buf) => execFileSync(process.execPath, ['-e', `
+    const cp = require('node:child_process'); const orig = cp.execFile;
+    cp.execFile = (cmd, args, opts, cb) => orig(cmd, args, { ...opts, maxBuffer: ${buf} }, cb);
+    const si = require(${JSON.stringify(path.resolve('src/sysinfo.js'))});
+    si.read(process.cwd()).then((r) => { console.log(JSON.stringify({ n: (r.procs || []).length, pid: r.procs?.[0]?.pid, rss: r.procs?.[0]?.rss })); });
+  `], { env: { ...process.env, PATH: dir + ':' + process.env.PATH }, encoding: 'utf8', timeout: 60000 }).trim();
+  const fixed = JSON.parse(run(32 * 1024 * 1024));
+  ok(fixed.n > 0 && Number.isFinite(fixed.rss) && fixed.pid === 1, `a 5.5 MB ps table still yields top procs (${fixed.n} rows, top pid ${fixed.pid})`);
+  const old = JSON.parse(run(4 * 1024 * 1024));
+  ok(old.n === 0, 'NEGATIVE CONTROL: the old 4 MiB bound turns the same table into an EMPTY list (the gate-red shape)');
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);
 process.exit(fail ? 1 : 0);
