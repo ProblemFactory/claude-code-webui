@@ -139,6 +139,12 @@ function captureRateLimitEvent({ cacheDir, key, identityIds, ev, now = Date.now(
       try { const c = JSON.parse(fs.readFileSync(fileFor(id), 'utf-8')) || {}; if ((Number(c.fetchedAt) || 0) > baseAt) { baseAt = Number(c.fetchedAt) || 0; base = c; } } catch { }
     }
     const cache = applyTo(base ? { ...base } : {});
+    // NOTE (r2): the established window is a fact about WHICH ACCOUNT THIS FILE
+    // IS, and this producer used to have to rescue it by hand (the
+    // freshest-sibling base above is chosen for its READINGS, so writing it
+    // through would let a sibling erase this key's window). It now lives in a
+    // sidecar that no reading producer writes — see windowSidecarName in
+    // src/reading-lag.js for why a hand-written preserve list was the bug.
     if (reading) {
       cache.fetchedAt = now; cache.source = source || 'rate-limit-event';
       // PROVENANCE (2026-09-07): did the OTel observation for the session that

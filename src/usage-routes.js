@@ -493,6 +493,29 @@ async function refreshViaCliPanel(key) {
         });
       }
     } catch { }
+    // ESTABLISH THE ACCOUNT'S OWN WINDOW (inc-mts8a8mr-ulmm). This producer is
+    // the only one whose KEY and whose CREDENTIAL DIR are the same decision
+    // (see the header above), so it is the only one entitled to say "this is
+    // the window `key`'s buckets are counted in". Every session-attributed
+    // producer is then checked AGAINST it (src/reading-lag.js ②) instead of
+    // being allowed to redefine the account by writing a foreign window into
+    // `sevenDay.resetsAt` — which is exactly what a mis-filed reading does, and
+    // why the established window may never be read back out of that field.
+    // It is written to a SIDECAR beside the cache, never into `merged` (r2,
+    // reproduced): this object is rebuilt wholesale by the statusline hook
+    // every 8 s, by the bare-token ⟳ and by the codex snapshot writer, and a
+    // field there survives only while every one of them remembers to carry it.
+    // One legitimate statusline render deleted every established window on the
+    // instance and replayed the incident. See windowSidecarName.
+    try {
+      const { windowOf, windowSidecarName } = require('./reading-lag.js');
+      const w = windowOf(merged);
+      if (w.sevenDay || w.fiveHour || Object.keys(w.scoped).length) {
+        const wf = path.join(USAGE_CACHE_DIR, windowSidecarName(key));
+        fs.writeFileSync(wf + '.tmp', JSON.stringify({ ...w, at: Date.now(), source: 'on-demand' }));
+        fs.renameSync(wf + '.tmp', wf);
+      }
+    } catch { }
     fs.writeFileSync(f + '.tmp', JSON.stringify(merged)); fs.renameSync(f + '.tmp', f);
     if (isGlobal) { _rateLimitCache = merged; writeUsageCache(); }
     else _accountUsage[key] = { ...merged, name: acctMeta.name, email: acctMeta.email };

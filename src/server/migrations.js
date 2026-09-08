@@ -83,6 +83,50 @@ function create({ rootDir, serverNotice }) {
       },
     },
     {
+      id: '2026-09-refile-readings-by-window',
+      note: "the readings-by-slot repair could only act where a member's own credential file DATED its death — one member on this instance — so every reading mis-filed BETWEEN TWO LOGGED-IN accounts survived it (its own header calls that the silent half). A weekly reset is an account fingerprint, so those entries can be proven foreign and re-filed by their window: re-attributes or archives-with-a-reason the anchors whose weekly phase is not their stream's, rescues a cache snapshot carrying another account's window, drops the learned rates, and SEEDS each account's own window so the live window guard is armed on this boot instead of on the next panel refresh. Since r4 it moves PER BUCKET — an anchor is a snapshot of a usage-cache FILE and that file has two writers, so a mis-keyed reading leaves a record that is itself a MIX (another account's 7d on top of this stream's own model-scoped bucket); measured on a copy of this instance, 444 of the 476 re-files were that shape, and moving them whole wrote another member's Fable bucket into the target's cache, which is what accountRemaining / weeklyDeadline / bucketRems read.",
+      run() {
+        // DEFERRED (2.369.73 integration): the r4 verifier showed the cache half of
+        // this repair keys on the stream's DOMINANT account and never seeds or
+        // repairs `__global__` (same identity per identityKeyFor), so one sweep
+        // re-poisons the stream it cleaned. The LIVE guard (reading-lag + the
+        // statusline sidecar) ships now; the repair ships under a NEW id once the
+        // per-key cache half (round 5) clears review. Returning marks THIS id
+        // applied on purpose — the r5 registration must carry a different id.
+        if (!process.env.VIBESPACE_REPAIR_BY_WINDOW) {
+          console.log('[migrate] readings-by-window: DEFERRED — the per-key cache half is not yet shipped (r5); the live window guard is active, the historical re-file runs under the next id');
+          return { deferred: true };
+        }
+        const { repairByWindow } = require('../reading-repair.js');
+        // Candidates to RECEIVE a re-filed reading are the CURRENT roster: a
+        // removed subscription cannot hold readings, and on this instance a
+        // removed account shares a live one's weekly phase — counting it would
+        // make every genuinely re-filable entry ambiguous. Read straight off
+        // disk (this runs before any AccountManager exists).
+        let roster = null;
+        try {
+          const st = JSON.parse(fs.readFileSync(path.join(dataDir, 'accounts.json'), 'utf-8'));
+          roster = (st?.accounts || []).filter((a) => a && a.id && a.type === 'subscription').map((a) => a.id);
+        } catch { }
+        const rep = repairByWindow({ dataDir, roster, id: '2026-09-refile-readings-by-window' });
+        const a = rep.anchors, c = rep.caches;
+        console.log('[migrate] readings-by-window:', JSON.stringify({
+          identities: rep.identities.length, receivers: rep.identities.filter((x) => x.canReceive).length,
+          anchors: a, caches: c,
+        }));
+        // A dropped BUCKET is its own repaired thing: 443 of this instance's 444
+        // partial moves carry no whole-record action at all, so counting only
+        // records would report "nothing happened" about the half of the repair
+        // that touches the model caps the pool decides on.
+        const touched = (a?.refiled || 0) + (a?.archived || 0) + (a?.stripped || 0) + (c?.foreign || 0) + (c?.scopedStripped || 0);
+        if (touched) {
+          try {
+            serverNotice?.('readings-window-repaired', `Quota bookkeeping repaired: ${touched} reading(s) whose usage window belongs to a different account were re-filed, split or archived to data/archive/ (a pool switch had filed them on the account a session was pointed at, not the one whose credentials answered). Panels and the usage estimator re-derive from the cleaned data.`, { level: 'info' });
+          } catch { }
+        }
+      },
+    },
+    {
       id: '2026-08-archive-dormant-task-plans',
       note: 'dormant checklist plan arrays (feature removed 2.121.0) → data/archive/',
       run() {

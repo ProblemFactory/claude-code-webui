@@ -136,7 +136,12 @@ fs.rmSync(dir, { recursive: true, force: true });
   const engCode = eng.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
   ok(!/\borgVerifiedKey\b/.test(engCode), '⑥ REFUTED AND REMOVED: no executable line calls orgVerifiedKey — nothing may key a reading on the observed org (the comments keep the record)');
   ok(/function corroborateReading\(session, key, what\)[\s\S]{0,800}observedOrgFor\?\.\(session\?\.claudeSessionId\)/.test(eng), '⑥ the observation survives as CORROBORATION: same query, logs + telemetry, no return into the key');
-  ok(/const slot = ev\.status === 'rejected' \? rejectionSlotFor\(session\) : readingSlotFor\(session\);/.test(eng), '⑥ rate_limit_event: rejection AND reading both resolve a credential slot (turn-pinned twins)');
+  // 2026-09-08 (inc-mts8a8mr-ulmm): the READING half also hands its own window
+  // to the resolver (the lag shadow is strictly additional evidence about which
+  // credentials produced it), so the pin allows the extra arguments while still
+  // requiring the two resolvers and the same rejected/allowed split.
+  ok(/const slot = ev\.status === 'rejected' \? rejectionSlotFor\(session\) : readingSlotFor\(session[^;]*\);/.test(eng), '⑥ rate_limit_event: rejection AND reading both resolve a credential slot (turn-pinned twins)');
+  ok(/const target = guardReadingTarget\(key, win, \{ session/.test(eng) && /if \(!target\) return;/.test(eng), '⑥ …and a READING is additionally checked against the target\'s own established window before it is written (never a rejection: its resetsAt is often a bounded guess)');
   ok(/const key = slot\.key \|\| readingSlotFor\(session\)\.key \|\| usageCacheKeyFor\(session\)/.test(eng), '⑥ limit-banner marks land on the slot too (same physics, same resolver)');
   ok(/function resolveUsageKey\(session\)[\s\S]{0,900}sessionBillingMember\(session, acct\)\.id/.test(eng), '⑥ VALUES follow the credential slot as well — there is no longer a "reading member" different from the billing member');
   ok(/\(prev\.source \|\| 'unknown'\) === \(g\.cache\.source \|\| 'unknown'\)/.test(eng), '⑥ calib pairs are same-source (cross-source offset is attribution, not prediction error — mirrors extractPairs 2.340.0)');

@@ -982,7 +982,11 @@ if (!probe) {
   // credential slot too — turn-pinned by its own resolver. Keeping the two
   // halves on different keys is exactly what let a wiped member "report" for
   // five days. The refuted routing (orgVerifiedKey) may not survive in code.
-  ok('WIRING: BOTH a rejection and a reading are keyed to the credential slot, each turn-pinned', /const slot = ev\.status === 'rejected' \? rejectionSlotFor\(session\) : readingSlotFor\(session\);[\s\S]{0,300}const key = \(slot && slot\.key\) \|\| usageCacheKeyFor\(session\);/.test(eng) && /const slot = rejectionSlotFor\(session\);\s*\n\s*const key = slot\.key \|\| readingSlotFor\(session\)\.key \|\| usageCacheKeyFor\(session\)/.test(eng));
+  // 2026-09-08 (inc-mts8a8mr-ulmm): the reading half now ALSO hands its own
+  // window to the resolver — the lag shadow and the window guard are strictly
+  // ADDITIONAL evidence about which credentials produced it, so the pin widens
+  // to allow the extra arguments while still requiring the same two resolvers.
+  ok('WIRING: BOTH a rejection and a reading are keyed to the credential slot, each turn-pinned', /const slot = ev\.status === 'rejected' \? rejectionSlotFor\(session\) : readingSlotFor\(session[^;]*\);[\s\S]{0,300}key = \(slot && slot\.key\) \|\| usageCacheKeyFor\(session\);/.test(eng) && /const slot = rejectionSlotFor\(session\);\s*\n\s*const key = slot\.key \|\| readingSlotFor\(session\)\.key \|\| usageCacheKeyFor\(session\)/.test(eng));
   ok('WIRING: the refuted resolver is GONE from executable code (comments keep the record)', !/\borgVerifiedKey\b/.test(engCode) && /REFUTED AND REMOVED: `orgVerifiedKey/.test(eng));
   // wallSlotFor is the FRESH reading; it now has exactly THREE readers —
   // wallKeyFor, the rejection pin's no-signal fallback, and the reading pin's

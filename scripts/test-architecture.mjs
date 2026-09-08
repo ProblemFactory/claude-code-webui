@@ -55,6 +55,11 @@ const PURE = new Set(['src/plugin-manifest.js', 'src/account-pool-auto.js', 'src
   // the instance default is a NEW-session default" — ONE decision for the spawn
   // (ws-create) and for what the client is allowed to send (session-lifecycle).
   'src/resume-continuity.js',
+  // WHOSE NUMBERS ARE THESE (inc-mts8a8mr-ulmm): the lag shadow + the window
+  // identity guard. PURE because the shipped statusline tool carries a VERBATIM
+  // mirror of its core block (a checkout-less host cannot require src/), and a
+  // rule with an import is a rule that cannot be mirrored.
+  'src/reading-lag.js',
   'src/rewind-ops.js', // claude tombstone / codex thread_rolled_back → ONE 'rewound' meta op; index-stable marking, no I/O
   'src/turn-state.js', // authoritative turn state: the live consumer and the attach reconciliation must decide identically
   'src/opencode-remote.js', // S9 remainder: the OpenCode-serve OP TABLE + runOpencodeOp — one definition the local rung, the agentd op and the shipped ssh script all obey

@@ -121,20 +121,53 @@ function backfillFromJournal(text, transitions) {
 }
 
 // ── ② usage-cache repair ────────────────────────────────────────────────────
+// The established window is NOT in this list, and not in the snapshot at all
+// (r2): it is a fact about WHO the account is, which is exactly why it may not
+// live in the object every reading producer rewrites. It has its own sidecar —
+// see windowSidecarName in src/reading-lag.js.
 const IDENTITY_FIELDS = ['orgUuid', 'orgName', 'orgEmail', 'email', 'name'];
 /** Rebuild a cache snapshot from a surviving anchor (a REAL past reading of
  *  this account, correctly dated) — identity fields are carried over because
- *  they are facts about WHO the account is, not readings. */
-function _cacheFromAnchor(anchor, prev) {
+ *  they are facts about WHO the account is, not readings.
+ *
+ *  `window` (r4) = the account's OWN established window, when the caller has
+ *  one. Every bucket it can judge must AGREE with it or it does not go into
+ *  this account's cache: `accountRemaining`, `weeklyDeadline` and `bucketRems`
+ *  all read `cache.scopedWeekly`, so writing another member's model-scoped
+ *  bucket here is a misattributed reading that can flip a pool switch — the
+ *  2.305.0 class. Omitted (the by-slot repair has no window to check against)
+ *  ⇒ nothing is filtered, exactly as before. */
+function _cacheFromAnchor(anchor, prev, window = null) {
   const out = {};
   for (const k of IDENTITY_FIELDS) if (prev && prev[k] !== undefined) out[k] = prev[k];
   const b = anchor.buckets || {};
+  const own = (name) => (window && window.scoped ? window.scoped[String(name || '').toLowerCase()] : null);
+  const agrees = (resetsAt, phase) => !window || phase == null || !(Number(resetsAt) > 0) || weeklyNear(resetsAt, phase) !== false;
   if (b.fiveHour) out.fiveHour = { utilization: b.fiveHour.u, resetsAt: b.fiveHour.resetsAt || 0, status: 'allowed' };
-  if (b.sevenDay) out.sevenDay = { utilization: b.sevenDay.u, resetsAt: b.sevenDay.resetsAt || 0, status: 'allowed' };
-  if (Array.isArray(b.scopedWeekly) && b.scopedWeekly.length) {
-    out.scopedWeekly = b.scopedWeekly.map((s) => ({ name: s.name, utilization: s.u, resetsAt: s.resetsAt || 0 }));
-    const asOf = b.scopedWeekly.find((s) => s.asOf)?.asOf;
+  if (b.sevenDay && agrees(b.sevenDay.resetsAt, window && window.sevenDay)) out.sevenDay = { utilization: b.sevenDay.u, resetsAt: b.sevenDay.resetsAt || 0, status: 'allowed' };
+  const sw = (Array.isArray(b.scopedWeekly) ? b.scopedWeekly : []).filter((s) => s && agrees(s.resetsAt, own(s.name)));
+  if (sw.length) {
+    out.scopedWeekly = sw.map((s) => ({ name: s.name, utilization: s.u, resetsAt: s.resetsAt || 0 }));
+    const asOf = sw.find((s) => s.asOf)?.asOf;
     if (asOf) out.scopedFetchedAt = asOf;
+  } else if (window && Array.isArray(prev && prev.scopedWeekly)) {
+    // NEVER CLOBBER A KNOWN SCOPED BUCKET WITH AN EMPTY ANSWER (r4). Scoped
+    // buckets only ever come from the panel, so most anchors state none — and
+    // once the per-bucket move can leave the newest own-window record without
+    // one, a rebuild that simply replaces the snapshot DELETES the account's
+    // model cap from the object the pool reads. That is the 2.70.0
+    // Fable-vanishing class, which is exactly why all three live writers
+    // preserve-merge this field; the rebuild now does the same, filtered by the
+    // account's own window so the preserve can never carry a foreign bucket
+    // forward. Only when a `window` is supplied: `repairUsageCaches` (the
+    // by-slot repair) hands a snapshot written AFTER the account's login died,
+    // which is provably foreign in whole, and has no window to filter with.
+    const keep = prev.scopedWeekly.filter((s) => s && s.name && agrees(s.resetsAt, own(s.name)));
+    if (keep.length) {
+      out.scopedWeekly = keep.map((s) => ({ name: s.name, utilization: s.utilization, resetsAt: s.resetsAt || 0 }));
+      if (typeof prev.scopedFetchedAt === 'number') out.scopedFetchedAt = prev.scopedFetchedAt;
+      out.scopedPreservedBy = 'window-repair';   // this half is older than `fetchedAt`, and says so
+    }
   }
   out.fetchedAt = anchor.fetchedAt;
   out.source = anchor.source || 'unknown';
@@ -427,4 +460,433 @@ function findJournal(dataDir) {
   return null;
 }
 
-module.exports = { repairReadings, deathMarkers, isForeign, backfillFromJournal, findJournal, repairUsageCaches, repairAnchors, repairAttribution, sessionKeysFor, _sessionKeyMap };
+// ── ④ THE WINDOW REPAIR (inc-mts8a8mr-ulmm, 2026-09-08) ─────────────────────
+// The 2026-09-07 repair could only act where a member's own credential file
+// DATED its death — on this instance that was ONE member (`members:1` in the
+// migration's own log), so every entry mis-filed BETWEEN TWO LOGGED-IN members
+// survived it, invisible by construction: that is the "silent half" its own
+// header names.
+//
+// The reading itself carries the evidence that repair lacked. A weekly reset is
+// an account property — measured over this instance's whole corpus (6 634
+// anchors, 30 days, 7 live subscriptions) each identity has exactly ONE weekly
+// reset phase, stable across the period, and the seven are all distinct; a roll
+// moves `resetsAt` by exactly one week, so the PHASE survives it. An entry
+// whose weekly phase is not its stream's is therefore provably not that
+// account's, whatever the account's login was doing at the time.
+//
+// STRICTLY EVIDENCE-LED, like ②: an identity establishes its window only from
+// its OWN on-demand (panel) readings — the producer whose key and credential
+// dir are one decision — and only with enough of them to be a fact rather than
+// a coincidence. Candidates for RE-FILING are further restricted to identities
+// whose account is still on the roster: a removed subscription cannot receive
+// readings, and on this instance one removed account shares PandyMax's weekly
+// phase, which would make every genuinely re-filable entry ambiguous.
+const MIN_OWN_READINGS = 5;   // fewer than this is a coincidence, not a window
+const OWN_DOMINANCE = 0.9;    // a stream whose own panel readings disagree with themselves establishes nothing
+const { weeklyNear, weeklyPhase, windowOf, windowFingerprint, windowSidecarName, decideReadingTarget } = require('./reading-lag.js');
+
+/** Tally one weekly `resetsAt` into a phase histogram, merging the ±60 s wobble
+ *  the panel and the event stream spell the SAME window with. Keeps the newest
+ *  actual value per phase so a rolled window is quoted at its current instant. */
+function _tallyPhase(hist, resetsAt, at) {
+  let hit = null;
+  for (const p of hist.keys()) if (weeklyNear(p, resetsAt)) { hit = p; break; }
+  const k = hit == null ? weeklyPhase(resetsAt) : hit;
+  const cur = hist.get(k) || { n: 0, resetsAt, at: 0 };
+  cur.n++;
+  if ((at || 0) >= cur.at) { cur.at = at || 0; cur.resetsAt = resetsAt; }
+  hist.set(k, cur);
+  return cur;
+}
+/** The dominant phase of a histogram, or null when the evidence is too thin or
+ *  too split to be a fingerprint (the same two thresholds everywhere). */
+function _dominant(hist) {
+  const total = [...hist.values()].reduce((a, b) => a + b.n, 0);
+  if (!total) return null;
+  const [phase, top] = [...hist.entries()].sort((a, b) => b[1].n - a[1].n)[0];
+  if (top.n < MIN_OWN_READINGS || top.n / total < OWN_DOMINANCE) return null;
+  return { phase, resetsAt: top.resetsAt, n: top.n, total };
+}
+
+/** identityKey → {window, accountId, phase, n, total} from that stream's OWN
+ *  on-demand readings. `roster` (account ids) decides who may RECEIVE a
+ *  re-filed entry; every stream is still a SUBJECT of the check.
+ *
+ *  THE SCOPED HALF IS EVIDENCE TOO (r4, reproduced on a copy of this instance).
+ *  The first spelling established only `{sevenDay, fiveHour:null, scoped:{}}` —
+ *  it THREW AWAY the model-scoped weekly buckets, which are the other half of
+ *  what a reading states about itself. That is not a smaller check, it is a
+ *  BLIND one: 444 of this instance's anchors carry a foreign 7d ON TOP OF the
+ *  stream's OWN Fable bucket (the shape a mis-keyed statusline write makes —
+ *  it rewrites {5h,7d} from its payload and PRESERVES the file's existing
+ *  scopedWeekly), so deciding on the 7d alone moved 443 records — Fable bucket
+ *  and all — onto an account whose Fable window they contradict, and
+ *  `repairCachesByWindow` then rebuilt a cache from one of them. The repair
+ *  was manufacturing the 2.305.0 scoped-bucket misattribution it exists to
+ *  clean up.
+ *  Measured on the same corpus, a scoped weekly is exactly as much of an
+ *  account fingerprint as the 7d: every identity's own on-demand Fable phase
+ *  is its own 7d phase (32340/32400, 532740/532800, 320340/320400/320399,
+ *  143940/144000/143999, 557999/558000, 579540/579600, 493140/493200 — every
+ *  cluster inside the ±120 s tolerance), and the seven are distinct. So each
+ *  scoped bucket gets the SAME evidence-led treatment as the 7d: its own
+ *  histogram over the stream's own panel readings, and it establishes nothing
+ *  unless it clears MIN_OWN_READINGS and OWN_DOMINANCE on its own. */
+function establishedWindows(anchorFiles, { roster = null } = {}) {
+  const out = new Map();
+  for (const f of anchorFiles) {
+    const buckets = new Map();   // representative 7d phase → {n, resetsAt, at}
+    const scoped = new Map();    // lowercased bucket name → its own histogram
+    const accts = new Map();
+    for (const r of f.rows) {
+      if (!r) continue;
+      accts.set(r.accountId || '__global__', (accts.get(r.accountId || '__global__') || 0) + 1);
+      if (r.source !== 'on-demand') continue;
+      const ra = r.buckets?.sevenDay?.resetsAt;
+      if (ra) _tallyPhase(buckets, ra, r.fetchedAt);
+      for (const s of (Array.isArray(r.buckets?.scopedWeekly) ? r.buckets.scopedWeekly : [])) {
+        if (!s || !s.name || !(Number(s.resetsAt) > 0)) continue;
+        const nm = String(s.name).toLowerCase();   // windowOf lowercases too — one namespace
+        if (!scoped.has(nm)) scoped.set(nm, new Map());
+        _tallyPhase(scoped.get(nm), Number(s.resetsAt), r.fetchedAt);
+      }
+    }
+    const top = _dominant(buckets);
+    if (!top) continue;
+    const accountId = [...accts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+    const sc = {};
+    const scMeta = {};
+    for (const [nm, hist] of scoped) {
+      const d = _dominant(hist);
+      if (!d) continue;                        // thin or split ⇒ no claim about this bucket
+      sc[nm] = d.resetsAt; scMeta[nm] = { phase: d.phase, n: d.n, of: d.total };
+    }
+    out.set(f.name.replace(/^anchors-|\.ndjson$/g, ''), {
+      file: f, phase: top.phase, n: top.n, total: top.total, accountId, scoped: scMeta,
+      window: { sevenDay: top.resetsAt, fiveHour: null, scoped: sc },
+      canReceive: !roster || roster.includes(accountId),
+    });
+  }
+  return out;
+}
+
+/** ONE bucket's verdict, asked with a window carrying NOTHING BUT that bucket,
+ *  so a bucket can never speak for another one in the same record.
+ *  `target` = the identity this bucket proves it belongs to (the stream itself
+ *  when it agrees), or null when nothing can be proven. */
+function _bucketVerdict(ident, bucketWindow, allWindows) {
+  const d = decideReadingTarget({ key: ident, readingWindow: bucketWindow, windows: allWindows });
+  return { ...d, target: d.action === 'write' ? ident : d.action === 'refile' ? d.key : null };
+}
+/** WHY THIS BUCKET DID NOT TRAVEL. `decideReadingTarget`'s own `reason` answers
+ *  "does this bucket belong to the stream it is sitting in" — a DIFFERENT
+ *  question, so quoting it here would file a line saying "window matches the
+ *  target" under a bucket that was dropped (measured on this instance: 443 of
+ *  444 drop lines said exactly that). A reason string is an assertion about the
+ *  system, and the assertion this line makes is about the DESTINATION. */
+function _dropReason(v, dest, ident) {
+  if (!v) return `states no weekly window, so it cannot be shown to be ${dest}'s`;
+  if (v.target === ident) return `its weekly window is ${ident}'s, not ${dest}'s — it did not travel with the record`;
+  if (v.target) return `its weekly window is ${v.target}'s, not ${dest}'s — it did not travel with the record`;
+  return `its weekly window matches no account that may receive readings, so it cannot be shown to be ${dest}'s (${v.reason})`;
+}
+
+/** Re-file or archive every anchor whose window is not its stream's, then
+ *  re-chain what that broke. A moved record is INSERTED IN TIME ORDER into the
+ *  owning stream with `prevFetchedAt`/`costSince` voided: its Δu is real for
+ *  that account but the cost interval it was measured over is not, and
+ *  `extractPairs` pairs on the explicit chain, so an unchained record teaches
+ *  nothing and breaks nothing (it is data, kept, never a forged pair).
+ *
+ *  PER BUCKET, NEVER WHOLESALE (r4, reproduced on a copy of this instance).
+ *  An anchor is a snapshot of a usage-cache FILE, and that file is written by
+ *  more than one producer: the statusline rewrites {5h, 7d} from its own
+ *  payload and PRESERVES whatever `scopedWeekly` the file already held (it has
+ *  no scoped buckets of its own — the 2.70.0 Fable-vanishing rule). So a
+ *  reading that landed on the wrong key before the window guard existed leaves
+ *  a record that is ITSELF A MIX: another account's 7d sitting on top of this
+ *  stream's own Fable bucket. Measured here: 444 such records, against 32 whose
+ *  halves are both foreign and 4466 clean ones. Handing the whole window to
+ *  `decideReadingTarget` decided on the 7d alone (the scoped half could not
+ *  even be compared, because `establishedWindows` was discarding it) and moved
+ *  443 records — Fable bucket and all — onto an account whose Fable window they
+ *  contradict; `repairCachesByWindow` then rebuilt a cache from one of them and
+ *  wrote another member's model-scoped bucket, `resetsAt` and `scopedFetchedAt`
+ *  over the target's own. `accountRemaining` / `weeklyDeadline` / `bucketRems`
+ *  all read `cache.scopedWeekly`, so the repair was manufacturing exactly the
+ *  2.305.0 scoped-bucket misattribution it exists to clean up.
+ *
+ *  Each bucket is therefore disposed of BY ITS OWN EVIDENCE:
+ *    · the PRIMARY half is {5h, 7d} — one payload, one producer, one
+ *      credential — so the 5h travels with the 7d and never alone (a 5-hour
+ *      window names a TIME, not an account, and can prove nothing by itself);
+ *    · every scoped weekly bucket is judged on its own phase;
+ *    · the RECORD follows its primary half, and carries ONLY the buckets that
+ *      agree with wherever it lands. Every other bucket is archived with its
+ *      own reason — the archive line keeps the ORIGINAL WHOLE RECORD, so
+ *      nothing is destroyed and the offline corpus can still re-derive it;
+ *    · a record with no agreeing bucket at all is archived, not moved. */
+function repairAnchorsByWindow({ anchorsDir, archiveDir, anchorFiles, windows, id, now = Date.now() }) {
+  const res = { streams: 0, refiled: 0, refiledWhole: 0, refiledPartial: 0, stripped: 0, bucketsArchived: 0, archived: 0, voided: 0, ratesReset: false, byTarget: {} };
+  const receivers = [...windows.entries()].filter(([, w]) => w.canReceive);
+  const winMap = {}; for (const [k, w] of receivers) winMap[k] = w.window;
+  const moves = new Map();  // target identityKey → [rows]
+  const archived = [];
+  const touched = new Set();
+  for (const [ident, info] of windows) {
+    const f = info.file;
+    const keep = [], gone = [];
+    for (const r of f.rows) {
+      const win = windowOf(r.buckets || {});
+      const sw = Array.isArray(r.buckets?.scopedWeekly) ? r.buckets.scopedWeekly : [];
+      const names = Object.keys(win.scoped);
+      if (!win.sevenDay && !names.length) { keep.push(r); continue; }  // no weekly evidence at all — nothing to judge
+      const all = { ...winMap, [ident]: info.window };
+      const prim = win.sevenDay ? _bucketVerdict(ident, { sevenDay: win.sevenDay, fiveHour: null, scoped: {} }, all) : null;
+      const scv = new Map();
+      for (const nm of names) scv.set(nm, _bucketVerdict(ident, { sevenDay: null, fiveHour: null, scoped: { [nm]: win.scoped[nm] } }, all));
+      // WHERE THE RECORD GOES: its primary half decides, because that is the
+      // half a producer wrote as one payload. With no primary (or an
+      // unprovable one) the record stays wherever a bucket proves it belongs,
+      // and only unanimous scoped evidence may move it.
+      let dest;
+      if (prim) dest = prim.target;
+      else {
+        const tg = [...new Set([...scv.values()].map((v) => v.target))];
+        dest = tg.length === 1 ? tg[0] : (tg.includes(ident) ? ident : null);
+      }
+      if (dest == null && [...scv.values()].some((v) => v.target === ident)) dest = ident;
+      if (dest == null) {                                    // nothing in it can be proven to belong anywhere
+        gone.push(r);
+        archived.push({ migration: id, at: now, store: 'usage-anchors', file: f.name, action: 'archived', reason: (prim || [...scv.values()][0]).reason, entry: r });
+        res.archived++;
+        continue;
+      }
+      const primKept = prim ? prim.target === dest : dest === ident;
+      const drops = [];
+      const keptScoped = [];
+      for (const s of sw) {
+        const nm = s && s.name ? String(s.name).toLowerCase() : null;
+        const v = nm ? scv.get(nm) : null;
+        if (!v) {
+          // A bucket that states no window can be neither confirmed nor
+          // refused ("no evidence ⇒ no refusal"), so it stays while the record
+          // stays — but MOVING it is a positive claim about an account it
+          // cannot be shown to belong to, and this whole class of defect is
+          // made of exactly those claims. 705 scoped entries on this instance
+          // carry no `resetsAt`, and `bucketRemaining` still reads their
+          // utilization, so they are money.
+          if (dest === ident) keptScoped.push(s);
+          else drops.push({ bucket: nm || '(unnamed)', reason: _dropReason(null, dest, ident) });
+          continue;
+        }
+        if (v.target === dest) keptScoped.push(s);
+        else drops.push({ bucket: nm, reason: _dropReason(v, dest, ident) });
+      }
+      if (!prim && dest !== ident && win.fiveHour) drops.push({ bucket: 'fiveHour', reason: `a five-hour window names a TIME, not an account, and this record states no 7-day window to travel with — it cannot be shown to be ${dest}'s` });
+      else if (prim && !primKept) drops.push({ bucket: 'sevenDay', reason: _dropReason(prim, dest, ident), alsoDropped: win.fiveHour ? ['fiveHour'] : undefined });
+      if (dest === ident) {
+        if (drops.length) {                                  // stays, stripped of what provably is not its
+          const orig = { ...r, buckets: r.buckets };         // the archive keeps the record as it was
+          r.buckets = {
+            fiveHour: primKept ? (r.buckets?.fiveHour ?? null) : null,
+            sevenDay: primKept ? (r.buckets?.sevenDay ?? null) : null,
+            scopedWeekly: keptScoped,
+          };
+          r.repairedBy = id;
+          r.strippedBuckets = drops.map((x) => x.bucket);
+          archived.push({ migration: id, at: now, store: 'usage-anchors', file: f.name, action: 'buckets-archived', to: ident, buckets: drops, entry: orig });
+          res.stripped++; res.bucketsArchived += drops.length;
+          touched.add(ident);
+        }
+        keep.push(r);
+        continue;
+      }
+      gone.push(r);
+      const tgt = windows.get(dest);
+      const row = {
+        ...r, accountId: tgt.accountId === '__global__' ? null : tgt.accountId, identityKey: dest,
+        buckets: {
+          fiveHour: primKept ? (r.buckets?.fiveHour ?? null) : null,
+          sevenDay: primKept ? (r.buckets?.sevenDay ?? null) : null,
+          scopedWeekly: keptScoped,
+        },
+        prevFetchedAt: null, elapsedSec: null, costSince: null, calib: undefined, accountIds: undefined,
+        repairedBy: id, refiledFrom: ident, refiledReason: (primKept && prim ? prim.reason : (drops[0] && drops[0].reason) || 'window'),
+        ...(drops.length ? { droppedBuckets: drops.map((x) => x.bucket) } : {}),
+      };
+      delete row.calib; delete row.accountIds;
+      (moves.get(dest) || moves.set(dest, []).get(dest)).push(row);
+      archived.push({
+        migration: id, at: now, store: 'usage-anchors', file: f.name, action: 'refiled', to: dest,
+        reason: row.refiledReason, ...(drops.length ? { buckets: drops } : {}), entry: r,
+      });
+      res.refiled++;
+      if (drops.length) { res.refiledPartial++; res.bucketsArchived += drops.length; } else res.refiledWhole++;
+      res.byTarget[dest] = (res.byTarget[dest] || 0) + 1;
+    }
+    // a stream that only had BUCKETS stripped still changed, and the report
+    // must say so — "streams: 0" about a run that rewrote a stream is the same
+    // kind of quiet lie the per-bucket counters exist to prevent
+    if (!gone.length) { if (touched.has(ident)) res.streams++; continue; }
+    res.streams++;
+    keep.sort((a, b) => (a.fetchedAt || 0) - (b.fetchedAt || 0));
+    const dropped = new Set(gone.map((r) => r.fetchedAt));
+    for (let i = 0; i < keep.length; i++) {
+      const r = keep[i];
+      if (r.prevFetchedAt == null || !dropped.has(r.prevFetchedAt)) continue;
+      const prev = i > 0 ? keep[i - 1] : null;
+      r.prevFetchedAt = prev ? prev.fetchedAt : null;
+      r.elapsedSec = prev ? Math.round((r.fetchedAt - prev.fetchedAt) / 1000) : null;
+      r.costSince = null;
+      r.repairedBy = id;
+      res.voided++;
+    }
+    f.rows = keep;
+    touched.add(ident);
+  }
+  for (const [ident, rows] of moves) {
+    const tgt = windows.get(ident);
+    if (!tgt) continue;
+    tgt.file.rows = [...tgt.file.rows, ...rows].sort((a, b) => (a.fetchedAt || 0) - (b.fetchedAt || 0));
+    touched.add(ident);
+  }
+  if (!touched.size) return res;
+  _appendArchive(archiveDir, 'readings-window-anchors.ndjson', archived);
+  for (const ident of touched) {
+    const f = windows.get(ident).file;
+    _writeAtomic(f.file, f.rows.map((r) => JSON.stringify(r)).join('\n') + (f.rows.length ? '\n' : ''));
+  }
+  const rates = path.join(anchorsDir, 'rates.json');
+  const cur = _readJson(rates);
+  if (cur) {
+    _appendArchive(archiveDir, 'readings-window-rates.ndjson', [{ migration: id, at: now, store: 'usage-anchors/rates.json', reason: 'learned from pairs that included readings of another account — re-learned from the cleaned set', entry: cur }]);
+    try { fs.unlinkSync(rates); } catch { }
+    res.ratesReset = true;
+  }
+  return res;
+}
+
+/** Does every weekly bucket this record states, that the account has a phase
+ *  for, agree with that account? (r4 — `true` only when NOTHING contradicts;
+ *  a bucket the account has no established phase for is not evidence either
+ *  way and does not veto.) */
+function _recordAgreesWholly(r, window) {
+  const b = r.buckets || {};
+  if (!(Number(b.sevenDay?.resetsAt) > 0) || weeklyNear(b.sevenDay.resetsAt, window.sevenDay) !== true) return false;
+  for (const s of (Array.isArray(b.scopedWeekly) ? b.scopedWeekly : [])) {
+    if (!s || !s.name || !(Number(s.resetsAt) > 0)) continue;
+    const own = window.scoped ? window.scoped[String(s.name).toLowerCase()] : null;
+    if (own == null) continue;
+    if (weeklyNear(s.resetsAt, own) === false) return false;
+  }
+  return true;
+}
+
+/** Seed the account's own window into every roster account's sidecar, and
+ *  rescue a cache whose CURRENT snapshot carries another account's window.
+ *  The seed is what ARMS the live guard on the upgrade: the window is stamped
+ *  only by the panel refresh, so without it the guard would stay inert on every
+ *  account until its next `claude -p /usage` — up to the refresher's whole
+ *  wandering 30-60 min idle interval, on exactly the machine we have just
+ *  proven has the bug. Since r4 the seeded sidecar carries the SCOPED phases
+ *  too, so the live guard is armed on the model-scoped buckets as well — the
+ *  live panel producer has always stamped them (usage-routes writes
+ *  `windowOf(merged)`), the migration was the half that dropped them.
+ *
+ *  THE REBUILD MAY NOT IMPORT A FOREIGN BUCKET (r4, reproduced). `best` used to
+ *  be "the newest record whose 7d is ours", which after the wholesale re-file
+ *  was frequently a record carrying ANOTHER member's Fable bucket — and
+ *  `_cacheFromAnchor` copied it, `resetsAt` and `scopedFetchedAt` and all, over
+ *  this account's own. Measured on a copy of this instance's stores AFTER the
+ *  r3 migration, the `best` for one of the seven members was exactly such a row
+ *  (`refiledFrom` naming the other member). So `best` is now chosen only among
+ *  records ALL of whose judgeable weekly buckets agree, and `_cacheFromAnchor`
+ *  filters on the window as a second, independent barrier. */
+function repairCachesByWindow({ cacheDir, archiveDir, windows, id, now = Date.now() }) {
+  const res = { seeded: 0, foreign: 0, restored: 0, scopedStripped: 0 };
+  const byAcct = new Map();
+  for (const [ident, w] of windows) if (w.canReceive && w.accountId) byAcct.set(w.accountId, { ident, ...w });
+  for (const [acct, w] of byAcct) {
+    const fp = path.join(cacheDir, String(acct).replace(/[^\w.-]/g, '_') + '.json');
+    const cur = _readJson(fp);
+    if (!cur) continue;
+    const snap = windowOf(cur);
+    let next = cur;
+    if (snap.sevenDay && weeklyNear(snap.sevenDay, w.window.sevenDay) === false) {
+      res.foreign++;
+      _appendArchive(archiveDir, 'readings-window-usage-cache.ndjson', [{
+        migration: id, at: now, store: 'usage-cache', key: acct,
+        reason: `snapshot window ${windowFingerprint(snap)} is not this account's (${windowFingerprint(w.window)})`,
+        entry: cur,
+      }]);
+      // the newest reading of this account that is ENTIRELY its own window
+      let best = null;
+      for (const r of w.file.rows) {
+        if (!_recordAgreesWholly(r, w.window)) continue;
+        if (!best || (r.fetchedAt || 0) > (best.fetchedAt || 0)) best = r;
+      }
+      if (best) { next = _cacheFromAnchor(best, cur, w.window); res.restored++; }
+      else {
+        next = {};
+        for (const k of IDENTITY_FIELDS) if (cur[k] !== undefined) next[k] = cur[k];
+        next.repairedBy = id;
+      }
+    } else {
+      // THE 7d AGREES BUT A SCOPED BUCKET DOES NOT (r4). The rebuild branch
+      // above never fires for this shape, so before r4 nothing on any path
+      // could clean it — and the pool reads `cache.scopedWeekly` directly. The
+      // fresh, correct 7d is kept and only the provably foreign bucket is
+      // stripped: a whole rebuild from an older anchor would throw away good
+      // numbers to fix a bad one.
+      const bad = (Array.isArray(cur.scopedWeekly) ? cur.scopedWeekly : []).filter((s) => {
+        const own = s && s.name ? w.window.scoped[String(s.name).toLowerCase()] : null;
+        return own != null && Number(s.resetsAt) > 0 && weeklyNear(s.resetsAt, own) === false;
+      });
+      if (bad.length) {
+        _appendArchive(archiveDir, 'readings-window-usage-cache.ndjson', [{
+          migration: id, at: now, store: 'usage-cache', key: acct, action: 'scoped-stripped',
+          reason: `model-scoped bucket(s) ${bad.map((s) => `${s.name}@${weeklyPhase(s.resetsAt)}`).join(', ')} are not this account's (${windowFingerprint(w.window)}) — the pool reads scopedWeekly for accountRemaining/weeklyDeadline/bucketRems`,
+          entry: cur,
+        }]);
+        const keptSw = cur.scopedWeekly.filter((s) => !bad.includes(s));
+        next = { ...cur, scopedWeekly: keptSw };
+        if (!keptSw.length) delete next.scopedFetchedAt;
+        next.repairedBy = id;
+        res.scopedStripped += bad.length;
+      }
+    }
+    // SEED THE SIDECAR, not the snapshot (r2): the snapshot is rebuilt whole by
+    // every reading producer, so a window written here would be deleted by the
+    // next statusline render — which is the defect this migration exists to
+    // repair the data for. Any legacy in-snapshot copy is stripped in passing.
+    delete next.ownWindow;
+    _writeAtomic(path.join(cacheDir, windowSidecarName(acct)), JSON.stringify({ ...w.window, at: now, source: 'on-demand', seededBy: id }));
+    res.seeded++;
+    _writeAtomic(fp, JSON.stringify(next));
+  }
+  return res;
+}
+
+/** THE window repair. Same contract as repairReadings: archive-never-destroy,
+ *  every archived row carries a reason, idempotent, atomic. */
+function repairByWindow({ dataDir, roster = null, id = 'readings-by-window', now = Date.now() }) {
+  const archiveDir = path.join(dataDir, 'archive');
+  const anchorsDir = path.join(dataDir, 'usage-anchors');
+  const anchorFiles = _readAnchorFiles(anchorsDir);
+  const windows = establishedWindows(anchorFiles, { roster });
+  const report = {
+    id, at: now,
+    // `scoped` names each model-scoped weekly phase this identity established
+    // from its OWN panel readings — the half r3 discarded, and the reason its
+    // re-files could contradict the target they were filed onto.
+    identities: [...windows.entries()].map(([k, w]) => ({ key: k, accountId: w.accountId, phase: w.phase, own: w.n, of: w.total, canReceive: w.canReceive, scoped: w.scoped })),
+    anchors: repairAnchorsByWindow({ anchorsDir, archiveDir, anchorFiles, windows, id, now }),
+    caches: null,
+  };
+  report.caches = repairCachesByWindow({ cacheDir: path.join(dataDir, 'usage-cache'), archiveDir, windows, id, now });
+  return report;
+}
+
+module.exports = { repairReadings, deathMarkers, isForeign, backfillFromJournal, findJournal, repairUsageCaches, repairAnchors, repairAttribution, sessionKeysFor, _sessionKeyMap, repairByWindow, establishedWindows, repairAnchorsByWindow, repairCachesByWindow, _cacheFromAnchor, _recordAgreesWholly, MIN_OWN_READINGS, OWN_DOMINANCE };
