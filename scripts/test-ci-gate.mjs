@@ -471,6 +471,41 @@ console.log('\n§6 machine-global fixtures + no-verdict honesty');
       '…and still writes no green/red marker');
   } finally { try { fs.unlinkSync(probe); } catch {} }
 
+  // MARKER KINDS HAVE THREE READERS. ci.mjs writes them and names them in one
+  // regex, GET /api/ci-heavy (src/server/ops-routes.js) re-spells that regex to
+  // serve them, and the Diagnostics report renders the verdict words. `skipped`
+  // was added in round 2, and a kind that only ever reaches the CLI is a
+  // verdict the UI silently DROPS — the absence looks exactly like "nobody has
+  // pushed lately", which is the failure mode invariant ⑪ exists to kill. So the
+  // API leg is derived from ci.mjs's own list (a FIFTH kind added tomorrow has
+  // to be served too), while the RENDERER leg names `skipped` on purpose: `pid`
+  // is not a verdict there (an in-flight run is the RUNNING row), so "render
+  // every kind" would be the wrong rule.
+  {
+    // ONE detector, used by the real files and by the controls below — a
+    // negative control has to exercise the code under test, not a paraphrase.
+    const readsKind = (src, k) => new RegExp(`\\(([a-z|]*\\|)?${k}(\\||\\))`).test(src);
+    const ciSrc = fs.readFileSync(path.join(REPO, 'scripts', 'ci.mjs'), 'utf-8');
+    const kinds = (/\\\.\(([a-z|]+)\)\$/.exec(ciSrc) || [, ''])[1].split('|').filter(Boolean);
+    ok(kinds.includes('green') && kinds.includes('red') && kinds.includes('skipped') && kinds.includes('pid'),
+      `ci.mjs reads the marker kinds it writes (${kinds.join(', ') || 'NONE FOUND — the regex moved'})`);
+    const ops = fs.readFileSync(path.join(REPO, 'src', 'server', 'ops-routes.js'), 'utf-8');
+    const missing = kinds.filter((k) => !readsKind(ops, k));
+    ok(!missing.length, `GET /api/ci-heavy reads every marker kind ci.mjs writes (missing: ${missing.join(', ') || 'none'})`);
+    const rendersSkipped = (src) => /'skipped'/.test(src) && /SKIP/.test(src);
+    const flows = fs.readFileSync(path.join(REPO, 'src', 'lib', 'setup-flows.js'), 'utf-8');
+    ok(rendersSkipped(flows), 'the Diagnostics report renders the skipped kind (a verdict-less run is visible, not dropped)');
+
+    // NEGATIVE CONTROLS. Both asserts above are greps, and a grep that matches
+    // anything is not an assert: mutate each source the way the defect would
+    // and require the SAME detector to name the missing kind.
+    const opsPreFix = ops.replace(/\(green\|red\|pid\|skipped\)/g, '(green|red|pid)');
+    ok(opsPreFix !== ops && kinds.filter((k) => !readsKind(opsPreFix, k)).join(',') === 'skipped',
+      'NEG: an /api/ci-heavy that still reads only the pre-round-2 kinds is caught, and named ("skipped")');
+    ok(!rendersSkipped(flows.replace(/'skipped'/g, "'green'")),
+      'NEG: a Diagnostics renderer with the skipped branch removed is caught (that row would silently vanish from the report)');
+  }
+
   // The block message must point at something REACHABLE. It used to offer "or
   // wait for the next push's background run" — but that run is launched BY a
   // push, and the push is what is being refused.

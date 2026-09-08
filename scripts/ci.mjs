@@ -780,6 +780,20 @@ function heavyGate({ sha: wantSha, isolate, dir, only, dirtyOk, lock, lockWaitMs
         if (abandonedWhy) { console.log(`\n[ci:heavy] stopping: ${abandonedWhy}`); break; }
         let r = noteChildResult(runSuite(s, { root: runRoot }));
         if (!r.ok) {
+          // …BUT NEVER RETRY A SUITE WE OURSELVES KILLED. Supersession SIGTERMs
+          // the process GROUP, so the suite in flight dies with the runner's
+          // own kill — and `noteChildResult` has just recorded that. Asking
+          // `abandoned()` at the loop top only is not enough: the answer
+          // becomes true HERE, one line before the most expensive thing the
+          // tier does. Measured in a throwaway repo (a 90 s heavy stub,
+          // superseded 6 s in): the superseded run spent the whole retry while
+          // still HOLDING the machine lock, and the newer run sat in "waiting
+          // up to 40 min for the machine" — the exact opposite of the reason
+          // supersession kills instead of queueing (round 2 ①a). Retry-once
+          // exists for a flaky FIXTURE (another checkout squatting :3987), and
+          // its answer here is discarded anyway: this run writes no verdict.
+          abandonedWhy = abandoned();
+          if (abandonedWhy) { console.log(`\n[ci:heavy] stopping: ${abandonedWhy}`); break; }
           // RETRY ONCE. This tier's verdict BLOCKS the next push, and many of
           // these suites hard-code a port or a /tmp path — on a machine that
           // hosts several checkouts, one of them squatting :3987 is not a

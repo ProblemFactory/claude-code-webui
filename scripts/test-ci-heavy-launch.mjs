@@ -7,7 +7,9 @@
 // removes its pid file and cleans the worktree up.
 //
 // WHY IT IS IN THE FAST TIER even though it costs a real worktree + build +
-// suite (measured 5.5 s here): the launcher is a SILENT-FAILURE path. If
+// suite (measured: 5.5 s when written, 11.6 s after round 2's concurrency
+// legs, 16 s with round 3's supersede A/B — it drives four real heavy runs
+// against a stub repository): the launcher is a SILENT-FAILURE path. If
 // detaching breaks, nothing throws and nobody waits — the heavy tier simply
 // never runs again and the only symptom is `npm run ci:status` staying empty,
 // which looks exactly like "nobody has pushed lately". A guard for that has to
@@ -282,6 +284,108 @@ try {
       ok(/HEAVY TIER ABORTED/.test(slog) && !/HEAVY (GATE|TIER) GREEN/.test(slog),
         '…and calls itself ABORTED, never GREEN — a tier that ran zero suites did not pass, and "HEAVY TIER GREEN" is quotable out of context');
       try { fs.rmSync(sdir, { recursive: true, force: true }); } catch { }
+    }
+
+    // (1d) SUPERSESSION MUST FREE THE MACHINE — SO IT NEVER RETRIES THE SUITE
+    //      IT JUST KILLED. Superseding SIGTERMs the process GROUP, so the suite
+    //      in flight dies of OUR kill; retry-once then re-ran it — a whole heavy
+    //      suite (up to its budget) — before the loop top asked `abandoned()`
+    //      again, and the superseded run HELD the machine lock throughout while
+    //      the newer run printed "waiting up to 40 min for the machine". That is
+    //      the opposite of why supersession kills instead of queueing (round 2
+    //      ①a). Measured in a throwaway repo with a 90 s heavy stub, superseded
+    //      6 s in; the verdict never changed (a signalled run writes none either
+    //      way), the COST did.
+    //
+    //      It runs against a stub REPOSITORY — its own git history, its own
+    //      ci.mjs copy, its own lock, one instant and one sleeping "heavy"
+    //      suite — because the real tier's suites cannot be made to sleep, and
+    //      the control arm has to be the REAL module with this one fix reverted.
+    {
+      const SLOW = (SUITES.find((x) => x.tier === 'heavy' && x.name !== SLICE) || {}).name;
+      const CI_SRC = fs.readFileSync(path.join(REPO, 'scripts', 'ci.mjs'), 'utf-8');
+      const GUARD = /\n\s*abandonedWhy = abandoned\(\);\n\s*if \(abandonedWhy\) \{ console\.log\(`\\n\[ci:heavy\] stopping: \$\{abandonedWhy\}`\); break; \}\n(\s*\/\/ RETRY ONCE)/;
+      const preFix = CI_SRC.replace(GUARD, '\n$1');
+      ok(!!SLOW && GUARD.test(CI_SRC) && preFix !== CI_SRC,
+        `the ask-before-retry guard is present and the control's patch applies (slow slice: ${SLOW})`);
+
+      const stubRepo = (ciSource) => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-ci-supersede-'));
+        fs.mkdirSync(path.join(root, 'scripts'), { recursive: true });
+        fs.writeFileSync(path.join(root, 'scripts', 'ci.mjs'), ciSource);
+        fs.copyFileSync(path.join(REPO, 'scripts', 'git-env.mjs'), path.join(root, 'scripts', 'git-env.mjs'));
+        fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'x', version: '0.0.0', private: true, scripts: { build: 'node -e "0"' } }) + '\n');
+        // The sleeping suite announces itself so the supersede lands while it
+        // is really running, instead of at a guessed moment.
+        fs.writeFileSync(path.join(root, 'scripts', SLOW + '.mjs'),
+          `import fs from 'node:fs';\nfs.writeFileSync(process.env.VS_SUPERSEDE_SENTINEL, String(process.pid));\nsetTimeout(() => console.log('ALL PASS (1)'), 10000);\n`);
+        fs.writeFileSync(path.join(root, 'scripts', SLICE + '.mjs'), "console.log('ALL PASS (1)');\n");
+        const git = (...a) => spawnSync('git', ['-C', root, ...a], { encoding: 'utf-8', env: { ...GIT_ENV, GIT_AUTHOR_NAME: 'x', GIT_AUTHOR_EMAIL: 'x@x', GIT_COMMITTER_NAME: 'x', GIT_COMMITTER_EMAIL: 'x@x' } });
+        spawnSync('git', ['init', '-q', root], { env: GIT_ENV });
+        git('add', '-A'); git('commit', '-q', '-m', 'a');
+        const A = (git('rev-parse', 'HEAD').stdout || '').trim();
+        fs.writeFileSync(path.join(root, 'x'), 'b');
+        git('add', '-A'); git('commit', '-q', '-m', 'b');
+        const B = (git('rev-parse', 'HEAD').stdout || '').trim();
+        return { root, A, B, lock: path.join(root, 'lock'), sentinel: path.join(root, 'started') };
+      };
+
+      // ONE arm, used for the product and for the pre-fix control: launch a run
+      // for A whose only suite sleeps, wait until that suite is really running,
+      // then push a DESCENDANT — the production supersede path.
+      const arm = async (ciSource, patience = 400) => {
+        const r = stubRepo(ciSource);
+        const env = { ...GIT_ENV, VS_SUPERSEDE_SENTINEL: r.sentinel };
+        const ciOf = (...a) => spawnSync(process.execPath, [path.join(r.root, 'scripts', 'ci.mjs'), ...a, '--lock=' + r.lock, '--lock-wait-ms=20000'],
+          { cwd: r.root, encoding: 'utf-8', env, timeout: 60000 });
+        ciOf('--heavy-launch', r.A, '--only=' + SLOW);
+        for (let i = 0; i < 200 && !fs.existsSync(r.sentinel); i++) await sleep(50);
+        const started = fs.existsSync(r.sentinel);
+        const pidRec = (() => { try { return JSON.parse(fs.readFileSync(path.join(r.root, 'data', 'ci-heavy', `${r.A}.pid`), 'utf-8')); } catch { return null; } })();
+        const sup = ciOf('--heavy-launch', r.B, '--only=' + SLICE);
+        const logA = () => { try { return fs.readFileSync(path.join(r.root, 'data', 'ci-heavy', `${r.A}.log`), 'utf-8'); } catch { return ''; } };
+        // The polls exit the moment they are satisfied, so the product arm's
+        // budget is generous (a loaded box must not make a fast-tier suite
+        // flaky); the control arm is given 2 s, long enough to catch the retry
+        // in the act and far short of the 10 s suite it is re-running.
+        let closed = false;
+        for (let i = 0; i < patience && !closed; i++) { closed = /HEAVY (GATE|TIER) (GREEN|RED|ABORTED|SKIPPED)/.test(logA()); if (!closed) await sleep(50); }
+        const markers = () => { try { return fs.readdirSync(path.join(r.root, 'data', 'ci-heavy')); } catch { return []; } };
+        let bDone = false;
+        for (let i = 0; i < patience && !bDone; i++) { bDone = markers().some((f) => f === `${r.B}.green` || f === `${r.B}.red`); if (!bDone) await sleep(50); }
+        const bPid = (() => { try { return JSON.parse(fs.readFileSync(path.join(r.root, 'data', 'ci-heavy', `${r.B}.pid`), 'utf-8')).pid; } catch { return null; } })();
+        const out = { started, closed, bDone, log: logA(), sup: (sup.stdout || '') + (sup.stderr || ''),
+          lockHolder: (() => { try { return JSON.parse(fs.readFileSync(r.lock, 'utf-8')).pid; } catch { return null; } })(),
+          aPid: pidRec && pidRec.pid, markers: markers(), root: r.root, A: r.A, B: r.B };
+        // Leave nothing running or checked out: the pre-fix arm is killed
+        // mid-retry ON PURPOSE, so its own cleanup never runs. Each isolated
+        // worktree is named after the sha and the pid that made it, so this
+        // removes OURS and can never touch another run's (round 2 ④).
+        for (const [pid, sha2] of [[out.aPid, r.A], [bPid, r.B]]) {
+          if (!pid) continue;
+          try { process.kill(-pid, 'SIGKILL'); } catch { try { process.kill(pid, 'SIGKILL'); } catch { } }
+          try { fs.rmSync(path.join(os.tmpdir(), `vs-ci-heavy-${sha2.slice(0, 8)}-${pid}`), { recursive: true, force: true }); } catch { }
+        }
+        return out;
+      };
+
+      const good = await arm(CI_SRC);
+      ok(good.started && /superseded the run for/.test(good.sup), 'the sleeping suite was really running when the newer push superseded it');
+      ok(!/retrying once/.test(good.log), '…and the superseded run does NOT re-run the suite our own SIGTERM just killed');
+      ok(good.closed && /stopping: /.test(good.log), `…it stops instead, saying why (${(good.log.match(/stopping: [^\n]*/) || ['(never said)'])[0]})`);
+      ok(!good.markers.some((f) => new RegExp(`^${good.A}\\.(green|red)$`).test(f)), '…and still claims nothing for the commit it did not finish');
+      ok(good.bDone, '…and the MACHINE IS FREED: the superseding run gets the lock and finishes (this is what supersession is for)');
+      try { fs.rmSync(good.root, { recursive: true, force: true }); } catch { }
+
+      // NEGATIVE CONTROL: the same fixture against the REAL module with this
+      // one guard reverted — it must re-run the killed suite and sit on the
+      // lock while the newer run waits, or the assertions above prove nothing.
+      const bad = await arm(preFix, 40);  // 2 s: long enough to catch the retry, far short of the 10 s suite
+      ok(bad.started, 'NEG: the pre-fix arm reached the same starting point');
+      ok(/retrying once/.test(bad.log), 'NEG: without the guard the superseded run RETRIES the suite it was killed in');
+      ok(!bad.bDone && bad.lockHolder === bad.aPid,
+        `NEG: …and holds the machine lock meanwhile, so the newer run waits (holder pid ${bad.lockHolder}, superseded pid ${bad.aPid})`);
+      try { fs.rmSync(bad.root, { recursive: true, force: true }); } catch { }
     }
 
     // (2) THE MACHINE LOCK: a second heavy run does not start while another
