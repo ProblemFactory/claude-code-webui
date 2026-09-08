@@ -2059,8 +2059,21 @@ function onMemberReadingFresh(memberId, why = 'reading', { at = Date.now() } = {
       // the link says one member and the running CLI still holds another's
       // credentials. "The link points at the member that recovered" is
       // therefore not enough to know where a continue would BILL.
+      // HOTNESS IS THE CAPS-GATED VERDICT, NEVER THE RAW FLAG (r3, reproduced):
+      // `a.hot` is a WISH the user's checkbox persists; whether the pool can
+      // act on it is `capsOf(backend).hotSwitch === 'verified'`, and the
+      // pool-level path computes exactly that before its own `if (hot)` spend
+      // (:2391/:2417). `capsOf('codex').hotSwitch` is 'impossible' (the 2026-
+      // 08-24 experiment: CODEX_HOME is canonicalized at startup and the
+      // tokens live in process memory), so a codex pool ALWAYS cold-restarts —
+      // and a codex pool carrying `hot:true` is persisted state, not a
+      // hypothesis: manage-agents offered that row un-gated until 2026-09-05
+      // and PATCH /api/accounts/pool/:id still writes the flag with no caps
+      // gate, so the setting is inert everywhere else and nobody had a reason
+      // to unset it. Reading the raw flag here let the capability gate deliver
+      // the very spend the pool-level path refuses.
       const pa = poolIds.has(acct) ? accounts.get(acct) : null;
-      const cold = !!(pa && pa.type === 'pooled' && !pa.hot);
+      const cold = !!(pa && pa.type === 'pooled' && !(pa.hot && capsOf(pa.backend).hotSwitch === 'verified'));
       const why2 = landsOn !== memberId ? 'lands-elsewhere' : before !== memberId ? 'the wake moved it' : cold ? 'cold pool — it restarts instead' : null;
       if (why2) { out.skipped.push({ id, landsOn, before, why: why2 }); continue; }
       try {

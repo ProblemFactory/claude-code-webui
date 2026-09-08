@@ -519,12 +519,6 @@ app.post('/api/accounts/subscription/:id/finalize', (req, res) => {
   try {
     const fin = accounts.finalizeSubscription(req.params.id);
     if (fin?.loggedIn) sweepLoginExpiry('subscription login'); // ONCE, above BOTH res.json paths (the merge branch returns early)
-    // The wake is FINGERPRINT-GATED where the sweep is not: this route is
-    // polled every 3 s for 5 minutes and the sweep is local file reads while
-    // the wake spawns a CLI panel. The merge branch below re-wakes the
-    // SURVIVOR — the fingerprint differs there (a different record id), so
-    // both calls land.
-    if (fin?.loggedIn) wakeOnLoginSuccess(req.params.id, fin, 'subscription login');
     // attempt identity for the re-login watcher (2.332.0): which helper RUN
     // produced the current state — lets the client ignore a pre-existing login
     try {
@@ -539,35 +533,63 @@ app.post('/api/accounts/subscription/:id/finalize', (req, res) => {
     // its file fallback into an older id would leave Claude preferring the
     // older id's stale Keychain item, so Darwin logins deliberately keep their
     // fresh record instead of using the path-changing auto-merge.
-    if (fin?.loggedIn && fin?.email && !fin.localOnly && accounts) {
+    //
+    // THE LOOKUP IS HOISTED ABOVE THE WAKE (r3, reproduced): it is a pure read
+    // of the roster, and it is the ONLY thing that knows whether this record
+    // will still exist in a moment.
+    const dupOf = (fin?.loggedIn && fin?.email && !fin.localOnly && accounts) ? (() => {
       const em = String(fin.email).trim().toLowerCase();
-      const dup = (accounts.list().accounts || []).find((x) =>
+      return (accounts.list().accounts || []).find((x) =>
         x.id !== req.params.id && (x.backend || 'claude') === 'claude' && x.type === 'subscription'
-        && String(x.email || (String(x.name || '').includes('@') ? x.name : '')).trim().toLowerCase() === em);
-      if (dup) {
-        try {
-          const merged = accounts.mergeSubscription(req.params.id, dup.id, { preferFromCreds: true, liveAccountIds: liveAccountIdSet() });
-          // AGAIN, AFTER THE MERGE (round-2 verifier). The sweep above ran
-          // while the fresh credentials were still in the THROWAWAY record's
-          // dir — the survivor, which is the record carrying the open warning,
-          // still had its dead file, so the sweep read a stale deadline and
-          // retracted nothing. `mergeSubscription` is the moment the
-          // survivor's credential file actually changes, so the sweep that
-          // can see it has to come after. The sweep is idempotent (test-login-
-          // expiry §5c(g) pins a repeat resolving nothing a second time), so
-          // the pre-merge one stays: it is the only sweep on every non-merge
-          // exit.
-          sweepLoginExpiry('subscription login merge');
-          // THE SURVIVOR is the record the pool holds and the one the fresh
-          // credentials now live in; the throwaway above is about to stop
-          // existing.
-          wakeOnLoginSuccess(dup.id, merged, 'subscription login merge', merged?.id || dup.id);
-          return res.json({ success: true, ...fin, merged: true, account: merged });
-        } catch (me) {
-          if (me.code !== 'merge-account-live') throw me;
-          // logged in, but a running session blocks the auto-fold — keep both, tell the user
-          return res.json({ success: true, ...fin, merged: false, mergeBlocked: 'a session using one of these accounts is running — stop it to auto-merge the duplicate' });
-        }
+        && String(x.email || (String(x.name || '').includes('@') ? x.name : '')).trim().toLowerCase() === em) || null;
+    })() : null;
+    // The wake is FINGERPRINT-GATED where the sweep is not: this route is
+    // polled every 3 s for 5 minutes and the sweep is local file reads while
+    // the wake spawns a CLI panel.
+    //
+    // AND IT IS GATED ON THE MERGE (r3, reproduced): the wake spawns
+    // `claude -p /usage` for `req.params.id`, and on the auto-merge exit that
+    // record is DELETED milliseconds later — the panel then answers for a
+    // phantom and `refreshViaCliPanel` writes `usage-cache/<deleted-id>.json`
+    // plus its window sidecar, which nothing ever removes and
+    // `establishedWindows()` reads back with no roster filter. MEASURED before
+    // the fix: 2 panel spawns on that exit, one of them for the throwaway. The
+    // source already said so three lines from here ("the throwaway above is
+    // about to stop existing") — it was a comment where a gate was needed.
+    // The merge branch below wakes the SURVIVOR, and every exit where the fold
+    // does NOT happen wakes this record from the catch, so the login edge is
+    // still taken exactly once, on whichever record ends up holding the login.
+    if (fin?.loggedIn && !dupOf) wakeOnLoginSuccess(req.params.id, fin, 'subscription login');
+    if (dupOf) {
+      const dup = dupOf;
+      try {
+        const merged = accounts.mergeSubscription(req.params.id, dup.id, { preferFromCreds: true, liveAccountIds: liveAccountIdSet() });
+        // AGAIN, AFTER THE MERGE (round-2 verifier). The sweep above ran
+        // while the fresh credentials were still in the THROWAWAY record's
+        // dir — the survivor, which is the record carrying the open warning,
+        // still had its dead file, so the sweep read a stale deadline and
+        // retracted nothing. `mergeSubscription` is the moment the
+        // survivor's credential file actually changes, so the sweep that
+        // can see it has to come after. The sweep is idempotent (test-login-
+        // expiry §5c(g) pins a repeat resolving nothing a second time), so
+        // the pre-merge one stays: it is the only sweep on every non-merge
+        // exit.
+        sweepLoginExpiry('subscription login merge');
+        // THE SURVIVOR is the record the pool holds and the one the fresh
+        // credentials now live in; the throwaway above is about to stop
+        // existing.
+        wakeOnLoginSuccess(dup.id, merged, 'subscription login merge', merged?.id || dup.id);
+        return res.json({ success: true, ...fin, merged: true, account: merged });
+      } catch (me) {
+        // THE FOLD DID NOT HAPPEN, SO THIS RECORD IS STILL THE ONE HOLDING
+        // THE LOGIN (r3) — it gets the edge the gate above deferred. Above
+        // the rethrow as well as above the blocked answer: a merge that
+        // failed for any other reason leaves the same record in place, and
+        // the fingerprint latch makes the later polls idempotent.
+        if (fin?.loggedIn) wakeOnLoginSuccess(req.params.id, fin, 'subscription login');
+        if (me.code !== 'merge-account-live') throw me;
+        // logged in, but a running session blocks the auto-fold — keep both, tell the user
+        return res.json({ success: true, ...fin, merged: false, mergeBlocked: 'a session using one of these accounts is running — stop it to auto-merge the duplicate' });
       }
     }
     res.json({ success: true, ...fin });

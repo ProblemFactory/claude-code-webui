@@ -459,6 +459,21 @@ async function refreshViaCliPanel(key) {
     } catch { resolve(null); }
   });
   if (!(cliPanel && (cliPanel.fiveHour || cliPanel.sevenDay))) return false;
+  // THE ROSTER IS ASKED AGAIN AT THE WRITE, NOT ONLY AT THE SPAWN (r3, the
+  // auto-merge finding's belt). This function's only roster check happens
+  // before a 60-second `execFile`, and a record CAN stop existing inside that
+  // window — the subscription auto-merge deletes the throwaway milliseconds
+  // after the login edge, and a removed account is a normal user action too.
+  // Nothing in accounts.js or the routes deletes usage-cache entries when an
+  // account goes away, and `establishedWindows()` reads every `.json` in that
+  // directory with no roster filter, so a write here would leave a cache file
+  // AND a window sidecar keyed to an id that no longer names anything. FALSE,
+  // not true: no reading was recorded, and the caller's backoff is the right
+  // response to a panel whose subject vanished.
+  if (!isGlobal && !(accounts.list().accounts || []).some((x) => x.id === key)) {
+    console.log(`[usage] the /usage panel for ${key} answered after the account was removed — discarding the reading`);
+    return false;
+  }
   _onDemandUsageAt[key] = Date.now();
   const u = { ...cliPanel, source: 'on-demand', scopedFetchedAt: Date.now() };
   try {

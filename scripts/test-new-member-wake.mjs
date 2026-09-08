@@ -46,6 +46,15 @@
 //        and a COLD one — where round 1 spent a turn on the member the
 //        conversation was already stuck on and called it "recovered"; the
 //        controls are PATCHED COPIES of the real engine, hit-count asserted.
+//        (r3) §8c′ adds the fourth: a CODEX pool carrying `hot:true`, where
+//        round 2's gate read the raw flag instead of the caps-gated verdict the
+//        engine acts on, so the capability gate delivered the spend the
+//        pool-level path had just refused.
+//   §9   (r3) the panel refresher's own belt: a `claude -p /usage` that answers
+//        after its account was removed writes no cache file and no window
+//        sidecar — driven through the real setupUsage factory with a FAKE
+//        `claude` on CLAUDE_CMD, so it costs nothing and still exercises the
+//        real execFile → parse → write path.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -66,6 +75,7 @@ const { create: createAR, CONTINUE_PROMPT, GRACE_MS, FIRE_MAX_IMMEDIATE, FIRE_QU
 const engMod = require(path.join(REPO, 'src/server/usage-pool-engine.js'));
 const { AccountManager } = require(path.join(REPO, 'src/accounts.js'));
 const readingLag = require(path.join(REPO, 'src/reading-lag.js'));
+const { capsOf } = require(path.join(REPO, 'src/backend-caps.js')); // §8c′: hotness is a CAPABILITY verdict, not the user's checkbox
 
 const cleanup = [];
 process.on('exit', () => { for (const d of cleanup) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { } } });
@@ -518,8 +528,28 @@ console.log('\n§6 every producer of a fresh reading takes the SAME edge');
 
   // THE FIVE LOGIN EXITS, through the REAL route factory.
   const routes = require(path.join(REPO, 'src/server/account-usage-routes.js'));
+  const routesSrc0 = read('src/server/account-usage-routes.js');
+  const routeMutants = [];
+  process.on('exit', () => { for (const f of routeMutants) { try { fs.unlinkSync(f); } catch { } } });
+  let mutR = 0;
+  /** A patched copy of the ROUTES module, as a SIBLING of the real one so its
+   *  relative requires resolve — same shape as §8's mutantEngine, same name
+   *  prefix so its stale-PID sweep collects these too, and gitignored. Every
+   *  replacement is counted and the count is asserted by the caller: an
+   *  unpatched "control" is not a control. */
+  function mutantRoutes(edits) {
+    let src = routesSrc0, hits = 0;
+    for (const [from, to] of edits) {
+      if (!src.includes(from)) return { err: 'needle missing: ' + from.slice(0, 70) };
+      src = src.split(from).join(to); hits++;
+    }
+    const f = path.join(REPO, 'src/server/vs-wake-mut-' + process.pid + '-r' + (++mutR) + '.js');
+    fs.writeFileSync(f, src); routeMutants.push(f);
+    return { mod: require(f), hits };
+  }
   function mkRoutes(opts = {}) {
     const w = mkWorld(opts);
+    const routesModule = opts.routesModule || routes;
     const handlers = new Map();
     const app = {
       get: (p, h) => handlers.set('GET ' + p, h), post: (p, h) => handlers.set('POST ' + p, h),
@@ -527,11 +557,15 @@ console.log('\n§6 every producer of a fresh reading takes the SAME edge');
       patch: (p, h) => handlers.set('PATCH ' + p, h), use: () => { }, locals: {},
     };
     const swept = [];
-    routes.create({
+    routesModule.create({
       app, rootDir: w.root, HOST: '127.0.0.1', CLAUDE_CMD: 'claude', NODE_CMD: 'node',
       CLAUDE_SUBSCRIPTION_LOGIN_HELPER: '/dev/null', activeSessions: w.sessions,
       auth: { enabled: false }, engine: w.eng, serverSetting: () => undefined,
-      recordUsageAttribution() { }, liveAccountIdSet: () => new Set(),
+      // `liveIds` is EXIT 4b's control: a running session on either side makes
+      // `mergeSubscription` refuse with code 'merge-account-live', which is the
+      // reachable exit where the fold does NOT happen and the fresh record is
+      // still the one holding the login.
+      recordUsageAttribution() { }, liveAccountIdSet: () => new Set(opts.liveIds || []),
       buildClaudeSubscriptionLoginCommand: () => 'true',
       getAccounts: () => w.am, getHosts: () => null, getMounts: () => null,
       getTelemetry: () => ({ ingestRemote: () => 0, centralSummary: () => ({}) }),
@@ -596,27 +630,71 @@ console.log('\n§6 every producer of a fresh reading takes the SAME edge');
       w.probes.length === 1, `probes=${w.probes.length}`);
   }
   // exit 4: the auto-merge exit wakes the SURVIVOR, not the throwaway
+  //
+  // r3: this leg used to reach for an email SETTER this AccountManager does not
+  // have and then SKIP, so the whole auto-merge exit went unmeasured — and what
+  // it was not measuring is that the route woke `req.params.id` UNCONDITIONALLY
+  // first, i.e. spawned a `claude -p /usage` panel for the record it was about
+  // to DELETE. The route's dup lookup reads `x.email || (a name containing @)`,
+  // so `rename` is all this needs; MEASURED before the fix: 2 panel spawns, one
+  // of them for the throwaway, and `usage-cache/<deleted-id>.json` left behind
+  // (nothing removes cache entries when an account goes away, and
+  // establishedWindows() reads that directory with no roster filter).
   {
     const { w, call } = mkRoutes();
-    // the survivor is an EXISTING record with the same email; the throwaway is
-    // the fresh one the Add flow just logged into
-    w.am.updateAccount?.(w.PANDY, { email: 'owner@example.com' });
-    try { w.am.update(w.PANDY, { email: 'owner@example.com' }); } catch { }
-    const acct = w.am.list().accounts.find((a) => a.id === w.PANDY);
-    if (String(acct?.email || '').includes('@')) {
-      fs.writeFileSync(path.join(w.am.subDir(w.NEW), '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'tok-new', refreshToken: 'r', expiresAt: Date.now() + 36e5, email: 'owner@example.com', subscriptionType: 'max' } }), { mode: 0o600 });
-      w.setProbeAnswer(() => w.healthy());
-      const r = await call('POST /api/accounts/subscription/:id/finalize', { id: w.NEW });
-      if (r?.merged) {
-        ok('EXIT 4 the auto-merge exit wakes the SURVIVOR — waking the throwaway would read a record about to stop existing and leave the one the pool holds unread',
-          w.probes.includes(w.PANDY), JSON.stringify(w.probes));
-      } else {
-        ok('EXIT 4 · SKIP (this AccountManager did not take the auto-merge path here) — the survivor wiring is pinned below instead', true);
-      }
-    } else {
-      ok('EXIT 4 · SKIP (no email setter on this AccountManager) — the survivor wiring is pinned below instead', true);
-    }
+    // the survivor is an EXISTING record the pool holds, identified by the same
+    // email; the throwaway is the fresh one the Add flow just logged into
+    w.am.rename(w.PANDY, 'owner@example.com');
+    fs.writeFileSync(path.join(w.am.subDir(w.NEW), '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'tok-new', refreshToken: 'r', expiresAt: Date.now() + 36e5, refreshTokenExpiresAt: Date.now() + 29 * 86400e3, email: 'owner@example.com', subscriptionType: 'max' } }), { mode: 0o600 });
+    w.setProbeAnswer(() => w.healthy());
+    const r = await call('POST /api/accounts/subscription/:id/finalize', { id: w.NEW });
+    ok('control setup: the Add flow really took the auto-merge exit (this leg is worthless if it did not)',
+      r?.merged === true && !w.am.get(w.NEW), JSON.stringify({ merged: r?.merged, throwawayGone: !w.am.get(w.NEW) }));
+    ok('EXIT 4 the auto-merge exit wakes the SURVIVOR — waking the throwaway would read a record about to stop existing and leave the one the pool holds unread',
+      w.probes.includes(w.PANDY), JSON.stringify(w.probes));
+    ok('…and it wakes NOBODY ELSE: the throwaway is never probed, so no panel is spawned for a record that is about to be deleted',
+      !w.probes.includes(w.NEW) && w.probes.length === 1, JSON.stringify(w.probes));
+    ok('…and no usage-cache entry is left keyed to the deleted record (nothing ever removes those, and establishedWindows() reads them all)',
+      w.readCache(w.NEW) === null, JSON.stringify(w.readCache(w.NEW)));
     ok('…and the survivor is named at the call site, not inferred', /wakeOnLoginSuccess\(dup\.id, merged, 'subscription login merge', merged\?\.id \|\| dup\.id\)/.test(read('src/server/account-usage-routes.js')));
+    // NEGATIVE CONTROL: the PRE-FIX route — the wake ungated, above the merge
+    const mutR = mutantRoutes([
+      ["    if (fin?.loggedIn && !dupOf) wakeOnLoginSuccess(req.params.id, fin, 'subscription login');",
+        "    if (fin?.loggedIn) wakeOnLoginSuccess(req.params.id, fin, 'subscription login'); // PRE-FIX: ungated"],
+      ["        if (fin?.loggedIn) wakeOnLoginSuccess(req.params.id, fin, 'subscription login');\n        if (me.code !== 'merge-account-live') throw me;",
+        "        if (me.code !== 'merge-account-live') throw me; // PRE-FIX: no catch-side wake"],
+    ]);
+    ok('control setup: the PRE-FIX routes copy applied both replacements', mutR.hits === 2, JSON.stringify(mutR));
+    const { w: w2, call: call2 } = mkRoutes({ routesModule: mutR.mod });
+    w2.am.rename(w2.PANDY, 'owner@example.com');
+    fs.writeFileSync(path.join(w2.am.subDir(w2.NEW), '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'tok-new', refreshToken: 'r', expiresAt: Date.now() + 36e5, refreshTokenExpiresAt: Date.now() + 29 * 86400e3, email: 'owner@example.com', subscriptionType: 'max' } }), { mode: 0o600 });
+    w2.setProbeAnswer(() => w2.healthy());
+    const r2 = await call2('POST /api/accounts/subscription/:id/finalize', { id: w2.NEW });
+    ok('NEGATIVE CONTROL (pre-fix): the same exit spawns TWO panels — one of them for the record it then deletes — and leaves a usage-cache entry keyed to a phantom',
+      r2?.merged === true && !w2.am.get(w2.NEW) && w2.probes.length === 2 && w2.probes.includes(w2.NEW) && w2.readCache(w2.NEW) !== null,
+      JSON.stringify({ probes: w2.probes, phantomCache: !!w2.readCache(w2.NEW) }));
+  }
+  // exit 4b: the fold did NOT happen, so this record still holds the login
+  //
+  // Gating the pre-merge wake on `dup` would otherwise DROP the edge on every
+  // exit where the merge is refused — and 'merge-account-live' is a documented,
+  // user-reachable one (a session using either account is running). The wake
+  // therefore moves into the catch, above BOTH the rethrow and the blocked
+  // answer, so the login edge is still taken exactly once, on whichever record
+  // ends up holding the login.
+  {
+    const live = [];                       // filled once the world names its ids
+    const { w, call } = mkRoutes({ liveIds: live });
+    live.push(w.PANDY);                    // a running session on the SURVIVOR
+    w.am.rename(w.PANDY, 'owner@example.com');
+    fs.writeFileSync(path.join(w.am.subDir(w.NEW), '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'tok-new', refreshToken: 'r', expiresAt: Date.now() + 36e5, refreshTokenExpiresAt: Date.now() + 29 * 86400e3, email: 'owner@example.com', subscriptionType: 'max' } }), { mode: 0o600 });
+    w.setProbeAnswer(() => w.healthy());
+    const r = await call('POST /api/accounts/subscription/:id/finalize', { id: w.NEW });
+    ok('control setup: a running session really blocked the auto-fold (both records survive)',
+      r?.merged === false && !!r?.mergeBlocked && !!w.am.get(w.NEW) && !!w.am.get(w.PANDY),
+      JSON.stringify({ merged: r?.merged, blocked: !!r?.mergeBlocked, newAlive: !!w.am.get(w.NEW) }));
+    ok('EXIT 4b the blocked-merge exit still takes the edge, on the record that KEPT the login — a deferred wake must not become a dropped one',
+      w.probes.length === 1 && w.probes[0] === w.NEW, JSON.stringify(w.probes));
   }
   // exit 5: codex device-auth
   {
@@ -659,14 +737,19 @@ console.log('\n§8 half ② fires only the conversations nothing could move (r2)
   // in one worktree, and deleting a LIVE run's module mid-require is worse than
   // the litter. (Same shape as the wire probe's stale sweep: the cleaner states
   // its own rule instead of assuming it is alone.)
-  try {
-    for (const f of fs.readdirSync(path.join(REPO, 'src/server'))) {
-      const m = /^vs-wake-(?:mut|master-ar)-(\d+)[-.]/.exec(f);
-      if (!m || Number(m[1]) === process.pid) continue;
-      try { process.kill(Number(m[1]), 0); continue; } catch (e) { if (e.code === 'EPERM') continue; }
-      try { fs.unlinkSync(path.join(REPO, 'src/server', f)); } catch { }
-    }
-  } catch { }
+  // Both directories hold copies: §6/§8 write engine + routes mutants into
+  // src/server/, §9 writes a usage-routes mutant into src/ (a patched copy must
+  // be a SIBLING of the real module or its relative requires do not resolve).
+  for (const dir of ['src/server', 'src']) {
+    try {
+      for (const f of fs.readdirSync(path.join(REPO, dir))) {
+        const m = /^vs-wake-(?:mut|master-ar)-(\d+)[-.]/.exec(f);
+        if (!m || Number(m[1]) === process.pid) continue;
+        try { process.kill(Number(m[1]), 0); continue; } catch (e) { if (e.code === 'EPERM') continue; }
+        try { fs.unlinkSync(path.join(REPO, dir, f)); } catch { }
+      }
+    } catch { }
+  }
   let mutN = 0;
   /** A patched copy of the engine, as a SIBLING of the real one so its relative
    *  requires resolve. Every replacement is counted, and the count is asserted
@@ -713,7 +796,7 @@ console.log('\n§8 half ② fires only the conversations nothing could move (r2)
         "      const before = memberId; // PRE-FIX: membership was the only filter"],
       ["      let landsOn = null;\n      try { landsOn = fireIdentityFor(s)?.key || null; } catch { }",
         "      let landsOn = memberId; // PRE-FIX"],
-      ["      const cold = !!(pa && pa.type === 'pooled' && !pa.hot);",
+      ["      const cold = !!(pa && pa.type === 'pooled' && !(pa.hot && capsOf(pa.backend).hotSwitch === 'verified'));",
         "      const cold = false; // PRE-FIX"],
     ]);
     ok('control setup: the PRE-FIX copy applied all three replacements', mut.hits === 3, JSON.stringify(mut));
@@ -750,7 +833,7 @@ console.log('\n§8 half ② fires only the conversations nothing could move (r2)
 
     // NEGATIVE CONTROL: ONLY the cold clause removed — one mechanism, one control
     const mut = mutantEngine([
-      ["      const cold = !!(pa && pa.type === 'pooled' && !pa.hot);", "      const cold = false; // MUTANT: no cold gate"],
+      ["      const cold = !!(pa && pa.type === 'pooled' && !(pa.hot && capsOf(pa.backend).hotSwitch === 'verified'));", "      const cold = false; // MUTANT: no cold gate"],
     ]);
     ok('control setup: the no-cold-gate copy applied its replacement', mut.hits === 1, JSON.stringify(mut));
     const w2 = await walled({ hot: false }, mut.mod);
@@ -758,6 +841,114 @@ console.log('\n§8 half ② fires only the conversations nothing could move (r2)
     await settle();
     ok('NEGATIVE CONTROL (no cold gate): the same world spends a continue into a CLI the pool just told the client to replace',
       r2.fired.length === 1 && w2.fired.length === 1, JSON.stringify({ fired: w2.fired.length }));
+  }
+
+  // (c′) A CODEX POOL — hot:true that the ENGINE ITSELF refuses to act on (r3).
+  // `a.hot` is a WISH the user's checkbox persists; the pool-level path asks
+  // `!!a.hot && capsOf(a.backend).hotSwitch === 'verified'` before its own
+  // `if (hot)` spend, and `capsOf('codex').hotSwitch` is 'impossible' (the
+  // 2026-08-24 experiment: CODEX_HOME is canonicalized at startup and the
+  // tokens live in process memory), so a codex pool ALWAYS cold-restarts.
+  // Half ② read the RAW flag, so the capability gate delivered exactly the
+  // spend the pool-level path had just refused — (c)'s failure mode arriving
+  // through a door round 2 did not check.
+  //
+  // REACHABILITY, not a hypothesis: manage-agents offered the "Hot switch (no
+  // restart)" row inside a bare `if (a?.pooled && !selectedHost)` until
+  // 2026-09-05, and PATCH /api/accounts/pool/:id still writes `hot` with no
+  // caps gate — the flag is inert on every other path, so a user who set it
+  // saw nothing happen and had no reason to unset it.
+  {
+    ok('the two backends really disagree about hotness (this leg is ABOUT the caps half, so it must not be vacuous)',
+      capsOf('claude').hotSwitch === 'verified' && capsOf('codex').hotSwitch === 'impossible',
+      `claude=${capsOf('claude').hotSwitch} codex=${capsOf('codex').hotSwitch}`);
+
+    /** The incident's shape on a CODEX pool: armed by the REAL codex rejection
+     *  producer, the pool default already moved onto a member with no reading,
+     *  then that member's first reading arrives. The session ANSWERS the
+     *  rpc-rate-limits probe with the wrapper's own error reply, so the 20 s
+     *  waiter settles at once instead of racing the wake — measured: without
+     *  it the wall probe re-arms mid-gate and the continue is dropped for an
+     *  UNRELATED reason, i.e. a leg that would go green on the wrong fact. */
+    async function codexWalled(engineModule = engMod) {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-wake-cx-'));
+      cleanup.push(root);
+      const dataDir = path.join(root, 'data');
+      const am = new AccountManager({ dataDir });
+      const cxLogin = (id) => fs.writeFileSync(path.join(am.codexSubDir(id), 'auth.json'),
+        JSON.stringify({ auth_mode: 'chatgpt', tokens: { access_token: 'tok-' + id } }), { mode: 0o600 });
+      const OLD = am.createCodexSubscription({ name: 'ChatGPT Old' }).id; cxLogin(OLD);
+      const NEW = am.createCodexSubscription({ name: 'ChatGPT New' }).id; cxLogin(NEW);
+      const P = am.createPool({ name: 'codex pool', backend: 'codex' }).id;
+      am.setPoolTarget(P, OLD);
+      am.updatePool(P, { auto: true, hot: true });   // the state PATCH /pool/:id still accepts
+
+      const cacheDir = path.join(dataDir, 'usage-cache'); fs.mkdirSync(cacheDir, { recursive: true });
+      const nowS = Math.floor(Date.now() / 1000);
+      const R5 = nowS + 8 * 3600, R7 = nowS + 3 * 86400;
+      const writeCache = (id, c) => fs.writeFileSync(path.join(cacheDir, id + '.json'), JSON.stringify(c));
+      writeCache(OLD, { fetchedAt: Date.now() - 60000, source: 'codex-rate-limits', fiveHour: { utilization: 1, status: 'limited', resetsAt: R5 }, sevenDay: { utilization: 1, status: 'limited', resetsAt: R7 } });
+      // NEW has no cache file at all — "no usage data", the incident's state
+
+      const sessions = new Map();
+      const notes = [], fired = [], wsSent = [];
+      let eng;
+      const ar = createAR({
+        dataDir, activeSessions: sessions, serverSetting: () => true, log: () => { },
+        notify: (id, s2, text) => notes.push({ id, text }),
+        sendToSession: (id, s2, text) => { fired.push({ id, text }); return true; },
+        beforeFire: (id, s2) => { try { return eng.beforeAutoResumeFire(id, s2); } catch { return true; } },
+        fireIdentity: (id, s2) => { try { return eng.fireIdentityFor(s2); } catch { return null; } },
+      });
+      const app = { get() { }, post() { }, put() { }, delete() { }, use() { }, locals: {} };
+      eng = engineModule.create({
+        app, rootDir: root, USAGE_CACHE_DIR: cacheDir, activeSessions: sessions,
+        wss: { clients: new Set([{ readyState: 1, send: (p2) => wsSent.push(p2) }]) }, WS_OPEN: 1, broadcastToSession() { },
+        serverNotice() { }, serverSetting: () => undefined,
+        getAccounts: () => am, getHosts: () => null, getUsageHistory: () => null,
+        recordUsageAttribution() { }, adapterRegistry: { get() { return null; } },
+        getAutoResume: () => ar, getOtelIngest: () => ({ observedOrgFor: () => null }),
+        getQuotaProbe: () => async () => false,   // the CLAUDE rung; never routed to for a codex identity
+      });
+      const s = { backend: 'codex', mode: 'chat', _webuiId: 'sess-9-1788764799999', claudeSessionId: 'cid-9', backendSessionId: 'cid-9', _accountId: P, _autoResume: true, name: 'sess-9' };
+      s.pty = { write(line) { if (/codex-read-limits/.test(String(line))) setImmediate(() => { try { eng.recordCodexQuotaSignal(s, { type: 'rate_limits_updated', error: 'no app-server in this harness' }); } catch { } }); } };
+      sessions.set(s._webuiId, s);
+      eng.recordCodexQuotaSignal(s, { type: 'task_failed', codexErrorInfo: 'usage_limit_reached' });
+      await tick(300);   // let the wall probe the rejection scheduled settle first
+      eng._poolAutoLast.clear(); eng._poolSwitchAt.clear(); eng._memberWakeAt.clear(); eng._loginReadAt.clear();
+      writeCache(NEW, { fetchedAt: Date.now(), source: 'codex-rate-limits', fiveHour: { utilization: 0.04, resetsAt: R5 }, sevenDay: { utilization: 0.10, resetsAt: R7 } });
+      const wake = async (why) => { const x = eng.onMemberReadingFresh(NEW, why); await tick(400); return x; };
+      return {
+        am, eng, ar, s, P, OLD, NEW, notes, fired, wake,
+        armed: () => !!ar._armed.get(s._webuiId),
+        linkOf: () => am.poolCurrentFor(P, s._webuiId),
+        coldRestarts: () => wsSent.filter((p2) => /"type":"pool-auto-switched"/.test(String(p2))).length,
+        cards: () => notes.map((n) => n.text).join(' | '),
+      };
+    }
+
+    const w = await codexWalled();
+    ok('control setup (codex): the REAL codex rejection producer armed it, and the pool COLD-restarted it onto the newcomer',
+      w.armed() && w.linkOf() === w.NEW && w.coldRestarts() >= 1,
+      `armed=${w.armed()} onNew=${w.linkOf() === w.NEW} restarts=${w.coldRestarts()}`);
+    const restarts = w.coldRestarts();
+    const r = await w.wake('manual refresh (cli-panel)');
+    ok('CODEX pool with hot:true: the wake continues NOBODY — hotness is the caps-gated verdict the engine acts on, never the raw flag',
+      r.acted === true && r.fired.length === 0 && w.fired.length === 0 && /^cold pool/.test(r.skipped[0]?.why || ''), JSON.stringify(r));
+    ok('…and it added no second restart broadcast either (it only declined to spend)', w.coldRestarts() === restarts, `${restarts} → ${w.coldRestarts()}`);
+    ok('…and no card claims a member recovered', !/已恢复可用/.test(w.cards()), w.cards());
+
+    // NEGATIVE CONTROL: ONLY the caps half removed — the raw-flag spelling
+    const mutC = mutantEngine([
+      ["      const cold = !!(pa && pa.type === 'pooled' && !(pa.hot && capsOf(pa.backend).hotSwitch === 'verified'));",
+        "      const cold = !!(pa && pa.type === 'pooled' && !pa.hot); // PRE-FIX: the RAW flag"],
+    ]);
+    ok('control setup: the raw-flag copy applied its replacement', mutC.hits === 1, JSON.stringify(mutC));
+    const w2 = await codexWalled(mutC.mod);
+    const r2 = await w2.wake('manual refresh (cli-panel)');
+    ok('NEGATIVE CONTROL (raw flag): the same world DELIVERS a continue into a codex CLI that cannot re-read credentials, while the pool was restarting that very conversation',
+      r2.fired.length === 1 && w2.fired.length === 1 && w2.coldRestarts() >= 1 && /ChatGPT New 已恢复可用/.test(w2.cards()),
+      JSON.stringify({ fired: w2.fired.length, restarts: w2.coldRestarts(), cards: w2.cards() }));
   }
 
   // (d) THE INCIDENT ITSELF still works — this gate must not close the door it opened
@@ -886,6 +1077,111 @@ console.log('\n§7 no new vendor surface');
       w.probes.length === 0 && r.ok === false && r.probe?.rung !== 'cli-usage', JSON.stringify({ probes: w.probes, r: r.probe }));
   } else {
     ok('· SKIP (no codex subscription factory on this AccountManager)', true);
+  }
+}
+
+
+// ── §9 THE PANEL MAY NOT WRITE FOR A RECORD THAT STOPPED EXISTING ──────────
+// The BELT behind §6 EXIT 4 (r3). `refreshViaCliPanel` checks the roster ONCE,
+// before a `claude -p /usage` child with a 60-second timeout, and an account
+// CAN stop existing inside that window — the subscription auto-merge deletes
+// the throwaway milliseconds after the login edge, and "remove this account" is
+// an ordinary user action too. Nothing in accounts.js or the routes removes
+// usage-cache entries when an account goes away, and `establishedWindows()`
+// reads every `.json` in that directory with no roster filter, so a write here
+// leaves a cache file AND a window sidecar keyed to an id that names nothing.
+//
+// Driven through the REAL setupUsage factory with a FAKE `claude` on
+// CLAUDE_CMD (zero vendor cost, real execFile, real parse, real writes): the
+// panel takes ~400 ms, the account is removed at ~120 ms, exactly as the merge
+// exit does it.
+console.log('\n§9 the /usage panel refresher answers for a record that no longer exists');
+{
+  const usageMod = require(path.join(REPO, 'src/usage-routes.js'));
+  const usageSrc0 = read('src/usage-routes.js');
+  const usageMutants = [];
+  process.on('exit', () => { for (const f of usageMutants) { try { fs.unlinkSync(f); } catch { } } });
+  let mutU = 0;
+  /** A patched copy of src/usage-routes.js, as a SIBLING of the real one (its
+   *  requires are relative to src/); same name prefix as the other mutants so
+   *  §8's stale-PID sweep collects it, and gitignored. */
+  function mutantUsage(edits) {
+    let src = usageSrc0, hits = 0;
+    for (const [from, to] of edits) {
+      if (!src.includes(from)) return { err: 'needle missing: ' + from.slice(0, 70) };
+      src = src.split(from).join(to); hits++;
+    }
+    const f = path.join(REPO, 'src/vs-wake-mut-' + process.pid + '-u' + (++mutU) + '.js');
+    fs.writeFileSync(f, src); usageMutants.push(f);
+    return { mod: require(f), hits };
+  }
+  // A panel WITH reset clauses: the window sidecar is stamped only when the
+  // reading actually names a window, and both writes have to be in play for
+  // the removal leg to prove both are refused.
+  const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const at = (ms) => { const d = new Date(Date.now() + ms); return `${MON[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCHours() % 12 || 12}${d.getUTCHours() < 12 ? 'am' : 'pm'} (UTC)`; };
+  const PANEL = `Current session: 4% used · resets ${at(3 * 3600e3)}\nCurrent week (all models): 10% used · resets ${at(3 * 86400e3)}\n`;
+
+  function mkUsage({ delayMs = 400, usageModule = usageMod } = {}) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-wake-panel-'));
+    cleanup.push(root);
+    const dataDir = path.join(root, 'data');
+    const am = new AccountManager({ dataDir });
+    const id = am.createSubscription({ name: 'UCI Max' }).id;
+    fs.writeFileSync(path.join(am.subDir(id), '.credentials.json'),
+      JSON.stringify({ claudeAiOauth: { accessToken: 'tok', refreshToken: 'r', expiresAt: Date.now() + 36e5, refreshTokenExpiresAt: Date.now() + 29 * 86400e3, subscriptionType: 'max' } }), { mode: 0o600 });
+    const cacheDir = path.join(dataDir, 'usage-cache'); fs.mkdirSync(cacheDir, { recursive: true });
+    // the fake CLI: sleeps, then prints a panel this build's own parser accepts
+    const bin = path.join(root, 'fake-claude');
+    fs.writeFileSync(bin, `#!/bin/sh\nsleep ${(delayMs / 1000).toFixed(2)}\ncat <<'EOF'\n${PANEL}EOF\n`, { mode: 0o755 });
+    const app = { get() { }, post() { }, put() { }, delete() { }, use() { }, locals: {} };
+    const u = usageModule.setupUsage({
+      app, accounts: am, hosts: null, usageHistory: null, activeSessions: new Map(),
+      serverSetting: () => undefined, ensureDir: (d) => fs.mkdirSync(d, { recursive: true }),
+      USAGE_CACHE_FILE: path.join(dataDir, 'usage-cache.json'), USAGE_CACHE_DIR: cacheDir,
+      CODEX_SESSIONS_DIR: path.join(root, 'codex-sessions'), META_DIR: path.join(dataDir, 'session-meta'),
+      AVAILABLE_MODELS: [], BUFFERS_DIR: path.join(dataDir, 'session-buffers'),
+      probeUsageForAccountKey: async () => false, onMemberReadingFresh: () => ({}), CLAUDE_CMD: bin,
+    });
+    const files = () => fs.readdirSync(cacheDir).filter((f) => f.includes(id)).sort();
+    return { root, am, id, cacheDir, u, files };
+  }
+
+  // POSITIVE CONTROL FIRST: the guard is a refusal, not an off-switch
+  {
+    const w = mkUsage();
+    const okd = await w.u.refreshViaCliPanel(w.id);
+    ok('a panel for a LIVE account still lands (the belt refuses, it does not disable the refresher)',
+      okd === true && w.files().length >= 1 && JSON.parse(fs.readFileSync(path.join(w.cacheDir, w.id + '.json'), 'utf8')).fiveHour?.utilization === 0.04,
+      JSON.stringify(w.files()));
+    ok('…and it stamped the account\'s own window sidecar too (so the removal leg below can prove BOTH writes are refused)',
+      w.files().some((f) => f.startsWith('.window-')), JSON.stringify(w.files()));
+  }
+
+  // THE RACE: the record is removed while the panel is running
+  {
+    const w = mkUsage();
+    const p = w.u.refreshViaCliPanel(w.id);
+    await tick(120);
+    w.am.remove(w.id);
+    const okd = await p;
+    ok('a panel that answers AFTER its account was removed writes NOTHING — no cache file, no window sidecar, and it says the reading was not recorded',
+      okd === false && w.files().length === 0 && !w.am.get(w.id), JSON.stringify({ okd, files: w.files() }));
+
+    // NEGATIVE CONTROL: the pre-fix refresher — roster asked only at the SPAWN
+    const mut = mutantUsage([
+      ["  if (!isGlobal && !(accounts.list().accounts || []).some((x) => x.id === key)) {",
+        "  if (false) { // PRE-FIX: the roster is asked only before the spawn"],
+    ]);
+    ok('control setup: the pre-fix refresher copy applied its replacement', mut.hits === 1, JSON.stringify(mut));
+    const w2 = mkUsage({ usageModule: mut.mod });
+    const p2 = w2.u.refreshViaCliPanel(w2.id);
+    await tick(120);
+    w2.am.remove(w2.id);
+    const okd2 = await p2;
+    ok('NEGATIVE CONTROL (pre-fix): the same race leaves a cache file AND a window sidecar keyed to an id the roster no longer knows',
+      okd2 === true && !w2.am.get(w2.id) && w2.files().some((f) => f.endsWith('.json')) && w2.files().some((f) => f.startsWith('.window-')),
+      JSON.stringify({ okd2, files: w2.files() }));
   }
 }
 

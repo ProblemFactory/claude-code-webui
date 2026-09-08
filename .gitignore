@@ -57,3 +57,4 @@ src/lib/build-version.js
 # gate REFUSES on, so they can never be allowed to become tree state.
 src/server/vs-wake-mut-*.js
 src/server/vs-wake-master-ar-*.js
+src/vs-wake-mut-*.js
