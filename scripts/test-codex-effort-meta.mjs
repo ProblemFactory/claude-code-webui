@@ -651,9 +651,13 @@ console.log('— ⑩ version markers resolve; this branch squats nothing');
   const read = (f) => fs.readFileSync(path.join(REPO, f), 'utf8');
   // The RELEASED predecessor every site below back-references. Not this change.
   const PREDECESSOR = '2.369.62';
-  // The number the integrator should take (master's head is 2.369.67). Nothing
-  // in the tree is stamped with it — that is the point: it must still be free.
-  const NEXT_FREE = '2.369.68';
+  // The number the integrator should take. Nothing in the tree is stamped with
+  // it — that is the point: it must still be free, and the leg below PROVES it
+  // against origin/master rather than trusting this line. It moves every time
+  // master releases (2.369.67 → .68 landed while this branch was in flight,
+  // which is exactly the red this leg is FOR: a "first free number" that a
+  // release has taken is a marker that no longer resolves).
+  const NEXT_FREE = '2.369.69';
   const SITES = ['CLAUDE.md', 'data/bin/codex-chat-wrapper.js', 'src/codex-message-manager.js',
     'src/codex-session-store.js', 'src/server/stdout/codex-events.js', 'src/lib/agent-meta.js',
     'src/lib/chat-status-bar.js', 'src/lib/chat-view.js', 'src/ws-handler.js', 'src/session-schema.js',
@@ -1124,8 +1128,28 @@ console.log('— ⑪c WIRING: every resume/fork/restart entry point, and where t
     && /model: model !== undefined \? model : savedCfg\.model,/.test(sl),
     'resumeSession still forwards an EXPLICIT pick (caller > the card ⚙ override) — the "chosen" rung',
     'resumeSession');
-  ok(/_doForkSession[\s\S]{0,2000}?resumeId,[\s\S]{0,400}?fork: true,/.test(sl),
-    'a FORK carries resumeId → it is a continuation, so it inherits the parent conversation\'s values');
+  // WHAT THIS PINS is that the fork's createSession call carries BOTH keys —
+  // `resumeId` (so `continuesConversation` is true and the ladder takes the
+  // parent's values) and `fork: true`. It used to pin the DISTANCE between them
+  // (2000 chars from the method name), which is a fact about formatting: owner
+  // ruling 9 added ~950 characters of comment inside `_doForkSession`
+  // explaining why the fork needs its own `worktree` pick, and the pin went red
+  // for a change that did not touch either key. Scope it to the METHOD BODY and
+  // read the call instead — same claim, and it cannot be broken by a paragraph.
+  const forkBody = (() => {
+    const i = sl.lastIndexOf('async _doForkSession(');
+    if (i < 0) return null;
+    let depth = 0;
+    for (let k = sl.indexOf('{', i); k < sl.length; k++) {
+      if (sl[k] === '{') depth++;
+      else if (sl[k] === '}' && --depth === 0) return sl.slice(i, k + 1);
+    }
+    return null;
+  })();
+  const forkCall = forkBody && /this\.createSession\(\{[\s\S]*?\n\s*\}\);/.exec(forkBody);
+  ok(!!forkCall && /\n\s*resumeId,/.test(forkCall[0]) && /\n\s*fork: true,/.test(forkCall[0]),
+    'a FORK carries resumeId → it is a continuation, so it inherits the parent conversation\'s values',
+    forkCall ? forkCall[0].slice(0, 200) : 'no _doForkSession createSession call found');
   ok(/restartConversationInPlace[\s\S]{0,1200}?this\.resumeSession\(cid,/.test(sl),
     'restartConversationInPlace goes through resumeSession (no second spawn path to keep in sync)');
   ok(/const retry = \(\) => this\.createSession\(\{\n\s*cwd, name: sessionName, resumeId, mode: sessionMode, model, permission, effort,/.test(sl),
@@ -1191,10 +1215,44 @@ console.log('— ⑪c WIRING: every resume/fork/restart entry point, and where t
   ok(/modelOrigin: s\._modelOrigin \|\| null, effortOrigin: s\._effortOrigin \|\| null,/.test(srv),
     'the active-sessions payload carries value + origin for Session Properties');
   const sb = read('src/lib/sidebar.js');
-  ok((sb.match(/modelOrigin: (wm\?\.|ws\.)modelOrigin \|\| null/g) || []).length === 2,
-    'BOTH merge branches carry it onto the session record (the 2.369.58 outputStyle row reached neither — fixed here with them)');
-  ok((sb.match(/outputStyle: (wm\?\.|ws\.)outputStyle \|\| null/g) || []).length === 2,
+  // THE CLAIM IS "BOTH BRANCHES CARRY IT", not "there are two hand-copied lines
+  // that spell it". This started as a pair of literal-line counts because the
+  // facts WERE hand-copied one per line — and the finding it was written for
+  // (`outputStyle` reached NEITHER branch) is precisely the drift a per-fact
+  // line invites. Owner ruling 9 round 3 replaced the copies with ONE declared
+  // list spread into both branches, so the pin now asks the two questions that
+  // survive that: is the fact DECLARED, and does each branch spread the list.
+  // A key dropped from the list still turns this red; a fifth fact added to it
+  // no longer needs a sixth line here.
+  const factList = /const LIVE_SESSION_FACTS = Object\.freeze\(\{([\s\S]*?)\n\}\);/.exec(sb);
+  const spreads = (sb.match(/\.\.\.liveSessionFacts\((?:wm|ws)\)/g) || []).length;
+  const declares = (k) => !!factList && new RegExp(`(^|[^\\w])${k}\\s*:`, 'm').test(factList[1]);
+  ok(!!factList && spreads === 2 && declares('modelOrigin') && declares('effortOrigin')
+    && declares('spawnModel') && declares('effort'),
+    'BOTH merge branches carry it onto the session record (the 2.369.58 outputStyle row reached neither — fixed here with them)',
+    JSON.stringify({ spreads, declared: !!factList && factList[1].replace(/\s+/g, ' ').slice(0, 200) }));
+  ok(declares('outputStyle'),
     '…including that outputStyle twin, whose "live" value the panel had been reading as always-empty');
+  // …and the list is not a place a fact can hide: every key it declares must be
+  // one the SERVER payload really publishes, or the merge carries a null under
+  // a name nothing writes (the other half of the same drift).
+  const srvPayload = read('server.js');
+  const declaredKeys = factList ? [...factList[1].matchAll(/^\s*(?:\/\/[^\n]*\n\s*)*([A-Za-z_$][\w$]*)\s*:/gm)].map((m) => m[1]) : [];
+  const unpublished = declaredKeys.filter((k) => !new RegExp(`(^|[^\\w])${k}:`).test(srvPayload));
+  ok(declaredKeys.length >= 8 && unpublished.length === 0,
+    'every fact the merge declares is one the active-sessions payload actually publishes',
+    JSON.stringify({ declaredKeys, unpublished }));
+  // NEGATIVE CONTROLS for the two questions above — a pin that replaced a
+  // literal-line count has to show it can still fail.
+  {
+    const dropped = sb.replace(/\n\s*'?outputStyle'?: \{ digest[^\n]*\n/, '\n');
+    const fl2 = /const LIVE_SESSION_FACTS = Object\.freeze\(\{([\s\S]*?)\n\}\);/.exec(dropped);
+    ok(!!fl2 && !/(^|[^\w])outputStyle\s*:/m.test(fl2[1]) && dropped !== sb,
+      'NEGATIVE CONTROL: a fact deleted from the declared list is DETECTED (the pin is not satisfied by the list merely existing)');
+    const unspread = sb.replace('...liveSessionFacts(ws)', '/* dropped */');
+    ok((unspread.match(/\.\.\.liveSessionFacts\((?:wm|ws)\)/g) || []).length === 1,
+      'NEGATIVE CONTROL: a branch that stops spreading the list is DETECTED (the unmatched-session branch is the one 2.369.58 forgot)');
+  }
   const sp = read('src/lib/session-props.js');
   ok(/originRow\(t\('Model'\), s\.spawnModel \|\| '', cfg\.model, s\.modelOrigin\)/.test(sp)
     && /originRow\(t\('Effort'\), s\.effort \|\| '', cfg\.effort, s\.effortOrigin,/.test(sp),
