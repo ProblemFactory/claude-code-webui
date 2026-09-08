@@ -60,11 +60,22 @@ const cleanup = () => {
   try { fs.rmSync(cwd, { recursive: true, force: true }); } catch {}
 };
 process.on('exit', cleanup);
-for (let i = 0; i < 60; i++) { try { await fetch(`http://127.0.0.1:${PORT}/api/home`); break; } catch { await sleep(250); } }
+// BOOT WAIT sized for a LOADED box (2.369.75 gate: the fast tier runs beside
+// three implementer workflows on a 3,900-process machine; the worktree server
+// took longer than the old 15 s, the loop gave up SILENTLY and the WebSocket
+// below threw an unhandled ECONNREFUSED at 18 s). 120 s is a floor; a server
+// that never answers is a LOUD fail naming the wait, never a stack trace.
+let booted = false;
+for (let i = 0; i < 480 && !booted; i++) { try { await fetch(`http://127.0.0.1:${PORT}/api/home`); booted = true; } catch { await sleep(250); } }
+check(`worktree server answered /api/home within the boot budget (${booted ? 'yes' : 'NO — 120 s elapsed'})`, booted);
+if (!booted) { console.log('FAIL'); process.exit(1); }
 
 const WebSocket = require('ws');
 const ws = new WebSocket(`ws://127.0.0.1:${PORT}/ws`);
-await new Promise((r) => ws.on('open', r));
+// a refused/dropped socket is an ASSERT with a reason, not an unhandled 'error' event
+const wsOpened = await new Promise((r) => { ws.once('open', () => r(true)); ws.once('error', (e) => { console.log('  ws error: ' + (e && e.message)); r(false); }); });
+check('websocket connected to the worktree server', wsOpened);
+if (!wsOpened) { console.log('FAIL'); process.exit(1); }
 const frames = [];
 ws.on('message', (d) => { const s = d.toString(); frames.push(s); });
 
@@ -186,5 +197,5 @@ try {
   fs.rmSync(projDir, { recursive: true, force: true });
 } catch { }
 ws.close();
-console.log(failed ? `\n${failed} FAILED` : '\nALL PASS (6)');
+console.log(failed ? `\n${failed} FAILED` : '\nALL PASS (8)');
 process.exit(failed ? 1 : 0);
