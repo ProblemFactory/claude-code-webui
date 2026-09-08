@@ -6,6 +6,7 @@
 - **Resume/fork/restart keep the conversation's own effort and model** (owner ruling): the client sends a value only when you explicitly chose one for this session; otherwise the server resumes with the rollout's own last turn (codex) or the transcript's last served model (claude); the instance default applies to NEW sessions only; Session Properties says which fact it is showing (chosen / conversation / instance / harness); the pool placement still gets the model family hint.
 - **Re-login clears the warnings it caused.** The login-expiry watch now resolves the inbox items it filed the moment a member's login session changes (any rung), a successful Manage Agents login sweeps immediately (once per finalize, never per 3-second poll), and a measured short session (this org's logins last ~24 h) is mentioned in the 24 h warning.
 - Merge review fixes: the pool-blocked notice again names dead logins (the readings chain's pre-filter had hidden them behind "spent: 5h"), the version-marker gate asks git instead of clearing an already-released number.
+- Modules: the readings-by-slot attribution lives in `readingSlotFor` (src/server/usage-pool-engine.js) with src/slot-transitions.js and src/reading-repair.js; the resume rule is the resume-continuity module (src/resume-continuity.js: `resumeSpawnPick` + `spawnOriginHint`).
 - test-readings-attribution 194, test-codex-effort-meta 245, test-login-expiry 257.
 
 ## 2.369.67 — login sessions expire: say it BEFORE the turn dies (owner: "OAuth session expired and could not be refreshed")
