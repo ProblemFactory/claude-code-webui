@@ -326,6 +326,20 @@ console.log('\n— WIRING PINS (a fix that is not wired is not a fix) —');
   ok('the session card offers the serve terminal for opencode sessions on THIS machine', /session\.opencodeTerminal/.test(card) && /=== 'opencode' && !c\.s\.host/.test(card));
   ok('ws-create bridges the serve pty into the normal terminal path (no dtach spawn for it)', /data\.opencodePty/.test(read('src/ws-create.js')) && /!r6Handle && !ocPty/.test(read('src/ws-create.js')));
   ok('…and a serve terminal asked for a REMOTE machine is refused WITH the reason (the ws is not a promise the menu keeps)', /code: 'opencode-pty-remote'/.test(read('src/ws-create.js')) && /if \(data\.hostId \|\| session\.host\) \{/.test(read('src/ws-create.js')));
+  // …and BOTH refusals carry the id that un-hangs `ws.request`, spelled the way
+  // every other refusal in that file spells it. The grep above passes on the
+  // CODE alone, which is how a bare `reqId` (a free identifier — the lost-binding
+  // class this project has been bitten by four times) sat on this branch: the
+  // route throws only when a user clicks "Open terminal in this session" on a
+  // remote OpenCode session, and the window then hangs on a reply that a
+  // ReferenceError ate. test-server-globals is the general net; this is the pin
+  // that says WHICH promise the two lines owe.
+  ok("…and both OpenCode-pty refusals answer the REQUEST (`reqId: data.reqId`, not a bare identifier) — an error without it leaves the window spinning",
+    (() => {
+      const src = read('src/ws-create.js');
+      const sites = [...src.matchAll(/\{ type: 'error', code: 'opencode-pty-(?:remote|failed)',[^}]*\}/g)].map((m) => m[0]);
+      return sites.length === 2 && sites.every((x) => /reqId: data\.reqId/.test(x));
+    })(), JSON.stringify([...read('src/ws-create.js').matchAll(/code: 'opencode-pty-[a-z]+',[^,]*,/g)].map((m) => m[0])));
   ok('the pty session field is registered with an owner', /_opencodePtyId:/.test(read('src/session-schema.js')));
   ok('the daemon bundle carries the shared serve + op table (the device rung is the SAME code)', (() => {
     const b = path.join(REPO, 'data/bin/vibespace-agentd.js');

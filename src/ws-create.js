@@ -1756,15 +1756,19 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
             // a promise — refusing with the reason beats a window that never
             // fills.
             if (data.hostId || session.host) {
-              ws.send(JSON.stringify({ type: 'error', code: 'opencode-pty-remote', reqId, message: `The OpenCode terminal only works on this machine — the serve streams its terminals over a loopback socket that ${session.host || data.hostId} does not share. Open a normal terminal on that machine instead.` }));
+              ws.send(JSON.stringify({ type: 'error', code: 'opencode-pty-remote', reqId: data.reqId, message: `The OpenCode terminal only works on this machine — the serve streams its terminals over a loopback socket that ${session.host || data.hostId} does not share. Open a normal terminal on that machine instead.` }));
               return;
             }
             try {
               ocPty = await openOpencodePty({ cwd: spawnCwd, title: data.name || null });
             } catch (e) {
               // reqId is what un-hangs the client's `ws.request` — an error
-              // without it leaves the window spinning with nothing to read
-              ws.send(JSON.stringify({ type: 'error', code: 'opencode-pty-failed', reqId, message: `Could not open an OpenCode terminal: ${e.message}` }));
+              // without it leaves the window spinning with nothing to read, and
+              // it must be READ OFF `data` like every other refusal in this
+              // file: a bare `reqId` here is a free identifier whose
+              // ReferenceError only fires when a user actually clicks the row
+              // (test-server-globals is the net; test-opencode-s9 pins the shape)
+              ws.send(JSON.stringify({ type: 'error', code: 'opencode-pty-failed', reqId: data.reqId, message: `Could not open an OpenCode terminal: ${e.message}` }));
               return;
             }
           }
