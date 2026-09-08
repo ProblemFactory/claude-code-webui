@@ -88,6 +88,37 @@ ok(sysinfo.capProcs(live, 100).some((p) => p.pid === 8), 'capProcs ranks by live
 ok(sysinfo.capProcs(many, -5).length > 0 && sysinfo.capProcs(many, 3.7).length >= 20, 'capProcs clamps a hostile max');
 const siSrc = fs.readFileSync(path.join(REPO, 'src/sysinfo.js'), 'utf-8');
 ok(siSrc.indexOf('sampleProcCpu(all)') !== -1 && siSrc.indexOf('sampleProcCpu(all)') < siSrc.indexOf('capProcs(all, max)'), 'listProcs samples the WHOLE table before capping (cap-by-flatlined-pcpu bug)');
+// THE `ps` READ IS BOUNDED BY A THING THAT ONLY GROWS (2026-09-07). node's
+// `maxBuffer` overflow is an ERROR, not a truncation, and `topProcs` reads that
+// error as "no --sort, this must be BSD ps" — so on a busy machine the primary
+// read overflowed, the fallback overflowed on the SAME bytes, and it resolved
+// `[]`. The daemon op then reported NO processes, which is indistinguishable
+// from a machine with nothing running. Measured on this host: 2574 processes =
+// 4.64 MB, over the old 4 MiB cap; the op assert above is what caught it.
+{
+  const cap = /const PS_MAX_BUFFER = (\d+) \* 1024 \* 1024;/.exec(siSrc);
+  ok(!!cap && Number(cap[1]) >= 32, `the ps reads declare ONE bound, and it is not the 4 MiB a busy machine passes (${cap ? cap[1] : '?'} MiB)`);
+  // BOTH reads of the same table share it: one being able to answer while the
+  // other cannot is a difference with no meaning.
+  ok((siSrc.match(/maxBuffer: PS_MAX_BUFFER/g) || []).length === 3
+    && !/maxBuffer: \d+ \* 1024 \* 1024/.test(siSrc.replace(/const PS_MAX_BUFFER[^\n]*\n/, '')),
+    'every ps read uses that ONE bound — no per-call number left to drift');
+  // …and the failure MODE is the reason the number matters: prove that an
+  // overflow really does surface as an error the BSD fallback cannot tell from
+  // a missing `--sort`, so a future reader cannot decide the cap is cosmetic.
+  const { execFile } = await import('node:child_process');
+  const overflow = await new Promise((res) => {
+    execFile('ps', ['aux'], { timeout: 5000, maxBuffer: 4096 }, (e, out) => res({ code: e && e.code, killed: e && e.killed, bytes: (out || '').length }));
+  });
+  ok(overflow.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' && !overflow.killed,
+    'an over-cap `ps` FAILS (it does not truncate) — which is why the fallback rung cannot tell it apart from a BSD `ps`, and why the bound must fit the table',
+    JSON.stringify(overflow));
+  // POSITIVE CONTROL, against the real machine: the shipped read answers here.
+  const live = await sysinfo.read(process.cwd());
+  ok(Array.isArray(live.procs) && live.procs.length > 0 && live.procs.every((x) => x.pid && Number.isFinite(x.rss)),
+    `the local read really answers on THIS machine's process table (${live.procs.length} rows)`,
+    JSON.stringify((live.procs || []).slice(0, 1)));
+}
 // THE SIGNAL VERDICT'S EXISTENCE PROBE (B-3185 r6). It used to be spelled
 // `ps -p ${pid}` at BOTH sites, pinned here as "never kill -0" — and that pin
 // was half a truth: a BARE `kill -0` really would report every

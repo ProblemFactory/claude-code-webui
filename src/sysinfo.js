@@ -111,9 +111,23 @@ async function memInfoAsync() {
   return memInfo();
 }
 
+/** THE BOUND IS ON A THING THAT ONLY GROWS (2026-09-07). `ps aux` prints one
+ *  line per process INCLUDING its whole command line, so the size of this read
+ *  is set by how busy the machine is — and node's `maxBuffer` overflow is an
+ *  ERROR, not a truncation: the call yields ERR_CHILD_PROCESS_STDIO_MAXBUFFER,
+ *  this function reads that as "no --sort, must be BSD ps", the fallback
+ *  overflows on the very same bytes, and it resolves `[]`. A machine with
+ *  enough processes therefore reported NO processes at all — silently, because
+ *  an empty list is also what a machine with nothing running would send.
+ *  MEASURED here: 2574 processes = 4.64 MB, over the old 4 MiB cap; the daemon
+ *  op's assert ("top procs with pid+rss") is what caught it.
+ *  `PS_MAX_BUFFER` is shared with `listProcs` below — the two reads are the
+ *  same table through two column sets, so one of them being able to answer
+ *  while the other cannot is a difference with no meaning. */
+const PS_MAX_BUFFER = 32 * 1024 * 1024;
 function topProcs(n = 8) {
   return new Promise((resolve) => {
-    execFile('ps', ['aux', '--sort=-rss'], { timeout: 5000, maxBuffer: 4 * 1024 * 1024 }, (err, out) => {
+    execFile('ps', ['aux', '--sort=-rss'], { timeout: 5000, maxBuffer: PS_MAX_BUFFER }, (err, out) => {
       const parse = (text) => text.split('\n').slice(1).filter(Boolean).map((ln) => {
         const f = ln.trim().split(/\s+/);
         // USER PID %CPU %MEM VSZ RSS TTY STAT START TIME CMD…
@@ -121,7 +135,7 @@ function topProcs(n = 8) {
       }).filter((p) => p.pid);
       if (!err) return resolve(parse(out).slice(0, n));
       // BSD ps (no --sort): sort ourselves
-      execFile('ps', ['aux'], { timeout: 5000, maxBuffer: 4 * 1024 * 1024 }, (e2, out2) => {
+      execFile('ps', ['aux'], { timeout: 5000, maxBuffer: PS_MAX_BUFFER }, (e2, out2) => {
         if (e2) return resolve([]);
         resolve(parse(out2).sort((a, b) => b.rss - a.rss).slice(0, n));
       });
@@ -220,7 +234,7 @@ function sampleProcCpu(rows) {
  *  Returns { procs, total, sampled } — `sampled` says pcpuNow is live. */
 function listProcs({ max = 350 } = {}) {
   return new Promise((resolve) => {
-    execFile('ps', ['axo', PS_COLUMNS], { timeout: 8000, maxBuffer: 8 * 1024 * 1024 }, (err, out) => {
+    execFile('ps', ['axo', PS_COLUMNS], { timeout: 8000, maxBuffer: PS_MAX_BUFFER }, (err, out) => {
       if (err) return resolve({ procs: [], total: 0, sampled: false, error: String(err.message || err).slice(0, 200) });
       const all = parsePsProcs(out);
       // sample the WHOLE table BEFORE capping (review-confirmed ordering bug:
