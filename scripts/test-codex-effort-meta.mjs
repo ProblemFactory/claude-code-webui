@@ -611,31 +611,61 @@ console.log('— ⑨ client wiring pins');
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// ⑩ THE VERSION MARKER NAMES THIS CHANGE.
-// r2 review: the first cut stamped "2.369.61" into 36 places across 17 files
+// ⑩ EVERY VERSION MARKER IN THE TREE MUST RESOLVE — AND THIS BRANCH MUST NOT
+//    SQUAT A NUMBER.
+// History: the first cut stamped "2.369.61" into 36 places across 17 files
 // while master had ALREADY SHIPPED 2.369.61 as an unrelated release (Alt+Enter
 // = steer, 16 seconds before this branch's own commit) — every kb entry and
-// code comment then pointed a reader at somebody else's release. This is the
+// code comment then pointed a reader at somebody else's release. That was the
 // SECOND time (2.369.58 r2 renumbered 21 files off 2.369.54), and the reason
 // the older belt did not catch it: a branch that is not rebased has no
 // CHANGELOG entry for EITHER number, so a CHANGELOG-only check passes
 // vacuously. The number is claimed on the INTEGRATION BRANCH — so ask git.
-console.log('— ⑩ version marker');
+//
+// INTEGRATION r2 — THE LEG WAS ITSELF LYING (reproduced). It carried
+// `MARK = '2.369.62'` as "this change's marker" and cleared any claimant whose
+// text matched /effort|ultra|xhigh|turn_context/i. By then master had RELEASED
+// 2.369.62 for the PREDECESSOR change (subject: "codex effort a TURN ran at …
+// test-codex-effort-meta 108; B-6b6d filed for the resume-default half") —
+// which matches that topic regex by construction, because the sites cite it
+// PRECISELY for being on that topic. So `mine.every(describesThisChange)` was
+// true and the assert went green while asserting something false. A topic
+// regex cannot separate a predecessor release from its own follow-up.
+//
+// The number was playing TWO roles that this leg conflated, so it now asks two
+// questions:
+//   ① 2.369.62 is a CROSS-REFERENCE to a released ancestor. Every site cites it
+//      for the effort work it really shipped, so the invariant is that the
+//      reference RESOLVES on the integration branch (the release exists AND is
+//      about that topic) — not that it names the branch we are on. Rewriting
+//      those to an unreleased number would MANUFACTURE the dangling reference
+//      this leg exists to prevent (master's 2.369.62 is an ancestor of HEAD).
+//   ② THIS branch (B-6b6d + readings-by-slot + the login-expiry merge) is
+//      UNRELEASED and deliberately stamps NO number of its own — the
+//      integrator assigns one at release. The leg therefore names the first
+//      unclaimed number and PROVES it is unclaimed, so the check runs against
+//      a live number instead of going vacuous, and refuses any number that a
+//      release already took.
+console.log('— ⑩ version markers resolve; this branch squats nothing');
 {
   const read = (f) => fs.readFileSync(path.join(REPO, f), 'utf8');
-  const MARK = '2.369.62';   // renumber HERE and everywhere else in one sed
+  // The RELEASED predecessor every site below back-references. Not this change.
+  const PREDECESSOR = '2.369.62';
+  // The number the integrator should take (master's head is 2.369.67). Nothing
+  // in the tree is stamped with it — that is the point: it must still be free.
+  const NEXT_FREE = '2.369.68';
   const SITES = ['CLAUDE.md', 'data/bin/codex-chat-wrapper.js', 'src/codex-message-manager.js',
     'src/codex-session-store.js', 'src/server/stdout/codex-events.js', 'src/lib/agent-meta.js',
     'src/lib/chat-status-bar.js', 'src/lib/chat-view.js', 'src/ws-handler.js', 'src/session-schema.js',
     'server.js', 'docs/kb-file-structure.md', 'docs/kb-features.md', 'docs/kb-bugfix-invariants.md'];
-  for (const f of SITES) ok(read(f).includes(MARK), `${f} carries the marker ${MARK} (all sites name ONE version)`);
-  // A leftover mention of the old number is only allowed where it is ABOUT the
-  // renumber (the same line names the new one) — anywhere else it is still a
-  // cross-reference pointing at somebody else's release.
+  for (const f of SITES) ok(read(f).includes(PREDECESSOR), `${f} back-references the predecessor ${PREDECESSOR} (all sites name ONE version)`);
+  // A leftover mention of 2.369.61 is only allowed where it is ABOUT the
+  // renumber (the same line names the predecessor) — anywhere else it is still
+  // a cross-reference pointing at somebody else's release.
   const staleLines = [];
   for (const f of SITES) {
     for (const line of read(f).split('\n')) {
-      if (/2\.369\.61(?![\d.])/.test(line) && !line.includes(MARK)) staleLines.push(`${f}: ${line.trim().slice(0, 80)}`);
+      if (/2\.369\.61(?![\d.])/.test(line) && !line.includes(PREDECESSOR)) staleLines.push(`${f}: ${line.trim().slice(0, 80)}`);
     }
   }
   ok(staleLines.length === 0, 'no site still names the number master took as a live cross-reference', JSON.stringify(staleLines).slice(0, 300));
@@ -660,34 +690,67 @@ console.log('— ⑩ version marker');
     }
     return out;
   };
-  const describesThisChange = (text) => /effort|ultra|xhigh|turn_context/i.test(text);
+  // TWO predicates, because "same topic" and "same change" are different
+  // questions and the old single one could not tell a predecessor from its
+  // follow-up. `describesThisChange` demands a marker only THIS branch's work
+  // carries — deliberately NOT 'B-6b6d', which the predecessor's own subject
+  // already names ("B-6b6d filed for the resume-default half").
+  const describesTheEffortTopic = (text) => /effort|ultra|xhigh|turn_context/i.test(text);
+  const describesThisChange = (text) => /resumeSpawnPick|resume[- ]continuity|resume ladder|spawnOriginHint|readingSlotFor|readings[- ]by[- ]slot/i.test(text);
   if (!REF) {
-    console.log('  SKIP: no master/origin-master ref in this checkout — the squatter check did not run');
+    console.log('  SKIP: no master/origin-master ref in this checkout — the claim checks did not run');
   } else {
-    const mine = claimants(MARK);
-    ok(mine.length === 0 || mine.every(describesThisChange),
-      `${MARK} is unclaimed on ${REF} (or the claim IS this change) — a number another release used = renumber everywhere`,
-      JSON.stringify(mine));
-    // NEGATIVE CONTROL: the number this branch originally carried really is
-    // taken on master, by a change that is not this one. If this goes green
-    // the check above is blind and the next parallel branch ships a dangling
-    // cross-reference again.
-    const squatted = claimants('2.369.61');
-    ok(squatted.length > 0 && !squatted.every(describesThisChange),
-      'negative control: 2.369.61 IS claimed on the integration branch by a DIFFERENT change (this check can see a squatter)',
-      JSON.stringify(squatted));
+    // ① the back-reference RESOLVES: the release exists and is about the work
+    //    the sites cite it for.
+    const pred = claimants(PREDECESSOR);
+    ok(pred.length > 0 && pred.every(describesTheEffortTopic),
+      `${PREDECESSOR} is a RELEASED ancestor about the effort work every site cites it for (a marker is a cross-reference — it must resolve)`,
+      JSON.stringify(pred).slice(0, 200));
+    // ② the number the integrator will take is genuinely free.
+    const next = claimants(NEXT_FREE);
+    ok(next.length === 0, `${NEXT_FREE} is unclaimed on ${REF} — the integrator may take it`, JSON.stringify(next));
+    // ③ and this branch stamps NO unreleased number in any of the files a
+    //    reader cross-references. (The suite itself is NOT in this census: its
+    //    NEXT_FREE is the DECLARATION of a free number, asserted free above,
+    //    not a cross-reference to a release.)
+    const unreleasedIn = (text) => {
+      const out = [];
+      for (const v of text.match(/2\.369\.\d+(?![\d.])/g) || []) { if (claimants(v).length === 0) out.push(v); }
+      return [...new Set(out)];
+    };
+    const squatted = [];
+    for (const f of SITES) for (const v of unreleasedIn(read(f))) squatted.push(`${f}: ${v}`);
+    ok(squatted.length === 0, 'every version number named in the cited files is a RELEASE that exists on the integration branch (this branch squats none)', JSON.stringify([...new Set(squatted)]).slice(0, 300));
+    // NEGATIVE CONTROL C: the census has teeth — the same predicate over a
+    // site's text with an unreleased stamp spliced in reports it. (The r2
+    // defect was a green assert over a number nobody had checked against git.)
+    ok(unreleasedIn(read('CLAUDE.md') + '\n(2.369.9001 residue)').includes('2.369.9001')
+       && unreleasedIn(read('CLAUDE.md')).length === 0,
+      'negative control C: the census reports an unreleased stamp spliced into a real site, and is silent on the real text');
+    // NEGATIVE CONTROL A — the leg's own r2 defect: the predecessor release is
+    // ON TOPIC, so the OLD predicate cleared it while the strict one does not.
+    // This is the permanent proof that a same-topic squatter is now visible.
+    ok(pred.every(describesTheEffortTopic) && !pred.some(describesThisChange),
+      'negative control A: the SAME-TOPIC predecessor 2.369.62 passes the old topic regex and FAILS the strict one (the blindness this r2 fixed)',
+      JSON.stringify(pred).slice(0, 200));
+    // NEGATIVE CONTROL B — an OFF-TOPIC squatter is still caught (the r2 case
+    // this leg was originally written for).
+    const off = claimants('2.369.61');
+    ok(off.length > 0 && !off.every(describesThisChange),
+      'negative control B: 2.369.61 IS claimed on the integration branch by a DIFFERENT change (this check can see a squatter)',
+      JSON.stringify(off));
   }
   // …and the CHANGELOG rule (test-harness-honesty's belt, kept): unreleased =
-  // no entry (fine); released = the entry under this number must be OURS.
+  // no entry (fine); released under the number we take = the entry must be OURS.
   const changelog = read('CHANGELOG.md');
-  const head = new RegExp(`^## ${MARK.replace(/\./g, '\\.')}(?![\\d.])`, 'm').exec(changelog);
+  const head = new RegExp(`^## ${NEXT_FREE.replace(/\./g, '\\.')}(?![\\d.])`, 'm').exec(changelog);
   let entry = null;
   if (head) {
     const next = changelog.indexOf('\n## ', head.index + 1);
     entry = changelog.slice(head.index, next < 0 ? changelog.length : next);
   }
   ok(!entry || describesThisChange(entry),
-    `CHANGELOG ${MARK} is either unwritten or describes THIS change`, entry ? entry.slice(0, 160) : 'no entry yet');
+    `CHANGELOG ${NEXT_FREE} is either unwritten (this branch makes no release) or describes THIS change`, entry ? entry.slice(0, 160) : 'no entry yet');
 }
 
 // ───────────────────────────────────────────────────────────────────────────
