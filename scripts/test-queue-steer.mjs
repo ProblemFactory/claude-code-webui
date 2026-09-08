@@ -1229,9 +1229,15 @@ console.log('— ⑩ the four new verbs against a REAL codex app-server (isolate
 
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-qv-home-'));
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-qv-cwd-'));
-    const srv = spawn('codex', ['app-server'], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, CODEX_HOME: home } });
+    // A home with NO account — and no ambient API key either: a leaked
+    // OPENAI_API_KEY/CODEX_API_KEY would let the server's own idle drain bill
+    // a real turn (the fake CODEX_HOME only removes the login, not env keys).
+    const spawnEnv = { ...process.env, CODEX_HOME: home };
+    for (const k of Object.keys(spawnEnv)) if (/^(OPENAI|CODEX)_API_KEY$/.test(k)) delete spawnEnv[k];
+    ok('the real-app-server leg spawns with NO ambient API key (a fake home removes the login; only the env strip removes a key)', !Object.keys(spawnEnv).some((k) => /^(OPENAI|CODEX)_API_KEY$/.test(k)));
+    const srv = spawn('codex', ['app-server'], { stdio: ['pipe', 'pipe', 'pipe'], env: spawnEnv });
     let buf = '', rid = 0, stderr = '';
-    const pend = new Map(); const notes = []; const sentMethods = [];
+    const pend = new Map(); const notes = []; const sentMethods = []; let turnDone = null;
     srv.stdout.on('data', (d) => {
       buf += d;
       let i;
@@ -1241,6 +1247,7 @@ console.log('— ⑩ the four new verbs against a REAL codex app-server (isolate
         let m; try { m = JSON.parse(line); } catch { continue; }
         if (m.id !== undefined && pend.has(m.id)) { pend.get(m.id)(m); pend.delete(m.id); continue; }
         if (m.method) notes.push(m.method);
+        if (m.method === 'turn/completed') turnDone = m.params?.turn || m.params || {};
       }
     });
     srv.stderr.on('data', (d) => { stderr += d; });
@@ -1323,7 +1330,13 @@ console.log('— ⑩ the four new verbs against a REAL codex app-server (isolate
         ok('THE LEG NEVER STARTS A TURN: no turn/start and no thread/queue/start was sent (only the server\'s own idle drain, which a logged-out home cannot bill)', !sentMethods.includes('turn/start') && !sentMethods.includes('thread/queue/start'), sentMethods.join(','));
         // …and if the server DID drain one into a turn, that turn must have
         // failed on the missing login — the evidence that nothing was spent.
-        ok('…and any turn the server started by itself died unauthenticated (401 / an error notification): zero tokens, on a home with no account', !notes.includes('turn/started') || notes.includes('error') || /401 Unauthorized|Unauthorized/i.test(stderr), { notes: [...new Set(notes)], stderr: stderr.slice(-200) });
+        // The drain's death is ASYNCHRONOUS (a network round trip that a loaded
+        // gate machine makes slow — the .69 gate saw turn/started with the error
+        // still in flight): wait for a terminal signal, bounded, before judging.
+        const sawDeath = () => notes.includes('error') || /401 Unauthorized|Unauthorized/i.test(stderr) || !!turnDone;
+        for (let w = 0; notes.includes('turn/started') && !sawDeath() && w < 60; w++) await sleep(250);
+        const turnStatus = turnDone?.status || turnDone?.turn?.status || null;
+        ok('…and any turn the server started by itself died unauthenticated (401 / an error notification / a non-completed turn): zero tokens, on a home with no account — the ONLY failing shape is a turn that COMPLETED', !notes.includes('turn/started') || ((notes.includes('error') || /401 Unauthorized|Unauthorized/i.test(stderr) || turnStatus !== 'completed') && turnStatus !== 'completed'), { notes: [...new Set(notes)], turnStatus, pending: notes.includes('turn/started') && !sawDeath(), stderr: stderr.slice(-200) });
       }
     } catch (e) {
       ok('the real-app-server verb leg ran', false, String(e.message || e).slice(0, 300));
