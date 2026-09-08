@@ -128,7 +128,35 @@ const reapAbandoned = () => {
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { }
     n++;
   }
-  if (n) spawnSync('git', ['-C', REPO, 'worktree', 'prune'], { env: GIT_ENV });
+  // A REGISTRATION KILLED DURING `worktree add` IS LOCKED, AND PRUNE SKIPS
+  // LOCKED WORKTREES FOREVER. git takes its own transient lock with the reason
+  // `initializing` while it checks the new worktree out and releases it when
+  // the add completes — so a run killed inside that window (which is most of
+  // what the SIGTERM mutations do) leaves a registration whose directory is
+  // GONE and which no prune will ever remove. Measured: four of them on this
+  // box, surviving every reap. Unlock ONLY that exact shape: our naming, a dead
+  // pid, a directory that no longer exists, and the reason `initializing` —
+  // any other reason is a human saying "don't touch this", and it is not ours
+  // to overrule.
+  let unlocked = 0;
+  const listed = spawnSync('git', ['-C', REPO, 'worktree', 'list', '--porcelain'], { encoding: 'utf-8', env: GIT_ENV });
+  let wt = null;
+  for (const line of (listed.stdout || '').split('\n')) {
+    if (line.startsWith('worktree ')) { wt = line.slice(9); continue; }
+    if (!wt || !line.startsWith('locked')) continue;
+    const reason = line.slice(6).trim();
+    const m = /^vs-ci-heavy-[0-9a-f]{8}-(\d+)$/.exec(path.basename(wt));
+    if (reason === 'initializing' && m && pidGone(Number(m[1])) && !fs.existsSync(wt)) {
+      spawnSync('git', ['-C', REPO, 'worktree', 'unlock', wt], { env: GIT_ENV });
+      unlocked++;
+    }
+  }
+  if (unlocked) console.log(`  ↺ unlocked ${unlocked} registration(s) git left locked as \`initializing\` when their run was killed mid-add`);
+  // ALWAYS prune, not just when we removed something: a registration whose
+  // directory is already gone (somebody cleared /tmp, or an earlier reap ran
+  // with a different REPO) is exactly what prune is for, and gating it on our
+  // own removals left four of them behind on this box — measured.
+  spawnSync('git', ['-C', REPO, 'worktree', 'prune'], { env: GIT_ENV });
   return n;
 };
 const reaped = reapAbandoned();
