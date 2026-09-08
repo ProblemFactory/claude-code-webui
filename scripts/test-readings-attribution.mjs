@@ -623,7 +623,11 @@ if (!probe) {
           && /resetsAt mod 604800/.test(r1) && /NEVER read back out of `sevenDay\.resetsAt`/.test(r1);
       })());
     ok('§9b NEGATIVE CONTROL: the same predicates fail on the row as it stood before this change (they are not matching prose that was always there)',
-      (() => { const before = row.replace(/\*\*AND THE READING IS EVIDENCE ABOUT ITSELF[\s\S]*?parity pin\)\.\*\* /, ''); return !/LAG SHADOW/.test(before) && !/reading-lag\.js/.test(before) && before.length < row.length; })());
+      // the terminus moves with the chain: every later round appends to the
+      // SAME block, so this control strips through whatever the last one ended
+      // with (r4: "…AFTER the guard chose the key.**") and must still remove
+      // strictly more than nothing, or it has silently stopped applying.
+      (() => { const before = row.replace(/\*\*AND THE READING IS EVIDENCE ABOUT ITSELF[\s\S]*?AFTER the guard chose the key\.\*\* /, ''); return !/LAG SHADOW/.test(before) && !/reading-lag\.js/.test(before) && !/PER BUCKET/.test(before) && before.length < row.length; })());
     // r3: the two rules THIS round established are exactly the kind a later edit
     // "simplifies" back — one of them is a single line's POSITION, the other is
     // which of two clocks a shipped single file is allowed to believe.
@@ -639,6 +643,21 @@ if (!probe) {
           // …while the ROUND 1+2 properties this row also pins are still there
           && /WEEKLY HALF IS THE ONLY IDENTITY EVIDENCE/.test(r2) && /ESTABLISHED WINDOW LIVES IN A SIDECAR/.test(r2)
           && /resetsAt mod 604800/.test(r2);
+      })());
+    // r4: the rule most likely to be "simplified" back is the one that reads as
+    // an optimisation — deciding a record once instead of once per bucket.
+    ok('§9b …and the rule ROUND 4 established: the repair moves PER BUCKET (the {5h,7d} primary half decides where the record goes; every other bucket is archived with its own reason), and "no evidence ⇒ no refusal" governs REFUSING TO WRITE, not MOVING',
+      /THE REPAIR MOVES PER BUCKET, NEVER WHOLESALE/.test(row) && /ONE BUCKET AT A TIME/.test(row)
+      && /the PRIMARY half is `\{5h,7d\}`/.test(row) && /governs REFUSING TO WRITE, not MOVING/.test(row)
+      && /preserve-merges the previous scoped bucket/.test(row), row.slice(-900));
+    ok('§9b NEGATIVE CONTROL: that predicate fails on the row as ROUND 3 left it (it is not matching prose that was already there)',
+      (() => {
+        const r3 = row.replace(/\*\*AND THE REPAIR MOVES PER BUCKET, NEVER WHOLESALE[\s\S]*?AFTER the guard chose the key\.\*\* /, '');
+        return r3.length < row.length
+          && !/THE REPAIR MOVES PER BUCKET/.test(r3) && !/ONE BUCKET AT A TIME/.test(r3)
+          // …while every earlier round's properties this row pins are still there
+          && /THE CLOCK RANKS BELOW THE WINDOWS/.test(r3) && /AND THE STATUSLINE RUNS THE GUARD/.test(r3)
+          && /WEEKLY HALF IS THE ONLY IDENTITY EVIDENCE/.test(r3);
       })());
   }
 }
@@ -2179,6 +2198,302 @@ const mkIncidentWorld = ({ stampWindows = true } = {}) => {
     /id: '2026-09-refile-readings-by-window'/.test(read('src/server/migrations.js')) && /\[migrate\] readings-by-window:/.test(read('src/server/migrations.js')));
   ok('§16 …and it hands the CURRENT roster as the only accounts that may RECEIVE a reading (a removed subscription cannot hold one)',
     /roster = \(st\?\.accounts \|\| \[\]\)\.filter\(\(a\) => a && a\.id && a\.type === 'subscription'\)/.test(read('src/server/migrations.js')));
+}
+
+// ── §16b PER BUCKET, NEVER WHOLESALE (r4, reproduced on a COPY of this
+// instance's stores) ─────────────────────────────────────────────────────────
+// An anchor is a snapshot of a usage-cache FILE, and that file has more than
+// one writer: the statusline rewrites {5h, 7d} from its own payload and
+// PRESERVES whatever `scopedWeekly` the file already held (it has no scoped
+// buckets of its own). So a reading that landed on the wrong key before the
+// window guard existed leaves a record that is ITSELF A MIX — another account's
+// 7d sitting on top of this stream's own Fable bucket. Measured on a copy of
+// this instance's stores: 444 such records against 32 whose halves are BOTH
+// foreign and 4466 clean ones.
+//
+// The r3 repair established each account's window as {sevenDay, fiveHour:null,
+// scoped:{}} — it DISCARDED the scoped half of the evidence — so it decided on
+// the 7d alone and moved 443 of its 476 re-files complete with a Fable bucket
+// the target's own weekly phase contradicts; `repairCachesByWindow` then
+// rebuilt a cache from one of them and wrote another member's model-scoped
+// bucket, resetsAt and scopedFetchedAt over the target's own.
+// `src/account-pool-auto.js` reads `cache.scopedWeekly` for accountRemaining /
+// weeklyDeadline / bucketRems, so that is a misattributed reading that can flip
+// a pool switch — the 2.305.0 scoped-bucket class, created BY THE REPAIR.
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-winrepair-mix-')); cleanup.push(d);
+  const A = 'sub-aaaaaaaaaaaa', B = 'sub-bbbbbbbbbbbb';
+  const WA = 1789030800, WB = 1789142400;   // two distinct weekly phases
+  const T0 = Date.parse('2026-09-08T00:00:00Z');
+  // a record's Fable bucket travels SEPARATELY from its {5h,7d} half, exactly
+  // as the two live writers produce it
+  const rec = (acct, ident, ts, u, resetsAt, fableAt, fableU, source = 'on-demand') => ({
+    ts, fetchedAt: ts, source, accountId: acct, identityKey: ident,
+    buckets: {
+      fiveHour: { u: 0.2, resetsAt: 1 }, sevenDay: { u, resetsAt },
+      scopedWeekly: fableAt ? [{ name: 'Fable', u: fableU, resetsAt: fableAt, asOf: ts - 1000 }] : [],
+    },
+    prevFetchedAt: null, elapsedSec: null, costSince: null,
+  });
+  /** Build the fixture fresh for each arm: A and B each with 8 of their OWN
+   *  panel readings (7d and Fable both on their own phase), plus ONE MIXED
+   *  record newest in B's stream — 7d = A's phase, Fable = B's. A's cache
+   *  carries a FOREIGN snapshot (B's 7d) so the rebuild branch fires, and its
+   *  scopedWeekly is A's OWN Fable. */
+  const build = (root) => {
+    const dataDir = path.join(root, 'data');
+    const anchors = path.join(dataDir, 'usage-anchors'), cache = path.join(dataDir, 'usage-cache');
+    for (const p of [anchors, cache]) fs.mkdirSync(p, { recursive: true });
+    const aRows = Array.from({ length: 8 }, (_, i) => rec(A, 'org_a', T0 + i * 60000, 0.1 + i * 0.01, WA, WA, 0.90 + i * 0.005));
+    const bRows = Array.from({ length: 8 }, (_, i) => rec(B, 'org_b', T0 + i * 60000, 0.5, WB, WB, 0.80));
+    bRows.push(rec(B, 'org_b', T0 + 20 * 60000, 0.20, WA, WB, 0.38, 'rate-limit-event'));   // ← THE MIXED RECORD
+    fs.writeFileSync(path.join(anchors, 'anchors-org_a.ndjson'), aRows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+    fs.writeFileSync(path.join(anchors, 'anchors-org_b.ndjson'), bRows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+    fs.writeFileSync(path.join(cache, A + '.json'), JSON.stringify({
+      fetchedAt: T0 + 21 * 60000, source: 'rate-limit-event',
+      fiveHour: { utilization: 0.2, resetsAt: 1 }, sevenDay: { utilization: 0.20, resetsAt: WB },   // ← foreign 7d
+      // A's OWN Fable cap is nearly spent while its 5h/7d are healthy — the
+      // 2.305.0 shape, so which repair ran decides a pool SWITCH.
+      scopedWeekly: [{ name: 'Fable', utilization: 0.96, resetsAt: WA }], scopedFetchedAt: T0 + 7 * 60000,
+      orgUuid: 'aaaa',
+    }));
+    fs.writeFileSync(path.join(cache, B + '.json'), JSON.stringify({ fetchedAt: T0, source: 'on-demand', sevenDay: { utilization: 0.5, resetsAt: WB } }));
+    return dataDir;
+  };
+  const rowsOf = (dataDir, f) => fs.readFileSync(path.join(dataDir, 'usage-anchors', f), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  const cacheOf = (dataDir, id) => JSON.parse(fs.readFileSync(path.join(dataDir, 'usage-cache', id + '.json'), 'utf8'));
+  const fableOf = (c) => (c.scopedWeekly || []).find((s) => String(s.name).toLowerCase() === 'fable') || null;
+
+  // (a) THE SCOPED HALF IS ESTABLISHED AT ALL — the evidence r3 threw away
+  const dataDir = build(path.join(d, 'fix'));
+  const rep = repair.repairByWindow({ dataDir, roster: [A, B], id: 'W4' });
+  ok('§16b each identity establishes its model-scoped weekly phases from its OWN panel readings too (r3 established `scoped:{}` and was therefore blind to half the record)',
+    rep.identities.length === 2 && rep.identities.every((i) => i.scoped && i.scoped.fable && i.scoped.fable.n === 8),
+    JSON.stringify(rep.identities.map((i) => [i.key, i.phase, i.scoped])));
+  ok('§16b …and the SEEDED sidecar carries them, so the live guard is armed on the scoped buckets exactly as the panel producer arms it (usage-routes stamps windowOf(merged), which includes scopedWeekly)',
+    readWindow(path.join(dataDir, 'usage-cache'), A)?.scoped?.fable === WA
+    && readWindow(path.join(dataDir, 'usage-cache'), B)?.scoped?.fable === WB,
+    JSON.stringify([readWindow(path.join(dataDir, 'usage-cache'), A), readWindow(path.join(dataDir, 'usage-cache'), B)]));
+
+  // (b) THE RECORD MOVES CARRYING ONLY WHAT AGREES WITH WHERE IT LANDS
+  const movedA = rowsOf(dataDir, 'anchors-org_a.ndjson').find((r) => r.refiledFrom === 'org_b');
+  ok('§16b the mixed record\'s 7-day half is filed on the account whose window it carries…',
+    !!movedA && Math.abs(movedA.buckets.sevenDay.u - 0.20) < 1e-9 && movedA.buckets.sevenDay.resetsAt === WA && movedA.accountId === A,
+    JSON.stringify(movedA && movedA.buckets));
+  ok('§16b …while its Fable bucket — whose weekly phase is the OTHER account\'s — does NOT travel with it',
+    !!movedA && (movedA.buckets.scopedWeekly || []).length === 0 && Array.isArray(movedA.droppedBuckets) && movedA.droppedBuckets.includes('fable'),
+    JSON.stringify(movedA && [movedA.buckets.scopedWeekly, movedA.droppedBuckets]));
+  ok('§16b …and the five-hour half travels WITH the seven-day one (one payload, one producer, one credential — a 5h window names a TIME and can prove nothing alone)',
+    !!movedA && movedA.buckets.fiveHour && movedA.buckets.fiveHour.resetsAt === 1, JSON.stringify(movedA && movedA.buckets.fiveHour));
+
+  // (c) THE DROPPED BUCKET IS ARCHIVED WITH A REASON THAT NAMES ITS OWNER
+  const archRows = fs.readFileSync(path.join(dataDir, 'archive', 'readings-window-anchors.ndjson'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  const line = archRows.find((r) => r.action === 'refiled' && r.to === 'org_a');
+  ok('§16b the Fable half is ARCHIVED with its OWN reason, naming the account it does belong to',
+    !!line && Array.isArray(line.buckets) && line.buckets.length === 1 && line.buckets[0].bucket === 'fable'
+    && /is org_b's, not org_a's/.test(line.buckets[0].reason),
+    JSON.stringify(line && line.buckets));
+  ok('§16b …and that line keeps the ORIGINAL WHOLE RECORD, so nothing is destroyed and the corpus still re-derives offline',
+    !!line && line.entry && line.entry.buckets.scopedWeekly.length === 1 && line.entry.buckets.scopedWeekly[0].resetsAt === WB
+    && Math.abs(line.entry.buckets.sevenDay.u - 0.20) < 1e-9,
+    JSON.stringify(line && line.entry && line.entry.buckets));
+  ok('§16b the report counts the two kinds apart (a partial move is not a whole one)',
+    rep.anchors.refiled === 1 && rep.anchors.refiledPartial === 1 && rep.anchors.refiledWhole === 0 && rep.anchors.bucketsArchived === 1 && rep.anchors.archived === 0,
+    JSON.stringify(rep.anchors));
+
+  // (d) THE CACHE REBUILD NEVER IMPORTS A FOREIGN BUCKET
+  const cA = cacheOf(dataDir, A);
+  ok('§16b A\'s cache is rebuilt from a record ALL of whose weekly buckets are its own — here the 7-day half that just moved in, which is A\'s real newest number',
+    rep.caches.foreign === 1 && rep.caches.restored === 1
+    && Math.abs(cA.sevenDay.utilization - 0.20) < 1e-9 && cA.sevenDay.resetsAt === WA && cA.orgUuid === 'aaaa',
+    JSON.stringify([rep.caches, cA.sevenDay]));
+  ok('§16b …and it KEEPS ITS OWN Fable bucket: that record states none, and a rebuild that simply replaced the snapshot would DELETE the model cap the pool reads (the 2.70.0 Fable-vanishing class the three live writers all preserve-merge against)',
+    fableOf(cA)?.resetsAt === WA && Math.abs(fableOf(cA).utilization - 0.96) < 1e-9
+    && cA.scopedFetchedAt === T0 + 7 * 60000 && cA.scopedPreservedBy === 'window-repair',
+    JSON.stringify([cA.scopedWeekly, cA.scopedFetchedAt, cA.scopedPreservedBy]));
+
+  // (e) IDEMPOTENT + THE CENSUS THIS ROUND EXISTS TO SATISFY
+  const rep2 = repair.repairByWindow({ dataDir, roster: [A, B], id: 'W4' });
+  ok('§16b IDEMPOTENT: a second run moves nothing, drops no bucket and rebuilds no cache',
+    rep2.anchors.refiled === 0 && rep2.anchors.archived === 0 && rep2.anchors.bucketsArchived === 0 && rep2.anchors.stripped === 0 && rep2.caches.foreign === 0 && rep2.caches.scopedStripped === 0,
+    JSON.stringify([rep2.anchors, rep2.caches]));
+  ok('§16b …and the census holds: NO stream and NO cache ends with a weekly bucket whose phase contradicts its account',
+    (() => {
+      const phase = { org_a: { sevenDay: WA, fable: WA }, org_b: { sevenDay: WB, fable: WB } };
+      let bad = 0;
+      for (const [ident, w] of Object.entries(phase)) {
+        for (const r of rowsOf(dataDir, `anchors-${ident}.ndjson`)) {
+          if (Number(r.buckets?.sevenDay?.resetsAt) > 0 && readingLag.weeklyNear(r.buckets.sevenDay.resetsAt, w.sevenDay) === false) bad++;
+          for (const s of (r.buckets?.scopedWeekly || [])) if (Number(s.resetsAt) > 0 && readingLag.weeklyNear(s.resetsAt, w.fable) === false) bad++;
+        }
+      }
+      for (const [id, w] of [[A, { sevenDay: WA, fable: WA }], [B, { sevenDay: WB, fable: WB }]]) {
+        const c = cacheOf(dataDir, id);
+        if (Number(c.sevenDay?.resetsAt) > 0 && readingLag.weeklyNear(c.sevenDay.resetsAt, w.sevenDay) === false) bad++;
+        for (const s of (c.scopedWeekly || [])) if (Number(s.resetsAt) > 0 && readingLag.weeklyNear(s.resetsAt, w.fable) === false) bad++;
+      }
+      return bad === 0;
+    })());
+
+  // (f) NEGATIVE CONTROL — the r3 repair, as a PATCHED COPY of the real module
+  // (never a re-typed one), with EXACTLY the decisions this round changed
+  // reverted: the scoped half is dropped from the established window again, and
+  // the record is decided and moved as a whole. Each replacement is asserted to
+  // have hit, so this can never silently become a second green arm.
+  {
+    const src = read('src/reading-repair.js');
+    const SUB = [
+      // ① establishedWindows discards the scoped evidence
+      ['window: { sevenDay: top.resetsAt, fiveHour: null, scoped: sc },',
+        'window: { sevenDay: top.resetsAt, fiveHour: null, scoped: {} },'],
+      // ② the record is decided as a whole, and every bucket travels with it
+      ['      const prim = win.sevenDay ? _bucketVerdict(ident, { sevenDay: win.sevenDay, fiveHour: null, scoped: {} }, all) : null;',
+        '      const prim = win.sevenDay ? _bucketVerdict(ident, win, all) : null;'],
+      ['        if (v.target === dest) keptScoped.push(s);\n        else drops.push({ bucket: nm, reason: _dropReason(v, dest, ident) });',
+        '        keptScoped.push(s);'],
+      // ③ the cache rebuild picks the newest record whose 7d is ours, whole
+      ['        if (!_recordAgreesWholly(r, w.window)) continue;',
+        '        const rw = windowOf(r.buckets || {}); if (!rw.sevenDay || weeklyNear(rw.sevenDay, w.window.sevenDay) !== true) continue;'],
+      ['      if (best) { next = _cacheFromAnchor(best, cur, w.window); res.restored++; }',
+        '      if (best) { next = _cacheFromAnchor(best, cur); res.restored++; }'],
+    ];
+    let patched = src, hits = 0;
+    for (const [from, to] of SUB) { if (patched.split(from).length === 2) { patched = patched.replace(from, to); hits++; } }
+    ok('§16b NEGATIVE CONTROL setup: all 5 pre-fix replacements hit the real module (a control that silently stops applying is a second green arm)', hits === SUB.length, `hits=${hits}/${SUB.length}`);
+    const preDir = path.join(d, 'prefix-src'); fs.mkdirSync(preDir, { recursive: true });
+    fs.writeFileSync(path.join(preDir, 'reading-repair.js'),
+      patched.replace("require('./login-state.js')", `require(${JSON.stringify(path.join(REPO, 'src/login-state.js'))})`)
+        .replace("require('./reading-lag.js')", `require(${JSON.stringify(path.join(REPO, 'src/reading-lag.js'))})`));
+    const R3 = require(path.join(preDir, 'reading-repair.js'));
+    const dd = build(path.join(d, 'pre'));
+    const r3 = R3.repairByWindow({ dataDir: dd, roster: [A, B], id: 'W3' });
+    const movedPre = rowsOf(dd, 'anchors-org_a.ndjson').find((r) => r.refiledFrom === 'org_b');
+    ok('§16b NEGATIVE CONTROL: the r3 repair moves the record WHOLE — the other account\'s Fable bucket lands in A\'s stream',
+      r3.anchors.refiled === 1 && !!movedPre && (movedPre.buckets.scopedWeekly || []).length === 1 && movedPre.buckets.scopedWeekly[0].resetsAt === WB,
+      JSON.stringify(movedPre && movedPre.buckets.scopedWeekly));
+    const cPre = cacheOf(dd, A);
+    ok('§16b NEGATIVE CONTROL: …and the cache rebuild then writes that bucket — value, resetsAt AND scopedFetchedAt — over A\'s own',
+      fableOf(cPre)?.resetsAt === WB && Math.abs(fableOf(cPre).utilization - 0.38) < 1e-9 && cPre.scopedFetchedAt !== (T0 + 7 * 60000),
+      JSON.stringify([cPre.scopedWeekly, cPre.scopedFetchedAt]));
+    // …and the harm is MONEY: the pool reads exactly that bucket
+    const { bucketRems, accountRemaining, decidePoolSwitch } = require(path.join(REPO, 'src/account-pool-auto.js'));
+    const nowSec = Math.floor((T0 + 22 * 60000) / 1000);
+    const fixRems = bucketRems(cA, nowSec).filter((x) => x.label === 'Fable');
+    const preRems = bucketRems(cPre, nowSec).filter((x) => x.label === 'Fable');
+    const members = [{ id: A, name: 'A' }, { id: B, name: 'B' }];
+    const verdict = (cache) => decidePoolSwitch({ currentId: A, members, readCache: (id) => (id === A ? cache : cacheOf(dataDir, B)), nowSec, hot: true });
+    ok('§16b NEGATIVE CONTROL: THE HARM IS MONEY — the same account\'s Fable cap reads nearly SPENT under the fix and mostly free under r3, and `accountRemaining` (the min across buckets) follows it',
+      fixRems.length === 1 && preRems.length === 1
+      && Math.abs(fixRems[0].remaining - 4) < 0.5 && Math.abs(preRems[0].remaining - 62) < 0.5
+      && Math.abs(accountRemaining(cA, nowSec).remaining - 4) < 0.5 && Math.abs(accountRemaining(cPre, nowSec).remaining - 62) < 0.5,
+      JSON.stringify([fixRems[0], preRems[0], accountRemaining(cA, nowSec), accountRemaining(cPre, nowSec)]));
+    ok('§16b NEGATIVE CONTROL: …and that is a POOL SWITCH — the real engine\'s own decider moves off A under the fix and stays on it under r3, on the same two accounts at the same instant',
+      verdict(cA)?.to === B && verdict(cA)?.reason === 'exhausted' && verdict(cPre) === null,
+      JSON.stringify([verdict(cA), verdict(cPre)]));
+    ok('§16b NEGATIVE CONTROL: …and the reset the r3 cache carries for A is B\'s, so a stranger\'s instant is among A\'s weekly-deadline candidates',
+      preRems[0].resetsAt === WB && fixRems[0].resetsAt === WA, JSON.stringify([preRems[0].resetsAt, fixRems[0].resetsAt]));
+  }
+
+  // (g) A RECORD WITH NO AGREEING BUCKET IS ARCHIVED, NOT MOVED
+  {
+    const dd = build(path.join(d, 'noowner'));
+    const rows = rowsOf(dd, 'anchors-org_b.ndjson');
+    rows[rows.length - 1].buckets.sevenDay.resetsAt = WA + 3 * 86400;        // nobody's 7d …
+    rows[rows.length - 1].buckets.scopedWeekly[0].resetsAt = WA + 3 * 86400; // … and nobody's Fable
+    fs.writeFileSync(path.join(dd, 'usage-anchors', 'anchors-org_b.ndjson'), rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+    const r = repair.repairByWindow({ dataDir: dd, roster: [A, B], id: 'W5' });
+    const arch = fs.readFileSync(path.join(dd, 'archive', 'readings-window-anchors.ndjson'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    ok('§16b a record with NO bucket that can be proven to belong anywhere is ARCHIVED WHOLE, never moved on a guess',
+      r.anchors.archived === 1 && r.anchors.refiled === 0 && arch.some((x) => x.action === 'archived' && /matches no known account/.test(x.reason)),
+      JSON.stringify([r.anchors, arch.map((x) => x.action)]));
+  }
+
+  // (h) A SCOPED-ONLY FOREIGN BUCKET IS STRIPPED IN PLACE — the shape the
+  // rebuild branch structurally cannot reach (its 7d agrees), so before r4
+  // nothing on any path could clean it, while the pool reads it every tick.
+  {
+    const dd = build(path.join(d, 'scopedonly'));
+    const rows = rowsOf(dd, 'anchors-org_b.ndjson');
+    rows[rows.length - 1].buckets.sevenDay.resetsAt = WB;            // 7d is B's own …
+    rows[rows.length - 1].buckets.scopedWeekly[0].resetsAt = WA;     // … but the Fable bucket is A's
+    fs.writeFileSync(path.join(dd, 'usage-anchors', 'anchors-org_b.ndjson'), rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+    const cB = cacheOf(dd, B);
+    cB.scopedWeekly = [{ name: 'Fable', utilization: 0.38, resetsAt: WA }]; cB.scopedFetchedAt = T0;
+    fs.writeFileSync(path.join(dd, 'usage-cache', B + '.json'), JSON.stringify(cB));
+    const r = repair.repairByWindow({ dataDir: dd, roster: [A, B], id: 'W6' });
+    const kept = rowsOf(dd, 'anchors-org_b.ndjson').find((x) => x.fetchedAt === T0 + 20 * 60000);
+    ok('§16b a record whose 7-day half is its own but whose Fable bucket is another account\'s STAYS, stripped of that bucket (it is not a re-file — only the bucket is foreign)',
+      r.anchors.stripped === 1 && r.anchors.refiled === 0 && !!kept && (kept.buckets.scopedWeekly || []).length === 0
+      && kept.buckets.sevenDay.resetsAt === WB && Array.isArray(kept.strippedBuckets) && kept.strippedBuckets.includes('fable'),
+      JSON.stringify([r.anchors, kept && kept.buckets]));
+    ok('§16b …and the report COUNTS that stream — "streams: 0" about a run that rewrote one is the quiet lie the per-bucket counters exist to prevent',
+      r.anchors.streams === 1, JSON.stringify(r.anchors));
+    ok('§16b …and the CACHE carrying that bucket is stripped too — its 7d agrees, so the rebuild branch can never see it, and the pool reads `cache.scopedWeekly` directly',
+      r.caches.scopedStripped === 1 && (cacheOf(dd, B).scopedWeekly || []).length === 0 && cacheOf(dd, B).scopedFetchedAt === undefined
+      && Math.abs(cacheOf(dd, B).sevenDay.utilization - 0.5) < 1e-9,
+      JSON.stringify(cacheOf(dd, B)));
+    const arch = fs.readFileSync(path.join(dd, 'archive', 'readings-window-usage-cache.ndjson'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    ok('§16b …with the snapshot archived under its own action and a reason naming the buckets and why they matter',
+      arch.some((x) => x.action === 'scoped-stripped' && /Fable@/.test(x.reason) && /accountRemaining/.test(x.reason)), JSON.stringify(arch.map((x) => [x.key, x.action])));
+  }
+
+  // (h2) THE `best` PICKER IS ITS OWN BARRIER, and it needs its own control.
+  // After a full pass the anchor half has already cleaned every stream, so a
+  // 7d-only picker would choose the same record — a guard nobody can delete and
+  // redden is not a guard. It speaks where the anchor pass has NOT run:
+  // `repairCachesByWindow` is separately exported and separately called, and it
+  // is the barrier that must still hold if a future change to the anchor half
+  // ever leaves a mixed row behind. So drive it ALONE over a store that still
+  // holds one.
+  {
+    const dd = build(path.join(d, 'cacheonly'));
+    const files = [];
+    for (const fn of fs.readdirSync(path.join(dd, 'usage-anchors'))) {
+      const fp = path.join(dd, 'usage-anchors', fn);
+      files.push({ file: fp, name: fn, rows: fs.readFileSync(fp, 'utf8').trim().split('\n').map((l) => JSON.parse(l)) });
+    }
+    const windows = repair.establishedWindows(files, { roster: [A, B] });
+    // the mixed record, still whole, moved into A's stream by hand — exactly
+    // what the r3 anchor pass produced, and newer than every clean A reading
+    const mixed = windows.get('org_b').file.rows.find((r) => r.source === 'rate-limit-event');
+    windows.get('org_a').file.rows.push({ ...mixed, accountId: A, identityKey: 'org_a', refiledFrom: 'org_b' });
+    const res = repair.repairCachesByWindow({ cacheDir: path.join(dd, 'usage-cache'), archiveDir: path.join(dd, 'archive'), windows, id: 'W7' });
+    const c = cacheOf(dd, A);
+    ok('§16b the cache rebuild refuses a record that carries ANY contradicting weekly bucket, even when its 7-day half is the account\'s own and it is the newest',
+      res.foreign === 1 && res.restored === 1 && fableOf(c)?.resetsAt === WA && Math.abs(fableOf(c).utilization - 0.935) < 1e-9,
+      JSON.stringify([res, c.scopedWeekly, c.sevenDay]));
+    ok('§16b …and it fell back to an OLDER WHOLLY-AGREEING reading rather than to the mixed one (both halves come from that record: 7d 0.17 and Fable 0.935, never the mixed record\'s 0.20 / 0.38)',
+      Math.abs(c.sevenDay.utilization - 0.17) < 1e-9 && c.sevenDay.resetsAt === WA && c.scopedPreservedBy === undefined,
+      JSON.stringify(c.sevenDay));
+  }
+
+  // (i) THE LIVE WRITER PATH: no producer can carry a MIXED payload, so the
+  // guard's whole-payload verdict already IS a per-bucket verdict there.
+  // A `rate_limit_event` names exactly ONE bucket (kind sevenDay|fiveHour|
+  // scoped); a `get_usage` control answer, a `/usage` panel result and a codex
+  // snapshot are each ONE credential's single response. The MIX in the store is
+  // manufactured downstream by the per-key preserve-merge — and each of those
+  // preserves reads the TARGET's own previous list, AFTER the guard has moved
+  // `key`. So this is a source pin, not a behaviour change.
+  {
+    const eng = read('src/server/usage-pool-engine.js');
+    const calls = [...eng.matchAll(/(?<!function )guardReadingTarget\(([^,]+),\s*([^,]+),/g)].map((m) => m[2].trim());
+    ok('§16b every live guard call is handed a PRODUCER PAYLOAD, never a merged cache snapshot (a merged snapshot is the one shape that can be mixed)',
+      calls.length === 3 && calls.every((a) => /^readingLag\.windowOf\((parsed|snap)\)$/.test(a) || a === 'win'),
+      JSON.stringify(calls));
+    ok('§16b …and the one that is not a whole payload is a rate_limit_event, which names exactly ONE bucket',
+      /const win = ev\.status === 'rejected' \? null : readingLag\.windowOf\(ev\);/.test(eng)
+      && /if \(x\.kind === 'sevenDay'\) out\.sevenDay = r;/.test(read('src/reading-lag.js')), '');
+    ok('§16b …and each cache writer preserves the TARGET\'s own scopedWeekly, read AFTER the guard has chosen the key (so a re-file can never import a stranger\'s bucket)',
+      (() => {
+        const tool = read('data/bin/vibespace-usage');
+        const refile = tool.indexOf("if (d.action === 'refile') key = d.key;");
+        const openFile = tool.indexOf("const f = path.join(CACHE_DIR, key + '.json');", refile);
+        const preserve = tool.indexOf('scopedWeekly: (prev && Array.isArray(prev.scopedWeekly)) ? prev.scopedWeekly : []', openFile);
+        return /if \(\(!parsed\.scopedWeekly \|\| !parsed\.scopedWeekly\.length\) && Array\.isArray\(prev\.scopedWeekly\)/.test(eng)
+          && refile > 0 && openFile > refile && preserve > openFile;
+      })(), '');
+  }
 }
 
 // ── §10 the panel, in a REAL browser at 375×667 ────────────────────────────
