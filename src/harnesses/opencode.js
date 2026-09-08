@@ -66,6 +66,10 @@ Object.assign(harness.store, {
   // The generic acpHarness ships no reader — an ACP agent that can name its
   // conversation's model adds one here, exactly like this.
   lastTurnModel: (id) => serve.facts().sessionModel(id),
+  /** The RESOLVED config for the read-only permission-rule view (ruling 10):
+   *  the serve's **v1** `GET /config`. Never a v2 route — `/api/permission/
+   *  saved` boots an OpenCode instance (measured; see the client method). */
+  readPermissionConfig: (opts) => serve.facts().readConfig(opts || {}),
   /** Why the store is unavailable right now (user-action error text). */
   unavailableReason: () => serve.facts().reasonUnavailable(),
   serveState: () => serve.facts().state(),

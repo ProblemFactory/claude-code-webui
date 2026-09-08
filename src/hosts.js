@@ -1957,6 +1957,62 @@ class HostManager {
     });
   }
 
+  /** ONE OpenCode-serve op on a REMOTE machine (S9 remainder piece (e),
+   *  B-eac2). `hostId` is a PARAMETER: the caller names the machine and the
+   *  op, this method only chooses the transport.
+   *    RUNG 1 (preferred) — the `opencode-serve` agentd op: the daemon
+   *      BUNDLES src/opencode-serve.js and runs the very same
+   *      runOpencodeOp() against its own facts, so a paired device behaves
+   *      exactly like this machine (keeper, caches, live lane and all).
+   *    RUNG 2 (FALLBACK, ssh hosts with no daemon) — ship
+   *      data/bin/vibespace-opencode-op and feed it the op on stdin. That
+   *      file is the documented checkout-less single-file exception and is
+   *      parity-pinned by scripts/test-opencode-remote.mjs.
+   *  Returns the op's plain-JSON result; every failure THROWS with the
+   *  machine-side reason (a user action must never fail silently). */
+  async opencodeOp(hostId, op, params = {}, { timeoutMs = 60000 } = {}) {
+    const h = this.get(hostId);
+    if (!h) throw new Error(`unknown host ${hostId}`);
+    if (this.dataPlaneOn?.() || h.transport === 'dial') {
+      try {
+        const dm = await this.deviceBounded(hostId);
+        return await dm.opencodeServe(op, params, { timeoutMs });
+      } catch (e) {
+        // a dial device has NO ssh fallback — reporting the ssh path's error
+        // instead of the device one misdiagnoses the failure (2.271.0 T3-6).
+        // An SSH host falls through on ANY device failure, exactly like the
+        // usage-scan and transcript rungs above: the daemon may be old
+        // ('lacks opencode-serve'), down, or mid-upgrade, and the shipped
+        // script answers the same question. The two rungs share ONE record
+        // (~/.vibespace/opencode-serve.json), so the fallback REUSES the
+        // daemon's serve instead of starting a second one.
+        if (h.transport === 'dial') throw e;
+        console.warn('[opencode] device op unavailable on ' + hostId + ', falling back to the ssh rung:', e.message);
+      }
+    }
+    // The script rides the COMMAND (base64, ~12 KB — well inside ARG_MAX) and
+    // the op json rides STDIN. Deliberately not both on stdin: `head -c N`
+    // may read-ahead past N bytes from a pipe, which would eat the op.
+    const script = fs.readFileSync(path.join(__dirname, '..', 'data', 'bin', 'vibespace-opencode-op'));
+    const b64 = script.toString('base64');
+    const stdout = await new Promise((resolve, reject) => {
+      const child = execFile('ssh', [...this.sshArgs(h, { multiplex: true }), '--',
+        'umask 077; mkdir -p "$HOME/.vibespace/bin"; printf %s ' + JSON.stringify(b64)
+        + ' | base64 -d > "$HOME/.vibespace/bin/vibespace-opencode-op"; '
+        + REMOTE_PRELUDE + 'node "$HOME/.vibespace/bin/vibespace-opencode-op"'],
+        { timeout: timeoutMs, maxBuffer: 96 * 1024 * 1024 }, (err, out, stderr) => {
+          if (err) return reject(new Error((stderr || err.message || '').toString().slice(0, 300) || 'ssh failed'));
+          resolve(out.toString());
+        });
+      child.stdin.end(JSON.stringify({ op, params }));
+    });
+    let parsed = null;
+    for (const line of stdout.trim().split('\n')) { try { const j = JSON.parse(line); if (j && typeof j.ok === 'boolean') parsed = j; } catch { } }
+    if (!parsed) throw new Error(`opencode op '${op}' on ${hostId} returned no result (${stdout.trim().slice(-200) || 'no output'})`);
+    if (!parsed.ok) throw new Error(parsed.error || `opencode op '${op}' failed on ${hostId}`);
+    return parsed.result || {};
+  }
+
   /** READ-ONLY peek at the host's own claude login token (ban-safety: never
    *  refresh, never write — expired/absent → null; the host's own CLI usage
    *  refreshes it). Powers the on-demand quota ⟳ for remote hosts. */

@@ -13,6 +13,8 @@
  * NormalizedMessage format via their own normalizer.
  */
 
+const { rewoundByRecord, applyRewound, rewoundOp } = require('./rewind-ops.js');
+
 // System subtypes _processSystem actually renders/consumes — anything else
 // trips the unhandled-subtype breadcrumb (2.227.5). Keep in sync when adding
 // a branch; task_* are handled under the tool_use_id path.
@@ -25,7 +27,107 @@ const HANDLED_SYSTEM_SUBTYPES = new Set([
   // attempt would spam the transcript. Listed here so the unknown-subtype
   // breadcrumb stops firing for it.
   'api_retry',
+  // session_state_changed is DELIBERATELY card-less too: it is the CLI's own
+  // authoritative turn state (idle|running|requires_action, env-gated at spawn
+  // — see src/adapters/claude-code.js) and the SERVER consumer drives
+  // _isStreaming + the status bar's third state from it. A card per state flip
+  // would be several per turn. Listed so the unknown-subtype breadcrumb stops
+  // firing for a record we handle (the 2.289.0 rate_limit_event lesson: the
+  // set lagging the handler made the breadcrumb lie).
+  'session_state_changed',
+  // status is card-less for the same reason and is the CLI's REAL compaction
+  // channel on our stdout (§2.11): {status:'compacting'} … {status:null,
+  // compact_result} — verified in a production buffer's 2.9-minute AUTO
+  // compaction, where `compact_progress` never appeared. The server consumer
+  // (src/server/stdout/claude-stream-json.js) turns it into the spinner label,
+  // _streamingKind and the Compact-now card's stage; a card per status flip
+  // would be two per compaction. The same subtype also carries the CLI's
+  // permission-mode echo ({status:null, permissionMode}) — also card-less, and
+  // the consumer deliberately ignores that one.
+  'status',
+  // Fire-and-forget full command-list push (2.1.257). Card-less by design:
+  // it re-points the composer's completion list, it is not an event.
+  'commands_changed',
 ]);
+
+// ── THE claude INIT FRAME (2.1.257 `system`/`init`) ─────────────────────────
+// Every field below is VERBATIM from the binary's own zod schema (dumped, per
+// the facts law — `strings` over the 2.1.257 binary, the `xie` schema object),
+// every one is optional TO US — a consumer that finds nothing must fall back to
+// what it does today — but NOT optional in the schema: only agents / betas /
+// terminal_slash_commands / plugin_errors / plugin_warnings / mcp_server_errors
+// / memory_paths carry `.optional()` (measured over 2.1.238/.239/.257), so the
+// presence of any other key says nothing about which CLI wrote it. We used to keep
+// three of them (model / permissionMode / slash_commands) and drop the rest,
+// so a FAILED MCP server — a real, present condition in this instance's own
+// sessions — was invisible: its tools simply did not exist.
+//   mcp_servers        [{name, status}]            status is an OPEN string set
+//                                                  ('connected' | 'failed' |
+//                                                  'needs-auth' observed here);
+//                                                  anything not 'connected' is
+//                                                  reported, never enumerated.
+//   plugin_errors      [{plugin, type, message}]   demoted plugins (absent when
+//                                                  none — and ALSO absent on
+//                                                  frame-persisting lanes, so
+//                                                  an absent key never means
+//                                                  "clean load", which is why
+//                                                  nothing here ever renders a
+//                                                  green "all fine" claim)
+//   mcp_server_errors  [{name, type, message}]     --mcp-config entries skipped
+//   plugin_warnings    [{plugin, type, message}]   advisory
+//   memory_paths       {auto?, team?}              "Lets SDK renderers classify
+//                                                  Read/Write/Edit tool calls
+//                                                  on these paths as memory
+//                                                  operations without
+//                                                  re-implementing CLI path
+//                                                  detection" (upstream's own
+//                                                  words for why it exists)
+//   terminal_slash_commands  string[]              "Subset of slash_commands
+//                                                  whose UX is bound to the
+//                                                  local terminal… Phone/remote
+//                                                  UIs should hide these"
+const strList = (v, cap) => (Array.isArray(v) ? v.map((x) => String(x)).filter(Boolean).slice(0, cap) : null);
+const objList = (v, keys, cap) => (Array.isArray(v)
+  ? v.filter((x) => x && typeof x === 'object').slice(0, cap).map((x) => Object.fromEntries(keys.map((k) => [k, x[k] == null ? '' : String(x[k]).slice(0, 400)])))
+  : null);
+
+/** The facts of a claude init frame, in CLIENT spelling. Null-valued keys are
+ *  dropped so "the CLI said nothing" and "the CLI said empty" stay different
+ *  answers (a producer that says nothing must never look like a session with
+ *  zero skills — codex/ACP build initData with no frame at all). */
+function initFrameFacts(raw) {
+  const out = {};
+  const put = (k, v) => { if (v != null) out[k] = v; };
+  put('tools', strList(raw.tools, 200));
+  put('agents', strList(raw.agents, 100));
+  put('skills', strList(raw.skills, 200));
+  put('betas', strList(raw.betas, 40));
+  put('slashCommands', strList(raw.slash_commands, 200));
+  put('terminalSlashCommands', strList(raw.terminal_slash_commands, 100));
+  put('mcpServers', objList(raw.mcp_servers, ['name', 'status'], 60));
+  put('mcpServerErrors', objList(raw.mcp_server_errors, ['name', 'type', 'message'], 40));
+  put('plugins', objList(raw.plugins, ['name', 'path', 'source', 'version'], 60));
+  put('pluginErrors', objList(raw.plugin_errors, ['plugin', 'type', 'message'], 40));
+  put('pluginWarnings', objList(raw.plugin_warnings, ['plugin', 'type', 'message'], 40));
+  if (raw.output_style != null) out.outputStyle = String(raw.output_style).slice(0, 80);
+  if (raw.claude_code_version != null) out.version = String(raw.claude_code_version).slice(0, 40);
+  if (raw.memory_paths && typeof raw.memory_paths === 'object') {
+    const mp = {};
+    for (const k of ['auto', 'team']) if (raw.memory_paths[k]) mp[k] = String(raw.memory_paths[k]).slice(0, 400);
+    if (Object.keys(mp).length) out.memoryPaths = mp;
+  }
+  return out;
+}
+
+/** Names out of a `commands_changed` payload. The rows are RICH objects
+ *  ({name, description, argumentHint, aliases?} — the same schema `/help`
+ *  reads), never bare strings like init's `slash_commands`; a producer that
+ *  ever sends strings is still read correctly. Returns null when the record
+ *  carries no array at all (⇒ do nothing; an empty array is a real answer). */
+function commandNames(commands) {
+  if (!Array.isArray(commands)) return null;
+  return commands.map((c) => String((c && typeof c === 'object' ? c.name : c) || '')).filter(Boolean).slice(0, 200);
+}
 
 
 // Cross-session peer display name (2.361.6, owner report: the card showed the
@@ -256,6 +358,9 @@ class MessageManager {
     let lastTurn = -1;
     for (let i = 0; i < this.messages.length; i++) {
       const m = this.messages[i];
+      // A RETRACTED message is not a turn marker: the minimap must never offer
+      // a jump to a turn the harness itself has taken back (§2.10).
+      if (m.rewound) continue;
       const t = m.turnIndex ?? 0;
       if (t !== lastTurn) {
         const entry = { turnIndex: t, startIdx: i, ts: m.ts, role: m.role };
@@ -387,17 +492,128 @@ class MessageManager {
       case 'control_request': return this._processControlRequest(raw, emit);
       case 'control_response': return this._processControlResponse(raw, emit);
       case 'control_cancel_request': return this._processControlCancel(raw, emit);
+      // A previously-yielded message was RETRACTED upstream (§2.10). We render
+      // AND persist the stream, so without this the orphan lived forever.
+      case 'tombstone': return this._processTombstone(raw, emit);
     }
+  }
+
+  /** claude `tombstone` → the ONE 'rewound' meta op (src/rewind-ops.js).
+   *  The record's `message` is the CLI's internal Message; we resolve it by the
+   *  identities our own ids are minted from (record uuid, API message.id).
+   *  A tombstone for a message we never rendered emits NOTHING — a no-op op
+   *  would tell the view to strike a message it does not have.
+   *
+   *  UNVERIFIED ON OUR WIRE (round 4, honest status): no VibeSpace-spawned CLI
+   *  has been observed emitting one — 0 in 24 production buffers, 0 in the wire
+   *  probe, and 0 files under ~/.claude/projects/ contain the type, so a
+   *  transcript rebuild cannot produce it either. It is not DISPROVEN like
+   *  set_in_progress_tool_use_ids and compact_progress (those go to host
+   *  callbacks; this one is `yield`ed on the query stream) — it just needs a
+   *  server REFUSAL-FALLBACK, which is not deterministically triggerable and
+   *  which we will not provoke. In practice today the retraction lane of §2.10
+   *  is CODEX-ONLY (`thread_rolled_back`, verified in real rollouts); this stays
+   *  as working code for the day a refusal fallback happens in front of a user. */
+  _processTombstone(raw, emit) {
+    const tomb = raw && raw.message;
+    if (!tomb || typeof tomb !== 'object') return;
+    const uuid = tomb.uuid || null;
+    const messageId = tomb.message?.id || tomb.id || null;
+    const ids = applyRewound(this.messages, rewoundByRecord(this.messages, { uuid, messageId }), 'superseded');
+    if (!ids.length) return;
+    if (emit) this._emit(rewoundOp({ harness: 'claude', toMessageId: ids[0], ids, kind: 'superseded', ts: this._currentTs }));
   }
 
   _processSystem(raw, emit) {
     // (see the unhandled-subtype breadcrumb at the tail of this method)
     if (raw.subtype === 'init') {
+      const frame = initFrameFacts(raw);
+      // ONE CARD PER *DISTINCT* FRAME (round 2). A conversation carries one
+      // init record per spawn — every resume, every server restart, every
+      // wrapper respawn — and they are overwhelmingly identical. Measured on
+      // this instance's own data/session-buffers (a ROTATING window, so the
+      // numbers are snapshots): 2026-09-07 05:34 = 62 init records in 13
+      // conversations, 62 of them carrying a health issue, 33 byte-identical
+      // ones in ONE conversation; a re-measure at 05:40, after the ring
+      // buffers had rotated, = 30 records / 14 distinct frames / 30 with
+      // issues / 6 max. Both agree on the shape: 2×–33× redundancy at a 100%
+      // warned rate. Restating the same session-start facts — and the same
+      // "4 not working" strip — 33 times tells the reader nothing the first
+      // one did not. So an init whose frame equals the PREVIOUS init's is marked
+      // `frameRepeat` and the renderer draws nothing for it; every side
+      // effect (model, permission mode, command list, memory dirs) still
+      // applies, because those are per-spawn facts even when they repeat.
+      // A frame that CHANGED always draws: a server that went connected →
+      // failed, a skill discovered mid-session, a CLI upgrade, another model
+      // are exactly what the card exists to show.
+      // The fingerprint is taken HERE, before `commands_changed` patches
+      // `_initFrame.slashCommands` in place, so the comparison is always
+      // init-vs-init and never init-vs-patched-init.
+      const framePrint = JSON.stringify(frame);
+      const frameRepeat = this._lastInitPrint !== undefined && framePrint === this._lastInitPrint;
+      this._lastInitPrint = framePrint;
+      this._initFrame = frame;
       const msg = this._create({
         role: 'system', status: 'complete',
-        content: [{ type: 'system_info', text: `Model: ${raw.model || 'unknown'}`, initData: { model: raw.model, permissionMode: raw.permissionMode, slashCommands: raw.slash_commands } }],
+        content: [{
+          type: 'system_info', text: `Model: ${raw.model || 'unknown'}`,
+          initData: {
+            model: raw.model, permissionMode: raw.permissionMode, slashCommands: raw.slash_commands,
+            // The WIDENED frame (§2.6): the same record already carried these
+            // and we dropped every one of them. Field names are verbatim from
+            // the 2.1.257 zod schema (`system`/`init` variant) — dumped, not
+            // guessed. NOTE (round 2, corrected): in the CLI's own schema
+            // `tools` / `mcp_servers` / `skills` / `plugins` / `output_style`
+            // / `claude_code_version` are REQUIRED, so the presence of a
+            // widened key is NOT evidence that a particular CLI is new — see
+            // buildInitCard, which must never be described as gating on it.
+            // The keys that really are `.optional()` (agents, betas,
+            // terminal_slash_commands, plugin_errors, plugin_warnings,
+            // mcp_server_errors, memory_paths) stay ABSENT when unsent.
+            frame, frameRepeat,
+          },
+        }],
       });
+      this._initMsgId = msg.id;
       if (emit) this._emit({ op: 'create', message: msg });
+      // The FIRST authority on the completion list, and the one that also says
+      // which of those commands are terminal-bound. Sent as the same meta op a
+      // mid-session `commands_changed` push uses, so the client has ONE code
+      // path for "here is the command list now" (the ACP twin joins it too).
+      if (emit) this._emitSlashCommands(raw.slash_commands, frame.terminalSlashCommands);
+    }
+
+    // MID-SESSION COMMAND-LIST PUSH (2.1.257 `system`/`commands_changed`,
+    // describe: "Fire-and-forget push of the full slash-command list after a
+    // mid-session change (e.g. skills discovered dynamically as the agent
+    // works in a subdirectory). Clients should REPLACE their cached command
+    // list with this payload"). Shape differs from init's `slash_commands`
+    // (string[]): `commands` is the RICH row {name, description,
+    // argumentHint, aliases?} — so the names are read out, never assumed.
+    // REPLACE is the whole contract: a command that disappeared upstream must
+    // disappear here, which an append would never do.
+    if (raw.subtype === 'commands_changed') {
+      const names = commandNames(raw.commands);
+      if (names) {
+        // The terminal subset is NOT re-sent by this push, so the init frame's
+        // stays authoritative — intersected with the new list so a command
+        // that vanished upstream does not linger as a "terminal" name.
+        const terminal = (this._initFrame?.terminalSlashCommands || []).filter((c) => names.includes(c));
+        if (this._initFrame) this._initFrame.slashCommands = names;
+        // Patch the init card in place (the codex/ACP pattern) so a client
+        // that rebuilds history from the buffer sees the CURRENT list…
+        const init = this._initMsgId ? this.messageIndex.get(this._initMsgId) : null;
+        const d = init?.content?.[0]?.initData;
+        if (d) {
+          d.slashCommands = names;
+          if (d.frame) d.frame.slashCommands = names;
+          if (emit) this._emit({ op: 'edit', id: init.id, fields: { content: init.content } });
+        }
+        // …and tell live clients through the ONE meta op (an `edit` on a
+        // complete system card does not re-run the renderer's side effects —
+        // the composer would never hear about it).
+        if (emit) this._emitSlashCommands(names, terminal);
+      }
     }
 
     if (raw.subtype === 'hook_response') {
@@ -538,6 +754,18 @@ class MessageManager {
         }
       }
     }
+  }
+
+  /** THE command-list op — one shape for the init frame and for every
+   *  mid-session push, mirrored by the ACP normalizer's
+   *  `available_commands_update` so the client has ONE path (the design's
+   *  "no local/remote twin"). `terminal` is the terminal-BOUND subset the
+   *  composer must hide; an empty array means "the CLI named none", which is
+   *  as true an answer as a populated one. */
+  _emitSlashCommands(commands, terminal) {
+    const names = strList(commands, 200);
+    if (!names) return;
+    this._emit({ op: 'meta', subtype: 'slash-commands', data: { commands: names, terminal: strList(terminal, 100) || [] } });
   }
 
   /** Close the task a <task-notification> payload names (status + summary).
@@ -1185,4 +1413,4 @@ function parseBackgroundLaunch(toolName, input, resultText) {
 // peerDisplayName is shared with the codex normalizer (design-harness-plugins
 // §1 P1): the server frames it parses are backend-neutral text, and a codex
 // rollout copy of a peer message carries ONLY that text.
-module.exports = { splitToolResultContent, MessageManager, classifyResultError, parseBackgroundLaunch, peerDisplayName };
+module.exports = { splitToolResultContent, MessageManager, classifyResultError, parseBackgroundLaunch, peerDisplayName, initFrameFacts, commandNames };

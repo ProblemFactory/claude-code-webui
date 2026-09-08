@@ -27,10 +27,41 @@
 .chat-status-goal { color: var(--accent); font-weight: 600; }
 .chat-status-goal-empty { opacity: 0.45; filter: grayscale(0.6); }
 .chat-status-remote { color: var(--yellow, #e5c07b); background: color-mix(in srgb, var(--yellow, #e5c07b) 12%, transparent); border-radius: 999px; padding: 0 6px; animation: chat-remote-pulse 1.6s ease-in-out infinite; }
+/* Session-health chip (§2.6 round 4): the init frame's non-working MCP
+   servers / plugins, on the ONE surface that survives the transcript
+   scrolling away. Warning colour, NO pulse — this is a standing condition,
+   not a transient like the reconnect chip. On ≤768px the status bar is a
+   single swipeable row whose children are flex-shrink:0, so this keeps its
+   full label there and is reachable by a horizontal swipe; it sits right
+   after the model/effort badges so it is the third chip, not the last. */
+.chat-status-health { color: var(--yellow, #e5c07b); background: color-mix(in srgb, var(--yellow, #e5c07b) 12%, transparent); border-radius: 999px; padding: 0 6px; display: inline-flex; align-items: center; gap: 3px; }
+.chat-status-health svg { width: 10px; height: 10px; flex-shrink: 0; }
+/* The row carries BOTH classes, and `.chat-status-dropdown-item` (declared
+   further down this file, same 0,1,0 specificity) sets `white-space: nowrap`
+   — so the plain `.chat-status-health-row { white-space: normal }` this used
+   to be was DEAD, and its `detail` (an unbounded upstream error message per
+   the 2.1.257 zod) hard-clipped inside the panel's `overflow: hidden`
+   (measured: scrollWidth 610 vs clientWidth 320, at 1280 AND at 375). The
+   sibling `.chat-status-dropdown-note` has no competing class and always did
+   wrap — which is what this row was written to do. Compound selector (0,2,0)
+   so the cascade cannot silently take it away again. */
+.chat-status-dropdown-item.chat-status-health-row { display: flex; align-items: center; gap: 5px; color: var(--yellow, #e5c07b); max-width: 320px; white-space: normal; overflow-wrap: anywhere; }
+.chat-status-health-row svg { width: 11px; height: 11px; flex-shrink: 0; }
 @keyframes chat-remote-pulse { 50% { opacity: 0.55; } }
 .chat-status-goal-empty:hover { opacity: 1; filter: none; }
 .chat-goal-timer { font-variant-numeric: tabular-nums; }
 .chat-status-style { color: var(--text-secondary); }
+/* Authoritative turn state, third value (design-harness-features §2.5): drawn
+   only for 'requires_action' — idle/running are already said by the composer's
+   spinner, and a second voice for one fact is how two surfaces start to
+   disagree. The pulse is the same 1.6s cadence as the remote-state chip so the
+   bar has ONE "something needs you" rhythm. */
+.chat-status-turnstate { border-radius: 999px; padding: 0 6px; }
+.chat-status-needs-action {
+  color: var(--yellow, #e5c07b); font-weight: 600;
+  background: color-mix(in srgb, var(--yellow, #e5c07b) 14%, transparent);
+  animation: chat-remote-pulse 1.6s ease-in-out infinite;
+}
 .chat-status-autoresume { color: var(--text-secondary); }
 .chat-status-autoresume-on { color: var(--accent); font-weight: 600; }
 .chat-status-autoresume-armed { color: var(--yellow, #f59e0b); font-weight: 600; }
@@ -67,8 +98,18 @@
   background: var(--bg-panel, var(--bg-dialog)); border: 1px solid var(--border); border-radius: var(--radius);
   box-shadow: 0 8px 24px rgba(0,0,0,0.35); z-index: 200; min-width: 130px; overflow: hidden;
 }
+/* WRAP, NEVER CLIP (round 5 r2 — the health rows learned this in round 4, and
+   the measurement that generalised the clamp found the same harm on the rows
+   nobody had restyled). The panel is `overflow: hidden` and the clamp above
+   caps its width at what fits, so on a 375px screen a panel anchored at the
+   right end of the bar is squeezed to its 130px min-width; with `nowrap` the
+   text simply vanished (measured: the response-style row lost 111px, a
+   background task's description 143px, with no scroller anywhere to reach it).
+   On a desktop-width container nothing changes: an absolutely positioned box
+   is shrink-to-fit, so it still sizes to the longest row and never wraps —
+   wrapping only happens once the cap actually bites. */
 .chat-status-dropdown-item {
-  padding: 5px 12px; font-size: 11px; cursor: pointer; color: var(--text); white-space: nowrap;
+  padding: 5px 12px; font-size: 11px; cursor: pointer; color: var(--text); white-space: normal; overflow-wrap: anywhere;
 }
 .chat-status-dropdown-item:hover { background: var(--bg-hover); }
 .chat-status-dropdown-item.active { color: var(--accent); font-weight: 600; }
@@ -293,6 +334,38 @@
 .chat-collab-type { font-weight: 500; opacity: 0.9; }
 .chat-agent-report-tag { margin-left: auto; font-weight: 400; opacity: 0.7; color: var(--text-dim); }
 .chat-agent-report-body { font-size: 13px; }
+
+/* ── claude's agent→user channel (--brief): SendUserMessage / SendUserFile ──
+   These are NOT generic tool cards: with --brief the CLI hides plain text
+   outside SendUserMessage from the message view, so this card IS the reply.
+   Theme vars only (§17); the accent left rule mirrors the sub-agent report
+   card, which is the same idea (attributed content, not tool noise). */
+.chat-userchan { border: 1px solid var(--border); border-left: 2px solid var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); border-radius: var(--radius-sm); padding: 8px 12px; }
+.chat-userchan-label { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--accent); font-weight: 600; margin-bottom: 4px; }
+.chat-userchan-label svg { width: 12px; height: 12px; flex-shrink: 0; }
+.chat-userchan-chip { font-weight: 500; font-size: 10px; padding: 0 5px; border-radius: var(--radius); background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+.chat-userchan-text { font-size: 13px; }
+.chat-userfile-list { display: flex; flex-direction: column; gap: 3px; margin-top: 5px; }
+.chat-userfile-row { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; font-size: 12px; }
+.chat-userfile-link { color: var(--accent); text-decoration: none; word-break: break-all; }
+.chat-userfile-link:hover { text-decoration: underline; }
+.chat-userfile-name { color: var(--text); word-break: break-all; }
+.chat-userfile-meta { font-size: 11px; color: var(--text-dim); }
+.chat-userfile-error { font-size: 11px; color: var(--red); }
+/* THE CALL ITSELF FAILED (round-3 verifier). This card has no ✓/✗ column —
+   the wrap label is the channel icon — so a rejected SendUserMessage/
+   SendUserFile has to say so inside the card, or it renders as an ordinary
+   success. The whole card takes the red rule (it is not a delivery any more)
+   and the reason sits directly under the head, above the file list. Theme vars
+   only (§17): no literal colours, no fallbacks. */
+.chat-userchan.chat-userchan-error { border-left-color: var(--red); background: color-mix(in srgb, var(--red) 8%, transparent); }
+.chat-userchan-error .chat-userchan-label { color: var(--red); }
+.chat-userchan-failed { font-size: 11px; color: var(--red); margin-bottom: 4px; word-break: break-word; }
+/* Same reason as .chat-agent-report below: the role-indicator bar paints every
+   .chat-msg-tool-result GREEN like ordinary assistant output, which is exactly
+   the confusion this card exists to remove. Same selector shape (attribute +
+   2 classes) so it wins wherever the role-indicator block sits. */
+[data-role-indicator] .chat-msg.chat-msg-userchan { border-left-color: transparent; }
 .chat-run-header .chat-collab-name { color: inherit; }
 .chat-run-agents { opacity: 0.85; }
 /* The role-indicator bar (default 'border') paints every .chat-msg-tool-result
@@ -315,6 +388,38 @@
 .chat-hook-output { max-height: 420px; overflow: auto; } /* wrap via the standard chat-pre-wrapped toggle */
 .chat-hook-summary .chat-hook-edit { margin-left: 8px; font-size: 10px; }
 [data-role-indicator="border"] .chat-system-notification { border-left-color: var(--text-dim); }
+/* ── Session-start (init frame) card, §2.6 ──
+   ONE quiet collapsed line per init frame. Two-class selector so
+   .chat-msg-system's flex centering never wins (the .chat-peer-message
+   lesson). The summary WRAPS: on a 375px viewport the head, the chips and the
+   health strip stack instead of overflowing, and the body's long verbatim
+   lists (skill names, MCP server ids) break on any character rather than
+   pushing the transcript sideways. */
+.chat-msg.chat-msg-init { display: block; padding: 2px 0; margin: 2px 0; font-size: 11px; color: var(--text-dim); }
+.chat-init-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; cursor: pointer; list-style: none; padding: 1px 4px; }
+.chat-init-summary::-webkit-details-marker { display: none; }
+.chat-init-summary::before { content: '\25B8'; opacity: 0.7; }
+.chat-init-details[open] > .chat-init-summary::before { content: '\25BE'; }
+.chat-init-head { color: var(--text-secondary); }
+.chat-init-chip { opacity: 0.8; }
+.chat-init-chip::before { content: '\00B7'; margin-right: 6px; opacity: 0.6; }
+/* The health strip: the ONE part that must be legible without expanding —
+   a failed MCP server is otherwise indistinguishable from an absent one. */
+.chat-init-warn { display: inline-flex; align-items: center; gap: 4px; color: var(--yellow); background: color-mix(in srgb, var(--yellow) 12%, transparent); border-radius: var(--radius-sm); padding: 0 6px; max-width: 100%; }
+.chat-init-warn svg { flex: none; }
+.chat-init-body { padding: 4px 4px 4px 18px; display: flex; flex-direction: column; gap: 3px; }
+/* A closed <details> hides its content through the UA slot, and setting
+   `display` on the child OVERRIDES that (measured in headless chrome: the
+   collapsed card was still 202px tall). Say it explicitly. */
+.chat-init-details:not([open]) > .chat-init-body { display: none; }
+.chat-init-issues { display: flex; flex-direction: column; gap: 2px; margin-bottom: 2px; }
+.chat-init-issue { display: flex; align-items: flex-start; gap: 4px; color: var(--yellow); word-break: break-word; }
+.chat-init-issue svg { flex: none; margin-top: 1px; }
+.chat-init-sect { display: flex; flex-wrap: wrap; gap: 6px; word-break: break-word; }
+.chat-init-sect-h { color: var(--text-secondary); flex: none; }
+.chat-init-sect-b { opacity: 0.85; min-width: 0; overflow-wrap: anywhere; }
+[data-role-indicator="border"] .chat-msg.chat-msg-init { border-left-color: var(--text-dim); }
+
 
 
 
@@ -1165,6 +1270,33 @@ body.hide-empty-thinking .chat-compact .chat-msg.chat-empty-thinking { display: 
 /* Long-running tool heartbeat line (2.227.7) — distinct from the agent status
    line: no count, no View Log (a Bash call has no transcript to open). */
 .chat-tool-progress { font-size: 11px; color: var(--text-dim); padding: 2px 0 0 2px; font-style: italic; }
+/* THE tool that is executing right now (claude set_in_progress_tool_use_ids —
+   caps.inProgressTools). A pending card is not the same thing as a RUNNING
+   one: between parse and execution a tool can be sitting on a permission
+   prompt, and only this record can tell them apart. */
+.chat-tool-inflight .chat-tool-label::after {
+  content: ''; display: inline-block; width: 6px; height: 6px; margin-left: 6px; border-radius: 50%;
+  background: var(--accent); animation: chat-remote-pulse 1.2s ease-in-out infinite; vertical-align: middle;
+}
+/* RETRACTED history (§2.10). Two kinds, two treatments — see src/rewind-ops.js:
+   a claude tombstone means "the CLI replaced this partial, remove it", so it
+   goes; a codex rollback means "these turns were taken back", which must stay
+   VISIBLE or we would silently rewrite what someone remembers reading.
+   No global .hidden in this project — each component declares its own. */
+/* Class-ON-class, and the compact variant spelled out: `.chat-compact .chat-msg
+   { display: block }` is (0,2,0) and a bare `.chat-msg-superseded` (0,1,0)
+   loses to it — measured in headless chrome at 375px, where compact mode is on
+   (the no-global-.hidden law's other half: verify hiding by COMPUTED display,
+   never by the class being present). */
+.chat-msg.chat-msg-superseded,
+.chat-compact .chat-msg.chat-msg-superseded { display: none; }
+.chat-msg-rewound { opacity: 0.45; }
+.chat-msg-rewound .chat-text, .chat-msg-rewound .chat-system-text { text-decoration: line-through; }
+.chat-rewound-tag {
+  display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 999px;
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--text-dim); border: 1px solid var(--border);
+}
 
 /* Background-task lifecycle chip on Agent/Workflow cards (2.368.30) */
 .chat-task-status-chip {

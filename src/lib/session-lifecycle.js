@@ -1,6 +1,6 @@
 // Session lifecycle: create/attach/resume/fork/view/kill + billing switcher + openSpec replay (mixin split from app.js, 2.82.0 audit seam).
 import { ChatView } from './chat-view.js';
-import { backendFeatureCaps } from './agent-meta.js';
+import { backendFeatureCaps, worktreePick } from './agent-meta.js';
 import { track, metric } from './telemetry-client.js';
 import { t } from './i18n.js';
 import { registerWindowType, replayOpenSpec as replayOpenSpecViaRegistry, svgIcon16 } from './window-types.js';
@@ -25,7 +25,22 @@ export function installSessionLifecycle(App, ctx = {}) {
     });
   },
 
-  createSession({ cwd, name, model, permission, extraArgs, resumeId, mode, syncId, effort, outputStyle, autoResume, fork, hostId, keeperSid, backend = 'claude', backendSessionId, agentKind, agentRole, agentNickname, sourceKind, parentThreadId, initialMessage, initialCommand, forkAtUuid, forkTitle, taskId, accountId, modelLock, lockModel, ephemeral = false, winBounds, recreateCwd = false, ignoreNoConvo = false, onCreateResult }) {
+  /** "Open terminal in this session" (S9 remainder piece (c), B-eac2): a shell
+   *  the OpenCode SERVE owns, in the conversation's own directory, opened as a
+   *  normal VibeSpace terminal window. It runs on the machine the serve runs
+   *  on — which is why it is offered only where that machine is this one (the
+   *  serve's pty websocket is loopback-only; the server says so if asked). */
+  openOpencodeTerminal(session) {
+    const cwd = stripCwdHostLabel(session?.cwd || '') || undefined;
+    this.createSession({
+      backend: 'shell', mode: 'terminal', cwd,
+      name: session?.name ? `${session.name} — terminal` : 'OpenCode terminal',
+      model: null, permission: null, effort: null, extraArgs: '',
+      opencodePty: true,
+    });
+  },
+
+  createSession({ cwd, name, model, permission, extraArgs, resumeId, mode, syncId, effort, outputStyle, autoResume, worktree, fork, hostId, keeperSid, backend = 'claude', backendSessionId, agentKind, agentRole, agentNickname, sourceKind, parentThreadId, initialMessage, initialCommand, forkAtUuid, forkTitle, taskId, accountId, modelLock, lockModel, ephemeral = false, winBounds, recreateCwd = false, ignoreNoConvo = false, opencodePty = false, onCreateResult }) {
     try { track('event', `session-create:${backend || 'claude'}:${mode || 'default'}`); } catch {}
     // FIRST USE of a harness whose history lives behind an opt-in background
     // service (opencode → the 'opencode-serve' plugin, default OFF since
@@ -127,6 +142,10 @@ export function installSessionLifecycle(App, ctx = {}) {
     const createMsg = {
       type:'create', backend, hostId: hostId||undefined, keeperSid: keeperSid||undefined, mode: sessionMode, cwd: cwd||undefined, sessionName: name||undefined, model: wireKnob(sessionModel),
       permissionMode: sessionPermission||undefined, effort: wireKnob(sessionEffort), outputStyle: outputStyle||undefined, autoResume, extraArgs: sessionExtraArgs||undefined,
+      // per-session git worktree (owner ruling 9): the server refuses with a
+      // reason when the cwd is not a repo, and only EMITS the flag on a new
+      // session or a fork (a resume re-enters the CLI's own recorded worktree)
+      worktree: worktree || undefined,
       tuiRenderer: (backend === 'claude' && sessionMode === 'terminal' ? this.settings.get('claude.tuiRenderer') : '') || undefined,
       agentKind: agentKind || undefined, agentRole: agentRole || undefined, agentNickname: agentNickname || undefined,
       sourceKind: sourceKind || undefined, parentThreadId: parentThreadId || undefined,
@@ -152,6 +171,10 @@ export function installSessionLifecycle(App, ctx = {}) {
       lockModel: lockModel || undefined, // explicit lock TARGET (review-caught: inferring from the spawn model re-targeted to claude.defaultModel)
       recreateCwd: recreateCwd || undefined, // B-7812: user danger-confirmed rebuilding a missing cwd
       ignoreNoConvo: ignoreNoConvo || undefined, // 2.227.3: user chose to retry past the no-transcript breaker
+      // S9 remainder (c): this terminal is a pty the OpenCode SERVE owns, not
+      // a local shell. The server bridges its websocket onto the normal
+      // terminal path; the serve's port never reaches this browser.
+      opencodePty: opencodePty || undefined,
     };
 
     // Request/reply via ws.request (2026-07-03 review structural fix):
@@ -776,7 +799,7 @@ export function installSessionLifecycle(App, ctx = {}) {
     });
   },
 
-  resumeSession(sessionId, cwd, sessionName, { mode, model, effort, permission, accountId, syncId, backend = 'claude', backendSessionId, agentKind, agentRole, agentNickname, sourceKind, parentThreadId, hostId, keeperSid, winBounds, excludeWebuiId, onCreateResult } = {}) {
+  resumeSession(sessionId, cwd, sessionName, { mode, model, effort, permission, accountId, worktree, syncId, backend = 'claude', backendSessionId, agentKind, agentRole, agentNickname, sourceKind, parentThreadId, hostId, keeperSid, winBounds, excludeWebuiId, onCreateResult } = {}) {
     this._closeSidebarOnMobile();
     const targetBackendId = backendSessionId || sessionId;
     // If this session is already open in a LIVE window, focus it.
@@ -824,6 +847,7 @@ export function installSessionLifecycle(App, ctx = {}) {
       permission: permission !== undefined ? permission : savedCfg.permission,
       effort: effort !== undefined ? effort : savedCfg.effort,
       outputStyle: savedCfg.outputStyle,   // 2.368.0: spawn-only settings key, so a resume is where a change lands
+      worktree: worktree !== undefined ? worktree : savedCfg.worktree, // owner ruling 9: the choice rides resume/restart (and a fork, which the CLI strips)
       autoResume: savedCfg.autoResume,     // tri-state: undefined = follow the instance default
       accountId: accountId !== undefined ? accountId : savedCfg.account,
       modelLock: savedCfg.modelLock,  // #6 lock v2: a locked conversation stays locked across resume (re-pin re-arms)
@@ -1342,6 +1366,18 @@ export function installSessionLifecycle(App, ctx = {}) {
     const forkArgs = backend === 'claude'
       ? ('--fork-session' + (resumeAt ? ` --resume-session-at ${resumeAt}` : ''))
       : '';
+    // PER-SESSION GIT WORKTREE (owner ruling 9). A fork is the OTHER spawn that
+    // emits `--worktree` (worktreeSpawnArgs: `--fork-session` STRIPS the CLI's
+    // recorded `worktreeSession`, so the branch inherits nothing and would run
+    // in the user's real working tree unless we ask again). Round-2 verifier,
+    // MAJOR: this call carried no `worktree` key at all, so that branch had NO
+    // producer in production — the Session Properties hint ("Applies when a new
+    // session or a fork starts") promised something the product could not do,
+    // and the suite pinned the pure rule with a call no site could make.
+    // The answer is the ONE rule the checkbox itself displays: the standing
+    // pick if there is one, else what the run being forked turned out to be.
+    const forkCfg = this.sidebar?.getSessionConfig?.(sessionInfo) || {};
+    const forkWorktree = worktreePick({ saved: forkCfg.worktree, live: sessionInfo.worktree });
     this.createSession({
       cwd: sessionInfo.cwd,
       name: forkName,
@@ -1350,6 +1386,7 @@ export function installSessionLifecycle(App, ctx = {}) {
       backend,
       backendSessionId: resumeId,
       fork: true,
+      worktree: forkWorktree || undefined,
       // remote sessions fork ON their host — omitting this spawned a LOCAL
       // `claude --resume <remote-id> --fork-session` against a transcript
       // that doesn't exist here (audit 2.192.0)

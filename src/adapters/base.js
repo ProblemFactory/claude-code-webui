@@ -51,6 +51,21 @@ BackendAdapter.prototype.formatQueueOp = function(op) { throw new Error('this ba
  * writing a frame its wrapper would drop on the floor.
  */
 BackendAdapter.prototype.formatSetResponseStyle = function(style) { throw new Error('this backend applies its response style at spawn only'); };
+/**
+ * READ-ONLY PERMISSION-RULE READ → the wrapper stdin frame (owner ruling 10).
+ * Only harnesses whose `permissionRules` source is 'config-read' or 'acp'
+ * implement it. Unlike the two verbs above, this one has NO ws message: the
+ * only caller is the HTTP reader src/server/permission-rules.js, and both
+ * gates live there — `read()` checks the caps row (`permissionRules.source` /
+ * `.liveVerb`, never a backend id) and `readViaSession()` additionally checks
+ * the RUNNING wrapper's own advert via `wrapperCaps().permissionRules` (the
+ * 2.361.1/2.364.1 pair), refusing `wrapper-old` rather than writing a frame an
+ * older wrapper would drop on the floor. A harness whose rules come off disk
+ * (claude: the settings hierarchy, read server-side) never reaches this at all.
+ * This throw is the last line of defence, not the gate.
+ * There is deliberately NO write twin anywhere in this interface.
+ */
+BackendAdapter.prototype.formatReadPermissionRules = function(opts) { throw new Error('this backend does not expose its permission rules over the session'); };
 /** Extra actions after sending interrupt (e.g. delayed SIGINT fallback) */
 BackendAdapter.prototype.postInterrupt = function(session, sessionId) {};
 

@@ -6,7 +6,7 @@ import { t } from './i18n.js';
 // drifted verb LIST (which scripts/test-queue-steer.mjs ① deep-compares
 // against the server row) and never a hand-copied boolean that disagrees with
 // the list next to it.
-import { deriveInputModes, notificationDelivery } from '../backend-caps.js';
+import { deriveInputModes, notificationDelivery, worktreeCaps as serverWorktreeCaps, NO_WORKTREE, worktreePick, worktreeLatchWrite } from '../backend-caps.js';
 
 export const BACKEND_META = {
   claude: {
@@ -37,7 +37,14 @@ export const BACKEND_META = {
     // peerDelivery mirrors the same row's live-delivery lane; the two together
     // DERIVE what a VibeSpace notification does to a busy session
     // (notificationDeliveryFor below — one law, shared with the server).
-    caps: { fork: true, effort: true, review: false, autoResume: true, accounts: true, peerDelivery: 'cli-inbox', inputModes: deriveInputModes({ queue: true, queueVerbs: [] }), responseStyle: { live: false, closed: false, values: ['Concise', 'Explanatory', 'Learning', 'Proactive'] } },
+    // turnState/inProgressTools MIRROR the server row as well (§3.5): the
+    // status bar's third state and the tool-card spinner set gate on THESE,
+    // never on a backend id. 'authoritative' is what the PROTOCOL can do — the
+    // per-session fact rides the attach payload / the live turn-state push.
+    // inProgressTools is FALSE on every harness today: claude's record for it
+    // never leaves the CLI's own host callback (backend-caps.js carries the
+    // dump + the wire measurement), so nothing may draw an "executing" dot.
+    caps: { fork: true, forkAtMessage: true, review: false, renameWriteback: false, effort: true, autoResume: true, accounts: true, peerDelivery: 'cli-inbox', inputModes: deriveInputModes({ queue: true, queueVerbs: [] }), turnState: 'authoritative', inProgressTools: false, responseStyle: { live: false, closed: false, values: ['Concise', 'Explanatory', 'Learning', 'Proactive'] }, worktree: { supported: true, flag: '--worktree', named: true, requiresGitRepo: true, hookEscape: 'WorktreeCreate', landsIn: '.claude/worktrees/<name>', branchPrefix: 'worktree-' }, permissionRules: { source: 'settings-files', session: true, instance: true, liveVerb: false } },
     // One-line hint per response-style VALUE (same contract as effortHints:
     // English key, t() at render — the VALUE itself is protocol and is never
     // translated).
@@ -89,7 +96,7 @@ export const BACKEND_META = {
     // fork: the thread-fork RPC exists but is unwired (flips when wired).
     // fork: true since 2.369.21 — thread/fork is wired end to end (wrapper
     // CODEX_WEBUI_FORK → thread/fork; server _forkRequested per caps).
-    caps: { fork: true, effort: true, review: true, autoResume: true, quotaRefresh: 'session-rpc', accounts: true, peerDelivery: 'rpc-queue', inputModes: deriveInputModes({ queue: true, queueVerbs: ['remove', 'steer', 'steer-all', 'reorder', 'edit', 'run-now', 'run-all'] }), responseStyle: { live: true, closed: true, values: ['none', 'friendly', 'pragmatic'] } },
+    caps: { fork: true, forkAtMessage: false, review: true, renameWriteback: true, effort: true, autoResume: true, quotaRefresh: 'session-rpc', accounts: true, peerDelivery: 'rpc-queue', inputModes: deriveInputModes({ queue: true, queueVerbs: ['remove', 'steer', 'steer-all', 'reorder', 'edit', 'run-now', 'run-all'] }), turnState: 'authoritative', inProgressTools: false, responseStyle: { live: true, closed: true, values: ['none', 'friendly', 'pragmatic'] }, worktree: NO_WORKTREE, permissionRules: { source: 'config-read', session: true, instance: false, liveVerb: true } },
     // codex Personality values (0.153.4 schema): protocol strings, hinted here.
     responseStyleHints: {
       none: 'no persona — the model\u2019s plain voice',
@@ -130,7 +137,7 @@ export const BACKEND_META = {
     brandColor: '#4ade80',
     fallbackModels: [],
     modelsFromAgent: true,
-    caps: { fork: false, effort: false, review: false, autoResume: false, accounts: false, peerDelivery: 'stash-only', inputModes: deriveInputModes({ queue: true, queueVerbs: ['remove', 'reorder', 'edit'] }), responseStyle: { live: false, closed: true, values: [] } },
+    caps: { fork: false, forkAtMessage: false, review: false, renameWriteback: false, effort: false, autoResume: false, accounts: false, peerDelivery: 'stash-only', inputModes: deriveInputModes({ queue: true, queueVerbs: ['remove', 'reorder', 'edit'] }), turnState: 'authoritative', inProgressTools: false, responseStyle: { live: false, closed: true, values: [] }, worktree: NO_WORKTREE, permissionRules: { source: 'serve-config', session: false, instance: true, liveVerb: false } },
     settingsPrefix: 'opencode',
     permissionModes: ['build', 'plan'],
     // The STORE (stopped conversations: list/open/resume/fork) runs behind a
@@ -214,6 +221,22 @@ export function responseStyleLabel(backend, value) {
 export function responseStyleCaps(backend) {
   return backendFeatureCaps(backend).responseStyle || NO_FEATURE_CAPS.responseStyle;
 }
+
+/** The client mirror of the server's `worktree` caps row (owner ruling 9).
+ *  EVERY worktree surface — the New Session checkbox, the Session Properties
+ *  row, the session-card badge — reads THIS, never a backend id. The server
+ *  row is the source; scripts/test-harness-contract.mjs deep-compares them, so
+ *  a drifted mirror is a red test rather than a checkbox that offers a flag
+ *  the spawn will refuse. */
+export function worktreeCapsFor(backend) {
+  return backendFeatureCaps(backend).worktree || NO_WORKTREE;
+}
+
+/** The PURE per-session worktree rules, re-exported so every CLIENT surface
+ *  (the Session Properties checkbox, the fork path, the chat-view latch) reads
+ *  the ONE implementation that lives beside the spawn rules — a paraphrase in
+ *  two places is how the fork lost the pick entirely (round-2 verifier). */
+export { worktreePick, worktreeLatchWrite };
 
 /** PURE (DOM-free, suite-tested): can a style change land on THIS session
  *  without a restart? TWO independent facts — and forgetting the second one is
@@ -319,7 +342,7 @@ export function settingsPrefixFor(backend) {
 }
 
 /** Feature caps for a backend (all-false for unknown/shell — chrome shows nothing it can't do). */
-const NO_FEATURE_CAPS = Object.freeze({ fork: false, effort: false, review: false, autoResume: false, responseStyle: Object.freeze({ live: false, closed: true, values: Object.freeze([]) }) });
+const NO_FEATURE_CAPS = Object.freeze({ fork: false, forkAtMessage: false, review: false, renameWriteback: false, effort: false, autoResume: false, responseStyle: Object.freeze({ live: false, closed: true, values: Object.freeze([]) }), worktree: NO_WORKTREE, permissionRules: Object.freeze({ source: null, session: false, instance: false, liveVerb: false }) });
 export function backendFeatureCaps(backend) {
   return BACKEND_META[backend]?.caps || NO_FEATURE_CAPS;
 }
@@ -335,9 +358,129 @@ export function notificationDeliveryFor(backend) {
   return notificationDelivery(BACKEND_META[backend]?.caps || null);
 }
 
+/** THE READ-ONLY PERMISSION-RULE ROW (owner ruling 10), mirroring
+ *  src/backend-caps.js `permissionRules`. Every surface that decides whether
+ *  to draw the "Permission rules" section, and at which SCOPE, reads THIS —
+ *  never a backend id. `source: null` ⇒ the section is not drawn at all.
+ *  scripts/test-harness-contract.mjs deep-compares it against the server row. */
+export function permissionRulesCaps(backend) {
+  return (BACKEND_META[backend]?.caps || NO_FEATURE_CAPS).permissionRules || NO_FEATURE_CAPS.permissionRules;
+}
+
 /** Every backend's agent-memory path pattern (see BACKEND_META.claude). */
 export function agentMemoryPathRes() {
   return Object.values(BACKEND_META).map((m) => m.memoryPathRe).filter(Boolean);
+}
+
+// ── AGENT MEMORY: THE FRAME FIRST, THE REGEX AS FALLBACK (§2.6) ────────────
+// The claude init frame carries `memory_paths {auto?, team?}` and upstream's
+// own reason for the field is exactly our use of it: "Lets SDK renderers
+// classify Read/Write/Edit tool calls on these paths as memory operations
+// without re-implementing CLI path detection." Our `memoryPathRe` IS that
+// re-implementation, and it goes quietly wrong the moment a user points the
+// store somewhere else — a memory write then renders as an ordinary Write card
+// on a long dotfile path. So: a directory the CLI NAMED wins; the regexes stay
+// for old CLIs, codex (no init frame at all) and any path outside the declared
+// dirs. Declared dirs accumulate (several sessions, several stores) and are
+// matched as PREFIXES on a normalised path — a directory named `…/memoryfoo`
+// must not match `…/memory`, so the prefix always ends in '/'.
+const MEMORY_DIRS = new Set();
+const MEMORY_RES = agentMemoryPathRes();
+
+/** Record the memory directories an init frame declared ({auto?, team?}). */
+export function noteMemoryPaths(paths) {
+  if (!paths || typeof paths !== 'object') return;
+  for (const key of ['auto', 'team']) {
+    const p = paths[key];
+    if (typeof p === 'string' && p) MEMORY_DIRS.add(p.endsWith('/') ? p : p + '/');
+  }
+}
+
+/** PURE: is this file path an agent-memory file? Frame-declared dirs first
+ *  (authoritative), the per-backend regexes second (the degrade path). */
+export function isAgentMemoryPath(fp) {
+  if (!fp) return false;
+  const p = String(fp);
+  for (const dir of MEMORY_DIRS) if (p.startsWith(dir)) return true;
+  return MEMORY_RES.some((re) => re.test(p));
+}
+
+/** Test seam ONLY (the module keeps process-lifetime state on purpose: a
+ *  memory dir named by ANY session identifies memory content in every view). */
+export function _resetMemoryPaths() { MEMORY_DIRS.clear(); }
+
+/** PURE: what an init frame says is WRONG right now — the facts behind the
+ *  init card's health strip (§2.6). Today a claude session with a failed MCP
+ *  server looks exactly like one with no such server configured: its tools
+ *  simply do not exist and nothing anywhere says why (this instance's own
+ *  live sessions carry `status:'failed'` servers).
+ *  Rows are {kind, name, detail}; kind ∈ mcp-server | mcp-config | plugin.
+ *  The status vocabulary is an OPEN string set on the wire ('connected',
+ *  'failed', 'needs-auth' observed) — so anything that is not exactly
+ *  'connected' is reported and the status is shown VERBATIM, never mapped
+ *  through a table that a new value would fall out of.
+ *  The inverse is deliberately NOT computed: an ABSENT plugin_errors /
+ *  mcp_server_errors key does not mean "clean" (upstream omits both on
+ *  frame-persisting lanes), so this never renders an "all healthy" claim. */
+export function initHealthIssues(frame) {
+  if (!frame || typeof frame !== 'object') return [];
+  const out = [];
+  for (const s of frame.mcpServers || []) {
+    if (s && s.status && s.status !== 'connected') out.push({ kind: 'mcp-server', name: s.name || '', detail: s.status });
+  }
+  for (const e of frame.mcpServerErrors || []) out.push({ kind: 'mcp-config', name: e.name || '', detail: [e.type, e.message].filter(Boolean).join(': ') });
+  for (const e of frame.pluginErrors || []) out.push({ kind: 'plugin', name: e.plugin || '', detail: [e.type, e.message].filter(Boolean).join(': ') });
+  return out;
+}
+
+/** PURE: the init frame a NORMALIZED record carries, or null (§2.6, round 5).
+ *  THE ONE READER of where the frame lives. Two consumers need it — the
+ *  renderer (which draws the card) and ChatView (which applies the health
+ *  facts to the pinned chip BEFORE the "viewing history" deferral, so a
+ *  mid-session respawn's frame is not lost when the reader happens to be
+ *  scrolled back) — and two spellings of `content[0].initData.frame` is the
+ *  drift this file exists to prevent. Frame-less producers (codex, ACP /
+ *  OpenCode, a pre-2.1.2xx claude) return null, which every consumer reads as
+ *  "never told" — ABSENT ≠ CLEAN. */
+export function initFrameOf(msg) {
+  return (msg && msg.content && msg.content[0] && msg.content[0].initData && msg.content[0].initData.frame) || null;
+}
+
+/** PURE: the one human label for an initHealthIssues() row (§2.6, round 4).
+ *  TWO surfaces now show these rows — the init card's warn strip/detail list
+ *  (chat-renderers) and the pinned status-bar chip that gives the same facts
+ *  an ATTACH path (chat-status-bar) — and the whole point of the second one
+ *  is that a window which opens later AGREES with one that watched the
+ *  session start. Two spellings of "MCP x — failed" would be exactly the
+ *  disagreement it exists to remove, so the composition lives here once.
+ *  `detail` is protocol text (an open status vocabulary, an upstream error
+ *  message) and is shown VERBATIM — never translated, never mapped. */
+export function initHealthLabel(issue) {
+  if (!issue) return '';
+  const name = issue.name || '';
+  const head = issue.kind === 'plugin' ? t('plugin {name}', { name }) : t('MCP {name}', { name });
+  return head + (issue.detail ? ' — ' + issue.detail : '');
+}
+
+/** PURE: the composer's slash-command completion list. TWO rules, both from
+ *  the init frame (§2.6):
+ *    ① `terminal_slash_commands` is upstream's own "Subset of slash_commands
+ *       whose UX is bound to the local terminal (e.g. exit, statusline).
+ *       Phone/remote UIs should hide these from command menus" — a chat
+ *       composer is such a UI, and offering /exit there is a control that
+ *       does nothing when clicked;
+ *    ② every entry is shown with its leading slash.
+ *  An absent or empty terminal list (old CLI, codex, ACP) filters nothing. */
+export function slashCompletionList(commands, terminal) {
+  if (!Array.isArray(commands)) return [];
+  const hide = new Set((Array.isArray(terminal) ? terminal : []).map((c) => String(c).replace(/^\//, '')));
+  const out = [];
+  for (const raw of commands) {
+    const name = String(raw || '').replace(/^\//, '');
+    if (!name || hide.has(name)) continue;
+    out.push('/' + name);
+  }
+  return out;
 }
 
 export function getBackendMeta(backend) {

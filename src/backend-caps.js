@@ -75,6 +75,46 @@
 // A harness that declares a verb it cannot construct is a RED test, so
 // "offering a control we cannot honour" (the 2.361.4 accept-and-ignore
 // failure) is structurally impossible rather than a review promise.
+// turnState names WHERE "is a turn running right now" comes from
+// (design-harness-features §3.5). Everything that gates on streaming — the
+// composer's Stop button, auto-resume's "it is already working" skip, the
+// attach payload's isStreaming — reads ONE flag; this row says whether that
+// flag is the harness's own statement or our inference:
+//   'authoritative' — the harness PUBLISHES turn state and we drive the flag
+//                     from it (claude: system/session_state_changed
+//                     {idle|running|requires_action}, the CLI's own words
+//                     "authoritative turn-over signal"; codex: turn/started +
+//                     turn/completed; ACP: prompt_start / prompt_end's stop
+//                     reason). Per SESSION the fact is still tri-state — an
+//                     old CLI, or claude without the spawn env below, never
+//                     emits one, so the consumer stays on the derived path
+//                     until the FIRST record arrives and only THEN reports
+//                     authoritative. Declaring it here says the PROTOCOL can,
+//                     never that this session did.
+//   'derived'       — we infer it from record shapes (no such harness today;
+//                     the value exists so a future one can say so honestly).
+//   null            — no turn concept at all (shell).
+// inProgressTools names the TOOL-GRANULAR truth: whether the harness reports
+// which tool_use ids are executing right now. FALSE ON EVERY HARNESS TODAY —
+// including claude, whose `set_in_progress_tool_use_ids` record exists and is
+// even documented ("Surfaces use this to show which tools are running") but
+// NEVER REACHES A STREAM-JSON CONSUMER: 2.1.257 hands it to a host callback
+// (`n.onInProgressToolUseIDs?.(e.op); return`, offset 186333979) and the 'add'
+// side goes to a callback at tool dispatch without entering that dispatcher at
+// all. Measured, not inferred — a probe in chat-wrapper.js's exact spawn shape
+// ran 6 tools and saw 0 of these while session_state_changed arrived on the
+// same stdout, and 24 production buffers hold 212 tool_use blocks and 0 of
+// these. A cap is a PROMISE TO A SURFACE: claiming true here painted a
+// "currently executing" dot no user could ever see. The consumer stays (dormant
+// with the callback named) and scripts/test-stdout-registry.mjs re-measures the
+// wire on every run — the day a CLI forwards the record, that leg goes red and
+// says to flip this row. codex/ACP report per-item lifecycle instead, and a
+// card's spinner is derived from its own item there.
+// CLAUDE'S SPAWN PREREQUISITE (owner decision 8(c), design §5.1): the CLI only
+// emits session_state_changed when CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS is in
+// its environment — src/adapters/claude-code.js sets it on every claude spawn.
+// It is pure observability (no behaviour change), which is why it is the ONE
+// spawn default that changed in this batch.
 // responseStyle names the harness's "how should the agent talk" knob and,
 // crucially, WHEN it can be set (2.369.58 — the chip's "restart to apply" row
 // gates on `live`, never on a backend id):
@@ -102,6 +142,87 @@
 // choice" and the key is then NEVER sent — the agent keeps whatever its own
 // config file says. codex's 'none' is a real, DIFFERENT value ("no
 // personality"), so it can only arrive from an explicit pick.
+// review / renameWriteback / forkAtMessage (§2.13 of
+// docs/design-harness-features.md) — three capabilities that were ALREADY
+// shipped and gated on a backend id at four call sites, so the client's
+// `caps.review` had nothing on the server to be checked against:
+//   review           — the harness can start a code review of a target
+//                      (codex `review/start` through the wrapper: working
+//                      tree / base branch / commit / custom, inline or
+//                      detached). The ws 'review-start' gate and the client's
+//                      button-availability + read-only poll read THIS.
+//   renameWriteback  — renaming the session here also renames it in the
+//                      AGENT's own store (codex `set-thread-name` →
+//                      thread/setName). claude's transcript has no title
+//                      field to write, so a rename stays ours.
+//   forkAtMessage    — fork from ONE MESSAGE (claude
+//                      `--resume-session-at <uuid> --fork-session`), which is
+//                      NOT `fork` above: codex's thread/fork branches the
+//                      WHOLE thread and has no per-message boundary, so a
+//                      per-message fork button gated on `fork` would be a
+//                      button that cannot work. Two capabilities, two rows.
+// worktree names the harness's PER-SESSION GIT WORKTREE knob (owner ruling 9,
+// design-harness-features §5.1). Every surface — the New Session checkbox, the
+// Session Properties row, the session-card badge, the ws refusal — gates on
+// THIS row, never on a backend id.
+//   supported      — the harness can run a session in its own git worktree.
+//   flag           — the EXACT argv token, dumped from `claude --help` on
+//                    2.1.257: `-w, --worktree [name]` ("Create a new git
+//                    worktree for this session (optionally specify a name)").
+//   named          — the flag takes an OPTIONAL name. We never send one: the
+//                    CLI's auto-generated name is unique per session, whereas
+//                    a name we chose would collide with an existing worktree
+//                    (two sessions in one tree) and would put a user string in
+//                    argv for no gain.
+//   requiresGitRepo — the CLI REFUSES outside a git repo and exits 1 before the
+//                    session exists (measured 2026-09-07: "Error: Can only use
+//                    --worktree in a git repository, but /tmp/notarepo is not a
+//                    git repository."), so we must refuse first, with a reason.
+//   hookEscape     — …but "not a git repo" is NOT the whole gate. The 2.1.257
+//                    decompiled condition is `if(!pX() && !await rh())` where
+//                    `pX(){return fB("WorktreeCreate").length>0}` and `rh()` is
+//                    the cached is-git-repo — i.e. the CLI ALSO accepts
+//                    --worktree outside a repo when a WorktreeCreate hook is
+//                    configured, which is exactly what its own error text
+//                    tells you to do ("Configure a WorktreeCreate hook in
+//                    settings.json to use --worktree with other VCS systems").
+//                    A preflight that is STRICTER than the CLI it protects is
+//                    a false refusal, so the hook is a probed fact too and
+//                    this row names the event to look for.
+//   landsIn/branchPrefix — where it puts the tree, for the honest UI hint.
+//                    Measured on 2.1.257: `claude --worktree probe5` in
+//                    /tmp/wtprobe created /tmp/wtprobe/.claude/worktrees/probe5
+//                    on branch `worktree-probe5` (locked), and the CLI process
+//                    CHDIR'd into it (/proc/<pid>/cwd) — which is why the init
+//                    frame's `cwd` is the worktree path and is the ONLY typed
+//                    record we read it from.
+// NEVER `--tmux`: its help says "Create a tmux session for the worktree
+// (requires --worktree)", and dtach is our persistence layer — a tmux inside
+// our dtach session is a second multiplexer nobody attaches to (owner ruling 9
+// spells this out).
+const NO_WORKTREE = Object.freeze({ supported: false, flag: null, named: false, requiresGitRepo: false, hookEscape: null, landsIn: null, branchPrefix: null });
+const CLAUDE_WORKTREE = Object.freeze({ supported: true, flag: '--worktree', named: true, requiresGitRepo: true, hookEscape: 'WorktreeCreate', landsIn: '.claude/worktrees/<name>', branchPrefix: 'worktree-' });
+
+// permissionRules names WHERE this harness's permission rules can be READ from
+// and at which SCOPE — the read-only "where does this rule come from" view
+// (owner ruling 10 of design-harness-features §5.1) gates on THIS row, never
+// on a backend id. It is a READ capability by construction: there is no write
+// verb anywhere behind it, and none is planned (codex `config/value/write`'s
+// optimistic concurrency turns one careless write into data loss, §4.5).
+//   source  — the closed vocabulary in src/permission-rules.js
+//             (PERMISSION_RULE_SOURCES). null = this harness has no
+//             permission-rule surface at all and the view is never offered.
+//   session — the SESSION-scoped read is possible (Session Properties). For
+//             codex this is true for a REAL reason: `config/read` resolves a
+//             `sessionFlags` layer — the `-c` overrides this session was
+//             spawned with — which only the session's own app-server can see.
+//   instance— the instance-wide read is possible (Manage Agents). claude reads
+//             files, so both scopes work; opencode's serve knows nothing about
+//             a particular session's cwd, so only the instance scope is true.
+//   liveVerb— the session-scoped read needs the RUNNING wrapper to serve the
+//             `read-permission-rules` stdin verb (⇒ the per-process advert
+//             gate applies, the 2.361.1/2.364.1 skew law). false = the server
+//             can answer without touching the session at all.
 const QUEUE_VERBS = Object.freeze(['remove', 'steer', 'steer-all', 'reorder', 'edit', 'run-now', 'run-all']);
 
 /** What a wrapper that advertises a queue but NAMES NO VERBS is taken to
@@ -136,14 +257,31 @@ const BACKEND_CAPS = {
     resetCredit: false,   // no such product concept
     quotaProbe: 'cli-usage',      // `claude -p /usage` auto-cli rung
     fork: true,                   // --fork-session (+ --resume-session-at for a mid-conversation fork)
+    forkAtMessage: true,          // --resume-session-at <uuid> --fork-session (the per-message boundary the CLI accepts)
+    review: false,                // no review verb on the stream-json control protocol
+    renameWriteback: false,       // the JSONL transcript has no title to write back
     streamProtocol: 'stream-json',
     peerDelivery: 'cli-inbox',
     // The CLI queues stdin messages itself and reports nothing about it —
     // an HONEST EMPTY verb table, not a missing feature.
     inputModes: { queue: true, queueVerbs: [] },
+    // system/session_state_changed (env-gated at spawn) — VERIFIED on our
+    // stdout in the wrapper's spawn shape (running → idle around a real turn).
+    // inProgressTools is false because the record it would need is swallowed by
+    // a host callback and never reaches us (see the row's essay above).
+    turnState: 'authoritative',
+    inProgressTools: false,
     // --settings outputStyle, read once at spawn (stream-json has no
     // /output-style verb) ⇒ a change needs a restart.
     responseStyle: { live: false, closed: false, values: ['Concise', 'Explanatory', 'Learning', 'Proactive'] },
+    // `-w, --worktree [name]` — the only harness of the four that has it
+    // (gemini 0.33.2 does NOT: 0 hits in the package, correcting an earlier
+    // draft; codex/opencode have no per-session worktree flag).
+    worktree: CLAUDE_WORKTREE,
+    // The documented settings hierarchy read straight off disk (managed /
+    // user / project / local settings.json + permissions.allow|deny|ask).
+    // No session needed and no live verb: the files ARE the answer.
+    permissionRules: { source: 'settings-files', session: true, instance: true, liveVerb: false },
   },
   codex: {
     pool: true,
@@ -153,6 +291,9 @@ const BACKEND_CAPS = {
     resetCredit: true,    // account/rateLimitResetCredit/consume (stored resets)
     quotaProbe: 'rpc-rate-limits', // account/rateLimits/read on a live app-server
     fork: true,                   // thread/fork (whole-thread fork; the wrapper sends it when CODEX_WEBUI_FORK=1)
+    forkAtMessage: false,         // thread/fork takes no message boundary — a per-message button here would be a dead control
+    review: true,                 // review/start: working tree / base branch / commit / custom, inline or detached
+    renameWriteback: true,        // set-thread-name → the thread's own name in codex's store
     streamProtocol: 'codex-events',
     peerDelivery: 'rpc-queue',
     // thread/queue/{add,list,delete,update,reorder,start} + turn/steer — every
@@ -160,25 +301,51 @@ const BACKEND_CAPS = {
     // app-server (the removal verb is `delete` with `queuedSubmissionId`;
     // there is NO `thread/queue/remove`).
     inputModes: { queue: true, queueVerbs: ['remove', 'steer', 'steer-all', 'reorder', 'edit', 'run-now', 'run-all'] },
+    // turn/started (+ turn_id) and turn/completed / turn_aborted / task_failed
+    // are the app-server's own turn boundaries — already the only thing the
+    // codex consumer flips _isStreaming on. No tool-granular set exists.
+    turnState: 'authoritative',
+    inProgressTools: false,
     // Personality enum + thread/settings/update, both from the 0.153.4 schema
     // dump. LIVE: the running thread takes the new personality for its next
     // turn — no restart, no new conversation.
     responseStyle: { live: true, closed: true, values: ['none', 'friendly', 'pragmatic'] },
+    worktree: NO_WORKTREE,
+    // app-server `config/read {cwd, includeLayers:true}` → layers + origins.
+    // liveVerb: the SESSION scope goes through the session's own wrapper —
+    // a fresh child cannot see the `sessionFlags` layer.
+    // instance:FALSE (round-2 verifier, 2026-09-07) — the instance scope has no
+    // session to ask, so the only way to answer it is a FRESH `codex
+    // app-server` child, and that child was measured (strace, empty CODEX_HOME
+    // ⇒ logged out) opening 7 INET connects incl. chatgpt.com:443 before it
+    // will answer. That is the same class this repo rejects `codex doctor` for.
+    // The measurement and the verdict live in src/local-oracles.js as
+    // `codex-app-server-config-read` with `blocks:'codex.permissionRules.
+    // instance'`; test-vendor-whitelist asserts THIS row and that entry agree,
+    // so re-enabling it without re-measuring fails the build.
+    permissionRules: { source: 'config-read', session: true, instance: false, liveVerb: true },
   },
   shell: {
     pool: false, hotSwitch: 'unverified', planC: false, sealedOrders: false, resetCredit: false, quotaProbe: null, fork: false,
+    forkAtMessage: false, review: false, renameWriteback: false,
     streamProtocol: null, // terminal-only: no chat parse pipeline
     peerDelivery: 'stash-only',
     inputModes: { queue: false, queueVerbs: [] },
+    turnState: null, inProgressTools: false, // terminal-only: there is no turn
     responseStyle: { live: false, closed: true, values: [] }, // terminal-only: no agent to style
+    worktree: NO_WORKTREE,
+    permissionRules: { source: null, session: false, instance: false, liveVerb: false }, // no agent ⇒ no rules
   },
   // ACP v1 harnesses (S8, design-harness-plugins §2.3): the agent holds its
   // own login/provider config — no pool, no quota probe, no credential
   // switching; 'acp-events' is the wrapper journal (data/bin/acp-wrapper.js);
   // fork/list/load are read from the agent's initialize reply at spawn, never
   // declared here. peerDelivery stays stash-only until a live lane is proven.
+  // ACP v1 has no review verb and no rename-back, and per-message fork is a
+  // claude flag — so review/renameWriteback/forkAtMessage stay false until a
+  // PROBE proves otherwise (setVerifiedCap is how `fork` flips), never guessed.
   opencode: {
-    pool: false, hotSwitch: 'unverified', planC: false, sealedOrders: false, resetCredit: false, quotaProbe: null, fork: false,
+    pool: false, hotSwitch: 'unverified', planC: false, sealedOrders: false, resetCredit: false, quotaProbe: null, fork: false, forkAtMessage: false, review: false, renameWriteback: false,
     streamProtocol: 'acp-events',
     peerDelivery: 'stash-only',
     frameFile: true,
@@ -190,8 +357,23 @@ const BACKEND_CAPS = {
     // ever has entries WHILE a prompt is running (an idle wrapper dispatches
     // immediately), so "run it now" could only ever answer 'busy'.
     inputModes: { queue: true, queueVerbs: ['remove', 'reorder', 'edit'] },
+    // ACP v1's prompt_end carries a stop reason — the agent's own statement
+    // that the prompt is over (acp-events already drives the flag from it).
+    turnState: 'authoritative',
+    inProgressTools: false,
     // ACP v1 has no response-style/persona verb; the agent's own config owns it.
     responseStyle: { live: false, closed: true, values: [] },
+    // OpenCode sandboxes into a worktree by its OWN policy; there is no
+    // per-session flag we can pass, so the row is honestly false.
+    worktree: NO_WORKTREE,
+    // The rules come from the SERVE's v1 `GET /config` (measured 1.18.29:
+    // zero instance boot; the v2 `/api/permission/saved` boots one — threads
+    // 15→37, inotify fds 0→2, RSS 316→482 MB — so it is never called).
+    // session:false — the serve resolves ONE config and reports no origin
+    // per key; claiming a session scope would promise a per-project answer
+    // OpenCode does not give. liveVerb:false — the wrapper is not the source
+    // (it answers 'unsupported-by-protocol'; the serve is).
+    permissionRules: { source: 'serve-config', session: false, instance: true, liveVerb: false },
   },
 };
 
@@ -200,7 +382,7 @@ const BACKEND_CAPS = {
 // row whose `steer` disagrees with its `queueVerbs`.
 for (const row of Object.values(BACKEND_CAPS)) row.inputModes = deriveInputModes(row.inputModes);
 
-const NO_CAPS = Object.freeze({ pool: false, hotSwitch: 'unverified', planC: false, sealedOrders: false, resetCredit: false, quotaProbe: null, fork: false, streamProtocol: null, peerDelivery: 'stash-only', inputModes: deriveInputModes({ queue: false, queueVerbs: [] }), responseStyle: Object.freeze({ live: false, closed: true, values: Object.freeze([]) }) });
+const NO_CAPS = Object.freeze({ pool: false, hotSwitch: 'unverified', planC: false, sealedOrders: false, resetCredit: false, quotaProbe: null, fork: false, forkAtMessage: false, review: false, renameWriteback: false, streamProtocol: null, worktree: NO_WORKTREE, peerDelivery: 'stash-only', inputModes: deriveInputModes({ queue: false, queueVerbs: [] }), turnState: null, inProgressTools: false, permissionRules: Object.freeze({ source: null, session: false, instance: false, liveVerb: false }), responseStyle: Object.freeze({ live: false, closed: true, values: Object.freeze([]) }) });
 
 function capsOf(backend) {
   return BACKEND_CAPS[backend || 'claude'] || NO_CAPS;
@@ -255,4 +437,117 @@ function setVerifiedCap(backend, key, value) {
   return true;
 }
 
-module.exports = { BACKEND_CAPS, capsOf, setVerifiedCap, QUEUE_VERBS, LEGACY_QUEUE_VERBS, deriveInputModes, notificationDelivery };
+
+// ── worktree: the PURE spawn rules (owner ruling 9) ─────────────────────────
+// FOUR questions, answered here so no surface has to know the CLI's semantics
+// (the last two joined in round 2, after the verifier found the fork branch had
+// no producer and the untick could not be expressed):
+//
+//   worktreeRefusal — CAN this spawn honour the request at all? The CLI exits
+//     1 outside a git repo BEFORE the session exists, so a refusal here is the
+//     difference between "a reason" and "the window died instantly".
+//     `isGitRepo` is a TRI-STATE: true / false / null = the probe could not
+//     answer (unreachable host, timeout). null is NOT false — refusing a real
+//     repo because a probe timed out would be worse than letting the CLI
+//     speak for itself, so it passes with `unverified` recorded.
+//     `hasWorktreeHook` is the SECOND half of the CLI's own condition (see the
+//     caps row: `!pX() && !rh()`), tri-state for the same reason. It can only
+//     ever RESCUE a spawn, never cause a refusal — a definite hook makes a
+//     definite non-repo legal, because that is precisely the configuration the
+//     CLI's error text tells the user to create. The asymmetry is deliberate
+//     and it is the conservative direction on BOTH sides: an unknown hook
+//     (unreadable settings) still refuses a KNOWN non-repo, because there the
+//     alternative is the instantly-dead window this preflight exists to
+//     prevent — and the refusal message names the hook so a mis-detected hook
+//     user is told exactly which configuration we failed to see, rather than
+//     being left with "not a git repository" and no way forward.
+//
+//   worktreeSpawnArgs — does THIS spawn pass the flag? Not "did the user tick
+//     the box": the CLI RECORDS the worktree on the session and RE-ENTERS it
+//     by itself on --resume (2.1.257 decompiled: the resume path calls
+//     y6(host, se.worktreeSession) and reports 'worktree-gone' / "cannot
+//     resume into worktree …" when that fails), while --fork-session
+//     explicitly STRIPS the binding (Une(se, {stripWorktreeSession:true})).
+//     So:  new  + want ⇒ pass          (create the worktree)
+//          fork + want ⇒ pass          (the fork inherits nothing)
+//          resume      ⇒ NEVER pass    (a second --worktree = a SECOND
+//                                       worktree; the CLI re-enters its own)
+//     A resume of a session whose worktree was deleted continues in the plain
+//     cwd and says so — the CLI's own notice, which we do not second-guess.
+//
+//   worktreePick — WHICH answer a surface must give to "would the NEXT run of
+//     this conversation be isolated?". Two facts feed it and they are not the
+//     same thing (round-2 verifier, MAJOR: the fork path read NEITHER, so the
+//     `fork ⇒ pass` branch above had no producer in production at all — a
+//     fork of an isolated conversation quietly ran in the user's real working
+//     tree while Session Properties promised otherwise):
+//       saved — the per-session PICK (`cfg.worktree`), TRI-STATE:
+//               true      = the user asked for it (New Session tick, or the
+//                           Session Properties checkbox),
+//               false     = the user explicitly said NO — and nothing may
+//                           resurrect that, least of all a live run that
+//                           happens to be isolated (this used to be a
+//                           truthy-only stored key, so unticking the box while
+//                           the run WAS isolated re-checked itself on the next
+//                           render: an accept-and-ignore control, 2.361.4),
+//               undefined = no pick on record, which is the NORMAL state right
+//                           after a New Session tick (the conversation has no
+//                           id yet when the box is ticked).
+//       live  — what the RUN we are looking at turned out to be, i.e. the
+//               init-frame arbiter's verdict.
+//     An absent pick therefore defers to the live fact, which is exactly what
+//     the Session Properties checkbox has always DISPLAYED — so the fork and
+//     the checkbox now answer with ONE function instead of two paraphrases.
+//
+//   worktreeLatchWrite — should the saved pick RECORD what this run turned out
+//     to be? ONE-WAY on purpose: only an ABSENT pick is ever written, and only
+//     to `true`. The live fact is the CLI's and it can drop on its own (a
+//     deleted worktree), so letting it write would silently discard a
+//     preference because of a transient; and an explicit `false` is a decision
+//     the user made, which a fact never overrules.
+const WORKTREE_REASONS = Object.freeze(['unsupported', 'not-a-git-repo']);
+
+function worktreeCaps(backend) {
+  return capsOf(backend).worktree || NO_WORKTREE;
+}
+
+/** @returns {null | {reason:'unsupported'|'not-a-git-repo', backend:string, hookEscape:string|null}} */
+function worktreeRefusal({ backend, want, isGitRepo, hasWorktreeHook }) {
+  if (!want) return null;
+  const wt = worktreeCaps(backend);
+  if (!wt.supported) return { reason: 'unsupported', backend: backend || '', hookEscape: null };
+  // The CLI's own gate is `hook OR repo` — mirror BOTH halves, or we refuse
+  // spawns the CLI would have accepted (the whole point of `hookEscape`).
+  if (wt.requiresGitRepo && isGitRepo === false && hasWorktreeHook !== true) {
+    return { reason: 'not-a-git-repo', backend: backend || '', hookEscape: wt.hookEscape || null };
+  }
+  return null;
+}
+
+/** WOULD THE NEXT RUN OF THIS CONVERSATION BE ISOLATED? — see the block above.
+ *  @returns {boolean} */
+function worktreePick({ saved, live }) {
+  if (saved === true) return true;
+  if (saved === false) return false;   // an explicit NO is a decision, never overruled by a fact
+  return !!live;                       // no pick on record ⇒ this run answers for it
+}
+
+/** SHOULD THE SAVED PICK RECORD WHAT THIS RUN TURNED OUT TO BE? — see above.
+ *  @returns {true|null} `true` = write the pick ON; null = leave it alone. */
+function worktreeLatchWrite({ saved, live }) {
+  return (saved === undefined && live === true) ? true : null;
+}
+
+/** @returns {{args:string[], pass:boolean, why:'new'|'fork'|'resume-rebinds'|'off'|'unsupported'}} */
+function worktreeSpawnArgs({ backend, want, resume, fork }) {
+  const wt = worktreeCaps(backend);
+  if (!want) return { args: [], pass: false, why: 'off' };
+  if (!wt.supported) return { args: [], pass: false, why: 'unsupported' };
+  if (resume && !fork) return { args: [], pass: false, why: 'resume-rebinds' };
+  // NO name argument on purpose (see the caps row): the CLI mints a unique
+  // one, a name of ours would collide and put a user string in argv.
+  return { args: [wt.flag], pass: true, why: fork ? 'fork' : 'new' };
+}
+
+module.exports = { BACKEND_CAPS, capsOf, setVerifiedCap, QUEUE_VERBS, LEGACY_QUEUE_VERBS, deriveInputModes, notificationDelivery,
+  NO_WORKTREE, WORKTREE_REASONS, worktreeCaps, worktreeRefusal, worktreeSpawnArgs, worktreePick, worktreeLatchWrite };

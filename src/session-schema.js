@@ -22,6 +22,7 @@
 const SESSION_FIELDS = {
   // identity / lifecycle
   _webuiId:            { owner: 'brain',  persisted: null,      note: 'webui id stamped for device-feed side effects' },
+  _opencodePtyId:      { owner: 'ws',     persisted: null,      note: 'S9 remainder (c): the OpenCode serve pty this terminal session bridges (pty_… on the serve, not a local process)' },
   _normalizer:         { owner: 'stdout', persisted: null,      note: 'MessageManager instance for the live stream' },
   _normEpoch:          { owner: 'stdout', persisted: null,      note: 'normalizer identity epoch — client full-reset discriminator (2.89.x)' },
   _subNormalizers:     { owner: 'stdout', persisted: null,      note: 'per-subagent normalizers map' },
@@ -32,13 +33,17 @@ const SESSION_FIELDS = {
   _jobsEventsSeenTs:   { owner: 'agent-routes', persisted: null, note: 'Background Work event delivery marker (2.342.0) — restart = full redelivery, mirroring group-snap semantics' },
   _csiAccepted:        { owner: 'jobs-wiring', persisted: null,  note: 'crossSessionInbound=accept pushed to this pre-2.344.0 live chat session via apply_flag_settings (2.344.1 catch-up; restart = harmless re-push)' },
   _startSubagentWatcher: { owner: 'stdout', persisted: null,    note: 'bound helper for restart re-arm of agent watchers' },
+  _retireCompaction:   { owner: 'stdout', persisted: null,      note: "bound `retireCompaction(session, id)` from the claude stdout consumer (§2.11, round 7): the TEARDOWN path is a turn-lifecycle exit this consumer never sees a record for, and it must retire the 'compacting' claim through the SAME named function (broadcast + clear) instead of reaching in and clearing _streamingKind silently" },
 
   // streaming / turn state
   _isStreaming:        { owner: 'stdout', persisted: 'wrapper', note: 'explicit protocol-signal streaming flag (never heuristic)' },
   _streamingLabel:     { owner: 'stdout', persisted: null,      note: 'current activity label (thinking/tool/responding)' },
   _autoResume:         { owner: 'ws',     persisted: 'session-config', note: 'per-session auto-continue-after-limit preference (undefined = follow claude.autoResumeOnLimit; 2.368.0)' },
   _outputStyle:        { owner: 'ws',     persisted: 'session-meta',   note: 'the EFFECTIVE response style this session runs with (claude output style / codex Personality). Spawn-scoped on claude (--settings, stream-json has no /output-style); LIVE on codex (thread/settings/update) — capsOf(backend).responseStyle.live decides. 2.368.0, generalized 2.369.58; persisted so a server restart does not report "default" for a session really running one' },
-  _streamingKind:      { owner: 'ws',     persisted: null,      note: 'streaming-label kind (compacting) — drives the client Stop two-step guard; set on a /compact send, reset with the label at turn end (2.365.0)' },
+  _streamingKind:      { owner: 'ws',     persisted: null,      note: 'streaming-label kind (compacting) — drives the client Stop two-step guard; set on a /compact send, reset with the label at turn end (2.365.0); also set/cleared by the compact_progress records (§2.11)' },
+  _turnState:          { owner: 'stdout', persisted: null,      note: "the harness's OWN turn state, last observed: 'idle'|'running'|'requires_action' (claude system/session_state_changed, env-gated at spawn — §2.5). Drives _isStreaming authoritatively and gives the status bar its third state; in-memory because it is a statement about a RUNNING process (a restart re-derives from the sidecar until the next record)" },
+  _turnStateSeen:      { owner: 'stdout', persisted: null,      note: 'THIS session has produced at least one authoritative turn-state record — the latch that stands the derived result/user inference down. False forever on an old CLI / a spawn without the env: degradation is the default path (§3.5)' },
+  _inProgressTools:    { owner: 'stdout', persisted: null,      note: "Set<tool_use_id> currently executing, from claude's set_in_progress_tool_use_ids {op:{action,ids}} (caps.inProgressTools). Live-only by nature — the tool cards' spinner set, pushed as 'tools-in-progress' and carried on the attach payload" },
   _codexResetTriedAt:  { owner: 'engine', persisted: null,      note: 'codex reset-credit attempt throttle (one try per limit event, 10min floor; 2.368.21)' },
   _turnWallSigs:       { owner: 'engine', persisted: null,      note: 'wall machine (2.369.0): wall signals accumulated on the CURRENT turn ({at, resetsAtMs, bucket, scopedName, key, slot} — key = the cache key the mark landed on (a REJECTION keys to the credential SLOT since 2026-09-07, a reading keys org-verified), slot = whether that key WAS the validated slot when the rejection arrived); the FIRST keyed signal PINS both for the rest of the turn (rejectionSlotFor — the first record of a rejection re-points the link by itself); the result record classifies' },
   _turnReadingSlot:    { owner: 'engine', persisted: null,      note: 'readings-by-slot (2026-09-07): the validated credential slot ({key, slotOk, at}) this turn\'s quota READINGS are attributed to, resolved ONCE per turn by readingSlotFor and cleared by noteTurnEnd — the twin of _turnWallSigs\' rejection pin. Without it a turn\'s ~20 readings split across the members our own mid-turn re-points moved to, crediting numbers to an account that served none of that turn' },
@@ -85,6 +90,8 @@ const SESSION_FIELDS = {
   _resumeWarning:      { owner: 'ws',     persisted: null,      note: 'non-fatal resume degradation note for the client' },
   _reattachAttempts:   { owner: 'stdout', persisted: null,      note: 'bounded dead-socket re-attach counter' },
   _cwdRecreated:       { owner: 'ws',     persisted: 'meta',    note: 'B-7812 recreate-cwd notice armed' },
+  _worktree:           { owner: 'ws',     persisted: 'meta',    note: 'the user asked THIS session to run in its own git worktree (claude --worktree, owner ruling 9). Persisted so a restart/resume keeps describing the session honestly and the badge survives; the FLAG itself is only re-emitted on a fork (worktreeSpawnArgs) because the CLI re-enters its recorded worktree on --resume by itself' },
+  _worktreePath:       { owner: 'stdout', persisted: 'meta',    note: 'the worktree directory the CLI ITSELF announced in its init frame `cwd` (typed record, never inferred: the CLI chdir\'s into <repo>/.claude/worktrees/<name> and reports it). null until the first init frame; Session Properties shows it'  },
 
   // remote / transport
   _remoteState:        { owner: 'stdout', persisted: 'wrapper', note: 'remote keeper link state (reconnecting chip)' },

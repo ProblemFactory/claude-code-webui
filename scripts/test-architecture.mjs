@@ -53,7 +53,12 @@ const PURE = new Set(['src/plugin-manifest.js', 'src/account-pool-auto.js', 'src
   // THE RESUME LADDER (B-6b6d): "the conversation's own value wins on a resume,
   // the instance default is a NEW-session default" — ONE decision for the spawn
   // (ws-create) and for what the client is allowed to send (session-lifecycle).
-  'src/resume-continuity.js']);
+  'src/resume-continuity.js',
+  'src/rewind-ops.js', // claude tombstone / codex thread_rolled_back → ONE 'rewound' meta op; index-stable marking, no I/O
+  'src/turn-state.js', // authoritative turn state: the live consumer and the attach reconciliation must decide identically
+  'src/opencode-remote.js', // S9 remainder: the OpenCode-serve OP TABLE + runOpencodeOp — one definition the local rung, the agentd op and the shipped ssh script all obey
+  'src/permission-rules.js', // READ-ONLY permission-rule model + DOM-free tree renderer (owner ruling 10) — shared server (readers) + browser (the view)
+  'src/local-oracles.js']); // the human-triggered zero-network CLI oracle registry + its measured proofs and REJECTED candidates (ruling 6) — server runs them, the menu mirrors them
 const SHARED = new Set(['src/discovery-facts.js', 'src/sysinfo.js', 'src/machine-probes.js', 'src/usage-walker.js',
   'src/transcript-service.js', 'src/ctx-sync.js', 'src/writer-sweep.js', 'src/remote-shell.js', 'src/account-material.js',
   // THE agent-CLI process identity, one rule in two spellings (B-3185 r3): the JS twin
@@ -75,7 +80,12 @@ const SHARED = new Set(['src/discovery-facts.js', 'src/sysinfo.js', 'src/machine
   // codex 0.153 thread/read fallback (B-21e4 item 5): pure Thread→records mapper + one bounded app-server read; node builtins only
   'src/codex-thread-read.js',
   // OpenCode serve-mode store facts (S9): 127.0.0.1 client + locator/keeper + 'acp-events' synthesis — facts about a machine
-  'src/opencode-serve.js']);
+  'src/opencode-serve.js',
+  // S9 remainder (B-eac2): the LIVE lane that replaced the 10s list poll —
+  // the serve's SSE stream + an fs.watch on the sqlite store (the only lane
+  // that sees another opencode process). Node builtins only; the daemon
+  // bundles it with opencode-serve.
+  'src/opencode-events.js']);
 const DEVICE = new Set(['src/agentd/agentd.js', 'src/agentd/mux.js', 'src/agentd/reexec.js', 'src/agentd/version.js', 'src/agentd/ws-min.js']);
 const ORCH_FILES = ['server.js', 'src/hosts.js', 'src/ws-handler.js', 'src/ws-create.js', 'src/agentd/client.js'];
 const isOrch = (p) => p === 'server.js' || p === 'src/ws-handler.js' || p === 'src/ws-create.js' || p === 'src/hosts.js' || p === 'src/agentd/client.js'

@@ -10,7 +10,7 @@ import { escHtml, copyText, showContextMenu, showToast, absUrl } from './utils.j
 import { track } from './telemetry-client.js';
 import { renderCodeBlock, rehighlightCodeBlock, stripAnsi, getHljsLanguages } from './highlight.js';
 import { UI_ICONS } from './icons.js';
-import { agentMemoryPathRes } from './agent-meta.js';
+import { isAgentMemoryPath, backendFeatureCaps, initHealthIssues, initHealthLabel, initFrameOf } from './agent-meta.js';
 import { createBackendIconHtml, getBackendMeta } from './agent-meta.js';
 import { t } from './i18n.js';
 import { searchQueryOf } from '../search-card.js'; // shared with the server (CJS pulled into the bundle, like task-color-seq.js)
@@ -19,14 +19,17 @@ import { mcpParts } from './chat-run-summary.js';
 // codex multi-agent collab rows (B-7473). Escaper/translator/icons are
 // injected so the whole surface is unit-testable outside a browser.
 import { collabRowsHtml, collabReportHeadText, collabRowTitle } from '../collab-row.js';
+// PURE builder for claude's OWN agent→user channel (--brief: SendUserMessage /
+// SendUserFile). Same contract as collab-row: esc/t/icons injected, so the
+// escaping is provable in a unit test rather than reviewed by eye.
+import { userChannelKind, userChannelRecord, userMessageCardHtml, userFileCardHtml } from '../user-channel.js';
 
 // Agent-memory files get their own card treatment (user ask: a memory write
 // is a different concern than a project write — render "记忆更新 <name>"
 // instead of a Write card with a long dotfile path). Full path stays on the
 // link's data-path (copy/Ctrl+click unchanged).
-const MEMORY_RES = agentMemoryPathRes();
 function memoryBase(fp) {
-  return fp && MEMORY_RES.some((re) => re.test(fp)) ? fp.split('/').pop() : null;
+  return fp && isAgentMemoryPath(fp) ? fp.split('/').pop() : null;
 }
 
 // MCP tool ids (mcp__<server>__<tool>) split into their parts — ONE
@@ -241,7 +244,7 @@ class ChatRenderers {
    * @param {HTMLElement} opts.messageList - Message list DOM element
    * @param {Function} [opts.onPermissionResolve] - Called when a permission is resolved (allow/deny)
    */
-  constructor({ ws, sessionId, app, backend = 'claude', compact, messageList, onPermissionResolve, onFork, getSessionCtx, onSendText, onQueueChipClick, getQueueCaps, isCollabLive }) {
+  constructor({ ws, sessionId, app, backend = 'claude', compact, messageList, onPermissionResolve, onFork, getSessionCtx, onSendText, onQueueChipClick, getQueueCaps, isCollabLive, getPublishedFiles }) {
     // Is THIS collab card the one the next row would coalesce into, on a turn
     // that is still streaming? Only the VIEW knows (it owns the streaming flag
     // and the message list), and the answer decides live age vs frozen span.
@@ -260,6 +263,7 @@ class ChatRenderers {
     this._onPermissionResolve = onPermissionResolve || (() => {});
     this._onFork = onFork || null;
     this._getSessionCtx = getSessionCtx || null;
+    this._getPublishedFiles = getPublishedFiles || null; // toolCallId → published SendUserFile rows (owner ruling 8(c))
     this.setupLinkHandler();
   }
 
@@ -269,12 +273,16 @@ class ChatRenderers {
   // their host/cwd and probed the LOCAL machine (audit 2.192.0). ChatView's
   // _getSessionIds already solves this (openSpec fallback) — prefer it.
   _sessionCtx() {
+    // publishedFiles rides the SAME accessor every link resolver already
+    // calls, so a view-only / terminated window gets it too (its map is empty
+    // until the /api/pages read lands, and an absent link is simply not drawn).
+    const published = (() => { try { return this._getPublishedFiles?.() || null; } catch { return null; } })();
     try {
       const ids = this._getSessionCtx?.();
-      if (ids && (ids.cwd || ids.host)) return { cwd: ids.cwd || '', host: ids.host || null };
+      if (ids && (ids.cwd || ids.host)) return { cwd: ids.cwd || '', host: ids.host || null, publishedFiles: published };
     } catch {}
     const sess = (this.app?.sidebar?._allSessions || []).find(s => s.webuiId === this.sessionId);
-    return { cwd: sess?.cwd || '', host: sess?.host || null };
+    return { cwd: sess?.cwd || '', host: sess?.host || null, publishedFiles: published };
   }
 
   // ── Message renderers ──
@@ -621,6 +629,58 @@ class ChatRenderers {
     return el;
   }
 
+  /**
+   * The two user-channel cards. `block` is a tool_call (pending) or a
+   * tool_result (done) — BOTH render, because the message is meant for the
+   * human the moment the agent writes it, not when the tool result lands.
+   * Returns null when there is genuinely nothing to show, so the caller falls
+   * back to the ordinary tool card rather than drawing an empty highlight.
+   */
+  _renderUserChannelMsg(el, block, msg) {
+    // The CALL's own outcome rides the record (round-3 verifier): this card has
+    // no ✓/✗ column at all — the wrap label is the channel icon — so a
+    // SendUserFile the CLI rejected, or a SendUserMessage the turn interrupted,
+    // rendered as an ordinary successful "File for you". The message-level
+    // fields are the complete source (an INTERRUPTED call keeps its tool_call
+    // block and only the message says 'error'); the block's own status is the
+    // tool_result twin and is passed for the record to prefer whichever exists.
+    const rec = userChannelRecord({
+      toolName: block.toolName, input: block.input, output: block.output,
+      status: msg.status || block.status, toolStatus: msg.toolStatus,
+    });
+    if (!rec) return null;
+    if (rec.kind === 'message') {
+      if (!rec.message && !rec.files.length) return null;
+      // markdown per the tool's own describe ("Supports markdown formatting").
+      // renderMarkdown is DOMPurify(marked(...)) — the ONE sanitizer; the PURE
+      // builder never carries one (it escapes instead).
+      const body = rec.message ? `<div class="chat-text">${this.renderMarkdown(rec.message)}</div>` : '';
+      el.classList.add('chat-msg-userchan');
+      this.wrapMsg(el, 'tool', UI_ICONS.mail, userMessageCardHtml(rec, { esc: escHtml, t, icons: { mail: UI_ICONS.mail }, body }));
+      return el;
+    }
+    if (!rec.files.length) return null;
+    // The RELATIVE link the server published this file under, joined with the
+    // browser's own origin (2.366.1: the server never guesses an absolute
+    // URL). `_publishedUserFiles` is ChatView's per-session map, filled by the
+    // live `user-file-published` broadcast and by the /api/pages read on
+    // attach — absent = no link yet, which the card simply does not draw.
+    const published = this._sessionCtx?.().publishedFiles || null;
+    const rowsForCall = published && msg.toolCallId ? published.get(msg.toolCallId) : null;
+    const rowFor = (f) => (rowsForCall ? rowsForCall.find((r) => r.path === f.path || r.name === f.name) : null) || null;
+    // A publish that FAILED here (missing file, too large, unreadable) is a
+    // delivery the agent believes happened — it goes on the card next to the
+    // file, in the same slot as the CLI's own upload_error (no-silent-failures).
+    for (const f of rec.files) { const r = rowFor(f); if (r && r.error && !f.error) f.error = r.error; }
+    const link = (f) => { const r = rowFor(f); return r && r.link ? absUrl(r.link) : ''; };
+    const note = this._sessionCtx?.().host
+      ? t('Files sent from a remote session are not published here — open them on that machine.')
+      : '';
+    el.classList.add('chat-msg-userchan');
+    this.wrapMsg(el, 'tool', UI_ICONS.upload, userFileCardHtml(rec, { esc: escHtml, t, icons: { upload: UI_ICONS.upload }, link, note }));
+    return el;
+  }
+
   renderToolMsg(msg) {
     if (msg.collab) return this._renderCollabMsg(msg);
     const block = msg.content?.[0];
@@ -629,6 +689,18 @@ class ChatRenderers {
     el.className = 'chat-msg chat-msg-assistant chat-msg-tool-result';
     el._rawMsg = msg;
     if (msg.toolCallId) el.dataset.toolId = msg.toolCallId;
+    // claude's OWN agent→user channel (--brief). These two are NOT generic
+    // tool calls: SendUserMessage IS the reply the human is meant to read
+    // (with --brief the CLI hides plain text outside it from the message
+    // view), and SendUserFile is a delivery. A generic "✓ SendUserMessage /
+    // Input / Output" card buries both. Rendered by the PURE builder so the
+    // escaping is testable; a tool that is NOT part of the channel falls
+    // straight through to the normal card below (the negative control in
+    // scripts/test-stdout-registry.mjs pins that).
+    if (userChannelKind(block.toolName)) {
+      const card = this._renderUserChannelMsg(el, block, msg);
+      if (card) return card;
+    }
     let html;
 
     if (block.type === 'tool_call') {
@@ -862,14 +934,47 @@ class ChatRenderers {
       el.innerHTML = `<span class="chat-system-text">${escHtml(t('⚠ Model auto-fallback: {from} → {to} (the harness switched models, e.g. capacity/overload; /model or the badge menu sets it back)', { from: b.fallbackFrom || '?', to: b.fallbackTo || '?' }))}</span>`;
       return { el, sideEffect: null };
     }
-    // system.init — extract metadata, don't render
+    // ROLLBACK NOTICE (§2.10 / §3.2): the normalizer bakes English (it cannot
+    // know the device language) and carries the NUMBERS, so the sentence is
+    // rebuilt here — the same contract as the model-fallback notices above.
+    if (msg.noticeKind === 'rewound' && msg.content?.[0]) {
+      const d = msg.content[0].rewindData || {};
+      const n = Number(d.numTurns) || 0;
+      const found = Number(d.turnsFound) || 0;
+      const el = document.createElement('div');
+      el.className = 'chat-msg chat-msg-system chat-system-notification chat-msg-rewind-notice';
+      // The honest two-number case: the agent dropped N turns but only `found`
+      // of them were ever on this screen (a resumed thread whose earlier turns
+      // we never rendered). Saying "rolled back N" there would strike history
+      // that is still showing.
+      const line = found && found < n
+        ? t('↶ Rolled back {found} of the {n} turns the agent dropped — the rest were already outside this view.', { found, n })
+        : t('↶ Rolled back {n} turn(s) — they are no longer part of the conversation the agent can see.', { n: n || found });
+      el.innerHTML = `<span class="chat-system-text">${escHtml(line)}</span>`;
+      return { el, sideEffect: null };
+    }
+    // system.init — metadata side effects, plus (since §2.6) a compact card
+    // for the facts the frame carries that have NO other home. A record with
+    // no `frame` (codex, ACP/OpenCode) keeps today's invisible behaviour, and
+    // a frame that merely REPEATS the previous init draws nothing while its
+    // side effects still apply — see buildInitCard for both rules.
     if (msg.content?.[0]?.initData) {
       const d = msg.content[0].initData;
+      const f = initFrameOf(msg); // the ONE reader of where the frame lives (agent-meta)
       const sideEffect = {};
       if (d.model) sideEffect.model = d.model.replace(/\[.*$/, '');
       if (d.permissionMode) sideEffect.permMode = d.permissionMode;
-      if (d.slashCommands) sideEffect.slashCommands = d.slashCommands.map(c => c.startsWith('/') ? c : '/' + c);
-      return { el: null, sideEffect };
+      if (d.slashCommands) sideEffect.slashCommands = d.slashCommands;
+      if (f?.terminalSlashCommands) sideEffect.terminalSlashCommands = f.terminalSlashCommands;
+      if (f?.memoryPaths) sideEffect.memoryPaths = f.memoryPaths;
+      // The health facts do NOT ride this side effect (round 5). Rendering is
+      // where a record LANDS; the chip is about what the session IS, and the
+      // renderer runs for every replayed record — so feeding the chip from
+      // here made the readout depend on where the transcript is scrolled
+      // (paging up past an older spawn's init silently rewrote a present-tense
+      // warning). ChatView applies the frame ONCE, above the deferral, through
+      // the same PURE initFrameOf reader.
+      return { el: this.buildInitCard(f, { repeat: !!d.frameRepeat }), sideEffect };
     }
     // Hook events — compact collapsible
     if (msg.content?.[0]?.hookData) {
@@ -911,7 +1016,23 @@ class ChatRenderers {
     section.className = 'chat-permission-inline';
     section.dataset.requestId = msg.permission.requestId;
 
-    if (msg.permission.kind === 'user_input' && !msg.permission.resolved) {
+    if (msg.permission.kind === 'user_input' && !msg.permission.resolved && msg.permission.stale) {
+      // an ask with no live request behind it: render the questions, never a
+      // Submit button whose only possible outcome is an error toast
+      const prompt = document.createElement('div');
+      prompt.className = 'chat-permission-prompt';
+      const head = document.createElement('div');
+      head.className = 'chat-permission-resolved';
+      head.textContent = t('This question is no longer waiting for an answer');
+      prompt.appendChild(head);
+      for (const q of msg.permission.questions || []) {
+        const row = document.createElement('div');
+        row.className = 'chat-permission-question';
+        row.textContent = q.question;
+        prompt.appendChild(row);
+      }
+      section.appendChild(prompt);
+    } else if (msg.permission.kind === 'user_input' && !msg.permission.resolved) {
       const questions = msg.permission.questions || [];
       section.innerHTML = '';
       const prompt = document.createElement('div');
@@ -1010,6 +1131,11 @@ class ChatRenderers {
           type: 'permission-response', sessionId: this.sessionId,
           requestId: msg.permission.requestId, approved: true,
           toolInput: { ...origInput, answers },
+          // WHICH LANE answers this card. Harness-neutral: the card forwards
+          // what the record that created it declared (S9: 'opencode-serve'
+          // asks are answered on the serve's own route, on `host`'s machine),
+          // so this renderer never learns a backend.
+          ...(msg.permission.via ? { via: msg.permission.via, host: msg.permission.host || null } : {}),
         });
         msg.permission.resolved = 'allowed';
         msg.permission.selectedAnswers = answers;
@@ -1023,6 +1149,7 @@ class ChatRenderers {
         this.ws.send({
           type: 'permission-response', sessionId: this.sessionId,
           requestId: msg.permission.requestId, approved: false,
+          ...(msg.permission.via ? { via: msg.permission.via, host: msg.permission.host || null } : {}),
         });
         msg.permission.resolved = 'denied';
         this.renderPermissionOverlay(el, msg);
@@ -1235,6 +1362,76 @@ class ChatRenderers {
     return tpl.innerHTML;
   }
 
+  /** THE SESSION-START CARD (§2.6).
+   *
+   *  WHAT RENDERS — and what this gate is NOT (round 2, a false claim
+   *  corrected): `hasFacts` is "does this frame carry anything the card can
+   *  show", NOT "is this CLI new enough". In the CLI's own zod schema
+   *  `tools` / `mcp_servers` / `skills` / `plugins` / `output_style` /
+   *  `claude_code_version` are REQUIRED (scripts/test-init-frame.mjs re-reads
+   *  the schema out of EVERY installed CLI — 2.1.238/.239/.257 here — and pins
+   *  which keys really are `.optional()`), so EVERY claude init frame passes
+   *  it and a claude session
+   *  gets a card. What returns null here is a producer that builds `initData`
+   *  with NO frame at all — codex (codex-message-manager) and ACP/OpenCode
+   *  (acp-message-manager) both send only {model, permissionMode,
+   *  slashCommands} — plus any frame whose every card fact is empty.
+   *
+   *  HOW OFTEN — once per DISTINCT frame. The normalizer marks an init whose
+   *  frame equals the previous init's as `frameRepeat` (see _processSystem,
+   *  which carries the measurement): a conversation carries one init per spawn
+   *  and this instance's own buffers held 33 byte-identical ones in a single
+   *  conversation, which would have been 33 cards and 33 health strips. A
+   *  frame that CHANGED still draws.
+   *
+   *  SHAPE: one quiet collapsed line. What is WRONG (a non-connected MCP
+   *  server, a demoted plugin, a skipped --mcp-config entry) sits in the
+   *  ALWAYS-VISIBLE summary in warning colour — a health strip behind a click
+   *  would not fix the invisibility it exists for — while the inventory
+   *  (skills, plugins, MCP servers, tools, betas, version) is one <details>
+   *  away. On this box EVERY distinct frame carries issues (a genuinely
+   *  failing MCP server — 62/62 records at the first measurement, 30/30 at the
+   *  second), so "quiet" means one warned line per conversation, not zero.
+   *  Strings are chrome ⇒ t(); every value from the frame is escaped and shown
+   *  verbatim (statuses/plugin ids are protocol text, never translated). */
+  buildInitCard(frame, { repeat = false } = {}) {
+    if (!frame) return null;
+    if (repeat) return null;
+    const skills = frame.skills || [], plugins = frame.plugins || [], servers = frame.mcpServers || [], tools = frame.tools || [], agents = frame.agents || [];
+    const issues = initHealthIssues(frame);
+    const hasFacts = skills.length || plugins.length || servers.length || tools.length || agents.length || frame.outputStyle || frame.version;
+    if (!issues.length && !hasFacts) return null;
+    const el = document.createElement('div');
+    el.className = 'chat-msg chat-msg-system chat-msg-init';
+    const chips = [];
+    if (skills.length) chips.push(t('{n} skills', { n: skills.length }));
+    if (frame.outputStyle) chips.push(t('output style: {style}', { style: frame.outputStyle }));
+    // The SHARED composition (agent-meta) — the status-bar chip shows the
+    // same rows on the attach path and the two must not spell them differently.
+    const issueLabel = initHealthLabel;
+    const warn = issues.length
+      ? `<span class="chat-init-warn" title="${escHtml(issues.map(issueLabel).join('\n'))}">${UI_ICONS.alert} ${escHtml(t('{n} not working', { n: issues.length }))}</span>`
+      : '';
+    const sect = (label, body) => (body ? `<div class="chat-init-sect"><span class="chat-init-sect-h">${escHtml(label)}</span><span class="chat-init-sect-b">${body}</span></div>` : '');
+    const list = (arr) => escHtml(arr.join(', '));
+    const body = [
+      issues.length ? `<div class="chat-init-issues">${issues.map((i) => `<div class="chat-init-issue">${UI_ICONS.alert} ${escHtml(issueLabel(i))}</div>`).join('')}</div>` : '',
+      sect(t('Skills'), skills.length ? list(skills) : ''),
+      sect(t('Plugins'), plugins.length ? escHtml(plugins.map((p) => p.name + (p.version ? ' ' + p.version : '')).join(', ')) : ''),
+      sect(t('MCP servers'), servers.length ? escHtml(servers.map((m) => `${m.name} (${m.status})`).join(', ')) : ''),
+      sect(t('Subagents'), agents.length ? list(agents) : ''),
+      sect(t('Tools'), tools.length ? String(tools.length) : ''),
+      sect(t('Output style'), frame.outputStyle ? escHtml(frame.outputStyle) : ''),
+      sect(t('CLI version'), frame.version ? escHtml(frame.version) + (frame.betas?.length ? ' (' + escHtml(frame.betas.join(', ')) + ')' : '') : ''),
+    ].filter(Boolean).join('');
+    el.innerHTML = `<details class="chat-init-details"><summary class="chat-init-summary">`
+      + `<span class="chat-init-head">${escHtml(t('Session start'))}</span>`
+      + chips.map((c) => `<span class="chat-init-chip">${escHtml(c)}</span>`).join('')
+      + warn
+      + `</summary><div class="chat-init-body">${body}</div></details>`;
+    return el;
+  }
+
   appendSystem(text) {
     const el = document.createElement('div');
     el.className = 'chat-msg chat-msg-system';
@@ -1243,10 +1440,71 @@ class ChatRenderers {
     return el;
   }
 
+  /** The CLI's live compaction stage (§2.11), or null when it has told us
+   *  nothing. Held here so a card rendered later still opens on the live stage,
+   *  and pushed into any card already on screen. */
+  setCompactStage(stage) {
+    this._compactStage = stage || null;
+    const hint = this.compactHintText();
+    for (const el of this._messageList?.querySelectorAll?.('.chat-ctx-full-hint') || []) el.textContent = hint;
+  }
+
+  /** THE guidance sentence: what the card says when there is no compaction to
+   *  report. Named so the "is a compaction in flight?" decision has ONE answer
+   *  to fall back to, in both readers below. */
+  compactFallbackHint() {
+    return t('Compacting a large conversation takes 1–2 minutes — do not press Stop. If it answers “Conversation too long”, rewind a few messages in terminal mode (Esc Esc) and compact again.');
+  }
+
+  /** Is a compaction RUNNING right now? A `compact_end` is deliberately KEPT
+   *  (setCompactStage) so a card that WATCHED the compaction does not revert to
+   *  "this takes 1–2 minutes" the instant it succeeded — but that stage belongs
+   *  to THAT compaction, not to the view forever. Nothing else ever cleared it,
+   *  so before this predicate the first compaction of a view (including the
+   *  AUTO one, which no user action precedes) permanently replaced the guidance
+   *  every later card exists to give. */
+  compactInFlight() {
+    const s = this._compactStage;
+    return !!(s && s.event && s.event !== 'compact_end');
+  }
+
+  /** THE sentence under the "Compact now" button. Before 2026-09 this was a
+   *  hardcoded apology — the only thing we could say, because the CLI's
+   *  compaction was a black box. The `system/status` lane opened it (§2.11), so
+   *  the apology is now the FALLBACK: shown only while no stage record has
+   *  arrived (an old CLI, or the seconds before the first one). Once one has,
+   *  the card states the real stage — and, at the end, the real OUTCOME: the
+   *  wire carries `compact_result` ("success") / `compact_error`, and a card
+   *  that reverted to the apology after a successful compaction would be
+   *  telling the user to keep waiting for something that already finished.
+   *
+   *  "ENDED" IS NOT "SUCCEEDED". A `compact_end` with NO outcome field is a
+   *  real wire shape, not a theoretical one: a PreCompact hook that BLOCKS the
+   *  compaction makes the CLI emit a bare `sdk_status status:null` with no
+   *  metadata (2.1.257 `if(ye.blockedBy) … onCompactEvent({type:"sdk_status",
+   *  status:null})`), and the retained `compact_progress` lane hardcodes
+   *  result:null on every frame. Nothing was compacted in either case — only
+   *  the CLI's own "success" may be reported as one. */
+  compactHintText() {
+    const s = this._compactStage;
+    if (!s) return this.compactFallbackHint();
+    if (s.event === 'hooks_start') return t('Compacting: running {hook} hooks…', { hook: String(s.hookType || 'hook').replace(/_/g, ' ') });
+    if (s.event === 'compact_start') return s.hint ? t('Compacting: {hint}', { hint: s.hint }) : t('Compacting the conversation…');
+    if (s.error) return t('Compaction failed: {error}', { error: String(s.error).slice(0, 160) });
+    if (s.result && s.result !== 'success') return t('Compaction ended: {result}', { result: String(s.result).slice(0, 60) });
+    if (s.result === 'success') return t('Compaction finished.');
+    return t('Compaction ended.');
+  }
+
   /** "Prompt is too long" guidance card (2.365.0): the context window is full
    *  and EVERY later send fails the same way until the conversation is
    *  compacted — say so and offer the action. View-only windows (no live
-   *  input) get the explanation without the button. */
+   *  input) get the explanation without the button.
+   *
+   *  A NEW card opens on the guidance unless a compaction is actually running:
+   *  the held terminal stage describes a compaction that is over, and this card
+   *  is about the context being full AGAIN. `setCompactStage` still rewrites
+   *  every hint on screen, so a card built here does join the NEXT compaction. */
   appendContextFullCard(text) {
     const el = document.createElement('div');
     el.className = 'chat-msg chat-msg-system';
@@ -1254,7 +1512,7 @@ class ChatRenderers {
       + `<div class="chat-ctx-full-title">${escHtml(text)}</div>`
       + `<div class="chat-ctx-full-help">${escHtml(t('The conversation no longer fits the model’s context window — every new message will fail the same way until it is compacted.'))}</div>`
       + `<div class="chat-ctx-full-actions"><button class="chat-ctx-compact-btn">${escHtml(t('Compact now'))}</button>`
-      + `<span class="chat-ctx-full-hint">${escHtml(t('Compacting a large conversation takes 1–2 minutes — do not press Stop. If it answers “Conversation too long”, rewind a few messages in terminal mode (Esc Esc) and compact again.'))}</span></div>`
+      + `<span class="chat-ctx-full-hint">${escHtml(this.compactInFlight() ? this.compactHintText() : this.compactFallbackHint())}</span></div>`
       + `</div>`;
     const btn = el.querySelector('.chat-ctx-compact-btn');
     // The button disables itself so the minute-long compaction is not fired
@@ -1577,12 +1835,14 @@ class ChatRenderers {
 
   // "Fork from here" — branches a NEW session containing the conversation up to
   // and including this assistant message (claude --resume-session-at <uuid>
-  // --fork-session). Claude-only (the flag is claude-specific), assistant
-  // messages only (that's the truncation boundary the CLI accepts), and never
-  // in subagent viewers. Sits next to the open-in-editor button.
+  // --fork-session). Gated on caps.forkAtMessage, NOT on caps.fork: codex's
+  // thread/fork branches the whole thread with no message boundary, so this
+  // button on a codex card would be a control that cannot do what it says
+  // (§2.13 — two capabilities, two rows). Assistant messages only (that is the
+  // truncation boundary the CLI accepts) and never in subagent viewers.
   addForkBtn(el, msg) {
     if (!this._onFork) return;
-    if (this.backend !== 'claude') return;
+    if (!backendFeatureCaps(this.backend).forkAtMessage) return;
     if (msg.role !== 'assistant' || !msg.uuid) return;
     if (typeof this.sessionId === 'string' && this.sessionId.startsWith('sub-')) return;
     const btn = document.createElement('button');

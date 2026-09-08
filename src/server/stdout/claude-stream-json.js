@@ -27,19 +27,208 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { execFile } = require('child_process');
 const { MessageManager } = require('../../message-manager');
 const { cwdToProjectDir } = require('../../session-store');
 const { ClaudeCodeAdapter } = require('../../adapters/claude-code.js');
+const { isTurnState, turnStateEffect } = require('../../turn-state.js');
+const { userChannelKind, userChannelRecord, userFilePaths } = require('../../user-channel.js');
+
+// SendUserFile → the published-pages channel (owner ruling 8(c),
+// design-harness-features §2.12). The CLI's tool names LOCAL files; we turn
+// each into a session-owned, PRIVATE-by-default snapshot the front end can
+// link to. Bounded on purpose: a chat card is not a file server.
+const USER_FILE_MAX_BYTES = 8 * 1024 * 1024;
+const USER_FILE_EXT_TYPES = new Map(Object.entries({
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
+  '.webp': 'image/webp', '.avif': 'image/avif', '.pdf': 'application/pdf', '.svg': 'image/svg+xml',
+  '.html': 'text/html', '.htm': 'text/html',
+  '.txt': 'text/plain', '.md': 'text/plain', '.log': 'text/plain', '.json': 'text/plain',
+  '.csv': 'text/plain', '.diff': 'text/plain', '.patch': 'text/plain', '.yml': 'text/plain', '.yaml': 'text/plain',
+}));
 
 const protocol = 'stream-json';
 
 function create({ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes, USAGE_SCANNER_PATH,
-  checkClaudeGoalStatus, noteModelSeen, sbSeenFirst, hosts, usageHistory }) {
+  checkClaudeGoalStatus, noteModelSeen, sbSeenFirst, hosts, usageHistory, pagesRef }) {
   const { _vsuPending, armWorkflowUsageWatcher, kickPoolEval, markLimitBanner,
     maybeRepinLockedModel, maybeStopOnFallback, notePoolAuthFailure,
     modelsMatch, noteSessionProduced, noteTurnEnd, recordRateLimitEvent, resolveUsageKey, usageEstimator } = engine;
+
+  /**
+   * IS THIS DIRECTORY A LINKED GIT WORKTREE? (round-4 verifier — the positive
+   * half of the init-frame arbiter below.)
+   *
+   *   true  — yes: `--git-dir` and `--git-common-dir` disagree, which is what
+   *           a linked worktree IS (`<common>/worktrees/<name>` vs `<common>`;
+   *           a plain checkout answers `.git` twice).
+   *   false — no: git answered and they agree, or git cannot see a repository
+   *           there at all (a non-repo directory is certainly not one — this
+   *           is the B-7812 recreate-cwd shape, where the worktree is gone and
+   *           the folder was rebuilt EMPTY). KNOWN LIMIT: a WorktreeCreate
+   *           hook can isolate a run under another VCS, and such a directory
+   *           also answers "not a git repo"; a resume that re-enters it in
+   *           place therefore retires the badge. Nothing on this machine can
+   *           tell those two apart, and the CLI's own flag is git-shaped.
+   *   null  — COULD NOT ANSWER (no git, spawn failure, timeout, an unreachable
+   *           host). A probe that cannot answer must retire nothing.
+   *
+   * CS separation: `hostId` is a PARAMETER — the same question is asked of the
+   * machine the session actually runs on, locally through a bounded child
+   * process and on any machine handle through hosts._hostShell, exactly like
+   * the ws-create worktree preflight. Bounded and async on both rungs (the
+   * never-block-the-event-loop law), and reached at most once per attach per
+   * directory.
+   *
+   * The local spawn gets a GIT_*-free env: git's "which repository am I
+   * talking about" layer lives in the environment (GIT_DIR/GIT_WORK_TREE/…),
+   * and this server can itself have been started from inside a session that
+   * exported them — inheriting them would make the probe answer about a
+   * different repository altogether.
+   */
+  function probeLinkedWorktree(session, dir) {
+    const same = (a, b) => path.resolve(dir, String(a || '').trim()) === path.resolve(dir, String(b || '').trim());
+    if (session.host) {
+      if (!hosts || typeof hosts._hostShell !== 'function') return Promise.resolve(null);
+      let h = null;
+      try { h = hosts.get(session.host); } catch { h = null; }
+      if (!h) return Promise.resolve(null);
+      const q = dir.replace(/'/g, `'\\''`);
+      // Markers, never exit codes: "not a repo" and "git is missing" are two
+      // different answers and only one of them retires a fact.
+      // ASK FOR THE SHAPE YOU ARE GOING TO COMPARE. The local rung resolves both
+      // answers against `dir` before comparing them; this rung compared the raw
+      // strings, and git does not answer in one form — from a SUBDIRECTORY of a
+      // PLAIN checkout, `--git-dir` is absolute and `--git-common-dir` is
+      // relative (measured, git 2.51: `/repo/.git` vs `../.git`), so "they
+      // disagree" was true of the shape that is not a worktree at all and every
+      // remote session started in a subdirectory read as isolated. `git` cannot
+      // be asked to resolve them here (there is no `path.resolve` in this
+      // script, and a `cd`-and-`pwd` dance would have to handle both forms
+      // anyway), so ask git for ONE form: `--path-format=absolute` (git ≥ 2.31)
+      // makes both answers absolute, which is exactly what the local rung
+      // computes for itself.
+      //
+      // And an EMPTY answer is now UNKNOWN, not NO: with the flag present, an
+      // empty `a` after git was found means the flag was refused (git < 2.31)
+      // or the command failed for a reason this script cannot see — neither of
+      // which is evidence that the directory is not a worktree, and a probe
+      // that cannot answer must retire nothing. "Not a repository" still
+      // reaches NO through the `cd`/exit-status path below.
+      const script = `command -v git >/dev/null 2>&1 || { echo __VS_WT_UNKNOWN__; exit 0; }; `
+        + `cd '${q}' 2>/dev/null || { echo __VS_WT_NO__; exit 0; }; `
+        + `git rev-parse --git-dir >/dev/null 2>&1 || { echo __VS_WT_NO__; exit 0; }; `
+        + `a=$(git rev-parse --path-format=absolute --git-dir 2>/dev/null); `
+        + `b=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null); `
+        + `if [ -z "$a" ] || [ -z "$b" ]; then echo __VS_WT_UNKNOWN__; elif [ "$a" = "$b" ]; then echo __VS_WT_NO__; else echo __VS_WT_YES__; fi`;
+      return Promise.race([
+        hosts._hostShell(h, script, { timeoutMs: 8000 }),
+        new Promise((r) => setTimeout(() => r(''), 8500)),
+      ]).then((out) => {
+        const txt = String(out || '');
+        if (txt.includes('__VS_WT_YES__')) return true;
+        if (txt.includes('__VS_WT_NO__')) return false;
+        return null;                                   // UNKNOWN marker, empty, or a timeout
+      }).catch(() => null);
+    }
+    const env = {};
+    for (const [k, v] of Object.entries(process.env)) if (!/^GIT_/.test(k)) env[k] = v;
+    return new Promise((resolve) => {
+      execFile('git', ['-C', dir, 'rev-parse', '--git-dir', '--git-common-dir'], { timeout: 6000, env }, (err, out) => {
+        // MEASURED error shapes (node v24, git 2.51): a non-repo/missing dir
+        // exits 128 (`err.code` NUMBER), a missing binary reports
+        // `code:'ENOENT'` (a STRING, and `killed` undefined), a timeout sets
+        // `killed`. So only a NUMERIC exit code means "git answered".
+        if (err && err.killed) return resolve(null);              // timeout ⇒ unknown
+        if (err && typeof err.code !== 'number') return resolve(null); // git missing / spawn failure ⇒ unknown
+        if (err) return resolve(false);                            // git spoke: not a repository / no such directory
+        const [a, b] = String(out || '').split('\n');
+        if (!a || !b) return resolve(null);                        // an answer we cannot read is not an answer
+        resolve(!same(a, b));
+      });
+    });
+  }
+
+  /**
+   * Publish the files ONE SendUserFile call names, then tell the session's
+   * clients where they landed. Fire-and-forget and fully async (the
+   * never-block-the-event-loop law: a sent file can sit on a wedged mount).
+   * Every failure is reported ON THE CARD via the same broadcast — a file the
+   * agent believes it delivered and the user never received is precisely the
+   * silent failure this product does not tolerate.
+   */
+  async function publishUserFiles(session, id, block, { broadcastToSession }) {
+    const rec = userChannelRecord({ toolName: block.name, input: block.input, output: null });
+    if (!rec) return;
+    const base = session._worktreePath || session.cwd || '';
+    const paths = userFilePaths(rec, base);
+    if (!paths.length) return;
+    const out = [];
+    for (const abs of paths) {
+      const name = abs.slice(abs.lastIndexOf('/') + 1);
+      try {
+        const st = await fs.promises.stat(abs);
+        if (!st.isFile()) { out.push({ path: abs, name, error: 'not a file' }); continue; }
+        if (st.size > USER_FILE_MAX_BYTES) { out.push({ path: abs, name, error: `too large to publish (${Math.round(st.size / 1024 / 1024)}MB > ${USER_FILE_MAX_BYTES / 1024 / 1024}MB)` }); continue; }
+        const buf = await fs.promises.readFile(abs);
+        const ext = (abs.match(/\.[A-Za-z0-9]+$/) || [''])[0].toLowerCase();
+        // An unknown extension publishes as a DOWNLOAD (octet-stream), never
+        // as a document: published-pages re-normalizes this anyway, but the
+        // intent is stated here too.
+        const mediaType = USER_FILE_EXT_TYPES.get(ext) || 'application/octet-stream';
+        const pages = pagesRef;
+        if (!pages || typeof pages.publishContent !== 'function') { out.push({ path: abs, name, error: 'publishing is unavailable on this instance' }); continue; }
+        const r = pages.publishContent({
+          html: buf, name,
+          // THE CHANNEL'S OWN KEY NAMESPACE (round-3 verifier, MAJOR).
+          // `srcKey` is the UPSERT IDENTITY of a published page, and
+          // `local:<abs>` is the key the user's OWN publishes use
+          // (published-pages `publish()`) and the one the agent CLI's
+          // `vibespace-page publish` mints (`<host|local>:<path>`). Sharing it
+          // meant a file this channel delivered SILENTLY TOOK OVER the page a
+          // user had published from the same path — overwriting its bytes,
+          // re-attributing it to this conversation, and (with the explicit
+          // flag below) flipping a page they had deliberately shared back to
+          // private, so the link they had handed out started redirecting to
+          // /login. It also collapsed two conversations that name the same
+          // stable path (`report.md`, `/tmp/out.png` — what agents actually
+          // write) into ONE record, so the older conversation's card lost its
+          // link entirely (`list({conversationId})` no longer matched it).
+          // Scoped to the CONVERSATION, not the run: the same file re-sent in
+          // the same conversation still keeps one stable URL across resumes,
+          // while a different conversation gets its own page.
+          srcKey: `userfile:${session.backendSessionId || session.claudeSessionId || id}:${abs}`,
+          srcPath: abs, // descriptive only — the key above is the identity
+          // NO visibility flag. A freshly minted record is already private
+          // (published-pages mints `public:false`), so private-by-default is
+          // preserved — while an EXPLICIT `false` would re-assert privacy on
+          // every re-send and overwrite a visibility the user chose in the
+          // Pages popover. Same rule the agent publish route already follows:
+          // only an explicit request changes what the user set.
+          sessionId: id, conversationId: session.backendSessionId || session.claudeSessionId || null,
+          mediaType: mediaType === 'text/html' ? '' : mediaType, // '' ⇒ the existing HTML page path, prelude and all
+        });
+        if (r?.error) { out.push({ path: abs, name, error: r.error }); continue; }
+        // RELATIVE path only (the 2.366.1 URL law): the server does not know
+        // how it is being reached, so the browser joins this with its own
+        // origin. Never a remembered/guessed absolute URL.
+        out.push({ path: abs, name, link: r.page.path, pageId: r.page.id, size: st.size });
+      } catch (e) {
+        out.push({ path: abs, name, error: e && e.code === 'ENOENT' ? 'file not found' : `could not read: ${e && e.message ? e.message : 'unknown error'}` });
+      }
+    }
+    if (!out.length) return;
+    try { broadcastToSession(session, id, { type: 'user-file-published', sessionId: id, toolCallId: block.id, files: out }); } catch { }
+    global.__vsEvent?.('user-file-published', `${out.filter((f) => f.link).length}/${out.length}`);
+  }
+
   function attach(session, id, ptyProcess, { feedLive, broadcastToSession, broadcastActiveSessions, readSessionMeta, writeSessionMeta, updateSessionTodos, applyTaskToolUpdate, emitTaskListTodos }) {
     let lineBuf = '';
+    // The directory the linked-worktree probe has already been asked about for
+    // THIS attach (see the init-frame arbiter below). Per-attach closure state,
+    // like lineBuf — not a session `_field` — so a re-attach simply asks once
+    // more and a probe never runs per init frame.
+    let wtProbedDir = '';
     if (!session.subagentBuffers) session.subagentBuffers = new Map();
     if (!session.subagentEmittedUuids) session.subagentEmittedUuids = new Map(); // toolUseId → Set<uuid>
     if (!session.subagentWatchers) session.subagentWatchers = new Map(); // toolUseId → {watcher, offset}
@@ -123,6 +312,53 @@ function create({ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes,
     // this handle (the wrapper meta's task map carries their ids); the
     // 10-min inactivity sweep bounds any stale entry it re-creates
     session._startSubagentWatcher = startSubagentWatcher;
+
+    /** RETIRE AN IN-FLIGHT COMPACTION (§2.11, round 6). `_streamingKind ===
+     *  'compacting'` is a claim about RIGHT NOW, and the client mirrors it as a
+     *  held `_compactStage` whose `compactInFlight()` gates the whole "Prompt is
+     *  too long" guidance card. Every place the server retires that claim must
+     *  therefore SAY SO — before round 6 only the `status:null` outcome record
+     *  did, and the other two exits (`result`/`compact_boundary`, and the CLI's
+     *  own idle turn state) cleared it silently. A compaction that ends without
+     *  an outcome record is a REAL wire shape, not a theoretical one: a
+     *  PreCompact hook that BLOCKS it makes the CLI emit a bare `sdk_status
+     *  status:null` with no metadata, and the ws-handler send-site sets the kind
+     *  on `/compact` before the CLI has said anything at all. In those cases the
+     *  client kept "Compacting: running <hook> hooks…" forever and every later
+     *  card lost the rewind-and-retry sentence it exists to give.
+     *
+     *  `result:null` on purpose — "ended" is not "succeeded" (round 5): only the
+     *  CLI's own `compact_result:"success"` may be reported as finished. And the
+     *  kind is cleared HERE, so the normal path (outcome record → its own
+     *  compact_end → kind null) never produces a second frame.
+     *
+     *  ROUND 7 — THE PIN HAS TO SEE A *SILENT* EXIT, AND COUNTING CALL SITES
+     *  CANNOT. Round 6 asserted "retireCompaction is called twice", which goes
+     *  red when a call is deleted and stays green when a FOURTH exit clears the
+     *  kind on its own (reproduced: a fake `system/vs_fake_silent_exit` branch
+     *  writing `session._streamingKind = null` left all 168 asserts green).
+     *  What the guard has to be able to say is "nothing clears this claim
+     *  without speaking", so `endCompaction` is now the ONE WRITER of the
+     *  cleared kind — every other exit calls it or `retireCompaction` — and the
+     *  suite pins the CENSUS of `_streamingKind = null` writes in this file at
+     *  exactly one. A fifth exit is then a new write, and it goes red by
+     *  construction instead of by a comment nobody re-counts. */
+    const endCompaction = (sess, sid, { result = null, error = null, announce = true } = {}) => {
+      const was = sess._streamingKind === 'compacting';
+      sess._streamingKind = null;
+      // `announce:false` is for the ONE caller that publishes its own frame for
+      // this same transition (the dormant `compact_progress` lane below) — two
+      // frames for one end would make the client draw the outcome twice.
+      if (announce) broadcastToSession(sess, sid, { type: 'compact-progress', sessionId: sid, event: 'compact_end', hookType: null, hint: null, result, error });
+      return was;
+    };
+    const retireCompaction = (sess, sid) => (sess._streamingKind === 'compacting' ? endCompaction(sess, sid) : false);
+    // The teardown path (src/server/session-stdout.js) is the exit this
+    // consumer cannot see: the wrapper dies and no record ever arrives. It is
+    // still a turn-lifecycle exit of the same claim, so it retires through the
+    // SAME named function rather than reaching in and clearing the field
+    // (session-schema row `_retireCompaction`).
+    session._retireCompaction = () => retireCompaction(session, id);
 
     ptyProcess.onData((output) => {
       if (session._reattachAttempts) session._reattachAttempts = 0;
@@ -242,6 +478,87 @@ function create({ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes,
               session._apiKeySource = msg.apiKeySource;
               if (session.sockName) writeSessionMeta(session.sockName, { ...(readSessionMeta(session.sockName) || {}), apiKeySource: msg.apiKeySource });
               broadcastActiveSessions();
+            }
+          }
+
+          // THE WORKTREE THE CLI ITSELF ANNOUNCED (owner ruling 9) — and it is
+          // the ARBITER IN BOTH DIRECTIONS, not just a path harvester.
+          //
+          // A `--worktree` spawn chdir's into <repo>/.claude/worktrees/<name>
+          // (2.1.257: `pCn(repo,name) = join(repo,'.claude','worktrees',name)`,
+          // `setup_worktree_ms` + `worktree_chdir:` run in SETUP, before the
+          // session stream exists), so the init record's `cwd` is that
+          // directory — a TYPED record, never a path we compose from a naming
+          // rule we would then have to keep in sync with the CLI (and which a
+          // WorktreeCreate hook can put anywhere at all).
+          //
+          // The SAME record also settles the opposite case, which is the one
+          // that would otherwise make the badge lie:
+          //   · the CLI's own 'worktree-gone' path — "the worktree … no longer
+          //     exists; continuing in the current directory without worktree
+          //     isolation. The worktree binding has been cleared." (2.1.257
+          //     verbatim) — the conversation KEEPS our `worktree:true` intent
+          //     while the process is plainly not isolated;
+          //   · a resume that carries the saved tick for a conversation the
+          //     CLI never bound to a worktree (a resume can only RE-ENTER a
+          //     recorded worktree, never create one — `--worktree` is emitted
+          //     on new/fork only, see worktreeSpawnArgs).
+          // In both, the CLI reports the very directory we launched it in.
+          //
+          // BUT "same cwd" IS NOT ITSELF THE ANSWER (round-4 verifier). It is a
+          // NEGATIVE inference, and a plain RESUME of a worktree conversation
+          // satisfies it: the resume launches in the DISCOVERY cwd, which for
+          // such a conversation IS the worktree — the CLI wrote its transcript
+          // from in there, so the JSONL's own `cwd` (session-store) and the
+          // project-dir encoding both name the worktree (measured: a
+          // `claude --worktree` run in /tmp/vs-wtrepo-probe produced
+          // ~/.claude/projects/-tmp-vs-wtrepo-probe--claude-worktrees-probe9).
+          // So EVERY resumed worktree session announced the directory it was
+          // launched in and had its live fact retired: badge gone, meta
+          // stripped, `worktree:false` broadcast, Session Properties saying
+          // "not isolated in this run" — about a run that is genuinely
+          // isolated, and permanently, because boot-restore reads the meta.
+          //
+          // The positive question is "is the announced directory a LINKED git
+          // worktree?", which git answers by itself: inside one, `--git-dir`
+          // (<common>/worktrees/<name>) and `--git-common-dir` (<common>)
+          // differ; in a plain checkout they are the same. So:
+          //   announced !== launched            ⇒ isolated (no probe, the CLI
+          //                                       moved: the fast path)
+          //   announced === launched, linked    ⇒ isolated, path = announced
+          //   announced === launched, not linked⇒ retire the fact
+          //   the probe cannot ANSWER           ⇒ touch NOTHING (the same
+          //                                       tri-state rule the ws-create
+          //                                       worktree preflight follows)
+          // Trailing slashes are cosmetic; nothing else is normalized, because
+          // a path we massaged is no longer the record the CLI gave us.
+          if (msg.type === 'system' && msg.subtype === 'init' && session._worktree && typeof msg.cwd === 'string' && msg.cwd) {
+            const trim = (p) => String(p || '').replace(/\/+$/, '');
+            const announced = trim(msg.cwd);
+            const launched = trim(session.cwd);
+            // ONE application point for both the sync and the probed verdict.
+            const applyWorktreeVerdict = (isolated) => {
+              const nextPath = isolated ? announced : null;
+              if (!(isolated ? session._worktreePath !== nextPath : (session._worktreePath || session._worktree))) return;
+              session._worktreePath = nextPath;
+              if (!isolated) session._worktree = false;   // the LIVE fact only; the user's saved pick is theirs to change
+              if (session.sockName) writeSessionMeta(session.sockName, { ...(readSessionMeta(session.sockName) || {}), worktree: isolated || undefined, worktreePath: nextPath || undefined });
+              broadcastToSession(session, id, { type: 'worktree-path', sessionId: id, worktree: isolated, worktreePath: nextPath });
+              broadcastActiveSessions();
+            };
+            if (announced && launched && announced !== launched) {
+              applyWorktreeVerdict(true);
+            } else if (announced && launched && wtProbedDir !== announced) {
+              wtProbedDir = announced;                    // once per attach per directory (a re-attach storm must not spawn a probe per frame)
+              probeLinkedWorktree(session, announced).then((linked) => {
+                if (!activeSessions.has(id) || !session._worktree) return;  // the run ended, or the fact is already retired
+                if (linked === null) {
+                  console.warn(`[session] worktree: could not tell whether ${announced} is a linked git worktree — leaving the session's worktree fact untouched`);
+                  global.__vsEvent?.('worktree-probe-unknown', session.host ? 'host' : 'local');
+                  return;                                 // a probe that cannot answer never retires a fact
+                }
+                applyWorktreeVerdict(linked);
+              }).catch(() => { });
             }
           }
 
@@ -387,6 +704,24 @@ function create({ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes,
               else if (b.name === 'TaskUpdate' && b.input?.taskId) applyTaskToolUpdate(session, b.input);
             }
           }
+
+          // SendUserFile → a private link in THIS instance (owner ruling 8(c)).
+          // The tool is the CLI's first-class "hand the user a file" channel;
+          // publishing it here means the chat card can carry a link the user
+          // can open, share with a colleague, or keep after the session dies —
+          // which is exactly what published pages already are.
+          // LOCAL sessions only: the paths are on the machine the CLI runs on,
+          // and a remote session's files are not ours to read (the card still
+          // renders, it simply carries no link — an honest absence, not a
+          // guess). Paths resolve against the directory the CLI ITSELF is in
+          // (`_worktreePath` for a --worktree session, else the session cwd) —
+          // the tool's own describe says "absolute or relative to cwd".
+          if (msg.type === 'assistant' && Array.isArray(msg.message?.content) && !session.host) {
+            for (const b of msg.message.content) {
+              if (b?.type !== 'tool_use' || userChannelKind(b.name) !== 'file') continue;
+              publishUserFiles(session, id, b, { broadcastToSession });
+            }
+          }
           if (msg.type === 'user' && Array.isArray(msg.message?.content) && session._pendingTaskCreates?.size) {
             for (const b of msg.message.content) {
               if (b?.type !== 'tool_result' || !session._pendingTaskCreates.has(b.tool_use_id)) continue;
@@ -401,14 +736,93 @@ function create({ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes,
             }
           }
 
+          // TOOL-GRANULAR RUN SET (§2.5, caps `inProgressTools`). The CLI's own
+          // describe: "Emitted when tool execution adds/removes tool_use ids
+          // from the mid-execution set (after permission grant, before
+          // result). Surfaces use this to show which tools are running."
+          // Card-less by design — it would drive the tool cards' spinner, not
+          // the transcript, so it is consumed HERE and never normalized (the
+          // normalizer has no case for it; a rebuild replays it into a no-op,
+          // which is correct: a run set is live-only by nature).
+          //
+          // DORMANT ON 2.1.257 — THE RECORD DOES NOT REACH US (round-4
+          // verifier, reproduced on the WIRE). The CLI routes it into a HOST
+          // CALLBACK and returns without re-yielding it:
+          //   `if(e.type==="set_in_progress_tool_use_ids"){
+          //      n.onInProgressToolUseIDs?.(e.op); return }`   (offset 186333979)
+          // and the "add" side never even enters that dispatcher — it is handed
+          // straight to a callback at tool dispatch
+          // (`U({type:"set_in_progress_tool_use_ids",op:{action:"add",ids:[n]}})`,
+          // offset 184806515). Only the SUBAGENT pipeline reads one, and only
+          // 'remove' (offset 191771649); the forked-skill pipeline `continue`s
+          // past it entirely (192802652).
+          // MEASURED, not inferred: a probe in chat-wrapper.js's exact spawn
+          // shape (--output-format stream-json --input-format stream-json
+          // --verbose --permission-prompt-tool stdio, piped) ran three parallel
+          // Reads plus three Bashes → 6 tool_use + 6 tool_result records and
+          // ZERO of these, while `system/session_state_changed` running/idle
+          // DID arrive on the same stdout (the positive control that the reader
+          // works). 24 production buffers: 212 tool_use blocks, 0 of these.
+          // So `caps.inProgressTools` is FALSE and no surface claims the dot.
+          // The branch stays because the day the CLI forwards the record this
+          // is the whole feature — scripts/test-stdout-registry.mjs's wire leg
+          // re-measures it on every run and goes RED (with the instruction to
+          // flip the cap) the moment one arrives.
+          if (msg.type === 'set_in_progress_tool_use_ids' && msg.op && Array.isArray(msg.op.ids)) {
+            const set = (session._inProgressTools ||= new Set());
+            const ids = msg.op.ids.filter((x) => typeof x === 'string' && x).slice(0, 200);
+            if (msg.op.action === 'add') for (const t of ids) set.add(t);
+            else if (msg.op.action === 'remove') for (const t of ids) set.delete(t);
+            else { global.__vsEvent?.('cli-unknown-inprogress-action', String(msg.op.action).slice(0, 40)); }
+            broadcastToSession(session, id, { type: 'tools-in-progress', sessionId: id, ids: [...set] });
+            continue;
+          }
           // Track turn lifecycle: streaming state + activity label (broadcast to clients)
           {
             let newLabel = null;
+            // AUTHORITATIVE TURN STATE (§2.5/§3.5). Once THIS session has shown
+            // us one `system/session_state_changed`, the harness's own words
+            // own `_isStreaming` and the derived writes below stand down. The
+            // flag is per SESSION and starts false: an old CLI, or one spawned
+            // before src/adapters/claude-code.js started setting
+            // CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS, simply never sets it and
+            // keeps today's result/compact_boundary/user inference forever —
+            // degradation is the default path, not an error path.
+            const authoritative = session._turnStateSeen === true;
             if (msg.type === 'result' || (msg.type === 'system' && msg.subtype === 'compact_boundary')) {
-              session._isStreaming = false;
+              if (!authoritative) session._isStreaming = false;
               session._fallbackStopFired = false; // one auto-stop per turn (claude.disableModelFallback belt)
-              session._streamingKind = null;
+              retireCompaction(session, id); // says so if one was in flight (§2.11) — and it is the ONLY writer of the cleared kind
               newLabel = '';
+            } else if (msg.type === 'system' && msg.subtype === 'session_state_changed' && isTurnState(msg.state)) {
+              // The CLI's own turn state. describe: "'idle' fires after
+              // heldBackResult flushes and the bg-agent do-while exits —
+              // authoritative turn-over signal". That is strictly LATER than
+              // our `result` guess, which is why a background agent still
+              // working after the result used to look finished. What each state
+              // MEANS is the PURE turnStateEffect — the same function the attach
+              // reconciliation reads, so the live view and a re-attach can never
+              // disagree about a session's turn.
+              const st = msg.state;
+              // `hasLabel` = "something is already on the spinner line, so a
+              // bare `running` must not stomp it". It is SOUND only because
+              // turnStateEffect never writes a line that goes stale (round 8):
+              // the only lines it can put there are '' and 'thinking...', so
+              // whatever is on the line when a `running` arrives is still true.
+              const eff = turnStateEffect(st, { hasLabel: !!session._streamingLabel });
+              const first = !session._turnStateSeen;
+              session._turnStateSeen = true;
+              const changed = session._turnState !== st;
+              session._turnState = st;
+              session._isStreaming = eff.streaming;
+              if (!eff.streaming) { session._fallbackStopFired = false; retireCompaction(session, id); }
+              if (eff.label !== null) newLabel = eff.label;
+              // Only on a CHANGE (the CLI can restate the same state) — and NOT
+              // through broadcastActiveSessions: the session-card payload
+              // carries no turn state at all, so re-broadcasting the whole list
+              // here would be a cost with no reader (and a comment claiming a
+              // chip that does not exist).
+              if (changed || first) broadcastToSession(session, id, { type: 'turn-state', sessionId: id, state: st, authoritative: true });
             } else if (msg.type === 'user' && !msg.parent_tool_use_id && !msg.isSidechain) {
               // Local-command echoes (e.g. "<local-command-stdout>Set model
               // to ...") are user records with NO turn behind them — treating
@@ -430,7 +844,7 @@ function create({ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes,
                 }
               }
               if (!/^<local-command-/.test(uText.trim())) {
-                session._isStreaming = true;
+                if (!authoritative) session._isStreaming = true;
                 newLabel = 'thinking...';
               }
             } else if (msg.type === 'assistant' && !msg.parent_tool_use_id && !msg.isSidechain) {
@@ -453,6 +867,130 @@ function create({ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes,
               // AUTH-class failure (2.335.0): a pooled session must route
               // AROUND a banned/expired member, not retry into it forever
               try { notePoolAuthFailure?.(session, id, { status: msg.error_status, message: msg.error, attempt: msg.attempt }); } catch { }
+            } else if (msg.type === 'system' && msg.subtype === 'status') {
+              // ── THE COMPACTION LANE THAT IS ACTUALLY ON OUR WIRE (§2.11) ──
+              // A REAL compaction, captured verbatim in a production buffer
+              // (data/session-buffers/sess-5-*.buf, an AUTO compaction with
+              // pre_tokens 997587 → post_tokens 11159, duration_ms 174751):
+              //   system/status      {status:"compacting"}
+              //   system/hook_started/hook_response  SessionStart:compact
+              //   system/status      {status:null, compact_result:"success"}
+              //   system/compact_boundary {compact_metadata:{trigger:"auto",…}}
+              // …and ZERO `compact_progress` records. That is a controlled A/B
+              // inside ONE producer: the manual-compact function emits the two
+              // twins one line apart, `onCompactEvent?.({type:"compact_progress",
+              // …})` (185190125) and `onCompactEvent?.({type:"sdk_status",
+              // status:"compacting"})` right after — and only the second one
+              // reaches us, because the host's onCompactEvent CONSUMES the
+              // first (`case"compact_progress":P.main.applyCompactProgress(
+              // x.event);return`, 201341255 — a TUI spinner store) while the
+              // second is forwarded through `HRt` (198800990) to the SDK sink
+              // as this record (`Oe.type==="sdk_status"` ⇒ `{type:"system",
+              // subtype:"status",status,compact_result?,compact_error?}`,
+              // 190037796).
+              // The whole channel carries exactly two values — 15 `sdk_status`
+              // emitters in 2.1.257, all of them "compacting" or null — plus a
+              // "requesting" that the forwarder itself filters out
+              // (`function wJt(e){return e!=="requesting"&&k5()}`, 198800730).
+              // So this branch, NOT compact_progress, is §2.11 in production.
+              // It also covers AUTO compaction — the case the user never typed
+              // /compact for, which the ws-handler send-site label can never
+              // see (it is the only compaction most long sessions ever hit).
+              // Card-less, exactly like api_retry above.
+              const st = msg.status;
+              const cres = typeof msg.compact_result === 'string' ? msg.compact_result : null;
+              const cerr = msg.compact_error ? String(msg.compact_error).slice(0, 200) : null;
+              const compacting = session._streamingKind === 'compacting';
+              if (st === 'compacting') {
+                session._streamingKind = 'compacting';
+                newLabel = 'Compacting the conversation…';
+                broadcastToSession(session, id, { type: 'compact-progress', sessionId: id, event: 'compact_start', hookType: null, hint: null, result: null, error: null });
+              } else if ((st === null || st === undefined) && (cres || cerr || compacting)
+                         // A bare `status:null` is ALSO the permission-mode echo
+                         // (`_r(p,P)` = {status:null,permissionMode,…}, 199038328).
+                         // One of those mid-compaction must not be read as "the
+                         // compaction finished" — an outcome field, or the
+                         // absence of permissionMode, is what makes it ours.
+                         && !(msg.permissionMode !== undefined && !cres && !cerr)) {
+                // Through the ONE writer, with the CLI's own outcome — the only
+                // exit that has one. Unlike `retireCompaction` this announces
+                // even when we never saw the `compacting` start (the branch's
+                // own condition already required an outcome field): losing the
+                // CLI's verdict there would be worse than an extra frame.
+                endCompaction(session, id, { result: cres || (cerr ? 'error' : null), error: cerr });
+                newLabel = 'thinking...';
+              }
+              // Any other status value (or a permission-mode echo outside a
+              // compaction) changes NOTHING — we never invent a stage.
+            } else if (msg.type === 'system' && msg.subtype === 'hook_started' && session._streamingKind === 'compacting') {
+              // The ONE intermediate stage this lane really has: the same
+              // production capture shows `SessionStart:compact` hooks running
+              // between the two status records. Gated on an IN-FLIGHT
+              // compaction — hook_started fires for every hook in every normal
+              // turn (13 of 24 production buffers), and outside a compaction it
+              // is none of this branch's business.
+              const hn = String(msg.hook_name || msg.hook_event || '').slice(0, 60);
+              newLabel = hn ? `Compacting: running ${hn} hooks…` : 'Compacting the conversation…';
+              broadcastToSession(session, id, { type: 'compact-progress', sessionId: id, event: 'hooks_start', hookType: hn || null, hint: null, result: null, error: null });
+            } else if (msg.type === 'compact_progress' && msg.event && typeof msg.event === 'object') {
+              // COMPACTION PROGRESS, the DECLARED lane (§2.11) — kept for
+              // SHAPE PARITY, not because it has ever arrived.
+              //
+              // NO VIBESPACE-SPAWNED CLI HAS EVER EMITTED ONE OF THESE: 24
+              // production buffers contain 0 (including the file with a real
+              // 2.9-minute auto-compaction, which produced the system/status
+              // pair above instead), and the host callback that swallows it is
+              // named in the branch above. The branch stays because it costs
+              // nothing and the record is declared in the CLI's own schema — if
+              // a later version starts forwarding it, this is already the
+              // richer lane (hooks phase + the CLI's own hint text). It is NOT
+              // what §2.11 runs on today.
+              //
+              // TWO SPELLINGS, and the schema is NOT the one on the wire.
+              // The 2.1.257 zod declaration (offset 179096059) says
+              //   hooks_start  {hook_type: pre_compact|post_compact|session_start}
+              //   compact_start{hint_text?: string|null}
+              //   compact_end
+              // but every EMITTER in the same binary builds the camelCase
+              // object — `{type:"compact_progress",event:{type:"hooks_start",
+              // hookType:"pre_compact"}}` (183979983), `{type:"compact_start",
+              // hintText:F}` (183980713), and 185190125/185193937/185195701/
+              // 185198872/185209427/192261073 — which `onCompactEvent:(k)=>
+              // r.enqueue(k)` (182861070) forwards VERBATIM to stdout. The
+              // CLI's own consumer reads camelCase too (189086200:
+              // `t.hookType==="pre_compact"`, `u(!0,t.hintText??null)`), and
+              // `grep -aob 'hint_text:'` finds exactly ONE hit in the whole
+              // binary: the schema literal. Reading only the schema spelling
+              // meant "running hook hooks…" and a null hint on every real
+              // compaction, which is §2.11's entire point.
+              // Read BOTH at this one point (schema shape first — if a later
+              // CLI ever makes the emitters match their own declaration, that
+              // is the spelling to prefer), and never downstream: the
+              // broadcast below publishes ONE normalized shape.
+              const ev = msg.event;
+              const hookT = ev.hook_type ?? ev.hookType;
+              const hintT = ev.hint_text ?? ev.hintText;
+              // This lane publishes its own frame for EVERY event type a few
+              // lines below, so the end goes through the one writer with the
+              // announcement suppressed (see endCompaction's `announce`).
+              if (ev.type === 'compact_end') endCompaction(session, id, { announce: false });
+              else session._streamingKind = 'compacting';
+              if (ev.type === 'hooks_start') newLabel = `Compacting: running ${String(hookT || 'hook').replace(/_/g, ' ')} hooks…`;
+              else if (ev.type === 'compact_start') {
+                const hint = hintT ? String(hintT).slice(0, 160) : '';
+                newLabel = hint ? `Compacting: ${hint}` : 'Compacting the conversation…';
+              } else if (ev.type === 'compact_end') newLabel = 'thinking...';
+              // The card-less record still has to reach the client that draws
+              // the guidance card — it is the ONLY way the card knows a real
+              // progress lane exists (the fallback text stops being shown).
+              broadcastToSession(session, id, {
+                type: 'compact-progress', sessionId: id, event: ev.type || '',
+                hookType: hookT || null, hint: hintT ? String(hintT).slice(0, 160) : null,
+                // ONE frame shape for both lanes: the declared record carries no
+                // outcome, and the client must never have to know which lane it
+                // came from (that is how a second consumer gets written).
+                result: null, error: null,
+              });
             }
             if (newLabel !== null && session._streamingLabel !== newLabel) {
               session._streamingLabel = newLabel;

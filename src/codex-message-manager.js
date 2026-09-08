@@ -15,6 +15,7 @@ const { peerDisplayName } = require('./message-manager');
 // web-search cards: the ONE results renderer + the twin-dedup key (PURE, shared with the client's title chip)
 const { renderSearchOutput, searchActionKey, NO_SEARCH_DETAILS } = require('./search-card');
 const { agentName, collabSummaryText } = require('./collab-row');
+const { rewoundByTurns, applyRewound, rewoundOp } = require('./rewind-ops.js');
 
 function safeJsonParse(text, fallback = null) {
   try { return JSON.parse(text); } catch { return fallback; }
@@ -273,13 +274,21 @@ const SKIPPED_EVENT_TYPES = new Set([
   'mcp_tool_call_begin', 'mcp_tool_call_end', 'image_generation_begin', 'image_generation_end', 'turn_diff', 'terminal_interaction',
   'collab_agent_spawn_begin', 'collab_agent_spawn_end', 'collab_agent_interaction_begin', 'collab_agent_interaction_end',
   // wrapper / engine side channels consumed elsewhere (pool engine, goal sync, usage meter, delivery ladder)
-  'rate_limits_updated', 'goal_updated', 'goal_cleared', 'thread_goal_updated', 'thread_queue_changed', '_remote_state', 'peer_message_result', 'reset_credit_result',
+  // permission_rules = the wrapper's answer to the READ-ONLY
+  // `read-permission-rules` verb (owner ruling 10). It is correlated by
+  // requestId to ONE pending HTTP read in src/server/permission-rules.js and
+  // has no conversation meaning at all — it is not a card, and it is not a
+  // client-side record either. Without this row every user who clicked "Show
+  // rules…" on a codex session fired a false `codex-unknown-record:
+  // permission_rules` breadcrumb, poisoning the signal whose whole job is to
+  // announce genuine upstream additions (round-2 verifier).
+  'rate_limits_updated', 'goal_updated', 'goal_cleared', 'thread_goal_updated', 'thread_queue_changed', '_remote_state', 'peer_message_result', 'reset_credit_result', 'permission_rules',
   // webui_user_retracted = the wrapper telling the READER that a user record it
   // already wrote will never be committed by the app-server (round 3). It is a
   // merge-time fact about the claim ledger (mergeCodexRecords), never a card:
   // the bubble it names STAYS — the user really did send that text.
   'webui_user_retracted',
-  'error', 'warning', 'stream_error', 'deprecation_notice', 'mcp_startup_update', 'mcp_startup_complete', 'session_configured', 'hook_started', 'hook_completed', 'thread_rolled_back', 'shutdown_complete',
+  'error', 'warning', 'stream_error', 'deprecation_notice', 'mcp_startup_update', 'mcp_startup_complete', 'session_configured', 'hook_started', 'hook_completed', 'shutdown_complete',
 ]);
 
 function flattenContentText(content) {
@@ -495,6 +504,9 @@ class CodexMessageManager {
     let lastTurn = -1;
     for (let i = 0; i < this.messages.length; i++) {
       const m = this.messages[i];
+      // A rolled-back message is not a turn marker (§2.10 / §3.2): after a
+      // `thread_rolled_back` the minimap must stop pointing at ghost turns.
+      if (m.rewound) continue;
       const turnIndex = m.turnIndex ?? 0;
       if (turnIndex === lastTurn) continue;
       const entry = { turnIndex, startIdx: i, ts: m.ts, role: m.role };
@@ -588,6 +600,12 @@ class CodexMessageManager {
       taskInfo: fields.taskInfo || null,
       backendMeta: fields.backendMeta || null,
       collapseKind: fields.collapseKind || null, // semantic run-fold kind (Track B) — the chat view folds by THIS, never by backend tool names
+      // noticeKind keys the CLIENT's localized renderer branch. It was passed
+      // to _create by the notice sites ('compact'/'notice' since 2.369.20) and
+      // silently DROPPED here — the exact 2.227.4 gap the claude normalizer
+      // documents. Threading it costs nothing (no renderer branch exists for
+      // those two values) and is what makes the 'rewound' notice localizable.
+      noticeKind: fields.noticeKind || null,
       meta: fields.meta || null, // per-response metadata for the message-info popup — threaded by _threadUsageMeta at token_count (claude parity: MessageManager._create)
     };
     this.messages.push(msg);
@@ -908,6 +926,11 @@ class CodexMessageManager {
         initData.slashCommands = this._status.slashCommands;
         if (emit) this._emit({ op: 'edit', id: init.id, fields: { content: init.content } });
       }
+      // The ONE command-list op (§2.6), same shape as the claude and ACP
+      // normalizers: the `edit` above updates a REBUILT history, but a
+      // complete system card is not re-rendered live, so on its own it never
+      // reaches the composer. codex declares no terminal-bound subset.
+      if (emit) this._emit({ op: 'meta', subtype: 'slash-commands', data: { commands: this._status.slashCommands, terminal: [] } });
     }
     if (payload.model) this._status.model = payload.model;
     if (payload.permissionMode) this._status.permissionMode = payload.permissionMode;
@@ -1992,6 +2015,37 @@ class CodexMessageManager {
     }
   }
 
+  /** codex `thread_rolled_back {num_turns}` → the ONE 'rewound' meta op.
+   *  ThreadRolledBackEvent has exactly one field (0.153.4 serde dump) and
+   *  `thread/rollback`'s param doc defines it: "The number of turns to drop
+   *  from the end of the thread." Until this landed, a rollback made from the
+   *  codex TUI was invisible here and the dropped turns stayed on screen —
+   *  ghost history the agent no longer has.
+   *  A notice card rides along so the transcript SAYS what happened; the mark
+   *  alone would silently strike N turns with no explanation. */
+  _processRolledBack(event, emit) {
+    const asked = event.num_turns ?? event.numTurns;
+    const { ids, turnsFound } = rewoundByTurns(this.messages, asked);
+    const applied = applyRewound(this.messages, ids, 'rollback');
+    const n = Number(asked) || turnsFound || 0;
+    // The honest number: what the harness ASKED for, and — when the visible
+    // history was shorter than that — what was actually there to take back.
+    const text = turnsFound && turnsFound < n
+      ? `Rolled back ${turnsFound} turn${turnsFound === 1 ? '' : 's'} (the agent dropped ${n})`
+      : `Rolled back ${n} turn${n === 1 ? '' : 's'}`;
+    // English baked here (the server cannot know the device language) PLUS the
+    // structured numbers, so chat-renderers localizes from `rewindData` and the
+    // text is only the fallback — the 2.227.4 noticeKind contract.
+    const msg = this._create({
+      role: 'system', status: 'complete', noticeKind: 'rewound',
+      content: [{ type: 'system_info', text, rewindData: { numTurns: n, turnsFound, harness: 'codex' } }],
+    });
+    if (emit) {
+      this._emit({ op: 'create', message: msg });
+      if (applied.length) this._emit(rewoundOp({ harness: 'codex', numTurns: n, ids: applied, ts: this._currentTs }));
+    }
+  }
+
   _processEvent(event, emit) {
     const type = event.type;
     if (!type) return;
@@ -2001,6 +2055,11 @@ class CodexMessageManager {
     if (type === 'view_image_tool_call') return this._processViewImageEvent(event, emit);
     // BEFORE the generic skip: 0.153.4 persists web.search / image_gen / ImageView ONLY here
     if (type === 'item_completed') return this._processItemCompleted(event, emit);
+    // A rollback (TUI `/undo`, or our own thread/rollback once it is wired) —
+    // the SAME payload arrives live and in the rollout, so this one branch
+    // covers both reads (§6 union survey; verified on the owner's two real
+    // rollouts that carry the record).
+    if (type === 'thread_rolled_back') return this._processRolledBack(event, emit);
 
     if (type === 'task_started') {
       if (event.turn_id || event.turnId) {

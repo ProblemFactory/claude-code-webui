@@ -300,7 +300,7 @@ function claimJsonls(locks, jsonls, tailIdsFor) {
 
 // ── JSONL helpers ──
 
-const { parseBackgroundLaunch } = require('./message-manager.js');
+const { parseBackgroundLaunch, initFrameFacts, commandNames } = require('./message-manager.js');
 
 function isSubagentMessage(msg) { return !!(msg.parent_tool_use_id || msg.isSidechain); }
 
@@ -748,6 +748,50 @@ class SessionMessages {
         break;
       }
     }
+    // The WIDENED init facts + the CURRENT command list (§2.6). A session
+    // re-inits (resume, wrapper restart) and pushes `commands_changed`
+    // mid-run, so the FIRST init is the wrong authority for anything live:
+    // upstream's own rule is "re-emitted inits carry the current value — the
+    // newest frame wins", and a commands_changed push REPLACES the list. This
+    // is the attach/HTTP twin of the live meta op, so a window that opens
+    // after the push (or whose init card sits outside the loaded tail) still
+    // gets the same answer. Bounded tail scan, like the usage one above.
+    //
+    // POSITIONS, NOT PRESENCE (round 3). "The newest frame wins" is an
+    // ORDERING rule, and a buffer holds many inits — one per spawn, and the
+    // round-2 measurement found 33 in a single conversation — so
+    // `[…, commands_changed, …, init]` is an ordinary order, not a corner
+    // case: a resume or a wrapper respawn re-inits AFTER a mid-run push. The
+    // first version applied the push unconditionally and handed the composer
+    // the PRE-restart list, disagreeing with the live path on the very same
+    // records (the live normalizer re-emits the new init's list, so the two
+    // twins answered differently — and applyStatus runs after the history
+    // loop, so the stale answer OVERWROTE the correct one the init card's own
+    // side effect had just set). So both indices are recorded and the push
+    // only wins when it is genuinely newer.
+    //
+    // The `!initFrame.slashCommands` half is the same rule read the other way:
+    // live, `_emitSlashCommands` returns early on an init that names no
+    // commands, so the last thing that SPOKE still stands. An init without
+    // `slash_commands` cannot happen on a real CLI (the field is REQUIRED in
+    // the 2.1.257 zod schema) — this is the degradation branch, not a shape
+    // we expect.
+    let initFrame = null, initIdx = -1, pushedCommands = null, pushedIdx = -1;
+    for (let i = msgs.length - 1; i >= Math.max(0, msgs.length - 2000); i--) {
+      const m = msgs[i];
+      if (!pushedCommands && m.type === 'system' && m.subtype === 'commands_changed') { pushedCommands = commandNames(m.commands); pushedIdx = i; }
+      if (!initFrame && m.type === 'system' && m.subtype === 'init') { initFrame = initFrameFacts(m); initIdx = i; }
+      if (initFrame && pushedCommands) break;
+    }
+    if (initFrame) {
+      if (pushedCommands && (pushedIdx > initIdx || !initFrame.slashCommands)) initFrame.slashCommands = pushedCommands;
+      if (initFrame.slashCommands) slashCommands = initFrame.slashCommands;
+      if (initFrame.terminalSlashCommands && initFrame.slashCommands) {
+        initFrame.terminalSlashCommands = initFrame.terminalSlashCommands.filter((c) => initFrame.slashCommands.includes(c));
+      }
+    } else if (pushedCommands) {
+      slashCommands = pushedCommands;
+    }
     // contextWindow comes from result.modelUsage (stdout-only). When restoring
     // from JSONL the only sound DEDUCTION is: observed usage beyond the 200k
     // window proves the 1M beta. Anything else stays 0 = unknown — the UI shows
@@ -761,6 +805,7 @@ class SessionMessages {
     if (!lastUsage && !model) return null;
     return {
       model, lastUsage, contextWindow, total_cost_usd: totalCost, slashCommands, permissionMode,
+      initFrame, // the widened claude init facts (§2.6): terminal-bound commands, memory dirs, health — null on every other harness / older CLI
       permissionModes: this._permissionModes,
       subagentMetas: getSubagentMetas(getHistorySessionId(this._session), this._session.cwd),
     };

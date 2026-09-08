@@ -88,7 +88,7 @@
 | 每会话 worktree | 原生 `-w` | — | 原生 sandbox worktree | 原生 `-w` | **缺**（决策 9） |
 | 临时 / 不落盘会话 | 原生 `--no-session-persistence` | 原生 `ephemeral` | — | — | **缺** |
 | 提示缓存杠杆 | 原生 `--system-prompt-snapshot` / `--exclude-dynamic-system-prompt-sections` / `--autocompact` | — | — | — | **缺**（决策 8） |
-| 零成本本地 oracle | `agents --json` / `auth status` | `doctor --json` | `/global/health`、`opencode stats` | `debug *` | **缺**（决策 6） |
+| 零成本本地 oracle | ~~`agents --json` / `auth status`~~ **实测各 5 个 INET connect ⇒ 否** | ~~`doctor --json`~~ **16 个 ⇒ 否**；改上 `login status` / `mcp list --json` / `features list`（各 0 个） | `/global/health`、`opencode stats` | `debug *` | **✅ 2026-09-07 实装**（人触发按钮，证据进 test-vendor-whitelist；kb-design-lessons §9） |
 | 分享对话 / 上传 | via /bug | 原生 feedback/upload | 原生 opncd.ai 分享 | — | **拒**（§4，决策 7） |
 | 远程 agent 传输 | Remote Control | 原生 app-server `ws://` | 原生 `attach <url>` + mDNS | — | **拒**（走机器句柄，§4） |
 
@@ -241,6 +241,14 @@ inputModes: {
 
 **接缝**：`HANDLED_SYSTEM_SUBTYPES`（message-manager.js:19）加 `session_state_changed`；claude-stream-json 消费者直驱 `_isStreaming`，attach 时对账；`requires_action` 是我们没有的第三态（今天靠「有没有权限卡」反推）。`set_in_progress_tool_use_ids` 走 §2.2 修好的顶层 default 之后新增的分支，喂工具卡的转圈状态。归 §3.5 `turnState`。**门**：test-stdout-registry + test-attach-rebuild（含 env 缺席时的降级路径：老 CLI / 未开开关 ⇒ 回到推断，不许崩）。**尺寸 S。**
 
+> **落地修订（round 4，2026-09-07；上线的一半与死掉的一半）**
+> **① `session_state_changed` 成立**：spawn env 打开后，在 chat-wrapper 的精确 flag 形状里实测到 `running` → `idle`（scripts/probe-claude-stdout.mjs，2.1.257）。§3.5 的 `turnState:'authoritative'` 名副其实。
+> **② `set_in_progress_tool_use_ids` 不成立——它根本不到我们的 stdout**。CLI 把它交给**宿主回调**后就 `return`：`if(e.type==="set_in_progress_tool_use_ids"){ n.onInProgressToolUseIDs?.(e.op); return }`（offset 186333979），而 `add` 那半连这个分发器都不进（tool dispatch 处直接 `U({…action:"add"…})`，184806515）；只有**子代理**流水线读它、且只读 `remove`（191771649），fork-skill 流水线显式 `continue`（192802652）。实测：wrapper 形状下 6 个 tool_use / 6 个 tool_result，**0 条**该记录，而同一份 stdout 上 `session_state_changed` 正常到达（正控）；24 份生产 buffer 里 212 个 tool_use 块、**0 条**。
+> 处置：`caps.inProgressTools` 全线 **false**（服务器 + 客户端镜像），消费分支/广播/attach 字段/`.chat-tool-inflight` 全部保留为**休眠代码**并在注释里点名那个吞掉它的回调；kb 与本节都按「没有任何用户看得见这个点」的口径写。翻牌条件不是读到新 schema，而是 test-stdout-registry 的**上线可达性腿**（每次运行都用装好的 CLI 真跑一个只读工具）观测到 ≥1 条 —— 那条腿在**两个方向**上断言 caps 与线路一致，所以它红的时候就是该翻牌的时候。
+> **教训（记进 §8.1）**：一个记录「在 schema 里 / 有 describe / 有发射点」都不等于**到达我们**；自己合成 fixture 的套件永远分不清「解析对了」与「从没来过」。能力位是**对某个界面的承诺**，没有线路证据就不许为真。
+
+> **落地修订（round 5）：这条上线可达性腿的卫生。** 它跑在**用户的真 $HOME** 上（要真凭据，不能给一次性 HOME），而它每次 `npm run ci` 都会跑 —— 于是 CLI 为它写的真转录被产品自己的 `discoverClaudeSessions` 当成 12 条 `status:"stopped"` 的垃圾会话列进侧边栏（每次 push 一条）。round 4 只修了副作用的 env 一半。现在探针**什么都不留**（自删临时 cwd + 转录 + per-session env 目录；启动时扫掉 >10 分钟的旧残留；原始 stdout 改成一个固定路径每次覆盖），回归钉的是**后果**——删完之后向 `session-store` 要一次发现，探针会话必须为 0，负控是那份原始抓取仍在。细节见 §8.2 第 21 条。
+
 ### 2.6 claude init 帧加宽 + `commands_changed` 后续推送 —— M
 
 **现状**：`_processSystem` 的 init 分支只取三个字段（message-manager.js:398：`raw.model` / `raw.permissionMode` / `raw.slash_commands`）。整帧还有 `tools` / `mcp_servers[{name,status}]` / `agents` / `skills` / `plugins[{name,path,source,version}]` / `plugin_errors[{plugin,type,message}]` / `terminal_slash_commands` / `output_style` / `memory_paths{auto,team}` / `betas` / `claude_code_version`。逐个 grep：全 0。
@@ -304,17 +312,52 @@ inputModes: {
 
 **接缝**：§2.2 修好的顶层 default 之后新增分支 → normalizer 的 `remove` op（已有 create/edit，删除是第三个）→ ChatView 的虚拟滚动要能处理「窗口内一条消失」（与既有 trim 路径共用，不许触发 §2.369.x 那批分页事故）。**门**：test-attach-rebuild（撤回后重建历史不再出现该消息）+ test-chat-trim-guard 的现成守卫。**尺寸 S。**
 
+> **落地修订（round 4）：claude 那一半是 UNVERIFIED，撤回通道今天实际上只有 codex。**
+> `tombstone` 在我们的线路上一次都没出现过：24 份生产 buffer 0 条、上线可达性探针 0 条，而且 `grep -rl '"type":"tombstone"' ~/.claude/projects/` = **0 个文件**，所以重建/gap 那条持久化路径也不可能产出它。
+> 但它与上面两条**不同类**，不能一并降级：它是**被 `yield` 到查询流上**的（`for(let eu of Bu) yield{type:"tombstone",message:eu}`，185068785 / 185075330），不是交给回调的 —— 也就是「没观测到」而非「结构上到不了」。它也**不可廉价触发**：两个发射点都挂在**服务端 refusal-fallback** 路径上（`ks.type==="refusal_no_fallback"`、以及带 `server_fallback` / `api_refusal_category` 的那支），即安全分类器中途拒答后换模型；没有不去**故意诱发一次拒答**就能确定性复现的探针，那不是测试套件该做的事。
+> 处置：`_processTombstone` 与 `superseded`（隐藏）渲染**原样保留为休眠代码**并按 rebuild/gap 三条路钉住行为；kb-features / kb-file-structure / 本节一律写明「今天生效的撤回通道是 codex `thread_rolled_back`（3 份真实 rollout 验证过），claude 那半未在线路上观测到」。真发生一次 refusal fallback 时它就已经是对的。
+> **round 5 复核：本节无变化。** 这一轮的可达性腿又跑了一次（`tombstone` 仍 0 条），四条 rebuild/gap 路径的 computed-style 断言与两个负控全绿；round-5 的三条缺陷都落在 §2.11 与探针卫生上，不涉及撤回语义。
+
 ### 2.11 `compact_progress`：压缩进度 —— S
 
 **现状**：全仓 0。今天 chat-renderers.js:1203 是一句硬编码致歉：「Compacting a large conversation takes 1–2 minutes — do not press Stop」；kb 里还记着一次「/compact 卡在 thinking」事故。上游有 `{type:'compact_progress', event: hooks_start{hook_type} | compact_start{hint_text} | compact_end}`，describe：「Emitted while compaction is running… Distinct from system/compact_boundary」。
 
 **接缝**：顶层新分支 → 现有的流式标签（与 2.284.2 `api_retry` 同一条通道，deliberately card-less）→ 压缩期间显示真实阶段与 `hint_text`，`compact_end` 收尾。硬编码文案降级为「收不到进度时」的兜底。**门**：test-stdout-registry。**尺寸 S。**
 
+> **落地修订（round 4）：`compact_progress` 也不到我们的 stdout；真正在线上的是 `system/status`。**
+> 这是**同一个生产者内部的对照实验**：手动压缩函数隔一行发出一对孪生 —— `onCompactEvent?.({type:"compact_progress",…})`（185190125）与紧随其后的 `onCompactEvent?.({type:"sdk_status",status:"compacting"})`。宿主的 `onCompactEvent` 把前者**就地消费**掉（`case"compact_progress":P.main.applyCompactProgress(x.event);return`，201341255 —— 一个 TUI spinner store），只把后者经 `HRt`（198800990）送进 SDK sink，映射成 `{type:"system",subtype:"status",status,compact_result?,compact_error?}`（190037796）。整个二进制里 `sdk_status` 的 15 个发射点只有两种取值：`"compacting"` 与 `null`；还有一个 `"requesting"` 被转发函数自己滤掉（`function wJt(e){return e!=="requesting"&&k5()}`，198800730）。
+> **生产实证**（data/session-buffers/sess-5-1788332329337.buf 第 57–62 行，一次 **AUTO** 压缩，pre_tokens 997587 → post_tokens 11159，duration_ms **174751**）：
+> `system/status{status:"compacting"}` → `system/hook_started SessionStart:compact` → `hook_response` → `system/status{status:null,compact_result:"success"}` → `system/compact_boundary{trigger:"auto"}`，**0 条 `compact_progress`**。24 份 buffer 合计：1 条 compact_boundary、0 条 compact_progress。
+> 处置：§2.11 改由 `system/status` 驱动 —— `_streamingKind`、spinner label、以及「Compact now」卡片的阶段/结局全部来自它，并顺带覆盖 **AUTO 压缩**（用户从没打过 `/compact`，ws-handler 的发送点结构上看不见它，而这正是长会话唯一会遇到的那种）；压缩进行中的 `hook_started` 是这条通道**唯一**的中间阶段，严格门控在 `_streamingKind==='compacting'` 内（普通 turn 里 hook_started 极常见）。`'status'` 进 `HANDLED_SYSTEM_SUBTYPES`（card-less，理由与 api_retry/session_state_changed 同）；同一 subtype 还承载 CLI 的**权限模式回声**（`{status:null,permissionMode}`，199038328），必须不被读成「压缩结束」—— 判据是有没有结局字段。`compact_progress` 分支保留为**形状对等**，注释写明没有任何 VibeSpace 拉起的 CLI 发出过它，test-stdout-registry 的那条腿标题也从「线路上的真拼写」改成形状对等说明。
+> 收尾还有一条诚实性：`compact_end` **不再**回落到那句「要 1–2 分钟，别按 Stop」——它描述的事情已经结束了；卡片改说真实结局（`compact_result` / `compact_error`）。
+
+> **落地修订（round 5）：那个「终态」只属于它描述的那次压缩，不属于这个视图的余生。**
+> round 4 让 `compact_end` **粘住**（正在看这次压缩的卡片不该在它刚成功的瞬间倒回致歉句），但**没有任何地方清掉它**。于是一个视图的**第一次**压缩——现在恰好包含 round 4 才接上的 **AUTO** 压缩，那是用户没有任何动作就会发生的——把 `_compactStage` 永久钉成 `{event:'compact_end',result:'success'}`；此后每一张「Prompt is too long」引导卡都在按钮下面写「Compaction finished.」，而这张卡存在的全部意义就是那句可操作的指引（1–2 分钟别按 Stop / 它说 Conversation too long 就去终端 Esc Esc 回退几条再压）。375×667 headless chrome 复现（真 bundle、真 server，按服务器为生产 AUTO 捕获所构建的帧逐条回放，屏幕上先没有卡片）：held stage = `{"event":"compact_end","result":"success"}`，随后建的卡片 `.chat-ctx-full-hint` 读到 `Compaction finished.`。
+> 修法=**把「有没有压缩在跑」变成一个具名判定**：`compactInFlight()`（`_compactStage` 存在且 `event !== 'compact_end'`），`appendContextFullCard` 只在它为真时用阶段句、否则用 `compactFallbackHint()`；`setCompactStage` 照旧改写**已经在屏幕上**的每条 hint ⇒ 看着这次压缩的卡片保留结局（round 4 不回退），后建的卡片重新可操作。
+> 同一轮还有一条：**「结束了」不等于「成功了」**。`compact_end` 带**空结局**是真的线路形状——PreCompact hook **拦下**压缩时 CLI 发的是一条不带任何 metadata 的 `sdk_status status:null`（2.1.257 `if(ye.blockedBy) …onCompactEvent({type:"sdk_status",status:null})`），而保留下来的 `compact_progress` 那条道每一帧都硬写 `result:null`。两种情况都**什么都没压**，卡片却会说「Compaction finished.」。⇒ `compactHintText` 只在 `result === 'success'` 时说「完成」，空结局说「Compaction ended.」（新增 zh/ja 词条），失败/其它结局仍按原样说出 CLI 自己的理由。
+
+> **落地修订（round 6）：开了一个「正在跑」的声明，就必须在它不再跑的时候说出来 —— 每一个出口。**
+> round 5 的 `compactInFlight()` 关掉了**终态**那一半（`compact_end` 粘住却没归属期），却留下**非终态**那一半：`_streamingKind === 'compacting'` 是一句关于**此刻**的声明，客户端把它镜像成一个 held `_compactStage`，而这个 stage 门控着整张「Prompt is too long」引导卡；可是**只有** `status:null` 那条结局记录会大声退役它，另外两个出口（`result`/`compact_boundary`，以及 harness 自己的 idle `session_state_changed`）都是**静默** `session._streamingKind = null`。于是一次**没有结局记录**的压缩——PreCompact hook **拦下**它时 CLI 只发一条不带 metadata 的 `sdk_status status:null`（不是结局，本分支正确地拒绝把它读成结局）；而 ws-handler 的 `/compact` 发送点更是在 CLI 说任何话**之前**就把 kind 置上——会让客户端永远停在「Compacting: running <hook> hooks…」，此后每一张引导卡都失去它存在的那句话。真引擎复现：帧 `["hooks_start"]`、`_streamingKind` 已是 null、**没有** `compact_end`。
+> 修法=**一个具名退役** `retireCompaction(sess, sid)`：kind 为 'compacting' 才动作，清 kind 并广播 `compact_end`，两个 turn 生命周期出口各调一次（正常路径上结局记录已先把 kind 清掉 ⇒ 永不产生第二帧）。回包 `result: null` 是**故意**的——round 5 的律条「结束了不等于成功了」在新出口上同样成立，客户端因此说「Compaction ended.」而不是「finished」。
+> 回归**测量后果**：服务器腿钉住两个出口各自的帧序列 + 「第二次 turn 结束不再广播」+「普通 turn 两个出口都零帧」两条负控 + 一条**调用点** WIRING PIN（第三个出口若沉默，只有它会变红）；浏览器腿（375×667，真 bundle 真 server）**不再手写帧**——它在 node 里跑**真消费者**产出帧、再把那批帧回放进真客户端，断言看着它的卡片说「ended」、`compactInFlight()` 归假、随后建的卡片重新给出可操作指引，并以「只有 hooks_start 时确实在跑」为控制组。把两个 `retireCompaction` 调用摘掉即复现原状（帧 `["hooks_start"]`，浏览器腿红）。
+> 不变量：**一个「正在发生」的声明和一个「最后已知状态」一样需要归属期——而它的归属期由生产者关闭，不由读者猜**；同一个状态有多个出口时，退役要收口成一个具名函数，否则第三个出口的沉默无人可见。
+
+> **落地修订（round 6）：清理断言要用清理器**自己的**规则，写进 /tmp 的固定路径不是 fixed 就够了。**
+> round 5 的探针只扫 **>10 分钟**的残留（「正在跑的探针的 cwd 必须活下来」），可套件断言的却是**绝对不存在**任何探针项目目录 ⇒ 一个**并发运行**的探针——正是这条规则存在的理由，而两个 worktree 相隔几分钟 push 是真实发生的——把强制 pre-push 门变红，还把责任推给清理器。复现：真 $HOME 里放一个 5 秒新、带转录的 `-tmp-vs-wire-probe-*` 目录，readdir 那条断言与 `discoverClaudeSessions` 那条断言**同时**红（验证者只复现了前一条，因为他用的是空目录）。修法=探针**报告自己的规则**（`cleaned.staleMs` / `cleaned.spared:[{name,ageMs}]`），两个读者都按它过滤，并在同一个目录上**两个年龄各测一次**（新 ⇒ 两个读者都放行、且它确实被看见；回拨到阈值之外 ⇒ 两个读者都点名它）。
+> 同一轮：round 5 把原始抓取从 0700 的 `mkdtemp` 目录挪到 **/tmp 根下一个可预测的名字**，而 `fs.writeFileSync` **跟随符号链接**——/tmp 的 sticky bit 拦得住别人删我们的文件，拦不住别人**先把那个名字创建成一个指向别处的链接**。复现：植入 `/tmp/vs-wire-probe.last.jsonl -> victim`，跑一次探针，victim 的内容被 CLI stdout 覆盖（每次非 docs push 各一次）。修法=固定路径**搬进本 uid 自己的 0700 目录**（`vs-wire-probe-raw-<uid>/last.jsonl`，扫除时显式跳过它，并顺手退休 round 5 那个旧文件名），目录用 `lstat` 复核（目录名本身也可能被植成链接）、文件用 `O_NOFOLLOW|O_CREAT` 打开后 **fstat 验主（普通文件 + 本 uid）再 ftruncate**——**没有 O_TRUNC**（round 7：这句话原本写着有，而代码 20 行后是故意省掉的；在 open 里截断＝在知道文件是谁的**之前**先把别人的文件清空，正是这段代码要堵的洞，照着注释「把标志加回去」就会无声地重新打开它），任何异常都**跳过抓取并报告原因**而不是写到没被要求的地方。两种植入各一条 ATTACK 腿（victim 逐字不变 + 探针说出理由）+ 一条「撤掉植入后抓取照常工作」的负控 —— 守卫是拒绝攻击，不是把功能关掉。
+
+> 这两条以及探针的「什么都不留」契约现在都由**假 CLI**（隔离 HOME+TMPDIR，零 vendor 成本，且它会留下真 CLI 的同一份足迹：转录 + per-session env 目录 + 一份自证足迹的账本）确定性驱动 —— 只依赖真 CLI 的断言在没装 CLI 的机器上会整段 SKIP，而这两个契约恰恰不该那样。
+
+> **round 7（同一验证者，六条，全部先复现）。** ①**HIGH 假 CLI 的 shebang 假设了 node 在哪**：leg ⓕ″ 把 `#!/usr/bin/env node` 交给一个**为假 CLI 定制的 PATH**（`<fakebin>:/usr/bin:/bin`），于是 node 不在 `/usr/bin`/`/bin` 的机器（nvm-only 开发机、本项目自己的 `node:22-bookworm-slim` 镜像、用 actions/setup-node 的 GitHub runner）上假 CLI 根本起不来：探针报 `claude --version failed: env: 'node': No such file or directory`，三条断言变红，然后 `path.dirname(r1.raw)`（`r1.raw===undefined`）**抛 TypeError 杀掉进程**，后面 ~65 条断言一条都不跑，而报错文本里连 node 和 PATH 都没提到——这台机器上它只是**碰巧**绿（Debian 的 apt nodejs 另外在 `/usr/bin/node` 放了个 v20）。修法两半：shebang 用**正在跑这套件的解释器** `process.execPath`（含空格才回落 `env node`，此时 `NODE_DIR` 已在 PATH 上），并把 `path.dirname(process.execPath)` 放进交给探针的 PATH；以及**能不能测量本身要先被断言**——整条腿包在带标签的块里，`r1.ok !== true` 就一条大声的红（点名 `skip` 原因）然后 `break`，绝不再往下读那份不存在的报告。回归=用**没有任何 node 的 PATH** 真跑一遍探针（正腿）+ round 6 那个 shebang 在同一 PATH 上起不来且探针**说出理由**（负控，证明这条 PATH 真的没有 node）。②**MEDIUM 扫除导出了阈值却没导出时钟**：`stale()` 在探针**开始**时判定，`spared` 在探针**结束**时重建，两个读者又在**断言时**第三次量——于是任何年龄落在 `STALE_MS - 探针运行时长` 与 `STALE_MS` 之间的残留会被扫除**故意放过**、然后被报告成超龄、再被两个读者点名，强制 pre-push 门在**扫除存在的理由**那个案例上变红（与 round 6 修的是同一类，只是低一层）。修法=**扫除报告自己的判决**：一个 `SWEPT_AT`、`spared` 由做判定的**同一趟**构造（名字 + 当时量到的 `ageMs`）、报告里加 `sweptAt`；读者按 `sweptAt` 判定，并把 `spared` 当作**决定清单按名字排除**（那是判决，不是测量，不许再问一次时钟）。回归=假 CLI 下把残留埋在阈值下 1.5s，探针自己 2s 的 post-result beat 把它推过线：正腿（扫除放过它并按自己的时钟报龄／round-7 读者零命中）+ 负控（round-6 读者点名它＝故障复现）+ 「下一次运行真的会收走它」（放过是延后不是豁免）。③**MEDIUM 数调用点的 pin 看不见沉默**：`retires === 2` 能发现被删掉的调用，对**第四个自己清 kind 的出口**永远绿（复现：往消费者里插一条 `system/vs_fake_silent_exit` 分支写 `session._streamingKind = null`，168 条全绿、pin 也绿）。修法=把 pin 挪到**赋值**上：`endCompaction` 成为清空该 kind 的**唯一写者**（`retireCompaction` 是它带守卫的外壳），套件对该文件里 `_streamingKind = null` 的**普查**钉死为 1（注释行不算），第五个出口＝一个新写＝按构造变红；外加一条**行为**腿——从消费者**自己的词表**（源码里所有与 `msg.type`/`msg.subtype` 比较的字面量）自动生成记录喂真消费者，法则是「要么这条声明还在，要么这条记录里发出过 compact_end」，那条假分支也会被它抓到；两条腿各配负控。④**LOW 注释与代码相反**：探针头部写着 `O_NOFOLLOW|O_CREAT|O_TRUNC`，而 20 行后的代码故意不带 O_TRUNC（先 fstat 验主再 ftruncate）——照注释「恢复」就重新打开截断先于验主的洞；三处（探针头、本节、kb）统一改口。⑤**LOW 会话死亡是同一类声明的第三个出口**：`exited` 分支从不清 `_compactStage`，wrapper 死在压缩中途就让 `compactInFlight()` 永真，此后每张引导卡都开在「Compacting: running <hook> hooks…」上——而那个进程已经没了。修法=客户端具名 `_retireCompactionStage()`（只在真的在飞时动作，发**同一形状**的 `compact_end{result:null}`＝「结束了」不是「成功了」）由 `exited` 分支调用；服务器侧同一出口也补上：teardown 通过**消费者自己的**绑定 `session._retireCompaction`（session-schema 有行）在 `exited` 广播**之前**退役，绝不在别处直接清字段（那正是普查禁止的沉默出口）。⑥**LOW 一条本就红着的门**：`test-codex-effort-meta` 的 git helper 用 node 默认 1 MiB maxBuffer 读 `git show origin/master:CHANGELOG.md`（1,052,996 字节）⇒ `spawnSync git ENOBUFS`，97 条绿之后**退出 1**，任何 push 都过不了 `npm run ci`；显式 `maxBuffer` + 两条回归（整份读得出来／同一读法用默认值确实 ENOBUFS，CHANGELOG 若缩回 1 MiB 以下则显式 SKIP 而不是假绿）。r7 不变量=**测试用的假二进制要点名正在跑这套件的解释器，不许假设 node 在哪**；**「能不能测量」本身要先断言，读报告之前先看 `ok`**（读不到的报告只配一条大声的红，不配一个 TypeError）；**清理器的判决要连同它的时钟一起导出，读者排除的是名字不是重新量的年龄**；**守卫要钉住「让它变错的那个写」，不是钉住调用点**（同一状态的第 N 个出口只有普查看得见）；**注释里的安全属性必须与代码逐字一致**（它会被人照着「恢复」）；**每次 push 都跑的 helper 要为它读的、只会变大的东西声明上界**。
+
 ### 2.12 claude 的两个用户通道工具 SendUserMessage / SendUserFile —— S/M（决策 8）
+### 2.12 claude 的两个用户通道工具 SendUserMessage / SendUserFile —— ✅ 已落地 2026-09-07（裁决 8(c)：`--brief` 与提示缓存三件套都做成设置项默认关）
 
 **现状**：`claude --help` 有 `--brief  Enable SendUserMessage tool for agent-to-user communication`，二进制里 `SendUserMessage` / `SendUserFile` 都是一等工具名。我们**手搓了这两件事的等价物**：`vibespace-ask`（用户 inbox）与 published pages（把文件交给用户）。全仓 grep：两个工具名 0 命中——也就是说，如果一个会话开了 `--brief`，agent 调它们，我们连**卡片都画不出来**。
 
 **接缝**：先做**渲染**（chat-renderers 的工具卡分支，SendUserFile 的产物落到 published-pages 的现成通道）；是否**默认开** `--brief` 是产品默认值改动（决策 8）。这条也修正 §3.7 的前提：agent 已经有一等的 user-message / user-file 通道，我们的工具通道设计要与它对齐，而不是再造第三套。**门**：渲染 fixture + i18n。**尺寸 S/M。**
+
+**落地记录（2026-09-07）**：`src/user-channel.js`（PURE，零 import，esc/t/icons 注入）持两侧；两个 schema **逐字 dump 自 2.1.257 二进制自己的 zod 定义**（`SendUserMessage` 别名 `Brief`，`{message, attachments?, status}` 且存在只有 `{message}` 的最小形态；`SendUserFile` `{files, caption?, status, display?}`）。渲染=chat-renderers 的高亮卡（不是通用工具卡：开了 `--brief` 之后工具外的纯文本在消息视图里根本看不到，这张卡就是那条回复）；`SendUserFile` 经 `publishContent` 落到 published-pages（会话归属、默认私有、卡片带**相对**链接、每个文件的失败就写在卡上、远程会话不发布只说明）；published-pages 因此新增 `mediaType`（白名单 + nosniff + 无脚本 sandbox CSP + SVG 只下载）。设置：`claude.brief` / `claude.systemPromptSnapshot` / `claude.excludeDynamicSystemPromptSections` / `claude.autocompact`，**全部默认关**，每个值在成为 argv token 之前先按 CLI 自己的词表校验。门：test-stdout-registry（两个工具的真 tool_use fixture + 端到端发布 + 无关工具的负控）、test-worktree-userchan-ui（375×667 headless chrome 测量 + CSS 负控）、i18n。
 
 ### 2.13 review / fork / rename：按 caps 收口（**取代上一稿的「review 联合体」条目**）—— S
 
@@ -333,7 +376,7 @@ inputModes: {
 | claude `background_tasks` / `stop_task` | 工具卡两个按钮 → 两个 control_request；不带 `tool_use_id` = 全部后台化 | test-stdout-registry + 渲染 fixture | M |
 | codex `thread/list` + `search` + **`items/list` / `turns/list` / `timeline/list`** | descriptor 加 `store.discoverViaProtocol`（bounded app-server child，照抄 codex-thread-read 的模式），优先它、失败回落文件遍历；三个分页 list 是**协议级转录分页**，与我们纯文件式的大转录故事（slab、.zst head、远端增量）是同一问题的第二个解 | test-codex-zst 扩 + 真 app-server 档 | M/L |
 | opencode SSE `/event` | 替掉 10s 轮询 + 补上「external driver 不可检测」洞。**动工前 /proc 实测订阅本身起不起 instance**；订阅是我们拥有的长连接 ⇒ 采样/设界/退避/出声一样不少，**并且每事件与整条流都要字节上限**（2.369.50 法则：整份响应读进 server 必须有上限）；`message.removed` / `message.part.removed` 必须处理（与 §2.10 同一条不变量） | test-opencode-serve + /proc A/B | M |
-| 权限规则面（codex permissionProfile / opencode saved permissions / gemini policy） | 只读展示：一张「这条规则从哪来」的层次视图（codex `config/read` 的 layers+origins 恰是我们自己设置面缺的视图） | 渲染 fixture | M |
+| ~~权限规则面（codex permissionProfile / opencode saved permissions / gemini policy）~~ **✅ 2026-09-07 实装（裁决 10 只读）** | 只读展示：一张「这条规则从哪来」的层次视图。落地=PURE `src/permission-rules.js`（记录形状+DOM-free 树渲染器，esc/t 注入⇒XSS 可单测证明）+ ORCH `src/server/permission-rules.js`（按 caps 行 `permissionRules{source,session,instance,liveVerb}` 选 rung，绝不按 backend id）+ 客户端 `src/lib/permission-rules-view.js`（Session Properties 一节 + Manage Agents 模态）。三条 rung：claude=文档化的 settings 层级读盘（managed/user/project/local + 每个 `managed-settings.d/*.json` 各算一个来源；缺文件/解析失败/无 permissions 块是三种不同的诚实注记）· codex=`config/read {includeLayers:true}` 的 layers+origins，**会话作用域必须走会话自己的 wrapper**（`sessionFlags` 层=本会话 spawn 时的 `-c`，新起的 child 看不见），**实例作用域=不提供**（2026-09-07 第二轮对抗验证：唯一实现方式是新起一个 `codex app-server` child，而它被实测——`strace -f -qq -e trace=network` + 空 CODEX_HOME（即**未登录**）——在回答 `config/read` 之前就开 7 个 INET connect，其中 2 个是 chatgpt.com:443；这正是本仓库因 16 个 connect 否掉 `codex doctor` 的同一类，而它却挂在一个兄弟行写着「实测零网络」的菜单下。⇒ caps 行 `permissionRules.instance:false`，读请求答专用 code `would-connect` 并逐字带上实测数字，证据永久留在 `src/local-oracles.js` 的 `codex-app-server-config-read`（`blocks:'codex.permissionRules.instance'`，test-vendor-whitelist 双向执法：不重新实测就改 caps 行会让 build 变红）。**留下的是会话作用域**——它问的是会话自己**已经在跑**的 app-server，不起新进程不开新 socket，而且 `sessionFlags` 层本来也只有它看得见）· opencode=serve 的 **v1 `/config`**（绝不碰 v2 `/api/permission/saved`：2026-09-07 /proc 复测，v1 四次调用 threads 15/inotify 0/RSS 平，v2 一次就 13→37 threads、0→2 inotify、345→507 MB）。**只读是结构性的**：没有写路由、没有写动词、wrapper 从不构造 `config/value/write`/`config/batchWrite`（§4.5）。新增唯一 stdin 动词 `read-permission-rules`，**两个 wrapper 同批**（codex 真答、ACP 答 `unsupported-by-protocol` + 它唯一拥有的权限事实=live mode），unknown-verb 出声。 | scripts/test-permission-rules.mjs（142：纯模型/渲染 fixture + 服务端读真文件与假活会话 + **经真 stdout 注册表的 WIRING PIN**（第三轮：`permissionRulesRef?.()` 里那个 `mk()` 惰性引用是 `{}` 上的 Proxy＝不可调用，于是每个 codex 活会话的「Show rules…」都在 20s 后报 `read-failed`，而套件直接调模块所以常绿——2.355.0 unstaged-wiring 那一类；现在按 session-stdout 的建法建注册表、喂一行真记录、断言 sink 收到，外加对每个 lazy.js 使用者的 STANDING SWEEP 与负控）+ headless chrome 375×667（含**广播不吞掉已加载的树**那条：`render()` 每次 active-sessions 都清空根节点，记录改由窗口持有并重绘、绝不重取，哨兵证明广播真的重建过） · test-lazy（原语：ref 不可调用）· test-peer-delivery（同一 Proxy 缺陷的投递孪生）· test-codex-p2-wrapper ⑧ · test-acp-harness · test-opencode-serve ③（v1-only 路由钉 + v2 负控）· test-harness-contract（caps 镜像深比对） | M |
 
 ---
 
@@ -421,6 +464,8 @@ CLAUDE.md 的 program-use billing 法律：会话跑交互式 PTY，**永不**�
 
 exactly two files 的规矩不变（scripts/test-vendor-whitelist 执行）。三个**候选**本地 oracle（`claude agents --json`、`claude auth status`、`codex doctor --json`）与 codex `account/usage/read` 都很有用，但它们的「零 vendor HTTP」性质**必须逐条举证**，不能靠形状推断——`auth status` 尤其可疑，max 封号复盘的主因正是后台的 auth/usage 型调用。因此它们统一进**决策 6**，需要 owner 就「每条附一份不发请求的证据 + 白名单豁免理由 + 只走人触发/已有节拍」拍板。auto-cli 那条 owner 批准的例外**不得泛化**。
 
+**✅ 2026-09-07 结论（裁决 6 落地）**：三个候选**逐条实测后全部否掉**（`claude auth status --json` 5、`claude agents --json` 5、`codex doctor --json` 16 个 INET connect，方法与逐字数字见 kb-design-lessons §9），本节「不能靠形状推断」的怀疑被证实——`auth status` 连**没有凭据**、且四个抑流量 env 全开时都照样连 api.anthropic.com。上线的是另外三条实测 0 connect 的 codex 只读命令，注册表 `src/local-oracles.js` 逐条带证据 + 把被否的三条永久留作负控；codex `account/usage/read` 仍未动（它是 app-server RPC 不是 CLI oracle，另立）。
+
 ### 4.3 沙箱与安全红线
 
 - **codex 沙箱**：2.369.17 打开 loopback 只为让 vibespace-* 工具能用。**不得再放宽**——不默认 `--yolo`/`danger-full-access`，不把 `--auto`/`--allow-all-tools`/`bypassPermissions` 做成一键默认。
@@ -469,13 +514,15 @@ claude Remote Control / `--cloud` / `/teleport` / `/schedule` routines：我们*
 | 3 | (a) 不选就不传 |
 | 4 | 立项，**两条硬约束**：① 权限按会话 token 作用域——agent **不能枚举、猜测或访问**不属于它的会话/任务/账号/文件；② **渐进式披露**——先注入一个入口工具 + 极简清单，子工具按需展开，绝不一次注入全部（owner 明指 context rot）。先出安全+披露设计再建 |
 | 5 | 做（先按上文在隔离目录用 0.58.0 重验 oauth-personal） |
-| 6 | 用（逐条附「不发 vendor 请求」证据进白名单豁免；人触发/已有节拍） |
+| 6 | 用（逐条附「不发 vendor 请求」证据进白名单豁免；人触发/已有节拍）— **✅ 2026-09-07 实装，且证据把三个候选全部否掉；第二轮又否掉第四个——我们自己已经上线的那条**（`codex app-server` + `config/read`，实测 7 个 connect 含 chatgpt.com:443，见 §2.14 该行与 kb-design-lessons §9；教训=拒绝表必须对**使用它的代码**同样苛刻，不能只对新候选苛刻）：`strace -f -qq -e trace=network` + 隔离空 HOME 实测 `claude auth status --json` 5 个 INET connect（api.anthropic.com，**无凭据时照连**，四个抑流量 env 全开仍是 5）、`claude agents --json` 5 个（而且 `--help` 说它列的是**后台会话**不是已装 agent，本来也答非所问）、`codex doctor --json` 16 个（它自己的报告点名 `network.provider_reachability` / `network.websocket_reachability`，`--help` 无离线开关）⇒ **一条 claude oracle 都不上线**；改上三条实测 0 connect 的 codex 只读命令（`login status` / `mcp list --json` / `features list`）。注册表 `src/local-oracles.js` 逐条带证据，被否的三条永久留作**负控**；test-vendor-whitelist 双向执法，并在 strace+CLI 都在时**重测**每条上线的 oracle（先用一次故意的 loopback connect 证明探测器看得见，绿才不是空绿；被否的三条**故意不重跑**——每次 push 都跑正是本法禁止的「定时」形状） |
 | 7 | (b) share 不做；feedback/upload 只作「报告问题」面板可选项 |
 | 8 | (c)：只默认开 `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS`（纯可观测性），`--brief` 与提示缓存三件套做设置项默认关（owner 2026-09-07 「按你说的来」） |
-| 9 | 做（只传 `--worktree`，绝不 `--tmux`） |
+| 9 | 做（只传 `--worktree`，绝不 `--tmux`）—— ✅ 已落地 2026-09-07：`backend-caps` 新增 `worktree` 能力行（客户端 `agent-meta` 镜像，test-harness-contract 深比对）；两个纯函数 `worktreeRefusal`（cwd 不是 git 仓库就带理由 + `scope:'action'` 拒绝，探针**三态**——答不出来不算拒绝；镜像 CLI 自己的 `hook OR repo` 门，`WorktreeCreate` hook 可救）与 `worktreeSpawnArgs`（新建/fork 发标志，**普通 resume 绝不发**——CLI 自己会重新进入它记录的 worktree）；init 帧的 `cwd` 是**双向仲裁者**（不同=记录路径，相同=这次运行没被隔离，撤销徽标）；勾选框在 New Session 与 Session Properties，卡片徽标 SVG，远程经 buildRemoteExec 原样携带 |
 | 10 | (a) 只读 |
+| 9 | 做（只传 `--worktree`，绝不 `--tmux`） |
+| 10 | (a) 只读 — **✅ 2026-09-07 实装**，见 §2.14 该行 |
 
-执行顺序（受机器并发限制）：B1 诚实批（§2.2/2.3/2.4/2.7）→ §2.1 队列动词（等 Stop 清队列链落地，同一 wrapper 文件）→ §3.2/3.3/3.5/3.4 → worktree 勾选 + §2.14 权限只读 + oracle → Gemini → §3.7 工具提供方。
+执行顺序（受机器并发限制）：B1 诚实批（§2.2/2.3/2.4/2.7）→ §2.1 队列动词（等 Stop 清队列链落地，同一 wrapper 文件）→ §3.2/3.3/3.5/3.4 → worktree 勾选 + ~~§2.14 权限只读 + oracle~~（**✅ 2026-09-07 落地**；worktree 勾选仍未做）→ Gemini → §3.7 工具提供方。
 
 ## 6. 落地纪律（每批都适用）
 
@@ -488,6 +535,11 @@ claude Remote Control / `--cloud` / `/teleport` / `/schedule` routines：我们*
 - 改了行为 ⇒ 同一个 commit 更新对应 kb 文件（CLAUDE.md 顶部的契约）。
 - 涉及第三方守护进程（opencode serve / ACP HTTP 面 / codex app-server child）⇒ 采样、设界、可停、出声；**路由成本要 `/proc` 实测，不能从 API 形状推断**；任何整份响应读进 server 进程必须带**字节上限**。
 - **能 dump 的 schema 不许猜；从缺席论证前先跑一次**（§4.1 的 `--replay-user-messages` 就是被这条打回的）。
+- **给某个 harness 新增一条 op ⇒ 先看它会不会打乱别的套件对 `ops[索引]` 的断言**（§2.6 round 4）：`available_commands_update` 的命令表 op 与 `session` 记录的 init 卡**没有顺序关系**——mock agent 先回 session/new 的 result 再发那条通知，wrapper 的 `session` 记录来自前者的 async 续段而后者同步落账，所以 `[update, session]` 是真实进程的**普通交错**（实测 test-acp-harness 1/16 变红，master 同文件 0/10）。断言要**按腿自己的名字查**（`ops.find(o => o.op === 'create' && …initData)`），不要按索引——索引断言测的是对方的时序，不是我们的规范；再补一条**两种顺序都喂一遍**的确定性属性腿，并把旧的索引式断言留作负控（它在两种顺序下自相矛盾）。
+- **一个「让 X 不再隐形」的事实必须有 attach 路径，不能只挂在会滚走/会被去重掉的卡片上**（§2.6 round 4）：init 卡按 `frameRepeat` 去重，而 attach 只加载 tail-50、init 记录通常在它前面几百条——本机 9 个多 init 会话里最大的 2 个正好是「窗口里有 init 记录、一张卡都画不出来」。凡是 `chatStatus` 已经在送、却只有卡片一个消费者的事实，都要问一句「后开的窗口看得见吗」。守卫**不许**按 slab 内容门控（会随分页失效）；`ABSENT ≠ CLEAN`（没帧就闭嘴）而「全部 connected」必须能把提示**清掉**。
+- **「不按 slab 门控」不等于「不从 slab 喂」——喂给它的那个面才是判据**（§2.6 round 5，round 4 自己的注释被自己的接线打脸）：round 4 把「chip 不按 slab 门控」写进了方法的 doc-comment，却把它接在 **render 路径**上，而 render 路径本身就是 slab——`_onCreateMessage` 的 system 分支对**窗口渲染的每一条记录**都跑，包括从更早 spawn 翻上来的 init。实测两个方向都坏：坏的 spawn attach 后往上翻过一个健康的旧 init ⇒ 提示消失（正是 §2.6 要终结的那种隐形），健康 attach 后翻过一个坏的旧 init ⇒ 凭空造警告。规则改为**「重放的记录不是新闻」**：只有两个写者——活流里到达的记录、以及 `applyStatus`（服务端在**整份记录表**上挑的最新 init，翻页永远做不到这件事）；`replay` 是**调用方对来源的声明**（喂点处 `{replay: this._loadingHistory}`），不是窗口边界也不是全局读数，所以换个喂点规则依然成立。三条推论：①应用点上移到「正在看历史」的延迟返回**之上**——在它下面，读者正好翻在历史里时一次中途重启的 init 会被**整条丢掉**（记录根本到不了 renderer）；②`sideEffect.initFrame` 删除，「帧在记录的哪里」收敛成 agent-meta 的唯一纯读者 `initFrameOf(msg)`；③同 epoch 重连补上 `applyStatus(msg.chatStatus)`——它是唯一一条丢掉 attach 权威快照的 attach 路径，于是那里唯一的写者曾经是 catch-up 的**重放**。
+- **你为某个场景加的可供性，就要在那个场景里量**（§2.6 round 5）：round 4 的下拉是**因为触摸没有 hover** 才加的，然后 375×667 只量了芯片、点开面板的那条腿跑在 1280×800 ——于是这一轮唯一为移动端做的东西恰好是唯一没在移动端量过的东西，而它在那里坏了两处（等特异性的后置规则把 `white-space: normal` 吃掉 ⇒ 上游自由文本在 `overflow:hidden` 里硬裁；面板被绝对定位到那条可横滑的 bar **之外**，超出视口的 68.7px 无法被任何手势够到，因为 `documentElement.scrollWidth === clientWidth`）。通则：**CSS 断言要断言计算值**（能被另一条规则悄悄拿走的规则不算规则），**弹出面板的位置要按容器夹紧并且限宽不限内容**（`overflow:hidden` 下放不下必须换行），负控要把修前状态**在同一次运行里**放回去。
+- **「一个地方夹紧」只有在别人不能在它之后改写同一属性时才成立**（§2.6 round 5 r2，round 5 自己的收口被自己的调用方绕过）：round 5 把夹紧写进 `showDropdown` 并宣布「每一个状态栏面板都被夹一次」，但**三个**调用方在它返回之后才写 `dropdown.style.minWidth/maxWidth`（design 300/440、goal 240/400、set-a-goal 280/420）——夹紧算的是面板**当时**的 130px CSS min-width，调用方随后把它撑宽，于是 375×667 实测 design 落在 right 537（超屏 162px）、set-a-goal 517（142px）、active goal 477（102px），而页面 `documentElement.scrollWidth === clientWidth === 375`，全都够不到。改法不是再夹一次，而是**把意图变成参数**：`showDropdown(anchor, {minWidth, maxWidth})` 同时决定宽度与位置（意图大 ⇒ 面板整体左移；意图比容器还大 ⇒ 连 min-width 一起夹，因为看不见的最小宽度不是最小宽度，是隐藏的面板），三处内联写法删除，并加一条**源码级钉子**：全文件对 dropdown 的 min/max width 写入必须都落在 `showDropdown` 体内（植入一行修前代码即红）。量法同理要**普查**而不是抽样：十个会开面板的芯片逐个打开、逐个量位置与裁切，缺席的芯片算**失败**不算跳过——round 5 的 belt 循环只有两项（effort/permission），而它们恰好是保持默认 130px 的那两个，于是「每一个」这句话是从两个恰好没问题的样本外推出来的。同一次普查还量出第二处同源伤害：被夹窄的面板里 `.chat-status-dropdown-item` 仍是 `nowrap`，response-style 行裁掉 111px、后台任务描述裁掉 143px（`overflow:hidden` 且面板自己没有滚动条）——round 4 只给 health 行开了换行；现在通用行也换行，桌面几何逐像素不变（面板是 shrink-to-fit，只有夹紧真正咬住时才换行）。
 
 ---
 
@@ -527,3 +579,26 @@ r2 稿经独立核查后逐条订正，已在正文就地改写的不再重复�
 11. SendUserMessage/SendUserFile 会以通用工具卡渲染，缺的是语义不是卡片。
 12. `inputModes` 消费方五处，daemon bundle 不含；test-queue-steer 精确比对两侧。
 13-15. 行号漂移：available_commands_update :503、usage_update :509、queueStripHtml :741、thread_rolled_back :252。
+
+### 8.1 第三次核查（round 4，2026-09-07）——「声明存在」≠「到达我们」，三条
+
+前两次核查读的都是**二进制里的声明**（zod schema + describe）。这一轮是第一次去**线路上**看，结论推翻了 §2.5 与 §2.11 的一半，也给 §2.10 打上了「未验证」而非「已上线」：
+
+16. **`set_in_progress_tool_use_ids` 从不到达我们的 stdout。** CLI 把它交给宿主回调 `onInProgressToolUseIDs` 后 `return`（186333979），`add` 那半更是在 tool dispatch 处直接进回调（184806515）；只有子代理流水线读它、且只读 `remove`。实测（chat-wrapper 精确 flag 形状、2.1.257）：6 tool_use / 6 tool_result / **0 条**；24 份生产 buffer：212 tool_use 块 / **0 条**。⇒ `caps.inProgressTools` 全线 false，`.chat-tool-inflight` 今天没有任何用户看得见；消费者保留为休眠代码。
+17. **`compact_progress` 同样从不到达；真实通道是 `system/status`。** 同一生产者内的孪生对照（`compact_progress` 被 `onCompactEvent` 消费，`sdk_status` 经 `HRt` 转发成 `system/status`），加上一次真实 **AUTO** 压缩的逐行捕获。⇒ §2.11 改由 `system/status{status:'compacting'|null, compact_result|compact_error}` 驱动，顺带第一次覆盖 AUTO 压缩；`'status'` 列入 HANDLED（card-less），并要与同 subtype 的**权限模式回声**区分开。
+18. **`tombstone` 是 UNVERIFIED，不是 DISPROVEN。** 它被 `yield` 到查询流（不是回调），但 24 份 buffer、探针、以及 7450 份 `~/.claude/projects/*.jsonl` 里都 0 命中；两个发射点都在**服务端 refusal-fallback** 路径上，没有不诱发拒答就能确定性触发的探针。⇒ 撤回通道今天**实际上只有 codex**（`thread_rolled_back`，3 份真实 rollout 验证）；claude 那半保留为休眠代码并在 kb 里如实标注。
+
+**为什么前两轮都没抓到**：三条的回归都是套件**自己合成**的记录 —— 那种腿只能证明「我们解析对了」，永远证不了「它来过」。**修法是机制而不是措辞**：test-stdout-registry 现在有一条**上线可达性腿**（scripts/probe-claude-stdout.mjs：用装好的 CLI、wrapper 的精确 flag 形状、跑一个只读工具、最便宜的模型，无 CLI/没跑起工具/超时一律**响亮 SKIP**——测不了就绝不当成不存在的证据），它在**两个方向**上断言 caps 与线路一致：今天 0 条 ⇒ 能力位必须为 false；哪天真到了 ⇒ 这条腿变红并直接写明去哪两个文件把它翻成 true。
+
+### 8.2 第四次核查（round 5，2026-09-07）——round 4 自己带进来的三条
+
+19. **粘住的压缩终态没有归属期。** 见 §2.11 的 round-5 修订：`compact_end` 被保留却从不清除，一个视图的第一次压缩（含 AUTO）永久替换掉「Prompt is too long」卡片的可操作指引。⇒ `compactInFlight()` 把「阶段」和「这张卡刚建出来该说什么」分开；已经在屏幕上的卡片保留结局，新建的卡片重新可操作。
+20. **「正在跑」的声明也有三个出口，其中两个是哑的。** 见 §2.11 的 round-6 修订：只有 `status:null` 结局记录大声退役 `_streamingKind==='compacting'`，`result`/`compact_boundary` 与 harness 自己的 idle 都静默清除 ⇒ 没有结局记录的压缩（hook 拦下 / `/compact` 发送点先置位）把客户端永久钉在「running … hooks…」。⇒ 一个具名 `retireCompaction`，两个出口各调一次，WIRING PIN 让第三个出口的沉默变红。
+21. **每次 push 都跑的探针：清理断言要用清理器自己的规则，抓取路径不能在共享命名空间里。** 见 §2.11 的 round-6 探针修订：绝对缺席的断言会因**并发**探针（清理器故意放行的那一个）把 pre-push 门变红；固定但可预测的 /tmp 路径 + `writeFileSync` = 跟随符号链接的写。⇒ 探针报告 `staleMs`/`spared` 供读者按规则过滤；抓取搬进本 uid 的 0700 目录并 `O_NOFOLLOW`；两个契约由假 CLI 确定性驱动，不再只在装了 CLI 的机器上才有断言。
+20. **`compact_end` 的空结局被读成成功。** PreCompact hook 拦下压缩（`blockedBy`）时 CLI 发的是不带 metadata 的 `sdk_status status:null`，我们的 `system/status` 分支照样合成 `compact_end{result:null}`；保留下来的 `compact_progress` 那条道更是每帧硬写 `result:null`。两种情况什么都没压，卡片却说「Compaction finished.」。⇒ 只有 CLI 自己的 `"success"` 才配说完成，空结局说「Compaction ended.」。
+21. **上线可达性腿在用户的真 $HOME 上留垃圾。** 它需要这台机器的真凭据，所以**不能**给它一个一次性 HOME —— 于是每次 `npm run ci`（即每次非 docs 的 push，走强制 pre-push 门）都让 CLI 在 `~/.claude/projects/<cwd 编码>/` 里写下一份真转录，`/tmp/vs-wire-probe-*` 也留一个目录。用产品**自己的** `discoverClaudeSessions` 实测：4480 个会话里 **12 个是探针会话**（`status:"stopped"`，名字是探针那句 prompt），也就是每次 push 往用户侧边栏塞一条垃圾会话 + 一个垃圾 cwd 分组；连 CLI 的 `~/.claude/session-env/<sid>/` 也各留一个。round 4 修掉了这个副作用的 env 一半（剥掉 `VIBESPACE_*`，免得 hook 去动真任务板），文件系统这一半没修。⇒ 探针现在**什么都不留**：报告时删掉自己的临时 cwd、CLI 为它写的转录、以及那些 per-session env 目录（`rmdir` 非递归，将来 CLI 往里放东西就宁可不删）；启动时**扫掉**早先版本留下的（只扫 mtime > 10 分钟的，并发跑的另一个探针不会被误伤；前缀由 `os.tmpdir()` 经 CLI 自己的 `cwd.replace(/[/._]/g,'-')` 编码算出，精确到不可能命中别的目录）；原始 stdout 改写到**一个固定路径**（`$TMPDIR/vs-wire-probe.last.jsonl`，每次覆盖）而不是每次一份。回归钉的是**后果**：删除后向 `session-store` 要一次发现，探针会话数必须为 0；负控=那份原始抓取仍然存在且不在被删掉的 cwd 里（清理不等于毁掉证据）。实测：扫除后 12 → 0（项目目录、/tmp 目录、session-env 各 12 个），发现结果 4480 → 4468、探针会话 0。
+
+**通则（这一轮新增）**：① 一个「最后已知状态」被**保留**时，必须同时回答「它属于谁、到什么时候为止」——否则它就成了那个视图的永久声音；② **每次 push 都会跑的测试没有资格在用户的真实数据目录里留下东西**，副作用要按「进程/环境/文件系统」逐面清点，修了一面不等于修完。
+### 8.3 第五次核查（B3 init-frame 链 round 5 r2，2026-09-07）——同一天的另一条链自纠一条
+
+22.（round 5 r2 自纠）「每一个状态栏下拉都在 `showDropdown` 里被夹一次」是**假的**：design / goal / set-a-goal 三处在它返回之后才写 min/max width，夹紧看不到那个宽度；round 5 的 kb 文案、报告与套件断言名都按两个样本（effort/permission）外推。现已改为「意图即参数」+ 源码级唯一写者钉 + 十面板普查（含裁切）。

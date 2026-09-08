@@ -47,7 +47,8 @@ export function installPluginsUI(App) {
         const stateTxt = isOc
           ? (!p.installed ? t('the opencode CLI is not installed')
             : p.parkedKind === 'runaway' ? t('stopped as a runaway')
-              : p.parked ? t('parked after repeated crashes')
+              : p.parkedKind === 'blocked' ? t('blocked by a serve we could not identify')
+                : p.parked ? t('parked after repeated crashes')
                 : running ? t('running on 127.0.0.1:{port}', { port: p.port || '?' })
                   : p.starting ? t('starting…') : t('turned off'))
           : isFrp

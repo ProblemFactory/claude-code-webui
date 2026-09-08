@@ -2,6 +2,7 @@ import { agoText, escHtml, copyText, createPopover, showConfirmDialog, showConte
 import { t as tr } from './i18n.js';
 import { registerCommand, registerMenuItem, menuItems } from './contributions.js';
 import { SESSION_STATE_META, SESSION_URGENCY_META } from './sidebar-tasks.js';
+import { UI_ICONS } from './icons.js';
 import { createBackendIcon, createAgentKindIcon, createModeBackendIcon, getBackendMeta, getAgentKindMeta, getAgentRoleLabel, getAgentRoleShortLabel, getSessionKey, backendFeatureCaps, settingsPrefixFor } from './agent-meta.js';
 
 /** Inline SVG icon helper — returns an HTML string for a 12x12 stroked icon */
@@ -60,6 +61,11 @@ export function registerSessionCardMenu() {
   registerCommand({ id: 'session.resumeTerminal', title: () => tr('Resume in Terminal'), run: (c) => resumeWith(c, 'terminal') });
   registerCommand({ id: 'session.viewHistory', title: () => tr('View History'), run: (c) => c.app.viewSession(c.s.sessionId, c.s.cwd, c.customName || c.s.name, { ...c.agentOpts }) });
   registerCommand({ id: 'session.fork', title: () => tr('Fork…'), run: (c) => c.app.forkSession(c.s) });
+  // S9 remainder (c): a shell the OpenCode SERVE owns, in this conversation's
+  // own directory. Local machine only — the serve streams its ptys over a
+  // loopback websocket, so a remote conversation's terminal is the host's own
+  // (that is what "Resume in Terminal" / the file explorer already give).
+  registerCommand({ id: 'session.opencodeTerminal', title: () => tr('Open terminal in this session'), run: (c) => c.app.openOpencodeTerminal(c.s) });
   registerCommand({ id: 'session.toggleStar', title: (c) => (c.state.isStarred(c.s) ? tr('Unstar') : tr('Star')), run: (c) => c.state.toggleStar(c.s) });
   registerCommand({ id: 'session.toggleArchive', title: (c) => (c.state.isArchived(c.s) ? tr('Unarchive') : tr('Archive')), run: (c) => c.state.toggleArchive(c.s) });
   registerCommand({ id: 'session.rename', title: () => tr('Rename…'), run: (c) => c.onRename(c.s, c.originalName) });
@@ -112,6 +118,7 @@ export function registerSessionCardMenu() {
   registerMenuItem({ menu: M, group: '0_primary', order: 20, command: 'session.resumeTerminal', when: stopped });
   registerMenuItem({ menu: M, group: '0_primary', order: 30, command: 'session.viewHistory' });
   registerMenuItem({ menu: M, group: '0_primary', order: 40, command: 'session.fork', when: (c) => !!backendFeatureCaps(c.s.backend || 'claude').fork && c.s.status !== 'external' });
+  registerMenuItem({ menu: M, group: '0_primary', order: 50, command: 'session.opencodeTerminal', when: (c) => (c.s.backend || 'claude') === 'opencode' && !c.s.host });
   // 1_state: star / archive / rename / status / task groups
   registerMenuItem({ menu: M, group: '1_state', order: 0, separator: true });
   registerMenuItem({ menu: M, group: '1_state', order: 10, command: 'session.toggleStar' });
@@ -292,6 +299,9 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
           return '';
         })()}
         ${s.hostName ? `<span class="session-host-badge" data-tip="Remote session on ${escHtml(s.hostName)}">${escHtml(s.hostName)}</span>` : ''}
+        ${s.worktree ? `<span class="session-card-badge badge-worktree" data-tip="${escHtml(s.worktreePath
+            ? tr('Running in its own git worktree: {path}', { path: s.worktreePath })
+            : tr('Running in its own git worktree (the CLI has not reported the path yet)'))}">${UI_ICONS.worktree}</span>` : ''}
         ${s.todo && s.todo.total > 0 && s.todo.done < s.todo.total ? `<span class="session-todo-pill" data-tip="${escHtml(s.todo.current ? tr('Now: {step}', { step: s.todo.current }) : tr('Agent steps'))} ${tr('({done}/{total} done)', { done: s.todo.done, total: s.todo.total })}"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5l1.2 1.2L5.5 3.4M2 9.5l1.2 1.2 2.3-2.3M8 4.5h6M8 9.5h6M8 13h4"/></svg>${s.todo.done}/${s.todo.total}</span>` : ''}
         <span class="sess-state-chip" style="display:none"></span>
       </div>
@@ -349,7 +359,7 @@ export function renderSessionCard(s, { state, app, settings, expandedCardId, onE
   if (s.remoteState && (s.status === 'live' || s.status === 'tmux')) {
     const rchip = document.createElement('span');
     rchip.className = 'sess-state-chip sess-state-derived sess-remote-chip';
-    rchip.style.setProperty('--chip-color', 'var(--yellow, #e5c07b)');
+    rchip.style.setProperty('--chip-color', 'var(--yellow)'); // theme var only (§17) — every theme defines --yellow, so the old literal fallback was dead as well as illegal
     rchip.innerHTML = `<span class="chip-icon">⟳</span><span class="chip-text">${escHtml(tr('host unreachable'))}</span>`;
     rchip.dataset.tip = tr('The machine this session runs on is unreachable — the connection retries automatically; messages you send are queued and delivered when it returns.');
     stateChip.after(rchip);

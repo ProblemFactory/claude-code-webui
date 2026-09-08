@@ -5,7 +5,7 @@
  * Installed on Sidebar.prototype via installSidebarState(Sidebar).
  * All methods use `this` (Sidebar instance context).
  */
-import { getSessionKey } from './agent-meta.js';
+import { getSessionKey, backendFeatureCaps } from './agent-meta.js';
 import { showToast, showInputDialog } from './utils.js';
 import { t as tr } from './i18n.js';
 
@@ -447,7 +447,8 @@ export function installSidebarState(SidebarClass) {
     // (the Session Properties toggle never saved), AND 'outputStyle'/'autoResume'
     // in 2.368.0 (the status-bar style pick vanished on resume — FOURTH strike,
     // owner-caught within hours) — keep it in sync with EVERY per-session
-    // config writer, and test-auto-resume now pins it.
+    // config writer, and test-auto-resume now pins it. (Owner ruling 9's
+    // 'worktree' is one of the TRI-STATE keys below, not this truthy list.)
     for (const k of ['model', 'effort', 'permission', 'account', 'groupManager', 'modelLock', 'lockModel', 'outputStyle']) {
       if (config?.[k]) clean[k] = config[k];
     }
@@ -455,6 +456,13 @@ export function installSidebarState(SidebarClass) {
     // is that a per-session OFF beats the global default being ON) — the
     // truthy filter above would erase it.
     if (config?.autoResume === true || config?.autoResume === false) clean.autoResume = config.autoResume;
+    // worktree is TRI-STATE for the SAME reason (owner ruling 9, round-2
+    // verifier): absent = "no pick on record, the live run answers"
+    // (worktreePick), so a truthy-only filter made an explicit UNTICK
+    // indistinguishable from never having chosen — the Session Properties box
+    // re-checked itself on the next render while the run was isolated, and a
+    // fork kept inheriting a preference the user had just revoked.
+    if (config?.worktree === true || config?.worktree === false) clean.worktree = config.worktree;
     if (Object.keys(clean).length) this._sessionConfigs[stateKey] = clean;
     else delete this._sessionConfigs[stateKey];
     const legacyId = this._getLegacySessionId(sessionOrKey);
@@ -477,7 +485,16 @@ export function installSidebarState(SidebarClass) {
     if (legacyId && legacyId !== stateKey) delete this._customNames[legacyId];
     this._pushUserState(); this._render();
     const newName = name.trim() || currentName || (legacyId ? legacyId.substring(0, 12) + '...' : tr('Session'));
-    if (sessionOrKey?.backend === 'codex' && name.trim()) this.app.renameBackendSession?.(sessionOrKey, name.trim());
+    // Write the new name back into the AGENT's own store only where the
+    // harness HAS one (§2.13 `renameWriteback` — codex's thread name; claude's
+    // JSONL carries no title, so a rename stays ours). This is the TRIGGER half
+    // of the capability and the ws case is the action half (ws-handler.js
+    // `rename-session`, which also writes session.name + session-meta and
+    // broadcasts): both must read the same row, or the first harness whose row
+    // flips to true gets a server ready to write and a client that never asks
+    // — the mirror image of the round-2 fork defect (button on caps, handler on
+    // an id). Never a backend id.
+    if (backendFeatureCaps(sessionOrKey?.backend).renameWriteback && name.trim()) this.app.renameBackendSession?.(sessionOrKey, name.trim());
     this.app.syncSessionName(sessionOrKey, newName);
   };
 

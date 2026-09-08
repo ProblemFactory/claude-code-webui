@@ -9,22 +9,21 @@ import { ChatInput } from './chat-input.js';
 import { ChatStatusBar } from './chat-status-bar.js';
 import { UI_ICONS } from './icons.js';
 import { t } from './i18n.js';
-import { agentMemoryPathRes, effortDisplay, getBackendMeta } from './agent-meta.js';
+import { isAgentMemoryPath, effortDisplay, getBackendMeta, backendFeatureCaps, noteMemoryPaths, initHealthIssues, initFrameOf } from './agent-meta.js';
 import { registerCommand, registerKeybinding, runCommand, hasCommand } from './contributions.js';
 // The verb list a wrapper that publishes a queue WITHOUT naming verbs serves —
 // the SAME array the server maps a verb-less sidecar onto (src/server/
 // wrapper-files.js). Imported, never re-typed: the two ends disagreeing about
 // "no list" is the bug this constant now prevents.
-import { LEGACY_QUEUE_VERBS } from '../backend-caps.js';
+import { LEGACY_QUEUE_VERBS, worktreeLatchWrite } from '../backend-caps.js';
 import { mcpParts, messageKind, foldToggleFor, countKinds, runSummaryLabel } from './chat-run-summary.js';
 import { collabTrafficStats, collabHeadText, collabRunPart, subAgentStreamLabel } from '../collab-row.js';
 
-// Agent-memory path patterns, PER BACKEND from BACKEND_META (agent-meta.js —
-// claude only today; codex has no memory feature; a new backend adds one
-// memoryPathRe entry there). Unioned: the PATH identifies memory content
-// regardless of which session's file op touches it.
-const MEMORY_PATH_RES = agentMemoryPathRes();
-const isMemoryPath = (fp) => MEMORY_PATH_RES.some((re) => re.test(fp));
+// Agent-memory paths: the claude init frame's own `memory_paths` when the
+// session declared them, the per-backend BACKEND_META regexes otherwise
+// (agent-meta.js owns both halves — see isAgentMemoryPath). The PATH
+// identifies memory content regardless of which session's file op touches it.
+const isMemoryPath = (fp) => isAgentMemoryPath(fp);
 
 // ── THE STEER CHORD (2026-09-07 owner ask: "顺便加入一个queue的快捷键,
 //    不支持queue的就不显示") ───────────────────────────────────────────────
@@ -378,6 +377,11 @@ class ChatView {
       // live sub-agent traffic (2026-09-07): only the view knows whether a
       // collab card is still the one the next row lands in on a live turn
       isCollabLive: (msg) => this._noteCollabHeadPainted(msg?.id, this._liveCollabId() === msg?.id),
+      // SendUserFile links (owner ruling 8(c)): toolCallId → the rows the
+      // server published for that call. Filled by the live broadcast AND by
+      // one /api/pages read on attach, so a reloaded history shows the same
+      // links a live session does.
+      getPublishedFiles: () => this._publishedUserFiles,
     });
 
     // Position indicator (shows when not at bottom, e.g. "120-170 / 3000")
@@ -923,6 +927,41 @@ class ChatView {
         if (msg.live) showToast(msg.outputStyle
           ? t('Response style \u201c{v}\u201d applies from the next turn', { v: msg.outputStyle })
           : t('Response style cleared \u2014 the agent\u2019s own config applies again'));
+      } else if (msg.type === 'user-file-published' && msg.sessionId === sessionId) {
+        // The server published the files ONE SendUserFile call named (owner
+        // ruling 8(c)). Keyed by toolCallId — the same id the card carries —
+        // so a re-render (scroll, trim, slab reload) always finds them again.
+        this._notePublishedUserFiles(msg.toolCallId, msg.files);
+      } else if (msg.type === 'worktree-path' && msg.sessionId === sessionId) {
+        // The CLI announced whether this run is really isolated, and where
+        // (its own init-frame cwd — owner ruling 9). The frame is the ARBITER
+        // in both directions: `worktree:false` is the CLI saying this run is
+        // NOT isolated (its worktree was gone, or a resume could not create
+        // one), so the live fact drops — while the SAVED pick stays the
+        // user's, because a fact we were wrong about is not a preference they
+        // changed (the one-way latch in _applyLiveMeta below).
+        //
+        // The badge and the Session Properties path both read the
+        // `active-sessions` payload, which the server rebroadcasts in the very
+        // same branch that sends this frame — so this handler does NOT redraw
+        // anything, and a `sidebar.refresh…()` call here would be a no-op that
+        // LOOKS like the thing keeping the badge honest.
+        //
+        // What it DOES do is run the latch, and that is the whole reason the
+        // branch exists (round-2 verifier: it used to write `this._worktree`
+        // and nothing read it — `_applyLiveMeta` reassigns the field on the
+        // line above its only reader, so the assignment here was unobservable
+        // and the suite pinned a dead line). This frame is the FIRST moment a
+        // brand-new worktree session can record its pick: the box is ticked
+        // before the conversation has an id, the `created` payload arrives
+        // before the CLI has announced one, and the creator never gets an
+        // 'attached' (2.368.4) — but the id-adoption branch that runs just
+        // BEFORE this frame server-side has already broadcast it.
+        // The BODY is a prototype method, not a closure: a branch that lives
+        // only inside the live-view constructor can be pinned by grep and
+        // nothing else, which is how the pre-fix version stayed green while
+        // doing nothing at all.
+        this._onWorktreePath(msg);
       } else if (msg.type === 'page-published' && msg.sessionId === sessionId) {
         // ONE notify point server-side (dialog + agent publishes): the status
         // bar's design chip is the live list; the agent's reply carries the link
@@ -945,8 +984,25 @@ class ChatView {
         this._onSubagentMessage(msg.parentToolUseId, msg.message);
       } else if (msg.type === 'tool-progress' && msg.sessionId === sessionId) {
         this._onToolProgress(msg);
+      } else if (msg.type === 'turn-state' && msg.sessionId === sessionId) {
+        // The harness's OWN turn state (§2.5). Arrives only from a harness that
+        // publishes one; a session that never does simply never sends this and
+        // the status bar's third state stays unclaimed.
+        this._statusBar?.setTurnState?.(msg.state || null);
+      } else if (msg.type === 'tools-in-progress' && msg.sessionId === sessionId) {
+        this._onToolsInProgress(msg.ids || []);
+      } else if (msg.type === 'compact-progress' && msg.sessionId === sessionId) {
+        // A REAL progress lane exists for this session — the guidance card's
+        // hardcoded "takes 1–2 minutes" apology becomes the fallback and the
+        // stage takes its place (§2.11). The spinner label itself rides the
+        // normal streaming-label broadcast.
+        this._onCompactProgress(msg);
       } else if (msg.type === 'exited' && msg.sessionId === sessionId) {
         this._hideTyping();
+        // THE THIRD EXIT of every "right now" claim this view holds — the
+        // compaction stage, the harness's turn-state chip, the executing-tool
+        // run set. One owner, because round 7 retired only the first of them.
+        this._retireLiveClaims();
         if (msg.reason === 'not_logged_in') {
           this._renderers.appendSystem(t('Not logged in — please log in to continue.'));
           this._setReadOnly();
@@ -1052,6 +1108,16 @@ class ChatView {
     this._windowEnd = this._total;
     this._loading = false;
 
+    // THE FRAME BEFORE THE HISTORY IT CLASSIFIES (§2.6, round 2). The memory
+    // dirs the init frame names decide whether a Read/Write/Edit card renders
+    // as a memory operation, and a system card is only re-rendered on a status
+    // TRANSITION — so learning them in applyStatus (below, after the loop)
+    // came too late for every memory card in the slab we are about to render,
+    // and they stayed misclassified for the life of the window. It cannot
+    // self-heal from the card's own side effect either: the init record sits
+    // hundreds of records before the tail-50 an attach carries. noteMemoryPaths
+    // writes into a Set — calling it here AND in applyStatus is idempotent.
+    if (meta?.chatStatus?.initFrame?.memoryPaths) noteMemoryPaths(meta.chatStatus.initFrame.memoryPaths);
     this._loadingHistory = true;
     for (const msg of messages) this._onCreateMessage(msg);
     this._loadingHistory = false;
@@ -1421,6 +1487,11 @@ class ChatView {
     // queueSupported and the same reason (2.361.1/2.364.1): the harness caps
     // row is about the PROTOCOL, this is about the process that is running.
     if ('responseStyleLive' in meta) this._statusBar?.setResponseStyleLive?.(meta.responseStyleLive);
+    // The harness's own turn state + the tool ids it says are running (§2.5).
+    // Carries-the-key guards, and `null` is a real value here: "this session
+    // has never reported one" — the chip stays off rather than claiming idle.
+    if ('turnState' in meta) this._statusBar?.setTurnState?.(meta.turnState || null);
+    if ('inProgressTools' in meta) this._onToolsInProgress(meta.inProgressTools || []);
     if ('autoResume' in meta) this._statusBar?.setAutoResume?.(meta.autoResume || null);
     // WHERE this spawn's model/effort came from (B-6b6d) — the resume ladder's
     // verdict, so the effort tooltip can say "carried over from this
@@ -1435,26 +1506,127 @@ class ChatView {
         this._statusBar?.setOutputStylePending?.(cfg.outputStyle !== undefined ? cfg.outputStyle : undefined);
       } catch { }
     }
+    // The per-session git worktree (owner ruling 9): `worktree` is the user's
+    // tick, `worktreePath` is what the CLI itself announced. Carries-the-key
+    // guarded like every other field here — a partial meta must not erase a
+    // badge the session really has.
+    if ('worktree' in meta) {
+      this._worktree = !!meta.worktree;
+      this._latchWorktreePick();
+    }
+    // One read of this conversation's published files, so a RELOADED history
+    // shows the same SendUserFile links a live session does (the broadcast
+    // only reaches clients that were connected at publish time).
+    try { this._loadPublishedUserFiles(); } catch { }
   }
 
   // Fork a new session from a specific assistant message (the chat fork button).
   // Resolves this view's session, then hands off to app.forkFromMessage which
   // adds --resume-session-at <uuid> so the branch is truncated at this point.
+  // BOTH halves of the capability read the SAME row (§2.13): the button is
+  // drawn on caps.forkAtMessage (chat-renderers addForkBtn) and so is this
+  // handler — a backend-id gate here meant the first harness to gain the row
+  // would get a visible button whose click did nothing and said nothing.
+  // And when the capability IS there but the ids are not yet, the user hears
+  // it: a click that silently returns is the no-silent-failures law.
   _forkFromMessage(uuid, msg) {
     const { backend, backendSessionId, cwd, host } = this._getSessionIds();
-    if (backend !== 'claude' || !backendSessionId || !uuid) return;
+    if (!backendFeatureCaps(backend).forkAtMessage) return;
+    if (!backendSessionId || !uuid) { showToast(t('Session id not known yet — try again after the first reply'), { type: 'error' }); return; }
     const allSess = this.app.sidebar?._allSessions || [];
     const match = allSess.find(s => s.webuiId === this.sessionId)
       || allSess.find(s => (s.backendSessionId || s.sessionId) === backendSessionId);
     const webuiName = match?.webuiName || match?.name || this.winInfo?._openSpec?.name || 'Session';
     // host rides along — a remote session's fork must spawn ON its host
-    this.app.forkFromMessage({ backend, backendSessionId, cwd, host, webuiName, webuiMode: 'chat' }, uuid);
+    // PER-SESSION GIT WORKTREE (owner ruling 9; round-3 verifier): the fork
+    // resolver reads `sessionInfo.worktree` as the LIVE half of worktreePick,
+    // and this hand-built handle carried no such key — so a fork started from
+    // the chat button answered `live: undefined` even for a run the CLI had
+    // just announced as isolated, and the branch ran in the user's real
+    // working tree. This view's own `_worktree` is that session's process
+    // talking; the merged sidebar row is the same fact off `active-sessions`
+    // and covers a view that has not seen an init frame yet.
+    this.app.forkFromMessage({
+      backend, backendSessionId, cwd, host, webuiName, webuiMode: 'chat',
+      worktree: this._worktree ?? match?.worktree ?? undefined,
+    }, uuid);
   }
 
   // Get session identifiers for API calls
   // Per-message metadata popup (left-strip right-click): everything the
   // normalizer knows about the record — serving model, token usage, request
   // identity, transcript position — plus a Copy-JSON escape hatch.
+  /** The OpenCode roll-back rows on the message-metadata popup. Offered on a
+   *  USER message only: OpenCode's revert takes a `messageID` and means
+   *  "restore the tree to before this message", which is exactly the prompt
+   *  boundary a reader points at. `Restore` appears only while a roll-back is
+   *  actually staged (the session row's own `opencode.revert`), never as a
+   *  button whose only outcome could be "nothing happened". */
+  _addOpencodeRevertActions(pop, msg) {
+    const ids = this._getSessionIds?.() || {};
+    if ((ids.backend || 'claude') !== 'opencode' || !ids.backendSessionId) return;
+    const row = this.app?.sidebar?._allSessions?.find((s) => (s.backend || 'claude') === 'opencode'
+      && (s.backendSessionId || s.sessionId) === ids.backendSessionId);
+    const staged = row?.opencode?.revert || null;
+    const msgId = msg.role === 'user' ? (msg.webuiMsgId || null) : null;
+    if (!msgId && !staged) return;
+    const mk = (label, fn) => {
+      const b = document.createElement('button');
+      // …-action marks it as NOT the "Copy as JSON" button: the popup's own
+      // click handler keys on `.msg-meta-copy` (the shared button style), and
+      // without the marker every roll-back click ALSO copied the metadata and
+      // toasted "Copied" over the real result (caught by the browser leg)
+      b.className = 'msg-meta-copy msg-meta-action';
+      b.textContent = label;
+      b.onclick = async () => {
+        b.disabled = true;
+        try { await fn(); } finally { pop.remove(); }
+      };
+      pop.appendChild(b);
+      return b;
+    };
+    const post = async (url, body, okMsg) => {
+      const r = await fetchJson(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, host: ids.host || null }) });
+      if (r?.error) { showToast(r.error, { type: 'error' }); return false; }
+      showToast(okMsg);
+      // the broadcast echo re-renders the sidebar and adds the in-line line
+      // for EVERY client including this one — never chain UI on the echo
+      // (multi-client law), so the toast above is this client's own receipt
+      return true;
+    };
+    if (msgId && !staged) {
+      mk(t('Roll back to before this message'), async () => {
+        const ok = await showConfirmDialog({
+          title: t('Roll back this conversation?'),
+          message: t('OpenCode will restore the files to the snapshot taken before this message and stage every later message for removal. Sending a new prompt makes it permanent; "Restore rolled-back messages" undoes it.'),
+          confirmText: t('Roll back'),
+          danger: true,
+        });
+        if (!ok) return;
+        await post('/api/opencode/revert', { id: ids.backendSessionId, messageID: msgId, cwd: ids.cwd || null }, t('Rolled back'));
+      });
+    }
+    if (staged) {
+      mk(t('Restore rolled-back messages'), () => post('/api/opencode/unrevert', { id: ids.backendSessionId, cwd: ids.cwd || null }, t('Restored')));
+    }
+  }
+  /** The store changed under an open window (this client or another one).
+   *  The MESSAGES do not change on a roll-back — OpenCode stages them for
+   *  removal, it does not delete them — so re-attaching the whole window would
+   *  be churn for nothing: what changed is the session's roll-back state, and
+   *  that is exactly what the line says. A fresh open renders the same
+   *  sentence from the store (revertNoticeText in src/opencode-serve.js). */
+  noteOpencodeChange(msg) {
+    const ids = this._getSessionIds?.() || {};
+    if ((ids.backend || 'claude') !== 'opencode') return;
+    if (msg.sessionId && ids.backendSessionId && msg.sessionId !== ids.backendSessionId) return;
+    const text = msg.kind === 'revert' ? t('Rolled back — everything below is staged for removal and the files were restored. The next prompt makes it permanent.')
+      : msg.kind === 'unrevert' ? t('Roll-back undone — the messages below are live again.')
+        : msg.kind === 'question-replied' ? t('A question in this conversation was answered.')
+          : msg.kind === 'question-rejected' ? t('A question in this conversation was dismissed.') : null;
+    if (text) this._renderers.appendSystem(text);
+  }
+
   _showMsgMeta(msg, x, y) {
     document.querySelectorAll('.msg-meta-pop').forEach(p => p.remove());
     const meta = msg.meta || {};
@@ -1505,11 +1677,19 @@ class ChatView {
     pop.style.top = Math.min(y, window.innerHeight - pop.offsetHeight - 8) + 'px';
     pop.addEventListener('click', (e) => {
       if (e.target.classList.contains('copyable')) { copyText(e.target.textContent); showToast(t('Copied')); }
-      else if (e.target.classList.contains('msg-meta-copy')) {
+      else if (e.target.classList.contains('msg-meta-copy') && !e.target.classList.contains('msg-meta-action')) {
         copyText(JSON.stringify({ role: msg.role, ts: msg.ts, uuid: msg.uuid, srcLine: msg.srcLine, toolName: msg.toolName, ...meta }, null, 2));
         showToast(t('Copied')); pop.remove();
       }
     });
+    // OPENCODE ROLL-BACK (S9 remainder piece (a), B-eac2): OpenCode can restore
+    // the working tree to the snapshot taken before a message and stage
+    // everything after it for removal. It is a real filesystem change on the
+    // machine the conversation lives on, so it asks first and reports what
+    // happened; the state it produces comes back through the store (the
+    // conversation re-reads with a "rolled back to here" notice) and the
+    // `opencode-updated` broadcast tells every other client.
+    this._addOpencodeRevertActions(pop, msg);
     const close = (e) => { if (!pop.contains(e.target)) { pop.remove(); document.removeEventListener('mousedown', close, true); } };
     document.addEventListener('mousedown', close, true);
     // Billing-account row (2.266.1, user request): resolved async from the
@@ -2613,6 +2793,25 @@ class ChatView {
       }
     }
 
+    // THE ONE LIVE APPLICATION POINT for the init frame's health facts (§2.6,
+    // round 5) — ABOVE the "viewing history" deferral below, because what the
+    // session IS does not depend on where its reader is standing. Two bugs
+    // live at this boundary and both are fixed by the position:
+    //   ① below it, a mid-session respawn's frame was dropped OUTRIGHT for a
+    //      reader who happened to be scrolled back (the record never reaches
+    //      the renderer at all — no card, no side effect, no chip);
+    //   ② the old feeder sat in the render switch, which also runs for every
+    //      record REPLAYED out of history, so paging up past an older spawn's
+    //      init silently rewrote a present-tense warning (reproduced both
+    //      directions: broken→silent and silent→broken).
+    // `replay` is the record's own provenance, NOT a slab bound: every batch
+    // path (loadHistory / _extendTop / _extendBottom / teleport / jump-to-
+    // bottom rebuild / read-only poll / reconnect catch-up) sets
+    // _loadingHistory, and for those the authority is applyStatus's frame —
+    // the server picks the NEWEST init over the whole record list, which a
+    // page-up never can.
+    this._applyInitHealth(initFrameOf(msg), { replay: this._loadingHistory });
+
     // Live message while viewing history: don't render, just track count.
     // Teleport mode is always "viewing history" \u2014 its window accounting is
     // stale, so gate on the flag directly (else live messages leak into the
@@ -2646,7 +2845,10 @@ class ChatView {
           const se = result.sideEffect;
           if (se.model) this._statusBar.setModel(se.model);
           if (se.permMode) this._statusBar.setPermMode(se.permMode);
-          if (se.slashCommands && this._chatInput) this._chatInput.setSlashCommands(se.slashCommands);
+          if (se.slashCommands && this._chatInput) this._chatInput.setSlashCommands(se.slashCommands, { terminal: se.terminalSlashCommands || null });
+          if (se.memoryPaths) noteMemoryPaths(se.memoryPaths);
+          // (the init frame's health facts are applied ABOVE the deferral, not
+          // here — a renderer runs for replays too; see round 5)
           this._statusBar.render();
         }
         el = result?.el || null;
@@ -2658,6 +2860,13 @@ class ChatView {
     if (!el) return;
     el.dataset.msgId = msg.id;
     if (msg.ts) el.dataset.ts = msg.ts; // for time-coordinate minimap positioning
+    // Every per-element mark the VIEW owns (retraction §2.10, the executing-tool
+    // dot §2.5) — re-derived here, at both replacement sites AND in the gap
+    // renderer (chat-view-seek `_renderGapMsg`), never carried by the
+    // element. Retraction survives a REBUILD because the normalizer
+    // marks the message in record order, so a reload of the transcript shows
+    // the same rewound history the live stream did — one code path for both.
+    this._applyElementMarks(el, msg);
     this._elements.set(msg.id, el);
     this._messageList.appendChild(el);
     this._renderers.addWrapToggles(el);
@@ -2742,19 +2951,7 @@ class ChatView {
         }
         if (newEl) {
           this._trace?.('editReplace', { id, status: fields.status });
-          newEl.dataset.msgId = id;
-          if (msg.ts) newEl.dataset.ts = msg.ts; // keep time-coordinate minimap data on re-render
-          // Run open/closed memory is keyed by ELEMENT — transfer it across the
-          // swap or a run whose every member gets replaced within one debounce
-          // window re-collapses on the user (review-confirmed: a single-Bash
-          // fold opened to watch live output snapped shut the moment the
-          // result landed).
-          if (this._runExpanded?.has(oldEl)) this._runExpanded.add(newEl);
-          if (this._runStickyOpen?.has(oldEl)) this._runStickyOpen.add(newEl); // the user's deliberate-open mark rides the swap too (verifier: a full re-render otherwise let the pinned auto-refold snap it shut)
-          oldEl.replaceWith(newEl);
-          this._elements.set(id, newEl);
-          this._renderers.addWrapToggles(newEl);
-          this._renderers.addOpenInEditorBtn(newEl);
+          this._swapMessageEl(oldEl, newEl, id);
         }
       }
     }
@@ -2938,6 +3135,24 @@ class ChatView {
       this._statusBar.setEffort(op.data?.effort || null, op.data?.effortNext ?? null);
       return;
     }
+    // RETRACTED HISTORY (§2.10 / §3.2). ONE op for both harnesses: claude's
+    // `tombstone` (kind 'superseded' — the CLI replaced a partial orphan and
+    // asks consumers to remove it) and codex's `thread_rolled_back` (kind
+    // 'rollback' — turns deliberately taken back, struck through in place so
+    // nobody's memory of reading them is silently rewritten). Marking, never
+    // splicing: the message array's indices back the virtual window's
+    // slice(offset,limit) and `total`, and re-indexing them under a reader is
+    // where three paging incidents came from.
+    if (op.subtype === 'rewound') { this._applyRewound(op.data); return; }
+    // THE command list changed mid-session (claude `commands_changed`, ACP
+    // `available_commands_update`): REPLACE, never append. An `edit` op on the
+    // init card cannot carry this — a complete system card is not re-rendered,
+    // so its side effects never re-run and the composer would keep the boot
+    // list for the whole session.
+    if (op.subtype === 'slash-commands') {
+      if (this._chatInput) this._chatInput.setSlashCommands(op.data?.commands || [], { terminal: op.data?.terminal || null });
+      return;
+    }
     if (op.subtype === 'usage') {
       this._statusBar.updateUsage(op.data);
     } else if (op.subtype === 'todos') {
@@ -2966,6 +3181,86 @@ class ChatView {
         this.winInfo.element.classList.add('window-waiting');
         if (this.winInfo._notifyChanged) this.winInfo._notifyChanged();
       }
+    }
+  }
+
+  /** Mark the named messages as retracted, live. Idempotent (the same op can
+   *  arrive again on a reconnect replay) and index-stable — the elements stay
+   *  where they are and only gain a class. */
+  _applyRewound(data) {
+    const ids = Array.isArray(data?.ids) ? data.ids : [];
+    const kind = data?.kind === 'superseded' ? 'superseded' : 'rollback';
+    if (!ids.length) return;
+    const want = new Set(ids);
+    for (const m of this._messages) if (m && want.has(m.id)) m.rewound = kind;
+    for (const id of ids) {
+      const el = this._elements.get(id);
+      if (el) this._markRewoundEl(el, kind);
+    }
+    // The minimap is NOT re-rendered here: ChatMinimap.render(turnMap) needs a
+    // turn map, and the only authority for one is the server normalizer (which
+    // already drops rewound turns). Fabricating a client-side map to blank the
+    // ghost markers would be a second source of truth for turn positions.
+  }
+
+  /** EVERY per-element mark this view owns, re-derived from the view's own
+   *  state onto a freshly built element.
+   *
+   *  The bug this closes (round-2 verifier, reproduced at 375×667): a mark
+   *  written STRAIGHT TO THE DOM at its origin — `_applyRewound`'s
+   *  strike-through, `_onToolsInProgress`'s executing dot — dies at the next
+   *  element REPLACEMENT, and there are FOUR places that build an element for
+   *  a message (`_onCreateMessage`, the status-transition re-render in
+   *  `_onEditMessage`, `_rerenderVisible`, and — round 3 — `_renderGapMsg`,
+   *  the huge-session seek renderer in chat-view-seek.js). The claude
+   *  tombstone case always gets one: the message it retracts is a STREAMING
+   *  partial, and `MessageManager._finalizeStreaming` emits `{op:'edit',
+   *  fields:{status:'complete'}}` for exactly that message at the next
+   *  `result` — so a retracted answer came back on screen one record later,
+   *  while an attach/rebuild (which reads `msg.rewound` from the normalizer)
+   *  still hid it. That divergence is what the create path's comment claims
+   *  cannot happen.
+   *
+   *  So: never re-apply marks one at a time at each replacement site (that is
+   *  the same miss with more copies). One function, called at every place an
+   *  element is BUILT FOR A MESSAGE, that asks the VIEW STATE what this
+   *  element should be wearing. A new mark is added here and is correct
+   *  everywhere. Idempotent — it only ever restates what the state says.
+   *
+   *  The rule is "built for a message", NOT "enters `_elements`": round 3's
+   *  finding was exactly that narrower phrasing — gap-slab elements are
+   *  deliberately kept out of `_elements` (they sit outside the virtual
+   *  window's accounting), so a hook keyed to that map skipped the one path
+   *  that renders a >34MB conversation's earlier history. scripts/
+   *  test-turn-truth-ui's source drift guard COUNTS the builders and demands a
+   *  mark call inside each one, so a fifth path cannot be added silently. */
+  _applyElementMarks(el, msg) {
+    if (!el) return;
+    // ① retraction (§2.10) — the message model carries it (live op + rebuild)
+    if (msg?.rewound) this._markRewoundEl(el, msg.rewound);
+    // ② the tool the harness says is EXECUTING (§2.5, set_in_progress_tool_use_ids).
+    //    `_inFlightTools` is the resolved set, and for a long-running tool the
+    //    next delta may never come — re-deriving is the only way the dot
+    //    survives a re-render or a page-out/page-in.
+    const inflight = this._inFlightTools;
+    if (inflight?.size) {
+      const mark = (node) => { const tid = node?.dataset?.toolId; if (tid) node.classList.toggle('chat-tool-inflight', inflight.has(tid)); };
+      mark(el);
+      if (el.querySelectorAll) for (const n of el.querySelectorAll('[data-tool-id]')) mark(n);
+    }
+  }
+
+  /** ONE place that turns the mark into DOM (create-path and live op share it,
+   *  so a rebuilt history and a live retraction can never look different). */
+  _markRewoundEl(el, kind) {
+    if (!el) return;
+    el.classList.add(kind === 'superseded' ? 'chat-msg-superseded' : 'chat-msg-rewound');
+    if (kind !== 'superseded' && !el.querySelector('.chat-rewound-tag')) {
+      const tag = document.createElement('span');
+      tag.className = 'chat-rewound-tag';
+      tag.textContent = t('rewound');
+      tag.title = t('The agent rolled this turn back — it is no longer part of the conversation it can see.');
+      el.appendChild(tag);
     }
   }
 
@@ -3158,6 +3453,184 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
    * guard) whose constructor never ran: setSuspended(false) → _tickCollab on
    * such a view must not throw, or the whole resume suite dies at import time.
    */
+  /**
+   * SendUserFile publish rows for one tool call (owner ruling 8(c)).
+   * Stored per toolCallId — the id the card carries — and the affected card is
+   * re-rendered in place. Bounded: a long conversation must not grow an
+   * unbounded map, and the OLDEST entries are the ones already scrolled away.
+   */
+  _notePublishedUserFiles(toolCallId, files) {
+    if (!toolCallId || !Array.isArray(files) || !files.length) return;
+    const map = (this._publishedUserFiles ||= new Map());
+    map.delete(toolCallId);         // re-insert = most-recently-published last
+    map.set(toolCallId, files);
+    while (map.size > 500) map.delete(map.keys().next().value);
+    this._rerenderToolCard(toolCallId);
+  }
+
+  /**
+   * THE message-element swap — every in-place re-render goes through here.
+   *
+   * A rendered message element is not just DOM: it carries the bookkeeping the
+   * rest of this class reads it BY. `dataset.msgId` is how both trims account
+   * for it (`els[i].dataset.msgId`), how jumpToIndex / search reveal / the
+   * minimap find it, and the key `_elements` maps to it; `dataset.ts` is the
+   * minimap's time coordinate; `dataset.line` is the seek machinery's file
+   * offset; `.chat-gap-msg` is what keeps a gap-loaded element OUT of the
+   * window accounting; and the two run-fold marks are keyed BY ELEMENT.
+   * None of it is produced by the renderers (grep `dataset.msgId` in
+   * chat-renderers.js = 0 hits) — it is applied at the append site, so a swap
+   * that forgets any of it silently unregisters the message.
+   *
+   * Round-2 verifier, MAJOR: `_rerenderToolCard` was a bare `replaceWith`, so a
+   * SendUserFile card that got its link from the `user-file-published`
+   * broadcast left `_elements` pointing at a DETACHED node — the tool_result
+   * edit then "replaced" a parentless element (a spec no-op) and the card
+   * stayed pending forever, while the visible element, now without a msgId,
+   * was trimmed out of the DOM with its id still in `_renderedMsgIds` (so
+   * re-extending the window early-returned and the message was gone for good).
+   * Three sites did this by hand and one of them was wrong; now there is one.
+   */
+  _swapMessageEl(oldEl, newEl, id) {
+    if (!oldEl || !newEl) return null;
+    const msgId = id || oldEl.dataset?.msgId || '';
+    const raw = newEl._rawMsg || oldEl._rawMsg;
+    if (msgId) newEl.dataset.msgId = msgId;
+    // Time coordinate for the minimap. The RECORD first, then whatever the old
+    // element already carried — renderSystemMsg deliberately stores a stub
+    // `_rawMsg = {role:'system'}`, so reading only the record would silently
+    // drop a system message's ts on every re-render.
+    const ts = raw?.ts || oldEl.dataset?.ts;
+    if (ts) newEl.dataset.ts = ts;
+    if (oldEl.dataset?.line) newEl.dataset.line = oldEl.dataset.line;
+    // A gap-loaded element is deliberately NOT part of the window: carry the
+    // class or the swap promotes it into both trims' accounting.
+    if (oldEl.classList?.contains('chat-gap-msg')) newEl.classList.add('chat-gap-msg');
+    // Run open/closed memory is keyed by ELEMENT — transfer it across the swap
+    // or a run whose every member gets replaced within one debounce window
+    // re-collapses on the user (review-confirmed: a single-Bash fold opened to
+    // watch live output snapped shut the moment the result landed). The
+    // user's deliberate-open mark rides too (verifier: a full re-render
+    // otherwise let the pinned auto-refold snap it shut).
+    if (this._runExpanded?.has(oldEl)) this._runExpanded.add(newEl);
+    if (this._runStickyOpen?.has(oldEl)) this._runStickyOpen.add(newEl);
+    // …and the VIEW-STATE marks (B3 §2.10/§3.5). A retraction's strike-through
+    // and the in-progress dot are written into the DOM, so they die with every
+    // element that gets replaced — the rule is "every path that builds an
+    // element for a message re-derives them", and collapsing the two swap sites
+    // into this method made this the place that owes it for both. `raw` is the
+    // same record the dataset above is read from, so a stub-`_rawMsg` system
+    // element is marked from whatever it does carry rather than not at all.
+    this._applyElementMarks(newEl, raw);
+    oldEl.replaceWith(newEl);
+    // Only re-point the map when it really pointed HERE: a gap-loaded element
+    // is not in `_elements` at all, and clobbering a different live element's
+    // entry would strand THAT one instead.
+    if (msgId && this._elements?.get(msgId) === oldEl) this._elements.set(msgId, newEl);
+    this._renderers.addWrapToggles(newEl);
+    this._renderers.addOpenInEditorBtn(newEl);
+    return newEl;
+  }
+
+  /**
+   * The CLI announced whether THIS run is really isolated, and where (owner
+   * ruling 9). Carries-the-key guarded like every other live fact: a frame
+   * that says nothing about the worktree must not clear a badge.
+   */
+  _onWorktreePath(msg) {
+    if (!msg || !('worktree' in msg)) return;
+    this._worktree = !!msg.worktree;
+    this._latchWorktreePick();
+  }
+
+  /**
+   * Record the CHOICE against the conversation the moment its id exists, so a
+   * later resume/restart/FORK carries it (the New Session dialog cannot: the
+   * conversation has no id yet when the box is ticked).
+   *
+   * ONE-WAY on purpose — it only ever LATCHES ON, and only over an ABSENT
+   * pick (worktreeLatchWrite). The saved key means "this conversation should
+   * run isolated" (a standing preference the user owns and unticks in Session
+   * Properties); the live `_worktree` means "this run is isolated", and the
+   * init-frame arbiter can turn THAT off on its own (a deleted worktree).
+   * Letting the live fact write the preference would silently discard a pick
+   * because of a transient — the auto-resume `noteRecovered` lesson, in a
+   * different subsystem — and letting it write over an explicit `false` would
+   * overrule a decision with a fact.
+   */
+  _latchWorktreePick() {
+    try {
+      const ids = this._getSessionIds();
+      if (!ids?.backendSessionId) return;
+      const key = { backend: ids.backend || 'claude', backendSessionId: ids.backendSessionId };
+      const cfg = this.app?.sidebar?.getSessionConfig?.(key) || {};
+      if (worktreeLatchWrite({ saved: cfg.worktree, live: this._worktree }) === true) {
+        this.app?.sidebar?.setSessionConfig?.(key, { ...cfg, worktree: true });
+      }
+    } catch { }
+  }
+
+  /** Re-render ONE tool card in place (no window/pin/scroll change). */
+  _rerenderToolCard(toolCallId) {
+    try {
+      const el = this._messageList?.querySelector(`[data-tool-id="${CSS.escape(String(toolCallId))}"]`);
+      const raw = el?._rawMsg;
+      if (!el || !raw) return;
+      const next = this._renderers.renderToolMsg(raw);
+      if (next) this._swapMessageEl(el, next);
+    } catch { /* a card that is not currently rendered simply gets the link on its next render */ }
+  }
+
+  /**
+   * One read of the pages this CONVERSATION owns, so a reloaded history shows
+   * the same links a live session does (the broadcast only reaches clients
+   * that were connected when the file was published). Best-effort and silent:
+   * a missing link is an absent affordance, never an error toast.
+   */
+  async _loadPublishedUserFiles() {
+    const convId = (() => { try { return this._getSessionIds()?.backendSessionId || ''; } catch { return ''; } })();
+    if (!convId || this._publishedFilesLoaded) return;
+    this._publishedFilesLoaded = true;
+    const r = await fetchJson(`/api/pages?conversationId=${encodeURIComponent(convId)}`);
+    const pages = r && Array.isArray(r.pages) ? r.pages : [];
+    if (!pages.length) return;
+    // A card knows its PATHS; it does not know page ids — so the map is keyed
+    // by the page's own `srcPath`, which is the path fact published-pages
+    // records for exactly this reason. Never by parsing a path back out of
+    // `srcKey`: that key is an UPSERT IDENTITY whose format is the publisher's
+    // business, and hand-parsing it drifted the moment the channel got its own
+    // namespace (round-3 made it `userfile:<conv>:<abs>` so a delivered file
+    // could not take over the user's own page — and the `local:`-stripping
+    // line here silently stopped matching every ABSOLUTE path, which is what
+    // the SendUserFile schema documents agents send; only relative paths kept
+    // resolving, by accident, through the basename fallback below).
+    this._publishedPagesByPath = new Map(
+      pages.map((p) => [String(p.srcPath || ''), p]).filter(([k]) => k));
+    this._rerenderUserFileCards();
+  }
+
+  /** Re-render every user-file card once the page list has landed. */
+  _rerenderUserFileCards() {
+    if (!this._publishedPagesByPath?.size) return;
+    for (const el of this._messageList?.querySelectorAll('.chat-msg-userchan') || []) {
+      const raw = el._rawMsg;
+      const b = raw?.content?.[0];
+      if (!raw?.toolCallId || !b) continue;
+      const rows = [];
+      const files = Array.isArray(b.input?.files) ? b.input.files : (typeof b.input?.files === 'string' ? [b.input.files] : []);
+      for (const f of files) {
+        const abs = String(f).startsWith('/') ? String(f) : '';
+        const page = abs ? this._publishedPagesByPath.get(abs) : null;
+        // A relative path in the record can still be matched by BASENAME —
+        // the publisher resolved it against the CLI's own cwd, which the
+        // client does not know (and must not guess).
+        const hit = page || [...this._publishedPagesByPath.entries()].find(([k]) => k.endsWith('/' + String(f).replace(/^\.\//, '')))?.[1];
+        if (hit) rows.push({ path: abs || String(f), name: String(f).split('/').pop(), link: hit.path });
+      }
+      if (rows.length) { (this._publishedUserFiles ||= new Map()).set(raw.toolCallId, rows); this._rerenderToolCard(raw.toolCallId); }
+    }
+  }
+
   _noteCollabHeadPainted(id, live) {
     if (id) {
       const ids = (this._liveHeadIds ||= new Set());
@@ -3303,6 +3776,100 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
     const s = Number(elapsedSeconds);
     const human = !Number.isFinite(s) ? '' : s < 60 ? `${Math.round(s)}s` : `${Math.floor(s / 60)}m${String(Math.round(s % 60)).padStart(2, '0')}s`;
     el.textContent = human ? t('still running · {elapsed}', { elapsed: human }) : t('still running');
+  }
+
+  /** The tool ids the harness says are EXECUTING right now (§2.5, claude
+   *  `set_in_progress_tool_use_ids`; caps.inProgressTools). Until this record
+   *  existed a tool card span "pending" from the moment it was parsed —
+   *  including the whole permission wait, where nothing is running at all.
+   *  Set-based and idempotent: the record is a delta, this is the resolved set,
+   *  so a reconnect that replays it lands on the same DOM. */
+  _onToolsInProgress(ids) {
+    if (!this._messageList) return;
+    const want = new Set(Array.isArray(ids) ? ids : []);
+    this._inFlightTools = want;
+    for (const el of this._messageList.querySelectorAll('[data-tool-id]')) {
+      el.classList.toggle('chat-tool-inflight', want.has(el.dataset.toolId));
+    }
+  }
+
+  /** Compaction stage from the harness's own records. Held on the view so a
+   *  card rendered LATER (or re-rendered) still shows the live stage instead of
+   *  the generic apology.
+   *
+   *  ONE frame shape, two producers (§2.11): on 2.1.257 the frames come from
+   *  `system/status` ({status:'compacting'} → compact_start, {status:null,
+   *  compact_result} → compact_end), which is also the ONLY lane that sees an
+   *  AUTO compaction — the one the user never typed /compact for. The declared
+   *  `compact_progress` record feeds the same frames if a CLI ever emits one.
+   *
+   *  A compact_end is KEPT, not dropped: "how it ended" is the last true thing
+   *  we know, and a card still on screen would otherwise silently fall back to
+   *  the 1–2-minute apology the moment the compaction succeeded.
+   *
+   *  …but a HELD terminal stage belongs to the compaction it describes, not to
+   *  the view forever. It is pushed into the cards that WATCHED the compaction
+   *  (setCompactStage) and no further: a card BUILT later opens on the guidance
+   *  again, because `compactInFlight()` is false. Without that split the first
+   *  compaction of a view — including the AUTO one, which no user action
+   *  precedes — silently replaced the actionable sentence every later "Prompt
+   *  is too long" card exists to give. */
+  _onCompactProgress(msg) {
+    this._compactStage = {
+      event: msg.event || '',
+      hookType: msg.hookType || null,
+      hint: msg.hint || null,
+      result: msg.result || null,
+      error: msg.error || null,
+    };
+    this._renderers?.setCompactStage?.(this._compactStage);
+  }
+
+  /** A CLAIM ABOUT *RIGHT NOW* DIES WITH ITS PRODUCER (§2.11, round 7). The
+   *  session is over, so a stage that says a compaction is RUNNING is a live
+   *  claim about a process that is gone: `compactInFlight()` stays true and
+   *  every "Prompt is too long" card built in this view afterwards opens on
+   *  "Compacting: running <hook> hooks…" instead of the rewind-and-retry
+   *  guidance the card exists to give. The server retires it at its own
+   *  teardown too, but a server that CRASHED sends no frame at all — and
+   *  'exited' is the one thing this view always learns.
+   *
+   *  Same shape the server would have sent: ENDED, never "finished" (round 5 —
+   *  nothing told us it worked), and ONLY when one was actually in flight, so
+   *  a session that never compacted is never made to claim that it did. Named
+   *  (not inlined at the exit) so the call site is greppable: this is the
+   *  client twin of the server's `retireCompaction`, and the same law applies —
+   *  a THIRD place learning the session is over must call THIS. */
+  _retireCompactionStage() {
+    if (!this._renderers?.compactInFlight?.()) return false;
+    this._onCompactProgress({ event: 'compact_end', hookType: null, hint: null, result: null, error: null });
+    return true;
+  }
+
+  /** SESSION DEATH — retire EVERY claim this view holds about what is
+   *  happening RIGHT NOW (round 8). The producer is gone: no record can ever
+   *  arrive to correct any of them, so each one is drawn until the window is
+   *  closed.
+   *
+   *  ONE owner, because the ENUMERATION is what round 7 got wrong. It retired
+   *  the compaction stage — correctly — and stopped there, while two claims of
+   *  exactly the same shape kept being drawn on a dead session:
+   *    • `_compactStage`  "a compaction is running"      (round 7)
+   *    • `_turnState`     "the agent is waiting for you"  — a PULSING chip on a
+   *      session that can never answer. `null` is not `idle`: it means nobody
+   *      reports a state any more, so the chip goes away instead of asserting
+   *      a state a dead process cannot be in.
+   *    • `_inFlightTools` "this tool is executing" — the DORMANT lane (no
+   *      harness publishes `set_in_progress_tool_use_ids` today, §2.5), but a
+   *      mark that outlives its process is the same defect whichever lane
+   *      wrote it, and this one has no second delta coming by construction.
+   *  A new live claim goes HERE, and gets a row in test-turn-truth-ui ⓪b.
+   *  Returns whether a compaction was in flight (the round-7 contract). */
+  _retireLiveClaims() {
+    const wasCompacting = this._retireCompactionStage();
+    this._statusBar?.setTurnState?.(null);
+    this._onToolsInProgress([]);
+    return wasCompacting;
   }
 
   /** Replace a finished agent card's live activity with its终态 (2.233.1).
@@ -3555,15 +4122,17 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
 
   _syncReviewAvailability() {
     const { backend } = this._getSessionIds();
-    if (backend !== 'codex') return;
+    if (!backendFeatureCaps(backend).review) return;
     const ready = this._messages.some((msg) => msg.role === 'assistant' && msg.status === 'complete');
     this._statusBar.setReviewEnabled(ready);
   }
 
   _startReadOnlyPolling() {
     if (!this._readOnly || !this.sessionId.startsWith('view-') || this._readOnlyPollTimer) return;
+    // A detached review lands in a read-only view that grows while the review
+    // runs — only a harness that CAN review produces one (caps, never an id).
     const { backend } = this._getSessionIds();
-    if (backend !== 'codex') return;
+    if (!backendFeatureCaps(backend).review) return;
     const tick = async () => {
       if (this._disposed) return;
       // Hidden tab: 2s polling of a read-only view is pure waste — heartbeat
@@ -3631,9 +4200,44 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
   applyStatus(status) {
     if (!status) return;
     this._statusBar.applyStatus(status);
+    // The ATTACH/HTTP twin of the live 'slash-commands' meta op: the same two
+    // facts (the current list + the terminal-bound subset), from the same
+    // init frame, so a window that opens after a mid-session push agrees with
+    // one that watched it happen (session-store chatStatus).
+    if (status.initFrame?.memoryPaths) noteMemoryPaths(status.initFrame.memoryPaths);
     if (status.slashCommands && this._chatInput) {
-      this._chatInput.setSlashCommands(status.slashCommands.map(c => c.startsWith('/') ? c : '/' + c));
+      this._chatInput.setSlashCommands(status.slashCommands, { terminal: status.initFrame?.terminalSlashCommands || null });
     }
+    this._applyInitHealth(status.initFrame);
+  }
+
+  /** THE ONE application point for the init frame's health facts (§2.6,
+   *  round 4) — fed by a LIVE init record AND by chatStatus.initFrame on
+   *  attach/HTTP, because the two must AGREE.
+   *  Why it cannot live in the init card alone: the card is suppressed for a
+   *  `frameRepeat`, and on an attach the init record usually sits hundreds of
+   *  records before the tail-50 the window loads. Measured on this instance's
+   *  own buffers: 9 conversations carry more than one init, and in 2 of them
+   *  (the two largest — i.e. exactly the long-running ones that accumulate MCP
+   *  failures) the rendered tail contains an init record and ZERO drawable
+   *  cards, so a "{n} not working" strip that a live watcher saw was simply
+   *  absent for a window opened later.
+   *  ROUND 5 — A REPLAYED RECORD IS NOT NEWS. Round 4 wrote "the chip is not
+   *  gated on the slab" and then fed it from the RENDER path, which is exactly
+   *  a slab: every batch replay (page-up, teleport, jump-to-bottom rebuild,
+   *  reconnect catch-up) re-runs it, so scrolling up past a previous spawn's
+   *  init rewrote the present-tense readout — measured both directions, and in
+   *  the one that matters a session with a dead MCP server went silent again.
+   *  `replay` is the CALLER's statement about the record's provenance (not a
+   *  window bound and not a global read), so the rule survives a new feeder:
+   *  a replay may not speak, because for replayed records the authority is
+   *  applyStatus — the server picks the newest init across the WHOLE record
+   *  list, which no page-up can.
+   *  ABSENT ≠ CLEAN: no frame ⇒ say nothing (initHealthIssues' own law); a
+   *  frame reporting everything connected ⇒ [] ⇒ the chip clears. */
+  _applyInitHealth(frame, { replay = false } = {}) {
+    if (!frame || replay) return;
+    this._statusBar.setInitHealth(initHealthIssues(frame));
   }
 
   _scrollToBottom() {
@@ -3775,6 +4379,17 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
         setTimeout(() => { if (!this._disposed) this._fullViewReset(msg); }, Math.random() * 500);
         return;
       }
+      // The attach payload's AUTHORITATIVE snapshot (§2.6 round 5). Every
+      // other attach path applies it — loadHistory's rebuild, its
+      // identical-skip branch, the read-only poll — and this one, the
+      // same-epoch reconnect, silently dropped it, so the only way a
+      // respawn's init reached the status bar here was the catch-up batch
+      // REPLAYING the record. A replay is not an authority (a page-up would
+      // then be one too), so the authority has to be applied where it
+      // arrives: chatStatus is computed from the whole record list at attach
+      // time, i.e. it already covers everything the catch-up is about to
+      // render.
+      if (msg.chatStatus) this.applyStatus(msg.chatStatus);
       // Sync streaming label from server
       if (msg.isStreaming) this._onServerStreamLabel(msg.streamingLabel || t('thinking...'), msg.streamingKind || null);
       else this._hideTyping();
@@ -4240,15 +4855,7 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
         }
       } catch {}
       if (!newEl) continue;
-      newEl.dataset.msgId = id;
-      if (msg.ts) newEl.dataset.ts = msg.ts;
-      if (oldEl.dataset.line) newEl.dataset.line = oldEl.dataset.line;
-      if (this._runExpanded?.has(oldEl)) this._runExpanded.add(newEl);
-          if (this._runStickyOpen?.has(oldEl)) this._runStickyOpen.add(newEl); // the user's deliberate-open mark rides the swap too (verifier: a full re-render otherwise let the pinned auto-refold snap it shut)
-      oldEl.replaceWith(newEl);
-      this._elements.set(id, newEl);
-      this._renderers.addWrapToggles(newEl);
-      this._renderers.addOpenInEditorBtn(newEl);
+      this._swapMessageEl(oldEl, newEl, id);
     }
     this._updateRuns();
   }

@@ -134,7 +134,10 @@ console.log('— ③ a REAL keeper driven by the plugin record');
   let pm = null;
   const facts = serve.install({
     dataDir: dir, command: () => STUB, env: () => ({ ...process.env }), log: null,
-    spawnImpl, bootTimeoutMs: 15000,
+    // live:false — this leg drives the CONTROL SURFACE (enable/disable/replay);
+    // the live lane is gated in test-opencode-s9, and arming it here would
+    // fs.watch the store of whoever is running the suite.
+    spawnImpl, bootTimeoutMs: 15000, live: false,
     autostart: () => serve.decideAutostart({ env: {}, pluginWantsUp: !!pm?.wantsServiceUp(OPENCODE_SERVE_ID) }),
   });
   pm = mkManager(dir);
@@ -182,7 +185,10 @@ console.log('— ③ a REAL keeper driven by the plugin record');
   ok('uninstall() (the process-exit path) stops OUR child', !alive(pid2));
   const facts2 = serve.install({
     dataDir: dir, command: () => STUB, env: () => ({ ...process.env }), log: null,
-    spawnImpl, bootTimeoutMs: 15000,
+    // live:false — this leg drives the CONTROL SURFACE (enable/disable/replay);
+    // the live lane is gated in test-opencode-s9, and arming it here would
+    // fs.watch the store of whoever is running the suite.
+    spawnImpl, bootTimeoutMs: 15000, live: false,
     autostart: () => serve.decideAutostart({ env: {}, pluginWantsUp: !!pm2?.wantsServiceUp(OPENCODE_SERVE_ID) }),
   });
   const pm2 = mkManager(dir);
@@ -226,14 +232,14 @@ console.log('— ③b the ops kill switch is authoritative over ADOPTION, not ju
   // NEGATIVE CONTROL first: without the switch this very fixture IS adopted,
   // so the assert below is about the kill switch, not a broken fixture.
   delete process.env.VIBESPACE_OPENCODE_SERVE;
-  const fA = serve.install({ dataDir: dir, command: () => STUB, env: () => ({ ...process.env }), log: null, spawnImpl: () => { throw new Error('must not spawn — this leg only adopts'); }, autostart: () => serve.decideAutostart({ pluginWantsUp: true }) });
+  const fA = serve.install({ dataDir: dir, command: () => STUB, env: () => ({ ...process.env }), log: null, live: false, spawnImpl: () => { throw new Error('must not spawn — this leg only adopts'); }, autostart: () => serve.decideAutostart({ pluginWantsUp: true }) });
   await fA.discover({});
   ok('(negative control) with no ops switch the recorded serve is ADOPTED, so the fixture is genuinely adoptable', fA.state().ready === true && fA.state().source === 'reused' && fA.state().pid === orphan.pid, fA.state());
   serve.uninstall();                       // leaves an ADOPTED serve alone (the next boot reuses it)
   ok('(setup) uninstall leaves the adopted process and its record alone', alive(orphan.pid) && fs.existsSync(recPath));
 
   process.env.VIBESPACE_OPENCODE_SERVE = '0';
-  const fB = serve.install({ dataDir: dir, command: () => STUB, env: () => ({ ...process.env }), log: null, spawnImpl: () => { throw new Error('must not spawn under the ops switch'); }, autostart: () => serve.decideAutostart({ pluginWantsUp: true }) });
+  const fB = serve.install({ dataDir: dir, command: () => STUB, env: () => ({ ...process.env }), log: null, live: false, spawnImpl: () => { throw new Error('must not spawn under the ops switch'); }, autostart: () => serve.decideAutostart({ pluginWantsUp: true }) });
   for (let i = 0; i < 60 && alive(orphan.pid); i++) await sleep(200);   // install() runs the ladder once — no discovery needed
   ok('VIBESPACE_OPENCODE_SERVE=0 STOPS the serve it inherited instead of adopting it, and clears the record', !alive(orphan.pid) && !fs.existsSync(recPath) && fB.state().ready === false, fB.state());
   ok('…so nothing is left running that the (correctly) locked panel could not stop', fB.state().pid === null && fB.state().source === null);

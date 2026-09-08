@@ -366,6 +366,35 @@ console.log('— the ACP wrapper adverts the queue verbs it serves');
   } finally { await w.stop(); }
 }
 
+console.log('— read-permission-rules: a TYPED refusal, never silence (owner ruling 10)');
+{
+  // The rules themselves come from the SERVE's v1 /config (server-side). What
+  // the WRAPPER owes is an ANSWER: a wrapper that adverts nothing is
+  // indistinguishable from one too old to answer, and the ws layer would then
+  // refuse with the wrong reason ("your agent is old") for a harness that will
+  // never have the method. The design's landing discipline is explicit: a new
+  // stdin verb lands in BOTH wrappers in the same batch, unknown-verb loud.
+  const w = startWrapper();
+  try {
+    await w.waitFor(() => w.find('session'), 10000, 'session record');
+    ok('the sidecar adverts caps.permissionRules (this wrapper SERVES the verb — its answer is a refusal, which is a different fact from "too old")',
+      w.metaJson()?.caps?.permissionRules === true, w.metaJson()?.caps);
+    w.send({ type: 'read-permission-rules', requestId: 'acp-rq-1' });
+    await w.waitFor(() => w.find('permission_rules'), 5000, 'a permission_rules record');
+    const r = w.find('permission_rules');
+    ok('the answer is TYPED: ok:false + a machine-readable reason (ACP v1 has no config-read method)',
+      r.ok === false && r.reason === 'unsupported-by-protocol' && /config-read/.test(r.detail || ''), JSON.stringify(r).slice(0, 200));
+    ok('…and it carries the requestId back, so a pending read is correlated instead of timing out', r.requestId === 'acp-rq-1');
+    ok('…plus the ONE permission fact ACP does carry: the session\'s live mode (the panel is never blank)',
+      typeof r.mode === 'string' && Array.isArray(r.modes) && r.modes.length > 0, JSON.stringify({ mode: r.mode, modes: r.modes }));
+    ok('the verb produced NO unknown-verb notice (it is served, not fallen through)',
+      !w.findAll('notice').some((n) => n.noticeKind === 'unknown-verb'));
+    const { capsOf } = require(path.join(REPO, 'src/backend-caps.js'));
+    ok('the harness caps row says the SESSION scope is not opencode\'s (its serve reports ONE resolved config with no per-key origin) — so the server never asks the session for the rules themselves',
+      capsOf('opencode').permissionRules.session === false && capsOf('opencode').permissionRules.instance === true && capsOf('opencode').permissionRules.source === 'serve-config');
+  } finally { await w.stop(); }
+}
+
 console.log('— the stop-time bookkeeping nudge survives a Stop that drops it from the queue');
 {
   // The nudge is FETCHED by endPrompt (a /api/agent/stop-check round trip) and
@@ -573,7 +602,38 @@ console.log('— normalizer (AcpMessageManager) over the journal');
   const live = new AcpMessageManager('s2'); const ops = []; live.onOp((o) => ops.push(o));
   for (const r of historyRecords.slice(0, historyRecords.findIndex((r) => r.kind === 'permission_resolved'))) live.processLive(r);
   const pendingCard = live.messages.find((m) => m.permission && !m.permission.resolved);
-  ok('live: the init card is created from the session record; the permission card is PENDING with ordered options', ops[0]?.op === 'create' && ops[0].message.content[0].initData?.model === 'mock/fast' && pendingCard && pendingCard.permission.options.map((o) => o.optionId).join(',') === 'once,always,no' && pendingCard.permission.kind === 'approval', ops[0]);
+  // ASSERT THE LEG'S OWN NAME, NOT AN INDEX. `ops[0]` was a smuggled claim
+  // that the init card is the FIRST op — which is a statement about the
+  // AGENT's record order, not about this normalizer. The mock sends the
+  // session/new RESULT and then the `available_commands_update` notification;
+  // the wrapper journals the `session` record from an async continuation of
+  // the former while the latter is journaled synchronously off the same
+  // stdout chunk, so `[update, session]` is an ordinary interleaving of a
+  // real process (measured: 1 failure / 16 runs of this suite). The op that
+  // list-shaped record emits is legitimately independent of the card, so the
+  // leg looks the card UP instead of assuming its position — the
+  // order-independence PROPERTY itself is pinned deterministically below.
+  const initOp = ops.find((o) => o.op === 'create' && o.message?.content?.[0]?.initData);
+  ok('live: the init card is created from the session record; the permission card is PENDING with ordered options', initOp?.message.content[0].initData?.model === 'mock/fast' && pendingCard && pendingCard.permission.options.map((o) => o.optionId).join(',') === 'once,always,no' && pendingCard.permission.kind === 'approval', { ops: ops.map((o) => o.op + (o.subtype ? ':' + o.subtype : '')).join(' | '), initOp });
+  // …and the property, with BOTH orders fed deterministically (no process
+  // timing involved): the init card and the command-list op are the same in
+  // either order. The NEGATIVE CONTROL is the assertion that was here before:
+  // `ops[0].op === 'create'` is TRUE in one order and FALSE in the other —
+  // i.e. it measured the agent's timing, so re-introducing it re-reds the gate.
+  {
+    const mk = () => [
+      { type: 'acp', kind: 'update', ts: 1, update: { sessionUpdate: 'available_commands_update', availableCommands: [{ name: 'review', description: 'Review the diff' }, { name: 'plan', description: 'Plan a change' }] } },
+      { type: 'acp', kind: 'session', ts: 2, sessionId: 'ses_mock_ord', how: 'new', cwd: '/tmp', agentInfo: { name: 'mock-acp' }, capabilities: { loadSession: true }, protocolVersion: 1, models: [{ id: 'mock/fast' }], model: 'mock/fast', mode: 'build', modeValues: ['build', 'plan'] },
+    ];
+    const run = (recs) => { const m = new AcpMessageManager('ord'); const o = []; m.onOp((x) => o.push(x)); for (const r of recs) m.processLive(r); return o; };
+    const [cmdFirst, sesFirst] = [run(mk()), run(mk().reverse())];
+    const cardOf = (o) => o.find((x) => x.op === 'create' && x.message?.content?.[0]?.initData)?.message.content[0].initData.model;
+    const cmdsOf = (o) => o.find((x) => x.op === 'meta' && x.subtype === 'slash-commands')?.data.commands.join(',');
+    ok('…and BOTH record orders give the same init card + the same command-list op (negative control: the ops[0] form disagrees with itself across the two orders)',
+      cardOf(cmdFirst) === 'mock/fast' && cardOf(sesFirst) === 'mock/fast' && cmdsOf(cmdFirst) === 'review,plan' && cmdsOf(sesFirst) === 'review,plan'
+      && (cmdFirst[0].op === 'create') !== (sesFirst[0].op === 'create'),
+      { cmdFirst: cmdFirst.map((o) => o.op).join(','), sesFirst: sesFirst.map((o) => o.op).join(',') });
+  }
   live.processLive({ type: 'permission-response', requestId: pendingCard.permission.requestId, approved: true, optionId: 'once' });
   ok('the ws-handler\'s echoed permission-response frame resolves the pending card (survives a refresh)', pendingCard.permission.resolved === 'allowed' && pendingCard.permission.selectedOptionId === 'once' && ops.at(-1).op === 'edit');
   ok('collapseKindOf/toolNameOf cover every ACP ToolKind', ['read', 'edit', 'delete', 'move', 'search', 'execute', 'think', 'fetch', 'switch_mode', 'other'].every((k) => toolNameOf(k)) && collapseKindOf('switch_mode') === null && collapseKindOf('fetch') === 'mcp' && collapseKindOf('think') === 'thinking');

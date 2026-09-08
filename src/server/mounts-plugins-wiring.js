@@ -575,6 +575,13 @@ function createSessionMessages(session, sessionId) {
     : new SessionMessages(session, sessionId, { buffersDir: BUFFERS_DIR, permissionModes: PERMISSION_MODES });
 }
 
+  // ── OpenCode serve ACCESS + its action routes (S9 remainder, B-eac2) ──
+  // Wired next to the plugin that owns the serve's on/off switch. ONE layer
+  // per instance: routes and ws cases name a machine with `hostId` and it
+  // picks the transport (local facts / the `opencode-serve` agentd op / the
+  // shipped ssh script) — hostId is a parameter, never a branch.
+  require('./opencode-access').create({ app, hosts, broadcast: (m) => bcastAll(m) });
+
   return { mounts, plugins, dialBridge, graduateHostToDial, createSessionMessages, pluginLoader };
 }
 module.exports = { create };

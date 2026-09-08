@@ -1787,6 +1787,205 @@ process.stdin.on('data', (d) => {
   R.stop();
 }
 
+// ── ⑧ THE READ-ONLY PERMISSION-RULE VERB (owner ruling 10) ─────────────────
+// `read-permission-rules` → `config/read {cwd, includeLayers:true}` on the
+// SESSION's own app-server. It has to be the session's own: config/read
+// resolves a `sessionFlags` layer (the `-c` overrides this session was spawned
+// with) that a fresh child cannot see. READ-ONLY: the write twins must never
+// be constructed, and the answer must be TRIMMED — a real store answered with
+// 378 origin keys, hundreds of them other projects' trust levels.
+console.log('— ⑧ read-permission-rules: config/read, trimmed, read-only');
+const STUB_CONFIG = `
+const fs = require('fs');
+let b = '';
+const send = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+const CWD = process.env.CODEX_WEBUI_CWD;
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (d) => {
+  b += d; let i;
+  while ((i = b.indexOf('\\n')) !== -1) {
+    const line = b.slice(0, i); b = b.slice(i + 1);
+    if (!line.trim()) continue;
+    let m; try { m = JSON.parse(line); } catch { continue; }
+    if (m.id === undefined || !m.method) continue;
+    fs.appendFileSync(__RPCLOG__, line + '\\n');
+    if (m.method === 'thread/start') { send({ id: m.id, result: { thread: { id: 'th-cfg' } } }); continue; }
+    if (m.method === 'config/read') {
+      const projects = { '/somebody/else': { trust_level: 'trusted' }, '/another/one': { trust_level: 'trusted' } };
+      projects[CWD] = { trust_level: 'trusted' };
+      const origins = {
+        approval_policy: { name: { type: 'user', file: '/h/.codex/config.toml', profile: null }, version: 'sha256:aa' },
+        sandbox_mode: { name: { type: 'sessionFlags' }, version: '' },
+        model: { name: { type: 'user', file: '/h/.codex/config.toml', profile: null }, version: 'sha256:aa' },
+        // MEASURED on a real 0.153.4: a TABLE-valued permission key is keyed by
+        // its LEAVES and never by itself, and a \`-c …network_access=true\`
+        // session flag lands on the LEAF as sessionFlags.
+        'sandbox_workspace_write.writable_roots.0': { name: { type: 'user', file: '/h/.codex/config.toml', profile: null }, version: 'sha256:aa' },
+        'sandbox_workspace_write.exclude_tmpdir_env_var': { name: { type: 'user', file: '/h/.codex/config.toml', profile: null }, version: 'sha256:aa' },
+        'sandbox_workspace_write.network_access': { name: { type: 'sessionFlags' }, version: '' },
+        // …and a LEAF of a key that is NOT permission-bearing must not ride along.
+        'plugins.secretMarketplace.token': { name: { type: 'user', file: '/h/.codex/config.toml', profile: null }, version: 'sha256:aa' },
+      };
+      origins['projects.' + CWD + '.trust_level'] = { name: { type: 'user', file: '/h/.codex/config.toml', profile: null }, version: 'sha256:aa' };
+      origins['projects./somebody/else.trust_level'] = { name: { type: 'user', file: '/h/.codex/config.toml', profile: null }, version: 'sha256:aa' };
+      send({ id: m.id, result: {
+        config: { approval_policy: 'on-request', sandbox_mode: 'workspace-write', include_permissions_instructions: true,
+                  sandbox_workspace_write: { writable_roots: ['/tmp/a'], network_access: true, exclude_tmpdir_env_var: true, exclude_slash_tmp: false },
+                  model: 'gpt-6-astra', model_reasoning_effort: 'xhigh', projects,
+                  plugins: { secretMarketplace: { token: 'NOT-A-PERMISSION-RULE' } } },
+        origins,
+        layers: [ { name: { type: 'user', file: '/h/.codex/config.toml', profile: null }, version: 'sha256:aa', config: { model: 'gpt-6-astra' } },
+                  { name: { type: 'sessionFlags' }, version: '', config: { sandbox_mode: 'workspace-write' } } ],
+      } });
+      continue;
+    }
+    send({ id: m.id, result: {} });
+  }
+});
+`;
+{
+  const C = spawnStub('config', STUB_CONFIG);
+  ok(await waitFor(() => C.meta()?.threadId === 'th-cfg'), 'config stub: the wrapper has a thread');
+  ok(C.meta()?.caps?.permissionRules === true, 'the wrapper ADVERTS caps.permissionRules in its sidecar (the per-process skew gate the server reads)');
+  C.send({ type: 'read-permission-rules', requestId: 'rq-1' });
+  ok(await waitFor(() => C.msgs().some((p) => p.type === 'permission_rules')), 'the verb produces a `permission_rules` event');
+  const ans = C.msgs().filter((p) => p.type === 'permission_rules').slice(-1)[0];
+  ok(ans.ok === true && ans.requestId === 'rq-1', 'the answer carries the caller\'s requestId (correlated, never "the next record wins")', JSON.stringify(ans).slice(0, 140));
+  const rd = C.rpc().filter((m) => m.method === 'config/read');
+  ok(rd.length === 1 && rd[0].params.includeLayers === true && rd[0].params.cwd === C.dir,
+    'exactly ONE config/read, with includeLayers and the SESSION\'s cwd (the sessionFlags layer is why this rung exists)', JSON.stringify(rd.map((m) => m.params)));
+  ok(!C.rpc().some((m) => /^config\/(value\/write|batchWrite)$/.test(m.method)),
+    'READ-ONLY: no config WRITE verb is ever constructed (§4.5 — expectedVersion turns a careless write into data loss)');
+  const keys = Object.keys(ans.config || {});
+  ok(keys.includes('approval_policy') && keys.includes('sandbox_mode') && !keys.includes('model') && !keys.includes('plugins'),
+    'ONLY the permission-bearing keys travel — the user\'s model/provider/plugin world stays out of an agent-visible journal', JSON.stringify(keys));
+  ok(ans.config.projects && Object.keys(ans.config.projects).length === 1 && ans.config.projects[C.dir],
+    'only THIS session\'s directory trust level travels (a real store had 378 origin keys, hundreds of them other people\'s projects)', JSON.stringify(Object.keys(ans.config.projects || {})));
+  ok(Object.keys(ans.origins || {}).every((k) => !/^projects\./.test(k) || k.includes(C.dir)),
+    'and the same for `origins` — no other project\'s path leaks through the origin map', JSON.stringify(Object.keys(ans.origins || {})));
+  // THE ROUND-4 FINDING, on the wrapper's half. codex keys `origins` by LEAF
+  // path for a table-valued key (measured on a real 0.153.4: the top-level key
+  // is NEVER in `origins`), so forwarding only the top level threw away the one
+  // fact this rung exists for — that the session's OWN `-c` flag set it.
+  const oKeys = Object.keys(ans.origins || {});
+  ok(ans.origins['sandbox_workspace_write.network_access']?.name?.type === 'sessionFlags'
+    && !!ans.origins['sandbox_workspace_write.writable_roots.0'] && !!ans.origins['sandbox_workspace_write.exclude_tmpdir_env_var'],
+    'the LEAF origins of a forwarded table-valued key travel — without them the reader cannot tell "this session\'s own -c flag set it" from "no layer set it"', JSON.stringify(oKeys));
+  ok(!oKeys.some((k) => k.startsWith('plugins.')) && !oKeys.some((k) => /^projects\./.test(k) && !k.includes(C.dir)),
+    'NEGATIVE CONTROL: leaf forwarding is scoped to the permission-bearing keys — a `plugins.*` leaf (and every other project\'s path) still stays out of the agent-visible journal', JSON.stringify(oKeys));
+  // …and the record the SERVER builds from this answer really attributes it.
+  {
+    const PRmod = require(path.join(REPO, 'src/permission-rules.js'));
+    const rec = PRmod.codexRulesRecord({ config: ans.config, origins: ans.origins, layers: ans.layers }, { cwd: C.dir, scope: 'session' });
+    const sf = rec.layers.find((l) => l.id === 'sessionFlags');
+    ok(sf && sf.rules.some((r) => r.key === 'sandbox_workspace_write.network_access' && r.value === 'true')
+      && !rec.layers.flatMap((l) => l.rules).some((r) => r.key.startsWith('sandbox_workspace_write') && r.note === PRmod.CODEX_DEFAULT_NOTE),
+      'END TO END: the answer this wrapper emits makes the SESSION layer own the flag it set — never "not set in any layer — the packaged default"',
+      JSON.stringify(rec.layers.map((l) => [l.id, l.rules.map((r) => r.key)])));
+  }
+  ok((ans.layers || []).length === 2 && (ans.layers || []).every((l) => !('config' in l)) && ans.layers.some((l) => l.name?.type === 'sessionFlags'),
+    'layers travel WITHOUT their config blobs (identity + file + version only — never a second copy of the config)', JSON.stringify(ans.layers));
+  // PARITY: the wrapper is a SHIPPED SINGLE FILE (it runs on hosts with no
+  // checkout), so its key list cannot require the pure module — it is pinned.
+  const wsrc = fs.readFileSync(path.join(REPO, 'data/bin/codex-chat-wrapper.js'), 'utf8');
+  const listed = (wsrc.match(/const PERMISSION_CONFIG_KEYS = \[([\s\S]*?)\];/) || [])[1] || '';
+  const wrapperKeys = [...listed.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]);
+  const pureKeys = require(path.join(REPO, 'src/permission-rules.js')).CODEX_PERMISSION_KEYS;
+  ok(wrapperKeys.length > 0 && wrapperKeys.join(',') === [...pureKeys].join(','),
+    'PARITY: the shipped wrapper\'s permission-key list is byte-for-byte the PURE module\'s (the usage scanner drifted twice by exactly this route)',
+    `wrapper=[${wrapperKeys}] pure=[${[...pureKeys]}]`);
+  C.stop();
+}
+
+// ── ⑧b THE BYTE CAP: a degrade path may not assert what it just threw away ──
+// The old ladder dropped `origins` wholesale and kept ok:true, so EVERY key
+// inherited "not set in any layer — the packaged default" — the exact opposite
+// of the truth, from a map the wrapper had deleted. And if the drop was not
+// enough the oversized line went out anyway, so the cap was decorative.
+// Sizes MEASURED against a real 0.153.4 (`[sandbox_workspace_write]` with N
+// `writable_roots` ⇒ N+1 leaf origins): 250 roots = 67530 bytes full / 12569
+// after the drop; 700 roots = 186780 / 33719, i.e. STILL over the 32768 cap.
+console.log('— ⑧b read-permission-rules: the 32KiB ladder says which fact it lost');
+const STUB_BIG = `
+const fs = require('fs');
+let b = '';
+const send = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+const N = __NROOTS__;
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (d) => {
+  b += d; let i;
+  while ((i = b.indexOf('\\n')) !== -1) {
+    const line = b.slice(0, i); b = b.slice(i + 1);
+    if (!line.trim()) continue;
+    let m; try { m = JSON.parse(line); } catch { continue; }
+    if (m.id === undefined || !m.method) continue;
+    fs.appendFileSync(__RPCLOG__, line + '\\n');
+    if (m.method === 'thread/start') { send({ id: m.id, result: { thread: { id: 'th-big' } } }); continue; }
+    if (m.method === 'config/read') {
+      const roots = [], origins = {
+        approval_policy: { name: { type: 'user', file: '/h/.codex/config.toml', profile: null }, version: 'sha256:aa' },
+      };
+      for (let k = 0; k < N; k++) {
+        roots.push('/srv/data/very/long/project/root/number-' + String(k).padStart(4, '0'));
+        origins['sandbox_workspace_write.writable_roots.' + k] = { name: { type: 'user', file: '/h/.codex/config.toml', profile: null }, version: 'sha256:aa' };
+      }
+      origins['sandbox_workspace_write.network_access'] = { name: { type: 'sessionFlags' }, version: '' };
+      send({ id: m.id, result: {
+        config: { approval_policy: 'on-request', sandbox_workspace_write: { writable_roots: roots, network_access: true } },
+        origins,
+        layers: [ { name: { type: 'user', file: '/h/.codex/config.toml', profile: null }, version: 'sha256:aa' } ],
+      } });
+      continue;
+    }
+    send({ id: m.id, result: {} });
+  }
+});
+`;
+{
+  const CAP = 32 * 1024;
+  const PRmod = require(path.join(REPO, 'src/permission-rules.js'));
+  // RUNG 2 — the drop fits: the answer goes out, and it SAYS the origin map is gone.
+  const B = spawnStub('cfgbig', STUB_BIG.replace(/__NROOTS__/g, '250'));
+  ok(await waitFor(() => B.meta()?.threadId === 'th-big'), 'big-config stub: the wrapper has a thread');
+  B.send({ type: 'read-permission-rules', requestId: 'rq-big' });
+  ok(await waitFor(() => B.msgs().some((p) => p.type === 'permission_rules')), 'the verb answers');
+  const a2 = B.msgs().filter((p) => p.type === 'permission_rules').slice(-1)[0];
+  ok(a2.ok === true && a2.truncated === true && a2.originsDropped === true && Object.keys(a2.origins || {}).length === 0,
+    'RUNG 2: over the cap, the wrapper drops `origins` and SAYS SO (`originsDropped`) — a lost fact is reported, never silently re-asserted',
+    JSON.stringify({ ok: a2.ok, truncated: a2.truncated, originsDropped: a2.originsDropped, origins: Object.keys(a2.origins || {}).length }));
+  ok(Buffer.byteLength(JSON.stringify(a2), 'utf8') <= CAP,
+    '…and what actually went out is under the cap', String(Buffer.byteLength(JSON.stringify(a2), 'utf8')));
+  {
+    const rec = PRmod.codexRulesRecord({ config: a2.config, origins: a2.origins, layers: a2.layers, originsDropped: a2.originsDropped === true }, { cwd: B.dir, scope: 'session' });
+    const rules = rec.layers.flatMap((l) => l.rules.map((r) => ({ ...r, layer: l.id })));
+    ok(rules.length > 0 && rules.every((r) => r.layer === 'originUnknown' && r.note === PRmod.CODEX_CAPPED_NOTE),
+      'END TO END: the capped answer renders as "origin unknown — the answer was capped", NOT as "the packaged default" (the finding, measured on the consequence)',
+      JSON.stringify(rules.map((r) => [r.layer, r.note])));
+    // NEGATIVE CONTROL: the pre-fix payload — the SAME bytes minus the flag —
+    // is exactly what produced the false claim.
+    const pre = PRmod.codexRulesRecord({ config: a2.config, origins: {}, layers: a2.layers }, { cwd: B.dir, scope: 'session' });
+    ok(pre.layers.flatMap((l) => l.rules).every((r) => r.note === PRmod.CODEX_DEFAULT_NOTE),
+      'NEGATIVE CONTROL: the pre-fix payload (same bytes, no `originsDropped`) still yields the false "packaged default" attribution — so the flag is what fixed it');
+  }
+  B.stop();
+
+  // RUNG 3 — the drop is NOT enough: refuse, with the byte count. A cap is a cap.
+  const G = spawnStub('cfghuge', STUB_BIG.replace(/__NROOTS__/g, '700'));
+  ok(await waitFor(() => G.meta()?.threadId === 'th-big'), 'huge-config stub: the wrapper has a thread');
+  G.send({ type: 'read-permission-rules', requestId: 'rq-huge' });
+  ok(await waitFor(() => G.msgs().some((p) => p.type === 'permission_rules')), 'the verb answers');
+  const a3 = G.msgs().filter((p) => p.type === 'permission_rules').slice(-1)[0];
+  ok(a3.ok === false && a3.reason === 'read-failed' && /over the 32768-byte answer cap/.test(a3.detail || '') && /\d{5}/.test(a3.detail || ''),
+    'RUNG 3: still over the cap after the drop ⇒ an HONEST typed refusal carrying the byte count — never an oversized line into the agent-visible journal',
+    JSON.stringify(a3).slice(0, 200));
+  ok(a3.requestId === 'rq-huge' && PRmod.UNAVAILABLE_REASONS.includes(a3.reason),
+    '…correlated to the caller and speaking a DECLARED reason code (the reader branches on the code, not the sentence)');
+  ok(G.events().every((e) => Buffer.byteLength(JSON.stringify(e), 'utf8') <= CAP),
+    'MEASURED: no line the wrapper emitted for this read is over the cap (the old ladder emitted the oversized payload anyway)',
+    String(Math.max(...G.events().map((e) => Buffer.byteLength(JSON.stringify(e), 'utf8')))));
+  G.stop();
+}
+
 try { w.kill('SIGTERM'); } catch {}
 await sleep(300);
 try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}

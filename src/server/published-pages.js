@@ -24,6 +24,43 @@ const ID_RE = /^pg[a-z0-9]{10}$/;
 const MAX_BYTES = 25 * 1024 * 1024;
 const CSP = "sandbox allow-scripts allow-popups allow-downloads allow-modals allow-forms";
 
+// NON-HTML SNAPSHOTS (owner ruling 8(c), the SendUserFile channel). The store
+// was HTML-only end to end: publishContent wrote `<id>.html` and serveRaw sent
+// `res.type('html')` + the script prelude. A screenshot or a PDF the agent
+// hands the user is the SAME product idea (a session-owned, private-by-default
+// link the front end can point at), so a record may now name its own media
+// type — and everything that made the HTML path safe gets STRICTER, not looser:
+//   · the type is normalized through this allowlist; anything unknown becomes
+//     application/octet-stream (never a sniffed type, never the caller's string),
+//   · `X-Content-Type-Options: nosniff` so the browser cannot upgrade bytes we
+//     called an image into a document,
+//   · the SAME sandbox CSP (opaque origin, no cookies, no same-origin reach),
+//     minus `allow-scripts` — a non-HTML snapshot has no legitimate script,
+//   · `Content-Disposition: inline` ONLY for the types below; everything else
+//     downloads. SVG is deliberately NOT inline: it is a scriptable document.
+// A record with NO mediaType is exactly what it always was — the HTML page,
+// byte-identical behaviour including the compat prelude.
+const MEDIA_TYPES = new Map([
+  ['image/png', { inline: true }], ['image/jpeg', { inline: true }], ['image/gif', { inline: true }],
+  ['image/webp', { inline: true }], ['image/avif', { inline: true }], ['application/pdf', { inline: true }],
+  ['text/plain', { inline: true }],
+  ['image/svg+xml', { inline: false }], // scriptable document — download only
+  ['application/octet-stream', { inline: false }],
+]);
+const NON_HTML_CSP = 'sandbox; default-src \'none\'';
+function normalizeMediaType(v) {
+  const s = String(v == null ? '' : v).toLowerCase().split(';')[0].trim();
+  if (!s || s === 'text/html') return '';                       // '' = the HTML page path, unchanged
+  return MEDIA_TYPES.has(s) ? s : 'application/octet-stream';
+}
+/** Extension of the snapshot file for a record — HTML keeps `.html` so every
+ *  existing page and every existing on-disk snapshot resolves unchanged. */
+function snapExt(rec) { return rec && rec.mediaType ? '.bin' : '.html'; }
+/** ASCII-safe filename for Content-Disposition (a header is not UTF-8). */
+function dispositionName(name) {
+  return String(name || 'file').replace(/[^\w.\-]+/g, '_').slice(0, 80) || 'file';
+}
+
 const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 // COMPAT PRELUDE (2.366.1) — two browser capabilities a hosted page cannot
@@ -100,7 +137,7 @@ function create({ dataDir, requestAuthed = () => true, publicUrl = () => null, l
     return base + '/p/' + id;
   };
 
-  const pub = (p, req) => ({ id: p.id, name: p.name, srcPath: p.srcPath, srcKey: p.srcKey, public: !!p.public, size: p.size, createdAt: p.createdAt, updatedAt: p.updatedAt, url: urlFor(p.id, req), path: '/p/' + p.id, sessionId: p.sessionId || null, conversationId: p.conversationId || null });
+  const pub = (p, req) => ({ id: p.id, name: p.name, srcPath: p.srcPath, srcKey: p.srcKey, public: !!p.public, size: p.size, createdAt: p.createdAt, updatedAt: p.updatedAt, url: urlFor(p.id, req), path: '/p/' + p.id, sessionId: p.sessionId || null, conversationId: p.conversationId || null, mediaType: p.mediaType || '' });
   const notify = (page, extra) => { try { onPublished && onPublished(page, extra || {}); } catch (e) { log('[pages] onPublished failed:', e.message); } };
 
   /** Copy-in publish; upserts by srcPath so a re-published design keeps its
@@ -134,22 +171,35 @@ function create({ dataDir, requestAuthed = () => true, publicUrl = () => null, l
 
   /** Content upload publish (agent CLI / remote hosts, 2.366.0): the HTML
    *  arrives in the request — the source file may live on another machine.
-   *  Upserts by srcKey; attributes the page to the publishing session. */
-  function publishContent({ html, name, srcKey, makePublic, sessionId = null, conversationId = null, req = null }) {
+   *  Upserts by srcKey; attributes the page to the publishing session.
+   *  `srcPath` is optional and purely DESCRIPTIVE: a caller whose srcKey is a
+   *  namespaced identity rather than `<host>:<path>` (the SendUserFile channel
+   *  scopes its key by conversation, so two conversations naming the same file
+   *  stay two pages) says what the source file actually was, instead of
+   *  letting the prefix-strip below invent `<conv>:/abs/path`. */
+  function publishContent({ html, name, srcKey, srcPath = '', makePublic, sessionId = null, conversationId = null, req = null, mediaType = '' }) {
     const buf = Buffer.isBuffer(html) ? html : Buffer.from(String(html || ''), 'utf8');
     if (!buf.length) return { error: 'empty page body' };
     if (buf.length > MAX_BYTES) return { error: `page too large (${Math.round(buf.length / 1024 / 1024)}MB > ${MAX_BYTES / 1024 / 1024}MB)` };
     const key = String(srcKey || '').slice(0, 1024);
     if (!key) return { error: 'missing srcKey' };
+    const mt = normalizeMediaType(mediaType);
     let rec = store.pages.find((p) => p.srcKey === key);
     const replaced = !!rec;
-    const draft = rec || { id: mintId(), srcKey: key, srcPath: key.replace(/^[^:]*:/, ''), public: false, createdAt: Date.now() };
+    const draft = rec || { id: mintId(), srcKey: key, srcPath: String(srcPath || '') || key.replace(/^[^:]*:/, ''), public: false, createdAt: Date.now() };
     try {
       fs.mkdirSync(pagesDir, { recursive: true });
-      const fp = path.join(pagesDir, draft.id + '.html');
+      // A re-publish that CHANGES kind (html ⇄ binary) must not leave the old
+      // snapshot behind under the other extension — serveRaw picks the file by
+      // the record's current mediaType, so a stale twin would be dead bytes on
+      // disk that a later flip would silently serve.
+      const prevExt = snapExt(rec);
+      const fp = path.join(pagesDir, draft.id + (mt ? '.bin' : '.html'));
       fs.writeFileSync(fp + '.tmp', buf); fs.renameSync(fp + '.tmp', fp);
+      if (rec && prevExt !== (mt ? '.bin' : '.html')) { try { fs.unlinkSync(path.join(pagesDir, draft.id + prevExt)); } catch { } }
     } catch (e) { return { error: 'store failed: ' + e.message }; }
     if (!rec) { rec = draft; store.pages.push(rec); }
+    if (mt) rec.mediaType = mt; else delete rec.mediaType;
     rec.name = String(name || rec.name || path.basename(rec.srcPath || 'page', path.extname(rec.srcPath || ''))).slice(0, 120);
     if (makePublic !== undefined) rec.public = !!makePublic;
     rec.size = buf.length;
@@ -177,7 +227,7 @@ function create({ dataDir, requestAuthed = () => true, publicUrl = () => null, l
     if (i < 0) return { error: 'no such page' };
     const [rec] = store.pages.splice(i, 1);
     const snap = { ...pub(rec), removed: true };
-    try { fs.unlinkSync(path.join(pagesDir, rec.id + '.html')); } catch { }
+    try { fs.unlinkSync(path.join(pagesDir, rec.id + snapExt(rec))); } catch { }
     save();
     notify(snap, { removed: true }); // an unpublished page must leave every client's list
     return { ok: true };
@@ -226,6 +276,10 @@ function create({ dataDir, requestAuthed = () => true, publicUrl = () => null, l
   function serve(req, res) {
     const rec = gate(req, res);
     if (!rec) return;
+    // A NON-HTML snapshot has no scripts and therefore no reason for the
+    // shell/iframe split (2.366.1) — the shell exists to give user HTML a real
+    // origin to talk to. Serve the bytes, with the strictest headers.
+    if (rec.mediaType) return serveBytes(rec, res);
     // GEO/STORAGE BRIDGE (B-74de, 2.369.7 — owner-directed via 生活方式助手's
     // verified spec, SharedContext/vibespace-pages-geo-bridge-spec.md): the
     // shell IS the privileged real origin the 2.366.1 split created — it can
@@ -299,9 +353,26 @@ function create({ dataDir, requestAuthed = () => true, publicUrl = () => null, l
   /** GET /p/:id/raw — the published HTML itself: sandbox CSP (opaque origin)
    *  + the storage shim. Directly reachable on purpose — the protection is
    *  the header, not the framing. */
+  /** The bytes of a non-HTML snapshot. nosniff + a script-less sandbox CSP +
+   *  an explicit disposition; the type is the ALLOWLISTED one recorded at
+   *  publish time, never anything derived from the request. */
+  function serveBytes(rec, res) {
+    const fp = path.join(pagesDir, rec.id + '.bin');
+    let st;
+    try { st = fs.statSync(fp); } catch { return res.status(410).send('file content missing \u2014 send it again'); }
+    const info = MEDIA_TYPES.get(rec.mediaType) || { inline: false };
+    res.setHeader('Content-Security-Policy', NON_HTML_CSP);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Type', rec.mediaType);
+    res.setHeader('Content-Length', String(st.size));
+    res.setHeader('Content-Disposition', `${info.inline ? 'inline' : 'attachment'}; filename="${dispositionName(rec.name)}"`);
+    fs.createReadStream(fp).pipe(res);
+  }
+
   function serveRaw(req, res) {
     const rec = gate(req, res);
     if (!rec) return;
+    if (rec.mediaType) return serveBytes(rec, res);
     const fp = path.join(pagesDir, rec.id + '.html');
     let st;
     try { st = fs.statSync(fp); } catch { return res.status(410).send('page content missing — republish it'); }

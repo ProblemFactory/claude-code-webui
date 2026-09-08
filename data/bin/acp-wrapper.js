@@ -133,7 +133,15 @@ const meta = {
   // NOT run-now/run-all (this queue only has entries WHILE a prompt runs — an
   // idle wrapper dispatches immediately — so "run it now" could only ever
   // answer busy). Declaring either would be the accept-and-ignore failure.
-  caps: { frameFile: true, peerMessage: false, inputQueue: true, queueVerbs: ACP_QUEUE_VERBS },
+  // permissionRules: this wrapper SERVES the read-only `read-permission-rules`
+  // verb — and its answer is that ACP v1 has no config-read method at all.
+  // Advertising it is the point: a wrapper that adverts nothing is
+  // indistinguishable from a wrapper too old to answer, and the ws layer would
+  // refuse with the wrong reason ("your agent is old") for a harness that will
+  // never have the method. It DOES report the session's live permission MODE
+  // (session/set_mode + current_mode_update), which is the one permission fact
+  // the protocol does carry.
+  caps: { frameFile: true, peerMessage: false, inputQueue: true, queueVerbs: ACP_QUEUE_VERBS, permissionRules: true },
   queue: [],
 };
 
@@ -666,6 +674,25 @@ async function handleInput(msg) {
       log(`interrupt: active=${!!activePrompt} dropped=${dropped.length} (nudges=${droppedNudges}, peers=${droppedPeers})`);
       return;
     }
+    case 'read-permission-rules': {
+      // READ-ONLY, and honest about a real protocol gap. ACP v1 has NO
+      // config-read method (verified against the 1.18.29 initialize reply and
+      // the protocol's own method list): there is nothing here that could
+      // enumerate an agent's permission rules or say which file they came
+      // from. So this answers with a CODE the UI branches on, not silence —
+      // the server then reads OpenCode's rules from the serve's v1 /config
+      // instead. What the protocol DOES carry is the session's live mode, and
+      // that travels with the refusal so the panel is not empty.
+      record('permission_rules', {
+        ok: false,
+        requestId: typeof msg.requestId === 'string' ? msg.requestId : '',
+        reason: 'unsupported-by-protocol',
+        detail: 'ACP v1 has no config-read method — an ACP agent does not expose its permission rules over the protocol.',
+        mode: currentModeValue() || null,
+        modes: modeValues(),
+      });
+      return;
+    }
     case 'queue-op': handleQueueOp(msg); return;
     case 'permission-response': resolvePermission(msg); return;
     case 'set-model': await applyModel(msg.model); return;
@@ -701,7 +728,7 @@ async function handleInput(msg) {
       return;
     }
     default:
-      notice('error', `Unknown stdin verb "${msg.type}" — ignored (ACP wrapper serves chat-input/interrupt/queue-op/permission-response/set-model/set-effort/set-mode/set-permission-mode/peer-message/_frame_file).`, 'unknown-verb');
+      notice('error', `Unknown stdin verb "${msg.type}" — ignored (ACP wrapper serves chat-input/interrupt/queue-op/permission-response/set-model/set-effort/set-mode/set-permission-mode/peer-message/read-permission-rules/_frame_file).`, 'unknown-verb');
   }
 }
 

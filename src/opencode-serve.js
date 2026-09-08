@@ -93,21 +93,35 @@
  * progressively without a request burst; fallback = OpenCode's own title unless
  * it is the "New session - <date>" placeholder.
  *
- * NOT IN SCOPE (endpoints seen in the 1.18.29 OpenAPI, unwired): revert
- * (POST /session/{sessionID}/revert), question (GET /question, POST
- * /question/{requestID}/reply), pty (/pty…), the SSE event stream (/event,
- * /global/event) — see the S9 row in docs/design-harness-plugins.md.
+ * WIRED BY THE S9 REMAINDER (B-eac2 — the old "NOT IN SCOPE" list is empty):
+ * revert/unrevert, the `question` ask lane, the pty family, and the SSE stream
+ * (src/opencode-events.js) which REPLACED the 10s list poll.
+ *
+ * THE PTY FAMILY SENDS NO `directory` (round 4 — the one place a user
+ * directory could still reach the serve). A `?directory=` query is what BOOTS
+ * an instance, `DELETE /pty/{id}` frees nothing it booted, and measured on a
+ * 200-dir repo that is 204 inotify watches per terminal that outlive every
+ * close, vs 4 without it — with an identical shell cwd, because the shell's
+ * directory rides the request BODY. See OpencodeServeClient's pty block.
+ * A serve pty also OUTLIVES this process, so `reapPtys()` sweeps the ones no
+ * session can reach on the ready edge of each serve process.
  */
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const net = require('net');
 const { spawn, execFile } = require('child_process');
+const cliIdentity = require('./cli-identity');   // THE process-identity ladder (residual (c)): one definition for every caller that signals
 const { nameFromText } = require('./discovery-facts');
 const { AcpSessionMessages } = require('./acp-message-manager');
 
 const DEFAULT_TIMEOUT_MS = 1500;   // the poll budget: a hung serve costs at most this per discovery
 const READ_TIMEOUT_MS = 8000;      // user actions (open a stopped conversation, fork): LOUD when exceeded
+/** Opening a pty BOOTS the OpenCode instance for that directory (measured:
+ *  +19 indexer threads, a full-tree index) — on a cold directory, or a loaded
+ *  machine, that is well past the 8s read budget. It is an explicit user
+ *  action with a spinner, so it gets a spawn-sized one. */
+const PTY_TIMEOUT_MS = 45000;
 const LIST_CACHE_MS = 10000;
 const NEGATIVE_CACHE_MS = 10000;
 const NAME_RETRY_MS = 60000;       // a session with no user message yet is re-checked at most this often
@@ -115,16 +129,50 @@ const BOOT_TIMEOUT_MS = 20000;     // opencode 1.18.29 answers /global/health in
 const MAX_CRASHES = 5;
 const HEALTHY_UPTIME_RESET_MS = 60000; // a serve that stayed up this long resets the crash counter
 const NAME_BATCH = 6;
+/** How long POSITIVE evidence that ANOTHER process touched a conversation
+ *  keeps it labelled 'external' (piece (f)). Short on purpose: the label must
+ *  decay back to 'stopped' on its own -- we never claim a running agent we
+ *  cannot see, and we never keep claiming one after the evidence went stale. */
+const EXTERNAL_WINDOW_MS = 90000;
+/** How long a mutation WE made stays exempt from that rung when the action
+ *  gave us NO new `time.updated` to match on (an answered/rejected ask).
+ *  MEASURED on a real 1.18.29 serve: `revert`/`unrevert` return the row's
+ *  FINAL `time.updated` and the serve never bumps it again afterwards
+ *  (0ms delta at +250ms…+8s), so those writes are recognised EXACTLY — by
+ *  value, not by clock — and this window only has to cover a listing that was
+ *  already in flight while we wrote. Short on purpose: a blind window is how
+ *  a real TUI change would be missed. */
+const OWN_WRITE_WINDOW_MS = 10000;
+/** Floor between two event-driven list refreshes. The single-flight promise
+ *  already coalesces CONCURRENT discovers; this coalesces SERIAL ones (five
+ *  browser tabs each poll /api/sessions, and a busy turn dirties the store
+ *  every few hundred ms), so "no timer" never becomes "a list per request". */
+const MIN_REFRESH_MS = 1000;
 const LIST_LIMIT = 500;
 const TITLE_PLACEHOLDER_RE = /^New session - /;
 const FORK_PATH = '/session/{sessionID}/fork';
 const NAME_MAX_BYTES = 1 << 20;    // the naming read is the WHOLE v1 message list — refuse a conversation bigger than this (it has a real title anyway)
+const CONFIG_MAX_BYTES = 512 * 1024;  // the v1 /config read (permission rules) — a whole response into this process always carries a cap (2.369.50)
 // ── the RUNAWAY guard (2.369.50, the 2.369.42 incident) ──
 const GUARD_SAMPLE_MS = 60000;                     // /proc sample cadence
 const GUARD_CPU_PCT = 150;                         // sustained CPU% (100% = one core) that counts as hot
 const GUARD_CPU_SUSTAIN_MS = 5 * 60 * 1000;        // …for this long ⇒ runaway
 const GUARD_RSS_BYTES = 2 * 1024 * 1024 * 1024;    // RSS above this ⇒ runaway at once
 const RUNAWAY_COOLDOWN_MS = 60 * 60 * 1000;        // a runaway is respawned at most once an hour
+// ── the RECORDED-SERVE settlement (round 10) ──
+/** A recorded serve that missed the 1.5s budget gets ONE longer probe before
+ *  we conclude it is wedged: a busy 1.18.29 answers /global/health in hundreds
+ *  of ms but a cold one takes ~1.2s, and "slow" must not read as "stop it". */
+const RECORD_CONFIRM_TIMEOUT_MS = 4000;
+/** How long we wait for a SIGTERMed serve to actually exit before refusing to
+ *  start a replacement over it. */
+const RECORD_KILL_WAIT_MS = 3000;
+const RECORD_KILL_POLL_MS = 150;
+/** A 'blocked' park (a live serve we could not identify or could not stop)
+ *  re-tries on its own: the state can heal without us (the serve answers
+ *  again, or the process exits), and a park that only a button can leave would
+ *  keep OpenCode dark long after the machine fixed itself. */
+const BLOCKED_RETRY_MS = 10 * 60 * 1000;
 const CLK_TCK = 100;                               // Linux USER_HZ (getconf CLK_TCK) — /proc stat ticks → seconds
 
 class OpencodeServeError extends Error {
@@ -260,6 +308,70 @@ function readProcUsage(pid) {
   } catch { return null; }
 }
 
+/** THE PORTABLE IDENTITY RUNG (round 11; ONE definition since B-eac2 residual
+ *  (c)). PROCFS IS NOT A GIVEN: macOS is "full support" in the README and has
+ *  NO /proc at all, so a procfs-only reader answers `null` for EVERY pid there
+ *  — and round 10 turns exactly that answer into a permanent BLOCKED park (see
+ *  classifyRecordedPid's 'blind'). The ladder (/proc first, `ps -p` where there
+ *  is no /proc, ONE call carrying uid AND argv, briefly memoised because the
+ *  two readers always ask about the same pid back to back) is NOT this module's
+ *  to own: it is the same question src/cli-identity.js already answers for the
+ *  writer sweep and discovery, and this module was its fourth spelling. It now
+ *  imports it — the standing sweep's law ("a VALUE read, never an existence
+ *  probe": `pidAlive`'s kill -0 is the only thing that decides whether a
+ *  process is there) is stated once, where the rule lives, for every caller
+ *  that signals. The names below stay so this module's readers, its exports and
+ *  the ssh-side parity twin keep reading the same. */
+const readPsIdentity = cliIdentity.readPsIdentity;
+const readProcCmdline = cliIdentity.procCmdline;
+const readProcUid = cliIdentity.procUid;
+/** IS THIS ALIVE PID REALLY THE SERVE THE RECORD NAMES? (round 10 — PURE, the
+ *  procfs reads are the caller's.) `pidAlive` answers "something is running
+ *  under that number", which is NOT the same claim: pids are recycled, and the
+ *  record can outlive its serve by weeks. The verdicts, and what each one
+ *  licenses:
+ *    'ours'    — the process is running `serve` with the recorded `--port`, as
+ *                this same user ⇒ we may SIGTERM it before replacing it.
+ *    'other'   — positive evidence it is NOT the serve (a different uid, this
+ *                very server process, a different command line) ⇒ the recorded
+ *                serve is GONE, so the record is stale bookkeeping we may
+ *                delete — but we must NEVER signal that pid.
+ *    'unknown' — THE READER NORMALLY ANSWERS AND THIS PID IT DID NOT (hidepid,
+ *                a zombie's empty cmdline, the process vanished mid-read) ⇒
+ *                neither kill nor overwrite: a serve may be running under it,
+ *                and starting a second one over a record we are about to
+ *                rewrite is exactly the orphan this record exists to prevent.
+ *    'blind'    — THIS HOST CANNOT ANSWER AT ALL (round 11: `hostReadable`
+ *                false — no procfs and no usable `ps`, probed once against our
+ *                OWN pid). A live pid carries NO information there, so the
+ *                'unknown' refusal would fire on every recycled pid on the
+ *                machine and park the store permanently — a regression on a
+ *                platform we claim full support for. The caller behaves like
+ *                the pre-round-10 path: clear the stale record, signal NOTHING,
+ *                spawn. It is a strictly weaker claim than 'unknown' and it is
+ *                a property of the MACHINE, not of the pid. */
+function classifyRecordedPid(rec, { pid = null, argv = null, uid = null, selfUid = null, selfPid = null, hostReadable = true } = {}) {
+  if (!Number.isInteger(pid) || pid <= 0) return { verdict: 'other', why: 'the record carries no pid' };
+  if (selfPid != null && pid === selfPid) return { verdict: 'other', why: `pid ${pid} is THIS server process — a recycled pid, never the serve` };
+  if (uid != null && selfUid != null && uid !== selfUid) return { verdict: 'other', why: `pid ${pid} runs as uid ${uid}, not as the user this server runs as (uid ${selfUid}) — we never spawned it` };
+  const args = Array.isArray(argv) ? argv.filter((a) => typeof a === 'string' && a !== '') : [];
+  if (!args.length) {
+    if (hostReadable === false) return { verdict: 'blind', why: `this host cannot identify ANY process (no /proc and no usable \`ps\` — not even this server's own pid ${selfPid == null ? '' : selfPid} reads back), so pid ${pid} being alive says nothing about whether it is the recorded serve` };
+    if (!Array.isArray(argv)) return { verdict: 'unknown', why: `the command line of pid ${pid} is unreadable (hidepid, or the process just vanished) on a host that can read other processes` };
+    return { verdict: 'unknown', why: `pid ${pid} has an EMPTY command line (a zombie or a kernel thread)` };
+  }
+  const port = String(rec && rec.port);
+  // the PORT is the discriminator: `serve` alone is a common word, but a
+  // process holding the exact port this record was written for, under our own
+  // uid, is the serve or nothing. (argv[0] is deliberately NOT compared: the
+  // `opencode` launcher can re-exec its runtime, so the recorded `command` is
+  // not guaranteed to be argv[0] of the live process.)
+  const hasServe = args.includes('serve');
+  const hasPort = args.some((a, i) => (a === '--port' && args[i + 1] === port) || a === `--port=${port}`);
+  if (hasServe && hasPort) return { verdict: 'ours', why: `its command line is \`${args.slice(0, 6).join(' ')}\`` };
+  return { verdict: 'other', why: `pid ${pid} is now \`${args.slice(0, 4).join(' ')}\` — not the \`serve --port ${port}\` this record was written for` };
+}
+
 // ── the client ──
 class OpencodeServeClient {
   constructor(baseUrl, { timeoutMs = DEFAULT_TIMEOUT_MS, fetchImpl = null, auth = null } = {}) {
@@ -392,9 +504,132 @@ class OpencodeServeClient {
   fork(id, { messageID = null, directory = null, timeoutMs = READ_TIMEOUT_MS } = {}) {
     return this.request('POST', `/session/${encodeURIComponent(id)}/fork`, { query: { directory }, body: messageID ? { messageID } : {}, timeoutMs });
   }
+  /** GET /config — the RESOLVED OpenCode config, v1 (the read-only permission-
+   *  rule view's source; owner ruling 10).
+   *  ROUTE LAW, re-measured 1.18.29 on 2026-09-07 with /proc, same method as
+   *  2.369.50: this route boots NOTHING (threads 14→15, inotify fds 0→0,
+   *  RSS flat, stable across four calls — one worker thread, no instance).
+   *  The obvious-looking v2 twin `GET /api/permission/saved` DOES boot one on
+   *  the same process: threads 15→**37**, inotify fds 0→**2**, RSS
+   *  316→**482 MB**. It is never called, and scripts/test-opencode-serve.mjs
+   *  pins that no `/api/` route string exists in this module.
+   *  Byte-capped like every other whole-response read (a config carries the
+   *  user's provider/mcp/plugin world). */
+  config({ directory = null, timeoutMs = null, maxBytes = CONFIG_MAX_BYTES } = {}) {
+    return this.request('GET', '/config', { query: { directory }, timeoutMs, maxBytes });
+  }
   children(id, opts) { return this.request('GET', `/session/${encodeURIComponent(id)}/children`, opts); }
+  /** GET /session/status → {sessionID: SessionStatus} for the sessions THIS
+   *  serve is running (idle|busy|retry). MEASURED on 1.18.29: no `directory`
+   *  needed and it boots NO instance (16 threads / 0 indexer threads before
+   *  and after). It is an IN-PROCESS view — a session another opencode
+   *  process is driving is absent from it, which is why 'external' liveness
+   *  is derived from the list's own `time.updated` instead (see deriveStatus). */
   sessionStatus(opts) { return this.request('GET', '/session/status', opts); }
   todo(id, opts) { return this.request('GET', `/session/${encodeURIComponent(id)}/todo`, opts); }
+  /** The store's own paths (home/state/config/worktree). Used to locate the
+   *  sqlite store for the fs.watch lane on the machine the serve runs on —
+   *  hostId is a parameter, so this must come from the SERVE, not from our
+   *  own os.homedir(), whenever the serve is somewhere else. */
+  paths(opts) { return this.request('GET', '/path', opts); }
+
+  // ── REVERT (S9 remainder, B-eac2) ──────────────────────────────────────
+  /** POST /session/:id/revert {messageID, partID?} → the updated Session,
+   *  whose `revert` field is {messageID, partID?, snapshot, diff, files?}.
+   *  MEASURED on a real 1.18.29 serve: the v1 route restores the working tree
+   *  AND boots NO instance (16 threads / 0 fff threads before and after) —
+   *  unlike every `/api/session/{id}/revert/*` v2 route (measured: 16→37
+   *  threads, 0→19 indexer threads, +165 MB on a single `revert/clear`), which
+   *  is why the v2 stage/clear/commit trio is deliberately NOT wired. */
+  revert(id, { messageID, partID = null, directory = null, timeoutMs = READ_TIMEOUT_MS } = {}) {
+    return this.request('POST', `/session/${encodeURIComponent(id)}/revert`, { query: { directory }, body: partID ? { messageID, partID } : { messageID }, timeoutMs });
+  }
+  /** POST /session/:id/unrevert → the updated Session with `revert` gone and
+   *  the files back. This is OpenCode's own "clear the staged revert". */
+  unrevert(id, { directory = null, timeoutMs = READ_TIMEOUT_MS } = {}) {
+    return this.request('POST', `/session/${encodeURIComponent(id)}/unrevert`, { query: { directory }, timeoutMs });
+  }
+
+  // ── QUESTION (the `question` tool's pending requests) ──────────────────
+  /** GET /question → [{id, sessionID, questions:[{question, header, options,
+   *  multiple?, custom?}], tool:{messageID, callID}}]. Boots no instance
+   *  (measured). PER-PROCESS: only questions raised by turns THIS serve is
+   *  running are listed — see the reachability note in the module header. */
+  questions(opts) { return this.request('GET', '/question', opts); }
+  /** POST /question/:requestID/reply {answers} — answers[i] is the array of
+   *  selected labels for questions[i], IN ORDER (verified live: a real
+   *  `question` tool call answered with [["Blue"]] completed the turn). */
+  questionReply(requestId, answers, { timeoutMs = READ_TIMEOUT_MS } = {}) {
+    return this.request('POST', `/question/${encodeURIComponent(requestId)}/reply`, { body: { answers }, timeoutMs });
+  }
+  questionReject(requestId, { timeoutMs = READ_TIMEOUT_MS } = {}) {
+    return this.request('POST', `/question/${encodeURIComponent(requestId)}/reject`, { timeoutMs });
+  }
+
+  // ── PTY (a shell the SERVE owns, on the serve's machine) ───────────────
+  /** THE PTY FAMILY NEVER SENDS `directory` — round 4 of B-eac2, and the whole
+   *  reason it is spelled out here (a helpful-looking `{ directory }` in ONE of
+   *  these six methods re-opens the 2.369.42/2.369.50 incident).
+   *
+   *  A pty is addressed by its ptyID, but the pty REGISTRY is per OpenCode
+   *  INSTANCE, and `?directory=X` is what picks (and BOOTS) the instance. So a
+   *  `directory` query on `POST /pty` bootstraps an instance for the user's
+   *  worktree — which recursively indexes and inotify-watches it — while
+   *  `DELETE /pty/{id}` releases NOTHING but the shell. Measured, same-origin
+   *  A/B, fresh serve per arm, target = a 200-dir/4046-file repo, /proc
+   *  Threads + `inotify wd` count over /proc/<serve>/fdinfo/*:
+   *    with `?directory=`  base[thr,wd]=[16,0] → open#1 [44,204] → close#1
+   *                        [41,204] → open/close #2,#3 … [41,204]  (never freed)
+   *    without it          base[16,0] → open#1 [45,4] → close#1 [42,4] → …[42,4]
+   *  and `readlink /proc/<shell>/cwd` = the target directory in BOTH arms: the
+   *  query buys the SHELL nothing (the `cwd` BODY field is what places it), it
+   *  only decides which instance owns the registry entry. The only thing that
+   *  frees the watches is `POST /instance/dispose` — i.e. the terminal would
+   *  have to hold a whole indexed instance for its entire lifetime and dispose
+   *  it on close, when it can simply never boot one.
+   *
+   *  CHANGE THEM TOGETHER OR NOT AT ALL: measured, `PUT /pty/{id}?directory=X`
+   *  on a pty created WITHOUT the query answers 404 PtyNotFoundError (and vice
+   *  versa) — a half-migrated family is a terminal that cannot be resized,
+   *  closed or reaped. `serveCwdPath()` (our own empty throwaway repo) is the
+   *  default instance every call below lands on; that instance's fixed cost is
+   *  the 4 watches above. */
+  ptyList({ timeoutMs = null } = {}) { return this.request('GET', '/pty', { timeoutMs }); }
+  ptyCreate({ command = null, args = null, cwd = null, title = null, env = null, timeoutMs = PTY_TIMEOUT_MS } = {}) {
+    const body = {};
+    if (command) body.command = command;
+    if (Array.isArray(args)) body.args = args;
+    if (cwd) body.cwd = cwd;            // where the SHELL runs — measured to place it, with no instance boot
+    if (title) body.title = title;
+    if (env && typeof env === 'object') body.env = env;
+    return this.request('POST', '/pty', { body, timeoutMs });
+  }
+  ptyGet(ptyId, { timeoutMs = null } = {}) { return this.request('GET', `/pty/${encodeURIComponent(ptyId)}`, { timeoutMs }); }
+  ptyResize(ptyId, { rows, cols, timeoutMs = null } = {}) {
+    return this.request('PUT', `/pty/${encodeURIComponent(ptyId)}`, { body: { size: { rows, cols } }, timeoutMs });
+  }
+  ptyRemove(ptyId, { timeoutMs = READ_TIMEOUT_MS } = {}) { return this.request('DELETE', `/pty/${encodeURIComponent(ptyId)}`, { timeoutMs }); }
+  /** POST /pty/:id/connect-token → {ticket, expires_in}. On an UNSECURED
+   *  loopback serve 1.18.29 answers PtyForbiddenError ("Invalid PTY connect
+   *  token request") and the ws upgrade needs no ticket at all — verified on
+   *  the wire. So the caller mints a ticket when it can and connects without
+   *  one when it cannot; the ticket NEVER reaches a browser either way. */
+  ptyTicket(ptyId, { timeoutMs = READ_TIMEOUT_MS } = {}) {
+    return this.request('POST', `/pty/${encodeURIComponent(ptyId)}/connect-token`, { timeoutMs });
+  }
+  /** The ws URL for a pty stream (SERVER-SIDE ONLY — the browser never learns
+   *  the serve's port; ws-create bridges it into the normal terminal path).
+   *  No `directory` here either: measured, the upgrade succeeds and the shell
+   *  is in its `cwd` with the query gone (both arms echoed a bash prompt). */
+  ptyConnectUrl(ptyId, { ticket = null, cursor = null } = {}) {
+    const u = new URL(this.baseUrl + `/pty/${encodeURIComponent(ptyId)}/connect`);
+    if (ticket) u.searchParams.set('ticket', ticket);
+    if (cursor) u.searchParams.set('cursor', String(cursor));
+    u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
+    return u.toString();
+  }
+  /** The Basic header the pty ws needs when the serve is password-protected. */
+  authHeader() { return this._auth; }
 }
 
 // ── the record synthesis (pure) ──
@@ -428,11 +663,70 @@ function stopReasonOf(info) {
 }
 function fileLine(part) { return `[file: ${part.filename || part.url || part.mime || 'attachment'}]`; }
 
-/** OpenCode v1 messages ([{info, parts}]) + the Session → 'acp-events' records. */
+/** QuestionInfo[] → the shape the harness-neutral ASK card renders
+ *  ({question, header, options:[{label, description}], multiSelect}). PURE. */
+function normalizeAskQuestions(list) {
+  return (Array.isArray(list) ? list : []).map((q) => ({
+    question: String(q?.question || ''),
+    header: String(q?.header || ''),
+    multiSelect: !!q?.multiple,
+    allowCustom: !!q?.custom,
+    options: (Array.isArray(q?.options) ? q.options : []).map((o) => ({ label: String(o?.label ?? ''), description: String(o?.description ?? '') })).filter((o) => o.label),
+  })).filter((q) => q.question);
+}
+/** OpenCode's positional answers ([["Blue"],["a","b"]]) → the card's
+ *  question-text-keyed map, which is what the resolved card renders. PURE. */
+function askAnswerMap(questions, answers) {
+  const out = {};
+  (Array.isArray(questions) ? questions : []).forEach((q, i) => {
+    const a = Array.isArray(answers) ? answers[i] : null;
+    if (a == null) return;
+    out[q.question] = (Array.isArray(a) ? a : [a]).map(String).join(', ');
+  });
+  return out;
+}
+/** The card's map back to OpenCode's POSITIONAL answers, in question order.
+ *  A custom typed answer is one label; a multi-select is the comma-joined
+ *  string the card produced, split back apart. PURE (the reply route's
+ *  contract lives here, not in the ws handler). */
+function askAnswersToPositional(questions, answerMap) {
+  return (Array.isArray(questions) ? questions : []).map((q) => {
+    const raw = answerMap && Object.prototype.hasOwnProperty.call(answerMap, q.question) ? answerMap[q.question] : '';
+    if (raw == null || raw === '') return [];
+    if (Array.isArray(raw)) return raw.map(String);
+    const s = String(raw);
+    // only split when every piece is a known option label — a free-text answer
+    // that happens to contain ", " must survive intact
+    const labels = new Set((q.options || []).map((o) => o.label));
+    const parts = s.split(', ');
+    return parts.length > 1 && parts.every((p) => labels.has(p)) ? parts : [s];
+  });
+}
+/** The one sentence a staged revert says wherever a conversation is rendered. */
+function revertNoticeText(session) {
+  const files = Array.isArray(session?.revert?.files) ? session.revert.files.length : 0;
+  const diff = typeof session?.revert?.diff === 'string' && session.revert.diff ? session.revert.diff : '';
+  const changed = files || (diff ? (diff.match(/^diff --git /gm) || []).length : 0);
+  return `Reverted to here — everything below is staged for removal${changed ? ` and ${changed} file${changed === 1 ? '' : 's'} were restored` : ''}. "Restore reverted messages" undoes it; the next prompt makes it permanent.`;
+}
+
+/** OpenCode v1 messages ([{info, parts}]) + the Session → 'acp-events' records.
+ *  Two S9-remainder additions (B-eac2):
+ *   • a `question` tool part becomes the harness-neutral ASK card
+ *     (permission_request kind 'user_input') instead of a generic "other"
+ *     tool — answered ones carry their answers, an unanswered one stays
+ *     open so the card can be answered from the reader after a page reload.
+ *   • the session's staged `revert` becomes a notice at the boundary, so a
+ *     reverted conversation SAYS it is reverted wherever it is rendered.
+ */
 function messagesToAcpRecords(messages, session = {}) {
   const sessionId = session?.id || messages?.[0]?.info?.sessionID || '';
   const out = [];
   const push = (rec) => { out.push(rec); return rec; };
+  // the staged revert boundary: everything from this message on is "staged for
+  // removal" until unrevert (v1) or the next prompt commits it
+  const revertAt = typeof session?.revert?.messageID === 'string' ? session.revert.messageID : '';
+  let revertAnnounced = false;
   let curModel = modelLabel(session?.model?.providerID, session?.model?.id);
   let curMode = session?.agent ? String(session.agent) : '';
   push({ ts: isoOf(session?.time?.created), type: 'acp', kind: 'session', sessionId, cwd: session?.directory || '', how: 'serve', model: curModel, mode: curMode, agentInfo: { name: 'opencode', version: session?.version || null }, replay: true });
@@ -441,6 +735,10 @@ function messagesToAcpRecords(messages, session = {}) {
     const info = m?.info || {};
     const parts = Array.isArray(m?.parts) ? m.parts : [];
     const ts = isoOf(info?.time?.created);
+    if (revertAt && !revertAnnounced && String(info.id || '') === revertAt) {
+      revertAnnounced = true;
+      push({ ts, type: 'acp', kind: 'notice', level: 'warn', noticeKind: 'revert', text: revertNoticeText(session) });
+    }
     if (info.role === 'user') {
       const texts = parts.filter((p) => p && p.type === 'text' && p.text && !p.ignored);
       const visible = texts.filter((p) => !p.synthetic);
@@ -468,6 +766,29 @@ function messagesToAcpRecords(messages, session = {}) {
       } else if (p.type === 'reasoning') {
         if (!p.text) continue;
         upd(pts, { sessionUpdate: 'agent_thought_chunk', messageId: p.id || undefined, content: { type: 'text', text: String(p.text) } });
+      } else if (p.type === 'tool' && p.tool === 'question') {
+        // THE ASK CARD. Verified shape on a real 1.18.29 turn: the `question`
+        // tool's part carries state.input.questions ([{question, header,
+        // options:[{label, description}], multiple?, custom?}]) and, once
+        // answered, state.metadata.answers ([["Blue"]] — one array of labels
+        // per question, in order). The request id is NOT in the part (it is
+        // `que_…`, minted per ask), so an UNANSWERED one is matched back to
+        // the live `GET /question` list by (sessionID, tool.callID).
+        const st = p.state || {};
+        const input = st.input && typeof st.input === 'object' ? st.input : {};
+        const callId = String(p.callID || p.id || '');
+        const qs = normalizeAskQuestions(input.questions);
+        const answers = Array.isArray(st.metadata?.answers) ? st.metadata.answers : null;
+        const resolved = st.status === 'completed' ? (answers ? 'allowed' : 'denied') : (st.status === 'error' ? 'denied' : null);
+        push({
+          ts: pts, type: 'acp', kind: 'permission_request', sessionId,
+          requestId: callId,               // the stable id inside a transcript; the live que_… id is carried by the pending list
+          via: 'opencode-serve',           // which lane answers it (the card forwards this back)
+          questions: qs, ask: true,
+          answers: answers ? askAnswerMap(qs, answers) : null,
+          resolved,
+          toolCall: { toolCallId: callId, title: String(st.title || 'Question'), kind: 'other', status: resolved ? 'completed' : 'pending', rawInput: { tool: 'question', questions: qs } },
+        });
       } else if (p.type === 'tool') {
         const st = p.state || {};
         const input = st.input && typeof st.input === 'object' ? st.input : {};
@@ -518,13 +839,16 @@ function createServeLocator({
   autostart = true, // false (or a function returning false) = REUSE ONLY (smoke harnesses: a SIGKILLed test server must not leave a serve behind)
   // ── the runaway guard (2.369.50) ──
   readProc = readProcUsage, killPid = (pid, sig) => process.kill(pid, sig),
+  // ── the recorded-serve settlement (round 10) ──
+  readCmdline = readProcCmdline, readUid = readProcUid,
+  confirmTimeoutMs = RECORD_CONFIRM_TIMEOUT_MS, killWaitMs = RECORD_KILL_WAIT_MS, blockedRetryMs = BLOCKED_RETRY_MS,
   telemetry = null, now = Date.now, guardSampleMs = GUARD_SAMPLE_MS,
   guardCpuPct = GUARD_CPU_PCT, guardCpuSustainMs = GUARD_CPU_SUSTAIN_MS, guardRssBytes = GUARD_RSS_BYTES,
   runawayCooldownMs = RUNAWAY_COOLDOWN_MS,
 } = {}) {
   if (!dataDir) throw new Error('createServeLocator: dataDir is required (the record lives at data/opencode-serve.json)');
   const recordPath = path.join(dataDir, 'opencode-serve.json');
-  const state = { client: null, port: null, pid: null, startedAt: null, source: null, child: null, crashes: 0, parked: false, parkedKind: null, runawayUntil: 0, lastError: null, stopping: false, backoffUntil: 0, caps: null, version: null, capsProbed: false, cwd: cwd || null, cwdIsolated: null, cpuPct: null, rssBytes: null, sampledAt: null, skippedWorktrees: [] };
+  const state = { client: null, port: null, pid: null, startedAt: null, source: null, child: null, crashes: 0, parked: false, parkedKind: null, runawayUntil: 0, retryAfter: 0, lastError: null, stopping: false, stopEpoch: 0, backoffUntil: 0, caps: null, version: null, capsProbed: false, cwd: cwd || null, cwdIsolated: null, cpuPct: null, rssBytes: null, sampledAt: null, skippedWorktrees: [] };
   const guard = { prev: null, hotSince: 0, timer: null };
   let ensuring = null;
   let respawnTimer = null;
@@ -535,7 +859,29 @@ function createServeLocator({
   const notify = () => { try { onState?.(snapshot()); } catch { } };
   function readRecord() { try { const r = JSON.parse(fs.readFileSync(recordPath, 'utf8')); return r && Number.isInteger(r.port) && r.port > 0 ? r : null; } catch { return null; } }
   function writeRecord(r) { try { writeJsonAtomic(recordPath, r); } catch (e) { log?.warn?.(`[opencode-serve] record write failed: ${e.message}`); } }
-  function clearRecord() { try { fs.unlinkSync(recordPath); } catch { } }
+  /** EVERY CLEAR NAMES THE SERVE IT BELIEVES IS RECORDED (round 9).
+   *  data/opencode-serve.json is a promise to the NEXT boot: "this port/pid is
+   *  ours — adopt it or kill it". Deleting one you do not own leaves a live
+   *  third-party daemon nobody can find, which is the exact class the record
+   *  exists to prevent. Round 8's `ensuring = null` let TWO ladders run at once
+   *  for the first time, so "the record on disk is mine" stopped being true by
+   *  construction: `owns` = {port, pid} is checked against what is actually
+   *  there and a mismatch REFUSES (returns false). Port alone is not identity —
+   *  a port freed by one ladder is re-bindable by the next — so the pid the
+   *  record was written with is part of the claim.
+   *  `clearRecord(null)` (unconditional) is reserved for `stop()`: it is
+   *  synchronous, it bumps the epoch FIRST, and "the user turned it off" is the
+   *  one instruction that outranks every record on disk. */
+  function clearRecord(owns = null) {
+    if (owns) {
+      const r = readRecord();
+      if (!r) return false;
+      if (owns.port != null && r.port !== owns.port) return false;
+      if ((r.pid ?? null) !== (owns.pid ?? null)) return false;
+    }
+    try { fs.unlinkSync(recordPath); } catch { }
+    return true;
+  }
   // /global/health carries the CLI version ({healthy, version:'1.18.29'}); /doc's info.version is the API doc's own
   async function healthy(client, ms) { try { const h = await client.health({ timeoutMs: ms }); if (h && typeof h.version === 'string') state.version = h.version; return !!h && h.healthy !== false; } catch { return false; } }
   async function probeCaps(client) {
@@ -548,7 +894,36 @@ function createServeLocator({
     state.capsProbed = true;
     try { onCaps?.({ ...state.caps }, snapshot()); } catch (e) { log?.error?.(`[opencode-serve] onCaps failed: ${e.message}`); }
   }
-  async function adopt(port, pid, source) {
+  /** IS THE ATTEMPT THAT CAPTURED `epoch` STILL THE ONE ALLOWED TO PUBLISH?
+   *  (round 8). `state.stopping` alone is a LEVEL, and a level is not terminal
+   *  across a Disable→Enable pair: `stop()` sets it, `start()` clears it 50 ms
+   *  later, and the ladder that was in flight the whole time sails past every
+   *  `state.stopping` check and publishes evidence it gathered BEFORE the stop
+   *  — measured: a Disable inside the 700 ms reuse probe followed by an Enable
+   *  adopted `source:'reused'` on the exact port `stop({killRecorded:true})`
+   *  had just SIGTERMed and whose record it had deleted, while the fresh
+   *  `ensure()` (which joined the cancelled attempt instead of starting its
+   *  own) spawned nothing. So the token is an EPOCH, bumped by `stop()` AND by
+   *  every new `locate()`: a cancelled attempt can never become valid again,
+   *  and only the NEWEST attempt may take ownership. Same shape as round 6's
+   *  per-arm cancellation in the live lane, one layer up. */
+  const cancelled = (epoch) => state.stopping || epoch !== state.stopEpoch;
+  /** THE ACQUISITION POINT (round 7 — the same rule round 6 applied to the
+   *  live lane, one layer up). This is the ONLY place `state.client` is ever
+   *  assigned, so it is the only place that can refuse to hand a client to a
+   *  service that was turned OFF while we were awaiting something. `locate()`
+   *  checks its cancellation at ENTRY only, and every rung below reaches this
+   *  call after at least one await (the reuse health probe, the safety probe,
+   *  the boot wait) — none of which `stop()` can cancel. Publishing here after
+   *  a stop is not a cosmetic lie: it sets `ready:true`, RE-ARMS the runaway
+   *  guard interval `stop()` just cleared, and through `laneWanted` (install())
+   *  builds a BRAND-NEW live lane whose own `laneStopped` is false by
+   *  construction — so the user's real OpenCode store is watched again, and
+   *  fires `onExternal`, for a service they just disabled. Reproduced through
+   *  the real wiring (install() + locator.start() + locator.stop()) with a
+   *  busy serve, and again with a stop landing inside the boot probe. */
+  async function adopt(port, pid, source, epoch) {
+    if (cancelled(epoch)) return null;
     state.client = mkClient(port);
     state.port = port; state.pid = pid; state.source = source; state.startedAt = Date.now(); state.lastError = null;
     guard.prev = null; guard.hotSince = 0; armGuard();
@@ -589,26 +964,31 @@ function createServeLocator({
   function parkRunaway(why) {
     const pid = state.pid, port = state.port;
     state.parked = true; state.parkedKind = 'runaway'; state.runawayUntil = now() + runawayCooldownMs;
+    state.retryAfter = state.runawayUntil;
     state.lastError = `opencode serve (pid ${pid}) was STOPPED as a runaway: ${why}`;
     guard.prev = null; guard.hotSince = 0;
     const ch = state.child;
     state.child = null; state.client = null; state.port = null; state.pid = null;
     try { if (ch) ch.kill('SIGTERM'); else if (pid && pid !== process.pid) killPid(pid, 'SIGTERM'); } catch { }
-    clearRecord();
+    clearRecord({ port, pid });   // the serve we just stopped, named (round 9)
     log?.error?.(`[opencode-serve] RUNAWAY — ${state.lastError}. OpenCode boots an instance per session DIRECTORY and its file finder indexes + watches that whole tree; a session rooted at a huge directory burns the machine. Not restarting for ${Math.round(runawayCooldownMs / 60000)} min — disable the "OpenCode background service" plugin (⚙ → Plugins) if it recurs.`);
     try { telemetry?.({ name: 'opencode-serve-runaway', detail: `${why}${port ? ` port ${port}` : ''}`, value: Math.round(state.rssBytes / 1048576) }); } catch { }
     notify();
   }
-  function onChildExit(child, code, signal) {
+  function onChildExit(child, code, signal, port) {
     if (state.child !== child) return;
     state.child = null; state.client = null; state.port = null; state.pid = null;
-    clearRecord();
+    // the record this child was spawned with, named (round 9): `state.port` is
+    // still null while a child dies DURING its boot wait, so the port travels
+    // from the spawn site instead — and naming it means a late exit event can
+    // never delete a newer ladder's record.
+    clearRecord({ port, pid: child.pid || null });
     if (state.stopping || state.parked) { notify(); return; } // a runaway/park already decided the outcome — never respawn on its own SIGTERM
     if (state.startedAt && Date.now() - state.startedAt >= HEALTHY_UPTIME_RESET_MS) state.crashes = 0;
     state.crashes++;
     state.lastError = `opencode serve exited (${signal || `code ${code}`})`;
     if (state.crashes >= maxCrashes) {
-      state.parked = true; state.parkedKind = 'crash';
+      state.parked = true; state.parkedKind = 'crash'; state.retryAfter = 0;   // terminal until an explicit start(): a crash park has NO deadline
       log?.error?.(`[opencode-serve] PARKED after ${state.crashes} crashes — ${state.lastError}; restart VibeSpace (or fix \`opencode serve\`) to retry`);
     } else {
       const wait = Math.min(30000, backoffBaseMs * 2 ** (state.crashes - 1));
@@ -643,14 +1023,174 @@ function createServeLocator({
     const why = unsafeWorktreeReason(cur && cur.worktree);
     return why ? `${why} (a 2.369.42 serve started from the server's own cwd)` : null;
   }
+  /** CAN THIS HOST NAME A PROCESS AT ALL? (round 11) — asked ONCE, of the one
+   *  pid whose answer we already know: our OWN. A reader that cannot describe
+   *  the process it is running inside has no procfs and no usable `ps`, and on
+   *  such a machine "alive but unidentifiable" is the answer for EVERY pid —
+   *  which is a fact about the MACHINE, never evidence about the record. The
+   *  probe goes through the INJECTED reader on purpose, so a stub that blinds
+   *  the host blinds it for our pid too (and a stub that blinds only the
+   *  RECORDED pid still reads as a host that answers — the two cases the fix
+   *  is about are told apart by exactly this call). Memoised POSITIVELY only
+   *  (see below): a yes is a property of the platform, a no is one probe. */
+  //  MEMOISE THE *YES* ONLY (S9 residual (b)). "This platform has a readable
+  //  process table" is a property of the platform and never changes back, so
+  //  caching `true` is free. `false` is NOT that fact: it is one reading of one
+  //  probe, and the probe can fail for reasons that are about the MOMENT — an
+  //  EMFILE/ENOMEM burst, a `ps` fork that lost the race with a load spike, a
+  //  container whose /proc was still being mounted at boot. Caching that answer
+  //  turns a transient miss into a permanent capability downgrade: every later
+  //  verdict becomes 'blind', which is the verdict that clears a live recorded
+  //  pid's record and spawns over it without ever identifying it. So a NO is
+  //  re-probed — at most once per settlement/stop, which is where the callers
+  //  already are.
+  let hostReadable = null;
+  function hostCanIdentify() {
+    if (hostReadable === true) return true;
+    const own = readCmdline(process.pid);
+    hostReadable = Array.isArray(own) && own.length > 0;
+    if (!hostReadable) log?.warn?.('[opencode-serve] this host cannot read its own process command line (no /proc, no usable `ps`) — a recorded pid can never be identified here, so a stale record is cleared rather than blocking the service');
+    return hostReadable;
+  }
+  /** The ONE identity verdict this keeper acts on — the settlement below and
+   *  `stop({killRecorded})` must never reach different conclusions about the
+   *  same recorded pid (round 11: stop() used to SIGTERM the very pid the
+   *  settlement had just refused to signal). */
+  function verdictFor(rec, pid) {
+    return classifyRecordedPid(rec, {
+      pid, argv: readCmdline(pid), uid: readUid(pid),
+      selfUid: typeof process.getuid === 'function' ? process.getuid() : null, selfPid: process.pid,
+      hostReadable: hostCanIdentify(),
+    });
+  }
+  /** WHICH PID MAY `stop({killRecorded})` SIGNAL? (round 11) — `{pid}` to
+   *  signal it, `{why}` to say out loud that we left something alone.
+   *    • a serve we are TALKING to  ⇒ its pid, no /proc question asked;
+   *    • else a recorded pid whose verdict is 'ours' ⇒ that pid;
+   *    • 'other' (provably not the serve, incl. a dead pid) ⇒ nothing to stop
+   *      and nothing to say: the record is stale bookkeeping, cleared below;
+   *    • 'unknown' / 'blind' ⇒ NOTHING is signalled and the state SAYS SO. On
+   *      a host that cannot identify processes this is the honest residue of
+   *      the fix: "off" stops what we can prove is ours, and names what it
+   *      could not (the alternative is SIGTERMing strangers by pid number). */
+  function decideRecordedKill(rec, livePid) {
+    if (Number.isInteger(livePid) && livePid > 0) return { pid: livePid, why: null };
+    const pid = rec && Number.isInteger(rec.pid) && rec.pid > 0 ? rec.pid : null;
+    if (!pid || !pidAlive(pid)) return { pid: null, why: null };
+    const v = verdictFor(rec, pid);
+    if (v.verdict === 'ours') return { pid, why: null };
+    if (v.verdict === 'other') return { pid: null, why: null };
+    return { pid: null, why: `the OpenCode background service was turned off, but the recorded \`opencode serve\` (pid ${pid}, port ${rec.port}) could not be identified — ${v.why} — so it was LEFT ALONE, never signalled. If an \`opencode serve\` is still running on this machine, stop it by hand.` };
+  }
+  /** THE RECORD IS A PROMISE TO THE NEXT BOOT — so "we are about to overwrite
+   *  it" has to be a DECISION (round 10). A recorded serve whose
+   *  `/global/health` did not answer used to fall THROUGH this rung whenever
+   *  its pid was alive: not killed, not cleared, not even logged — and the
+   *  spawn below then rewrote data/opencode-serve.json with the new child,
+   *  leaving a live `opencode serve` that NOTHING on disk names. No
+   *  concurrency needed; it happened on every restart of a wedged serve.
+   *  (Reproduced through install() + locator.start(): the recorded process
+   *  still running, the record naming a different port, silence in the log.)
+   *  Such an orphan keeps indexing and inotify-watching whatever it was
+   *  working on, and neither the runaway guard — which samples OUR child — nor
+   *  `stop({killRecorded})` — which reads the record — can ever reach it.
+   *
+   *  The outcomes, each one OWNED:
+   *    'answered'  — one longer probe answered after all ⇒ the caller adopts it
+   *                  (slow is not wedged: a cold 1.18.29 needs ~1.2s).
+   *    'clear'     — the recorded serve is provably gone (dead pid, a recycled
+   *                  pid, or we stopped it and SAW it exit) ⇒ the record is
+   *                  deleted and the spawn may write its own.
+   *    'keep'      — we are not going to spawn (no CLI / service off), so
+   *                  nothing overwrites it and it still NAMES a live process.
+   *    'blocked'   — something is alive that we could not identify or could not
+   *                  stop ⇒ never signal it, never start a second serve over
+   *                  it, and SAY SO (a park with an honest lastError, which is
+   *                  the harness store reason the plugin card and the client
+   *                  toast read).
+   *    'cancelled' — a stop, or a newer ladder, owns this record now. */
+  async function settleRecordedServe(rec, owned, probe, epoch, willSpawn) {
+    const pid = Number.isInteger(rec.pid) && rec.pid > 0 ? rec.pid : null;
+    if (!pidAlive(pid)) { clearRecord(owned); return 'clear'; }
+    if (!willSpawn) return 'keep';
+    const v = verdictFor(rec, pid);
+    if (v.verdict === 'blind') {
+      // THIS HOST CANNOT NAME ANY PROCESS (round 11). Round 10's refusal reads
+      // "alive and unidentifiable ⇒ refuse", and on a machine with no procfs
+      // and no usable `ps` that is EVERY live pid — so a stale record whose
+      // number has been recycled onto an unrelated program parked the store
+      // dark forever, with a red toast on every page load telling the user to
+      // stop a process that has nothing to do with us. A verdict we can never
+      // reach is not a guard, it is an outage. Where no evidence is OBTAINABLE
+      // the pre-round-10 behaviour is the honest one: the record is
+      // bookkeeping we may drop, and the one thing round 10 really bought —
+      // never signalling a pid we cannot account for — still holds.
+      log?.warn?.(`[opencode-serve] ${v.why} — clearing ${recordPath} and starting a fresh one; the recorded process is NOT signalled`);
+      try { telemetry?.({ name: 'opencode-serve-host-blind', detail: v.why }); } catch { }
+      clearRecord(owned);
+      return 'clear';
+    }
+    if (v.verdict === 'other') {
+      log?.warn?.(`[opencode-serve] the recorded serve is gone (${v.why}) — clearing ${recordPath} and starting a fresh one`);
+      clearRecord(owned);
+      return 'clear';
+    }
+    if (v.verdict === 'unknown') {
+      blockOnRecord(`a recorded \`opencode serve\` (pid ${pid}, port ${rec.port}) is alive but unresponsive and could not be verified — ${v.why}. VibeSpace will NOT start a second serve over it: stop that process, or delete ${recordPath}, then start the service again (it re-checks every ${Math.round(blockedRetryMs / 60000)} min).`);
+      return 'blocked';
+    }
+    // 'ours' — and the classifier answers 'other' for THIS process, which is
+    // the one pid that must never be signalled, so no self-kill is reachable here.
+    if (await healthy(probe, confirmTimeoutMs)) return 'answered';
+    if (cancelled(epoch)) return 'cancelled';
+    log?.warn?.(`[opencode-serve] the recorded serve (pid ${pid}, port ${rec.port}) is ALIVE but answered no /global/health in ${DEFAULT_TIMEOUT_MS}+${confirmTimeoutMs}ms (${v.why}) — stopping it before starting a replacement`);
+    try { killPid(pid, 'SIGTERM'); } catch (e) { log?.warn?.(`[opencode-serve] SIGTERM to pid ${pid} failed: ${e.message}`); }
+    const gone = await waitForExit(pid, killWaitMs);
+    // the wait is an await like every other one in this rung: a newer ladder
+    // (or a stop) may own the record by now, and round 9's rule is that a
+    // cancelled attempt does not touch it — the owner re-reads this pid itself
+    if (cancelled(epoch)) return 'cancelled';
+    if (!gone) {
+      blockOnRecord(`the recorded \`opencode serve\` (pid ${pid}, port ${rec.port}) did not exit within ${killWaitMs}ms of SIGTERM and is STILL RUNNING. VibeSpace will NOT start a second serve over it: stop that process, or delete ${recordPath}, then start the service again (it re-checks every ${Math.round(blockedRetryMs / 60000)} min).`);
+      return 'blocked';
+    }
+    clearRecord(owned);
+    return 'clear';
+  }
+  async function waitForExit(pid, budgetMs) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < budgetMs) { await wait(RECORD_KILL_POLL_MS); if (!pidAlive(pid)) return true; }
+    return !pidAlive(pid);
+  }
+  /** A live serve we may neither adopt, identify nor stop is a BROKEN store,
+   *  not an off one — so it PARKS (the only state `storeFailureReason` lets
+   *  speak, 2026-09-07) with a sentence naming the pid, the port and the two
+   *  things that fix it. It re-tries on its own cooldown because the state can
+   *  heal without the user: the serve may answer again, or the process may exit. */
+  function blockOnRecord(why) {
+    state.parked = true; state.parkedKind = 'blocked'; state.retryAfter = now() + blockedRetryMs;
+    state.lastError = why;
+    log?.error?.(`[opencode-serve] ${why}`);
+    try { telemetry?.({ name: 'opencode-serve-blocked', detail: why }); } catch { }
+    notify();
+  }
   async function locate() {
     if (state.client) return state.client;
     if (state.stopping) return null;
+    // THIS attempt's cancellation token (round 8). Bumping it here as well as
+    // in stop() means a ladder is cancelled BOTH by a stop and by a newer
+    // ladder starting — so the Enable after a Disable cannot be served by the
+    // run the Disable killed, and two ladders can never both reach adopt().
+    const epoch = ++state.stopEpoch;
     if (state.parked) {
-      // a runaway earns exactly one retry per cooldown; a crash park is terminal until restart
-      if (state.parkedKind !== 'runaway' || now() < state.runawayUntil) return null;
-      state.parked = false; state.parkedKind = null; state.crashes = 0; state.lastError = null;
-      log?.warn?.('[opencode-serve] runaway cooldown elapsed — trying `opencode serve` once more');
+      // a runaway — and a 'blocked' record (round 10) — earns exactly one retry
+      // per cooldown; a crash park stays terminal until an explicit start().
+      // `retryAfter` is the ONE gate so a new retryable park cannot be added
+      // without giving it a deadline (0 = never on its own).
+      if (!state.retryAfter || now() < state.retryAfter) return null;
+      const was = state.parkedKind;
+      state.parked = false; state.parkedKind = null; state.crashes = 0; state.lastError = null; state.retryAfter = 0;
+      log?.warn?.(`[opencode-serve] ${was === 'blocked' ? 'blocked-record' : 'runaway'} cooldown elapsed — trying \`opencode serve\` once more`);
     }
     if (Date.now() < state.backoffUntil) return null;
     const cmd = commandOf();
@@ -664,10 +1204,35 @@ function createServeLocator({
     if (cmd && !state.cwd && (rec || autostartOn())) {
       try { const r = await ensureServeCwd(dataDir, { execImpl, log }); state.cwd = r.dir; state.cwdIsolated = r.isolated; }
       catch (e) { log?.warn?.(`[opencode-serve] isolated cwd unavailable (${e.message})`); }
+      if (cancelled(epoch)) return null;   // `git init` is an await too: a disable landing in it used to reach the spawn below
     }
     if (rec) {
       const probe = mkClient(rec.port);
-      if (await healthy(probe, DEFAULT_TIMEOUT_MS)) {
+      // the ownership claim every clear in this rung makes: we may only delete
+      // the record if it is still THIS one (round 9 — see clearRecord)
+      const owned = { port: rec.port, pid: rec.pid || null };
+      // A SILENT PROBE IS NOT A VERDICT ON THE PROCESS (round 10). The only
+      // arm this rung owned was a DEAD pid; an ALIVE one fell THROUGH to the
+      // spawn below, whose writeRecord then buried it. Everything that can
+      // happen to a record we are about to overwrite is decided in ONE place
+      // now (settleRecordedServe) — including 'keep', which falls through to
+      // the spawn GATES below so they refuse with the honest "not installed" /
+      // "service off" reason while the record keeps naming its live process
+      // (that record is exactly what stop({killRecorded}) reads).
+      let answered = await healthy(probe, DEFAULT_TIMEOUT_MS);
+      if (!answered) {
+        if (cancelled(epoch)) return null;
+        const settled = await settleRecordedServe(rec, owned, probe, epoch, !!cmd && autostartOn());
+        if (settled === 'blocked' || settled === 'cancelled') return null;
+        answered = settled === 'answered';
+      }
+      if (answered) {
+        // …and the probe itself is an await (a BUSY serve answers /global/health
+        // in hundreds of ms). Checking here as well as in adopt() means a
+        // disable never even evaluates the reuse verdict — it does not signal a
+        // recorded pid we were about to replace, on behalf of a service that is
+        // already being torn down by stop({killRecorded}).
+        if (cancelled(epoch)) return null;
         // THE OPS KILL SWITCH IS AUTHORITATIVE OVER ADOPTION, not just over
         // spawning (2026-09-07 follow-up): this rung runs BEFORE the autostart
         // gate below, so VIBESPACE_OPENCODE_SERVE=0 used to stop us STARTING a
@@ -678,32 +1243,83 @@ function createServeLocator({
         const bad = serveEnvOverride() === false
           ? 'VIBESPACE_OPENCODE_SERVE=0 is set on this instance — the ops kill switch stops an adopted serve too'
           : await unsafeReuseReason(probe, rec);
-        if (!bad) return adopt(rec.port, rec.pid || null, 'reused');
+        if (!bad) return adopt(rec.port, rec.pid || null, 'reused', epoch);
+        // …AND THE VERDICT IS AN AWAIT OF ITS OWN (round 9): `unsafeReuseReason`
+        // probes `GET /project/current` on that same busy serve. Round 8 made
+        // two ladders concurrent for the first time (`stop()` detaches the
+        // in-flight one so the Enable starts its own), and this branch — the
+        // only post-await site left without the check — then SIGTERMed a pid
+        // and DELETED THE RECORD on a verdict about a serve the newer ladder
+        // had already replaced. Measured: Disable at T, Enable at T+50 ms, the
+        // stale ladder waking at T+1.4 s wiped the record the Enable's spawn
+        // had just written — a live `opencode serve` the next boot can neither
+        // adopt nor kill, the orphaned-daemon class this record exists for.
+        if (cancelled(epoch)) return null;
         log?.warn?.(`[opencode-serve] replacing the recorded serve (pid ${rec.pid}, port ${rec.port}): ${bad}`);
         // never signal ourselves: a record can name this very process (a stale
         // pid reused after a reboot) and a self-SIGTERM would take the server down
         try { if (rec.pid && rec.pid !== process.pid) killPid(rec.pid, 'SIGTERM'); } catch { }
-        clearRecord();
-      } else if (!pidAlive(rec.pid)) clearRecord();
+        clearRecord(owned);
+      }
     }
     // 2) start one — only when the CLI is installed and autostart is allowed
     if (!cmd) { state.lastError = 'opencode CLI is not installed'; return null; }
     if (!autostartOn()) { state.lastError = serveEnvOverride() === false ? 'the OpenCode background service is forced OFF by VIBESPACE_OPENCODE_SERVE=0 on this instance' : 'the OpenCode background service is off — enable the "OpenCode background service" plugin (⚙ → Plugins) to start it'; return null; }
     const port = await freePort();
+    if (cancelled(epoch)) return null;   // never START a third-party daemon for a service that was turned off mid-ladder
     let child;
     try {
       child = spawnImpl(cmd, ['serve', '--port', String(port), '--hostname', '127.0.0.1', '--log-level', 'WARN'], { cwd: state.cwd || cwd || os.homedir(), env: env(), stdio: 'ignore', detached: true });
-    } catch (e) { state.lastError = `spawn failed: ${e.message}`; state.crashes++; if (state.crashes >= maxCrashes) { state.parked = true; state.parkedKind = 'crash'; } notify(); return null; }
+    } catch (e) { state.lastError = `spawn failed: ${e.message}`; state.crashes++; if (state.crashes >= maxCrashes) { state.parked = true; state.parkedKind = 'crash'; state.retryAfter = 0; } notify(); return null; }
     if (typeof child.unref === 'function') child.unref();
     state.child = child; state.pid = child.pid || null; state.startedAt = Date.now();
     child.once('error', (e) => { state.lastError = `spawn failed: ${e.message}`; });
-    child.on('exit', (code, signal) => onChildExit(child, code, signal));
+    child.on('exit', (code, signal) => onChildExit(child, code, signal, port));
     writeRecord({ port, pid: child.pid || null, startedAt: state.startedAt, command: cmd, cwd: state.cwd || cwd || null });
     const probe = mkClient(port);
     const t0 = Date.now();
+    /** A boot we walk away from must not leave the child behind. `stop()` ran
+     *  BEFORE this child existed, so it had nothing to kill and its
+     *  `clearRecord()` came before our `writeRecord()` — the old `return null`
+     *  left a live `opencode serve` plus a record the NEXT boot would adopt,
+     *  for a service the user had just turned off. */
+    const abandon = ({ why = null } = {}) => {
+      // `why` only when WE decided AND the stop is still the current story: a
+      // child that exited on its own already has onChildExit's honest
+      // lastError (overwriting it would hide the crash), and a run cancelled by
+      // a NEWER ladder must not write a complaint the new ladder is about to
+      // contradict — it would surface on a healthy locator at the next notify.
+      if (why) { state.lastError = `opencode serve was starting when ${why} — stopped it`; log?.warn?.(`[opencode-serve] ${state.lastError} (pid ${child.pid || '?'}, port ${port})`); }
+      // A no-op on every path we have: `stop()` nulls `state.child` before this
+      // runs, and a newer ladder owns a DIFFERENT child — which is exactly why
+      // it must not null unconditionally (that would drop the live handle a
+      // newer ladder just took). Kept so a future caller that abandons without
+      // a preceding stop cannot leave a stale handle; the SIGTERM below and
+      // this invariant are pinned by test-opencode-s9's abandon leg.
+      if (state.child === child) { state.child = null; state.pid = null; }
+      try { child.kill('SIGTERM'); } catch { }
+      // never clear a record that names a DIFFERENT serve — and PORT ALONE
+      // CANNOT SAY THAT (round 9): `freePort()` hands out a port that is free
+      // right now, so the port this abandoned child was given is re-bindable
+      // by the very ladder that cancelled it, and the old `r.port === port`
+      // test would then delete the NEW ladder's record for the serve it is
+      // actually talking to. The claim is {port, pid} — the pair writeRecord
+      // wrote — so a recycled port with a different child fails it.
+      clearRecord({ port, pid: child.pid || null });
+      return null;
+    };
+    const cancelWhy = () => (state.stopping ? 'the background service was turned off' : null);
     while (Date.now() - t0 < bootTimeoutMs) {
-      if (state.stopping || state.child !== child) return null;
-      if (await healthy(probe, 1000)) { log?.log?.(`[opencode-serve] started pid ${child.pid} on 127.0.0.1:${port} (${Date.now() - t0}ms)`); return adopt(port, child.pid || null, 'spawned'); }
+      if (cancelled(epoch)) return abandon({ why: cancelWhy() });
+      if (state.child !== child) return abandon();
+      // the health probe is an await of its own (up to 1s per rung, over a
+      // boot wait of up to 20s — the whole window in which a user watching
+      // "starting…" gives up and clicks Disable)
+      if (await healthy(probe, 1000)) {
+        if (cancelled(epoch)) return abandon({ why: cancelWhy() });
+        log?.log?.(`[opencode-serve] started pid ${child.pid} on 127.0.0.1:${port} (${Date.now() - t0}ms)`);
+        return adopt(port, child.pid || null, 'spawned', epoch);
+      }
       await wait(200);
     }
     state.lastError = `opencode serve did not answer on 127.0.0.1:${port} within ${bootTimeoutMs}ms`;
@@ -713,7 +1329,13 @@ function createServeLocator({
   }
   function ensure() {
     if (state.client) return Promise.resolve(state.client);
-    if (!ensuring) ensuring = locate().catch((e) => { state.lastError = e.message; notify(); return null; }).finally(() => { ensuring = null; });
+    if (!ensuring) {
+      // the in-flight attempt is single-flight, but `stop()` DETACHES it (round
+      // 8) — so this settle handler must only clear the slot it still owns, or
+      // a cancelled ladder finishing late would drop the live one that replaced it
+      const p = locate().catch((e) => { state.lastError = e.message; notify(); return null; }).finally(() => { if (ensuring === p) ensuring = null; });
+      ensuring = p;
+    }
     return ensuring;
   }
   /** A client within `budgetMs`, else null (the boot continues in the background). */
@@ -735,7 +1357,7 @@ function createServeLocator({
   function start() {
     state.stopping = false;
     state.parked = false; state.parkedKind = null; state.crashes = 0;
-    state.backoffUntil = 0; state.runawayUntil = 0; state.lastError = null;
+    state.backoffUntil = 0; state.runawayUntil = 0; state.retryAfter = 0; state.lastError = null;
     notify();
     return ensure();
   }
@@ -745,18 +1367,59 @@ function createServeLocator({
    *  next boot reuses it); a user turning the service OFF means STOP IT. */
   function stop({ killRecorded = false } = {}) {
     state.stopping = true;
+    // CANCEL THE ATTEMPT, don't just raise a flag (round 8). `state.stopping` is
+    // cleared again by the very next start(), so on its own it lets a Disable→
+    // Enable pair be served by the ladder the Disable killed; the epoch makes
+    // the cancellation terminal, and detaching `ensuring` makes the Enable's
+    // ensure() start its OWN ladder instead of joining the cancelled one (which
+    // now resolves null — an Enable that silently did nothing).
+    state.stopEpoch++;
+    ensuring = null;
     clearTimeout(respawnTimer); respawnTimer = null;
     if (guard.timer) { clearInterval(guard.timer); guard.timer = null; }
     const ch = state.child;
     const livePid = state.pid;
+    // "we are TALKING to it" is the identity proof this branch owns: the
+    // client answered /global/health on the port we adopted, so state.pid is
+    // that serve without asking /proc anything (round 11).
+    const talking = !!state.client;
     state.child = null; state.client = null; state.port = null;
+    // UNCONDITIONAL, deliberately (round 9): `stop()` is synchronous and bumps
+    // the epoch FIRST, so no ladder can be interleaved with these lines, and
+    // "the user turned the service off" outranks whatever is on disk — leaving
+    // a record here is how "off" becomes "the next boot adopts it again".
     if (ch) { try { ch.kill('SIGTERM'); } catch { } clearRecord(); }
     else if (killRecorded) {
+      // THE SAME VERDICT, OR NO SIGNAL (round 11). This used to SIGTERM
+      // `state.pid || rec.pid` behind nothing but a self-pid guard — the very
+      // pid the blocked park had just refused to touch, reachable from the ONE
+      // control the ⚙ card leaves enabled in that state (Disable). A record
+      // outlives its serve, pids get recycled, and "the user turned it off" is
+      // authority over OUR daemon, never a licence to signal a stranger.
       const rec = readRecord();
-      const target = livePid || rec?.pid || null;
-      // never signal ourselves: a stale pid can name this very process
-      try { if (target && target !== process.pid) killPid(target, 'SIGTERM'); } catch { }
+      const decided = decideRecordedKill(rec, talking ? livePid : null);
+      if (decided.pid) { try { if (decided.pid !== process.pid) killPid(decided.pid, 'SIGTERM'); } catch { } }
+      else if (decided.why) { state.lastError = decided.why; log?.warn?.(`[opencode-serve] ${decided.why}`); }
       clearRecord();
+      // A DELIBERATELY-OFF SERVICE IS NOT A BROKEN STORE (S9 residual (a)).
+      // `blocked` and `runaway` are the two parks that say "something is wrong
+      // with the store", and `storeFailureReason` reads exactly `parked` — so a
+      // user who answers a blocked park by turning the plugin OFF got the panel
+      // it was complaining about replaced by a red /api/home + a toast on every
+      // page load, for a service they had just switched off. The park's whole
+      // job (a deadline-driven retry of a serve we could not reach) is over the
+      // moment the record it was about is gone and the user has asked for OFF.
+      //
+      // A `crash` park is deliberately NOT cleared here: it is terminal until an
+      // explicit start(), and start() already clears every park — clearing it on
+      // stop() would make Disable→Enable quietly forget a crash loop.
+      //
+      // `lastError` STAYS: it is the history of what happened, and the ⚙ card
+      // reads it for the "last error" line. What must go is the CLAIM that the
+      // store is broken RIGHT NOW.
+      if (state.parked && (state.parkedKind === 'blocked' || state.parkedKind === 'runaway')) {
+        state.parked = false; state.parkedKind = null; state.retryAfter = 0;
+      }
     }
     state.pid = null; state.source = null;
     notify();
@@ -769,12 +1432,50 @@ function createServeLocator({
 }
 
 // ── the store facts ──
-function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCacheMs = LIST_CACHE_MS, negativeCacheMs = NEGATIVE_CACHE_MS } = {}) {
-  const cache = { list: null, at: 0, negativeUntil: 0, lastError: null, skippedWorktrees: [] };
+function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCacheMs = LIST_CACHE_MS, negativeCacheMs = NEGATIVE_CACHE_MS,
+  externalWindowMs = EXTERNAL_WINDOW_MS, ownWriteWindowMs = OWN_WRITE_WINDOW_MS, onChange = null, log = console,
+  heldPtyIds = null } = {}) {
+  const cache = { list: null, at: 0, negativeUntil: 0, lastError: null, skippedWorktrees: [], dirty: true };
   const names = new Map();      // id → { name, at }
   const naming = new Set();
   const convo = new Map();      // id → { at, session, messages, records }
+  const cfgCache = new Map();   // directory('' = none) → { at, config } — the v1 /config read
   let listing = null;
+  // ── THE LIVE LANE (S9 remainder, B-eac2) — see armLive() ──
+  const live = {
+    lane: null,                 // the createLiveLane() handle, once armed
+    statuses: new Map(),        // opencode session id → SessionStatus (this serve's own turns)
+    questions: new Map(),       // que_id → {id, sessionID, questions, tool, at}
+    lastUpdated: new Map(),     // opencode session id → the last `time.updated` we saw in a list
+    activeElsewhere: new Map(), // opencode session id → ts of the last observed CHANGE we did not make
+    ownWrites: new Map(),       // opencode session id → { at, updated } of a mutation WE made (see noteOwnWrite)
+    ptys: new Set(),            // serve pty ids THIS process opened — the reaper's "ours", independent of session registration
+    ptyOpening: 0,              // opens IN FLIGHT (the serve may already hold a pty whose id we do not know yet)
+    ptyOpenSeq: 0,              // monotonic count of opens STARTED — the reaper compares it across its listing
+    reapedFor: null,            // `${pid}:${port}:${startedAt}` of the serve we already swept (reapPtys runs once per serve process)
+    // THE QUESTION MAP IS PER SERVE PROCESS (round 5). `/question` is answered
+    // out of the serve's OWN memory, so a serve that restarted — a keeper
+    // respawn, an OOM, a new port, an adopted instance replaced — has NO
+    // pending asks at all while this warm map still holds every `que_…` the
+    // PREVIOUS process minted. readConversation joins an open ask in the
+    // transcript to this map and only re-reads the authoritative list when the
+    // map is EMPTY, so a warm-but-dead map renders precisely the answerable
+    // card whose Submit can only fail — the thing the `stale` marker exists to
+    // prevent. So the map carries the serve process it was filled under, and a
+    // map stamped for a DIFFERENT process is not "known", it is "unknown".
+    questionsFor: null,         // `${pid}:${port}:${startedAt}` the question map was filled under (null = never / dropped)
+  };
+  /** The serve PROCESS a fact belongs to. Same key the pty reaper uses. */
+  function serveKey() { const st = locator.state?.() || {}; return `${st.pid || 0}:${st.port || 0}:${st.startedAt || 0}`; }
+  /** Is the warm question map still about the serve we are talking to? */
+  function questionsWarm() { return live.questions.size > 0 && live.questionsFor === serveKey(); }
+  /** A question fact arriving from the CURRENT serve (an event, a listing).
+   *  Drops a map belonging to an older process first — stamping a stale map as
+   *  current is how a dead `que_…` would become answerable again. */
+  function questionEpoch() {
+    const k = serveKey();
+    if (live.questionsFor !== k) { live.questions.clear(); live.questionsFor = k; }
+  }
 
   function reasonUnavailable() {
     const st = locator.state();
@@ -782,11 +1483,100 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
     // the runaway must SPEAK: the owner's instance burned for two hours with
     // nothing in the product saying so (2.369.42)
     if (st.parked && st.parkedKind === 'runaway') return `OpenCode serve was stopped by VibeSpace as a RUNAWAY — ${st.lastError || 'resource guard'}. It will not restart for up to an hour; disable the "OpenCode background service" plugin (⚙ → Plugins) if it keeps happening.`;
+    // a BLOCKED record is not a crash loop: it names a process the user has to
+    // deal with, and its own lastError is the whole instruction (round 10)
+    if (st.parked && st.parkedKind === 'blocked') return st.lastError || 'a recorded `opencode serve` is alive but unreachable and could not be identified — stop that process, or delete data/opencode-serve.json, then start the service again';
     if (st.parked) return `OpenCode serve is parked after ${st.crashes} crashes (${st.lastError || 'unknown error'}) — start it again from ⚙ → Plugins → OpenCode background service`;
     if (st.autostart === false) return st.envForced === false
       ? 'the OpenCode background service is forced OFF by VIBESPACE_OPENCODE_SERVE=0 on this instance — stopped OpenCode conversations cannot be listed or opened'
       : 'the OpenCode background service is off — enable the "OpenCode background service" plugin (⚙ → Plugins) to list, open, resume and fork STOPPED OpenCode conversations';
     return `OpenCode serve is unreachable (${st.lastError || 'still starting'})`;
+  }
+  /** THE HONEST LIVENESS VERDICT (piece (f) of B-eac2).
+   *   • 'live'     — one of OUR live sessions holds this conversation id.
+   *   • 'external' — POSITIVE evidence that something else is driving it:
+   *       (a) this serve's own `/session/status` says busy/retry (an event or
+   *           a client of this serve is running the turn — in-process truth), or
+   *       (b) the row's `time.updated` moved while we were not the ones moving
+   *           it — "we" meaning BOTH a live session of ours and a user action
+   *           taken through our own serve routes (noteOwnWrite; a roll-back is
+   *           the user, not a stranger) — within externalWindowMs (a TUI or
+   *           another opencode process writing the SAME sqlite — MEASURED: its events never reach our
+   *           serve's event bus, but the store row it writes does reach our
+   *           list, and the store-watch lane makes us re-read it in ~0.4s).
+   *   • 'stopped'  — no evidence of anyone driving it. NEVER a fake 'running'.
+   *  When we have NO live lane at all we cannot see (b) — the fact is reported
+   *  in state().liveLane so the panel can say "liveness unknown" rather than
+   *  every row lying; the rows themselves stay honest at 'stopped'. */
+  function deriveStatus(s, active) {
+    if (active) return 'live';
+    const st = live.statuses.get(s.id);
+    if (st && st.type && st.type !== 'idle') return 'external';
+    const seen = live.activeElsewhere.get(s.id) || 0;
+    if (seen && now() - seen < externalWindowMs) return 'external';
+    return 'stopped';
+  }
+  function pendingQuestionsFor(sessionId) {
+    if (!questionsWarm()) return [];      // a map minted by a serve that is gone answers nothing
+    const out = [];
+    for (const q of live.questions.values()) if (q.sessionID === sessionId) out.push(q);
+    return out;
+  }
+  /** REMEMBER A MUTATION WE MADE (round 3 of the review: clicking "Roll back to
+   *  before this message" made the row claim ANOTHER process was driving the
+   *  conversation for 90s — dimmed card, "Running in unsupported terminal",
+   *  no Fork… row, and gone entirely from a sidebar filtered to exclude
+   *  'external'). Our own write through the serve moves `time.updated` exactly
+   *  like a TUI's does; the only difference is that we know we did it, so we
+   *  have to write it down.
+   *
+   *  `session` is the action's own response when it carries one. MEASURED on a
+   *  real 1.18.29 serve: `revert`/`unrevert` return the row's FINAL
+   *  `time.updated` and nothing bumps it afterwards, so we match by VALUE —
+   *  the listing that reports exactly what we wrote is ours no matter how long
+   *  it takes to arrive, and the very next move past it is somebody else's.
+   *  An action with no Session (an answered ask) falls back to a short clock
+   *  window, which is the only blind spot and is bounded by design. */
+  function noteOwnWrite(id, session = null) {
+    if (!id) return;
+    const updated = Number(session?.time?.updated || session?.time?.created || 0) || 0;
+    live.ownWrites.set(String(id), { at: now(), updated });
+  }
+  /** Does this listing row's `time.updated` describe a write of OURS?
+   *  Consumes/expires the ledger entry so it can never linger. */
+  function ownWriteVerdict(id, u, t) {
+    const own = live.ownWrites.get(id);
+    if (!own) return false;
+    if (own.updated) {
+      if (u === own.updated) { live.ownWrites.delete(id); return true; }        // confirmed: this row IS our write
+      if (u < own.updated && t - own.at < ownWriteWindowMs) return true;        // a listing that was already in flight while we wrote
+      live.ownWrites.delete(id);                                               // moved PAST our write ⇒ whoever did that, it was not us
+      return false;
+    }
+    if (t - own.at < ownWriteWindowMs) return true;                            // no stamp (an answered ask): the short window
+    live.ownWrites.delete(id);
+    return false;
+  }
+  /** Fold a fresh listing into the external-activity ledger: a row whose
+   *  `time.updated` MOVED since the previous listing changed under someone —
+   *  us or another process. `ownIds` are the conversation ids our own live
+   *  sessions hold, and `live.ownWrites` is the same fact for a conversation
+   *  with NO live session that the user acted on through our own routes, so
+   *  neither kind of own write ever masquerades as "external". */
+  function noteListing(list, ownIds) {
+    const t = now();
+    for (const s of Array.isArray(list) ? list : []) {
+      const u = s?.time?.updated || s?.time?.created || 0;
+      const prev = live.lastUpdated.get(s.id);
+      live.lastUpdated.set(s.id, u);
+      const ours = ownWriteVerdict(s.id, u, t);
+      if (prev === undefined) continue;                 // first sighting proves nothing
+      if (u > prev && !ours && !(ownIds && ownIds.has(s.id))) live.activeElsewhere.set(s.id, t);
+    }
+    if (live.lastUpdated.size > 4000) live.lastUpdated.clear();
+    // a write on a conversation that then vanished from the store would never
+    // be consumed above: sweep by age so the ledger stays bounded
+    if (live.ownWrites.size > 256) for (const [k, v] of live.ownWrites) if (t - v.at > ownWriteWindowMs) live.ownWrites.delete(k);
   }
   function assemble(list, activeSessions) {
     const activeById = new Map();
@@ -795,6 +1585,10 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
       const sid = s.backendSessionId || null;
       if (sid && !activeById.has(sid)) activeById.set(sid, { id, session: s });
     }
+    // fold the listing into the external-activity ledger BEFORE deriving
+    // statuses (a row that just moved under a TUI must read 'external' on the
+    // very tick that noticed it, not the next one)
+    noteListing(list, new Set(activeById.keys()));
     const entries = (list || []).map((s) => {
       const active = activeById.get(s.id) || null;
       const named = names.get(s.id);
@@ -806,14 +1600,23 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
         cwd: s.directory || '',
         startedAt: s.time?.updated || s.time?.created || now(),
         createdAt: s.time?.created || null,
-        status: active ? 'live' : 'stopped',
+        status: deriveStatus(s, active),
         name: (named && named.name) || sessionTitle(s),
         agentKind: s.parentID ? 'subagent' : 'primary',
         parentThreadId: s.parentID || null,
         webuiId: active?.id || null,
         webuiName: active?.session?.name || null,
         webuiMode: active?.session?.mode || null,
-        opencode: { slug: s.slug || null, agent: s.agent || null, model: modelLabel(s.model?.providerID, s.model?.id) || null, projectID: s.projectID || null },
+        opencode: {
+          slug: s.slug || null, agent: s.agent || null,
+          model: modelLabel(s.model?.providerID, s.model?.id) || null,
+          projectID: s.projectID || null,
+          // the staged revert (chat action state) and the pending ask, so the
+          // sidebar/chat never has to ask a second route for either
+          revert: s.revert ? { messageID: s.revert.messageID || '', files: Array.isArray(s.revert.files) ? s.revert.files.length : 0 } : null,
+          questions: pendingQuestionsFor(s.id).length || 0,
+          busy: live.statuses.get(s.id)?.type || null,
+        },
       };
     });
     entries.sort((a, b) => b.startedAt - a.startedAt);
@@ -848,18 +1651,36 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
     const client = await locator.client({ budgetMs });
     if (!client) throw new OpencodeServeError(reasonUnavailable(), { code: 'unavailable' });
     const list = await withTimeout(client.listAllSessions({ timeoutMs: budgetMs }), budgetMs, 'session listing');
-    cache.list = list; cache.at = now(); cache.lastError = null;
+    cache.list = list; cache.at = now(); cache.lastError = null; cache.dirty = false;
     cache.skippedWorktrees = client.skippedWorktrees || [];
     nameSome(client, list).catch(() => { });
     return list;
   }
+  /** Is a live event lane actually carrying signal right now? While it is, the
+   *  list is refreshed ONLY when an event says it changed — the 10s timer is
+   *  GONE, not slowed (piece (d) of B-eac2). A lane that is down (serve
+   *  restarting, SSE broken, the store dir unwatchable) falls back to the
+   *  timer STRUCTURALLY: a broken lane must not freeze the sidebar forever. */
+  function laneHealthy() {
+    const st = live.lane?.state?.();
+    return !!(st && st.sse?.connected && st.watch?.active);
+  }
+  function markDirty(reason) {
+    cache.dirty = true;
+    cache.negativeUntil = 0;                 // a real change retires the negative cache
+    try { onChange?.({ reason }); } catch { }
+  }
   /** The v1 session list, cache-first and bounded. NEVER throws and NEVER waits
    *  past the budget: cache → negative cache → one shared bounded refresh. Both
    *  readers below are built on it, so neither can invent a second route (the
-   *  v2 per-session routes boot an OpenCode instance per directory — 2.369.50). */
+   *  v2 per-session routes boot an OpenCode instance per directory — 2.369.50).
+   *  FRESHNESS is the lane's answer when the lane is up (B-eac2 piece (d)): only
+   *  an event marks the list dirty, so the 10s timer is GONE — and a lane that
+   *  is down falls back to it STRUCTURALLY. */
   async function listNow(budgetMs) {
     const t = now();
-    if (cache.list && t - cache.at < listCacheMs) return cache.list;
+    const fresh = laneHealthy() ? (!cache.dirty || t - cache.at < MIN_REFRESH_MS) : (t - cache.at < listCacheMs);
+    if (cache.list && fresh) return cache.list;
     if (t < cache.negativeUntil) return cache.list || [];
     if (!listing) listing = refreshList(budgetMs).finally(() => { listing = null; });
     try { await listing; }
@@ -902,7 +1723,27 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
       if (isConnErr(e)) locator.invalidate(e.message);
       throw new OpencodeServeError(`OpenCode conversation ${id} could not be read: ${e.message}`, { status: e.status, code: e.code, cause: e });
     }
-    const entry = { at: now(), session, messages: Array.isArray(messages) ? messages : [], records: messagesToAcpRecords(Array.isArray(messages) ? messages : [], session) };
+    const records = messagesToAcpRecords(Array.isArray(messages) ? messages : [], session);
+    // A PENDING ask survives a page reload only if the card can be answered:
+    // the transcript knows the tool CALL id, the live route wants the `que_…`
+    // REQUEST id. Join them here, at the one place that has both.
+    const open = records.filter((r) => r.kind === 'permission_request' && !r.resolved);
+    if (open.length) {
+      // the live lane keeps this map warm, but a server that just restarted
+      // has an empty one — and one whose SERVE restarted has a map full of
+      // `que_…` ids that process no longer knows (pendingQuestionsFor answers
+      // [] for it, see the questionsFor epoch). Either way: re-read the
+      // authoritative list ONCE rather than rendering a card whose Submit
+      // could only fail.
+      let pend = pendingQuestionsFor(id);
+      if (!pend.length) { try { pend = await pendingQuestions({ sessionId: id, refresh: true }); } catch { pend = []; } }
+      for (const r of open) {
+        const q = pend.find((x) => x?.tool?.callID && x.tool.callID === r.requestId);
+        if (q) r.requestId = String(q.id);
+        else r.stale = true;              // no live request behind it: the reader shows it, the card cannot answer it
+      }
+    }
+    const entry = { at: now(), session, messages: Array.isArray(messages) ? messages : [], records };
     convo.set(id, entry);
     if (convo.size > 64) convo.delete(convo.keys().next().value);
     return entry;
@@ -920,12 +1761,324 @@ function createFacts(locator, { now = Date.now, nameBatch = NAME_BATCH, listCach
     // session lives in sqlite and stays readable, verified 1.18.29)
     const dir = cwd || forked.directory || null;
     if (dir) await client.disposeInstance(dir, { timeoutMs: DEFAULT_TIMEOUT_MS }).catch(() => { });
+    // no noteOwnWrite here, and that is MEASURED rather than assumed: forking
+    // does not move the SOURCE row's `time.updated` on 1.18.29 (before ===
+    // after), and the fork's own row is a first sighting, which proves nothing
+    // by construction. An unmeasured entry would only add a blind window.
     invalidate();
     return forked;
   }
-  function invalidate() { cache.at = 0; cache.negativeUntil = 0; convo.clear(); }
-  function stateOf() { return { ...locator.state(), cachedSessions: cache.list ? cache.list.length : null, cacheAgeMs: cache.at ? now() - cache.at : null, negativeUntil: cache.negativeUntil, lastError: cache.lastError || locator.state().lastError, namesKnown: names.size, skippedWorktrees: cache.skippedWorktrees || [] }; }
-  return { discover, sessionModel, readConversation, forkSession, invalidate, state: stateOf, reasonUnavailable, locator, _names: names };
+  /** The RESOLVED OpenCode config for the READ-ONLY permission-rule view
+   *  (owner ruling 10). USER ACTION ⇒ LOUD: a failure returns the reason, it
+   *  never degrades into "this agent has no rules". v1 `/config` only — see
+   *  the client method for the /proc measurement that says why.
+   *  Cached briefly (a config does not change between two clicks) and NEVER
+   *  negative-cached: the user asking again after fixing their config must get
+   *  the new answer. */
+  async function readConfig({ directory = null, timeoutMs = READ_TIMEOUT_MS } = {}) {
+    const key = directory || '';
+    const hit = cfgCache.get(key);
+    if (hit && now() - hit.at < listCacheMs) return hit.config;
+    const client = await locator.client({ budgetMs: timeoutMs });
+    if (!client) throw new OpencodeServeError(reasonUnavailable(), { code: 'unavailable' });
+    let config;
+    try { config = await client.config({ directory, timeoutMs }); }
+    catch (e) {
+      if (isConnErr(e)) locator.invalidate(e.message);
+      throw new OpencodeServeError(`OpenCode config could not be read: ${e.message}`, { status: e.status, code: e.code, cause: e });
+    }
+    cfgCache.set(key, { at: now(), config: config || {} });
+    if (cfgCache.size > 8) cfgCache.delete(cfgCache.keys().next().value);
+    return config || {};
+  }
+  function invalidate() { cache.at = 0; cache.dirty = true; cache.negativeUntil = 0; convo.clear(); cfgCache.clear(); }
+
+  // -- USER ACTIONS over the serve (LOUD by contract: every failure names the
+  //    cause; a silent no-op here is the "no silent failures" law broken) --
+  async function userClient(timeoutMs) {
+    const client = await locator.client({ budgetMs: timeoutMs });
+    if (!client) throw new OpencodeServeError(reasonUnavailable(), { code: 'unavailable' });
+    return client;
+  }
+  /** Roll a conversation back to a message (piece (a)). The v1 route ONLY --
+   *  measured to restore the tree without booting an instance, unlike v2's
+   *  stage/clear/commit trio. Returns the updated Session (its `revert` field
+   *  is the state the reader then renders). */
+  async function revertTo(id, { messageID, partID = null, cwd = null, timeoutMs = READ_TIMEOUT_MS } = {}) {
+    if (!messageID) throw new OpencodeServeError('revert needs the message to roll back to', { code: 'bad-request' });
+    const client = await userClient(timeoutMs);
+    let session;
+    try { session = await client.revert(id, { messageID, partID, directory: cwd || null, timeoutMs }); }
+    catch (e) { if (isConnErr(e)) locator.invalidate(e.message); throw new OpencodeServeError(`OpenCode could not roll back ${id}: ${e.message}`, { status: e.status, code: e.code, cause: e }); }
+    noteOwnWrite(id, session);          // OUR write — never "someone else is driving it" (see noteOwnWrite)
+    convo.delete(id); markDirty('revert');
+    return session;
+  }
+  /** Undo a staged rollback (OpenCode's own `unrevert` = the v1 "clear"). */
+  async function unrevert(id, { cwd = null, timeoutMs = READ_TIMEOUT_MS } = {}) {
+    const client = await userClient(timeoutMs);
+    let session;
+    try { session = await client.unrevert(id, { directory: cwd || null, timeoutMs }); }
+    catch (e) { if (isConnErr(e)) locator.invalidate(e.message); throw new OpencodeServeError(`OpenCode could not restore the rolled-back messages of ${id}: ${e.message}`, { status: e.status, code: e.code, cause: e }); }
+    noteOwnWrite(id, session);
+    convo.delete(id); markDirty('unrevert');
+    return session;
+  }
+
+  /** The pending asks (piece (b)). The live lane keeps this map warm from
+   *  `question.asked/replied/rejected`; a caller with `refresh` re-reads the
+   *  authoritative list (an attach after a page reload does exactly that, so
+   *  a pending card survives the reload). */
+  async function pendingQuestions({ sessionId = null, refresh = false, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+    if (refresh) {
+      const client = await userClient(timeoutMs);
+      const list = await client.questions({ timeoutMs });
+      live.questions.clear();
+      // the list is authoritative FOR THIS SERVE PROCESS — stamp it, so the
+      // next process's readers know this map is not about them
+      live.questionsFor = serveKey();
+      for (const q of Array.isArray(list) ? list : []) if (q && q.id) live.questions.set(String(q.id), { ...q, at: now() });
+    }
+    const all = questionsWarm() ? [...live.questions.values()] : [];
+    return sessionId ? all.filter((q) => q.sessionID === sessionId) : all;
+  }
+  /** Answer an ask through the REAL route. `answers` is either OpenCode's own
+   *  positional array-of-arrays, or the card's question-text map (converted
+   *  here -- the conversion is PURE and lives with the shape it belongs to). */
+  async function answerQuestion(requestId, answers, { timeoutMs = READ_TIMEOUT_MS } = {}) {
+    let q = questionsWarm() ? (live.questions.get(String(requestId)) || null) : null;
+    // THE CARD'S MAP IS KEYED BY QUESTION TEXT, so converting it back to
+    // OpenCode's positional form NEEDS the question list. A server that
+    // restarted between rendering the card and the user pressing Submit has an
+    // empty warm map, and converting against nothing produced `[]` → "no
+    // answers", i.e. a dead Submit on a perfectly answerable ask. Re-read the
+    // authoritative list once instead.
+    // POSITIONAL answers need no conversion, but they DO need the same read:
+    // the question is the only thing that names the conversation, and without
+    // it we can neither invalidate that conversation's cache, nor tell the
+    // clients WHICH row changed, nor write down that the move it is about to
+    // make was OURS (round 3). `/question` boots no instance — measured.
+    if (!q) {
+      try { await pendingQuestions({ refresh: true, timeoutMs }); q = live.questions.get(String(requestId)) || null; } catch { }
+    }
+    const positional = Array.isArray(answers)
+      ? answers.map((a) => (Array.isArray(a) ? a.map(String) : [String(a)]))
+      : askAnswersToPositional(normalizeAskQuestions(q?.questions), answers || {});
+    if (!positional.length) throw new OpencodeServeError(`no answers for question ${requestId}`, { code: 'bad-request' });
+    const client = await userClient(timeoutMs);
+    try { await client.questionReply(requestId, positional, { timeoutMs }); }
+    catch (e) { if (isConnErr(e)) locator.invalidate(e.message); throw new OpencodeServeError(`OpenCode refused the answer to ${requestId}: ${e.message}`, { status: e.status, code: e.code, cause: e }); }
+    live.questions.delete(String(requestId));
+    // an answer moves the row (and starts a turn): the move is OURS. No Session
+    // comes back here, so this is the windowed form of the ledger entry.
+    if (q?.sessionID) { noteOwnWrite(q.sessionID); convo.delete(q.sessionID); }
+    markDirty('question-replied');
+    return { ok: true, sessionID: q?.sessionID || null, answers: positional };
+  }
+  async function rejectQuestion(requestId, { timeoutMs = READ_TIMEOUT_MS } = {}) {
+    let q = questionsWarm() ? (live.questions.get(String(requestId)) || null) : null;
+    // same cold-map read as the reply path, for the same reason: a rejection
+    // moves the row too, and only the question names the conversation
+    if (!q) { try { await pendingQuestions({ refresh: true, timeoutMs }); q = live.questions.get(String(requestId)) || null; } catch { } }
+    const client = await userClient(timeoutMs);
+    try { await client.questionReject(requestId, { timeoutMs }); }
+    catch (e) { if (isConnErr(e)) locator.invalidate(e.message); throw new OpencodeServeError(`OpenCode refused the rejection of ${requestId}: ${e.message}`, { status: e.status, code: e.code, cause: e }); }
+    live.questions.delete(String(requestId));
+    if (q?.sessionID) { noteOwnWrite(q.sessionID); convo.delete(q.sessionID); }
+    markDirty('question-rejected');
+    return { ok: true, sessionID: q?.sessionID || null };
+  }
+
+  /** A shell the SERVE owns, on the serve's machine (piece (c)). Returns
+   *  everything the caller needs to bridge it onto the normal ws terminal
+   *  path -- INCLUDING the ws url + auth header, which is why this value
+   *  never leaves the server process.
+   *
+   *  `cwd` places the SHELL and nothing else: it rides the request BODY, never
+   *  a `directory` query, so opening a terminal in a 200-directory repo boots
+   *  NO OpenCode instance for that repo (round 4 — see the pty family in
+   *  OpencodeServeClient for the /proc A/B: 204 inotify watches that outlived
+   *  every close, vs 4). `cwd` stays in the signature because it is the shell's
+   *  working directory and the op table carries it; it must never become a
+   *  query again. */
+  async function openPty({ cwd = null, command = null, args = null, title = null, env = null, timeoutMs = PTY_TIMEOUT_MS } = {}) {
+    const client = await userClient(timeoutMs);
+    let pty;
+    // THE ONE WINDOW THE REAPER CANNOT REASON ABOUT is between "the serve made
+    // the pty" and "we learned its id": a sweep listing right there would see a
+    // terminal it cannot recognise as ours. So an open is ANNOUNCED before the
+    // request and only un-announced after the id is recorded — reapPtys refuses
+    // to sweep while one is in flight (see there) rather than racing it.
+    live.ptyOpening++; live.ptyOpenSeq++;
+    try {
+      try { pty = await client.ptyCreate({ cwd, command, args, title, env, timeoutMs }); }
+      catch (e) { if (isConnErr(e)) locator.invalidate(e.message); throw new OpencodeServeError(`OpenCode could not open a terminal${cwd ? ' in ' + cwd : ''}: ${e.message}`, { status: e.status, code: e.code, cause: e }); }
+      if (!pty || typeof pty.id !== 'string') throw new OpencodeServeError('OpenCode returned no pty id', { code: 'protocol' });
+      live.ptys.add(String(pty.id));
+    } finally { live.ptyOpening--; }
+    // A ticket is only mintable on a SECURED serve (1.18.29 answers
+    // PtyForbiddenError on an unsecured one and the ws needs none) -- try, and
+    // connect without it when the serve says no. The ticket never leaves here.
+    let ticket = null;
+    try { ticket = (await client.ptyTicket(pty.id, { timeoutMs: READ_TIMEOUT_MS }))?.ticket || null; } catch { ticket = null; }
+    return { pty, url: client.ptyConnectUrl(pty.id, { ticket }), auth: client.authHeader(), ticketed: !!ticket };
+  }
+  /** `cwd` is accepted (the op table carries it) and deliberately UNUSED: a pty
+   *  is addressed by its id on the default instance — see openPty. */
+  async function closePty(ptyId, { cwd = null, timeoutMs = READ_TIMEOUT_MS } = {}) {
+    const client = await userClient(timeoutMs);
+    try { await client.ptyRemove(ptyId, { timeoutMs }); } catch (e) { throw new OpencodeServeError(`OpenCode could not close terminal ${ptyId}: ${e.message}`, { status: e.status, code: e.code, cause: e }); }
+    live.ptys.delete(String(ptyId));
+    return { ok: true };
+  }
+  /** …same for `cwd` here. */
+  async function resizePty(ptyId, { rows, cols, cwd = null, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+    const client = await locator.client({ budgetMs: timeoutMs });
+    if (!client) return { ok: false };                 // a resize is not worth an error dialog
+    try { await client.ptyResize(ptyId, { rows, cols, timeoutMs }); return { ok: true }; }
+    catch { return { ok: false }; }
+  }
+  /** REAP THE PTYS NOBODY CAN REACH ANY MORE (round 4). The serve OUTLIVES us:
+   *  a SIGKILL/OOM restart (or any restart while the serve was ADOPTED from
+   *  data/opencode-serve.json, where `state.child` is null so our exit hook has
+   *  nothing to kill) leaves every serve-owned shell running with no session,
+   *  no socketPath (deliberately — a serve pty is not dtach-restorable) and no
+   *  window able to reach it. Measured: a pty survives our websocket closing
+   *  and is re-connectable; it only disappears when its own shell exits or the
+   *  serve dies.
+   *
+   *  So this is the adopt-or-reap ladder the dtach/job paths already use, on
+   *  the ONE moment it is answerable: a serve became reachable. KEEP =
+   *  everything this process opened (`live.ptys`) UNION everything a live
+   *  session still holds (`heldPtyIds()` reads session._opencodePtyId — the
+   *  field's consumer). Everything else on the serve is unreachable by
+   *  construction and is removed.
+   *  Runs ONCE per serve PROCESS (pid+port+startedAt): a respawned serve has no
+   *  ptys to reap, and re-running on every state notify would race a terminal
+   *  the user is opening. */
+  async function reapPtys({ timeoutMs = READ_TIMEOUT_MS, force = false, attempts = 3, settleMs = 1500 } = {}) {
+    const client = await locator.client({ budgetMs: timeoutMs });
+    if (!client) return { ok: false, reason: reasonUnavailable() };
+    const st = locator.state?.() || {};
+    const key = `${st.pid || 0}:${st.port || 0}:${st.startedAt || 0}`;
+    if (!force && live.reapedFor === key) return { ok: true, skipped: 'already-reaped', key };
+    // A SWEEP IS ONLY ANSWERABLE WHILE NOBODY IS OPENING A TERMINAL. Between
+    // the serve creating a pty and openPty recording its id, that pty is in the
+    // serve's list and in no keep set — so instead of racing it, refuse and
+    // retry: quiet BEFORE the listing, and the same open-count AFTER it, means
+    // no create was issued during the window. Never marked done on a refusal,
+    // so the next ready edge (or an explicit call) tries again.
+    let list = null, busy = null;
+    for (let i = 0; i < Math.max(1, attempts) && list === null; i++) {
+      if (i) await new Promise((r) => { const t = setTimeout(r, settleMs); t.unref?.(); });
+      if (live.ptyOpening > 0) { busy = 'a terminal is being opened'; continue; }
+      const seq0 = live.ptyOpenSeq;
+      let got;
+      try { got = await client.ptyList({ timeoutMs }); }
+      catch (e) { return { ok: false, reason: e.message }; }   // NOT marked done: a failed sweep retries on the next ready edge
+      if (live.ptyOpening > 0 || live.ptyOpenSeq !== seq0) { busy = 'a terminal was opened while listing'; continue; }
+      list = got;
+    }
+    if (list === null) return { ok: false, reason: busy || 'could not take a quiet listing' };
+    live.reapedFor = key;
+    let held = [];
+    try { held = heldPtyIds ? (heldPtyIds() || []) : []; } catch { held = []; }
+    const keep = new Set([...live.ptys, ...held].map((x) => String(x)));
+    const removed = [], failed = [];
+    for (const p of Array.isArray(list) ? list : []) {
+      const id = p && typeof p.id === 'string' ? p.id : '';
+      if (!id || keep.has(id)) continue;
+      try { await client.ptyRemove(id, { timeoutMs }); removed.push(id); }
+      catch (e) { failed.push({ id, reason: e.message }); }
+    }
+    if (removed.length) log?.warn?.(`[opencode-serve] reaped ${removed.length} orphaned serve terminal(s) no session can reach: ${removed.join(', ')}`);
+    return { ok: true, key, removed, failed, kept: [...keep] };
+  }
+  /** The agent's own todo list for a conversation (cheap v1 route). */
+  async function todos(id, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+    const client = await userClient(timeoutMs);
+    return client.todo(id, { timeoutMs });
+  }
+  /** This serve's in-process busy map (piece (f) rung 1). */
+  async function statusMap({ timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+    const client = await userClient(timeoutMs);
+    const map = await client.sessionStatus({ timeoutMs });
+    live.statuses.clear();
+    for (const [k, v] of Object.entries(map || {})) live.statuses.set(String(k), v);
+    return map || {};
+  }
+
+  /** DROP AND RE-READ THE PENDING ASKS (round 5). A (re)connect is the one
+   *  moment we know we may have missed `question.asked/replied/rejected`
+   *  frames AND the one moment the serve on the other end may be a DIFFERENT
+   *  process than the one that minted the ids in the warm map. `/question` is
+   *  per process (its answer comes out of the serve's own memory) and boots no
+   *  instance — measured — so the reconnect pays for one cheap read, exactly
+   *  like the busy map above.
+   *  DROP FIRST, then read: a failed read must leave "unknown" (⇒ open ask
+   *  cards render `stale`, which is honest and answerable-by-nobody) rather
+   *  than "known" from a serve that no longer exists (⇒ a Submit that can only
+   *  fail — the dead Submit the `stale` marker was built for). */
+  function refreshQuestions(why) {
+    const had = live.questions.size;
+    live.questions.clear();
+    live.questionsFor = null;             // UNKNOWN until the authoritative list answers
+    return pendingQuestions({ refresh: true })
+      .catch((e) => { log?.warn?.(`[opencode-serve] the pending-ask list could not be re-read after ${why} (${e.message}) — open ask cards render stale until it answers`); return []; })
+      .then(() => { if (had || live.questions.size) markDirty('questions'); });
+  }
+
+  /** ARM THE LIVE LANE (piece (d)). `makeLane` is injected so these facts
+   *  never hard-depend on the event module's IO inside a unit test. */
+  function armLive(makeLane) {
+    if (live.lane) return live.lane;
+    live.lane = makeLane({
+      locator,
+      onEvent: (info) => {
+        // A (RE)CONNECT IS THE ONLY MOMENT WE KNOW WE MISSED EVENTS. The busy
+        // map is fed by `session.status` frames, so a serve that was already
+        // running a turn when the stream came up would read 'stopped' until
+        // its NEXT status change — the honest-liveness rung 1 silently blind
+        // for the length of a turn. `/session/status` is the authoritative
+        // answer, needs no directory and boots no instance (measured), so the
+        // reconnect pays for one cheap read.
+        if (info.kind === 'connected') { statusMap().catch(() => { }); refreshQuestions('a reconnect').catch(() => { }); }
+        if (info.kind === 'status' && info.sessionId) {
+          if (info.status && info.status.type && info.status.type !== 'idle') live.statuses.set(info.sessionId, info.status);
+          else live.statuses.delete(info.sessionId);
+          markDirty('status');
+          return;
+        }
+        if (info.kind === 'question') {
+          questionEpoch();                 // a fact from the CURRENT serve; a map from an older one is dropped, never inherited
+          if (info.question) live.questions.set(String(info.questionId), { ...info.question, at: now() });
+          else live.questions.delete(String(info.questionId));
+          if (info.sessionId) convo.delete(info.sessionId);
+          markDirty('question');
+          return;
+        }
+        if (info.dirty?.conversation) convo.delete(info.dirty.conversation);
+        if (info.dirty?.sessions || info.dirty?.conversation) markDirty(info.kind);
+      },
+      // the STORE-WATCH lane: another opencode process (a TUI) wrote the
+      // sqlite. We do not know WHAT changed -- only that the list must be
+      // re-read, which is exactly what dirty means.
+      onExternal: (reason) => { convo.clear(); markDirty(reason || 'store'); },
+      onState: () => { try { onChange?.({ reason: 'lane' }); } catch { } },
+      log,
+    });
+    return live.lane;
+  }
+  function stopLive() { try { live.lane?.stop?.(); } catch { } live.lane = null; }
+
+  function stateOf() {
+    const laneSt = live.lane?.state?.() || null;
+    return { ...locator.state(), cachedSessions: cache.list ? cache.list.length : null, cacheAgeMs: cache.at ? now() - cache.at : null, negativeUntil: cache.negativeUntil, lastError: cache.lastError || locator.state().lastError, namesKnown: names.size, skippedWorktrees: cache.skippedWorktrees || [],
+      liveLane: laneSt, liveLaneHealthy: laneHealthy(), pendingQuestions: questionsWarm() ? live.questions.size : 0, busySessions: live.statuses.size, dirty: !!cache.dirty };
+  }
+  return { discover, sessionModel, readConversation, readConfig, forkSession, invalidate, state: stateOf, reasonUnavailable, locator, _names: names,
+    revertTo, unrevert, pendingQuestions, answerQuestion, rejectQuestion, openPty, closePty, resizePty, reapPtys, todos, statusMap,
+    armLive, stopLive, _live: live };
 }
 
 // ── the serve-backed reader ──
@@ -959,16 +2112,115 @@ const NULL_FACTS = Object.freeze({
   sessionModel: async () => '',   // no serve ⇒ no answer; the ladder logs the fall back to the instance default
   readConversation: async (id) => { throw new OpencodeServeError(`OpenCode serve is not configured on this instance (conversation ${id})`, { code: 'unconfigured' }); },
   forkSession: async () => { throw new OpencodeServeError('OpenCode serve is not configured on this instance', { code: 'unconfigured' }); },
+  readConfig: async () => { throw new OpencodeServeError('OpenCode serve is not configured on this instance', { code: 'unconfigured' }); },
   invalidate: () => { },
-  state: () => ({ installed: false, ready: false, parked: false, caps: null, configured: false, autostart: false, envForced: null, stopped: true }),
+  state: () => ({ installed: false, ready: false, parked: false, caps: null, configured: false, autostart: false, envForced: null, stopped: true, liveLane: null, liveLaneHealthy: false, pendingQuestions: 0, busySessions: 0 }),
   reasonUnavailable: () => 'OpenCode serve is not configured on this instance',
   locator: null,
+  // the S9-remainder action surface: UNCONFIGURED must say so, never no-op
+  // (the "no silent failures" law -- a user action that quietly does nothing
+  // is the worst possible answer)
+  revertTo: async () => { throw new OpencodeServeError('OpenCode serve is not configured on this instance', { code: 'unconfigured' }); },
+  unrevert: async () => { throw new OpencodeServeError('OpenCode serve is not configured on this instance', { code: 'unconfigured' }); },
+  pendingQuestions: async () => [],
+  answerQuestion: async () => { throw new OpencodeServeError('OpenCode serve is not configured on this instance', { code: 'unconfigured' }); },
+  rejectQuestion: async () => { throw new OpencodeServeError('OpenCode serve is not configured on this instance', { code: 'unconfigured' }); },
+  openPty: async () => { throw new OpencodeServeError('OpenCode serve is not configured on this instance', { code: 'unconfigured' }); },
+  closePty: async () => ({ ok: false }),
+  resizePty: async () => ({ ok: false }),
+  reapPtys: async () => ({ ok: false, reason: 'OpenCode serve is not configured on this instance' }),
+  todos: async () => [],
+  statusMap: async () => ({}),
+  armLive: () => null,
+  stopLive: () => { },
 });
 /** Wire the locator + facts for this process. Called ONCE by cli-env (ORCH);
  *  tests call it with a mock spawn/fetch. Returns the facts. */
 function install(opts) {
-  const locator = opts.locator || createServeLocator(opts);
+  // FOLLOW THE SERVE (see the lane block below): the locator's own state
+  // callback is the only place that knows "a serve is now reachable on port
+  // N". Wrapping it HERE — before the locator exists — is what makes the hook
+  // real; the caller's onState still runs first and unchanged.
+  const laneRef = { lane: null, lastPort: null, facts: null, sync: () => { } };
+  const locatorOpts = opts.locator ? opts : {
+    ...opts,
+    onState: (st) => {
+      try { opts.onState?.(st); } catch (e) { (opts.log || console).warn?.(`[opencode-serve] onState failed: ${e.message}`); }
+      // THE LANE LIVES AND DIES WITH THE SERVICE (round 5, see below): every
+      // locator state change — the plugin's start/stop, an adoption, a park —
+      // is where it is started or torn down.
+      laneRef.sync(st);
+      const port = st && st.ready ? (st.port || null) : null;
+      if (!port) { laneRef.lastPort = null; return; }
+      if (port === laneRef.lastPort) return;      // NOT every notify(): the guard samples one a minute
+      laneRef.lastPort = port;
+      try { laneRef.lane?.kick(); } catch { }
+      // …and the SAME edge is the adopt-or-reap moment (round 4): "a serve is
+      // reachable" is the only instant at which "which of its terminals can
+      // still be reached from here" is answerable. Idempotent per serve
+      // process; off the caller's stack so a slow sweep never delays a notify.
+      const rt = setImmediate(() => {
+        Promise.resolve(laneRef.facts?.reapPtys?.()).catch((e) => (opts.log || console).warn?.(`[opencode-serve] pty reap failed: ${e.message}`));
+      });
+      rt.unref?.();
+    },
+  };
+  const locator = opts.locator || createServeLocator(locatorOpts);
   installed = createFacts(locator, opts);
+  laneRef.facts = installed;
+  // THE LIVE LANE replaces the 10s list poll (piece (d) of B-eac2). It is armed
+  // here, not lazily at the first discovery, because its whole job is to notice
+  // changes NOBODY asked about; `makeLane` is injectable so a unit test can arm
+  // a fake one, and `false` disables it entirely (the timer fallback returns).
+  //
+  // BUT IT ONLY RUNS WHILE THE SERVICE DOES (round 5). The lane is a CLIENT of
+  // the serve: `start()` arms an fs.watch on the USER's real OpenCode store
+  // (resolved from the env THIS server runs under) plus an SSE reconnect loop
+  // with its own timers. With the background service OFF — the shipped default
+  // since 2026-09-07, where the rule is that NOTHING of ours runs or watches —
+  // install() started it anyway at boot, so an unrelated `opencode` process's
+  // writes to ~/.local/share/opencode woke a server whose OpenCode feature the
+  // user never turned on. So the lane follows ONE predicate:
+  //   • the SAME decision the locator spawns on (opts.autostart =
+  //     decideAutostart: the ops override, else the plugin record), OR
+  //   • a serve is actually READY — which covers the one case that decision
+  //     does not: a RECORDED instance we merely ADOPT (allowed with the plugin
+  //     off, and once we are talking to it, following it costs nothing new).
+  // Enabling the plugin flips the decision AND notifies (locator.start()), so
+  // the lane comes up without a restart; disabling stops the process and the
+  // lane with it — SSE socket, backoff timer and store watch.
+  const wantsAutostart = () => { try { const a = opts.autostart; return a === undefined ? true : !!(typeof a === 'function' ? a() : a); } catch { return false; } };
+  const laneWanted = (st) => { try { return !!(st && st.ready) || wantsAutostart(); } catch { return false; } };
+  if (opts.live !== false) {
+    const makeLane = opts.makeLane || ((deps) => require('./opencode-events').createLiveLane({ ...deps, storeDirs: opts.storeDirs }));
+    laneRef.sync = (st) => {
+      // a notify arriving after uninstall() (or after a second install) must
+      // never re-arm a lane on facts nobody is using any more
+      if (installed !== laneRef.facts) return;
+      let known = st;
+      if (!known) { try { known = locator.state?.(); } catch { known = null; } }
+      const want = laneWanted(known);
+      if (want === !!laneRef.lane) return;
+      if (want) {
+        try {
+          const lane = laneRef.facts.armLive(makeLane);
+          lane.start();
+          // FOLLOW THE SERVE. The stream backs off to 30s while there is
+          // nothing to connect to (the keeper is respawning), so "the serve
+          // came back on a NEW port" would otherwise take up to half a minute
+          // to become live again. The locator already tells us: kick on the
+          // READY EDGE (and on a port change) — never on every notify(), which
+          // fires each guard sample and would re-open the socket once a minute
+          // for nothing.
+          laneRef.lane = lane;
+        } catch (e) { (opts.log || console).warn?.(`[opencode-serve] live lane could not start: ${e.message} -- falling back to the timed list refresh`); }
+      } else {
+        laneRef.lane = null; laneRef.lastPort = null;
+        try { laneRef.facts.stopLive(); } catch { }
+      }
+    };
+    laneRef.sync(null);           // sync reads the locator itself, inside its own guard
+  }
   // …and enforce the ops kill switch AT BOOT rather than at the first
   // discovery: with VIBESPACE_OPENCODE_SERVE=0 a serve that outlived a restart
   // must be STOPPED, and an instance nobody is polling (no client connected)
@@ -983,13 +2235,15 @@ function install(opts) {
   return installed;
 }
 function facts() { return installed || NULL_FACTS; }
-function uninstall() { const f = installed; installed = null; try { f?.locator?.stop?.(); } catch { } }
+function uninstall() { const f = installed; installed = null; try { f?.stopLive?.(); } catch { } try { f?.locator?.stop?.(); } catch { } }
 
 module.exports = {
   OpencodeServeClient, OpencodeServeError, createServeLocator, createFacts, OpencodeServeSessionMessages,
   messagesToAcpRecords, acpKindOfTool, acpStatusOfState, sessionTitle, install, facts, uninstall,
   bootstrappableWorktree, unsafeWorktreeReason, ensureServeCwd, serveCwdPath, readProcUsage,
+  classifyRecordedPid, readProcCmdline, readProcUid, readPsIdentity, RECORD_CONFIRM_TIMEOUT_MS, RECORD_KILL_WAIT_MS, RECORD_KILL_POLL_MS, BLOCKED_RETRY_MS,
+  normalizeAskQuestions, askAnswerMap, askAnswersToPositional, revertNoticeText, EXTERNAL_WINDOW_MS, OWN_WRITE_WINDOW_MS,
   serveEnvOverride, decideAutostart, SERVICE_PLUGIN_ID: 'opencode-serve',
   DEFAULT_TIMEOUT_MS, READ_TIMEOUT_MS, LIST_CACHE_MS, NEGATIVE_CACHE_MS, MAX_CRASHES, FORK_PATH,
-  NAME_MAX_BYTES, GUARD_CPU_PCT, GUARD_RSS_BYTES, GUARD_SAMPLE_MS, RUNAWAY_COOLDOWN_MS,
+  NAME_MAX_BYTES, CONFIG_MAX_BYTES, GUARD_CPU_PCT, GUARD_RSS_BYTES, GUARD_SAMPLE_MS, RUNAWAY_COOLDOWN_MS, MIN_REFRESH_MS, PTY_TIMEOUT_MS,
 };

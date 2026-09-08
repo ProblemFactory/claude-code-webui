@@ -651,9 +651,17 @@ console.log('— ⑩ version markers resolve; this branch squats nothing');
   const read = (f) => fs.readFileSync(path.join(REPO, f), 'utf8');
   // The RELEASED predecessor every site below back-references. Not this change.
   const PREDECESSOR = '2.369.62';
-  // The number the integrator should take (master's head is 2.369.67). Nothing
-  // in the tree is stamped with it — that is the point: it must still be free.
-  const NEXT_FREE = '2.369.68';
+  // The number the integrator should take. Nothing in the tree is stamped with
+  // it — that is the point: it must still be free, and the leg below PROVES it
+  // against origin/master rather than trusting this line. It moves every time
+  // master releases (2.369.67 → .68 landed while this branch was in flight,
+  // which is exactly the red this leg is FOR: a "first free number" that a
+  // release has taken is a marker that no longer resolves).
+  // COMPUTED (2026-09-08): a hardcoded "first free number" went red on master
+  // the moment the next release landed (twice in one day). The leg derives it
+  // from the integration branch itself — highest released 2.369.N + 1 — and
+  // proves both halves: N is claimed, N+1 is not.
+  let NEXT_FREE = null;
   const SITES = ['CLAUDE.md', 'data/bin/codex-chat-wrapper.js', 'src/codex-message-manager.js',
     'src/codex-session-store.js', 'src/server/stdout/codex-events.js', 'src/lib/agent-meta.js',
     'src/lib/chat-status-bar.js', 'src/lib/chat-view.js', 'src/ws-handler.js', 'src/session-schema.js',
@@ -671,8 +679,39 @@ console.log('— ⑩ version markers resolve; this branch squats nothing');
   ok(staleLines.length === 0, 'no site still names the number master took as a live cross-reference', JSON.stringify(staleLines).slice(0, 300));
 
   const { execFileSync } = await import('node:child_process');
-  const git = (...a) => execFileSync('git', ['-C', REPO, ...a], { maxBuffer: 64 * 1024 * 1024, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  // maxBuffer, EXPLICITLY (round 7): this helper's biggest read is
+  // `git show <ref>:CHANGELOG.md`, and that file passed node's DEFAULT 1 MiB
+  // stdout buffer in 2026-09 (1,052,996 bytes on origin/master). Over the
+  // default, execFileSync does not return a truncated string — it THROWS
+  // `spawnSync git ENOBUFS`, which killed this suite (exit 1) after 97 green
+  // asserts and made the mandatory pre-push gate unpassable for every push,
+  // for a reason that names neither git nor the CHANGELOG. A helper that reads
+  // a file which only ever grows states its own bound.
+  const GIT_MAXBUF = 64 * 1024 * 1024;
+  const git = (...a) => execFileSync('git', ['-C', REPO, ...a], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: GIT_MAXBUF });
   const REF = ['origin/master', 'master'].find((r) => { try { git('rev-parse', '--verify', r); return true; } catch { return false; } });
+  // REGRESSION (round 7): the helper must SURVIVE the biggest read it makes.
+  // Measured as the consequence — the read either returns the whole file or
+  // this leg says so; before the explicit maxBuffer it threw and the process
+  // died, so nothing below here ever ran.
+  let refChangelog = null, refErr = null;
+  if (REF) { try { refChangelog = git('show', `${REF}:CHANGELOG.md`); } catch (e) { refErr = e; } }
+  if (REF) {
+    ok(`the integration branch's CHANGELOG reads through the git helper (${refChangelog ? refChangelog.length : 0} bytes) — a suite that CRASHES here reports nothing at all`,
+      typeof refChangelog === 'string' && refChangelog.length > 0, `${refErr?.code || refErr?.message || 'empty'}`);
+    if (refChangelog && refChangelog.length > 1024 * 1024) {
+      // NEGATIVE CONTROL: the file really is over the default, and the default
+      // really does fail — so the explicit bound above is load-bearing, not
+      // decoration. (SKIPs loudly if the CHANGELOG ever shrinks back under
+      // 1 MiB: the control would then be measuring nothing.)
+      let defErr = null;
+      try { execFileSync('git', ['-C', REPO, 'show', `${REF}:CHANGELOG.md`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }); } catch (e) { defErr = e; }
+      ok(`NEGATIVE CONTROL: the SAME read with node's DEFAULT maxBuffer fails with ENOBUFS (${refChangelog.length} bytes > 1 MiB) — the explicit bound is what keeps this suite runnable`,
+        defErr?.code === 'ENOBUFS', `${defErr?.code || 'no error at all'}`);
+    } else {
+      console.log(`  SKIP: ${REF}:CHANGELOG.md is ${refChangelog ? refChangelog.length : 0} bytes — under node's 1 MiB default, so the ENOBUFS control would measure nothing`);
+    }
+  }
   /** Everything on the INTEGRATION BRANCH that already claims this number:
    *  release commit subjects (`<n>: …`) and CHANGELOG headings (`## <n> — …`).
    *  A branch's own commit is not on that branch yet, so this is exactly "did
@@ -706,7 +745,14 @@ console.log('— ⑩ version markers resolve; this branch squats nothing');
     ok(pred.length > 0 && pred.every(describesTheEffortTopic),
       `${PREDECESSOR} is a RELEASED ancestor about the effort work every site cites it for (a marker is a cross-reference — it must resolve)`,
       JSON.stringify(pred).slice(0, 200));
-    // ② the number the integrator will take is genuinely free.
+    // ② the number the integrator will take is genuinely free — derived from
+    //    the branch, never declared: highest released 2.369.N on REF, plus one.
+    const releasedNs = [];
+    for (const line of git('log', '--format=%s', '-400', REF).split('\n')) { const m = /^2\.369\.(\d+)(?![\d.])/.exec(line.trim()); if (m) releasedNs.push(+m[1]); }
+    for (const line of git('show', `${REF}:CHANGELOG.md`).split('\n')) { const m = /^## 2\.369\.(\d+)(?![\d.])/.exec(line.trim()); if (m) releasedNs.push(+m[1]); }
+    const latestN = Math.max(...releasedNs);
+    NEXT_FREE = `2.369.${latestN + 1}`;
+    ok(Number.isFinite(latestN) && claimants(`2.369.${latestN}`).length > 0, `the latest release on ${REF} is 2.369.${latestN} (derived, not declared)`, JSON.stringify(releasedNs.slice(-5)));
     const next = claimants(NEXT_FREE);
     ok(next.length === 0, `${NEXT_FREE} is unclaimed on ${REF} — the integrator may take it`, JSON.stringify(next));
     // ③ and this branch stamps NO unreleased number in any of the files a
@@ -743,14 +789,22 @@ console.log('— ⑩ version markers resolve; this branch squats nothing');
   // …and the CHANGELOG rule (test-harness-honesty's belt, kept): unreleased =
   // no entry (fine); released under the number we take = the entry must be OURS.
   const changelog = read('CHANGELOG.md');
-  const head = new RegExp(`^## ${NEXT_FREE.replace(/\./g, '\\.')}(?![\\d.])`, 'm').exec(changelog);
-  let entry = null;
-  if (head) {
-    const next = changelog.indexOf('\n## ', head.index + 1);
-    entry = changelog.slice(head.index, next < 0 ? changelog.length : next);
+  const entries = changelog.split(/\n(?=## )/).filter((e) => /^## 2\.369\./.test(e));
+  const shipped = entries.find((e) => describesThisChange(e));
+  if (shipped) {
+    // POST-RELEASE (2026-09-08): this change has a release entry of its own;
+    // the next free number belongs to whoever ships next and owes it nothing.
+    ok(true, `this change shipped as ${shipped.split('\n')[0].slice(3, 60)} — later entries owe it nothing`);
+  } else if (NEXT_FREE) {
+    const head = new RegExp(`^## ${NEXT_FREE.replace(/\./g, '\\.')}(?![\\d.])`, 'm').exec(changelog);
+    let entry = null;
+    if (head) {
+      const next = changelog.indexOf('\n## ', head.index + 1);
+      entry = changelog.slice(head.index, next < 0 ? changelog.length : next);
+    }
+    ok(!entry || describesThisChange(entry),
+      `CHANGELOG ${NEXT_FREE} is either unwritten (this branch makes no release) or describes THIS change`, entry ? entry.slice(0, 160) : 'no entry yet');
   }
-  ok(!entry || describesThisChange(entry),
-    `CHANGELOG ${NEXT_FREE} is either unwritten (this branch makes no release) or describes THIS change`, entry ? entry.slice(0, 160) : 'no entry yet');
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1093,8 +1147,28 @@ console.log('— ⑪c WIRING: every resume/fork/restart entry point, and where t
     && /model: model !== undefined \? model : savedCfg\.model,/.test(sl),
     'resumeSession still forwards an EXPLICIT pick (caller > the card ⚙ override) — the "chosen" rung',
     'resumeSession');
-  ok(/_doForkSession[\s\S]{0,2000}?resumeId,[\s\S]{0,400}?fork: true,/.test(sl),
-    'a FORK carries resumeId → it is a continuation, so it inherits the parent conversation\'s values');
+  // WHAT THIS PINS is that the fork's createSession call carries BOTH keys —
+  // `resumeId` (so `continuesConversation` is true and the ladder takes the
+  // parent's values) and `fork: true`. It used to pin the DISTANCE between them
+  // (2000 chars from the method name), which is a fact about formatting: owner
+  // ruling 9 added ~950 characters of comment inside `_doForkSession`
+  // explaining why the fork needs its own `worktree` pick, and the pin went red
+  // for a change that did not touch either key. Scope it to the METHOD BODY and
+  // read the call instead — same claim, and it cannot be broken by a paragraph.
+  const forkBody = (() => {
+    const i = sl.lastIndexOf('async _doForkSession(');
+    if (i < 0) return null;
+    let depth = 0;
+    for (let k = sl.indexOf('{', i); k < sl.length; k++) {
+      if (sl[k] === '{') depth++;
+      else if (sl[k] === '}' && --depth === 0) return sl.slice(i, k + 1);
+    }
+    return null;
+  })();
+  const forkCall = forkBody && /this\.createSession\(\{[\s\S]*?\n\s*\}\);/.exec(forkBody);
+  ok(!!forkCall && /\n\s*resumeId,/.test(forkCall[0]) && /\n\s*fork: true,/.test(forkCall[0]),
+    'a FORK carries resumeId → it is a continuation, so it inherits the parent conversation\'s values',
+    forkCall ? forkCall[0].slice(0, 200) : 'no _doForkSession createSession call found');
   ok(/restartConversationInPlace[\s\S]{0,1200}?this\.resumeSession\(cid,/.test(sl),
     'restartConversationInPlace goes through resumeSession (no second spawn path to keep in sync)');
   ok(/const retry = \(\) => this\.createSession\(\{\n\s*cwd, name: sessionName, resumeId, mode: sessionMode, model, permission, effort,/.test(sl),
@@ -1160,10 +1234,44 @@ console.log('— ⑪c WIRING: every resume/fork/restart entry point, and where t
   ok(/modelOrigin: s\._modelOrigin \|\| null, effortOrigin: s\._effortOrigin \|\| null,/.test(srv),
     'the active-sessions payload carries value + origin for Session Properties');
   const sb = read('src/lib/sidebar.js');
-  ok((sb.match(/modelOrigin: (wm\?\.|ws\.)modelOrigin \|\| null/g) || []).length === 2,
-    'BOTH merge branches carry it onto the session record (the 2.369.58 outputStyle row reached neither — fixed here with them)');
-  ok((sb.match(/outputStyle: (wm\?\.|ws\.)outputStyle \|\| null/g) || []).length === 2,
+  // THE CLAIM IS "BOTH BRANCHES CARRY IT", not "there are two hand-copied lines
+  // that spell it". This started as a pair of literal-line counts because the
+  // facts WERE hand-copied one per line — and the finding it was written for
+  // (`outputStyle` reached NEITHER branch) is precisely the drift a per-fact
+  // line invites. Owner ruling 9 round 3 replaced the copies with ONE declared
+  // list spread into both branches, so the pin now asks the two questions that
+  // survive that: is the fact DECLARED, and does each branch spread the list.
+  // A key dropped from the list still turns this red; a fifth fact added to it
+  // no longer needs a sixth line here.
+  const factList = /const LIVE_SESSION_FACTS = Object\.freeze\(\{([\s\S]*?)\n\}\);/.exec(sb);
+  const spreads = (sb.match(/\.\.\.liveSessionFacts\((?:wm|ws)\)/g) || []).length;
+  const declares = (k) => !!factList && new RegExp(`(^|[^\\w])${k}\\s*:`, 'm').test(factList[1]);
+  ok(!!factList && spreads === 2 && declares('modelOrigin') && declares('effortOrigin')
+    && declares('spawnModel') && declares('effort'),
+    'BOTH merge branches carry it onto the session record (the 2.369.58 outputStyle row reached neither — fixed here with them)',
+    JSON.stringify({ spreads, declared: !!factList && factList[1].replace(/\s+/g, ' ').slice(0, 200) }));
+  ok(declares('outputStyle'),
     '…including that outputStyle twin, whose "live" value the panel had been reading as always-empty');
+  // …and the list is not a place a fact can hide: every key it declares must be
+  // one the SERVER payload really publishes, or the merge carries a null under
+  // a name nothing writes (the other half of the same drift).
+  const srvPayload = read('server.js');
+  const declaredKeys = factList ? [...factList[1].matchAll(/^\s*(?:\/\/[^\n]*\n\s*)*([A-Za-z_$][\w$]*)\s*:/gm)].map((m) => m[1]) : [];
+  const unpublished = declaredKeys.filter((k) => !new RegExp(`(^|[^\\w])${k}:`).test(srvPayload));
+  ok(declaredKeys.length >= 8 && unpublished.length === 0,
+    'every fact the merge declares is one the active-sessions payload actually publishes',
+    JSON.stringify({ declaredKeys, unpublished }));
+  // NEGATIVE CONTROLS for the two questions above — a pin that replaced a
+  // literal-line count has to show it can still fail.
+  {
+    const dropped = sb.replace(/\n\s*'?outputStyle'?: \{ digest[^\n]*\n/, '\n');
+    const fl2 = /const LIVE_SESSION_FACTS = Object\.freeze\(\{([\s\S]*?)\n\}\);/.exec(dropped);
+    ok(!!fl2 && !/(^|[^\w])outputStyle\s*:/m.test(fl2[1]) && dropped !== sb,
+      'NEGATIVE CONTROL: a fact deleted from the declared list is DETECTED (the pin is not satisfied by the list merely existing)');
+    const unspread = sb.replace('...liveSessionFacts(ws)', '/* dropped */');
+    ok((unspread.match(/\.\.\.liveSessionFacts\((?:wm|ws)\)/g) || []).length === 1,
+      'NEGATIVE CONTROL: a branch that stops spreading the list is DETECTED (the unmatched-session branch is the one 2.369.58 forgot)');
+  }
   const sp = read('src/lib/session-props.js');
   ok(/originRow\(t\('Model'\), s\.spawnModel \|\| '', cfg\.model, s\.modelOrigin\)/.test(sp)
     && /originRow\(t\('Effort'\), s\.effort \|\| '', cfg\.effort, s\.effortOrigin,/.test(sp),

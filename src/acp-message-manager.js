@@ -335,7 +335,13 @@ class AcpMessageManager {
       case 'queue_changed': return this._processQueueChanged(record, emit);
       case 'queue_op_result': return this._processQueueOpResult(record, emit);
       case 'notice': return this._processNotice(record, emit);
-      default: return; // client_request / notification / peer_result: journal-only
+      // client_request / notification / peer_result / permission_rules:
+      // journal-only. `permission_rules` is named here for the same reason
+      // codex's normalizer lists it in SKIPPED_EVENT_TYPES — it is the typed
+      // answer to the read-only `read-permission-rules` verb, correlated by
+      // requestId to one pending HTTP read, never a card and never a client
+      // record (round-2 verifier).
+      default: return;
     }
   }
 
@@ -537,6 +543,12 @@ class AcpMessageManager {
         this._status.slashCommands = asArray(u.availableCommands).map((c) => String(c?.name || '')).filter(Boolean).slice(0, 64);
         this._status.commandDescriptions = Object.fromEntries(asArray(u.availableCommands).filter((c) => c?.name).map((c) => [String(c.name), String(c.description || '')]));
         this._patchInit(emit);
+        // …and the ONE command-list op the claude normalizer also emits
+        // (§2.6): patching the init card alone never reaches the composer —
+        // an `edit` on a COMPLETE system card is not re-rendered, so its side
+        // effects never re-run. ACP declares no terminal-bound subset, so
+        // nothing is filtered; the shape stays identical across harnesses.
+        if (emit) this._emit({ op: 'meta', subtype: 'slash-commands', data: { commands: this._status.slashCommands, terminal: [] } });
         return;
       }
       case 'usage_update': {
@@ -694,7 +706,26 @@ class AcpMessageManager {
     if (tc.toolCallId && !this.toolCards.has(tc.toolCallId)) this._toolCall({ ...tc, status: tc.status || 'pending' }, emit);
     const msgId = tc.toolCallId ? this.toolCards.get(tc.toolCallId) : null;
     let existing = msgId ? this.messageIndex.get(msgId) : null;
-    const permission = {
+    // ASK cards (S9 remainder, B-eac2): a record carrying `questions` is the
+    // harness-neutral "the agent is asking the user something" shape claude's
+    // AskUserQuestion already renders (kind 'user_input'), not an approval.
+    // OpenCode's `question` tool arrives this way, live and from the store.
+    const ask = Array.isArray(rec.questions) && rec.questions.length ? rec.questions : null;
+    const permission = ask ? {
+      requestId: rec.requestId,
+      toolName: existing?.toolName || 'AskUserQuestion',
+      input: existing?.content?.[0]?.input || inputOf(tc),
+      questions: ask,
+      resolved: rec.resolved || null,
+      selectedAnswers: rec.answers && typeof rec.answers === 'object' ? rec.answers : undefined,
+      via: rec.via || null,                 // which lane answers it (e.g. 'opencode-serve')
+      host: rec.host || null,               // …on which machine (hostId is a parameter here too)
+      // STALE = the ask is in the transcript but no live request is behind it
+      // any more (answered elsewhere, or the process that asked is gone). The
+      // card must SAY so instead of offering a Submit that could only fail.
+      stale: !!rec.stale,
+      kind: 'user_input',
+    } : {
       requestId: rec.requestId,
       toolName: existing?.toolName || toolNameOf(tc.kind),
       input: existing?.content?.[0]?.input || inputOf(tc),
@@ -706,12 +737,16 @@ class AcpMessageManager {
     if (!existing) {
       existing = this._create({ role: 'tool', status: 'pending', content: [{ type: 'tool_call', toolCallId: tc.toolCallId || requestId, toolName: permission.toolName, input: permission.input }], toolCallId: tc.toolCallId || requestId, toolName: permission.toolName, permission });
       if (tc.toolCallId) this.toolCards.set(tc.toolCallId, existing.id);
-      this.pendingApprovals.set(requestId, { msgId: existing.id, permission });
+      // an ALREADY-resolved card (a store replay of an answered ask) is not
+      // pending — leaving it in the map would let a stray response echo flip
+      // a historical answer
+      if (!permission.resolved) this.pendingApprovals.set(requestId, { msgId: existing.id, permission });
       if (emit) this._emit({ op: 'create', message: existing });
       return;
     }
     existing.permission = permission;
-    this.pendingApprovals.set(requestId, { msgId: existing.id, permission });
+    if (!permission.resolved) this.pendingApprovals.set(requestId, { msgId: existing.id, permission });
+    else this.pendingApprovals.delete(requestId);
     if (emit) this._emit({ op: 'edit', id: existing.id, fields: { permission } });
   }
   _resolvePermission(requestId, resolved, emit, optionId) {

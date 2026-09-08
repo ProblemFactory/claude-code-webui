@@ -45,7 +45,7 @@ import { registerWindowType, svgIcon16 } from './window-types.js';
 import { CustomizeMode, applyArrangement } from './customize-mode.js';
 import { installSessionPalette } from './session-palette.js';
 import { installUserTodos } from './user-todos-panel.js';
-import { BACKEND_META, createBackendIconHtml, getSessionKey, pickAgentIdentity, settingsPrefixFor, effortLabel, noteModelCatalog } from './agent-meta.js';
+import { BACKEND_META, createBackendIconHtml, getSessionKey, pickAgentIdentity, settingsPrefixFor, effortLabel, noteModelCatalog, worktreeCapsFor } from './agent-meta.js';
 
 const BACKEND_SESSION_OPTIONS = {
   claude: {
@@ -353,6 +353,19 @@ class App {
       if (msg.service !== undefined) BACKEND_META[msg.backend].service = msg.service || null;
       if (msg.reason && msg.reason !== prev) showToast(`${BACKEND_META[msg.backend].label || msg.backend}: ${msg.reason}`, { type: 'error' });
       try { this.sidebar?._render?.(); } catch {}
+    });
+    // S9 remainder (B-eac2): a conversation was rolled back / restored, or an
+    // ask was answered, on THIS or another client. Persistent state changed →
+    // every browser must see it without a refresh (multi-client law): the
+    // session list carries the new roll-back state, and any open window on
+    // that conversation says what happened in-line.
+    this.ws.onGlobal((msg) => {
+      if (msg.type !== 'opencode-updated') return;
+      try { this.sidebar?._poll?.(); } catch {}
+      for (const view of this.sessions?.values?.() || []) {
+        if (!view?.noteOpencodeChange) continue;
+        try { view.noteOpencodeChange(msg); } catch {}
+      }
     });
     // A harness's background service is controlled by a built-in PLUGIN
     // (opencode → 'opencode-serve'): enable/disable/"asked once" are instance
@@ -1475,6 +1488,9 @@ class App {
         extraArgs: document.getElementById('input-extra-args').value.trim(),
         taskId: document.getElementById('input-task')?.value || undefined,
         accountId: document.getElementById('input-account')?.value || undefined,
+        // Only send it when the harness HAS the row (the box is hidden + cleared
+        // otherwise, but the read is gated too so a stale DOM cannot leak it).
+        worktree: worktreeCapsFor(backend).supported && !!document.getElementById('input-worktree')?.checked,
       });
       this.hideDialogs();
     });
@@ -1533,10 +1549,15 @@ class App {
     for (const [id, hide] of [
       ['row-mode', isShell], ['row-model', isShell], ['custom-model-row', isShell],
       ['row-permission', isShell], ['row-effort', isShell || BACKEND_META[backend]?.caps?.effort === false], ['row-extra-args', isShell],
+      // Per-session git worktree (owner ruling 9): gated on the CAPS ROW, not
+      // on a backend id — a harness without the flag simply has no row, and
+      // the box is cleared so a stale tick can never ride a create.
+      ['row-worktree', isShell || !worktreeCapsFor(backend).supported],
     ]) {
       const el = document.getElementById(id);
       if (el) el.classList.toggle('hidden', hide);
     }
+    { const wt = document.getElementById('input-worktree'); if (wt && !worktreeCapsFor(backend).supported) wt.checked = false; }
     if (isShell) return; // nothing else to populate
 
     const cfg = BACKEND_SESSION_OPTIONS[backend] || BACKEND_SESSION_OPTIONS.claude;

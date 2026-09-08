@@ -15,6 +15,93 @@ import { installSidebarTasks } from './sidebar-tasks.js';
 // enough that a real outage never renders a silently stale list.
 const SESSION_POLL_STALE_AFTER = 3;
 
+/**
+ * THE per-session LIVE FACTS the `active-sessions` payload publishes under the
+ * names every client surface reads them by — carried through `_merge()` as ONE
+ * list instead of one hand-copied line each.
+ *
+ * WHY A LIST AND NOT MORE LINES (round-3 verifier, BLOCKER). `_merge()` does
+ * not spread the live row: it REBUILDS it (the webui half is renamed into
+ * webuiId/webuiName/webuiMode, `cwd` becomes the composed display/grouping
+ * key, `status` is derived), so a fact that is not named here is DROPPED — and
+ * `/api/sessions` discovery does not carry any of these, so the `...s` spread
+ * cannot supply them either. That is the whitelist-drift class this project
+ * has now been bitten by six times (2.368.4 named it at the fifth), and three
+ * facts were dead RIGHT HERE when this list was written:
+ *   · `worktree`/`worktreePath` (owner ruling 9) — the card badge never drew,
+ *     Session Properties said "not isolated in this run" about a session the
+ *     server had just reported isolated WITH a path, and the fork's
+ *     `worktreePick({saved, live: sessionInfo.worktree})` always got
+ *     `live: undefined` — so a fork of an isolated conversation ran in the
+ *     user's real working tree;
+ *   · `outputStyle` (2.369.58) — Session Properties' response-style row read
+ *     `s.outputStyle` and never saw a live value, so a session running a style
+ *     reported the harness default;
+ *   · `remoteState` (2.219.1) — the "host unreachable" chip could not draw, so
+ *     a session whose machine was gone still read as conversable.
+ * Adding a key to the server payload and NOT to this list fails the drift
+ * guard in scripts/test-worktree-userchan-ui.mjs, which re-derives the payload's
+ * own key set from server.js.
+ */
+/**
+ * REACHING `_merge()` IS HALF THE HOP (round-4 verifier). `_mergeAndRender()`
+ * only re-renders when its DIGEST changes, and the digest listed neither
+ * `worktree`/`worktreePath` nor `remoteState` — so the `worktree-path`
+ * broadcast this branch added specifically to keep the badge honest repainted
+ * NOTHING, and neither badge nor chip has any partial-update path (both exist
+ * only inside `renderSessionCard`). A card kept claiming "Running in its own
+ * git worktree" after the CLI retired the fact, and a keeper link going down
+ * (`remoteState` set, `status` still 'live') could not draw its chip, until
+ * some unrelated digest field happened to change.
+ *
+ * So each fact declares BOTH halves here: it is always CARRIED, and `digest`
+ * names the projection that gates the re-render (null = carried only).
+ * Gating facts must be cheap SCALARS whose value changes when the rendered
+ * result changes — the digest comment below explains why churn is forbidden
+ * (`startedAt` bumps on every write; a 5000-row list re-rendered every poll
+ * yanks scroll/expanded state out from under the user — two real reports).
+ * The four gating rows change at most once per session (an init frame, a
+ * transport transition, a style pick), so they cannot reintroduce that churn.
+ *
+ * DELIBERATELY carried-only, measured not assumed: `todo` is an OBJECT whose
+ * `current` step string changes several times per TURN, and `auth` is an
+ * object the pool re-points; gating on either is exactly the 2.72.0/2.106.1
+ * churn. Their surfaces (the TodoWrite pill, the billing badge) therefore
+ * still repaint late — the same class as this finding, but a change with its
+ * own churn measurement to make, not a line to slip in here.
+ */
+const LIVE_SESSION_FACTS = Object.freeze({
+  remoteState: { digest: (v) => v || '' },            // 2.219.1 "host unreachable" chip
+  accountId: { digest: null }, accountName: { digest: null }, accountTail: { digest: null },
+  auth: { digest: null },                             // object (source/name/poolTarget)
+  todo: { digest: null },                             // object, changes per TodoWrite
+  outputStyle: { digest: (v) => v || '' },            // 2.369.58 response-style row
+  // The B-6b6d spawn knobs and the origin each one came from. CARRIED-ONLY:
+  // nothing on the CARD draws them (Session Properties does, and it re-reads
+  // the merged row when it opens), so gating on them would buy a re-render
+  // with no rendered difference — the churn this table exists to bound.
+  spawnModel: { digest: null }, effort: { digest: null },
+  modelOrigin: { digest: null }, effortOrigin: { digest: null },
+  worktree: { digest: (v) => (v ? '1' : '0') },       // owner ruling 9 badge
+  worktreePath: { digest: (v) => v || '' },           // …and the path its tooltip names
+});
+const LIVE_SESSION_FACT_KEYS = Object.freeze(Object.keys(LIVE_SESSION_FACTS));
+/** Carry the live facts verbatim; an absent live row states nothing (null). */
+const liveSessionFacts = (src) => {
+  const out = {};
+  for (const k of LIVE_SESSION_FACT_KEYS) out[k] = src ? (src[k] ?? null) : null;
+  return out;
+};
+/** The render-gate projection of one row's live facts (see the digest below). */
+const liveFactsDigestPart = (s) => {
+  let out = '';
+  for (const k of LIVE_SESSION_FACT_KEYS) {
+    const d = LIVE_SESSION_FACTS[k].digest;
+    if (d) out += ':' + d(s ? s[k] : null);
+  }
+  return out;
+};
+
 class Sidebar {
   constructor(app) {
     this.app = app; this.el = document.getElementById('sidebar');
@@ -748,22 +835,10 @@ class Sidebar {
         webuiId: wm?.id || null,
         webuiName: wm?.name || null,
         webuiMode: wm ? (wm.mode || 'terminal') : null,
-        accountId: wm?.accountId || null, // billing account id (title-badge switcher's "current")
-        accountName: wm?.accountName || null, // billing identity badge (API key sessions)
-        accountTail: wm?.accountTail || null,
-        auth: wm?.auth || null, // billing identity (subscription/api-console/api-key/unknown)
-        todo: wm?.todo || null, // agent's own TodoWrite/plan summary (board pill)
-        // WHAT THIS SESSION IS ACTUALLY RUNNING WITH, from the server's own
-        // record — Session Properties reports these as facts and must never
-        // re-derive them from the saved PICK. `outputStyle` was added to the
-        // active-sessions payload in 2.369.58 but never to this merge, so the
-        // panel's "live" value was silently always empty and every session read
-        // as 'saved'; the B-6b6d rows land here WITH it, one wiring, one bug.
-        outputStyle: wm?.outputStyle || null,
-        spawnModel: wm?.spawnModel || null,
-        effort: wm?.effort || null,
-        modelOrigin: wm?.modelOrigin || null,   // 'chosen' | 'conversation' | 'instance' | 'harness'
-        effortOrigin: wm?.effortOrigin || null,
+        // Every remaining live fact, by the server's own name (see
+        // LIVE_SESSION_FACTS): billing identity, the agent's TodoWrite pill,
+        // the transport chip, the response style and the worktree badge/path.
+        ...liveSessionFacts(wm),
       };
     });
 
@@ -797,16 +872,7 @@ class Sidebar {
           webuiName: ws.name,
           name: ws.name || '',
           webuiMode: ws.mode || 'terminal',
-          accountId: ws.accountId || null,
-          accountName: ws.accountName || null,
-          accountTail: ws.accountTail || null,
-          auth: ws.auth || null,
-          todo: ws.todo || null,
-          outputStyle: ws.outputStyle || null,
-          spawnModel: ws.spawnModel || null,
-          effort: ws.effort || null,
-          modelOrigin: ws.modelOrigin || null,
-          effortOrigin: ws.effortOrigin || null,
+          ...liveSessionFacts(ws), // the SAME list as the matched branch above
         });
       }
     }
@@ -847,7 +913,11 @@ class Sidebar {
     // order-insensitive digest made changes so rare it never re-fired
     // (real report: 订阅徽章消失 on reload).
     this.app.syncSessionIdentity?.(this._allSessions);
-    const digest = JSON.stringify(this._allSessions.map(s => `${this._getSessionStateKey(s)}:${s.status}:${s.name || ''}:${s.webuiName || ''}:${s.webuiId || ''}:${s.agentKind || 'primary'}:${s.agentRole || ''}:${s.agentNickname || ''}`).sort());
+    // …and the render-gating LIVE facts (round-4 verifier): a fact that reaches
+    // `_merge()` but not this digest cannot repaint the card that draws it.
+    // The suffix is DERIVED from LIVE_SESSION_FACTS so the drift guard covers
+    // the render gate too — a new payload key must choose gate-or-carry there.
+    const digest = JSON.stringify(this._allSessions.map(s => `${this._getSessionStateKey(s)}:${s.status}:${s.name || ''}:${s.webuiName || ''}:${s.webuiId || ''}:${s.agentKind || 'primary'}:${s.agentRole || ''}:${s.agentNickname || ''}${liveFactsDigestPart(s)}`).sort());
     if (digest === this._sessionDigest) return;
     this._sessionDigest = digest;
     this._updateBackendFilterBtn(document.getElementById('backend-filter'));

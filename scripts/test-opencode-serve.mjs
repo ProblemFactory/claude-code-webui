@@ -162,6 +162,43 @@ console.log('— ③ facts.discover / readConversation / forkSession');
   const f = await facts.forkSession('ses_a1', { cwd: '/work/alpha' });
   ok('forkSession → POST fork with the directory → the new session; the list cache is invalidated', f.id === 'ses_a1_fork1' && mock.state.requests.includes('POST /session/ses_a1/fork?directory=%2Fwork%2Falpha') && (await facts.discover({})).some((e) => e.backendSessionId === 'ses_a1_fork1'));
   ok('…and DISPOSES the instance for that directory afterwards (fork is the one call that hands a directory to a mutating endpoint)', mock.state.disposed.includes('/work/alpha') && mock.state.requests.includes('POST /instance/dispose?directory=%2Fwork%2Falpha'), mock.state.disposed);
+  // ── readConfig: the READ-ONLY permission-rule source (owner ruling 10) ──
+  // THE ROUTE LAW, re-measured on a real 1.18.29 serve (2026-09-07, /proc):
+  // v1 `GET /config` left it at threads 15, inotify fds 0, RSS flat across
+  // four calls; minutes later on the SAME process the v2 twin
+  // `GET /api/permission/saved` took it to threads 37, inotify fds 2, RSS
+  // 345→507 MB. The mock models both, so reaching for the obvious-looking
+  // route turns this suite red instead of turning the fleet slow.
+  {
+    const before = mock.state.requests.length;
+    const cfg = await facts.readConfig();
+    ok('readConfig reads the v1 GET /config (the permission block, verbatim)',
+      cfg?.permission?.edit === 'allow' && cfg.permission.bash['git push*'] === 'deny' && mock.state.requests.slice(before).some((r) => r.startsWith('GET /config')), mock.state.requests.slice(before));
+    ok('…and boots ZERO OpenCode instances — the v2 `/api/permission/saved` twin is never called (measured: it takes one serve from 13→37 threads, 0→2 inotify fds, 345→507 MB)',
+      mock.state.instances.size === 0 && !mock.state.requests.some((r) => r.includes('/api/permission')), { instances: [...mock.state.instances], perm: mock.state.requests.filter((r) => r.includes('permission')) });
+    const n2 = mock.state.requests.length;
+    await facts.readConfig();
+    ok('a second read inside the cache window is free (a config does not change between two clicks)', mock.state.requests.length === n2);
+    mock.state.fail = true; facts.invalidate();
+    let ec = null; try { await facts.readConfig(); } catch (e) { ec = e; }
+    ok('a FAILING read is LOUD (user action) — never a silent "this agent has no rules"', ec instanceof serve.OpencodeServeError && /config could not be read/.test(ec.message), ec?.message);
+    mock.state.fail = false;
+    const cfg2 = await facts.readConfig();
+    ok('…and it is NOT negative-cached: the next click after fixing the serve gets the real answer', cfg2?.permission?.edit === 'allow');
+    // NEGATIVE CONTROL: the mock really does model the instance boot, so the
+    // zero above is a measurement and not a mock that cannot answer.
+    await client.request('GET', '/api/permission/saved');
+    ok('NEGATIVE CONTROL: calling the v2 twin on the same mock DOES boot an instance (so the assert above is not vacuous)', mock.state.instances.size === 1, [...mock.state.instances]);
+    mock.state.instances.clear();
+    const src = read('src/opencode-serve.js');
+    // COMMENTS are stripped first: the v2 routes are NAMED in the prose on
+    // purpose (the next reader has to know which route the measurement
+    // rejected), so a raw grep would pin the warning instead of the code.
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '');
+    ok('the module\'s CODE contains no `/api/` route string at all (the v2 family is named only in comments), and its config call is a GET — never the `/config` PATCH write twin (ruling 10 is read-only)',
+      !/['"`]\/api\//.test(code) && /\/api\//.test(src) && /this\.request\('GET', '\/config'/.test(code) && !/request\('(PATCH|POST|PUT|DELETE)', ?'\/config/.test(code),
+      (code.match(/['"`]\/api\/[^'"`]*/g) || []).join(' | '));
+  }
   const facts2 = serve.createFacts(fakeLocator(client, { caps: { fork: false }, version: '1.10.0' }), { now: clock });
   let ef = null; try { await facts2.forkSession('ses_a1'); } catch (e) { ef = e; }
   ok('forkSession is REFUSED (code unsupported) when the serve OpenAPI has no fork endpoint', ef?.code === 'unsupported' && /no session fork endpoint/.test(ef.message) && /1\.10\.0/.test(ef.message), ef?.message);
@@ -346,7 +383,19 @@ console.log('— ⑤ serve-backed reader + the harness store contract');
 console.log('— ⑥ caps verdict');
 {
   const h = require(path.join(REPO, 'src/harnesses/opencode.js'));
-  ok('shipped verdict: capsOf(opencode).fork is false until the serve OpenAPI proves it', capsOf('opencode').fork === false && /fork: false,\n    streamProtocol: 'acp-events'/.test(read('src/backend-caps.js')));
+  // The source pin asserts what the opencode ROW DECLARES, not the byte layout
+  // of one line (the bd2289f2 lesson, repeated): the §2.13 caps收口 appended
+  // forkAtMessage/review/renameWriteback to that same line, and an adjacency
+  // regex went red on the reflow while every fact it meant to pin was still
+  // true. Row-scoped, so a `fork: true` anywhere ELSE in the file cannot
+  // satisfy it either.
+  const capsSrc = read('src/backend-caps.js');
+  const rowOf = (src, id) => { const i = src.indexOf(`\n  ${id}: {`); if (i < 0) return ''; const e = src.indexOf('\n  },', i); return e < 0 ? '' : src.slice(i, e); };
+  const ocRow = rowOf(capsSrc, 'opencode');
+  ok('shipped verdict: capsOf(opencode).fork is false until the serve OpenAPI proves it (row-scoped source pin, layout-independent)',
+    capsOf('opencode').fork === false && /\bfork: false\b/.test(ocRow) && /streamProtocol: 'acp-events'/.test(ocRow), ocRow.slice(0, 200));
+  ok('…NEGATIVE CONTROL: the row extractor is bounded and the pin catches a flipped declaration (a `fork: true` planted in the row fails; the claude row is a different row)',
+    /\bfork: true\b/.test(ocRow.replace('fork: false', 'fork: true')) && !/streamProtocol: 'acp-events'/.test(rowOf(capsSrc, 'claude')) && rowOf(capsSrc, 'nosuch') === '');
   ok('setVerifiedCap flips the SAME row object the descriptor holds', setVerifiedCap('opencode', 'fork', true) === true && capsOf('opencode').fork === true && h.caps === capsOf('opencode') && h.caps.fork === true && BACKEND_CAPS.opencode.fork === true);
   ok('setVerifiedCap refuses an unknown backend or key (returns false, no row grows)', setVerifiedCap('gemini', 'fork', true) === false && setVerifiedCap('claude', 'nope', 1) === false && !('nope' in BACKEND_CAPS.claude));
   setVerifiedCap('opencode', 'fork', false);
@@ -379,7 +428,7 @@ console.log('— ⑦ wiring pins');
   ok('app.js merges verified caps from /api/home and the live harness-caps-updated broadcast (then re-renders the sidebar)', /if \(h\.caps && BACKEND_META\[h\.id\]\?\.caps\) Object\.assign\(BACKEND_META\[h\.id\]\.caps, h\.caps\);/.test(app) && /msg\.type !== 'harness-caps-updated'/.test(app) && /Object\.assign\(BACKEND_META\[msg\.backend\]\.caps, msg\.caps\);/.test(app) && /this\.sidebar\?\._render\?\.\(\);/.test(app));
   ok('the sidebar Fork row + fork command gate on META caps (no id list)', /when: \(c\) => !!backendFeatureCaps\(c\.s\.backend \|\| 'claude'\)\.fork/.test(read('src/lib/session-card.js')));
   ok('backend-caps exports setVerifiedCap (PURE setter, in-place row mutation)', /function setVerifiedCap\(backend, key, value\)/.test(read('src/backend-caps.js')) && /module\.exports = \{[^}]*\bsetVerifiedCap\b[^}]*\};/.test(read('src/backend-caps.js')));
-  ok('test-architecture places src/opencode-serve.js in SHARED; ci.mjs runs this suite', /'src\/opencode-serve\.js'\]\);/.test(read('scripts/test-architecture.mjs')) && /'test-opencode-serve'/.test(read('scripts/ci.mjs')));
+  ok('test-architecture places src/opencode-serve.js in SHARED; ci.mjs runs this suite', /SHARED = new Set\(\[[\s\S]*?'src\/opencode-serve\.js'[\s\S]*?\]\);/.test(read('scripts/test-architecture.mjs')) && /'test-opencode-serve'/.test(read('scripts/ci.mjs')));
   const oc = read('src/opencode-serve.js');
   ok('opencode-serve talks to 127.0.0.1 only, never a vendor host, never a secret in argv', /http:\/\/127\.0\.0\.1:\$\{port\}/.test(oc) && /'--hostname', '127\.0\.0\.1'/.test(oc) && !/api\.anthropic\.com|api\.openai\.com|Bearer sk-/.test(oc) && !/OPENCODE_SERVER_PASSWORD.*args/.test(oc));
   ok('the record is written atomically (tmp + rename) and the serve is spawned detached with ignored stdio under the caller env', /fs\.renameSync\(tmp, file\)/.test(oc) && /stdio: 'ignore', detached: true/.test(oc) && /env: env\(\)/.test(oc));

@@ -10,7 +10,8 @@ const { listCodexThreads } = require('./codex-session-store');
 const { findCodexSessionJsonlPath, extractCodexThreadMeta } = require('./adapters/codex');
 const { cwdToProjectDir, findSessionJsonlPath } = require('./session-store');
 const { get: harnessOf } = require('./harnesses'); // S3: store.warmTranscript per harness (claude parse-cache warm / codex thread/read fallback)
-const { capsOf } = require('./backend-caps');      // inputModes.queueVerbs gate for the 'queue-op' case (never a backend-id branch)
+const { capsOf } = require('./backend-caps');      // inputModes.queueVerbs / review / renameWriteback gates (never a backend-id branch)
+const { reconcileAttachStreaming } = require('./turn-state'); // §2.5: ONE attach-time streaming decision, shared with the live consumer
 
 /** The sentence a harness-level verb refusal carries. Every branch says what
  *  happens to the message ANYWAY — a refusal that only says "no" leaves the
@@ -713,9 +714,12 @@ function registerWsHandler(wss, ctx) {
           break;
         }
 
+        // Start a code review (§2.13). Gated on the HARNESS caps row, never on
+        // a backend id — the client's own button already reads the mirror of
+        // this row, and a server that disagreed would silently drop the frame.
         case 'review-start': {
           const session = activeSessions.get(data.sessionId);
-          if (session?.pty && session.mode === 'chat' && session.backend === 'codex' && data.target) {
+          if (session?.pty && session.mode === 'chat' && capsOf(session.backend).review && data.target) {
             session.pty.write(JSON.stringify({
               type: 'review-start',
               target: data.target,
@@ -726,6 +730,31 @@ function registerWsHandler(wss, ctx) {
         }
 
         case 'permission-response': {
+          // ASK cards raised by the OpenCode SERVE are answered on the serve's
+          // OWN route (S9 remainder piece (b), B-eac2) — not on a session's
+          // stdin, because the conversation may have no live process here at
+          // all (a stopped conversation opened read-only still shows a pending
+          // ask). The card forwards the `via` the record that created it
+          // carried, so this layer never guesses a backend, and `host` makes
+          // the answer land on the machine the serve runs on.
+          if (data.via === 'opencode-serve') {
+            const { access } = require('./server/opencode-access');
+            const answers = (data.toolInput && data.toolInput.answers) || {};
+            const act = data.approved
+              ? access().call(data.host || null, 'answer', { requestId: data.requestId, answers })
+              : access().call(data.host || null, 'reject', { requestId: data.requestId });
+            act.catch((e) => {
+              // a refused answer MUST reach the user: the card already flipped
+              // itself to "answered" optimistically, so silence would be a lie.
+              // `scope:'action'` is LOAD-BEARING (2.363.1, inc-mt2arppw): a
+              // session-scoped `error` frame without it is read as "attach
+              // failed" and flips the LIVE window into the read-only Resume
+              // bar — an OpenCode question we could not answer must refuse ONE
+              // ACTION, never condemn the conversation.
+              try { ws.send(JSON.stringify({ type: 'error', scope: 'action', code: 'opencode-question', sessionId: data.sessionId, requestId: data.requestId, error: `OpenCode did not accept the answer: ${e.message}`, message: `OpenCode did not accept the answer: ${e.message}` })); } catch { }
+            });
+            break;
+          }
           const session = activeSessions.get(data.sessionId);
           if (session?.pty && session.mode === 'chat') {
             const adapter = adapterRegistry.get(session.backend);
@@ -805,7 +834,10 @@ function registerWsHandler(wss, ctx) {
           if (!session) break;
 
           if (trimmedName) session.name = trimmedName;
-          if (session.backend === 'codex' && session.mode === 'chat' && session.pty && trimmedName) {
+          // Write the new name back into the AGENT's own store when the
+          // harness has somewhere to write it (caps.renameWriteback — codex's
+          // thread name; claude's JSONL has no title field). Never a backend id.
+          if (capsOf(session.backend).renameWriteback && session.mode === 'chat' && session.pty && trimmedName) {
             session.pty.write(JSON.stringify({ type: 'set-thread-name', name: trimmedName }) + '\n');
           }
           if (session.sockName) {
@@ -1049,26 +1081,51 @@ function registerWsHandler(wss, ctx) {
               const turnMap = session._normalizer ? session._normalizer.turnMap() : [];
               const pendingPerms = sm.activePendingPermissions?.() || {};
               // session._isStreaming is tracked explicitly from protocol signals
-              // (result/compact_boundary/user for Claude, turn events for Codex).
-              // Falls back to wrapper metadata file for sessions not yet tracked.
-              // STREAMING RECONCILIATION (2.339.2, stuck-thinking incident):
-              // the wrapper's sidecar flips streaming:false the moment the
-              // result record flows — if the server still believes this LOCAL
-              // chat session is mid-turn while the wrapper disagrees (and the
-              // sidecar has been settled >3s, so no mid-pipeline race), the
-              // server missed the turn end (restart window / parse detach).
-              // Heal here so an attach can never show thinking forever.
-              if (session._isStreaming && !session.host && session.mode === 'chat') {
-                try {
-                  const wf = require('./server/wrapper-files.js').resolveWrapperFiles(BUFFERS_DIR, data.sessionId, path.join(SOCKETS_DIR, data.sessionId.replace(/^sess-/, 'cw-')));
-                  const st = fs.statSync(wf.sidecar);
-                  const sc = JSON.parse(fs.readFileSync(wf.sidecar, 'utf-8'));
-                  if (sc.streaming === false && Date.now() - st.mtimeMs > 3000) {
-                    console.log(`[session] ${data.sessionId}: wrapper says the turn ENDED but server still streaming — healing (missed result)`);
-                    session._isStreaming = false;
-                    session._streamingLabel = '';
+              // (result/compact_boundary/user for claude and — since §2.5 — its
+              // own session_state_changed; turn events for codex; prompt_end for
+              // ACP). Falls back to the wrapper metadata file for sessions the
+              // server is not tracking yet.
+              // ATTACH RECONCILIATION — ONE decision, PURE
+              // (src/turn-state.js reconcileAttachStreaming), shared with the
+              // live consumer's reading of what each state means. Two rungs, in
+              // order:
+              //   ① the harness's OWN last turn state wins in BOTH directions,
+              //     including "still running" — which the derived path could
+              //     never say, because the CLI's `idle` fires after the bg-agent
+              //     loop exits, strictly later than `result`.
+              //   ② the wrapper sidecar stays the BACKSTOP (2.339.2: it flips
+              //     streaming:false the moment the result record flows). It is a
+              //     DERIVED observer, so it never outranks the harness — but it
+              //     is the only thing between us and a session that shows
+              //     "thinking" forever if an `idle` record is ever lost. Under
+              //     authority its settle window is 30s instead of 3s, and when it
+              //     fires anyway the override SAYS so (telemetry) instead of
+              //     quietly deciding the new signal was wrong.
+              if (session.mode === 'chat') {
+                let sidecar = null;
+                if (session._isStreaming && !session.host) {
+                  try {
+                    const wf = require('./server/wrapper-files.js').resolveWrapperFiles(BUFFERS_DIR, data.sessionId, path.join(SOCKETS_DIR, data.sessionId.replace(/^sess-/, 'cw-')));
+                    const st = fs.statSync(wf.sidecar);
+                    const sc = JSON.parse(fs.readFileSync(wf.sidecar, 'utf-8'));
+                    sidecar = { streaming: sc.streaming, ageMs: Date.now() - st.mtimeMs };
+                  } catch { sidecar = null; } // unreadable sidecar heals nothing
+                }
+                const rec = reconcileAttachStreaming({
+                  turnStateSeen: session._turnStateSeen === true, turnState: session._turnState || null,
+                  isStreaming: !!session._isStreaming, sidecar,
+                });
+                if (rec.action !== 'none') {
+                  console.log(`[session] ${data.sessionId}: streaming reconciled (${rec.action}${rec.staleAuthority ? `, the harness last said ${session._turnState}` : ''}) \u2192 ${rec.isStreaming}`);
+                  session._isStreaming = rec.isStreaming;
+                  if (rec.clearLabel) session._streamingLabel = '';
+                  if (rec.staleAuthority) {
+                    try { telemetry?.record?.({ kind: 'event', name: 'turn-state-stale', detail: String(session._turnState || '') }); } catch { }
+                    // the override is a STATE change, not a display tweak:
+                    // leaving 'running' behind would make the NEXT attach undo it
+                    session._turnState = 'idle';
                   }
-                } catch { }
+                }
               }
               const isStreaming = session._isStreaming ?? sm.isStreaming;
               const streamingLabel = isStreaming ? (session._streamingLabel || 'thinking...') : '';
@@ -1093,7 +1150,7 @@ function registerWsHandler(wss, ctx) {
               // (no avoidable sync work here).
               const wcapsAttach = wrapperCaps(BUFFERS_DIR, data.sessionId, session.socketPath);
               ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, mode: 'chat',
-                messages, totalCount, chatStatus, isStreaming, streamingLabel, streamingKind: isStreaming ? (session._streamingKind || null) : null, autoResume: autoResume?.statusFor?.(data.sessionId) || null, outputStyle: session._outputStyle || null, spawnOrigin: { model: session._modelOrigin || null, effort: session._effortOrigin || null }, taskState: sm.taskState(), turnMap, pendingPermissions: pendingPerms,
+                messages, totalCount, chatStatus, isStreaming, streamingLabel, streamingKind: isStreaming ? (session._streamingKind || null) : null, autoResume: autoResume?.statusFor?.(data.sessionId) || null, outputStyle: session._outputStyle || null, worktree: !!session._worktree, worktreePath: session._worktreePath || null, spawnOrigin: { model: session._modelOrigin || null, effort: session._effortOrigin || null }, taskState: sm.taskState(), turnMap, pendingPermissions: pendingPerms,
                 // The input queue as the normalizer knows it (the wrapper's
                 // queue_changed replays through the buffer on a rebuild) —
                 // ALWAYS present so a reconnecting client can clear a stale
@@ -1130,6 +1187,13 @@ function registerWsHandler(wss, ctx) {
                 // cannot" — the client keeps its "try it" state instead of
                 // wearing a restart row it does not need.
                 responseStyleLive: wcapsAttach.reason === 'no-sidecar' ? null : !!wcapsAttach.responseStyle,
+                // The harness's OWN turn state and the tool ids it says are
+                // running (§2.5). TRI-STATE like responseStyleLive: null = this
+                // session has never emitted one (old CLI / spawned before the
+                // env), and the client then keeps showing the derived state
+                // instead of wearing a third state nobody reported.
+                turnState: session._turnStateSeen ? (session._turnState || null) : null,
+                inProgressTools: session._inProgressTools ? [...session._inProgressTools] : [],
                 normEpoch: session._normEpoch || 0,
                 remoteState: session._remoteState || (session._bareRemote ? { state: 'unprotected' } : null),
                 goal: session._goal || null, goalElapsed: session._goalElapsed || 0, goalStatus: session._goalStatus || null }));
@@ -1185,6 +1249,14 @@ function registerWsHandler(wss, ctx) {
               cwd: data.cwd || '',
               buffer: '',
             });
+            // THE FOURTH READER SITE (found by the S9-remainder browser leg,
+            // B-eac2): a store-backed reader has no bytes until `prepare()` has
+            // run — transcript-service awaits it at its three sites, and this
+            // one did not, so EVERY stopped OpenCode conversation opened from
+            // "View History" said "No messages in this session's transcript
+            // yet." while the serve had them. A reader that is not prepared is
+            // EMPTY, never wrong, which is exactly why it was silent.
+            if (typeof sm.prepare === 'function') { try { await sm.prepare(); } catch (e) { console.warn(`[view] ${data.backend || 'claude'} reader prepare failed for ${backendSessionId}: ${e.message}`); } }
             const mm = createMessageManager(data.backend || 'claude', data.sessionId || 'view', { threadId: backendSessionId }); // the rendered conversation's id (codex ledger key)
             await mm.convertHistoryAsync(sm.raw()); // view-only replay of a dead session — same loop-friendly slicing (boot replay opens N of these at once)
             ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: data.name || '', cwd: data.cwd || '', mode: 'chat',

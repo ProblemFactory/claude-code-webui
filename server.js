@@ -102,6 +102,7 @@ const { X_ENV, detectXDisplay, refreshXEnv, stabilizeXAuth, adapterRegistry,
   getOAuthToken: (...a) => getOAuthToken(...a),
   usagePollingEnabled: (...a) => usagePollingEnabled(...a),
   refreshCodexModels: (...a) => refreshCodexModels(...a), broadcast: (m) => bcastAll(m), getTelemetry: () => { try { return telemetry; } catch { return null; } }, getPlugins: () => { try { return plugins; } catch { return null; } }, // S9: opencode serve caps verdict → 'harness-caps-updated'; runaway telemetry + the 'opencode-serve' PLUGIN is the autostart switch (lazy — both defined below)
+  getHeldPtyIds: () => { try { return [...activeSessions.values()].map((s) => s?._opencodePtyId).filter(Boolean); } catch { return []; } }, // S9 r4: the ONE reader of session._opencodePtyId — the serve-pty reaper's keep set (lazy like getPlugins: activeSessions is declared below)
 });
 // ── Codex model list (from ~/.codex/models_cache.json) ──
 // That cache is last-writer-wins AND version-gated server-side: a still-running
@@ -407,7 +408,7 @@ const CLAUDE_STREAM_TYPES = new Set([
   'assistant', 'user', 'system', 'result', 'attachment', 'control_request',
   'control_response', 'tool_progress', 'stream_event', 'summary',
   'rate_limit_event', // handled since 2.289.0 — the set lagged the handler, so the breadcrumb cried 'unhandled' for a handled type (misled the inc-msozeyw2 read)
-  '_stdin_ack', '_remote_state', '_remote_exit',
+  'set_in_progress_tool_use_ids', 'compact_progress', 'tombstone', '_stdin_ack', '_remote_state', '_remote_exit', // B3 §2.5/§2.10/§2.11: the run set + compaction stage have readers in claude-stream-json.js, tombstone in the normalizer — listed here or the breadcrumb cries 'unhandled' for handled records (the 2.289.0 mistake). Round 4: the first two have never been observed on our stdout (host callbacks swallow them; the live compaction lane is system/status) and tombstone is unverified — the rows stay because the READER exists, which is what this set is about
 ]);
 const _seenStreamTypes = new Set();
 
@@ -517,7 +518,7 @@ const { setupSessionPty, attachToDtach, readSessionMeta, writeSessionMeta,
   getHosts: () => { try { return hosts; } catch { return null; } },
   getUsageHistory: () => { try { return usageHistory; } catch { return null; } },
   getTelemetry: () => { try { return telemetry; } catch { return null; } },
-  getNoConvoRef: () => { try { return noConvoRef; } catch { return null; } }, getDeliver: () => { try { return deliver; } catch { return null; } },
+  getNoConvoRef: () => { try { return noConvoRef; } catch { return null; } }, getDeliver: () => { try { return deliver; } catch { return null; } }, getPages: () => { try { return publishedPages; } catch { return null; } }, getPermissionRules: () => { try { return permissionRules; } catch { return null; } }, // lazy getters; getPages = SendUserFile hands the user a private link (published-pages is created further down)
 });
 // ── Boot restore (src/server/boot-restore.js, decomposition #7) ──
 // migrations + restoreSessions + R6 pipe re-open + keeper re-adoption.
@@ -1489,7 +1490,7 @@ setTimeout(() => { portForwards.restore().catch(() => {}); }, 5500);
 const instanceUrl = require('./src/server/instance-url.js').create({ dataDir: path.join(__dirname, 'data'), port: PORT, serverSetting, log: (...a) => console.log(...a), authEnabled: () => auth.enabled, broadcast: (m) => bcastAll(m), plugins: { status: (id) => plugins.status(id), frpPublish: (...a) => plugins.frpPublish(...a), frpUnpublish: (...a) => plugins.frpUnpublish(...a), setSelfDialSub: (...a) => plugins.setSelfDialSub?.(...a) } }); // ONE resolver for "this instance's URL" (frp mapping layered OVER agentd.publicUrl, never written into it) + the ONLY publisher of the 'vibespace-instance' proxy; plugins arrives later so its accessors are lazy ⇒ src/server/instance-url.js
 const autoResume = require('./src/server/auto-resume.js').create({ dataDir: path.join(__dirname, 'data'), activeSessions, serverSetting, beforeFire: (id, s) => { try { return beforeAutoResumeFire(id, s); } catch { return true; } }, fireIdentity: (id, s) => { try { return fireIdentityFor(s); } catch { return null; } }, log: (...a) => console.log(...a), broadcast: (id, m) => { const s = activeSessions.get(id); if (s) broadcastToSession(s, id, m); }, notify: (id, s, text) => { try { feedPeerCard(s, { fromName: 'VibeSpace', text }); } catch { } }, sendToSession: (id, s, text) => { try { const ad = adapterRegistry.get(s.backend); if (!ad || !s.pty || s.mode !== 'chat') return false; const { stdinPayload, userMsg } = ad.formatChatInput(text, Date.now() + '-auto'); s._isStreaming = true; s.pty.write(stdinPayload + '\n'); if (userMsg) { userMsg.originKind = 'auto-resume'; if (userMsg.payload) userMsg.payload.webui_origin = 'auto-resume'; s.buffer = (s.buffer + JSON.stringify(userMsg) + '\n').slice(-500000); feedLive(s, userMsg); } return true; } catch (e) { console.warn('[auto-resume] send failed:', e.message); return false; } } }); // continue a limited session when its quota resets ⇒ src/server/auto-resume.js
 autoResume.start();
-instanceUrl.registerRoutes(app); instanceUrl.restore(); Object.defineProperty(app.locals, 'instancePublicUrl', { get: () => { try { return instanceUrl.url(); } catch { return null; } } }); app.get('/api/port-forwards', (req, res) => res.json({ forwards: portForwards.list() }));
+const permissionRules = require('./src/server/permission-rules.js').create({ activeSessions, adapterRegistry, accounts, agentEnv: (...a) => require('./src/ws-handler').agentEnv(...a), buffersDir: BUFFERS_DIR, codexCmdRef: () => CODEX_CMD, telemetry: { record: (e) => { try { telemetry.record(e); } catch { } } } }); permissionRules.registerRoutes(app); instanceUrl.registerRoutes(app); instanceUrl.restore(); Object.defineProperty(app.locals, 'instancePublicUrl', { get: () => { try { return instanceUrl.url(); } catch { return null; } } }); app.get('/api/port-forwards', (req, res) => res.json({ forwards: portForwards.list() })); // permissionRules = the READ-ONLY "where does this rule come from" view (owner ruling 10) + the human-triggered zero-network local oracles (ruling 6) ⇒ src/server/permission-rules.js
 app.get('/api/hosts/:id/ports', async (req, res) => {
   // the UI path probes protocols (http/https/tcp chip); the watch sweep doesn't
   try { res.json({ ports: await portForwards.detect(req.params.id, { probe: true }) }); } catch (e) { res.status(400).json({ error: e.message }); }
@@ -1795,8 +1796,8 @@ function activeSessionsPayload() {
       accountTail: s._accountId ? (accounts.get(s._accountId)?.tail || null) : null,
       todo: s._todos || null, // {done, total, current} — the agent's own TodoWrite/plan
       auth: sessionAuth(s), // billing identity (subscription / api-console / api-key / unknown)
-      mode: s.mode || 'terminal',
-      outputStyle: s._outputStyle || null, spawnModel: s._spawnModel || null, effort: s._effort || null, modelOrigin: s._modelOrigin || null, effortOrigin: s._effortOrigin || null, // EFFECTIVE response style (2.369.58) + the model/effort this session was SPAWNED with and WHICH FACT each came from (B-6b6d: 'chosen'|'conversation'|'instance'|'harness'). null = the agent's own config decides / a session that predates the field. Session Properties names value AND origin, which neither the saved PICK nor the value itself can give it — a conversation's own value and the instance default are frequently the same string, and only the server ever read the conversation's records
+      // outputStyle = the EFFECTIVE style (2.369.58; null = the agent's own config decides); worktree/worktreePath = the per-session git worktree (owner ruling 9) — the card badge + the path the CLI ITSELF announced in its init frame
+      mode: s.mode || 'terminal', outputStyle: s._outputStyle || null, worktree: !!s._worktree, worktreePath: s._worktreePath || null, spawnModel: s._spawnModel || null, effort: s._effort || null, modelOrigin: s._modelOrigin || null, effortOrigin: s._effortOrigin || null, // EFFECTIVE response style (2.369.58) + the model/effort this session was SPAWNED with and WHICH FACT each came from (B-6b6d: 'chosen'|'conversation'|'instance'|'harness'). null = the agent's own config decides / a session that predates the field. Session Properties names value AND origin, which neither the saved PICK nor the value itself can give it — a conversation's own value and the instance default are frequently the same string, and only the server ever read the conversation's records
     });
   }
   return activeList;

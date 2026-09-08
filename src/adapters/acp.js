@@ -105,6 +105,17 @@ class AcpAdapter extends BackendAdapter {
     return JSON.stringify({ type: 'queue-op', op: 'remove', id });
   }
 
+  // READ-ONLY permission-rule read (owner ruling 10). ACP v1 has no
+  // config-read method, and the wrapper says exactly that back
+  // ('unsupported-by-protocol') plus the one permission fact the protocol DOES
+  // carry: the session's live mode. The frame is still sent rather than
+  // suppressed here, because a REFUSAL FROM THE AGENT is a different (and more
+  // useful) statement than a refusal from us guessing on its behalf — and the
+  // OpenCode rules themselves come from the serve's v1 /config, server-side.
+  formatReadPermissionRules({ requestId = '' } = {}) {
+    return JSON.stringify({ type: 'read-permission-rules', requestId: String(requestId || '') });
+  }
+
   /** Preview user record (acp-events `user` shape) so the bubble renders
    *  before the wrapper's own record lands; the two dedup on msgId. */
   static _buildUserPreview(rawText, msgId) {

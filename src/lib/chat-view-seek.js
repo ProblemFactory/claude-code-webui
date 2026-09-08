@@ -279,6 +279,16 @@ export function installChatSeek(ChatView) {
     if (markerEl._isSeekSentinel) markerEl.remove();
   },
 
+  /** The FOURTH path that builds an element for a message (round 3): a seek
+   *  slab's records. Its elements deliberately never enter `this._elements`
+   *  (they are outside the virtual window's accounting), which is exactly why
+   *  the round-2 hook — keyed to `_elements.set` — missed it, and a retraction
+   *  reached through a gap slab rendered as ordinary live history. That is the
+   *  §2.10 failure itself: past 34MB (JSONL_HEAD_BYTES + JSONL_TAIL_BYTES) the
+   *  seek path is the ONLY way to read that history, the server's `gapSlab`
+   *  normalizes the slab through the same message manager, and codex carries
+   *  `thread_rolled_back` in the ROLLOUT — so `msg.rewound` genuinely arrives
+   *  here. Marks are re-derived from view state like everywhere else. */
     _renderGapMsg(msg) {
     let el;
     switch (msg.role) {
@@ -292,6 +302,7 @@ export function installChatSeek(ChatView) {
     el.classList.add('chat-gap-msg');
     if (Number.isFinite(msg.srcLine)) el.dataset.line = msg.srcLine;
     if (msg.ts) el.dataset.ts = msg.ts;
+    this._applyElementMarks(el, msg);
     this._renderers.addWrapToggles(el);
     this._renderers.addOpenInEditorBtn(el);
     return el;

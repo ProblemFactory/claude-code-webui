@@ -44,7 +44,12 @@ function resolveWrapperFiles(BUFFERS_DIR, id, sockPath) {
  *  sessions that were already new (owner: three restarts + an update for
  *  nothing). STATELESS by design — callers must not cache a negative verdict
  *  (a wrapper resuming a huge transcript may not have written its sidecar yet).
- *  Returns { frameFile, peerMessage, inputQueue, responseStyle, caps, reason: 'ok'|'no-caps'|'no-sidecar', startedAt, pid }.
+ *  Returns { frameFile, peerMessage, inputQueue, responseStyle, permissionRules, caps, reason: 'ok'|'no-caps'|'no-sidecar', startedAt, pid }.
+ *  permissionRules (owner ruling 10): the RUNNING wrapper serves the READ-ONLY
+ *  `read-permission-rules` stdin verb. Same two-gate rule again — the harness
+ *  caps row (`permissionRules.liveVerb`) says this KIND of agent answers over
+ *  the session, this says THIS process does; a wrapper spawned before the verb
+ *  existed would drop the frame without a word (2.361.1/2.364.1).
  *  responseStyle (2.369.58): the RUNNING wrapper serves the `set-response-style`
  *  stdin verb (codex: thread/settings/update). Same two-gate rule as inputQueue —
  *  the harness caps row says the KIND of agent can do it live, this says THIS
@@ -87,13 +92,13 @@ const QUEUE_OP_MAX_BYTES = 64 * 1024;
 function wrapperCaps(BUFFERS_DIR, id, sockPath) {
   const { sidecar } = resolveWrapperFiles(BUFFERS_DIR, id, sockPath);
   let m;
-  try { m = JSON.parse(fs.readFileSync(sidecar, 'utf-8')); } catch { return { frameFile: false, peerMessage: false, inputQueue: false, queueVerbs: [], responseStyle: false, caps: null, reason: 'no-sidecar', startedAt: null, pid: null }; }
+  try { m = JSON.parse(fs.readFileSync(sidecar, 'utf-8')); } catch { return { frameFile: false, peerMessage: false, inputQueue: false, queueVerbs: [], responseStyle: false, permissionRules: false, caps: null, reason: 'no-sidecar', startedAt: null, pid: null }; }
   const caps = (m && m.caps && typeof m.caps === 'object') ? m.caps : null;
   const inputQueue = !!(caps && caps.inputQueue);
   const queueVerbs = Array.isArray(caps && caps.queueVerbs)
     ? caps.queueVerbs.map((v) => String(v))
     : (inputQueue ? LEGACY_QUEUE_VERBS.slice() : []);
-  return { frameFile: !!(caps && caps.frameFile), peerMessage: !!(caps && caps.peerMessage), inputQueue, queueVerbs, responseStyle: !!(caps && caps.responseStyle), caps, reason: caps ? 'ok' : 'no-caps', startedAt: (m && m.startedAt) || null, pid: (m && m.pid) || null };
+  return { frameFile: !!(caps && caps.frameFile), peerMessage: !!(caps && caps.peerMessage), inputQueue, queueVerbs, responseStyle: !!(caps && caps.responseStyle), permissionRules: !!(caps && caps.permissionRules), caps, reason: caps ? 'ok' : 'no-caps', startedAt: (m && m.startedAt) || null, pid: (m && m.pid) || null };
 }
 
 module.exports = { resolveWrapperFiles, wrapperCaps, LEGACY_QUEUE_VERBS, QUEUE_EDIT_MAX_CHARS, QUEUE_OP_MAX_BYTES };

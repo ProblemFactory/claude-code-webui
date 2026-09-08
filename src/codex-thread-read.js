@@ -15,8 +15,30 @@
 //                                  normalizer already renders (no new render path)
 //   readThreadViaAppServer(id, o)  ONE bounded `codex app-server` child:
 //                                  initialize → initialized → thread/read → kill.
-//                                  Not a session, no stdin of a live thread, no
-//                                  network of ours (the app-server reads its store)
+//                                  Not a session, no stdin of a live thread.
+//                                  NETWORK, CORRECTED 2026-09-07: the line
+//                                  that used to sit here reassured the reader
+//                                  that this child only reads its local store
+//                                  and touches nothing remote. That was never
+//                                  measured, and it is FALSE. Measured with
+//                                  `strace -f -qq -e trace=network` under
+//                                  `env -i HOME=<empty dir>` (codex 0.153.4):
+//                                  starting `codex app-server` opens 7 INET
+//                                  connects, 2 of them port 443 to chatgpt.com
+//                                  — with NO credentials, so it is the
+//                                  app-server's own startup, not a refresh. We
+//                                  construct no vendor request (the vendor's
+//                                  own CLI does, like the owner-approved
+//                                  auto-cli rung), but this spawn is
+//                                  NAVIGATION-triggered, not human-triggered,
+//                                  which is a §ban-safety question only the
+//                                  owner can settle — it is recorded in
+//                                  src/local-oracles.js NOT_ORACLES as
+//                                  `codex-app-server-config-read` and parked
+//                                  as backlog B-af31. Behaviour unchanged
+//                                  here on purpose: this is shipped B-21e4
+//                                  code, and silently deleting a transcript
+//                                  fallback is not a review fix.
 //   warmMissingThread(id, o)       the descriptor's store.warmTranscript hook:
 //                                  no-op when the rollout exists / remote /
 //                                  disabled; single-flight per id; positive LRU

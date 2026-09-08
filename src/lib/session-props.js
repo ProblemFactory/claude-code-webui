@@ -1,6 +1,7 @@
-import { escHtml, copyText, showConfirmDialog, taskGroupColor } from './utils.js';
+import { escHtml, copyText, showConfirmDialog, stripCwdHostLabel, taskGroupColor } from './utils.js';
 import { SESSION_STATE_META, SESSION_URGENCY_META } from './sidebar-tasks.js';
-import { getBackendMeta, getAgentKindMeta, getAgentRoleLabel, responseStyleCaps, responseStyleOrigin, spawnValueOrigin, effortDisplay, composerSendModes, notificationDeliveryFor } from './agent-meta.js';
+import { getBackendMeta, getAgentKindMeta, getAgentRoleLabel, responseStyleCaps, responseStyleOrigin, spawnValueOrigin, effortDisplay, composerSendModes, notificationDeliveryFor, worktreeCapsFor, worktreePick, permissionRulesCaps } from './agent-meta.js';
+import { loadInto, renderInto } from './permission-rules-view.js';
 import { t } from './i18n.js';
 import { registerOpenAction } from './window-types.js';
 
@@ -323,6 +324,64 @@ export function openSessionProps(app, sessionRef, { syncId } = {}) {
         { wrap: true });   // same family, same reason
     }
 
+    // ── Per-session git worktree (owner ruling 9) ──
+    // TWO facts, said apart, exactly like the response-style row above — and
+    // they are genuinely different things, so they never share a control:
+    //   · `s.worktree` / `s.worktreePath` = what THIS RUN is, decided by the
+    //     CLI's own init frame (the arbiter, both directions: a worktree it
+    //     could not re-enter turns the live fact OFF). Read-only by nature —
+    //     a running process cannot be moved into or out of a checkout.
+    //   · `cfg.worktree` = the standing PICK for this conversation, which is
+    //     what a fork (and a restart from this config) asks for. That one is
+    //     the CHECKBOX, mirroring the New Session dialog's row.
+    // A resume is deliberately NOT in that list: `--worktree` is emitted on a
+    // new session and on a fork only, because the CLI records the binding on
+    // the conversation and re-enters it by itself (2.1.257 `worktreeSession`,
+    // stripped by --fork-session) — a second flag would create a SECOND tree.
+    // The hint says exactly that, so an unticked box is never a broken promise.
+    // Gated on the CAPS MIRROR, never on a backend id.
+    {
+      const wtCaps = worktreeCapsFor(s.backend || 'claude');
+      const live = !!s.worktree;
+      if (wtCaps.supported) {
+        const sec = cfgSection();
+        const lbl = document.createElement('label');
+        lbl.className = 'session-props-group';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        // ONE rule, shared with the fork path (worktreePick): an absent pick
+        // shows what this RUN is, and the box the user is looking at is
+        // therefore exactly what a fork of this conversation will ask for.
+        cb.checked = worktreePick({ saved: cfg.worktree, live });
+        // The pick is TRI-STATE and written as a BOOLEAN: `false` has to
+        // persist, or unticking the box while the run IS isolated is a control
+        // that re-checks itself on the next render (accept-and-ignore) — and
+        // the fork would keep inheriting a preference the user just revoked.
+        cb.onchange = () => sidebar.setSessionConfig?.(s, { ...(sidebar.getSessionConfig?.(s) || {}), worktree: cb.checked });
+        const txt = document.createElement('span');
+        txt.textContent = t('Run in a git worktree');
+        lbl.append(cb, txt);
+        sec.appendChild(lbl);
+        const hint = document.createElement('div');
+        hint.className = 'empty-hint';
+        hint.textContent = t('Applies when a new session or a fork starts. A resume re-enters whatever worktree the CLI recorded for this conversation, so it cannot gain or lose one.');
+        sec.appendChild(hint);
+        // What this RUN actually is — the CLI's own word, or an honest absence.
+        if (live) {
+          const r = row(sec, t('Git worktree'), s.worktreePath
+            ? `<span class="session-detail-path">${escHtml(s.worktreePath)}</span>`
+            : escHtml(t('on \u2014 the CLI has not reported the directory yet')),
+          s.worktreePath ? { copy: s.worktreePath } : {});
+          r.classList.add('sp-wrap');
+        } else if (cfg.worktree === true) {
+          // Ticked, but this run is not isolated — say so rather than letting
+          // the checkbox imply otherwise (the CLI clears a binding whose
+          // worktree is gone, and a resume can never create one).
+          row(sec, t('Git worktree'), `<span class="chat-status-dim">${escHtml(t('not isolated in this run'))}</span>`);
+        }
+      }
+    }
+
     // ── What a send DURING a running turn does here (2026-09-07) ──
     // The HARNESS row, not the live intersection: a properties panel describes
     // what this KIND of agent does, and it is opened on stopped sessions too.
@@ -336,6 +395,86 @@ export function openSessionProps(app, sessionRef, { syncId } = {}) {
         if (sm.queueSegment) bits.push(t('Enter queues it — it runs after this turn'));
         if (sm.steerSegment) bits.push(t('Alt+Enter injects it into the running turn (the agent sees it at its next reply)'));
         row(cfgSection(), t('Sending during a turn'), escHtml(bits.join(' \u00b7 ')));
+      }
+    }
+
+    // ── Permission rules (READ-ONLY, owner ruling 10) ──
+    // "Where does this rule come from" for THIS session. Gated on the caps row
+    // (`permissionRules`), never on a backend id — a harness with no rule
+    // surface (shell) gets no section at all, and one that only answers for
+    // the whole machine (opencode: the serve reports ONE resolved config with
+    // no per-key origin) says so instead of pretending it is session-scoped.
+    // HUMAN-TRIGGERED: the tree loads on the button, never on render — the
+    // codex rung asks the session's own agent (a 20s round trip on ITS
+    // app-server), and a panel that re-rendered on every broadcast would ask
+    // it again on every broadcast.
+    //
+    // …WHICH IS EXACTLY WHY THE LOADED RECORD IS KEPT ON THE WINDOW (round-3
+    // verifier, reproduced at 375×667): `render()` starts with
+    // `root.innerHTML = ''` and re-runs on every 'active-sessions' broadcast —
+    // i.e. continuously while the session you opened Properties for is
+    // working. The tree the user just paid an agent round trip for vanished
+    // within a second and the button went back to "Show rules…". The record is
+    // re-RENDERED (never re-fetched: nothing here may talk to the agent
+    // without a click) and it is keyed by the QUERY it answered, so if the
+    // session's backend/cwd/host changes underneath, the stale tree is dropped
+    // rather than relabelled — a tree is an answer to one specific question.
+    {
+      const prCaps = permissionRulesCaps(s.backend || 'claude');
+      if (prCaps.source) {
+        const prSec = section(t('Permission rules'));
+        const hint = document.createElement('div');
+        hint.className = 'agents-note';
+        hint.textContent = prCaps.session
+          ? t('Read-only: which rule comes from which file or layer.')
+          : t('Read-only, and machine-wide: this agent reports one resolved set of rules, not a per-session one.');
+        prSec.appendChild(hint);
+        const query = {
+          backend: s.backend || 'claude',
+          scope: prCaps.session ? 'session' : 'instance',
+          sessionId: prCaps.session ? (s.webuiId || '') : '',
+          // TWO fields of a merged session record, both of which have been
+          // wrong here before (round-2 verifier, both reproduced):
+          //  · `s.host` is the field. `s.hostId` does not exist on a session
+          //    — it is an OPENSPEC name (session-card.js / sidebar-tasks.js
+          //    both MAP `hostId: s.host` when they build one), so reading it
+          //    here sent `host=` EMPTY for every remote session and the
+          //    server's `remote-session` guard never fired: the panel showed
+          //    THIS machine's ~/.claude/settings.json as the remote
+          //    session's rules.
+          //  · `s.cwd` on a merged record is the host-labeled DISPLAY string
+          //    ("box: /home/u/proj", sidebar.js _merge) — the 2.225.2 law
+          //    says it must never reach an operation, and a settings-file
+          //    reader is an operation. Strip it here too, so a mistake in
+          //    ONE of the two fields cannot compose a fake path either.
+          cwd: stripCwdHostLabel(s.cwd || ''),
+          host: s.host || '',
+        };
+        const queryKey = JSON.stringify(query);
+        const tree = document.createElement('div');
+        const btn = document.createElement('button');
+        btn.className = 'task-detail-btn';
+        const held = winInfo._permRulesLoaded;
+        const haveHeld = !!held && held.key === queryKey && !!held.record;
+        btn.textContent = haveHeld ? t('Reload rules') : t('Show rules…');
+        if (haveHeld) renderInto(tree, held.record);
+        btn.onclick = () => {
+          btn.disabled = true;
+          loadInto(tree, query)
+            .then((rec) => {
+              if (!rec) return;
+              winInfo._permRulesLoaded = { key: queryKey, record: rec };
+              // A broadcast that lands WHILE the read is in flight rebuilt the
+              // section around a now-detached tree, and loadInto correctly
+              // refuses to paint a detached node — so the answer would have
+              // been held and never shown. Repaint from the held record (no
+              // second fetch, so the click is still the only thing that ever
+              // asks the agent).
+              if (!tree.isConnected) render();
+            })
+            .finally(() => { btn.disabled = false; btn.textContent = t('Reload rules'); });
+        };
+        prSec.append(btn, tree);
       }
     }
 

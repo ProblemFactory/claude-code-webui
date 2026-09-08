@@ -111,14 +111,20 @@ async function memInfoAsync() {
   return memInfo();
 }
 
-// `ps` output is unbounded by process count AND argv length: a busy dev box
-// (2463 processes, one `claude -p <29 KB prompt>`) produced 4.4 MB of `ps aux`,
-// past the old 4 MiB maxBuffer — execFile then fails and topProcs answered []
-// (the sysinfo op shipped an EMPTY top-procs list and the release gate went red,
-// 2.369.68). 32 MiB bounds ~100k such rows; width flags (--cols) are GNU-only
-// and would break the BSD/macOS rung, so the bound lives on the buffer.
+/** THE BOUND IS ON A THING THAT ONLY GROWS (2026-09-07). `ps aux` prints one
+ *  line per process INCLUDING its whole command line, so the size of this read
+ *  is set by how busy the machine is — and node's `maxBuffer` overflow is an
+ *  ERROR, not a truncation: the call yields ERR_CHILD_PROCESS_STDIO_MAXBUFFER,
+ *  this function reads that as "no --sort, must be BSD ps", the fallback
+ *  overflows on the very same bytes, and it resolves `[]`. A machine with
+ *  enough processes therefore reported NO processes at all — silently, because
+ *  an empty list is also what a machine with nothing running would send.
+ *  MEASURED here: 2574 processes = 4.64 MB, over the old 4 MiB cap; the daemon
+ *  op's assert ("top procs with pid+rss") is what caught it.
+ *  `PS_MAX_BUFFER` is shared with `listProcs` below — the two reads are the
+ *  same table through two column sets, so one of them being able to answer
+ *  while the other cannot is a difference with no meaning. */
 const PS_MAX_BUFFER = 32 * 1024 * 1024;
-
 function topProcs(n = 8) {
   return new Promise((resolve) => {
     execFile('ps', ['aux', '--sort=-rss'], { timeout: 5000, maxBuffer: PS_MAX_BUFFER }, (err, out) => {
