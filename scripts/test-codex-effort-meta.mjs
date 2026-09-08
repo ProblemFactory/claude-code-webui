@@ -751,7 +751,20 @@ console.log('— ⑩ version markers resolve; this branch squats nothing');
     for (const line of git('log', '--format=%s', '-400', REF).split('\n')) { const m = /^2\.369\.(\d+)(?![\d.])/.exec(line.trim()); if (m) releasedNs.push(+m[1]); }
     for (const line of git('show', `${REF}:CHANGELOG.md`).split('\n')) { const m = /^## 2\.369\.(\d+)(?![\d.])/.exec(line.trim()); if (m) releasedNs.push(+m[1]); }
     const latestN = Math.max(...releasedNs);
-    NEXT_FREE = `2.369.${latestN + 1}`;
+    // THE RELEASE BEING CUT IS CLAIMED BY THIS TREE (2.369.70 gate, the second
+    // time this leg blocked a release for naming ITSELF): every release names
+    // its own number in CLAUDE.md / the kb essays, and by construction that
+    // number is not on the integration branch until the push this gate guards.
+    // The exemption is exactly ONE number — package.json's version — and only
+    // when it is newer than the latest release AND this tree's CHANGELOG heads
+    // an entry for it (a version bumped without a CHANGELOG entry earns none).
+    const CURRENT = JSON.parse(read('package.json')).version;
+    const curN = Number((/^2\.369\.(\d+)$/.exec(CURRENT) || [])[1]);
+    const cutting = Number.isFinite(curN) && curN > latestN
+      && new RegExp(`^## ${CURRENT.replace(/\./g, '\\.')}(?![\\d.])`, 'm').test(read('CHANGELOG.md'));
+    const CLAIMED_HERE = cutting ? CURRENT : null;
+    NEXT_FREE = `2.369.${Math.max(latestN, cutting ? curN : latestN) + 1}`;
+    ok(!cutting || claimants(CURRENT).length === 0, `the release being cut here (${CURRENT}) is not yet on ${REF} — the census exempts exactly it, and only because this tree's CHANGELOG heads it`, JSON.stringify(claimants(CURRENT)));
     ok(Number.isFinite(latestN) && claimants(`2.369.${latestN}`).length > 0, `the latest release on ${REF} is 2.369.${latestN} (derived, not declared)`, JSON.stringify(releasedNs.slice(-5)));
     const next = claimants(NEXT_FREE);
     ok(next.length === 0, `${NEXT_FREE} is unclaimed on ${REF} — the integrator may take it`, JSON.stringify(next));
@@ -761,7 +774,7 @@ console.log('— ⑩ version markers resolve; this branch squats nothing');
     //    not a cross-reference to a release.)
     const unreleasedIn = (text) => {
       const out = [];
-      for (const v of text.match(/2\.369\.\d+(?![\d.])/g) || []) { if (claimants(v).length === 0) out.push(v); }
+      for (const v of text.match(/2\.369\.\d+(?![\d.])/g) || []) { if (v !== CLAIMED_HERE && claimants(v).length === 0) out.push(v); }
       return [...new Set(out)];
     };
     const squatted = [];
@@ -773,6 +786,10 @@ console.log('— ⑩ version markers resolve; this branch squats nothing');
     ok(unreleasedIn(read('CLAUDE.md') + '\n(2.369.9001 residue)').includes('2.369.9001')
        && unreleasedIn(read('CLAUDE.md')).length === 0,
       'negative control C: the census reports an unreleased stamp spliced into a real site, and is silent on the real text');
+    // NEGATIVE CONTROL D: the exemption is exactly the version being cut —
+    // NEXT_FREE (one past it) is still reported, and so is any number this
+    // tree's CHANGELOG does not head (a bump without an entry is not a claim).
+    ok(unreleasedIn(`(${NEXT_FREE} residue)`).includes(NEXT_FREE), `negative control D: the number after the release being cut (${NEXT_FREE}) is still reported by the census`);
     // NEGATIVE CONTROL A — the leg's own r2 defect: the predecessor release is
     // ON TOPIC, so the OLD predicate cleared it while the strict one does not.
     // This is the permanent proof that a same-topic squatter is now visible.
