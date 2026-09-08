@@ -14,6 +14,13 @@
 const fs = require('fs');
 const path = require('path');
 
+// THE ANCHOR-FILE SLUG. Exported because the repair has to walk this the OTHER
+// way — from a stream file name back to the identity it stands for, and from a
+// usage-cache key's identity forward to the stream that holds its readings. A
+// second spelling of a name-mangling rule is a twin, and a twin that drifts
+// silently re-files readings under a key nothing else uses.
+function anchorSlug(key) { return String(key).replace(/[^\w.@-]/g, '_').slice(0, 80); }
+
 function identityKeyFor({ accountId, cache, email }) {
   if (cache?.orgUuid) return 'org:' + String(cache.orgUuid).toLowerCase();
   const em = email || cache?.orgEmail || cache?.email || null;
@@ -26,7 +33,7 @@ class UsageAnchors {
     this.dir = path.join(dataDir, 'usage-anchors');
     this._last = new Map(); // identityKey → last recorded fetchedAt (dedup)
   }
-  _file(key) { return path.join(this.dir, 'anchors-' + key.replace(/[^\w.@-]/g, '_').slice(0, 80) + '.ndjson'); }
+  _file(key) { return path.join(this.dir, 'anchors-' + anchorSlug(key) + '.ndjson'); }
   // Last recorded anchor for a key (tail line) — used by the engine to compute
   // the cost delta window and by future prediction code as the base point.
   lastAnchor(key) {
@@ -187,4 +194,4 @@ function costBetweenMulti(usageHistory, accountIds, fromMs, toMs) {
   return out;
 }
 
-module.exports = { UsageAnchors, identityKeyFor, costBetween, costBetweenMulti };
+module.exports = { UsageAnchors, identityKeyFor, anchorSlug, costBetween, costBetweenMulti };

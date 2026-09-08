@@ -485,6 +485,9 @@ function findJournal(dataDir) {
 const MIN_OWN_READINGS = 5;   // fewer than this is a coincidence, not a window
 const OWN_DOMINANCE = 0.9;    // a stream whose own panel readings disagree with themselves establishes nothing
 const { weeklyNear, weeklyPhase, windowOf, windowFingerprint, windowSidecarName, decideReadingTarget } = require('./reading-lag.js');
+// The identity a usage-cache FILE belongs to, and the slug its anchor stream is
+// named with — both taken from the producer rather than re-spelled here (r5).
+const { identityKeyFor, anchorSlug } = require('./usage-anchors.js');
 
 /** Tally one weekly `resetsAt` into a phase histogram, merging the ±60 s wobble
  *  the panel and the event stream spell the SAME window with. Keeps the newest
@@ -591,6 +594,32 @@ function _dropReason(v, dest, ident) {
   if (v.target) return `its weekly window is ${v.target}'s, not ${dest}'s — it did not travel with the record`;
   return `its weekly window matches no account that may receive readings, so it cannot be shown to be ${dest}'s (${v.reason})`;
 }
+/** THE PRIMARY HALF IS DECIDED ON THE RECORD'S BUCKETS, NOT ON THE WINDOW
+ *  (r5, reproduced). {5h, 7d} is one payload so they leave together, but the
+ *  lines were written off `win` — the DATED view — so a record whose primary
+ *  half states no `resetsAt` had it silently deleted from the moved row: no
+ *  drop line, `bucketsArchived: 0`, counted as a WHOLE re-file, and the
+ *  placeholder reason `'window'` in the journal and the archive. That shape is
+ *  ordinary: `vibespace-usage` writes `{u: 0}` with no window for an absent
+ *  bucket and `maybeRecord` keeps the utilization, and 2392 of this instance's
+ *  7106 anchors carry an undated primary bucket beside a dated scoped one.
+ *  An undated bucket can be neither confirmed nor refused, so it RIDES ALONG
+ *  while the record stays — but moving it is a positive claim about an account
+ *  it cannot be shown to belong to, which is the whole class of defect this
+ *  repair is made of. So every primary bucket the record actually STATES gets
+ *  its own archived line, dated or not, and the move is counted PARTIAL. */
+function _primaryDrops(prim, dest, ident, buckets) {
+  const b = buckets || {};
+  const out = [];
+  if (b.sevenDay) out.push({ bucket: 'sevenDay', reason: (Number(b.sevenDay.resetsAt) > 0 && prim) ? _dropReason(prim, dest, ident) : _dropReason(null, dest, ident) });
+  if (b.fiveHour) {
+    out.push({
+      bucket: 'fiveHour',
+      reason: `a five-hour window names a TIME, not an account, and the seven-day half it travels with ${b.sevenDay ? `is not ${dest}'s` : `is absent from this record`} — it cannot be shown to be ${dest}'s`,
+    });
+  }
+  return out;
+}
 
 /** Re-file or archive every anchor whose window is not its stream's, then
  *  re-chain what that broke. A moved record is INSERTED IN TIME ORDER into the
@@ -684,8 +713,7 @@ function repairAnchorsByWindow({ anchorsDir, archiveDir, anchorFiles, windows, i
         if (v.target === dest) keptScoped.push(s);
         else drops.push({ bucket: nm, reason: _dropReason(v, dest, ident) });
       }
-      if (!prim && dest !== ident && win.fiveHour) drops.push({ bucket: 'fiveHour', reason: `a five-hour window names a TIME, not an account, and this record states no 7-day window to travel with — it cannot be shown to be ${dest}'s` });
-      else if (prim && !primKept) drops.push({ bucket: 'sevenDay', reason: _dropReason(prim, dest, ident), alsoDropped: win.fiveHour ? ['fiveHour'] : undefined });
+      if (!primKept) drops.push(..._primaryDrops(prim, dest, ident, r.buckets));
       if (dest === ident) {
         if (drops.length) {                                  // stays, stripped of what provably is not its
           const orig = { ...r, buckets: r.buckets };         // the archive keeps the record as it was
@@ -713,7 +741,11 @@ function repairAnchorsByWindow({ anchorsDir, archiveDir, anchorFiles, windows, i
           scopedWeekly: keptScoped,
         },
         prevFetchedAt: null, elapsedSec: null, costSince: null, calib: undefined, accountIds: undefined,
-        repairedBy: id, refiledFrom: ident, refiledReason: (primKept && prim ? prim.reason : (drops[0] && drops[0].reason) || 'window'),
+        // WHY THE RECORD MOVED — never a drop line (that sentence is about a
+        // bucket that did NOT move) and never the `'window'` placeholder: with
+        // no primary half the record followed a SCOPED bucket, so that bucket's
+        // verdict is the reason, and a reason string is an assertion.
+        repairedBy: id, refiledFrom: ident, refiledReason: (primKept && prim ? prim.reason : (([...scv.values()].find((v) => v.target === dest) || {}).reason || (drops[0] && drops[0].reason) || 'window')),
         ...(drops.length ? { droppedBuckets: drops.map((x) => x.bucket) } : {}),
       };
       delete row.calib; delete row.accountIds;
@@ -784,6 +816,95 @@ function _recordAgreesWholly(r, window) {
   return true;
 }
 
+/** EVERY usage-cache FILE THE PRODUCT ACCEPTS, resolved to the identity whose
+ *  readings it holds (r5, reproduced on a copy of this instance's stores).
+ *
+ *  r4 keyed the cache half on ONE account per stream — `w.accountId`, the most
+ *  frequent `accountId` among the stream's rows — and that is not the same
+ *  question as "which cache files are this identity's". An org-merged login
+ *  surfaces as BOTH `__global__.json` (the machine login) and the named
+ *  subscription, and `usageIdentityGroups` puts them in ONE group precisely
+ *  because they are one quota; on this instance `usage-cache/__global__.json`
+ *  carries the same `orgUuid` as its named sibling and that identity's stream
+ *  holds 47 rows keyed to it. Being invisible here had three consequences, all
+ *  silent: it was never repaired, so a foreign window in it survived the
+ *  migration; it was never SEEDED, so `guardReadingTarget` — whose `windows`
+ *  map is keyed by CACHE FILE NAME — had no entry for `__global__` and was
+ *  structurally inert on it, writing whatever bookkeeping asked; and because
+ *  `sweepUsageAnchors` anchors the FRESHEST cache of a group, one sweep of a
+ *  foreign `__global__.json` re-poisons the stream the migration just cleaned.
+ *
+ *  So the files are ENUMERATED with the product's own predicate and each is
+ *  resolved with the product's own rule:
+ *    · FORWARD (`identityKeyFor` over the file itself, plus the roster's
+ *      backend/type/email exactly as `usageIdentityGroups` reads them) — this
+ *      is the live answer and it WINS whenever it names an identity;
+ *    · the `acct:` fallback is `identityKeyFor`'s own documented LAST RESORT,
+ *      i.e. the file states no org and no email. The engine can still key such
+ *      an account by email because `accounts.list()` reads it out of the
+ *      CREDENTIAL DIR, which this migration (running before any AccountManager
+ *      exists) cannot; two live members here are in exactly that state. Their
+ *      own stream names them in `accountId`, written beside `identityKey` from
+ *      the SAME group at the SAME moment, so it is the historical forward
+ *      answer rather than a guess — and it can only be used when exactly ONE
+ *      established stream names the account. A reassignment cannot sneak
+ *      through it: a login that moved orgs writes the new `orgUuid` into the
+ *      file, and the forward rung reads that first.
+ *  Pseudo keys are deliberately excluded from the fallback index: the engine
+ *  records `accountId: null` for BOTH `__global__.json` and
+ *  `__global_codex__.json`, so a null row cannot tell the two apart (measured:
+ *  the codex stream's 1532 rows are null-keyed exactly like a claude machine
+ *  login's would be). Both are named by the forward rung anyway.
+ *  `host-*` is excluded for the same reason the engine excludes it from
+ *  identity groups: `usage-cache/host-<id>.json` is that HOST's own claude
+ *  login, no anchor stream describes it, and this migration therefore has no
+ *  established window to judge or seed it with. */
+function identityCacheKeys(cacheDir, windows, { accounts = null } = {}) {
+  const out = [];
+  // accountId -> the established, receivable identities whose stream names it
+  const byRowAcct = new Map();
+  for (const [ident, w] of windows) {
+    if (!w.canReceive) continue;
+    const seen = new Set();
+    for (const r of w.file.rows) {
+      const a = r && r.accountId;
+      if (!a || a === '__global__' || a === '__global_codex__' || seen.has(a)) continue;
+      seen.add(a);
+      (byRowAcct.get(a) || byRowAcct.set(a, []).get(a)).push(ident);
+    }
+  }
+  let names = [];
+  // the predicate is `usageIdentityGroups`', verbatim
+  try { names = fs.readdirSync(cacheDir).filter((f) => f.endsWith('.json') && !f.startsWith('__models__') && !f.startsWith('host-') && f !== 'rates.json'); } catch { return out; }
+  for (const fn of names.sort()) {
+    const key = fn.slice(0, -5);
+    const cache = _readJson(path.join(cacheDir, fn));
+    if (!cache) { out.push({ key, file: fn, cache: null, ident: null, why: 'unreadable' }); continue; }
+    const accountId = (key === '__global__' || key === '__global_codex__') ? null : key;
+    const rec = accountId && accounts ? accounts.find((a) => a && a.id === accountId) : null;
+    // a cache file with no roster record is a zombie the product already
+    // ignores, and a pool holds no quota of its own — both skipped there, both
+    // skipped here, for the same reasons
+    if (accountId && accounts && !rec) { out.push({ key, file: fn, cache, ident: null, why: 'no roster record — the product ignores this file too' }); continue; }
+    if (rec && rec.type === 'pooled') { out.push({ key, file: fn, cache, ident: null, why: 'a pool holds no quota of its own' }); continue; }
+    const fwd = key === '__global_codex__' ? 'codex:__global__'
+      : ((rec && rec.backend === 'codex') ? 'codex:' : '') + identityKeyFor({ accountId, cache, email: rec ? rec.email : undefined });
+    const slug = anchorSlug(fwd);
+    if (windows.has(slug) && windows.get(slug).canReceive) { out.push({ key, file: fn, cache, ident: slug, via: 'identity' }); continue; }
+    // the file NAMED an identity, so the streams are not asked — each refusal
+    // says which of the two things is missing, because a line that says "no
+    // established window" about an identity that has one is a false diagnosis
+    if (!/^acct:/.test(fwd)) {
+      out.push({ key, file: fn, cache, ident: null, why: windows.has(slug) ? `its identity ${fwd} may not receive readings (its account is not on the roster)` : `its identity ${fwd} has no established window` });
+      continue;
+    }
+    const hits = byRowAcct.get(key) || [];
+    if (hits.length === 1) { out.push({ key, file: fn, cache, ident: hits[0], via: 'stream' }); continue; }
+    out.push({ key, file: fn, cache, ident: null, why: hits.length ? `the file states no identity and ${hits.length} established streams name this account` : 'the file states no identity and no established stream names this account' });
+  }
+  return out;
+}
+
 /** Seed the account's own window into every roster account's sidecar, and
  *  rescue a cache whose CURRENT snapshot carries another account's window.
  *  The seed is what ARMS the live guard on the upgrade: the window is stamped
@@ -804,14 +925,15 @@ function _recordAgreesWholly(r, window) {
  *  (`refiledFrom` naming the other member). So `best` is now chosen only among
  *  records ALL of whose judgeable weekly buckets agree, and `_cacheFromAnchor`
  *  filters on the window as a second, independent barrier. */
-function repairCachesByWindow({ cacheDir, archiveDir, windows, id, now = Date.now() }) {
-  const res = { seeded: 0, foreign: 0, restored: 0, scopedStripped: 0 };
-  const byAcct = new Map();
-  for (const [ident, w] of windows) if (w.canReceive && w.accountId) byAcct.set(w.accountId, { ident, ...w });
-  for (const [acct, w] of byAcct) {
-    const fp = path.join(cacheDir, String(acct).replace(/[^\w.-]/g, '_') + '.json');
-    const cur = _readJson(fp);
+function repairCachesByWindow({ cacheDir, archiveDir, windows, accounts = null, id, now = Date.now() }) {
+  const res = { keys: 0, seeded: 0, foreign: 0, restored: 0, scopedStripped: 0, unresolved: [] };
+  for (const k of identityCacheKeys(cacheDir, windows, { accounts })) {
+    if (!k.ident) { res.unresolved.push({ key: k.key, why: k.why }); continue; }
+    const acct = k.key, w = windows.get(k.ident);
+    const fp = path.join(cacheDir, k.file);
+    const cur = k.cache;
     if (!cur) continue;
+    res.keys++;
     const snap = windowOf(cur);
     let next = cur;
     if (snap.sevenDay && weeklyNear(snap.sevenDay, w.window.sevenDay) === false) {
@@ -830,7 +952,7 @@ function repairCachesByWindow({ cacheDir, archiveDir, windows, id, now = Date.no
       if (best) { next = _cacheFromAnchor(best, cur, w.window); res.restored++; }
       else {
         next = {};
-        for (const k of IDENTITY_FIELDS) if (cur[k] !== undefined) next[k] = cur[k];
+        for (const f of IDENTITY_FIELDS) if (cur[f] !== undefined) next[f] = cur[f];
         next.repairedBy = id;
       }
     } else {
@@ -871,7 +993,7 @@ function repairCachesByWindow({ cacheDir, archiveDir, windows, id, now = Date.no
 
 /** THE window repair. Same contract as repairReadings: archive-never-destroy,
  *  every archived row carries a reason, idempotent, atomic. */
-function repairByWindow({ dataDir, roster = null, id = 'readings-by-window', now = Date.now() }) {
+function repairByWindow({ dataDir, roster = null, accounts = null, id = 'readings-by-window', now = Date.now() }) {
   const archiveDir = path.join(dataDir, 'archive');
   const anchorsDir = path.join(dataDir, 'usage-anchors');
   const anchorFiles = _readAnchorFiles(anchorsDir);
@@ -885,8 +1007,8 @@ function repairByWindow({ dataDir, roster = null, id = 'readings-by-window', now
     anchors: repairAnchorsByWindow({ anchorsDir, archiveDir, anchorFiles, windows, id, now }),
     caches: null,
   };
-  report.caches = repairCachesByWindow({ cacheDir: path.join(dataDir, 'usage-cache'), archiveDir, windows, id, now });
+  report.caches = repairCachesByWindow({ cacheDir: path.join(dataDir, 'usage-cache'), archiveDir, windows, accounts, id, now });
   return report;
 }
 
-module.exports = { repairReadings, deathMarkers, isForeign, backfillFromJournal, findJournal, repairUsageCaches, repairAnchors, repairAttribution, sessionKeysFor, _sessionKeyMap, repairByWindow, establishedWindows, repairAnchorsByWindow, repairCachesByWindow, _cacheFromAnchor, _recordAgreesWholly, MIN_OWN_READINGS, OWN_DOMINANCE };
+module.exports = { repairReadings, deathMarkers, isForeign, backfillFromJournal, findJournal, repairUsageCaches, repairAnchors, repairAttribution, sessionKeysFor, _sessionKeyMap, repairByWindow, establishedWindows, identityCacheKeys, repairAnchorsByWindow, repairCachesByWindow, _cacheFromAnchor, _recordAgreesWholly, _primaryDrops, MIN_OWN_READINGS, OWN_DOMINANCE };

@@ -92,12 +92,19 @@ function create({ rootDir, serverNotice }) {
         // removed account shares a live one's weekly phase — counting it would
         // make every genuinely re-filable entry ambiguous. Read straight off
         // disk (this runs before any AccountManager exists).
-        let roster = null;
+        let roster = null, accounts = null;
         try {
           const st = JSON.parse(fs.readFileSync(path.join(dataDir, 'accounts.json'), 'utf-8'));
-          roster = (st?.accounts || []).filter((a) => a && a.id && a.type === 'subscription').map((a) => a.id);
+          // The RECORDS as well as the ids (r5): resolving a usage-cache FILE
+          // to its identity is `usageIdentityGroups`' job, and that reads the
+          // record's backend (a ChatGPT and an Anthropic login sharing an email
+          // must never merge), its type (a pool holds no quota of its own) and
+          // its declared email. Handing over only ids would make this
+          // migration's map a second, weaker spelling of the engine's.
+          accounts = (st?.accounts || []).filter((a) => a && a.id);
+          roster = accounts.filter((a) => a.type === 'subscription').map((a) => a.id);
         } catch { }
-        const rep = repairByWindow({ dataDir, roster, id: '2026-09-refile-readings-by-window' });
+        const rep = repairByWindow({ dataDir, roster, accounts, id: '2026-09-refile-readings-by-window' });
         const a = rep.anchors, c = rep.caches;
         console.log('[migrate] readings-by-window:', JSON.stringify({
           identities: rep.identities.length, receivers: rep.identities.filter((x) => x.canReceive).length,
