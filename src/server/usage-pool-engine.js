@@ -1945,9 +1945,39 @@ function readingForeignForWake(memberId, snap) {
  *      the member can actually serve; "the pool moved somebody else" is half
  *      ①'s business and that path already nudges.
  *
+ *      HALF ② SERVES ONLY THE CONVERSATIONS NOTHING COULD MOVE (r2). It fires
+ *      a session only when a continue would land ON `memberId` and would have
+ *      landed there BEFORE half ① ran too — i.e. exactly the shape the
+ *      paragraph above describes. Round 1 filtered on pool MEMBERSHIP and
+ *      fired anyway, which spent a real turn in three measured shapes:
+ *        · a MANUAL pool (`auto:false`) — half ① returns at the top of
+ *          maybePoolAutoSwitchForPool, so the link never moves; the continue
+ *          bills the spent member and the card called that member "recovered".
+ *        · a REMOTE session (`s.host`) — the per-session pass skips it BY
+ *          DESIGN, same outcome.
+ *        · a COLD pool (`hot:false`) — the pool RESTARTS such a conversation
+ *          through the client (`pool-auto-switched`) precisely because its CLI
+ *          cannot re-read credentials, and master's only other fireNow call
+ *          site guards that same spend with `if (a.hot)`.
+ *      The pre-fire gate cannot catch any of them: `quotaVerdictFor` answers a
+ *      POOLED scope with "any member usable", which is true and beside the
+ *      point. The fact half ② needs is the one this module already names —
+ *      `fireIdentityFor`, "where would a continue land right now" — asked
+ *      twice, because "the wake moved it there" and "it was already there" are
+ *      different worlds and only the second is half ②'s. When half ① DOES move
+ *      a conversation, that path fires it itself for a hot pool (:2417) and
+ *      restarts it through the client for a cold one.
+ *      WHAT THE COLD RULE COSTS, deliberately: a cold pool's conversation is
+ *      released by the TIMED path at its armed reset rather than early. That is
+ *      latency; firing anyway is money, spent on whichever member the CLI still
+ *      holds — the restart is a CLIENT action, so with no browser connected
+ *      nothing restarts and the link says one thing while the CLI bills
+ *      another. Nothing in this process knows whether a client obeyed a restart
+ *      broadcast, and guessing is worse than waiting.
+ *
  *  "No reading" is a REFUSAL TO ACT, never a verdict of 0%. */
 function onMemberReadingFresh(memberId, why = 'reading', { at = Date.now() } = {}) {
-  const out = { member: memberId || null, why, acted: false, reason: null, detail: null, pools: [], fired: [] };
+  const out = { member: memberId || null, why, acted: false, reason: null, detail: null, pools: [], fired: [], skipped: [] };
   try {
     if (!memberId || typeof memberId !== 'string') { out.reason = 'no-member'; return out; }
     let snap = null;
@@ -1967,6 +1997,33 @@ function onMemberReadingFresh(memberId, why = 'reading', { at = Date.now() } = {
     out.acted = true;
 
     const pools = memberPoolsOf(memberId);
+    const ar = getAutoResume();
+    // WHERE A CONTINUE WOULD LAND, PER WAITING CONVERSATION, *BEFORE* HALF ①
+    // IS ALLOWED TO MOVE ANYTHING (r2). Half ② serves only the conversations
+    // nothing could move, and that is a fact about the world before the
+    // re-decide — read after it, "the wake moved this session onto the new
+    // member" is indistinguishable from "it was already parked there", and the
+    // first of those is a spend half ① has already accounted for (it fires a
+    // hot pool itself and restarts a cold one through the client).
+    // MEASURED HONESTLY: deleting this snapshot changes no outcome TODAY —
+    // auto-resume refuses the second fire on its own (`session._arFiring` is
+    // raised for the whole gate, and a delivered continue deletes the arm), so
+    // the mutant delivers the same one continue with the same card. It stays
+    // because half ②'s money-safety must not be OWED to another module's
+    // private in-flight flag, and because the skip is what makes half ②'s
+    // contract ("only what nothing could move") testable rather than a
+    // sentence in a comment. test-new-member-wake §8f drives the interlock
+    // itself, so this claim is not decorative.
+    const landedBefore = new Map();
+    if (ar && ar.armedIds && ar.fireNow) {
+      let ids0 = [];
+      try { ids0 = ar.armedIds() || []; } catch { }
+      for (const id of ids0) {
+        const s0 = activeSessions.get(id);
+        if (!s0) continue;
+        try { landedBefore.set(id, fireIdentityFor(s0)?.key || null); } catch { landedBefore.set(id, null); }
+      }
+    }
     for (const p of pools) {
       out.pools.push(p.id);
       try { maybePoolAutoSwitchForPool(p.id, { force: true }); } catch (e) { console.warn(`[pool] wake re-decide ${p.id} failed:`, e.message); }
@@ -1975,7 +2032,6 @@ function onMemberReadingFresh(memberId, why = 'reading', { at = Date.now() } = {
     let usable = null;
     try { usable = quotaVerdict(poolReadCache()(memberId), at / 1000, { tier: 'hot' }).usable; } catch { }
     if (usable !== true) { out.reason = 'member-not-usable'; return out; }
-    const ar = getAutoResume();
     if (!ar || !ar.fireNow || !ar.armedIds) { out.reason = 'no-auto-resume'; return out; }
     const poolIds = new Set(pools.map((p) => p.id));
     let ids = [];
@@ -1985,9 +2041,34 @@ function onMemberReadingFresh(memberId, why = 'reading', { at = Date.now() } = {
       if (!s) continue;
       const acct = s._accountId || null;
       if (acct !== memberId && !poolIds.has(acct)) continue;
+      // THE CONTINUE MUST LAND ON THE MEMBER THAT BECAME USABLE, AND MUST
+      // ALREADY HAVE BEEN GOING TO (r2 — see the header). `fireIdentityFor` is
+      // this module's ONE answer to "where would a continue land right now"
+      // (it is auto-resume's own `fireIdentity` dep, so attemptFire re-resolves
+      // the very same fact); asking pool MEMBERSHIP instead billed a spent
+      // member and then called it recovered. A session armed DURING this wake
+      // is absent from the snapshot and is therefore skipped — whatever armed
+      // it did so having already seen this reading.
+      let landsOn = null;
+      try { landsOn = fireIdentityFor(s)?.key || null; } catch { }
+      const before = landedBefore.has(id) ? landedBefore.get(id) : null;
+      // A COLD pool RESTARTS the conversation through the client instead of
+      // trusting the CLI to re-read its credentials — master's only other
+      // fireNow call site guards its spend with exactly this (:2417), and the
+      // restart is a CLIENT action: with no client connected nothing restarts,
+      // the link says one member and the running CLI still holds another's
+      // credentials. "The link points at the member that recovered" is
+      // therefore not enough to know where a continue would BILL.
+      const pa = poolIds.has(acct) ? accounts.get(acct) : null;
+      const cold = !!(pa && pa.type === 'pooled' && !pa.hot);
+      const why2 = landsOn !== memberId ? 'lands-elsewhere' : before !== memberId ? 'the wake moved it' : cold ? 'cold pool — it restarts instead' : null;
+      if (why2) { out.skipped.push({ id, landsOn, before, why: why2 }); continue; }
       try {
         if (ar.fireNow(id, `${nameOf(memberId)} 已恢复可用`, { cause: 'member-usable' })) out.fired.push(id);
       } catch (e) { console.warn('[auto-resume] wake fire failed:', e.message); }
+    }
+    for (const k of out.skipped) {
+      console.log(`[pool] member wake ${nameOf(memberId)}: left ${k.id} alone (${k.why}) — a continue there would have landed on ${nameOf(k.landsOn) || 'nobody'}`);
     }
     if (out.pools.length || out.fired.length) {
       console.log(`[pool] member wake ${nameOf(memberId)} (${why}): re-decided ${out.pools.length} pool(s), continued ${out.fired.length} waiting conversation(s)`);

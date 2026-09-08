@@ -516,6 +516,17 @@ if (!probe) {
   ok('PURE continue: a TIMED fire off the near-arm says the pool switched (round 1 said the limit had reset)', C({ kind: 'timed', armReason: 'switched to a usable account (X)', label: 'X' }).text === '账号池已切换到 X，已自动继续这个任务。');
   ok('PURE continue: a TIMED fire whose identity MOVED during the gate says the same', C({ kind: 'timed', armReason: 'usage limit', label: 'X', moved: true }).cls === 'switched');
   ok('PURE continue: an account that came back by itself is not a pool switch', C({ kind: 'timed', armReason: 'account usable again', label: 'X' }).text === '账号 X 已恢复可用，已自动继续这个任务。');
+  // THE PAIR ROUND 1 SILENTLY CHANGED (r2 of the new-member wake): the engine
+  // arms with 'account usable again' at scheduleWallProbe and then a REAL pool
+  // switch fires with kind:'now' (:2417/:2498). Round 1 hoisted the arm-reason
+  // clause above kind:'now' while adding `cause`, and this pair started
+  // reading as a recovery. `cause` may only REFINE the order, never reorder it.
+  ok('PURE continue: kind:\'now\' on a session near-armed with \'account usable again\' is a SWITCH, not a recovery (the pair round 1 changed)',
+    C({ kind: 'now', armReason: 'account usable again', label: 'X' }).text === '账号池已切换到 X，已自动继续这个任务。');
+  ok('PURE continue: the new-member wake NAMES the member that became usable (nothing switched)',
+    C({ kind: 'now', armReason: 'usage limit', label: 'X', cause: 'member-usable' }).text === '账号 X 已恢复可用，已自动继续这个任务。');
+  ok('PURE continue: …but `moved` still outranks `cause` — the gate re-pointed us onto a member the wake never spoke about',
+    C({ kind: 'now', armReason: 'usage limit', label: 'Y', moved: true, cause: 'member-usable' }).text === '账号池已切换到 Y，已自动继续这个任务。');
   ok('PURE continue: a real reset anchor keeps the reset wording', C({ kind: 'timed', armReason: '5h 0% < 10% · 7d 2% < 5%', label: 'X' }).cls === 'reset');
   ok('PURE continue: a missing label degrades, never throws', C({ kind: 'now', armReason: null, label: null }).text === '账号池已切换到 可用账号，已自动继续这个任务。');
   // DRIFT GUARD: the arm reasons above are ENGINE strings — if the engine

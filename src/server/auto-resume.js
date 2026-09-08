@@ -123,13 +123,26 @@ function refusalNoticeFor({ reason, label, armedResetsAt = 0, noTargetAt = 0, no
  *                    stand in for "a pool switch" now that the immediate path
  *                    has a second caller.
  *  Only with none of them is "the limit reset" the reason we continued.
- *  `cause` defaults to null, so every pre-existing caller is byte-identical. */
+ *
+ *  ORDER IS LOAD-BEARING, AND `cause` MAY ONLY REFINE IT (r2). `moved` still
+ *  outranks `cause`: if the pre-fire gate re-pointed the link under us, the
+ *  continue is landing on a member the wake never spoke about, so "the pool
+ *  switched to X" is the true sentence — a `cause`-first order would have
+ *  named the gate's target as the account that "recovered". Below `cause`,
+ *  master's own precedence is restored verbatim: round 1 hoisted the
+ *  `/^account usable again/` arm ABOVE `kind === 'now'` and so silently changed
+ *  a PRE-EXISTING pair — the engine's near-arm (:1491 "account usable again")
+ *  followed by a real pool switch firing with kind:'now' (:2417/:2498) — from
+ *  "账号池已切换到 X" to "账号 X 已恢复可用", describing a switch as a recovery.
+ *  With `cause` null every one of the eight reachable caller shapes is
+ *  byte-identical to master, and test-auto-resume-loop §3 pins the pair. */
 function continueNoticeFor({ kind, armReason, label, moved = false, cause = null }) {
   const who = label || '可用账号';
   const r = String(armReason || '');
   if (moved || /^switched to a usable account/.test(r)) return { cls: 'switched', text: `账号池已切换到 ${who}，已自动继续这个任务。` };
-  if (cause === 'member-usable' || /^account usable again/.test(r)) return { cls: 'switched', text: `账号 ${who} 已恢复可用，已自动继续这个任务。` };
+  if (cause === 'member-usable') return { cls: 'switched', text: `账号 ${who} 已恢复可用，已自动继续这个任务。` };
   if (kind === 'now') return { cls: 'switched', text: `账号池已切换到 ${who}，已自动继续这个任务。` };
+  if (/^account usable again/.test(r)) return { cls: 'switched', text: `账号 ${who} 已恢复可用，已自动继续这个任务。` };
   return { cls: 'reset', text: '用量上限已重置，已自动继续这个任务。' };
 }
 

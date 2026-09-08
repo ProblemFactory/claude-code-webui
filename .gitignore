@@ -50,3 +50,10 @@ data/uploads-sync.json
 data/bin/vibespace-agentd.js
 data/bin/vibespace-agentd-attach.js
 src/lib/build-version.js
+# §8 of scripts/test-new-member-wake.mjs writes PATCHED COPIES of
+# src/server/usage-pool-engine.js beside the real one (they must be SIBLINGS or
+# their relative requires do not resolve). They are unlinked on exit and swept
+# at start, but a SIGKILL can strand one — and a dirty tree is what the release
+# gate REFUSES on, so they can never be allowed to become tree state.
+src/server/vs-wake-mut-*.js
+src/server/vs-wake-master-ar-*.js

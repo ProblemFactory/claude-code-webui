@@ -41,12 +41,23 @@
 //        window is another member's, a member that is itself still spent.
 //   §3   both floors, and the fingerprint gate on the polled routes.
 //   §4   the loop breaker still holds against a member that keeps rejecting.
+//   §8   (r2) the three real shapes in which the pool CANNOT move a
+//        conversation onto the newcomer — a MANUAL pool, a REMOTE conversation
+//        and a COLD one — where round 1 spent a turn on the member the
+//        conversation was already stuck on and called it "recovered"; the
+//        controls are PATCHED COPIES of the real engine, hit-count asserted.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { execFileSync } from 'node:child_process';
+import { gitEnvFrom } from './git-env.mjs';
 const require = createRequire(import.meta.url);
 const REPO = path.resolve(new URL('..', import.meta.url).pathname);
+// §8g reads master's copy of continueNoticeFor. This suite runs inside
+// `npm run build`, i.e. inside a process git itself populates (GIT_DIR /
+// GIT_INDEX_FILE / GIT_PREFIX) — see scripts/git-env.mjs for the incident.
+const GIT_ENV = gitEnvFrom(process.env);
 let pass = 0, fail = 0;
 const ok = (n, c, e) => { if (c) { pass++; console.log('  ✓ ' + n); } else { fail++; console.error('  ✗ ' + n + (e ? ' — ' + e : '')); } };
 const read = (f) => fs.readFileSync(path.join(REPO, f), 'utf8');
@@ -72,8 +83,11 @@ const settle = () => tick(60);
  *  credentials and no reading at all.
  *
  *  `auto` / `withFireNow` are the §1c controls: both are real production
- *  states, not stubs of the code under test. */
-function mkWorld({ auto = true, withFireNow = true, newLoggedIn = true, parkOn = null } = {}) {
+ *  states, not stubs of the code under test. `auto:false` (a MANUAL pool),
+ *  `hot:false` (a COLD pool) and `host` (a REMOTE conversation) are §8's — the
+ *  three real shapes in which the pool structurally CANNOT move a conversation
+ *  onto the member that just became usable. */
+function mkWorld({ auto = true, hot = true, host = null, withFireNow = true, newLoggedIn = true, parkOn = null, engineModule = engMod } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-wake-'));
   cleanup.push(root);
   const dataDir = path.join(root, 'data');
@@ -95,7 +109,7 @@ function mkWorld({ auto = true, withFireNow = true, newLoggedIn = true, parkOn =
   if (newLoggedIn) login(NEW);
   const P = am.createPool({ name: '全部' }).id;
   am.setPoolTarget(P, FISH);
-  am.updatePool(P, { auto, hot: true });
+  am.updatePool(P, { auto, hot });
 
   const cacheDir = path.join(dataDir, 'usage-cache'); fs.mkdirSync(cacheDir, { recursive: true });
   const nowS = Math.floor(Date.now() / 1000);
@@ -110,7 +124,7 @@ function mkWorld({ auto = true, withFireNow = true, newLoggedIn = true, parkOn =
   // NEW has NO cache file at all — "no usage data", exactly the arm reason
 
   const sessions = new Map();
-  const notices = [], notes = [], fired = [];
+  const notices = [], notes = [], fired = [], wsSent = [];
   const ar = createAR({
     dataDir, activeSessions: sessions, serverSetting: () => true, log: () => { },
     notify: (id, s2, text) => notes.push({ id, text }),
@@ -131,9 +145,12 @@ function mkWorld({ auto = true, withFireNow = true, newLoggedIn = true, parkOn =
   const probes = [];
   let probeAnswer = null; // set by the test: what the panel "sees"
   const app = { get() { }, post() { }, put() { }, delete() { }, use() { }, locals: {} };
-  const eng = engMod.create({
+  // `engineModule` is §8's negative-control seam: a PATCHED COPY of the real
+  // engine, wired through this same harness so the two arms differ in exactly
+  // the one named replacement.
+  const eng = engineModule.create({
     app, rootDir: root, USAGE_CACHE_DIR: cacheDir, activeSessions: sessions,
-    wss: { clients: new Set() }, WS_OPEN: 1, broadcastToSession() { }, serverNotice: (k, t) => notices.push(t),
+    wss: { clients: new Set([{ readyState: 1, send: (p2) => wsSent.push(p2) }]) }, WS_OPEN: 1, broadcastToSession() { }, serverNotice: (k, t) => notices.push(t),
     serverSetting: () => undefined, getAccounts: () => am, getHosts: () => null, getUsageHistory: () => null,
     recordUsageAttribution() { }, adapterRegistry: { get() { return null; } },
     getAutoResume: () => arSeenByEngine, getOtelIngest: () => ({ observedOrgFor: () => null }),
@@ -146,7 +163,7 @@ function mkWorld({ auto = true, withFireNow = true, newLoggedIn = true, parkOn =
   });
 
   const mkSession = (sid, cid) => {
-    const s = { backend: 'claude', mode: 'chat', host: null, _webuiId: sid, claudeSessionId: cid, _accountId: P, _autoResume: true, _servedModel: 'claude-fable-5', _servedModelAt: Date.now(), pty: { write() { } }, name: sid };
+    const s = { backend: 'claude', mode: 'chat', host, _webuiId: sid, claudeSessionId: cid, _accountId: P, _autoResume: true, _servedModel: 'claude-fable-5', _servedModelAt: Date.now(), pty: { write() { } }, name: sid };
     sessions.set(sid, s);
     am.ensureSessionPoolLink(P, sid, parkOn || FISH);
     return s;
@@ -156,7 +173,8 @@ function mkWorld({ auto = true, withFireNow = true, newLoggedIn = true, parkOn =
 
   const w = {
     root, dataDir, am, eng, ar, sessions, A, B, P, FISH, PANDY, NEW, R5, R7,
-    notices, notes, fired, cacheDir, readCache, writeCache, spent, probes, login,
+    notices, notes, fired, wsSent, cacheDir, readCache, writeCache, spent, probes, login,
+    coldRestarts: () => wsSent.filter((p2) => /"type":"pool-auto-switched"/.test(String(p2))).length,
     setProbeAnswer: (f) => { probeAnswer = f; },
     linkOf: (sid) => am.poolCurrentFor(P, sid),
     healthy: () => ({ fetchedAt: Date.now(), source: 'on-demand', fiveHour: { utilization: 0.04, resetsAt: R5 }, sevenDay: { utilization: 0.10, resetsAt: R7 } }),
@@ -609,6 +627,243 @@ console.log('\n§6 every producer of a fresh reading takes the SAME edge');
       /const fp = loginFingerprint\(r\);/.test(src.split('const wakeOnLoginSuccess')[1].slice(0, 800)));
     ok('…on its OWN latch, so disabling one of the two side effects cannot silently disable the other',
       /const lastWakeFingerprint = new Map\(\)/.test(src));
+  }
+}
+
+// ── §8 THE CONTINUE MUST LAND ON THE MEMBER THAT BECAME USABLE ─────────────
+// r2 (adversarial verifier). Half ② used to filter on POOL MEMBERSHIP and fire
+// anyway, so in every shape where the pool structurally CANNOT move a
+// conversation onto the newcomer the continue was billed to the member that
+// conversation was already stuck on — and the card called THAT member
+// "recovered". The pre-fire gate cannot catch it: `quotaVerdictFor` answers a
+// POOLED scope with "any member usable", which is true and beside the point.
+//
+// The three shapes are real production states, and they are mkWorld's own
+// controls (declared since round 1, never driven — which is exactly why they
+// went unmeasured):
+//   auto:false   a MANUAL pool — maybePoolAutoSwitchForPool returns at the top
+//   host:'…'     a REMOTE conversation — the per-session pass skips it BY DESIGN
+//   hot:false    a COLD pool — it RESTARTS the conversation through the client
+//
+// THE NEGATIVE CONTROLS ARE PATCHED COPIES OF THE PRODUCT MODULE (each
+// replacement asserted to have HIT), because "0 continues delivered" is also
+// what a leg that never ran prints.
+console.log('\n§8 half ② fires only the conversations nothing could move (r2)');
+{
+  const engPath = path.join(REPO, 'src/server/usage-pool-engine.js');
+  const engSrc0 = read('src/server/usage-pool-engine.js');
+  const mutants = [];
+  process.on('exit', () => { for (const f of mutants) { try { fs.unlinkSync(f); } catch { } } });
+  // A run killed with SIGKILL leaves its copies behind. Sweep them, but only
+  // the ones whose PID is GONE — this suite can legitimately be running twice
+  // in one worktree, and deleting a LIVE run's module mid-require is worse than
+  // the litter. (Same shape as the wire probe's stale sweep: the cleaner states
+  // its own rule instead of assuming it is alone.)
+  try {
+    for (const f of fs.readdirSync(path.join(REPO, 'src/server'))) {
+      const m = /^vs-wake-(?:mut|master-ar)-(\d+)[-.]/.exec(f);
+      if (!m || Number(m[1]) === process.pid) continue;
+      try { process.kill(Number(m[1]), 0); continue; } catch (e) { if (e.code === 'EPERM') continue; }
+      try { fs.unlinkSync(path.join(REPO, 'src/server', f)); } catch { }
+    }
+  } catch { }
+  let mutN = 0;
+  /** A patched copy of the engine, as a SIBLING of the real one so its relative
+   *  requires resolve. Every replacement is counted, and the count is asserted
+   *  by the caller — an unpatched "control" is not a control. */
+  function mutantEngine(edits) {
+    let src = engSrc0, hits = 0;
+    for (const [from, to] of edits) {
+      if (!src.includes(from)) return { err: 'needle missing: ' + from.slice(0, 70) };
+      src = src.split(from).join(to); hits++;
+    }
+    const f = path.join(REPO, 'src/server/vs-wake-mut-' + process.pid + '-' + (++mutN) + '.js');
+    fs.writeFileSync(f, src); mutants.push(f);
+    return { mod: require(f), hits };
+  }
+
+  /** The world, ARMED through the REAL rejection producer, with the newcomer
+   *  becoming usable. `engineModule` lets a leg drive a patched copy of the
+   *  product through the SAME wiring. */
+  async function walled(opts, engineModule = engMod) {
+    const w = mkWorld({ ...opts, engineModule });
+    w.reject(w.A);                       // the real producer: rate_limit_event + turn end
+    await tick(20);
+    w.unthrottle();
+    w.writeCache(w.NEW, w.healthy());    // ⟳ / login: the newcomer can serve now
+    return w;
+  }
+  const cardsOf = (w) => w.notes.map((n) => n.text).join(' | ');
+
+  // (a) MANUAL pool — the link never moves, so a continue would bill the SPENT member
+  {
+    const w = await walled({ auto: false });
+    const linkBefore = w.linkOf(w.A._webuiId);
+    const r = w.eng.onMemberReadingFresh(w.NEW, 'manual refresh (cli-panel)');
+    await settle();
+    ok('MANUAL pool (auto:false): the wake continues NOBODY — half ① cannot move the link, so a continue would land on the spent member',
+      r.acted === true && r.fired.length === 0 && w.fired.length === 0, JSON.stringify(r));
+    ok('…and it SAYS which conversation it left alone and where a continue would have landed',
+      r.skipped.length === 1 && r.skipped[0].id === w.A._webuiId && r.skipped[0].landsOn === linkBefore && r.skipped[0].why === 'lands-elsewhere', JSON.stringify(r.skipped));
+    ok('…and no card claims a member recovered', !/已恢复可用/.test(cardsOf(w)), cardsOf(w));
+
+    // NEGATIVE CONTROL: the pre-fix spelling (membership only), on a patched copy
+    const mut = mutantEngine([
+      ["      const before = landedBefore.has(id) ? landedBefore.get(id) : null;",
+        "      const before = memberId; // PRE-FIX: membership was the only filter"],
+      ["      let landsOn = null;\n      try { landsOn = fireIdentityFor(s)?.key || null; } catch { }",
+        "      let landsOn = memberId; // PRE-FIX"],
+      ["      const cold = !!(pa && pa.type === 'pooled' && !pa.hot);",
+        "      const cold = false; // PRE-FIX"],
+    ]);
+    ok('control setup: the PRE-FIX copy applied all three replacements', mut.hits === 3, JSON.stringify(mut));
+    const w2 = await walled({ auto: false }, mut.mod);
+    const r2 = w2.eng.onMemberReadingFresh(w2.NEW, 'manual refresh (cli-panel)');
+    await settle();
+    const spentCache = w2.readCache(w2.linkOf(w2.A._webuiId));
+    ok('NEGATIVE CONTROL (pre-fix): the same world DOES spend a turn — on a member measured at 100% utilization — and the card names that member as recovered',
+      r2.fired.length === 1 && w2.fired.length === 1 && spentCache?.fiveHour?.utilization === 1 && /Fish Max 已恢复可用/.test(cardsOf(w2)),
+      JSON.stringify({ fired: w2.fired.length, util: spentCache?.fiveHour?.utilization, cards: cardsOf(w2) }));
+  }
+
+  // (b) REMOTE conversation — the per-session pass skips `s.host` BY DESIGN
+  {
+    const w = await walled({ host: 'aidev' });
+    const r = w.eng.onMemberReadingFresh(w.NEW, 'manual refresh (cli-panel)');
+    await settle();
+    ok('REMOTE conversation (s.host): same verdict — the per-session pass skips it by design, so the wake must not fire it either',
+      r.acted === true && r.fired.length === 0 && w.fired.length === 0 && r.skipped[0]?.why === 'lands-elsewhere', JSON.stringify(r));
+    ok('…and the pool half still ran (this is a refusal to SPEND, not a refusal to think)', r.pools.includes(w.P), JSON.stringify(r.pools));
+  }
+
+  // (c) COLD pool — the pool RESTARTS such a conversation through the client
+  {
+    const w = await walled({ hot: false });
+    ok('control setup: a COLD pool moved the conversation onto the newcomer and broadcast the client restart',
+      w.linkOf(w.A._webuiId) === w.NEW && w.coldRestarts() >= 1, `onNew=${w.linkOf(w.A._webuiId) === w.NEW} restarts=${w.coldRestarts()}`);
+    const restarts = w.coldRestarts();
+    const r = w.eng.onMemberReadingFresh(w.NEW, 'manual refresh (cli-panel)');
+    await settle();
+    ok('COLD pool (hot:false): the wake continues NOBODY — a cold conversation is RESTARTED, and master guards its own fireNow with the same `if (a.hot)`',
+      r.acted === true && r.fired.length === 0 && w.fired.length === 0 && /^cold pool/.test(r.skipped[0]?.why || ''), JSON.stringify(r));
+    ok('…and it added no second restart broadcast either (it only declined to spend)', w.coldRestarts() === restarts, `${restarts} → ${w.coldRestarts()}`);
+
+    // NEGATIVE CONTROL: ONLY the cold clause removed — one mechanism, one control
+    const mut = mutantEngine([
+      ["      const cold = !!(pa && pa.type === 'pooled' && !pa.hot);", "      const cold = false; // MUTANT: no cold gate"],
+    ]);
+    ok('control setup: the no-cold-gate copy applied its replacement', mut.hits === 1, JSON.stringify(mut));
+    const w2 = await walled({ hot: false }, mut.mod);
+    const r2 = w2.eng.onMemberReadingFresh(w2.NEW, 'manual refresh (cli-panel)');
+    await settle();
+    ok('NEGATIVE CONTROL (no cold gate): the same world spends a continue into a CLI the pool just told the client to replace',
+      r2.fired.length === 1 && w2.fired.length === 1, JSON.stringify({ fired: w2.fired.length }));
+  }
+
+  // (d) THE INCIDENT ITSELF still works — this gate must not close the door it opened
+  {
+    const w = mkWorld();
+    w.eng.maybePoolAutoSwitchForPool(w.P); await tick(5);   // park both on the newcomer
+    for (const s of [w.A, w.B]) w.ar.armIfEnabled(s._webuiId, s, w.R5 * 1000, 'UCI Max: no usage data | Fish Max: 5h 0% < 10%');
+    w.unthrottle();
+    w.writeCache(w.NEW, w.healthy());
+    const r = w.eng.onMemberReadingFresh(w.NEW, 'manual refresh (cli-panel)');
+    await settle();
+    ok('THE INCIDENT: both conversations were ALREADY parked on the newcomer, so the continue lands on the member that became usable — both released',
+      r.fired.length === 2 && w.fired.length === 2 && r.skipped.length === 0, JSON.stringify({ fired: r.fired.length, sent: w.fired.length, skipped: r.skipped }));
+    ok('…and the card names the account that recovered', /UCI Max 已恢复可用/.test(cardsOf(w)), cardsOf(w));
+  }
+
+  // (e) "THE WAKE MOVED IT" IS HALF ①'s SPEND, NOT HALF ②'s — the LOGIN shape:
+  //     armed while the newcomer had no login at all (so it was not a candidate),
+  //     then the login lands. Half ①'s per-session pass moves the link AND fires
+  //     it itself; half ② must not offer a second continue for the same event.
+  {
+    const w = mkWorld({ newLoggedIn: false });
+    w.reject(w.A); await tick(20);
+    ok('control setup: the conversation is armed and STILL on the spent member (the newcomer had no login, so it was not a candidate)',
+      !!w.ar._armed.get(w.A._webuiId) && w.linkOf(w.A._webuiId) === w.FISH, `link=${w.linkOf(w.A._webuiId)}`);
+    w.unthrottle();
+    w.login(w.NEW); w.writeCache(w.NEW, w.healthy());
+    const r = w.eng.onMemberReadingFresh(w.NEW, 'login success');
+    await settle();
+    ok('half ① moved the link and fired it ITSELF, so half ② stands down and names why',
+      w.linkOf(w.A._webuiId) === w.NEW && r.fired.length === 0 && r.skipped[0]?.why === 'the wake moved it', JSON.stringify(r));
+    ok('…and EXACTLY ONE continue was delivered, worded as the pool switch it was',
+      w.fired.length === 1 && /账号池已切换到 UCI Max/.test(cardsOf(w)), JSON.stringify({ fired: w.fired.length, cards: cardsOf(w) }));
+    // HONEST BOUNDARY, measured: deleting this snapshot changes no outcome today
+    // — auto-resume refuses the second fire on its own (§8f drives that). It
+    // stays so half ②'s money-safety is not OWED to another module's private
+    // in-flight flag, and the source has to SAY that it is redundant.
+    ok('…and the source says so at the snapshot (a redundant guard must announce that it is redundant)',
+      /MEASURED HONESTLY: deleting this snapshot changes no outcome TODAY/.test(engSrc0));
+  }
+
+  // (f) THE INTERLOCK ITSELF — what actually prevents the second fire today,
+  //     driven so (e)'s honesty is checkable rather than asserted.
+  {
+    const w = mkWorld();
+    w.eng.maybePoolAutoSwitchForPool(w.P); await tick(5);
+    w.ar.armIfEnabled(w.A._webuiId, w.A, w.R5 * 1000, 'usage limit');
+    w.unthrottle(); w.writeCache(w.NEW, w.healthy());
+    w.A._arFiring = true;                     // a pre-fire gate is in flight for this session
+    const r = w.eng.onMemberReadingFresh(w.NEW, 'manual refresh (cli-panel)');
+    await settle();
+    ok('INTERLOCK: auto-resume refuses a re-entrant fire while its own gate is in flight (attemptFire\'s _arFiring)',
+      r.fired.length === 0 && w.fired.length === 0 && !!w.ar._armed.get(w.A._webuiId), JSON.stringify(r));
+    w.A._arFiring = false;
+    w.eng._memberWakeAt.clear();
+    const r2 = w.eng.onMemberReadingFresh(w.NEW, 'manual refresh (cli-panel)');
+    await settle();
+    ok('…and with the gate clear the same wake DOES continue it (the interlock is a gate, not a wall)',
+      r2.fired.length === 1 && w.fired.length === 1, JSON.stringify(r2));
+  }
+
+  // (g) THE CARD'S ORDERING — `cause` may only REFINE master's precedence.
+  //     Round 1 hoisted the 'account usable again' arm ABOVE kind:'now' and so
+  //     silently changed a PRE-EXISTING pair: the engine's near-arm (:1491)
+  //     followed by a real pool switch firing with kind:'now' started reading
+  //     as "the account recovered".
+  {
+    const C = (o) => continueNoticeFor(o).text;
+    ok('a REAL pool switch on a near-armed session is still described as a switch (the pair round 1 changed)',
+      C({ kind: 'now', armReason: 'account usable again', label: 'X' }) === '账号池已切换到 X，已自动继续这个任务。');
+    ok('…and the engine really writes both halves of that pair (drift pin: the near-arm reason and a kind:\'now\' switch fire)',
+      /armIfEnabled\?\.\(id, session, Date\.now\(\) \+ 45000, 'account usable again'\)/.test(engSrc0)
+      && /if \(a\.hot\) \{ try \{ getAutoResume\(\)\?\.fireNow\?\.\(sid, `账号池已切换到 \$\{toName\}`\)/.test(engSrc0));
+    ok('the account that came back BY ITSELF (timed path) still reads as a recovery',
+      C({ kind: 'timed', armReason: 'account usable again', label: 'X' }) === '账号 X 已恢复可用，已自动继续这个任务。');
+    ok('the WAKE names the member that became usable', C({ kind: 'now', armReason: 'usage limit', label: 'X', cause: 'member-usable' }) === '账号 X 已恢复可用，已自动继续这个任务。');
+    ok('…but `moved` still outranks `cause`: if the pre-fire gate re-pointed us, the continue lands on a member the wake never spoke about',
+      C({ kind: 'now', armReason: 'usage limit', label: 'Y', moved: true, cause: 'member-usable' }) === '账号池已切换到 Y，已自动继续这个任务。');
+
+    // BYTE-IDENTITY WITH MASTER for every pre-existing caller shape. Round 1's
+    // commit claimed this and nothing measured it.
+    let masterAr = null, gitErr = null;
+    try {
+      const src = execFileSync('git', ['-C', REPO, 'show', 'master:src/server/auto-resume.js'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, env: GIT_ENV });
+      const f = path.join(REPO, 'src/server/vs-wake-master-ar-' + process.pid + '.js');
+      fs.writeFileSync(f, src); mutants.push(f);
+      masterAr = require(f);
+    } catch (e) { gitErr = e.message; }
+    if (masterAr?.continueNoticeFor) {
+      const SHAPES = [
+        { kind: 'now', armReason: 'account usable again', label: 'X' },
+        { kind: 'now', armReason: 'account usable again', label: 'X', moved: true },
+        { kind: 'timed', armReason: 'account usable again', label: 'X' },
+        { kind: 'now', armReason: 'Fish Max: 5h 0% < 10%', label: 'X' },
+        { kind: 'timed', armReason: 'Fish Max: 5h 0% < 10%', label: 'X' },
+        { kind: 'timed', armReason: 'switched to a usable account (X)', label: 'X' },
+        { kind: 'now', armReason: 'switched to a usable account (X)', label: 'X' },
+        { kind: 'timed', armReason: 'Fish Max: 5h 0%', label: 'X', moved: true },
+      ];
+      const diffs = SHAPES.filter((s) => JSON.stringify(continueNoticeFor(s)) !== JSON.stringify(masterAr.continueNoticeFor(s)));
+      ok(`every pre-existing caller shape is byte-identical to master (cause defaults to null) — ${SHAPES.length} shapes`,
+        diffs.length === 0, JSON.stringify(diffs));
+      ok('…and the comparison is not vacuous: master\'s copy really answers these', masterAr.continueNoticeFor(SHAPES[0]).text.length > 0);
+    } else {
+      ok('· SKIP (git could not read master:src/server/auto-resume.js — ' + (gitErr || '?') + ')', true);
+    }
   }
 }
 
