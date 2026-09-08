@@ -218,12 +218,22 @@ if (fs.existsSync('/proc/self')) {
     'the no-/proc rung REACHES the real codex holder (positive control — an empty answer would make every assert below pass)', JSON.stringify(viaLsof));
   ok(!haveLsof || (holdsIt(keeper.pid, rollout) && !isCliProcess(keeper.pid, 'codex')),
     'the `codex-keeper` fixture holds the rollout open and is NOT the codex CLI (the shape the loose rule confuses)');
-  // THE MEASURED FACT the status fix rests on: lsof answers correctly, says
-  // nothing on stderr, and exits non-zero.
+  // THE MEASURED FACT the status fix rests on: lsof answers correctly on STDOUT
+  // and exits non-zero — the product consumes stdout and IGNORES both the exit
+  // status and stderr. It deliberately does NOT assert an empty stderr: lsof
+  // stats every entry in the mount table during startup (independent of `+D`)
+  // and warns to stderr about any it cannot stat — a docker overlayfs mount, a
+  // stale NFS handle, an autofs point — none of which is an error signal and
+  // none of which the product reads. (A machine with docker overlay mounts made
+  // this leg's old `!stderr.trim()` clause a false RED — 2.369.71 gate.)
   const rawLsof = haveLsof ? spawnSync('lsof', ['-Fpn', '+D', codexRoot], { encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 }) : null;
-  ok(!haveLsof || (rawLsof.status !== 0 && rawLsof.stdout.includes(rollout) && !String(rawLsof.stderr || '').trim()),
-    '`lsof +D` reports the holder CORRECTLY, writes nothing to stderr, and still exits non-zero (its status is not an error signal)',
-    JSON.stringify({ status: rawLsof && rawLsof.status, stderr: rawLsof && rawLsof.stderr }));
+  ok(!haveLsof || (rawLsof.status !== 0 && rawLsof.stdout.includes(rollout)),
+    '`lsof +D` reports the holder CORRECTLY on stdout and still exits non-zero (its status is not an error signal — stderr warnings about unstat-able mounts are ignored, as the product ignores them)',
+    JSON.stringify({ status: rawLsof && rawLsof.status, stderrLen: rawLsof && String(rawLsof.stderr || '').length }));
+  // …and the product's own reader is PROVEN indifferent to that stderr: it read
+  // the same tree correctly above (viaLsof.includes(rollout)) on this very box.
+  ok(!haveLsof || viaLsof.includes(rollout),
+    'the product reader (listOpenRolloutPathsViaLsof) returns the holder even when lsof warned on stderr — stderr is not consumed');
   // NEGATIVE CONTROL #1 — the pre-r3 EXIT-STATUS handling with the SHIPPED
   // identity: `execFileSync` throws on that status and the catch eats it.
   const preR3StatusViaLsof = (root) => {
