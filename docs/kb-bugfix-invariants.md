@@ -2,6 +2,14 @@
 
 Moved VERBATIM out of CLAUDE.md (tier-2 pass).
 
+## THE "HISTORY IS HIDDEN" ROW NEVER SHOWED ON THE ONE LIST THAT NEEDED IT (2.369.70, caught by the Actions mirror)
+
+The sidebar's `_render()` early-returns "No sessions" when the filtered list is empty (and no hosts / no search / not the tasks tab). The OpenCode "stopped conversations are hidden — its background service is off" row is rendered by the workbench builder, i.e. AFTER that return, so an instance whose only conversations are the hidden OpenCode ones — the exact user the row exists for, whose list is empty BECAUSE the history is hidden — never saw the way back. The plugin suite's leg 4 was green on the dev machine for the wrong reason (unrelated claude sessions keep the list non-empty) and red on the GitHub Actions runner (no sessions at all) for two pushes.
+
+Fix: the empty branch calls `_renderServiceHintRows(sessions)` before returning (nothing wipes `listEl` after it, which is why the "workbench-only" pin now allows exactly that one extra call, immediately before the `return`). Regression: test-opencode-plugin leg 4b forces `_allSessions = []` + no hosts and asserts "No sessions" + the row + its Enable action; A/B with the fix reverted goes 3 red.
+
+Invariants: **an early-return branch is a render path** — every row that is "gated on broadcast state" must be reachable from every branch that can paint the list, or the branch that happens on the poorest instance is the one that lies; **a leg that passes because of the developer's own data is environment-dependent** — the Actions mirror is the instance with nothing, read it after every push (memory: push后要看CI镜像).
+
 ## QUOTA READINGS WERE KEYED BY THE ORG THE CLI STARTED ON (2026-09-07, owner: "为啥不是从根源上解决假数据而是加 guardrail")
 
 The visible symptom was absurd: a member whose Claude login had been **wiped on 2026-09-02 22:55 PDT** kept receiving limit-banners and Fable-bucket readings for five more days. The first instinct — "make logged-out members reject readings" — was rejected by the owner as a guardrail over a lie, and he was right: the logged-out member is only the case where the lie becomes *visible*.

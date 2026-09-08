@@ -1104,7 +1104,18 @@ class Sidebar {
     const searchActive = !!(document.getElementById('session-filter')?.value || '').trim();
     this._ensureHostsData?.();
     const hasHosts = !!this._hostsData?.hosts?.length;
-    if (!sessions.length && this._activeTab !== 'tasks' && !searchActive && !hasHosts) { this.listEl.insertAdjacentHTML('beforeend', `<div class="empty-hint">${tr('No sessions')}</div>`); return; }
+    if (!sessions.length && this._activeTab !== 'tasks' && !searchActive && !hasHosts) {
+      this.listEl.insertAdjacentHTML('beforeend', `<div class="empty-hint">${tr('No sessions')}</div>`);
+      // The "stopped OpenCode conversations are hidden — its service is off"
+      // row must survive the empty branch: an instance whose ONLY conversations
+      // are the hidden ones is exactly the one this row exists for (the list is
+      // empty BECAUSE the history is hidden). The workbench render below is
+      // where the row normally lives; this early return used to skip it, and
+      // only a machine with unrelated sessions ever showed the way back
+      // (caught by the Actions mirror, which has no sessions at all).
+      this._renderServiceHintRows?.(sessions);
+      return;
+    }
 
     if (this._mobileMode) {
       // Restore drill-down state if we were inside a folder/group

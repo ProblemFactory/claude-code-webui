@@ -481,6 +481,24 @@ console.log('— ⑤ the first-use dialog in a real browser');
       `);
       ok('the sidebar says NOTHING while the service is running (no nagging)', leg4?.onRow === 0, leg4);
       ok('…and once it is off (after we asked) the list admits its history is hidden AND carries the way back', leg4?.offRow === true && /hidden/.test(leg4.text) && leg4.action === true, leg4);
+      // LEG 4b: the EMPTY list. An instance whose only conversations are the
+      // hidden OpenCode ones has an empty sidebar BECAUSE the service is off —
+      // the exact user the row exists for. The "No sessions" early return used
+      // to skip the row, so only a machine with unrelated sessions ever showed
+      // the way back (the Actions mirror, with no sessions at all, went red on
+      // leg 4 while this machine's own history kept it green).
+      const leg4b = await evaluate(`
+        const sb = window.app.sidebar;
+        const saved = sb._allSessions, savedHosts = sb._hostsData;
+        try {
+          sb._allSessions = []; sb._hostsData = { hosts: [] };
+          sb._render();
+          const row = document.querySelector('.sidebar-service-hint');
+          return { noSessions: /No sessions/.test(sb.listEl.textContent), row: !!row, action: row ? !!row.querySelector('.sidebar-service-enable') : false, cards: sb.listEl.querySelectorAll('.session-card').length };
+        } finally { sb._allSessions = saved; sb._hostsData = savedHosts; sb._render(); }
+      `);
+      ok('…and on an EMPTY list ("No sessions") the row is STILL there with its Enable action — the empty branch renders it too', leg4b?.noSessions === true && leg4b.cards === 0 && leg4b.row === true && leg4b.action === true, leg4b);
+      ok('(pin) the sidebar\'s empty-list early return calls _renderServiceHintRows before returning', /No sessions[\s\S]{0,900}_renderServiceHintRows\?\.\(sessions\);\s*\n\s*return;/.test(fs.readFileSync(path.join(REPO, 'src/lib/sidebar.js'), 'utf8')));
       ws.close();
     }
     cleanup2();
@@ -507,7 +525,9 @@ console.log('— ⑥ wiring pins');
   const sb = read('src/lib/sidebar.js');
   ok('the sidebar hint row is generic over BACKEND_META.servicePlugin (never a backend id) and only shows once the user has met the harness', /_renderServiceHintRows\(sessions\) \{/.test(sb) && /const svc = meta\.servicePlugin \? meta\.service : null;/.test(sb) && /svc\.prompted \|\| \(sessions \|\| \[\]\)\.some/.test(sb));
   ok('…and an OPS-forced-off service gets the same EXPLANATION with no Enable button (nothing the user clicks there could work) — it is the only in-product word left now that "off" is not an error toast', /if \(svc\.envForced !== false\) \{[\s\S]{0,400}sidebar-service-enable[\s\S]{0,300}row\.append\(enable\);/.test(sb) && !/svc\.envForced === false\) continue;/.test(sb));
-  ok('…and it is rendered by the WORKBENCH, the one builder that owns the sessions list on desktop AND mobile (it wipes listEl, so a row added in _renderInner would be silently thrown away — how this shipped broken once)', /this\._renderServiceHintRows\?\.\(sessions\);/.test(read('src/lib/sidebar-workbench.js')) && !/_renderServiceHintRows\?\.\(/.test(sb));
+  ok('…and it is rendered by the WORKBENCH, the one builder that owns the sessions list on desktop AND mobile (it wipes listEl, so a row added in _renderInner would be silently thrown away — how this shipped broken once)', /this\._renderServiceHintRows\?\.\(sessions\);/.test(read('src/lib/sidebar-workbench.js')) && (sb.match(/_renderServiceHintRows\?\.\(/g) || []).length === 1 && /_renderServiceHintRows\?\.\(sessions\);\s*\n\s*return;/.test(sb));
+  // (the ONE call sidebar.js keeps is the empty-list branch's, and it must sit
+  // immediately before that branch's `return` — nothing wipes listEl after it)
   const mw = read('src/server/mounts-plugins-wiring.js');
   ok('POST /api/plugins/:id/prompted exists next to the other plugin routes', /app\.post\('\/api\/plugins\/:id\/prompted'/.test(mw));
   const os_ = read('src/opencode-serve.js');
