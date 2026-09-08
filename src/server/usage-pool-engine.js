@@ -597,16 +597,31 @@ function probeUsageForAccountKey(key) {
 app.locals.usageIdentityAccountIds = usageIdentityAccountIds;
 
 // ── THE ESTABLISHED WINDOW of every account we could file a reading on ──────
-// `ownWindow` is STAMPED AT THE WRITE by the ONE producer whose key and whose
-// credential dir are the SAME decision — refreshViaCliPanel's `claude -p
-// /usage` (usage-routes.js says so in its own header). It is deliberately NOT
-// inferred from whatever the last write left in `sevenDay.resetsAt`: that
-// field is exactly what a mis-filed reading overwrites, so reading the window
-// back out of it would let one bad write redefine the account and immunise
-// every later one. A member with no `ownWindow` yet simply has no established
-// window and the guard stays inert for it — no evidence, no refusal.
+// It is STAMPED AT THE WRITE by the ONE producer whose key and whose credential
+// dir are the SAME decision — refreshViaCliPanel's `claude -p /usage`
+// (usage-routes.js says so in its own header). It is deliberately NOT inferred
+// from whatever the last write left in `sevenDay.resetsAt`: that field is
+// exactly what a mis-filed reading overwrites, so reading the window back out
+// of it would let one bad write redefine the account and immunise every later
+// one. A member with no established window simply has none, and the guard
+// stays inert for it — no evidence, no refusal.
+//
+// IT LIVES IN A SIDECAR, NOT IN THE SNAPSHOT (r2, reproduced end to end). It
+// was a field of the usage-cache object, which EVERY reading producer rewrites
+// wholesale — and the highest-frequency one of all, the shipped statusline hook
+// (once per 8 s per account), rebuilds that object from a literal that
+// preserves scopedWeekly / the org identity / spend one field at a time. The
+// window was never added to that list, so ONE legitimate statusline render
+// deleted every established window on the instance, `windows` went empty, the
+// guard degraded to "no established window to contradict", and the incident
+// replayed with its second false pool switch. Two more writers (the bare-token
+// ⟳ and the codex snapshot) clobber the same way. A hand-written preserve list
+// is what failed — five times on this one file — so the fact a reading producer
+// may not state no longer lives where a reading producer writes.
+// Keyed off the CACHE FILES, so a sidecar left behind by a removed account is
+// invisible and can never become a re-file target.
 // Memoised for one tick of the producers (a turn writes ~20 readings and each
-// would otherwise re-read every cache file).
+// would otherwise re-read every sidecar).
 const OWN_WINDOW_TTL_MS = 5000;
 let _ownWinAt = 0, _ownWin = null;
 function establishedWindows() {
@@ -616,9 +631,10 @@ function establishedWindows() {
   let files = [];
   try { files = fs.readdirSync(USAGE_CACHE_DIR).filter((f) => f.endsWith('.json') && !f.startsWith('__models__')); } catch { }
   for (const fn of files) {
+    const key = fn.slice(0, -5);
     try {
-      const c = JSON.parse(fs.readFileSync(path.join(USAGE_CACHE_DIR, fn), 'utf-8'));
-      if (c && c.ownWindow) out[fn.slice(0, -5)] = c.ownWindow;
+      const w = JSON.parse(fs.readFileSync(path.join(USAGE_CACHE_DIR, readingLag.windowSidecarName(key)), 'utf-8'));
+      if (w && (w.sevenDay || w.fiveHour || (w.scoped && Object.keys(w.scoped).length))) out[key] = w;
     } catch { }
   }
   _ownWin = out; _ownWinAt = now;
@@ -1778,13 +1794,11 @@ function markLimitBanner(session, text) {
       try { const c = JSON.parse(fs.readFileSync(fileFor(id), 'utf-8')) || {}; if ((Number(c.fetchedAt) || 0) > baseAt) { baseAt = Number(c.fetchedAt) || 0; base = c; } } catch {}
     }
     const cache = applyHit(base ? { ...base } : {});
-    // `ownWindow` belongs to the FILE, not to the freshest sibling this write
-    // is based on (same rule as captureRateLimitEvent — carrying a sibling's
-    // through, or dropping this key's, disarms the window guard silently)
-    try {
-      const own = JSON.parse(fs.readFileSync(fileFor(key), 'utf-8'));
-      if (own && own.ownWindow) cache.ownWindow = own.ownWindow; else delete cache.ownWindow;
-    } catch { delete cache.ownWindow; }
+    // NOTE (r2): this write used to have to rescue `ownWindow` by hand — the
+    // freshest-sibling base is chosen for its READINGS, so writing it through
+    // would have carried another file's window here. The established window now
+    // lives in a sidecar (readingLag.windowSidecarName) that no reading producer
+    // writes, so there is nothing here to preserve and nothing to forget.
     cache.fetchedAt = Date.now(); cache.source = 'limit-banner';
     if (corr) cache.corroborated = !!corr.agree; else delete cache.corroborated;
     fs.mkdirSync(USAGE_CACHE_DIR, { recursive: true });

@@ -121,11 +121,11 @@ function backfillFromJournal(text, transitions) {
 }
 
 // ── ② usage-cache repair ────────────────────────────────────────────────────
-// `ownWindow` rides with the identity fields on purpose: the window an
-// account's buckets are counted in is a fact about WHO the account is, not a
-// reading, and dropping it while rebuilding a cache would silently disarm the
-// window guard for that member until its next panel refresh.
-const IDENTITY_FIELDS = ['orgUuid', 'orgName', 'orgEmail', 'email', 'name', 'ownWindow'];
+// The established window is NOT in this list, and not in the snapshot at all
+// (r2): it is a fact about WHO the account is, which is exactly why it may not
+// live in the object every reading producer rewrites. It has its own sidecar —
+// see windowSidecarName in src/reading-lag.js.
+const IDENTITY_FIELDS = ['orgUuid', 'orgName', 'orgEmail', 'email', 'name'];
 /** Rebuild a cache snapshot from a surviving anchor (a REAL past reading of
  *  this account, correctly dated) — identity fields are carried over because
  *  they are facts about WHO the account is, not readings. */
@@ -455,7 +455,7 @@ function findJournal(dataDir) {
 // phase, which would make every genuinely re-filable entry ambiguous.
 const MIN_OWN_READINGS = 5;   // fewer than this is a coincidence, not a window
 const OWN_DOMINANCE = 0.9;    // a stream whose own panel readings disagree with themselves establishes nothing
-const { weeklyNear, weeklyPhase, windowOf, windowFingerprint, decideReadingTarget } = require('./reading-lag.js');
+const { weeklyNear, weeklyPhase, windowOf, windowFingerprint, windowSidecarName, decideReadingTarget } = require('./reading-lag.js');
 
 /** identityKey → {window, accountId, phase, n, total} from that stream's OWN
  *  on-demand readings. `roster` (account ids) decides who may RECEIVE a
@@ -609,7 +609,12 @@ function repairCachesByWindow({ cacheDir, archiveDir, windows, id, now = Date.no
         next.repairedBy = id;
       }
     }
-    next.ownWindow = { ...w.window, at: now, source: 'on-demand', seededBy: id };
+    // SEED THE SIDECAR, not the snapshot (r2): the snapshot is rebuilt whole by
+    // every reading producer, so a window written here would be deleted by the
+    // next statusline render — which is the defect this migration exists to
+    // repair the data for. Any legacy in-snapshot copy is stripped in passing.
+    delete next.ownWindow;
+    _writeAtomic(path.join(cacheDir, windowSidecarName(acct)), JSON.stringify({ ...w.window, at: now, source: 'on-demand', seededBy: id }));
     res.seeded++;
     _writeAtomic(fp, JSON.stringify(next));
   }

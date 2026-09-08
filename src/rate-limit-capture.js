@@ -139,17 +139,12 @@ function captureRateLimitEvent({ cacheDir, key, identityIds, ev, now = Date.now(
       try { const c = JSON.parse(fs.readFileSync(fileFor(id), 'utf-8')) || {}; if ((Number(c.fetchedAt) || 0) > baseAt) { baseAt = Number(c.fetchedAt) || 0; base = c; } } catch { }
     }
     const cache = applyTo(base ? { ...base } : {});
-    // `ownWindow` is a fact about WHICH ACCOUNT THIS FILE IS (the window its
-    // buckets are counted in, stamped only by the panel refresh — the one
-    // producer whose key and credential dir are the same decision). The
+    // NOTE (r2): the established window is a fact about WHICH ACCOUNT THIS FILE
+    // IS, and this producer used to have to rescue it by hand (the
     // freshest-sibling base above is chosen for its READINGS, so writing it
-    // through would let a sibling that has never been panel-refreshed erase
-    // this key's window and silently disarm the guard that depends on it.
-    // Identity fields have carried this same rule since 2.267.0.
-    try {
-      const own = JSON.parse(fs.readFileSync(fileFor(key), 'utf-8'));
-      if (own && own.ownWindow) cache.ownWindow = own.ownWindow; else delete cache.ownWindow;
-    } catch { delete cache.ownWindow; }
+    // through would let a sibling erase this key's window). It now lives in a
+    // sidecar that no reading producer writes — see windowSidecarName in
+    // src/reading-lag.js for why a hand-written preserve list was the bug.
     if (reading) {
       cache.fetchedAt = now; cache.source = source || 'rate-limit-event';
       // PROVENANCE (2026-09-07): did the OTel observation for the session that

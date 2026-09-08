@@ -41,6 +41,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import cp from 'node:child_process';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const REPO = path.resolve(new URL('..', import.meta.url).pathname);
@@ -55,6 +56,14 @@ const { AccountManager } = require(path.join(REPO, 'src/accounts.js'));
 const { SlotTransitions } = require(path.join(REPO, 'src/slot-transitions.js'));
 const { loginState, accountLoginState, OAT_TTL_MS } = require(path.join(REPO, 'src/login-state.js'));
 const repair = require(path.join(REPO, 'src/reading-repair.js'));
+const readingLag = require(path.join(REPO, 'src/reading-lag.js'));
+/** The established window lives in a SIDECAR beside the cache (r2), because the
+ *  snapshot is rebuilt wholesale by every reading producer — including the
+ *  shipped statusline hook, whose ordinary 8 s write used to delete it. Every
+ *  fixture stamps it the way refreshViaCliPanel does. */
+const stampWindow = (cacheDir, id, win) =>
+  fs.writeFileSync(path.join(cacheDir, readingLag.windowSidecarName(id)), JSON.stringify({ at: Date.now(), source: 'on-demand', ...win }));
+const readWindow = (cacheDir, id) => { try { return JSON.parse(fs.readFileSync(path.join(cacheDir, readingLag.windowSidecarName(id)), 'utf8')); } catch { return null; } };
 
 const cleanup = [];
 process.on('exit', () => { for (const d of cleanup) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { } } });
@@ -114,6 +123,8 @@ function mkWorld({ hosts = null } = {}) {
   return {
     root, dataDir, cacheDir, am, eng, mkEngine, sessions, session, SID, CID, P, FISH, LINK, SPARE, R5, R7,
     notices, obs, readCache, writeCache, login,
+    stampWindow: (id, win) => stampWindow(cacheDir, id, win),
+    readWindow: (id) => readWindow(cacheDir, id),
     linkNow: () => am.poolCurrentFor(P, SID),
     // the producers, driven for real
     reading: (u = 0.42, opts = {}) => eng.recordRateLimitEvent(session, { type: 'rate_limit_event', rate_limit_info: { status: 'allowed', rateLimitType: 'seven_day', utilization: u, resets_at: opts.resetsAt ?? R7, resetsAt: opts.resetsAt ?? R7 } }),
@@ -593,6 +604,24 @@ if (!probe) {
     ok('§9b …including the two properties a later edit is most likely to drop: the PHASE comparison, and that `ownWindow` is stamped and never read back out of `sevenDay.resetsAt`',
       /resetsAt mod 604800/.test(row) && /NEVER read back out of `sevenDay\.resetsAt`/.test(row));
     ok('§9b …and the file index names the PURE module beside the ledger it works with', /^  reading-lag\.js — PURE \(imports nothing\)/m.test(md));
+    // r2: the auto-loaded index gates the NEXT change, so it must carry the two
+    // rules round 2 established — WHICH HALF of a window identifies an account,
+    // and WHERE the established window may be kept. Both are the kind of thing
+    // a later edit "simplifies" back, and each one cost a reproduced incident.
+    ok('§9b …and the two rules ROUND 2 established: the weekly half is the only identity evidence (a 5h window names a TIME), and the established window lives in a sidecar no reading producer writes',
+      /WEEKLY HALF IS THE ONLY IDENTITY EVIDENCE/.test(row) && /FIVE-HOUR window names a TIME/.test(row)
+      && /ESTABLISHED WINDOW LIVES IN A SIDECAR/.test(row) && /\.window-<key>/.test(row)
+      && /NOT a field of the usage-cache snapshot/.test(row), row.slice(-400));
+    ok('§9b NEGATIVE CONTROL: those predicates fail on the row as ROUND 1 left it (they are not matching prose that was already there)',
+      (() => {
+        const r1 = row.replace(/\*\*THE WEEKLY HALF IS THE ONLY IDENTITY EVIDENCE\*\*[\s\S]*?The statusline carries a byte-identical MIRROR/,
+          'A weekly window is an ACCOUNT FINGERPRINT compared by its PHASE (`resetsAt mod 604800`, ±120s) because a roll adds exactly one week. `cache.ownWindow` is STAMPED AT THE WRITE by the one producer whose key and credential dir are the same decision (refreshViaCliPanel) and NEVER read back out of `sevenDay.resetsAt`; every session-attributed writer PRESERVES it. The statusline carries a byte-identical MIRROR');
+        return r1.length < row.length
+          && !/WEEKLY HALF IS THE ONLY IDENTITY EVIDENCE/.test(r1) && !/ESTABLISHED WINDOW LIVES IN A SIDECAR/.test(r1)
+          // …while the ROUND 1 properties this row also pins are still there,
+          // so the control differs in exactly the dimension it names
+          && /resetsAt mod 604800/.test(r1) && /NEVER read back out of `sevenDay\.resetsAt`/.test(r1);
+      })());
     ok('§9b NEGATIVE CONTROL: the same predicates fail on the row as it stood before this change (they are not matching prose that was always there)',
       (() => { const before = row.replace(/\*\*AND THE READING IS EVIDENCE ABOUT ITSELF[\s\S]*?parity pin\)\.\*\* /, ''); return !/LAG SHADOW/.test(before) && !/reading-lag\.js/.test(before) && before.length < row.length; })());
   }
@@ -1242,11 +1271,64 @@ if (!probe) {
   ok('§13 compareWindows is THREE-state', L.compareWindows({ kind: 'sevenDay', resetsAt: W_A }, winA, { nowSec }) === 'agree'
     && L.compareWindows({ kind: 'sevenDay', resetsAt: W_A }, winB, { nowSec }) === 'differ'
     && L.compareWindows({ kind: 'fiveHour', resetsAt: 1 }, winA, { nowSec }) === 'unknown');
-  ok('§13 a 5-hour window is evidence only while it has NOT rolled (it opens at the account\'s first request, so an expired one says nothing)',
-    L.compareWindows({ kind: 'fiveHour', resetsAt: nowSec + 60 }, { sevenDay: null, fiveHour: nowSec + 7200, scoped: {} }, { nowSec }) === 'differ'
-    && L.compareWindows({ kind: 'fiveHour', resetsAt: nowSec + 60 }, { sevenDay: null, fiveHour: nowSec - 7200, scoped: {} }, { nowSec }) === 'unknown');
-  ok('§13 the WEEKLY answer outranks the 5-hour one (weekly is the account property; 5h is corroboration)',
-    L.compareWindows({ sevenDay: W_A, fiveHour: 111 }, { sevenDay: W_A, fiveHour: nowSec + 7200, scoped: {} }, { nowSec }) === 'agree');
+  // A FIVE-HOUR WINDOW IDENTIFIES A TIME, NOT AN ACCOUNT (r2 — the first
+  // spelling of this rule asked it, and that was a new misattribution of
+  // exactly the class the guard exists to prevent). Measured on this
+  // instance's own 30-day corpus, with the real numbers below:
+  //   · SAME account, >120 s from its own still-future stamped 5h, on 7.2 %
+  //     (33/456) and 7.4 % (47/639) of the two busiest streams — a 'differ'
+  //     about its rightful owner. The pair below is verbatim from that scan.
+  //   · DIFFERENT identities carry IDENTICAL 5h resets constantly (47 distinct
+  //     colliding values; `resetsAt mod 1800` piles onto :00/:10/:29/:30) — an
+  //     'agree' with a stranger. End to end that rung would have re-filed a
+  //     legitimate reading onto another account at 50 real moments.
+  // The corpus pair is one account's own: stamped 1788780540, read 1788786600
+  // (Δ 6060 s). Anchored to NOW here on purpose — the retired rung only ever
+  // fired while the target's stamped 5h was still in the FUTURE, so a leg built
+  // on the raw (now past) corpus seconds could never have reddened for it.
+  const OWN_5H = Math.floor(Date.now() / 1000) + 1800, READ_5H = OWN_5H + 6060;
+  ok('§13 a 5-hour window identifies a TIME, not an account: a reading 6060 s from the target\'s own STILL-FUTURE stamped 5h is NOT a disagreement (measured: 7.2 % (33/456) and 7.4 % (47/639) of the two busiest streams do exactly this)',
+    L.compareWindows({ kind: 'fiveHour', resetsAt: READ_5H }, { sevenDay: null, fiveHour: OWN_5H, scoped: {} }) === 'unknown');
+  ok('§13 …and a stranger whose still-future 5h happens to line up is NOT a match either (5h resets snap to the clock — 47 colliding values across identities in the same corpus)',
+    L.compareWindows({ kind: 'fiveHour', resetsAt: READ_5H }, { sevenDay: null, fiveHour: READ_5H, scoped: {} }) === 'unknown');
+  ok('§13 THE WEEKLY HALF IS THE ONLY IDENTITY EVIDENCE — a disagreeing 5h cannot spoil an agreeing week, and identity is decided WITHOUT a clock',
+    L.compareWindows({ sevenDay: W_A, fiveHour: 111 }, { sevenDay: W_A, fiveHour: nowSec + 7200, scoped: {} }) === 'agree'
+    && L.compareWindows({ sevenDay: W_A, fiveHour: READ_5H }, { sevenDay: W_B, fiveHour: READ_5H, scoped: {} }) === 'differ');
+  ok('§13 …so a reading with NO weekly component is simply written — never re-filed onto a sibling, never archived (no evidence, no refusal)',
+    (() => {
+      const win5 = { fish: { sevenDay: null, fiveHour: OWN_5H, scoped: {} }, bstack: { sevenDay: null, fiveHour: READ_5H, scoped: {} } };
+      const d = L.decideReadingTarget({ key: 'fish', readingWindow: { kind: 'fiveHour', resetsAt: READ_5H }, windows: win5 });
+      const alone = L.decideReadingTarget({ key: 'fish', readingWindow: { kind: 'fiveHour', resetsAt: READ_5H }, windows: { fish: win5.fish } });
+      // and the REASON is true: the target HAS an established window, the
+      // reading just carries nothing that names an account
+      return d.action === 'write' && d.key === 'fish' && /no weekly window/.test(d.reason)
+        && alone.action === 'write' && alone.key === 'fish';
+    })());
+  ok('§13 NEGATIVE CONTROL: the retired 5-hour rung, on those same numbers, calls the account\'s OWN reading foreign and a stranger\'s a match',
+    (() => {
+      // the pre-fix rung, verbatim: absNear on 5h whenever the target's own 5h
+      // is still future
+      const absNear = (a, b, j = 120) => Math.abs(Number(a) - Number(b)) <= j;
+      const nowS = Math.floor(Date.now() / 1000);
+      const preFix = (readingR, ownR) => (ownR > nowS) ? (absNear(readingR, ownR) ? 'agree' : 'differ') : 'unknown';
+      return preFix(READ_5H, OWN_5H) === 'differ' && preFix(READ_5H, READ_5H) === 'agree';
+    })());
+  // TWO MECHANISMS, TWO LEGS. Removing the 5h rung is what makes
+  // `compareWindows` answer 'unknown'; the no-weekly early return in
+  // `decideReadingTarget` is what keeps that answer from being re-derived by a
+  // future edit — and it is NOT decoration: it fires before compareWindows is
+  // consulted at all, which is why the engine-level leg in §15 survives even a
+  // restored rung. Each is mutation-checked on its own.
+  ok('§13 MECHANISM 2: a reading with no weekly component short-circuits the guard BEFORE any comparison, and says so in the reason that reaches the journal and the archive',
+    (() => {
+      const d = L.decideReadingTarget({
+        key: 'fish', readingWindow: { kind: 'fiveHour', resetsAt: READ_5H },
+        windows: { fish: { sevenDay: W_A, fiveHour: OWN_5H, scoped: {} }, bstack: { sevenDay: W_B, fiveHour: READ_5H, scoped: {} } },
+      });
+      // the target HAS an established window, so "no established window to
+      // contradict" would be a false sentence about it
+      return d.action === 'write' && d.key === 'fish' && d.reason === 'reading states no weekly window';
+    })());
   ok('§13 a scoped weekly bucket carries the same fingerprint', L.compareWindows({ kind: 'scoped', scopedName: 'fable', resetsAt: W_A }, { sevenDay: null, fiveHour: null, scoped: { fable: W_B } }, { nowSec }) === 'differ');
 
   // ── the shadow, on the incident's own timing
@@ -1334,13 +1416,12 @@ if (!probe) {
 // being burned), SPARE plays Personal Max (the member the pool moved TO, and
 // the one that was wrongly credited with 93 %), FISH plays Fish Max (where the
 // false second switch went).
-{
-  const WEEK = 604800;
-  /** A world whose three members have three DIFFERENT weekly windows, each
-   *  stamped as that account's own — which on a real instance is written by
-   *  refreshViaCliPanel, the one producer whose key and credential dir are the
-   *  same decision (source-pinned below). */
-  const mkIncidentWorld = ({ stampWindows = true } = {}) => {
+/** A world whose three members have three DIFFERENT weekly windows, each
+ *  stamped as that account's own — which on a real instance is written by
+ *  refreshViaCliPanel, the one producer whose key and credential dir are the
+ *  same decision (source-pinned in §15). Module-scoped because §15's clobber
+ *  leg replays the same incident after a real statusline render. */
+const mkIncidentWorld = ({ stampWindows = true } = {}) => {
     const w = mkWorld();
     const nowSec = Math.floor(Date.now() / 1000);
     const WIN = { [w.LINK]: nowSec + 3 * 86400, [w.SPARE]: nowSec + 5 * 86400, [w.FISH]: nowSec + 6 * 86400 };
@@ -1351,16 +1432,17 @@ if (!probe) {
         sevenDay: { utilization: u7, resetsAt: WIN[id] },
         scopedWeekly: [{ name: 'Fable', utilization: u7, resetsAt: WIN[id] }],
       };
-      if (stampWindows) c.ownWindow = { sevenDay: WIN[id], fiveHour: null, scoped: { fable: WIN[id] }, at: Date.now(), source: 'on-demand' };
       w.writeCache(id, c);
+      if (stampWindows) w.stampWindow(id, { sevenDay: WIN[id], fiveHour: null, scoped: { fable: WIN[id] } });
     };
     put(w.LINK, 0.98);   // PandyMax: 2 % left — hard dead, the reason the pool moves
     put(w.SPARE, 0.11);  // Personal Max: barely used (the owner's "low-usage account")
     put(w.FISH, 0.33);
     w.am.updatePool(w.P, { auto: true, hot: true });
     return { ...w, WIN, nowSec };
-  };
+};
 
+{
   // ① THE MOVE. Driven through the pool's own material act — the same call the
   //    engine makes and the ONLY writer of the transition ledger.
   // ② THE LAGGING RESPONSE. Delivered through the REAL producer, carrying
@@ -1475,11 +1557,13 @@ if (!probe) {
     const w = mkWorld();
     const nowSec = Math.floor(Date.now() / 1000);
     const SHARED = nowSec + 3 * 86400;                       // ONE phase, two members
-    for (const id of [w.LINK, w.SPARE, w.FISH]) w.writeCache(id, {
-      fetchedAt: Date.now() - 60000, source: 'on-demand', fiveHour: { utilization: 0.1, resetsAt: nowSec + 3600 },
-      sevenDay: { utilization: 0.3, resetsAt: SHARED },
-      ownWindow: { sevenDay: SHARED, fiveHour: null, scoped: {}, at: Date.now(), source: 'on-demand' },
-    });
+    for (const id of [w.LINK, w.SPARE, w.FISH]) {
+      w.writeCache(id, {
+        fetchedAt: Date.now() - 60000, source: 'on-demand', fiveHour: { utilization: 0.1, resetsAt: nowSec + 3600 },
+        sevenDay: { utilization: 0.3, resetsAt: SHARED },
+      });
+      w.stampWindow(id, { sevenDay: SHARED, fiveHour: null, scoped: {} });
+    }
     const cap = quiet();
     w.reading(0.42, { resetsAt: SHARED });                    // seen under LINK
     w.endTurn();
@@ -1491,11 +1575,13 @@ if (!probe) {
       JSON.stringify([w.readCache(w.LINK).sevenDay, w.readCache(w.SPARE).sevenDay]));
     // NEGATIVE CONTROL: the first payload that DIFFERS is the new credentials'
     const w2 = mkWorld();
-    for (const id of [w2.LINK, w2.SPARE, w2.FISH]) w2.writeCache(id, {
-      fetchedAt: Date.now() - 60000, source: 'on-demand', fiveHour: { utilization: 0.1, resetsAt: nowSec + 3600 },
-      sevenDay: { utilization: 0.3, resetsAt: SHARED },
-      ownWindow: { sevenDay: SHARED, fiveHour: null, scoped: {}, at: Date.now(), source: 'on-demand' },
-    });
+    for (const id of [w2.LINK, w2.SPARE, w2.FISH]) {
+      w2.writeCache(id, {
+        fetchedAt: Date.now() - 60000, source: 'on-demand', fiveHour: { utilization: 0.1, resetsAt: nowSec + 3600 },
+        sevenDay: { utilization: 0.3, resetsAt: SHARED },
+      });
+      w2.stampWindow(id, { sevenDay: SHARED, fiveHour: null, scoped: {} });
+    }
     const cap2 = quiet();
     w2.reading(0.42, { resetsAt: SHARED });
     w2.endTurn();
@@ -1539,8 +1625,8 @@ if (!probe) {
       w.writeCache(id, {
         fetchedAt: Date.now() - 60000, source: 'on-demand',
         fiveHour: { utilization: 0.1, resetsAt: nowSec + 3600 }, sevenDay: { utilization: 0.3, resetsAt: WIN[id] },
-        ownWindow: { sevenDay: WIN[id], fiveHour: null, scoped: {}, at: Date.now(), source: 'on-demand' },
       });
+      w.stampWindow(id, { sevenDay: WIN[id], fiveHour: null, scoped: {} });
     }
     return { ...w, WIN };
   };
@@ -1579,15 +1665,142 @@ if (!probe) {
     w.reading(0.51, { resetsAt: w.WIN[w.LINK] });
     w.banner();
     cap.done();
-    ok('§15 `ownWindow` survives a rate-limit-event write (which is based on the identity group\'s FRESHEST sibling)', !!w.readCache(w.LINK).ownWindow, JSON.stringify(Object.keys(w.readCache(w.LINK))));
-    ok('§15 …and a limit-banner write', !!w.readCache(w.LINK).ownWindow);
+    ok('§15 the established window survives a rate-limit-event write (which is based on the identity group\'s FRESHEST sibling)', !!w.readWindow(w.LINK)?.sevenDay, JSON.stringify(Object.keys(w.readCache(w.LINK))));
+    ok('§15 …and a limit-banner write', !!w.readWindow(w.LINK)?.sevenDay);
+    ok('§15 …because it is NOT a field of the snapshot those producers rewrite (that is what let one statusline render disarm the whole guard)',
+      w.readCache(w.LINK).ownWindow === undefined, JSON.stringify(Object.keys(w.readCache(w.LINK))));
     const ur = read('src/usage-routes.js');
-    ok('§15 SOURCE PIN: the ONLY producer that stamps `ownWindow` is the panel refresh — the one whose key and credential dir are the same decision',
-      /merged\.ownWindow = \{ \.\.\.w, at: Date\.now\(\), source: 'on-demand' \}/.test(ur)
-      && !/ownWindow\s*=/.test(code('src/rate-limit-capture.js').replace(/cache\.ownWindow = own\.ownWindow;/, ''))
-      , '');
+    ok('§15 SOURCE PIN: the ONLY producer that writes the window sidecar is the panel refresh — the one whose key and credential dir are the same decision',
+      /windowSidecarName\(key\)/.test(ur) && /source: 'on-demand'/.test(ur)
+      && !/windowSidecarName/.test(code('src/rate-limit-capture.js')), '');
     ok('§15 …and it is never READ BACK from `sevenDay.resetsAt` (the field a mis-filed reading overwrites — that would let one bad write redefine the account)',
-      /c && c\.ownWindow/.test(code('src/server/usage-pool-engine.js')) && !/ownWindow = .*sevenDay\.resetsAt/.test(code('src/server/usage-pool-engine.js')));
+      /readingLag\.windowSidecarName\(key\)/.test(code('src/server/usage-pool-engine.js')) && !/ownWindow = .*sevenDay\.resetsAt/.test(code('src/server/usage-pool-engine.js')));
+  }
+
+  // ── THE CLOBBER (r2, reproduced). The window used to be a FIELD of the
+  //    usage-cache snapshot, and EVERY reading producer rebuilds that object
+  //    whole. The highest-frequency one is the SHIPPED statusline hook — once
+  //    per 8 s per account — whose `out` literal preserves scopedWeekly / the
+  //    org identity / spend one field at a time and simply never listed the
+  //    window. One ordinary, entirely legitimate render therefore deleted every
+  //    established window on the instance, and the incident replayed with its
+  //    second false switch. Driven through the SHIPPED FILE'S OWN BYTES,
+  //    because that file is the writer.
+  {
+    const runTool = (toolPath, w, id, sevenDayReset, pct) => {
+      const f = path.join(w.cacheDir, id + '.json');
+      const cur = w.readCache(id);
+      const old = new Date(Date.now() - 60000); fs.utimesSync(f, old, old);   // past THROTTLE_MS
+      cp.execFileSync(process.execPath, [toolPath], {
+        input: JSON.stringify({ model: { id: 'claude-fable-5' }, rate_limits: {
+          five_hour: { used_percentage: 20, resets_at: cur.fiveHour.resetsAt },
+          seven_day: { used_percentage: pct, resets_at: sevenDayReset } } }),
+        env: { ...process.env, VIBESPACE_USAGE_CACHE: w.cacheDir, VIBESPACE_ACCOUNT_KEY: id }, encoding: 'utf8',
+      });
+    };
+    const TOOL_PATH = path.join(REPO, 'data/bin/vibespace-usage');
+    const w = mkIncidentWorld();
+    const before = [w.LINK, w.SPARE, w.FISH].map((id) => !!w.readWindow(id)?.sevenDay);
+    for (const id of [w.LINK, w.SPARE, w.FISH]) runTool(TOOL_PATH, w, id, w.WIN[id], Math.round(w.readCache(id).sevenDay.utilization * 100));
+    const after = [w.LINK, w.SPARE, w.FISH].map((id) => !!w.readWindow(id)?.sevenDay);
+    ok('§15 CLOBBER: one legitimate statusline render per member leaves every established window intact (pre-fix: all three deleted)',
+      before.every(Boolean) && after.every(Boolean), JSON.stringify([before, after]));
+    ok('§15 …and the renders really happened (a leg that measures nothing would pass too)',
+      [w.LINK, w.SPARE, w.FISH].every((id) => w.readCache(id).source === 'passive'),
+      JSON.stringify([w.LINK, w.SPARE, w.FISH].map((id) => w.readCache(id).source)));
+    ok('§15 …the sidecar stays invisible to every usage-cache scanner (they all filter on `.json`, like the `.slot-` sidecar beside it)',
+      !readingLag.windowSidecarName(w.LINK).endsWith('.json')
+      && fs.existsSync(path.join(w.cacheDir, readingLag.windowSidecarName(w.LINK)))
+      && fs.readdirSync(w.cacheDir).filter((f) => f.endsWith('.json')).every((f) => !f.startsWith('.window-')));
+    // …so the incident STILL does not replay AFTER the render
+    const cap = quiet();
+    w.am.ensureSessionPoolLink(w.P, w.SID, w.SPARE, { why: 'per-session-switch' });
+    w.am.setPoolTarget(w.P, w.SPARE, { why: 'pool-switch' });
+    w.reading(0.96, { resetsAt: w.WIN[w.LINK] });
+    const eng2 = w.mkEngine(); eng2.maybePoolAutoSwitchForPool(w.P);
+    cap.done();
+    ok('§15 …so the lagging response is STILL filed on the member whose credentials made the request',
+      Math.abs(w.readCache(w.LINK).sevenDay.utilization - 0.96) < 1e-9 && Math.abs(w.readCache(w.SPARE).sevenDay.utilization - 0.11) < 1e-9,
+      JSON.stringify([w.readCache(w.LINK).sevenDay, w.readCache(w.SPARE).sevenDay]));
+    ok('§15 …and there is NO second switch', w.am.poolCurrent(w.P) === w.SPARE, `default=${w.am.poolCurrent(w.P)} spare=${w.SPARE} fish=${w.FISH}`);
+
+    // NEGATIVE CONTROL — a PATCHED COPY of the shipped tool with the storage
+    // decision reverted (the window read back out of the snapshot, as it was),
+    // over a snapshot carrying the window: the SAME `out` literal deletes it.
+    // The patch is asserted to have hit, so this can never silently become a
+    // second green arm.
+    const w2 = mkIncidentWorld();
+    const shipped = read('data/bin/vibespace-usage');
+    const NEEDLE = "const w = JSON.parse(fs.readFileSync(path.join(CACHE_DIR, windowSidecarName(key)), 'utf-8'));";
+    ok('§15 NEGATIVE CONTROL setup: the storage decision is a single line in the shipped tool (the patch below must hit it)',
+      shipped.split(NEEDLE).length === 2, '');
+    const preFixTool = path.join(w2.root, 'vibespace-usage.prefix');
+    fs.writeFileSync(preFixTool, shipped.replace(NEEDLE,
+      "const c = JSON.parse(fs.readFileSync(path.join(CACHE_DIR, String(key).replace(/[^\\w.-]/g, '_') + '.json'), 'utf-8')); const w = c && c.ownWindow;"), { mode: 0o755 });
+    for (const id of [w2.LINK, w2.SPARE, w2.FISH]) {         // put the window back IN the snapshot, pre-fix style
+      const c = w2.readCache(id);
+      c.ownWindow = { sevenDay: w2.WIN[id], fiveHour: null, scoped: { fable: w2.WIN[id] }, at: Date.now(), source: 'on-demand' };
+      w2.writeCache(id, c);
+      fs.rmSync(path.join(w2.cacheDir, readingLag.windowSidecarName(id)), { force: true });
+    }
+    const before2 = [w2.LINK, w2.SPARE, w2.FISH].map((id) => !!w2.readCache(id).ownWindow);
+    for (const id of [w2.LINK, w2.SPARE, w2.FISH]) runTool(preFixTool, w2, id, w2.WIN[id], Math.round(w2.readCache(id).sevenDay.utilization * 100));
+    const after2 = [w2.LINK, w2.SPARE, w2.FISH].map((id) => !!w2.readCache(id).ownWindow);
+    ok('§15 NEGATIVE CONTROL: with the window back in the snapshot, one render of the SAME `out` literal deletes all three',
+      before2.every(Boolean) && after2.every((x) => x === false), JSON.stringify([before2, after2]));
+    const cap2 = quiet();
+    w2.am.ensureSessionPoolLink(w2.P, w2.SID, w2.SPARE, { why: 'per-session-switch' });
+    w2.am.setPoolTarget(w2.P, w2.SPARE, { why: 'pool-switch' });
+    w2.reading(0.96, { resetsAt: w2.WIN[w2.LINK] });
+    const eng3 = w2.mkEngine(); eng3.maybePoolAutoSwitchForPool(w2.P);
+    cap2.done();
+    ok('§15 …and THAT is the whole incident again — the poison lands on the low-usage account and the pool makes its SECOND false switch',
+      Math.abs(w2.readCache(w2.SPARE).sevenDay.utilization - 0.96) < 1e-9 && w2.am.poolCurrent(w2.P) === w2.FISH,
+      `spare7d=${w2.readCache(w2.SPARE).sevenDay.utilization} default=${w2.am.poolCurrent(w2.P)} fish=${w2.FISH}`);
+  }
+
+  // ── THE FIVE-HOUR RUNG (r2, reproduced), through the REAL producer. A
+  //    `five_hour` rate_limit_event of the session's OWN slot must stay there
+  //    even when a sibling's stamped 5h lines up with it: 5h resets snap to the
+  //    clock (47 colliding values in this instance's corpus) and drift from the
+  //    account's own stamped value on 7.2 %/7.4 % of the two busiest streams,
+  //    so the rung that used to answer here invented the very misattribution
+  //    the guard exists to prevent (50 real moments in the same corpus).
+  {
+    const now5 = Math.floor(Date.now() / 1000);
+    const LINK_5H = now5 + 1800, SPARE_5H = now5 + 7200;   // LINK is really in the block SPARE's window names
+    /** The windows are built PER WORLD — every mkWorld() mints new account ids,
+     *  and a map keyed by another world's ids yields `undefined` windows, i.e.
+     *  a leg that quietly tests nothing. */
+    const mk5 = () => {
+      const w = mkWorld();
+      const W7 = { [w.LINK]: now5 + 3 * 86400, [w.SPARE]: now5 + 5 * 86400, [w.FISH]: now5 + 6 * 86400 };
+      const own5 = { [w.LINK]: LINK_5H, [w.SPARE]: SPARE_5H, [w.FISH]: now5 - 3600 };
+      for (const id of [w.LINK, w.SPARE, w.FISH]) {
+        w.writeCache(id, { fetchedAt: Date.now() - 60000, source: 'on-demand', fiveHour: { utilization: 0.2, resetsAt: own5[id] }, sevenDay: { utilization: 0.3, resetsAt: W7[id] } });
+        w.stampWindow(id, { sevenDay: W7[id], fiveHour: own5[id], scoped: {} });
+      }
+      return { ...w, W7, own5 };
+    };
+    const w = mk5();
+    const cap = quiet();
+    w.eng.recordRateLimitEvent(w.session, { type: 'rate_limit_event', rate_limit_info: { status: 'allowed', rateLimitType: 'five_hour', utilization: 0.55, resets_at: SPARE_5H, resetsAt: SPARE_5H } });
+    const lines = cap.done();
+    ok('§15 FIVE-HOUR: a `five_hour` reading of the session\'s OWN slot is not stolen by a sibling whose stamped 5h lines up',
+      Math.abs(w.readCache(w.LINK).fiveHour.utilization - 0.55) < 1e-9, JSON.stringify(w.readCache(w.LINK).fiveHour));
+    ok('§15 …the sibling received nothing', Math.abs(w.readCache(w.SPARE).fiveHour.utilization - 0.2) < 1e-9, JSON.stringify(w.readCache(w.SPARE).fiveHour));
+    ok('§15 …and nothing was archived either (with one sibling matching this was a re-file; with none it would have been a silent DROP of fresh evidence)',
+      !fs.existsSync(path.join(w.dataDir, 'archive', 'readings-window-mismatch.ndjson')));
+    ok('§15 …and the guard said nothing about it', !lines.some((l) => /window says these numbers|refusing to write/.test(l)), lines.filter((l) => /\[usage\]/.test(l)).join(' | ').slice(0, 200));
+    // the WEEKLY guard is still armed in the very same world (the 5h rung was
+    // removed, not the guard) — otherwise this leg would pass on a dead guard
+    const w3 = mk5();
+    const cap3 = quiet();
+    w3.reading(0.66, { resetsAt: w3.W7[w3.SPARE] });       // LINK's slot, SPARE's WEEK
+    cap3.done();
+    ok('§15 POSITIVE CONTROL: in the same world a WEEKLY reading that is not the target\'s is still re-filed (only the 5h rung was retired)',
+      Math.abs(w3.readCache(w3.SPARE).sevenDay.utilization - 0.66) < 1e-9 && Math.abs(w3.readCache(w3.LINK).sevenDay.utilization - 0.3) < 1e-9,
+      JSON.stringify([w3.readCache(w3.LINK).sevenDay, w3.readCache(w3.SPARE).sevenDay]));
   }
 }
 
@@ -1653,8 +1866,11 @@ if (!probe) {
     return rep.caches.foreign === 1 && rep.caches.restored === 1 && Math.abs(c.sevenDay.utilization - 0.2) < 1e-9 && c.orgUuid === 'aaaa';
   })(), JSON.stringify(JSON.parse(fs.readFileSync(path.join(cache, A + '.json'), 'utf8'))));
   ok('§16 every roster account is SEEDED with its own window, so the live guard is armed on THIS boot, not on the next panel refresh',
-    rep.caches.seeded === 2 && JSON.parse(fs.readFileSync(path.join(cache, A + '.json'), 'utf8')).ownWindow.sevenDay
-    && JSON.parse(fs.readFileSync(path.join(cache, B + '.json'), 'utf8')).ownWindow.sevenDay);
+    rep.caches.seeded === 2 && readWindow(cache, A)?.sevenDay === WA && readWindow(cache, B)?.sevenDay === WB
+    // …into the SIDECAR, so the next statusline render cannot delete what the
+    // migration just established (r2 — that is the whole point of the move)
+    && JSON.parse(fs.readFileSync(path.join(cache, A + '.json'), 'utf8')).ownWindow === undefined,
+    JSON.stringify([rep.caches.seeded, readWindow(cache, A), readWindow(cache, B)]));
   ok('§16 the learned rates are archived and dropped so the estimator re-learns from the cleaned pairs',
     !fs.existsSync(path.join(anchors, 'rates.json')) && fs.existsSync(path.join(dataDir, 'archive', 'readings-window-rates.ndjson')));
   const rep2 = repair.repairByWindow({ dataDir, roster: [A, B], id: 'W' });

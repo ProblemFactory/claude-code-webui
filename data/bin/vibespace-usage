@@ -123,12 +123,21 @@ function rlFingerprint(rl) {
 }
 /** The account's ESTABLISHED window, as the server stamps it: only the panel
  *  refresh (`claude -p /usage`, whose key and credential dir are one decision)
- *  writes `ownWindow`. Absent ⇒ no established window ⇒ no evidence, and the
- *  rule falls through to the r3 fingerprint clause exactly as before. */
+ *  writes it. Absent ⇒ no established window ⇒ no evidence, and the rule falls
+ *  through to the r3 fingerprint clause exactly as before.
+ *
+ *  IT IS READ FROM THE SIDECAR, NOT FROM THE CACHE (r2, reproduced). This file
+ *  REBUILDS the cache object on every write — the `out` literal below preserves
+ *  scopedWeekly / the org identity / spend one field at a time, and the window
+ *  was simply never added to that list, so one ordinary statusline render (8 s
+ *  cadence, our OWN write, entirely legitimate) deleted every established
+ *  window on the instance and disarmed the guard end to end. The fix is not a
+ *  fifth entry in a hand-written preserve list: the window moved OUT of the
+ *  object every reading producer rewrites (see `windowSidecarName`). */
 function ownWindowOf(key) {
   try {
-    const c = JSON.parse(fs.readFileSync(path.join(CACHE_DIR, String(key).replace(/[^\w.-]/g, '_') + '.json'), 'utf-8'));
-    return (c && c.ownWindow) || null;
+    const w = JSON.parse(fs.readFileSync(path.join(CACHE_DIR, windowSidecarName(key)), 'utf-8'));
+    return (w && (w.sevenDay || w.fiveHour || (w.scoped && Object.keys(w.scoped).length))) ? w : null;
   } catch { return null; }
 }
 
@@ -152,11 +161,20 @@ function weeklyNear(a, b, jitterSec = JITTER_SEC) {
   const d = Math.abs(p - q) % WEEK_SEC;
   return Math.min(d, WEEK_SEC - d) <= jitterSec;
 }
-function absNear(a, b, jitterSec = JITTER_SEC) {
-  const p = Number(a), q = Number(b);
-  if (!Number.isFinite(p) || !Number.isFinite(q) || p <= 0 || q <= 0) return null;
-  return Math.abs(p - q) <= jitterSec;
-}
+/** WHERE THE ESTABLISHED WINDOW LIVES (r2). NOT inside the usage-cache
+ *  snapshot: that object is REBUILT WHOLESALE by every reading producer — the
+ *  statusline hook (once per 8 s per account), the on-demand ⟳, the codex
+ *  snapshot writer — so a field there survives only while every one of them
+ *  remembers to carry it forward. This exact file has already lost
+ *  `scopedWeekly`, the org identity, `spend` and `corroborated` that way, and
+ *  `ownWindow` was the fifth: ONE ordinary statusline render deleted the only
+ *  evidence the guard below runs on, and the incident replayed end to end.
+ *  So the window a member's buckets are counted in lives BESIDE the cache, in
+ *  a file no reading producer writes at all: `.window-<key>` — no `.json`, so
+ *  every usage-cache scanner keeps ignoring it, exactly as the `.slot-<id>`
+ *  sidecar next to it already relies on. A fact only one producer may state
+ *  does not belong in the object all the others rewrite. */
+function windowSidecarName(key) { return '.window-' + String(key).replace(/[^\w.-]/g, '_'); }
 
 /** The window fingerprint of ANY of the shapes this codebase carries readings
  *  in — a usage-cache snapshot, an anchor's `buckets`, the statusline's
@@ -201,11 +219,29 @@ function windowFingerprint(win) {
  *  'agree' | 'differ' | 'unknown' — three states, because "we cannot tell" must
  *  never be spelled the same way as "yes".
  *
- *  WEEKLY OUTRANKS FIVE-HOUR. A weekly reset is an account property that holds
- *  for weeks; a 5-hour window opens at the account's first request in it, so it
- *  is only evidence while it has not yet rolled — past `nowSec` it says nothing
- *  and a fresh 5h window on the same account is expected, not foreign. */
-function compareWindows(readingWin, memberWin, { nowSec = Math.floor(Date.now() / 1000), jitterSec = JITTER_SEC } = {}) {
+ *  THE WEEKLY HALF IS THE ONLY IDENTITY EVIDENCE (r2, measured — the first
+ *  spelling of this rule also asked the 5-hour window, and that was wrong in
+ *  both directions). A weekly reset is an account property: every identity in
+ *  this instance's 30-day corpus has exactly ONE weekly phase, stable across
+ *  the period, and all seven are distinct. A FIVE-HOUR reset is a property of
+ *  a TIME: it opens at the account's first request in the block and then snaps
+ *  to the clock, so on the same corpus
+ *    · a SAME-account 5h reading sits >120 s from that account's own
+ *      still-future stamped 5h on 7.2 % (33/456) and 7.4 % (47/639) of the two
+ *      busiest streams — a 'differ' about its rightful owner; and
+ *    · DIFFERENT identities carry IDENTICAL 5h resets constantly (47 distinct
+ *      colliding values; `resetsAt mod 1800` piles onto :00/:10/:29/:30) — an
+ *      'agree' with a stranger.
+ *  Scanned end to end, that rung would have re-filed a legitimate reading onto
+ *  another account at 50 real moments. So five-hour is recorded (it is useful
+ *  in a fingerprint, and forensics want it) and never asked WHO. A reading
+ *  with no weekly component answers 'unknown', and the callers below treat
+ *  that as no evidence — which is the honest answer, not a cheap one.
+ *
+ *  Note there is no `nowSec`: comparing weekly PHASES (mod one week) survives
+ *  a roll by construction, so identity is decided without consulting a clock.
+ *  The 5-hour rung was the only thing that ever needed the time. */
+function compareWindows(readingWin, memberWin, { jitterSec = JITTER_SEC } = {}) {
   const a = readingWin && readingWin.scoped ? readingWin : windowOf(readingWin);
   const b = memberWin && memberWin.scoped ? memberWin : windowOf(memberWin);
   let weekly = null;
@@ -219,12 +255,6 @@ function compareWindows(readingWin, memberWin, { nowSec = Math.floor(Date.now() 
   }
   if (weekly === true) return 'agree';
   if (weekly === false) return 'differ';
-  // 5h: evidence only while the member's known window has not expired
-  if (a.fiveHour && b.fiveHour && b.fiveHour > nowSec) {
-    const r = absNear(a.fiveHour, b.fiveHour, jitterSec);
-    if (r === true) return 'agree';
-    if (r === false) return 'differ';
-  }
   return 'unknown';
 }
 
@@ -245,12 +275,12 @@ function compareWindows(readingWin, memberWin, { nowSec = Math.floor(Date.now() 
 function decideLagShadow({
   prevKey = null, prevWindow = null, newKey = null, newWindow = null,
   readingWindow = null, readingFingerprint = null, prevFingerprint = null,
-  repointAgeMs = 0, shadowMs = SHADOW_MS, nowSec = Math.floor(Date.now() / 1000), jitterSec = JITTER_SEC,
+  repointAgeMs = 0, shadowMs = SHADOW_MS, jitterSec = JITTER_SEC,
 } = {}) {
   if (!prevKey || !newKey || prevKey === newKey) return { key: newKey, shadowed: false, why: 'no-repoint' };
   if (!(Number(repointAgeMs) >= 0) || Number(repointAgeMs) > shadowMs) return { key: newKey, shadowed: false, why: 'shadow-expired' };
-  const cmpPrev = prevWindow ? compareWindows(readingWindow, prevWindow, { nowSec, jitterSec }) : 'unknown';
-  const cmpNew = newWindow ? compareWindows(readingWindow, newWindow, { nowSec, jitterSec }) : 'unknown';
+  const cmpPrev = prevWindow ? compareWindows(readingWindow, prevWindow, { jitterSec }) : 'unknown';
+  const cmpNew = newWindow ? compareWindows(readingWindow, newWindow, { jitterSec }) : 'unknown';
   if (cmpPrev === 'agree' && cmpNew === 'differ') return { key: prevKey, shadowed: true, why: 'window-of-previous-slot', cmpPrev, cmpNew };
   if (cmpNew === 'agree' && cmpPrev === 'differ') return { key: newKey, shadowed: false, why: 'window-of-new-slot', cmpPrev, cmpNew };
   if (readingFingerprint && prevFingerprint && readingFingerprint === prevFingerprint) {
