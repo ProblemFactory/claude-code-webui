@@ -472,6 +472,8 @@ export class ChatStatusBar {
     // harness itself reported it, never inferred, never on a backend id.
     if (this._turnState === 'requires_action') {
       parts.push(`<span class="chat-status-turnstate chat-status-needs-action" title="${escHtml(t('The agent is waiting for you — the turn is paused, not finished (reported by the harness).'))}">${UI_ICONS.hourglass} ${escHtml(t('waiting for you'))}</span>`);
+    }
+
     // SESSION HEALTH (§2.6, round 4) — the init frame's non-working MCP
     // servers / config entries / plugins, on the ONE surface that does not
     // depend on where the transcript is scrolled. The init CARD carries the

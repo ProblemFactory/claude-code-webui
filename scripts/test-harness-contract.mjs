@@ -156,6 +156,8 @@ console.log('— turnState');
   const sb = fs.readFileSync(path.join(REPO, 'src/lib/chat-status-bar.js'), 'utf8');
   ok(!/_backend === 'claude'[^\n]*turnState|turnState[^\n]*_backend === 'claude'/.test(sb),
     'the status bar never asks "is this claude?" to decide whether to draw the turn state');
+}
+
 // ── §2.13 caps收口: server↔client DEEP COMPARE + no backend-id gate left ──
 // The drift this exists to stop is REAL: the client carried `caps.review` for
 // releases while src/backend-caps.js had no such row at all, so the mirror had

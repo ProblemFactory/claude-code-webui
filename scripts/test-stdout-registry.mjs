@@ -337,10 +337,16 @@ const inflight = (id) => calls.broadcasts.filter((b) => b.id === id && b.type ==
     const camelHint = hits('type:"compact_start",hintText:');
     const snakeHooksEmit = hits('type:"hooks_start",hook_type:');
     const snakeHintEmit = hits('type:"compact_start",hint_text:');
-    const schemaDecl = hits('hook_type:ee(["pre_compact"');
+    // The zod enum helper is a MINIFIED LOCAL NAME (`ee(` on 2.1.257, `K(` on
+    // 2.1.263) — pinning it made this leg red on a newer CLI for a reason that
+    // named neither the record nor the spelling. What the leg asserts is that
+    // the DECLARATION is snake_case, so match the field and its enum call with
+    // the helper's identifier left free.
+    const hitsRe = (re) => { try { return Number(require('child_process').execFileSync('grep', ['-c', '-a', '-E', re, bin], { encoding: 'utf8' }).trim()) || 0; } catch { return 0; } };
+    const schemaDecl = hitsRe('hook_type:[A-Za-z_$][A-Za-z0-9_$]*\\(\\["pre_compact"');
     const ver = (() => { try { return require('child_process').execFileSync(bin, ['--version'], { encoding: 'utf8' }).trim(); } catch { return '?'; } })();
     ok(`${ver}: the installed CLI EMITS camelCase compact_progress (hookType ${camelHooks} sites, hintText ${camelHint} sites) — the compatibility rung is load-bearing, not defensive`, camelHooks > 0 && camelHint > 0, `hookType=${camelHooks} hintText=${camelHint}`);
-    ok('…and it DECLARES snake_case in the same binary (both rungs are justified; the schema is not fiction)', schemaDecl > 0, `hook_type:ee([...]) sites=${schemaDecl}`);
+    ok('…and it DECLARES snake_case in the same binary (both rungs are justified; the schema is not fiction)', schemaDecl > 0, `hook_type:<enum>(["pre_compact"…]) sites=${schemaDecl}`);
     ok('…and no emitter uses the declared spelling yet — the day one does, the schema-first read still wins (leg ⓑ pins that)', snakeHooksEmit === 0 && snakeHintEmit === 0, `snake emitters hooks=${snakeHooksEmit} hint=${snakeHintEmit}`);
   }
 }
@@ -1037,6 +1043,8 @@ setTimeout(() => process.exit(0), 60000);
     && turnStateEffect('requires_action', { hasLabel: true }).label === null
     && turnStateEffect('requires_action', { hasLabel: false }).label === null
     && turnStateEffect('wedged') === null);
+}
+
 // ── 3a-bis. the WIDENED init frame + commands_changed over the same consumer ──
 // (design-harness-features §2.6). The frame is the fixture the schema pin in
 // scripts/test-init-frame.mjs re-greps out of the installed 2.1.257 binary;
