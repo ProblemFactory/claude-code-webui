@@ -124,38 +124,88 @@ try {
   // other's ports and /tmp checkouts until the loser stamped a red that
   // blocked the next push. Here the two mechanisms are exercised for real.
   {
-    // (1) SUPERSEDE — and its negative control, decided by the SAME launch so
-    //     neither can pass vacuously: an in-flight run for an ANCESTOR of the
-    //     sha being pushed is killed (the newer commit subsumes it), while a
-    //     run for a commit that is NOT an ancestor is left alone (superseding
-    //     it would throw away a verdict nobody is replacing — it queues on the
-    //     machine lock instead).
-    const sleeper = () => {
-      const r = spawnSync(process.execPath, ['-e', 'const c=require("child_process").spawn(process.execPath,["-e","setTimeout(()=>{},120000)"],{detached:true,stdio:"ignore"});c.unref();console.log(c.pid)'], { encoding: 'utf-8' });
+    // (1) SUPERSEDE, WITH BOTH OF ITS NEGATIVE CONTROLS DECIDED BY THE SAME
+    //     LAUNCH so none of the three can pass vacuously:
+    //       · an in-flight run for an ANCESTOR of the sha being pushed is
+    //         killed — the newer commit subsumes it;
+    //       · a run for a commit that is NOT an ancestor is left alone —
+    //         superseding it would throw away a verdict nobody is replacing,
+    //         so it queues on the machine lock instead;
+    //       · a pid that does not READ as a heavy run is never killed, even
+    //         for an ancestor. Superseding SIGTERMs a process GROUP, so the
+    //         cost of a recycled pid (or of a pid file an older ci.mjs wrote
+    //         without a `cmd`) is somebody else's work. Reading trusts;
+    //         killing demands positive evidence.
+    //     The two that must DIE or SURVIVE as heavy runs are real, parked
+    //     `ci.mjs --heavy` processes (waiting on a lock somebody else holds),
+    //     not stand-ins: the predicate under test reads /proc, so the fixture
+    //     has to be the thing.
+    const detach = (argv) => {
+      const r = spawnSync(process.execPath, ['-e',
+        'const {spawn}=require("child_process");const a=JSON.parse(process.argv[1]);const c=spawn(a[0],a.slice(1),{detached:true,stdio:"ignore",cwd:process.argv[2]});c.unref();console.log(c.pid)',
+        JSON.stringify(argv), REPO], { encoding: 'utf-8', env: GIT_ENV });
       return Number((r.stdout || '').trim());
     };
-    const parent = spawnSync('git', ['-C', REPO, 'rev-parse', 'HEAD~1'], { encoding: 'utf-8', env: GIT_ENV });
-    if (parent.status === 0) {
-      const OLD = parent.stdout.trim();
-      const NOTANC = 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef';
-      const vpid = sleeper(), opid = sleeper();
-      fs.writeFileSync(path.join(dir, `${OLD}.pid`), JSON.stringify({ sha: OLD, pid: vpid, startedAt: Date.now() }));
-      fs.writeFileSync(path.join(dir, `${NOTANC}.pid`), JSON.stringify({ sha: NOTANC, pid: opid, startedAt: Date.now() }));
+    const sleeper = () => detach([process.execPath, '-e', 'setTimeout(()=>{},120000)']);
+    const parkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-ci-heavy-park-'));
+    const parkLock = path.join(parkDir, 'lock');
+    const parkHolder = sleeper();
+    fs.writeFileSync(parkLock, JSON.stringify({ pid: parkHolder, sha: 'f'.repeat(40), startedAt: Date.now() }));
+    const parkedHeavy = (forSha) => detach([process.execPath, path.join(REPO, 'scripts', 'ci.mjs'),
+      '--heavy', '--sha=' + forSha, '--isolate', '--markers=' + parkDir, '--only=' + SLICE, '--lock=' + parkLock, '--lock-wait-ms=600000']);
+
+    const p1 = spawnSync('git', ['-C', REPO, 'rev-parse', 'HEAD~1'], { encoding: 'utf-8', env: GIT_ENV });
+    const p2 = spawnSync('git', ['-C', REPO, 'rev-parse', 'HEAD~2'], { encoding: 'utf-8', env: GIT_ENV });
+    // The "not an ancestor" control has to be a commit this repo KNOWS —
+    // `deadbeef…` would be skipped by the unknown-commit branch and never
+    // reach the ancestry test at all, which is exactly the kind of control
+    // that passes without testing anything. `commit-tree` mints a real,
+    // dangling commit off HEAD~1: it exists, and HEAD does not descend from it.
+    const minted = spawnSync('git', ['-C', REPO, 'commit-tree', 'HEAD^{tree}', '-p', (p1.stdout || '').trim() || 'HEAD', '-m', 'test-ci-heavy-launch: a commit HEAD does not descend from'],
+      { encoding: 'utf-8', env: { ...GIT_ENV, GIT_AUTHOR_NAME: 'gate test', GIT_AUTHOR_EMAIL: 'gate@test.local', GIT_COMMITTER_NAME: 'gate test', GIT_COMMITTER_EMAIL: 'gate@test.local' } });
+    if (p1.status === 0 && p2.status === 0 && minted.status === 0) {
+      const OLD = p1.stdout.trim(), OLD2 = p2.stdout.trim();
+      const NOTANC = minted.stdout.trim();
+      ok(spawnSync('git', ['-C', REPO, 'merge-base', '--is-ancestor', NOTANC, SHA], { env: GIT_ENV }).status !== 0
+        && spawnSync('git', ['-C', REPO, 'cat-file', '-e', NOTANC + '^{commit}'], { env: GIT_ENV }).status === 0,
+        `the NON-ancestor control is a commit this repo knows but HEAD does not descend from (${NOTANC.slice(0, 8)}) — so it reaches the ancestry test`);
+      const vpid = parkedHeavy(OLD);       // a real heavy run for an ancestor ⇒ must die
+      const opid = parkedHeavy(NOTANC);    // a real heavy run, not an ancestor ⇒ must live
+      const spid = sleeper();              // NOT a heavy run, but an ancestor ⇒ must live
+      // The parked runs must actually BE parked heavy runs before we judge them.
+      const reads = (pid) => { try { return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf-8').replace(/\0/g, ' '); } catch { return ''; } };
+      for (let i = 0; i < 100 && !(reads(vpid).includes('ci.mjs') && reads(opid).includes('ci.mjs')); i++) await sleep(50);
+      ok(reads(vpid).includes('--heavy') && reads(opid).includes('--heavy'),
+        'the supersede fixtures are REAL parked `ci.mjs --heavy` processes (the predicate reads /proc)');
+      ok(!reads(spid).includes('ci.mjs'), '…and the third fixture deliberately is not one');
+      for (const [s, p] of [[OLD, vpid], [NOTANC, opid], [OLD2, spid]]) {
+        fs.writeFileSync(path.join(dir, `${s}.pid`), JSON.stringify({ sha: s, pid: p, startedAt: Date.now() }));
+      }
       const sup = spawnSync(process.execPath, [path.join(REPO, 'scripts', 'ci.mjs'), '--heavy-launch', SHA, '--markers=' + dir, '--only=' + SLICE, ...lockArgs],
         { cwd: REPO, encoding: 'utf-8', env: GIT_ENV, timeout: 60000 });
-      ok(/superseded the run for/.test(sup.stderr || ''), `an in-flight run for an ANCESTOR is superseded, out loud (${(sup.stderr || '').trim().split('\n')[0] || 'silent'})`);
+      const serr = sup.stderr || '';
+      ok(/superseded the run for/.test(serr), `an in-flight run for an ANCESTOR is superseded, out loud (${serr.trim().split('\n').find((l) => /superseded/.test(l)) || 'silent'})`);
       ok(!fs.existsSync(path.join(dir, `${OLD}.pid`)), '…its pid file is removed (it is no longer in flight)');
       let dead = false;
-      for (let i = 0; i < 60 && !dead; i++) { try { process.kill(vpid, 0); await sleep(50); } catch { dead = true; } }
+      for (let i = 0; i < 100 && !dead; i++) { try { process.kill(vpid, 0); await sleep(50); } catch { dead = true; } }
       ok(dead, `…and the process it named is gone (pid ${vpid})`);
-      let stillAlive = false; try { process.kill(opid, 0); stillAlive = true; } catch { }
-      ok(stillAlive && fs.existsSync(path.join(dir, `${NOTANC}.pid`)),
+      let oAlive = false; try { process.kill(opid, 0); oAlive = true; } catch { }
+      ok(oAlive && fs.existsSync(path.join(dir, `${NOTANC}.pid`)),
         'NEG: the SAME launch leaves the run for a NON-ancestor alone (pid alive, pid file kept)');
-      try { process.kill(-opid, 'SIGKILL'); } catch { try { process.kill(opid, 'SIGKILL'); } catch { } }
-      try { fs.unlinkSync(path.join(dir, `${NOTANC}.pid`)); } catch { }
+      let sAlive = false; try { process.kill(spid, 0); sAlive = true; } catch { }
+      ok(sAlive && /NOT superseding/.test(serr),
+        'NEG: …and refuses to kill an ANCESTOR whose pid does not read as a heavy run, out loud (queues instead)');
+      for (const p of [opid, spid, parkHolder]) { try { process.kill(-p, 'SIGKILL'); } catch { try { process.kill(p, 'SIGKILL'); } catch { } } }
+      for (const s of [NOTANC, OLD2]) { try { fs.unlinkSync(path.join(dir, `${s}.pid`)); } catch { } }
       // The launch we just made is real; let it finish before the temp dir goes.
       for (let i = 0; i < 300 && fs.existsSync(path.join(dir, `${SHA}.pid`)); i++) await sleep(1000);
+    } else {
+      // A shallow CI checkout has no HEAD~2, and a runner with no git identity
+      // cannot mint the control commit. SKIP loudly rather than pretend.
+      console.log(`  – SKIP supersede legs: need HEAD~1/HEAD~2 and a mintable control commit (rev-parse ${p1.status}/${p2.status}, commit-tree ${minted.status}: ${(minted.stderr || '').trim().slice(0, 80)})`);
+      try { process.kill(parkHolder, 'SIGKILL'); } catch { }
     }
+    try { fs.rmSync(parkDir, { recursive: true, force: true }); } catch { }
 
     // (1b) A SUPERSEDED RUN CLEANS UP AFTER ITSELF. Superseding SIGTERMs a run
     //      that is minutes into its tier, and node's default SIGTERM does not
@@ -171,10 +221,21 @@ try {
         process.execPath, path.join(REPO, 'scripts', 'ci.mjs'), SHA, kdir, SLICE, klock, REPO], { encoding: 'utf-8', env: GIT_ENV });
       const kpid = Number((child.stdout || '').trim());
       const wtName = `vs-ci-heavy-${SHA.slice(0, 8)}-${kpid}`;
+      // os.tmpdir(), not machineTmpDir(): a scratch CHECKOUT should follow
+      // TMPDIR (it is per-run scratch, named by sha+pid). Only the LOCK has to
+      // be a machine-wide name, which is why exactly one of them ignores it.
       const wtPath = path.join(os.tmpdir(), wtName);
+      // WAIT UNTIL THE CHILD IS PAST `git worktree add`, NOT MERELY INSIDE IT.
+      // Measured while mutation-testing this leg: killing during the add made
+      // the "checkout removed" assert pass with the handlers DELETED, because
+      // GIT cleans up its own interrupted add — the leg was measuring git, not
+      // us. heavyGate symlinks node_modules only after the add SUCCEEDS, so
+      // that symlink is the "the checkout is now ours to leak" signal. (A/B
+      // with the corrected timing: handlers on ⇒ gone/unregistered/unlocked;
+      // handlers off ⇒ all three left behind.)
       let appeared = false;
-      for (let i = 0; i < 200 && !appeared; i++) { appeared = fs.existsSync(wtPath); if (!appeared) await sleep(50); }
-      ok(appeared, `a running heavy child really has an isolated checkout to leak (${wtName})`);
+      for (let i = 0; i < 400 && !appeared; i++) { try { fs.lstatSync(path.join(wtPath, 'node_modules')); appeared = true; } catch { await sleep(50); } }
+      ok(appeared, `a running heavy child really has an isolated checkout to leak, past \`worktree add\` (${wtName})`);
       if (appeared) {
         ok(fs.existsSync(klock), '…and really holds the machine lock while it runs');
         try { process.kill(-kpid, 'SIGTERM'); } catch { try { process.kill(kpid, 'SIGTERM'); } catch { } }
@@ -189,6 +250,36 @@ try {
         ok(!fs.readdirSync(kdir).some((f) => /\.(green|red)$/.test(f)), '…and writes NO verdict (it never finished)');
       }
       try { fs.rmSync(kdir, { recursive: true, force: true }); } catch { }
+    }
+
+    // (1c) A SUPERSEDED RUN STOPS AND CLAIMS NOTHING — the production path.
+    //      heavyGate is spawnSync from top to bottom, so the SIGTERM handler
+    //      cannot preempt it; the abort is a synchronous QUESTION asked between
+    //      suites, and the launcher's removal of our pid file is the answer.
+    //      Without it a superseded run finished the tier and stamped a marker
+    //      whose build had been KILLED — a RED for the very commit the newer
+    //      run replaced (measured while mutation-testing (1b)).
+    {
+      const sdir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-ci-heavy-sup-'));
+      const slock = path.join(sdir, 'lock');
+      spawnSync(process.execPath, [path.join(REPO, 'scripts', 'ci.mjs'), '--heavy-launch', SHA, '--markers=' + sdir, '--only=' + SLICE, '--lock=' + slock, '--lock-wait-ms=5000'],
+        { cwd: REPO, encoding: 'utf-8', env: GIT_ENV, timeout: 60000 });
+      const spidFile = path.join(sdir, `${SHA}.pid`);
+      ok(fs.existsSync(spidFile), 'a launched run has a pid file — the thing superseding removes');
+      // Remove it while the run is still working (its build alone takes ~2 s).
+      try { fs.unlinkSync(spidFile); } catch { }
+      // Wait for the run to CLOSE. `/HEAVY/` alone matches its own opening
+      // line ("release gate — HEAVY tier: …"), so it has to be the summary.
+      const readLog = () => { try { return fs.readFileSync(path.join(sdir, `${SHA}.log`), 'utf-8'); } catch { return ''; } };
+      let done = false;
+      for (let i = 0; i < 600 && !done; i++) { done = /HEAVY (GATE|TIER) (GREEN|RED)/.test(readLog()); if (!done) await sleep(50); }
+      const slog = readLog();
+      ok(done, `the superseded run reached its closing line (${(slog.trim().split('\n').pop() || '(no output)').slice(0, 90)})`);
+      ok(/stopping: superseded by a newer push/.test(slog), `…and removing it makes the run STOP, saying why (${(slog.match(/stopping: [^\n]*/) || ['(never said)'])[0]})`);
+      ok(!fs.readdirSync(sdir).some((f) => /\.(green|red)$/.test(f)),
+        `…and it writes NO verdict for a commit whose run it did not finish (${fs.readdirSync(sdir).join(' ')})`);
+      ok(/NO VERDICT WRITTEN/.test(slog), '…and its closing line says so');
+      try { fs.rmSync(sdir, { recursive: true, force: true }); } catch { }
     }
 
     // (2) THE MACHINE LOCK: a second heavy run does not start while another

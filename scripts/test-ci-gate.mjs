@@ -23,7 +23,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { SUITES, EXCLUDED, censusFindings, listSuiteFiles, heavyBlocker, machineGlobalFixtures } from './ci.mjs';
+import { SUITES, EXCLUDED, censusFindings, listSuiteFiles, heavyBlocker, machineGlobalFixtures, defaultLockPath, killedFromOutside } from './ci.mjs';
 import { GIT_REDIRECTORS, gitEnvFrom } from './git-env.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -373,6 +373,20 @@ console.log('\n§6 machine-global fixtures + no-verdict honesty');
     `…and it claims nothing machine-global either — the FAST tier pays for it (${[...sliceF.ports, ...sliceF.paths].join(' ') || 'clean'})`);
   ok(/--lock=/.test(launcherSrc), '…and it drives its OWN machine lock, so it never queues behind a real heavy run');
 
+  // THE MACHINE LOCK MUST NAME THE MACHINE. `os.tmpdir()` follows TMPDIR, so a
+  // lock derived from it is per-PROCESS-environment: two agents with different
+  // TMPDIRs would each take "the machine lock" and neither would wait, while
+  // the things it protects (a bound port, the literal `/tmp` checkouts the
+  // suites claim) do not move with TMPDIR at all.
+  const beforeTmp = process.env.TMPDIR;
+  const lockDefault = defaultLockPath();
+  try {
+    process.env.TMPDIR = path.join(mktmp('tmpdir'), 'elsewhere');
+    ok(defaultLockPath() === lockDefault, `TMPDIR does not move the machine lock (${lockDefault})`);
+  } finally { if (beforeTmp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = beforeTmp; }
+  ok(/(^|\/)vibespace-ci-heavy-\d+\.lock$/.test(lockDefault) && os.tmpdir !== undefined,
+    '…and it is per-uid, so two users never fight over one file neither can unlink');
+
   // NEGATIVE CONTROLS — the detector must fire on the exact shapes that caused
   // the incident and stay quiet on the ones that replaced them. They live in
   // scripts/fixtures/machine-global-shapes/ rather than inline because the
@@ -390,6 +404,19 @@ console.log('\n§6 machine-global fixtures + no-verdict honesty');
   const clean = machineGlobalFixtures(shape('clean.js.txt'));
   ok(!clean.ports.length && !clean.paths.length,
     `NEG: the replacement shapes (freePort, mkdtemp, per-pid paths) AND the two that must never be flagged (a /tmp fixture VALUE, a lowercase port: config field) are all quiet (${[...clean.ports, ...clean.paths].join(' ') || 'clean'})`);
+
+  // "KILLED FROM OUTSIDE" MUST NOT LAUNDER A HANG. A heavy run refuses to
+  // write a verdict when a child died on a signal it did not send — that is
+  // how a superseded or Ctrl-C'd run stops stamping a RED built from its own
+  // interruption. But a suite that HANGS is killed by our own budget, with the
+  // same SIGTERM, and that one IS a red. spawnSync tells them apart by
+  // reporting ETIMEDOUT for its own kill, and this is the whole distinction.
+  ok(killedFromOutside({ signal: 'SIGTERM' }) === true, 'a child killed by SIGTERM with no error of ours reads as killed from OUTSIDE');
+  ok(killedFromOutside({ signal: 'SIGKILL' }) === true, '…SIGKILL too');
+  ok(killedFromOutside({ signal: 'SIGTERM', error: { code: 'ETIMEDOUT' } }) === false,
+    'NEG: our OWN budget kill (ETIMEDOUT) does NOT — a hung suite is a red, never a "no verdict"');
+  ok(killedFromOutside({ status: 1 }) === false && killedFromOutside({ status: 0 }) === false && killedFromOutside(null) === false,
+    'NEG: an ordinary failure, an ordinary pass and a missing result are not signals');
 
   // (b) THE DIRTY-TREE PATH, FOR REAL. A probe file makes this checkout dirty
   //     for the length of two runs; `finally` removes it.
