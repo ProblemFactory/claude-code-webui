@@ -84,7 +84,23 @@ for (let i = 0; i < 180 && !replied; i++) {
   replied = frames.some((s) => s.includes('assistant') && s.includes('CANARY_GREEN'));
   await sleep(1000);
 }
-check('haiku inference round-trip: assistant reply flows back over ws (chat-wrapper → normalizer → push)', replied);
+// CLASSIFY A MISSING REPLY (2.369.71 gate, five runs): the gate's one real turn
+// bills a real account, and that account can be rate-limited or the API can
+// error — the CLI then emits an api_error / an is_error result and no assistant
+// text ever exists. That proves the pipeline up to the API (spawn → prompt →
+// request sent) and disproves nothing of ours; a hard RED there blocked every
+// push while the owner's subscriptions were exhausted. Evidence, not a
+// guess: the ws frames carry the error result / API error text, and the
+// receiver counted the CLI's own api_error event.
+let apiErr = null;
+if (!replied) {
+  const hit = frames.find((s) => /"is_error":\s*true|API Error|rate.?limit|overloaded|"status":\s*(429|529)|usage limit|credit balance/i.test(s));
+  let ev = null; try { ev = (await (await fetch(`http://127.0.0.1:${PORT}/api/otel-stats`)).json())?.events || null; } catch { }
+  if (hit || (ev && ev.api_error > 0)) apiErr = { frame: (hit || '').slice(0, 220), otelApiErrors: ev?.api_error || 0 };
+}
+if (replied) check('haiku inference round-trip: assistant reply flows back over ws (chat-wrapper → normalizer → push)', true);
+else if (apiErr) console.log(`  ⚠ SKIP: the billing account could not serve the haiku turn (API error / rate limit) — request sent, no reply to round-trip; nothing of ours disproven — ${JSON.stringify(apiErr)}`);
+else check('haiku inference round-trip: assistant reply flows back over ws (chat-wrapper → normalizer → push)', false, frames.slice(-3).join('\n').slice(0, 400));
 
 // the turn must SETTLE (result processed — the /compact-class "stuck on thinking" regressions)
 let settled = false;
