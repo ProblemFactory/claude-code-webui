@@ -342,13 +342,30 @@ function listOpenCodexRolloutPaths({ sessionsDir } = {}) {
  *  written"). The shell twin never had this bug because a shell consumes
  *  `lsof …`'s STDOUT and ignores its status. Read the output; treat only a
  *  spawn-level failure (no lsof, timeout, buffer overflow) as "cannot tell". */
+const LSOF_BUDGET_MS = 20000;
+let _lsofWarnAt = 0;
+/** An answer lsof could not give is not an empty answer. */
+function lsofUnknown(arr, why) {
+  try { Object.defineProperty(arr, 'unknown', { value: String(why || 'unknown'), enumerable: false }); } catch { }
+  const now = Date.now();
+  if (now - _lsofWarnAt > 60000) { _lsofWarnAt = now; console.warn(`[discovery] lsof could not answer (${why}) — codex liveness via lsof is UNKNOWN this round, not "none"`); }
+  return arr;
+}
 function listOpenRolloutPathsViaLsof(root) {
   const out = new Set();
   try {
+    // BUDGET (2.369.75 gate): lsof enumerates EVERY process's open files before
+    // `+D` filters them — on a 3,900-process box under a full test tier that took
+    // more than the old 4 s, and the timeout was returned as `[]` = "no codex
+    // thread holds a rollout" (the B-3185 always-failing-degrade shape: a wrong
+    // STOPPED for every live thread on such a host). 20 s is a floor, not a
+    // target (measured 104 ms idle). A spawn/timeout failure is UNKNOWN, never
+    // an answer: the array carries a non-enumerable `unknown` mark + the reason
+    // and the degrade is logged verbatim (rate-limited) instead of swallowed.
     const r = spawnSync('lsof', ['-Fpn', '+D', root], {
-      encoding: 'utf-8', timeout: 4000, maxBuffer: 8 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'],
+      encoding: 'utf-8', timeout: LSOF_BUDGET_MS, maxBuffer: 8 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'],
     });
-    if (r.error) return [...out];
+    if (r.error) return lsofUnknown([...out], r.error.code || r.error.message);
     const output = String(r.stdout || '');
     const verdicts = new Map();
     let isCli = false;
@@ -599,6 +616,6 @@ function synthesizeDiscoveryLines(snap) {
 module.exports = {
   extractTailIds, nameFromUserRecord, nameFromUserLine, nameFromText, pidLooksClaude, interpretDiscoveryLines, synthesizeDiscoveryLines, NAME_MAX,
   // S3 (codex facts + zstd rollouts)
-  deriveCodexSessionName, nameFromCodexUserLine, listOpenCodexRolloutPaths, listOpenRolloutPathsViaLsof, isCliProcess, CODEX_TID_RE, CODEX_ROLLOUT_RE, codexThreadIdOf,
+  deriveCodexSessionName, nameFromCodexUserLine, listOpenCodexRolloutPaths, listOpenRolloutPathsViaLsof, LSOF_BUDGET_MS, isCliProcess, CODEX_TID_RE, CODEX_ROLLOUT_RE, codexThreadIdOf,
   ZSTD_SUPPORTED, ZSTD_MAGIC, isZstPath, isZstBuffer, zstdDecompressFrames, zstdDecompressHead, readHeadText,
 };

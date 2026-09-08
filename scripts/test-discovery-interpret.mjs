@@ -13,7 +13,7 @@ import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const REPO = path.resolve(new URL('..', import.meta.url).pathname);
-const { interpretDiscoveryLines, pidLooksClaude, listOpenCodexRolloutPaths, listOpenRolloutPathsViaLsof, isCliProcess } = require(REPO + '/src/discovery-facts.js');
+const { interpretDiscoveryLines, pidLooksClaude, listOpenCodexRolloutPaths, listOpenRolloutPathsViaLsof, isCliProcess, LSOF_BUDGET_MS } = require(REPO + '/src/discovery-facts.js');
 const { cliIdentityShellFns } = require(REPO + '/src/cli-identity.js');
 const { claimJsonls } = require(REPO + '/src/session-store.js');
 
@@ -214,7 +214,15 @@ if (fs.existsSync('/proc/self')) {
   if (!haveLsof) console.log('  · lsof absent — the no-/proc rung legs below are vacuous here');
   const codexRoot = path.join(home, '.codex', 'sessions');
   const viaLsof = haveLsof ? listOpenRolloutPathsViaLsof(codexRoot) : [];
-  ok(!haveLsof || viaLsof.includes(rollout),
+  // An lsof that could not answer inside the product's budget (a loaded box:
+  // the 2.369.75 gate ran 74 suites on a 3,900-process machine) is UNKNOWN,
+  // marked on the array — not evidence about holders. The legs below are
+  // about lsof's ANSWER, so they SKIP with that evidence instead of reading a
+  // timeout as "no holders" (the very degrade the product no longer commits).
+  const lsofUnknown = !!(viaLsof && viaLsof.unknown);
+  if (lsofUnknown) console.log(`  ⚠ SKIP: lsof could not answer within ${LSOF_BUDGET_MS} ms on this box (${viaLsof.unknown}) — the no-/proc rung legs are not evidence this round`);
+  const haveLsofAnswer = haveLsof && !lsofUnknown;
+  ok(!haveLsofAnswer || viaLsof.includes(rollout),
     'the no-/proc rung REACHES the real codex holder (positive control — an empty answer would make every assert below pass)', JSON.stringify(viaLsof));
   ok(!haveLsof || (holdsIt(keeper.pid, rollout) && !isCliProcess(keeper.pid, 'codex')),
     'the `codex-keeper` fixture holds the rollout open and is NOT the codex CLI (the shape the loose rule confuses)');
@@ -227,12 +235,12 @@ if (fs.existsSync('/proc/self')) {
   // none of which the product reads. (A machine with docker overlay mounts made
   // this leg's old `!stderr.trim()` clause a false RED — 2.369.71 gate.)
   const rawLsof = haveLsof ? spawnSync('lsof', ['-Fpn', '+D', codexRoot], { encoding: 'utf-8', maxBuffer: 8 * 1024 * 1024 }) : null;
-  ok(!haveLsof || (rawLsof.status !== 0 && rawLsof.stdout.includes(rollout)),
+  ok(!haveLsofAnswer || (rawLsof.status !== 0 && rawLsof.stdout.includes(rollout)),
     '`lsof +D` reports the holder CORRECTLY on stdout and still exits non-zero (its status is not an error signal — stderr warnings about unstat-able mounts are ignored, as the product ignores them)',
     JSON.stringify({ status: rawLsof && rawLsof.status, stderrLen: rawLsof && String(rawLsof.stderr || '').length }));
   // …and the product's own reader is PROVEN indifferent to that stderr: it read
   // the same tree correctly above (viaLsof.includes(rollout)) on this very box.
-  ok(!haveLsof || viaLsof.includes(rollout),
+  ok(!haveLsofAnswer || viaLsof.includes(rollout),
     'the product reader (listOpenRolloutPathsViaLsof) returns the holder even when lsof warned on stderr — stderr is not consumed');
   // NEGATIVE CONTROL #1 — the pre-r3 EXIT-STATUS handling with the SHIPPED
   // identity: `execFileSync` throws on that status and the catch eats it.
@@ -283,7 +291,7 @@ if (fs.existsSync('/proc/self')) {
   ok(!haveLsof || listOpenRolloutPathsViaLsof(keeperOnlyRoot).length === 0,
     '…and the shipped rung reports NOTHING for it: the same predicate as /proc and as the shell (a stopped thread stops reading RUNNING on macOS too)',
     JSON.stringify(haveLsof ? listOpenRolloutPathsViaLsof(keeperOnlyRoot) : []));
-  ok(!haveLsof || JSON.stringify([...viaLsof].sort()) === JSON.stringify([...listOpenCodexRolloutPaths({ sessionsDir: codexRoot })].sort()),
+  ok(!haveLsofAnswer || JSON.stringify([...viaLsof].sort()) === JSON.stringify([...listOpenCodexRolloutPaths({ sessionsDir: codexRoot })].sort()),
     'PARITY: the /proc rung and the no-/proc rung return the SAME set for the same fixtures (the two bodies are one rule)',
     JSON.stringify({ lsof: viaLsof, proc: open }));
 
