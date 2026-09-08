@@ -204,7 +204,7 @@ for (let i = 1; i <= 25000; i++) rows.push('u ' + i + ' 0.1 0.2 100000 ' + (9000
 process.stdout.write(rows.join('\\n') + '\\n');
 `, { mode: 0o755 });
   const src = fs.readFileSync(new URL('../src/sysinfo.js', import.meta.url), 'utf8');
-  ok(/PS_MAX_BUFFER = 32 \* 1024 \* 1024/.test(src) && !/maxBuffer: [48] \* 1024 \* 1024/.test(src), 'every ps call carries the 32 MiB bound (the 4/8 MiB literals are gone)');
+  ok(/PS_MAX_BUFFER = (32|64) \* 1024 \* 1024/.test(src) && !/maxBuffer: [48] \* 1024 \* 1024/.test(src), 'every ps call carries the shared ≥32 MiB bound (64 MiB since the gate-split merge; the 4/8 MiB literals are gone)');
   const { execFileSync } = await import('node:child_process');
   const run = (buf) => execFileSync(process.execPath, ['-e', `
     const cp = require('node:child_process'); const orig = cp.execFile;

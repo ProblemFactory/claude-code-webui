@@ -300,13 +300,13 @@ export const SUITES = [
   { name: 'test-jobs-engine', tier: 'heavy', why: 'slow (71s)' }, // Background Work ENGINE gate (real spawns in an isolated tmp dataDir — never the repo's production data/). Pins: spawn→adopt-by-stamp across engine generations…
   { name: 'test-desktop-resume-paging', tier: 'heavy', why: 'chrome — the fast tier never launches a browser (224s here; a browser leg\'s cost follows machine load)' }, // inc-mtq5bpjt-0o0n end-to-end: a PINNED window survives a real desktop switch on a real >34MB transcript (gap sentinel installed), incl. the input-less scrollTop→0 probes and the round-3 TRUSTED-input legs (a real click must NOT disarm the resume repair, a real wheel/scrollbar drag must), WITH a source-level negative control that rebuilds the bundle with the gates patched out (SKIPs without chrome; ~3.5 min, two chrome runs + two bundle builds)
   // ── integrated 2.369.72 (suites master added while the split branch was open; all HEAVY: chrome / real serve / real wrapper / >10 s) ──
-  { name: 'test-init-frame', tier: 'heavy', why: 'headless chrome 375×667 census of the status-bar panels + a dump of the installed CLI binary' },
-  { name: 'test-opencode-remote', tier: 'heavy', why: 'drives the shipped ssh op script with real child processes; 21 s measured' },
-  { name: 'test-opencode-s9', tier: 'heavy', why: 'real opencode serve + headless chrome + real processes (11 rounds)' },
-  { name: 'test-permission-rules', tier: 'heavy', why: 'real chat-wrapper stdin verb + local oracles (strace + real CLIs when present)' },
-  { name: 'test-readings-attribution', tier: 'heavy', why: 'real engine + real pool + real symlinks + headless chrome §10 panel legs' },
-  { name: 'test-turn-truth-ui', tier: 'heavy', why: 'headless chrome live ChatView + real stdout consumer' },
-  { name: 'test-worktree-userchan-ui', tier: 'heavy', why: 'headless chrome + the LIVE_SESSION_FACTS drift guard' },
+  { name: 'test-init-frame', tier: 'heavy', why: 'chrome + binary: headless 375×667 census of the status-bar panels + a dump of the installed CLI (2s here with the chrome legs skipped)' },
+  { name: 'test-opencode-remote', tier: 'heavy', why: 'binary + slow: the shipped ssh op script over real child processes (21s)' },
+  { name: 'test-opencode-s9', tier: 'heavy', why: 'server + chrome: real opencode serve + headless chrome + real processes (227s)' },
+  { name: 'test-permission-rules', tier: 'heavy', why: 'cli: the real chat-wrapper stdin verb + local oracles (strace + real CLIs when present) (10s)' },
+  { name: 'test-readings-attribution', tier: 'heavy', why: 'chrome: real engine/pool/symlinks + the headless §10 panel legs (3s here with chrome skipped)' },
+  { name: 'test-turn-truth-ui', tier: 'heavy', why: 'chrome: a live ChatView in headless chrome + the real stdout consumer (9s)' },
+  { name: 'test-worktree-userchan-ui', tier: 'heavy', why: 'chrome: headless chrome + the LIVE_SESSION_FACTS drift guard (4s here with chrome skipped)' },
 ];
 
 // Suites that are in NEITHER tier, each with the reason it cannot be gated.
