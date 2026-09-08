@@ -1,0 +1,19 @@
+// The pre-fix scripts/test-attach-ack.mjs, verbatim in the parts that mattered:
+// a port the whole box shares, and a /tmp checkout it force-removed first (so a
+// second run of any gate deleted the first run's worktree mid-suite).
+const PORT = 3991;
+const wt = '/tmp/vs-ack-smoke';
+try { execSync(`git worktree remove --force ${wt}`, { cwd: repo, stdio: 'ignore' }); } catch {}
+execSync(`git worktree add --detach ${wt} HEAD`, { cwd: repo, stdio: 'ignore' });
+
+// A second, comma-declared fixed port (scripts/test-proxy-post.mjs, pre-fix).
+const TARGET_PORT = 18941, PROXY_PORT = 18942;
+
+// A literal bound to a NAME that is later listened on — the same claim, spelled
+// so that grepping for "PORT =" would miss it.
+const P = 3993;
+srv.listen(P);
+
+// And a literal handed to a child as its PORT.
+const Q = 3989;
+spawn(process.execPath, ['server.js'], { env: { PORT: String(Q) } });

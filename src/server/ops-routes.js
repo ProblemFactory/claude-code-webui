@@ -131,11 +131,15 @@ app.get('/api/ci-heavy', (req, res) => {
   const runs = [], running = [];
   try {
     for (const f of fs.readdirSync(CI_HEAVY_DIR)) {
-      const m = /^([0-9a-f]{7,40})\.(green|red|pid)$/.exec(f);
+      // `skipped` is not a verdict, it is the ABSENCE of one, recorded out
+      // loud (2026-09-07 round 2): a commit whose heavy run never got the
+      // machine lock has no green and no red, and without this row that is
+      // indistinguishable from "nobody has pushed lately".
+      const m = /^([0-9a-f]{7,40})\.(green|red|pid|skipped)$/.exec(f);
       if (!m) continue;
       let rec = {};
       try { rec = JSON.parse(fs.readFileSync(path.join(CI_HEAVY_DIR, f), 'utf-8')); } catch {}
-      const row = { sha: rec.sha || m[1], result: m[2] === 'pid' ? 'running' : m[2], startedAt: rec.startedAt || 0, endedAt: rec.endedAt || 0, ms: rec.ms || 0, suites: rec.suites || 0, failed: Array.isArray(rec.failed) ? rec.failed.slice(0, 20) : [], flaky: Array.isArray(rec.flaky) ? rec.flaky.slice(0, 20) : [], pid: rec.pid || 0 };
+      const row = { sha: rec.sha || m[1], result: m[2] === 'pid' ? 'running' : m[2], startedAt: rec.startedAt || 0, endedAt: rec.endedAt || 0, ms: rec.ms || 0, suites: rec.suites || 0, failed: Array.isArray(rec.failed) ? rec.failed.slice(0, 20) : [], flaky: Array.isArray(rec.flaky) ? rec.flaky.slice(0, 20) : [], pid: rec.pid || 0, reason: typeof rec.reason === 'string' ? rec.reason.slice(0, 200) : '', unlocked: !!rec.unlocked };
       if (m[2] === 'pid') { let live = false; try { process.kill(row.pid, 0); live = true; } catch {} if (live) running.push(row); }
       else runs.push(row);
     }

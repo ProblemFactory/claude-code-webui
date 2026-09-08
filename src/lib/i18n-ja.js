@@ -1375,6 +1375,8 @@ export default {
   "Suites too slow for the pre-push gate (headless chrome, real servers, real CLIs). A RED run blocks the next push until a newer green run clears it — run npm run ci:status for the ancestry verdict.": "push 前のゲートには遅すぎるスイート（ヘッドレス Chrome、実サーバー、実 CLI）。RED の実行は、より新しい green の実行が解除するまで次の push をブロックします — 祖先関係の判定は npm run ci:status で。",
   "commit": "コミット",
   "flaky": "不安定",
+  "no verdict": "判定なし",
+  "ran without the machine lock": "マシンロックなしで実行",
   "result": "結果",
   "duration": "所要時間",
   "{n} suites": "{n} 件のスイート",

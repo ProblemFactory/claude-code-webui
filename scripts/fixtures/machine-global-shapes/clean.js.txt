@@ -1,0 +1,28 @@
+// The replacement shapes: nothing outside this process needs to know the
+// number or the path, so nothing outside this process can collide with them.
+const freePort = () => new Promise((res, rej) => { const s = net.createServer(); s.once('error', rej); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); }); });
+const PORT = await freePort();
+const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-ack-smoke-'));
+const wt = path.join(tmpRoot, 'wt');
+execSync(`git worktree add --detach ${wt} HEAD`, { cwd: repo, stdio: 'ignore' });
+
+// A per-pid path is not a machine-global claim either.
+const other = `/tmp/vs-restore-smoke-${process.pid}`;
+const dataDir = '/tmp/vs-disc-dirty-' + process.pid;
+
+// MUST NOT be flagged: a /tmp string that is only a fixture VALUE — nothing
+// creates it, it is the `cwd` field of a fake record (scripts/test-otel-truth,
+// test-transcript-parity, test-agent-msg all legitimately carry these).
+const CWD = '/tmp/vsproj';
+const rec = { requestId: 'req_bake1', cwd: '/tmp/x', socketPath: '/tmp/x.sock' };
+assert.equal(parse(rec).cwd, CWD);
+
+// MUST NOT be flagged: a lowercase `port:` config field binds nothing, and
+// listen(0) is the opposite of a claim.
+create({ dataDir: dir, port: 3456, plugins: fakePlugins() });
+const srv = app.listen(0, '127.0.0.1');
+
+// MUST NOT be flagged: a COMMENT binds nothing. const PORT = 3991; and
+// const wt = '/tmp/vs-ack-smoke'; written here are prose, not claims.
+/* Nor does a block comment: const OTHER_PORT = 3994; srv.listen(3995); */
+const url = 'http://127.0.0.1:8080/x'; // a URL is not a bind

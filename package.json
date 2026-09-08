@@ -9,7 +9,7 @@
     "dev": "npm run build && node server.js",
     "build:agentd": "node -e \"const v=require('./package.json').version;require('fs').writeFileSync('src/agentd/version.js','module.exports = { VERSION: '+JSON.stringify(v)+' };\\n')\" && esbuild src/agentd/agentd.js --bundle --platform=node --external:node-pty --outfile=data/bin/vibespace-agentd.js && esbuild src/agentd/attach-cli.js --bundle --platform=node --outfile=data/bin/vibespace-agentd-attach.js",
     "ci": "node scripts/ci.mjs",
-    "ci:heavy": "node scripts/ci.mjs --heavy",
+    "ci:heavy": "node scripts/ci.mjs --heavy --isolate",
     "ci:status": "node scripts/ci.mjs --status",
     "postinstall": "node scripts/install-git-hooks.mjs"
   },

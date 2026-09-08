@@ -4,21 +4,34 @@
 // synchronous attach-ack BEFORE the (possibly slow) attached/error reply, so
 // the client can tell "server alive and processing" from "server gone" and
 // stop declaring live sessions dead on slow replies.
+//
+// NOTHING HERE IS MACHINE-GLOBAL (2026-09-07 round 2). This suite used to bind
+// a fixed :3991 and check its worktree out at a fixed /tmp/vs-ack-smoke — which
+// it FORCE-REMOVED first. On a box hosting ~160 checkouts of this repo driven
+// by parallel agents that is not a fixture, it is a weapon: a second run of any
+// gate deleted the first run's checkout mid-suite, and the loser's red blocked
+// a push. (Three more suites share :3991 and four share :3989; the heavy tier's
+// machine lock in scripts/ci.mjs keeps THEM serial. This one is fixed at the
+// source because it is the destructive one.) The rule is asserted for the whole
+// fast tier by test-ci-gate §6 via ci.mjs `machineGlobalFixtures`.
 import { execSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
+import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 
 const repo = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
-const PORT = 3991;
-const wt = '/tmp/vs-ack-smoke';
+const freePort = () => new Promise((res, rej) => { const s = net.createServer(); s.once('error', rej); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); }); });
+const PORT = await freePort();
+const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-ack-smoke-'));
+const wt = path.join(tmpRoot, 'wt');
 let failed = 0;
 const check = (n, c, e) => { if (c) console.log(`  ✓ ${n}`); else { failed++; console.error(`  ✗ ${n}${e ? ' — ' + e : ''}`); } };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-try { execSync(`git worktree remove --force ${wt}`, { cwd: repo, stdio: 'ignore' }); } catch {}
 execSync(`git worktree add --detach ${wt} HEAD`, { cwd: repo, stdio: 'ignore' });
 for (const f of ['src', 'public', 'server.js']) {
   execSync(`rm -rf ${wt}/${f} && cp -r ${repo}/${f} ${wt}/${f}`);
@@ -29,6 +42,7 @@ const srv = spawn(process.execPath, ['server.js'], { cwd: wt, env: { ...process.
 const cleanup = () => {
   try { srv.kill('SIGKILL'); } catch {}
   try { execSync(`git worktree remove --force ${wt}`, { cwd: repo, stdio: 'ignore' }); } catch {}
+  try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch {}
 };
 process.on('exit', cleanup);
 

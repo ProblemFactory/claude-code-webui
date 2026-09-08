@@ -9,12 +9,21 @@
 import { WebSocket } from 'ws';
 import { spawn, execFileSync } from 'child_process';
 import fs from 'fs';
+import net from 'net';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const wt = `/tmp/vs-restore-smoke-${process.pid}`;
-const PORT = 3971 + (process.pid % 20);
+// FREE port (2026-09-07 round 2). `3971 + pid % 20` is a machine-global claim
+// on twenty numbers: this box hosts ~160 checkouts of this repo and the fast
+// tier is fail-fast with no retry, so a squatter anywhere in 3971-3990 turned
+// somebody else's perfectly good push red. It already happened once — an
+// orphaned throwaway server on :3987 took this suite down along with two
+// others (the split's own field notes). Nothing outside this process needs to
+// know the number, so nothing outside this process gets to collide with it.
+const freePort = () => new Promise((res, rej) => { const s = net.createServer(); s.once('error', rej); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); }); });
+const PORT = await freePort();
 execFileSync('git', ['-C', repo, 'worktree', 'add', '--detach', wt, 'HEAD'], { stdio: 'ignore' });
 // Overlay the WORKING TREE's code (2.335.1, after this smoke passed while an
 // uncommitted server.js could not boot — a worktree checks out HEAD, so a

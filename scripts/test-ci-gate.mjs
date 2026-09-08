@@ -14,7 +14,8 @@
 // Sections: §1 census (+ negative controls) · §2 tier hygiene · §3 the block
 // rule over real commits · §4 the hook's control flow end-to-end · §5 the git
 // environment the detached child must NOT inherit (with the damage as the
-// negative control).
+// negative control) · §6 no FAST-tier suite claims a machine-global fixture,
+// and every "no verdict" path says so up front and at the end (round 2).
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -22,7 +23,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { SUITES, EXCLUDED, censusFindings, listSuiteFiles, heavyBlocker } from './ci.mjs';
+import { SUITES, EXCLUDED, censusFindings, listSuiteFiles, heavyBlocker, machineGlobalFixtures } from './ci.mjs';
 import { GIT_REDIRECTORS, gitEnvFrom } from './git-env.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -125,6 +126,11 @@ console.log('\n§2 tier hygiene');
   ok(/node scripts\/ci\.mjs\s*$/m.test(wf) && wf.includes('node scripts/ci.mjs --heavy'),
     'the Actions mirror runs BOTH tiers');
   ok(/"ci:heavy"\s*:/.test(pkg) && /"ci:status"\s*:/.test(pkg), 'package.json exposes ci:heavy + ci:status');
+  // `npm run ci:heavy` is the command the block message tells a blocked
+  // developer to run, so it has to be able to WRITE the marker that clears the
+  // block. In place it can only do that on a clean tree; --isolate always can
+  // (round 2: the manual path used to run 16 minutes and then refuse silently).
+  ok(/"ci:heavy"\s*:\s*"[^"]*--isolate/.test(pkg), 'ci:heavy runs ISOLATED, so the recovery command always earns a marker');
   ok(read('.gitignore').includes('data/ci-heavy'), 'the marker directory is gitignored');
 }
 
@@ -191,9 +197,10 @@ const repo = ${JSON.stringify(repo)};
 const dir = path.join(repo, 'data', 'ci-heavy');
 const argv = process.argv.slice(2);
 const note = (o) => fs.appendFileSync(path.join(repo, 'calls.ndjson'), JSON.stringify(o) + '\\n');
+const headArg = (argv.find((a) => a.startsWith('--head=')) || '').slice(7) || null;
 if (argv.includes('--check-heavy')) {
-  note({ mode: 'check-heavy' });
-  const b = heavyBlocker({ dir, repoRoot: repo });
+  note({ mode: 'check-heavy', head: headArg });
+  const b = heavyBlocker({ dir, repoRoot: repo, head: headArg || undefined });
   if (b) { console.error('PUSH BLOCKED failed: ' + (b.failed || []).join(', ')); process.exit(1); }
   process.exit(0);
 }
@@ -206,14 +213,15 @@ process.exit(fs.existsSync(path.join(repo, 'FAST_RED')) ? 1 : 0);
   fs.chmodSync(path.join(repo, 'pre-push'), 0o755);
   const ZERO = '0'.repeat(40);
   const calls = () => { try { return fs.readFileSync(path.join(repo, 'calls.ndjson'), 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
-  const runHook = (localSha, remoteSha = ZERO, env = {}) => {
+  const runHookRefs = (stdin, env = {}) => {
     try { fs.unlinkSync(path.join(repo, 'calls.ndjson')); } catch {}
     const r = spawnSync('bash', [path.join(repo, 'pre-push'), 'origin', 'git@example.invalid:x/y.git'], {
-      cwd: repo, input: `refs/heads/main ${localSha} refs/heads/main ${remoteSha}\n`,
-      encoding: 'utf-8', env: { ...GIT_ENV, ...env },
+      cwd: repo, input: stdin, encoding: 'utf-8', env: { ...GIT_ENV, ...env },
     });
     return { status: r.status, out: (r.stdout || '') + (r.stderr || ''), calls: calls() };
   };
+  const runHook = (localSha, remoteSha = ZERO, env = {}) =>
+    runHookRefs(`refs/heads/main ${localSha} refs/heads/main ${remoteSha}\n`, env);
 
   const A = commit(repo, 'src/a.js', '//a\n', 'A');
   const r1 = runHook(A);
@@ -254,6 +262,35 @@ process.exit(fs.existsSync(path.join(repo, 'FAST_RED')) ? 1 : 0);
   writeMarker(path.join(repo, 'data', 'ci-heavy'), E, 'red', ['boom']);
   const r6 = runHook(E, D, { VIBESPACE_SKIP_CI: '1' });
   ok(r6.status === 0 && !r6.calls.length, 'VIBESPACE_SKIP_CI=1 bypasses even a blocking red');
+
+  // ── THE VERDICT IS ABOUT THE REFS BEING PUSHED (2026-09-07 round 2) ────
+  // Reproduced before the fix: the hook asked `--check-heavy` with no --head,
+  // so the answer was about the CHECKED-OUT commit. `git push origin main`
+  // from a different branch therefore shipped a commit riding on a heavy-red
+  // ancestor with no block and no message.
+  // E's red belonged to the bypass leg above; leave it there and this leg is
+  // asking about two reds at once.
+  try { fs.unlinkSync(path.join(repo, 'data', 'ci-heavy', `${E}.red`)); } catch {}
+  git(repo, ['checkout', '-q', '-b', 'shipping', E]);
+  const R = commit(repo, 'src/r.js', '//r\n', 'R — the commit that will go red');
+  const RIDER = commit(repo, 'src/rider.js', '//rider\n', 'RIDER — rides on the red, and is what we push');
+  git(repo, ['checkout', '-q', '-b', 'elsewhere', E]);
+  const SIDE = commit(repo, 'src/side.js', '//side\n', 'the branch we are STANDING on — unrelated to the red');
+  writeMarker(path.join(repo, 'data', 'ci-heavy'), R, 'red', ['test-fold-ux']);
+  // Non-vacuity, stated as the two answers the fix is choosing between.
+  ok(heavyBlocker({ dir: path.join(repo, 'data', 'ci-heavy'), head: SIDE, repoRoot: repo }) === null,
+    'the checked-out branch is NOT blocked (this is what the hook used to ask about)');
+  ok(heavyBlocker({ dir: path.join(repo, 'data', 'ci-heavy'), head: RIDER, repoRoot: repo })?.sha === R,
+    '…while the ref being pushed IS blocked (this is what it must ask about)');
+  const r7 = runHookRefs(`refs/heads/shipping ${RIDER} refs/heads/shipping ${R}\n`);
+  ok(r7.status === 1, 'pushing a ref whose tip is NOT HEAD is blocked by a red in THAT ref\'s history');
+  ok(r7.calls.every((c) => c.mode !== 'fast'), '…and refused before the fast tier, like every other block');
+  ok(r7.calls.some((c) => c.mode === 'check-heavy' && c.head === RIDER), `…because the hook asked about the pushed sha (${(r7.calls[0] || {}).head || 'HEAD'})`);
+  // Every pushed ref is asked about, not just the first.
+  git(repo, ['branch', '-f', 'clean-branch', SIDE]);
+  const r8 = runHookRefs(`refs/heads/clean-branch ${SIDE} refs/heads/clean-branch ${ZERO}\nrefs/heads/shipping ${RIDER} refs/heads/shipping ${R}\n`);
+  ok(r8.status === 1 && r8.calls.filter((c) => c.mode === 'check-heavy').length >= 2,
+    'a multi-ref push asks about EVERY ref (a clean one first does not excuse the red one)');
 }
 
 // ── §5 THE GIT ENVIRONMENT THE DETACHED CHILD MUST NOT INHERIT ───────────
@@ -305,6 +342,98 @@ console.log('\n§5 the detached child\'s git environment');
     'NEGATIVE CONTROL: …and it certainly does not check out OUR commit (this is the damage the sanitizer prevents)');
   // Leave no worktree registrations behind in the throwaway repos.
   for (const [root, wt] of [[ours, wt1], [ours, wt2], [decoy, wt2]]) { try { spawnSync('git', ['-C', root, 'worktree', 'remove', '--force', wt], { env: GIT_ENV }); } catch {} }
+}
+
+// ── §6 MACHINE-GLOBAL FIXTURES + "NO VERDICT" HONESTY (round 2) ──────────
+// Two rules the round-2 findings turned into asserts.
+//
+// (a) A FAST-tier suite must not claim a name the whole BOX shares. The fast
+//     tier is fail-fast, has no retry and blocks the push directly, so one
+//     squatter from any of this machine's ~160 checkouts of this repo turns an
+//     unrelated push red. Measured: with a bare listener on :3991,
+//     test-attach-ack — which the fast tier reached through the launcher
+//     self-test's slice — hung to its budget. The rule covers the slice that
+//     test-ci-heavy-launch launches too: it is fast-tier cost by transitivity.
+// (b) A run that writes no verdict must say so at the START (so nobody spends
+//     sixteen minutes to be told) and must not print "HEAVY GATE GREEN" at the
+//     end (a claim about a commit that nobody recorded).
+console.log('\n§6 machine-global fixtures + no-verdict honesty');
+{
+  const srcOf = (n) => { try { return fs.readFileSync(path.join(REPO, 'scripts', n + '.mjs'), 'utf-8'); } catch { return ''; } };
+  const fast = SUITES.filter((s) => s.tier === 'fast');
+  const offenders = fast.map((s) => ({ s, f: machineGlobalFixtures(srcOf(s.name)) }))
+    .filter(({ f }) => f.ports.length || f.paths.length);
+  ok(!offenders.length, `no FAST-tier suite claims a fixed port or /tmp path (${offenders.map(({ s, f }) => `${s.name}: ${[...f.ports, ...f.paths].join(' ')}`).join('; ') || `${fast.length} suites clean`})`);
+
+  const launcherSrc = srcOf('test-ci-heavy-launch');
+  const slice = (/const SLICE = '([^']+)'/.exec(launcherSrc) || [])[1];
+  ok(!!slice && SUITES.some((s) => s.name === slice && s.tier === 'heavy'), `the launcher self-test's slice is a heavy suite (${slice})`);
+  const sliceF = machineGlobalFixtures(srcOf(slice));
+  ok(!sliceF.ports.length && !sliceF.paths.length,
+    `…and it claims nothing machine-global either — the FAST tier pays for it (${[...sliceF.ports, ...sliceF.paths].join(' ') || 'clean'})`);
+  ok(/--lock=/.test(launcherSrc), '…and it drives its OWN machine lock, so it never queues behind a real heavy run');
+
+  // NEGATIVE CONTROLS — the detector must fire on the exact shapes that caused
+  // the incident and stay quiet on the ones that replaced them. They live in
+  // scripts/fixtures/machine-global-shapes/ rather than inline because the
+  // assert above scans every fast-tier suite's SOURCE and this file is one:
+  // a verbatim `const PORT = 3991` control made the suite report ITSELF as an
+  // offender (first run of this section — a control has to read as data).
+  const shape = (n) => fs.readFileSync(path.join(REPO, 'scripts', 'fixtures', 'machine-global-shapes', n), 'utf-8');
+  const flagged = machineGlobalFixtures(shape('flagged.js.txt'));
+  ok(flagged.ports.includes(3991) && flagged.paths.includes('/tmp/vs-ack-smoke'),
+    `NEG: the pre-fix test-attach-ack shape (fixed :3991 + a fixed /tmp worktree it force-removes) is detected (${flagged.paths.join(' ')})`);
+  ok(flagged.ports.includes(18941) && flagged.ports.includes(18942),
+    'NEG: a comma-declared fixed pair (the pre-fix test-proxy-post shape) is detected');
+  ok(flagged.ports.includes(3993) && flagged.ports.includes(3989),
+    'NEG: a literal bound through a NAME — listened on, or handed to a child as PORT — is detected too');
+  const clean = machineGlobalFixtures(shape('clean.js.txt'));
+  ok(!clean.ports.length && !clean.paths.length,
+    `NEG: the replacement shapes (freePort, mkdtemp, per-pid paths) AND the two that must never be flagged (a /tmp fixture VALUE, a lowercase port: config field) are all quiet (${[...clean.ports, ...clean.paths].join(' ') || 'clean'})`);
+
+  // (b) THE DIRTY-TREE PATH, FOR REAL. A probe file makes this checkout dirty
+  //     for the length of two runs; `finally` removes it.
+  const probe = path.join(REPO, '.ci-gate-dirty-probe');
+  const mdir = mktmp('dirty');
+  try {
+    fs.writeFileSync(probe, 'round-2 dirty-tree probe\n');
+    const porcelain = spawnSync('git', ['-C', REPO, 'status', '--porcelain'], { encoding: 'utf-8', env: GIT_ENV }).stdout || '';
+    ok(porcelain.includes('.ci-gate-dirty-probe'), 'the probe really makes this tree dirty (the two legs below are non-vacuous)');
+    const t0 = Date.now();
+    const refused = spawnSync(process.execPath, [path.join(REPO, 'scripts', 'ci.mjs'), '--heavy', '--markers=' + mdir, '--only=test-eml'],
+      { cwd: REPO, encoding: 'utf-8', env: GIT_ENV, timeout: 120000 });
+    const rout = (refused.stdout || '') + (refused.stderr || '');
+    ok(refused.status === 2 && /REFUSED/.test(rout), `a dirty in-place heavy run is REFUSED (exit ${refused.status})`);
+    ok(Date.now() - t0 < 15000, `…UP FRONT, before the build and the suites (${Date.now() - t0}ms — the whole point)`);
+    ok(!/npm run build/.test(rout), '…so it does not spend a build first');
+    ok(/--isolate|ci:heavy/.test(rout), '…and the refusal names the way to get a real verdict');
+    ok(!fs.readdirSync(mdir).length, '…and writes no marker');
+
+    const anyway = spawnSync(process.execPath, [path.join(REPO, 'scripts', 'ci.mjs'), '--heavy', '--dirty-ok', '--markers=' + mdir, '--only=test-eml', '--lock=' + path.join(mdir, 'lock')],
+      { cwd: REPO, encoding: 'utf-8', env: GIT_ENV, timeout: 300000 });
+    const aout = (anyway.stdout || '') + (anyway.stderr || '');
+    ok(/NO VERDICT will be written/i.test(aout), '--dirty-ok says NO VERDICT at the START of the run');
+    ok(/NO VERDICT WRITTEN/.test(aout) && !/HEAVY GATE GREEN/.test(aout),
+      '…and the closing line says NO VERDICT WRITTEN instead of "HEAVY GATE GREEN"');
+    ok(!fs.existsSync(path.join(mdir, 'x')) && !fs.readdirSync(mdir).some((f) => /\.(green|red)$/.test(f)),
+      '…and still writes no green/red marker');
+  } finally { try { fs.unlinkSync(probe); } catch {} }
+
+  // The block message must point at something REACHABLE. It used to offer "or
+  // wait for the next push's background run" — but that run is launched BY a
+  // push, and the push is what is being refused.
+  // The red has to name a commit THIS repository knows (a marker for an
+  // unknown sha is ignored on purpose), so it is HEAD — with the markers in a
+  // temp dir, so no real push is ever blocked by this assert.
+  const bdir = mktmp('blockmsg');
+  const bA = (spawnSync('git', ['-C', REPO, 'rev-parse', 'HEAD'], { encoding: 'utf-8', env: GIT_ENV }).stdout || '').trim();
+  writeMarker(bdir, bA, 'red', ['test-client-boot']);
+  const blocked = spawnSync(process.execPath, [path.join(REPO, 'scripts', 'ci.mjs'), '--check-heavy', '--markers=' + bdir, '--head=' + bA],
+    { cwd: REPO, encoding: 'utf-8', env: GIT_ENV });
+  const bout = (blocked.stdout || '') + (blocked.stderr || '');
+  ok(blocked.status === 1 && /PUSH BLOCKED/.test(bout), 'the block message is produced by a real red marker');
+  ok(/npm run ci:heavy/.test(bout), '…and names npm run ci:heavy');
+  ok(!/wait for the next push/.test(bout), '…and no longer offers the unreachable "wait for the next push\'s background run"');
 }
 } finally {
   for (const d of tmpDirs) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} }

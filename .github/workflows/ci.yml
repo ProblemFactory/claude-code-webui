@@ -49,6 +49,13 @@ jobs:
       - run: npm ci
       # Runner images ship Chrome; the chrome suites SKIP with a reason if a
       # future image drops it, so this never becomes a silent pass.
-      - run: node scripts/ci.mjs --heavy
+      #
+      # --dirty-ok (round 2): here the EXIT CODE is the signal — the runner is
+      # thrown away, so the `data/ci-heavy/<sha>` marker nobody will ever read
+      # is not what this job is for. Locally that refusal is the point (it
+      # stops a developer spending 16 minutes to be told the run could not
+      # produce the verdict they were told to produce); in Actions it would
+      # only turn "some step touched a tracked file" into a red gate.
+      - run: node scripts/ci.mjs --heavy --dirty-ok
         env:
           VIBESPACE_CI_OAT: ${{ secrets.VIBESPACE_CI_OAT }}

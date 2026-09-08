@@ -21,10 +21,30 @@
 //
 // THE HEAVY TIER STILL BLOCKS — ONE PUSH LATER. A red heavy marker on any
 // commit that is an ANCESTOR of HEAD blocks the NEXT push (`--check-heavy`,
-// called first by the hook) until a newer green run descends from it or the
-// operator uses the existing VIBESPACE_SKIP_CI=1 bypass. That is the honest
-// trade: the fast tier proves the push is not obviously broken, the heavy tier
-// proves it is actually good, and nothing rides on top of a known-red commit.
+// called first by the hook, ONCE PER PUSHED REF — the question is about the
+// commits being published, not about whichever branch happens to be checked
+// out) until a newer green run descends from it or the operator uses the
+// existing VIBESPACE_SKIP_CI=1 bypass. That is the honest trade: the fast tier
+// proves the push is not obviously broken, the heavy tier proves it is
+// actually good, and nothing rides on top of a known-red commit.
+//
+// ONE HEAVY TIER PER MACHINE (2026-09-07 round 2). The heavy suites claim
+// machine-global names — fixed ports, fixed /tmp checkouts — so two heavy runs
+// on one box do not merely queue, they DESTROY each other and the loser writes
+// a red that blocks the next push. Two mechanisms keep the tier serial, and
+// both are needed because this box hosts ~160 checkouts of this repository
+// driven by parallel agents:
+//   · the LAUNCHER supersedes: a run in flight for an ANCESTOR of the sha
+//     being pushed is killed, because the newer commit subsumes it and its
+//     half-finished verdict is worthless. A run for the same sha is refused;
+//     anything else is launched and queues (below).
+//   · the RUN takes an exclusive MACHINE lock (os.tmpdir(), per uid) for its
+//     whole duration and waits — bounded — for its turn. Timing out writes NO
+//     verdict and says so (a run that never happened must not look like one),
+//     and a stale lock whose holder is gone is stolen.
+// A marker is a claim about a commit; every path that cannot honestly make one
+// refuses UP FRONT (a dirty in-place tree) or says NO VERDICT WRITTEN at the
+// end. "HEAVY GATE GREEN" is never printed for a run nobody recorded.
 //
 // EVERY suite under scripts/test-*.mjs is in exactly one tier or in EXCLUDED
 // with a reason — asserted by `--census` (and by test-architecture, so it runs
@@ -33,14 +53,26 @@
 //
 // Modes:
 //   node scripts/ci.mjs                  the FAST gate (+ .git/ci-green marker)
-//   node scripts/ci.mjs --heavy          the HEAVY tier here, now
+//   node scripts/ci.mjs --heavy --isolate   the HEAVY tier at HEAD, in its own
+//                                        worktree (this is `npm run ci:heavy`,
+//                                        the command a blocked push is told to
+//                                        run — it always earns a marker)
+//   node scripts/ci.mjs --heavy          the HEAVY tier against THIS tree; only
+//                                        a clean tree can earn a marker, so a
+//                                        dirty one is refused up front (exit 2)
+//                                        unless --dirty-ok says "no verdict, run
+//                                        it anyway"
 //   node scripts/ci.mjs --heavy-launch <sha>   detach a heavy run for <sha>
 //   node scripts/ci.mjs --check-heavy    exit 1 if a red heavy blocks a push
 //   node scripts/ci.mjs --status         last heavy result per sha
 //   node scripts/ci.mjs --census         the tier census self-test
 // Ops flags: --markers=<dir> (where heavy results live), --head=<sha> (which
 // commit the verdict is about), --only=a,b (a subset of the heavy tier, e.g.
-// re-running one suite after a fix; an unknown name is a loud exit 2).
+// re-running one suite after a fix; an unknown name is a loud exit 2),
+// --lock=<file> + --lock-wait-ms=<n> (the machine lock — a test drives its own
+// so it never contends with, or waits for, a real heavy run).
+// Exit codes: 0 green · 1 red · 2 refused (dirty tree / bad --only) · 3 the
+// tier did not run (never got the machine lock) — no verdict either way.
 // Mirrored in .github/workflows/ci.yml (fast and heavy as separate jobs).
 // Gate for this file: scripts/test-ci-gate.mjs.
 import { spawn, spawnSync } from 'node:child_process';
@@ -298,6 +330,80 @@ export function censusFindings(diskNames, suites = SUITES, excluded = EXCLUDED) 
   };
 }
 
+// MACHINE-GLOBAL FIXTURES (2026-09-07 round 2). A suite that claims a name the
+// whole BOX shares — a literal port it binds, a fixed /tmp path it creates,
+// removes or checks a worktree into — cannot survive a second run of anything.
+// In the heavy tier that is contained by the machine lock; in the FAST tier it
+// is not, because the fast tier is fail-fast, has no retry and blocks the push
+// directly, so one squatter from any of this box's ~160 checkouts turns a
+// perfectly good push red. (Measured on the code this replaced: with a plain
+// listener on :3991, the pre-fix test-attach-ack — which the fast tier reached
+// through the launcher self-test's slice — hung 240 s to its budget; with the
+// free port it passes in 2 s under the same squatter.) PURE so the rule can be
+// asserted over every fast suite with the pre-fix shapes as negative controls.
+//
+// It is deliberately narrow: a port DERIVED from freePort()/env is not a claim,
+// and a /tmp string that is only ever a fixture VALUE (a `cwd` inside a fake
+// record) creates nothing. What counts is a literal that reaches an ACT.
+const FIXTURE_ACTS = /(worktree|mkdirSync|mkdtempSync|rmSync|rmdirSync|unlinkSync|writeFileSync|symlinkSync|cpSync|createServer|\.listen\(|spawn|exec(?:Sync|File|FileSync)?\(|rm -rf|cp -r)/;
+
+// A COMMENT BINDS NOTHING. Found the moment §6 first ran: the comment in
+// test-ci-gate explaining "a verbatim `const PORT = 3991` control made the
+// suite report itself" made the suite report itself. Line-wise on purpose —
+// string state resets at every newline, so a regex literal carrying a quote
+// (`/['"]/`) can at worst mis-scan its OWN line instead of eating the file;
+// block-comment state is the only thing carried across lines.
+function stripComments(src) {
+  let inBlock = false;
+  return src.split('\n').map((line) => {
+    let out = '', quote = null;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i], n = line[i + 1];
+      if (inBlock) { if (c === '*' && n === '/') { inBlock = false; i++; } continue; }
+      if (quote) { out += c; if (c === '\\') { out += n === undefined ? '' : n; i++; } else if (c === quote) quote = null; continue; }
+      if (c === '"' || c === "'" || c === '`') { quote = c; out += c; continue; }
+      if (c === '/' && n === '/') break;
+      if (c === '/' && n === '*') { inBlock = true; i++; continue; }
+      out += c;
+    }
+    return out;
+  }).join('\n');
+}
+
+export function machineGlobalFixtures(source) {
+  const ports = new Set(), paths = new Set();
+  const src = stripComments(source);
+  const lines = src.split('\n');
+  const port = (v) => { const n = Number(v); if (n > 0 && n <= 65535) ports.add(n); };
+  // (a) a literal that IS the port: `const PORT = 3991`, `const TARGET_PORT =
+  //     18941`, `.listen(3991`. Uppercase-only for the name form — a lowercase
+  //     `port: 3456` passed to a factory binds nothing, and flagging it would
+  //     buy an allowlist, which is where rules go to rot.
+  for (const m of src.matchAll(/(?:(?:\b(?:const|let|var)\s+|,\s*)[A-Z0-9_]*PORT[A-Z0-9_]*\s*=\s*|\.listen\(\s*)(\d{2,5})\b/g)) port(m[1]);
+  // (b) a literal BOUND TO A NAME that is later listened on / handed to a
+  //     child as PORT (`const P = 3991` … `spawn(…, { PORT: String(P) })`).
+  for (const m of src.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(\d{2,5})\b/g)) {
+    const [, name, n] = m;
+    const bound = new RegExp(`(?:\\.listen\\(\\s*|PORT\\s*:\\s*(?:String\\(\\s*)?)${name.replace(/\$/g, '\\$')}\\b`);
+    if (bound.test(src)) port(n);
+  }
+  // (a) a complete /tmp literal used on a line that acts on the filesystem
+  for (const line of lines) {
+    for (const m of line.matchAll(/(['"`])(\/tmp\/[A-Za-z0-9._/-]+)\1/g)) {
+      if (/^\s*\+/.test(line.slice(m.index + m[0].length))) continue; // concatenated with something unique
+      if (FIXTURE_ACTS.test(line)) paths.add(m[2]);
+    }
+  }
+  // (b) a complete /tmp literal BOUND TO A NAME whose name later reaches one
+  //     (`const wt = '/tmp/vs-ack-smoke'` … `git worktree add ${wt}`)
+  for (const m of src.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(['"`])(\/tmp\/[A-Za-z0-9._/-]+)\2/g)) {
+    const [, name, , p] = m;
+    const used = new RegExp(`\\b${name.replace(/\$/g, '\\$')}\\b`);
+    if (lines.some((line) => used.test(line) && FIXTURE_ACTS.test(line))) paths.add(p);
+  }
+  return { ports: [...ports], paths: [...paths] };
+}
+
 // ── running one suite ────────────────────────────────────────────────────
 // Headless-chrome suites boot a worktree server + a browser; on a box that is
 // also running other agents' gates they legitimately take minutes (three
@@ -345,7 +451,7 @@ function readMarkers(dir) {
   try { files = fs.readdirSync(d); } catch { return []; }
   const out = [];
   for (const f of files) {
-    const m = /^([0-9a-f]{7,40})\.(green|red|pid)$/.exec(f);
+    const m = /^([0-9a-f]{7,40})\.(green|red|pid|skipped)$/.exec(f);
     if (!m) continue;
     let rec = {};
     try { rec = JSON.parse(fs.readFileSync(path.join(d, f), 'utf8')); } catch {}
@@ -359,10 +465,78 @@ const gitIn = (root, args) => {
   return r.status === 0 ? (r.stdout || '').trim() : null;
 };
 const gitOut = (args) => gitIn(repo, args);
-const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+// EPERM means the process EXISTS and belongs to somebody else — the one answer
+// this predicate must not report as "gone", because the caller's next move is
+// to steal its lock or supersede its run.
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
 
-// A heavy run is IN FLIGHT when its pid file names a living process.
-const inFlight = (dir) => readMarkers(dir).filter((m) => m.kind === 'pid' && m.pid && alive(m.pid));
+// PID IDENTITY. A pid outlives nothing and gets recycled; a stale pid file
+// naming a reused number would either block every future launch ("already
+// running") or make a lock unstealable. So a record that NAMED what it started
+// must still name it — `cmd` is a fragment of the child's own argv, compared
+// against /proc. A record that does not say (an older file, one written by
+// hand in a test) is trusted as before: unknown is not the same as wrong.
+const pidCmdline = (pid) => { try { return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ').trim(); } catch { return null; } };
+function pidStillRunning(rec) {
+  if (!rec || !rec.pid || !alive(rec.pid)) return false;
+  if (!rec.cmd) return true;
+  const cur = pidCmdline(rec.pid);
+  if (cur === null) return true; // no /proc (or no permission): cannot tell ⇒ trust
+  return cur.includes(rec.cmd);
+}
+
+// A heavy run is IN FLIGHT when its pid file names a living process that is
+// still the run it claims to be.
+const inFlight = (dir) => readMarkers(dir).filter((m) => m.kind === 'pid' && m.pid && pidStillRunning(m));
+
+// ── THE MACHINE LOCK ─────────────────────────────────────────────────────
+// The heavy suites claim machine-global names (test-attach-ack USED to bind
+// :3991 and check a worktree out at a fixed /tmp path it force-removed first —
+// fixed at the source because it was the destructive one; three more suites
+// still share that port and four share :3989, and the lock is what keeps THEM
+// from meeting). Two heavy runs on one box therefore
+// delete each other's checkouts and steal each other's ports, and the loser
+// writes a RED that blocks the next push — a false verdict the retry-once
+// absorber cannot rescue, because the competing run holds the fixture for its
+// whole 16 minutes. The lock is per MACHINE (os.tmpdir()) and not per checkout
+// because the resources are: this box hosts ~160 worktrees of this repository.
+// Per uid, so two users never fight over one file they cannot unlink.
+const defaultLockPath = () => path.join(os.tmpdir(), `vibespace-ci-heavy-${typeof process.getuid === 'function' ? process.getuid() : 'u'}.lock`);
+const sleepSync = (ms) => { try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { } };
+const readJson = (p) => { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; } };
+
+/**
+ * Take the machine's heavy-tier lock, waiting up to `waitMs` for the current
+ * holder. Returns {ok:true, release()} · {ok:false, timedOut, holder} · or
+ * {ok:false, error} when a lock cannot be used at all (read-only tmp) — the
+ * caller then runs UNLOCKED and says so in the marker, because a lock that
+ * cannot be taken must never be able to stop the gate from running.
+ */
+function acquireMachineLock(lockPath, { waitMs, sha, onWait } = {}) {
+  const deadline = Date.now() + Math.max(0, waitMs || 0);
+  let announced = false;
+  for (;;) {
+    try {
+      const fd = fs.openSync(lockPath, 'wx');
+      fs.writeSync(fd, JSON.stringify({ pid: process.pid, sha, root: repo, cmd: 'ci.mjs', startedAt: Date.now() }) + '\n');
+      fs.closeSync(fd);
+      return {
+        ok: true,
+        path: lockPath,
+        release() { const cur = readJson(lockPath); if (!cur || cur.pid === process.pid) { try { fs.unlinkSync(lockPath); } catch { } } },
+      };
+    } catch (e) {
+      if (e.code !== 'EEXIST') return { ok: false, error: e };
+      const holder = readJson(lockPath);
+      // A holder that is gone (reboot, SIGKILL, recycled pid) leaves a file
+      // behind; stealing it is the only way the tier ever runs again.
+      if (!pidStillRunning(holder)) { try { fs.unlinkSync(lockPath); continue; } catch { /* someone else won the race — loop */ } }
+      if (Date.now() >= deadline) return { ok: false, timedOut: true, holder };
+      if (!announced && onWait) { announced = true; onWait(holder); }
+      sleepSync(3000);
+    }
+  }
+}
 
 /**
  * THE BLOCK RULE. A red heavy marker blocks the next push when its commit is
@@ -404,7 +578,7 @@ function pruneMarkers(dir, keep = 30) {
   const d = markerDir(dir);
   const results = readMarkers(dir).filter((m) => m.kind !== 'pid');
   for (const m of results.slice(keep)) {
-    for (const ext of ['green', 'red', 'log', 'pid']) { try { fs.unlinkSync(path.join(d, `${m.sha}.${ext}`)); } catch {} }
+    for (const ext of ['green', 'red', 'skipped', 'log', 'pid']) { try { fs.unlinkSync(path.join(d, `${m.sha}.${ext}`)); } catch {} }
   }
 }
 
@@ -438,7 +612,7 @@ function writeGreenMarker() {
   } catch (e) { console.log('[ci] green marker not written: ' + e.message); }
 }
 
-function heavyGate({ sha: wantSha, isolate, dir, only }) {
+function heavyGate({ sha: wantSha, isolate, dir, only, dirtyOk, lock, lockWaitMs }) {
   const t0 = Date.now();
   const all = SUITES.filter((s) => s.tier === 'heavy');
   // `--only=a,b` re-runs part of the tier (after a fix, or from the self-test).
@@ -451,9 +625,65 @@ function heavyGate({ sha: wantSha, isolate, dir, only }) {
   }) : all;
   const sha = wantSha || gitOut(['rev-parse', 'HEAD']);
   const d = markerDir(dir);
+  // REFUSE UP FRONT, NOT AT THE END. This decision is made at t=0 and it
+  // decides whether the run can produce a verdict at all; announcing it after
+  // sixteen minutes — under a closing line that said GREEN — cost a blocked
+  // developer the whole tier and left them just as blocked (round 2 finding).
+  // `npm run ci:heavy` now passes --isolate, so the command a blocked push is
+  // told to run always earns a marker; --dirty-ok is the deliberate "run it
+  // against my working tree, I know there will be no verdict".
   const dirtyAtStart = isolate ? '' : gitOut(['status', '--porcelain']);
+  if (dirtyAtStart && !dirtyOk) {
+    console.error('\n[ci:heavy] REFUSED — this tree is DIRTY, so a marker for ' + shortSha(sha) + ' would not describe what ran.');
+    console.error('  Commit first, or:');
+    console.error('    npm run ci:heavy               runs the tier in an isolated worktree at HEAD (writes the marker)');
+    console.error('    node scripts/ci.mjs --heavy --dirty-ok   runs it against this tree, NO verdict written\n');
+    return 2;
+  }
   let runRoot = repo, wt = null;
   console.log(`release gate — HEAVY tier: ${heavy.length} suites for ${shortSha(sha)}${isolate ? ' (isolated worktree)' : ''}`);
+  if (dirtyAtStart) console.log('[ci:heavy] --dirty-ok: this tree is dirty ⇒ NO VERDICT will be written for ' + shortSha(sha) + ' (said now, not in sixteen minutes)');
+
+  // ONE HEAVY TIER PER MACHINE. Wait for our turn before spending a build.
+  const lockPath = lock || defaultLockPath();
+  const waitMs = lockWaitMs === undefined ? 40 * 60 * 1000 : lockWaitMs;
+  const held = acquireMachineLock(lockPath, {
+    waitMs, sha,
+    onWait: (h) => console.log(`[ci:heavy] another heavy run holds ${lockPath} (pid ${h && h.pid}, ${h && h.sha ? shortSha(h.sha) : '?'}) — waiting up to ${Math.round(waitMs / 60000)} min for the machine (the suites share ports and /tmp checkouts)`),
+  });
+  if (!held.ok && held.timedOut) {
+    // NOT a verdict. Nothing ran, so nothing is claimed — the note exists so
+    // `ci:status` can say "this commit has no heavy run" out loud instead of
+    // looking identical to "nobody has pushed lately".
+    try {
+      fs.mkdirSync(d, { recursive: true });
+      fs.writeFileSync(path.join(d, `${sha}.skipped`), JSON.stringify({ sha, result: 'skipped', reason: 'machine lock held by another heavy run', holder: held.holder || null, endedAt: Date.now(), ms: Date.now() - t0 }, null, 2) + '\n');
+    } catch { }
+    console.error(`\nHEAVY TIER SKIPPED for ${shortSha(sha)} — never got the machine lock (${lockPath}) within ${Math.round(waitMs / 60000)} min. NO VERDICT WRITTEN.`);
+    return 3;
+  }
+  if (!held.ok) console.log(`[ci:heavy] running WITHOUT the machine lock (${held.error && held.error.code}) — the marker will say so`);
+
+  // CLEAN UP EVEN WHEN WE ARE KILLED. A heavy run is now SUPERSEDED by the
+  // next push (the launcher SIGTERMs it), and node's default SIGTERM does not
+  // run `finally` — so without this the killed run leaves a full checkout in
+  // /tmp, a registration in `git worktree list` that `worktree prune` will
+  // never remove (the directory still exists), and the machine lock held
+  // until its pid is reaped. Idempotent: the finally calls the same function.
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return; cleaned = true;
+    if (held.ok) held.release();
+    try { fs.unlinkSync(path.join(d, `${sha}.pid`)); } catch {}
+    if (wt) {
+      try { spawnSync('git', ['-C', repo, 'worktree', 'remove', '--force', wt], { env: GIT_ENV }); } catch {}
+      try { fs.rmSync(wt, { recursive: true, force: true }); } catch {}
+      try { spawnSync('git', ['-C', repo, 'worktree', 'prune'], { env: GIT_ENV }); } catch {}
+    }
+  };
+  for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
+    process.on(sig, () => { console.error(`\n[ci:heavy] ${sig} — superseded or cancelled; cleaning up and writing NO verdict for ${shortSha(sha)}`); cleanup(); process.exit(143); });
+  }
   try {
     if (isolate) {
       // The working tree keeps moving while a ten-minute run is in flight, so
@@ -496,35 +726,38 @@ function heavyGate({ sha: wantSha, isolate, dir, only }) {
       startedAt: t0, endedAt: Date.now(), ms: Date.now() - t0,
       suites: heavy.length, isolated: !!isolate, host: os.hostname(),
       partial: only ? only.slice() : undefined,
+      unlocked: held.ok ? undefined : true,
       timings: timings.sort((a, b) => b.ms - a.ms).slice(0, 10),
     };
     // A marker is a CLAIM about a commit, so it is only written when the run
     // can honestly make it. Two refusals: a dirty in-place tree (the sha would
-    // not describe what ran), and a PARTIAL run trying to overwrite a full
-    // verdict (a `--only` re-run must not erase what the whole tier said).
-    const existing = readMarkers(dir).find((m) => m.sha === sha && m.kind !== 'pid' && !m.partial);
-    if (!isolate && dirtyAtStart) {
-      console.log('\n[ci:heavy] tree was DIRTY — no marker written (the sha would not describe what ran)');
-    } else if (only && existing) {
-      console.log(`\n[ci:heavy] partial run — keeping the existing FULL ${existing.kind.toUpperCase()} marker for ${shortSha(sha)}`);
+    // not describe what ran — normally refused at t=0, reachable here only via
+    // --dirty-ok), and a PARTIAL run trying to overwrite a full verdict (a
+    // `--only` re-run must not erase what the whole tier said).
+    const existing = readMarkers(dir).find((m) => m.sha === sha && (m.kind === 'green' || m.kind === 'red') && !m.partial);
+    let noVerdict = '';
+    if (dirtyAtStart) noVerdict = 'the tree was DIRTY — the sha would not describe what ran';
+    else if (only && existing) noVerdict = `partial run — keeping the existing FULL ${existing.kind.toUpperCase()} marker for ${shortSha(sha)}`;
+    if (noVerdict) {
+      console.log('\n[ci:heavy] ' + noVerdict);
     } else {
       fs.mkdirSync(d, { recursive: true });
-      for (const ext of ['green', 'red']) { try { fs.unlinkSync(path.join(d, `${sha}.${ext}`)); } catch {} }
+      for (const ext of ['green', 'red', 'skipped']) { try { fs.unlinkSync(path.join(d, `${sha}.${ext}`)); } catch {} }
       fs.writeFileSync(path.join(d, `${sha}.${rec.result}`), JSON.stringify(rec, null, 2) + '\n');
       pruneMarkers(dir);
     }
-    console.log(failed.length
-      ? `\nHEAVY GATE RED for ${shortSha(sha)} in ${Math.round(rec.ms / 1000)}s — failed: ${failed.join(', ')}`
-      : `\nHEAVY GATE GREEN for ${shortSha(sha)} in ${Math.round(rec.ms / 1000)}s (${heavy.length} suites)`);
+    // THE CLOSING LINE IS THE ONE PEOPLE READ. "HEAVY GATE GREEN" is a claim
+    // about a commit; when no marker was written there is no such claim, and
+    // saying it anyway is how a developer waits out the whole tier and stays
+    // blocked without knowing why (round 2 finding).
+    const verdict = failed.length
+      ? `HEAVY ${noVerdict ? 'TIER' : 'GATE'} RED for ${shortSha(sha)} in ${Math.round(rec.ms / 1000)}s — failed: ${failed.join(', ')}`
+      : `HEAVY ${noVerdict ? 'TIER' : 'GATE'} GREEN for ${shortSha(sha)} in ${Math.round(rec.ms / 1000)}s (${heavy.length} suites)`;
+    console.log('\n' + verdict + (noVerdict ? ` — NO VERDICT WRITTEN (${noVerdict})` : ''));
     if (flaky.length) console.log(`[ci:heavy] FLAKY (failed, passed on retry — not blocking, but they did fail once): ${flaky.join(', ')}`);
     return failed.length ? 1 : 0;
   } finally {
-    try { fs.unlinkSync(path.join(d, `${sha}.pid`)); } catch {}
-    if (wt) {
-      try { spawnSync('git', ['-C', repo, 'worktree', 'remove', '--force', wt], { env: GIT_ENV }); } catch {}
-      try { fs.rmSync(wt, { recursive: true, force: true }); } catch {}
-      try { spawnSync('git', ['-C', repo, 'worktree', 'prune'], { env: GIT_ENV }); } catch {}
-    }
+    cleanup();
   }
 }
 
@@ -535,20 +768,45 @@ function heavyGate({ sha: wantSha, isolate, dir, only }) {
 // `git worktree add`. (The project's own detached-job primitive — jobs.js /
 // data/bin/job-wrapper.js — needs a running server and a session token, so it
 // is not reachable from a git hook.)
-function heavyLaunch(sha, { dir, only } = {}) {
+function heavyLaunch(sha, { dir, only, lock, lockWaitMs } = {}) {
   const d = markerDir(dir);
   if (!sha || gitOut(['cat-file', '-e', sha + '^{commit}']) === null) { console.error(`[ci:heavy] not launching: ${sha ? 'unknown commit ' + shortSha(sha) : 'no sha given'}`); return 0; }
-  const live = inFlight(dir).find((m) => m.sha === sha);
-  if (live) { console.error(`[ci:heavy] already running for ${shortSha(sha)} (pid ${live.pid})`); return 0; }
+  // SERIALISE THE TIER, NOT JUST THE SHA (round 2 finding). Refusing only a
+  // twin for the SAME sha meant two pushes inside one 16-minute window started
+  // two full heavy tiers that ate each other's ports and /tmp checkouts, and
+  // the loser stamped a RED that blocked the next push. A run for an ANCESTOR
+  // of what we are pushing is SUPERSEDED — the newer commit subsumes it and a
+  // half-finished verdict about a commit nobody is on top of any more is worth
+  // nothing — and killing it now frees the machine instead of queueing behind
+  // it. Anything else (a divergent branch, an older push) still gets launched:
+  // refusing would leave that commit with no heavy coverage at all, so the
+  // child waits for the machine lock instead.
+  const running = inFlight(dir);
+  const same = running.find((m) => m.sha === sha);
+  if (same) { console.error(`[ci:heavy] already running for ${shortSha(sha)} (pid ${same.pid})`); return 0; }
+  const isAncestorOfNew = (old) => spawnSync('git', ['-C', repo, 'merge-base', '--is-ancestor', old, sha], { env: GIT_ENV }).status === 0;
+  for (const old of running) {
+    if (!old.sha || old.sha === sha || gitOut(['cat-file', '-e', old.sha + '^{commit}']) === null || !isAncestorOfNew(old.sha)) continue;
+    // Detached children are process-group leaders (spawn detached:true), so the
+    // negative pid takes the suites down with the runner.
+    try { process.kill(-old.pid, 'SIGTERM'); } catch { try { process.kill(old.pid, 'SIGTERM'); } catch {} }
+    try { fs.unlinkSync(old.file); } catch {}
+    console.error(`[ci:heavy] superseded the run for ${shortSha(old.sha)} (pid ${old.pid}) — ${shortSha(sha)} descends from it`);
+  }
   fs.mkdirSync(d, { recursive: true });
   const logPath = path.join(d, `${sha}.log`);
   const fd = fs.openSync(logPath, 'w');
   const args = [HERE, '--heavy', '--sha=' + sha, '--isolate', '--markers=' + d];
   if (only) args.push('--only=' + only.join(','));
+  if (lock) args.push('--lock=' + lock);
+  if (lockWaitMs !== undefined) args.push('--lock-wait-ms=' + lockWaitMs);
   const child = spawn(process.execPath, args, { cwd: repo, detached: true, stdio: ['ignore', fd, fd], env: GIT_ENV });
   child.unref();
   fs.closeSync(fd);
-  fs.writeFileSync(path.join(d, `${sha}.pid`), JSON.stringify({ sha, pid: child.pid, startedAt: Date.now() }) + '\n');
+  // `cmd` is a fragment of the child's OWN argv: it is what lets a later
+  // launcher tell "still running" from "that pid number belongs to something
+  // else now" (pidStillRunning).
+  fs.writeFileSync(path.join(d, `${sha}.pid`), JSON.stringify({ sha, pid: child.pid, cmd: '--heavy --sha=' + sha, startedAt: Date.now() }) + '\n');
   console.error(`[ci:heavy] launched for ${shortSha(sha)} (pid ${child.pid}) — ${path.relative(repo, logPath)}; \`npm run ci:status\` for the verdict`);
   return 0;
 }
@@ -566,8 +824,12 @@ function checkHeavy({ dir, head } = {}) {
   console.error(`\n[ci] PUSH BLOCKED — the heavy tier went RED on ${shortSha(blocker.sha)} (${when}), which is an ancestor of HEAD.`);
   console.error(`     failed: ${(blocker.failed || []).join(', ') || '(no suite names recorded)'}`);
   console.error(`     log:    ${path.relative(repo, path.join(markerDir(dir), blocker.sha + '.log'))}`);
-  console.error('     Fix it, then clear the block with a green heavy run on the new commit:');
-  console.error('       npm run ci:heavy        (or wait for the next push\'s background run)');
+  // The recovery has to be REACHABLE. It used to also offer "or wait for the
+  // next push's background run" — but the background run is launched BY a
+  // push and the push is the thing being refused, so that sentence pointed at
+  // a door that only opens from the other side (round 2 finding).
+  console.error('     Fix it, COMMIT, then earn a green heavy verdict on the new commit:');
+  console.error('       npm run ci:heavy        (the whole tier in an isolated worktree at HEAD, ~17 min; writes the marker that clears this)');
   console.error('     Emergency bypass: VIBESPACE_SKIP_CI=1 git push\n');
   return 1;
 }
@@ -576,15 +838,23 @@ function status({ dir, head: wantHead } = {}) {
   const all = readMarkers(dir);
   const results = all.filter((m) => m.kind !== 'pid');
   const running = inFlight(dir);
+  const lockPath = defaultLockPath();
+  const holder = readJson(lockPath);
   const dur = (ms) => (ms >= 60000 ? `${Math.floor(ms / 60000)}m${String(Math.round((ms % 60000) / 1000)).padStart(2, '0')}s` : `${Math.round(ms / 1000)}s`);
   console.log(`heavy gate results (${path.relative(repo, markerDir(dir)) || markerDir(dir)}):`);
   if (!results.length && !running.length) console.log('  (none yet — the next push launches one)');
   for (const m of running) console.log(`  ${shortSha(m.sha)}  RUNNING  started ${new Date(m.startedAt).toLocaleString()}  pid ${m.pid}`);
   for (const m of results.slice(0, 12)) {
-    const detail = m.result === 'green' ? `${m.suites} suites` : 'failed: ' + (m.failed || []).join(', ');
-    const marks = [m.partial ? `partial: ${m.partial.join(',')}` : '', (m.flaky || []).length ? `flaky: ${m.flaky.join(',')}` : ''].filter(Boolean).join('  ');
-    console.log(`  ${shortSha(m.sha)}  ${m.result === 'green' ? 'GREEN' : 'RED  '}  ${dur(m.ms || 0).padStart(6)}  ${new Date(m.endedAt || 0).toLocaleString()}  ${detail}${marks ? '  [' + marks + ']' : ''}`);
+    // SKIPPED is not a verdict — it is the absence of one, said out loud, so a
+    // commit that never got its turn on the machine cannot be mistaken for one
+    // that passed (or for "nobody has pushed lately").
+    const label = m.kind === 'skipped' ? 'SKIP ' : m.result === 'green' ? 'GREEN' : 'RED  ';
+    const detail = m.kind === 'skipped' ? `no verdict — ${m.reason || 'did not run'}`
+      : m.result === 'green' ? `${m.suites} suites` : 'failed: ' + (m.failed || []).join(', ');
+    const marks = [m.partial ? `partial: ${m.partial.join(',')}` : '', m.unlocked ? 'ran WITHOUT the machine lock' : '', (m.flaky || []).length ? `flaky: ${m.flaky.join(',')}` : ''].filter(Boolean).join('  ');
+    console.log(`  ${shortSha(m.sha)}  ${label}  ${dur(m.ms || 0).padStart(6)}  ${new Date(m.endedAt || 0).toLocaleString()}  ${detail}${marks ? '  [' + marks + ']' : ''}`);
   }
+  if (holder) console.log(`\nmachine lock: held by pid ${holder.pid} for ${shortSha(holder.sha)}${pidStillRunning(holder) ? '' : ' (DEAD — the next run steals it)'}  ${lockPath}`);
   const blocker = heavyBlocker({ dir, head: wantHead });
   const head = wantHead || gitOut(['rev-parse', 'HEAD']);
   console.log(blocker
@@ -619,11 +889,16 @@ function main(argv) {
   const dir = str('markers') ? path.resolve(str('markers')) : undefined;
   const head = str('head') || undefined;
   const only = str('only') ? str('only').split(',').map((x) => x.trim()).filter(Boolean) : null;
+  // The machine lock is real infrastructure, so a TEST must be able to drive
+  // its own instead of contending with (or waiting 40 minutes for) the box's
+  // actual heavy run — scripts/test-ci-heavy-launch.mjs passes both.
+  const lock = str('lock') ? path.resolve(str('lock')) : (process.env.VIBESPACE_CI_HEAVY_LOCK || undefined);
+  const lockWaitMs = str('lock-wait-ms') !== null ? Number(str('lock-wait-ms')) : undefined;
   if (arg('census')) process.exit(census());
   if (arg('status')) process.exit(status({ dir, head }));
   if (arg('check-heavy')) process.exit(checkHeavy({ dir, head }));
-  if (arg('heavy-launch') !== undefined) process.exit(heavyLaunch(str('heavy-launch') || argv[argv.indexOf('--heavy-launch') + 1], { dir, only }));
-  if (arg('heavy')) process.exit(heavyGate({ sha: str('sha'), isolate: !!arg('isolate'), dir, only }));
+  if (arg('heavy-launch') !== undefined) process.exit(heavyLaunch(str('heavy-launch') || argv[argv.indexOf('--heavy-launch') + 1], { dir, only, lock, lockWaitMs }));
+  if (arg('heavy')) process.exit(heavyGate({ sha: str('sha'), isolate: !!arg('isolate'), dir, only, dirtyOk: !!arg('dirty-ok'), lock, lockWaitMs }));
   fastGate();
 }
 
