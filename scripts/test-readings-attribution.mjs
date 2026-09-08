@@ -297,6 +297,70 @@ if (!probe) {
       return w4.eng.healthyPoolMembers(w4.P).length === 0;
     })());
   }
+  // ── §5b THE CROSSING LEG (integration r2, a REPRODUCED merge-only defect).
+  // The two halves above were each pinned alone: "healthyPoolMembers drops the
+  // dead member" here, "decidePoolSwitch says all-logins-expired" in
+  // test-login-expiry — and NOTHING ran healthyPoolMembers → decidePoolSwitch
+  // → poolBlockedNotice end to end. So a candidate list that pre-filtered the
+  // login-dead members deleted the very evidence the notice is built from
+  // (`loginBlocked` holds the members the DECISION was shown), and the pool's
+  // refusal silently degraded from "Re-login those accounts in Manage Agents"
+  // to the quota remedy "wait until a window resets" — the exact defect
+  // 2.369.67 shipped to fix — with both suites green.
+  // The assertion is therefore on the SERVER NOTICE STRING, nothing smaller.
+  {
+    const dead = (id) => CREDS(id, { expiresAt: now - 10000, refreshExpiresAt: now - 5000 });
+    // access token expired and NO refresh token: only src/login-state.js can
+    // see this one (login-expiry finds no deadline ⇒ 'unknown' = no claim),
+    // and parseAuth still reports loggedIn:true
+    const fileOnlyDead = (id) => JSON.stringify({ claudeAiOauth: { accessToken: 'tok-' + id, refreshToken: '', expiresAt: now - 10000, subscriptionType: 'max' } });
+    const spent = (w2, id) => w2.writeCache(id, { fetchedAt: Date.now() - 60000, source: 'cli-usage', fiveHour: { utilization: 0.99, resetsAt: w2.R5 }, sevenDay: { utilization: 0.5, resetsAt: w2.R7 } });
+    const blocked = (w2) => { const cap = quiet(); w2.am.updatePool(w2.P, { auto: true }); w2.eng.maybePoolAutoSwitchForPool(w2.P); cap.done(); return w2.notices.join(' | '); };
+
+    const w5 = mkWorld();
+    spent(w5, w5.LINK); // the current member is quota-dead, so a switch is wanted
+    for (const id of [w5.FISH, w5.SPARE]) fs.writeFileSync(path.join(w5.am.subDir(id), '.credentials.json'), dead(id));
+    const n5 = blocked(w5);
+    ok('§5b the pool NAMES the login wall end to end (healthyPoolMembers → decidePoolSwitch → poolBlockedNotice), not a spent quota bucket',
+      /Re-login those accounts in Manage Agents/.test(n5) && n5.includes('Fish Max') && n5.includes('B-Stack Max'), n5);
+    ok('§5b …and does NOT prescribe the quota remedy for a wall the user clears in 30 seconds',
+      !/until a window resets/.test(n5), n5);
+
+    // NEGATIVE CONTROL ①: every login healthy, every member out of quota ⇒ the
+    // quota sentence, and the word re-login must NOT appear.
+    const w6 = mkWorld();
+    for (const id of [w6.LINK, w6.FISH, w6.SPARE]) spent(w6, id);
+    const n6 = blocked(w6);
+    ok('§5b NEG ① an all-quota-dead pool keeps the quota sentence and never says re-login',
+      /until a window resets/.test(n6) && !/[Rr]e-login/.test(n6), n6);
+
+    // NEGATIVE CONTROL ②: the member only the FILE reader can call dead. The
+    // naming must not cost the exclusion — it must still never become a
+    // target, and it must be named too (this is why the second verdict is
+    // folded into poolReadLogin instead of pre-filtering the list).
+    const w7 = mkWorld();
+    spent(w7, w7.LINK);
+    fs.writeFileSync(path.join(w7.am.subDir(w7.FISH), '.credentials.json'), fileOnlyDead(w7.FISH));
+    fs.writeFileSync(path.join(w7.am.subDir(w7.SPARE), '.credentials.json'), dead(w7.SPARE));
+    ok('§5b NEG ② the file-only-dead shape is invisible to the deadline reader…',
+      w7.am.loginStateOf(w7.FISH).state === 'unknown' && w7.eng.memberLoginState(w7.FISH).usable === false);
+    ok('§5b NEG ② …but poolReadLogin folds BOTH readers, so the decision still excludes it',
+      w7.eng.poolReadLogin()(w7.FISH).state === 'expired');
+    const n7 = blocked(w7);
+    ok('§5b NEG ② …the pool did NOT move onto it, and the notice names it', w7.am.poolCurrent(w7.P) === w7.LINK && n7.includes('Fish Max') && /Re-login/.test(n7), n7);
+
+    // …and the two lists stay two different questions: DECIDE sees the dead
+    // members (so it can name them), ACT never does.
+    const w8 = mkWorld();
+    for (const id of [w8.FISH, w8.SPARE]) fs.writeFileSync(path.join(w8.am.subDir(id), '.credentials.json'), dead(id));
+    ok('§5b switchCandidates (decide) shows the login-dead members; healthyPoolMembers (act) does not',
+      w8.eng.switchCandidates(w8.P).length === 3 && w8.eng.healthyPoolMembers(w8.P).length === 1, JSON.stringify({ decide: w8.eng.switchCandidates(w8.P).length, act: w8.eng.healthyPoolMembers(w8.P).length }));
+    // WIRING PIN: the pure-list fix is worthless if the engine's decision site
+    // goes back to the act list (the 2.355.0 unstaged-wiring class).
+    const engSrc = code('src/server/usage-pool-engine.js');
+    ok('§5b WIRING: maybePoolAutoSwitchForPool decides on switchCandidates, and the act sites keep healthyPoolMembers',
+      /const members = switchCandidates\(poolId\)/.test(engSrc) && /const alive = healthyPoolMembers\(poolId\)/.test(engSrc), '');
+  }
 }
 
 // ── §6 THE MIGRATION, on a fixture shaped like this instance's stores ───────
@@ -482,6 +546,41 @@ if (!probe) {
   ok('§9 login-state has ONE home, and every consumer imports it from there', ["src/server/usage-pool-engine.js", "src/usage-routes.js", "src/reading-repair.js"].every((f) => /require\('\.\.?\/(\.\.\/)?login-state\.js'\)/.test(read(f))));
   ok('§9 the migration is registered append-only with a dated id', /id: '2026-09-reattribute-readings-by-slot'/.test(read('src/server/migrations.js')));
   ok('§9 …and it says out loud what it did, even when that is nothing', /\[migrate\] readings-by-slot:/.test(read('src/server/migrations.js')));
+  // §9b THE LAW INDEX IS A SOURCE PIN TOO (integration r2, a reproduced
+  // merge-only doc regression). CLAUDE.md is auto-loaded and its routing table
+  // is what gates the NEXT change to this subsystem, so a superseded paragraph
+  // there outranks any essay that contradicts it. The Pool/billing row is ONE
+  // 3.3 KB line, so a hand-merge that keeps "both sides verbatim" resurrects
+  // the refuted rule SUB-LINE, where a lost/resurrected-LINE check sees
+  // nothing. Pinned against the code that refutes it, not against a snapshot:
+  // the row may not claim the observed org still routes VALUES while
+  // readingSlotFor is what every value producer calls.
+  {
+    const md = read('CLAUDE.md');
+    const row = md.split('\n').find((l) => /^\|\s*\*\*Pool\/billing decisions\*\*/.test(l)) || '';
+    ok('§9b the Pool/billing routing row exists and is one well-formed 3-cell row', !!row && row.split('|').length === 5, String(row.length));
+    const REFUTED = /quota VALUES keep the observed-org routing/;
+    ok('§9b …and it does NOT still say the observed org routes quota VALUES (the rule this chain deleted from the code)', !REFUTED.test(row), row.slice(0, 200));
+    ok('§9b …while the rule that REPLACED it is stated there', /EVERY reading AND every rejection is attributed to the credential SLOT/.test(row) && /readingSlotFor/.test(row));
+    // the CODE half of the same claim — the doc is wrong precisely because the
+    // engine routes every value through the slot and the OTel override is dead
+    const engSrc = code('src/server/usage-pool-engine.js');
+    ok('§9b …and the engine agrees: values go through readingSlotFor, nothing keys on the observation', /readingSlotFor\(/.test(engSrc) && !/\borgVerifiedKey\b/.test(engSrc) && !/setTruthLookup\s*\(/.test(code('server.js')));
+    // NEGATIVE CONTROL: the pin can SEE the refuted sentence when it is there
+    // (this is the leg the merge defeated — a line-granularity check reports
+    // zero resurrected lines with the paragraph present).
+    ok('§9b NEGATIVE CONTROL: the same predicate fails on the pre-fix row text', (() => {
+      const prefix = row.slice(0, 1331);
+      const resurrected = prefix + "**A REJECTION is attributed to the credential SLOT (the token-slot-validated link), never to the OTel-observed org — that names the identity the CLI cached at SPAWN (2026-09-07 loop incident); quota VALUES keep the observed-org routing.** " + row.slice(1331);
+      return REFUTED.test(resurrected) && resurrected.split('|').length === 5;
+    })());
+    // …and the historical ESSAY is deliberately allowed to keep the refuted
+    // rule (it narrates round 1 keeping it and round 2 finishing it) — a pin
+    // that also banned the record would delete the history.
+    // (and it narrates it in the PAST tense — "kept", not "keep" — which is
+    // exactly the difference between a record and a rule)
+    ok('§9b …and the kb ESSAY may still narrate the refuted rule as history, in the past tense', /Round 1 \(2\.369\.66\) changed only the CONSUMER:/.test(read('docs/kb-file-structure.md')) && /quota VALUES kept the observed-org routing/.test(read('docs/kb-file-structure.md')));
+  }
 }
 
 // ── §11 ROUND 2: the six defects the adversarial verifier reproduced ────────

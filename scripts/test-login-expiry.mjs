@@ -648,7 +648,22 @@ console.log('— §5 wiring');
   // engine must CALL it and must not have grown a second copy.
   ck('the engine composes the blocked notice through the PURE poolBlockedNotice', /poolBlockedNotice\(d, \{ poolName: a\.name, currentName: nameOf\(currentId\) \}\)/.test(eng)
     && /poolBlockedNotice,? .*= require\('\.\.\/account-pool-auto\.js'\)/.test(eng));
-  ck('...and no longer carries an inline twin of it', !/spent: \$\{dead\}/.test(eng) && !/Also needing a re-login/.test(eng) && !/until a window resets/.test(eng));
+  // INTEGRATION r2: the twin check reads EXECUTABLE lines only. A comment must
+  // stay free to quote the retired sentence — this repo's rule is "the comments
+  // keep the refutation on record", and the merge's own fix note explains that
+  // pre-filtering the candidates degraded the notice back to "wait until a
+  // window resets". Matching that quote as if it were a second copy would make
+  // the pin punish the record of why it exists.
+  const engCode = eng.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+  ck('...and no longer carries an inline twin of it (executable lines: a comment may quote the retired sentence)', !/spent: \$\{dead\}/.test(engCode) && !/Also needing a re-login/.test(engCode) && !/until a window resets/.test(engCode));
+  ck('NEGATIVE CONTROL: the same predicate still fires on a real inline twin (an executable line composing the retired sentence)',
+    (() => { const twin = engCode + "\n    serverNotice(k, `Pool: no member can serve it — spent: ${dead}. Conversations on it will hit a limit until a window resets.`);"; return /spent: \$\{dead\}/.test(twin) && /until a window resets/.test(twin); })());
+  ck('NEGATIVE CONTROL: …and the stripper drops the phrase only on a COMMENT line, never on an executable one (so the pin narrows by line KIND, not by losing the phrase)',
+    (() => {
+      const strip = (s) => s.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+      return !/until a window resets/.test(strip('  // back into "wait until a window resets": the wall the user'))
+        && /until a window resets/.test(strip('    serverNotice(k, `… until a window resets.`);'));
+    })());
   ck('...while a switch onto a NEAR-expiry scrap tells the user the reprieve is short', /d\.toLoginNear/.test(eng) && /re-login it in Manage Agents now/.test(eng));
   ck('...on BOTH switch surfaces — the per-session re-point (plan C) fires far more often than the pool-level one', /ds\.toLoginNear/.test(eng) && (eng.match(/re-login it in Manage Agents now/g) || []).length === 2);
   const apa = fs.readFileSync(path.join(REPO, 'src/account-pool-auto.js'), 'utf8');

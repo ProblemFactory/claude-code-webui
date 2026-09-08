@@ -408,10 +408,53 @@ function poolReadCache(poolId) {
 // member: loginStateOf hits the credential file, and a single pool decision
 // asks about the same member several times. §ban-safety: file reads only —
 // this whole feature never touches the network.
+//
+// IT ANSWERS FOR *BOTH* READERS (integration r2, reproduced). Two modules ask
+// "is this login dead" from different angles and each sees a state the other
+// misses:
+//   · src/login-expiry.js (accounts.loginStateOf) — the refresh-token
+//     DEADLINE. It calls a member with a live access token but a past
+//     refreshTokenExpiresAt 'expired'; it says 'unknown' (= no claim) about a
+//     file with no deadline at all.
+//   · src/login-state.js (memberLoginState) — can a request be made RIGHT
+//     NOW. It is the only one that catches "access token expired AND no
+//     refresh token", which parseAuth still reports as loggedIn:true.
+// The integration's first shape pre-FILTERED the second reader's verdict out
+// of the candidate list before decidePoolSwitch ever saw it. That silently
+// deleted the attribution master ships: `loginBlocked` (and therefore
+// 'all-logins-expired' + "Re-login those accounts in Manage Agents") is built
+// from the members the decision was SHOWN, so a member removed beforehand can
+// never be named and the refusal degraded to a spent-quota sentence with the
+// "wait for a window to reset" remedy — the exact defect 2.369.67 fixed.
+// So the second verdict is FOLDED IN HERE, at the reader every gate already
+// consults: identical exclusions (decidePoolSwitch's own login gate drops the
+// member), restored naming (it drops it into loginBlocked on the way out).
+// The hard pre-filter stays only where the list is ACTED on (healthyPoolMembers).
 function poolReadLogin() {
   const memo = new Map();
   return (id) => {
-    if (!memo.has(id)) { try { memo.set(id, accounts.loginStateOf(id)); } catch { memo.set(id, null); } }
+    if (!memo.has(id)) {
+      let st = null;
+      try { st = accounts.loginStateOf(id); } catch { st = null; }
+      // EITHER reader saying "unusable" is enough. Only ever a DOWNGRADE: a
+      // file verdict never resurrects a login the deadline reader buried.
+      try {
+        const f = memberLoginState(id);
+        if (f && !f.usable && loginUsable(st)) {
+          const now = Date.now();
+          st = {
+            state: f.state === 'expired' ? 'expired' : 'logged-out',
+            refreshExpiresAt: f.refreshExpiresAt ?? null,
+            accessExpiresAt: f.expiresAt ?? null,
+            // the file reader's `since` IS the instant it stopped working, so
+            // msLeft stays a coherent (negative) number instead of the
+            // deadline reader's stale "30 days left" under an 'expired' state
+            msLeft: typeof f.since === 'number' ? f.since - now : (typeof f.refreshExpiresAt === 'number' ? f.refreshExpiresAt - now : null),
+          };
+        }
+      } catch { }
+      memo.set(id, st);
+    }
     return memo.get(id);
   };
 }
@@ -1674,6 +1717,20 @@ function healthyPoolMembers(poolId) {
   const ok = usable.filter((m) => !memberAuthFailed(m.id));
   return ok.length ? ok : usable;
 }
+/** Candidates for a DECISION, as opposed to an ACT (integration r2). Same
+ *  auth-failure escape as healthyPoolMembers and NO login pre-filter — the
+ *  login verdict is decidePoolSwitch's own gate (poolReadLogin now folds both
+ *  readers, so the exclusion is identical) and it can only NAME the members it
+ *  was shown. Pre-filtering them out turned "Re-login those accounts in
+ *  Manage Agents" back into "wait until a window resets": the wall the user
+ *  can clear in 30 seconds, reported as a spent quota bucket.
+ *  Use this wherever the list feeds decidePoolSwitch; use healthyPoolMembers
+ *  wherever the list is a set of re-point targets to act on. */
+function switchCandidates(poolId) {
+  const all = accounts.poolMembers(poolId) || [];
+  const ok = all.filter((m) => !memberAuthFailed(m.id));
+  return ok.length ? ok : all; // the 2.335.0 auth-fail escape, unchanged
+}
 
 // A running session's CLI reported an AUTH-class API failure (401×2+/403/ban/
 // credit message). Quota decisions can't see this — the failed account often
@@ -1812,7 +1869,10 @@ function maybePoolAutoSwitchForPool(poolId) {
     // FAMILY-PROJECTED view and re-point only their link — an opus session's
     // spent cap never evicts a fable session, and vice versa. Sessions whose
     // family is unknown project nothing (full view = legacy semantics).
-    const members = healthyPoolMembers(poolId); // auth-failed members are not candidates (2.335.0)
+    // DECISION list, not an act list (integration r2): auth-failed members are
+    // not candidates (2.335.0), but a login-dead member must still REACH
+    // decidePoolSwitch so its refusal can name it and prescribe the re-login.
+    const members = switchCandidates(poolId);
     const readLogin = poolReadLogin(); // ONE login read per member for this whole tick (per-session pass + pool decision)
     for (const [sid, s2] of activeSessions) {
       if (!poolCaps.planC) break; // plan-C per-session links need the backend's material path
@@ -2019,7 +2079,7 @@ function maybeStopOnFallback(session, id, from, to) {
     poolChooserForModel, poolReadCache, probeUsageForAccountKey,
     noteSessionProduced, noteTurnEnd, noteWallSignal, beforeAutoResumeFire, quotaVerdictFor, probeUsageViaSession, recordRateLimitEvent, recordCodexQuotaSignal, resolveUsageKey,
     probeQuotaForKey, quotaSourceFor, quotaBackendFor, // S4 caps-routed quota probe + the per-harness QuotaSignalSource lookup (functional seams for test-quota-source)
-    observedMemberFor, sessionBillingMember, wallKeyFor, rejectionSlotFor, readingSlotFor, corroborateReading, memberLoginState, healthyPoolMembers, slotTransitions, nearArmVeto, fireIdentityFor, demoteWalledAccount, wallCount, sessionWalledMembers,
+    observedMemberFor, sessionBillingMember, wallKeyFor, rejectionSlotFor, readingSlotFor, corroborateReading, memberLoginState, healthyPoolMembers, switchCandidates, poolReadLogin, slotTransitions, nearArmVeto, fireIdentityFor, demoteWalledAccount, wallCount, sessionWalledMembers,
     _wallRing, _sessionWalls, OBSERVED_ORG_RECENT_MS, WALL_RING_MS, SESSION_WALL_MS, // wall-ground-truth + token-slot + session-wall seams (test-auto-resume §11, test-auto-resume-loop)
     _poolAutoLast, _poolSwitchAt, // the eval gate (10s) + dwell belt (180s) are WALL-CLOCK: a suite winds them back instead of sleeping through them
     sessionModelFor, sweepUsageAnchors, usageCacheKeyFor,
