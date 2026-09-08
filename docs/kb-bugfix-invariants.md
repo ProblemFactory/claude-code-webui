@@ -2,6 +2,20 @@
 
 Moved VERBATIM out of CLAUDE.md (tier-2 pass).
 
+## THE PROCESS LIST WENT EMPTY ON THE BUSIEST MACHINES, SILENTLY (2026-09-07, found by the release gate going red)
+
+`test-sysinfo-op`'s oldest assert — "top procs with pid+rss" — went red on the dev box mid-session, then again on a re-run, having passed an hour earlier. The suite was innocent and so was the daemon: `sysinfo.read().procs` really was `[]` on a machine running 2,404 processes.
+
+**The measurement.** `topProcs()` ran `ps aux --sort=-rss` through `execFile` with `maxBuffer: 4 * 1024 * 1024`. Command lines on a box hosting ~60 agent worktrees are long, so `ps aux` output is ~1.8 KB per process: measured **4,258,412 bytes at 2,404 processes** — past the cap. `execFile` kills the child and errors; the BSD fallback leg (`ps aux`, same 4 MiB) errors identically; and the code then did `resolve([])`. No log, no error field, no way to tell "this machine has no processes" from "we threw the answer away". The full-table twin `listProcs()` had the same shape with 8 MiB — `ps axo <cols>` measured 4,244,406 bytes, i.e. already at half its cap, and its cap is applied AFTER parsing, so the WHOLE table has to fit.
+
+**Why it matters beyond a red suite.** Those rows feed the System panel's process manager and, worse, the memory-pressure alert's `top: …` line — which is printed *because* the machine is under pressure. The one artefact that says "here is what is eating the box" disappears exactly when the box is being eaten. This is the degrade-gracefully class again (2.276.0 writer sweep, 2.340.2 lost binding): **a catch broader than the failure it was written for hides its own bug, and only a path that logs the message VERBATIM ever gets found.**
+
+**Fix.** One named constant `PS_MAX_BUFFER = 64 MiB` (~36k processes) shared by both readers, the `topProcs` timeout raised 5s→8s to match its twin, and BOTH final failure paths now `console.warn` the verbatim `ps` error saying the list will be empty. Nothing about the parse, the cap or the sampling changed.
+
+**Invariants.** ① A buffer sized for a laptop is a silent truncation on a server — size it from a measurement and name the number in the comment. ② A degrade path that returns an EMPTY collection must say so out loud; an empty list and a discarded answer are different facts and callers cannot tell them apart. ③ A reader whose whole job is "what is this machine doing" must not be the thing that stops working when the machine is busy.
+
+**Test.** scripts/test-sysinfo-op.mjs — a fake `ps` on `PATH` (in a child process, so `PATH` never leaks into the rest of the suite) emitting ~6 MiB of plausible output: the shipped module still returns rows, and the NEGATIVE CONTROL — the same table against a copy of `src/sysinfo.js` with the pre-fix 4 MiB constant spliced back in — returns the empty list this fixes. (An assert that cannot fail is not an assert.)
+
 ## STEER-ALL PUT 25 MESSAGES IN THE TURN AND SHOWED ONE (2026-09-07, owner "我刚才在那个codex session里全给插入了，但是我只能看到我最后插入的一条消息")
 
 In a long-running codex session the owner pressed **Steer all** on a 25-item queue. Every steer succeeded — the model demonstrably got all 25 — and the chat window showed exactly ONE new bubble: the message typed after the last resume.
