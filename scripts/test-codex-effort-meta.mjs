@@ -657,7 +657,11 @@ console.log('— ⑩ version markers resolve; this branch squats nothing');
   // master releases (2.369.67 → .68 landed while this branch was in flight,
   // which is exactly the red this leg is FOR: a "first free number" that a
   // release has taken is a marker that no longer resolves).
-  const NEXT_FREE = '2.369.69';
+  // COMPUTED (2026-09-08): a hardcoded "first free number" went red on master
+  // the moment the next release landed (twice in one day). The leg derives it
+  // from the integration branch itself — highest released 2.369.N + 1 — and
+  // proves both halves: N is claimed, N+1 is not.
+  let NEXT_FREE = null;
   const SITES = ['CLAUDE.md', 'data/bin/codex-chat-wrapper.js', 'src/codex-message-manager.js',
     'src/codex-session-store.js', 'src/server/stdout/codex-events.js', 'src/lib/agent-meta.js',
     'src/lib/chat-status-bar.js', 'src/lib/chat-view.js', 'src/ws-handler.js', 'src/session-schema.js',
@@ -741,7 +745,14 @@ console.log('— ⑩ version markers resolve; this branch squats nothing');
     ok(pred.length > 0 && pred.every(describesTheEffortTopic),
       `${PREDECESSOR} is a RELEASED ancestor about the effort work every site cites it for (a marker is a cross-reference — it must resolve)`,
       JSON.stringify(pred).slice(0, 200));
-    // ② the number the integrator will take is genuinely free.
+    // ② the number the integrator will take is genuinely free — derived from
+    //    the branch, never declared: highest released 2.369.N on REF, plus one.
+    const releasedNs = [];
+    for (const line of git('log', '--format=%s', '-400', REF).split('\n')) { const m = /^2\.369\.(\d+)(?![\d.])/.exec(line.trim()); if (m) releasedNs.push(+m[1]); }
+    for (const line of git('show', `${REF}:CHANGELOG.md`).split('\n')) { const m = /^## 2\.369\.(\d+)(?![\d.])/.exec(line.trim()); if (m) releasedNs.push(+m[1]); }
+    const latestN = Math.max(...releasedNs);
+    NEXT_FREE = `2.369.${latestN + 1}`;
+    ok(Number.isFinite(latestN) && claimants(`2.369.${latestN}`).length > 0, `the latest release on ${REF} is 2.369.${latestN} (derived, not declared)`, JSON.stringify(releasedNs.slice(-5)));
     const next = claimants(NEXT_FREE);
     ok(next.length === 0, `${NEXT_FREE} is unclaimed on ${REF} — the integrator may take it`, JSON.stringify(next));
     // ③ and this branch stamps NO unreleased number in any of the files a
@@ -778,14 +789,22 @@ console.log('— ⑩ version markers resolve; this branch squats nothing');
   // …and the CHANGELOG rule (test-harness-honesty's belt, kept): unreleased =
   // no entry (fine); released under the number we take = the entry must be OURS.
   const changelog = read('CHANGELOG.md');
-  const head = new RegExp(`^## ${NEXT_FREE.replace(/\./g, '\\.')}(?![\\d.])`, 'm').exec(changelog);
-  let entry = null;
-  if (head) {
-    const next = changelog.indexOf('\n## ', head.index + 1);
-    entry = changelog.slice(head.index, next < 0 ? changelog.length : next);
+  const entries = changelog.split(/\n(?=## )/).filter((e) => /^## 2\.369\./.test(e));
+  const shipped = entries.find((e) => describesThisChange(e));
+  if (shipped) {
+    // POST-RELEASE (2026-09-08): this change has a release entry of its own;
+    // the next free number belongs to whoever ships next and owes it nothing.
+    ok(true, `this change shipped as ${shipped.split('\n')[0].slice(3, 60)} — later entries owe it nothing`);
+  } else if (NEXT_FREE) {
+    const head = new RegExp(`^## ${NEXT_FREE.replace(/\./g, '\\.')}(?![\\d.])`, 'm').exec(changelog);
+    let entry = null;
+    if (head) {
+      const next = changelog.indexOf('\n## ', head.index + 1);
+      entry = changelog.slice(head.index, next < 0 ? changelog.length : next);
+    }
+    ok(!entry || describesThisChange(entry),
+      `CHANGELOG ${NEXT_FREE} is either unwritten (this branch makes no release) or describes THIS change`, entry ? entry.slice(0, 160) : 'no entry yet');
   }
-  ok(!entry || describesThisChange(entry),
-    `CHANGELOG ${NEXT_FREE} is either unwritten (this branch makes no release) or describes THIS change`, entry ? entry.slice(0, 160) : 'no entry yet');
 }
 
 // ───────────────────────────────────────────────────────────────────────────
