@@ -8,8 +8,9 @@
 //
 // WHY IT IS IN THE FAST TIER even though it costs a real worktree + build +
 // suite (measured: 5.5 s when written, 11.6 s after round 2's concurrency
-// legs, 16 s with round 3's supersede A/B — it drives four real heavy runs
-// against a stub repository): the launcher is a SILENT-FAILURE path. If
+// legs, 16.2 s with round 3's supersede A/B and its retry control — it drives
+// five real heavy runs against stub repositories): the launcher is a
+// SILENT-FAILURE path. If
 // detaching breaks, nothing throws and nobody waits — the heavy tier simply
 // never runs again and the only symptom is `npm run ci:status` staying empty,
 // which looks exactly like "nobody has pushed lately". A guard for that has to
@@ -386,6 +387,40 @@ try {
       ok(!bad.bDone && bad.lockHolder === bad.aPid,
         `NEG: …and holds the machine lock meanwhile, so the newer run waits (holder pid ${bad.lockHolder}, superseded pid ${bad.aPid})`);
       try { fs.rmSync(bad.root, { recursive: true, force: true }); } catch { }
+    }
+
+    // (1e) …AND RETRY-ONCE STILL RETRIES. (1d) added a question immediately
+    //      before the retry, so the control it needs is the case it must NOT
+    //      change: a suite that fails for its OWN reasons, with nobody
+    //      superseding anything, must still be re-run — and a pass on the
+    //      second try is recorded as FLAKY, which is the entire reason
+    //      retry-once exists. Same stub repository, run in the FOREGROUND (no
+    //      supersede, no kill), with a suite that fails once and then passes.
+    {
+      const SLOW = (SUITES.find((x) => x.tier === 'heavy' && x.name !== SLICE) || {}).name;
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-ci-retry-'));
+      fs.mkdirSync(path.join(root, 'scripts'), { recursive: true });
+      fs.copyFileSync(path.join(REPO, 'scripts', 'ci.mjs'), path.join(root, 'scripts', 'ci.mjs'));
+      fs.copyFileSync(path.join(REPO, 'scripts', 'git-env.mjs'), path.join(root, 'scripts', 'git-env.mjs'));
+      fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'x', version: '0.0.0', private: true, scripts: { build: 'node -e "0"' } }) + '\n');
+      // The marker lives OUTSIDE the checkout: --isolate runs the suite in a
+      // fresh worktree, so anything written inside it is invisible to the retry.
+      fs.writeFileSync(path.join(root, 'scripts', SLOW + '.mjs'),
+        `import fs from 'node:fs';\nconst m = process.env.VS_FLAKY_MARKER;\nif (fs.existsSync(m)) { console.log('ALL PASS (1)'); } else { fs.writeFileSync(m, '1'); console.log('1 FAILED (0 passed)'); process.exit(1); }\n`);
+      const genv = { ...GIT_ENV, GIT_AUTHOR_NAME: 'x', GIT_AUTHOR_EMAIL: 'x@x', GIT_COMMITTER_NAME: 'x', GIT_COMMITTER_EMAIL: 'x@x' };
+      spawnSync('git', ['init', '-q', root], { env: GIT_ENV });
+      spawnSync('git', ['-C', root, 'add', '-A'], { env: genv });
+      spawnSync('git', ['-C', root, 'commit', '-q', '-m', 'a'], { env: genv });
+      const sha = (spawnSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf-8', env: genv }).stdout || '').trim();
+      const r = spawnSync(process.execPath, [path.join(root, 'scripts', 'ci.mjs'), '--heavy', '--sha=' + sha, '--isolate',
+        '--only=' + SLOW, '--lock=' + path.join(root, 'lock'), '--lock-wait-ms=20000'],
+        { cwd: root, encoding: 'utf-8', env: { ...GIT_ENV, VS_FLAKY_MARKER: path.join(root, 'flaky-marker') }, timeout: 120000 });
+      const out = (r.stdout || '') + (r.stderr || '');
+      ok(/retrying once/.test(out), 'a suite that fails on its OWN is still retried (the guard added in (1d) does not swallow the flaky path)');
+      const marker = (() => { try { return JSON.parse(fs.readFileSync(path.join(root, 'data', 'ci-heavy', `${sha}.green`), 'utf-8')); } catch { return null; } })();
+      ok(!!marker && r.status === 0, `…and a pass on the second try is a GREEN verdict, not a red (exit ${r.status})`);
+      ok(!!marker && (marker.flaky || []).includes(SLOW), `…recorded as FLAKY, never laundered into a plain green (${marker && JSON.stringify(marker.flaky)})`);
+      try { fs.rmSync(root, { recursive: true, force: true }); } catch { }
     }
 
     // (2) THE MACHINE LOCK: a second heavy run does not start while another
