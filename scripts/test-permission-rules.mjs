@@ -155,6 +155,82 @@ const CODEX_FIXTURE = {
     check('THE FINDING, measured on the consequence: a key the user\'s own layers set is NEVER filed as "the packaged default", and the sessionFlags layer is NOT empty',
       !all.some((r) => r.key.startsWith('sandbox_workspace_write') && r.note === PR.CODEX_DEFAULT_NOTE)
       && by.sessionFlags.rules.length >= 2, JSON.stringify(all.map((r) => [r.layer, r.key, r.note])));
+    // ── A STALE PER-INDEX ORIGIN IS NOT A RULE (residual, ruling 10) ──
+    // codex keys `origins` per ARRAY INDEX and KEEPS the lower layer's indices
+    // after a higher layer replaced the array with a SHORTER one. Those origins
+    // name elements the RESOLVED config does not have, so the view — whose one
+    // question is "where does this rule come from" — used to print a row for a
+    // rule that is not in force, with an empty value and the note "value not
+    // carried in the answer", which reads as "we could not read it".
+    {
+      const shrunk = {
+        config: {
+          approval_policy: 'never',
+          // the layer in force replaced a 3-element array with a 1-element one
+          sandbox_workspace_write: { writable_roots: ['/w/only'], network_access: true },
+        },
+        origins: {
+          approval_policy: { name: { type: 'user', file: '/h/.codex/config.toml', profile: null }, version: 'sha256:aa' },
+          'sandbox_workspace_write.writable_roots.0': { name: { type: 'sessionFlags' }, version: '' },
+          // …the FILE's own indices 1 and 2 survive in the origin map
+          'sandbox_workspace_write.writable_roots.1': { name: { type: 'user', file: '/h/.codex/config.toml', profile: null }, version: 'sha256:aa' },
+          'sandbox_workspace_write.writable_roots.2': { name: { type: 'user', file: '/h/.codex/config.toml', profile: null }, version: 'sha256:aa' },
+          // …and a CARRIED leaf the FILE won, so the surviving leaves really do
+          // disagree — otherwise the whole table collapses to one layer and the
+          // per-leaf path this fixture is about never runs.
+          'sandbox_workspace_write.network_access': { name: { type: 'user', file: '/h/.codex/config.toml', profile: null }, version: 'sha256:aa' },
+        },
+        layers: [
+          { name: { type: 'sessionFlags' }, version: 'sha256:00' },
+          { name: { type: 'user', file: '/h/.codex/config.toml', profile: null }, version: 'sha256:aa' },
+        ],
+      };
+      const rs = PR.codexRulesRecord(shrunk, { cwd: '/w/proj' });
+      const rules = rs.layers.flatMap((l) => l.rules.map((r) => ({ ...r, layer: l.id })));
+      check('a per-index origin the RESOLVED config no longer carries is DROPPED — no row, no empty value, no "could not read it" note',
+        !rules.some((r) => /\.writable_roots\.[12]$/.test(r.key)) && !rules.some((r) => r.value === '' || r.value == null),
+        JSON.stringify(rules.map((r) => [r.layer, r.key, r.value, r.note])));
+      // …and dropping them BEFORE the agreement test is what makes the answer
+      // right rather than merely quieter: the surviving element has ONE owner.
+      const wr = rules.filter((r) => r.key.startsWith('sandbox_workspace_write.writable_roots'));
+      check('…and the shorter array now reads as one rule owned by the layer that actually set it (the phantoms had made it look SPLIT)',
+        wr.length === 1 && wr[0].layer === 'sessionFlags' && wr[0].key === 'sandbox_workspace_write.writable_roots' && wr[0].value === '["/w/only"]' && wr[0].note === null,
+        JSON.stringify(wr));
+      // NEGATIVE CONTROL: the pre-fix behaviour, reproduced through the module's
+      // own leaf reader, so "it used to print that row" is measured and not
+      // remembered — the phantom index resolves to `undefined` in the config
+      // that is in force, which is exactly the row the view used to render.
+      const leafOf = (cfg, key, path) => {
+        let cur = cfg[key];
+        for (const seg of path.slice(key.length + 1).split('.')) {
+          if (cur == null) return undefined;
+          if (Array.isArray(cur)) { const i = Number(seg); cur = Number.isInteger(i) && i >= 0 ? cur[i] : undefined; }
+          else if (cur && typeof cur === 'object') cur = cur[seg];
+          else return undefined;
+        }
+        return cur;
+      };
+      check('NEGATIVE CONTROL: those indices really are unresolvable in the config in force (index 0 resolves, 1 and 2 do not) — the dropped rows had no value to show',
+        leafOf(shrunk.config, 'sandbox_workspace_write', 'sandbox_workspace_write.writable_roots.0') === '/w/only'
+        && leafOf(shrunk.config, 'sandbox_workspace_write', 'sandbox_workspace_write.writable_roots.1') === undefined
+        && leafOf(shrunk.config, 'sandbox_workspace_write', 'sandbox_workspace_write.writable_roots.2') === undefined);
+      // POSITIVE CONTROL: a genuinely SPLIT table still splits — the filter
+      // must not have turned "one rule per leaf" off for the case it is for.
+      check('POSITIVE CONTROL: a table whose CARRIED leaves disagree is still one rule per leaf, each under its own layer',
+        rules.some((r) => r.key === 'sandbox_workspace_write.network_access' && r.layer === 'user' && r.value === 'true'),
+        JSON.stringify(rules.filter((r) => r.key.startsWith('sandbox_workspace_write'))));
+      // …and when NOTHING maps, we say who set the key rather than inventing
+      // "nobody did" (defaults) or "we were capped" (unknown).
+      const allGone = {
+        config: { sandbox_workspace_write: { writable_roots: [] } },
+        origins: { 'sandbox_workspace_write.writable_roots.0': { name: { type: 'user', file: '/h/.codex/config.toml', profile: null }, version: 'sha256:aa' } },
+        layers: [{ name: { type: 'user', file: '/h/.codex/config.toml', profile: null }, version: 'sha256:aa' }],
+      };
+      const ag = PR.codexRulesRecord(allGone, { cwd: '/w/proj' }).layers.flatMap((l) => l.rules.map((r) => ({ ...r, layer: l.id })));
+      check('when NO per-element origin maps onto the value in force, the key is still attributed to the layer that set it — never "the packaged default", never "the answer was capped"',
+        ag.length === 1 && ag[0].layer === 'user' && ag[0].note === PR.CODEX_STALE_INDEX_NOTE
+        && ag[0].note !== PR.CODEX_DEFAULT_NOTE && ag[0].note !== PR.CODEX_CAPPED_NOTE, JSON.stringify(ag));
+    }
     // NEGATIVE CONTROL: a key with NO origin at all — neither top-level nor
     // leaf — must still read "the packaged default". (Measured: 0.153.4 gives
     // `include_permissions_instructions` no origin entry of any kind.)

@@ -220,6 +220,11 @@ const CODEX_DEFAULT_NOTE = 'not set in any layer — the packaged default';
  *  asserts the provenance it just discarded is the worst kind of lie: it
  *  reads exactly like the honest answer). */
 const CODEX_CAPPED_NOTE = 'origin unknown — the answer was capped';
+/** …and the note for a key whose only origins name ARRAY ELEMENTS the resolved
+ *  config no longer has. codex keys `origins` per index, and a higher layer
+ *  that REPLACES an array with a shorter one leaves the lower layer's `.1`,
+ *  `.2`… behind: they are origins for rules that are not in force. */
+const CODEX_STALE_INDEX_NOTE = 'set by this layer — codex still reports per-element origins for elements the resolved value no longer has';
 
 /**
  * codex: a `config/read {cwd, includeLayers:true}` response → the typed
@@ -324,12 +329,32 @@ function codexRulesRecord(resp, { cwd = null, host = null, scope = 'session', ma
     if (origin) { add(bucket(origin.name), { kind, key, value, note: null }); return; }
     const leaves = Object.keys(origins).filter((k) => k.startsWith(key + '.'));
     if (!leaves.length) { add(defaultsBucket(), { kind, key, value, note: CODEX_DEFAULT_NOTE }); return; }
+    // AN ORIGIN IS NOT A RULE. codex keys `origins` per ARRAY INDEX, and it
+    // keeps the lower layer's indices after a higher layer REPLACED the array
+    // with a shorter one — so `writable_roots.1` can have an origin while the
+    // RESOLVED config has one element. This view answers "where does this rule
+    // come from", and there is no rule at that index: rendering it printed a
+    // path with an empty value and the note "value not carried in the answer",
+    // which reads as "we could not read it" about a rule that does not exist.
+    // Dropping them BEFORE the grouping also fixes the verdict above it: with
+    // the phantoms in, a shorter array that one layer wholly owns looked SPLIT
+    // across two layers and was rendered element by element.
+    const carried = leaves.filter((k) => leafValue(key, k) !== undefined);
+    if (!carried.length) {
+      // Some layer really did set this key — we just cannot map any of its
+      // per-element origins onto the value in force. Say THAT, under that
+      // layer; never `defaultsBucket` (nobody set it) and never
+      // `unknownBucket` (its note is about the capped answer — two different
+      // facts must never share a sentence).
+      add(bucket(origins[leaves[0]].name), { kind, key, value, note: CODEX_STALE_INDEX_NOTE });
+      return;
+    }
     // Group an array's per-index leaves (`writable_roots.0`, `.1`, …) under
     // their parent path: when every element agrees on a layer, one rule for
     // the array is honest AND readable (a real config had 700 roots = 701
     // leaf origins; one rule per element would have blown the whole view).
     const groups = new Map();                 // display path → {ids:Set, leaves:[]}
-    for (const leaf of leaves) {
+    for (const leaf of carried) {
       const disp = leaf.replace(/\.\d+$/, '');
       let g = groups.get(disp);
       if (!g) groups.set(disp, (g = { ids: new Set(), leaves: [] }));
@@ -339,7 +364,7 @@ function codexRulesRecord(resp, { cwd = null, host = null, scope = 'session', ma
     const allIds = new Set();
     for (const g of groups.values()) for (const id of g.ids) allIds.add(id);
     if (allIds.size === 1) {                  // one layer won every member ⇒ it owns the key
-      add(bucket(origins[leaves[0]].name), { kind, key, value, note: null });
+      add(bucket(origins[carried[0]].name), { kind, key, value, note: null });
       return;
     }
     // SPLIT across layers ⇒ ONE RULE PER LEAF, each under the layer that won
@@ -349,8 +374,11 @@ function codexRulesRecord(resp, { cwd = null, host = null, scope = 'session', ma
       const paths = g.ids.size === 1 ? [disp] : g.leaves;
       for (const p of paths) {
         const src = origins[g.ids.size === 1 ? g.leaves[0] : p];
+        // `v` is carried by construction now (the filter above), for a display
+        // path either way: a grouped `disp` reads the array itself, and a
+        // per-leaf `p` was kept only because it resolved.
         const v = leafValue(key, p);
-        add(bucket(src && src.name), { kind, key: p, value: stringifyValue(v), note: v === undefined ? 'value not carried in the answer' : null });
+        add(bucket(src && src.name), { kind, key: p, value: stringifyValue(v), note: null });
       }
     }
   };
@@ -536,7 +564,7 @@ function ruleTreeSummary(record, { t } = {}) {
 module.exports = {
   RULE_KINDS, CLAUDE_LAYERS, CLAUDE_MANAGED_DIR, CLAUDE_MANAGED_DROPIN,
   CLAUDE_PERMISSION_LISTS, CLAUDE_PERMISSION_VALUES, CODEX_PERMISSION_KEYS,
-  CODEX_DEFAULT_NOTE, CODEX_CAPPED_NOTE,
+  CODEX_DEFAULT_NOTE, CODEX_CAPPED_NOTE, CODEX_STALE_INDEX_NOTE,
   PERMISSION_RULE_SOURCES, UNAVAILABLE_REASONS,
   joinPath, claudeSettingsPaths, claudeRulesFromSettings, claudeRulesRecord,
   codexLayerLabel, codexRulesRecord, opencodeRulesRecord,
