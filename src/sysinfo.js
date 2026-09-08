@@ -111,9 +111,17 @@ async function memInfoAsync() {
   return memInfo();
 }
 
+// `ps` output is unbounded by process count AND argv length: a busy dev box
+// (2463 processes, one `claude -p <29 KB prompt>`) produced 4.4 MB of `ps aux`,
+// past the old 4 MiB maxBuffer — execFile then fails and topProcs answered []
+// (the sysinfo op shipped an EMPTY top-procs list and the release gate went red,
+// 2.369.68). 32 MiB bounds ~100k such rows; width flags (--cols) are GNU-only
+// and would break the BSD/macOS rung, so the bound lives on the buffer.
+const PS_MAX_BUFFER = 32 * 1024 * 1024;
+
 function topProcs(n = 8) {
   return new Promise((resolve) => {
-    execFile('ps', ['aux', '--sort=-rss'], { timeout: 5000, maxBuffer: 4 * 1024 * 1024 }, (err, out) => {
+    execFile('ps', ['aux', '--sort=-rss'], { timeout: 5000, maxBuffer: PS_MAX_BUFFER }, (err, out) => {
       const parse = (text) => text.split('\n').slice(1).filter(Boolean).map((ln) => {
         const f = ln.trim().split(/\s+/);
         // USER PID %CPU %MEM VSZ RSS TTY STAT START TIME CMD…
@@ -121,7 +129,7 @@ function topProcs(n = 8) {
       }).filter((p) => p.pid);
       if (!err) return resolve(parse(out).slice(0, n));
       // BSD ps (no --sort): sort ourselves
-      execFile('ps', ['aux'], { timeout: 5000, maxBuffer: 4 * 1024 * 1024 }, (e2, out2) => {
+      execFile('ps', ['aux'], { timeout: 5000, maxBuffer: PS_MAX_BUFFER }, (e2, out2) => {
         if (e2) return resolve([]);
         resolve(parse(out2).sort((a, b) => b.rss - a.rss).slice(0, n));
       });
@@ -220,7 +228,7 @@ function sampleProcCpu(rows) {
  *  Returns { procs, total, sampled } — `sampled` says pcpuNow is live. */
 function listProcs({ max = 350 } = {}) {
   return new Promise((resolve) => {
-    execFile('ps', ['axo', PS_COLUMNS], { timeout: 8000, maxBuffer: 8 * 1024 * 1024 }, (err, out) => {
+    execFile('ps', ['axo', PS_COLUMNS], { timeout: 8000, maxBuffer: PS_MAX_BUFFER }, (err, out) => {
       if (err) return resolve({ procs: [], total: 0, sampled: false, error: String(err.message || err).slice(0, 200) });
       const all = parsePsProcs(out);
       // sample the WHOLE table BEFORE capping (review-confirmed ordering bug:
