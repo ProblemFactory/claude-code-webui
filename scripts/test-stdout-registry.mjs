@@ -1525,6 +1525,86 @@ console.log('— agent→user channel (SendUserMessage / SendUserFile)');
     ok('…and retires it on __VS_WT_NO__ (both directions ride the same one marker protocol)',
       sr2._worktree === false && !sr2._worktreePath, JSON.stringify({ live: sr2._worktree }));
 
+    // …AND THE SCRIPT IT SENDS IS RUN, against real repositories. The two legs
+    // above prove the consumer READS the markers; they cannot see whether the
+    // shell it composes PRODUCES the right one, because the transport is a stub
+    // that answers from a list. The defect this leg exists for lived exactly
+    // there: git does not answer `--git-dir` and `--git-common-dir` in one
+    // form, so from a SUBDIRECTORY of a PLAIN checkout the raw-string compare
+    // `[ "$a" = "$b" ]` was FALSE (measured, git 2.51: `/repo/.git` vs
+    // `../.git`) and every remote session started in a subdirectory read as an
+    // isolated worktree. The local rung never had it — it resolves both answers
+    // against the directory before comparing.
+    {
+      const { execFileSync } = require('child_process');
+      const runShell = (script) => {
+        try { return String(execFileSync('sh', ['-c', script], { encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'] })); }
+        catch { return ''; }
+      };
+      const gitOk = (() => { try { execFileSync('git', ['--version'], { stdio: 'ignore' }); return true; } catch { return false; } })();
+      if (!gitOk) {
+        console.log('  SKIP: no git on PATH — the remote worktree script was not run against real repositories');
+      } else {
+        const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-wtsh-'));
+        const genv = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', HOME: repo };
+        const git = (cwd, ...a) => execFileSync('git', ['-C', cwd, ...a], { encoding: 'utf8', env: genv, stdio: ['ignore', 'pipe', 'ignore'] });
+        git(repo, 'init', '-q', '.');
+        git(repo, 'config', 'user.email', 'a@b.c'); git(repo, 'config', 'user.name', 't');
+        fs.writeFileSync(path.join(repo, 'f'), 'x');
+        git(repo, 'add', 'f'); git(repo, 'commit', '-qm', 'i');
+        fs.mkdirSync(path.join(repo, 'sub'), { recursive: true });
+        const lw = path.join(repo, '..', path.basename(repo) + '-lw');
+        git(repo, 'worktree', 'add', '-q', lw, '-b', 'lw');
+        fs.mkdirSync(path.join(lw, 's2'), { recursive: true });
+
+        // ONE more consumer, whose transport really executes what it is handed.
+        const ranScripts = [];
+        const soSh = require(path.join(REPO, 'src/server/session-stdout.js')).create({
+          rootDir: tmp, BUFFERS_DIR, META_DIR, DTACH_CMD: 'dtach', USAGE_SCANNER_PATH: path.join(tmp, 'nonexistent'),
+          CLAUDE_STREAM_TYPES: new Set(['system', 'assistant', 'user', 'result']), _seenStreamTypes: new Set(), activeSessions, engine,
+          checkClaudeGoalStatus() { }, broadcastToSession: (s2, id, m) => calls.broadcasts.push({ id, ...m }), broadcastActiveSessions: () => { calls.active++; },
+          noteModelSeen: () => { }, noteHarnessModels: () => { }, recordUsageAttribution() { }, daemonPtyShim: (h) => h,
+          sbSeenFirst: () => true, getDeviceMgr: () => null,
+          getHosts: () => ({ get: (hid) => ({ id: hid, name: 'probe-host' }), async _hostShell(h, script) { ranScripts.push(script); return runShell(script); } }),
+          getUsageHistory: () => ({ _cost: () => 0, ingestRemoteEvents() { } }), getTelemetry: () => null, getNoConvoRef: () => ({ map: new Map() }),
+          getDeliver: () => ({ stashFor() { } }), getPages: () => pages,
+        });
+        const verdictFor = async (cwd, id) => {
+          const sx = mkSession('claude', id); sx.cwd = cwd; sx.host = 'h1'; sx._worktree = true;
+          const px = fakePty(); soSh.setupSessionPty(sx, id, px);
+          px.data(J({ type: 'system', subtype: 'init', session_id: 'sid-' + id, cwd, model: 'claude-fable-5' }));
+          await settle();
+          return sx._worktree;
+        };
+        const plainSub = await verdictFor(path.join(repo, 'sub'), 'w-wt-sh-plain');
+        const linkedSub = await verdictFor(path.join(lw, 's2'), 'w-wt-sh-linked');
+        ok('THE REMOTE SCRIPT, RUN: a SUBDIRECTORY of a plain checkout is NOT a linked worktree — the fact is retired, not kept',
+          plainSub === false, JSON.stringify({ plainSub, script: ranScripts[0] }));
+        ok('…and a subdirectory of a REAL linked worktree still answers YES (the fix narrows nothing it was right about)',
+          linkedSub === true, JSON.stringify({ linkedSub }));
+        // NEGATIVE CONTROL: the pre-fix comparison, on the same directory.
+        const preFix = (dir) => {
+          const q = dir.replace(/'/g, `'\\''`);
+          return 'command -v git >/dev/null 2>&1 || { echo __VS_WT_UNKNOWN__; exit 0; }; '
+            + `cd '${q}' 2>/dev/null || { echo __VS_WT_NO__; exit 0; }; `
+            + 'a=$(git rev-parse --git-dir 2>/dev/null); b=$(git rev-parse --git-common-dir 2>/dev/null); '
+            + 'if [ -z "$a" ]; then echo __VS_WT_NO__; elif [ "$a" = "$b" ]; then echo __VS_WT_NO__; else echo __VS_WT_YES__; fi';
+        };
+        const preOut = runShell(preFix(path.join(repo, 'sub')));
+        ok('NEGATIVE CONTROL: the pre-fix raw-string compare calls that same plain-checkout subdirectory a linked WORKTREE (`/repo/.git` vs `../.git`)',
+          preOut.includes('__VS_WT_YES__'), JSON.stringify({ preOut: preOut.trim() }));
+        // …and the shape the fix depends on is really what git answers here.
+        const abs = git(path.join(repo, 'sub'), 'rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir').trim().split('\n');
+        ok('…and `--path-format=absolute` is what makes them comparable at all: both answers absolute, and EQUAL in a plain checkout',
+          abs.length === 2 && abs[0] === abs[1] && abs[0].startsWith('/'), JSON.stringify(abs));
+        // An EMPTY answer after git was found is UNKNOWN, never NO: an old git
+        // that refuses --path-format must retire nothing.
+        const emptyProbe = ranScripts[0].replace(/git rev-parse --path-format=absolute --git-dir 2>\/dev\/null/, 'true');
+        ok('…and an empty answer from a git that refused the flag reads as UNKNOWN (a probe that cannot answer retires nothing)',
+          runShell(emptyProbe).includes('__VS_WT_UNKNOWN__'), JSON.stringify({ out: runShell(emptyProbe).trim() }));
+        try { fs.rmSync(lw, { recursive: true, force: true }); fs.rmSync(repo, { recursive: true, force: true }); } catch { }
+      }
+    }
     try { fs.rmSync(wtBase, { recursive: true, force: true }); fs.rmSync(bare, { recursive: true, force: true }); fs.rmSync(emptyDir, { recursive: true, force: true }); } catch { }
   }
   try { fs.rmSync(pagesDir, { recursive: true, force: true }); } catch { }

@@ -96,10 +96,31 @@ function create({ activeSessions, engine, CLAUDE_STREAM_TYPES, _seenStreamTypes,
       const q = dir.replace(/'/g, `'\\''`);
       // Markers, never exit codes: "not a repo" and "git is missing" are two
       // different answers and only one of them retires a fact.
+      // ASK FOR THE SHAPE YOU ARE GOING TO COMPARE. The local rung resolves both
+      // answers against `dir` before comparing them; this rung compared the raw
+      // strings, and git does not answer in one form — from a SUBDIRECTORY of a
+      // PLAIN checkout, `--git-dir` is absolute and `--git-common-dir` is
+      // relative (measured, git 2.51: `/repo/.git` vs `../.git`), so "they
+      // disagree" was true of the shape that is not a worktree at all and every
+      // remote session started in a subdirectory read as isolated. `git` cannot
+      // be asked to resolve them here (there is no `path.resolve` in this
+      // script, and a `cd`-and-`pwd` dance would have to handle both forms
+      // anyway), so ask git for ONE form: `--path-format=absolute` (git ≥ 2.31)
+      // makes both answers absolute, which is exactly what the local rung
+      // computes for itself.
+      //
+      // And an EMPTY answer is now UNKNOWN, not NO: with the flag present, an
+      // empty `a` after git was found means the flag was refused (git < 2.31)
+      // or the command failed for a reason this script cannot see — neither of
+      // which is evidence that the directory is not a worktree, and a probe
+      // that cannot answer must retire nothing. "Not a repository" still
+      // reaches NO through the `cd`/exit-status path below.
       const script = `command -v git >/dev/null 2>&1 || { echo __VS_WT_UNKNOWN__; exit 0; }; `
         + `cd '${q}' 2>/dev/null || { echo __VS_WT_NO__; exit 0; }; `
-        + `a=$(git rev-parse --git-dir 2>/dev/null); b=$(git rev-parse --git-common-dir 2>/dev/null); `
-        + `if [ -z "$a" ]; then echo __VS_WT_NO__; elif [ "$a" = "$b" ]; then echo __VS_WT_NO__; else echo __VS_WT_YES__; fi`;
+        + `git rev-parse --git-dir >/dev/null 2>&1 || { echo __VS_WT_NO__; exit 0; }; `
+        + `a=$(git rev-parse --path-format=absolute --git-dir 2>/dev/null); `
+        + `b=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null); `
+        + `if [ -z "$a" ] || [ -z "$b" ]; then echo __VS_WT_UNKNOWN__; elif [ "$a" = "$b" ]; then echo __VS_WT_NO__; else echo __VS_WT_YES__; fi`;
       return Promise.race([
         hosts._hostShell(h, script, { timeoutMs: 8000 }),
         new Promise((r) => setTimeout(() => r(''), 8500)),
