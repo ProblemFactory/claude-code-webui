@@ -1380,6 +1380,7 @@ export default {
   "result": "結果",
   "duration": "所要時間",
   "{n} suites": "{n} 件のスイート",
+  "{n} not present at that commit": "うち {n} 件はそのコミットに存在しません",
   "Diagnostics report…": "診断レポート…",
   "Errors": "エラー",
   "Events per day": "日別イベント数",

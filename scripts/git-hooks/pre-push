@@ -5,7 +5,10 @@
 # it was being skipped. Now:
 #
 #   BEFORE the push   `node scripts/ci.mjs`        build + the FAST tier + the
-#                                                  one real haiku turn (~2 min)
+#                                                  one real haiku turn (~2 min),
+#                                                  ONCE per push (round 6) — for
+#                                                  HEAD if it is being pushed,
+#                                                  else the newest pushed sha
 #   AFTER  the push   `node scripts/ci.mjs --heavy` DETACHED, in its own
 #                                                  worktree at the pushed sha
 #   NEXT   push       blocked if a heavy run went RED anywhere in this branch's
@@ -112,6 +115,19 @@ for line in "${REFS[@]:-}"; do
   done <<< "$files"
 done
 
+# The ref a sha arrived on, for the messages below (a sha8 alone does not tell
+# anybody which branch they are pushing). Several refs can name one sha; the
+# first is enough, and "a ref" is the honest answer when the lists do not line
+# up rather than printing an empty word.
+ref_for_sha() {
+  local j=0
+  for s in "${PUSHED_SHAS[@]:-}"; do
+    [ "$s" = "$1" ] && { echo "${PUSHED_REFS[$j]:-a ref}"; return 0; }
+    j=$((j + 1))
+  done
+  echo "a ref"
+}
+
 # ── HEAVY-TIER VERDICT FIRST (2026-09-07) ─────────────────────────────────
 # A heavy run that went RED on a commit that is an ANCESTOR of what we are
 # about to push means the last push shipped a regression the fast tier cannot
@@ -199,16 +215,49 @@ fi
 # worktree at the commit it is actually publishing (~+3 s of `git worktree
 # add`, then the same tier). Distinct shas only, so a multi-ref push of one
 # commit still runs once.
+#
+# …AND EXACTLY ONE FAST SUBJECT PER PUSH (round 6). Round 5 made that a LOOP
+# over the distinct pushed shas, which is the whole ≤2 min budget multiplied by
+# the number of refs — inside the live SSH session, and each run spends a real
+# billed haiku turn (test-chat-e2e). Reproduced with this hook in a throwaway
+# repo: `git push` of three refs ⇒ THREE fast runs (in place for HEAD, isolated
+# for the other two); `git push --all` here would be 315 branches and
+# `git push --tags` 41 tags. So the hook picks ONE subject and says what it did
+# not cover: HEAD when HEAD is among the pushed shas (the ordinary push, run in
+# place, unchanged), otherwise the NEWEST of them. The others are not
+# ungated — `--heavy-launch` below still runs for every pushed sha, and that
+# tier is where a multi-ref push gets its per-commit coverage. Spending N×2 min
+# and N billed turns in the hook is the "a gate people route around" failure
+# again, one budget larger.
 head_sha="$(git rev-parse HEAD 2>/dev/null || true)"
 if [ "$skip_fast" = "0" ]; then
-  ran_fast=0
-  done_shas=""
-  i=0
+  # every distinct sha this push publishes, in push order
+  distinct=""
   for sha in "${PUSHED_SHAS[@]:-}"; do
-    ref="${PUSHED_REFS[$i]:-a ref}"; i=$((i + 1))
     [ -z "$sha" ] && continue
-    case " $done_shas " in *" $sha "*) continue ;; esac
-    done_shas="$done_shas $sha"
+    case " $distinct " in *" $sha "*) continue ;; esac
+    distinct="$distinct $sha"
+  done
+  # THE ONE SUBJECT. HEAD if it is being pushed (that is the ordinary push and
+  # it runs in place); otherwise the newest by commit date, falling back to the
+  # first pushed ref when git cannot sort them (an annotated tag's own object,
+  # a repo state rev-list refuses) — and only when the answer is one of the
+  # shas we are actually publishing, because naming a peeled commit nobody
+  # asked about would be a verdict about a sha that is not in this push.
+  subject=""
+  for sha in $distinct; do [ "$sha" = "$head_sha" ] && subject="$sha"; done
+  if [ -z "$subject" ] && [ -n "$distinct" ]; then
+    newest="$(git rev-list --no-walk=sorted $distinct 2>/dev/null | head -1)"
+    case " $distinct " in *" $newest "*) subject="$newest" ;; esac
+    [ -z "$subject" ] && subject="$(echo $distinct | awk '{print $1}')"
+  fi
+  # `fast_subjects` is the guard: it is what makes this ONE run instead of one
+  # per pushed sha. (test-ci-gate's negative control sets it back to
+  # "$distinct" — that is the round-5 hook, verbatim in behaviour.)
+  fast_subjects="$subject"
+  ran_fast=0
+  for sha in $fast_subjects; do
+    ref="$(ref_for_sha "$sha")"
     if [ "$sha" = "$head_sha" ]; then
       echo "[ci] release gate — fast tier (VIBESPACE_SKIP_CI=1 to bypass in an emergency)…" >&2
       node scripts/ci.mjs || { echo "[ci] GATE RED — push blocked" >&2; exit 1; }
@@ -218,6 +267,17 @@ if [ "$skip_fast" = "0" ]; then
     fi
     ran_fast=1
   done
+  # SAY WHAT THE FAST TIER DID NOT LOOK AT. Silence here would be the same
+  # class of defect as the one above: a push that got one green tier reading as
+  # if every ref in it had been gated.
+  others=""; others_n=0
+  for sha in $distinct; do
+    case " $fast_subjects " in *" $sha "*) continue ;; esac
+    others="$others $(echo "$sha" | cut -c1-8)"; others_n=$((others_n + 1))
+  done
+  if [ "$others_n" != "0" ]; then
+    echo "[ci] this push publishes $others_n other commit(s) ($(echo $others)) — the fast tier runs ONCE per push (it costs ~2 min and one real billed chat turn), so those are covered by the HEAVY tier only, which is launched for every pushed sha below." >&2
+  fi
   # No pushed shas at all (a deletion-only push, or a caller that fed us
   # nothing): gate the tree we have, exactly as before. Nothing is claimed
   # about a list we do not have.

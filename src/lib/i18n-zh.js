@@ -1380,6 +1380,7 @@ export default {
   "result": "结果",
   "duration": "耗时",
   "{n} suites": "{n} 个套件",
+  "{n} not present at that commit": "其中 {n} 个在该提交上不存在",
   "Diagnostics report…": "诊断报告…",
   "Errors": "错误",
   "Events per day": "每日事件数",

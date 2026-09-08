@@ -53,6 +53,13 @@
 // inside `npm run build`). Before the split, 99 of the 184 suites on disk were
 // in NO list at all: they neither ran nor were they written down anywhere.
 //
+// THE TABLE IS THIS GATE'S, THE SUITE SOURCES ARE THE GATED COMMIT'S (round 6).
+// Every isolated run — the whole heavy tier, and a fast run for a pushed tip
+// that is not HEAD — gates a commit that may not contain every name in the
+// table above. That is an ABSENCE, not a failing suite: it is skipped LOUDLY,
+// counted, named in the closing line and recorded in the marker (`absent`), and
+// a run in which EVERY suite was absent claims nothing at all. See runSuite.
+//
 // Modes:
 //   node scripts/ci.mjs                  the FAST gate (+ .git/ci-green marker)
 //   node scripts/ci.mjs --isolate --sha=<x>  the FAST gate in a scratch
@@ -458,7 +465,30 @@ const budgetFor = (s) => (s.tier === 'fast' ? 300000 : /chrome/.test(s.why || ''
 export const OUTSIDE_SIGNALS = ['SIGTERM', 'SIGINT', 'SIGHUP'];
 export const killedFromOutside = (r) => !!(r && r.signal && OUTSIDE_SIGNALS.includes(r.signal) && !(r.error && r.error.code === 'ETIMEDOUT'));
 
-function runSuite(s, { root = repo } = {}) {
+// A SUITE THE GATED COMMIT DOES NOT CONTAIN IS AN ABSENCE, NOT A RED (round
+// 6). Both tiers take the suite TABLE from the ci.mjs that is RUNNING and the
+// suite SOURCES from the commit being gated, and those are two different
+// commits whenever `--isolate --sha=<x>` is used (the fast tier's non-HEAD
+// push, every heavy run). A name the running table has and the gated commit
+// does not is not a failing suite — there is nothing there to fail. Before
+// this, `node <scratch>/scripts/<name>.mjs` exited MODULE_NOT_FOUND ⇒ RED ⇒
+// the push was hard-blocked, and the fast tier is fail-fast so it stopped
+// there. Reproduced with the real module against real history: `--isolate
+// --sha=<master's tip>` died on test-ci-gate ("Cannot find module
+// /tmp/vs-ci-fast-5d54ffe5-861442/scripts/test-ci-gate.mjs") after 51 green
+// suites, and 5d54ffe5 is missing exactly the 2 fast suites this branch adds —
+// so once this gate is integrated, EVERY branch and tag that predates it is
+// unpushable. Measured across this repository: master's tip 2 of 73 fast
+// suites absent, master~300 42 of 73, the v2.30.0 tag all 73.
+//   It is scoped to `absentIsSkip` (i.e. to an isolated run) ON PURPOSE: for an
+// in-place run the table and the tree come from the same checkout, so a
+// missing file means THIS tree disagrees with its own table — a red, and one
+// `--census` already reports as a ghost inside `npm run build`.
+function runSuite(s, { root = repo, absentIsSkip = false, sha = '' } = {}) {
+  if (absentIsSkip && !fs.existsSync(path.join(root, 'scripts', s.name + '.mjs'))) {
+    console.log(`  ⊘ ${s.name} — SKIPPED: not present at ${shortSha(sha)} (this gate's table names it; the commit being gated does not contain it, so this run says nothing about it)`);
+    return { ok: true, ms: 0, absent: true };
+  }
   const t = Date.now();
   const r = spawnSync(process.execPath, [path.join(root, 'scripts', s.name + '.mjs')],
     { cwd: root, stdio: ['ignore', 'pipe', 'pipe'], timeout: budgetFor(s), encoding: 'utf-8', env: GIT_ENV });
@@ -699,11 +729,26 @@ function fastGate({ sha: wantSha, isolate } = {}) {
     if (isolate) { wt = addScratchWorktree(sha, 'fast'); runRoot = wt; }
     console.log(`release gate — FAST tier: build + ${fast.length} suites (heavy tier: ${SUITES.filter((s) => s.tier === 'heavy').length} suites, runs after the push)${isolate ? ` — ISOLATED worktree at ${shortSha(sha)}` : ''}`);
     if (!runBuild({ cwd: runRoot }).ok) { console.error('\n✗ build FAILED — release gate is RED, do not push\n'); return 1; }
+    const absent = [];
     for (const s of fast) {
-      if (!runSuite(s, { root: runRoot }).ok) { console.error(`\n✗ ${s.name} — release gate is RED, do not push\n`); return 1; }
+      const r = runSuite(s, { root: runRoot, absentIsSkip: !!isolate, sha });
+      if (r.absent) { absent.push(s.name); continue; }
+      if (!r.ok) { console.error(`\n✗ ${s.name} — release gate is RED, do not push\n`); return 1; }
     }
+    // NOTHING RAN IS NOT A PASS. An old tag or a commit that predates the gate
+    // contains none of these suites (measured: v2.30.0 ⇒ 73 of 73 absent), and
+    // "ALL GREEN" for a run of zero suites is the vacuous green the `--only`
+    // typo guard already refuses elsewhere. It does NOT block the push — an
+    // absence is not evidence of breakage, and blocking every old ref is the
+    // defect this round is fixing — it just refuses to claim anything.
+    if (absent.length === fast.length) {
+      console.log(`\nNO VERDICT — the fast tier could not gate ${shortSha(sha)}: none of its ${fast.length} suites exist at that commit (an old tag, or a commit that predates them). Nothing ran, so nothing is claimed; the push is not blocked by an absence.`);
+      return 0;
+    }
+    const ran = fast.length - absent.length;
     const subject = isolate ? `for ${shortSha(sha)} (isolated worktree at the commit being pushed)` : '(this working tree)';
-    console.log(`\nALL GREEN — fast gate passed in ${Math.round((Date.now() - t0) / 1000)}s ${subject}`);
+    console.log(`\nALL GREEN — fast gate passed in ${Math.round((Date.now() - t0) / 1000)}s ${subject}${absent.length ? ` — ${ran} of ${fast.length} suites ran; ${absent.length} not present at that commit` : ''}`);
+    if (absent.length) console.log(`[ci] SKIPPED (absent at ${shortSha(sha)}, not run and not judged): ${absent.join(', ')}`);
     // The marker's contract is "HEAD, clean, passed", so an isolated run at
     // some other commit must not write one — it proves nothing about the tree
     // the next push would skip the tier for (⑫: say so, do not go quiet).
@@ -838,7 +883,7 @@ function heavyGate({ sha: wantSha, isolate, dir, only, dirtyOk, lock, lockWaitMs
       runRoot = wt;
     }
     const build = noteChildResult(runBuild({ cwd: runRoot }));
-    const failed = [], flaky = [], timings = [];
+    const failed = [], flaky = [], timings = [], absent = [];
     // The build is the first thing a supersede kill lands on, so ask before
     // believing its failure — and before spending the rest of the tier.
     let abandonedWhy = abandoned();
@@ -851,7 +896,11 @@ function heavyGate({ sha: wantSha, isolate, dir, only, dirtyOk, lock, lockWaitMs
       for (const s of heavy) {
         abandonedWhy = abandoned();
         if (abandonedWhy) { console.log(`\n[ci:heavy] stopping: ${abandonedWhy}`); break; }
-        let r = noteChildResult(runSuite(s, { root: runRoot }));
+        let r = noteChildResult(runSuite(s, { root: runRoot, absentIsSkip: !!isolate, sha }));
+        // Absent at the commit being gated (round 6): not run, not judged, and
+        // not counted in `timings` — a marker that named 97 suites when 42 of
+        // them do not exist at that sha is a claim nobody made.
+        if (r.absent) { absent.push(s.name); continue; }
         if (!r.ok) {
           // …BUT NEVER RETRY A SUITE WE OURSELVES KILLED. Supersession SIGTERMs
           // the process GROUP, so the suite in flight dies with the runner's
@@ -886,6 +935,11 @@ function heavyGate({ sha: wantSha, isolate, dir, only, dirtyOk, lock, lockWaitMs
       flaky: flaky.length ? flaky : undefined,
       startedAt: t0, endedAt: Date.now(), ms: Date.now() - t0,
       suites: heavy.length, isolated: !!isolate, host: os.hostname(),
+      // The suites this gate's table names that the gated COMMIT does not
+      // contain: not run, not judged. Named in the marker so `ci:status` and
+      // the Diagnostics report can say what the verdict is about rather than
+      // implying all `suites` of them ran.
+      absent: absent.length ? absent : undefined,
       partial: only ? only.slice() : undefined,
       unlocked: held.ok ? undefined : true,
       timings: timings.sort((a, b) => b.ms - a.ms).slice(0, 10),
@@ -901,6 +955,10 @@ function heavyGate({ sha: wantSha, isolate, dir, only, dirtyOk, lock, lockWaitMs
     let noVerdict = '';
     if (abandonedWhy || (abandonedWhy = abandoned())) noVerdict = abandonedWhy;
     else if (dirtyAtStart) noVerdict = 'the tree was DIRTY — the sha would not describe what ran';
+    // …and a run in which EVERY suite was absent judged nothing (round 6): an
+    // old ref that predates them would otherwise earn a GREEN marker for a run
+    // of zero suites — the vacuous green `--only` already refuses on a typo.
+    else if (absent.length && absent.length === heavy.length) noVerdict = `every suite in this run is absent at ${shortSha(sha)} — nothing ran, so nothing is claimed`;
     else if (only && existing) noVerdict = `partial run — keeping the existing FULL ${existing.kind.toUpperCase()} marker for ${shortSha(sha)}`;
     if (noVerdict) {
       console.log('\n[ci:heavy] ' + noVerdict);
@@ -922,8 +980,9 @@ function heavyGate({ sha: wantSha, isolate, dir, only, dirtyOk, lock, lockWaitMs
       ? `HEAVY TIER ABORTED for ${shortSha(sha)} after ${Math.round(rec.ms / 1000)}s (${timings.length} of ${heavy.length} suites ran)`
       : failed.length
         ? `HEAVY ${noVerdict ? 'TIER' : 'GATE'} RED for ${shortSha(sha)} in ${Math.round(rec.ms / 1000)}s — failed: ${failed.join(', ')}`
-        : `HEAVY ${noVerdict ? 'TIER' : 'GATE'} GREEN for ${shortSha(sha)} in ${Math.round(rec.ms / 1000)}s (${heavy.length} suites)`;
+        : `HEAVY ${noVerdict ? 'TIER' : 'GATE'} GREEN for ${shortSha(sha)} in ${Math.round(rec.ms / 1000)}s (${heavy.length - absent.length} of ${heavy.length} suites${absent.length ? ` ran; ${absent.length} not present at that commit` : ''})`;
     console.log('\n' + verdict + (noVerdict ? ` — NO VERDICT WRITTEN (${noVerdict})` : ''));
+    if (absent.length) console.log(`[ci:heavy] SKIPPED (absent at ${shortSha(sha)}, not run and not judged): ${absent.join(', ')}`);
     if (flaky.length) console.log(`[ci:heavy] FLAKY (failed, passed on retry — not blocking, but they did fail once): ${flaky.join(', ')}`);
     // AN ABORTED TIER MUST NEVER EXIT 0 (round 4 finding). `failed` is empty
     // for an abandoned run by construction — it stopped instead of judging —
@@ -1051,7 +1110,11 @@ function status({ dir, head: wantHead } = {}) {
     const label = m.kind === 'skipped' ? 'SKIP ' : m.result === 'green' ? 'GREEN' : 'RED  ';
     const detail = m.kind === 'skipped' ? `no verdict — ${m.reason || 'did not run'}`
       : m.result === 'green' ? `${m.suites} suites` : 'failed: ' + (m.failed || []).join(', ');
-    const marks = [m.partial ? `partial: ${m.partial.join(',')}` : '', m.unlocked ? 'ran WITHOUT the machine lock' : '', (m.flaky || []).length ? `flaky: ${m.flaky.join(',')}` : ''].filter(Boolean).join('  ');
+    // `absent` is not decoration: it is what makes "97 suites" above true or
+    // false, so the CLI carries it exactly like the route and the report do.
+    const marks = [m.partial ? `partial: ${m.partial.join(',')}` : '', m.unlocked ? 'ran WITHOUT the machine lock' : '',
+      (m.absent || []).length ? `${m.absent.length} not present at that commit` : '',
+      (m.flaky || []).length ? `flaky: ${m.flaky.join(',')}` : ''].filter(Boolean).join('  ');
     console.log(`  ${shortSha(m.sha)}  ${label}  ${dur(m.ms || 0).padStart(6)}  ${new Date(m.endedAt || 0).toLocaleString()}  ${detail}${marks ? '  [' + marks + ']' : ''}`);
   }
   if (holder) console.log(`\nmachine lock: held by pid ${holder.pid} for ${shortSha(holder.sha)}${pidStillRunning(holder) ? '' : ' (DEAD — the next run steals it)'}  ${lockPath}`);

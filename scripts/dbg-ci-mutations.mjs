@@ -117,6 +117,16 @@ const MUTANTS = [
       ['# ── HEAVY-TIER VERDICT FIRST (2026-09-07) ─',
         'if [ "$only_docs" = "1" ] && [ "${#REFS[@]}" -gt 0 ]; then\n  echo "[ci] docs-only push — fast tier skipped" >&2\n  exit 0\nfi\n\n# ── HEAVY-TIER VERDICT FIRST (2026-09-07) ─'],
     ] },
+  // ROUND 6 — what a run is a verdict ABOUT when the table and the sources come
+  // from different commits, and how much of the budget one push may spend.
+  { name: 'a suite absent at the gated commit is a RED again (round 6)', file: CI, suite: 'test-ci-heavy-launch',
+    from: "  if (absentIsSkip && !fs.existsSync(path.join(root, 'scripts', s.name + '.mjs'))) {", to: '  if (false) {' },
+  { name: 'a fast run where NOTHING ran says ALL GREEN again (round 6)', file: CI, suite: 'test-ci-heavy-launch',
+    from: '    if (absent.length === fast.length) {', to: '    if (false) {' },
+  { name: 'a heavy run where NOTHING ran stamps a green marker again (round 6)', file: CI, suite: 'test-ci-heavy-launch',
+    from: '    else if (absent.length && absent.length === heavy.length) noVerdict = `every suite in this run is absent at ${shortSha(sha)} — nothing ran, so nothing is claimed`;\n', to: '' },
+  { name: 'the fast tier runs once per pushed sha again (round 6)', file: HOOK, suite: 'test-ci-gate',
+    from: '  fast_subjects="$subject"', to: '  fast_subjects="$distinct"' },
   // …and the other half of round 5: the "not code" set was a statement about
   // how a path LOOKS. Dropping both gate-input arms is the pre-round-5 hook.
   { name: 'a .md path the gate READS counts as documentation again (round 5)', file: HOOK, suite: 'test-ci-gate',

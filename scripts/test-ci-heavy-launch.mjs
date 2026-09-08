@@ -621,6 +621,97 @@ try {
       'NEG: with that one line removed, --isolate --sha runs the tier against the WORKING TREE again (the defect)');
   }
 
+  // ── (4) A SUITE THE GATED COMMIT DOES NOT CONTAIN IS AN ABSENCE (round 6)
+  //     Both tiers take the suite TABLE from the ci.mjs that is RUNNING and the
+  //     suite SOURCES from the commit being gated, and `--isolate --sha=<x>`
+  //     makes those two different commits. A name the table has and the commit
+  //     does not used to be `node <scratch>/scripts/<name>.mjs` ⇒
+  //     MODULE_NOT_FOUND ⇒ RED, and the fast tier is fail-fast, so the push was
+  //     hard-blocked. Reproduced with the REAL module against REAL history
+  //     before the fix: `--isolate --sha=5d54ffe5` (master's tip) died on
+  //     test-ci-gate after 51 green suites — master is missing exactly the two
+  //     fast suites this branch adds, so once this gate ships, every branch and
+  //     tag that predates it is unpushable (measured: master's tip 2 of 73 fast
+  //     suites absent, master~300 42 of 73, tag v2.30.0 all 73).
+  {
+    const CI_SRC_A = fs.readFileSync(path.join(REPO, 'scripts', 'ci.mjs'), 'utf-8');
+    const fastNames = SUITES.filter((s) => s.tier === 'fast').map((s) => s.name);
+    const PASS_STUB = "console.log('ALL PASS (1)');\n";
+    const FAIL_STUB = "console.log('1 FAILED (0 passed)');\nprocess.exit(1);\n";
+    // The absent one is the LAST in the tier order, so everything before it
+    // really ran: an assert that passes because the tier stopped early would
+    // prove the opposite of what it says.
+    const ABSENT = fastNames[fastNames.length - 1];
+    const fastStub = (tag, { ciSource, present, failing = null }) => {
+      const suites = {};
+      for (const n of present) suites[n] = n === failing ? FAIL_STUB : PASS_STUB;
+      return stubGateRepo(tag, { ciSource, suites, commits: 1 });
+    };
+    const runFast = (s, args) => {
+      const r = spawnSync(process.execPath, [path.join(s.root, 'scripts', 'ci.mjs'), ...args.map((a) => a.replace('%SHA%', s.sha))],
+        { cwd: s.root, encoding: 'utf-8', env: GIT_ENV, timeout: 300000 });
+      const out = (r.stdout || '') + (r.stderr || '');
+      try { spawnSync('git', ['-C', s.root, 'worktree', 'prune'], { env: GIT_ENV }); } catch { }
+      try { fs.rmSync(s.root, { recursive: true, force: true }); } catch { }
+      return { status: r.status, out };
+    };
+
+    const present = fastNames.filter((n) => n !== ABSENT);
+    const gap = runFast(fastStub('absent', { ciSource: CI_SRC_A, present }), ['--isolate', '--sha=%SHA%']);
+    ok(gap.status === 0, `an isolated run whose commit is missing a suite this table names is GREEN, not a blocked push (exit ${gap.status})`);
+    ok(new RegExp(`⊘ ${ABSENT} — SKIPPED: not present at`).test(gap.out) && new RegExp(`SKIPPED \\(absent at [0-9a-f]{8}[^\\n]*\\): ${ABSENT}`).test(gap.out),
+      `…and it NAMES the suite it did not run, twice: at the moment it skipped it and in the closing summary (${ABSENT})`);
+    ok(/ALL GREEN[^\n]*— \d+ of \d+ suites ran; 1 not present at that commit/.test(gap.out),
+      `…and "ALL GREEN" carries the count, so it is never a sentence about ${fastNames.length} suites when ${fastNames.length - 1} ran`);
+    // SCOPING CONTROL: the same missing file with NO --isolate is still a RED.
+    // In place the table and the tree come from one checkout, so a missing file
+    // means this tree disagrees with its own table — the skip must not reach it.
+    const inplaceGap = runFast(fastStub('absent-inplace', { ciSource: CI_SRC_A, present }), []);
+    ok(inplaceGap.status === 1 && /release gate is RED/.test(inplaceGap.out),
+      `CONTROL: the same absent suite in an IN-PLACE run is still RED (exit ${inplaceGap.status}) — a tree that disagrees with its own table is a defect, not an absence`);
+    // CONTROL: a suite that EXISTS at the target and fails is still a RED —
+    // the fix must not turn "isolated" into "lenient".
+    const isoRed = runFast(fastStub('absent-red', { ciSource: CI_SRC_A, present: fastNames, failing: fastNames[0] }), ['--isolate', '--sha=%SHA%']);
+    ok(isoRed.status === 1 && new RegExp(`✗ ${fastNames[0]} — release gate is RED`).test(isoRed.out),
+      `CONTROL: a suite that EXISTS at the gated commit and FAILS is still RED under --isolate (exit ${isoRed.status})`);
+    // …and a commit that contains NONE of them claims nothing (an old tag).
+    // Measured for real: `--isolate --sha=<v2.30.0>` ⇒ 73 of 73 absent, 0.8 s.
+    const allGone = runFast(fastStub('absent-all', { ciSource: CI_SRC_A, present: [] }), ['--isolate', '--sha=%SHA%']);
+    ok(allGone.status === 0 && /NO VERDICT — the fast tier could not gate/.test(allGone.out) && !/ALL GREEN/.test(allGone.out),
+      `a commit containing NONE of the suites gets NO VERDICT, never a vacuous ALL GREEN — and is not blocked (exit ${allGone.status})`);
+    // NEGATIVE CONTROL: the real module with the existence check removed.
+    const NEUTER_A = ["  if (absentIsSkip && !fs.existsSync(path.join(root, 'scripts', s.name + '.mjs'))) {",
+      '  if (false) {'];
+    ok(CI_SRC_A.includes(NEUTER_A[0]), 'the pre-fix control patches a line that is really in ci.mjs (otherwise it proves nothing)');
+    const preAbsent = runFast(fastStub('absent-neg', { ciSource: CI_SRC_A.replace(...NEUTER_A), present }), ['--isolate', '--sha=%SHA%']);
+    ok(preAbsent.status === 1 && /MODULE_NOT_FOUND|Cannot find module/.test(preAbsent.out),
+      `NEG: without the check the same push is RED with MODULE_NOT_FOUND (exit ${preAbsent.status}) — the defect, hard-blocking every older ref`);
+
+    // …AND THE HEAVY TIER, WHICH IS ISOLATED ON EVERY RUN.
+    const heavyNames = SUITES.filter((s) => s.tier === 'heavy').map((s) => s.name);
+    const [H_PRESENT, H_ABSENT] = heavyNames;
+    const runHeavy = (s, only) => {
+      const r = spawnSync(process.execPath, [path.join(s.root, 'scripts', 'ci.mjs'), '--heavy', '--sha=' + s.sha, '--isolate',
+        '--only=' + only, '--lock=' + path.join(s.root, 'lock'), '--lock-wait-ms=20000'],
+        { cwd: s.root, encoding: 'utf-8', env: GIT_ENV, timeout: 300000 });
+      let rec = null;
+      for (const k of ['green', 'red']) { try { rec = JSON.parse(fs.readFileSync(path.join(s.root, 'data', 'ci-heavy', `${s.sha}.${k}`), 'utf-8')); } catch { } }
+      const out = (r.stdout || '') + (r.stderr || '');
+      try { spawnSync('git', ['-C', s.root, 'worktree', 'prune'], { env: GIT_ENV }); } catch { }
+      try { fs.rmSync(s.root, { recursive: true, force: true }); } catch { }
+      return { status: r.status, out, rec };
+    };
+    const hGap = runHeavy(stubGateRepo('absent-heavy', { ciSource: CI_SRC_A, suites: { [H_PRESENT]: PASS_STUB }, commits: 1 }), `${H_PRESENT},${H_ABSENT}`);
+    ok(hGap.status === 0 && !!hGap.rec && hGap.rec.result === 'green',
+      `the heavy tier also skips a suite absent at the sha instead of stamping a RED for it (exit ${hGap.status}, marker ${hGap.rec && hGap.rec.result})`);
+    ok(!!hGap.rec && (hGap.rec.absent || []).join() === H_ABSENT && (hGap.rec.timings || []).every((t) => t.name !== H_ABSENT),
+      `…and the MARKER says which ones (absent: ${hGap.rec && JSON.stringify(hGap.rec.absent)}), so "N suites" is not a claim about a suite that was never there`);
+    ok(/HEAVY GATE GREEN[^\n]*1 of 2 suites ran; 1 not present at that commit/.test(hGap.out), '…as does the closing line the operator reads');
+    const hAllGone = runHeavy(stubGateRepo('absent-heavy-all', { ciSource: CI_SRC_A, suites: { [H_PRESENT]: PASS_STUB }, commits: 1 }), H_ABSENT);
+    ok(!hAllGone.rec && /every suite in this run is absent/.test(hAllGone.out) && /NO VERDICT WRITTEN/.test(hAllGone.out),
+      'a heavy run in which EVERY suite was absent writes NO marker and says so (a green for zero suites is the vacuous verdict `--only` already refuses on a typo)');
+  }
+
   // An unknown commit is refused rather than stamped.
   const bogus = spawnSync(process.execPath, [path.join(REPO, 'scripts', 'ci.mjs'), '--heavy-launch', 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef', '--markers=' + dir],
     { cwd: REPO, encoding: 'utf-8', env: GIT_ENV, timeout: 60000 });

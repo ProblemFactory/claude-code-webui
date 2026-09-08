@@ -48,11 +48,14 @@ function makeRepo(tag) {
   git(d, ['config', 'commit.gpgsign', 'false']);
   return d;
 }
-function commit(repo, file, body, msg) {
+// `date` (optional) pins the COMMITTER date: the round-6 leg asserts which of
+// several pushed shas is the newest, and commits made in the same second would
+// make that a coin toss wearing a rule's clothes.
+function commit(repo, file, body, msg, date) {
   fs.mkdirSync(path.dirname(path.join(repo, file)), { recursive: true });
   fs.writeFileSync(path.join(repo, file), body);
   git(repo, ['add', '-f', file]);
-  git(repo, ['commit', '-q', '-m', msg]);
+  git(repo, ['commit', '-q', '-m', msg], date ? { ...GIT_ENV, GIT_COMMITTER_DATE: date, GIT_AUTHOR_DATE: date } : GIT_ENV);
   return git(repo, ['rev-parse', 'HEAD']);
 }
 const writeMarker = (dir, sha, result, failed = [], partial = undefined, flaky = undefined) => {
@@ -638,6 +641,66 @@ process.exit(fs.existsSync(path.join(repo, 'FAST_RED')) ? 1 : 0);
         'NEG: before the fix the same push ran the tier against the WORKING TREE and said ALL GREEN about it');
     }
   }
+
+  // ── ROUND 6: ONE FAST SUBJECT PER PUSH ────────────────────────────────
+  // Round 5 made the fast run a LOOP over the distinct pushed shas, so the
+  // ≤2 min budget — and the real billed haiku turn inside it — was multiplied
+  // by the number of refs, inside the live SSH session. Reproduced with this
+  // fixture before the fix: a three-ref push ⇒ THREE fast runs. `git push
+  // --all` in this repository is 315 branches and `git push --tags` is 41.
+  // The other refs are not ungated: `--heavy-launch` still runs for every
+  // pushed sha, which is the tier that gives a multi-ref push its per-commit
+  // coverage — and the hook SAYS which commits the fast tier did not look at.
+  {
+    git(repo, ['checkout', '-q', '-b', 'multi6', SIDE]);
+    const M_HEAD = commit(repo, 'src/m-head.js', '//head\n', 'M_HEAD — the commit we are standing on');
+    git(repo, ['checkout', '-q', '-b', 'multi6b', SIDE]);
+    // Explicit committer dates: the subject for a push that does NOT include
+    // HEAD is the NEWEST of the pushed shas, and `git rev-list --no-walk` sorts
+    // by COMMITTER date — two commits made in the same second would make that
+    // assert a coin toss dressed up as a rule.
+    const M_OLD = commit(repo, 'src/m-old.js', '//old\n', 'M_OLD — older by committer date', '2026-01-01T00:00:00 +0000');
+    git(repo, ['checkout', '-q', '-b', 'multi6c', SIDE]);
+    const M_NEW = commit(repo, 'src/m-new.js', '//new\n', 'M_NEW — newer by committer date', '2026-06-01T00:00:00 +0000');
+    git(repo, ['checkout', '-q', 'multi6']);
+    const threeRefs = `refs/heads/multi6 ${M_HEAD} refs/heads/multi6 ${ZERO}\nrefs/heads/multi6b ${M_OLD} refs/heads/multi6b ${ZERO}\nrefs/heads/multi6c ${M_NEW} refs/heads/multi6c ${ZERO}\n`;
+    ok(git(repo, ['rev-parse', 'HEAD']) === M_HEAD, 'the fixture stands on M_HEAD, and the push carries three distinct commits');
+    const rMulti = runHookRefs(threeRefs);
+    const fastCalls = rMulti.calls.filter((c) => c.mode === 'fast');
+    ok(fastCalls.length === 1, `a three-ref push runs the fast tier ONCE (got ${fastCalls.length}) — not three builds, three tiers and three billed chat turns inside the SSH session`);
+    ok(fastCalls.length === 1 && !fastCalls[0].isolate,
+      '…in place, because HEAD is one of the pushed shas (the ordinary push is unchanged: same cost as a single-ref push)');
+    ok(rMulti.calls.filter((c) => c.mode === 'heavy-launch').length === 3,
+      '…while the HEAVY tier is still launched for EVERY pushed sha (that is where the other refs are covered)');
+    ok(/publishes 2 other commit\(s\)/.test(rMulti.out) && rMulti.out.includes(M_OLD.slice(0, 8)) && rMulti.out.includes(M_NEW.slice(0, 8)),
+      '…and the hook NAMES the commits the fast tier did not look at (a silent one-of-three would read as "all of them were gated")');
+    ok(rMulti.status === 0, 'and the push proceeds');
+
+    // HEAD not being pushed at all: still ONE run, isolated, at the NEWEST.
+    git(repo, ['checkout', '-q', 'elsewhere5']);
+    const rMultiAway = runHookRefs(`refs/heads/multi6b ${M_OLD} refs/heads/multi6b ${ZERO}\nrefs/heads/multi6c ${M_NEW} refs/heads/multi6c ${ZERO}\n`);
+    const awayFast = rMultiAway.calls.filter((c) => c.mode === 'fast');
+    ok(awayFast.length === 1 && awayFast[0].isolate === true && awayFast[0].sha === M_NEW,
+      `a multi-ref push with HEAD not among the pushed shas gates ONE of them — the newest (${M_NEW.slice(0, 8)}), isolated (got ${awayFast.length} run(s) at ${(awayFast[0] || {}).sha || '-'})`);
+    ok(/refs\/heads\/multi6c tips at/.test(rMultiAway.out) && /publishes 1 other commit\(s\)/.test(rMultiAway.out),
+      '…named by its ref, with the one it did not cover named too');
+
+    // A one-ref push says nothing about "other commits" — the message is a
+    // statement of fact, not decoration.
+    git(repo, ['checkout', '-q', 'multi6']);
+    const rOne = runHookRefs(`refs/heads/multi6 ${M_HEAD} refs/heads/multi6 ${ZERO}\n`);
+    ok(rOne.calls.filter((c) => c.mode === 'fast').length === 1 && !/other commit\(s\)/.test(rOne.out),
+      'a single-ref push is byte-for-byte the old behaviour: one in-place run, and no claim about commits it skipped');
+
+    // NEGATIVE CONTROL: the selection put back to "every distinct sha", which
+    // is the round-5 hook's behaviour verbatim (the loop below it is unchanged).
+    const preOne = preFixHook('onesubject', ['  fast_subjects="$subject"', '  fast_subjects="$distinct"']);
+    if (preOne) {
+      const n = runHookRefs(threeRefs, {}, preOne);
+      ok(n.calls.filter((c) => c.mode === 'fast').length === 3,
+        `NEG: with the selection reverted the same push runs the whole fast tier THREE times (got ${n.calls.filter((c) => c.mode === 'fast').length}) — N× the budget and N billed turns`);
+    }
+  }
 }
 
 // ── §5 THE GIT ENVIRONMENT THE DETACHED CHILD MUST NOT INHERIT ───────────
@@ -874,6 +937,42 @@ console.log('\n§6 machine-global fixtures + no-verdict honesty');
       'NEG: an /api/ci-heavy that still reads only the pre-round-2 kinds is caught, and named ("skipped")');
     ok(!rendersSkipped(flows.replace(/'skipped'/g, "'green'")),
       'NEG: a Diagnostics renderer with the skipped branch removed is caught (that row would silently vanish from the report)');
+
+    // …AND SO DOES THE `absent` FIELD (round 6). It is not a kind, it is what
+    // makes `suites` mean something else: a run is isolated at a sha, and this
+    // gate's table can name suites that sha never contained (measured: 42 of 97
+    // at master~300), so a green row printing the total contradicts its own
+    // record. Same three readers, same rule — one detector per reader, each with
+    // the mutation that would drop it.
+    const writesAbsent = (src) => /absent: absent\.length \? absent : undefined/.test(src);
+    const servesAbsent = (src) => /absent: Array\.isArray\(rec\.absent\) \? rec\.absent\.length : 0/.test(src);
+    const rendersAbsent = (src) => /r\.absent \?/.test(src) && /\{n\} not present at that commit/.test(src);
+    ok(writesAbsent(ciSrc), 'ci.mjs records the suites the gated commit did not contain (marker field `absent`)');
+    ok(servesAbsent(ops), '…GET /api/ci-heavy serves it');
+    ok(rendersAbsent(flows), '…and the Diagnostics report renders it (a field that only reaches the CLI is the marker-kind lesson again)');
+    ok(!servesAbsent(ops.replace(/absent: Array\.isArray\(rec\.absent\) \? rec\.absent\.length : 0, /, '')),
+      'NEG: a route that drops the field is caught');
+    ok(!rendersAbsent(flows.replace(/\$\{r\.absent \?/g, '${false ?')),
+      'NEG: …as is a report that has the number and does not print it');
+    // The CLI is the FOURTH reader, and it is the one an operator actually runs
+    // — so this leg is FUNCTIONAL rather than a grep: a real marker through the
+    // real `--status`, with a marker that has no absent list as the control.
+    {
+      const sdir = mktmp('status-absent');
+      const sha = (spawnSync('git', ['-C', REPO, 'rev-parse', 'HEAD'], { encoding: 'utf-8', env: GIT_ENV }).stdout || '').trim();
+      fs.mkdirSync(sdir, { recursive: true });
+      fs.writeFileSync(path.join(sdir, `${sha}.green`), JSON.stringify({ sha, result: 'green', failed: [], suites: 97, absent: ['test-a', 'test-b'], endedAt: Date.now(), ms: 1000 }));
+      const run = () => {
+        const r = spawnSync(process.execPath, [path.join(REPO, 'scripts', 'ci.mjs'), '--status', '--markers=' + sdir, '--head=' + sha], { cwd: REPO, encoding: 'utf-8', env: GIT_ENV });
+        return (r.stdout || '') + (r.stderr || '');
+      };
+      const withAbsent = run();
+      ok(/97 suites/.test(withAbsent) && /2 not present at that commit/.test(withAbsent),
+        'ci:status prints the absent count beside the suite total (the number is what makes "97 suites" true or false)');
+      fs.writeFileSync(path.join(sdir, `${sha}.green`), JSON.stringify({ sha, result: 'green', failed: [], suites: 97, endedAt: Date.now(), ms: 1000 }));
+      ok(!/not present at that commit/.test(run()),
+        'CONTROL: a marker with no absent list says nothing about absence (the row is not decorated unconditionally)');
+    }
   }
 
   // The block message must point at something REACHABLE. It used to offer "or
