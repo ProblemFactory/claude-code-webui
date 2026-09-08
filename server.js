@@ -1198,7 +1198,7 @@ require('./src/server/account-usage-routes.js').create({
   getHosts: () => { try { return hosts; } catch { return null; } },
   getMounts: () => { try { return mounts; } catch { return null; } },
   getTelemetry: () => { try { return telemetry; } catch { return null; } },
-  getUsageHistory: () => { try { return usageHistory; } catch { return null; } },
+  getUsageHistory: () => { try { return usageHistory; } catch { return null; } }, getLoginExpiryWatch: () => { try { return loginExpiryWatch; } catch { return null; } }, // ← constructed BELOW this stanza; lazy, like every other late singleton (拆分 P1). Sharing a line because server.js is AT the size ratchet — the wiring stanza may not grow.
 });
 // ── Session status (agent-set via vibespace-status CLI, user-overridable) ──
 // The user's override of an agent-set status is injected as a system-reminder
@@ -1227,7 +1227,7 @@ const userTodos = new UserTodoManager({
     wss.clients.forEach(c => { if (c.readyState === WS_OPEN) { try { c.send(json); } catch {} } });
   },
 });
-require('./src/server/login-expiry-watch.js').create({ accounts, userTodos, dataDir: path.join(__dirname, 'data'), log: (...a) => console.log(...a) }).start(); // PASSIVE (file reads only, §ban-safety): warns the inbox at 24h/1h/expired before a subscription's LOGIN SESSION dies — see src/login-expiry.js
+const loginExpiryWatch = require('./src/server/login-expiry-watch.js').create({ accounts, userTodos, dataDir: path.join(__dirname, 'data'), log: (...a) => console.log(...a) }); loginExpiryWatch.start(); // PASSIVE (file reads only, §ban-safety): warns the inbox at 24h/1h/expired before a subscription's LOGIN SESSION dies AND retracts those warnings once the member is re-logged in — see src/login-expiry.js. The handle is kept so the accounts login routes can sweep it IMMEDIATELY on a successful login (up to 5 min of staring at the item you just fixed is the reported defect)
 app.get('/api/user-todos', (req, res) => res.json({ todos: userTodos.snapshot() }));
 // User actions from the panel: done / dismissed / open (reopen)
 app.post('/api/user-todos/:id', (req, res) => {

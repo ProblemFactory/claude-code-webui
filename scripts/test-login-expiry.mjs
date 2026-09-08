@@ -612,6 +612,265 @@ console.log('— §4 warning ladder (fake clock, persisted ledger)');
     fs.rmSync(dir7, { recursive: true, force: true });
   }
 
+
+  // ── 2026-09-07 RECOVERY: an inbox item is a CLAIM. When a member is
+  // re-logged in, the claim is false and the thing that filed it must retract
+  // it. Measured on this instance: the owner re-logged two members (fresh
+  // tokens, a deadline 29 days out) and the "For you" panel still listed
+  // `Claude login for "Fish Max" is signed out …` as OPEN — the ledger reset
+  // only silences FUTURE filings. These legs drive the REAL UserTodoManager,
+  // not a stub, because "clients update live" is a property of the store's own
+  // resolve path (setStatus → save + onChange broadcast).
+  console.log('— §4d re-login retracts the warnings it filed');
+  {
+    const { UserTodoManager } = R('src/user-todos.js');
+    const wiped = (exp) => creds({ accessToken: '', refreshToken: '', expiresAt: 0, refreshTokenExpiresAt: exp, scopes: ['user:inference'] });
+    const live = (exp, at) => creds({ ...LIVE, expiresAt: at + H, refreshTokenExpiresAt: exp });
+
+    // A world: one subscription, a fake clock, the real inbox store.
+    const world = (startCreds, { name = 'Fish Max', id = 'sub-fish', at = NOW } = {}) => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-lewrec-'));
+      const st = { clock: at, creds: startCreds, broadcasts: 0, dir };
+      st.todos = new UserTodoManager({ dataDir: dir, onChange: () => { st.broadcasts++; } });
+      st.journal = [];
+      st.accounts = {
+        list: () => ({ accounts: [{ id, name, type: 'subscription', backend: 'claude' }] }),
+        loginStateOf: (_id, t) => ({ ...loginState(st.creds, t || st.clock), ...(st.writtenAt != null ? { writtenAt: st.writtenAt } : {}) }),
+      };
+      st.mk = () => watch.create({ accounts: st.accounts, userTodos: st.todos, dataDir: dir, now: () => st.clock, log: (...a) => st.journal.push(a.join(' ')) });
+      st.w = st.mk();
+      st.open = () => st.todos.snapshot().open;
+      st.done = () => st.todos.snapshot().resolved;
+      st.cleanup = () => { try { st.todos.flush(); } catch { } fs.rmSync(dir, { recursive: true, force: true }); };
+      return st;
+    };
+
+    // (a) THE REPRODUCTION, end to end: died 20 min ago (inside the grace, so
+    // it IS filed) → re-login → the item must be gone.
+    {
+      const s = world(wiped(NOW - 20 * MIN));
+      s.w.sweep();
+      const filedId = s.open()[0]?.id;
+      ck('(a) the death files ONE open item', s.open().length === 1 && /is signed out/.test(s.open()[0].text));
+      const beforeBroadcasts = s.broadcasts;
+      s.clock += 30 * MIN;
+      s.creds = live(s.clock + 29 * 24 * H, s.clock); // the owner's actual shape: fresh tokens, 29 days out
+      const r = s.w.sweep();
+      ck('(a) the re-login RESOLVES the item the watch filed (this is the reported defect)', s.open().length === 0);
+      ck('...as done, not deleted, and not reopened', s.done().some((i) => i.id === filedId && i.status === 'done'));
+      ck('...through the store, so every open client is told (onChange fired)', s.broadcasts > beforeBroadcasts);
+      ck('...attributed to neither the user nor an agent (the panel says "automatically")', s.todos.get(filedId).resolvedBy === watch.RESOLVED_BY && watch.RESOLVED_BY === 'system');
+      ck('...and the journal says it ONCE, naming the account and the count', s.journal.filter((l) => /Fish Max: re-logged in — 1 warning cleared/.test(l)).length === 1);
+      ck('...the sweep reports it to its caller (the route logs the count)', (r.resolved || []).some((x) => x.id === 'sub-fish' && x.n === 1));
+      const j0 = s.journal.length;
+      s.w.sweep(); s.w.sweep();
+      ck('...and it is not re-resolved or re-announced on every later sweep', s.journal.length === j0 && s.done().filter((i) => i.id === filedId).length === 1);
+      ck('...the ledger row is gone (nothing left to remember)', !s.w.ledger()['sub-fish']);
+
+      // A LATER expiry files a NEW item — recovery must not disarm the ladder.
+      s.clock = s.creds.claudeAiOauth.refreshTokenExpiresAt - 20 * H;
+      s.w.sweep();
+      ck('(a) a later expiry on the NEW deadline files a NEW item', s.open().length === 1 && /expires in 20 h/.test(s.open()[0].text) && s.open()[0].id !== filedId);
+      s.cleanup();
+    }
+
+    // (b) ALL THREE rungs are retracted, and the count says three.
+    {
+      const s = world(live(NOW + 40 * H, NOW));
+      s.w.sweep();
+      s.clock = NOW + 20 * H; s.w.sweep();          // 24h
+      s.clock = NOW + 39.5 * H; s.w.sweep();        // 1h
+      s.clock = NOW + 41 * H; s.w.sweep();          // expired
+      ck('(b) the full ladder leaves three open items', s.open().length === 3);
+      s.clock += H;
+      s.creds = live(s.clock + 20 * 24 * H, s.clock);
+      s.w.sweep();
+      ck('(b) a re-login clears ALL of them', s.open().length === 0);
+      ck('...and says so once, with the plural', s.journal.filter((l) => /re-logged in — 3 warnings cleared/.test(l)).length === 1);
+      s.cleanup();
+    }
+
+    // (c) NEGATIVE CONTROL — an item the USER already resolved is neither
+    // re-resolved nor REOPENED, and the count only claims what it did.
+    {
+      const s = world(wiped(NOW - 20 * MIN));
+      s.w.sweep();
+      const id = s.open()[0].id;
+      s.todos.setStatus(id, 'dismissed', 'user');
+      const at = s.todos.get(id).resolvedAt;
+      s.clock += 30 * MIN;
+      s.creds = live(s.clock + 20 * 24 * H, s.clock);
+      s.w.sweep();
+      const it = s.todos.get(id);
+      ck('(c) NEGATIVE CONTROL: a user-dismissed item stays dismissed (never reopened, never re-stamped)', it.status === 'dismissed' && it.resolvedBy === 'user' && it.resolvedAt === at);
+      ck('...and the watch does not claim to have cleared anything', !s.journal.some((l) => /re-logged in/.test(l)));
+      s.cleanup();
+    }
+
+    // (d) NEGATIVE CONTROL — items belonging to ANYTHING ELSE are untouched:
+    // another member's warning, and an agent's own vibespace-ask item.
+    {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-lewrec2-'));
+      const todos = new UserTodoManager({ dataDir: dir, onChange: () => {} });
+      const agentItem = todos.add('claude:abc-123', { text: 'Which database should I use?', by: 'agent', urgency: 'high' });
+      let clock = NOW;
+      const state = { a: wiped(NOW - 20 * MIN), b: wiped(NOW - 30 * MIN) };
+      const w = watch.create({
+        accounts: {
+          list: () => ({ accounts: [{ id: 'sub-a', name: 'A Max', type: 'subscription', backend: 'claude' }, { id: 'sub-b', name: 'B Max', type: 'subscription', backend: 'claude' }] }),
+          loginStateOf: (id, t) => loginState(state[id === 'sub-a' ? 'a' : 'b'], t || clock),
+        }, userTodos: todos, dataDir: dir, now: () => clock, log: () => {},
+      });
+      w.sweep();
+      ck('(d) two dead members + one agent question = three open items', todos.snapshot().open.length === 3);
+      clock += 30 * MIN;
+      state.a = live(clock + 20 * 24 * H, clock);   // ONLY A is re-logged in
+      w.sweep();
+      const open = todos.snapshot().open;
+      ck("(d) NEGATIVE CONTROL: re-logging A clears A only — B's warning stays open", open.length === 2 && open.some((i) => /B Max/.test(i.text)) && !open.some((i) => /A Max/.test(i.text)));
+      ck("...and the AGENT's item (different session, not ours to touch) is untouched", todos.get(agentItem.id).status === 'open' && todos.get(agentItem.id).resolvedBy === null);
+      try { todos.flush(); } catch { }
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+
+    // (e) NEGATIVE CONTROL — a credentials REWRITE that keeps the SAME
+    // deadline is not a new session. (A creds file copied between machines, an
+    // import, an access-token refresh: nothing was fixed, so nothing may be
+    // cleared.) Same for a wiped file whose deadline is in the FUTURE — the
+    // number went up, but the tokens are still gone.
+    {
+      const s = world(live(NOW + 20 * H, NOW));
+      s.w.sweep();
+      ck('(e) 20 h out files the 24 h warning', s.open().length === 1);
+      s.clock += 10 * MIN;
+      s.creds = live(NOW + 20 * H, s.clock);        // rewritten, SAME deadline
+      s.w.sweep();
+      ck('(e) NEGATIVE CONTROL: a rewrite with the SAME deadline resolves nothing', s.open().length === 1 && !s.journal.some((l) => /re-logged in/.test(l)));
+      s.creds = wiped(s.clock + 30 * 24 * H);       // signed out, deadline in the FUTURE
+      s.w.sweep();
+      ck('(e) NEGATIVE CONTROL: a WIPED file with a newer deadline is not a re-login (the tokens are gone)', !s.journal.some((l) => /re-logged in/.test(l)));
+      s.cleanup();
+    }
+    // (e2) THE EARLIER DEADLINE — and why the predicate asks "changed", not
+    // "grew". An org with a SHORT session policy hands back a deadline that
+    // can be EARLIER than the one we warned about (warned with 20 h left, the
+    // new session is 12 h long). A `>` test leaves that now-false item open
+    // forever — the exact defect being fixed, just one scenario over.
+    {
+      const s = world(live(NOW + 20 * H, NOW));
+      s.w.sweep();
+      const stale = s.open()[0]?.id;
+      ck('(e2) the 24 h rung fires with 20 h left', s.open().length === 1 && /expires in 20 h/.test(s.open()[0].text));
+      s.clock += 10 * MIN;
+      s.creds = live(s.clock + 12 * H, s.clock);    // a 12 h session: EARLIER than the deadline we warned about
+      s.w.sweep();
+      ck('(e2) a re-login onto a SHORTER session still retracts the stale item', s.todos.get(stale).status === 'done');
+      ck('...and re-arms immediately with the accurate one (a deserved warning is never lost by a retraction)',
+        s.open().length === 1 && s.open()[0].id !== stale && /expires in 12 h/.test(s.open()[0].text));
+      s.cleanup();
+    }
+    // The pure predicate directly (each clause load-bearing).
+    ck('reloggedIn: ALIVE + a readable deadline that CHANGED — never "grew"', LE.reloggedIn(stFor(20 * 24 * H), NOW - H) === true
+      && LE.reloggedIn(stFor(20 * 24 * H), NOW + 20 * 24 * H) === false            // same deadline = same session
+      && LE.reloggedIn(stFor(3 * H), NOW + 20 * H) === true                        // EARLIER, but different = a new session
+      && LE.reloggedIn(loginState(wiped(NOW + 30 * 24 * H), NOW), NOW - H) === false
+      && LE.reloggedIn(loginState({}, NOW), NOW - H) === false
+      && LE.reloggedIn(stFor(20 * 24 * H), null) === true);
+
+    // (f) RESTART SURVIVAL of the FILED-ID ledger — the ids must be on disk,
+    // or a server that restarts between the warning and the re-login can never
+    // retract (which is the shipped bug, just with an extra step).
+    {
+      const s = world(wiped(NOW - 20 * MIN));
+      s.w.sweep();
+      const id = s.open()[0].id;
+      const onDisk = JSON.parse(fs.readFileSync(path.join(s.dir, 'login-expiry.json'), 'utf-8'));
+      ck('(f) the filed item id is PERSISTED with the member row', (onDisk.members['sub-fish'].items || []).some((r) => r.id === id));
+      s.clock += 30 * MIN;
+      s.creds = live(s.clock + 20 * 24 * H, s.clock);
+      const w2 = s.mk();                              // a brand-new watcher, as after a restart
+      w2.sweep();
+      ck('(f) RESTART: a fresh watcher retracts the item its predecessor filed', s.open().length === 0 && s.todos.get(id).status === 'done');
+      s.cleanup();
+    }
+
+    // (g) THE IMMEDIATE SWEEP after a login runs ONCE and is idempotent — the
+    // poll tick that lands seconds later must not re-announce anything.
+    {
+      const s = world(wiped(NOW - 20 * MIN));
+      s.w.sweep();
+      s.clock += 30 * MIN;
+      s.creds = live(s.clock + 20 * 24 * H, s.clock);
+      const r1 = s.w.sweep();                         // the route's immediate sweep
+      const r2 = s.w.sweep();                         // the scheduled poll, right behind it
+      ck('(g) the immediate sweep clears it; the poll behind it clears nothing more', (r1.resolved || []).length === 1 && (r2.resolved || []).length === 0);
+      ck('...and the journal line appears exactly once', s.journal.filter((l) => /re-logged in/.test(l)).length === 1);
+      s.cleanup();
+    }
+
+    // (h) THE SESSION-POLICY HINT — only from a MEASURED span, only while it
+    // still describes this session, and never from a mtime we did not witness.
+    console.log('— §4e the short-session hint');
+    {
+      const s = world(live(NOW + 40 * H, NOW));
+      s.writtenAt = NOW - 10 * H;
+      s.w.sweep();                                    // observed; nothing to say yet
+      ck('(h) 40 h out with no witnessed login says nothing', s.open().length === 0);
+      ck('...and a healthy member is OBSERVED without a warning row (the split that makes the measurement possible at all)',
+        s.w.seen()['sub-fish']?.exp === NOW + 40 * H && !s.w.ledger()['sub-fish']);
+      // A LOGIN we witness: the deadline changes AND the file was written
+      // since our last look, inside one sweep of it.
+      s.clock += 4 * MIN;
+      s.writtenAt = s.clock - 30e3;
+      s.creds = live(s.writtenAt + 24 * H, s.clock);  // a 24 h org session policy
+      s.w.sweep();
+      ck('(h) a witnessed login files the 24 h rung AND names the short session', s.open().length === 1
+        && /its last login session lasted only ~24 h — this org's session policy may be short/.test(s.open()[0].text));
+      ck('...and the measurement is persisted in the OBSERVATION log for the next session',
+        JSON.parse(fs.readFileSync(path.join(s.dir, 'login-expiry.json'), 'utf-8')).seen['sub-fish'].spanMs === 24 * H);
+      ck('...in the observation log, never in the warning row (two stores, two questions)',
+        !!s.w.seen()['sub-fish'] && !!s.w.ledger()['sub-fish'] && !('spanMs' in s.w.ledger()['sub-fish']));
+      s.cleanup();
+    }
+    {
+      // NEGATIVE CONTROL: the naive predicate. A HEALTHY 30-day login whose
+      // file was refreshed an hour ago has (deadline − mtime) = 20 h, which is
+      // exactly what "the deadline is < 36 h after the file's last write"
+      // measures — and it is a lie. Nothing was witnessed, so nothing is said.
+      const s = world(live(NOW + 30 * 24 * H, NOW));
+      s.writtenAt = NOW - H;
+      s.w.sweep();
+      s.clock = NOW + 30 * 24 * H - 20 * H;           // the 24 h rung, 29 days into a healthy login
+      s.writtenAt = s.clock - H;                      // last access-token refresh: an hour ago
+      s.w.sweep();
+      ck('(h) NEGATIVE CONTROL: an actively-refreshed 30-day login gets the warning WITHOUT the policy hint', s.open().length === 1
+        && /expires in 20 h/.test(s.open()[0].text) && !/session policy/.test(s.open()[0].text));
+      s.cleanup();
+    }
+    ck('measureLoginSpan: witnessed ⇒ the span; every missing clause ⇒ null', (() => {
+      const gap = 15 * 60e3;
+      const info = { refreshExpiresAt: NOW + 24 * H, writtenAt: NOW - 60e3, msLeft: 24 * H, state: 'ok' };
+      const prev = { exp: NOW - 5 * H, sent: [], at: NOW - 4 * MIN };
+      return watch.measureLoginSpan(info, prev, NOW, gap) === 24 * H + 60e3
+        && watch.measureLoginSpan(info, { ...prev, at: NOW - 40 * MIN }, NOW, gap) === null   // we were not watching
+        && watch.measureLoginSpan(info, { ...prev, exp: info.refreshExpiresAt }, NOW, gap) === null // deadline unchanged
+        && watch.measureLoginSpan({ ...info, writtenAt: NOW - 10 * H }, prev, NOW, gap) === null    // file predates our look
+        && watch.measureLoginSpan({ ...info, writtenAt: null }, prev, NOW, gap) === null            // no mtime at all
+        && watch.measureLoginSpan(info, { ...prev, at: null }, NOW, gap) === null;                  // no previous observation
+    })());
+    ck('the hint is empty for an unmeasured / long / absurd span, and speaks only under 36 h', watch.shortSessionHint(null) === ''
+      && watch.shortSessionHint(40 * H) === '' && watch.shortSessionHint(LE.SHORT_SESSION_MS) === ''
+      && /~24 h/.test(watch.shortSessionHint(24 * H)));
+    ck('a STALE measurement (shorter than what is left) is not quoted by the SENTENCE itself', (() => {
+      const info = loginState(creds({ ...LIVE, refreshTokenExpiresAt: NOW + 20 * H }), NOW);
+      return !/session policy/.test(watch.itemTextFor('24h', 'X', info, { spanMs: 2 * H }))
+        && /session policy/.test(watch.itemTextFor('24h', 'X', info, { spanMs: 24 * H }));
+    })());
+    ck('NEGATIVE CONTROL: the terminal rungs never carry the hint (they are not about how long the session was)',
+      !/session policy/.test(watch.itemTextFor('expired', 'X', loginState(creds({ ...LIVE, refreshTokenExpiresAt: NOW - H }), NOW), { spanMs: 24 * H }))
+      && !/session policy/.test(watch.itemTextFor('expired', 'X', loginState(wiped(NOW - H), NOW), { spanMs: 24 * H })));
+  }
+
   for (const d of [dataDir, dataDir2, dataDir3]) fs.rmSync(d, { recursive: true, force: true });
 }
 
@@ -681,7 +940,32 @@ console.log('— §5 wiring');
   ck('a login-expired escape is exempt from the 180s dwell belt (dead login = hard death, and its fromRemaining is null)',
     (eng.match(/ds\.reason !== 'login-expired' && !\(ds\.fromRemaining/g) || []).length === 1 && (eng.match(/d\.reason !== 'login-expired' && !\(d\.fromRemaining/g) || []).length === 1);
   const srv = fs.readFileSync(path.join(REPO, 'server.js'), 'utf8');
-  ck('server.js STARTS the watcher (a module nobody starts is a feature nobody has)', /login-expiry-watch\.js'\)\.create\(\{[\s\S]*?\}\)\.start\(\)/.test(srv));
+  ck('server.js STARTS the watcher (a module nobody starts is a feature nobody has)', /login-expiry-watch\.js'\)\.create\(\{[\s\S]*?\}\); loginExpiryWatch\.start\(\);/.test(srv));
+  // 2026-09-07: the login routes must be able to sweep IMMEDIATELY. A watcher
+  // whose handle is thrown away can only be polled — the user would keep
+  // staring at the item about the login they just fixed for up to 5 minutes.
+  ck('server.js KEEPS the handle and hands it to the accounts routes as a lazy getter',
+    /const loginExpiryWatch = require\('\.\/src\/server\/login-expiry-watch\.js'\)/.test(srv)
+    && /getLoginExpiryWatch: \(\) => \{ try \{ return loginExpiryWatch; \} catch \{ return null; \} \}/.test(srv));
+  const aur = fs.readFileSync(path.join(REPO, 'src/server/account-usage-routes.js'), 'utf8');
+  ck('the routes destructure it (an unread dep is the 2.355.0 unstaged-wiring class)', /getTelemetry, getUsageHistory, getLoginExpiryWatch \}\) \{/.test(aur));
+  ck('every login FINALIZE route sweeps once, gated on the login having actually succeeded', (() => {
+    const calls = aur.match(/sweepLoginExpiry\('[^']+'\)/g) || [];
+    return calls.length === 3
+      && /const r = accounts\.reloginResolve\(req\.params\.id\);\n\s*if \(r\?\.loggedIn\) sweepLoginExpiry\('re-login'\);/.test(aur)
+      && /const fin = accounts\.finalizeSubscription\(req\.params\.id\);\n\s*if \(fin\?\.loggedIn\) sweepLoginExpiry\('subscription login'\);/.test(aur)
+      && /sweepLoginExpiry\('codex device-auth'\)/.test(aur);
+  })());
+  ck('...and the sweep never throws into the login route (a follow-up must not fail the login)', /const sweepLoginExpiry = \(why\) => \{\n\s*try \{[\s\S]*?\} catch \(e\) \{ console\.log\('\[login-expiry\] immediate sweep failed:'/.test(aur));
+  // ONE READER: the chip (roster row `loginState`) and the inbox item both come
+  // from accounts.loginStateOf. The watch must never grow a credential reader
+  // of its own, or the two surfaces can disagree about the same file.
+  ck('the watch asks the ACCOUNT STORE for the login state — the same reader the chip is built from',
+    /accounts\.loginStateOf\(a\.id, t\)/.test(fs.readFileSync(path.join(REPO, 'src/server/login-expiry-watch.js'), 'utf8')));
+  ck('the harness descriptor is the one place that touches the credential FILE (it also reports the last write)', (() => {
+    const cl = fs.readFileSync(path.join(REPO, 'src/harnesses/claude.js'), 'utf8');
+    return /writtenAt = fs\.statSync\(fp\)\.mtimeMs/.test(cl) && /return \{ \.\.\.loginState\(raw, now\), writtenAt \}/.test(cl);
+  })());
 
   const ma = fs.readFileSync(path.join(REPO, 'src/lib/manage-agents.js'), 'utf8');
   ck('the roster row renders the chip', /loginExpiryChipHtml\(a, \{ local: !selectedHost \}\)/.test(ma) && /\$\{oatTag\}\$\{loginTag\}/.test(ma));
@@ -691,6 +975,11 @@ console.log('— §5 wiring');
   ck('the chip SVG is explicitly sized (an unsized inline SVG swallows the row — 2.369.13)', /\.acct-login-chip svg \{[^}]*width: 10px[^}]*height: 10px/.test(css));
   const panel = fs.readFileSync(path.join(REPO, 'src/lib/user-todos-panel.js'), 'utf8');
   ck("the inbox item's click lands on Manage Agents instead of a dead end", /key === 'accounts'/.test(panel) && /_showAgentsDialog/.test(panel));
+  // An item that vanishes on its own must SAY it vanished on its own: the
+  // resolved tail credits 'agent' for agent-resolved items, and the watch's
+  // retraction is neither the user nor an agent.
+  ck("the resolved tail labels a watch-retracted item 'automatically' (not the user, not an agent)",
+    /i\.resolvedBy === 'system' \? ' · ' \+ t\('automatically'\)/.test(panel));
   // ROUND 3: the item text asks the STATE what happened, not the rung how
   // urgent it is — warnStageFor collapses 'logged-out' onto 'expired'.
   const lew = fs.readFileSync(path.join(REPO, 'src/server/login-expiry-watch.js'), 'utf8');
@@ -700,9 +989,105 @@ console.log('— §5 wiring');
   // i18n: every user-visible string in the chip has zh + ja
   const zh = fs.readFileSync(path.join(REPO, 'src/lib/i18n-zh.js'), 'utf8');
   const ja = fs.readFileSync(path.join(REPO, 'src/lib/i18n-ja.js'), 'utf8');
-  const keys = ['login expires in {left}', 'login expired {when} — re-login', 'login signed out — re-login', '{n} min', '{n} h', '{n} d'];
+  const keys = ['login expires in {left}', 'login expired {when} — re-login', 'login signed out — re-login', '{n} min', '{n} h', '{n} d', 'automatically'];
   ck('every new chip string has a zh entry', keys.every((k) => zh.includes(JSON.stringify(k))));
   ck('every new chip string has a ja entry', keys.every((k) => ja.includes(JSON.stringify(k))));
+}
+
+
+// ── §5b the immediate post-login sweep, FUNCTIONALLY ─────────────────────
+// The grep pins above say the call sites exist. This drives the REAL routes
+// factory with a stub express app, captures its handlers and calls them — the
+// only way to prove the lazy getter actually resolves at request time (the
+// lost-export / Proxy-swallowed class: 2.333.0, 2.341.1, 2.343.0) and that a
+// login fires the sweep exactly ONCE, including on the merge branch that
+// returns early.
+console.log('— §5b the immediate sweep after a login (real routes factory)');
+{
+  const routes = R('src/server/account-usage-routes.js');
+  const mkApp = () => {
+    const h = { get: new Map(), post: new Map(), patch: new Map(), delete: new Map(), put: new Map() };
+    const app = {};
+    for (const m of Object.keys(h)) app[m] = (p, ...fns) => h[m].set(p, fns[fns.length - 1]);
+    app.use = () => {};
+    return { app, h };
+  };
+  const call = (fn, req = {}) => {
+    let code = 200, body = null;
+    const res = { status(c) { code = c; return this; }, json(b) { body = b; return this; } };
+    fn({ params: {}, query: {}, body: {}, headers: {}, ...req }, res);
+    return { code, body };
+  };
+  // A watch stand-in that only counts. The real one is exercised in §4d.
+  const mkWatch = () => { const w = { n: 0, sweep() { w.n++; return { emitted: [], resolved: [{ id: 'sub-1', n: 2 }] }; } }; return w; };
+  const build = (acctOverrides, watch_) => {
+    const { app, h } = mkApp();
+    const accounts = {
+      list: () => ({ accounts: [] }), get: () => null, subDir: () => '/tmp/nope',
+      reloginResolve: () => ({ loggedIn: true }), finalizeSubscription: () => ({ loggedIn: true }),
+      finalizeCodexSubscription: () => ({ loggedIn: true }), _subscriptionLoginStatus: () => null,
+      ...acctOverrides,
+    };
+    routes.create({
+      app, rootDir: REPO, HOST: '127.0.0.1', CLAUDE_CMD: 'claude', NODE_CMD: 'node',
+      CLAUDE_SUBSCRIPTION_LOGIN_HELPER: '/tmp/helper.js', activeSessions: new Map(), auth: { enabled: false },
+      engine: { clearSealedOrders: () => {} }, serverSetting: () => null, recordUsageAttribution: () => {},
+      liveAccountIdSet: () => new Set(), buildClaudeSubscriptionLoginCommand: () => 'claude auth login',
+      getAccounts: () => accounts, getHosts: () => null, getMounts: () => null,
+      getTelemetry: () => null, getUsageHistory: () => null,
+      getLoginExpiryWatch: () => watch_,
+    });
+    return h;
+  };
+
+  {
+    const w = mkWatch();
+    const h = build({}, w);
+    const r = call(h.post.get('/api/accounts/:id/relogin-finalize'), { params: { id: 'sub-1' } });
+    ck('a successful RE-LOGIN sweeps the watch exactly once, through the lazy getter', w.n === 1 && r.code === 200);
+    ck("...and the route's own answer is unchanged (the sweep is a side effect, never the reply)", r.body?.success === true && r.body?.loggedIn === true);
+  }
+  {
+    const w = mkWatch();
+    const h = build({ reloginResolve: () => ({ loggedIn: false, state: 'error' }) }, w);
+    call(h.post.get('/api/accounts/:id/relogin-finalize'), { params: { id: 'sub-1' } });
+    ck('NEGATIVE CONTROL: a FAILED re-login sweeps nothing (there is no new fact to find)', w.n === 0);
+  }
+  {
+    const w = mkWatch();
+    const h = build({}, w);
+    call(h.post.get('/api/accounts/subscription/:id/finalize'), { params: { id: 'sub-1' } });
+    ck('the ADD-subscription finalize sweeps once too', w.n === 1);
+  }
+  {
+    // The auto-merge branch returns EARLY with its own res.json. A sweep placed
+    // on the normal exit would silently never run for a login that folded into
+    // an existing account — the single call site above `fin` covers both.
+    const w = mkWatch();
+    const h = build({
+      finalizeSubscription: () => ({ loggedIn: true, email: 'x@example.com' }),
+      list: () => ({ accounts: [{ id: 'sub-other', backend: 'claude', type: 'subscription', email: 'x@example.com' }] }),
+      mergeSubscription: () => ({ id: 'sub-other' }),
+    }, w);
+    const r = call(h.post.get('/api/accounts/subscription/:id/finalize'), { params: { id: 'sub-1' } });
+    ck('...including on the auto-merge branch, which returns early (still exactly once)', w.n === 1 && r.body?.merged === true);
+  }
+  {
+    const w = mkWatch();
+    const h = build({}, w);
+    call(h.post.get('/api/accounts/codex-subscription/:id/finalize'), { params: { id: 'cx-1' } });
+    ck('the codex device-auth completion sweeps too (a login finished — the roster moved)', w.n === 1);
+  }
+  {
+    // A sweep that throws must not turn a successful login into a 400.
+    const bad = { sweep() { throw new Error('boom'); } };
+    const h = build({}, bad);
+    const r = call(h.post.get('/api/accounts/:id/relogin-finalize'), { params: { id: 'sub-1' } });
+    ck('a THROWING sweep never fails the login it followed', r.code === 200 && r.body?.success === true);
+    const h2 = build({}, null);
+    ck('NEGATIVE CONTROL: no watch wired at all is a quiet no-op, not a 500',
+      call(h2.post.get('/api/accounts/:id/relogin-finalize'), { params: { id: 'sub-1' } }).code === 200);
+  }
 }
 
 // ── §6 §ban-safety ───────────────────────────────────────────────────────

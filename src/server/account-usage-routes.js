@@ -16,13 +16,32 @@ function create({ app, rootDir, HOST, CLAUDE_CMD, NODE_CMD,
   CLAUDE_SUBSCRIPTION_LOGIN_HELPER, activeSessions, auth, engine,
   serverSetting, recordUsageAttribution, liveAccountIdSet,
   buildClaudeSubscriptionLoginCommand, getAccounts, getHosts, getMounts,
-  getTelemetry, getUsageHistory }) {
+  getTelemetry, getUsageHistory, getLoginExpiryWatch }) {
   const { clearSealedOrders } = engine;
   const accounts = mk(getAccounts);
   const hosts = mk(getHosts);
   const mounts = mk(getMounts);
   const telemetry = mk(getTelemetry);
   const usageHistory = mk(getUsageHistory);
+// A SUCCESSFUL LOGIN is the one moment the login-expiry watch's picture is
+// stale by construction: the deadline it warned about no longer exists. Its
+// poll is 5 min, which is a long time to keep staring at a red chip and an
+// inbox item about the thing you JUST fixed — so every finalize route sweeps
+// it right here. The sweep is the SINGLE reader: it asks accounts.loginStateOf
+// (exactly what the roster row's `loginState` — the chip — is built from), so
+// the chip and the inbox can never disagree about what it found, and there is
+// no second credential reader to drift. Failure is logged, never thrown: a
+// login must not fail because a follow-up sweep did.
+const sweepLoginExpiry = (why) => {
+  try {
+    const w = getLoginExpiryWatch ? getLoginExpiryWatch() : null;
+    if (!w?.sweep) return null;
+    const r = w.sweep();
+    const cleared = (r?.resolved || []).reduce((n, x) => n + (x.n || 0), 0);
+    if (cleared) console.log(`[login-expiry] immediate sweep after ${why}: ${cleared} warning(s) cleared`);
+    return r;
+  } catch (e) { console.log('[login-expiry] immediate sweep failed:', e.message); return null; }
+};
 // ── Central collector (team deployments): other instances POST their batches
 // here (telemetry.forwardUrl → https://<collector>/api/telemetry/ingest).
 // Enabled ONLY when VIBESPACE_TELEMETRY_INGEST_TOKEN is set — the shared
@@ -384,6 +403,7 @@ app.post('/api/accounts/:id/relogin', (req, res) => {
 app.post('/api/accounts/:id/relogin-finalize', (req, res) => {
   try {
     const r = accounts.reloginResolve(req.params.id);
+    if (r?.loggedIn) sweepLoginExpiry('re-login');
     try {
       // SAME-SPELLING WARNING (2026-09-07): this `loginState` is a STRING
       // ('error') describing how the login TERMINAL run went. The account ROW
@@ -400,6 +420,7 @@ app.post('/api/accounts/:id/relogin-finalize', (req, res) => {
 app.post('/api/accounts/subscription/:id/finalize', (req, res) => {
   try {
     const fin = accounts.finalizeSubscription(req.params.id);
+    if (fin?.loggedIn) sweepLoginExpiry('subscription login'); // ONCE, above BOTH res.json paths (the merge branch returns early)
     // attempt identity for the re-login watcher (2.332.0): which helper RUN
     // produced the current state — lets the client ignore a pre-existing login
     try {
@@ -469,8 +490,15 @@ app.post('/api/accounts/codex-subscription', (req, res) => {
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 app.post('/api/accounts/codex-subscription/:id/finalize', (req, res) => {
-  try { res.json({ success: true, ...accounts.finalizeCodexSubscription(req.params.id) }); }
-  catch (e) { res.status(400).json({ error: e.message }); }
+  try {
+    const fin = accounts.finalizeCodexSubscription(req.params.id);
+    // The device-auth completion sweeps too. Codex declares no creds.loginState,
+    // so this member itself contributes nothing — but the sweep is per-INSTANCE
+    // (it walks every subscription), and "a login just finished" is the one
+    // event we have that says the roster's login facts moved.
+    if (fin?.loggedIn) sweepLoginExpiry('codex device-auth');
+    res.json({ success: true, ...fin });
+  } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
 }

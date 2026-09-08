@@ -1237,6 +1237,7 @@ export default {
   "This session is running outside VibeSpace": "该会话运行在 VibeSpace 之外",
   "all clear": "全部处理完",
   "by the agent": "由 Agent",
+  "automatically": "自动",
   "dismissed": "已忽略",
   "{h}h ago": "{h}小时前",
   "{n} items waiting on you": "{n} 个事项等你处理",

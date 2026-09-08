@@ -1236,6 +1236,7 @@ export default {
   "This session is running outside VibeSpace": "このセッションは VibeSpace の外で実行されています",
   "all clear": "すべて対応済み",
   "by the agent": "エージェントによる",
+  "automatically": "自動的に",
   "dismissed": "無視済み",
   "{h}h ago": "{h}時間前",
   "{n} items waiting on you": "{n} 件があなたの対応待ち",

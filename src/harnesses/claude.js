@@ -42,9 +42,19 @@ function parseClaudeAuth(dir) {
  *  login deadline declare this; the others simply do not, and accounts.js
  *  answers 'unknown' for them rather than inventing a verdict. */
 function claudeLoginState(dir, now = Date.now()) {
+  const fp = path.join(dir, '.credentials.json');
   let raw = null;
-  try { raw = JSON.parse(fs.readFileSync(path.join(dir, '.credentials.json'), 'utf-8')); } catch { return loginState(null, now); }
-  return loginState(raw, now);
+  try { raw = JSON.parse(fs.readFileSync(fp, 'utf-8')); } catch { return loginState(null, now); }
+  // `writtenAt` = the file's last write. It is the ONLY on-disk clock that
+  // says anything about when this login session STARTED, but it is NOT the
+  // login time: every access-token refresh rewrites this file while
+  // refreshTokenExpiresAt stays put, so on an actively-used account it walks
+  // forward and "deadline − writtenAt" shrinks towards zero. Nothing may treat
+  // it as the session length on its own — the watch only uses it at a moment
+  // it WITNESSED the deadline change (login-expiry-watch.measureLoginSpan).
+  let writtenAt = null;
+  try { writtenAt = fs.statSync(fp).mtimeMs; } catch { }
+  return { ...loginState(raw, now), writtenAt };
 }
 
 module.exports = {

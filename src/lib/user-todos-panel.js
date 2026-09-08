@@ -171,7 +171,7 @@ export function installUserTodos(app) {
           <span class="ut-dot" data-urgency=""></span>
           <div class="ut-body"><div class="ut-text">${escHtml(i.text)}</div>
           ${detailHtml(i)}
-          <div class="ut-meta"><span class="ut-sess" title="${t('Go to this session')}">${escHtml(nameFor(i.sessionKey, [i]))}</span> · ${i.status === 'dismissed' ? t('dismissed') : t('done')}${i.resolvedBy === 'agent' ? ' · ' + t('by the agent') : ''} · ${agoText(i.resolvedAt || i.createdAt)}</div></div>
+          <div class="ut-meta"><span class="ut-sess" title="${t('Go to this session')}">${escHtml(nameFor(i.sessionKey, [i]))}</span> · ${i.status === 'dismissed' ? t('dismissed') : t('done')}${i.resolvedBy === 'agent' ? ' · ' + t('by the agent') : (i.resolvedBy === 'system' ? ' · ' + t('automatically') : '')} · ${agoText(i.resolvedAt || i.createdAt)}</div></div>
           <span class="ut-actions"><button class="ut-act ut-view" title="${t('Open in viewer (copyable, rendered)')}">⤢</button><button class="ut-act ut-reopen" title="${t('Reopen')}">↺</button></span>
         </div>`).join('')}` : '';
     popup.innerHTML = tabsHtml + `

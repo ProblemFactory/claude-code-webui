@@ -39,6 +39,15 @@ const EXPIRING_MS = 24 * 3600e3;
 // with 20 h left still serves its own conversation fine (that is why
 // loginUsable and loginSwitchTarget are two different questions).
 const NEAR_MS = 30 * 60e3;
+// A LOGIN SESSION shorter than this is not how Claude subscriptions normally
+// behave (the deadlines measured on this instance were 5, 9, 12 and 16 DAYS
+// out) — it is what an org-level SSO session policy looks like from the
+// outside. It is a HINT, never a claim: it is only ever spoken about a span
+// this watch actually MEASURED (see measureLoginSpan in the watch), because
+// the only clock on disk — the credential file's mtime — also moves on every
+// access-token refresh and would otherwise report a 30-day session as a
+// 20-hour one.
+const SHORT_SESSION_MS = 36 * 3600e3;
 // Warning ladder, most-lenient first. 'expired' is the terminal rung (it
 // fires once, when the login actually dies).
 const WARN_STAGES = Object.freeze(['24h', '1h', 'expired']);
@@ -168,6 +177,48 @@ function loginWallPhrase(info) {
   return 'login session is unusable'; // never reached through loginUsable(), but never silent either
 }
 
+/**
+ * reloggedIn(info, prevExp) — did a REAL new login session start since the
+ * deadline `prevExp` was recorded?
+ *
+ * Three clauses, each load-bearing:
+ *  · the login must be ALIVE again ('ok'/'expiring'). A wiped file keeps
+ *    refreshTokenExpiresAt and that deadline can be in the FUTURE (the round-3
+ *    shape), so "the number went up" alone would read a signed-out account as
+ *    recovered — and silently drop the warning that is still true.
+ *  · there must be a readable deadline now. A live token with no deadline is
+ *    'unknown' = NO CLAIM, and no claim never overrides a warning we filed
+ *    from a fact.
+ *  · the deadline must be DIFFERENT from the recorded one. A login session's
+ *    deadline is fixed for its whole life, so a change can only come from a
+ *    new session; a REWRITE that keeps it (an access-token refresh, a creds
+ *    file copied between machines, an import) is the SAME session — nothing
+ *    was fixed, so nothing may be cleared. This is the load-bearing negative.
+ * `prevExp == null` with a live deadline now IS a re-login: the recorded row
+ * was the un-datable wiped shape and there is a session again.
+ *
+ * NOT "strictly newer" — that reading is wrong in exactly the case the
+ * session-policy hint exists for. An org with a 24 h SSO policy hands back a
+ * deadline 24 h out; if we warned at the 24 h rung with 20 h still on the
+ * clock, the new session's deadline is EARLIER than the one we warned about,
+ * and a `>` test would leave that now-false item open forever — the very
+ * defect this is fixing. Retraction is safe in the other direction too: the
+ * warning ladder re-arms on the new deadline in the SAME sweep, so an item
+ * that is still deserved is re-filed immediately, with the right numbers.
+ */
+function reloggedIn(info, prevExp = null) {
+  if (info?.state !== 'ok' && info?.state !== 'expiring') return false;
+  const exp = info?.refreshExpiresAt ?? null;
+  if (exp == null) return false;
+  return exp !== prevExp;
+}
+
+/** Is a MEASURED login-session length short enough to be worth mentioning as
+ *  a possible org session policy? Never true for a missing measurement. */
+function shortSession(spanMs) {
+  return typeof spanMs === 'number' && Number.isFinite(spanMs) && spanMs > 0 && spanMs < SHORT_SESSION_MS;
+}
+
 /** The most urgent warning rung this login currently qualifies for, or null. */
 function warnStageFor(info) {
   if (!loginUsable(info)) return 'expired';
@@ -230,8 +281,8 @@ function reviewWarnings(info, entry, now = Date.now(), opts = {}) {
 }
 
 module.exports = {
-  EXPIRING_MS, NEAR_MS, WARN_STAGES, STAGE_MS, DEAD_STATES, STALE_GRACE_MS,
+  EXPIRING_MS, NEAR_MS, WARN_STAGES, STAGE_MS, DEAD_STATES, STALE_GRACE_MS, SHORT_SESSION_MS,
   loginState, loginUsable, loginSwitchTarget, loginRank, loginBlockReason,
   loginAgeText, loginBucketLabel, loginBlockedPhrase, loginBlockedText, loginWallPhrase,
-  warnStageFor, reviewWarnings,
+  warnStageFor, reviewWarnings, reloggedIn, shortSession,
 };
