@@ -949,13 +949,26 @@ console.log('— §5 wiring');
     && /getLoginExpiryWatch: \(\) => \{ try \{ return loginExpiryWatch; \} catch \{ return null; \} \}/.test(srv));
   const aur = fs.readFileSync(path.join(REPO, 'src/server/account-usage-routes.js'), 'utf8');
   ck('the routes destructure it (an unread dep is the 2.355.0 unstaged-wiring class)', /getTelemetry, getUsageHistory, getLoginExpiryWatch \}\) \{/.test(aur));
-  ck('every login FINALIZE route sweeps once, gated on the login having actually succeeded', (() => {
-    const calls = aur.match(/sweepLoginExpiry\('[^']+'\)/g) || [];
-    return calls.length === 3
-      && /const r = accounts\.reloginResolve\(req\.params\.id\);\n\s*if \(r\?\.loggedIn\) sweepLoginExpiry\('re-login'\);/.test(aur)
+  ck('every login FINALIZE route sweeps, gated on the login having actually succeeded', (() => {
+    const calls = (aur.match(/sweepLoginExpiry\('[^']+'\)/g) || []).concat(aur.match(/sweepOnLoginTransition\([^)]*'[^']+'\)/g) || []);
+    return calls.length === 4
+      // ROUND 2: gate on reloginResolve's REAL answer. `r.loggedIn` (round 1)
+      // is a property that method returns on NONE of its four outcomes.
+      && /const captured = !!r\?\.account\?\.loggedIn \|\| r\?\.outcome === 'moved';\n\s*if \(captured\) sweepOnLoginTransition\(req\.params\.id, r, 're-login'\);/.test(aur)
+      && !/if \(r\?\.loggedIn\) sweepLoginExpiry/.test(aur)
       && /const fin = accounts\.finalizeSubscription\(req\.params\.id\);\n\s*if \(fin\?\.loggedIn\) sweepLoginExpiry\('subscription login'\);/.test(aur)
       && /sweepLoginExpiry\('codex device-auth'\)/.test(aur);
   })());
+  // ROUND 2: the merge branch's SECOND sweep. The one above `fin` runs while
+  // the fresh credentials are still in the throwaway record's dir — it cannot
+  // see the survivor's new deadline, which is the whole point.
+  ck('...and the auto-merge branch sweeps AGAIN, after mergeSubscription moved the credentials',
+    /const merged = accounts\.mergeSubscription\([\s\S]{0,900}?sweepLoginExpiry\('subscription login merge'\);\n\s*return res\.json\(\{ success: true, \.\.\.fin, merged: true/.test(aur));
+  // A route the client POLLS may not carry an unbounded per-call side effect.
+  ck('the polled re-login route sweeps on the TRANSITION (a credential fingerprint), never per poll',
+    /const lastLoginFingerprint = new Map\(\)/.test(aur)
+    && /const loginFingerprint = \(r\) => \{/.test(aur)
+    && /const sweepOnLoginTransition = \(id, r, why\) => \{[\s\S]*?if \(lastLoginFingerprint\.get\(id\) === fp\) return false;/.test(aur));
   ck('...and the sweep never throws into the login route (a follow-up must not fail the login)', /const sweepLoginExpiry = \(why\) => \{\n\s*try \{[\s\S]*?\} catch \(e\) \{ console\.log\('\[login-expiry\] immediate sweep failed:'/.test(aur));
   // ONE READER: the chip (roster row `loginState`) and the inbox item both come
   // from accounts.loginStateOf. The watch must never grow a credential reader
@@ -1000,11 +1013,63 @@ console.log('— §5 wiring');
 // factory with a stub express app, captures its handlers and calls them — the
 // only way to prove the lazy getter actually resolves at request time (the
 // lost-export / Proxy-swallowed class: 2.333.0, 2.341.1, 2.343.0) and that a
-// login fires the sweep exactly ONCE, including on the merge branch that
-// returns early.
+// login fires the sweep, including on the merge branch that returns early.
+//
+// ROUND 2, THE FIXTURE ITSELF WAS THE BUG. Round 1 stubbed
+// `reloginResolve: () => ({ loggedIn: true })` — a shape that method has never
+// returned. It answers `{outcome}` plus, on two of its four outcomes, a nested
+// `{account}`; the route's `if (r?.loggedIn)` was therefore reading `undefined`
+// and the immediate sweep was DEAD on the exact route the inbox item and the
+// login chip send the user to, while the suite stayed green. So the shapes
+// below are not written by hand at all: `realResolve()` builds a temp accounts
+// store, drives the REAL AccountManager.reloginResolve, and hands the route the
+// object it actually returned. A change to that method's shape lands here.
 console.log('— §5b the immediate sweep after a login (real routes factory)');
 {
   const routes = R('src/server/account-usage-routes.js');
+  const { AccountManager } = R('src/accounts.js');
+  const RH = 3600e3;
+  const tmpDirs = [];
+  const subCreds = (dir, id, { exp, email, at = Date.now() }) => {
+    const d = path.join(dir, 'subs', id);
+    fs.mkdirSync(d, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(d, '.credentials.json'), JSON.stringify({
+      claudeAiOauth: { accessToken: 'sk-ant-oat-x', refreshToken: 'sk-ant-ort-x', expiresAt: at + RH, refreshTokenExpiresAt: exp, scopes: ['user:inference'], subscriptionType: 'max' },
+    }));
+    fs.writeFileSync(path.join(d, '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: email, organizationName: 'Org' } }));
+  };
+  const mkStore = (accts) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-lereal-'));
+    tmpDirs.push(dir);
+    fs.mkdirSync(path.join(dir, 'subs'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'accounts.json'), JSON.stringify({ version: 1, accounts: accts }));
+    return { dir, am: new AccountManager({ dataDir: dir, platform: 'linux' }) };
+  };
+  /** THE REAL ANSWER for each of reloginResolve's four outcomes, captured from
+   *  an actual call. `at` shifts the access-token expiry so two 'same' answers
+   *  can differ the way two different logins do. */
+  const realResolve = (kind, { at = Date.now() } = {}) => {
+    const me = { id: 'sub-1', name: 'Fish Max', type: 'subscription', backend: 'claude', email: 'fish@example.com' };
+    if (kind === 'pending') { const { am } = mkStore([me]); return am.reloginResolve('sub-1'); }
+    if (kind === 'moved') {
+      const other = { id: 'sub-2', name: 'Other Max', type: 'subscription', backend: 'claude', email: 'other@example.com' };
+      const { dir, am } = mkStore([me, other]);
+      subCreds(dir, 'sub-1', { exp: at + 29 * 24 * RH, email: 'other@example.com', at });
+      return am.reloginResolve('sub-1');
+    }
+    const { dir, am } = mkStore([me]);
+    subCreds(dir, 'sub-1', { exp: at + 29 * 24 * RH, email: kind === 'split' ? 'stranger@example.com' : 'fish@example.com', at });
+    return am.reloginResolve('sub-1');
+  };
+  const REAL = { same: realResolve('same'), moved: realResolve('moved'), split: realResolve('split'), pending: realResolve('pending') };
+  ck('FIXTURE SOURCE: the real reloginResolve answers {outcome} — and NEVER a top-level loggedIn (round 1 gated on exactly that)',
+    REAL.same.outcome === 'same' && REAL.moved.outcome === 'moved' && REAL.split.outcome === 'split' && REAL.pending.outcome === 'pending'
+    && ['same', 'moved', 'split', 'pending'].every((k) => REAL[k].loggedIn === undefined));
+  ck('...the captured login rides in a NESTED account on same/split, and `moved` carries no account at all',
+    REAL.same.account?.loggedIn === true && REAL.split.account?.loggedIn === true
+    && REAL.moved.account === undefined && REAL.moved.movedTo?.id === 'sub-2'
+    && REAL.pending.account === undefined);
+
   const mkApp = () => {
     const h = { get: new Map(), post: new Map(), patch: new Map(), delete: new Map(), put: new Map() };
     const app = {};
@@ -1018,13 +1083,13 @@ console.log('— §5b the immediate sweep after a login (real routes factory)');
     fn({ params: {}, query: {}, body: {}, headers: {}, ...req }, res);
     return { code, body };
   };
-  // A watch stand-in that only counts. The real one is exercised in §4d.
+  // A watch stand-in that only counts. The real one is exercised in §4d/§5c.
   const mkWatch = () => { const w = { n: 0, sweep() { w.n++; return { emitted: [], resolved: [{ id: 'sub-1', n: 2 }] }; } }; return w; };
   const build = (acctOverrides, watch_) => {
     const { app, h } = mkApp();
     const accounts = {
       list: () => ({ accounts: [] }), get: () => null, subDir: () => '/tmp/nope',
-      reloginResolve: () => ({ loggedIn: true }), finalizeSubscription: () => ({ loggedIn: true }),
+      reloginResolve: () => REAL.same, finalizeSubscription: () => ({ loggedIn: true }),
       finalizeCodexSubscription: () => ({ loggedIn: true }), _subscriptionLoginStatus: () => null,
       ...acctOverrides,
     };
@@ -1044,14 +1109,49 @@ console.log('— §5b the immediate sweep after a login (real routes factory)');
     const w = mkWatch();
     const h = build({}, w);
     const r = call(h.post.get('/api/accounts/:id/relogin-finalize'), { params: { id: 'sub-1' } });
-    ck('a successful RE-LOGIN sweeps the watch exactly once, through the lazy getter', w.n === 1 && r.code === 200);
-    ck("...and the route's own answer is unchanged (the sweep is a side effect, never the reply)", r.body?.success === true && r.body?.loggedIn === true);
+    ck('a successful RE-LOGIN sweeps the watch, through the lazy getter', w.n === 1 && r.code === 200);
+    ck("...and the route's own answer is unchanged (the sweep is a side effect, never the reply)",
+      r.body?.success === true && r.body?.outcome === 'same' && r.body?.account?.loggedIn === true);
+  }
+  {
+    // 'moved' relocated a LIVE login into another record — that record's ledger
+    // row is what needs retracting, and there is no `account` here to ask.
+    const w = mkWatch();
+    const h = build({ reloginResolve: () => REAL.moved }, w);
+    const r = call(h.post.get('/api/accounts/:id/relogin-finalize'), { params: { id: 'sub-1' } });
+    ck("outcome 'moved' sweeps too (a login landed — in ANOTHER record)", w.n === 1 && r.body?.movedTo?.id === 'sub-2');
   }
   {
     const w = mkWatch();
-    const h = build({ reloginResolve: () => ({ loggedIn: false, state: 'error' }) }, w);
+    const h = build({ reloginResolve: () => REAL.split }, w);
     call(h.post.get('/api/accounts/:id/relogin-finalize'), { params: { id: 'sub-1' } });
-    ck('NEGATIVE CONTROL: a FAILED re-login sweeps nothing (there is no new fact to find)', w.n === 0);
+    ck("outcome 'split' sweeps (the login was minted into a new record)", w.n === 1);
+  }
+  {
+    const w = mkWatch();
+    const h = build({ reloginResolve: () => REAL.pending }, w);
+    call(h.post.get('/api/accounts/:id/relogin-finalize'), { params: { id: 'sub-1' } });
+    ck("NEGATIVE CONTROL: outcome 'pending' sweeps nothing — the browser flow is not finished", w.n === 0);
+  }
+  {
+    // THE POLL. manage-agents hits this route every 3 s for up to 5 minutes and
+    // 'same' is the answer for every one of them once a login is on disk. A
+    // side effect hung on the answer runs ~100×; measured before the fix: 100
+    // polls → 100 sweeps.
+    const w = mkWatch();
+    let answer = REAL.same;
+    const h = build({ reloginResolve: () => answer }, w);
+    const route = h.post.get('/api/accounts/:id/relogin-finalize');
+    for (let i = 0; i < 100; i++) call(route, { params: { id: 'sub-1' } });
+    ck('100 polls of the SAME answer sweep exactly once (a polled route carries no per-call side effect)', w.n === 1);
+    // …and the login the user is actually completing must NOT be skipped. This
+    // is why the gate is a fingerprint and not an "already swept this account"
+    // latch: re-logging a still-logged-in account answers 'same' from poll #1.
+    answer = realResolve('same', { at: Date.now() + 8 * RH });
+    for (let i = 0; i < 10; i++) call(route, { params: { id: 'sub-1' } });
+    ck('...and a genuinely NEW login arriving mid-poll still sweeps (never a boolean latch)', w.n === 2);
+    for (let i = 0; i < 10; i++) call(route, { params: { id: 'sub-1' } });
+    ck('...then goes quiet again', w.n === 2);
   }
   {
     const w = mkWatch();
@@ -1060,9 +1160,10 @@ console.log('— §5b the immediate sweep after a login (real routes factory)');
     ck('the ADD-subscription finalize sweeps once too', w.n === 1);
   }
   {
-    // The auto-merge branch returns EARLY with its own res.json. A sweep placed
-    // on the normal exit would silently never run for a login that folded into
-    // an existing account — the single call site above `fin` covers both.
+    // The auto-merge branch returns EARLY with its own res.json. The sweep
+    // above `fin` covers both exits — but it runs BEFORE mergeSubscription
+    // moves the fresh credentials into the survivor's dir, so a SECOND sweep
+    // follows the merge. (§5c asserts the EFFECT, with a real merge.)
     const w = mkWatch();
     const h = build({
       finalizeSubscription: () => ({ loggedIn: true, email: 'x@example.com' }),
@@ -1070,7 +1171,7 @@ console.log('— §5b the immediate sweep after a login (real routes factory)');
       mergeSubscription: () => ({ id: 'sub-other' }),
     }, w);
     const r = call(h.post.get('/api/accounts/subscription/:id/finalize'), { params: { id: 'sub-1' } });
-    ck('...including on the auto-merge branch, which returns early (still exactly once)', w.n === 1 && r.body?.merged === true);
+    ck('...the auto-merge branch sweeps once before the merge and once after it', w.n === 2 && r.body?.merged === true);
   }
   {
     const w = mkWatch();
@@ -1087,6 +1188,105 @@ console.log('— §5b the immediate sweep after a login (real routes factory)');
     const h2 = build({}, null);
     ck('NEGATIVE CONTROL: no watch wired at all is a quiet no-op, not a 500',
       call(h2.post.get('/api/accounts/:id/relogin-finalize'), { params: { id: 'sub-1' } }).code === 200);
+  }
+  for (const d of tmpDirs) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { } }
+}
+
+// ── §5c the sweep's EFFECT, end to end on real stores ─────────────────────
+// §5b counts calls. A call count cannot tell you the sweep found anything —
+// round 1's merge leg asserted `w.n === 1` and was green while the survivor's
+// warning stayed open forever, because the sweep ran against the survivor's
+// STALE credential file. These two legs run the REAL AccountManager, the REAL
+// UserTodoManager and the REAL watch through the REAL route, and assert on the
+// inbox.
+console.log('— §5c the immediate sweep RETRACTS, end to end');
+{
+  const routes = R('src/server/account-usage-routes.js');
+  const watch = R('src/server/login-expiry-watch.js');
+  const { AccountManager } = R('src/accounts.js');
+  const { UserTodoManager } = R('src/user-todos.js');
+  const RH = 3600e3, RMIN = 60e3;
+  const mkApp = () => {
+    const h = { get: new Map(), post: new Map(), patch: new Map(), delete: new Map(), put: new Map() };
+    const app = {};
+    for (const m of Object.keys(h)) app[m] = (p, ...fns) => h[m].set(p, fns[fns.length - 1]);
+    app.use = () => {};
+    return { app, h };
+  };
+  const call = (fn, req = {}) => {
+    let code = 200, body = null;
+    const res = { status(c) { code = c; return this; }, json(b) { body = b; return this; } };
+    fn({ params: {}, query: {}, body: {}, headers: {}, ...req }, res);
+    return { code, body };
+  };
+  const wire = (accounts, w) => {
+    const { app, h } = mkApp();
+    routes.create({
+      app, rootDir: REPO, HOST: '127.0.0.1', CLAUDE_CMD: 'claude', NODE_CMD: 'node',
+      CLAUDE_SUBSCRIPTION_LOGIN_HELPER: '/tmp/helper.js', activeSessions: new Map(), auth: { enabled: false },
+      engine: { clearSealedOrders: () => {} }, serverSetting: () => null, recordUsageAttribution: () => {},
+      liveAccountIdSet: () => new Set(), buildClaudeSubscriptionLoginCommand: () => 'claude auth login',
+      getAccounts: () => accounts, getHosts: () => null, getMounts: () => null,
+      getTelemetry: () => null, getUsageHistory: () => null, getLoginExpiryWatch: () => w,
+    });
+    return h;
+  };
+  const putCreds = (dir, id, { exp, email, wiped }) => {
+    const d = path.join(dir, 'subs', id);
+    fs.mkdirSync(d, { recursive: true, mode: 0o700 });
+    const tok = wiped ? { accessToken: '', refreshToken: '', expiresAt: 0 } : { accessToken: 'sk-ant-oat-x', refreshToken: 'sk-ant-ort-x', expiresAt: Date.now() + RH };
+    fs.writeFileSync(path.join(d, '.credentials.json'), JSON.stringify({ claudeAiOauth: { ...tok, refreshTokenExpiresAt: exp, scopes: ['user:inference'], subscriptionType: 'max' } }));
+    fs.writeFileSync(path.join(d, '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: email, organizationName: 'Org' } }));
+  };
+  const world = (accts) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-lee2e-'));
+    fs.mkdirSync(path.join(dir, 'subs'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'accounts.json'), JSON.stringify({ version: 1, accounts: accts }));
+    const accounts = new AccountManager({ dataDir: dir, platform: 'linux' });
+    const todos = new UserTodoManager({ dataDir: dir, onChange: () => {} });
+    const w = watch.create({ accounts, userTodos: todos, dataDir: dir, log: () => {} });
+    return {
+      dir, accounts, todos, w,
+      open: () => todos.snapshot().open,
+      cleanup: () => { try { todos.flush(); } catch { } fs.rmSync(dir, { recursive: true, force: true }); },
+    };
+  };
+
+  // (f) THE REPORTED DEFECT, through the real route: the item about the login
+  // you just fixed must be gone by the time the route answers.
+  {
+    const s = world([{ id: 'sub-1', name: 'Fish Max', type: 'subscription', backend: 'claude', email: 'fish@example.com' }]);
+    putCreds(s.dir, 'sub-1', { exp: Date.now() - 20 * RMIN, email: 'fish@example.com', wiped: true });
+    s.w.sweep();
+    ck('(f) the signed-out member has an OPEN inbox item', s.open().length === 1 && /is signed out/.test(s.open()[0].text));
+    putCreds(s.dir, 'sub-1', { exp: Date.now() + 29 * 24 * RH, email: 'fish@example.com' }); // the owner re-logs in
+    const h = wire(s.accounts, s.w);
+    const r = call(h.post.get('/api/accounts/:id/relogin-finalize'), { params: { id: 'sub-1' } });
+    ck('(f) POSTing the real relogin-finalize RETRACTS it (round 1 left it open forever)', s.open().length === 0 && r.body?.outcome === 'same');
+    s.cleanup();
+  }
+
+  // (g) THE MERGE. The survivor carries the warning; the fresh login lands in a
+  // throwaway record and mergeSubscription moves it over. A sweep placed only
+  // before the merge reads the survivor's DEAD file and retracts nothing.
+  {
+    const s = world([{ id: 'sub-old', name: 'Fish Max', type: 'subscription', backend: 'claude', email: 'fish@example.com' }]);
+    putCreds(s.dir, 'sub-old', { exp: Date.now() - 20 * RMIN, email: 'fish@example.com', wiped: true });
+    s.w.sweep();
+    ck('(g) the survivor has an OPEN warning before the Add flow starts', s.open().length === 1);
+    const created = s.accounts.createSubscription({ name: 'Subscription' });
+    putCreds(s.dir, created.id, { exp: Date.now() + 29 * 24 * RH, email: 'fish@example.com' });
+    const h = wire(s.accounts, s.w);
+    const r = call(h.post.get('/api/accounts/subscription/:id/finalize'), { params: { id: created.id } });
+    ck('(g) the auto-merge really folded the record', r.body?.merged === true && r.body?.account?.id === 'sub-old');
+    ck("(g) ...and the SURVIVOR's credential file now carries the fresh login", s.accounts.loginStateOf('sub-old').state === 'ok');
+    ck('(g) the warning is RETRACTED by the time the route answers (the EFFECT, not the call count)', s.open().length === 0);
+    // IDEMPOTENCE, which is what lets the pre-merge sweep stay: a second sweep
+    // finds nothing left to do and says nothing.
+    const again = s.w.sweep();
+    ck('(g) NEGATIVE CONTROL: the sweep is idempotent — a repeat resolves nothing a second time',
+      (again.resolved || []).length === 0 && s.open().length === 0 && s.todos.snapshot().resolved.filter((i) => /is signed out/.test(i.text)).length === 1);
+    s.cleanup();
   }
 }
 

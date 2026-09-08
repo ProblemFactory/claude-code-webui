@@ -42,6 +42,38 @@ const sweepLoginExpiry = (why) => {
     return r;
   } catch (e) { console.log('[login-expiry] immediate sweep failed:', e.message); return null; }
 };
+// ONCE PER LOGIN, NOT ONCE PER POLL (round-2 verifier). `/relogin-finalize` is
+// a WATCHER endpoint: manage-agents polls it every 3 s for up to 5 minutes,
+// and for a record whose login is already on disk the answer is the SAME
+// `outcome:'same'` every time. A side effect hung on that answer runs ~100×
+// per re-login — a polled route may not carry an unbounded per-call side
+// effect.
+//
+// It also cannot be a plain "already swept this account" latch. Re-logging an
+// account that is STILL logged in answers 'same' from the very first poll,
+// minutes before the user finishes the browser flow, so a boolean latch would
+// skip exactly the sweep that matters. The gate is therefore the answer's own
+// CREDENTIAL FINGERPRINT — the fields that can only change when the file the
+// login writes changes: which outcome, which record, which identity, which
+// access token. Same fingerprint ⇒ the credentials did not move ⇒ there is
+// nothing new for the watch to find. This reads the ANSWER the route already
+// has; it is NOT a second credential reader (the sweep stays the single one).
+const lastLoginFingerprint = new Map(); // accountId → fingerprint of the last answer we swept on
+const FINGERPRINT_CAP = 500;            // bounded by the roster in practice; a hard ceiling anyway
+const loginFingerprint = (r) => {
+  const a = r?.account || r; // reloginResolve WRAPS the finalize result; finalizeSubscription IS it
+  return [r?.outcome || '', a?.id || r?.movedTo?.id || '', String(a?.email || r?.freshEmail || '').trim().toLowerCase(), a?.expiresAt ?? ''].join('|');
+};
+/** Sweep only on the TRANSITION — the first finalize answer that differs from
+ *  the last one we swept for this record. Returns whether it swept. */
+const sweepOnLoginTransition = (id, r, why) => {
+  const fp = loginFingerprint(r);
+  if (lastLoginFingerprint.get(id) === fp) return false;
+  if (lastLoginFingerprint.size >= FINGERPRINT_CAP) lastLoginFingerprint.clear();
+  lastLoginFingerprint.set(id, fp);
+  sweepLoginExpiry(why);
+  return true;
+};
 // ── Central collector (team deployments): other instances POST their batches
 // here (telemetry.forwardUrl → https://<collector>/api/telemetry/ingest).
 // Enabled ONLY when VIBESPACE_TELEMETRY_INGEST_TOKEN is set — the shared
@@ -403,7 +435,19 @@ app.post('/api/accounts/:id/relogin', (req, res) => {
 app.post('/api/accounts/:id/relogin-finalize', (req, res) => {
   try {
     const r = accounts.reloginResolve(req.params.id);
-    if (r?.loggedIn) sweepLoginExpiry('re-login');
+    // GATE ON reloginResolve's REAL ANSWER (round-2 verifier — the round-1 gate
+    // read `r.loggedIn`, a property this method has never returned on ANY of
+    // its four outcomes, so the sweep was dead on the exact route the inbox
+    // item and the login chip send the user to). Its shapes are:
+    //   'pending'                  — nothing on disk yet: stay silent
+    //   'same'  { account }        — the ordinary in-place re-login
+    //   'split' { account }        — a stranger's login, minted as a new record
+    //   'moved' { movedTo }        — the login belonged to ANOTHER record and
+    //                                was relocated into it; that record's
+    //                                ledger row is the one to retract, and
+    //                                there is no `account` here at all
+    const captured = !!r?.account?.loggedIn || r?.outcome === 'moved';
+    if (captured) sweepOnLoginTransition(req.params.id, r, 're-login');
     try {
       // SAME-SPELLING WARNING (2026-09-07): this `loginState` is a STRING
       // ('error') describing how the login TERMINAL run went. The account ROW
@@ -443,6 +487,17 @@ app.post('/api/accounts/subscription/:id/finalize', (req, res) => {
       if (dup) {
         try {
           const merged = accounts.mergeSubscription(req.params.id, dup.id, { preferFromCreds: true, liveAccountIds: liveAccountIdSet() });
+          // AGAIN, AFTER THE MERGE (round-2 verifier). The sweep above ran
+          // while the fresh credentials were still in the THROWAWAY record's
+          // dir — the survivor, which is the record carrying the open warning,
+          // still had its dead file, so the sweep read a stale deadline and
+          // retracted nothing. `mergeSubscription` is the moment the
+          // survivor's credential file actually changes, so the sweep that
+          // can see it has to come after. The sweep is idempotent (test-login-
+          // expiry §5c(g) pins a repeat resolving nothing a second time), so
+          // the pre-merge one stays: it is the only sweep on every non-merge
+          // exit.
+          sweepLoginExpiry('subscription login merge');
           return res.json({ success: true, ...fin, merged: true, account: merged });
         } catch (me) {
           if (me.code !== 'merge-account-live') throw me;
