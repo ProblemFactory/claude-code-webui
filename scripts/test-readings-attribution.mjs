@@ -68,6 +68,18 @@ const readWindow = (cacheDir, id) => { try { return JSON.parse(fs.readFileSync(p
 const cleanup = [];
 process.on('exit', () => { for (const d of cleanup) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { } } });
 
+/** Write a PATCHED COPY of a real src/ module somewhere else and require it.
+ *  EVERY relative require is re-pointed at the repo, not a hand-kept list of
+ *  two: r5 added one import to `reading-repair.js` and the r4 control — the
+ *  file whose whole job is to still run — died on MODULE_NOT_FOUND. A control
+ *  that stops loading is worse than one that stops applying. */
+const patchedModule = (dir, name, text) => {
+  fs.mkdirSync(dir, { recursive: true });
+  const fp = path.join(dir, name);
+  fs.writeFileSync(fp, text.replace(/require\((['"])\.\/([\w.-]+)\1\)/g, (_m, _q, f) => `require(${JSON.stringify(path.join(REPO, 'src', f))})`));
+  return require(fp);
+};
+
 const CREDS = (id, { wiped = false, expiresAt = null, refreshExpiresAt = null } = {}) => JSON.stringify({
   claudeAiOauth: wiped
     ? { accessToken: '', refreshToken: '', expiresAt: 0, refreshTokenExpiresAt: Date.now() + 30 * 86400e3, scopes: [], subscriptionType: 'max' }
@@ -658,6 +670,41 @@ if (!probe) {
           // …while every earlier round's properties this row pins are still there
           && /THE CLOCK RANKS BELOW THE WINDOWS/.test(r3) && /AND THE STATUSLINE RUNS THE GUARD/.test(r3)
           && /WEEKLY HALF IS THE ONLY IDENTITY EVIDENCE/.test(r3);
+      })());
+    // r5: the rule most likely to be "simplified" back is the one that reads
+    // like bookkeeping — which KEY the cache half iterates. It is the whole
+    // difference between arming the live guard on an identity and arming it on
+    // one of that identity's two files.
+    ok('§9b …and the two rules ROUND 5 established: an identity can hold MORE THAN ONE cache file (so the cache half enumerates the files the product accepts, and the `acct:` rung is the only one that may ask the streams), and a bucket\'s fate is decided on the RECORD\'s buckets, not on the dated view of them',
+      /AND AN IDENTITY CAN HOLD MORE THAN ONE CACHE FILE/.test(row) && /keyed on the FILES the product accepts/.test(row)
+      && /structurally inert on it/.test(row) && /re-poisoned the just-cleaned stream on the next tick/.test(row)
+      && /documented LAST RESORT/.test(row) && /a PSEUDO key never/.test(row)
+      && /A BUCKET'S FATE IS DECIDED ON THE RECORD'S BUCKETS/.test(row) && /counted PARTIAL/.test(row), row.slice(-1200));
+    ok('§9b NEGATIVE CONTROL: those predicates fail on the row as ROUND 4 left it (they are not matching prose that was already there)',
+      (() => {
+        const r4 = row.replace(/\*\*AND AN IDENTITY CAN HOLD MORE THAN ONE CACHE FILE[\s\S]*?never a drop line\.\*\*/, '');
+        return r4.length < row.length
+          && !/AN IDENTITY CAN HOLD MORE THAN ONE CACHE FILE/.test(r4) && !/A BUCKET'S FATE IS DECIDED ON THE RECORD'S BUCKETS/.test(r4)
+          // …while every earlier round's properties this row pins are still there
+          && /THE REPAIR MOVES PER BUCKET/.test(r4) && /THE CLOCK RANKS BELOW THE WINDOWS/.test(r4)
+          && /WEEKLY HALF IS THE ONLY IDENTITY EVIDENCE/.test(r4);
+      })());
+    // r6: the rule most likely to be dropped is the one that reads like an
+    // implementation detail of r5 — that the DIRECTORY is not every file.
+    ok('§9b …and the rule ROUND 6 established: the `__global__` key has a SECOND snapshot outside the directory (`data/usage-cache.json`), judged by the directory half\'s own answer, archived-then-UNLINKED rather than mirrored, and reported as its own state',
+      /AND THE `__global__` KEY HAS A SECOND SNAPSHOT, OUTSIDE THAT DIRECTORY/.test(row)
+      && /USAGE_CACHE_FILE/.test(row) && /newest-wins merge/.test(row)
+      && /never a second `identityKeyFor` over that payload/.test(row)
+      && /UNLINKED, not mirrored/.test(row) && /globalFile: clean \/ archived \/ unresolvable \/ absent/.test(row)
+      && /STANDING SWEEP derives the persisted-snapshot ROOTS from the source/.test(row), row.slice(-1400));
+    ok('§9b NEGATIVE CONTROL: that predicate fails on the row as ROUND 5 left it (it is not matching prose that was already there)',
+      (() => {
+        const r5 = row.replace(/ \*\*AND THE `__global__` KEY HAS A SECOND SNAPSHOT, OUTSIDE THAT DIRECTORY[\s\S]*?to judge or seed it with\.\*\*/, '');
+        return r5.length < row.length
+          && !/SECOND SNAPSHOT, OUTSIDE THAT DIRECTORY/.test(r5) && !/globalFile: clean \/ archived/.test(r5)
+          // …while every earlier round's properties this row pins are still there
+          && /AN IDENTITY CAN HOLD MORE THAN ONE CACHE FILE/.test(r5) && /THE REPAIR MOVES PER BUCKET/.test(r5)
+          && /WEEKLY HALF IS THE ONLY IDENTITY EVIDENCE/.test(r5);
       })());
   }
 }
@@ -2129,19 +2176,19 @@ const mkIncidentWorld = ({ stampWindows = true } = {}) => {
   const writeStream = (ident, rows) => fs.writeFileSync(path.join(anchors, `anchors-${ident}.ndjson`), rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
   // A: 8 honest panel readings + a chained pair whose FIRST half is foreign
   const aRows = [];
-  for (let i = 0; i < 8; i++) aRows.push(rec(A, 'org_a', T0 + i * 60000, 0.1 + i * 0.01, i % 2 ? WA : WA - 60));
-  aRows.push(rec(A, 'org_a', T0 + 9 * 60000, 0.9, WB, 'rate-limit-event'));                 // ← B's window, filed on A
-  aRows.push({ ...rec(A, 'org_a', T0 + 10 * 60000, 0.2, WA, 'rate-limit-event'), prevFetchedAt: T0 + 9 * 60000, elapsedSec: 60, costSince: { total: 7 } });
-  writeStream('org_a', aRows);
+  for (let i = 0; i < 8; i++) aRows.push(rec(A, 'org_aaaa', T0 + i * 60000, 0.1 + i * 0.01, i % 2 ? WA : WA - 60));
+  aRows.push(rec(A, 'org_aaaa', T0 + 9 * 60000, 0.9, WB, 'rate-limit-event'));                 // ← B's window, filed on A
+  aRows.push({ ...rec(A, 'org_aaaa', T0 + 10 * 60000, 0.2, WA, 'rate-limit-event'), prevFetchedAt: T0 + 9 * 60000, elapsedSec: 60, costSince: { total: 7 } });
+  writeStream('org_aaaa', aRows);
   // B: 8 honest panel readings
-  writeStream('org_b', Array.from({ length: 8 }, (_, i) => rec(B, 'org_b', T0 + i * 60000, 0.5, i % 2 ? WB : WB - 60)));
+  writeStream('org_bbbb', Array.from({ length: 8 }, (_, i) => rec(B, 'org_bbbb', T0 + i * 60000, 0.5, i % 2 ? WB : WB - 60)));
   // a REMOVED account's stream that shares A's weekly phase — it must never be
   // a re-file target, and its own rows must not be judged (too few readings)
   writeStream('org_gone', [rec(GONE, 'org_gone', T0, 0.4, WGONE), rec(GONE, 'org_gone', T0 + 60000, 0.41, WGONE)]);
-  fs.writeFileSync(path.join(anchors, 'rates.json'), JSON.stringify({ 'org_a': { computedAt: 1 } }));
+  fs.writeFileSync(path.join(anchors, 'rates.json'), JSON.stringify({ 'org_aaaa': { computedAt: 1 } }));
   // a cache snapshot carrying the WRONG account's window
   fs.writeFileSync(path.join(cache, A + '.json'), JSON.stringify({ fetchedAt: T0 + 9 * 60000, source: 'rate-limit-event', fiveHour: { utilization: 0.2 }, sevenDay: { utilization: 0.9, resetsAt: WB }, orgUuid: 'aaaa' }));
-  fs.writeFileSync(path.join(cache, B + '.json'), JSON.stringify({ fetchedAt: T0, source: 'on-demand', sevenDay: { utilization: 0.5, resetsAt: WB } }));
+  fs.writeFileSync(path.join(cache, B + '.json'), JSON.stringify({ fetchedAt: T0, source: 'on-demand', sevenDay: { utilization: 0.5, resetsAt: WB }, orgUuid: 'bbbb' }));
 
   const rep = repair.repairByWindow({ dataDir, roster: [A, B], id: 'W' });
   const rows = (f) => fs.readFileSync(path.join(anchors, f), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
@@ -2149,22 +2196,22 @@ const mkIncidentWorld = ({ stampWindows = true } = {}) => {
     JSON.stringify(rep.identities.map((i) => [i.key, i.own, i.of, i.canReceive])));
   ok('§16 …a stream with too few own readings establishes nothing (a coincidence is not a fingerprint)', !rep.identities.some((i) => i.key === 'org_gone'));
   ok('§16 the foreign anchor is RE-FILED onto the account whose window it carries', rep.anchors.refiled === 1 && rep.anchors.archived === 0, JSON.stringify(rep.anchors));
-  ok('§16 …and a REMOVED account that shares the phase is not a candidate, so the answer stays unambiguous', rows('anchors-org_b.ndjson').some((r) => Math.abs(r.buckets.sevenDay.u - 0.9) < 1e-9));
+  ok('§16 …and a REMOVED account that shares the phase is not a candidate, so the answer stays unambiguous', rows('anchors-org_bbbb.ndjson').some((r) => Math.abs(r.buckets.sevenDay.u - 0.9) < 1e-9));
   ok('§16 …inserted IN TIME ORDER, unchained and uncosted (its Δu is real for that account, the cost interval is not)', (() => {
-    const b = rows('anchors-org_b.ndjson');
+    const b = rows('anchors-org_bbbb.ndjson');
     const moved = b.find((r) => Math.abs(r.buckets.sevenDay.u - 0.9) < 1e-9);
-    return moved && moved.prevFetchedAt === null && moved.costSince === null && moved.accountId === B && moved.identityKey === 'org_b' && moved.refiledFrom === 'org_a'
+    return moved && moved.prevFetchedAt === null && moved.costSince === null && moved.accountId === B && moved.identityKey === 'org_bbbb' && moved.refiledFrom === 'org_aaaa'
       && b.every((r, i) => i === 0 || r.fetchedAt >= b[i - 1].fetchedAt);
-  })(), JSON.stringify(rows('anchors-org_b.ndjson').map((r) => [r.fetchedAt - T0, r.buckets.sevenDay.u])));
+  })(), JSON.stringify(rows('anchors-org_bbbb.ndjson').map((r) => [r.fetchedAt - T0, r.buckets.sevenDay.u])));
   ok('§16 the pair it broke is VOIDED, not silently re-pointed at a different interval', (() => {
-    const a = rows('anchors-org_a.ndjson');
+    const a = rows('anchors-org_aaaa.ndjson');
     const after = a.find((r) => r.fetchedAt === T0 + 10 * 60000);
     return rep.anchors.voided === 1 && after && after.costSince === null && after.prevFetchedAt === T0 + 7 * 60000;
   })(), JSON.stringify(rep.anchors));
   ok('§16 ARCHIVE-NEVER-DESTROY: every moved row is archived with the reason, and the corpus keeps every record', (() => {
     const arch = fs.readFileSync(path.join(dataDir, 'archive', 'readings-window-anchors.ndjson'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
-    const total = ['anchors-org_a.ndjson', 'anchors-org_b.ndjson', 'anchors-org_gone.ndjson'].reduce((n, f) => n + rows(f).length, 0);
-    return arch.length === 1 && arch[0].action === 'refiled' && /is not org_a's/.test(arch[0].reason) && total === 10 + 8 + 2;
+    const total = ['anchors-org_aaaa.ndjson', 'anchors-org_bbbb.ndjson', 'anchors-org_gone.ndjson'].reduce((n, f) => n + rows(f).length, 0);
+    return arch.length === 1 && arch[0].action === 'refiled' && /is not org_aaaa's/.test(arch[0].reason) && total === 10 + 8 + 2;
   })());
   ok('§16 the cache snapshot carrying another account\'s window is archived and REBUILT from that account\'s newest own-window reading', (() => {
     const c = JSON.parse(fs.readFileSync(path.join(cache, A + '.json'), 'utf8'));
@@ -2187,17 +2234,20 @@ const mkIncidentWorld = ({ stampWindows = true } = {}) => {
     const dd = path.join(d2, 'data');
     fs.mkdirSync(path.join(dd, 'usage-anchors'), { recursive: true });
     fs.mkdirSync(path.join(dd, 'usage-cache'), { recursive: true });
-    const rs = Array.from({ length: 8 }, (_, i) => rec(A, 'org_a', T0 + i * 60000, 0.1, WA));
-    rs.push(rec(A, 'org_a', T0 + 9 * 60000, 0.9, WA + 3 * 86400, 'rate-limit-event'));
-    fs.writeFileSync(path.join(dd, 'usage-anchors', 'anchors-org_a.ndjson'), rs.map((r) => JSON.stringify(r)).join('\n') + '\n');
+    const rs = Array.from({ length: 8 }, (_, i) => rec(A, 'org_aaaa', T0 + i * 60000, 0.1, WA));
+    rs.push(rec(A, 'org_aaaa', T0 + 9 * 60000, 0.9, WA + 3 * 86400, 'rate-limit-event'));
+    fs.writeFileSync(path.join(dd, 'usage-anchors', 'anchors-org_aaaa.ndjson'), rs.map((r) => JSON.stringify(r)).join('\n') + '\n');
     const r = repair.repairByWindow({ dataDir: dd, roster: [A], id: 'W2' });
     const arch = fs.readFileSync(path.join(dd, 'archive', 'readings-window-anchors.ndjson'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
     ok('§16 a foreign reading matching NO account is ARCHIVED with the reason, never re-filed on a guess', r.anchors.archived === 1 && r.anchors.refiled === 0 && /matches no known account/.test(arch[0].reason), JSON.stringify(r.anchors));
   }
   ok('§16 the migration is registered append-only with a dated id, and says out loud what it did',
-    /id: '2026-09-refile-readings-by-window'/.test(read('src/server/migrations.js')) && /\[migrate\] readings-by-window:/.test(read('src/server/migrations.js')));
+    /id: '2026-09-refile-readings-by-window(-v\d+)?'/.test(read('src/server/migrations.js')) && /\[migrate\] readings-by-window:/.test(read('src/server/migrations.js')));
   ok('§16 …and it hands the CURRENT roster as the only accounts that may RECEIVE a reading (a removed subscription cannot hold one)',
-    /roster = \(st\?\.accounts \|\| \[\]\)\.filter\(\(a\) => a && a\.id && a\.type === 'subscription'\)/.test(read('src/server/migrations.js')));
+    /roster = accounts\.filter\(\(a\) => a\.type === 'subscription'\)\.map\(\(a\) => a\.id\)/.test(read('src/server/migrations.js')));
+  ok('§16 …and the RECORDS as well (r5): resolving a cache FILE to its identity is `usageIdentityGroups`\' job, which reads backend + type + email — ids alone would make this a second, weaker spelling of the engine\'s map',
+    /accounts = \(st\?\.accounts \|\| \[\]\)\.filter\(\(a\) => a && a\.id\)/.test(read('src/server/migrations.js'))
+    && /repairByWindow\(\{ dataDir, roster, accounts, id:/.test(read('src/server/migrations.js')));
 }
 
 // ── §16b PER BUCKET, NEVER WHOLESALE (r4, reproduced on a COPY of this
@@ -2244,11 +2294,11 @@ const mkIncidentWorld = ({ stampWindows = true } = {}) => {
     const dataDir = path.join(root, 'data');
     const anchors = path.join(dataDir, 'usage-anchors'), cache = path.join(dataDir, 'usage-cache');
     for (const p of [anchors, cache]) fs.mkdirSync(p, { recursive: true });
-    const aRows = Array.from({ length: 8 }, (_, i) => rec(A, 'org_a', T0 + i * 60000, 0.1 + i * 0.01, WA, WA, 0.90 + i * 0.005));
-    const bRows = Array.from({ length: 8 }, (_, i) => rec(B, 'org_b', T0 + i * 60000, 0.5, WB, WB, 0.80));
-    bRows.push(rec(B, 'org_b', T0 + 20 * 60000, 0.20, WA, WB, 0.38, 'rate-limit-event'));   // ← THE MIXED RECORD
-    fs.writeFileSync(path.join(anchors, 'anchors-org_a.ndjson'), aRows.map((r) => JSON.stringify(r)).join('\n') + '\n');
-    fs.writeFileSync(path.join(anchors, 'anchors-org_b.ndjson'), bRows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+    const aRows = Array.from({ length: 8 }, (_, i) => rec(A, 'org_aaaa', T0 + i * 60000, 0.1 + i * 0.01, WA, WA, 0.90 + i * 0.005));
+    const bRows = Array.from({ length: 8 }, (_, i) => rec(B, 'org_bbbb', T0 + i * 60000, 0.5, WB, WB, 0.80));
+    bRows.push(rec(B, 'org_bbbb', T0 + 20 * 60000, 0.20, WA, WB, 0.38, 'rate-limit-event'));   // ← THE MIXED RECORD
+    fs.writeFileSync(path.join(anchors, 'anchors-org_aaaa.ndjson'), aRows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+    fs.writeFileSync(path.join(anchors, 'anchors-org_bbbb.ndjson'), bRows.map((r) => JSON.stringify(r)).join('\n') + '\n');
     fs.writeFileSync(path.join(cache, A + '.json'), JSON.stringify({
       fetchedAt: T0 + 21 * 60000, source: 'rate-limit-event',
       fiveHour: { utilization: 0.2, resetsAt: 1 }, sevenDay: { utilization: 0.20, resetsAt: WB },   // ← foreign 7d
@@ -2257,7 +2307,7 @@ const mkIncidentWorld = ({ stampWindows = true } = {}) => {
       scopedWeekly: [{ name: 'Fable', utilization: 0.96, resetsAt: WA }], scopedFetchedAt: T0 + 7 * 60000,
       orgUuid: 'aaaa',
     }));
-    fs.writeFileSync(path.join(cache, B + '.json'), JSON.stringify({ fetchedAt: T0, source: 'on-demand', sevenDay: { utilization: 0.5, resetsAt: WB } }));
+    fs.writeFileSync(path.join(cache, B + '.json'), JSON.stringify({ fetchedAt: T0, source: 'on-demand', sevenDay: { utilization: 0.5, resetsAt: WB }, orgUuid: 'bbbb' }));
     return dataDir;
   };
   const rowsOf = (dataDir, f) => fs.readFileSync(path.join(dataDir, 'usage-anchors', f), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
@@ -2276,7 +2326,7 @@ const mkIncidentWorld = ({ stampWindows = true } = {}) => {
     JSON.stringify([readWindow(path.join(dataDir, 'usage-cache'), A), readWindow(path.join(dataDir, 'usage-cache'), B)]));
 
   // (b) THE RECORD MOVES CARRYING ONLY WHAT AGREES WITH WHERE IT LANDS
-  const movedA = rowsOf(dataDir, 'anchors-org_a.ndjson').find((r) => r.refiledFrom === 'org_b');
+  const movedA = rowsOf(dataDir, 'anchors-org_aaaa.ndjson').find((r) => r.refiledFrom === 'org_bbbb');
   ok('§16b the mixed record\'s 7-day half is filed on the account whose window it carries…',
     !!movedA && Math.abs(movedA.buckets.sevenDay.u - 0.20) < 1e-9 && movedA.buckets.sevenDay.resetsAt === WA && movedA.accountId === A,
     JSON.stringify(movedA && movedA.buckets));
@@ -2288,10 +2338,10 @@ const mkIncidentWorld = ({ stampWindows = true } = {}) => {
 
   // (c) THE DROPPED BUCKET IS ARCHIVED WITH A REASON THAT NAMES ITS OWNER
   const archRows = fs.readFileSync(path.join(dataDir, 'archive', 'readings-window-anchors.ndjson'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
-  const line = archRows.find((r) => r.action === 'refiled' && r.to === 'org_a');
+  const line = archRows.find((r) => r.action === 'refiled' && r.to === 'org_aaaa');
   ok('§16b the Fable half is ARCHIVED with its OWN reason, naming the account it does belong to',
     !!line && Array.isArray(line.buckets) && line.buckets.length === 1 && line.buckets[0].bucket === 'fable'
-    && /is org_b's, not org_a's/.test(line.buckets[0].reason),
+    && /is org_bbbb's, not org_aaaa's/.test(line.buckets[0].reason),
     JSON.stringify(line && line.buckets));
   ok('§16b …and that line keeps the ORIGINAL WHOLE RECORD, so nothing is destroyed and the corpus still re-derives offline',
     !!line && line.entry && line.entry.buckets.scopedWeekly.length === 1 && line.entry.buckets.scopedWeekly[0].resetsAt === WB
@@ -2319,7 +2369,7 @@ const mkIncidentWorld = ({ stampWindows = true } = {}) => {
     JSON.stringify([rep2.anchors, rep2.caches]));
   ok('§16b …and the census holds: NO stream and NO cache ends with a weekly bucket whose phase contradicts its account',
     (() => {
-      const phase = { org_a: { sevenDay: WA, fable: WA }, org_b: { sevenDay: WB, fable: WB } };
+      const phase = { org_aaaa: { sevenDay: WA, fable: WA }, org_bbbb: { sevenDay: WB, fable: WB } };
       let bad = 0;
       for (const [ident, w] of Object.entries(phase)) {
         for (const r of rowsOf(dataDir, `anchors-${ident}.ndjson`)) {
@@ -2360,14 +2410,10 @@ const mkIncidentWorld = ({ stampWindows = true } = {}) => {
     let patched = src, hits = 0;
     for (const [from, to] of SUB) { if (patched.split(from).length === 2) { patched = patched.replace(from, to); hits++; } }
     ok('§16b NEGATIVE CONTROL setup: all 5 pre-fix replacements hit the real module (a control that silently stops applying is a second green arm)', hits === SUB.length, `hits=${hits}/${SUB.length}`);
-    const preDir = path.join(d, 'prefix-src'); fs.mkdirSync(preDir, { recursive: true });
-    fs.writeFileSync(path.join(preDir, 'reading-repair.js'),
-      patched.replace("require('./login-state.js')", `require(${JSON.stringify(path.join(REPO, 'src/login-state.js'))})`)
-        .replace("require('./reading-lag.js')", `require(${JSON.stringify(path.join(REPO, 'src/reading-lag.js'))})`));
-    const R3 = require(path.join(preDir, 'reading-repair.js'));
+    const R3 = patchedModule(path.join(d, 'prefix-src'), 'reading-repair.js', patched);
     const dd = build(path.join(d, 'pre'));
     const r3 = R3.repairByWindow({ dataDir: dd, roster: [A, B], id: 'W3' });
-    const movedPre = rowsOf(dd, 'anchors-org_a.ndjson').find((r) => r.refiledFrom === 'org_b');
+    const movedPre = rowsOf(dd, 'anchors-org_aaaa.ndjson').find((r) => r.refiledFrom === 'org_bbbb');
     ok('§16b NEGATIVE CONTROL: the r3 repair moves the record WHOLE — the other account\'s Fable bucket lands in A\'s stream',
       r3.anchors.refiled === 1 && !!movedPre && (movedPre.buckets.scopedWeekly || []).length === 1 && movedPre.buckets.scopedWeekly[0].resetsAt === WB,
       JSON.stringify(movedPre && movedPre.buckets.scopedWeekly));
@@ -2397,10 +2443,10 @@ const mkIncidentWorld = ({ stampWindows = true } = {}) => {
   // (g) A RECORD WITH NO AGREEING BUCKET IS ARCHIVED, NOT MOVED
   {
     const dd = build(path.join(d, 'noowner'));
-    const rows = rowsOf(dd, 'anchors-org_b.ndjson');
+    const rows = rowsOf(dd, 'anchors-org_bbbb.ndjson');
     rows[rows.length - 1].buckets.sevenDay.resetsAt = WA + 3 * 86400;        // nobody's 7d …
     rows[rows.length - 1].buckets.scopedWeekly[0].resetsAt = WA + 3 * 86400; // … and nobody's Fable
-    fs.writeFileSync(path.join(dd, 'usage-anchors', 'anchors-org_b.ndjson'), rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+    fs.writeFileSync(path.join(dd, 'usage-anchors', 'anchors-org_bbbb.ndjson'), rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
     const r = repair.repairByWindow({ dataDir: dd, roster: [A, B], id: 'W5' });
     const arch = fs.readFileSync(path.join(dd, 'archive', 'readings-window-anchors.ndjson'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
     ok('§16b a record with NO bucket that can be proven to belong anywhere is ARCHIVED WHOLE, never moved on a guess',
@@ -2413,15 +2459,15 @@ const mkIncidentWorld = ({ stampWindows = true } = {}) => {
   // nothing on any path could clean it, while the pool reads it every tick.
   {
     const dd = build(path.join(d, 'scopedonly'));
-    const rows = rowsOf(dd, 'anchors-org_b.ndjson');
+    const rows = rowsOf(dd, 'anchors-org_bbbb.ndjson');
     rows[rows.length - 1].buckets.sevenDay.resetsAt = WB;            // 7d is B's own …
     rows[rows.length - 1].buckets.scopedWeekly[0].resetsAt = WA;     // … but the Fable bucket is A's
-    fs.writeFileSync(path.join(dd, 'usage-anchors', 'anchors-org_b.ndjson'), rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+    fs.writeFileSync(path.join(dd, 'usage-anchors', 'anchors-org_bbbb.ndjson'), rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
     const cB = cacheOf(dd, B);
     cB.scopedWeekly = [{ name: 'Fable', utilization: 0.38, resetsAt: WA }]; cB.scopedFetchedAt = T0;
     fs.writeFileSync(path.join(dd, 'usage-cache', B + '.json'), JSON.stringify(cB));
     const r = repair.repairByWindow({ dataDir: dd, roster: [A, B], id: 'W6' });
-    const kept = rowsOf(dd, 'anchors-org_b.ndjson').find((x) => x.fetchedAt === T0 + 20 * 60000);
+    const kept = rowsOf(dd, 'anchors-org_bbbb.ndjson').find((x) => x.fetchedAt === T0 + 20 * 60000);
     ok('§16b a record whose 7-day half is its own but whose Fable bucket is another account\'s STAYS, stripped of that bucket (it is not a re-file — only the bucket is foreign)',
       r.anchors.stripped === 1 && r.anchors.refiled === 0 && !!kept && (kept.buckets.scopedWeekly || []).length === 0
       && kept.buckets.sevenDay.resetsAt === WB && Array.isArray(kept.strippedBuckets) && kept.strippedBuckets.includes('fable'),
@@ -2455,8 +2501,8 @@ const mkIncidentWorld = ({ stampWindows = true } = {}) => {
     const windows = repair.establishedWindows(files, { roster: [A, B] });
     // the mixed record, still whole, moved into A's stream by hand — exactly
     // what the r3 anchor pass produced, and newer than every clean A reading
-    const mixed = windows.get('org_b').file.rows.find((r) => r.source === 'rate-limit-event');
-    windows.get('org_a').file.rows.push({ ...mixed, accountId: A, identityKey: 'org_a', refiledFrom: 'org_b' });
+    const mixed = windows.get('org_bbbb').file.rows.find((r) => r.source === 'rate-limit-event');
+    windows.get('org_aaaa').file.rows.push({ ...mixed, accountId: A, identityKey: 'org_aaaa', refiledFrom: 'org_bbbb' });
     const res = repair.repairCachesByWindow({ cacheDir: path.join(dd, 'usage-cache'), archiveDir: path.join(dd, 'archive'), windows, id: 'W7' });
     const c = cacheOf(dd, A);
     ok('§16b the cache rebuild refuses a record that carries ANY contradicting weekly bucket, even when its 7-day half is the account\'s own and it is the newest',
@@ -2493,6 +2539,681 @@ const mkIncidentWorld = ({ stampWindows = true } = {}) => {
         return /if \(\(!parsed\.scopedWeekly \|\| !parsed\.scopedWeekly\.length\) && Array\.isArray\(prev\.scopedWeekly\)/.test(eng)
           && refile > 0 && openFile > refile && preserve > openFile;
       })(), '');
+  }
+}
+
+// ── §16c ONE IDENTITY, MORE THAN ONE CACHE FILE (r5, reproduced on a COPY of
+// this instance's stores) ────────────────────────────────────────────────────
+// r4 keyed the cache half on ONE account per stream — `w.accountId`, the most
+// frequent accountId among the stream's rows. That answers "who is this stream
+// mostly about", not "which usage-cache files hold this identity's readings",
+// and an org-merged login is exactly the case where the two differ:
+// `usageIdentityGroups` puts `__global__.json` (the machine login) and the
+// named subscription in ONE group because they are ONE quota. On this instance
+// `usage-cache/__global__.json` carries the same orgUuid as its named sibling
+// and that identity's stream holds 47 rows keyed to it, so r4 left it out of
+// every one of its three jobs, silently:
+//   · never REPAIRED  — a foreign window in it survives the migration;
+//   · never SEEDED    — `guardReadingTarget` keys `windows` by CACHE FILE NAME,
+//                       so with no `.window-__global__` the live guard is
+//                       structurally inert on that key and writes whatever the
+//                       bookkeeping asked;
+//   · and `sweepUsageAnchors` anchors the FRESHEST cache of a group, so one
+//     ordinary sweep re-poisons the stream the migration has just cleaned.
+// Measured on a copy of this instance's stores, SAME frozen snapshot, only the
+// repair changed: r4 leaves __global__ carrying the stranger's 7d and writes 7
+// sidecars; r5 archives + rebuilds it and writes 8.
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-winrepair-multi-')); cleanup.push(d);
+  const A = 'sub-aaaaaaaaaaaa', B = 'sub-bbbbbbbbbbbb';
+  const WA = 1789030800, WB = 1789142400;
+  const T0 = Date.parse('2026-09-08T00:00:00Z');
+  const rec = (acct, ident, ts, u, resetsAt, source = 'on-demand') => ({
+    ts, fetchedAt: ts, source, accountId: acct, identityKey: ident,
+    buckets: { fiveHour: { u: 0.2, resetsAt: 1 }, sevenDay: { u, resetsAt }, scopedWeekly: [{ name: 'Fable', u: 0.5, resetsAt, asOf: ts - 1000 }] },
+    prevFetchedAt: null, elapsedSec: null, costSince: null,
+  });
+  /** A's identity is carried by TWO cache files — the named sub and the machine
+   *  login `__global__` — exactly as an org-merged login is on disk here. The
+   *  MACHINE LOGIN's snapshot is the poisoned one AND the freshest in the
+   *  group, which is what makes it anchor material for the next sweep. */
+  const build = (root) => {
+    const dataDir = path.join(root, 'data');
+    const anchors = path.join(dataDir, 'usage-anchors'), cache = path.join(dataDir, 'usage-cache');
+    for (const p of [anchors, cache]) fs.mkdirSync(p, { recursive: true });
+    const aRows = Array.from({ length: 8 }, (_, i) => rec(A, 'org_aaaa', T0 + i * 60000, 0.10 + i * 0.01, WA));
+    // …and the identity's own stream really does hold rows keyed to the machine
+    // login, which is how the engine writes them (accountId = the group's
+    // freshest cache, identityKey = the group)
+    aRows.push(rec(null, 'org_aaaa', T0 + 8 * 60000, 0.19, WA));
+    fs.writeFileSync(path.join(anchors, 'anchors-org_aaaa.ndjson'), aRows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+    fs.writeFileSync(path.join(anchors, 'anchors-org_bbbb.ndjson'),
+      Array.from({ length: 8 }, (_, i) => rec(B, 'org_bbbb', T0 + i * 60000, 0.5, WB)).map((r) => JSON.stringify(r)).join('\n') + '\n');
+    fs.writeFileSync(path.join(cache, A + '.json'), JSON.stringify({
+      fetchedAt: T0 + 8 * 60000, source: 'on-demand', orgUuid: 'aaaa',
+      fiveHour: { utilization: 0.2, resetsAt: 1 }, sevenDay: { utilization: 0.19, resetsAt: WA },
+      scopedWeekly: [{ name: 'Fable', utilization: 0.5, resetsAt: WA }], scopedFetchedAt: T0,
+    }));
+    fs.writeFileSync(path.join(cache, '__global__.json'), JSON.stringify({
+      fetchedAt: T0 + 30 * 60000, source: 'control', orgUuid: 'aaaa', orgEmail: 'a@example.test',
+      fiveHour: { utilization: 0.4, resetsAt: 2 },
+      sevenDay: { utilization: 0.93, resetsAt: WB },   // ← B's weekly phase, on A's machine login
+      scopedWeekly: [{ name: 'Fable', utilization: 0.5, resetsAt: WA }], scopedFetchedAt: T0,
+    }));
+    fs.writeFileSync(path.join(cache, B + '.json'), JSON.stringify({ fetchedAt: T0, source: 'on-demand', orgUuid: 'bbbb', sevenDay: { utilization: 0.5, resetsAt: WB } }));
+    // files the product's own predicate refuses — none may be seeded or judged
+    fs.writeFileSync(path.join(cache, '__models__.json'), JSON.stringify({ models: [] }));
+    fs.writeFileSync(path.join(cache, 'host-h1.json'), JSON.stringify({ fetchedAt: T0, orgUuid: 'aaaa', sevenDay: { utilization: 0.1, resetsAt: WB } }));
+    fs.writeFileSync(path.join(cache, 'sub-zombiezombie.json'), JSON.stringify({ fetchedAt: T0, orgUuid: 'aaaa', sevenDay: { utilization: 0.1, resetsAt: WB } }));
+    fs.writeFileSync(path.join(cache, 'pool-000000000000.json'), JSON.stringify({ fetchedAt: T0, orgUuid: 'aaaa', sevenDay: { utilization: 0.1, resetsAt: WB } }));
+    return dataDir;
+  };
+  const ROSTER = [A, B];
+  const ACCOUNTS = [{ id: A, type: 'subscription', backend: 'claude' }, { id: B, type: 'subscription', backend: 'claude' },
+    { id: 'pool-000000000000', type: 'pooled', backend: 'claude' }];
+  const cacheOf = (dataDir, id) => JSON.parse(fs.readFileSync(path.join(dataDir, 'usage-cache', id + '.json'), 'utf8'));
+  const rowsOf = (dataDir, f) => fs.readFileSync(path.join(dataDir, 'usage-anchors', f), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  const streams = (dd) => fs.readdirSync(path.join(dd, 'usage-anchors')).map((fn) => ({
+    file: path.join(dd, 'usage-anchors', fn), name: fn,
+    rows: fs.readFileSync(path.join(dd, 'usage-anchors', fn), 'utf8').trim().split('\n').map((l) => JSON.parse(l)),
+  }));
+
+  // (a) THE MAP: every accepted file resolved with the PRODUCT's own rule
+  const dataDir = build(path.join(d, 'fix'));
+  {
+    const windows = repair.establishedWindows(streams(dataDir), { roster: ROSTER });
+    const keys = repair.identityCacheKeys(path.join(dataDir, 'usage-cache'), windows, { accounts: ACCOUNTS });
+    const by = Object.fromEntries(keys.map((k) => [k.key, k.ident ? `${k.ident}/${k.via}` : `-/${k.why}`]));
+    ok('§16c the MACHINE LOGIN and the named subscription resolve to the SAME identity — one quota, two files, exactly as `usageIdentityGroups` groups them',
+      by['__global__'] === 'org_aaaa/identity' && by[A] === 'org_aaaa/identity' && by[B] === 'org_bbbb/identity', JSON.stringify(by));
+    ok('§16c …and the product\'s own predicate is what refuses the rest: `__models__` and `host-*` never reach the map at all, while a zombie file of a removed account and a POOL are named and skipped',
+      !('__models__' in by) && !('host-h1' in by)
+      && /no roster record/.test(by['sub-zombiezombie'] || '') && /pool holds no quota/.test(by['pool-000000000000'] || ''), JSON.stringify(by));
+  }
+
+  // (b) …so the machine login is REPAIRED and SEEDED like any other key
+  const rep = repair.repairByWindow({ dataDir, roster: ROSTER, accounts: ACCOUNTS, id: 'W8' });
+  ok('§16c the poisoned MACHINE-LOGIN snapshot is archived and rebuilt from the identity\'s own newest wholly-agreeing reading (r4 could not see this file at all)',
+    rep.caches.foreign === 1 && rep.caches.restored === 1
+    && cacheOf(dataDir, '__global__').sevenDay.resetsAt === WA && cacheOf(dataDir, '__global__').orgUuid === 'aaaa',
+    JSON.stringify([rep.caches, cacheOf(dataDir, '__global__').sevenDay]));
+  ok('§16c EVERY key of an identity is seeded, not one per stream — `guardReadingTarget` keys `windows` by CACHE FILE NAME, so a key with no sidecar is a key the live guard can refuse nothing on',
+    rep.caches.keys === 3 && rep.caches.seeded === 3
+    && readWindow(path.join(dataDir, 'usage-cache'), '__global__')?.sevenDay === WA
+    && readWindow(path.join(dataDir, 'usage-cache'), A)?.sevenDay === WA
+    && readWindow(path.join(dataDir, 'usage-cache'), B)?.sevenDay === WB,
+    JSON.stringify([rep.caches, readWindow(path.join(dataDir, 'usage-cache'), '__global__')]));
+  ok('§16c …and the files the predicate refused are left exactly as they were, sidecar and all (a migration that seeds a host bucket it has no window for is inventing one)',
+    !fs.existsSync(path.join(dataDir, 'usage-cache', readingLag.windowSidecarName('host-h1')))
+    && !fs.existsSync(path.join(dataDir, 'usage-cache', readingLag.windowSidecarName('__models__')))
+    && !fs.existsSync(path.join(dataDir, 'usage-cache', readingLag.windowSidecarName('sub-zombiezombie')))
+    && cacheOf(dataDir, 'host-h1').sevenDay.resetsAt === WB);
+
+  // (c) WHAT THE SEEDING BUYS: the live guard, keyed by cache FILE NAME
+  {
+    /** `establishedWindows()` in the engine, in shape: read the sidecar beside
+     *  every cache file and key the map by that FILE's name. */
+    const liveWindows = (dir) => {
+      const out = {};
+      for (const fn of fs.readdirSync(dir).filter((f) => f.endsWith('.json') && !f.startsWith('__models__'))) {
+        const w = readWindow(dir, fn.slice(0, -5));
+        if (w && (w.sevenDay || w.fiveHour || (w.scoped && Object.keys(w.scoped).length))) out[fn.slice(0, -5)] = w;
+      }
+      return out;
+    };
+    ok('§16c SOURCE PIN: that IS how the live guard is keyed — the engine reads `.window-<cache file name>`, so an identity with two files needs two sidecars',
+      /files = fs\.readdirSync\(USAGE_CACHE_DIR\)\.filter\(\(f\) => f\.endsWith\('\.json'\) && !f\.startsWith\('__models__'\)\);/.test(read('src/server/usage-pool-engine.js'))
+      && /const key = fn\.slice\(0, -5\);[\s\S]{0,200}readingLag\.windowSidecarName\(key\)/.test(read('src/server/usage-pool-engine.js')), '');
+    const dir = path.join(dataDir, 'usage-cache');
+    const stranger = { kind: 'sevenDay', resetsAt: WB };   // a reading that is provably B's
+    const groupOf = (id) => (id === '__global__' || id === A ? A : id);
+    const after = readingLag.decideReadingTarget({ key: '__global__', readingWindow: stranger, windows: liveWindows(dir), groupOf });
+    ok('§16c THE GUARD IS NOW ARMED ON THE MACHINE LOGIN: a reading whose weekly window is another member\'s is re-filed instead of written',
+      after.action === 'refile' && after.key === B, JSON.stringify(after));
+    // the same instant, on the store r4 leaves behind: no sidecar for this key.
+    // Read/restore defensively — a MUTATION run must reach the legs below this
+    // one and report, not die on a file the mutant never wrote.
+    const sc = path.join(dir, readingLag.windowSidecarName('__global__'));
+    const saved = fs.existsSync(sc) ? fs.readFileSync(sc) : null;
+    if (saved) fs.rmSync(sc);
+    const before = readingLag.decideReadingTarget({ key: '__global__', readingWindow: stranger, windows: liveWindows(dir), groupOf });
+    ok('§16c NEGATIVE CONTROL: with that one sidecar missing — the state r4 leaves — the same guard, the same reading, WRITES, and says out loud it had nothing to contradict',
+      before.action === 'write' && before.key === '__global__' && before.reason === 'no established window to contradict', JSON.stringify(before));
+    if (saved) fs.writeFileSync(sc, saved);
+  }
+
+  // (d) THE NEXT SWEEP: a cache the migration could not see is anchor material
+  // the very next tick. `usageIdentityGroups` keeps the FRESHEST cache of a
+  // group and `sweepUsageAnchors` hands exactly that to `maybeRecord`, so the
+  // REAL recorder is driven here with the real freshest-cache choice.
+  {
+    const eng = read('src/server/usage-pool-engine.js');
+    ok('§16c SOURCE PIN: the sweep anchors the FRESHEST cache of an identity group, so the machine login\'s snapshot is what the next tick records for the whole identity',
+      /if \(!g\.cache \|\| cache\.fetchedAt > g\.cache\.fetchedAt\) \{ g\.cache = cache; g\.accountId = accountId; \}/.test(eng)
+      && /usageAnchors\.maybeRecord\(\{ identityKey, accountId: g\.accountId, cache: g\.cache,/.test(eng), '');
+    const { UsageAnchors, identityKeyFor } = require(path.join(REPO, 'src/usage-anchors.js'));
+    const sweepOnce = (dd) => {
+      const dir = path.join(dd, 'usage-cache');
+      const groups = new Map();
+      for (const fn of fs.readdirSync(dir).filter((f) => f.endsWith('.json') && !f.startsWith('__models__') && !f.startsWith('host-'))) {
+        const accountId = fn === '__global__.json' ? null : fn.slice(0, -5);
+        if (accountId && !ROSTER.includes(accountId)) continue;
+        const cache = JSON.parse(fs.readFileSync(path.join(dir, fn), 'utf8'));
+        const key = identityKeyFor({ accountId, cache });
+        const g = groups.get(key) || { cache: null, accountId: null };
+        if (!g.cache || cache.fetchedAt > g.cache.fetchedAt) { g.cache = cache; g.accountId = accountId; }
+        groups.set(key, g);
+      }
+      const ua = new UsageAnchors({ dataDir: dd });
+      for (const [key, g] of groups) ua.maybeRecord({ identityKey: key, accountId: g.accountId, cache: g.cache });
+    };
+    const foreignRows = (dd) => rowsOf(dd, 'anchors-org_aaaa.ndjson').filter((r) => Number(r.buckets?.sevenDay?.resetsAt) > 0 && readingLag.weeklyNear(r.buckets.sevenDay.resetsAt, WA) === false);
+    sweepOnce(dataDir);
+    ok('§16c …and after the repair that sweep adds NOTHING foreign to the stream it just cleaned',
+      foreignRows(dataDir).length === 0, JSON.stringify(rowsOf(dataDir, 'anchors-org_aaaa.ndjson').slice(-1)));
+    const dd = build(path.join(d, 'unrepaired'));
+    sweepOnce(dd);
+    ok('§16c NEGATIVE CONTROL: on the store r4 leaves — the machine login still carrying the stranger\'s window — ONE sweep re-poisons that stream, which is why the fix has to be the cache half and not a second anchor pass',
+      foreignRows(dd).length === 1 && foreignRows(dd)[0].buckets.sevenDay.resetsAt === WB, JSON.stringify(foreignRows(dd).map((r) => r.buckets.sevenDay)));
+  }
+
+  // (e) THE `acct:` FALLBACK — `identityKeyFor`'s own documented LAST RESORT,
+  // and the only rung that may look at the streams. The engine still keys such
+  // an account by EMAIL because `accounts.list()` reads it out of the
+  // credential dir; this migration runs before any AccountManager exists, and
+  // two live members on this instance are in exactly that state.
+  {
+    const dd = build(path.join(d, 'fallback'));
+    const dir = path.join(dd, 'usage-cache');
+    const bare = cacheOf(dd, B); delete bare.orgUuid;      // the file states no identity at all
+    fs.writeFileSync(path.join(dir, B + '.json'), JSON.stringify(bare));
+    const one = repair.identityCacheKeys(dir, repair.establishedWindows(streams(dd), { roster: ROSTER }), { accounts: ACCOUNTS }).find((k) => k.key === B);
+    ok('§16c a cache file that states NO identity is resolved by the one established stream that names it — its own rows, written beside `identityKey` from the SAME group at the SAME moment',
+      one && one.ident === 'org_bbbb' && one.via === 'stream', JSON.stringify(one && [one.ident, one.via, one.why]));
+    // …and never on a guess: two streams naming it is UNKNOWN, not a coin toss
+    const rowsA = rowsOf(dd, 'anchors-org_aaaa.ndjson'); rowsA[0].accountId = B;
+    fs.writeFileSync(path.join(dd, 'usage-anchors', 'anchors-org_aaaa.ndjson'), rowsA.map((r) => JSON.stringify(r)).join('\n') + '\n');
+    const amb = repair.identityCacheKeys(dir, repair.establishedWindows(streams(dd), { roster: ROSTER }), { accounts: ACCOUNTS }).find((k) => k.key === B);
+    ok('§16c …and when TWO established streams name it, it is left alone and SAID — an unresolvable key is never seeded with a window it cannot be shown to have',
+      amb && amb.ident === null && /2 established streams name this account/.test(amb.why), JSON.stringify(amb && [amb.ident, amb.why]));
+    // a pseudo key is NEVER resolved this way: the engine records accountId
+    // `null` for BOTH `__global__.json` and `__global_codex__.json`, so a null
+    // row cannot tell the two apart (measured: this instance's codex stream is
+    // 1532 null-keyed rows, exactly like a claude machine login's would be)
+    const bareG = cacheOf(dd, '__global__'); delete bareG.orgUuid; delete bareG.orgEmail;
+    fs.writeFileSync(path.join(dir, '__global__.json'), JSON.stringify(bareG));
+    const g = repair.identityCacheKeys(dir, repair.establishedWindows(streams(dd), { roster: ROSTER }), { accounts: ACCOUNTS }).find((k) => k.key === '__global__');
+    ok('§16c …and a PSEUDO key is never resolved from the streams at all: `accountId: null` cannot tell the machine login from the codex one',
+      g && g.ident === null && /no established stream names this account/.test(g.why), JSON.stringify(g && [g.ident, g.why]));
+    ok('§16c SOURCE PIN: that is the engine\'s own spelling — both pseudo caches are recorded with a null accountId',
+      /const accountId = \(fn === '__global__\.json' \|\| fn === '__global_codex__\.json'\) \? null : fn\.slice\(0, -5\);/.test(read('src/server/usage-pool-engine.js')));
+  }
+
+  // (f) NEGATIVE CONTROL — the r4 cache half, as a PATCHED COPY of the real
+  // module with exactly this round's decision reverted: the cache keyed on the
+  // stream's dominant accountId instead of on the files the product accepts.
+  {
+    const src = read('src/reading-repair.js');
+    const SUB = [
+      ['  for (const k of identityCacheKeys(cacheDir, windows, { accounts })) {\n'
+        + '    if (!k.ident) { res.unresolved.push({ key: k.key, why: k.why }); continue; }\n'
+        + '    const acct = k.key, w = windows.get(k.ident);\n'
+        + '    const fp = path.join(cacheDir, k.file);\n'
+        + '    const cur = k.cache;\n'
+        + '    if (!cur) continue;\n'
+        + '    res.keys++;',
+      '  const byAcct = new Map();\n'
+        + '  for (const [ident0, w0] of windows) if (w0.canReceive && w0.accountId) byAcct.set(w0.accountId, { ident: ident0, ...w0 });\n'
+        + '  for (const [acct, w] of byAcct) {\n'
+        + "    const fp = path.join(cacheDir, String(acct).replace(/[^\\w.-]/g, '_') + '.json');\n"
+        + '    const cur = _readJson(fp);\n'
+        + '    if (!cur) continue;\n'
+        + '    res.keys++;'],
+    ];
+    let patched = src, hits = 0;
+    for (const [from, to] of SUB) { if (patched.split(from).length === 2) { patched = patched.replace(from, to); hits++; } }
+    ok('§16c NEGATIVE CONTROL setup: the pre-fix replacement hits the real module (a control that silently stops applying is a second green arm)', hits === SUB.length, `hits=${hits}/${SUB.length}`);
+    const R4 = patchedModule(path.join(d, 'r4-src'), 'reading-repair.js', patched);
+    const dd = build(path.join(d, 'pre'));
+    const r4 = R4.repairByWindow({ dataDir: dd, roster: ROSTER, accounts: ACCOUNTS, id: 'W8pre' });
+    ok('§16c NEGATIVE CONTROL: r4 touches ONE key per stream, so the machine login keeps the stranger\'s weekly window and gets no sidecar at all',
+      r4.caches.keys === 2 && r4.caches.seeded === 2 && r4.caches.foreign === 0
+      && cacheOf(dd, '__global__').sevenDay.resetsAt === WB
+      && readWindow(path.join(dd, 'usage-cache'), '__global__') === null,
+      JSON.stringify([r4.caches, cacheOf(dd, '__global__').sevenDay]));
+  }
+
+  // (g) THE CENSUS this round exists to satisfy: EVERY accepted cache key that
+  // belongs to an identity ends with a sidecar AND with no bucket that
+  // identity's own phases contradict.
+  {
+    const dd = build(path.join(d, 'census'));
+    repair.repairByWindow({ dataDir: dd, roster: ROSTER, accounts: ACCOUNTS, id: 'W8c' });
+    const windows = repair.establishedWindows(streams(dd), { roster: ROSTER });
+    const dir = path.join(dd, 'usage-cache');
+    const contradicts = (win, w) => {
+      const bad = [];
+      if (win.sevenDay && readingLag.weeklyNear(win.sevenDay, w.window.sevenDay) === false) bad.push('7d');
+      for (const [nm, v] of Object.entries(win.scoped || {})) {
+        const o = w.window.scoped[nm];
+        if (o != null && readingLag.weeklyNear(v, o) === false) bad.push(nm);
+      }
+      return bad;
+    };
+    let inIdentity = 0; const missing = [], contra = [];
+    for (const k of repair.identityCacheKeys(dir, windows, { accounts: ACCOUNTS })) {
+      if (!k.ident) continue;
+      inIdentity++;
+      if (!readWindow(dir, k.key)) missing.push(k.key);
+      const bad = contradicts(readingLag.windowOf(cacheOf(dd, k.key)), windows.get(k.ident));
+      if (bad.length) contra.push([k.key, bad]);
+    }
+    let rowBad = 0;
+    for (const f of streams(dd)) {
+      const w = windows.get(f.name.replace(/^anchors-|\.ndjson$/g, ''));
+      if (!w) continue;
+      for (const r of f.rows) if (contradicts(readingLag.windowOf(r.buckets || {}), w).length) rowBad++;
+    }
+    ok('§16c CENSUS: every accepted cache key that belongs to an identity ends with a sidecar and with no bucket that identity contradicts — and no anchor row does either',
+      inIdentity === 3 && !missing.length && !contra.length && rowBad === 0, JSON.stringify([inIdentity, missing, contra, rowBad]));
+  }
+
+  // (h) THE SECOND SNAPSHOT OF THE SAME KEY (r6, reproduced end to end on a
+  // COPY of this instance's stores with the REAL `setupUsage()` and the REAL
+  // `/api/usage` route). `repairCachesByWindow` walks the usage-cache
+  // DIRECTORY — but the machine login's snapshot is persisted TWICE, and the
+  // second copy is `data/usage-cache.json` (USAGE_CACHE_FILE): the boot seed of
+  // `_rateLimitCache`, whose `.claude` payload IS the `__global__` slot, and
+  // which the same-account merge (usage-routes ~:310-316) also writes the named
+  // subscription's snapshot into whenever the two are one quota.
+  // Because a rebuild REWINDS `fetchedAt` to the anchor it restored from, that
+  // untouched copy is GUARANTEED to win the newest-wins merge that reads it —
+  // so after the r5 migration the directory is clean and `/api/usage` still
+  // serves the stranger on BOTH rows, for good: the migration is one-shot and
+  // ledger-gated.
+  {
+    const express = require('express');   // a repo dependency (server.js runs on it); resolved the way node resolves it, not by a hand-built path
+    const { setupUsage } = require(path.join(REPO, 'src/usage-routes.js'));
+    const EMAIL = 'a@example.test';   // the machine login's own address (the poisoned __global__ states it)
+    const ACCT_MAIL = [{ id: A, type: 'subscription', backend: 'claude', name: 'A', email: EMAIL },
+      { id: B, type: 'subscription', backend: 'claude', name: 'B', email: 'b@example.test' },
+      { id: 'pool-000000000000', type: 'pooled', backend: 'claude' }];
+    /** the fixture, plus the sibling file carrying the SAME poisoned payload and
+     *  the freshest `fetchedAt` of the identity — the state a rebuild
+     *  guarantees, since it rewinds every directory copy to an older anchor */
+    const withSibling = (where, mutate = null) => {
+      const dd = build(path.join(d, where));
+      const g = JSON.parse(fs.readFileSync(path.join(dd, 'usage-cache', '__global__.json'), 'utf8'));
+      const claude = mutate ? mutate({ ...g }) : { ...g, fetchedAt: T0 + 90 * 60000 };
+      if (claude) fs.writeFileSync(path.join(dd, 'usage-cache.json'), JSON.stringify({ claude }, null, 2));
+      return dd;
+    };
+    const sibOf = (dd) => { try { return JSON.parse(fs.readFileSync(path.join(dd, 'usage-cache.json'), 'utf8')).claude; } catch { return null; } };
+    /** THE REAL ROUTE: the shipped `setupUsage` on a real express app, reading
+     *  the repaired store off disk exactly as the server does at boot. */
+    const serveUsage = async (dd) => {
+      const app = express();
+      const emptyDir = (n) => { const q = path.join(dd, '..', n + '-' + Math.random().toString(36).slice(2)); fs.mkdirSync(q, { recursive: true }); return q; };
+      const accounts = {
+        list: () => ({ accounts: ACCT_MAIL }),
+        codexGlobalStatus: () => ({ loggedIn: false, email: null }),
+        subscriptionStatus: () => ({ loggedIn: true, email: EMAIL }),
+        subCredsPath: () => path.join(dd, 'no-such-creds', '.credentials.json'),
+        usageToken: () => null,
+      };
+      setupUsage({
+        app, accounts, hosts: { list: () => [] }, usageHistory: null, activeSessions: new Map(),
+        serverSetting: () => false, ensureDir: (x) => fs.mkdirSync(x, { recursive: true }),
+        USAGE_CACHE_FILE: path.join(dd, 'usage-cache.json'), USAGE_CACHE_DIR: path.join(dd, 'usage-cache'),
+        CODEX_SESSIONS_DIR: emptyDir('codex'), META_DIR: emptyDir('meta'),
+        AVAILABLE_MODELS: { claude: [] }, BUFFERS_DIR: emptyDir('buffers'),
+        probeUsageForAccountKey: null, CLAUDE_CMD: 'claude',
+      });
+      const server = app.listen(0, '127.0.0.1');
+      await new Promise((r) => server.once('listening', r));
+      const body = await fetch('http://127.0.0.1:' + server.address().port + '/api/usage').then((x) => x.json());
+      server.close();
+      return body;
+    };
+
+    const dd = withSibling('sibling');
+    const rep6 = repair.repairByWindow({ dataDir: dd, roster: ROSTER, accounts: ACCT_MAIL, id: 'W8h' });
+    ok('§16c the machine login\'s SECOND snapshot — `data/usage-cache.json`, which is NOT in the directory the repair walks — is judged too, and says so in the report',
+      rep6.globalFile === 'archived' && /data\/usage-cache\.json/.test(rep6.globalFileWhy || '') && /newest-wins/.test(rep6.globalFileWhy || ''),
+      JSON.stringify([rep6.globalFile, rep6.globalFileWhy]));
+    ok('§16c …ARCHIVE-NEVER-DESTROY: the line names its own store and keeps the WHOLE original payload, and only then is the copy removed',
+      (() => {
+        const rows = fs.readFileSync(path.join(dd, 'archive', 'readings-window-usage-cache.ndjson'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+        const mine = rows.filter((r) => r.store === 'usage-cache.json');
+        return mine.length === 1 && mine[0].action === 'unlinked' && mine[0].key === '__global__'
+          && mine[0].entry.sevenDay.resetsAt === WB && !fs.existsSync(path.join(dd, 'usage-cache.json'));
+      })(), '');
+    const fixed = await serveUsage(dd);
+    ok('§16c THE REAL /api/usage NOW SERVES THE REPAIRED NUMBERS ON BOTH ROWS — the machine login from `_rateLimitCache`, and the named subscription because the same-account merge hands the freshest of the pair to both',
+      fixed.rateLimit?.sevenDay?.resetsAt === WA && fixed.accounts?.[A]?.sevenDay?.resetsAt === WA && fixed.globalLogin?.accountId === A,
+      JSON.stringify([fixed.rateLimit?.sevenDay, fixed.accounts?.[A]?.sevenDay, fixed.globalLogin?.accountId]));
+    ok('§16c …and the file is RE-SEEDED by the product\'s own `!_rateLimitCache` branch, from the repaired directory — so it agrees with the window this migration seeded for `__global__`, and its `fetchedAt` can never outrank it again',
+      (() => {
+        const sib = sibOf(dd), seeded = readWindow(path.join(dd, 'usage-cache'), '__global__');
+        return !!sib && !!seeded && readingLag.weeklyNear(readingLag.windowOf(sib).sevenDay, seeded.sevenDay) === true
+          && sib.fetchedAt === JSON.parse(fs.readFileSync(path.join(dd, 'usage-cache', '__global__.json'), 'utf8')).fetchedAt;
+      })(), JSON.stringify([sibOf(dd)?.sevenDay, readWindow(path.join(dd, 'usage-cache'), '__global__')?.sevenDay]));
+
+    // §16c(h) PRODUCTION ORDER (the r6 verifier): `setupUsage()` runs at module
+    // top level (server.js ~:1616) and loads data/usage-cache.json into
+    // `_rateLimitCache` BEFORE `runLocalMigrations()` (inside server.listen's
+    // callback). Unlinking the sibling then changes nothing for THAT process —
+    // both panel rows keep the stranger's window for its whole life — unless the
+    // migration's removal reaches the module state it invalidated:
+    // `usage.reloadRateLimitCache()`, called by server.js right after the runner.
+    {
+      const bootThenRepair = async (reload) => {
+        const dd2 = withSibling('prod-order-' + (reload ? 'reload' : 'stale'));
+        const app = express();
+        const emptyDir = (n) => { const q = path.join(dd2, '..', n + '-' + Math.random().toString(36).slice(2)); fs.mkdirSync(q, { recursive: true }); return q; };
+        const accounts = { list: () => ({ accounts: ACCT_MAIL }), codexGlobalStatus: () => ({ loggedIn: false, email: null }), subscriptionStatus: () => ({ loggedIn: true, email: EMAIL }), subCredsPath: () => path.join(dd2, 'no-such-creds', '.credentials.json'), usageToken: () => null };
+        const usage = setupUsage({
+          app, accounts, hosts: { list: () => [] }, usageHistory: null, activeSessions: new Map(),
+          serverSetting: () => false, ensureDir: (x) => fs.mkdirSync(x, { recursive: true }),
+          USAGE_CACHE_FILE: path.join(dd2, 'usage-cache.json'), USAGE_CACHE_DIR: path.join(dd2, 'usage-cache'),
+          CODEX_SESSIONS_DIR: emptyDir('codex'), META_DIR: emptyDir('meta'),
+          AVAILABLE_MODELS: { claude: [] }, BUFFERS_DIR: emptyDir('buffers'),
+          probeUsageForAccountKey: null, CLAUDE_CMD: 'claude',
+        });
+        const rep = repair.repairByWindow({ dataDir: dd2, roster: ROSTER, accounts: ACCT_MAIL, id: 'W8prod' }); // AFTER setupUsage, as in production
+        if (reload) usage.reloadRateLimitCache();
+        const server = app.listen(0, '127.0.0.1'); await new Promise((r) => server.once('listening', r));
+        const body = await fetch('http://127.0.0.1:' + server.address().port + '/api/usage').then((x) => x.json());
+        server.close();
+        return { rep, body, usage };
+      };
+      const withReload = await bootThenRepair(true);
+      ok('§16c(h) PRODUCTION ORDER: setupUsage() FIRST (the poisoned sibling is already in memory), the migration SECOND, then reloadRateLimitCache() — the real /api/usage serves the repaired window on BOTH rows in the SAME process',
+        typeof withReload.usage.reloadRateLimitCache === 'function' && withReload.rep.globalFile === 'archived' && withReload.body.rateLimit?.sevenDay?.resetsAt === WA && withReload.body.accounts?.[A]?.sevenDay?.resetsAt === WA,
+        JSON.stringify([withReload.rep.globalFile, withReload.body.rateLimit?.sevenDay, withReload.body.accounts?.[A]?.sevenDay]));
+      const stale = await bootThenRepair(false);
+      ok('§16c(h) NEGATIVE CONTROL: without the reload the unlinked file changes NOTHING for that process — both rows keep the stranger\'s window (what r6 shipped before its verifier)',
+        stale.rep.globalFile === 'archived' && stale.body.rateLimit?.sevenDay?.resetsAt === WB && stale.body.accounts?.[A]?.sevenDay?.resetsAt === WB,
+        JSON.stringify([stale.body.rateLimit?.sevenDay, stale.body.accounts?.[A]?.sevenDay]));
+      ok('§16c(h) WIRING PIN: server.js calls usage.reloadRateLimitCache() right after runLocalMigrations(), and usage-routes exports it',
+        /runLocalMigrations\(\);\s*usage\.reloadRateLimitCache\?\.\(\)/.test(read('server.js')) && /reloadRateLimitCache,/.test(read('src/usage-routes.js')));
+    }
+    ok('§16c …and a second run has nothing left to do (idempotent: the copy is gone, and what re-seeded it came FROM the repaired directory)',
+      (() => { const r2 = repair.repairByWindow({ dataDir: dd, roster: ROSTER, accounts: ACCT_MAIL, id: 'W8h2' }); return r2.globalFile === 'clean' && sibOf(dd)?.sevenDay?.resetsAt === WA; })(), '');
+
+    // NEGATIVE CONTROL — the r5 module, which never looked at this file, driven
+    // through the SAME real route on the SAME fixture.
+    {
+      const src = read('src/reading-repair.js');
+      const SUB = [
+        ["  const gf = repairGlobalFile({ dataDir, cacheDir, archiveDir, windows, accounts, id, now });\n"
+          + "  report.globalFile = gf.state;",
+          "  report.globalFile = 'r5-never-looked';\n  const gf = { state: 'r5-never-looked', why: null };\n  void gf.state;"],
+      ];
+      let patched = src, hits = 0;
+      for (const [from, to] of SUB) { if (patched.split(from).length === 2) { patched = patched.replace(from, to); hits++; } }
+      ok('§16c NEGATIVE CONTROL setup: the pre-fix replacement hits the real module (a control that silently stops applying is a second green arm)', hits === SUB.length, `hits=${hits}/${SUB.length}`);
+      const R5 = patchedModule(path.join(d, 'r5-src'), 'reading-repair.js', patched);
+      const pre = withSibling('r6-pre');
+      const r5rep = R5.repairByWindow({ dataDir: pre, roster: ROSTER, accounts: ACCT_MAIL, id: 'W8pre6' });
+      const served = await serveUsage(pre);
+      ok('§16c NEGATIVE CONTROL: r5 repairs the DIRECTORY and leaves the second copy alone — so the real route serves the stranger\'s 93% on BOTH rows, and the file still holds it afterwards (one-shot migration ⇒ nothing runs again to notice)',
+        r5rep.caches.foreign === 1 && JSON.parse(fs.readFileSync(path.join(pre, 'usage-cache', '__global__.json'), 'utf8')).sevenDay.resetsAt === WA
+        && served.rateLimit?.sevenDay?.resetsAt === WB && Math.abs(served.rateLimit.sevenDay.utilization - 0.93) < 1e-9
+        && served.accounts?.[A]?.sevenDay?.resetsAt === WB && sibOf(pre)?.sevenDay?.resetsAt === WB,
+        JSON.stringify([r5rep.globalFile, served.rateLimit?.sevenDay, served.accounts?.[A]?.sevenDay, sibOf(pre)?.sevenDay]));
+    }
+
+    // A SCOPED bucket contradicts on its own — the pool reads `scopedWeekly`
+    // for accountRemaining / weeklyDeadline / bucketRems, and this copy feeds
+    // the same two panel rows.
+    {
+      const sc = withSibling('sibling-scoped', (g) => ({ ...g, sevenDay: { utilization: 0.2, resetsAt: WA }, scopedWeekly: [{ name: 'Fable', utilization: 0.9, resetsAt: WB }], fetchedAt: T0 + 90 * 60000 }));
+      const r = repair.repairByWindow({ dataDir: sc, roster: ROSTER, accounts: ACCT_MAIL, id: 'W8sc' });
+      ok('§16c …ANY contradicting bucket removes the copy, not just the 7-day one: this file is a COPY of a snapshot just repaired in both shapes, so the honest repair for either is to drop it and let it be re-seeded',
+        r.globalFile === 'archived' && /fable@/.test(r.globalFileWhy || '') && !fs.existsSync(path.join(sc, 'usage-cache.json')), JSON.stringify([r.globalFile, r.globalFileWhy]));
+    }
+    // …and an AGREEING copy is left byte-identical: this half only ever acts on
+    // a contradiction, exactly like the directory half.
+    {
+      const cl = withSibling('sibling-clean', (g) => ({ ...g, sevenDay: { utilization: 0.19, resetsAt: WA }, fetchedAt: T0 + 90 * 60000 }));
+      const before = fs.readFileSync(path.join(cl, 'usage-cache.json'));
+      const r = repair.repairByWindow({ dataDir: cl, roster: ROSTER, accounts: ACCT_MAIL, id: 'W8cl' });
+      ok('§16c NEGATIVE CONTROL: a copy whose window IS this identity\'s is left byte-identical and reported clean',
+        r.globalFile === 'clean' && r.globalFileWhy === null && fs.readFileSync(path.join(cl, 'usage-cache.json')).equals(before), JSON.stringify([r.globalFile, r.globalFileWhy]));
+    }
+    // …and with no copy at all there is simply nothing to say.
+    {
+      const ab = build(path.join(d, 'sibling-absent'));
+      ok('§16c …and `absent` is its own answer, so the one-shot log never claims a file it never saw',
+        repair.repairByWindow({ dataDir: ab, roster: ROSTER, accounts: ACCT_MAIL, id: 'W8ab' }).globalFile === 'absent');
+    }
+    // UNRESOLVABLE: judged by the DIRECTORY half's own answer for `__global__`,
+    // never by a second `identityKeyFor` over this payload — and a copy we
+    // cannot attribute is not a copy we may delete.
+    {
+      const un = withSibling('sibling-unresolvable');
+      const g = JSON.parse(fs.readFileSync(path.join(un, 'usage-cache', '__global__.json'), 'utf8'));
+      delete g.orgUuid; delete g.orgEmail;                      // pseudo key, never resolved from the streams
+      fs.writeFileSync(path.join(un, 'usage-cache', '__global__.json'), JSON.stringify(g));
+      const before = fs.readFileSync(path.join(un, 'usage-cache.json'));
+      const r = repair.repairByWindow({ dataDir: un, roster: ROSTER, accounts: ACCT_MAIL, id: 'W8un' });
+      ok('§16c …an UNRESOLVABLE `__global__` leaves the copy exactly where it is and SAYS which evidence is missing — the payload still states the identity, and asking it directly would be the second, weaker map r5 exists to remove',
+        r.globalFile === 'unresolvable' && /no established stream names this account/.test(r.globalFileWhy || '')
+        && fs.readFileSync(path.join(un, 'usage-cache.json')).equals(before)
+        && !!sibOf(un).orgUuid, JSON.stringify([r.globalFile, r.globalFileWhy]));
+      // …including the shape where the directory holds no `__global__.json` at
+      // all, so the map never names the key this file is a copy of
+      const un2 = withSibling('sibling-nodir');
+      const b2 = fs.readFileSync(path.join(un2, 'usage-cache.json'));
+      fs.rmSync(path.join(un2, 'usage-cache', '__global__.json'));
+      const r2 = repair.repairByWindow({ dataDir: un2, roster: ROSTER, accounts: ACCT_MAIL, id: 'W8un2' });
+      ok('§16c …and with no `usage-cache/__global__.json` at all the answer is the same refusal, naming that as the missing evidence',
+        r2.globalFile === 'unresolvable' && /__global__\.json is absent/.test(r2.globalFileWhy || '')
+        && fs.readFileSync(path.join(un2, 'usage-cache.json')).equals(b2), JSON.stringify([r2.globalFile, r2.globalFileWhy]));
+    }
+    // THE SECOND LOOKUP MUST GIVE THE FIRST ONE'S ANSWER. This half asks
+    // `identityCacheKeys` again, AFTER the directory half has rewritten those
+    // files, so it leans on both rebuild branches preserving IDENTITY_FIELDS.
+    // Driven against the shape that keeps the LEAST — the emptied snapshot a
+    // key with no surviving own-window reading is left as (`next = {}` plus the
+    // identity fields), which is exactly where a lost `orgUuid` would silently
+    // turn every later run into "unresolvable, left alone".
+    {
+      const em = withSibling('sibling-emptied');
+      fs.writeFileSync(path.join(em, 'usage-cache', '__global__.json'), JSON.stringify({ orgUuid: 'aaaa', orgEmail: EMAIL, repairedBy: 'earlier-run' }));
+      const r = repair.repairByWindow({ dataDir: em, roster: ROSTER, accounts: ACCT_MAIL, id: 'W8em' });
+      ok('§16c …and the second lookup still names the identity when the directory copy has been EMPTIED down to its identity fields — the post-state this half is read in',
+        r.globalFile === 'archived' && !fs.existsSync(path.join(em, 'usage-cache.json')), JSON.stringify([r.globalFile, r.globalFileWhy]));
+    }
+    // NO SILENT FAILURE: 'archived' claims the copy is GONE. If the unlink
+    // cannot happen, the file is still what `/api/usage` serves, so the run
+    // must fail loudly (the runner logs it verbatim and retries next boot)
+    // rather than report a repair that did not take.
+    {
+      const nf = withSibling('sibling-nounlink');
+      repair.repairByWindow({ dataDir: nf, roster: ROSTER, accounts: ACCT_MAIL, id: 'W8nf1' });   // creates data/archive
+      const g = JSON.parse(fs.readFileSync(path.join(nf, 'usage-cache', '__global__.json'), 'utf8'));
+      fs.writeFileSync(path.join(nf, 'usage-cache.json'), JSON.stringify({ claude: { ...g, sevenDay: { utilization: 0.93, resetsAt: WB }, fetchedAt: T0 + 90 * 60000 } }));
+      let threw = null;
+      fs.chmodSync(nf, 0o555);
+      try { repair.repairByWindow({ dataDir: nf, roster: ROSTER, accounts: ACCT_MAIL, id: 'W8nf2' }); } catch (e) { threw = e; }
+      finally { fs.chmodSync(nf, 0o755); }
+      ok('§16c …and a copy that CANNOT be removed fails the migration loudly instead of reporting it archived — the ledger row stays unwritten and the next boot retries',
+        !!threw && /usage-cache\.json/.test(String(threw.message)) && fs.existsSync(path.join(nf, 'usage-cache.json'))
+        && JSON.parse(fs.readFileSync(path.join(nf, 'archive', 'readings-window-usage-cache.ndjson'), 'utf8').trim().split('\n').pop()).store === 'usage-cache.json',
+        String(threw && threw.message).slice(0, 160));
+    }
+    // SOURCE PINS: the two product facts this half stands on — the file the
+    // seed is read from, and the newest-wins merge a stale copy wins.
+    ok('§16c SOURCE PIN: `data/usage-cache.json` really is the `__global__` slot\'s other home — one reader, one writer, and the same-account merge writes the NAMED subscription\'s snapshot into it',
+      /const USAGE_CACHE_FILE = path\.join\(__dirname, 'data', 'usage-cache\.json'\);/.test(read('server.js'))
+      && /function readUsageCache\(\) \{[\s\S]{0,200}JSON\.parse\(fs\.readFileSync\(USAGE_CACHE_FILE, 'utf-8'\)\)[\s\S]{0,80}cached\?\.claude/.test(read('src/usage-routes.js'))
+      && /const \{ name, email, \.\.\.usage \} = newest;\s*\n\s*_rateLimitCache = usage; writeUsageCache\(\);/.test(read('src/usage-routes.js'))
+      // …and the wrapper holds NOTHING but that payload, which is why archiving
+      // `.claude` archives the whole file
+      && /fs\.writeFileSync\(tmpPath, JSON\.stringify\(\{ claude: _rateLimitCache \}, null, 2\)\);/.test(read('src/usage-routes.js')), '');
+    ok('§16c SOURCE PIN: …and it is read back NEWEST-WINS, which is why a rewound rebuild can never displace a stale copy — and why `!_rateLimitCache` re-seeds it once the copy is gone',
+      /if \(!_rateLimitCache \|\| \(u\.fetchedAt > \(_rateLimitCache\.fetchedAt \|\| 0\)\)\) \{ _rateLimitCache = u; writeUsageCache\(\); \}/.test(read('src/usage-routes.js'))
+      && /out\.fetchedAt = anchor\.fetchedAt;/.test(read('src/reading-repair.js')), '');
+
+    // STANDING SWEEP — "is there a THIRD home for a reading snapshot?" is a
+    // number to re-measure, not a fact to inherit (the r5 lesson, one level up:
+    // r5 fixed "one identity, more than one cache FILE" and still assumed the
+    // directory was every file). The set is DERIVED from the source rather than
+    // listed, and printed, so a new persistence root fails here instead of
+    // surviving the next migration the way this one did.
+    {
+      const roots = [path.join(REPO, 'server.js'), path.join(REPO, 'src'), path.join(REPO, 'data', 'bin')];
+      const files = [];
+      const walk = (fp) => {
+        let st; try { st = fs.statSync(fp); } catch { return; }
+        if (st.isDirectory()) { for (const e of fs.readdirSync(fp).sort()) walk(path.join(fp, e)); return; }
+        // runtime artefacts the product DOWNLOADS into data/bin (the 64 MB
+        // rclone) are not source; nothing under 1 MiB here is one. The esbuild
+        // daemon BUNDLE is named out too — it is a copy of src/agentd + the
+        // shared modules, so its sites are duplicates of theirs, and it is a
+        // build output that a fresh checkout does not have (a census whose set
+        // changes with `npm run build` is not a census).
+        if (st.size > 1024 * 1024) return;
+        if (path.relative(REPO, fp) === path.join('data', 'bin', 'vibespace-agentd.js')) return;
+        files.push(fp);
+      };
+      for (const r of roots) walk(r);
+      const entries = [];
+      for (const fp of files) { try { entries.push({ file: path.relative(REPO, fp), text: fs.readFileSync(fp, 'utf8') }); } catch { } }
+      const SITE = /(path\.join\([^)]*['"]usage-cache)|VIBESPACE_USAGE_CACHE/;
+      /** THE HOMES A CLAUDE READING SNAPSHOT IS PERSISTED IN, each with the
+       *  reason it is in or out of this migration's scope. Driven off an
+       *  INJECTED file list so the verdict below can be driven a second time
+       *  with a synthetic third home — a sweep whose "nothing else exists"
+       *  arm cannot be made to fail has proven nothing. */
+      const bucket = (t) => t.includes("'usage-cache.json'") ? 'sibling'
+        : (/VIBESPACE_USAGE_CACHE|'\.vibespace', 'usage-cache'/.test(t) ? 'device' : 'directory');
+      const census = (list) => {
+        const by = { sibling: [], device: [], directory: [] }, all = [];
+        for (const e of list) e.text.split('\n').forEach((line, i) => {
+          if (!SITE.test(line)) return;
+          all.push(e.file + ':' + (i + 1));
+          by[bucket(line.trim())].push(e.file + ':' + (i + 1));
+        });
+        return { by, all };
+      };
+      /** the verdict this sweep exists to make: exactly two sites name a
+       *  persisted snapshot outside the directory, and both are the ones r6
+       *  accounts for */
+      const onlyKnownSibling = (by) => by.sibling.length === 2
+        && by.sibling.some((x) => x.startsWith('server.js:')) && by.sibling.some((x) => x.startsWith('src/reading-repair.js:'));
+      const { by, all } = census(entries);
+      console.log('    census: ' + JSON.stringify(by));
+      ok('§16c STANDING SWEEP: the census covers the files that actually hold these roots (an assert that can walk an empty set is not an assert)',
+        all.length >= 8 && ['server.js', 'src/reading-repair.js', 'src/agentd/agentd.js', 'data/bin/vibespace-usage'].every((f) => all.some((x) => x.startsWith(f + ':'))),
+        JSON.stringify(all));
+      ok('§16c STANDING SWEEP: the only persisted claude snapshot OUTSIDE the usage-cache directory is `data/usage-cache.json` — the constant in server.js and the half that now judges it — so a THIRD home would fail here',
+        onlyKnownSibling(by), JSON.stringify(by.sibling));
+      ok('§16c STANDING SWEEP CONTROL: …and it really would — the same verdict over the same tree PLUS one synthetic module persisting the slot somewhere else says no',
+        !onlyKnownSibling(census([...entries, { file: 'src/fake-third-home.js', text: "const f = path.join(dataDir, 'usage-cache.json');" }]).by));
+      ok('§16c STANDING SWEEP: …and the remaining root is a DEVICE\'s own store (`~/.vibespace/usage-cache`), NAMED out of scope: it belongs to that machine, reaches us only as `usage-cache/host-*.json`, and the repair\'s own predicate refuses those because no anchor stream describes a host\'s login — it has no established window to judge or seed one with',
+        by.device.some((x) => x.startsWith('src/agentd/agentd.js:')) && by.device.some((x) => x.startsWith('data/bin/vibespace-usage:'))
+        && /!f\.startsWith\('host-'\)/.test(read('src/reading-repair.js'))
+        && /host-\*` is excluded for the same reason the engine excludes it from/.test(read('src/reading-repair.js')),
+        JSON.stringify(by.device));
+    }
+  }
+}
+
+// ── §16d THE PRIMARY HALF IS DECIDED ON THE RECORD'S BUCKETS (r5) ───────────
+// {5h, 7d} is ONE payload, so they leave together — but the drop lines were
+// written off the DATED view of the window, so a record whose primary half
+// states no `resetsAt` had it deleted from the moved row with no line at all:
+// `bucketsArchived: 0`, counted as a WHOLE re-file, and the placeholder reason
+// `'window'` in both the journal and the archive. The shape is ordinary —
+// `vibespace-usage` writes `{u: 0}` with no window for an absent bucket and
+// `maybeRecord` keeps the utilization, and 2392 of this instance's 7106 anchors
+// carry an undated primary bucket beside a dated scoped one. (Zero of them are
+// ALSO 7d-less today, which is why this is latent rather than measured harm —
+// but a bucket moved onto an account it cannot be shown to belong to is the
+// whole class of defect this repair is made of, and it was moving silently.)
+{
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-winrepair-undated-')); cleanup.push(d);
+  const A = 'sub-aaaaaaaaaaaa', B = 'sub-bbbbbbbbbbbb';
+  const WA = 1789030800, WB = 1789142400;
+  const T0 = Date.parse('2026-09-08T00:00:00Z');
+  const rec = (acct, ident, ts, buckets, source = 'on-demand') => ({
+    ts, fetchedAt: ts, source, accountId: acct, identityKey: ident, buckets,
+    prevFetchedAt: null, elapsedSec: null, costSince: null,
+  });
+  const own = (u, w) => ({ fiveHour: { u: 0.2, resetsAt: 1 }, sevenDay: { u, resetsAt: w }, scopedWeekly: [{ name: 'Fable', u: 0.5, resetsAt: w, asOf: T0 }] });
+  /** THE RECORD: a dated Fable bucket that is A's, sitting on B's stream beside
+   *  an UNDATED 5h and an UNDATED 7d that both carry real utilizations. */
+  const build = (root) => {
+    const dataDir = path.join(root, 'data');
+    const anchors = path.join(dataDir, 'usage-anchors'), cache = path.join(dataDir, 'usage-cache');
+    for (const p of [anchors, cache]) fs.mkdirSync(p, { recursive: true });
+    fs.writeFileSync(path.join(anchors, 'anchors-org_aaaa.ndjson'),
+      Array.from({ length: 8 }, (_, i) => rec(A, 'org_aaaa', T0 + i * 60000, own(0.1 + i * 0.01, WA))).map((r) => JSON.stringify(r)).join('\n') + '\n');
+    const bRows = Array.from({ length: 8 }, (_, i) => rec(B, 'org_bbbb', T0 + i * 60000, own(0.5, WB)));
+    bRows.push(rec(B, 'org_bbbb', T0 + 20 * 60000, {
+      fiveHour: { u: 0.77 },                                                // ← states no window
+      sevenDay: { u: 0.66 },                                                // ← states no window
+      scopedWeekly: [{ name: 'Fable', u: 0.42, resetsAt: WA, asOf: T0 }],   // ← A's
+    }, 'rate-limit-event'));
+    fs.writeFileSync(path.join(anchors, 'anchors-org_bbbb.ndjson'), bRows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+    fs.writeFileSync(path.join(cache, A + '.json'), JSON.stringify({ fetchedAt: T0, source: 'on-demand', orgUuid: 'aaaa', sevenDay: { utilization: 0.17, resetsAt: WA } }));
+    fs.writeFileSync(path.join(cache, B + '.json'), JSON.stringify({ fetchedAt: T0, source: 'on-demand', orgUuid: 'bbbb', sevenDay: { utilization: 0.5, resetsAt: WB } }));
+    return dataDir;
+  };
+  const ACCOUNTS = [{ id: A, type: 'subscription' }, { id: B, type: 'subscription' }];
+  const rowsOf = (dataDir, f) => fs.readFileSync(path.join(dataDir, 'usage-anchors', f), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+
+  const dataDir = build(path.join(d, 'fix'));
+  const rep = repair.repairByWindow({ dataDir, roster: [A, B], accounts: ACCOUNTS, id: 'W9' });
+  const moved = rowsOf(dataDir, 'anchors-org_aaaa.ndjson').find((r) => r.refiledFrom === 'org_bbbb');
+  const arch = fs.readFileSync(path.join(dataDir, 'archive', 'readings-window-anchors.ndjson'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  const line = arch.find((r) => r.action === 'refiled');
+  ok('§16d a record whose only weekly evidence is a SCOPED bucket follows that bucket, and its undated primary half does not ride along',
+    !!moved && moved.buckets.sevenDay === null && moved.buckets.fiveHour === null
+    && (moved.buckets.scopedWeekly || []).length === 1 && moved.buckets.scopedWeekly[0].resetsAt === WA,
+    JSON.stringify(moved && moved.buckets));
+  ok('§16d …and EACH primary bucket the record actually STATES gets its own archived line — an undated bucket states no weekly window, so it cannot be shown to belong to the destination',
+    !!line && Array.isArray(line.buckets) && line.buckets.length === 2
+    && line.buckets.map((b) => b.bucket).join(',') === 'sevenDay,fiveHour'
+    && /states no weekly window, so it cannot be shown to be org_aaaa's/.test(line.buckets[0].reason)
+    && /five-hour window names a TIME/.test(line.buckets[1].reason),
+    JSON.stringify(line && line.buckets));
+  ok('§16d …the move is counted PARTIAL, naming the buckets it dropped (a WHOLE re-file that silently deleted two buckets is a report about a run that did not happen)',
+    rep.anchors.refiled === 1 && rep.anchors.refiledPartial === 1 && rep.anchors.refiledWhole === 0 && rep.anchors.bucketsArchived === 2
+    && Array.isArray(moved.droppedBuckets) && moved.droppedBuckets.join(',') === 'sevenDay,fiveHour',
+    JSON.stringify([rep.anchors, moved && moved.droppedBuckets]));
+  ok('§16d …and the reason the record MOVED is the verdict of the bucket that decided it — never a drop line (that sentence is about a bucket that stayed behind) and never the `window` placeholder',
+    !!line && /matches exactly one account/.test(line.reason) && line.reason === moved.refiledReason && !/cannot be shown/.test(line.reason),
+    JSON.stringify([line && line.reason, moved && moved.refiledReason]));
+  ok('§16d ARCHIVE-NEVER-DESTROY holds for the silent half too: the line keeps the ORIGINAL record, undated utilizations and all',
+    !!line && Math.abs(line.entry.buckets.sevenDay.u - 0.66) < 1e-9 && Math.abs(line.entry.buckets.fiveHour.u - 0.77) < 1e-9,
+    JSON.stringify(line && line.entry.buckets));
+
+  // NEGATIVE CONTROL — the r4 lines, as a PATCHED COPY of the real module
+  {
+    const src = read('src/reading-repair.js');
+    const SUB = [
+      ['      if (!primKept) drops.push(..._primaryDrops(prim, dest, ident, r.buckets));',
+        "      if (!prim && dest !== ident && win.fiveHour) drops.push({ bucket: 'fiveHour', reason: `a five-hour window names a TIME, not an account, and this record states no 7-day window to travel with — it cannot be shown to be ${dest}'s` });\n      else if (prim && !primKept) drops.push({ bucket: 'sevenDay', reason: _dropReason(prim, dest, ident), alsoDropped: win.fiveHour ? ['fiveHour'] : undefined });"],
+      ["refiledReason: (primKept && prim ? prim.reason : (([...scv.values()].find((v) => v.target === dest) || {}).reason || (drops[0] && drops[0].reason) || 'window')),",
+        "refiledReason: (primKept && prim ? prim.reason : (drops[0] && drops[0].reason) || 'window'),"],
+    ];
+    let patched = src, hits = 0;
+    for (const [from, to] of SUB) { if (patched.split(from).length === 2) { patched = patched.replace(from, to); hits++; } }
+    ok('§16d NEGATIVE CONTROL setup: both pre-fix replacements hit the real module', hits === SUB.length, `hits=${hits}/${SUB.length}`);
+    const R4 = patchedModule(path.join(d, 'r4-src'), 'reading-repair.js', patched);
+    const dd = build(path.join(d, 'pre'));
+    const r4 = R4.repairByWindow({ dataDir: dd, roster: [A, B], accounts: ACCOUNTS, id: 'W9pre' });
+    const mv = rowsOf(dd, 'anchors-org_aaaa.ndjson').find((r) => r.refiledFrom === 'org_bbbb');
+    const ar = fs.readFileSync(path.join(dd, 'archive', 'readings-window-anchors.ndjson'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).find((r) => r.action === 'refiled');
+    ok('§16d NEGATIVE CONTROL: r4 deletes both primary buckets from the moved row with NO line, calls it a WHOLE re-file with `bucketsArchived: 0`, and files it under the placeholder reason',
+      !!mv && mv.buckets.sevenDay === null && mv.buckets.fiveHour === null && mv.droppedBuckets === undefined
+      && r4.anchors.refiledWhole === 1 && r4.anchors.refiledPartial === 0 && r4.anchors.bucketsArchived === 0
+      && !!ar && ar.buckets === undefined && ar.reason === 'window',
+      JSON.stringify([r4.anchors, mv && mv.buckets, ar && ar.reason]));
   }
 }
 

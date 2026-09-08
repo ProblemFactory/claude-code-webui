@@ -245,6 +245,13 @@ function usagePollingEnabled() {
 // ONE entry for the account instead of a confusing duplicate pair).
 let _usageGlobalLink = { email: null, loggedIn: false, accountId: null };
 let _codexUsageGlobalLink = { email: null, loggedIn: false, accountId: null };
+/** Re-read the persisted machine-login snapshot and re-run the passive merge.
+ *  The one-shot migrations run INSIDE server.listen's callback, i.e. AFTER this
+ *  module already loaded data/usage-cache.json into `_rateLimitCache` at boot
+ *  (2026-09-08 repair r6 verifier: unlinking a poisoned sibling changed nothing
+ *  for the life of that process — both panel rows kept the stranger's window).
+ *  Cheap and idempotent: server.js calls it right after runLocalMigrations(). */
+function reloadRateLimitCache() { _rateLimitCache = readUsageCache(); ingestPassiveUsage(); }
 function ingestPassiveUsage() {
   const allAccts = accounts.list().accounts || [];
   const roster = allAccts.filter((a) => (a.backend || 'claude') !== 'codex' && a.type === 'subscription');
@@ -1028,7 +1035,7 @@ app.get('/api/usage', (req, res) => {
 });
 
 
-  return { refreshViaCliPanel, getOAuthToken, usagePollingEnabled, refreshRateLimit, ingestPassiveUsage, summarizeCodexRateLimit, summarizeCodexRateLimits };
+  return { refreshViaCliPanel, getOAuthToken, usagePollingEnabled, refreshRateLimit, reloadRateLimitCache, ingestPassiveUsage, summarizeCodexRateLimit, summarizeCodexRateLimits };
 }
 
 module.exports = { setupUsage, parseCliUsageText, normalizeCodexRateLimit };
