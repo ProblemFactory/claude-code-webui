@@ -440,7 +440,7 @@ const {
   getHosts: () => { try { return hosts; } catch { return null; } },
   getUsageHistory: () => { try { return usageHistory; } catch { return null; } },
   recordUsageAttribution: (...a) => recordUsageAttribution(...a),
-  adapterRegistry,
+  adapterRegistry, readUserState: () => { try { return persistenceRouter.readUserState(); } catch { return {}; } },
 });
 // ── Effective-size computation (min cols/rows across clients + PTY resize + broadcast) ──
 // Only clients that have sent a REAL `resize` (terminal fit) drive the PTY

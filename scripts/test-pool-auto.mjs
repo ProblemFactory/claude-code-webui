@@ -7,7 +7,7 @@
 import path from 'node:path';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
-const { bucketRemaining, accountRemaining, weeklyDeadline, decidePoolSwitch, classifyAuthFailure } = require(path.resolve('src/account-pool-auto.js'));
+const { bucketRemaining, accountRemaining, weeklyDeadline, decidePoolSwitch, classifyAuthFailure, conversationDisplayName } = require(path.resolve('src/account-pool-auto.js'));
 
 let pass = 0, fail = 0;
 const ck = (n, c) => { if (c) { pass++; console.log('  ✓ ' + n); } else { fail++; console.log('  ✗ ' + n); } };
@@ -213,6 +213,21 @@ ck('auth: the same text WITH a status code still qualifies (api_retry channel)',
 ck('auth: 5xx never qualifies no matter how many retries', classifyAuthFailure({ status: 500, message: 'Internal server error', attempt: 9 }) === false);
 ck('auth: overload is not an identity problem', classifyAuthFailure({ status: 529, message: 'Overloaded' }) === false);
 ck('auth: hostile/empty input is quiet', classifyAuthFailure({}) === false && classifyAuthFailure() === false);
+
+// ── conversationDisplayName: the pool switch bubble shows the SIDEBAR name ──
+// (owner 2026-09-08: "切换账户的那个气泡提示里没有用session的自定义名，而是用了第一句话")
+{
+  // customNames is keyed by the client's getSessionKey = `<backend>:<backendSessionId>`
+  const CN = { 'claude:9f4cd444-uuid': 'B2B助手', 'bare-id-2': 'Legacy Name' };
+  const live = { backend: 'claude', claudeSessionId: '9f4cd444-uuid', name: '你是主要负责管理我在HanabiAI的B2B任务的Agent，我下面给你一些资源' };
+  ck('name: the custom rename WINS over the first-message name (the bug)', conversationDisplayName(live, CN, 'sess-1-123') === 'B2B助手');
+  ck('name: NEGATIVE — with no custom name it falls back to the session name, not the id', conversationDisplayName({ backend: 'claude', claudeSessionId: 'no-rename', name: '第一句话' }, CN, 'sess-2-123') === '第一句话');
+  ck('name: with neither, the webui id is the last resort (never empty)', conversationDisplayName({ backend: 'claude', claudeSessionId: 'x' }, {}, 'sess-3-123') === 'sess-3-123');
+  ck('name: a legacy bare-backend-id key still resolves', conversationDisplayName({ backend: 'claude', claudeSessionId: 'bare-id-2', name: 'first msg' }, CN, 'sess-4') === 'Legacy Name');
+  ck('name: backendSessionId is accepted when claudeSessionId is absent (codex/other)', conversationDisplayName({ backend: 'codex', backendSessionId: 'th_9', name: 'msg' }, { 'codex:th_9': 'My Codex Job' }, 'sess-5') === 'My Codex Job');
+  ck('name: null customNames / hostile input never throws and never returns undefined', conversationDisplayName({ name: 'ok' }, null, 'sid') === 'ok' && conversationDisplayName(null, null, 'sid') === 'sid' && conversationDisplayName(null, null) === '');
+  ck('name: an empty/whitespace custom rename does NOT win (falls through to the session name)', conversationDisplayName({ backend: 'claude', claudeSessionId: 'w', name: 'real' }, { 'claude:w': '   ' }, 'sid') === 'real');
+}
 
 console.log(fail ? `${fail} FAILED (${pass} passed)` : `ALL PASS (${pass})`);
 process.exit(fail ? 1 : 0);

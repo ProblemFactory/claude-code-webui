@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.369.71 — the account-switch bubble now shows the conversation's custom name, not its first message
+
+- **Pool notice.** The server-side "Pool X: conversation \"…\" moved to <account>" notice read `session.name`, which is the discovery/first-message name; the user's sidebar rename lives in `user-state.json` `customNames` (keyed `<backend>:<backendSessionId>`) and was applied only client-side, so the bubble showed the first sentence of the chat instead of the custom name. A new PURE `conversationDisplayName(session, customNames, fallbackId)` in src/account-pool-auto.js resolves the label the same way the sidebar does (custom rename → session name → webui id), wired into usage-pool-engine via a `readUserState` dep. test-pool-auto 74 (+7: custom-name-wins, both fallbacks, codex/legacy keys, hostile input, whitespace rename).
+
 ## 2.369.70 — the "stopped OpenCode conversations are hidden" row now shows on an EMPTY session list (caught by the GitHub Actions mirror)
 
 - **Sidebar.** The sidebar's "No sessions" early return rendered nothing else, so the row that says stopped OpenCode conversations are hidden because the background service is off (with its Enable action) never appeared on an instance whose ONLY conversations are the hidden ones — the exact user the row exists for. The empty branch now renders the row before returning. The plugin suite's leg passed locally only because this machine has unrelated sessions; the Actions runner (no sessions) was red for two pushes. Regression = an empty-list leg + a source pin (the empty branch is the ONE call sidebar.js keeps, immediately before its `return`, so nothing wipes it); A/B: fix reverted ⇒ 3 red. test-opencode-plugin 109.

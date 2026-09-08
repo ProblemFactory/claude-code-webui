@@ -488,6 +488,31 @@ function quotaVerdict(cache, nowSec, { tier = 'hot' } = {}) {
   };
 }
 
+/** THE conversation label a pool notice shows — the SAME name the sidebar
+ *  shows, resolved server-side. The user's custom rename lives in
+ *  user-state.json `customNames`, keyed `<backend>:<backendSessionId>` (the
+ *  client's getSessionKey), and is applied only in the sidebar merge; the live
+ *  session object carries `.name` = the discovery/first-message name. A notice
+ *  that reads `session.name` alone shows the first sentence of the chat instead
+ *  of "B2B助手". PURE so test-pool-auto can pin it. customNames may be null.
+ *  Precedence mirrors recordUsageAttribution's id (claudeSessionId first) and
+ *  the client's legacy fallbacks (bare backend-session-id, then the webui id). */
+function conversationDisplayName(session, customNames, fallbackId = '') {
+  const s = session || {};
+  const cn = customNames || {};
+  const bsid = s.claudeSessionId || s.backendSessionId || null;
+  const keys = [];
+  if (bsid) keys.push(`${s.backend || 'claude'}:${bsid}`, bsid);
+  if (s.sessionKey) keys.unshift(s.sessionKey);
+  if (fallbackId) keys.push(fallbackId);
+  for (const k of keys) {
+    const v = k && Object.hasOwn(cn, k) ? cn[k] : null;
+    if (v && String(v).trim()) return String(v).trim();
+  }
+  if (s.name && String(s.name).trim()) return String(s.name).trim();
+  return fallbackId || '';
+}
+
 module.exports = {
-  quotaVerdict,
+  quotaVerdict, conversationDisplayName,
   classifyAuthFailure, decideCliRefresh, SWITCH_THRESHOLD_PCT, THRESH, rankPoolMembers, UNKNOWN_REMAINING_PCT, PROACTIVE_MARGIN_SEC, MIN_GAIN_PCT, bucketRemaining, bucketRems, accountRemaining, weeklyDeadline, decidePoolSwitch, poolBlockedNotice };
