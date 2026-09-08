@@ -9,3 +9,4 @@ accessToken: 'expired-test-token'
 -----END OPENSSH PRIVATE KEY-----
 BEGIN [A-Z ]*PRIVATE KEY
 sk-ant-oat-EXPIRED
+token: 'NOT-A-PERMISSION-RULE'
