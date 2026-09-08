@@ -516,6 +516,17 @@ if (!probe) {
   ok('PURE continue: a TIMED fire off the near-arm says the pool switched (round 1 said the limit had reset)', C({ kind: 'timed', armReason: 'switched to a usable account (X)', label: 'X' }).text === '账号池已切换到 X，已自动继续这个任务。');
   ok('PURE continue: a TIMED fire whose identity MOVED during the gate says the same', C({ kind: 'timed', armReason: 'usage limit', label: 'X', moved: true }).cls === 'switched');
   ok('PURE continue: an account that came back by itself is not a pool switch', C({ kind: 'timed', armReason: 'account usable again', label: 'X' }).text === '账号 X 已恢复可用，已自动继续这个任务。');
+  // THE PAIR ROUND 1 SILENTLY CHANGED (r2 of the new-member wake): the engine
+  // arms with 'account usable again' at scheduleWallProbe and then a REAL pool
+  // switch fires with kind:'now' (:2417/:2498). Round 1 hoisted the arm-reason
+  // clause above kind:'now' while adding `cause`, and this pair started
+  // reading as a recovery. `cause` may only REFINE the order, never reorder it.
+  ok('PURE continue: kind:\'now\' on a session near-armed with \'account usable again\' is a SWITCH, not a recovery (the pair round 1 changed)',
+    C({ kind: 'now', armReason: 'account usable again', label: 'X' }).text === '账号池已切换到 X，已自动继续这个任务。');
+  ok('PURE continue: the new-member wake NAMES the member that became usable (nothing switched)',
+    C({ kind: 'now', armReason: 'usage limit', label: 'X', cause: 'member-usable' }).text === '账号 X 已恢复可用，已自动继续这个任务。');
+  ok('PURE continue: …but `moved` still outranks `cause` — the gate re-pointed us onto a member the wake never spoke about',
+    C({ kind: 'now', armReason: 'usage limit', label: 'Y', moved: true, cause: 'member-usable' }).text === '账号池已切换到 Y，已自动继续这个任务。');
   ok('PURE continue: a real reset anchor keeps the reset wording', C({ kind: 'timed', armReason: '5h 0% < 10% · 7d 2% < 5%', label: 'X' }).cls === 'reset');
   ok('PURE continue: a missing label degrades, never throws', C({ kind: 'now', armReason: null, label: null }).text === '账号池已切换到 可用账号，已自动继续这个任务。');
   // DRIFT GUARD: the arm reasons above are ENGINE strings — if the engine
@@ -1013,7 +1024,10 @@ if (!probe) {
   ok('WIRING: the refusal notice is chosen by the REASON (the call site passes the check through; round 1 computed `chk` and dropped it)', /breakerNotice\(id, session, label \|\| key, kind, chk\)/.test(ar2src) && /function breakerNotice\(id, session, label, kind, chk\) \{[\s\S]{0,700}refusalNoticeFor\(\{[\s\S]{0,200}reason: chk && chk\.reason/.test(ar2src));
   ok('WIRING: a journal-only refusal spends no notice budget (the return is ABOVE the stamp)', /if \(!n\) return;[\s\S]{0,220}r\.notices\[n\.cls\] = now; save\(\);/.test(ar2src));
   ok('WIRING: the identity is re-resolved INSIDE deliver (after the gate) and re-checked before spending', /const deliver = \(\) => \{[\s\S]{0,1400}const ident2 = identityFor\(id, session\) \|\| ident;[\s\S]{0,400}const chk2 = canFire\(id, key2, kind, now2\);[\s\S]{0,200}if \(!chk2\.ok\)/.test(ar2src) && /noteFired\(id, key2, kind, Date\.now\(\)\)/.test(ar2src) && /announce\(id, session, key2, kind, note\)/.test(ar2src));
-  ok('WIRING: the continue card is chosen from the ARM + whether the gate moved us, in one place', /const moved = !!key && !!key2 && key2 !== key;[\s\S]{0,600}const note = continueNoticeFor\(\{ kind, armReason: a2\.reason, label: label2, moved \}\);/.test(ar2src));
+  // 2026-09-08: `cause` joined the inputs — the immediate path has a second
+  // caller now (the new-member wake), and `kind:'now'` can no longer stand in
+  // for "a pool switch". Pinned here so the card keeps naming what unblocked it.
+  ok('WIRING: the continue card is chosen from the ARM + whether the gate moved us + the caller\'s named CAUSE, in one place', /const moved = !!key && !!key2 && key2 !== key;[\s\S]{0,600}const note = continueNoticeFor\(\{ kind, armReason: a2\.reason, label: label2, moved, cause \}\);/.test(ar2src));
   // 'all-logins-expired' (2026-09-07) is the same class of fact — nowhere for
   // this conversation to go — so the breaker must hear it too, or it re-fires
   // into a pool whose every other member needs a re-login.

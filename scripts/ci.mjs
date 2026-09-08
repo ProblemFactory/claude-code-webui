@@ -163,6 +163,7 @@ export const SUITES = [
   { name: 'test-usage-walk-parity', tier: 'fast' },
   { name: 'test-proxy-post', tier: 'fast' }, // proxied POST body reaches the target (real unblocker; the json-parser-skips-/proxy/ pin)
   { name: 'test-auto-resume', tier: 'fast' }, // continue-after-limit-reset (tri-state gate, never-early/twice, restart-survival) + CLI output style at spawn
+  { name: 'test-new-member-wake', tier: 'fast' }, // a member that BECOMES usable (login success / human ⟳) re-drives the pool and releases the conversations armed on exhaustion: the 2026-09-08 incident replayed on the real engine + real pool + real symlinks + real auto-resume, each half of the wake proven load-bearing on its own, the polled routes' fingerprint gate measured with the engine floor wound back, and the breaker/cap/quarantine proven still in force
   { name: 'test-codex-sandbox-net', tier: 'fast' }, // codex sandbox keeps loopback open for the vibespace-* tools: real `codex sandbox` A/B (evidence-SKIP without the binary) + wrapper/adapter/probe pins
   { name: 'test-codex-subagents', tier: 'fast' }, // B-7473 sub-agent visibility: the PURE row builder (labels/coalescing/XSS marker proof), the renderer + chat-view click-through/fold wiring, and GET /api/subagents over a temp CODEX_HOME with real parent+child rollout heads
   { name: 'test-quota-source', tier: 'fast' }, // harness S4: per-harness QuotaSignalSource (normalize/signalFromStream/probe/classifyAuthFailure on real shapes) + the caps-routed probe dispatcher (no claude spawn for codex identities) + wiring pins

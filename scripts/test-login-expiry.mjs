@@ -954,7 +954,9 @@ console.log('— §5 wiring');
     return calls.length === 4
       // ROUND 2: gate on reloginResolve's REAL answer. `r.loggedIn` (round 1)
       // is a property that method returns on NONE of its four outcomes.
-      && /const captured = !!r\?\.account\?\.loggedIn \|\| r\?\.outcome === 'moved';\n\s*if \(captured\) sweepOnLoginTransition\(req\.params\.id, r, 're-login'\);/.test(aur)
+      // (the gate may now open a BLOCK — the 2026-09-08 login wake hangs on the
+      // same `captured` verdict — so the adjacency is bounded, not literal)
+      && /const captured = !!r\?\.account\?\.loggedIn \|\| r\?\.outcome === 'moved';\n\s*if \(captured\) \{?\s*\n?\s*sweepOnLoginTransition\(req\.params\.id, r, 're-login'\);/.test(aur)
       && !/if \(r\?\.loggedIn\) sweepLoginExpiry/.test(aur)
       && /const fin = accounts\.finalizeSubscription\(req\.params\.id\);\n\s*if \(fin\?\.loggedIn\) sweepLoginExpiry\('subscription login'\);/.test(aur)
       && /sweepLoginExpiry\('codex device-auth'\)/.test(aur);
@@ -963,7 +965,7 @@ console.log('— §5 wiring');
   // the fresh credentials are still in the throwaway record's dir — it cannot
   // see the survivor's new deadline, which is the whole point.
   ck('...and the auto-merge branch sweeps AGAIN, after mergeSubscription moved the credentials',
-    /const merged = accounts\.mergeSubscription\([\s\S]{0,900}?sweepLoginExpiry\('subscription login merge'\);\n\s*return res\.json\(\{ success: true, \.\.\.fin, merged: true/.test(aur));
+    /const merged = accounts\.mergeSubscription\([\s\S]{0,900}?sweepLoginExpiry\('subscription login merge'\);[\s\S]{0,400}?return res\.json\(\{ success: true, \.\.\.fin, merged: true/.test(aur));
   // A route the client POLLS may not carry an unbounded per-call side effect.
   ck('the polled re-login route sweeps on the TRANSITION (a credential fingerprint), never per poll',
     /const lastLoginFingerprint = new Map\(\)/.test(aur)

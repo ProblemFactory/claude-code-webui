@@ -22,7 +22,7 @@ const claudeQuota = harnesses.get('claude').quota;
 const parseCliUsageText = claudeQuota.parseCliUsageText;      // `claude -p /usage` panel text
 const normalizeCodexRateLimit = harnesses.get('codex').quota.normalize; // codex rate_limits (rollout / live push / rateLimits/read)
 
-function setupUsage({ app, accounts, hosts, usageHistory, activeSessions, serverSetting, ensureDir, USAGE_CACHE_FILE, USAGE_CACHE_DIR, CODEX_SESSIONS_DIR, META_DIR, AVAILABLE_MODELS, BUFFERS_DIR, probeUsageForAccountKey, CLAUDE_CMD }) {
+function setupUsage({ app, accounts, hosts, usageHistory, activeSessions, serverSetting, ensureDir, USAGE_CACHE_FILE, USAGE_CACHE_DIR, CODEX_SESSIONS_DIR, META_DIR, AVAILABLE_MODELS, BUFFERS_DIR, probeUsageForAccountKey, onMemberReadingFresh, CLAUDE_CMD }) {
 const https = require('https');
 function readUsageCache() {
   try {
@@ -466,6 +466,21 @@ async function refreshViaCliPanel(key) {
     } catch { resolve(null); }
   });
   if (!(cliPanel && (cliPanel.fiveHour || cliPanel.sevenDay))) return false;
+  // THE ROSTER IS ASKED AGAIN AT THE WRITE, NOT ONLY AT THE SPAWN (r3, the
+  // auto-merge finding's belt). This function's only roster check happens
+  // before a 60-second `execFile`, and a record CAN stop existing inside that
+  // window — the subscription auto-merge deletes the throwaway milliseconds
+  // after the login edge, and a removed account is a normal user action too.
+  // Nothing in accounts.js or the routes deletes usage-cache entries when an
+  // account goes away, and `establishedWindows()` reads every `.json` in that
+  // directory with no roster filter, so a write here would leave a cache file
+  // AND a window sidecar keyed to an id that no longer names anything. FALSE,
+  // not true: no reading was recorded, and the caller's backoff is the right
+  // response to a panel whose subject vanished.
+  if (!isGlobal && !(accounts.list().accounts || []).some((x) => x.id === key)) {
+    console.log(`[usage] the /usage panel for ${key} answered after the account was removed — discarding the reading`);
+    return false;
+  }
   _onDemandUsageAt[key] = Date.now();
   const u = { ...cliPanel, source: 'on-demand', scopedFetchedAt: Date.now() };
   try {
@@ -530,6 +545,34 @@ async function refreshViaCliPanel(key) {
   } catch { }
   return true;
 }
+
+// A HUMAN ⟳ THAT REVEALS A USABLE MEMBER MUST RE-DRIVE THE POOL (2026-09-08,
+// the new-member incident). This route used to write the reading and answer
+// {success:true}: it re-ran no pool decision and it did not touch the
+// conversations ARMED on exhaustion, so the owner clicked refresh, watched the
+// number change, and eight conversations kept waiting for a reset eight hours
+// out. Every LOCAL rung below therefore takes the ONE edge — session,
+// cli-panel and the bare-token ladder — because a third rung would otherwise
+// be the one that forgets.
+//
+// LOCAL ONLY, DELIBERATELY. The `host` branch above returns long before this:
+// a remote machine's pool is decided by the instance that owns it, and the
+// conversations armed there are not ours to continue. (Its readings still land
+// in the host-<id> caches for the panels, exactly as before.)
+//
+// The edge is idempotent, rate-floored per member, and refuses a reading that
+// is missing, stale, or whose weekly window says it is another member's — see
+// onMemberReadingFresh. Failure is swallowed: a refresh must not fail because
+// a follow-up pool evaluation did.
+//
+// '__global__' is skipped as a COST saving, not a rule: the machine login is
+// not a `sub-` record, so it can never be a pool member (poolMembers filters
+// subscriptions) and a session billed to it carries no `_accountId` to match —
+// the edge would do a cache read and a roster walk to reach the same answer.
+const wakePool = (key, why) => {
+  try { if (key && key !== '__global__' && onMemberReadingFresh) onMemberReadingFresh(key, why); }
+  catch (e) { console.warn('[usage] pool wake after refresh failed:', e.message); }
+};
 
 app.post('/api/usage/refresh', async (req, res) => {
   // User-facing kill switch (accounts.onDemandQuotaRefresh = 'off'): never
@@ -684,6 +727,7 @@ app.post('/api/usage/refresh', async (req, res) => {
       const viaSession = await probeUsageForAccountKey(key);
       if (viaSession) {
         _onDemandUsageAt[key] = Date.now();
+        wakePool(key, 'manual refresh (session)');
         return res.json({ success: true, via: 'session' });
       }
     } catch { /* fall through to the bare call */ }
@@ -703,7 +747,12 @@ app.post('/api/usage/refresh', async (req, res) => {
   // token ladder below. Ambient key/oat env is stripped so the CLI reads the
   // subscription login, not an inherited API key.
   const cliOk = await refreshViaCliPanel(key);
-  if (cliOk) return res.json({ success: true, via: 'cli-panel' });
+  if (cliOk) { wakePool(key, 'manual refresh (cli-panel)'); return res.json({ success: true, via: 'cli-panel' }); }
+  // A record REMOVED while its panel was being read (the r3 belt refuses to
+  // write for it) must not fall through to the token ladder: that costs one
+  // real vendor request on a SIBLING's token and can re-create the phantom
+  // cache entry the belt exists to prevent (member-wake r3 verifier, LOW).
+  if (!isGlobal && !(accounts.list().accounts || []).some((x) => x.id === key)) return res.status(404).json({ error: 'that account was removed while its usage was being read' });
   let token = isGlobal ? getOAuthToken() : accounts.usageToken(key);
   // Same-account fallback (2.181.0, real report): a named subscription's dir
   // token is only refreshed while a session RUNS on that dir — but when the
@@ -759,6 +808,7 @@ app.post('/api/usage/refresh', async (req, res) => {
       if (isGlobal) { _rateLimitCache = u; writeUsageCache(); }
       else _accountUsage[key] = { ...u, name: acctMeta.name, email: acctMeta.email };
       try { ingestPassiveUsage(); } catch {} // re-run the global↔named same-account merge
+      wakePool(key, 'manual refresh (token)');
       res.json({ success: true });
     });
   });

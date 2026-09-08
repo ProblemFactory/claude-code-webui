@@ -113,11 +113,35 @@ function refusalNoticeFor({ reason, label, armedResetsAt = 0, noTargetAt = 0, no
  *   · `moved`      — the pre-fire gate re-pointed the link under us (the
  *                    identity the continue lands on is not the one we
  *                    resolved before the gate): a switch by any other name.
- *  Only with none of the three is "the limit reset" the reason we continued. */
-function continueNoticeFor({ kind, armReason, label, moved = false }) {
+ *   · `cause`      — the caller NAMES it. 'member-usable' is the 2026-09-08
+ *                    new-member wake: a member's first reading arrived (a
+ *                    login finished, or a human refreshed) and this session
+ *                    was ALREADY parked on it, so NOTHING SWITCHED. Saying
+ *                    "the pool switched to X" there would be the r2 defect
+ *                    again — a card explaining a billed turn must name the
+ *                    thing that caused it — and `kind:'now'` can no longer
+ *                    stand in for "a pool switch" now that the immediate path
+ *                    has a second caller.
+ *  Only with none of them is "the limit reset" the reason we continued.
+ *
+ *  ORDER IS LOAD-BEARING, AND `cause` MAY ONLY REFINE IT (r2). `moved` still
+ *  outranks `cause`: if the pre-fire gate re-pointed the link under us, the
+ *  continue is landing on a member the wake never spoke about, so "the pool
+ *  switched to X" is the true sentence — a `cause`-first order would have
+ *  named the gate's target as the account that "recovered". Below `cause`,
+ *  master's own precedence is restored verbatim: round 1 hoisted the
+ *  `/^account usable again/` arm ABOVE `kind === 'now'` and so silently changed
+ *  a PRE-EXISTING pair — the engine's near-arm (:1491 "account usable again")
+ *  followed by a real pool switch firing with kind:'now' (:2417/:2498) — from
+ *  "账号池已切换到 X" to "账号 X 已恢复可用", describing a switch as a recovery.
+ *  With `cause` null every one of the eight reachable caller shapes is
+ *  byte-identical to master, and test-auto-resume-loop §3 pins the pair. */
+function continueNoticeFor({ kind, armReason, label, moved = false, cause = null }) {
   const who = label || '可用账号';
   const r = String(armReason || '');
-  if (kind === 'now' || moved || /^switched to a usable account/.test(r)) return { cls: 'switched', text: `账号池已切换到 ${who}，已自动继续这个任务。` };
+  if (moved || /^switched to a usable account/.test(r)) return { cls: 'switched', text: `账号池已切换到 ${who}，已自动继续这个任务。` };
+  if (cause === 'member-usable') return { cls: 'switched', text: `账号 ${who} 已恢复可用，已自动继续这个任务。` };
+  if (kind === 'now') return { cls: 'switched', text: `账号池已切换到 ${who}，已自动继续这个任务。` };
   if (/^account usable again/.test(r)) return { cls: 'switched', text: `账号 ${who} 已恢复可用，已自动继续这个任务。` };
   return { cls: 'reset', text: '用量上限已重置，已自动继续这个任务。' };
 }
@@ -437,7 +461,7 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
    *  same identity had just been rejected.
    *    breaker → the SAME beforeFire gate → deliver → remember what we fired at
    *  Returns true when a continue was delivered or a gate is in flight. */
-  function attemptFire(id, session, a, kind, why) {
+  function attemptFire(id, session, a, kind, why, cause = null) {
     const now = Date.now();
     if (session._arFiring) return false;   // a gate is already running for this session (also breaks fireNow ⇄ beforeFire re-entry)
     const ident = identityFor(id, session);
@@ -475,7 +499,7 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
       }
       // WHAT UNBLOCKED US decides both the journal line and the card, from the
       // ARMED RECORD (one source, one wording) — see continueNoticeFor
-      const note = continueNoticeFor({ kind, armReason: a2.reason, label: label2, moved });
+      const note = continueNoticeFor({ kind, armReason: a2.reason, label: label2, moved, cause });
       const ok = sendToSession(id, session, CONTINUE_PROMPT);
       if (!ok) { log(`[auto-resume] ${id}: could not deliver the continue prompt (will retry)`); return false; }
       armed.delete(id);
@@ -560,15 +584,24 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
    *  Since 2026-09-07 this runs the breaker AND the same pre-fire gate as the
    *  tick: the incident's 130 continues all came down this path, each one
    *  bypassing the gate that would have re-verdicted the target. */
-  function fireNow(id, why) {
+  function fireNow(id, why, { cause = null } = {}) {
     try {
       const a = armed.get(id);
       if (!a || a.fired) return false;
       const session = activeSessions.get(id);
       if (!session || !enabledFor(session) || session._isStreaming) return false;
-      return attemptFire(id, session, a, 'now', why);
+      return attemptFire(id, session, a, 'now', why, cause);
     } catch (e) { log('[auto-resume] fireNow failed: ' + e.message); return false; }
   }
+
+  /** WHO IS WAITING. The new-member wake (2026-09-08) has to re-examine the
+   *  conversations that are ARMED — they are exactly the ones that produce
+   *  neither of the two events the pool re-evaluates on (a turn end, a streamed
+   *  usage record), which is how eight of them sat out a reset eight hours
+   *  away. A tiny public accessor rather than the engine reaching into
+   *  `_armed`: "who is waiting" is a question this module should answer, and a
+   *  caller holding the map would also be able to mutate it. */
+  function armedIds() { return [...armed.keys()]; }
 
   function start() {
     if (timer) return;
@@ -578,7 +611,7 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
   const stop = () => { if (timer) { clearInterval(timer); timer = null; } };
 
   return {
-    armIfEnabled, noteRecovered, forget, setEnabled, statusFor, enabledFor, fireNow, tick, start, stop, CONTINUE_PROMPT,
+    armIfEnabled, noteRecovered, forget, setEnabled, statusFor, enabledFor, fireNow, armedIds, tick, start, stop, CONTINUE_PROMPT,
     noteFireOutcome, recentFireFailures, canFire, noteNoPoolTarget, // the loop breaker's seams (engine: walled turn ⇒ ok:false; per-session switch ⇒ exclude + its own no-target verdict)
     _armed: armed, _fires: fires,
   };
