@@ -272,13 +272,15 @@ try {
       // line ("release gate — HEAVY tier: …"), so it has to be the summary.
       const readLog = () => { try { return fs.readFileSync(path.join(sdir, `${SHA}.log`), 'utf-8'); } catch { return ''; } };
       let done = false;
-      for (let i = 0; i < 600 && !done; i++) { done = /HEAVY (GATE|TIER) (GREEN|RED)/.test(readLog()); if (!done) await sleep(50); }
+      for (let i = 0; i < 600 && !done; i++) { done = /HEAVY (GATE|TIER) (GREEN|RED|ABORTED|SKIPPED)/.test(readLog()); if (!done) await sleep(50); }
       const slog = readLog();
       ok(done, `the superseded run reached its closing line (${(slog.trim().split('\n').pop() || '(no output)').slice(0, 90)})`);
       ok(/stopping: superseded by a newer push/.test(slog), `…and removing it makes the run STOP, saying why (${(slog.match(/stopping: [^\n]*/) || ['(never said)'])[0]})`);
       ok(!fs.readdirSync(sdir).some((f) => /\.(green|red)$/.test(f)),
         `…and it writes NO verdict for a commit whose run it did not finish (${fs.readdirSync(sdir).join(' ')})`);
       ok(/NO VERDICT WRITTEN/.test(slog), '…and its closing line says so');
+      ok(/HEAVY TIER ABORTED/.test(slog) && !/HEAVY (GATE|TIER) GREEN/.test(slog),
+        '…and calls itself ABORTED, never GREEN — a tier that ran zero suites did not pass, and "HEAVY TIER GREEN" is quotable out of context');
       try { fs.rmSync(sdir, { recursive: true, force: true }); } catch { }
     }
 

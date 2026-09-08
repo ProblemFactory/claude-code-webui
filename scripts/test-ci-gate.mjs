@@ -21,7 +21,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { SUITES, EXCLUDED, censusFindings, listSuiteFiles, heavyBlocker, machineGlobalFixtures, defaultLockPath, killedFromOutside } from './ci.mjs';
 import { GIT_REDIRECTORS, gitEnvFrom } from './git-env.mjs';
@@ -420,7 +420,18 @@ console.log('\n§6 machine-global fixtures + no-verdict honesty');
 
   // (b) THE DIRTY-TREE PATH, FOR REAL. A probe file makes this checkout dirty
   //     for the length of two runs; `finally` removes it.
+  // THIS LEG DIRTIES THE REPOSITORY, so it must clean up on SIGNALS too, not
+  // only in `finally`. Learned the hard way in this very round: a killed
+  // process does not run `finally` (or `process.on('exit')`), and ci.mjs's own
+  // per-suite budget kill is a SIGTERM — a stray probe then leaves the tree
+  // dirty, which blocks the fast tier's green marker AND makes the next
+  // in-place `npm run ci:heavy` refuse. It also self-heals a stale one, because
+  // the previous run may have been the one that was killed.
   const probe = path.join(REPO, '.ci-gate-dirty-probe');
+  const rmProbe = () => { try { fs.unlinkSync(probe); } catch {} };
+  rmProbe();
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.once(sig, () => { rmProbe(); process.exit(143); });
+  process.on('exit', rmProbe);
   const mdir = mktmp('dirty');
   try {
     fs.writeFileSync(probe, 'round-2 dirty-tree probe\n');
@@ -436,9 +447,23 @@ console.log('\n§6 machine-global fixtures + no-verdict honesty');
     ok(/--isolate|ci:heavy/.test(rout), '…and the refusal names the way to get a real verdict');
     ok(!fs.readdirSync(mdir).length, '…and writes no marker');
 
-    const anyway = spawnSync(process.execPath, [path.join(REPO, 'scripts', 'ci.mjs'), '--heavy', '--dirty-ok', '--markers=' + mdir, '--only=test-eml', '--lock=' + path.join(mdir, 'lock')],
-      { cwd: REPO, encoding: 'utf-8', env: GIT_ENV, timeout: 300000 });
-    const aout = (anyway.stdout || '') + (anyway.stderr || '');
+    // The dirty tree only has to exist until the run CAPTURES it (heavyGate
+    // reads `git status` once, at t=0, and announces it on the next line), so
+    // the probe is removed as soon as the child says it saw one. That keeps the
+    // repository dirty for ~200 ms instead of for the whole run — the window in
+    // which killing this suite would strand the probe, dirty the tree, and cost
+    // the next push its green marker. Belt and braces with the self-heal above:
+    // shrink the hazard, then clean up after it anyway.
+    const child = spawn(process.execPath, [path.join(REPO, 'scripts', 'ci.mjs'), '--heavy', '--dirty-ok', '--markers=' + mdir, '--only=test-eml', '--lock=' + path.join(mdir, 'lock')],
+      { cwd: REPO, env: GIT_ENV, stdio: ['ignore', 'pipe', 'pipe'] });
+    let aout = '';
+    child.stdout.on('data', (d) => { aout += d; });
+    child.stderr.on('data', (d) => { aout += d; });
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    for (let i = 0; i < 600 && !/--dirty-ok: this tree is dirty/.test(aout); i++) await sleep(50);
+    ok(/--dirty-ok: this tree is dirty/.test(aout), 'the run announces the dirty tree as soon as it captures it (so the probe can go)');
+    rmProbe();
+    const anyway = await new Promise((res) => child.on('exit', (code) => res({ status: code })));
     ok(/NO VERDICT will be written/i.test(aout), '--dirty-ok says NO VERDICT at the START of the run');
     ok(/NO VERDICT WRITTEN/.test(aout) && !/HEAVY GATE GREEN/.test(aout),
       '…and the closing line says NO VERDICT WRITTEN instead of "HEAVY GATE GREEN"');

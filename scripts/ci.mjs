@@ -827,9 +827,15 @@ function heavyGate({ sha: wantSha, isolate, dir, only, dirtyOk, lock, lockWaitMs
     // about a commit; when no marker was written there is no such claim, and
     // saying it anyway is how a developer waits out the whole tier and stays
     // blocked without knowing why (round 2 finding).
-    const verdict = failed.length
-      ? `HEAVY ${noVerdict ? 'TIER' : 'GATE'} RED for ${shortSha(sha)} in ${Math.round(rec.ms / 1000)}s — failed: ${failed.join(', ')}`
-      : `HEAVY ${noVerdict ? 'TIER' : 'GATE'} GREEN for ${shortSha(sha)} in ${Math.round(rec.ms / 1000)}s (${heavy.length} suites)`;
+    // An ABANDONED run did not pass — it stopped. Printing "GREEN" for a tier
+    // that ran zero suites, even with "NO VERDICT WRITTEN" beside it, hands the
+    // next reader a sentence they can quote out of context; that is the exact
+    // dishonesty this round is about, one word smaller.
+    const verdict = abandonedWhy
+      ? `HEAVY TIER ABORTED for ${shortSha(sha)} after ${Math.round(rec.ms / 1000)}s (${timings.length} of ${heavy.length} suites ran)`
+      : failed.length
+        ? `HEAVY ${noVerdict ? 'TIER' : 'GATE'} RED for ${shortSha(sha)} in ${Math.round(rec.ms / 1000)}s — failed: ${failed.join(', ')}`
+        : `HEAVY ${noVerdict ? 'TIER' : 'GATE'} GREEN for ${shortSha(sha)} in ${Math.round(rec.ms / 1000)}s (${heavy.length} suites)`;
     console.log('\n' + verdict + (noVerdict ? ` — NO VERDICT WRITTEN (${noVerdict})` : ''));
     if (flaky.length) console.log(`[ci:heavy] FLAKY (failed, passed on retry — not blocking, but they did fail once): ${flaky.join(', ')}`);
     return failed.length ? 1 : 0;
