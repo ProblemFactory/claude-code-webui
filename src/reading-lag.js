@@ -197,28 +197,46 @@ function compareWindows(readingWin, memberWin, { jitterSec = JITTER_SEC } = {}) 
  *      previous slot (the 05:27 incident, verbatim);
  *    · the window matches the one we moved to and not the one we left ⇒ the new
  *      slot (the shadow is over — this is what ends it);
- *    · neither is decidable (unknown windows, or two members that genuinely
+ *    · BOUNDED: with the windows silent, a re-point older than `shadowMs`
+ *      explains nothing, so a session that never speaks again can never pin a
+ *      slot forever;
+ *    · neither window decidable (unknown windows, or two members that genuinely
  *      share a weekly phase) ⇒ the r3 statusline clause: numbers identical to
  *      the last ones seen under the previous slot are still those numbers.
- *  BOUNDED: past `shadowMs` a re-point explains nothing, so a session that
- *  never speaks again can never pin a slot forever. */
+ *
+ *  THE CLOCK RANKS BELOW THE WINDOWS (r3, reproduced). The bound used to
+ *  short-circuit FIRST, above every window rung, and that made the whole rule
+ *  only as good as its caller's estimate of the age. The shipped statusline has
+ *  no re-point instant in hand and passed the age of its last OBSERVATION
+ *  instead, so ONE ordinary render of an idle pooled TERMINAL session — 30 min
+ *  since its last redraw, link re-pointed one second ago — answered
+ *  `shadow-expired` and filed the previous member's 96 % onto the low-usage
+ *  one, replaying the incident including its second false switch, and doing it
+ *  in a shape MASTER's unconditional r3 rule had protected.
+ *
+ *  A clock is a PROXY for "were those credentials still in play"; the window is
+ *  the ANSWER. A proxy may never overrule the thing it stands in for, so the
+ *  bound now applies only where there is nothing else to go on — which is also
+ *  the only place it was ever load-bearing. And `repointAgeMs == null` is
+ *  UNKNOWN and does NOT expire: a caller that cannot date the re-point has not
+ *  thereby proved the shadow is over (spelling unknown like 'expired' is how
+ *  the r3 protection was deleted in the first place). */
 function decideLagShadow({
   prevKey = null, prevWindow = null, newKey = null, newWindow = null,
   readingWindow = null, readingFingerprint = null, prevFingerprint = null,
   repointAgeMs = 0, shadowMs = SHADOW_MS, jitterSec = JITTER_SEC,
 } = {}) {
   if (!prevKey || !newKey || prevKey === newKey) return { key: newKey, shadowed: false, why: 'no-repoint' };
-  if (!(Number(repointAgeMs) >= 0) || Number(repointAgeMs) > shadowMs) return { key: newKey, shadowed: false, why: 'shadow-expired' };
   const cmpPrev = prevWindow ? compareWindows(readingWindow, prevWindow, { jitterSec }) : 'unknown';
   const cmpNew = newWindow ? compareWindows(readingWindow, newWindow, { jitterSec }) : 'unknown';
   if (cmpPrev === 'agree' && cmpNew === 'differ') return { key: prevKey, shadowed: true, why: 'window-of-previous-slot', cmpPrev, cmpNew };
   if (cmpNew === 'agree' && cmpPrev === 'differ') return { key: newKey, shadowed: false, why: 'window-of-new-slot', cmpPrev, cmpNew };
+  if (repointAgeMs != null && (!(Number(repointAgeMs) >= 0) || Number(repointAgeMs) > shadowMs)) return { key: newKey, shadowed: false, why: 'shadow-expired', cmpPrev, cmpNew };
   if (readingFingerprint && prevFingerprint && readingFingerprint === prevFingerprint) {
     return { key: prevKey, shadowed: true, why: 'identical-payload', cmpPrev, cmpNew };
   }
   return { key: newKey, shadowed: false, why: 'no-evidence', cmpPrev, cmpNew };
 }
-// <<< reading-lag mirror
 
 /** ② THE WINDOW IDENTITY GUARD. Whatever bookkeeping named `key`, a reading
  *  whose window contradicts that member's OWN established window is not that
@@ -267,6 +285,7 @@ function decideReadingTarget({ key, readingWindow, windows = {}, groupOf = null,
       : `window ${windowFingerprint(win)} is not ${key}'s (${windowFingerprint(own)}) and matches no known account`,
   };
 }
+// <<< reading-lag mirror
 
 module.exports = {
   WEEK_SEC, JITTER_SEC, SHADOW_MS,

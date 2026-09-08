@@ -140,6 +140,74 @@ function ownWindowOf(key) {
     return (w && (w.sevenDay || w.fiveHour || (w.scoped && Object.keys(w.scoped).length))) ? w : null;
   } catch { return null; }
 }
+/** Every account's established window, keyed off the CACHE FILES exactly as the
+ *  server's `establishedWindows()` is — so a sidecar left behind by a REMOVED
+ *  account is invisible here too and can never become a re-file target. */
+function establishedWindows() {
+  const out = {};
+  let files = [];
+  try { files = fs.readdirSync(CACHE_DIR).filter((f) => f.endsWith('.json') && !f.startsWith('__models__')); } catch { return out; }
+  for (const fn of files) {
+    const k = fn.slice(0, -5);
+    const w = ownWindowOf(k);
+    if (w) out[k] = w;
+  }
+  return out;
+}
+/** WHEN DID THE LINK ACTUALLY MOVE. The bound inside `decideLagShadow` is about
+ *  the RE-POINT, and the pool's re-point MINTS a new symlink
+ *  (`repointPoolSymlink`: symlink-to-temp + rename), so the link's OWN lstat
+ *  mtime IS that instant — measured: an untouched link reads 7200 s old and
+ *  0.001 s the moment after a re-point.
+ *
+ *  IT IS NOT `st.at` (reproduced). That is when this conversation was last SEEN
+ *  under the OLD slot, which is necessarily EARLIER than the re-point that ended
+ *  it, so it systematically OVERSTATES the age — and overstating is the unsafe
+ *  direction. One ordinary render of an IDLE pooled terminal (30 min since its
+ *  last redraw, link re-pointed one second ago) therefore expired a shadow that
+ *  had not started and filed the previous member's 96 % onto the low-usage one,
+ *  in a shape master's unconditional r3 rule had protected. `st.at` stays in the
+ *  state file as FORENSICS; it was never evidence about a re-point.
+ *
+ *  Unreadable, or dated in the future (a clock anomaly, not a measurement) ⇒
+ *  null ⇒ UNKNOWN, and unknown must not expire. That deliberately swallows the
+ *  sub-millisecond negative a JUST-minted link can read (float noise between two
+ *  clock reads — observed here as -0.00 s), where `unknown` and `just now` have
+ *  the same answer anyway, rather than inventing a threshold nothing measured. */
+function repointAgeMs() {
+  try {
+    const ms = Date.now() - fs.lstatSync(process.env.VIBESPACE_ACCOUNT_LINK).mtimeMs;
+    return ms >= 0 ? ms : null;
+  } catch { return null; }
+}
+/** A refusal is an assertion about the system, so it is written down. Beside the
+ *  cache (a checkout-less host cannot derive the server's archive path) and NOT
+ *  ending in `.json`, so every usage-cache scanner keeps ignoring it. Bounded by
+ *  appending the head to a per-DAY shard, never by truncating it away.
+ *
+ *  IT IS A SAMPLE, NOT A COUNT, and it says so on every line. A statusline is a
+ *  fresh process per render, so it cannot hold the engine's per-session/per-
+ *  verdict memory; a genuinely persistent mismatch would otherwise write ~11 500
+ *  lines a day at the 8 s cadence. One line per 60 s (the file's own mtime is
+ *  the clock) keeps the fact and drops the repetition — the rate floor is
+ *  instance-wide, so a second account refusing inside the same minute is
+ *  represented by the line already there rather than by one of its own. */
+const REFUSAL_FLOOR_MS = 60000;
+function noteWindowRefusal(key, d) {
+  try {
+    fs.mkdirSync(CACHE_DIR, { recursive: true });
+    const f = path.join(CACHE_DIR, '.window-refused.ndjson');
+    try { const st = fs.statSync(f); if (st.size && Date.now() - st.mtimeMs < REFUSAL_FLOOR_MS) return; } catch { }
+    try {
+      if (fs.statSync(f).size > 256 * 1024) {
+        const day = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+        fs.appendFileSync(f.replace(/\.ndjson$/, `-${day}.ndjson`), fs.readFileSync(f));
+        fs.writeFileSync(f, '');
+      }
+    } catch { }
+    fs.appendFileSync(f, JSON.stringify({ at: Date.now(), by: 'statusline', sampled: '<=1/60s', key, action: d.action, to: d.key, reason: d.reason, matched: d.matched }) + '\n');
+  } catch { }
+}
 
 // >>> reading-lag mirror (src/reading-lag.js) — keep byte-identical
 const WEEK_SEC = 604800;      // a weekly window's period; a roll is exactly this
@@ -267,26 +335,93 @@ function compareWindows(readingWin, memberWin, { jitterSec = JITTER_SEC } = {}) 
  *      previous slot (the 05:27 incident, verbatim);
  *    · the window matches the one we moved to and not the one we left ⇒ the new
  *      slot (the shadow is over — this is what ends it);
- *    · neither is decidable (unknown windows, or two members that genuinely
+ *    · BOUNDED: with the windows silent, a re-point older than `shadowMs`
+ *      explains nothing, so a session that never speaks again can never pin a
+ *      slot forever;
+ *    · neither window decidable (unknown windows, or two members that genuinely
  *      share a weekly phase) ⇒ the r3 statusline clause: numbers identical to
  *      the last ones seen under the previous slot are still those numbers.
- *  BOUNDED: past `shadowMs` a re-point explains nothing, so a session that
- *  never speaks again can never pin a slot forever. */
+ *
+ *  THE CLOCK RANKS BELOW THE WINDOWS (r3, reproduced). The bound used to
+ *  short-circuit FIRST, above every window rung, and that made the whole rule
+ *  only as good as its caller's estimate of the age. The shipped statusline has
+ *  no re-point instant in hand and passed the age of its last OBSERVATION
+ *  instead, so ONE ordinary render of an idle pooled TERMINAL session — 30 min
+ *  since its last redraw, link re-pointed one second ago — answered
+ *  `shadow-expired` and filed the previous member's 96 % onto the low-usage
+ *  one, replaying the incident including its second false switch, and doing it
+ *  in a shape MASTER's unconditional r3 rule had protected.
+ *
+ *  A clock is a PROXY for "were those credentials still in play"; the window is
+ *  the ANSWER. A proxy may never overrule the thing it stands in for, so the
+ *  bound now applies only where there is nothing else to go on — which is also
+ *  the only place it was ever load-bearing. And `repointAgeMs == null` is
+ *  UNKNOWN and does NOT expire: a caller that cannot date the re-point has not
+ *  thereby proved the shadow is over (spelling unknown like 'expired' is how
+ *  the r3 protection was deleted in the first place). */
 function decideLagShadow({
   prevKey = null, prevWindow = null, newKey = null, newWindow = null,
   readingWindow = null, readingFingerprint = null, prevFingerprint = null,
   repointAgeMs = 0, shadowMs = SHADOW_MS, jitterSec = JITTER_SEC,
 } = {}) {
   if (!prevKey || !newKey || prevKey === newKey) return { key: newKey, shadowed: false, why: 'no-repoint' };
-  if (!(Number(repointAgeMs) >= 0) || Number(repointAgeMs) > shadowMs) return { key: newKey, shadowed: false, why: 'shadow-expired' };
   const cmpPrev = prevWindow ? compareWindows(readingWindow, prevWindow, { jitterSec }) : 'unknown';
   const cmpNew = newWindow ? compareWindows(readingWindow, newWindow, { jitterSec }) : 'unknown';
   if (cmpPrev === 'agree' && cmpNew === 'differ') return { key: prevKey, shadowed: true, why: 'window-of-previous-slot', cmpPrev, cmpNew };
   if (cmpNew === 'agree' && cmpPrev === 'differ') return { key: newKey, shadowed: false, why: 'window-of-new-slot', cmpPrev, cmpNew };
+  if (repointAgeMs != null && (!(Number(repointAgeMs) >= 0) || Number(repointAgeMs) > shadowMs)) return { key: newKey, shadowed: false, why: 'shadow-expired', cmpPrev, cmpNew };
   if (readingFingerprint && prevFingerprint && readingFingerprint === prevFingerprint) {
     return { key: prevKey, shadowed: true, why: 'identical-payload', cmpPrev, cmpNew };
   }
   return { key: newKey, shadowed: false, why: 'no-evidence', cmpPrev, cmpNew };
+}
+
+/** ② THE WINDOW IDENTITY GUARD. Whatever bookkeeping named `key`, a reading
+ *  whose window contradicts that member's OWN established window is not that
+ *  member's. `windows` is {accountId: window}; `groupOf` collapses the identity
+ *  groups an org-merged login spans (`__global__` + the named sub are ONE
+ *  account, and must not read as two matches).
+ *
+ *  Outcomes — every one of them NAMED, none of them silent:
+ *    write   — agrees, or there is no evidence either way (the honest default:
+ *              a guard with no evidence must not delete data)
+ *    refile  — contradicts the target and matches EXACTLY ONE other account
+ *    archive — contradicts the target and matches none, or several */
+function decideReadingTarget({ key, readingWindow, windows = {}, groupOf = null, jitterSec = JITTER_SEC } = {}) {
+  const win = readingWindow && readingWindow.scoped ? readingWindow : windowOf(readingWindow);
+  // NO WEEKLY COMPONENT = NO IDENTITY EVIDENCE. A `five_hour` rate_limit_event
+  // states a window, but a 5-hour window names a TIME, not an account (see
+  // `compareWindows`), so such a reading can never be moved or refused. Stated
+  // here at the decision point so the REASON that reaches the journal and the
+  // archive is true: `compareWindows` already answers 'unknown' for it, but
+  // "no established window to contradict" would be a false sentence about a
+  // target that has one — and in this subsystem the reason IS the diagnosis.
+  if (!win.sevenDay && !Object.keys(win.scoped).length) {
+    return { action: 'write', key, reason: 'reading states no weekly window', matched: [] };
+  }
+  const own = windows[key] || null;
+  const mine = own ? compareWindows(win, own, { jitterSec }) : 'unknown';
+  if (mine !== 'differ') {
+    return { action: 'write', key, reason: mine === 'agree' ? 'window matches the target' : 'no established window to contradict', matched: [] };
+  }
+  const grp = (id) => (groupOf ? groupOf(id) : id) || id;
+  const hits = new Map(); // group → representative id
+  for (const id of Object.keys(windows)) {
+    if (id === key) continue;
+    if (compareWindows(win, windows[id], { jitterSec }) !== 'agree') continue;
+    const g = grp(id);
+    if (!hits.has(g)) hits.set(g, id);
+  }
+  const matched = [...hits.values()];
+  if (matched.length === 1) {
+    return { action: 'refile', key: matched[0], reason: `window ${windowFingerprint(win)} is not ${key}'s (${windowFingerprint(own)}) and matches exactly one account`, matched };
+  }
+  return {
+    action: 'archive', key: null, matched,
+    reason: matched.length
+      ? `window ${windowFingerprint(win)} is not ${key}'s (${windowFingerprint(own)}) and matches ${matched.length} accounts — no single owner can be proven`
+      : `window ${windowFingerprint(win)} is not ${key}'s (${windowFingerprint(own)}) and matches no known account`,
+  };
 }
 // <<< reading-lag mirror
 function slotStateFile(p) {
@@ -315,7 +450,7 @@ function writeSlotState(f, st, fresh) {
 function writeUsage(p) {
   const rl = p && p.rate_limits;
   if (!rl) return; // absent for API-key sessions / before the first API response
-  const key = accountKey().replace(/[^\w.-]/g, '_');
+  let key = accountKey().replace(/[^\w.-]/g, '_');
   if (process.env.VIBESPACE_ACCOUNT_LINK) {
     const sf = slotStateFile(p);
     if (sf) {
@@ -331,13 +466,10 @@ function writeUsage(p) {
           prevKey: st.key, prevWindow: ownWindowOf(st.key) || st.win || null,
           newKey: key, newWindow: ownWindowOf(key),
           readingWindow: win, readingFingerprint: fp, prevFingerprint: st.fp || null,
-          // the age of the RE-POINT is unknown here — what we know is when we
-          // last saw this conversation under the old slot, which is never
-          // earlier, so it is the honest upper bound; a conversation that has
-          // been silent all night can no longer pin anything. A state file
-          // written before this field existed reads as age 0, i.e. exactly the
-          // r3 behaviour, rather than losing its protection on the upgrade.
-          repointAgeMs: Date.now() - (Number(st.at) || Date.now()),
+          // the RE-POINT instant, read off the link the pool re-minted (see
+          // repointAgeMs) — never `st.at`, which dates our last OBSERVATION and
+          // is systematically older; unreadable ⇒ null ⇒ unknown ⇒ never expires.
+          repointAgeMs: repointAgeMs(),
         });
         if (d.shadowed) {
           writeSlotState(sf, { key: st.key, fp, win, at: Number(st.at) || Date.now() }, false);
@@ -346,6 +478,37 @@ function writeUsage(p) {
       }
       writeSlotState(sf, { key, fp, win, at: Date.now() }, !st);
     }
+  }
+  // ② THE WINDOW IDENTITY GUARD — the same rule the server applies to every
+  //    value producer, now applied by the producer that had NONE: this hook is
+  //    the highest-frequency writer on the instance (once per 8 s per account)
+  //    and every path that reaches this line without a shadow (a session with
+  //    no link, an unreadable link, a re-point past the horizon, a payload the
+  //    windows could not place) used to write whatever `accountKey()` resolved.
+  //    A reading whose weekly window contradicts the target's own established
+  //    window is not that target's, so it is re-filed on the one account whose
+  //    window matches, else refused — the numbers stay where they were and the
+  //    refusal is written down. NO EVIDENCE ⇒ NO REFUSAL is the shared rule's,
+  //    so an instance with no established windows behaves exactly as before.
+  //
+  //    THE ONE THING A SINGLE SHIPPED FILE CANNOT DO: it has no identity-group
+  //    table, so an org-merged login ('__global__' + its named sub) reads as TWO
+  //    matches and its reading is REFUSED rather than re-filed. That is the
+  //    conservative direction — nothing is written anywhere — and the server's
+  //    own guard, which HAS the table, still sees every later reading.
+  //
+  //    It runs AFTER the slot state has been written, and it deliberately does
+  //    not touch it: that state records which credential SLOT this conversation
+  //    resolved to, which is what the shadow reasons about next time. Where the
+  //    NUMBERS ended up is a different question, and answering it here would
+  //    make the next render believe the link had moved when it had not.
+  //    Cost, measured on this instance's usage-cache: one readdir of 13 entries
+  //    plus ≤7 sidecar reads totalling 8590 bytes for the whole directory.
+  {
+    const d = decideReadingTarget({ key, readingWindow: windowOf(rl), windows: establishedWindows() });
+    if (d.action !== 'write') noteWindowRefusal(key, d);
+    if (d.action === 'archive') return;
+    if (d.action === 'refile') key = d.key;
   }
   const f = path.join(CACHE_DIR, key + '.json');
   // Throttle: the statusline re-renders often; one write / 25s per account is

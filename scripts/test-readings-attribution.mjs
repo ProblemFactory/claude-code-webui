@@ -624,6 +624,22 @@ if (!probe) {
       })());
     ok('§9b NEGATIVE CONTROL: the same predicates fail on the row as it stood before this change (they are not matching prose that was always there)',
       (() => { const before = row.replace(/\*\*AND THE READING IS EVIDENCE ABOUT ITSELF[\s\S]*?parity pin\)\.\*\* /, ''); return !/LAG SHADOW/.test(before) && !/reading-lag\.js/.test(before) && before.length < row.length; })());
+    // r3: the two rules THIS round established are exactly the kind a later edit
+    // "simplifies" back — one of them is a single line's POSITION, the other is
+    // which of two clocks a shipped single file is allowed to believe.
+    ok('§9b …and the two rules ROUND 3 established: the clock ranks BELOW the windows (a proxy may not overrule what it stands for, and an unknown age does not expire), and the statusline dates the RE-POINT from the link the pool re-mints — never from its own last observation',
+      /THE CLOCK RANKS BELOW THE WINDOWS/.test(row) && /`repointAgeMs == null` is UNKNOWN/.test(row)
+      && /lstat\(link\)\.mtimeMs`? IS that instant/.test(row) && /systematically OLDER than the re-point/.test(row)
+      && /AND THE STATUSLINE RUNS THE GUARD/.test(row) && /\.window-refused\.ndjson/.test(row), row.slice(-900));
+    ok('§9b NEGATIVE CONTROL: those predicates fail on the row as ROUND 2 left it (they are not matching prose that was already there)',
+      (() => {
+        const r2 = row.replace(/\*\*THE CLOCK RANKS BELOW THE WINDOWS\*\*[\s\S]*?nothing is written anywhere\)\. /, '');
+        return r2.length < row.length
+          && !/THE CLOCK RANKS BELOW THE WINDOWS/.test(r2) && !/AND THE STATUSLINE RUNS THE GUARD/.test(r2)
+          // …while the ROUND 1+2 properties this row also pins are still there
+          && /WEEKLY HALF IS THE ONLY IDENTITY EVIDENCE/.test(r2) && /ESTABLISHED WINDOW LIVES IN A SIDECAR/.test(r2)
+          && /resetsAt mod 604800/.test(r2);
+      })());
   }
 }
 
@@ -1338,9 +1354,40 @@ if (!probe) {
     s1.key === 'acct-A' && s1.shadowed === true && s1.why === 'window-of-previous-slot', JSON.stringify(s1));
   const s2 = shadow({ readingWindow: { kind: 'sevenDay', resetsAt: W_B }, repointAgeMs: 16000 });
   ok('§13 …and the FIRST reading that is really the new credentials\' ends it', s2.key === 'acct-B' && s2.shadowed === false && s2.why === 'window-of-new-slot', JSON.stringify(s2));
+  // ── r3: THE CLOCK RANKS BELOW THE WINDOWS. `shadowMs` used to short-circuit
+  //    above every window rung, which made the whole rule only as good as its
+  //    caller's ESTIMATE of the age — and the shipped statusline had no re-point
+  //    instant to give it (see §15's leg). A clock is a proxy for "were those
+  //    credentials still in play"; the window is the answer, so the proxy may
+  //    never overrule it.
   const s3 = shadow({ readingWindow: { kind: 'sevenDay', resetsAt: W_A }, repointAgeMs: 11 * 60e3 });
-  ok('§13 BOUNDED: past the shadow window a re-point explains nothing, so a session that never speaks again cannot pin a slot forever',
-    s3.shadowed === false && s3.why === 'shadow-expired', JSON.stringify(s3));
+  ok('§13 THE WINDOW OUTRANKS THE CLOCK: an old re-point does not make the PREVIOUS slot\'s window stop being the previous slot\'s',
+    s3.key === 'acct-A' && s3.shadowed === true && s3.why === 'window-of-previous-slot', JSON.stringify(s3));
+  const s3b = L.decideLagShadow({ prevKey: 'acct-A', newKey: 'acct-B', readingWindow: { kind: 'sevenDay', resetsAt: W_A }, readingFingerprint: 'X', prevFingerprint: 'X', repointAgeMs: 11 * 60e3 });
+  ok('§13 BOUNDED where the clock is the only thing left: with no window evidence, a re-point past the horizon explains nothing, so a session that never speaks again cannot pin a slot forever',
+    s3b.shadowed === false && s3b.why === 'shadow-expired', JSON.stringify(s3b));
+  const s3c = L.decideLagShadow({ prevKey: 'acct-A', newKey: 'acct-B', readingWindow: { kind: 'sevenDay', resetsAt: W_A }, readingFingerprint: 'X', prevFingerprint: 'X', repointAgeMs: null });
+  ok('§13 …and an UNKNOWN age never expires — a caller that cannot date the re-point has not thereby proved the shadow is over',
+    s3c.key === 'acct-A' && s3c.shadowed === true && s3c.why === 'identical-payload', JSON.stringify(s3c));
+  const s3d = L.decideLagShadow({ prevKey: 'acct-A', newKey: 'acct-B', readingWindow: { kind: 'sevenDay', resetsAt: W_A }, readingFingerprint: 'X', prevFingerprint: 'X', repointAgeMs: -5 });
+  ok('§13 …while a NEGATIVE age is still rejected (a number that cannot be an age is not evidence)',
+    s3d.shadowed === false && s3d.why === 'shadow-expired', JSON.stringify(s3d));
+  ok('§13 NEGATIVE CONTROL: the PRE-FIX ordering (clock first) answers `shadow-expired` on the very reading whose window names the previous slot',
+    (() => {
+      const preFix = ({ prevKey, newKey, repointAgeMs, shadowMs = L.SHADOW_MS }) => {
+        if (!prevKey || !newKey || prevKey === newKey) return 'no-repoint';
+        if (!(Number(repointAgeMs) >= 0) || Number(repointAgeMs) > shadowMs) return 'shadow-expired';
+        return 'window-of-previous-slot';
+      };
+      // …and note WHY the null case is not part of this control: the retired
+      // rule coerced (`Number(null) === 0`), so it read "unknown" as "just now"
+      // and happened to agree. The `!= null` clause is a STATEMENT, not a
+      // behaviour change — the defect was the ORDER, and that is what differs.
+      return preFix({ prevKey: 'acct-A', newKey: 'acct-B', repointAgeMs: 11 * 60e3 }) === 'shadow-expired'
+        && s3.why === 'window-of-previous-slot'
+        && preFix({ prevKey: 'acct-A', newKey: 'acct-B', repointAgeMs: null }) === 'window-of-previous-slot'
+        && s3c.why === 'identical-payload';
+    })());
   ok('§13 no re-point ⇒ no shadow, ever', L.decideLagShadow({ prevKey: null, newKey: 'acct-B', readingWindow: { kind: 'sevenDay', resetsAt: W_A } }).why === 'no-repoint'
     && L.decideLagShadow({ prevKey: 'acct-B', newKey: 'acct-B', readingWindow: { kind: 'sevenDay', resetsAt: W_A } }).why === 'no-repoint');
   // the r3 statusline clause, now the LAST rung of the same rule
@@ -1383,7 +1430,7 @@ if (!probe) {
     // the mirror is a block of declarations; evaluate it and hand back the two
     // entry points the statusline uses (this is the SHIPPED bytes, not a copy)
     // eslint-disable-next-line no-new-func
-    const f = new Function(bTool + '\nreturn { windowOf, decideLagShadow, compareWindows, weeklyPhase, windowFingerprint };');
+    const f = new Function(bTool + '\nreturn { windowOf, decideLagShadow, decideReadingTarget, compareWindows, weeklyPhase, windowFingerprint };');
     const T = f();
     const table = [
       [{ prevKey: 'a', prevWindow: winA, newKey: 'b', newWindow: winB, readingWindow: { kind: 'sevenDay', resetsAt: W_A }, repointAgeMs: 16000, nowSec }],
@@ -1391,10 +1438,33 @@ if (!probe) {
       [{ prevKey: 'a', prevWindow: winA, newKey: 'b', newWindow: winB, readingWindow: { kind: 'sevenDay', resetsAt: W_A }, repointAgeMs: 11 * 60e3, nowSec }],
       [{ prevKey: 'a', newKey: 'b', readingWindow: { kind: 'sevenDay', resetsAt: W_A }, readingFingerprint: 'X', prevFingerprint: 'X', repointAgeMs: 3000, nowSec }],
       [{ prevKey: 'a', newKey: 'b', readingWindow: { kind: 'sevenDay', resetsAt: W_A }, readingFingerprint: 'Y', prevFingerprint: 'X', repointAgeMs: 3000, nowSec }],
+      // r3: the ORDER of the clock against the windows, and the two ages the
+      // reordering gave meaning to (unknown never expires; a negative age is
+      // not an age). A one-sided edit of either spelling changes these rows.
+      [{ prevKey: 'a', newKey: 'b', readingWindow: { kind: 'sevenDay', resetsAt: W_A }, readingFingerprint: 'X', prevFingerprint: 'X', repointAgeMs: 11 * 60e3, nowSec }],
+      [{ prevKey: 'a', newKey: 'b', readingWindow: { kind: 'sevenDay', resetsAt: W_A }, readingFingerprint: 'X', prevFingerprint: 'X', repointAgeMs: null, nowSec }],
+      [{ prevKey: 'a', newKey: 'b', readingWindow: { kind: 'sevenDay', resetsAt: W_A }, readingFingerprint: 'X', prevFingerprint: 'X', repointAgeMs: -5, nowSec }],
     ];
     const same = table.every(([inp]) => JSON.stringify(T.decideLagShadow(inp)) === JSON.stringify(L.decideLagShadow(inp)));
     ok('§13 …and the two spellings answer the SAME table identically, driven through the shipped file\'s own bytes', same,
       JSON.stringify(table.map(([i]) => [T.decideLagShadow(i).why, L.decideLagShadow(i).why])));
+    // …and the GUARD too: r3 moved `decideReadingTarget` INSIDE the sentinels
+    // because the statusline now runs it (it was the one value producer with no
+    // window guard at all), so its parity is owed the same table.
+    {
+      const gw = { a: winA, b: winB, c: { sevenDay: W_C, fiveHour: null, scoped: {} } };
+      const gtable = [
+        { key: 'b', readingWindow: { kind: 'sevenDay', resetsAt: W_A }, windows: gw },
+        { key: 'b', readingWindow: { kind: 'sevenDay', resetsAt: W_B }, windows: gw },
+        { key: 'b', readingWindow: { kind: 'sevenDay', resetsAt: W_B + 3 * 86400 }, windows: gw },
+        { key: 'b', readingWindow: { kind: 'fiveHour', resetsAt: nowSec + 1800 }, windows: gw },
+        { key: 'z', readingWindow: { kind: 'sevenDay', resetsAt: W_A }, windows: gw },
+        { key: 'b', readingWindow: { kind: 'sevenDay', resetsAt: W_A }, windows: { ...gw, d: { sevenDay: W_A + WEEK, fiveHour: null, scoped: {} } } },
+      ];
+      ok('§13 …including the WINDOW GUARD, which the statusline now runs from the same mirrored bytes',
+        gtable.every((i) => JSON.stringify(T.decideReadingTarget(i)) === JSON.stringify(L.decideReadingTarget(i))),
+        JSON.stringify(gtable.map((i) => [T.decideReadingTarget(i).action, L.decideReadingTarget(i).action])));
+    }
     // the statusline's rate_limits payload shape is one of the shapes windowOf reads
     const rl = { five_hour: { used_percentage: 22, resets_at: 1788850800 }, seven_day: { used_percentage: 93, resets_at: W_A } };
     ok('§13 …including the statusline\'s OWN payload shape (snake_case rate_limits)', T.windowOf(rl).sevenDay === W_A && T.windowOf(rl).fiveHour === 1788850800
@@ -1757,6 +1827,222 @@ const mkIncidentWorld = ({ stampWindows = true } = {}) => {
     ok('§15 …and THAT is the whole incident again — the poison lands on the low-usage account and the pool makes its SECOND false switch',
       Math.abs(w2.readCache(w2.SPARE).sevenDay.utilization - 0.96) < 1e-9 && w2.am.poolCurrent(w2.P) === w2.FISH,
       `spare7d=${w2.readCache(w2.SPARE).sevenDay.utilization} default=${w2.am.poolCurrent(w2.P)} fish=${w2.FISH}`);
+  }
+
+  // ── r3: THE STATUSLINE OF A POOLED TERMINAL SESSION. Everything above drives
+  //    the tool WITHOUT `VIBESPACE_ACCOUNT_LINK`, so no leg had ever reached the
+  //    `.slot-<id>` branch — the one that decides which member a pooled
+  //    terminal's numbers are filed on. Three defects lived behind it, and each
+  //    gets its OWN leg with its OWN single-mechanism negative control (a
+  //    patched copy of the shipped file, the patch asserted to hit), because a
+  //    control that reverts two mechanisms cannot tell them apart.
+  {
+    const TOOL_PATH = path.join(REPO, 'data/bin/vibespace-usage');
+    const shipped = read('data/bin/vibespace-usage');
+    /** ONE ordinary statusline render of a pooled TERMINAL session, driven
+     *  through the given file's OWN BYTES with the link env the spawn sets. */
+    const renderPooled = (toolPath, w, { pct, sevenDayReset, slotFp, slotAtMinutesAgo, ages = [] }) => {
+      const rl = {
+        five_hour: { used_percentage: 20, resets_at: w.nowSec + 2 * 3600 },
+        seven_day: { used_percentage: pct, resets_at: sevenDayReset },
+      };
+      const sf = path.join(w.cacheDir, '.slot-' + w.CID.replace(/[^\w.-]/g, '_'));
+      fs.writeFileSync(sf, JSON.stringify({
+        key: w.LINK,
+        fp: slotFp === 'same' ? `20/${rl.five_hour.resets_at}|${pct}/${sevenDayReset}` : 'an-older-payload',
+        win: { sevenDay: w.WIN[w.LINK], fiveHour: null, scoped: {} },
+        at: Date.now() - slotAtMinutesAgo * 60e3,
+      }));
+      for (const id of ages) {                       // past THROTTLE_MS, or the write is skipped
+        const f = path.join(w.cacheDir, id + '.json');
+        const old = new Date(Date.now() - 60000); fs.utimesSync(f, old, old);
+      }
+      cp.execFileSync(process.execPath, [toolPath], {
+        input: JSON.stringify({ session_id: w.CID, model: { id: 'claude-fable-5' }, rate_limits: rl }),
+        env: { ...process.env, VIBESPACE_USAGE_CACHE: w.cacheDir, VIBESPACE_ACCOUNT_KEY: w.LINK,
+          VIBESPACE_ACCOUNT_LINK: w.am.sessionPoolLinkPath(w.P, w.SID) },
+        encoding: 'utf8',
+      });
+    };
+    /** The pool's move, then the render, then the pool's own re-evaluation on a
+     *  FRESH engine (what a restart sees — the real 98-second gap had let the
+     *  anti-flap timers expire). `repointMinutesAgo` back-dates the LINK the
+     *  pool re-minted, which is the only honest clock this tool has. */
+    const playPooled = (toolPath, w, opts) => {
+      const cap = quiet();
+      w.am.ensureSessionPoolLink(w.P, w.SID, w.SPARE, { why: 'per-session-switch' });
+      w.am.setPoolTarget(w.P, w.SPARE, { why: 'pool-switch' });
+      if (opts.repointMinutesAgo) {
+        const t = Date.now() / 1000 - opts.repointMinutesAgo * 60;
+        fs.lutimesSync(w.am.sessionPoolLinkPath(w.P, w.SID), t, t);
+      }
+      renderPooled(toolPath, w, opts);
+      const eng2 = w.mkEngine(); eng2.maybePoolAutoSwitchForPool(w.P);
+      cap.done();
+    };
+
+    // ① THE WINDOW OUTRANKS THE CLOCK. An IDLE pooled terminal: the pool moved
+    //    LINK → SPARE 30 minutes ago, the CLI has made no request since, so its
+    //    `rate_limits` still carries LINK's numbers counted in LINK's window.
+    //    The re-point is genuinely old — and the window still says whose
+    //    credentials produced these numbers.
+    const slotStateOf = (w) => { try { return JSON.parse(fs.readFileSync(path.join(w.cacheDir, '.slot-' + w.CID.replace(/[^\w.-]/g, '_')), 'utf8')); } catch { return null; } };
+    {
+      const w = mkIncidentWorld();
+      playPooled(TOOL_PATH, w, { pct: 96, sevenDayReset: w.WIN[w.LINK], slotFp: 'differs', slotAtMinutesAgo: 30, repointMinutesAgo: 30, ages: [w.LINK, w.SPARE, w.FISH] });
+      ok('§15 POOLED STATUSLINE: a render whose window is the PREVIOUS slot\'s leaves the low-usage member alone, however old the re-point is',
+        Math.abs(w.readCache(w.SPARE).sevenDay.utilization - 0.11) < 1e-9, JSON.stringify(w.readCache(w.SPARE).sevenDay));
+      ok('§15 …and it is SHADOWED, not re-filed: the shadow leaves the numbers where they were, so neither cache moves',
+        slotStateOf(w)?.key === w.LINK && Math.abs(w.readCache(w.LINK).sevenDay.utilization - 0.98) < 1e-9,
+        JSON.stringify([slotStateOf(w)?.key === w.LINK, w.readCache(w.LINK).sevenDay]));
+      ok('§15 …so the pool makes NO second switch', w.am.poolCurrent(w.P) === w.SPARE,
+        `default=${w.am.poolCurrent(w.P)} spare=${w.SPARE} fish=${w.FISH}`);
+    }
+    // NEGATIVE CONTROL — the PRE-FIX ORDERING only (the clock short-circuits
+    // above every window rung). Measured at the SHADOW's own output, because
+    // the guard added below is a SECOND barrier against the same harm and would
+    // otherwise mask this one: a control that reverts one mechanism must be
+    // read where that mechanism speaks, and the money is judged by the control
+    // that reverts BOTH (next block).
+    const NEW_BOUND = "  if (repointAgeMs != null && (!(Number(repointAgeMs) >= 0) || Number(repointAgeMs) > shadowMs)) return { key: newKey, shadowed: false, why: 'shadow-expired', cmpPrev, cmpNew };\n";
+    const NO_REPOINT = "  if (!prevKey || !newKey || prevKey === newKey) return { key: newKey, shadowed: false, why: 'no-repoint' };\n";
+    const OLD_BOUND = "  if (!(Number(repointAgeMs) >= 0) || Number(repointAgeMs) > shadowMs) return { key: newKey, shadowed: false, why: 'shadow-expired' };\n";
+    const GUARD_ASK = "    const d = decideReadingTarget({ key, readingWindow: windowOf(rl), windows: establishedWindows() });\n";
+    const GUARD_OFF = "    const d = { action: 'write', key, reason: 'pre-fix: this producer had no window guard', matched: [] };\n";
+    const clockFirst = (txt) => txt.replace(NEW_BOUND, '').replace(NO_REPOINT, NO_REPOINT + OLD_BOUND);
+    ok('§15 NEGATIVE CONTROL setup: the clock bound, the no-repoint rung and the guard call are each a single line in the shipped tool (every patch below must hit)',
+      shipped.split(NEW_BOUND).length === 2 && shipped.split(NO_REPOINT).length === 2 && shipped.split(GUARD_ASK).length === 2, '');
+    {
+      const w = mkIncidentWorld();
+      const preFix = path.join(w.root, 'vibespace-usage.clock-first');
+      fs.writeFileSync(preFix, clockFirst(shipped), { mode: 0o755 });
+      playPooled(preFix, w, { pct: 96, sevenDayReset: w.WIN[w.LINK], slotFp: 'differs', slotAtMinutesAgo: 30, repointMinutesAgo: 30, ages: [w.LINK, w.SPARE, w.FISH] });
+      ok('§15 NEGATIVE CONTROL: with the clock ranked ABOVE the windows the shadow is gone — the conversation is re-keyed onto the member the pool moved to, whose credentials produced none of it',
+        slotStateOf(w)?.key === w.SPARE, JSON.stringify(slotStateOf(w)));
+    }
+    // …and THAT is the money, once the second barrier is down too: the PRE-FIX
+    // file — the ordering as it shipped, and the producer with no guard at all.
+    {
+      const w = mkIncidentWorld();
+      const preFix = path.join(w.root, 'vibespace-usage.prefix-both');
+      fs.writeFileSync(preFix, clockFirst(shipped).replace(GUARD_ASK, GUARD_OFF), { mode: 0o755 });
+      playPooled(preFix, w, { pct: 96, sevenDayReset: w.WIN[w.LINK], slotFp: 'differs', slotAtMinutesAgo: 30, repointMinutesAgo: 30, ages: [w.LINK, w.SPARE, w.FISH] });
+      ok('§15 NEGATIVE CONTROL: the PRE-FIX statusline files the previous member\'s 96 % on the low-usage one and the pool makes its SECOND false switch — one ordinary render of an idle terminal',
+        Math.abs(w.readCache(w.SPARE).sevenDay.utilization - 0.96) < 1e-9 && w.am.poolCurrent(w.P) === w.FISH,
+        `spare7d=${w.readCache(w.SPARE).sevenDay.utilization} default=${w.am.poolCurrent(w.P)} fish=${w.FISH}`);
+    }
+
+    // ② THE CLOCK SOURCE. With NO established windows (a fresh instance, or any
+    //    account whose panel has not refreshed yet) the rule falls to the r3
+    //    identical-payload clause, and THAT is where the age is load-bearing.
+    //    The link moved one second ago; the conversation's last render was 30
+    //    minutes ago. Only one of those two numbers is a re-point age.
+    {
+      const w = mkIncidentWorld({ stampWindows: false });
+      playPooled(TOOL_PATH, w, { pct: 96, sevenDayReset: w.WIN[w.LINK], slotFp: 'same', slotAtMinutesAgo: 30, ages: [w.LINK, w.SPARE, w.FISH] });
+      ok('§15 CLOCK SOURCE: with no windows at all, an idle terminal\'s unchanged payload is still the previous slot\'s — the r3 protection master shipped is intact',
+        Math.abs(w.readCache(w.SPARE).sevenDay.utilization - 0.11) < 1e-9 && w.am.poolCurrent(w.P) === w.SPARE,
+        `spare7d=${w.readCache(w.SPARE).sevenDay.utilization} default=${w.am.poolCurrent(w.P)}`);
+    }
+    // NEGATIVE CONTROL — the OBSERVATION age only (the shipped ordering stays).
+    {
+      const w = mkIncidentWorld({ stampWindows: false });
+      const NEW_SRC = '          repointAgeMs: repointAgeMs(),';
+      const OLD_SRC = '          repointAgeMs: Date.now() - (Number(st.at) || Date.now()),';
+      ok('§15 NEGATIVE CONTROL setup: the re-point age has ONE source in the shipped tool (the patch below must hit it)',
+        shipped.split(NEW_SRC).length === 2, '');
+      const preFix = path.join(w.root, 'vibespace-usage.observation-age');
+      fs.writeFileSync(preFix, shipped.replace(NEW_SRC, OLD_SRC), { mode: 0o755 });
+      playPooled(preFix, w, { pct: 96, sevenDayReset: w.WIN[w.LINK], slotFp: 'same', slotAtMinutesAgo: 30, ages: [w.LINK, w.SPARE, w.FISH] });
+      ok('§15 NEGATIVE CONTROL: fed its own OBSERVATION age instead of the re-point\'s, the same render expires a shadow that had not started — 96 % onto the low-usage member, and the SECOND false switch',
+        Math.abs(w.readCache(w.SPARE).sevenDay.utilization - 0.96) < 1e-9 && w.am.poolCurrent(w.P) === w.FISH,
+        `spare7d=${w.readCache(w.SPARE).sevenDay.utilization} default=${w.am.poolCurrent(w.P)} fish=${w.FISH}`);
+    }
+
+    // ③ THE GUARD IN THE 8×/MINUTE PRODUCER. The shadow only speaks when a
+    //    re-point can explain the reading; every other path through this file
+    //    wrote whatever `accountKey()` resolved. A session with NO link at all
+    //    (not pooled, or a link we cannot read) is the plainest of them.
+    const renderKeyed = (toolPath, w, key, { pct, sevenDayReset }) => {
+      for (const id of [w.LINK, w.SPARE, w.FISH]) {
+        const f = path.join(w.cacheDir, id + '.json');
+        const old = new Date(Date.now() - 60000); fs.utimesSync(f, old, old);
+      }
+      cp.execFileSync(process.execPath, [toolPath], {
+        input: JSON.stringify({ model: { id: 'claude-fable-5' }, rate_limits: {
+          five_hour: { used_percentage: 20, resets_at: w.nowSec + 2 * 3600 },
+          seven_day: { used_percentage: pct, resets_at: sevenDayReset } } }),
+        env: { ...process.env, VIBESPACE_USAGE_CACHE: w.cacheDir, VIBESPACE_ACCOUNT_KEY: key },
+        encoding: 'utf8',
+      });
+    };
+    {
+      const w = mkIncidentWorld();
+      renderKeyed(TOOL_PATH, w, w.SPARE, { pct: 96, sevenDayReset: w.WIN[w.LINK] });   // SPARE's key, LINK's WEEK
+      ok('§15 STATUSLINE GUARD: a reading whose weekly window is another member\'s is re-filed there, not written to the key the spawn handed us',
+        Math.abs(w.readCache(w.SPARE).sevenDay.utilization - 0.11) < 1e-9 && Math.abs(w.readCache(w.LINK).sevenDay.utilization - 0.96) < 1e-9,
+        JSON.stringify([w.readCache(w.SPARE).sevenDay, w.readCache(w.LINK).sevenDay]));
+      const readRefused = () => { try { return fs.readFileSync(path.join(w.cacheDir, '.window-refused.ndjson'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)); } catch { return []; } };
+      const refused = readRefused();
+      ok('§15 …and the move is WRITTEN DOWN with its reason, beside the cache and invisible to every `.json` scanner',
+        refused.length === 1 && refused[0].action === 'refile' && refused[0].key === w.SPARE && refused[0].to === w.LINK && /matches exactly one account/.test(refused[0].reason)
+        && !'.window-refused.ndjson'.endsWith('.json'), JSON.stringify(refused));
+      // …and it is a SAMPLE, not a count: a statusline is a fresh process per
+      // render, so it cannot hold the engine's per-verdict memory, and a
+      // persistent mismatch at the 8 s cadence would otherwise write ~11 500
+      // lines a day. The line SAYS it is sampled, so nobody reads it as a count.
+      renderKeyed(TOOL_PATH, w, w.SPARE, { pct: 97, sevenDayReset: w.WIN[w.LINK] });
+      ok('§15 …once per 60 s, and the line says so — a repeated refusal keeps the fact and drops the repetition',
+        readRefused().length === 1 && refused[0].sampled === '<=1/60s'
+        && Math.abs(w.readCache(w.SPARE).sevenDay.utilization - 0.11) < 1e-9,   // …and it still refused the second one
+        JSON.stringify(readRefused()));
+    }
+    {
+      const w = mkIncidentWorld();
+      // nobody's week: the three members are +3/+5/+6 days, and the comparison
+      // is by PHASE (mod one week), so a stranger's reset must be phase-distinct
+      // — +40 days is +5 days plus five whole weeks, i.e. B-Stack's own phase.
+      renderKeyed(TOOL_PATH, w, w.SPARE, { pct: 96, sevenDayReset: w.nowSec + 1 * 86400 });
+      ok('§15 …a reading whose window matches NOBODY is refused outright — nothing is written anywhere',
+        Math.abs(w.readCache(w.SPARE).sevenDay.utilization - 0.11) < 1e-9
+        && Math.abs(w.readCache(w.LINK).sevenDay.utilization - 0.98) < 1e-9
+        && Math.abs(w.readCache(w.FISH).sevenDay.utilization - 0.33) < 1e-9,
+        JSON.stringify([w.readCache(w.SPARE).sevenDay.utilization, w.readCache(w.LINK).sevenDay.utilization, w.readCache(w.FISH).sevenDay.utilization]));
+    }
+    {   // NO EVIDENCE ⇒ NO REFUSAL, both ways: an agreeing window, and no windows at all
+      const w = mkIncidentWorld();
+      renderKeyed(TOOL_PATH, w, w.SPARE, { pct: 42, sevenDayReset: w.WIN[w.SPARE] });
+      ok('§15 …while a reading that AGREES with the target is written unchanged',
+        Math.abs(w.readCache(w.SPARE).sevenDay.utilization - 0.42) < 1e-9 && w.readCache(w.SPARE).source === 'passive',
+        JSON.stringify(w.readCache(w.SPARE).sevenDay));
+      const w4 = mkIncidentWorld({ stampWindows: false });
+      renderKeyed(TOOL_PATH, w4, w4.SPARE, { pct: 96, sevenDayReset: w4.WIN[w4.LINK] });
+      ok('§15 …and with NO established windows the guard is INERT, so an instance that has never refreshed a panel behaves exactly as before',
+        Math.abs(w4.readCache(w4.SPARE).sevenDay.utilization - 0.96) < 1e-9, JSON.stringify(w4.readCache(w4.SPARE).sevenDay));
+    }
+    // NEGATIVE CONTROL — the guard removed from the shipped file, nothing else.
+    {
+      const w = mkIncidentWorld();
+      const preFix = path.join(w.root, 'vibespace-usage.no-guard');
+      fs.writeFileSync(preFix, shipped.replace(GUARD_ASK, GUARD_OFF), { mode: 0o755 });
+      renderKeyed(preFix, w, w.SPARE, { pct: 96, sevenDayReset: w.WIN[w.LINK] });
+      ok('§15 NEGATIVE CONTROL: without it, the highest-frequency producer on the instance writes another member\'s numbers onto whatever key its spawn was given',
+        Math.abs(w.readCache(w.SPARE).sevenDay.utilization - 0.96) < 1e-9, JSON.stringify(w.readCache(w.SPARE).sevenDay));
+    }
+    // SOURCE PINS — each fix is one line, and each is the kind a later edit
+    // "simplifies" back. The rule they enforce is in the module's own header.
+    ok('§15 SOURCE PIN: the shipped tool dates the RE-POINT from the link the pool re-minted, and keeps `st.at` only as forensics',
+      /fs\.lstatSync\(process\.env\.VIBESPACE_ACCOUNT_LINK\)\.mtimeMs/.test(shipped)
+      && /repointAgeMs: repointAgeMs\(\),/.test(shipped)
+      && !/repointAgeMs: Date\.now\(\) - \(Number\(st\.at\)/.test(shipped)
+      && /at: Date\.now\(\) \}/.test(shipped), '');
+    ok('§15 SOURCE PIN: in BOTH spellings the clock bound sits BELOW the two window rungs, and a null age does not expire',
+      [read('src/reading-lag.js'), shipped].every((txt) => {
+        const w1 = txt.indexOf("why: 'window-of-previous-slot'");
+        const w2 = txt.indexOf("why: 'window-of-new-slot'");
+        const cl = txt.indexOf("why: 'shadow-expired'");
+        return w1 > 0 && w2 > w1 && cl > w2 && /repointAgeMs != null && \(!\(Number\(repointAgeMs\) >= 0\)/.test(txt);
+      }), '');
   }
 
   // ── THE FIVE-HOUR RUNG (r2, reproduced), through the REAL producer. A
