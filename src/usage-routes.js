@@ -549,7 +549,16 @@ async function refreshViaCliPanel(key) {
       }
     } catch { }
     delete merged.limits; // the canonical half is the write path's to compute, never inherited from `prev`
-    const wrote = usageWrite.writeCacheObject({ cacheDir: USAGE_CACHE_DIR, key, obj: merged, source: 'on-demand', familyOf: familyOfScopedBucket, backend: 'claude' });
+    // AUTHORITATIVE OVER THE MODEL-SCOPED SET, but only when this panel's OWN
+    // parse listed one (r5). `mergeLimitSets` keeps every previous limitId
+    // unconditionally — right for a producer that knows about one bucket, wrong
+    // for the one that enumerates: a cap the vendor stops reporting is
+    // resurrected for ever with its last number and `accountRemaining` reads 0 %
+    // for an account whose live reading says otherwise. `u.scopedWeekly` is
+    // THIS read's list; when it is empty `merged` carries `prev`'s forward and
+    // this write states nothing about the set.
+    const wrote = usageWrite.writeCacheObject({ cacheDir: USAGE_CACHE_DIR, key, obj: merged, source: 'on-demand', familyOf: familyOfScopedBucket, backend: 'claude',
+      authoritativeScopes: u.scopedWeekly?.length ? ['model'] : null });
     if (wrote.ok) Object.assign(merged, wrote.object);
     if (isGlobal) { _rateLimitCache = merged; writeUsageCache(); }
     else _accountUsage[key] = { ...merged, name: acctMeta.name, email: acctMeta.email };
@@ -631,6 +640,8 @@ app.post('/api/usage/refresh', async (req, res) => {
         usageWrite.writeCacheObject({
           cacheDir: USAGE_CACHE_DIR, key: 'host-' + hid.replace(/[^\w-]/g, '_') + '-' + aid,
           obj: _hostAcctUsage[hid + ':' + aid], source: 'on-demand', familyOf: familyOfScopedBucket, backend: 'claude',
+          // enumerating producer (r5) — see refreshViaCliPanel
+          authoritativeScopes: u.scopedWeekly?.length ? ['model'] : null,
         });
         res.json({ success: true, origin: 'device' });
       }).catch(() => hosts.readRemoteSubOAuth(hid, aid).then((token) => {
@@ -646,6 +657,8 @@ app.post('/api/usage/refresh', async (req, res) => {
         usageWrite.writeCacheObject({
           cacheDir: USAGE_CACHE_DIR, key: 'host-' + hid.replace(/[^\w-]/g, '_') + '-' + aid,
           obj: _hostAcctUsage[hid + ':' + aid], source: 'on-demand', familyOf: familyOfScopedBucket, backend: 'claude',
+          // enumerating producer (r5) — see refreshViaCliPanel
+          authoritativeScopes: u.scopedWeekly?.length ? ['model'] : null,
         });
             res.json({ success: true });
           });
@@ -698,6 +711,8 @@ app.post('/api/usage/refresh', async (req, res) => {
       usageWrite.writeCacheObject({
         cacheDir: USAGE_CACHE_DIR, key: 'host-' + hid.replace(/[^\w-]/g, '_'),
         obj: _hostUsage[hid], source: 'on-demand-remote', familyOf: familyOfScopedBucket, backend: 'claude',
+        // enumerating producer (r5) — see refreshViaCliPanel
+        authoritativeScopes: u.scopedWeekly?.length ? ['model'] : null,
       });
       res.json({ success: true, origin: 'device' });
     }).catch(() => hosts.readRemoteOAuth(hid).then((token) => {
@@ -713,6 +728,8 @@ app.post('/api/usage/refresh', async (req, res) => {
       usageWrite.writeCacheObject({
         cacheDir: USAGE_CACHE_DIR, key: 'host-' + hid.replace(/[^\w-]/g, '_'),
         obj: _hostUsage[hid], source: 'on-demand-remote', familyOf: familyOfScopedBucket, backend: 'claude',
+        // enumerating producer (r5) — see refreshViaCliPanel
+        authoritativeScopes: u.scopedWeekly?.length ? ['model'] : null,
       });
           res.json({ success: true });
         });
@@ -810,7 +827,10 @@ app.post('/api/usage/refresh', async (req, res) => {
       // survives restarts, and the hook's preserve-merge keeps scopedWeekly and
       // the org identity alive through subsequent passive (5h/7d-only) writes.
       {
-        const w = usageWrite.writeCacheObject({ cacheDir: USAGE_CACHE_DIR, key, obj: u, source: 'on-demand', familyOf: familyOfScopedBucket, backend: 'claude' });
+        // enumerating producer (r5) — see refreshViaCliPanel. `u` IS this read's
+        // own answer (no preserve-merge here at all), so its list is complete.
+        const w = usageWrite.writeCacheObject({ cacheDir: USAGE_CACHE_DIR, key, obj: u, source: 'on-demand', familyOf: familyOfScopedBucket, backend: 'claude',
+          authoritativeScopes: u.scopedWeekly?.length ? ['model'] : null });
         if (w.ok) Object.assign(u, w.object);
       }
       if (isGlobal) { _rateLimitCache = u; writeUsageCache(); }

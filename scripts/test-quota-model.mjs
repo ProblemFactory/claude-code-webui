@@ -1421,5 +1421,279 @@ console.log('\n⑯ the round-3 defects: three ways a counting bucket stopped cou
       `⑯e NEGATIVE CONTROL: …and the typed accessor moves with it (${JSON.stringify(QM.remaining(setE, { nowSec }))} vs ${JSON.stringify(QMpreE.remaining(setE, { nowSec }))})`);
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑰ THE ROUND-4 DEFECTS: who MEASURED this limit, and who may RETIRE one.
+//
+// Both were found by an adversarial verifier against the round-3 branch and
+// both were reproduced against a copy of this instance's own post-migration
+// cache file before anything was changed. They share a root: `writeCacheObject`
+// lifts a LEGACY object, and a legacy object is ONE reading spread over a
+// carry-forward of everything else — the lift could not tell the halves apart,
+// so it stamped the whole file with this producer's name and clock (⑰a) while
+// `mergeLimitSets` let nobody ever say a limit was gone (⑰b).
+//
+// These legs drive the REAL producers through the REAL write path — the §17
+// panel leg in test-readings-attribution feeds a HAND-BUILT `limits` array and
+// never goes through the write path, which is exactly why 659 green asserts
+// said nothing about either defect.
+console.log('\n⑰ per-limit provenance and the right to retire a limit');
+{
+  const MUT17 = `vs-qmr4-mut-${process.pid}-`;
+  // Same crashed-run sweep as ⑯: a SIGKILLed suite must never leave a sibling
+  // in src/ that dirties the tree and blocks the release gate.
+  try {
+    for (const f of fs.readdirSync(path.join(ROOT, 'src'))) {
+      const m = /^vs-qmr4-mut-(\d+)-/.exec(f);
+      if (!m || Number(m[1]) === process.pid) continue;
+      try { process.kill(Number(m[1]), 0); continue; } catch { }
+      try { fs.unlinkSync(path.join(ROOT, 'src', f)); } catch { }
+    }
+  } catch { }
+  const mutants17 = [];
+  process.on('exit', () => { for (const f of mutants17) { try { fs.unlinkSync(f); } catch { } } });
+  const mutantWorld17 = (tag, names, patches) => {
+    const out = {}, hits = [];
+    const nameOf = (n) => `${MUT17}${tag}-${path.basename(n)}`;
+    for (const n of names) {
+      let src = fs.readFileSync(path.join(ROOT, n), 'utf8');
+      for (const other of names) {
+        const rel = './' + path.basename(other);
+        if (src.includes(`require('${rel}')`)) src = src.split(`require('${rel}')`).join(`require('./${nameOf(other)}')`);
+      }
+      for (const [from, to] of (patches[n] || [])) {
+        hits.push([n, src.split(from).length - 1]);
+        src = src.split(from).join(to);
+      }
+      const dst = path.join(ROOT, 'src', nameOf(n));
+      fs.writeFileSync(dst, src);
+      mutants17.push(dst);
+      out[n] = dst;
+    }
+    return { out, hits };
+  };
+  const load17 = (w, n) => require(w.out[n]);
+  const hit17 = (w, label) => ok(w.hits.length > 0 && w.hits.every(([, c]) => c === 1),
+    `⑰ NEGATIVE CONTROL setup: ${label} — every patch anchor hit exactly once (${JSON.stringify(w.hits)})`);
+
+  const WF = 'src/usage-cache-write.js', QF = 'src/quota-model.js', CF = 'src/rate-limit-capture.js';
+  const CAP17 = require(path.join(ROOT, 'src/rate-limit-capture.js'));
+  const SRC = require(path.join(ROOT, 'src/lib/usage-source.js'));
+
+  const T17 = 1788974610137;                 // the real file's own fetchedAt
+  const OVER_AT = 1788911228197;             // …and its overage limit's own asOf
+  const NOW17 = T17 + 607363;                // the event, ~10 min later
+
+  // THE REAL SHAPE, verbatim from this instance's `usage-cache/sub-*.json`
+  // (anonymised: the org/email fields are dropped, no ids, no tokens). Three
+  // limits after the backfill — plan, the Fable model cap, and overage — each
+  // with its own producer and its own age.
+  const realShape = () => ({
+    fiveHour: { utilization: 0 },
+    sevenDay: { utilization: 0.83, resetsAt: 1789318800 },
+    scopedWeekly: [{ name: 'Fable', utilization: 1, resetsAt: 1789318800 }],
+    overallStatus: 'allowed',
+    fetchedAt: T17, source: 'on-demand', scopedFetchedAt: T17 + 2,
+    overage: { inUse: false, asOf: OVER_AT, status: 'rejected', disabledReason: 'org_level_disabled' },
+  });
+
+  /** Migrate the real-shape file into a dir, then fire ONE five-hour
+   *  rate_limit_event through the REAL producer. `Wm`/`Cm` let a control swap
+   *  in a patched copy of the write path / the producer. */
+  const runEvent = (Wm, Cm) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), `vs-qm17-${process.pid}-`));
+    const key = 'sub-anon';
+    // the migration's own stamping rung, driven through the write path under test
+    const set0 = Wm.liftCacheObject(realShape(), { identity: key, familyOf: familyOfScopedBucket });
+    Wm.writeCacheObject({ cacheDir: dir, key, obj: realShape(), set: set0, replace: true, familyOf: familyOfScopedBucket, source: 'on-demand' });
+    const before = Wm.readCacheObject(dir, key);
+    Cm.captureRateLimitEvent({
+      cacheDir: dir, key, identityIds: [key], now: NOW17, familyOf: familyOfScopedBucket,
+      ev: { kind: 'fiveHour', rawType: 'five_hour', status: 'allowed', utilization: 0.88, resetsAt: 0, overage: {} },
+    });
+    return { dir, key, before, after: Wm.readCacheObject(dir, key) };
+  };
+  const limOf = (obj, id) => (obj.limits || []).find((l) => l && l.limitId === id) || null;
+
+  // ── ⑰a a limit this write only CARRIED FORWARD keeps its own producer ──────
+  {
+    const r = runEvent(W, CAP17);
+    const b = { plan: limOf(r.before, 'plan'), fable: limOf(r.before, 'model:fable'), over: limOf(r.before, 'overage') };
+    ok(b.plan && b.fable && b.over && b.fable.source === 'on-demand' && b.fable.fetchedAt === T17,
+      `⑰a the migrated real-shape file holds three limits, each with its own producer (${(r.before.limits || []).map((l) => `${l.limitId}:${l.source}@${l.fetchedAt}`).join(' | ')})`);
+
+    const a = { plan: limOf(r.after, 'plan'), fable: limOf(r.after, 'model:fable'), over: limOf(r.after, 'overage') };
+    ok(a.plan.source === 'rate-limit-event' && a.plan.fetchedAt === NOW17,
+      `⑰a the PLAN limit — the one this event measured — is re-stamped with the producer and its clock (${a.plan.source}@${a.plan.fetchedAt})`);
+    const w5 = QM.windowOfKind(a.plan, '5h');
+    ok(w5 && w5.usedPct === 88 && w5.measuredAt === NOW17,
+      `⑰a …and the reading LANDED (5h ${w5 && w5.usedPct}% measured at ${w5 && w5.measuredAt})`);
+    ok(a.fable.source === 'on-demand' && a.fable.fetchedAt === T17,
+      `⑰a the model-scoped cap — which this record says NOTHING about — keeps the producer that measured it (${a.fable.source}@${a.fable.fetchedAt})`);
+    const wf = QM.windowOfKind(a.fable, '7d');
+    ok(wf && wf.measuredAt === T17 && wf.usedPct === 100,
+      `⑰a …down to the instant its window was measured (${wf && wf.measuredAt}, still ${wf && wf.usedPct}%)`);
+    ok(a.over.source === 'on-demand' && a.over.fetchedAt === OVER_AT,
+      `⑰a the overage limit likewise (${a.over.source}@${a.over.fetchedAt})`);
+    // The 7d window of the plan limit was carried forward INSIDE a limit this
+    // event did measure: the limit is the producer's, the untouched window is
+    // still the panel-read's.
+    const w7 = QM.windowOfKind(a.plan, '7d');
+    ok(w7 && w7.usedPct === 83 && w7.measuredAt === T17,
+      `⑰a a window carried forward inside a MEASURED limit keeps its own measuredAt too (7d ${w7 && w7.usedPct}% @${w7 && w7.measuredAt})`);
+
+    // THE USER-VISIBLE HALF: the panel rows this feature added.
+    const rows = SRC.limitRows(QM, W.limitsOfCache(r.after, { identity: r.key }), { t: (s) => s });
+    const rowF = rows.find((x) => x.limitId === 'model:fable');
+    ok(rowF && rowF.source === 'on-demand' && rowF.fetchedAt === T17,
+      `⑰a …so the panel row says "via ${rowF && rowF.sourceLabel}" and dates it ${rowF && rowF.fetchedAt}, not "just now"`);
+
+    // NEGATIVE CONTROL: the round-3 write path, which lifted the whole object.
+    const wA = mutantWorld17('a', [WF, QF], {
+      [WF]: [['    next = carryUnmeasuredLimits(prevSet, next);\n', '']],
+    });
+    hit17(wA, '⑰a removes the carried-forward rule');
+    const CAPa = mutantWorld17('ac', [CF], { [CF]: [["require('./usage-cache-write.js')", `require('./${MUT17}a-usage-cache-write.js')`]] });
+    hit17(CAPa, '⑰a re-points the real producer at the patched write path');
+    const pre = runEvent(load17(wA, WF), load17(CAPa, CF));
+    const pf = limOf(pre.after, 'model:fable'), po = limOf(pre.after, 'overage');
+    ok(pf.source === 'rate-limit-event' && pf.fetchedAt === NOW17,
+      `⑰a NEGATIVE CONTROL: the pre-fix path stamps the Fable cap as this producer's, just now (${pf.source}@${pf.fetchedAt})`);
+    ok(QM.windowOfKind(pf, '7d').measuredAt === NOW17,
+      `⑰a NEGATIVE CONTROL: …and moves the window's measuredAt onto a number nobody re-measured (${QM.windowOfKind(pf, '7d').measuredAt})`);
+    ok(po.source === 'rate-limit-event',
+      `⑰a NEGATIVE CONTROL: …and the overage limit too (${po.source})`);
+    const preRows = SRC.limitRows(QM, load17(wA, WF).limitsOfCache(pre.after, { identity: pre.key }), { t: (s) => s });
+    ok((preRows.find((x) => x.limitId === 'model:fable') || {}).fetchedAt === NOW17,
+      '⑰a NEGATIVE CONTROL: …which is the sentence the panel row printed');
+
+    // SECOND NEGATIVE CONTROL, ONE MECHANISM: keep the rule but resolve it per
+    // LIMIT instead of per WINDOW (this fix's own round-1 shape). Everything
+    // above stays green — only the carried-forward 7-day window inside the
+    // MEASURED plan limit moves, which is why it needs its own control.
+    const wW = mutantWorld17('w', [WF, QF], {
+      [WF]: [['    for (const w of quotaModel.windowsOf(prev)) if (w) prevByKind.set(w.kind, w);\n', '']],
+    });
+    hit17(wW, '⑰a resolves the rule per LIMIT instead of per WINDOW');
+    const CAPw = mutantWorld17('wc', [CF], { [CF]: [["require('./usage-cache-write.js')", `require('./${MUT17}w-usage-cache-write.js')`]] });
+    hit17(CAPw, '⑰a re-points the real producer at the per-limit copy');
+    const preW = runEvent(load17(wW, WF), load17(CAPw, CF));
+    const pwPlan = limOf(preW.after, 'plan'), pwFable = limOf(preW.after, 'model:fable');
+    ok(QM.windowOfKind(pwPlan, '7d').measuredAt === NOW17 && QM.windowOfKind(pwPlan, '7d').usedPct === 83,
+      `⑰a NEGATIVE CONTROL: per-LIMIT granularity re-clocks the 7-day number this event never mentioned (@${QM.windowOfKind(pwPlan, '7d').measuredAt})`);
+    ok(pwFable.source === 'on-demand' && pwFable.fetchedAt === T17,
+      '⑰a NEGATIVE CONTROL: …while the wholly-untouched limits are unaffected, so only the window leg can catch it');
+  }
+
+  // ── ⑰b only a producer that ENUMERATED may retire a limit ─────────────────
+  {
+    const POOL17 = require(path.join(ROOT, 'src/account-pool-auto.js'));
+    const nowSec = Math.floor(Date.now() / 1000);
+    const now = nowSec * 1000;
+    const panel = (scoped, at) => ({
+      fiveHour: { utilization: 0.2, resetsAt: nowSec + 3600 },
+      sevenDay: { utilization: 0.2, resetsAt: nowSec + 500000 },
+      scopedWeekly: scoped, fetchedAt: at, source: 'on-demand',
+    });
+    const TWO = [{ name: 'OldModel', utilization: 1, resetsAt: nowSec + 300 }, { name: 'Fable', utilization: 0.1, resetsAt: nowSec + 500000 }];
+    const ONE = [{ name: 'Fable', utilization: 0.1, resetsAt: nowSec + 500000 }];
+
+    /** Two panel reads: the first lists two model caps, the second lists only
+     *  one — the shape a cap retirement/rename produces. */
+    const runPanel = (Wm, { authoritative = true } = {}) => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), `vs-qm17b-${process.pid}-`));
+      const key = 'acct';
+      const one = (scoped, at) => Wm.writeCacheObject({
+        cacheDir: dir, key, obj: panel(scoped, at), measuredAt: at, source: 'on-demand',
+        familyOf: familyOfScopedBucket, backend: 'claude',
+        authoritativeScopes: authoritative && scoped.length ? ['model'] : null,
+      });
+      one(TWO, now);
+      const mid = Wm.readCacheObject(dir, key);
+      one(ONE, now + 1000);
+      return { dir, key, mid, after: Wm.readCacheObject(dir, key) };
+    };
+
+    const r = runPanel(W);
+    ok(POOL17.accountRemaining(r.mid, nowSec).remaining === 0,
+      `⑰b with BOTH caps reported, the exhausted one governs the account (${JSON.stringify(POOL17.accountRemaining(r.mid, nowSec))})`);
+    ok(!limOf(r.after, 'model:oldmodel') && !!limOf(r.after, 'model:fable'),
+      `⑰b the next panel read names only one cap, and the one it dropped is RETIRED (${(r.after.limits || []).map((l) => l.limitId).join(',')})`);
+    ok((r.after.scopedWeekly || []).length === 1 && r.after.scopedWeekly[0].name === 'Fable',
+      `⑰b …the derived view follows (${JSON.stringify(r.after.scopedWeekly)})`);
+    const rem = POOL17.accountRemaining(r.after, nowSec);
+    ok(rem.remaining === 80 && rem.known === true,
+      `⑰b …and the pool follows the LIVE reading (${JSON.stringify(rem)}) — which is what the base commit answered`);
+
+    // NEGATIVE CONTROL 1: the round-3 merge, which kept every prev limitId.
+    const wB = mutantWorld17('b', [WF, QF], {
+      [WF]: [['  const base = replace ? prevSet : retireUnnamedScopes(prevSet, next, authoritativeScopes, { key, source: source || (obj && obj.source) || null });',
+        '  const base = prevSet;']],
+    });
+    hit17(wB, '⑰b removes the retirement');
+    const preB = runPanel(load17(wB, WF));
+    ok(!!limOf(preB.after, 'model:oldmodel'),
+      `⑰b NEGATIVE CONTROL: the pre-fix merge resurrects the retired cap (${(preB.after.limits || []).map((l) => l.limitId).join(',')})`);
+    ok(POOL17.accountRemaining(preB.after, nowSec).remaining === 0,
+      `⑰b NEGATIVE CONTROL: …at 0 %, so the pool excludes a member whose live reading says 80 (${JSON.stringify(POOL17.accountRemaining(preB.after, nowSec))})`);
+
+    // POSITIVE CONTROL: a producer that did NOT enumerate must never retire.
+    // (The statusline writes `scopedWeekly: prev.scopedWeekly` and the
+    // rate_limit_event knows about one bucket — both carry the set forward.)
+    const rNo = runPanel(W, { authoritative: false });
+    ok(!!limOf(rNo.after, 'model:oldmodel'),
+      `⑰b POSITIVE CONTROL: without the producer's own claim, the cap is carried forward as before (${(rNo.after.limits || []).map((l) => l.limitId).join(',')})`);
+    // …and the same holds for a REAL non-enumerating producer on a live file.
+    const dirS = fs.mkdtempSync(path.join(os.tmpdir(), `vs-qm17s-${process.pid}-`));
+    W.writeCacheObject({ cacheDir: dirS, key: 'acct', obj: panel(TWO, now), measuredAt: now, source: 'on-demand', familyOf: familyOfScopedBucket, backend: 'claude', authoritativeScopes: ['model'] });
+    CAP17.captureRateLimitEvent({
+      cacheDir: dirS, key: 'acct', identityIds: ['acct'], now: now + 1000, familyOf: familyOfScopedBucket,
+      ev: { kind: 'fiveHour', rawType: 'five_hour', status: 'allowed', utilization: 0.5, resetsAt: 0, overage: {} },
+    });
+    const afterEv = W.readCacheObject(dirS, 'acct');
+    ok(!!limOf(afterEv, 'model:oldmodel') && !!limOf(afterEv, 'model:fable'),
+      `⑰b POSITIVE CONTROL: a real rate_limit_event retires nothing (${(afterEv.limits || []).map((l) => l.limitId).join(',')})`);
+
+    // WIRING PIN: a pure rule with no call site is the 2.355.0 class. Only the
+    // producers whose OWN parse enumerates may pass it, and each must gate on
+    // that parse — never on the preserve-merged object.
+    const routes = fs.readFileSync(path.join(ROOT, 'src/usage-routes.js'), 'utf8');
+    const engine = fs.readFileSync(path.join(ROOT, 'src/server/usage-pool-engine.js'), 'utf8');
+    const sites = (routes.match(/authoritativeScopes:/g) || []).length + (engine.match(/authoritativeScopes:/g) || []).length;
+    // The count is a PIN, not trivia: five ⟳ legs in usage-routes (the local
+    // panel, the two host-per-account legs, the two host-global legs) plus the
+    // bare-token ⟳ and the engine's control-channel probe. A seventh site is a
+    // new claim of authority and must be looked at.
+    ok(sites === 7, `⑰b WIRING PIN: exactly seven enumerating producers pass it (found ${sites})`);
+    ok(!/authoritativeScopes:\s*\[/.test(routes) && !/authoritativeScopes:\s*\[/.test(engine),
+      '⑰b WIRING PIN: …every one of them GATES on its own parse, never unconditionally');
+    ok(/authoritativeScopes: parsed\.scopedWeekly\?\.length \? \['model'\] : null/.test(engine)
+      && /authoritativeScopes: u\.scopedWeekly\?\.length \? \['model'\] : null/.test(routes),
+      "⑰b WIRING PIN: …on the list THIS read produced (`u`/`parsed`), not on the preserve-merged object");
+    const capture = fs.readFileSync(path.join(ROOT, 'src/rate-limit-capture.js'), 'utf8');
+    const statusline = fs.readFileSync(path.join(ROOT, 'data/bin/vibespace-usage'), 'utf8');
+    ok(!capture.includes('authoritativeScopes') && !statusline.includes('authoritativeScopes')
+      && !/authoritativeScopes/.test(fs.readFileSync(path.join(ROOT, 'src/quota-model-migrate.js'), 'utf8')),
+      '⑰b WIRING PIN: …and the single-bucket producers, the statusline and the migration never claim it');
+  }
+
+  // ── ⑰c the claim key is about NUMBERS, never about clocks ─────────────────
+  {
+    const w = { kind: '7d', minutes: 10080, usedPct: 83, resetsAt: 1789318800, measuredAt: 1, state: 'running' };
+    ok(QM.windowClaimKey(w) === QM.windowClaimKey({ ...w, measuredAt: 999, state: 'empty' }),
+      '⑰c the same numbers under a different clock and a different derived verdict are ONE claim');
+    ok(QM.windowClaimKey(w) !== QM.windowClaimKey({ ...w, usedPct: 84 })
+      && QM.windowClaimKey(w) !== QM.windowClaimKey({ ...w, resetsAt: 1789318801 })
+      && QM.windowClaimKey(w) !== QM.windowClaimKey({ ...w, status: 'limited' }),
+      '⑰c …and any number the vendor stated moving makes it a different one');
+    const L = (over) => QM.makeLimit({ limitId: 'overage', scope: 'overage', flags: { inUse: false, asOf: over }, windows: [] });
+    ok(QM.sameLimitClaim(L(1), L(1)) && !QM.sameLimitClaim(L(1), L(2)),
+      '⑰c a windowless limit is compared on its FLAGS (the overage limit states nothing else)');
+    ok(QM.sameLimitClaim(QM.makeLimit({ limitId: 'p', windows: [w, { ...w, kind: '5h' }] }),
+      QM.makeLimit({ limitId: 'p', windows: [{ ...w, kind: '5h' }, w] })),
+      '⑰c window order is not a claim');
+  }
+}
+
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);
 process.exit(fail ? 1 : 0);

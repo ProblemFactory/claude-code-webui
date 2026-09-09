@@ -504,6 +504,42 @@ function deadline(set, { model = null, family = null, nowSec = null } = {}) {
   return best;
 }
 
+// ── what a reading CLAIMS (r5, the per-limit-provenance finding) ────────────
+
+/** THE CLAIM a window makes: the numbers a producer measured, and nothing
+ *  else. Deliberately EXCLUDED are `measuredAt` and `state` — the PROVENANCE
+ *  halves (when somebody looked, and the verdict derived from that clock),
+ *  which is exactly what this key exists to keep separate from the numbers.
+ *
+ *  `usedPct` is rounded to 1e-9 because it round-trips through the legacy view
+ *  as a 0..1 `utilization` (`usedPct/100` and back), and float noise below that
+ *  is not a reading anybody took. */
+function windowClaimKey(w) {
+  if (!w) return '-';
+  const u = num(w.usedPct);
+  return [
+    w.kind, w.minutes == null ? '' : w.minutes, w.minutesStated ? 1 : 0,
+    u == null ? '' : Math.round(u * 1e9) / 1e9,
+    posNum(w.resetsAt) || '', str(w.status) || '', w.resetsAtEstimated ? 1 : 0,
+  ].join('\u0000');
+}
+
+/** THE CLAIM a limit makes: its identity, its flags and every window's claim,
+ *  sorted so two spellings of the same reading compare equal. */
+function limitClaimKey(limit) {
+  if (!limit) return '-';
+  const flags = limit.flags && typeof limit.flags === 'object' ? limit.flags : {};
+  const flagKey = Object.keys(flags).sort().map((k) => k + '=' + JSON.stringify(flags[k])).join(',');
+  const wins = windowsOf(limit).map(windowClaimKey).sort().join('|');
+  return [limit.limitId, str(limit.name) || '', limit.scope, str(limit.model) || '', str(limit.family) || '', flagKey, wins].join('\u0001');
+}
+
+/** DID THIS LIMIT'S NUMBERS MOVE? Two limits whose claims are equal are the
+ *  SAME READING however many times it has been copied forward — which is the
+ *  one question a carried-forward legacy snapshot cannot answer about itself.
+ *  (The write path's caller: src/usage-cache-write.js.) */
+function sameLimitClaim(a, b) { return limitClaimKey(a) === limitClaimKey(b); }
+
 // ── merge ───────────────────────────────────────────────────────────────────
 
 /** Merge one window into an existing one: the NEWER measurement wins whole. A
@@ -1079,6 +1115,8 @@ module.exports = {
   windowStatesSpend, bucketStatesSpend, spendingWindows,
   // merge
   mergeLimitSets, mergeLimit, mergeWindow,
+  // "did these numbers move?" — the write path's carried-forward rule
+  windowClaimKey, limitClaimKey, sameLimitClaim,
   // panels
   orderLimits, limitLabel, limitState,
   // the wall's own attribution (inc-mttbrtc0-6049)
