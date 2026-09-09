@@ -2,6 +2,37 @@
 
 Moved VERBATIM out of CLAUDE.md (tier-2 pass).
 
+## A PARSE THAT COULD NOT SEE A CAP RETIRED IT (2026-09-09, quota-model r6 — found by an adversarial verifier against this branch's own r5)
+
+**THE SHAPE.** r5 gave a producer the right to RETIRE a model-scoped limit the cache file holds and the current read does not name (`authoritativeScopes`), because `mergeLimitSets` can only ADD and a cap the vendor stops reporting was otherwise resurrected for ever with its last, possibly exhausted, number. The gate was `u.scopedWeekly?.length ? ['model'] : null` — **a fact about the ARRAY**: it says a model cap was seen, never that ALL of them were.
+
+Seven call sites are fed by THREE parsers. Driven over ONE account state — plan 20 %/20 %, a Fable cap at 10 %, and a `seven_day_opus` at **100 % stated with no `resets_at`** — they answer differently:
+
+```
+parseCliUsageText      -> plan, model:fable, model:opus     (the ⟳ CLI-panel rung, 1 of 7)
+parseOAuthUsage        -> plan, model:fable                 (the bare-token ⟳ + the four host legs, 5 of 7)
+parseGetUsageResponse  -> plan, model:fable                 (the engine's control-channel probe, 1 of 7)
+```
+
+So the panel establishes the spent cap and any of the other six then **retires it**, end to end through the real modules and the real write path: `accountRemaining` `{remaining:0}` → `{remaining:80, known:true}`. That is inc-msof8i22 — "the pool stayed on an account whose Opus was spent" — re-opened by the mechanism built to end its mirror image.
+
+**REACHABILITY IS STRUCTURAL, NOT INCIDENTAL.** The control-channel probe is the FIRST rung of `POST /api/usage/refresh`, ahead of `refreshViaCliPanel`, so on any account with a live local claude chat session the "authoritative" list always came from a parser that omits reset-less named caps. No preserve-merge protects it either: the panel replaces `scopedWeekly` wholesale when non-empty, `writeUsageCacheForKey` falls back to `prev` only when the list is EMPTY, and the bare-token leg hands the parse to the write path verbatim. And the only signal on a real cap deletion was a `console.log`.
+
+**THE FIX — COMPLETENESS IS A PROPERTY THE PARSE STATES.** Each producer counts what it DROPPED (a `weekly_scoped` entry it could not NAME; a bucket-shaped field it could not read a number from; a `Current week (…)` line its own regex did not match) and only a parse that dropped nothing marks itself, through the ONE rule every site asks — `quotaModel.authoritativeScopesOf(parse)`. r5's second condition is kept deliberately: an enumerated but EMPTY list still states nothing, because it cannot be told apart from "my scoped parsing broke" and retiring a spent cap is the money-losing direction.
+
+**AND A BUCKET WITHOUT A RESET IS STILL A BUCKET.** Both named-field loops required `v.resets_at` while the array branches beside them in the SAME parsers accept an entry without one — one parser, two answers for one payload shape (measured: 3 of this instance's reset-less scoped anchor readings carry `source: 'control'`, i.e. that array branch really produces them). r3/r4 had already settled what such a bucket means — a STATED SPEND is decisive and counts, it merely may not name a DEADLINE — so the requirement is gone. It is the routine shape: **704 of 5631 scoped readings and 615 of 7978 seven-day readings on this instance carry no reset at all** (692 of the scoped ones from the ⟳ panel). Honest boundary: every reset-less bucket ever recorded here sits at u=0, so the exact spent-and-reset-less combination is LATENT on this instance, not live — but it is the shape 2.305.0 found in a real payload, and two suites' pinned assertions ("a scoped field with no reset is still skipped") were pinning the pre-r3 belief that such a bucket is useless. They are inverted on purpose, each with its essay and a replacement negative control.
+
+**INVARIANTS.**
+- **Completeness is stated by the producer, never inferred from a non-empty array.** "I saw one" and "I saw all of them" are different claims, and only the second may delete somebody else's.
+- **A claim about a READ must not be expressible in the store that read is written to.** The mark is a NON-ENUMERABLE, SYMBOL-KEYED own property: `JSON.stringify` drops it, a spread drops it, a preserve-merge of a stored file drops it — every one of those losses meaning "no authority", the safe direction — and no JSON a vendor, a device or a file could hand us can FORGE it. (This store's oldest law, from the established-window incident: a fact only ONE producer may state does not belong in the object all the others rewrite.)
+- **When the parse result and the write payload are different objects, the gate belongs to the parse** — `refreshViaCliPanel` writes `{...cliPanel, …}` and must ask `cliPanel`.
+- **A call site whose failure mode is SILENCE owes a functional test, not another pin.** Asking the spread type-checks, satisfies the wiring pin's shape, and kills the retirement at the one producer that most deserves it; mutation-tested, it reddened nothing else in the suite. §⑱f therefore drives the REAL `refreshViaCliPanel` through the REAL `setupUsage` with a fake `claude` on `CLAUDE_CMD` and reads the consequence.
+- **A filter written when a list was ADDITIVE becomes a lie when that list is promoted to an AUTHORITATIVE enumeration.** The `!resets_at` skips predate the retirement by years and were correct then; the promotion is what made them dangerous, and nothing re-read them.
+- **A test file's own scratch copies must be git-ignored by a rule that covers the FAMILY, not by one line per section** (r5's `vs-qmr4-mut-*` prefix was never added, so a SIGKILL could strand a file in `src/` that dirties the tree and blocks every push — §⑱0 now asks git itself, and SKIPs loudly with git's own failure when there is no repo to ask).
+
+**GATE.** test-quota-model 293 (§⑱a the cross-producer parity over one vendor state, with the pre-fix skips restored one parser at a time as its negative controls; §⑱b the end-to-end ladder with the verifier's own numbers reproduced by a pre-fix world AND a single-mechanism control showing the parser half is what made the gate lethal; §⑱c completeness is falsifiable per drop shape; §⑱d the mark is per-read and unforgeable; §⑱f the REAL panel refresher, with "ask the spread" as its negative control; §⑱e the retirement line names the claim it drops). Product-source mutation matrix: OAuth parser drop → 8 red, control parser drop → 3 red, authority ignoring the claim → 9 red, unconditional completeness → 1 red, panel site asking the spread → 2 red, log line dropping the numbers → 1 red; restored → 0.
+
+
 ## A WALL LANDED ON THE MEMBER THE TURN STARTED ON (inc-mttbrtc0-6049, 2026-09-08 23:47Z, production journal + anchors)
 
 **THE SHAPE.** The pool re-pointed one session's credential link twice inside a SINGLE turn — `data/slot-transitions.jsonl` carries all three rows, per session, with timestamps (23:44:48, 23:46:00, 23:46:36). The CLI re-read the credentials (2.1.257's `rpe()` re-reads on mtime, which is exactly what a re-point bumps) and its NEXT request, made with the member we had just moved TO, came back rejected with that member's own 5h window ("resets 8:30pm"). `demoteWalledAccount` attributed it to the TURN-PINNED slot — the member the turn had STARTED on — and wrote it with `captureRateLimitEvent(source:'wall')`, which had **no window check at all**. The anchor streams recorded the whole thing (identities anonymised):

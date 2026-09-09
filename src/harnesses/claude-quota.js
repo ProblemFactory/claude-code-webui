@@ -15,6 +15,10 @@
 //   • GET /api/oauth/usage JSON           → parseOAuthUsage     (usage-routes _parseUsage, moved verbatim)
 //   • get_usage control payload           → ClaudeCodeAdapter.parseGetUsageResponse (adapter, unchanged)
 const { capsOf } = require('../backend-caps.js');
+// PURE, and required HERE rather than beside the typed producers below because
+// the two parsers at the top of this file mark their own enumeration with it
+// (r6, `markScopedEnumeration`).
+const quotaModel = require('../quota-model.js');
 const { ClaudeCodeAdapter } = require('../adapters/claude-code.js');
 const { parseRateLimitEvent } = require('../rate-limit-capture.js');
 const { classifyAuthFailure } = require('../account-pool-auto.js');
@@ -72,7 +76,17 @@ function parseCliUsageText(text, nowMs) {
     scopedWeekly.push({ name: m[1], utilization: Math.min(1, Math.max(0, (+m[2]) / 100)),
       ...(m[3] && m[4] ? { resetsAt: _parseCliResetTime(m[3], m[4], nowMs) || undefined } : {}) });
   }
-  return { fiveHour: fiveHour || undefined, sevenDay: sevenDay || undefined, scopedWeekly, fetchedAt: nowMs || Date.now() };
+  // DID THIS PARSE SEE EVERY MODEL CAP THE PANEL PRINTED? (r6.) Count the
+  // `Current week (…)` lines with a LOOSER regex than the one that reads them:
+  // a line whose `N% used` half the bucket regex could not match is a cap this
+  // read lost, and losing one silently is what makes an "authoritative" list a
+  // lie. Format drift therefore costs the right to retire (and nothing else) —
+  // the parse itself still degrades exactly as it always has.
+  let printed = 0;
+  for (const m of s.matchAll(/^Current week \(([^)]+)\):/gm)) if (!/^all models$/i.test(m[1])) printed++;
+  return quotaModel.markScopedEnumeration(
+    { fiveHour: fiveHour || undefined, sevenDay: sevenDay || undefined, scopedWeekly, fetchedAt: nowMs || Date.now() },
+    printed === scopedWeekly.length);
 }
 
 // GET /api/oauth/usage reply → usage-cache shape (usage-routes `_parseUsage`,
@@ -89,17 +103,21 @@ function parseOAuthUsage(u) {
   const sevenDay = toWin(u.seven_day);
   const scopedWeekly = [];
   const haveScoped = new Set();
+  // Model caps this parse SAW but could not turn into a bucket (r6). Only a
+  // parse that dropped none of them may claim to have enumerated the scope —
+  // see quota-model's `markScopedEnumeration`.
+  let dropped = 0;
   if (Array.isArray(u.limits)) {
     for (const lim of u.limits) {
-      if (lim?.kind === 'weekly_scoped' && lim.scope?.model?.display_name) {
-        scopedWeekly.push({
-          name: lim.scope.model.display_name,
-          utilization: (typeof lim.percent === 'number' ? lim.percent : 0) / 100,
-          resetsAt: lim.resets_at ? Math.floor(Date.parse(lim.resets_at) / 1000) || 0 : 0,
-          severity: lim.severity || 'normal',
-        });
-        haveScoped.add(String(lim.scope.model.display_name).toLowerCase());
-      }
+      if (lim?.kind !== 'weekly_scoped') continue;
+      if (!lim.scope?.model?.display_name) { dropped++; continue; } // a model cap we cannot NAME is a cap we lost
+      scopedWeekly.push({
+        name: lim.scope.model.display_name,
+        utilization: (typeof lim.percent === 'number' ? lim.percent : 0) / 100,
+        resetsAt: lim.resets_at ? Math.floor(Date.parse(lim.resets_at) / 1000) || 0 : 0,
+        severity: lim.severity || 'normal',
+      });
+      haveScoped.add(String(lim.scope.model.display_name).toLowerCase());
     }
   }
   // NAMED scoped buckets too (2.305.0, inc-msof8i22): the REST payload can
@@ -107,14 +125,27 @@ function parseOAuthUsage(u) {
   // instead of (or in addition to) a `limits[]` entry. Reading only limits[]
   // made the OPUS cap invisible to the pool's exhaustion test — it stayed on
   // an account whose Opus was spent while a member still had headroom. Any
-  // object field with a utilization/percent AND a reset counts; array entries
-  // win on name collision.
+  // object field with a utilization/percent counts; array entries win on name
+  // collision. A `null` field is the vendor stating there is no such limit and
+  // is not a drop.
+  //
+  // A BUCKET WITHOUT A RESET IS STILL A BUCKET (r6). This loop used to require
+  // `v.resets_at`, which is the SAME shape the `limits[]` branch above accepts
+  // without one — one parser, two answers for one payload shape. And it is the
+  // routine shape, not an edge: on this instance's own anchor streams 704 of
+  // 5631 scoped readings and 615 of 7978 seven-day readings carry no reset at
+  // all (692 of the scoped ones from the ⟳ panel, 3 from this very control
+  // channel's array branch). r3/r4 already settled what such a bucket means —
+  // a STATED SPEND is decisive and counts, it merely may not name a DEADLINE
+  // (`windowState` / `bucketCounts`) — so dropping it turns a fact the vendor
+  // stated into ignorance, and the fact it drops is precisely "this model cap
+  // is spent".
   for (const [k, v] of Object.entries(u)) {
     if (!/^seven_day_./.test(k) || k === 'seven_day_oauth_apps') continue;
-    if (!v || typeof v !== 'object') continue;
+    if (!v || typeof v !== 'object' || Array.isArray(v)) continue;
     const pctRaw = typeof v.utilization === 'number' ? v.utilization
       : (typeof v.percent === 'number' ? v.percent : null);
-    if (pctRaw == null || !v.resets_at) continue;
+    if (pctRaw == null) { dropped++; continue; } // shaped like a weekly bucket, states no number we can read
     const name = k.replace(/^seven_day_/, '').replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
     if (haveScoped.has(name.toLowerCase())) continue;
     haveScoped.add(name.toLowerCase());
@@ -143,11 +174,11 @@ function parseOAuthUsage(u) {
       };
     }
   }
-  return {
+  return quotaModel.markScopedEnumeration({
     fiveHour, sevenDay, scopedWeekly, ...(spend ? { spend } : {}),
     overallStatus: (fiveHour.status === 'limited' || sevenDay.status === 'limited') ? 'limited' : 'allowed',
     fetchedAt: Date.now(),
-  };
+  }, dropped === 0);
 }
 
 // ONE entry over the three claude reading shapes (the harness contract).
@@ -221,7 +252,7 @@ const WEEK_SEC = 7 * 86400;
 //     `extra_usage`) or an overage state (`rate_limit_event`'s overage fields).
 // `familyOf` is injected by the caller (src/model-family.js) — this file is in
 // the SHARED tier and quota-model is PURE, so neither may reach for it.
-const quotaModel = require('../quota-model.js');
+// (`quotaModel` is required at the top of this file — see the note there.)
 
 const CLAUDE_EXTRA_KEYS = ['orgUuid', 'orgName', 'orgEmail', 'email', 'name', 'planType', 'overallStatus', 'scopedFetchedAt', 'spend', 'corroborated'];
 

@@ -14,6 +14,12 @@
 
 const { BackendAdapter } = require('./base');
 const { worktreeSpawnArgs } = require('../backend-caps');
+// PURE (imports nothing): `parseGetUsageResponse` marks whether its own parse
+// enumerated the model-scoped set — the claim that lets a write RETIRE a limit
+// (r6). Deliberately the SAME function the other two claude parsers use; a
+// second spelling of "did I see the whole set" is the twin class this store has
+// already paid for six times.
+const quotaModel = require('../quota-model.js');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -432,8 +438,13 @@ class ClaudeCodeAdapter extends BackendAdapter {
     const fiveHour = toWin(rl.five_hour);
     const sevenDay = toWin(rl.seven_day);
     const scopedWeekly = [];
+    // Model caps this parse SAW but could not turn into a bucket (r6). Only a
+    // parse that dropped none of them may claim to have enumerated the scope,
+    // because that claim is what lets a write RETIRE a limit the file holds
+    // (src/quota-model.js `markScopedEnumeration` / `authoritativeScopesOf`).
+    let dropped = 0;
     for (const s of (Array.isArray(rl.model_scoped) ? rl.model_scoped : [])) {
-      if (!s?.display_name) continue;
+      if (!s?.display_name) { if (s && typeof s === 'object') dropped++; continue; }
       const resetsAt = typeof s.resets_at === 'number' ? s.resets_at
         : (s.resets_at ? Math.floor(Date.parse(s.resets_at) / 1000) || 0 : 0);
       scopedWeekly.push({
@@ -453,13 +464,29 @@ class ClaudeCodeAdapter extends BackendAdapter {
     // stayed on an account whose Opus was spent, which is exactly the switch
     // the feature exists to make. An array entry wins over a named field of
     // the same bucket (dedupe by name).
+    //
+    // A BUCKET WITHOUT A RESET IS STILL A BUCKET (r6). This loop used to
+    // require `v.resets_at`, while the `model_scoped` array above accepts an
+    // entry without one — one parser, two answers for one payload shape (and
+    // the array branch really does produce them: 3 of this instance's
+    // reset-less scoped anchor readings carry `source: 'control'`). r3/r4
+    // already settled what such a bucket means: a STATED SPEND is decisive and
+    // counts, it merely may not name a DEADLINE. Dropping it turned "this model
+    // cap is spent" into ignorance — the inc-msof8i22 harm, one layer down.
+    // What still marks a bucket is a NUMBER; a candidate that is shaped like a
+    // window (any of utilization/used_percentage/percent/resets_at) but states
+    // no number we can read is counted as a DROP, so this parse stops claiming
+    // to have enumerated the scope instead of silently under-reporting it.
     {
       const have = new Set(scopedWeekly.map((x) => String(x.name).toLowerCase()));
       const SKIP = new Set(['five_hour', 'seven_day', 'extra_usage', 'seven_day_oauth_apps']);
+      const WINDOWISH = ['utilization', 'used_percentage', 'percent', 'resets_at'];
       for (const [k, v] of Object.entries(rl)) {
-        if (SKIP.has(k) || !v || typeof v !== 'object') continue;
-        if (typeof v.utilization !== 'number' && typeof v.used_percentage !== 'number') continue;
-        if (!v.resets_at) continue;
+        if (SKIP.has(k) || !v || typeof v !== 'object' || Array.isArray(v)) continue;
+        if (typeof v.utilization !== 'number' && typeof v.used_percentage !== 'number') {
+          if (WINDOWISH.some((f) => f in v)) dropped++;
+          continue;
+        }
         const w = toWin(v);
         const name = k.replace(/^seven_day_/, '').replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
         if (have.has(name.toLowerCase())) continue; // array entry wins
@@ -467,12 +494,12 @@ class ClaudeCodeAdapter extends BackendAdapter {
         scopedWeekly.push({ name, utilization: w.utilization, resetsAt: w.resetsAt, severity: w.utilization >= 1 ? 'exceeded' : 'normal' });
       }
     }
-    return {
+    return quotaModel.markScopedEnumeration({
       fiveHour, sevenDay, scopedWeekly,
       overallStatus: (fiveHour.status === 'limited' || sevenDay.status === 'limited') ? 'limited' : 'allowed',
       fetchedAt: Date.now(), source: 'control',
       scopedFetchedAt: scopedWeekly.length ? Date.now() : undefined,
-    };
+    }, dropped === 0);
   }
 
   // Chat-mode PASSIVE limit signal (2.260.0, ToS-clean by construction): the

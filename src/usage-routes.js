@@ -33,6 +33,10 @@ const parseCliUsageText = claudeQuota.parseCliUsageText;      // `claude -p /usa
 const codexQuota = harnesses.get('codex').quota;
 const normalizeCodexRateLimit = codexQuota.normalize; // codex rate_limits (rollout / live push / rateLimits/read)
 const quotaModel = require('./quota-model.js');
+// MAY THIS READ RETIRE A LIMIT? One rule, asked by every enumerating producer
+// (r6) — never a hand-spelled `scopedWeekly?.length` test, which is a fact about
+// the array and not about the parse. See quota-model's `authoritativeScopesOf`.
+const { authoritativeScopesOf } = quotaModel;
 
 function setupUsage({ app, accounts, hosts, usageHistory, activeSessions, serverSetting, ensureDir, USAGE_CACHE_FILE, USAGE_CACHE_DIR, CODEX_SESSIONS_DIR, META_DIR, AVAILABLE_MODELS, BUFFERS_DIR, probeUsageForAccountKey, onMemberReadingFresh, CLAUDE_CMD }) {
 const https = require('https');
@@ -550,15 +554,24 @@ async function refreshViaCliPanel(key) {
     } catch { }
     delete merged.limits; // the canonical half is the write path's to compute, never inherited from `prev`
     // AUTHORITATIVE OVER THE MODEL-SCOPED SET, but only when this panel's OWN
-    // parse listed one (r5). `mergeLimitSets` keeps every previous limitId
-    // unconditionally — right for a producer that knows about one bucket, wrong
-    // for the one that enumerates: a cap the vendor stops reporting is
-    // resurrected for ever with its last number and `accountRemaining` reads 0 %
-    // for an account whose live reading says otherwise. `u.scopedWeekly` is
-    // THIS read's list; when it is empty `merged` carries `prev`'s forward and
-    // this write states nothing about the set.
+    // parse both ENUMERATED and listed one (r5 + r6). `mergeLimitSets` keeps
+    // every previous limitId unconditionally — right for a producer that knows
+    // about one bucket, wrong for the one that enumerates: a cap the vendor
+    // stops reporting is resurrected for ever with its last number and
+    // `accountRemaining` reads 0 % for an account whose live reading says
+    // otherwise.
+    //
+    // ASKED OF `cliPanel`, NOT OF `u` (r6): the enumeration mark is a
+    // NON-ENUMERABLE, symbol-keyed property of the parse result, so the
+    // `const u = { ...cliPanel, … }` above does not carry it — deliberately,
+    // because that is the same property which stops a stored object from ever
+    // forging the claim. The PARSE is the thing that knows whether it dropped a
+    // cap; `u` is a copy of its fields. (`u.scopedWeekly` IS
+    // `cliPanel.scopedWeekly`, so the list this gate reads is unchanged, and
+    // test-quota-model §⑱f drives this call site with a real CLI panel because
+    // spelling it `u` here fails SILENTLY: authority simply never happens.)
     const wrote = usageWrite.writeCacheObject({ cacheDir: USAGE_CACHE_DIR, key, obj: merged, source: 'on-demand', familyOf: familyOfScopedBucket, backend: 'claude',
-      authoritativeScopes: u.scopedWeekly?.length ? ['model'] : null });
+      authoritativeScopes: authoritativeScopesOf(cliPanel) });
     if (wrote.ok) Object.assign(merged, wrote.object);
     if (isGlobal) { _rateLimitCache = merged; writeUsageCache(); }
     else _accountUsage[key] = { ...merged, name: acctMeta.name, email: acctMeta.email };
@@ -641,7 +654,7 @@ app.post('/api/usage/refresh', async (req, res) => {
           cacheDir: USAGE_CACHE_DIR, key: 'host-' + hid.replace(/[^\w-]/g, '_') + '-' + aid,
           obj: _hostAcctUsage[hid + ':' + aid], source: 'on-demand', familyOf: familyOfScopedBucket, backend: 'claude',
           // enumerating producer (r5) — see refreshViaCliPanel
-          authoritativeScopes: u.scopedWeekly?.length ? ['model'] : null,
+          authoritativeScopes: authoritativeScopesOf(u),
         });
         res.json({ success: true, origin: 'device' });
       }).catch(() => hosts.readRemoteSubOAuth(hid, aid).then((token) => {
@@ -658,7 +671,7 @@ app.post('/api/usage/refresh', async (req, res) => {
           cacheDir: USAGE_CACHE_DIR, key: 'host-' + hid.replace(/[^\w-]/g, '_') + '-' + aid,
           obj: _hostAcctUsage[hid + ':' + aid], source: 'on-demand', familyOf: familyOfScopedBucket, backend: 'claude',
           // enumerating producer (r5) — see refreshViaCliPanel
-          authoritativeScopes: u.scopedWeekly?.length ? ['model'] : null,
+          authoritativeScopes: authoritativeScopesOf(u),
         });
             res.json({ success: true });
           });
@@ -712,7 +725,7 @@ app.post('/api/usage/refresh', async (req, res) => {
         cacheDir: USAGE_CACHE_DIR, key: 'host-' + hid.replace(/[^\w-]/g, '_'),
         obj: _hostUsage[hid], source: 'on-demand-remote', familyOf: familyOfScopedBucket, backend: 'claude',
         // enumerating producer (r5) — see refreshViaCliPanel
-        authoritativeScopes: u.scopedWeekly?.length ? ['model'] : null,
+        authoritativeScopes: authoritativeScopesOf(u),
       });
       res.json({ success: true, origin: 'device' });
     }).catch(() => hosts.readRemoteOAuth(hid).then((token) => {
@@ -729,7 +742,7 @@ app.post('/api/usage/refresh', async (req, res) => {
         cacheDir: USAGE_CACHE_DIR, key: 'host-' + hid.replace(/[^\w-]/g, '_'),
         obj: _hostUsage[hid], source: 'on-demand-remote', familyOf: familyOfScopedBucket, backend: 'claude',
         // enumerating producer (r5) — see refreshViaCliPanel
-        authoritativeScopes: u.scopedWeekly?.length ? ['model'] : null,
+        authoritativeScopes: authoritativeScopesOf(u),
       });
           res.json({ success: true });
         });
@@ -830,7 +843,7 @@ app.post('/api/usage/refresh', async (req, res) => {
         // enumerating producer (r5) — see refreshViaCliPanel. `u` IS this read's
         // own answer (no preserve-merge here at all), so its list is complete.
         const w = usageWrite.writeCacheObject({ cacheDir: USAGE_CACHE_DIR, key, obj: u, source: 'on-demand', familyOf: familyOfScopedBucket, backend: 'claude',
-          authoritativeScopes: u.scopedWeekly?.length ? ['model'] : null });
+          authoritativeScopes: authoritativeScopesOf(u) });
         if (w.ok) Object.assign(u, w.object);
       }
       if (isGlobal) { _rateLimitCache = u; writeUsageCache(); }

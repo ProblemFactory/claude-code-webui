@@ -111,7 +111,10 @@ What's contributing to your limits usage?`;
     nimbus_quill: { utilization: 0, resets_at: null }, extra_usage: { is_enabled: false } } };
   const g = cl.normalize(live);
   const gRef = ClaudeCodeAdapter.parseGetUsageResponse(live);
-  ok('get_usage payload → the adapter parse (0-100 ints normalized, named scoped field, codename skipped)', g && near(g.fiveHour.utilization, 0.34) && near(g.sevenDay.utilization, 0.39) && g.scopedWeekly.some((w) => /Sonnet/i.test(w.name) && near(w.utilization, 0.12)) && !g.scopedWeekly.some((w) => /nimbus/i.test(w.name)) && g.source === gRef.source, g);
+  // r6: the codename bucket is KEPT (a stated spend is a claim even with no
+  // reset — see test-get-usage-parse for the essay); the null buckets are still
+  // absent, because `null` is the vendor saying there is no such limit.
+  ok('get_usage payload → the adapter parse (0-100 ints normalized, named scoped field, reset-less codename kept, null buckets absent)', g && near(g.fiveHour.utilization, 0.34) && near(g.sevenDay.utilization, 0.39) && g.scopedWeekly.some((w) => /Sonnet/i.test(w.name) && near(w.utilization, 0.12)) && g.scopedWeekly.some((w) => /nimbus/i.test(w.name) && w.utilization === 0) && !g.scopedWeekly.some((w) => /opus|oauth/i.test(w.name)) && g.source === gRef.source, g);
   // (c) GET /api/oauth/usage REST JSON (limits[] + a named seven_day_* field + extra_usage)
   const rest = { five_hour: { utilization: 42, resets_at: '2026-08-08T05:00:00.000Z' }, seven_day: { utilization: 71, resets_at: '2026-08-12T00:00:00.000Z' },
     seven_day_opus: { utilization: 100, resets_at: '2026-08-12T00:00:00.000Z' },

@@ -1667,9 +1667,15 @@ console.log('\n⑰ per-limit provenance and the right to retire a limit');
     ok(sites === 7, `⑰b WIRING PIN: exactly seven enumerating producers pass it (found ${sites})`);
     ok(!/authoritativeScopes:\s*\[/.test(routes) && !/authoritativeScopes:\s*\[/.test(engine),
       '⑰b WIRING PIN: …every one of them GATES on its own parse, never unconditionally');
-    ok(/authoritativeScopes: parsed\.scopedWeekly\?\.length \? \['model'\] : null/.test(engine)
-      && /authoritativeScopes: u\.scopedWeekly\?\.length \? \['model'\] : null/.test(routes),
-      "⑰b WIRING PIN: …on the list THIS read produced (`u`/`parsed`), not on the preserve-merged object");
+    // r6: the gate is the ONE pure rule, asked of the PARSE. A hand-spelled
+    // `scopedWeekly?.length` is a fact about the array — it says a model cap was
+    // seen, never that all of them were — and that is the whole of §⑱.
+    const gateRe = /authoritativeScopes: (?:quotaModel\.)?authoritativeScopesOf\((cliPanel|u|parsed)\)/g;
+    const gates = [...routes.matchAll(gateRe), ...engine.matchAll(gateRe)].map((m) => m[1]);
+    ok(gates.length === sites,
+      `⑰b WIRING PIN: …through the ONE rule, asked of THIS read's own parse (${gates.length}/${sites}: ${[...new Set(gates)].join(', ')})`);
+    ok(!/scopedWeekly\?\.length \? \['model'\]/.test(routes) && !/scopedWeekly\?\.length \? \['model'\]/.test(engine),
+      '⑰b WIRING PIN: …and no site re-spells the rule as "the array is non-empty" (the r5 shape §⑱ reproduces)');
     const capture = fs.readFileSync(path.join(ROOT, 'src/rate-limit-capture.js'), 'utf8');
     const statusline = fs.readFileSync(path.join(ROOT, 'data/bin/vibespace-usage'), 'utf8');
     ok(!capture.includes('authoritativeScopes') && !statusline.includes('authoritativeScopes')
@@ -1692,6 +1698,357 @@ console.log('\n⑰ per-limit provenance and the right to retire a limit');
     ok(QM.sameLimitClaim(QM.makeLimit({ limitId: 'p', windows: [w, { ...w, kind: '5h' }] }),
       QM.makeLimit({ limitId: 'p', windows: [{ ...w, kind: '5h' }, w] })),
       '⑰c window order is not a claim');
+  }
+}
+
+// ── ⑱ THE RIGHT TO RETIRE BELONGS TO A PARSE THAT SAW THE WHOLE SET (r6) ────
+//
+// r5 gave a producer the right to RETIRE a model cap the file holds and this
+// read did not name, gated on `u.scopedWeekly?.length` — a fact about the
+// ARRAY. Seven call sites, three different parsers, and they do not agree on
+// one vendor state: six of the seven ran a parser that silently drops a named
+// cap stated without a `resets_at`, so an enumerating write retired a REAL,
+// SPENT cap and `accountRemaining` went 0 → 80. That is inc-msof8i22 re-opened
+// by the mechanism built to end its mirror image.
+console.log('\n⑱ only a parse that ENUMERATED may retire a limit (r6)');
+{
+  const MUT18 = `vs-qmr6-mut-${process.pid}-`;
+  const MUT_DIRS = ['src', 'src/harnesses', 'src/adapters'];
+  // Same crashed-run sweep as ⑯/⑰ — a SIGKILLed suite must never leave a
+  // sibling in the tree, because a dirty tree is what the release gate REFUSES
+  // on. (r5's own prefix was never added to .gitignore; ⑱-0 below is why that
+  // cannot happen again silently.)
+  for (const d of MUT_DIRS) {
+    try {
+      for (const f of fs.readdirSync(path.join(ROOT, d))) {
+        const m = /^vs-qmr6-mut-(\d+)-/.exec(f);
+        if (!m || Number(m[1]) === process.pid) continue;
+        try { process.kill(Number(m[1]), 0); continue; } catch { }
+        try { fs.unlinkSync(path.join(ROOT, d, f)); } catch { }
+      }
+    } catch { }
+  }
+  const mutants18 = [];
+  process.on('exit', () => { for (const f of mutants18) { try { fs.unlinkSync(f); } catch { } } });
+  /** A patched copy BESIDE the original (same directory, or its `../` requires
+   *  do not resolve). Returns {path, hits} so the patch can be asserted to hit. */
+  const mutantBeside = (rel, patches) => {
+    let src = fs.readFileSync(path.join(ROOT, rel), 'utf8');
+    const hits = [];
+    for (const [from, to] of patches) { hits.push(src.split(from).length - 1); src = src.split(from).join(to); }
+    const dst = path.join(ROOT, path.dirname(rel), MUT18 + path.basename(rel));
+    fs.writeFileSync(dst, src);
+    mutants18.push(dst);
+    return { path: dst, hits };
+  };
+  const hit18 = (m, label) => ok(m.hits.length > 0 && m.hits.every((c) => c === 1),
+    `⑱ NEGATIVE CONTROL setup: ${label} — every patch anchor hit exactly once (${JSON.stringify(m.hits)})`);
+
+  // ── ⑱0 the copies this leg writes can never become tree state ─────────────
+  // r5 introduced `vs-qmr4-mut-*` and never added it to .gitignore, so a
+  // SIGKILL between its two writes would have left a file in src/ that dirties
+  // the tree, blocks every push, AND is walked by the architecture suite as
+  // source. The rule is only real if the suite asks git itself.
+  {
+    const { execFileSync } = await import('node:child_process');
+    const { gitEnvFrom } = await import('./git-env.mjs');
+    const env = gitEnvFrom(process.env); // this suite runs inside `npm run ci` and inside the pre-push hook
+    const ask = (p) => {
+      try { execFileSync('git', ['-C', ROOT, 'check-ignore', '-q', p], { env, stdio: 'ignore' }); return true; }
+      catch (e) { if (e && e.status === 1) return false; throw e; }
+    };
+    try {
+      const probes = [...MUT_DIRS.map((d) => `${d}/${MUT18}x.js`), `src/vs-qmr3-mut-${process.pid}-x.js`, `src/vs-qmr4-mut-${process.pid}-x.js`];
+      const bad = probes.filter((p) => !ask(p));
+      ok(bad.length === 0, `⑱0 every mutant-copy path this file can write is git-ignored (${bad.length ? 'NOT IGNORED: ' + bad.join(', ') : probes.length + ' checked'})`);
+      ok(ask('src/quota-model.js') === false, '⑱0 …and the probe is not answering "ignored" to everything (a real source file is not)');
+    } catch (e) {
+      // No git / no repo (a tarball or `git archive` export): SKIP LOUDLY with
+      // the failure, never a green line that invented its own reason.
+      ok(true, `⑱0 SKIPPED — cannot ask git whether the mutant paths are ignored: ${String(e && e.message || e).split('\n')[0]}`);
+    }
+  }
+
+  const CQ = require(path.join(ROOT, 'src/harnesses/claude-quota.js'));
+  const { ClaudeCodeAdapter: ADP } = require(path.join(ROOT, 'src/adapters/claude-code.js'));
+  const POOL18 = require(path.join(ROOT, 'src/account-pool-auto.js'));
+
+  // ONE VENDOR STATE, three wire formats. Plan 20 %/20 %, a Fable cap at 10 %
+  // with a reset, and an OPUS CAP AT 100 % STATED WITHOUT A RESET — the shape
+  // 2.305.0 found in a real payload, in the form this instance's own anchors
+  // say is routine: 704 of 5631 scoped readings and 615 of 7978 seven-day
+  // readings carry no reset at all (692 of the scoped ones produced by the ⟳
+  // panel, 3 by the control channel's own array branch). Honest boundary: every
+  // reset-less bucket ever recorded HERE sits at u=0, so the exact combination
+  // is latent on this instance, not live.
+  const nowSec18 = Math.floor(Date.now() / 1000);
+  const R5x = nowSec18 + 3600, R7x = nowSec18 + 400000;
+  const ISO = (s) => new Date(s * 1000).toISOString();
+  const PANEL_TEXT = [
+    'Current session: 20% used · resets Aug 12, 12:20am (America/Los_Angeles)',
+    'Current week (all models): 20% used · resets Aug 15, 12:20am (America/Los_Angeles)',
+    'Current week (Fable): 10% used · resets Aug 15, 12:20am (America/Los_Angeles)',
+    'Current week (Opus): 100% used',
+  ].join('\n');
+  const OAUTH = () => ({
+    five_hour: { utilization: 20, resets_at: ISO(R5x) }, seven_day: { utilization: 20, resets_at: ISO(R7x) },
+    limits: [{ kind: 'weekly_scoped', scope: { model: { display_name: 'Fable' } }, percent: 10, resets_at: ISO(R7x) }],
+    seven_day_opus: { utilization: 100 },
+  });
+  const CTRL = () => ({ rate_limits: {
+    five_hour: { utilization: 20, resets_at: R5x }, seven_day: { utilization: 20, resets_at: R7x },
+    model_scoped: [{ display_name: 'Fable', utilization: 10, resets_at: R7x }],
+    seven_day_opus: { utilization: 100 },
+  } });
+  const idsOf = (u) => u ? QM.limitsOf(QM.fromLegacy({ ...u, fetchedAt: Date.now() }, {
+    identity: 'k', limitId: 'plan', familyOf: familyOfScopedBucket, extraKeys: CLAUDEQ.CLAUDE_EXTRA_KEYS, source: 'x', fetchedAt: Date.now(),
+  })).map((l) => l.limitId).sort() : null;
+
+  // ── ⑱a the three enumerating parsers agree on ONE vendor state ────────────
+  {
+    const a = idsOf(CQ.parseCliUsageText(PANEL_TEXT, Date.now()));
+    const b = idsOf(CQ.parseOAuthUsage(OAUTH()));
+    const c = idsOf(ADP.parseGetUsageResponse(CTRL()));
+    eq(a, ['model:fable', 'model:opus', 'plan'], '⑱a the ⟳ panel parse sees plan + both model caps');
+    ok(JSON.stringify(a) === JSON.stringify(b) && JSON.stringify(b) === JSON.stringify(c),
+      `⑱a …and so do the OAuth and control parses (${JSON.stringify(b)} / ${JSON.stringify(c)})`);
+    ok(CQ.parseOAuthUsage(OAUTH()).scopedWeekly.find((x) => x.name === 'Opus')?.utilization === 1,
+      '⑱a …with the SPENT number intact (a bucket with no reset is still a bucket)');
+
+    // NEGATIVE CONTROL: today's `!resets_at` skips, restored one at a time.
+    const mq = mutantBeside('src/harnesses/claude-quota.js',
+      [['if (pctRaw == null) { dropped++; continue; } // shaped like a weekly bucket, states no number we can read',
+        'if (pctRaw == null || !v.resets_at) continue;']]);
+    hit18(mq, '⑱a restores the OAuth parser\'s reset requirement');
+    const ma = mutantBeside('src/adapters/claude-code.js',
+      [['        if (typeof v.utilization !== \'number\' && typeof v.used_percentage !== \'number\') {\n          if (WINDOWISH.some((f) => f in v)) dropped++;\n          continue;\n        }',
+        '        if (typeof v.utilization !== \'number\' && typeof v.used_percentage !== \'number\') continue;\n        if (!v.resets_at) continue;']]);
+    hit18(ma, '⑱a restores the control parser\'s reset requirement');
+    const preB = idsOf(require(mq.path).parseOAuthUsage(OAUTH()));
+    const preC = idsOf(require(ma.path).ClaudeCodeAdapter.parseGetUsageResponse(CTRL()));
+    eq(preB, ['model:fable', 'plan'], '⑱a NEGATIVE CONTROL: the pre-fix OAuth parse loses the spent cap');
+    eq(preC, ['model:fable', 'plan'], '⑱a NEGATIVE CONTROL: …and so does the pre-fix control parse');
+    ok(JSON.stringify(a) !== JSON.stringify(preB),
+      '⑱a NEGATIVE CONTROL: …i.e. two parsers disagreed with the third about the SAME account');
+  }
+
+  // ── ⑱b end-to-end: a producer that could not see the cap must not retire it ─
+  {
+    /** The ⟳ ladder as it really runs: the CLI-panel rung writes first (it is
+     *  the only parser that saw the cap), then a later rung re-reads the same
+     *  vendor state through the OAuth parse and writes the SAME key. `gate` is
+     *  the call-site expression, which the ⑰b WIRING PIN keeps honest. */
+    const runLadder = (Wm, parseOAuth, gate) => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), `vs-qm18-${process.pid}-`));
+      tmpDirs.push(dir);
+      const key = 'acct';
+      const panel = CQ.parseCliUsageText(PANEL_TEXT, Date.now());
+      const u1 = { ...panel, source: 'on-demand', scopedFetchedAt: Date.now() };
+      Wm.writeCacheObject({ cacheDir: dir, key, obj: u1, source: 'on-demand', familyOf: familyOfScopedBucket, backend: 'claude',
+        authoritativeScopes: gate(panel) });
+      const mid = Wm.readCacheObject(dir, key);
+      const u2 = parseOAuth(OAUTH());
+      u2.source = 'on-demand';
+      Wm.writeCacheObject({ cacheDir: dir, key, obj: u2, source: 'on-demand', familyOf: familyOfScopedBucket, backend: 'claude',
+        authoritativeScopes: gate(u2) });
+      return { dir, key, mid, after: Wm.readCacheObject(dir, key) };
+    };
+    const idsIn = (o) => (o.limits || []).map((l) => l.limitId).sort();
+
+    const r = runLadder(W, CQ.parseOAuthUsage, QM.authoritativeScopesOf);
+    eq(idsIn(r.mid), ['model:fable', 'model:opus', 'plan'], '⑱b the panel read establishes both model caps');
+    ok(POOL18.accountRemaining(r.mid, nowSec18).remaining === 0,
+      `⑱b …and the spent one governs the account (${JSON.stringify(POOL18.accountRemaining(r.mid, nowSec18))})`);
+    eq(idsIn(r.after), ['model:fable', 'model:opus', 'plan'], '⑱b a later rung re-reads the same state and the cap SURVIVES');
+    const rem = POOL18.accountRemaining(r.after, nowSec18);
+    ok(rem.remaining === 0 && rem.known === true,
+      `⑱b …so the pool still sees a spent account (${JSON.stringify(rem)})`);
+
+    // NEGATIVE CONTROL: the pre-fix world — the parser that drops the cap, and
+    // r5's gate ("the array is non-empty"). This is the verifier's reproduction,
+    // driven through the real write path and the real pool accessor.
+    const mq2 = mutantBeside('src/harnesses/claude-quota.js',
+      [['if (pctRaw == null) { dropped++; continue; } // shaped like a weekly bucket, states no number we can read',
+        'if (pctRaw == null || !v.resets_at) continue;']]);
+    hit18(mq2, '⑱b restores the pre-fix OAuth parser');
+    const r5gate = (u) => (u.scopedWeekly?.length ? ['model'] : null); // the r5 call-site expression, verbatim
+    const pre = runLadder(W, require(mq2.path).parseOAuthUsage, r5gate);
+    eq(idsIn(pre.mid), ['model:fable', 'model:opus', 'plan'], '⑱b NEGATIVE CONTROL: the panel read still establishes both caps');
+    eq(idsIn(pre.after), ['model:fable', 'plan'],
+      '⑱b NEGATIVE CONTROL: …and the read that could never have SEEN the spent cap retires it');
+    const preRem = POOL18.accountRemaining(pre.after, nowSec18);
+    ok(preRem.remaining === 80 && preRem.known === true,
+      `⑱b NEGATIVE CONTROL: …so the pool reads 80 % free on an account whose Opus is gone (${JSON.stringify(preRem)}) — inc-msof8i22`);
+
+    // …and ONE mechanism at a time: the r5 GATE alone, with the FIXED parser,
+    // retires nothing (the parser half is what made the gate lethal).
+    const half = runLadder(W, CQ.parseOAuthUsage, r5gate);
+    eq(idsIn(half.after), ['model:fable', 'model:opus', 'plan'],
+      '⑱b CONTROL: with the parser fixed, even the r5 gate has nothing to retire');
+  }
+
+  // ── ⑱c the claim is FALSIFIABLE: a parse that dropped something claims none ─
+  {
+    const scoped = QM.authoritativeScopesOf;
+    ok(JSON.stringify(scoped(CQ.parseOAuthUsage(OAUTH()))) === '["model"]', '⑱c a clean OAuth parse claims the model scope');
+    const noName = OAUTH(); noName.limits.push({ kind: 'weekly_scoped', scope: {}, percent: 50, resets_at: ISO(R7x) });
+    ok(scoped(CQ.parseOAuthUsage(noName)) === null,
+      '⑱c a weekly_scoped entry it could not NAME costs the claim (the cap is real, we just cannot key it)');
+    const noNum = OAUTH(); noNum.seven_day_zebra = { resets_at: ISO(R7x) };
+    ok(scoped(CQ.parseOAuthUsage(noNum)) === null,
+      '⑱c …as does a bucket-shaped field it could not read a number from');
+    const nulls = OAUTH(); nulls.seven_day_sonnet = null; nulls.seven_day_oauth_apps = null;
+    ok(JSON.stringify(scoped(CQ.parseOAuthUsage(nulls))) === '["model"]',
+      '⑱c …but a NULL field is the vendor saying "no such limit", not a drop');
+
+    ok(JSON.stringify(scoped(ADP.parseGetUsageResponse(CTRL()))) === '["model"]', '⑱c a clean control parse claims it');
+    const cNoName = CTRL(); cNoName.rate_limits.model_scoped.push({ utilization: 50, resets_at: R7x });
+    ok(scoped(ADP.parseGetUsageResponse(cNoName)) === null, '⑱c …and an unnameable model_scoped entry costs it');
+    const cNoNum = CTRL(); cNoNum.rate_limits.nimbus_quill = { resets_at: null, percent: null };
+    ok(scoped(ADP.parseGetUsageResponse(cNoNum)) === null, '⑱c …as does a window-shaped field with no readable number');
+    const cOther = CTRL(); cOther.rate_limits.some_flag = { enabled: true };
+    ok(JSON.stringify(scoped(ADP.parseGetUsageResponse(cOther))) === '["model"]',
+      '⑱c …while an object that is not window-shaped at all is not a bucket and not a drop');
+
+    ok(JSON.stringify(scoped(CQ.parseCliUsageText(PANEL_TEXT, Date.now()))) === '["model"]', '⑱c a clean panel parse claims it');
+    const drift = PANEL_TEXT + '\nCurrent week (Zebra): unavailable';
+    ok(scoped(CQ.parseCliUsageText(drift, Date.now())) === null,
+      '⑱c …and a `Current week (…)` line its own regex could not read costs the claim (format drift ⇒ no retirement)');
+
+    // The r5 half, kept on purpose: an EMPTY list still states nothing.
+    const noScoped = CQ.parseCliUsageText('Current session: 20% used\nCurrent week (all models): 20% used', Date.now());
+    ok(QM.scopedEnumeration(noScoped) === true && scoped(noScoped) === null,
+      '⑱c an enumerated but EMPTY list claims nothing — indistinguishable from a broken parse, and retiring a spent cap is the money-losing direction');
+  }
+
+  // ── ⑱d the claim is a fact about ONE READ: never stored, never forgeable ───
+  {
+    const parse = CQ.parseOAuthUsage(OAUTH());
+    ok(QM.scopedEnumeration(parse) === true, '⑱d the parse itself carries the claim');
+    ok(QM.authoritativeScopesOf(JSON.parse(JSON.stringify(parse))) === null,
+      '⑱d a JSON round trip loses it (a device wire, a cache file — every one of them fails SAFE)');
+    ok(QM.authoritativeScopesOf({ ...parse }) === null,
+      '⑱d a spread loses it (which is why the panel call site asks `cliPanel`, not the `{...cliPanel}` it writes)');
+    ok(QM.authoritativeScopesOf({ ...parse, scopedComplete: true }) === null,
+      '⑱d and a STORED object cannot forge it — the mark is symbol-keyed, so no JSON can express it');
+    ok(Object.keys(parse).indexOf('scopedComplete') === -1 && !JSON.stringify(parse).includes('scopedComplete'),
+      '⑱d …nor does it ever reach a payload we serialize');
+    // The POSITIVE twin, and four of the seven call sites depend on it: the
+    // host/token legs mutate the parse in place (`u.source = …`,
+    // `Object.assign(u, org)` in `_fetchOAuthRoles`/`_consumeDeviceQuota`) and
+    // then gate on `u`. Mutation keeps the object, so it keeps the claim.
+    const mutated = CQ.parseOAuthUsage(OAUTH());
+    mutated.source = 'on-demand'; Object.assign(mutated, { orgUuid: 'o', scopedFetchedAt: Date.now() });
+    ok(JSON.stringify(QM.authoritativeScopesOf(mutated)) === '["model"]',
+      '⑱d …while mutating the parse in place (what the token and host legs do) keeps it — the object is the same object');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), `vs-qm18d-${process.pid}-`));
+    tmpDirs.push(dir);
+    W.writeCacheObject({ cacheDir: dir, key: 'acct', obj: parse, source: 'on-demand', familyOf: familyOfScopedBucket, backend: 'claude',
+      authoritativeScopes: QM.authoritativeScopesOf(parse) });
+    ok(!fs.readFileSync(W.cacheFileFor(dir, 'acct'), 'utf8').includes('scopedComplete'),
+      '⑱d …and the file this write persists carries no trace of it');
+  }
+
+  // ── ⑱f THE PANEL PRODUCER'S AUTHORITY, DRIVEN END TO END ──────────────────
+  //
+  // WHY A FUNCTIONAL LEG AND NOT ANOTHER PIN. The r5 WIRING PIN asserts that
+  // each of the seven sites gates on a variable — and the panel site is the one
+  // whose parse result and whose WRITE PAYLOAD are different objects
+  // (`u = {...cliPanel, …}`). Since the enumeration mark is deliberately
+  // non-enumerable, asking `u` instead of `cliPanel` silently answers "no
+  // authority" for ever: the retirement dies at the one producer that most
+  // deserves it, no test goes red, and the r5 feature becomes a guard that
+  // cannot fire. Mutation-tested: swapping the argument reddens NOTHING else in
+  // this suite. So this leg runs the REAL `refreshViaCliPanel` through the REAL
+  // setupUsage factory with a FAKE `claude` on CLAUDE_CMD (zero vendor cost,
+  // real execFile, real parse, real write path) and reads the CONSEQUENCE.
+  {
+    const { AccountManager } = require(path.join(ROOT, 'src/accounts.js'));
+    const usageMod = require(path.join(ROOT, 'src/usage-routes.js'));
+    const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const at = (ms) => { const d = new Date(Date.now() + ms); return `${MON[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCHours() % 12 || 12}${d.getUTCHours() < 12 ? 'am' : 'pm'} (UTC)`; };
+    const panelText = (caps) => `Current session: 20% used · resets ${at(3 * 3600e3)}\n`
+      + `Current week (all models): 20% used · resets ${at(3 * 86400e3)}\n`
+      + caps.map((c) => `Current week (${c.name}): ${c.pct}% used · resets ${at(3 * 86400e3)}\n`).join('');
+
+    const mkPanelWorld = (usageModule) => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), `vs-qm18f-${process.pid}-`));
+      tmpDirs.push(root);
+      const dataDir = path.join(root, 'data');
+      const am = new AccountManager({ dataDir });
+      const id = am.createSubscription({ name: 'Panel Acct' }).id;
+      fs.writeFileSync(path.join(am.subDir(id), '.credentials.json'), JSON.stringify({ claudeAiOauth: {
+        accessToken: 'tok', refreshToken: 'r', expiresAt: Date.now() + 36e5, refreshTokenExpiresAt: Date.now() + 29 * 86400e3, subscriptionType: 'max',
+      } }), { mode: 0o600 });
+      const cacheDir = path.join(dataDir, 'usage-cache'); fs.mkdirSync(cacheDir, { recursive: true });
+      const bin = path.join(root, 'fake-claude');
+      const say = (caps) => fs.writeFileSync(bin, `#!/bin/sh\ncat <<'EOF'\n${panelText(caps)}EOF\n`, { mode: 0o755 });
+      say([]);
+      const u = usageModule.setupUsage({
+        app: { get() { }, post() { }, put() { }, delete() { }, use() { }, locals: {} },
+        accounts: am, hosts: null, usageHistory: null, activeSessions: new Map(),
+        serverSetting: () => undefined, ensureDir: (d) => fs.mkdirSync(d, { recursive: true }),
+        USAGE_CACHE_FILE: path.join(dataDir, 'usage-cache.json'), USAGE_CACHE_DIR: cacheDir,
+        CODEX_SESSIONS_DIR: path.join(root, 'codex-sessions'), META_DIR: path.join(dataDir, 'session-meta'),
+        AVAILABLE_MODELS: [], BUFFERS_DIR: path.join(dataDir, 'session-buffers'),
+        probeUsageForAccountKey: async () => false, onMemberReadingFresh: () => ({}), CLAUDE_CMD: bin,
+      });
+      const readBack = () => W.readCacheObject(cacheDir, id);
+      return { root, am, id, cacheDir, u, say, readBack };
+    };
+
+    const TWO_CAPS = [{ name: 'OldModel', pct: 100 }, { name: 'Fable', pct: 10 }];
+    const ONE_CAP = [{ name: 'Fable', pct: 10 }];
+    const runPanels = async (w) => {
+      w.say(TWO_CAPS); const ok1 = await w.u.refreshViaCliPanel(w.id);
+      const mid = w.readBack();
+      w.say(ONE_CAP); const ok2 = await w.u.refreshViaCliPanel(w.id);
+      return { ok1, ok2, mid, after: w.readBack() };
+    };
+    const idsIn = (o) => (o && o.limits || []).map((l) => l.limitId).sort();
+
+    const w = mkPanelWorld(usageMod);
+    const r = await runPanels(w);
+    ok(r.ok1 === true && r.ok2 === true, `⑱f both panel reads landed through the real refresher (${r.ok1}/${r.ok2})`);
+    eq(idsIn(r.mid), ['model:fable', 'model:oldmodel', 'plan'], '⑱f the first panel establishes both model caps');
+    eq(idsIn(r.after), ['model:fable', 'plan'],
+      '⑱f the second panel enumerates one and the cap it no longer reports is RETIRED — the r5 feature, proven at its call site');
+
+    // NEGATIVE CONTROL: ask the SPREAD instead of the parse. It is one argument,
+    // it type-checks, it satisfies the wiring pin's shape — and it silently
+    // disables the panel's authority for ever.
+    const mSpread = mutantBeside('src/usage-routes.js',
+      [['authoritativeScopes: authoritativeScopesOf(cliPanel) });', 'authoritativeScopes: authoritativeScopesOf(u) });']]);
+    hit18(mSpread, '⑱f asks the spread `u` instead of the parse `cliPanel`');
+    const w2 = mkPanelWorld(require(mSpread.path));
+    const r2 = await runPanels(w2);
+    eq(idsIn(r2.after), ['model:fable', 'model:oldmodel', 'plan'],
+      '⑱f NEGATIVE CONTROL: asking the spread retires nothing — the mark does not survive `{...cliPanel}`, and no other assert in this file can see it');
+  }
+
+  // ── ⑱e the retirement says WHAT CLAIM it is dropping ──────────────────────
+  // A legitimate retirement is a vendor change; the line that records it is the
+  // only artefact that answers "did a constraint just disappear?" when the pool
+  // starts spending on an account it now thinks is free.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), `vs-qm18e-${process.pid}-`));
+    tmpDirs.push(dir);
+    const base = {
+      fiveHour: { utilization: 0.2, resetsAt: nowSec18 + 3600 }, sevenDay: { utilization: 0.2, resetsAt: nowSec18 + 500000 },
+      scopedWeekly: [{ name: 'OldModel', utilization: 1, resetsAt: nowSec18 + 300 }, { name: 'Fable', utilization: 0.1, resetsAt: nowSec18 + 500000 }],
+      fetchedAt: Date.now(), source: 'on-demand',
+    };
+    W.writeCacheObject({ cacheDir: dir, key: 'acct', obj: base, measuredAt: Date.now(), source: 'on-demand', familyOf: familyOfScopedBucket, backend: 'claude', authoritativeScopes: ['model'] });
+    const said = [];
+    const realLog = console.log;
+    console.log = (...a) => { said.push(a.join(' ')); };
+    try {
+      W.writeCacheObject({ cacheDir: dir, key: 'acct', obj: { ...base, scopedWeekly: [base.scopedWeekly[1]], fetchedAt: Date.now() + 1000 },
+        measuredAt: Date.now() + 1000, source: 'on-demand', familyOf: familyOfScopedBucket, backend: 'claude', authoritativeScopes: ['model'] });
+    } finally { console.log = realLog; }
+    const line = said.find((s) => s.includes('retiring')) || '';
+    ok(/model:oldmodel \(100% 7d, running\)/.test(line),
+      `⑱e the retirement names the claim it drops, not just the id (${JSON.stringify(line)})`);
   }
 }
 

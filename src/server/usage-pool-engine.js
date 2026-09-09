@@ -624,11 +624,14 @@ function writeUsageCacheForKey(key, parsed) {
     }
     for (const k of ['orgUuid', 'orgName', 'orgEmail', 'email', 'name']) if (prev[k] !== undefined && merged[k] === undefined) merged[k] = prev[k];
     delete merged.limits; // the canonical half is the write path's to compute, never inherited whole from `prev`
-    // AUTHORITATIVE OVER THE MODEL SET only when THIS answer listed one (r5) —
-    // the preserve-merge above carries `prev`'s forward when it did not, and a
-    // carried-forward list states nothing about what the vendor still reports.
+    // AUTHORITATIVE OVER THE MODEL SET only when THIS answer both ENUMERATED
+    // and listed one (r5 + r6) — the preserve-merge above carries `prev`'s
+    // forward when it did not, and a carried-forward list states nothing about
+    // what the vendor still reports. `parsed` is the control payload's own
+    // parse (`parseGetUsageResponse`), which is the only object that can know
+    // whether it dropped a bucket; `merged` could not answer it.
     return usageWrite.writeCacheObject({ cacheDir: USAGE_CACHE_DIR, key, obj: merged, source: parsed.source || null, familyOf: familyOfScopedBucket, backend: 'claude',
-      authoritativeScopes: parsed.scopedWeekly?.length ? ['model'] : null }).ok;
+      authoritativeScopes: quotaModel.authoritativeScopesOf(parsed) }).ok;
   } catch { return false; }
 }
 // Ask a LIVE LOCAL claude chat session's CLI for usage over its control

@@ -35,8 +35,26 @@ ck('LIVE: 0-100 int utilization normalized (34 → 0.34)', Math.abs(lv.fiveHour.
 ck('LIVE: sevenDay 0.39', Math.abs(lv.sevenDay.utilization-0.39)<1e-3);
 ck('LIVE: ISO resets_at → epoch seconds', lv.sevenDay.resetsAt === Math.floor(Date.parse('2026-08-11T16:59:59.753043+00:00')/1000));
 ck('LIVE: named scoped field picked up (seven_day_sonnet → Sonnet)', lv.scopedWeekly.some(w=>/Sonnet/i.test(w.name)&&Math.abs(w.utilization-0.12)<1e-3));
-ck('LIVE: codename bucket without resets_at skipped', !lv.scopedWeekly.some(w=>/nimbus/i.test(w.name)));
+// A BUCKET WITHOUT A RESET IS STILL A BUCKET (r6). This used to assert the
+// opposite ('codename bucket without resets_at skipped', because it had "no
+// usable deadline") — but a deadline and a claim are two different questions,
+// which is exactly what the r3/r4 rounds of the quota model settled: a STATED
+// SPEND counts (`windowState`), it merely may not name a deadline
+// (`bucketCounts`). Dropping the entry turned a number the vendor stated into
+// ignorance, and the number it drops is "this model cap is spent" — the
+// inc-msof8i22 harm one layer down. The `model_scoped` array in the very same
+// parser has always accepted reset-less entries, so this was also one parser
+// giving two answers for one payload shape.
+ck('LIVE: codename bucket without resets_at is KEPT (a stated spend counts; only the DEADLINE needs a reset)',
+  lv.scopedWeekly.some(w=>/nimbus/i.test(w.name)&&w.utilization===0&&!w.resetsAt));
 ck('LIVE: null buckets skipped, extra_usage not a scoped entry', !lv.scopedWeekly.some(w=>/extra|oauth/i.test(w.name)));
+// …and the parse still says it ENUMERATED, because a `null` field is the vendor
+// stating there is no such limit, not a bucket we failed to read (r6: only a
+// parse that dropped nothing may retire a limit — see test-quota-model §⑱).
+{
+  const QM = require('../src/quota-model.js');
+  ck('LIVE: the parse claims the model scope (it dropped nothing)', QM.scopedEnumeration(lv) === true);
+}
 
 // ── chat-mode limit banner parser (passive exhaustion signal) ──
 const pb = ClaudeCodeAdapter.parseLimitBanner;
@@ -83,9 +101,23 @@ ck("banner: 'Fable 5 limit' (no week word) → scoped Fable", (()=>{const r=pb("
   ck('array-only payload unchanged', arrOnly.scopedWeekly.length === 1 && arrOnly.scopedWeekly[0].name === 'Fable');
   const namedOnly = ClaudeCodeAdapter.parseGetUsageResponse({ rate_limits: { seven_day_opus: { utilization: 40, resets_at: 1786900000 } } });
   ck('named-only payload unchanged', namedOnly.scopedWeekly.length === 1 && namedOnly.scopedWeekly[0].name === 'Opus');
-  // codename buckets without a reset are still skipped (no usable deadline)
+  // A SPENT CAP WITH NO RESET IS THE SHAPE THAT MATTERS (r6): this fixture is a
+  // model cap at 50 % that the pre-r6 parser threw away, so the pool saw an
+  // account with more headroom than it has.
   const noReset = ClaudeCodeAdapter.parseGetUsageResponse({ rate_limits: { seven_day_zebra: { utilization: 50 } } });
-  ck('a scoped field with no reset is still skipped', noReset.scopedWeekly.length === 0);
+  const QM = require('../src/quota-model.js');
+  ck('a scoped field with no reset is KEPT, with its stated number',
+    noReset.scopedWeekly.length === 1 && noReset.scopedWeekly[0].name === 'Zebra' && Math.abs(noReset.scopedWeekly[0].utilization - 0.5) < 1e-9);
+  ck('…and the parse still claims the scope (nothing was dropped)', QM.scopedEnumeration(noReset) === true);
+  // What still is NOT a bucket: a window-shaped field stating no number we can
+  // read. It is not admitted — AND it costs the parse the right to retire,
+  // because a cap we could not read is a cap we lost.
+  const noNum = ClaudeCodeAdapter.parseGetUsageResponse({ rate_limits: { five_hour: { utilization: 1 }, seven_day_zebra: { resets_at: 1786900000 } } });
+  ck('a window-shaped field with no readable number is not a bucket', noNum.scopedWeekly.length === 0);
+  ck('…and the parse does NOT claim to have enumerated the scope', QM.scopedEnumeration(noNum) === false);
+  // …while an object that is not window-shaped at all is neither a bucket nor a drop.
+  const other = ClaudeCodeAdapter.parseGetUsageResponse({ rate_limits: { five_hour: { utilization: 1 }, some_flag: { enabled: true } } });
+  ck('a non-window object is ignored and costs nothing', other.scopedWeekly.length === 0 && QM.scopedEnumeration(other) === true);
 }
 
 console.log(fail?`${fail} FAILED`:`ALL PASS (${pass})`);

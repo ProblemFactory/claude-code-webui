@@ -253,12 +253,22 @@ function retireUnnamedScopes(prevSet, next, scopes, { key = null, source = null 
   const retired = [];
   const kept = quotaModel.limitsOf(prevSet).filter((l) => {
     if (!l || !drop.has(l.scope) || named.has(l.limitId)) return true;
-    retired.push(l.limitId);
+    retired.push(l);
     return false;
   });
   if (!retired.length) return prevSet;
-  // LOUD: removing a limit removes a CLAIM, and this one gates the pool.
-  try { console.log(`[usage-write] ${key}: ${source || 'a producer'} enumerated ${[...drop].join('/')} and did not list ${retired.join(', ')} — retiring`); } catch { }
+  // LOUD, AND IT NAMES THE CLAIM IT IS DROPPING (r6). "Retired model:opus" and
+  // "retired model:opus, which was reading 100 % and counting" are different
+  // sentences to whoever reads this line after the pool starts spending on an
+  // account it thought was free — the second one says whether a constraint just
+  // disappeared. (`state`/`usedPct` come off the limit's own windows; a limit
+  // with no window states nothing, and the line says that too.)
+  const describe = (l) => {
+    const w = quotaModel.windowsOf(l).filter((x) => x && x.usedPct != null)
+      .sort((a, b) => (b.usedPct || 0) - (a.usedPct || 0))[0];
+    return w ? `${l.limitId} (${Math.round(w.usedPct)}% ${w.kind}, ${w.state})` : `${l.limitId} (no window)`;
+  };
+  try { console.log(`[usage-write] ${key}: ${source || 'a producer'} enumerated ${[...drop].join('/')} and did not list ${retired.map(describe).join(', ')} — retiring`); } catch { }
   return quotaModel.makeLimitSet({ ...prevSet, limits: kept });
 }
 

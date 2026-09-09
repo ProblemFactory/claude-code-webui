@@ -540,6 +540,77 @@ function limitClaimKey(limit) {
  *  (The write path's caller: src/usage-cache-write.js.) */
 function sameLimitClaim(a, b) { return limitClaimKey(a) === limitClaimKey(b); }
 
+// ── DID THIS READ SEE THE WHOLE SET? (r6, the cross-producer finding) ───────
+//
+// THE DEFECT r5 SHIPPED. `authoritativeScopes` gives a producer the right to
+// RETIRE a limit the file holds and this read did not name — and r5 gated it on
+// `u.scopedWeekly?.length`, i.e. on THE LIST BEING NON-EMPTY. That is a fact
+// about the array, not about the parse: it says a model cap was seen, never
+// that ALL of them were. Three different parsers feed those seven call sites
+// and they do not agree with each other on one vendor state (measured, one
+// account: plan 20/20 + Fable 10 % + a `seven_day_opus` at 100 % stated with no
+// `resets_at`):
+//
+//   parseCliUsageText     → plan, model:fable, model:opus   (the ⟳ panel rung)
+//   parseOAuthUsage       → plan, model:fable               (the bare-token ⟳ + the four host legs)
+//   parseGetUsageResponse → plan, model:fable               (the engine's control-channel probe)
+//
+// So six of the seven sites RETIRED a real, spent model cap on the strength of
+// a parse that could never have seen it: `accountRemaining` went 0 → 80 and the
+// pool spent on an account whose Opus was gone — inc-msof8i22 re-opened by the
+// very mechanism meant to end its mirror image. Reachability is structural, not
+// incidental: the control-channel probe is the FIRST rung of the ⟳ route, ahead
+// of the panel, so on any account with a live local claude chat session the
+// authoritative list always came from a parser that omits reset-less named caps.
+//
+// COMPLETENESS IS A PROPERTY THE PARSE STATES, NOT ONE THE ARRAY IMPLIES. Each
+// producer counts what it DROPPED — an entry it could not name, a bucket-shaped
+// field it could not read a number from, a panel line its own regex did not
+// match — and only a parse that dropped nothing may claim the scope.
+//
+// IT IS A FACT ABOUT ONE READ AND MUST NEVER BE STORED. This store's oldest law
+// (the established-window incident): a fact only ONE producer may state does
+// not belong in the object all the others rewrite. So the mark is a
+// NON-ENUMERABLE, SYMBOL-KEYED own property of the parse result:
+//   • `JSON.stringify` drops it, a spread drops it, a preserve-merge of a
+//     stored file drops it — and every one of those losses means "no
+//     authority", which is the safe direction to fail in;
+//   • no JSON a vendor, a device or a file could ever hand us can FORGE it,
+//     because a symbol is not expressible in JSON. A string field would have
+//     been forgeable by the very stored object this rule exists to distrust.
+const SCOPED_ENUMERATED = Symbol('scopedComplete');
+
+/** Mark a parse result as having enumerated its model-scoped set (or not).
+ *  Returns the same object, so a parser can `return markScopedEnumeration({…}, ok)`. */
+function markScopedEnumeration(parsed, complete) {
+  if (!parsed || typeof parsed !== 'object') return parsed;
+  try {
+    Object.defineProperty(parsed, SCOPED_ENUMERATED, { value: !!complete, enumerable: false, configurable: true, writable: true });
+  } catch { /* frozen object: no claim, which is the safe answer */ }
+  return parsed;
+}
+
+/** Did THIS parse enumerate the model-scoped set? Unknown ⇒ false. */
+function scopedEnumeration(parsed) {
+  return !!(parsed && typeof parsed === 'object' && parsed[SCOPED_ENUMERATED] === true);
+}
+
+/** THE ONE RULE the enumerating call sites ask (`authoritativeScopes`).
+ *
+ *  Two conditions, and both are load-bearing:
+ *   • the parse enumerated (`scopedEnumeration`) — the r6 half;
+ *   • it named at least one model cap — the r5 half, kept deliberately. An
+ *     empty list is indistinguishable from "my scoped parsing broke", and
+ *     acting on it would retire every model cap at the call sites that hand us
+ *     their read verbatim. Retiring a spent cap is the money-losing direction
+ *     (the pool goes on spending against it), so an empty read keeps stating
+ *     nothing about the set — exactly as it did before this change. */
+function authoritativeScopesOf(parsed) {
+  if (!scopedEnumeration(parsed)) return null;
+  const list = parsed.scopedWeekly;
+  return Array.isArray(list) && list.length ? ['model'] : null;
+}
+
 // ── merge ───────────────────────────────────────────────────────────────────
 
 /** Merge one window into an existing one: the NEWER measurement wins whole. A
@@ -1117,6 +1188,8 @@ module.exports = {
   mergeLimitSets, mergeLimit, mergeWindow,
   // "did these numbers move?" — the write path's carried-forward rule
   windowClaimKey, limitClaimKey, sameLimitClaim,
+  // "did this READ see the whole set?" — the retirement's right to speak
+  markScopedEnumeration, scopedEnumeration, authoritativeScopesOf, SCOPED_ENUMERATED,
   // panels
   orderLimits, limitLabel, limitState,
   // the wall's own attribution (inc-mttbrtc0-6049)
