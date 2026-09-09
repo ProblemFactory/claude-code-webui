@@ -861,7 +861,17 @@ if (!probe) {
     const raw = JSON.parse(fs.readFileSync(path.join(w.dataDir, 'auto-resume.json'), 'utf8'));
     return !!raw.fires?.[w.SID] && (raw.fires[w.SID].fails || []).some((f) => f.key === w.SPARE);
   })(), fs.readFileSync(path.join(w.dataDir, 'auto-resume.json'), 'utf8').slice(0, 400));
-  ok('…while the DISARM is unchanged: the timed wait is dropped exactly as before (a fire onto a session that is not waiting is the wasted turn this call has always prevented)', w.ar.statusFor(w.SID).armed === false, JSON.stringify(w.ar.statusFor(w.SID)));
+  // 2026-09-08: the DISARM on this reading is GONE, and that is the fix, not a
+  // regression. The session is walled on 5h; this reading is about 7d at 50 %
+  // and says NOTHING about the wall — dropping the wait on it silently broke a
+  // promise the user switched on. (For claude it was merely useless: readings
+  // only arrive while a turn is running, and that turn's own `result` disarms
+  // through 'turn completed normally'. For codex the app-server pushes them to
+  // an IDLE thread, which is exactly how the 32 h stall's conversation lost its
+  // wait.) The reading is now JUDGED instead: wrong bucket ⇒ nothing changes.
+  ok('…while the promise SURVIVES a reading that cannot judge the wall (5h wall, 7d reading — the silent-disarm class)', w.ar.statusFor(w.SID).armed === true, JSON.stringify(w.ar.statusFor(w.SID)));
+  ok('…and the arm records WHICH wall it is waiting on, so the edge can tell', w.ar.statusFor(w.SID).bucket === 'fiveHour');
+  ok('…and no continue was spent on it (the edge refused; the breaker never had to)', w.fired.length === 1, 'fired=' + w.fired.length);
   ok('…and the reading said nothing in the conversation', w.notes.length === notesBefore, JSON.stringify(w.notes.slice(notesBefore)));
 
   // RESTART, state 1: the quarantine is still refused by a fresh module
@@ -954,8 +964,14 @@ if (!probe) {
   // removed must fail the leg above (a guard nobody can delete and turn red is
   // not a guard — the B-3185 rule).
   const src = read('src/server/auto-resume.js');
-  const mutated = src.replace('if (worked) noteFireOutcome(id, true, why);', 'noteFireOutcome(id, true, why);');
-  ok('MUTATION CONTROL: the guard is one identifiable line', mutated !== src);
+  // …and the copy runs from a tmpdir, so its RELATIVE requires (the PURE
+  // fresh-window rule, the harness registry the resume verb comes from) are
+  // re-pointed at the real files. The MUTATION is still exactly one line — the
+  // control differs from the shipped module in the named dimension and in
+  // nothing else, which is the whole point of a negative control.
+  const mutated = src.replace('if (worked) noteFireOutcome(id, true, why);', 'noteFireOutcome(id, true, why);')
+    .replace(/require\('\.\.\//g, `require('${path.join(REPO, 'src')}/`);
+  ok('MUTATION CONTROL: the guard is one identifiable line', mutated !== src && !/require\('\.\.\//.test(mutated));
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-armut-')); cleanup.push(dir);
   const modPath = path.join(dir, 'auto-resume-mutated.cjs');
   fs.writeFileSync(modPath, mutated);
@@ -1046,8 +1062,13 @@ if (!probe) {
     // file                              why                               worked  because
     ['src/server/usage-pool-engine.js', 'turn completed normally', true],   //  the turn ended with real output: WORK
     ['src/ws-handler.js', 'user sent a prompt', true],                      //  a human took the conversation over: WORK
-    ['src/server/usage-pool-engine.js', 'fresh non-rejected reading', false], // a bucket has room — says nothing about this session
-    ['src/server/usage-pool-engine.js', 'fresh non-limited codex reading', false], // …its codex twin
+    // 2026-09-08: the two READING producers no longer call noteRecovered
+    // directly — they route through ONE shared edge (noteQuotaReadingForResume)
+    // which keeps the round-4 classification for an un-armed session and asks
+    // an ARMED one whether the reading says the wall is gone. So the census has
+    // one row here with a non-literal `why` (it is the caller's word), and the
+    // literal whys are pinned separately below, one per producer.
+    ['src/server/usage-pool-engine.js', '<non-literal>', false],             //  the shared reading edge; its callers' whys are pinned below
     ['src/server/usage-pool-engine.js', 'codex reset credit consumed', false], // the LIMIT moved; the conversation produced nothing
     ['src/server/auto-resume.js', 'disabled', false],                       //  the feature was switched off under a live arm
   ];
@@ -1087,7 +1108,17 @@ if (!probe) {
   const table = new Set(AUDIT.map(([f, why, worked]) => `${f}|${why}|${worked}`));
   ok('AUDIT: every noteRecovered call site in src/ is classified in the table (an unclassified new caller fails here, not in production)', [...derived].every((k) => table.has(k)), 'unlisted: ' + [...derived].filter((k) => !table.has(k)).join(' ; '));
   ok('AUDIT: …and every row of the table is a real call site (no dead rows)', [...table].every((k) => derived.has(k)), 'dead rows: ' + [...table].filter((k) => !derived.has(k)).join(' ; '));
-  ok('AUDIT: the derivation actually found them all — 2 that claim WORK, 4 that do not', callSites.length === AUDIT.length && callSites.filter((c) => c.worked).length === 2, JSON.stringify(callSites));
+  ok('AUDIT: the derivation actually found them all — 2 that claim WORK, 3 that do not', callSites.length === AUDIT.length && callSites.filter((c) => c.worked).length === 2, JSON.stringify(callSites));
+  // …and the ONE non-literal row is not a hole: its callers are enumerated
+  // from the source with their own literal whys, so a NEW reading producer that
+  // forgets to route through the shared edge is caught here rather than in
+  // production (the round-4 rule, applied one level up).
+  {
+    const engSrc = read('src/server/usage-pool-engine.js');
+    const whys = [...engSrc.matchAll(/noteQuotaReadingForResume\([^;]*?'([^']+)'\)/g)].map((m) => m[1]).sort();
+    ok('AUDIT: every caller of the shared reading edge is enumerated with its own why', whys.join(' / ') === 'fresh non-limited codex reading / fresh non-rejected reading', JSON.stringify(whys));
+    ok('AUDIT: …and the shared edge is the ONLY thing that turns a reading into a noteRecovered', /function noteQuotaReadingForResume\(session, snapshot, why\)/.test(engSrc));
+  }
   ok('AUDIT: the two callers the loop breaker trusts are a completed TURN and the USER — nothing else may clear it', callSites.filter((c) => c.worked).map((c) => c.why).sort().join(' / ') === 'turn completed normally / user sent a prompt', JSON.stringify(callSites.filter((c) => c.worked)));
   ok('WIRING: the breaker is cleared ONLY under the classification, and the disarm below stays unconditional', /function noteRecovered\(id, why, \{ worked = true \} = \{\}\) \{[\s\S]{0,400}if \(worked\) noteFireOutcome\(id, true, why\);\s*\n\s*const a = armed\.get\(id\);/.test(ar2src) && !/^\s*noteFireOutcome\(id, true, why\);/m.test(ar2src));
 }

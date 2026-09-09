@@ -14,9 +14,35 @@
 // every chat harness's protocol has a registered consumer and that no
 // stdout/stream twin of caps.streamProtocol exists here.
 const { NULL_QUOTA } = require('./null-quota');
+const { AUTO_RESUME_FORMS, NO_AUTO_RESUME, deriveAutoResume } = require('../backend-caps');
 
 const QUOTA_PROBE_RUNGS = Object.freeze(['cli-usage', 'rpc-rate-limits', null]);
 const REQUIRED = ['id', 'label', 'kind', 'caps', 'Adapter', 'adapterConfig', 'wrapper'];
+
+/** Can this harness's QuotaSignalSource ever CLASSIFY a limit? NULL_QUOTA is
+ *  the frozen, shared "honest nothing" (shell, and every ACP agent), so a
+ *  source that IS it — or that merely re-uses its classifier — has no limit
+ *  signal. Asked by identity rather than by a declared boolean on purpose: a
+ *  capability a harness could hand-set is a capability it can lie about, and
+ *  this one gates unattended spending. */
+function hasLimitSignal(quota) {
+  if (!quota || typeof quota.signalFromStream !== 'function') return false;
+  if (quota === NULL_QUOTA) return false;
+  return quota.signalFromStream !== NULL_QUOTA.signalFromStream;
+}
+
+/** AUTO-RESUME'S RESUME VERB (owner ruling 2026-09-08). `null` is a valid
+ *  DECLARATION ("there is no way to restart a turn here" — shell). Anything
+ *  else must be a real `{form, deliver}`; an undeclared form or a missing
+ *  deliver THROWS at registration, so a harness cannot inherit a verb it has
+ *  not implemented and no surface can offer a control nothing serves. */
+function assertResumeContract(id, resume) {
+  if (resume == null) return null;
+  if (typeof resume !== 'object') throw new Error(`harness '${id}': resume must be {form, deliver} or null`);
+  if (!AUTO_RESUME_FORMS.includes(resume.form)) throw new Error(`harness '${id}': resume.form must be one of ${AUTO_RESUME_FORMS.join('|')} (got ${JSON.stringify(resume.form)})`);
+  if (typeof resume.deliver !== 'function') throw new Error(`harness '${id}': resume.deliver(session, text, deps) must be a function`);
+  return resume;
+}
 
 /** The quota contract every harness carries (S4): the engine reaches quota
  *  behaviour through this object, never through a backend-id branch. */
@@ -43,6 +69,19 @@ function validate(h, { full = true } = {}) {
     }
   }
   assertQuotaContract(h.id, h.quota);
+  assertResumeContract(h.id, h.resume);
+  // THE AUTO-RESUME CAPS ROW IS DERIVED HERE, from what the descriptor really
+  // implements — never hand-set on the caps literal (which carries the honest
+  // NO_AUTO_RESUME placeholder so an unregistered id still answers). `h.caps`
+  // IS the BACKEND_CAPS row object (test-harness-contract pins that identity),
+  // so `capsOf(id).autoResume` and the client mirror see this the moment the
+  // registry loads. A contributed harness gets the same treatment.
+  if (h.caps && typeof h.caps === 'object') {
+    h.caps.autoResume = deriveAutoResume({
+      hasLimitSignal: hasLimitSignal(h.quota),
+      resumeForm: h.resume ? h.resume.form : null,
+    });
+  }
   return h;
 }
 
@@ -88,4 +127,18 @@ function unregister(id) {
   return REGISTRY.delete(id);
 }
 
-module.exports = { HARNESSES, harnessOf, harnessIds, chatHarnessIds, REQUIRED_DESCRIPTOR_KEYS: REQUIRED, get, has, list, ids, register, unregister, assertQuotaContract, QUOTA_PROBE_RUNGS, NULL_QUOTA };
+/** The auto-resume caps row for one harness id — the ONE reader every surface
+ *  and the engine use, so "can this session be armed / continued" is never a
+ *  backend-id branch. Unknown id = the honest nothing (never a throw: this is
+ *  asked about live sessions whose backend may predate the registry). */
+function autoResumeCaps(id) {
+  try { return get(id).caps.autoResume || NO_AUTO_RESUME; } catch { return NO_AUTO_RESUME; }
+}
+/** The harness's own resume verb `{form, deliver}` — null when it has none.
+ *  auto-resume's fire path calls THIS; the ORCH channel arrives in `deps`. */
+function resumeVerb(id) {
+  try { return get(id).resume || null; } catch { return null; }
+}
+
+module.exports = { HARNESSES, harnessOf, harnessIds, chatHarnessIds, REQUIRED_DESCRIPTOR_KEYS: REQUIRED, get, has, list, ids, register, unregister, assertQuotaContract, QUOTA_PROBE_RUNGS, NULL_QUOTA,
+  hasLimitSignal, assertResumeContract, autoResumeCaps, resumeVerb, AUTO_RESUME_FORMS, NO_AUTO_RESUME };

@@ -1,6 +1,6 @@
 import { escHtml, showInputDialog, uiScale, showToast, fetchJson, copyText, absUrl } from './utils.js';
 import { UI_ICONS } from './icons.js';
-import { BACKEND_META, getBackendMeta, backendFeatureCaps, effortDisplay, effortLabel, noteModelCatalog, responseStyleLabel, responseStyleCaps, styleAppliesLive, initHealthLabel } from './agent-meta.js';
+import { BACKEND_META, getBackendMeta, backendFeatureCaps, autoResumeCapsFor, effortDisplay, effortLabel, noteModelCatalog, responseStyleLabel, responseStyleCaps, styleAppliesLive, initHealthLabel } from './agent-meta.js';
 import { t } from './i18n.js';
 
 /** Gap kept between a status-bar dropdown and the right edge of the chat view
@@ -541,13 +541,20 @@ export class ChatStatusBar {
       parts.push(`<span class="chat-status-style chat-status-clickable${(os || hasPend) ? '' : ' chat-status-dim'}" title="${escHtml(tip)}">${label}</span>`);
     }
 
-    // Auto-continue after a usage limit (2.368.0): only ever shown for claude
-    // chat; it turns loud (amber, with the time) once a wait is actually armed.
-    if (feats.autoResume && this._autoResume) {
+    // Auto-continue after a usage limit (2.368.0; GENERIC since 2026-09-08).
+    // Shown for any harness that can BOTH classify a limit and restart a turn
+    // — `caps.autoResume.supported`, the derived row, never a backend id — and
+    // it turns loud (amber, with the time) once a wait is actually armed.
+    if (autoResumeCapsFor(this._backend).supported && this._autoResume) {
       const a = this._autoResume;
       const when = a.armed && a.resetsAt ? new Date(a.resetsAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+      // A WATCH (the reset is past the 26h ceiling) promises no TIME — only
+      // that a reading saying the quota is back will continue the session. The
+      // chip must not print a clock it cannot keep.
       const title = a.armed
-        ? t('Usage limit hit — this session will continue by itself at {t}. Click to cancel.', { t: when })
+        ? (a.watch
+          ? t('Usage limit hit — the reset is too far out to wait for, but this session will continue by itself as soon as the quota is back. Click to cancel.')
+          : t('Usage limit hit — this session will continue by itself at {t}. Click to cancel.', { t: when }))
         : (a.enabled ? t('Auto-continue is ON: if the quota runs out with no account to switch to, this session waits for the reset and continues. Click to turn off.')
           : t('Auto-continue is OFF: a usage limit leaves this session waiting for you. Click to turn on.'));
       // ON must LOOK on (owner: "几乎没有视觉反馈"): accent + a label, not a
@@ -555,7 +562,7 @@ export class ChatStatusBar {
       // to the style chip next door (pending pick) and two adjacent
       // hourglasses meaning different things read as one broken widget.
       const arState = a.armed ? ' chat-status-autoresume-armed' : (a.enabled ? ' chat-status-autoresume-on' : ' chat-status-dim');
-      const arLabel = a.armed ? ' ' + escHtml(when) : (a.enabled ? ' ' + escHtml(t('auto')) : '');
+      const arLabel = a.armed ? (a.watch ? ' ' + escHtml(t('waiting')) : ' ' + escHtml(when)) : (a.enabled ? ' ' + escHtml(t('auto')) : '');
       parts.push(`<span class="chat-status-autoresume chat-status-clickable${arState}" title="${escHtml(title)}">${UI_ICONS.autoContinue}${arLabel}</span>`);
     }
 

@@ -64,6 +64,20 @@ function acpHarness({ id, label, command, args = ['acp'], env = {}, store = {}, 
       SessionMessages: AcpSessionMessages,
     },
     quota: NULL_QUOTA,            // no quota concept over ACP (usage_update is context size, not a subscription window)
+    // AUTO-RESUME'S RESUME VERB (owner ruling 2026-09-08) — see the claude
+    // descriptor for the law. FORM 'prompt': the shared acp-wrapper's
+    // `chat-input` verb dispatches `session/prompt` when nothing is running
+    // (its own promptQueue holds it otherwise), so the verb EXISTS and is
+    // declared honestly. The other half does NOT: `quota` above is NULL_QUOTA,
+    // so `caps.autoResume.signal` is false and `supported` is false — ACP v1
+    // exposes no subscription window, so nothing can ever ARM an ACP session
+    // and no surface offers the toggle. Declaring the verb anyway is the point
+    // of deriving the row: the day an ACP agent reports a limit, this harness
+    // already knows how to continue it, and nothing had to be guessed.
+    resume: {
+      form: 'prompt',
+      deliver: (session, text, deps) => !!deps.sendChatInput(session, text),
+    },
     creds: null,                  // the agent holds its own login; VibeSpace never manages ACP credentials
     settingsPrefix: id,
     // CONTEXT INJECTION (S6 kind 'acp'): the wrapper prefixes each prompt with

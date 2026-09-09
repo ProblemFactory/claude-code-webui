@@ -52,7 +52,11 @@ const { BACKEND_META } = await import(path.join(REPO, 'src/lib/agent-meta.js'));
   // 2.369.58: the `outputStyle` BOOLEAN is gone — codex CAN be styled, it just
   // speaks a different vocabulary, so the caps row carries {live, values} and
   // the chip/menu gate on those (never on a backend id).
-  ok(c.fork === true && c.effort === true && c.review === true && c.autoResume === true && c.accounts === true && BACKEND_META.codex.caps.quotaRefresh === 'session-rpc'
+  // 2026-09-08: the `autoResume` BOOLEAN is gone the same way — auto-resume is
+  // generic, so the row carries {signal, resume, supported} DERIVED from the
+  // descriptor's two hooks, and every surface gates on `supported` + the verb
+  // FORM rather than on a truthy flag that only claude and codex could have.
+  ok(c.fork === true && c.effort === true && c.review === true && c.autoResume?.supported === true && c.autoResume?.resume === 'turn-start' && c.accounts === true && BACKEND_META.codex.caps.quotaRefresh === 'session-rpc'
     && c.responseStyle?.live === true && JSON.stringify(c.responseStyle?.values) === JSON.stringify(['none', 'friendly', 'pragmatic']) && !('outputStyle' in c),
     'client META: codex caps.fork is true (the fork button/menu shows) + a LIVE responseStyle row', JSON.stringify(c));
 }

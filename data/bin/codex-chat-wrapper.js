@@ -1308,7 +1308,25 @@ function handleNotification(method, params) {
     meta.streaming = false;
     activeTurnOwned = false; // the next turn/started decides its own ownership
     if (status === 'interrupted' || status === 'cancelled' || status === 'canceled') emitTaskEvent('turn_aborted', { turn_id: currentTurnId });
-    else if (status === 'failed' || status === 'error') emitTaskEvent('task_failed', { turn_id: currentTurnId, error: params?.error || params?.message || '' });
+    // THE ERROR LIVES ON THE TURN, NOT ON THE PARAMS (measured 2026-09-08 against
+    // the 0.153.4 schema: TurnCompletedNotification is {threadId, turn} and
+    // Turn.error — "Only populated when the Turn's status is failed" — is the
+    // TurnError {message, codexErrorInfo, additionalDetails}). `params.error`
+    // does not exist, so this branch shipped `{error: ''}` with NO typed enum
+    // and the quota classifier dropped every one of them: a usage-limit turn
+    // ended, the pool never switched and auto-resume never armed. Forward the
+    // same shape the `error` notification below already forwards, so ONE
+    // classifier (src/harnesses/codex-quota.js signalFromStream) reads both.
+    else if (status === 'failed' || status === 'error') {
+      const te = params?.turn?.error || params?.error || null;
+      emitTaskEvent('task_failed', {
+        turn_id: currentTurnId,
+        error: (typeof te === 'string' ? te : te?.message) || params?.message || '',
+        codexErrorInfo: te?.codexErrorInfo ?? te?.codex_error_info ?? null,
+        resetsAt: te?.resetsAt ?? te?.resets_at ?? null,
+        rateLimits: te?.rateLimits ?? te?.rate_limits ?? null,
+      });
+    }
     else emitTaskEvent('task_complete', { turn_id: currentTurnId, last_agent_message: '' });
     currentTurnId = null;
     // Drop server requests the turn ended without resolving (interrupt/abort) —

@@ -61,6 +61,12 @@ const PURE = new Set(['src/plugin-manifest.js', 'src/account-pool-auto.js', 'src
   // rule with an import is a rule that cannot be mirrored.
   'src/reading-lag.js',
   'src/rewind-ops.js', // claude tombstone / codex thread_rolled_back → ONE 'rewound' meta op; index-stable marking, no I/O
+  // THE FRESH-WINDOW EDGE (2026-09-08): does a normalized quota reading say the
+  // wall a conversation is waiting on is gone? PURE because both producers ask
+  // it (claude rate_limit_event, codex rate_limits_updated) and because the
+  // answer AUTHORISES A BILLED TURN — that decision must be unit-testable
+  // without a server.
+  'src/auto-resume-signal.js',
   'src/turn-state.js', // authoritative turn state: the live consumer and the attach reconciliation must decide identically
   'src/opencode-remote.js', // S9 remainder: the OpenCode-serve OP TABLE + runOpencodeOp — one definition the local rung, the agentd op and the shipped ssh script all obey
   'src/permission-rules.js', // READ-ONLY permission-rule model + DOM-free tree renderer (owner ruling 10) — shared server (readers) + browser (the view)

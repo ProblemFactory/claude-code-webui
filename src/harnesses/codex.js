@@ -124,6 +124,18 @@ module.exports = {
     parseAuth: parseCodexAuth,
     parseAuthFile: parseCodexAuthFile,
   },
+  // AUTO-RESUME'S RESUME VERB (owner ruling 2026-09-08) — see the claude
+  // descriptor for the law. FORM 'turn-start': the wrapper owns the app-server
+  // RPC connection, so a chat-input frame arriving while the thread is IDLE
+  // becomes `turn/start` (a real billed turn on the same thread); while a turn
+  // is running it becomes `thread/queue/add`. Auto-resume never fires at a
+  // streaming session (attemptFire refuses on `_isStreaming`), so the idle arm
+  // is the one this verb rides — and it is the SAME lane the delivery ladder's
+  // 'rpc-queue' rung uses, deliberately, rather than a second injector.
+  resume: {
+    form: 'turn-start',
+    deliver: (session, text, deps) => !!deps.sendChatInput(session, text),
+  },
   settingsPrefix: 'codex',
   // CONTEXT INJECTION strategy (S6): hooks are registered (the app-server
   // RUNS them) but their SessionStart output is IGNORED, so the WRAPPER

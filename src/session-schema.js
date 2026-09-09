@@ -53,6 +53,7 @@ const SESSION_FIELDS = {
   _wallProbeTimer:     { owner: 'engine', persisted: null,      note: 'wall machine: pending quota-probe backoff timer (30m→1h→2h) when no reset time is known' },
   _arFiring:           { owner: 'auto-resume', persisted: null, note: 'async pre-fire gate in flight (probe+verdict) — tick skips the session meanwhile' },
   _codexLastResetsAt:  { owner: 'engine', persisted: null,      note: 'resets_at (unix sec) of the codex limit that triggered the reset-credit try — auto-resume arms from it if the credit fails (2.368.21)' },
+  _codexLastLane:      { owner: 'engine', persisted: null,      note: 'limitId of the codex window that triggered the reset-credit try — the arm carries it so the fresh-window edge cannot be fooled by a sibling lane (2026-09-08)' },
   _codexLimitsWaiters: { owner: 'engine', persisted: null,      note: 'rpc-rate-limits probe waiters (S4 caps-routed quota probe): {resolve,timer} entries settled by the next rate_limits_updated AFTER its cache write; bounded by a timeout' },
   _interruptTimer:     { owner: 'ws',     persisted: null,      note: 'delayed-SIGINT fallback handle (2s, cancel on protocol success)' },
   _wrapperFrameFile:   { owner: 'ws',     persisted: null,      note: 'wrapper understands _frame_file pointers (meta.caps at wrapper boot, chat-wrapper AND codex-chat-wrapper; 2.361.1 skew gate — old wrappers silently DROP pointer lines; positive verdict only)' },

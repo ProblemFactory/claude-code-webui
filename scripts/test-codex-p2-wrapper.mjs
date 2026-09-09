@@ -37,6 +37,7 @@ const buf = path.join(dir, SID + '.buf'), meta = path.join(dir, SID + '.json'), 
 // 'completed') and drains one queued item — the path where a queued message really
 // RUNS, as opposed to a turn ended by Stop.
 const endTurnFile = path.join(dir, 'end-turn');
+const failTurnFile = path.join(dir, 'fail-turn'); // …and the app-server's OWN way of ending a turn on a usage limit
 // Stub app-server: thread/start → id; turn/start → turn id + a turn/started
 // notification and (on the FIRST turn) an MCP item pair + a web search item
 // (the turn never completes = stays active); thread/queue/add → {};
@@ -159,6 +160,21 @@ setInterval(() => {
   const ended = activeTurn; activeTurn = null;
   send({ method: 'turn/completed', params: { turn: { id: ended }, status: 'completed' } });
   drain();
+}, 40);
+// A turn the app-server ends because the ACCOUNT IS OUT OF QUOTA. The shape is
+// the 0.153.4 schema's, not a paraphrase: TurnCompletedNotification is
+// {threadId, turn} and Turn.error — "Only populated when the Turn's status is
+// failed" — is a TurnError {message, codexErrorInfo, additionalDetails}, with
+// codexErrorInfo in CAMEL CASE ("This translation layer make sure that we
+// expose codex error code in camel case"). The wrapper used to read
+// \`params.error\`, which does not exist, and emitted task_failed with an empty
+// string and no enum — so the quota classifier dropped every usage-limit turn
+// and codex auto-resume never armed.
+setInterval(() => {
+  try { fs.unlinkSync(${JSON.stringify(failTurnFile)}); } catch { return; }
+  if (!activeTurn) return;
+  const ended = activeTurn; activeTurn = null;
+  send({ method: 'turn/completed', params: { threadId: 'th-p2', turn: { id: ended, status: 'failed', items: [], error: { message: "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Sep 13th, 2026 8:36 PM.", codexErrorInfo: 'usageLimitExceeded', additionalDetails: null } } } });
 }, 40);
 `;
 const w = spawn(process.execPath, [path.join(REPO, 'data/bin/codex-chat-wrapper.js'), buf, meta, process.execPath, '-e', STUB], {
@@ -1984,6 +2000,41 @@ process.stdin.on('data', (d) => {
     'MEASURED: no line the wrapper emitted for this read is over the cap (the old ladder emitted the oversized payload anyway)',
     String(Math.max(...G.events().map((e) => Buffer.byteLength(JSON.stringify(e), 'utf8')))));
   G.stop();
+}
+
+// ── ⑨ A TURN THE APP-SERVER ENDS ON A USAGE LIMIT (2026-09-08) ─────────────
+// The 32-hour codex stall had THREE independent breaks and this file owns one
+// of them: `turn/completed` with status 'failed' carries its TurnError on
+// `params.turn.error` (0.153.4 schema: TurnCompletedNotification is
+// {threadId, turn}, and Turn.error is "Only populated when the Turn's status is
+// failed"). The wrapper read `params.error`, which does not exist, so it
+// emitted `task_failed {error: '', /* no enum */}` — and the quota classifier,
+// which needs the typed enum, dropped every usage-limit turn. The pool never
+// switched and auto-resume never armed.
+{
+  const before = events().filter((e) => e.payload?.type === 'task_failed').length;
+  sendLine({ type: 'chat-input', text: 'a turn that will hit the wall', msgId: 'm-wall' });
+  ok(await waitFor(() => !!readMeta()?.activeTurnId), 'a turn is running to be walled', JSON.stringify(readMeta()?.activeTurnId));
+  const walledTurn = readMeta().activeTurnId;
+  fs.writeFileSync(failTurnFile, '1');
+  ok(await waitFor(() => events().filter((e) => e.payload?.type === 'task_failed').length > before), 'a failed turn/completed becomes a task_failed record');
+  const tf = events().filter((e) => e.payload?.type === 'task_failed').slice(-1)[0].payload;
+  ok(/hit your usage limit/.test(tf.error || ''), 'it carries the CLI\'s own sentence (the record used to say nothing at all)', JSON.stringify(tf));
+  ok(tf.codexErrorInfo === 'usageLimitExceeded', '…and the TYPED enum off params.turn.error — the whole point, since the classifier keys on it', JSON.stringify(tf));
+  // …and the harness's classifier, unchanged, now calls it what it is. This is
+  // the seam every producer goes through, so proving it here proves the arm.
+  {
+    const cq = require(path.join(REPO, 'src/harnesses/codex-quota.js'));
+    const sig = cq.signalFromStream({ type: 'event_msg', payload: tf });
+    ok(sig && sig.kind === 'exhausted', 'the codex QuotaSignalSource classifies THIS record as exhaustion (it is what arms auto-resume)', JSON.stringify(sig).slice(0, 160));
+    // read the report only after checking it EXISTS: a classifier that refused
+    // deserves a red line, not a TypeError that kills the rest of the file
+    ok(sig?.resetsAtSec > Math.floor(Date.now() / 1000), '…with a reset read out of the CLI\'s prose, because the record states none', sig ? new Date(sig.resetsAtSec * 1000).toISOString() : 'no signal');
+    // NEGATIVE CONTROL: the retired enum spelling, on the very same record.
+    const RETIRED = /^(usage_limit_reached|quota_exceeded|usage_not_included|workspace_owner_usage_limit_reached|workspace_member_usage_limit_reached|workspace_member_credits_depleted)$/;
+    ok(RETIRED.test(String(tf.codexErrorInfo)) === false, 'NEGATIVE CONTROL: the spelling the classifier looked for before matches NOTHING the wire sends');
+  }
+  ok(tf.turn_id === walledTurn, 'and it names the turn that was walled (the wrapper still closes that turn out)', JSON.stringify({ tf: tf.turn_id, walledTurn }));
 }
 
 try { w.kill('SIGTERM'); } catch {}

@@ -23,8 +23,25 @@
 // default (`claude.autoResumeOnLimit`, default OFF), a per-session value taken
 // at spawn, and a live per-session toggle. Firing announces itself in the
 // conversation — an unexplained turn that costs money is not acceptable.
+//
+// GENERIC SINCE 2026-09-08 (owner ruling: "auto resume 应该是通用的, 只要支持
+// hook/注入的 harness 都支持, 形式可以不一样 — 有些是发消息, 有些是 start turn
+// 之类的固有指令"). Everything in this file is HARNESS-NEUTRAL: the timer, the
+// loop breaker, the notices, the tri-state gate, restart survival. Exactly TWO
+// facts are harness-specific and BOTH live on the descriptor:
+//   the LIMIT SIGNAL  descriptor.quota.signalFromStream — the engine arms from
+//                     the classified signal, never from a consumer-local regex
+//   the RESUME VERB   descriptor.resume {form, deliver} — 'message' (claude, a
+//                     user message on the CLI's chat stdin), 'turn-start'
+//                     (codex, the wrapper's app-server RPC lane), 'prompt'
+//                     (ACP session/prompt), or null (shell: no agent)
+// `capsOf(backend).autoResume` is DERIVED from those two (src/backend-caps.js
+// deriveAutoResume, written by the registry at load), and every surface that
+// OFFERS or ACTS on auto-resume reads that row — never a backend id.
 const fs = require('fs');
 const path = require('path');
+const { windowOpened } = require('../auto-resume-signal.js'); // PURE: does this reading say the wall is gone?
+const harnesses = require('../harnesses');                    // the descriptor registry: THE resume verb lives there
 
 // The CLI's own continue prompt, verbatim (2.1.239) — same words, so a session
 // that has seen the TUI behave this way sees nothing new.
@@ -176,7 +193,7 @@ function writeJsonAtomic(file, obj) {
  * @param deps.broadcast      (sessionId, msg) => void — per-session UI state
  * @param deps.notify         (sessionId, session, text) => void — a visible line in the chat
  */
-function create({ dataDir, activeSessions, sendToSession, serverSetting, broadcast = () => { }, notify = null, beforeFire = null, fireIdentity = null, notifyDelayMs = 90000, log = () => { } }) {
+function create({ dataDir, activeSessions, sendToSession, serverSetting, broadcast = () => { }, notify = null, beforeFire = null, fireIdentity = null, resumeVerb = null, notifyDelayMs = 90000, log = () => { } }) {
   const file = path.join(dataDir, 'auto-resume.json');
   let armed = new Map(); // webuiId -> { at, resetsAt, reason, cid, fired }
   let fires = new Map(); // webuiId -> loop-breaker record (see FIRE_* above)
@@ -186,6 +203,20 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
     for (const [k, v] of Object.entries(raw && raw.fires ? raw.fires : {})) if (v && typeof v === 'object') fires.set(k, v);
   } catch { }
   let timer = null;
+
+  // THE HARNESS'S RESUME VERB (owner ruling 2026-09-08) — `{form, deliver}` or
+  // null, from the descriptor registry BY DEFAULT (no wiring to forget, and
+  // no second table: the same object src/harnesses validated at load). It
+  // gates BOTH ends: `armIfEnabled` refuses to promise a continue it has no
+  // way to deliver, and `deliver()` below runs the descriptor's own function
+  // rather than assuming a chat-input frame. The `resumeVerb` dep exists so a
+  // test can stand in a stub channel for a harness it is not running.
+  function verbFor(session) {
+    try {
+      const v = resumeVerb ? resumeVerb(session) : harnesses.resumeVerb(session && session.backend);
+      return v || null;
+    } catch { return null; }
+  }
 
   const save = () => {
     try {
@@ -216,6 +247,7 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
   function statusFor(id) {
     const session = activeSessions.get(id);
     const a = armed.get(id) || null;
+    const verb = session ? verbFor(session) : null;
     return {
       enabled: enabledFor(session),
       explicit: session && session._autoResume !== undefined ? !!session._autoResume : null,
@@ -223,6 +255,15 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
       armed: !!a && !a.fired,
       resetsAt: a ? a.resetsAt : null,
       reason: a ? a.reason : null,
+      // THE HARNESS FACTS the client chip gates on, so no surface has to know
+      // a backend id: `resume` is the verb's form (null = this harness cannot
+      // continue a turn at all), `watch` = armed with no timed fire (the reset
+      // is past the ceiling; only a fresh-window reading can continue it),
+      // `lane` = which limit lane the wait is about (null = the harness has one).
+      resume: verb ? verb.form : null,
+      watch: !!(a && !a.fired && a.watch),
+      lane: a ? (a.lane || null) : null,
+      bucket: a ? (a.bucket || null) : null,
     };
   }
   const _refuseNotified = new Map(); // id → last far-refusal notice ts (1/h floor)
@@ -242,34 +283,70 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
   /** Exhaustion seen for this session (rate_limit_event status=rejected, or a
    *  limit banner). resetsAtMs may be null — without a reset time there is
    *  nothing to wait FOR, so we do not pretend. */
-  function armIfEnabled(id, session, resetsAtMs, reason) {
+  function armIfEnabled(id, session, resetsAtMs, reason, opts = {}) {
     if (!id || !session) return null;
     if (!enabledFor(session)) return null;
+    // THE HARNESS MUST BE ABLE TO CONTINUE THIS CONVERSATION. A promise we
+    // cannot keep is worse than none: the chip would say "waiting", the wait
+    // would survive restarts, and the fire would find no verb. shell lands
+    // here; so does any future harness that declares resume:null.
+    if (!verbFor(session)) { log(`[auto-resume] ${id}: harness '${session.backend || '?'}' declares no resume verb — not arming`); return null; }
     const at = Date.now();
     const resets = Number(resetsAtMs) || 0;
+    // WHICH WALL this wait is about — the harness's own limit LANE and BUCKET
+    // (and, for a model-scoped weekly, which cap). Without them the
+    // fresh-window edge cannot fire (see windowOpened): a reading about a
+    // different lane, or about a different bucket of the same lane, is not
+    // evidence that THIS wall lifted.
+    //
+    // A RE-ARM INHERITS THEM (2026-09-08). Several callers re-arm the SAME
+    // session from a re-verdict that has no signals in hand — the wall-probe
+    // ladder's `account usable again` near-arm and the pre-fire gate's
+    // `re-armed at fire: …` — and before this they silently replaced a
+    // wall-aware wait with a lane-blind one, after which no reading could ever
+    // open it again (`unknown-bucket` forever). That is the very failure this
+    // release exists to remove, re-introduced one function later. A caller that
+    // KNOWS it is a different wall says so and overrides; saying nothing means
+    // "the same wall, re-verdicted".
+    const held = armed.get(id);
+    const inherit = held && !held.fired ? held : null;
+    const lane = opts.lane != null ? String(opts.lane) : (inherit ? inherit.lane || null : null);
+    const bucket = opts.bucket != null ? String(opts.bucket) : (inherit ? inherit.bucket || null : null);
+    const scopedName = opts.scopedName != null ? String(opts.scopedName) : (inherit ? inherit.scopedName || null : null);
     if (!resets || resets <= at) return null;                 // already past / unknown
-    if (resets - at > MAX_WAIT_MS) {                          // a week out: say so, do not squat
+    // A RESET BEYOND THE CEILING IS STILL A WALL. Before 2026-09-08 this
+    // returned null and the conversation was on its own — which is exactly
+    // what happened to the incident's codex thread: its reset was SIX DAYS
+    // out, so the (correct) refusal to squat on a timer meant nothing was
+    // watching when the window reopened 32 h later. A WATCH is the honest
+    // middle: no timed fire is ever scheduled (`due()` skips it, so the
+    // "refuse to sit forever" rule is intact and costs nothing), but the
+    // fresh-window edge can still continue the session the moment a reading
+    // says the wall is gone. It retires by itself once the far reset passes.
+    const watch = resets - at > MAX_WAIT_MS;
+    if (watch) {
       const hrs = Math.round((resets - at) / 3600000);
-      log(`[auto-resume] ${id}: reset is ${hrs}h away — not arming`);
-      // …but say so IN the session too (the c1206711 lesson: this refusal was
-      // journal-only and the user watched a silently dead session). 1/h floor.
+      log(`[auto-resume] ${id}: reset is ${hrs}h away — watching (no timed continue) instead of arming`);
       const lastN = _refuseNotified.get(id) || 0;
       if (notify && at - lastN > 3600000) {
         _refuseNotified.set(id, at);
-        try { notify(id, session, `用量已达上限，最近的重置在 ${new Date(resets).toLocaleString()}（约${hrs}小时后），超过自动等待上限（${Math.round(MAX_WAIT_MS / 3600000)}h），不会自动续跑。可切换账号或届时手动继续。`); } catch { }
+        try { notify(id, session, `用量已达上限，最近的重置在 ${new Date(resets).toLocaleString()}（约${hrs}小时后），超过自动等待上限（${Math.round(MAX_WAIT_MS / 3600000)}h），不会按时间自动续跑；但配额一旦提前恢复会自动继续。也可切换账号或手动继续。`); } catch { }
       }
-      return null;
     }
-    const prev = armed.get(id);
-    if (prev && !prev.fired && prev.resetsAt === resets) return prev; // idempotent
-    const rec = { at, resetsAt: resets, reason: reason || 'usage limit', cid: session.claudeSessionId || null, fired: false };
+    if (inherit && inherit.resetsAt === resets) return inherit; // idempotent
+    const rec = { at, resetsAt: resets, reason: reason || 'usage limit', cid: session.claudeSessionId || null, fired: false, lane, bucket, scopedName, watch };
     armed.set(id, rec);
     save();
-    log(`[auto-resume] ${id}: armed for ${new Date(resets).toISOString()} (${reason})`);
+    log(`[auto-resume] ${id}: ${watch ? 'watching' : 'armed'} for ${new Date(resets).toISOString()} (${reason}${lane ? `, lane ${lane}` : ''}${bucket ? `, bucket ${bucket}` : ''})`);
     // DELAYED announcement (2.368.34): a dead event often races the pool
     // switch that fixes it — the armed STATE is instant (chip), but the loud
     // in-chat line waits; a disarm inside the window means it never speaks.
+    // A WATCH gets none of it: it promises no TIME, so a line saying "will
+    // continue at T" would be false — the watch already said its own sentence
+    // above (once an hour), and cancelling any pending timer is still required
+    // or a previous arm's announcement would speak for a wait that is gone.
     _cancelArmNotify(id);
+    if (watch) { emit(id); return rec; }
     if (notify) {
       const t = setTimeout(() => {
         _armNotifyTimers.delete(id);
@@ -449,9 +526,32 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
     const out = [];
     for (const [id, a] of armed) {
       if (a.fired) continue;
+      // A WATCH NEVER FIRES ON THE TIMER (see armIfEnabled): its reset is
+      // beyond MAX_WAIT_MS, so squatting on it is the thing this module has
+      // always refused to do. It retires itself once that reset passes — by
+      // then either a reading continued the session or nothing ever will.
+      if (a.watch) { if (now >= a.resetsAt + GRACE_MS) { armed.delete(id); save(); log(`[auto-resume] ${id}: watch expired (its reset has passed with no reading)`); emit(id); } continue; }
       if (now >= a.resetsAt + GRACE_MS) out.push([id, a]);
     }
     return out;
+  }
+
+  /** THE FRESH-WINDOW EDGE (the 2026-09-08 incident's own recovery path).
+   *  A quota READING arrived for this session. If it says the lane the session
+   *  is waiting on is OPEN, the wait is over and the promise is kept NOW —
+   *  through the same `attemptFire` every other continue uses, so the loop
+   *  breaker, the hourly cap, the same-identity quarantine and the pre-fire
+   *  gate all still apply. Anything else leaves the arm exactly where it is.
+   *  Harness-neutral by construction: the caller hands over the harness's OWN
+   *  normalized snapshot and PURE `windowOpened` reads it.
+   *  Returns the verdict's `why` so the caller can journal it. */
+  function noteQuotaReading(id, snapshot, why = 'quota reading') {
+    const a = armed.get(id);
+    if (!a || a.fired) return { open: false, why: 'not-armed', fired: false };
+    const v = windowOpened({ snapshot, armedLane: a.lane || null, armedBucket: a.bucket || null, armedScopedName: a.scopedName || null });
+    if (!v.open) return { ...v, fired: false };
+    log(`[auto-resume] ${id}: ${a.watch ? 'watched' : 'armed'} window reopened (${why}) — continuing now`);
+    return { ...v, fired: fireNow(id, 'the usage window reopened') };
   }
 
   /** ONE fire path for BOTH callers — the timed tick and the immediate
@@ -500,7 +600,25 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
       // WHAT UNBLOCKED US decides both the journal line and the card, from the
       // ARMED RECORD (one source, one wording) — see continueNoticeFor
       const note = continueNoticeFor({ kind, armReason: a2.reason, label: label2, moved, cause });
-      const ok = sendToSession(id, session, CONTINUE_PROMPT);
+      // THE HARNESS'S OWN VERB delivers (owner ruling 2026-09-08). This is the
+      // ONE fire choke point for every harness and every path — the timed tick,
+      // the immediate pool-switch fire and the fresh-window edge all arrive at
+      // THIS line, which is what keeps the loop breaker in front of every
+      // unattended turn. `sendChatInput` is the ORCH channel the verb may use;
+      // the descriptor decides what a continue MEANS on its harness.
+      //
+      // NAMED SEAM FOR THE SPEND AUTHORIZER (design-account-hardening §4.4(c),
+      // branch feat-hardening-p4-spend — NOT on master as of 2026-09-08, so it
+      // is not wired here). When it lands, `authorizeSpend({reason:'auto-resume',
+      // …})` goes immediately ABOVE this line and its `release()` on the
+      // `!ok` path below, exactly as that branch already writes it: making the
+      // verb generic did not add a second fire path, so ONE gate still covers
+      // every harness. Integrators: the conflict is this one line.
+      const verb = verbFor(session);
+      if (!verb) { log(`[auto-resume] ${id}: harness '${session.backend || '?'}' declares no resume verb — cannot continue`); armed.delete(id); save(); emit(id); return false; }
+      let ok = false;
+      try { ok = !!verb.deliver(session, CONTINUE_PROMPT, { sendChatInput: (s2, text) => sendToSession(id, s2, text) }); }
+      catch (e) { log(`[auto-resume] ${id}: the '${verb.form}' resume verb threw: ${e.message}`); ok = false; }
       if (!ok) { log(`[auto-resume] ${id}: could not deliver the continue prompt (will retry)`); return false; }
       armed.delete(id);
       noteFired(id, key2, kind, Date.now());
@@ -612,6 +730,7 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
 
   return {
     armIfEnabled, noteRecovered, forget, setEnabled, statusFor, enabledFor, fireNow, armedIds, tick, start, stop, CONTINUE_PROMPT,
+    noteQuotaReading, // the fresh-window edge: a reading that says the wall is gone continues the session NOW
     noteFireOutcome, recentFireFailures, canFire, noteNoPoolTarget, // the loop breaker's seams (engine: walled turn ⇒ ok:false; per-session switch ⇒ exclude + its own no-target verdict)
     _armed: armed, _fires: fires,
   };
